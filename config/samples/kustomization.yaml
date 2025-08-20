@@ -1,0 +1,8 @@
+## Append samples of your project ##
+resources:
+- infra.virtrigaud.io_v1alpha1_virtualmachine.yaml
+- infra.virtrigaud.io_v1alpha1_vmclass.yaml
+- infra.virtrigaud.io_v1alpha1_vmimage.yaml
+- infra.virtrigaud.io_v1alpha1_vmnetworkattachment.yaml
+- infra.virtrigaud.io_v1alpha1_provider.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

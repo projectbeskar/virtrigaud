@@ -1,0 +1,517 @@
+/*
+Copyright 2025.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package controller
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+
+	infravirtrigaudiov1alpha1 "github.com/projectbeskar/virtrigaud/api/v1alpha1"
+	"github.com/projectbeskar/virtrigaud/internal/k8s"
+	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
+	"github.com/projectbeskar/virtrigaud/internal/providers/registry"
+)
+
+// VirtualMachineReconciler reconciles a VirtualMachine object
+type VirtualMachineReconciler struct {
+	client.Client
+	Scheme           *runtime.Scheme
+	ProviderRegistry *registry.Registry
+}
+
+// +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=virtualmachines,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=virtualmachines/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=virtualmachines/finalizers,verbs=update
+// +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=providers,verbs=get;list;watch
+// +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=vmclasses,verbs=get;list;watch
+// +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=vmimages,verbs=get;list;watch
+// +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=vmnetworkattachments,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+
+// Reconcile handles VirtualMachine reconciliation
+func (r *VirtualMachineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+	logger.Info("Reconciling VirtualMachine", "name", req.Name, "namespace", req.Namespace)
+
+	// Fetch the VirtualMachine instance
+	vm := &infravirtrigaudiov1alpha1.VirtualMachine{}
+	if err := r.Get(ctx, req.NamespacedName, vm); err != nil {
+		if errors.IsNotFound(err) {
+			logger.Info("VirtualMachine not found, assuming deleted")
+			return ctrl.Result{}, nil
+		}
+		logger.Error(err, "Failed to fetch VirtualMachine")
+		return ctrl.Result{}, err
+	}
+
+	// Handle deletion
+	if k8s.IsBeingDeleted(vm) {
+		return r.handleDeletion(ctx, vm)
+	}
+
+	// Add finalizer if not present
+	if !k8s.HasFinalizer(vm, infravirtrigaudiov1alpha1.VirtualMachineFinalizer) {
+		if err := k8s.AddFinalizer(ctx, r.Client, vm, infravirtrigaudiov1alpha1.VirtualMachineFinalizer); err != nil {
+			logger.Error(err, "Failed to add finalizer")
+			return ctrl.Result{}, err
+		}
+		// Requeue to continue reconciliation
+		return ctrl.Result{Requeue: true}, nil
+	}
+
+	// Reconcile the VM
+	return r.reconcileVM(ctx, vm)
+}
+
+// reconcileVM handles the main reconciliation logic
+func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravirtrigaudiov1alpha1.VirtualMachine) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	// Update observed generation
+	vm.Status.ObservedGeneration = vm.Generation
+
+	// Get dependencies
+	provider, vmClass, vmImage, networks, err := r.getDependencies(ctx, vm)
+	if err != nil {
+		logger.Error(err, "Failed to get dependencies")
+		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonWaitingForDependencies, err.Error())
+		r.updateStatus(ctx, vm)
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	// Get provider instance
+	providerInstance, err := r.ProviderRegistry.Get(ctx, provider)
+	if err != nil {
+		logger.Error(err, "Failed to get provider instance")
+		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, err.Error())
+		r.updateStatus(ctx, vm)
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	// Validate provider
+	if err := providerInstance.Validate(ctx); err != nil {
+		logger.Error(err, "Provider validation failed")
+		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Provider validation failed: %v", err))
+		r.updateStatus(ctx, vm)
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	// Check if we have an active task
+	if vm.Status.LastTaskRef != "" {
+		done, err := providerInstance.IsTaskComplete(ctx, vm.Status.LastTaskRef)
+		if err != nil {
+			logger.Error(err, "Failed to check task status")
+			k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Failed to check task: %v", err))
+			r.updateStatus(ctx, vm)
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+
+		if !done {
+			logger.Info("Task still in progress", "taskRef", vm.Status.LastTaskRef)
+			k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonTaskInProgress, "Task in progress")
+			r.updateStatus(ctx, vm)
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+
+		// Task completed, clear it
+		vm.Status.LastTaskRef = ""
+	}
+
+	// Ensure VM exists
+	if vm.Status.ID == "" {
+		logger.Info("Creating VM")
+		return r.createVM(ctx, vm, providerInstance, vmClass, vmImage, networks)
+	}
+
+	// VM exists, check current state
+	desc, err := providerInstance.Describe(ctx, vm.Status.ID)
+	if err != nil {
+		logger.Error(err, "Failed to describe VM")
+		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Failed to describe VM: %v", err))
+		r.updateStatus(ctx, vm)
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	if !desc.Exists {
+		logger.Info("VM no longer exists, recreating")
+		vm.Status.ID = ""
+		return r.createVM(ctx, vm, providerInstance, vmClass, vmImage, networks)
+	}
+
+	// Update status with current state
+	vm.Status.PowerState = desc.PowerState
+	vm.Status.IPs = desc.IPs
+	vm.Status.ConsoleURL = desc.ConsoleURL
+	vm.Status.Provider = desc.ProviderRaw
+
+	// Check desired power state
+	desiredPowerState := vm.Spec.PowerState
+	if desiredPowerState == "" {
+		desiredPowerState = "On"
+	}
+
+	if desc.PowerState != desiredPowerState {
+		logger.Info("Power state mismatch, adjusting", "current", desc.PowerState, "desired", desiredPowerState)
+		return r.adjustPowerState(ctx, vm, providerInstance, desiredPowerState)
+	}
+
+	// VM is ready
+	k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonReconcileSuccess, "VM is ready")
+	k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonReconcileSuccess, "VM provisioned")
+
+	r.updateStatus(ctx, vm)
+	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+}
+
+// handleDeletion handles VM deletion
+func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infravirtrigaudiov1alpha1.VirtualMachine) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	if !k8s.HasFinalizer(vm, infravirtrigaudiov1alpha1.VirtualMachineFinalizer) {
+		return ctrl.Result{}, nil
+	}
+
+	// Get provider if we have a provider ref and VM ID
+	if vm.Status.ID != "" && vm.Spec.ProviderRef.Name != "" {
+		provider := &infravirtrigaudiov1alpha1.Provider{}
+		providerKey := types.NamespacedName{
+			Name:      vm.Spec.ProviderRef.Name,
+			Namespace: vm.Namespace,
+		}
+		if vm.Spec.ProviderRef.Namespace != "" {
+			providerKey.Namespace = vm.Spec.ProviderRef.Namespace
+		}
+
+		if err := r.Get(ctx, providerKey, provider); err != nil {
+			if !errors.IsNotFound(err) {
+				logger.Error(err, "Failed to get provider for deletion")
+				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			}
+			// Provider not found, continue with cleanup
+		} else {
+			// Delete VM from provider
+			providerInstance, err := r.ProviderRegistry.Get(ctx, provider)
+			if err != nil {
+				logger.Error(err, "Failed to get provider instance for deletion")
+			} else {
+				logger.Info("Deleting VM from provider", "id", vm.Status.ID)
+				taskRef, err := providerInstance.Delete(ctx, vm.Status.ID)
+				if err != nil {
+					logger.Error(err, "Failed to delete VM from provider")
+					// Continue with cleanup even if deletion fails
+				} else if taskRef != "" {
+					logger.Info("VM deletion initiated", "taskRef", taskRef)
+					// TODO: Wait for task completion in future iterations
+				}
+			}
+		}
+	}
+
+	// Remove finalizer
+	if err := k8s.RemoveFinalizer(ctx, r.Client, vm, infravirtrigaudiov1alpha1.VirtualMachineFinalizer); err != nil {
+		logger.Error(err, "Failed to remove finalizer")
+		return ctrl.Result{}, err
+	}
+
+	logger.Info("VirtualMachine deleted successfully")
+	return ctrl.Result{}, nil
+}
+
+// getDependencies fetches all required dependencies for the VM
+func (r *VirtualMachineReconciler) getDependencies(ctx context.Context, vm *infravirtrigaudiov1alpha1.VirtualMachine) (
+	*infravirtrigaudiov1alpha1.Provider,
+	*infravirtrigaudiov1alpha1.VMClass,
+	*infravirtrigaudiov1alpha1.VMImage,
+	[]*infravirtrigaudiov1alpha1.VMNetworkAttachment,
+	error,
+) {
+	// Get Provider
+	provider := &infravirtrigaudiov1alpha1.Provider{}
+	providerKey := types.NamespacedName{
+		Name:      vm.Spec.ProviderRef.Name,
+		Namespace: vm.Namespace,
+	}
+	if vm.Spec.ProviderRef.Namespace != "" {
+		providerKey.Namespace = vm.Spec.ProviderRef.Namespace
+	}
+	if err := r.Get(ctx, providerKey, provider); err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("failed to get provider %s: %w", vm.Spec.ProviderRef.Name, err)
+	}
+
+	// Get VMClass
+	vmClass := &infravirtrigaudiov1alpha1.VMClass{}
+	classKey := types.NamespacedName{
+		Name:      vm.Spec.ClassRef.Name,
+		Namespace: vm.Namespace,
+	}
+	if vm.Spec.ClassRef.Namespace != "" {
+		classKey.Namespace = vm.Spec.ClassRef.Namespace
+	}
+	if err := r.Get(ctx, classKey, vmClass); err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("failed to get vmclass %s: %w", vm.Spec.ClassRef.Name, err)
+	}
+
+	// Get VMImage
+	vmImage := &infravirtrigaudiov1alpha1.VMImage{}
+	imageKey := types.NamespacedName{
+		Name:      vm.Spec.ImageRef.Name,
+		Namespace: vm.Namespace,
+	}
+	if vm.Spec.ImageRef.Namespace != "" {
+		imageKey.Namespace = vm.Spec.ImageRef.Namespace
+	}
+	if err := r.Get(ctx, imageKey, vmImage); err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("failed to get vmimage %s: %w", vm.Spec.ImageRef.Name, err)
+	}
+
+	// Get VMNetworkAttachments
+	var networks []*infravirtrigaudiov1alpha1.VMNetworkAttachment
+	for _, netRef := range vm.Spec.Networks {
+		network := &infravirtrigaudiov1alpha1.VMNetworkAttachment{}
+		netKey := types.NamespacedName{
+			Name:      netRef.Name,
+			Namespace: vm.Namespace,
+		}
+		if err := r.Get(ctx, netKey, network); err != nil {
+			return nil, nil, nil, nil, fmt.Errorf("failed to get vmnetworkattachment %s: %w", netRef.Name, err)
+		}
+		networks = append(networks, network)
+	}
+
+	return provider, vmClass, vmImage, networks, nil
+}
+
+// createVM creates a new VM using the provider
+func (r *VirtualMachineReconciler) createVM(
+	ctx context.Context,
+	vm *infravirtrigaudiov1alpha1.VirtualMachine,
+	provider contracts.Provider,
+	vmClass *infravirtrigaudiov1alpha1.VMClass,
+	vmImage *infravirtrigaudiov1alpha1.VMImage,
+	networks []*infravirtrigaudiov1alpha1.VMNetworkAttachment,
+) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	// Build create request
+	req := r.buildCreateRequest(vm, vmClass, vmImage, networks)
+
+	// Create VM
+	resp, err := provider.Create(ctx, req)
+	if err != nil {
+		logger.Error(err, "Failed to create VM")
+		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Failed to create VM: %v", err))
+		r.updateStatus(ctx, vm)
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	// Update status
+	vm.Status.ID = resp.ID
+	if resp.TaskRef != "" {
+		vm.Status.LastTaskRef = resp.TaskRef
+		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonCreating, "VM creation initiated")
+	} else {
+		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonReconcileSuccess, "VM created")
+	}
+
+	r.updateStatus(ctx, vm)
+	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+}
+
+// adjustPowerState adjusts the VM power state
+func (r *VirtualMachineReconciler) adjustPowerState(
+	ctx context.Context,
+	vm *infravirtrigaudiov1alpha1.VirtualMachine,
+	provider contracts.Provider,
+	desiredState string,
+) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	var powerOp contracts.PowerOp
+	switch desiredState {
+	case "On":
+		powerOp = contracts.PowerOpOn
+	case "Off":
+		powerOp = contracts.PowerOpOff
+	default:
+		logger.Error(nil, "Unsupported power state", "state", desiredState)
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	taskRef, err := provider.Power(ctx, vm.Status.ID, powerOp)
+	if err != nil {
+		logger.Error(err, "Failed to adjust power state")
+		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Failed to adjust power state: %v", err))
+		r.updateStatus(ctx, vm)
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	if taskRef != "" {
+		vm.Status.LastTaskRef = taskRef
+		k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonUpdating, "Adjusting power state")
+	}
+
+	r.updateStatus(ctx, vm)
+	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+}
+
+// buildCreateRequest builds a provider create request from VM spec
+func (r *VirtualMachineReconciler) buildCreateRequest(
+	vm *infravirtrigaudiov1alpha1.VirtualMachine,
+	vmClass *infravirtrigaudiov1alpha1.VMClass,
+	vmImage *infravirtrigaudiov1alpha1.VMImage,
+	networks []*infravirtrigaudiov1alpha1.VMNetworkAttachment,
+) contracts.CreateRequest {
+	// Convert VMClass
+	class := contracts.VMClass{
+		CPU:              vmClass.Spec.CPU,
+		MemoryMiB:        vmClass.Spec.MemoryMiB,
+		Firmware:         vmClass.Spec.Firmware,
+		GuestToolsPolicy: vmClass.Spec.GuestToolsPolicy,
+		ExtraConfig:      vmClass.Spec.ExtraConfig,
+	}
+
+	if vmClass.Spec.DiskDefaults != nil {
+		class.DiskDefaults = &contracts.DiskDefaults{
+			Type:    vmClass.Spec.DiskDefaults.Type,
+			SizeGiB: vmClass.Spec.DiskDefaults.SizeGiB,
+		}
+	}
+
+	// Convert VMImage
+	image := contracts.VMImage{
+		Format:       "template", // Default for vSphere
+		ChecksumType: "sha256",
+	}
+
+	if vmImage.Spec.VSphere != nil {
+		image.TemplateName = vmImage.Spec.VSphere.TemplateName
+		image.URL = vmImage.Spec.VSphere.OVAURL
+		if vmImage.Spec.VSphere.Checksum != "" {
+			image.Checksum = vmImage.Spec.VSphere.Checksum
+		}
+		if vmImage.Spec.VSphere.ChecksumType != "" {
+			image.ChecksumType = vmImage.Spec.VSphere.ChecksumType
+		}
+	}
+
+	// Convert Networks
+	var networkAttachments []contracts.NetworkAttachment
+	for i, netRef := range vm.Spec.Networks {
+		if i < len(networks) {
+			net := networks[i]
+			attachment := contracts.NetworkAttachment{
+				Name:     net.Name,
+				IPPolicy: netRef.IPPolicy,
+				StaticIP: netRef.StaticIP,
+			}
+
+			if net.Spec.VSphere != nil {
+				attachment.Portgroup = net.Spec.VSphere.Portgroup
+				attachment.NetworkName = net.Spec.VSphere.NetworkName
+				attachment.VLAN = net.Spec.VSphere.VLAN
+			}
+
+			if net.Spec.Libvirt != nil {
+				attachment.NetworkName = net.Spec.Libvirt.NetworkName
+				attachment.Bridge = net.Spec.Libvirt.Bridge
+				attachment.Model = net.Spec.Libvirt.Model
+			}
+
+			if net.Spec.MacAddress != "" {
+				attachment.MacAddress = net.Spec.MacAddress
+			}
+
+			networkAttachments = append(networkAttachments, attachment)
+		}
+	}
+
+	// Convert Disks
+	var disks []contracts.DiskSpec
+	for _, diskSpec := range vm.Spec.Disks {
+		disks = append(disks, contracts.DiskSpec{
+			SizeGiB: diskSpec.SizeGiB,
+			Type:    diskSpec.Type,
+			Name:    diskSpec.Name,
+		})
+	}
+
+	// Convert UserData
+	var userData *contracts.UserData
+	if vm.Spec.UserData != nil && vm.Spec.UserData.CloudInit != nil {
+		userData = &contracts.UserData{
+			Type: "cloud-init",
+		}
+		if vm.Spec.UserData.CloudInit.Inline != "" {
+			userData.CloudInitData = vm.Spec.UserData.CloudInit.Inline
+		}
+		// TODO: Handle SecretRef
+	}
+
+	// Convert Placement
+	var placement *contracts.Placement
+	if vm.Spec.Placement != nil {
+		placement = &contracts.Placement{
+			Datastore: vm.Spec.Placement.Datastore,
+			Cluster:   vm.Spec.Placement.Cluster,
+			Folder:    vm.Spec.Placement.Folder,
+		}
+	}
+
+	return contracts.CreateRequest{
+		Name:      vm.Name,
+		Class:     class,
+		Image:     image,
+		Networks:  networkAttachments,
+		Disks:     disks,
+		UserData:  userData,
+		Placement: placement,
+		Tags:      vm.Spec.Tags,
+	}
+}
+
+// updateStatus updates the VM status
+func (r *VirtualMachineReconciler) updateStatus(ctx context.Context, vm *infravirtrigaudiov1alpha1.VirtualMachine) {
+	if err := r.Status().Update(ctx, vm); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to update VirtualMachine status")
+	}
+}
+
+// SetupWithManager sets up the controller with the Manager.
+func (r *VirtualMachineReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&infravirtrigaudiov1alpha1.VirtualMachine{}).
+		WithEventFilter(predicate.Funcs{
+			DeleteFunc: func(e event.DeleteEvent) bool {
+				// Handle deletion in Reconcile through finalizers
+				return false
+			},
+		}).
+		Named("virtualmachine").
+		Complete(r)
+}

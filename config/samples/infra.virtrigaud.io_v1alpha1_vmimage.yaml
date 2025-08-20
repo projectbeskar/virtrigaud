@@ -1,0 +1,9 @@
+apiVersion: infra.virtrigaud.io.infra.virtrigaud.io/v1alpha1
+kind: VMImage
+metadata:
+  labels:
+    app.kubernetes.io/name: virtrigaud
+    app.kubernetes.io/managed-by: kustomize
+  name: vmimage-sample
+spec:
+  # TODO(user): Add fields here

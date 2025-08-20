@@ -1,0 +1,93 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - infra.virtrigaud.io
+  resources:
+  - providers
+  - vmclasses
+  - vmimages
+  - vmnetworkattachments
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - infra.virtrigaud.io
+  resources:
+  - virtualmachines
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - infra.virtrigaud.io
+  resources:
+  - virtualmachines/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - infra.virtrigaud.io
+  resources:
+  - virtualmachines/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - infra.virtrigaud.io.infra.virtrigaud.io
+  resources:
+  - providers
+  - vmclasses
+  - vmimages
+  - vmnetworkattachments
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - infra.virtrigaud.io.infra.virtrigaud.io
+  resources:
+  - providers/finalizers
+  - vmclasses/finalizers
+  - vmimages/finalizers
+  - vmnetworkattachments/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - infra.virtrigaud.io.infra.virtrigaud.io
+  resources:
+  - providers/status
+  - vmclasses/status
+  - vmimages/status
+  - vmnetworkattachments/status
+  verbs:
+  - get
+  - patch
+  - update

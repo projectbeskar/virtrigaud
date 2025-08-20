@@ -1,0 +1,16 @@
+apiVersion: infra.virtrigaud.io/v1alpha1
+kind: VMImage
+metadata:
+  name: ubuntu-22-template
+  namespace: default
+spec:
+  vsphere:
+    templateName: "tmpl-ubuntu-22.04-cloudimg"
+  libvirt:
+    url: "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img"
+    format: qcow2
+    checksum: "b9d52c6e1e44b0d8c6ff54d6b6e5e7d7a6c9e7e4e4f4f4f4f4f4f4f4f4f4f4f4"
+    checksumType: sha256
+  prepare:
+    importIfMissing: true
+    validateChecksum: true
