@@ -40,6 +40,7 @@ import (
 	infravirtrigaudiov1alpha1 "github.com/projectbeskar/virtrigaud/api/v1alpha1"
 	"github.com/projectbeskar/virtrigaud/internal/controller"
 	"github.com/projectbeskar/virtrigaud/internal/providers/registry"
+	"github.com/projectbeskar/virtrigaud/internal/providers/vsphere"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -206,8 +207,9 @@ func main() {
 	// Create provider registry
 	providerRegistry := registry.NewRegistry()
 
-	// TODO: Register provider factories when they are implemented
-	// For now, this will just log warnings about unsupported providers
+	// Register vSphere provider factory
+	providerRegistry.Register("vsphere", vsphere.Factory(mgr.GetClient()))
+
 	setupLog.Info("Provider registry initialized", "supportedTypes", providerRegistry.ListSupportedTypes())
 
 	if err = (&controller.VirtualMachineReconciler{

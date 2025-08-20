@@ -8,12 +8,14 @@ Virtrigaud is a Kubernetes operator that enables declarative management of virtu
 
 ## Features
 
-- **Multi-Hypervisor Support**: Manage VMs across vSphere, Libvirt/KVM, and more
+- **Multi-Hypervisor Support**: Manage VMs across vSphere (ready), Libvirt/KVM (planned), and more
 - **Declarative API**: Define VM resources using Kubernetes CRDs
-- **Provider Interface**: Clean, extensible interface for adding new hypervisors
+- **Production-Ready vSphere Provider**: Full vSphere integration with govmomi
 - **Cloud-Init Support**: Initialize VMs with cloud-init configuration
 - **Network Management**: Configure VM networking with provider-specific settings
-- **Power Management**: Control VM power state (On/Off)
+- **Power Management**: Control VM power state (On/Off/Reboot)
+- **Async Task Support**: Handles long-running vSphere operations
+- **Resource Management**: CPU, memory, disk configuration and reconfiguration
 - **Finalizer-based Cleanup**: Ensures proper cleanup of external resources
 
 ## Architecture
@@ -55,19 +57,28 @@ Virtrigaud is a Kubernetes operator that enables declarative management of virtu
    make run
    ```
 
-3. **Create a provider secret**:
+3. **Create provider and VM resources**:
    ```bash
-   kubectl apply -f examples/secrets/vsphere-creds.yaml
-   ```
-
-4. **Create provider and VM resources**:
-   ```bash
+   # Complete example with all components
+   kubectl apply -f examples/complete-example.yaml
+   
+   # Or step by step:
+   kubectl create secret generic vsphere-creds \
+     --from-literal=username=administrator@vsphere.local \
+     --from-literal=password=your-password
    kubectl apply -f examples/provider-vsphere.yaml
    kubectl apply -f examples/vmclass-small.yaml
    kubectl apply -f examples/vmimage-ubuntu.yaml
    kubectl apply -f examples/vmnetwork-app.yaml
    kubectl apply -f examples/vm-ubuntu-small.yaml
    ```
+
+4. **Monitor VM creation**:
+   ```bash
+   kubectl get virtualmachine -w
+   ```
+
+For detailed instructions, see [QUICKSTART.md](QUICKSTART.md).
 
 ## CRDs
 
@@ -79,10 +90,16 @@ Virtrigaud is a Kubernetes operator that enables declarative management of virtu
 
 ## Supported Providers
 
-- **vSphere**: Production ready
-- **Libvirt**: Planned for Stage 2
-- **Firecracker**: Future roadmap
-- **QEMU**: Future roadmap
+- **vSphere**: ✅ Production ready (govmomi-based)
+  - VM creation from templates
+  - Power management (On/Off/Reboot)
+  - Resource configuration (CPU/Memory/Disks)
+  - Cloud-init support via guestinfo
+  - Network configuration with portgroups
+  - Async task monitoring
+- **Libvirt**: 🚧 Planned for Stage 2
+- **Firecracker**: 📋 Future roadmap
+- **QEMU**: 📋 Future roadmap
 
 ## Development
 
@@ -121,9 +138,10 @@ make run
 
 ## Documentation
 
-- [CRD Reference](docs/CRDs.md)
-- [Provider Development](docs/PROVIDERS.md)
-- [Examples](docs/EXAMPLES.md)
+- [Quick Start Guide](QUICKSTART.md) - Get started in 5 minutes
+- [CRD Reference](docs/CRDs.md) - Complete API documentation
+- [Examples](docs/EXAMPLES.md) - Practical examples and use cases
+- [Provider Development](docs/PROVIDERS.md) - How to add new hypervisors
 
 ## Contributing
 
