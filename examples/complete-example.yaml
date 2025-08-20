@@ -1,0 +1,140 @@
+# Complete example showing how to create a VM with vSphere provider
+
+# First, create the credentials secret
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vsphere-creds
+  namespace: default
+type: Opaque
+stringData:
+  username: "administrator@vsphere.local"
+  password: "your-password-here"
+
+---
+# Define the vSphere provider
+apiVersion: infra.virtrigaud.io/v1alpha1
+kind: Provider
+metadata:
+  name: vsphere-prod
+  namespace: default
+spec:
+  type: vsphere
+  endpoint: https://vcenter.example.com
+  credentialSecretRef:
+    name: vsphere-creds
+  insecureSkipVerify: false  # Set to true for dev/test environments
+  defaults:
+    datastore: datastore1
+    cluster: compute-cluster-a
+    folder: virtrigaud-vms
+  rateLimit:
+    qps: 10
+    burst: 20
+
+---
+# Define a VM class for resource allocation
+apiVersion: infra.virtrigaud.io/v1alpha1
+kind: VMClass
+metadata:
+  name: small
+  namespace: default
+spec:
+  cpu: 2
+  memoryMiB: 4096
+  firmware: UEFI
+  diskDefaults:
+    type: thin
+    sizeGiB: 40
+  guestToolsPolicy: install
+  extraConfig:
+    "tools.syncTime": "true"
+    "time.synchronize.continue": "true"
+
+---
+# Define the VM image/template
+apiVersion: infra.virtrigaud.io/v1alpha1
+kind: VMImage
+metadata:
+  name: ubuntu-22-template
+  namespace: default
+spec:
+  vsphere:
+    templateName: "ubuntu-22.04-cloudimg"
+  prepare:
+    importIfMissing: false  # Template must already exist
+    validateChecksum: false
+
+---
+# Define network attachment
+apiVersion: infra.virtrigaud.io/v1alpha1
+kind: VMNetworkAttachment
+metadata:
+  name: app-network
+  namespace: default
+spec:
+  vsphere:
+    portgroup: "VM Network"
+  ipPolicy: dhcp
+
+---
+# Create the virtual machine
+apiVersion: infra.virtrigaud.io/v1alpha1
+kind: VirtualMachine
+metadata:
+  name: demo-web-server
+  namespace: default
+spec:
+  providerRef:
+    name: vsphere-prod
+  classRef:
+    name: small
+  imageRef:
+    name: ubuntu-22-template
+  networks:
+    - name: app-network
+      ipPolicy: dhcp
+  disks:
+    - name: data-disk
+      sizeGiB: 100
+      type: thin
+  powerState: On
+  userData:
+    cloudInit:
+      inline: |
+        #cloud-config
+        hostname: demo-web-server
+        fqdn: demo-web-server.example.com
+        
+        users:
+          - name: admin
+            sudo: ALL=(ALL) NOPASSWD:ALL
+            shell: /bin/bash
+            ssh_authorized_keys:
+              - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAB... # Add your SSH key here
+              
+        packages:
+          - curl
+          - wget
+          - nginx
+          - htop
+          
+        runcmd:
+          - systemctl enable nginx
+          - systemctl start nginx
+          - echo "<h1>Hello from virtrigaud!</h1>" > /var/www/html/index.html
+          - ufw allow 22/tcp
+          - ufw allow 80/tcp
+          - ufw --force enable
+          
+        final_message: "VM is ready! SSH: ssh admin@<ip>"
+        
+  tags:
+    - environment:demo
+    - application:web
+    - managed-by:virtrigaud
+  
+  placement:
+    datastore: datastore1
+    cluster: compute-cluster-a
+    folder: demo-vms
