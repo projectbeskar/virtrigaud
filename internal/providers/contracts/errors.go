@@ -34,6 +34,16 @@ const (
 	ErrorTypeUnauthorized ErrorType = "Unauthorized"
 	// ErrorTypeNotSupported indicates unsupported operation
 	ErrorTypeNotSupported ErrorType = "NotSupported"
+	// ErrorTypeRateLimit indicates rate limiting
+	ErrorTypeRateLimit ErrorType = "RateLimit"
+	// ErrorTypeUnavailable indicates service unavailable
+	ErrorTypeUnavailable ErrorType = "Unavailable"
+	// ErrorTypeTimeout indicates operation timeout
+	ErrorTypeTimeout ErrorType = "Timeout"
+	// ErrorTypeQuotaExceeded indicates quota exceeded
+	ErrorTypeQuotaExceeded ErrorType = "QuotaExceeded"
+	// ErrorTypeConflict indicates resource conflict
+	ErrorTypeConflict ErrorType = "Conflict"
 )
 
 // ProviderError represents a categorized error from a provider
@@ -63,7 +73,9 @@ func (e *ProviderError) Unwrap() error {
 
 // IsRetryable returns true if the error is retryable
 func (e *ProviderError) IsRetryable() bool {
-	return e.Retryable || e.Type == ErrorTypeRetryable
+	return e.Retryable || e.Type == ErrorTypeRetryable ||
+		e.Type == ErrorTypeUnavailable || e.Type == ErrorTypeTimeout ||
+		e.Type == ErrorTypeRateLimit
 }
 
 // NewNotFoundError creates a not found error
@@ -111,6 +123,56 @@ func NewNotSupportedError(message string) *ProviderError {
 	return &ProviderError{
 		Type:      ErrorTypeNotSupported,
 		Message:   message,
+		Retryable: false,
+	}
+}
+
+// NewRateLimitError creates a rate limit error
+func NewRateLimitError(message string, cause error) *ProviderError {
+	return &ProviderError{
+		Type:      ErrorTypeRateLimit,
+		Message:   message,
+		Cause:     cause,
+		Retryable: true,
+	}
+}
+
+// NewUnavailableError creates an unavailable error
+func NewUnavailableError(message string, cause error) *ProviderError {
+	return &ProviderError{
+		Type:      ErrorTypeUnavailable,
+		Message:   message,
+		Cause:     cause,
+		Retryable: true,
+	}
+}
+
+// NewTimeoutError creates a timeout error
+func NewTimeoutError(message string, cause error) *ProviderError {
+	return &ProviderError{
+		Type:      ErrorTypeTimeout,
+		Message:   message,
+		Cause:     cause,
+		Retryable: true,
+	}
+}
+
+// NewQuotaExceededError creates a quota exceeded error
+func NewQuotaExceededError(message string, cause error) *ProviderError {
+	return &ProviderError{
+		Type:      ErrorTypeQuotaExceeded,
+		Message:   message,
+		Cause:     cause,
+		Retryable: false,
+	}
+}
+
+// NewConflictError creates a conflict error
+func NewConflictError(message string, cause error) *ProviderError {
+	return &ProviderError{
+		Type:      ErrorTypeConflict,
+		Message:   message,
+		Cause:     cause,
 		Retryable: false,
 	}
 }
