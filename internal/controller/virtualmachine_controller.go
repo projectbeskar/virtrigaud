@@ -35,6 +35,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/providers/registry"
+	"github.com/projectbeskar/virtrigaud/internal/runtime/remote"
 )
 
 // VirtualMachineReconciler reconciles a VirtualMachine object
@@ -42,6 +43,7 @@ type VirtualMachineReconciler struct {
 	client.Client
 	Scheme           *runtime.Scheme
 	ProviderRegistry *registry.Registry
+	RemoteResolver   *remote.Resolver
 }
 
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=virtualmachines,verbs=get;list;watch;create;update;patch;delete
@@ -105,8 +107,8 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
-	// Get provider instance
-	providerInstance, err := r.ProviderRegistry.Get(ctx, provider)
+	// Get provider instance (remote or in-process)
+	providerInstance, err := r.getProviderInstance(ctx, provider)
 	if err != nil {
 		logger.Error(err, "Failed to get provider instance")
 		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, err.Error())
@@ -216,7 +218,7 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 			// Provider not found, continue with cleanup
 		} else {
 			// Delete VM from provider
-			providerInstance, err := r.ProviderRegistry.Get(ctx, provider)
+			providerInstance, err := r.getProviderInstance(ctx, provider)
 			if err != nil {
 				logger.Error(err, "Failed to get provider instance for deletion")
 			} else {
@@ -500,6 +502,23 @@ func (r *VirtualMachineReconciler) updateStatus(ctx context.Context, vm *infravi
 	if err := r.Status().Update(ctx, vm); err != nil {
 		log.FromContext(ctx).Error(err, "Failed to update VirtualMachine status")
 	}
+}
+
+// getProviderInstance resolves a provider to either a remote or in-process implementation
+func (r *VirtualMachineReconciler) getProviderInstance(ctx context.Context, provider *infravirtrigaudiov1alpha1.Provider) (contracts.Provider, error) {
+	// Try remote resolver first
+	if r.RemoteResolver != nil {
+		if r.RemoteResolver.IsRemoteProvider(provider) {
+			return r.RemoteResolver.GetProvider(ctx, provider)
+		}
+	}
+
+	// Fallback to in-process provider registry
+	if r.ProviderRegistry != nil {
+		return r.ProviderRegistry.Get(ctx, provider)
+	}
+
+	return nil, fmt.Errorf("no provider resolver available")
 }
 
 // SetupWithManager sets up the controller with the Manager.

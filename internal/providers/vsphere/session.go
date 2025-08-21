@@ -29,8 +29,6 @@ import (
 	"github.com/vmware/govmomi/vim25/soap"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
-
-
 )
 
 // loadCredentials loads credentials from the referenced Kubernetes secret
@@ -93,7 +91,7 @@ func (p *Provider) connect(ctx context.Context) error {
 
 	// Create SOAP client
 	soapClient := soap.NewClient(u, p.config.Spec.InsecureSkipVerify)
-	
+
 	// Configure TLS if needed
 	if !p.config.Spec.InsecureSkipVerify {
 		soapClient.DefaultTransport().TLSClientConfig = &tls.Config{

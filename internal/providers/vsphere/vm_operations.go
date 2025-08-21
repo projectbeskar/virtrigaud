@@ -109,7 +109,7 @@ func (p *Provider) createVM(ctx context.Context, req contracts.CreateRequest) (t
 func (p *Provider) buildCloneSpec(req contracts.CreateRequest, resourcePool *object.ResourcePool, datastore *object.Datastore) types.VirtualMachineCloneSpec {
 	poolRef := resourcePool.Reference()
 	datastoreRef := datastore.Reference()
-	
+
 	spec := types.VirtualMachineCloneSpec{
 		Location: types.VirtualMachineRelocateSpec{
 			Pool:      &poolRef,

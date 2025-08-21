@@ -1,0 +1,201 @@
+# Remote Libvirt Provider Example
+# This demonstrates running the Libvirt provider as a separate deployment
+
+# Credentials for Libvirt connection
+apiVersion: v1
+kind: Secret
+metadata:
+  name: libvirt-creds
+  namespace: default
+type: Opaque
+stringData:
+  username: "virtrigaud"
+  password: "your-password-here"
+  # For TLS-enabled libvirt:
+  # client.key: |
+  #   -----BEGIN PRIVATE KEY-----
+  #   ...
+  # client.crt: |
+  #   -----BEGIN CERTIFICATE-----
+  #   ...
+  # ca.crt: |
+  #   -----BEGIN CERTIFICATE-----
+  #   ...
+
+---
+# TLS certificates for provider gRPC communication
+apiVersion: v1
+kind: Secret
+metadata:
+  name: libvirt-provider-tls
+  namespace: default
+type: kubernetes.io/tls
+data:
+  # Generate these with: 
+  # openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+  #   -keyout tls.key -out tls.crt \
+  #   -subj "/CN=virtrigaud-provider-default-libvirt-prod"
+  tls.crt: LS0tLS1CRUdJTi... # base64 encoded cert
+  tls.key: LS0tLS1CRUdJTi... # base64 encoded key
+stringData:
+  ca.crt: |
+    -----BEGIN CERTIFICATE-----
+    # Same as tls.crt for self-signed, or your CA cert
+    -----END CERTIFICATE-----
+
+---
+# Remote Libvirt Provider Configuration
+apiVersion: infra.virtrigaud.io/v1alpha1
+kind: Provider
+metadata:
+  name: libvirt-prod
+  namespace: default
+spec:
+  type: libvirt
+  endpoint: qemu+tls://libvirt-host.example.com/system
+  credentialSecretRef:
+    name: libvirt-creds
+  
+  # Remote runtime configuration
+  runtime:
+    mode: Remote
+    image: ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.2.0
+    version: v0.2.0
+    replicas: 2
+    
+    service:
+      port: 9443
+    
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
+      limits:
+        cpu: "2"
+        memory: "1Gi"
+    
+    # Node selection for provider pods
+    nodeSelector:
+      virtrigaud.io/provider: "libvirt"
+    
+    # Security context
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 65532
+      readOnlyRootFilesystem: true
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+    
+    # Environment variables for provider
+    env:
+    - name: PROVIDER_NAMESPACE
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.namespace
+    - name: PROVIDER_NAME
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.name
+    
+    # TLS configuration for secure communication
+    tls:
+      enabled: true
+      secretRef:
+        name: libvirt-provider-tls
+
+---
+# VM Class for remote provider
+apiVersion: infra.virtrigaud.io/v1alpha1
+kind: VMClass
+metadata:
+  name: libvirt-small
+  namespace: default
+spec:
+  cpu: 2
+  memoryMiB: 2048
+  firmware: BIOS
+  diskDefaults:
+    type: qcow2
+    sizeGiB: 20
+  guestToolsPolicy: install
+
+---
+# VM Image for remote provider
+apiVersion: infra.virtrigaud.io/v1alpha1
+kind: VMImage
+metadata:
+  name: ubuntu-22-libvirt
+  namespace: default
+spec:
+  libvirt:
+    path: "/var/lib/libvirt/images/ubuntu-22.04-cloudimg.qcow2"
+    format: qcow2
+  prepare:
+    importIfMissing: false
+
+---
+# VM Network for remote provider
+apiVersion: infra.virtrigaud.io/v1alpha1
+kind: VMNetworkAttachment
+metadata:
+  name: libvirt-default
+  namespace: default
+spec:
+  libvirt:
+    networkName: "default"
+    model: virtio
+  ipPolicy: dhcp
+
+---
+# Virtual Machine using remote Libvirt provider
+apiVersion: infra.virtrigaud.io/v1alpha1
+kind: VirtualMachine
+metadata:
+  name: ubuntu-remote-vm
+  namespace: default
+  labels:
+    provider: libvirt
+    runtime: remote
+spec:
+  providerRef:
+    name: libvirt-prod
+  classRef:
+    name: libvirt-small
+  imageRef:
+    name: ubuntu-22-libvirt
+  networks:
+  - name: libvirt-default
+  
+  powerState: On
+  
+  userData:
+    cloudInit:
+      inline: |
+        #cloud-config
+        hostname: ubuntu-remote-vm
+        fqdn: ubuntu-remote-vm.local
+        
+        users:
+        - name: ubuntu
+          sudo: ALL=(ALL) NOPASSWD:ALL
+          shell: /bin/bash
+          ssh_authorized_keys:
+          - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAB... # Your SSH key
+        
+        packages:
+        - qemu-guest-agent
+        - curl
+        - htop
+        
+        runcmd:
+        - systemctl enable --now qemu-guest-agent
+        - echo "Remote Libvirt VM via virtrigaud!" > /etc/motd
+        
+        final_message: "Remote Libvirt VM is ready! Runtime: remote"
+  
+  tags:
+  - environment:production
+  - provider:libvirt
+  - runtime:remote

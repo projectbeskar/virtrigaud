@@ -57,7 +57,7 @@ func (p *Provider) findResourcePool(ctx context.Context, placement *contracts.Pl
 	}
 
 	var clusterName string
-	
+
 	// Use placement cluster if specified
 	if placement != nil && placement.Cluster != "" {
 		clusterName = placement.Cluster

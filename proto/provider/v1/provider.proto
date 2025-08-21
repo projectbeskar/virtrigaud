@@ -1,0 +1,114 @@
+syntax = "proto3";
+package provider.v1;
+option go_package = "github.com/projectbeskar/virtrigaud/internal/rpc/provider/v1;providerv1";
+
+// Power operations enum
+enum PowerOp {
+  POWER_OP_UNSPECIFIED = 0;
+  POWER_OP_ON = 1;
+  POWER_OP_OFF = 2;
+  POWER_OP_REBOOT = 3;
+}
+
+// Task reference for async operations
+message TaskRef {
+  string id = 1;
+}
+
+// Empty message for operations with no parameters
+message Empty {}
+
+// Validate provider connectivity and configuration
+message ValidateRequest {}
+message ValidateResponse {
+  bool ok = 1;
+  string message = 2;
+}
+
+// Create a new virtual machine
+message CreateRequest {
+  string name = 1;
+  bytes user_data = 2; // Already rendered cloud-init/ignition data
+  
+  // JSON-encoded provider-agnostic specifications
+  string class_json = 3;     // VMClass
+  string image_json = 4;     // VMImage  
+  string networks_json = 5;  // []NetworkAttachment
+  string disks_json = 6;     // []DiskSpec
+  string placement_json = 7; // Placement
+  repeated string tags = 8;  // Tags
+}
+
+message CreateResponse {
+  string id = 1;       // Provider-specific VM identifier
+  TaskRef task = 2;    // Optional task reference for async operations
+}
+
+// Delete a virtual machine
+message DeleteRequest {
+  string id = 1;
+}
+
+// Power control operations
+message PowerRequest {
+  string id = 1;
+  PowerOp op = 2;
+}
+
+// Reconfigure virtual machine resources
+message ReconfigureRequest {
+  string id = 1;
+  string desired_json = 2; // JSON-encoded desired state
+}
+
+// Generic task response for async operations
+message TaskResponse {
+  TaskRef task = 1;
+}
+
+// Describe virtual machine current state
+message DescribeRequest {
+  string id = 1;
+}
+
+message DescribeResponse {
+  bool exists = 1;
+  string power_state = 2;
+  repeated string ips = 3;
+  string console_url = 4;
+  string provider_raw_json = 5; // Provider-specific additional data
+}
+
+// Check async task status
+message TaskStatusRequest {
+  TaskRef task = 1;
+}
+
+message TaskStatusResponse {
+  bool done = 1;
+  string error = 2; // Error message if task failed
+}
+
+// Provider service definition
+service Provider {
+  // Validate provider configuration and connectivity
+  rpc Validate(ValidateRequest) returns (ValidateResponse);
+  
+  // Create a new virtual machine
+  rpc Create(CreateRequest) returns (CreateResponse);
+  
+  // Delete a virtual machine
+  rpc Delete(DeleteRequest) returns (TaskResponse);
+  
+  // Perform power operations on a virtual machine
+  rpc Power(PowerRequest) returns (TaskResponse);
+  
+  // Reconfigure virtual machine resources
+  rpc Reconfigure(ReconfigureRequest) returns (TaskResponse);
+  
+  // Describe current virtual machine state
+  rpc Describe(DescribeRequest) returns (DescribeResponse);
+  
+  // Check the status of an async task
+  rpc TaskStatus(TaskStatusRequest) returns (TaskStatusResponse);
+}

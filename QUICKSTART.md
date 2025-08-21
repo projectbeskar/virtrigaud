@@ -1,17 +1,23 @@
 # Quick Start Guide
 
-This guide will help you get started with virtrigaud and create your first virtual machine using the vSphere provider.
+This guide will help you get started with virtrigaud and create your first virtual machine using either the vSphere or Libvirt/KVM provider.
 
 ## Prerequisites
 
 - Kubernetes cluster (1.24+)
 - kubectl configured to access your cluster
-- Access to a vSphere environment with:
+- **For vSphere**: Access to a vSphere environment with:
   - vCenter Server
   - At least one datacenter, cluster, and datastore
   - VM template or base image for cloning
   - Network (portgroup) for VM connectivity
   - User account with VM management permissions
+- **For Libvirt**: Access to a Libvirt/KVM environment with:
+  - Libvirt daemon running (local or remote)
+  - At least one storage pool configured
+  - Base qcow2 images for VM creation
+  - Network configuration (default network or custom bridges)
+  - Appropriate user permissions for VM management
 
 ## Installation
 
@@ -31,6 +37,10 @@ This guide will help you get started with virtrigaud and create your first virtu
    ```
 
 ## Create Your First VM
+
+Choose either the vSphere or Libvirt path below based on your infrastructure.
+
+## Option A: vSphere Provider
 
 ### Step 1: Create Credentials Secret
 
@@ -172,6 +182,125 @@ NAME          PROVIDER     CLASS   IMAGE            POWER   IPS           READY 
 my-first-vm   my-vsphere   small   ubuntu-template  On      192.168.1.50  True    2m
 ```
 
+## Option B: Libvirt/KVM Provider
+
+### Step 1: Create Credentials Secret
+
+For local connections, create a minimal secret (credentials may not be needed):
+
+```bash
+kubectl create secret generic libvirt-creds \
+  --from-literal=username=virtrigaud \
+  --from-literal=password=not-used-for-local
+```
+
+For remote connections, provide actual credentials:
+```bash
+kubectl create secret generic libvirt-creds \
+  --from-literal=username=your-username \
+  --from-literal=password=your-password
+```
+
+### Step 2: Configure the Provider
+
+Create a Provider resource pointing to your Libvirt daemon:
+
+```yaml
+apiVersion: infra.virtrigaud.io/v1alpha1
+kind: Provider
+metadata:
+  name: my-libvirt
+spec:
+  type: libvirt
+  endpoint: qemu:///system  # Local connection
+  # For remote: qemu+tcp://kvm-host.example.com/system
+  credentialSecretRef:
+    name: libvirt-creds
+  defaults:
+    cluster: default
+```
+
+### Step 3: Define VM Class
+
+```yaml
+apiVersion: infra.virtrigaud.io/v1alpha1
+kind: VMClass
+metadata:
+  name: kvm-small
+spec:
+  cpu: 2
+  memoryMiB: 2048
+  firmware: BIOS
+  diskDefaults:
+    type: qcow2
+    sizeGiB: 20
+```
+
+### Step 4: Define VM Image
+
+Create a VMImage referencing your qcow2 image:
+
+```yaml
+apiVersion: infra.virtrigaud.io/v1alpha1
+kind: VMImage
+metadata:
+  name: ubuntu-kvm
+spec:
+  libvirt:
+    path: "/var/lib/libvirt/images/ubuntu-20.04.qcow2"
+    format: qcow2
+```
+
+### Step 5: Define Network
+
+```yaml
+apiVersion: infra.virtrigaud.io/v1alpha1
+kind: VMNetworkAttachment
+metadata:
+  name: kvm-network
+spec:
+  libvirt:
+    networkName: "default"
+    model: virtio
+  ipPolicy: dhcp
+```
+
+### Step 6: Create the Virtual Machine
+
+```yaml
+apiVersion: infra.virtrigaud.io/v1alpha1
+kind: VirtualMachine
+metadata:
+  name: my-kvm-vm
+spec:
+  providerRef:
+    name: my-libvirt
+  classRef:
+    name: kvm-small
+  imageRef:
+    name: ubuntu-kvm
+  networks:
+    - name: kvm-network
+  powerState: On
+  userData:
+    cloudInit:
+      inline: |
+        #cloud-config
+        hostname: my-kvm-vm
+        users:
+          - name: ubuntu
+            sudo: ALL=(ALL) NOPASSWD:ALL
+            shell: /bin/bash
+            ssh_authorized_keys:
+              - ssh-rsa AAAAB... # Your SSH public key
+```
+
+### Step 7: Monitor the VM
+
+```bash
+kubectl get virtualmachine my-kvm-vm -w
+```
+
 ## Troubleshooting
 
 ### Check Provider Health
@@ -202,11 +331,23 @@ kubectl logs -n virtrigaud-system deployment/virtrigaud-controller-manager
 - Check out [advanced examples](docs/EXAMPLES.md) for complex scenarios
 - Learn about [provider development](docs/PROVIDERS.md) to add new hypervisors
 
-## Complete Example
+## Complete Examples
 
-For a complete working example with all components, see:
+For complete working examples with all components, see:
+
+**vSphere:**
 ```bash
 kubectl apply -f examples/complete-example.yaml
 ```
 
-This creates a full stack with provider, credentials, classes, and VM in one file.
+**Libvirt/KVM:**
+```bash
+kubectl apply -f examples/libvirt-complete-example.yaml
+```
+
+**Multi-provider (both vSphere and Libvirt):**
+```bash
+kubectl apply -f examples/multi-provider-example.yaml
+```
+
+Each creates a full stack with provider, credentials, classes, and VM in one file.
