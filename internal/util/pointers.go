@@ -54,3 +54,16 @@ func BoolValue(b *bool) bool {
 	}
 	return *b
 }
+
+// Int64Ptr returns a pointer to the given int64
+func Int64Ptr(i int64) *int64 {
+	return &i
+}
+
+// Int64Value returns the int64 value or zero if nil
+func Int64Value(i *int64) int64 {
+	if i == nil {
+		return 0
+	}
+	return *i
+}

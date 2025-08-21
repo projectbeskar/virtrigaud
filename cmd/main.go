@@ -42,6 +42,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt"
 	"github.com/projectbeskar/virtrigaud/internal/providers/registry"
 	"github.com/projectbeskar/virtrigaud/internal/providers/vsphere"
+	"github.com/projectbeskar/virtrigaud/internal/runtime/remote"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -214,12 +215,25 @@ func main() {
 
 	setupLog.Info("Provider registry initialized", "supportedTypes", providerRegistry.ListSupportedTypes())
 
+	// Create remote provider resolver with in-process fallback
+	remoteResolver := remote.NewResolver(mgr.GetClient(), providerRegistry)
+
+	setupLog.Info("Remote provider resolver initialized")
+
 	if err = (&controller.VirtualMachineReconciler{
 		Client:           mgr.GetClient(),
 		Scheme:           mgr.GetScheme(),
 		ProviderRegistry: providerRegistry,
+		RemoteResolver:   remoteResolver,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "VirtualMachine")
+		os.Exit(1)
+	}
+	if err = (&controller.ProviderReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "Provider")
 		os.Exit(1)
 	}
 	if err = (&controller.VMClassReconciler{
