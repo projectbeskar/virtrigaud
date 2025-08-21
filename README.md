@@ -8,14 +8,15 @@ Virtrigaud is a Kubernetes operator that enables declarative management of virtu
 
 ## Features
 
-- **Multi-Hypervisor Support**: Manage VMs across vSphere (ready), Libvirt/KVM (planned), and more
+- **Multi-Hypervisor Support**: Manage VMs across vSphere and Libvirt/KVM simultaneously
 - **Declarative API**: Define VM resources using Kubernetes CRDs
-- **Production-Ready vSphere Provider**: Full vSphere integration with govmomi
-- **Cloud-Init Support**: Initialize VMs with cloud-init configuration
+- **Production-Ready Providers**: Full integration for both vSphere (govmomi) and Libvirt/KVM
+- **Cloud-Init Support**: Initialize VMs with cloud-init configuration across all providers
 - **Network Management**: Configure VM networking with provider-specific settings
-- **Power Management**: Control VM power state (On/Off/Reboot)
-- **Async Task Support**: Handles long-running vSphere operations
-- **Resource Management**: CPU, memory, disk configuration and reconfiguration
+- **Power Management**: Control VM power state (On/Off/Reboot) uniformly
+- **Async Task Support**: Handles long-running operations (vSphere) and synchronous operations (Libvirt)
+- **Resource Management**: CPU, memory, disk configuration across hypervisors
+- **Storage Management**: Provider-specific storage handling (datastores vs storage pools)
 - **Finalizer-based Cleanup**: Ensures proper cleanup of external resources
 
 ## Architecture
@@ -59,8 +60,14 @@ Virtrigaud is a Kubernetes operator that enables declarative management of virtu
 
 3. **Create provider and VM resources**:
    ```bash
-   # Complete example with all components
+   # vSphere example
    kubectl apply -f examples/complete-example.yaml
+   
+   # Libvirt/KVM example
+   kubectl apply -f examples/libvirt-complete-example.yaml
+   
+   # Multi-provider example (both vSphere and Libvirt)
+   kubectl apply -f examples/multi-provider-example.yaml
    
    # Or step by step:
    kubectl create secret generic vsphere-creds \
@@ -97,7 +104,15 @@ For detailed instructions, see [QUICKSTART.md](QUICKSTART.md).
   - Cloud-init support via guestinfo
   - Network configuration with portgroups
   - Async task monitoring
-- **Libvirt**: 🚧 Planned for Stage 2
+  
+- **Libvirt/KVM**: ✅ Production ready (libvirt-go-based)
+  - VM creation from qcow2 images
+  - Power management (On/Off/Reboot)  
+  - Resource configuration (CPU/Memory/Disks)
+  - Cloud-init support via nocloud ISO
+  - Network configuration with bridges/networks
+  - Storage pool and volume management
+  
 - **Firecracker**: 📋 Future roadmap
 - **QEMU**: 📋 Future roadmap
 

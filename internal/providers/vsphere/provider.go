@@ -34,14 +34,14 @@ import (
 type Provider struct {
 	// provider configuration
 	config *v1alpha1.Provider
-	
+
 	// Kubernetes client for reading secrets
 	k8sClient client.Client
-	
+
 	// vSphere connection
 	client *govmomi.Client
 	finder *find.Finder
-	
+
 	// cached credentials
 	credentials *Credentials
 }

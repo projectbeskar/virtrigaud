@@ -1,5 +1,8 @@
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
+PROVIDER_LIBVIRT_IMG ?= ghcr.io/projectbeskar/virtrigaud/provider-libvirt:latest
+PROVIDER_VSPHERE_IMG ?= ghcr.io/projectbeskar/virtrigaud/provider-vsphere:latest
+TAG ?= latest
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -91,9 +94,33 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 
 ##@ Build
 
+# Protocol buffer definitions
+PROTO_DIR = proto
+PROTO_OUT = internal/rpc
+PROTO_PKGS = $(PROTO_DIR)/provider/v1/provider.proto
+
+.PHONY: proto
+proto: ## Generate gRPC stubs from protocol buffer definitions
+	@mkdir -p $(PROTO_OUT)
+	$(PROTOC) -I $(PROTO_DIR) \
+		--go_out=$(PROTO_OUT) --go_opt=paths=source_relative \
+		--go-grpc_out=$(PROTO_OUT) --go-grpc_opt=paths=source_relative \
+		$(PROTO_PKGS)
+
 .PHONY: build
 build: manifests generate fmt vet ## Build manager binary.
 	go build -o bin/manager cmd/main.go
+
+.PHONY: build-provider-libvirt
+build-provider-libvirt: proto ## Build libvirt provider binary (requires CGO)
+	CGO_ENABLED=1 go build -o bin/provider-libvirt ./cmd/provider-libvirt
+
+.PHONY: build-provider-vsphere
+build-provider-vsphere: proto ## Build vsphere provider binary
+	CGO_ENABLED=0 go build -o bin/provider-vsphere ./cmd/provider-vsphere
+
+.PHONY: build-providers
+build-providers: build-provider-libvirt build-provider-vsphere ## Build all provider binaries
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
@@ -109,6 +136,17 @@ docker-build: ## Build docker image with the manager.
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
 	$(CONTAINER_TOOL) push ${IMG}
+
+.PHONY: docker-provider-libvirt
+docker-provider-libvirt: ## Build docker image for libvirt provider
+	$(CONTAINER_TOOL) build -f cmd/provider-libvirt/Dockerfile -t $(PROVIDER_LIBVIRT_IMG) .
+
+.PHONY: docker-provider-vsphere
+docker-provider-vsphere: ## Build docker image for vsphere provider
+	$(CONTAINER_TOOL) build -f cmd/provider-vsphere/Dockerfile -t $(PROVIDER_VSPHERE_IMG) .
+
+.PHONY: docker-providers
+docker-providers: docker-provider-libvirt docker-provider-vsphere ## Build all provider docker images
 
 # PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
 # architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:
@@ -170,6 +208,7 @@ KUSTOMIZE ?= $(LOCALBIN)/kustomize
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
+PROTOC ?= protoc
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.6.0

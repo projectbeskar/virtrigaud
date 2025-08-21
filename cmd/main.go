@@ -39,6 +39,7 @@ import (
 
 	infravirtrigaudiov1alpha1 "github.com/projectbeskar/virtrigaud/api/v1alpha1"
 	"github.com/projectbeskar/virtrigaud/internal/controller"
+	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt"
 	"github.com/projectbeskar/virtrigaud/internal/providers/registry"
 	"github.com/projectbeskar/virtrigaud/internal/providers/vsphere"
 	// +kubebuilder:scaffold:imports
@@ -207,8 +208,9 @@ func main() {
 	// Create provider registry
 	providerRegistry := registry.NewRegistry()
 
-	// Register vSphere provider factory
+	// Register provider factories
 	providerRegistry.Register("vsphere", vsphere.Factory(mgr.GetClient()))
+	providerRegistry.Register("libvirt", libvirt.Factory(mgr.GetClient()))
 
 	setupLog.Info("Provider registry initialized", "supportedTypes", providerRegistry.ListSupportedTypes())
 
