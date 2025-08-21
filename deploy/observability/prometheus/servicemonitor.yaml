@@ -1,0 +1,107 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: virtrigaud-manager
+  namespace: virtrigaud-system
+  labels:
+    app.kubernetes.io/name: virtrigaud
+    app.kubernetes.io/component: manager
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: virtrigaud
+      app.kubernetes.io/component: manager
+  endpoints:
+  - port: metrics
+    path: /metrics
+    interval: 30s
+    scrapeTimeout: 10s
+    relabelings:
+    - sourceLabels: [__meta_kubernetes_pod_name]
+      targetLabel: pod
+    - sourceLabels: [__meta_kubernetes_pod_node_name]
+      targetLabel: node
+    - sourceLabels: [__meta_kubernetes_namespace]
+      targetLabel: namespace
+    metricRelabelings:
+    - sourceLabels: [__name__]
+      regex: 'go_.*|process_.*'
+      action: drop
+    - sourceLabels: [__name__]
+      regex: 'virtrigaud_.*'
+      action: keep
+
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: virtrigaud-providers
+  namespace: virtrigaud-system
+  labels:
+    app.kubernetes.io/name: virtrigaud
+    app.kubernetes.io/component: provider
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: virtrigaud-provider
+  endpoints:
+  - port: metrics
+    path: /metrics
+    interval: 15s
+    scrapeTimeout: 10s
+    relabelings:
+    - sourceLabels: [__meta_kubernetes_service_label_virtrigaud_io_provider_type]
+      targetLabel: provider_type
+    - sourceLabels: [__meta_kubernetes_service_label_app_kubernetes_io_instance]
+      targetLabel: provider_instance
+    - sourceLabels: [__meta_kubernetes_pod_name]
+      targetLabel: pod
+    - sourceLabels: [__meta_kubernetes_pod_node_name]
+      targetLabel: node
+    - sourceLabels: [__meta_kubernetes_namespace]
+      targetLabel: namespace
+    metricRelabelings:
+    - sourceLabels: [__name__]
+      regex: 'go_.*|process_.*'
+      action: drop
+    - sourceLabels: [__name__]
+      regex: 'virtrigaud_.*'
+      action: keep
+
+---
+# Additional ServiceMonitor for detailed provider metrics
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: virtrigaud-providers-detailed
+  namespace: virtrigaud-system
+  labels:
+    app.kubernetes.io/name: virtrigaud
+    app.kubernetes.io/component: provider
+    monitoring: detailed
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: virtrigaud-provider
+      monitoring: detailed
+  endpoints:
+  - port: metrics
+    path: /metrics
+    interval: 10s
+    scrapeTimeout: 5s
+    relabelings:
+    - sourceLabels: [__meta_kubernetes_service_label_virtrigaud_io_provider_type]
+      targetLabel: provider_type
+    - sourceLabels: [__meta_kubernetes_service_label_app_kubernetes_io_instance]
+      targetLabel: provider_instance
+    - sourceLabels: [__meta_kubernetes_pod_name]
+      targetLabel: pod
+    - sourceLabels: [__meta_kubernetes_pod_node_name]
+      targetLabel: node
+    - sourceLabels: [__meta_kubernetes_namespace]
+      targetLabel: namespace
+    # Keep all metrics for detailed monitoring
+    metricRelabelings:
+    - sourceLabels: [__name__]
+      regex: 'virtrigaud_.*|go_.*|process_.*'
+      action: keep

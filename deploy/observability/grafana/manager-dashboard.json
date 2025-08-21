@@ -1,0 +1,282 @@
+{
+  "dashboard": {
+    "id": null,
+    "title": "Virtrigaud Manager Overview",
+    "description": "Overview of Virtrigaud manager performance and operations",
+    "tags": ["virtrigaud", "manager", "kubernetes"],
+    "style": "dark",
+    "timezone": "browser",
+    "refresh": "30s",
+    "time": {
+      "from": "now-1h",
+      "to": "now"
+    },
+    "templating": {
+      "list": [
+        {
+          "name": "namespace",
+          "type": "query",
+          "query": "label_values(virtrigaud_manager_reconcile_total, namespace)",
+          "refresh": 1,
+          "includeAll": true,
+          "allValue": ".*",
+          "multi": true
+        },
+        {
+          "name": "kind",
+          "type": "query", 
+          "query": "label_values(virtrigaud_manager_reconcile_total{namespace=~\"$namespace\"}, kind)",
+          "refresh": 1,
+          "includeAll": true,
+          "allValue": ".*",
+          "multi": true
+        }
+      ]
+    },
+    "panels": [
+      {
+        "id": 1,
+        "title": "Manager Status",
+        "type": "stat",
+        "gridPos": {"h": 6, "w": 6, "x": 0, "y": 0},
+        "targets": [
+          {
+            "expr": "up{job=\"virtrigaud-manager\",namespace=~\"$namespace\"}",
+            "legendFormat": "Manager Up"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "thresholds"},
+            "thresholds": {
+              "steps": [
+                {"color": "red", "value": 0},
+                {"color": "green", "value": 1}
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 2,
+        "title": "Total Reconciles (5m)",
+        "type": "stat",
+        "gridPos": {"h": 6, "w": 6, "x": 6, "y": 0},
+        "targets": [
+          {
+            "expr": "sum(rate(virtrigaud_manager_reconcile_total{namespace=~\"$namespace\",kind=~\"$kind\"}[5m])) * 300",
+            "legendFormat": "Total"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "palette-classic"},
+            "unit": "short"
+          }
+        }
+      },
+      {
+        "id": 3,
+        "title": "Error Rate",
+        "type": "stat", 
+        "gridPos": {"h": 6, "w": 6, "x": 12, "y": 0},
+        "targets": [
+          {
+            "expr": "sum(rate(virtrigaud_manager_reconcile_total{outcome=\"error\",namespace=~\"$namespace\",kind=~\"$kind\"}[5m])) / sum(rate(virtrigaud_manager_reconcile_total{namespace=~\"$namespace\",kind=~\"$kind\"}[5m])) * 100",
+            "legendFormat": "Error %"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "thresholds"},
+            "unit": "percent",
+            "thresholds": {
+              "steps": [
+                {"color": "green", "value": 0},
+                {"color": "yellow", "value": 5},
+                {"color": "red", "value": 10}
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 4,
+        "title": "Queue Depth",
+        "type": "stat",
+        "gridPos": {"h": 6, "w": 6, "x": 18, "y": 0},
+        "targets": [
+          {
+            "expr": "sum(virtrigaud_queue_depth{namespace=~\"$namespace\",kind=~\"$kind\"})",
+            "legendFormat": "Items"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "thresholds"},
+            "unit": "short",
+            "thresholds": {
+              "steps": [
+                {"color": "green", "value": 0},
+                {"color": "yellow", "value": 50},
+                {"color": "red", "value": 100}
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 5,
+        "title": "Reconcile Rate by Kind",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 6},
+        "targets": [
+          {
+            "expr": "sum by (kind, outcome) (rate(virtrigaud_manager_reconcile_total{namespace=~\"$namespace\",kind=~\"$kind\"}[5m]))",
+            "legendFormat": "{{kind}} - {{outcome}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "palette-classic"},
+            "unit": "reqps",
+            "custom": {
+              "drawStyle": "line",
+              "lineInterpolation": "linear",
+              "pointSize": 5,
+              "showPoints": "never"
+            }
+          }
+        }
+      },
+      {
+        "id": 6,
+        "title": "Reconcile Duration (95th percentile)",
+        "type": "timeseries", 
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 6},
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, sum by (kind, le) (rate(virtrigaud_manager_reconcile_duration_seconds_bucket{namespace=~\"$namespace\",kind=~\"$kind\"}[5m])))",
+            "legendFormat": "{{kind}} p95"
+          },
+          {
+            "expr": "histogram_quantile(0.50, sum by (kind, le) (rate(virtrigaud_manager_reconcile_duration_seconds_bucket{namespace=~\"$namespace\",kind=~\"$kind\"}[5m])))",
+            "legendFormat": "{{kind}} p50"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "palette-classic"},
+            "unit": "s",
+            "custom": {
+              "drawStyle": "line",
+              "lineInterpolation": "linear"
+            }
+          }
+        }
+      },
+      {
+        "id": 7,
+        "title": "Queue Depth by Kind",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 14},
+        "targets": [
+          {
+            "expr": "virtrigaud_queue_depth{namespace=~\"$namespace\",kind=~\"$kind\"}",
+            "legendFormat": "{{kind}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "palette-classic"},
+            "unit": "short",
+            "custom": {
+              "drawStyle": "line",
+              "lineInterpolation": "linear"
+            }
+          }
+        }
+      },
+      {
+        "id": 8,
+        "title": "Error Breakdown",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 14},
+        "targets": [
+          {
+            "expr": "sum by (reason) (rate(virtrigaud_errors_total{component=\"manager\",namespace=~\"$namespace\"}[5m]))",
+            "legendFormat": "{{reason}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "palette-classic"},
+            "unit": "reqps",
+            "custom": {
+              "drawStyle": "line",
+              "lineInterpolation": "linear"
+            }
+          }
+        }
+      },
+      {
+        "id": 9,
+        "title": "Memory Usage",
+        "type": "timeseries",
+        "gridPos": {"h": 6, "w": 8, "x": 0, "y": 22},
+        "targets": [
+          {
+            "expr": "process_resident_memory_bytes{job=\"virtrigaud-manager\",namespace=~\"$namespace\"} / 1024 / 1024",
+            "legendFormat": "RSS (MB)"
+          },
+          {
+            "expr": "go_memstats_heap_inuse_bytes{job=\"virtrigaud-manager\",namespace=~\"$namespace\"} / 1024 / 1024",
+            "legendFormat": "Heap (MB)"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "palette-classic"},
+            "unit": "decmbytes"
+          }
+        }
+      },
+      {
+        "id": 10,
+        "title": "CPU Usage",
+        "type": "timeseries", 
+        "gridPos": {"h": 6, "w": 8, "x": 8, "y": 22},
+        "targets": [
+          {
+            "expr": "rate(process_cpu_seconds_total{job=\"virtrigaud-manager\",namespace=~\"$namespace\"}[5m]) * 100",
+            "legendFormat": "CPU %"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "palette-classic"},
+            "unit": "percent"
+          }
+        }
+      },
+      {
+        "id": 11,
+        "title": "Goroutines",
+        "type": "timeseries",
+        "gridPos": {"h": 6, "w": 8, "x": 16, "y": 22},
+        "targets": [
+          {
+            "expr": "go_goroutines{job=\"virtrigaud-manager\",namespace=~\"$namespace\"}",
+            "legendFormat": "Goroutines"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "palette-classic"},
+            "unit": "short"
+          }
+        }
+      }
+    ]
+  }
+}

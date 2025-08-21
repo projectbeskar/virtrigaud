@@ -1,0 +1,255 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: virtrigaud-alerts
+  namespace: virtrigaud-system
+  labels:
+    app.kubernetes.io/name: virtrigaud
+    app.kubernetes.io/component: monitoring
+spec:
+  groups:
+  - name: virtrigaud.provider.rules
+    interval: 30s
+    rules:
+    - alert: VirtrigaudProviderDown
+      expr: |
+        (
+          up{job=~".*virtrigaud-provider.*"} == 0
+          or
+          virtrigaud_provider_rpc_requests_total{code!="OK"} / virtrigaud_provider_rpc_requests_total > 0.9
+        )
+      for: 5m
+      labels:
+        severity: critical
+        component: provider
+      annotations:
+        summary: "Virtrigaud provider {{ $labels.provider_type }} is down or unhealthy"
+        description: |
+          Provider {{ $labels.provider_type }} in namespace {{ $labels.namespace }}
+          has been down or experiencing high error rates (>90%) for more than 5 minutes.
+          
+          Current status: {{ $value }}
+        runbook_url: "https://github.com/projectbeskar/virtrigaud/blob/main/docs/runbooks/provider-down.md"
+
+    - alert: VirtrigaudProviderErrorRateHigh
+      expr: |
+        (
+          rate(virtrigaud_provider_rpc_requests_total{code!="OK"}[5m]) 
+          / 
+          rate(virtrigaud_provider_rpc_requests_total[5m])
+        ) > 0.5
+      for: 10m
+      labels:
+        severity: warning
+        component: provider
+      annotations:
+        summary: "High error rate for Virtrigaud provider {{ $labels.provider_type }}"
+        description: |
+          Provider {{ $labels.provider_type }} is experiencing error rate of {{ printf "%.2f" $value }}%
+          for method {{ $labels.method }} over the last 5 minutes.
+        runbook_url: "https://github.com/projectbeskar/virtrigaud/blob/main/docs/runbooks/high-error-rate.md"
+
+    - alert: VirtrigaudProviderLatencyHigh
+      expr: |
+        histogram_quantile(0.95, 
+          rate(virtrigaud_provider_rpc_latency_seconds_bucket[5m])
+        ) > 30
+      for: 15m
+      labels:
+        severity: warning
+        component: provider
+      annotations:
+        summary: "High latency for Virtrigaud provider {{ $labels.provider_type }}"
+        description: |
+          Provider {{ $labels.provider_type }} method {{ $labels.method }}
+          is experiencing 95th percentile latency of {{ printf "%.2f" $value }}s
+          which is above the 30s threshold.
+        runbook_url: "https://github.com/projectbeskar/virtrigaud/blob/main/docs/runbooks/high-latency.md"
+
+  - name: virtrigaud.manager.rules
+    interval: 30s
+    rules:
+    - alert: VirtrigaudManagerDown
+      expr: up{job="virtrigaud-manager"} == 0
+      for: 2m
+      labels:
+        severity: critical
+        component: manager
+      annotations:
+        summary: "Virtrigaud manager is down"
+        description: |
+          The Virtrigaud manager has been down for more than 2 minutes.
+          This will prevent all VM operations from being processed.
+        runbook_url: "https://github.com/projectbeskar/virtrigaud/blob/main/docs/runbooks/manager-down.md"
+
+    - alert: VirtrigaudReconcileStuck
+      expr: |
+        histogram_quantile(0.95, 
+          rate(virtrigaud_manager_reconcile_duration_seconds_bucket[10m])
+        ) > 300
+      for: 15m
+      labels:
+        severity: warning
+        component: manager
+      annotations:
+        summary: "Virtrigaud reconcile operations are stuck"
+        description: |
+          Reconcile operations for {{ $labels.kind }} are taking longer than 5 minutes
+          (95th percentile: {{ printf "%.1f" $value }}s) indicating potential issues.
+        runbook_url: "https://github.com/projectbeskar/virtrigaud/blob/main/docs/runbooks/reconcile-stuck.md"
+
+    - alert: VirtrigaudQueueBackedUp
+      expr: virtrigaud_queue_depth > 100
+      for: 10m
+      labels:
+        severity: warning
+        component: manager
+      annotations:
+        summary: "Virtrigaud work queue is backed up"
+        description: |
+          Work queue for {{ $labels.kind }} has {{ $value }} items pending
+          for more than 10 minutes, indicating processing issues.
+        runbook_url: "https://github.com/projectbeskar/virtrigaud/blob/main/docs/runbooks/queue-backed-up.md"
+
+  - name: virtrigaud.vm.rules
+    interval: 60s
+    rules:
+    - alert: VirtrigaudVMCreateFailing
+      expr: |
+        (
+          rate(virtrigaud_vm_operations_total{operation="Create",outcome="error"}[10m])
+          /
+          rate(virtrigaud_vm_operations_total{operation="Create"}[10m])
+        ) > 0.3
+      for: 15m
+      labels:
+        severity: warning
+        component: vm
+      annotations:
+        summary: "High VM creation failure rate"
+        description: |
+          VM creation is failing at {{ printf "%.1f" $value }}% rate
+          for provider {{ $labels.provider_type }}/{{ $labels.provider }}
+          over the last 10 minutes.
+        runbook_url: "https://github.com/projectbeskar/virtrigaud/blob/main/docs/runbooks/vm-create-failing.md"
+
+    - alert: VirtrigaudVMNoIPAfterCreate
+      expr: |
+        increase(virtrigaud_vm_operations_total{operation="Create",outcome="success"}[10m]) > 0
+        unless
+        increase(virtrigaud_ip_discovery_duration_seconds_count[10m]) > 0
+      for: 10m
+      labels:
+        severity: warning
+        component: vm
+      annotations:
+        summary: "VMs created but no IP addresses discovered"
+        description: |
+          VMs have been successfully created but no IP addresses have been discovered
+          for provider {{ $labels.provider_type }} in the last 10 minutes.
+          This may indicate networking or guest tools issues.
+        runbook_url: "https://github.com/projectbeskar/virtrigaud/blob/main/docs/runbooks/no-ip-discovery.md"
+
+    - alert: VirtrigaudVMIPDiscoveryTooSlow
+      expr: |
+        histogram_quantile(0.95, 
+          rate(virtrigaud_ip_discovery_duration_seconds_bucket[10m])
+        ) > 300
+      for: 10m
+      labels:
+        severity: warning
+        component: vm
+      annotations:
+        summary: "VM IP discovery is too slow"
+        description: |
+          IP discovery for {{ $labels.provider_type }} is taking more than 5 minutes
+          (95th percentile: {{ printf "%.1f" $value }}s) which may indicate guest tools
+          or networking issues.
+        runbook_url: "https://github.com/projectbeskar/virtrigaud/blob/main/docs/runbooks/slow-ip-discovery.md"
+
+  - name: virtrigaud.circuit-breaker.rules
+    interval: 30s
+    rules:
+    - alert: VirtrigaudCircuitBreakerOpen
+      expr: virtrigaud_circuit_breaker_state == 2
+      for: 5m
+      labels:
+        severity: warning
+        component: circuit-breaker
+      annotations:
+        summary: "Circuit breaker is open for {{ $labels.provider_type }}/{{ $labels.provider }}"
+        description: |
+          Circuit breaker for provider {{ $labels.provider_type }}/{{ $labels.provider }}
+          has been open for more than 5 minutes, indicating persistent issues
+          with the provider endpoint.
+        runbook_url: "https://github.com/projectbeskar/virtrigaud/blob/main/docs/runbooks/circuit-breaker-open.md"
+
+    - alert: VirtrigaudCircuitBreakerFailureRateHigh
+      expr: rate(virtrigaud_circuit_breaker_failures_total[5m]) > 1
+      for: 10m
+      labels:
+        severity: warning
+        component: circuit-breaker
+      annotations:
+        summary: "High circuit breaker failure rate"
+        description: |
+          Circuit breaker for {{ $labels.provider_type }}/{{ $labels.provider }}
+          is experiencing {{ printf "%.2f" $value }} failures per second
+          over the last 5 minutes.
+        runbook_url: "https://github.com/projectbeskar/virtrigaud/blob/main/docs/runbooks/circuit-breaker-failures.md"
+
+  - name: virtrigaud.tasks.rules
+    interval: 60s
+    rules:
+    - alert: VirtrigaudTasksInflightHigh
+      expr: virtrigaud_provider_tasks_inflight > 50
+      for: 15m
+      labels:
+        severity: warning
+        component: tasks
+      annotations:
+        summary: "High number of inflight tasks"
+        description: |
+          Provider {{ $labels.provider_type }}/{{ $labels.provider }} has
+          {{ $value }} inflight tasks for more than 15 minutes.
+          This may indicate stuck tasks or resource constraints.
+        runbook_url: "https://github.com/projectbeskar/virtrigaud/blob/main/docs/runbooks/tasks-inflight-high.md"
+
+  - name: virtrigaud.resource.rules
+    interval: 5m
+    rules:
+    - alert: VirtrigaudManagerMemoryHigh
+      expr: |
+        (
+          process_resident_memory_bytes{job="virtrigaud-manager"} 
+          / 
+          (1024*1024*1024)
+        ) > 1
+      for: 10m
+      labels:
+        severity: warning
+        component: manager
+      annotations:
+        summary: "Virtrigaud manager memory usage is high"
+        description: |
+          Manager is using {{ printf "%.2f" $value }}GB of memory
+          which is above the 1GB threshold.
+        runbook_url: "https://github.com/projectbeskar/virtrigaud/blob/main/docs/runbooks/high-memory.md"
+
+    - alert: VirtrigaudProviderMemoryHigh
+      expr: |
+        (
+          process_resident_memory_bytes{job=~".*virtrigaud-provider.*"} 
+          / 
+          (1024*1024*1024)
+        ) > 0.5
+      for: 10m
+      labels:
+        severity: warning
+        component: provider
+      annotations:
+        summary: "Virtrigaud provider memory usage is high"
+        description: |
+          Provider {{ $labels.provider_type }} is using {{ printf "%.2f" $value }}GB of memory
+          which is above the 500MB threshold.
+        runbook_url: "https://github.com/projectbeskar/virtrigaud/blob/main/docs/runbooks/high-memory.md"
