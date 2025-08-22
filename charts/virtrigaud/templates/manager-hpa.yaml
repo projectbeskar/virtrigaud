@@ -1,0 +1,34 @@
+{{- if .Values.autoscaling.manager.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "virtrigaud.fullname" . }}-manager
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "virtrigaud.labels" . | nindent 4 }}
+    app.kubernetes.io/component: manager
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "virtrigaud.fullname" . }}-manager
+  minReplicas: {{ .Values.autoscaling.manager.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.manager.maxReplicas }}
+  metrics:
+  {{- if .Values.autoscaling.manager.targetCPUUtilizationPercentage }}
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: {{ .Values.autoscaling.manager.targetCPUUtilizationPercentage }}
+  {{- end }}
+  {{- if .Values.autoscaling.manager.targetMemoryUtilizationPercentage }}
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: {{ .Values.autoscaling.manager.targetMemoryUtilizationPercentage }}
+  {{- end }}
+{{- end }}

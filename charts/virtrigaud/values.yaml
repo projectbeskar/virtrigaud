@@ -1,0 +1,311 @@
+# Default values for virtrigaud
+# This is a YAML-formatted file.
+
+# Global configuration
+global:
+  # Image registry for all images
+  imageRegistry: ghcr.io
+  # Image pull policy
+  imagePullPolicy: IfNotPresent
+  # Image pull secrets
+  imagePullSecrets: []
+
+# Manager configuration
+manager:
+  # Image configuration
+  image:
+    repository: projectbeskar/virtrigaud
+    tag: "v0.1.0"
+    pullPolicy: IfNotPresent
+
+  # Replica count for manager
+  replicaCount: 1
+
+  # Resource limits and requests
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
+  # Security context (secure defaults)
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    readOnlyRootFilesystem: true
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+    seccompProfile:
+      type: RuntimeDefault
+
+  # Pod security context
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    fsGroupChangePolicy: "OnRootMismatch"
+    seccompProfile:
+      type: RuntimeDefault
+
+  # Service account
+  serviceAccount:
+    create: true
+    annotations: {}
+    name: ""
+
+  # Node selector
+  nodeSelector: {}
+
+  # Tolerations
+  tolerations: []
+
+  # Affinity
+  affinity: {}
+
+  # Environment variables
+  env:
+    - name: VIRTRIGAUD_LOG_LEVEL
+      value: "info"
+    - name: VIRTRIGAUD_LOG_FORMAT
+      value: "json"
+    - name: VIRTRIGAUD_TRACING_ENABLED
+      value: "false"
+
+  # Additional volumes
+  volumes: []
+
+  # Additional volume mounts
+  volumeMounts: []
+
+# Provider configuration
+providers:
+  # Libvirt provider
+  libvirt:
+    enabled: true
+    # Remote runtime configuration
+    remote:
+      enabled: true
+      replicaCount: 1
+      image:
+        repository: projectbeskar/virtrigaud/provider-libvirt
+        tag: "v0.1.0"
+      resources:
+        limits:
+          cpu: 1000m
+          memory: 1Gi
+        requests:
+          cpu: 200m
+          memory: 256Mi
+
+  # vSphere provider  
+  vsphere:
+    enabled: true
+    # Remote runtime configuration
+    remote:
+      enabled: true
+      replicaCount: 1
+      image:
+        repository: projectbeskar/virtrigaud/provider-vsphere
+        tag: "v0.1.0"
+      resources:
+        limits:
+          cpu: 1000m
+          memory: 1Gi
+        requests:
+          cpu: 200m
+          memory: 256Mi
+
+# RBAC configuration
+rbac:
+  # Enable RBAC
+  create: true
+  # Scope: namespace or cluster
+  scope: namespace
+  # Additional rules
+  additionalRules: []
+
+# Security configuration
+security:
+  # Pod Security Profile: strict, baseline, or privileged
+  podSecurityProfile: strict
+  
+  # Network policies
+  networkPolicies:
+    enabled: true
+    # Ingress rules
+    ingress:
+      # Allow manager to provider communication
+      managerToProvider: true
+      # Allow external access to webhooks
+      webhookIngress: true
+    # Egress rules  
+    egress:
+      # Allow provider to hypervisor communication
+      providerToHypervisor: true
+      # Allow DNS resolution
+      dns: true
+      # Allow access to Kubernetes API
+      kubernetesAPI: true
+
+  # TLS/mTLS configuration
+  tls:
+    # Enable TLS for provider gRPC
+    enabled: true
+    # Enable mutual TLS
+    mTLS: true
+    # Certificate source: cert-manager, manual, or self-signed
+    source: self-signed
+    # Certificate secret names (when source is manual)
+    secrets:
+      manager: virtrigaud-manager-tls
+      providers: virtrigaud-provider-tls
+    # cert-manager configuration (when source is cert-manager)
+    certManager:
+      issuer: virtrigaud-ca-issuer
+      issuerKind: ClusterIssuer
+
+# Webhook configuration
+webhooks:
+  # Enable admission webhooks
+  enabled: true
+  
+  # Conversion webhook for CRD versioning
+  conversion:
+    enabled: true
+    
+  # Validating webhook
+  validating:
+    enabled: true
+    failurePolicy: Fail
+    
+  # Mutating webhook  
+  mutating:
+    enabled: true
+    failurePolicy: Fail
+
+  # Certificate configuration
+  certificates:
+    # Certificate source: cert-manager, manual, or self-signed
+    source: self-signed
+    # Certificate secret name
+    secretName: virtrigaud-webhook-certs
+    # cert-manager configuration
+    certManager:
+      issuer: virtrigaud-ca-issuer
+      issuerKind: ClusterIssuer
+
+# Observability configuration
+observability:
+  # Prometheus monitoring
+  prometheus:
+    enabled: false
+    # Create ServiceMonitor
+    serviceMonitor:
+      enabled: false
+      interval: 30s
+      scrapeTimeout: 10s
+      labels: {}
+      
+    # Create PrometheusRule for alerts
+    prometheusRule:
+      enabled: false
+      labels: {}
+      
+  # Grafana dashboards
+  grafana:
+    enabled: false
+    # Create ConfigMaps with dashboards
+    dashboards:
+      enabled: false
+      labels:
+        grafana_dashboard: "1"
+        
+  # OpenTelemetry tracing
+  tracing:
+    enabled: false
+    endpoint: ""
+    samplingRatio: 0.1
+
+# Autoscaling
+autoscaling:
+  # Manager autoscaling
+  manager:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 3
+    targetCPUUtilizationPercentage: 80
+    targetMemoryUtilizationPercentage: 80
+    
+  # Provider autoscaling  
+  providers:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 5
+    targetCPUUtilizationPercentage: 80
+    # Custom metrics for provider scaling
+    customMetrics:
+      - type: Pods
+        pods:
+          metric:
+            name: virtrigaud_provider_tasks_inflight
+          target:
+            type: AverageValue
+            averageValue: "10"
+
+# Configuration
+config:
+  # Feature gates
+  featureGates: []
+  
+  # Worker configuration
+  workers:
+    perKind: 2
+    maxInflightTasks: 100
+    
+  # Retry configuration
+  retry:
+    maxAttempts: 5
+    baseDelay: 500ms
+    maxDelay: 30s
+    
+  # Circuit breaker configuration
+  circuitBreaker:
+    failureThreshold: 10
+    resetTimeout: 60s
+    
+  # Rate limiting
+  rateLimit:
+    qps: 10
+    burst: 20
+
+# CRD installation
+crds:
+  # Install CRDs
+  install: true
+  # Keep CRDs on uninstall
+  keep: false
+
+# Testing
+testing:
+  # Conformance testing
+  conformance:
+    enabled: false
+    # Test configuration
+    config:
+      providers: ["libvirt", "vsphere"]
+      skipTests: []
+      
+  # Load testing  
+  loadTesting:
+    enabled: false
+    # Load test configuration
+    config:
+      vmCount: 10
+      concurrency: 2
+      duration: 300s

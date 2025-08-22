@@ -1,0 +1,231 @@
+- name: vm-create-delete
+  description: Test basic VM creation and deletion
+  requiredCapabilities:
+    - vm-create
+    - vm-delete
+  timeout: 10m
+  labels:
+    category: basic
+    priority: high
+  steps:
+    - name: create-provider
+      type: create
+      timeout: 30s
+      resource:
+        apiVersion: infra.virtrigaud.io/v1alpha1
+        kind: Provider
+        metadata:
+          name: test-provider
+          namespace: default
+        spec:
+          type: test
+          endpoint: "test://localhost"
+      validate:
+        - path: .status.phase
+          operator: eq
+          value: Ready
+
+    - name: create-vmclass
+      type: create
+      timeout: 30s
+      resource:
+        apiVersion: infra.virtrigaud.io/v1alpha1
+        kind: VMClass
+        metadata:
+          name: test-class
+          namespace: default
+        spec:
+          cpu: 2
+          memoryMiB: 2048
+
+    - name: create-vmimage
+      type: create
+      timeout: 30s
+      resource:
+        apiVersion: infra.virtrigaud.io/v1alpha1
+        kind: VMImage
+        metadata:
+          name: test-image
+          namespace: default
+        spec:
+          source:
+            http:
+              url: "http://example.com/test.ova"
+
+    - name: create-vm
+      type: create
+      timeout: 5m
+      resource:
+        apiVersion: infra.virtrigaud.io/v1alpha1
+        kind: VirtualMachine
+        metadata:
+          name: test-vm
+          namespace: default
+        spec:
+          providerRef:
+            name: test-provider
+          classRef:
+            name: test-class
+          imageRef:
+            name: test-image
+
+    - name: wait-vm-ready
+      type: wait
+      timeout: 3m
+      waitFor:
+        condition: Ready
+        timeout: 3m
+
+    - name: validate-vm-running
+      type: validate
+      resource:
+        apiVersion: infra.virtrigaud.io/v1alpha1
+        kind: VirtualMachine
+        metadata:
+          name: test-vm
+          namespace: default
+      validate:
+        - path: .status.powerState
+          operator: eq
+          value: "On"
+        - path: .status.id
+          operator: exists
+
+    - name: delete-vm
+      type: delete
+      timeout: 3m
+      resource:
+        apiVersion: infra.virtrigaud.io/v1alpha1
+        kind: VirtualMachine
+        metadata:
+          name: test-vm
+          namespace: default
+
+    - name: wait-vm-deleted
+      type: wait
+      timeout: 2m
+      waitFor:
+        condition: Deleted
+        timeout: 2m
+
+  cleanup:
+    - name: cleanup-vmimage
+      type: delete
+      resource:
+        apiVersion: infra.virtrigaud.io/v1alpha1
+        kind: VMImage
+        metadata:
+          name: test-image
+          namespace: default
+
+    - name: cleanup-vmclass
+      type: delete
+      resource:
+        apiVersion: infra.virtrigaud.io/v1alpha1
+        kind: VMClass
+        metadata:
+          name: test-class
+          namespace: default
+
+    - name: cleanup-provider
+      type: delete
+      resource:
+        apiVersion: infra.virtrigaud.io/v1alpha1
+        kind: Provider
+        metadata:
+          name: test-provider
+          namespace: default
+
+- name: vm-power-cycle
+  description: Test VM power operations
+  requiredCapabilities:
+    - vm-create
+    - vm-power
+    - vm-delete
+  timeout: 8m
+  labels:
+    category: basic
+    priority: medium
+  steps:
+    - name: create-vm
+      type: create
+      timeout: 5m
+      resource:
+        apiVersion: infra.virtrigaud.io/v1alpha1
+        kind: VirtualMachine
+        metadata:
+          name: test-power-vm
+          namespace: default
+        spec:
+          providerRef:
+            name: test-provider
+          classRef:
+            name: test-class
+          imageRef:
+            name: test-image
+          powerState: "On"
+
+    - name: wait-vm-running
+      type: wait
+      timeout: 3m
+      waitFor:
+        condition: Running
+
+    - name: power-off-vm
+      type: update
+      timeout: 2m
+      resource:
+        apiVersion: infra.virtrigaud.io/v1alpha1
+        kind: VirtualMachine
+        metadata:
+          name: test-power-vm
+          namespace: default
+        spec:
+          powerState: "Off"
+
+    - name: wait-vm-stopped
+      type: wait
+      timeout: 2m
+      waitFor:
+        condition: Stopped
+
+    - name: validate-vm-off
+      type: validate
+      resource:
+        apiVersion: infra.virtrigaud.io/v1alpha1
+        kind: VirtualMachine
+        metadata:
+          name: test-power-vm
+          namespace: default
+      validate:
+        - path: .status.powerState
+          operator: eq
+          value: "Off"
+
+    - name: power-on-vm
+      type: update
+      timeout: 2m
+      resource:
+        apiVersion: infra.virtrigaud.io/v1alpha1
+        kind: VirtualMachine
+        metadata:
+          name: test-power-vm
+          namespace: default
+        spec:
+          powerState: "On"
+
+    - name: wait-vm-running-again
+      type: wait
+      timeout: 3m
+      waitFor:
+        condition: Running
+
+  cleanup:
+    - name: cleanup-test-vm
+      type: delete
+      resource:
+        apiVersion: infra.virtrigaud.io/v1alpha1
+        kind: VirtualMachine
+        metadata:
+          name: test-power-vm
+          namespace: default

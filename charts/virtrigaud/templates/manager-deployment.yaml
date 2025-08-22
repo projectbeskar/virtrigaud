@@ -1,0 +1,125 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "virtrigaud.fullname" . }}-manager
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "virtrigaud.labels" . | nindent 4 }}
+    app.kubernetes.io/component: manager
+spec:
+  replicas: {{ .Values.manager.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "virtrigaud.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: manager
+  template:
+    metadata:
+      labels:
+        {{- include "virtrigaud.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: manager
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/manager-configmap.yaml") . | sha256sum }}
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "virtrigaud.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.manager.podSecurityContext | nindent 8 }}
+      containers:
+      - name: manager
+        image: "{{ .Values.global.imageRegistry }}/{{ .Values.manager.image.repository }}:{{ .Values.manager.image.tag | default .Chart.AppVersion }}"
+        imagePullPolicy: {{ .Values.manager.image.pullPolicy }}
+        securityContext:
+          {{- toYaml .Values.manager.securityContext | nindent 10 }}
+        command:
+        - /manager
+        args:
+        - --config=/etc/virtrigaud/config.yaml
+        - --metrics-bind-address=0.0.0.0:8080
+        - --health-probe-bind-address=0.0.0.0:8081
+        - --leader-elect
+        {{- if .Values.webhooks.enabled }}
+        - --webhook-port=9443
+        - --webhook-cert-dir=/tmp/k8s-webhook-server/serving-certs
+        {{- end }}
+        env:
+        {{- range .Values.manager.env }}
+        - name: {{ .name }}
+          value: {{ .value | quote }}
+        {{- end }}
+        - name: VIRTRIGAUD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: VIRTRIGAUD_POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        ports:
+        - containerPort: 8080
+          name: metrics
+          protocol: TCP
+        - containerPort: 8081
+          name: health
+          protocol: TCP
+        {{- if .Values.webhooks.enabled }}
+        - containerPort: 9443
+          name: webhook
+          protocol: TCP
+        {{- end }}
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: health
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: health
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          {{- toYaml .Values.manager.resources | nindent 10 }}
+        volumeMounts:
+        - name: config
+          mountPath: /etc/virtrigaud
+          readOnly: true
+        - name: tmp
+          mountPath: /tmp
+        {{- if .Values.webhooks.enabled }}
+        - name: webhook-certs
+          mountPath: /tmp/k8s-webhook-server/serving-certs
+          readOnly: true
+        {{- end }}
+        {{- with .Values.manager.volumeMounts }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      volumes:
+      - name: config
+        configMap:
+          name: {{ include "virtrigaud.fullname" . }}-config
+      - name: tmp
+        emptyDir: {}
+      {{- if .Values.webhooks.enabled }}
+      - name: webhook-certs
+        secret:
+          secretName: {{ .Values.webhooks.certificates.secretName }}
+      {{- end }}
+      {{- with .Values.manager.volumes }}
+      {{- toYaml . | nindent 6 }}
+      {{- end }}
+      {{- with .Values.manager.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.manager.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.manager.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
