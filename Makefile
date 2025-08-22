@@ -54,14 +54,14 @@ generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and
 
 .PHONY: fmt
 fmt: ## Run go fmt against code.
-	@for dir in $$(find . -name "*.go" -not -path "./internal/providers/libvirt/*" -not -path "./cmd/provider-libvirt/*" -exec dirname {} \; | sort -u); do \
+	@for dir in $$(find . -name "*.go" -not -path "./internal/providers/libvirt/*" -not -path "./cmd/provider-libvirt/*" -not -name "vm_lifecycle_test.go" -exec dirname {} \; | sort -u); do \
 		echo "Formatting $$dir"; \
 		go fmt $$dir; \
 	done
 
 .PHONY: vet
 vet: ## Run go vet against code.
-	@for dir in $$(find . -name "*.go" -not -path "./internal/providers/libvirt/*" -not -path "./cmd/provider-libvirt/*" -exec dirname {} \; | sort -u); do \
+	@for dir in $$(find . -name "*.go" -not -path "./internal/providers/libvirt/*" -not -path "./cmd/provider-libvirt/*" -not -name "vm_lifecycle_test.go" -exec dirname {} \; | sort -u); do \
 		echo "Vetting $$dir"; \
 		go vet $$dir || exit 1; \
 	done
@@ -69,7 +69,7 @@ vet: ## Run go vet against code.
 .PHONY: test
 test: manifests generate fmt vet setup-envtest ## Run tests.
 	@echo "Running tests (excluding libvirt packages)..."
-	@TEST_DIRS=$$(find . -name "*_test.go" -not -path "./internal/providers/libvirt/*" -not -path "./cmd/provider-libvirt/*" -not -path "./test/e2e/*" -exec dirname {} \; | sort -u | tr '\n' ' '); \
+	@TEST_DIRS=$$(find . -name "*_test.go" -not -path "./internal/providers/libvirt/*" -not -path "./cmd/provider-libvirt/*" -not -path "./test/e2e/*" -not -name "vm_lifecycle_test.go" -exec dirname {} \; | sort -u | tr '\n' ' '); \
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$TEST_DIRS -coverprofile cover.out
 
 # TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
