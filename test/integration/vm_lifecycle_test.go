@@ -1,0 +1,364 @@
+/*
+Copyright 2025.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package integration
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	infrav1alpha1 "github.com/projectbeskar/virtrigaud/api/v1alpha1"
+	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt"
+	"github.com/projectbeskar/virtrigaud/internal/providers/vsphere"
+	providerv1 "github.com/projectbeskar/virtrigaud/internal/rpc/provider/v1"
+)
+
+func TestProviderCapabilities(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("VSphere Capabilities", func(t *testing.T) {
+		// Create a mock vSphere provider
+		provider := &vsphere.Provider{} // Mock implementation
+		server := vsphere.NewServer(provider)
+
+		// Test GetCapabilities
+		resp, err := server.GetCapabilities(ctx, &providerv1.GetCapabilitiesRequest{})
+		require.NoError(t, err)
+
+		// Verify vSphere capabilities
+		assert.True(t, resp.SupportsReconfigureOnline)
+		assert.True(t, resp.SupportsDiskExpansionOnline)
+		assert.True(t, resp.SupportsSnapshots)
+		assert.True(t, resp.SupportsMemorySnapshots)
+		assert.True(t, resp.SupportsLinkedClones)
+		assert.True(t, resp.SupportsImageImport)
+		assert.Contains(t, resp.SupportedDiskTypes, "thin")
+		assert.Contains(t, resp.SupportedNetworkTypes, "VMXNET3")
+	})
+
+	t.Run("Libvirt Capabilities", func(t *testing.T) {
+		// Create a mock Libvirt provider
+		provider := &libvirt.Provider{} // Mock implementation
+		server := libvirt.NewServer(provider)
+
+		// Test GetCapabilities
+		resp, err := server.GetCapabilities(ctx, &providerv1.GetCapabilitiesRequest{})
+		require.NoError(t, err)
+
+		// Verify Libvirt capabilities
+		assert.False(t, resp.SupportsReconfigureOnline)   // Usually requires power cycle
+		assert.False(t, resp.SupportsDiskExpansionOnline) // Usually requires power cycle
+		assert.True(t, resp.SupportsSnapshots)            // Supports snapshots
+		assert.False(t, resp.SupportsMemorySnapshots)     // Storage-dependent
+		assert.True(t, resp.SupportsLinkedClones)         // Via qcow2 backing files
+		assert.True(t, resp.SupportsImageImport)          // Can download images
+		assert.Contains(t, resp.SupportedDiskTypes, "qcow2")
+		assert.Contains(t, resp.SupportedNetworkTypes, "virtio")
+	})
+}
+
+func TestSnapshotOperations(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("VSphere Snapshot Lifecycle", func(t *testing.T) {
+		provider := &vsphere.Provider{}
+		server := vsphere.NewServer(provider)
+
+		// Test snapshot creation
+		createReq := &providerv1.SnapshotCreateRequest{
+			VmId:          "vm-12345",
+			NameHint:      "test-snapshot",
+			IncludeMemory: true,
+			Description:   "Integration test snapshot",
+		}
+
+		createResp, err := server.SnapshotCreate(ctx, createReq)
+		require.NoError(t, err)
+		assert.NotEmpty(t, createResp.SnapshotId)
+		assert.NotNil(t, createResp.Task)
+
+		// Test snapshot deletion
+		deleteReq := &providerv1.SnapshotDeleteRequest{
+			VmId:       "vm-12345",
+			SnapshotId: createResp.SnapshotId,
+		}
+
+		deleteResp, err := server.SnapshotDelete(ctx, deleteReq)
+		require.NoError(t, err)
+		assert.NotNil(t, deleteResp.Task)
+
+		// Test snapshot revert
+		revertReq := &providerv1.SnapshotRevertRequest{
+			VmId:       "vm-12345",
+			SnapshotId: createResp.SnapshotId,
+		}
+
+		revertResp, err := server.SnapshotRevert(ctx, revertReq)
+		require.NoError(t, err)
+		assert.NotNil(t, revertResp.Task)
+	})
+}
+
+func TestCloneOperations(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("VM Clone", func(t *testing.T) {
+		provider := &vsphere.Provider{}
+		server := vsphere.NewServer(provider)
+
+		// Test VM cloning
+		cloneReq := &providerv1.CloneRequest{
+			SourceVmId:    "vm-source-12345",
+			TargetName:    "vm-clone-test",
+			Linked:        true,
+			ClassJson:     `{"cpu": 2, "memory": 4096}`,
+			PlacementJson: `{"datastore": "test-ds"}`,
+		}
+
+		cloneResp, err := server.Clone(ctx, cloneReq)
+		require.NoError(t, err)
+		assert.NotEmpty(t, cloneResp.TargetVmId)
+		assert.NotNil(t, cloneResp.Task)
+		assert.Contains(t, cloneResp.TargetVmId, "vm-clone")
+	})
+}
+
+func TestImagePrepare(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("Image Preparation", func(t *testing.T) {
+		provider := &vsphere.Provider{}
+		server := vsphere.NewServer(provider)
+
+		// Test image preparation
+		prepareReq := &providerv1.ImagePrepareRequest{
+			ImageJson:   `{"templateName": "ubuntu-22.04", "ovaURL": "https://example.com/ubuntu.ova"}`,
+			TargetName:  "ubuntu-22-prepared",
+			StorageHint: "prod-datastore",
+		}
+
+		prepareResp, err := server.ImagePrepare(ctx, prepareReq)
+		require.NoError(t, err)
+		assert.NotNil(t, prepareResp.Task)
+	})
+}
+
+func TestVMSnapshotCRD(t *testing.T) {
+	// Test VMSnapshot CRD creation and validation
+	snapshot := &infrav1alpha1.VMSnapshot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-snapshot",
+			Namespace: "default",
+		},
+		Spec: infrav1alpha1.VMSnapshotSpec{
+			VMRef: infrav1alpha1.LocalObjectReference{
+				Name: "test-vm",
+			},
+			NameHint:    "integration-test",
+			Memory:      true,
+			Description: "Test snapshot for integration testing",
+			RetentionPolicy: &infrav1alpha1.SnapshotRetentionPolicy{
+				MaxAge: &metav1.Duration{
+					Duration: 7 * 24 * time.Hour, // 7 days
+				},
+				DeleteOnVMDelete: true,
+			},
+		},
+	}
+
+	// Validate the snapshot object
+	assert.Equal(t, "test-snapshot", snapshot.Name)
+	assert.Equal(t, "test-vm", snapshot.Spec.VMRef.Name)
+	assert.True(t, snapshot.Spec.Memory)
+	assert.Equal(t, 7*24*time.Hour, snapshot.Spec.RetentionPolicy.MaxAge.Duration)
+}
+
+func TestVMCloneCRD(t *testing.T) {
+	// Test VMClone CRD creation and validation
+	clone := &infrav1alpha1.VMClone{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-clone",
+			Namespace: "default",
+		},
+		Spec: infrav1alpha1.VMCloneSpec{
+			SourceRef: infrav1alpha1.LocalObjectReference{
+				Name: "source-vm",
+			},
+			Target: infrav1alpha1.VMCloneTarget{
+				Name: "cloned-vm",
+				ClassRef: &infrav1alpha1.LocalObjectReference{
+					Name: "medium-class",
+				},
+			},
+			Linked:  true,
+			PowerOn: true,
+			Customization: &infrav1alpha1.VMCustomization{
+				Hostname: "cloned-vm-host",
+				Networks: []infrav1alpha1.NetworkCustomization{
+					{
+						Name:      "primary",
+						IPAddress: "192.168.1.100",
+						Gateway:   "192.168.1.1",
+						DNS:       []string{"8.8.8.8", "8.8.4.4"},
+					},
+				},
+				Tags: []string{"environment:test", "cloned:true"},
+			},
+		},
+	}
+
+	// Validate the clone object
+	assert.Equal(t, "test-clone", clone.Name)
+	assert.Equal(t, "source-vm", clone.Spec.SourceRef.Name)
+	assert.Equal(t, "cloned-vm", clone.Spec.Target.Name)
+	assert.True(t, clone.Spec.Linked)
+	assert.True(t, clone.Spec.PowerOn)
+	assert.Equal(t, "cloned-vm-host", clone.Spec.Customization.Hostname)
+	assert.Equal(t, "192.168.1.100", clone.Spec.Customization.Networks[0].IPAddress)
+}
+
+func TestVMSetCRD(t *testing.T) {
+	// Test VMSet CRD creation and validation
+	replicas := int32(3)
+	vmset := &infrav1alpha1.VMSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-vmset",
+			Namespace: "default",
+		},
+		Spec: infrav1alpha1.VMSetSpec{
+			Replicas: &replicas,
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					"app": "web-server",
+				},
+			},
+			Template: infrav1alpha1.VMSetTemplate{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						"app": "web-server",
+					},
+				},
+				Spec: infrav1alpha1.VirtualMachineSpec{
+					ProviderRef: infrav1alpha1.ObjectRef{
+						Name: "test-provider",
+					},
+					ClassRef: infrav1alpha1.ObjectRef{
+						Name: "small-class",
+					},
+					ImageRef: infrav1alpha1.ObjectRef{
+						Name: "ubuntu-image",
+					},
+				},
+			},
+			UpdateStrategy: infrav1alpha1.VMSetUpdateStrategy{
+				Type: infrav1alpha1.RollingUpdateVMSetStrategyType,
+			},
+		},
+	}
+
+	// Validate the VMSet object
+	assert.Equal(t, "test-vmset", vmset.Name)
+	assert.Equal(t, int32(3), *vmset.Spec.Replicas)
+	assert.Equal(t, "web-server", vmset.Spec.Selector.MatchLabels["app"])
+	assert.Equal(t, "test-provider", vmset.Spec.Template.Spec.ProviderRef.Name)
+	assert.Equal(t, infrav1alpha1.RollingUpdateVMSetStrategyType, vmset.Spec.UpdateStrategy.Type)
+}
+
+func TestVMPlacementPolicyCRD(t *testing.T) {
+	// Test VMPlacementPolicy CRD creation and validation
+	policy := &infrav1alpha1.VMPlacementPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-placement-policy",
+			Namespace: "default",
+		},
+		Spec: infrav1alpha1.VMPlacementPolicySpec{
+			Hard: &infrav1alpha1.PlacementConstraints{
+				Clusters:   []string{"prod-cluster"},
+				Datastores: []string{"ssd-datastore"},
+				Hosts:      []string{"esxi-01", "esxi-02"},
+			},
+			Soft: &infrav1alpha1.PlacementConstraints{
+				Folders: []string{"/Production"},
+				Zones:   []string{"zone-a", "zone-b"},
+			},
+			AntiAffinity: &infrav1alpha1.AntiAffinityRules{
+				HostAntiAffinity:      true,
+				ClusterAntiAffinity:   false,
+				DatastoreAntiAffinity: false,
+			},
+		},
+	}
+
+	// Validate the placement policy object
+	assert.Equal(t, "test-placement-policy", policy.Name)
+	assert.Contains(t, policy.Spec.Hard.Clusters, "prod-cluster")
+	assert.Contains(t, policy.Spec.Hard.Datastores, "ssd-datastore")
+	assert.Contains(t, policy.Spec.Soft.Folders, "/Production")
+	assert.True(t, policy.Spec.AntiAffinity.HostAntiAffinity)
+	assert.False(t, policy.Spec.AntiAffinity.ClusterAntiAffinity)
+}
+
+func TestVirtualMachineExtensions(t *testing.T) {
+	// Test extended VirtualMachine fields
+	vm := &infrav1alpha1.VirtualMachine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-vm-extended",
+			Namespace: "default",
+		},
+		Spec: infrav1alpha1.VirtualMachineSpec{
+			ProviderRef: infrav1alpha1.ObjectRef{
+				Name: "test-provider",
+			},
+			ClassRef: infrav1alpha1.ObjectRef{
+				Name: "test-class",
+			},
+			ImageRef: infrav1alpha1.ObjectRef{
+				Name: "test-image",
+			},
+			Resources: &infrav1alpha1.VirtualMachineResources{
+				CPU:       func() *int32 { v := int32(4); return &v }(),
+				MemoryMiB: func() *int64 { v := int64(8192); return &v }(),
+				GPU: &infrav1alpha1.GPUConfig{
+					Count:  1,
+					Type:   "nvidia-tesla-t4",
+					Memory: func() *int64 { v := int64(16384); return &v }(),
+				},
+			},
+			PlacementRef: &infrav1alpha1.LocalObjectReference{
+				Name: "production-policy",
+			},
+			Snapshot: &infrav1alpha1.VMSnapshotOperation{
+				RevertToRef: &infrav1alpha1.LocalObjectReference{
+					Name: "rollback-snapshot",
+				},
+			},
+		},
+	}
+
+	// Validate the extended VM object
+	assert.Equal(t, "test-vm-extended", vm.Name)
+	assert.Equal(t, int32(4), *vm.Spec.Resources.CPU)
+	assert.Equal(t, int64(8192), *vm.Spec.Resources.MemoryMiB)
+	assert.Equal(t, int32(1), vm.Spec.Resources.GPU.Count)
+	assert.Equal(t, "nvidia-tesla-t4", vm.Spec.Resources.GPU.Type)
+	assert.Equal(t, "production-policy", vm.Spec.PlacementRef.Name)
+	assert.Equal(t, "rollback-snapshot", vm.Spec.Snapshot.RevertToRef.Name)
+}

@@ -1,0 +1,144 @@
+# Snapshot Lifecycle Management Example
+# This demonstrates the complete snapshot lifecycle:
+# 1. Create snapshots for backup/rollback
+# 2. Revert to a previous snapshot
+# 3. Clean up old snapshots
+
+---
+# Create a backup snapshot before maintenance
+apiVersion: infra.virtrigaud.io/v1alpha1
+kind: VMSnapshot
+metadata:
+  name: web-server-01-maintenance-backup
+  namespace: default
+spec:
+  vmRef:
+    name: web-server-01
+  nameHint: "maintenance-backup"
+  memory: true  # Include memory for faster rollback
+  description: "Backup before scheduled maintenance window"
+  retentionPolicy:
+    maxAge: "30d"  # Keep for 30 days
+    deleteOnVMDelete: true
+
+---
+# Create a snapshot before applying updates
+apiVersion: infra.virtrigaud.io/v1alpha1
+kind: VMSnapshot
+metadata:
+  name: web-server-01-pre-update
+  namespace: default
+spec:
+  vmRef:
+    name: web-server-01
+  nameHint: "pre-system-update"
+  memory: false  # Disk-only snapshot for storage efficiency
+  description: "Snapshot before system package updates"
+  retentionPolicy:
+    maxAge: "7d"
+    deleteOnVMDelete: true
+
+---
+# Weekly backup snapshot (would be created by a CronJob)
+apiVersion: infra.virtrigaud.io/v1alpha1
+kind: VMSnapshot
+metadata:
+  name: web-server-01-weekly-backup
+  namespace: default
+  labels:
+    backup-type: weekly
+    automated: "true"
+spec:
+  vmRef:
+    name: web-server-01
+  nameHint: "weekly-backup-$(date +%Y%m%d)"
+  memory: false  # Disk-only for long-term storage
+  description: "Automated weekly backup snapshot"
+  retentionPolicy:
+    maxAge: "90d"  # Keep weekly backups for 3 months
+    deleteOnVMDelete: false  # Keep backups even if VM is deleted
+
+---
+# To revert to a snapshot, patch the VM with a snapshot reference:
+# 
+# apiVersion: infra.virtrigaud.io/v1alpha1
+# kind: VirtualMachine
+# metadata:
+#   name: web-server-01
+#   namespace: default
+# spec:
+#   snapshot:
+#     revertToRef:
+#       name: web-server-01-maintenance-backup
+#
+# The controller will:
+# 1. Power off the VM if running
+# 2. Call provider's SnapshotRevert RPC
+# 3. Power on the VM
+# 4. Clear the revertToRef field when complete
+# 5. Update conditions and emit events
+
+---
+# Example CronJob for automated snapshot cleanup
+# (This would be deployed separately)
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: snapshot-cleanup
+  namespace: default
+spec:
+  schedule: "0 2 * * 0"  # Weekly on Sunday at 2 AM
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: virtrigaud-snapshot-cleanup
+          containers:
+          - name: cleanup
+            image: bitnami/kubectl:latest
+            command:
+            - /bin/sh
+            - -c
+            - |
+              # Delete snapshots older than retention policy
+              # In practice, this would be handled by the controller
+              echo "Cleanup would run here"
+              
+              # Delete old automated snapshots
+              kubectl delete vmsnapshots -l automated=true \
+                --field-selector='metadata.creationTimestamp<$(date -d "90 days ago" -Iso-8601)'
+          restartPolicy: OnFailure
+
+---
+# RBAC for snapshot cleanup job
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: virtrigaud-snapshot-cleanup
+  namespace: default
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: snapshot-cleanup
+  namespace: default
+rules:
+- apiGroups: ["infra.virtrigaud.io"]
+  resources: ["vmsnapshots"]
+  verbs: ["get", "list", "delete"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: snapshot-cleanup
+  namespace: default
+subjects:
+- kind: ServiceAccount
+  name: virtrigaud-snapshot-cleanup
+  namespace: default
+roleRef:
+  kind: Role
+  name: snapshot-cleanup
+  apiGroup: rbac.authorization.k8s.io

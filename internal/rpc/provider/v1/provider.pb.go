@@ -813,6 +813,567 @@ func (x *TaskStatusResponse) GetError() string {
 	return ""
 }
 
+// Snapshot operations
+type SnapshotCreateRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	VmId          string                 `protobuf:"bytes,1,opt,name=vm_id,json=vmId,proto3" json:"vm_id,omitempty"`
+	NameHint      string                 `protobuf:"bytes,2,opt,name=name_hint,json=nameHint,proto3" json:"name_hint,omitempty"`
+	IncludeMemory bool                   `protobuf:"varint,3,opt,name=include_memory,json=includeMemory,proto3" json:"include_memory,omitempty"` // Include memory state if supported
+	Description   string                 `protobuf:"bytes,4,opt,name=description,proto3" json:"description,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SnapshotCreateRequest) Reset() {
+	*x = SnapshotCreateRequest{}
+	mi := &file_provider_v1_provider_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SnapshotCreateRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SnapshotCreateRequest) ProtoMessage() {}
+
+func (x *SnapshotCreateRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_provider_v1_provider_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SnapshotCreateRequest.ProtoReflect.Descriptor instead.
+func (*SnapshotCreateRequest) Descriptor() ([]byte, []int) {
+	return file_provider_v1_provider_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *SnapshotCreateRequest) GetVmId() string {
+	if x != nil {
+		return x.VmId
+	}
+	return ""
+}
+
+func (x *SnapshotCreateRequest) GetNameHint() string {
+	if x != nil {
+		return x.NameHint
+	}
+	return ""
+}
+
+func (x *SnapshotCreateRequest) GetIncludeMemory() bool {
+	if x != nil {
+		return x.IncludeMemory
+	}
+	return false
+}
+
+func (x *SnapshotCreateRequest) GetDescription() string {
+	if x != nil {
+		return x.Description
+	}
+	return ""
+}
+
+type SnapshotCreateResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SnapshotId    string                 `protobuf:"bytes,1,opt,name=snapshot_id,json=snapshotId,proto3" json:"snapshot_id,omitempty"`
+	Task          *TaskRef               `protobuf:"bytes,2,opt,name=task,proto3" json:"task,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SnapshotCreateResponse) Reset() {
+	*x = SnapshotCreateResponse{}
+	mi := &file_provider_v1_provider_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SnapshotCreateResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SnapshotCreateResponse) ProtoMessage() {}
+
+func (x *SnapshotCreateResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_provider_v1_provider_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SnapshotCreateResponse.ProtoReflect.Descriptor instead.
+func (*SnapshotCreateResponse) Descriptor() ([]byte, []int) {
+	return file_provider_v1_provider_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *SnapshotCreateResponse) GetSnapshotId() string {
+	if x != nil {
+		return x.SnapshotId
+	}
+	return ""
+}
+
+func (x *SnapshotCreateResponse) GetTask() *TaskRef {
+	if x != nil {
+		return x.Task
+	}
+	return nil
+}
+
+type SnapshotDeleteRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	VmId          string                 `protobuf:"bytes,1,opt,name=vm_id,json=vmId,proto3" json:"vm_id,omitempty"`
+	SnapshotId    string                 `protobuf:"bytes,2,opt,name=snapshot_id,json=snapshotId,proto3" json:"snapshot_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SnapshotDeleteRequest) Reset() {
+	*x = SnapshotDeleteRequest{}
+	mi := &file_provider_v1_provider_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SnapshotDeleteRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SnapshotDeleteRequest) ProtoMessage() {}
+
+func (x *SnapshotDeleteRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_provider_v1_provider_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SnapshotDeleteRequest.ProtoReflect.Descriptor instead.
+func (*SnapshotDeleteRequest) Descriptor() ([]byte, []int) {
+	return file_provider_v1_provider_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *SnapshotDeleteRequest) GetVmId() string {
+	if x != nil {
+		return x.VmId
+	}
+	return ""
+}
+
+func (x *SnapshotDeleteRequest) GetSnapshotId() string {
+	if x != nil {
+		return x.SnapshotId
+	}
+	return ""
+}
+
+type SnapshotRevertRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	VmId          string                 `protobuf:"bytes,1,opt,name=vm_id,json=vmId,proto3" json:"vm_id,omitempty"`
+	SnapshotId    string                 `protobuf:"bytes,2,opt,name=snapshot_id,json=snapshotId,proto3" json:"snapshot_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SnapshotRevertRequest) Reset() {
+	*x = SnapshotRevertRequest{}
+	mi := &file_provider_v1_provider_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SnapshotRevertRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SnapshotRevertRequest) ProtoMessage() {}
+
+func (x *SnapshotRevertRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_provider_v1_provider_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SnapshotRevertRequest.ProtoReflect.Descriptor instead.
+func (*SnapshotRevertRequest) Descriptor() ([]byte, []int) {
+	return file_provider_v1_provider_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *SnapshotRevertRequest) GetVmId() string {
+	if x != nil {
+		return x.VmId
+	}
+	return ""
+}
+
+func (x *SnapshotRevertRequest) GetSnapshotId() string {
+	if x != nil {
+		return x.SnapshotId
+	}
+	return ""
+}
+
+// Clone operations
+type CloneRequest struct {
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	SourceVmId string                 `protobuf:"bytes,1,opt,name=source_vm_id,json=sourceVmId,proto3" json:"source_vm_id,omitempty"`
+	TargetName string                 `protobuf:"bytes,2,opt,name=target_name,json=targetName,proto3" json:"target_name,omitempty"`
+	Linked     bool                   `protobuf:"varint,3,opt,name=linked,proto3" json:"linked,omitempty"` // Best-effort linked clone
+	// JSON-encoded specifications for customization
+	ClassJson     string `protobuf:"bytes,4,opt,name=class_json,json=classJson,proto3" json:"class_json,omitempty"`             // VMClass overrides
+	PlacementJson string `protobuf:"bytes,5,opt,name=placement_json,json=placementJson,proto3" json:"placement_json,omitempty"` // Placement hints
+	CustomizeJson string `protobuf:"bytes,6,opt,name=customize_json,json=customizeJson,proto3" json:"customize_json,omitempty"` // Customization spec
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CloneRequest) Reset() {
+	*x = CloneRequest{}
+	mi := &file_provider_v1_provider_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CloneRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CloneRequest) ProtoMessage() {}
+
+func (x *CloneRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_provider_v1_provider_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CloneRequest.ProtoReflect.Descriptor instead.
+func (*CloneRequest) Descriptor() ([]byte, []int) {
+	return file_provider_v1_provider_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *CloneRequest) GetSourceVmId() string {
+	if x != nil {
+		return x.SourceVmId
+	}
+	return ""
+}
+
+func (x *CloneRequest) GetTargetName() string {
+	if x != nil {
+		return x.TargetName
+	}
+	return ""
+}
+
+func (x *CloneRequest) GetLinked() bool {
+	if x != nil {
+		return x.Linked
+	}
+	return false
+}
+
+func (x *CloneRequest) GetClassJson() string {
+	if x != nil {
+		return x.ClassJson
+	}
+	return ""
+}
+
+func (x *CloneRequest) GetPlacementJson() string {
+	if x != nil {
+		return x.PlacementJson
+	}
+	return ""
+}
+
+func (x *CloneRequest) GetCustomizeJson() string {
+	if x != nil {
+		return x.CustomizeJson
+	}
+	return ""
+}
+
+type CloneResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	TargetVmId    string                 `protobuf:"bytes,1,opt,name=target_vm_id,json=targetVmId,proto3" json:"target_vm_id,omitempty"`
+	Task          *TaskRef               `protobuf:"bytes,2,opt,name=task,proto3" json:"task,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CloneResponse) Reset() {
+	*x = CloneResponse{}
+	mi := &file_provider_v1_provider_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CloneResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CloneResponse) ProtoMessage() {}
+
+func (x *CloneResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_provider_v1_provider_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CloneResponse.ProtoReflect.Descriptor instead.
+func (*CloneResponse) Descriptor() ([]byte, []int) {
+	return file_provider_v1_provider_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *CloneResponse) GetTargetVmId() string {
+	if x != nil {
+		return x.TargetVmId
+	}
+	return ""
+}
+
+func (x *CloneResponse) GetTask() *TaskRef {
+	if x != nil {
+		return x.Task
+	}
+	return nil
+}
+
+// Image preparation operations
+type ImagePrepareRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ImageJson     string                 `protobuf:"bytes,1,opt,name=image_json,json=imageJson,proto3" json:"image_json,omitempty"`       // JSON-encoded VMImage spec
+	TargetName    string                 `protobuf:"bytes,2,opt,name=target_name,json=targetName,proto3" json:"target_name,omitempty"`    // Target template/image name
+	StorageHint   string                 `protobuf:"bytes,3,opt,name=storage_hint,json=storageHint,proto3" json:"storage_hint,omitempty"` // Storage location hint (datastore, pool, etc.)
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ImagePrepareRequest) Reset() {
+	*x = ImagePrepareRequest{}
+	mi := &file_provider_v1_provider_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ImagePrepareRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ImagePrepareRequest) ProtoMessage() {}
+
+func (x *ImagePrepareRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_provider_v1_provider_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ImagePrepareRequest.ProtoReflect.Descriptor instead.
+func (*ImagePrepareRequest) Descriptor() ([]byte, []int) {
+	return file_provider_v1_provider_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *ImagePrepareRequest) GetImageJson() string {
+	if x != nil {
+		return x.ImageJson
+	}
+	return ""
+}
+
+func (x *ImagePrepareRequest) GetTargetName() string {
+	if x != nil {
+		return x.TargetName
+	}
+	return ""
+}
+
+func (x *ImagePrepareRequest) GetStorageHint() string {
+	if x != nil {
+		return x.StorageHint
+	}
+	return ""
+}
+
+// Capability check - what features does this provider support
+type GetCapabilitiesRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetCapabilitiesRequest) Reset() {
+	*x = GetCapabilitiesRequest{}
+	mi := &file_provider_v1_provider_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetCapabilitiesRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetCapabilitiesRequest) ProtoMessage() {}
+
+func (x *GetCapabilitiesRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_provider_v1_provider_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetCapabilitiesRequest.ProtoReflect.Descriptor instead.
+func (*GetCapabilitiesRequest) Descriptor() ([]byte, []int) {
+	return file_provider_v1_provider_proto_rawDescGZIP(), []int{21}
+}
+
+type GetCapabilitiesResponse struct {
+	state                       protoimpl.MessageState `protogen:"open.v1"`
+	SupportsReconfigureOnline   bool                   `protobuf:"varint,1,opt,name=supports_reconfigure_online,json=supportsReconfigureOnline,proto3" json:"supports_reconfigure_online,omitempty"`
+	SupportsDiskExpansionOnline bool                   `protobuf:"varint,2,opt,name=supports_disk_expansion_online,json=supportsDiskExpansionOnline,proto3" json:"supports_disk_expansion_online,omitempty"`
+	SupportsSnapshots           bool                   `protobuf:"varint,3,opt,name=supports_snapshots,json=supportsSnapshots,proto3" json:"supports_snapshots,omitempty"`
+	SupportsMemorySnapshots     bool                   `protobuf:"varint,4,opt,name=supports_memory_snapshots,json=supportsMemorySnapshots,proto3" json:"supports_memory_snapshots,omitempty"`
+	SupportsLinkedClones        bool                   `protobuf:"varint,5,opt,name=supports_linked_clones,json=supportsLinkedClones,proto3" json:"supports_linked_clones,omitempty"`
+	SupportsImageImport         bool                   `protobuf:"varint,6,opt,name=supports_image_import,json=supportsImageImport,proto3" json:"supports_image_import,omitempty"`
+	SupportedDiskTypes          []string               `protobuf:"bytes,7,rep,name=supported_disk_types,json=supportedDiskTypes,proto3" json:"supported_disk_types,omitempty"`
+	SupportedNetworkTypes       []string               `protobuf:"bytes,8,rep,name=supported_network_types,json=supportedNetworkTypes,proto3" json:"supported_network_types,omitempty"`
+	unknownFields               protoimpl.UnknownFields
+	sizeCache                   protoimpl.SizeCache
+}
+
+func (x *GetCapabilitiesResponse) Reset() {
+	*x = GetCapabilitiesResponse{}
+	mi := &file_provider_v1_provider_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetCapabilitiesResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetCapabilitiesResponse) ProtoMessage() {}
+
+func (x *GetCapabilitiesResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_provider_v1_provider_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetCapabilitiesResponse.ProtoReflect.Descriptor instead.
+func (*GetCapabilitiesResponse) Descriptor() ([]byte, []int) {
+	return file_provider_v1_provider_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *GetCapabilitiesResponse) GetSupportsReconfigureOnline() bool {
+	if x != nil {
+		return x.SupportsReconfigureOnline
+	}
+	return false
+}
+
+func (x *GetCapabilitiesResponse) GetSupportsDiskExpansionOnline() bool {
+	if x != nil {
+		return x.SupportsDiskExpansionOnline
+	}
+	return false
+}
+
+func (x *GetCapabilitiesResponse) GetSupportsSnapshots() bool {
+	if x != nil {
+		return x.SupportsSnapshots
+	}
+	return false
+}
+
+func (x *GetCapabilitiesResponse) GetSupportsMemorySnapshots() bool {
+	if x != nil {
+		return x.SupportsMemorySnapshots
+	}
+	return false
+}
+
+func (x *GetCapabilitiesResponse) GetSupportsLinkedClones() bool {
+	if x != nil {
+		return x.SupportsLinkedClones
+	}
+	return false
+}
+
+func (x *GetCapabilitiesResponse) GetSupportsImageImport() bool {
+	if x != nil {
+		return x.SupportsImageImport
+	}
+	return false
+}
+
+func (x *GetCapabilitiesResponse) GetSupportedDiskTypes() []string {
+	if x != nil {
+		return x.SupportedDiskTypes
+	}
+	return nil
+}
+
+func (x *GetCapabilitiesResponse) GetSupportedNetworkTypes() []string {
+	if x != nil {
+		return x.SupportedNetworkTypes
+	}
+	return nil
+}
+
 var File_provider_v1_provider_proto protoreflect.FileDescriptor
 
 const file_provider_v1_provider_proto_rawDesc = "" +
@@ -864,12 +1425,59 @@ const file_provider_v1_provider_proto_rawDesc = "" +
 	"\x04task\x18\x01 \x01(\v2\x14.provider.v1.TaskRefR\x04task\">\n" +
 	"\x12TaskStatusResponse\x12\x12\n" +
 	"\x04done\x18\x01 \x01(\bR\x04done\x12\x14\n" +
-	"\x05error\x18\x02 \x01(\tR\x05error*[\n" +
+	"\x05error\x18\x02 \x01(\tR\x05error\"\x92\x01\n" +
+	"\x15SnapshotCreateRequest\x12\x13\n" +
+	"\x05vm_id\x18\x01 \x01(\tR\x04vmId\x12\x1b\n" +
+	"\tname_hint\x18\x02 \x01(\tR\bnameHint\x12%\n" +
+	"\x0einclude_memory\x18\x03 \x01(\bR\rincludeMemory\x12 \n" +
+	"\vdescription\x18\x04 \x01(\tR\vdescription\"c\n" +
+	"\x16SnapshotCreateResponse\x12\x1f\n" +
+	"\vsnapshot_id\x18\x01 \x01(\tR\n" +
+	"snapshotId\x12(\n" +
+	"\x04task\x18\x02 \x01(\v2\x14.provider.v1.TaskRefR\x04task\"M\n" +
+	"\x15SnapshotDeleteRequest\x12\x13\n" +
+	"\x05vm_id\x18\x01 \x01(\tR\x04vmId\x12\x1f\n" +
+	"\vsnapshot_id\x18\x02 \x01(\tR\n" +
+	"snapshotId\"M\n" +
+	"\x15SnapshotRevertRequest\x12\x13\n" +
+	"\x05vm_id\x18\x01 \x01(\tR\x04vmId\x12\x1f\n" +
+	"\vsnapshot_id\x18\x02 \x01(\tR\n" +
+	"snapshotId\"\xd6\x01\n" +
+	"\fCloneRequest\x12 \n" +
+	"\fsource_vm_id\x18\x01 \x01(\tR\n" +
+	"sourceVmId\x12\x1f\n" +
+	"\vtarget_name\x18\x02 \x01(\tR\n" +
+	"targetName\x12\x16\n" +
+	"\x06linked\x18\x03 \x01(\bR\x06linked\x12\x1d\n" +
+	"\n" +
+	"class_json\x18\x04 \x01(\tR\tclassJson\x12%\n" +
+	"\x0eplacement_json\x18\x05 \x01(\tR\rplacementJson\x12%\n" +
+	"\x0ecustomize_json\x18\x06 \x01(\tR\rcustomizeJson\"[\n" +
+	"\rCloneResponse\x12 \n" +
+	"\ftarget_vm_id\x18\x01 \x01(\tR\n" +
+	"targetVmId\x12(\n" +
+	"\x04task\x18\x02 \x01(\v2\x14.provider.v1.TaskRefR\x04task\"x\n" +
+	"\x13ImagePrepareRequest\x12\x1d\n" +
+	"\n" +
+	"image_json\x18\x01 \x01(\tR\timageJson\x12\x1f\n" +
+	"\vtarget_name\x18\x02 \x01(\tR\n" +
+	"targetName\x12!\n" +
+	"\fstorage_hint\x18\x03 \x01(\tR\vstorageHint\"\x18\n" +
+	"\x16GetCapabilitiesRequest\"\xdd\x03\n" +
+	"\x17GetCapabilitiesResponse\x12>\n" +
+	"\x1bsupports_reconfigure_online\x18\x01 \x01(\bR\x19supportsReconfigureOnline\x12C\n" +
+	"\x1esupports_disk_expansion_online\x18\x02 \x01(\bR\x1bsupportsDiskExpansionOnline\x12-\n" +
+	"\x12supports_snapshots\x18\x03 \x01(\bR\x11supportsSnapshots\x12:\n" +
+	"\x19supports_memory_snapshots\x18\x04 \x01(\bR\x17supportsMemorySnapshots\x124\n" +
+	"\x16supports_linked_clones\x18\x05 \x01(\bR\x14supportsLinkedClones\x122\n" +
+	"\x15supports_image_import\x18\x06 \x01(\bR\x13supportsImageImport\x120\n" +
+	"\x14supported_disk_types\x18\a \x03(\tR\x12supportedDiskTypes\x126\n" +
+	"\x17supported_network_types\x18\b \x03(\tR\x15supportedNetworkTypes*[\n" +
 	"\aPowerOp\x12\x18\n" +
 	"\x14POWER_OP_UNSPECIFIED\x10\x00\x12\x0f\n" +
 	"\vPOWER_OP_ON\x10\x01\x12\x10\n" +
 	"\fPOWER_OP_OFF\x10\x02\x12\x13\n" +
-	"\x0fPOWER_OP_REBOOT\x10\x032\xf9\x03\n" +
+	"\x0fPOWER_OP_REBOOT\x10\x032\xe1\a\n" +
 	"\bProvider\x12G\n" +
 	"\bValidate\x12\x1c.provider.v1.ValidateRequest\x1a\x1d.provider.v1.ValidateResponse\x12A\n" +
 	"\x06Create\x12\x1a.provider.v1.CreateRequest\x1a\x1b.provider.v1.CreateResponse\x12?\n" +
@@ -878,7 +1486,13 @@ const file_provider_v1_provider_proto_rawDesc = "" +
 	"\vReconfigure\x12\x1f.provider.v1.ReconfigureRequest\x1a\x19.provider.v1.TaskResponse\x12G\n" +
 	"\bDescribe\x12\x1c.provider.v1.DescribeRequest\x1a\x1d.provider.v1.DescribeResponse\x12M\n" +
 	"\n" +
-	"TaskStatus\x12\x1e.provider.v1.TaskStatusRequest\x1a\x1f.provider.v1.TaskStatusResponseBIZGgithub.com/projectbeskar/virtrigaud/internal/rpc/provider/v1;providerv1b\x06proto3"
+	"TaskStatus\x12\x1e.provider.v1.TaskStatusRequest\x1a\x1f.provider.v1.TaskStatusResponse\x12Y\n" +
+	"\x0eSnapshotCreate\x12\".provider.v1.SnapshotCreateRequest\x1a#.provider.v1.SnapshotCreateResponse\x12O\n" +
+	"\x0eSnapshotDelete\x12\".provider.v1.SnapshotDeleteRequest\x1a\x19.provider.v1.TaskResponse\x12O\n" +
+	"\x0eSnapshotRevert\x12\".provider.v1.SnapshotRevertRequest\x1a\x19.provider.v1.TaskResponse\x12>\n" +
+	"\x05Clone\x12\x19.provider.v1.CloneRequest\x1a\x1a.provider.v1.CloneResponse\x12K\n" +
+	"\fImagePrepare\x12 .provider.v1.ImagePrepareRequest\x1a\x19.provider.v1.TaskResponse\x12\\\n" +
+	"\x0fGetCapabilities\x12#.provider.v1.GetCapabilitiesRequest\x1a$.provider.v1.GetCapabilitiesResponseBIZGgithub.com/projectbeskar/virtrigaud/internal/rpc/provider/v1;providerv1b\x06proto3"
 
 var (
 	file_provider_v1_provider_proto_rawDescOnce sync.Once
@@ -893,48 +1507,71 @@ func file_provider_v1_provider_proto_rawDescGZIP() []byte {
 }
 
 var file_provider_v1_provider_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_provider_v1_provider_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
+var file_provider_v1_provider_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
 var file_provider_v1_provider_proto_goTypes = []any{
-	(PowerOp)(0),               // 0: provider.v1.PowerOp
-	(*TaskRef)(nil),            // 1: provider.v1.TaskRef
-	(*Empty)(nil),              // 2: provider.v1.Empty
-	(*ValidateRequest)(nil),    // 3: provider.v1.ValidateRequest
-	(*ValidateResponse)(nil),   // 4: provider.v1.ValidateResponse
-	(*CreateRequest)(nil),      // 5: provider.v1.CreateRequest
-	(*CreateResponse)(nil),     // 6: provider.v1.CreateResponse
-	(*DeleteRequest)(nil),      // 7: provider.v1.DeleteRequest
-	(*PowerRequest)(nil),       // 8: provider.v1.PowerRequest
-	(*ReconfigureRequest)(nil), // 9: provider.v1.ReconfigureRequest
-	(*TaskResponse)(nil),       // 10: provider.v1.TaskResponse
-	(*DescribeRequest)(nil),    // 11: provider.v1.DescribeRequest
-	(*DescribeResponse)(nil),   // 12: provider.v1.DescribeResponse
-	(*TaskStatusRequest)(nil),  // 13: provider.v1.TaskStatusRequest
-	(*TaskStatusResponse)(nil), // 14: provider.v1.TaskStatusResponse
+	(PowerOp)(0),                    // 0: provider.v1.PowerOp
+	(*TaskRef)(nil),                 // 1: provider.v1.TaskRef
+	(*Empty)(nil),                   // 2: provider.v1.Empty
+	(*ValidateRequest)(nil),         // 3: provider.v1.ValidateRequest
+	(*ValidateResponse)(nil),        // 4: provider.v1.ValidateResponse
+	(*CreateRequest)(nil),           // 5: provider.v1.CreateRequest
+	(*CreateResponse)(nil),          // 6: provider.v1.CreateResponse
+	(*DeleteRequest)(nil),           // 7: provider.v1.DeleteRequest
+	(*PowerRequest)(nil),            // 8: provider.v1.PowerRequest
+	(*ReconfigureRequest)(nil),      // 9: provider.v1.ReconfigureRequest
+	(*TaskResponse)(nil),            // 10: provider.v1.TaskResponse
+	(*DescribeRequest)(nil),         // 11: provider.v1.DescribeRequest
+	(*DescribeResponse)(nil),        // 12: provider.v1.DescribeResponse
+	(*TaskStatusRequest)(nil),       // 13: provider.v1.TaskStatusRequest
+	(*TaskStatusResponse)(nil),      // 14: provider.v1.TaskStatusResponse
+	(*SnapshotCreateRequest)(nil),   // 15: provider.v1.SnapshotCreateRequest
+	(*SnapshotCreateResponse)(nil),  // 16: provider.v1.SnapshotCreateResponse
+	(*SnapshotDeleteRequest)(nil),   // 17: provider.v1.SnapshotDeleteRequest
+	(*SnapshotRevertRequest)(nil),   // 18: provider.v1.SnapshotRevertRequest
+	(*CloneRequest)(nil),            // 19: provider.v1.CloneRequest
+	(*CloneResponse)(nil),           // 20: provider.v1.CloneResponse
+	(*ImagePrepareRequest)(nil),     // 21: provider.v1.ImagePrepareRequest
+	(*GetCapabilitiesRequest)(nil),  // 22: provider.v1.GetCapabilitiesRequest
+	(*GetCapabilitiesResponse)(nil), // 23: provider.v1.GetCapabilitiesResponse
 }
 var file_provider_v1_provider_proto_depIdxs = []int32{
 	1,  // 0: provider.v1.CreateResponse.task:type_name -> provider.v1.TaskRef
 	0,  // 1: provider.v1.PowerRequest.op:type_name -> provider.v1.PowerOp
 	1,  // 2: provider.v1.TaskResponse.task:type_name -> provider.v1.TaskRef
 	1,  // 3: provider.v1.TaskStatusRequest.task:type_name -> provider.v1.TaskRef
-	3,  // 4: provider.v1.Provider.Validate:input_type -> provider.v1.ValidateRequest
-	5,  // 5: provider.v1.Provider.Create:input_type -> provider.v1.CreateRequest
-	7,  // 6: provider.v1.Provider.Delete:input_type -> provider.v1.DeleteRequest
-	8,  // 7: provider.v1.Provider.Power:input_type -> provider.v1.PowerRequest
-	9,  // 8: provider.v1.Provider.Reconfigure:input_type -> provider.v1.ReconfigureRequest
-	11, // 9: provider.v1.Provider.Describe:input_type -> provider.v1.DescribeRequest
-	13, // 10: provider.v1.Provider.TaskStatus:input_type -> provider.v1.TaskStatusRequest
-	4,  // 11: provider.v1.Provider.Validate:output_type -> provider.v1.ValidateResponse
-	6,  // 12: provider.v1.Provider.Create:output_type -> provider.v1.CreateResponse
-	10, // 13: provider.v1.Provider.Delete:output_type -> provider.v1.TaskResponse
-	10, // 14: provider.v1.Provider.Power:output_type -> provider.v1.TaskResponse
-	10, // 15: provider.v1.Provider.Reconfigure:output_type -> provider.v1.TaskResponse
-	12, // 16: provider.v1.Provider.Describe:output_type -> provider.v1.DescribeResponse
-	14, // 17: provider.v1.Provider.TaskStatus:output_type -> provider.v1.TaskStatusResponse
-	11, // [11:18] is the sub-list for method output_type
-	4,  // [4:11] is the sub-list for method input_type
-	4,  // [4:4] is the sub-list for extension type_name
-	4,  // [4:4] is the sub-list for extension extendee
-	0,  // [0:4] is the sub-list for field type_name
+	1,  // 4: provider.v1.SnapshotCreateResponse.task:type_name -> provider.v1.TaskRef
+	1,  // 5: provider.v1.CloneResponse.task:type_name -> provider.v1.TaskRef
+	3,  // 6: provider.v1.Provider.Validate:input_type -> provider.v1.ValidateRequest
+	5,  // 7: provider.v1.Provider.Create:input_type -> provider.v1.CreateRequest
+	7,  // 8: provider.v1.Provider.Delete:input_type -> provider.v1.DeleteRequest
+	8,  // 9: provider.v1.Provider.Power:input_type -> provider.v1.PowerRequest
+	9,  // 10: provider.v1.Provider.Reconfigure:input_type -> provider.v1.ReconfigureRequest
+	11, // 11: provider.v1.Provider.Describe:input_type -> provider.v1.DescribeRequest
+	13, // 12: provider.v1.Provider.TaskStatus:input_type -> provider.v1.TaskStatusRequest
+	15, // 13: provider.v1.Provider.SnapshotCreate:input_type -> provider.v1.SnapshotCreateRequest
+	17, // 14: provider.v1.Provider.SnapshotDelete:input_type -> provider.v1.SnapshotDeleteRequest
+	18, // 15: provider.v1.Provider.SnapshotRevert:input_type -> provider.v1.SnapshotRevertRequest
+	19, // 16: provider.v1.Provider.Clone:input_type -> provider.v1.CloneRequest
+	21, // 17: provider.v1.Provider.ImagePrepare:input_type -> provider.v1.ImagePrepareRequest
+	22, // 18: provider.v1.Provider.GetCapabilities:input_type -> provider.v1.GetCapabilitiesRequest
+	4,  // 19: provider.v1.Provider.Validate:output_type -> provider.v1.ValidateResponse
+	6,  // 20: provider.v1.Provider.Create:output_type -> provider.v1.CreateResponse
+	10, // 21: provider.v1.Provider.Delete:output_type -> provider.v1.TaskResponse
+	10, // 22: provider.v1.Provider.Power:output_type -> provider.v1.TaskResponse
+	10, // 23: provider.v1.Provider.Reconfigure:output_type -> provider.v1.TaskResponse
+	12, // 24: provider.v1.Provider.Describe:output_type -> provider.v1.DescribeResponse
+	14, // 25: provider.v1.Provider.TaskStatus:output_type -> provider.v1.TaskStatusResponse
+	16, // 26: provider.v1.Provider.SnapshotCreate:output_type -> provider.v1.SnapshotCreateResponse
+	10, // 27: provider.v1.Provider.SnapshotDelete:output_type -> provider.v1.TaskResponse
+	10, // 28: provider.v1.Provider.SnapshotRevert:output_type -> provider.v1.TaskResponse
+	20, // 29: provider.v1.Provider.Clone:output_type -> provider.v1.CloneResponse
+	10, // 30: provider.v1.Provider.ImagePrepare:output_type -> provider.v1.TaskResponse
+	23, // 31: provider.v1.Provider.GetCapabilities:output_type -> provider.v1.GetCapabilitiesResponse
+	19, // [19:32] is the sub-list for method output_type
+	6,  // [6:19] is the sub-list for method input_type
+	6,  // [6:6] is the sub-list for extension type_name
+	6,  // [6:6] is the sub-list for extension extendee
+	0,  // [0:6] is the sub-list for field type_name
 }
 
 func init() { file_provider_v1_provider_proto_init() }
@@ -948,7 +1585,7 @@ func file_provider_v1_provider_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_provider_v1_provider_proto_rawDesc), len(file_provider_v1_provider_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   14,
+			NumMessages:   23,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

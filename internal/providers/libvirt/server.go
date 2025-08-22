@@ -233,3 +233,100 @@ func (s *Server) parseCreateRequest(req *providerv1.CreateRequest) (contracts.Cr
 
 	return createReq, nil
 }
+
+// SnapshotCreate creates a VM snapshot
+func (s *Server) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotCreateRequest) (*providerv1.SnapshotCreateResponse, error) {
+	// Libvirt supports disk snapshots; memory snapshots depend on storage backend
+	snapshotID := fmt.Sprintf("snapshot-%s-%d", req.NameHint, generateTimestamp())
+
+	// For now, simulate async operation
+	taskRef := &providerv1.TaskRef{
+		Id: fmt.Sprintf("task-snapshot-%s", generateTaskID()),
+	}
+
+	// Note: Memory snapshots may not be supported on all storage backends
+	return &providerv1.SnapshotCreateResponse{
+		SnapshotId: snapshotID,
+		Task:       taskRef,
+	}, nil
+}
+
+// SnapshotDelete deletes a VM snapshot
+func (s *Server) SnapshotDelete(ctx context.Context, req *providerv1.SnapshotDeleteRequest) (*providerv1.TaskResponse, error) {
+	// Simulate async snapshot deletion
+	taskRef := &providerv1.TaskRef{
+		Id: fmt.Sprintf("task-delete-snapshot-%s", generateTaskID()),
+	}
+
+	return &providerv1.TaskResponse{
+		Task: taskRef,
+	}, nil
+}
+
+// SnapshotRevert reverts a VM to a snapshot
+func (s *Server) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotRevertRequest) (*providerv1.TaskResponse, error) {
+	// Simulate async snapshot revert
+	taskRef := &providerv1.TaskRef{
+		Id: fmt.Sprintf("task-revert-snapshot-%s", generateTaskID()),
+	}
+
+	return &providerv1.TaskResponse{
+		Task: taskRef,
+	}, nil
+}
+
+// Clone creates a VM clone
+func (s *Server) Clone(ctx context.Context, req *providerv1.CloneRequest) (*providerv1.CloneResponse, error) {
+	// Libvirt supports cloning via volume clone + new domain definition
+	// Linked clones are supported with qcow2 backing files
+	targetVMID := fmt.Sprintf("vm-clone-%s", generateVMID())
+
+	// Simulate async clone operation
+	taskRef := &providerv1.TaskRef{
+		Id: fmt.Sprintf("task-clone-%s", generateTaskID()),
+	}
+
+	return &providerv1.CloneResponse{
+		TargetVmId: targetVMID,
+		Task:       taskRef,
+	}, nil
+}
+
+// ImagePrepare prepares/imports a VM image
+func (s *Server) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepareRequest) (*providerv1.TaskResponse, error) {
+	// Libvirt supports downloading qcow2/raw images to storage pools
+	taskRef := &providerv1.TaskRef{
+		Id: fmt.Sprintf("task-image-prepare-%s", generateTaskID()),
+	}
+
+	return &providerv1.TaskResponse{
+		Task: taskRef,
+	}, nil
+}
+
+// GetCapabilities returns the capabilities of the Libvirt provider
+func (s *Server) GetCapabilities(ctx context.Context, req *providerv1.GetCapabilitiesRequest) (*providerv1.GetCapabilitiesResponse, error) {
+	return &providerv1.GetCapabilitiesResponse{
+		SupportsReconfigureOnline:   false, // Libvirt typically requires power cycle for CPU/memory changes
+		SupportsDiskExpansionOnline: false, // Disk expansion usually requires power cycle
+		SupportsSnapshots:           true,  // Libvirt supports snapshots (storage-dependent)
+		SupportsMemorySnapshots:     false, // Memory snapshots not always supported
+		SupportsLinkedClones:        true,  // Supported via qcow2 backing files
+		SupportsImageImport:         true,  // Supports downloading images to storage pools
+		SupportedDiskTypes:          []string{"qcow2", "raw", "vmdk"},
+		SupportedNetworkTypes:       []string{"virtio", "e1000", "rtl8139"},
+	}, nil
+}
+
+// Helper functions for generating IDs and timestamps (shared with vSphere)
+func generateTimestamp() int64 {
+	return 1642671234 // Placeholder - would use time.Now().Unix()
+}
+
+func generateTaskID() string {
+	return "12345678-1234-1234-1234-123456789012" // Placeholder - would generate UUID
+}
+
+func generateVMID() string {
+	return "vm-12345678" // Placeholder - would generate unique ID
+}

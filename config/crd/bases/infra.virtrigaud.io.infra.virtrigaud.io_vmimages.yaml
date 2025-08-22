@@ -82,10 +82,64 @@ spec:
               prepare:
                 description: Prepare contains optional image preparation steps
                 properties:
-                  importIfMissing:
-                    default: true
-                    description: ImportIfMissing imports the image if it doesn't exist
+                  force:
+                    description: Force forces re-import even if image exists
                     type: boolean
+                  onMissing:
+                    allOf:
+                    - enum:
+                      - Import
+                      - Fail
+                    - enum:
+                      - Import
+                      - Fail
+                    default: Import
+                    description: OnMissing defines the action to take when image is
+                      missing
+                    type: string
+                  retries:
+                    default: 3
+                    description: Retries defines the number of retry attempts for
+                      failed operations
+                    format: int32
+                    type: integer
+                  storage:
+                    description: Storage defines storage-specific preparation options
+                    properties:
+                      libvirt:
+                        description: Libvirt storage options
+                        properties:
+                          allocationPolicy:
+                            description: AllocationPolicy defines how storage is allocated
+                            enum:
+                            - eager
+                            - lazy
+                            type: string
+                          storagePool:
+                            description: StoragePool specifies the target storage
+                              pool for import
+                            type: string
+                        type: object
+                      vsphere:
+                        description: VSphere storage options
+                        properties:
+                          datastore:
+                            description: Datastore specifies the target datastore
+                              for import
+                            type: string
+                          folder:
+                            description: Folder specifies the target folder for import
+                            type: string
+                          thinProvisioned:
+                            description: ThinProvisioned indicates whether to use
+                              thin provisioning
+                            type: boolean
+                        type: object
+                    type: object
+                  timeout:
+                    default: 30m
+                    description: Timeout defines the maximum time to wait for preparation
+                    type: string
                   validateChecksum:
                     default: true
                     description: ValidateChecksum validates the image checksum
@@ -179,15 +233,56 @@ spec:
                   - type
                   type: object
                 type: array
+              importProgress:
+                description: ImportProgress shows the progress of image import operations
+                properties:
+                  eta:
+                    description: ETA is the estimated time to completion
+                    type: string
+                  percentage:
+                    description: Percentage is the completion percentage (0-100)
+                    format: int32
+                    type: integer
+                  totalBytes:
+                    description: TotalBytes is the total size of the image being imported
+                    format: int64
+                    type: integer
+                  transferRate:
+                    description: TransferRate is the current transfer rate in bytes
+                      per second
+                    format: int64
+                    type: integer
+                  transferredBytes:
+                    description: TransferredBytes is the number of bytes transferred
+                      so far
+                    format: int64
+                    type: integer
+                type: object
               lastPrepareTime:
                 description: LastPrepareTime records when the image was last prepared
                 format: date-time
+                type: string
+              message:
+                description: Message provides additional details about the current
+                  state
                 type: string
               observedGeneration:
                 description: ObservedGeneration reflects the generation observed by
                   the controller
                 format: int64
                 type: integer
+              phase:
+                description: Phase represents the current phase of image preparation
+                enum:
+                - Pending
+                - Importing
+                - Preparing
+                - Ready
+                - Failed
+                type: string
+              prepareTaskRef:
+                description: PrepareTaskRef tracks any ongoing image preparation operations
+                type: string
               ready:
                 description: Ready indicates if the image is ready for use
                 type: boolean
