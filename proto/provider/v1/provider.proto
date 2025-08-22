@@ -89,6 +89,67 @@ message TaskStatusResponse {
   string error = 2; // Error message if task failed
 }
 
+// Snapshot operations
+message SnapshotCreateRequest {
+  string vm_id = 1;
+  string name_hint = 2;
+  bool include_memory = 3; // Include memory state if supported
+  string description = 4;
+}
+
+message SnapshotCreateResponse {
+  string snapshot_id = 1;
+  TaskRef task = 2;
+}
+
+message SnapshotDeleteRequest {
+  string vm_id = 1;
+  string snapshot_id = 2;
+}
+
+message SnapshotRevertRequest {
+  string vm_id = 1;
+  string snapshot_id = 2;
+}
+
+// Clone operations
+message CloneRequest {
+  string source_vm_id = 1;
+  string target_name = 2;
+  bool linked = 3; // Best-effort linked clone
+  
+  // JSON-encoded specifications for customization
+  string class_json = 4;     // VMClass overrides
+  string placement_json = 5; // Placement hints
+  string customize_json = 6; // Customization spec
+}
+
+message CloneResponse {
+  string target_vm_id = 1;
+  TaskRef task = 2;
+}
+
+// Image preparation operations
+message ImagePrepareRequest {
+  string image_json = 1; // JSON-encoded VMImage spec
+  string target_name = 2; // Target template/image name
+  string storage_hint = 3; // Storage location hint (datastore, pool, etc.)
+}
+
+// Capability check - what features does this provider support
+message GetCapabilitiesRequest {}
+
+message GetCapabilitiesResponse {
+  bool supports_reconfigure_online = 1;
+  bool supports_disk_expansion_online = 2;
+  bool supports_snapshots = 3;
+  bool supports_memory_snapshots = 4;
+  bool supports_linked_clones = 5;
+  bool supports_image_import = 6;
+  repeated string supported_disk_types = 7;
+  repeated string supported_network_types = 8;
+}
+
 // Provider service definition
 service Provider {
   // Validate provider configuration and connectivity
@@ -111,4 +172,18 @@ service Provider {
   
   // Check the status of an async task
   rpc TaskStatus(TaskStatusRequest) returns (TaskStatusResponse);
+  
+  // Snapshot operations
+  rpc SnapshotCreate(SnapshotCreateRequest) returns (SnapshotCreateResponse);
+  rpc SnapshotDelete(SnapshotDeleteRequest) returns (TaskResponse);
+  rpc SnapshotRevert(SnapshotRevertRequest) returns (TaskResponse);
+  
+  // Clone operations
+  rpc Clone(CloneRequest) returns (CloneResponse);
+  
+  // Image preparation and import
+  rpc ImagePrepare(ImagePrepareRequest) returns (TaskResponse);
+  
+  // Get provider capabilities
+  rpc GetCapabilities(GetCapabilitiesRequest) returns (GetCapabilitiesResponse);
 }

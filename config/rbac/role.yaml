@@ -48,6 +48,7 @@ rules:
   resources:
   - providers
   - virtualmachines
+  - vmsnapshots
   verbs:
   - create
   - delete
@@ -61,6 +62,7 @@ rules:
   resources:
   - providers/finalizers
   - virtualmachines/finalizers
+  - vmsnapshots/finalizers
   verbs:
   - update
 - apiGroups:
@@ -68,6 +70,7 @@ rules:
   resources:
   - providers/status
   - virtualmachines/status
+  - vmsnapshots/status
   verbs:
   - get
   - patch

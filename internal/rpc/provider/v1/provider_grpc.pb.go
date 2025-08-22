@@ -19,13 +19,19 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Provider_Validate_FullMethodName    = "/provider.v1.Provider/Validate"
-	Provider_Create_FullMethodName      = "/provider.v1.Provider/Create"
-	Provider_Delete_FullMethodName      = "/provider.v1.Provider/Delete"
-	Provider_Power_FullMethodName       = "/provider.v1.Provider/Power"
-	Provider_Reconfigure_FullMethodName = "/provider.v1.Provider/Reconfigure"
-	Provider_Describe_FullMethodName    = "/provider.v1.Provider/Describe"
-	Provider_TaskStatus_FullMethodName  = "/provider.v1.Provider/TaskStatus"
+	Provider_Validate_FullMethodName        = "/provider.v1.Provider/Validate"
+	Provider_Create_FullMethodName          = "/provider.v1.Provider/Create"
+	Provider_Delete_FullMethodName          = "/provider.v1.Provider/Delete"
+	Provider_Power_FullMethodName           = "/provider.v1.Provider/Power"
+	Provider_Reconfigure_FullMethodName     = "/provider.v1.Provider/Reconfigure"
+	Provider_Describe_FullMethodName        = "/provider.v1.Provider/Describe"
+	Provider_TaskStatus_FullMethodName      = "/provider.v1.Provider/TaskStatus"
+	Provider_SnapshotCreate_FullMethodName  = "/provider.v1.Provider/SnapshotCreate"
+	Provider_SnapshotDelete_FullMethodName  = "/provider.v1.Provider/SnapshotDelete"
+	Provider_SnapshotRevert_FullMethodName  = "/provider.v1.Provider/SnapshotRevert"
+	Provider_Clone_FullMethodName           = "/provider.v1.Provider/Clone"
+	Provider_ImagePrepare_FullMethodName    = "/provider.v1.Provider/ImagePrepare"
+	Provider_GetCapabilities_FullMethodName = "/provider.v1.Provider/GetCapabilities"
 )
 
 // ProviderClient is the client API for Provider service.
@@ -48,6 +54,16 @@ type ProviderClient interface {
 	Describe(ctx context.Context, in *DescribeRequest, opts ...grpc.CallOption) (*DescribeResponse, error)
 	// Check the status of an async task
 	TaskStatus(ctx context.Context, in *TaskStatusRequest, opts ...grpc.CallOption) (*TaskStatusResponse, error)
+	// Snapshot operations
+	SnapshotCreate(ctx context.Context, in *SnapshotCreateRequest, opts ...grpc.CallOption) (*SnapshotCreateResponse, error)
+	SnapshotDelete(ctx context.Context, in *SnapshotDeleteRequest, opts ...grpc.CallOption) (*TaskResponse, error)
+	SnapshotRevert(ctx context.Context, in *SnapshotRevertRequest, opts ...grpc.CallOption) (*TaskResponse, error)
+	// Clone operations
+	Clone(ctx context.Context, in *CloneRequest, opts ...grpc.CallOption) (*CloneResponse, error)
+	// Image preparation and import
+	ImagePrepare(ctx context.Context, in *ImagePrepareRequest, opts ...grpc.CallOption) (*TaskResponse, error)
+	// Get provider capabilities
+	GetCapabilities(ctx context.Context, in *GetCapabilitiesRequest, opts ...grpc.CallOption) (*GetCapabilitiesResponse, error)
 }
 
 type providerClient struct {
@@ -128,6 +144,66 @@ func (c *providerClient) TaskStatus(ctx context.Context, in *TaskStatusRequest, 
 	return out, nil
 }
 
+func (c *providerClient) SnapshotCreate(ctx context.Context, in *SnapshotCreateRequest, opts ...grpc.CallOption) (*SnapshotCreateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SnapshotCreateResponse)
+	err := c.cc.Invoke(ctx, Provider_SnapshotCreate_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *providerClient) SnapshotDelete(ctx context.Context, in *SnapshotDeleteRequest, opts ...grpc.CallOption) (*TaskResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(TaskResponse)
+	err := c.cc.Invoke(ctx, Provider_SnapshotDelete_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *providerClient) SnapshotRevert(ctx context.Context, in *SnapshotRevertRequest, opts ...grpc.CallOption) (*TaskResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(TaskResponse)
+	err := c.cc.Invoke(ctx, Provider_SnapshotRevert_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *providerClient) Clone(ctx context.Context, in *CloneRequest, opts ...grpc.CallOption) (*CloneResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CloneResponse)
+	err := c.cc.Invoke(ctx, Provider_Clone_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *providerClient) ImagePrepare(ctx context.Context, in *ImagePrepareRequest, opts ...grpc.CallOption) (*TaskResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(TaskResponse)
+	err := c.cc.Invoke(ctx, Provider_ImagePrepare_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *providerClient) GetCapabilities(ctx context.Context, in *GetCapabilitiesRequest, opts ...grpc.CallOption) (*GetCapabilitiesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetCapabilitiesResponse)
+	err := c.cc.Invoke(ctx, Provider_GetCapabilities_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ProviderServer is the server API for Provider service.
 // All implementations must embed UnimplementedProviderServer
 // for forward compatibility.
@@ -148,6 +224,16 @@ type ProviderServer interface {
 	Describe(context.Context, *DescribeRequest) (*DescribeResponse, error)
 	// Check the status of an async task
 	TaskStatus(context.Context, *TaskStatusRequest) (*TaskStatusResponse, error)
+	// Snapshot operations
+	SnapshotCreate(context.Context, *SnapshotCreateRequest) (*SnapshotCreateResponse, error)
+	SnapshotDelete(context.Context, *SnapshotDeleteRequest) (*TaskResponse, error)
+	SnapshotRevert(context.Context, *SnapshotRevertRequest) (*TaskResponse, error)
+	// Clone operations
+	Clone(context.Context, *CloneRequest) (*CloneResponse, error)
+	// Image preparation and import
+	ImagePrepare(context.Context, *ImagePrepareRequest) (*TaskResponse, error)
+	// Get provider capabilities
+	GetCapabilities(context.Context, *GetCapabilitiesRequest) (*GetCapabilitiesResponse, error)
 	mustEmbedUnimplementedProviderServer()
 }
 
@@ -178,6 +264,24 @@ func (UnimplementedProviderServer) Describe(context.Context, *DescribeRequest) (
 }
 func (UnimplementedProviderServer) TaskStatus(context.Context, *TaskStatusRequest) (*TaskStatusResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method TaskStatus not implemented")
+}
+func (UnimplementedProviderServer) SnapshotCreate(context.Context, *SnapshotCreateRequest) (*SnapshotCreateResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SnapshotCreate not implemented")
+}
+func (UnimplementedProviderServer) SnapshotDelete(context.Context, *SnapshotDeleteRequest) (*TaskResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SnapshotDelete not implemented")
+}
+func (UnimplementedProviderServer) SnapshotRevert(context.Context, *SnapshotRevertRequest) (*TaskResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SnapshotRevert not implemented")
+}
+func (UnimplementedProviderServer) Clone(context.Context, *CloneRequest) (*CloneResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Clone not implemented")
+}
+func (UnimplementedProviderServer) ImagePrepare(context.Context, *ImagePrepareRequest) (*TaskResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ImagePrepare not implemented")
+}
+func (UnimplementedProviderServer) GetCapabilities(context.Context, *GetCapabilitiesRequest) (*GetCapabilitiesResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetCapabilities not implemented")
 }
 func (UnimplementedProviderServer) mustEmbedUnimplementedProviderServer() {}
 func (UnimplementedProviderServer) testEmbeddedByValue()                  {}
@@ -326,6 +430,114 @@ func _Provider_TaskStatus_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Provider_SnapshotCreate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SnapshotCreateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProviderServer).SnapshotCreate(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Provider_SnapshotCreate_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProviderServer).SnapshotCreate(ctx, req.(*SnapshotCreateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Provider_SnapshotDelete_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SnapshotDeleteRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProviderServer).SnapshotDelete(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Provider_SnapshotDelete_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProviderServer).SnapshotDelete(ctx, req.(*SnapshotDeleteRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Provider_SnapshotRevert_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SnapshotRevertRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProviderServer).SnapshotRevert(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Provider_SnapshotRevert_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProviderServer).SnapshotRevert(ctx, req.(*SnapshotRevertRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Provider_Clone_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CloneRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProviderServer).Clone(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Provider_Clone_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProviderServer).Clone(ctx, req.(*CloneRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Provider_ImagePrepare_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ImagePrepareRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProviderServer).ImagePrepare(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Provider_ImagePrepare_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProviderServer).ImagePrepare(ctx, req.(*ImagePrepareRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Provider_GetCapabilities_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetCapabilitiesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProviderServer).GetCapabilities(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Provider_GetCapabilities_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProviderServer).GetCapabilities(ctx, req.(*GetCapabilitiesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Provider_ServiceDesc is the grpc.ServiceDesc for Provider service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -360,6 +572,30 @@ var Provider_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "TaskStatus",
 			Handler:    _Provider_TaskStatus_Handler,
+		},
+		{
+			MethodName: "SnapshotCreate",
+			Handler:    _Provider_SnapshotCreate_Handler,
+		},
+		{
+			MethodName: "SnapshotDelete",
+			Handler:    _Provider_SnapshotDelete_Handler,
+		},
+		{
+			MethodName: "SnapshotRevert",
+			Handler:    _Provider_SnapshotRevert_Handler,
+		},
+		{
+			MethodName: "Clone",
+			Handler:    _Provider_Clone_Handler,
+		},
+		{
+			MethodName: "ImagePrepare",
+			Handler:    _Provider_ImagePrepare_Handler,
+		},
+		{
+			MethodName: "GetCapabilities",
+			Handler:    _Provider_GetCapabilities_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

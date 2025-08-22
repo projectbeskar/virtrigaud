@@ -56,6 +56,54 @@ type VirtualMachineSpec struct {
 	// Tags are applied to the VM for organization
 	// +optional
 	Tags []string `json:"tags,omitempty"`
+
+	// Resources allows overriding resource allocation from the VMClass
+	// +optional
+	Resources *VirtualMachineResources `json:"resources,omitempty"`
+
+	// PlacementRef references a VMPlacementPolicy for advanced placement rules
+	// +optional
+	PlacementRef *LocalObjectReference `json:"placementRef,omitempty"`
+
+	// Snapshot defines snapshot-related operations
+	// +optional
+	Snapshot *VMSnapshotOperation `json:"snapshot,omitempty"`
+}
+
+// VirtualMachineResources defines resource overrides for a VM
+type VirtualMachineResources struct {
+	// CPU specifies the number of virtual CPUs
+	// +optional
+	CPU *int32 `json:"cpu,omitempty"`
+
+	// MemoryMiB specifies the amount of memory in MiB
+	// +optional
+	MemoryMiB *int64 `json:"memoryMiB,omitempty"`
+
+	// GPU specifies GPU configuration
+	// +optional
+	GPU *GPUConfig `json:"gpu,omitempty"`
+}
+
+// GPUConfig defines GPU configuration for a VM
+type GPUConfig struct {
+	// Count specifies the number of GPUs to assign
+	Count int32 `json:"count"`
+
+	// Type specifies the GPU type (provider-specific)
+	// +optional
+	Type string `json:"type,omitempty"`
+
+	// Memory specifies GPU memory in MiB
+	// +optional
+	Memory *int64 `json:"memory,omitempty"`
+}
+
+// VMSnapshotOperation defines snapshot operations in VM spec
+type VMSnapshotOperation struct {
+	// RevertToRef specifies a snapshot to revert to
+	// +optional
+	RevertToRef *LocalObjectReference `json:"revertToRef,omitempty"`
 }
 
 // VirtualMachineStatus defines the observed state of VirtualMachine.
@@ -92,6 +140,52 @@ type VirtualMachineStatus struct {
 	// +optional
 	// +kubebuilder:pruning:PreserveUnknownFields
 	Provider map[string]string `json:"provider,omitempty"`
+
+	// ReconfigureTaskRef tracks reconfiguration operations
+	// +optional
+	ReconfigureTaskRef string `json:"reconfigureTaskRef,omitempty"`
+
+	// LastReconfigureTime records when the last reconfiguration occurred
+	// +optional
+	LastReconfigureTime *metav1.Time `json:"lastReconfigureTime,omitempty"`
+
+	// CurrentResources shows the current resource allocation
+	// +optional
+	CurrentResources *VirtualMachineResources `json:"currentResources,omitempty"`
+
+	// Snapshots lists available snapshots for this VM
+	// +optional
+	Snapshots []VMSnapshotInfo `json:"snapshots,omitempty"`
+}
+
+// VMSnapshotInfo provides information about a VM snapshot
+type VMSnapshotInfo struct {
+	// ID is the provider-specific snapshot identifier
+	ID string `json:"id"`
+
+	// Name is the snapshot name
+	Name string `json:"name"`
+
+	// CreationTime is when the snapshot was created
+	CreationTime metav1.Time `json:"creationTime"`
+
+	// Description provides additional context
+	// +optional
+	Description string `json:"description,omitempty"`
+
+	// SizeBytes is the size of the snapshot
+	// +optional
+	SizeBytes *int64 `json:"sizeBytes,omitempty"`
+
+	// HasMemory indicates if memory state is included
+	// +optional
+	HasMemory bool `json:"hasMemory,omitempty"`
+}
+
+// LocalObjectReference represents a reference to an object in the same namespace
+type LocalObjectReference struct {
+	// Name of the referenced object
+	Name string `json:"name"`
 }
 
 // ObjectRef represents a reference to another object

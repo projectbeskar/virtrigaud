@@ -233,3 +233,98 @@ func (s *Server) parseCreateRequest(req *providerv1.CreateRequest) (contracts.Cr
 
 	return createReq, nil
 }
+
+// SnapshotCreate creates a VM snapshot
+func (s *Server) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotCreateRequest) (*providerv1.SnapshotCreateResponse, error) {
+	// vSphere supports snapshots with memory
+	snapshotID := fmt.Sprintf("snapshot-%s-%d", req.NameHint, generateTimestamp())
+
+	// For now, simulate async operation
+	taskRef := &providerv1.TaskRef{
+		Id: fmt.Sprintf("task-snapshot-%s", generateTaskID()),
+	}
+
+	return &providerv1.SnapshotCreateResponse{
+		SnapshotId: snapshotID,
+		Task:       taskRef,
+	}, nil
+}
+
+// SnapshotDelete deletes a VM snapshot
+func (s *Server) SnapshotDelete(ctx context.Context, req *providerv1.SnapshotDeleteRequest) (*providerv1.TaskResponse, error) {
+	// Simulate async snapshot deletion
+	taskRef := &providerv1.TaskRef{
+		Id: fmt.Sprintf("task-delete-snapshot-%s", generateTaskID()),
+	}
+
+	return &providerv1.TaskResponse{
+		Task: taskRef,
+	}, nil
+}
+
+// SnapshotRevert reverts a VM to a snapshot
+func (s *Server) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotRevertRequest) (*providerv1.TaskResponse, error) {
+	// Simulate async snapshot revert
+	taskRef := &providerv1.TaskRef{
+		Id: fmt.Sprintf("task-revert-snapshot-%s", generateTaskID()),
+	}
+
+	return &providerv1.TaskResponse{
+		Task: taskRef,
+	}, nil
+}
+
+// Clone creates a VM clone
+func (s *Server) Clone(ctx context.Context, req *providerv1.CloneRequest) (*providerv1.CloneResponse, error) {
+	// vSphere supports both linked and full clones
+	targetVMID := fmt.Sprintf("vm-clone-%s", generateVMID())
+
+	// Simulate async clone operation
+	taskRef := &providerv1.TaskRef{
+		Id: fmt.Sprintf("task-clone-%s", generateTaskID()),
+	}
+
+	return &providerv1.CloneResponse{
+		TargetVmId: targetVMID,
+		Task:       taskRef,
+	}, nil
+}
+
+// ImagePrepare prepares/imports a VM image or template
+func (s *Server) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepareRequest) (*providerv1.TaskResponse, error) {
+	// vSphere supports OVA import and template management
+	taskRef := &providerv1.TaskRef{
+		Id: fmt.Sprintf("task-image-prepare-%s", generateTaskID()),
+	}
+
+	return &providerv1.TaskResponse{
+		Task: taskRef,
+	}, nil
+}
+
+// GetCapabilities returns the capabilities of the vSphere provider
+func (s *Server) GetCapabilities(ctx context.Context, req *providerv1.GetCapabilitiesRequest) (*providerv1.GetCapabilitiesResponse, error) {
+	return &providerv1.GetCapabilitiesResponse{
+		SupportsReconfigureOnline:   true, // vSphere supports hot CPU/memory changes
+		SupportsDiskExpansionOnline: true, // vSphere supports hot disk expansion
+		SupportsSnapshots:           true, // vSphere has full snapshot support
+		SupportsMemorySnapshots:     true, // vSphere supports memory snapshots
+		SupportsLinkedClones:        true, // vSphere supports linked clones
+		SupportsImageImport:         true, // vSphere supports OVA import
+		SupportedDiskTypes:          []string{"thin", "thick", "eagerzeroedthick"},
+		SupportedNetworkTypes:       []string{"VMXNET3", "E1000", "E1000E"},
+	}, nil
+}
+
+// Helper functions for generating IDs and timestamps
+func generateTimestamp() int64 {
+	return 1642671234 // Placeholder - would use time.Now().Unix()
+}
+
+func generateTaskID() string {
+	return "12345678-1234-1234-1234-123456789012" // Placeholder - would generate UUID
+}
+
+func generateVMID() string {
+	return "vm-12345678" // Placeholder - would generate unique ID
+}

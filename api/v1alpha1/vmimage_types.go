@@ -56,6 +56,62 @@ type VMImageStatus struct {
 	// LastPrepareTime records when the image was last prepared
 	// +optional
 	LastPrepareTime *metav1.Time `json:"lastPrepareTime,omitempty"`
+
+	// Phase represents the current phase of image preparation
+	// +optional
+	Phase ImagePhase `json:"phase,omitempty"`
+
+	// Message provides additional details about the current state
+	// +optional
+	Message string `json:"message,omitempty"`
+
+	// PrepareTaskRef tracks any ongoing image preparation operations
+	// +optional
+	PrepareTaskRef string `json:"prepareTaskRef,omitempty"`
+
+	// ImportProgress shows the progress of image import operations
+	// +optional
+	ImportProgress *ImageImportProgress `json:"importProgress,omitempty"`
+}
+
+// ImagePhase represents the phase of image preparation
+// +kubebuilder:validation:Enum=Pending;Importing;Preparing;Ready;Failed
+type ImagePhase string
+
+const (
+	// ImagePhasePending indicates the image is waiting to be processed
+	ImagePhasePending ImagePhase = "Pending"
+	// ImagePhaseImporting indicates the image is being imported
+	ImagePhaseImporting ImagePhase = "Importing"
+	// ImagePhasePreparing indicates the image is being prepared
+	ImagePhasePreparing ImagePhase = "Preparing"
+	// ImagePhaseReady indicates the image is ready for use
+	ImagePhaseReady ImagePhase = "Ready"
+	// ImagePhaseFailed indicates the image preparation failed
+	ImagePhaseFailed ImagePhase = "Failed"
+)
+
+// ImageImportProgress tracks the progress of image import operations
+type ImageImportProgress struct {
+	// TotalBytes is the total size of the image being imported
+	// +optional
+	TotalBytes *int64 `json:"totalBytes,omitempty"`
+
+	// TransferredBytes is the number of bytes transferred so far
+	// +optional
+	TransferredBytes *int64 `json:"transferredBytes,omitempty"`
+
+	// Percentage is the completion percentage (0-100)
+	// +optional
+	Percentage *int32 `json:"percentage,omitempty"`
+
+	// TransferRate is the current transfer rate in bytes per second
+	// +optional
+	TransferRate *int64 `json:"transferRate,omitempty"`
+
+	// ETA is the estimated time to completion
+	// +optional
+	ETA *metav1.Duration `json:"eta,omitempty"`
 }
 
 // VSphereImageSpec defines vSphere-specific image configuration
@@ -108,15 +164,83 @@ type LibvirtImageSpec struct {
 
 // ImagePrepare defines optional image preparation steps
 type ImagePrepare struct {
-	// ImportIfMissing imports the image if it doesn't exist
+	// OnMissing defines the action to take when image is missing
 	// +optional
-	// +kubebuilder:default=true
-	ImportIfMissing bool `json:"importIfMissing,omitempty"`
+	// +kubebuilder:default="Import"
+	// +kubebuilder:validation:Enum=Import;Fail
+	OnMissing ImageMissingAction `json:"onMissing,omitempty"`
 
 	// ValidateChecksum validates the image checksum
 	// +optional
 	// +kubebuilder:default=true
 	ValidateChecksum bool `json:"validateChecksum,omitempty"`
+
+	// Timeout defines the maximum time to wait for preparation
+	// +optional
+	// +kubebuilder:default="30m"
+	Timeout *metav1.Duration `json:"timeout,omitempty"`
+
+	// Retries defines the number of retry attempts for failed operations
+	// +optional
+	// +kubebuilder:default=3
+	Retries *int32 `json:"retries,omitempty"`
+
+	// Force forces re-import even if image exists
+	// +optional
+	Force bool `json:"force,omitempty"`
+
+	// Storage defines storage-specific preparation options
+	// +optional
+	Storage *StoragePrepareOptions `json:"storage,omitempty"`
+}
+
+// ImageMissingAction defines actions to take when an image is missing
+// +kubebuilder:validation:Enum=Import;Fail
+type ImageMissingAction string
+
+const (
+	// ImageMissingActionImport imports the missing image
+	ImageMissingActionImport ImageMissingAction = "Import"
+	// ImageMissingActionFail fails when the image is missing
+	ImageMissingActionFail ImageMissingAction = "Fail"
+)
+
+// StoragePrepareOptions defines storage-specific preparation options
+type StoragePrepareOptions struct {
+	// VSphere storage options
+	// +optional
+	VSphere *VSphereStorageOptions `json:"vsphere,omitempty"`
+
+	// Libvirt storage options
+	// +optional
+	Libvirt *LibvirtStorageOptions `json:"libvirt,omitempty"`
+}
+
+// VSphereStorageOptions defines vSphere storage preparation options
+type VSphereStorageOptions struct {
+	// Datastore specifies the target datastore for import
+	// +optional
+	Datastore string `json:"datastore,omitempty"`
+
+	// Folder specifies the target folder for import
+	// +optional
+	Folder string `json:"folder,omitempty"`
+
+	// ThinProvisioned indicates whether to use thin provisioning
+	// +optional
+	ThinProvisioned *bool `json:"thinProvisioned,omitempty"`
+}
+
+// LibvirtStorageOptions defines Libvirt storage preparation options
+type LibvirtStorageOptions struct {
+	// StoragePool specifies the target storage pool for import
+	// +optional
+	StoragePool string `json:"storagePool,omitempty"`
+
+	// AllocationPolicy defines how storage is allocated
+	// +optional
+	// +kubebuilder:validation:Enum=eager;lazy
+	AllocationPolicy string `json:"allocationPolicy,omitempty"`
 }
 
 // +kubebuilder:object:root=true
