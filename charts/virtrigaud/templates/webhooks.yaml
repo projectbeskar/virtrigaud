@@ -1,0 +1,207 @@
+{{- if .Values.webhooks.enabled }}
+{{- if eq .Values.webhooks.certificates.source "self-signed" }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ .Values.webhooks.certificates.secretName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "virtrigaud.labels" . | nindent 4 }}
+    app.kubernetes.io/component: webhook
+type: kubernetes.io/tls
+data:
+  {{- include "virtrigaud.webhookCerts" . | nindent 2 }}
+---
+{{- end }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "virtrigaud.webhookServiceName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "virtrigaud.labels" . | nindent 4 }}
+    app.kubernetes.io/component: webhook
+spec:
+  ports:
+  - name: webhook
+    port: 443
+    protocol: TCP
+    targetPort: webhook
+  selector:
+    {{- include "virtrigaud.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: manager
+---
+{{- if .Values.webhooks.validating.enabled }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionWebhook
+metadata:
+  name: {{ include "virtrigaud.fullname" . }}-validating
+  labels:
+    {{- include "virtrigaud.labels" . | nindent 4 }}
+    app.kubernetes.io/component: webhook
+  {{- if eq .Values.webhooks.certificates.source "cert-manager" }}
+  annotations:
+    cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/{{ .Values.webhooks.certificates.secretName }}
+  {{- end }}
+webhooks:
+- admissionReviewVersions:
+  - v1
+  - v1beta1
+  clientConfig:
+    service:
+      name: {{ include "virtrigaud.webhookServiceName" . }}
+      namespace: {{ .Release.Namespace }}
+      path: /validate-infra-virtrigaud-io-v1alpha1-virtualmachine
+    {{- if eq .Values.webhooks.certificates.source "self-signed" }}
+    caBundle: {{ include "virtrigaud.webhookCerts" . | fromYaml | get "ca.crt" }}
+    {{- end }}
+  failurePolicy: {{ .Values.webhooks.validating.failurePolicy }}
+  name: vvirtualmachine.kb.io
+  rules:
+  - apiGroups:
+    - infra.virtrigaud.io
+    apiVersions:
+    - v1alpha1
+    - v1beta1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - virtualmachines
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  - v1beta1
+  clientConfig:
+    service:
+      name: {{ include "virtrigaud.webhookServiceName" . }}
+      namespace: {{ .Release.Namespace }}
+      path: /validate-infra-virtrigaud-io-v1alpha1-vmclass
+    {{- if eq .Values.webhooks.certificates.source "self-signed" }}
+    caBundle: {{ include "virtrigaud.webhookCerts" . | fromYaml | get "ca.crt" }}
+    {{- end }}
+  failurePolicy: {{ .Values.webhooks.validating.failurePolicy }}
+  name: vvmclass.kb.io
+  rules:
+  - apiGroups:
+    - infra.virtrigaud.io
+    apiVersions:
+    - v1alpha1
+    - v1beta1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - vmclasses
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  - v1beta1
+  clientConfig:
+    service:
+      name: {{ include "virtrigaud.webhookServiceName" . }}
+      namespace: {{ .Release.Namespace }}
+      path: /validate-infra-virtrigaud-io-v1alpha1-vmsnapshot
+    {{- if eq .Values.webhooks.certificates.source "self-signed" }}
+    caBundle: {{ include "virtrigaud.webhookCerts" . | fromYaml | get "ca.crt" }}
+    {{- end }}
+  failurePolicy: {{ .Values.webhooks.validating.failurePolicy }}
+  name: vvmsnapshot.kb.io
+  rules:
+  - apiGroups:
+    - infra.virtrigaud.io
+    apiVersions:
+    - v1alpha1
+    - v1beta1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - vmsnapshots
+  sideEffects: None
+---
+{{- end }}
+{{- if .Values.webhooks.mutating.enabled }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingAdmissionWebhook
+metadata:
+  name: {{ include "virtrigaud.fullname" . }}-mutating
+  labels:
+    {{- include "virtrigaud.labels" . | nindent 4 }}
+    app.kubernetes.io/component: webhook
+  {{- if eq .Values.webhooks.certificates.source "cert-manager" }}
+  annotations:
+    cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/{{ .Values.webhooks.certificates.secretName }}
+  {{- end }}
+webhooks:
+- admissionReviewVersions:
+  - v1
+  - v1beta1
+  clientConfig:
+    service:
+      name: {{ include "virtrigaud.webhookServiceName" . }}
+      namespace: {{ .Release.Namespace }}
+      path: /mutate-infra-virtrigaud-io-v1alpha1-virtualmachine
+    {{- if eq .Values.webhooks.certificates.source "self-signed" }}
+    caBundle: {{ include "virtrigaud.webhookCerts" . | fromYaml | get "ca.crt" }}
+    {{- end }}
+  failurePolicy: {{ .Values.webhooks.mutating.failurePolicy }}
+  name: mvirtualmachine.kb.io
+  rules:
+  - apiGroups:
+    - infra.virtrigaud.io
+    apiVersions:
+    - v1alpha1
+    - v1beta1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - virtualmachines
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  - v1beta1
+  clientConfig:
+    service:
+      name: {{ include "virtrigaud.webhookServiceName" . }}
+      namespace: {{ .Release.Namespace }}
+      path: /mutate-infra-virtrigaud-io-v1alpha1-vmset
+    {{- if eq .Values.webhooks.certificates.source "self-signed" }}
+    caBundle: {{ include "virtrigaud.webhookCerts" . | fromYaml | get "ca.crt" }}
+    {{- end }}
+  failurePolicy: {{ .Values.webhooks.mutating.failurePolicy }}
+  name: mvmset.kb.io
+  rules:
+  - apiGroups:
+    - infra.virtrigaud.io
+    apiVersions:
+    - v1alpha1
+    - v1beta1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - vmsets
+  sideEffects: None
+---
+{{- end }}
+{{- if .Values.webhooks.conversion.enabled }}
+{{- $ca := genCA "virtrigaud-conversion-ca" 3650 }}
+{{- $cert := genSignedCert (include "virtrigaud.webhookServiceName" .) nil (list (printf "%s.%s.svc" (include "virtrigaud.webhookServiceName" .) .Release.Namespace) (printf "%s.%s.svc.cluster.local" (include "virtrigaud.webhookServiceName" .) .Release.Namespace)) 3650 $ca }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "virtrigaud.fullname" . }}-conversion-certs
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "virtrigaud.labels" . | nindent 4 }}
+    app.kubernetes.io/component: webhook
+type: kubernetes.io/tls
+data:
+  tls.crt: {{ $cert.Cert | b64enc }}
+  tls.key: {{ $cert.Key | b64enc }}
+  ca.crt: {{ $ca.Cert | b64enc }}
+---
+{{- end }}
+{{- end }}

@@ -1,0 +1,32 @@
+apiVersion: v2
+name: virtrigaud
+description: A Kubernetes operator for managing virtual machines across multiple hypervisors
+type: application
+version: 0.1.0
+appVersion: "v0.1.0"
+home: https://github.com/projectbeskar/virtrigaud
+sources:
+  - https://github.com/projectbeskar/virtrigaud
+maintainers:
+  - name: Virtrigaud Maintainers
+    email: maintainers@virtrigaud.io
+keywords:
+  - virtualization
+  - vmware
+  - vsphere
+  - libvirt
+  - kvm
+  - operator
+  - kubernetes
+annotations:
+  category: Infrastructure
+  licenses: Apache-2.0
+dependencies:
+  - name: provider-libvirt
+    version: 0.1.0
+    condition: providers.libvirt.enabled
+    repository: file://./charts/provider-libvirt
+  - name: provider-vsphere
+    version: 0.1.0  
+    condition: providers.vsphere.enabled
+    repository: file://./charts/provider-vsphere

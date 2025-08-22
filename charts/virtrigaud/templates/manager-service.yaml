@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "virtrigaud.managerServiceName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "virtrigaud.labels" . | nindent 4 }}
+    app.kubernetes.io/component: manager
+  {{- if .Values.observability.prometheus.enabled }}
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8080"
+    prometheus.io/path: "/metrics"
+  {{- end }}
+spec:
+  ports:
+  - name: metrics
+    port: 8080
+    protocol: TCP
+    targetPort: metrics
+  - name: health
+    port: 8081
+    protocol: TCP
+    targetPort: health
+  selector:
+    {{- include "virtrigaud.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: manager
