@@ -1,4 +1,5 @@
 name: Release
+
 on:
   push:
     tags:
@@ -22,11 +23,11 @@ permissions:
 
 jobs:
   prepare:
+    name: Prepare Release
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.get-tag.outputs.tag }}
       version: ${{ steps.get-tag.outputs.version }}
-      images: ${{ steps.images.outputs.images }}
     steps:
     - name: Get tag
       id: get-tag
@@ -40,22 +41,10 @@ jobs:
         echo "tag=${TAG}" >> $GITHUB_OUTPUT
         echo "version=${VERSION}" >> $GITHUB_OUTPUT
 
-    - name: Set image names
-      id: images
-      run: |
-        IMAGES=$(cat <<EOF | jq -c .
-        {
-          "manager": "${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}:${{ steps.get-tag.outputs.tag }}",
-          "provider-libvirt": "${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/provider-libvirt:${{ steps.get-tag.outputs.tag }}",
-          "provider-vsphere": "${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/provider-vsphere:${{ steps.get-tag.outputs.tag }}"
-        }
-        EOF
-        )
-        echo "images=${IMAGES}" >> $GITHUB_OUTPUT
-
   build-and-push:
-    needs: prepare
+    name: Build and Push Images
     runs-on: ubuntu-latest
+    needs: prepare
     strategy:
       matrix:
         component: [manager, provider-libvirt, provider-vsphere]
@@ -80,10 +69,10 @@ jobs:
       with:
         images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/${{ matrix.component }}
         tags: |
-          type=ref,event=tag
           type=semver,pattern={{version}}
           type=semver,pattern={{major}}.{{minor}}
-          type=sha
+          type=semver,pattern={{major}}
+          type=ref,event=tag
 
     - name: Build and push
       id: build
@@ -108,8 +97,9 @@ jobs:
         cosign sign --yes ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/${{ matrix.component }}@${{ steps.build.outputs.digest }}
 
   security-scan:
-    needs: [prepare, build-and-push]
+    name: Security Scan Images
     runs-on: ubuntu-latest
+    needs: [prepare, build-and-push]
     strategy:
       matrix:
         component: [manager, provider-libvirt, provider-vsphere]
@@ -117,19 +107,19 @@ jobs:
     - name: Run Trivy vulnerability scanner
       uses: aquasecurity/trivy-action@master
       with:
-        image-ref: ${{ fromJson(needs.prepare.outputs.images)[matrix.component] }}
+        image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/${{ matrix.component }}:${{ needs.prepare.outputs.tag }}
         format: 'sarif'
         output: 'trivy-results-${{ matrix.component }}.sarif'
 
-    - name: Upload Trivy scan results to GitHub Security tab
+    - name: Upload Trivy scan results
       uses: github/codeql-action/upload-sarif@v3
       with:
         sarif_file: 'trivy-results-${{ matrix.component }}.sarif'
 
-    - name: Run Trivy in table format
+    - name: Run Trivy for high/critical vulnerabilities
       uses: aquasecurity/trivy-action@master
       with:
-        image-ref: ${{ fromJson(needs.prepare.outputs.images)[matrix.component] }}
+        image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/${{ matrix.component }}:${{ needs.prepare.outputs.tag }}
         format: 'table'
         exit-code: '1'
         ignore-unfixed: true
@@ -137,8 +127,9 @@ jobs:
         severity: 'CRITICAL,HIGH'
 
   generate-sbom:
-    needs: [prepare, build-and-push]
+    name: Generate SBOMs
     runs-on: ubuntu-latest
+    needs: [prepare, build-and-push]
     strategy:
       matrix:
         component: [manager, provider-libvirt, provider-vsphere]
@@ -146,7 +137,7 @@ jobs:
     - name: Generate SBOM
       uses: anchore/sbom-action@v0
       with:
-        image: ${{ fromJson(needs.prepare.outputs.images)[matrix.component] }}
+        image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/${{ matrix.component }}:${{ needs.prepare.outputs.tag }}
         format: spdx-json
         output-file: sbom-${{ matrix.component }}.spdx.json
 
@@ -157,8 +148,9 @@ jobs:
         path: sbom-${{ matrix.component }}.spdx.json
 
   build-helm-chart:
-    needs: prepare
+    name: Build and Package Helm Chart
     runs-on: ubuntu-latest
+    needs: prepare
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -172,10 +164,13 @@ jobs:
       run: |
         sed -i "s/version: .*/version: ${{ needs.prepare.outputs.version }}/" charts/virtrigaud/Chart.yaml
         sed -i "s/appVersion: .*/appVersion: \"${{ needs.prepare.outputs.tag }}\"/" charts/virtrigaud/Chart.yaml
+        
+        # Update image tags in values.yaml
+        sed -i "s/tag: \".*\"/tag: \"${{ needs.prepare.outputs.tag }}\"/" charts/virtrigaud/values.yaml
 
     - name: Package chart
       run: |
-        helm dependency update charts/virtrigaud
+        mkdir -p helm-packages
         helm package charts/virtrigaud --destination ./helm-packages/
 
     - name: Upload chart
@@ -184,9 +179,17 @@ jobs:
         name: helm-chart
         path: helm-packages/*.tgz
 
-  test-conformance:
-    needs: [prepare, build-and-push]
+  build-cli-tools:
+    name: Build CLI Tools
     runs-on: ubuntu-latest
+    needs: prepare
+    strategy:
+      matrix:
+        os: [linux, darwin, windows]
+        arch: [amd64, arm64]
+        exclude:
+          - os: windows
+            arch: arm64
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -196,33 +199,34 @@ jobs:
       with:
         go-version: '1.21'
 
-    - name: Build conformance test suite
+    - name: Build CLI tools
       run: |
-        cd cmd/vcts
-        go build -o ../../vcts .
+        mkdir -p dist
+        
+        # Set extension for Windows
+        EXT=""
+        if [ "${{ matrix.os }}" = "windows" ]; then
+          EXT=".exe"
+        fi
+        
+        # Build each tool
+        for tool in vrtg vcts virtrigaud-loadgen; do
+          GOOS=${{ matrix.os }} GOARCH=${{ matrix.arch }} go build \
+            -ldflags="-s -w -X 'main.version=${{ needs.prepare.outputs.tag }}'" \
+            -o dist/${tool}-${{ matrix.os }}-${{ matrix.arch }}${EXT} \
+            ./cmd/${tool}
+        done
 
-    - name: Set up Kind cluster
-      uses: helm/kind-action@v1
-      with:
-        version: v0.20.0
-
-    - name: Install CRDs
-      run: |
-        make install
-
-    - name: Run conformance tests
-      run: |
-        ./vcts run --provider=test --output-dir=./conformance-results
-
-    - name: Upload conformance results
+    - name: Upload CLI tools
       uses: actions/upload-artifact@v4
       with:
-        name: conformance-results
-        path: conformance-results/
+        name: cli-tools-${{ matrix.os }}-${{ matrix.arch }}
+        path: dist/*
 
   generate-changelog:
-    needs: prepare
+    name: Generate Changelog
     runs-on: ubuntu-latest
+    needs: prepare
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -234,7 +238,7 @@ jobs:
       run: |
         # Get the previous tag
         PREV_TAG=$(git tag --sort=version:refname | grep -B1 ${{ needs.prepare.outputs.tag }} | head -1)
-        if [ -z "$PREV_TAG" ]; then
+        if [ -z "$PREV_TAG" ] || [ "$PREV_TAG" = "${{ needs.prepare.outputs.tag }}" ]; then
           PREV_TAG=$(git rev-list --max-parents=0 HEAD)
         fi
         
@@ -242,19 +246,28 @@ jobs:
         cat > CHANGELOG.md << EOF
         # Changelog for ${{ needs.prepare.outputs.tag }}
         
-        ## Changes since ${PREV_TAG}
+        ## What's Changed
         
-        $(git log --pretty=format:"- %s (%h)" ${PREV_TAG}..${{ needs.prepare.outputs.tag }})
+        $(git log --pretty=format:"- %s (%h)" ${PREV_TAG}..${{ needs.prepare.outputs.tag }} | head -20)
         
-        ## Images
+        ## Container Images
         
-        - Manager: ${{ fromJson(needs.prepare.outputs.images).manager }}
-        - Provider Libvirt: ${{ fromJson(needs.prepare.outputs.images).provider-libvirt }}
-        - Provider vSphere: ${{ fromJson(needs.prepare.outputs.images).provider-vsphere }}
+        - Manager: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}:${{ needs.prepare.outputs.tag }}\`
+        - Provider Libvirt: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/provider-libvirt:${{ needs.prepare.outputs.tag }}\`
+        - Provider vSphere: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/provider-vsphere:${{ needs.prepare.outputs.tag }}\`
+        
+        ## Installation
+        
+        \`\`\`bash
+        helm repo add virtrigaud https://projectbeskar.github.io/virtrigaud
+        helm install virtrigaud virtrigaud/virtrigaud --version ${{ needs.prepare.outputs.version }}
+        \`\`\`
         
         ## Security
         
-        All images are signed with Cosign and include SBOMs.
+        All images are signed with Cosign and include Software Bill of Materials (SBOMs).
+        
+        **Full Changelog**: https://github.com/projectbeskar/virtrigaud/compare/${PREV_TAG}...${{ needs.prepare.outputs.tag }}
         EOF
 
     - name: Upload changelog
@@ -264,15 +277,16 @@ jobs:
         path: CHANGELOG.md
 
   create-release:
-    needs: [prepare, build-and-push, security-scan, generate-sbom, build-helm-chart, test-conformance, generate-changelog]
+    name: Create GitHub Release
     runs-on: ubuntu-latest
+    needs: [prepare, build-and-push, security-scan, generate-sbom, build-helm-chart, build-cli-tools, generate-changelog]
     steps:
     - name: Download all artifacts
       uses: actions/download-artifact@v4
 
     - name: Create checksums
       run: |
-        find . -name "*.tgz" -o -name "*.spdx.json" | xargs sha256sum > checksums.txt
+        find . -name "*.tgz" -o -name "*.spdx.json" -o -name "vrtg-*" -o -name "vcts-*" -o -name "virtrigaud-loadgen-*" | xargs sha256sum > checksums.txt
 
     - name: Create GitHub Release
       uses: softprops/action-gh-release@v1
@@ -283,19 +297,22 @@ jobs:
         files: |
           helm-chart/*.tgz
           sbom-*/*.spdx.json
-          conformance-results/*
+          cli-tools-*/*
           checksums.txt
         prerelease: ${{ contains(needs.prepare.outputs.tag, '-') }}
 
   update-helm-repo:
-    needs: [create-release]
+    name: Update Helm Repository
     runs-on: ubuntu-latest
+    needs: [create-release]
+    if: github.repository == 'projectbeskar/virtrigaud'
     steps:
     - name: Checkout gh-pages
       uses: actions/checkout@v4
       with:
         ref: gh-pages
         path: gh-pages
+        token: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Download helm chart
       uses: actions/download-artifact@v4
@@ -308,8 +325,8 @@ jobs:
         cd gh-pages
         cp ../charts/*.tgz ./
         helm repo index . --url https://projectbeskar.github.io/virtrigaud
-        git config user.name "GitHub Actions"
-        git config user.email "actions@github.com"
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
         git add .
-        git commit -m "Update Helm chart for ${{ needs.prepare.outputs.tag }}"
+        git commit -m "Release Helm chart ${{ needs.prepare.outputs.tag }}"
         git push

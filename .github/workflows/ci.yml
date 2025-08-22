@@ -1,0 +1,351 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+env:
+  GO_VERSION: '1.21'
+  REGISTRY: ghcr.io
+  IMAGE_NAME_PREFIX: projectbeskar/virtrigaud
+
+permissions:
+  contents: read
+  security-events: write
+  packages: read
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Cache Go modules
+      uses: actions/cache@v3
+      with:
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Verify dependencies
+      run: go mod verify
+
+    - name: Run go vet
+      run: go vet ./...
+
+    - name: Run tests
+      run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.out
+        flags: unittests
+        name: codecov-umbrella
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Run golangci-lint
+      uses: golangci/golangci-lint-action@v3
+      with:
+        version: latest
+        args: --timeout=5m
+
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Run Gosec Security Scanner
+      uses: securecodewarrior/github-action-gosec@master
+      with:
+        args: '-fmt sarif -out gosec.sarif ./...'
+
+    - name: Upload SARIF file
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: gosec.sarif
+
+    - name: Run Trivy vulnerability scanner in repo mode
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+
+    - name: Upload Trivy scan results to GitHub Security tab
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+  generate:
+    name: Verify Generated Files
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Install controller-gen
+      run: go install sigs.k8s.io/controller-tools/cmd/controller-gen@latest
+
+    - name: Install protoc
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y protobuf-compiler
+
+    - name: Install protoc plugins
+      run: |
+        go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+        go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+
+    - name: Generate code
+      run: make generate
+
+    - name: Generate manifests
+      run: make manifests
+
+    - name: Generate protobuf
+      run: make proto
+
+    - name: Verify no changes
+      run: |
+        git diff --exit-code || (echo "Generated files are out of sync. Please run 'make generate && make manifests && make proto' and commit the changes." && exit 1)
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    needs: [test, lint]
+    strategy:
+      matrix:
+        component: [manager, provider-libvirt, provider-vsphere]
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Build binary
+      run: |
+        case "${{ matrix.component }}" in
+          manager)
+            go build -o bin/manager ./cmd/manager
+            ;;
+          provider-libvirt)
+            go build -o bin/provider-libvirt ./cmd/provider-libvirt
+            ;;
+          provider-vsphere)
+            go build -o bin/provider-vsphere ./cmd/provider-vsphere
+            ;;
+        esac
+
+    - name: Upload binary
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.component }}-binary
+        path: bin/${{ matrix.component }}*
+
+  build-tools:
+    name: Build Tools
+    runs-on: ubuntu-latest
+    needs: [test, lint]
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Build CLI tools
+      run: |
+        go build -o bin/vrtg ./cmd/vrtg
+        go build -o bin/vcts ./cmd/vcts
+        go build -o bin/virtrigaud-loadgen ./cmd/virtrigaud-loadgen
+
+    - name: Upload tools
+      uses: actions/upload-artifact@v4
+      with:
+        name: cli-tools
+        path: bin/*
+
+  build-images:
+    name: Build Container Images
+    runs-on: ubuntu-latest
+    needs: [test, lint, security]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    strategy:
+      matrix:
+        component: [manager, provider-libvirt, provider-vsphere]
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/${{ matrix.component }}
+        tags: |
+          type=ref,event=branch
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+
+    - name: Build and push development image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./build/Dockerfile.${{ matrix.component }}
+        platforms: linux/amd64
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  helm:
+    name: Validate Helm Charts
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up Helm
+      uses: azure/setup-helm@v3
+      with:
+        version: '3.12.0'
+
+    - name: Validate Helm charts
+      run: |
+        helm lint charts/virtrigaud
+        helm template virtrigaud charts/virtrigaud --values charts/virtrigaud/values.yaml > /tmp/rendered.yaml
+        
+    - name: Validate rendered manifests
+      run: |
+        # Install kubeval for manifest validation
+        curl -L https://github.com/instrumenta/kubeval/releases/latest/download/kubeval-linux-amd64.tar.gz | tar xz
+        sudo mv kubeval /usr/local/bin
+        
+        # Validate the rendered manifests
+        kubeval /tmp/rendered.yaml
+
+  conformance:
+    name: Conformance Tests
+    runs-on: ubuntu-latest
+    needs: [build-tools]
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Download CLI tools
+      uses: actions/download-artifact@v4
+      with:
+        name: cli-tools
+        path: bin/
+
+    - name: Make tools executable
+      run: chmod +x bin/*
+
+    - name: Set up Kind cluster
+      uses: helm/kind-action@v1
+      with:
+        version: v0.20.0
+        cluster_name: virtrigaud-test
+
+    - name: Install CRDs
+      run: make install
+
+    - name: Validate conformance specs
+      run: ./bin/vcts validate test/conformance/specs/
+
+    - name: Upload conformance results
+      uses: actions/upload-artifact@v4
+      with:
+        name: conformance-validation
+        path: test/conformance/specs/
+
+  integration:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: [build]
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Set up Kind cluster
+      uses: helm/kind-action@v1
+      with:
+        version: v0.20.0
+        cluster_name: virtrigaud-integration
+
+    - name: Install CRDs
+      run: make install
+
+    - name: Run integration tests
+      run: go test -v ./test/integration/... -timeout=10m
+
+    - name: Upload test results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: integration-test-results
+        path: test/integration/results/

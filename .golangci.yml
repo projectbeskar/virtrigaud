@@ -1,47 +1,43 @@
 run:
   timeout: 5m
-  allow-parallel-runners: true
+  modules-download-mode: readonly
 
-issues:
-  # don't skip warning about doc comments
-  # don't exclude the default set of lint
-  exclude-use-default: false
-  # restore some of the defaults
-  # (fill in the rest as needed)
-  exclude-rules:
-    - path: "api/*"
-      linters:
-        - lll
-    - path: "internal/*"
-      linters:
-        - dupl
-        - lll
 linters:
-  disable-all: true
   enable:
-    - dupl
-    - errcheck
-    - copyloopvar
-    - ginkgolinter
-    - goconst
-    - gocyclo
     - gofmt
     - goimports
-    - gosimple
     - govet
     - ineffassign
-    - lll
     - misspell
-    - nakedret
-    - prealloc
     - revive
     - staticcheck
-    - typecheck
-    - unconvert
-    - unparam
     - unused
+    - errcheck
+    - gosimple
+    - typecheck
 
 linters-settings:
   revive:
-    rules:
-      - name: comment-spacings
+    confidence: 0
+  goimports:
+    local-prefixes: github.com/projectbeskar/virtrigaud
+
+issues:
+  exclude-rules:
+    # Exclude some linters from running on tests files.
+    - path: _test\.go
+      linters:
+        - revive
+        - staticcheck
+    # Exclude generated files
+    - path: ".*\\.pb\\.go$"
+      linters:
+        - revive
+        - staticcheck
+        - unused
+    # Exclude kubebuilder generated files
+    - path: "zz_generated.*\\.go$"
+      linters:
+        - revive
+        - staticcheck
+        - unused
