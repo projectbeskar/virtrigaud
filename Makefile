@@ -46,23 +46,31 @@ help: ## Display this help.
 
 .PHONY: manifests
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
-	$(CONTROLLER_GEN) rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+	$(CONTROLLER_GEN) rbac:roleName=manager-role crd webhook paths="./api/..." paths="./internal/controller/..." output:crd:artifacts:config=config/crd/bases
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
-	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt" paths="./..."
+	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt" paths="./api/..."
 
 .PHONY: fmt
 fmt: ## Run go fmt against code.
-	go fmt ./...
+	@for dir in $$(find . -name "*.go" -not -path "./internal/providers/libvirt/*" -not -path "./cmd/provider-libvirt/*" -not -path "./test/integration/*" -exec dirname {} \; | sort -u); do \
+		echo "Formatting $$dir"; \
+		go fmt $$dir; \
+	done
 
 .PHONY: vet
 vet: ## Run go vet against code.
-	go vet ./...
+	@for dir in $$(find . -name "*.go" -not -path "./internal/providers/libvirt/*" -not -path "./cmd/provider-libvirt/*" -not -path "./test/integration/*" -exec dirname {} \; | sort -u); do \
+		echo "Vetting $$dir"; \
+		go vet $$dir || exit 1; \
+	done
 
 .PHONY: test
 test: manifests generate fmt vet setup-envtest ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
+	@echo "Running tests (excluding libvirt packages)..."
+	@TEST_DIRS=$$(find . -name "*_test.go" -not -path "./internal/providers/libvirt/*" -not -path "./cmd/provider-libvirt/*" -not -path "./test/e2e/*" -not -path "./test/integration/*" -exec dirname {} \; | sort -u | tr '\n' ' '); \
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$TEST_DIRS -coverprofile cover.out
 
 # TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
 # The default setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.

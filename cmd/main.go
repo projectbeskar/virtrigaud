@@ -39,7 +39,6 @@ import (
 
 	infravirtrigaudiov1alpha1 "github.com/projectbeskar/virtrigaud/api/v1alpha1"
 	"github.com/projectbeskar/virtrigaud/internal/controller"
-	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt"
 	"github.com/projectbeskar/virtrigaud/internal/providers/registry"
 	"github.com/projectbeskar/virtrigaud/internal/providers/vsphere"
 	"github.com/projectbeskar/virtrigaud/internal/runtime/remote"
@@ -211,7 +210,8 @@ func main() {
 
 	// Register provider factories
 	providerRegistry.Register("vsphere", vsphere.Factory(mgr.GetClient()))
-	providerRegistry.Register("libvirt", libvirt.Factory(mgr.GetClient()))
+	// Note: libvirt provider registration removed to avoid CGO dependencies in CI
+	// Libvirt VMs should use remote provider runtime mode
 
 	setupLog.Info("Provider registry initialized", "supportedTypes", providerRegistry.ListSupportedTypes())
 
