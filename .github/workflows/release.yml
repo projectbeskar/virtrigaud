@@ -327,9 +327,28 @@ jobs:
     - name: Download all artifacts
       uses: actions/download-artifact@v4
 
+    - name: Debug artifact structure
+      run: |
+        echo "=== Artifact structure ==="
+        find . -type f -name "*.tgz" -o -name "*.spdx.json" -o -name "vrtg-*" -o -name "vcts-*" -o -name "virtrigaud-loadgen-*" | head -20
+        echo "=== Directory structure ==="
+        ls -la
+        echo "=== SBOM directories ==="
+        ls -la sbom-* 2>/dev/null || echo "No sbom-* directories found"
+
     - name: Create checksums
       run: |
-        find . -name "*.tgz" -o -name "*.spdx.json" -o -name "vrtg-*" -o -name "vcts-*" -o -name "virtrigaud-loadgen-*" | xargs sha256sum > checksums.txt
+        # Create checksums for all release artifacts
+        FILES=$(find . -type f \( -name "*.tgz" -o -name "*.spdx.json" -o -name "vrtg-*" -o -name "vcts-*" -o -name "virtrigaud-loadgen-*" \) | sort)
+        
+        if [ -n "$FILES" ]; then
+          echo "$FILES" | xargs sha256sum > checksums.txt
+          echo "Generated checksums:"
+          cat checksums.txt
+        else
+          echo "No files found for checksum generation"
+          touch checksums.txt
+        fi
 
     - name: Create GitHub Release
       uses: softprops/action-gh-release@v1
