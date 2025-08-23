@@ -41,3 +41,44 @@ issues:
         - revive
         - staticcheck
         - unused
+    # Exclude libvirt provider (requires C dependencies)
+    - path: "internal/providers/libvirt/.*"
+      linters:
+        - typecheck
+        - gosimple
+        - unused
+        - staticcheck
+        - ineffassign
+        - govet
+        - errcheck
+        - revive
+        - gofmt
+        - goimports
+        - misspell
+    - path: "cmd/provider-libvirt/.*"
+      linters:
+        - typecheck
+        - gosimple
+        - unused
+        - staticcheck
+        - ineffassign
+        - govet
+        - errcheck
+        - revive
+        - gofmt
+        - goimports
+        - misspell
+    # Exclude integration tests (may have libvirt dependencies)
+    - path: "test/integration/.*"
+      linters:
+        - typecheck
+        - gosimple
+        - unused
+        - staticcheck
+        - ineffassign
+        - govet
+        - errcheck
+        - revive
+        - gofmt
+        - goimports
+        - misspell
