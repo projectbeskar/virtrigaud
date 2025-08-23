@@ -1,12 +1,21 @@
-# Build the provider binary
-FROM golang:1.23 as builder
+# Build stage with CGO support for libvirt
+FROM golang:1.23-bookworm AS builder
 ARG TARGETOS
 ARG TARGETARCH
 
+# Install libvirt development libraries
+RUN apt-get update && apt-get install -y \
+    libvirt-dev \
+    pkg-config \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /workspace
+
 # Copy the Go Modules manifests
 COPY go.mod go.mod
 COPY go.sum go.sum
+
 # cache deps before building and copying source so that we don't need to re-download as much
 # and so that source changes don't invalidate our downloaded layer
 RUN go mod download
@@ -17,13 +26,26 @@ COPY api/ api/
 COPY internal/ internal/
 COPY proto/ proto/
 
-# Build
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o provider cmd/provider-libvirt/main.go
+# Build the provider binary with CGO enabled
+RUN CGO_ENABLED=1 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o provider cmd/provider-libvirt/main.go
 
-# Use distroless as minimal base image to package the provider binary
-FROM gcr.io/distroless/static:nonroot
+# Runtime stage
+FROM debian:bookworm-slim
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    libvirt0 \
+    libxml2 \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user
+RUN groupadd -r virtrigaud && useradd -r -g virtrigaud virtrigaud
+
 WORKDIR /
-COPY --from=builder /workspace/provider .
-USER 65532:65532
+COPY --from=builder /workspace/provider /usr/local/bin/provider-libvirt
 
-ENTRYPOINT ["/provider"]
+# Switch to non-root user
+USER virtrigaud
+
+ENTRYPOINT ["/usr/local/bin/provider-libvirt"]
