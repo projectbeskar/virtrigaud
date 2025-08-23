@@ -77,10 +77,9 @@ jobs:
         go-version: ${{ env.GO_VERSION }}
 
     - name: Run golangci-lint
-      uses: golangci/golangci-lint-action@v3
-      with:
-        version: latest
-        args: --timeout=5m
+      run: |
+        # Use the Makefile target which respects our .golangci.yml configuration
+        make lint
 
   security:
     name: Security Scan
