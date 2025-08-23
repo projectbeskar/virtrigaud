@@ -116,6 +116,16 @@ ca.crt: {{ $ca.Cert | b64enc }}
 {{- end }}
 
 {{/*
+Generate CA certificate for webhook validation
+*/}}
+{{- define "virtrigaud.webhookCaCert" -}}
+{{- if eq .Values.webhooks.certificates.source "self-signed" }}
+{{- $ca := genCA "virtrigaud-ca" 3650 }}
+{{- $ca.Cert | b64enc }}
+{{- end }}
+{{- end }}
+
+{{/*
 Generate certificates for provider gRPC
 */}}
 {{- define "virtrigaud.providerCerts" -}}

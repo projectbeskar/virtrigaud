@@ -53,7 +53,7 @@ webhooks:
       namespace: {{ .Release.Namespace }}
       path: /validate-infra-virtrigaud-io-v1alpha1-virtualmachine
     {{- if eq .Values.webhooks.certificates.source "self-signed" }}
-    caBundle: {{ include "virtrigaud.webhookCerts" . | fromYaml | get "ca.crt" }}
+    caBundle: {{ include "virtrigaud.webhookCaCert" . }}
     {{- end }}
   failurePolicy: {{ .Values.webhooks.validating.failurePolicy }}
   name: vvirtualmachine.kb.io
@@ -78,7 +78,7 @@ webhooks:
       namespace: {{ .Release.Namespace }}
       path: /validate-infra-virtrigaud-io-v1alpha1-vmclass
     {{- if eq .Values.webhooks.certificates.source "self-signed" }}
-    caBundle: {{ include "virtrigaud.webhookCerts" . | fromYaml | get "ca.crt" }}
+    caBundle: {{ include "virtrigaud.webhookCaCert" . }}
     {{- end }}
   failurePolicy: {{ .Values.webhooks.validating.failurePolicy }}
   name: vvmclass.kb.io
@@ -103,7 +103,7 @@ webhooks:
       namespace: {{ .Release.Namespace }}
       path: /validate-infra-virtrigaud-io-v1alpha1-vmsnapshot
     {{- if eq .Values.webhooks.certificates.source "self-signed" }}
-    caBundle: {{ include "virtrigaud.webhookCerts" . | fromYaml | get "ca.crt" }}
+    caBundle: {{ include "virtrigaud.webhookCaCert" . }}
     {{- end }}
   failurePolicy: {{ .Values.webhooks.validating.failurePolicy }}
   name: vvmsnapshot.kb.io
@@ -143,7 +143,7 @@ webhooks:
       namespace: {{ .Release.Namespace }}
       path: /mutate-infra-virtrigaud-io-v1alpha1-virtualmachine
     {{- if eq .Values.webhooks.certificates.source "self-signed" }}
-    caBundle: {{ include "virtrigaud.webhookCerts" . | fromYaml | get "ca.crt" }}
+    caBundle: {{ include "virtrigaud.webhookCaCert" . }}
     {{- end }}
   failurePolicy: {{ .Values.webhooks.mutating.failurePolicy }}
   name: mvirtualmachine.kb.io
@@ -168,7 +168,7 @@ webhooks:
       namespace: {{ .Release.Namespace }}
       path: /mutate-infra-virtrigaud-io-v1alpha1-vmset
     {{- if eq .Values.webhooks.certificates.source "self-signed" }}
-    caBundle: {{ include "virtrigaud.webhookCerts" . | fromYaml | get "ca.crt" }}
+    caBundle: {{ include "virtrigaud.webhookCaCert" . }}
     {{- end }}
   failurePolicy: {{ .Values.webhooks.mutating.failurePolicy }}
   name: mvmset.kb.io

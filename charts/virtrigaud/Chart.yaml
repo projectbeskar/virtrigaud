@@ -21,12 +21,12 @@ keywords:
 annotations:
   category: Infrastructure
   licenses: Apache-2.0
-dependencies:
-  - name: provider-libvirt
-    version: 0.1.0
-    condition: providers.libvirt.enabled
-    repository: file://./charts/provider-libvirt
-  - name: provider-vsphere
-    version: 0.1.0  
-    condition: providers.vsphere.enabled
-    repository: file://./charts/provider-vsphere
+# dependencies:
+#   - name: provider-libvirt
+#     version: 0.1.0
+#     condition: providers.libvirt.enabled
+#     repository: file://./charts/provider-libvirt
+#   - name: provider-vsphere
+#     version: 0.1.0  
+#     condition: providers.vsphere.enabled
+#     repository: file://./charts/provider-vsphere
