@@ -14,7 +14,7 @@ env:
 permissions:
   contents: read
   security-events: write
-  
+  packages: write
 
 jobs:
   test:
