@@ -52,8 +52,10 @@ jobs:
 
     - name: Run tests (excluding libvirt)
       run: |
-        TEST_DIRS=$(find . -name "*_test.go" -not -path "./internal/providers/libvirt/*" -not -path "./cmd/provider-libvirt/*" -not -path "./test/e2e/*" -not -path "./test/integration/*" -exec dirname {} \; | sort -u | tr '\n' ' ')
-        go test -race -coverprofile=coverage.out -covermode=atomic $TEST_DIRS
+        # Use the Makefile target which properly sets up ENVTEST environment
+        make test
+        # The Makefile generates coverage in cover.out, rename it for codecov
+        mv cover.out coverage.out
 
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v3
