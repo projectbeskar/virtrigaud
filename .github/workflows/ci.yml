@@ -76,6 +76,11 @@ jobs:
       with:
         go-version: ${{ env.GO_VERSION }}
 
+    - name: Install libvirt dependencies for Go module resolution
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libvirt-dev pkg-config
+
     - name: Run golangci-lint
       run: |
         # Use the Makefile target which respects our .golangci.yml configuration
