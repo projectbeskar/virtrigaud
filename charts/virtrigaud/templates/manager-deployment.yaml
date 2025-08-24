@@ -36,7 +36,6 @@ spec:
         command:
         - /manager
         args:
-        - --config=/etc/virtrigaud/config.yaml
         - --metrics-bind-address=0.0.0.0:8080
         - --health-probe-bind-address=0.0.0.0:8081
         - --leader-elect
@@ -84,9 +83,6 @@ spec:
         resources:
           {{- toYaml .Values.manager.resources | nindent 10 }}
         volumeMounts:
-        - name: config
-          mountPath: /etc/virtrigaud
-          readOnly: true
         - name: tmp
           mountPath: /tmp
         {{- if .Values.webhooks.enabled }}
@@ -98,9 +94,6 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
       volumes:
-      - name: config
-        configMap:
-          name: {{ include "virtrigaud.fullname" . }}-config
       - name: tmp
         emptyDir: {}
       {{- if .Values.webhooks.enabled }}
