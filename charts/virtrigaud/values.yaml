@@ -14,8 +14,8 @@ global:
 manager:
   # Image configuration
   image:
-    repository: projectbeskar/virtrigaud
-    tag: "v0.1.0"
+    repository: projectbeskar/virtrigaud/manager
+    tag: "0.1.1"
     pullPolicy: IfNotPresent
 
   # Replica count for manager
@@ -94,7 +94,7 @@ providers:
       replicaCount: 1
       image:
         repository: projectbeskar/virtrigaud/provider-libvirt
-        tag: "v0.1.0"
+        tag: "0.1.1"
       resources:
         limits:
           cpu: 1000m
@@ -112,7 +112,7 @@ providers:
       replicaCount: 1
       image:
         repository: projectbeskar/virtrigaud/provider-vsphere
-        tag: "v0.1.0"
+        tag: "0.1.1"
       resources:
         limits:
           cpu: 1000m
