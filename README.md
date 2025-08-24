@@ -1,4 +1,4 @@
-# virtrigaud
+# VirtRigaud
 
 A Kubernetes operator for managing virtual machines across multiple hypervisors.
 
@@ -48,6 +48,35 @@ Virtrigaud is a Kubernetes operator that enables declarative management of virtu
 
 ## Quick Start
 
+### Installation via Helm (Recommended)
+
+1. **Add the Helm repository**:
+   ```bash
+   helm repo add virtrigaud https://projectbeskar.github.io/virtrigaud
+   helm repo update
+   ```
+
+2. **Install VirtRigaud**:
+   ```bash
+   # Basic installation
+   helm install virtrigaud virtrigaud/virtrigaud -n virtrigaud --create-namespace
+   
+   # With custom values
+   helm install virtrigaud virtrigaud/virtrigaud \
+     -n virtrigaud --create-namespace \
+     --set webhooks.enabled=true \
+     --set providers.vsphere.enabled=true \
+     --set providers.libvirt.enabled=false
+   ```
+
+3. **Verify the installation**:
+   ```bash
+   kubectl get pods -n virtrigaud
+   kubectl get crd | grep virtrigaud
+   ```
+
+### Development Installation
+
 1. **Install the CRDs**:
    ```bash
    make install
@@ -58,7 +87,9 @@ Virtrigaud is a Kubernetes operator that enables declarative management of virtu
    make run
    ```
 
-3. **Create provider and VM resources**:
+### Using VirtRigaud
+
+1. **Create provider and VM resources**:
    ```bash
    # vSphere example
    kubectl apply -f examples/complete-example.yaml
@@ -80,7 +111,7 @@ Virtrigaud is a Kubernetes operator that enables declarative management of virtu
    kubectl apply -f examples/vm-ubuntu-small.yaml
    ```
 
-4. **Monitor VM creation**:
+2. **Monitor VM creation**:
    ```bash
    kubectl get virtualmachine -w
    ```

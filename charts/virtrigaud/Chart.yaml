@@ -2,7 +2,7 @@ apiVersion: v2
 name: virtrigaud
 description: A Kubernetes operator for managing virtual machines across multiple hypervisors
 type: application
-version: 0.1.1
+version: 0.1.2
 appVersion: "v0.1.0"
 home: https://github.com/projectbeskar/virtrigaud
 sources:

@@ -32,7 +32,11 @@ spec:
     app.kubernetes.io/component: manager
 ---
 {{- if .Values.webhooks.validating.enabled }}
+{{- if .Capabilities.APIVersions.Has "admissionregistration.k8s.io/v1" }}
 apiVersion: admissionregistration.k8s.io/v1
+{{- else }}
+apiVersion: admissionregistration.k8s.io/v1beta1
+{{- end }}
 kind: ValidatingAdmissionWebhookConfiguration
 metadata:
   name: {{ include "virtrigaud.fullname" . }}-validating
@@ -122,7 +126,11 @@ webhooks:
 ---
 {{- end }}
 {{- if .Values.webhooks.mutating.enabled }}
+{{- if .Capabilities.APIVersions.Has "admissionregistration.k8s.io/v1" }}
 apiVersion: admissionregistration.k8s.io/v1
+{{- else }}
+apiVersion: admissionregistration.k8s.io/v1beta1
+{{- end }}
 kind: MutatingAdmissionWebhookConfiguration
 metadata:
   name: {{ include "virtrigaud.fullname" . }}-mutating

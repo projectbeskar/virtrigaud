@@ -173,7 +173,7 @@ security:
 # Webhook configuration
 webhooks:
   # Enable admission webhooks
-  enabled: true
+  enabled: false
   
   # Conversion webhook for CRD versioning
   conversion:
