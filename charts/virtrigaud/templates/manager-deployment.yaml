@@ -17,8 +17,7 @@ spec:
       labels:
         {{- include "virtrigaud.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: manager
-      annotations:
-        checksum/config: {{ include (print $.Template.BasePath "/manager-configmap.yaml") . | sha256sum }}
+      annotations: {}
     spec:
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
