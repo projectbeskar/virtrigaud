@@ -28,7 +28,9 @@ RUN mkdir -p /go/bin && \
         proto/provider/v1/provider.proto
 
 # Build the provider binary (no CGO needed for vSphere)
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+ARG TARGETOS
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
     -a -o provider-vsphere cmd/provider-vsphere/main.go
 
 # Runtime stage - use distroless for minimal attack surface

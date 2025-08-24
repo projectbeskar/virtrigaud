@@ -35,7 +35,9 @@ RUN mkdir -p /go/bin && \
         proto/provider/v1/provider.proto
 
 # Build the provider binary
-RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build \
+ARG TARGETOS
+ARG TARGETARCH
+RUN CGO_ENABLED=1 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
     -a -o provider-libvirt cmd/provider-libvirt/main.go
 
 # Runtime stage
