@@ -379,18 +379,19 @@ jobs:
 
     - name: Create gh-pages branch if it doesn't exist
       run: |
-        if [ ! -d "gh-pages" ]; then
+        if [ ! -d "gh-pages" ] || [ ! -f "gh-pages/.git/HEAD" ]; then
           echo "Creating gh-pages branch..."
+          rm -rf gh-pages
           mkdir gh-pages
           cd gh-pages
           git init
-          git remote add origin https://github.com/${{ github.repository }}.git
+          git checkout -b gh-pages
+          git remote add origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           echo "# Helm Repository" > README.md
           git add README.md
           git commit -m "Initialize gh-pages branch"
-          git branch -M gh-pages
           git push -u origin gh-pages
         fi
 
@@ -408,10 +409,27 @@ jobs:
     - name: Update Helm repository
       run: |
         cd gh-pages
+        
+        # Ensure we're on gh-pages branch
+        git checkout gh-pages 2>/dev/null || git checkout -b gh-pages
+        
+        # Copy new chart
         cp ../charts/*.tgz ./
+        
+        # Update index
         helm repo index . --url https://projectbeskar.github.io/virtrigaud
+        
+        # Configure git
         git config user.name "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
-        git add .
-        git commit -m "Release Helm chart ${{ needs.prepare.outputs.tag }}" || echo "No changes to commit"
-        git push
+        
+        # Check if there are changes
+        if git diff --quiet && git diff --cached --quiet; then
+          echo "No changes to commit"
+        else
+          git add .
+          git commit -m "Release Helm chart ${{ needs.prepare.outputs.tag }}"
+          
+          # Set upstream and push
+          git push --set-upstream origin gh-pages
+        fi
