@@ -128,7 +128,7 @@ For detailed instructions, see [QUICKSTART.md](QUICKSTART.md).
 
 ## Supported Providers
 
-- **vSphere**: ✅ Production ready (govmomi-based)
+- **vSphere**: (govmomi-based)
   - VM creation from templates
   - Power management (On/Off/Reboot)
   - Resource configuration (CPU/Memory/Disks)
@@ -136,7 +136,7 @@ For detailed instructions, see [QUICKSTART.md](QUICKSTART.md).
   - Network configuration with portgroups
   - Async task monitoring
   
-- **Libvirt/KVM**: ✅ Production ready (libvirt-go-based)
+- **Libvirt/KVM**: (libvirt-go-based)
   - VM creation from qcow2 images
   - Power management (On/Off/Reboot)  
   - Resource configuration (CPU/Memory/Disks)
@@ -144,8 +144,8 @@ For detailed instructions, see [QUICKSTART.md](QUICKSTART.md).
   - Network configuration with bridges/networks
   - Storage pool and volume management
   
-- **Firecracker**: 📋 Future roadmap
-- **QEMU**: 📋 Future roadmap
+- **Firecracker**: Future roadmap
+- **QEMU**: Future roadmap
 
 ## Development
 

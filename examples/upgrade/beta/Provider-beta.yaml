@@ -1,0 +1,93 @@
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: Provider
+metadata:
+  name: vsphere-prod
+  namespace: default
+  labels:
+    provider: vsphere
+    environment: production
+spec:
+  type: vsphere
+  endpoint: "https://vcenter.example.com/sdk"
+  credentialSecretRef:
+    name: vsphere-credentials
+    namespace: default
+  insecureSkipVerify: false
+  defaults:
+    datastore: vsanDatastore
+    cluster: prod-cluster-01
+    folder: "/Demo"
+    resourcePool: Production-RP
+    network: VM-Network
+  rateLimit:
+    qps: 10
+    burst: 20
+  runtime:
+    mode: InProcess
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.1.0"
+    imagePullPolicy: IfNotPresent
+    imagePullSecrets:
+      - name: ghcr-secret
+    replicas: 1
+    service:
+      port: 9443
+      tls:
+        enabled: true
+        secretRef:
+          name: provider-tls
+        insecureSkipVerify: false
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+    nodeSelector:
+      kubernetes.io/arch: amd64
+    tolerations:
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
+    affinity:
+      nodeAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            preference:
+              matchExpressions:
+                - key: node-role.kubernetes.io/control-plane
+                  operator: Exists
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 65534
+      readOnlyRootFilesystem: true
+    env:
+      - name: LOG_LEVEL
+        value: "info"
+      - name: METRICS_PORT
+        value: "8080"
+    livenessProbe:
+      httpGet:
+        path: /healthz
+        port: 8080
+        scheme: HTTP
+      initialDelaySeconds: 30
+      periodSeconds: 10
+    readinessProbe:
+      httpGet:
+        path: /ready
+        port: 8080
+        scheme: HTTP
+      initialDelaySeconds: 5
+      periodSeconds: 5
+  healthCheck:
+    enabled: true
+    interval: 30s
+    timeout: 10s
+    failureThreshold: 3
+    successThreshold: 1
+  connectionPooling:
+    maxConnections: 10
+    maxIdleConnections: 5
+    connectionTimeout: 30s
+    idleTimeout: 5m

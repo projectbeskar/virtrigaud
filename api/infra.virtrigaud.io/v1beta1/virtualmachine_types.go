@@ -477,3 +477,10 @@ type VirtualMachineList struct {
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []VirtualMachine `json:"items"`
 }
+
+// Hub marks this version as the conversion hub
+func (*VirtualMachine) Hub() {}
+
+func init() {
+	SchemeBuilder.Register(&VirtualMachine{}, &VirtualMachineList{})
+}
