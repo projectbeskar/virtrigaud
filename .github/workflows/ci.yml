@@ -335,8 +335,10 @@ jobs:
     - name: Set up Kind cluster
       uses: helm/kind-action@v1
       with:
-        version: v0.20.0
+        version: v0.24.0
         cluster_name: virtrigaud-test
+        wait: 60s
+        verbosity: 1
 
     - name: Install CRDs
       run: make install
@@ -366,8 +368,10 @@ jobs:
     - name: Set up Kind cluster
       uses: helm/kind-action@v1
       with:
-        version: v0.20.0
+        version: v0.24.0
         cluster_name: virtrigaud-integration
+        wait: 60s
+        verbosity: 1
 
     - name: Install CRDs
       run: make install
