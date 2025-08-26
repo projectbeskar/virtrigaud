@@ -20,6 +20,14 @@ Virtrigaud is a Kubernetes operator that enables declarative management of virtu
 - **Storage Management**: Provider-specific storage handling (datastores vs storage pools)
 - **Finalizer-based Cleanup**: Ensures proper cleanup of external resources
 
+## API Support
+
+**Default API**: v1beta1 - The recommended stable API for all new deployments.
+
+**Legacy API**: v1alpha1 - Served for compatibility but deprecated. See the [upgrade guide](docs/upgrade/) for migration instructions.
+
+All resources support seamless conversion between API versions via webhooks.
+
 ## Architecture
 
 ```

@@ -49,8 +49,249 @@ func createSimpleVMClassBeta() *v1beta1.VMClass {
 	}
 }
 
-// Placeholder fixtures for types not yet implemented
-// These will be completed when conversion implementations are added
+// VMImage fixture creation functions
+func createSimpleVMImageAlpha() *VMImage {
+	return &VMImage{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "infra.virtrigaud.io/v1alpha1",
+			Kind:       "VMImage",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-vmimage-simple",
+			Namespace: "test-ns",
+		},
+		Spec: VMImageSpec{
+			VSphere: &VSphereImageSpec{
+				TemplateName: "ubuntu-template",
+			},
+		},
+	}
+}
+
+func createSimpleVMImageBeta() *v1beta1.VMImage {
+	return &v1beta1.VMImage{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "infra.virtrigaud.io/v1beta1",
+			Kind:       "VMImage",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-vmimage-simple",
+			Namespace: "test-ns",
+		},
+		Spec: v1beta1.VMImageSpec{
+			Source: v1beta1.ImageSource{
+				VSphere: &v1beta1.VSphereImageSource{
+					TemplateName: "ubuntu-template",
+				},
+			},
+		},
+	}
+}
+
+// VMNetworkAttachment fixture creation functions
+func createSimpleVMNetworkAttachmentAlpha() *VMNetworkAttachment {
+	return &VMNetworkAttachment{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "infra.virtrigaud.io/v1alpha1",
+			Kind:       "VMNetworkAttachment",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-vmnetwork-simple",
+			Namespace: "test-ns",
+		},
+		Spec: VMNetworkAttachmentSpec{
+			IPPolicy: "dhcp",
+		},
+	}
+}
+
+func createSimpleVMNetworkAttachmentBeta() *v1beta1.VMNetworkAttachment {
+	return &v1beta1.VMNetworkAttachment{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "infra.virtrigaud.io/v1beta1",
+			Kind:       "VMNetworkAttachment",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-vmnetwork-simple",
+			Namespace: "test-ns",
+		},
+		Spec: v1beta1.VMNetworkAttachmentSpec{
+			IPAllocation: &v1beta1.IPAllocationConfig{
+				Type: v1beta1.IPAllocationTypeDHCP,
+			},
+		},
+	}
+}
+
+// VMSnapshot fixture creation functions
+func createSimpleVMSnapshotAlpha() *VMSnapshot {
+	return &VMSnapshot{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "infra.virtrigaud.io/v1alpha1",
+			Kind:       "VMSnapshot",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-vmsnapshot-simple",
+			Namespace: "test-ns",
+		},
+		Spec: VMSnapshotSpec{
+			VMRef: LocalObjectReference{
+				Name: "test-vm",
+			},
+			NameHint: "snapshot-1",
+		},
+	}
+}
+
+func createSimpleVMSnapshotBeta() *v1beta1.VMSnapshot {
+	return &v1beta1.VMSnapshot{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "infra.virtrigaud.io/v1beta1",
+			Kind:       "VMSnapshot",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-vmsnapshot-simple",
+			Namespace: "test-ns",
+		},
+		Spec: v1beta1.VMSnapshotSpec{
+			VMRef: v1beta1.LocalObjectReference{
+				Name: "test-vm",
+			},
+			SnapshotConfig: &v1beta1.SnapshotConfig{
+				Name: "snapshot-1",
+			},
+		},
+	}
+}
+
+// VMClone fixture creation functions
+func createSimpleVMCloneAlpha() *VMClone {
+	return &VMClone{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "infra.virtrigaud.io/v1alpha1",
+			Kind:       "VMClone",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-vmclone-simple",
+			Namespace: "test-ns",
+		},
+		Spec: VMCloneSpec{
+			SourceRef: LocalObjectReference{
+				Name: "source-vm",
+			},
+			Target: VMCloneTarget{
+				Name: "cloned-vm",
+			},
+		},
+	}
+}
+
+func createSimpleVMCloneBeta() *v1beta1.VMClone {
+	return &v1beta1.VMClone{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "infra.virtrigaud.io/v1beta1",
+			Kind:       "VMClone",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-vmclone-simple",
+			Namespace: "test-ns",
+		},
+		Spec: v1beta1.VMCloneSpec{
+			Source: v1beta1.CloneSource{
+				VMRef: &v1beta1.LocalObjectReference{
+					Name: "source-vm",
+				},
+			},
+			Target: v1beta1.VMCloneTarget{
+				Name: "cloned-vm",
+			},
+		},
+	}
+}
+
+// VMSet fixture creation functions
+func createSimpleVMSetAlpha() *VMSet {
+	return &VMSet{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "infra.virtrigaud.io/v1alpha1",
+			Kind:       "VMSet",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-vmset-simple",
+			Namespace: "test-ns",
+		},
+		Spec: VMSetSpec{
+			Replicas: func() *int32 { r := int32(3); return &r }(),
+			Template: VMSetTemplate{
+				Spec: VirtualMachineSpec{
+					ProviderRef: ObjectRef{Name: "test-provider"},
+					ClassRef:    ObjectRef{Name: "test-class"},
+					ImageRef:    ObjectRef{Name: "test-image"},
+				},
+			},
+		},
+	}
+}
+
+func createSimpleVMSetBeta() *v1beta1.VMSet {
+	return &v1beta1.VMSet{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "infra.virtrigaud.io/v1beta1",
+			Kind:       "VMSet",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-vmset-simple",
+			Namespace: "test-ns",
+		},
+		Spec: v1beta1.VMSetSpec{
+			Replicas: func() *int32 { r := int32(3); return &r }(),
+			Template: v1beta1.VMSetTemplate{
+				Spec: v1beta1.VirtualMachineSpec{
+					ProviderRef: v1beta1.ObjectRef{Name: "test-provider"},
+					ClassRef:    v1beta1.ObjectRef{Name: "test-class"},
+					ImageRef:    v1beta1.ObjectRef{Name: "test-image"},
+				},
+			},
+		},
+	}
+}
+
+// VMPlacementPolicy fixture creation functions
+func createSimpleVMPlacementPolicyAlpha() *VMPlacementPolicy {
+	return &VMPlacementPolicy{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "infra.virtrigaud.io/v1alpha1",
+			Kind:       "VMPlacementPolicy",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-vmplacementpolicy-simple",
+			Namespace: "test-ns",
+		},
+		Spec: VMPlacementPolicySpec{
+			Hard: &PlacementConstraints{
+				Clusters: []string{"cluster1"},
+			},
+		},
+	}
+}
+
+func createSimpleVMPlacementPolicyBeta() *v1beta1.VMPlacementPolicy {
+	return &v1beta1.VMPlacementPolicy{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "infra.virtrigaud.io/v1beta1",
+			Kind:       "VMPlacementPolicy",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-vmplacementpolicy-simple",
+			Namespace: "test-ns",
+		},
+		Spec: v1beta1.VMPlacementPolicySpec{
+			Hard: &v1beta1.PlacementConstraints{
+				Clusters: []string{"cluster1"},
+			},
+		},
+	}
+}
 
 // createSimpleVirtualMachineAlpha creates a simple v1alpha1 VirtualMachine for testing
 func createSimpleVirtualMachineAlpha() *VirtualMachine {
@@ -251,32 +492,128 @@ func TestVMClass_AlphaBetaAlpha_RoundTrip(t *testing.T) {
 	}
 }
 
-// VMImage Tests - Skipped until conversion implementation is available
+// VMImage Tests
 func TestVMImage_AlphaBetaAlpha_RoundTrip(t *testing.T) {
-	t.Skip("VMImage conversion not yet implemented")
+	tests := []struct {
+		name  string
+		alpha *VMImage
+		beta  *v1beta1.VMImage
+	}{
+		{
+			name:  "simple_vmimage",
+			alpha: createSimpleVMImageAlpha(),
+			beta:  createSimpleVMImageBeta(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			roundtrip.RoundTripTest(t, tt.alpha, tt.beta)
+		})
+	}
 }
 
-// VMNetworkAttachment Tests - Skipped until conversion implementation is available
+// VMNetworkAttachment Tests
 func TestVMNetworkAttachment_AlphaBetaAlpha_RoundTrip(t *testing.T) {
-	t.Skip("VMNetworkAttachment conversion not yet implemented")
+	tests := []struct {
+		name  string
+		alpha *VMNetworkAttachment
+		beta  *v1beta1.VMNetworkAttachment
+	}{
+		{
+			name:  "simple_vmnetworkattachment",
+			alpha: createSimpleVMNetworkAttachmentAlpha(),
+			beta:  createSimpleVMNetworkAttachmentBeta(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			roundtrip.RoundTripTest(t, tt.alpha, tt.beta)
+		})
+	}
 }
 
-// VMSnapshot Tests - Skipped until conversion implementation is available
+// VMSnapshot Tests
 func TestVMSnapshot_AlphaBetaAlpha_RoundTrip(t *testing.T) {
-	t.Skip("VMSnapshot conversion not yet implemented")
+	tests := []struct {
+		name  string
+		alpha *VMSnapshot
+		beta  *v1beta1.VMSnapshot
+	}{
+		{
+			name:  "simple_vmsnapshot",
+			alpha: createSimpleVMSnapshotAlpha(),
+			beta:  createSimpleVMSnapshotBeta(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			roundtrip.RoundTripTest(t, tt.alpha, tt.beta)
+		})
+	}
 }
 
-// VMClone Tests - Skipped until conversion implementation is available
+// VMClone Tests
 func TestVMClone_AlphaBetaAlpha_RoundTrip(t *testing.T) {
-	t.Skip("VMClone conversion not yet implemented")
+	tests := []struct {
+		name  string
+		alpha *VMClone
+		beta  *v1beta1.VMClone
+	}{
+		{
+			name:  "simple_vmclone",
+			alpha: createSimpleVMCloneAlpha(),
+			beta:  createSimpleVMCloneBeta(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			roundtrip.RoundTripTest(t, tt.alpha, tt.beta)
+		})
+	}
 }
 
-// VMSet Tests - Skipped until conversion implementation is available
+// VMSet Tests
 func TestVMSet_AlphaBetaAlpha_RoundTrip(t *testing.T) {
-	t.Skip("VMSet conversion not yet implemented")
+	tests := []struct {
+		name  string
+		alpha *VMSet
+		beta  *v1beta1.VMSet
+	}{
+		{
+			name:  "simple_vmset",
+			alpha: createSimpleVMSetAlpha(),
+			beta:  createSimpleVMSetBeta(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			roundtrip.RoundTripTest(t, tt.alpha, tt.beta)
+		})
+	}
 }
 
-// VMPlacementPolicy Tests - Skipped until conversion implementation is available
+// VMPlacementPolicy Tests
 func TestVMPlacementPolicy_AlphaBetaAlpha_RoundTrip(t *testing.T) {
-	t.Skip("VMPlacementPolicy conversion not yet implemented")
+	tests := []struct {
+		name  string
+		alpha *VMPlacementPolicy
+		beta  *v1beta1.VMPlacementPolicy
+	}{
+		{
+			name:  "simple_vmplacementpolicy",
+			alpha: createSimpleVMPlacementPolicyAlpha(),
+			beta:  createSimpleVMPlacementPolicyBeta(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			roundtrip.RoundTripTest(t, tt.alpha, tt.beta)
+		})
+	}
 }

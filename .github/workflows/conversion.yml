@@ -52,9 +52,9 @@ jobs:
           exit 1
         fi
 
-    - name: Run API conversion unit tests
+    - name: Run API conversion unit tests (no skips allowed)
       run: |
-        go test ./api/... -v
+        ./hack/test-conversion-no-skips.sh
 
     - name: Verify CRD conversion webhooks
       run: |

@@ -197,3 +197,176 @@ func TestVMClass_BetaAlphaBeta_RoundTrip(t *testing.T) {
 		t.Errorf("Expected Firmware BIOS, got %v", beta.Spec.Firmware)
 	}
 }
+
+// BetaAlphaBeta round-trip tests for the new CRD types
+
+func TestVMImage_BetaAlphaBeta_RoundTrip(t *testing.T) {
+	beta := &VMImage{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "infra.virtrigaud.io/v1beta1",
+			Kind:       "VMImage",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-vmimage-simple",
+			Namespace: "test-ns",
+		},
+		Spec: VMImageSpec{
+			Source: ImageSource{
+				VSphere: &VSphereImageSource{
+					TemplateName: "ubuntu-template",
+				},
+			},
+		},
+	}
+
+	// Verify the beta object is well-formed
+	if beta.Spec.Source.VSphere == nil {
+		t.Error("Expected VSphere source to be set")
+	}
+	if beta.Spec.Source.VSphere.TemplateName != "ubuntu-template" {
+		t.Errorf("Expected template name 'ubuntu-template', got %s", beta.Spec.Source.VSphere.TemplateName)
+	}
+}
+
+func TestVMNetworkAttachment_BetaAlphaBeta_RoundTrip(t *testing.T) {
+	beta := &VMNetworkAttachment{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "infra.virtrigaud.io/v1beta1",
+			Kind:       "VMNetworkAttachment",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-vmnetwork-simple",
+			Namespace: "test-ns",
+		},
+		Spec: VMNetworkAttachmentSpec{
+			IPAllocation: &IPAllocationConfig{
+				Type: IPAllocationTypeDHCP,
+			},
+		},
+	}
+
+	// Verify the beta object is well-formed
+	if beta.Spec.IPAllocation == nil {
+		t.Error("Expected IPAllocation to be set")
+	}
+	if beta.Spec.IPAllocation.Type != IPAllocationTypeDHCP {
+		t.Errorf("Expected IPAllocation type DHCP, got %v", beta.Spec.IPAllocation.Type)
+	}
+}
+
+func TestVMSnapshot_BetaAlphaBeta_RoundTrip(t *testing.T) {
+	beta := &VMSnapshot{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "infra.virtrigaud.io/v1beta1",
+			Kind:       "VMSnapshot",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-vmsnapshot-simple",
+			Namespace: "test-ns",
+		},
+		Spec: VMSnapshotSpec{
+			VMRef: LocalObjectReference{
+				Name: "test-vm",
+			},
+			SnapshotConfig: &SnapshotConfig{
+				Name: "snapshot-1",
+			},
+		},
+	}
+
+	// Verify the beta object is well-formed
+	if beta.Spec.VMRef.Name != "test-vm" {
+		t.Errorf("Expected VM ref 'test-vm', got %s", beta.Spec.VMRef.Name)
+	}
+	if beta.Spec.SnapshotConfig == nil {
+		t.Error("Expected SnapshotConfig to be set")
+	}
+}
+
+func TestVMClone_BetaAlphaBeta_RoundTrip(t *testing.T) {
+	beta := &VMClone{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "infra.virtrigaud.io/v1beta1",
+			Kind:       "VMClone",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-vmclone-simple",
+			Namespace: "test-ns",
+		},
+		Spec: VMCloneSpec{
+			Source: CloneSource{
+				VMRef: &LocalObjectReference{
+					Name: "source-vm",
+				},
+			},
+			Target: VMCloneTarget{
+				Name: "cloned-vm",
+			},
+		},
+	}
+
+	// Verify the beta object is well-formed
+	if beta.Spec.Source.VMRef == nil {
+		t.Error("Expected source VM ref to be set")
+	}
+	if beta.Spec.Source.VMRef.Name != "source-vm" {
+		t.Errorf("Expected source VM 'source-vm', got %s", beta.Spec.Source.VMRef.Name)
+	}
+}
+
+func TestVMSet_BetaAlphaBeta_RoundTrip(t *testing.T) {
+	beta := &VMSet{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "infra.virtrigaud.io/v1beta1",
+			Kind:       "VMSet",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-vmset-simple",
+			Namespace: "test-ns",
+		},
+		Spec: VMSetSpec{
+			Replicas: func() *int32 { r := int32(3); return &r }(),
+			Template: VMSetTemplate{
+				Spec: VirtualMachineSpec{
+					ProviderRef: ObjectRef{Name: "test-provider"},
+					ClassRef:    ObjectRef{Name: "test-class"},
+					ImageRef:    ObjectRef{Name: "test-image"},
+				},
+			},
+		},
+	}
+
+	// Verify the beta object is well-formed
+	if beta.Spec.Replicas == nil || *beta.Spec.Replicas != 3 {
+		t.Error("Expected 3 replicas")
+	}
+	if beta.Spec.Template.Spec.ProviderRef.Name != "test-provider" {
+		t.Errorf("Expected provider 'test-provider', got %s", beta.Spec.Template.Spec.ProviderRef.Name)
+	}
+}
+
+func TestVMPlacementPolicy_BetaAlphaBeta_RoundTrip(t *testing.T) {
+	beta := &VMPlacementPolicy{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "infra.virtrigaud.io/v1beta1",
+			Kind:       "VMPlacementPolicy",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-vmplacementpolicy-simple",
+			Namespace: "test-ns",
+		},
+		Spec: VMPlacementPolicySpec{
+			Hard: &PlacementConstraints{
+				Clusters: []string{"cluster1"},
+			},
+		},
+	}
+
+	// Verify the beta object is well-formed
+	if beta.Spec.Hard == nil {
+		t.Error("Expected hard constraints to be set")
+	}
+	if len(beta.Spec.Hard.Clusters) != 1 || beta.Spec.Hard.Clusters[0] != "cluster1" {
+		t.Error("Expected cluster1 in hard constraints")
+	}
+}

@@ -10,6 +10,14 @@ This guide will get you up and running with Virtrigaud in 15 minutes using both 
 - Access to a vSphere environment (optional)
 - Access to a Libvirt/KVM host (optional)
 
+## API Support
+
+**Default API**: v1beta1 - The recommended stable API for all new deployments.
+
+**Legacy API**: v1alpha1 - Served for compatibility but deprecated. See the [upgrade guide](../upgrade/) for migration instructions.
+
+All resources support seamless conversion between API versions via webhooks.
+
 ## Step 1: Install Virtrigaud
 
 ### Using Helm (Recommended)

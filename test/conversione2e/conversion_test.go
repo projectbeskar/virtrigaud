@@ -79,6 +79,31 @@ func TestConversionWebhook(t *testing.T) {
 	t.Run("VMClass_AlphaToBeta", func(t *testing.T) {
 		testVMClassAlphaToBeta(t, ctx, k8sClient)
 	})
+
+	// Test new CRD types
+	t.Run("VMImage_AlphaToBeta", func(t *testing.T) {
+		testVMImageAlphaToBeta(t, ctx, k8sClient)
+	})
+
+	t.Run("VMNetworkAttachment_AlphaToBeta", func(t *testing.T) {
+		testVMNetworkAttachmentAlphaToBeta(t, ctx, k8sClient)
+	})
+
+	t.Run("VMSnapshot_AlphaToBeta", func(t *testing.T) {
+		testVMSnapshotAlphaToBeta(t, ctx, k8sClient)
+	})
+
+	t.Run("VMClone_AlphaToBeta", func(t *testing.T) {
+		testVMCloneAlphaToBeta(t, ctx, k8sClient)
+	})
+
+	t.Run("VMSet_AlphaToBeta", func(t *testing.T) {
+		testVMSetAlphaToBeta(t, ctx, k8sClient)
+	})
+
+	t.Run("VMPlacementPolicy_AlphaToBeta", func(t *testing.T) {
+		testVMPlacementPolicyAlphaToBeta(t, ctx, k8sClient)
+	})
 }
 
 func testVMAlphaToBeta(t *testing.T, ctx context.Context, k8sClient client.Client) {
@@ -312,5 +337,265 @@ func testVMClassAlphaToBeta(t *testing.T, ctx context.Context, k8sClient client.
 	expectedMemory := betaVMClass.Spec.Memory.String()
 	if expectedMemory != "2Gi" {
 		t.Errorf("Expected Memory to be 2Gi, got %s", expectedMemory)
+	}
+}
+
+func testVMImageAlphaToBeta(t *testing.T, ctx context.Context, k8sClient client.Client) {
+	// Create v1alpha1 VMImage
+	alphaVMImage := &v1alpha1.VMImage{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-vmimage-alpha-to-beta",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.VMImageSpec{
+			VSphere: &v1alpha1.VSphereImageSpec{
+				TemplateName: "ubuntu-template",
+			},
+		},
+	}
+
+	// Create the alpha VMImage
+	if err := k8sClient.Create(ctx, alphaVMImage); err != nil {
+		t.Fatalf("Failed to create alpha VMImage: %v", err)
+	}
+	defer func() {
+		if err := k8sClient.Delete(ctx, alphaVMImage); err != nil {
+			t.Errorf("Failed to delete VMImage: %v", err)
+		}
+	}()
+
+	// Wait a bit for the object to be processed
+	time.Sleep(200 * time.Millisecond)
+
+	// Read back as v1beta1
+	betaVMImage := &v1beta1.VMImage{}
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(alphaVMImage), betaVMImage); err != nil {
+		t.Fatalf("Failed to read VMImage as v1beta1: %v", err)
+	}
+
+	// Verify basic fields were converted
+	if betaVMImage.Spec.Source.VSphere == nil {
+		t.Error("Expected VSphere source to be set")
+	} else if betaVMImage.Spec.Source.VSphere.TemplateName != "ubuntu-template" {
+		t.Errorf("Expected template name 'ubuntu-template', got %s", betaVMImage.Spec.Source.VSphere.TemplateName)
+	}
+}
+
+func testVMNetworkAttachmentAlphaToBeta(t *testing.T, ctx context.Context, k8sClient client.Client) {
+	// Create v1alpha1 VMNetworkAttachment
+	alphaVMNetwork := &v1alpha1.VMNetworkAttachment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-vmnetwork-alpha-to-beta",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.VMNetworkAttachmentSpec{
+			IPPolicy: "dhcp",
+		},
+	}
+
+	// Create the alpha VMNetworkAttachment
+	if err := k8sClient.Create(ctx, alphaVMNetwork); err != nil {
+		t.Fatalf("Failed to create alpha VMNetworkAttachment: %v", err)
+	}
+	defer func() {
+		if err := k8sClient.Delete(ctx, alphaVMNetwork); err != nil {
+			t.Errorf("Failed to delete VMNetworkAttachment: %v", err)
+		}
+	}()
+
+	// Wait a bit for the object to be processed
+	time.Sleep(200 * time.Millisecond)
+
+	// Read back as v1beta1
+	betaVMNetwork := &v1beta1.VMNetworkAttachment{}
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(alphaVMNetwork), betaVMNetwork); err != nil {
+		t.Fatalf("Failed to read VMNetworkAttachment as v1beta1: %v", err)
+	}
+
+	// Verify basic fields were converted
+	if betaVMNetwork.Spec.IPAllocation == nil {
+		t.Error("Expected IPAllocation to be set")
+	} else if betaVMNetwork.Spec.IPAllocation.Type != v1beta1.IPAllocationTypeDHCP {
+		t.Errorf("Expected IPAllocation type DHCP, got %v", betaVMNetwork.Spec.IPAllocation.Type)
+	}
+}
+
+func testVMSnapshotAlphaToBeta(t *testing.T, ctx context.Context, k8sClient client.Client) {
+	// Create v1alpha1 VMSnapshot
+	alphaVMSnapshot := &v1alpha1.VMSnapshot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-vmsnapshot-alpha-to-beta",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.VMSnapshotSpec{
+			VMRef: v1alpha1.LocalObjectReference{
+				Name: "test-vm",
+			},
+			NameHint: "snapshot-1",
+		},
+	}
+
+	// Create the alpha VMSnapshot
+	if err := k8sClient.Create(ctx, alphaVMSnapshot); err != nil {
+		t.Fatalf("Failed to create alpha VMSnapshot: %v", err)
+	}
+	defer func() {
+		if err := k8sClient.Delete(ctx, alphaVMSnapshot); err != nil {
+			t.Errorf("Failed to delete VMSnapshot: %v", err)
+		}
+	}()
+
+	// Wait a bit for the object to be processed
+	time.Sleep(200 * time.Millisecond)
+
+	// Read back as v1beta1
+	betaVMSnapshot := &v1beta1.VMSnapshot{}
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(alphaVMSnapshot), betaVMSnapshot); err != nil {
+		t.Fatalf("Failed to read VMSnapshot as v1beta1: %v", err)
+	}
+
+	// Verify basic fields were converted
+	if betaVMSnapshot.Spec.VMRef.Name != "test-vm" {
+		t.Errorf("Expected VM ref 'test-vm', got %s", betaVMSnapshot.Spec.VMRef.Name)
+	}
+	if betaVMSnapshot.Spec.SnapshotConfig == nil {
+		t.Error("Expected SnapshotConfig to be set")
+	} else if betaVMSnapshot.Spec.SnapshotConfig.Name != "snapshot-1" {
+		t.Errorf("Expected snapshot name 'snapshot-1', got %s", betaVMSnapshot.Spec.SnapshotConfig.Name)
+	}
+}
+
+func testVMCloneAlphaToBeta(t *testing.T, ctx context.Context, k8sClient client.Client) {
+	// Create v1alpha1 VMClone
+	alphaVMClone := &v1alpha1.VMClone{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-vmclone-alpha-to-beta",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.VMCloneSpec{
+			SourceRef: v1alpha1.LocalObjectReference{
+				Name: "source-vm",
+			},
+			Target: v1alpha1.VMCloneTarget{
+				Name: "cloned-vm",
+			},
+		},
+	}
+
+	// Create the alpha VMClone
+	if err := k8sClient.Create(ctx, alphaVMClone); err != nil {
+		t.Fatalf("Failed to create alpha VMClone: %v", err)
+	}
+	defer func() {
+		if err := k8sClient.Delete(ctx, alphaVMClone); err != nil {
+			t.Errorf("Failed to delete VMClone: %v", err)
+		}
+	}()
+
+	// Wait a bit for the object to be processed
+	time.Sleep(200 * time.Millisecond)
+
+	// Read back as v1beta1
+	betaVMClone := &v1beta1.VMClone{}
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(alphaVMClone), betaVMClone); err != nil {
+		t.Fatalf("Failed to read VMClone as v1beta1: %v", err)
+	}
+
+	// Verify basic fields were converted
+	if betaVMClone.Spec.Source.VMRef == nil {
+		t.Error("Expected source VM ref to be set")
+	} else if betaVMClone.Spec.Source.VMRef.Name != "source-vm" {
+		t.Errorf("Expected source VM 'source-vm', got %s", betaVMClone.Spec.Source.VMRef.Name)
+	}
+	if betaVMClone.Spec.Target.Name != "cloned-vm" {
+		t.Errorf("Expected target name 'cloned-vm', got %s", betaVMClone.Spec.Target.Name)
+	}
+}
+
+func testVMSetAlphaToBeta(t *testing.T, ctx context.Context, k8sClient client.Client) {
+	// Create v1alpha1 VMSet
+	alphaVMSet := &v1alpha1.VMSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-vmset-alpha-to-beta",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.VMSetSpec{
+			Replicas: func() *int32 { r := int32(2); return &r }(),
+			Template: v1alpha1.VMSetTemplate{
+				Spec: v1alpha1.VirtualMachineSpec{
+					ProviderRef: v1alpha1.ObjectRef{Name: "test-provider"},
+					ClassRef:    v1alpha1.ObjectRef{Name: "test-class"},
+					ImageRef:    v1alpha1.ObjectRef{Name: "test-image"},
+				},
+			},
+		},
+	}
+
+	// Create the alpha VMSet
+	if err := k8sClient.Create(ctx, alphaVMSet); err != nil {
+		t.Fatalf("Failed to create alpha VMSet: %v", err)
+	}
+	defer func() {
+		if err := k8sClient.Delete(ctx, alphaVMSet); err != nil {
+			t.Errorf("Failed to delete VMSet: %v", err)
+		}
+	}()
+
+	// Wait a bit for the object to be processed
+	time.Sleep(200 * time.Millisecond)
+
+	// Read back as v1beta1
+	betaVMSet := &v1beta1.VMSet{}
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(alphaVMSet), betaVMSet); err != nil {
+		t.Fatalf("Failed to read VMSet as v1beta1: %v", err)
+	}
+
+	// Verify basic fields were converted
+	if betaVMSet.Spec.Replicas == nil || *betaVMSet.Spec.Replicas != 2 {
+		t.Error("Expected 2 replicas")
+	}
+	if betaVMSet.Spec.Template.Spec.ProviderRef.Name != "test-provider" {
+		t.Errorf("Expected provider 'test-provider', got %s", betaVMSet.Spec.Template.Spec.ProviderRef.Name)
+	}
+}
+
+func testVMPlacementPolicyAlphaToBeta(t *testing.T, ctx context.Context, k8sClient client.Client) {
+	// Create v1alpha1 VMPlacementPolicy
+	alphaVMPlacementPolicy := &v1alpha1.VMPlacementPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-vmplacementpolicy-alpha-to-beta",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.VMPlacementPolicySpec{
+			Hard: &v1alpha1.PlacementConstraints{
+				Clusters: []string{"cluster1"},
+			},
+		},
+	}
+
+	// Create the alpha VMPlacementPolicy
+	if err := k8sClient.Create(ctx, alphaVMPlacementPolicy); err != nil {
+		t.Fatalf("Failed to create alpha VMPlacementPolicy: %v", err)
+	}
+	defer func() {
+		if err := k8sClient.Delete(ctx, alphaVMPlacementPolicy); err != nil {
+			t.Errorf("Failed to delete VMPlacementPolicy: %v", err)
+		}
+	}()
+
+	// Wait a bit for the object to be processed
+	time.Sleep(200 * time.Millisecond)
+
+	// Read back as v1beta1
+	betaVMPlacementPolicy := &v1beta1.VMPlacementPolicy{}
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(alphaVMPlacementPolicy), betaVMPlacementPolicy); err != nil {
+		t.Fatalf("Failed to read VMPlacementPolicy as v1beta1: %v", err)
+	}
+
+	// Verify basic fields were converted
+	if betaVMPlacementPolicy.Spec.Hard == nil {
+		t.Error("Expected hard constraints to be set")
+	} else if len(betaVMPlacementPolicy.Spec.Hard.Clusters) != 1 || betaVMPlacementPolicy.Spec.Hard.Clusters[0] != "cluster1" {
+		t.Error("Expected cluster1 in hard constraints")
 	}
 }
