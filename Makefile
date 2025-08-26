@@ -77,6 +77,18 @@ test: manifests generate fmt vet setup-envtest ## Run tests.
 	@TEST_DIRS=$$(find . -name "*_test.go" -not -path "./internal/providers/libvirt/*" -not -path "./cmd/provider-libvirt/*" -not -path "./test/e2e/*" -not -path "./test/integration/*" -exec dirname {} \; | sort -u | tr '\n' ' '); \
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$TEST_DIRS -coverprofile cover.out
 
+.PHONY: envtest-setup
+envtest-setup: setup-envtest ## Install setup-envtest and export KUBEBUILDER_ASSETS for local runs
+	@echo "To run tests locally with envtest, export:"
+	@echo "export KUBEBUILDER_ASSETS=\"$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)\""
+
+.PHONY: providers-version
+providers-version: ## Print versions for manager and all providers
+	@echo "Manager: $(VERSION)"
+	@echo "Provider libvirt: $(VERSION)"
+	@echo "Provider vSphere: $(VERSION)"
+	@echo "Git SHA: $(GIT_SHA)"
+
 # TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
 # The default setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
 # CertManager is installed by default; skip with:
@@ -109,16 +121,18 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 
 # Protocol buffer definitions
 PROTO_DIR = proto
-PROTO_OUT = internal/rpc
-PROTO_PKGS = $(PROTO_DIR)/provider/v1/provider.proto
 
 .PHONY: proto
-proto: ## Generate gRPC stubs from protocol buffer definitions
-	@mkdir -p $(PROTO_OUT)
-	$(PROTOC) -I $(PROTO_DIR) \
-		--go_out=$(PROTO_OUT) --go_opt=paths=source_relative \
-		--go-grpc_out=$(PROTO_OUT) --go-grpc_opt=paths=source_relative \
-		$(PROTO_PKGS)
+proto: buf ## Generate gRPC stubs from protocol buffer definitions using buf
+	cd $(PROTO_DIR) && $(BUF) generate
+
+.PHONY: proto-lint
+proto-lint: buf ## Lint protocol buffer definitions
+	cd $(PROTO_DIR) && $(BUF) lint
+
+.PHONY: proto-breaking
+proto-breaking: buf ## Check for breaking changes in protocol buffer definitions
+	cd $(PROTO_DIR) && $(BUF) breaking --against '.git#branch=main'
 
 .PHONY: build
 build: manifests generate fmt vet ## Build manager binary.
@@ -132,8 +146,12 @@ build-provider-libvirt: proto ## Build libvirt provider binary (requires CGO)
 build-provider-vsphere: proto ## Build vsphere provider binary
 	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o bin/provider-vsphere ./cmd/provider-vsphere
 
+.PHONY: build-provider-mock
+build-provider-mock: ## Build mock provider binary
+	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o bin/provider-mock ./cmd/provider-mock
+
 .PHONY: build-providers
-build-providers: build-provider-libvirt build-provider-vsphere ## Build all provider binaries
+build-providers: build-provider-libvirt build-provider-vsphere build-provider-mock ## Build all provider binaries
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
@@ -223,7 +241,7 @@ KUSTOMIZE ?= $(LOCALBIN)/kustomize
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
-PROTOC ?= protoc
+BUF ?= $(LOCALBIN)/buf
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.6.0
@@ -233,6 +251,7 @@ ENVTEST_VERSION ?= $(shell go list -m -f "{{ .Version }}" sigs.k8s.io/controller
 #ENVTEST_K8S_VERSION is the version of Kubernetes to use for setting up ENVTEST binaries (i.e. 1.31)
 ENVTEST_K8S_VERSION ?= $(shell go list -m -f "{{ .Version }}" k8s.io/api | awk -F'[v.]' '{printf "1.%d", $$3}')
 GOLANGCI_LINT_VERSION ?= v1.64.8
+BUF_VERSION ?= v1.46.0
 
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.
@@ -261,6 +280,11 @@ $(ENVTEST): $(LOCALBIN)
 golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
 $(GOLANGCI_LINT): $(LOCALBIN)
 	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
+
+.PHONY: buf
+buf: $(BUF) ## Download buf locally if necessary.
+$(BUF): $(LOCALBIN)
+	$(call go-install-tool,$(BUF),github.com/bufbuild/buf/cmd/buf,$(BUF_VERSION))
 
 # go-install-tool will 'go install' any package with custom target and name of binary, if it doesn't exist
 # $1 - target path with name of binary

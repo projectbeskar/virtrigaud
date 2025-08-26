@@ -1,0 +1,42 @@
+version: v1
+name: buf.build/projectbeskar/virtrigaud
+deps:
+  - buf.build/googleapis/googleapis
+breaking:
+  use:
+    - FILE
+  except:
+    # Allow backwards-compatible changes
+    - FIELD_SAME_DEFAULT
+    - FIELD_SAME_JSON_NAME
+    - FIELD_SAME_JSTYPE
+    - FIELD_SAME_LABEL
+    - FIELD_SAME_NAME
+    - FIELD_SAME_ONEOF
+    - FIELD_SAME_TYPE
+    - FIELD_WIRE_COMPATIBLE_TYPE
+    - FIELD_WIRE_JSON_COMPATIBLE_TYPE
+    # Allow adding new optional fields
+    - FIELD_NO_DELETE
+    # Allow adding new enum values
+    - ENUM_VALUE_NO_DELETE
+    # Allow adding new methods to services
+    - SERVICE_NO_DELETE
+    - RPC_NO_DELETE
+lint:
+  use:
+    - STANDARD
+  except:
+    # Allow flexibility in field naming for compatibility
+    - FIELD_LOWER_SNAKE_CASE
+    # Allow flexibility in enum value naming  
+    - ENUM_VALUE_UPPER_SNAKE_CASE
+    # Allow flexibility in service naming for existing APIs
+    - SERVICE_SUFFIX
+    # Allow reusing response types for consistency
+    - RPC_RESPONSE_STANDARD_NAME
+    - RPC_REQUEST_RESPONSE_UNIQUE
+  ignore:
+    # Ignore generated files
+    - "**/*_grpc.pb.go"
+    - "**/*.pb.go"

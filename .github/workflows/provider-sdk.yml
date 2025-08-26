@@ -1,0 +1,219 @@
+name: Provider SDK
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'sdk/**'
+      - 'proto/**'
+      - 'cmd/vrtg-provider/**'
+      - 'cmd/provider-mock/**'
+      - 'internal/providers/mock/**'
+      - 'internal/scaffold/**'
+      - '.github/workflows/provider-sdk.yml'
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'sdk/**'
+      - 'proto/**'
+      - 'cmd/vrtg-provider/**'
+      - 'cmd/provider-mock/**'
+      - 'internal/providers/mock/**'
+      - 'internal/scaffold/**'
+      - '.github/workflows/provider-sdk.yml'
+
+env:
+  GO_VERSION: '1.23'
+
+jobs:
+  proto:
+    name: Protocol Buffer Validation
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Install buf
+      run: go install github.com/bufbuild/buf/cmd/buf@v1.46.0
+
+    - name: Lint proto files
+      run: make proto-lint
+
+    - name: Check for breaking changes
+      run: make proto-breaking
+      if: github.event_name == 'pull_request'
+
+    - name: Generate proto
+      run: make proto
+
+    - name: Verify no uncommitted changes
+      run: |
+        if ! git diff --exit-code; then
+          echo "Generated proto files have uncommitted changes. Please run 'make proto' and commit the changes."
+          exit 1
+        fi
+
+  sdk:
+    name: SDK Tests
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Cache Go modules
+      uses: actions/cache@v3
+      with:
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Test SDK packages
+      run: go test -v -race ./sdk/...
+
+    - name: Test scaffold
+      run: go test -v ./internal/scaffold/...
+
+    - name: Test mock provider
+      run: go test -v ./internal/providers/mock/...
+
+  scaffold-cli:
+    name: Scaffold CLI Tests
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        provider-type: [vsphere, libvirt, firecracker, qemu, generic]
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Build vrtg-provider CLI
+      run: go build -o bin/vrtg-provider ./cmd/vrtg-provider
+
+    - name: Test provider scaffolding
+      run: |
+        mkdir -p /tmp/test-providers
+        cd /tmp/test-providers
+        $GITHUB_WORKSPACE/bin/vrtg-provider init test-${{ matrix.provider-type }} --type ${{ matrix.provider-type }} --output .
+
+    - name: Verify scaffolded project
+      run: |
+        cd /tmp/test-providers/providers/test-${{ matrix.provider-type }}
+        go mod tidy
+        go build .
+        go test ./...
+
+  mock-provider:
+    name: Mock Provider Tests
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Build mock provider
+      run: make build-provider-mock
+
+    - name: Test mock provider binary
+      run: |
+        timeout 5s ./bin/provider-mock || [ $? -eq 124 ]
+        ./bin/provider-mock --version
+
+    - name: Build mock provider Docker image
+      run: |
+        docker build -f cmd/provider-mock/Dockerfile -t provider-mock:test .
+
+  integration:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: [proto, sdk, mock-provider]
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Install VCTS
+      run: go build -o bin/vcts ./cmd/vcts
+
+    - name: Build mock provider
+      run: make build-provider-mock
+
+    - name: Run mock provider in background
+      run: |
+        ./bin/provider-mock &
+        echo $! > provider.pid
+        sleep 2
+
+    - name: Run VCTS core profile against mock provider
+      run: |
+        # TODO: Update when VCTS supports mock provider
+        echo "VCTS integration test placeholder"
+        # ./bin/vcts run --profile core --provider mock --endpoint localhost:9443
+
+    - name: Stop mock provider
+      run: |
+        if [ -f provider.pid ]; then
+          kill $(cat provider.pid) || true
+        fi
+
+  documentation:
+    name: Documentation Generation
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [proto, sdk]
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Install godoc
+      run: go install golang.org/x/tools/cmd/godoc@latest
+
+    - name: Generate SDK documentation
+      run: |
+        mkdir -p docs/sdk
+        echo "# Provider SDK Documentation" > docs/sdk/README.md
+        echo "" >> docs/sdk/README.md
+        echo "Generated on $(date)" >> docs/sdk/README.md
+        echo "" >> docs/sdk/README.md
+        echo "## Packages" >> docs/sdk/README.md
+        echo "" >> docs/sdk/README.md
+        for pkg in $(find sdk -name "*.go" -exec dirname {} \; | sort -u); do
+          echo "- [$pkg](./$pkg/)" >> docs/sdk/README.md
+        done
+
+    - name: Upload documentation artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: sdk-documentation
+        path: docs/sdk/
