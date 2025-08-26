@@ -1,0 +1,650 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.17.2
+  name: vmsnapshots.infra.virtrigaud.io
+spec:
+  conversion:
+    strategy: Webhook
+    webhook:
+      clientConfig:
+        service:
+          name: virtrigaud-webhook
+          namespace: virtrigaud
+          path: /convert
+      conversionReviewVersions:
+      - v1
+  group: infra.virtrigaud.io
+  names:
+    kind: VMSnapshot
+    listKind: VMSnapshotList
+    plural: vmsnapshots
+    shortNames:
+    - vmsnap
+    singular: vmsnapshot
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.vmRef.name
+      name: VM
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.snapshotID
+      name: Snapshot ID
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    - jsonPath: .status.sizeBytes
+      name: Size
+      type: string
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: VMSnapshot is the Schema for the vmsnapshots API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: VMSnapshotSpec defines the desired state of VMSnapshot
+            properties:
+              description:
+                description: Description provides additional context for the snapshot
+                type: string
+              memory:
+                description: Memory indicates whether to include memory state in the
+                  snapshot
+                type: boolean
+              nameHint:
+                description: NameHint suggests a name for the snapshot (provider may
+                  modify)
+                type: string
+              retentionPolicy:
+                description: RetentionPolicy defines how long to keep this snapshot
+                properties:
+                  deleteOnVMDelete:
+                    description: DeleteOnVMDelete indicates whether to delete snapshot
+                      when VM is deleted
+                    type: boolean
+                  maxAge:
+                    description: MaxAge is the maximum age before snapshot should
+                      be deleted
+                    type: string
+                type: object
+              vmRef:
+                description: VMRef references the virtual machine to snapshot
+                properties:
+                  name:
+                    description: Name of the referenced object
+                    type: string
+                required:
+                - name
+                type: object
+            required:
+            - vmRef
+            type: object
+          status:
+            description: VMSnapshotStatus defines the observed state of VMSnapshot
+            properties:
+              conditions:
+                description: Conditions represent the current service state
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              creationTime:
+                description: CreationTime is when the snapshot was created
+                format: date-time
+                type: string
+              message:
+                description: Message provides additional details about the current
+                  state
+                type: string
+              phase:
+                description: Phase represents the current phase of the snapshot
+                enum:
+                - Pending
+                - Creating
+                - Ready
+                - Deleting
+                - Failed
+                type: string
+              sizeBytes:
+                description: SizeBytes is the size of the snapshot in bytes (if available)
+                format: int64
+                type: integer
+              snapshotID:
+                description: SnapshotID is the provider-specific identifier for the
+                  snapshot
+                type: string
+              taskRef:
+                description: TaskRef tracks any ongoing async operations
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: false
+    subresources:
+      status: {}
+  - additionalPrinterColumns:
+    - jsonPath: .spec.vmRef.name
+      name: VM
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.size
+      name: Size
+      type: string
+    - jsonPath: .status.creationTime
+      name: Created
+      type: date
+    - jsonPath: .status.expiryTime
+      name: Expires
+      type: date
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1beta1
+    schema:
+      openAPIV3Schema:
+        description: VMSnapshot is the Schema for the vmsnapshots API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: VMSnapshotSpec defines the desired state of VMSnapshot
+            properties:
+              metadata:
+                description: Metadata contains snapshot metadata
+                properties:
+                  application:
+                    description: Application specifies the application that created
+                      the snapshot
+                    maxLength: 255
+                    type: string
+                  environment:
+                    description: Environment specifies the environment
+                    enum:
+                    - dev
+                    - staging
+                    - prod
+                    - test
+                    type: string
+                  pinned:
+                    default: false
+                    description: Pinned indicates whether the snapshot is pinned (protected
+                      from automatic deletion)
+                    type: boolean
+                  purpose:
+                    description: Purpose describes the purpose of the snapshot
+                    enum:
+                    - backup
+                    - testing
+                    - migration
+                    - restore-point
+                    - update
+                    - other
+                    type: string
+                  tags:
+                    additionalProperties:
+                      type: string
+                    description: Tags are key-value pairs for categorizing the snapshot
+                    maxProperties: 50
+                    type: object
+                type: object
+              retentionPolicy:
+                description: RetentionPolicy defines how long to keep this snapshot
+                properties:
+                  deleteOnVMDelete:
+                    default: true
+                    description: DeleteOnVMDelete indicates whether to delete snapshot
+                      when VM is deleted
+                    type: boolean
+                  gracePeriod:
+                    default: 24h
+                    description: GracePeriod is the grace period before deletion
+                    type: string
+                  maxAge:
+                    description: MaxAge is the maximum age before snapshot should
+                      be deleted
+                    type: string
+                  maxCount:
+                    description: MaxCount is the maximum number of snapshots to retain
+                    format: int32
+                    maximum: 100
+                    minimum: 1
+                    type: integer
+                  preservePinned:
+                    default: true
+                    description: PreservePinned indicates whether to preserve pinned
+                      snapshots
+                    type: boolean
+                type: object
+              schedule:
+                description: Schedule defines automated snapshot scheduling
+                properties:
+                  concurrencyPolicy:
+                    default: Forbid
+                    description: ConcurrencyPolicy specifies how to handle concurrent
+                      snapshot jobs
+                    enum:
+                    - Allow
+                    - Forbid
+                    - Replace
+                    type: string
+                  cronSpec:
+                    description: CronSpec defines the schedule in cron format
+                    pattern: ^(@(annually|yearly|monthly|weekly|daily|hourly|reboot))|(@every
+                      (\d+(ns|us|µs|ms|s|m|h))+)|((((\d+,)+\d+|(\d+(\/|-)\d+)|\d+|\*)
+                      ?){5,7})$
+                    type: string
+                  enabled:
+                    default: false
+                    description: Enabled indicates if scheduled snapshots are enabled
+                    type: boolean
+                  failedJobsHistoryLimit:
+                    default: 1
+                    description: FailedJobsHistoryLimit limits retained failed jobs
+                    format: int32
+                    maximum: 100
+                    minimum: 0
+                    type: integer
+                  successfulJobsHistoryLimit:
+                    default: 3
+                    description: SuccessfulJobsHistoryLimit limits retained successful
+                      jobs
+                    format: int32
+                    maximum: 100
+                    minimum: 0
+                    type: integer
+                  suspend:
+                    default: false
+                    description: Suspend indicates whether to suspend scheduled snapshots
+                    type: boolean
+                  timezone:
+                    default: UTC
+                    description: Timezone specifies the timezone for the schedule
+                    type: string
+                type: object
+              snapshotConfig:
+                description: SnapshotConfig defines snapshot configuration options
+                properties:
+                  compression:
+                    default: false
+                    description: Compression enables snapshot compression
+                    type: boolean
+                  consistencyLevel:
+                    default: FilesystemConsistent
+                    description: ConsistencyLevel defines the consistency level required
+                    enum:
+                    - CrashConsistent
+                    - FilesystemConsistent
+                    - ApplicationConsistent
+                    type: string
+                  description:
+                    description: Description provides additional context for the snapshot
+                    maxLength: 1024
+                    type: string
+                  encryption:
+                    description: Encryption enables snapshot encryption
+                    properties:
+                      enabled:
+                        default: false
+                        description: Enabled indicates if encryption should be used
+                        type: boolean
+                      keyProvider:
+                        description: KeyProvider specifies the encryption key provider
+                        enum:
+                        - standard
+                        - hardware
+                        - external
+                        type: string
+                      keyRef:
+                        description: KeyRef references encryption keys
+                        properties:
+                          name:
+                            description: Name of the referenced object
+                            maxLength: 253
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                            type: string
+                        required:
+                        - name
+                        type: object
+                    type: object
+                  includeMemory:
+                    default: false
+                    description: IncludeMemory indicates whether to include memory
+                      state in the snapshot
+                    type: boolean
+                  name:
+                    description: Name provides a name hint for the snapshot (provider
+                      may modify)
+                    maxLength: 255
+                    pattern: ^[a-zA-Z0-9]([a-zA-Z0-9\-_]*[a-zA-Z0-9])?$
+                    type: string
+                  quiesce:
+                    default: true
+                    description: Quiesce indicates whether to quiesce the file system
+                      before snapshotting
+                    type: boolean
+                  type:
+                    allOf:
+                    - enum:
+                      - Standard
+                      - Crash
+                      - Application
+                    - enum:
+                      - Standard
+                      - Crash
+                      - Application
+                    default: Standard
+                    description: Type specifies the snapshot type
+                    type: string
+                type: object
+              vmRef:
+                description: VMRef references the virtual machine to snapshot
+                properties:
+                  name:
+                    description: Name of the referenced object
+                    maxLength: 253
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                required:
+                - name
+                type: object
+            required:
+            - vmRef
+            type: object
+          status:
+            description: VMSnapshotStatus defines the observed state of VMSnapshot
+            properties:
+              children:
+                description: Children lists child snapshots (for snapshot trees)
+                items:
+                  description: SnapshotRef references a snapshot
+                  properties:
+                    name:
+                      description: Name is the snapshot name
+                      type: string
+                    namespace:
+                      description: Namespace is the snapshot namespace
+                      type: string
+                    uid:
+                      description: UID is the snapshot UID
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
+              completionTime:
+                description: CompletionTime is when the snapshot creation completed
+                format: date-time
+                type: string
+              conditions:
+                description: Conditions represent the current service state
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              creationTime:
+                description: CreationTime is when the snapshot was created
+                format: date-time
+                type: string
+              expiryTime:
+                description: ExpiryTime is when the snapshot will expire (based on
+                  retention policy)
+                format: date-time
+                type: string
+              message:
+                description: Message provides additional details about the current
+                  state
+                type: string
+              observedGeneration:
+                description: ObservedGeneration reflects the generation observed by
+                  the controller
+                format: int64
+                type: integer
+              parent:
+                description: Parent references the parent snapshot (for snapshot trees)
+                properties:
+                  name:
+                    description: Name is the snapshot name
+                    type: string
+                  namespace:
+                    description: Namespace is the snapshot namespace
+                    type: string
+                  uid:
+                    description: UID is the snapshot UID
+                    type: string
+                required:
+                - name
+                type: object
+              phase:
+                description: Phase represents the current phase of the snapshot
+                enum:
+                - Pending
+                - Creating
+                - Ready
+                - Deleting
+                - Failed
+                - Expired
+                type: string
+              progress:
+                description: Progress shows the snapshot creation progress
+                properties:
+                  completedBytes:
+                    description: CompletedBytes is the number of bytes completed
+                    format: int64
+                    type: integer
+                  eta:
+                    description: ETA is the estimated time to completion
+                    type: string
+                  percentage:
+                    description: Percentage is the completion percentage (0-100)
+                    format: int32
+                    maximum: 100
+                    minimum: 0
+                    type: integer
+                  startTime:
+                    description: StartTime is when the snapshot creation started
+                    format: date-time
+                    type: string
+                  totalBytes:
+                    description: TotalBytes is the total number of bytes to snapshot
+                    format: int64
+                    type: integer
+                type: object
+              providerStatus:
+                additionalProperties:
+                  description: ProviderSnapshotStatus contains provider-specific snapshot
+                    status
+                  properties:
+                    available:
+                      description: Available indicates if the snapshot is available
+                        on this provider
+                      type: boolean
+                    id:
+                      description: ID is the provider-specific snapshot identifier
+                      type: string
+                    lastUpdated:
+                      description: LastUpdated is when the status was last updated
+                      format: date-time
+                      type: string
+                    message:
+                      description: Message provides provider-specific status information
+                      type: string
+                    path:
+                      description: Path is the provider-specific snapshot path
+                      type: string
+                    state:
+                      description: State is the provider-specific snapshot state
+                      type: string
+                  required:
+                  - available
+                  type: object
+                description: ProviderStatus contains provider-specific status information
+                type: object
+              size:
+                anyOf:
+                - type: integer
+                - type: string
+                description: Size is the size of the snapshot
+                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                x-kubernetes-int-or-string: true
+              snapshotID:
+                description: SnapshotID is the provider-specific identifier for the
+                  snapshot
+                type: string
+              taskRef:
+                description: TaskRef tracks any ongoing async operations
+                type: string
+              virtualSize:
+                anyOf:
+                - type: integer
+                - type: string
+                description: VirtualSize is the virtual size of the snapshot
+                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                x-kubernetes-int-or-string: true
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

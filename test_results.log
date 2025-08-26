@@ -1,0 +1,121 @@
+# github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1
+package github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1
+	imports github.com/projectbeskar/virtrigaud/api/v1alpha1
+	imports github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1: import cycle not allowed in test
+FAIL	github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1 [setup failed]
+?   	github.com/projectbeskar/virtrigaud/api/testutil/fixtures	[no test files]
+?   	github.com/projectbeskar/virtrigaud/api/testutil/roundtrip	[no test files]
+=== RUN   TestVirtualMachine_AlphaBetaAlpha_RoundTrip
+=== RUN   TestVirtualMachine_AlphaBetaAlpha_RoundTrip/simple_vm
+=== RUN   TestVirtualMachine_AlphaBetaAlpha_RoundTrip/simple_vm/Original_to_Hub_to_Original
+    roundtrip.go:32: Round-trip conversion mismatch (-original +final):
+          &v1alpha1.VirtualMachine{
+          	... // 1 ignored field
+          	ObjectMeta: {Name: "test-vm-simple", Namespace: "test-ns"},
+          	Spec: v1alpha1.VirtualMachineSpec{
+          		ProviderRef: {Name: "test-provider"},
+          		ClassRef:    {Name: "test-class"},
+          		ImageRef:    {Name: "test-image"},
+          		Networks: []v1alpha1.VMNetworkRef{
+          			{
+          				Name:     "network1",
+        - 				IPPolicy: "",
+        + 				IPPolicy: "dhcp",
+          				StaticIP: "192.168.1.10",
+          			},
+          		},
+          		Disks:    nil,
+          		UserData: nil,
+          		... // 6 identical fields
+          	},
+          	Status: v1alpha1.VirtualMachineStatus{
+          		ID:         "",
+        - 		PowerState: "",
+        + 		PowerState: "On",
+          		IPs:        nil,
+          		ConsoleURL: "",
+          		... // 8 identical fields
+          	},
+          }
+=== RUN   TestVirtualMachine_AlphaBetaAlpha_RoundTrip/simple_vm/Hub_to_Original_to_Hub
+    roundtrip.go:37: Round-trip conversion mismatch (-hub +final):
+          &v1beta1.VirtualMachine{
+          	... // 1 ignored field
+          	ObjectMeta: {Name: "test-vm-simple", Namespace: "test-ns"},
+          	Spec:       {ProviderRef: {Name: "test-provider"}, ClassRef: {Name: "test-class"}, ImageRef: {Name: "test-image"}, Networks: {{Name: "network1", NetworkRef: {Name: "network1"}, IPAddress: "192.168.1.10"}}, ...},
+          	Status: v1beta1.VirtualMachineStatus{
+          		ID:         "",
+        - 		PowerState: "",
+        + 		PowerState: "On",
+          		IPs:        nil,
+          		ConsoleURL: "",
+          		... // 6 identical fields
+          		CurrentResources: nil,
+          		Snapshots:        {},
+        - 		Phase:            "",
+        + 		Phase:            "Running",
+          		Message:          "",
+          	},
+          }
+--- FAIL: TestVirtualMachine_AlphaBetaAlpha_RoundTrip (0.00s)
+    --- FAIL: TestVirtualMachine_AlphaBetaAlpha_RoundTrip/simple_vm (0.00s)
+        --- FAIL: TestVirtualMachine_AlphaBetaAlpha_RoundTrip/simple_vm/Original_to_Hub_to_Original (0.00s)
+        --- FAIL: TestVirtualMachine_AlphaBetaAlpha_RoundTrip/simple_vm/Hub_to_Original_to_Hub (0.00s)
+=== RUN   TestVirtualMachine_BetaAlphaBeta_RoundTrip
+=== RUN   TestVirtualMachine_BetaAlphaBeta_RoundTrip/simple_vm
+=== RUN   TestVirtualMachine_BetaAlphaBeta_RoundTrip/simple_vm/Original_to_Hub_to_Original
+    roundtrip.go:32: Original type *v1beta1.VirtualMachine does not implement Convertible
+=== RUN   TestVirtualMachine_BetaAlphaBeta_RoundTrip/simple_vm/Hub_to_Original_to_Hub
+    roundtrip.go:37: Original type *v1beta1.VirtualMachine does not implement Convertible
+--- FAIL: TestVirtualMachine_BetaAlphaBeta_RoundTrip (0.00s)
+    --- FAIL: TestVirtualMachine_BetaAlphaBeta_RoundTrip/simple_vm (0.00s)
+        --- FAIL: TestVirtualMachine_BetaAlphaBeta_RoundTrip/simple_vm/Original_to_Hub_to_Original (0.00s)
+        --- FAIL: TestVirtualMachine_BetaAlphaBeta_RoundTrip/simple_vm/Hub_to_Original_to_Hub (0.00s)
+=== RUN   TestProvider_AlphaBetaAlpha_RoundTrip
+=== RUN   TestProvider_AlphaBetaAlpha_RoundTrip/simple_provider
+=== RUN   TestProvider_AlphaBetaAlpha_RoundTrip/simple_provider/Original_to_Hub_to_Original
+=== RUN   TestProvider_AlphaBetaAlpha_RoundTrip/simple_provider/Hub_to_Original_to_Hub
+    roundtrip.go:37: Round-trip conversion mismatch (-hub +final):
+          &v1beta1.Provider{
+          	... // 1 ignored field
+          	ObjectMeta: {Name: "test-provider-simple", Namespace: "test-ns"},
+          	Spec: v1beta1.ProviderSpec{
+          		... // 5 identical fields
+          		RateLimit:         nil,
+          		Runtime:           nil,
+        - 		HealthCheck:       nil,
+        + 		HealthCheck:       &v1beta1.ProviderHealthCheck{Enabled: true, FailureThreshold: 3, SuccessThreshold: 1},
+        - 		ConnectionPooling: nil,
+        + 		ConnectionPooling: &v1beta1.ConnectionPooling{MaxConnections: 10, MaxIdleConnections: 5},
+          	},
+          	Status: v1beta1.ProviderStatus{
+          		... // 3 identical fields
+          		Conditions:         nil,
+          		ObservedGeneration: 0,
+        - 		Capabilities:       nil,
+        + 		Capabilities:       []v1beta1.ProviderCapability{"VirtualMachines"},
+          		Version:            "",
+          		ConnectedVMs:       0,
+          		ResourceUsage:      nil,
+          	},
+          }
+--- FAIL: TestProvider_AlphaBetaAlpha_RoundTrip (0.00s)
+    --- FAIL: TestProvider_AlphaBetaAlpha_RoundTrip/simple_provider (0.00s)
+        --- PASS: TestProvider_AlphaBetaAlpha_RoundTrip/simple_provider/Original_to_Hub_to_Original (0.00s)
+        --- FAIL: TestProvider_AlphaBetaAlpha_RoundTrip/simple_provider/Hub_to_Original_to_Hub (0.00s)
+=== RUN   TestProvider_BetaAlphaBeta_RoundTrip
+=== RUN   TestProvider_BetaAlphaBeta_RoundTrip/simple_provider
+=== RUN   TestProvider_BetaAlphaBeta_RoundTrip/simple_provider/Original_to_Hub_to_Original
+    roundtrip.go:32: Original type *v1beta1.Provider does not implement Convertible
+=== RUN   TestProvider_BetaAlphaBeta_RoundTrip/simple_provider/Hub_to_Original_to_Hub
+    roundtrip.go:37: Original type *v1beta1.Provider does not implement Convertible
+--- FAIL: TestProvider_BetaAlphaBeta_RoundTrip (0.00s)
+    --- FAIL: TestProvider_BetaAlphaBeta_RoundTrip/simple_provider (0.00s)
+        --- FAIL: TestProvider_BetaAlphaBeta_RoundTrip/simple_provider/Original_to_Hub_to_Original (0.00s)
+        --- FAIL: TestProvider_BetaAlphaBeta_RoundTrip/simple_provider/Hub_to_Original_to_Hub (0.00s)
+=== RUN   TestVirtualMachine_InvalidAlpha_ConversionError
+    conversion_test.go:226: Expected conversion to fail, but it succeeded
+--- FAIL: TestVirtualMachine_InvalidAlpha_ConversionError (0.00s)
+FAIL
+FAIL	github.com/projectbeskar/virtrigaud/api/v1alpha1	0.008s
+FAIL

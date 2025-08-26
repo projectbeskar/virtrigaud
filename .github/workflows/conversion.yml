@@ -1,0 +1,86 @@
+name: Conversion Tests
+
+on:
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'api/**'
+      - 'config/crd/**'
+      - '.github/workflows/conversion.yml'
+  push:
+    branches: [ main ]
+    paths:
+      - 'api/**'
+      - 'config/crd/**'
+      - '.github/workflows/conversion.yml'
+
+env:
+  GO_VERSION: '1.23'
+
+jobs:
+  conversion-validation:
+    runs-on: ubuntu-latest
+    name: API Conversion Tests
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Install controller-gen
+      run: go install sigs.k8s.io/controller-tools/cmd/controller-gen@latest
+
+    - name: Check code generation is up to date
+      run: |
+        make generate
+        if ! git diff --exit-code; then
+          echo "Generated code is out of date. Please run 'make generate' and commit the changes."
+          exit 1
+        fi
+
+    - name: Check CRD manifests are up to date
+      run: |
+        make manifests
+        if ! git diff --exit-code; then
+          echo "CRD manifests are out of date. Please run 'make manifests' and commit the changes."
+          exit 1
+        fi
+
+    - name: Run API conversion unit tests
+      run: |
+        go test ./api/... -v
+
+    - name: Verify CRD conversion webhooks
+      run: |
+        ./hack/verify-crd-conversion.sh
+
+  conversion-e2e:
+    runs-on: ubuntu-latest
+    name: Conversion E2E Tests
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Install controller-gen
+      run: go install sigs.k8s.io/controller-tools/cmd/controller-gen@latest
+
+    - name: Generate CRDs with conversion webhooks
+      run: make manifests
+
+    - name: Run envtest conversion tests
+      run: |
+        go test ./test/conversione2e -run TestConversion* -v -timeout 10m

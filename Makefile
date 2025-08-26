@@ -126,11 +126,11 @@ build: manifests generate fmt vet ## Build manager binary.
 
 .PHONY: build-provider-libvirt
 build-provider-libvirt: proto ## Build libvirt provider binary (requires CGO)
-	CGO_ENABLED=1 go build -o bin/provider-libvirt ./cmd/provider-libvirt
+	CGO_ENABLED=1 go build -ldflags "$(LDFLAGS)" -o bin/provider-libvirt ./cmd/provider-libvirt
 
 .PHONY: build-provider-vsphere
 build-provider-vsphere: proto ## Build vsphere provider binary
-	CGO_ENABLED=0 go build -o bin/provider-vsphere ./cmd/provider-vsphere
+	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o bin/provider-vsphere ./cmd/provider-vsphere
 
 .PHONY: build-providers
 build-providers: build-provider-libvirt build-provider-vsphere ## Build all provider binaries

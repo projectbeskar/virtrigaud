@@ -1,0 +1,1396 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.17.2
+  name: vmclones.infra.virtrigaud.io
+spec:
+  conversion:
+    strategy: Webhook
+    webhook:
+      clientConfig:
+        service:
+          name: virtrigaud-webhook
+          namespace: virtrigaud
+          path: /convert
+      conversionReviewVersions:
+      - v1
+  group: infra.virtrigaud.io
+  names:
+    kind: VMClone
+    listKind: VMCloneList
+    plural: vmclones
+    shortNames:
+    - vmclone
+    singular: vmclone
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.sourceRef.name
+      name: Source
+      type: string
+    - jsonPath: .spec.target.name
+      name: Target
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.linkedClone
+      name: Linked
+      type: boolean
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: VMClone is the Schema for the vmclones API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: VMCloneSpec defines the desired state of VMClone
+            properties:
+              customization:
+                description: Customization defines VM customization options
+                properties:
+                  hostname:
+                    description: Hostname sets the target VM hostname
+                    type: string
+                  networks:
+                    description: Networks defines network customization
+                    items:
+                      description: NetworkCustomization defines network-specific customization
+                      properties:
+                        dns:
+                          description: DNS sets DNS servers
+                          items:
+                            type: string
+                          type: array
+                        gateway:
+                          description: Gateway sets the network gateway
+                          type: string
+                        ipAddress:
+                          description: IPAddress sets a static IP address
+                          type: string
+                        name:
+                          description: Name identifies the network to customize
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    type: array
+                  tags:
+                    description: Tags defines additional tags for the cloned VM
+                    items:
+                      type: string
+                    type: array
+                  userData:
+                    description: UserData provides cloud-init or similar customization
+                      data
+                    properties:
+                      cloudInit:
+                        description: CloudInit contains cloud-init specific configuration
+                        properties:
+                          inline:
+                            description: Inline contains inline cloud-init configuration
+                            type: string
+                          secretRef:
+                            description: SecretRef references a Secret containing
+                              cloud-init data
+                            properties:
+                              name:
+                                description: Name of the referenced object
+                                type: string
+                              namespace:
+                                description: Namespace of the referenced object (defaults
+                                  to current namespace)
+                                type: string
+                            required:
+                            - name
+                            type: object
+                        type: object
+                    type: object
+                type: object
+              linked:
+                description: Linked indicates whether to create a linked clone (best
+                  effort)
+                type: boolean
+              powerOn:
+                description: PowerOn indicates whether to power on the cloned VM
+                type: boolean
+              sourceRef:
+                description: SourceRef references the source virtual machine to clone
+                properties:
+                  name:
+                    description: Name of the referenced object
+                    type: string
+                required:
+                - name
+                type: object
+              target:
+                description: Target defines the target VM configuration
+                properties:
+                  classRef:
+                    description: ClassRef references the VM class for resource allocation
+                    properties:
+                      name:
+                        description: Name of the referenced object
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  disks:
+                    description: Disks defines disk configuration overrides
+                    items:
+                      description: DiskSpec defines additional disk requirements
+                      properties:
+                        name:
+                          description: Name provides a name for the disk
+                          type: string
+                        sizeGiB:
+                          description: SizeGiB specifies disk size in GiB
+                          format: int32
+                          type: integer
+                        type:
+                          description: Type specifies the disk type (thin, thick,
+                            etc.)
+                          type: string
+                      required:
+                      - sizeGiB
+                      type: object
+                    type: array
+                  imageRef:
+                    description: ImageRef references the VM image (if different from
+                      source)
+                    properties:
+                      name:
+                        description: Name of the referenced object
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  name:
+                    description: Name is the name of the target VM
+                    type: string
+                  namespace:
+                    description: Namespace is the namespace for the target VM (defaults
+                      to source namespace)
+                    type: string
+                  networks:
+                    description: Networks defines network configuration overrides
+                    items:
+                      description: VMNetworkAttachment is the Schema for the vmnetworkattachments
+                        API.
+                      properties:
+                        apiVersion:
+                          description: |-
+                            APIVersion defines the versioned schema of this representation of an object.
+                            Servers should convert recognized schemas to the latest internal value, and
+                            may reject unrecognized values.
+                            More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+                          type: string
+                        kind:
+                          description: |-
+                            Kind is a string value representing the REST resource this object represents.
+                            Servers may infer this from the endpoint the client submits requests to.
+                            Cannot be updated.
+                            In CamelCase.
+                            More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+                          type: string
+                        metadata:
+                          type: object
+                        spec:
+                          description: VMNetworkAttachmentSpec defines the desired
+                            state of VMNetworkAttachment.
+                          properties:
+                            ipPolicy:
+                              default: dhcp
+                              description: IPPolicy specifies the default IP assignment
+                                policy
+                              enum:
+                              - dhcp
+                              - static
+                              type: string
+                            libvirt:
+                              description: Libvirt contains Libvirt-specific network
+                                configuration
+                              properties:
+                                bridge:
+                                  description: Bridge specifies the bridge name
+                                  type: string
+                                model:
+                                  default: virtio
+                                  description: Model specifies the network device
+                                    model
+                                  enum:
+                                  - virtio
+                                  - e1000
+                                  - rtl8139
+                                  type: string
+                                networkName:
+                                  description: NetworkName specifies the Libvirt network
+                                    name
+                                  type: string
+                              type: object
+                            macAddress:
+                              description: MacAddress specifies a static MAC address
+                              type: string
+                            vsphere:
+                              description: VSphere contains vSphere-specific network
+                                configuration
+                              properties:
+                                networkName:
+                                  description: NetworkName specifies the vSphere network
+                                    name
+                                  type: string
+                                portgroup:
+                                  description: Portgroup specifies the vSphere portgroup
+                                    name
+                                  type: string
+                                vlan:
+                                  description: VLAN specifies the VLAN ID
+                                  format: int32
+                                  type: integer
+                              type: object
+                          type: object
+                        status:
+                          description: VMNetworkAttachmentStatus defines the observed
+                            state of VMNetworkAttachment.
+                          properties:
+                            availableOn:
+                              description: AvailableOn lists the providers where the
+                                network is available
+                              items:
+                                type: string
+                              type: array
+                            conditions:
+                              description: Conditions represent the latest available
+                                observations
+                              items:
+                                description: Condition contains details for one aspect
+                                  of the current state of this API Resource.
+                                properties:
+                                  lastTransitionTime:
+                                    description: |-
+                                      lastTransitionTime is the last time the condition transitioned from one status to another.
+                                      This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                                    format: date-time
+                                    type: string
+                                  message:
+                                    description: |-
+                                      message is a human readable message indicating details about the transition.
+                                      This may be an empty string.
+                                    maxLength: 32768
+                                    type: string
+                                  observedGeneration:
+                                    description: |-
+                                      observedGeneration represents the .metadata.generation that the condition was set based upon.
+                                      For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                                      with respect to the current state of the instance.
+                                    format: int64
+                                    minimum: 0
+                                    type: integer
+                                  reason:
+                                    description: |-
+                                      reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                                      Producers of specific condition types may define expected values and meanings for this field,
+                                      and whether the values are considered a guaranteed API.
+                                      The value should be a CamelCase string.
+                                      This field may not be empty.
+                                    maxLength: 1024
+                                    minLength: 1
+                                    pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                                    type: string
+                                  status:
+                                    description: status of the condition, one of True,
+                                      False, Unknown.
+                                    enum:
+                                    - "True"
+                                    - "False"
+                                    - Unknown
+                                    type: string
+                                  type:
+                                    description: type of condition in CamelCase or
+                                      in foo.example.com/CamelCase.
+                                    maxLength: 316
+                                    pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                                    type: string
+                                required:
+                                - lastTransitionTime
+                                - message
+                                - reason
+                                - status
+                                - type
+                                type: object
+                              type: array
+                            observedGeneration:
+                              description: ObservedGeneration reflects the generation
+                                observed by the controller
+                              format: int64
+                              type: integer
+                            ready:
+                              description: Ready indicates if the network is ready
+                                for use
+                              type: boolean
+                          type: object
+                      type: object
+                    type: array
+                  placementRef:
+                    description: PlacementRef references placement policy for the
+                      target VM
+                    properties:
+                      name:
+                        description: Name of the referenced object
+                        type: string
+                    required:
+                    - name
+                    type: object
+                required:
+                - name
+                type: object
+            required:
+            - sourceRef
+            - target
+            type: object
+          status:
+            description: VMCloneStatus defines the observed state of VMClone
+            properties:
+              completionTime:
+                description: CompletionTime is when the clone operation completed
+                format: date-time
+                type: string
+              conditions:
+                description: Conditions represent the current service state
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              linkedClone:
+                description: LinkedClone indicates whether a linked clone was actually
+                  created
+                type: boolean
+              message:
+                description: Message provides additional details about the current
+                  state
+                type: string
+              phase:
+                description: Phase represents the current phase of the clone operation
+                enum:
+                - Pending
+                - Cloning
+                - Customizing
+                - Ready
+                - Failed
+                type: string
+              startTime:
+                description: StartTime is when the clone operation started
+                format: date-time
+                type: string
+              targetRef:
+                description: TargetRef references the created target VM
+                properties:
+                  name:
+                    description: Name of the referenced object
+                    type: string
+                required:
+                - name
+                type: object
+              taskRef:
+                description: TaskRef tracks any ongoing async operations
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: false
+    subresources:
+      status: {}
+  - additionalPrinterColumns:
+    - jsonPath: .spec.source.vmRef.name
+      name: Source
+      type: string
+    - jsonPath: .spec.target.name
+      name: Target
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.actualCloneType
+      name: Clone Type
+      type: string
+    - jsonPath: .status.progress.overallPercentage
+      name: Progress
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1beta1
+    schema:
+      openAPIV3Schema:
+        description: VMClone is the Schema for the vmclones API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: VMCloneSpec defines the desired state of VMClone
+            properties:
+              customization:
+                description: Customization defines VM customization options
+                properties:
+                  certificates:
+                    description: Certificates defines certificates to install
+                    items:
+                      description: CertificateSpec defines a certificate to install
+                      properties:
+                        data:
+                          description: Data contains the certificate data (PEM format)
+                          type: string
+                        name:
+                          description: Name is the certificate name
+                          maxLength: 255
+                          type: string
+                        secretKey:
+                          default: tls.crt
+                          description: SecretKey is the key in the secret containing
+                            the certificate
+                          type: string
+                        secretRef:
+                          description: SecretRef references a secret containing the
+                            certificate
+                          properties:
+                            name:
+                              description: Name of the referenced object
+                              maxLength: 253
+                              pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        store:
+                          default: root
+                          description: Store specifies the certificate store
+                          enum:
+                          - root
+                          - ca
+                          - my
+                          - trust
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    maxItems: 10
+                    type: array
+                  domain:
+                    description: Domain sets the domain name
+                    maxLength: 255
+                    type: string
+                  guestCommands:
+                    description: GuestCommands defines commands to run in the guest
+                      OS
+                    items:
+                      description: GuestCommand defines a command to run in the guest
+                        OS
+                      properties:
+                        arguments:
+                          description: Arguments contains command arguments
+                          items:
+                            type: string
+                          maxItems: 20
+                          type: array
+                        command:
+                          description: Command is the command to execute
+                          maxLength: 1000
+                          type: string
+                        runAsUser:
+                          description: RunAsUser specifies the user to run the command
+                            as
+                          maxLength: 255
+                          type: string
+                        stage:
+                          default: post-customization
+                          description: Stage specifies when to run the command
+                          enum:
+                          - pre-customization
+                          - post-customization
+                          - first-boot
+                          type: string
+                        timeout:
+                          default: 5m
+                          description: Timeout specifies the command timeout
+                          type: string
+                        workingDirectory:
+                          description: WorkingDirectory specifies the working directory
+                          maxLength: 500
+                          type: string
+                      required:
+                      - command
+                      type: object
+                    maxItems: 20
+                    type: array
+                  hostname:
+                    description: Hostname sets the target VM hostname
+                    maxLength: 255
+                    pattern: ^[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?$
+                    type: string
+                  networks:
+                    description: Networks defines network customization
+                    items:
+                      description: NetworkCustomization defines network-specific customization
+                      properties:
+                        dhcp:
+                          description: DHCP enables DHCP for this network
+                          type: boolean
+                        dns:
+                          description: DNS sets DNS servers
+                          items:
+                            type: string
+                          maxItems: 5
+                          type: array
+                        gateway:
+                          description: Gateway sets the network gateway
+                          pattern: ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$
+                          type: string
+                        ipAddress:
+                          description: IPAddress sets a static IP address
+                          pattern: ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$
+                          type: string
+                        macAddress:
+                          description: MACAddress sets a custom MAC address
+                          pattern: ^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$
+                          type: string
+                        name:
+                          description: Name identifies the network to customize
+                          maxLength: 255
+                          type: string
+                        subnetMask:
+                          description: SubnetMask sets the subnet mask
+                          pattern: ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    maxItems: 10
+                    type: array
+                  sysprep:
+                    description: Sysprep provides Windows sysprep customization
+                    properties:
+                      adminPassword:
+                        description: AdminPassword specifies the administrator password
+                        properties:
+                          secretKey:
+                            default: password
+                            description: SecretKey is the key in the secret containing
+                              the password
+                            type: string
+                          secretRef:
+                            description: SecretRef references a secret containing
+                              the password
+                            properties:
+                              name:
+                                description: Name of the referenced object
+                                maxLength: 253
+                                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                type: string
+                            required:
+                            - name
+                            type: object
+                          value:
+                            description: Value is the plaintext password (not recommended
+                              for production)
+                            type: string
+                        type: object
+                      customCommands:
+                        description: CustomCommands specifies custom commands to run
+                          during sysprep
+                        items:
+                          type: string
+                        maxItems: 20
+                        type: array
+                      enabled:
+                        default: false
+                        description: Enabled indicates if sysprep should be run
+                        type: boolean
+                      joinDomain:
+                        description: JoinDomain specifies domain join configuration
+                        properties:
+                          domain:
+                            description: Domain is the domain name to join
+                            maxLength: 255
+                            type: string
+                          organizationalUnit:
+                            description: OrganizationalUnit specifies the OU for the
+                              computer account
+                            maxLength: 500
+                            type: string
+                          password:
+                            description: Password is the domain join password
+                            properties:
+                              secretKey:
+                                default: password
+                                description: SecretKey is the key in the secret containing
+                                  the password
+                                type: string
+                              secretRef:
+                                description: SecretRef references a secret containing
+                                  the password
+                                properties:
+                                  name:
+                                    description: Name of the referenced object
+                                    maxLength: 253
+                                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                    type: string
+                                required:
+                                - name
+                                type: object
+                              value:
+                                description: Value is the plaintext password (not
+                                  recommended for production)
+                                type: string
+                            type: object
+                          username:
+                            description: Username is the domain join username
+                            maxLength: 255
+                            type: string
+                        required:
+                        - domain
+                        - password
+                        - username
+                        type: object
+                      organization:
+                        description: Organization specifies the organization name
+                        maxLength: 255
+                        type: string
+                      owner:
+                        description: Owner specifies the owner name
+                        maxLength: 255
+                        type: string
+                      productKey:
+                        description: ProductKey specifies the Windows product key
+                        type: string
+                    type: object
+                  tags:
+                    description: Tags defines additional tags for the cloned VM
+                    items:
+                      type: string
+                    maxItems: 50
+                    type: array
+                  timeZone:
+                    description: TimeZone sets the timezone
+                    maxLength: 100
+                    type: string
+                  userData:
+                    description: UserData provides cloud-init or similar customization
+                      data
+                    properties:
+                      cloudInit:
+                        description: CloudInit contains cloud-init configuration
+                        properties:
+                          inline:
+                            description: Inline contains inline cloud-init data
+                            type: string
+                          secretRef:
+                            description: SecretRef references a Secret containing
+                              cloud-init data
+                            properties:
+                              name:
+                                description: Name of the referenced object
+                                maxLength: 253
+                                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                type: string
+                            required:
+                            - name
+                            type: object
+                        type: object
+                      ignition:
+                        description: Ignition contains Ignition configuration for
+                          CoreOS/RHEL
+                        properties:
+                          inline:
+                            description: Inline contains inline Ignition data
+                            type: string
+                          secretRef:
+                            description: SecretRef references a Secret containing
+                              Ignition data
+                            properties:
+                              name:
+                                description: Name of the referenced object
+                                maxLength: 253
+                                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                type: string
+                            required:
+                            - name
+                            type: object
+                        type: object
+                    type: object
+                type: object
+              metadata:
+                description: Metadata contains clone operation metadata
+                properties:
+                  createdBy:
+                    description: CreatedBy identifies who or what created the clone
+                    maxLength: 255
+                    type: string
+                  environment:
+                    description: Environment specifies the environment
+                    enum:
+                    - dev
+                    - staging
+                    - prod
+                    - test
+                    type: string
+                  project:
+                    description: Project identifies the project this clone belongs
+                      to
+                    maxLength: 255
+                    type: string
+                  purpose:
+                    description: Purpose describes the purpose of the clone
+                    enum:
+                    - backup
+                    - testing
+                    - migration
+                    - development
+                    - production
+                    - staging
+                    type: string
+                  tags:
+                    additionalProperties:
+                      type: string
+                    description: Tags are key-value pairs for categorizing the clone
+                    maxProperties: 50
+                    type: object
+                type: object
+              options:
+                description: Options defines cloning options
+                properties:
+                  includeSnapshots:
+                    default: false
+                    description: IncludeSnapshots indicates whether to include snapshots
+                      in the clone
+                    type: boolean
+                  parallel:
+                    default: false
+                    description: Parallel enables parallel disk cloning (if supported)
+                    type: boolean
+                  performance:
+                    description: Performance defines performance-related clone options
+                    properties:
+                      concurrentDisks:
+                        default: 2
+                        description: ConcurrentDisks limits the number of disks cloned
+                          concurrently
+                        format: int32
+                        maximum: 10
+                        minimum: 1
+                        type: integer
+                      ioThrottling:
+                        default: false
+                        description: IOThrottling enables I/O throttling during clone
+                          operations
+                        type: boolean
+                      maxIOPS:
+                        description: MaxIOPS limits the maximum IOPS during clone
+                          operations
+                        format: int32
+                        maximum: 100000
+                        minimum: 100
+                        type: integer
+                      priority:
+                        default: Normal
+                        description: Priority specifies the clone operation priority
+                        enum:
+                        - Low
+                        - Normal
+                        - High
+                        type: string
+                    type: object
+                  powerOn:
+                    default: false
+                    description: PowerOn indicates whether to power on the cloned
+                      VM
+                    type: boolean
+                  retryPolicy:
+                    description: RetryPolicy defines retry behavior for failed clones
+                    properties:
+                      backoffMultiplier:
+                        default: 2
+                        description: BackoffMultiplier is the multiplier for exponential
+                          backoff
+                        format: int32
+                        type: integer
+                      maxRetries:
+                        default: 3
+                        description: MaxRetries is the maximum number of retry attempts
+                        format: int32
+                        maximum: 10
+                        minimum: 0
+                        type: integer
+                      retryDelay:
+                        default: 5m
+                        description: RetryDelay is the delay between retry attempts
+                        type: string
+                    type: object
+                  storage:
+                    description: Storage defines storage-specific clone options
+                    properties:
+                      datastore:
+                        description: Datastore specifies the target datastore for
+                          cloned disks
+                        maxLength: 255
+                        type: string
+                      diskFormat:
+                        description: DiskFormat specifies the preferred disk format
+                          for cloned disks
+                        enum:
+                        - thin
+                        - thick
+                        - eagerzeroedthick
+                        - ssd
+                        - hdd
+                        - nvme
+                        type: string
+                      enableCompression:
+                        default: false
+                        description: EnableCompression enables compression during
+                          clone operations
+                        type: boolean
+                      folder:
+                        description: Folder specifies the target folder for the cloned
+                          VM
+                        maxLength: 255
+                        type: string
+                      preferThinProvisioning:
+                        default: true
+                        description: PreferThinProvisioning prefers thin provisioning
+                          for cloned disks
+                        type: boolean
+                      storageClass:
+                        description: StorageClass specifies the storage class for
+                          cloned disks
+                        maxLength: 253
+                        type: string
+                    type: object
+                  timeout:
+                    default: 30m
+                    description: Timeout defines the maximum time to wait for clone
+                      completion
+                    type: string
+                  type:
+                    allOf:
+                    - enum:
+                      - FullClone
+                      - LinkedClone
+                      - InstantClone
+                    - enum:
+                      - FullClone
+                      - LinkedClone
+                      - InstantClone
+                    default: FullClone
+                    description: Type specifies the clone type
+                    type: string
+                type: object
+              source:
+                description: Source defines the source for cloning
+                properties:
+                  imageRef:
+                    description: ImageRef references a VM image to clone from
+                    properties:
+                      name:
+                        description: Name of the referenced object
+                        maxLength: 253
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                      namespace:
+                        description: Namespace of the referenced object (defaults
+                          to current namespace)
+                        maxLength: 63
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  snapshotRef:
+                    description: SnapshotRef references a specific snapshot to clone
+                      from
+                    properties:
+                      name:
+                        description: Name of the referenced object
+                        maxLength: 253
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  templateRef:
+                    description: TemplateRef references a VM template to clone from
+                    properties:
+                      name:
+                        description: Name of the referenced object
+                        maxLength: 253
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                      namespace:
+                        description: Namespace of the referenced object (defaults
+                          to current namespace)
+                        maxLength: 63
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  vmRef:
+                    description: VMRef references the source virtual machine to clone
+                    properties:
+                      name:
+                        description: Name of the referenced object
+                        maxLength: 253
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                    required:
+                    - name
+                    type: object
+                type: object
+              target:
+                description: Target defines the target VM configuration
+                properties:
+                  annotations:
+                    additionalProperties:
+                      type: string
+                    description: Annotations defines annotations to apply to the target
+                      VM
+                    maxProperties: 50
+                    type: object
+                  classRef:
+                    description: ClassRef references the VM class for resource allocation
+                    properties:
+                      name:
+                        description: Name of the referenced object
+                        maxLength: 253
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  disks:
+                    description: Disks defines disk configuration overrides
+                    items:
+                      description: DiskSpec defines a disk configuration
+                      properties:
+                        expandPolicy:
+                          default: Offline
+                          description: ExpandPolicy defines how the disk can be expanded
+                          enum:
+                          - Online
+                          - Offline
+                          type: string
+                        name:
+                          description: Name is the disk identifier
+                          maxLength: 63
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                          type: string
+                        sizeGiB:
+                          description: SizeGiB is the size of the disk in GiB
+                          format: int32
+                          maximum: 65536
+                          minimum: 1
+                          type: integer
+                        storageClass:
+                          description: StorageClass specifies the storage class (optional)
+                          type: string
+                        type:
+                          default: thin
+                          description: Type specifies the disk type (provider-specific)
+                          enum:
+                          - thin
+                          - thick
+                          - eagerzeroedthick
+                          - ssd
+                          - hdd
+                          type: string
+                      required:
+                      - name
+                      - sizeGiB
+                      type: object
+                    maxItems: 20
+                    type: array
+                  labels:
+                    additionalProperties:
+                      type: string
+                    description: Labels defines labels to apply to the target VM
+                    maxProperties: 50
+                    type: object
+                  name:
+                    description: Name is the name of the target VM
+                    maxLength: 253
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                  namespace:
+                    description: Namespace is the namespace for the target VM (defaults
+                      to source namespace)
+                    maxLength: 63
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                  networks:
+                    description: Networks defines network configuration overrides
+                    items:
+                      description: VMNetworkRef represents a reference to a network
+                        attachment
+                      properties:
+                        ipAddress:
+                          description: IPAddress specifies a static IP address (optional)
+                          pattern: ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$
+                          type: string
+                        macAddress:
+                          description: MACAddress specifies a static MAC address (optional)
+                          pattern: ^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$
+                          type: string
+                        name:
+                          description: Name is the name of this network attachment
+                          maxLength: 63
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                          type: string
+                        networkRef:
+                          description: NetworkRef references the VMNetworkAttachment
+                          properties:
+                            name:
+                              description: Name of the referenced object
+                              maxLength: 253
+                              pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                              type: string
+                            namespace:
+                              description: Namespace of the referenced object (defaults
+                                to current namespace)
+                              maxLength: 63
+                              pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                              type: string
+                          required:
+                          - name
+                          type: object
+                      required:
+                      - name
+                      - networkRef
+                      type: object
+                    maxItems: 10
+                    type: array
+                  placementRef:
+                    description: PlacementRef references placement policy for the
+                      target VM
+                    properties:
+                      name:
+                        description: Name of the referenced object
+                        maxLength: 253
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  providerRef:
+                    description: ProviderRef references the target provider (defaults
+                      to source provider)
+                    properties:
+                      name:
+                        description: Name of the referenced object
+                        maxLength: 253
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                      namespace:
+                        description: Namespace of the referenced object (defaults
+                          to current namespace)
+                        maxLength: 63
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                    required:
+                    - name
+                    type: object
+                required:
+                - name
+                type: object
+            required:
+            - source
+            - target
+            type: object
+          status:
+            description: VMCloneStatus defines the observed state of VMClone
+            properties:
+              actualCloneType:
+                description: ActualCloneType indicates the actual clone type that
+                  was used
+                enum:
+                - FullClone
+                - LinkedClone
+                - InstantClone
+                type: string
+              completionTime:
+                description: CompletionTime is when the clone operation completed
+                format: date-time
+                type: string
+              conditions:
+                description: Conditions represent the current service state
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              customizationStatus:
+                description: CustomizationStatus contains customization operation
+                  status
+                properties:
+                  completed:
+                    description: Completed indicates if customization has completed
+                    type: boolean
+                  completedSteps:
+                    description: CompletedSteps lists completed customization steps
+                    items:
+                      type: string
+                    type: array
+                  currentStep:
+                    description: CurrentStep is the current customization step
+                    type: string
+                  failedSteps:
+                    description: FailedSteps lists failed customization steps
+                    items:
+                      type: string
+                    type: array
+                  message:
+                    description: Message provides customization status details
+                    type: string
+                  started:
+                    description: Started indicates if customization has started
+                    type: boolean
+                type: object
+              lastRetryTime:
+                description: LastRetryTime is when the clone was last retried
+                format: date-time
+                type: string
+              message:
+                description: Message provides additional details about the current
+                  state
+                type: string
+              observedGeneration:
+                description: ObservedGeneration reflects the generation observed by
+                  the controller
+                format: int64
+                type: integer
+              phase:
+                description: Phase represents the current phase of the clone operation
+                enum:
+                - Pending
+                - Preparing
+                - Cloning
+                - Customizing
+                - Powering-On
+                - Ready
+                - Failed
+                type: string
+              progress:
+                description: Progress shows the clone operation progress
+                properties:
+                  completedDisks:
+                    description: CompletedDisks is the number of disks completed
+                    format: int32
+                    type: integer
+                  currentDisk:
+                    description: CurrentDisk shows progress of the current disk being
+                      cloned
+                    properties:
+                      completedBytes:
+                        description: CompletedBytes is the number of bytes completed
+                        format: int64
+                        type: integer
+                      name:
+                        description: Name is the disk name
+                        type: string
+                      percentage:
+                        description: Percentage is the completion percentage (0-100)
+                        format: int32
+                        maximum: 100
+                        minimum: 0
+                        type: integer
+                      totalBytes:
+                        description: TotalBytes is the total size of the disk
+                        format: int64
+                        type: integer
+                      transferRate:
+                        description: TransferRate is the current transfer rate in
+                          bytes per second
+                        format: int64
+                        type: integer
+                    required:
+                    - name
+                    type: object
+                  eta:
+                    description: ETA is the estimated time to completion
+                    type: string
+                  overallPercentage:
+                    description: OverallPercentage is the overall completion percentage
+                      (0-100)
+                    format: int32
+                    maximum: 100
+                    minimum: 0
+                    type: integer
+                  totalDisks:
+                    description: TotalDisks is the total number of disks to clone
+                    format: int32
+                    type: integer
+                type: object
+              retryCount:
+                description: RetryCount is the number of times the clone has been
+                  retried
+                format: int32
+                type: integer
+              startTime:
+                description: StartTime is when the clone operation started
+                format: date-time
+                type: string
+              targetRef:
+                description: TargetRef references the created target VM
+                properties:
+                  name:
+                    description: Name of the referenced object
+                    maxLength: 253
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                required:
+                - name
+                type: object
+              taskRef:
+                description: TaskRef tracks any ongoing async operations
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

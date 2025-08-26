@@ -1,0 +1,1559 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.17.2
+  name: vmsets.infra.virtrigaud.io
+spec:
+  conversion:
+    strategy: Webhook
+    webhook:
+      clientConfig:
+        service:
+          name: virtrigaud-webhook
+          namespace: virtrigaud
+          path: /convert
+      conversionReviewVersions:
+      - v1
+  group: infra.virtrigaud.io
+  names:
+    kind: VMSet
+    listKind: VMSetList
+    plural: vmsets
+    shortNames:
+    - vmset
+    singular: vmset
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.replicas
+      name: Desired
+      type: integer
+    - jsonPath: .status.replicas
+      name: Current
+      type: integer
+    - jsonPath: .status.readyReplicas
+      name: Ready
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: VMSet is the Schema for the vmsets API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: VMSetSpec defines the desired state of VMSet
+            properties:
+              minReadySeconds:
+                description: |-
+                  MinReadySeconds is the minimum number of seconds for which a newly created VM
+                  should be ready without any of its containers crashing
+                format: int32
+                type: integer
+              replicas:
+                description: Replicas is the desired number of VMs in the set
+                format: int32
+                type: integer
+              revisionHistoryLimit:
+                description: RevisionHistoryLimit is the number of old VMSets to retain
+                format: int32
+                type: integer
+              selector:
+                description: Selector is a label query over VMs that should match
+                  the replica count
+                properties:
+                  matchExpressions:
+                    description: matchExpressions is a list of label selector requirements.
+                      The requirements are ANDed.
+                    items:
+                      description: |-
+                        A label selector requirement is a selector that contains values, a key, and an operator that
+                        relates the key and values.
+                      properties:
+                        key:
+                          description: key is the label key that the selector applies
+                            to.
+                          type: string
+                        operator:
+                          description: |-
+                            operator represents a key's relationship to a set of values.
+                            Valid operators are In, NotIn, Exists and DoesNotExist.
+                          type: string
+                        values:
+                          description: |-
+                            values is an array of string values. If the operator is In or NotIn,
+                            the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                            the values array must be empty. This array is replaced during a strategic
+                            merge patch.
+                          items:
+                            type: string
+                          type: array
+                          x-kubernetes-list-type: atomic
+                      required:
+                      - key
+                      - operator
+                      type: object
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  matchLabels:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                      map is equivalent to an element of matchExpressions, whose key field is "key", the
+                      operator is "In", and the values array contains only "value". The requirements are ANDed.
+                    type: object
+                type: object
+                x-kubernetes-map-type: atomic
+              template:
+                description: Template is the object that describes the VM that will
+                  be created
+                properties:
+                  metadata:
+                    description: ObjectMeta is metadata for VMs created from this
+                      template
+                    type: object
+                  spec:
+                    description: Spec is the VM specification
+                    properties:
+                      classRef:
+                        description: ClassRef references the VMClass that defines
+                          resource allocation
+                        properties:
+                          name:
+                            description: Name of the referenced object
+                            type: string
+                          namespace:
+                            description: Namespace of the referenced object (defaults
+                              to current namespace)
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      disks:
+                        description: Disks specifies additional disks beyond the root
+                          disk
+                        items:
+                          description: DiskSpec defines additional disk requirements
+                          properties:
+                            name:
+                              description: Name provides a name for the disk
+                              type: string
+                            sizeGiB:
+                              description: SizeGiB specifies disk size in GiB
+                              format: int32
+                              type: integer
+                            type:
+                              description: Type specifies the disk type (thin, thick,
+                                etc.)
+                              type: string
+                          required:
+                          - sizeGiB
+                          type: object
+                        type: array
+                      imageRef:
+                        description: ImageRef references the VMImage to use as base
+                          template
+                        properties:
+                          name:
+                            description: Name of the referenced object
+                            type: string
+                          namespace:
+                            description: Namespace of the referenced object (defaults
+                              to current namespace)
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      networks:
+                        description: Networks specifies network attachments for the
+                          VM
+                        items:
+                          description: VMNetworkRef references a VMNetworkAttachment
+                            with optional IP configuration
+                          properties:
+                            ipPolicy:
+                              default: dhcp
+                              description: IPPolicy specifies how IP addresses are
+                                assigned
+                              enum:
+                              - dhcp
+                              - static
+                              type: string
+                            name:
+                              description: Name references a VMNetworkAttachment
+                              type: string
+                            staticIP:
+                              description: StaticIP specifies a static IP when IPPolicy
+                                is "static"
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
+                      placement:
+                        description: Placement provides hints for VM placement
+                        properties:
+                          cluster:
+                            description: Cluster specifies the preferred cluster
+                            type: string
+                          datastore:
+                            description: Datastore specifies the preferred datastore
+                            type: string
+                          folder:
+                            description: Folder specifies the preferred folder
+                            type: string
+                        type: object
+                      placementRef:
+                        description: PlacementRef references a VMPlacementPolicy for
+                          advanced placement rules
+                        properties:
+                          name:
+                            description: Name of the referenced object
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      powerState:
+                        default: "On"
+                        description: PowerState specifies the desired power state
+                        enum:
+                        - "On"
+                        - "Off"
+                        type: string
+                      providerRef:
+                        description: ProviderRef references the Provider that manages
+                          this VM
+                        properties:
+                          name:
+                            description: Name of the referenced object
+                            type: string
+                          namespace:
+                            description: Namespace of the referenced object (defaults
+                              to current namespace)
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      resources:
+                        description: Resources allows overriding resource allocation
+                          from the VMClass
+                        properties:
+                          cpu:
+                            description: CPU specifies the number of virtual CPUs
+                            format: int32
+                            type: integer
+                          gpu:
+                            description: GPU specifies GPU configuration
+                            properties:
+                              count:
+                                description: Count specifies the number of GPUs to
+                                  assign
+                                format: int32
+                                type: integer
+                              memory:
+                                description: Memory specifies GPU memory in MiB
+                                format: int64
+                                type: integer
+                              type:
+                                description: Type specifies the GPU type (provider-specific)
+                                type: string
+                            required:
+                            - count
+                            type: object
+                          memoryMiB:
+                            description: MemoryMiB specifies the amount of memory
+                              in MiB
+                            format: int64
+                            type: integer
+                        type: object
+                      snapshot:
+                        description: Snapshot defines snapshot-related operations
+                        properties:
+                          revertToRef:
+                            description: RevertToRef specifies a snapshot to revert
+                              to
+                            properties:
+                              name:
+                                description: Name of the referenced object
+                                type: string
+                            required:
+                            - name
+                            type: object
+                        type: object
+                      tags:
+                        description: Tags are applied to the VM for organization
+                        items:
+                          type: string
+                        type: array
+                      userData:
+                        description: UserData contains cloud-init configuration
+                        properties:
+                          cloudInit:
+                            description: CloudInit contains cloud-init specific configuration
+                            properties:
+                              inline:
+                                description: Inline contains inline cloud-init configuration
+                                type: string
+                              secretRef:
+                                description: SecretRef references a Secret containing
+                                  cloud-init data
+                                properties:
+                                  name:
+                                    description: Name of the referenced object
+                                    type: string
+                                  namespace:
+                                    description: Namespace of the referenced object
+                                      (defaults to current namespace)
+                                    type: string
+                                required:
+                                - name
+                                type: object
+                            type: object
+                        type: object
+                    required:
+                    - classRef
+                    - imageRef
+                    - providerRef
+                    type: object
+                required:
+                - spec
+                type: object
+              updateStrategy:
+                description: UpdateStrategy defines how to replace existing VMs with
+                  new ones
+                properties:
+                  rollingUpdate:
+                    description: RollingUpdate is used when Type is RollingUpdate
+                    properties:
+                      maxSurge:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: MaxSurge is the maximum number of VMs that can
+                          be created above desired replica count
+                        x-kubernetes-int-or-string: true
+                      maxUnavailable:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: MaxUnavailable is the maximum number of VMs that
+                          can be unavailable during update
+                        x-kubernetes-int-or-string: true
+                      partition:
+                        description: Partition indicates the ordinal at which the
+                          VMSet should be partitioned for updates
+                        format: int32
+                        type: integer
+                    type: object
+                  type:
+                    description: Type can be "RollingUpdate" or "OnDelete"
+                    enum:
+                    - RollingUpdate
+                    - OnDelete
+                    type: string
+                type: object
+            required:
+            - selector
+            - template
+            type: object
+          status:
+            description: VMSetStatus defines the observed state of VMSet
+            properties:
+              availableReplicas:
+                description: AvailableReplicas is the number of VMs that are available
+                format: int32
+                type: integer
+              collisionCount:
+                description: CollisionCount is the count of hash collisions for the
+                  VMSet
+                format: int32
+                type: integer
+              conditions:
+                description: Conditions represent the current service state
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              currentRevision:
+                description: CurrentRevision is the revision of the current VMSet
+                type: string
+              observedGeneration:
+                description: ObservedGeneration is the most recent generation observed
+                  by the controller
+                format: int64
+                type: integer
+              readyReplicas:
+                description: ReadyReplicas is the number of VMs that are ready
+                format: int32
+                type: integer
+              replicas:
+                description: Replicas is the number of VMs created by the VMSet controller
+                format: int32
+                type: integer
+              updateRevision:
+                description: UpdateRevision is the revision of the updated VMSet
+                type: string
+              updatedReplicas:
+                description: UpdatedReplicas is the number of VMs that have been updated
+                format: int32
+                type: integer
+            type: object
+        type: object
+    served: true
+    storage: false
+    subresources:
+      scale:
+        labelSelectorPath: .status.selector
+        specReplicasPath: .spec.replicas
+        statusReplicasPath: .status.replicas
+      status: {}
+  - additionalPrinterColumns:
+    - jsonPath: .spec.replicas
+      name: Desired
+      type: integer
+    - jsonPath: .status.replicas
+      name: Current
+      type: integer
+    - jsonPath: .status.readyReplicas
+      name: Ready
+      type: integer
+    - jsonPath: .status.updatedReplicas
+      name: Updated
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1beta1
+    schema:
+      openAPIV3Schema:
+        description: VMSet is the Schema for the vmsets API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: VMSetSpec defines the desired state of VMSet
+            properties:
+              minReadySeconds:
+                description: |-
+                  MinReadySeconds is the minimum number of seconds for which a newly created VM
+                  should be ready without any of its containers crashing
+                format: int32
+                maximum: 3600
+                minimum: 0
+                type: integer
+              ordinals:
+                description: Ordinals configures the sequential ordering of VM indices
+                properties:
+                  start:
+                    default: 0
+                    description: Start is the number representing the first replica's
+                      index
+                    format: int32
+                    maximum: 999999
+                    minimum: 0
+                    type: integer
+                type: object
+              persistentVolumeClaimRetentionPolicy:
+                description: PersistentVolumeClaimRetentionPolicy defines the retention
+                  policy for PVCs
+                properties:
+                  whenDeleted:
+                    allOf:
+                    - enum:
+                      - Retain
+                      - Delete
+                    - enum:
+                      - Retain
+                      - Delete
+                    default: Retain
+                    description: WhenDeleted specifies what happens to PVCs created
+                      from VMSet VolumeClaimTemplates when the VMSet is deleted
+                    type: string
+                  whenScaled:
+                    allOf:
+                    - enum:
+                      - Retain
+                      - Delete
+                    - enum:
+                      - Retain
+                      - Delete
+                    default: Retain
+                    description: WhenScaled specifies what happens to PVCs created
+                      from VMSet VolumeClaimTemplates when the VMSet is scaled down
+                    type: string
+                type: object
+              replicas:
+                default: 1
+                description: Replicas is the desired number of VMs in the set
+                format: int32
+                maximum: 1000
+                minimum: 0
+                type: integer
+              revisionHistoryLimit:
+                default: 10
+                description: RevisionHistoryLimit is the number of old VMSets to retain
+                format: int32
+                maximum: 100
+                minimum: 0
+                type: integer
+              selector:
+                description: Selector is a label query over VMs that should match
+                  the replica count
+                properties:
+                  matchExpressions:
+                    description: matchExpressions is a list of label selector requirements.
+                      The requirements are ANDed.
+                    items:
+                      description: |-
+                        A label selector requirement is a selector that contains values, a key, and an operator that
+                        relates the key and values.
+                      properties:
+                        key:
+                          description: key is the label key that the selector applies
+                            to.
+                          type: string
+                        operator:
+                          description: |-
+                            operator represents a key's relationship to a set of values.
+                            Valid operators are In, NotIn, Exists and DoesNotExist.
+                          type: string
+                        values:
+                          description: |-
+                            values is an array of string values. If the operator is In or NotIn,
+                            the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                            the values array must be empty. This array is replaced during a strategic
+                            merge patch.
+                          items:
+                            type: string
+                          type: array
+                          x-kubernetes-list-type: atomic
+                      required:
+                      - key
+                      - operator
+                      type: object
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  matchLabels:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                      map is equivalent to an element of matchExpressions, whose key field is "key", the
+                      operator is "In", and the values array contains only "value". The requirements are ANDed.
+                    type: object
+                type: object
+                x-kubernetes-map-type: atomic
+              serviceName:
+                description: ServiceName is the name of the service that governs this
+                  VMSet
+                maxLength: 253
+                type: string
+              template:
+                description: Template is the object that describes the VM that will
+                  be created
+                properties:
+                  metadata:
+                    description: ObjectMeta is metadata for VMs created from this
+                      template
+                    type: object
+                  spec:
+                    description: Spec is the VM specification
+                    properties:
+                      classRef:
+                        description: ClassRef references the VMClass that defines
+                          resource allocation
+                        properties:
+                          name:
+                            description: Name of the referenced object
+                            maxLength: 253
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                            type: string
+                          namespace:
+                            description: Namespace of the referenced object (defaults
+                              to current namespace)
+                            maxLength: 63
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      disks:
+                        description: Disks specifies additional disks beyond the root
+                          disk
+                        items:
+                          description: DiskSpec defines a disk configuration
+                          properties:
+                            expandPolicy:
+                              default: Offline
+                              description: ExpandPolicy defines how the disk can be
+                                expanded
+                              enum:
+                              - Online
+                              - Offline
+                              type: string
+                            name:
+                              description: Name is the disk identifier
+                              maxLength: 63
+                              pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                              type: string
+                            sizeGiB:
+                              description: SizeGiB is the size of the disk in GiB
+                              format: int32
+                              maximum: 65536
+                              minimum: 1
+                              type: integer
+                            storageClass:
+                              description: StorageClass specifies the storage class
+                                (optional)
+                              type: string
+                            type:
+                              default: thin
+                              description: Type specifies the disk type (provider-specific)
+                              enum:
+                              - thin
+                              - thick
+                              - eagerzeroedthick
+                              - ssd
+                              - hdd
+                              type: string
+                          required:
+                          - name
+                          - sizeGiB
+                          type: object
+                        maxItems: 20
+                        type: array
+                      imageRef:
+                        description: ImageRef references the VMImage to use as base
+                          template
+                        properties:
+                          name:
+                            description: Name of the referenced object
+                            maxLength: 253
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                            type: string
+                          namespace:
+                            description: Namespace of the referenced object (defaults
+                              to current namespace)
+                            maxLength: 63
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      lifecycle:
+                        description: Lifecycle defines VM lifecycle configuration
+                        properties:
+                          gracefulShutdownTimeout:
+                            default: 60s
+                            description: GracefulShutdownTimeout defines how long
+                              to wait for graceful shutdown
+                            type: string
+                          postStart:
+                            description: PostStart defines actions to take after starting
+                              the VM
+                            properties:
+                              exec:
+                                description: Exec specifies a command to execute
+                                properties:
+                                  command:
+                                    description: Command is the command line to execute
+                                    items:
+                                      type: string
+                                    minItems: 1
+                                    type: array
+                                required:
+                                - command
+                                type: object
+                              httpGet:
+                                description: HTTPGet specifies an HTTP GET request
+                                properties:
+                                  host:
+                                    description: Host name to connect to (defaults
+                                      to VM IP)
+                                    type: string
+                                  path:
+                                    description: Path is the HTTP path to access
+                                    type: string
+                                  port:
+                                    description: Port is the port to access
+                                    format: int32
+                                    maximum: 65535
+                                    minimum: 1
+                                    type: integer
+                                  scheme:
+                                    default: HTTP
+                                    description: Scheme to use for connecting (HTTP
+                                      or HTTPS)
+                                    enum:
+                                    - HTTP
+                                    - HTTPS
+                                    type: string
+                                required:
+                                - port
+                                type: object
+                              snapshot:
+                                description: Snapshot specifies a snapshot to create
+                                properties:
+                                  description:
+                                    description: Description provides context for
+                                      the snapshot
+                                    type: string
+                                  includeMemory:
+                                    description: IncludeMemory indicates whether to
+                                      include memory state
+                                    type: boolean
+                                  name:
+                                    description: Name is the name hint for the snapshot
+                                    type: string
+                                required:
+                                - name
+                                type: object
+                            type: object
+                          preStop:
+                            description: PreStop defines actions to take before stopping
+                              the VM
+                            properties:
+                              exec:
+                                description: Exec specifies a command to execute
+                                properties:
+                                  command:
+                                    description: Command is the command line to execute
+                                    items:
+                                      type: string
+                                    minItems: 1
+                                    type: array
+                                required:
+                                - command
+                                type: object
+                              httpGet:
+                                description: HTTPGet specifies an HTTP GET request
+                                properties:
+                                  host:
+                                    description: Host name to connect to (defaults
+                                      to VM IP)
+                                    type: string
+                                  path:
+                                    description: Path is the HTTP path to access
+                                    type: string
+                                  port:
+                                    description: Port is the port to access
+                                    format: int32
+                                    maximum: 65535
+                                    minimum: 1
+                                    type: integer
+                                  scheme:
+                                    default: HTTP
+                                    description: Scheme to use for connecting (HTTP
+                                      or HTTPS)
+                                    enum:
+                                    - HTTP
+                                    - HTTPS
+                                    type: string
+                                required:
+                                - port
+                                type: object
+                              snapshot:
+                                description: Snapshot specifies a snapshot to create
+                                properties:
+                                  description:
+                                    description: Description provides context for
+                                      the snapshot
+                                    type: string
+                                  includeMemory:
+                                    description: IncludeMemory indicates whether to
+                                      include memory state
+                                    type: boolean
+                                  name:
+                                    description: Name is the name hint for the snapshot
+                                    type: string
+                                required:
+                                - name
+                                type: object
+                            type: object
+                        type: object
+                      networks:
+                        description: Networks specifies network attachments for the
+                          VM
+                        items:
+                          description: VMNetworkRef represents a reference to a network
+                            attachment
+                          properties:
+                            ipAddress:
+                              description: IPAddress specifies a static IP address
+                                (optional)
+                              pattern: ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$
+                              type: string
+                            macAddress:
+                              description: MACAddress specifies a static MAC address
+                                (optional)
+                              pattern: ^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$
+                              type: string
+                            name:
+                              description: Name is the name of this network attachment
+                              maxLength: 63
+                              pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                              type: string
+                            networkRef:
+                              description: NetworkRef references the VMNetworkAttachment
+                              properties:
+                                name:
+                                  description: Name of the referenced object
+                                  maxLength: 253
+                                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                  type: string
+                                namespace:
+                                  description: Namespace of the referenced object
+                                    (defaults to current namespace)
+                                  maxLength: 63
+                                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                  type: string
+                              required:
+                              - name
+                              type: object
+                          required:
+                          - name
+                          - networkRef
+                          type: object
+                        maxItems: 10
+                        type: array
+                      placement:
+                        description: Placement provides hints for VM placement
+                        properties:
+                          cluster:
+                            description: Cluster specifies the target cluster
+                            type: string
+                          datastore:
+                            description: Datastore specifies the target datastore
+                            type: string
+                          folder:
+                            description: Folder specifies the target folder
+                            type: string
+                          host:
+                            description: Host specifies the target host
+                            type: string
+                          resourcePool:
+                            description: ResourcePool specifies the target resource
+                              pool
+                            type: string
+                        type: object
+                      placementRef:
+                        description: PlacementRef references a VMPlacementPolicy for
+                          advanced placement rules
+                        properties:
+                          name:
+                            description: Name of the referenced object
+                            maxLength: 253
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      powerState:
+                        allOf:
+                        - enum:
+                          - "On"
+                          - "Off"
+                        - enum:
+                          - "On"
+                          - "Off"
+                        default: "On"
+                        description: PowerState specifies the desired power state
+                        type: string
+                      providerRef:
+                        description: ProviderRef references the Provider that manages
+                          this VM
+                        properties:
+                          name:
+                            description: Name of the referenced object
+                            maxLength: 253
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                            type: string
+                          namespace:
+                            description: Namespace of the referenced object (defaults
+                              to current namespace)
+                            maxLength: 63
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      resources:
+                        description: Resources allows overriding resource allocation
+                          from the VMClass
+                        properties:
+                          cpu:
+                            description: CPU specifies the number of virtual CPUs
+                            format: int32
+                            maximum: 128
+                            minimum: 1
+                            type: integer
+                          gpu:
+                            description: GPU specifies GPU configuration
+                            properties:
+                              count:
+                                description: Count specifies the number of GPUs to
+                                  assign
+                                format: int32
+                                maximum: 8
+                                minimum: 1
+                                type: integer
+                              memory:
+                                description: Memory specifies GPU memory in MiB
+                                format: int64
+                                minimum: 512
+                                type: integer
+                              type:
+                                description: Type specifies the GPU type (provider-specific)
+                                pattern: ^[a-zA-Z0-9-_]+$
+                                type: string
+                            required:
+                            - count
+                            type: object
+                          memoryMiB:
+                            description: MemoryMiB specifies the amount of memory
+                              in MiB
+                            format: int64
+                            maximum: 1048576
+                            minimum: 128
+                            type: integer
+                        type: object
+                      snapshot:
+                        description: Snapshot defines snapshot-related operations
+                        properties:
+                          revertToRef:
+                            description: RevertToRef specifies a snapshot to revert
+                              to
+                            properties:
+                              name:
+                                description: Name of the referenced object
+                                maxLength: 253
+                                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                type: string
+                            required:
+                            - name
+                            type: object
+                        type: object
+                      tags:
+                        description: Tags are applied to the VM for organization
+                        items:
+                          type: string
+                        maxItems: 50
+                        type: array
+                      userData:
+                        description: UserData contains cloud-init configuration
+                        properties:
+                          cloudInit:
+                            description: CloudInit contains cloud-init configuration
+                            properties:
+                              inline:
+                                description: Inline contains inline cloud-init data
+                                type: string
+                              secretRef:
+                                description: SecretRef references a Secret containing
+                                  cloud-init data
+                                properties:
+                                  name:
+                                    description: Name of the referenced object
+                                    maxLength: 253
+                                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                    type: string
+                                required:
+                                - name
+                                type: object
+                            type: object
+                          ignition:
+                            description: Ignition contains Ignition configuration
+                              for CoreOS/RHEL
+                            properties:
+                              inline:
+                                description: Inline contains inline Ignition data
+                                type: string
+                              secretRef:
+                                description: SecretRef references a Secret containing
+                                  Ignition data
+                                properties:
+                                  name:
+                                    description: Name of the referenced object
+                                    maxLength: 253
+                                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                    type: string
+                                required:
+                                - name
+                                type: object
+                            type: object
+                        type: object
+                    required:
+                    - classRef
+                    - imageRef
+                    - providerRef
+                    type: object
+                required:
+                - spec
+                type: object
+              updateStrategy:
+                description: UpdateStrategy defines how to replace existing VMs with
+                  new ones
+                properties:
+                  rollingUpdate:
+                    description: RollingUpdate is used when Type is RollingUpdate
+                    properties:
+                      maxSurge:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        default: 25%
+                        description: MaxSurge is the maximum number of VMs that can
+                          be created above desired replica count
+                        x-kubernetes-int-or-string: true
+                      maxUnavailable:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        default: 25%
+                        description: MaxUnavailable is the maximum number of VMs that
+                          can be unavailable during update
+                        x-kubernetes-int-or-string: true
+                      partition:
+                        description: Partition indicates the ordinal at which the
+                          VMSet should be partitioned for updates
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      podManagementPolicy:
+                        allOf:
+                        - enum:
+                          - OrderedReady
+                          - Parallel
+                        - enum:
+                          - OrderedReady
+                          - Parallel
+                        default: OrderedReady
+                        description: |-
+                          PodManagementPolicy controls how VMs are created during initial scale up,
+                          when replacing VMs on nodes, or when scaling down
+                        type: string
+                    type: object
+                  type:
+                    default: RollingUpdate
+                    description: Type can be "RollingUpdate" or "OnDelete"
+                    enum:
+                    - RollingUpdate
+                    - OnDelete
+                    - Recreate
+                    type: string
+                type: object
+              volumeClaimTemplates:
+                description: VolumeClaimTemplates defines a list of claims that VMs
+                  are allowed to reference
+                items:
+                  description: PersistentVolumeClaimTemplate describes a PVC template
+                    for VMSet VMs
+                  properties:
+                    metadata:
+                      description: ObjectMeta is the standard object metadata
+                      type: object
+                    spec:
+                      description: Spec is the desired characteristics of the volume
+                      properties:
+                        accessModes:
+                          description: |-
+                            accessModes contains the desired access modes the volume should have.
+                            More info: https://kubernetes.io/docs/concepts/storage/persistent-volumes#access-modes-1
+                          items:
+                            type: string
+                          type: array
+                          x-kubernetes-list-type: atomic
+                        dataSource:
+                          description: |-
+                            dataSource field can be used to specify either:
+                            * An existing VolumeSnapshot object (snapshot.storage.k8s.io/VolumeSnapshot)
+                            * An existing PVC (PersistentVolumeClaim)
+                            If the provisioner or an external controller can support the specified data source,
+                            it will create a new volume based on the contents of the specified data source.
+                            When the AnyVolumeDataSource feature gate is enabled, dataSource contents will be copied to dataSourceRef,
+                            and dataSourceRef contents will be copied to dataSource when dataSourceRef.namespace is not specified.
+                            If the namespace is specified, then dataSourceRef will not be copied to dataSource.
+                          properties:
+                            apiGroup:
+                              description: |-
+                                APIGroup is the group for the resource being referenced.
+                                If APIGroup is not specified, the specified Kind must be in the core API group.
+                                For any other third-party types, APIGroup is required.
+                              type: string
+                            kind:
+                              description: Kind is the type of resource being referenced
+                              type: string
+                            name:
+                              description: Name is the name of resource being referenced
+                              type: string
+                          required:
+                          - kind
+                          - name
+                          type: object
+                          x-kubernetes-map-type: atomic
+                        dataSourceRef:
+                          description: |-
+                            dataSourceRef specifies the object from which to populate the volume with data, if a non-empty
+                            volume is desired. This may be any object from a non-empty API group (non
+                            core object) or a PersistentVolumeClaim object.
+                            When this field is specified, volume binding will only succeed if the type of
+                            the specified object matches some installed volume populator or dynamic
+                            provisioner.
+                            This field will replace the functionality of the dataSource field and as such
+                            if both fields are non-empty, they must have the same value. For backwards
+                            compatibility, when namespace isn't specified in dataSourceRef,
+                            both fields (dataSource and dataSourceRef) will be set to the same
+                            value automatically if one of them is empty and the other is non-empty.
+                            When namespace is specified in dataSourceRef,
+                            dataSource isn't set to the same value and must be empty.
+                            There are three important differences between dataSource and dataSourceRef:
+                            * While dataSource only allows two specific types of objects, dataSourceRef
+                              allows any non-core object, as well as PersistentVolumeClaim objects.
+                            * While dataSource ignores disallowed values (dropping them), dataSourceRef
+                              preserves all values, and generates an error if a disallowed value is
+                              specified.
+                            * While dataSource only allows local objects, dataSourceRef allows objects
+                              in any namespaces.
+                            (Beta) Using this field requires the AnyVolumeDataSource feature gate to be enabled.
+                            (Alpha) Using the namespace field of dataSourceRef requires the CrossNamespaceVolumeDataSource feature gate to be enabled.
+                          properties:
+                            apiGroup:
+                              description: |-
+                                APIGroup is the group for the resource being referenced.
+                                If APIGroup is not specified, the specified Kind must be in the core API group.
+                                For any other third-party types, APIGroup is required.
+                              type: string
+                            kind:
+                              description: Kind is the type of resource being referenced
+                              type: string
+                            name:
+                              description: Name is the name of resource being referenced
+                              type: string
+                            namespace:
+                              description: |-
+                                Namespace is the namespace of resource being referenced
+                                Note that when a namespace is specified, a gateway.networking.k8s.io/ReferenceGrant object is required in the referent namespace to allow that namespace's owner to accept the reference. See the ReferenceGrant documentation for details.
+                                (Alpha) This field requires the CrossNamespaceVolumeDataSource feature gate to be enabled.
+                              type: string
+                          required:
+                          - kind
+                          - name
+                          type: object
+                        resources:
+                          description: |-
+                            resources represents the minimum resources the volume should have.
+                            If RecoverVolumeExpansionFailure feature is enabled users are allowed to specify resource requirements
+                            that are lower than previous value but must still be higher than capacity recorded in the
+                            status field of the claim.
+                            More info: https://kubernetes.io/docs/concepts/storage/persistent-volumes#resources
+                          properties:
+                            limits:
+                              additionalProperties:
+                                anyOf:
+                                - type: integer
+                                - type: string
+                                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                x-kubernetes-int-or-string: true
+                              description: |-
+                                Limits describes the maximum amount of compute resources allowed.
+                                More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                              type: object
+                            requests:
+                              additionalProperties:
+                                anyOf:
+                                - type: integer
+                                - type: string
+                                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                x-kubernetes-int-or-string: true
+                              description: |-
+                                Requests describes the minimum amount of compute resources required.
+                                If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                                otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                                More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                              type: object
+                          type: object
+                        selector:
+                          description: selector is a label query over volumes to consider
+                            for binding.
+                          properties:
+                            matchExpressions:
+                              description: matchExpressions is a list of label selector
+                                requirements. The requirements are ANDed.
+                              items:
+                                description: |-
+                                  A label selector requirement is a selector that contains values, a key, and an operator that
+                                  relates the key and values.
+                                properties:
+                                  key:
+                                    description: key is the label key that the selector
+                                      applies to.
+                                    type: string
+                                  operator:
+                                    description: |-
+                                      operator represents a key's relationship to a set of values.
+                                      Valid operators are In, NotIn, Exists and DoesNotExist.
+                                    type: string
+                                  values:
+                                    description: |-
+                                      values is an array of string values. If the operator is In or NotIn,
+                                      the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                      the values array must be empty. This array is replaced during a strategic
+                                      merge patch.
+                                    items:
+                                      type: string
+                                    type: array
+                                    x-kubernetes-list-type: atomic
+                                required:
+                                - key
+                                - operator
+                                type: object
+                              type: array
+                              x-kubernetes-list-type: atomic
+                            matchLabels:
+                              additionalProperties:
+                                type: string
+                              description: |-
+                                matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                                map is equivalent to an element of matchExpressions, whose key field is "key", the
+                                operator is "In", and the values array contains only "value". The requirements are ANDed.
+                              type: object
+                          type: object
+                          x-kubernetes-map-type: atomic
+                        storageClassName:
+                          description: |-
+                            storageClassName is the name of the StorageClass required by the claim.
+                            More info: https://kubernetes.io/docs/concepts/storage/persistent-volumes#class-1
+                          type: string
+                        volumeAttributesClassName:
+                          description: |-
+                            volumeAttributesClassName may be used to set the VolumeAttributesClass used by this claim.
+                            If specified, the CSI driver will create or update the volume with the attributes defined
+                            in the corresponding VolumeAttributesClass. This has a different purpose than storageClassName,
+                            it can be changed after the claim is created. An empty string value means that no VolumeAttributesClass
+                            will be applied to the claim but it's not allowed to reset this field to empty string once it is set.
+                            If unspecified and the PersistentVolumeClaim is unbound, the default VolumeAttributesClass
+                            will be set by the persistentvolume controller if it exists.
+                            If the resource referred to by volumeAttributesClass does not exist, this PersistentVolumeClaim will be
+                            set to a Pending state, as reflected by the modifyVolumeStatus field, until such as a resource
+                            exists.
+                            More info: https://kubernetes.io/docs/concepts/storage/volume-attributes-classes/
+                            (Beta) Using this field requires the VolumeAttributesClass feature gate to be enabled (off by default).
+                          type: string
+                        volumeMode:
+                          description: |-
+                            volumeMode defines what type of volume is required by the claim.
+                            Value of Filesystem is implied when not included in claim spec.
+                          type: string
+                        volumeName:
+                          description: volumeName is the binding reference to the
+                            PersistentVolume backing this claim.
+                          type: string
+                      type: object
+                  required:
+                  - spec
+                  type: object
+                maxItems: 20
+                type: array
+            required:
+            - selector
+            - template
+            type: object
+          status:
+            description: VMSetStatus defines the observed state of VMSet
+            properties:
+              availableReplicas:
+                description: AvailableReplicas is the number of VMs that are available
+                format: int32
+                type: integer
+              collisionCount:
+                description: CollisionCount is the count of hash collisions for the
+                  VMSet
+                format: int32
+                type: integer
+              conditions:
+                description: Conditions represent the current service state
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              currentReplicas:
+                description: CurrentReplicas is the number of VMs currently running
+                format: int32
+                type: integer
+              currentRevision:
+                description: CurrentRevision is the revision of the current VMSet
+                type: string
+              observedGeneration:
+                description: ObservedGeneration is the most recent generation observed
+                  by the controller
+                format: int64
+                type: integer
+              readyReplicas:
+                description: ReadyReplicas is the number of VMs that are ready
+                format: int32
+                type: integer
+              replicas:
+                description: Replicas is the number of VMs created by the VMSet controller
+                format: int32
+                type: integer
+              updateRevision:
+                description: UpdateRevision is the revision of the updated VMSet
+                type: string
+              updateStatus:
+                description: UpdateStatus provides detailed update operation status
+                properties:
+                  completionTime:
+                    description: CompletionTime is when the update completed
+                    format: date-time
+                    type: string
+                  failedVMs:
+                    description: FailedVMs lists VMs that failed to update
+                    items:
+                      description: VMSetFailedVM represents a VM that failed to update
+                      properties:
+                        lastAttempt:
+                          description: LastAttempt is when the last update attempt
+                            was made
+                          format: date-time
+                          type: string
+                        message:
+                          description: Message provides additional details about the
+                            failure
+                          type: string
+                        name:
+                          description: Name is the name of the failed VM
+                          type: string
+                        reason:
+                          description: Reason provides the reason for failure
+                          type: string
+                        retryCount:
+                          description: RetryCount is the number of retry attempts
+                          format: int32
+                          type: integer
+                      required:
+                      - name
+                      type: object
+                    maxItems: 1000
+                    type: array
+                  message:
+                    description: Message provides additional details about the update
+                    type: string
+                  pendingVMs:
+                    description: PendingVMs lists VMs that are pending update
+                    items:
+                      type: string
+                    maxItems: 1000
+                    type: array
+                  phase:
+                    description: Phase represents the current phase of the update
+                    enum:
+                    - Pending
+                    - InProgress
+                    - Paused
+                    - Completed
+                    - Failed
+                    type: string
+                  startTime:
+                    description: StartTime is when the update started
+                    format: date-time
+                    type: string
+                  updatedVMs:
+                    description: UpdatedVMs lists VMs that have been updated
+                    items:
+                      type: string
+                    maxItems: 1000
+                    type: array
+                type: object
+              updatedReplicas:
+                description: UpdatedReplicas is the number of VMs that have been updated
+                format: int32
+                type: integer
+              vmStatus:
+                description: VMStatus provides per-VM status information
+                items:
+                  description: VMSetVMStatus provides per-VM status information
+                  properties:
+                    creationTime:
+                      description: CreationTime is when the VM was created
+                      format: date-time
+                      type: string
+                    lastUpdateTime:
+                      description: LastUpdateTime is when the VM was last updated
+                      format: date-time
+                      type: string
+                    message:
+                      description: Message provides additional VM status information
+                      type: string
+                    name:
+                      description: Name is the VM name
+                      type: string
+                    phase:
+                      description: Phase is the VM phase
+                      enum:
+                      - Pending
+                      - Provisioning
+                      - Running
+                      - Stopped
+                      - Reconfiguring
+                      - Deleting
+                      - Failed
+                      type: string
+                    ready:
+                      description: Ready indicates if the VM is ready
+                      type: boolean
+                    revision:
+                      description: Revision is the VM revision
+                      type: string
+                  required:
+                  - name
+                  type: object
+                maxItems: 1000
+                type: array
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      scale:
+        labelSelectorPath: .status.selector
+        specReplicasPath: .spec.replicas
+        statusReplicasPath: .status.replicas
+      status: {}

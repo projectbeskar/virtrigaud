@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"os/signal"
 	"syscall"
 
@@ -31,9 +32,16 @@ import (
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt"
 	providerv1 "github.com/projectbeskar/virtrigaud/internal/rpc/provider/v1"
+	"github.com/projectbeskar/virtrigaud/internal/version"
 )
 
 func main() {
+	// Handle --version flag before any other flag parsing
+	if len(os.Args) > 1 && os.Args[1] == "--version" {
+		fmt.Printf("virtrigaud-provider-libvirt %s\n", version.String())
+		os.Exit(0)
+	}
+
 	var port int
 	var healthPort int
 	flag.IntVar(&port, "port", 9443, "gRPC server port")
@@ -64,7 +72,7 @@ func main() {
 		log.Fatalf("Failed to listen: %v", err)
 	}
 
-	log.Printf("Libvirt provider server listening on port %d", port)
+	log.Printf("Libvirt provider server %s listening on port %d", version.String(), port)
 
 	// Start server in a goroutine
 	go func() {
