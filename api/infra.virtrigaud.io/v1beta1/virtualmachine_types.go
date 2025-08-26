@@ -459,6 +459,7 @@ const (
 //+kubebuilder:printcolumn:name="Image",type=string,JSONPath=`.spec.imageRef.name`
 //+kubebuilder:printcolumn:name="IPs",type=string,JSONPath=`.status.ips[*]`
 //+kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+//+kubebuilder:storageversion
 
 // VirtualMachine is the Schema for the virtualmachines API
 type VirtualMachine struct {

@@ -727,6 +727,7 @@ const (
 //+kubebuilder:resource:shortName=vmpp
 
 // VMPlacementPolicy is the Schema for the vmplacementpolicies API
+// +kubebuilder:storageversion
 type VMPlacementPolicy struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

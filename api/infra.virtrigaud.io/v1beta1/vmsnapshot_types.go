@@ -405,6 +405,7 @@ const (
 //+kubebuilder:resource:shortName=vmsnap
 
 // VMSnapshot is the Schema for the vmsnapshots API
+// +kubebuilder:storageversion
 type VMSnapshot struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

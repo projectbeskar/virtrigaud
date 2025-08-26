@@ -484,6 +484,7 @@ const (
 //+kubebuilder:resource:shortName=prov
 
 // Provider is the Schema for the providers API
+// +kubebuilder:storageversion
 type Provider struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

@@ -37,6 +37,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
+	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	infravirtrigaudiov1alpha1 "github.com/projectbeskar/virtrigaud/api/v1alpha1"
 	"github.com/projectbeskar/virtrigaud/internal/controller"
 	"github.com/projectbeskar/virtrigaud/internal/providers/registry"
@@ -54,6 +55,7 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
 	utilruntime.Must(infravirtrigaudiov1alpha1.AddToScheme(scheme))
+	utilruntime.Must(infravirtrigaudiov1beta1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 

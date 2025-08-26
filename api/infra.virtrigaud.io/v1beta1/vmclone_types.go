@@ -673,6 +673,7 @@ const (
 //+kubebuilder:resource:shortName=vmclone
 
 // VMClone is the Schema for the vmclones API
+// +kubebuilder:storageversion
 type VMClone struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

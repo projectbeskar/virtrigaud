@@ -652,6 +652,7 @@ const (
 //+kubebuilder:resource:shortName=vmimg
 
 // VMImage is the Schema for the vmimages API
+// +kubebuilder:storageversion
 type VMImage struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

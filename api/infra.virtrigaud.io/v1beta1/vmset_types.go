@@ -400,6 +400,7 @@ const (
 //+kubebuilder:resource:shortName=vmset
 
 // VMSet is the Schema for the vmsets API
+// +kubebuilder:storageversion
 type VMSet struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

@@ -304,6 +304,7 @@ const (
 //+kubebuilder:resource:shortName=vmclass
 
 // VMClass is the Schema for the vmclasses API
+// +kubebuilder:storageversion
 type VMClass struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

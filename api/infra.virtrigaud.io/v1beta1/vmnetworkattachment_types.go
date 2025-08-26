@@ -686,6 +686,7 @@ const (
 //+kubebuilder:resource:shortName=vmnet
 
 // VMNetworkAttachment is the Schema for the vmnetworkattachments API
+// +kubebuilder:storageversion
 type VMNetworkAttachment struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
