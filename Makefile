@@ -11,6 +11,11 @@ else
 GOBIN=$(shell go env GOBIN)
 endif
 
+# Version information
+VERSION ?= $(shell git describe --tags --always --dirty)
+GIT_SHA ?= $(shell git rev-parse HEAD)
+LDFLAGS := -X github.com/projectbeskar/virtrigaud/internal/version.Version=$(VERSION) -X github.com/projectbeskar/virtrigaud/internal/version.GitSHA=$(GIT_SHA)
+
 # CONTAINER_TOOL defines the container tool to be used for building images.
 # Be aware that the target commands are only tested with Docker which is
 # scaffolded by default. However, you might want to replace it to use other
@@ -117,7 +122,7 @@ proto: ## Generate gRPC stubs from protocol buffer definitions
 
 .PHONY: build
 build: manifests generate fmt vet ## Build manager binary.
-	go build -o bin/manager cmd/main.go
+	go build -ldflags "$(LDFLAGS)" -o bin/manager cmd/main.go
 
 .PHONY: build-provider-libvirt
 build-provider-libvirt: proto ## Build libvirt provider binary (requires CGO)

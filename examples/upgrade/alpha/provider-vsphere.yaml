@@ -1,17 +1,13 @@
-apiVersion: infra.virtrigaud.io/v1beta1
+apiVersion: infra.virtrigaud.io/v1alpha1
 kind: Provider
 metadata:
   name: vsphere-prod
   namespace: default
 spec:
   type: vsphere
-  connection:
-    endpoint: https://vcenter.example.com
-    auth:
-      secretRef:
-        name: vsphere-creds
-    tls:
-      insecure: false
+  endpoint: https://vcenter.example.com
+  credentialSecretRef:
+    name: vsphere-creds
   defaults:
     datastore: datastore1
     cluster: compute-cluster-a

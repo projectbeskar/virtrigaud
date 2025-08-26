@@ -19,6 +19,7 @@ package main
 import (
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -43,6 +44,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/providers/registry"
 	"github.com/projectbeskar/virtrigaud/internal/providers/vsphere"
 	"github.com/projectbeskar/virtrigaud/internal/runtime/remote"
+	"github.com/projectbeskar/virtrigaud/internal/version"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -61,6 +63,12 @@ func init() {
 
 // nolint:gocyclo
 func main() {
+	// Handle --version flag before any other flag parsing
+	if len(os.Args) > 1 && os.Args[1] == "--version" {
+		fmt.Printf("virtrigaud-manager %s\n", version.String())
+		os.Exit(0)
+	}
+
 	var metricsAddr string
 	var metricsCertPath, metricsCertName, metricsCertKey string
 	var webhookCertPath, webhookCertName, webhookCertKey string
@@ -206,6 +214,8 @@ func main() {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
 	}
+
+	setupLog.Info("Starting virtrigaud manager", "version", version.String())
 
 	// Create provider registry
 	providerRegistry := registry.NewRegistry()

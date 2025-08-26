@@ -1,12 +1,17 @@
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMNetworkAttachment
 metadata:
-  name: app-net
+  name: app-network
   namespace: default
 spec:
-  ipPolicy: dhcp
-  vsphere:
-    portgroup: "PG-App"
-  libvirt:
-    networkName: "default"
-    model: virtio
+  network:
+    type: distributed
+    identifier: "PG-App"
+  ipAllocation:
+    type: dhcp
+  provider:
+    vsphere:
+      portgroup: "PG-App"
+    libvirt:
+      networkName: "default"
+      model: virtio
