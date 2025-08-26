@@ -3,11 +3,54 @@ package v1alpha1
 import (
 	"testing"
 
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/api/testutil/roundtrip"
 )
+
+// VMClass fixture creation functions
+func createSimpleVMClassAlpha() *VMClass {
+	return &VMClass{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "infra.virtrigaud.io/v1alpha1",
+			Kind:       "VMClass",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-vmclass-simple",
+			Namespace: "test-ns",
+		},
+		Spec: VMClassSpec{
+			CPU:              2,
+			MemoryMiB:        2048,
+			Firmware:         "BIOS",
+			GuestToolsPolicy: "install",
+		},
+	}
+}
+
+func createSimpleVMClassBeta() *v1beta1.VMClass {
+	return &v1beta1.VMClass{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "infra.virtrigaud.io/v1beta1",
+			Kind:       "VMClass",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-vmclass-simple",
+			Namespace: "test-ns",
+		},
+		Spec: v1beta1.VMClassSpec{
+			CPU:              2,
+			Memory:           resource.MustParse("2Gi"),
+			Firmware:         v1beta1.FirmwareTypeBIOS,
+			GuestToolsPolicy: v1beta1.GuestToolsPolicyInstall,
+		},
+	}
+}
+
+// Placeholder fixtures for types not yet implemented
+// These will be completed when conversion implementations are added
 
 // createSimpleVirtualMachineAlpha creates a simple v1alpha1 VirtualMachine for testing
 func createSimpleVirtualMachineAlpha() *VirtualMachine {
@@ -187,11 +230,53 @@ func TestVirtualMachine_InvalidAlpha_ConversionError(t *testing.T) {
 	t.Skip("Skipping invalid conversion test - conversion implementation doesn't validate yet")
 }
 
-// TODO: Add tests for other CRDs once their conversion implementations are complete
-// func TestVMClass_AlphaBetaAlpha_RoundTrip(t *testing.T) { ... }
-// func TestVMImage_AlphaBetaAlpha_RoundTrip(t *testing.T) { ... }
-// func TestVMNetworkAttachment_AlphaBetaAlpha_RoundTrip(t *testing.T) { ... }
-// func TestVMSnapshot_AlphaBetaAlpha_RoundTrip(t *testing.T) { ... }
-// func TestVMClone_AlphaBetaAlpha_RoundTrip(t *testing.T) { ... }
-// func TestVMSet_AlphaBetaAlpha_RoundTrip(t *testing.T) { ... }
-// func TestVMPlacementPolicy_AlphaBetaAlpha_RoundTrip(t *testing.T) { ... }
+// VMClass Tests
+func TestVMClass_AlphaBetaAlpha_RoundTrip(t *testing.T) {
+	tests := []struct {
+		name  string
+		alpha *VMClass
+		beta  *v1beta1.VMClass
+	}{
+		{
+			name:  "simple_vmclass",
+			alpha: createSimpleVMClassAlpha(),
+			beta:  createSimpleVMClassBeta(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			roundtrip.RoundTripTest(t, tt.alpha, tt.beta)
+		})
+	}
+}
+
+// VMImage Tests - Skipped until conversion implementation is available
+func TestVMImage_AlphaBetaAlpha_RoundTrip(t *testing.T) {
+	t.Skip("VMImage conversion not yet implemented")
+}
+
+// VMNetworkAttachment Tests - Skipped until conversion implementation is available
+func TestVMNetworkAttachment_AlphaBetaAlpha_RoundTrip(t *testing.T) {
+	t.Skip("VMNetworkAttachment conversion not yet implemented")
+}
+
+// VMSnapshot Tests - Skipped until conversion implementation is available
+func TestVMSnapshot_AlphaBetaAlpha_RoundTrip(t *testing.T) {
+	t.Skip("VMSnapshot conversion not yet implemented")
+}
+
+// VMClone Tests - Skipped until conversion implementation is available
+func TestVMClone_AlphaBetaAlpha_RoundTrip(t *testing.T) {
+	t.Skip("VMClone conversion not yet implemented")
+}
+
+// VMSet Tests - Skipped until conversion implementation is available
+func TestVMSet_AlphaBetaAlpha_RoundTrip(t *testing.T) {
+	t.Skip("VMSet conversion not yet implemented")
+}
+
+// VMPlacementPolicy Tests - Skipped until conversion implementation is available
+func TestVMPlacementPolicy_AlphaBetaAlpha_RoundTrip(t *testing.T) {
+	t.Skip("VMPlacementPolicy conversion not yet implemented")
+}

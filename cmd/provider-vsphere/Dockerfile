@@ -30,7 +30,10 @@ RUN mkdir -p /go/bin && \
 # Build the provider binary (no CGO needed for vSphere)
 ARG TARGETOS
 ARG TARGETARCH
+ARG VERSION=dev
+ARG GIT_SHA=unknown
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
+    -ldflags "-X github.com/projectbeskar/virtrigaud/internal/version.Version=${VERSION} -X github.com/projectbeskar/virtrigaud/internal/version.GitSHA=${GIT_SHA}" \
     -a -o provider-vsphere cmd/provider-vsphere/main.go
 
 # Runtime stage - use distroless for minimal attack surface

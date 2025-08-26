@@ -37,7 +37,10 @@ RUN mkdir -p /go/bin && \
 # Build the provider binary
 ARG TARGETOS
 ARG TARGETARCH
+ARG VERSION=dev
+ARG GIT_SHA=unknown
 RUN CGO_ENABLED=1 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
+    -ldflags "-X github.com/projectbeskar/virtrigaud/internal/version.Version=${VERSION} -X github.com/projectbeskar/virtrigaud/internal/version.GitSHA=${GIT_SHA}" \
     -a -o provider-libvirt cmd/provider-libvirt/main.go
 
 # Runtime stage

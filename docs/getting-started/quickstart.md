@@ -19,7 +19,7 @@ This guide will get you up and running with Virtrigaud in 15 minutes using both 
 helm repo add virtrigaud https://projectbeskar.github.io/virtrigaud
 helm repo update
 
-# Install with default settings
+# Install with default settings (CRDs included automatically)
 helm install virtrigaud virtrigaud/virtrigaud \
   --namespace virtrigaud-system \
   --create-namespace
@@ -30,6 +30,12 @@ helm install virtrigaud virtrigaud/virtrigaud \
   --create-namespace \
   --set providers.vsphere.enabled=true \
   --set providers.libvirt.enabled=true
+
+# To skip CRDs if already installed separately
+helm install virtrigaud virtrigaud/virtrigaud \
+  --namespace virtrigaud-system \
+  --create-namespace \
+  --skip-crds
 ```
 
 ### Using Kustomize
@@ -54,6 +60,9 @@ kubectl get pods -n virtrigaud-system
 
 # Check CRDs are installed
 kubectl get crds | grep virtrigaud
+
+# Verify API conversion is working (v1alpha1 <-> v1beta1)
+kubectl get crd virtualmachines.infra.virtrigaud.io -o yaml | yq '.spec.conversion'
 
 # Check manager logs
 kubectl logs -n virtrigaud-system deployment/virtrigaud-manager

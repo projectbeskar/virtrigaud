@@ -9,8 +9,9 @@ Virtrigaud is a Kubernetes operator that enables declarative management of virtu
 ## Features
 
 - **Multi-Hypervisor Support**: Manage VMs across vSphere and Libvirt/KVM simultaneously
-- **Declarative API**: Define VM resources using Kubernetes CRDs
+- **Declarative API**: Define VM resources using Kubernetes CRDs with API versioning (v1alpha1/v1beta1)
 - **Production-Ready Providers**: Full integration for both vSphere (govmomi) and Libvirt/KVM
+- **API Conversion**: Seamless conversion between v1alpha1 and v1beta1 API versions via webhooks
 - **Cloud-Init Support**: Initialize VMs with cloud-init configuration across all providers
 - **Network Management**: Configure VM networking with provider-specific settings
 - **Power Management**: Control VM power state (On/Off/Reboot) uniformly
@@ -58,7 +59,7 @@ Virtrigaud is a Kubernetes operator that enables declarative management of virtu
 
 2. **Install VirtRigaud**:
    ```bash
-   # Basic installation
+   # Basic installation (CRDs included automatically)
    helm install virtrigaud virtrigaud/virtrigaud -n virtrigaud --create-namespace
    
    # With custom values
@@ -67,12 +68,21 @@ Virtrigaud is a Kubernetes operator that enables declarative management of virtu
      --set webhooks.enabled=true \
      --set providers.vsphere.enabled=true \
      --set providers.libvirt.enabled=false
+   
+   # Skip CRDs if already installed separately
+   helm install virtrigaud virtrigaud/virtrigaud -n virtrigaud --create-namespace --skip-crds
    ```
 
 3. **Verify the installation**:
    ```bash
+   # Check pods
    kubectl get pods -n virtrigaud
+   
+   # Check CRDs
    kubectl get crd | grep virtrigaud
+   
+   # Verify API conversion is working
+   kubectl get crd virtualmachines.infra.virtrigaud.io -o yaml | yq '.spec.conversion'
    ```
 
 ### Development Installation
@@ -91,11 +101,13 @@ Virtrigaud is a Kubernetes operator that enables declarative management of virtu
 
 1. **Create provider and VM resources**:
    ```bash
-   # vSphere example
+   # vSphere example (v1beta1 API)
    kubectl apply -f examples/complete-example.yaml
    
-   # Libvirt/KVM example
+   # Libvirt/KVM example (v1beta1 API)
    kubectl apply -f examples/libvirt-complete-example.yaml
+   
+   # For v1alpha1 examples (legacy), see examples/upgrade/alpha/
    
    # Multi-provider example (both vSphere and Libvirt)
    kubectl apply -f examples/multi-provider-example.yaml
@@ -146,6 +158,52 @@ For detailed instructions, see [QUICKSTART.md](QUICKSTART.md).
   
 - **Firecracker**: Future roadmap
 - **QEMU**: Future roadmap
+
+## Troubleshooting
+
+### API Conversion Issues
+
+If you encounter issues with API conversion between v1alpha1 and v1beta1:
+
+1. **Verify conversion webhook is running**:
+   ```bash
+   kubectl get pods -n virtrigaud -l app=virtrigaud-webhook
+   ```
+
+2. **Check conversion webhook configuration**:
+   ```bash
+   kubectl get crd virtualmachines.infra.virtrigaud.io -o yaml | yq '.spec.conversion'
+   ```
+
+3. **Verify webhook service**:
+   ```bash
+   kubectl get svc -n virtrigaud virtrigaud-webhook
+   ```
+
+4. **Check webhook logs**:
+   ```bash
+   kubectl logs -n virtrigaud -l app=virtrigaud-webhook
+   ```
+
+### Missing CRDs
+
+If CRDs are missing after Helm install:
+
+1. **Check if CRDs were skipped**:
+   ```bash
+   helm get values virtrigaud -n virtrigaud | grep skip-crds
+   ```
+
+2. **Manually install CRDs**:
+   ```bash
+   kubectl apply -f charts/virtrigaud/crds/
+   ```
+
+3. **Re-install with CRDs**:
+   ```bash
+   helm uninstall virtrigaud -n virtrigaud
+   helm install virtrigaud virtrigaud/virtrigaud -n virtrigaud --create-namespace
+   ```
 
 ## Development
 

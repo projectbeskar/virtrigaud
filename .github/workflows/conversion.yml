@@ -78,6 +78,13 @@ jobs:
     - name: Install controller-gen
       run: go install sigs.k8s.io/controller-tools/cmd/controller-gen@latest
 
+    - name: Install setup-envtest
+      run: go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
+
+    - name: Setup envtest (Kubernetes v1.30)
+      run: |
+        echo "KUBEBUILDER_ASSETS=$(setup-envtest use -p path 1.30.x)" >> $GITHUB_ENV
+
     - name: Generate CRDs with conversion webhooks
       run: make manifests
 

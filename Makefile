@@ -144,7 +144,7 @@ run: manifests generate fmt vet ## Run a controller from your host.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
 .PHONY: docker-build
 docker-build: ## Build docker image with the manager.
-	$(CONTAINER_TOOL) build -t ${IMG} .
+	$(CONTAINER_TOOL) build -t ${IMG} --build-arg VERSION=$(VERSION) --build-arg GIT_SHA=$(GIT_SHA) .
 
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
@@ -152,11 +152,13 @@ docker-push: ## Push docker image with the manager.
 
 .PHONY: docker-provider-libvirt
 docker-provider-libvirt: ## Build docker image for libvirt provider
-	$(CONTAINER_TOOL) build -f cmd/provider-libvirt/Dockerfile -t $(PROVIDER_LIBVIRT_IMG) .
+	$(CONTAINER_TOOL) build -f cmd/provider-libvirt/Dockerfile -t $(PROVIDER_LIBVIRT_IMG) \
+		--build-arg VERSION=$(VERSION) --build-arg GIT_SHA=$(GIT_SHA) .
 
 .PHONY: docker-provider-vsphere
 docker-provider-vsphere: ## Build docker image for vsphere provider
-	$(CONTAINER_TOOL) build -f cmd/provider-vsphere/Dockerfile -t $(PROVIDER_VSPHERE_IMG) .
+	$(CONTAINER_TOOL) build -f cmd/provider-vsphere/Dockerfile -t $(PROVIDER_VSPHERE_IMG) \
+		--build-arg VERSION=$(VERSION) --build-arg GIT_SHA=$(GIT_SHA) .
 
 .PHONY: docker-providers
 docker-providers: docker-provider-libvirt docker-provider-vsphere ## Build all provider docker images
