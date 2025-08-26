@@ -443,6 +443,46 @@ func TestVirtualMachine_AlphaBetaAlpha_RoundTrip(t *testing.T) {
 	}
 }
 
+// createVirtualMachineWithEmptyPowerStateAlpha creates a VM with explicitly empty PowerState
+func createVirtualMachineWithEmptyPowerStateAlpha() *VirtualMachine {
+	vm := createSimpleVirtualMachineAlpha()
+	vm.ObjectMeta.Name = "test-vm-empty-powerstate"
+	// Explicitly ensure PowerState is empty (default Go zero value)
+	vm.Spec.PowerState = ""
+	vm.Status.PowerState = ""
+	return vm
+}
+
+func createVirtualMachineWithEmptyPowerStateBeta() *v1beta1.VirtualMachine {
+	vm := createSimpleVirtualMachineBeta()
+	vm.ObjectMeta.Name = "test-vm-empty-powerstate"
+	// Explicitly ensure PowerState is empty (default Go zero value)
+	vm.Spec.PowerState = ""
+	vm.Status.PowerState = ""
+	vm.Status.Phase = ""
+	return vm
+}
+
+func TestVirtualMachine_AlphaBetaAlpha_RoundTrip_EmptyPowerState(t *testing.T) {
+	tests := []struct {
+		name  string
+		alpha *VirtualMachine
+		beta  *v1beta1.VirtualMachine
+	}{
+		{
+			name:  "vm_empty_powerstate",
+			alpha: createVirtualMachineWithEmptyPowerStateAlpha(),
+			beta:  createVirtualMachineWithEmptyPowerStateBeta(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			roundtrip.RoundTripTest(t, tt.alpha, tt.beta)
+		})
+	}
+}
+
 func TestProvider_AlphaBetaAlpha_RoundTrip(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -576,6 +616,23 @@ func TestVMClone_AlphaBetaAlpha_RoundTrip(t *testing.T) {
 	}
 }
 
+// createVMSetWithEmptyPowerStateAlpha creates a VMSet with explicitly empty PowerState
+func createVMSetWithEmptyPowerStateAlpha() *VMSet {
+	vmset := createSimpleVMSetAlpha()
+	vmset.ObjectMeta.Name = "test-vmset-empty-powerstate"
+	// Explicitly ensure PowerState is empty (default Go zero value)
+	vmset.Spec.Template.Spec.PowerState = ""
+	return vmset
+}
+
+func createVMSetWithEmptyPowerStateBeta() *v1beta1.VMSet {
+	vmset := createSimpleVMSetBeta()
+	vmset.ObjectMeta.Name = "test-vmset-empty-powerstate"
+	// Explicitly ensure PowerState is empty (default Go zero value)
+	vmset.Spec.Template.Spec.PowerState = ""
+	return vmset
+}
+
 // VMSet Tests
 func TestVMSet_AlphaBetaAlpha_RoundTrip(t *testing.T) {
 	tests := []struct {
@@ -587,6 +644,11 @@ func TestVMSet_AlphaBetaAlpha_RoundTrip(t *testing.T) {
 			name:  "simple_vmset",
 			alpha: createSimpleVMSetAlpha(),
 			beta:  createSimpleVMSetBeta(),
+		},
+		{
+			name:  "vmset_empty_powerstate",
+			alpha: createVMSetWithEmptyPowerStateAlpha(),
+			beta:  createVMSetWithEmptyPowerStateBeta(),
 		},
 	}
 

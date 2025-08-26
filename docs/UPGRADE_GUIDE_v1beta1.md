@@ -23,7 +23,7 @@ All conversions between v1alpha1 and v1beta1 are **lossless** and **automatic**.
 
 | v1alpha1 Field | v1beta1 Field | Notes |
 |----------------|---------------|--------|
-| `spec.powerState` (string) | `spec.powerState` (PowerState enum) | Converted to typed enum |
+| `spec.powerState` (string) | `spec.powerState` (PowerState enum) | Converted to typed enum. Note: Conversions do not apply defaults - if your resources relied on implicit defaults for powerState, set it explicitly or enable mutating webhooks |
 | `spec.networks[].ipPolicy` | Removed | Replaced with explicit IP configuration |
 | `spec.networks[].staticIP` | `spec.networks[].ipAddress` | Renamed for clarity |
 | `spec.networks[].name` | `spec.networks[].networkRef.name` | Enhanced network reference |

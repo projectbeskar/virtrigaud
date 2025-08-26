@@ -85,13 +85,10 @@ func convertVMSetSpecToV1Beta1(src *VMSetSpec, dst *v1beta1.VMSetSpec) error {
 		ObjectMeta: src.Template.ObjectMeta,
 	}
 
-	// Convert embedded VirtualMachine spec using the VM conversion helper
-	srcVM := &VirtualMachine{Spec: src.Template.Spec}
-	dstVM := &v1beta1.VirtualMachine{}
-	if err := srcVM.ConvertTo(dstVM); err != nil {
+	// Convert embedded VirtualMachine spec using direct spec conversion (no defaulting)
+	if err := convertVirtualMachineSpec(&src.Template.Spec, &dst.Template.Spec); err != nil {
 		return fmt.Errorf("failed to convert embedded VM spec: %w", err)
 	}
-	dst.Template.Spec = dstVM.Spec
 
 	// Convert update strategy
 	if err := convertVMSetUpdateStrategyToV1Beta1(&src.UpdateStrategy, &dst.UpdateStrategy); err != nil {
@@ -120,13 +117,10 @@ func convertVMSetSpecFromV1Beta1(src *v1beta1.VMSetSpec, dst *VMSetSpec) error {
 		ObjectMeta: src.Template.ObjectMeta,
 	}
 
-	// Convert embedded VirtualMachine spec using the VM conversion helper
-	srcVM := &v1beta1.VirtualMachine{Spec: src.Template.Spec}
-	dstVM := &VirtualMachine{}
-	if err := dstVM.ConvertFrom(srcVM); err != nil {
+	// Convert embedded VirtualMachine spec using direct spec conversion (no defaulting)
+	if err := convertVirtualMachineSpecFromBeta(&src.Template.Spec, &dst.Template.Spec); err != nil {
 		return fmt.Errorf("failed to convert embedded VM spec: %w", err)
 	}
-	dst.Template.Spec = dstVM.Spec
 
 	// Convert update strategy
 	if err := convertVMSetUpdateStrategyFromV1Beta1(&src.UpdateStrategy, &dst.UpdateStrategy); err != nil {

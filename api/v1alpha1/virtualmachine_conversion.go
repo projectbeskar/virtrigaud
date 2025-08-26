@@ -130,13 +130,13 @@ func convertVirtualMachineSpec(src *VirtualMachineSpec, dst *v1beta1.VirtualMach
 	}
 
 	// Convert PowerState - alpha uses string, beta uses typed enum
+	// Only set if source has a value, do not apply defaults in conversion
 	switch src.PowerState {
 	case "On":
 		dst.PowerState = v1beta1.PowerStateOn
 	case "Off":
 		dst.PowerState = v1beta1.PowerStateOff
-	default:
-		dst.PowerState = v1beta1.PowerStateOn // Default to On
+		// default: leave dst.PowerState empty (no defaulting in conversion)
 	}
 
 	// Convert Tags
@@ -195,13 +195,13 @@ func convertVirtualMachineStatus(src *VirtualMachineStatus, dst *v1beta1.Virtual
 	dst.Snapshots = make([]v1beta1.VMSnapshotInfo, len(src.Snapshots))
 
 	// Convert PowerState - alpha uses string, beta uses typed enum
+	// Only set if source has a value, do not apply defaults in conversion
 	switch src.PowerState {
 	case "On":
 		dst.PowerState = v1beta1.PowerStateOn
 	case "Off":
 		dst.PowerState = v1beta1.PowerStateOff
-	default:
-		dst.PowerState = v1beta1.PowerStateOn // Default to On
+		// default: leave dst.PowerState empty (no defaulting in conversion)
 	}
 
 	// Convert CurrentResources
@@ -231,9 +231,9 @@ func convertVirtualMachineStatus(src *VirtualMachineStatus, dst *v1beta1.Virtual
 		}
 	}
 
-	// New fields in beta - set sensible defaults
-	dst.Phase = v1beta1.VirtualMachinePhaseRunning // Default phase
-	dst.Message = ""                               // No equivalent in alpha
+	// New fields in beta - do not apply defaults in conversion
+	// dst.Phase left empty (no defaulting in conversion)
+	dst.Message = "" // No equivalent in alpha
 
 	return nil
 }
@@ -295,13 +295,13 @@ func convertVirtualMachineSpecFromBeta(src *v1beta1.VirtualMachineSpec, dst *Vir
 	}
 
 	// Convert PowerState - beta uses typed enum, alpha uses string
+	// Only set if source has a value, do not apply defaults in conversion
 	switch src.PowerState {
 	case v1beta1.PowerStateOn:
 		dst.PowerState = "On"
 	case v1beta1.PowerStateOff:
 		dst.PowerState = "Off"
-	default:
-		dst.PowerState = "On" // Default to On
+		// default: leave dst.PowerState empty (no defaulting in conversion)
 	}
 
 	// Convert Tags
@@ -359,13 +359,13 @@ func convertVirtualMachineStatusFromBeta(src *v1beta1.VirtualMachineStatus, dst 
 	dst.Snapshots = make([]VMSnapshotInfo, len(src.Snapshots))
 
 	// Convert PowerState - beta uses typed enum, alpha uses string
+	// Only set if source has a value, do not apply defaults in conversion
 	switch src.PowerState {
 	case v1beta1.PowerStateOn:
 		dst.PowerState = "On"
 	case v1beta1.PowerStateOff:
 		dst.PowerState = "Off"
-	default:
-		dst.PowerState = "On" // Default to On
+		// default: leave dst.PowerState empty (no defaulting in conversion)
 	}
 
 	// Convert CurrentResources

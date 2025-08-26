@@ -741,7 +741,6 @@ spec:
                 - enum:
                   - "On"
                   - "Off"
-                default: "On"
                 description: PowerState specifies the desired power state
                 type: string
               providerRef:

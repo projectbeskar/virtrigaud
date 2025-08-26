@@ -26,7 +26,7 @@ Virtrigaud is a Kubernetes operator that enables declarative management of virtu
 
 **Legacy API**: v1alpha1 - Served for compatibility but deprecated. See the [upgrade guide](docs/upgrade/) for migration instructions.
 
-All resources support seamless conversion between API versions via webhooks.
+All resources support seamless conversion between API versions via webhooks. Conversions are lossless and do not apply defaults. Any defaults (e.g., powerState) are applied by admission webhooks or controllers, not by the API conversion layer.
 
 ## Architecture
 

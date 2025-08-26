@@ -51,7 +51,6 @@ type VirtualMachineSpec struct {
 
 	// PowerState specifies the desired power state
 	// +optional
-	// +kubebuilder:default="On"
 	// +kubebuilder:validation:Enum=On;Off
 	PowerState PowerState `json:"powerState,omitempty"`
 
