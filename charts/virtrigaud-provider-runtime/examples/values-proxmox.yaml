@@ -1,0 +1,126 @@
+# Example values for Proxmox VE Provider Runtime
+# This demonstrates deploying the Proxmox provider as a remote provider
+
+# Provider-specific configuration
+image:
+  repository: ghcr.io/projectbeskar/virtrigaud/provider-proxmox
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+# Environment variables for Proxmox provider
+env:
+  - name: PVE_ENDPOINT
+    value: "https://pve.example.com:8006"
+  - name: PVE_TOKEN_ID
+    valueFrom:
+      secretKeyRef:
+        name: proxmox-credentials
+        key: token_id
+  - name: PVE_TOKEN_SECRET
+    valueFrom:
+      secretKeyRef:
+        name: proxmox-credentials
+        key: token_secret
+  - name: PVE_CA_BUNDLE
+    valueFrom:
+      secretKeyRef:
+        name: proxmox-credentials
+        key: ca.crt
+        optional: true
+  - name: PVE_NODE_SELECTOR
+    value: "pve-node-1,pve-node-2,pve-node-3"
+  - name: PVE_INSECURE_SKIP_VERIFY
+    value: "false"
+
+# Resource configuration
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 200m
+    memory: 256Mi
+
+# Service configuration
+service:
+  type: ClusterIP
+  port: 9443
+  targetPort: 9443
+
+# Health check configuration
+livenessProbe:
+  grpc:
+    port: 9443
+  initialDelaySeconds: 15
+  periodSeconds: 20
+
+readinessProbe:
+  grpc:
+    port: 9443
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+# Security context
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 65532
+
+# Pod security context
+podSecurityContext:
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+# Labels and annotations
+podLabels:
+  app.kubernetes.io/component: provider
+  app.kubernetes.io/part-of: virtrigaud
+  provider.virtrigaud.io/type: proxmox
+
+# TLS configuration (if enabled)
+tls:
+  enabled: true
+  secretName: proxmox-provider-tls
+
+# Network policy (if enabled)
+networkPolicy:
+  enabled: true
+  ingress:
+    - from:
+      - namespaceSelector:
+          matchLabels:
+            name: virtrigaud-system
+      - podSelector:
+          matchLabels:
+            app.kubernetes.io/name: virtrigaud-manager
+  egress:
+    - to:
+      - ipBlock:
+          cidr: 192.168.1.0/24  # Proxmox VE network
+      ports:
+      - protocol: TCP
+        port: 8006
+    - to: []
+      ports:
+      - protocol: UDP
+        port: 53
+      - protocol: TCP
+        port: 53
+
+# Auto-scaling configuration
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 80
+  targetMemoryUtilizationPercentage: 80
+
+# Pod disruption budget
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1

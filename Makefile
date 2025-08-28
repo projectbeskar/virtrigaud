@@ -120,6 +120,10 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 
 ##@ Build
 
+.PHONY: ci
+ci: test lint proto-lint generate manifests vet ## Run all CI checks locally
+	@echo "✅ All CI checks passed"
+
 # Protocol buffer definitions
 PROTO_DIR = proto
 

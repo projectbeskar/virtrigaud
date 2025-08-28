@@ -11,6 +11,10 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME_PREFIX: projectbeskar/virtrigaud
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
   security-events: write
@@ -19,23 +23,17 @@ permissions:
 jobs:
   test:
     name: Test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
     - name: Checkout
       uses: actions/checkout@v4
 
     - name: Set up Go
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@v5
       with:
-        go-version: ${{ env.GO_VERSION }}
-
-    - name: Cache Go modules
-      uses: actions/cache@v3
-      with:
-        path: ~/go/pkg/mod
-        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-        restore-keys: |
-          ${{ runner.os }}-go-
+        go-version-file: go.mod
+        cache: true
 
     - name: Download dependencies
       run: go mod download
@@ -44,6 +42,7 @@ jobs:
       run: go mod verify
 
     - name: Run go vet (excluding libvirt)
+      shell: bash -euxo pipefail
       run: |
         for dir in $(find . -name "*.go" -not -path "./internal/providers/libvirt/*" -not -path "./cmd/provider-libvirt/*" -not -path "./test/integration/*" -exec dirname {} \; | sort -u); do
           echo "Vetting $dir"
@@ -66,15 +65,17 @@ jobs:
 
   lint:
     name: Lint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
     - name: Checkout
       uses: actions/checkout@v4
 
     - name: Set up Go
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@v5
       with:
-        go-version: ${{ env.GO_VERSION }}
+        go-version-file: go.mod
+        cache: true
 
     - name: Install libvirt dependencies for Go module resolution
       run: |
@@ -82,26 +83,28 @@ jobs:
         sudo apt-get install -y libvirt-dev pkg-config
 
     - name: Run golangci-lint
-      run: |
-        # Use the Makefile target which respects our .golangci.yml configuration
-        # Continue on lint errors to not block CI while issues are being addressed
-        make lint || echo "Lint issues found but not blocking CI"
+      uses: golangci/golangci-lint-action@v6
+      with:
+        version: latest
+        args: --timeout=10m
 
   security:
     name: Security Scan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
     - name: Checkout
       uses: actions/checkout@v4
 
     - name: Set up Go
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@v5
       with:
-        go-version: ${{ env.GO_VERSION }}
+        go-version-file: go.mod
+        cache: true
 
     - name: Run Gosec Security Scanner (excluding libvirt)
       run: |
-        go install github.com/securego/gosec/v2/cmd/gosec@latest
+        go install github.com/securecodewarrior/gosec/v2/cmd/gosec@latest
         $(go env GOPATH)/bin/gosec -fmt sarif -out gosec.sarif -no-fail -exclude-dir=internal/providers/libvirt ./...
 
     - name: Upload SARIF file
@@ -124,15 +127,17 @@ jobs:
 
   generate:
     name: Verify Generated Files
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
     - name: Checkout
       uses: actions/checkout@v4
 
     - name: Set up Go
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@v5
       with:
-        go-version: ${{ env.GO_VERSION }}
+        go-version-file: go.mod
+        cache: true
 
     - name: Install controller-gen
       run: go install sigs.k8s.io/controller-tools/cmd/controller-gen@latest
@@ -162,19 +167,21 @@ jobs:
 
   build:
     name: Build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     needs: [test, lint]
     strategy:
       matrix:
-        component: [manager, provider-libvirt, provider-vsphere]
+        component: [manager, provider-libvirt, provider-vsphere, provider-proxmox]
     steps:
     - name: Checkout
       uses: actions/checkout@v4
 
     - name: Set up Go
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@v5
       with:
-        go-version: ${{ env.GO_VERSION }}
+        go-version-file: go.mod
+        cache: true
 
     - name: Install libvirt (for provider-libvirt)
       if: matrix.component == 'provider-libvirt'
@@ -183,6 +190,7 @@ jobs:
         sudo apt-get install -y libvirt-dev pkg-config
 
     - name: Build binary
+      shell: bash -euxo pipefail
       run: |
         case "${{ matrix.component }}" in
           manager)
@@ -194,6 +202,9 @@ jobs:
           provider-vsphere)
             CGO_ENABLED=0 go build -o bin/provider-vsphere ./cmd/provider-vsphere
             ;;
+          provider-proxmox)
+            CGO_ENABLED=0 go build -o bin/provider-proxmox ./cmd/provider-proxmox
+            ;;
         esac
 
     - name: Upload binary
@@ -204,16 +215,18 @@ jobs:
 
   build-tools:
     name: Build Tools
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     needs: [test, lint]
     steps:
     - name: Checkout
       uses: actions/checkout@v4
 
     - name: Set up Go
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@v5
       with:
-        go-version: ${{ env.GO_VERSION }}
+        go-version-file: go.mod
+        cache: true
 
     - name: Build CLI tools
       run: |
@@ -229,15 +242,19 @@ jobs:
 
   build-images:
     name: Build Container Images
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     needs: [test, lint, security]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     strategy:
       matrix:
-        component: [manager, provider-libvirt, provider-vsphere]
+        component: [manager, provider-libvirt, provider-vsphere, provider-proxmox]
     steps:
     - name: Checkout
       uses: actions/checkout@v4
+
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
@@ -260,11 +277,11 @@ jobs:
           type=raw,value=latest,enable={{is_default_branch}}
 
     - name: Build and push development image
-      uses: docker/build-push-action@v5
+      uses: docker/build-push-action@v6
       with:
         context: .
         file: ${{ matrix.component == 'manager' && './build/Dockerfile.manager' || format('./cmd/{0}/Dockerfile', matrix.component) }}
-        platforms: linux/amd64
+        platforms: linux/amd64,linux/arm64
         push: true
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
@@ -274,13 +291,14 @@ jobs:
 
   helm:
     name: Validate Helm Charts
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
     - name: Checkout
       uses: actions/checkout@v4
 
     - name: Set up Helm
-      uses: azure/setup-helm@v3
+      uses: azure/setup-helm@v4
       with:
         version: '3.12.0'
 
@@ -289,6 +307,7 @@ jobs:
         helm lint charts/virtrigaud
         
     - name: Validate rendered manifests
+      shell: bash -euxo pipefail
       run: |
         # Render Helm template (without cluster validation)
         helm template virtrigaud charts/virtrigaud --values charts/virtrigaud/values.yaml > /tmp/rendered.yaml
@@ -312,16 +331,18 @@ jobs:
 
   conformance:
     name: Conformance Tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     needs: [build-tools]
     steps:
     - name: Checkout
       uses: actions/checkout@v4
 
     - name: Set up Go
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@v5
       with:
-        go-version: ${{ env.GO_VERSION }}
+        go-version-file: go.mod
+        cache: true
 
     - name: Download CLI tools
       uses: actions/download-artifact@v4
@@ -354,16 +375,18 @@ jobs:
 
   integration:
     name: Integration Tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     needs: [build]
     steps:
     - name: Checkout
       uses: actions/checkout@v4
 
     - name: Set up Go
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@v5
       with:
-        go-version: ${{ env.GO_VERSION }}
+        go-version-file: go.mod
+        cache: true
 
     - name: Set up Kind cluster
       uses: helm/kind-action@v1
@@ -388,3 +411,37 @@ jobs:
       with:
         name: integration-test-results
         path: test/integration/results/
+
+  ci:
+    name: CI Summary
+    runs-on: ubuntu-24.04
+    needs: [test, lint, security, generate, build, build-tools, helm, conformance, integration]
+    if: always()
+    steps:
+    - name: Check CI Results
+      run: |
+        echo "CI Summary:"
+        echo "- Test: ${{ needs.test.result }}"
+        echo "- Lint: ${{ needs.lint.result }}"
+        echo "- Security: ${{ needs.security.result }}"
+        echo "- Generate: ${{ needs.generate.result }}"
+        echo "- Build: ${{ needs.build.result }}"
+        echo "- Build Tools: ${{ needs.build-tools.result }}"
+        echo "- Helm: ${{ needs.helm.result }}"
+        echo "- Conformance: ${{ needs.conformance.result }}"
+        echo "- Integration: ${{ needs.integration.result }}"
+        
+        # Fail if any required job failed
+        if [[ "${{ needs.test.result }}" != "success" ]] || \
+           [[ "${{ needs.lint.result }}" != "success" ]] || \
+           [[ "${{ needs.security.result }}" != "success" ]] || \
+           [[ "${{ needs.generate.result }}" != "success" ]] || \
+           [[ "${{ needs.build.result }}" != "success" ]] || \
+           [[ "${{ needs.build-tools.result }}" != "success" ]] || \
+           [[ "${{ needs.helm.result }}" != "success" ]] || \
+           [[ "${{ needs.conformance.result }}" != "success" ]]; then
+          echo "❌ CI failed"
+          exit 1
+        fi
+        
+        echo "✅ CI passed"
