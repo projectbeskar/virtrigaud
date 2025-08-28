@@ -12,13 +12,21 @@ on:
       - 'charts/virtrigaud-provider-runtime/**'
       - '.github/workflows/runtime-chart.yml'
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 env:
   GO_VERSION: '1.23'
 
 jobs:
   lint:
     name: Lint Runtime Chart
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -46,18 +54,25 @@ jobs:
         helm template test-libvirt charts/virtrigaud-provider-runtime/ \
           -f charts/virtrigaud-provider-runtime/examples/values-libvirt.yaml
 
+    - name: Template chart with proxmox provider values
+      run: |
+        helm template test-proxmox charts/virtrigaud-provider-runtime/ \
+          -f charts/virtrigaud-provider-runtime/examples/values-proxmox.yaml
+
   kind-test:
     name: Kind Integration Test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     needs: lint
     steps:
     - name: Checkout
       uses: actions/checkout@v4
 
     - name: Set up Go
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@v5
       with:
-        go-version: ${{ env.GO_VERSION }}
+        go-version-file: go.mod
+        cache: true
 
     - name: Set up Helm
       uses: azure/setup-helm@v4
@@ -133,7 +148,8 @@ jobs:
 
   package:
     name: Package Chart
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     needs: [lint, kind-test]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
