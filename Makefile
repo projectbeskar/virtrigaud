@@ -2,6 +2,7 @@
 IMG ?= controller:latest
 PROVIDER_LIBVIRT_IMG ?= ghcr.io/projectbeskar/virtrigaud/provider-libvirt:latest
 PROVIDER_VSPHERE_IMG ?= ghcr.io/projectbeskar/virtrigaud/provider-vsphere:latest
+PROVIDER_PROXMOX_IMG ?= ghcr.io/projectbeskar/virtrigaud/provider-proxmox:latest
 TAG ?= latest
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
@@ -146,12 +147,16 @@ build-provider-libvirt: proto ## Build libvirt provider binary (requires CGO)
 build-provider-vsphere: proto ## Build vsphere provider binary
 	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o bin/provider-vsphere ./cmd/provider-vsphere
 
+.PHONY: build-provider-proxmox
+build-provider-proxmox: proto ## Build proxmox provider binary
+	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o bin/provider-proxmox ./cmd/provider-proxmox
+
 .PHONY: build-provider-mock
 build-provider-mock: ## Build mock provider binary
 	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o bin/provider-mock ./cmd/provider-mock
 
 .PHONY: build-providers
-build-providers: build-provider-libvirt build-provider-vsphere build-provider-mock ## Build all provider binaries
+build-providers: build-provider-libvirt build-provider-vsphere build-provider-proxmox build-provider-mock ## Build all provider binaries
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
@@ -225,8 +230,13 @@ docker-provider-vsphere: ## Build docker image for vsphere provider
 	$(CONTAINER_TOOL) build -f cmd/provider-vsphere/Dockerfile -t $(PROVIDER_VSPHERE_IMG) \
 		--build-arg VERSION=$(VERSION) --build-arg GIT_SHA=$(GIT_SHA) .
 
+.PHONY: docker-provider-proxmox
+docker-provider-proxmox: ## Build docker image for proxmox provider
+	$(CONTAINER_TOOL) build -f cmd/provider-proxmox/Dockerfile -t $(PROVIDER_PROXMOX_IMG) \
+		--build-arg VERSION=$(VERSION) --build-arg GIT_SHA=$(GIT_SHA) .
+
 .PHONY: docker-providers
-docker-providers: docker-provider-libvirt docker-provider-vsphere ## Build all provider docker images
+docker-providers: docker-provider-libvirt docker-provider-vsphere docker-provider-proxmox ## Build all provider docker images
 
 # PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
 # architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:

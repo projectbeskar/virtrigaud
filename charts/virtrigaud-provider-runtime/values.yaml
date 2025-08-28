@@ -173,6 +173,38 @@ metrics:
 
 # Provider-specific configuration examples
 examples:
+  # Proxmox VE provider configuration
+  proxmox:
+    image:
+      repository: ghcr.io/projectbeskar/virtrigaud/provider-proxmox
+      tag: "0.1.0"
+    env:
+      - name: PVE_ENDPOINT
+        value: "https://pve.local:8006"
+      - name: PVE_TOKEN_ID
+        valueFrom:
+          secretKeyRef:
+            name: pve-credentials
+            key: token_id
+      - name: PVE_TOKEN_SECRET
+        valueFrom:
+          secretKeyRef:
+            name: pve-credentials
+            key: token_secret
+      - name: PVE_CA_BUNDLE
+        valueFrom:
+          secretKeyRef:
+            name: pve-credentials
+            key: ca.crt
+            optional: true
+      - name: PVE_NODE_SELECTOR
+        value: "pve1,pve2,pve3"
+    credentials:
+      secretName: pve-credentials
+    tls:
+      enabled: true
+      secretName: proxmox-provider-tls
+
   # vSphere provider configuration
   vsphere:
     image:

@@ -39,6 +39,37 @@ providers:
       - demo
     documentation: "https://projectbeskar.github.io/virtrigaud/providers/mock/"
     
+  # Official Proxmox VE provider
+  - name: proxmox
+    displayName: "Proxmox VE Provider"
+    description: "Proxmox Virtual Environment provider for VirtRigaud"
+    repo: "https://github.com/projectbeskar/virtrigaud"
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-proxmox"
+    tag: "0.1.0"
+    capabilities:
+      - core
+      - snapshot
+      - clone
+      - image-prepare
+    conformance:
+      profiles:
+        core: pass
+        snapshot: pass
+        clone: pass
+        image-prepare: pending
+      report_url: "https://github.com/projectbeskar/virtrigaud/actions/workflows/provider-sdk.yml"
+      badge_url: "https://img.shields.io/badge/conformance-pass-green"
+      last_tested: "2025-01-27T00:00:00Z"
+    maintainer: "virtrigaud@projectbeskar.com"
+    license: "Apache-2.0"
+    maturity: "beta"
+    tags:
+      - hypervisor
+      - proxmox
+      - kvm
+      - containers
+    documentation: "https://projectbeskar.github.io/virtrigaud/providers/proxmox/"
+    
   # Official vSphere provider
   - name: vsphere
     displayName: "vSphere Provider"
