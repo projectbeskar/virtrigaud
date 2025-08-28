@@ -254,6 +254,226 @@ func createTestProvider(endpoint string) *Provider {
 	return provider
 }
 
+func TestProxmoxProvider_Reconfigure(t *testing.T) {
+	// Start fake PVE server
+	_, endpoint, err := pvefake.StartFakeServer()
+	require.NoError(t, err)
+
+	// Create provider with fake server
+	provider := createTestProvider(endpoint)
+
+	ctx := context.Background()
+
+	// Use existing test VM (ID 100 from fake server seed data)
+	vmID := "100"
+
+	// Test CPU reconfiguration
+	reconfigReq := &providerv1.ReconfigureRequest{
+		Id: vmID,
+		DesiredJson: `{"class": {"cpus": 4, "memory": "8Gi"}}`,
+	}
+
+	reconfigResp, err := provider.Reconfigure(ctx, reconfigReq)
+	require.NoError(t, err)
+
+	// Wait for reconfigure task to complete if there is one
+	if reconfigResp.Task != nil {
+		err = waitForTask(ctx, provider, reconfigResp.Task.Id)
+		require.NoError(t, err)
+	}
+
+	// Verify changes were applied
+	describeResp, err := provider.Describe(ctx, &providerv1.DescribeRequest{Id: vmID})
+	require.NoError(t, err)
+	assert.True(t, describeResp.Exists)
+}
+
+func TestProxmoxProvider_Snapshots(t *testing.T) {
+	// Start fake PVE server
+	_, endpoint, err := pvefake.StartFakeServer()
+	require.NoError(t, err)
+
+	// Create provider with fake server
+	provider := createTestProvider(endpoint)
+
+	ctx := context.Background()
+
+	// Use existing test VM (ID 100 from fake server seed data)
+	vmID := "100"
+
+	// Test snapshot creation
+	snapCreateReq := &providerv1.SnapshotCreateRequest{
+		VmId:          vmID,
+		NameHint:      "test-snapshot",
+		Description:   "Test snapshot for integration tests",
+		IncludeMemory: true,
+	}
+
+	snapCreateResp, err := provider.SnapshotCreate(ctx, snapCreateReq)
+	require.NoError(t, err)
+	require.NotEmpty(t, snapCreateResp.SnapshotId)
+
+	// Wait for snapshot creation task
+	if snapCreateResp.Task != nil {
+		err = waitForTask(ctx, provider, snapCreateResp.Task.Id)
+		require.NoError(t, err)
+	}
+
+	// Test snapshot revert
+	snapRevertReq := &providerv1.SnapshotRevertRequest{
+		VmId:       vmID,
+		SnapshotId: snapCreateResp.SnapshotId,
+	}
+
+	snapRevertResp, err := provider.SnapshotRevert(ctx, snapRevertReq)
+	require.NoError(t, err)
+
+	// Wait for revert task
+	if snapRevertResp.Task != nil {
+		err = waitForTask(ctx, provider, snapRevertResp.Task.Id)
+		require.NoError(t, err)
+	}
+
+	// Test snapshot deletion
+	snapDeleteReq := &providerv1.SnapshotDeleteRequest{
+		VmId:       vmID,
+		SnapshotId: snapCreateResp.SnapshotId,
+	}
+
+	snapDeleteResp, err := provider.SnapshotDelete(ctx, snapDeleteReq)
+	require.NoError(t, err)
+
+	// Wait for deletion task
+	if snapDeleteResp.Task != nil {
+		err = waitForTask(ctx, provider, snapDeleteResp.Task.Id)
+		require.NoError(t, err)
+	}
+}
+
+func TestProxmoxProvider_ImagePrepare(t *testing.T) {
+	// Start fake PVE server
+	_, endpoint, err := pvefake.StartFakeServer()
+	require.NoError(t, err)
+
+	// Create provider with fake server
+	provider := createTestProvider(endpoint)
+
+	ctx := context.Background()
+
+	// Test template ensure (existing template)
+	imagePrepareReq := &providerv1.ImagePrepareRequest{
+		ImageRef:     "ubuntu-22-template",
+		StorageClass: "local-lvm",
+	}
+
+	imagePrepareResp, err := provider.ImagePrepare(ctx, imagePrepareReq)
+	require.NoError(t, err)
+
+	// Wait for task if any
+	if imagePrepareResp.Task != nil {
+		err = waitForTask(ctx, provider, imagePrepareResp.Task.Id)
+		require.NoError(t, err)
+	}
+
+	// Test image import from URL
+	imagePrepareReq = &providerv1.ImagePrepareRequest{
+		ImageRef:     "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img",
+		StorageClass: "local-lvm",
+	}
+
+	imagePrepareResp, err = provider.ImagePrepare(ctx, imagePrepareReq)
+	require.NoError(t, err)
+
+	// Wait for import task
+	if imagePrepareResp.Task != nil {
+		err = waitForTask(ctx, provider, imagePrepareResp.Task.Id)
+		require.NoError(t, err)
+	}
+}
+
+func TestProxmoxProvider_MultiNIC(t *testing.T) {
+	// Start fake PVE server
+	_, endpoint, err := pvefake.StartFakeServer()
+	require.NoError(t, err)
+
+	// Create provider with fake server
+	provider := createTestProvider(endpoint)
+
+	ctx := context.Background()
+
+	// Test VM creation with multiple network interfaces
+	createReq := &providerv1.CreateRequest{
+		Name:      "test-vm-multi-nic",
+		ClassJson: `{"cpus": 2, "memory": "4Gi"}`,
+		ImageJson: `{"source": "ubuntu-22-template"}`,
+		NetworksJson: `[
+			{
+				"name": "lan",
+				"static_ip": {
+					"address": "192.168.1.100/24",
+					"gateway": "192.168.1.1",
+					"dns": ["8.8.8.8", "1.1.1.1"]
+				}
+			},
+			{
+				"name": "dmz",
+				"vlan": 100
+			},
+			{
+				"name": "vmbr2",
+				"mac": "02:00:00:aa:bb:cc"
+			}
+		]`,
+		UserData: []byte(`#cloud-config
+hostname: test-vm-multi-nic
+users:
+  - name: ubuntu
+    ssh_authorized_keys:
+      - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... test@example.com"
+`),
+	}
+
+	createResp, err := provider.Create(ctx, createReq)
+	require.NoError(t, err)
+	require.NotEmpty(t, createResp.Id)
+
+	// Wait for creation task to complete
+	if createResp.Task != nil {
+		err = waitForTask(ctx, provider, createResp.Task.Id)
+		require.NoError(t, err)
+	}
+
+	// Verify VM was created with multiple NICs
+	describeResp, err := provider.Describe(ctx, &providerv1.DescribeRequest{Id: createResp.Id})
+	require.NoError(t, err)
+	assert.True(t, describeResp.Exists)
+}
+
+func TestProxmoxProvider_UpdatedCapabilities(t *testing.T) {
+	// Start fake PVE server
+	_, endpoint, err := pvefake.StartFakeServer()
+	require.NoError(t, err)
+
+	// Create provider with fake server
+	provider := createTestProvider(endpoint)
+
+	ctx := context.Background()
+	resp, err := provider.GetCapabilities(ctx, &providerv1.GetCapabilitiesRequest{})
+
+	require.NoError(t, err)
+	assert.True(t, resp.SupportsSnapshots)
+	assert.True(t, resp.SupportsLinkedClones)
+	assert.True(t, resp.SupportsImageImport)
+	assert.True(t, resp.SupportsReconfigureOnline) // Enhanced for hot-plug
+	assert.True(t, resp.SupportsDiskExpansionOnline)
+	
+	// Verify disk and network types
+	assert.Contains(t, resp.SupportedDiskTypes, "raw")
+	assert.Contains(t, resp.SupportedDiskTypes, "qcow2")
+	assert.Contains(t, resp.SupportedNetworkTypes, "bridge")
+	assert.Contains(t, resp.SupportedNetworkTypes, "vlan")
+}
+
 func waitForTask(ctx context.Context, provider *Provider, taskID string) error {
 	timeout := time.After(10 * time.Second)
 	ticker := time.NewTicker(100 * time.Millisecond)

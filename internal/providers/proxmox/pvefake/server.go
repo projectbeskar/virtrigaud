@@ -68,7 +68,19 @@ type VM struct {
 	PID       int               `json:"pid,omitempty"`
 	Lock      string            `json:"lock,omitempty"`
 	Config    map[string]string `json:"-"`
+	Networks  []NetworkConfig   `json:"-"`
+	IPAddrs   []string          `json:"-"`
 	CreatedAt time.Time         `json:"-"`
+}
+
+// NetworkConfig represents a fake network interface
+type NetworkConfig struct {
+	Index  int    `json:"index"`
+	Model  string `json:"model"`
+	Bridge string `json:"bridge"`
+	VLAN   int    `json:"vlan,omitempty"`
+	MAC    string `json:"mac,omitempty"`
+	IP     string `json:"ip,omitempty"`
 }
 
 // Task represents a fake task
@@ -143,6 +155,9 @@ func (s *Server) setupRoutes() {
 	api.HandleFunc("/nodes/{node}/qemu", s.handleCreateVM).Methods("POST")
 	api.HandleFunc("/nodes/{node}/qemu/{vmid}", s.handleDeleteVM).Methods("DELETE")
 	api.HandleFunc("/nodes/{node}/qemu/{vmid}/status/current", s.handleGetVM).Methods("GET")
+	api.HandleFunc("/nodes/{node}/qemu/{vmid}/config", s.handleGetVMConfig).Methods("GET")
+	api.HandleFunc("/nodes/{node}/qemu/{vmid}/config", s.handleReconfigureVM).Methods("PUT")
+	api.HandleFunc("/nodes/{node}/qemu/{vmid}/resize", s.handleResizeDisk).Methods("PUT")
 	api.HandleFunc("/nodes/{node}/qemu/{vmid}/clone", s.handleCloneVM).Methods("POST")
 	
 	// Power operations
@@ -629,12 +644,149 @@ func (s *Server) writeError(w http.ResponseWriter, statusCode int, message strin
 	json.NewEncoder(w).Encode(response)
 }
 
+// handleGetVMConfig handles VM configuration retrieval
+func (s *Server) handleGetVMConfig(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	vmidStr := vars["vmid"]
+
+	vmid, err := strconv.Atoi(vmidStr)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, "Invalid VMID")
+		return
+	}
+
+	s.mu.RLock()
+	vm, exists := s.vms[vmid]
+	s.mu.RUnlock()
+
+	if !exists {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	// Build fake config that mirrors PVE format
+	config := map[string]interface{}{
+		"cores":  vm.CPUs,
+		"memory": vm.Memory / (1024 * 1024), // Convert to MB
+		"name":   vm.Name,
+		"vmid":   vm.VMID,
+	}
+
+	// Add network interfaces
+	for i, net := range vm.Networks {
+		netString := fmt.Sprintf("%s,bridge=%s", net.Model, net.Bridge)
+		if net.VLAN > 0 {
+			netString += fmt.Sprintf(",tag=%d", net.VLAN)
+		}
+		if net.MAC != "" {
+			netString += fmt.Sprintf(",macaddr=%s", net.MAC)
+		}
+		config[fmt.Sprintf("net%d", i)] = netString
+	}
+
+	// Add disk config
+	config["scsi0"] = "local-lvm:vm-100-disk-0,size=32G"
+
+	s.writeResponse(w, config)
+}
+
+// handleReconfigureVM handles VM reconfiguration
+func (s *Server) handleReconfigureVM(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	node := vars["node"]
+	vmidStr := vars["vmid"]
+
+	vmid, err := strconv.Atoi(vmidStr)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, "Invalid VMID")
+		return
+	}
+
+	if err := r.ParseForm(); err != nil {
+		s.writeError(w, http.StatusBadRequest, "Invalid form data")
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	vm, exists := s.vms[vmid]
+	if !exists {
+		s.writeError(w, http.StatusNotFound, "VM not found")
+		return
+	}
+
+	// Update VM configuration
+	if cores := r.FormValue("cores"); cores != "" {
+		if c, err := strconv.Atoi(cores); err == nil {
+			vm.CPUs = c
+		}
+	}
+
+	if memory := r.FormValue("memory"); memory != "" {
+		if m, err := strconv.ParseInt(memory, 10, 64); err == nil {
+			vm.Memory = m * 1024 * 1024 // Convert MB to bytes
+		}
+	}
+
+	// Create async task
+	taskID := s.createTask(node, "qmconfig", vmidStr)
+
+	s.writeResponse(w, taskID)
+}
+
+// handleResizeDisk handles disk resizing
+func (s *Server) handleResizeDisk(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	node := vars["node"]
+	vmidStr := vars["vmid"]
+
+	vmid, err := strconv.Atoi(vmidStr)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, "Invalid VMID")
+		return
+	}
+
+	if err := r.ParseForm(); err != nil {
+		s.writeError(w, http.StatusBadRequest, "Invalid form data")
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	vm, exists := s.vms[vmid]
+	if !exists {
+		s.writeError(w, http.StatusNotFound, "VM not found")
+		return
+	}
+
+	disk := r.FormValue("disk")
+	size := r.FormValue("size")
+
+	if disk == "" || size == "" {
+		s.writeError(w, http.StatusBadRequest, "Disk and size required")
+		return
+	}
+
+	// Store disk resize info in config
+	if vm.Config == nil {
+		vm.Config = make(map[string]string)
+	}
+	vm.Config[disk+"_size"] = size
+
+	// Create async task
+	taskID := s.createTask(node, "qmresize", vmidStr)
+
+	s.writeResponse(w, taskID)
+}
+
 // StartFakeServer starts a fake PVE server on a random port
 func StartFakeServer() (*Server, string, error) {
 	server := NewServer()
 	
 	// Start HTTP server on random port
-	listener, err := http.Listen("tcp", ":0")
+	listener, err := net.Listen("tcp", ":0")
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to start fake server: %w", err)
 	}

@@ -1,0 +1,222 @@
+name: Proxmox VE Conformance
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'internal/providers/proxmox/**'
+      - 'cmd/provider-proxmox/**'
+      - '.github/workflows/proxmox-conformance.yml'
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'internal/providers/proxmox/**'
+      - 'cmd/provider-proxmox/**'
+      - '.github/workflows/proxmox-conformance.yml'
+  schedule:
+    # Run daily at 06:00 UTC
+    - cron: '0 6 * * *'
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ghcr.io/projectbeskar/virtrigaud/provider-proxmox
+
+jobs:
+  conformance:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      actions: write
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.23'
+
+    - name: Cache Go modules
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cache/go-build
+          ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y make
+
+    - name: Build provider binary
+      run: |
+        make build-provider-proxmox
+        chmod +x bin/provider-proxmox
+
+    - name: Run unit tests
+      run: |
+        cd internal/providers/proxmox
+        go test -v -race -coverprofile=coverage.out ./...
+
+    - name: Run integration tests
+      run: |
+        cd internal/providers/proxmox
+        go test -v -race -tags=integration ./...
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.IMAGE_NAME }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+
+    - name: Build and push provider image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./cmd/provider-proxmox/Dockerfile
+        platforms: linux/amd64,linux/arm64
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Start fake Proxmox VE server
+      run: |
+        # Start fake server in background
+        cd internal/providers/proxmox/pvefake
+        go run . --port 8006 &
+        FAKE_PVE_PID=$!
+        echo "FAKE_PVE_PID=$FAKE_PVE_PID" >> $GITHUB_ENV
+        
+        # Wait for server to be ready
+        for i in {1..30}; do
+          if curl -f http://localhost:8006/health; then
+            echo "Fake PVE server is ready"
+            break
+          fi
+          echo "Waiting for fake PVE server... ($i/30)"
+          sleep 2
+        done
+
+    - name: Run VCTS conformance tests
+      env:
+        PVE_ENDPOINT: http://localhost:8006
+        PVE_TOKEN_ID: test@pve!token
+        PVE_TOKEN_SECRET: fake-secret
+        PVE_INSECURE_SKIP_VERIFY: "true"
+      run: |
+        # Run VCTS with Proxmox profile
+        ./bin/vcts run \
+          --provider-type=proxmox \
+          --provider-image=${{ env.IMAGE_NAME }}:${{ github.sha }} \
+          --profiles=core,snapshot,clone,image-prepare \
+          --output-dir=./vcts-results \
+          --junit-file=./vcts-results/junit.xml \
+          --markdown-file=./vcts-results/report.md \
+          --verbose
+
+    - name: Upload VCTS results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: vcts-results-${{ github.run_id }}
+        path: |
+          ./vcts-results/
+          internal/providers/proxmox/coverage.out
+
+    - name: Parse test results and generate badge
+      if: always()
+      run: |
+        # Parse VCTS results and generate badge info
+        if [ -f "./vcts-results/junit.xml" ]; then
+          TOTAL_TESTS=$(xmllint --xpath "//testsuite/@tests" ./vcts-results/junit.xml | cut -d'"' -f2)
+          FAILED_TESTS=$(xmllint --xpath "//testsuite/@failures" ./vcts-results/junit.xml | cut -d'"' -f2)
+          PASSED_TESTS=$((TOTAL_TESTS - FAILED_TESTS))
+          
+          if [ "$FAILED_TESTS" -eq "0" ]; then
+            BADGE_COLOR="brightgreen"
+            BADGE_MESSAGE="passing"
+          else
+            BADGE_COLOR="red"
+            BADGE_MESSAGE="$FAILED_TESTS failing"
+          fi
+          
+          echo "BADGE_COLOR=$BADGE_COLOR" >> $GITHUB_ENV
+          echo "BADGE_MESSAGE=$BADGE_MESSAGE" >> $GITHUB_ENV
+          echo "TOTAL_TESTS=$TOTAL_TESTS" >> $GITHUB_ENV
+          echo "PASSED_TESTS=$PASSED_TESTS" >> $GITHUB_ENV
+          echo "FAILED_TESTS=$FAILED_TESTS" >> $GITHUB_ENV
+        fi
+
+    - name: Create conformance badge
+      if: github.ref == 'refs/heads/main'
+      run: |
+        # Generate badge JSON for shields.io
+        cat > badge.json << EOF
+        {
+          "schemaVersion": 1,
+          "label": "conformance",
+          "message": "${BADGE_MESSAGE}",
+          "color": "${BADGE_COLOR}",
+          "namedLogo": "proxmox"
+        }
+        EOF
+        
+        # Upload badge to GitHub Pages or artifact store
+        echo "Generated conformance badge: ${BADGE_MESSAGE} (${BADGE_COLOR})"
+
+    - name: Update provider catalog
+      if: github.ref == 'refs/heads/main' && env.FAILED_TESTS == '0'
+      run: |
+        # Update catalog.yaml with latest conformance results
+        TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        REPORT_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        BADGE_URL="https://img.shields.io/badge/conformance-${BADGE_MESSAGE//' '/'%20'}-${BADGE_COLOR}"
+        
+        # Update providers/catalog.yaml (would need write permissions)
+        echo "Would update catalog with:"
+        echo "  last_tested: $TIMESTAMP"
+        echo "  report_url: $REPORT_URL"
+        echo "  badge_url: $BADGE_URL"
+        echo "  core: pass"
+        echo "  snapshot: pass"
+        echo "  clone: pass"
+        echo "  image-prepare: pass"
+
+    - name: Cleanup
+      if: always()
+      run: |
+        # Stop fake PVE server
+        if [ ! -z "$FAKE_PVE_PID" ]; then
+          kill $FAKE_PVE_PID || true
+        fi
+
+    - name: Publish test results
+      uses: dorny/test-reporter@v1
+      if: always()
+      with:
+        name: 'Proxmox VE Conformance Tests'
+        path: './vcts-results/junit.xml'
+        reporter: java-junit
+        fail-on-error: true

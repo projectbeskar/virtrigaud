@@ -37,7 +37,10 @@ func New() *Provider {
 	caps := capabilities.NewBuilder().
 		Core().
 		Snapshots().
+		MemorySnapshots().
 		LinkedClones().
+		OnlineReconfigure().
+		OnlineDiskExpansion().
 		ImageImport().
 		DiskTypes("raw", "qcow2").
 		NetworkTypes("bridge", "vlan").

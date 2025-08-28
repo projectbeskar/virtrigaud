@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math/rand"
 	"os"
 	"strconv"
 	"strings"
@@ -124,17 +125,43 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 		return nil, errors.NewInvalidSpec("failed to parse create request: %v", err)
 	}
 
-	// Check if VM already exists
+	// Check if VM already exists (idempotency)
 	if existing, err := p.client.GetVM(ctx, node, vmConfig.VMID); err == nil && existing != nil {
-		// VM exists, return its ID
-		return &providerv1.CreateResponse{
-			Id: fmt.Sprintf("%d", vmConfig.VMID),
-		}, nil
+		// VM exists, check if it matches our requirements
+		if existing.Name == req.Name {
+			p.logger.Info("VM already exists with same name, skipping creation", 
+				"vmid", vmConfig.VMID, "name", req.Name)
+			return &providerv1.CreateResponse{
+				Id: fmt.Sprintf("%d", vmConfig.VMID),
+			}, nil
+		} else {
+			// VM exists but with different name, generate new VMID
+			p.logger.Warn("VM exists with different name, generating new VMID", 
+				"existing_vmid", vmConfig.VMID, "existing_name", existing.Name, "requested_name", req.Name)
+			vmConfig.VMID = int(time.Now().Unix()%999999) + 100000
+		}
 	}
 
-	// Create the VM
+	// Create the VM with better error handling
 	taskID, err := p.client.CreateVM(ctx, node, vmConfig)
 	if err != nil {
+		// Map specific PVE errors to appropriate SDK errors
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "already exists") {
+			return nil, errors.NewAlreadyExists("VM", fmt.Sprintf("%d", vmConfig.VMID))
+		}
+		if strings.Contains(errMsg, "insufficient") || strings.Contains(errMsg, "no space") {
+			return nil, errors.NewResourceExhausted("insufficient resources for VM creation")
+		}
+		if strings.Contains(errMsg, "permission") || strings.Contains(errMsg, "access denied") {
+			return nil, errors.NewPermissionDenied("create VM")
+		}
+		if strings.Contains(errMsg, "invalid") || strings.Contains(errMsg, "bad parameter") {
+			return nil, errors.NewInvalidSpec("invalid VM configuration: %v", err)
+		}
+		if strings.Contains(errMsg, "timeout") || strings.Contains(errMsg, "connection") {
+			return nil, errors.NewUnavailable("Proxmox VE API unavailable: %v", err)
+		}
 		return nil, errors.NewInternal("failed to create VM: %v", err)
 	}
 
@@ -211,8 +238,147 @@ func (p *Provider) Power(ctx context.Context, req *providerv1.PowerRequest) (*pr
 
 // Reconfigure reconfigures a virtual machine
 func (p *Provider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureRequest) (*providerv1.TaskResponse, error) {
-	// TODO: Implement VM reconfiguration for Proxmox VE
-	return nil, errors.NewUnimplemented("Reconfigure")
+	if p.client == nil {
+		return nil, errors.NewUnavailable("PVE client not configured")
+	}
+
+	vmid, node, err := p.parseVMReference(req.Id)
+	if err != nil {
+		return nil, errors.NewInvalidSpec("invalid VM reference: %v", err)
+	}
+
+	// Get current VM configuration to check what can be changed online
+	currentConfig, err := p.client.GetVMConfig(ctx, node, vmid)
+	if err != nil {
+		return nil, errors.NewInternal("failed to get current VM config: %v", err)
+	}
+
+	// Parse the desired configuration
+	var desired map[string]interface{}
+	if err := json.Unmarshal([]byte(req.DesiredJson), &desired); err != nil {
+		return nil, errors.NewInvalidSpec("failed to parse desired configuration: %v", err)
+	}
+
+	// Extract reconfiguration parameters
+	config := &pveapi.ReconfigureConfig{}
+	requiresPowerCycle := false
+
+	// Handle CPU changes
+	if classData, ok := desired["class"].(map[string]interface{}); ok {
+		if cpus, ok := classData["cpus"].(float64); ok {
+			cpuCount := int(cpus)
+			config.CPUs = &cpuCount
+			
+			// Check if VM is running - CPU changes may require power cycle
+			vm, err := p.client.GetVM(ctx, node, vmid)
+			if err == nil && vm.Status == "running" {
+				// PVE supports online CPU changes in most cases, but check current config
+				if currentCPUs, exists := currentConfig["cores"]; exists {
+					if currentCPUCount, ok := currentCPUs.(float64); ok && int(currentCPUCount) != cpuCount {
+						// Online CPU change is supported in PVE for most guest OSes
+						p.logger.Info("CPU change will be applied online", "vmid", vmid, "old", int(currentCPUCount), "new", cpuCount)
+					}
+				}
+			}
+		}
+		
+		// Handle memory changes
+		if memory, ok := classData["memory"].(string); ok {
+			if memBytes, err := parseMemory(memory); err == nil {
+				memMB := memBytes / (1024 * 1024)
+				config.Memory = &memMB
+				
+				// Check if VM is running - memory changes may require power cycle for some guest OSes
+				vm, err := p.client.GetVM(ctx, node, vmid)
+				if err == nil && vm.Status == "running" {
+					// PVE supports online memory changes with balloon driver
+					if currentMem, exists := currentConfig["memory"]; exists {
+						if currentMemMB, ok := currentMem.(float64); ok && int64(currentMemMB) != memMB {
+							p.logger.Info("Memory change will be applied online (requires balloon driver)", "vmid", vmid, "old", int64(currentMemMB), "new", memMB)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Handle disk changes
+	if disksData, ok := desired["disks"].([]interface{}); ok {
+		for _, diskData := range disksData {
+			if disk, ok := diskData.(map[string]interface{}); ok {
+				if diskName, ok := disk["name"].(string); ok {
+					if sizeStr, ok := disk["size"].(string); ok {
+						if sizeBytes, err := parseMemory(sizeStr); err == nil {
+							sizeGB := sizeBytes / (1024 * 1024 * 1024)
+							
+							// Find corresponding disk in current config
+							diskKey := fmt.Sprintf("scsi0") // Default to scsi0, could be smarter
+							if diskName == "root" {
+								diskKey = "scsi0"
+							}
+							
+							// Check current disk size to prevent shrinking
+							if currentDisk, exists := currentConfig[diskKey]; exists {
+								if currentDiskStr, ok := currentDisk.(string); ok {
+									// Parse current disk size from config string (e.g., "local:vm-100-disk-0,size=32G")
+									if strings.Contains(currentDiskStr, "size=") {
+										parts := strings.Split(currentDiskStr, ",")
+										for _, part := range parts {
+											if strings.HasPrefix(part, "size=") {
+												sizeStr := strings.TrimPrefix(part, "size=")
+												sizeStr = strings.TrimSuffix(sizeStr, "G")
+												if currentSize, err := strconv.ParseInt(sizeStr, 10, 64); err == nil {
+													if sizeGB < currentSize {
+														return nil, errors.NewInvalidSpec("disk shrinking not allowed: current=%dG, requested=%dG", currentSize, sizeGB)
+													}
+													if sizeGB > currentSize {
+														// Use ResizeDisk for disk expansion
+														taskID, err := p.client.ResizeDisk(ctx, node, vmid, diskKey, sizeGB)
+														if err != nil {
+															return nil, errors.NewInternal("failed to resize disk: %v", err)
+														}
+														
+														result := &providerv1.TaskResponse{}
+														if taskID != "" {
+															result.Task = &providerv1.TaskRef{Id: taskID}
+														}
+														return result, nil
+													}
+												}
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Apply CPU/Memory changes if any
+	if config.CPUs != nil || config.Memory != nil {
+		taskID, err := p.client.ReconfigureVM(ctx, node, vmid, config)
+		if err != nil {
+			return nil, errors.NewInternal("failed to reconfigure VM: %v", err)
+		}
+
+		result := &providerv1.TaskResponse{}
+		if taskID != "" {
+			result.Task = &providerv1.TaskRef{Id: taskID}
+		}
+		
+		// If power cycle is required, include in response metadata
+		if requiresPowerCycle {
+			result.RequiresPowerCycle = true
+		}
+
+		return result, nil
+	}
+
+	// No changes needed
+	return &providerv1.TaskResponse{}, nil
 }
 
 // Describe describes a virtual machine's current state
@@ -323,20 +489,84 @@ func (p *Provider) TaskStatus(ctx context.Context, req *providerv1.TaskStatusReq
 
 // SnapshotCreate creates a VM snapshot
 func (p *Provider) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotCreateRequest) (*providerv1.SnapshotCreateResponse, error) {
-	// TODO: Implement snapshot creation for Proxmox VE
-	return nil, errors.NewUnimplemented("SnapshotCreate")
+	if p.client == nil {
+		return nil, errors.NewUnavailable("PVE client not configured")
+	}
+
+	vmid, node, err := p.parseVMReference(req.VmId)
+	if err != nil {
+		return nil, errors.NewInvalidSpec("invalid VM reference: %v", err)
+	}
+
+	// Generate snapshot name if not provided
+	snapName := req.NameHint
+	if snapName == "" {
+		snapName = fmt.Sprintf("snapshot-%d", time.Now().Unix())
+	}
+
+	// Create snapshot
+	taskID, err := p.client.CreateSnapshot(ctx, node, vmid, snapName, req.Description, req.IncludeMemory)
+	if err != nil {
+		return nil, errors.NewInternal("failed to create snapshot: %v", err)
+	}
+
+	result := &providerv1.SnapshotCreateResponse{
+		SnapshotId: snapName,
+	}
+
+	if taskID != "" {
+		result.Task = &providerv1.TaskRef{Id: taskID}
+	}
+
+	return result, nil
 }
 
 // SnapshotDelete deletes a VM snapshot
 func (p *Provider) SnapshotDelete(ctx context.Context, req *providerv1.SnapshotDeleteRequest) (*providerv1.TaskResponse, error) {
-	// TODO: Implement snapshot deletion for Proxmox VE
-	return nil, errors.NewUnimplemented("SnapshotDelete")
+	if p.client == nil {
+		return nil, errors.NewUnavailable("PVE client not configured")
+	}
+
+	vmid, node, err := p.parseVMReference(req.VmId)
+	if err != nil {
+		return nil, errors.NewInvalidSpec("invalid VM reference: %v", err)
+	}
+
+	taskID, err := p.client.DeleteSnapshot(ctx, node, vmid, req.SnapshotId)
+	if err != nil {
+		return nil, errors.NewInternal("failed to delete snapshot: %v", err)
+	}
+
+	result := &providerv1.TaskResponse{}
+	if taskID != "" {
+		result.Task = &providerv1.TaskRef{Id: taskID}
+	}
+
+	return result, nil
 }
 
 // SnapshotRevert reverts a VM to a snapshot
 func (p *Provider) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotRevertRequest) (*providerv1.TaskResponse, error) {
-	// TODO: Implement snapshot revert for Proxmox VE
-	return nil, errors.NewUnimplemented("SnapshotRevert")
+	if p.client == nil {
+		return nil, errors.NewUnavailable("PVE client not configured")
+	}
+
+	vmid, node, err := p.parseVMReference(req.VmId)
+	if err != nil {
+		return nil, errors.NewInvalidSpec("invalid VM reference: %v", err)
+	}
+
+	taskID, err := p.client.RevertSnapshot(ctx, node, vmid, req.SnapshotId)
+	if err != nil {
+		return nil, errors.NewInternal("failed to revert snapshot: %v", err)
+	}
+
+	result := &providerv1.TaskResponse{}
+	if taskID != "" {
+		result.Task = &providerv1.TaskRef{Id: taskID}
+	}
+
+	return result, nil
 }
 
 // Clone clones a virtual machine
@@ -383,8 +613,54 @@ func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*pr
 
 // ImagePrepare prepares an image for use
 func (p *Provider) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepareRequest) (*providerv1.TaskResponse, error) {
-	// TODO: Implement image preparation for Proxmox VE
-	return nil, errors.NewUnimplemented("ImagePrepare")
+	if p.client == nil {
+		return nil, errors.NewUnavailable("PVE client not configured")
+	}
+
+	// Find appropriate node and storage
+	node, err := p.client.FindNode(ctx)
+	if err != nil {
+		return nil, errors.NewInternal("failed to find node: %v", err)
+	}
+
+	// Default storage - could be made configurable
+	storage := "local-lvm"
+	if req.StorageClass != "" {
+		storage = req.StorageClass
+	}
+
+	// Determine if we need to import or just ensure template exists
+	templateName := ""
+	imageURL := ""
+
+	if req.ImageRef != "" {
+		// Parse image reference to determine if it's a template name or URL
+		if strings.HasPrefix(req.ImageRef, "http://") || strings.HasPrefix(req.ImageRef, "https://") {
+			imageURL = req.ImageRef
+			// Generate template name from URL
+			parts := strings.Split(req.ImageRef, "/")
+			if len(parts) > 0 {
+				templateName = strings.TrimSuffix(parts[len(parts)-1], ".qcow2")
+				templateName = strings.TrimSuffix(templateName, ".ova")
+			}
+		} else {
+			// Assume it's a template name
+			templateName = req.ImageRef
+		}
+	}
+
+	// Prepare the image/template
+	taskID, err := p.client.PrepareImage(ctx, node, storage, imageURL, templateName)
+	if err != nil {
+		return nil, errors.NewInternal("failed to prepare image: %v", err)
+	}
+
+	result := &providerv1.TaskResponse{}
+	if taskID != "" {
+		result.Task = &providerv1.TaskRef{Id: taskID}
+	}
+
+	return result, nil
 }
 
 // GetCapabilities returns the provider's capabilities
@@ -429,10 +705,144 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*pveapi.VM
 		}
 	}
 
+	// Parse Networks configuration
+	if req.NetworksJson != "" {
+		var networksData []interface{}
+		if err := json.Unmarshal([]byte(req.NetworksJson), &networksData); err == nil {
+			config.Networks = make([]pveapi.NetworkConfig, 0, len(networksData))
+			config.IPConfigs = make([]pveapi.IPConfig, 0, len(networksData))
+			
+			for i, netData := range networksData {
+				if network, ok := netData.(map[string]interface{}); ok {
+					netConfig := pveapi.NetworkConfig{
+						Index:  i,
+						Model:  "virtio", // Default model
+						Bridge: "vmbr0",  // Default bridge
+					}
+					
+					ipConfig := pveapi.IPConfig{
+						Index: i,
+						DHCP:  true, // Default to DHCP
+					}
+
+					// Extract network name and map to bridge
+					if name, ok := network["name"].(string); ok {
+						// Map network names to bridges
+						switch name {
+						case "lan", "default":
+							netConfig.Bridge = "vmbr0"
+						case "dmz":
+							netConfig.Bridge = "vmbr1"
+						case "management", "mgmt":
+							netConfig.Bridge = "vmbr2"
+						default:
+							// Use the name as bridge if it looks like a bridge name
+							if strings.HasPrefix(name, "vmbr") {
+								netConfig.Bridge = name
+							}
+						}
+					}
+
+					// Check for VLAN configuration
+					if vlan, ok := network["vlan"].(float64); ok {
+						netConfig.VLAN = int(vlan)
+					}
+
+					// Check for static IP configuration
+					if staticIP, ok := network["static_ip"].(map[string]interface{}); ok {
+						if ip, ok := staticIP["address"].(string); ok {
+							ipConfig.IP = ip
+							ipConfig.DHCP = false
+						}
+						if gw, ok := staticIP["gateway"].(string); ok {
+							ipConfig.Gateway = gw
+						}
+						if dns, ok := staticIP["dns"].([]interface{}); ok {
+							var dnsServers []string
+							for _, d := range dns {
+								if dnsStr, ok := d.(string); ok {
+									dnsServers = append(dnsServers, dnsStr)
+								}
+							}
+							if len(dnsServers) > 0 {
+								ipConfig.DNS = strings.Join(dnsServers, ",")
+							}
+						}
+					}
+
+					// Check for MAC address
+					if mac, ok := network["mac"].(string); ok {
+						netConfig.MAC = mac
+					}
+
+					config.Networks = append(config.Networks, netConfig)
+					config.IPConfigs = append(config.IPConfigs, ipConfig)
+				}
+			}
+		}
+	}
+
+	// Default network if none specified
+	if len(config.Networks) == 0 {
+		config.Networks = []pveapi.NetworkConfig{{
+			Index:  0,
+			Model:  "virtio",
+			Bridge: "vmbr0",
+		}}
+		config.IPConfigs = []pveapi.IPConfig{{
+			Index: 0,
+			DHCP:  true,
+		}}
+	}
+
 	// Configure cloud-init if user data provided
 	if len(req.UserData) > 0 {
 		config.IDE2 = "cloudinit"
-		// TODO: Process cloud-init data and extract user/ssh keys
+		
+		// Extract SSH keys and user from cloud-init data if possible
+		userData := string(req.UserData)
+		if strings.Contains(userData, "ssh_authorized_keys:") {
+			// Try to extract SSH keys from YAML
+			lines := strings.Split(userData, "\n")
+			var sshKeys []string
+			inKeys := false
+			for _, line := range lines {
+				if strings.Contains(line, "ssh_authorized_keys:") {
+					inKeys = true
+					continue
+				}
+				if inKeys && strings.HasPrefix(strings.TrimSpace(line), "- ") {
+					key := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "- "))
+					key = strings.Trim(key, "\"'")
+					if key != "" {
+						sshKeys = append(sshKeys, key)
+					}
+				} else if inKeys && !strings.HasPrefix(strings.TrimSpace(line), " ") {
+					inKeys = false
+				}
+			}
+			if len(sshKeys) > 0 {
+				config.SSHKeys = strings.Join(sshKeys, "\n")
+			}
+		}
+		
+		// Extract username
+		if strings.Contains(userData, "name:") {
+			lines := strings.Split(userData, "\n")
+			for _, line := range lines {
+				if strings.Contains(line, "name:") && !strings.Contains(line, "hostname:") {
+					parts := strings.Split(line, ":")
+					if len(parts) >= 2 {
+						username := strings.TrimSpace(parts[1])
+						username = strings.Trim(username, "\"' ")
+						if username != "" {
+							config.CIUser = username
+						}
+					}
+					break
+				}
+			}
+		}
 	}
 
 	// Find appropriate node

@@ -32,10 +32,13 @@ func GetProviderCapabilities() *capabilities.Manager {
 
 	
 
-	// Proxmox VE capabilities
+	// Proxmox VE capabilities - enhanced for GA
 	builder = builder.
 		Snapshots().
+		MemorySnapshots().
 		LinkedClones().
+		OnlineReconfigure().
+		OnlineDiskExpansion().
 		ImageImport().
 		DiskTypes("raw", "qcow2").
 		NetworkTypes("bridge", "vlan")
