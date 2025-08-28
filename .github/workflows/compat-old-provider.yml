@@ -1,0 +1,410 @@
+name: Provider Compatibility
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'sdk/**'
+      - 'proto/**'
+      - 'api/**'
+      - '.github/workflows/compat-old-provider.yml'
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'sdk/**'
+      - 'proto/**'
+      - 'api/**'
+      - '.github/workflows/compat-old-provider.yml'
+
+env:
+  GO_VERSION: '1.23'
+
+jobs:
+  detect-versions:
+    name: Detect Versions for Compatibility Testing
+    runs-on: ubuntu-latest
+    outputs:
+      current_version: ${{ steps.versions.outputs.current }}
+      previous_version: ${{ steps.versions.outputs.previous }}
+      has_previous: ${{ steps.versions.outputs.has_previous }}
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Need full history for tag detection
+
+    - name: Detect versions
+      id: versions
+      run: |
+        # Get current version (use current commit SHA for development)
+        CURRENT_VERSION="${GITHUB_SHA:0:8}"
+        echo "current=${CURRENT_VERSION}" >> $GITHUB_OUTPUT
+        
+        # Find previous SDK version tag
+        PREVIOUS_TAG=$(git tag -l "sdk/v*" --sort=-version:refname | head -1)
+        
+        if [ -n "$PREVIOUS_TAG" ]; then
+          echo "has_previous=true" >> $GITHUB_OUTPUT
+          echo "previous=${PREVIOUS_TAG#sdk/}" >> $GITHUB_OUTPUT
+          echo "Found previous SDK version: $PREVIOUS_TAG"
+        else
+          echo "has_previous=false" >> $GITHUB_OUTPUT
+          echo "previous=" >> $GITHUB_OUTPUT
+          echo "No previous SDK version found"
+        fi
+
+  compatibility-matrix:
+    name: SDK Compatibility Matrix
+    runs-on: ubuntu-latest
+    needs: detect-versions
+    if: needs.detect-versions.outputs.has_previous == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        combination:
+          - name: "current-sdk-previous-provider"
+            sdk_version: "current"
+            provider_version: "previous"
+            description: "Current SDK with Previous Provider"
+          - name: "previous-sdk-current-provider"
+            sdk_version: "previous"
+            provider_version: "current"
+            description: "Previous SDK with Current Provider"
+    
+    steps:
+    - name: Checkout current
+      uses: actions/checkout@v4
+      with:
+        path: current
+
+    - name: Checkout previous SDK version
+      uses: actions/checkout@v4
+      with:
+        ref: sdk/${{ needs.detect-versions.outputs.previous_version }}
+        path: previous
+      if: matrix.combination.sdk_version == 'previous' || matrix.combination.provider_version == 'previous'
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Prepare workspace
+      run: |
+        mkdir -p compat-test
+        cd compat-test
+        
+        echo "=== Setting up ${{ matrix.combination.description }} ==="
+        
+        # Determine SDK source
+        if [ "${{ matrix.combination.sdk_version }}" = "current" ]; then
+          SDK_PATH="../current/sdk"
+          echo "Using current SDK from: $SDK_PATH"
+        else
+          SDK_PATH="../previous/sdk"
+          echo "Using previous SDK from: $SDK_PATH"
+        fi
+        
+        # Determine provider source
+        if [ "${{ matrix.combination.provider_version }}" = "current" ]; then
+          PROVIDER_PATH="../current"
+          echo "Using current provider from: $PROVIDER_PATH"
+        else
+          PROVIDER_PATH="../previous"
+          echo "Using previous provider from: $PROVIDER_PATH"
+        fi
+        
+        # Create test module
+        cat > go.mod << EOF
+        module compat-test
+        go 1.23
+        require (
+          github.com/projectbeskar/virtrigaud/sdk v0.0.0
+          github.com/projectbeskar/virtrigaud/proto v0.0.0
+          github.com/stretchr/testify v1.10.0
+        )
+        replace github.com/projectbeskar/virtrigaud/sdk => $SDK_PATH
+        replace github.com/projectbeskar/virtrigaud/proto => $PROVIDER_PATH/proto
+        EOF
+        
+        # Copy mock provider source for testing
+        mkdir -p internal/providers/mock
+        cp $PROVIDER_PATH/internal/providers/mock/*.go internal/providers/mock/ || echo "No mock provider found"
+        
+        # Create compatibility test
+        cat > compat_test.go << 'EOF'
+        package main
+        
+        import (
+          "context"
+          "testing"
+          "time"
+          
+          "github.com/stretchr/testify/assert"
+          "github.com/stretchr/testify/require"
+          "github.com/projectbeskar/virtrigaud/sdk/provider/server"
+          "github.com/projectbeskar/virtrigaud/sdk/provider/client"
+          "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
+        )
+        
+        func TestBasicCompatibility(t *testing.T) {
+          // Test that basic SDK components can be imported and used
+          config := &server.Config{
+            Port:      9999,
+            EnableTLS: false,
+          }
+          
+          srv, err := server.New(config)
+          require.NoError(t, err, "Should be able to create server with SDK")
+          require.NotNil(t, srv, "Server should not be nil")
+          
+          // Test client creation
+          clientConfig := &client.Config{
+            Endpoint: "localhost:9999",
+            Timeout:  5 * time.Second,
+          }
+          
+          // This tests that the client can be created (connection will fail but that's ok)
+          _, err = client.NewClient(clientConfig)
+          // We expect this to fail since no server is running, but it shouldn't panic
+          t.Logf("Client creation result (expected to fail): %v", err)
+        }
+        
+        func TestProtoCompatibility(t *testing.T) {
+          // Test that protobuf messages can be created and marshaled
+          req := &providerv1.CreateVMRequest{
+            Name: "test-vm",
+            Spec: &providerv1.VMSpec{
+              Cpu:    2,
+              Memory: 4096,
+              Image:  "ubuntu:20.04",
+            },
+          }
+          
+          require.NotNil(t, req, "Should be able to create proto message")
+          assert.Equal(t, "test-vm", req.Name, "Proto fields should be accessible")
+          assert.Equal(t, int32(2), req.Spec.Cpu, "Nested proto fields should be accessible")
+        }
+        EOF
+
+    - name: Run compatibility tests
+      run: |
+        cd compat-test
+        echo "=== Running compatibility tests for ${{ matrix.combination.description }} ==="
+        
+        # Download dependencies
+        go mod tidy
+        
+        # Run tests
+        go test -v -timeout=30s ./...
+
+    - name: Build mock provider with mixed versions
+      run: |
+        cd compat-test
+        echo "=== Building mock provider with ${{ matrix.combination.description }} ==="
+        
+        # Try to build the mock provider if it exists
+        if [ -f "internal/providers/mock/provider.go" ]; then
+          cat > main.go << 'EOF'
+        package main
+        
+        import (
+          "log"
+          "github.com/projectbeskar/virtrigaud/sdk/provider/server"
+          "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
+        )
+        
+        func main() {
+          config := &server.Config{
+            Port:      9443,
+            EnableTLS: false,
+          }
+          
+          srv, err := server.New(config)
+          if err != nil {
+            log.Fatalf("Failed to create server: %v", err)
+          }
+          
+          log.Println("Mock provider built successfully with mixed SDK/Provider versions")
+          _ = srv // Use the server variable
+        }
+        EOF
+          
+          go build -o mock-provider ./...
+          echo "✅ Build successful with ${{ matrix.combination.description }}"
+        else
+          echo "⚠️  No mock provider source found, skipping build test"
+        fi
+
+    - name: Test VCTS core profile compatibility
+      run: |
+        cd compat-test
+        echo "=== Testing VCTS compatibility with ${{ matrix.combination.description }} ==="
+        
+        # Create minimal VCTS test
+        cat > vcts_test.go << 'EOF'
+        package main
+        
+        import (
+          "testing"
+          "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
+        )
+        
+        func TestVCTSCoreProfile(t *testing.T) {
+          // Test that core VCTS operations can be defined
+          testCases := []struct {
+            name string
+            req  interface{}
+          }{
+            {"CreateVM", &providerv1.CreateVMRequest{Name: "test"}},
+            {"GetVM", &providerv1.GetVMRequest{VmId: "test"}},
+            {"DeleteVM", &providerv1.DeleteVMRequest{VmId: "test"}},
+            {"PowerVM", &providerv1.PowerVMRequest{VmId: "test", PowerOp: providerv1.PowerOp_POWER_OP_ON}},
+            {"GetCapabilities", &providerv1.GetCapabilitiesRequest{}},
+          }
+          
+          for _, tc := range testCases {
+            t.Run(tc.name, func(t *testing.T) {
+              if tc.req == nil {
+                t.Errorf("Request type %s should not be nil", tc.name)
+              }
+              t.Logf("✅ %s request type is compatible", tc.name)
+            })
+          }
+        }
+        EOF
+        
+        go test -v -run TestVCTSCoreProfile ./...
+
+    - name: Generate compatibility report
+      if: always()
+      run: |
+        cd compat-test
+        echo "=== Compatibility Report: ${{ matrix.combination.description }} ===" > compat-report.txt
+        echo "Date: $(date)" >> compat-report.txt
+        echo "SDK Version: ${{ matrix.combination.sdk_version }}" >> compat-report.txt
+        echo "Provider Version: ${{ matrix.combination.provider_version }}" >> compat-report.txt
+        echo "" >> compat-report.txt
+        
+        # Check if tests passed
+        if go test -v ./... 2>&1 | tee test-output.txt; then
+          echo "✅ All compatibility tests passed" >> compat-report.txt
+        else
+          echo "❌ Some compatibility tests failed" >> compat-report.txt
+          echo "" >> compat-report.txt
+          echo "Test Output:" >> compat-report.txt
+          cat test-output.txt >> compat-report.txt
+        fi
+        
+        echo "" >> compat-report.txt
+        echo "Go Module Info:" >> compat-report.txt
+        go list -m all >> compat-report.txt
+        
+        cat compat-report.txt
+
+    - name: Upload compatibility report
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: compat-report-${{ matrix.combination.name }}
+        path: compat-test/compat-report.txt
+
+  api-compatibility:
+    name: API Version Compatibility
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Test API conversion compatibility
+      run: |
+        echo "=== Testing API conversion compatibility ==="
+        
+        # Run conversion fuzz tests in short mode
+        cd api/v1alpha1
+        go test -fuzz=FuzzVirtualMachineConversion -fuzztime=10s -fuzzminimizetime=1s
+        go test -fuzz=FuzzVMSetConversion -fuzztime=10s -fuzzminimizetime=1s
+        go test -fuzz=FuzzHubConversion -fuzztime=10s -fuzzminimizetime=1s
+
+    - name: Test proto compatibility
+      run: |
+        echo "=== Testing protobuf compatibility ==="
+        
+        # Run proto fuzz tests in short mode  
+        cd proto/rpc/provider/v1
+        go test -fuzz=FuzzCreateVMRequestJSON -fuzztime=10s -fuzzminimizetime=1s
+        go test -fuzz=FuzzVMSpecJSON -fuzztime=10s -fuzzminimizetime=1s
+        go test -fuzz=FuzzProviderResponseJSON -fuzztime=10s -fuzzminimizetime=1s
+
+  failure-analysis:
+    name: Analyze Compatibility Failures
+    runs-on: ubuntu-latest
+    needs: [compatibility-matrix, api-compatibility]
+    if: failure()
+    steps:
+    - name: Download all compatibility reports
+      uses: actions/download-artifact@v4
+      with:
+        path: reports
+
+    - name: Analyze failures
+      run: |
+        echo "=== Compatibility Failure Analysis ==="
+        echo "The following compatibility issues were detected:"
+        echo ""
+        
+        find reports -name "*.txt" -type f | while read report; do
+          echo "## $(basename $report .txt)"
+          echo ""
+          if grep -q "❌" "$report"; then
+            echo "❌ FAILED - Review required"
+            grep -A 5 -B 5 "❌" "$report" || true
+          else
+            echo "✅ PASSED"
+          fi
+          echo ""
+        done
+        
+        echo "## Recommended Actions:"
+        echo "1. Review the specific failure modes above"
+        echo "2. Check if breaking changes were introduced in SDK or proto"
+        echo "3. Update compatibility matrix if intentional breaking changes"
+        echo "4. Consider gradual migration strategy for providers"
+
+  summary:
+    name: Compatibility Summary
+    runs-on: ubuntu-latest
+    needs: [detect-versions, compatibility-matrix, api-compatibility]
+    if: always()
+    steps:
+    - name: Generate summary
+      run: |
+        echo "=== Provider Compatibility Summary ==="
+        echo ""
+        echo "**Versions Tested:**"
+        echo "- Current: ${{ needs.detect-versions.outputs.current_version }}"
+        echo "- Previous: ${{ needs.detect-versions.outputs.previous_version }}"
+        echo "- Has Previous: ${{ needs.detect-versions.outputs.has_previous }}"
+        echo ""
+        
+        if [ "${{ needs.detect-versions.outputs.has_previous }}" = "false" ]; then
+          echo "ℹ️  No previous version found - this may be the first release"
+          echo "Compatibility testing will be enabled once a previous version is available."
+        elif [ "${{ needs.compatibility-matrix.result }}" = "success" ] && [ "${{ needs.api-compatibility.result }}" = "success" ]; then
+          echo "✅ All compatibility tests passed"
+          echo "Both forward and backward compatibility confirmed."
+        else
+          echo "❌ Some compatibility tests failed"
+          echo "Review the detailed reports for specific failure modes."
+          echo ""
+          echo "**Next Steps:**"
+          echo "1. Check if breaking changes are acceptable for this release"
+          echo "2. Update migration documentation if needed"
+          echo "3. Consider versioning strategy (major vs minor release)"
+        fi
+

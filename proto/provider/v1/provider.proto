@@ -1,6 +1,6 @@
 syntax = "proto3";
 package provider.v1;
-option go_package = "github.com/projectbeskar/virtrigaud/internal/rpc/provider/v1;providerv1";
+option go_package = "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1;providerv1";
 
 // Power operations enum
 enum PowerOp {

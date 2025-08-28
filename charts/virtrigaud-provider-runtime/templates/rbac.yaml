@@ -1,0 +1,35 @@
+{{- if and .Values.rbac.create .Values.serviceAccount.create }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "virtrigaud-provider-runtime.fullname" . }}
+  labels:
+    {{- include "virtrigaud-provider-runtime.labels" . | nindent 4 }}
+rules:
+{{- if .Values.rbac.rules }}
+  {{- toYaml .Values.rbac.rules | nindent 2 }}
+{{- else }}
+  # Default minimal permissions for provider runtime
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "virtrigaud-provider-runtime.fullname" . }}
+  labels:
+    {{- include "virtrigaud-provider-runtime.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "virtrigaud-provider-runtime.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "virtrigaud-provider-runtime.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

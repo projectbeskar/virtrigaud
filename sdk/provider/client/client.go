@@ -28,7 +28,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 
-	providerv1 "github.com/projectbeskar/virtrigaud/internal/rpc/provider/v1"
+	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/errors"
 )
 

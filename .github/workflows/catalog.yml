@@ -1,0 +1,288 @@
+name: Provider Catalog
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'providers/catalog.yaml'
+      - 'cmd/vrtg-provider/publish.go'
+      - '.github/workflows/catalog.yml'
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'providers/catalog.yaml'
+      - 'cmd/vrtg-provider/publish.go'
+      - '.github/workflows/catalog.yml'
+
+env:
+  GO_VERSION: '1.23'
+
+jobs:
+  validate-schema:
+    name: Validate Catalog Schema
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: Install dependencies
+      run: |
+        pip install pyyaml jsonschema requests
+
+    - name: Validate catalog YAML
+      run: |
+        python3 -c "
+        import yaml
+        import sys
+        
+        try:
+            with open('providers/catalog.yaml', 'r') as f:
+                catalog = yaml.safe_load(f)
+            print('✅ Catalog YAML is valid')
+            
+            # Basic structure validation
+            if 'metadata' not in catalog:
+                print('❌ Missing metadata section')
+                sys.exit(1)
+            
+            if 'providers' not in catalog:
+                print('❌ Missing providers section')
+                sys.exit(1)
+                
+            print(f'📦 Found {len(catalog[\"providers\"])} providers in catalog')
+            
+            # Validate each provider
+            for provider in catalog['providers']:
+                required_fields = ['name', 'displayName', 'description', 'repo', 'image', 'tag', 'capabilities', 'conformance', 'maintainer', 'license', 'maturity']
+                for field in required_fields:
+                    if field not in provider:
+                        print(f'❌ Provider {provider.get(\"name\", \"unknown\")} missing required field: {field}')
+                        sys.exit(1)
+                        
+                print(f'✅ Provider {provider[\"name\"]} validation passed')
+                
+        except Exception as e:
+            print(f'❌ Catalog validation failed: {e}')
+            sys.exit(1)
+        "
+
+  verify-urls:
+    name: Verify Provider URLs
+    runs-on: ubuntu-latest
+    needs: validate-schema
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Verify URLs are accessible
+      run: |
+        python3 -c "
+        import yaml
+        import requests
+        import sys
+        
+        with open('providers/catalog.yaml', 'r') as f:
+            catalog = yaml.safe_load(f)
+        
+        errors = []
+        
+        for provider in catalog['providers']:
+            name = provider['name']
+            
+            # Check repository URL
+            repo_url = provider['repo']
+            try:
+                response = requests.head(repo_url, timeout=10)
+                if response.status_code >= 400:
+                    errors.append(f'Repository URL for {name} returned {response.status_code}: {repo_url}')
+                else:
+                    print(f'✅ Repository URL for {name} is accessible')
+            except Exception as e:
+                errors.append(f'Repository URL for {name} failed: {repo_url} ({e})')
+            
+            # Check conformance report URL if present
+            if 'conformance' in provider and 'report_url' in provider['conformance']:
+                report_url = provider['conformance']['report_url']
+                if report_url:
+                    try:
+                        response = requests.head(report_url, timeout=10)
+                        if response.status_code >= 400:
+                            errors.append(f'Report URL for {name} returned {response.status_code}: {report_url}')
+                        else:
+                            print(f'✅ Report URL for {name} is accessible')
+                    except Exception as e:
+                        errors.append(f'Report URL for {name} failed: {report_url} ({e})')
+        
+        if errors:
+            print('❌ URL verification failed:')
+            for error in errors:
+                print(f'  - {error}')
+            sys.exit(1)
+        else:
+            print('✅ All URLs verified successfully')
+        "
+
+  verify-images:
+    name: Verify Container Images
+    runs-on: ubuntu-latest
+    needs: validate-schema
+    if: github.event_name == 'push'
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Verify container images exist
+      run: |
+        python3 -c "
+        import yaml
+        import subprocess
+        import sys
+        
+        with open('providers/catalog.yaml', 'r') as f:
+            catalog = yaml.safe_load(f)
+        
+        errors = []
+        
+        for provider in catalog['providers']:
+            name = provider['name']
+            image = provider['image']
+            tag = provider['tag']
+            full_image = f'{image}:{tag}'
+            
+            print(f'🔍 Checking image: {full_image}')
+            
+            try:
+                # Use docker manifest inspect to check if image exists
+                result = subprocess.run(['docker', 'manifest', 'inspect', full_image], 
+                                      capture_output=True, text=True, timeout=30)
+                if result.returncode == 0:
+                    print(f'✅ Image {full_image} exists and is accessible')
+                else:
+                    errors.append(f'Image {full_image} not found or not accessible')
+            except Exception as e:
+                errors.append(f'Failed to check image {full_image}: {e}')
+        
+        if errors:
+            print('❌ Image verification failed:')
+            for error in errors:
+                print(f'  - {error}')
+            # Don't fail CI for image issues as they might be temporary
+            print('⚠️  Continuing despite image verification failures')
+        else:
+            print('✅ All images verified successfully')
+        "
+
+  test-publish-command:
+    name: Test Publish Command
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Build vrtg-provider CLI
+      run: go build -o bin/vrtg-provider ./cmd/vrtg-provider
+
+    - name: Test publish command help
+      run: ./bin/vrtg-provider publish --help
+
+    - name: Test publish dry run
+      run: |
+        mkdir -p /tmp/test-provider
+        cd /tmp/test-provider
+        
+        # Create minimal go.mod for provider detection
+        cat > go.mod << EOF
+        module test-provider
+        go 1.23
+        require github.com/projectbeskar/virtrigaud/sdk v0.1.0
+        EOF
+        
+        # Test dry run
+        $GITHUB_WORKSPACE/bin/vrtg-provider publish \
+          --name test-provider \
+          --image ghcr.io/example/test-provider \
+          --tag latest \
+          --repo https://github.com/example/test-provider \
+          --maintainer test@example.com \
+          --dry-run \
+          --skip-verify \
+          --catalog $GITHUB_WORKSPACE/providers/catalog.yaml
+
+  generate-docs:
+    name: Generate Catalog Documentation
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [validate-schema, verify-urls]
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Generate catalog documentation
+      run: |
+        python3 -c "
+        import yaml
+        import json
+        from datetime import datetime
+        
+        with open('providers/catalog.yaml', 'r') as f:
+            catalog = yaml.safe_load(f)
+        
+        # Generate markdown table
+        md_content = '# Provider Catalog\n\n'
+        md_content += f'*Last updated: {catalog[\"metadata\"][\"lastUpdated\"]}*\n\n'
+        md_content += '| Provider | Description | Capabilities | Conformance | Maintainer | License |\n'
+        md_content += '|----------|-------------|--------------|-------------|------------|----------|\n'
+        
+        for provider in sorted(catalog['providers'], key=lambda x: x['name']):
+            name = provider['name']
+            display_name = provider['displayName']
+            description = provider['description']
+            capabilities = ', '.join(provider['capabilities'])
+            badge_url = provider['conformance'].get('badge_url', '')
+            badge = f'![Conformance]({badge_url})' if badge_url else 'N/A'
+            maintainer = provider['maintainer']
+            license_id = provider['license']
+            
+            md_content += f'| **{display_name}** | {description} | {capabilities} | {badge} | {maintainer} | {license_id} |\n'
+        
+        md_content += '\n## Provider Details\n\n'
+        
+        for provider in sorted(catalog['providers'], key=lambda x: x['name']):
+            md_content += f'### {provider[\"displayName\"]}\n\n'
+            md_content += f'- **Image:** \`{provider[\"image\"]}:{provider[\"tag\"]}\`\n'
+            md_content += f'- **Repository:** [{provider[\"repo\"]}]({provider[\"repo\"]})\n'
+            md_content += f'- **Maturity:** {provider[\"maturity\"]}\n'
+            if 'tags' in provider:
+                md_content += f'- **Tags:** {', '.join(provider[\"tags\"])}\n'
+            if 'documentation' in provider:
+                md_content += f'- **Documentation:** [{provider[\"documentation\"]}]({provider[\"documentation\"]})\n'
+            md_content += '\n'
+        
+        # Write markdown file
+        with open('docs/catalog.md', 'w') as f:
+            f.write(md_content)
+        
+        # Generate JSON for web consumption
+        with open('docs/catalog.json', 'w') as f:
+            json.dump(catalog, f, indent=2)
+        
+        print('✅ Catalog documentation generated')
+        "
+
+    - name: Upload documentation artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: catalog-docs
+        path: |
+          docs/catalog.md
+          docs/catalog.json

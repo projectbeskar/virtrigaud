@@ -254,6 +254,9 @@ make run
 - [CRD Reference](docs/CRDs.md) - Complete API documentation
 - [Examples](docs/EXAMPLES.md) - Practical examples and use cases
 - [Provider Development](docs/PROVIDERS.md) - How to add new hypervisors
+- [Provider Catalog](docs/catalog.md) - Browse available providers
+- [Provider Tutorial](docs/providers/tutorial.md) - Complete provider development guide
+- [Versioning & Breaking Changes](docs/providers/versioning.md)
 
 ## Contributing
 

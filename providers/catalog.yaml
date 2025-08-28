@@ -1,0 +1,168 @@
+# VirtRigaud Provider Catalog
+# This file lists all verified and community providers for VirtRigaud
+
+metadata:
+  version: "v1"
+  lastUpdated: "2025-08-26T14:30:00Z"
+  description: "Official catalog of VirtRigaud providers"
+
+providers:
+  # Official mock provider for testing and development
+  - name: mock
+    displayName: "Mock Provider"
+    description: "A mock provider for testing and demonstrations"
+    repo: "https://github.com/projectbeskar/virtrigaud"
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-mock"
+    tag: "0.1.1"
+    capabilities:
+      - core
+      - snapshot
+      - clone
+      - image-prepare
+      - advanced
+    conformance:
+      profiles:
+        core: pass
+        snapshot: pass
+        clone: pass
+        image-prepare: pass
+        advanced: pass
+      report_url: "https://github.com/projectbeskar/virtrigaud/actions/workflows/provider-sdk.yml"
+      badge_url: "https://img.shields.io/badge/conformance-pass-green"
+      last_tested: "2025-08-26T14:30:00Z"
+    maintainer: "virtrigaud@projectbeskar.com"
+    license: "Apache-2.0"
+    maturity: "stable"
+    tags:
+      - testing
+      - development
+      - demo
+    documentation: "https://projectbeskar.github.io/virtrigaud/providers/mock/"
+    
+  # Official vSphere provider
+  - name: vsphere
+    displayName: "vSphere Provider"
+    description: "VMware vSphere provider for VirtRigaud"
+    repo: "https://github.com/projectbeskar/virtrigaud"
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere"
+    tag: "0.1.1"
+    capabilities:
+      - core
+      - snapshot
+      - clone
+      - advanced
+    conformance:
+      profiles:
+        core: pass
+        snapshot: pass
+        clone: pass
+        image-prepare: skip
+        advanced: pass
+      report_url: "https://github.com/projectbeskar/virtrigaud/actions/workflows/ci.yml"
+      badge_url: "https://img.shields.io/badge/conformance-pass-green"
+      last_tested: "2025-08-26T14:30:00Z"
+    maintainer: "virtrigaud@projectbeskar.com"
+    license: "Apache-2.0"
+    maturity: "beta"
+    tags:
+      - vmware
+      - vsphere
+      - enterprise
+    documentation: "https://projectbeskar.github.io/virtrigaud/providers/vsphere/"
+    
+  # Official libvirt provider  
+  - name: libvirt
+    displayName: "Libvirt Provider"
+    description: "Libvirt/KVM provider for VirtRigaud"
+    repo: "https://github.com/projectbeskar/virtrigaud"
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-libvirt"
+    tag: "0.1.1"
+    capabilities:
+      - core
+      - snapshot
+      - clone
+    conformance:
+      profiles:
+        core: pass
+        snapshot: pass
+        clone: pass
+        image-prepare: skip
+        advanced: partial
+      report_url: "https://github.com/projectbeskar/virtrigaud/actions/workflows/ci.yml"
+      badge_url: "https://img.shields.io/badge/conformance-partial-yellow"
+      last_tested: "2025-08-26T14:30:00Z"
+    maintainer: "virtrigaud@projectbeskar.com"
+    license: "Apache-2.0"
+    maturity: "beta"
+    tags:
+      - libvirt
+      - kvm
+      - qemu
+      - open-source
+    documentation: "https://projectbeskar.github.io/virtrigaud/providers/libvirt/"
+
+# Schema information
+schema:
+  version: "v1"
+  fields:
+    provider:
+      name:
+        required: true
+        type: string
+        description: "Unique provider identifier"
+      displayName:
+        required: true
+        type: string
+        description: "Human-readable provider name"
+      description:
+        required: true
+        type: string
+        description: "Brief description of the provider"
+      repo:
+        required: true
+        type: string
+        format: url
+        description: "Source code repository URL"
+      image:
+        required: true
+        type: string
+        description: "Container image repository"
+      tag:
+        required: true
+        type: string
+        description: "Container image tag"
+      capabilities:
+        required: true
+        type: array
+        items:
+          enum: [core, snapshot, clone, image-prepare, advanced]
+        description: "List of supported capability profiles"
+      conformance:
+        required: true
+        type: object
+        description: "Conformance test results"
+      maintainer:
+        required: true
+        type: string
+        format: email
+        description: "Maintainer email address"
+      license:
+        required: true
+        type: string
+        description: "License identifier (SPDX format)"
+      maturity:
+        required: true
+        type: string
+        enum: [alpha, beta, stable, deprecated]
+        description: "Maturity level of the provider"
+      tags:
+        required: false
+        type: array
+        items:
+          type: string
+        description: "Descriptive tags for categorization"
+      documentation:
+        required: false
+        type: string
+        format: url
+        description: "Link to provider documentation"

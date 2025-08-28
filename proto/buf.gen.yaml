@@ -2,18 +2,18 @@ version: v1
 managed:
   enabled: true
   go_package_prefix:
-    default: github.com/projectbeskar/virtrigaud/internal/rpc
+    default: github.com/projectbeskar/virtrigaud/proto/rpc
     except:
       - buf.build/googleapis/googleapis
 plugins:
   # Generate Go protobuf bindings
   - plugin: buf.build/protocolbuffers/go:v1.34.2
-    out: ../internal/rpc
+    out: rpc
     opt:
       - paths=source_relative
   # Generate Go gRPC bindings  
   - plugin: buf.build/grpc/go:v1.5.1
-    out: ../internal/rpc
+    out: rpc
     opt:
       - paths=source_relative
   # Generate documentation (future enhancement)

@@ -1,8 +1,10 @@
 module github.com/projectbeskar/virtrigaud
 
-go 1.23.0
+go 1.23
 
-godebug default=go1.23
+// Local development replacements
+replace github.com/projectbeskar/virtrigaud/proto => ./proto
+replace github.com/projectbeskar/virtrigaud/sdk => ./sdk
 
 require (
 	github.com/fsnotify/fsnotify v1.9.0

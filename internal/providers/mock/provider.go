@@ -25,7 +25,7 @@ import (
 	"sync"
 	"time"
 
-	providerv1 "github.com/projectbeskar/virtrigaud/internal/rpc/provider/v1"
+	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/capabilities"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/errors"
 )

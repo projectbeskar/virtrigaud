@@ -1,0 +1,92 @@
+# Example values for libvirt provider  
+image:
+  repository: ghcr.io/projectbeskar/virtrigaud/provider-libvirt
+  tag: "0.1.1"
+
+env:
+  - name: LOG_LEVEL
+    value: "info"
+  - name: LIBVIRT_URI
+    value: "qemu:///system"
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+  requests:
+    cpu: 200m
+    memory: 256Mi
+
+# Security context for libvirt (may need privileged access)
+securityContext:
+  allowPrivilegeEscalation: true
+  capabilities:
+    add:
+    - SYS_ADMIN
+  readOnlyRootFilesystem: false
+  runAsNonRoot: false
+  runAsUser: 0
+
+podSecurityContext:
+  runAsNonRoot: false
+  runAsUser: 0
+
+# RBAC permissions for libvirt provider
+rbac:
+  rules:
+    - apiGroups: [""]
+      resources: ["configmaps", "secrets", "events"]
+      verbs: ["get", "list", "watch", "create", "patch"]
+    - apiGroups: [""]
+      resources: ["nodes"]
+      verbs: ["get", "list", "watch"]
+
+# Volume mounts for libvirt socket and storage
+volumeMounts:
+  - name: libvirt-socket
+    mountPath: /var/run/libvirt
+  - name: libvirt-storage
+    mountPath: /var/lib/libvirt
+
+volumes:
+  - name: libvirt-socket
+    hostPath:
+      path: /var/run/libvirt
+      type: Directory
+  - name: libvirt-storage
+    hostPath:
+      path: /var/lib/libvirt
+      type: Directory
+
+# Node selector to run on nodes with libvirt
+nodeSelector:
+  node-role.kubernetes.io/worker: "true"
+
+# Tolerations for running on dedicated nodes
+tolerations:
+  - key: "hypervisor"
+    operator: "Equal"
+    value: "libvirt"
+    effect: "NoSchedule"
+
+# Network policy for libvirt environment
+networkPolicy:
+  enabled: true
+  ingress:
+    fromNamespaces:
+      - virtrigaud-system
+  egress:
+    # Allow communication to libvirt daemons on nodes
+    - to: []
+      ports:
+        - protocol: TCP
+          port: 16509
+    # Allow DNS resolution
+    - to: []
+      ports:
+        - protocol: UDP
+          port: 53
+
+# Disable pod disruption budget for now (single instance)
+podDisruptionBudget:
+  enabled: false

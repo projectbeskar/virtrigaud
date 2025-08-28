@@ -1,0 +1,32 @@
+# Example values for mock provider
+image:
+  repository: ghcr.io/projectbeskar/virtrigaud/provider-mock
+  tag: "0.1.1"
+
+env:
+  - name: LOG_LEVEL
+    value: "debug"
+  - name: MOCK_SLOW_MODE
+    value: "false"
+  - name: MOCK_FAILURE_MODE
+    value: ""
+
+resources:
+  limits:
+    cpu: 200m
+    memory: 256Mi
+  requests:
+    cpu: 50m
+    memory: 64Mi
+
+# Enable network policy with default settings
+networkPolicy:
+  enabled: true
+  ingress:
+    fromNamespaces:
+      - virtrigaud-system
+
+# Enable pod disruption budget
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1

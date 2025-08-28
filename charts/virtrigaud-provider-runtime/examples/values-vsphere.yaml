@@ -1,0 +1,75 @@
+# Example values for vSphere provider
+image:
+  repository: ghcr.io/projectbeskar/virtrigaud/provider-vsphere
+  tag: "0.1.1"
+
+env:
+  - name: LOG_LEVEL
+    value: "info"
+  - name: VSPHERE_SERVER
+    value: "vcenter.example.com"
+  - name: VSPHERE_USERNAME
+    valueFrom:
+      secretKeyRef:
+        name: vsphere-credentials
+        key: username
+  - name: VSPHERE_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: vsphere-credentials
+        key: password
+
+credentials:
+  secretName: vsphere-credentials
+
+# TLS configuration
+tls:
+  enabled: true
+  secretName: vsphere-provider-tls
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 512Mi
+  requests:
+    cpu: 200m
+    memory: 128Mi
+
+# RBAC permissions for vSphere provider
+rbac:
+  rules:
+    - apiGroups: [""]
+      resources: ["configmaps", "secrets", "events"]
+      verbs: ["get", "list", "watch", "create", "patch"]
+
+# Enable autoscaling
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70
+
+# Network policy for vSphere environment
+networkPolicy:
+  enabled: true
+  ingress:
+    fromNamespaces:
+      - virtrigaud-system
+  egress:
+    # Allow communication to vCenter
+    - to:
+        - ipBlock:
+            cidr: 10.0.0.0/8
+      ports:
+        - protocol: TCP
+          port: 443
+    # Allow DNS resolution
+    - to: []
+      ports:
+        - protocol: UDP
+          port: 53
+
+# Pod disruption budget
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 1

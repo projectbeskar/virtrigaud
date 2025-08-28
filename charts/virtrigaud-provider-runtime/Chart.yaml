@@ -1,0 +1,19 @@
+apiVersion: v2
+name: virtrigaud-provider-runtime
+description: A Helm chart for running VirtRigaud provider services in Kubernetes
+type: application
+version: 0.1.0
+appVersion: "0.1.1"
+keywords:
+  - virtrigaud
+  - provider
+  - virtualization
+  - kubernetes
+home: https://github.com/projectbeskar/virtrigaud
+sources:
+  - https://github.com/projectbeskar/virtrigaud
+maintainers:
+  - name: VirtRigaud Team
+    email: virtrigaud@projectbeskar.com
+annotations:
+  category: Infrastructure

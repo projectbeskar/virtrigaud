@@ -20,7 +20,7 @@ package capabilities
 import (
 	"context"
 
-	providerv1 "github.com/projectbeskar/virtrigaud/internal/rpc/provider/v1"
+	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
 // Capability represents a provider capability flag.
@@ -37,21 +37,21 @@ const (
 	CapabilityGetCapabilities Capability = "get_capabilities"
 
 	// Optional capabilities
-	CapabilityReconfigure            Capability = "reconfigure"
-	CapabilityReconfigureOnline      Capability = "reconfigure_online"
-	CapabilityDiskExpansionOnline    Capability = "disk_expansion_online"
-	CapabilitySnapshots              Capability = "snapshots"
-	CapabilityMemorySnapshots        Capability = "memory_snapshots"
-	CapabilityLinkedClones           Capability = "linked_clones"
-	CapabilityImageImport            Capability = "image_import"
-	CapabilityTaskStatus             Capability = "task_status"
+	CapabilityReconfigure         Capability = "reconfigure"
+	CapabilityReconfigureOnline   Capability = "reconfigure_online"
+	CapabilityDiskExpansionOnline Capability = "disk_expansion_online"
+	CapabilitySnapshots           Capability = "snapshots"
+	CapabilityMemorySnapshots     Capability = "memory_snapshots"
+	CapabilityLinkedClones        Capability = "linked_clones"
+	CapabilityImageImport         Capability = "image_import"
+	CapabilityTaskStatus          Capability = "task_status"
 
 	// Provider-specific capabilities
-	CapabilityVSphere          Capability = "vsphere"
-	CapabilityLibvirt          Capability = "libvirt"
-	CapabilityFirecracker      Capability = "firecracker"
-	CapabilityQEMU             Capability = "qemu"
-	CapabilityMock             Capability = "mock"
+	CapabilityVSphere     Capability = "vsphere"
+	CapabilityLibvirt     Capability = "libvirt"
+	CapabilityFirecracker Capability = "firecracker"
+	CapabilityQEMU        Capability = "qemu"
+	CapabilityMock        Capability = "mock"
 )
 
 // Profile represents a set of capabilities that form a functional profile.
@@ -77,8 +77,8 @@ const (
 
 // Manager manages provider capabilities.
 type Manager struct {
-	capabilities         map[Capability]bool
-	supportedDiskTypes   []string
+	capabilities          map[Capability]bool
+	supportedDiskTypes    []string
 	supportedNetworkTypes []string
 }
 
@@ -121,14 +121,14 @@ func (m *Manager) SetSupportedNetworkTypes(types []string) *Manager {
 // GetCapabilities returns the capabilities response for gRPC.
 func (m *Manager) GetCapabilities(ctx context.Context, req *providerv1.GetCapabilitiesRequest) (*providerv1.GetCapabilitiesResponse, error) {
 	return &providerv1.GetCapabilitiesResponse{
-		SupportsReconfigureOnline:      m.HasCapability(CapabilityReconfigureOnline),
-		SupportsDiskExpansionOnline:    m.HasCapability(CapabilityDiskExpansionOnline),
-		SupportsSnapshots:              m.HasCapability(CapabilitySnapshots),
-		SupportsMemorySnapshots:        m.HasCapability(CapabilityMemorySnapshots),
-		SupportsLinkedClones:           m.HasCapability(CapabilityLinkedClones),
-		SupportsImageImport:            m.HasCapability(CapabilityImageImport),
-		SupportedDiskTypes:             m.supportedDiskTypes,
-		SupportedNetworkTypes:          m.supportedNetworkTypes,
+		SupportsReconfigureOnline:   m.HasCapability(CapabilityReconfigureOnline),
+		SupportsDiskExpansionOnline: m.HasCapability(CapabilityDiskExpansionOnline),
+		SupportsSnapshots:           m.HasCapability(CapabilitySnapshots),
+		SupportsMemorySnapshots:     m.HasCapability(CapabilityMemorySnapshots),
+		SupportsLinkedClones:        m.HasCapability(CapabilityLinkedClones),
+		SupportsImageImport:         m.HasCapability(CapabilityImageImport),
+		SupportedDiskTypes:          m.supportedDiskTypes,
+		SupportedNetworkTypes:       m.supportedNetworkTypes,
 	}, nil
 }
 
@@ -310,22 +310,22 @@ func (b *Builder) Build() *Manager {
 
 // Standard disk types that providers can support.
 var (
-	DiskTypeThin        = "thin"
-	DiskTypeThick       = "thick"
-	DiskTypeEagerZero   = "eager_zero"
-	DiskTypeRaw         = "raw"
-	DiskTypeQCOW2       = "qcow2"
-	DiskTypeVMDK        = "vmdk"
-	DiskTypeVHD         = "vhd"
-	DiskTypeVDI         = "vdi"
+	DiskTypeThin      = "thin"
+	DiskTypeThick     = "thick"
+	DiskTypeEagerZero = "eager_zero"
+	DiskTypeRaw       = "raw"
+	DiskTypeQCOW2     = "qcow2"
+	DiskTypeVMDK      = "vmdk"
+	DiskTypeVHD       = "vhd"
+	DiskTypeVDI       = "vdi"
 )
 
 // Standard network types that providers can support.
 var (
-	NetworkTypeBridge     = "bridge"
-	NetworkTypeNAT        = "nat"
-	NetworkTypeHostOnly   = "host_only"
+	NetworkTypeBridge      = "bridge"
+	NetworkTypeNAT         = "nat"
+	NetworkTypeHostOnly    = "host_only"
 	NetworkTypeDistributed = "distributed"
-	NetworkTypeVLAN       = "vlan"
-	NetworkTypeOVS        = "ovs"
+	NetworkTypeVLAN        = "vlan"
+	NetworkTypeOVS         = "ovs"
 )

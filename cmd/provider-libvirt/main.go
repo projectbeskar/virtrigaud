@@ -31,7 +31,7 @@ import (
 	"google.golang.org/grpc/health/grpc_health_v1"
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt"
-	providerv1 "github.com/projectbeskar/virtrigaud/internal/rpc/provider/v1"
+	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 	"github.com/projectbeskar/virtrigaud/internal/version"
 )
 

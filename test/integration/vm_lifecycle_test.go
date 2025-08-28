@@ -28,7 +28,7 @@ import (
 	infrav1alpha1 "github.com/projectbeskar/virtrigaud/api/v1alpha1"
 	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt"
 	"github.com/projectbeskar/virtrigaud/internal/providers/vsphere"
-	providerv1 "github.com/projectbeskar/virtrigaud/internal/rpc/provider/v1"
+	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
 func TestProviderCapabilities(t *testing.T) {

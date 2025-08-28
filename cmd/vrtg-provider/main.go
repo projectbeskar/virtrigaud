@@ -46,6 +46,7 @@ to help developers build reliable and conformant provider implementations.`,
 		newInitCommand(),
 		newGenerateCommand(),
 		newVerifyCommand(),
+		newPublishCommand(),
 		newVersionCommand(),
 	)
 

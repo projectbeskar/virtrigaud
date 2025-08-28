@@ -22,7 +22,7 @@ import (
 	"fmt"
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
-	providerv1 "github.com/projectbeskar/virtrigaud/internal/rpc/provider/v1"
+	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
 // Server implements the providerv1.ProviderServer interface for vSphere

@@ -157,6 +157,53 @@ build-providers: build-provider-libvirt build-provider-vsphere build-provider-mo
 run: manifests generate fmt vet ## Run a controller from your host.
 	go run ./cmd/main.go
 
+##@ Module Release
+
+.PHONY: release-proto
+release-proto: proto-lint ## Release proto module with tags and buf push
+	@echo "Releasing proto module..."
+	@cd proto && \
+	if [ -z "$(VERSION)" ]; then \
+		echo "Error: VERSION is required. Usage: make release-proto VERSION=v0.1.0"; \
+		exit 1; \
+	fi && \
+	git tag proto/$(VERSION) && \
+	echo "Tagged proto module with proto/$(VERSION)" && \
+	if command -v buf >/dev/null 2>&1; then \
+		echo "Pushing to buf registry..."; \
+		buf push || echo "buf push failed or not configured"; \
+	else \
+		echo "buf not found, skipping buf push"; \
+	fi
+
+.PHONY: release-sdk
+release-sdk: ## Release SDK module with tags and generate docs
+	@echo "Releasing SDK module..."
+	@cd sdk && \
+	if [ -z "$(VERSION)" ]; then \
+		echo "Error: VERSION is required. Usage: make release-sdk VERSION=v0.1.0"; \
+		exit 1; \
+	fi && \
+	go mod tidy && \
+	git tag sdk/$(VERSION) && \
+	echo "Tagged SDK module with sdk/$(VERSION)" && \
+	mkdir -p ../docs/sdk && \
+	echo "# Provider SDK $(VERSION)" > ../docs/sdk/README.md && \
+	echo "" >> ../docs/sdk/README.md && \
+	echo "Install the SDK:" >> ../docs/sdk/README.md && \
+	echo "" >> ../docs/sdk/README.md && \
+	echo '```bash' >> ../docs/sdk/README.md && \
+	echo "go get github.com/projectbeskar/virtrigaud/sdk/provider@$(VERSION)" >> ../docs/sdk/README.md && \
+	echo '```' >> ../docs/sdk/README.md && \
+	echo "" >> ../docs/sdk/README.md && \
+	echo "## Packages" >> ../docs/sdk/README.md && \
+	echo "" >> ../docs/sdk/README.md && \
+	for pkg in $$(find provider -name "*.go" -exec dirname {} \; | sort -u); do \
+		echo "- [$$pkg](./$$pkg/)" >> ../docs/sdk/README.md; \
+	done
+
+##@ Build
+
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/

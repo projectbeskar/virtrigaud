@@ -132,17 +132,17 @@ func (s *Scaffolder) generateFile(relativePath, tmplContent string, ctx map[stri
 // getFileTemplates returns a map of file paths to template content.
 func (s *Scaffolder) getFileTemplates() map[string]string {
 	return map[string]string{
-		"main.go":         mainGoTemplate,
-		"go.mod":          goModTemplate,
-		"Makefile":        makefileTemplate,
-		"Dockerfile":      dockerfileTemplate,
-		"README.md":       readmeTemplate,
-		".gitignore":      gitignoreTemplate,
-		".github/workflows/ci.yml": ciWorkflowTemplate,
-		"config/deployment.yaml":   deploymentTemplate,
-		"config/service.yaml":      serviceTemplate,
-		"internal/provider/provider.go": providerTemplate,
-		"internal/provider/capabilities.go": capabilitiesTemplate,
+		"main.go":                            mainGoTemplate,
+		"go.mod":                             goModTemplate,
+		"Makefile":                           makefileTemplate,
+		"Dockerfile":                         dockerfileTemplate,
+		"README.md":                          readmeTemplate,
+		".gitignore":                         gitignoreTemplate,
+		".github/workflows/ci.yml":           ciWorkflowTemplate,
+		"config/deployment.yaml":             deploymentTemplate,
+		"config/service.yaml":                serviceTemplate,
+		"internal/provider/provider.go":      providerTemplate,
+		"internal/provider/capabilities.go":  capabilitiesTemplate,
 		"internal/provider/provider_test.go": providerTestTemplate,
 	}
 }
@@ -714,7 +714,7 @@ import (
 	"context"
 	"fmt"
 
-	providerv1 "github.com/projectbeskar/virtrigaud/internal/rpc/provider/v1"
+	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/errors"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/capabilities"
 )
@@ -930,7 +930,7 @@ import (
 	"context"
 	"testing"
 
-	providerv1 "github.com/projectbeskar/virtrigaud/internal/rpc/provider/v1"
+	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
 func TestProvider_Validate(t *testing.T) {

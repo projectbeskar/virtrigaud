@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "virtrigaud-provider-runtime.fullname" . }}
+  labels:
+    {{- include "virtrigaud-provider-runtime.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.targetPort }}
+      protocol: TCP
+      name: grpc
+    {{- range .Values.service.additionalPorts }}
+    - port: {{ .port }}
+      targetPort: {{ .targetPort }}
+      protocol: TCP
+      name: {{ .name }}
+    {{- end }}
+  selector:
+    {{- include "virtrigaud-provider-runtime.selectorLabels" . | nindent 4 }}

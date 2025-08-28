@@ -1,0 +1,15 @@
+# This configmap template is used for checksum calculation in deployment
+# It can be extended to include provider-specific configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "virtrigaud-provider-runtime.fullname" . }}
+  labels:
+    {{- include "virtrigaud-provider-runtime.labels" . | nindent 4 }}
+data:
+  # Provider configuration can be added here
+  provider.yaml: |
+    # Configuration placeholder
+    metadata:
+      chart: {{ .Chart.Name }}
+      version: {{ .Chart.Version }}
