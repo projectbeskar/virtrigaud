@@ -4,13 +4,13 @@ A Kubernetes operator for managing virtual machines across multiple hypervisors.
 
 ## Overview
 
-Virtrigaud is a Kubernetes operator that enables declarative management of virtual machines across different hypervisor platforms. It provides a unified API for provisioning and managing VMs on vSphere, Libvirt/KVM, and other hypervisors through a clean provider interface.
+Virtrigaud is a Kubernetes operator that enables declarative management of virtual machines across different hypervisor platforms. It provides a unified API for provisioning and managing VMs on vSphere, Libvirt/KVM, Proxmox VE, and other hypervisors through a clean provider interface.
 
 ## Features
 
-- **Multi-Hypervisor Support**: Manage VMs across vSphere and Libvirt/KVM simultaneously
+- **Multi-Hypervisor Support**: Manage VMs across vSphere, Libvirt/KVM, and Proxmox VE simultaneously
 - **Declarative API**: Define VM resources using Kubernetes CRDs with API versioning (v1alpha1/v1beta1)
-- **Production-Ready Providers**: Full integration for both vSphere (govmomi) and Libvirt/KVM
+- **Production-Ready Providers**: Full integration for vSphere (govmomi), Libvirt/KVM, and Proxmox VE
 - **API Conversion**: Seamless conversion between v1alpha1 and v1beta1 API versions via webhooks
 - **Cloud-Init Support**: Initialize VMs with cloud-init configuration across all providers
 - **Network Management**: Configure VM networking with provider-specific settings
@@ -30,29 +30,144 @@ All resources support seamless conversion between API versions via webhooks. Con
 
 ## Architecture
 
+VirtRigaud supports both **In-Process** and **Remote** provider deployment models:
+
+### In-Process Model (Traditional)
 ```
-┌─────────────────┐    ┌───────────────┐    ┌─────────────────┐
-│  VirtualMachine │    │   VMClass     │    │     VMImage     │
-│      CRD        │    │     CRD       │    │      CRD        │
-└─────────────────┘    └───────────────┘    └─────────────────┘
-         │                       │                       │
-         └───────────────────────┼───────────────────────┘
-                                 │
-                    ┌─────────────────┐
-                    │   Controller    │
-                    │   (Reconciler)  │
-                    └─────────────────┘
-                                 │
-                    ┌─────────────────┐
-                    │    Provider     │
-                    │   Interface     │
-                    └─────────────────┘
-                         │       │
-              ┌──────────┘       └──────────┐
-    ┌─────────────────┐           ┌─────────────────┐
-    │    vSphere      │           │    Libvirt     │
-    │   Provider      │           │   Provider     │
-    └─────────────────┘           └─────────────────┘
+                    ┌─────────────────────────────────────────┐
+                    │            Kubernetes Cluster           │
+                    │                                         │
+┌─────────────────┐ │ ┌─────────────────┐                    │
+│  VirtualMachine │ │ │   Controller    │                    │
+│      CRD        │─┼─│   (Manager)     │                    │
+└─────────────────┘ │ │                 │                    │
+┌─────────────────┐ │ │  ┌──────────────┴──────────────┐     │
+│    VMClass      │─┼─│  │        Provider Interface   │     │
+│      CRD        │ │ │  └──────────────┬──────────────┘     │
+└─────────────────┘ │ │                 │                    │
+┌─────────────────┐ │ │    ┌────────────┼────────────┐       │
+│    VMImage      │─┼─│    │            │            │       │
+│      CRD        │ │ │ ┌──▼───┐    ┌───▼───┐   ┌───▼────┐  │
+└─────────────────┘ │ │ │vSphere│    │Libvirt│   │Proxmox │  │
+┌─────────────────┐ │ │ │Provider│   │Provider│  │Provider│  │
+│    Provider     │─┼─│ └───────┘    └───────┘   └────────┘  │
+│      CRD        │ │ └─────────────────────────────────────┘
+└─────────────────┘ │
+                    │ ┌─────────────────────────────────────┐
+                    │ │         External Infrastructure      │
+                    │ │                                     │
+                    │ │ ┌──────────┐ ┌─────────┐ ┌─────────┐│
+                    │ │ │ vSphere  │ │ Libvirt │ │Proxmox  ││
+                    │ │ │   ESXi   │ │   KVM   │ │   VE    ││
+                    │ │ └──────────┘ └─────────┘ └─────────┘│
+                    │ └─────────────────────────────────────┘
+                    └─────────────────────────────────────────┘
+```
+
+### Remote Provider Model (Recommended for Production)
+```
+                    ┌─────────────────────────────────────────┐
+                    │            Kubernetes Cluster           │
+                    │                                         │
+┌─────────────────┐ │ ┌─────────────────┐                    │
+│  VirtualMachine │ │ │   Controller    │                    │
+│      CRD        │─┼─│   (Manager)     │                    │
+└─────────────────┘ │ │                 │                    │
+┌─────────────────┐ │ │                 │                    │
+│    VMClass      │─┼─│                 │                    │
+│      CRD        │ │ │                 │                    │
+└─────────────────┘ │ │                 │                    │
+┌─────────────────┐ │ │                 │  gRPC/TLS          │
+│    VMImage      │─┼─│                 ├──────────────────► │
+│      CRD        │ │ │                 │                    │
+└─────────────────┘ │ └─────────────────┘                    │
+┌─────────────────┐ │                                        │
+│    Provider     │ │ ┌─────────────────────────────────────┐│
+│      CRD        │─┼─│        Remote Providers              ││
+└─────────────────┘ │ │                                     ││
+                    │ │ ┌──────────┐ ┌─────────┐ ┌─────────┐││
+                    │ │ │ vSphere  │ │ Libvirt │ │Proxmox  │││
+                    │ │ │ Provider │ │ Provider│ │Provider │││
+                    │ │ │   Pod    │ │   Pod   │ │  Pod    │││
+                    │ │ └──────────┘ └─────────┘ └─────────┘││
+                    │ └─────────────────────────────────────┘│
+                    │                                        │
+                    │ ┌─────────────────────────────────────┐│
+                    │ │         External Infrastructure      ││
+                    │ │                                     ││
+                    │ │ ┌──────────┐ ┌─────────┐ ┌─────────┐││
+                    │ │ │ vSphere  │ │ Libvirt │ │Proxmox  │││
+                    │ │ │   ESXi   │ │   KVM   │ │   VE    │││
+                    │ │ └──────────┘ └─────────┘ └─────────┘││
+                    │ └─────────────────────────────────────┘│
+                    └─────────────────────────────────────────┘
+```
+
+**Key Benefits of Remote Model:**
+- **Isolation**: Provider failures don't affect the core manager
+- **Scalability**: Independent scaling of providers
+- **Security**: Fine-grained RBAC and NetworkPolicies per provider
+- **Multi-tenancy**: Different providers for different teams/environments
+- **Updates**: Rolling updates of providers without manager downtime
+
+### Architecture Overview Diagram
+
+```mermaid
+graph TB
+    %% Kubernetes Cluster boundary
+    subgraph "Kubernetes Cluster"
+        
+        %% CRDs
+        subgraph "Custom Resources"
+            VM[VirtualMachine CRD]
+            VMC[VMClass CRD]
+            VMI[VMImage CRD]
+            PR[Provider CRD]
+        end
+        
+        %% Controller
+        CTRL[VirtRigaud Controller<br/>Manager]
+        
+        %% Remote Providers
+        subgraph "Remote Providers (gRPC)"
+            VSP[vSphere Provider<br/>Pod]
+            LVP[Libvirt Provider<br/>Pod] 
+            PXP[Proxmox Provider<br/>Pod]
+        end
+        
+        %% Connections within cluster
+        VM -.-> CTRL
+        VMC -.-> CTRL
+        VMI -.-> CTRL
+        PR -.-> CTRL
+        
+        CTRL -->|gRPC/TLS| VSP
+        CTRL -->|gRPC/TLS| LVP
+        CTRL -->|gRPC/TLS| PXP
+    end
+    
+    %% External Infrastructure
+    subgraph "External Infrastructure"
+        subgraph "vSphere Environment"
+            VCENTER[vCenter Server]
+            ESXI[ESXi Hosts]
+        end
+        
+        subgraph "KVM Environment"
+            LIBVIRT[Libvirt Hosts]
+            QEMU[QEMU/KVM VMs]
+        end
+        
+        subgraph "Proxmox Environment"
+            PVE[Proxmox VE Cluster]
+            NODES[PVE Nodes]
+        end
+    end
+    
+    %% External connections
+    VSP -->|govmomi API| VCENTER
+    LVP -->|libvirt API| LIBVIRT
+    PXP -->|REST API| PVE
 ```
 
 ## Quick Start
@@ -75,7 +190,8 @@ All resources support seamless conversion between API versions via webhooks. Con
      -n virtrigaud --create-namespace \
      --set webhooks.enabled=true \
      --set providers.vsphere.enabled=true \
-     --set providers.libvirt.enabled=false
+     --set providers.libvirt.enabled=false \
+     --set providers.proxmox.enabled=true
    
    # Skip CRDs if already installed separately
    helm install virtrigaud virtrigaud/virtrigaud -n virtrigaud --create-namespace --skip-crds
@@ -115,9 +231,12 @@ All resources support seamless conversion between API versions via webhooks. Con
    # Libvirt/KVM example (v1beta1 API)
    kubectl apply -f examples/libvirt-complete-example.yaml
    
+   # Proxmox VE example (v1beta1 API)
+   kubectl apply -f examples/proxmox-complete-example.yaml
+   
    # For v1alpha1 examples (legacy), see examples/upgrade/alpha/
    
-   # Multi-provider example (both vSphere and Libvirt)
+   # Multi-provider example (vSphere, Libvirt, and Proxmox)
    kubectl apply -f examples/multi-provider-example.yaml
    
    # Or step by step:
@@ -148,7 +267,9 @@ For detailed instructions, see [QUICKSTART.md](QUICKSTART.md).
 
 ## Supported Providers
 
-- **vSphere**: (govmomi-based)
+### Production-Ready Providers
+
+- **vSphere** (govmomi-based) - ✅ **GA**
   - VM creation from templates
   - Power management (On/Off/Reboot)
   - Resource configuration (CPU/Memory/Disks)
@@ -156,16 +277,48 @@ For detailed instructions, see [QUICKSTART.md](QUICKSTART.md).
   - Network configuration with portgroups
   - Async task monitoring
   
-- **Libvirt/KVM**: (libvirt-go-based)
+- **Libvirt/KVM** (libvirt-go-based) - ✅ **GA**
   - VM creation from qcow2 images
   - Power management (On/Off/Reboot)  
   - Resource configuration (CPU/Memory/Disks)
   - Cloud-init support via nocloud ISO
   - Network configuration with bridges/networks
   - Storage pool and volume management
-  
-- **Firecracker**: Future roadmap
-- **QEMU**: Future roadmap
+
+- **Proxmox VE** (REST API-based) - ✅ **GA**
+  - VM creation from templates or ISO
+  - Power management (On/Off/Reboot)
+  - **Hot-plug reconfiguration** (CPU/Memory/Disk)
+  - **Snapshot management** (with memory state)
+  - **Multi-NIC networking** with VLAN support
+  - **Linked/Full cloning**
+  - **Image import** from URLs
+  - Cloud-init support with static IPs
+  - Async task monitoring with jittered backoff
+
+### Provider Feature Matrix
+
+| Feature | vSphere | Libvirt | Proxmox | Notes |
+|---------|---------|---------|---------|-------|
+| **Core Operations** | ✅ | ✅ | ✅ | Create/Delete/Power/Describe |
+| **Hot Reconfiguration** | ⚠️ Limited | ❌ | ✅ | CPU/Memory online changes |
+| **Disk Expansion** | ✅ | ✅ | ✅ | Online disk growth |
+| **Snapshots** | ✅ | ✅ | ✅ | VM state snapshots |
+| **Memory Snapshots** | ✅ | ❌ | ✅ | Include RAM in snapshots |
+| **Cloning** | ✅ | ✅ | ✅ | VM duplication |
+| **Linked Clones** | ✅ | ❌ | ✅ | COW-based fast clones |
+| **Image Import** | ❌ | ✅ | ✅ | Import from URLs/files |
+| **Multi-NIC** | ✅ | ✅ | ✅ | Multiple network interfaces |
+| **VLAN Support** | ✅ | ✅ | ✅ | 802.1Q VLAN tagging |
+| **Static IPs** | ✅ | ✅ | ✅ | Cloud-init network config |
+| **Remote Deployment** | ✅ | ✅ | ✅ | gRPC-based providers |
+
+### Future Roadmap
+
+- **Firecracker**: Serverless microVM support
+- **QEMU**: Direct QEMU integration
+- **Hyper-V**: Windows virtualization platform
+- **OpenStack**: Cloud infrastructure integration
 
 ## Troubleshooting
 
@@ -257,6 +410,12 @@ make run
 - [Provider Catalog](docs/catalog.md) - Browse available providers
 - [Provider Tutorial](docs/providers/tutorial.md) - Complete provider development guide
 - [Versioning & Breaking Changes](docs/providers/versioning.md)
+
+### Provider-Specific Documentation
+
+- [vSphere Provider](docs/providers/vsphere.md) - vCenter/ESXi integration
+- [Libvirt Provider](docs/providers/libvirt.md) - KVM/QEMU virtualization  
+- [Proxmox VE Provider](docs/providers/proxmox.md) - Proxmox Virtual Environment
 
 ## Contributing
 
