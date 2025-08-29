@@ -145,12 +145,16 @@ func FuzzVMSetConversion(f *testing.F) {
 			},
 			Spec: VMSetSpec{
 				Replicas: &replicas,
-				Template: VirtualMachineTemplateSpec{
+				Template: VMSetTemplate{
 					Spec: VirtualMachineSpec{
 						PowerState: powerState,
-						CPU:        cpu,
-						Memory:     memory,
-						Image:      image,
+						Resources: &VirtualMachineResources{
+							CPU:       cpu,
+							MemoryMiB: memory,
+						},
+						ImageRef: ObjectRef{
+							Name: image,
+						},
 					},
 				},
 			},
@@ -181,16 +185,21 @@ func FuzzVMSetConversion(f *testing.F) {
 			}
 		}
 
-		if alphaRoundTrip.Spec.Template.Spec.CPU != alpha.Spec.Template.Spec.CPU {
-			t.Errorf("VMSet template CPU mismatch: original=%d, roundtrip=%d", alpha.Spec.Template.Spec.CPU, alphaRoundTrip.Spec.Template.Spec.CPU)
+		if alphaRoundTrip.Spec.Template.Spec.Resources != nil && alpha.Spec.Template.Spec.Resources != nil {
+			if alphaRoundTrip.Spec.Template.Spec.Resources.CPU != nil && alpha.Spec.Template.Spec.Resources.CPU != nil {
+				if *alphaRoundTrip.Spec.Template.Spec.Resources.CPU != *alpha.Spec.Template.Spec.Resources.CPU {
+					t.Errorf("VMSet template CPU mismatch: original=%d, roundtrip=%d", *alpha.Spec.Template.Spec.Resources.CPU, *alphaRoundTrip.Spec.Template.Spec.Resources.CPU)
+				}
+			}
+			if alphaRoundTrip.Spec.Template.Spec.Resources.MemoryMiB != nil && alpha.Spec.Template.Spec.Resources.MemoryMiB != nil {
+				if *alphaRoundTrip.Spec.Template.Spec.Resources.MemoryMiB != *alpha.Spec.Template.Spec.Resources.MemoryMiB {
+					t.Errorf("VMSet template Memory mismatch: original=%d, roundtrip=%d", *alpha.Spec.Template.Spec.Resources.MemoryMiB, *alphaRoundTrip.Spec.Template.Spec.Resources.MemoryMiB)
+				}
+			}
 		}
 
-		if alphaRoundTrip.Spec.Template.Spec.Memory != alpha.Spec.Template.Spec.Memory {
-			t.Errorf("VMSet template Memory mismatch: original=%d, roundtrip=%d", alpha.Spec.Template.Spec.Memory, alphaRoundTrip.Spec.Template.Spec.Memory)
-		}
-
-		if alphaRoundTrip.Spec.Template.Spec.Image != alpha.Spec.Template.Spec.Image {
-			t.Errorf("VMSet template Image mismatch: original=%s, roundtrip=%s", alpha.Spec.Template.Spec.Image, alphaRoundTrip.Spec.Template.Spec.Image)
+		if alphaRoundTrip.Spec.Template.Spec.ImageRef.Name != alpha.Spec.Template.Spec.ImageRef.Name {
+			t.Errorf("VMSet template Image mismatch: original=%s, roundtrip=%s", alpha.Spec.Template.Spec.ImageRef.Name, alphaRoundTrip.Spec.Template.Spec.ImageRef.Name)
 		}
 	})
 }
