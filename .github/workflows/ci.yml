@@ -112,7 +112,7 @@ jobs:
 
     - name: Run Gosec Security Scanner (excluding libvirt)
       run: |
-  go install github.com/securego/gosec/v2/cmd/gosec@latest
+        go install github.com/securego/gosec/v2/cmd/gosec@latest
         $(go env GOPATH)/bin/gosec -fmt sarif -out gosec.sarif -exclude-dir=internal/providers/libvirt ./...
 
     - name: Upload SARIF file
@@ -365,17 +365,6 @@ jobs:
 
     - name: Make tools executable
       run: chmod +x bin/*
-
-    - name: Set up Kind cluster
-      uses: helm/kind-action@v1.10.0
-      with:
-        version: v0.24.0
-        cluster_name: virtrigaud-test
-        wait: 60s
-        verbosity: 1
-
-    - name: Install CRDs
-      run: make install
 
     - name: Validate conformance specs
       run: ./bin/vcts validate test/conformance/specs/
