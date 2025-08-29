@@ -1,9 +1,6 @@
 run:
   timeout: 5m
   modules-download-mode: readonly
-  skip-dirs:
-    - internal/providers/libvirt
-    - cmd/provider-libvirt
 
 linters:
   enable:
@@ -30,9 +27,6 @@ issues:
   exclude-dirs:
     - internal/providers/libvirt
     - cmd/provider-libvirt
-  exclude-files:
-    - "internal/providers/libvirt/.*\\.go$"
-    - "cmd/provider-libvirt/.*\\.go$"
   exclude-rules:
     # Exclude some linters from running on tests files.
     - path: _test\.go

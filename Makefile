@@ -71,8 +71,9 @@ vet: ## Run go vet against code.
 .PHONY: test
 test: manifests generate fmt vet setup-envtest ## Run tests.
 	@echo "Running tests (excluding libvirt packages)..."
-	@TEST_DIRS=$$(find . -name "*_test.go" -not -path "./internal/providers/libvirt/*" -not -path "./cmd/provider-libvirt/*" -not -path "./test/e2e/*" -not -path "./test/integration/*" -exec dirname {} \; | sort -u | tr '\n' ' '); \
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$TEST_DIRS -coverprofile cover.out
+	@KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" \
+	go list ./... | grep -v '/internal/providers/libvirt' | grep -v '/cmd/provider-libvirt' | grep -v '/test/e2e' | grep -v '/test/integration' | \
+	xargs go test -coverprofile cover.out
 
 .PHONY: envtest-setup
 envtest-setup: setup-envtest ## Install setup-envtest and export KUBEBUILDER_ASSETS for local runs
