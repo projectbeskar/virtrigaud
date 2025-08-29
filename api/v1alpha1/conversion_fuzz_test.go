@@ -94,11 +94,10 @@ func FuzzVirtualMachineConversion(f *testing.F) {
 		}
 
 		// PowerState should be preserved unless it was invalid
+		// Only "On" and "Off" are valid in v1beta1 API
 		validPowerStates := map[string]bool{
-			"On":      true,
-			"Off":     true,
-			"Restart": true,
-			"Suspend": true,
+			"On":  true,
+			"Off": true,
 		}
 
 		if validPowerStates[alpha.Spec.PowerState] {
@@ -108,11 +107,10 @@ func FuzzVirtualMachineConversion(f *testing.F) {
 		}
 
 		// PowerState in status should be preserved unless it was invalid
+		// Only "On" and "Off" are valid in v1beta1 API
 		validStatusPowerStates := map[string]bool{
-			"On":      true,
-			"Off":     true,
-			"Restart": true,
-			"Suspend": true,
+			"On":  true,
+			"Off": true,
 		}
 
 		if validStatusPowerStates[alpha.Status.PowerState] {
