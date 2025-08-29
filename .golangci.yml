@@ -2,11 +2,6 @@ run:
   timeout: 5m
   modules-download-mode: readonly
 
-issues:
-  exclude-dirs:
-    - internal/providers/libvirt
-    - cmd/provider-libvirt
-
 linters:
   enable:
     - gofmt
@@ -28,6 +23,9 @@ linters-settings:
     local-prefixes: github.com/projectbeskar/virtrigaud
 
 issues:
+  exclude-dirs:
+    - internal/providers/libvirt
+    - cmd/provider-libvirt
   exclude-rules:
     # Exclude some linters from running on tests files.
     - path: _test\.go
@@ -35,13 +33,13 @@ issues:
         - revive
         - staticcheck
     # Exclude generated files
-    - path: ".*\\.pb\\.go$"
+    - path: ".*\.pb\.go$"
       linters:
         - revive
         - staticcheck
         - unused
     # Exclude kubebuilder generated files
-    - path: "zz_generated.*\\.go$"
+    - path: "zz_generated.*\.go$"
       linters:
         - revive
         - staticcheck
