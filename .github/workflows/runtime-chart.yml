@@ -90,6 +90,18 @@ jobs:
           - role: control-plane
           - role: worker
 
+    - name: Configure kubectl for kind cluster
+      run: |
+        echo "🔧 Configuring kubectl for kind cluster..."
+        kind get kubeconfig --name runtime-test > /tmp/kubeconfig
+        export KUBECONFIG=/tmp/kubeconfig
+        echo "KUBECONFIG=/tmp/kubeconfig" >> $GITHUB_ENV
+        
+        echo "✅ Testing kubectl connection..."
+        kubectl config current-context
+        kubectl get nodes
+        kubectl cluster-info
+
     - name: Build mock provider image
       run: |
         make build-provider-mock
@@ -139,10 +151,23 @@ jobs:
       if: failure()
       run: |
         echo "🔍 Checking cluster status and logs..."
-        kubectl config current-context
-        kubectl get nodes
-        kubectl describe pods
-        kubectl logs -l app.kubernetes.io/name=virtrigaud-provider-runtime
+        
+        # Ensure kubectl is configured for kind cluster
+        if [ ! -f "/tmp/kubeconfig" ]; then
+          echo "⚠️  Kubeconfig not found, attempting to recreate..."
+          kind get kubeconfig --name runtime-test > /tmp/kubeconfig || echo "Failed to get kubeconfig"
+        fi
+        export KUBECONFIG=/tmp/kubeconfig
+        
+        echo "📋 Cluster context and nodes:"
+        kubectl config current-context || echo "No current context"
+        kubectl get nodes || echo "Failed to get nodes"
+        
+        echo "📋 Pod status:"
+        kubectl describe pods || echo "Failed to describe pods"
+        
+        echo "📋 Application logs:"
+        kubectl logs -l app.kubernetes.io/name=virtrigaud-provider-runtime || echo "No logs found"
 
     - name: Clean up
       if: always()
