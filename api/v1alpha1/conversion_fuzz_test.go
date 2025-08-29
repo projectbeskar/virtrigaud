@@ -234,24 +234,16 @@ func FuzzHubConversion(f *testing.F) {
 
 		// Convert to hub (should be v1beta1)
 		hub := &v1beta1.VirtualMachine{}
-		if convertible, ok := alpha.(conversion.Convertible); ok {
-			err := convertible.ConvertTo(hub)
-			if err != nil {
-				t.Fatalf("Failed to convert to hub: %v", err)
-			}
-		} else {
-			t.Fatal("v1alpha1.VirtualMachine is not convertible")
+		err := alpha.ConvertTo(hub)
+		if err != nil {
+			t.Fatalf("Failed to convert to hub: %v", err)
 		}
 
 		// Convert back from hub
 		alphaFromHub := &VirtualMachine{}
-		if convertible, ok := alphaFromHub.(conversion.Convertible); ok {
-			err := convertible.ConvertFrom(hub)
-			if err != nil {
-				t.Fatalf("Failed to convert from hub: %v", err)
-			}
-		} else {
-			t.Fatal("v1alpha1.VirtualMachine is not convertible")
+		err = alphaFromHub.ConvertFrom(hub)
+		if err != nil {
+			t.Fatalf("Failed to convert from hub: %v", err)
 		}
 
 		// Verify round-trip
