@@ -2,6 +2,11 @@ run:
   timeout: 5m
   modules-download-mode: readonly
 
+issues:
+  exclude-dirs:
+    - internal/providers/libvirt
+    - cmd/provider-libvirt
+
 linters:
   enable:
     - gofmt

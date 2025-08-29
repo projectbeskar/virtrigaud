@@ -16,24 +16,12 @@ limitations under the License.
 
 package proxmox
 
-import (
-	"github.com/projectbeskar/virtrigaud/sdk/provider/capabilities"
-)
+import "github.com/projectbeskar/virtrigaud/sdk/provider/capabilities"
 
-// GetProviderCapabilities returns the capabilities for this provider type.
+// GetProviderCapabilities returns the capabilities for the Proxmox provider
 func GetProviderCapabilities() *capabilities.Manager {
-	builder := capabilities.NewBuilder().Core()
-
-	
-
-	
-
-	
-
-	
-
-	// Proxmox VE capabilities - enhanced for GA
-	builder = builder.
+	return capabilities.NewBuilder().
+		Core().
 		Snapshots().
 		MemorySnapshots().
 		LinkedClones().
@@ -41,7 +29,6 @@ func GetProviderCapabilities() *capabilities.Manager {
 		OnlineDiskExpansion().
 		ImageImport().
 		DiskTypes("raw", "qcow2").
-		NetworkTypes("bridge", "vlan")
-
-	return builder.Build()
+		NetworkTypes("bridge", "vlan").
+		Build()
 }

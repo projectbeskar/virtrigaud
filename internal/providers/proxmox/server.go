@@ -43,15 +43,8 @@ type Provider struct {
 
 // New creates a new Proxmox provider
 func New() *Provider {
-	// Build capabilities for Proxmox VE
-	caps := capabilities.NewBuilder().
-		Core().
-		Snapshots().
-		LinkedClones().
-		ImageImport().
-		DiskTypes("raw", "qcow2").
-		NetworkTypes("bridge", "vlan").
-		Build()
+	// Get capabilities for Proxmox VE
+	caps := GetProviderCapabilities()
 
 	// Create PVE client from environment
 	config := &pveapi.Config{

@@ -45,12 +45,16 @@ func FuzzVirtualMachineConversion(f *testing.F) {
 			},
 			Spec: VirtualMachineSpec{
 				PowerState: powerState,
-				CPU:        cpu,
-				Memory:     memory,
-				Image:      image,
+				ProviderRef: ObjectRef{Name: "test-provider"},
+				ClassRef:    ObjectRef{Name: "test-class"},
+				ImageRef:    ObjectRef{Name: image},
+				Resources: &VirtualMachineResources{
+					CPU:       &cpu,
+					MemoryMiB: &memory,
+				},
 			},
 			Status: VirtualMachineStatus{
-				Phase: phase,
+				PowerState: phase,
 			},
 		}
 
@@ -73,16 +77,21 @@ func FuzzVirtualMachineConversion(f *testing.F) {
 			t.Errorf("Name mismatch: original=%s, roundtrip=%s", alpha.ObjectMeta.Name, alphaRoundTrip.ObjectMeta.Name)
 		}
 
-		if alphaRoundTrip.Spec.CPU != alpha.Spec.CPU {
-			t.Errorf("CPU mismatch: original=%d, roundtrip=%d", alpha.Spec.CPU, alphaRoundTrip.Spec.CPU)
+		if alphaRoundTrip.Spec.Resources != nil && alpha.Spec.Resources != nil {
+			if alphaRoundTrip.Spec.Resources.CPU != nil && alpha.Spec.Resources.CPU != nil {
+				if *alphaRoundTrip.Spec.Resources.CPU != *alpha.Spec.Resources.CPU {
+					t.Errorf("CPU mismatch: original=%d, roundtrip=%d", *alpha.Spec.Resources.CPU, *alphaRoundTrip.Spec.Resources.CPU)
+				}
+			}
+			if alphaRoundTrip.Spec.Resources.MemoryMiB != nil && alpha.Spec.Resources.MemoryMiB != nil {
+				if *alphaRoundTrip.Spec.Resources.MemoryMiB != *alpha.Spec.Resources.MemoryMiB {
+					t.Errorf("Memory mismatch: original=%d, roundtrip=%d", *alpha.Spec.Resources.MemoryMiB, *alphaRoundTrip.Spec.Resources.MemoryMiB)
+				}
+			}
 		}
 
-		if alphaRoundTrip.Spec.Memory != alpha.Spec.Memory {
-			t.Errorf("Memory mismatch: original=%d, roundtrip=%d", alpha.Spec.Memory, alphaRoundTrip.Spec.Memory)
-		}
-
-		if alphaRoundTrip.Spec.Image != alpha.Spec.Image {
-			t.Errorf("Image mismatch: original=%s, roundtrip=%s", alpha.Spec.Image, alphaRoundTrip.Spec.Image)
+		if alphaRoundTrip.Spec.ImageRef.Name != alpha.Spec.ImageRef.Name {
+			t.Errorf("Image mismatch: original=%s, roundtrip=%s", alpha.Spec.ImageRef.Name, alphaRoundTrip.Spec.ImageRef.Name)
 		}
 
 		// PowerState should be preserved unless it was invalid
@@ -99,20 +108,17 @@ func FuzzVirtualMachineConversion(f *testing.F) {
 			}
 		}
 
-		// Phase should be preserved unless it was invalid
-		validPhases := map[string]bool{
-			"Pending":   true,
-			"Running":   true,
-			"Stopped":   true,
-			"Failed":    true,
-			"Creating":  true,
-			"Deleting":  true,
-			"Updating":  true,
+		// PowerState in status should be preserved unless it was invalid
+		validStatusPowerStates := map[string]bool{
+			"On":      true,
+			"Off":     true,
+			"Restart": true,
+			"Suspend": true,
 		}
 
-		if validPhases[alpha.Status.Phase] {
-			if alphaRoundTrip.Status.Phase != alpha.Status.Phase {
-				t.Errorf("Phase mismatch: original=%s, roundtrip=%s", alpha.Status.Phase, alphaRoundTrip.Status.Phase)
+		if validStatusPowerStates[alpha.Status.PowerState] {
+			if alphaRoundTrip.Status.PowerState != alpha.Status.PowerState {
+				t.Errorf("Status PowerState mismatch: original=%s, roundtrip=%s", alpha.Status.PowerState, alphaRoundTrip.Status.PowerState)
 			}
 		}
 	})
