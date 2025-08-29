@@ -25,4 +25,4 @@ go.work
 *.swp
 *.swo
 *~
-test-local*
+test*local.*
