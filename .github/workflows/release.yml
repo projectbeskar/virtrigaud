@@ -262,7 +262,7 @@ jobs:
         fi
         
         # Build each tool
-        for tool in vrtg vcts virtrigaud-loadgen; do
+        for tool in vrtg vcts virtrigaud-loadgen vrtg-provider; do
           GOOS=${{ matrix.os }} GOARCH=${{ matrix.arch }} go build \
             -ldflags="-s -w -X 'main.version=${{ needs.prepare.outputs.tag }}'" \
             -o dist/${tool}-${{ matrix.os }}-${{ matrix.arch }}${EXT} \
