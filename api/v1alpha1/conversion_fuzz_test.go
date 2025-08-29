@@ -48,10 +48,10 @@ func FuzzVirtualMachineConversion(f *testing.F) {
 				ProviderRef: ObjectRef{Name: "test-provider"},
 				ClassRef:    ObjectRef{Name: "test-class"},
 				ImageRef:    ObjectRef{Name: image},
-				Resources: &VirtualMachineResources{
-					CPU:       &cpu,
-					MemoryMiB: &memory,
-				},
+				   Resources: &VirtualMachineResources{
+					   CPU:       &cpu,
+					   MemoryMiB: func(m int32) *int64 { v := int64(m); return &v }(memory),
+				   },
 			},
 			Status: VirtualMachineStatus{
 				PowerState: phase,
