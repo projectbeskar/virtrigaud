@@ -10,11 +10,13 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /workspace
 
-# Copy go mod files
+# Copy go mod files and local modules (needed for replace directives)
 COPY go.mod go.mod
 COPY go.sum go.sum
+COPY sdk/ sdk/
+COPY proto/ proto/
 
-# Download dependencies
+# Download dependencies (now that local modules are available)
 RUN go mod download
 
 # Copy source code

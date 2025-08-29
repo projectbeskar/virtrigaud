@@ -3,18 +3,19 @@ FROM golang:1.23-bookworm AS builder
 
 WORKDIR /workspace
 
-# Copy go mod files
+# Copy go mod files and local modules (needed for replace directives)
 COPY go.mod go.mod
 COPY go.sum go.sum
+COPY proto/ proto/
+COPY sdk/ sdk/
 
-# Download dependencies
+# Download dependencies (now that local modules are available)
 RUN go mod download
 
 # Copy source code
 COPY cmd/provider-vsphere/ cmd/provider-vsphere/
 COPY api/ api/
 COPY internal/ internal/
-COPY proto/ proto/
 
 # Ensure protobuf stubs are generated
 RUN mkdir -p /go/bin && \

@@ -3,17 +3,18 @@ FROM golang:1.23-bookworm AS builder
 
 WORKDIR /workspace
 
-# Copy go mod files
+# Copy go mod files and local modules (needed for replace directives)
 COPY go.mod go.mod
 COPY go.sum go.sum
+COPY sdk/ sdk/
+COPY proto/ proto/
 
-# Download dependencies
+# Download dependencies (now that local modules are available)
 RUN go mod download
 
 # Copy source code
 COPY cmd/provider-mock/ cmd/provider-mock/
 COPY internal/ internal/
-COPY sdk/ sdk/
 
 # Build the provider binary
 ARG TARGETOS
