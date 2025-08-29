@@ -149,8 +149,8 @@ func FuzzVMSetConversion(f *testing.F) {
 					Spec: VirtualMachineSpec{
 						PowerState: powerState,
 						Resources: &VirtualMachineResources{
-							CPU:       cpu,
-							MemoryMiB: memory,
+							CPU:       &cpu,
+							MemoryMiB: func(m int32) *int64 { v := int64(m); return &v }(memory),
 						},
 						ImageRef: ObjectRef{
 							Name: image,
