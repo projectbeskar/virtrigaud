@@ -25,16 +25,8 @@ COPY api/ api/
 COPY internal/ internal/
 COPY proto/ proto/
 
-# Ensure protobuf stubs are generated
-RUN mkdir -p /go/bin && \
-    go install google.golang.org/protobuf/cmd/protoc-gen-go@latest && \
-    go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest && \
-    apt-get update && apt-get install -y protobuf-compiler && \
-    export PATH=$PATH:/go/bin && \
-    protoc -I proto \
-        --go_out=internal/rpc --go_opt=paths=source_relative \
-        --go-grpc_out=internal/rpc --go-grpc_opt=paths=source_relative \
-        proto/provider/v1/provider.proto
+# Protobuf files are already generated in proto/rpc/
+# No need to regenerate them during Docker build
 
 # Build the provider binary
 ARG TARGETOS
