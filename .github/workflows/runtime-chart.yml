@@ -79,10 +79,23 @@ jobs:
       with:
         version: 'latest'
 
-    - name: Set up Kind
-      uses: helm/kind-action@v1.10.0
-      with:
-        cluster_name: runtime-test
+    - name: Install kind
+      run: |
+        # Download and install kind
+        curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.22.0/kind-linux-amd64
+        chmod +x ./kind
+        sudo mv ./kind /usr/local/bin/kind
+        
+        # Verify installation
+        kind --version
+
+    - name: Create kind cluster
+      run: |
+        echo "🚀 Creating kind cluster..."
+        kind create cluster --name runtime-test --wait 60s
+        
+        echo "✅ Cluster created successfully"
+        kind get clusters
 
     - name: Configure kubectl for kind cluster
       run: |
