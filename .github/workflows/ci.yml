@@ -35,6 +35,9 @@ jobs:
         go-version-file: go.mod
         cache: true
 
+    - name: Tidy Go modules
+      run: go mod tidy
+
     - name: Download dependencies
       run: go mod download
 
@@ -42,7 +45,6 @@ jobs:
       run: go mod verify
 
     - name: Run go vet (excluding libvirt)
-      shell: bash -euxo pipefail
       run: |
         for dir in $(find . -name "*.go" -not -path "./internal/providers/libvirt/*" -not -path "./cmd/provider-libvirt/*" -not -path "./test/integration/*" -exec dirname {} \; | sort -u); do
           echo "Vetting $dir"
@@ -82,6 +84,9 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y libvirt-dev pkg-config
 
+    - name: Tidy Go modules
+      run: go mod tidy
+
     - name: Run golangci-lint
       uses: golangci/golangci-lint-action@v6
       with:
@@ -102,10 +107,13 @@ jobs:
         go-version-file: go.mod
         cache: true
 
+    - name: Tidy Go modules
+      run: go mod tidy
+
     - name: Run Gosec Security Scanner (excluding libvirt)
-      run: |
-        go install github.com/securecodewarrior/gosec/v2/cmd/gosec@latest
-        $(go env GOPATH)/bin/gosec -fmt sarif -out gosec.sarif -no-fail -exclude-dir=internal/providers/libvirt ./...
+      uses: securecodewarrior/github-action-gosec@master
+      with:
+        args: '-fmt sarif -out gosec.sarif -exclude-dir=internal/providers/libvirt ./...'
 
     - name: Upload SARIF file
       uses: github/codeql-action/upload-sarif@v3
@@ -138,6 +146,9 @@ jobs:
       with:
         go-version-file: go.mod
         cache: true
+
+    - name: Tidy Go modules
+      run: go mod tidy
 
     - name: Install controller-gen
       run: go install sigs.k8s.io/controller-tools/cmd/controller-gen@latest
@@ -190,7 +201,6 @@ jobs:
         sudo apt-get install -y libvirt-dev pkg-config
 
     - name: Build binary
-      shell: bash -euxo pipefail
       run: |
         case "${{ matrix.component }}" in
           manager)
@@ -307,7 +317,6 @@ jobs:
         helm lint charts/virtrigaud
         
     - name: Validate rendered manifests
-      shell: bash -euxo pipefail
       run: |
         # Render Helm template (without cluster validation)
         helm template virtrigaud charts/virtrigaud --values charts/virtrigaud/values.yaml > /tmp/rendered.yaml
