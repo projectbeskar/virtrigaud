@@ -66,7 +66,7 @@ virtrigaud providers to verify compliance with the provider contract.`,
 	runCmd.Flags().StringSliceVar(&skipTests, "skip", []string{}, "List of test names to skip")
 	runCmd.Flags().DurationVar(&timeout, "timeout", 30*time.Minute, "Test timeout")
 	runCmd.Flags().IntVar(&parallel, "parallel", 1, "Number of parallel test executions")
-	runCmd.MarkFlagRequired("provider")
+	_ = runCmd.MarkFlagRequired("provider")
 
 	listCmd := &cobra.Command{
 		Use:   "list",

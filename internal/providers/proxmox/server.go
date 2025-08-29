@@ -303,7 +303,7 @@ func (p *Provider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureR
 							sizeGB := sizeBytes / (1024 * 1024 * 1024)
 
 							// Find corresponding disk in current config
-							diskKey := fmt.Sprintf("scsi0") // Default to scsi0, could be smarter
+							diskKey := "scsi0" // Default to scsi0, could be smarter
 							if diskName == "root" {
 								diskKey = "scsi0"
 							}

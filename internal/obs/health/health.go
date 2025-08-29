@@ -221,7 +221,7 @@ func (hc *HealthChecker) HTTPHandler() http.HandlerFunc {
 func (hc *HealthChecker) LivenessHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("ok"))
+		_, _ = w.Write([]byte("ok"))
 	}
 }
 
@@ -233,10 +233,10 @@ func (hc *HealthChecker) ReadinessHandler() http.HandlerFunc {
 
 		if hc.IsHealthy(ctx) {
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte("ready"))
+			_, _ = w.Write([]byte("ready"))
 		} else {
 			w.WriteHeader(http.StatusServiceUnavailable)
-			w.Write([]byte("not ready"))
+			_, _ = w.Write([]byte("not ready"))
 		}
 	}
 }

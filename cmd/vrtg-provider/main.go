@@ -61,7 +61,7 @@ func newVersionCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "version",
 		Short: "Show version information",
-		Run: func(cmd *cobra.Command, args []string) {
+		Run: func(_ *cobra.Command, _ []string) {
 			fmt.Printf("vrtg-provider version: %s\n", version.String())
 			fmt.Printf("Git SHA: %s\n", version.GitSHA)
 		},

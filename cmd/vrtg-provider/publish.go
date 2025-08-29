@@ -109,9 +109,9 @@ The command must be run from within a provider project directory.`,
 	cmd.Flags().BoolVar(&opts.dryRun, "dry-run", false, "Show what would be published without making changes")
 	cmd.Flags().StringVar(&opts.catalogPath, "catalog", "", "Path to catalog file (defaults to providers/catalog.yaml in repo root)")
 
-	cmd.MarkFlagRequired("image")
-	cmd.MarkFlagRequired("repo")
-	cmd.MarkFlagRequired("maintainer")
+	_ = cmd.MarkFlagRequired("image")
+	_ = cmd.MarkFlagRequired("repo")
+	_ = cmd.MarkFlagRequired("maintainer")
 
 	return cmd
 }

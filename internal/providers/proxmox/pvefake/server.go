@@ -597,7 +597,7 @@ func (s *Server) handleRevertSnapshot(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{
+	_ = json.NewEncoder(w).Encode(map[string]string{
 		"status": "healthy",
 		"time":   time.Now().Format(time.RFC3339),
 	})
@@ -631,7 +631,7 @@ func (s *Server) writeResponse(w http.ResponseWriter, data interface{}) {
 	w.WriteHeader(http.StatusOK)
 
 	response := APIResponse{Data: data}
-	json.NewEncoder(w).Encode(response)
+	_ = json.NewEncoder(w).Encode(response)
 }
 
 // writeError writes an error response
@@ -642,7 +642,7 @@ func (s *Server) writeError(w http.ResponseWriter, statusCode int, message strin
 	response := APIResponse{
 		Errors: map[string]string{"error": message},
 	}
-	json.NewEncoder(w).Encode(response)
+	_ = json.NewEncoder(w).Encode(response)
 }
 
 // handleGetVMConfig handles VM configuration retrieval
