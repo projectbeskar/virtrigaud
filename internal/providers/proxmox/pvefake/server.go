@@ -159,15 +159,15 @@ func (s *Server) setupRoutes() {
 	api.HandleFunc("/nodes/{node}/qemu/{vmid}/config", s.handleReconfigureVM).Methods("PUT")
 	api.HandleFunc("/nodes/{node}/qemu/{vmid}/resize", s.handleResizeDisk).Methods("PUT")
 	api.HandleFunc("/nodes/{node}/qemu/{vmid}/clone", s.handleCloneVM).Methods("POST")
-	
+
 	// Power operations
 	api.HandleFunc("/nodes/{node}/qemu/{vmid}/status/start", s.handlePowerOp("start")).Methods("POST")
 	api.HandleFunc("/nodes/{node}/qemu/{vmid}/status/stop", s.handlePowerOp("stop")).Methods("POST")
 	api.HandleFunc("/nodes/{node}/qemu/{vmid}/status/reboot", s.handlePowerOp("reboot")).Methods("POST")
-	
+
 	// Task operations
 	api.HandleFunc("/nodes/{node}/tasks/{taskid}/status", s.handleGetTaskStatus).Methods("GET")
-	
+
 	// Snapshot operations
 	api.HandleFunc("/nodes/{node}/qemu/{vmid}/snapshot", s.handleCreateSnapshot).Methods("POST")
 	api.HandleFunc("/nodes/{node}/qemu/{vmid}/snapshot/{snapname}", s.handleDeleteSnapshot).Methods("DELETE")
@@ -605,8 +605,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 // createTask creates a new async task
 func (s *Server) createTask(node, taskType, id string) string {
-	taskID := fmt.Sprintf("UPID:%s:%08X:%s:%s:%s:%s:%s:", 
-		node, rand.Intn(99999999), taskType, id, "root@pam", time.Now().Unix())
+	timestamp := time.Now().Unix()
+	taskID := fmt.Sprintf("UPID:%s:%08X:%s:%s:%s:%d:",
+		node, rand.Intn(99999999), taskType, id, "root@pam", timestamp)
 
 	task := &Task{
 		UPID:      taskID,
@@ -784,7 +785,7 @@ func (s *Server) handleResizeDisk(w http.ResponseWriter, r *http.Request) {
 // StartFakeServer starts a fake PVE server on a random port
 func StartFakeServer() (*Server, string, error) {
 	server := NewServer()
-	
+
 	// Start HTTP server on random port
 	listener, err := net.Listen("tcp", ":0")
 	if err != nil {

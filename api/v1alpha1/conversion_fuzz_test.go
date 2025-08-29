@@ -21,7 +21,6 @@ import (
 
 	"github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"sigs.k8s.io/controller-runtime/pkg/conversion"
 )
 
 // FuzzVirtualMachineConversion tests round-trip conversion between v1alpha1 and v1beta1 VirtualMachine objects
@@ -251,12 +250,17 @@ func FuzzHubConversion(f *testing.F) {
 			t.Errorf("Hub round-trip name mismatch: original=%s, result=%s", alpha.ObjectMeta.Name, alphaFromHub.ObjectMeta.Name)
 		}
 
-		if alphaFromHub.Spec.CPU != alpha.Spec.CPU {
-			t.Errorf("Hub round-trip CPU mismatch: original=%d, result=%d", alpha.Spec.CPU, alphaFromHub.Spec.CPU)
-		}
-
-		if alphaFromHub.Spec.Memory != alpha.Spec.Memory {
-			t.Errorf("Hub round-trip Memory mismatch: original=%d, result=%d", alpha.Spec.Memory, alphaFromHub.Spec.Memory)
+		if alphaFromHub.Spec.Resources != nil && alpha.Spec.Resources != nil {
+			if alphaFromHub.Spec.Resources.CPU != nil && alpha.Spec.Resources.CPU != nil {
+				if *alphaFromHub.Spec.Resources.CPU != *alpha.Spec.Resources.CPU {
+					t.Errorf("Hub round-trip CPU mismatch: original=%d, result=%d", *alpha.Spec.Resources.CPU, *alphaFromHub.Spec.Resources.CPU)
+				}
+			}
+			if alphaFromHub.Spec.Resources.MemoryMiB != nil && alpha.Spec.Resources.MemoryMiB != nil {
+				if *alphaFromHub.Spec.Resources.MemoryMiB != *alpha.Spec.Resources.MemoryMiB {
+					t.Errorf("Hub round-trip Memory mismatch: original=%d, result=%d", *alpha.Spec.Resources.MemoryMiB, *alphaFromHub.Spec.Resources.MemoryMiB)
+				}
+			}
 		}
 	})
 }
@@ -300,7 +304,7 @@ func FuzzConversionWithNilFields(f *testing.F) {
 		}
 
 		if !nilPhase {
-			vmset.Status.Phase = "Running"
+			vmset.Status.Replicas = 1
 		}
 
 		// Convert to beta and back
@@ -318,14 +322,19 @@ func FuzzConversionWithNilFields(f *testing.F) {
 
 		// Verify conversion doesn't panic and handles nil fields gracefully
 		// The specific behavior may vary, but conversion should not crash
-		if roundTrip.Spec.Template.Spec.CPU != vmset.Spec.Template.Spec.CPU {
-			t.Errorf("CPU changed during nil field conversion: original=%d, result=%d", 
-				vmset.Spec.Template.Spec.CPU, roundTrip.Spec.Template.Spec.CPU)
-		}
-
-		if roundTrip.Spec.Template.Spec.Memory != vmset.Spec.Template.Spec.Memory {
-			t.Errorf("Memory changed during nil field conversion: original=%d, result=%d", 
-				vmset.Spec.Template.Spec.Memory, roundTrip.Spec.Template.Spec.Memory)
+		if roundTrip.Spec.Template.Spec.Resources != nil && vmset.Spec.Template.Spec.Resources != nil {
+			if roundTrip.Spec.Template.Spec.Resources.CPU != nil && vmset.Spec.Template.Spec.Resources.CPU != nil {
+				if *roundTrip.Spec.Template.Spec.Resources.CPU != *vmset.Spec.Template.Spec.Resources.CPU {
+					t.Errorf("CPU changed during nil field conversion: original=%d, result=%d", 
+						*vmset.Spec.Template.Spec.Resources.CPU, *roundTrip.Spec.Template.Spec.Resources.CPU)
+				}
+			}
+			if roundTrip.Spec.Template.Spec.Resources.MemoryMiB != nil && vmset.Spec.Template.Spec.Resources.MemoryMiB != nil {
+				if *roundTrip.Spec.Template.Spec.Resources.MemoryMiB != *vmset.Spec.Template.Spec.Resources.MemoryMiB {
+					t.Errorf("Memory changed during nil field conversion: original=%d, result=%d", 
+						*vmset.Spec.Template.Spec.Resources.MemoryMiB, *roundTrip.Spec.Template.Spec.Resources.MemoryMiB)
+				}
+			}
 		}
 	})
 }
@@ -355,7 +364,7 @@ func FuzzConversionWithInvalidData(f *testing.F) {
 				},
 			},
 			Status: VirtualMachineStatus{
-				Phase: phase,
+				PowerState: phase,
 			},
 		}
 

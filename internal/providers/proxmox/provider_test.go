@@ -57,7 +57,7 @@ func TestProxmoxProvider_CreateAndDescribe(t *testing.T) {
 
 	// Test VM creation
 	createReq := &providerv1.CreateRequest{
-		Name: "test-vm-create",
+		Name:      "test-vm-create",
 		ClassJson: `{"cpus": 2, "memory": "2Gi"}`,
 		ImageJson: `{"source": "ubuntu-22-template"}`,
 		UserData:  []byte("#cloud-config\nhostname: test-vm"),
@@ -147,9 +147,9 @@ func TestProxmoxProvider_Clone(t *testing.T) {
 
 	// Use template VM (ID 9000 from fake server seed data)
 	cloneReq := &providerv1.CloneRequest{
-		SourceVmId:  "9000",
-		TargetName:  "test-clone",
-		LinkedClone: true,
+		SourceVmId: "9000",
+		TargetName: "test-clone",
+		Linked:     true,
 	}
 
 	cloneResp, err := provider.Clone(ctx, cloneReq)
@@ -269,7 +269,7 @@ func TestProxmoxProvider_Reconfigure(t *testing.T) {
 
 	// Test CPU reconfiguration
 	reconfigReq := &providerv1.ReconfigureRequest{
-		Id: vmID,
+		Id:          vmID,
 		DesiredJson: `{"class": {"cpus": 4, "memory": "8Gi"}}`,
 	}
 
@@ -362,8 +362,8 @@ func TestProxmoxProvider_ImagePrepare(t *testing.T) {
 
 	// Test template ensure (existing template)
 	imagePrepareReq := &providerv1.ImagePrepareRequest{
-		ImageRef:     "ubuntu-22-template",
-		StorageClass: "local-lvm",
+		ImageJson:   `{"name": "ubuntu-22-template"}`,
+		StorageHint: "local-lvm",
 	}
 
 	imagePrepareResp, err := provider.ImagePrepare(ctx, imagePrepareReq)
@@ -377,8 +377,8 @@ func TestProxmoxProvider_ImagePrepare(t *testing.T) {
 
 	// Test image import from URL
 	imagePrepareReq = &providerv1.ImagePrepareRequest{
-		ImageRef:     "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img",
-		StorageClass: "local-lvm",
+		ImageJson:   `{"source": {"url": "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img"}}`,
+		StorageHint: "local-lvm",
 	}
 
 	imagePrepareResp, err = provider.ImagePrepare(ctx, imagePrepareReq)
@@ -466,7 +466,7 @@ func TestProxmoxProvider_UpdatedCapabilities(t *testing.T) {
 	assert.True(t, resp.SupportsImageImport)
 	assert.True(t, resp.SupportsReconfigureOnline) // Enhanced for hot-plug
 	assert.True(t, resp.SupportsDiskExpansionOnline)
-	
+
 	// Verify disk and network types
 	assert.Contains(t, resp.SupportedDiskTypes, "raw")
 	assert.Contains(t, resp.SupportedDiskTypes, "qcow2")

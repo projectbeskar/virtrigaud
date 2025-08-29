@@ -21,7 +21,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"math/rand"
 	"os"
 	"strconv"
 	"strings"
@@ -29,8 +28,8 @@ import (
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/proxmox/pveapi"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
-	"github.com/projectbeskar/virtrigaud/sdk/provider/errors"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/capabilities"
+	"github.com/projectbeskar/virtrigaud/sdk/provider/errors"
 )
 
 // Provider implements the Proxmox VE provider
@@ -109,7 +108,7 @@ func (p *Provider) Validate(ctx context.Context, req *providerv1.ValidateRequest
 // Create creates a new virtual machine
 func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*providerv1.CreateResponse, error) {
 	if p.client == nil {
-		return nil, errors.NewUnavailable("PVE client not configured")
+		return nil, errors.NewUnavailable("PVE client not configured", nil)
 	}
 
 	// Parse the request
@@ -122,14 +121,14 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 	if existing, err := p.client.GetVM(ctx, node, vmConfig.VMID); err == nil && existing != nil {
 		// VM exists, check if it matches our requirements
 		if existing.Name == req.Name {
-			p.logger.Info("VM already exists with same name, skipping creation", 
+			p.logger.Info("VM already exists with same name, skipping creation",
 				"vmid", vmConfig.VMID, "name", req.Name)
 			return &providerv1.CreateResponse{
 				Id: fmt.Sprintf("%d", vmConfig.VMID),
 			}, nil
 		} else {
 			// VM exists but with different name, generate new VMID
-			p.logger.Warn("VM exists with different name, generating new VMID", 
+			p.logger.Warn("VM exists with different name, generating new VMID",
 				"existing_vmid", vmConfig.VMID, "existing_name", existing.Name, "requested_name", req.Name)
 			vmConfig.VMID = int(time.Now().Unix()%999999) + 100000
 		}
@@ -144,7 +143,7 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 			return nil, errors.NewAlreadyExists("VM", fmt.Sprintf("%d", vmConfig.VMID))
 		}
 		if strings.Contains(errMsg, "insufficient") || strings.Contains(errMsg, "no space") {
-			return nil, errors.NewResourceExhausted("insufficient resources for VM creation")
+			return nil, errors.NewRateLimit(time.Minute * 5) // Retry after 5 minutes for resource exhaustion
 		}
 		if strings.Contains(errMsg, "permission") || strings.Contains(errMsg, "access denied") {
 			return nil, errors.NewPermissionDenied("create VM")
@@ -172,7 +171,7 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 // Delete deletes a virtual machine
 func (p *Provider) Delete(ctx context.Context, req *providerv1.DeleteRequest) (*providerv1.TaskResponse, error) {
 	if p.client == nil {
-		return nil, errors.NewUnavailable("PVE client not configured")
+		return nil, errors.NewUnavailable("PVE client not configured", nil)
 	}
 
 	vmid, node, err := p.parseVMReference(req.Id)
@@ -196,7 +195,7 @@ func (p *Provider) Delete(ctx context.Context, req *providerv1.DeleteRequest) (*
 // Power performs power operations on a virtual machine
 func (p *Provider) Power(ctx context.Context, req *providerv1.PowerRequest) (*providerv1.TaskResponse, error) {
 	if p.client == nil {
-		return nil, errors.NewUnavailable("PVE client not configured")
+		return nil, errors.NewUnavailable("PVE client not configured", nil)
 	}
 
 	vmid, node, err := p.parseVMReference(req.Id)
@@ -232,7 +231,7 @@ func (p *Provider) Power(ctx context.Context, req *providerv1.PowerRequest) (*pr
 // Reconfigure reconfigures a virtual machine
 func (p *Provider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureRequest) (*providerv1.TaskResponse, error) {
 	if p.client == nil {
-		return nil, errors.NewUnavailable("PVE client not configured")
+		return nil, errors.NewUnavailable("PVE client not configured", nil)
 	}
 
 	vmid, node, err := p.parseVMReference(req.Id)
@@ -254,14 +253,13 @@ func (p *Provider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureR
 
 	// Extract reconfiguration parameters
 	config := &pveapi.ReconfigureConfig{}
-	requiresPowerCycle := false
 
 	// Handle CPU changes
 	if classData, ok := desired["class"].(map[string]interface{}); ok {
 		if cpus, ok := classData["cpus"].(float64); ok {
 			cpuCount := int(cpus)
 			config.CPUs = &cpuCount
-			
+
 			// Check if VM is running - CPU changes may require power cycle
 			vm, err := p.client.GetVM(ctx, node, vmid)
 			if err == nil && vm.Status == "running" {
@@ -274,13 +272,13 @@ func (p *Provider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureR
 				}
 			}
 		}
-		
+
 		// Handle memory changes
 		if memory, ok := classData["memory"].(string); ok {
 			if memBytes, err := parseMemory(memory); err == nil {
 				memMB := memBytes / (1024 * 1024)
 				config.Memory = &memMB
-				
+
 				// Check if VM is running - memory changes may require power cycle for some guest OSes
 				vm, err := p.client.GetVM(ctx, node, vmid)
 				if err == nil && vm.Status == "running" {
@@ -303,13 +301,13 @@ func (p *Provider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureR
 					if sizeStr, ok := disk["size"].(string); ok {
 						if sizeBytes, err := parseMemory(sizeStr); err == nil {
 							sizeGB := sizeBytes / (1024 * 1024 * 1024)
-							
+
 							// Find corresponding disk in current config
 							diskKey := fmt.Sprintf("scsi0") // Default to scsi0, could be smarter
 							if diskName == "root" {
 								diskKey = "scsi0"
 							}
-							
+
 							// Check current disk size to prevent shrinking
 							if currentDisk, exists := currentConfig[diskKey]; exists {
 								if currentDiskStr, ok := currentDisk.(string); ok {
@@ -330,7 +328,7 @@ func (p *Provider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureR
 														if err != nil {
 															return nil, errors.NewInternal("failed to resize disk: %v", err)
 														}
-														
+
 														result := &providerv1.TaskResponse{}
 														if taskID != "" {
 															result.Task = &providerv1.TaskRef{Id: taskID}
@@ -361,11 +359,9 @@ func (p *Provider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureR
 		if taskID != "" {
 			result.Task = &providerv1.TaskRef{Id: taskID}
 		}
-		
-		// If power cycle is required, include in response metadata
-		if requiresPowerCycle {
-			result.RequiresPowerCycle = true
-		}
+
+		// Note: Power cycle requirement should be handled at a higher level
+		// The TaskResponse only contains task reference for async operations
 
 		return result, nil
 	}
@@ -377,7 +373,7 @@ func (p *Provider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureR
 // Describe describes a virtual machine's current state
 func (p *Provider) Describe(ctx context.Context, req *providerv1.DescribeRequest) (*providerv1.DescribeResponse, error) {
 	if p.client == nil {
-		return nil, errors.NewUnavailable("PVE client not configured")
+		return nil, errors.NewUnavailable("PVE client not configured", nil)
 	}
 
 	vmid, node, err := p.parseVMReference(req.Id)
@@ -412,7 +408,7 @@ func (p *Provider) Describe(ctx context.Context, req *providerv1.DescribeRequest
 	if p.client != nil && p.client.Config() != nil {
 		endpoint = p.client.Config().Endpoint
 	}
-	consoleURL := fmt.Sprintf("%s/#v1:0:=qemu/%d:4:5:=console", 
+	consoleURL := fmt.Sprintf("%s/#v1:0:=qemu/%d:4:5:=console",
 		strings.TrimSuffix(endpoint, "/api2"), vmid)
 
 	// TODO: Extract IP addresses from guest agent or network config
@@ -446,7 +442,7 @@ func (p *Provider) Describe(ctx context.Context, req *providerv1.DescribeRequest
 // TaskStatus checks the status of an async task
 func (p *Provider) TaskStatus(ctx context.Context, req *providerv1.TaskStatusRequest) (*providerv1.TaskStatusResponse, error) {
 	if p.client == nil {
-		return nil, errors.NewUnavailable("PVE client not configured")
+		return nil, errors.NewUnavailable("PVE client not configured", nil)
 	}
 
 	// Parse task ID to extract node
@@ -483,7 +479,7 @@ func (p *Provider) TaskStatus(ctx context.Context, req *providerv1.TaskStatusReq
 // SnapshotCreate creates a VM snapshot
 func (p *Provider) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotCreateRequest) (*providerv1.SnapshotCreateResponse, error) {
 	if p.client == nil {
-		return nil, errors.NewUnavailable("PVE client not configured")
+		return nil, errors.NewUnavailable("PVE client not configured", nil)
 	}
 
 	vmid, node, err := p.parseVMReference(req.VmId)
@@ -517,7 +513,7 @@ func (p *Provider) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotC
 // SnapshotDelete deletes a VM snapshot
 func (p *Provider) SnapshotDelete(ctx context.Context, req *providerv1.SnapshotDeleteRequest) (*providerv1.TaskResponse, error) {
 	if p.client == nil {
-		return nil, errors.NewUnavailable("PVE client not configured")
+		return nil, errors.NewUnavailable("PVE client not configured", nil)
 	}
 
 	vmid, node, err := p.parseVMReference(req.VmId)
@@ -541,7 +537,7 @@ func (p *Provider) SnapshotDelete(ctx context.Context, req *providerv1.SnapshotD
 // SnapshotRevert reverts a VM to a snapshot
 func (p *Provider) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotRevertRequest) (*providerv1.TaskResponse, error) {
 	if p.client == nil {
-		return nil, errors.NewUnavailable("PVE client not configured")
+		return nil, errors.NewUnavailable("PVE client not configured", nil)
 	}
 
 	vmid, node, err := p.parseVMReference(req.VmId)
@@ -565,7 +561,7 @@ func (p *Provider) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotR
 // Clone clones a virtual machine
 func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*providerv1.CloneResponse, error) {
 	if p.client == nil {
-		return nil, errors.NewUnavailable("PVE client not configured")
+		return nil, errors.NewUnavailable("PVE client not configured", nil)
 	}
 
 	sourceVMID, sourceNode, err := p.parseVMReference(req.SourceVmId)
@@ -574,15 +570,14 @@ func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*pr
 	}
 
 	// Generate new VMID for clone
-	targetVMID := int(time.Now().Unix() % 999999) + 100000 // Ensure 6-digit VMID
-	targetNode := sourceNode // Clone to same node by default
+	targetVMID := int(time.Now().Unix()%999999) + 100000 // Ensure 6-digit VMID
 
 	config := &pveapi.VMConfig{
 		VMID: targetVMID,
 		Name: req.TargetName,
 	}
 
-	if req.LinkedClone {
+	if req.Linked {
 		config.Custom = map[string]string{"full": "0"}
 	} else {
 		config.Custom = map[string]string{"full": "1"}
@@ -607,7 +602,7 @@ func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*pr
 // ImagePrepare prepares an image for use
 func (p *Provider) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepareRequest) (*providerv1.TaskResponse, error) {
 	if p.client == nil {
-		return nil, errors.NewUnavailable("PVE client not configured")
+		return nil, errors.NewUnavailable("PVE client not configured", nil)
 	}
 
 	// Find appropriate node and storage
@@ -618,27 +613,36 @@ func (p *Provider) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepar
 
 	// Default storage - could be made configurable
 	storage := "local-lvm"
-	if req.StorageClass != "" {
-		storage = req.StorageClass
+	if req.StorageHint != "" {
+		storage = req.StorageHint
 	}
 
 	// Determine if we need to import or just ensure template exists
 	templateName := ""
 	imageURL := ""
 
-	if req.ImageRef != "" {
-		// Parse image reference to determine if it's a template name or URL
-		if strings.HasPrefix(req.ImageRef, "http://") || strings.HasPrefix(req.ImageRef, "https://") {
-			imageURL = req.ImageRef
-			// Generate template name from URL
-			parts := strings.Split(req.ImageRef, "/")
-			if len(parts) > 0 {
-				templateName = strings.TrimSuffix(parts[len(parts)-1], ".qcow2")
-				templateName = strings.TrimSuffix(templateName, ".ova")
+	if req.ImageJson != "" {
+		// Parse JSON-encoded VMImage spec to determine template name or URL
+		var imageSpec map[string]interface{}
+		if err := json.Unmarshal([]byte(req.ImageJson), &imageSpec); err != nil {
+			return nil, errors.NewInvalidSpec("failed to parse image JSON: %v", err)
+		}
+
+		// Extract image source information
+		if source, ok := imageSpec["source"].(map[string]interface{}); ok {
+			if httpSource, ok := source["http"].(map[string]interface{}); ok {
+				if url, ok := httpSource["url"].(string); ok {
+					imageURL = url
+					// Generate template name from URL
+					parts := strings.Split(url, "/")
+					if len(parts) > 0 {
+						templateName = strings.TrimSuffix(parts[len(parts)-1], ".qcow2")
+						templateName = strings.TrimSuffix(templateName, ".ova")
+					}
+				}
+			} else if templateRef, ok := source["template"].(string); ok {
+				templateName = templateRef
 			}
-		} else {
-			// Assume it's a template name
-			templateName = req.ImageRef
 		}
 	}
 
@@ -666,7 +670,7 @@ func (p *Provider) GetCapabilities(ctx context.Context, req *providerv1.GetCapab
 // parseCreateRequest parses the gRPC create request into PVE API format
 func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*pveapi.VMConfig, string, error) {
 	// Generate VMID from name hash or use timestamp
-	vmid := int(time.Now().Unix() % 999999) + 100000
+	vmid := int(time.Now().Unix()%999999) + 100000
 
 	config := &pveapi.VMConfig{
 		VMID: vmid,
@@ -704,7 +708,7 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*pveapi.VM
 		if err := json.Unmarshal([]byte(req.NetworksJson), &networksData); err == nil {
 			config.Networks = make([]pveapi.NetworkConfig, 0, len(networksData))
 			config.IPConfigs = make([]pveapi.IPConfig, 0, len(networksData))
-			
+
 			for i, netData := range networksData {
 				if network, ok := netData.(map[string]interface{}); ok {
 					netConfig := pveapi.NetworkConfig{
@@ -712,7 +716,7 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*pveapi.VM
 						Model:  "virtio", // Default model
 						Bridge: "vmbr0",  // Default bridge
 					}
-					
+
 					ipConfig := pveapi.IPConfig{
 						Index: i,
 						DHCP:  true, // Default to DHCP
@@ -791,7 +795,7 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*pveapi.VM
 	// Configure cloud-init if user data provided
 	if len(req.UserData) > 0 {
 		config.IDE2 = "cloudinit"
-		
+
 		// Extract SSH keys and user from cloud-init data if possible
 		userData := string(req.UserData)
 		if strings.Contains(userData, "ssh_authorized_keys:") {
@@ -818,7 +822,7 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*pveapi.VM
 				config.SSHKeys = strings.Join(sshKeys, "\n")
 			}
 		}
-		
+
 		// Extract username
 		if strings.Contains(userData, "name:") {
 			lines := strings.Split(userData, "\n")
