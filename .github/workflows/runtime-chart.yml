@@ -171,3 +171,57 @@ jobs:
       with:
         name: runtime-chart
         path: dist/*.tgz
+
+  crd-installation-test:
+    name: CRD Installation Test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up Helm
+      uses: azure/setup-helm@v3
+      with:
+        version: '3.12.0'
+
+    - name: Set up kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'latest'
+
+    - name: Create kind cluster
+      uses: helm/kind-action@v1.10.0
+      with:
+        cluster_name: crd-test
+        kubectl_version: v1.28.0
+
+    - name: Test CRD installation via Helm
+      run: |
+        echo "🧪 Testing CRD installation..."
+        
+        # Test installing CRDs via Helm chart
+        helm install virtrigaud-crds ./charts/virtrigaud-crds --wait --timeout=5m
+        
+        # Verify CRDs are installed
+        echo "🔍 Verifying CRDs are installed..."
+        kubectl get crd | grep virtrigaud.io
+        
+        # Test CRD functionality by creating sample resources
+        echo "🧪 Testing CRD functionality..."
+        kubectl apply -f - <<EOF
+        apiVersion: infra.virtrigaud.io/v1beta1
+        kind: Provider
+        metadata:
+          name: test-provider
+        spec:
+          type: mock
+          endpoint: http://localhost:9443
+        EOF
+        
+        # Verify resource was created
+        kubectl get provider test-provider
+        
+        # Clean up
+        kubectl delete provider test-provider
+        helm uninstall virtrigaud-crds
