@@ -36,6 +36,7 @@ import (
 	"google.golang.org/grpc/keepalive"
 
 	"github.com/projectbeskar/virtrigaud/internal/version"
+	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/middleware"
 )
 
@@ -44,7 +45,7 @@ type Config struct {
 	// Port is the gRPC server port (default: 9443)
 	Port int
 
-	// HealthPort is the health check server port (default: 8080)  
+	// HealthPort is the health check server port (default: 8080)
 	HealthPort int
 
 	// TLS configuration
@@ -203,8 +204,8 @@ func (s *Server) RegisterService(desc *grpc.ServiceDesc, impl interface{}) {
 
 // RegisterProvider is a convenience method to register a provider service.
 func (s *Server) RegisterProvider(service interface{}) {
-	// This will be filled in when we have the actual provider service descriptor
-	s.grpcServer.RegisterService(nil, service)
+	// Register the provider service using the generated service descriptor
+	s.grpcServer.RegisterService(&providerv1.Provider_ServiceDesc, service)
 }
 
 // Serve starts the gRPC server and blocks until shutdown.

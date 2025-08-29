@@ -111,9 +111,10 @@ jobs:
 
     - name: Build mock provider image
       run: |
-        echo "🔨 Building mock provider..."
-        make build-provider-mock
-        docker build -f cmd/provider-mock/Dockerfile -t provider-mock:test .
+        echo "🔨 Building mock provider with fixed RegisterProvider..."
+        
+        # Force clean build to pick up the server fix
+        docker build -f cmd/provider-mock/Dockerfile -t provider-mock:test . --no-cache
         
         echo "📦 Loading image into kind cluster..."
         kind load docker-image provider-mock:test --name runtime-test
