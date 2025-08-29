@@ -221,9 +221,14 @@ func FuzzHubConversion(f *testing.F) {
 				Namespace: "default",
 			},
 			Spec: VirtualMachineSpec{
-				PowerState: powerState,
-				CPU:        cpu,
-				Memory:     memory,
+				PowerState:  powerState,
+				ProviderRef: ObjectRef{Name: "test-provider"},
+				ClassRef:    ObjectRef{Name: "test-class"},
+				ImageRef:    ObjectRef{Name: "test-image"},
+				Resources: &VirtualMachineResources{
+					CPU:       &cpu,
+					MemoryMiB: func(m int32) *int64 { v := int64(m); return &v }(memory),
+				},
 			},
 		}
 
@@ -278,10 +283,15 @@ func FuzzConversionWithNilFields(f *testing.F) {
 				Namespace: "default",
 			},
 			Spec: VMSetSpec{
-				Template: VirtualMachineTemplateSpec{
+				Template: VMSetTemplate{
 					Spec: VirtualMachineSpec{
-						CPU:    2,
-						Memory: 4096,
+						ProviderRef: ObjectRef{Name: "test-provider"},
+						ClassRef:    ObjectRef{Name: "test-class"},
+						ImageRef:    ObjectRef{Name: "test-image"},
+						Resources: &VirtualMachineResources{
+							CPU:       func() *int32 { v := int32(2); return &v }(),
+							MemoryMiB: func() *int64 { v := int64(4096); return &v }(),
+						},
 					},
 				},
 			},
@@ -343,9 +353,14 @@ func FuzzConversionWithInvalidData(f *testing.F) {
 				Namespace: "default",
 			},
 			Spec: VirtualMachineSpec{
-				PowerState: powerState,
-				CPU:        cpu,
-				Memory:     memory,
+				PowerState:  powerState,
+				ProviderRef: ObjectRef{Name: "test-provider"},
+				ClassRef:    ObjectRef{Name: "test-class"},
+				ImageRef:    ObjectRef{Name: "test-image"},
+				Resources: &VirtualMachineResources{
+					CPU:       &cpu,
+					MemoryMiB: func(m int32) *int64 { v := int64(m); return &v }(memory),
+				},
 			},
 			Status: VirtualMachineStatus{
 				Phase: phase,
