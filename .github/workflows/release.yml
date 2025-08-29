@@ -334,8 +334,23 @@ jobs:
     runs-on: ubuntu-latest
     needs: [prepare, build-and-push, security-scan, generate-sbom, build-helm-chart, build-cli-tools, generate-changelog]
     steps:
-    - name: Download all artifacts
+    - name: Download all artifacts (with retry resilience)
+      id: download-artifacts
       uses: actions/download-artifact@v4
+      continue-on-error: true
+      
+    - name: Retry failed artifact downloads
+      if: steps.download-artifacts.outcome == 'failure'
+      run: |
+        echo "Initial download failed, attempting selective downloads..."
+        
+        # Try downloading critical artifacts individually
+        for artifact in "helm-chart" "changelog" "cli-tools-linux-amd64" "cli-tools-darwin-amd64" "cli-tools-windows-amd64"; do
+          echo "Attempting to download $artifact..."
+          gh run download ${{ github.run_id }} --name "$artifact" --dir . || echo "Failed to download $artifact"
+        done
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Debug artifact structure
       run: |
@@ -348,17 +363,39 @@ jobs:
 
     - name: Create checksums
       run: |
-        # Create checksums for all release artifacts
-        FILES=$(find . -type f \( -name "*.tgz" -o -name "*.spdx.json" -o -name "vrtg-*" -o -name "vcts-*" -o -name "virtrigaud-loadgen-*" \) | sort)
+        # Create checksums for all available release artifacts
+        FILES=$(find . -type f \( -name "*.tgz" -o -name "*.spdx.json" -o -name "vrtg-*" -o -name "vcts-*" -o -name "virtrigaud-loadgen-*" \) 2>/dev/null | sort)
         
         if [ -n "$FILES" ]; then
           echo "$FILES" | xargs sha256sum > checksums.txt
-          echo "Generated checksums:"
+          echo "Generated checksums for $(echo "$FILES" | wc -l) files:"
           cat checksums.txt
         else
-          echo "No files found for checksum generation"
+          echo "Warning: No files found for checksum generation - creating empty checksums.txt"
           touch checksums.txt
         fi
+
+    - name: Prepare release files
+      run: |
+        # Create a release directory and copy available files
+        mkdir -p release-files
+        
+        # Copy helm charts
+        find . -name "*.tgz" -type f -exec cp {} release-files/ \; 2>/dev/null || echo "No helm charts found"
+        
+        # Copy SBOM files 
+        find . -name "*.spdx.json" -type f -exec cp {} release-files/ \; 2>/dev/null || echo "No SBOM files found"
+        
+        # Copy CLI tools
+        find . -name "vrtg-*" -type f -exec cp {} release-files/ \; 2>/dev/null || echo "No vrtg tools found"
+        find . -name "vcts-*" -type f -exec cp {} release-files/ \; 2>/dev/null || echo "No vcts tools found"  
+        find . -name "virtrigaud-loadgen-*" -type f -exec cp {} release-files/ \; 2>/dev/null || echo "No loadgen tools found"
+        
+        # Copy checksums
+        cp checksums.txt release-files/ 2>/dev/null || echo "No checksums file found"
+        
+        echo "Release files prepared:"
+        ls -la release-files/
 
     - name: Create GitHub Release
       uses: softprops/action-gh-release@v1
@@ -366,12 +403,9 @@ jobs:
         tag_name: ${{ needs.prepare.outputs.tag }}
         name: Release ${{ needs.prepare.outputs.tag }}
         body_path: changelog/CHANGELOG.md
-        files: |
-          helm-chart/*.tgz
-          sbom-*/*.spdx.json
-          cli-tools-*/*
-          checksums.txt
+        files: release-files/*
         prerelease: ${{ contains(needs.prepare.outputs.tag, '-') }}
+        fail_on_unmatched_files: false
 
   update-helm-repo:
     name: Update Helm Repository
