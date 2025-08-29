@@ -2,7 +2,7 @@ apiVersion: v2
 name: virtrigaud-provider-runtime
 description: A Helm chart for running VirtRigaud provider services in Kubernetes
 type: application
-version: 0.1.0
+version: 0.1.1
 appVersion: "0.1.1"
 keywords:
   - virtrigaud

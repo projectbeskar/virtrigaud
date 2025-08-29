@@ -177,7 +177,7 @@ examples:
   proxmox:
     image:
       repository: ghcr.io/projectbeskar/virtrigaud/provider-proxmox
-      tag: "0.1.0"
+      tag: "0.1.1"
     env:
       - name: PVE_ENDPOINT
         value: "https://pve.local:8006"
