@@ -133,6 +133,15 @@ jobs:
           tag: test
           pullPolicy: Never
         
+        # Environment variables for mock provider
+        env:
+          - name: LOG_LEVEL
+            value: "debug"
+          - name: MOCK_SLOW_MODE
+            value: "false"
+          - name: MOCK_FAILURE_MODE
+            value: ""
+        
         # Minimal resource requirements for testing
         resources:
           requests:
@@ -142,25 +151,59 @@ jobs:
             cpu: 500m
             memory: 512Mi
         
-        # Disable health checks that might cause issues
+        # Configure gRPC health checks with generous timeouts for testing
         livenessProbe:
-          enabled: false
+          grpc:
+            port: 9443
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 5
+        
         readinessProbe:
-          enabled: false
+          grpc:
+            port: 9443
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 5
         
         # Simple service configuration
         service:
           type: ClusterIP
           port: 9443
+          targetPort: grpc
+          additionalPorts:
+            - name: health
+              port: 8080
+              targetPort: health
         EOF
         
-        # Install with debug output
+        # Show the generated values for debugging
+        echo "📋 Generated values for installation:"
+        cat /tmp/test-values.yaml
+        
+        # Install with debug output but no wait initially
+        echo "🚀 Installing chart..."
         helm install test-runtime charts/virtrigaud-provider-runtime/ \
           -f /tmp/test-values.yaml \
           --debug \
-          --wait --timeout=3m
+          --timeout=5m
         
-        echo "✅ Chart installed successfully"
+        echo "✅ Chart installed, checking status..."
+        
+        # Manual wait with detailed monitoring
+        echo "⏳ Waiting for deployment to be ready..."
+        kubectl get pods,deployments,services
+        
+        # Wait for deployment to have desired replicas
+        kubectl wait --for=condition=available deployment/test-runtime-virtrigaud-provider-runtime --timeout=300s || {
+          echo "❌ Deployment failed to become available, checking details..."
+          kubectl describe deployment test-runtime-virtrigaud-provider-runtime
+          kubectl describe pods -l app.kubernetes.io/name=virtrigaud-provider-runtime
+          kubectl logs -l app.kubernetes.io/name=virtrigaud-provider-runtime --tail=100 || echo "No logs available yet"
+          exit 1
+        }
 
     - name: Verify deployment is ready
       run: |
