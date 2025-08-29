@@ -91,20 +91,18 @@ tls:
 networkPolicy:
   enabled: true
   ingress:
-    - from:
-      - namespaceSelector:
-          matchLabels:
-            name: virtrigaud-system
-      - podSelector:
-          matchLabels:
-            app.kubernetes.io/name: virtrigaud-manager
+    # Allow ingress from manager namespace
+    fromNamespaces:
+      - virtrigaud-system
   egress:
+    # Allow egress to Proxmox VE endpoints
     - to:
       - ipBlock:
           cidr: 192.168.1.0/24  # Proxmox VE network
       ports:
       - protocol: TCP
         port: 8006
+    # Allow DNS resolution
     - to: []
       ports:
       - protocol: UDP

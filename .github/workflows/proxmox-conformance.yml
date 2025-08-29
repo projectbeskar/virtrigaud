@@ -49,6 +49,18 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y make
 
+    - name: Build VCTS conformance test runner
+      run: |
+        echo "Building VCTS conformance test runner..."
+        mkdir -p bin
+        go build -o bin/vcts ./cmd/vcts
+        chmod +x bin/vcts
+        
+    - name: Verify VCTS build
+      run: |
+        echo "Verifying VCTS binary..."
+        ./bin/vcts --help
+
     - name: Build provider binary
       run: |
         make build-provider-proxmox
@@ -101,15 +113,23 @@ jobs:
       run: |
         # Start fake server in background
         cd internal/providers/proxmox/pvefake
+        echo "Starting fake Proxmox VE server..."
         go run . --port 8006 &
         FAKE_PVE_PID=$!
         echo "FAKE_PVE_PID=$FAKE_PVE_PID" >> $GITHUB_ENV
+        echo "Started fake PVE server with PID: $FAKE_PVE_PID"
         
         # Wait for server to be ready
         for i in {1..30}; do
-          if curl -f http://localhost:8006/health; then
+          if curl -f http://localhost:8006/health 2>/dev/null; then
             echo "Fake PVE server is ready"
             break
+          fi
+          if [ $i -eq 30 ]; then
+            echo "ERROR: Fake PVE server failed to start after 60 seconds"
+            echo "Server logs:"
+            jobs -l
+            exit 1
           fi
           echo "Waiting for fake PVE server... ($i/30)"
           sleep 2
@@ -122,10 +142,22 @@ jobs:
         PVE_TOKEN_SECRET: fake-secret
         PVE_INSECURE_SKIP_VERIFY: "true"
       run: |
+        # Determine the correct image tag to use
+        if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+          IMAGE_TAG="${{ env.IMAGE_NAME }}:latest"
+        else
+          IMAGE_TAG="${{ env.IMAGE_NAME }}:${{ github.ref_name }}-${{ github.sha }}"
+        fi
+        
+        echo "Using provider image: $IMAGE_TAG"
+        
+        # Ensure output directory exists
+        mkdir -p ./vcts-results
+        
         # Run VCTS with Proxmox profile
         ./bin/vcts run \
           --provider-type=proxmox \
-          --provider-image=${{ env.IMAGE_NAME }}:${{ github.sha }} \
+          --provider-image="$IMAGE_TAG" \
           --profiles=core,snapshot,clone,image-prepare \
           --output-dir=./vcts-results \
           --junit-file=./vcts-results/junit.xml \

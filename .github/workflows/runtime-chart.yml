@@ -200,8 +200,13 @@ jobs:
       run: |
         echo "🧪 Testing CRD installation..."
         
-        # Test installing CRDs via Helm chart
-        helm install virtrigaud-crds ./charts/virtrigaud-crds --wait --timeout=5m
+        # Test installing CRDs via main virtrigaud chart (CRDs only)
+        helm install virtrigaud-crds ./charts/virtrigaud \
+          --set manager.replicaCount=0 \
+          --set providers.libvirt.enabled=false \
+          --set providers.vsphere.enabled=false \
+          --set webhooks.enabled=false \
+          --wait --timeout=5m
         
         # Verify CRDs are installed
         echo "🔍 Verifying CRDs are installed..."
