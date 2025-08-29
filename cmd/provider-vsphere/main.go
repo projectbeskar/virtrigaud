@@ -31,8 +31,8 @@ import (
 	"google.golang.org/grpc/health/grpc_health_v1"
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/vsphere"
-	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 	"github.com/projectbeskar/virtrigaud/internal/version"
+	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
 func main() {

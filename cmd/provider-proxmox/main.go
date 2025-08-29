@@ -23,8 +23,8 @@ import (
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/proxmox"
 	"github.com/projectbeskar/virtrigaud/internal/version"
-	"github.com/projectbeskar/virtrigaud/sdk/provider/server"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/middleware"
+	"github.com/projectbeskar/virtrigaud/sdk/provider/server"
 )
 
 func main() {
@@ -65,10 +65,10 @@ func main() {
 	srv.RegisterProvider(providerImpl)
 
 	// Log startup information with capabilities
-	logger.Info("Starting Proxmox VE provider server", 
+	logger.Info("Starting Proxmox VE provider server",
 		"version", version.String(),
 		"capabilities", []string{
-			"core", "snapshots", "memory-snapshots", "linked-clones", 
+			"core", "snapshots", "memory-snapshots", "linked-clones",
 			"online-reconfigure", "online-disk-expansion", "image-import",
 		},
 		"supported_disk_types", []string{"raw", "qcow2"},

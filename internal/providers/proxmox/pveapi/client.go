@@ -32,17 +32,17 @@ import (
 
 // Config holds the PVE API client configuration
 type Config struct {
-	Endpoint             string
-	TokenID              string
-	TokenSecret          string
-	Username             string
-	Password             string
-	InsecureSkipVerify   bool
-	CABundle             []byte
-	NodeSelector         []string
-	RequestTimeout       time.Duration
-	TaskPollInterval     time.Duration
-	TaskTimeout          time.Duration
+	Endpoint           string
+	TokenID            string
+	TokenSecret        string
+	Username           string
+	Password           string
+	InsecureSkipVerify bool
+	CABundle           []byte
+	NodeSelector       []string
+	RequestTimeout     time.Duration
+	TaskPollInterval   time.Duration
+	TaskTimeout        time.Duration
 }
 
 // Client represents a Proxmox VE API client
@@ -105,16 +105,16 @@ func (c *Client) Config() *Config {
 
 // VM represents a Proxmox VE virtual machine
 type VM struct {
-	VMID        int    `json:"vmid"`
-	Name        string `json:"name"`
-	Status      string `json:"status"`
-	Node        string `json:"node"`
-	CPUs        int    `json:"cpus,omitempty"`
-	Memory      int64  `json:"maxmem,omitempty"`
-	Template    int    `json:"template,omitempty"`
-	QMPStatus   string `json:"qmpstatus,omitempty"`
-	PID         int    `json:"pid,omitempty"`
-	ConfigLock  string `json:"lock,omitempty"`
+	VMID       int    `json:"vmid"`
+	Name       string `json:"name"`
+	Status     string `json:"status"`
+	Node       string `json:"node"`
+	CPUs       int    `json:"cpus,omitempty"`
+	Memory     int64  `json:"maxmem,omitempty"`
+	Template   int    `json:"template,omitempty"`
+	QMPStatus  string `json:"qmpstatus,omitempty"`
+	PID        int    `json:"pid,omitempty"`
+	ConfigLock string `json:"lock,omitempty"`
 }
 
 // VMConfig represents VM configuration parameters
@@ -137,13 +137,13 @@ type VMConfig struct {
 
 // NetworkConfig represents a VM network interface
 type NetworkConfig struct {
-	Index     int    `json:"index"`           // Network interface index (0, 1, 2...)
-	Model     string `json:"model"`           // Network adapter model (virtio, e1000, etc.)
-	Bridge    string `json:"bridge"`          // Bridge name (vmbr0, vmbr1, etc.)
-	VLAN      int    `json:"vlan,omitempty"`  // VLAN tag
-	MAC       string `json:"mac,omitempty"`   // MAC address
-	Firewall  bool   `json:"firewall"`        // Enable firewall
-	LinkDown  bool   `json:"link_down"`       // Start with link down
+	Index    int    `json:"index"`          // Network interface index (0, 1, 2...)
+	Model    string `json:"model"`          // Network adapter model (virtio, e1000, etc.)
+	Bridge   string `json:"bridge"`         // Bridge name (vmbr0, vmbr1, etc.)
+	VLAN     int    `json:"vlan,omitempty"` // VLAN tag
+	MAC      string `json:"mac,omitempty"`  // MAC address
+	Firewall bool   `json:"firewall"`       // Enable firewall
+	LinkDown bool   `json:"link_down"`      // Start with link down
 }
 
 // IPConfig represents IP configuration for a network interface
@@ -224,7 +224,7 @@ func (c *Client) request(ctx context.Context, method, path string, body interfac
 // GetVM retrieves information about a specific VM
 func (c *Client) GetVM(ctx context.Context, node string, vmid int) (*VM, error) {
 	path := fmt.Sprintf("/api2/json/nodes/%s/qemu/%d/status/current", node, vmid)
-	
+
 	resp, err := c.request(ctx, "GET", path, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get VM: %w", err)
@@ -263,10 +263,10 @@ func (c *Client) GetVM(ctx context.Context, node string, vmid int) (*VM, error) 
 // CreateVM creates a new VM
 func (c *Client) CreateVM(ctx context.Context, node string, config *VMConfig) (string, error) {
 	path := fmt.Sprintf("/api2/json/nodes/%s/qemu", node)
-	
+
 	// Convert config to form values
 	values := c.configToValues(config)
-	
+
 	resp, err := c.request(ctx, "POST", path, values)
 	if err != nil {
 		return "", fmt.Errorf("failed to create VM: %w", err)
@@ -294,9 +294,9 @@ func (c *Client) CreateVM(ctx context.Context, node string, config *VMConfig) (s
 // CloneVM clones an existing VM
 func (c *Client) CloneVM(ctx context.Context, node string, vmid int, config *VMConfig) (string, error) {
 	path := fmt.Sprintf("/api2/json/nodes/%s/qemu/%d/clone", node, vmid)
-	
+
 	values := c.configToValues(config)
-	
+
 	resp, err := c.request(ctx, "POST", path, values)
 	if err != nil {
 		return "", fmt.Errorf("failed to clone VM: %w", err)
@@ -323,7 +323,7 @@ func (c *Client) CloneVM(ctx context.Context, node string, vmid int, config *VMC
 // DeleteVM deletes a VM
 func (c *Client) DeleteVM(ctx context.Context, node string, vmid int) (string, error) {
 	path := fmt.Sprintf("/api2/json/nodes/%s/qemu/%d", node, vmid)
-	
+
 	resp, err := c.request(ctx, "DELETE", path, nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to delete VM: %w", err)
@@ -355,7 +355,7 @@ func (c *Client) DeleteVM(ctx context.Context, node string, vmid int) (string, e
 // PowerOperation performs a power operation on a VM
 func (c *Client) PowerOperation(ctx context.Context, node string, vmid int, operation string) (string, error) {
 	path := fmt.Sprintf("/api2/json/nodes/%s/qemu/%d/status/%s", node, vmid, operation)
-	
+
 	resp, err := c.request(ctx, "POST", path, nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to perform power operation: %w", err)
@@ -382,7 +382,7 @@ func (c *Client) PowerOperation(ctx context.Context, node string, vmid int, oper
 // GetTaskStatus gets the status of a task
 func (c *Client) GetTaskStatus(ctx context.Context, node, taskID string) (*Task, error) {
 	path := fmt.Sprintf("/api2/json/nodes/%s/tasks/%s/status", node, taskID)
-	
+
 	resp, err := c.request(ctx, "GET", path, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get task status: %w", err)
@@ -446,7 +446,7 @@ func (c *Client) WaitForTask(ctx context.Context, node, taskID string) error {
 // configToValues converts VMConfig to url.Values
 func (c *Client) configToValues(config *VMConfig) url.Values {
 	values := url.Values{}
-	
+
 	if config.VMID != 0 {
 		values.Set("vmid", strconv.Itoa(config.VMID))
 	}
@@ -592,7 +592,7 @@ func (c *Client) FindNode(ctx context.Context) (string, error) {
 type ReconfigureConfig struct {
 	CPUs     *int   `json:"cores,omitempty"`
 	Sockets  *int   `json:"sockets,omitempty"`
-	Memory   *int64 `json:"memory,omitempty"`    // Memory in MB
+	Memory   *int64 `json:"memory,omitempty"`   // Memory in MB
 	DiskSize *int64 `json:"disksize,omitempty"` // Disk size in GB
 	Disk     string `json:"disk,omitempty"`     // Disk identifier (e.g., "scsi0")
 }
@@ -600,9 +600,9 @@ type ReconfigureConfig struct {
 // ReconfigureVM reconfigures a VM
 func (c *Client) ReconfigureVM(ctx context.Context, node string, vmid int, config *ReconfigureConfig) (string, error) {
 	path := fmt.Sprintf("/api2/json/nodes/%s/qemu/%d/config", node, vmid)
-	
+
 	values := url.Values{}
-	
+
 	if config.CPUs != nil {
 		values.Set("cores", strconv.Itoa(*config.CPUs))
 	}
@@ -616,7 +616,7 @@ func (c *Client) ReconfigureVM(ctx context.Context, node string, vmid int, confi
 		// For disk resize, we need to modify the disk parameter
 		values.Set(config.Disk, fmt.Sprintf("size=%dG", *config.DiskSize))
 	}
-	
+
 	resp, err := c.request(ctx, "PUT", path, values)
 	if err != nil {
 		return "", fmt.Errorf("failed to reconfigure VM: %w", err)
@@ -644,11 +644,11 @@ func (c *Client) ReconfigureVM(ctx context.Context, node string, vmid int, confi
 // ResizeDisk resizes a VM disk
 func (c *Client) ResizeDisk(ctx context.Context, node string, vmid int, disk string, sizeGB int64) (string, error) {
 	path := fmt.Sprintf("/api2/json/nodes/%s/qemu/%d/resize", node, vmid)
-	
+
 	values := url.Values{}
 	values.Set("disk", disk)
 	values.Set("size", fmt.Sprintf("%dG", sizeGB))
-	
+
 	resp, err := c.request(ctx, "PUT", path, values)
 	if err != nil {
 		return "", fmt.Errorf("failed to resize disk: %w", err)
@@ -675,7 +675,7 @@ func (c *Client) ResizeDisk(ctx context.Context, node string, vmid int, disk str
 // CreateSnapshot creates a VM snapshot
 func (c *Client) CreateSnapshot(ctx context.Context, node string, vmid int, snapname, description string, includeMemory bool) (string, error) {
 	path := fmt.Sprintf("/api2/json/nodes/%s/qemu/%d/snapshot", node, vmid)
-	
+
 	values := url.Values{}
 	values.Set("snapname", snapname)
 	if description != "" {
@@ -684,7 +684,7 @@ func (c *Client) CreateSnapshot(ctx context.Context, node string, vmid int, snap
 	if includeMemory {
 		values.Set("vmstate", "1")
 	}
-	
+
 	resp, err := c.request(ctx, "POST", path, values)
 	if err != nil {
 		return "", fmt.Errorf("failed to create snapshot: %w", err)
@@ -711,7 +711,7 @@ func (c *Client) CreateSnapshot(ctx context.Context, node string, vmid int, snap
 // DeleteSnapshot deletes a VM snapshot
 func (c *Client) DeleteSnapshot(ctx context.Context, node string, vmid int, snapname string) (string, error) {
 	path := fmt.Sprintf("/api2/json/nodes/%s/qemu/%d/snapshot/%s", node, vmid, snapname)
-	
+
 	resp, err := c.request(ctx, "DELETE", path, nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to delete snapshot: %w", err)
@@ -743,7 +743,7 @@ func (c *Client) DeleteSnapshot(ctx context.Context, node string, vmid int, snap
 // RevertSnapshot reverts a VM to a snapshot
 func (c *Client) RevertSnapshot(ctx context.Context, node string, vmid int, snapname string) (string, error) {
 	path := fmt.Sprintf("/api2/json/nodes/%s/qemu/%d/snapshot/%s/rollback", node, vmid, snapname)
-	
+
 	resp, err := c.request(ctx, "POST", path, nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to revert snapshot: %w", err)
@@ -770,7 +770,7 @@ func (c *Client) RevertSnapshot(ctx context.Context, node string, vmid int, snap
 // ListSnapshots lists VM snapshots
 func (c *Client) ListSnapshots(ctx context.Context, node string, vmid int) ([]*Snapshot, error) {
 	path := fmt.Sprintf("/api2/json/nodes/%s/qemu/%d/snapshot", node, vmid)
-	
+
 	resp, err := c.request(ctx, "GET", path, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list snapshots: %w", err)
@@ -825,12 +825,12 @@ func (c *Client) PrepareImage(ctx context.Context, node, storage, imageURL, temp
 		// 2. Create VM from image
 		// 3. Convert to template
 		path := fmt.Sprintf("/api2/json/nodes/%s/storage/%s/download-url", node, storage)
-		
+
 		values := url.Values{}
 		values.Set("content", "iso")
 		values.Set("filename", "imported-image.qcow2")
 		values.Set("url", imageURL)
-		
+
 		resp, err := c.request(ctx, "POST", path, values)
 		if err != nil {
 			return "", fmt.Errorf("failed to import image: %w", err)
@@ -858,7 +858,7 @@ func (c *Client) PrepareImage(ctx context.Context, node, storage, imageURL, temp
 // GetVMConfig retrieves VM configuration
 func (c *Client) GetVMConfig(ctx context.Context, node string, vmid int) (map[string]interface{}, error) {
 	path := fmt.Sprintf("/api2/json/nodes/%s/qemu/%d/config", node, vmid)
-	
+
 	resp, err := c.request(ctx, "GET", path, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get VM config: %w", err)
@@ -887,8 +887,8 @@ func (c *Client) GetVMConfig(ctx context.Context, node string, vmid int) (map[st
 
 // Custom errors
 var (
-	ErrVMNotFound = fmt.Errorf("VM not found")
-	ErrNodeNotFound = fmt.Errorf("node not found")
-	ErrTaskFailed = fmt.Errorf("task failed")
+	ErrVMNotFound           = fmt.Errorf("VM not found")
+	ErrNodeNotFound         = fmt.Errorf("node not found")
+	ErrTaskFailed           = fmt.Errorf("task failed")
 	ErrDiskShrinkNotAllowed = fmt.Errorf("disk shrinking not allowed")
 )

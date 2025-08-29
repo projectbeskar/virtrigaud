@@ -60,17 +60,13 @@ generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and
 
 .PHONY: fmt
 fmt: ## Run go fmt against code.
-	@for dir in $$(find . -name "*.go" -not -path "./internal/providers/libvirt/*" -not -path "./cmd/provider-libvirt/*" -not -path "./test/integration/*" -exec dirname {} \; | sort -u); do \
-		echo "Formatting $$dir"; \
-		go fmt $$dir; \
-	done
+	@echo "Formatting code (excluding libvirt packages)..."
+	@go list ./... | grep -v '/internal/providers/libvirt' | grep -v '/cmd/provider-libvirt' | grep -v '/test/integration' | xargs go fmt
 
 .PHONY: vet
 vet: ## Run go vet against code.
-	@for dir in $$(find . -name "*.go" -not -path "./internal/providers/libvirt/*" -not -path "./cmd/provider-libvirt/*" -not -path "./test/integration/*" -exec dirname {} \; | sort -u); do \
-		echo "Vetting $$dir"; \
-		go vet $$dir || exit 1; \
-	done
+	@echo "Running go vet (excluding libvirt packages)..."
+	@go list ./... | grep -v '/internal/providers/libvirt' | grep -v '/cmd/provider-libvirt' | grep -v '/test/integration' | xargs go vet
 
 .PHONY: test
 test: manifests generate fmt vet setup-envtest ## Run tests.

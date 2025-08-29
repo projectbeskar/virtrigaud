@@ -43,14 +43,14 @@ func FuzzVirtualMachineConversion(f *testing.F) {
 				Namespace: "default",
 			},
 			Spec: VirtualMachineSpec{
-				PowerState: powerState,
+				PowerState:  powerState,
 				ProviderRef: ObjectRef{Name: "test-provider"},
 				ClassRef:    ObjectRef{Name: "test-class"},
 				ImageRef:    ObjectRef{Name: image},
-				   Resources: &VirtualMachineResources{
-					   CPU:       &cpu,
-					   MemoryMiB: func(m int32) *int64 { v := int64(m); return &v }(memory),
-				   },
+				Resources: &VirtualMachineResources{
+					CPU:       &cpu,
+					MemoryMiB: func(m int32) *int64 { v := int64(m); return &v }(memory),
+				},
 			},
 			Status: VirtualMachineStatus{
 				PowerState: phase,
@@ -267,8 +267,8 @@ func FuzzHubConversion(f *testing.F) {
 
 // FuzzConversionWithNilFields tests conversion behavior with nil/empty fields
 func FuzzConversionWithNilFields(f *testing.F) {
-	f.Add(true, true, true)   // All fields nil
-	f.Add(false, true, false) // Mixed nil fields
+	f.Add(true, true, true)    // All fields nil
+	f.Add(false, true, false)  // Mixed nil fields
 	f.Add(false, false, false) // No nil fields
 
 	f.Fuzz(func(t *testing.T, nilReplicas, nilPowerState, nilPhase bool) {
@@ -325,13 +325,13 @@ func FuzzConversionWithNilFields(f *testing.F) {
 		if roundTrip.Spec.Template.Spec.Resources != nil && vmset.Spec.Template.Spec.Resources != nil {
 			if roundTrip.Spec.Template.Spec.Resources.CPU != nil && vmset.Spec.Template.Spec.Resources.CPU != nil {
 				if *roundTrip.Spec.Template.Spec.Resources.CPU != *vmset.Spec.Template.Spec.Resources.CPU {
-					t.Errorf("CPU changed during nil field conversion: original=%d, result=%d", 
+					t.Errorf("CPU changed during nil field conversion: original=%d, result=%d",
 						*vmset.Spec.Template.Spec.Resources.CPU, *roundTrip.Spec.Template.Spec.Resources.CPU)
 				}
 			}
 			if roundTrip.Spec.Template.Spec.Resources.MemoryMiB != nil && vmset.Spec.Template.Spec.Resources.MemoryMiB != nil {
 				if *roundTrip.Spec.Template.Spec.Resources.MemoryMiB != *vmset.Spec.Template.Spec.Resources.MemoryMiB {
-					t.Errorf("Memory changed during nil field conversion: original=%d, result=%d", 
+					t.Errorf("Memory changed during nil field conversion: original=%d, result=%d",
 						*vmset.Spec.Template.Spec.Resources.MemoryMiB, *roundTrip.Spec.Template.Spec.Resources.MemoryMiB)
 				}
 			}
@@ -371,7 +371,7 @@ func FuzzConversionWithInvalidData(f *testing.F) {
 		// Conversion should not panic even with invalid data
 		beta := &v1beta1.VirtualMachine{}
 		err := vm.ConvertTo(beta)
-		
+
 		// We don't require conversion to succeed with invalid data,
 		// but it should not panic
 		if err != nil {
@@ -391,4 +391,3 @@ func FuzzConversionWithInvalidData(f *testing.F) {
 		t.Logf("Conversion succeeded with potentially invalid data - this is acceptable if values were normalized")
 	})
 }
-

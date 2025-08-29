@@ -55,12 +55,12 @@ type VirtualMachine struct {
 
 // Snapshot represents a mock VM snapshot.
 type Snapshot struct {
-	ID           string
-	Name         string
-	CreatedTime  time.Time
-	Description  string
-	SizeBytes    int64
-	HasMemory    bool
+	ID          string
+	Name        string
+	CreatedTime time.Time
+	Description string
+	SizeBytes   int64
+	HasMemory   bool
 }
 
 // Task represents an async operation.
@@ -273,7 +273,7 @@ func (p *Provider) Power(ctx context.Context, req *providerv1.PowerRequest) (*pr
 	// Update power state after delay
 	go func() {
 		time.Sleep(1 * time.Second)
-		
+
 		var newState string
 		switch req.Op {
 		case providerv1.PowerOp_POWER_OP_ON:
