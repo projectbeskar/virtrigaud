@@ -46,10 +46,8 @@ jobs:
 
     - name: Run go vet (excluding libvirt)
       run: |
-        for dir in $(find . -name "*.go" -not -path "./internal/providers/libvirt/*" -not -path "./cmd/provider-libvirt/*" -not -path "./test/integration/*" -exec dirname {} \; | sort -u); do
-          echo "Vetting $dir"
-          go vet $dir || exit 1
-        done
+        # Use go list to find all packages and exclude problematic ones
+        go list ./... | grep -v '/internal/providers/libvirt' | grep -v '/cmd/provider-libvirt' | grep -v '/test/integration' | xargs go vet
 
     - name: Run tests (excluding libvirt)
       run: |
