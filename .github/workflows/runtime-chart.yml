@@ -138,6 +138,9 @@ jobs:
     - name: Check logs
       if: failure()
       run: |
+        echo "🔍 Checking cluster status and logs..."
+        kubectl config current-context
+        kubectl get nodes
         kubectl describe pods
         kubectl logs -l app.kubernetes.io/name=virtrigaud-provider-runtime
 
@@ -214,14 +217,22 @@ jobs:
         
         # Test CRD functionality by creating sample resources
         echo "🧪 Testing CRD functionality..."
+        
+        # Create a secret for credentials
+        kubectl create secret generic test-credentials \
+          --from-literal=username=test \
+          --from-literal=password=test
+        
         kubectl apply -f - <<EOF
         apiVersion: infra.virtrigaud.io/v1beta1
         kind: Provider
         metadata:
           name: test-provider
         spec:
-          type: mock
+          type: proxmox
           endpoint: http://localhost:9443
+          credentialSecretRef:
+            name: test-credentials
         EOF
         
         # Verify resource was created
@@ -229,4 +240,5 @@ jobs:
         
         # Clean up
         kubectl delete provider test-provider
+        kubectl delete secret test-credentials
         helm uninstall virtrigaud-crds
