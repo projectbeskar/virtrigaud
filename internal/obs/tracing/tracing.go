@@ -31,6 +31,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
 	otrace "go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -67,8 +68,8 @@ func DefaultConfig(serviceName, version string) *Config {
 // Setup initializes OpenTelemetry tracing
 func Setup(ctx context.Context, config *Config) (func(), error) {
 	if !config.Enabled {
-		// Set up a no-op tracer provider
-		otel.SetTracerProvider(otrace.NewNoopTracerProvider())
+		// Set up a no-op otracer provider
+		otel.SetTracerProvider(noop.NewTracerProvider())
 		return func() {}, nil
 	}
 
@@ -102,14 +103,14 @@ func Setup(ctx context.Context, config *Config) (func(), error) {
 		return nil, fmt.Errorf("failed to create resource: %w", err)
 	}
 
-	// Create tracer provider
+	// Create otracer provider
 	tp := trace.NewTracerProvider(
 		trace.WithBatcher(exporter),
 		trace.WithResource(res),
 		trace.WithSampler(trace.TraceIDRatioBased(config.SamplingRatio)),
 	)
 
-	// Set global tracer provider
+	// Set global otracer provider
 	otel.SetTracerProvider(tp)
 
 	// Set global propagator
@@ -124,20 +125,20 @@ func Setup(ctx context.Context, config *Config) (func(), error) {
 		defer cancel()
 		if err := tp.Shutdown(shutdownCtx); err != nil {
 			// Log error but don't fail shutdown
-			fmt.Printf("Error shutting down tracer provider: %v\n", err)
+			fmt.Printf("Error shutting down otracer provider: %v\n", err)
 		}
 	}, nil
 }
 
-// GetTracer returns a tracer for the given name
+// GetTracer returns a otracer for the given name
 func GetTracer(name string) otrace.Tracer {
 	return otel.Tracer(name)
 }
 
 // StartSpan starts a new span with the given name and options
 func StartSpan(ctx context.Context, name string, opts ...otrace.SpanStartOption) (context.Context, otrace.Span) {
-	tracer := otel.Tracer("virtrigaud")
-	return tracer.Start(ctx, name, opts...)
+	otracer := otel.Tracer("virtrigaud")
+	return otracer.Start(ctx, name, opts...)
 }
 
 // AddEvent adds an event to the current span

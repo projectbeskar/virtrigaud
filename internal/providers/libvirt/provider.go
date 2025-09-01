@@ -23,14 +23,14 @@ import (
 	libvirt "libvirt.org/go/libvirt"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/projectbeskar/virtrigaud/api/v1alpha1"
+	v1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 )
 
 // Provider implements the contracts.Provider interface for Libvirt/KVM
 type Provider struct {
 	// provider configuration
-	config *v1alpha1.Provider
+	config *v1beta1.Provider
 
 	// Kubernetes client for reading secrets
 	k8sClient client.Client
@@ -53,9 +53,9 @@ type Credentials struct {
 }
 
 // NewProvider creates a new Libvirt provider instance
-func NewProvider(ctx context.Context, k8sClient client.Client, provider *v1alpha1.Provider) (contracts.Provider, error) {
-	if provider.Spec.Type != "libvirt" {
-		return nil, contracts.NewInvalidSpecError(fmt.Sprintf("invalid provider type: %s, expected libvirt", provider.Spec.Type), nil)
+func NewProvider(ctx context.Context, k8sClient client.Client, provider *v1beta1.Provider) (contracts.Provider, error) {
+	if string(provider.Spec.Type) != "libvirt" {
+		return nil, contracts.NewInvalidSpecError(fmt.Sprintf("invalid provider type: %s, expected libvirt", string(provider.Spec.Type)), nil)
 	}
 
 	p := &Provider{
@@ -100,7 +100,7 @@ func (p *Provider) Create(ctx context.Context, req contracts.CreateRequest) (con
 	domain, err := p.findDomain(req.Name)
 	if err == nil && domain != nil {
 		// Domain exists, return its ID
-		defer domain.Free()
+		defer domain.Free() //nolint:errcheck // Libvirt domain cleanup not critical in defer
 		uuid, _ := domain.GetUUIDString()
 		return contracts.CreateResponse{
 			ID: uuid,
@@ -125,7 +125,7 @@ func (p *Provider) Delete(ctx context.Context, id string) (taskRef string, err e
 		// Domain not found, consider it already deleted
 		return "", nil
 	}
-	defer domain.Free()
+	defer domain.Free() //nolint:errcheck // Libvirt domain cleanup not critical in defer
 
 	// Check if domain is running
 	active, err := domain.IsActive()
@@ -157,7 +157,7 @@ func (p *Provider) Power(ctx context.Context, id string, op contracts.PowerOp) (
 	if err != nil {
 		return "", contracts.NewNotFoundError("domain not found", err)
 	}
-	defer domain.Free()
+	defer domain.Free() //nolint:errcheck // Libvirt domain cleanup not critical in defer
 
 	switch op {
 	case contracts.PowerOpOn:
@@ -183,7 +183,7 @@ func (p *Provider) Reconfigure(ctx context.Context, id string, desired contracts
 	if err != nil {
 		return "", contracts.NewNotFoundError("domain not found", err)
 	}
-	defer domain.Free()
+	defer domain.Free() //nolint:errcheck // Libvirt domain cleanup not critical in defer
 
 	// For basic reconfiguration, we'd need to modify the domain XML
 	// This is more complex in Libvirt compared to vSphere
@@ -199,7 +199,7 @@ func (p *Provider) Describe(ctx context.Context, id string) (contracts.DescribeR
 			Exists: false,
 		}, nil
 	}
-	defer domain.Free()
+	defer domain.Free() //nolint:errcheck // Libvirt domain cleanup not critical in defer
 
 	return p.describeDomain(domain)
 }

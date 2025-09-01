@@ -42,7 +42,7 @@ spec:
     - jsonPath: .status.sizeBytes
       name: Size
       type: string
-    name: v1alpha1
+    name: v1beta1
     schema:
       openAPIV3Schema:
         description: VMSnapshot is the Schema for the vmsnapshots API

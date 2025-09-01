@@ -79,7 +79,7 @@ func (p *Provider) createDomain(ctx context.Context, req contracts.CreateRequest
 	if err != nil {
 		return "", contracts.NewRetryableError("failed to define domain", err)
 	}
-	defer domain.Free()
+	defer domain.Free() //nolint:errcheck // Libvirt domain cleanup not critical in defer
 
 	// Start the domain if power state is On
 	if req.Class.ExtraConfig["autostart"] == "true" || strings.ToLower(req.Tags[0]) == "autostart" {
@@ -254,7 +254,7 @@ func (p *Provider) describeDomain(domain *libvirt.Domain) (contracts.DescribeRes
 	}
 
 	// Generate console URL (VNC)
-	response.ConsoleURL = fmt.Sprintf("vnc://localhost:5900") // Simplified
+	response.ConsoleURL = "vnc://localhost:5900" // Simplified
 
 	return response, nil
 }

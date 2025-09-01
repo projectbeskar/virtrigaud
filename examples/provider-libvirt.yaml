@@ -1,4 +1,4 @@
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: Provider
 metadata:
   name: libvirt-local

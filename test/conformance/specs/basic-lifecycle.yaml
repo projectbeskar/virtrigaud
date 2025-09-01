@@ -12,7 +12,7 @@
       type: create
       timeout: 30s
       resource:
-        apiVersion: infra.virtrigaud.io/v1alpha1
+        apiVersion: infra.virtrigaud.io/v1beta1
         kind: Provider
         metadata:
           name: test-provider
@@ -29,7 +29,7 @@
       type: create
       timeout: 30s
       resource:
-        apiVersion: infra.virtrigaud.io/v1alpha1
+        apiVersion: infra.virtrigaud.io/v1beta1
         kind: VMClass
         metadata:
           name: test-class
@@ -42,7 +42,7 @@
       type: create
       timeout: 30s
       resource:
-        apiVersion: infra.virtrigaud.io/v1alpha1
+        apiVersion: infra.virtrigaud.io/v1beta1
         kind: VMImage
         metadata:
           name: test-image
@@ -56,7 +56,7 @@
       type: create
       timeout: 5m
       resource:
-        apiVersion: infra.virtrigaud.io/v1alpha1
+        apiVersion: infra.virtrigaud.io/v1beta1
         kind: VirtualMachine
         metadata:
           name: test-vm
@@ -79,7 +79,7 @@
     - name: validate-vm-running
       type: validate
       resource:
-        apiVersion: infra.virtrigaud.io/v1alpha1
+        apiVersion: infra.virtrigaud.io/v1beta1
         kind: VirtualMachine
         metadata:
           name: test-vm
@@ -95,7 +95,7 @@
       type: delete
       timeout: 3m
       resource:
-        apiVersion: infra.virtrigaud.io/v1alpha1
+        apiVersion: infra.virtrigaud.io/v1beta1
         kind: VirtualMachine
         metadata:
           name: test-vm
@@ -112,7 +112,7 @@
     - name: cleanup-vmimage
       type: delete
       resource:
-        apiVersion: infra.virtrigaud.io/v1alpha1
+        apiVersion: infra.virtrigaud.io/v1beta1
         kind: VMImage
         metadata:
           name: test-image
@@ -121,7 +121,7 @@
     - name: cleanup-vmclass
       type: delete
       resource:
-        apiVersion: infra.virtrigaud.io/v1alpha1
+        apiVersion: infra.virtrigaud.io/v1beta1
         kind: VMClass
         metadata:
           name: test-class
@@ -130,7 +130,7 @@
     - name: cleanup-provider
       type: delete
       resource:
-        apiVersion: infra.virtrigaud.io/v1alpha1
+        apiVersion: infra.virtrigaud.io/v1beta1
         kind: Provider
         metadata:
           name: test-provider
@@ -151,7 +151,7 @@
       type: create
       timeout: 5m
       resource:
-        apiVersion: infra.virtrigaud.io/v1alpha1
+        apiVersion: infra.virtrigaud.io/v1beta1
         kind: VirtualMachine
         metadata:
           name: test-power-vm
@@ -175,7 +175,7 @@
       type: update
       timeout: 2m
       resource:
-        apiVersion: infra.virtrigaud.io/v1alpha1
+        apiVersion: infra.virtrigaud.io/v1beta1
         kind: VirtualMachine
         metadata:
           name: test-power-vm
@@ -192,7 +192,7 @@
     - name: validate-vm-off
       type: validate
       resource:
-        apiVersion: infra.virtrigaud.io/v1alpha1
+        apiVersion: infra.virtrigaud.io/v1beta1
         kind: VirtualMachine
         metadata:
           name: test-power-vm
@@ -206,7 +206,7 @@
       type: update
       timeout: 2m
       resource:
-        apiVersion: infra.virtrigaud.io/v1alpha1
+        apiVersion: infra.virtrigaud.io/v1beta1
         kind: VirtualMachine
         metadata:
           name: test-power-vm
@@ -224,7 +224,7 @@
     - name: cleanup-test-vm
       type: delete
       resource:
-        apiVersion: infra.virtrigaud.io/v1alpha1
+        apiVersion: infra.virtrigaud.io/v1beta1
         kind: VirtualMachine
         metadata:
           name: test-power-vm

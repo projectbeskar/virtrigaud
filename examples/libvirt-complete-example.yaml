@@ -22,7 +22,7 @@ stringData:
 
 ---
 # Define the Libvirt provider
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: Provider
 metadata:
   name: libvirt-local
@@ -42,7 +42,7 @@ spec:
 
 ---
 # Define a VM class for KVM
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMClass
 metadata:
   name: kvm-small
@@ -60,7 +60,7 @@ spec:
 
 ---
 # Define the VM image for Libvirt
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMImage
 metadata:
   name: ubuntu-20-kvm
@@ -78,7 +78,7 @@ spec:
 
 ---
 # Define network attachment for Libvirt
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMNetworkAttachment
 metadata:
   name: kvm-default-network
@@ -91,7 +91,7 @@ spec:
 
 ---
 # Create the virtual machine
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VirtualMachine
 metadata:
   name: ubuntu-kvm-vm

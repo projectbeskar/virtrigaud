@@ -502,9 +502,6 @@ type ProviderList struct {
 	Items           []Provider `json:"items"`
 }
 
-// Hub marks this version as the conversion hub
-func (*Provider) Hub() {}
-
 func init() {
 	SchemeBuilder.Register(&Provider{}, &ProviderList{})
 }

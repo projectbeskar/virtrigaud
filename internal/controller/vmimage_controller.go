@@ -24,7 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	infravirtrigaudiov1alpha1 "github.com/projectbeskar/virtrigaud/api/v1alpha1"
+	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 )
 
 // VMImageReconciler reconciles a VMImage object
@@ -57,7 +57,7 @@ func (r *VMImageReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 // SetupWithManager sets up the controller with the Manager.
 func (r *VMImageReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&infravirtrigaudiov1alpha1.VMImage{}).
+		For(&infravirtrigaudiov1beta1.VMImage{}).
 		Named("vmimage").
 		Complete(r)
 }

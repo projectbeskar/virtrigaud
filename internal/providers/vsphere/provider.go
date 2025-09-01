@@ -26,14 +26,14 @@ import (
 	"github.com/vmware/govmomi/vim25/soap"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/projectbeskar/virtrigaud/api/v1alpha1"
+	v1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 )
 
 // Provider implements the contracts.Provider interface for vSphere
 type Provider struct {
 	// provider configuration
-	config *v1alpha1.Provider
+	config *v1beta1.Provider
 
 	// Kubernetes client for reading secrets
 	k8sClient client.Client
@@ -54,9 +54,9 @@ type Credentials struct {
 }
 
 // NewProvider creates a new vSphere provider instance
-func NewProvider(ctx context.Context, k8sClient client.Client, provider *v1alpha1.Provider) (contracts.Provider, error) {
-	if provider.Spec.Type != "vsphere" {
-		return nil, contracts.NewInvalidSpecError(fmt.Sprintf("invalid provider type: %s, expected vsphere", provider.Spec.Type), nil)
+func NewProvider(ctx context.Context, k8sClient client.Client, provider *v1beta1.Provider) (contracts.Provider, error) {
+	if string(provider.Spec.Type) != "vsphere" {
+		return nil, contracts.NewInvalidSpecError(fmt.Sprintf("invalid provider type: %s, expected vsphere", string(provider.Spec.Type)), nil)
 	}
 
 	p := &Provider{

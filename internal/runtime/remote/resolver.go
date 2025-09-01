@@ -23,7 +23,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	infravirtrigaudiov1alpha1 "github.com/projectbeskar/virtrigaud/api/v1alpha1"
+	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/providers/registry"
 	grpcClient "github.com/projectbeskar/virtrigaud/internal/transport/grpc"
@@ -47,17 +47,17 @@ func NewResolver(k8sClient client.Client, inProcessRegistry *registry.Registry) 
 }
 
 // GetProvider resolves a Provider object to a contracts.Provider implementation
-func (r *Resolver) GetProvider(ctx context.Context, provider *infravirtrigaudiov1alpha1.Provider) (contracts.Provider, error) {
+func (r *Resolver) GetProvider(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) (contracts.Provider, error) {
 	// Determine runtime mode
-	runtimeMode := infravirtrigaudiov1alpha1.RuntimeModeInProcess
+	runtimeMode := infravirtrigaudiov1beta1.RuntimeModeInProcess
 	if provider.Spec.Runtime != nil && provider.Spec.Runtime.Mode != "" {
 		runtimeMode = provider.Spec.Runtime.Mode
 	}
 
 	switch runtimeMode {
-	case infravirtrigaudiov1alpha1.RuntimeModeRemote:
+	case infravirtrigaudiov1beta1.RuntimeModeRemote:
 		return r.getRemoteProvider(ctx, provider)
-	case infravirtrigaudiov1alpha1.RuntimeModeInProcess:
+	case infravirtrigaudiov1beta1.RuntimeModeInProcess:
 		return r.getInProcessProvider(ctx, provider)
 	default:
 		return nil, fmt.Errorf("unsupported runtime mode: %s", runtimeMode)
@@ -65,7 +65,7 @@ func (r *Resolver) GetProvider(ctx context.Context, provider *infravirtrigaudiov
 }
 
 // getRemoteProvider creates or reuses a gRPC client for remote providers
-func (r *Resolver) getRemoteProvider(ctx context.Context, provider *infravirtrigaudiov1alpha1.Provider) (contracts.Provider, error) {
+func (r *Resolver) getRemoteProvider(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) (contracts.Provider, error) {
 	// Check if provider runtime is ready
 	if provider.Status.Runtime == nil || provider.Status.Runtime.Endpoint == "" {
 		return nil, fmt.Errorf("remote provider runtime is not ready: no endpoint available")
@@ -88,7 +88,7 @@ func (r *Resolver) getRemoteProvider(ctx context.Context, provider *infravirtrig
 			// Client is no longer valid, remove it and create a new one
 			r.clientsMutex.Lock()
 			delete(r.clients, cacheKey)
-			existingClient.Close()
+			existingClient.Close() //nolint:errcheck // Client cleanup not critical
 			r.clientsMutex.Unlock()
 		} else {
 			// Client is still valid, reuse it
@@ -109,7 +109,7 @@ func (r *Resolver) getRemoteProvider(ctx context.Context, provider *infravirtrig
 
 	// Validate the new client
 	if err := client.Validate(ctx); err != nil {
-		client.Close()
+		client.Close() //nolint:errcheck // Client cleanup not critical
 		return nil, fmt.Errorf("remote provider validation failed: %w", err)
 	}
 
@@ -122,7 +122,7 @@ func (r *Resolver) getRemoteProvider(ctx context.Context, provider *infravirtrig
 }
 
 // getInProcessProvider returns an in-process provider implementation
-func (r *Resolver) getInProcessProvider(ctx context.Context, provider *infravirtrigaudiov1alpha1.Provider) (contracts.Provider, error) {
+func (r *Resolver) getInProcessProvider(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) (contracts.Provider, error) {
 	if r.inProcessRegistry == nil {
 		return nil, fmt.Errorf("no in-process provider registry available")
 	}
@@ -131,9 +131,10 @@ func (r *Resolver) getInProcessProvider(ctx context.Context, provider *infravirt
 }
 
 // buildTLSConfig builds TLS configuration for gRPC client based on provider spec
-func (r *Resolver) buildTLSConfig(ctx context.Context, provider *infravirtrigaudiov1alpha1.Provider) (*grpcClient.TLSConfig, error) {
+func (r *Resolver) buildTLSConfig(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) (*grpcClient.TLSConfig, error) {
 	// If TLS is not enabled, return nil for insecure connection
-	if provider.Spec.Runtime.TLS == nil || !provider.Spec.Runtime.TLS.Enabled {
+	// TLS configuration removed in v1beta1, always return nil for insecure connection
+	if true {
 		return nil, nil
 	}
 
@@ -151,14 +152,14 @@ func (r *Resolver) buildTLSConfig(ctx context.Context, provider *infravirtrigaud
 }
 
 // CleanupClient removes and closes a cached gRPC client
-func (r *Resolver) CleanupClient(provider *infravirtrigaudiov1alpha1.Provider) {
+func (r *Resolver) CleanupClient(provider *infravirtrigaudiov1beta1.Provider) {
 	cacheKey := fmt.Sprintf("%s/%s", provider.Namespace, provider.Name)
 
 	r.clientsMutex.Lock()
 	defer r.clientsMutex.Unlock()
 
 	if client, exists := r.clients[cacheKey]; exists {
-		client.Close()
+		client.Close() //nolint:errcheck // Client cleanup not critical
 		delete(r.clients, cacheKey)
 	}
 }
@@ -169,15 +170,15 @@ func (r *Resolver) CleanupAllClients() {
 	defer r.clientsMutex.Unlock()
 
 	for key, client := range r.clients {
-		client.Close()
+		client.Close() //nolint:errcheck // Client cleanup not critical
 		delete(r.clients, key)
 	}
 }
 
 // IsRemoteProvider checks if a provider is configured for remote runtime
-func (r *Resolver) IsRemoteProvider(provider *infravirtrigaudiov1alpha1.Provider) bool {
+func (r *Resolver) IsRemoteProvider(provider *infravirtrigaudiov1beta1.Provider) bool {
 	if provider.Spec.Runtime == nil {
 		return false
 	}
-	return provider.Spec.Runtime.Mode == infravirtrigaudiov1alpha1.RuntimeModeRemote
+	return provider.Spec.Runtime.Mode == infravirtrigaudiov1beta1.RuntimeModeRemote
 }

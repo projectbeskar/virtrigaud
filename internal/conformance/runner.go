@@ -22,14 +22,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"gopkg.in/yaml.v2"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	infrav1alpha1 "github.com/projectbeskar/virtrigaud/api/v1alpha1"
+	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 )
 
 // Config holds configuration for the conformance runner
@@ -223,7 +222,7 @@ func (r *Runner) loadTests() error {
 // getProviderCapabilities retrieves provider capabilities
 func (r *Runner) getProviderCapabilities(ctx context.Context) ([]string, error) {
 	// Get the provider resource
-	provider := &infrav1alpha1.Provider{}
+	provider := &infrav1beta1.Provider{}
 	key := client.ObjectKey{
 		Namespace: r.config.Namespace,
 		Name:      r.config.Provider,
@@ -237,9 +236,9 @@ func (r *Runner) getProviderCapabilities(ctx context.Context) ([]string, error) 
 	// This would be populated by the provider's GetCapabilities RPC
 	capabilities := []string{}
 	// For now, return basic capabilities based on provider type
-	if provider.Spec.Type == "vsphere" {
+	if string(provider.Spec.Type) == "vsphere" {
 		capabilities = append(capabilities, "vm-create", "vm-delete", "vm-power", "vm-reconfigure", "vm-snapshot")
-	} else if provider.Spec.Type == "libvirt" {
+	} else if string(provider.Spec.Type) == "libvirt" {
 		capabilities = append(capabilities, "vm-create", "vm-delete", "vm-power")
 	}
 
@@ -418,21 +417,21 @@ func (r *Runner) saveResults(results *Results) error {
 		return fmt.Errorf("failed to marshal JSON results: %w", err)
 	}
 
-	if err := os.WriteFile(jsonFile, jsonData, 0644); err != nil {
+	if err := os.WriteFile(jsonFile, jsonData, 0o644); err != nil {
 		return fmt.Errorf("failed to write JSON results: %w", err)
 	}
 
 	// Save JUnit XML results
 	junitFile := filepath.Join(r.config.OutputDir, "junit.xml")
 	junitData := r.generateJUnitXML(results)
-	if err := os.WriteFile(junitFile, []byte(junitData), 0644); err != nil {
+	if err := os.WriteFile(junitFile, []byte(junitData), 0o644); err != nil {
 		return fmt.Errorf("failed to write JUnit results: %w", err)
 	}
 
 	// Save Markdown report
 	markdownFile := filepath.Join(r.config.OutputDir, "report.md")
 	markdownData := r.generateMarkdownReport(results)
-	if err := os.WriteFile(markdownFile, []byte(markdownData), 0644); err != nil {
+	if err := os.WriteFile(markdownFile, []byte(markdownData), 0o644); err != nil {
 		return fmt.Errorf("failed to write Markdown report: %w", err)
 	}
 
@@ -489,7 +488,7 @@ func (r *Runner) generateMarkdownReport(results *Results) string {
 		results.Duration, results.Timestamp.Format(time.RFC3339))
 
 	for _, test := range results.Tests {
-		status := strings.Title(test.Status)
+		status := test.Status
 		if test.Status == "passed" {
 			status = "✅ Passed"
 		} else if test.Status == "failed" {

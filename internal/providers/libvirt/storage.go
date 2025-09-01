@@ -32,7 +32,7 @@ func (p *Provider) createStorageVolume(ctx context.Context, req contracts.Create
 	if err != nil {
 		return "", fmt.Errorf("failed to get storage pool: %w", err)
 	}
-	defer pool.Free()
+	defer pool.Free() //nolint:errcheck // Libvirt pool cleanup not critical in defer
 
 	// Check if we have a base image to clone from
 	if req.Image.Path != "" {
@@ -71,7 +71,7 @@ func (p *Provider) createVolumeFromImage(pool *libvirt.StoragePool, req contract
 	if err != nil {
 		return "", fmt.Errorf("base image not found: %s", req.Image.Path)
 	}
-	defer baseVol.Free()
+	defer baseVol.Free() //nolint:errcheck // Libvirt volume cleanup not critical in defer
 
 	// Create clone volume XML
 	volumeName := fmt.Sprintf("%s.qcow2", req.Name)
@@ -98,7 +98,7 @@ func (p *Provider) createVolumeFromImage(pool *libvirt.StoragePool, req contract
 	if err != nil {
 		return "", fmt.Errorf("failed to create storage volume: %w", err)
 	}
-	defer vol.Free()
+	defer vol.Free() //nolint:errcheck // Libvirt volume cleanup not critical in defer
 
 	// Get the path of the created volume
 	path, err := vol.GetPath()
@@ -131,7 +131,7 @@ func (p *Provider) createBlankVolume(pool *libvirt.StoragePool, req contracts.Cr
 	if err != nil {
 		return "", fmt.Errorf("failed to create storage volume: %w", err)
 	}
-	defer vol.Free()
+	defer vol.Free() //nolint:errcheck // Libvirt volume cleanup not critical in defer
 
 	// Get the path of the created volume
 	path, err := vol.GetPath()
@@ -149,7 +149,7 @@ func (p *Provider) createCloudInitISO(ctx context.Context, vmName, cloudInitData
 	if err != nil {
 		return "", fmt.Errorf("failed to get storage pool: %w", err)
 	}
-	defer pool.Free()
+	defer pool.Free() //nolint:errcheck // Libvirt pool cleanup not critical in defer
 
 	// Create cloud-init ISO name
 	isoName := fmt.Sprintf("%s-cloud-init.iso", vmName)
@@ -178,7 +178,7 @@ func (p *Provider) createCloudInitISO(ctx context.Context, vmName, cloudInitData
 	if err != nil {
 		return "", fmt.Errorf("failed to create cloud-init ISO volume: %w", err)
 	}
-	defer vol.Free()
+	defer vol.Free() //nolint:errcheck // Libvirt volume cleanup not critical in defer
 
 	// Get the path of the created volume
 	path, err := vol.GetPath()
@@ -192,26 +192,5 @@ func (p *Provider) createCloudInitISO(ctx context.Context, vmName, cloudInitData
 }
 
 // deleteStorageVolume deletes a storage volume
-func (p *Provider) deleteStorageVolume(volumePath string) error {
-	vol, err := p.conn.LookupStorageVolByPath(volumePath)
-	if err != nil {
-		// Volume doesn't exist, nothing to delete
-		return nil
-	}
-	defer vol.Free()
-
-	return vol.Delete(0)
-}
 
 // getStoragePoolPath returns the path of the default storage pool
-func (p *Provider) getStoragePoolPath() (string, error) {
-	pool, err := p.getDefaultStoragePool()
-	if err != nil {
-		return "", err
-	}
-	defer pool.Free()
-
-	// For simplicity, return a default path
-	// In production, you'd parse the XML to get the actual path
-	return "/var/lib/libvirt/images", nil
-}

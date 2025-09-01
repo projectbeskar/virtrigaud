@@ -1,7 +1,7 @@
 # Multi-provider example showing both vSphere and Libvirt VMs in one cluster
 
 # vSphere Provider Configuration
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: Provider
 metadata:
   name: vsphere-datacenter1
@@ -18,7 +18,7 @@ spec:
 
 ---
 # Libvirt Provider Configuration  
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: Provider
 metadata:
   name: libvirt-edge
@@ -33,7 +33,7 @@ spec:
 
 ---
 # Shared VM Classes
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMClass
 metadata:
   name: web-tier
@@ -45,7 +45,7 @@ spec:
     sizeGiB: 100
 
 ---
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMClass
 metadata:
   name: edge-small
@@ -58,7 +58,7 @@ spec:
 
 ---
 # Images for different providers
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMImage
 metadata:
   name: ubuntu-multi
@@ -73,7 +73,7 @@ spec:
 
 ---
 # Networks for different providers
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMNetworkAttachment
 metadata:
   name: production-network
@@ -87,7 +87,7 @@ spec:
 
 ---
 # VM running on vSphere
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VirtualMachine
 metadata:
   name: web-server-vsphere
@@ -119,7 +119,7 @@ spec:
 
 ---
 # VM running on Libvirt (edge location)
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VirtualMachine
 metadata:
   name: edge-cache-libvirt
@@ -152,7 +152,7 @@ spec:
 
 ---
 # Another vSphere VM for comparison
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VirtualMachine
 metadata:
   name: api-server-vsphere

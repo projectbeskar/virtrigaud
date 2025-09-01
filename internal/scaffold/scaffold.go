@@ -99,7 +99,7 @@ func (s *Scaffolder) generateFile(relativePath, tmplContent string, ctx map[stri
 	targetPath := filepath.Join(s.config.TargetDir, pathBuf.String())
 
 	// Create directory if it doesn't exist
-	if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
@@ -120,7 +120,7 @@ func (s *Scaffolder) generateFile(relativePath, tmplContent string, ctx map[stri
 	if err != nil {
 		return fmt.Errorf("failed to create file: %w", err)
 	}
-	defer file.Close()
+	defer file.Close() //nolint:errcheck // File close in defer is not critical
 
 	if err := tmpl.Execute(file, ctx); err != nil {
 		return fmt.Errorf("failed to execute template: %w", err)

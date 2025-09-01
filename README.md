@@ -9,9 +9,8 @@ Virtrigaud is a Kubernetes operator that enables declarative management of virtu
 ## Features
 
 - **Multi-Hypervisor Support**: Manage VMs across vSphere, Libvirt/KVM, and Proxmox VE simultaneously
-- **Declarative API**: Define VM resources using Kubernetes CRDs with API versioning (v1alpha1/v1beta1)
+- **Declarative API**: Define VM resources using Kubernetes CRDs with stable v1beta1 API
 - **Production-Ready Providers**: Full integration for vSphere (govmomi), Libvirt/KVM, and Proxmox VE
-- **API Conversion**: Seamless conversion between v1alpha1 and v1beta1 API versions via webhooks
 - **Cloud-Init Support**: Initialize VMs with cloud-init configuration across all providers
 - **Network Management**: Configure VM networking with provider-specific settings
 - **Power Management**: Control VM power state (On/Off/Reboot) uniformly
@@ -22,11 +21,9 @@ Virtrigaud is a Kubernetes operator that enables declarative management of virtu
 
 ## API Support
 
-**Default API**: v1beta1 - The recommended stable API for all new deployments.
+**API Version**: v1beta1 - The stable production-ready API. This is the only supported API version for virtrigaud.
 
-**Legacy API**: v1alpha1 - Served for compatibility but deprecated. See the [upgrade guide](docs/upgrade/) for migration instructions.
-
-All resources support seamless conversion between API versions via webhooks. Conversions are lossless and do not apply defaults. Any defaults (e.g., powerState) are applied by admission webhooks or controllers, not by the API conversion layer.
+All resources use the v1beta1 API with comprehensive OpenAPI validation and type safety.
 
 ## Architecture
 
@@ -234,7 +231,7 @@ graph TB
    # Proxmox VE example (v1beta1 API)
    kubectl apply -f examples/proxmox-complete-example.yaml
    
-   # For v1alpha1 examples (legacy), see examples/upgrade/alpha/
+   # Only v1beta1 API is supported as of v0.2.0
    
    # Multi-provider example (vSphere, Libvirt, and Proxmox)
    kubectl apply -f examples/multi-provider-example.yaml
@@ -324,7 +321,7 @@ For detailed instructions, see [QUICKSTART.md](QUICKSTART.md).
 
 ### API Conversion Issues
 
-If you encounter issues with API conversion between v1alpha1 and v1beta1:
+As of v0.2.0, only v1beta1 API is supported. For migration from legacy v1alpha1:
 
 1. **Verify conversion webhook is running**:
    ```bash

@@ -22,12 +22,11 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
-	infravirtrigaudiov1alpha1 "github.com/projectbeskar/virtrigaud/api/v1alpha1"
+	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 )
 
 var _ = Describe("Provider Controller", func() {
@@ -40,21 +39,21 @@ var _ = Describe("Provider Controller", func() {
 			Name:      resourceName,
 			Namespace: "default", // TODO(user):Modify as needed
 		}
-		provider := &infravirtrigaudiov1alpha1.Provider{}
+		provider := &infravirtrigaudiov1beta1.Provider{}
 
 		BeforeEach(func() {
 			By("creating the custom resource for the Kind Provider")
 			err := k8sClient.Get(ctx, typeNamespacedName, provider)
 			if err != nil && errors.IsNotFound(err) {
-				resource := &infravirtrigaudiov1alpha1.Provider{
+				resource := &infravirtrigaudiov1beta1.Provider{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      resourceName,
 						Namespace: "default",
 					},
-					Spec: infravirtrigaudiov1alpha1.ProviderSpec{
+					Spec: infravirtrigaudiov1beta1.ProviderSpec{
 						Type:     "vsphere",
 						Endpoint: "https://vcenter.example.com",
-						CredentialSecretRef: infravirtrigaudiov1alpha1.ObjectRef{
+						CredentialSecretRef: infravirtrigaudiov1beta1.ObjectRef{
 							Name: "test-creds",
 						},
 					},
@@ -65,7 +64,7 @@ var _ = Describe("Provider Controller", func() {
 
 		AfterEach(func() {
 			// TODO(user): Cleanup logic after each test, like removing the resource instance.
-			resource := &infravirtrigaudiov1alpha1.Provider{}
+			resource := &infravirtrigaudiov1beta1.Provider{}
 			err := k8sClient.Get(ctx, typeNamespacedName, resource)
 			Expect(err).NotTo(HaveOccurred())
 

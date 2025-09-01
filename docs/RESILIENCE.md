@@ -166,7 +166,7 @@ err := policy.Execute(ctx, func(ctx context.Context) error {
 
 ```go
 // In VirtualMachine controller
-func (r *VirtualMachineReconciler) createVM(ctx context.Context, vm *v1alpha1.VirtualMachine) error {
+func (r *VirtualMachineReconciler) createVM(ctx context.Context, vm *v1beta1.VirtualMachine) error {
     // Get circuit breaker for this provider
     cb := r.CircuitBreakerRegistry.GetOrCreate(
         "vm-operations", 

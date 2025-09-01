@@ -161,9 +161,8 @@ func verifyCodeQuality() error {
 	}
 
 	// Try make lint if available
-	if err := runMakeTarget("lint"); err != nil {
-		// Ignore if not available
-	}
+	// Run linting if available - errors are ignored for compatibility with older providers
+	_ = runMakeTarget("lint") // intentionally ignore: not all providers have lint configured
 
 	if len(errors) > 0 {
 		return fmt.Errorf("code quality issues: %s", strings.Join(errors, ", "))

@@ -17,7 +17,7 @@ kubectl create secret generic vsphere-creds \
 ### 2. Create Provider
 
 ```yaml
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: Provider
 metadata:
   name: vsphere-prod
@@ -35,7 +35,7 @@ spec:
 ### 3. Create VM Class
 
 ```yaml
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMClass
 metadata:
   name: small
@@ -51,7 +51,7 @@ spec:
 ### 4. Create VM Image
 
 ```yaml
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMImage
 metadata:
   name: ubuntu-22
@@ -63,7 +63,7 @@ spec:
 ### 5. Create Network Attachment
 
 ```yaml
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMNetworkAttachment
 metadata:
   name: vm-network
@@ -76,7 +76,7 @@ spec:
 ### 6. Create Virtual Machine
 
 ```yaml
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VirtualMachine
 metadata:
   name: web-server-01
@@ -106,7 +106,7 @@ spec:
 Example with additional data disks:
 
 ```yaml
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VirtualMachine
 metadata:
   name: database-server
@@ -134,7 +134,7 @@ spec:
 Example with static IP assignment:
 
 ```yaml
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMNetworkAttachment
 metadata:
   name: static-network
@@ -144,7 +144,7 @@ spec:
   ipPolicy: static
 
 ---
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VirtualMachine
 metadata:
   name: static-vm
@@ -196,7 +196,7 @@ stringData:
 ### 2. Reference Secret in VM
 
 ```yaml
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VirtualMachine
 metadata:
   name: web-server-02
@@ -222,7 +222,7 @@ spec:
 Custom VM class for memory-intensive workloads:
 
 ```yaml
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMClass
 metadata:
   name: high-memory
@@ -243,7 +243,7 @@ spec:
 Configuration for Libvirt/KVM:
 
 ```yaml
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: Provider
 metadata:
   name: libvirt-local
@@ -254,7 +254,7 @@ spec:
     name: libvirt-creds
 
 ---
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMImage
 metadata:
   name: ubuntu-22-kvm
@@ -266,7 +266,7 @@ spec:
     checksumType: sha256
 
 ---
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMNetworkAttachment
 metadata:
   name: bridge-network
@@ -282,7 +282,7 @@ spec:
 Specify exact placement for the VM:
 
 ```yaml
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VirtualMachine
 metadata:
   name: placed-vm
@@ -311,7 +311,7 @@ spec:
 VM with multiple network connections:
 
 ```yaml
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMNetworkAttachment
 metadata:
   name: frontend-network
@@ -321,7 +321,7 @@ spec:
   ipPolicy: dhcp
 
 ---
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMNetworkAttachment
 metadata:
   name: backend-network
@@ -331,7 +331,7 @@ spec:
   ipPolicy: dhcp
 
 ---
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VirtualMachine
 metadata:
   name: multi-nic-vm
@@ -353,7 +353,7 @@ spec:
 ### Power Off VM
 
 ```yaml
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VirtualMachine
 metadata:
   name: web-server-01

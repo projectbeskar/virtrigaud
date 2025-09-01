@@ -127,7 +127,7 @@ func (p *Provider) buildCloneSpec(req contracts.CreateRequest, resourcePool *obj
 	configSpec := &types.VirtualMachineConfigSpec{}
 
 	// Set CPU and memory
-	cpuCount := int32(req.Class.CPU)
+	cpuCount := req.Class.CPU
 	memoryMB := int64(req.Class.MemoryMiB)
 
 	configSpec.NumCPUs = cpuCount
@@ -304,7 +304,7 @@ func (p *Provider) buildReconfigSpec(desired contracts.CreateRequest) *types.Vir
 
 	// CPU changes
 	if desired.Class.CPU > 0 {
-		spec.NumCPUs = int32(desired.Class.CPU)
+		spec.NumCPUs = desired.Class.CPU
 		hasChanges = true
 	}
 

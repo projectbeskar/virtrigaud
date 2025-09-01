@@ -295,7 +295,7 @@ func TCPCheck(addr string) Check {
 		if err != nil {
 			return fmt.Errorf("failed to connect to %s: %w", addr, err)
 		}
-		conn.Close()
+		conn.Close() //nolint:errcheck // Connection close in error path not critical
 		return nil
 	}
 }
@@ -316,7 +316,7 @@ func HTTPCheck(url string) Check {
 		if err != nil {
 			return fmt.Errorf("failed to make request to %s: %w", url, err)
 		}
-		defer resp.Body.Close()
+		defer resp.Body.Close() //nolint:errcheck // Response body close in defer is not critical
 
 		if resp.StatusCode >= 400 {
 			return fmt.Errorf("HTTP %d from %s", resp.StatusCode, url)

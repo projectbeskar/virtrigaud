@@ -26,7 +26,7 @@ Virtrigaud supports both online (hot) and offline reconfiguration depending on p
 
 ```yaml
 # Original VM with 2 CPU, 4GB RAM
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VirtualMachine
 metadata:
   name: web-server
@@ -64,7 +64,7 @@ spec:
 ### Creating Snapshots
 
 ```yaml
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMSnapshot
 metadata:
   name: pre-maintenance-backup
@@ -107,7 +107,7 @@ The controller will:
 ### Basic Cloning
 
 ```yaml
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMClone
 metadata:
   name: web-server-clone
@@ -148,7 +148,7 @@ VMSets provide declarative management of multiple VMs with rolling updates.
 ### Basic VMSet
 
 ```yaml
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMSet
 metadata:
   name: web-tier
@@ -188,7 +188,7 @@ When you update the template spec, VMSet will:
 ### Advanced Placement Rules
 
 ```yaml
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMPlacementPolicy
 metadata:
   name: production-policy
@@ -224,7 +224,7 @@ The provider will attempt to satisfy:
 ### Automated Image Import
 
 ```yaml
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMImage
 metadata:
   name: ubuntu-22-04
@@ -261,7 +261,7 @@ Different providers support different features. Query capabilities:
 
 ```yaml
 # Example capabilities response
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: Provider
 status:
   capabilities:

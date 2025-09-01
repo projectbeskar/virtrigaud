@@ -670,9 +670,6 @@ type VMImageList struct {
 	Items           []VMImage `json:"items"`
 }
 
-// Hub marks this version as the conversion hub
-func (*VMImage) Hub() {}
-
 func init() {
 	SchemeBuilder.Register(&VMImage{}, &VMImageList{})
 }

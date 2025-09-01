@@ -24,7 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	infravirtrigaudiov1alpha1 "github.com/projectbeskar/virtrigaud/api/v1alpha1"
+	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 )
 
 // VMNetworkAttachmentReconciler reconciles a VMNetworkAttachment object
@@ -57,7 +57,7 @@ func (r *VMNetworkAttachmentReconciler) Reconcile(ctx context.Context, req ctrl.
 // SetupWithManager sets up the controller with the Manager.
 func (r *VMNetworkAttachmentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&infravirtrigaudiov1alpha1.VMNetworkAttachment{}).
+		For(&infravirtrigaudiov1beta1.VMNetworkAttachment{}).
 		Named("vmnetworkattachment").
 		Complete(r)
 }

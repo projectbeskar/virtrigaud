@@ -20,6 +20,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+const (
+	// VirtualMachineFinalizer is the finalizer for VirtualMachine resources
+	VirtualMachineFinalizer = "virtualmachine.infra.virtrigaud.io/finalizer"
+)
+
 // VirtualMachineSpec defines the desired state of VirtualMachine.
 type VirtualMachineSpec struct {
 	// ProviderRef references the Provider that manages this VM
@@ -477,9 +482,6 @@ type VirtualMachineList struct {
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []VirtualMachine `json:"items"`
 }
-
-// Hub marks this version as the conversion hub
-func (*VirtualMachine) Hub() {}
 
 func init() {
 	SchemeBuilder.Register(&VirtualMachine{}, &VirtualMachineList{})

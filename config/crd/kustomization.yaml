@@ -13,17 +13,6 @@ resources:
 - bases/infra.virtrigaud.io_vmplacementpolicies.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
-patchesStrategicMerge:
-# Conversion webhooks for all CRDs
-- patches/webhook_in_virtualmachines.yaml
-- patches/webhook_in_providers.yaml
-- patches/webhook_in_vmclasses.yaml
-- patches/webhook_in_vmimages.yaml
-- patches/webhook_in_vmnetworkattachments.yaml
-- patches/webhook_in_vmsnapshots.yaml
-- patches/webhook_in_vmclones.yaml
-- patches/webhook_in_vmsets.yaml
-- patches/webhook_in_vmplacementpolicies.yaml
 # +kubebuilder:scaffold:crdkustomizewebhookpatch
 
 # The following config is for teaching kustomize how to do kustomization for CRDs.

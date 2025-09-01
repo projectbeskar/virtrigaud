@@ -21,13 +21,13 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/projectbeskar/virtrigaud/api/v1alpha1"
+	v1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 )
 
 // Factory creates a new vSphere provider instance
-func Factory(k8sClient client.Client) func(ctx context.Context, provider *v1alpha1.Provider) (contracts.Provider, error) {
-	return func(ctx context.Context, provider *v1alpha1.Provider) (contracts.Provider, error) {
+func Factory(k8sClient client.Client) func(ctx context.Context, provider *v1beta1.Provider) (contracts.Provider, error) {
+	return func(ctx context.Context, provider *v1beta1.Provider) (contracts.Provider, error) {
 		return NewProvider(ctx, k8sClient, provider)
 	}
 }

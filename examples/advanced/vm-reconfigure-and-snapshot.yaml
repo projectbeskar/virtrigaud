@@ -7,7 +7,7 @@
 
 ---
 # Placement policy for production workloads
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMPlacementPolicy
 metadata:
   name: production-policy
@@ -24,7 +24,7 @@ spec:
 
 ---
 # VM Image with preparation settings
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMImage
 metadata:
   name: ubuntu-22-server
@@ -55,7 +55,7 @@ spec:
 
 ---
 # VM Class defining resource tiers
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMClass
 metadata:
   name: web-server-small
@@ -74,7 +74,7 @@ spec:
 
 ---
 # Initial VM configuration
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VirtualMachine
 metadata:
   name: web-server-01
@@ -141,7 +141,7 @@ spec:
 
 ---
 # Create a pre-change snapshot
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMSnapshot
 metadata:
   name: web-server-01-pre-upgrade
@@ -158,7 +158,7 @@ spec:
 
 ---
 # Clone the VM for testing
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMClone
 metadata:
   name: web-server-01-test-clone
@@ -194,7 +194,7 @@ spec:
 
 ---
 # VMSet for multiple web servers with rolling updates
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMSet
 metadata:
   name: web-server-set

@@ -745,9 +745,6 @@ type VMPlacementPolicyList struct {
 	Items           []VMPlacementPolicy `json:"items"`
 }
 
-// Hub marks this version as the conversion hub
-func (*VMPlacementPolicy) Hub() {}
-
 func init() {
 	SchemeBuilder.Register(&VMPlacementPolicy{}, &VMPlacementPolicyList{})
 }

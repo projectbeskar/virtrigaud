@@ -58,16 +58,16 @@ package yourprovider
 
 import (
     "context"
-    "github.com/projectbeskar/virtrigaud/api/v1alpha1"
+    "github.com/projectbeskar/virtrigaud/api/v1beta1"
     "github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 )
 
 type Provider struct {
-    config   *v1alpha1.Provider
+    config   *v1beta1.Provider
     client   YourProviderClient
 }
 
-func NewProvider(ctx context.Context, provider *v1alpha1.Provider) (contracts.Provider, error) {
+func NewProvider(ctx context.Context, provider *v1beta1.Provider) (contracts.Provider, error) {
     // Initialize your provider client
     // Parse credentials from secret
     // Establish connection
@@ -252,7 +252,7 @@ Each provider type should support these configuration options:
 Example Provider spec:
 
 ```yaml
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: Provider
 metadata:
   name: my-provider

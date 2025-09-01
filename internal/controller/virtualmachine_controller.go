@@ -31,7 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
-	infravirtrigaudiov1alpha1 "github.com/projectbeskar/virtrigaud/api/v1alpha1"
+	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/providers/registry"
@@ -62,7 +62,7 @@ func (r *VirtualMachineReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	logger.Info("Reconciling VirtualMachine", "name", req.Name, "namespace", req.Namespace)
 
 	// Fetch the VirtualMachine instance
-	vm := &infravirtrigaudiov1alpha1.VirtualMachine{}
+	vm := &infravirtrigaudiov1beta1.VirtualMachine{}
 	if err := r.Get(ctx, req.NamespacedName, vm); err != nil {
 		if errors.IsNotFound(err) {
 			logger.Info("VirtualMachine not found, assuming deleted")
@@ -78,8 +78,8 @@ func (r *VirtualMachineReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 
 	// Add finalizer if not present
-	if !k8s.HasFinalizer(vm, infravirtrigaudiov1alpha1.VirtualMachineFinalizer) {
-		if err := k8s.AddFinalizer(ctx, r.Client, vm, infravirtrigaudiov1alpha1.VirtualMachineFinalizer); err != nil {
+	if !k8s.HasFinalizer(vm, infravirtrigaudiov1beta1.VirtualMachineFinalizer) {
+		if err := k8s.AddFinalizer(ctx, r.Client, vm, infravirtrigaudiov1beta1.VirtualMachineFinalizer); err != nil {
 			logger.Error(err, "Failed to add finalizer")
 			return ctrl.Result{}, err
 		}
@@ -92,7 +92,7 @@ func (r *VirtualMachineReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 }
 
 // reconcileVM handles the main reconciliation logic
-func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravirtrigaudiov1alpha1.VirtualMachine) (ctrl.Result, error) {
+func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
 	// Update observed generation
@@ -167,7 +167,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	}
 
 	// Update status with current state
-	vm.Status.PowerState = desc.PowerState
+	vm.Status.PowerState = infravirtrigaudiov1beta1.PowerState(desc.PowerState)
 	vm.Status.IPs = desc.IPs
 	vm.Status.ConsoleURL = desc.ConsoleURL
 	vm.Status.Provider = desc.ProviderRaw
@@ -175,12 +175,12 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	// Check desired power state
 	desiredPowerState := vm.Spec.PowerState
 	if desiredPowerState == "" {
-		desiredPowerState = "On"
+		desiredPowerState = infravirtrigaudiov1beta1.PowerStateOn
 	}
 
-	if desc.PowerState != desiredPowerState {
+	if desc.PowerState != string(desiredPowerState) {
 		logger.Info("Power state mismatch, adjusting", "current", desc.PowerState, "desired", desiredPowerState)
-		return r.adjustPowerState(ctx, vm, providerInstance, desiredPowerState)
+		return r.adjustPowerState(ctx, vm, providerInstance, string(desiredPowerState))
 	}
 
 	// VM is ready
@@ -192,16 +192,16 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 }
 
 // handleDeletion handles VM deletion
-func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infravirtrigaudiov1alpha1.VirtualMachine) (ctrl.Result, error) {
+func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	if !k8s.HasFinalizer(vm, infravirtrigaudiov1alpha1.VirtualMachineFinalizer) {
+	if !k8s.HasFinalizer(vm, infravirtrigaudiov1beta1.VirtualMachineFinalizer) {
 		return ctrl.Result{}, nil
 	}
 
 	// Get provider if we have a provider ref and VM ID
 	if vm.Status.ID != "" && vm.Spec.ProviderRef.Name != "" {
-		provider := &infravirtrigaudiov1alpha1.Provider{}
+		provider := &infravirtrigaudiov1beta1.Provider{}
 		providerKey := types.NamespacedName{
 			Name:      vm.Spec.ProviderRef.Name,
 			Namespace: vm.Namespace,
@@ -236,7 +236,7 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 	}
 
 	// Remove finalizer
-	if err := k8s.RemoveFinalizer(ctx, r.Client, vm, infravirtrigaudiov1alpha1.VirtualMachineFinalizer); err != nil {
+	if err := k8s.RemoveFinalizer(ctx, r.Client, vm, infravirtrigaudiov1beta1.VirtualMachineFinalizer); err != nil {
 		logger.Error(err, "Failed to remove finalizer")
 		return ctrl.Result{}, err
 	}
@@ -246,15 +246,15 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 }
 
 // getDependencies fetches all required dependencies for the VM
-func (r *VirtualMachineReconciler) getDependencies(ctx context.Context, vm *infravirtrigaudiov1alpha1.VirtualMachine) (
-	*infravirtrigaudiov1alpha1.Provider,
-	*infravirtrigaudiov1alpha1.VMClass,
-	*infravirtrigaudiov1alpha1.VMImage,
-	[]*infravirtrigaudiov1alpha1.VMNetworkAttachment,
+func (r *VirtualMachineReconciler) getDependencies(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine) (
+	*infravirtrigaudiov1beta1.Provider,
+	*infravirtrigaudiov1beta1.VMClass,
+	*infravirtrigaudiov1beta1.VMImage,
+	[]*infravirtrigaudiov1beta1.VMNetworkAttachment,
 	error,
 ) {
 	// Get Provider
-	provider := &infravirtrigaudiov1alpha1.Provider{}
+	provider := &infravirtrigaudiov1beta1.Provider{}
 	providerKey := types.NamespacedName{
 		Name:      vm.Spec.ProviderRef.Name,
 		Namespace: vm.Namespace,
@@ -267,7 +267,7 @@ func (r *VirtualMachineReconciler) getDependencies(ctx context.Context, vm *infr
 	}
 
 	// Get VMClass
-	vmClass := &infravirtrigaudiov1alpha1.VMClass{}
+	vmClass := &infravirtrigaudiov1beta1.VMClass{}
 	classKey := types.NamespacedName{
 		Name:      vm.Spec.ClassRef.Name,
 		Namespace: vm.Namespace,
@@ -280,7 +280,7 @@ func (r *VirtualMachineReconciler) getDependencies(ctx context.Context, vm *infr
 	}
 
 	// Get VMImage
-	vmImage := &infravirtrigaudiov1alpha1.VMImage{}
+	vmImage := &infravirtrigaudiov1beta1.VMImage{}
 	imageKey := types.NamespacedName{
 		Name:      vm.Spec.ImageRef.Name,
 		Namespace: vm.Namespace,
@@ -293,9 +293,9 @@ func (r *VirtualMachineReconciler) getDependencies(ctx context.Context, vm *infr
 	}
 
 	// Get VMNetworkAttachments
-	var networks []*infravirtrigaudiov1alpha1.VMNetworkAttachment
+	var networks []*infravirtrigaudiov1beta1.VMNetworkAttachment
 	for _, netRef := range vm.Spec.Networks {
-		network := &infravirtrigaudiov1alpha1.VMNetworkAttachment{}
+		network := &infravirtrigaudiov1beta1.VMNetworkAttachment{}
 		netKey := types.NamespacedName{
 			Name:      netRef.Name,
 			Namespace: vm.Namespace,
@@ -312,11 +312,11 @@ func (r *VirtualMachineReconciler) getDependencies(ctx context.Context, vm *infr
 // createVM creates a new VM using the provider
 func (r *VirtualMachineReconciler) createVM(
 	ctx context.Context,
-	vm *infravirtrigaudiov1alpha1.VirtualMachine,
+	vm *infravirtrigaudiov1beta1.VirtualMachine,
 	provider contracts.Provider,
-	vmClass *infravirtrigaudiov1alpha1.VMClass,
-	vmImage *infravirtrigaudiov1alpha1.VMImage,
-	networks []*infravirtrigaudiov1alpha1.VMNetworkAttachment,
+	vmClass *infravirtrigaudiov1beta1.VMClass,
+	vmImage *infravirtrigaudiov1beta1.VMImage,
+	networks []*infravirtrigaudiov1beta1.VMNetworkAttachment,
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -348,7 +348,7 @@ func (r *VirtualMachineReconciler) createVM(
 // adjustPowerState adjusts the VM power state
 func (r *VirtualMachineReconciler) adjustPowerState(
 	ctx context.Context,
-	vm *infravirtrigaudiov1alpha1.VirtualMachine,
+	vm *infravirtrigaudiov1beta1.VirtualMachine,
 	provider contracts.Provider,
 	desiredState string,
 ) (ctrl.Result, error) {
@@ -384,24 +384,24 @@ func (r *VirtualMachineReconciler) adjustPowerState(
 
 // buildCreateRequest builds a provider create request from VM spec
 func (r *VirtualMachineReconciler) buildCreateRequest(
-	vm *infravirtrigaudiov1alpha1.VirtualMachine,
-	vmClass *infravirtrigaudiov1alpha1.VMClass,
-	vmImage *infravirtrigaudiov1alpha1.VMImage,
-	networks []*infravirtrigaudiov1alpha1.VMNetworkAttachment,
+	vm *infravirtrigaudiov1beta1.VirtualMachine,
+	vmClass *infravirtrigaudiov1beta1.VMClass,
+	vmImage *infravirtrigaudiov1beta1.VMImage,
+	networks []*infravirtrigaudiov1beta1.VMNetworkAttachment,
 ) contracts.CreateRequest {
 	// Convert VMClass
 	class := contracts.VMClass{
 		CPU:              vmClass.Spec.CPU,
-		MemoryMiB:        vmClass.Spec.MemoryMiB,
-		Firmware:         vmClass.Spec.Firmware,
-		GuestToolsPolicy: vmClass.Spec.GuestToolsPolicy,
+		MemoryMiB:        int32(vmClass.Spec.Memory.Value() / (1024 * 1024)), // Convert bytes to MiB
+		Firmware:         string(vmClass.Spec.Firmware),
+		GuestToolsPolicy: string(vmClass.Spec.GuestToolsPolicy),
 		ExtraConfig:      vmClass.Spec.ExtraConfig,
 	}
 
 	if vmClass.Spec.DiskDefaults != nil {
 		class.DiskDefaults = &contracts.DiskDefaults{
-			Type:    vmClass.Spec.DiskDefaults.Type,
-			SizeGiB: vmClass.Spec.DiskDefaults.SizeGiB,
+			Type:    string(vmClass.Spec.DiskDefaults.Type),
+			SizeGiB: int32(vmClass.Spec.DiskDefaults.Size.Value() / (1024 * 1024 * 1024)), // Convert bytes to GiB
 		}
 	}
 
@@ -411,14 +411,14 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 		ChecksumType: "sha256",
 	}
 
-	if vmImage.Spec.VSphere != nil {
-		image.TemplateName = vmImage.Spec.VSphere.TemplateName
-		image.URL = vmImage.Spec.VSphere.OVAURL
-		if vmImage.Spec.VSphere.Checksum != "" {
-			image.Checksum = vmImage.Spec.VSphere.Checksum
+	if vmImage.Spec.Source.VSphere != nil {
+		image.TemplateName = vmImage.Spec.Source.VSphere.TemplateName
+		image.URL = vmImage.Spec.Source.VSphere.OVAURL
+		if vmImage.Spec.Source.VSphere.Checksum != "" {
+			image.Checksum = vmImage.Spec.Source.VSphere.Checksum
 		}
-		if vmImage.Spec.VSphere.ChecksumType != "" {
-			image.ChecksumType = vmImage.Spec.VSphere.ChecksumType
+		if vmImage.Spec.Source.VSphere.ChecksumType != "" {
+			image.ChecksumType = string(vmImage.Spec.Source.VSphere.ChecksumType)
 		}
 	}
 
@@ -428,26 +428,26 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 		if i < len(networks) {
 			net := networks[i]
 			attachment := contracts.NetworkAttachment{
-				Name:     net.Name,
-				IPPolicy: netRef.IPPolicy,
-				StaticIP: netRef.StaticIP,
+				Name:     netRef.Name,
+				StaticIP: netRef.IPAddress,
 			}
 
-			if net.Spec.VSphere != nil {
-				attachment.Portgroup = net.Spec.VSphere.Portgroup
-				attachment.NetworkName = net.Spec.VSphere.NetworkName
-				attachment.VLAN = net.Spec.VSphere.VLAN
+			if net.Spec.Network.VSphere != nil {
+				attachment.NetworkName = net.Spec.Network.VSphere.Portgroup
+				if net.Spec.Network.VSphere.VLAN != nil && net.Spec.Network.VSphere.VLAN.VlanID != nil {
+					attachment.VLAN = *net.Spec.Network.VSphere.VLAN.VlanID
+				}
 			}
 
-			if net.Spec.Libvirt != nil {
-				attachment.NetworkName = net.Spec.Libvirt.NetworkName
-				attachment.Bridge = net.Spec.Libvirt.Bridge
-				attachment.Model = net.Spec.Libvirt.Model
+			if net.Spec.Network.Libvirt != nil {
+				attachment.NetworkName = net.Spec.Network.Libvirt.NetworkName
+				if net.Spec.Network.Libvirt.Bridge != nil {
+					attachment.Bridge = net.Spec.Network.Libvirt.Bridge.Name
+				}
+				attachment.Model = net.Spec.Network.Libvirt.Model
 			}
 
-			if net.Spec.MacAddress != "" {
-				attachment.MacAddress = net.Spec.MacAddress
-			}
+			// MacAddress is not part of NetworkConfig in v1beta1, skip for now
 
 			networkAttachments = append(networkAttachments, attachment)
 		}
@@ -498,14 +498,14 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 }
 
 // updateStatus updates the VM status
-func (r *VirtualMachineReconciler) updateStatus(ctx context.Context, vm *infravirtrigaudiov1alpha1.VirtualMachine) {
+func (r *VirtualMachineReconciler) updateStatus(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine) {
 	if err := r.Status().Update(ctx, vm); err != nil {
 		log.FromContext(ctx).Error(err, "Failed to update VirtualMachine status")
 	}
 }
 
 // getProviderInstance resolves a provider to either a remote or in-process implementation
-func (r *VirtualMachineReconciler) getProviderInstance(ctx context.Context, provider *infravirtrigaudiov1alpha1.Provider) (contracts.Provider, error) {
+func (r *VirtualMachineReconciler) getProviderInstance(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) (contracts.Provider, error) {
 	// Try remote resolver first
 	if r.RemoteResolver != nil {
 		if r.RemoteResolver.IsRemoteProvider(provider) {
@@ -524,7 +524,7 @@ func (r *VirtualMachineReconciler) getProviderInstance(ctx context.Context, prov
 // SetupWithManager sets up the controller with the Manager.
 func (r *VirtualMachineReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&infravirtrigaudiov1alpha1.VirtualMachine{}).
+		For(&infravirtrigaudiov1beta1.VirtualMachine{}).
 		WithEventFilter(predicate.Funcs{
 			DeleteFunc: func(e event.DeleteEvent) bool {
 				// Handle deletion in Reconcile through finalizers

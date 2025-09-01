@@ -6,7 +6,7 @@
 
 ---
 # Create a backup snapshot before maintenance
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMSnapshot
 metadata:
   name: web-server-01-maintenance-backup
@@ -23,7 +23,7 @@ spec:
 
 ---
 # Create a snapshot before applying updates
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMSnapshot
 metadata:
   name: web-server-01-pre-update
@@ -40,7 +40,7 @@ spec:
 
 ---
 # Weekly backup snapshot (would be created by a CronJob)
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMSnapshot
 metadata:
   name: web-server-01-weekly-backup
@@ -61,7 +61,7 @@ spec:
 ---
 # To revert to a snapshot, patch the VM with a snapshot reference:
 # 
-# apiVersion: infra.virtrigaud.io/v1alpha1
+# apiVersion: infra.virtrigaud.io/v1beta1
 # kind: VirtualMachine
 # metadata:
 #   name: web-server-01

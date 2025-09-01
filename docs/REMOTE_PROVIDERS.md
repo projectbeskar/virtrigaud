@@ -65,7 +65,7 @@ Two specialized images are built:
 ### Runtime Specification
 
 ```yaml
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: Provider
 spec:
   runtime:
@@ -227,7 +227,7 @@ Existing Provider CRs without `runtime` specification continue to work in InProc
 
 ```yaml
 # This continues to work unchanged
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: Provider
 spec:
   type: vsphere

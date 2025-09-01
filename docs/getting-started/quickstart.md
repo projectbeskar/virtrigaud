@@ -14,7 +14,7 @@ This guide will get you up and running with Virtrigaud in 15 minutes using both 
 
 **Default API**: v1beta1 - The recommended stable API for all new deployments.
 
-**Legacy API**: v1alpha1 - Served for compatibility but deprecated. See the [upgrade guide](../upgrade/) for migration instructions.
+**Legacy API**: v1beta1 - Served for compatibility but deprecated. See the [upgrade guide](../upgrade/) for migration instructions.
 
 All resources support seamless conversion between API versions via webhooks.
 
@@ -69,7 +69,7 @@ kubectl get pods -n virtrigaud-system
 # Check CRDs are installed
 kubectl get crds | grep virtrigaud
 
-# Verify API conversion is working (v1alpha1 <-> v1beta1)
+# Verify API conversion is working (v1beta1 <-> v1beta1)
 kubectl get crd virtualmachines.infra.virtrigaud.io -o yaml | yq '.spec.conversion'
 
 # Check manager logs
@@ -94,7 +94,7 @@ kubectl create secret generic vsphere-credentials \
 Create a vSphere provider:
 
 ```yaml
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: Provider
 metadata:
   name: vsphere-prod
@@ -125,7 +125,7 @@ kubectl create secret generic libvirt-credentials \
 Create a Libvirt provider:
 
 ```yaml
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: Provider
 metadata:
   name: libvirt-lab
@@ -151,7 +151,7 @@ kubectl apply -f provider.yaml
 Define resource templates for your VMs:
 
 ```yaml
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMClass
 metadata:
   name: small
@@ -179,7 +179,7 @@ Define the base image for your VMs:
 ### vSphere Image (OVA)
 
 ```yaml
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMImage
 metadata:
   name: ubuntu-20-04
@@ -199,7 +199,7 @@ spec:
 ### Libvirt Image (qcow2)
 
 ```yaml
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMImage
 metadata:
   name: ubuntu-20-04
@@ -222,7 +222,7 @@ kubectl apply -f vmimage.yaml
 ## Step 6: Create Your First VM
 
 ```yaml
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VirtualMachine
 metadata:
   name: my-first-vm
@@ -295,7 +295,7 @@ ssh ubuntu@<vm-ip>
 ### Create a Snapshot
 
 ```yaml
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMSnapshot
 metadata:
   name: my-vm-snapshot
@@ -310,7 +310,7 @@ spec:
 ### Clone the VM
 
 ```yaml
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMClone
 metadata:
   name: my-vm-clone
@@ -329,7 +329,7 @@ spec:
 ### Scale with VMSet
 
 ```yaml
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMSet
 metadata:
   name: web-servers

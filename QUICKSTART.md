@@ -57,7 +57,7 @@ kubectl create secret generic vsphere-creds \
 Create a Provider resource pointing to your vCenter:
 
 ```yaml
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: Provider
 metadata:
   name: my-vsphere
@@ -82,7 +82,7 @@ kubectl apply -f provider.yaml
 Create a VMClass defining the resource allocation:
 
 ```yaml
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMClass
 metadata:
   name: small
@@ -100,7 +100,7 @@ spec:
 Create a VMImage referencing your vSphere template:
 
 ```yaml
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMImage
 metadata:
   name: ubuntu-template
@@ -114,7 +114,7 @@ spec:
 Create a VMNetworkAttachment for VM networking:
 
 ```yaml
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMNetworkAttachment
 metadata:
   name: vm-network
@@ -129,7 +129,7 @@ spec:
 Finally, create your VM:
 
 ```yaml
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VirtualMachine
 metadata:
   name: my-first-vm
@@ -206,7 +206,7 @@ kubectl create secret generic libvirt-creds \
 Create a Provider resource pointing to your Libvirt daemon:
 
 ```yaml
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: Provider
 metadata:
   name: my-libvirt
@@ -223,7 +223,7 @@ spec:
 ### Step 3: Define VM Class
 
 ```yaml
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMClass
 metadata:
   name: kvm-small
@@ -241,7 +241,7 @@ spec:
 Create a VMImage referencing your qcow2 image:
 
 ```yaml
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMImage
 metadata:
   name: ubuntu-kvm
@@ -254,7 +254,7 @@ spec:
 ### Step 5: Define Network
 
 ```yaml
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMNetworkAttachment
 metadata:
   name: kvm-network
@@ -268,7 +268,7 @@ spec:
 ### Step 6: Create the Virtual Machine
 
 ```yaml
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VirtualMachine
 metadata:
   name: my-kvm-vm

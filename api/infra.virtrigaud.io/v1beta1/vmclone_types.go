@@ -691,9 +691,6 @@ type VMCloneList struct {
 	Items           []VMClone `json:"items"`
 }
 
-// Hub marks this version as the conversion hub
-func (*VMClone) Hub() {}
-
 func init() {
 	SchemeBuilder.Register(&VMClone{}, &VMCloneList{})
 }

@@ -24,7 +24,7 @@ type Convertible interface {
 }
 
 // RoundTripTest performs round-trip conversion tests
-func RoundTripTest(t *testing.T, original ConvertibleObject, hub ConvertibleObject) {
+func RoundTripTest(t *testing.T, original, hub ConvertibleObject) {
 	t.Helper()
 
 	// Test: Original -> Hub -> Original (alpha -> beta -> alpha)
@@ -38,12 +38,12 @@ func RoundTripTest(t *testing.T, original ConvertibleObject, hub ConvertibleObje
 	})
 }
 
-func testOriginalToHubToOriginal(t *testing.T, original ConvertibleObject, hub ConvertibleObject) {
+func testOriginalToHubToOriginal(t *testing.T, original, hub ConvertibleObject) {
 	t.Helper()
 
 	// Create deep copies to avoid mutation
-	originalCopy := original.DeepCopyObject().(ConvertibleObject)
-	hubInstance := hub.DeepCopyObject().(ConvertibleObject)
+	originalCopy := original.DeepCopyObject().(ConvertibleObject) //nolint:errcheck // Test utility type assertion
+	hubInstance := hub.DeepCopyObject().(ConvertibleObject)       //nolint:errcheck // Test utility type assertion
 
 	// Convert: Original -> Hub
 	convertible, ok := originalCopy.(Convertible)
@@ -61,7 +61,7 @@ func testOriginalToHubToOriginal(t *testing.T, original ConvertibleObject, hub C
 	}
 
 	// Convert: Hub -> Original
-	finalCopy := original.DeepCopyObject().(ConvertibleObject)
+	finalCopy := original.DeepCopyObject().(ConvertibleObject) //nolint:errcheck // Test utility type assertion
 	finalConvertible, ok := finalCopy.(Convertible)
 	if !ok {
 		t.Fatalf("Final type %T does not implement Convertible", finalCopy)
@@ -77,12 +77,12 @@ func testOriginalToHubToOriginal(t *testing.T, original ConvertibleObject, hub C
 	}
 }
 
-func testHubToOriginalToHub(t *testing.T, hub ConvertibleObject, original ConvertibleObject) {
+func testHubToOriginalToHub(t *testing.T, hub, original ConvertibleObject) {
 	t.Helper()
 
 	// Create deep copies to avoid mutation
-	hubCopy := hub.DeepCopyObject().(ConvertibleObject)
-	originalInstance := original.DeepCopyObject().(ConvertibleObject)
+	hubCopy := hub.DeepCopyObject().(ConvertibleObject)               //nolint:errcheck // Test utility type assertion
+	originalInstance := original.DeepCopyObject().(ConvertibleObject) //nolint:errcheck // Test utility type assertion
 
 	// Convert: Hub -> Original
 	originalConvertible, ok := originalInstance.(Convertible)
@@ -100,7 +100,7 @@ func testHubToOriginalToHub(t *testing.T, hub ConvertibleObject, original Conver
 	}
 
 	// Convert: Original -> Hub
-	finalCopy := hub.DeepCopyObject().(ConvertibleObject)
+	finalCopy := hub.DeepCopyObject().(ConvertibleObject) //nolint:errcheck // Test utility type assertion
 	finalHubConvertible, ok := finalCopy.(conversion.Hub)
 	if !ok {
 		t.Fatalf("Final hub type %T does not implement conversion.Hub", finalCopy)
@@ -183,11 +183,11 @@ func getFieldName(obj interface{}) string {
 }
 
 // ExpectConversionError tests that conversion fails with expected error
-func ExpectConversionError(t *testing.T, original ConvertibleObject, hub ConvertibleObject, expectedErrorSubstring string) {
+func ExpectConversionError(t *testing.T, original, hub ConvertibleObject, expectedErrorSubstring string) {
 	t.Helper()
 
-	originalCopy := original.DeepCopyObject().(ConvertibleObject)
-	hubInstance := hub.DeepCopyObject().(ConvertibleObject)
+	originalCopy := original.DeepCopyObject().(ConvertibleObject) //nolint:errcheck // Test utility type assertion
+	hubInstance := hub.DeepCopyObject().(ConvertibleObject)       //nolint:errcheck // Test utility type assertion
 
 	convertible, ok := originalCopy.(Convertible)
 	if !ok {

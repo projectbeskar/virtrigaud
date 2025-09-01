@@ -92,7 +92,7 @@ func runInit(opts *initOptions) error {
 
 	// Create target directory
 	targetDir := filepath.Join(opts.outputDir, "providers", opts.providerName)
-	if err := os.MkdirAll(targetDir, 0755); err != nil {
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
 		return fmt.Errorf("failed to create directory %s: %w", targetDir, err)
 	}
 

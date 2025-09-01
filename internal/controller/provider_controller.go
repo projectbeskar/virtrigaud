@@ -34,7 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	infravirtrigaudiov1alpha1 "github.com/projectbeskar/virtrigaud/api/v1alpha1"
+	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
 	"github.com/projectbeskar/virtrigaud/internal/util"
 )
@@ -57,7 +57,7 @@ func (r *ProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	logger := log.FromContext(ctx)
 
 	// Fetch the Provider
-	var provider infravirtrigaudiov1alpha1.Provider
+	var provider infravirtrigaudiov1beta1.Provider
 	if err := r.Get(ctx, req.NamespacedName, &provider); err != nil {
 		if apierrors.IsNotFound(err) {
 			logger.Info("Provider not found, may have been deleted")
@@ -74,11 +74,11 @@ func (r *ProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	// Initialize runtime status if needed
 	if provider.Status.Runtime == nil {
-		provider.Status.Runtime = &infravirtrigaudiov1alpha1.ProviderRuntimeStatus{}
+		provider.Status.Runtime = &infravirtrigaudiov1beta1.ProviderRuntimeStatus{}
 	}
 
 	// Determine runtime mode
-	runtimeMode := infravirtrigaudiov1alpha1.RuntimeModeInProcess
+	runtimeMode := infravirtrigaudiov1beta1.RuntimeModeInProcess
 	if provider.Spec.Runtime != nil && provider.Spec.Runtime.Mode != "" {
 		runtimeMode = provider.Spec.Runtime.Mode
 	}
@@ -90,9 +90,9 @@ func (r *ProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	var err error
 
 	switch runtimeMode {
-	case infravirtrigaudiov1alpha1.RuntimeModeRemote:
+	case infravirtrigaudiov1beta1.RuntimeModeRemote:
 		result, err = r.reconcileRemoteRuntime(ctx, &provider)
-	case infravirtrigaudiov1alpha1.RuntimeModeInProcess:
+	case infravirtrigaudiov1beta1.RuntimeModeInProcess:
 		result, err = r.reconcileInProcessRuntime(ctx, &provider)
 	default:
 		err = fmt.Errorf("unsupported runtime mode: %s", runtimeMode)
@@ -112,10 +112,10 @@ func (r *ProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 }
 
 // handleDeletion cleans up remote runtime resources when Provider is deleted
-func (r *ProviderReconciler) handleDeletion(ctx context.Context, provider *infravirtrigaudiov1alpha1.Provider) (ctrl.Result, error) {
+func (r *ProviderReconciler) handleDeletion(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	if provider.Spec.Runtime != nil && provider.Spec.Runtime.Mode == infravirtrigaudiov1alpha1.RuntimeModeRemote {
+	if provider.Spec.Runtime != nil && provider.Spec.Runtime.Mode == infravirtrigaudiov1beta1.RuntimeModeRemote {
 		// Clean up deployment and service
 		if err := r.cleanupRemoteRuntime(ctx, provider); err != nil {
 			logger.Error(err, "Failed to cleanup remote runtime resources")
@@ -127,7 +127,7 @@ func (r *ProviderReconciler) handleDeletion(ctx context.Context, provider *infra
 }
 
 // reconcileInProcessRuntime handles in-process providers (existing behavior)
-func (r *ProviderReconciler) reconcileInProcessRuntime(ctx context.Context, provider *infravirtrigaudiov1alpha1.Provider) (ctrl.Result, error) {
+func (r *ProviderReconciler) reconcileInProcessRuntime(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) (ctrl.Result, error) {
 	// For in-process providers, just update status to indicate they're ready
 	provider.Status.Runtime.Phase = "Ready"
 	provider.Status.Runtime.Message = "In-process provider ready"
@@ -142,7 +142,7 @@ func (r *ProviderReconciler) reconcileInProcessRuntime(ctx context.Context, prov
 }
 
 // reconcileRemoteRuntime manages remote provider deployments and services
-func (r *ProviderReconciler) reconcileRemoteRuntime(ctx context.Context, provider *infravirtrigaudiov1alpha1.Provider) (ctrl.Result, error) {
+func (r *ProviderReconciler) reconcileRemoteRuntime(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
 	// Validate remote runtime configuration
@@ -208,7 +208,7 @@ func (r *ProviderReconciler) reconcileRemoteRuntime(ctx context.Context, provide
 }
 
 // validateRemoteRuntimeSpec validates the remote runtime configuration
-func (r *ProviderReconciler) validateRemoteRuntimeSpec(provider *infravirtrigaudiov1alpha1.Provider) error {
+func (r *ProviderReconciler) validateRemoteRuntimeSpec(provider *infravirtrigaudiov1beta1.Provider) error {
 	if provider.Spec.Runtime == nil {
 		return fmt.Errorf("runtime configuration is required for remote mode")
 	}
@@ -221,17 +221,17 @@ func (r *ProviderReconciler) validateRemoteRuntimeSpec(provider *infravirtrigaud
 }
 
 // getDeploymentName generates a unique deployment name for the provider
-func (r *ProviderReconciler) getDeploymentName(provider *infravirtrigaudiov1alpha1.Provider) string {
+func (r *ProviderReconciler) getDeploymentName(provider *infravirtrigaudiov1beta1.Provider) string {
 	return fmt.Sprintf("virtrigaud-provider-%s-%s", provider.Namespace, provider.Name)
 }
 
 // getServiceName generates a unique service name for the provider
-func (r *ProviderReconciler) getServiceName(provider *infravirtrigaudiov1alpha1.Provider) string {
+func (r *ProviderReconciler) getServiceName(provider *infravirtrigaudiov1beta1.Provider) string {
 	return fmt.Sprintf("virtrigaud-provider-%s-%s", provider.Namespace, provider.Name)
 }
 
 // reconcileService creates or updates the service for remote provider
-func (r *ProviderReconciler) reconcileService(ctx context.Context, provider *infravirtrigaudiov1alpha1.Provider, serviceName string) (*corev1.Service, error) {
+func (r *ProviderReconciler) reconcileService(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider, serviceName string) (*corev1.Service, error) {
 	port := int32(9443)
 	if provider.Spec.Runtime.Service != nil && provider.Spec.Runtime.Service.Port != 0 {
 		port = provider.Spec.Runtime.Service.Port
@@ -246,7 +246,7 @@ func (r *ProviderReconciler) reconcileService(ctx context.Context, provider *inf
 				"app.kubernetes.io/instance":   provider.Name,
 				"app.kubernetes.io/component":  "provider",
 				"app.kubernetes.io/managed-by": "virtrigaud",
-				"virtrigaud.io/provider-type":  provider.Spec.Type,
+				"virtrigaud.io/provider-type":  string(provider.Spec.Type),
 			},
 		},
 		Spec: corev1.ServiceSpec{
@@ -302,7 +302,7 @@ func (r *ProviderReconciler) reconcileService(ctx context.Context, provider *inf
 }
 
 // reconcileDeployment creates or updates the deployment for remote provider
-func (r *ProviderReconciler) reconcileDeployment(ctx context.Context, provider *infravirtrigaudiov1alpha1.Provider, deploymentName string) (*appsv1.Deployment, error) {
+func (r *ProviderReconciler) reconcileDeployment(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider, deploymentName string) (*appsv1.Deployment, error) {
 	// Default values
 	replicas := int32(1)
 	if provider.Spec.Runtime.Replicas != nil {
@@ -325,7 +325,7 @@ func (r *ProviderReconciler) reconcileDeployment(ctx context.Context, provider *
 				"app.kubernetes.io/instance":   provider.Name,
 				"app.kubernetes.io/component":  "provider",
 				"app.kubernetes.io/managed-by": "virtrigaud",
-				"virtrigaud.io/provider-type":  provider.Spec.Type,
+				"virtrigaud.io/provider-type":  string(provider.Spec.Type),
 			},
 		},
 		Spec: appsv1.DeploymentSpec{
@@ -343,7 +343,7 @@ func (r *ProviderReconciler) reconcileDeployment(ctx context.Context, provider *
 						"app.kubernetes.io/instance":   provider.Name,
 						"app.kubernetes.io/component":  "provider",
 						"app.kubernetes.io/managed-by": "virtrigaud",
-						"virtrigaud.io/provider-type":  provider.Spec.Type,
+						"virtrigaud.io/provider-type":  string(provider.Spec.Type),
 					},
 				},
 				Spec: corev1.PodSpec{
@@ -389,12 +389,9 @@ func (r *ProviderReconciler) reconcileDeployment(ctx context.Context, provider *
 }
 
 // buildProviderContainer builds the container spec for the provider
-func (r *ProviderReconciler) buildProviderContainer(provider *infravirtrigaudiov1alpha1.Provider) (*corev1.Container, error) {
-	// Determine image and command
+func (r *ProviderReconciler) buildProviderContainer(provider *infravirtrigaudiov1beta1.Provider) (*corev1.Container, error) {
+	// Use the image as-is since Runtime.Version field was removed
 	image := provider.Spec.Runtime.Image
-	if provider.Spec.Runtime.Version != "" {
-		image = fmt.Sprintf("%s:%s", provider.Spec.Runtime.Image, provider.Spec.Runtime.Version)
-	}
 
 	// Default resource requirements
 	resources := corev1.ResourceRequirements{
@@ -416,7 +413,7 @@ func (r *ProviderReconciler) buildProviderContainer(provider *infravirtrigaudiov
 	env := []corev1.EnvVar{
 		{
 			Name:  "PROVIDER_TYPE",
-			Value: provider.Spec.Type,
+			Value: string(provider.Spec.Type),
 		},
 		{
 			Name:  "PROVIDER_ENDPOINT",
@@ -441,7 +438,7 @@ func (r *ProviderReconciler) buildProviderContainer(provider *infravirtrigaudiov
 	}
 
 	// Add TLS environment variable
-	tlsEnabled := provider.Spec.Runtime.TLS != nil && provider.Spec.Runtime.TLS.Enabled
+	tlsEnabled := false // TLS configuration removed in v1beta1
 	env = append(env, corev1.EnvVar{
 		Name:  "TLS_ENABLED",
 		Value: fmt.Sprintf("%t", tlsEnabled),
@@ -499,7 +496,7 @@ func (r *ProviderReconciler) buildProviderContainer(provider *infravirtrigaudiov
 		Args: []string{
 			fmt.Sprintf("--grpc-addr=:%d", grpcPort),
 			"--metrics-addr=:8080",
-			fmt.Sprintf("--provider-type=%s", provider.Spec.Type),
+			fmt.Sprintf("--provider-type=%s", string(provider.Spec.Type)),
 			fmt.Sprintf("--provider-endpoint=%s", provider.Spec.Endpoint),
 			fmt.Sprintf("--tls-enabled=%t", tlsEnabled),
 		},
@@ -546,7 +543,7 @@ func (r *ProviderReconciler) buildProviderContainer(provider *infravirtrigaudiov
 }
 
 // buildPodVolumes builds the volumes for the provider pod
-func (r *ProviderReconciler) buildPodVolumes(provider *infravirtrigaudiov1alpha1.Provider) []corev1.Volume {
+func (r *ProviderReconciler) buildPodVolumes(provider *infravirtrigaudiov1beta1.Provider) []corev1.Volume {
 	var volumes []corev1.Volume
 
 	// Add credentials volume
@@ -560,12 +557,13 @@ func (r *ProviderReconciler) buildPodVolumes(provider *infravirtrigaudiov1alpha1
 	})
 
 	// Add TLS volume if enabled
-	if provider.Spec.Runtime.TLS != nil && provider.Spec.Runtime.TLS.Enabled {
+	// TLS configuration removed in v1beta1
+	if false {
 		volumes = append(volumes, corev1.Volume{
 			Name: "provider-tls",
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
-					SecretName: provider.Spec.Runtime.TLS.SecretRef.Name,
+					SecretName: "tls-secret",
 				},
 			},
 		})
@@ -575,7 +573,7 @@ func (r *ProviderReconciler) buildPodVolumes(provider *infravirtrigaudiov1alpha1
 }
 
 // cleanupRemoteRuntime cleans up deployment and service for remote providers
-func (r *ProviderReconciler) cleanupRemoteRuntime(ctx context.Context, provider *infravirtrigaudiov1alpha1.Provider) error {
+func (r *ProviderReconciler) cleanupRemoteRuntime(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) error {
 	deploymentName := r.getDeploymentName(provider)
 	serviceName := r.getServiceName(provider)
 
@@ -607,7 +605,7 @@ func (r *ProviderReconciler) cleanupRemoteRuntime(ctx context.Context, provider 
 // SetupWithManager sets up the controller with the Manager.
 func (r *ProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&infravirtrigaudiov1alpha1.Provider{}).
+		For(&infravirtrigaudiov1beta1.Provider{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
 		Named("provider").

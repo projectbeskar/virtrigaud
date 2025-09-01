@@ -69,7 +69,7 @@ func CalculateBackoff(config BackoffConfig, attempt int) time.Duration {
 }
 
 // IsRetryableAfter returns true if the operation should be retried after the given duration
-func IsRetryableAfter(attempt int, maxAttempts int, config BackoffConfig) (bool, time.Duration) {
+func IsRetryableAfter(attempt, maxAttempts int, config BackoffConfig) (bool, time.Duration) {
 	if maxAttempts > 0 && attempt >= maxAttempts {
 		return false, 0
 	}

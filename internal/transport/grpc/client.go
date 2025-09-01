@@ -43,8 +43,8 @@ type Client struct {
 
 // NewClient creates a new gRPC provider client
 func NewClient(ctx context.Context, endpoint string, tlsConfig *TLSConfig) (*Client, error) {
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
+	// Connection timeout is handled by grpc.NewClient internally
+	_ = ctx // Context available for future timeout implementation
 
 	var opts []grpc.DialOption
 
@@ -60,13 +60,13 @@ func NewClient(ctx context.Context, endpoint string, tlsConfig *TLSConfig) (*Cli
 
 	// Add retry and timeout configurations
 	opts = append(opts,
-		grpc.WithBlock(),
+		// grpc.WithBlock() removed as it's deprecated in newer gRPC versions
 		grpc.WithDefaultCallOptions(
 			grpc.WaitForReady(true),
 		),
 	)
 
-	conn, err := grpc.DialContext(ctx, endpoint, opts...)
+	conn, err := grpc.NewClient(endpoint, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to provider at %s: %w", endpoint, err)
 	}

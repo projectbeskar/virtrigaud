@@ -34,7 +34,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 
-	infrav1alpha1 "github.com/projectbeskar/virtrigaud/api/v1alpha1"
+	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
+	"github.com/projectbeskar/virtrigaud/internal/util/closer"
 )
 
 var (
@@ -182,7 +183,7 @@ func runLoadGen(cmd *cobra.Command, args []string) error {
 	}
 
 	// Create output directory
-	if err := os.MkdirAll(outputDir, 0755); err != nil {
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		return fmt.Errorf("failed to create output directory: %w", err)
 	}
 
@@ -287,16 +288,16 @@ func (lg *LoadGenerator) performCreate(ctx context.Context, provider string, wor
 	startTime := time.Now()
 	vmName := lg.generateVMName(workerID)
 
-	vm := &infrav1alpha1.VirtualMachine{
+	vm := &infrav1beta1.VirtualMachine{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      vmName,
 			Namespace: lg.namespace,
 			Labels:    lg.config.VMTemplate.Labels,
 		},
-		Spec: infrav1alpha1.VirtualMachineSpec{
-			ProviderRef: infrav1alpha1.ObjectRef{Name: provider},
-			ClassRef:    infrav1alpha1.ObjectRef{Name: lg.config.VMTemplate.ClassRef},
-			ImageRef:    infrav1alpha1.ObjectRef{Name: lg.config.VMTemplate.ImageRef},
+		Spec: infrav1beta1.VirtualMachineSpec{
+			ProviderRef: infrav1beta1.ObjectRef{Name: provider},
+			ClassRef:    infrav1beta1.ObjectRef{Name: lg.config.VMTemplate.ClassRef},
+			ImageRef:    infrav1beta1.ObjectRef{Name: lg.config.VMTemplate.ImageRef},
 			PowerState:  "On",
 		},
 	}
@@ -337,7 +338,7 @@ func (lg *LoadGenerator) performDelete(ctx context.Context, provider string, wor
 	startTime := time.Now()
 
 	// Find an existing VM to delete
-	vmList := &infrav1alpha1.VirtualMachineList{}
+	vmList := &infrav1beta1.VirtualMachineList{}
 	err := lg.client.List(ctx, vmList, client.InNamespace(lg.namespace))
 
 	result := Result{
@@ -426,7 +427,7 @@ func (lg *LoadGenerator) performDescribe(ctx context.Context, provider string, w
 	startTime := time.Now()
 
 	// List VMs as a describe operation
-	vmList := &infrav1alpha1.VirtualMachineList{}
+	vmList := &infrav1beta1.VirtualMachineList{}
 	err := lg.client.List(ctx, vmList, client.InNamespace(lg.namespace))
 
 	result := Result{
@@ -559,17 +560,20 @@ func (lg *LoadGenerator) saveCSV(filename string, results []Result) {
 		log.Printf("Failed to create CSV file: %v", err)
 		return
 	}
-	defer file.Close()
+	defer closer.CloseQuietlyWithoutLogger(file)
 
 	writer := csv.NewWriter(file)
 	defer writer.Flush()
 
 	// Write header
-	writer.Write([]string{"Operation", "Provider", "VMName", "StartTime", "Duration", "Success", "Error", "Phase"})
+	if err := writer.Write([]string{"Operation", "Provider", "VMName", "StartTime", "Duration", "Success", "Error", "Phase"}); err != nil {
+		log.Printf("Failed to write CSV header: %v", err)
+		return
+	}
 
 	// Write results
 	for _, result := range results {
-		writer.Write([]string{
+		if err := writer.Write([]string{
 			result.Operation,
 			result.Provider,
 			result.VMName,
@@ -578,7 +582,10 @@ func (lg *LoadGenerator) saveCSV(filename string, results []Result) {
 			strconv.FormatBool(result.Success),
 			result.Error,
 			result.Phase,
-		})
+		}); err != nil {
+			log.Printf("Failed to write CSV row: %v", err)
+			return
+		}
 	}
 }
 
@@ -588,26 +595,33 @@ func (lg *LoadGenerator) saveSummary(filename string, stats *Statistics) {
 		log.Printf("Failed to create summary file: %v", err)
 		return
 	}
-	defer file.Close()
+	defer closer.CloseQuietlyWithoutLogger(file)
 
-	fmt.Fprintf(file, "# Load Generation Summary\n\n")
-	fmt.Fprintf(file, "## Overview\n\n")
-	fmt.Fprintf(file, "- **Duration**: %v\n", stats.EndTime.Sub(stats.StartTime))
-	fmt.Fprintf(file, "- **Total Operations**: %d\n", stats.TotalOperations)
-	fmt.Fprintf(file, "- **Successful**: %d (%.1f%%)\n", stats.SuccessfulOps, float64(stats.SuccessfulOps)/float64(stats.TotalOperations)*100)
-	fmt.Fprintf(file, "- **Failed**: %d (%.1f%%)\n", stats.FailedOps, float64(stats.FailedOps)/float64(stats.TotalOperations)*100)
-
-	fmt.Fprintf(file, "\n## Operations by Type\n\n")
-	fmt.Fprintf(file, "| Operation | Count | Percentage |\n")
-	fmt.Fprintf(file, "|-----------|-------|------------|\n")
-	for op, count := range stats.OperationsByType {
-		percentage := float64(count) / float64(stats.TotalOperations) * 100
-		fmt.Fprintf(file, "| %s | %d | %.1f%% |\n", op, count, percentage)
+	// Write summary with error handling
+	writeOrLog := func(format string, args ...interface{}) {
+		if _, err := fmt.Fprintf(file, format, args...); err != nil {
+			log.Printf("Failed to write to summary file: %v", err)
+		}
 	}
 
-	fmt.Fprintf(file, "\n## Performance Metrics\n\n")
-	fmt.Fprintf(file, "| Operation | Count | P50 | P95 | P99 | Max |\n")
-	fmt.Fprintf(file, "|-----------|-------|-----|-----|-----|\n")
+	writeOrLog("# Load Generation Summary\n\n")
+	writeOrLog("## Overview\n\n")
+	writeOrLog("- **Duration**: %v\n", stats.EndTime.Sub(stats.StartTime))
+	writeOrLog("- **Total Operations**: %d\n", stats.TotalOperations)
+	writeOrLog("- **Successful**: %d (%.1f%%)\n", stats.SuccessfulOps, float64(stats.SuccessfulOps)/float64(stats.TotalOperations)*100)
+	writeOrLog("- **Failed**: %d (%.1f%%)\n", stats.FailedOps, float64(stats.FailedOps)/float64(stats.TotalOperations)*100)
+
+	writeOrLog("\n## Operations by Type\n\n")
+	writeOrLog("| Operation | Count | Percentage |\n")
+	writeOrLog("|-----------|-------|------------|\n")
+	for op, count := range stats.OperationsByType {
+		percentage := float64(count) / float64(stats.TotalOperations) * 100
+		writeOrLog("| %s | %d | %.1f%% |\n", op, count, percentage)
+	}
+
+	writeOrLog("\n## Performance Metrics\n\n")
+	writeOrLog("| Operation | Count | P50 | P95 | P99 | Max |\n")
+	writeOrLog("|-----------|-------|-----|-----|-----|\n")
 	for op, durations := range stats.DurationsByOp {
 		if len(durations) == 0 {
 			continue
@@ -622,7 +636,7 @@ func (lg *LoadGenerator) saveSummary(filename string, stats *Statistics) {
 		p99 := durations[len(durations)*99/100]
 		max := durations[len(durations)-1]
 
-		fmt.Fprintf(file, "| %s | %d | %v | %v | %v | %v |\n",
+		writeOrLog("| %s | %d | %v | %v | %v | %v |\n",
 			op, len(durations), p50, p95, p99, max)
 	}
 }

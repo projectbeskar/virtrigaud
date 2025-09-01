@@ -1,100 +1,59 @@
 run:
   timeout: 5m
+  tests: true
   modules-download-mode: readonly
+
+output:
+  formats:
+    - format: colored-line-number
+  print-issued-lines: true
+  print-linter-name: true
+
+issues:
+  exclude-use-default: false
+  exclude-dirs:
+    - vendor
+    - proto/gen
+    - bin
+  exclude-files:
+    - ".*\\.pb\\.go$"
+    - ".*_generated\\.go$"
+  max-issues-per-linter: 0
+  max-same-issues: 0
 
 linters:
   enable:
-    - gofmt
-    # - goimports  # Temporarily disabled due to version differences
+    - govet
+    - staticcheck
     - ineffassign
+    - gosimple
+    - gci
+    - gofumpt
+    - unused
+    - typecheck
+    - errcheck
     - misspell
-    # Temporarily disable linters that cause issues with libvirt
-    # - govet      # Contains type checking that fails on libvirt
-    # - revive
-    # - staticcheck
-    # - unused
-    # - errcheck
-    # - gosimple
+    - unconvert
+
   disable:
-    - typecheck  # Disabled due to libvirt CGO dependencies that aren't available in CI
-    - govet      # Contains type checking that fails on libvirt
-    - revive     # Too many style issues to fix in one go
-    - staticcheck # Deprecated API warnings to be addressed separately
-    - unused     # Unused function warnings for development code
-    - errcheck   # Error checking improvements for future iteration
-    - gosimple   # Code simplification for future iteration
+    - gosec     # Too noisy for development
+    - gocritic  # Too aggressive for now
+    - unparam   # Not critical
+    - prealloc  # Not critical
 
 linters-settings:
-  revive:
-    confidence: 0
-  goimports:
-    local-prefixes: github.com/projectbeskar/virtrigaud
-
-issues:
-  exclude-dirs:
-    - internal/providers/libvirt
-    - cmd/provider-libvirt
-  exclude-rules:
-    # Exclude some linters from running on tests files.
-    - path: _test\.go
-      linters:
-        - revive
-        - staticcheck
-    # Exclude generated files
-    - path: ".*\\.pb\\.go$"
-      linters:
-        - revive
-        - staticcheck
-        - unused
-    # Exclude kubebuilder generated files
-    - path: "zz_generated.*\\.go$"
-      linters:
-        - revive
-        - staticcheck
-        - unused
-    # Exclude libvirt provider entirely (requires C dependencies)
-    - path: "internal/providers/libvirt/.*"
-      linters:
-        - typecheck
-        - gosimple
-        - unused
-        - staticcheck
-        - ineffassign
-        - govet
-        - errcheck
-        - revive
-        - gofmt
-        - goimports
-        - misspell
-    - path: "cmd/provider-libvirt/.*"
-      linters:
-        - typecheck
-        - gosimple
-        - unused
-        - staticcheck
-        - ineffassign
-        - govet
-        - errcheck
-        - revive
-        - gofmt
-        - goimports
-        - misspell
-    # Exclude libvirt files completely (alternative approach)
-    - path: ".*/libvirt/.*"
-      text: ".*"
-    - path: ".*libvirt.*"
-      text: ".*"
-    # Exclude integration tests (may have libvirt dependencies)
-    - path: "test/integration/.*"
-      linters:
-        - typecheck
-        - gosimple
-        - unused
-        - staticcheck
-        - ineffassign
-        - govet
-        - errcheck
-        - revive
-        - gofmt
-        - goimports
-        - misspell
+  gci:
+    sections:
+      - standard
+      - default
+      - prefix(github.com/projectbeskar/virtrigaud)
+  gofumpt:
+    extra-rules: true
+  staticcheck:
+    checks: ["all"]
+  errcheck:
+    check-type-assertions: true
+    check-blank: false
+    exclude-functions:
+      - fmt.Println
+      - fmt.Printf

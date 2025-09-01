@@ -173,36 +173,3 @@ func (p *Provider) findFolder(ctx context.Context, placement *contracts.Placemen
 }
 
 // findNetwork finds a network/portgroup for VM configuration
-func (p *Provider) findNetwork(ctx context.Context, networkName, portgroup string) (object.NetworkReference, error) {
-	if err := p.ensureConnection(ctx); err != nil {
-		return nil, err
-	}
-
-	// Try to find portgroup first (more specific)
-	if portgroup != "" {
-		networks, err := p.finder.NetworkList(ctx, portgroup)
-		if err == nil && len(networks) > 0 {
-			return networks[0], nil
-		}
-	}
-
-	// Try to find by network name
-	if networkName != "" {
-		networks, err := p.finder.NetworkList(ctx, networkName)
-		if err == nil && len(networks) > 0 {
-			return networks[0], nil
-		}
-	}
-
-	// Fallback to finding any available network
-	networks, err := p.finder.NetworkList(ctx, "*")
-	if err != nil {
-		return nil, fmt.Errorf("failed to find networks: %w", err)
-	}
-
-	if len(networks) == 0 {
-		return nil, fmt.Errorf("no networks found")
-	}
-
-	return networks[0], nil
-}

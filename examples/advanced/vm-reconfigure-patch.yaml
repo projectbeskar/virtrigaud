@@ -5,7 +5,7 @@
 ---
 # Patch to upgrade web-server-01 resources
 # Apply with: kubectl patch vm web-server-01 --patch-file vm-reconfigure-patch.yaml --type merge
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VirtualMachine
 metadata:
   name: web-server-01

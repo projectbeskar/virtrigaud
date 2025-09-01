@@ -30,7 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 
-	infrav1alpha1 "github.com/projectbeskar/virtrigaud/api/v1alpha1"
+	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 )
 
 var (
@@ -217,7 +217,7 @@ func listVMs(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	vmList := &infrav1alpha1.VirtualMachineList{}
+	vmList := &infrav1beta1.VirtualMachineList{}
 	err = client.List(ctx, vmList)
 	if err != nil {
 		return fmt.Errorf("failed to list VMs: %w", err)
@@ -252,7 +252,7 @@ func describeVM(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	vm := &infrav1alpha1.VirtualMachine{}
+	vm := &infrav1beta1.VirtualMachine{}
 	key := types.NamespacedName{Namespace: namespace, Name: args[0]}
 	err = client.Get(ctx, key, vm)
 	if err != nil {
@@ -320,7 +320,7 @@ func vmConsoleURL(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	vm := &infrav1alpha1.VirtualMachine{}
+	vm := &infrav1beta1.VirtualMachine{}
 	key := types.NamespacedName{Namespace: namespace, Name: args[0]}
 	err = client.Get(ctx, key, vm)
 	if err != nil {
@@ -345,7 +345,7 @@ func listProviders(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	providerList := &infrav1alpha1.ProviderList{}
+	providerList := &infrav1beta1.ProviderList{}
 	err = client.List(ctx, providerList)
 	if err != nil {
 		return fmt.Errorf("failed to list providers: %w", err)
@@ -374,7 +374,7 @@ func providerStatus(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	provider := &infrav1alpha1.Provider{}
+	provider := &infrav1beta1.Provider{}
 	key := types.NamespacedName{Namespace: namespace, Name: args[0]}
 	err = client.Get(ctx, key, provider)
 	if err != nil {

@@ -22,13 +22,13 @@ spec:
     spec:
       serviceAccountName: {{ include "virtrigaud.serviceAccountName" . }}
       securityContext:
-        {{- toYaml .Values.global.podSecurityContext | nindent 8 }}
+        {{- toYaml .Values.manager.podSecurityContext | nindent 8 }}
       containers:
       - name: provider-vsphere
         image: "{{ .Values.global.imageRegistry }}/{{ .Values.providers.vsphere.remote.image.repository }}:{{ .Values.providers.vsphere.remote.image.tag | default .Chart.AppVersion }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
         securityContext:
-          {{- toYaml .Values.global.securityContext | nindent 10 }}
+          {{- toYaml .Values.manager.securityContext | nindent 10 }}
         command:
         - /usr/local/bin/provider-vsphere
         args:

@@ -22,12 +22,11 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
-	infravirtrigaudiov1alpha1 "github.com/projectbeskar/virtrigaud/api/v1alpha1"
+	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 )
 
 var _ = Describe("VMClass Controller", func() {
@@ -40,13 +39,13 @@ var _ = Describe("VMClass Controller", func() {
 			Name:      resourceName,
 			Namespace: "default", // TODO(user):Modify as needed
 		}
-		vmclass := &infravirtrigaudiov1alpha1.VMClass{}
+		vmclass := &infravirtrigaudiov1beta1.VMClass{}
 
 		BeforeEach(func() {
 			By("creating the custom resource for the Kind VMClass")
 			err := k8sClient.Get(ctx, typeNamespacedName, vmclass)
 			if err != nil && errors.IsNotFound(err) {
-				resource := &infravirtrigaudiov1alpha1.VMClass{
+				resource := &infravirtrigaudiov1beta1.VMClass{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      resourceName,
 						Namespace: "default",
@@ -59,7 +58,7 @@ var _ = Describe("VMClass Controller", func() {
 
 		AfterEach(func() {
 			// TODO(user): Cleanup logic after each test, like removing the resource instance.
-			resource := &infravirtrigaudiov1alpha1.VMClass{}
+			resource := &infravirtrigaudiov1beta1.VMClass{}
 			err := k8sClient.Get(ctx, typeNamespacedName, resource)
 			Expect(err).NotTo(HaveOccurred())
 

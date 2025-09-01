@@ -95,14 +95,6 @@ func (p *Provider) connect(ctx context.Context) error {
 // These will be implemented in a future version
 
 // disconnect closes the Libvirt connection
-func (p *Provider) disconnect() error {
-	if p.conn != nil {
-		_, err := p.conn.Close()
-		p.conn = nil
-		return err
-	}
-	return nil
-}
 
 // ensureConnection ensures we have a valid connection to Libvirt
 func (p *Provider) ensureConnection(ctx context.Context) error {

@@ -322,9 +322,6 @@ type VMClassList struct {
 	Items           []VMClass `json:"items"`
 }
 
-// Hub marks this version as the conversion hub
-func (*VMClass) Hub() {}
-
 func init() {
 	SchemeBuilder.Register(&VMClass{}, &VMClassList{})
 }

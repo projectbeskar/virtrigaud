@@ -21,12 +21,12 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/projectbeskar/virtrigaud/api/v1alpha1"
+	v1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 )
 
 // ProviderFactory creates a new provider instance
-type ProviderFactory func(ctx context.Context, provider *v1alpha1.Provider) (contracts.Provider, error)
+type ProviderFactory func(ctx context.Context, provider *v1beta1.Provider) (contracts.Provider, error)
 
 // Registry manages provider factories and instances
 type Registry struct {
@@ -51,12 +51,12 @@ func (r *Registry) Register(providerType string, factory ProviderFactory) {
 }
 
 // Get returns a provider instance for the given Provider resource
-func (r *Registry) Get(ctx context.Context, provider *v1alpha1.Provider) (contracts.Provider, error) {
+func (r *Registry) Get(ctx context.Context, provider *v1beta1.Provider) (contracts.Provider, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	// Create a cache key from provider spec
-	cacheKey := fmt.Sprintf("%s:%s:%s", provider.Spec.Type, provider.Namespace, provider.Name)
+	cacheKey := fmt.Sprintf("%s:%s:%s", string(provider.Spec.Type), provider.Namespace, provider.Name)
 
 	// Check if we have a cached instance
 	if instance, ok := r.instances[cacheKey]; ok {
@@ -64,9 +64,9 @@ func (r *Registry) Get(ctx context.Context, provider *v1alpha1.Provider) (contra
 	}
 
 	// Look up the factory
-	factory, ok := r.factories[provider.Spec.Type]
+	factory, ok := r.factories[string(provider.Spec.Type)]
 	if !ok {
-		return nil, fmt.Errorf("no factory registered for provider type: %s", provider.Spec.Type)
+		return nil, fmt.Errorf("no factory registered for provider type: %s", string(provider.Spec.Type))
 	}
 
 	// Create new instance
@@ -82,11 +82,11 @@ func (r *Registry) Get(ctx context.Context, provider *v1alpha1.Provider) (contra
 }
 
 // Invalidate removes a provider instance from the cache
-func (r *Registry) Invalidate(provider *v1alpha1.Provider) {
+func (r *Registry) Invalidate(provider *v1beta1.Provider) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	cacheKey := fmt.Sprintf("%s:%s:%s", provider.Spec.Type, provider.Namespace, provider.Name)
+	cacheKey := fmt.Sprintf("%s:%s:%s", string(provider.Spec.Type), provider.Namespace, provider.Name)
 	delete(r.instances, cacheKey)
 }
 

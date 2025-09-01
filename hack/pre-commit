@@ -1,0 +1,28 @@
+#!/bin/bash
+# Pre-commit hook for virtrigaud
+# This script runs formatting and linting checks before commits
+
+set -e
+
+echo "🔧 Running pre-commit checks..."
+
+# Format code
+echo "📝 Formatting code..."
+if command -v gofumpt &> /dev/null; then
+    gofumpt -l -w .
+else
+    echo "⚠️  gofumpt not found, skipping formatting"
+fi
+
+# Organize imports
+if command -v gci &> /dev/null; then
+    gci write --skip-generated .
+else
+    echo "⚠️  gci not found, skipping import organization"
+fi
+
+# Run linter
+echo "🔍 Running linter..."
+make lint-check
+
+echo "✅ Pre-commit checks passed!"

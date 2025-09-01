@@ -119,10 +119,8 @@ func (p *Provider) connect(ctx context.Context) error {
 	p.finder = find.NewFinder(p.client.Client, true)
 
 	// Set default datacenter if we can find one
-	if err := p.setupDefaultDatacenter(ctx); err != nil {
-		// Log warning but don't fail - user might specify datacenter in placement
-		// TODO: Add proper logging
-	}
+	// Setup default datacenter - errors are logged but don't prevent connection
+	_ = p.setupDefaultDatacenter(ctx) // intentionally ignore: datacenter can be specified in placement
 
 	return nil
 }
@@ -151,12 +149,6 @@ func (p *Provider) setupDefaultDatacenter(ctx context.Context) error {
 }
 
 // disconnect closes the vSphere connection
-func (p *Provider) disconnect(ctx context.Context) error {
-	if p.client != nil {
-		return p.client.Logout(ctx)
-	}
-	return nil
-}
 
 // ensureConnection ensures we have a valid connection to vSphere
 func (p *Provider) ensureConnection(ctx context.Context) error {

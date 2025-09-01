@@ -418,9 +418,6 @@ type VMSetList struct {
 	Items           []VMSet `json:"items"`
 }
 
-// Hub marks this version as the conversion hub
-func (*VMSet) Hub() {}
-
 func init() {
 	SchemeBuilder.Register(&VMSet{}, &VMSetList{})
 }

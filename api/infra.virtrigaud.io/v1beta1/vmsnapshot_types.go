@@ -423,9 +423,6 @@ type VMSnapshotList struct {
 	Items           []VMSnapshot `json:"items"`
 }
 
-// Hub marks this version as the conversion hub
-func (*VMSnapshot) Hub() {}
-
 func init() {
 	SchemeBuilder.Register(&VMSnapshot{}, &VMSnapshotList{})
 }

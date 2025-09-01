@@ -32,7 +32,7 @@ stringData:
 
 ---
 # Remote vSphere Provider Configuration
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: Provider
 metadata:
   name: vsphere-datacenter1
@@ -119,7 +119,7 @@ spec:
 
 ---
 # VM Class for enterprise workloads
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMClass
 metadata:
   name: enterprise-medium
@@ -138,7 +138,7 @@ spec:
 
 ---
 # VM Image from vSphere template
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMImage
 metadata:
   name: ubuntu-22-template
@@ -150,7 +150,7 @@ spec:
 
 ---
 # Enterprise network configuration
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMNetworkAttachment
 metadata:
   name: production-vlan
@@ -163,7 +163,7 @@ spec:
 
 ---
 # Virtual Machine using remote vSphere provider
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VirtualMachine
 metadata:
   name: web-server-remote

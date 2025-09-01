@@ -24,6 +24,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 	"gopkg.in/yaml.v2"
 )
 
@@ -286,8 +288,9 @@ func createCatalogEntry(opts *publishOptions, results ConformanceResults) Catalo
 	}
 
 	// Generate display name and description
-	displayName := strings.Title(strings.ReplaceAll(opts.providerName, "-", " ")) + " Provider"
-	description := fmt.Sprintf("%s provider for VirtRigaud", strings.Title(opts.providerName))
+	caser := cases.Title(language.Und)
+	displayName := caser.String(strings.ReplaceAll(opts.providerName, "-", " ")) + " Provider"
+	description := fmt.Sprintf("%s provider for VirtRigaud", caser.String(opts.providerName))
 
 	return CatalogProvider{
 		Name:         opts.providerName,
@@ -382,7 +385,7 @@ func updateCatalog(catalogPath string, entry CatalogProvider) error {
 		return fmt.Errorf("failed to marshal catalog: %w", err)
 	}
 
-	if err := os.WriteFile(catalogPath, data, 0644); err != nil {
+	if err := os.WriteFile(catalogPath, data, 0o644); err != nil {
 		return fmt.Errorf("failed to write catalog: %w", err)
 	}
 

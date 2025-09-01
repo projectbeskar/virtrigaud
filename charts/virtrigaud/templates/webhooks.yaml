@@ -55,7 +55,7 @@ webhooks:
     service:
       name: {{ include "virtrigaud.webhookServiceName" . }}
       namespace: {{ .Release.Namespace }}
-      path: /validate-infra-virtrigaud-io-v1alpha1-virtualmachine
+      path: /validate-infra-virtrigaud-io-v1beta1-virtualmachine
     {{- if eq .Values.webhooks.certificates.source "self-signed" }}
     caBundle: {{ include "virtrigaud.webhookCaCert" . }}
     {{- end }}
@@ -65,7 +65,7 @@ webhooks:
   - apiGroups:
     - infra.virtrigaud.io
     apiVersions:
-    - v1alpha1
+    - v1beta1
     - v1beta1
     operations:
     - CREATE
@@ -80,7 +80,7 @@ webhooks:
     service:
       name: {{ include "virtrigaud.webhookServiceName" . }}
       namespace: {{ .Release.Namespace }}
-      path: /validate-infra-virtrigaud-io-v1alpha1-vmclass
+      path: /validate-infra-virtrigaud-io-v1beta1-vmclass
     {{- if eq .Values.webhooks.certificates.source "self-signed" }}
     caBundle: {{ include "virtrigaud.webhookCaCert" . }}
     {{- end }}
@@ -90,7 +90,7 @@ webhooks:
   - apiGroups:
     - infra.virtrigaud.io
     apiVersions:
-    - v1alpha1
+    - v1beta1
     - v1beta1
     operations:
     - CREATE
@@ -105,7 +105,7 @@ webhooks:
     service:
       name: {{ include "virtrigaud.webhookServiceName" . }}
       namespace: {{ .Release.Namespace }}
-      path: /validate-infra-virtrigaud-io-v1alpha1-vmsnapshot
+      path: /validate-infra-virtrigaud-io-v1beta1-vmsnapshot
     {{- if eq .Values.webhooks.certificates.source "self-signed" }}
     caBundle: {{ include "virtrigaud.webhookCaCert" . }}
     {{- end }}
@@ -115,7 +115,7 @@ webhooks:
   - apiGroups:
     - infra.virtrigaud.io
     apiVersions:
-    - v1alpha1
+    - v1beta1
     - v1beta1
     operations:
     - CREATE
@@ -149,7 +149,7 @@ webhooks:
     service:
       name: {{ include "virtrigaud.webhookServiceName" . }}
       namespace: {{ .Release.Namespace }}
-      path: /mutate-infra-virtrigaud-io-v1alpha1-virtualmachine
+      path: /mutate-infra-virtrigaud-io-v1beta1-virtualmachine
     {{- if eq .Values.webhooks.certificates.source "self-signed" }}
     caBundle: {{ include "virtrigaud.webhookCaCert" . }}
     {{- end }}
@@ -159,7 +159,7 @@ webhooks:
   - apiGroups:
     - infra.virtrigaud.io
     apiVersions:
-    - v1alpha1
+    - v1beta1
     - v1beta1
     operations:
     - CREATE
@@ -174,7 +174,7 @@ webhooks:
     service:
       name: {{ include "virtrigaud.webhookServiceName" . }}
       namespace: {{ .Release.Namespace }}
-      path: /mutate-infra-virtrigaud-io-v1alpha1-vmset
+      path: /mutate-infra-virtrigaud-io-v1beta1-vmset
     {{- if eq .Values.webhooks.certificates.source "self-signed" }}
     caBundle: {{ include "virtrigaud.webhookCaCert" . }}
     {{- end }}
@@ -184,7 +184,7 @@ webhooks:
   - apiGroups:
     - infra.virtrigaud.io
     apiVersions:
-    - v1alpha1
+    - v1beta1
     - v1beta1
     operations:
     - CREATE

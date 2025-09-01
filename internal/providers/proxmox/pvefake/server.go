@@ -792,7 +792,7 @@ func StartFakeServer() (*Server, string, error) {
 		return nil, "", fmt.Errorf("failed to start fake server: %w", err)
 	}
 
-	port := listener.Addr().(*net.TCPAddr).Port
+	port := listener.Addr().(*net.TCPAddr).Port //nolint:errcheck // Test server port assignment
 	endpoint := fmt.Sprintf("http://localhost:%d", port)
 
 	go func() {

@@ -704,9 +704,6 @@ type VMNetworkAttachmentList struct {
 	Items           []VMNetworkAttachment `json:"items"`
 }
 
-// Hub marks this version as the conversion hub
-func (*VMNetworkAttachment) Hub() {}
-
 func init() {
 	SchemeBuilder.Register(&VMNetworkAttachment{}, &VMNetworkAttachmentList{})
 }

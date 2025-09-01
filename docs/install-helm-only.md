@@ -69,7 +69,7 @@ webhook:
 
 ### Check API Versions
 
-Verify that both v1alpha1 and v1beta1 versions are available:
+Verify that both v1beta1 and v1beta1 versions are available:
 
 ```bash
 # Check available versions for VirtualMachine CRD
@@ -78,7 +78,7 @@ kubectl get crd virtualmachines.infra.virtrigaud.io -o jsonpath='{.spec.versions
 
 Expected output:
 ```
-v1alpha1
+v1beta1
 v1beta1
 ```
 
@@ -101,9 +101,9 @@ v1beta1
 Create resources using different API versions and verify conversion works:
 
 ```bash
-# Create a VM using v1alpha1 API
+# Create a VM using v1beta1 API
 cat <<EOF | kubectl apply -f -
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VirtualMachine
 metadata:
   name: test-vm-alpha
@@ -195,7 +195,7 @@ kubectl get pods -l app.kubernetes.io/name=virtrigaud -n virtrigaud
 ### ArgoCD
 
 ```yaml
-apiVersion: argoproj.io/v1alpha1
+apiVersion: argoproj.io/v1beta1
 kind: Application
 metadata:
   name: virtrigaud

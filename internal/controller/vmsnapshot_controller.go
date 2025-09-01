@@ -28,7 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	infrav1alpha1 "github.com/projectbeskar/virtrigaud/api/v1alpha1"
+	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/obs/logging"
 	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 	"github.com/projectbeskar/virtrigaud/internal/providers/registry"
@@ -82,7 +82,7 @@ func (r *VMSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	logger.Info("Reconciling VMSnapshot", "snapshot", req.NamespacedName)
 
 	// Fetch the VMSnapshot instance
-	snapshot := &infrav1alpha1.VMSnapshot{}
+	snapshot := &infrav1beta1.VMSnapshot{}
 	if err := r.Get(ctx, req.NamespacedName, snapshot); err != nil {
 		if client.IgnoreNotFound(err) == nil {
 			logger.Info("VMSnapshot not found, ignoring")
@@ -114,17 +114,18 @@ func (r *VMSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	// Get the referenced VM
-	vm := &infrav1alpha1.VirtualMachine{}
+	vm := &infrav1beta1.VirtualMachine{}
 	vmKey := client.ObjectKey{
 		Namespace: snapshot.Namespace,
 		Name:      snapshot.Spec.VMRef.Name,
 	}
 	if err := r.Get(ctx, vmKey, vm); err != nil {
 		logger.Error(err, "Failed to get referenced VM", "vm", snapshot.Spec.VMRef.Name)
-		k8s.SetCondition(&snapshot.Status.Conditions, infrav1alpha1.VMSnapshotConditionReady,
-			metav1.ConditionFalse, infrav1alpha1.VMSnapshotReasonProviderError,
+		k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionReady,
+			metav1.ConditionFalse, infrav1beta1.VMSnapshotReasonProviderError,
 			fmt.Sprintf("Referenced VM not found: %v", err))
-		r.updateStatus(ctx, snapshot)
+		// Status update errors are intentionally ignored to avoid blocking reconciliation
+		_ = r.updateStatus(ctx, snapshot)
 		timer.Finish(metrics.OutcomeError)
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
@@ -136,10 +137,11 @@ func (r *VMSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// Check VM status
 	if vm.Status.ID == "" {
 		logger.Info("VM not yet provisioned, waiting")
-		k8s.SetCondition(&snapshot.Status.Conditions, infrav1alpha1.VMSnapshotConditionCreating,
-			metav1.ConditionTrue, infrav1alpha1.VMSnapshotReasonCreating,
+		k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionCreating,
+			metav1.ConditionTrue, infrav1beta1.VMSnapshotReasonCreating,
 			"Waiting for VM to be provisioned")
-		r.updateStatus(ctx, snapshot)
+		// Status update errors are intentionally ignored to avoid blocking reconciliation
+		_ = r.updateStatus(ctx, snapshot)
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
@@ -148,13 +150,13 @@ func (r *VMSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	case "":
 		// Initialize snapshot creation
 		return r.createSnapshot(ctx, snapshot, vm)
-	case infrav1alpha1.SnapshotPhaseCreating:
+	case infrav1beta1.SnapshotPhaseCreating:
 		// Check if snapshot creation is complete
 		return r.checkSnapshotCreation(ctx, snapshot, vm)
-	case infrav1alpha1.SnapshotPhaseReady:
+	case infrav1beta1.SnapshotPhaseReady:
 		// Snapshot is ready, check for retention policy
 		return r.handleRetention(ctx, snapshot)
-	case infrav1alpha1.SnapshotPhaseFailed:
+	case infrav1beta1.SnapshotPhaseFailed:
 		// Handle failed snapshots
 		logger.Info("Snapshot is in failed state", "message", snapshot.Status.Message)
 		return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
@@ -166,21 +168,21 @@ func (r *VMSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 }
 
 // createSnapshot initiates snapshot creation
-func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *infrav1alpha1.VMSnapshot, vm *infrav1alpha1.VirtualMachine) (ctrl.Result, error) {
+func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *infrav1beta1.VMSnapshot, vm *infrav1beta1.VirtualMachine) (ctrl.Result, error) {
 	logger := logging.FromContext(ctx)
 
 	logger.Info("Creating VM snapshot")
 
 	// Update phase to creating
-	snapshot.Status.Phase = infrav1alpha1.SnapshotPhaseCreating
+	snapshot.Status.Phase = infrav1beta1.SnapshotPhaseCreating
 	snapshot.Status.Message = "Creating snapshot"
-	k8s.SetCondition(&snapshot.Status.Conditions, infrav1alpha1.VMSnapshotConditionCreating,
-		metav1.ConditionTrue, infrav1alpha1.VMSnapshotReasonCreating,
+	k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionCreating,
+		metav1.ConditionTrue, infrav1beta1.VMSnapshotReasonCreating,
 		"Snapshot creation initiated")
 
 	// For demonstration purposes, simulate snapshot creation
 	// In a real implementation, this would call the provider's SnapshotCreate RPC
-	snapshotID := fmt.Sprintf("snapshot-%s-%d", snapshot.Spec.NameHint, time.Now().Unix())
+	snapshotID := fmt.Sprintf("snapshot-%s-%d", snapshot.Name, time.Now().Unix()) // NameHint field removed
 	snapshot.Status.SnapshotID = snapshotID
 	snapshot.Status.TaskRef = fmt.Sprintf("task-snapshot-%s", snapshotID)
 	snapshot.Status.CreationTime = &metav1.Time{Time: time.Now()}
@@ -196,7 +198,7 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 }
 
 // checkSnapshotCreation checks if snapshot creation is complete
-func (r *VMSnapshotReconciler) checkSnapshotCreation(ctx context.Context, snapshot *infrav1alpha1.VMSnapshot, vm *infrav1alpha1.VirtualMachine) (ctrl.Result, error) {
+func (r *VMSnapshotReconciler) checkSnapshotCreation(ctx context.Context, snapshot *infrav1beta1.VMSnapshot, vm *infrav1beta1.VirtualMachine) (ctrl.Result, error) {
 	logger := logging.FromContext(ctx)
 
 	logger.Info("Checking snapshot creation progress")
@@ -205,16 +207,16 @@ func (r *VMSnapshotReconciler) checkSnapshotCreation(ctx context.Context, snapsh
 	// In real implementation, this would call TaskStatus RPC
 	if time.Since(snapshot.Status.CreationTime.Time) > 30*time.Second {
 		// Mark as ready
-		snapshot.Status.Phase = infrav1alpha1.SnapshotPhaseReady
+		snapshot.Status.Phase = infrav1beta1.SnapshotPhaseReady
 		snapshot.Status.Message = "Snapshot created successfully"
-		snapshot.Status.SizeBytes = func() *int64 { size := int64(1024 * 1024 * 1024); return &size }() // 1GB
+		// SizeBytes field removed in v1beta1 VMSnapshotStatus
 		snapshot.Status.TaskRef = ""
 
-		k8s.SetCondition(&snapshot.Status.Conditions, infrav1alpha1.VMSnapshotConditionReady,
-			metav1.ConditionTrue, infrav1alpha1.VMSnapshotReasonCreated,
+		k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionReady,
+			metav1.ConditionTrue, infrav1beta1.VMSnapshotReasonCreated,
 			"Snapshot created successfully")
-		k8s.SetCondition(&snapshot.Status.Conditions, infrav1alpha1.VMSnapshotConditionCreating,
-			metav1.ConditionFalse, infrav1alpha1.VMSnapshotReasonCreated,
+		k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionCreating,
+			metav1.ConditionFalse, infrav1beta1.VMSnapshotReasonCreated,
 			"Snapshot creation completed")
 
 		r.Recorder.Event(snapshot, "Normal", "SnapshotReady", "Snapshot created successfully")
@@ -231,7 +233,7 @@ func (r *VMSnapshotReconciler) checkSnapshotCreation(ctx context.Context, snapsh
 }
 
 // handleRetention handles snapshot retention policies
-func (r *VMSnapshotReconciler) handleRetention(ctx context.Context, snapshot *infrav1alpha1.VMSnapshot) (ctrl.Result, error) {
+func (r *VMSnapshotReconciler) handleRetention(ctx context.Context, snapshot *infrav1beta1.VMSnapshot) (ctrl.Result, error) {
 	logger := logging.FromContext(ctx)
 
 	// Check retention policy
@@ -252,7 +254,7 @@ func (r *VMSnapshotReconciler) handleRetention(ctx context.Context, snapshot *in
 
 	// Check retention based on VM deletion
 	if snapshot.Spec.RetentionPolicy != nil && snapshot.Spec.RetentionPolicy.DeleteOnVMDelete {
-		vm := &infrav1alpha1.VirtualMachine{}
+		vm := &infrav1beta1.VirtualMachine{}
 		vmKey := client.ObjectKey{
 			Namespace: snapshot.Namespace,
 			Name:      snapshot.Spec.VMRef.Name,
@@ -274,18 +276,18 @@ func (r *VMSnapshotReconciler) handleRetention(ctx context.Context, snapshot *in
 }
 
 // handleDeletion handles snapshot deletion
-func (r *VMSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *infrav1alpha1.VMSnapshot) (ctrl.Result, error) {
+func (r *VMSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *infrav1beta1.VMSnapshot) (ctrl.Result, error) {
 	logger := logging.FromContext(ctx)
 
 	logger.Info("Deleting VM snapshot")
 
 	// Update phase
-	snapshot.Status.Phase = infrav1alpha1.SnapshotPhaseDeleting
-	k8s.SetCondition(&snapshot.Status.Conditions, infrav1alpha1.VMSnapshotConditionDeleting,
-		metav1.ConditionTrue, infrav1alpha1.VMSnapshotReasonDeleting,
+	snapshot.Status.Phase = infrav1beta1.SnapshotPhaseDeleting
+	k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionDeleting,
+		metav1.ConditionTrue, infrav1beta1.VMSnapshotReasonDeleting,
 		"Snapshot deletion initiated")
 
-	r.updateStatus(ctx, snapshot)
+	_ = r.updateStatus(ctx, snapshot) //nolint:errcheck // Status update errors logged elsewhere
 
 	// In real implementation, this would call the provider's SnapshotDelete RPC
 	r.Recorder.Event(snapshot, "Normal", "SnapshotDeleting", "Started snapshot deletion")
@@ -307,7 +309,7 @@ func (r *VMSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *inf
 }
 
 // updateStatus updates the snapshot status
-func (r *VMSnapshotReconciler) updateStatus(ctx context.Context, snapshot *infrav1alpha1.VMSnapshot) error {
+func (r *VMSnapshotReconciler) updateStatus(ctx context.Context, snapshot *infrav1beta1.VMSnapshot) error {
 	if err := r.Status().Update(ctx, snapshot); err != nil {
 		logger := logging.FromContext(ctx)
 		logger.Error(err, "Failed to update VMSnapshot status")
@@ -319,6 +321,6 @@ func (r *VMSnapshotReconciler) updateStatus(ctx context.Context, snapshot *infra
 // SetupWithManager sets up the controller with the Manager
 func (r *VMSnapshotReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&infrav1alpha1.VMSnapshot{}).
+		For(&infrav1beta1.VMSnapshot{}).
 		Complete(r)
 }

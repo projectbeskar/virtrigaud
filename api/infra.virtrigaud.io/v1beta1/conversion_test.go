@@ -8,7 +8,7 @@ import (
 )
 
 // Simple tests for beta types - avoiding import cycles by testing basic conversions
-// Real conversion testing is handled in v1alpha1 package
+// No conversion needed - v1beta1 is the only API version
 
 func TestVirtualMachine_Basic(t *testing.T) {
 	beta := &VirtualMachine{
@@ -120,7 +120,7 @@ func TestVirtualMachine_BetaAlphaBeta_RoundTrip(t *testing.T) {
 		},
 	}
 
-	// Since we can't import v1alpha1 here due to import cycles,
+	// No conversion needed - v1beta1 is the only API version,
 	// this test just verifies the beta object is well-formed
 	if beta.Spec.PowerState != PowerStateOn {
 		t.Errorf("Expected PowerState On, got %v", beta.Spec.PowerState)

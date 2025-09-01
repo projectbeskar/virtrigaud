@@ -13,7 +13,7 @@ stringData:
 
 ---
 # Define the vSphere provider
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: Provider
 metadata:
   name: vsphere-prod
@@ -34,7 +34,7 @@ spec:
 
 ---
 # Define a VM class for resource allocation
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMClass
 metadata:
   name: small
@@ -53,7 +53,7 @@ spec:
 
 ---
 # Define the VM image/template
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMImage
 metadata:
   name: ubuntu-22-template
@@ -67,7 +67,7 @@ spec:
 
 ---
 # Define network attachment
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMNetworkAttachment
 metadata:
   name: app-network
@@ -79,7 +79,7 @@ spec:
 
 ---
 # Create the virtual machine
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VirtualMachine
 metadata:
   name: demo-web-server

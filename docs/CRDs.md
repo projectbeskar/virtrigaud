@@ -36,7 +36,7 @@ The `VirtualMachine` CRD represents a virtual machine instance.
 ### Example
 
 ```yaml
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VirtualMachine
 metadata:
   name: demo-web-01
@@ -71,7 +71,7 @@ The `VMClass` CRD defines resource allocation for virtual machines.
 ### Example
 
 ```yaml
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMClass
 metadata:
   name: small
@@ -99,7 +99,7 @@ The `VMImage` CRD defines base templates/images for virtual machines.
 ### Example
 
 ```yaml
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMImage
 metadata:
   name: ubuntu-22-template
@@ -127,7 +127,7 @@ The `VMNetworkAttachment` CRD defines network configurations.
 ### Example
 
 ```yaml
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMNetworkAttachment
 metadata:
   name: app-net
@@ -155,7 +155,7 @@ The `Provider` CRD configures hypervisor connection details.
 ### Example
 
 ```yaml
-apiVersion: infra.virtrigaud.io/v1alpha1
+apiVersion: infra.virtrigaud.io/v1beta1
 kind: Provider
 metadata:
   name: vsphere-prod

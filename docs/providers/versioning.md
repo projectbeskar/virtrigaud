@@ -37,13 +37,13 @@ Kubernetes-style API versioning with multiple supported versions:
 
 ```yaml
 # Supported API versions
-apiVersion: infra.virtrigaud.io/v1alpha1  # Development/preview
+apiVersion: infra.virtrigaud.io/v1beta1  # Development/preview
 apiVersion: infra.virtrigaud.io/v1beta1   # Pre-release/testing
 apiVersion: infra.virtrigaud.io/v1        # Stable/production
 ```
 
 **Stability Levels:**
-- **Alpha (v1alpha1)**: Experimental, may change or be removed
+- **Alpha (v1beta1)**: Experimental, may change or be removed
 - **Beta (v1beta1)**: Well-tested, minimal changes expected
 - **Stable (v1)**: Production-ready, strong backward compatibility
 
@@ -229,7 +229,7 @@ breaking:
     - SERVICE_NO_DELETE
   ignore:
     # Allowed changes during alpha/beta
-    - "provider/v1alpha1"
+    - "provider/v1beta1"
 ```
 
 ```bash
@@ -250,11 +250,11 @@ vcts run --provider ./provider --virtrigaud-version 1.0.0
 
 ### API Version Migration
 
-#### Example: VirtualMachine v1alpha1 → v1beta1
+#### Example: VirtualMachine v1beta1 → v1beta1
 
 ```go
 // Conversion webhook approach
-func (src *v1alpha1.VirtualMachine) ConvertTo(dst *v1beta1.VirtualMachine) error {
+func (src *v1beta1.VirtualMachine) ConvertTo(dst *v1beta1.VirtualMachine) error {
     // Convert common fields
     dst.ObjectMeta = src.ObjectMeta
     
@@ -276,18 +276,18 @@ func (src *v1alpha1.VirtualMachine) ConvertTo(dst *v1beta1.VirtualMachine) error
 
 ```bash
 # Phase 1: Dual support (both versions work)
-kubectl apply -f vm-v1alpha1.yaml  # Still works
+kubectl apply -f vm-v1beta1.yaml  # Still works
 kubectl apply -f vm-v1beta1.yaml   # Also works
 
 # Phase 2: Deprecation warning
-kubectl apply -f vm-v1alpha1.yaml
-# Warning: v1alpha1 is deprecated, use v1beta1
+kubectl apply -f vm-v1beta1.yaml
+# Warning: v1beta1 is deprecated, use v1beta1
 
 # Phase 3: Conversion only (internal storage uses v1beta1)
-kubectl apply -f vm-v1alpha1.yaml  # Automatically converted
+kubectl apply -f vm-v1beta1.yaml  # Automatically converted
 
 # Phase 4: Removal (after support window)
-kubectl apply -f vm-v1alpha1.yaml  # Error: version not supported
+kubectl apply -f vm-v1beta1.yaml  # Error: version not supported
 ```
 
 ### Provider SDK Migration
