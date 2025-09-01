@@ -1,5 +1,9 @@
 # Complete Proxmox VE Provider Example
 # This example demonstrates all major features of the Proxmox provider
+#
+# ⚠️  IMPORTANT: Requires Active Proxmox VE Server
+# The Proxmox provider needs environment variables to connect to a real Proxmox VE server.
+# See docs/providers/proxmox.md for deployment configuration examples.
 
 ---
 # Secret for Proxmox VE API credentials

@@ -32,3 +32,4 @@ go.work
 DEVELOPMENT.md
 hack/dev-deploy.sh
 hack/dev-watch.sh
+/tmp/virtrigaud-dev-values.yaml 

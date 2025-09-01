@@ -17,9 +17,21 @@ This provider implements the VirtRigaud provider interface to manage VM lifecycl
 
 ## Prerequisites
 
-- Proxmox VE 7.0 or later
-- API token or user account with appropriate privileges
-- Network connectivity from VirtRigaud to Proxmox API (port 8006)
+**⚠️ IMPORTANT: Active Proxmox VE Server Required**
+
+The Proxmox provider requires a running Proxmox VE server to function. Unlike some providers that can operate in simulation mode, this provider performs actual API calls to Proxmox VE during startup and operation.
+
+### Requirements:
+- **Proxmox VE 7.0 or later** (running and accessible)
+- **API token or user account** with appropriate privileges  
+- **Network connectivity** from VirtRigaud to Proxmox API (port 8006/HTTPS)
+- **Valid TLS configuration** (production) or skip verification (development)
+
+### Testing/Development:
+If you don't have a Proxmox VE server available:
+- Use [Proxmox VE in a VM](https://pve.proxmox.com/wiki/Installation) for testing
+- Consider alternative providers (libvirt, vSphere) for local development  
+- The provider will fail startup validation without a reachable Proxmox endpoint
 
 ## Authentication
 
@@ -243,20 +255,97 @@ spec:
 
 ## Configuration
 
-### Environment Variables
+### Required Environment Variables
 
-| Variable | Description | Required | Default |
-|----------|-------------|----------|---------|
-| `PVE_ENDPOINT` | Proxmox API endpoint URL | Yes | - |
-| `PVE_TOKEN_ID` | API token identifier | Yes* | - |
-| `PVE_TOKEN_SECRET` | API token secret | Yes* | - |
-| `PVE_USERNAME` | Username for session auth | Yes* | - |
-| `PVE_PASSWORD` | Password for session auth | Yes* | - |
-| `PVE_NODE_SELECTOR` | Preferred nodes (comma-separated) | No | Auto-detect |
-| `PVE_INSECURE_SKIP_VERIFY` | Skip TLS verification | No | `false` |
-| `PVE_CA_BUNDLE` | Custom CA certificate | No | - |
+**⚠️ The provider requires environment variables to connect to Proxmox VE:**
 
-\* Either token or username/password is required
+| Variable | Description | Required | Default | Example |
+|----------|-------------|----------|---------|---------|
+| `PVE_ENDPOINT` | Proxmox API endpoint URL | **Yes** | - | `https://pve.example.com:8006/api2` |
+| `PVE_TOKEN_ID` | API token identifier | Yes* | - | `virtrigaud@pve!vrtg-token` |
+| `PVE_TOKEN_SECRET` | API token secret | Yes* | - | `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` |
+| `PVE_USERNAME` | Username for session auth | Yes* | - | `virtrigaud@pve` |
+| `PVE_PASSWORD` | Password for session auth | Yes* | - | `secure-password` |
+| `PVE_NODE_SELECTOR` | Preferred nodes (comma-separated) | No | Auto-detect | `pve-node-1,pve-node-2` |
+| `PVE_INSECURE_SKIP_VERIFY` | Skip TLS verification | No | `false` | `true` |
+| `PVE_CA_BUNDLE` | Custom CA certificate | No | - | `-----BEGIN CERTIFICATE-----...` |
+
+\* Either token (`PVE_TOKEN_ID` + `PVE_TOKEN_SECRET`) or username/password (`PVE_USERNAME` + `PVE_PASSWORD`) is required
+
+### Deployment Configuration
+
+The provider needs environment variables to connect to Proxmox. Here are complete deployment examples:
+
+#### Using Helm Values
+
+```yaml
+# values.yaml
+providers:
+  proxmox:
+    enabled: true
+    env:
+      - name: PVE_ENDPOINT
+        value: "https://pve.example.com:8006/api2"
+      - name: PVE_TOKEN_ID
+        value: "virtrigaud@pve!vrtg-token"
+      - name: PVE_TOKEN_SECRET
+        value: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+      - name: PVE_INSECURE_SKIP_VERIFY
+        value: "true"  # Only for development!
+      - name: PVE_NODE_SELECTOR
+        value: "pve-node-1,pve-node-2"  # Optional
+```
+
+#### Using Kubernetes Secrets (Recommended)
+
+```yaml
+# Create secret with credentials
+apiVersion: v1
+kind: Secret
+metadata:
+  name: proxmox-credentials
+  namespace: virtrigaud-system
+type: Opaque
+stringData:
+  PVE_ENDPOINT: "https://pve.example.com:8006/api2"
+  PVE_TOKEN_ID: "virtrigaud@pve!vrtg-token"
+  PVE_TOKEN_SECRET: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+  PVE_INSECURE_SKIP_VERIFY: "false"
+
+---
+# Reference secret in deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: virtrigaud-provider-proxmox
+spec:
+  template:
+    spec:
+      containers:
+      - name: provider-proxmox
+        image: ghcr.io/projectbeskar/virtrigaud/provider-proxmox:v0.2.0
+        envFrom:
+        - secretRef:
+            name: proxmox-credentials
+```
+
+#### Development/Testing Configuration
+
+```yaml
+# For development with a local Proxmox VE instance
+providers:
+  proxmox:
+    enabled: true
+    env:
+      - name: PVE_ENDPOINT
+        value: "https://192.168.1.100:8006/api2"
+      - name: PVE_USERNAME
+        value: "root@pam"
+      - name: PVE_PASSWORD
+        value: "your-password"
+      - name: PVE_INSECURE_SKIP_VERIFY
+        value: "true"
+```
 
 ### Node Selection
 
@@ -744,6 +833,114 @@ spec:
                 matchLabels:
                   app: provider-proxmox
               topologyKey: kubernetes.io/hostname
+```
+
+## Troubleshooting
+
+### Common Issues
+
+#### ❌ "endpoint is required" Error
+
+**Symptom**: Provider pod crashes with `ERROR Failed to create PVE client error="endpoint is required"`
+
+**Cause**: Missing or empty `PVE_ENDPOINT` environment variable
+
+**Solution**:
+```yaml
+# Ensure PVE_ENDPOINT is set in deployment
+env:
+  - name: PVE_ENDPOINT
+    value: "https://your-proxmox.example.com:8006/api2"
+```
+
+#### ❌ Connection Timeout/Refused
+
+**Symptom**: Provider fails with connection timeouts or "connection refused"
+
+**Cause**: Network connectivity issues or wrong endpoint URL
+
+**Solutions**:
+1. **Verify endpoint**: Test from a pod in the cluster:
+   ```bash
+   kubectl run test-curl --rm -i --tty --image=curlimages/curl -- \
+     curl -k https://your-proxmox.example.com:8006/api2/json/version
+   ```
+
+2. **Check firewall**: Ensure port 8006 is accessible from Kubernetes cluster
+
+3. **Verify URL format**: Should be `https://hostname:8006/api2` (note the `/api2` path)
+
+#### ❌ TLS Certificate Errors
+
+**Symptom**: `x509: certificate signed by unknown authority`
+
+**Solutions**:
+- **Development**: Set `PVE_INSECURE_SKIP_VERIFY=true` (not for production!)
+- **Production**: Provide valid TLS certificates or CA bundle
+
+#### ❌ Authentication Failures
+
+**Symptom**: `401 Unauthorized` or `authentication failure`
+
+**Solutions**:
+1. **Verify token permissions**:
+   ```bash
+   # Test API token manually
+   curl -k "https://pve.example.com:8006/api2/json/version" \
+     -H "Authorization: PVEAPIToken=USER@REALM!TOKENID=SECRET"
+   ```
+
+2. **Check user privileges**: Ensure user has VM management permissions
+3. **Verify token format**: Should be `user@realm!tokenid` (note the `!`)
+
+#### ❌ Provider Not Starting
+
+**Symptom**: Pod in `CrashLoopBackOff` or `0/1 Ready`
+
+**Diagnostic Steps**:
+```bash
+# Check pod logs
+kubectl logs -n virtrigaud-system deployment/virtrigaud-provider-proxmox
+
+# Check environment variables
+kubectl describe pod -n virtrigaud-system -l app.kubernetes.io/component=provider-proxmox
+
+# Verify configuration
+kubectl get secret proxmox-credentials -o yaml
+```
+
+### Validation Commands
+
+Test your Proxmox connection before deploying:
+
+```bash
+# 1. Test network connectivity
+telnet your-proxmox.example.com 8006
+
+# 2. Test API endpoint
+curl -k https://your-proxmox.example.com:8006/api2/json/version
+
+# 3. Test authentication
+curl -k "https://your-proxmox.example.com:8006/api2/json/nodes" \
+  -H "Authorization: PVEAPIToken=USER@REALM!TOKENID=SECRET"
+
+# 4. Test from within cluster
+kubectl run debug --rm -i --tty --image=curlimages/curl -- sh
+# Then run curl commands from inside the pod
+```
+
+### Debug Logging
+
+Enable verbose logging for the provider:
+
+```yaml
+providers:
+  proxmox:
+    env:
+      - name: LOG_LEVEL
+        value: "debug"
+      - name: PVE_ENDPOINT
+        value: "https://pve.example.com:8006/api2"
 ```
 
 ## API Reference
