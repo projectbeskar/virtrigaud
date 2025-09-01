@@ -270,7 +270,7 @@ func describeVM(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Current Power State: %s\n", vm.Status.PowerState)
 		fmt.Printf("IPs: %s\n", strings.Join(vm.Status.IPs, ", "))
 		fmt.Printf("Console URL: %s\n", vm.Status.ConsoleURL)
-		fmt.Printf("Created: %s\n", vm.CreationTimestamp.Time.Format(time.RFC3339))
+		fmt.Printf("Created: %s\n", vm.CreationTimestamp.Format(time.RFC3339))
 
 		if len(vm.Status.Conditions) > 0 {
 			fmt.Printf("\nConditions:\n")
@@ -303,7 +303,7 @@ func vmEvents(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("%-30s %-10s %-15s %-50s\n", "LAST SEEN", "TYPE", "REASON", "MESSAGE")
 	for _, event := range events.Items {
-		lastSeen := event.LastTimestamp.Time.Format("2006-01-02 15:04:05")
+		lastSeen := event.LastTimestamp.Format("2006-01-02 15:04:05")
 		fmt.Printf("%-30s %-10s %-15s %-50s\n",
 			lastSeen, event.Type, event.Reason, event.Message)
 	}

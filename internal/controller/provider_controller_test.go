@@ -52,7 +52,7 @@ var _ = Describe("Provider Controller", func() {
 					},
 					Spec: infravirtrigaudiov1beta1.ProviderSpec{
 						Type:     "vsphere",
-						Endpoint: "https://vcenter.example.com",
+						Endpoint: "https://vcenter.example.com:443",
 						CredentialSecretRef: infravirtrigaudiov1beta1.ObjectRef{
 							Name: "test-creds",
 						},

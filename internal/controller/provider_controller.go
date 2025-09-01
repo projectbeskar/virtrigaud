@@ -129,7 +129,7 @@ func (r *ProviderReconciler) handleDeletion(ctx context.Context, provider *infra
 // reconcileInProcessRuntime handles in-process providers (existing behavior)
 func (r *ProviderReconciler) reconcileInProcessRuntime(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) (ctrl.Result, error) {
 	// For in-process providers, just update status to indicate they're ready
-	provider.Status.Runtime.Phase = "Ready"
+	provider.Status.Runtime.Phase = infravirtrigaudiov1beta1.ProviderRuntimePhaseRunning
 	provider.Status.Runtime.Message = "In-process provider ready"
 	provider.Status.Runtime.Endpoint = ""
 	provider.Status.Runtime.ServiceRef = nil
@@ -148,7 +148,7 @@ func (r *ProviderReconciler) reconcileRemoteRuntime(ctx context.Context, provide
 	// Validate remote runtime configuration
 	if err := r.validateRemoteRuntimeSpec(provider); err != nil {
 		k8s.SetCondition(&provider.Status.Conditions, "ProviderRuntimeReady", metav1.ConditionFalse, "InvalidConfiguration", err.Error())
-		provider.Status.Runtime.Phase = "Error"
+		provider.Status.Runtime.Phase = infravirtrigaudiov1beta1.ProviderRuntimePhaseFailed
 		provider.Status.Runtime.Message = err.Error()
 		return ctrl.Result{RequeueAfter: time.Minute}, err
 	}
@@ -162,7 +162,7 @@ func (r *ProviderReconciler) reconcileRemoteRuntime(ctx context.Context, provide
 	if err != nil {
 		logger.Error(err, "Failed to reconcile service")
 		k8s.SetCondition(&provider.Status.Conditions, "ProviderRuntimeReady", metav1.ConditionFalse, "ServiceError", fmt.Sprintf("Failed to create service: %v", err))
-		provider.Status.Runtime.Phase = "Error"
+		provider.Status.Runtime.Phase = infravirtrigaudiov1beta1.ProviderRuntimePhaseFailed
 		provider.Status.Runtime.Message = err.Error()
 		return ctrl.Result{RequeueAfter: time.Minute}, err
 	}
@@ -172,7 +172,7 @@ func (r *ProviderReconciler) reconcileRemoteRuntime(ctx context.Context, provide
 	if err != nil {
 		logger.Error(err, "Failed to reconcile deployment")
 		k8s.SetCondition(&provider.Status.Conditions, "ProviderRuntimeReady", metav1.ConditionFalse, "DeploymentError", fmt.Sprintf("Failed to create deployment: %v", err))
-		provider.Status.Runtime.Phase = "Error"
+		provider.Status.Runtime.Phase = infravirtrigaudiov1beta1.ProviderRuntimePhaseFailed
 		provider.Status.Runtime.Message = err.Error()
 		return ctrl.Result{RequeueAfter: time.Minute}, err
 	}
@@ -188,14 +188,14 @@ func (r *ProviderReconciler) reconcileRemoteRuntime(ctx context.Context, provide
 
 	// Check deployment readiness
 	if deployment.Status.ReadyReplicas > 0 {
-		provider.Status.Runtime.Phase = "Ready"
+		provider.Status.Runtime.Phase = infravirtrigaudiov1beta1.ProviderRuntimePhaseRunning
 		provider.Status.Runtime.Message = "Remote provider runtime is ready"
 
 		k8s.SetCondition(&provider.Status.Conditions, "ProviderRuntimeReady", metav1.ConditionTrue, "DeploymentReady", fmt.Sprintf("Deployment has %d ready replicas", deployment.Status.ReadyReplicas))
 
 		k8s.SetCondition(&provider.Status.Conditions, "ProviderAvailable", metav1.ConditionTrue, "RemoteAvailable", "Remote provider is available")
 	} else {
-		provider.Status.Runtime.Phase = "Pending"
+		provider.Status.Runtime.Phase = infravirtrigaudiov1beta1.ProviderRuntimePhasePending
 		provider.Status.Runtime.Message = "Waiting for deployment to be ready"
 
 		k8s.SetCondition(&provider.Status.Conditions, "ProviderRuntimeReady", metav1.ConditionFalse, "DeploymentNotReady", "Deployment pods are not ready yet")

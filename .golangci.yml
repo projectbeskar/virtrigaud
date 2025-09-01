@@ -1,23 +1,16 @@
+# golangci-lint configuration for VirtRigaud
+# Compatible with golangci-lint v2.4.0+
+
 run:
   timeout: 5m
   tests: true
-  modules-download-mode: readonly
 
 output:
-  formats:
-    - format: colored-line-number
   print-issued-lines: true
   print-linter-name: true
 
 issues:
   exclude-use-default: false
-  exclude-dirs:
-    - vendor
-    - proto/gen
-    - bin
-  exclude-files:
-    - ".*\\.pb\\.go$"
-    - ".*_generated\\.go$"
   max-issues-per-linter: 0
   max-same-issues: 0
 
@@ -27,33 +20,20 @@ linters:
     - staticcheck
     - ineffassign
     - gosimple
-    - gci
-    - gofumpt
     - unused
     - typecheck
     - errcheck
     - misspell
     - unconvert
-
   disable:
-    - gosec     # Too noisy for development
-    - gocritic  # Too aggressive for now
-    - unparam   # Not critical
-    - prealloc  # Not critical
+    - gosec
+    - gocritic
+    - unparam
+    - prealloc
 
 linters-settings:
-  gci:
-    sections:
-      - standard
-      - default
-      - prefix(github.com/projectbeskar/virtrigaud)
-  gofumpt:
-    extra-rules: true
   staticcheck:
     checks: ["all"]
   errcheck:
     check-type-assertions: true
     check-blank: false
-    exclude-functions:
-      - fmt.Println
-      - fmt.Printf

@@ -447,17 +447,18 @@ func (r *Runner) generateJUnitXML(results *Results) string {
 	for _, test := range results.Tests {
 		xml += fmt.Sprintf(`  <testcase name="%s" time="%.2f"`, test.Name, test.Duration.Seconds())
 
-		if test.Status == "failed" {
+		switch test.Status {
+		case "failed":
 			xml += fmt.Sprintf(`>
     <failure message="%s">%s</failure>
   </testcase>
 `, test.Error, test.Error)
-		} else if test.Status == "skipped" {
+		case "skipped":
 			xml += `>
     <skipped/>
   </testcase>
 `
-		} else {
+		default:
 			xml += "/>\n"
 		}
 	}
@@ -489,11 +490,12 @@ func (r *Runner) generateMarkdownReport(results *Results) string {
 
 	for _, test := range results.Tests {
 		status := test.Status
-		if test.Status == "passed" {
+		switch test.Status {
+		case "passed":
 			status = "✅ Passed"
-		} else if test.Status == "failed" {
+		case "failed":
 			status = "❌ Failed"
-		} else if test.Status == "skipped" {
+		case "skipped":
 			status = "⏭️ Skipped"
 		}
 
@@ -512,9 +514,10 @@ func (r *Runner) generateMarkdownReport(results *Results) string {
 // printTestResult prints a test result to stdout
 func (r *Runner) printTestResult(result TestResult) {
 	status := "✅"
-	if result.Status == "failed" {
+	switch result.Status {
+	case "failed":
 		status = "❌"
-	} else if result.Status == "skipped" {
+	case "skipped":
 		status = "⏭️"
 	}
 

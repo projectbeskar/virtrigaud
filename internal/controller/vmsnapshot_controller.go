@@ -76,7 +76,7 @@ func (r *VMSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	defer timer.Finish(metrics.OutcomeSuccess)
 
 	// Add correlation context
-	ctx = logging.WithCorrelationID(ctx, fmt.Sprintf("vmsnapshot-%s", req.NamespacedName.Name))
+	ctx = logging.WithCorrelationID(ctx, fmt.Sprintf("vmsnapshot-%s", req.Name))
 	logger := logging.FromContext(ctx)
 
 	logger.Info("Reconciling VMSnapshot", "snapshot", req.NamespacedName)
