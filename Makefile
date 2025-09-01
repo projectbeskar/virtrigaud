@@ -54,6 +54,34 @@ help: ## Display this help.
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	$(CONTROLLER_GEN) rbac:roleName=manager-role crd webhook paths="./api/infra.virtrigaud.io/v1beta1" paths="./internal/controller/..." output:crd:artifacts:config=config/crd/bases
 
+.PHONY: dev-deploy
+dev-deploy: ## Deploy to local Kind cluster for development
+	./hack/dev-deploy.sh deploy
+
+.PHONY: dev-reload
+dev-reload: ## Hot reload after code changes (rebuild images and restart pods)
+	./hack/dev-deploy.sh reload
+
+.PHONY: dev-status
+dev-status: ## Show development deployment status
+	./hack/dev-deploy.sh status
+
+.PHONY: dev-logs
+dev-logs: ## Follow manager logs in development cluster
+	./hack/dev-deploy.sh logs
+
+.PHONY: dev-shell
+dev-shell: ## Get shell in manager pod
+	./hack/dev-deploy.sh shell
+
+.PHONY: dev-cleanup
+dev-cleanup: ## Clean up development deployment
+	./hack/dev-deploy.sh cleanup
+
+.PHONY: dev-watch
+dev-watch: ## Watch for file changes and auto-reload (requires fswatch or inotify-tools)
+	./hack/dev-watch.sh watch
+
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter & fix issues.
 	$(GOLANGCI_LINT) run ./... --fix

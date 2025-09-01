@@ -1,0 +1,750 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.17.2
+  name: vmnetworkattachments.infra.virtrigaud.io
+spec:
+  group: infra.virtrigaud.io
+  names:
+    kind: VMNetworkAttachment
+    listKind: VMNetworkAttachmentList
+    plural: vmnetworkattachments
+    shortNames:
+    - vmnet
+    singular: vmnetworkattachment
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.ready
+      name: Ready
+      type: boolean
+    - jsonPath: .spec.network.type
+      name: Type
+      type: string
+    - jsonPath: .status.connectedVMs
+      name: Connected VMs
+      type: integer
+    - jsonPath: .status.availableOn[*]
+      name: Providers
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1beta1
+    schema:
+      openAPIV3Schema:
+        description: VMNetworkAttachment is the Schema for the vmnetworkattachments
+          API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: VMNetworkAttachmentSpec defines the desired state of VMNetworkAttachment
+            properties:
+              ipAllocation:
+                description: IPAllocation defines IP address allocation settings
+                properties:
+                  dhcpConfig:
+                    description: DHCPConfig contains DHCP configuration
+                    properties:
+                      clientID:
+                        description: ClientID specifies the DHCP client ID
+                        maxLength: 255
+                        type: string
+                      hostname:
+                        description: Hostname specifies the hostname to request
+                        maxLength: 255
+                        type: string
+                      options:
+                        additionalProperties:
+                          type: string
+                        description: Options contains DHCP options
+                        maxProperties: 20
+                        type: object
+                    type: object
+                  dnsConfig:
+                    description: DNSConfig contains DNS configuration
+                    properties:
+                      options:
+                        additionalProperties:
+                          type: string
+                        description: Options contains DNS resolver options
+                        maxProperties: 10
+                        type: object
+                      searchDomains:
+                        description: SearchDomains contains DNS search domains
+                        items:
+                          type: string
+                        maxItems: 10
+                        type: array
+                      servers:
+                        description: Servers contains DNS server addresses
+                        items:
+                          type: string
+                        maxItems: 10
+                        type: array
+                    type: object
+                  poolConfig:
+                    description: PoolConfig contains IP pool configuration
+                    properties:
+                      poolRef:
+                        description: PoolRef references an IP pool resource
+                        properties:
+                          name:
+                            description: Name of the referenced object
+                            maxLength: 253
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      preferredIP:
+                        description: PreferredIP requests a preferred IP from the
+                          pool
+                        pattern: ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$
+                        type: string
+                    required:
+                    - poolRef
+                    type: object
+                  staticConfig:
+                    description: StaticConfig contains static IP configuration
+                    properties:
+                      address:
+                        description: Address is the static IP address (CIDR notation)
+                        pattern: ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)/([0-9]|[1-2][0-9]|3[0-2])$
+                        type: string
+                      gateway:
+                        description: Gateway is the default gateway
+                        pattern: ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$
+                        type: string
+                      routes:
+                        description: Routes contains static routes
+                        items:
+                          description: StaticRoute defines a static route
+                          properties:
+                            destination:
+                              description: Destination is the destination network
+                                (CIDR notation)
+                              pattern: ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)/([0-9]|[1-2][0-9]|3[0-2])$
+                              type: string
+                            gateway:
+                              description: Gateway is the route gateway
+                              pattern: ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$
+                              type: string
+                            metric:
+                              description: Metric is the route metric
+                              format: int32
+                              maximum: 65535
+                              minimum: 0
+                              type: integer
+                          required:
+                          - destination
+                          - gateway
+                          type: object
+                        maxItems: 20
+                        type: array
+                    required:
+                    - address
+                    type: object
+                  type:
+                    allOf:
+                    - enum:
+                      - DHCP
+                      - Static
+                      - Pool
+                      - None
+                    - enum:
+                      - DHCP
+                      - Static
+                      - Pool
+                      - None
+                    default: DHCP
+                    description: Type specifies the IP allocation type
+                    type: string
+                type: object
+              metadata:
+                description: Metadata contains network metadata and labels
+                properties:
+                  description:
+                    description: Description provides a description
+                    maxLength: 1024
+                    type: string
+                  displayName:
+                    description: DisplayName is a human-readable name
+                    maxLength: 255
+                    type: string
+                  environment:
+                    description: Environment specifies the environment (dev, staging,
+                      prod)
+                    enum:
+                    - dev
+                    - staging
+                    - prod
+                    - test
+                    type: string
+                  tags:
+                    additionalProperties:
+                      type: string
+                    description: Tags are key-value pairs for categorizing
+                    maxProperties: 50
+                    type: object
+                type: object
+              network:
+                description: Network defines the underlying network configuration
+                properties:
+                  libvirt:
+                    description: Libvirt contains Libvirt-specific network configuration
+                    properties:
+                      bridge:
+                        description: Bridge specifies the bridge configuration
+                        properties:
+                          delay:
+                            description: Delay is the STP forwarding delay
+                            format: int32
+                            maximum: 30
+                            minimum: 0
+                            type: integer
+                          name:
+                            description: Name is the bridge name
+                            maxLength: 15
+                            type: string
+                          stp:
+                            default: false
+                            description: STP enables Spanning Tree Protocol
+                            type: boolean
+                        required:
+                        - name
+                        type: object
+                      driver:
+                        description: Driver specifies the network driver configuration
+                        properties:
+                          eventIDX:
+                            description: EventIDX enables event index
+                            type: boolean
+                          ioEventFD:
+                            description: IOEventFD enables IO event file descriptor
+                            type: boolean
+                          name:
+                            description: Name is the driver name
+                            enum:
+                            - kvm
+                            - vfio
+                            - uio
+                            type: string
+                          queues:
+                            description: Queues specifies the number of queues
+                            format: int32
+                            maximum: 16
+                            minimum: 1
+                            type: integer
+                          txMode:
+                            description: TxMode specifies the TX mode
+                            enum:
+                            - iothread
+                            - timer
+                            type: string
+                        type: object
+                      filterRef:
+                        description: FilterRef specifies network filter configuration
+                        properties:
+                          filter:
+                            description: Filter is the filter name
+                            maxLength: 255
+                            type: string
+                          parameters:
+                            additionalProperties:
+                              type: string
+                            description: Parameters contains filter parameters
+                            maxProperties: 20
+                            type: object
+                        required:
+                        - filter
+                        type: object
+                      model:
+                        default: virtio
+                        description: Model specifies the network device model
+                        enum:
+                        - virtio
+                        - e1000
+                        - e1000e
+                        - rtl8139
+                        - pcnet
+                        - ne2k_pci
+                        type: string
+                      networkName:
+                        description: NetworkName specifies the Libvirt network name
+                        maxLength: 255
+                        type: string
+                    type: object
+                  mtu:
+                    default: 1500
+                    description: MTU specifies the Maximum Transmission Unit
+                    format: int32
+                    maximum: 9000
+                    minimum: 68
+                    type: integer
+                  type:
+                    allOf:
+                    - enum:
+                      - bridged
+                      - nat
+                      - isolated
+                      - host-only
+                      - external
+                    - enum:
+                      - bridged
+                      - nat
+                      - isolated
+                      - host-only
+                      - external
+                    default: bridged
+                    description: Type specifies the network type
+                    type: string
+                  vsphere:
+                    description: VSphere contains vSphere-specific network configuration
+                    properties:
+                      distributedSwitch:
+                        description: DistributedSwitch specifies the distributed virtual
+                          switch
+                        properties:
+                          name:
+                            description: Name is the name of the distributed switch
+                            maxLength: 255
+                            type: string
+                          portgroupType:
+                            description: PortgroupType specifies the type of portgroup
+                            enum:
+                            - ephemeral
+                            - distributed
+                            type: string
+                          uuid:
+                            description: UUID is the UUID of the distributed switch
+                              (optional)
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      portgroup:
+                        description: Portgroup specifies the vSphere portgroup name
+                        maxLength: 255
+                        type: string
+                      security:
+                        description: Security defines portgroup security settings
+                        properties:
+                          allowForgedTransmits:
+                            default: true
+                            description: AllowForgedTransmits allows forged transmits
+                            type: boolean
+                          allowMACChanges:
+                            default: true
+                            description: AllowMACChanges allows MAC address changes
+                            type: boolean
+                          allowPromiscuous:
+                            default: false
+                            description: AllowPromiscuous allows promiscuous mode
+                            type: boolean
+                        type: object
+                      trafficShaping:
+                        description: TrafficShaping defines traffic shaping settings
+                        properties:
+                          averageBandwidth:
+                            description: AverageBandwidth is the average bandwidth
+                              in bits per second
+                            format: int64
+                            minimum: 1000
+                            type: integer
+                          burstSize:
+                            description: BurstSize is the burst size in bytes
+                            format: int64
+                            minimum: 1024
+                            type: integer
+                          enabled:
+                            default: false
+                            description: Enabled indicates if traffic shaping is enabled
+                            type: boolean
+                          peakBandwidth:
+                            description: PeakBandwidth is the peak bandwidth in bits
+                              per second
+                            format: int64
+                            minimum: 1000
+                            type: integer
+                        type: object
+                      vlan:
+                        description: VLAN specifies the VLAN configuration
+                        properties:
+                          primaryVlanID:
+                            description: PrimaryVlanID specifies the primary VLAN
+                              ID for PVLAN
+                            format: int32
+                            maximum: 4094
+                            minimum: 1
+                            type: integer
+                          secondaryVlanID:
+                            description: SecondaryVlanID specifies the secondary VLAN
+                              ID for PVLAN
+                            format: int32
+                            maximum: 4094
+                            minimum: 1
+                            type: integer
+                          trunkVlanIDs:
+                            description: TrunkVlanIDs specifies VLAN IDs for trunk
+                              type
+                            items:
+                              format: int32
+                              type: integer
+                            maxItems: 100
+                            type: array
+                          type:
+                            default: none
+                            description: Type specifies the VLAN type
+                            enum:
+                            - none
+                            - vlan
+                            - pvlan
+                            - trunk
+                            type: string
+                          vlanID:
+                            description: VlanID specifies the VLAN ID for VLAN type
+                            format: int32
+                            maximum: 4094
+                            minimum: 1
+                            type: integer
+                        type: object
+                    type: object
+                type: object
+              qos:
+                description: QoS defines Quality of Service settings
+                properties:
+                  dscp:
+                    description: DSCP specifies DSCP marking
+                    format: int32
+                    maximum: 63
+                    minimum: 0
+                    type: integer
+                  egressLimit:
+                    description: EgressLimit limits outbound traffic in bits per second
+                    format: int64
+                    minimum: 1000
+                    type: integer
+                  ingressLimit:
+                    description: IngressLimit limits inbound traffic in bits per second
+                    format: int64
+                    minimum: 1000
+                    type: integer
+                  priority:
+                    description: Priority specifies traffic priority
+                    format: int32
+                    maximum: 7
+                    minimum: 0
+                    type: integer
+                type: object
+              security:
+                description: Security defines network security settings
+                properties:
+                  encryption:
+                    description: Encryption contains network encryption settings
+                    properties:
+                      enabled:
+                        default: false
+                        description: Enabled indicates if encryption is enabled
+                        type: boolean
+                      keyRef:
+                        description: KeyRef references encryption keys
+                        properties:
+                          name:
+                            description: Name of the referenced object
+                            maxLength: 253
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      protocol:
+                        description: Protocol specifies the encryption protocol
+                        enum:
+                        - ipsec
+                        - wireguard
+                        - openvpn
+                        type: string
+                    type: object
+                  firewall:
+                    description: Firewall contains firewall configuration
+                    properties:
+                      defaultPolicy:
+                        default: ACCEPT
+                        description: DefaultPolicy specifies the default firewall
+                          policy
+                        enum:
+                        - ACCEPT
+                        - DROP
+                        - REJECT
+                        type: string
+                      enabled:
+                        default: false
+                        description: Enabled indicates if firewall is enabled
+                        type: boolean
+                      rules:
+                        description: Rules contains firewall rules
+                        items:
+                          description: FirewallRule defines a firewall rule
+                          properties:
+                            action:
+                              description: Action specifies the rule action
+                              enum:
+                              - ACCEPT
+                              - DROP
+                              - REJECT
+                              type: string
+                            destinationCIDR:
+                              description: DestinationCIDR specifies the destination
+                                CIDR
+                              type: string
+                            direction:
+                              description: Direction specifies the traffic direction
+                              enum:
+                              - in
+                              - out
+                              - inout
+                              type: string
+                            name:
+                              description: Name is the rule name
+                              maxLength: 255
+                              type: string
+                            ports:
+                              description: Ports specifies the port range
+                              properties:
+                                end:
+                                  description: End is the ending port (optional, defaults
+                                    to start)
+                                  format: int32
+                                  maximum: 65535
+                                  minimum: 1
+                                  type: integer
+                                start:
+                                  description: Start is the starting port
+                                  format: int32
+                                  maximum: 65535
+                                  minimum: 1
+                                  type: integer
+                              required:
+                              - start
+                              type: object
+                            priority:
+                              description: Priority specifies the rule priority
+                              format: int32
+                              maximum: 1000
+                              minimum: 1
+                              type: integer
+                            protocol:
+                              description: Protocol specifies the protocol
+                              enum:
+                              - tcp
+                              - udp
+                              - icmp
+                              - all
+                              type: string
+                            sourceCIDR:
+                              description: SourceCIDR specifies the source CIDR
+                              type: string
+                          required:
+                          - action
+                          - direction
+                          - name
+                          type: object
+                        maxItems: 100
+                        type: array
+                    type: object
+                  isolation:
+                    description: Isolation contains network isolation settings
+                    properties:
+                      allowedNetworks:
+                        description: AllowedNetworks contains allowed network CIDRs
+                        items:
+                          type: string
+                        maxItems: 50
+                        type: array
+                      deniedNetworks:
+                        description: DeniedNetworks contains denied network CIDRs
+                        items:
+                          type: string
+                        maxItems: 50
+                        type: array
+                      mode:
+                        description: Mode specifies the isolation mode
+                        enum:
+                        - none
+                        - strict
+                        - custom
+                        type: string
+                    type: object
+                type: object
+            required:
+            - network
+            type: object
+          status:
+            description: VMNetworkAttachmentStatus defines the observed state of VMNetworkAttachment
+            properties:
+              availableOn:
+                description: AvailableOn lists the providers where the network is
+                  available
+                items:
+                  type: string
+                type: array
+              conditions:
+                description: Conditions represent the latest available observations
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              connectedVMs:
+                description: ConnectedVMs is the number of VMs using this network
+                format: int32
+                type: integer
+              ipAllocations:
+                description: IPAllocations contains current IP allocations
+                items:
+                  description: IPAllocation represents an IP allocation
+                  properties:
+                    allocatedAt:
+                      description: AllocatedAt is when the IP was allocated
+                      format: date-time
+                      type: string
+                    ip:
+                      description: IP is the allocated IP address
+                      type: string
+                    leaseExpiry:
+                      description: LeaseExpiry is when the IP lease expires (for DHCP)
+                      format: date-time
+                      type: string
+                    mac:
+                      description: MAC is the allocated MAC address
+                      type: string
+                    vm:
+                      description: VM is the VM name that has the IP allocated
+                      type: string
+                  required:
+                  - ip
+                  - vm
+                  type: object
+                type: array
+              message:
+                description: Message provides additional details about the current
+                  state
+                type: string
+              observedGeneration:
+                description: ObservedGeneration reflects the generation observed by
+                  the controller
+                format: int64
+                type: integer
+              phase:
+                description: Phase represents the current phase
+                enum:
+                - Pending
+                - Configuring
+                - Ready
+                - Failed
+                type: string
+              providerStatus:
+                additionalProperties:
+                  description: ProviderNetworkStatus contains provider-specific network
+                    status
+                  properties:
+                    available:
+                      description: Available indicates if the network is available
+                        on this provider
+                      type: boolean
+                    id:
+                      description: ID is the provider-specific network identifier
+                      type: string
+                    lastUpdated:
+                      description: LastUpdated is when the status was last updated
+                      format: date-time
+                      type: string
+                    message:
+                      description: Message provides provider-specific status information
+                      type: string
+                    state:
+                      description: State is the provider-specific network state
+                      type: string
+                  required:
+                  - available
+                  type: object
+                description: ProviderStatus contains provider-specific status information
+                type: object
+              ready:
+                description: Ready indicates if the network is ready for use
+                type: boolean
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

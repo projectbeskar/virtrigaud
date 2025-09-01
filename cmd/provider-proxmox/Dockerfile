@@ -36,7 +36,7 @@ RUN CGO_ENABLED=${CGO_ENABLED} GOOS=${GOOS} GOARCH=${GOARCH} go build \
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
 FROM gcr.io/distroless/static:nonroot
 WORKDIR /
-COPY --from=builder /workspace/provider-proxmox .
+COPY --from=builder /workspace/provider-proxmox /usr/local/bin/provider-proxmox
 USER 65532:65532
 
-ENTRYPOINT ["/provider-proxmox"]
+ENTRYPOINT ["/usr/local/bin/provider-proxmox"]

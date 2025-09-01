@@ -27,3 +27,8 @@ go.work
 *~
 *test*local.*
 *.sarif
+
+# Local development files
+DEVELOPMENT.md
+hack/dev-deploy.sh
+hack/dev-watch.sh

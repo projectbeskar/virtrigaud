@@ -1,0 +1,737 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.17.2
+  name: vmimages.infra.virtrigaud.io
+spec:
+  group: infra.virtrigaud.io
+  names:
+    kind: VMImage
+    listKind: VMImageList
+    plural: vmimages
+    shortNames:
+    - vmimg
+    singular: vmimage
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.ready
+      name: Ready
+      type: boolean
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.size
+      name: Size
+      type: string
+    - jsonPath: .status.availableOn[*]
+      name: Providers
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1beta1
+    schema:
+      openAPIV3Schema:
+        description: VMImage is the Schema for the vmimages API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: VMImageSpec defines the desired state of VMImage
+            properties:
+              distribution:
+                description: Distribution contains OS distribution information
+                properties:
+                  family:
+                    description: Family is the OS family
+                    enum:
+                    - linux
+                    - windows
+                    - bsd
+                    - other
+                    type: string
+                  kernel:
+                    description: Kernel specifies kernel information
+                    properties:
+                      type:
+                        description: Type is the kernel type
+                        enum:
+                        - linux
+                        - windows
+                        - freebsd
+                        - other
+                        type: string
+                      version:
+                        description: Version is the kernel version
+                        type: string
+                    type: object
+                  name:
+                    description: Name is the OS distribution name
+                    enum:
+                    - ubuntu
+                    - centos
+                    - rhel
+                    - fedora
+                    - debian
+                    - suse
+                    - windows
+                    - freebsd
+                    - coreos
+                    - other
+                    type: string
+                  variant:
+                    description: Variant is the distribution variant (e.g., server,
+                      desktop)
+                    maxLength: 100
+                    type: string
+                  version:
+                    description: Version is the distribution version
+                    maxLength: 100
+                    type: string
+                type: object
+              metadata:
+                description: Metadata contains image metadata and annotations
+                properties:
+                  annotations:
+                    additionalProperties:
+                      type: string
+                    description: Annotations are additional metadata annotations
+                    maxProperties: 50
+                    type: object
+                  architecture:
+                    default: amd64
+                    description: Architecture specifies the CPU architecture
+                    enum:
+                    - amd64
+                    - arm64
+                    - x86_64
+                    - aarch64
+                    type: string
+                  description:
+                    description: Description provides a description of the image
+                    maxLength: 1024
+                    type: string
+                  displayName:
+                    description: DisplayName is a human-readable name for the image
+                    maxLength: 255
+                    type: string
+                  tags:
+                    additionalProperties:
+                      type: string
+                    description: Tags are key-value pairs for categorizing the image
+                    maxProperties: 50
+                    type: object
+                  version:
+                    description: Version specifies the image version
+                    maxLength: 100
+                    type: string
+                type: object
+              prepare:
+                description: Prepare contains optional image preparation steps
+                properties:
+                  force:
+                    description: Force forces re-import even if image exists
+                    type: boolean
+                  onMissing:
+                    default: Import
+                    description: OnMissing defines the action to take when image is
+                      missing
+                    enum:
+                    - Import
+                    - Fail
+                    - Wait
+                    type: string
+                  optimization:
+                    description: Optimization defines image optimization options
+                    properties:
+                      convertFormat:
+                        description: ConvertFormat converts the image to a more optimal
+                          format
+                        enum:
+                        - qcow2
+                        - raw
+                        - vmdk
+                        - vhd
+                        - vhdx
+                        - iso
+                        - ova
+                        - ovf
+                        type: string
+                      enableCompression:
+                        default: false
+                        description: EnableCompression enables image compression
+                        type: boolean
+                      enableDeltaSync:
+                        default: false
+                        description: EnableDeltaSync enables delta synchronization
+                          for updates
+                        type: boolean
+                      removeUnusedSpace:
+                        default: false
+                        description: RemoveUnusedSpace removes unused space from the
+                          image
+                        type: boolean
+                    type: object
+                  retries:
+                    default: 3
+                    description: Retries defines the number of retry attempts for
+                      failed operations
+                    format: int32
+                    maximum: 10
+                    minimum: 0
+                    type: integer
+                  storage:
+                    description: Storage defines storage-specific preparation options
+                    properties:
+                      compression:
+                        default: false
+                        description: Compression enables compression during import
+                        type: boolean
+                      libvirt:
+                        description: Libvirt storage options
+                        properties:
+                          allocationPolicy:
+                            description: AllocationPolicy defines how storage is allocated
+                            enum:
+                            - eager
+                            - lazy
+                            type: string
+                          preallocation:
+                            description: Preallocation specifies preallocation mode
+                            enum:
+                            - "off"
+                            - metadata
+                            - falloc
+                            - full
+                            type: string
+                          storagePool:
+                            description: StoragePool specifies the target storage
+                              pool for import
+                            maxLength: 255
+                            type: string
+                        type: object
+                      preferredFormat:
+                        description: PreferredFormat specifies the preferred target
+                          format
+                        enum:
+                        - qcow2
+                        - raw
+                        - vmdk
+                        - vhd
+                        - vhdx
+                        - iso
+                        - ova
+                        - ovf
+                        type: string
+                      vsphere:
+                        description: VSphere storage options
+                        properties:
+                          datastore:
+                            description: Datastore specifies the target datastore
+                              for import
+                            maxLength: 255
+                            type: string
+                          diskType:
+                            description: DiskType specifies the disk provisioning
+                              type
+                            enum:
+                            - thin
+                            - thick
+                            - eagerzeroedthick
+                            type: string
+                          folder:
+                            description: Folder specifies the target folder for import
+                            maxLength: 255
+                            type: string
+                          thinProvisioned:
+                            description: ThinProvisioned indicates whether to use
+                              thin provisioning
+                            type: boolean
+                        type: object
+                    type: object
+                  timeout:
+                    default: 30m
+                    description: Timeout defines the maximum time to wait for preparation
+                    type: string
+                  validateChecksum:
+                    default: true
+                    description: ValidateChecksum validates the image checksum
+                    type: boolean
+                type: object
+              source:
+                description: Source defines the image source configuration
+                properties:
+                  dataVolume:
+                    description: DataVolume contains DataVolume-based image configuration
+                    properties:
+                      name:
+                        description: Name is the name of the DataVolume
+                        maxLength: 253
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                      namespace:
+                        description: Namespace is the namespace of the DataVolume
+                          (defaults to image namespace)
+                        maxLength: 63
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  http:
+                    description: HTTP contains HTTP/HTTPS download configuration
+                    properties:
+                      authentication:
+                        description: Authentication contains authentication configuration
+                        properties:
+                          basicAuth:
+                            description: BasicAuth contains basic authentication configuration
+                            properties:
+                              passwordKey:
+                                default: password
+                                description: 'PasswordKey is the key in the secret
+                                  containing the password (default: password)'
+                                type: string
+                              secretRef:
+                                description: SecretRef references a secret containing
+                                  username and password
+                                properties:
+                                  name:
+                                    description: Name of the referenced object
+                                    maxLength: 253
+                                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                    type: string
+                                required:
+                                - name
+                                type: object
+                              usernameKey:
+                                default: username
+                                description: 'UsernameKey is the key in the secret
+                                  containing the username (default: username)'
+                                type: string
+                            required:
+                            - secretRef
+                            type: object
+                          bearer:
+                            description: Bearer contains bearer token authentication
+                            properties:
+                              secretRef:
+                                description: SecretRef references a secret containing
+                                  the bearer token
+                                properties:
+                                  name:
+                                    description: Name of the referenced object
+                                    maxLength: 253
+                                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                    type: string
+                                required:
+                                - name
+                                type: object
+                              tokenKey:
+                                default: token
+                                description: 'TokenKey is the key in the secret containing
+                                  the token (default: token)'
+                                type: string
+                            required:
+                            - secretRef
+                            type: object
+                          clientCert:
+                            description: ClientCert contains client certificate authentication
+                            properties:
+                              certKey:
+                                default: tls.crt
+                                description: 'CertKey is the key in the secret containing
+                                  the certificate (default: tls.crt)'
+                                type: string
+                              keyKey:
+                                default: tls.key
+                                description: 'KeyKey is the key in the secret containing
+                                  the private key (default: tls.key)'
+                                type: string
+                              secretRef:
+                                description: SecretRef references a secret containing
+                                  the client certificate and key
+                                properties:
+                                  name:
+                                    description: Name of the referenced object
+                                    maxLength: 253
+                                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                    type: string
+                                required:
+                                - name
+                                type: object
+                            required:
+                            - secretRef
+                            type: object
+                        type: object
+                      checksum:
+                        description: Checksum provides expected checksum for verification
+                        type: string
+                      checksumType:
+                        default: sha256
+                        description: ChecksumType specifies the checksum algorithm
+                        enum:
+                        - md5
+                        - sha1
+                        - sha256
+                        - sha512
+                        type: string
+                      headers:
+                        additionalProperties:
+                          type: string
+                        description: Headers contains HTTP headers to include in the
+                          request
+                        maxProperties: 20
+                        type: object
+                      timeout:
+                        default: 30m
+                        description: Timeout specifies the download timeout
+                        type: string
+                      url:
+                        description: URL is the HTTP/HTTPS URL to download the image
+                        pattern: ^https?://.*
+                        type: string
+                    required:
+                    - url
+                    type: object
+                  libvirt:
+                    description: Libvirt contains Libvirt-specific image configuration
+                    properties:
+                      checksum:
+                        description: Checksum provides expected checksum for verification
+                        type: string
+                      checksumType:
+                        default: sha256
+                        description: ChecksumType specifies the checksum algorithm
+                        enum:
+                        - md5
+                        - sha1
+                        - sha256
+                        - sha512
+                        type: string
+                      format:
+                        default: qcow2
+                        description: Format specifies the image format
+                        enum:
+                        - qcow2
+                        - raw
+                        - vmdk
+                        - vhd
+                        - vhdx
+                        - iso
+                        - ova
+                        - ovf
+                        type: string
+                      path:
+                        description: Path specifies the path to the image file on
+                          the host
+                        type: string
+                      storagePool:
+                        description: StoragePool specifies the libvirt storage pool
+                        maxLength: 255
+                        type: string
+                      url:
+                        description: URL provides a URL to download the image
+                        pattern: ^(https?|ftp)://.*
+                        type: string
+                    type: object
+                  registry:
+                    description: Registry contains container registry image configuration
+                    properties:
+                      format:
+                        default: qcow2
+                        description: Format specifies the expected image format
+                        enum:
+                        - qcow2
+                        - raw
+                        - vmdk
+                        - vhd
+                        - vhdx
+                        - iso
+                        - ova
+                        - ovf
+                        type: string
+                      image:
+                        description: Image is the container image reference
+                        pattern: ^[a-zA-Z0-9._/-]+:[a-zA-Z0-9._-]+$
+                        type: string
+                      pullSecretRef:
+                        description: PullSecretRef references a secret for pulling
+                          the image
+                        properties:
+                          name:
+                            description: Name of the referenced object
+                            maxLength: 253
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                            type: string
+                        required:
+                        - name
+                        type: object
+                    required:
+                    - image
+                    type: object
+                  vsphere:
+                    description: VSphere contains vSphere-specific image configuration
+                    properties:
+                      checksum:
+                        description: Checksum provides expected checksum for verification
+                        type: string
+                      checksumType:
+                        default: sha256
+                        description: ChecksumType specifies the checksum algorithm
+                        enum:
+                        - md5
+                        - sha1
+                        - sha256
+                        - sha512
+                        type: string
+                      contentLibrary:
+                        description: ContentLibrary references a vSphere content library
+                          item
+                        properties:
+                          item:
+                            description: Item is the name of the library item
+                            maxLength: 255
+                            type: string
+                          library:
+                            description: Library is the name of the content library
+                            maxLength: 255
+                            type: string
+                          version:
+                            description: Version specifies the item version (optional)
+                            type: string
+                        required:
+                        - item
+                        - library
+                        type: object
+                      ovaURL:
+                        description: OVAURL provides a URL to an OVA file to import
+                        pattern: ^https?://.*\.(ova|ovf)$
+                        type: string
+                      providerRef:
+                        description: ProviderRef references the vSphere provider for
+                          importing
+                        properties:
+                          name:
+                            description: Name of the referenced object
+                            maxLength: 253
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      templateName:
+                        description: TemplateName references an existing vSphere template
+                        maxLength: 255
+                        type: string
+                    type: object
+                type: object
+            required:
+            - source
+            type: object
+          status:
+            description: VMImageStatus defines the observed state of VMImage
+            properties:
+              availableOn:
+                description: AvailableOn lists the providers where the image is available
+                items:
+                  type: string
+                type: array
+              checksum:
+                description: Checksum is the actual checksum of the prepared image
+                type: string
+              conditions:
+                description: Conditions represent the latest available observations
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              format:
+                description: Format is the actual format of the prepared image
+                enum:
+                - qcow2
+                - raw
+                - vmdk
+                - vhd
+                - vhdx
+                - iso
+                - ova
+                - ovf
+                type: string
+              importProgress:
+                description: ImportProgress shows the progress of image import operations
+                properties:
+                  eta:
+                    description: ETA is the estimated time to completion
+                    type: string
+                  percentage:
+                    description: Percentage is the completion percentage (0-100)
+                    format: int32
+                    maximum: 100
+                    minimum: 0
+                    type: integer
+                  startTime:
+                    description: StartTime is when the import started
+                    format: date-time
+                    type: string
+                  totalBytes:
+                    description: TotalBytes is the total size of the image being imported
+                    format: int64
+                    type: integer
+                  transferRate:
+                    description: TransferRate is the current transfer rate in bytes
+                      per second
+                    format: int64
+                    type: integer
+                  transferredBytes:
+                    description: TransferredBytes is the number of bytes transferred
+                      so far
+                    format: int64
+                    type: integer
+                type: object
+              lastPrepareTime:
+                description: LastPrepareTime records when the image was last prepared
+                format: date-time
+                type: string
+              message:
+                description: Message provides additional details about the current
+                  state
+                type: string
+              observedGeneration:
+                description: ObservedGeneration reflects the generation observed by
+                  the controller
+                format: int64
+                type: integer
+              phase:
+                description: Phase represents the current phase of image preparation
+                enum:
+                - Pending
+                - Downloading
+                - Importing
+                - Converting
+                - Optimizing
+                - Ready
+                - Failed
+                type: string
+              prepareTaskRef:
+                description: PrepareTaskRef tracks any ongoing image preparation operations
+                type: string
+              providerStatus:
+                additionalProperties:
+                  description: ProviderImageStatus contains provider-specific image
+                    status
+                  properties:
+                    available:
+                      description: Available indicates if the image is available on
+                        this provider
+                      type: boolean
+                    id:
+                      description: ID is the provider-specific image identifier
+                      type: string
+                    lastUpdated:
+                      description: LastUpdated is when the status was last updated
+                      format: date-time
+                      type: string
+                    message:
+                      description: Message provides provider-specific status information
+                      type: string
+                    path:
+                      description: Path is the provider-specific image path
+                      type: string
+                    size:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      description: Size is the image size on this provider
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                  required:
+                  - available
+                  type: object
+                description: ProviderStatus contains provider-specific status information
+                type: object
+              ready:
+                description: Ready indicates if the image is ready for use
+                type: boolean
+              size:
+                anyOf:
+                - type: integer
+                - type: string
+                description: Size is the size of the prepared image
+                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                x-kubernetes-int-or-string: true
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
