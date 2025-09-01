@@ -372,6 +372,29 @@ If CRDs are missing after Helm install:
 - kubectl
 - A Kubernetes cluster
 
+### Local Testing
+
+Test GitHub Actions workflows locally before pushing to save costs and catch issues early:
+
+```bash
+# Setup local testing environment
+./hack/test-workflows-locally.sh setup
+
+# Quick lint check (run before every commit)
+./hack/test-lint-locally.sh
+
+# Comprehensive CI testing (run before PRs)
+./hack/test-ci-locally.sh
+
+# Test Helm charts with Kind cluster
+./hack/test-helm-locally.sh
+
+# Simulate release workflow
+./hack/test-release-locally.sh v0.2.0-test
+```
+
+See [TESTING_WORKFLOWS_LOCALLY.md](TESTING_WORKFLOWS_LOCALLY.md) for detailed instructions.
+
 ### Building
 
 ```bash
