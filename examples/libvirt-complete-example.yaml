@@ -1,4 +1,9 @@
-# Complete example showing how to create a VM with Libvirt provider
+# Complete LibVirt/KVM Provider Example
+# This example demonstrates VM creation using the LibVirt provider
+#
+# 📝 NOTE: Requires LibVirt Daemon Access
+# The LibVirt provider connects to libvirtd (local or remote). For local development,
+# install libvirt-daemon-system. See docs/providers/libvirt.md for setup details.
 
 # First, create the credentials secret (for remote connections)
 apiVersion: v1
