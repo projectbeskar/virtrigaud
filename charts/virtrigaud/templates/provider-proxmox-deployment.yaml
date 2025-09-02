@@ -9,7 +9,7 @@ metadata:
     {{- include "virtrigaud.labels" . | nindent 4 }}
     app.kubernetes.io/component: provider-proxmox
 spec:
-  replicas: {{ .Values.providers.proxmox.remote.replicaCount }}
+  replicas: {{ .Values.providers.proxmox.replicaCount }}
   selector:
     matchLabels:
       {{- include "virtrigaud.selectorLabels" . | nindent 6 }}
@@ -59,7 +59,7 @@ spec:
           initialDelaySeconds: 5
           periodSeconds: 10
         resources:
-          {{- toYaml .Values.providers.proxmox.remote.resources | nindent 10 }}
+          {{- toYaml .Values.providers.proxmox.resources | nindent 10 }}
         volumeMounts:
         - name: tmp
           mountPath: /tmp

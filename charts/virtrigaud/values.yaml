@@ -88,56 +88,47 @@ providers:
   # Libvirt provider
   libvirt:
     enabled: true
-    # Remote runtime configuration
-    remote:
-      enabled: true
-      replicaCount: 1
-      image:
-        repository: projectbeskar/virtrigaud/provider-libvirt
-        tag: "v0.1.1"
-      resources:
-        limits:
-          cpu: 1000m
-          memory: 1Gi
-        requests:
-          cpu: 200m
-          memory: 256Mi
+    replicaCount: 1
+    image:
+      repository: projectbeskar/virtrigaud/provider-libvirt
+      tag: "v0.1.1"
+    resources:
+      limits:
+        cpu: 1000m
+        memory: 1Gi
+      requests:
+        cpu: 200m
+        memory: 256Mi
 
   # vSphere provider  
   vsphere:
     enabled: true
-    # Remote runtime configuration
-    remote:
-      enabled: true
-      replicaCount: 1
-      image:
-        repository: projectbeskar/virtrigaud/provider-vsphere
-        tag: "v0.1.1"
-      resources:
-        limits:
-          cpu: 1000m
-          memory: 1Gi
-        requests:
-          cpu: 200m
-          memory: 256Mi
+    replicaCount: 1
+    image:
+      repository: projectbeskar/virtrigaud/provider-vsphere
+      tag: "v0.1.1"
+    resources:
+      limits:
+        cpu: 1000m
+        memory: 1Gi
+      requests:
+        cpu: 200m
+        memory: 256Mi
 
   # Proxmox provider
   proxmox:
     enabled: false
-    # Remote runtime configuration
-    remote:
-      enabled: true
-      replicaCount: 1
-      image:
-        repository: projectbeskar/virtrigaud/provider-proxmox
-        tag: "v0.1.1"
-      resources:
-        limits:
-          cpu: 1000m
-          memory: 1Gi
-        requests:
-          cpu: 200m
-          memory: 256Mi
+    replicaCount: 1
+    image:
+      repository: projectbeskar/virtrigaud/provider-proxmox
+      tag: "v0.1.1"
+    resources:
+      limits:
+        cpu: 1000m
+        memory: 1Gi
+      requests:
+        cpu: 200m
+        memory: 256Mi
 
 # RBAC configuration
 rbac:

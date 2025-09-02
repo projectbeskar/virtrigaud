@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Local Lint Testing Script
-# Replicates the lint.yml workflow locally without GitHub Actions
+# Replicates the lint job from ci.yml workflow locally without GitHub Actions
 
 set -euo pipefail
 
@@ -20,13 +20,13 @@ log_success() { echo -e "${GREEN}✅ $1${NC}"; }
 log_warning() { echo -e "${YELLOW}⚠️  $1${NC}"; }
 log_error() { echo -e "${RED}❌ $1${NC}"; }
 
-# Configuration matching the GitHub workflow
-GO_VERSION="1.21"
-GOLANGCI_LINT_VERSION="v1.58.2"
+# Configuration matching the ci.yml lint job
+GO_VERSION="1.23"
+GOLANGCI_LINT_VERSION="v1.64.8"
 
 cd "$PROJECT_ROOT"
 
-log_info "🔍 Running local lint testing (replicating lint.yml workflow)"
+log_info "🔍 Running local lint testing (replicating ci.yml lint job)"
 
 # Step 1: Check Go version
 log_info "Checking Go version..."
