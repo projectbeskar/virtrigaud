@@ -91,6 +91,130 @@ stringData:
   password: "secure-password"
 ```
 
+## Deployment Configuration
+
+### Required Environment Variables
+
+The Proxmox provider **requires** environment variables to connect to your Proxmox VE server. Configure these variables in your Helm values file:
+
+| Variable | Required | Description | Example |
+|----------|----------|-------------|---------|
+| `PVE_ENDPOINT` | ✅ **Yes** | Proxmox VE API endpoint URL | `https://pve.example.com:8006` |
+| `PVE_USERNAME` | ✅ **Yes**\* | Username for password auth | `root@pam` or `user@realm` |
+| `PVE_PASSWORD` | ✅ **Yes**\* | Password for username | `secure-password` |
+| `PVE_TOKEN_ID` | ✅ **Yes**\*\* | API token ID (alternative) | `user@realm!tokenid` |
+| `PVE_TOKEN_SECRET` | ✅ **Yes**\*\* | API token secret (alternative) | `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` |
+| `PVE_INSECURE_SKIP_VERIFY` | 🔵 Optional | Skip TLS verification | `true` (dev only) |
+
+> **\*** Either username/password OR token authentication is required  
+> **\*\*** API token authentication is recommended for production
+
+### Helm Configuration Examples
+
+#### Username/Password Authentication
+
+```yaml
+# values.yaml
+providers:
+  proxmox:
+    enabled: true
+    env:
+      - name: PVE_ENDPOINT
+        value: "https://your-proxmox-server.example.com:8006"
+      - name: PVE_USERNAME
+        value: "root@pam"
+      - name: PVE_PASSWORD
+        value: "your-secure-password"
+```
+
+#### API Token Authentication (Recommended)
+
+```yaml
+# values.yaml  
+providers:
+  proxmox:
+    enabled: true
+    env:
+      - name: PVE_ENDPOINT
+        value: "https://your-proxmox-server.example.com:8006"
+      - name: PVE_TOKEN_ID
+        value: "virtrigaud@pve!automation"
+      - name: PVE_TOKEN_SECRET
+        value: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+```
+
+#### Using Kubernetes Secrets (Production)
+
+For production environments, use Kubernetes secrets:
+
+```yaml
+# Create secret first
+apiVersion: v1
+kind: Secret
+metadata:
+  name: proxmox-credentials
+type: Opaque
+stringData:
+  PVE_ENDPOINT: "https://your-proxmox-server.example.com:8006"
+  PVE_TOKEN_ID: "virtrigaud@pve!automation"  
+  PVE_TOKEN_SECRET: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+
+---
+# values.yaml - Reference the secret
+providers:
+  proxmox:
+    enabled: true
+    env:
+      - name: PVE_ENDPOINT
+        valueFrom:
+          secretKeyRef:
+            name: proxmox-credentials
+            key: PVE_ENDPOINT
+      - name: PVE_TOKEN_ID
+        valueFrom:
+          secretKeyRef:
+            name: proxmox-credentials
+            key: PVE_TOKEN_ID
+      - name: PVE_TOKEN_SECRET
+        valueFrom:
+          secretKeyRef:
+            name: proxmox-credentials
+            key: PVE_TOKEN_SECRET
+```
+
+### Configuration Validation
+
+The provider validates configuration at startup and will **fail to start** if:
+
+- ✅ `PVE_ENDPOINT` is missing or invalid
+- ✅ Neither username/password nor token credentials are provided
+- ✅ Proxmox server is unreachable
+- ✅ Authentication fails
+
+#### Error Examples
+
+```bash
+# Missing endpoint
+ERROR Failed to create PVE client error="endpoint is required"
+
+# Invalid endpoint format  
+ERROR Failed to create PVE client error="invalid endpoint URL"
+
+# Authentication failure
+ERROR Failed to authenticate error="authentication failed: invalid credentials"
+
+# Connection failure
+ERROR Failed to connect error="dial tcp: no route to host"
+```
+
+### Development vs Production
+
+| Environment | Endpoint | Authentication | TLS | Notes |
+|-------------|----------|---------------|-----|-------|
+| **Development** | `https://pve-test.local:8006` | Username/Password | Skip verify | Use `PVE_INSECURE_SKIP_VERIFY=true` |
+| **Staging** | `https://pve-staging.company.com:8006` | API Token | Custom CA | Configure CA bundle |
+| **Production** | `https://pve.company.com:8006` | API Token | Valid cert | Use Kubernetes secrets |
+
 ## TLS Configuration
 
 ### Self-Signed Certificates (Development)

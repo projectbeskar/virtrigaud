@@ -129,6 +129,28 @@ providers:
       requests:
         cpu: 200m
         memory: 256Mi
+    
+    # ⚠️  REQUIRED: Proxmox VE server configuration
+    # The Proxmox provider requires connection to an active Proxmox VE server.
+    # Configure the environment variables below with your Proxmox server details.
+    # 
+    # For detailed setup instructions, see: docs/providers/proxmox.md
+    #
+    # Example configuration:
+    # env:
+    #   - name: PVE_ENDPOINT
+    #     value: "https://your-proxmox-server.example.com:8006"
+    #   - name: PVE_USERNAME
+    #     value: "root@pam"  # or "user@realm"
+    #   - name: PVE_PASSWORD
+    #     value: "your-password"
+    #   - name: PVE_TOKEN_ID      # Alternative to password authentication
+    #     value: "user@realm!tokenid"
+    #   - name: PVE_TOKEN_SECRET  # Use with PVE_TOKEN_ID
+    #     value: "token-secret-value"
+    #   - name: PVE_INSECURE_SKIP_VERIFY  # For self-signed certificates
+    #     value: "true"
+    env: []
 
 # RBAC configuration
 rbac:

@@ -55,12 +55,27 @@ type Client struct {
 // NewClient creates a new PVE API client
 func NewClient(config *Config) (*Client, error) {
 	if config.Endpoint == "" {
-		return nil, fmt.Errorf("endpoint is required")
+		return nil, fmt.Errorf("PVE_ENDPOINT environment variable is required. " +
+			"Set it to your Proxmox VE server URL (e.g., https://pve.example.com:8006). " +
+			"See docs/providers/proxmox.md for complete configuration instructions")
+	}
+
+	// Validate authentication credentials
+	hasPasswordAuth := config.Username != "" && config.Password != ""
+	hasTokenAuth := config.TokenID != "" && config.TokenSecret != ""
+
+	if !hasPasswordAuth && !hasTokenAuth {
+		return nil, fmt.Errorf("Proxmox authentication credentials are required. " +
+			"Provide either:\n" +
+			"  • Username/Password: Set PVE_USERNAME and PVE_PASSWORD environment variables\n" +
+			"  • API Token: Set PVE_TOKEN_ID and PVE_TOKEN_SECRET environment variables (recommended)\n" +
+			"See docs/providers/proxmox.md for detailed setup instructions")
 	}
 
 	baseURL, err := url.Parse(config.Endpoint)
 	if err != nil {
-		return nil, fmt.Errorf("invalid endpoint URL: %w", err)
+		return nil, fmt.Errorf("invalid PVE_ENDPOINT URL '%s': %w. "+
+			"Expected format: https://pve.example.com:8006", config.Endpoint, err)
 	}
 
 	// Set defaults
