@@ -29,7 +29,4 @@ go.work
 *.sarif
 
 # Local development files
-DEVELOPMENT.md
-hack/dev-deploy.sh
-hack/dev-watch.sh
 /tmp/virtrigaud-dev-values.yaml 

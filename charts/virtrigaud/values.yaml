@@ -156,8 +156,8 @@ providers:
 rbac:
   # Enable RBAC
   create: true
-  # Scope: namespace or cluster
-  scope: namespace
+  # Scope: namespace or cluster (cluster required for CRDs)
+  scope: cluster
   # Additional rules
   additionalRules: []
 

@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"log/slog"
 	"os"
 
@@ -28,11 +29,18 @@ import (
 )
 
 func main() {
-	// Handle --version flag
+	// Handle --version flag before any other flag parsing
 	if len(os.Args) > 1 && os.Args[1] == "--version" {
 		println("proxmox-provider", version.String())
 		os.Exit(0)
 	}
+
+	// Parse command-line flags
+	var port int
+	var healthPort int
+	flag.IntVar(&port, "port", 9443, "gRPC server port")
+	flag.IntVar(&healthPort, "health-port", 8080, "Health check port")
+	flag.Parse()
 
 	// Create logger
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
@@ -41,6 +49,8 @@ func main() {
 
 	// Create server configuration
 	config := server.DefaultConfig()
+	config.Port = port
+	config.HealthPort = healthPort
 	config.Logger = logger
 	config.Middleware = &middleware.Config{
 		Logging: &middleware.LoggingConfig{
