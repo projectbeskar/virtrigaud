@@ -1,13 +1,10 @@
-# Remote Provider Architecture
+# Provider Architecture
 
-This document describes the remote provider runtime architecture implemented in virtrigaud.
+This document describes the provider architecture in VirtRigaud.
 
 ## Overview
 
-virtrigaud now supports two execution modes for providers:
-
-1. **InProcess**: Traditional mode where providers run within the manager process
-2. **Remote**: New mode where providers run as separate deployments with gRPC communication
+VirtRigaud uses a **Remote Provider** architecture where providers run as independent pods, communicating with the manager controller via gRPC. This design provides scalability, security, and reliability benefits.
 
 ## Architecture
 
@@ -30,106 +27,152 @@ virtrigaud now supports two execution modes for providers:
 │                 │    └───────────────────┘              │
 │   ┌─────────────┤                                       │
 │   │ gRPC Client │◄──────────────────────────────────────┘
-│   │             │        TLS Connection
-│   └─────────────┤        Port 9443
+│   │             │        gRPC Connection
+│   └─────────────┤        Port 9090
 └─────────────────┘
 ```
 
-## Remote Provider Components
+## Provider Components
 
 ### 1. Provider Runtime Deployments
 
-Each Provider CR with `spec.runtime.mode: Remote` creates:
+Each Provider resource automatically creates:
 
 - **Deployment**: Runs provider-specific containers
 - **Service**: ClusterIP service for gRPC communication  
-- **Secret mounts**: Credentials and TLS certificates
-- **NetworkPolicy**: (Optional) Traffic restrictions
+- **ConfigMaps**: Provider configuration
+- **Secret mounts**: Credentials for hypervisor access
 
 ### 2. Provider Images
 
-Two specialized images are built:
+Specialized images for each provider type:
 
-- **provider-libvirt**: CGO-enabled for libvirt bindings
-- **provider-vsphere**: Pure Go for vSphere (govmomi)
+- **virtrigaud/provider-vsphere**: vSphere provider with govmomi
+- **virtrigaud/provider-libvirt**: LibVirt provider with CGO bindings
+- **virtrigaud/provider-proxmox**: Proxmox VE provider
+- **virtrigaud/provider-mock**: Mock provider for testing
 
 ### 3. gRPC Communication
 
-- **Protocol**: gRPC with protobuf definitions
-- **Security**: mTLS with certificate-based authentication
+- **Protocol**: gRPC with protocol buffers
+- **Security**: Secure communication over TLS (optional)
 - **Health**: Built-in health checks and graceful shutdown
 - **Metrics**: Prometheus metrics on port 8080
 
-## Provider CRD Enhancements
+## Provider Configuration
 
-### Runtime Specification
+### Basic Provider Setup
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vsphere-credentials
+  namespace: default
+type: Opaque
+stringData:
+  username: "admin@vsphere.local"
+  password: "your-password"
+
+---
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: Provider
+metadata:
+  name: vsphere-datacenter
+  namespace: default
+spec:
+  type: vsphere
+  endpoint: "https://vcenter.example.com:443"
+  credentialSecretRef:
+    name: vsphere-credentials
+  runtime:
+    mode: Remote
+    image: "virtrigaud/provider-vsphere:latest"
+    service:
+      port: 9090
+```
+
+### Advanced Configuration
 
 ```yaml
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: Provider
+metadata:
+  name: libvirt-cluster
+  namespace: production
 spec:
-  runtime:
-    mode: Remote                    # InProcess | Remote
-    image: provider-libvirt:v0.2.0  # Container image
-    replicas: 2                     # Pod replicas
-    
-    service:
-      port: 9443                    # gRPC port
-    
-    resources:                      # Resource requirements
-      requests:
-        cpu: "100m"
-        memory: "128Mi"
-      limits:
-        cpu: "2"
-        memory: "1Gi"
-    
-    tls:                           # TLS configuration
-      enabled: true
-      secretRef:
-        name: provider-tls
-    
-    # Standard Kubernetes scheduling
-    nodeSelector: {}
-    tolerations: []
-    affinity: {}
-    securityContext: {}
-    env: []
-```
-
-### Runtime Status
-
-```yaml
-status:
+  type: libvirt
+  endpoint: "qemu+ssh://admin@kvm.example.com/system"
+  credentialSecretRef:
+    name: libvirt-credentials
+  defaults:
+    cluster: production
+  rateLimit:
+    qps: 20
+    burst: 50
   runtime:
     mode: Remote
-    endpoint: "virtrigaud-provider-default-libvirt-prod:9443"
-    serviceRef:
-      name: virtrigaud-provider-default-libvirt-prod
-    phase: Ready
-    message: "Provider runtime is healthy"
+    image: "virtrigaud/provider-libvirt:v1.0.0"
+    replicas: 3
+    
+    service:
+      port: 9090
+      
+    resources:
+      requests:
+        cpu: "200m"
+        memory: "256Mi"
+      limits:
+        cpu: "2"
+        memory: "2Gi"
+        
+    # High availability setup
+    affinity:
+      podAntiAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app.kubernetes.io/instance: libvirt-cluster
+          topologyKey: kubernetes.io/hostname
+          
+    # Node placement
+    nodeSelector:
+      workload-type: compute
+      
+    tolerations:
+    - key: "compute-dedicated"
+      operator: "Equal"
+      value: "true"
+      effect: "NoSchedule"
+      
+    # Environment variables
+    env:
+    - name: LIBVIRT_DEBUG
+      value: "1"
+    - name: PROVIDER_TIMEOUT
+      value: "300s"
 ```
 
 ## Security Model
 
 ### Pod Security
 
-- **runAsNonRoot**: All containers run as non-root user
-- **readOnlyRootFilesystem**: Immutable container filesystem
-- **No capabilities**: All Linux capabilities dropped
-- **SecurityContext**: Enforced via CRDs and controllers
-
-### Network Security
-
-- **mTLS**: Mutual TLS authentication between manager and providers
-- **Certificate Management**: Kubernetes secrets for cert storage
-- **NetworkPolicy**: Optional traffic restrictions to hypervisor endpoints
+- **Non-root execution**: All containers run as non-root users
+- **Read-only filesystem**: Immutable container filesystem
+- **Minimal capabilities**: Reduced Linux capabilities
+- **Security contexts**: Enforced via deployment templates
 
 ### Credential Isolation
 
-- **Separation**: Provider pods get mounted secrets, manager doesn't
-- **Scoped Access**: Each provider only accesses its own credentials
-- **Rotation**: Standard Kubernetes secret rotation mechanisms
+- **Separated secrets**: Each provider has dedicated credential secrets
+- **Scoped access**: Providers only access their own hypervisor credentials
+- **RBAC isolation**: Fine-grained RBAC per provider namespace
+
+### Network Security
+
+- **Service mesh ready**: Compatible with Istio/Linkerd
+- **Network policies**: Optional traffic restrictions
+- **TLS support**: Secure gRPC communication (configurable)
 
 ## Communication Protocol
 
@@ -144,178 +187,277 @@ service Provider {
   rpc Reconfigure(ReconfigureRequest) returns (TaskResponse);
   rpc Describe(DescribeRequest) returns (DescribeResponse);
   rpc TaskStatus(TaskStatusRequest) returns (TaskStatusResponse);
+  rpc ListCapabilities(CapabilitiesRequest) returns (CapabilitiesResponse);
 }
 ```
 
 ### Error Handling
 
-- **Circuit Breakers**: Prevent cascade failures
-- **Exponential Backoff**: Retry with increasing delays
-- **Timeout Controls**: Per-operation timeout configuration
-- **Condition Updates**: Status reflected in Kubernetes conditions
+- **Retry logic**: Exponential backoff for transient failures
+- **Circuit breakers**: Prevent cascade failures
+- **Timeout controls**: Configurable per-operation timeouts
+- **Status reporting**: Conditions reflected in Kubernetes status
 
 ## Observability
 
 ### Metrics
 
-Each provider runtime exposes Prometheus metrics:
+Provider pods expose Prometheus metrics on port 8080:
 
-- **Request Counters**: gRPC method call counts
-- **Latency Histograms**: Operation duration tracking
-- **Error Rates**: Failed operation percentages
-- **Health Status**: Provider connectivity and health
+```
+# Request metrics
+provider_grpc_requests_total{method="Create",status="success"} 42
+provider_grpc_request_duration_seconds{method="Create",quantile="0.95"} 2.5
+
+# VM metrics  
+provider_vms_total{state="running"} 15
+provider_vms_total{state="stopped"} 3
+
+# Health metrics
+provider_health_status{provider="vsphere-datacenter"} 1
+provider_hypervisor_connection_status{endpoint="vcenter.example.com"} 1
+```
 
 ### Logging
 
-- **Structured Logs**: JSON-formatted with correlation IDs
-- **Log Levels**: Configurable verbosity (debug, info, warn, error)
-- **Context Propagation**: Request tracing across components
+- **Structured logs**: JSON format with correlation IDs
+- **Log levels**: Configurable verbosity (debug, info, warn, error)
+- **Request tracing**: Context propagation across gRPC calls
 
 ### Health Checks
 
-- **gRPC Health Protocol**: Standard health check implementation
-- **Kubernetes Probes**: Liveness and readiness probe support
-- **Dependency Checks**: Hypervisor connectivity validation
+- **Kubernetes probes**: Liveness and readiness probes
+- **gRPC health protocol**: Standard health check implementation
+- **Hypervisor connectivity**: Validates connection to external systems
 
-## Deployment Strategies
+## Deployment Patterns
 
-### High Availability
-
-```yaml
-runtime:
-  replicas: 3
-  affinity:
-    podAntiAffinity:
-      requiredDuringSchedulingIgnoredDuringExecution:
-      - labelSelector:
-          matchLabels:
-            app: virtrigaud-provider
-        topologyKey: kubernetes.io/hostname
-```
-
-### Resource Management
+### Single Provider Setup
 
 ```yaml
-runtime:
-  resources:
-    requests:
-      cpu: "100m"      # Minimum guaranteed
-      memory: "128Mi"
-    limits:
-      cpu: "2"         # Maximum allowed
-      memory: "1Gi"
-```
-
-### Node Placement
-
-```yaml
-runtime:
-  nodeSelector:
-    virtrigaud.io/provider: "libvirt"
-  tolerations:
-  - key: "virtrigaud.io/provider"
-    operator: "Equal"
-    value: "libvirt"
-    effect: "NoSchedule"
-```
-
-## Migration Path
-
-### Backward Compatibility
-
-Existing Provider CRs without `runtime` specification continue to work in InProcess mode:
-
-```yaml
-# This continues to work unchanged
+# Simple development setup
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: Provider
+metadata:
+  name: dev-vsphere
 spec:
   type: vsphere
-  endpoint: https://vcenter.example.com
-  # runtime: omitted = InProcess mode
+  endpoint: "https://vcenter-dev.example.com:443"
+  credentialSecretRef:
+    name: dev-credentials
+  runtime:
+    mode: Remote
+    image: "virtrigaud/provider-vsphere:latest"
 ```
 
-### Gradual Migration
+### High Availability Setup
 
-1. **Deploy**: Add new remote providers alongside existing ones
-2. **Test**: Validate functionality with non-production workloads
-3. **Switch**: Update VirtualMachine providerRef to use remote providers
-4. **Cleanup**: Remove old in-process provider configurations
+```yaml
+# Production HA setup
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: Provider
+metadata:
+  name: prod-vsphere
+spec:
+  type: vsphere
+  endpoint: "https://vcenter-prod.example.com:443"
+  credentialSecretRef:
+    name: prod-credentials
+  runtime:
+    mode: Remote
+    image: "virtrigaud/provider-vsphere:v1.0.0"
+    replicas: 3
+    affinity:
+      podAntiAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app.kubernetes.io/instance: prod-vsphere
+          topologyKey: kubernetes.io/hostname
+```
+
+### Multi-Environment Setup
+
+```yaml
+# Development environment
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: Provider
+metadata:
+  name: dev-libvirt
+  namespace: development
+spec:
+  type: libvirt
+  endpoint: "qemu+ssh://dev@libvirt-dev.example.com/system"
+  runtime:
+    mode: Remote
+    image: "virtrigaud/provider-libvirt:latest"
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
+
+---
+# Production environment  
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: Provider
+metadata:
+  name: prod-libvirt
+  namespace: production
+spec:
+  type: libvirt
+  endpoint: "qemu+ssh://prod@libvirt-prod.example.com/system"
+  runtime:
+    mode: Remote
+    image: "virtrigaud/provider-libvirt:v1.0.0"
+    replicas: 2
+    resources:
+      requests:
+        cpu: "500m"
+        memory: "512Mi"
+      limits:
+        cpu: "2"
+        memory: "2Gi"
+```
 
 ## Benefits
 
 ### Scalability
 
-- **Horizontal Scaling**: Multiple provider replicas per hypervisor
-- **Resource Isolation**: Provider pods can be sized independently
-- **Load Distribution**: gRPC load balancing across provider instances
+- **Horizontal scaling**: Multiple provider replicas per hypervisor
+- **Resource isolation**: Independent resource allocation per provider
+- **Load distribution**: gRPC load balancing across provider instances
 
 ### Security
 
-- **Credential Isolation**: Hypervisor credentials only in provider pods
-- **Network Segmentation**: Provider pods can run in isolated namespaces
-- **Least Privilege**: Manager runs without hypervisor access
+- **Credential isolation**: Hypervisor credentials isolated to provider pods
+- **Network segmentation**: Providers can run in separate namespaces
+- **Least privilege**: Manager runs without direct hypervisor access
 
 ### Reliability
 
-- **Fault Isolation**: Provider failures don't crash the manager
-- **Independent Updates**: Provider images can be updated separately
-- **Circuit Breaking**: Automatic failure detection and recovery
+- **Fault isolation**: Provider failures don't affect the manager
+- **Independent updates**: Provider images updated separately
+- **Circuit breaking**: Automatic failure detection and recovery
 
-### Maintenance
+### Operational Excellence
 
-- **Rolling Updates**: Provider deployments support rolling updates
-- **Health Monitoring**: Built-in health checks and metrics
-- **Debugging**: Isolated provider logs and metrics
-
-## Example Configurations
-
-See `examples/remote/` for complete working examples:
-
-- `libvirt-remote-provider.yaml`: Libvirt with CGO in remote container
-- `vsphere-remote-provider.yaml`: vSphere with HA and enterprise features
+- **Rolling updates**: Zero-downtime provider updates
+- **Health monitoring**: Built-in health checks and metrics
+- **Debugging**: Isolated provider logs and observability
 
 ## Troubleshooting
 
 ### Common Issues
 
-1. **TLS Certificate Problems**
-   - Verify certificate validity and CA trust
-   - Check certificate subject matches service DNS name
-   - Ensure secrets are properly mounted
+1. **Image Pull Failures**
+   ```bash
+   # Check image availability
+   docker pull virtrigaud/provider-vsphere:latest
+   
+   # Verify imagePullSecrets if using private registry
+   kubectl get secret regcred -o yaml
+   ```
 
 2. **Network Connectivity**
-   - Verify service endpoints and ports
-   - Check NetworkPolicy rules if enabled
-   - Test gRPC connectivity with grpcurl
+   ```bash
+   # Test provider service
+   kubectl get svc virtrigaud-provider-*
+   
+   # Check provider pod logs
+   kubectl logs -l app.kubernetes.io/name=virtrigaud-provider
+   ```
 
-3. **Resource Constraints**
-   - Monitor provider pod resource usage
-   - Adjust resource requests/limits as needed
-   - Check node capacity and scheduling
+3. **Credential Issues**
+   ```bash
+   # Verify secret exists and is mounted
+   kubectl get secret vsphere-credentials
+   kubectl describe pod virtrigaud-provider-*
+   ```
 
 ### Debugging Commands
 
 ```bash
 # Check provider status
-kubectl describe provider libvirt-prod
+kubectl describe provider vsphere-datacenter
 
-# Check provider runtime deployment
-kubectl get deployment virtrigaud-provider-default-libvirt-prod
+# Check provider deployment
+kubectl get deployment -l app.kubernetes.io/instance=vsphere-datacenter
 
-# Check provider logs
-kubectl logs -l app.kubernetes.io/instance=libvirt-prod
+# Check provider pods
+kubectl get pods -l app.kubernetes.io/instance=vsphere-datacenter
 
-# Test gRPC connectivity
-grpcurl -insecure virtrigaud-provider-default-libvirt-prod:9443 \
-  grpc.health.v1.Health/Check
+# View provider logs
+kubectl logs -l app.kubernetes.io/instance=vsphere-datacenter -f
+
+# Check provider metrics
+kubectl port-forward svc/virtrigaud-provider-vsphere-datacenter 8080:8080
+curl http://localhost:8080/metrics
 ```
 
-## Future Enhancements
+### Performance Tuning
 
-### Planned Features
+```yaml
+# Optimize for high-volume workloads
+spec:
+  rateLimit:
+    qps: 100        # Increase API rate limit
+    burst: 200      # Allow burst capacity
+  runtime:
+    replicas: 5     # Scale out for throughput
+    resources:
+      requests:
+        cpu: "1"    # Guarantee CPU resources
+        memory: "1Gi"
+      limits:
+        cpu: "4"    # Allow burst CPU
+        memory: "4Gi"
+```
 
-- **Auto-scaling**: HPA based on VM creation rate
-- **Multi-cluster**: Cross-cluster provider communication
-- **Policy Engine**: Advanced placement and security policies
-- **Provider Marketplace**: Community provider registry
+## Best Practices
+
+### Resource Management
+
+- **Right-sizing**: Start with small requests, monitor and adjust
+- **Limits**: Always set memory limits to prevent OOM kills
+- **QoS**: Use Guaranteed QoS for production workloads
+
+### Security
+
+- **Secrets rotation**: Implement regular credential rotation
+- **Network policies**: Restrict provider-to-hypervisor traffic
+- **RBAC**: Use dedicated service accounts per provider
+
+### Monitoring
+
+- **Alerting**: Set up alerts on provider health metrics
+- **Dashboards**: Create Grafana dashboards for provider metrics
+- **Log aggregation**: Centralize logs for debugging and auditing
+
+## Migration and Upgrades
+
+### Provider Image Updates
+
+```bash
+# Update provider image
+kubectl patch provider vsphere-datacenter -p '
+{
+  "spec": {
+    "runtime": {
+      "image": "virtrigaud/provider-vsphere:v1.1.0"
+    }
+  }
+}'
+
+# Monitor rollout
+kubectl rollout status deployment virtrigaud-provider-vsphere-datacenter
+```
+
+### Configuration Changes
+
+```bash
+# Update provider configuration
+kubectl edit provider vsphere-datacenter
+
+# Verify changes applied
+kubectl describe provider vsphere-datacenter
+```

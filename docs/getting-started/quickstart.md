@@ -84,7 +84,7 @@ Create a secret with vSphere credentials:
 
 ```bash
 kubectl create secret generic vsphere-credentials \
-  --namespace virtrigaud-system \
+  --namespace default \
   --from-literal=endpoint=https://vcenter.example.com \
   --from-literal=username=administrator@vsphere.local \
   --from-literal=password=your-password \
@@ -98,16 +98,21 @@ apiVersion: infra.virtrigaud.io/v1beta1
 kind: Provider
 metadata:
   name: vsphere-prod
-  namespace: virtrigaud-system
+  namespace: default
 spec:
   type: vsphere
   endpoint: https://vcenter.example.com
-  credentialsRef:
+  credentialSecretRef:
     name: vsphere-credentials
-  config:
-    datacenter: "DC1"
-    defaultDatastore: "datastore1"
-    defaultResourcePool: "cluster1/Resources"
+  runtime:
+    mode: Remote
+    image: "virtrigaud/provider-vsphere:latest"
+    service:
+      port: 9090
+  defaults:
+    datastore: "datastore1"
+    cluster: "cluster1"
+    folder: "virtrigaud-vms"
 ```
 
 ### Option B: Libvirt Provider
@@ -116,7 +121,7 @@ Create a secret with Libvirt connection details:
 
 ```bash
 kubectl create secret generic libvirt-credentials \
-  --namespace virtrigaud-system \
+  --namespace default \
   --from-literal=uri=qemu+ssh://root@libvirt-host.example.com/system \
   --from-literal=username=root \
   --from-literal=privateKey="$(cat ~/.ssh/id_rsa)"
@@ -129,13 +134,18 @@ apiVersion: infra.virtrigaud.io/v1beta1
 kind: Provider
 metadata:
   name: libvirt-lab
-  namespace: virtrigaud-system
+  namespace: default
 spec:
   type: libvirt
   endpoint: qemu+ssh://root@libvirt-host.example.com/system
-  credentialsRef:
+  credentialSecretRef:
     name: libvirt-credentials
-  config:
+  runtime:
+    mode: Remote
+    image: "virtrigaud/provider-libvirt:latest"
+    service:
+      port: 9090
+  defaults:
     defaultStoragePool: "default"
     defaultNetwork: "default"
 ```
@@ -155,7 +165,7 @@ apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMClass
 metadata:
   name: small
-  namespace: virtrigaud-system
+  namespace: default
 spec:
   cpu: 2
   memoryMiB: 2048
@@ -230,13 +240,13 @@ metadata:
 spec:
   providerRef:
     name: vsphere-prod  # or libvirt-lab
-    namespace: virtrigaud-system
+    namespace: default
   classRef:
     name: small
-    namespace: virtrigaud-system
+    namespace: default
   imageRef:
     name: ubuntu-20-04
-    namespace: virtrigaud-system
+    namespace: default
   powerState: "On"
   userData:
     cloudInit:
@@ -254,7 +264,7 @@ spec:
   - name: default
     networkRef:
       name: default-network
-      namespace: virtrigaud-system
+      namespace: default
 ```
 
 ```bash
@@ -322,7 +332,7 @@ spec:
     name: cloned-vm
     classRef:
       name: small
-      namespace: virtrigaud-system
+      namespace: default
   linked: true
 ```
 
@@ -340,13 +350,13 @@ spec:
     spec:
       providerRef:
         name: vsphere-prod
-        namespace: virtrigaud-system
+        namespace: default
       classRef:
         name: small
-        namespace: virtrigaud-system
+        namespace: default
       imageRef:
         name: ubuntu-20-04
-        namespace: virtrigaud-system
+        namespace: default
       powerState: "On"
 ```
 

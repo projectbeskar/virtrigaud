@@ -51,7 +51,7 @@ apiVersion: infra.virtrigaud.io/v1beta1
 kind: Provider
 metadata:
   name: vsphere-prod
-  namespace: virtrigaud-system
+  namespace: default
 spec:
   type: vsphere
   endpoint: https://vcenter.example.com
@@ -59,6 +59,11 @@ spec:
     name: vsphere-credentials
   # Optional: Skip TLS verification (development only)
   insecureSkipVerify: false
+  runtime:
+    mode: Remote
+    image: "virtrigaud/provider-vsphere:latest"
+    service:
+      port: 9090
 ```
 
 Create credentials secret:
@@ -67,7 +72,7 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: vsphere-credentials
-  namespace: virtrigaud-system
+  namespace: default
 type: Opaque
 stringData:
   username: "virtrigaud@vsphere.local"
@@ -83,7 +88,7 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: vsphere-token
-  namespace: virtrigaud-system
+  namespace: default
 type: Opaque
 stringData:
   token: "vmware-api-session-id:abcd1234..."

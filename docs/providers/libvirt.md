@@ -1,6 +1,6 @@
 # LibVirt/KVM Provider
 
-The LibVirt provider enables VirtRigaud to manage virtual machines on KVM/QEMU hypervisors using the LibVirt API. This provider is ideal for local development, on-premises deployments, and environments where direct access to the hypervisor is available.
+The LibVirt provider enables VirtRigaud to manage virtual machines on KVM/QEMU hypervisors using the LibVirt API. This provider runs as a dedicated pod that communicates with LibVirt daemons locally or remotely, making it ideal for development, on-premises deployments, and cloud environments.
 
 ## Overview
 
@@ -41,22 +41,29 @@ For local development, you can:
 
 The LibVirt provider supports multiple connection methods:
 
-### Local Connection (Development)
+### Local LibVirt Connection
 
-For local LibVirt instances (most common for development):
+For connecting to a LibVirt daemon on the same host as the provider pod:
 
 ```yaml
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: Provider
 metadata:
   name: libvirt-local
-  namespace: virtrigaud-system
+  namespace: default
 spec:
   type: libvirt
   endpoint: "qemu:///system"  # Local system connection
-  # No credentials needed for local access (if supported)
-  # Note: May require TCP endpoint depending on provider implementation
+  credentialSecretRef:
+    name: libvirt-local-credentials
+  runtime:
+    mode: Remote
+    image: "virtrigaud/provider-libvirt:latest"
+    service:
+      port: 9090
 ```
+
+**Note**: When using local connections, ensure the provider pod has appropriate permissions to access the LibVirt socket.
 
 ### Remote Connection with SSH
 
@@ -67,12 +74,17 @@ apiVersion: infra.virtrigaud.io/v1beta1
 kind: Provider
 metadata:
   name: libvirt-remote
-  namespace: virtrigaud-system
+  namespace: default
 spec:
   type: libvirt
   endpoint: "qemu+ssh://user@libvirt-host/system"
   credentialSecretRef:
     name: libvirt-ssh-credentials
+  runtime:
+    mode: Remote
+    image: "virtrigaud/provider-libvirt:latest"
+    service:
+      port: 9090
 ```
 
 Create SSH credentials secret:
@@ -81,7 +93,7 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: libvirt-ssh-credentials
-  namespace: virtrigaud-system
+  namespace: default
 type: Opaque
 stringData:
   username: "libvirt-user"
@@ -103,12 +115,17 @@ apiVersion: infra.virtrigaud.io/v1beta1
 kind: Provider
 metadata:
   name: libvirt-tls
-  namespace: virtrigaud-system
+  namespace: default
 spec:
   type: libvirt
   endpoint: "qemu+tls://libvirt-host:16514/system"
   credentialSecretRef:
     name: libvirt-tls-credentials
+  runtime:
+    mode: Remote
+    image: "virtrigaud/provider-libvirt:latest"
+    service:
+      port: 9090
 ```
 
 Create TLS credentials secret:
@@ -117,7 +134,7 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: libvirt-tls-credentials
-  namespace: virtrigaud-system
+  namespace: default
 type: kubernetes.io/tls
 data:
   tls.crt: # Base64 encoded client certificate

@@ -54,6 +54,7 @@ API tokens provide secure, scope-limited access without exposing user passwords.
    kind: Provider
    metadata:
      name: proxmox-prod
+     namespace: default
    spec:
      type: proxmox
      endpoint: https://pve.example.com:8006
@@ -61,7 +62,9 @@ API tokens provide secure, scope-limited access without exposing user passwords.
        name: pve-credentials
      runtime:
        mode: Remote
-       image: ghcr.io/projectbeskar/virtrigaud/provider-proxmox:v0.1.0
+       image: "virtrigaud/provider-proxmox:latest"
+       service:
+         port: 9090
    ```
 
 3. **Create Credentials Secret**:
@@ -70,6 +73,7 @@ API tokens provide secure, scope-limited access without exposing user passwords.
    kind: Secret
    metadata:
      name: pve-credentials
+     namespace: default
    type: Opaque
    stringData:
      token_id: "virtrigaud@pve!vrtg-token"
@@ -85,6 +89,7 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: pve-credentials
+  namespace: default
 type: Opaque
 stringData:
   username: "virtrigaud@pve"

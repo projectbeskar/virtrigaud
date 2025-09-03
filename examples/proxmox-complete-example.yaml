@@ -11,7 +11,7 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: proxmox-credentials
-  namespace: virtrigaud-system
+  namespace: default
 type: Opaque
 stringData:
   # Use API token authentication (recommended)
@@ -30,7 +30,7 @@ apiVersion: infra.virtrigaud.io/v1beta1
 kind: Provider
 metadata:
   name: proxmox-prod
-  namespace: virtrigaud-system
+  namespace: default
 spec:
   type: proxmox
   endpoint: https://pve.example.com:8006
@@ -38,18 +38,9 @@ spec:
     name: proxmox-credentials
   runtime:
     mode: Remote
-    image: ghcr.io/projectbeskar/virtrigaud/provider-proxmox:0.1.0
-    env:
-      - name: PVE_NODE_SELECTOR
-        value: "pve-node-1,pve-node-2,pve-node-3"
-      - name: PVE_INSECURE_SKIP_VERIFY
-        value: "false"  # Use true only for development
+    image: "virtrigaud/provider-proxmox:latest"
     service:
-      port: 9443
-    tls:
-      enabled: true
-      secretRef:
-        name: proxmox-provider-tls
+      port: 9090
 
 ---
 # Small VM class for development workloads

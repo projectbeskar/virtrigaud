@@ -1,10 +1,10 @@
 # Provider Development Guide
 
-This document explains how to implement a new provider for virtrigaud.
+This document explains how to implement a new provider for VirtRigaud.
 
 ## Overview
 
-Providers are responsible for implementing the actual VM lifecycle operations on specific hypervisor platforms. Each provider implements the `contracts.Provider` interface and handles platform-specific details.
+Providers are responsible for implementing VM lifecycle operations on specific hypervisor platforms. VirtRigaud uses a Remote Provider architecture where each provider runs as an independent gRPC service, communicating with the manager controller.
 
 ## Provider Interface
 
@@ -86,15 +86,37 @@ func (p *Provider) Validate(ctx context.Context) error {
 // Implement other interface methods...
 ```
 
-### 3. Register the Provider
+### 3. Create Provider gRPC Server
 
-In your main.go or provider init function:
+Create a gRPC server for your provider:
 
 ```go
-import "github.com/projectbeskar/virtrigaud/internal/providers/yourprovider"
+// cmd/provider-yourprovider/main.go
+package main
 
-func init() {
-    providerRegistry.Register("yourprovider", yourprovider.NewProvider)
+import (
+    "context"
+    "log"
+    "net"
+    
+    "google.golang.org/grpc"
+    "github.com/projectbeskar/virtrigaud/pkg/grpc/provider"
+    "github.com/projectbeskar/virtrigaud/internal/providers/yourprovider"
+)
+
+func main() {
+    lis, err := net.Listen("tcp", ":9090")
+    if err != nil {
+        log.Fatal(err)
+    }
+    
+    s := grpc.NewServer()
+    provider.RegisterProviderServer(s, &yourprovider.GRPCServer{})
+    
+    log.Println("Provider server listening on :9090")
+    if err := s.Serve(lis); err != nil {
+        log.Fatal(err)
+    }
 }
 ```
 

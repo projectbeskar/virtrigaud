@@ -50,6 +50,11 @@ spec:
   rateLimit:
     qps: 5
     burst: 10
+  runtime:
+    mode: Remote
+    image: "virtrigaud/provider-libvirt:latest"
+    service:
+      port: 9090
 
 ---
 # Define a VM class for KVM

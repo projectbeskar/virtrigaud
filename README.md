@@ -27,60 +27,26 @@ All resources use the v1beta1 API with comprehensive OpenAPI validation and type
 
 ## Architecture
 
-VirtRigaud supports both **In-Process** and **Remote** provider deployment models:
-
-### In-Process Model (Traditional)
+VirtRigaud uses a **Remote Provider** architecture for optimal scalability and reliability:
 ```
                     ┌─────────────────────────────────────────┐
                     │            Kubernetes Cluster           │
                     │                                         │
 ┌─────────────────┐ │ ┌─────────────────┐                    │
-│  VirtualMachine │ │ │   Controller    │                    │
-│      CRD        │─┼─│   (Manager)     │                    │
-└─────────────────┘ │ │                 │                    │
-┌─────────────────┐ │ │  ┌──────────────┴──────────────┐     │
-│    VMClass      │─┼─│  │        Provider Interface   │     │
-│      CRD        │ │ │  └──────────────┬──────────────┘     │
-└─────────────────┘ │ │                 │                    │
-┌─────────────────┐ │ │    ┌────────────┼────────────┐       │
-│    VMImage      │─┼─│    │            │            │       │
-│      CRD        │ │ │ ┌──▼───┐    ┌───▼───┐   ┌───▼────┐  │
-└─────────────────┘ │ │ │vSphere│    │Libvirt│   │Proxmox │  │
-┌─────────────────┐ │ │ │Provider│   │Provider│  │Provider│  │
-│    Provider     │─┼─│ └───────┘    └───────┘   └────────┘  │
-│      CRD        │ │ └─────────────────────────────────────┘
-└─────────────────┘ │
-                    │ ┌─────────────────────────────────────┐
-                    │ │         External Infrastructure      │
-                    │ │                                     │
-                    │ │ ┌──────────┐ ┌─────────┐ ┌─────────┐│
-                    │ │ │ vSphere  │ │ Libvirt │ │Proxmox  ││
-                    │ │ │   ESXi   │ │   KVM   │ │   VE    ││
-                    │ │ └──────────┘ └─────────┘ └─────────┘│
-                    │ └─────────────────────────────────────┘
-                    └─────────────────────────────────────────┘
-```
-
-### Remote Provider Model (Recommended for Production)
-```
-                    ┌─────────────────────────────────────────┐
-                    │            Kubernetes Cluster           │
-                    │                                         │
-┌─────────────────┐ │ ┌─────────────────┐                    │
-│  VirtualMachine │ │ │   Controller    │                    │
-│      CRD        │─┼─│   (Manager)     │                    │
+│  VirtualMachine │ │ │   Manager       │                    │
+│      CRD        │─┼─│   Controller    │                    │
 └─────────────────┘ │ │                 │                    │
 ┌─────────────────┐ │ │                 │                    │
 │    VMClass      │─┼─│                 │                    │
 │      CRD        │ │ │                 │                    │
 └─────────────────┘ │ │                 │                    │
-┌─────────────────┐ │ │                 │  gRPC/TLS          │
+┌─────────────────┐ │ │                 │  gRPC              │
 │    VMImage      │─┼─│                 ├──────────────────► │
 │      CRD        │ │ │                 │                    │
 └─────────────────┘ │ └─────────────────┘                    │
 ┌─────────────────┐ │                                        │
 │    Provider     │ │ ┌─────────────────────────────────────┐│
-│      CRD        │─┼─│        Remote Providers              ││
+│      CRD        │─┼─│        Provider Pods                 ││
 └─────────────────┘ │ │                                     ││
                     │ │ ┌──────────┐ ┌─────────┐ ┌─────────┐││
                     │ │ │ vSphere  │ │ Libvirt │ │Proxmox  │││
@@ -100,10 +66,13 @@ VirtRigaud supports both **In-Process** and **Remote** provider deployment model
                     └─────────────────────────────────────────┘
 ```
 
-**Key Benefits of Remote Model:**
-- **Isolation**: Provider failures don't affect the core manager
-- **Scalability**: Independent scaling of providers
-- **Security**: Fine-grained RBAC and NetworkPolicies per provider
+### Key Benefits
+
+- **Scalability**: Each provider runs as independent pods with dedicated resources
+- **Reliability**: Provider failures don't affect the manager or other providers  
+- **Security**: Provider credentials are isolated to their respective pods
+- **Flexibility**: Scale providers independently based on workload demands
+- **Maintainability**: Update providers without affecting the core manager
 - **Multi-tenancy**: Different providers for different teams/environments
 - **Updates**: Rolling updates of providers without manager downtime
 
@@ -220,13 +189,37 @@ graph TB
 
 ### Using VirtRigaud
 
-1. **Create provider and VM resources**:
+1. **Create a Provider** (one-time setup per hypervisor):
    ```bash
-   # vSphere example (v1beta1 API)
-   kubectl apply -f examples/complete-example.yaml
+   # Create credentials secret
+   kubectl create secret generic vsphere-creds \
+     --from-literal=username=admin \
+     --from-literal=password=yourpassword
    
-   # Libvirt/KVM example (v1beta1 API)
-   kubectl apply -f examples/libvirt-complete-example.yaml
+   # Create Provider resource
+   kubectl apply -f - <<EOF
+   apiVersion: infra.virtrigaud.io/v1beta1
+   kind: Provider
+   metadata:
+     name: vsphere-datacenter
+     namespace: default
+   spec:
+     type: vsphere
+     endpoint: "https://vcenter.example.com:443"
+     credentialSecretRef:
+       name: vsphere-creds
+     runtime:
+       mode: Remote
+       image: "virtrigaud/provider-vsphere:latest"
+       service:
+         port: 9090
+   EOF
+   ```
+
+2. **Create VM resources using the Provider**:
+   ```bash
+   # Apply VM definition that references the provider
+   kubectl apply -f examples/complete-example.yaml
    
    # Proxmox VE example (v1beta1 API)
    kubectl apply -f examples/proxmox-complete-example.yaml
