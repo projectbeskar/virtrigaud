@@ -31,7 +31,7 @@ import (
 	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/obs/logging"
 	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
-	"github.com/projectbeskar/virtrigaud/internal/providers/registry"
+
 	"github.com/projectbeskar/virtrigaud/internal/runtime/remote"
 	"github.com/projectbeskar/virtrigaud/internal/util/k8s"
 )
@@ -39,28 +39,27 @@ import (
 // VMSnapshotReconciler reconciles a VMSnapshot object
 type VMSnapshotReconciler struct {
 	client.Client
-	Scheme           *runtime.Scheme
-	ProviderRegistry *registry.Registry
-	RemoteResolver   *remote.Resolver
-	Recorder         record.EventRecorder
-	metrics          *metrics.ReconcileMetrics
+	Scheme *runtime.Scheme
+
+	RemoteResolver *remote.Resolver
+	Recorder       record.EventRecorder
+	metrics        *metrics.ReconcileMetrics
 }
 
 // NewVMSnapshotReconciler creates a new VMSnapshot reconciler
 func NewVMSnapshotReconciler(
 	client client.Client,
 	scheme *runtime.Scheme,
-	providerRegistry *registry.Registry,
 	remoteResolver *remote.Resolver,
 	recorder record.EventRecorder,
 ) *VMSnapshotReconciler {
 	return &VMSnapshotReconciler{
-		Client:           client,
-		Scheme:           scheme,
-		ProviderRegistry: providerRegistry,
-		RemoteResolver:   remoteResolver,
-		Recorder:         recorder,
-		metrics:          metrics.NewReconcileMetrics("VMSnapshot"),
+		Client: client,
+		Scheme: scheme,
+
+		RemoteResolver: remoteResolver,
+		Recorder:       recorder,
+		metrics:        metrics.NewReconcileMetrics("VMSnapshot"),
 	}
 }
 

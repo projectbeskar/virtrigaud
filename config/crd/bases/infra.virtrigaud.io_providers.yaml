@@ -128,8 +128,11 @@ spec:
                     type: string
                 type: object
               endpoint:
-                description: Endpoint is the provider endpoint URI
-                pattern: ^(https?|tcp|grpc)://[a-zA-Z0-9.-]+:[0-9]+(/.*)?$
+                description: |-
+                  Endpoint is the provider endpoint URI
+                  Supports multiple protocols: HTTP(S), TCP, gRPC for general providers
+                  and LibVirt-specific schemes: qemu://, qemu+ssh://, qemu+tcp://, qemu+tls://
+                pattern: ^((https?|tcp|grpc)://[a-zA-Z0-9.-]+:[0-9]+(/.*)?|qemu(\+ssh|\+tcp|\+tls)?://([a-zA-Z0-9@.-]+(:[0-9]+)?)?(/.*))$
                 type: string
               healthCheck:
                 description: HealthCheck defines health checking configuration
@@ -185,7 +188,7 @@ spec:
                     type: integer
                 type: object
               runtime:
-                description: Runtime defines how the provider is executed
+                description: Runtime defines how the provider is executed (required)
                 properties:
                   affinity:
                     description: Affinity defines scheduling constraints
@@ -1238,7 +1241,7 @@ spec:
                     type: array
                   image:
                     description: Image is the container image for remote providers
-                      (required if Mode=Remote)
+                      (required)
                     pattern: ^[a-zA-Z0-9._/-]+:[a-zA-Z0-9._-]+$
                     type: string
                   imagePullPolicy:
@@ -1423,10 +1426,9 @@ spec:
                         type: integer
                     type: object
                   mode:
-                    default: InProcess
-                    description: Mode specifies the runtime mode
+                    default: Remote
+                    description: Mode specifies the runtime mode (always Remote)
                     enum:
-                    - InProcess
                     - Remote
                     type: string
                   nodeSelector:
@@ -1929,6 +1931,8 @@ spec:
                       type: object
                     maxItems: 20
                     type: array
+                required:
+                - image
                 type: object
               type:
                 description: Type specifies the provider type
@@ -1942,6 +1946,7 @@ spec:
             required:
             - credentialSecretRef
             - endpoint
+            - runtime
             - type
             type: object
           status:
@@ -2142,7 +2147,6 @@ spec:
                   mode:
                     description: Mode indicates the current runtime mode
                     enum:
-                    - InProcess
                     - Remote
                     type: string
                   phase:

@@ -56,6 +56,10 @@ var _ = Describe("Provider Controller", func() {
 						CredentialSecretRef: infravirtrigaudiov1beta1.ObjectRef{
 							Name: "test-creds",
 						},
+						Runtime: &infravirtrigaudiov1beta1.ProviderRuntimeSpec{
+							Mode:  infravirtrigaudiov1beta1.RuntimeModeRemote,
+							Image: "virtrigaud/provider-vsphere:test",
+						},
 					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())

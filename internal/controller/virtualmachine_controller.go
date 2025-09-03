@@ -34,16 +34,15 @@ import (
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
-	"github.com/projectbeskar/virtrigaud/internal/providers/registry"
+
 	"github.com/projectbeskar/virtrigaud/internal/runtime/remote"
 )
 
 // VirtualMachineReconciler reconciles a VirtualMachine object
 type VirtualMachineReconciler struct {
 	client.Client
-	Scheme           *runtime.Scheme
-	ProviderRegistry *registry.Registry
-	RemoteResolver   *remote.Resolver
+	Scheme         *runtime.Scheme
+	RemoteResolver *remote.Resolver
 }
 
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=virtualmachines,verbs=get;list;watch;create;update;patch;delete
@@ -504,21 +503,14 @@ func (r *VirtualMachineReconciler) updateStatus(ctx context.Context, vm *infravi
 	}
 }
 
-// getProviderInstance resolves a provider to either a remote or in-process implementation
+// getProviderInstance resolves a provider to a remote implementation
 func (r *VirtualMachineReconciler) getProviderInstance(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) (contracts.Provider, error) {
-	// Try remote resolver first
-	if r.RemoteResolver != nil {
-		if r.RemoteResolver.IsRemoteProvider(provider) {
-			return r.RemoteResolver.GetProvider(ctx, provider)
-		}
+	// All providers are now remote
+	if r.RemoteResolver == nil {
+		return nil, fmt.Errorf("no remote resolver available")
 	}
 
-	// Fallback to in-process provider registry
-	if r.ProviderRegistry != nil {
-		return r.ProviderRegistry.Get(ctx, provider)
-	}
-
-	return nil, fmt.Errorf("no provider resolver available")
+	return r.RemoteResolver.GetProvider(ctx, provider)
 }
 
 // SetupWithManager sets up the controller with the Manager.

@@ -4,6 +4,10 @@
 # 📝 NOTE: Requires LibVirt Daemon Access
 # The LibVirt provider connects to libvirtd (local or remote). For local development,
 # install libvirt-daemon-system. See docs/providers/libvirt.md for setup details.
+#
+# ⚠️  SCHEMA UPDATE: This example has been updated to match the current v1beta1 CRD schema.
+# Key changes: endpoint format, memory/disk sizes use resource.Quantity, 
+# nested structure for source/network configs, and proper field naming.
 
 # First, create the credentials secret (for remote connections)
 apiVersion: v1
@@ -36,7 +40,9 @@ spec:
   type: libvirt
   endpoint: qemu:///system  # Local connection
   # For remote connections:
-  # endpoint: qemu+tcp://kvm-host.example.com/system
+  # endpoint: qemu+ssh://user@kvm-host.example.com/system
+  # endpoint: qemu+tcp://kvm-host.example.com:16509/system
+  # endpoint: qemu+tls://kvm-host.example.com:16514/system
   credentialSecretRef:
     name: libvirt-creds
   defaults:
@@ -54,11 +60,11 @@ metadata:
   namespace: default
 spec:
   cpu: 2
-  memoryMiB: 2048
+  memory: "2Gi"  # Uses Kubernetes resource.Quantity format
   firmware: BIOS  # Can be BIOS or UEFI
   diskDefaults:
-    type: qcow2
-    sizeGiB: 20
+    type: thin
+    size: "20Gi"  # Uses Kubernetes resource.Quantity format
   guestToolsPolicy: install
   extraConfig:
     "autostart": "false"
@@ -71,15 +77,16 @@ metadata:
   name: ubuntu-20-kvm
   namespace: default
 spec:
-  libvirt:
-    path: "/var/lib/libvirt/images/ubuntu-20.04-cloudimg.qcow2"
-    format: qcow2
-    # Alternative: download from URL
-    # url: "https://cloud-images.ubuntu.com/focal/current/focal-server-cloudimg-amd64.img"
-    # checksum: "abcd1234..."
-    # checksumType: sha256
+  source:
+    libvirt:
+      path: "/var/lib/libvirt/images/ubuntu-20.04-cloudimg.qcow2"
+      format: qcow2
+      # Alternative: download from URL
+      # url: "https://cloud-images.ubuntu.com/focal/current/focal-server-cloudimg-amd64.img"
+      # checksum: "abcd1234..."
+      # checksumType: sha256
   prepare:
-    importIfMissing: false  # Image must already exist
+    onMissing: Fail  # Options: Import, Fail, Wait (previously importIfMissing)
 
 ---
 # Define network attachment for Libvirt
@@ -89,10 +96,13 @@ metadata:
   name: kvm-default-network
   namespace: default
 spec:
-  libvirt:
-    networkName: "default"  # Use Libvirt default network
-    model: virtio           # Network device model
-  ipPolicy: dhcp
+  network:
+    type: bridged
+    libvirt:
+      networkName: "default"  # Use Libvirt default network
+      model: virtio           # Network device model
+  ipAllocation:
+    type: DHCP
 
 ---
 # Create the virtual machine
@@ -110,12 +120,14 @@ spec:
     name: ubuntu-20-kvm
   networks:
     - name: kvm-default-network
-      ipPolicy: dhcp
+      networkRef:
+        name: kvm-default-network
+      # IP allocation handled by VMNetworkAttachment
   disks:
     - name: extra-storage
       sizeGiB: 50
-      type: qcow2
-  powerState: On
+      type: thin
+  powerState: "On"  # Quote to ensure string type
   userData:
     cloudInit:
       inline: |

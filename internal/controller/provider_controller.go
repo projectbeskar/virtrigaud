@@ -77,27 +77,22 @@ func (r *ProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		provider.Status.Runtime = &infravirtrigaudiov1beta1.ProviderRuntimeStatus{}
 	}
 
-	// Determine runtime mode
-	runtimeMode := infravirtrigaudiov1beta1.RuntimeModeInProcess
-	if provider.Spec.Runtime != nil && provider.Spec.Runtime.Mode != "" {
-		runtimeMode = provider.Spec.Runtime.Mode
+	// Validate that runtime is configured (now required)
+	if provider.Spec.Runtime == nil {
+		err := fmt.Errorf("runtime configuration is required")
+		k8s.SetCondition(&provider.Status.Conditions, "ProviderRuntimeReady", metav1.ConditionFalse, "MissingRuntime", err.Error())
+		provider.Status.ObservedGeneration = provider.Generation
+		if updateErr := r.Status().Update(ctx, &provider); updateErr != nil {
+			logger.Error(updateErr, "Failed to update Provider status")
+		}
+		return ctrl.Result{}, err
 	}
 
-	provider.Status.Runtime.Mode = runtimeMode
+	// Set runtime mode (always Remote)
+	provider.Status.Runtime.Mode = infravirtrigaudiov1beta1.RuntimeModeRemote
 
-	// Handle runtime reconciliation based on mode
-	var result ctrl.Result
-	var err error
-
-	switch runtimeMode {
-	case infravirtrigaudiov1beta1.RuntimeModeRemote:
-		result, err = r.reconcileRemoteRuntime(ctx, &provider)
-	case infravirtrigaudiov1beta1.RuntimeModeInProcess:
-		result, err = r.reconcileInProcessRuntime(ctx, &provider)
-	default:
-		err = fmt.Errorf("unsupported runtime mode: %s", runtimeMode)
-		k8s.SetCondition(&provider.Status.Conditions, "ProviderRuntimeReady", metav1.ConditionFalse, "InvalidRuntimeMode", err.Error())
-	}
+	// Handle remote runtime reconciliation
+	result, err := r.reconcileRemoteRuntime(ctx, &provider)
 
 	// Update provider status
 	provider.Status.ObservedGeneration = provider.Generation
@@ -115,28 +110,11 @@ func (r *ProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 func (r *ProviderReconciler) handleDeletion(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	if provider.Spec.Runtime != nil && provider.Spec.Runtime.Mode == infravirtrigaudiov1beta1.RuntimeModeRemote {
-		// Clean up deployment and service
-		if err := r.cleanupRemoteRuntime(ctx, provider); err != nil {
-			logger.Error(err, "Failed to cleanup remote runtime resources")
-			return ctrl.Result{RequeueAfter: time.Minute}, err
-		}
+	// Always clean up remote runtime resources (all providers are remote now)
+	if err := r.cleanupRemoteRuntime(ctx, provider); err != nil {
+		logger.Error(err, "Failed to cleanup remote runtime resources")
+		return ctrl.Result{RequeueAfter: time.Minute}, err
 	}
-
-	return ctrl.Result{}, nil
-}
-
-// reconcileInProcessRuntime handles in-process providers (existing behavior)
-func (r *ProviderReconciler) reconcileInProcessRuntime(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) (ctrl.Result, error) {
-	// For in-process providers, just update status to indicate they're ready
-	provider.Status.Runtime.Phase = infravirtrigaudiov1beta1.ProviderRuntimePhaseRunning
-	provider.Status.Runtime.Message = "In-process provider ready"
-	provider.Status.Runtime.Endpoint = ""
-	provider.Status.Runtime.ServiceRef = nil
-
-	k8s.SetCondition(&provider.Status.Conditions, "ProviderRuntimeReady", metav1.ConditionTrue, "InProcessReady", "In-process provider is ready")
-
-	k8s.SetCondition(&provider.Status.Conditions, "ProviderAvailable", metav1.ConditionTrue, "InProcessAvailable", "In-process provider is available")
 
 	return ctrl.Result{}, nil
 }

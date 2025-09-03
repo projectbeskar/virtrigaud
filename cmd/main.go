@@ -26,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
@@ -39,8 +40,6 @@ import (
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/controller"
-	"github.com/projectbeskar/virtrigaud/internal/providers/registry"
-	"github.com/projectbeskar/virtrigaud/internal/providers/vsphere"
 	"github.com/projectbeskar/virtrigaud/internal/runtime/remote"
 	"github.com/projectbeskar/virtrigaud/internal/version"
 )
@@ -214,26 +213,15 @@ func main() {
 
 	setupLog.Info("Starting virtrigaud manager", "version", version.String())
 
-	// Create provider registry
-	providerRegistry := registry.NewRegistry()
-
-	// Register provider factories
-	providerRegistry.Register("vsphere", vsphere.Factory(mgr.GetClient()))
-	// Note: libvirt provider registration removed to avoid CGO dependencies in CI
-	// Libvirt VMs should use remote provider runtime mode
-
-	setupLog.Info("Provider registry initialized", "supportedTypes", providerRegistry.ListSupportedTypes())
-
-	// Create remote provider resolver with in-process fallback
-	remoteResolver := remote.NewResolver(mgr.GetClient(), providerRegistry)
+	// Create remote provider resolver (all providers are now remote)
+	remoteResolver := remote.NewResolver(mgr.GetClient())
 
 	setupLog.Info("Remote provider resolver initialized")
 
 	if err = (&controller.VirtualMachineReconciler{
-		Client:           mgr.GetClient(),
-		Scheme:           mgr.GetScheme(),
-		ProviderRegistry: providerRegistry,
-		RemoteResolver:   remoteResolver,
+		Client:         mgr.GetClient(),
+		Scheme:         mgr.GetScheme(),
+		RemoteResolver: remoteResolver,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "VirtualMachine")
 		os.Exit(1)

@@ -30,3 +30,7 @@ go.work
 
 # Local development files
 /tmp/virtrigaud-dev-values.yaml 
+libvirtVM.yaml
+libvirtVM-corrected.yaml
+vm-example.yaml
+vm-simple-example.yaml

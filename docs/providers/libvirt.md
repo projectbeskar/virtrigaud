@@ -54,7 +54,8 @@ metadata:
 spec:
   type: libvirt
   endpoint: "qemu:///system"  # Local system connection
-  # No credentials needed for local access
+  # No credentials needed for local access (if supported)
+  # Note: May require TCP endpoint depending on provider implementation
 ```
 
 ### Remote Connection with SSH
@@ -136,6 +137,8 @@ The LibVirt provider supports standard LibVirt connection URIs:
 | `qemu+ssh://user@host/system` | SSH connection | Remote access with SSH |
 | `qemu+tls://host:16514/system` | TLS connection | Secure remote access |
 | `qemu+tcp://host:16509/system` | TCP connection | Insecure remote (testing only) |
+
+**⚠️ Note**: All LibVirt URI schemes are now supported in the CRD validation pattern.
 
 ### Deployment Configuration
 

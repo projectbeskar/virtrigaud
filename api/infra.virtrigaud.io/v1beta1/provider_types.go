@@ -39,12 +39,10 @@ const (
 )
 
 // ProviderRuntimeMode specifies how the provider is executed
-// +kubebuilder:validation:Enum=InProcess;Remote
+// +kubebuilder:validation:Enum=Remote
 type ProviderRuntimeMode string
 
 const (
-	// RuntimeModeInProcess runs the provider in the manager process
-	RuntimeModeInProcess ProviderRuntimeMode = "InProcess"
 	// RuntimeModeRemote runs the provider as a separate deployment
 	RuntimeModeRemote ProviderRuntimeMode = "Remote"
 )
@@ -81,15 +79,14 @@ type ProviderTLSSpec struct {
 
 // ProviderRuntimeSpec defines the runtime configuration for providers
 type ProviderRuntimeSpec struct {
-	// Mode specifies the runtime mode
+	// Mode specifies the runtime mode (always Remote)
 	// +optional
-	// +kubebuilder:default="InProcess"
+	// +kubebuilder:default="Remote"
 	Mode ProviderRuntimeMode `json:"mode,omitempty"`
 
-	// Image is the container image for remote providers (required if Mode=Remote)
-	// +optional
+	// Image is the container image for remote providers (required)
 	// +kubebuilder:validation:Pattern="^[a-zA-Z0-9._/-]+:[a-zA-Z0-9._-]+$"
-	Image string `json:"image,omitempty"`
+	Image string `json:"image"`
 
 	// ImagePullPolicy defines the image pull policy
 	// +optional
@@ -202,7 +199,9 @@ type ProviderSpec struct {
 	Type ProviderType `json:"type"`
 
 	// Endpoint is the provider endpoint URI
-	// +kubebuilder:validation:Pattern="^(https?|tcp|grpc)://[a-zA-Z0-9.-]+:[0-9]+(/.*)?$"
+	// Supports multiple protocols: HTTP(S), TCP, gRPC for general providers
+	// and LibVirt-specific schemes: qemu://, qemu+ssh://, qemu+tcp://, qemu+tls://
+	// +kubebuilder:validation:Pattern="^((https?|tcp|grpc)://[a-zA-Z0-9.-]+:[0-9]+(/.*)?|qemu(\\+ssh|\\+tcp|\\+tls)?://([a-zA-Z0-9@.-]+(:[0-9]+)?)?(/.*))$"
 	Endpoint string `json:"endpoint"`
 
 	// CredentialSecretRef references the Secret containing credentials
@@ -221,9 +220,8 @@ type ProviderSpec struct {
 	// +optional
 	RateLimit *RateLimit `json:"rateLimit,omitempty"`
 
-	// Runtime defines how the provider is executed
-	// +optional
-	Runtime *ProviderRuntimeSpec `json:"runtime,omitempty"`
+	// Runtime defines how the provider is executed (required)
+	Runtime *ProviderRuntimeSpec `json:"runtime"`
 
 	// HealthCheck defines health checking configuration
 	// +optional
