@@ -5,8 +5,36 @@ entries:
       category: Infrastructure
       licenses: Apache-2.0
     apiVersion: v2
+    appVersion: v0.2.0-rc1
+    created: "2025-09-03T11:56:50.708047785Z"
+    description: A Kubernetes operator for managing virtual machines across multiple
+      hypervisors
+    digest: bab77fd0a45bbe47f80a69808f57b9401fc77290cddf39d78cdffa97498246a8
+    home: https://github.com/projectbeskar/virtrigaud
+    keywords:
+    - virtualization
+    - vmware
+    - vsphere
+    - libvirt
+    - kvm
+    - operator
+    - kubernetes
+    maintainers:
+    - email: maintainers@virtrigaud.io
+      name: Virtrigaud Maintainers
+    name: virtrigaud
+    sources:
+    - https://github.com/projectbeskar/virtrigaud
+    type: application
+    urls:
+    - https://projectbeskar.github.io/virtrigaud/virtrigaud-0.2.0-rc1.tgz
+    version: 0.2.0-rc1
+  - annotations:
+      category: Infrastructure
+      licenses: Apache-2.0
+    apiVersion: v2
     appVersion: v0.1.1
-    created: "2025-08-29T21:43:39.807832938Z"
+    created: "2025-09-03T11:56:50.705164374Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 4a055a268b1a1ee3863f51401c1208a850714a2237e8dafaf573b4abc3b536ec
@@ -34,7 +62,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.1.0
-    created: "2025-08-29T21:43:39.805356561Z"
+    created: "2025-09-03T11:56:50.702725684Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: d54456172b07ca140fafe39e7ff522f6e57ab63fd4ed8a001eee251cd30d6a89
@@ -57,4 +85,4 @@ entries:
     urls:
     - https://projectbeskar.github.io/virtrigaud/virtrigaud-0.1.0.tgz
     version: 0.1.0
-generated: "2025-08-29T21:43:39.804325274Z"
+generated: "2025-09-03T11:56:50.701697539Z"
