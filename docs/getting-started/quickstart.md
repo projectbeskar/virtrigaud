@@ -156,6 +156,8 @@ Apply the provider configuration:
 kubectl apply -f provider.yaml
 ```
 
+> 💡 **Behind the scenes**: VirtRigaud automatically converts your Provider resource into the appropriate command-line arguments, environment variables, and secret mounts for the provider pod. See the [configuration flow documentation](../REMOTE_PROVIDERS.md#configuration-flow-provider-resource--provider-pod) for complete details.
+
 ## Step 4: Create a VM Class
 
 Define resource templates for your VMs:

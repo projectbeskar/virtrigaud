@@ -43,6 +43,97 @@ Each Provider resource automatically creates:
 - **ConfigMaps**: Provider configuration
 - **Secret mounts**: Credentials for hypervisor access
 
+### Configuration Flow: Provider Resource → Provider Pod
+
+The VirtRigaud Provider Controller automatically translates your Provider resource configuration into the appropriate command-line arguments and environment variables for the provider pod.
+
+#### Command-Line Arguments
+
+The controller generates these arguments from your Provider spec:
+
+| Provider Field | Generated Argument | Example |
+|----------------|-------------------|---------|
+| `spec.type` | `--provider-type` | `--provider-type=vsphere` |
+| `spec.endpoint` | `--provider-endpoint` | `--provider-endpoint=https://vcenter.example.com` |
+| `spec.runtime.service.port` | `--grpc-addr` | `--grpc-addr=:9090` |
+| (hardcoded) | `--metrics-addr` | `--metrics-addr=:8080` |
+| (optional) | `--tls-enabled` | `--tls-enabled=false` |
+
+#### Environment Variables
+
+The controller also sets these environment variables:
+
+| Provider Field | Environment Variable | Example |
+|----------------|---------------------|---------|
+| `spec.type` | `PROVIDER_TYPE` | `vsphere` |
+| `spec.endpoint` | `PROVIDER_ENDPOINT` | `https://vcenter.example.com` |
+| `metadata.namespace` | `PROVIDER_NAMESPACE` | `default` |
+| `metadata.name` | `PROVIDER_NAME` | `vsphere-datacenter` |
+| (optional) | `TLS_ENABLED` | `false` |
+
+#### Secret Volume Mounts
+
+Credentials from `spec.credentialSecretRef` are automatically mounted at:
+
+- **Mount Path**: `/etc/virtrigaud/credentials/`
+- **Files Created**: Each secret key becomes a file
+  - `username` → `/etc/virtrigaud/credentials/username`
+  - `password` → `/etc/virtrigaud/credentials/password`
+  - `token` → `/etc/virtrigaud/credentials/token`
+
+#### Complete Example
+
+When you create this Provider resource:
+
+```yaml
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: Provider
+metadata:
+  name: vsphere-datacenter
+  namespace: default
+spec:
+  type: vsphere
+  endpoint: "https://vcenter.example.com:443"
+  credentialSecretRef:
+    name: vsphere-credentials
+  runtime:
+    mode: Remote
+    image: "virtrigaud/provider-vsphere:latest"
+    service:
+      port: 9090
+```
+
+The controller automatically creates a deployment with:
+
+**Command-line arguments:**
+```bash
+/provider-vsphere \
+  --grpc-addr=:9090 \
+  --metrics-addr=:8080 \
+  --provider-type=vsphere \
+  --provider-endpoint=https://vcenter.example.com:443 \
+  --tls-enabled=false
+```
+
+**Environment variables:**
+```bash
+PROVIDER_TYPE=vsphere
+PROVIDER_ENDPOINT=https://vcenter.example.com:443
+PROVIDER_NAMESPACE=default
+PROVIDER_NAME=vsphere-datacenter
+TLS_ENABLED=false
+```
+
+**Volume mounts:**
+```bash
+/etc/virtrigaud/credentials/username  # Contains: admin@vsphere.local
+/etc/virtrigaud/credentials/password  # Contains: your-password
+```
+
+### **✅ Key Point: You Don't Configure This Manually**
+
+The beauty of VirtRigaud's Remote Provider architecture is that **you never need to manually configure command-line arguments or environment variables**. Simply create the Provider resource, and the controller handles all the deployment details automatically!
+
 ### 2. Provider Images
 
 Specialized images for each provider type:

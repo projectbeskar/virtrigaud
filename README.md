@@ -216,6 +216,8 @@ graph TB
    EOF
    ```
 
+   > 📚 **How it works**: VirtRigaud automatically translates your Provider configuration into command-line arguments and environment variables for the provider pod. See [Remote Provider Documentation](docs/REMOTE_PROVIDERS.md#configuration-flow-provider-resource--provider-pod) for details.
+
 2. **Create VM resources using the Provider**:
    ```bash
    # Apply VM definition that references the provider
