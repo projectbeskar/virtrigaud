@@ -351,6 +351,11 @@ jobs:
           endpoint: http://localhost:9443
           credentialSecretRef:
             name: test-credentials
+          runtime:
+            mode: Remote
+            image: "virtrigaud/provider-proxmox:latest"
+            service:
+              port: 9090
         EOF
         
         # Verify resource was created

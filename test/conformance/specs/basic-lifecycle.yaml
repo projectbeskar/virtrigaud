@@ -20,6 +20,11 @@
         spec:
           type: test
           endpoint: "test://localhost"
+          runtime:
+            mode: Remote
+            image: "virtrigaud/provider-mock:latest"
+            service:
+              port: 9090
       validate:
         - path: .status.phase
           operator: eq
