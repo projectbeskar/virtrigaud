@@ -19,71 +19,74 @@ package main
 import (
 	"context"
 	"flag"
-	"fmt"
-	"log"
-	"net"
+	"log/slog"
 	"os"
-	"os/signal"
-	"syscall"
-
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/health"
-	"google.golang.org/grpc/health/grpc_health_v1"
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/vsphere"
 	"github.com/projectbeskar/virtrigaud/internal/version"
-	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
+	"github.com/projectbeskar/virtrigaud/sdk/provider/middleware"
+	"github.com/projectbeskar/virtrigaud/sdk/provider/server"
 )
 
 func main() {
 	// Handle --version flag before any other flag parsing
 	if len(os.Args) > 1 && os.Args[1] == "--version" {
-		fmt.Printf("virtrigaud-provider-vsphere %s\n", version.String())
+		println("vsphere-provider", version.String())
 		os.Exit(0)
 	}
 
+	// Parse command-line flags
 	var port int
 	var healthPort int
 	flag.IntVar(&port, "port", 9443, "gRPC server port")
 	flag.IntVar(&healthPort, "health-port", 8080, "Health check port")
 	flag.Parse()
 
-	// Create context that listens for the interrupt signal from the OS
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
+	// Create logger
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	}))
 
-	// Create gRPC server
-	server := grpc.NewServer()
-
-	// Create vSphere provider
-	provider := vsphere.NewServer(nil)
-
-	// Register the provider service
-	providerv1.RegisterProviderServer(server, provider)
-
-	// Register health service
-	healthServer := health.NewServer()
-	grpc_health_v1.RegisterHealthServer(server, healthServer)
-	healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
-
-	// Start gRPC server
-	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
-	if err != nil {
-		log.Fatalf("Failed to listen: %v", err)
+	// Create server configuration
+	config := server.DefaultConfig()
+	config.Port = port
+	config.HealthPort = healthPort
+	config.Logger = logger
+	config.Middleware = &middleware.Config{
+		Logging: &middleware.LoggingConfig{
+			Enabled: true,
+			Logger:  logger,
+		},
+		Recovery: &middleware.RecoveryConfig{
+			Enabled: true,
+			Logger:  logger,
+		},
 	}
 
-	log.Printf("vSphere provider server %s listening on port %d", version.String(), port)
+	// Create server
+	srv, err := server.New(config)
+	if err != nil {
+		logger.Error("Failed to create server", "error", err)
+		os.Exit(1)
+	}
 
-	// Start server in a goroutine
-	go func() {
-		if err := server.Serve(lis); err != nil {
-			log.Fatalf("Failed to serve: %v", err)
-		}
-	}()
+	// Create and register provider
+	providerImpl := vsphere.New()
+	srv.RegisterProvider(providerImpl)
 
-	// Wait for interrupt signal to gracefully shutdown the server
-	<-ctx.Done()
+	// Log startup information with capabilities
+	logger.Info("Starting vSphere provider server",
+		"version", version.String(),
+		"capabilities", []string{
+			"core", "snapshots", "linked-clones",
+			"online-reconfigure", "templates", "folders",
+		},
+		"supported_platforms", []string{"vsphere", "vcenter"},
+	)
 
-	log.Println("Shutting down gRPC server...")
-	server.GracefulStop()
+	// Start server
+	if err := srv.Serve(context.Background()); err != nil {
+		logger.Error("Server failed", "error", err)
+		os.Exit(1)
+	}
 }
