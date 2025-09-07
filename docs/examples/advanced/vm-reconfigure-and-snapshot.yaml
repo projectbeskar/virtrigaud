@@ -1,0 +1,263 @@
+# Advanced VM Lifecycle Example: Reconfiguration and Snapshots
+# This example demonstrates:
+# 1. Creating a VM with initial configuration
+# 2. Taking a snapshot before making changes
+# 3. Reconfiguring the VM (CPU/memory changes)
+# 4. Using placement policies for advanced placement rules
+
+---
+# Placement policy for production workloads
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMPlacementPolicy
+metadata:
+  name: production-policy
+  namespace: default
+spec:
+  hard:
+    clusters: ["prod-cluster-1", "prod-cluster-2"]
+    datastores: ["prod-ssd-01", "prod-ssd-02"]
+  soft:
+    folders: ["/Production/WebServers"]
+  antiAffinity:
+    hostAntiAffinity: true  # Don't place multiple VMs on same host
+    datastoreAntiAffinity: false
+
+---
+# VM Image with preparation settings
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMImage
+metadata:
+  name: ubuntu-22-server
+  namespace: default
+spec:
+  vsphere:
+    templateName: "ubuntu-22.04-server-template"
+    # Alternative: import from OVA
+    # ovaURL: "https://releases.ubuntu.com/22.04/ubuntu-22.04-server-cloudimg-amd64.ova"
+    # checksum: "abcd1234..."
+  libvirt:
+    url: "https://cloud-images.ubuntu.com/releases/22.04/release/ubuntu-22.04-server-cloudimg-amd64.img"
+    format: "qcow2"
+    checksum: "1234567890abcdef..."
+  prepare:
+    onMissing: "Import"
+    validateChecksum: true
+    timeout: "30m"
+    retries: 3
+    storage:
+      vsphere:
+        datastore: "prod-ssd-01"
+        folder: "/Templates"
+        thinProvisioned: true
+      libvirt:
+        storagePool: "production"
+        allocationPolicy: "lazy"
+
+---
+# VM Class defining resource tiers
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMClass
+metadata:
+  name: web-server-small
+  namespace: default
+spec:
+  cpu: 2
+  memory: 4096  # 4 GB
+  diskDefaults:
+    - name: "root"
+      sizeGiB: 20
+      type: "thin"
+  networkDefaults:
+    - name: "primary"
+      networkRef:
+        name: "prod-network"
+
+---
+# Initial VM configuration
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: web-server-01
+  namespace: default
+  labels:
+    app: web-server
+    environment: production
+    tier: frontend
+spec:
+  providerRef:
+    name: vsphere-prod
+  classRef:
+    name: web-server-small
+  imageRef:
+    name: ubuntu-22-server
+  placementRef:
+    name: production-policy
+  
+  # Resource overrides (will be changed later for reconfiguration demo)
+  resources:
+    cpu: 2
+    memoryMiB: 4096
+  
+  disks:
+    - name: "data"
+      sizeGiB: 50
+      type: "thin"
+      expandPolicy: "Online"  # Allow online expansion
+  
+  networks:
+    - name: "primary"
+      networkRef:
+        name: "prod-network"
+    - name: "backup"
+      networkRef:
+        name: "backup-network"
+  
+  powerState: "On"
+  
+  userData:
+    cloudInit:
+      inline: |
+        #cloud-config
+        hostname: web-server-01
+        users:
+          - name: ubuntu
+            sudo: ALL=(ALL) NOPASSWD:ALL
+            shell: /bin/bash
+            ssh_authorized_keys:
+              - ssh-rsa AAAAB3NzaC1yc2E... # Your public key
+        packages:
+          - nginx
+          - htop
+          - curl
+        runcmd:
+          - systemctl enable nginx
+          - systemctl start nginx
+          - echo "Web Server 01 - Production" > /var/www/html/index.html
+  
+  tags:
+    - "environment:production"
+    - "application:web-server"
+    - "managed-by:virtrigaud"
+
+---
+# Create a pre-change snapshot
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMSnapshot
+metadata:
+  name: web-server-01-pre-upgrade
+  namespace: default
+spec:
+  vmRef:
+    name: web-server-01
+  nameHint: "pre-upgrade-snapshot"
+  memory: true  # Include memory state
+  description: "Snapshot before CPU/memory upgrade"
+  retentionPolicy:
+    maxAge: "7d"  # Keep for 7 days
+    deleteOnVMDelete: true
+
+---
+# Clone the VM for testing
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMClone
+metadata:
+  name: web-server-01-test-clone
+  namespace: default
+spec:
+  sourceRef:
+    name: web-server-01
+  target:
+    name: web-server-01-test
+    classRef:
+      name: web-server-small
+    placementRef:
+      name: production-policy
+  linked: true  # Use linked clone for faster creation
+  powerOn: true
+  customization:
+    hostname: web-server-01-test
+    networks:
+      - name: primary
+        ipAddress: "192.168.1.101"  # Static IP for test VM
+        gateway: "192.168.1.1"
+        dns: ["8.8.8.8", "8.8.4.4"]
+    userData:
+      cloudInit:
+        inline: |
+          #cloud-config
+          hostname: web-server-01-test
+          runcmd:
+            - echo "Test Clone - Do Not Use in Production" > /var/www/html/index.html
+    tags:
+      - "environment:test"
+      - "cloned-from:web-server-01"
+
+---
+# VMSet for multiple web servers with rolling updates
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMSet
+metadata:
+  name: web-server-set
+  namespace: default
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: web-server-set
+      environment: production
+  template:
+    metadata:
+      labels:
+        app: web-server-set
+        environment: production
+        tier: frontend
+    spec:
+      providerRef:
+        name: vsphere-prod
+      classRef:
+        name: web-server-small
+      imageRef:
+        name: ubuntu-22-server
+      placementRef:
+        name: production-policy
+      
+      resources:
+        cpu: 2
+        memoryMiB: 4096
+      
+      disks:
+        - name: "data"
+          sizeGiB: 30
+          type: "thin"
+      
+      networks:
+        - name: "primary"
+          networkRef:
+            name: "prod-network"
+      
+      powerState: "On"
+      
+      userData:
+        cloudInit:
+          inline: |
+            #cloud-config
+            packages:
+              - nginx
+              - htop
+            runcmd:
+              - systemctl enable nginx
+              - systemctl start nginx
+              - echo "Web Server Set - Instance $(hostname)" > /var/www/html/index.html
+      
+      tags:
+        - "environment:production"
+        - "application:web-server-set"
+        - "managed-by:virtrigaud"
+  
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  
+  minReadySeconds: 30

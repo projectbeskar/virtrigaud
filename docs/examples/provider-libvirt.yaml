@@ -1,0 +1,22 @@
+# LibVirt Provider Example  
+# This example demonstrates Remote provider configuration for LibVirt/KVM
+#
+# ⚠️  IMPORTANT: Requires LibVirt Host Access
+# The LibVirt provider needs access to a LibVirt daemon (qemu:///system or remote)
+# See docs/providers/libvirt.md for setup instructions and configuration details.
+
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: Provider
+metadata:
+  name: libvirt-local
+  namespace: default
+spec:
+  type: libvirt
+  endpoint: qemu+tcp://libvirt.example.com/system
+  credentialSecretRef:
+    name: libvirt-creds
+  runtime:
+    mode: Remote
+    image: "virtrigaud/provider-libvirt:latest"
+    service:
+      port: 9090

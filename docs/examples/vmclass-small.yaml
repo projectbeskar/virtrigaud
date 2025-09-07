@@ -1,0 +1,13 @@
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMClass
+metadata:
+  name: small
+  namespace: default
+spec:
+  cpu: 2
+  memory: "4Gi"
+  firmware: UEFI
+  diskDefaults:
+    type: thin
+    size: "40Gi"
+  guestToolsPolicy: install

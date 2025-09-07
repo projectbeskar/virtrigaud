@@ -1,0 +1,27 @@
+# vSphere Provider Example
+# This example demonstrates Remote provider configuration for VMware vSphere
+#
+# ⚠️  IMPORTANT: Requires Active vSphere Environment  
+# The vSphere provider needs access to vCenter Server or ESXi hosts.
+# See docs/providers/vsphere.md for setup instructions and configuration details.
+
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: Provider
+metadata:
+  name: vsphere-prod
+  namespace: default
+spec:
+  type: vsphere
+  endpoint: https://vcenter.example.com
+  credentialSecretRef:
+    name: vsphere-creds
+  insecureSkipVerify: false
+  runtime:
+    mode: Remote
+    image: "virtrigaud/provider-vsphere:latest"
+    service:
+      port: 9090
+  defaults:
+    datastore: datastore1
+    cluster: compute-cluster-a
+    folder: virtrigaud-vms

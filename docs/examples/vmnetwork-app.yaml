@@ -1,0 +1,12 @@
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMNetworkAttachment
+metadata:
+  name: app-network
+  namespace: default
+spec:
+  network:
+    vsphere:
+      portgroup: "PG-App"
+      distributed: true
+  ipAllocation:
+    type: DHCP

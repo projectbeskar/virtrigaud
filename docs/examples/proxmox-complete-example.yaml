@@ -1,0 +1,313 @@
+# Complete Proxmox VE Provider Example
+# This example demonstrates all major features of the Proxmox provider
+#
+# ⚠️  IMPORTANT: Requires Active Proxmox VE Server
+# The Proxmox provider needs environment variables to connect to a real Proxmox VE server.
+# See docs/providers/proxmox.md for deployment configuration examples.
+
+---
+# Secret for Proxmox VE API credentials
+apiVersion: v1
+kind: Secret
+metadata:
+  name: proxmox-credentials
+  namespace: default
+type: Opaque
+stringData:
+  # Use API token authentication (recommended)
+  token_id: "virtrigaud@pve!vrtg-token"
+  token_secret: "xxxxxxxx-xxxx-4xxx-xxxx-xxxxxxxxxxxx"
+  
+  # Optional: CA certificate for self-signed Proxmox VE
+  ca.crt: |
+    -----BEGIN CERTIFICATE-----
+    # Your Proxmox VE CA certificate here
+    -----END CERTIFICATE-----
+
+---
+# Provider configuration for Proxmox VE
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: Provider
+metadata:
+  name: proxmox-prod
+  namespace: default
+spec:
+  type: proxmox
+  endpoint: https://pve.example.com:8006
+  credentialSecretRef:
+    name: proxmox-credentials
+  runtime:
+    mode: Remote
+    image: "virtrigaud/provider-proxmox:latest"
+    service:
+      port: 9090
+
+---
+# Small VM class for development workloads
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMClass
+metadata:
+  name: small
+  namespace: virtrigaud-system
+spec:
+  cpus: 2
+  memory: "4Gi"
+  disks:
+    - name: root
+      size: "40Gi"
+      storageClass: "local-lvm"  # Proxmox storage pool
+
+---
+# Medium VM class for production workloads
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMClass
+metadata:
+  name: medium
+  namespace: virtrigaud-system
+spec:
+  cpus: 4
+  memory: "8Gi"
+  disks:
+    - name: root
+      size: "80Gi"
+      storageClass: "ssd-storage"
+    - name: data
+      size: "100Gi"
+      storageClass: "nvme-storage"
+
+---
+# Ubuntu 22.04 VM image/template
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMImage
+metadata:
+  name: ubuntu-22
+  namespace: virtrigaud-system
+spec:
+  source: "ubuntu-22-template"  # Existing template in Proxmox VE
+  description: "Ubuntu 22.04 LTS Cloud Image"
+
+---
+# CentOS Stream 9 image with import from URL
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMImage
+metadata:
+  name: centos-stream-9
+  namespace: virtrigaud-system
+spec:
+  source: "https://cloud.centos.org/centos/9-stream/x86_64/images/CentOS-Stream-GenericCloud-9-latest.x86_64.qcow2"
+  description: "CentOS Stream 9 Cloud Image"
+  storageClass: "local-lvm"
+
+---
+# Basic network configuration
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMNetworkAttachment
+metadata:
+  name: lan-network
+  namespace: virtrigaud-system
+spec:
+  networkRef:
+    name: "lan"  # Maps to vmbr0 bridge
+
+---
+# Multi-NIC network configuration with VLANs
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMNetworkAttachment
+metadata:
+  name: multi-nic-network
+  namespace: virtrigaud-system
+spec:
+  networks:
+    # Primary LAN interface with static IP
+    - name: "lan"
+      bridge: "vmbr0"
+      staticIP:
+        address: "192.168.1.100/24"
+        gateway: "192.168.1.1"
+        dns: ["8.8.8.8", "1.1.1.1"]
+    
+    # DMZ interface with VLAN
+    - name: "dmz"
+      bridge: "vmbr1"
+      vlan: 100
+    
+    # Management interface
+    - name: "mgmt"
+      bridge: "vmbr2"
+      mac: "02:00:00:aa:bb:cc"
+
+---
+# Simple development VM
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: dev-vm-01
+  namespace: virtrigaud-system
+spec:
+  providerRef:
+    name: proxmox-prod
+  classRef:
+    name: small
+  imageRef:
+    name: ubuntu-22
+  networkAttachmentRef:
+    name: lan-network
+  powerState: On
+  userData:
+    cloudInit:
+      inline: |
+        #cloud-config
+        hostname: dev-vm-01
+        users:
+          - name: ubuntu
+            sudo: ALL=(ALL) NOPASSWD:ALL
+            ssh_authorized_keys:
+              - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... dev@example.com"
+        packages:
+          - curl
+          - git
+          - docker.io
+        runcmd:
+          - systemctl enable docker
+          - systemctl start docker
+          - usermod -aG docker ubuntu
+
+---
+# Production web server with multi-NIC and snapshots
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: web-server-01
+  namespace: virtrigaud-system
+  labels:
+    environment: production
+    tier: frontend
+spec:
+  providerRef:
+    name: proxmox-prod
+  classRef:
+    name: medium
+  imageRef:
+    name: ubuntu-22
+  networkAttachmentRef:
+    name: multi-nic-network
+  powerState: On
+  userData:
+    cloudInit:
+      inline: |
+        #cloud-config
+        hostname: web-server-01
+        users:
+          - name: webadmin
+            sudo: ALL=(ALL) NOPASSWD:ALL
+            ssh_authorized_keys:
+              - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... admin@example.com"
+        packages:
+          - nginx
+          - certbot
+          - python3-certbot-nginx
+        runcmd:
+          - systemctl enable nginx
+          - systemctl start nginx
+          - ufw allow 'Nginx Full'
+          - ufw enable
+
+---
+# VM Snapshot for the web server
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMSnapshot
+metadata:
+  name: web-server-01-baseline
+  namespace: virtrigaud-system
+spec:
+  vmRef:
+    name: web-server-01
+  description: "Baseline snapshot after initial setup"
+  includeMemory: false  # Faster crash-consistent snapshot
+
+---
+# Database server with high-performance storage
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: db-server-01
+  namespace: virtrigaud-system
+  labels:
+    environment: production
+    tier: database
+spec:
+  providerRef:
+    name: proxmox-prod
+  classRef:
+    name: medium
+  imageRef:
+    name: ubuntu-22
+  networkAttachmentRef:
+    name: lan-network
+  powerState: On
+  userData:
+    cloudInit:
+      inline: |
+        #cloud-config
+        hostname: db-server-01
+        users:
+          - name: dbadmin
+            sudo: ALL=(ALL) NOPASSWD:ALL
+            ssh_authorized_keys:
+              - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... dba@example.com"
+        packages:
+          - postgresql-14
+          - postgresql-contrib
+          - redis-server
+        runcmd:
+          - systemctl enable postgresql
+          - systemctl start postgresql
+          - systemctl enable redis-server
+          - systemctl start redis-server
+
+---
+# Memory snapshot for database (before maintenance)
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMSnapshot
+metadata:
+  name: db-server-01-pre-maintenance
+  namespace: virtrigaud-system
+spec:
+  vmRef:
+    name: db-server-01
+  description: "Before database maintenance window"
+  includeMemory: true  # Include memory for consistent state
+
+---
+# Test VM with CentOS Stream 9 (auto-imported)
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: test-centos-vm
+  namespace: virtrigaud-system
+  labels:
+    environment: testing
+spec:
+  providerRef:
+    name: proxmox-prod
+  classRef:
+    name: small
+  imageRef:
+    name: centos-stream-9  # Will trigger image import if not present
+  networkAttachmentRef:
+    name: lan-network
+  powerState: On
+  userData:
+    cloudInit:
+      inline: |
+        #cloud-config
+        hostname: test-centos-vm
+        users:
+          - name: centos
+            sudo: ALL=(ALL) NOPASSWD:ALL
+            ssh_authorized_keys:
+              - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... test@example.com"
+        packages:
+          - epel-release
+          - htop
+          - tmux

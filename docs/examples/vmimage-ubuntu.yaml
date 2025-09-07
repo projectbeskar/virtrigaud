@@ -1,0 +1,14 @@
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMImage
+metadata:
+  name: ubuntu-22-template
+  namespace: default
+spec:
+  source:
+    vsphere:
+      templateName: "tmpl-ubuntu-22.04-cloudimg"
+  metadata:
+    description: "Ubuntu 22.04 LTS cloud image"
+    version: "22.04"
+  prepare:
+    onMissing: Fail
