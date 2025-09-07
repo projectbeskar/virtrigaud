@@ -40,11 +40,13 @@ RUN CGO_ENABLED=1 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
 # Runtime stage
 FROM debian:bookworm-slim
 
-# Install runtime dependencies
+# Install runtime dependencies with latest security updates
 RUN apt-get update && apt-get install -y \
     libvirt0 \
     libxml2 \
     ca-certificates \
+    curl \
+    && apt-get upgrade -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
