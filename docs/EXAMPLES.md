@@ -1,420 +1,102 @@
 # Examples
 
-This document provides practical examples for using virtrigaud.
+This document provides practical examples for using VirtRigaud with the Remote provider architecture.
 
-## Basic VM Creation
+## Quick Start Examples
 
-This example demonstrates creating a simple VM on vSphere.
+All VirtRigaud providers now run as Remote providers. Here are the essential examples to get started:
 
-### 1. Create Credentials Secret
+### Basic Provider Setup
 
-```bash
-kubectl create secret generic vsphere-creds \
-  --from-literal=username=administrator@vsphere.local \
-  --from-literal=password=your-password
+- **[vSphere Provider](examples/provider-vsphere.yaml)** - Basic vSphere provider configuration
+- **[LibVirt Provider](examples/provider-libvirt.yaml)** - Basic LibVirt provider configuration
+
+### Complete Working Examples
+
+- **[Complete vSphere Setup](examples/complete-example.yaml)** - End-to-end vSphere VM creation
+- **[Advanced vSphere Setup](examples/vsphere-advanced-example.yaml)** - Production-ready vSphere configuration
+- **[LibVirt Complete Setup](examples/libvirt-complete-example.yaml)** - End-to-end LibVirt VM creation
+- **[Multi-Provider Setup](examples/multi-provider-example.yaml)** - Using multiple providers together
+
+### Individual Resource Examples
+
+- **[VMClass](examples/vmclass-small.yaml)** - VM resource allocation template
+- **[VMImage](examples/vmimage-ubuntu.yaml)** - VM image/template definition
+- **[VMNetworkAttachment](examples/vmnetwork-app.yaml)** - Network configuration
+- **[Simple VM](examples/vm-ubuntu-small.yaml)** - Basic virtual machine
+
+### Advanced Examples
+
+- **[Security Configuration](examples/security/)** - RBAC, network policies, external secrets
+- **[Advanced Operations](examples/advanced/)** - Snapshots, reconfiguration, lifecycle management
+
+## Example Directory Structure
+
+```
+docs/examples/
+├── provider-*.yaml          # Provider configurations
+├── complete-example.yaml    # Full working setup
+├── *-advanced-example.yaml  # Production configurations
+├── vm*.yaml                 # Individual resource definitions
+├── advanced/                # Advanced operations
+├── security/                # Security configurations
+└── secrets/                 # Credential examples
 ```
 
-### 2. Create Provider
+## Key Changes from Previous Versions
+
+### Remote-Only Architecture
+
+All providers now run as separate pods with the Remote runtime:
 
 ```yaml
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: Provider
 metadata:
-  name: vsphere-prod
+  name: my-provider
 spec:
-  type: vsphere
+  type: vsphere  # or libvirt, proxmox
   endpoint: https://vcenter.example.com
   credentialSecretRef:
-    name: vsphere-creds
-  defaults:
-    datastore: datastore1
-    cluster: compute-cluster
-    folder: virtrigaud-vms
+    name: provider-creds
+  runtime:
+    mode: Remote              # Required - only mode supported
+    image: "virtrigaud/provider-vsphere:latest"
+    service:
+      port: 9090
 ```
 
-### 3. Create VM Class
+### Updated API Schema (v1beta1)
 
-```yaml
-apiVersion: infra.virtrigaud.io/v1beta1
-kind: VMClass
-metadata:
-  name: small
-spec:
-  cpu: 2
-  memoryMiB: 4096
-  firmware: UEFI
-  diskDefaults:
-    type: thin
-    sizeGiB: 40
-```
+- **VMClass**: Use `memory: "4Gi"` instead of `memoryMiB: 4096`
+- **VMClass**: Use `size: "40Gi"` instead of `sizeGiB: 40`
+- **VMImage**: Use `source.vsphere` instead of `vsphere`
+- **VMNetworkAttachment**: Use `network.vsphere` and `ipAllocation.type: DHCP`
+- **VirtualMachine**: Use quoted `powerState: "On"`
 
-### 4. Create VM Image
+### Configuration Management
 
-```yaml
-apiVersion: infra.virtrigaud.io/v1beta1
-kind: VMImage
-metadata:
-  name: ubuntu-22
-spec:
-  vsphere:
-    templateName: ubuntu-22.04-cloudimg
-```
+Providers receive configuration through:
+- **Endpoint**: Environment variable `PROVIDER_ENDPOINT`
+- **Credentials**: Mounted secret files in `/etc/virtrigaud/credentials/`
+- **Runtime**: Managed automatically by the provider controller
 
-### 5. Create Network Attachment
+## Getting Started
 
-```yaml
-apiVersion: infra.virtrigaud.io/v1beta1
-kind: VMNetworkAttachment
-metadata:
-  name: vm-network
-spec:
-  vsphere:
-    portgroup: VM Network
-  ipPolicy: dhcp
-```
+1. **Choose your provider** from the basic examples above
+2. **Create credentials secret** (see `examples/secrets/`)
+3. **Apply provider configuration** with required `runtime` section
+4. **Define VM resources** (VMClass, VMImage, VMNetworkAttachment)
+5. **Create VirtualMachine** referencing your resources
 
-### 6. Create Virtual Machine
+For detailed setup instructions, see:
+- [Getting Started Guide](getting-started/quickstart.md)
+- [Remote Providers Documentation](REMOTE_PROVIDERS.md)
+- [Provider-Specific Guides](providers/)
 
-```yaml
-apiVersion: infra.virtrigaud.io/v1beta1
-kind: VirtualMachine
-metadata:
-  name: web-server-01
-spec:
-  providerRef:
-    name: vsphere-prod
-  classRef:
-    name: small
-  imageRef:
-    name: ubuntu-22
-  networks:
-    - name: vm-network
-  powerState: On
-  userData:
-    cloudInit:
-      inline: |
-        #cloud-config
-        packages:
-          - nginx
-        runcmd:
-          - systemctl enable nginx
-          - systemctl start nginx
-```
+## Need Help?
 
-## Multi-Disk VM
-
-Example with additional data disks:
-
-```yaml
-apiVersion: infra.virtrigaud.io/v1beta1
-kind: VirtualMachine
-metadata:
-  name: database-server
-spec:
-  providerRef:
-    name: vsphere-prod
-  classRef:
-    name: large
-  imageRef:
-    name: ubuntu-22
-  networks:
-    - name: db-network
-  disks:
-    - name: data-disk-1
-      sizeGiB: 100
-      type: thick
-    - name: data-disk-2
-      sizeGiB: 200
-      type: thin
-  powerState: On
-```
-
-## Static IP Configuration
-
-Example with static IP assignment:
-
-```yaml
-apiVersion: infra.virtrigaud.io/v1beta1
-kind: VMNetworkAttachment
-metadata:
-  name: static-network
-spec:
-  vsphere:
-    portgroup: Static-Network
-  ipPolicy: static
-
----
-apiVersion: infra.virtrigaud.io/v1beta1
-kind: VirtualMachine
-metadata:
-  name: static-vm
-spec:
-  providerRef:
-    name: vsphere-prod
-  classRef:
-    name: small
-  imageRef:
-    name: ubuntu-22
-  networks:
-    - name: static-network
-      ipPolicy: static
-      staticIP: 192.168.1.100
-  powerState: On
-```
-
-## Cloud-Init with Secret
-
-Using a secret for cloud-init configuration:
-
-### 1. Create Cloud-Init Secret
-
-```yaml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: web-server-config
-type: Opaque
-stringData:
-  cloud-init: |
-    #cloud-config
-    users:
-      - name: admin
-        sudo: ALL=(ALL) NOPASSWD:ALL
-        shell: /bin/bash
-        ssh_authorized_keys:
-          - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAB...
-    packages:
-      - nginx
-      - certbot
-    runcmd:
-      - systemctl enable nginx
-      - systemctl start nginx
-      - ufw allow 'Nginx Full'
-      - ufw enable
-```
-
-### 2. Reference Secret in VM
-
-```yaml
-apiVersion: infra.virtrigaud.io/v1beta1
-kind: VirtualMachine
-metadata:
-  name: web-server-02
-spec:
-  providerRef:
-    name: vsphere-prod
-  classRef:
-    name: small
-  imageRef:
-    name: ubuntu-22
-  networks:
-    - name: vm-network
-  userData:
-    cloudInit:
-      secretRef:
-        name: web-server-config
-        key: cloud-init
-  powerState: On
-```
-
-## High Memory VM Class
-
-Custom VM class for memory-intensive workloads:
-
-```yaml
-apiVersion: infra.virtrigaud.io/v1beta1
-kind: VMClass
-metadata:
-  name: high-memory
-spec:
-  cpu: 8
-  memoryMiB: 32768  # 32 GB
-  firmware: UEFI
-  diskDefaults:
-    type: thick
-    sizeGiB: 100
-  extraConfig:
-    mem.hotadd: "true"
-    vcpu.hotadd: "true"
-```
-
-## Libvirt Provider Example
-
-Configuration for Libvirt/KVM:
-
-```yaml
-apiVersion: infra.virtrigaud.io/v1beta1
-kind: Provider
-metadata:
-  name: libvirt-local
-spec:
-  type: libvirt
-  endpoint: qemu+tcp://kvm-host.local/system
-  credentialSecretRef:
-    name: libvirt-creds
-
----
-apiVersion: infra.virtrigaud.io/v1beta1
-kind: VMImage
-metadata:
-  name: ubuntu-22-kvm
-spec:
-  libvirt:
-    url: https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img
-    format: qcow2
-    checksum: b8e9f8f8e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9
-    checksumType: sha256
-
----
-apiVersion: infra.virtrigaud.io/v1beta1
-kind: VMNetworkAttachment
-metadata:
-  name: bridge-network
-spec:
-  libvirt:
-    bridge: br0
-    model: virtio
-  ipPolicy: dhcp
-```
-
-## VM with Custom Placement
-
-Specify exact placement for the VM:
-
-```yaml
-apiVersion: infra.virtrigaud.io/v1beta1
-kind: VirtualMachine
-metadata:
-  name: placed-vm
-spec:
-  providerRef:
-    name: vsphere-prod
-  classRef:
-    name: small
-  imageRef:
-    name: ubuntu-22
-  networks:
-    - name: vm-network
-  placement:
-    datastore: ssd-datastore
-    cluster: production-cluster
-    folder: web-tier
-  tags:
-    - environment:production
-    - tier:web
-    - owner:team-alpha
-  powerState: On
-```
-
-## Multiple Network Interfaces
-
-VM with multiple network connections:
-
-```yaml
-apiVersion: infra.virtrigaud.io/v1beta1
-kind: VMNetworkAttachment
-metadata:
-  name: frontend-network
-spec:
-  vsphere:
-    portgroup: Frontend-Network
-  ipPolicy: dhcp
-
----
-apiVersion: infra.virtrigaud.io/v1beta1
-kind: VMNetworkAttachment
-metadata:
-  name: backend-network
-spec:
-  vsphere:
-    portgroup: Backend-Network
-  ipPolicy: dhcp
-
----
-apiVersion: infra.virtrigaud.io/v1beta1
-kind: VirtualMachine
-metadata:
-  name: multi-nic-vm
-spec:
-  providerRef:
-    name: vsphere-prod
-  classRef:
-    name: small
-  imageRef:
-    name: ubuntu-22
-  networks:
-    - name: frontend-network
-    - name: backend-network
-  powerState: On
-```
-
-## VM Lifecycle Management
-
-### Power Off VM
-
-```yaml
-apiVersion: infra.virtrigaud.io/v1beta1
-kind: VirtualMachine
-metadata:
-  name: web-server-01
-spec:
-  # ... other fields remain the same
-  powerState: Off
-```
-
-### Delete VM
-
-```bash
-kubectl delete virtualmachine web-server-01
-```
-
-The controller will:
-1. Power off the VM if it's running
-2. Delete the VM from the hypervisor
-3. Remove the Kubernetes resource
-
-## Monitoring VM Status
-
-Check VM status:
-
-```bash
-# List all VMs
-kubectl get virtualmachine
-
-# Get detailed status
-kubectl describe virtualmachine web-server-01
-
-# Watch for changes
-kubectl get virtualmachine -w
-```
-
-Example output:
-
-```
-NAME            PROVIDER       CLASS   IMAGE      POWER   IPS             READY   AGE
-web-server-01   vsphere-prod   small   ubuntu-22  On      192.168.1.50    True    5m
-```
-
-## Troubleshooting
-
-### Check Provider Health
-
-```bash
-kubectl get provider vsphere-prod -o yaml
-```
-
-Look for conditions in the status section.
-
-### Check VM Conditions
-
-```bash
-kubectl describe virtualmachine web-server-01
-```
-
-Look for events and conditions to understand any issues.
-
-### Controller Logs
-
-```bash
-kubectl logs -n virtrigaud-system controller-manager-xxx
-```
+- Check the [Remote Providers documentation](REMOTE_PROVIDERS.md) for architecture details
+- Review [provider-specific guides](providers/) for setup instructions
+- Look at [complete examples](examples/) for working configurations
+- See [troubleshooting tips](getting-started/quickstart.md#troubleshooting) for common issues

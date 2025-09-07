@@ -418,7 +418,7 @@ make run
 
 ## Documentation
 
-- [Quick Start Guide](QUICKSTART.md) - Get started in 5 minutes
+- [Quick Start Guide](docs/getting-started/quickstart.md) - Get started in 15 minutes
 - [CRD Reference](docs/CRDs.md) - Complete API documentation
 - [Examples](docs/EXAMPLES.md) - Practical examples and use cases
 - [Provider Development](docs/PROVIDERS.md) - How to add new hypervisors
