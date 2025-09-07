@@ -20,14 +20,12 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"io/ioutil"
 	"log/slog"
 	"net/url"
 	"os"
 	"strings"
 
 	"github.com/vmware/govmomi"
-	"github.com/vmware/govmomi/find"
 	"github.com/vmware/govmomi/session"
 	"github.com/vmware/govmomi/vim25"
 	"github.com/vmware/govmomi/vim25/soap"
@@ -45,7 +43,6 @@ const (
 type Provider struct {
 	providerv1.UnimplementedProviderServer
 	client *govmomi.Client
-	finder *find.Finder
 	logger *slog.Logger
 	config *Config
 }
@@ -88,14 +85,14 @@ func New() *Provider {
 // loadCredentialsFromFiles reads credentials from mounted secret files
 func loadCredentialsFromFiles(config *Config) error {
 	// Read username from mounted secret
-	if data, err := ioutil.ReadFile(CredentialsPath + "/username"); err == nil {
+	if data, err := os.ReadFile(CredentialsPath + "/username"); err == nil {
 		config.Username = strings.TrimSpace(string(data))
 	} else {
 		return fmt.Errorf("failed to read username from %s/username: %w", CredentialsPath, err)
 	}
 
 	// Read password from mounted secret
-	if data, err := ioutil.ReadFile(CredentialsPath + "/password"); err == nil {
+	if data, err := os.ReadFile(CredentialsPath + "/password"); err == nil {
 		config.Password = strings.TrimSpace(string(data))
 	} else {
 		return fmt.Errorf("failed to read password from %s/password: %w", CredentialsPath, err)
