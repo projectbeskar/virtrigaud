@@ -33,7 +33,6 @@ import (
 	"github.com/vmware/govmomi/vim25/soap"
 
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
-	"github.com/projectbeskar/virtrigaud/sdk/provider/capabilities"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/errors"
 )
 
@@ -45,11 +44,10 @@ const (
 // Provider implements the vSphere provider using the SDK pattern
 type Provider struct {
 	providerv1.UnimplementedProviderServer
-	client       *govmomi.Client
-	finder       *find.Finder
-	capabilities *capabilities.Manager
-	logger       *slog.Logger
-	config       *Config
+	client *govmomi.Client
+	finder *find.Finder
+	logger *slog.Logger
+	config *Config
 }
 
 // Config holds the vSphere provider configuration
@@ -62,9 +60,6 @@ type Config struct {
 
 // New creates a new vSphere provider that reads configuration from environment and mounted secrets
 func New() *Provider {
-	// Get capabilities for vSphere
-	caps := GetProviderCapabilities()
-
 	// Load configuration from environment (set by provider controller)
 	config := &Config{
 		Endpoint:           os.Getenv("PROVIDER_ENDPOINT"),
@@ -84,10 +79,9 @@ func New() *Provider {
 	}
 
 	return &Provider{
-		config:       config,
-		client:       client,
-		capabilities: caps,
-		logger:       slog.Default(),
+		config: config,
+		client: client,
+		logger: slog.Default(),
 	}
 }
 
@@ -189,7 +183,14 @@ func (p *Provider) Validate(ctx context.Context, req *providerv1.ValidateRequest
 // GetCapabilities returns the provider's capabilities
 func (p *Provider) GetCapabilities(ctx context.Context, req *providerv1.GetCapabilitiesRequest) (*providerv1.GetCapabilitiesResponse, error) {
 	return &providerv1.GetCapabilitiesResponse{
-		Capabilities: p.capabilities.Proto(),
+		SupportsReconfigureOnline:    true,
+		SupportsDiskExpansionOnline:  true,
+		SupportsSnapshots:            true,
+		SupportsMemorySnapshots:      false, // vSphere snapshots don't include memory by default
+		SupportsLinkedClones:         true,
+		SupportsImageImport:          true,
+		SupportedDiskTypes:          []string{"thin", "thick", "eager-zeroed"},
+		SupportedNetworkTypes:       []string{"standard", "distributed"},
 	}, nil
 }
 
@@ -199,46 +200,51 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 }
 
 // Delete deletes a virtual machine
-func (p *Provider) Delete(ctx context.Context, req *providerv1.DeleteRequest) (*providerv1.DeleteResponse, error) {
+func (p *Provider) Delete(ctx context.Context, req *providerv1.DeleteRequest) (*providerv1.TaskResponse, error) {
 	return nil, errors.NewUnimplemented("Delete operation not yet implemented for vSphere")
 }
 
-// Get retrieves virtual machine information
-func (p *Provider) Get(ctx context.Context, req *providerv1.GetRequest) (*providerv1.GetResponse, error) {
-	return nil, errors.NewUnimplemented("Get operation not yet implemented for vSphere")
+// Power performs power operations on a virtual machine
+func (p *Provider) Power(ctx context.Context, req *providerv1.PowerRequest) (*providerv1.TaskResponse, error) {
+	return nil, errors.NewUnimplemented("Power operation not yet implemented for vSphere")
 }
 
-// List lists virtual machines
-func (p *Provider) List(ctx context.Context, req *providerv1.ListRequest) (*providerv1.ListResponse, error) {
-	return nil, errors.NewUnimplemented("List operation not yet implemented for vSphere")
+// Reconfigure reconfigures a virtual machine
+func (p *Provider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureRequest) (*providerv1.TaskResponse, error) {
+	return nil, errors.NewUnimplemented("Reconfigure operation not yet implemented for vSphere")
 }
 
-// Update updates a virtual machine
-func (p *Provider) Update(ctx context.Context, req *providerv1.UpdateRequest) (*providerv1.UpdateResponse, error) {
-	return nil, errors.NewUnimplemented("Update operation not yet implemented for vSphere")
+// Describe retrieves virtual machine information
+func (p *Provider) Describe(ctx context.Context, req *providerv1.DescribeRequest) (*providerv1.DescribeResponse, error) {
+	return nil, errors.NewUnimplemented("Describe operation not yet implemented for vSphere")
 }
 
-// Start starts a virtual machine
-func (p *Provider) Start(ctx context.Context, req *providerv1.StartRequest) (*providerv1.StartResponse, error) {
-	return nil, errors.NewUnimplemented("Start operation not yet implemented for vSphere")
+// TaskStatus checks the status of an async task
+func (p *Provider) TaskStatus(ctx context.Context, req *providerv1.TaskStatusRequest) (*providerv1.TaskStatusResponse, error) {
+	return nil, errors.NewUnimplemented("TaskStatus operation not yet implemented for vSphere")
 }
 
-// Stop stops a virtual machine
-func (p *Provider) Stop(ctx context.Context, req *providerv1.StopRequest) (*providerv1.StopResponse, error) {
-	return nil, errors.NewUnimplemented("Stop operation not yet implemented for vSphere")
+// SnapshotCreate creates a snapshot of a virtual machine
+func (p *Provider) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotCreateRequest) (*providerv1.SnapshotCreateResponse, error) {
+	return nil, errors.NewUnimplemented("SnapshotCreate operation not yet implemented for vSphere")
 }
 
-// Restart restarts a virtual machine
-func (p *Provider) Restart(ctx context.Context, req *providerv1.RestartRequest) (*providerv1.RestartResponse, error) {
-	return nil, errors.NewUnimplemented("Restart operation not yet implemented for vSphere")
+// SnapshotDelete deletes a snapshot
+func (p *Provider) SnapshotDelete(ctx context.Context, req *providerv1.SnapshotDeleteRequest) (*providerv1.TaskResponse, error) {
+	return nil, errors.NewUnimplemented("SnapshotDelete operation not yet implemented for vSphere")
 }
 
-// GetCapabilities returns the vSphere provider capabilities
-func GetProviderCapabilities() *capabilities.Manager {
-	return capabilities.NewBuilder().
-		Core().
-		VSphere().
-		DiskTypes("thin", "thick", "eager-zeroed").
-		NetworkTypes("standard", "distributed").
-		Build()
+// SnapshotRevert reverts to a snapshot
+func (p *Provider) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotRevertRequest) (*providerv1.TaskResponse, error) {
+	return nil, errors.NewUnimplemented("SnapshotRevert operation not yet implemented for vSphere")
+}
+
+// Clone clones a virtual machine
+func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*providerv1.CloneResponse, error) {
+	return nil, errors.NewUnimplemented("Clone operation not yet implemented for vSphere")
+}
+
+// ImagePrepare prepares an image/template
+func (p *Provider) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepareRequest) (*providerv1.TaskResponse, error) {
+	return nil, errors.NewUnimplemented("ImagePrepare operation not yet implemented for vSphere")
 }
