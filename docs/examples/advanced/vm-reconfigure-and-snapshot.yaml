@@ -30,19 +30,11 @@ metadata:
   name: ubuntu-22-server
   namespace: default
 spec:
-  vsphere:
-    templateName: "ubuntu-22.04-server-template"
-    # Alternative: import from OVA
-    # ovaURL: "https://releases.ubuntu.com/22.04/ubuntu-22.04-server-cloudimg-amd64.ova"
-    # checksum: "abcd1234..."
-  libvirt:
-    url: "https://cloud-images.ubuntu.com/releases/22.04/release/ubuntu-22.04-server-cloudimg-amd64.img"
-    format: "qcow2"
-    checksum: "1234567890abcdef..."
+  source:
+    vsphere:
+      templateName: "ubuntu-22.04-server-template"
   prepare:
-    onMissing: "Import"
-    validateChecksum: true
-    timeout: "30m"
+    onMissing: Fail
     retries: 3
     storage:
       vsphere:
@@ -62,15 +54,12 @@ metadata:
   namespace: default
 spec:
   cpu: 2
-  memory: 4096  # 4 GB
+  memory: "4Gi"  # 4 GB
+  firmware: UEFI
   diskDefaults:
-    - name: "root"
-      sizeGiB: 20
-      type: "thin"
-  networkDefaults:
-    - name: "primary"
-      networkRef:
-        name: "prod-network"
+    type: thin
+    size: "20Gi"
+  guestToolsPolicy: install
 
 ---
 # Initial VM configuration
@@ -96,13 +85,12 @@ spec:
   # Resource overrides (will be changed later for reconfiguration demo)
   resources:
     cpu: 2
-    memoryMiB: 4096
+    memory: "4Gi"
   
   disks:
     - name: "data"
       sizeGiB: 50
       type: "thin"
-      expandPolicy: "Online"  # Allow online expansion
   
   networks:
     - name: "primary"
@@ -223,7 +211,7 @@ spec:
       
       resources:
         cpu: 2
-        memoryMiB: 4096
+        memory: "4Gi"
       
       disks:
         - name: "data"

@@ -114,11 +114,11 @@ metadata:
   namespace: default
 spec:
   cpu: 2
-  memoryMiB: 2048
+  memory: "2Gi"
   firmware: BIOS
   diskDefaults:
     type: qcow2
-    sizeGiB: 20
+    size: "20Gi"
   guestToolsPolicy: install
 
 ---

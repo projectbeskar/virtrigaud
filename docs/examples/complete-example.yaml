@@ -97,9 +97,11 @@ spec:
     name: ubuntu-22-template
   networks:
     - name: app-network
+      networkRef:
+        name: app-network
   disks:
     - name: data-disk
-      size: "100Gi"
+      sizeGiB: 100
       type: thin
   powerState: "On"
   userData:

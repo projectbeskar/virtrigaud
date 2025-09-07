@@ -130,7 +130,7 @@ spec:
       # IP allocation handled by VMNetworkAttachment
   disks:
     - name: extra-storage
-      sizeGiB: 50
+      size: "50Gi"
       type: thin
   powerState: "On"  # Quote to ensure string type
   userData:

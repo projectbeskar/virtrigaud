@@ -14,19 +14,17 @@ spec:
   # Increase CPU and memory
   resources:
     cpu: 4        # Upgrade from 2 to 4 CPUs
-    memoryMiB: 8192  # Upgrade from 4GB to 8GB
+    memory: "8Gi"  # Upgrade from 4GB to 8GB
   
   # Expand the data disk
   disks:
     - name: "data"
       sizeGiB: 100    # Expand from 50GB to 100GB
       type: "thin"
-      expandPolicy: "Online"  # Try online expansion first
     # Add a new disk
     - name: "logs"
       sizeGiB: 20
       type: "thin"
-      expandPolicy: "Offline"
 
 # The controller will detect these changes and:
 # 1. Try online reconfiguration if supported by the provider

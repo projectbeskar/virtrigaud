@@ -125,13 +125,15 @@ spec:
     name: ubuntu-22-template
   networks:
   - name: production-vlan
+    networkRef:
+      name: production-vlan
   
   disks:
   - name: app-data
-    size: "200Gi"
+    sizeGiB: 200
     type: thick
   - name: logs
-    size: "50Gi"
+    sizeGiB: 50
     type: thin
   
   placement:

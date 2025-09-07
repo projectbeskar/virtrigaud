@@ -39,10 +39,10 @@ metadata:
   name: web-tier
 spec:
   cpu: 4
-  memoryMiB: 8192
+  memory: "8Gi"
   firmware: UEFI
   diskDefaults:
-    sizeGiB: 100
+    size: "100Gi"
 
 ---
 apiVersion: infra.virtrigaud.io/v1beta1
@@ -51,10 +51,10 @@ metadata:
   name: edge-small
 spec:
   cpu: 2
-  memoryMiB: 4096
+  memory: "4Gi"
   firmware: BIOS
   diskDefaults:
-    sizeGiB: 50
+    size: "50Gi"
 
 ---
 # Images for different providers
@@ -63,13 +63,11 @@ kind: VMImage
 metadata:
   name: ubuntu-multi
 spec:
-  # vSphere template
-  vsphere:
-    templateName: "ubuntu-22.04-server"
-  # Libvirt image
-  libvirt:
-    path: "/var/lib/libvirt/images/ubuntu-22.04.qcow2"
-    format: qcow2
+  source:
+    vsphere:
+      templateName: "ubuntu-22.04-server"
+  prepare:
+    onMissing: Fail
 
 ---
 # Networks for different providers
@@ -78,12 +76,11 @@ kind: VMNetworkAttachment
 metadata:
   name: production-network
 spec:
-  vsphere:
-    portgroup: "Production-VLAN100"
-  libvirt:
-    networkName: "production"
-    bridge: "br-prod"
-  ipPolicy: dhcp
+  network:
+    vsphere:
+      portgroup: "Production-VLAN100"
+  ipAllocation:
+    type: DHCP
 
 ---
 # VM running on vSphere
@@ -168,6 +165,8 @@ spec:
     name: ubuntu-multi
   networks:
     - name: production-network
+      networkRef:
+        name: production-network
   disks:
     - name: api-data
       sizeGiB: 200
