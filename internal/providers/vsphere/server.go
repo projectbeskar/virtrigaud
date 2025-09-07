@@ -183,12 +183,12 @@ func (p *Provider) Validate(ctx context.Context, req *providerv1.ValidateRequest
 // GetCapabilities returns the provider's capabilities
 func (p *Provider) GetCapabilities(ctx context.Context, req *providerv1.GetCapabilitiesRequest) (*providerv1.GetCapabilitiesResponse, error) {
 	return &providerv1.GetCapabilitiesResponse{
-		SupportsReconfigureOnline:    true,
-		SupportsDiskExpansionOnline:  true,
-		SupportsSnapshots:            true,
-		SupportsMemorySnapshots:      false, // vSphere snapshots don't include memory by default
-		SupportsLinkedClones:         true,
-		SupportsImageImport:          true,
+		SupportsReconfigureOnline:   true,
+		SupportsDiskExpansionOnline: true,
+		SupportsSnapshots:           true,
+		SupportsMemorySnapshots:     false, // vSphere snapshots don't include memory by default
+		SupportsLinkedClones:        true,
+		SupportsImageImport:         true,
 		SupportedDiskTypes:          []string{"thin", "thick", "eager-zeroed"},
 		SupportedNetworkTypes:       []string{"standard", "distributed"},
 	}, nil

@@ -34,3 +34,4 @@ libvirtVM.yaml
 libvirtVM-corrected.yaml
 vm-example.yaml
 vm-simple-example.yaml
+vsphere-provider-example.yaml
