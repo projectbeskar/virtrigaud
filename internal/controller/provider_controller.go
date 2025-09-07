@@ -472,11 +472,8 @@ func (r *ProviderReconciler) buildProviderContainer(provider *infravirtrigaudiov
 		Image:           image,
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		Args: []string{
-			fmt.Sprintf("--grpc-addr=:%d", grpcPort),
-			"--metrics-addr=:8080",
-			fmt.Sprintf("--provider-type=%s", string(provider.Spec.Type)),
-			fmt.Sprintf("--provider-endpoint=%s", provider.Spec.Endpoint),
-			fmt.Sprintf("--tls-enabled=%t", tlsEnabled),
+			fmt.Sprintf("--port=%d", grpcPort),
+			"--health-port=8080",
 		},
 		Env:             env,
 		Resources:       resources,
