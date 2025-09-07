@@ -201,7 +201,7 @@ type ProviderSpec struct {
 	// Endpoint is the provider endpoint URI
 	// Supports multiple protocols: HTTP(S), TCP, gRPC for general providers
 	// and LibVirt-specific schemes: qemu://, qemu+ssh://, qemu+tcp://, qemu+tls://
-	// +kubebuilder:validation:Pattern="^((https?|tcp|grpc)://[a-zA-Z0-9.-]+:[0-9]+(/.*)?|qemu(\\+ssh|\\+tcp|\\+tls)?://([a-zA-Z0-9@.-]+(:[0-9]+)?)?(/.*))$"
+	// +kubebuilder:validation:Pattern="^((https?://[a-zA-Z0-9.-]+(:[0-9]+)?(/.*)?|(tcp|grpc)://[a-zA-Z0-9.-]+:[0-9]+(/.*)?)|qemu(\\+ssh|\\+tcp|\\+tls)?://([a-zA-Z0-9@.-]+(:[0-9]+)?)?(/.*))$"
 	Endpoint string `json:"endpoint"`
 
 	// CredentialSecretRef references the Secret containing credentials
