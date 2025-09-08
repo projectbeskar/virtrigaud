@@ -111,16 +111,13 @@ func createVSphereClient(config *Config) (*govmomi.Client, error) {
 		return nil, fmt.Errorf("username and password are required in mounted credentials secret")
 	}
 
-	// Parse the endpoint URL
+	// Parse the endpoint URL (without embedding credentials to avoid special character issues)
 	u, err := url.Parse(config.Endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("invalid vSphere endpoint URL: %w", err)
 	}
 
-	// Set up authentication
-	u.User = url.UserPassword(config.Username, config.Password)
-
-	// Create SOAP client
+	// Create SOAP client without credentials in URL
 	soapClient := soap.NewClient(u, config.InsecureSkipVerify)
 
 	// Configure TLS if needed
@@ -141,8 +138,9 @@ func createVSphereClient(config *Config) (*govmomi.Client, error) {
 		SessionManager: session.NewManager(vimClient),
 	}
 
-	// Login to vSphere
-	if err := client.Login(context.Background(), nil); err != nil {
+	// Login to vSphere with explicit credentials (proper govmomi authentication method)
+	userInfo := url.UserPassword(config.Username, config.Password)
+	if err := client.Login(context.Background(), userInfo); err != nil {
 		return nil, fmt.Errorf("failed to login to vSphere: %w", err)
 	}
 
