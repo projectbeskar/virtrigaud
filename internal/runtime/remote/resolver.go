@@ -56,7 +56,7 @@ func (r *Resolver) getRemoteProvider(ctx context.Context, provider *infravirtrig
 		return nil, fmt.Errorf("remote provider runtime is not ready: no endpoint available")
 	}
 
-	if provider.Status.Runtime.Phase != "Ready" {
+	if provider.Status.Runtime.Phase != "Running" {
 		return nil, fmt.Errorf("remote provider runtime is not ready: phase=%s", provider.Status.Runtime.Phase)
 	}
 

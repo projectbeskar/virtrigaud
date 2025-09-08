@@ -36,6 +36,7 @@ import (
 
 	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/controller"
+	"github.com/projectbeskar/virtrigaud/internal/runtime/remote"
 )
 
 var (
@@ -121,9 +122,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Create remote provider resolver (all providers are now remote)
+	remoteResolver := remote.NewResolver(mgr.GetClient())
+
 	if err = (&controller.VirtualMachineReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:         mgr.GetClient(),
+		Scheme:         mgr.GetScheme(),
+		RemoteResolver: remoteResolver,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "VirtualMachine")
 		os.Exit(1)

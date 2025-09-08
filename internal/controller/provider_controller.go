@@ -161,7 +161,7 @@ func (r *ProviderReconciler) reconcileRemoteRuntime(ctx context.Context, provide
 		port = provider.Spec.Runtime.Service.Port
 	}
 
-	provider.Status.Runtime.Endpoint = fmt.Sprintf("%s:%d", service.Name, port)
+	provider.Status.Runtime.Endpoint = fmt.Sprintf("%s.%s.svc.cluster.local:%d", service.Name, provider.Namespace, port)
 	provider.Status.Runtime.ServiceRef = &corev1.LocalObjectReference{Name: service.Name}
 
 	// Check deployment readiness
