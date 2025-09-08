@@ -60,7 +60,7 @@ func New() *Provider {
 	// Load configuration from environment (set by provider controller)
 	config := &Config{
 		Endpoint:           os.Getenv("PROVIDER_ENDPOINT"),
-		InsecureSkipVerify: false, // Default to secure
+		InsecureSkipVerify: os.Getenv("TLS_INSECURE_SKIP_VERIFY") == "true", // Allow skipping TLS verification
 	}
 
 	// Load credentials from mounted secret files

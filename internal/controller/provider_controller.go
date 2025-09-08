@@ -422,6 +422,12 @@ func (r *ProviderReconciler) buildProviderContainer(provider *infravirtrigaudiov
 		Value: fmt.Sprintf("%t", tlsEnabled),
 	})
 
+	// Add TLS insecure skip verify configuration
+	env = append(env, corev1.EnvVar{
+		Name:  "TLS_INSECURE_SKIP_VERIFY",
+		Value: fmt.Sprintf("%t", provider.Spec.InsecureSkipVerify),
+	})
+
 	// Add custom environment variables
 	if provider.Spec.Runtime.Env != nil {
 		env = append(env, provider.Spec.Runtime.Env...)

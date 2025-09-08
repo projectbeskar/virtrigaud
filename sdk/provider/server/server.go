@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"sync/atomic"
@@ -35,6 +36,7 @@ import (
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/keepalive"
 
+	healthcheck "github.com/projectbeskar/virtrigaud/internal/obs/health"
 	"github.com/projectbeskar/virtrigaud/internal/version"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/middleware"
@@ -120,11 +122,13 @@ func DefaultConfig() *Config {
 
 // Server wraps a gRPC server with provider-specific functionality.
 type Server struct {
-	config       *Config
-	grpcServer   *grpc.Server
-	healthServer *health.Server
-	logger       *slog.Logger
-	running      atomic.Bool
+	config        *Config
+	grpcServer    *grpc.Server
+	healthServer  *health.Server
+	healthChecker *healthcheck.HealthChecker
+	httpServer    *http.Server
+	logger        *slog.Logger
+	running       atomic.Bool
 }
 
 // New creates a new provider server with the given configuration.
@@ -189,11 +193,30 @@ func New(config *Config) (*Server, error) {
 	// Create health server
 	healthServer := health.NewServer()
 
+	// Create health checker for HTTP endpoints
+	healthChecker := healthcheck.NewHealthChecker()
+
+	// Create HTTP server for health checks
+	mux := http.NewServeMux()
+	mux.Handle("/healthz", healthChecker.LivenessHandler())
+	mux.Handle("/readyz", healthChecker.ReadinessHandler())
+	mux.Handle("/health", healthChecker.HTTPHandler())
+
+	httpServer := &http.Server{
+		Addr:         fmt.Sprintf(":%d", config.HealthPort),
+		Handler:      mux,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
+
 	return &Server{
-		config:       config,
-		grpcServer:   grpcServer,
-		healthServer: healthServer,
-		logger:       config.Logger,
+		config:        config,
+		grpcServer:    grpcServer,
+		healthServer:  healthServer,
+		healthChecker: healthChecker,
+		httpServer:    httpServer,
+		logger:        config.Logger,
 	}, nil
 }
 
@@ -241,11 +264,21 @@ func (s *Server) Serve(ctx context.Context) error {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	// Start server in goroutine
-	errChan := make(chan error, 1)
+	// Start servers in goroutines
+	errChan := make(chan error, 2)
+
+	// Start gRPC server
 	go func() {
 		if err := s.grpcServer.Serve(lis); err != nil {
 			errChan <- fmt.Errorf("gRPC server error: %w", err)
+		}
+	}()
+
+	// Start HTTP health server
+	go func() {
+		s.logger.Info("Starting HTTP health server", "health_port", s.config.HealthPort)
+		if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			errChan <- fmt.Errorf("HTTP health server error: %w", err)
 		}
 	}()
 
@@ -270,13 +303,23 @@ func (s *Server) Shutdown() error {
 }
 
 func (s *Server) shutdown() error {
-	s.logger.Info("Shutting down gRPC server")
+	s.logger.Info("Shutting down servers")
 
 	// Mark health as not serving
 	s.healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
 	s.healthServer.SetServingStatus(s.config.ServiceName, grpc_health_v1.HealthCheckResponse_NOT_SERVING)
 
-	// Graceful stop with timeout
+	// Shutdown HTTP server first
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), s.config.GracefulTimeout/2)
+	defer cancel()
+
+	if err := s.httpServer.Shutdown(shutdownCtx); err != nil {
+		s.logger.Warn("HTTP server shutdown error", "error", err)
+	} else {
+		s.logger.Info("HTTP health server stopped gracefully")
+	}
+
+	// Graceful stop gRPC server with timeout
 	stopped := make(chan struct{})
 	go func() {
 		s.grpcServer.GracefulStop()
@@ -285,10 +328,10 @@ func (s *Server) shutdown() error {
 
 	select {
 	case <-stopped:
-		s.logger.Info("Server stopped gracefully")
+		s.logger.Info("gRPC server stopped gracefully")
 		return nil
-	case <-time.After(s.config.GracefulTimeout):
-		s.logger.Warn("Graceful shutdown timeout, forcing stop")
+	case <-time.After(s.config.GracefulTimeout / 2):
+		s.logger.Warn("gRPC server graceful shutdown timeout, forcing stop")
 		s.grpcServer.Stop()
 		return nil
 	}
