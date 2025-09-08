@@ -12,7 +12,7 @@ metadata:
   namespace: default
 spec:
   type: vsphere
-  endpoint: https://vcenter.example.com
+  endpoint: https://vcenter.example.com/sdk
   credentialSecretRef:
     name: vsphere-creds
   insecureSkipVerify: false

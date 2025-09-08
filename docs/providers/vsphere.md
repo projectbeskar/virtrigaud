@@ -54,7 +54,7 @@ metadata:
   namespace: default
 spec:
   type: vsphere
-  endpoint: https://vcenter.example.com
+  endpoint: https://vcenter.example.com/sdk
   credentialSecretRef:
     name: vsphere-credentials
   # Optional: Skip TLS verification (development only)
@@ -113,9 +113,9 @@ Create a dedicated service account with minimal required privileges:
 
 | Endpoint Type | Format | Use Case |
 |---------------|--------|----------|
-| vCenter Server | `https://vcenter.example.com` | Multi-host management (recommended) |
-| vCenter FQDN | `https://vcenter.corp.local` | Internal domain environments |
-| vCenter IP | `https://192.168.1.10` | Direct IP access |
+| vCenter Server | `https://vcenter.example.com/sdk` | Multi-host management (recommended) |
+| vCenter FQDN | `https://vcenter.corp.local/sdk` | Internal domain environments |
+| vCenter IP | `https://192.168.1.10/sdk` | Direct IP access |
 | ESXi Host | `https://esxi-host.example.com` | Single host environments |
 
 ### Deployment Configuration
@@ -127,7 +127,7 @@ Create a dedicated service account with minimal required privileges:
 providers:
   vsphere:
     enabled: true
-    endpoint: "https://vcenter.example.com"
+    endpoint: "https://vcenter.example.com/sdk"
     insecureSkipVerify: false  # Set to true for self-signed certificates
     credentialSecretRef:
       name: vsphere-credentials
@@ -161,7 +161,7 @@ metadata:
   namespace: virtrigaud-system
 spec:
   type: vsphere
-  endpoint: https://vcenter.prod.example.com
+  endpoint: https://vcenter.prod.example.com/sdk
   credentialSecretRef:
     name: vsphere-secure-credentials
   insecureSkipVerify: false
@@ -190,7 +190,7 @@ metadata:
   name: vsphere-datacenter-a
 spec:
   type: vsphere
-  endpoint: https://vcenter-a.example.com
+  endpoint: https://vcenter-a.example.com/sdk
   credentialSecretRef:
     name: vsphere-credentials-a
 
@@ -201,7 +201,7 @@ metadata:
   name: vsphere-datacenter-b
 spec:
   type: vsphere
-  endpoint: https://vcenter-b.example.com
+  endpoint: https://vcenter-b.example.com/sdk
   credentialSecretRef:
     name: vsphere-credentials-b
 ```

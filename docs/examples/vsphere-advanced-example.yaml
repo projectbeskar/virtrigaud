@@ -39,7 +39,7 @@ metadata:
   namespace: default
 spec:
   type: vsphere
-  endpoint: https://vcenter.dc1.example.com
+  endpoint: https://vcenter.dc1.example.com/sdk
   credentialSecretRef:
     name: vsphere-creds
   insecureSkipVerify: false  # Use proper TLS in production
