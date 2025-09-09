@@ -455,7 +455,6 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*VMSpec, e
 	return spec, nil
 }
 
-
 // createVirtualMachine creates a VM in vSphere using the parsed specification
 func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (string, error) {
 	p.logger.Info("Creating virtual machine",
