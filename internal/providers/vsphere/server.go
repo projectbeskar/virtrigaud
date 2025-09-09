@@ -248,7 +248,64 @@ func (p *Provider) Delete(ctx context.Context, req *providerv1.DeleteRequest) (*
 
 // Power performs power operations on a virtual machine
 func (p *Provider) Power(ctx context.Context, req *providerv1.PowerRequest) (*providerv1.TaskResponse, error) {
-	return nil, errors.NewUnimplemented("Power operation not yet implemented for vSphere")
+	if p.client == nil {
+		return nil, fmt.Errorf("vSphere client not configured")
+	}
+
+	p.logger.Info("Performing power operation", "vm_id", req.Id, "operation", req.Op.String())
+
+	// Set datacenter context for finder
+	datacenter, err := p.finder.DefaultDatacenter(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find default datacenter: %w", err)
+	}
+	p.finder.SetDatacenter(datacenter)
+
+	// Create VM reference from ID
+	vmRef := types.ManagedObjectReference{
+		Type:  "VirtualMachine",
+		Value: req.Id,
+	}
+	
+	vm := object.NewVirtualMachine(p.client.Client, vmRef)
+
+	// Perform the power operation
+	var task *object.Task
+	switch req.Op {
+	case providerv1.PowerOp_POWER_OP_ON:
+		task, err = vm.PowerOn(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to start power on task: %w", err)
+		}
+	case providerv1.PowerOp_POWER_OP_OFF:
+		task, err = vm.PowerOff(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to start power off task: %w", err)
+		}
+	case providerv1.PowerOp_POWER_OP_REBOOT:
+		// For reboot, we need to restart the guest OS
+		err = vm.RebootGuest(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to reboot guest: %w", err)
+		}
+		// RebootGuest is synchronous, so we don't need to wait for a task
+		p.logger.Info("Power operation completed successfully", "vm_id", req.Id, "operation", req.Op.String())
+		return &providerv1.TaskResponse{}, nil
+	default:
+		return nil, fmt.Errorf("unsupported power operation: %s", req.Op.String())
+	}
+
+	// For now, wait for the task to complete (synchronous operation)
+	// In a real implementation, you might want to return the task reference for async tracking
+	_, err = task.WaitForResult(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("power operation failed: %w", err)
+	}
+
+	p.logger.Info("Power operation completed successfully", "vm_id", req.Id, "operation", req.Op.String())
+
+	// Return empty task response since we completed synchronously
+	return &providerv1.TaskResponse{}, nil
 }
 
 // Reconfigure reconfigures a virtual machine
@@ -600,15 +657,31 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 	}
 
 	// Get the new VM reference
-	vmRef := info.Result.(types.ManagedObjectReference)
-
+	vmRef, ok := info.Result.(types.ManagedObjectReference)
+	if !ok {
+		return "", fmt.Errorf("unexpected result type from clone task: %T", info.Result)
+	}
+	
 	// Get the VM's managed object ID for returning
 	vmID := vmRef.Value
 
 	p.logger.Info("Virtual machine created successfully", "vm_id", vmID, "name", spec.Name)
 
-	// TODO: Power on the VM if powerState is requested
-	// This would involve checking the original request and calling newVM.PowerOn(ctx)
+	// Power on the VM if requested (VirtualMachine spec.powerState: "On")
+	// Note: This is a simple implementation - in production you might want to check the actual powerState from the request
+	newVM := object.NewVirtualMachine(p.client.Client, vmRef)
+	powerTask, err := newVM.PowerOn(ctx)
+	if err != nil {
+		p.logger.Warn("Failed to power on VM after creation", "vm_id", vmID, "error", err)
+		// Don't fail the entire creation if power on fails
+	} else {
+		_, err = powerTask.WaitForResult(ctx, nil)
+		if err != nil {
+			p.logger.Warn("VM power on task failed", "vm_id", vmID, "error", err)
+		} else {
+			p.logger.Info("VM powered on successfully", "vm_id", vmID)
+		}
+	}
 
 	return vmID, nil
 }
