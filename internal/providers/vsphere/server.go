@@ -24,7 +24,6 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
-	"strconv"
 	"strings"
 
 	"github.com/vmware/govmomi"
@@ -399,16 +398,16 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*VMSpec, e
 		Name: req.Name,
 	}
 
-	// Parse VMClass from JSON
+	// Parse VMClass from JSON (contracts.VMClass structure)
 	if req.ClassJson != "" {
 		var vmClass struct {
-			CPU          int32  `json:"cpu"`
-			Memory       string `json:"memory"`
-			DiskDefaults struct {
-				Size string `json:"size"`
-				Type string `json:"type"`
-			} `json:"diskDefaults"`
-			Firmware string `json:"firmware"`
+			CPU          int32  `json:"CPU"`
+			MemoryMiB    int32  `json:"MemoryMiB"`
+			Firmware     string `json:"Firmware"`
+			DiskDefaults *struct {
+				Type    string `json:"Type"`
+				SizeGiB int32  `json:"SizeGiB"`
+			} `json:"DiskDefaults"`
 		}
 
 		if err := json.Unmarshal([]byte(req.ClassJson), &vmClass); err != nil {
@@ -416,45 +415,32 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*VMSpec, e
 		}
 
 		spec.CPU = vmClass.CPU
+		spec.MemoryMB = int64(vmClass.MemoryMiB) // Convert MiB to MB (same value)
 		spec.Firmware = vmClass.Firmware
-		spec.DiskType = vmClass.DiskDefaults.Type
 
-		// Parse memory (e.g., "4Gi" -> 4096 MB)
-		if memMB, err := p.parseMemoryToMB(vmClass.Memory); err == nil {
-			spec.MemoryMB = memMB
-		}
-
-		// Parse disk size (e.g., "40Gi" -> 40 GB)
-		if diskGB, err := p.parseSizeToGB(vmClass.DiskDefaults.Size); err == nil {
-			spec.DiskSizeGB = diskGB
+		if vmClass.DiskDefaults != nil {
+			spec.DiskType = vmClass.DiskDefaults.Type
+			spec.DiskSizeGB = int64(vmClass.DiskDefaults.SizeGiB) // Convert GiB to GB (same value)
 		}
 	}
 
-	// Parse VMImage from JSON
+	// Parse VMImage from JSON (contracts.VMImage structure)
 	if req.ImageJson != "" {
 		var vmImage struct {
-			Source struct {
-				VSphere struct {
-					TemplateName string `json:"templateName"`
-				} `json:"vsphere"`
-			} `json:"source"`
+			TemplateName string `json:"TemplateName"`
 		}
 
 		if err := json.Unmarshal([]byte(req.ImageJson), &vmImage); err != nil {
 			return nil, fmt.Errorf("failed to parse VMImage JSON: %w", err)
 		}
 
-		spec.TemplateName = vmImage.Source.VSphere.TemplateName
+		spec.TemplateName = vmImage.TemplateName
 	}
 
-	// Parse Networks from JSON
+	// Parse Networks from JSON ([]contracts.NetworkAttachment structure)
 	if req.NetworksJson != "" {
 		var networks []struct {
-			Network struct {
-				VSphere struct {
-					Portgroup string `json:"portgroup"`
-				} `json:"vsphere"`
-			} `json:"network"`
+			NetworkName string `json:"NetworkName"`
 		}
 
 		if err := json.Unmarshal([]byte(req.NetworksJson), &networks); err != nil {
@@ -462,55 +448,13 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*VMSpec, e
 		}
 
 		if len(networks) > 0 {
-			spec.NetworkName = networks[0].Network.VSphere.Portgroup
+			spec.NetworkName = networks[0].NetworkName
 		}
 	}
 
 	return spec, nil
 }
 
-// parseMemoryToMB converts memory strings like "4Gi" to megabytes
-func (p *Provider) parseMemoryToMB(memory string) (int64, error) {
-	if memory == "" {
-		return 0, fmt.Errorf("empty memory specification")
-	}
-
-	// Simple parsing for common units
-	if strings.HasSuffix(memory, "Gi") {
-		gb := strings.TrimSuffix(memory, "Gi")
-		if val, err := strconv.ParseInt(gb, 10, 64); err == nil {
-			return val * 1024, nil // GB to MB
-		}
-	}
-	if strings.HasSuffix(memory, "Mi") {
-		mb := strings.TrimSuffix(memory, "Mi")
-		if val, err := strconv.ParseInt(mb, 10, 64); err == nil {
-			return val, nil
-		}
-	}
-
-	return 0, fmt.Errorf("unsupported memory format: %s", memory)
-}
-
-// parseSizeToGB converts size strings like "40Gi" to gigabytes
-func (p *Provider) parseSizeToGB(size string) (int64, error) {
-	if size == "" {
-		return 0, fmt.Errorf("empty size specification")
-	}
-
-	if strings.HasSuffix(size, "Gi") {
-		gb := strings.TrimSuffix(size, "Gi")
-		return strconv.ParseInt(gb, 10, 64)
-	}
-	if strings.HasSuffix(size, "Ti") {
-		tb := strings.TrimSuffix(size, "Ti")
-		if val, err := strconv.ParseInt(tb, 10, 64); err == nil {
-			return val * 1024, nil // TB to GB
-		}
-	}
-
-	return 0, fmt.Errorf("unsupported size format: %s", size)
-}
 
 // createVirtualMachine creates a VM in vSphere using the parsed specification
 func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (string, error) {
