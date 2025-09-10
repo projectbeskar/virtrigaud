@@ -266,7 +266,7 @@ func (p *Provider) Power(ctx context.Context, req *providerv1.PowerRequest) (*pr
 		Type:  "VirtualMachine",
 		Value: req.Id,
 	}
-	
+
 	vm := object.NewVirtualMachine(p.client.Client, vmRef)
 
 	// Perform the power operation
@@ -407,6 +407,62 @@ func contains(slice []string, item string) bool {
 	return false
 }
 
+// addCloudInitToConfigSpec adds cloud-init data to VM configuration via guestinfo properties
+func (p *Provider) addCloudInitToConfigSpec(configSpec *types.VirtualMachineConfigSpec, cloudInitData string) error {
+	// VMware cloud-init datasource reads from guestinfo properties
+	// This is the standard way to pass cloud-init data to VMs in vSphere
+	
+	// Encode cloud-init data (base64 encoding is common but not required)
+	// We'll pass it directly as it's already in YAML format
+	
+	// Create extra config options for cloud-init
+	extraConfig := []types.BaseOptionValue{
+		&types.OptionValue{
+			Key:   "guestinfo.userdata",
+			Value: cloudInitData,
+		},
+		&types.OptionValue{
+			Key:   "guestinfo.userdata.encoding",
+			Value: "yaml", // Indicate this is YAML format
+		},
+		// Some cloud-init datasources also look for metadata
+		&types.OptionValue{
+			Key:   "guestinfo.metadata",
+			Value: `{"instance-id": "` + configSpec.Name + `"}`,
+		},
+		&types.OptionValue{
+			Key:   "guestinfo.metadata.encoding",
+			Value: "json",
+		},
+	}
+
+	// Add to existing extra config or create new
+	if configSpec.ExtraConfig != nil {
+		configSpec.ExtraConfig = append(configSpec.ExtraConfig, extraConfig...)
+	} else {
+		configSpec.ExtraConfig = extraConfig
+	}
+
+	return nil
+}
+
+// extractHostnameFromCloudInit extracts hostname from cloud-init YAML data
+func (p *Provider) extractHostnameFromCloudInit(cloudInitData string) string {
+	lines := strings.Split(cloudInitData, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "hostname:") {
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) == 2 {
+				hostname := strings.TrimSpace(parts[1])
+				hostname = strings.Trim(hostname, "\"' ")
+				return hostname
+			}
+		}
+	}
+	return ""
+}
+
 // TaskStatus checks the status of an async task
 func (p *Provider) TaskStatus(ctx context.Context, req *providerv1.TaskStatusRequest) (*providerv1.TaskStatusResponse, error) {
 	return nil, errors.NewUnimplemented("TaskStatus operation not yet implemented for vSphere")
@@ -447,6 +503,7 @@ type VMSpec struct {
 	TemplateName string
 	NetworkName  string
 	Firmware     string
+	CloudInit    string // Cloud-init user data
 }
 
 // parseCreateRequest parses the JSON-encoded specifications from the gRPC request
@@ -507,6 +564,11 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*VMSpec, e
 		if len(networks) > 0 {
 			spec.NetworkName = networks[0].NetworkName
 		}
+	}
+
+	// Parse UserData (cloud-init)
+	if len(req.UserData) > 0 {
+		spec.CloudInit = string(req.UserData)
 	}
 
 	return spec, nil
@@ -642,6 +704,16 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 
 	cloneSpec.Config = configSpec
 
+	// Add cloud-init data via guestinfo properties if provided
+	if spec.CloudInit != "" {
+		if err := p.addCloudInitToConfigSpec(configSpec, spec.CloudInit); err != nil {
+			p.logger.Warn("Failed to add cloud-init configuration", "error", err)
+			// Continue without cloud-init rather than failing
+		} else {
+			p.logger.Info("Added cloud-init configuration to VM", "vm_name", spec.Name)
+		}
+	}
+
 	// Perform the clone operation
 	p.logger.Info("Cloning virtual machine from template", "template", spec.TemplateName, "target", spec.Name)
 
@@ -661,7 +733,7 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 	if !ok {
 		return "", fmt.Errorf("unexpected result type from clone task: %T", info.Result)
 	}
-	
+
 	// Get the VM's managed object ID for returning
 	vmID := vmRef.Value
 
