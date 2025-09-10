@@ -243,7 +243,81 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 
 // Delete deletes a virtual machine
 func (p *Provider) Delete(ctx context.Context, req *providerv1.DeleteRequest) (*providerv1.TaskResponse, error) {
-	return nil, errors.NewUnimplemented("Delete operation not yet implemented for vSphere")
+	if p.client == nil {
+		return nil, fmt.Errorf("vSphere client not configured")
+	}
+
+	p.logger.Info("Deleting virtual machine", "vm_id", req.Id)
+
+	// Set datacenter context for finder
+	datacenter, err := p.finder.DefaultDatacenter(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find default datacenter: %w", err)
+	}
+	p.finder.SetDatacenter(datacenter)
+
+	// Create VM reference from ID
+	vmRef := types.ManagedObjectReference{
+		Type:  "VirtualMachine",
+		Value: req.Id,
+	}
+	
+	vm := object.NewVirtualMachine(p.client.Client, vmRef)
+
+	// First, check if the VM exists by getting its power state
+	powerState, err := vm.PowerState(ctx)
+	if err != nil {
+		// Check if this is a "not found" error
+		if soap.IsSoapFault(err) {
+			soapFault := soap.ToSoapFault(err)
+			if soapFault.VimFault() != nil {
+				// VM doesn't exist - this is not an error for deletion
+				p.logger.Info("VM does not exist, deletion complete", "vm_id", req.Id)
+				return &providerv1.TaskResponse{}, nil
+			}
+		}
+		return nil, fmt.Errorf("failed to check VM power state: %w", err)
+	}
+
+	p.logger.Info("VM found, proceeding with deletion", "vm_id", req.Id, "power_state", powerState)
+
+	// If VM is powered on, power it off first
+	if powerState == types.VirtualMachinePowerStatePoweredOn {
+		p.logger.Info("Powering off VM before deletion", "vm_id", req.Id)
+		
+		powerOffTask, err := vm.PowerOff(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to start power off operation: %w", err)
+		}
+		
+		// Wait for power off to complete
+		_, err = powerOffTask.WaitForResult(ctx, nil)
+		if err != nil {
+			p.logger.Warn("Power off failed, continuing with deletion", "vm_id", req.Id, "error", err)
+			// Continue with deletion even if power off fails
+		} else {
+			p.logger.Info("VM powered off successfully", "vm_id", req.Id)
+		}
+	}
+
+	// Delete the VM from disk (this removes it from inventory and deletes files)
+	p.logger.Info("Deleting VM from disk", "vm_id", req.Id)
+	
+	deleteTask, err := vm.Destroy(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to start VM deletion: %w", err)
+	}
+
+	// Wait for deletion to complete
+	_, err = deleteTask.WaitForResult(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("VM deletion failed: %w", err)
+	}
+
+	p.logger.Info("Virtual machine deleted successfully", "vm_id", req.Id)
+
+	// Return empty task response since we completed synchronously
+	return &providerv1.TaskResponse{}, nil
 }
 
 // Power performs power operations on a virtual machine
