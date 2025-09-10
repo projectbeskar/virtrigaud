@@ -187,7 +187,9 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonReconcileSuccess, "VM provisioned")
 
 	r.updateStatus(ctx, vm)
-	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+	
+	// Optimize polling frequency based on VM state
+	return ctrl.Result{RequeueAfter: r.getRequeueInterval(vm, desc)}, nil
 }
 
 // handleDeletion handles VM deletion
@@ -500,6 +502,38 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 func (r *VirtualMachineReconciler) updateStatus(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine) {
 	if err := r.Status().Update(ctx, vm); err != nil {
 		log.FromContext(ctx).Error(err, "Failed to update VirtualMachine status")
+	}
+}
+
+// getRequeueInterval returns an intelligent requeue interval based on VM state
+func (r *VirtualMachineReconciler) getRequeueInterval(vm *infravirtrigaudiov1beta1.VirtualMachine, desc contracts.DescribeResponse) time.Duration {
+	// Fast polling intervals for various states
+	const (
+		fastPoll     = 30 * time.Second  // For transitional states
+		normalPoll   = 2 * time.Minute   // For stable running VMs
+		slowPoll     = 5 * time.Minute   // For stable powered-off VMs
+		errorPoll    = 30 * time.Second  // For error conditions
+	)
+
+	// Check if VM has no IP addresses yet (waiting for DHCP/network)
+	if desc.PowerState == "poweredOn" && len(desc.IPs) == 0 {
+		return fastPoll // Poll frequently until VM gets IP
+	}
+
+	// Check VM power state for different polling frequencies
+	switch desc.PowerState {
+	case "poweredOn":
+		// VM is running - normal monitoring frequency
+		return normalPoll
+	case "poweredOff":
+		// VM is off - slower polling
+		return slowPoll
+	case "suspended":
+		// VM is suspended - normal polling
+		return normalPoll
+	default:
+		// Unknown or transitional state - fast polling
+		return fastPoll
 	}
 }
 
