@@ -410,15 +410,43 @@ func (p *Provider) Describe(ctx context.Context, req *providerv1.DescribeRequest
 
 	// VM object will be used for property retrieval
 
-	// Get VM properties
+	// Get VM properties - comprehensive list for detailed monitoring
 	var vmMo mo.VirtualMachine
 	pc := property.DefaultCollector(p.client.Client)
 	err = pc.RetrieveOne(ctx, vmRef, []string{
+		// Power and runtime state
 		"runtime.powerState",
-		"guest.ipAddress",
-		"guest.net",
-		"summary.config.name",
+		"runtime.connectionState",
+		"runtime.bootTime",
 		"summary.runtime.powerState",
+		"summary.runtime.connectionState",
+		
+		// Guest information
+		"guest.ipAddress", 
+		"guest.net",
+		"guest.guestState",
+		"guest.toolsStatus",
+		"guest.toolsVersion",
+		"guest.guestFullName",
+		"guest.hostName",
+		
+		// Configuration
+		"summary.config.name",
+		"summary.config.numCpu",
+		"summary.config.memorySizeMB",
+		"summary.config.vmPathName",
+		"summary.config.guestFullName",
+		"summary.config.annotation",
+		
+		// Hardware and performance
+		"summary.quickStats.overallCpuUsage",
+		"summary.quickStats.guestMemoryUsage",
+		"summary.quickStats.hostMemoryUsage", 
+		"summary.quickStats.uptimeSeconds",
+		
+		// Network details
+		"network",
+		"summary.runtime.host",
 	}, &vmMo)
 
 	if err != nil {
@@ -429,38 +457,110 @@ func (p *Provider) Describe(ctx context.Context, req *providerv1.DescribeRequest
 		}, nil
 	}
 
-	// VM exists, gather information
+	// VM exists, gather comprehensive information
 	powerState := string(vmMo.Runtime.PowerState)
-
-	// Collect IP addresses
+	connectionState := string(vmMo.Runtime.ConnectionState)
+	
+	// Collect IP addresses with enhanced detection
 	var ips []string
+	var primaryIP string
+	
 	if vmMo.Guest != nil {
 		// Primary IP address
 		if vmMo.Guest.IpAddress != "" {
+			primaryIP = vmMo.Guest.IpAddress
 			ips = append(ips, vmMo.Guest.IpAddress)
 		}
 
-		// Additional IPs from guest networks
+		// Additional IPs from guest networks - filter out link-local and loopback
 		if vmMo.Guest.Net != nil {
 			for _, netInfo := range vmMo.Guest.Net {
 				if netInfo.IpConfig != nil {
 					for _, ipConfig := range netInfo.IpConfig.IpAddress {
-						if ipConfig.IpAddress != "" && !contains(ips, ipConfig.IpAddress) {
-							ips = append(ips, ipConfig.IpAddress)
+						ip := ipConfig.IpAddress
+						if ip != "" && !contains(ips, ip) && p.isValidIPAddress(ip) {
+							ips = append(ips, ip)
 						}
 					}
 				}
 			}
 		}
 	}
+	
+	// Get guest tools status
+	toolsStatus := ""
+	toolsVersion := ""
+	guestOS := ""
+	hostname := ""
+	
+	if vmMo.Guest != nil {
+		if vmMo.Guest.ToolsStatus != "" {
+			toolsStatus = string(vmMo.Guest.ToolsStatus)
+		}
+		if vmMo.Guest.ToolsVersion != "" {
+			toolsVersion = vmMo.Guest.ToolsVersion
+		}
+		if vmMo.Guest.GuestFullName != "" {
+			guestOS = vmMo.Guest.GuestFullName  
+		}
+		if vmMo.Guest.HostName != "" {
+			hostname = vmMo.Guest.HostName
+		}
+	}
+	
+	// Get resource information (handle potential nil values safely)
+	cpuCount := int32(0)
+	memoryMB := int32(0)
+	cpuUsage := int32(0)
+	memoryUsage := int32(0)
+	uptimeSeconds := int64(0)
+	
+	// Summary.Config and Summary.QuickStats are structs, not pointers
+	cpuCount = vmMo.Summary.Config.NumCpu
+	memoryMB = vmMo.Summary.Config.MemorySizeMB
+	
+	cpuUsage = vmMo.Summary.QuickStats.OverallCpuUsage
+	memoryUsage = vmMo.Summary.QuickStats.GuestMemoryUsage
+	uptimeSeconds = int64(vmMo.Summary.QuickStats.UptimeSeconds)
+	
+	// Boot time
+	bootTime := ""
+	if vmMo.Runtime.BootTime != nil {
+		bootTime = vmMo.Runtime.BootTime.Format("2006-01-02T15:04:05Z")
+	}
 
-	// Create provider raw JSON with detailed VM info
+	// Create comprehensive provider raw JSON with detailed VM info
 	providerRawJson := fmt.Sprintf(`{
 		"vm_id": "%s",
 		"name": "%s",
 		"power_state": "%s",
-		"guest_ip": "%s"
-	}`, req.Id, vmMo.Summary.Config.Name, powerState, vmMo.Guest.IpAddress)
+		"connection_state": "%s",
+		"primary_ip": "%s",
+		"hostname": "%s",
+		"guest_os": "%s",
+		"tools_status": "%s",
+		"tools_version": "%s",
+		"cpu_count": %d,
+		"memory_mb": %d,
+		"cpu_usage_mhz": %d,
+		"memory_usage_mb": %d,
+		"uptime_seconds": %d,
+		"boot_time": "%s"
+	}`, req.Id, 
+		vmMo.Summary.Config.Name, 
+		powerState, 
+		connectionState,
+		primaryIP,
+		hostname,
+		guestOS,
+		toolsStatus,
+		toolsVersion,
+		cpuCount,
+		memoryMB,
+		cpuUsage,
+		memoryUsage,
+		uptimeSeconds,
+		bootTime)
 
 	return &providerv1.DescribeResponse{
 		Exists:          true,
@@ -479,6 +579,17 @@ func contains(slice []string, item string) bool {
 		}
 	}
 	return false
+}
+
+// isValidIPAddress filters out unwanted IP addresses (loopback, link-local, etc.)
+func (p *Provider) isValidIPAddress(ip string) bool {
+	// Filter out localhost and link-local addresses
+	if ip == "127.0.0.1" || ip == "::1" || 
+	   strings.HasPrefix(ip, "169.254.") || // Link-local IPv4
+	   strings.HasPrefix(ip, "fe80:") {     // Link-local IPv6
+		return false
+	}
+	return true
 }
 
 // addCloudInitToConfigSpec adds cloud-init data to VM configuration via guestinfo properties
