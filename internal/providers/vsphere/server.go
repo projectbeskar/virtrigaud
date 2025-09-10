@@ -261,7 +261,7 @@ func (p *Provider) Delete(ctx context.Context, req *providerv1.DeleteRequest) (*
 		Type:  "VirtualMachine",
 		Value: req.Id,
 	}
-	
+
 	vm := object.NewVirtualMachine(p.client.Client, vmRef)
 
 	// First, check if the VM exists by getting its power state
@@ -284,12 +284,12 @@ func (p *Provider) Delete(ctx context.Context, req *providerv1.DeleteRequest) (*
 	// If VM is powered on, power it off first
 	if powerState == types.VirtualMachinePowerStatePoweredOn {
 		p.logger.Info("Powering off VM before deletion", "vm_id", req.Id)
-		
+
 		powerOffTask, err := vm.PowerOff(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to start power off operation: %w", err)
 		}
-		
+
 		// Wait for power off to complete
 		_, err = powerOffTask.WaitForResult(ctx, nil)
 		if err != nil {
@@ -302,7 +302,7 @@ func (p *Provider) Delete(ctx context.Context, req *providerv1.DeleteRequest) (*
 
 	// Delete the VM from disk (this removes it from inventory and deletes files)
 	p.logger.Info("Deleting VM from disk", "vm_id", req.Id)
-	
+
 	deleteTask, err := vm.Destroy(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to start VM deletion: %w", err)
@@ -420,16 +420,16 @@ func (p *Provider) Describe(ctx context.Context, req *providerv1.DescribeRequest
 		"runtime.bootTime",
 		"summary.runtime.powerState",
 		"summary.runtime.connectionState",
-		
+
 		// Guest information
-		"guest.ipAddress", 
+		"guest.ipAddress",
 		"guest.net",
 		"guest.guestState",
 		"guest.toolsStatus",
 		"guest.toolsVersion",
 		"guest.guestFullName",
 		"guest.hostName",
-		
+
 		// Configuration
 		"summary.config.name",
 		"summary.config.numCpu",
@@ -437,13 +437,13 @@ func (p *Provider) Describe(ctx context.Context, req *providerv1.DescribeRequest
 		"summary.config.vmPathName",
 		"summary.config.guestFullName",
 		"summary.config.annotation",
-		
+
 		// Hardware and performance
 		"summary.quickStats.overallCpuUsage",
 		"summary.quickStats.guestMemoryUsage",
-		"summary.quickStats.hostMemoryUsage", 
+		"summary.quickStats.hostMemoryUsage",
 		"summary.quickStats.uptimeSeconds",
-		
+
 		// Network details
 		"network",
 		"summary.runtime.host",
@@ -460,11 +460,11 @@ func (p *Provider) Describe(ctx context.Context, req *providerv1.DescribeRequest
 	// VM exists, gather comprehensive information
 	powerState := p.mapVSpherePowerState(string(vmMo.Runtime.PowerState))
 	connectionState := string(vmMo.Runtime.ConnectionState)
-	
+
 	// Collect IP addresses with enhanced detection
 	var ips []string
 	var primaryIP string
-	
+
 	if vmMo.Guest != nil {
 		// Primary IP address
 		if vmMo.Guest.IpAddress != "" {
@@ -486,13 +486,13 @@ func (p *Provider) Describe(ctx context.Context, req *providerv1.DescribeRequest
 			}
 		}
 	}
-	
+
 	// Get guest tools status
 	toolsStatus := ""
 	toolsVersion := ""
 	guestOS := ""
 	hostname := ""
-	
+
 	if vmMo.Guest != nil {
 		if vmMo.Guest.ToolsStatus != "" {
 			toolsStatus = string(vmMo.Guest.ToolsStatus)
@@ -501,28 +501,28 @@ func (p *Provider) Describe(ctx context.Context, req *providerv1.DescribeRequest
 			toolsVersion = vmMo.Guest.ToolsVersion
 		}
 		if vmMo.Guest.GuestFullName != "" {
-			guestOS = vmMo.Guest.GuestFullName  
+			guestOS = vmMo.Guest.GuestFullName
 		}
 		if vmMo.Guest.HostName != "" {
 			hostname = vmMo.Guest.HostName
 		}
 	}
-	
+
 	// Get resource information (handle potential nil values safely)
 	cpuCount := int32(0)
 	memoryMB := int32(0)
 	cpuUsage := int32(0)
 	memoryUsage := int32(0)
 	uptimeSeconds := int64(0)
-	
+
 	// Summary.Config and Summary.QuickStats are structs, not pointers
 	cpuCount = vmMo.Summary.Config.NumCpu
 	memoryMB = vmMo.Summary.Config.MemorySizeMB
-	
+
 	cpuUsage = vmMo.Summary.QuickStats.OverallCpuUsage
 	memoryUsage = vmMo.Summary.QuickStats.GuestMemoryUsage
 	uptimeSeconds = int64(vmMo.Summary.QuickStats.UptimeSeconds)
-	
+
 	// Boot time
 	bootTime := ""
 	if vmMo.Runtime.BootTime != nil {
@@ -546,9 +546,9 @@ func (p *Provider) Describe(ctx context.Context, req *providerv1.DescribeRequest
 		"memory_usage_mb": %d,
 		"uptime_seconds": %d,
 		"boot_time": "%s"
-	}`, req.Id, 
-		vmMo.Summary.Config.Name, 
-		powerState, 
+	}`, req.Id,
+		vmMo.Summary.Config.Name,
+		powerState,
 		connectionState,
 		primaryIP,
 		hostname,
@@ -584,9 +584,9 @@ func contains(slice []string, item string) bool {
 // isValidIPAddress filters out unwanted IP addresses (loopback, link-local, etc.)
 func (p *Provider) isValidIPAddress(ip string) bool {
 	// Filter out localhost and link-local addresses
-	if ip == "127.0.0.1" || ip == "::1" || 
-	   strings.HasPrefix(ip, "169.254.") || // Link-local IPv4
-	   strings.HasPrefix(ip, "fe80:") {     // Link-local IPv6
+	if ip == "127.0.0.1" || ip == "::1" ||
+		strings.HasPrefix(ip, "169.254.") || // Link-local IPv4
+		strings.HasPrefix(ip, "fe80:") { // Link-local IPv6
 		return false
 	}
 	return true
@@ -610,10 +610,10 @@ func (p *Provider) mapVSpherePowerState(vspherePowerState string) string {
 func (p *Provider) addCloudInitToConfigSpec(configSpec *types.VirtualMachineConfigSpec, cloudInitData string) error {
 	// VMware cloud-init datasource reads from guestinfo properties
 	// This is the standard way to pass cloud-init data to VMs in vSphere
-	
+
 	// Encode cloud-init data (base64 encoding is common but not required)
 	// We'll pass it directly as it's already in YAML format
-	
+
 	// Create extra config options for cloud-init
 	extraConfig := []types.BaseOptionValue{
 		&types.OptionValue{

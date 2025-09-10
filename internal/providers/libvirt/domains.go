@@ -213,7 +213,7 @@ func (p *Provider) generateDomainXML(req contracts.CreateRequest, volumePath, cl
 	return xml
 }
 
-// describeDomain returns the current state of a domain
+// describeDomain returns comprehensive state information of a domain
 func (p *Provider) describeDomain(domain *libvirt.Domain) (contracts.DescribeResponse, error) {
 	// Get basic domain info
 	name, err := domain.GetName()
@@ -226,61 +226,373 @@ func (p *Provider) describeDomain(domain *libvirt.Domain) (contracts.DescribeRes
 		return contracts.DescribeResponse{}, contracts.NewRetryableError("failed to get domain UUID", err)
 	}
 
-	// Get power state
-	active, err := domain.IsActive()
+	// Get comprehensive domain information
+	domainInfo, err := domain.GetInfo()
 	if err != nil {
-		return contracts.DescribeResponse{}, contracts.NewRetryableError("failed to get domain state", err)
+		return contracts.DescribeResponse{}, contracts.NewRetryableError("failed to get domain info", err)
 	}
 
-	var powerState string
-	if active {
-		powerState = "On"
-	} else {
-		powerState = "Off"
-	}
+	// Map libvirt state to VirtRigaud power state
+	powerState := p.mapLibvirtPowerState(domainInfo.State)
 
-	// Get IP addresses (requires guest agent)
+	// Get IP addresses using multiple methods
 	ips := p.getDomainIPs(domain)
+
+	// Get memory statistics
+	memoryStats := p.getDomainMemoryStats(domain)
+
+	// Get CPU statistics
+	cpuStats := p.getDomainCPUStats(domain)
+
+	// Get network statistics
+	networkStats := p.getDomainNetworkStats(domain)
+
+	// Get storage statistics
+	storageStats := p.getDomainStorageStats(domain)
+
+	// Get guest OS information
+	guestInfo := p.getDomainGuestInfo(domain)
+
+	// Get console information
+	consoleURL := p.getDomainConsoleURL(domain)
+
+	// Create comprehensive provider raw JSON matching vSphere format
+	providerRawJson := p.createProviderRawJSON(name, uuid, powerState, domainInfo, memoryStats, cpuStats, networkStats, storageStats, guestInfo, ips)
 
 	response := contracts.DescribeResponse{
 		Exists:     true,
 		PowerState: powerState,
 		IPs:        ips,
+		ConsoleURL: consoleURL,
 		ProviderRaw: map[string]string{
-			"uuid":   uuid,
-			"name":   name,
-			"active": fmt.Sprintf("%t", active),
+			"json": providerRawJson,
 		},
 	}
-
-	// Generate console URL (VNC)
-	response.ConsoleURL = "vnc://localhost:5900" // Simplified
 
 	return response, nil
 }
 
-// getDomainIPs attempts to get IP addresses from the domain
+// getDomainIPs attempts to get IP addresses from the domain using multiple methods
 func (p *Provider) getDomainIPs(domain *libvirt.Domain) []string {
 	var ips []string
 
-	// Try to get interface addresses from guest agent
+	// Method 1: Try to get interface addresses from guest agent (most reliable)
 	ifaces, err := domain.ListAllInterfaceAddresses(libvirt.DOMAIN_INTERFACE_ADDRESSES_SRC_AGENT)
-	if err != nil {
-		// Fall back to DHCP lease lookup
-		ifaces, err = domain.ListAllInterfaceAddresses(libvirt.DOMAIN_INTERFACE_ADDRESSES_SRC_LEASE)
-		if err != nil {
-			return ips // Return empty if we can't get IPs
+	if err == nil {
+		for _, iface := range ifaces {
+			for _, addr := range iface.Addrs {
+				if p.isValidIPAddress(addr.Addr) {
+					ips = append(ips, addr.Addr)
+				}
+			}
+		}
+		if len(ips) > 0 {
+			return ips
 		}
 	}
 
-	for _, iface := range ifaces {
-		for _, addr := range iface.Addrs {
-			// Skip loopback and link-local addresses
-			if !strings.HasPrefix(addr.Addr, "127.") && !strings.HasPrefix(addr.Addr, "169.254.") {
-				ips = append(ips, addr.Addr)
+	// Method 2: Fall back to DHCP lease lookup
+	ifaces, err = domain.ListAllInterfaceAddresses(libvirt.DOMAIN_INTERFACE_ADDRESSES_SRC_LEASE)
+	if err == nil {
+		for _, iface := range ifaces {
+			for _, addr := range iface.Addrs {
+				if p.isValidIPAddress(addr.Addr) {
+					ips = append(ips, addr.Addr)
+				}
+			}
+		}
+		if len(ips) > 0 {
+			return ips
+		}
+	}
+
+	// Method 3: Try ARP table lookup (for bridged networks)
+	ifaces, err = domain.ListAllInterfaceAddresses(libvirt.DOMAIN_INTERFACE_ADDRESSES_SRC_ARP)
+	if err == nil {
+		for _, iface := range ifaces {
+			for _, addr := range iface.Addrs {
+				if p.isValidIPAddress(addr.Addr) {
+					ips = append(ips, addr.Addr)
+				}
 			}
 		}
 	}
 
 	return ips
+}
+
+// isValidIPAddress filters out unwanted IP addresses
+func (p *Provider) isValidIPAddress(ip string) bool {
+	// Skip loopback addresses
+	if strings.HasPrefix(ip, "127.") {
+		return false
+	}
+	// Skip link-local addresses
+	if strings.HasPrefix(ip, "169.254.") {
+		return false
+	}
+	// Skip IPv6 link-local addresses
+	if strings.HasPrefix(ip, "fe80:") {
+		return false
+	}
+	// Skip localhost IPv6
+	if ip == "::1" {
+		return false
+	}
+	return true
+}
+
+// mapLibvirtPowerState converts libvirt domain state to VirtRigaud power state
+func (p *Provider) mapLibvirtPowerState(state libvirt.DomainState) string {
+	switch state {
+	case libvirt.DOMAIN_RUNNING:
+		return "On"
+	case libvirt.DOMAIN_BLOCKED:
+		return "On" // Domain is running but blocked on resource
+	case libvirt.DOMAIN_PAUSED:
+		return "On" // Domain is paused
+	case libvirt.DOMAIN_SHUTDOWN:
+		return "Off" // Domain is being shut down
+	case libvirt.DOMAIN_SHUTOFF:
+		return "Off" // Domain is shut off
+	case libvirt.DOMAIN_CRASHED:
+		return "Off" // Domain has crashed
+	case libvirt.DOMAIN_PMSUSPENDED:
+		return "Off" // Domain is suspended by guest power management
+	default:
+		return "Off" // Unknown state, assume off
+	}
+}
+
+// getDomainMemoryStats collects memory statistics
+func (p *Provider) getDomainMemoryStats(domain *libvirt.Domain) map[string]interface{} {
+	stats := make(map[string]interface{})
+
+	// Get memory statistics from domain
+	memStats, err := domain.MemoryStats(8, 0) // Request up to 8 stats
+	if err == nil {
+		for _, stat := range memStats {
+			// Use int comparison for memory stat tags
+			switch int(stat.Tag) {
+			case 6: // DOMAIN_MEMORY_STAT_ACTUAL_BALLOON
+				stats["actual_balloon_kb"] = stat.Val
+			case 7: // DOMAIN_MEMORY_STAT_RSS
+				stats["rss_kb"] = stat.Val
+			case 8: // DOMAIN_MEMORY_STAT_USABLE
+				stats["usable_kb"] = stat.Val
+			case 9: // DOMAIN_MEMORY_STAT_AVAILABLE
+				stats["available_kb"] = stat.Val
+			case 10: // DOMAIN_MEMORY_STAT_UNUSED
+				stats["unused_kb"] = stat.Val
+			}
+		}
+	}
+
+	return stats
+}
+
+// getDomainCPUStats collects CPU statistics
+func (p *Provider) getDomainCPUStats(domain *libvirt.Domain) map[string]interface{} {
+	stats := make(map[string]interface{})
+
+	// Get basic domain info for CPU count instead of detailed stats
+	// The GetCPUStats API has complex structure that varies by hypervisor
+	domainInfo, err := domain.GetInfo()
+	if err == nil {
+		stats["vcpu_count"] = domainInfo.NrVirtCpu
+		stats["max_memory_kb"] = domainInfo.MaxMem
+		stats["current_memory_kb"] = domainInfo.Memory
+		stats["cpu_time_ns"] = domainInfo.CpuTime
+		stats["state"] = int(domainInfo.State)
+	}
+
+	return stats
+}
+
+// getDomainNetworkStats collects network interface statistics
+func (p *Provider) getDomainNetworkStats(domain *libvirt.Domain) map[string]interface{} {
+	stats := make(map[string]interface{})
+
+	// Try common interface names for libvirt/KVM
+	interfaceNames := []string{"vnet0", "tap0", "virbr0-nic", "eth0"}
+
+	for _, ifName := range interfaceNames {
+		interfaceStats, err := domain.InterfaceStats(ifName)
+		if err == nil {
+			stats["interface_name"] = ifName
+			stats["rx_bytes"] = interfaceStats.RxBytes
+			stats["rx_packets"] = interfaceStats.RxPackets
+			stats["rx_errors"] = interfaceStats.RxErrs
+			stats["rx_dropped"] = interfaceStats.RxDrop
+			stats["tx_bytes"] = interfaceStats.TxBytes
+			stats["tx_packets"] = interfaceStats.TxPackets
+			stats["tx_errors"] = interfaceStats.TxErrs
+			stats["tx_dropped"] = interfaceStats.TxDrop
+			break // Found working interface
+		}
+	}
+
+	return stats
+}
+
+// getDomainStorageStats collects storage statistics
+func (p *Provider) getDomainStorageStats(domain *libvirt.Domain) map[string]interface{} {
+	stats := make(map[string]interface{})
+
+	// Get block device statistics for primary disk (simplified)
+	blockStats, err := domain.BlockStats("vda") // Common default device name
+	if err == nil {
+		stats["read_requests"] = blockStats.RdReq
+		stats["read_bytes"] = blockStats.RdBytes
+		stats["write_requests"] = blockStats.WrReq
+		stats["write_bytes"] = blockStats.WrBytes
+		stats["errors"] = blockStats.Errs
+	}
+
+	return stats
+}
+
+// getDomainGuestInfo collects guest OS information
+func (p *Provider) getDomainGuestInfo(domain *libvirt.Domain) map[string]interface{} {
+	info := make(map[string]interface{})
+
+	// Get OS type
+	osType, err := domain.GetOSType()
+	if err == nil {
+		info["os_type"] = osType
+	}
+
+	// Try to get guest information via guest agent
+	// This requires qemu-guest-agent to be installed and running in the guest
+	if guestInfo, err := domain.QemuAgentCommand(
+		`{"execute":"guest-get-osinfo"}`,
+		libvirt.DOMAIN_QEMU_AGENT_COMMAND_DEFAULT, 0); err == nil {
+		info["guest_agent_info"] = guestInfo
+	}
+
+	// Get hostname via guest agent
+	if hostname, err := domain.GetHostname(libvirt.DOMAIN_GET_HOSTNAME_AGENT); err == nil {
+		info["hostname"] = hostname
+	}
+
+	return info
+}
+
+// getDomainConsoleURL generates console access URL
+func (p *Provider) getDomainConsoleURL(domain *libvirt.Domain) string {
+	// For now, return a simplified VNC URL
+	// In production, you'd parse the domain XML to get the actual VNC port
+	return "vnc://localhost:5900"
+}
+
+// createProviderRawJSON creates comprehensive JSON output matching vSphere format
+func (p *Provider) createProviderRawJSON(
+	name, uuid, powerState string,
+	domainInfo *libvirt.DomainInfo,
+	memoryStats, cpuStats, networkStats, storageStats, guestInfo map[string]interface{},
+	ips []string,
+) string {
+	// Get primary IP
+	primaryIP := ""
+	if len(ips) > 0 {
+		primaryIP = ips[0]
+	}
+
+	// Get hostname from guest info
+	hostname := ""
+	if h, ok := guestInfo["hostname"].(string); ok {
+		hostname = h
+	}
+
+	// Get OS type
+	osType := ""
+	if os, ok := guestInfo["os_type"].(string); ok {
+		osType = os
+	}
+
+	// Calculate memory in MB
+	maxMemoryMB := domainInfo.MaxMem / 1024
+	currentMemoryMB := domainInfo.Memory / 1024
+
+	// Memory usage calculation
+	memoryUsageMB := int64(0)
+	if rss, ok := memoryStats["rss_kb"].(uint64); ok {
+		memoryUsageMB = int64(rss / 1024)
+	}
+
+	// Create comprehensive JSON matching vSphere provider format
+	providerRawJson := fmt.Sprintf(`{
+		"domain_id": "%s",
+		"name": "%s",
+		"power_state": "%s",
+		"primary_ip": "%s",
+		"hostname": "%s",
+		"os_type": "%s",
+		"vcpu_count": %d,
+		"max_memory_mb": %d,
+		"current_memory_mb": %d,
+		"memory_usage_mb": %d,
+		"state": %d,
+		"memory_stats": %v,
+		"cpu_stats": %v,
+		"network_stats": %v,
+		"storage_stats": %v,
+		"guest_info": %v,
+		"all_ips": %v
+	}`,
+		uuid,
+		name,
+		powerState,
+		primaryIP,
+		hostname,
+		osType,
+		domainInfo.NrVirtCpu,
+		maxMemoryMB,
+		currentMemoryMB,
+		memoryUsageMB,
+		int(domainInfo.State),
+		p.mapToJSON(memoryStats),
+		p.mapToJSON(cpuStats),
+		p.mapToJSON(networkStats),
+		p.mapToJSON(storageStats),
+		p.mapToJSON(guestInfo),
+		p.stringSliceToJSON(ips),
+	)
+
+	return providerRawJson
+}
+
+// mapToJSON converts a map to JSON string representation
+func (p *Provider) mapToJSON(data map[string]interface{}) string {
+	if len(data) == 0 {
+		return "{}"
+	}
+	// Simple JSON serialization - in production you'd use json.Marshal
+	result := "{"
+	count := 0
+	for k, v := range data {
+		if count > 0 {
+			result += ","
+		}
+		result += fmt.Sprintf(`"%s":%v`, k, v)
+		count++
+	}
+	result += "}"
+	return result
+}
+
+// stringSliceToJSON converts a string slice to JSON array
+func (p *Provider) stringSliceToJSON(slice []string) string {
+	if len(slice) == 0 {
+		return "[]"
+	}
+	result := "["
+	for i, s := range slice {
+		if i > 0 {
+			result += ","
+		}
+		result += fmt.Sprintf(`"%s"`, s)
+	}
+	result += "]"
+	return result
 }

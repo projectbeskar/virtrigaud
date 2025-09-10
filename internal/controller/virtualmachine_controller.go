@@ -187,7 +187,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonReconcileSuccess, "VM provisioned")
 
 	r.updateStatus(ctx, vm)
-	
+
 	// Optimize polling frequency based on VM state
 	return ctrl.Result{RequeueAfter: r.getRequeueInterval(vm, desc)}, nil
 }
@@ -509,10 +509,10 @@ func (r *VirtualMachineReconciler) updateStatus(ctx context.Context, vm *infravi
 func (r *VirtualMachineReconciler) getRequeueInterval(vm *infravirtrigaudiov1beta1.VirtualMachine, desc contracts.DescribeResponse) time.Duration {
 	// Fast polling intervals for various states
 	const (
-		fastPoll     = 30 * time.Second  // For transitional states
-		normalPoll   = 2 * time.Minute   // For stable running VMs
-		slowPoll     = 5 * time.Minute   // For stable powered-off VMs
-		errorPoll    = 30 * time.Second  // For error conditions
+		fastPoll   = 30 * time.Second // For transitional states
+		normalPoll = 2 * time.Minute  // For stable running VMs
+		slowPoll   = 5 * time.Minute  // For stable powered-off VMs
+		errorPoll  = 30 * time.Second // For error conditions
 	)
 
 	// Check if VM has no IP addresses yet (waiting for DHCP/network)
