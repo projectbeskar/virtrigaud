@@ -49,6 +49,7 @@ jobs:
     name: Build and Push Images
     runs-on: ubuntu-latest
     needs: prepare
+    timeout-minutes: 30
     strategy:
       matrix:
         component: [manager, provider-libvirt, provider-vsphere, provider-proxmox]
@@ -61,13 +62,28 @@ jobs:
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
-
-    - name: Log in to Container Registry
-      uses: docker/login-action@v3
       with:
-        registry: ${{ env.REGISTRY }}
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+        driver-opts: |
+          network=host
+
+    - name: Wait and retry Docker login
+      run: |
+        echo "Attempting Docker login with retry logic..."
+        for i in {1..3}; do
+          echo "Login attempt $i/3"
+          if docker login ${{ env.REGISTRY }} -u ${{ github.actor }} -p ${{ secrets.GITHUB_TOKEN }}; then
+            echo "Login successful on attempt $i"
+            break
+          else
+            echo "Login attempt $i failed"
+            if [ $i -eq 3 ]; then
+              echo "All login attempts failed"
+              exit 1
+            fi
+            echo "Waiting 30 seconds before retry..."
+            sleep 30
+          fi
+        done
 
     - name: Extract metadata
       id: meta
@@ -83,6 +99,7 @@ jobs:
     - name: Build and push
       id: build
       uses: docker/build-push-action@v6
+      timeout-minutes: 20
       with:
         context: .
         file: ${{ matrix.component == 'manager' && './build/Dockerfile.manager' || format('./cmd/{0}/Dockerfile', matrix.component) }}
@@ -107,16 +124,29 @@ jobs:
     name: Security Scan Images
     runs-on: ubuntu-latest
     needs: [prepare, build-and-push]
+    timeout-minutes: 20
     strategy:
       matrix:
         component: [manager, provider-libvirt, provider-vsphere, provider-proxmox]
     steps:
-    - name: Log in to Container Registry
-      uses: docker/login-action@v3
-      with:
-        registry: ${{ env.REGISTRY }}
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+    - name: Retry Docker login for security scan
+      run: |
+        echo "Attempting Docker login for security scan..."
+        for i in {1..3}; do
+          echo "Login attempt $i/3"
+          if docker login ${{ env.REGISTRY }} -u ${{ github.actor }} -p ${{ secrets.GITHUB_TOKEN }}; then
+            echo "Login successful on attempt $i"
+            break
+          else
+            echo "Login attempt $i failed"
+            if [ $i -eq 3 ]; then
+              echo "All login attempts failed"
+              exit 1
+            fi
+            echo "Waiting 30 seconds before retry..."
+            sleep 30
+          fi
+        done
 
     - name: Wait for image propagation
       run: |
@@ -159,16 +189,29 @@ jobs:
     name: Generate SBOMs
     runs-on: ubuntu-latest
     needs: [prepare, build-and-push]
+    timeout-minutes: 15
     strategy:
       matrix:
         component: [manager, provider-libvirt, provider-vsphere, provider-proxmox]
     steps:
-    - name: Log in to Container Registry
-      uses: docker/login-action@v3
-      with:
-        registry: ${{ env.REGISTRY }}
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+    - name: Retry Docker login for SBOM generation
+      run: |
+        echo "Attempting Docker login for SBOM generation..."
+        for i in {1..3}; do
+          echo "Login attempt $i/3"
+          if docker login ${{ env.REGISTRY }} -u ${{ github.actor }} -p ${{ secrets.GITHUB_TOKEN }}; then
+            echo "Login successful on attempt $i"
+            break
+          else
+            echo "Login attempt $i failed"
+            if [ $i -eq 3 ]; then
+              echo "All login attempts failed"
+              exit 1
+            fi
+            echo "Waiting 30 seconds before retry..."
+            sleep 30
+          fi
+        done
 
     - name: Wait for image propagation
       run: |
@@ -234,6 +277,7 @@ jobs:
     name: Build CLI Tools
     runs-on: ubuntu-latest
     needs: prepare
+    timeout-minutes: 15
     strategy:
       matrix:
         os: [linux, darwin, windows]
