@@ -458,7 +458,7 @@ func (p *Provider) Describe(ctx context.Context, req *providerv1.DescribeRequest
 	}
 
 	// VM exists, gather comprehensive information
-	powerState := string(vmMo.Runtime.PowerState)
+	powerState := p.mapVSpherePowerState(string(vmMo.Runtime.PowerState))
 	connectionState := string(vmMo.Runtime.ConnectionState)
 	
 	// Collect IP addresses with enhanced detection
@@ -590,6 +590,20 @@ func (p *Provider) isValidIPAddress(ip string) bool {
 		return false
 	}
 	return true
+}
+
+// mapVSpherePowerState maps vSphere power states to VirtRigaud standard power states
+func (p *Provider) mapVSpherePowerState(vspherePowerState string) string {
+	switch vspherePowerState {
+	case "poweredOn":
+		return "On"
+	case "poweredOff":
+		return "Off"
+	case "suspended":
+		return "Off" // Treat suspended as Off for VirtRigaud
+	default:
+		return "Off" // Default to Off for unknown states
+	}
 }
 
 // addCloudInitToConfigSpec adds cloud-init data to VM configuration via guestinfo properties
