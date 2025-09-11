@@ -31,32 +31,33 @@ COPY internal/ internal/
 RUN CGO_ENABLED=1 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
     go build -a -o provider cmd/provider-libvirt/main.go
 
-# Runtime stage
-FROM debian:bookworm-slim
+# Runtime stage - switching to Alpine for better user environment handling
+FROM alpine:3.18
 
-# Force cache-bust for apt layer when you change CACHEBUST
-ARG CACHEBUST=2
+# Force cache-bust for apk layer when you change CACHEBUST
+ARG CACHEBUST=3
 
-# Install runtime deps incl. OpenSSH client  
-RUN apt-get update \
-  && echo "=== Installing packages ===" \
-  && apt-get install -y --no-install-recommends \
-    libvirt0 \
+# Install runtime deps incl. OpenSSH client (Alpine packages)
+RUN echo "=== Installing Alpine packages ===" \
+  && apk add --no-cache \
+    libvirt-libs \
     libxml2 \
     ca-certificates \
     openssh-client \
-  && echo "=== Cleaning up ===" \
-  && rm -rf /var/lib/apt/lists/* \
+    gcompat \
+  && echo "=== Updating CA certificates ===" \
   && update-ca-certificates \
   && echo "=== Verifying SSH installation ===" \
-  && dpkg -l | grep openssh \
+  && apk info | grep openssh \
   && which ssh \
   && ssh -V \
   && echo "=== SSH verification successful! CACHEBUST=$CACHEBUST ==="
 
-# Create non-root user with a home (avoids odd ssh/HOME issues)
-RUN groupadd -r virtrigaud \
-  && useradd -r -g virtrigaud -m -d /home/virtrigaud -s /usr/sbin/nologin virtrigaud
+# Create non-root user with proper home directory (Alpine style)
+RUN addgroup -g 1000 virtrigaud \
+  && adduser -D -u 1000 -G virtrigaud -h /home/virtrigaud -s /bin/sh virtrigaud \
+  && echo "=== User created with home: $(getent passwd virtrigaud) ===" \
+  && ls -la /home/virtrigaud
 ENV HOME=/home/virtrigaud
 
 WORKDIR /
