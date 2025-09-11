@@ -34,13 +34,18 @@ RUN CGO_ENABLED=1 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o pr
 # Runtime stage
 FROM debian:bookworm-slim
 
-# Install runtime dependencies (force rebuild for SSH client)
+# Force cache invalidation for SSH client installation
+ARG CACHEBUST=1
+
+# Install runtime dependencies (MUST include openssh-client for SSH transport)
 RUN apt-get update && apt-get install -y \
     libvirt0 \
     libxml2 \
     ca-certificates \
     openssh-client \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && which ssh \
+    && ssh -V
 
 # Create non-root user
 RUN groupadd -r virtrigaud && useradd -r -g virtrigaud virtrigaud
