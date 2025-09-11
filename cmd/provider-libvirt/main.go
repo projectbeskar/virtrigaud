@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -55,7 +56,9 @@ func main() {
 	// Create gRPC server
 	server := grpc.NewServer()
 
-	// Create Libvirt provider
+	// Create Libvirt provider server
+	// Note: Provider initialization happens later when gRPC calls are made
+	// This allows the health server to start even if libvirt connection fails initially
 	provider := libvirt.NewServer(nil)
 
 	// Register the provider service
@@ -74,10 +77,35 @@ func main() {
 
 	log.Printf("Libvirt provider server %s listening on port %d", version.String(), port)
 
-	// Start server in a goroutine
+	// Create HTTP health server
+	healthMux := http.NewServeMux()
+	healthMux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	})
+	healthMux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ready"))
+	})
+	
+	httpServer := &http.Server{
+		Addr:    fmt.Sprintf(":%d", healthPort),
+		Handler: healthMux,
+	}
+
+	log.Printf("Starting HTTP health server on port %d", healthPort)
+
+	// Start gRPC server in a goroutine
 	go func() {
 		if err := server.Serve(lis); err != nil {
-			log.Fatalf("Failed to serve: %v", err)
+			log.Fatalf("Failed to serve gRPC: %v", err)
+		}
+	}()
+
+	// Start HTTP health server in a goroutine
+	go func() {
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Failed to serve HTTP health server: %v", err)
 		}
 	}()
 
@@ -86,4 +114,7 @@ func main() {
 
 	log.Println("Shutting down gRPC server...")
 	server.GracefulStop()
+	
+	log.Println("Shutting down HTTP health server...")
+	httpServer.Shutdown(context.Background())
 }
