@@ -19,6 +19,9 @@ package libvirt
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"os"
+	"strings"
 
 	libvirt "libvirt.org/go/libvirt"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -55,7 +58,86 @@ type Credentials struct {
 	CAData   string
 }
 
-// NewProvider creates a new Libvirt provider instance
+const (
+	// CredentialsPath is where the controller mounts the credentials secret
+	CredentialsPath = "/etc/virtrigaud/credentials"
+)
+
+// Config holds the libvirt provider configuration  
+type Config struct {
+	Endpoint string
+	Username string
+	Password string
+}
+
+// New creates a new Libvirt provider that reads configuration from environment and mounted secrets
+func New() *Provider {
+	// Load configuration from environment (set by provider controller)
+	config := &Config{
+		Endpoint: os.Getenv("PROVIDER_ENDPOINT"),
+	}
+
+	// Load credentials from mounted secret files
+	if err := loadCredentialsFromFiles(config); err != nil {
+		slog.Error("Failed to load credentials from mounted secret", "error", err)
+	}
+
+	p := &Provider{
+		config:      nil, // We'll create a minimal config
+		k8sClient:   nil, // No K8s client needed in container mode
+		credentials: &Credentials{
+			Username: config.Username,
+			Password: config.Password,
+		},
+	}
+
+	// Try to establish libvirt connection
+	if config.Endpoint != "" && config.Username != "" && config.Password != "" {
+		if err := p.connectWithConfig(context.Background(), config); err != nil {
+			slog.Error("Failed to connect to libvirt", "error", err)
+		}
+	} else {
+		slog.Warn("Libvirt provider configuration incomplete", 
+			"endpoint_set", config.Endpoint != "",
+			"username_set", config.Username != "",
+			"password_set", config.Password != "")
+	}
+
+	return p
+}
+
+// loadCredentialsFromFiles reads credentials from mounted secret files
+func loadCredentialsFromFiles(config *Config) error {
+	// Read username from mounted secret
+	if data, err := os.ReadFile(CredentialsPath + "/username"); err == nil {
+		config.Username = strings.TrimSpace(string(data))
+	} else {
+		return fmt.Errorf("failed to read username from %s/username: %w", CredentialsPath, err)
+	}
+
+	// Read password from mounted secret
+	if data, err := os.ReadFile(CredentialsPath + "/password"); err == nil {
+		config.Password = strings.TrimSpace(string(data))
+	} else {
+		return fmt.Errorf("failed to read password from %s/password: %w", CredentialsPath, err)
+	}
+
+	return nil
+}
+
+// connectWithConfig establishes a libvirt connection using the provided config
+func (p *Provider) connectWithConfig(ctx context.Context, config *Config) error {
+	// Use our existing SSH authentication logic
+	p.config = &v1beta1.Provider{
+		Spec: v1beta1.ProviderSpec{
+			Endpoint: config.Endpoint,
+		},
+	}
+	
+	return p.connect(ctx)
+}
+
+// NewProvider creates a new Libvirt provider instance (legacy K8s API method)
 func NewProvider(ctx context.Context, k8sClient client.Client, provider *v1beta1.Provider) (contracts.Provider, error) {
 	if string(provider.Spec.Type) != "libvirt" {
 		return nil, contracts.NewInvalidSpecError(fmt.Sprintf("invalid provider type: %s, expected libvirt", string(provider.Spec.Type)), nil)

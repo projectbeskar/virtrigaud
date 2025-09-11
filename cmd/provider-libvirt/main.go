@@ -56,10 +56,9 @@ func main() {
 	// Create gRPC server
 	server := grpc.NewServer()
 
-	// Create Libvirt provider server
-	// Note: Provider initialization happens later when gRPC calls are made
-	// This allows the health server to start even if libvirt connection fails initially
-	provider := libvirt.NewServer(nil)
+	// Create Libvirt provider with SDK pattern (reads config from environment)
+	providerImpl := libvirt.New()
+	provider := libvirt.NewServer(providerImpl)
 
 	// Register the provider service
 	providerv1.RegisterProviderServer(server, provider)
