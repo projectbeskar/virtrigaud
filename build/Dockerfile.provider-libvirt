@@ -3,57 +3,57 @@ FROM golang:1.23-bookworm AS builder
 ARG TARGETOS
 ARG TARGETARCH
 
-# Install libvirt development libraries
-RUN apt-get update && apt-get install -y \
+# Install build deps (incl. ssh in case go mod/git uses SSH URLs)
+RUN apt-get update && apt-get install -y --no-install-recommends \
     libvirt-dev \
     pkg-config \
     gcc \
-    && rm -rf /var/lib/apt/lists/*
+    openssh-client \
+  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace
 
-# Copy the Go Modules manifests and local modules (needed for replace directives)
+# Module manifests + local replaces
 COPY go.mod go.mod
 COPY go.sum go.sum
 COPY sdk/ sdk/
 COPY proto/ proto/
 
-# cache deps before building and copying source so that we don't need to re-download as much
-# and so that source changes don't invalidate our downloaded layer
 RUN go mod download
 
-# Copy the go source
+# Source
 COPY cmd/ cmd/
 COPY api/ api/
 COPY internal/ internal/
-COPY proto/ proto/
+# (proto already copied above; no need to copy twice)
 
-# Build the provider binary with CGO enabled
-RUN CGO_ENABLED=1 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o provider cmd/provider-libvirt/main.go
+# Build with CGO
+RUN CGO_ENABLED=1 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
+    go build -a -o provider cmd/provider-libvirt/main.go
 
 # Runtime stage
 FROM debian:bookworm-slim
 
-# Force cache invalidation for SSH client installation
+# Force cache-bust for apt layer when you change CACHEBUST
 ARG CACHEBUST=1
 
-# Install runtime dependencies (MUST include openssh-client for SSH transport)
-RUN apt-get update && apt-get install -y \
+# Install runtime deps incl. OpenSSH client
+RUN apt-get update && apt-get install -y --no-install-recommends \
     libvirt0 \
     libxml2 \
     ca-certificates \
     openssh-client \
-    && rm -rf /var/lib/apt/lists/* \
-    && which ssh \
-    && ssh -V
+  && rm -rf /var/lib/apt/lists/* \
+  && update-ca-certificates \
+  && command -v ssh && ssh -V && echo "CACHEBUST=$CACHEBUST" >/dev/null
 
-# Create non-root user
-RUN groupadd -r virtrigaud && useradd -r -g virtrigaud virtrigaud
+# Create non-root user with a home (avoids odd ssh/HOME issues)
+RUN groupadd -r virtrigaud \
+  && useradd -r -g virtrigaud -m -d /home/virtrigaud -s /usr/sbin/nologin virtrigaud
+ENV HOME=/home/virtrigaud
 
 WORKDIR /
 COPY --from=builder /workspace/provider /usr/local/bin/provider-libvirt
 
-# Switch to non-root user
 USER virtrigaud
-
 ENTRYPOINT ["/usr/local/bin/provider-libvirt"]
