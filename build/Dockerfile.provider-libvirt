@@ -34,7 +34,7 @@ RUN CGO_ENABLED=1 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o pr
 # Runtime stage
 FROM debian:bookworm-slim
 
-# Install runtime dependencies
+# Install runtime dependencies (force rebuild for SSH client)
 RUN apt-get update && apt-get install -y \
     libvirt0 \
     libxml2 \
