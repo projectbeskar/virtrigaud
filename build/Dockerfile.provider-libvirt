@@ -1,67 +1,38 @@
-# Build stage with CGO support for libvirt
-FROM golang:1.23-bookworm AS builder
+# Build stage (musl)
+FROM golang:1.23-alpine AS builder
 ARG TARGETOS
 ARG TARGETARCH
-
-# Install build deps (incl. ssh in case go mod/git uses SSH URLs)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libvirt-dev \
-    pkg-config \
-    gcc \
-    openssh-client \
-  && rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache \
+    build-base pkgconfig libvirt-dev libxml2-dev openssh-client git
 
 WORKDIR /workspace
-
-# Module manifests + local replaces
-COPY go.mod go.mod
-COPY go.sum go.sum
+COPY go.mod go.sum ./
 COPY sdk/ sdk/
 COPY proto/ proto/
-
 RUN go mod download
 
-# Source
 COPY cmd/ cmd/
 COPY api/ api/
 COPY internal/ internal/
-# (proto already copied above; no need to copy twice)
 
-# Build with CGO
+# external link not required on musl, but harmless
 RUN CGO_ENABLED=1 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
-    go build -a -o provider cmd/provider-libvirt/main.go
+    go build -o /out/provider cmd/provider-libvirt/main.go
 
-# Runtime stage - switching to Alpine for better user environment handling
+# Runtime (musl)
 FROM alpine:3.18
+RUN apk add --no-cache libvirt-libs libxml2 ca-certificates openssh-client \
+ && update-ca-certificates
 
-# Force cache-bust for apk layer when you change CACHEBUST
-ARG CACHEBUST=3
-
-# Install runtime deps incl. OpenSSH client (Alpine packages)
-RUN echo "=== Installing Alpine packages ===" \
-  && apk add --no-cache \
-    libvirt-libs \
-    libxml2 \
-    ca-certificates \
-    openssh-client \
-    gcompat \
-  && echo "=== Updating CA certificates ===" \
-  && update-ca-certificates \
-  && echo "=== Verifying SSH installation ===" \
-  && apk info | grep openssh \
-  && which ssh \
-  && ssh -V \
-  && echo "=== SSH verification successful! CACHEBUST=$CACHEBUST ==="
-
-# Create non-root user with proper home directory (Alpine style)
-RUN addgroup -g 1000 virtrigaud \
-  && adduser -D -u 1000 -G virtrigaud -h /home/virtrigaud -s /bin/sh virtrigaud \
-  && echo "=== User created with home: $(getent passwd virtrigaud) ===" \
-  && ls -la /home/virtrigaud
-ENV HOME=/home/virtrigaud
+RUN addgroup -g 1000 app \
+ && adduser -D -u 1000 -G app -h /home/app -s /bin/sh app
+ENV HOME=/home/app
+ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+RUN mkdir -p /home/app/.ssh && chown -R app:app /home/app && chmod 700 /home/app/.ssh
 
 WORKDIR /
-COPY --from=builder /workspace/provider /usr/local/bin/provider-libvirt
+COPY --from=builder /out/provider /usr/local/bin/provider-libvirt
+RUN ln -s /usr/bin/ssh /usr/local/bin/ssh || true
 
-USER virtrigaud
+USER app
 ENTRYPOINT ["/usr/local/bin/provider-libvirt"]
