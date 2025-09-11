@@ -19,6 +19,8 @@ package libvirt
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -52,6 +54,14 @@ func (p *Provider) loadCredentials(ctx context.Context) error {
 		creds.Password = string(password)
 	}
 
+	// Check for SSH keys
+	if sshPrivateKey, ok := secret.Data["ssh-privatekey"]; ok {
+		creds.SSHPrivateKey = string(sshPrivateKey)
+	}
+	if sshPublicKey, ok := secret.Data["ssh-publickey"]; ok {
+		creds.SSHPublicKey = string(sshPublicKey)
+	}
+
 	// Check for TLS certificates
 	if certData, ok := secret.Data["tls.crt"]; ok {
 		creds.CertData = string(certData)
@@ -77,9 +87,17 @@ func (p *Provider) connect(ctx context.Context) error {
 		uri = "qemu:///system"
 	}
 
-	// Establish connection
-	// For MVP, we'll use simple connection without complex auth
-	// TODO: Implement proper authentication for remote connections
+	// Check if this is a remote connection that needs authentication
+	if p.needsAuth(uri) {
+		conn, err := p.connectWithAuth(ctx, uri)
+		if err != nil {
+			return fmt.Errorf("failed to connect to Libvirt with authentication: %w", err)
+		}
+		p.conn = conn
+		return nil
+	}
+
+	// Establish simple connection for local/unauthenticated connections
 	conn, err := libvirt.NewConnect(uri)
 	if err != nil {
 		return fmt.Errorf("failed to connect to Libvirt: %w", err)
@@ -89,10 +107,82 @@ func (p *Provider) connect(ctx context.Context) error {
 	return nil
 }
 
-// TODO: Implement authentication for remote connections
 // needsAuth determines if authentication is needed based on URI
-// buildAuth creates authentication configuration
-// These will be implemented in a future version
+func (p *Provider) needsAuth(uri string) bool {
+	// Parse the URI to determine transport
+	parsedURI, err := url.Parse(uri)
+	if err != nil {
+		return false
+	}
+
+	// Check for remote transports that require authentication
+	return strings.Contains(parsedURI.Scheme, "ssh") || 
+		   strings.Contains(parsedURI.Scheme, "tls") ||
+		   (parsedURI.Host != "" && parsedURI.Host != "localhost")
+}
+
+// connectWithAuth establishes an authenticated connection to Libvirt
+func (p *Provider) connectWithAuth(ctx context.Context, uri string) (*libvirt.Connect, error) {
+	if p.credentials == nil {
+		return nil, fmt.Errorf("credentials not loaded for authenticated connection")
+	}
+
+	// For SSH connections, we need to set up the URI with embedded credentials
+	// This is a temporary approach while we work on proper callback authentication
+	authenticatedURI, err := p.buildAuthenticatedURI(uri)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build authenticated URI: %w", err)
+	}
+
+	// Use default authentication for now
+	// TODO: Implement proper callback-based authentication
+	conn, err := libvirt.NewConnectWithAuth(authenticatedURI, nil, 0)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect with authentication: %w", err)
+	}
+
+	return conn, nil
+}
+
+// buildAuthenticatedURI builds a URI with embedded authentication for SSH connections
+func (p *Provider) buildAuthenticatedURI(uri string) (string, error) {
+	parsedURI, err := url.Parse(uri)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse URI: %w", err)
+	}
+
+	// For SSH connections, embed username in the URI
+	if strings.Contains(parsedURI.Scheme, "ssh") && p.credentials.Username != "" {
+		// If the URI doesn't already have a user, add it
+		if parsedURI.User == nil {
+			parsedURI.User = url.User(p.credentials.Username)
+		}
+	}
+
+	return parsedURI.String(), nil
+}
+
+// authCallback handles authentication requests from libvirt
+// TODO: Currently unused due to callback signature issues - will be implemented in future version
+// func (p *Provider) authCallback(creds []libvirt.ConnectCredential) int {
+//     for i := range creds {
+//         switch creds[i].Type {
+//         case libvirt.CRED_USERNAME, libvirt.CRED_AUTHNAME:
+//             if p.credentials.Username != "" {
+//                 creds[i].Result = p.credentials.Username
+//                 log.Printf("AUTH: Providing username for %s", creds[i].Prompt)
+//             }
+//         case libvirt.CRED_PASSPHRASE:
+//             if p.credentials.Password != "" {
+//                 creds[i].Result = p.credentials.Password
+//                 log.Printf("AUTH: Providing password for %s", creds[i].Prompt)
+//             }
+//         default:
+//             log.Printf("AUTH: Unsupported credential type %d for %s", creds[i].Type, creds[i].Prompt)
+//         }
+//     }
+//     return 0 // Success
+// }
 
 // disconnect closes the Libvirt connection
 

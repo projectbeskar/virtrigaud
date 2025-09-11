@@ -46,6 +46,9 @@ type Provider struct {
 type Credentials struct {
 	Username string
 	Password string
+	// SSH key authentication
+	SSHPrivateKey string
+	SSHPublicKey  string
 	// For TLS connections
 	CertData string
 	KeyData  string
