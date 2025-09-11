@@ -35,17 +35,24 @@ RUN CGO_ENABLED=1 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
 FROM debian:bookworm-slim
 
 # Force cache-bust for apt layer when you change CACHEBUST
-ARG CACHEBUST=1
+ARG CACHEBUST=2
 
-# Install runtime deps incl. OpenSSH client
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Install runtime deps incl. OpenSSH client  
+RUN apt-get update \
+  && echo "=== Installing packages ===" \
+  && apt-get install -y --no-install-recommends \
     libvirt0 \
     libxml2 \
     ca-certificates \
     openssh-client \
+  && echo "=== Cleaning up ===" \
   && rm -rf /var/lib/apt/lists/* \
   && update-ca-certificates \
-  && command -v ssh && ssh -V && echo "CACHEBUST=$CACHEBUST" >/dev/null
+  && echo "=== Verifying SSH installation ===" \
+  && dpkg -l | grep openssh \
+  && which ssh \
+  && ssh -V \
+  && echo "=== SSH verification successful! CACHEBUST=$CACHEBUST ==="
 
 # Create non-root user with a home (avoids odd ssh/HOME issues)
 RUN groupadd -r virtrigaud \
