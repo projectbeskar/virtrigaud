@@ -1,4 +1,4 @@
-# Build stage (musl)
+# Build stage (musl) - FORCE ALPINE BUILD
 FROM golang:1.23-alpine AS builder
 ARG TARGETOS
 ARG TARGETARCH
@@ -19,10 +19,14 @@ COPY internal/ internal/
 RUN CGO_ENABLED=1 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
     go build -o /out/provider cmd/provider-libvirt/main.go
 
-# Runtime (musl)
+# Runtime (musl) - FORCE ALPINE RUNTIME  
 FROM alpine:3.18
 RUN apk add --no-cache libvirt-libs libxml2 ca-certificates openssh-client \
- && update-ca-certificates
+ && update-ca-certificates \
+ && echo "ALPINE BUILD SUCCESS - SSH CLIENT AVAILABLE" \
+ && which ssh \
+ && ssh -V \
+ && cat /etc/os-release
 
 RUN addgroup -g 1000 app \
  && adduser -D -u 1000 -G app -h /home/app -s /bin/sh app
