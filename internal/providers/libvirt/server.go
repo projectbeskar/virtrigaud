@@ -40,6 +40,15 @@ func NewServer(provider contracts.Provider) *Server {
 
 // Validate validates the provider configuration
 func (s *Server) Validate(ctx context.Context, req *providerv1.ValidateRequest) (*providerv1.ValidateResponse, error) {
+	// If no provider is configured yet, return a basic healthy response
+	// This allows the health checks to pass while the provider is being initialized
+	if s.provider == nil {
+		return &providerv1.ValidateResponse{
+			Ok:      true,
+			Message: "Provider server is running (provider not yet initialized)",
+		}, nil
+	}
+
 	err := s.provider.Validate(ctx)
 	if err != nil {
 		return &providerv1.ValidateResponse{
@@ -56,6 +65,10 @@ func (s *Server) Validate(ctx context.Context, req *providerv1.ValidateRequest) 
 
 // Create creates a new virtual machine
 func (s *Server) Create(ctx context.Context, req *providerv1.CreateRequest) (*providerv1.CreateResponse, error) {
+	if s.provider == nil {
+		return nil, fmt.Errorf("provider not initialized")
+	}
+
 	// Parse JSON-encoded specifications
 	createReq, err := s.parseCreateRequest(req)
 	if err != nil {
@@ -143,6 +156,10 @@ func (s *Server) Reconfigure(ctx context.Context, req *providerv1.ReconfigureReq
 
 // Describe describes the current state of a virtual machine
 func (s *Server) Describe(ctx context.Context, req *providerv1.DescribeRequest) (*providerv1.DescribeResponse, error) {
+	if s.provider == nil {
+		return nil, fmt.Errorf("provider not initialized")
+	}
+
 	resp, err := s.provider.Describe(ctx, req.Id)
 	if err != nil {
 		return nil, fmt.Errorf("failed to describe VM: %w", err)
