@@ -193,6 +193,12 @@ func (p *Provider) connectWithPassword(ctx context.Context, uri string) (*libvir
 		}
 	}
 
+	// Add SSH options to disable host key verification (common in containers)
+	query := u.Query()
+	query.Set("no_verify", "1")
+	query.Set("no_tty", "1")
+	u.RawQuery = query.Encode()
+
 	authenticatedURI := u.String()
 	log.Printf("DEBUG: Connecting to libvirt with password, URI: %s", authenticatedURI)
 
@@ -254,6 +260,12 @@ func (p *Provider) buildSSHKeyURI(uri string) (string, error) {
 	} else {
 		log.Printf("DEBUG: No SSH private key available, trying default SSH agent/config")
 	}
+
+	// Add SSH options to disable host key verification (common in containers)
+	query := u.Query()
+	query.Set("no_verify", "1")
+	query.Set("no_tty", "1")
+	u.RawQuery = query.Encode()
 
 	finalURI := u.String()
 	log.Printf("DEBUG: Final SSH key URI: %s", finalURI)
