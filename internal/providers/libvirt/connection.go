@@ -125,12 +125,41 @@ func (p *Provider) needsAuth(uri string) bool {
 		(parsedURI.Host != "" && parsedURI.Host != "localhost")
 }
 
-// connectWithAuth establishes an authenticated connection to Libvirt using SSH key
+// connectWithAuth establishes an authenticated connection to Libvirt with fallback strategy
 func (p *Provider) connectWithAuth(ctx context.Context, uri string) (*libvirt.Connect, error) {
 	if p.credentials == nil {
 		return nil, fmt.Errorf("credentials not loaded for authenticated connection")
 	}
 
+	// Strategy 1: Try SSH key authentication first (if available)
+	if p.credentials.SSHPrivateKey != "" {
+		log.Printf("DEBUG: Attempting SSH key authentication")
+		conn, err := p.connectWithSSHKey(ctx, uri)
+		if err != nil {
+			log.Printf("DEBUG: SSH key authentication failed: %v", err)
+			log.Printf("DEBUG: Falling back to password authentication")
+		} else {
+			log.Printf("DEBUG: Successfully established SSH key authenticated connection")
+			return conn, nil
+		}
+	}
+
+	// Strategy 2: Fall back to password authentication
+	if p.credentials.Username != "" && p.credentials.Password != "" {
+		log.Printf("DEBUG: Attempting password authentication")
+		conn, err := p.connectWithPassword(ctx, uri)
+		if err != nil {
+			return nil, fmt.Errorf("failed to connect with password: %w", err)
+		}
+		log.Printf("DEBUG: Successfully established password authenticated connection")
+		return conn, nil
+	}
+
+	return nil, fmt.Errorf("no valid authentication method available (tried SSH key and password)")
+}
+
+// connectWithSSHKey attempts SSH key authentication
+func (p *Provider) connectWithSSHKey(ctx context.Context, uri string) (*libvirt.Connect, error) {
 	// Build URI with SSH key authentication
 	authenticatedURI, err := p.buildSSHKeyURI(uri)
 	if err != nil {
@@ -139,17 +168,63 @@ func (p *Provider) connectWithAuth(ctx context.Context, uri string) (*libvirt.Co
 
 	log.Printf("DEBUG: Connecting to libvirt with SSH key, URI: %s", authenticatedURI)
 
-	// Simple connection - libvirt handles SSH authentication via keyfile parameter
+	// Simple connection - libvirt handles SSH authentication via SSH agent
 	conn, err := libvirt.NewConnect(authenticatedURI)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect with SSH key: %w", err)
 	}
 
-	log.Printf("DEBUG: Successfully established SSH key authenticated libvirt connection")
 	return conn, nil
 }
 
-// buildSSHKeyURI builds a URI with SSH key authentication like your example
+// connectWithPassword attempts password authentication via libvirt callback
+func (p *Provider) connectWithPassword(ctx context.Context, uri string) (*libvirt.Connect, error) {
+	// Parse and modify URI to include username
+	u, err := url.Parse(uri)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse URI: %w", err)
+	}
+
+	// Add username to URI if provided and not already present
+	if strings.Contains(u.Scheme, "ssh") && p.credentials.Username != "" {
+		if u.User == nil {
+			u.User = url.User(p.credentials.Username)
+			log.Printf("DEBUG: Added username to URI: %s", p.credentials.Username)
+		}
+	}
+
+	authenticatedURI := u.String()
+	log.Printf("DEBUG: Connecting to libvirt with password, URI: %s", authenticatedURI)
+
+	// Use libvirt authentication callback for password
+	auth := &libvirt.ConnectAuth{
+		CredType: []libvirt.ConnectCredentialType{
+			libvirt.CRED_AUTHNAME,
+			libvirt.CRED_PASSPHRASE,
+		},
+		Callback: func(creds []*libvirt.ConnectCredential) {
+			for i := range creds {
+				switch creds[i].Type {
+				case libvirt.CRED_AUTHNAME:
+					creds[i].Result = p.credentials.Username
+					log.Printf("DEBUG: Provided username for authentication")
+				case libvirt.CRED_PASSPHRASE:
+					creds[i].Result = p.credentials.Password
+					log.Printf("DEBUG: Provided password for authentication")
+				}
+			}
+		},
+	}
+
+	conn, err := libvirt.NewConnectWithAuth(authenticatedURI, auth, 0)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect with password: %w", err)
+	}
+
+	return conn, nil
+}
+
+// buildSSHKeyURI builds a URI with SSH key authentication
 func (p *Provider) buildSSHKeyURI(uri string) (string, error) {
 	log.Printf("DEBUG: Building SSH key URI from: %s", uri)
 
