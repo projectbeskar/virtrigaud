@@ -39,7 +39,7 @@ RUN CGO_ENABLED=1 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
     -ldflags "-X github.com/projectbeskar/virtrigaud/internal/version.Version=${VERSION} -X github.com/projectbeskar/virtrigaud/internal/version.GitSHA=${GIT_SHA}" \
     -a -o provider-libvirt cmd/provider-libvirt/main.go
 
-# Runtime stage with compatible libvirt and SSH client
+# Runtime stage with compatible libvirt and SSH client + SSH agent
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y \
     libvirt0 \
@@ -49,8 +49,9 @@ RUN apt-get update && apt-get install -y \
     curl \
     && apt-get upgrade -y \
     && rm -rf /var/lib/apt/lists/* \
-    && echo "DEBIAN BUILD SUCCESS - SSH CLIENT AVAILABLE" \
+    && echo "DEBIAN BUILD SUCCESS - SSH CLIENT + SSH AGENT AVAILABLE" \
     && which ssh \
+    && which ssh-agent \
     && ssh -V
 
 # Create non-root user with proper home directory

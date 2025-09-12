@@ -17,11 +17,13 @@ limitations under the License.
 package libvirt
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log"
 	"net/url"
 	"os"
+	"os/exec"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -167,20 +169,15 @@ func (p *Provider) buildSSHKeyURI(uri string) (string, error) {
 
 	// Check if we have SSH private key
 	if p.credentials.SSHPrivateKey != "" {
-		// Write SSH private key to a temporary file
-		keyPath, err := p.writeSSHKeyToFile()
+		// Use SSH agent instead of writing key files
+		err := p.setupSSHAgent()
 		if err != nil {
-			return "", fmt.Errorf("failed to write SSH key to file: %w", err)
+			return "", fmt.Errorf("failed to setup SSH agent: %w", err)
 		}
 
-		// Add keyfile parameter to URI
-		q := u.Query()
-		q.Set("keyfile", keyPath)
-		u.RawQuery = q.Encode()
-
-		log.Printf("DEBUG: Added keyfile parameter: %s", keyPath)
+		log.Printf("DEBUG: SSH agent configured with private key")
 	} else {
-		log.Printf("DEBUG: No SSH private key available, trying default SSH agent")
+		log.Printf("DEBUG: No SSH private key available, trying default SSH agent/config")
 	}
 
 	finalURI := u.String()
@@ -188,18 +185,98 @@ func (p *Provider) buildSSHKeyURI(uri string) (string, error) {
 	return finalURI, nil
 }
 
-// writeSSHKeyToFile writes the SSH private key to a temporary file
-func (p *Provider) writeSSHKeyToFile() (string, error) {
-	// Use the credentials mount point which is writable (tmpfs)
-	keyPath := "/etc/virtrigaud/credentials/ssh_key_temp"
+// setupSSHAgent configures SSH agent with the private key
+func (p *Provider) setupSSHAgent() error {
+	log.Printf("DEBUG: Setting up SSH agent with private key")
 
-	// Write the private key with correct permissions
+	// Create temporary key file for ssh-add (we'll delete it immediately after)
+	keyPath := "/etc/virtrigaud/credentials/temp_ssh_key"
+	
+	// Write the private key temporarily
 	if err := os.WriteFile(keyPath, []byte(p.credentials.SSHPrivateKey), 0600); err != nil {
-		return "", fmt.Errorf("failed to write SSH private key: %w", err)
+		return fmt.Errorf("failed to write temporary SSH private key: %w", err)
+	}
+	
+	// Ensure cleanup
+	defer func() {
+		os.Remove(keyPath)
+		log.Printf("DEBUG: Cleaned up temporary key file")
+	}()
+
+	// Start SSH agent if not already running
+	if err := p.startSSHAgent(); err != nil {
+		return fmt.Errorf("failed to start SSH agent: %w", err)
 	}
 
-	log.Printf("DEBUG: SSH private key written to: %s", keyPath)
-	return keyPath, nil
+	// Add the key to SSH agent
+	if err := p.addKeyToSSHAgent(keyPath); err != nil {
+		return fmt.Errorf("failed to add key to SSH agent: %w", err)
+	}
+
+	log.Printf("DEBUG: SSH agent setup completed successfully")
+	return nil
+}
+
+// startSSHAgent starts the SSH agent if not already running
+func (p *Provider) startSSHAgent() error {
+	// Check if SSH_AUTH_SOCK is already set (agent running)
+	if authSock := os.Getenv("SSH_AUTH_SOCK"); authSock != "" {
+		log.Printf("DEBUG: SSH agent already running at: %s", authSock)
+		return nil
+	}
+
+	// Start ssh-agent and capture output
+	cmd := exec.Command("ssh-agent", "-s")
+	output, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("failed to start ssh-agent: %w", err)
+	}
+
+	// Parse the output to set environment variables
+	lines := strings.Split(string(output), "\n")
+	for _, line := range lines {
+		if strings.Contains(line, "SSH_AUTH_SOCK") {
+			parts := strings.Split(line, "=")
+			if len(parts) >= 2 {
+				value := strings.TrimSuffix(parts[1], ";")
+				os.Setenv("SSH_AUTH_SOCK", value)
+				log.Printf("DEBUG: Set SSH_AUTH_SOCK=%s", value)
+			}
+		} else if strings.Contains(line, "SSH_AGENT_PID") {
+			parts := strings.Split(line, "=")
+			if len(parts) >= 2 {
+				value := strings.TrimSuffix(parts[1], ";")
+				os.Setenv("SSH_AGENT_PID", value)
+				log.Printf("DEBUG: Set SSH_AGENT_PID=%s", value)
+			}
+		}
+	}
+
+	return nil
+}
+
+// addKeyToSSHAgent adds the SSH private key to the running SSH agent
+func (p *Provider) addKeyToSSHAgent(keyPath string) error {
+	log.Printf("DEBUG: Adding key to SSH agent: %s", keyPath)
+
+	// Use ssh-add to add the key to the agent
+	cmd := exec.Command("ssh-add", keyPath)
+	
+	// Capture both stdout and stderr
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("ssh-add failed: %w, stderr: %s", err, stderr.String())
+	}
+
+	log.Printf("DEBUG: Successfully added key to SSH agent")
+	if stdout.Len() > 0 {
+		log.Printf("DEBUG: ssh-add output: %s", stdout.String())
+	}
+
+	return nil
 }
 
 // disconnect closes the Libvirt connection
