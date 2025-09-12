@@ -43,16 +43,18 @@ RUN CGO_ENABLED=1 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y \
     libvirt0 \
+    libvirt-clients \
     libxml2 \
     ca-certificates \
     openssh-client \
     curl \
     && apt-get upgrade -y \
     && rm -rf /var/lib/apt/lists/* \
-    && echo "DEBIAN BUILD SUCCESS - SSH CLIENT + SSH AGENT AVAILABLE" \
+    && echo "DEBIAN BUILD SUCCESS - SSH CLIENT + VIRSH AVAILABLE" \
     && which ssh \
-    && which ssh-agent \
-    && ssh -V
+    && which virsh \
+    && ssh -V \
+    && virsh --version
 
 # Create non-root user with UID 65532 (matches Kubernetes nonroot user)
 RUN groupadd -r app -g 65532 && useradd -r -g app -u 65532 -m -d /home/app -s /bin/bash app
