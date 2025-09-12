@@ -63,7 +63,7 @@ const (
 	CredentialsPath = "/etc/virtrigaud/credentials"
 )
 
-// Config holds the libvirt provider configuration  
+// Config holds the libvirt provider configuration
 type Config struct {
 	Endpoint string
 	Username string
@@ -83,8 +83,8 @@ func New() *Provider {
 	}
 
 	p := &Provider{
-		config:      nil, // We'll create a minimal config
-		k8sClient:   nil, // No K8s client needed in container mode
+		config:    nil, // We'll create a minimal config
+		k8sClient: nil, // No K8s client needed in container mode
 		credentials: &Credentials{
 			Username: config.Username,
 			Password: config.Password,
@@ -96,14 +96,14 @@ func New() *Provider {
 		"endpoint", config.Endpoint,
 		"username", config.Username,
 		"password_length", len(config.Password))
-		
+
 	if config.Endpoint != "" && config.Username != "" && config.Password != "" {
 		slog.Info("Attempting to connect to libvirt with credentials")
 		if err := p.connectWithConfig(context.Background(), config); err != nil {
 			slog.Error("Failed to connect to libvirt", "error", err)
 		}
 	} else {
-		slog.Warn("Libvirt provider configuration incomplete", 
+		slog.Warn("Libvirt provider configuration incomplete",
 			"endpoint_set", config.Endpoint != "",
 			"endpoint_value", config.Endpoint,
 			"username_set", config.Username != "",
@@ -119,15 +119,15 @@ func New() *Provider {
 func loadCredentialsFromFiles(config *Config) error {
 	usernamePath := CredentialsPath + "/username"
 	passwordPath := CredentialsPath + "/password"
-	
-	slog.Info("Loading credentials from mounted secret files", 
-		"username_path", usernamePath, 
+
+	slog.Info("Loading credentials from mounted secret files",
+		"username_path", usernamePath,
 		"password_path", passwordPath)
-	
+
 	// Read username from mounted secret
 	if data, err := os.ReadFile(usernamePath); err == nil {
 		config.Username = strings.TrimSpace(string(data))
-		slog.Info("Successfully loaded username", 
+		slog.Info("Successfully loaded username",
 			"username_length", len(config.Username),
 			"username_value", config.Username)
 	} else {
@@ -138,7 +138,7 @@ func loadCredentialsFromFiles(config *Config) error {
 	// Read password from mounted secret
 	if data, err := os.ReadFile(passwordPath); err == nil {
 		config.Password = strings.TrimSpace(string(data))
-		slog.Info("Successfully loaded password", 
+		slog.Info("Successfully loaded password",
 			"password_length", len(config.Password))
 	} else {
 		slog.Error("Failed to read password file", "path", passwordPath, "error", err)
@@ -156,7 +156,7 @@ func (p *Provider) connectWithConfig(ctx context.Context, config *Config) error 
 			Endpoint: config.Endpoint,
 		},
 	}
-	
+
 	return p.connect(ctx)
 }
 

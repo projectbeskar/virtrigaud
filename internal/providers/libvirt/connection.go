@@ -19,6 +19,7 @@ package libvirt
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/url"
 	"strings"
 
@@ -146,6 +147,10 @@ func (p *Provider) connectWithAuth(ctx context.Context, uri string) (*libvirt.Co
 
 // buildAuthenticatedURI builds a URI with embedded authentication for SSH connections
 func (p *Provider) buildAuthenticatedURI(uri string) (string, error) {
+	log.Printf("DEBUG: Building authenticated URI from: %s", uri)
+	log.Printf("DEBUG: Credentials available: username='%s', password_len=%d", 
+		p.credentials.Username, len(p.credentials.Password))
+	
 	parsedURI, err := url.Parse(uri)
 	if err != nil {
 		return "", fmt.Errorf("failed to parse URI: %w", err)
@@ -156,10 +161,15 @@ func (p *Provider) buildAuthenticatedURI(uri string) (string, error) {
 		// If the URI doesn't already have a user, add it
 		if parsedURI.User == nil {
 			parsedURI.User = url.User(p.credentials.Username)
+			log.Printf("DEBUG: Added username to URI: %s", p.credentials.Username)
+		} else {
+			log.Printf("DEBUG: URI already has user: %s", parsedURI.User.Username())
 		}
 	}
 
-	return parsedURI.String(), nil
+	finalURI := parsedURI.String()
+	log.Printf("DEBUG: Final authenticated URI: %s", finalURI)
+	return finalURI, nil
 }
 
 // authCallback handles authentication requests from libvirt
