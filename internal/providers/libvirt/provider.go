@@ -92,15 +92,24 @@ func New() *Provider {
 	}
 
 	// Try to establish libvirt connection
+	slog.Info("Libvirt provider configuration loaded",
+		"endpoint", config.Endpoint,
+		"username", config.Username,
+		"password_length", len(config.Password))
+		
 	if config.Endpoint != "" && config.Username != "" && config.Password != "" {
+		slog.Info("Attempting to connect to libvirt with credentials")
 		if err := p.connectWithConfig(context.Background(), config); err != nil {
 			slog.Error("Failed to connect to libvirt", "error", err)
 		}
 	} else {
 		slog.Warn("Libvirt provider configuration incomplete", 
 			"endpoint_set", config.Endpoint != "",
+			"endpoint_value", config.Endpoint,
 			"username_set", config.Username != "",
-			"password_set", config.Password != "")
+			"username_value", config.Username,
+			"password_set", config.Password != "",
+			"password_length", len(config.Password))
 	}
 
 	return p
@@ -108,18 +117,32 @@ func New() *Provider {
 
 // loadCredentialsFromFiles reads credentials from mounted secret files
 func loadCredentialsFromFiles(config *Config) error {
+	usernamePath := CredentialsPath + "/username"
+	passwordPath := CredentialsPath + "/password"
+	
+	slog.Info("Loading credentials from mounted secret files", 
+		"username_path", usernamePath, 
+		"password_path", passwordPath)
+	
 	// Read username from mounted secret
-	if data, err := os.ReadFile(CredentialsPath + "/username"); err == nil {
+	if data, err := os.ReadFile(usernamePath); err == nil {
 		config.Username = strings.TrimSpace(string(data))
+		slog.Info("Successfully loaded username", 
+			"username_length", len(config.Username),
+			"username_value", config.Username)
 	} else {
-		return fmt.Errorf("failed to read username from %s/username: %w", CredentialsPath, err)
+		slog.Error("Failed to read username file", "path", usernamePath, "error", err)
+		return fmt.Errorf("failed to read username from %s: %w", usernamePath, err)
 	}
 
 	// Read password from mounted secret
-	if data, err := os.ReadFile(CredentialsPath + "/password"); err == nil {
+	if data, err := os.ReadFile(passwordPath); err == nil {
 		config.Password = strings.TrimSpace(string(data))
+		slog.Info("Successfully loaded password", 
+			"password_length", len(config.Password))
 	} else {
-		return fmt.Errorf("failed to read password from %s/password: %w", CredentialsPath, err)
+		slog.Error("Failed to read password file", "path", passwordPath, "error", err)
+		return fmt.Errorf("failed to read password from %s: %w", passwordPath, err)
 	}
 
 	return nil
