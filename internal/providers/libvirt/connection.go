@@ -205,16 +205,23 @@ func (p *Provider) connectWithPassword(ctx context.Context, uri string) (*libvir
 		CredType: []libvirt.ConnectCredentialType{
 			libvirt.CRED_AUTHNAME,
 			libvirt.CRED_PASSPHRASE,
+			libvirt.CRED_ECHOPROMPT,    // For interactive prompts
+			libvirt.CRED_NOECHOPROMPT,  // For password prompts
 		},
 		Callback: func(creds []*libvirt.ConnectCredential) {
 			for i := range creds {
 				switch creds[i].Type {
 				case libvirt.CRED_AUTHNAME:
 					creds[i].Result = p.credentials.Username
-					log.Printf("DEBUG: Provided username for authentication")
-				case libvirt.CRED_PASSPHRASE:
+					log.Printf("DEBUG: Provided username for authentication: %s", p.credentials.Username)
+				case libvirt.CRED_PASSPHRASE, libvirt.CRED_NOECHOPROMPT:
 					creds[i].Result = p.credentials.Password
-					log.Printf("DEBUG: Provided password for authentication")
+					log.Printf("DEBUG: Provided password for authentication (type: %d)", creds[i].Type)
+				case libvirt.CRED_ECHOPROMPT:
+					creds[i].Result = p.credentials.Username  // Usually username for echo prompts
+					log.Printf("DEBUG: Provided response to echo prompt: %s", p.credentials.Username)
+				default:
+					log.Printf("DEBUG: Unknown credential type requested: %d", creds[i].Type)
 				}
 			}
 		},
@@ -283,9 +290,10 @@ func (p *Provider) writeSSHKeyToTempFile() (string, error) {
 
 	// Try different writable locations in order of preference
 	tempDirs := []string{
-		"/home/app/.ssh",     // User home SSH directory
-		"/tmp",               // Standard temp directory
-		"/var/tmp",           // Alternative temp directory
+		"/etc/virtrigaud/credentials", // Kubernetes secret mount (should be writable for our key)
+		"/home/app/.ssh",              // User home SSH directory
+		"/tmp",                        // Standard temp directory
+		"/var/tmp",                    // Alternative temp directory
 	}
 
 	var tempFile *os.File
