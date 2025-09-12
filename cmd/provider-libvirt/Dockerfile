@@ -67,8 +67,8 @@ WORKDIR /
 # Copy the binary from builder stage
 COPY --from=builder /workspace/provider-libvirt /usr/local/bin/provider-libvirt
 
-# Switch to non-root user
-USER app
+# Temporarily run as root to debug secret mount permissions
+# USER app
 
 # Expose gRPC and metrics ports
 EXPOSE 9443 8080
