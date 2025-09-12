@@ -189,27 +189,13 @@ func (p *Provider) buildSSHKeyURI(uri string) (string, error) {
 func (p *Provider) setupSSHAgent() error {
 	log.Printf("DEBUG: Setting up SSH agent with private key")
 
-	// Create temporary key file for ssh-add (we'll delete it immediately after)
-	keyPath := "/etc/virtrigaud/credentials/temp_ssh_key"
-	
-	// Write the private key temporarily
-	if err := os.WriteFile(keyPath, []byte(p.credentials.SSHPrivateKey), 0600); err != nil {
-		return fmt.Errorf("failed to write temporary SSH private key: %w", err)
-	}
-	
-	// Ensure cleanup
-	defer func() {
-		os.Remove(keyPath)
-		log.Printf("DEBUG: Cleaned up temporary key file")
-	}()
-
 	// Start SSH agent if not already running
 	if err := p.startSSHAgent(); err != nil {
 		return fmt.Errorf("failed to start SSH agent: %w", err)
 	}
 
-	// Add the key to SSH agent
-	if err := p.addKeyToSSHAgent(keyPath); err != nil {
+	// Add the key to SSH agent using stdin (no file needed!)
+	if err := p.addKeyToSSHAgentFromStdin(); err != nil {
 		return fmt.Errorf("failed to add key to SSH agent: %w", err)
 	}
 
@@ -255,13 +241,16 @@ func (p *Provider) startSSHAgent() error {
 	return nil
 }
 
-// addKeyToSSHAgent adds the SSH private key to the running SSH agent
-func (p *Provider) addKeyToSSHAgent(keyPath string) error {
-	log.Printf("DEBUG: Adding key to SSH agent: %s", keyPath)
+// addKeyToSSHAgentFromStdin adds the SSH private key to the running SSH agent via stdin
+func (p *Provider) addKeyToSSHAgentFromStdin() error {
+	log.Printf("DEBUG: Adding key to SSH agent via stdin")
 
-	// Use ssh-add to add the key to the agent
-	cmd := exec.Command("ssh-add", keyPath)
-	
+	// Use ssh-add with stdin to add the key (no file needed!)
+	cmd := exec.Command("ssh-add", "-")
+
+	// Provide the private key via stdin
+	cmd.Stdin = strings.NewReader(p.credentials.SSHPrivateKey)
+
 	// Capture both stdout and stderr
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -271,7 +260,7 @@ func (p *Provider) addKeyToSSHAgent(keyPath string) error {
 		return fmt.Errorf("ssh-add failed: %w, stderr: %s", err, stderr.String())
 	}
 
-	log.Printf("DEBUG: Successfully added key to SSH agent")
+	log.Printf("DEBUG: Successfully added key to SSH agent via stdin")
 	if stdout.Len() > 0 {
 		log.Printf("DEBUG: ssh-add output: %s", stdout.String())
 	}
