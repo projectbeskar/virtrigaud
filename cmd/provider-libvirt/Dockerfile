@@ -1,12 +1,9 @@
-# Build stage with CGO support for libvirt
-FROM golang:1.23-bookworm AS builder
+# Build stage (musl) - FORCE ALPINE BUILD
+FROM golang:1.23-alpine AS builder
 
-# Install libvirt development libraries
-RUN apt-get update && apt-get install -y \
-    libvirt-dev \
-    pkg-config \
-    gcc \
-    && rm -rf /var/lib/apt/lists/*
+# Install libvirt development libraries  
+RUN apk add --no-cache \
+    build-base pkgconfig libvirt-dev libxml2-dev openssh-client git
 
 WORKDIR /workspace
 
@@ -28,7 +25,7 @@ COPY proto/ proto/
 # Protobuf files are already generated in proto/rpc/
 # No need to regenerate them during Docker build
 
-# Build the provider binary
+# Build the provider binary  
 ARG TARGETOS
 ARG TARGETARCH
 ARG VERSION=dev
@@ -37,37 +34,39 @@ RUN CGO_ENABLED=1 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
     -ldflags "-X github.com/projectbeskar/virtrigaud/internal/version.Version=${VERSION} -X github.com/projectbeskar/virtrigaud/internal/version.GitSHA=${GIT_SHA}" \
     -a -o provider-libvirt cmd/provider-libvirt/main.go
 
-# Runtime stage
-FROM debian:bookworm-slim
-
-# Install runtime dependencies with latest security updates
-RUN apt-get update && apt-get install -y \
-    libvirt0 \
-    libxml2 \
-    ca-certificates \
-    curl \
-    && apt-get upgrade -y \
-    && rm -rf /var/lib/apt/lists/*
+# Runtime (musl) - FORCE ALPINE RUNTIME  
+FROM alpine:3.18
+RUN apk add --no-cache libvirt-libs libxml2 ca-certificates openssh-client curl \
+ && update-ca-certificates \
+ && echo "ALPINE BUILD SUCCESS - SSH CLIENT AVAILABLE" \
+ && which ssh \
+ && ssh -V \
+ && cat /etc/os-release
 
 # Create non-root user
-RUN groupadd -r virtrigaud && useradd -r -g virtrigaud virtrigaud
+RUN addgroup -g 1000 app \
+ && adduser -D -u 1000 -G app -h /home/app -s /bin/sh app
+ENV HOME=/home/app
+ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+RUN mkdir -p /home/app/.ssh && chown -R app:app /home/app && chmod 700 /home/app/.ssh
 
 # Create directories for TLS and credentials
 RUN mkdir -p /etc/virtrigaud/tls /etc/virtrigaud/credentials && \
-    chown -R virtrigaud:virtrigaud /etc/virtrigaud
+    chown -R app:app /etc/virtrigaud
 
 WORKDIR /
 
 # Copy the binary from builder stage
 COPY --from=builder /workspace/provider-libvirt /usr/local/bin/provider-libvirt
+RUN ln -s /usr/bin/ssh /usr/local/bin/ssh || true
 
 # Switch to non-root user
-USER virtrigaud
+USER app
 
 # Expose gRPC and metrics ports
 EXPOSE 9443 8080
 
-# Health check
+# Health check (using curl which we installed)
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:8080/healthz || exit 1
 
