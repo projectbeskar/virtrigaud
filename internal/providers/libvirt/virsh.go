@@ -184,8 +184,10 @@ func (v *VirshProvider) setupConnection() error {
 		// Set SSH options for non-interactive authentication
 		v.env = append(v.env, "SSH_ASKPASS_REQUIRE=never")
 		
-		// Accept host keys automatically (for containers)
-		v.env = append(v.env, "SSH_OPTIONS=-o StrictHostKeyChecking=accept-new -o PasswordAuthentication=yes")
+		// Create SSH config for automatic host key acceptance
+		if err := v.createSSHConfig(); err != nil {
+			log.Printf("WARN Failed to create SSH config: %v", err)
+		}
 		
 		log.Printf("INFO Configured non-interactive SSH authentication via sshpass")
 	}
@@ -467,12 +469,48 @@ func (v *VirshProvider) getDomainInfo(ctx context.Context, domainName string) (m
 	return info, nil
 }
 
+// createSSHConfig creates an SSH configuration file for non-interactive authentication
+func (v *VirshProvider) createSSHConfig() error {
+	sshDir := "/home/app/.ssh"
+	configPath := sshDir + "/config"
+	
+	// Ensure SSH directory exists
+	if err := os.MkdirAll(sshDir, 0700); err != nil {
+		log.Printf("DEBUG Failed to create SSH directory: %v", err)
+		// Try a different location if home directory is read-only
+		sshDir = "/tmp/.ssh"
+		configPath = sshDir + "/config"
+		if err := os.MkdirAll(sshDir, 0700); err != nil {
+			return fmt.Errorf("failed to create SSH directory: %w", err)
+		}
+		// Set SSH config path in environment
+		v.env = append(v.env, fmt.Sprintf("HOME=/tmp"))
+	}
+	
+	// SSH config content for automatic host key acceptance
+	sshConfig := `Host *
+    StrictHostKeyChecking accept-new
+    PasswordAuthentication yes
+    PubkeyAuthentication no
+    UserKnownHostsFile /tmp/known_hosts
+    LogLevel ERROR
+`
+	
+	// Write SSH config file
+	if err := os.WriteFile(configPath, []byte(sshConfig), 0600); err != nil {
+		return fmt.Errorf("failed to write SSH config: %w", err)
+	}
+	
+	log.Printf("INFO Created SSH config at %s for automatic host key acceptance", configPath)
+	return nil
+}
+
 // Cleanup performs any necessary cleanup operations
 func (v *VirshProvider) Cleanup() error {
 	log.Printf("INFO Cleaning up virsh provider")
-
+	
 	// No persistent connections to close with virsh approach
 	// All commands are stateless
-
+	
 	return nil
 }
