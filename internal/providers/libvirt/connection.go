@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"log"
 	"net/url"
-	"os"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -123,79 +122,67 @@ func (p *Provider) needsAuth(uri string) bool {
 		   (parsedURI.Host != "" && parsedURI.Host != "localhost")
 }
 
-// connectWithAuth establishes an authenticated connection to Libvirt
+// connectWithAuth establishes an authenticated connection to Libvirt using proper callback
 func (p *Provider) connectWithAuth(ctx context.Context, uri string) (*libvirt.Connect, error) {
 	if p.credentials == nil {
 		return nil, fmt.Errorf("credentials not loaded for authenticated connection")
 	}
 
-	// For SSH connections, we need to set up the URI with embedded credentials
-	// This is a temporary approach while we work on proper callback authentication
-	authenticatedURI, err := p.buildAuthenticatedURI(uri)
-	if err != nil {
-		return nil, fmt.Errorf("failed to build authenticated URI: %w", err)
-	}
+	log.Printf("DEBUG: Connecting to libvirt with authentication callback, URI: %s", uri)
+	log.Printf("DEBUG: Credentials available: username='%s', password_len=%d", 
+		p.credentials.Username, len(p.credentials.Password))
 
-	// For SSH connections with username/password, use environment variables
-	// as a workaround for libvirt authentication issues
-	if strings.Contains(authenticatedURI, "ssh://") {
-		log.Printf("DEBUG: Setting SSH environment variables for authentication")
+	// Create the authentication callback function  
+	authCallback := func(creds []*libvirt.ConnectCredential) {
+		log.Printf("DEBUG: Authentication callback invoked with %d credential requests", len(creds))
 		
-		// Create a temporary auth file in home directory (writable)
-		authFile := "/home/app/libvirt_auth"
-		authContent := fmt.Sprintf(`[credentials-ssh]
-authname=%s
-username=%s
-password=%s
-`, p.credentials.Username, p.credentials.Username, p.credentials.Password)
-		
-		if err := os.WriteFile(authFile, []byte(authContent), 0600); err != nil {
-			log.Printf("DEBUG: Failed to create auth file at %s: %v", authFile, err)
-		} else {
-			log.Printf("DEBUG: Created auth file for SSH authentication at %s", authFile)
-			os.Setenv("LIBVIRT_AUTH_FILE", authFile)
-			// Also set SSH-specific environment variables
-			os.Setenv("SSH_USER", p.credentials.Username)
-			os.Setenv("SSH_ASKPASS_REQUIRE", "never")
-			log.Printf("DEBUG: Set SSH environment variables for user %s", p.credentials.Username)
+		for i, cred := range creds {
+			log.Printf("DEBUG: Processing credential %d: type=%d, prompt='%s'", 
+				i, int(cred.Type), cred.Prompt)
+			
+			switch cred.Type {
+			case libvirt.CRED_AUTHNAME, libvirt.CRED_USERNAME:
+				if p.credentials.Username != "" {
+					creds[i].Result = p.credentials.Username
+					log.Printf("DEBUG: Provided username '%s' for credential type %d", 
+						p.credentials.Username, int(cred.Type))
+				} else {
+					log.Printf("ERROR: No username available for credential type %d", int(cred.Type))
+				}
+			case libvirt.CRED_PASSPHRASE:
+				if p.credentials.Password != "" {
+					creds[i].Result = p.credentials.Password
+					log.Printf("DEBUG: Provided password (len=%d) for credential type %d", 
+						len(p.credentials.Password), int(cred.Type))
+				} else {
+					log.Printf("ERROR: No password available for credential type %d", int(cred.Type))
+				}
+			default:
+				log.Printf("DEBUG: Unsupported credential type %d, leaving empty", int(cred.Type))
+			}
 		}
 	}
-	
-	log.Printf("DEBUG: Connecting with libvirt, URI: %s", authenticatedURI)
-	conn, err := libvirt.NewConnect(authenticatedURI)
+
+	// Create auth configuration
+	auth := &libvirt.ConnectAuth{
+		CredType: []libvirt.ConnectCredentialType{
+			libvirt.CRED_AUTHNAME,
+			libvirt.CRED_USERNAME,
+			libvirt.CRED_PASSPHRASE,
+		},
+		Callback: authCallback,
+	}
+
+	log.Printf("DEBUG: Attempting authenticated connection to %s", uri)
+	conn, err := libvirt.NewConnectWithAuth(uri, auth, 0)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect with authentication: %w", err)
 	}
 
+	log.Printf("DEBUG: Successfully established authenticated libvirt connection")
 	return conn, nil
 }
 
-// buildAuthenticatedURI builds a URI with embedded authentication for SSH connections
-func (p *Provider) buildAuthenticatedURI(uri string) (string, error) {
-	log.Printf("DEBUG: Building authenticated URI from: %s", uri)
-	log.Printf("DEBUG: Credentials available: username='%s', password_len=%d", 
-		p.credentials.Username, len(p.credentials.Password))
-	
-	parsedURI, err := url.Parse(uri)
-	if err != nil {
-		return "", fmt.Errorf("failed to parse URI: %w", err)
-	}
-
-	// For SSH connections, embed username in the URI
-	if strings.Contains(parsedURI.Scheme, "ssh") && p.credentials.Username != "" {
-		// If the URI doesn't already have a user, add it
-		if parsedURI.User == nil {
-			parsedURI.User = url.User(p.credentials.Username)
-			log.Printf("DEBUG: Added username to URI: %s", p.credentials.Username)
-		} else {
-			log.Printf("DEBUG: URI already has user: %s", parsedURI.User.Username())
-		}
-	}
-
-	finalURI := parsedURI.String()
-	log.Printf("DEBUG: Final authenticated URI: %s", finalURI)
-	return finalURI, nil
-}
 
 
 // disconnect closes the Libvirt connection
