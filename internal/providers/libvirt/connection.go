@@ -190,8 +190,8 @@ func (p *Provider) buildSSHKeyURI(uri string) (string, error) {
 
 // writeSSHKeyToFile writes the SSH private key to a temporary file
 func (p *Provider) writeSSHKeyToFile() (string, error) {
-	// Create SSH key file in writable temporary location
-	keyPath := "/tmp/libvirt_ssh_key"
+	// Use the credentials mount point which is writable (tmpfs)
+	keyPath := "/etc/virtrigaud/credentials/ssh_key_temp"
 
 	// Write the private key with correct permissions
 	if err := os.WriteFile(keyPath, []byte(p.credentials.SSHPrivateKey), 0600); err != nil {
