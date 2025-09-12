@@ -65,9 +65,10 @@ const (
 
 // Config holds the libvirt provider configuration
 type Config struct {
-	Endpoint string
-	Username string
-	Password string
+	Endpoint       string
+	Username       string
+	Password       string
+	SSHPrivateKey  string
 }
 
 // New creates a new Libvirt provider that reads configuration from environment and mounted secrets
@@ -119,10 +120,12 @@ func New() *Provider {
 func loadCredentialsFromFiles(config *Config) error {
 	usernamePath := CredentialsPath + "/username"
 	passwordPath := CredentialsPath + "/password"
+	sshKeyPath := CredentialsPath + "/ssh-privatekey"
 
 	slog.Info("Loading credentials from mounted secret files",
 		"username_path", usernamePath,
-		"password_path", passwordPath)
+		"password_path", passwordPath,
+		"ssh_key_path", sshKeyPath)
 
 	// Read username from mounted secret
 	if data, err := os.ReadFile(usernamePath); err == nil {
@@ -145,6 +148,17 @@ func loadCredentialsFromFiles(config *Config) error {
 		return fmt.Errorf("failed to read password from %s: %w", passwordPath, err)
 	}
 
+	// Read SSH private key from mounted secret (optional)
+	if data, err := os.ReadFile(sshKeyPath); err == nil {
+		config.SSHPrivateKey = strings.TrimSpace(string(data))
+		slog.Info("Successfully loaded SSH private key",
+			"ssh_key_length", len(config.SSHPrivateKey))
+	} else {
+		slog.Info("SSH private key not found, will try username/password authentication",
+			"path", sshKeyPath, "error", err)
+		// SSH key is optional - don't return error
+	}
+
 	return nil
 }
 
@@ -155,6 +169,13 @@ func (p *Provider) connectWithConfig(ctx context.Context, config *Config) error 
 		Spec: v1beta1.ProviderSpec{
 			Endpoint: config.Endpoint,
 		},
+	}
+
+	// Set credentials from config
+	p.credentials = &Credentials{
+		Username:      config.Username,
+		Password:      config.Password,
+		SSHPrivateKey: config.SSHPrivateKey,
 	}
 
 	return p.connect(ctx)
