@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 )
@@ -145,28 +146,70 @@ func (p *Provider) Reconfigure(ctx context.Context, id string, desired contracts
 	return "", nil
 }
 
-// Describe returns VM information using virsh
+// Describe returns comprehensive VM information using virsh (enhanced monitoring like vSphere)
 func (p *Provider) Describe(ctx context.Context, id string) (contracts.DescribeResponse, error) {
-	log.Printf("INFO Describing VM: %s", id)
+	log.Printf("INFO Describing VM with comprehensive monitoring: %s", id)
 
 	if p.virshProvider == nil {
 		return contracts.DescribeResponse{}, contracts.NewRetryableError("virsh provider not initialized", nil)
 	}
 
-	// Get domain information
+	// Get comprehensive domain information (now includes enhanced monitoring)
 	domainInfo, err := p.virshProvider.getDomainInfo(ctx, id)
 	if err != nil {
 		return contracts.DescribeResponse{}, contracts.NewRetryableError("failed to get domain info", err)
 	}
 
-	// Convert virsh domain info to contracts format
-	response := contracts.DescribeResponse{
-		Exists:     true,
-		PowerState: domainInfo["State"],
-		// TODO: Add more fields from domainInfo
+	// Extract power state (libvirt uses different names than vSphere)
+	powerState := p.mapLibvirtPowerState(domainInfo["State"])
+	
+	// Extract IP addresses from enhanced domain info
+	var ips []string
+	if guestIPs := domainInfo["guest_ip_addresses"]; guestIPs != "" {
+		ips = strings.Split(guestIPs, ",")
+		// Filter out empty strings
+		var validIPs []string
+		for _, ip := range ips {
+			if strings.TrimSpace(ip) != "" {
+				validIPs = append(validIPs, strings.TrimSpace(ip))
+			}
+		}
+		ips = validIPs
+	}
+	
+	// Get primary IP (first valid IP)
+	primaryIP := ""
+	if len(ips) > 0 {
+		primaryIP = ips[0]
+	}
+	
+	// Extract comprehensive information for ProviderRawJson (like vSphere)
+	hostname := domainInfo["guest_hostname"]
+	if hostname == "" {
+		hostname = domainInfo["Name"] // fallback to domain name
+	}
+	
+	// Add comprehensive monitoring fields to domain info for ProviderRaw
+	domainInfo["primary_ip"] = primaryIP
+	domainInfo["hostname"] = hostname
+	domainInfo["tools_status"] = p.getToolsStatus(domainInfo)
+	domainInfo["power_state_mapped"] = string(powerState)
+	
+	// Ensure guest OS is properly set
+	if domainInfo["guest_os"] == "" && domainInfo["OS Type"] != "" {
+		domainInfo["guest_os"] = domainInfo["OS Type"]
 	}
 
-	log.Printf("INFO Domain %s state: %s", id, response.PowerState)
+	// Convert virsh domain info to contracts format
+	response := contracts.DescribeResponse{
+		Exists:      true,
+		PowerState:  string(powerState),
+		IPs:         ips,
+		ConsoleURL:  "", // TODO: Generate VNC/console URL if needed
+		ProviderRaw: domainInfo, // Pass the enhanced domain info as provider-specific data
+	}
+
+	log.Printf("INFO Domain %s comprehensive state: power=%s, ips=%v, monitoring_data=collected", id, response.PowerState, ips)
 	return response, nil
 }
 
@@ -174,4 +217,32 @@ func (p *Provider) Describe(ctx context.Context, id string) (contracts.DescribeR
 func (p *Provider) IsTaskComplete(ctx context.Context, taskRef string) (done bool, err error) {
 	// Most virsh operations are synchronous, so tasks are immediately complete
 	return true, nil
+}
+
+// mapLibvirtPowerState maps libvirt power states to VirtRigaud standard power states
+func (p *Provider) mapLibvirtPowerState(libvirtState string) contracts.PowerState {
+	switch strings.ToLower(libvirtState) {
+	case "running":
+		return "On"
+	case "shut off", "shutoff":
+		return "Off"
+	case "paused", "suspended":
+		return "Off" // Treat paused/suspended as Off for consistency with vSphere
+	case "in shutdown", "shutting down":
+		return "Off" // Transitioning to off
+	default:
+		return "Off" // Default to Off for unknown states
+	}
+}
+
+// getToolsStatus determines guest tools equivalent status
+func (p *Provider) getToolsStatus(domainInfo map[string]string) string {
+	// Check if we have guest agent connectivity
+	if guestHost := domainInfo["guest_hostname"]; guestHost != "" {
+		return "toolsOk" // Guest agent is working
+	}
+	if guestIPs := domainInfo["guest_ip_addresses"]; guestIPs != "" {
+		return "toolsOk" // We can get IP addresses from guest
+	}
+	return "toolsNotInstalled" // No guest agent connectivity
 }

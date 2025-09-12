@@ -180,15 +180,15 @@ func (v *VirshProvider) setupConnection() error {
 	if v.credentials.Password != "" {
 		// Use sshpass for non-interactive password authentication
 		v.env = append(v.env, fmt.Sprintf("SSHPASS=%s", v.credentials.Password))
-		
+
 		// Set SSH options for non-interactive authentication
 		v.env = append(v.env, "SSH_ASKPASS_REQUIRE=never")
-		
+
 		// Create SSH config for automatic host key acceptance
 		if err := v.createSSHConfig(); err != nil {
 			log.Printf("WARN Failed to create SSH config: %v", err)
 		}
-		
+
 		log.Printf("INFO Configured non-interactive SSH authentication via sshpass")
 	}
 
@@ -230,26 +230,26 @@ type VirshResult struct {
 // runVirshCommand executes a virsh command with proper environment and error handling
 func (v *VirshProvider) runVirshCommand(ctx context.Context, args ...string) (*VirshResult, error) {
 	start := time.Now()
-	
+
 	var cmd *exec.Cmd
 	var command string
-	
+
 	// Use sshpass for non-interactive SSH authentication if password is available
 	if v.credentials.Password != "" && strings.Contains(v.uri, "ssh://") {
 		// Build command: SSHPASS=password sshpass -e ssh -o [options] user@host virsh [args]
 		// This directly uses SSH with options rather than relying on config files
-		
+
 		// Extract host and user from URI for direct SSH call
 		parsedURI, _ := url.Parse(v.uri)
 		host := parsedURI.Host
 		user := parsedURI.User.Username()
-		
+
 		// Build SSH command with all necessary options
 		sshArgs := []string{
-			"-e", // Read password from SSHPASS environment variable  
+			"-e", // Read password from SSHPASS environment variable
 			"ssh",
 			"-o", "StrictHostKeyChecking=accept-new",
-			"-o", "PasswordAuthentication=yes", 
+			"-o", "PasswordAuthentication=yes",
 			"-o", "PubkeyAuthentication=no",
 			"-o", "UserKnownHostsFile=/tmp/known_hosts",
 			"-o", "LogLevel=ERROR",
@@ -257,7 +257,7 @@ func (v *VirshProvider) runVirshCommand(ctx context.Context, args ...string) (*V
 			"virsh",
 		}
 		sshArgs = append(sshArgs, args...)
-		
+
 		cmd = exec.CommandContext(ctx, "sshpass", sshArgs...)
 		command = fmt.Sprintf("sshpass -e ssh %s@%s virsh %s", user, host, strings.Join(args, " "))
 		cmd.Env = v.env
@@ -460,7 +460,7 @@ func (v *VirshProvider) getDomainXML(ctx context.Context, domainName string) (st
 	return result.Stdout, nil
 }
 
-// getDomainInfo gets detailed information about a domain
+// getDomainInfo gets comprehensive information about a domain (enhanced monitoring)
 func (v *VirshProvider) getDomainInfo(ctx context.Context, domainName string) (map[string]string, error) {
 	result, err := v.runVirshCommand(ctx, "dominfo", domainName)
 	if err != nil {
@@ -477,6 +477,12 @@ func (v *VirshProvider) getDomainInfo(ctx context.Context, domainName string) (m
 			info[key] = value
 		}
 	}
+	
+	// Enhance with comprehensive monitoring data (like vSphere provider)
+	if err := v.enrichDomainInfo(ctx, domainName, info); err != nil {
+		log.Printf("WARN Failed to get enhanced monitoring data for %s: %v", domainName, err)
+		// Continue with basic info if enhanced monitoring fails
+	}
 
 	return info, nil
 }
@@ -485,7 +491,7 @@ func (v *VirshProvider) getDomainInfo(ctx context.Context, domainName string) (m
 func (v *VirshProvider) createSSHConfig() error {
 	sshDir := "/home/app/.ssh"
 	configPath := sshDir + "/config"
-	
+
 	// Ensure SSH directory exists
 	if err := os.MkdirAll(sshDir, 0700); err != nil {
 		log.Printf("DEBUG Failed to create SSH directory: %v", err)
@@ -499,7 +505,7 @@ func (v *VirshProvider) createSSHConfig() error {
 		v.env = append(v.env, "HOME=/tmp")
 		log.Printf("INFO Using /tmp as HOME for SSH config")
 	}
-	
+
 	// SSH config content for automatic host key acceptance
 	sshConfig := `Host *
     StrictHostKeyChecking accept-new
@@ -508,12 +514,12 @@ func (v *VirshProvider) createSSHConfig() error {
     UserKnownHostsFile /tmp/known_hosts
     LogLevel ERROR
 `
-	
+
 	// Write SSH config file
 	if err := os.WriteFile(configPath, []byte(sshConfig), 0600); err != nil {
 		return fmt.Errorf("failed to write SSH config: %w", err)
 	}
-	
+
 	log.Printf("INFO Created SSH config at %s for automatic host key acceptance", configPath)
 	return nil
 }
@@ -526,4 +532,230 @@ func (v *VirshProvider) Cleanup() error {
 	// All commands are stateless
 	
 	return nil
+}
+
+// enrichDomainInfo adds comprehensive monitoring data similar to vSphere provider
+func (v *VirshProvider) enrichDomainInfo(ctx context.Context, domainName string, info map[string]string) error {
+	// Get memory statistics
+	if memStats, err := v.getDomainMemoryStats(ctx, domainName); err == nil {
+		for k, v := range memStats {
+			info[k] = v
+		}
+	}
+	
+	// Get CPU statistics  
+	if cpuStats, err := v.getDomainCPUStats(ctx, domainName); err == nil {
+		for k, v := range cpuStats {
+			info[k] = v
+		}
+	}
+	
+	// Get network interfaces and IP addresses
+	if netInfo, err := v.getDomainNetworkInfo(ctx, domainName); err == nil {
+		for k, v := range netInfo {
+			info[k] = v
+		}
+	}
+	
+	// Get block device statistics
+	if blockStats, err := v.getDomainBlockStats(ctx, domainName); err == nil {
+		for k, v := range blockStats {
+			info[k] = v
+		}
+	}
+	
+	// Get guest agent information (if available)
+	if guestInfo, err := v.getDomainGuestInfo(ctx, domainName); err == nil {
+		for k, v := range guestInfo {
+			info[k] = v
+		}
+	}
+	
+	return nil
+}
+
+// getDomainMemoryStats retrieves memory usage statistics
+func (v *VirshProvider) getDomainMemoryStats(ctx context.Context, domainName string) (map[string]string, error) {
+	result, err := v.runVirshCommand(ctx, "dommemstat", domainName)
+	if err != nil {
+		return nil, err
+	}
+	
+	stats := make(map[string]string)
+	lines := strings.Split(strings.TrimSpace(result.Stdout), "\n")
+	for _, line := range lines {
+		parts := strings.Fields(line)
+		if len(parts) >= 2 {
+			key := fmt.Sprintf("memory_%s", parts[0])
+			stats[key] = parts[1]
+		}
+	}
+	return stats, nil
+}
+
+// getDomainCPUStats retrieves CPU usage statistics  
+func (v *VirshProvider) getDomainCPUStats(ctx context.Context, domainName string) (map[string]string, error) {
+	result, err := v.runVirshCommand(ctx, "cpu-stats", domainName)
+	if err != nil {
+		return nil, err
+	}
+	
+	stats := make(map[string]string)
+	lines := strings.Split(strings.TrimSpace(result.Stdout), "\n")
+	for _, line := range lines {
+		if strings.Contains(line, ":") {
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) == 2 {
+				key := fmt.Sprintf("cpu_%s", strings.TrimSpace(parts[0]))
+				stats[key] = strings.TrimSpace(parts[1])
+			}
+		}
+	}
+	return stats, nil
+}
+
+// getDomainNetworkInfo retrieves network interface information and IP addresses
+func (v *VirshProvider) getDomainNetworkInfo(ctx context.Context, domainName string) (map[string]string, error) {
+	info := make(map[string]string)
+	
+	// Get domain interface list
+	result, err := v.runVirshCommand(ctx, "domiflist", domainName)
+	if err != nil {
+		return nil, err
+	}
+	
+	interfaces := []string{}
+	lines := strings.Split(strings.TrimSpace(result.Stdout), "\n")
+	for i, line := range lines {
+		if i == 0 || strings.HasPrefix(line, "-") {
+			continue // Skip header lines
+		}
+		parts := strings.Fields(line)
+		if len(parts) >= 1 {
+			interfaces = append(interfaces, parts[0])
+		}
+	}
+	
+	info["network_interfaces"] = strings.Join(interfaces, ",")
+	
+	// Try to get IP addresses via guest agent (if available)
+	if ipInfo, err := v.getDomainIPAddresses(ctx, domainName); err == nil {
+		info["guest_ip_addresses"] = ipInfo
+	}
+	
+	return info, nil
+}
+
+// getDomainIPAddresses attempts to get IP addresses via guest agent
+func (v *VirshProvider) getDomainIPAddresses(ctx context.Context, domainName string) (string, error) {
+	result, err := v.runVirshCommand(ctx, "domifaddr", domainName)
+	if err != nil {
+		return "", err
+	}
+	
+	ips := []string{}
+	lines := strings.Split(strings.TrimSpace(result.Stdout), "\n")
+	for i, line := range lines {
+		if i == 0 || strings.HasPrefix(line, "-") {
+			continue // Skip header lines
+		}
+		parts := strings.Fields(line)
+		if len(parts) >= 4 {
+			// Format: Name MAC address Protocol Address
+			ip := parts[3]
+			if ip != "N/A" && ip != "-" {
+				// Remove CIDR notation if present
+				if strings.Contains(ip, "/") {
+					ip = strings.Split(ip, "/")[0]
+				}
+				ips = append(ips, ip)
+			}
+		}
+	}
+	
+	return strings.Join(ips, ","), nil
+}
+
+// getDomainBlockStats retrieves storage device statistics
+func (v *VirshProvider) getDomainBlockStats(ctx context.Context, domainName string) (map[string]string, error) {
+	info := make(map[string]string)
+	
+	// Get block device list
+	result, err := v.runVirshCommand(ctx, "domblklist", domainName)
+	if err != nil {
+		return nil, err
+	}
+	
+	devices := []string{}
+	lines := strings.Split(strings.TrimSpace(result.Stdout), "\n")
+	for i, line := range lines {
+		if i == 0 || strings.HasPrefix(line, "-") {
+			continue // Skip header lines
+		}
+		parts := strings.Fields(line)
+		if len(parts) >= 1 {
+			devices = append(devices, parts[0])
+		}
+	}
+	
+	info["block_devices"] = strings.Join(devices, ",")
+	
+	// Get stats for first device (if any)
+	if len(devices) > 0 {
+		if blockStats, err := v.getBlockDeviceStats(ctx, domainName, devices[0]); err == nil {
+			for k, v := range blockStats {
+				info[k] = v
+			}
+		}
+	}
+	
+	return info, nil
+}
+
+// getBlockDeviceStats retrieves statistics for a specific block device
+func (v *VirshProvider) getBlockDeviceStats(ctx context.Context, domainName, device string) (map[string]string, error) {
+	result, err := v.runVirshCommand(ctx, "domblkstat", domainName, device)
+	if err != nil {
+		return nil, err
+	}
+	
+	stats := make(map[string]string)
+	lines := strings.Split(strings.TrimSpace(result.Stdout), "\n")
+	for _, line := range lines {
+		parts := strings.Fields(line)
+		if len(parts) >= 2 {
+			key := fmt.Sprintf("block_%s", parts[0])
+			stats[key] = parts[1]
+		}
+	}
+	return stats, nil
+}
+
+// getDomainGuestInfo retrieves guest agent information
+func (v *VirshProvider) getDomainGuestInfo(ctx context.Context, domainName string) (map[string]string, error) {
+	info := make(map[string]string)
+	
+	// Try to get guest OS information
+	result, err := v.runVirshCommand(ctx, "guestinfo", domainName, "--os")
+	if err == nil {
+		lines := strings.Split(strings.TrimSpace(result.Stdout), "\n")
+		for _, line := range lines {
+			if strings.Contains(line, ":") {
+				parts := strings.SplitN(line, ":", 2)
+				if len(parts) == 2 {
+					key := fmt.Sprintf("guest_%s", strings.TrimSpace(parts[0]))
+					info[key] = strings.TrimSpace(parts[1])
+				}
+			}
+		}
+	}
+	
+	// Try to get guest hostname
+	if result, err := v.runVirshCommand(ctx, "guestinfo", domainName, "--hostname"); err == nil {
+		if strings.TrimSpace(result.Stdout) != "" {
+			info["guest_hostname"] = strings.TrimSpace(result.Stdout)
+		}
+	}
+	
+	return info, nil
 }
