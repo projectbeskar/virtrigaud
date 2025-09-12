@@ -17,11 +17,13 @@ limitations under the License.
 package libvirt
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log"
 	"net/url"
 	"os"
+	"os/exec"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -142,18 +144,55 @@ func (p *Provider) connectWithAuth(ctx context.Context, uri string) (*libvirt.Co
 		}
 	}
 
-	// Strategy 2: Fall back to password authentication
+	// Strategy 2: Test virsh command-line approach
 	if p.credentials.Username != "" && p.credentials.Password != "" {
-		log.Printf("DEBUG: Attempting password authentication")
+		log.Printf("DEBUG: Testing virsh command-line approach")
+		
+		// Build URI with authentication
+		u, err := url.Parse(uri)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse URI: %w", err)
+		}
+		
+		// Add username if not present
+		if strings.Contains(u.Scheme, "ssh") && p.credentials.Username != "" {
+			if u.User == nil {
+				u.User = url.User(p.credentials.Username)
+				log.Printf("DEBUG: Added username to URI: %s", p.credentials.Username)
+			}
+		}
+		
+		// Add SSH options for containers
+		query := u.Query()
+		query.Set("no_verify", "1")
+		query.Set("no_tty", "1")
+		u.RawQuery = query.Encode()
+		
+		virshURI := u.String()
+		
+		// Test virsh connection
+		if err := p.testVirshConnection(ctx, virshURI); err != nil {
+			log.Printf("DEBUG: virsh approach failed: %v", err)
+			log.Printf("DEBUG: Falling back to libvirt-go password authentication")
+			
+			// Fall back to original password approach
+			conn, err := p.connectWithPassword(ctx, uri)
+			if err != nil {
+				return nil, fmt.Errorf("both virsh and libvirt-go failed - virsh: %v, libvirt-go: %w", err, err)
+			}
+			return conn, nil
+		}
+		
+		log.Printf("DEBUG: virsh approach successful! Consider switching to virsh-based provider")
+		// For now, still try libvirt-go to maintain compatibility
 		conn, err := p.connectWithPassword(ctx, uri)
 		if err != nil {
-			return nil, fmt.Errorf("failed to connect with password: %w", err)
+			return nil, fmt.Errorf("virsh works but libvirt-go failed: %w", err)
 		}
-		log.Printf("DEBUG: Successfully established password authenticated connection")
 		return conn, nil
 	}
 
-	return nil, fmt.Errorf("no valid authentication method available (tried SSH key and password)")
+	return nil, fmt.Errorf("no valid authentication method available (tried SSH key, virsh, and password)")
 }
 
 // connectWithSSHKey attempts SSH key authentication
@@ -173,6 +212,32 @@ func (p *Provider) connectWithSSHKey(ctx context.Context, uri string) (*libvirt.
 	}
 
 	return conn, nil
+}
+
+// testVirshConnection tests if virsh command-line approach works
+func (p *Provider) testVirshConnection(ctx context.Context, uri string) error {
+	log.Printf("DEBUG: Testing virsh connection approach")
+	
+	// Build environment with credentials
+	env := os.Environ()
+	env = append(env, fmt.Sprintf("LIBVIRT_DEFAULT_URI=%s", uri))
+	
+	// Test basic virsh connectivity
+	cmd := exec.Command("virsh", "list", "--all")
+	cmd.Env = env
+	
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	
+	if err := cmd.Run(); err != nil {
+		log.Printf("DEBUG: virsh failed: %v, stderr: %s", err, stderr.String())
+		return fmt.Errorf("virsh connection failed: %w", err)
+	}
+	
+	log.Printf("DEBUG: virsh connection successful!")
+	log.Printf("DEBUG: virsh output: %s", stdout.String())
+	return nil
 }
 
 // connectWithPassword attempts password authentication via libvirt callback
@@ -205,8 +270,8 @@ func (p *Provider) connectWithPassword(ctx context.Context, uri string) (*libvir
 		CredType: []libvirt.ConnectCredentialType{
 			libvirt.CRED_AUTHNAME,
 			libvirt.CRED_PASSPHRASE,
-			libvirt.CRED_ECHOPROMPT,    // For interactive prompts
-			libvirt.CRED_NOECHOPROMPT,  // For password prompts
+			libvirt.CRED_ECHOPROMPT,   // For interactive prompts
+			libvirt.CRED_NOECHOPROMPT, // For password prompts
 		},
 		Callback: func(creds []*libvirt.ConnectCredential) {
 			for i := range creds {
@@ -218,7 +283,7 @@ func (p *Provider) connectWithPassword(ctx context.Context, uri string) (*libvir
 					creds[i].Result = p.credentials.Password
 					log.Printf("DEBUG: Provided password for authentication (type: %d)", creds[i].Type)
 				case libvirt.CRED_ECHOPROMPT:
-					creds[i].Result = p.credentials.Username  // Usually username for echo prompts
+					creds[i].Result = p.credentials.Username // Usually username for echo prompts
 					log.Printf("DEBUG: Provided response to echo prompt: %s", p.credentials.Username)
 				default:
 					log.Printf("DEBUG: Unknown credential type requested: %d", creds[i].Type)
@@ -271,7 +336,7 @@ func (p *Provider) buildSSHKeyURI(uri string) (string, error) {
 		log.Printf("DEBUG: SSH key written to temp file: %s", keyfilePath)
 	} else {
 		log.Printf("DEBUG: No SSH private key available, trying default SSH config")
-		
+
 		// Add SSH options for password authentication
 		query := u.Query()
 		query.Set("no_verify", "1")
