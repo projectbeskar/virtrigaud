@@ -1,9 +1,14 @@
-# Build stage (musl) - FORCE ALPINE BUILD
-FROM golang:1.23-alpine AS builder
+# Build stage with CGO support for libvirt
+FROM golang:1.23-bookworm AS builder
 
-# Install libvirt development libraries  
-RUN apk add --no-cache \
-    build-base pkgconfig libvirt-dev libxml2-dev openssh-client git
+# Install libvirt development libraries and SSH client
+RUN apt-get update && apt-get install -y \
+    libvirt-dev \
+    pkg-config \
+    gcc \
+    openssh-client \
+    git \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace
 
@@ -34,20 +39,23 @@ RUN CGO_ENABLED=1 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
     -ldflags "-X github.com/projectbeskar/virtrigaud/internal/version.Version=${VERSION} -X github.com/projectbeskar/virtrigaud/internal/version.GitSHA=${GIT_SHA}" \
     -a -o provider-libvirt cmd/provider-libvirt/main.go
 
-# Runtime (musl) - FORCE ALPINE RUNTIME  
-FROM alpine:3.18
-RUN apk add --no-cache libvirt-libs libxml2 ca-certificates openssh-client curl \
- && update-ca-certificates \
- && echo "ALPINE BUILD SUCCESS - SSH CLIENT AVAILABLE" \
- && which ssh \
- && ssh -V \
- && cat /etc/os-release
+# Runtime stage with compatible libvirt and SSH client
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y \
+    libvirt0 \
+    libxml2 \
+    ca-certificates \
+    openssh-client \
+    curl \
+    && apt-get upgrade -y \
+    && rm -rf /var/lib/apt/lists/* \
+    && echo "DEBIAN BUILD SUCCESS - SSH CLIENT AVAILABLE" \
+    && which ssh \
+    && ssh -V
 
-# Create non-root user
-RUN addgroup -g 1000 app \
- && adduser -D -u 1000 -G app -h /home/app -s /bin/sh app
+# Create non-root user with proper home directory
+RUN groupadd -r app && useradd -r -g app -m -d /home/app -s /bin/bash app
 ENV HOME=/home/app
-ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 RUN mkdir -p /home/app/.ssh && chown -R app:app /home/app && chmod 700 /home/app/.ssh
 
 # Create directories for TLS and credentials
@@ -58,7 +66,6 @@ WORKDIR /
 
 # Copy the binary from builder stage
 COPY --from=builder /workspace/provider-libvirt /usr/local/bin/provider-libvirt
-RUN ln -s /usr/bin/ssh /usr/local/bin/ssh || true
 
 # Switch to non-root user
 USER app
