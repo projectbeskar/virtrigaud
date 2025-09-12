@@ -54,8 +54,8 @@ RUN apt-get update && apt-get install -y \
     && which ssh-agent \
     && ssh -V
 
-# Create non-root user with proper home directory
-RUN groupadd -r app && useradd -r -g app -m -d /home/app -s /bin/bash app
+# Create non-root user with UID 65532 (matches Kubernetes nonroot user)
+RUN groupadd -r app -g 65532 && useradd -r -g app -u 65532 -m -d /home/app -s /bin/bash app
 ENV HOME=/home/app
 RUN mkdir -p /home/app/.ssh && chown -R app:app /home/app && chmod 700 /home/app/.ssh
 
@@ -68,8 +68,8 @@ WORKDIR /
 # Copy the binary from builder stage
 COPY --from=builder /workspace/provider-libvirt /usr/local/bin/provider-libvirt
 
-# Temporarily run as root to debug secret mount permissions
-# USER app
+# Run as the app user (UID 65532)
+USER app
 
 # Expose gRPC and metrics ports
 EXPOSE 9443 8080
