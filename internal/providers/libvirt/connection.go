@@ -140,19 +140,24 @@ func (p *Provider) connectWithAuth(ctx context.Context, uri string) (*libvirt.Co
 	// as a workaround for libvirt authentication issues
 	if strings.Contains(authenticatedURI, "ssh://") {
 		log.Printf("DEBUG: Setting SSH environment variables for authentication")
-		os.Setenv("LIBVIRT_AUTH_FILE", "/tmp/libvirt_auth")
 		
-		// Create a temporary auth file
+		// Create a temporary auth file in home directory (writable)
+		authFile := "/home/app/libvirt_auth"
 		authContent := fmt.Sprintf(`[credentials-ssh]
 authname=%s
 username=%s
 password=%s
 `, p.credentials.Username, p.credentials.Username, p.credentials.Password)
 		
-		if err := os.WriteFile("/tmp/libvirt_auth", []byte(authContent), 0600); err != nil {
-			log.Printf("DEBUG: Failed to create auth file: %v", err)
+		if err := os.WriteFile(authFile, []byte(authContent), 0600); err != nil {
+			log.Printf("DEBUG: Failed to create auth file at %s: %v", authFile, err)
 		} else {
-			log.Printf("DEBUG: Created auth file for SSH authentication")
+			log.Printf("DEBUG: Created auth file for SSH authentication at %s", authFile)
+			os.Setenv("LIBVIRT_AUTH_FILE", authFile)
+			// Also set SSH-specific environment variables
+			os.Setenv("SSH_USER", p.credentials.Username)
+			os.Setenv("SSH_ASKPASS_REQUIRE", "never")
+			log.Printf("DEBUG: Set SSH environment variables for user %s", p.credentials.Username)
 		}
 	}
 	
