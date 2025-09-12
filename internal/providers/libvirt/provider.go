@@ -46,7 +46,7 @@ type Provider struct {
 
 // ProviderConfig represents the configuration for the provider
 type ProviderConfig struct {
-	Spec ProviderSpec
+	Spec      ProviderSpec
 	Namespace string
 }
 
@@ -82,10 +82,10 @@ const (
 
 // Config holds the libvirt provider configuration
 type Config struct {
-	Endpoint       string
-	Username       string
-	Password       string
-	SSHPrivateKey  string
+	Endpoint      string
+	Username      string
+	Password      string
+	SSHPrivateKey string
 }
 
 // New creates a new Libvirt provider that reads configuration from environment and mounted secrets
@@ -123,18 +123,18 @@ func New() *Provider {
 		},
 		Namespace: "default",
 	}
-	
+
 	// Create virsh provider to replace libvirt-go
 	virshProvider := NewVirshProvider(providerConfig)
 	p.virshProvider = virshProvider
-	
+
 	// Create minimal v1beta1.Provider config for compatibility
 	p.config = &v1beta1.Provider{
 		Spec: v1beta1.ProviderSpec{
 			Endpoint: config.Endpoint,
 		},
 	}
-	
+
 	// Initialize the virsh provider
 	ctx := context.Background()
 	if err := virshProvider.Initialize(ctx); err != nil {

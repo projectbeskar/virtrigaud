@@ -47,14 +47,17 @@ RUN apt-get update && apt-get install -y \
     libxml2 \
     ca-certificates \
     openssh-client \
+    sshpass \
     curl \
     && apt-get upgrade -y \
     && rm -rf /var/lib/apt/lists/* \
-    && echo "DEBIAN BUILD SUCCESS - SSH CLIENT + VIRSH AVAILABLE" \
+    && echo "DEBIAN BUILD SUCCESS - SSH CLIENT + VIRSH + SSHPASS AVAILABLE" \
     && which ssh \
     && which virsh \
+    && which sshpass \
     && ssh -V \
-    && virsh --version
+    && virsh --version \
+    && sshpass -V
 
 # Create non-root user with UID 65532 (matches Kubernetes nonroot user)
 RUN groupadd -r app -g 65532 && useradd -r -g app -u 65532 -m -d /home/app -s /bin/bash app
