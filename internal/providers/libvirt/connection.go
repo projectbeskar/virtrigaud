@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"os"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -135,18 +136,28 @@ func (p *Provider) connectWithAuth(ctx context.Context, uri string) (*libvirt.Co
 		return nil, fmt.Errorf("failed to build authenticated URI: %w", err)
 	}
 
-	// Use authentication callback to provide credentials
-	auth := &libvirt.ConnectAuth{
-		CredTypes: []libvirt.ConnectCredentialType{
-			libvirt.CRED_AUTHNAME,
-			libvirt.CRED_USERNAME, 
-			libvirt.CRED_PASSPHRASE,
-		},
-		Callback: p.authCallback,
+	// For SSH connections with username/password, use environment variables
+	// as a workaround for libvirt authentication issues
+	if strings.Contains(authenticatedURI, "ssh://") {
+		log.Printf("DEBUG: Setting SSH environment variables for authentication")
+		os.Setenv("LIBVIRT_AUTH_FILE", "/tmp/libvirt_auth")
+		
+		// Create a temporary auth file
+		authContent := fmt.Sprintf(`[credentials-ssh]
+authname=%s
+username=%s
+password=%s
+`, p.credentials.Username, p.credentials.Username, p.credentials.Password)
+		
+		if err := os.WriteFile("/tmp/libvirt_auth", []byte(authContent), 0600); err != nil {
+			log.Printf("DEBUG: Failed to create auth file: %v", err)
+		} else {
+			log.Printf("DEBUG: Created auth file for SSH authentication")
+		}
 	}
 	
-	log.Printf("DEBUG: Connecting with auth callback, URI: %s", authenticatedURI)
-	conn, err := libvirt.NewConnectWithAuth(authenticatedURI, auth, 0)
+	log.Printf("DEBUG: Connecting with libvirt, URI: %s", authenticatedURI)
+	conn, err := libvirt.NewConnect(authenticatedURI)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect with authentication: %w", err)
 	}
@@ -181,39 +192,6 @@ func (p *Provider) buildAuthenticatedURI(uri string) (string, error) {
 	return finalURI, nil
 }
 
-// authCallback handles authentication requests from libvirt
-func (p *Provider) authCallback(creds []libvirt.ConnectCredential) int {
-	log.Printf("DEBUG: Auth callback called with %d credentials", len(creds))
-	
-	for i := range creds {
-		log.Printf("DEBUG: Processing credential type %v, prompt: '%s'", creds[i].Type, creds[i].Prompt)
-		
-		switch creds[i].Type {
-		case libvirt.CRED_USERNAME, libvirt.CRED_AUTHNAME:
-			if p.credentials.Username != "" {
-				creds[i].Result = p.credentials.Username
-				log.Printf("DEBUG: Provided username '%s' for prompt '%s'", p.credentials.Username, creds[i].Prompt)
-			} else {
-				log.Printf("DEBUG: No username available for prompt '%s'", creds[i].Prompt)
-				return -1
-			}
-		case libvirt.CRED_PASSPHRASE:
-			if p.credentials.Password != "" {
-				creds[i].Result = p.credentials.Password
-				log.Printf("DEBUG: Provided password (len=%d) for prompt '%s'", len(p.credentials.Password), creds[i].Prompt)
-			} else {
-				log.Printf("DEBUG: No password available for prompt '%s'", creds[i].Prompt)
-				return -1
-			}
-		default:
-			log.Printf("DEBUG: Unsupported credential type %v for prompt '%s'", creds[i].Type, creds[i].Prompt)
-			return -1
-		}
-	}
-	
-	log.Printf("DEBUG: Auth callback completed successfully")
-	return 0
-}
 
 // disconnect closes the Libvirt connection
 

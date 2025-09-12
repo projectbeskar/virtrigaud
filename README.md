@@ -261,7 +261,7 @@ For detailed instructions, see [QUICKSTART.md](QUICKSTART.md).
 
 ### Production-Ready Providers
 
-- **vSphere** (govmomi-based) - ✅ **GA**
+- **vSphere** (govmomi-based) - **Pre-release**
   - VM creation from templates
   - Power management (On/Off/Reboot)
   - Resource configuration (CPU/Memory/Disks)
@@ -269,7 +269,7 @@ For detailed instructions, see [QUICKSTART.md](QUICKSTART.md).
   - Network configuration with portgroups
   - Async task monitoring
   
-- **Libvirt/KVM** (libvirt-go-based) - ✅ **GA**
+- **Libvirt/KVM** (libvirt-go-based) - **In Development**
   - VM creation from qcow2 images
   - Power management (On/Off/Reboot)  
   - Resource configuration (CPU/Memory/Disks)
@@ -277,7 +277,7 @@ For detailed instructions, see [QUICKSTART.md](QUICKSTART.md).
   - Network configuration with bridges/networks
   - Storage pool and volume management
 
-- **Proxmox VE** (REST API-based) - ✅ **GA**
+- **Proxmox VE** (REST API-based) - **In Development**
   - VM creation from templates or ISO
   - Power management (On/Off/Reboot)
   - **Hot-plug reconfiguration** (CPU/Memory/Disk)
