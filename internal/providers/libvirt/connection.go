@@ -190,15 +190,10 @@ func (p *Provider) buildSSHKeyURI(uri string) (string, error) {
 
 // writeSSHKeyToFile writes the SSH private key to a temporary file
 func (p *Provider) writeSSHKeyToFile() (string, error) {
-	// Create SSH key file in writable location
-	keyPath := "/home/app/.ssh/id_rsa"
+	// Create SSH key file in writable temporary location
+	keyPath := "/tmp/libvirt_ssh_key"
 
-	// Ensure .ssh directory exists
-	if err := os.MkdirAll("/home/app/.ssh", 0700); err != nil {
-		return "", fmt.Errorf("failed to create .ssh directory: %w", err)
-	}
-
-	// Write the private key
+	// Write the private key with correct permissions
 	if err := os.WriteFile(keyPath, []byte(p.credentials.SSHPrivateKey), 0600); err != nil {
 		return "", fmt.Errorf("failed to write SSH private key: %w", err)
 	}
