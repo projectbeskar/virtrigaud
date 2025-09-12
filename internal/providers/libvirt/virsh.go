@@ -236,19 +236,31 @@ func (v *VirshProvider) runVirshCommand(ctx context.Context, args ...string) (*V
 	
 	// Use sshpass for non-interactive SSH authentication if password is available
 	if v.credentials.Password != "" && strings.Contains(v.uri, "ssh://") {
-		// Build sshpass command with SSH options
-		sshpassArgs := []string{
-			"-e", // Read password from SSHPASS environment variable
+		// Build command: SSHPASS=password sshpass -e ssh -o [options] user@host virsh [args]
+		// This directly uses SSH with options rather than relying on config files
+		
+		// Extract host and user from URI for direct SSH call
+		parsedURI, _ := url.Parse(v.uri)
+		host := parsedURI.Host
+		user := parsedURI.User.Username()
+		
+		// Build SSH command with all necessary options
+		sshArgs := []string{
+			"-e", // Read password from SSHPASS environment variable  
+			"ssh",
+			"-o", "StrictHostKeyChecking=accept-new",
+			"-o", "PasswordAuthentication=yes", 
+			"-o", "PubkeyAuthentication=no",
+			"-o", "UserKnownHostsFile=/tmp/known_hosts",
+			"-o", "LogLevel=ERROR",
+			fmt.Sprintf("%s@%s", user, host),
 			"virsh",
 		}
-		sshpassArgs = append(sshpassArgs, args...)
+		sshArgs = append(sshArgs, args...)
 		
-		cmd = exec.CommandContext(ctx, "sshpass", sshpassArgs...)
-		command = "sshpass -e virsh " + strings.Join(args, " ")
-		
-		// Set environment with SSH options
+		cmd = exec.CommandContext(ctx, "sshpass", sshArgs...)
+		command = fmt.Sprintf("sshpass -e ssh %s@%s virsh %s", user, host, strings.Join(args, " "))
 		cmd.Env = v.env
-		cmd.Env = append(cmd.Env, "SSH_OPTIONS=-o StrictHostKeyChecking=accept-new -o PasswordAuthentication=yes -o PubkeyAuthentication=no")
 	} else {
 		// Standard virsh command for local or key-based connections
 		cmd = exec.CommandContext(ctx, "virsh", args...)
@@ -484,7 +496,8 @@ func (v *VirshProvider) createSSHConfig() error {
 			return fmt.Errorf("failed to create SSH directory: %w", err)
 		}
 		// Set SSH config path in environment
-		v.env = append(v.env, fmt.Sprintf("HOME=/tmp"))
+		v.env = append(v.env, "HOME=/tmp")
+		log.Printf("INFO Using /tmp as HOME for SSH config")
 	}
 	
 	// SSH config content for automatic host key acceptance
