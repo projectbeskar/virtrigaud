@@ -75,16 +75,16 @@ func NewStorageProvider(virshProvider *VirshProvider) *StorageProvider {
 // EnsureDefaultStoragePool ensures the default storage pool exists and is active
 func (s *StorageProvider) EnsureDefaultStoragePool(ctx context.Context) error {
 	log.Printf("INFO Ensuring default storage pool exists and is active")
-	
+
 	// Check if default pool exists
 	result, err := s.virshProvider.runVirshCommand(ctx, "pool-list", "--all")
 	if err != nil {
 		return fmt.Errorf("failed to list storage pools: %w", err)
 	}
-	
+
 	// Parse pool list to check if default pool exists
 	hasDefaultPool := strings.Contains(result.Stdout, "default")
-	
+
 	if hasDefaultPool {
 		// Check if the existing pool uses the correct path
 		poolInfo, err := s.virshProvider.runVirshCommand(ctx, "pool-dumpxml", "default")
@@ -96,7 +96,7 @@ func (s *StorageProvider) EnsureDefaultStoragePool(ctx context.Context) error {
 			hasDefaultPool = false
 		}
 	}
-	
+
 	if !hasDefaultPool {
 		// Create default storage pool
 		log.Printf("INFO Creating default storage pool")
@@ -104,12 +104,12 @@ func (s *StorageProvider) EnsureDefaultStoragePool(ctx context.Context) error {
 			return fmt.Errorf("failed to create default storage pool: %w", err)
 		}
 	}
-	
+
 	// Ensure the pool is active
 	if err := s.ensurePoolActive(ctx, "default"); err != nil {
 		return fmt.Errorf("failed to activate default storage pool: %w", err)
 	}
-	
+
 	log.Printf("INFO Default storage pool is ready")
 	return nil
 }
@@ -121,7 +121,7 @@ func (s *StorageProvider) createDefaultStoragePool(ctx context.Context) error {
 	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "mkdir", "-p", poolPath); err != nil {
 		return fmt.Errorf("failed to create pool directory: %w", err)
 	}
-	
+
 	// Define the default storage pool
 	poolXML := fmt.Sprintf(`<pool type='dir'>
   <name>default</name>
@@ -134,34 +134,34 @@ func (s *StorageProvider) createDefaultStoragePool(ctx context.Context) error {
     </permissions>
   </target>
 </pool>`, poolPath)
-	
+
 	// Write pool XML to temporary file
 	poolFile := "/tmp/default-pool.xml"
 	heredocMarker := "EOF_POOL_" + fmt.Sprintf("%d", time.Now().UnixNano())
 	command := fmt.Sprintf("cat > '%s' << '%s'\n%s\n%s", poolFile, heredocMarker, poolXML, heredocMarker)
-	
+
 	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", command); err != nil {
 		return fmt.Errorf("failed to write pool XML: %w", err)
 	}
-	
+
 	// Define the pool
 	if _, err := s.virshProvider.runVirshCommand(ctx, "pool-define", poolFile); err != nil {
 		return fmt.Errorf("failed to define storage pool: %w", err)
 	}
-	
+
 	// Clean up temporary file
 	s.virshProvider.runVirshCommand(ctx, "!", "rm", "-f", poolFile)
-	
+
 	// Build the pool (create directory structure)
 	if _, err := s.virshProvider.runVirshCommand(ctx, "pool-build", "default"); err != nil {
 		log.Printf("WARN Failed to build storage pool (may already exist): %v", err)
 	}
-	
+
 	// Set autostart
 	if _, err := s.virshProvider.runVirshCommand(ctx, "pool-autostart", "default"); err != nil {
 		log.Printf("WARN Failed to set pool autostart: %v", err)
 	}
-	
+
 	log.Printf("INFO Successfully created default storage pool")
 	return nil
 }
@@ -173,7 +173,7 @@ func (s *StorageProvider) ensurePoolActive(ctx context.Context, poolName string)
 	if err != nil {
 		return fmt.Errorf("failed to get pool info: %w", err)
 	}
-	
+
 	// If pool is not active, start it
 	if !strings.Contains(result.Stdout, "State:") || !strings.Contains(result.Stdout, "running") {
 		log.Printf("INFO Starting storage pool: %s", poolName)
@@ -181,32 +181,32 @@ func (s *StorageProvider) ensurePoolActive(ctx context.Context, poolName string)
 			return fmt.Errorf("failed to start storage pool: %w", err)
 		}
 	}
-	
+
 	return nil
 }
 
 // CreateVolume creates a new storage volume
 func (s *StorageProvider) CreateVolume(ctx context.Context, poolName, volumeName, format string, sizeGB int) (*StorageVolume, error) {
 	log.Printf("INFO Creating storage volume: %s in pool %s (%dGB, %s)", volumeName, poolName, sizeGB, format)
-	
+
 	// Ensure pool is active
 	if err := s.ensurePoolActive(ctx, poolName); err != nil {
 		return nil, fmt.Errorf("failed to ensure pool is active: %w", err)
 	}
-	
+
 	// Create volume using vol-create-as
 	sizeBytes := fmt.Sprintf("%dG", sizeGB)
 	result, err := s.virshProvider.runVirshCommand(ctx, "vol-create-as", poolName, volumeName, sizeBytes, "--format", format)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create volume: %w, output: %s", err, result.Stderr)
 	}
-	
+
 	// Get volume information
 	volume, err := s.GetVolumeInfo(ctx, poolName, volumeName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get created volume info: %w", err)
 	}
-	
+
 	log.Printf("INFO Successfully created storage volume: %s", volumeName)
 	return volume, nil
 }
@@ -217,13 +217,13 @@ func (s *StorageProvider) GetVolumeInfo(ctx context.Context, poolName, volumeNam
 	if err != nil {
 		return nil, fmt.Errorf("failed to get volume info: %w", err)
 	}
-	
+
 	// Parse volume info
 	volume := &StorageVolume{
 		Name: volumeName,
 		Pool: poolName,
 	}
-	
+
 	lines := strings.Split(result.Stdout, "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
@@ -235,41 +235,40 @@ func (s *StorageProvider) GetVolumeInfo(ctx context.Context, poolName, volumeNam
 			volume.Allocation = strings.TrimSpace(strings.TrimPrefix(line, "Allocation:"))
 		}
 	}
-	
+
 	// Get volume path
 	pathResult, err := s.virshProvider.runVirshCommand(ctx, "vol-path", volumeName, "--pool", poolName)
 	if err == nil {
 		volume.Path = strings.TrimSpace(pathResult.Stdout)
 	}
-	
+
 	return volume, nil
 }
 
 // DownloadCloudImage downloads a cloud image and creates a bootable volume
 func (s *StorageProvider) DownloadCloudImage(ctx context.Context, imageURL, volumeName, poolName string, sizeGB int) (*StorageVolume, error) {
 	log.Printf("INFO Downloading cloud image from %s to volume %s", imageURL, volumeName)
-	
+
 	// Ensure pool is active
 	if err := s.ensurePoolActive(ctx, poolName); err != nil {
 		return nil, fmt.Errorf("failed to ensure pool is active: %w", err)
 	}
-	
+
 	// Get pool path
 	poolInfo, err := s.GetPoolInfo(ctx, poolName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get pool info: %w", err)
 	}
-	
+
 	// Download image to temporary location
 	tempImage := filepath.Join("/tmp", fmt.Sprintf("%s-temp.img", volumeName))
 	log.Printf("INFO Downloading image to temporary location: %s", tempImage)
-	
-	downloadCmd := fmt.Sprintf("wget -O '%s' '%s'", tempImage, imageURL)
-	result, err := s.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", downloadCmd)
+
+	result, err := s.virshProvider.runVirshCommand(ctx, "!", "wget", "-O", tempImage, imageURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to download image: %w, output: %s", err, result.Stderr)
 	}
-	
+
 	// Get image info
 	imageInfoCmd := fmt.Sprintf("qemu-img info '%s'", tempImage)
 	infoResult, err := s.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", imageInfoCmd)
@@ -278,14 +277,14 @@ func (s *StorageProvider) DownloadCloudImage(ctx context.Context, imageURL, volu
 	} else {
 		log.Printf("DEBUG Image info: %s", infoResult.Stdout)
 	}
-	
+
 	// Create target volume path
 	targetPath := filepath.Join(poolInfo.Path, fmt.Sprintf("%s.qcow2", volumeName))
-	
+
 	// Convert and resize image if needed
 	if sizeGB > 0 {
 		log.Printf("INFO Converting and resizing image to %dGB", sizeGB)
-		convertCmd := fmt.Sprintf("qemu-img convert -f qcow2 -O qcow2 '%s' '%s' && qemu-img resize '%s' %dG", 
+		convertCmd := fmt.Sprintf("qemu-img convert -f qcow2 -O qcow2 '%s' '%s' && qemu-img resize '%s' %dG",
 			tempImage, targetPath, targetPath, sizeGB)
 		result, err = s.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", convertCmd)
 		if err != nil {
@@ -300,15 +299,15 @@ func (s *StorageProvider) DownloadCloudImage(ctx context.Context, imageURL, volu
 			return nil, fmt.Errorf("failed to convert image: %w, output: %s", err, result.Stderr)
 		}
 	}
-	
+
 	// Clean up temporary file
 	s.virshProvider.runVirshCommand(ctx, "!", "rm", "-f", tempImage)
-	
+
 	// Refresh storage pool to recognize new volume
 	if _, err := s.virshProvider.runVirshCommand(ctx, "pool-refresh", poolName); err != nil {
 		log.Printf("WARN Failed to refresh storage pool: %v", err)
 	}
-	
+
 	// Get volume information
 	volume, err := s.GetVolumeInfo(ctx, poolName, volumeName)
 	if err != nil {
@@ -321,7 +320,7 @@ func (s *StorageProvider) DownloadCloudImage(ctx context.Context, imageURL, volu
 			Type:   "file",
 		}
 	}
-	
+
 	log.Printf("INFO Successfully downloaded and prepared cloud image: %s", volumeName)
 	return volume, nil
 }
@@ -332,11 +331,11 @@ func (s *StorageProvider) GetPoolInfo(ctx context.Context, poolName string) (*St
 	if err != nil {
 		return nil, fmt.Errorf("failed to get pool info: %w", err)
 	}
-	
+
 	pool := &StoragePool{
 		Name: poolName,
 	}
-	
+
 	lines := strings.Split(result.Stdout, "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
@@ -352,13 +351,13 @@ func (s *StorageProvider) GetPoolInfo(ctx context.Context, poolName string) (*St
 			pool.Available = strings.TrimSpace(strings.TrimPrefix(line, "Available:"))
 		}
 	}
-	
+
 	// Calculate used space
 	if pool.Capacity != "" && pool.Available != "" {
 		// This is a simplified calculation - in reality you'd parse the byte values
 		pool.Used = "calculated"
 	}
-	
+
 	// Get pool path
 	pathResult, err := s.virshProvider.runVirshCommand(ctx, "pool-dumpxml", poolName)
 	if err == nil && strings.Contains(pathResult.Stdout, "<path>") {
@@ -369,7 +368,7 @@ func (s *StorageProvider) GetPoolInfo(ctx context.Context, poolName string) (*St
 			pool.Path = pathResult.Stdout[start : start+end]
 		}
 	}
-	
+
 	return pool, nil
 }
 
@@ -379,16 +378,16 @@ func (s *StorageProvider) ListVolumes(ctx context.Context, poolName string) ([]*
 	if err != nil {
 		return nil, fmt.Errorf("failed to list volumes: %w", err)
 	}
-	
+
 	var volumes []*StorageVolume
 	lines := strings.Split(result.Stdout, "\n")
-	
+
 	// Skip header lines and parse volume entries
 	for i, line := range lines {
 		if i < 2 || strings.TrimSpace(line) == "" {
 			continue
 		}
-		
+
 		fields := strings.Fields(line)
 		if len(fields) >= 2 {
 			volumeName := fields[0]
@@ -402,19 +401,19 @@ func (s *StorageProvider) ListVolumes(ctx context.Context, poolName string) ([]*
 			}
 		}
 	}
-	
+
 	return volumes, nil
 }
 
 // DeleteVolume deletes a storage volume
 func (s *StorageProvider) DeleteVolume(ctx context.Context, poolName, volumeName string) error {
 	log.Printf("INFO Deleting storage volume: %s from pool %s", volumeName, poolName)
-	
+
 	result, err := s.virshProvider.runVirshCommand(ctx, "vol-delete", volumeName, "--pool", poolName)
 	if err != nil {
 		return fmt.Errorf("failed to delete volume: %w, output: %s", err, result.Stderr)
 	}
-	
+
 	log.Printf("INFO Successfully deleted storage volume: %s", volumeName)
 	return nil
 }
@@ -422,18 +421,18 @@ func (s *StorageProvider) DeleteVolume(ctx context.Context, poolName, volumeName
 // CloneVolume creates a clone of an existing volume
 func (s *StorageProvider) CloneVolume(ctx context.Context, poolName, sourceVolume, targetVolume string) (*StorageVolume, error) {
 	log.Printf("INFO Cloning volume %s to %s in pool %s", sourceVolume, targetVolume, poolName)
-	
+
 	result, err := s.virshProvider.runVirshCommand(ctx, "vol-clone", sourceVolume, targetVolume, "--pool", poolName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to clone volume: %w, output: %s", err, result.Stderr)
 	}
-	
+
 	// Get cloned volume information
 	volume, err := s.GetVolumeInfo(ctx, poolName, targetVolume)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get cloned volume info: %w", err)
 	}
-	
+
 	log.Printf("INFO Successfully cloned volume: %s", targetVolume)
 	return volume, nil
 }
@@ -441,13 +440,13 @@ func (s *StorageProvider) CloneVolume(ctx context.Context, poolName, sourceVolum
 // ResizeVolume resizes an existing volume
 func (s *StorageProvider) ResizeVolume(ctx context.Context, poolName, volumeName string, newSizeGB int) error {
 	log.Printf("INFO Resizing volume %s to %dGB", volumeName, newSizeGB)
-	
+
 	newSize := fmt.Sprintf("%dG", newSizeGB)
 	result, err := s.virshProvider.runVirshCommand(ctx, "vol-resize", volumeName, newSize, "--pool", poolName)
 	if err != nil {
 		return fmt.Errorf("failed to resize volume: %w, output: %s", err, result.Stderr)
 	}
-	
+
 	log.Printf("INFO Successfully resized volume: %s", volumeName)
 	return nil
 }
@@ -497,7 +496,7 @@ func (s *StorageProvider) GetPredefinedTemplates() []*ImageTemplate {
 // CreateVolumeFromTemplate downloads and prepares a volume from a predefined template
 func (s *StorageProvider) CreateVolumeFromTemplate(ctx context.Context, templateName, volumeName, poolName string, sizeGB int) (*StorageVolume, error) {
 	log.Printf("INFO Creating volume %s from template %s", volumeName, templateName)
-	
+
 	// Find template
 	templates := s.GetPredefinedTemplates()
 	var template *ImageTemplate
@@ -507,11 +506,11 @@ func (s *StorageProvider) CreateVolumeFromTemplate(ctx context.Context, template
 			break
 		}
 	}
-	
+
 	if template == nil {
 		return nil, fmt.Errorf("template not found: %s", templateName)
 	}
-	
+
 	// Download and create volume
 	return s.DownloadCloudImage(ctx, template.URL, volumeName, poolName, sizeGB)
 }
