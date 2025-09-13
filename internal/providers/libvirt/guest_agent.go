@@ -146,8 +146,9 @@ func (g *GuestAgentProvider) GetGuestInfo(ctx context.Context, domainName string
 
 // isGuestAgentAvailable checks if QEMU Guest Agent is available and responsive
 func (g *GuestAgentProvider) isGuestAgentAvailable(ctx context.Context, domainName string) bool {
-	// Try to ping the guest agent using properly escaped JSON
-	result, err := g.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", fmt.Sprintf("virsh qemu-agent-command %s '{\"execute\":\"guest-ping\"}'", domainName))
+	// Try to ping the guest agent using heredoc to avoid quote issues
+	heredocCmd := fmt.Sprintf("virsh qemu-agent-command %s \"$(cat <<'EOF'\n{\"execute\":\"guest-ping\"}\nEOF\n)\"", domainName)
+	result, err := g.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", heredocCmd)
 	if err != nil {
 		log.Printf("DEBUG Guest agent ping failed for %s: %v", domainName, err)
 		return false
@@ -166,7 +167,8 @@ func (g *GuestAgentProvider) isGuestAgentAvailable(ctx context.Context, domainNa
 // getGuestOSInfo retrieves operating system information from the guest
 func (g *GuestAgentProvider) getGuestOSInfo(ctx context.Context, domainName string, info *GuestAgentInfo) error {
 	// Get OS info using guest-get-osinfo command
-	result, err := g.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", fmt.Sprintf("virsh qemu-agent-command %s '{\"execute\":\"guest-get-osinfo\"}'", domainName))
+	heredocCmd := fmt.Sprintf("virsh qemu-agent-command %s \"$(cat <<'EOF'\n{\"execute\":\"guest-get-osinfo\"}\nEOF\n)\"", domainName)
+	result, err := g.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", heredocCmd)
 	if err != nil {
 		return fmt.Errorf("failed to get OS info: %w", err)
 	}
@@ -204,7 +206,8 @@ func (g *GuestAgentProvider) getGuestOSInfo(ctx context.Context, domainName stri
 // getGuestNetworkInfo retrieves network interface information from the guest
 func (g *GuestAgentProvider) getGuestNetworkInfo(ctx context.Context, domainName string, info *GuestAgentInfo) error {
 	// Get network interfaces using guest-network-get-interfaces command
-	result, err := g.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", fmt.Sprintf("virsh qemu-agent-command %s '{\"execute\":\"guest-network-get-interfaces\"}'", domainName))
+	heredocCmd := fmt.Sprintf("virsh qemu-agent-command %s \"$(cat <<'EOF'\n{\"execute\":\"guest-network-get-interfaces\"}\nEOF\n)\"", domainName)
+	result, err := g.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", heredocCmd)
 	if err != nil {
 		return fmt.Errorf("failed to get network info: %w", err)
 	}
@@ -260,7 +263,8 @@ func (g *GuestAgentProvider) getGuestNetworkInfo(ctx context.Context, domainName
 // getGuestFilesystemInfo retrieves filesystem information from the guest
 func (g *GuestAgentProvider) getGuestFilesystemInfo(ctx context.Context, domainName string, info *GuestAgentInfo) error {
 	// Get filesystem info using guest-get-fsinfo command
-	result, err := g.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", fmt.Sprintf("virsh qemu-agent-command %s '{\"execute\":\"guest-get-fsinfo\"}'", domainName))
+	heredocCmd := fmt.Sprintf("virsh qemu-agent-command %s \"$(cat <<'EOF'\n{\"execute\":\"guest-get-fsinfo\"}\nEOF\n)\"", domainName)
+	result, err := g.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", heredocCmd)
 	if err != nil {
 		return fmt.Errorf("failed to get filesystem info: %w", err)
 	}
@@ -301,7 +305,8 @@ func (g *GuestAgentProvider) getGuestFilesystemInfo(ctx context.Context, domainN
 // getGuestTime retrieves the current time from inside the guest
 func (g *GuestAgentProvider) getGuestTime(ctx context.Context, domainName string, info *GuestAgentInfo) error {
 	// Get guest time using guest-get-time command
-	result, err := g.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", fmt.Sprintf("virsh qemu-agent-command %s '{\"execute\":\"guest-get-time\"}'", domainName))
+	heredocCmd := fmt.Sprintf("virsh qemu-agent-command %s \"$(cat <<'EOF'\n{\"execute\":\"guest-get-time\"}\nEOF\n)\"", domainName)
+	result, err := g.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", heredocCmd)
 	if err != nil {
 		return fmt.Errorf("failed to get guest time: %w", err)
 	}
@@ -325,7 +330,8 @@ func (g *GuestAgentProvider) getGuestTime(ctx context.Context, domainName string
 // getGuestUsers retrieves information about logged-in users from the guest
 func (g *GuestAgentProvider) getGuestUsers(ctx context.Context, domainName string, info *GuestAgentInfo) error {
 	// Get user info using guest-get-users command
-	result, err := g.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", fmt.Sprintf("virsh qemu-agent-command %s '{\"execute\":\"guest-get-users\"}'", domainName))
+	heredocCmd := fmt.Sprintf("virsh qemu-agent-command %s \"$(cat <<'EOF'\n{\"execute\":\"guest-get-users\"}\nEOF\n)\"", domainName)
+	result, err := g.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", heredocCmd)
 	if err != nil {
 		return fmt.Errorf("failed to get guest users: %w", err)
 	}
@@ -367,11 +373,11 @@ func (g *GuestAgentProvider) ExecuteGuestCommand(ctx context.Context, domainName
 		return "", fmt.Errorf("guest agent not available for domain: %s", domainName)
 	}
 	
-	// Execute command using guest-exec with proper escaping
+	// Execute command using guest-exec with heredoc to avoid quote issues
 	escapedCommand := strings.ReplaceAll(command, `"`, `\"`)
-	execCmd := fmt.Sprintf("virsh qemu-agent-command %s '{\"execute\":\"guest-exec\",\"arguments\":{\"path\":\"/bin/sh\",\"arg\":[\"-c\",\"%s\"],\"capture-output\":true}}'", domainName, escapedCommand)
+	heredocCmd := fmt.Sprintf("virsh qemu-agent-command %s \"$(cat <<'EOF'\n{\"execute\":\"guest-exec\",\"arguments\":{\"path\":\"/bin/sh\",\"arg\":[\"-c\",\"%s\"],\"capture-output\":true}}\nEOF\n)\"", domainName, escapedCommand)
 	
-	result, err := g.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", execCmd)
+	result, err := g.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", heredocCmd)
 	if err != nil {
 		return "", fmt.Errorf("failed to execute guest command: %w", err)
 	}
@@ -388,7 +394,7 @@ func (g *GuestAgentProvider) ExecuteGuestCommand(ctx context.Context, domainName
 	}
 	
 	// Get the command status and output
-	statusCmd := fmt.Sprintf("virsh qemu-agent-command %s '{\"execute\":\"guest-exec-status\",\"arguments\":{\"pid\":%d}}'", domainName, execResponse.Return.PID)
+	statusCmd := fmt.Sprintf("virsh qemu-agent-command %s \"$(cat <<'EOF'\n{\"execute\":\"guest-exec-status\",\"arguments\":{\"pid\":%d}}\nEOF\n)\"", domainName, execResponse.Return.PID)
 	
 	// Wait for command completion (with timeout)
 	timeout := time.After(30 * time.Second)
@@ -441,7 +447,8 @@ func (g *GuestAgentProvider) SetGuestTime(ctx context.Context, domainName string
 	}
 	
 	// Set guest time using guest-set-time command (sync with host)
-	result, err := g.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", fmt.Sprintf("virsh qemu-agent-command %s '{\"execute\":\"guest-set-time\"}'", domainName))
+	heredocCmd := fmt.Sprintf("virsh qemu-agent-command %s \"$(cat <<'EOF'\n{\"execute\":\"guest-set-time\"}\nEOF\n)\"", domainName)
+	result, err := g.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", heredocCmd)
 	if err != nil {
 		return fmt.Errorf("failed to set guest time: %w", err)
 	}
