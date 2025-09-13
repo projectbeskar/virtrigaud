@@ -341,23 +341,22 @@ func (p *Provider) generateDomainXML(req contracts.CreateRequest) (string, error
 	}
 	
 	// Basic domain XML template for cloud-init enabled VMs
-	domainXML := fmt.Sprintf(`<domain type='kvm'>
+	domainXML := fmt.Sprintf(`<domain type='qemu'>
   <name>%s</name>
   <uuid>%s</uuid>
   <memory unit='MiB'>%d</memory>
   <currentMemory unit='MiB'>%d</currentMemory>
   <vcpu placement='static'>%d</vcpu>
   <os>
-    <type arch='x86_64' machine='pc-i440fx-8.2'>hvm</type>
+    <type arch='x86_64' machine='pc'>hvm</type>
     <boot dev='hd'/>
     <boot dev='cdrom'/>
   </os>
   <features>
     <acpi/>
     <apic/>
-    <vmport state='off'/>
   </features>
-  <cpu mode='host-model' check='partial'/>
+  <cpu mode='host-passthrough' check='none'/>
   <clock offset='utc'>
     <timer name='rtc' tickpolicy='catchup'/>
     <timer name='pit' tickpolicy='delay'/>
@@ -366,10 +365,6 @@ func (p *Provider) generateDomainXML(req contracts.CreateRequest) (string, error
   <on_poweroff>destroy</on_poweroff>
   <on_reboot>restart</on_reboot>
   <on_crash>destroy</on_crash>
-  <pm>
-    <suspend-to-mem enabled='no'/>
-    <suspend-to-disk enabled='no'/>
-  </pm>
   <devices>
     <emulator>/usr/bin/qemu-system-x86_64</emulator>
     <disk type='file' device='disk'>
