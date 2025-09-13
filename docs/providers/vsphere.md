@@ -61,7 +61,7 @@ spec:
   insecureSkipVerify: false
   runtime:
     mode: Remote
-    image: "virtrigaud/provider-vsphere:latest"
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.2.0"
     service:
       port: 9090
 ```

@@ -61,18 +61,17 @@ spec:
     name: provider-creds
   runtime:
     mode: Remote              # Required - only mode supported
-    image: "virtrigaud/provider-vsphere:latest"
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.2.0"
     service:
       port: 9090
 ```
 
-### Updated API Schema (v1beta1)
+### Current API Schema (v0.2.0)
 
-- **VMClass**: Use `memory: "4Gi"` instead of `memoryMiB: 4096`
-- **VMClass**: Use `size: "40Gi"` instead of `sizeGiB: 40`
-- **VMImage**: Use `source.vsphere` instead of `vsphere`
-- **VMNetworkAttachment**: Use `network.vsphere` and `ipAllocation.type: DHCP`
-- **VirtualMachine**: Use quoted `powerState: "On"`
+- **VMClass**: Standard Kubernetes resource quantities (`cpus: 4`, `memory: "4Gi"`)
+- **VMImage**: Provider-specific source configurations
+- **VMNetworkAttachment**: Network provider abstractions
+- **VirtualMachine**: Declarative power state management
 
 ### Configuration Management
 

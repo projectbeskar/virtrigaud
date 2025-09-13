@@ -6,8 +6,8 @@ Welcome to the Virtrigaud documentation. Virtrigaud is a Kubernetes operator for
 
 ### Getting Started
 - [15-Minute Quickstart](getting-started/quickstart.md)
-- [Installation Guide](install/README.md)
-- [Your First VM](getting-started/first-vm.md)
+- [Installation Guide](install-helm-only.md)
+- [Your First VM](getting-started/quickstart.md)
 
 ### Core Concepts
 - [Architecture Overview](concepts/architecture.md)
@@ -39,10 +39,10 @@ Welcome to the Virtrigaud documentation. Virtrigaud is a Kubernetes operator for
 - [Supply Chain Security](security/supply-chain.md)
 
 ### API Reference
-- [Custom Resource Definitions](api-reference/crds.md)
-- [gRPC Provider API](api-reference/grpc.md)
+- [Custom Resource Definitions](CRDs.md)
 - [CLI Reference](api-reference/cli.md)
 - [Metrics Catalog](api-reference/metrics.md)
+- [Provider Capabilities Matrix](PROVIDERS_CAPABILITIES.md)
 
 ### Developer Resources
 - [Provider Development Guide](developer/provider-guide.md)
@@ -51,7 +51,7 @@ Welcome to the Virtrigaud documentation. Virtrigaud is a Kubernetes operator for
 
 ## Version Information
 
-This documentation covers Virtrigaud v0.1.0.
+This documentation covers Virtrigaud v0.2.0.
 
 ## Support
 

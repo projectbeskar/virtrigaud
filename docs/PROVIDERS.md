@@ -259,7 +259,7 @@ type YourProviderNetworkSpec struct {
 See the existing providers for reference:
 
 - `internal/providers/vsphere/` - vSphere implementation
-- `internal/providers/libvirt/` - Libvirt implementation (planned)
+- `internal/providers/libvirt/` - Libvirt implementation (production ready)
 
 ## Provider Configuration
 

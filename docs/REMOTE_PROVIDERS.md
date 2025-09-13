@@ -98,7 +98,7 @@ spec:
     name: vsphere-credentials
   runtime:
     mode: Remote
-    image: "virtrigaud/provider-vsphere:latest"
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.2.0"
     service:
       port: 9090
 ```
@@ -138,10 +138,10 @@ The beauty of VirtRigaud's Remote Provider architecture is that **you never need
 
 Specialized images for each provider type:
 
-- **virtrigaud/provider-vsphere**: vSphere provider with govmomi
-- **virtrigaud/provider-libvirt**: LibVirt provider with CGO bindings
-- **virtrigaud/provider-proxmox**: Proxmox VE provider
-- **virtrigaud/provider-mock**: Mock provider for testing
+- **ghcr.io/projectbeskar/virtrigaud/provider-vsphere**: vSphere provider with govmomi
+- **ghcr.io/projectbeskar/virtrigaud/provider-libvirt**: LibVirt provider via virsh commands
+- **ghcr.io/projectbeskar/virtrigaud/provider-proxmox**: Proxmox VE provider
+- **ghcr.io/projectbeskar/virtrigaud/provider-mock**: Mock provider for testing
 
 ### 3. gRPC Communication
 
@@ -178,7 +178,7 @@ spec:
     name: vsphere-credentials
   runtime:
     mode: Remote
-    image: "virtrigaud/provider-vsphere:latest"
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.2.0"
     service:
       port: 9090
 ```
@@ -203,7 +203,7 @@ spec:
     burst: 50
   runtime:
     mode: Remote
-    image: "virtrigaud/provider-libvirt:v1.0.0"
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.2.0"
     replicas: 3
     
     service:
@@ -338,7 +338,7 @@ spec:
     name: dev-credentials
   runtime:
     mode: Remote
-    image: "virtrigaud/provider-vsphere:latest"
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.2.0"
 ```
 
 ### High Availability Setup
@@ -356,7 +356,7 @@ spec:
     name: prod-credentials
   runtime:
     mode: Remote
-    image: "virtrigaud/provider-vsphere:v1.0.0"
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.2.0"
     replicas: 3
     affinity:
       podAntiAffinity:
@@ -381,7 +381,7 @@ spec:
   endpoint: "qemu+ssh://dev@libvirt-dev.example.com/system"
   runtime:
     mode: Remote
-    image: "virtrigaud/provider-libvirt:latest"
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.2.0"
     resources:
       requests:
         cpu: "100m"
@@ -399,7 +399,7 @@ spec:
   endpoint: "qemu+ssh://prod@libvirt-prod.example.com/system"
   runtime:
     mode: Remote
-    image: "virtrigaud/provider-libvirt:v1.0.0"
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.2.0"
     replicas: 2
     resources:
       requests:
@@ -443,7 +443,7 @@ spec:
 1. **Image Pull Failures**
    ```bash
    # Check image availability
-   docker pull virtrigaud/provider-vsphere:latest
+   docker pull ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.2.0
    
    # Verify imagePullSecrets if using private registry
    kubectl get secret regcred -o yaml
@@ -534,7 +534,7 @@ kubectl patch provider vsphere-datacenter -p '
 {
   "spec": {
     "runtime": {
-      "image": "virtrigaud/provider-vsphere:v1.1.0"
+      "image": "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.2.0"
     }
   }
 }'

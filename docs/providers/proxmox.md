@@ -62,7 +62,7 @@ API tokens provide secure, scope-limited access without exposing user passwords.
        name: pve-credentials
      runtime:
        mode: Remote
-       image: "virtrigaud/provider-proxmox:latest"
+       image: "ghcr.io/projectbeskar/virtrigaud/provider-proxmox:v0.2.0"
        service:
          port: 9090
    ```

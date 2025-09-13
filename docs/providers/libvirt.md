@@ -6,14 +6,18 @@ The LibVirt provider enables VirtRigaud to manage virtual machines on KVM/QEMU h
 
 This provider implements the VirtRigaud provider interface to manage VM lifecycle operations on LibVirt/KVM:
 
-- **Create**: Create VMs from existing images/templates with cloud-init support
-- **Delete**: Remove VMs and associated storage volumes  
+- **Create**: Create VMs from cloud images with comprehensive cloud-init support
+- **Delete**: Remove VMs and associated storage volumes (with cleanup)
 - **Power**: Start, stop, and reboot virtual machines
-- **Describe**: Query VM state, resource usage, and network information
-- **Reconfigure**: Modify CPU/memory resources (requires VM restart)
+- **Describe**: Query VM state, resource usage, guest agent information, and network details
+- **Reconfigure**: Modify VM resources (currently requires VM restart)
 - **Clone**: Create new VMs based on existing VM configurations
-- **Snapshot**: Create, delete, and revert VM snapshots
-- **ImagePrepare**: Import and prepare VM templates from various sources
+- **Snapshot**: Create, delete, and revert VM snapshots (storage-dependent)
+- **ImagePrepare**: Download and prepare cloud images from URLs
+- **Storage Management**: Advanced storage pool and volume operations
+- **Cloud-Init**: Full NoCloud datasource support with ISO generation
+- **QEMU Guest Agent**: Integration for enhanced guest OS monitoring
+- **Network Configuration**: Support for various network types and bridges
 
 ## Prerequisites
 
@@ -58,7 +62,7 @@ spec:
     name: libvirt-local-credentials
   runtime:
     mode: Remote
-    image: "virtrigaud/provider-libvirt:latest"
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.2.0"
     service:
       port: 9090
 ```
@@ -82,7 +86,7 @@ spec:
     name: libvirt-ssh-credentials
   runtime:
     mode: Remote
-    image: "virtrigaud/provider-libvirt:latest"
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.2.0"
     service:
       port: 9090
 ```
@@ -123,7 +127,7 @@ spec:
     name: libvirt-tls-credentials
   runtime:
     mode: Remote
-    image: "virtrigaud/provider-libvirt:latest"
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.2.0"
     service:
       port: 9090
 ```
