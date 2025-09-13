@@ -149,27 +149,28 @@ graph TB
 2. **Install VirtRigaud**:
    ```bash
    # Basic installation (CRDs included automatically)
-   helm install virtrigaud virtrigaud/virtrigaud -n virtrigaud --create-namespace
+   helm install virtrigaud virtrigaud/virtrigaud -n virtrigaud-system --create-namespace
    
    # With custom values
    helm install virtrigaud virtrigaud/virtrigaud \
-     -n virtrigaud --create-namespace \
+     -n virtrigaud-system --create-namespace \
      --set webhooks.enabled=true \
      --set providers.vsphere.enabled=true \
-     --set providers.libvirt.enabled=false \
-     --set providers.proxmox.enabled=true
+     --set providers.libvirt.enabled=true \
+     --set providers.proxmox.enabled=false \
+     --version 0.2.0
    
    # Skip CRDs if already installed separately
-   helm install virtrigaud virtrigaud/virtrigaud -n virtrigaud --create-namespace --skip-crds
+   helm install virtrigaud virtrigaud/virtrigaud -n virtrigaud-system --create-namespace --skip-crds
    ```
 
 3. **Verify the installation**:
    ```bash
    # Check pods
-   kubectl get pods -n virtrigaud
+   kubectl get pods -n virtrigaud-system
    
    # Check CRDs
-   kubectl get crd | grep virtrigaud
+   kubectl get crd | grep virtrigaud-system
    
    # Verify API conversion is working
    kubectl get crd virtualmachines.infra.virtrigaud.io -o yaml | yq '.spec.conversion'
@@ -354,8 +355,8 @@ If CRDs are missing after Helm install:
 
 3. **Re-install with CRDs**:
    ```bash
-   helm uninstall virtrigaud -n virtrigaud
-   helm install virtrigaud virtrigaud/virtrigaud -n virtrigaud --create-namespace
+   helm uninstall virtrigaud -n virtrigaud-system
+   helm install virtrigaud virtrigaud/virtrigaud -n virtrigaud-system --create-namespace
    ```
 
 ## Development
