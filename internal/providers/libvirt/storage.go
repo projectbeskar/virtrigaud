@@ -85,6 +85,18 @@ func (s *StorageProvider) EnsureDefaultStoragePool(ctx context.Context) error {
 	// Parse pool list to check if default pool exists
 	hasDefaultPool := strings.Contains(result.Stdout, "default")
 	
+	if hasDefaultPool {
+		// Check if the existing pool uses the correct path
+		poolInfo, err := s.virshProvider.runVirshCommand(ctx, "pool-dumpxml", "default")
+		if err == nil && strings.Contains(poolInfo.Stdout, "/var/lib/libvirt/images") {
+			// Old pool with wrong path - delete and recreate
+			log.Printf("INFO Deleting old default storage pool with incorrect path")
+			s.virshProvider.runVirshCommand(ctx, "pool-destroy", "default")
+			s.virshProvider.runVirshCommand(ctx, "pool-undefine", "default")
+			hasDefaultPool = false
+		}
+	}
+	
 	if !hasDefaultPool {
 		// Create default storage pool
 		log.Printf("INFO Creating default storage pool")
