@@ -238,6 +238,9 @@ func (p *Provider) Describe(ctx context.Context, id string) (contracts.DescribeR
 		return contracts.DescribeResponse{}, contracts.NewRetryableError("failed to get domain info", err)
 	}
 
+	// Initialize guest agent provider for enhanced guest information
+	guestAgent := NewGuestAgentProvider(p.virshProvider)
+
 	// Extract power state (libvirt uses different names than vSphere)
 	powerState := p.mapLibvirtPowerState(domainInfo["State"])
 	
@@ -265,6 +268,100 @@ func (p *Provider) Describe(ctx context.Context, id string) (contracts.DescribeR
 	hostname := domainInfo["guest_hostname"]
 	if hostname == "" {
 		hostname = domainInfo["Name"] // fallback to domain name
+	}
+
+	// If VM is running, try to get enhanced guest information via QEMU Guest Agent
+	if powerState == "On" {
+		if guestInfo, err := guestAgent.GetGuestInfo(ctx, id); err == nil {
+			// Enhanced Guest OS Information
+			if guestInfo.OSName != "" {
+				domainInfo["guest_os"] = guestInfo.OSName
+				domainInfo["guest_os_version"] = guestInfo.OSVersion
+				domainInfo["guest_os_pretty_name"] = guestInfo.OSPrettyName
+				domainInfo["guest_kernel_release"] = guestInfo.OSKernelRelease
+				domainInfo["guest_machine"] = guestInfo.OSMachine
+			}
+			
+			// Guest Agent Status and Version
+			domainInfo["guest_agent_status"] = guestInfo.AgentStatus
+			if guestInfo.AgentVersion != "" {
+				domainInfo["guest_agent_version"] = guestInfo.AgentVersion
+			}
+			
+			// Enhanced Network Information from Guest Agent
+			if len(guestInfo.NetworkInterfaces) > 0 {
+				var guestIPs []string
+				var interfaceNames []string
+				
+				for _, iface := range guestInfo.NetworkInterfaces {
+					interfaceNames = append(interfaceNames, iface.Name)
+					guestIPs = append(guestIPs, iface.IPAddresses...)
+					
+					// Add detailed network statistics
+					domainInfo[fmt.Sprintf("net_%s_rx_bytes", iface.Name)] = fmt.Sprintf("%d", iface.Statistics.RxBytes)
+					domainInfo[fmt.Sprintf("net_%s_tx_bytes", iface.Name)] = fmt.Sprintf("%d", iface.Statistics.TxBytes)
+					domainInfo[fmt.Sprintf("net_%s_rx_packets", iface.Name)] = fmt.Sprintf("%d", iface.Statistics.RxPackets)
+					domainInfo[fmt.Sprintf("net_%s_tx_packets", iface.Name)] = fmt.Sprintf("%d", iface.Statistics.TxPackets)
+					domainInfo[fmt.Sprintf("net_%s_mac", iface.Name)] = iface.HardwareAddr
+				}
+				
+				// Use guest agent IPs if available (more accurate than virsh)
+				if len(guestIPs) > 0 {
+					ips = guestIPs
+					primaryIP = guestIPs[0]
+				}
+				domainInfo["guest_network_interfaces"] = strings.Join(interfaceNames, ",")
+			}
+			
+			// Guest Filesystem Information
+			if len(guestInfo.Filesystems) > 0 {
+				var mountpoints []string
+				var totalDiskSpace uint64
+				var usedDiskSpace uint64
+				
+				for _, fs := range guestInfo.Filesystems {
+					mountpoints = append(mountpoints, fs.Mountpoint)
+					totalDiskSpace += fs.TotalBytes
+					usedDiskSpace += fs.UsedBytes
+					
+					// Add per-filesystem statistics
+					safeMountpoint := strings.ReplaceAll(strings.ReplaceAll(fs.Mountpoint, "/", "_"), "-", "_")
+					domainInfo[fmt.Sprintf("fs_%s_total", safeMountpoint)] = fmt.Sprintf("%d", fs.TotalBytes)
+					domainInfo[fmt.Sprintf("fs_%s_used", safeMountpoint)] = fmt.Sprintf("%d", fs.UsedBytes)
+					domainInfo[fmt.Sprintf("fs_%s_free", safeMountpoint)] = fmt.Sprintf("%d", fs.FreeBytes)
+					domainInfo[fmt.Sprintf("fs_%s_type", safeMountpoint)] = fs.Type
+				}
+				
+				domainInfo["guest_filesystems"] = strings.Join(mountpoints, ",")
+				domainInfo["guest_disk_total"] = fmt.Sprintf("%d", totalDiskSpace)
+				domainInfo["guest_disk_used"] = fmt.Sprintf("%d", usedDiskSpace)
+				domainInfo["guest_disk_free"] = fmt.Sprintf("%d", totalDiskSpace-usedDiskSpace)
+			}
+			
+			// Guest Time Information
+			if !guestInfo.GuestTime.IsZero() {
+				domainInfo["guest_time"] = guestInfo.GuestTime.Format(time.RFC3339)
+				domainInfo["guest_time_sync"] = "available"
+			}
+			
+			// Guest Users Information
+			if len(guestInfo.Users) > 0 {
+				var users []string
+				for _, user := range guestInfo.Users {
+					if user.Domain != "" {
+						users = append(users, fmt.Sprintf("%s@%s", user.User, user.Domain))
+					} else {
+						users = append(users, user.User)
+					}
+				}
+				domainInfo["guest_users"] = strings.Join(users, ",")
+				domainInfo["guest_user_count"] = fmt.Sprintf("%d", len(guestInfo.Users))
+			}
+			
+			log.Printf("INFO Enhanced guest information collected via QEMU Guest Agent for domain: %s", id)
+		} else {
+			log.Printf("DEBUG QEMU Guest Agent not available for domain %s: %v", id, err)
+		}
 	}
 	
 	// Add comprehensive monitoring fields to domain info for ProviderRaw
@@ -315,14 +412,83 @@ func (p *Provider) mapLibvirtPowerState(libvirtState string) contracts.PowerStat
 
 // getToolsStatus determines guest tools equivalent status
 func (p *Provider) getToolsStatus(domainInfo map[string]string) string {
-	// Check if we have guest agent connectivity
+	// Check QEMU Guest Agent status first (most accurate)
+	if agentStatus := domainInfo["guest_agent_status"]; agentStatus != "" {
+		switch agentStatus {
+		case "available":
+			return "toolsOk"
+		case "not_available":
+			return "toolsNotInstalled"
+		default:
+			return "toolsNotRunning"
+		}
+	}
+	
+	// Fallback: Check if we have guest agent connectivity indicators
 	if guestHost := domainInfo["guest_hostname"]; guestHost != "" {
 		return "toolsOk" // Guest agent is working
 	}
 	if guestIPs := domainInfo["guest_ip_addresses"]; guestIPs != "" {
 		return "toolsOk" // We can get IP addresses from guest
 	}
+	if guestOS := domainInfo["guest_os"]; guestOS != "" && guestOS != domainInfo["OS Type"] {
+		return "toolsOk" // We have enhanced guest OS info
+	}
+	
 	return "toolsNotInstalled" // No guest agent connectivity
+}
+
+// ExecuteGuestCommand executes a command inside the guest via QEMU Guest Agent
+func (p *Provider) ExecuteGuestCommand(ctx context.Context, id, command string) (string, error) {
+	log.Printf("INFO Executing guest command in VM %s: %s", id, command)
+
+	if p.virshProvider == nil {
+		return "", contracts.NewRetryableError("virsh provider not initialized", nil)
+	}
+
+	guestAgent := NewGuestAgentProvider(p.virshProvider)
+	result, err := guestAgent.ExecuteGuestCommand(ctx, id, command)
+	if err != nil {
+		return "", contracts.NewRetryableError("failed to execute guest command", err)
+	}
+
+	log.Printf("INFO Successfully executed guest command in VM: %s", id)
+	return result, nil
+}
+
+// SyncGuestTime synchronizes the guest time with the host
+func (p *Provider) SyncGuestTime(ctx context.Context, id string) error {
+	log.Printf("INFO Synchronizing guest time for VM: %s", id)
+
+	if p.virshProvider == nil {
+		return contracts.NewRetryableError("virsh provider not initialized", nil)
+	}
+
+	guestAgent := NewGuestAgentProvider(p.virshProvider)
+	if err := guestAgent.SetGuestTime(ctx, id); err != nil {
+		return contracts.NewRetryableError("failed to sync guest time", err)
+	}
+
+	log.Printf("INFO Successfully synchronized guest time for VM: %s", id)
+	return nil
+}
+
+// GetGuestInfo retrieves detailed guest information via QEMU Guest Agent
+func (p *Provider) GetGuestInfo(ctx context.Context, id string) (*GuestAgentInfo, error) {
+	log.Printf("INFO Retrieving detailed guest information for VM: %s", id)
+
+	if p.virshProvider == nil {
+		return nil, contracts.NewRetryableError("virsh provider not initialized", nil)
+	}
+
+	guestAgent := NewGuestAgentProvider(p.virshProvider)
+	guestInfo, err := guestAgent.GetGuestInfo(ctx, id)
+	if err != nil {
+		return nil, contracts.NewRetryableError("failed to get guest info", err)
+	}
+
+	log.Printf("INFO Successfully retrieved guest information for VM: %s", id)
+	return guestInfo, nil
 }
 
 // generateDomainXML creates libvirt domain XML from CreateRequest
