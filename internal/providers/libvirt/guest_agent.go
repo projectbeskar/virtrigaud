@@ -154,6 +154,7 @@ func (g *GuestAgentProvider) isGuestAgentAvailable(ctx context.Context, domainNa
 	}
 	
 	// Check if we got a valid response
+	log.Printf("DEBUG Guest agent ping response for %s: stdout=%s, stderr=%s", domainName, result.Stdout, result.Stderr)
 	if strings.Contains(result.Stdout, "return") {
 		log.Printf("DEBUG Guest agent is responsive for domain: %s", domainName)
 		return true
