@@ -104,8 +104,8 @@ func (s *StorageProvider) EnsureDefaultStoragePool(ctx context.Context) error {
 
 // createDefaultStoragePool creates the default storage pool
 func (s *StorageProvider) createDefaultStoragePool(ctx context.Context) error {
-	// Create pool directory on remote host
-	poolPath := "/var/lib/libvirt/images"
+	// Use user-writable directory for storage pool to avoid permission issues
+	poolPath := "/home/wrkode/libvirt-images"
 	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "mkdir", "-p", poolPath); err != nil {
 		return fmt.Errorf("failed to create pool directory: %w", err)
 	}
