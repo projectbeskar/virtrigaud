@@ -1,6 +1,4 @@
 # golangci-lint configuration for VirtRigaud
-version: 2
-
 run:
   timeout: 10m
 
