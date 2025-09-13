@@ -629,7 +629,7 @@ func (p *Provider) generateDomainXMLWithStorage(req contracts.CreateRequest, dis
     <acpi/>
     <apic/>
   </features>
-  <cpu mode='host-passthrough' check='none'/>
+  <cpu mode='host-model' check='partial'/>
   <clock offset='utc'>
     <timer name='rtc' tickpolicy='catchup'/>
     <timer name='pit' tickpolicy='delay'/>
@@ -740,7 +740,7 @@ func (p *Provider) generateDomainXML(req contracts.CreateRequest) (string, error
     <acpi/>
     <apic/>
   </features>
-  <cpu mode='host-passthrough' check='none'/>
+  <cpu mode='host-model' check='partial'/>
   <clock offset='utc'>
     <timer name='rtc' tickpolicy='catchup'/>
     <timer name='pit' tickpolicy='delay'/>
