@@ -65,7 +65,7 @@ func NewClient(config *Config) (*Client, error) {
 	hasTokenAuth := config.TokenID != "" && config.TokenSecret != ""
 
 	if !hasPasswordAuth && !hasTokenAuth {
-		return nil, fmt.Errorf("Proxmox authentication credentials are required. " +
+		return nil, fmt.Errorf("proxmox authentication credentials are required. " +
 			"Provide either:\n" +
 			"  • Username/Password: Set PVE_USERNAME and PVE_PASSWORD environment variables\n" +
 			"  • API Token: Set PVE_TOKEN_ID and PVE_TOKEN_SECRET environment variables (recommended)\n" +

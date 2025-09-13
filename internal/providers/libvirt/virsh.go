@@ -373,67 +373,7 @@ func (v *VirshProvider) listDomains(ctx context.Context) ([]VirshDomain, error) 
 	return domains, nil
 }
 
-// createDomain creates a new domain from XML definition
-func (v *VirshProvider) createDomain(ctx context.Context, xmlDef string) error {
-	log.Printf("INFO Creating domain from XML definition")
 
-	// Create temporary file for XML definition
-	tmpFile, err := os.CreateTemp("", "domain_*.xml")
-	if err != nil {
-		return fmt.Errorf("failed to create temp file: %w", err)
-	}
-	defer os.Remove(tmpFile.Name())
-	defer tmpFile.Close()
-
-	// Write XML definition
-	if _, err := tmpFile.WriteString(xmlDef); err != nil {
-		return fmt.Errorf("failed to write XML definition: %w", err)
-	}
-
-	if err := tmpFile.Close(); err != nil {
-		return fmt.Errorf("failed to close temp file: %w", err)
-	}
-
-	// Create domain using virsh
-	_, err = v.runVirshCommand(ctx, "create", tmpFile.Name())
-	if err != nil {
-		return fmt.Errorf("failed to create domain: %w", err)
-	}
-
-	log.Printf("INFO Successfully created domain")
-	return nil
-}
-
-// defineDomain defines a domain from XML (creates but doesn't start)
-func (v *VirshProvider) defineDomain(ctx context.Context, xmlDef string) error {
-	log.Printf("INFO Defining domain from XML definition")
-
-	// Create temporary file for XML definition
-	tmpFile, err := os.CreateTemp("", "domain_*.xml")
-	if err != nil {
-		return fmt.Errorf("failed to create temp file: %w", err)
-	}
-	defer os.Remove(tmpFile.Name())
-	defer tmpFile.Close()
-
-	// Write XML definition
-	if _, err := tmpFile.WriteString(xmlDef); err != nil {
-		return fmt.Errorf("failed to write XML definition: %w", err)
-	}
-
-	if err := tmpFile.Close(); err != nil {
-		return fmt.Errorf("failed to close temp file: %w", err)
-	}
-
-	// Define domain using virsh
-	_, err = v.runVirshCommand(ctx, "define", tmpFile.Name())
-	if err != nil {
-		return fmt.Errorf("failed to define domain: %w", err)
-	}
-
-	log.Printf("INFO Successfully defined domain")
-	return nil
-}
 
 // startDomain starts a defined domain
 func (v *VirshProvider) startDomain(ctx context.Context, domainName string) error {
@@ -487,15 +427,6 @@ func (v *VirshProvider) undefineDomain(ctx context.Context, domainName string) e
 	return nil
 }
 
-// getDomainXML retrieves the XML definition of a domain
-func (v *VirshProvider) getDomainXML(ctx context.Context, domainName string) (string, error) {
-	result, err := v.runVirshCommand(ctx, "dumpxml", domainName)
-	if err != nil {
-		return "", fmt.Errorf("failed to get domain XML for %s: %w", domainName, err)
-	}
-
-	return result.Stdout, nil
-}
 
 // getDomainInfo gets comprehensive information about a domain (enhanced monitoring)
 func (v *VirshProvider) getDomainInfo(ctx context.Context, domainName string) (map[string]string, error) {

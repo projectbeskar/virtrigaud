@@ -123,25 +123,6 @@ func (c *CloudInitProvider) createRemoteCloudInitISO(ctx context.Context, source
 	return nil
 }
 
-// createCloudInitISO creates an ISO9660 filesystem with cloud-init files
-func (c *CloudInitProvider) createCloudInitISO(ctx context.Context, sourceDir, isoPath string) error {
-	// Use genisoimage to create NoCloud datasource ISO
-	// The ISO must contain user-data and meta-data files at the root
-	result, err := c.virshProvider.runVirshCommand(ctx, "!", "genisoimage", 
-		"-output", isoPath,
-		"-volid", "cidata",     // Volume ID for NoCloud datasource
-		"-joliet",              // Enable Joliet extensions
-		"-rock",                // Enable Rock Ridge extensions  
-		"-input-charset", "utf-8",
-		sourceDir)
-	
-	if err != nil {
-		return fmt.Errorf("genisoimage failed: %w, output: %s", err, result.Stderr)
-	}
-	
-	log.Printf("DEBUG Created cloud-init ISO with genisoimage: %s", isoPath)
-	return nil
-}
 
 // generateMetaData creates basic metadata for the VM instance
 func (c *CloudInitProvider) generateMetaData(instanceID, hostname string) string {
@@ -192,14 +173,14 @@ func (c *CloudInitProvider) copyISOToRemote(ctx context.Context, localPath, doma
 	remotePath := fmt.Sprintf("%s/%s-cloud-init.iso", remoteDir, domainName)
 	
 	// Create remote directory
-	result, err := c.virshProvider.runVirshCommand(ctx, "!", "ssh", "wrkode@172.16.56.38", 
+	_, err := c.virshProvider.runVirshCommand(ctx, "!", "ssh", "wrkode@172.16.56.38", 
 		"mkdir", "-p", remoteDir)
 	if err != nil {
 		log.Printf("WARN Failed to create remote directory (may already exist): %v", err)
 	}
 	
 	// Copy ISO file using scp
-	result, err = c.virshProvider.runVirshCommand(ctx, "!", "scp", localPath, 
+	result, err := c.virshProvider.runVirshCommand(ctx, "!", "scp", localPath, 
 		fmt.Sprintf("wrkode@172.16.56.38:%s", remotePath))
 	
 	if err != nil {

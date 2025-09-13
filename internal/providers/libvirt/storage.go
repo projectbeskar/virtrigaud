@@ -91,8 +91,8 @@ func (s *StorageProvider) EnsureDefaultStoragePool(ctx context.Context) error {
 		if err == nil && strings.Contains(poolInfo.Stdout, "/var/lib/libvirt/images") {
 			// Old pool with wrong path - delete and recreate
 			log.Printf("INFO Deleting old default storage pool with incorrect path")
-			s.virshProvider.runVirshCommand(ctx, "pool-destroy", "default")
-			s.virshProvider.runVirshCommand(ctx, "pool-undefine", "default")
+			_, _ = s.virshProvider.runVirshCommand(ctx, "pool-destroy", "default")
+			_, _ = s.virshProvider.runVirshCommand(ctx, "pool-undefine", "default")
 			hasDefaultPool = false
 		}
 	}
@@ -150,7 +150,7 @@ func (s *StorageProvider) createDefaultStoragePool(ctx context.Context) error {
 	}
 
 	// Clean up temporary file
-	s.virshProvider.runVirshCommand(ctx, "!", "rm", "-f", poolFile)
+	_, _ = s.virshProvider.runVirshCommand(ctx, "!", "rm", "-f", poolFile)
 
 	// Build the pool (create directory structure)
 	if _, err := s.virshProvider.runVirshCommand(ctx, "pool-build", "default"); err != nil {
@@ -307,7 +307,7 @@ func (s *StorageProvider) DownloadCloudImage(ctx context.Context, imageURL, volu
 	}
 
 	// Clean up temporary file
-	s.virshProvider.runVirshCommand(ctx, "!", "rm", "-f", tempImage)
+	_, _ = s.virshProvider.runVirshCommand(ctx, "!", "rm", "-f", tempImage)
 
 	// Refresh storage pool to recognize new volume
 	if _, err := s.virshProvider.runVirshCommand(ctx, "pool-refresh", poolName); err != nil {

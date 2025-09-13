@@ -80,11 +80,11 @@ func main() {
 	healthMux := http.NewServeMux()
 	healthMux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("ok"))
+		_, _ = w.Write([]byte("ok"))
 	})
 	healthMux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("ready"))
+		_, _ = w.Write([]byte("ready"))
 	})
 	
 	httpServer := &http.Server{
@@ -115,5 +115,5 @@ func main() {
 	server.GracefulStop()
 	
 	log.Println("Shutting down HTTP health server...")
-	httpServer.Shutdown(context.Background())
+	_ = httpServer.Shutdown(context.Background())
 }

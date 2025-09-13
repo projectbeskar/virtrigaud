@@ -645,22 +645,6 @@ func (p *Provider) addCloudInitToConfigSpec(configSpec *types.VirtualMachineConf
 	return nil
 }
 
-// extractHostnameFromCloudInit extracts hostname from cloud-init YAML data
-func (p *Provider) extractHostnameFromCloudInit(cloudInitData string) string {
-	lines := strings.Split(cloudInitData, "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "hostname:") {
-			parts := strings.SplitN(line, ":", 2)
-			if len(parts) == 2 {
-				hostname := strings.TrimSpace(parts[1])
-				hostname = strings.Trim(hostname, "\"' ")
-				return hostname
-			}
-		}
-	}
-	return ""
-}
 
 // TaskStatus checks the status of an async task
 func (p *Provider) TaskStatus(ctx context.Context, req *providerv1.TaskStatusRequest) (*providerv1.TaskStatusResponse, error) {
