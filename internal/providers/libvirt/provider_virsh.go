@@ -458,10 +458,11 @@ func (p *Provider) createDomainDefinition(ctx context.Context, domainName, domai
 	// Create temporary file path on remote server
 	remotePath := fmt.Sprintf("/tmp/%s-domain.xml", domainName)
 	
-	// Write domain XML to remote file using SSH
-	result, err := p.virshProvider.runVirshCommand(ctx, "!", "ssh", "wrkode@172.16.56.38", 
-		"bash", "-c", fmt.Sprintf("cat > %s << 'EOF'\n%s\nEOF", remotePath, domainXML))
+	// Write domain XML to remote file using heredoc (similar to cloud-init approach)
+	heredocMarker := "EOF_DOMAIN_" + fmt.Sprintf("%d", time.Now().UnixNano())
+	command := fmt.Sprintf("cat > '%s' << '%s'\n%s\n%s", remotePath, heredocMarker, domainXML, heredocMarker)
 	
+	result, err := p.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", command)
 	if err != nil {
 		return fmt.Errorf("failed to create domain definition file: %w, output: %s", err, result.Stderr)
 	}
@@ -481,7 +482,7 @@ func (p *Provider) defineDomain(ctx context.Context, domainName string) error {
 	}
 	
 	// Clean up temporary XML file
-	_, cleanupErr := p.virshProvider.runVirshCommand(ctx, "!", "ssh", "wrkode@172.16.56.38", "rm", "-f", remotePath)
+	_, cleanupErr := p.virshProvider.runVirshCommand(ctx, "!", "rm", "-f", remotePath)
 	if cleanupErr != nil {
 		log.Printf("WARN Failed to cleanup domain XML file: %v", cleanupErr)
 	}
