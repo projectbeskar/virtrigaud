@@ -146,9 +146,9 @@ func (g *GuestAgentProvider) GetGuestInfo(ctx context.Context, domainName string
 
 // isGuestAgentAvailable checks if QEMU Guest Agent is available and responsive
 func (g *GuestAgentProvider) isGuestAgentAvailable(ctx context.Context, domainName string) bool {
-	// Try to ping the guest agent using heredoc to avoid quote issues
-	heredocCmd := fmt.Sprintf("virsh qemu-agent-command %s \"$(cat <<'EOF'\n{\"execute\":\"guest-ping\"}\nEOF\n)\"", domainName)
-	result, err := g.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", heredocCmd)
+	// Try to ping the guest agent - write JSON to temp file and use it
+	cmd := fmt.Sprintf("echo '{\"execute\":\"guest-ping\"}' > /tmp/guest-ping.json && virsh qemu-agent-command %s \"$(cat /tmp/guest-ping.json)\" && rm -f /tmp/guest-ping.json", domainName)
+	result, err := g.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", cmd)
 	if err != nil {
 		log.Printf("DEBUG Guest agent ping failed for %s: %v", domainName, err)
 		return false
