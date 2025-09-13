@@ -395,8 +395,7 @@ func (p *Provider) generateDomainXML(req contracts.CreateRequest) (string, error
     <controller type='virtio-serial' index='0'>
       <address type='pci' domain='0x0000' bus='0x00' slot='0x06' function='0x0'/>
     </controller>
-    <interface type='network'>
-      <source network='default'/>
+    <interface type='user'>
       <model type='virtio'/>
       <address type='pci' domain='0x0000' bus='0x00' slot='0x03' function='0x0'/>
     </interface>
