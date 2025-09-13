@@ -284,17 +284,23 @@ func (s *StorageProvider) DownloadCloudImage(ctx context.Context, imageURL, volu
 	// Convert and resize image if needed
 	if sizeGB > 0 {
 		log.Printf("INFO Converting and resizing image to %dGB", sizeGB)
-		convertCmd := fmt.Sprintf("qemu-img convert -f qcow2 -O qcow2 '%s' '%s' && qemu-img resize '%s' %dG",
-			tempImage, targetPath, targetPath, sizeGB)
-		result, err = s.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", convertCmd)
+		
+		// First convert the image
+		result, err = s.virshProvider.runVirshCommand(ctx, "!", "qemu-img", "convert", "-f", "qcow2", "-O", "qcow2", tempImage, targetPath)
 		if err != nil {
-			return nil, fmt.Errorf("failed to convert/resize image: %w, output: %s", err, result.Stderr)
+			return nil, fmt.Errorf("failed to convert image: %w, output: %s", err, result.Stderr)
+		}
+		
+		// Then resize it
+		sizeSpec := fmt.Sprintf("%dG", sizeGB)
+		result, err = s.virshProvider.runVirshCommand(ctx, "!", "qemu-img", "resize", targetPath, sizeSpec)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resize image: %w, output: %s", err, result.Stderr)
 		}
 	} else {
 		// Just convert to target location
 		log.Printf("INFO Converting image to qcow2 format")
-		convertCmd := fmt.Sprintf("qemu-img convert -f qcow2 -O qcow2 '%s' '%s'", tempImage, targetPath)
-		result, err = s.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", convertCmd)
+		result, err = s.virshProvider.runVirshCommand(ctx, "!", "qemu-img", "convert", "-f", "qcow2", "-O", "qcow2", tempImage, targetPath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert image: %w, output: %s", err, result.Stderr)
 		}
