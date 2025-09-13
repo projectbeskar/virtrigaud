@@ -1,7 +1,7 @@
 # Example values for mock provider
 image:
   repository: ghcr.io/projectbeskar/virtrigaud/provider-mock
-  tag: "0.1.1"
+  tag: "v0.2.0"
 
 env:
   - name: LOG_LEVEL

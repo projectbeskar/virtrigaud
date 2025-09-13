@@ -177,7 +177,7 @@ examples:
   proxmox:
     image:
       repository: ghcr.io/projectbeskar/virtrigaud/provider-proxmox
-      tag: "0.1.1"
+      tag: "v0.2.0"
     env:
       - name: PVE_ENDPOINT
         value: "https://pve.local:8006"
@@ -209,7 +209,7 @@ examples:
   vsphere:
     image:
       repository: ghcr.io/projectbeskar/virtrigaud/provider-vsphere
-      tag: "0.1.1"
+      tag: "v0.2.0"
     env:
       - name: VSPHERE_SERVER
         value: "vcenter.example.com"
@@ -230,7 +230,7 @@ examples:
   libvirt:
     image:
       repository: ghcr.io/projectbeskar/virtrigaud/provider-libvirt
-      tag: "0.1.1"
+      tag: "v0.2.0"
     env:
       - name: LIBVIRT_URI
         value: "qemu:///system"
@@ -246,7 +246,7 @@ examples:
   mock:
     image:
       repository: ghcr.io/projectbeskar/virtrigaud/provider-mock
-      tag: "0.1.1"
+      tag: "v0.2.0"
     env:
       - name: LOG_LEVEL
         value: "debug"

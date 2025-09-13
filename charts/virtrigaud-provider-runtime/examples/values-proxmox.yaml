@@ -4,7 +4,7 @@
 # Provider-specific configuration
 image:
   repository: ghcr.io/projectbeskar/virtrigaud/provider-proxmox
-  tag: "0.1.1"
+  tag: "v0.2.0"
   pullPolicy: IfNotPresent
 
 # Environment variables for Proxmox provider
