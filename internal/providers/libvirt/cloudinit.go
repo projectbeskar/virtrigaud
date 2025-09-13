@@ -47,14 +47,16 @@ func NewCloudInitProvider(virshProvider *VirshProvider) *CloudInitProvider {
 	}
 }
 
-// PrepareCloudInit creates cloud-init configuration and returns the ISO path
+// PrepareCloudInit creates cloud-init configuration remotely and returns the ISO path
 func (c *CloudInitProvider) PrepareCloudInit(ctx context.Context, config CloudInitConfig) (string, error) {
 	log.Printf("INFO Preparing cloud-init configuration for instance: %s", config.InstanceID)
 	
-	// Ensure temp directory exists
-	instanceDir := filepath.Join(c.tempDir, config.InstanceID)
-	if err := os.MkdirAll(instanceDir, 0755); err != nil {
-		return "", fmt.Errorf("failed to create cloud-init directory: %w", err)
+	// Work remotely on the libvirt host to avoid read-only filesystem issues
+	remoteDir := fmt.Sprintf("/tmp/virtrigaud-cloudinit/%s", config.InstanceID)
+	
+	// Create remote directory
+	if _, err := c.virshProvider.runVirshCommand(ctx, "!", "mkdir", "-p", remoteDir); err != nil {
+		return "", fmt.Errorf("failed to create remote cloud-init directory: %w", err)
 	}
 	
 	// Generate metadata if not provided
@@ -62,26 +64,60 @@ func (c *CloudInitProvider) PrepareCloudInit(ctx context.Context, config CloudIn
 		config.MetaData = c.generateMetaData(config.InstanceID, config.Hostname)
 	}
 	
-	// Write user-data file
-	userDataPath := filepath.Join(instanceDir, "user-data")
-	if err := os.WriteFile(userDataPath, []byte(config.UserData), 0644); err != nil {
-		return "", fmt.Errorf("failed to write user-data: %w", err)
+	// Write user-data file remotely
+	userDataPath := filepath.Join(remoteDir, "user-data")
+	if err := c.writeRemoteFile(ctx, userDataPath, config.UserData); err != nil {
+		return "", fmt.Errorf("failed to write remote user-data: %w", err)
 	}
 	
-	// Write meta-data file
-	metaDataPath := filepath.Join(instanceDir, "meta-data")
-	if err := os.WriteFile(metaDataPath, []byte(config.MetaData), 0644); err != nil {
-		return "", fmt.Errorf("failed to write meta-data: %w", err)
+	// Write meta-data file remotely
+	metaDataPath := filepath.Join(remoteDir, "meta-data")
+	if err := c.writeRemoteFile(ctx, metaDataPath, config.MetaData); err != nil {
+		return "", fmt.Errorf("failed to write remote meta-data: %w", err)
 	}
 	
-	// Create cloud-init ISO using genisoimage (NoCloud datasource)
-	isoPath := filepath.Join(instanceDir, "cloud-init.iso")
-	if err := c.createCloudInitISO(ctx, instanceDir, isoPath); err != nil {
-		return "", fmt.Errorf("failed to create cloud-init ISO: %w", err)
+	// Create cloud-init ISO using genisoimage (NoCloud datasource) on remote host
+	isoPath := filepath.Join(remoteDir, "cloud-init.iso")
+	if err := c.createRemoteCloudInitISO(ctx, remoteDir, isoPath); err != nil {
+		return "", fmt.Errorf("failed to create remote cloud-init ISO: %w", err)
 	}
 	
-	log.Printf("INFO Successfully created cloud-init ISO: %s", isoPath)
+	log.Printf("INFO Successfully created remote cloud-init ISO: %s", isoPath)
 	return isoPath, nil
+}
+
+// writeRemoteFile writes content to a file on the remote libvirt host
+func (c *CloudInitProvider) writeRemoteFile(ctx context.Context, remotePath, content string) error {
+	// Use echo with proper escaping to write content to remote file
+	// We use printf to handle special characters properly
+	_, err := c.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", 
+		fmt.Sprintf("printf '%s' > '%s'", strings.ReplaceAll(content, "'", "'\"'\"'"), remotePath))
+	if err != nil {
+		return fmt.Errorf("failed to write remote file %s: %w", remotePath, err)
+	}
+	
+	log.Printf("DEBUG Wrote remote file: %s", remotePath)
+	return nil
+}
+
+// createRemoteCloudInitISO creates an ISO9660 filesystem with cloud-init files on remote host
+func (c *CloudInitProvider) createRemoteCloudInitISO(ctx context.Context, sourceDir, isoPath string) error {
+	// Use genisoimage to create NoCloud datasource ISO on remote host
+	// The ISO must contain user-data and meta-data files at the root
+	result, err := c.virshProvider.runVirshCommand(ctx, "!", "genisoimage", 
+		"-output", isoPath,
+		"-volid", "cidata",     // Volume ID for NoCloud datasource
+		"-joliet",              // Enable Joliet extensions
+		"-rock",                // Enable Rock Ridge extensions  
+		"-input-charset", "utf-8",
+		sourceDir)
+	
+	if err != nil {
+		return fmt.Errorf("genisoimage failed on remote host: %w, output: %s", err, result.Stderr)
+	}
+	
+	log.Printf("DEBUG Created remote cloud-init ISO with genisoimage: %s", isoPath)
+	return nil
 }
 
 // createCloudInitISO creates an ISO9660 filesystem with cloud-init files
