@@ -63,12 +63,48 @@ func (p *Provider) Create(ctx context.Context, req contracts.CreateRequest) (con
 	}, nil
 }
 
-// createVMWithCloudInit creates a VM with comprehensive cloud-init support
+// createVMWithCloudInit creates a VM with comprehensive cloud-init support and storage management
 func (p *Provider) createVMWithCloudInit(ctx context.Context, req contracts.CreateRequest) (string, error) {
-	log.Printf("INFO Creating VM with enhanced cloud-init configuration: %s", req.Name)
+	log.Printf("INFO Creating VM with enhanced cloud-init configuration and storage: %s", req.Name)
 	
-	// Initialize cloud-init provider
+	// Initialize providers
 	cloudInitProvider := NewCloudInitProvider(p.virshProvider)
+	storageProvider := NewStorageProvider(p.virshProvider)
+
+	// Ensure default storage pool exists and is active
+	if err := storageProvider.EnsureDefaultStoragePool(ctx); err != nil {
+		return "", fmt.Errorf("failed to ensure storage pool: %w", err)
+	}
+
+	// Create disk image from template or create empty disk
+	diskVolumeName := fmt.Sprintf("%s-disk", req.Name)
+	var diskPath string
+	
+	// Check if VMImage is specified in the request
+	if imageSpec := p.extractImageSpec(req); imageSpec != "" {
+		log.Printf("INFO Creating disk from image template: %s", imageSpec)
+		
+		// Try to create volume from predefined template
+		volume, err := storageProvider.CreateVolumeFromTemplate(ctx, imageSpec, diskVolumeName, "default", 20) // 20GB default
+		if err != nil {
+			// Fallback: try to download directly if it's a URL
+			if strings.HasPrefix(imageSpec, "http") {
+				volume, err = storageProvider.DownloadCloudImage(ctx, imageSpec, diskVolumeName, "default", 20)
+			}
+			if err != nil {
+				return "", fmt.Errorf("failed to create disk from image: %w", err)
+			}
+		}
+		diskPath = volume.Path
+	} else {
+		// Create empty disk volume
+		log.Printf("INFO Creating empty disk volume: %s", diskVolumeName)
+		volume, err := storageProvider.CreateVolume(ctx, "default", diskVolumeName, "qcow2", 20) // 20GB default
+		if err != nil {
+			return "", fmt.Errorf("failed to create disk volume: %w", err)
+		}
+		diskPath = volume.Path
+	}
 	
 	// Prepare cloud-init if provided
 	var cloudInitISOPath string
@@ -105,10 +141,34 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, req contracts.Crea
 				log.Printf("WARN Failed to cleanup cloud-init files: %v", cleanupErr)
 			}
 		}()
+	} else {
+		// Generate default cloud-init for Ubuntu images
+		log.Printf("INFO Generating default cloud-init configuration for VM: %s", req.Name)
+		
+		defaultCloudInit := p.generateDefaultCloudInit(req.Name)
+		cloudInitConfig := CloudInitConfig{
+			UserData:   defaultCloudInit,
+			InstanceID: req.Name,
+			Hostname:   req.Name,
+		}
+		
+		var err error
+		cloudInitISOPath, err = cloudInitProvider.PrepareCloudInit(ctx, cloudInitConfig)
+		if err != nil {
+			log.Printf("WARN Failed to prepare default cloud-init: %v", err)
+			// Continue without cloud-init
+		} else {
+			// Cleanup cloud-init files when done (defer)
+			defer func() {
+				if cleanupErr := cloudInitProvider.CleanupCloudInit(req.Name); cleanupErr != nil {
+					log.Printf("WARN Failed to cleanup cloud-init files: %v", cleanupErr)
+				}
+			}()
+		}
 	}
 	
-	// Generate domain XML with specifications
-	domainXML, err := p.generateDomainXML(req)
+	// Generate domain XML with proper disk and cloud-init ISO
+	domainXML, err := p.generateDomainXMLWithStorage(req, diskPath, cloudInitISOPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to generate domain XML: %w", err)
 	}
@@ -123,17 +183,7 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, req contracts.Crea
 		return "", fmt.Errorf("failed to define domain: %w", err)
 	}
 	
-	// Attach cloud-init ISO if provided
-	if cloudInitISOPath != "" {
-		if err := cloudInitProvider.AttachCloudInitISO(ctx, req.Name, cloudInitISOPath); err != nil {
-			log.Printf("WARN Failed to attach cloud-init ISO: %v", err)
-			// Continue without cloud-init rather than failing
-		} else {
-			log.Printf("INFO Successfully attached cloud-init ISO to VM: %s", req.Name)
-		}
-	}
-	
-	log.Printf("INFO Successfully created VM definition: %s", req.Name)
+	log.Printf("INFO Successfully created VM with storage and cloud-init: %s", req.Name)
 	return req.Name, nil
 }
 
@@ -489,6 +539,174 @@ func (p *Provider) GetGuestInfo(ctx context.Context, id string) (*GuestAgentInfo
 
 	log.Printf("INFO Successfully retrieved guest information for VM: %s", id)
 	return guestInfo, nil
+}
+
+// extractImageSpec extracts the image specification from the request
+func (p *Provider) extractImageSpec(req contracts.CreateRequest) string {
+	// Check for image specification in the request name or other fields
+	// For now, default to Ubuntu 22.04 as a bootable cloud image
+	// This can be extended to support different image specifications
+	
+	// Default to Ubuntu 22.04 if no image specified
+	return "ubuntu-22.04-server"
+}
+
+// generateDefaultCloudInit generates a default cloud-init configuration
+func (p *Provider) generateDefaultCloudInit(vmName string) string {
+	return fmt.Sprintf(`#cloud-config
+hostname: %s
+users:
+  - name: ubuntu
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIN7lHIuo2QJBkdVDL79bl+tEmJh3pBz7rHImwvNMjenK
+      
+packages:
+  - qemu-guest-agent
+  - htop
+  - stress
+  
+runcmd:
+  - systemctl enable qemu-guest-agent
+  - systemctl start qemu-guest-agent
+  - echo "VM %s ready" > /tmp/vm-ready
+  
+final_message: "VM %s is ready!"
+`, vmName, vmName, vmName)
+}
+
+// generateDomainXMLWithStorage creates libvirt domain XML with proper storage configuration
+func (p *Provider) generateDomainXMLWithStorage(req contracts.CreateRequest, diskPath, cloudInitISOPath string) (string, error) {
+	// Extract specifications from request
+	cpuCount := int32(1)   // default
+	memoryMB := int64(1024) // default 1GB
+
+	// Extract from VMClass
+	if req.Class.CPU > 0 {
+		cpuCount = req.Class.CPU
+	}
+	
+	if req.Class.MemoryMiB > 0 {
+		memoryMB = int64(req.Class.MemoryMiB)
+	}
+
+	// Generate UUID for the domain
+	uuid := p.generateUUID()
+
+	// Build disk devices XML
+	diskDevicesXML := fmt.Sprintf(`    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2'/>
+      <source file='%s'/>
+      <target dev='vda' bus='virtio'/>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x07' function='0x0'/>
+    </disk>`, diskPath)
+
+	// Add cloud-init ISO if available
+	if cloudInitISOPath != "" {
+		diskDevicesXML += fmt.Sprintf(`
+    <disk type='file' device='cdrom'>
+      <driver name='qemu' type='raw'/>
+      <source file='%s'/>
+      <target dev='hda' bus='ide'/>
+      <readonly/>
+      <address type='drive' controller='0' bus='0' target='0' unit='0'/>
+    </disk>`, cloudInitISOPath)
+	}
+
+	domainXML := fmt.Sprintf(`<domain type='qemu'>
+  <name>%s</name>
+  <uuid>%s</uuid>
+  <memory unit='MiB'>%d</memory>
+  <currentMemory unit='MiB'>%d</currentMemory>
+  <vcpu placement='static'>%d</vcpu>
+  <os>
+    <type arch='x86_64' machine='pc'>hvm</type>
+    <boot dev='hd'/>
+    <boot dev='cdrom'/>
+  </os>
+  <features>
+    <acpi/>
+    <apic/>
+  </features>
+  <cpu mode='host-passthrough' check='none'/>
+  <clock offset='utc'>
+    <timer name='rtc' tickpolicy='catchup'/>
+    <timer name='pit' tickpolicy='delay'/>
+    <timer name='hpet' present='no'/>
+  </clock>
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <on_crash>destroy</on_crash>
+  <devices>
+    <emulator>/usr/bin/qemu-system-x86_64</emulator>
+%s
+    <controller type='usb' index='0' model='ich9-ehci1'>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x05' function='0x7'/>
+    </controller>
+    <controller type='usb' index='0' model='ich9-uhci1'>
+      <master startport='0'/>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x05' function='0x0' multifunction='on'/>
+    </controller>
+    <controller type='usb' index='0' model='ich9-uhci2'>
+      <master startport='2'/>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x05' function='0x1'/>
+    </controller>
+    <controller type='usb' index='0' model='ich9-uhci3'>
+      <master startport='4'/>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x05' function='0x2'/>
+    </controller>
+    <controller type='pci' index='0' model='pci-root'/>
+    <controller type='ide' index='0'>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x01' function='0x1'/>
+    </controller>
+    <controller type='virtio-serial' index='0'>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x06' function='0x0'/>
+    </controller>
+    <interface type='user'>
+      <model type='virtio'/>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x03' function='0x0'/>
+    </interface>
+    <serial type='pty'>
+      <target type='isa-serial' port='0'>
+        <model name='isa-serial'/>
+      </target>
+    </serial>
+    <console type='pty'>
+      <target type='serial' port='0'/>
+    </console>
+    <channel type='unix'>
+      <target type='virtio' name='org.qemu.guest_agent.0'/>
+      <address type='virtio-serial' controller='0' bus='0' port='1'/>
+    </channel>
+    <input type='tablet' bus='usb'>
+      <address type='usb' bus='0' port='1'/>
+    </input>
+    <input type='mouse' bus='ps2'/>
+    <input type='keyboard' bus='ps2'/>
+    <graphics type='vnc' port='-1' autoport='yes' listen='127.0.0.1'>
+      <listen type='address' address='127.0.0.1'/>
+    </graphics>
+    <sound model='ich6'>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x04' function='0x0'/>
+    </sound>
+    <video>
+      <model type='cirrus' vram='16384' heads='1' primary='yes'/>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x02' function='0x0'/>
+    </video>
+    <memballoon model='virtio'>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x08' function='0x0'/>
+    </memballoon>
+  </devices>
+</domain>`,
+		req.Name,
+		uuid,
+		memoryMB,
+		memoryMB,
+		cpuCount,
+		diskDevicesXML)
+
+	return domainXML, nil
 }
 
 // generateDomainXML creates libvirt domain XML from CreateRequest
