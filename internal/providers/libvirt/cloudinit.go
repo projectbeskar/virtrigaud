@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // CloudInitConfig represents cloud-init configuration for libvirt VMs
@@ -88,10 +89,12 @@ func (c *CloudInitProvider) PrepareCloudInit(ctx context.Context, config CloudIn
 
 // writeRemoteFile writes content to a file on the remote libvirt host
 func (c *CloudInitProvider) writeRemoteFile(ctx context.Context, remotePath, content string) error {
-	// Use echo with proper escaping to write content to remote file
-	// We use printf to handle special characters properly
-	_, err := c.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", 
-		fmt.Sprintf("printf '%s' > '%s'", strings.ReplaceAll(content, "'", "'\"'\"'"), remotePath))
+	// Use cat with heredoc to write content to remote file (handles multiline content)
+	// This approach avoids shell escaping issues with printf
+	heredocMarker := "EOF_CLOUDINIT_" + fmt.Sprintf("%d", time.Now().UnixNano())
+	command := fmt.Sprintf("cat > '%s' << '%s'\n%s\n%s", remotePath, heredocMarker, content, heredocMarker)
+	
+	_, err := c.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", command)
 	if err != nil {
 		return fmt.Errorf("failed to write remote file %s: %w", remotePath, err)
 	}
