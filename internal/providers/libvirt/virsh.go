@@ -228,44 +228,81 @@ type VirshResult struct {
 }
 
 // runVirshCommand executes a virsh command with proper environment and error handling
+// Special case: if first arg is "!", execute the remaining args as a direct command (not virsh)
 func (v *VirshProvider) runVirshCommand(ctx context.Context, args ...string) (*VirshResult, error) {
 	start := time.Now()
-
+	
 	var cmd *exec.Cmd
 	var command string
-
-	// Use sshpass for non-interactive SSH authentication if password is available
-	if v.credentials.Password != "" && strings.Contains(v.uri, "ssh://") {
-		// Build command: SSHPASS=password sshpass -e ssh -o [options] user@host virsh [args]
-		// This directly uses SSH with options rather than relying on config files
-
-		// Extract host and user from URI for direct SSH call
-		parsedURI, _ := url.Parse(v.uri)
-		host := parsedURI.Host
-		user := parsedURI.User.Username()
-
-		// Build SSH command with all necessary options
-		sshArgs := []string{
-			"-e", // Read password from SSHPASS environment variable
-			"ssh",
-			"-o", "StrictHostKeyChecking=accept-new",
-			"-o", "PasswordAuthentication=yes",
-			"-o", "PubkeyAuthentication=no",
-			"-o", "UserKnownHostsFile=/tmp/known_hosts",
-			"-o", "LogLevel=ERROR",
-			fmt.Sprintf("%s@%s", user, host),
-			"virsh",
+	
+	// Special handling for direct commands (prefixed with "!")
+	if len(args) > 0 && args[0] == "!" {
+		// Execute direct command (not through virsh)
+		directArgs := args[1:] // Remove the "!" prefix
+		if len(directArgs) == 0 {
+			return nil, fmt.Errorf("no command specified after '!' prefix")
 		}
-		sshArgs = append(sshArgs, args...)
-
-		cmd = exec.CommandContext(ctx, "sshpass", sshArgs...)
-		command = fmt.Sprintf("sshpass -e ssh %s@%s virsh %s", user, host, strings.Join(args, " "))
+		
+		if v.credentials.Password != "" && strings.Contains(v.uri, "ssh://") {
+			// For remote execution, use SSH
+			parsedURI, _ := url.Parse(v.uri)
+			host := parsedURI.Host
+			user := parsedURI.User.Username()
+			
+			sshArgs := []string{
+				"-e", // Read password from SSHPASS environment variable  
+				"ssh",
+				"-o", "StrictHostKeyChecking=accept-new",
+				"-o", "PasswordAuthentication=yes", 
+				"-o", "PubkeyAuthentication=no",
+				"-o", "UserKnownHostsFile=/tmp/known_hosts",
+				"-o", "LogLevel=ERROR",
+				fmt.Sprintf("%s@%s", user, host),
+			}
+			sshArgs = append(sshArgs, directArgs...)
+			
+			cmd = exec.CommandContext(ctx, "sshpass", sshArgs...)
+			command = fmt.Sprintf("sshpass -e ssh %s@%s %s", user, host, strings.Join(directArgs, " "))
+		} else {
+			// Local execution
+			cmd = exec.CommandContext(ctx, directArgs[0], directArgs[1:]...)
+			command = strings.Join(directArgs, " ")
+		}
 		cmd.Env = v.env
 	} else {
-		// Standard virsh command for local or key-based connections
-		cmd = exec.CommandContext(ctx, "virsh", args...)
-		command = "virsh " + strings.Join(args, " ")
-		cmd.Env = v.env
+		// Standard virsh command execution
+		if v.credentials.Password != "" && strings.Contains(v.uri, "ssh://") {
+			// Build command: SSHPASS=password sshpass -e ssh -o [options] user@host virsh [args]
+			// This directly uses SSH with options rather than relying on config files
+			
+			// Extract host and user from URI for direct SSH call
+			parsedURI, _ := url.Parse(v.uri)
+			host := parsedURI.Host
+			user := parsedURI.User.Username()
+			
+			// Build SSH command with all necessary options
+			sshArgs := []string{
+				"-e", // Read password from SSHPASS environment variable  
+				"ssh",
+				"-o", "StrictHostKeyChecking=accept-new",
+				"-o", "PasswordAuthentication=yes", 
+				"-o", "PubkeyAuthentication=no",
+				"-o", "UserKnownHostsFile=/tmp/known_hosts",
+				"-o", "LogLevel=ERROR",
+				fmt.Sprintf("%s@%s", user, host),
+				"virsh",
+			}
+			sshArgs = append(sshArgs, args...)
+			
+			cmd = exec.CommandContext(ctx, "sshpass", sshArgs...)
+			command = fmt.Sprintf("sshpass -e ssh %s@%s virsh %s", user, host, strings.Join(args, " "))
+			cmd.Env = v.env
+		} else {
+			// Standard virsh command for local or key-based connections
+			cmd = exec.CommandContext(ctx, "virsh", args...)
+			command = "virsh " + strings.Join(args, " ")
+			cmd.Env = v.env
+		}
 	}
 
 	var stdout, stderr bytes.Buffer

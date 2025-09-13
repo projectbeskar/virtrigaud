@@ -21,15 +21,16 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 )
 
 // Clean provider implementation using only virsh
 
-// Create creates a new VM using virsh
+// Create creates a new VM using virsh with full cloud-init support
 func (p *Provider) Create(ctx context.Context, req contracts.CreateRequest) (contracts.CreateResponse, error) {
-	log.Printf("INFO Creating VM: %s", req.Name)
+	log.Printf("INFO Creating VM with cloud-init support: %s", req.Name)
 
 	if p.virshProvider == nil {
 		return contracts.CreateResponse{}, contracts.NewRetryableError("virsh provider not initialized", nil)
@@ -50,13 +51,90 @@ func (p *Provider) Create(ctx context.Context, req contracts.CreateRequest) (con
 		}
 	}
 
-	// TODO: Generate domain XML and create via virsh
-	// For now, return success to test the basic flow
-	log.Printf("INFO Would create new domain: %s", req.Name)
+	// Create VM with cloud-init support
+	vmID, err := p.createVMWithCloudInit(ctx, req)
+	if err != nil {
+		return contracts.CreateResponse{}, contracts.NewRetryableError("failed to create VM", err)
+	}
 
+	log.Printf("INFO Successfully created VM: %s with ID: %s", req.Name, vmID)
 	return contracts.CreateResponse{
-		ID: req.Name,
+		ID: vmID,
 	}, nil
+}
+
+// createVMWithCloudInit creates a VM with comprehensive cloud-init support
+func (p *Provider) createVMWithCloudInit(ctx context.Context, req contracts.CreateRequest) (string, error) {
+	log.Printf("INFO Creating VM with enhanced cloud-init configuration: %s", req.Name)
+	
+	// Initialize cloud-init provider
+	cloudInitProvider := NewCloudInitProvider(p.virshProvider)
+	
+	// Prepare cloud-init if provided
+	var cloudInitISOPath string
+	if req.UserData != nil && req.UserData.CloudInitData != "" {
+		log.Printf("INFO Preparing cloud-init configuration for VM: %s", req.Name)
+		
+		// Extract hostname from cloud-init data
+		hostname := cloudInitProvider.ExtractHostnameFromCloudInit(req.UserData.CloudInitData)
+		if hostname == "" {
+			hostname = req.Name // fallback to VM name
+		}
+		
+		// Validate cloud-init data
+		if err := cloudInitProvider.ValidateCloudInitData(req.UserData.CloudInitData); err != nil {
+			return "", fmt.Errorf("invalid cloud-init data: %w", err)
+		}
+		
+		// Prepare cloud-init configuration
+		cloudInitConfig := CloudInitConfig{
+			UserData:   req.UserData.CloudInitData,
+			InstanceID: req.Name,
+			Hostname:   hostname,
+		}
+		
+		var err error
+		cloudInitISOPath, err = cloudInitProvider.PrepareCloudInit(ctx, cloudInitConfig)
+		if err != nil {
+			return "", fmt.Errorf("failed to prepare cloud-init: %w", err)
+		}
+		
+		// Cleanup cloud-init files when done (defer)
+		defer func() {
+			if cleanupErr := cloudInitProvider.CleanupCloudInit(req.Name); cleanupErr != nil {
+				log.Printf("WARN Failed to cleanup cloud-init files: %v", cleanupErr)
+			}
+		}()
+	}
+	
+	// Generate domain XML with specifications
+	domainXML, err := p.generateDomainXML(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to generate domain XML: %w", err)
+	}
+	
+	// Create domain definition file
+	if err := p.createDomainDefinition(ctx, req.Name, domainXML); err != nil {
+		return "", fmt.Errorf("failed to create domain definition: %w", err)
+	}
+	
+	// Define the domain in libvirt
+	if err := p.defineDomain(ctx, req.Name); err != nil {
+		return "", fmt.Errorf("failed to define domain: %w", err)
+	}
+	
+	// Attach cloud-init ISO if provided
+	if cloudInitISOPath != "" {
+		if err := cloudInitProvider.AttachCloudInitISO(ctx, req.Name, cloudInitISOPath); err != nil {
+			log.Printf("WARN Failed to attach cloud-init ISO: %v", err)
+			// Continue without cloud-init rather than failing
+		} else {
+			log.Printf("INFO Successfully attached cloud-init ISO to VM: %s", req.Name)
+		}
+	}
+	
+	log.Printf("INFO Successfully created VM definition: %s", req.Name)
+	return req.Name, nil
 }
 
 // Delete removes a VM using virsh
@@ -245,4 +323,169 @@ func (p *Provider) getToolsStatus(domainInfo map[string]string) string {
 		return "toolsOk" // We can get IP addresses from guest
 	}
 	return "toolsNotInstalled" // No guest agent connectivity
+}
+
+// generateDomainXML creates libvirt domain XML from CreateRequest
+func (p *Provider) generateDomainXML(req contracts.CreateRequest) (string, error) {
+	// Extract specifications from request
+	cpuCount := int32(1)   // default
+	memoryMB := int64(1024) // default 1GB
+	
+	// Extract from VMClass
+	if req.Class.CPU > 0 {
+		cpuCount = req.Class.CPU
+	}
+	
+	if req.Class.MemoryMiB > 0 {
+		memoryMB = int64(req.Class.MemoryMiB)
+	}
+	
+	// Basic domain XML template for cloud-init enabled VMs
+	domainXML := fmt.Sprintf(`<domain type='kvm'>
+  <name>%s</name>
+  <uuid>%s</uuid>
+  <memory unit='MiB'>%d</memory>
+  <currentMemory unit='MiB'>%d</currentMemory>
+  <vcpu placement='static'>%d</vcpu>
+  <os>
+    <type arch='x86_64' machine='pc-i440fx-8.2'>hvm</type>
+    <boot dev='hd'/>
+    <boot dev='cdrom'/>
+  </os>
+  <features>
+    <acpi/>
+    <apic/>
+    <vmport state='off'/>
+  </features>
+  <cpu mode='host-model' check='partial'/>
+  <clock offset='utc'>
+    <timer name='rtc' tickpolicy='catchup'/>
+    <timer name='pit' tickpolicy='delay'/>
+    <timer name='hpet' present='no'/>
+  </clock>
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <on_crash>destroy</on_crash>
+  <pm>
+    <suspend-to-mem enabled='no'/>
+    <suspend-to-disk enabled='no'/>
+  </pm>
+  <devices>
+    <emulator>/usr/bin/qemu-system-x86_64</emulator>
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2'/>
+      <source file='/var/lib/libvirt/images/%s.qcow2'/>
+      <target dev='vda' bus='virtio'/>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x07' function='0x0'/>
+    </disk>
+    <controller type='usb' index='0' model='ich9-ehci1'>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x05' function='0x7'/>
+    </controller>
+    <controller type='usb' index='0' model='ich9-uhci1'>
+      <master startport='0'/>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x05' function='0x0' multifunction='on'/>
+    </controller>
+    <controller type='usb' index='0' model='ich9-uhci2'>
+      <master startport='2'/>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x05' function='0x1'/>
+    </controller>
+    <controller type='usb' index='0' model='ich9-uhci3'>
+      <master startport='4'/>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x05' function='0x2'/>
+    </controller>
+    <controller type='pci' index='0' model='pci-root'/>
+    <controller type='ide' index='0'>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x01' function='0x1'/>
+    </controller>
+    <controller type='virtio-serial' index='0'>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x06' function='0x0'/>
+    </controller>
+    <interface type='network'>
+      <source network='default'/>
+      <model type='virtio'/>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x03' function='0x0'/>
+    </interface>
+    <serial type='pty'>
+      <target type='isa-serial' port='0'>
+        <model name='isa-serial'/>
+      </target>
+    </serial>
+    <console type='pty'>
+      <target type='serial' port='0'/>
+    </console>
+    <channel type='unix'>
+      <target type='virtio' name='org.qemu.guest_agent.0'/>
+      <address type='virtio-serial' controller='0' bus='0' port='1'/>
+    </channel>
+    <input type='tablet' bus='usb'>
+      <address type='usb' bus='0' port='1'/>
+    </input>
+    <input type='mouse' bus='ps2'/>
+    <input type='keyboard' bus='ps2'/>
+    <graphics type='vnc' port='-1' autoport='yes' listen='127.0.0.1'>
+      <listen type='address' address='127.0.0.1'/>
+    </graphics>
+    <sound model='ich6'>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x04' function='0x0'/>
+    </sound>
+    <video>
+      <model type='cirrus' vram='16384' heads='1' primary='yes'/>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x02' function='0x0'/>
+    </video>
+    <memballoon model='virtio'>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x08' function='0x0'/>
+    </memballoon>
+  </devices>
+</domain>`, 
+		req.Name,
+		p.generateUUID(),
+		memoryMB,
+		memoryMB,
+		cpuCount,
+		req.Name)
+	
+	return domainXML, nil
+}
+
+// generateUUID creates a simple UUID for the domain
+func (p *Provider) generateUUID() string {
+	// Simple UUID generation for demo - in production, use proper UUID library
+	return fmt.Sprintf("550e8400-e29b-41d4-a716-%012d", time.Now().UnixNano()%1000000000000)
+}
+
+// createDomainDefinition writes the domain XML to a temporary file on the remote server
+func (p *Provider) createDomainDefinition(ctx context.Context, domainName, domainXML string) error {
+	// Create temporary file path on remote server
+	remotePath := fmt.Sprintf("/tmp/%s-domain.xml", domainName)
+	
+	// Write domain XML to remote file using SSH
+	result, err := p.virshProvider.runVirshCommand(ctx, "!", "ssh", "wrkode@172.16.56.38", 
+		"bash", "-c", fmt.Sprintf("cat > %s << 'EOF'\n%s\nEOF", remotePath, domainXML))
+	
+	if err != nil {
+		return fmt.Errorf("failed to create domain definition file: %w, output: %s", err, result.Stderr)
+	}
+	
+	log.Printf("INFO Created domain definition file: %s", remotePath)
+	return nil
+}
+
+// defineDomain defines the domain in libvirt using the XML file
+func (p *Provider) defineDomain(ctx context.Context, domainName string) error {
+	// Define domain from XML file
+	remotePath := fmt.Sprintf("/tmp/%s-domain.xml", domainName)
+	
+	result, err := p.virshProvider.runVirshCommand(ctx, "define", remotePath)
+	if err != nil {
+		return fmt.Errorf("failed to define domain: %w, output: %s", err, result.Stderr)
+	}
+	
+	// Clean up temporary XML file
+	_, cleanupErr := p.virshProvider.runVirshCommand(ctx, "!", "ssh", "wrkode@172.16.56.38", "rm", "-f", remotePath)
+	if cleanupErr != nil {
+		log.Printf("WARN Failed to cleanup domain XML file: %v", cleanupErr)
+	}
+	
+	log.Printf("INFO Successfully defined domain: %s", domainName)
+	return nil
 }
