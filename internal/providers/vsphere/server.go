@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -500,6 +501,94 @@ func (p *Provider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureR
 	return nil, errors.NewUnimplemented("Reconfigure operation not yet implemented for vSphere")
 }
 
+// HardwareUpgrade upgrades the hardware version of a virtual machine
+func (p *Provider) HardwareUpgrade(ctx context.Context, req *providerv1.HardwareUpgradeRequest) (*providerv1.TaskResponse, error) {
+	if p.client == nil {
+		return nil, fmt.Errorf("vSphere client not configured")
+	}
+
+	p.logger.Info("Upgrading VM hardware version", "vm_id", req.Id, "target_version", req.TargetVersion)
+
+	// Set datacenter context for finder
+	datacenter, err := p.finder.DefaultDatacenter(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find default datacenter: %w", err)
+	}
+	p.finder.SetDatacenter(datacenter)
+
+	// Create VM reference from ID
+	vmRef := types.ManagedObjectReference{
+		Type:  "VirtualMachine",
+		Value: req.Id,
+	}
+
+	vm := object.NewVirtualMachine(p.client.Client, vmRef)
+
+	// Check current power state - VM must be powered off for hardware upgrade
+	powerState, err := vm.PowerState(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check VM power state: %w", err)
+	}
+
+	if powerState != types.VirtualMachinePowerStatePoweredOff {
+		return nil, fmt.Errorf("VM must be powered off for hardware upgrade, current state: %s", powerState)
+	}
+
+	// Get current VM configuration to check current hardware version
+	var vmMo mo.VirtualMachine
+	err = vm.Properties(ctx, vm.Reference(), []string{"config.version", "config.name"}, &vmMo)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get VM properties: %w", err)
+	}
+
+	currentVersion := vmMo.Config.Version
+	targetVersion := fmt.Sprintf("vmx-%d", req.TargetVersion)
+
+	p.logger.Info("Hardware version comparison",
+		"vm_id", req.Id,
+		"current_version", currentVersion,
+		"target_version", targetVersion)
+
+	// Check if upgrade is needed
+	if currentVersion == targetVersion {
+		p.logger.Info("VM already at target hardware version", "vm_id", req.Id, "version", targetVersion)
+		return &providerv1.TaskResponse{}, nil
+	}
+
+	// Validate target version is newer than current
+	if !p.isNewerHardwareVersion(currentVersion, targetVersion) {
+		return nil, fmt.Errorf("target version %s is not newer than current version %s", targetVersion, currentVersion)
+	}
+
+	// Perform the hardware upgrade
+	upgradeTask, err := vm.UpgradeVM(ctx, targetVersion)
+	if err != nil {
+		return nil, fmt.Errorf("failed to start hardware upgrade: %w", err)
+	}
+
+	// Wait for upgrade to complete
+	_, err = upgradeTask.WaitForResult(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("hardware upgrade failed: %w", err)
+	}
+
+	p.logger.Info("Hardware upgrade completed successfully",
+		"vm_id", req.Id,
+		"from_version", currentVersion,
+		"to_version", targetVersion)
+
+	return &providerv1.TaskResponse{}, nil
+}
+
+// isNewerHardwareVersion checks if target version is newer than current version
+func (p *Provider) isNewerHardwareVersion(current, target string) bool {
+	// Extract version numbers from vmx-XX format
+	var currentNum, targetNum int
+	fmt.Sscanf(current, "vmx-%d", &currentNum)
+	fmt.Sscanf(target, "vmx-%d", &targetNum)
+	return targetNum > currentNum
+}
+
 // Describe retrieves virtual machine information
 func (p *Provider) Describe(ctx context.Context, req *providerv1.DescribeRequest) (*providerv1.DescribeResponse, error) {
 	if p.client == nil {
@@ -790,15 +879,16 @@ func (p *Provider) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepar
 
 // VMSpec represents the parsed virtual machine specification
 type VMSpec struct {
-	Name         string
-	CPU          int32
-	MemoryMB     int64
-	DiskSizeGB   int64
-	DiskType     string
-	TemplateName string
-	NetworkName  string
-	Firmware     string
-	CloudInit    string // Cloud-init user data
+	Name            string
+	CPU             int32
+	MemoryMB        int64
+	DiskSizeGB      int64
+	DiskType        string
+	TemplateName    string
+	NetworkName     string
+	Firmware        string
+	HardwareVersion *int32 // VM hardware compatibility version
+	CloudInit       string // Cloud-init user data
 }
 
 // parseCreateRequest parses the JSON-encoded specifications from the gRPC request
@@ -810,9 +900,10 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*VMSpec, e
 	// Parse VMClass from JSON (contracts.VMClass structure)
 	if req.ClassJson != "" {
 		var vmClass struct {
-			CPU          int32  `json:"CPU"`
-			MemoryMiB    int32  `json:"MemoryMiB"`
-			Firmware     string `json:"Firmware"`
+			CPU          int32             `json:"CPU"`
+			MemoryMiB    int32             `json:"MemoryMiB"`
+			Firmware     string            `json:"Firmware"`
+			ExtraConfig  map[string]string `json:"ExtraConfig"`
 			DiskDefaults *struct {
 				Type    string `json:"Type"`
 				SizeGiB int32  `json:"SizeGiB"`
@@ -826,6 +917,19 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*VMSpec, e
 		spec.CPU = vmClass.CPU
 		spec.MemoryMB = int64(vmClass.MemoryMiB) // Convert MiB to MB (same value)
 		spec.Firmware = vmClass.Firmware
+
+		// Parse hardware version from ExtraConfig (vSphere-specific)
+		if vmClass.ExtraConfig != nil {
+			if hwVersionStr, exists := vmClass.ExtraConfig["vsphere.hardwareVersion"]; exists && hwVersionStr != "" {
+				if hwVersion, err := strconv.ParseInt(hwVersionStr, 10, 32); err == nil {
+					hwVersionInt32 := int32(hwVersion)
+					spec.HardwareVersion = &hwVersionInt32
+					p.logger.Info("Parsed hardware version from ExtraConfig", "version", hwVersion, "vm_name", spec.Name)
+				} else {
+					p.logger.Warn("Invalid hardware version in ExtraConfig", "value", hwVersionStr, "vm_name", spec.Name)
+				}
+			}
+		}
 
 		if vmClass.DiskDefaults != nil {
 			spec.DiskType = vmClass.DiskDefaults.Type
@@ -955,6 +1059,13 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 		} else {
 			configSpec.Firmware = string(types.GuestOsDescriptorFirmwareTypeBios)
 		}
+	}
+
+	// Set hardware version if specified
+	if spec.HardwareVersion != nil {
+		// Convert hardware version to VMX format (e.g., 21 -> "vmx-21")
+		configSpec.Version = fmt.Sprintf("vmx-%d", *spec.HardwareVersion)
+		p.logger.Info("Setting VM hardware version", "version", configSpec.Version, "vm_name", spec.Name)
 	}
 
 	// Configure network if specified

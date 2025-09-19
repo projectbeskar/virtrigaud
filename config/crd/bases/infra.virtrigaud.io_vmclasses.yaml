@@ -124,6 +124,15 @@ spec:
                 - upgrade
                 - uninstall
                 type: string
+              hardwareVersion:
+                description: |-
+                  HardwareVersion specifies the VM hardware compatibility version
+                  For vSphere: values like 10, 11, 13, 14, 15, 17, 18, 19, 20, 21
+                  Higher versions provide more features but require newer ESXi hosts
+                format: int32
+                maximum: 21
+                minimum: 4
+                type: integer
               memory:
                 anyOf:
                 - type: integer
