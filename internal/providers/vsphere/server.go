@@ -25,6 +25,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/vmware/govmomi"
 	"github.com/vmware/govmomi/find"
@@ -365,6 +366,9 @@ func (p *Provider) Power(ctx context.Context, req *providerv1.PowerRequest) (*pr
 		// RebootGuest is synchronous, so we don't need to wait for a task
 		p.logger.Info("Power operation completed successfully", "vm_id", req.Id, "operation", req.Op.String())
 		return &providerv1.TaskResponse{}, nil
+	case providerv1.PowerOp_POWER_OP_SHUTDOWN_GRACEFUL:
+		// Graceful shutdown using guest tools
+		return p.performGracefulShutdown(ctx, vm, req)
 	default:
 		return nil, fmt.Errorf("unsupported power operation: %s", req.Op.String())
 	}
@@ -379,6 +383,115 @@ func (p *Provider) Power(ctx context.Context, req *providerv1.PowerRequest) (*pr
 	p.logger.Info("Power operation completed successfully", "vm_id", req.Id, "operation", req.Op.String())
 
 	// Return empty task response since we completed synchronously
+	return &providerv1.TaskResponse{}, nil
+}
+
+// performGracefulShutdown performs a graceful shutdown using VMware guest tools
+func (p *Provider) performGracefulShutdown(ctx context.Context, vm *object.VirtualMachine, req *providerv1.PowerRequest) (*providerv1.TaskResponse, error) {
+	// Default timeout if not specified
+	gracefulTimeout := 60 * time.Second
+	if req.GracefulTimeoutSeconds > 0 {
+		gracefulTimeout = time.Duration(req.GracefulTimeoutSeconds) * time.Second
+	}
+
+	p.logger.Info("Attempting graceful shutdown", "vm_id", req.Id, "timeout_seconds", int(gracefulTimeout.Seconds()))
+
+	// Check if VMware Tools is running
+	toolsStatus, err := p.getVMwareToolsStatus(ctx, vm)
+	if err != nil {
+		p.logger.Warn("Failed to check VMware Tools status, falling back to power off", "vm_id", req.Id, "error", err)
+		return p.fallbackToPowerOff(ctx, vm, req.Id)
+	}
+
+	if toolsStatus != "toolsOk" && toolsStatus != "toolsOld" {
+		p.logger.Warn("VMware Tools not available for graceful shutdown, falling back to power off",
+			"vm_id", req.Id, "tools_status", toolsStatus)
+		return p.fallbackToPowerOff(ctx, vm, req.Id)
+	}
+
+	// Create a context with timeout for the graceful shutdown attempt
+	shutdownCtx, cancel := context.WithTimeout(ctx, gracefulTimeout)
+	defer cancel()
+
+	// Attempt graceful shutdown using guest tools
+	p.logger.Info("Initiating graceful shutdown using VMware Tools", "vm_id", req.Id)
+	err = vm.ShutdownGuest(shutdownCtx)
+	if err != nil {
+		p.logger.Warn("Graceful shutdown failed, falling back to power off", "vm_id", req.Id, "error", err)
+		return p.fallbackToPowerOff(ctx, vm, req.Id)
+	}
+
+	// Monitor shutdown progress
+	return p.waitForGracefulShutdown(ctx, vm, req.Id, gracefulTimeout)
+}
+
+// getVMwareToolsStatus checks the status of VMware Tools on the VM
+func (p *Provider) getVMwareToolsStatus(ctx context.Context, vm *object.VirtualMachine) (string, error) {
+	var vmObj mo.VirtualMachine
+	err := vm.Properties(ctx, vm.Reference(), []string{"guest.toolsStatus"}, &vmObj)
+	if err != nil {
+		return "", fmt.Errorf("failed to get VM properties: %w", err)
+	}
+
+	if vmObj.Guest == nil {
+		return "toolsNotInstalled", nil
+	}
+
+	return string(vmObj.Guest.ToolsStatus), nil
+}
+
+// waitForGracefulShutdown waits for the VM to shut down gracefully within the timeout
+func (p *Provider) waitForGracefulShutdown(ctx context.Context, vm *object.VirtualMachine, vmID string, timeout time.Duration) (*providerv1.TaskResponse, error) {
+	p.logger.Info("Waiting for graceful shutdown to complete", "vm_id", vmID, "timeout", timeout)
+
+	// Create a context with timeout
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	// Poll the power state until shutdown or timeout
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-waitCtx.Done():
+			// Timeout reached, fall back to hard power off
+			p.logger.Warn("Graceful shutdown timeout reached, falling back to power off", "vm_id", vmID)
+			return p.fallbackToPowerOff(ctx, vm, vmID)
+
+		case <-ticker.C:
+			powerState, err := vm.PowerState(ctx)
+			if err != nil {
+				p.logger.Error("Failed to check power state during graceful shutdown", "vm_id", vmID, "error", err)
+				continue
+			}
+
+			if powerState == types.VirtualMachinePowerStatePoweredOff {
+				p.logger.Info("Graceful shutdown completed successfully", "vm_id", vmID)
+				return &providerv1.TaskResponse{}, nil
+			}
+
+			p.logger.Debug("VM still shutting down", "vm_id", vmID, "power_state", powerState)
+		}
+	}
+}
+
+// fallbackToPowerOff performs a hard power off when graceful shutdown fails
+func (p *Provider) fallbackToPowerOff(ctx context.Context, vm *object.VirtualMachine, vmID string) (*providerv1.TaskResponse, error) {
+	p.logger.Info("Performing hard power off", "vm_id", vmID)
+
+	task, err := vm.PowerOff(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to start power off task: %w", err)
+	}
+
+	// Wait for power off to complete
+	_, err = task.WaitForResult(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("power off operation failed: %w", err)
+	}
+
+	p.logger.Info("Hard power off completed successfully", "vm_id", vmID)
 	return &providerv1.TaskResponse{}, nil
 }
 
@@ -644,7 +757,6 @@ func (p *Provider) addCloudInitToConfigSpec(configSpec *types.VirtualMachineConf
 
 	return nil
 }
-
 
 // TaskStatus checks the status of an async task
 func (p *Provider) TaskStatus(ctx context.Context, req *providerv1.TaskStatusRequest) (*providerv1.TaskStatusResponse, error) {

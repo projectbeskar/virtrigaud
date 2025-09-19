@@ -1,0 +1,66 @@
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: graceful-shutdown-example
+  namespace: default
+spec:
+  # Use graceful shutdown power state
+  powerState: OffGraceful
+  
+  providerRef:
+    name: vsphere-provider
+    namespace: virtrigaud-system
+  
+  classRef:
+    name: small-vm
+    namespace: virtrigaud-system
+  
+  imageRef:
+    name: ubuntu-22-04
+    namespace: virtrigaud-system
+  
+  networks:
+    - name: default-network
+  
+  # Configure graceful shutdown timeout
+  lifecycle:
+    gracefulShutdownTimeout: "90s"  # 90 seconds for graceful shutdown
+    
+    # Optional: Pre-stop hook to run before shutdown
+    preStop:
+      exec:
+        command:
+          - "/bin/bash"
+          - "-c"
+          - |
+            # Save any important data
+            sync
+            # Notify applications to shutdown gracefully
+            systemctl stop my-application || true
+            # Wait a moment for cleanup
+            sleep 5
+
+---
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: regular-shutdown-example
+  namespace: default
+spec:
+  # Regular hard shutdown
+  powerState: Off
+  
+  providerRef:
+    name: vsphere-provider
+    namespace: virtrigaud-system
+  
+  classRef:
+    name: small-vm
+    namespace: virtrigaud-system
+  
+  imageRef:
+    name: ubuntu-22-04
+    namespace: virtrigaud-system
+  
+  networks:
+    - name: default-network

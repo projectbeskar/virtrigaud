@@ -153,10 +153,17 @@ func (c *Client) Power(ctx context.Context, id string, op contracts.PowerOp) (ta
 		return "", fmt.Errorf("invalid power operation: %w", err)
 	}
 
-	resp, err := c.client.Power(ctx, &providerv1.PowerRequest{
+	powerReq := &providerv1.PowerRequest{
 		Id: id,
 		Op: grpcOp,
-	})
+	}
+
+	// Set default graceful timeout for graceful shutdown operations
+	if op == contracts.PowerOpShutdownGraceful {
+		powerReq.GracefulTimeoutSeconds = 60 // 60 seconds default
+	}
+
+	resp, err := c.client.Power(ctx, powerReq)
 	if err != nil {
 		return "", c.mapGRPCError("power", err)
 	}
@@ -295,6 +302,8 @@ func (c *Client) convertPowerOp(op contracts.PowerOp) (providerv1.PowerOp, error
 		return providerv1.PowerOp_POWER_OP_OFF, nil
 	case contracts.PowerOpReboot:
 		return providerv1.PowerOp_POWER_OP_REBOOT, nil
+	case contracts.PowerOpShutdownGraceful:
+		return providerv1.PowerOp_POWER_OP_SHUTDOWN_GRACEFUL, nil
 	default:
 		return providerv1.PowerOp_POWER_OP_UNSPECIFIED, fmt.Errorf("unsupported power operation: %s", op)
 	}

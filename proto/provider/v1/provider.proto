@@ -8,6 +8,7 @@ enum PowerOp {
   POWER_OP_ON = 1;
   POWER_OP_OFF = 2;
   POWER_OP_REBOOT = 3;
+  POWER_OP_SHUTDOWN_GRACEFUL = 4;  // Graceful shutdown using guest tools
 }
 
 // Task reference for async operations
@@ -53,6 +54,7 @@ message DeleteRequest {
 message PowerRequest {
   string id = 1;
   PowerOp op = 2;
+  int32 graceful_timeout_seconds = 3;  // Timeout for graceful operations (shutdown/reboot)
 }
 
 // Reconfigure virtual machine resources

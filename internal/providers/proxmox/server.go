@@ -211,6 +211,8 @@ func (p *Provider) Power(ctx context.Context, req *providerv1.PowerRequest) (*pr
 		operation = "stop"
 	case providerv1.PowerOp_POWER_OP_REBOOT:
 		operation = "reboot"
+	case providerv1.PowerOp_POWER_OP_SHUTDOWN_GRACEFUL:
+		operation = "shutdown" // Proxmox supports graceful shutdown
 	default:
 		return nil, errors.NewInvalidSpec("unsupported power operation: %v", req.Op)
 	}

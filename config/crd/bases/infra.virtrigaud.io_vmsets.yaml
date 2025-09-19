@@ -477,6 +477,7 @@ spec:
                         - enum:
                           - "On"
                           - "Off"
+                          - OffGraceful
                         - enum:
                           - "On"
                           - "Off"

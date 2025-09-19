@@ -337,6 +337,7 @@ spec:
                 - enum:
                   - "On"
                   - "Off"
+                  - OffGraceful
                 - enum:
                   - "On"
                   - "Off"
@@ -607,6 +608,7 @@ spec:
                 enum:
                 - "On"
                 - "Off"
+                - OffGraceful
                 type: string
               provider:
                 additionalProperties:

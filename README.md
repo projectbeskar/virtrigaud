@@ -28,43 +28,6 @@ All resources use the v1beta1 API with comprehensive OpenAPI validation and type
 ## Architecture
 
 VirtRigaud uses a **Remote Provider** architecture for optimal scalability and reliability:
-```
-                    ┌─────────────────────────────────────────┐
-                    │            Kubernetes Cluster           │
-                    │                                         │
-┌─────────────────┐ │ ┌─────────────────┐                    │
-│  VirtualMachine │ │ │   Manager       │                    │
-│      CRD        │─┼─│   Controller    │                    │
-└─────────────────┘ │ │                 │                    │
-┌─────────────────┐ │ │                 │                    │
-│    VMClass      │─┼─│                 │                    │
-│      CRD        │ │ │                 │                    │
-└─────────────────┘ │ │                 │                    │
-┌─────────────────┐ │ │                 │  gRPC              │
-│    VMImage      │─┼─│                 ├──────────────────► │
-│      CRD        │ │ │                 │                    │
-└─────────────────┘ │ └─────────────────┘                    │
-┌─────────────────┐ │                                        │
-│    Provider     │ │ ┌─────────────────────────────────────┐│
-│      CRD        │─┼─│        Provider Pods                 ││
-└─────────────────┘ │ │                                     ││
-                    │ │ ┌──────────┐ ┌─────────┐ ┌─────────┐││
-                    │ │ │ vSphere  │ │ Libvirt │ │Proxmox  │││
-                    │ │ │ Provider │ │ Provider│ │Provider │││
-                    │ │ │   Pod    │ │   Pod   │ │  Pod    │││
-                    │ │ └──────────┘ └─────────┘ └─────────┘││
-                    │ └─────────────────────────────────────┘│
-                    │                                        │
-                    │ ┌─────────────────────────────────────┐│
-                    │ │         External Infrastructure      ││
-                    │ │                                     ││
-                    │ │ ┌──────────┐ ┌─────────┐ ┌─────────┐││
-                    │ │ │ vSphere  │ │ Libvirt │ │Proxmox  │││
-                    │ │ │   ESXi   │ │   KVM   │ │   VE    │││
-                    │ │ └──────────┘ └─────────┘ └─────────┘││
-                    │ └─────────────────────────────────────┘│
-                    └─────────────────────────────────────────┘
-```
 
 ### Key Benefits
 
@@ -154,7 +117,6 @@ graph TB
    # With custom values
    helm install virtrigaud virtrigaud/virtrigaud \
      -n virtrigaud-system --create-namespace \
-     --set webhooks.enabled=true \
      --set providers.vsphere.enabled=true \
      --set providers.libvirt.enabled=true \
      --set providers.proxmox.enabled=false \

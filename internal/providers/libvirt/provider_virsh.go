@@ -66,7 +66,7 @@ func (p *Provider) Create(ctx context.Context, req contracts.CreateRequest) (con
 // createVMWithCloudInit creates a VM with comprehensive cloud-init support and storage management
 func (p *Provider) createVMWithCloudInit(ctx context.Context, req contracts.CreateRequest) (string, error) {
 	log.Printf("INFO Creating VM with enhanced cloud-init configuration and storage: %s", req.Name)
-	
+
 	// Initialize providers
 	cloudInitProvider := NewCloudInitProvider(p.virshProvider)
 	storageProvider := NewStorageProvider(p.virshProvider)
@@ -79,11 +79,11 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, req contracts.Crea
 	// Create disk image from template or create empty disk
 	diskVolumeName := fmt.Sprintf("%s-disk", req.Name)
 	var diskPath string
-	
+
 	// Check if VMImage is specified in the request
 	if imageSpec := p.extractImageSpec(req); imageSpec != "" {
 		log.Printf("INFO Creating disk from image template: %s", imageSpec)
-		
+
 		// Try to create volume from predefined template
 		volume, err := storageProvider.CreateVolumeFromTemplate(ctx, imageSpec, diskVolumeName, "default", 20) // 20GB default
 		if err != nil {
@@ -105,36 +105,36 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, req contracts.Crea
 		}
 		diskPath = volume.Path
 	}
-	
+
 	// Prepare cloud-init if provided
 	var cloudInitISOPath string
 	if req.UserData != nil && req.UserData.CloudInitData != "" {
 		log.Printf("INFO Preparing cloud-init configuration for VM: %s", req.Name)
-		
+
 		// Extract hostname from cloud-init data
 		hostname := cloudInitProvider.ExtractHostnameFromCloudInit(req.UserData.CloudInitData)
 		if hostname == "" {
 			hostname = req.Name // fallback to VM name
 		}
-		
+
 		// Validate cloud-init data
 		if err := cloudInitProvider.ValidateCloudInitData(req.UserData.CloudInitData); err != nil {
 			return "", fmt.Errorf("invalid cloud-init data: %w", err)
 		}
-		
+
 		// Prepare cloud-init configuration
 		cloudInitConfig := CloudInitConfig{
 			UserData:   req.UserData.CloudInitData,
 			InstanceID: req.Name,
 			Hostname:   hostname,
 		}
-		
+
 		var err error
 		cloudInitISOPath, err = cloudInitProvider.PrepareCloudInit(ctx, cloudInitConfig)
 		if err != nil {
 			return "", fmt.Errorf("failed to prepare cloud-init: %w", err)
 		}
-		
+
 		// Cleanup cloud-init files when done (defer)
 		defer func() {
 			if cleanupErr := cloudInitProvider.CleanupCloudInit(req.Name); cleanupErr != nil {
@@ -144,14 +144,14 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, req contracts.Crea
 	} else {
 		// Generate default cloud-init for Ubuntu images
 		log.Printf("INFO Generating default cloud-init configuration for VM: %s", req.Name)
-		
+
 		defaultCloudInit := p.generateDefaultCloudInit(req.Name)
 		cloudInitConfig := CloudInitConfig{
 			UserData:   defaultCloudInit,
 			InstanceID: req.Name,
 			Hostname:   req.Name,
 		}
-		
+
 		var err error
 		cloudInitISOPath, err = cloudInitProvider.PrepareCloudInit(ctx, cloudInitConfig)
 		if err != nil {
@@ -166,23 +166,23 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, req contracts.Crea
 			}()
 		}
 	}
-	
+
 	// Generate domain XML with proper disk and cloud-init ISO
 	domainXML, err := p.generateDomainXMLWithStorage(req, diskPath, cloudInitISOPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to generate domain XML: %w", err)
 	}
-	
+
 	// Create domain definition file
 	if err := p.createDomainDefinition(ctx, req.Name, domainXML); err != nil {
 		return "", fmt.Errorf("failed to create domain definition: %w", err)
 	}
-	
+
 	// Define the domain in libvirt
 	if err := p.defineDomain(ctx, req.Name); err != nil {
 		return "", fmt.Errorf("failed to define domain: %w", err)
 	}
-	
+
 	log.Printf("INFO Successfully created VM with storage and cloud-init: %s", req.Name)
 	return req.Name, nil
 }
@@ -248,6 +248,13 @@ func (p *Provider) Power(ctx context.Context, id string, op contracts.PowerOp) (
 			log.Printf("WARN Failed to stop domain for reboot: %v", stopErr)
 		}
 		err = p.virshProvider.startDomain(ctx, id)
+	case contracts.PowerOpShutdownGraceful:
+		// Graceful shutdown for libvirt - attempt guest shutdown, fallback to force stop
+		err = p.virshProvider.shutdownDomain(ctx, id)
+		if err != nil {
+			log.Printf("WARN Graceful shutdown failed for %s, falling back to force stop: %v", id, err)
+			err = p.virshProvider.stopDomain(ctx, id)
+		}
 	default:
 		return "", contracts.NewInvalidSpecError(fmt.Sprintf("unsupported power operation: %s", op), nil)
 	}
@@ -293,7 +300,7 @@ func (p *Provider) Describe(ctx context.Context, id string) (contracts.DescribeR
 
 	// Extract power state (libvirt uses different names than vSphere)
 	powerState := p.mapLibvirtPowerState(domainInfo["State"])
-	
+
 	// Extract IP addresses from enhanced domain info
 	var ips []string
 	if guestIPs := domainInfo["guest_ip_addresses"]; guestIPs != "" {
@@ -307,13 +314,13 @@ func (p *Provider) Describe(ctx context.Context, id string) (contracts.DescribeR
 		}
 		ips = validIPs
 	}
-	
+
 	// Get primary IP (first valid IP)
 	primaryIP := ""
 	if len(ips) > 0 {
 		primaryIP = ips[0]
 	}
-	
+
 	// Extract comprehensive information for ProviderRawJson (like vSphere)
 	hostname := domainInfo["guest_hostname"]
 	if hostname == "" {
@@ -331,22 +338,22 @@ func (p *Provider) Describe(ctx context.Context, id string) (contracts.DescribeR
 				domainInfo["guest_kernel_release"] = guestInfo.OSKernelRelease
 				domainInfo["guest_machine"] = guestInfo.OSMachine
 			}
-			
+
 			// Guest Agent Status and Version
 			domainInfo["guest_agent_status"] = guestInfo.AgentStatus
 			if guestInfo.AgentVersion != "" {
 				domainInfo["guest_agent_version"] = guestInfo.AgentVersion
 			}
-			
+
 			// Enhanced Network Information from Guest Agent
 			if len(guestInfo.NetworkInterfaces) > 0 {
 				var guestIPs []string
 				var interfaceNames []string
-				
+
 				for _, iface := range guestInfo.NetworkInterfaces {
 					interfaceNames = append(interfaceNames, iface.Name)
 					guestIPs = append(guestIPs, iface.IPAddresses...)
-					
+
 					// Add detailed network statistics
 					domainInfo[fmt.Sprintf("net_%s_rx_bytes", iface.Name)] = fmt.Sprintf("%d", iface.Statistics.RxBytes)
 					domainInfo[fmt.Sprintf("net_%s_tx_bytes", iface.Name)] = fmt.Sprintf("%d", iface.Statistics.TxBytes)
@@ -354,7 +361,7 @@ func (p *Provider) Describe(ctx context.Context, id string) (contracts.DescribeR
 					domainInfo[fmt.Sprintf("net_%s_tx_packets", iface.Name)] = fmt.Sprintf("%d", iface.Statistics.TxPackets)
 					domainInfo[fmt.Sprintf("net_%s_mac", iface.Name)] = iface.HardwareAddr
 				}
-				
+
 				// Use guest agent IPs if available (more accurate than virsh)
 				if len(guestIPs) > 0 {
 					ips = guestIPs
@@ -362,18 +369,18 @@ func (p *Provider) Describe(ctx context.Context, id string) (contracts.DescribeR
 				}
 				domainInfo["guest_network_interfaces"] = strings.Join(interfaceNames, ",")
 			}
-			
+
 			// Guest Filesystem Information
 			if len(guestInfo.Filesystems) > 0 {
 				var mountpoints []string
 				var totalDiskSpace uint64
 				var usedDiskSpace uint64
-				
+
 				for _, fs := range guestInfo.Filesystems {
 					mountpoints = append(mountpoints, fs.Mountpoint)
 					totalDiskSpace += fs.TotalBytes
 					usedDiskSpace += fs.UsedBytes
-					
+
 					// Add per-filesystem statistics
 					safeMountpoint := strings.ReplaceAll(strings.ReplaceAll(fs.Mountpoint, "/", "_"), "-", "_")
 					domainInfo[fmt.Sprintf("fs_%s_total", safeMountpoint)] = fmt.Sprintf("%d", fs.TotalBytes)
@@ -381,19 +388,19 @@ func (p *Provider) Describe(ctx context.Context, id string) (contracts.DescribeR
 					domainInfo[fmt.Sprintf("fs_%s_free", safeMountpoint)] = fmt.Sprintf("%d", fs.FreeBytes)
 					domainInfo[fmt.Sprintf("fs_%s_type", safeMountpoint)] = fs.Type
 				}
-				
+
 				domainInfo["guest_filesystems"] = strings.Join(mountpoints, ",")
 				domainInfo["guest_disk_total"] = fmt.Sprintf("%d", totalDiskSpace)
 				domainInfo["guest_disk_used"] = fmt.Sprintf("%d", usedDiskSpace)
 				domainInfo["guest_disk_free"] = fmt.Sprintf("%d", totalDiskSpace-usedDiskSpace)
 			}
-			
+
 			// Guest Time Information
 			if !guestInfo.GuestTime.IsZero() {
 				domainInfo["guest_time"] = guestInfo.GuestTime.Format(time.RFC3339)
 				domainInfo["guest_time_sync"] = "available"
 			}
-			
+
 			// Guest Users Information
 			if len(guestInfo.Users) > 0 {
 				var users []string
@@ -407,19 +414,19 @@ func (p *Provider) Describe(ctx context.Context, id string) (contracts.DescribeR
 				domainInfo["guest_users"] = strings.Join(users, ",")
 				domainInfo["guest_user_count"] = fmt.Sprintf("%d", len(guestInfo.Users))
 			}
-			
+
 			log.Printf("INFO Enhanced guest information collected via QEMU Guest Agent for domain: %s", id)
 		} else {
 			log.Printf("DEBUG QEMU Guest Agent not available for domain %s: %v", id, err)
 		}
 	}
-	
+
 	// Add comprehensive monitoring fields to domain info for ProviderRaw
 	domainInfo["primary_ip"] = primaryIP
 	domainInfo["hostname"] = hostname
 	domainInfo["tools_status"] = p.getToolsStatus(domainInfo)
 	domainInfo["power_state_mapped"] = string(powerState)
-	
+
 	// Ensure guest OS is properly set
 	if domainInfo["guest_os"] == "" && domainInfo["OS Type"] != "" {
 		domainInfo["guest_os"] = domainInfo["OS Type"]
@@ -430,7 +437,7 @@ func (p *Provider) Describe(ctx context.Context, id string) (contracts.DescribeR
 		Exists:      true,
 		PowerState:  string(powerState),
 		IPs:         ips,
-		ConsoleURL:  "", // TODO: Generate VNC/console URL if needed
+		ConsoleURL:  "",         // TODO: Generate VNC/console URL if needed
 		ProviderRaw: domainInfo, // Pass the enhanced domain info as provider-specific data
 	}
 
@@ -473,7 +480,7 @@ func (p *Provider) getToolsStatus(domainInfo map[string]string) string {
 			return "toolsNotRunning"
 		}
 	}
-	
+
 	// Fallback: Check if we have guest agent connectivity indicators
 	if guestHost := domainInfo["guest_hostname"]; guestHost != "" {
 		return "toolsOk" // Guest agent is working
@@ -484,7 +491,7 @@ func (p *Provider) getToolsStatus(domainInfo map[string]string) string {
 	if guestOS := domainInfo["guest_os"]; guestOS != "" && guestOS != domainInfo["OS Type"] {
 		return "toolsOk" // We have enhanced guest OS info
 	}
-	
+
 	return "toolsNotInstalled" // No guest agent connectivity
 }
 
@@ -546,7 +553,7 @@ func (p *Provider) extractImageSpec(req contracts.CreateRequest) string {
 	// Check for image specification in the request name or other fields
 	// For now, default to Ubuntu 22.04 as a bootable cloud image
 	// This can be extended to support different image specifications
-	
+
 	// Default to Ubuntu 22.04 if no image specified
 	return "ubuntu-22.04-server"
 }
@@ -579,14 +586,14 @@ final_message: "VM %s is ready!"
 // generateDomainXMLWithStorage creates libvirt domain XML with proper storage configuration
 func (p *Provider) generateDomainXMLWithStorage(req contracts.CreateRequest, diskPath, cloudInitISOPath string) (string, error) {
 	// Extract specifications from request
-	cpuCount := int32(1)   // default
+	cpuCount := int32(1)    // default
 	memoryMB := int64(1024) // default 1GB
 
 	// Extract from VMClass
 	if req.Class.CPU > 0 {
 		cpuCount = req.Class.CPU
 	}
-	
+
 	if req.Class.MemoryMiB > 0 {
 		memoryMB = int64(req.Class.MemoryMiB)
 	}
@@ -709,7 +716,6 @@ func (p *Provider) generateDomainXMLWithStorage(req contracts.CreateRequest, dis
 	return domainXML, nil
 }
 
-
 // generateUUID creates a simple UUID for the domain
 func (p *Provider) generateUUID() string {
 	// Simple UUID generation for demo - in production, use proper UUID library
@@ -720,16 +726,16 @@ func (p *Provider) generateUUID() string {
 func (p *Provider) createDomainDefinition(ctx context.Context, domainName, domainXML string) error {
 	// Create temporary file path on remote server
 	remotePath := fmt.Sprintf("/tmp/%s-domain.xml", domainName)
-	
+
 	// Write domain XML to remote file using heredoc (similar to cloud-init approach)
 	heredocMarker := "EOF_DOMAIN_" + fmt.Sprintf("%d", time.Now().UnixNano())
 	command := fmt.Sprintf("cat > '%s' << '%s'\n%s\n%s", remotePath, heredocMarker, domainXML, heredocMarker)
-	
+
 	result, err := p.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", command)
 	if err != nil {
 		return fmt.Errorf("failed to create domain definition file: %w, output: %s", err, result.Stderr)
 	}
-	
+
 	log.Printf("INFO Created domain definition file: %s", remotePath)
 	return nil
 }
@@ -738,18 +744,18 @@ func (p *Provider) createDomainDefinition(ctx context.Context, domainName, domai
 func (p *Provider) defineDomain(ctx context.Context, domainName string) error {
 	// Define domain from XML file
 	remotePath := fmt.Sprintf("/tmp/%s-domain.xml", domainName)
-	
+
 	result, err := p.virshProvider.runVirshCommand(ctx, "define", remotePath)
 	if err != nil {
 		return fmt.Errorf("failed to define domain: %w, output: %s", err, result.Stderr)
 	}
-	
+
 	// Clean up temporary XML file
 	_, cleanupErr := p.virshProvider.runVirshCommand(ctx, "!", "rm", "-f", remotePath)
 	if cleanupErr != nil {
 		log.Printf("WARN Failed to cleanup domain XML file: %v", cleanupErr)
 	}
-	
+
 	log.Printf("INFO Successfully defined domain: %s", domainName)
 	return nil
 }
