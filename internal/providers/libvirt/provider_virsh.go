@@ -80,16 +80,20 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, req contracts.Crea
 	diskVolumeName := fmt.Sprintf("%s-disk", req.Name)
 	var diskPath string
 
+	// Get disk size from VMClass (default to 20GB if not specified)
+	diskSizeGB := p.extractDiskSize(req)
+	log.Printf("INFO Using disk size: %dGB", diskSizeGB)
+
 	// Check if VMImage is specified in the request
 	if imageSpec := p.extractImageSpec(req); imageSpec != "" {
 		log.Printf("INFO Creating disk from image template: %s", imageSpec)
 
 		// Try to create volume from predefined template
-		volume, err := storageProvider.CreateVolumeFromTemplate(ctx, imageSpec, diskVolumeName, "default", 20) // 20GB default
+		volume, err := storageProvider.CreateVolumeFromTemplate(ctx, imageSpec, diskVolumeName, "default", diskSizeGB)
 		if err != nil {
 			// Fallback: try to download directly if it's a URL
 			if strings.HasPrefix(imageSpec, "http") {
-				volume, err = storageProvider.DownloadCloudImage(ctx, imageSpec, diskVolumeName, "default", 20)
+				volume, err = storageProvider.DownloadCloudImage(ctx, imageSpec, diskVolumeName, "default", diskSizeGB)
 			}
 			if err != nil {
 				return "", fmt.Errorf("failed to create disk from image: %w", err)
@@ -99,7 +103,7 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, req contracts.Crea
 	} else {
 		// Create empty disk volume
 		log.Printf("INFO Creating empty disk volume: %s", diskVolumeName)
-		volume, err := storageProvider.CreateVolume(ctx, "default", diskVolumeName, "qcow2", 20) // 20GB default
+		volume, err := storageProvider.CreateVolume(ctx, "default", diskVolumeName, "qcow2", diskSizeGB)
 		if err != nil {
 			return "", fmt.Errorf("failed to create disk volume: %w", err)
 		}
@@ -556,6 +560,19 @@ func (p *Provider) extractImageSpec(req contracts.CreateRequest) string {
 
 	// Default to Ubuntu 22.04 if no image specified
 	return "ubuntu-22.04-server"
+}
+
+// extractDiskSize extracts the disk size from VMClass DiskDefaults
+func (p *Provider) extractDiskSize(req contracts.CreateRequest) int {
+	// Check if VMClass has DiskDefaults with size specified
+	if req.Class.DiskDefaults != nil && req.Class.DiskDefaults.SizeGiB > 0 {
+		log.Printf("INFO Using disk size from VMClass: %dGB", req.Class.DiskDefaults.SizeGiB)
+		return int(req.Class.DiskDefaults.SizeGiB)
+	}
+
+	// Default to 20GB if not specified
+	log.Printf("INFO No disk size specified in VMClass, using default: 20GB")
+	return 20
 }
 
 // generateDefaultCloudInit generates a default cloud-init configuration

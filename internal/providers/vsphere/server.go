@@ -1145,9 +1145,17 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 
 	p.logger.Info("Virtual machine created successfully", "vm_id", vmID, "name", spec.Name)
 
+	// Resize disk if specified in VMClass
+	newVM := object.NewVirtualMachine(p.client.Client, vmRef)
+	if spec.DiskSizeGB > 0 {
+		if err := p.resizeVMDisk(ctx, newVM, spec.DiskSizeGB, vmID); err != nil {
+			p.logger.Warn("Failed to resize VM disk", "vm_id", vmID, "target_size_gb", spec.DiskSizeGB, "error", err)
+			// Don't fail the entire creation if disk resize fails
+		}
+	}
+
 	// Power on the VM if requested (VirtualMachine spec.powerState: "On")
 	// Note: This is a simple implementation - in production you might want to check the actual powerState from the request
-	newVM := object.NewVirtualMachine(p.client.Client, vmRef)
 	powerTask, err := newVM.PowerOn(ctx)
 	if err != nil {
 		p.logger.Warn("Failed to power on VM after creation", "vm_id", vmID, "error", err)
@@ -1162,4 +1170,75 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 	}
 
 	return vmID, nil
+}
+
+// resizeVMDisk resizes the primary disk of a VM to the specified size
+func (p *Provider) resizeVMDisk(ctx context.Context, vm *object.VirtualMachine, targetSizeGB int64, vmID string) error {
+	p.logger.Info("Resizing VM disk", "vm_id", vmID, "target_size_gb", targetSizeGB)
+
+	// Get current VM configuration to find the disk
+	var vmMo mo.VirtualMachine
+	err := vm.Properties(ctx, vm.Reference(), []string{"config.hardware.device"}, &vmMo)
+	if err != nil {
+		return fmt.Errorf("failed to get VM properties: %w", err)
+	}
+
+	// Find the primary disk (usually the first disk device)
+	var primaryDisk *types.VirtualDisk
+	for _, device := range vmMo.Config.Hardware.Device {
+		if disk, ok := device.(*types.VirtualDisk); ok {
+			primaryDisk = disk
+			break
+		}
+	}
+
+	if primaryDisk == nil {
+		return fmt.Errorf("no disk found in VM")
+	}
+
+	// Get current disk size in bytes
+	currentSizeKB := primaryDisk.CapacityInKB
+	currentSizeGB := currentSizeKB / (1024 * 1024) // Convert KB to GB
+	targetSizeKB := targetSizeGB * 1024 * 1024     // Convert GB to KB
+
+	p.logger.Info("Disk size comparison",
+		"vm_id", vmID,
+		"current_size_gb", currentSizeGB,
+		"target_size_gb", targetSizeGB)
+
+	// Only resize if target is larger than current (don't shrink)
+	if targetSizeGB <= currentSizeGB {
+		p.logger.Info("Disk already at or larger than target size", "vm_id", vmID, "current_gb", currentSizeGB, "target_gb", targetSizeGB)
+		return nil
+	}
+
+	// Create a new virtual disk device spec with updated size
+	newDisk := *primaryDisk
+	newDisk.CapacityInKB = targetSizeKB
+
+	// Create device change spec for disk resize
+	deviceSpec := &types.VirtualDeviceConfigSpec{
+		Operation: types.VirtualDeviceConfigSpecOperationEdit,
+		Device:    &newDisk,
+	}
+
+	// Create reconfigure spec
+	configSpec := &types.VirtualMachineConfigSpec{
+		DeviceChange: []types.BaseVirtualDeviceConfigSpec{deviceSpec},
+	}
+
+	// Perform the reconfiguration
+	task, err := vm.Reconfigure(ctx, *configSpec)
+	if err != nil {
+		return fmt.Errorf("failed to start disk resize task: %w", err)
+	}
+
+	// Wait for reconfiguration to complete
+	_, err = task.WaitForResult(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("disk resize task failed: %w", err)
+	}
+
+	p.logger.Info("Disk resized successfully", "vm_id", vmID, "from_gb", currentSizeGB, "to_gb", targetSizeGB)
+	return nil
 }
