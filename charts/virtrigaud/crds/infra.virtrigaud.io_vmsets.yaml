@@ -473,14 +473,11 @@ spec:
                         - name
                         type: object
                       powerState:
-                        allOf:
-                        - enum:
-                          - "On"
-                          - "Off"
-                        - enum:
-                          - "On"
-                          - "Off"
                         description: PowerState specifies the desired power state
+                        enum:
+                        - "On"
+                        - "Off"
+                        - OffGraceful
                         type: string
                       providerRef:
                         description: ProviderRef references the Provider that manages
