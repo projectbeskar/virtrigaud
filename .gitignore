@@ -35,6 +35,8 @@ go.work
 # Build artifacts
 dist/
 *.tgz
+
+# Development files
 libvirtVM.yaml
 libvirtVM-corrected.yaml
 vm-example.yaml

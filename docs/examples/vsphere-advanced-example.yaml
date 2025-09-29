@@ -1,5 +1,9 @@
-# Remote vSphere Provider Example
-# This demonstrates running the vSphere provider as a separate deployment
+# Advanced vSphere Provider Example (v0.2.1+)
+# This demonstrates running the vSphere provider with all v0.2.1 features:
+# - OffGraceful shutdown support
+# - Hardware version management
+# - Proper disk sizing
+# - Remote provider deployment
 
 # vSphere credentials
 apiVersion: v1
@@ -57,7 +61,7 @@ spec:
       port: 9090
 
 ---
-# VM Class for enterprise workloads
+# VM Class for enterprise workloads (v0.2.1+ features)
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMClass
 metadata:
@@ -69,11 +73,14 @@ spec:
   firmware: UEFI
   diskDefaults:
     type: thin
-    size: "100Gi"
+    size: "100Gi"  # v0.2.1: Disk size now properly respected
   guestToolsPolicy: install
   extraConfig:
+    # vSphere performance tuning
     "sched.cpu.latencySensitivity": "high"
     "numa.nodeAffinity": "0"
+    # v0.2.1: Hardware version management
+    "vsphere.hardwareVersion": "21"  # ESXi 8.0+ compatibility
 
 ---
 # VM Image from vSphere template
@@ -144,6 +151,22 @@ spec:
   
   powerState: "On"
   
+  # v0.2.1: Enhanced lifecycle management
+  lifecycle:
+    gracefulShutdownTimeout: "120s"  # Allow 2 minutes for graceful shutdown
+    preStop:
+      exec:
+        command:
+        - "/bin/bash"
+        - "-c"
+        - |
+          # Graceful application shutdown
+          systemctl stop nginx
+          systemctl stop my-web-app
+          # Sync filesystems
+          sync
+          sleep 5
+  
   userData:
     cloudInit:
       inline: |
@@ -203,3 +226,11 @@ spec:
   - provider:vsphere
   - runtime:remote
   - datacenter:dc1
+
+---
+# Example: How to gracefully shutdown this VM (v0.2.1+)
+# kubectl patch virtualmachine web-server-remote --type='merge' -p='{"spec":{"powerState":"OffGraceful"}}'
+# This will:
+# 1. Execute the preStop hook (stop nginx, stop my-web-app, sync)
+# 2. Attempt graceful shutdown using VMware Tools (120s timeout)
+# 3. Fall back to hard power off if graceful shutdown fails

@@ -1,4 +1,9 @@
-# Complete example showing how to create a VM with vSphere provider
+# Complete example showing how to create a VM with vSphere provider (v0.2.1+)
+# Demonstrates all major v0.2.1 features:
+# - OffGraceful shutdown support
+# - Hardware version management  
+# - Proper disk sizing
+# - Enhanced lifecycle management
 
 # First, create the credentials secret
 apiVersion: v1
@@ -35,7 +40,7 @@ spec:
       port: 9090
 
 ---
-# Define a VM class for resource allocation
+# Define a VM class for resource allocation (v0.2.1+ features)
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMClass
 metadata:
@@ -47,11 +52,14 @@ spec:
   firmware: UEFI
   diskDefaults:
     type: thin
-    size: "40Gi"
+    size: "40Gi"  # v0.2.1: Disk size now properly respected across all providers
   guestToolsPolicy: install
   extraConfig:
+    # Time synchronization
     "tools.syncTime": "true"
     "time.synchronize.continue": "true"
+    # v0.2.1: Hardware version management (vSphere only)
+    "vsphere.hardwareVersion": "19"  # ESXi 7.0 U2+ compatibility
 
 ---
 # Define the VM image/template
@@ -104,6 +112,22 @@ spec:
       sizeGiB: 100
       type: thin
   powerState: "On"
+  
+  # v0.2.1: Enhanced lifecycle management
+  lifecycle:
+    gracefulShutdownTimeout: "90s"  # 90 seconds for graceful shutdown
+    preStop:
+      exec:
+        command:
+        - "/bin/bash"
+        - "-c"
+        - |
+          # Graceful shutdown sequence
+          echo "$(date): Starting graceful shutdown" >> /var/log/shutdown.log
+          systemctl stop apache2 || true
+          sync
+          echo "$(date): Graceful shutdown complete" >> /var/log/shutdown.log
+  
   userData:
     cloudInit:
       inline: |
@@ -143,3 +167,18 @@ spec:
     datastore: datastore1
     cluster: compute-cluster-a
     folder: demo-vms
+
+---
+# v0.2.1 Usage Examples:
+
+# 1. Graceful shutdown (uses preStop hook + VMware Tools):
+# kubectl patch virtualmachine demo-web-server --type='merge' -p='{"spec":{"powerState":"OffGraceful"}}'
+
+# 2. Regular hard shutdown:
+# kubectl patch virtualmachine demo-web-server --type='merge' -p='{"spec":{"powerState":"Off"}}'
+
+# 3. Start VM:
+# kubectl patch virtualmachine demo-web-server --type='merge' -p='{"spec":{"powerState":"On"}}'
+
+# 4. Check VM status:
+# kubectl get virtualmachine demo-web-server -o yaml

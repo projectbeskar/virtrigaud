@@ -18,17 +18,31 @@ spec:
       networkRef:
         name: app-network
       ipAddress: ""  # Empty for DHCP
-  storage:
-    disks:
-      - name: data-disk
-        size: 50Gi
-        type: thin
+  disks:
+    - name: data-disk
+      sizeGiB: 50  # v0.2.1: Uses sizeGiB instead of size
+      type: thin
+  
+  # v0.2.1: Enhanced lifecycle management
+  lifecycle:
+    gracefulShutdownTimeout: "60s"  # 1 minute for simple applications
+    preStop:
+      exec:
+        command:
+        - "/bin/bash"
+        - "-c"
+        - |
+          # Simple graceful shutdown
+          systemctl stop nginx || true
+          sync
+  
   userData:
     cloudInit:
       inline: |
         #cloud-config
         packages:
           - nginx
+          - open-vm-tools  # v0.2.1: Required for graceful shutdown
         runcmd:
           - [ systemctl, enable, --now, nginx ]
         users:
@@ -38,7 +52,10 @@ spec:
             ssh_authorized_keys:
               - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC... # Add your SSH key here
   powerState: On
-  metadata:
-    labels:
-      environment: demo
-      application: web
+  tags:
+    - environment:demo
+    - application:web
+    - version:v0.2.1
+
+# v0.2.1 Usage Example:
+# Test graceful shutdown: kubectl patch virtualmachine demo-web-01 --type='merge' -p='{"spec":{"powerState":"OffGraceful"}}'
