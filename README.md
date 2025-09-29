@@ -184,25 +184,25 @@ graph TB
 2. **Create VM resources using the Provider**:
    ```bash
    # Apply VM definition that references the provider
-   kubectl apply -f examples/complete-example.yaml
+   kubectl apply -f docs/examples/complete-example.yaml
    
    # Proxmox VE example (v1beta1 API)
-   kubectl apply -f examples/proxmox-complete-example.yaml
+   kubectl apply -f docs/examples/proxmox-complete-example.yaml
    
-   # Only v1beta1 API is supported as of v0.2.0
+   # Only v1beta1 API is supported as of v0.2.1
    
    # Multi-provider example (vSphere, Libvirt, and Proxmox)
-   kubectl apply -f examples/multi-provider-example.yaml
+   kubectl apply -f docs/examples/multi-provider-example.yaml
    
    # Or step by step:
    kubectl create secret generic vsphere-creds \
      --from-literal=username=administrator@vsphere.local \
      --from-literal=password=your-password
-   kubectl apply -f examples/provider-vsphere.yaml
-   kubectl apply -f examples/vmclass-small.yaml
-   kubectl apply -f examples/vmimage-ubuntu.yaml
-   kubectl apply -f examples/vmnetwork-app.yaml
-   kubectl apply -f examples/vm-ubuntu-small.yaml
+   kubectl apply -f docs/examples/provider-vsphere.yaml
+   kubectl apply -f docs/examples/vmclass-small.yaml
+   kubectl apply -f docs/examples/vmimage-ubuntu.yaml
+   kubectl apply -f docs/examples/vmnetwork-app.yaml
+   kubectl apply -f docs/examples/vm-ubuntu-small.yaml
    ```
 
 2. **Monitor VM creation**:
@@ -210,7 +210,7 @@ graph TB
    kubectl get virtualmachine -w
    ```
 
-For detailed instructions, see [QUICKSTART.md](QUICKSTART.md).
+For detailed instructions, see [Quick Start Guide](docs/getting-started/quickstart.md).
 
 ## CRDs
 
@@ -326,7 +326,7 @@ Test GitHub Actions workflows locally before pushing to save costs and catch iss
 ./hack/test-release-locally.sh v0.2.0-test
 ```
 
-See [TESTING_WORKFLOWS_LOCALLY.md](TESTING_WORKFLOWS_LOCALLY.md) for detailed instructions.
+See [Testing Workflows Locally](docs/TESTING_WORKFLOWS_LOCALLY.md) for detailed instructions.
 
 ### Building
 
