@@ -384,6 +384,8 @@ make run
 - [Quick Start Guide](docs/getting-started/quickstart.md) - Get started in 15 minutes
 - [CRD Reference](docs/CRDs.md) - Complete API documentation
 - [Examples](docs/EXAMPLES.md) - Practical examples and use cases
+- [CLI Tools Reference](docs/CLI.md) - Command-line interface guide
+- [Upgrade Guide](docs/UPGRADE.md) - Version upgrade procedures
 - [Provider Development](docs/PROVIDERS.md) - How to add new hypervisors
 - [Provider Catalog](docs/catalog.md) - Browse available providers
 - [Provider Tutorial](docs/providers/tutorial.md) - Complete provider development guide

@@ -54,6 +54,30 @@ help: ## Display this help.
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	$(CONTROLLER_GEN) rbac:roleName=manager-role crd webhook paths="./api/infra.virtrigaud.io/v1beta1" paths="./internal/controller/..." output:crd:artifacts:config=config/crd/bases
 
+.PHONY: sync-helm-crds
+sync-helm-crds: manifests ## Sync generated CRDs to Helm chart directory
+	@echo "Syncing CRDs from config/crd/bases/ to charts/virtrigaud/crds/"
+	@cp config/crd/bases/*.yaml charts/virtrigaud/crds/
+	@echo "✅ CRDs synced successfully"
+
+.PHONY: verify-helm-crds
+verify-helm-crds: manifests ## Verify Helm chart CRDs are in sync with generated CRDs
+	@echo "Verifying Helm chart CRDs are in sync..."
+	@temp_dir=$$(mktemp -d); \
+	cp config/crd/bases/*.yaml "$$temp_dir/"; \
+	if ! diff -r "$$temp_dir" charts/virtrigaud/crds/ > /dev/null 2>&1; then \
+		echo "❌ Helm chart CRDs are out of sync with generated CRDs!"; \
+		echo "Run 'make sync-helm-crds' to fix this."; \
+		echo ""; \
+		echo "Differences:"; \
+		diff -r "$$temp_dir" charts/virtrigaud/crds/ || true; \
+		rm -rf "$$temp_dir"; \
+		exit 1; \
+	else \
+		echo "✅ Helm chart CRDs are in sync"; \
+		rm -rf "$$temp_dir"; \
+	fi
+
 .PHONY: dev-deploy
 dev-deploy: ## Deploy to local Kind cluster for development
 	./hack/dev-deploy.sh deploy
@@ -293,12 +317,24 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 	rm Dockerfile.cross
 
 .PHONY: build-installer
-build-installer: manifests generate kustomize ## Generate a consolidated YAML with CRDs and deployment.
+build-installer: sync-helm-crds generate kustomize ## Generate a consolidated YAML with CRDs and deployment.
 	mkdir -p dist
 	cd config/manager && $(KUSTOMIZE) edit set image controller=${IMG}
 	$(KUSTOMIZE) build config/default > dist/install.yaml
 
 ##@ Deployment
+
+.PHONY: helm-package
+helm-package: sync-helm-crds ## Package Helm chart with latest CRDs
+	@echo "Packaging Helm chart with synced CRDs..."
+	@helm package charts/virtrigaud -d dist/
+	@echo "✅ Helm chart packaged successfully"
+
+.PHONY: helm-lint
+helm-lint: sync-helm-crds ## Lint Helm chart with latest CRDs
+	@echo "Linting Helm chart..."
+	@helm lint charts/virtrigaud
+	@echo "✅ Helm chart lint passed"
 
 ifndef ignore-not-found
   ignore-not-found = false
