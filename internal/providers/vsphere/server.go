@@ -584,8 +584,17 @@ func (p *Provider) HardwareUpgrade(ctx context.Context, req *providerv1.Hardware
 func (p *Provider) isNewerHardwareVersion(current, target string) bool {
 	// Extract version numbers from vmx-XX format
 	var currentNum, targetNum int
-	fmt.Sscanf(current, "vmx-%d", &currentNum)
-	fmt.Sscanf(target, "vmx-%d", &targetNum)
+
+	// Parse current version, default to 0 if parsing fails
+	if _, err := fmt.Sscanf(current, "vmx-%d", &currentNum); err != nil {
+		currentNum = 0
+	}
+
+	// Parse target version, default to 0 if parsing fails
+	if _, err := fmt.Sscanf(target, "vmx-%d", &targetNum); err != nil {
+		targetNum = 0
+	}
+
 	return targetNum > currentNum
 }
 
