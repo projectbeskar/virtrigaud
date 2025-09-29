@@ -56,7 +56,6 @@ type VirtualMachineSpec struct {
 
 	// PowerState specifies the desired power state
 	// +optional
-	// +kubebuilder:validation:Enum=On;Off
 	PowerState PowerState `json:"powerState,omitempty"`
 
 	// Tags are applied to the VM for organization
