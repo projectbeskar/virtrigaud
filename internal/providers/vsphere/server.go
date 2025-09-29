@@ -24,7 +24,9 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/vmware/govmomi"
 	"github.com/vmware/govmomi/find"
@@ -365,6 +367,9 @@ func (p *Provider) Power(ctx context.Context, req *providerv1.PowerRequest) (*pr
 		// RebootGuest is synchronous, so we don't need to wait for a task
 		p.logger.Info("Power operation completed successfully", "vm_id", req.Id, "operation", req.Op.String())
 		return &providerv1.TaskResponse{}, nil
+	case providerv1.PowerOp_POWER_OP_SHUTDOWN_GRACEFUL:
+		// Graceful shutdown using guest tools
+		return p.performGracefulShutdown(ctx, vm, req)
 	default:
 		return nil, fmt.Errorf("unsupported power operation: %s", req.Op.String())
 	}
@@ -382,9 +387,206 @@ func (p *Provider) Power(ctx context.Context, req *providerv1.PowerRequest) (*pr
 	return &providerv1.TaskResponse{}, nil
 }
 
+// performGracefulShutdown performs a graceful shutdown using VMware guest tools
+func (p *Provider) performGracefulShutdown(ctx context.Context, vm *object.VirtualMachine, req *providerv1.PowerRequest) (*providerv1.TaskResponse, error) {
+	// Default timeout if not specified
+	gracefulTimeout := 60 * time.Second
+	if req.GracefulTimeoutSeconds > 0 {
+		gracefulTimeout = time.Duration(req.GracefulTimeoutSeconds) * time.Second
+	}
+
+	p.logger.Info("Attempting graceful shutdown", "vm_id", req.Id, "timeout_seconds", int(gracefulTimeout.Seconds()))
+
+	// Check if VMware Tools is running
+	toolsStatus, err := p.getVMwareToolsStatus(ctx, vm)
+	if err != nil {
+		p.logger.Warn("Failed to check VMware Tools status, falling back to power off", "vm_id", req.Id, "error", err)
+		return p.fallbackToPowerOff(ctx, vm, req.Id)
+	}
+
+	if toolsStatus != "toolsOk" && toolsStatus != "toolsOld" {
+		p.logger.Warn("VMware Tools not available for graceful shutdown, falling back to power off",
+			"vm_id", req.Id, "tools_status", toolsStatus)
+		return p.fallbackToPowerOff(ctx, vm, req.Id)
+	}
+
+	// Create a context with timeout for the graceful shutdown attempt
+	shutdownCtx, cancel := context.WithTimeout(ctx, gracefulTimeout)
+	defer cancel()
+
+	// Attempt graceful shutdown using guest tools
+	p.logger.Info("Initiating graceful shutdown using VMware Tools", "vm_id", req.Id)
+	err = vm.ShutdownGuest(shutdownCtx)
+	if err != nil {
+		p.logger.Warn("Graceful shutdown failed, falling back to power off", "vm_id", req.Id, "error", err)
+		return p.fallbackToPowerOff(ctx, vm, req.Id)
+	}
+
+	// Monitor shutdown progress
+	return p.waitForGracefulShutdown(ctx, vm, req.Id, gracefulTimeout)
+}
+
+// getVMwareToolsStatus checks the status of VMware Tools on the VM
+func (p *Provider) getVMwareToolsStatus(ctx context.Context, vm *object.VirtualMachine) (string, error) {
+	var vmObj mo.VirtualMachine
+	err := vm.Properties(ctx, vm.Reference(), []string{"guest.toolsStatus"}, &vmObj)
+	if err != nil {
+		return "", fmt.Errorf("failed to get VM properties: %w", err)
+	}
+
+	if vmObj.Guest == nil {
+		return "toolsNotInstalled", nil
+	}
+
+	return string(vmObj.Guest.ToolsStatus), nil
+}
+
+// waitForGracefulShutdown waits for the VM to shut down gracefully within the timeout
+func (p *Provider) waitForGracefulShutdown(ctx context.Context, vm *object.VirtualMachine, vmID string, timeout time.Duration) (*providerv1.TaskResponse, error) {
+	p.logger.Info("Waiting for graceful shutdown to complete", "vm_id", vmID, "timeout", timeout)
+
+	// Create a context with timeout
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	// Poll the power state until shutdown or timeout
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-waitCtx.Done():
+			// Timeout reached, fall back to hard power off
+			p.logger.Warn("Graceful shutdown timeout reached, falling back to power off", "vm_id", vmID)
+			return p.fallbackToPowerOff(ctx, vm, vmID)
+
+		case <-ticker.C:
+			powerState, err := vm.PowerState(ctx)
+			if err != nil {
+				p.logger.Error("Failed to check power state during graceful shutdown", "vm_id", vmID, "error", err)
+				continue
+			}
+
+			if powerState == types.VirtualMachinePowerStatePoweredOff {
+				p.logger.Info("Graceful shutdown completed successfully", "vm_id", vmID)
+				return &providerv1.TaskResponse{}, nil
+			}
+
+			p.logger.Debug("VM still shutting down", "vm_id", vmID, "power_state", powerState)
+		}
+	}
+}
+
+// fallbackToPowerOff performs a hard power off when graceful shutdown fails
+func (p *Provider) fallbackToPowerOff(ctx context.Context, vm *object.VirtualMachine, vmID string) (*providerv1.TaskResponse, error) {
+	p.logger.Info("Performing hard power off", "vm_id", vmID)
+
+	task, err := vm.PowerOff(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to start power off task: %w", err)
+	}
+
+	// Wait for power off to complete
+	_, err = task.WaitForResult(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("power off operation failed: %w", err)
+	}
+
+	p.logger.Info("Hard power off completed successfully", "vm_id", vmID)
+	return &providerv1.TaskResponse{}, nil
+}
+
 // Reconfigure reconfigures a virtual machine
 func (p *Provider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureRequest) (*providerv1.TaskResponse, error) {
 	return nil, errors.NewUnimplemented("Reconfigure operation not yet implemented for vSphere")
+}
+
+// HardwareUpgrade upgrades the hardware version of a virtual machine
+func (p *Provider) HardwareUpgrade(ctx context.Context, req *providerv1.HardwareUpgradeRequest) (*providerv1.TaskResponse, error) {
+	if p.client == nil {
+		return nil, fmt.Errorf("vSphere client not configured")
+	}
+
+	p.logger.Info("Upgrading VM hardware version", "vm_id", req.Id, "target_version", req.TargetVersion)
+
+	// Set datacenter context for finder
+	datacenter, err := p.finder.DefaultDatacenter(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find default datacenter: %w", err)
+	}
+	p.finder.SetDatacenter(datacenter)
+
+	// Create VM reference from ID
+	vmRef := types.ManagedObjectReference{
+		Type:  "VirtualMachine",
+		Value: req.Id,
+	}
+
+	vm := object.NewVirtualMachine(p.client.Client, vmRef)
+
+	// Check current power state - VM must be powered off for hardware upgrade
+	powerState, err := vm.PowerState(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check VM power state: %w", err)
+	}
+
+	if powerState != types.VirtualMachinePowerStatePoweredOff {
+		return nil, fmt.Errorf("VM must be powered off for hardware upgrade, current state: %s", powerState)
+	}
+
+	// Get current VM configuration to check current hardware version
+	var vmMo mo.VirtualMachine
+	err = vm.Properties(ctx, vm.Reference(), []string{"config.version", "config.name"}, &vmMo)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get VM properties: %w", err)
+	}
+
+	currentVersion := vmMo.Config.Version
+	targetVersion := fmt.Sprintf("vmx-%d", req.TargetVersion)
+
+	p.logger.Info("Hardware version comparison",
+		"vm_id", req.Id,
+		"current_version", currentVersion,
+		"target_version", targetVersion)
+
+	// Check if upgrade is needed
+	if currentVersion == targetVersion {
+		p.logger.Info("VM already at target hardware version", "vm_id", req.Id, "version", targetVersion)
+		return &providerv1.TaskResponse{}, nil
+	}
+
+	// Validate target version is newer than current
+	if !p.isNewerHardwareVersion(currentVersion, targetVersion) {
+		return nil, fmt.Errorf("target version %s is not newer than current version %s", targetVersion, currentVersion)
+	}
+
+	// Perform the hardware upgrade
+	upgradeTask, err := vm.UpgradeVM(ctx, targetVersion)
+	if err != nil {
+		return nil, fmt.Errorf("failed to start hardware upgrade: %w", err)
+	}
+
+	// Wait for upgrade to complete
+	_, err = upgradeTask.WaitForResult(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("hardware upgrade failed: %w", err)
+	}
+
+	p.logger.Info("Hardware upgrade completed successfully",
+		"vm_id", req.Id,
+		"from_version", currentVersion,
+		"to_version", targetVersion)
+
+	return &providerv1.TaskResponse{}, nil
+}
+
+// isNewerHardwareVersion checks if target version is newer than current version
+func (p *Provider) isNewerHardwareVersion(current, target string) bool {
+	// Extract version numbers from vmx-XX format
+	var currentNum, targetNum int
+	fmt.Sscanf(current, "vmx-%d", &currentNum)
+	fmt.Sscanf(target, "vmx-%d", &targetNum)
+	return targetNum > currentNum
 }
 
 // Describe retrieves virtual machine information
@@ -645,7 +847,6 @@ func (p *Provider) addCloudInitToConfigSpec(configSpec *types.VirtualMachineConf
 	return nil
 }
 
-
 // TaskStatus checks the status of an async task
 func (p *Provider) TaskStatus(ctx context.Context, req *providerv1.TaskStatusRequest) (*providerv1.TaskStatusResponse, error) {
 	return nil, errors.NewUnimplemented("TaskStatus operation not yet implemented for vSphere")
@@ -678,15 +879,16 @@ func (p *Provider) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepar
 
 // VMSpec represents the parsed virtual machine specification
 type VMSpec struct {
-	Name         string
-	CPU          int32
-	MemoryMB     int64
-	DiskSizeGB   int64
-	DiskType     string
-	TemplateName string
-	NetworkName  string
-	Firmware     string
-	CloudInit    string // Cloud-init user data
+	Name            string
+	CPU             int32
+	MemoryMB        int64
+	DiskSizeGB      int64
+	DiskType        string
+	TemplateName    string
+	NetworkName     string
+	Firmware        string
+	HardwareVersion *int32 // VM hardware compatibility version
+	CloudInit       string // Cloud-init user data
 }
 
 // parseCreateRequest parses the JSON-encoded specifications from the gRPC request
@@ -698,9 +900,10 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*VMSpec, e
 	// Parse VMClass from JSON (contracts.VMClass structure)
 	if req.ClassJson != "" {
 		var vmClass struct {
-			CPU          int32  `json:"CPU"`
-			MemoryMiB    int32  `json:"MemoryMiB"`
-			Firmware     string `json:"Firmware"`
+			CPU          int32             `json:"CPU"`
+			MemoryMiB    int32             `json:"MemoryMiB"`
+			Firmware     string            `json:"Firmware"`
+			ExtraConfig  map[string]string `json:"ExtraConfig"`
 			DiskDefaults *struct {
 				Type    string `json:"Type"`
 				SizeGiB int32  `json:"SizeGiB"`
@@ -714,6 +917,19 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*VMSpec, e
 		spec.CPU = vmClass.CPU
 		spec.MemoryMB = int64(vmClass.MemoryMiB) // Convert MiB to MB (same value)
 		spec.Firmware = vmClass.Firmware
+
+		// Parse hardware version from ExtraConfig (vSphere-specific)
+		if vmClass.ExtraConfig != nil {
+			if hwVersionStr, exists := vmClass.ExtraConfig["vsphere.hardwareVersion"]; exists && hwVersionStr != "" {
+				if hwVersion, err := strconv.ParseInt(hwVersionStr, 10, 32); err == nil {
+					hwVersionInt32 := int32(hwVersion)
+					spec.HardwareVersion = &hwVersionInt32
+					p.logger.Info("Parsed hardware version from ExtraConfig", "version", hwVersion, "vm_name", spec.Name)
+				} else {
+					p.logger.Warn("Invalid hardware version in ExtraConfig", "value", hwVersionStr, "vm_name", spec.Name)
+				}
+			}
+		}
 
 		if vmClass.DiskDefaults != nil {
 			spec.DiskType = vmClass.DiskDefaults.Type
@@ -845,6 +1061,13 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 		}
 	}
 
+	// Set hardware version if specified
+	if spec.HardwareVersion != nil {
+		// Convert hardware version to VMX format (e.g., 21 -> "vmx-21")
+		configSpec.Version = fmt.Sprintf("vmx-%d", *spec.HardwareVersion)
+		p.logger.Info("Setting VM hardware version", "version", configSpec.Version, "vm_name", spec.Name)
+	}
+
 	// Configure network if specified
 	if network != nil {
 		// Get the network reference
@@ -922,9 +1145,17 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 
 	p.logger.Info("Virtual machine created successfully", "vm_id", vmID, "name", spec.Name)
 
+	// Resize disk if specified in VMClass
+	newVM := object.NewVirtualMachine(p.client.Client, vmRef)
+	if spec.DiskSizeGB > 0 {
+		if err := p.resizeVMDisk(ctx, newVM, spec.DiskSizeGB, vmID); err != nil {
+			p.logger.Warn("Failed to resize VM disk", "vm_id", vmID, "target_size_gb", spec.DiskSizeGB, "error", err)
+			// Don't fail the entire creation if disk resize fails
+		}
+	}
+
 	// Power on the VM if requested (VirtualMachine spec.powerState: "On")
 	// Note: This is a simple implementation - in production you might want to check the actual powerState from the request
-	newVM := object.NewVirtualMachine(p.client.Client, vmRef)
 	powerTask, err := newVM.PowerOn(ctx)
 	if err != nil {
 		p.logger.Warn("Failed to power on VM after creation", "vm_id", vmID, "error", err)
@@ -939,4 +1170,75 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 	}
 
 	return vmID, nil
+}
+
+// resizeVMDisk resizes the primary disk of a VM to the specified size
+func (p *Provider) resizeVMDisk(ctx context.Context, vm *object.VirtualMachine, targetSizeGB int64, vmID string) error {
+	p.logger.Info("Resizing VM disk", "vm_id", vmID, "target_size_gb", targetSizeGB)
+
+	// Get current VM configuration to find the disk
+	var vmMo mo.VirtualMachine
+	err := vm.Properties(ctx, vm.Reference(), []string{"config.hardware.device"}, &vmMo)
+	if err != nil {
+		return fmt.Errorf("failed to get VM properties: %w", err)
+	}
+
+	// Find the primary disk (usually the first disk device)
+	var primaryDisk *types.VirtualDisk
+	for _, device := range vmMo.Config.Hardware.Device {
+		if disk, ok := device.(*types.VirtualDisk); ok {
+			primaryDisk = disk
+			break
+		}
+	}
+
+	if primaryDisk == nil {
+		return fmt.Errorf("no disk found in VM")
+	}
+
+	// Get current disk size in bytes
+	currentSizeKB := primaryDisk.CapacityInKB
+	currentSizeGB := currentSizeKB / (1024 * 1024) // Convert KB to GB
+	targetSizeKB := targetSizeGB * 1024 * 1024     // Convert GB to KB
+
+	p.logger.Info("Disk size comparison",
+		"vm_id", vmID,
+		"current_size_gb", currentSizeGB,
+		"target_size_gb", targetSizeGB)
+
+	// Only resize if target is larger than current (don't shrink)
+	if targetSizeGB <= currentSizeGB {
+		p.logger.Info("Disk already at or larger than target size", "vm_id", vmID, "current_gb", currentSizeGB, "target_gb", targetSizeGB)
+		return nil
+	}
+
+	// Create a new virtual disk device spec with updated size
+	newDisk := *primaryDisk
+	newDisk.CapacityInKB = targetSizeKB
+
+	// Create device change spec for disk resize
+	deviceSpec := &types.VirtualDeviceConfigSpec{
+		Operation: types.VirtualDeviceConfigSpecOperationEdit,
+		Device:    &newDisk,
+	}
+
+	// Create reconfigure spec
+	configSpec := &types.VirtualMachineConfigSpec{
+		DeviceChange: []types.BaseVirtualDeviceConfigSpec{deviceSpec},
+	}
+
+	// Perform the reconfiguration
+	task, err := vm.Reconfigure(ctx, *configSpec)
+	if err != nil {
+		return fmt.Errorf("failed to start disk resize task: %w", err)
+	}
+
+	// Wait for reconfiguration to complete
+	_, err = task.WaitForResult(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("disk resize task failed: %w", err)
+	}
+
+	p.logger.Info("Disk resized successfully", "vm_id", vmID, "from_gb", currentSizeGB, "to_gb", targetSizeGB)
+	return nil
 }

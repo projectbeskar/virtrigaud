@@ -56,7 +56,6 @@ type VirtualMachineSpec struct {
 
 	// PowerState specifies the desired power state
 	// +optional
-	// +kubebuilder:validation:Enum=On;Off
 	PowerState PowerState `json:"powerState,omitempty"`
 
 	// Tags are applied to the VM for organization
@@ -82,7 +81,7 @@ type VirtualMachineSpec struct {
 }
 
 // PowerState represents the desired power state of a VM
-// +kubebuilder:validation:Enum=On;Off
+// +kubebuilder:validation:Enum=On;Off;OffGraceful
 type PowerState string
 
 const (
@@ -90,6 +89,8 @@ const (
 	PowerStateOn PowerState = "On"
 	// PowerStateOff indicates the VM should be powered off
 	PowerStateOff PowerState = "Off"
+	// PowerStateOffGraceful indicates the VM should be gracefully shut down
+	PowerStateOffGraceful PowerState = "OffGraceful"
 )
 
 // VirtualMachineLifecycle defines lifecycle configuration for a VM

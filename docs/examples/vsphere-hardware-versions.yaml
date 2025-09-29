@@ -1,0 +1,168 @@
+---
+# Example: vSphere VMClass with Hardware Version 21 (ESXi 8.0)
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMClass
+metadata:
+  name: vsphere-hw21-class
+  namespace: virtrigaud-system
+spec:
+  cpu: 4
+  memory: 8Gi
+  firmware: UEFI
+  
+  # vSphere-specific hardware version configuration
+  # Hardware version 21 provides latest ESXi 8.0 features
+  extraConfig:
+    vsphere.hardwareVersion: "21"
+  
+  diskDefaults:
+    type: thin
+    sizeGiB: 100
+  
+  guestToolsPolicy: install
+
+---
+# Example: vSphere VMClass with Hardware Version 17 (ESXi 7.0)
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMClass
+metadata:
+  name: vsphere-hw17-class
+  namespace: virtrigaud-system
+spec:
+  cpu: 2
+  memory: 4Gi
+  firmware: BIOS
+  
+  # Hardware version 17 for ESXi 7.0 compatibility
+  # Includes TPM 2.0 support and enhanced security features
+  extraConfig:
+    vsphere.hardwareVersion: "17"
+  
+  diskDefaults:
+    type: thick
+    sizeGiB: 50
+
+---
+# Example: vSphere VMClass with Legacy Hardware Version 13 (ESXi 6.5)
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMClass
+metadata:
+  name: vsphere-legacy-class
+  namespace: virtrigaud-system
+spec:
+  cpu: 2
+  memory: 2Gi
+  firmware: BIOS
+  
+  # Hardware version 13 for compatibility with older ESXi 6.5 hosts
+  extraConfig:
+    vsphere.hardwareVersion: "13"
+  
+  diskDefaults:
+    type: thin
+    sizeGiB: 40
+
+---
+# Virtual Machine using modern hardware version
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: modern-vm-hw21
+  namespace: default
+spec:
+  powerState: On
+  
+  providerRef:
+    name: vsphere-provider
+    namespace: virtrigaud-system
+  
+  classRef:
+    name: vsphere-hw21-class  # Uses hardware version 21
+    namespace: virtrigaud-system
+  
+  imageRef:
+    name: ubuntu-22-04-template
+    namespace: virtrigaud-system
+  
+  networks:
+    - name: vm-network-dvs
+
+---
+# Virtual Machine using legacy hardware version for older ESXi
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: legacy-vm-hw13
+  namespace: default
+spec:
+  powerState: On
+  
+  providerRef:
+    name: vsphere-provider
+    namespace: virtrigaud-system
+  
+  classRef:
+    name: vsphere-legacy-class  # Uses hardware version 13
+    namespace: virtrigaud-system
+  
+  imageRef:
+    name: centos7-template
+    namespace: virtrigaud-system
+  
+  networks:
+    - name: vm-network-legacy
+
+---
+# Example: Different VMClasses for different hardware versions
+# This allows you to support mixed ESXi environments
+
+# For ESXi 8.0 clusters (latest features)
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMClass
+metadata:
+  name: esxi8-optimized
+  namespace: virtrigaud-system
+spec:
+  cpu: 8
+  memory: 32Gi
+  firmware: UEFI
+  extraConfig:
+    vsphere.hardwareVersion: "21"  # ESXi 8.0
+    # Additional ESXi 8.0 optimizations could go here
+  diskDefaults:
+    type: thin
+    sizeGiB: 200
+
+---
+# For ESXi 7.0 clusters (stable production)
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMClass
+metadata:
+  name: esxi7-production
+  namespace: virtrigaud-system
+spec:
+  cpu: 4
+  memory: 16Gi
+  firmware: UEFI
+  extraConfig:
+    vsphere.hardwareVersion: "17"  # ESXi 7.0
+  diskDefaults:
+    type: thick
+    sizeGiB: 100
+
+---
+# For ESXi 6.5 clusters (legacy support)
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMClass
+metadata:
+  name: esxi65-legacy
+  namespace: virtrigaud-system
+spec:
+  cpu: 2
+  memory: 8Gi
+  firmware: BIOS
+  extraConfig:
+    vsphere.hardwareVersion: "13"  # ESXi 6.5
+  diskDefaults:
+    type: thin
+    sizeGiB: 80

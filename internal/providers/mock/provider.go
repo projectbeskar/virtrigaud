@@ -288,6 +288,11 @@ func (p *Provider) Power(ctx context.Context, req *providerv1.PowerRequest) (*pr
 			vm.IPs = []string{}
 		case providerv1.PowerOp_POWER_OP_REBOOT:
 			newState = "On"
+		case providerv1.PowerOp_POWER_OP_SHUTDOWN_GRACEFUL:
+			// Mock graceful shutdown - same as regular Off but with a slight delay
+			newState = "Off"
+			// Clear IPs when shutting down
+			vm.IPs = []string{}
 		}
 
 		p.mu.Lock()

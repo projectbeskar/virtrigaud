@@ -1,0 +1,300 @@
+# VirtRigaud v0.2.1 Feature Showcase
+# This example demonstrates all new v0.2.1 features in one comprehensive configuration
+
+---
+# Provider with Remote runtime (enhanced)
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: Provider
+metadata:
+  name: vsphere-v021-demo
+  namespace: default
+spec:
+  type: vsphere
+  endpoint: https://vcenter.example.com/sdk
+  credentialSecretRef:
+    name: vsphere-creds
+  insecureSkipVerify: false
+  runtime:
+    mode: Remote
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.2.1"
+    replicas: 1
+    service:
+      port: 9090
+  defaults:
+    datastore: nvme-datastore
+    cluster: prod-cluster
+    folder: virtrigaud-v021-demo
+
+---
+# VMClass showcasing hardware version management (vSphere-specific)
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMClass
+metadata:
+  name: v021-high-performance
+  namespace: default
+spec:
+  cpu: 8
+  memory: "16Gi"
+  firmware: UEFI
+  
+  # v0.2.1: Disk sizing now properly respected
+  diskDefaults:
+    type: thin
+    size: "200Gi"  # This will actually create a 200GB disk
+  
+  guestToolsPolicy: install
+  
+  # vSphere-specific configuration using extraConfig
+  extraConfig:
+    # v0.2.1: Hardware version management
+    "vsphere.hardwareVersion": "21"  # Latest ESXi 8.0+ features
+    
+    # Performance optimizations
+    "sched.cpu.latencySensitivity": "high"
+    "numa.nodeAffinity": "0"
+    "sched.cpu.min": "8000"
+    "sched.cpu.shares": "high"
+    
+    # Memory optimizations
+    "sched.mem.min": "16384"
+    "prefvmx.useRecommendedLockedMemSize": "true"
+    
+    # Network optimizations
+    "ethernetX.pnicFeatures": "4"
+    "ethernetX.uptCompatibility": "true"
+
+---
+# VMClass for older hardware compatibility
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMClass
+metadata:
+  name: v021-legacy-compatible
+  namespace: default
+spec:
+  cpu: 4
+  memory: "8Gi"
+  firmware: BIOS
+  
+  diskDefaults:
+    type: thick
+    size: "100Gi"
+  
+  guestToolsPolicy: install
+  
+  extraConfig:
+    # v0.2.1: Hardware version for older ESXi compatibility
+    "vsphere.hardwareVersion": "15"  # ESXi 6.7+ compatibility
+    "tools.syncTime": "true"
+
+---
+# VMClass for testing different disk sizes
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMClass
+metadata:
+  name: v021-disk-test
+  namespace: default
+spec:
+  cpu: 2
+  memory: "4Gi"
+  firmware: UEFI
+  
+  # v0.2.1: Various disk sizes to test the fix
+  diskDefaults:
+    type: thin
+    size: "50Gi"  # Demonstrates fixed disk sizing
+
+---
+# VM Image configuration
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMImage
+metadata:
+  name: ubuntu-22-04-v021
+  namespace: default
+spec:
+  source:
+    vsphere:
+      templateName: "ubuntu-22.04-server-template"
+  prepare:
+    onMissing: Download
+    customization:
+      timezone: "UTC"
+      network:
+        dns: ["8.8.8.8", "8.8.4.4"]
+
+---
+# Network configuration
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMNetworkAttachment
+metadata:
+  name: v021-production-vlan
+  namespace: default
+spec:
+  vsphere:
+    portGroup: "Production VLAN 100"
+    vlanId: 100
+    dhcp: true
+
+---
+# Virtual Machine showcasing all v0.2.1 features
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: v021-feature-demo
+  namespace: default
+  labels:
+    version: "v0.2.1"
+    demo: "feature-showcase"
+    provider: "vsphere"
+spec:
+  providerRef:
+    name: vsphere-v021-demo
+  
+  classRef:
+    name: v021-high-performance  # Uses hardware version 21
+  
+  imageRef:
+    name: ubuntu-22-04-v021
+  
+  networks:
+  - name: production
+    networkRef:
+      name: v021-production-vlan
+  
+  # Additional disks to test sizing
+  disks:
+  - name: application-data
+    sizeGiB: 500  # Large data disk
+    type: thin
+  - name: database-logs
+    sizeGiB: 100  # Logs disk
+    type: thick
+  
+  powerState: "On"
+  
+  # v0.2.1: Enhanced lifecycle management with graceful shutdown
+  lifecycle:
+    gracefulShutdownTimeout: "180s"  # 3 minutes for complex applications
+    
+    postStart:
+      exec:
+        command:
+        - "/bin/bash"
+        - "-c"
+        - |
+          # v0.2.1 post-start initialization
+          echo "$(date): VM started with v0.2.1 features" >> /var/log/virtrigaud.log
+          echo "Hardware Version: $(vmware-toolbox-cmd stat raw text session)" >> /var/log/virtrigaud.log
+    
+    preStop:
+      exec:
+        command:
+        - "/bin/bash"
+        - "-c"
+        - |
+          # v0.2.1 graceful shutdown sequence
+          echo "$(date): Starting graceful shutdown with v0.2.1" >> /var/log/virtrigaud.log
+          
+          # Stop application services gracefully
+          systemctl stop nginx || true
+          systemctl stop postgresql || true
+          systemctl stop redis || true
+          
+          # Sync filesystems
+          sync
+          
+          # Wait for processes to finish
+          sleep 10
+          
+          # Final sync
+          sync
+          echo "$(date): Graceful shutdown sequence complete" >> /var/log/virtrigaud.log
+  
+  userData:
+    cloudInit:
+      inline: |
+        #cloud-config
+        hostname: v021-feature-demo
+        fqdn: v021-feature-demo.example.com
+        
+        users:
+        - name: demo
+          sudo: ALL=(ALL) NOPASSWD:ALL
+          shell: /bin/bash
+          ssh_authorized_keys:
+          - ssh-rsa AAAAB3NzaC1yc2E... # Your SSH key here
+        
+        packages:
+        - open-vm-tools  # Required for graceful shutdown
+        - htop
+        - curl
+        - nginx
+        - postgresql
+        - redis-server
+        
+        disk_setup:
+          /dev/sdb:
+            table_type: gpt
+            layout: true
+          /dev/sdc:
+            table_type: gpt
+            layout: true
+        
+        fs_setup:
+        - device: /dev/sdb1
+          filesystem: ext4
+          label: app-data
+        - device: /dev/sdc1
+          filesystem: ext4
+          label: db-logs
+        
+        mounts:
+        - ["/dev/sdb1", "/opt/app-data", "ext4", "defaults", "0", "2"]
+        - ["/dev/sdc1", "/var/lib/postgresql", "ext4", "defaults", "0", "2"]
+        
+        runcmd:
+        - echo "v0.2.1 Feature Demo VM" > /var/www/html/index.html
+        - echo "<p>Hardware Version: $(vmware-toolbox-cmd stat raw text session)</p>" >> /var/www/html/index.html
+        - echo "<p>Disk Sizes:</p>" >> /var/www/html/index.html
+        - echo "<p>Root: $(df -h / | tail -1 | awk '{print $2}')</p>" >> /var/www/html/index.html
+        - echo "<p>App Data: $(df -h /opt/app-data | tail -1 | awk '{print $2}')</p>" >> /var/www/html/index.html
+        - echo "<p>DB Logs: $(df -h /var/lib/postgresql | tail -1 | awk '{print $2}')</p>" >> /var/www/html/index.html
+        - systemctl enable nginx
+        - systemctl start nginx
+        
+        final_message: "v0.2.1 Feature Demo VM ready! All features tested and working."
+  
+  placement:
+    datastore: nvme-datastore
+    cluster: prod-cluster
+    folder: virtrigaud-v021-demo
+  
+  tags:
+  - version:v0.2.1
+  - demo:feature-showcase
+  - provider:vsphere
+  - hardware-version:21
+  - graceful-shutdown:enabled
+
+---
+# Example commands for testing v0.2.1 features:
+
+# 1. Check VM hardware version (should be 21):
+# kubectl exec -it v021-feature-demo -- vmware-toolbox-cmd stat raw text session
+
+# 2. Verify disk sizes are correct:
+# kubectl exec -it v021-feature-demo -- df -h
+
+# 3. Test graceful shutdown (v0.2.1 feature):
+# kubectl patch virtualmachine v021-feature-demo --type='merge' -p='{"spec":{"powerState":"OffGraceful"}}'
+
+# 4. Monitor shutdown process:
+# kubectl logs -f deployment/virtrigaud-provider-default-vsphere-v021-demo
+
+# 5. Check shutdown logs in VM:
+# kubectl exec -it v021-feature-demo -- tail -f /var/log/virtrigaud.log
+
+# 6. Restart VM:
+# kubectl patch virtualmachine v021-feature-demo --type='merge' -p='{"spec":{"powerState":"On"}}'
+
+# 7. Verify all v0.2.1 features working:
+# kubectl describe virtualmachine v021-feature-demo

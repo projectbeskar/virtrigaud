@@ -8,6 +8,7 @@ enum PowerOp {
   POWER_OP_ON = 1;
   POWER_OP_OFF = 2;
   POWER_OP_REBOOT = 3;
+  POWER_OP_SHUTDOWN_GRACEFUL = 4;  // Graceful shutdown using guest tools
 }
 
 // Task reference for async operations
@@ -53,12 +54,19 @@ message DeleteRequest {
 message PowerRequest {
   string id = 1;
   PowerOp op = 2;
+  int32 graceful_timeout_seconds = 3;  // Timeout for graceful operations (shutdown/reboot)
 }
 
 // Reconfigure virtual machine resources
 message ReconfigureRequest {
   string id = 1;
   string desired_json = 2; // JSON-encoded desired state
+}
+
+// Upgrade VM hardware version
+message HardwareUpgradeRequest {
+  string id = 1;
+  int32 target_version = 2; // Target hardware version (e.g., 21)
 }
 
 // Generic task response for async operations
@@ -166,6 +174,9 @@ service Provider {
   
   // Reconfigure virtual machine resources
   rpc Reconfigure(ReconfigureRequest) returns (TaskResponse);
+  
+  // Upgrade VM hardware version
+  rpc HardwareUpgrade(HardwareUpgradeRequest) returns (TaskResponse);
   
   // Describe current virtual machine state
   rpc Describe(DescribeRequest) returns (DescribeResponse);

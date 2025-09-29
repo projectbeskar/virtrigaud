@@ -1,0 +1,65 @@
+# Pre-commit hooks for VirtRigaud
+# See https://pre-commit.com for more information
+# See https://pre-commit.com/hooks.html for more hooks
+
+repos:
+- repo: https://github.com/pre-commit/pre-commit-hooks
+  rev: v4.6.0
+  hooks:
+  - id: trailing-whitespace
+  - id: end-of-file-fixer
+  - id: check-yaml
+    args: ['--unsafe']  # Allow custom YAML tags used in Kubernetes
+  - id: check-added-large-files
+  - id: check-merge-conflict
+  - id: mixed-line-ending
+
+- repo: https://github.com/golangci/golangci-lint
+  rev: v1.59.1
+  hooks:
+  - id: golangci-lint
+    args: ['--exclude-dirs=internal/providers/libvirt,cmd/provider-libvirt']
+
+- repo: https://github.com/tekwizely/pre-commit-golang
+  rev: v1.0.0-rc.1
+  hooks:
+  - id: go-fmt
+    args: [-w]
+  - id: go-vet-mod
+
+- repo: https://github.com/adrienverge/yamllint
+  rev: v1.35.1
+  hooks:
+  - id: yamllint
+    args: [-c=.yamllint]
+
+# VirtRigaud-specific hooks
+- repo: local
+  hooks:
+  - id: sync-helm-crds
+    name: Sync Helm Chart CRDs
+    entry: make sync-helm-crds
+    language: system
+    files: ^(api/.*\.go|config/crd/.*\.yaml)$
+    pass_filenames: false
+    
+  - id: verify-helm-crds
+    name: Verify Helm CRDs are in sync
+    entry: make verify-helm-crds
+    language: system
+    files: ^(charts/virtrigaud/crds/.*\.yaml)$
+    pass_filenames: false
+    
+  - id: go-mod-tidy
+    name: Go Mod Tidy
+    entry: go mod tidy
+    language: system
+    files: ^go\.(mod|sum)$
+    pass_filenames: false
+
+  - id: generate-code
+    name: Generate Go Code
+    entry: make generate
+    language: system
+    files: ^(api/.*\.go)$
+    pass_filenames: false

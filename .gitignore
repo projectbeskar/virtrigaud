@@ -29,7 +29,14 @@ go.work
 *.sarif
 
 # Local development files
-/tmp/virtrigaud-dev-values.yaml 
+/tmp/virtrigaud-dev-values.yaml
+/fieldTesting
+
+# Build artifacts
+dist/
+*.tgz
+
+# Development files
 libvirtVM.yaml
 libvirtVM-corrected.yaml
 vm-example.yaml

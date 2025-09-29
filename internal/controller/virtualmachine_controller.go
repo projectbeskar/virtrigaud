@@ -361,6 +361,8 @@ func (r *VirtualMachineReconciler) adjustPowerState(
 		powerOp = contracts.PowerOpOn
 	case "Off":
 		powerOp = contracts.PowerOpOff
+	case "OffGraceful":
+		powerOp = contracts.PowerOpShutdownGraceful
 	default:
 		logger.Error(nil, "Unsupported power state", "state", desiredState)
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil

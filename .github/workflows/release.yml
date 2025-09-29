@@ -262,6 +262,11 @@ jobs:
         # Update image tags in values.yaml
         sed -i "s/tag: \".*\"/tag: \"${{ needs.prepare.outputs.tag }}\"/" charts/virtrigaud/values.yaml
 
+    - name: Sync CRDs to Helm chart
+      run: |
+        # Ensure Helm chart has latest CRDs before packaging
+        make sync-helm-crds
+
     - name: Package chart
       run: |
         mkdir -p helm-packages

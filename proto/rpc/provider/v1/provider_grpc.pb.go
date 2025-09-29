@@ -24,6 +24,7 @@ const (
 	Provider_Delete_FullMethodName          = "/provider.v1.Provider/Delete"
 	Provider_Power_FullMethodName           = "/provider.v1.Provider/Power"
 	Provider_Reconfigure_FullMethodName     = "/provider.v1.Provider/Reconfigure"
+	Provider_HardwareUpgrade_FullMethodName = "/provider.v1.Provider/HardwareUpgrade"
 	Provider_Describe_FullMethodName        = "/provider.v1.Provider/Describe"
 	Provider_TaskStatus_FullMethodName      = "/provider.v1.Provider/TaskStatus"
 	Provider_SnapshotCreate_FullMethodName  = "/provider.v1.Provider/SnapshotCreate"
@@ -50,6 +51,8 @@ type ProviderClient interface {
 	Power(ctx context.Context, in *PowerRequest, opts ...grpc.CallOption) (*TaskResponse, error)
 	// Reconfigure virtual machine resources
 	Reconfigure(ctx context.Context, in *ReconfigureRequest, opts ...grpc.CallOption) (*TaskResponse, error)
+	// Upgrade VM hardware version
+	HardwareUpgrade(ctx context.Context, in *HardwareUpgradeRequest, opts ...grpc.CallOption) (*TaskResponse, error)
 	// Describe current virtual machine state
 	Describe(ctx context.Context, in *DescribeRequest, opts ...grpc.CallOption) (*DescribeResponse, error)
 	// Check the status of an async task
@@ -118,6 +121,16 @@ func (c *providerClient) Reconfigure(ctx context.Context, in *ReconfigureRequest
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(TaskResponse)
 	err := c.cc.Invoke(ctx, Provider_Reconfigure_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *providerClient) HardwareUpgrade(ctx context.Context, in *HardwareUpgradeRequest, opts ...grpc.CallOption) (*TaskResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(TaskResponse)
+	err := c.cc.Invoke(ctx, Provider_HardwareUpgrade_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -220,6 +233,8 @@ type ProviderServer interface {
 	Power(context.Context, *PowerRequest) (*TaskResponse, error)
 	// Reconfigure virtual machine resources
 	Reconfigure(context.Context, *ReconfigureRequest) (*TaskResponse, error)
+	// Upgrade VM hardware version
+	HardwareUpgrade(context.Context, *HardwareUpgradeRequest) (*TaskResponse, error)
 	// Describe current virtual machine state
 	Describe(context.Context, *DescribeRequest) (*DescribeResponse, error)
 	// Check the status of an async task
@@ -258,6 +273,9 @@ func (UnimplementedProviderServer) Power(context.Context, *PowerRequest) (*TaskR
 }
 func (UnimplementedProviderServer) Reconfigure(context.Context, *ReconfigureRequest) (*TaskResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Reconfigure not implemented")
+}
+func (UnimplementedProviderServer) HardwareUpgrade(context.Context, *HardwareUpgradeRequest) (*TaskResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method HardwareUpgrade not implemented")
 }
 func (UnimplementedProviderServer) Describe(context.Context, *DescribeRequest) (*DescribeResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Describe not implemented")
@@ -390,6 +408,24 @@ func _Provider_Reconfigure_Handler(srv interface{}, ctx context.Context, dec fun
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ProviderServer).Reconfigure(ctx, req.(*ReconfigureRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Provider_HardwareUpgrade_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(HardwareUpgradeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProviderServer).HardwareUpgrade(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Provider_HardwareUpgrade_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProviderServer).HardwareUpgrade(ctx, req.(*HardwareUpgradeRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -564,6 +600,10 @@ var Provider_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Reconfigure",
 			Handler:    _Provider_Reconfigure_Handler,
+		},
+		{
+			MethodName: "HardwareUpgrade",
+			Handler:    _Provider_HardwareUpgrade_Handler,
 		},
 		{
 			MethodName: "Describe",

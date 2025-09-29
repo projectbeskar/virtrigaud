@@ -116,6 +116,8 @@ func (s *Server) Power(ctx context.Context, req *providerv1.PowerRequest) (*prov
 		powerOp = contracts.PowerOpOff
 	case providerv1.PowerOp_POWER_OP_REBOOT:
 		powerOp = contracts.PowerOpReboot
+	case providerv1.PowerOp_POWER_OP_SHUTDOWN_GRACEFUL:
+		powerOp = contracts.PowerOpShutdownGraceful
 	default:
 		return nil, fmt.Errorf("unsupported power operation: %v", req.Op)
 	}

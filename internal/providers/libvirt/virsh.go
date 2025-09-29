@@ -231,10 +231,10 @@ type VirshResult struct {
 // Special case: if first arg is "!", execute the remaining args as a direct command (not virsh)
 func (v *VirshProvider) runVirshCommand(ctx context.Context, args ...string) (*VirshResult, error) {
 	start := time.Now()
-	
+
 	var cmd *exec.Cmd
 	var command string
-	
+
 	// Special handling for direct commands (prefixed with "!")
 	if len(args) > 0 && args[0] == "!" {
 		// Execute direct command (not through virsh)
@@ -242,25 +242,25 @@ func (v *VirshProvider) runVirshCommand(ctx context.Context, args ...string) (*V
 		if len(directArgs) == 0 {
 			return nil, fmt.Errorf("no command specified after '!' prefix")
 		}
-		
+
 		if v.credentials.Password != "" && strings.Contains(v.uri, "ssh://") {
 			// For remote execution, use SSH
 			parsedURI, _ := url.Parse(v.uri)
 			host := parsedURI.Host
 			user := parsedURI.User.Username()
-			
+
 			sshArgs := []string{
-				"-e", // Read password from SSHPASS environment variable  
+				"-e", // Read password from SSHPASS environment variable
 				"ssh",
 				"-o", "StrictHostKeyChecking=accept-new",
-				"-o", "PasswordAuthentication=yes", 
+				"-o", "PasswordAuthentication=yes",
 				"-o", "PubkeyAuthentication=no",
 				"-o", "UserKnownHostsFile=/tmp/known_hosts",
 				"-o", "LogLevel=ERROR",
 				fmt.Sprintf("%s@%s", user, host),
 			}
 			sshArgs = append(sshArgs, directArgs...)
-			
+
 			cmd = exec.CommandContext(ctx, "sshpass", sshArgs...)
 			command = fmt.Sprintf("sshpass -e ssh %s@%s %s", user, host, strings.Join(directArgs, " "))
 		} else {
@@ -274,18 +274,18 @@ func (v *VirshProvider) runVirshCommand(ctx context.Context, args ...string) (*V
 		if v.credentials.Password != "" && strings.Contains(v.uri, "ssh://") {
 			// Build command: SSHPASS=password sshpass -e ssh -o [options] user@host virsh [args]
 			// This directly uses SSH with options rather than relying on config files
-			
+
 			// Extract host and user from URI for direct SSH call
 			parsedURI, _ := url.Parse(v.uri)
 			host := parsedURI.Host
 			user := parsedURI.User.Username()
-			
+
 			// Build SSH command with all necessary options
 			sshArgs := []string{
-				"-e", // Read password from SSHPASS environment variable  
+				"-e", // Read password from SSHPASS environment variable
 				"ssh",
 				"-o", "StrictHostKeyChecking=accept-new",
-				"-o", "PasswordAuthentication=yes", 
+				"-o", "PasswordAuthentication=yes",
 				"-o", "PubkeyAuthentication=no",
 				"-o", "UserKnownHostsFile=/tmp/known_hosts",
 				"-o", "LogLevel=ERROR",
@@ -293,7 +293,7 @@ func (v *VirshProvider) runVirshCommand(ctx context.Context, args ...string) (*V
 				"virsh",
 			}
 			sshArgs = append(sshArgs, args...)
-			
+
 			cmd = exec.CommandContext(ctx, "sshpass", sshArgs...)
 			command = fmt.Sprintf("sshpass -e ssh %s@%s virsh %s", user, host, strings.Join(args, " "))
 			cmd.Env = v.env
@@ -373,8 +373,6 @@ func (v *VirshProvider) listDomains(ctx context.Context) ([]VirshDomain, error) 
 	return domains, nil
 }
 
-
-
 // startDomain starts a defined domain
 func (v *VirshProvider) startDomain(ctx context.Context, domainName string) error {
 	log.Printf("INFO Starting domain: %s", domainName)
@@ -388,16 +386,29 @@ func (v *VirshProvider) startDomain(ctx context.Context, domainName string) erro
 	return nil
 }
 
-// stopDomain stops a running domain
+// stopDomain forcefully stops a running domain
 func (v *VirshProvider) stopDomain(ctx context.Context, domainName string) error {
-	log.Printf("INFO Stopping domain: %s", domainName)
+	log.Printf("INFO Force stopping domain: %s", domainName)
 
-	_, err := v.runVirshCommand(ctx, "shutdown", domainName)
+	_, err := v.runVirshCommand(ctx, "destroy", domainName)
 	if err != nil {
 		return fmt.Errorf("failed to stop domain %s: %w", domainName, err)
 	}
 
-	log.Printf("INFO Successfully stopped domain: %s", domainName)
+	log.Printf("INFO Successfully force stopped domain: %s", domainName)
+	return nil
+}
+
+// shutdownDomain gracefully shuts down a running domain
+func (v *VirshProvider) shutdownDomain(ctx context.Context, domainName string) error {
+	log.Printf("INFO Gracefully shutting down domain: %s", domainName)
+
+	_, err := v.runVirshCommand(ctx, "shutdown", domainName)
+	if err != nil {
+		return fmt.Errorf("failed to shutdown domain %s: %w", domainName, err)
+	}
+
+	log.Printf("INFO Successfully initiated graceful shutdown for domain: %s", domainName)
 	return nil
 }
 
@@ -427,7 +438,6 @@ func (v *VirshProvider) undefineDomain(ctx context.Context, domainName string) e
 	return nil
 }
 
-
 // getDomainInfo gets comprehensive information about a domain (enhanced monitoring)
 func (v *VirshProvider) getDomainInfo(ctx context.Context, domainName string) (map[string]string, error) {
 	result, err := v.runVirshCommand(ctx, "dominfo", domainName)
@@ -445,7 +455,7 @@ func (v *VirshProvider) getDomainInfo(ctx context.Context, domainName string) (m
 			info[key] = value
 		}
 	}
-	
+
 	// Enhance with comprehensive monitoring data (like vSphere provider)
 	if err := v.enrichDomainInfo(ctx, domainName, info); err != nil {
 		log.Printf("WARN Failed to get enhanced monitoring data for %s: %v", domainName, err)
@@ -495,10 +505,10 @@ func (v *VirshProvider) createSSHConfig() error {
 // Cleanup performs any necessary cleanup operations
 func (v *VirshProvider) Cleanup() error {
 	log.Printf("INFO Cleaning up virsh provider")
-	
+
 	// No persistent connections to close with virsh approach
 	// All commands are stateless
-	
+
 	return nil
 }
 
@@ -510,35 +520,35 @@ func (v *VirshProvider) enrichDomainInfo(ctx context.Context, domainName string,
 			info[k] = v
 		}
 	}
-	
-	// Get CPU statistics  
+
+	// Get CPU statistics
 	if cpuStats, err := v.getDomainCPUStats(ctx, domainName); err == nil {
 		for k, v := range cpuStats {
 			info[k] = v
 		}
 	}
-	
+
 	// Get network interfaces and IP addresses
 	if netInfo, err := v.getDomainNetworkInfo(ctx, domainName); err == nil {
 		for k, v := range netInfo {
 			info[k] = v
 		}
 	}
-	
+
 	// Get block device statistics
 	if blockStats, err := v.getDomainBlockStats(ctx, domainName); err == nil {
 		for k, v := range blockStats {
 			info[k] = v
 		}
 	}
-	
+
 	// Get guest agent information (if available)
 	if guestInfo, err := v.getDomainGuestInfo(ctx, domainName); err == nil {
 		for k, v := range guestInfo {
 			info[k] = v
 		}
 	}
-	
+
 	return nil
 }
 
@@ -548,7 +558,7 @@ func (v *VirshProvider) getDomainMemoryStats(ctx context.Context, domainName str
 	if err != nil {
 		return nil, err
 	}
-	
+
 	stats := make(map[string]string)
 	lines := strings.Split(strings.TrimSpace(result.Stdout), "\n")
 	for _, line := range lines {
@@ -561,13 +571,13 @@ func (v *VirshProvider) getDomainMemoryStats(ctx context.Context, domainName str
 	return stats, nil
 }
 
-// getDomainCPUStats retrieves CPU usage statistics  
+// getDomainCPUStats retrieves CPU usage statistics
 func (v *VirshProvider) getDomainCPUStats(ctx context.Context, domainName string) (map[string]string, error) {
 	result, err := v.runVirshCommand(ctx, "cpu-stats", domainName)
 	if err != nil {
 		return nil, err
 	}
-	
+
 	stats := make(map[string]string)
 	lines := strings.Split(strings.TrimSpace(result.Stdout), "\n")
 	for _, line := range lines {
@@ -585,13 +595,13 @@ func (v *VirshProvider) getDomainCPUStats(ctx context.Context, domainName string
 // getDomainNetworkInfo retrieves network interface information and IP addresses
 func (v *VirshProvider) getDomainNetworkInfo(ctx context.Context, domainName string) (map[string]string, error) {
 	info := make(map[string]string)
-	
+
 	// Get domain interface list
 	result, err := v.runVirshCommand(ctx, "domiflist", domainName)
 	if err != nil {
 		return nil, err
 	}
-	
+
 	interfaces := []string{}
 	lines := strings.Split(strings.TrimSpace(result.Stdout), "\n")
 	for i, line := range lines {
@@ -603,14 +613,14 @@ func (v *VirshProvider) getDomainNetworkInfo(ctx context.Context, domainName str
 			interfaces = append(interfaces, parts[0])
 		}
 	}
-	
+
 	info["network_interfaces"] = strings.Join(interfaces, ",")
-	
+
 	// Try to get IP addresses via guest agent (if available)
 	if ipInfo, err := v.getDomainIPAddresses(ctx, domainName); err == nil {
 		info["guest_ip_addresses"] = ipInfo
 	}
-	
+
 	return info, nil
 }
 
@@ -620,7 +630,7 @@ func (v *VirshProvider) getDomainIPAddresses(ctx context.Context, domainName str
 	if err != nil {
 		return "", err
 	}
-	
+
 	ips := []string{}
 	lines := strings.Split(strings.TrimSpace(result.Stdout), "\n")
 	for i, line := range lines {
@@ -640,20 +650,20 @@ func (v *VirshProvider) getDomainIPAddresses(ctx context.Context, domainName str
 			}
 		}
 	}
-	
+
 	return strings.Join(ips, ","), nil
 }
 
 // getDomainBlockStats retrieves storage device statistics
 func (v *VirshProvider) getDomainBlockStats(ctx context.Context, domainName string) (map[string]string, error) {
 	info := make(map[string]string)
-	
+
 	// Get block device list
 	result, err := v.runVirshCommand(ctx, "domblklist", domainName)
 	if err != nil {
 		return nil, err
 	}
-	
+
 	devices := []string{}
 	lines := strings.Split(strings.TrimSpace(result.Stdout), "\n")
 	for i, line := range lines {
@@ -665,9 +675,9 @@ func (v *VirshProvider) getDomainBlockStats(ctx context.Context, domainName stri
 			devices = append(devices, parts[0])
 		}
 	}
-	
+
 	info["block_devices"] = strings.Join(devices, ",")
-	
+
 	// Get stats for first device (if any)
 	if len(devices) > 0 {
 		if blockStats, err := v.getBlockDeviceStats(ctx, domainName, devices[0]); err == nil {
@@ -676,7 +686,7 @@ func (v *VirshProvider) getDomainBlockStats(ctx context.Context, domainName stri
 			}
 		}
 	}
-	
+
 	return info, nil
 }
 
@@ -686,7 +696,7 @@ func (v *VirshProvider) getBlockDeviceStats(ctx context.Context, domainName, dev
 	if err != nil {
 		return nil, err
 	}
-	
+
 	stats := make(map[string]string)
 	lines := strings.Split(strings.TrimSpace(result.Stdout), "\n")
 	for _, line := range lines {
@@ -702,7 +712,7 @@ func (v *VirshProvider) getBlockDeviceStats(ctx context.Context, domainName, dev
 // getDomainGuestInfo retrieves guest agent information
 func (v *VirshProvider) getDomainGuestInfo(ctx context.Context, domainName string) (map[string]string, error) {
 	info := make(map[string]string)
-	
+
 	// Try to get guest OS information
 	result, err := v.runVirshCommand(ctx, "guestinfo", domainName, "--os")
 	if err == nil {
@@ -717,13 +727,13 @@ func (v *VirshProvider) getDomainGuestInfo(ctx context.Context, domainName strin
 			}
 		}
 	}
-	
+
 	// Try to get guest hostname
 	if result, err := v.runVirshCommand(ctx, "guestinfo", domainName, "--hostname"); err == nil {
 		if strings.TrimSpace(result.Stdout) != "" {
 			info["guest_hostname"] = strings.TrimSpace(result.Stdout)
 		}
 	}
-	
+
 	return info, nil
 }

@@ -30,6 +30,8 @@ const (
 	PowerOpOff PowerOp = "Off"
 	// PowerOpReboot reboots the VM
 	PowerOpReboot PowerOp = "Reboot"
+	// PowerOpShutdownGraceful gracefully shuts down the VM using guest tools
+	PowerOpShutdownGraceful PowerOp = "ShutdownGraceful"
 )
 
 // CreateRequest contains all information needed to create a VM

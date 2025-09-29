@@ -21,50 +21,13 @@ Virtrigaud is a Kubernetes operator that enables declarative management of virtu
 
 ## API Support
 
-**API Version**: v1beta1 - The stable production-ready API. This is the only supported API version for virtrigaud.
+**API Version**: v1beta1
 
 All resources use the v1beta1 API with comprehensive OpenAPI validation and type safety.
 
 ## Architecture
 
 VirtRigaud uses a **Remote Provider** architecture for optimal scalability and reliability:
-```
-                    ┌─────────────────────────────────────────┐
-                    │            Kubernetes Cluster           │
-                    │                                         │
-┌─────────────────┐ │ ┌─────────────────┐                    │
-│  VirtualMachine │ │ │   Manager       │                    │
-│      CRD        │─┼─│   Controller    │                    │
-└─────────────────┘ │ │                 │                    │
-┌─────────────────┐ │ │                 │                    │
-│    VMClass      │─┼─│                 │                    │
-│      CRD        │ │ │                 │                    │
-└─────────────────┘ │ │                 │                    │
-┌─────────────────┐ │ │                 │  gRPC              │
-│    VMImage      │─┼─│                 ├──────────────────► │
-│      CRD        │ │ │                 │                    │
-└─────────────────┘ │ └─────────────────┘                    │
-┌─────────────────┐ │                                        │
-│    Provider     │ │ ┌─────────────────────────────────────┐│
-│      CRD        │─┼─│        Provider Pods                 ││
-└─────────────────┘ │ │                                     ││
-                    │ │ ┌──────────┐ ┌─────────┐ ┌─────────┐││
-                    │ │ │ vSphere  │ │ Libvirt │ │Proxmox  │││
-                    │ │ │ Provider │ │ Provider│ │Provider │││
-                    │ │ │   Pod    │ │   Pod   │ │  Pod    │││
-                    │ │ └──────────┘ └─────────┘ └─────────┘││
-                    │ └─────────────────────────────────────┘│
-                    │                                        │
-                    │ ┌─────────────────────────────────────┐│
-                    │ │         External Infrastructure      ││
-                    │ │                                     ││
-                    │ │ ┌──────────┐ ┌─────────┐ ┌─────────┐││
-                    │ │ │ vSphere  │ │ Libvirt │ │Proxmox  │││
-                    │ │ │   ESXi   │ │   KVM   │ │   VE    │││
-                    │ │ └──────────┘ └─────────┘ └─────────┘││
-                    │ └─────────────────────────────────────┘│
-                    └─────────────────────────────────────────┘
-```
 
 ### Key Benefits
 
@@ -154,11 +117,10 @@ graph TB
    # With custom values
    helm install virtrigaud virtrigaud/virtrigaud \
      -n virtrigaud-system --create-namespace \
-     --set webhooks.enabled=true \
      --set providers.vsphere.enabled=true \
      --set providers.libvirt.enabled=true \
      --set providers.proxmox.enabled=false \
-     --version 0.2.0
+     --version v0.2.1
    
    # Skip CRDs if already installed separately
    helm install virtrigaud virtrigaud/virtrigaud -n virtrigaud-system --create-namespace --skip-crds
@@ -222,25 +184,25 @@ graph TB
 2. **Create VM resources using the Provider**:
    ```bash
    # Apply VM definition that references the provider
-   kubectl apply -f examples/complete-example.yaml
+   kubectl apply -f docs/examples/complete-example.yaml
    
    # Proxmox VE example (v1beta1 API)
-   kubectl apply -f examples/proxmox-complete-example.yaml
+   kubectl apply -f docs/examples/proxmox-complete-example.yaml
    
-   # Only v1beta1 API is supported as of v0.2.0
+   # Only v1beta1 API is supported as of v0.2.1
    
    # Multi-provider example (vSphere, Libvirt, and Proxmox)
-   kubectl apply -f examples/multi-provider-example.yaml
+   kubectl apply -f docs/examples/multi-provider-example.yaml
    
    # Or step by step:
    kubectl create secret generic vsphere-creds \
      --from-literal=username=administrator@vsphere.local \
      --from-literal=password=your-password
-   kubectl apply -f examples/provider-vsphere.yaml
-   kubectl apply -f examples/vmclass-small.yaml
-   kubectl apply -f examples/vmimage-ubuntu.yaml
-   kubectl apply -f examples/vmnetwork-app.yaml
-   kubectl apply -f examples/vm-ubuntu-small.yaml
+   kubectl apply -f docs/examples/provider-vsphere.yaml
+   kubectl apply -f docs/examples/vmclass-small.yaml
+   kubectl apply -f docs/examples/vmimage-ubuntu.yaml
+   kubectl apply -f docs/examples/vmnetwork-app.yaml
+   kubectl apply -f docs/examples/vm-ubuntu-small.yaml
    ```
 
 2. **Monitor VM creation**:
@@ -248,12 +210,12 @@ graph TB
    kubectl get virtualmachine -w
    ```
 
-For detailed instructions, see [QUICKSTART.md](QUICKSTART.md).
+For detailed instructions, see [Quick Start Guide](docs/getting-started/quickstart.md).
 
 ## CRDs
 
 - **VirtualMachine**: Represents a virtual machine instance
-- **VMClass**: Defines resource allocation (CPU, memory, etc.)
+- **VMClass**: Defines resource allocation (CPU, memory, disk, etc.)
 - **VMImage**: References base templates/images
 - **VMNetworkAttachment**: Defines network configurations
 - **Provider**: Configures hypervisor connection details
@@ -262,15 +224,15 @@ For detailed instructions, see [QUICKSTART.md](QUICKSTART.md).
 
 ### Production-Ready Providers
 
-- **vSphere** (govmomi-based) - **Pre-release**
+- **vSphere** - **GA**
   - VM creation from templates
-  - Power management (On/Off/Reboot)
+  - Power management (On/Off/ShutDown)
   - Resource configuration (CPU/Memory/Disks)
   - Cloud-init support via guestinfo
   - Network configuration with portgroups
   - Async task monitoring
   
-- **Libvirt/KVM** (libvirt-go-based) - **In Development**
+- **Libvirt/KVM** - **Pre-Release**
   - VM creation from qcow2 images
   - Power management (On/Off/Reboot)  
   - Resource configuration (CPU/Memory/Disks)
@@ -278,7 +240,7 @@ For detailed instructions, see [QUICKSTART.md](QUICKSTART.md).
   - Network configuration with bridges/networks
   - Storage pool and volume management
 
-- **Proxmox VE** (REST API-based) - **In Development**
+- **Proxmox VE** - **In Development**
   - VM creation from templates or ISO
   - Power management (On/Off/Reboot)
   - **Hot-plug reconfiguration** (CPU/Memory/Disk)
@@ -310,34 +272,9 @@ For detailed instructions, see [QUICKSTART.md](QUICKSTART.md).
 
 - **Firecracker**: Serverless microVM support
 - **QEMU**: Direct QEMU integration
-- **Hyper-V**: Windows virtualization platform
-- **OpenStack**: Cloud infrastructure integration
+
 
 ## Troubleshooting
-
-### API Conversion Issues
-
-As of v0.2.0, only v1beta1 API is supported. For migration from legacy v1alpha1:
-
-1. **Verify conversion webhook is running**:
-   ```bash
-   kubectl get pods -n virtrigaud -l app=virtrigaud-webhook
-   ```
-
-2. **Check conversion webhook configuration**:
-   ```bash
-   kubectl get crd virtualmachines.infra.virtrigaud.io -o yaml | yq '.spec.conversion'
-   ```
-
-3. **Verify webhook service**:
-   ```bash
-   kubectl get svc -n virtrigaud virtrigaud-webhook
-   ```
-
-4. **Check webhook logs**:
-   ```bash
-   kubectl logs -n virtrigaud -l app=virtrigaud-webhook
-   ```
 
 ### Missing CRDs
 
@@ -345,7 +282,7 @@ If CRDs are missing after Helm install:
 
 1. **Check if CRDs were skipped**:
    ```bash
-   helm get values virtrigaud -n virtrigaud | grep skip-crds
+   helm get values virtrigaud -n virtrigaud-system | grep skip-crds
    ```
 
 2. **Manually install CRDs**:
@@ -389,7 +326,7 @@ Test GitHub Actions workflows locally before pushing to save costs and catch iss
 ./hack/test-release-locally.sh v0.2.0-test
 ```
 
-See [TESTING_WORKFLOWS_LOCALLY.md](TESTING_WORKFLOWS_LOCALLY.md) for detailed instructions.
+See [Testing Workflows Locally](docs/TESTING_WORKFLOWS_LOCALLY.md) for detailed instructions.
 
 ### Building
 
@@ -422,6 +359,8 @@ make run
 - [Quick Start Guide](docs/getting-started/quickstart.md) - Get started in 15 minutes
 - [CRD Reference](docs/CRDs.md) - Complete API documentation
 - [Examples](docs/EXAMPLES.md) - Practical examples and use cases
+- [CLI Tools Reference](docs/CLI.md) - Command-line interface guide
+- [Upgrade Guide](docs/UPGRADE.md) - Version upgrade procedures
 - [Provider Development](docs/PROVIDERS.md) - How to add new hypervisors
 - [Provider Catalog](docs/catalog.md) - Browse available providers
 - [Provider Tutorial](docs/providers/tutorial.md) - Complete provider development guide

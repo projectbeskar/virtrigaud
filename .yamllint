@@ -1,0 +1,32 @@
+# yamllint configuration for VirtRigaud
+# See https://yamllint.readthedocs.io/en/stable/configuration.html
+
+extends: default
+
+rules:
+  # Allow longer lines for Kubernetes YAML
+  line-length:
+    max: 120
+    
+  # Allow document start indicators to be optional
+  document-start: disable
+  
+  # Be more lenient with comments
+  comments:
+    min-spaces-from-content: 1
+    
+  # Allow empty values (common in Kubernetes)
+  empty-values: disable
+  
+  # Allow truthy values (on/off used in YAML)
+  truthy:
+    allowed-values: ['true', 'false', 'on', 'off']
+
+ignore: |
+  *.gotmpl
+  .github/
+  hack/
+  config/
+  charts/virtrigaud/templates/
+  examples/
+  test/
