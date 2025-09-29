@@ -5,6 +5,88 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2025-01-29
+
+### Patch Release: Critical Fixes and Documentation Updates
+
+This patch release addresses several critical issues discovered in v0.2.0, including linter compliance fixes, documentation improvements, and enhanced provider capabilities. VirtRigaud v0.2.1 ensures improved stability and usability for production deployments.
+
+### Fixed
+
+#### Code Quality and Compliance
+- **Error Handling**: Fixed unchecked error return values in vSphere provider fmt.Sscanf calls
+- **Linting Compliance**: Resolved golangci-lint errcheck violations that were causing CI failures
+- **CRD Validation**: Fixed CRD validation conflicts for OffGraceful powerState transitions
+
+#### Documentation and Examples
+- **Broken Links**: Corrected broken documentation links in README.md
+- **Example Updates**: Consolidated and enhanced examples with v0.2.1 features
+- **CLI Documentation**: Added comprehensive CLI documentation and reference guides
+
+#### Provider Enhancements
+- **VMClass Disk Settings**: Fixed VMClass disk size settings to be properly respected across all providers
+- **CRD Schema Sync**: Synchronized Helm chart CRDs with latest schema fixes for consistency
+
+### Added
+
+#### Infrastructure Improvements
+- **Build Artifacts**: Enhanced .gitignore to properly exclude dist/ and build artifacts
+- **Automated CRD Sync**: Implemented automated CRD synchronization workflow for improved consistency
+- **Field Test Exclusions**: Added fieldTest exclusions to .gitignore for cleaner repository
+
+#### vSphere Provider Features
+- **Hardware Version Management**: Added VM hardware version management support with version comparison logic
+- **Graceful Shutdown**: Implemented graceful shutdown capabilities for virtual machines
+- **Enhanced Power States**: Improved power state management with better error handling
+
+### Enhanced
+
+#### Documentation
+- **README Updates**: Comprehensive updates to project README with corrected examples and links
+- **CLI Reference**: Complete CLI documentation covering all available commands and options
+- **Provider Guides**: Enhanced provider-specific documentation with updated examples
+
+#### Development Workflow
+- **Release Preparation**: Streamlined release preparation process with automated documentation sync
+- **CI/CD Pipeline**: Improved continuous integration with better linting and validation checks
+
+### Technical Details
+
+#### API Stability
+- Maintains full backward compatibility with v0.2.0
+- No breaking changes to existing APIs or configurations
+- CRD schemas remain stable with validation improvements
+
+#### Provider Compatibility
+- All existing provider configurations continue to work without modification
+- Enhanced error handling improves provider reliability
+- VMClass configurations now properly enforce disk size settings
+
+### Deployment Notes
+
+#### Container Images
+Updated provider images are available from GitHub Container Registry:
+- **Manager**: `ghcr.io/projectbeskar/virtrigaud/manager:v0.2.1`
+- **vSphere Provider**: `ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.2.1`
+- **LibVirt Provider**: `ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.2.1`
+- **Proxmox Provider**: `ghcr.io/projectbeskar/virtrigaud/provider-proxmox:v0.2.1`
+- **Mock Provider**: `ghcr.io/projectbeskar/virtrigaud/provider-mock:v0.2.1`
+
+#### Helm Charts
+- **Main Chart**: `virtrigaud/virtrigaud:0.2.1`
+- **Provider Runtime Chart**: `virtrigaud/virtrigaud-provider-runtime:0.2.1`
+
+#### Upgrade Path
+- Direct upgrade from v0.2.0 with no manual intervention required
+- Existing deployments will automatically benefit from the fixes
+- No configuration changes needed for standard deployments
+
+### Acknowledgments
+
+This release includes important fixes identified by the community and addresses issues reported in production environments. Thanks to all contributors who helped identify and resolve these issues.
+
+---
+
 ## [0.2.0] - 2025-01-15
 
 ### Major Release: Production-Ready Provider Architecture
@@ -188,4 +270,4 @@ For provider-specific configuration and capabilities, see the [Provider Document
 
 ---
 
-**Full Changelog**: https://github.com/projectbeskar/virtrigaud/compare/v0.1.0...v0.2.0
+**Full Changelog**: https://github.com/projectbeskar/virtrigaud/compare/v0.2.0...v0.2.1
