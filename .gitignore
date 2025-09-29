@@ -31,6 +31,10 @@ go.work
 # Local development files
 /tmp/virtrigaud-dev-values.yaml
 /fieldTesting
+
+# Build artifacts
+dist/
+*.tgz
 libvirtVM.yaml
 libvirtVM-corrected.yaml
 vm-example.yaml
