@@ -615,6 +615,22 @@ func (p *Provider) generateDomainXMLWithStorage(req contracts.CreateRequest, dis
 		memoryMB = int64(req.Class.MemoryMiB)
 	}
 
+	// Extract performance and security features
+	var nestedVirtualization bool
+	var vtdEnabled bool
+	var secureBoot bool
+	var tpmEnabled bool
+
+	if req.Class.PerformanceProfile != nil {
+		nestedVirtualization = req.Class.PerformanceProfile.NestedVirtualization
+	}
+
+	if req.Class.SecurityProfile != nil {
+		vtdEnabled = req.Class.SecurityProfile.VTDEnabled
+		secureBoot = req.Class.SecurityProfile.SecureBoot
+		tpmEnabled = req.Class.SecurityProfile.TPMEnabled
+	}
+
 	// Generate UUID for the domain
 	uuid := p.generateUUID()
 
@@ -638,6 +654,55 @@ func (p *Provider) generateDomainXMLWithStorage(req contracts.CreateRequest, dis
     </disk>`, cloudInitISOPath)
 	}
 
+	// Build features XML based on configuration
+	featuresXML := `    <acpi/>
+    <apic/>`
+
+	if secureBoot {
+		featuresXML += `
+    <smm state='on'>
+      <tseg unit='MiB'>16</tseg>
+    </smm>`
+	}
+
+	if vtdEnabled {
+		featuresXML += `
+    <iommu model='intel'/>` // or 'amd' for AMD systems
+	}
+
+	// Build CPU configuration with nested virtualization support
+	cpuXML := `<cpu mode='host-model' check='partial'>`
+	if nestedVirtualization {
+		cpuXML += `
+    <feature policy='require' name='vmx'/> <!-- Intel VT-x -->
+    <feature policy='require' name='svm'/> <!-- AMD-V -->`
+	}
+	cpuXML += `</cpu>`
+
+	// Build OS configuration with secure boot if needed
+	osXML := `    <type arch='x86_64' machine='pc'>hvm</type>
+    <boot dev='hd'/>
+    <boot dev='cdrom'/>`
+
+	if secureBoot {
+		osXML = `    <type arch='x86_64' machine='q35'>hvm</type>
+    <loader readonly='yes' type='pflash' secure='yes'>/usr/share/OVMF/OVMF_CODE_4M.secboot.fd</loader>
+    <nvram template='/usr/share/OVMF/OVMF_VARS_4M.fd'/>
+    <boot dev='hd'/>
+    <boot dev='cdrom'/>`
+	}
+
+	// Build devices XML with TPM if needed
+	devicesXML := fmt.Sprintf(`    <emulator>/usr/bin/qemu-system-x86_64</emulator>
+%s`, diskDevicesXML)
+
+	if tpmEnabled {
+		devicesXML += `
+    <tpm model='tpm-tis'>
+      <backend type='emulator' version='2.0'/>
+    </tpm>`
+	}
+
 	domainXML := fmt.Sprintf(`<domain type='qemu'>
   <name>%s</name>
   <uuid>%s</uuid>
@@ -645,15 +710,12 @@ func (p *Provider) generateDomainXMLWithStorage(req contracts.CreateRequest, dis
   <currentMemory unit='MiB'>%d</currentMemory>
   <vcpu placement='static'>%d</vcpu>
   <os>
-    <type arch='x86_64' machine='pc'>hvm</type>
-    <boot dev='hd'/>
-    <boot dev='cdrom'/>
+%s
   </os>
   <features>
-    <acpi/>
-    <apic/>
+%s
   </features>
-  <cpu mode='host-model' check='partial'/>
+  %s
   <clock offset='utc'>
     <timer name='rtc' tickpolicy='catchup'/>
     <timer name='pit' tickpolicy='delay'/>
@@ -663,7 +725,6 @@ func (p *Provider) generateDomainXMLWithStorage(req contracts.CreateRequest, dis
   <on_reboot>restart</on_reboot>
   <on_crash>destroy</on_crash>
   <devices>
-    <emulator>/usr/bin/qemu-system-x86_64</emulator>
 %s
     <controller type='usb' index='0' model='ich9-ehci1'>
       <address type='pci' domain='0x0000' bus='0x00' slot='0x05' function='0x7'/>
@@ -721,6 +782,59 @@ func (p *Provider) generateDomainXMLWithStorage(req contracts.CreateRequest, dis
     <memballoon model='virtio'>
       <address type='pci' domain='0x0000' bus='0x00' slot='0x08' function='0x0'/>
     </memballoon>
+    <controller type='usb' index='0' model='ich9-ehci1'>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x05' function='0x7'/>
+    </controller>
+    <controller type='usb' index='0' model='ich9-uhci1'>
+      <master startport='0'/>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x05' function='0x0' multifunction='on'/>
+    </controller>
+    <controller type='usb' index='0' model='ich9-uhci2'>
+      <master startport='2'/>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x05' function='0x1'/>
+    </controller>
+    <controller type='usb' index='0' model='ich9-uhci3'>
+      <master startport='4'/>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x05' function='0x2'/>
+    </controller>
+    <controller type='pci' index='0' model='pci-root'/>
+    <controller type='ide' index='0'>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x01' function='0x1'/>
+    </controller>
+    <controller type='virtio-serial' index='0'>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x06' function='0x0'/>
+    </controller>
+    <interface type='user'>
+      <model type='virtio'/>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x03' function='0x0'/>
+    </interface>
+    <serial type='pty'>
+      <target type='isa-serial' port='0'>
+        <model name='isa-serial'/>
+      </target>
+    </serial>
+    <console type='pty'>
+      <target type='serial' port='0'/>
+    </console>
+    <channel type='unix'>
+      <target type='virtio' name='org.qemu.guest_agent.0'/>
+      <address type='virtio-serial' controller='0' bus='0' port='1'/>
+    </channel>
+    <input type='tablet' bus='usb'>
+      <address type='usb' bus='0' port='1'/>
+    </input>
+    <input type='mouse' bus='ps2'/>
+    <input type='keyboard' bus='ps2'/>
+    <graphics type='vnc' port='-1' autoport='yes' listen='127.0.0.1'>
+      <listen type='address' address='127.0.0.1'/>
+    </graphics>
+    <video>
+      <model type='cirrus' vram='16384' heads='1' primary='yes'/>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x02' function='0x0'/>
+    </video>
+    <memballoon model='virtio'>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x08' function='0x0'/>
+    </memballoon>
   </devices>
 </domain>`,
 		req.Name,
@@ -728,7 +842,10 @@ func (p *Provider) generateDomainXMLWithStorage(req contracts.CreateRequest, dis
 		memoryMB,
 		memoryMB,
 		cpuCount,
-		diskDevicesXML)
+		osXML,
+		featuresXML,
+		cpuXML,
+		devicesXML)
 
 	return domainXML, nil
 }
