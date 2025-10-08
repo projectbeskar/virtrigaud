@@ -888,16 +888,23 @@ func (p *Provider) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepar
 
 // VMSpec represents the parsed virtual machine specification
 type VMSpec struct {
-	Name            string
-	CPU             int32
-	MemoryMB        int64
-	DiskSizeGB      int64
-	DiskType        string
-	TemplateName    string
-	NetworkName     string
-	Firmware        string
-	HardwareVersion *int32 // VM hardware compatibility version
-	CloudInit       string // Cloud-init user data
+	Name                        string
+	CPU                         int32
+	MemoryMB                    int64
+	DiskSizeGB                  int64
+	DiskType                    string
+	TemplateName                string
+	NetworkName                 string
+	Firmware                    string
+	HardwareVersion             *int32 // VM hardware compatibility version
+	CloudInit                   string // Cloud-init user data
+	NestedVirtualization        bool   // Enable nested virtualization
+	VirtualizationBasedSecurity bool   // Enable VBS features
+	CPUHotAddEnabled            bool   // Enable CPU hot-add
+	MemoryHotAddEnabled         bool   // Enable memory hot-add
+	SecureBoot                  bool   // Enable secure boot
+	TPMEnabled                  bool   // Enable TPM
+	VTDEnabled                  bool   // Enable Intel VT-d or AMD-Vi
 }
 
 // parseCreateRequest parses the JSON-encoded specifications from the gRPC request
@@ -917,6 +924,17 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*VMSpec, e
 				Type    string `json:"Type"`
 				SizeGiB int32  `json:"SizeGiB"`
 			} `json:"DiskDefaults"`
+			PerformanceProfile *struct {
+				NestedVirtualization        bool `json:"NestedVirtualization"`
+				VirtualizationBasedSecurity bool `json:"VirtualizationBasedSecurity"`
+				CPUHotAddEnabled            bool `json:"CPUHotAddEnabled"`
+				MemoryHotAddEnabled         bool `json:"MemoryHotAddEnabled"`
+			} `json:"PerformanceProfile"`
+			SecurityProfile *struct {
+				SecureBoot bool `json:"SecureBoot"`
+				TPMEnabled bool `json:"TPMEnabled"`
+				VTDEnabled bool `json:"VTDEnabled"`
+			} `json:"SecurityProfile"`
 		}
 
 		if err := json.Unmarshal([]byte(req.ClassJson), &vmClass); err != nil {
@@ -943,6 +961,21 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*VMSpec, e
 		if vmClass.DiskDefaults != nil {
 			spec.DiskType = vmClass.DiskDefaults.Type
 			spec.DiskSizeGB = int64(vmClass.DiskDefaults.SizeGiB) // Convert GiB to GB (same value)
+		}
+
+		// Parse PerformanceProfile
+		if vmClass.PerformanceProfile != nil {
+			spec.NestedVirtualization = vmClass.PerformanceProfile.NestedVirtualization
+			spec.VirtualizationBasedSecurity = vmClass.PerformanceProfile.VirtualizationBasedSecurity
+			spec.CPUHotAddEnabled = vmClass.PerformanceProfile.CPUHotAddEnabled
+			spec.MemoryHotAddEnabled = vmClass.PerformanceProfile.MemoryHotAddEnabled
+		}
+
+		// Parse SecurityProfile
+		if vmClass.SecurityProfile != nil {
+			spec.SecureBoot = vmClass.SecurityProfile.SecureBoot
+			spec.TPMEnabled = vmClass.SecurityProfile.TPMEnabled
+			spec.VTDEnabled = vmClass.SecurityProfile.VTDEnabled
 		}
 	}
 
@@ -1075,6 +1108,94 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 		// Convert hardware version to VMX format (e.g., 21 -> "vmx-21")
 		configSpec.Version = fmt.Sprintf("vmx-%d", *spec.HardwareVersion)
 		p.logger.Info("Setting VM hardware version", "version", configSpec.Version, "vm_name", spec.Name)
+	}
+
+	// Configure performance and security features
+	var extraConfig []types.BaseOptionValue
+
+	// Enable nested virtualization if requested
+	if spec.NestedVirtualization {
+		p.logger.Info("Enabling nested virtualization", "vm_name", spec.Name)
+		extraConfig = append(extraConfig, &types.OptionValue{
+			Key:   "vhv.enable",
+			Value: "TRUE",
+		})
+		// Also enable nested page tables for better performance
+		extraConfig = append(extraConfig, &types.OptionValue{
+			Key:   "vhv.allowNestedPageTables",
+			Value: "TRUE",
+		})
+	}
+
+	// Enable VBS (Virtualization Based Security) if requested
+	if spec.VirtualizationBasedSecurity {
+		p.logger.Info("Enabling Virtualization Based Security", "vm_name", spec.Name)
+		extraConfig = append(extraConfig, &types.OptionValue{
+			Key:   "vbs.enable",
+			Value: "TRUE",
+		})
+	}
+
+	// Enable Intel VT-d or AMD-Vi if requested
+	if spec.VTDEnabled {
+		p.logger.Info("Enabling VT-d/AMD-Vi", "vm_name", spec.Name)
+		extraConfig = append(extraConfig, &types.OptionValue{
+			Key:   "vvtd.enable",
+			Value: "TRUE",
+		})
+	}
+
+	// Configure CPU and memory hot-add
+	if spec.CPUHotAddEnabled {
+		p.logger.Info("Enabling CPU hot-add", "vm_name", spec.Name)
+		configSpec.CpuHotAddEnabled = &spec.CPUHotAddEnabled
+	}
+
+	if spec.MemoryHotAddEnabled {
+		p.logger.Info("Enabling memory hot-add", "vm_name", spec.Name)
+		configSpec.MemoryHotAddEnabled = &spec.MemoryHotAddEnabled
+	}
+
+	// Configure secure boot and TPM
+	if spec.SecureBoot || spec.TPMEnabled {
+		// These features require UEFI firmware
+		if spec.Firmware == "" || strings.ToUpper(spec.Firmware) != "UEFI" {
+			p.logger.Warn("Secure Boot and TPM require UEFI firmware, forcing UEFI", "vm_name", spec.Name)
+			configSpec.Firmware = string(types.GuestOsDescriptorFirmwareTypeEfi)
+		}
+
+		if spec.SecureBoot {
+			p.logger.Info("Enabling Secure Boot", "vm_name", spec.Name)
+			configSpec.BootOptions = &types.VirtualMachineBootOptions{
+				EfiSecureBootEnabled: &spec.SecureBoot,
+			}
+		}
+
+		if spec.TPMEnabled {
+			p.logger.Info("Enabling TPM", "vm_name", spec.Name)
+			// Add TPM device - this requires vSphere 6.7+ and hardware version 14+
+			tpmDevice := &types.VirtualTPM{
+				VirtualDevice: types.VirtualDevice{
+					Key: -1, // Auto-assign key
+					DeviceInfo: &types.Description{
+						Label:   "TPM",
+						Summary: "Trusted Platform Module",
+					},
+				},
+			}
+
+			deviceChange := &types.VirtualDeviceConfigSpec{
+				Operation: types.VirtualDeviceConfigSpecOperationAdd,
+				Device:    tpmDevice,
+			}
+
+			configSpec.DeviceChange = append(configSpec.DeviceChange, deviceChange)
+		}
+	}
+
+	// Apply extra configuration if any
+	if len(extraConfig) > 0 {
+		configSpec.ExtraConfig = extraConfig
 	}
 
 	// Configure network if specified
