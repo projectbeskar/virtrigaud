@@ -408,6 +408,50 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 		}
 	}
 
+	// Convert PerformanceProfile
+	if vmClass.Spec.PerformanceProfile != nil {
+		class.PerformanceProfile = &contracts.PerformanceProfile{
+			LatencySensitivity:          vmClass.Spec.PerformanceProfile.LatencySensitivity,
+			CPUHotAddEnabled:            vmClass.Spec.PerformanceProfile.CPUHotAddEnabled,
+			MemoryHotAddEnabled:         vmClass.Spec.PerformanceProfile.MemoryHotAddEnabled,
+			VirtualizationBasedSecurity: vmClass.Spec.PerformanceProfile.VirtualizationBasedSecurity,
+			NestedVirtualization:        vmClass.Spec.PerformanceProfile.NestedVirtualization,
+			HyperThreadingPolicy:        vmClass.Spec.PerformanceProfile.HyperThreadingPolicy,
+		}
+	}
+
+	// Convert SecurityProfile
+	if vmClass.Spec.SecurityProfile != nil {
+		class.SecurityProfile = &contracts.SecurityProfile{
+			SecureBoot:        vmClass.Spec.SecurityProfile.SecureBoot,
+			TPMEnabled:        vmClass.Spec.SecurityProfile.TPMEnabled,
+			TPMVersion:        vmClass.Spec.SecurityProfile.TPMVersion,
+			VTDEnabled:        vmClass.Spec.SecurityProfile.VTDEnabled,
+			EncryptionEnabled: vmClass.Spec.SecurityProfile.EncryptionPolicy != nil && vmClass.Spec.SecurityProfile.EncryptionPolicy.Enabled,
+			RequireEncryption: vmClass.Spec.SecurityProfile.EncryptionPolicy != nil && vmClass.Spec.SecurityProfile.EncryptionPolicy.RequireEncryption,
+		}
+		if vmClass.Spec.SecurityProfile.EncryptionPolicy != nil {
+			class.SecurityProfile.KeyProvider = vmClass.Spec.SecurityProfile.EncryptionPolicy.KeyProvider
+		}
+	}
+
+	// Convert ResourceLimits
+	if vmClass.Spec.ResourceLimits != nil {
+		class.ResourceLimits = &contracts.ResourceLimits{
+			CPULimit:       vmClass.Spec.ResourceLimits.CPULimit,
+			CPUReservation: vmClass.Spec.ResourceLimits.CPUReservation,
+			CPUShares:      vmClass.Spec.ResourceLimits.CPUShares,
+		}
+		if vmClass.Spec.ResourceLimits.MemoryLimit != nil {
+			memLimitMiB := int32(vmClass.Spec.ResourceLimits.MemoryLimit.Value() / (1024 * 1024))
+			class.ResourceLimits.MemoryLimitMiB = &memLimitMiB
+		}
+		if vmClass.Spec.ResourceLimits.MemoryReservation != nil {
+			memResMiB := int32(vmClass.Spec.ResourceLimits.MemoryReservation.Value() / (1024 * 1024))
+			class.ResourceLimits.MemoryReservationMiB = &memResMiB
+		}
+	}
+
 	// Convert VMImage
 	image := contracts.VMImage{
 		Format:       "template", // Default for vSphere
