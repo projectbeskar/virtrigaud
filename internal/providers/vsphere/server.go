@@ -905,6 +905,11 @@ type VMSpec struct {
 	SecureBoot                  bool   // Enable secure boot
 	TPMEnabled                  bool   // Enable TPM
 	VTDEnabled                  bool   // Enable Intel VT-d or AMD-Vi
+	// Placement overrides
+	Cluster   string // Cluster override (empty = use provider default)
+	Datastore string // Datastore override (empty = use provider default)
+	Folder    string // Folder override (empty = use provider default)
+	Host      string // Host override (empty = use provider default)
 }
 
 // parseCreateRequest parses the JSON-encoded specifications from the gRPC request
@@ -1012,6 +1017,26 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*VMSpec, e
 		spec.CloudInit = string(req.UserData)
 	}
 
+	// Parse Placement from JSON (contracts.Placement structure)
+	if req.PlacementJson != "" {
+		var placement struct {
+			Cluster   string `json:"Cluster"`
+			Datastore string `json:"Datastore"`
+			Folder    string `json:"Folder"`
+			Host      string `json:"Host"`
+		}
+
+		if err := json.Unmarshal([]byte(req.PlacementJson), &placement); err != nil {
+			return nil, fmt.Errorf("failed to parse Placement JSON: %w", err)
+		}
+
+		// Set placement overrides if specified
+		spec.Cluster = placement.Cluster
+		spec.Datastore = placement.Datastore
+		spec.Folder = placement.Folder
+		spec.Host = placement.Host
+	}
+
 	return spec, nil
 }
 
@@ -1040,10 +1065,17 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 		return "", fmt.Errorf("failed to find template VM '%s': %w", spec.TemplateName, err)
 	}
 
+	// Determine which cluster to use (spec override or provider default)
+	clusterName := p.config.DefaultCluster
+	if spec.Cluster != "" {
+		clusterName = spec.Cluster
+		p.logger.Info("Using placement override for cluster", "cluster", clusterName)
+	}
+
 	// Find the cluster and resource pool
-	cluster, err := p.finder.ClusterComputeResource(ctx, p.config.DefaultCluster)
+	cluster, err := p.finder.ClusterComputeResource(ctx, clusterName)
 	if err != nil {
-		return "", fmt.Errorf("failed to find cluster '%s': %w", p.config.DefaultCluster, err)
+		return "", fmt.Errorf("failed to find cluster '%s': %w", clusterName, err)
 	}
 
 	resourcePool, err := cluster.ResourcePool(ctx)
@@ -1051,17 +1083,31 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 		return "", fmt.Errorf("failed to get resource pool from cluster: %w", err)
 	}
 
+	// Determine which datastore to use (spec override or provider default)
+	datastoreName := p.config.DefaultDatastore
+	if spec.Datastore != "" {
+		datastoreName = spec.Datastore
+		p.logger.Info("Using placement override for datastore", "datastore", datastoreName)
+	}
+
 	// Find the datastore
-	datastore, err := p.finder.Datastore(ctx, p.config.DefaultDatastore)
+	datastore, err := p.finder.Datastore(ctx, datastoreName)
 	if err != nil {
-		return "", fmt.Errorf("failed to find datastore '%s': %w", p.config.DefaultDatastore, err)
+		return "", fmt.Errorf("failed to find datastore '%s': %w", datastoreName, err)
+	}
+
+	// Determine which folder to use (spec override or provider default)
+	folderName := p.config.DefaultFolder
+	if spec.Folder != "" {
+		folderName = spec.Folder
+		p.logger.Info("Using placement override for folder", "folder", folderName)
 	}
 
 	// Find the folder
-	folder, err := p.finder.Folder(ctx, p.config.DefaultFolder)
+	folder, err := p.finder.Folder(ctx, folderName)
 	if err != nil {
 		// If folder doesn't exist, use the datacenter's default VM folder
-		p.logger.Warn("Failed to find folder, using datacenter default VM folder", "folder", p.config.DefaultFolder, "error", err)
+		p.logger.Warn("Failed to find folder, using datacenter default VM folder", "folder", folderName, "error", err)
 		folder, err = p.finder.Folder(ctx, datacenter.Name()+"/vm")
 		if err != nil {
 			return "", fmt.Errorf("failed to find datacenter VM folder: %w", err)
