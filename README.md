@@ -52,6 +52,7 @@ graph TB
             VMC[VMClass CRD]
             VMI[VMImage CRD]
             PR[Provider CRD]
+            VMNA[VMNetworkAttachment CRD]
         end
         
         %% Controller
@@ -271,6 +272,7 @@ For detailed instructions, see [Quick Start Guide](docs/getting-started/quicksta
 ### Future Roadmap
 
 - **Firecracker**: Serverless microVM support
+- **Cloud-Hypervisor**: Serverless microVM support
 - **QEMU**: Direct QEMU integration
 
 
