@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+#### Nested Virtualization Support
+- **VMClass PerformanceProfile**: Added `nestedVirtualization` field to enable nested virtualization capabilities in VMs, allowing VMs to run their own hypervisors and nested virtual machines
+- **vSphere Provider Implementation**: 
+  - Automatically configures `vhv.enable=TRUE` for hardware-assisted virtualization
+  - Enables `vhv.allowNestedPageTables=TRUE` for improved nested VM performance
+  - Compatible with VM hardware version 9+ (version 14+ recommended)
+- **LibVirt Provider Implementation**: 
+  - Configures CPU mode with required virtualization extensions (vmx for Intel VT-x, svm for AMD-V)
+  - Automatically passes through host CPU virtualization features to guest VMs
+  - Compatible with QEMU/KVM hypervisors with nested virtualization enabled
+- **VT-d/AMD-Vi Support**: Added `vtdEnabled` field in SecurityProfile for Intel VT-d or AMD IOMMU support, improving I/O performance for nested environments
+- **CPU/Memory Hot-Add**: Added `cpuHotAddEnabled` and `memoryHotAddEnabled` in PerformanceProfile for dynamic resource scaling without VM restart
+- **Virtualization Based Security**: Added `virtualizationBasedSecurity` field in PerformanceProfile for Windows VBS features
+
+#### Security Features
+- **TPM (Trusted Platform Module) Support**: 
+  - Added `tpmEnabled` and `tpmVersion` fields in VMClass SecurityProfile
+  - vSphere Provider: Full TPM 2.0 device support (requires vSphere 6.7+ and VM hardware version 14+)
+  - LibVirt Provider: TPM emulator support with tpm-tis model and version 2.0
+  - Automatically enforces UEFI firmware requirement when TPM is enabled
+  - Enables Windows 11 support and BitLocker encryption capabilities
+- **Secure Boot Support**: 
+  - Added `secureBoot` field in SecurityProfile for UEFI Secure Boot functionality
+  - vSphere Provider: Configures EFI Secure Boot through VM boot options
+  - LibVirt Provider: Uses OVMF firmware with Secure Boot capabilities
+  - Automatically forces UEFI firmware when enabled
+  - Protects against rootkits and bootkits at firmware level
+- **Comprehensive Documentation**: 
+  - Added `docs/NESTED_VIRTUALIZATION.md` with detailed configuration guide
+  - Added `docs/examples/nested-virtualization.yaml` with complete working examples
+  - Includes verification steps, troubleshooting guidance, and performance recommendations
+
+#### Use Cases Enabled
+- Development and testing of virtualization platforms (e.g., Proxmox, OpenStack, vSphere)
+- Running Kubernetes clusters with nested container runtimes
+- Creating isolated lab environments for security testing
+- Educational scenarios for learning virtualization technologies
+
 ### Fixed
 
 #### vSphere Provider
