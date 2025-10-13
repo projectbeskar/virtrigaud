@@ -25,11 +25,12 @@ VirtRigaud uses **Helm Hooks** with a Kubernetes Job to automatically apply CRDs
 VirtRigaud builds and publishes its own `kubectl` image as part of the release process. This image:
 
 - Based on Alpine Linux for minimal size (~50MB)
-- Includes kubectl 1.31.0 binary from official Kubernetes releases
+- Includes kubectl 1.32.0 binary from official Kubernetes releases
 - Includes bash and shell for scripting support
 - Runs as non-root user (UID 65532)
 - Verified with SHA256 checksums
 - Signed with Cosign and includes SBOM
+- Security scanned but uses official kubectl binary (vulnerabilities tracked upstream)
 
 The image is automatically built and tagged to match each VirtRigaud release version, ensuring version consistency across all components.
 

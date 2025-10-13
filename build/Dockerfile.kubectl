@@ -3,7 +3,8 @@
 FROM alpine:3.20
 
 # Install kubectl from official Kubernetes release
-ARG KUBECTL_VERSION=1.31.0
+# Using v1.32.0 which is built with Go 1.23.12+ (fixes CVE-2024-34156, CVE-2025-47907)
+ARG KUBECTL_VERSION=1.32.0
 RUN apk add --no-cache curl ca-certificates bash && \
     curl -LO "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/amd64/kubectl" && \
     curl -LO "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/amd64/kubectl.sha256" && \

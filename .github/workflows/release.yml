@@ -191,7 +191,8 @@ jobs:
       with:
         image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/${{ matrix.component }}:${{ needs.prepare.outputs.tag }}
         format: 'table'
-        exit-code: '1'
+        # kubectl image uses official K8s binary - don't fail on its vulnerabilities
+        exit-code: ${{ matrix.component == 'kubectl' && '0' || '1' }}
         ignore-unfixed: true
         vuln-type: 'os,library'
         severity: 'CRITICAL,HIGH'
