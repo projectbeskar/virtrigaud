@@ -190,7 +190,7 @@ jobs:
       run: go mod tidy
 
     - name: Install controller-gen
-      run: go install sigs.k8s.io/controller-tools/cmd/controller-gen@latest
+      run: go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.17.2
 
     - name: Install protoc
       run: |
