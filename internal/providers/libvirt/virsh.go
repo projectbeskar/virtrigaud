@@ -737,3 +737,84 @@ func (v *VirshProvider) getDomainGuestInfo(ctx context.Context, domainName strin
 
 	return info, nil
 }
+
+// getDomainState returns the current state of a domain
+func (v *VirshProvider) getDomainState(ctx context.Context, domainName string) (string, error) {
+	result, err := v.runVirshCommand(ctx, "domstate", domainName)
+	if err != nil {
+		return "", fmt.Errorf("failed to get domain state: %w", err)
+	}
+
+	state := strings.TrimSpace(result.Stdout)
+	log.Printf("DEBUG Domain %s state: %s", domainName, state)
+	return state, nil
+}
+
+// snapshotExists checks if a snapshot exists for a domain
+func (v *VirshProvider) snapshotExists(ctx context.Context, domainName, snapshotName string) (bool, error) {
+	// List all snapshots for the domain
+	result, err := v.runVirshCommand(ctx, "snapshot-list", domainName, "--name")
+	if err != nil {
+		// If domain has no snapshots, snapshot-list may fail
+		if strings.Contains(err.Error(), "no domain snapshot") {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to list snapshots: %w", err)
+	}
+
+	// Check if snapshot name is in the list
+	snapshots := strings.Split(strings.TrimSpace(result.Stdout), "\n")
+	for _, snap := range snapshots {
+		if strings.TrimSpace(snap) == snapshotName {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
+// getSnapshotInfo returns information about a specific snapshot
+func (v *VirshProvider) getSnapshotInfo(ctx context.Context, domainName, snapshotName string) (map[string]string, error) {
+	result, err := v.runVirshCommand(ctx, "snapshot-info", domainName, snapshotName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get snapshot info: %w", err)
+	}
+
+	info := make(map[string]string)
+	lines := strings.Split(result.Stdout, "\n")
+	for _, line := range lines {
+		if strings.Contains(line, ":") {
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) == 2 {
+				key := strings.TrimSpace(parts[0])
+				value := strings.TrimSpace(parts[1])
+				info[key] = value
+			}
+		}
+	}
+
+	return info, nil
+}
+
+// listSnapshots returns all snapshots for a domain
+func (v *VirshProvider) listSnapshots(ctx context.Context, domainName string) ([]string, error) {
+	result, err := v.runVirshCommand(ctx, "snapshot-list", domainName, "--name")
+	if err != nil {
+		// If domain has no snapshots, return empty list
+		if strings.Contains(err.Error(), "no domain snapshot") {
+			return []string{}, nil
+		}
+		return nil, fmt.Errorf("failed to list snapshots: %w", err)
+	}
+
+	snapshots := []string{}
+	lines := strings.Split(strings.TrimSpace(result.Stdout), "\n")
+	for _, line := range lines {
+		snap := strings.TrimSpace(line)
+		if snap != "" {
+			snapshots = append(snapshots, snap)
+		}
+	}
+
+	return snapshots, nil
+}

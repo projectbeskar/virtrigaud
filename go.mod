@@ -33,7 +33,6 @@ require (
 	k8s.io/apimachinery v0.32.1
 	k8s.io/client-go v0.32.1
 	k8s.io/klog/v2 v2.130.1
-	libvirt.org/go/libvirt v1.11006.0
 	sigs.k8s.io/controller-runtime v0.20.4
 )
 

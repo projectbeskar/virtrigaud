@@ -62,6 +62,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Automatic power state handling during revert
   - Hierarchical snapshot tree navigation
   - Synchronous operations for immediate completion
+- **LibVirt Provider Implementation** ✅ **COMPLETED**:
+  - Full virsh-based snapshot operations (Create, Delete, Revert)
+  - Memory snapshot support for running VMs with qcow2 storage
+  - Disk-only snapshots for VMs with incompatible storage backends
+  - Atomic snapshot creation with --atomic flag
+  - Automatic power state preservation during revert
+  - Snapshot existence validation before operations
+  - Synchronous operations with immediate feedback
+  - Snapshot name sanitization for virsh compatibility
+  - Helper methods for snapshot listing and querying
 - **Proxmox Provider Implementation** ✅ **FULLY FUNCTIONAL**:
   - Complete snapshot lifecycle support
   - Memory state inclusion (vmstate)
