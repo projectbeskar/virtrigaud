@@ -30,6 +30,12 @@ type VMClass struct {
 	GuestToolsPolicy string
 	// ExtraConfig contains provider-specific configuration
 	ExtraConfig map[string]string
+	// PerformanceProfile defines performance-related settings
+	PerformanceProfile *PerformanceProfile
+	// SecurityProfile defines security-related settings
+	SecurityProfile *SecurityProfile
+	// ResourceLimits defines resource limits and reservations
+	ResourceLimits *ResourceLimits
 }
 
 // VMImage defines the base template/image (provider-agnostic)
@@ -118,6 +124,38 @@ type TaskRef struct {
 	Type string
 }
 
+// TaskStatus represents the status of an async task
+type TaskStatus struct {
+	// IsCompleted indicates if the task is done
+	IsCompleted bool
+	// Error contains error message if task failed
+	Error string
+	// Message contains status message
+	Message string
+}
+
+// SnapshotCreateRequest defines snapshot creation request
+type SnapshotCreateRequest struct {
+	// VmId is the VM identifier
+	VmId string
+	// NameHint provides a name suggestion for the snapshot
+	NameHint string
+	// Description provides context for the snapshot
+	Description string
+	// IncludeMemory indicates whether to include memory state
+	IncludeMemory bool
+	// Quiesce indicates whether to quiesce the filesystem
+	Quiesce bool
+}
+
+// SnapshotCreateResponse contains the result of snapshot creation
+type SnapshotCreateResponse struct {
+	// SnapshotId is the provider-specific snapshot identifier
+	SnapshotId string
+	// Task references an async operation if applicable
+	Task *TaskRef
+}
+
 // PowerState represents VM power states
 type PowerState string
 
@@ -140,4 +178,52 @@ type IPAddress struct {
 	Type string
 	// Source specifies how the IP was assigned (DHCP, static, etc.)
 	Source string
+}
+
+// PerformanceProfile defines performance-related settings
+type PerformanceProfile struct {
+	// LatencySensitivity configures latency sensitivity
+	LatencySensitivity string
+	// CPUHotAddEnabled allows adding CPUs while VM is running
+	CPUHotAddEnabled bool
+	// MemoryHotAddEnabled allows adding memory while VM is running
+	MemoryHotAddEnabled bool
+	// VirtualizationBasedSecurity enables VBS features
+	VirtualizationBasedSecurity bool
+	// NestedVirtualization enables nested virtualization
+	NestedVirtualization bool
+	// HyperThreadingPolicy controls hyperthreading usage
+	HyperThreadingPolicy string
+}
+
+// SecurityProfile defines security-related settings
+type SecurityProfile struct {
+	// SecureBoot enables secure boot functionality
+	SecureBoot bool
+	// TPMEnabled enables TPM (Trusted Platform Module)
+	TPMEnabled bool
+	// TPMVersion specifies the TPM version
+	TPMVersion string
+	// VTDEnabled enables Intel VT-d or AMD-Vi
+	VTDEnabled bool
+	// EncryptionEnabled indicates if encryption should be used
+	EncryptionEnabled bool
+	// KeyProvider specifies the encryption key provider
+	KeyProvider string
+	// RequireEncryption mandates encryption (fails if not available)
+	RequireEncryption bool
+}
+
+// ResourceLimits defines resource limits and reservations
+type ResourceLimits struct {
+	// CPULimit is the maximum CPU usage limit (in MHz or percentage)
+	CPULimit *int32
+	// CPUReservation is the guaranteed CPU allocation (in MHz)
+	CPUReservation *int32
+	// MemoryLimitMiB is the maximum memory usage limit in MiB
+	MemoryLimitMiB *int32
+	// MemoryReservationMiB is the guaranteed memory allocation in MiB
+	MemoryReservationMiB *int32
+	// CPUShares defines the relative CPU priority (higher = more priority)
+	CPUShares *int32
 }

@@ -20,6 +20,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
+	"regexp"
+	"strings"
+	"time"
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
@@ -255,43 +259,166 @@ func (s *Server) parseCreateRequest(req *providerv1.CreateRequest) (contracts.Cr
 
 // SnapshotCreate creates a VM snapshot
 func (s *Server) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotCreateRequest) (*providerv1.SnapshotCreateResponse, error) {
-	// Libvirt supports disk snapshots; memory snapshots depend on storage backend
-	snapshotID := fmt.Sprintf("snapshot-%s-%d", req.NameHint, generateTimestamp())
+	log.Printf("INFO Creating snapshot for VM: %s", req.VmId)
 
-	// For now, simulate async operation
-	taskRef := &providerv1.TaskRef{
-		Id: fmt.Sprintf("task-snapshot-%s", generateTaskID()),
+	// Get the provider instance and cast to libvirt Provider
+	libvirtProvider, ok := s.provider.(*Provider)
+	if !ok || libvirtProvider == nil || libvirtProvider.virshProvider == nil {
+		return nil, fmt.Errorf("libvirt provider not initialized")
 	}
 
-	// Note: Memory snapshots may not be supported on all storage backends
+	// Generate snapshot name if not provided
+	snapshotName := req.NameHint
+	if snapshotName == "" {
+		snapshotName = fmt.Sprintf("snapshot-%d", generateTimestamp())
+	}
+
+	// Clean snapshot name (virsh has strict naming requirements)
+	snapshotName = sanitizeSnapshotName(snapshotName)
+
+	// Prepare snapshot description
+	description := req.Description
+	if description == "" {
+		description = fmt.Sprintf("Snapshot created by VirtRigaud at %s", time.Now().Format(time.RFC3339))
+	}
+
+	// Check if domain exists and get its state
+	domainState, err := libvirtProvider.virshProvider.getDomainState(ctx, req.VmId)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get domain state: %w", err)
+	}
+
+	log.Printf("INFO Domain %s is in state: %s", req.VmId, domainState)
+
+	// Build virsh snapshot-create-as command
+	// Format: virsh snapshot-create-as DOMAIN NAME --description "DESC" [--disk-only] [--atomic]
+	args := []string{
+		"snapshot-create-as",
+		req.VmId,
+		snapshotName,
+		"--description", description,
+		"--atomic", // Ensure atomic operation
+	}
+
+	// Determine snapshot type based on domain state and request
+	if req.IncludeMemory && domainState == "running" {
+		// Memory snapshot (full system checkpoint including RAM)
+		log.Printf("INFO Creating memory snapshot (includes RAM state)")
+		// No --disk-only flag = full snapshot with memory
+	} else {
+		// Disk-only snapshot (faster, no memory state)
+		log.Printf("INFO Creating disk-only snapshot")
+		args = append(args, "--disk-only")
+	}
+
+	// Execute snapshot creation
+	result, err := libvirtProvider.virshProvider.runVirshCommand(ctx, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create snapshot: %w", err)
+	}
+
+	log.Printf("INFO Snapshot created successfully: %s\nOutput: %s", snapshotName, result.Stdout)
+
+	// Return snapshot ID (synchronous operation for libvirt)
 	return &providerv1.SnapshotCreateResponse{
-		SnapshotId: snapshotID,
-		Task:       taskRef,
+		SnapshotId: snapshotName,
+		// No task reference - libvirt snapshots are synchronous
 	}, nil
 }
 
 // SnapshotDelete deletes a VM snapshot
 func (s *Server) SnapshotDelete(ctx context.Context, req *providerv1.SnapshotDeleteRequest) (*providerv1.TaskResponse, error) {
-	// Simulate async snapshot deletion
-	taskRef := &providerv1.TaskRef{
-		Id: fmt.Sprintf("task-delete-snapshot-%s", generateTaskID()),
+	log.Printf("INFO Deleting snapshot %s from VM: %s", req.SnapshotId, req.VmId)
+
+	// Get the provider instance and cast to libvirt Provider
+	libvirtProvider, ok := s.provider.(*Provider)
+	if !ok || libvirtProvider == nil || libvirtProvider.virshProvider == nil {
+		return nil, fmt.Errorf("libvirt provider not initialized")
 	}
 
-	return &providerv1.TaskResponse{
-		Task: taskRef,
-	}, nil
+	// Check if snapshot exists
+	exists, err := libvirtProvider.virshProvider.snapshotExists(ctx, req.VmId, req.SnapshotId)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check snapshot existence: %w", err)
+	}
+
+	if !exists {
+		log.Printf("WARN Snapshot %s does not exist, considering deletion successful", req.SnapshotId)
+		return &providerv1.TaskResponse{}, nil
+	}
+
+	// Delete the snapshot
+	// Format: virsh snapshot-delete DOMAIN SNAPSHOT --metadata
+	// Using --metadata keeps the data but removes snapshot metadata (safer for external snapshots)
+	// For internal snapshots, this will delete both metadata and disk changes
+	args := []string{
+		"snapshot-delete",
+		req.VmId,
+		req.SnapshotId,
+	}
+
+	result, err := libvirtProvider.virshProvider.runVirshCommand(ctx, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to delete snapshot: %w", err)
+	}
+
+	log.Printf("INFO Snapshot deleted successfully: %s\nOutput: %s", req.SnapshotId, result.Stdout)
+
+	// Return empty response (synchronous operation)
+	return &providerv1.TaskResponse{}, nil
 }
 
 // SnapshotRevert reverts a VM to a snapshot
 func (s *Server) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotRevertRequest) (*providerv1.TaskResponse, error) {
-	// Simulate async snapshot revert
-	taskRef := &providerv1.TaskRef{
-		Id: fmt.Sprintf("task-revert-snapshot-%s", generateTaskID()),
+	log.Printf("INFO Reverting VM %s to snapshot: %s", req.VmId, req.SnapshotId)
+
+	// Get the provider instance and cast to libvirt Provider
+	libvirtProvider, ok := s.provider.(*Provider)
+	if !ok || libvirtProvider == nil || libvirtProvider.virshProvider == nil {
+		return nil, fmt.Errorf("libvirt provider not initialized")
 	}
 
-	return &providerv1.TaskResponse{
-		Task: taskRef,
-	}, nil
+	// Check if snapshot exists
+	exists, err := libvirtProvider.virshProvider.snapshotExists(ctx, req.VmId, req.SnapshotId)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check snapshot existence: %w", err)
+	}
+
+	if !exists {
+		return nil, fmt.Errorf("snapshot %s does not exist", req.SnapshotId)
+	}
+
+	// Get current domain state
+	domainState, err := libvirtProvider.virshProvider.getDomainState(ctx, req.VmId)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get domain state: %w", err)
+	}
+
+	log.Printf("INFO Domain %s current state: %s", req.VmId, domainState)
+
+	// Revert to snapshot
+	// Format: virsh snapshot-revert DOMAIN SNAPSHOT --running|--paused
+	args := []string{
+		"snapshot-revert",
+		req.VmId,
+		req.SnapshotId,
+		"--force", // Force revert even if domain is running
+	}
+
+	// If domain was running, keep it running after revert
+	if domainState == "running" {
+		args = append(args, "--running")
+	}
+
+	result, err := libvirtProvider.virshProvider.runVirshCommand(ctx, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to revert to snapshot: %w", err)
+	}
+
+	log.Printf("INFO Successfully reverted to snapshot: %s\nOutput: %s", req.SnapshotId, result.Stdout)
+
+	// Return empty response (synchronous operation)
+	return &providerv1.TaskResponse{}, nil
 }
 
 // Clone creates a VM clone
@@ -339,13 +466,36 @@ func (s *Server) GetCapabilities(ctx context.Context, req *providerv1.GetCapabil
 
 // Helper functions for generating IDs and timestamps (shared with vSphere)
 func generateTimestamp() int64 {
-	return 1642671234 // Placeholder - would use time.Now().Unix()
+	return time.Now().Unix()
 }
 
 func generateTaskID() string {
-	return "12345678-1234-1234-1234-123456789012" // Placeholder - would generate UUID
+	return fmt.Sprintf("%d-%d", time.Now().Unix(), time.Now().Nanosecond())
 }
 
 func generateVMID() string {
-	return "vm-12345678" // Placeholder - would generate unique ID
+	return fmt.Sprintf("vm-%d", time.Now().Unix())
+}
+
+// sanitizeSnapshotName ensures snapshot name is valid for virsh
+// Virsh snapshot names must contain only alphanumeric, underscore, hyphen, and period
+func sanitizeSnapshotName(name string) string {
+	// Replace invalid characters with hyphens
+	reg := regexp.MustCompile(`[^a-zA-Z0-9_.-]`)
+	sanitized := reg.ReplaceAllString(name, "-")
+
+	// Ensure it starts with alphanumeric
+	sanitized = strings.TrimLeft(sanitized, "-_.")
+
+	// Limit length to 64 characters (virsh limit)
+	if len(sanitized) > 64 {
+		sanitized = sanitized[:64]
+	}
+
+	// If empty after sanitization, use default
+	if sanitized == "" {
+		sanitized = fmt.Sprintf("snapshot-%d", generateTimestamp())
+	}
+
+	return sanitized
 }

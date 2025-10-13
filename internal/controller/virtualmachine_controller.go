@@ -408,6 +408,73 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 		}
 	}
 
+	// Convert PerformanceProfile
+	if vmClass.Spec.PerformanceProfile != nil {
+		class.PerformanceProfile = &contracts.PerformanceProfile{
+			LatencySensitivity:          vmClass.Spec.PerformanceProfile.LatencySensitivity,
+			CPUHotAddEnabled:            vmClass.Spec.PerformanceProfile.CPUHotAddEnabled,
+			MemoryHotAddEnabled:         vmClass.Spec.PerformanceProfile.MemoryHotAddEnabled,
+			VirtualizationBasedSecurity: vmClass.Spec.PerformanceProfile.VirtualizationBasedSecurity,
+			NestedVirtualization:        vmClass.Spec.PerformanceProfile.NestedVirtualization,
+			HyperThreadingPolicy:        vmClass.Spec.PerformanceProfile.HyperThreadingPolicy,
+		}
+	}
+
+	// Convert SecurityProfile
+	if vmClass.Spec.SecurityProfile != nil {
+		class.SecurityProfile = &contracts.SecurityProfile{
+			SecureBoot:        vmClass.Spec.SecurityProfile.SecureBoot,
+			TPMEnabled:        vmClass.Spec.SecurityProfile.TPMEnabled,
+			TPMVersion:        vmClass.Spec.SecurityProfile.TPMVersion,
+			VTDEnabled:        vmClass.Spec.SecurityProfile.VTDEnabled,
+			EncryptionEnabled: vmClass.Spec.SecurityProfile.EncryptionPolicy != nil && vmClass.Spec.SecurityProfile.EncryptionPolicy.Enabled,
+			RequireEncryption: vmClass.Spec.SecurityProfile.EncryptionPolicy != nil && vmClass.Spec.SecurityProfile.EncryptionPolicy.RequireEncryption,
+		}
+		if vmClass.Spec.SecurityProfile.EncryptionPolicy != nil {
+			class.SecurityProfile.KeyProvider = vmClass.Spec.SecurityProfile.EncryptionPolicy.KeyProvider
+		}
+	}
+
+	// Convert ResourceLimits
+	if vmClass.Spec.ResourceLimits != nil {
+		class.ResourceLimits = &contracts.ResourceLimits{
+			CPULimit:       vmClass.Spec.ResourceLimits.CPULimit,
+			CPUReservation: vmClass.Spec.ResourceLimits.CPUReservation,
+			CPUShares:      vmClass.Spec.ResourceLimits.CPUShares,
+		}
+		if vmClass.Spec.ResourceLimits.MemoryLimit != nil {
+			memLimitBytes := vmClass.Spec.ResourceLimits.MemoryLimit.Value()
+			memLimitMiB := memLimitBytes / (1024 * 1024)
+			// Check for int32 overflow (max int32 = 2,147,483,647 MiB ~= 2048 TiB)
+			// This is extremely unlikely in practice, but we handle it defensively
+			const maxInt32 = int64(^uint32(0) >> 1)
+			if memLimitMiB > maxInt32 {
+				ctrl.LoggerFrom(context.Background()).Info(
+					"Memory limit exceeds int32 max, clamping to maximum",
+					"original", memLimitMiB, "clamped", maxInt32,
+				)
+				memLimitMiB = maxInt32
+			}
+			memLimitMiB32 := int32(memLimitMiB) // #nosec G115 -- overflow checked above
+			class.ResourceLimits.MemoryLimitMiB = &memLimitMiB32
+		}
+		if vmClass.Spec.ResourceLimits.MemoryReservation != nil {
+			memResBytes := vmClass.Spec.ResourceLimits.MemoryReservation.Value()
+			memResMiB := memResBytes / (1024 * 1024)
+			// Check for int32 overflow
+			const maxInt32 = int64(^uint32(0) >> 1)
+			if memResMiB > maxInt32 {
+				ctrl.LoggerFrom(context.Background()).Info(
+					"Memory reservation exceeds int32 max, clamping to maximum",
+					"original", memResMiB, "clamped", maxInt32,
+				)
+				memResMiB = maxInt32
+			}
+			memResMiB32 := int32(memResMiB) // #nosec G115 -- overflow checked above
+			class.ResourceLimits.MemoryReservationMiB = &memResMiB32
+		}
+	}
+
 	// Convert VMImage
 	image := contracts.VMImage{
 		Format:       "template", // Default for vSphere

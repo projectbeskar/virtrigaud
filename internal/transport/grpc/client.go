@@ -255,6 +255,100 @@ func (c *Client) IsTaskComplete(ctx context.Context, taskRef string) (done bool,
 	return resp.Done, nil
 }
 
+// TaskStatus checks the status of an async task
+func (c *Client) TaskStatus(ctx context.Context, taskRef string) (contracts.TaskStatus, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	resp, err := c.client.TaskStatus(ctx, &providerv1.TaskStatusRequest{
+		Task: &providerv1.TaskRef{Id: taskRef},
+	})
+	if err != nil {
+		return contracts.TaskStatus{}, c.mapGRPCError("taskStatus", err)
+	}
+
+	return contracts.TaskStatus{
+		IsCompleted: resp.Done,
+		Error:       resp.Error,
+		Message:     "", // Message field not in proto
+	}, nil
+}
+
+// SnapshotCreate creates a VM snapshot
+func (c *Client) SnapshotCreate(ctx context.Context, req contracts.SnapshotCreateRequest) (contracts.SnapshotCreateResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+
+	grpcReq := &providerv1.SnapshotCreateRequest{
+		VmId:          req.VmId,
+		NameHint:      req.NameHint,
+		Description:   req.Description,
+		IncludeMemory: req.IncludeMemory,
+		// Note: Quiesce not in proto yet, would need to add to provider.proto
+	}
+
+	resp, err := c.client.SnapshotCreate(ctx, grpcReq)
+	if err != nil {
+		return contracts.SnapshotCreateResponse{}, c.mapGRPCError("snapshotCreate", err)
+	}
+
+	result := contracts.SnapshotCreateResponse{
+		SnapshotId: resp.SnapshotId,
+	}
+
+	if resp.Task != nil {
+		result.Task = &contracts.TaskRef{
+			ID: resp.Task.Id,
+		}
+	}
+
+	return result, nil
+}
+
+// SnapshotDelete deletes a VM snapshot
+func (c *Client) SnapshotDelete(ctx context.Context, vmId string, snapshotId string) (taskRef string, err error) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+
+	grpcReq := &providerv1.SnapshotDeleteRequest{
+		VmId:       vmId,
+		SnapshotId: snapshotId,
+	}
+
+	resp, err := c.client.SnapshotDelete(ctx, grpcReq)
+	if err != nil {
+		return "", c.mapGRPCError("snapshotDelete", err)
+	}
+
+	if resp.Task != nil {
+		return resp.Task.Id, nil
+	}
+
+	return "", nil
+}
+
+// SnapshotRevert reverts a VM to a snapshot
+func (c *Client) SnapshotRevert(ctx context.Context, vmId string, snapshotId string) (taskRef string, err error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+
+	grpcReq := &providerv1.SnapshotRevertRequest{
+		VmId:       vmId,
+		SnapshotId: snapshotId,
+	}
+
+	resp, err := c.client.SnapshotRevert(ctx, grpcReq)
+	if err != nil {
+		return "", c.mapGRPCError("snapshotRevert", err)
+	}
+
+	if resp.Task != nil {
+		return resp.Task.Id, nil
+	}
+
+	return "", nil
+}
+
 // convertCreateRequest converts contracts.CreateRequest to gRPC format
 func (c *Client) convertCreateRequest(req contracts.CreateRequest) (*providerv1.CreateRequest, error) {
 	grpcReq := &providerv1.CreateRequest{

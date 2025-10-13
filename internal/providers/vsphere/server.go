@@ -863,17 +863,232 @@ func (p *Provider) TaskStatus(ctx context.Context, req *providerv1.TaskStatusReq
 
 // SnapshotCreate creates a snapshot of a virtual machine
 func (p *Provider) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotCreateRequest) (*providerv1.SnapshotCreateResponse, error) {
-	return nil, errors.NewUnimplemented("SnapshotCreate operation not yet implemented for vSphere")
+	if p.client == nil {
+		return nil, fmt.Errorf("vSphere client not configured")
+	}
+
+	p.logger.Info("Creating VM snapshot",
+		"vm_id", req.VmId,
+		"name_hint", req.NameHint,
+		"include_memory", req.IncludeMemory)
+
+	// Set datacenter context for finder
+	datacenter, err := p.finder.DefaultDatacenter(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find default datacenter: %w", err)
+	}
+	p.finder.SetDatacenter(datacenter)
+
+	// Create VM reference from ID
+	vmRef := types.ManagedObjectReference{
+		Type:  "VirtualMachine",
+		Value: req.VmId,
+	}
+
+	vm := object.NewVirtualMachine(p.client.Client, vmRef)
+
+	// Generate snapshot name if not provided
+	snapshotName := req.NameHint
+	if snapshotName == "" {
+		snapshotName = fmt.Sprintf("snapshot-%d", time.Now().Unix())
+	}
+
+	// Description defaults to empty string if not provided
+	description := req.Description
+
+	// Quiesce filesystem (false by default, requires VMware Tools)
+	// TODO: Make this configurable via API when proto is updated
+	quiesce := false
+
+	// Create the snapshot
+	// Parameters: name, description, includeMemory, quiesce
+	p.logger.Info("Initiating snapshot creation",
+		"vm_id", req.VmId,
+		"snapshot_name", snapshotName,
+		"memory", req.IncludeMemory,
+		"quiesce", quiesce)
+
+	task, err := vm.CreateSnapshot(ctx, snapshotName, description, req.IncludeMemory, quiesce)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create snapshot task: %w", err)
+	}
+
+	// Wait for snapshot creation to complete
+	taskInfo, err := task.WaitForResult(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot creation failed: %w", err)
+	}
+
+	// Extract snapshot reference from task result
+	if taskInfo.Result == nil {
+		return nil, fmt.Errorf("snapshot creation completed but no snapshot reference returned")
+	}
+
+	snapshotRef, ok := taskInfo.Result.(types.ManagedObjectReference)
+	if !ok {
+		return nil, fmt.Errorf("unexpected task result type: %T", taskInfo.Result)
+	}
+
+	p.logger.Info("Snapshot created successfully",
+		"vm_id", req.VmId,
+		"snapshot_id", snapshotRef.Value,
+		"snapshot_name", snapshotName)
+
+	return &providerv1.SnapshotCreateResponse{
+		SnapshotId: snapshotRef.Value,
+	}, nil
 }
 
 // SnapshotDelete deletes a snapshot
 func (p *Provider) SnapshotDelete(ctx context.Context, req *providerv1.SnapshotDeleteRequest) (*providerv1.TaskResponse, error) {
-	return nil, errors.NewUnimplemented("SnapshotDelete operation not yet implemented for vSphere")
+	if p.client == nil {
+		return nil, fmt.Errorf("vSphere client not configured")
+	}
+
+	p.logger.Info("Deleting VM snapshot", "vm_id", req.VmId, "snapshot_id", req.SnapshotId)
+
+	// Set datacenter context for finder
+	datacenter, err := p.finder.DefaultDatacenter(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find default datacenter: %w", err)
+	}
+	p.finder.SetDatacenter(datacenter)
+
+	// Create VM reference from ID
+	vmRef := types.ManagedObjectReference{
+		Type:  "VirtualMachine",
+		Value: req.VmId,
+	}
+
+	vm := object.NewVirtualMachine(p.client.Client, vmRef)
+
+	// Get the VM's snapshot tree to find the specific snapshot
+	var vmObj mo.VirtualMachine
+	err = vm.Properties(ctx, vm.Reference(), []string{"snapshot"}, &vmObj)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get VM snapshot properties: %w", err)
+	}
+
+	if vmObj.Snapshot == nil {
+		return nil, fmt.Errorf("VM has no snapshots")
+	}
+
+	// Find the snapshot by ID in the snapshot tree
+	snapshot := p.findSnapshotByID(vmObj.Snapshot.RootSnapshotList, req.SnapshotId)
+	if snapshot == nil {
+		return nil, fmt.Errorf("snapshot not found: %s", req.SnapshotId)
+	}
+
+	// Remove the snapshot using RemoveSnapshot_Task method
+	// removeChildren: false = consolidate child snapshots into parent
+	// consolidate: true = merge snapshot disks after removal
+	removeChildren := false
+	consolidate := true
+
+	task, err := vm.RemoveSnapshot(ctx, snapshot.Snapshot.Value, removeChildren, &consolidate)
+	if err != nil {
+		return nil, fmt.Errorf("failed to start snapshot removal: %w", err)
+	}
+
+	// Wait for snapshot deletion to complete
+	_, err = task.WaitForResult(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot deletion failed: %w", err)
+	}
+
+	p.logger.Info("Snapshot deleted successfully", "vm_id", req.VmId, "snapshot_id", req.SnapshotId)
+
+	return &providerv1.TaskResponse{}, nil
 }
 
 // SnapshotRevert reverts to a snapshot
 func (p *Provider) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotRevertRequest) (*providerv1.TaskResponse, error) {
-	return nil, errors.NewUnimplemented("SnapshotRevert operation not yet implemented for vSphere")
+	if p.client == nil {
+		return nil, fmt.Errorf("vSphere client not configured")
+	}
+
+	p.logger.Info("Reverting to VM snapshot", "vm_id", req.VmId, "snapshot_id", req.SnapshotId)
+
+	// Set datacenter context for finder
+	datacenter, err := p.finder.DefaultDatacenter(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find default datacenter: %w", err)
+	}
+	p.finder.SetDatacenter(datacenter)
+
+	// Create VM reference from ID
+	vmRef := types.ManagedObjectReference{
+		Type:  "VirtualMachine",
+		Value: req.VmId,
+	}
+
+	vm := object.NewVirtualMachine(p.client.Client, vmRef)
+
+	// Get the VM's snapshot tree to find the specific snapshot
+	var vmObj mo.VirtualMachine
+	err = vm.Properties(ctx, vm.Reference(), []string{"snapshot", "runtime.powerState"}, &vmObj)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get VM properties: %w", err)
+	}
+
+	if vmObj.Snapshot == nil {
+		return nil, fmt.Errorf("VM has no snapshots")
+	}
+
+	// Find the snapshot by ID in the snapshot tree
+	snapshot := p.findSnapshotByID(vmObj.Snapshot.RootSnapshotList, req.SnapshotId)
+	if snapshot == nil {
+		return nil, fmt.Errorf("snapshot not found: %s", req.SnapshotId)
+	}
+
+	// Store original power state for restoration if needed
+	originalPowerState := vmObj.Runtime.PowerState
+	p.logger.Info("VM current power state", "vm_id", req.VmId, "power_state", originalPowerState)
+
+	// Revert to the snapshot
+	// suppressPowerOn: false = power on if snapshot contains memory state
+	// TODO: Make this configurable via API when proto is updated
+	suppressPowerOn := false
+
+	task, err := vm.RevertToSnapshot(ctx, snapshot.Snapshot.Value, suppressPowerOn)
+	if err != nil {
+		return nil, fmt.Errorf("failed to start snapshot revert: %w", err)
+	}
+
+	// Wait for snapshot revert to complete
+	_, err = task.WaitForResult(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot revert failed: %w", err)
+	}
+
+	p.logger.Info("Snapshot revert completed successfully",
+		"vm_id", req.VmId,
+		"snapshot_id", req.SnapshotId)
+
+	return &providerv1.TaskResponse{}, nil
+}
+
+// findSnapshotByID recursively searches for a snapshot by its ManagedObjectReference value
+func (p *Provider) findSnapshotByID(snapshots []types.VirtualMachineSnapshotTree, snapshotID string) *types.VirtualMachineSnapshotTree {
+	for i := range snapshots {
+		if snapshots[i].Snapshot.Value == snapshotID {
+			return &snapshots[i]
+		}
+
+		// Also check by snapshot name as a fallback
+		if snapshots[i].Name == snapshotID {
+			return &snapshots[i]
+		}
+
+		// Recursively search child snapshots
+		if len(snapshots[i].ChildSnapshotList) > 0 {
+			if found := p.findSnapshotByID(snapshots[i].ChildSnapshotList, snapshotID); found != nil {
+				return found
+			}
+		}
+	}
+
+	return nil
 }
 
 // Clone clones a virtual machine
@@ -888,16 +1103,28 @@ func (p *Provider) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepar
 
 // VMSpec represents the parsed virtual machine specification
 type VMSpec struct {
-	Name            string
-	CPU             int32
-	MemoryMB        int64
-	DiskSizeGB      int64
-	DiskType        string
-	TemplateName    string
-	NetworkName     string
-	Firmware        string
-	HardwareVersion *int32 // VM hardware compatibility version
-	CloudInit       string // Cloud-init user data
+	Name                        string
+	CPU                         int32
+	MemoryMB                    int64
+	DiskSizeGB                  int64
+	DiskType                    string
+	TemplateName                string
+	NetworkName                 string
+	Firmware                    string
+	HardwareVersion             *int32 // VM hardware compatibility version
+	CloudInit                   string // Cloud-init user data
+	NestedVirtualization        bool   // Enable nested virtualization
+	VirtualizationBasedSecurity bool   // Enable VBS features
+	CPUHotAddEnabled            bool   // Enable CPU hot-add
+	MemoryHotAddEnabled         bool   // Enable memory hot-add
+	SecureBoot                  bool   // Enable secure boot
+	TPMEnabled                  bool   // Enable TPM
+	VTDEnabled                  bool   // Enable Intel VT-d or AMD-Vi
+	// Placement overrides
+	Cluster   string // Cluster override (empty = use provider default)
+	Datastore string // Datastore override (empty = use provider default)
+	Folder    string // Folder override (empty = use provider default)
+	Host      string // Host override (empty = use provider default)
 }
 
 // parseCreateRequest parses the JSON-encoded specifications from the gRPC request
@@ -917,6 +1144,17 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*VMSpec, e
 				Type    string `json:"Type"`
 				SizeGiB int32  `json:"SizeGiB"`
 			} `json:"DiskDefaults"`
+			PerformanceProfile *struct {
+				NestedVirtualization        bool `json:"NestedVirtualization"`
+				VirtualizationBasedSecurity bool `json:"VirtualizationBasedSecurity"`
+				CPUHotAddEnabled            bool `json:"CPUHotAddEnabled"`
+				MemoryHotAddEnabled         bool `json:"MemoryHotAddEnabled"`
+			} `json:"PerformanceProfile"`
+			SecurityProfile *struct {
+				SecureBoot bool `json:"SecureBoot"`
+				TPMEnabled bool `json:"TPMEnabled"`
+				VTDEnabled bool `json:"VTDEnabled"`
+			} `json:"SecurityProfile"`
 		}
 
 		if err := json.Unmarshal([]byte(req.ClassJson), &vmClass); err != nil {
@@ -943,6 +1181,21 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*VMSpec, e
 		if vmClass.DiskDefaults != nil {
 			spec.DiskType = vmClass.DiskDefaults.Type
 			spec.DiskSizeGB = int64(vmClass.DiskDefaults.SizeGiB) // Convert GiB to GB (same value)
+		}
+
+		// Parse PerformanceProfile
+		if vmClass.PerformanceProfile != nil {
+			spec.NestedVirtualization = vmClass.PerformanceProfile.NestedVirtualization
+			spec.VirtualizationBasedSecurity = vmClass.PerformanceProfile.VirtualizationBasedSecurity
+			spec.CPUHotAddEnabled = vmClass.PerformanceProfile.CPUHotAddEnabled
+			spec.MemoryHotAddEnabled = vmClass.PerformanceProfile.MemoryHotAddEnabled
+		}
+
+		// Parse SecurityProfile
+		if vmClass.SecurityProfile != nil {
+			spec.SecureBoot = vmClass.SecurityProfile.SecureBoot
+			spec.TPMEnabled = vmClass.SecurityProfile.TPMEnabled
+			spec.VTDEnabled = vmClass.SecurityProfile.VTDEnabled
 		}
 	}
 
@@ -979,6 +1232,26 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*VMSpec, e
 		spec.CloudInit = string(req.UserData)
 	}
 
+	// Parse Placement from JSON (contracts.Placement structure)
+	if req.PlacementJson != "" {
+		var placement struct {
+			Cluster   string `json:"Cluster"`
+			Datastore string `json:"Datastore"`
+			Folder    string `json:"Folder"`
+			Host      string `json:"Host"`
+		}
+
+		if err := json.Unmarshal([]byte(req.PlacementJson), &placement); err != nil {
+			return nil, fmt.Errorf("failed to parse Placement JSON: %w", err)
+		}
+
+		// Set placement overrides if specified
+		spec.Cluster = placement.Cluster
+		spec.Datastore = placement.Datastore
+		spec.Folder = placement.Folder
+		spec.Host = placement.Host
+	}
+
 	return spec, nil
 }
 
@@ -1007,10 +1280,17 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 		return "", fmt.Errorf("failed to find template VM '%s': %w", spec.TemplateName, err)
 	}
 
+	// Determine which cluster to use (spec override or provider default)
+	clusterName := p.config.DefaultCluster
+	if spec.Cluster != "" {
+		clusterName = spec.Cluster
+		p.logger.Info("Using placement override for cluster", "cluster", clusterName)
+	}
+
 	// Find the cluster and resource pool
-	cluster, err := p.finder.ClusterComputeResource(ctx, p.config.DefaultCluster)
+	cluster, err := p.finder.ClusterComputeResource(ctx, clusterName)
 	if err != nil {
-		return "", fmt.Errorf("failed to find cluster '%s': %w", p.config.DefaultCluster, err)
+		return "", fmt.Errorf("failed to find cluster '%s': %w", clusterName, err)
 	}
 
 	resourcePool, err := cluster.ResourcePool(ctx)
@@ -1018,17 +1298,31 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 		return "", fmt.Errorf("failed to get resource pool from cluster: %w", err)
 	}
 
+	// Determine which datastore to use (spec override or provider default)
+	datastoreName := p.config.DefaultDatastore
+	if spec.Datastore != "" {
+		datastoreName = spec.Datastore
+		p.logger.Info("Using placement override for datastore", "datastore", datastoreName)
+	}
+
 	// Find the datastore
-	datastore, err := p.finder.Datastore(ctx, p.config.DefaultDatastore)
+	datastore, err := p.finder.Datastore(ctx, datastoreName)
 	if err != nil {
-		return "", fmt.Errorf("failed to find datastore '%s': %w", p.config.DefaultDatastore, err)
+		return "", fmt.Errorf("failed to find datastore '%s': %w", datastoreName, err)
+	}
+
+	// Determine which folder to use (spec override or provider default)
+	folderName := p.config.DefaultFolder
+	if spec.Folder != "" {
+		folderName = spec.Folder
+		p.logger.Info("Using placement override for folder", "folder", folderName)
 	}
 
 	// Find the folder
-	folder, err := p.finder.Folder(ctx, p.config.DefaultFolder)
+	folder, err := p.finder.Folder(ctx, folderName)
 	if err != nil {
 		// If folder doesn't exist, use the datacenter's default VM folder
-		p.logger.Warn("Failed to find folder, using datacenter default VM folder", "folder", p.config.DefaultFolder, "error", err)
+		p.logger.Warn("Failed to find folder, using datacenter default VM folder", "folder", folderName, "error", err)
 		folder, err = p.finder.Folder(ctx, datacenter.Name()+"/vm")
 		if err != nil {
 			return "", fmt.Errorf("failed to find datacenter VM folder: %w", err)
@@ -1075,6 +1369,94 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 		// Convert hardware version to VMX format (e.g., 21 -> "vmx-21")
 		configSpec.Version = fmt.Sprintf("vmx-%d", *spec.HardwareVersion)
 		p.logger.Info("Setting VM hardware version", "version", configSpec.Version, "vm_name", spec.Name)
+	}
+
+	// Configure performance and security features
+	var extraConfig []types.BaseOptionValue
+
+	// Enable nested virtualization if requested
+	if spec.NestedVirtualization {
+		p.logger.Info("Enabling nested virtualization", "vm_name", spec.Name)
+		extraConfig = append(extraConfig, &types.OptionValue{
+			Key:   "vhv.enable",
+			Value: "TRUE",
+		})
+		// Also enable nested page tables for better performance
+		extraConfig = append(extraConfig, &types.OptionValue{
+			Key:   "vhv.allowNestedPageTables",
+			Value: "TRUE",
+		})
+	}
+
+	// Enable VBS (Virtualization Based Security) if requested
+	if spec.VirtualizationBasedSecurity {
+		p.logger.Info("Enabling Virtualization Based Security", "vm_name", spec.Name)
+		extraConfig = append(extraConfig, &types.OptionValue{
+			Key:   "vbs.enable",
+			Value: "TRUE",
+		})
+	}
+
+	// Enable Intel VT-d or AMD-Vi if requested
+	if spec.VTDEnabled {
+		p.logger.Info("Enabling VT-d/AMD-Vi", "vm_name", spec.Name)
+		extraConfig = append(extraConfig, &types.OptionValue{
+			Key:   "vvtd.enable",
+			Value: "TRUE",
+		})
+	}
+
+	// Configure CPU and memory hot-add
+	if spec.CPUHotAddEnabled {
+		p.logger.Info("Enabling CPU hot-add", "vm_name", spec.Name)
+		configSpec.CpuHotAddEnabled = &spec.CPUHotAddEnabled
+	}
+
+	if spec.MemoryHotAddEnabled {
+		p.logger.Info("Enabling memory hot-add", "vm_name", spec.Name)
+		configSpec.MemoryHotAddEnabled = &spec.MemoryHotAddEnabled
+	}
+
+	// Configure secure boot and TPM
+	if spec.SecureBoot || spec.TPMEnabled {
+		// These features require UEFI firmware
+		if spec.Firmware == "" || strings.ToUpper(spec.Firmware) != "UEFI" {
+			p.logger.Warn("Secure Boot and TPM require UEFI firmware, forcing UEFI", "vm_name", spec.Name)
+			configSpec.Firmware = string(types.GuestOsDescriptorFirmwareTypeEfi)
+		}
+
+		if spec.SecureBoot {
+			p.logger.Info("Enabling Secure Boot", "vm_name", spec.Name)
+			configSpec.BootOptions = &types.VirtualMachineBootOptions{
+				EfiSecureBootEnabled: &spec.SecureBoot,
+			}
+		}
+
+		if spec.TPMEnabled {
+			p.logger.Info("Enabling TPM", "vm_name", spec.Name)
+			// Add TPM device - this requires vSphere 6.7+ and hardware version 14+
+			tpmDevice := &types.VirtualTPM{
+				VirtualDevice: types.VirtualDevice{
+					Key: -1, // Auto-assign key
+					DeviceInfo: &types.Description{
+						Label:   "TPM",
+						Summary: "Trusted Platform Module",
+					},
+				},
+			}
+
+			deviceChange := &types.VirtualDeviceConfigSpec{
+				Operation: types.VirtualDeviceConfigSpecOperationAdd,
+				Device:    tpmDevice,
+			}
+
+			configSpec.DeviceChange = append(configSpec.DeviceChange, deviceChange)
+		}
+	}
+
+	// Apply extra configuration if any
+	if len(extraConfig) > 0 {
+		configSpec.ExtraConfig = extraConfig
 	}
 
 	// Configure network if specified

@@ -1,0 +1,332 @@
+# Nested Virtualization Example
+# This example demonstrates how to create VMs with nested virtualization support
+# across different providers using VirtRigaud.
+
+---
+# VMClass with nested virtualization enabled
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMClass
+metadata:
+  name: nested-hypervisor
+  namespace: default
+  labels:
+    virtrigaud.io/capability: nested-virtualization
+    virtrigaud.io/use-case: development
+spec:
+  # Resource allocation for nested hypervisor
+  cpu: 8
+  memory: 16Gi
+  firmware: UEFI  # Required for modern security features
+  
+  # Performance profile with nested virtualization
+  performanceProfile:
+    # Enable nested virtualization - the key feature
+    nestedVirtualization: true
+    
+    # Additional performance features
+    virtualizationBasedSecurity: false  # May conflict with some nested hypervisors
+    cpuHotAddEnabled: true
+    memoryHotAddEnabled: true
+    latencySensitivity: low  # Better performance for nested workloads
+    hyperThreadingPolicy: prefer
+  
+  # Security profile configuration
+  securityProfile:
+    # Disable secure boot for compatibility with nested hypervisors
+    secureBoot: false
+    
+    # TPM can be enabled if needed by nested VMs
+    tpmEnabled: false
+    
+    # Enable VT-d/AMD-Vi for better I/O performance
+    vtdEnabled: true
+  
+  # Resource limits and reservations
+  resourceLimits:
+    # Reserve CPU for consistent performance
+    cpuReservation: 4000  # 4GHz reserved
+    cpuLimit: 8000        # 8GHz maximum
+    
+    # Reserve memory for nested VMs
+    memoryReservation: 8Gi
+    memoryLimit: 16Gi
+    
+    # CPU priority
+    cpuShares: 2000  # High priority
+  
+  # Disk configuration for nested environments
+  diskDefaults:
+    type: thin  # Efficient space usage
+    size: 200Gi  # Large disk for multiple nested VMs
+    storageClass: fast-ssd  # Fast storage for better performance
+
+---
+# VMClass for lightweight nested VMs (smaller footprint)
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMClass
+metadata:
+  name: nested-lightweight
+  namespace: default
+  labels:
+    virtrigaud.io/capability: nested-virtualization
+    virtrigaud.io/use-case: testing
+spec:
+  cpu: 4
+  memory: 8Gi
+  firmware: UEFI
+  
+  performanceProfile:
+    nestedVirtualization: true
+    cpuHotAddEnabled: true
+    memoryHotAddEnabled: true
+  
+  securityProfile:
+    secureBoot: false
+    vtdEnabled: true
+  
+  diskDefaults:
+    type: thin
+    size: 100Gi
+
+---
+# VMImage for Ubuntu Server with KVM support
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMImage
+metadata:
+  name: ubuntu-kvm-ready
+  namespace: default
+  labels:
+    virtrigaud.io/os: ubuntu
+    virtrigaud.io/version: "22.04"
+    virtrigaud.io/hypervisor: kvm
+spec:
+  source:
+    libvirt:
+      url: "https://cloud-images.ubuntu.com/releases/22.04/release/ubuntu-22.04-server-cloudimg-amd64.img"
+      checksum: "de5e632e17b8965f2baf4ea6d2b824788e154d9a65df4fd419ec4019898e15cd"
+      checksumType: sha256
+    vsphere:
+      templateName: "ubuntu-22.04-server-template"
+      ovaURL: "https://cloud-images.ubuntu.com/releases/22.04/release/ubuntu-22.04-server-cloudimg-amd64.ova"
+
+---
+# Virtual Machine with nested virtualization for development
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: dev-hypervisor
+  namespace: default
+  labels:
+    app: development
+    role: hypervisor
+    virtrigaud.io/nested: "true"
+spec:
+  providerRef:
+    name: primary-provider
+  
+  classRef:
+    name: nested-hypervisor
+  
+  imageRef:
+    name: ubuntu-kvm-ready
+  
+  # Cloud-init configuration for KVM setup
+  userData:
+    cloudInit:
+      inline: |
+        #cloud-config
+        hostname: dev-hypervisor
+        
+        # User configuration
+        users:
+          - name: developer
+            groups: sudo, libvirt, kvm
+            shell: /bin/bash
+            sudo: ALL=(ALL) NOPASSWD:ALL
+            ssh_authorized_keys:
+              - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC... # Replace with your SSH key
+        
+        # Package installation
+        packages:
+          - qemu-kvm
+          - libvirt-daemon-system
+          - libvirt-clients
+          - bridge-utils
+          - virt-manager
+          - virt-viewer
+          - cpu-checker
+          - htop
+          - iotop
+        
+        # System configuration
+        write_files:
+          - path: /etc/libvirt/qemu.conf
+            content: |
+              # Enable nested virtualization
+              security_driver = "none"
+              user = "root"
+              group = "root"
+            append: true
+        
+        # Commands to run after boot
+        runcmd:
+          # Verify nested virtualization support
+          - echo "=== Checking nested virtualization support ==="
+          - kvm-ok || echo "KVM not available, checking CPU features..."
+          - grep -E "(vmx|svm)" /proc/cpuinfo && echo "CPU supports virtualization" || echo "CPU does not support virtualization"
+          - ls -la /dev/kvm && echo "KVM device available" || echo "KVM device not found"
+          
+          # Configure libvirt
+          - systemctl enable libvirtd
+          - systemctl start libvirtd
+          - systemctl status libvirtd
+          
+          # Add user to virtualization groups
+          - usermod -aG libvirt developer
+          - usermod -aG kvm developer
+          
+          # Enable nested virtualization in kernel modules
+          - modprobe -r kvm_intel || true
+          - modprobe -r kvm_amd || true
+          - modprobe kvm_intel nested=1 || modprobe kvm_amd nested=1
+          
+          # Verify nested support
+          - cat /sys/module/kvm_intel/parameters/nested 2>/dev/null || cat /sys/module/kvm_amd/parameters/nested 2>/dev/null || echo "Nested parameter not found"
+          
+          # Create default libvirt network
+          - virsh net-autostart default
+          - virsh net-start default || true
+          
+          # Set up bridge networking (optional)
+          - ip link add br0 type bridge || true
+          - ip link set br0 up || true
+          
+          # Final verification
+          - echo "=== Final verification ==="
+          - virt-host-validate
+          - virsh version
+          - virsh list --all
+          
+          # Create a test script for nested VM creation
+          - |
+            cat > /home/developer/create-nested-vm.sh << 'EOF'
+            #!/bin/bash
+            # Script to create a simple nested VM for testing
+            
+            VM_NAME="nested-test-vm"
+            VM_MEMORY="1024"
+            VM_VCPUS="2"
+            VM_DISK_SIZE="10G"
+            
+            echo "Creating nested VM: $VM_NAME"
+            
+            # Create disk image
+            qemu-img create -f qcow2 /var/lib/libvirt/images/$VM_NAME.qcow2 $VM_DISK_SIZE
+            
+            # Create VM (you'll need to provide an ISO)
+            echo "VM disk created. Use virt-install to complete VM creation:"
+            echo "virt-install --name $VM_NAME --memory $VM_MEMORY --vcpus $VM_VCPUS --disk /var/lib/libvirt/images/$VM_NAME.qcow2 --cdrom /path/to/your.iso --network network=default --graphics vnc"
+            EOF
+          
+          - chmod +x /home/developer/create-nested-vm.sh
+          - chown developer:developer /home/developer/create-nested-vm.sh
+          
+          # Log completion
+          - echo "=== Nested virtualization setup completed ===" | tee -a /var/log/nested-setup.log
+          - date >> /var/log/nested-setup.log
+  
+  # Network configuration
+  networks:
+    - name: default-network
+      ipPolicy: dhcp
+  
+  # Power on the VM
+  powerState: On
+  
+  # Tags for organization
+  tags:
+    - nested-virtualization
+    - development
+    - kvm-ready
+
+---
+# Virtual Machine for testing nested environments
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: test-nested-env
+  namespace: default
+  labels:
+    app: testing
+    role: nested-hypervisor
+spec:
+  providerRef:
+    name: primary-provider
+  
+  classRef:
+    name: nested-lightweight
+  
+  imageRef:
+    name: ubuntu-kvm-ready
+  
+  userData:
+    cloudInit:
+      inline: |
+        #cloud-config
+        hostname: test-nested-env
+        
+        users:
+          - name: tester
+            groups: sudo, libvirt, kvm
+            shell: /bin/bash
+            sudo: ALL=(ALL) NOPASSWD:ALL
+            ssh_authorized_keys:
+              - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC... # Replace with your SSH key
+        
+        packages:
+          - qemu-kvm
+          - libvirt-daemon-system
+          - libvirt-clients
+          - cpu-checker
+        
+        runcmd:
+          # Quick nested virtualization test
+          - kvm-ok
+          - systemctl enable --now libvirtd
+          - usermod -aG libvirt,kvm tester
+          - virt-host-validate qemu
+          - echo "Test environment ready for nested virtualization"
+  
+  powerState: On
+  
+  tags:
+    - testing
+    - nested-virtualization
+
+---
+# VMNetworkAttachment for isolated nested network
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMNetworkAttachment
+metadata:
+  name: nested-network
+  namespace: default
+spec:
+  network:
+    libvirt:
+      networkName: "nested-lab"
+      bridge:
+        name: "br-nested"
+      model: "virtio"
+    vsphere:
+      portgroup: "Nested-Lab-PG"
+      vlan:
+        vlanId: 100
+  
+  ipPolicy: dhcp
+  
+  # Optional: Static IP configuration
+  # staticIP: "192.168.100.10"
+  # gateway: "192.168.100.1"
+  # dns:
+  #   - "8.8.8.8"
+  #   - "8.8.4.4"

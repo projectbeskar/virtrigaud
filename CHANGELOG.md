@@ -5,6 +5,98 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+#### Nested Virtualization Support
+- **VMClass PerformanceProfile**: Added `nestedVirtualization` field to enable nested virtualization capabilities in VMs, allowing VMs to run their own hypervisors and nested virtual machines
+- **vSphere Provider Implementation**: 
+  - Automatically configures `vhv.enable=TRUE` for hardware-assisted virtualization
+  - Enables `vhv.allowNestedPageTables=TRUE` for improved nested VM performance
+  - Compatible with VM hardware version 9+ (version 14+ recommended)
+- **LibVirt Provider Implementation**: 
+  - Configures CPU mode with required virtualization extensions (vmx for Intel VT-x, svm for AMD-V)
+  - Automatically passes through host CPU virtualization features to guest VMs
+  - Compatible with QEMU/KVM hypervisors with nested virtualization enabled
+- **VT-d/AMD-Vi Support**: Added `vtdEnabled` field in SecurityProfile for Intel VT-d or AMD IOMMU support, improving I/O performance for nested environments
+- **CPU/Memory Hot-Add**: Added `cpuHotAddEnabled` and `memoryHotAddEnabled` in PerformanceProfile for dynamic resource scaling without VM restart
+- **Virtualization Based Security**: Added `virtualizationBasedSecurity` field in PerformanceProfile for Windows VBS features
+
+#### Security Features
+- **TPM (Trusted Platform Module) Support**: 
+  - Added `tpmEnabled` and `tpmVersion` fields in VMClass SecurityProfile
+  - vSphere Provider: Full TPM 2.0 device support (requires vSphere 6.7+ and VM hardware version 14+)
+  - LibVirt Provider: TPM emulator support with tpm-tis model and version 2.0
+  - Automatically enforces UEFI firmware requirement when TPM is enabled
+  - Enables Windows 11 support and BitLocker encryption capabilities
+- **Secure Boot Support**: 
+  - Added `secureBoot` field in SecurityProfile for UEFI Secure Boot functionality
+  - vSphere Provider: Configures EFI Secure Boot through VM boot options
+  - LibVirt Provider: Uses OVMF firmware with Secure Boot capabilities
+  - Automatically forces UEFI firmware when enabled
+  - Protects against rootkits and bootkits at firmware level
+- **Comprehensive Documentation**: 
+  - Added `docs/NESTED_VIRTUALIZATION.md` with detailed configuration guide
+  - Added `docs/examples/nested-virtualization.yaml` with complete working examples
+  - Includes verification steps, troubleshooting guidance, and performance recommendations
+
+#### Use Cases Enabled
+- Development and testing of virtualization platforms (e.g., Proxmox, OpenStack, vSphere)
+- Running Kubernetes clusters with nested container runtimes
+- Creating isolated lab environments for security testing
+- Educational scenarios for learning virtualization technologies
+
+#### VM Snapshot Management (Production Ready)
+- **Complete VMSnapshot CRD**: Full-featured API for VM snapshot lifecycle management
+  - Snapshot creation with memory state and filesystem quiescing options
+  - Snapshot deletion with proper cleanup
+  - Snapshot revert for rollback scenarios
+  - Retention policies (maxAge, deleteOnVMDelete, maxCount)
+  - Automated scheduling support via cron expressions
+  - Snapshot metadata and tagging
+- **vSphere Provider Implementation** ✅ **COMPLETED**:
+  - Full govmomi-based snapshot operations (Create, Delete, Revert)
+  - Memory snapshot support for powered-on VMs
+  - Filesystem quiescing with VMware Tools integration
+  - Automatic power state handling during revert
+  - Hierarchical snapshot tree navigation
+  - Synchronous operations for immediate completion
+- **LibVirt Provider Implementation** ✅ **COMPLETED**:
+  - Full virsh-based snapshot operations (Create, Delete, Revert)
+  - Memory snapshot support for running VMs with qcow2 storage
+  - Disk-only snapshots for VMs with incompatible storage backends
+  - Atomic snapshot creation with --atomic flag
+  - Automatic power state preservation during revert
+  - Snapshot existence validation before operations
+  - Synchronous operations with immediate feedback
+  - Snapshot name sanitization for virsh compatibility
+  - Helper methods for snapshot listing and querying
+- **Proxmox Provider Implementation** ✅ **FULLY FUNCTIONAL**:
+  - Complete snapshot lifecycle support
+  - Memory state inclusion (vmstate)
+  - Async task handling with status tracking
+- **Controller Integration** ✅ **PRODUCTION READY**:
+  - Real provider RPC calls (no more simulation)
+  - Proper task status polling for async operations
+  - Comprehensive error handling and reporting
+  - Event recording for observability
+  - Finalizer-based cleanup
+- **Transport Layer**:
+  - Added snapshot methods to gRPC client
+  - TaskStatus RPC for async operation tracking
+  - Proper request/response type mapping
+- **Use Cases**:
+  - Pre-maintenance backups with quick rollback
+  - CI/CD testing with snapshot-based environments
+  - Disaster recovery and point-in-time restore
+  - Development environment versioning
+
+### Fixed
+
+#### vSphere Provider
+- **Placement Override Bug**: Fixed critical bug where VirtualMachine `spec.placement.folder`, `spec.placement.datastore`, and `spec.placement.cluster` overrides were not being respected by the vSphere provider. The provider was always using the default values from the Provider CRD instead of honoring the per-VM placement overrides specified in the VirtualMachine manifest. VMs are now correctly created in the specified folder, datastore, and cluster when placement overrides are provided.
+
 ## [0.2.1] - 2025-01-29
 
 ### Patch Release: Critical Fixes and Documentation Updates

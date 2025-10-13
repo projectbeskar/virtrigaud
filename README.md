@@ -52,6 +52,7 @@ graph TB
             VMC[VMClass CRD]
             VMI[VMImage CRD]
             PR[Provider CRD]
+            VMNA[VMNetworkAttachment CRD]
         end
         
         %% Controller
@@ -69,6 +70,7 @@ graph TB
         VMC -.-> CTRL
         VMI -.-> CTRL
         PR -.-> CTRL
+        VMNA -,-> CTRL
         
         CTRL -->|gRPC/TLS| VSP
         CTRL -->|gRPC/TLS| LVP
@@ -120,7 +122,7 @@ graph TB
      --set providers.vsphere.enabled=true \
      --set providers.libvirt.enabled=true \
      --set providers.proxmox.enabled=false \
-     --version v0.2.1
+     --version v0.2.2
    
    # Skip CRDs if already installed separately
    helm install virtrigaud virtrigaud/virtrigaud -n virtrigaud-system --create-namespace --skip-crds
@@ -133,9 +135,6 @@ graph TB
    
    # Check CRDs
    kubectl get crd | grep virtrigaud-system
-   
-   # Verify API conversion is working
-   kubectl get crd virtualmachines.infra.virtrigaud.io -o yaml | yq '.spec.conversion'
    ```
 
 ### Development Installation
@@ -179,7 +178,7 @@ graph TB
    EOF
    ```
 
-   > 📚 **How it works**: VirtRigaud automatically translates your Provider configuration into command-line arguments and environment variables for the provider pod. See [Remote Provider Documentation](docs/REMOTE_PROVIDERS.md#configuration-flow-provider-resource--provider-pod) for details.
+   > **How it works**: VirtRigaud automatically translates your Provider configuration into command-line arguments and environment variables for the provider pod. See [Remote Provider Documentation](docs/REMOTE_PROVIDERS.md#configuration-flow-provider-resource--provider-pod) for details.
 
 2. **Create VM resources using the Provider**:
    ```bash
@@ -271,6 +270,7 @@ For detailed instructions, see [Quick Start Guide](docs/getting-started/quicksta
 ### Future Roadmap
 
 - **Firecracker**: Serverless microVM support
+- **Cloud-Hypervisor**: Serverless microVM support
 - **QEMU**: Direct QEMU integration
 
 
