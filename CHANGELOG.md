@@ -47,6 +47,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Creating isolated lab environments for security testing
 - Educational scenarios for learning virtualization technologies
 
+#### VM Snapshot Management (Production Ready)
+- **Complete VMSnapshot CRD**: Full-featured API for VM snapshot lifecycle management
+  - Snapshot creation with memory state and filesystem quiescing options
+  - Snapshot deletion with proper cleanup
+  - Snapshot revert for rollback scenarios
+  - Retention policies (maxAge, deleteOnVMDelete, maxCount)
+  - Automated scheduling support via cron expressions
+  - Snapshot metadata and tagging
+- **vSphere Provider Implementation** ✅ **COMPLETED**:
+  - Full govmomi-based snapshot operations (Create, Delete, Revert)
+  - Memory snapshot support for powered-on VMs
+  - Filesystem quiescing with VMware Tools integration
+  - Automatic power state handling during revert
+  - Hierarchical snapshot tree navigation
+  - Synchronous operations for immediate completion
+- **Proxmox Provider Implementation** ✅ **FULLY FUNCTIONAL**:
+  - Complete snapshot lifecycle support
+  - Memory state inclusion (vmstate)
+  - Async task handling with status tracking
+- **Controller Integration** ✅ **PRODUCTION READY**:
+  - Real provider RPC calls (no more simulation)
+  - Proper task status polling for async operations
+  - Comprehensive error handling and reporting
+  - Event recording for observability
+  - Finalizer-based cleanup
+- **Transport Layer**:
+  - Added snapshot methods to gRPC client
+  - TaskStatus RPC for async operation tracking
+  - Proper request/response type mapping
+- **Use Cases**:
+  - Pre-maintenance backups with quick rollback
+  - CI/CD testing with snapshot-based environments
+  - Disaster recovery and point-in-time restore
+  - Development environment versioning
+
 ### Fixed
 
 #### vSphere Provider

@@ -31,7 +31,7 @@ import (
 	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/obs/logging"
 	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
-
+	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/runtime/remote"
 	"github.com/projectbeskar/virtrigaud/internal/util/k8s"
 )
@@ -179,37 +179,108 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 		metav1.ConditionTrue, infrav1beta1.VMSnapshotReasonCreating,
 		"Snapshot creation initiated")
 
-	// For demonstration purposes, simulate snapshot creation
-	// In a real implementation, this would call the provider's SnapshotCreate RPC
-	snapshotID := fmt.Sprintf("snapshot-%s-%d", snapshot.Name, time.Now().Unix()) // NameHint field removed
-	snapshot.Status.SnapshotID = snapshotID
-	snapshot.Status.TaskRef = fmt.Sprintf("task-snapshot-%s", snapshotID)
+	// Get the provider for this VM
+	provider := &infrav1beta1.Provider{}
+	providerKey := client.ObjectKey{
+		Name:      vm.Spec.ProviderRef.Name,
+		Namespace: vm.Namespace,
+	}
+	if vm.Spec.ProviderRef.Namespace != "" {
+		providerKey.Namespace = vm.Spec.ProviderRef.Namespace
+	}
+
+	if err := r.Get(ctx, providerKey, provider); err != nil {
+		logger.Error(err, "Failed to get provider", "provider", vm.Spec.ProviderRef.Name)
+		k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionReady,
+			metav1.ConditionFalse, infrav1beta1.VMSnapshotReasonProviderError,
+			fmt.Sprintf("Failed to get provider: %v", err))
+		// Status update errors are intentionally ignored to avoid blocking reconciliation
+		_ = r.updateStatus(ctx, snapshot)
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	// Get provider instance
+	providerInstance, err := r.getProviderInstance(ctx, provider)
+	if err != nil {
+		logger.Error(err, "Failed to get provider instance")
+		k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionReady,
+			metav1.ConditionFalse, infrav1beta1.VMSnapshotReasonProviderError,
+			fmt.Sprintf("Failed to get provider instance: %v", err))
+		// Status update errors are intentionally ignored to avoid blocking reconciliation
+		_ = r.updateStatus(ctx, snapshot)
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	// Build snapshot create request
+	req := r.buildSnapshotCreateRequest(snapshot, vm)
+
+	// Call provider to create snapshot
+	resp, err := providerInstance.SnapshotCreate(ctx, req)
+	if err != nil {
+		logger.Error(err, "Failed to create snapshot")
+		snapshot.Status.Phase = infrav1beta1.SnapshotPhaseFailed
+		snapshot.Status.Message = fmt.Sprintf("Failed to create snapshot: %v", err)
+		k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionReady,
+			metav1.ConditionFalse, infrav1beta1.VMSnapshotReasonProviderError,
+			fmt.Sprintf("Snapshot creation failed: %v", err))
+		k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionCreating,
+			metav1.ConditionFalse, infrav1beta1.VMSnapshotReasonProviderError,
+			fmt.Sprintf("Snapshot creation failed: %v", err))
+		r.Recorder.Event(snapshot, "Warning", "SnapshotFailed", fmt.Sprintf("Failed to create snapshot: %v", err))
+		// Status update errors are intentionally ignored to avoid blocking reconciliation
+		_ = r.updateStatus(ctx, snapshot)
+		return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+	}
+
+	// Update status with snapshot information
+	snapshot.Status.SnapshotID = resp.SnapshotId
 	snapshot.Status.CreationTime = &metav1.Time{Time: time.Now()}
 
-	r.Recorder.Event(snapshot, "Normal", "SnapshotCreating", "Started snapshot creation")
+	// Check if there's a task to monitor
+	if resp.Task != nil && resp.Task.ID != "" {
+		snapshot.Status.TaskRef = resp.Task.ID
+		logger.Info("Snapshot creation task started", "task_id", resp.Task.ID)
+	} else {
+		// Snapshot was created synchronously
+		snapshot.Status.Phase = infrav1beta1.SnapshotPhaseReady
+		snapshot.Status.Message = "Snapshot created successfully"
+		snapshot.Status.TaskRef = ""
+
+		k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionReady,
+			metav1.ConditionTrue, infrav1beta1.VMSnapshotReasonCreated,
+			"Snapshot created successfully")
+		k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionCreating,
+			metav1.ConditionFalse, infrav1beta1.VMSnapshotReasonCreated,
+			"Snapshot creation completed")
+
+		r.Recorder.Event(snapshot, "Normal", "SnapshotReady", "Snapshot created successfully")
+		logger.Info("Snapshot created successfully", "snapshot_id", resp.SnapshotId)
+	}
 
 	if err := r.updateStatus(ctx, snapshot); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	// Simulate async operation - in real implementation, this would poll the task
-	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	// If there's a task, requeue to check status
+	if snapshot.Status.TaskRef != "" {
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+
+	// Snapshot is ready
+	return ctrl.Result{}, nil
 }
 
 // checkSnapshotCreation checks if snapshot creation is complete
 func (r *VMSnapshotReconciler) checkSnapshotCreation(ctx context.Context, snapshot *infrav1beta1.VMSnapshot, vm *infrav1beta1.VirtualMachine) (ctrl.Result, error) {
 	logger := logging.FromContext(ctx)
 
-	logger.Info("Checking snapshot creation progress")
+	logger.Info("Checking snapshot creation progress", "task_ref", snapshot.Status.TaskRef)
 
-	// Simulate completion check
-	// In real implementation, this would call TaskStatus RPC
-	if time.Since(snapshot.Status.CreationTime.Time) > 30*time.Second {
-		// Mark as ready
+	// For vSphere and other synchronous providers, if there's no task ref,
+	// the snapshot is already complete
+	if snapshot.Status.TaskRef == "" {
 		snapshot.Status.Phase = infrav1beta1.SnapshotPhaseReady
 		snapshot.Status.Message = "Snapshot created successfully"
-		// SizeBytes field removed in v1beta1 VMSnapshotStatus
-		snapshot.Status.TaskRef = ""
 
 		k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionReady,
 			metav1.ConditionTrue, infrav1beta1.VMSnapshotReasonCreated,
@@ -227,7 +298,76 @@ func (r *VMSnapshotReconciler) checkSnapshotCreation(ctx context.Context, snapsh
 		return ctrl.Result{}, nil
 	}
 
-	// Still creating
+	// Get the provider to check task status
+	provider := &infrav1beta1.Provider{}
+	providerKey := client.ObjectKey{
+		Name:      vm.Spec.ProviderRef.Name,
+		Namespace: vm.Namespace,
+	}
+	if vm.Spec.ProviderRef.Namespace != "" {
+		providerKey.Namespace = vm.Spec.ProviderRef.Namespace
+	}
+
+	if err := r.Get(ctx, providerKey, provider); err != nil {
+		logger.Error(err, "Failed to get provider")
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	// Get provider instance
+	providerInstance, err := r.getProviderInstance(ctx, provider)
+	if err != nil {
+		logger.Error(err, "Failed to get provider instance")
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	// Check task status
+	taskStatus, err := providerInstance.TaskStatus(ctx, snapshot.Status.TaskRef)
+	if err != nil {
+		logger.Error(err, "Failed to check task status")
+		// Don't fail immediately, retry
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+
+	if taskStatus.IsCompleted {
+		if taskStatus.Error != "" {
+			// Task failed
+			snapshot.Status.Phase = infrav1beta1.SnapshotPhaseFailed
+			snapshot.Status.Message = fmt.Sprintf("Snapshot creation failed: %s", taskStatus.Error)
+			snapshot.Status.TaskRef = ""
+
+			k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionReady,
+				metav1.ConditionFalse, infrav1beta1.VMSnapshotReasonProviderError,
+				fmt.Sprintf("Snapshot creation failed: %s", taskStatus.Error))
+			k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionCreating,
+				metav1.ConditionFalse, infrav1beta1.VMSnapshotReasonProviderError,
+				"Snapshot creation failed")
+
+			r.Recorder.Event(snapshot, "Warning", "SnapshotFailed", fmt.Sprintf("Snapshot creation failed: %s", taskStatus.Error))
+		} else {
+			// Task succeeded
+			snapshot.Status.Phase = infrav1beta1.SnapshotPhaseReady
+			snapshot.Status.Message = "Snapshot created successfully"
+			snapshot.Status.TaskRef = ""
+
+			k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionReady,
+				metav1.ConditionTrue, infrav1beta1.VMSnapshotReasonCreated,
+				"Snapshot created successfully")
+			k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionCreating,
+				metav1.ConditionFalse, infrav1beta1.VMSnapshotReasonCreated,
+				"Snapshot creation completed")
+
+			r.Recorder.Event(snapshot, "Normal", "SnapshotReady", "Snapshot created successfully")
+		}
+
+		if err := r.updateStatus(ctx, snapshot); err != nil {
+			return ctrl.Result{}, err
+		}
+
+		return ctrl.Result{}, nil
+	}
+
+	// Task still in progress
+	logger.Info("Snapshot creation task still in progress")
 	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 }
 
@@ -288,11 +428,64 @@ func (r *VMSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *inf
 
 	_ = r.updateStatus(ctx, snapshot) //nolint:errcheck // Status update errors logged elsewhere
 
-	// In real implementation, this would call the provider's SnapshotDelete RPC
 	r.Recorder.Event(snapshot, "Normal", "SnapshotDeleting", "Started snapshot deletion")
 
-	// Simulate deletion time
-	time.Sleep(2 * time.Second)
+	// Get the VM to find the provider
+	vm := &infrav1beta1.VirtualMachine{}
+	vmKey := client.ObjectKey{
+		Namespace: snapshot.Namespace,
+		Name:      snapshot.Spec.VMRef.Name,
+	}
+
+	// Get the VM
+	vmNotFound := false
+	if err := r.Get(ctx, vmKey, vm); err != nil {
+		if client.IgnoreNotFound(err) == nil {
+			// VM was already deleted, skip provider call
+			logger.Info("VM not found, skipping provider snapshot deletion", "vm", snapshot.Spec.VMRef.Name)
+			vmNotFound = true
+		} else {
+			logger.Error(err, "Failed to get VM for snapshot deletion")
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+	}
+
+	// Only call provider if VM still exists and we have a snapshot ID
+	if !vmNotFound && snapshot.Status.SnapshotID != "" && vm.Status.ID != "" {
+		// Get the provider
+		provider := &infrav1beta1.Provider{}
+		providerKey := client.ObjectKey{
+			Name:      vm.Spec.ProviderRef.Name,
+			Namespace: vm.Namespace,
+		}
+		if vm.Spec.ProviderRef.Namespace != "" {
+			providerKey.Namespace = vm.Spec.ProviderRef.Namespace
+		}
+
+		if err := r.Get(ctx, providerKey, provider); err != nil {
+			logger.Error(err, "Failed to get provider", "provider", vm.Spec.ProviderRef.Name)
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+
+		// Get provider instance
+		providerInstance, err := r.getProviderInstance(ctx, provider)
+		if err != nil {
+			logger.Error(err, "Failed to get provider instance")
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+
+		// Delete the snapshot via provider
+		logger.Info("Calling provider to delete snapshot", "snapshot_id", snapshot.Status.SnapshotID, "vm_id", vm.Status.ID)
+		_, err = providerInstance.SnapshotDelete(ctx, vm.Status.ID, snapshot.Status.SnapshotID)
+		if err != nil {
+			logger.Error(err, "Failed to delete snapshot via provider")
+			// Log the error but continue with finalizer removal
+			// The snapshot may already be deleted or the VM may be gone
+			r.Recorder.Event(snapshot, "Warning", "SnapshotDeleteFailed", fmt.Sprintf("Failed to delete snapshot: %v", err))
+		} else {
+			logger.Info("Snapshot deleted successfully via provider")
+		}
+	}
 
 	// Remove finalizer
 	controllerutil.RemoveFinalizer(snapshot, "snapshot.infra.virtrigaud.io/finalizer")
@@ -315,6 +508,42 @@ func (r *VMSnapshotReconciler) updateStatus(ctx context.Context, snapshot *infra
 		return err
 	}
 	return nil
+}
+
+// getProviderInstance resolves a provider to a remote implementation
+func (r *VMSnapshotReconciler) getProviderInstance(ctx context.Context, provider *infrav1beta1.Provider) (contracts.Provider, error) {
+	// All providers are now remote
+	if r.RemoteResolver == nil {
+		return nil, fmt.Errorf("no remote resolver available")
+	}
+
+	return r.RemoteResolver.GetProvider(ctx, provider)
+}
+
+// buildSnapshotCreateRequest builds a snapshot create request from the snapshot spec
+func (r *VMSnapshotReconciler) buildSnapshotCreateRequest(snapshot *infrav1beta1.VMSnapshot, vm *infrav1beta1.VirtualMachine) contracts.SnapshotCreateRequest {
+	req := contracts.SnapshotCreateRequest{
+		VmId: vm.Status.ID,
+	}
+
+	// Set snapshot configuration if provided
+	if snapshot.Spec.SnapshotConfig != nil {
+		req.NameHint = snapshot.Spec.SnapshotConfig.Name
+		if req.NameHint == "" {
+			// Use the VMSnapshot resource name as a hint
+			req.NameHint = snapshot.Name
+		}
+
+		req.Description = snapshot.Spec.SnapshotConfig.Description
+		req.IncludeMemory = snapshot.Spec.SnapshotConfig.IncludeMemory
+		req.Quiesce = snapshot.Spec.SnapshotConfig.Quiesce
+	} else {
+		// Use the VMSnapshot resource name as a hint
+		req.NameHint = snapshot.Name
+		req.Quiesce = true // Default to quiesce for consistency
+	}
+
+	return req
 }
 
 // SetupWithManager sets up the controller with the Manager

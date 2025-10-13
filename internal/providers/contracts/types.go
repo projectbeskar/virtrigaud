@@ -124,6 +124,38 @@ type TaskRef struct {
 	Type string
 }
 
+// TaskStatus represents the status of an async task
+type TaskStatus struct {
+	// IsCompleted indicates if the task is done
+	IsCompleted bool
+	// Error contains error message if task failed
+	Error string
+	// Message contains status message
+	Message string
+}
+
+// SnapshotCreateRequest defines snapshot creation request
+type SnapshotCreateRequest struct {
+	// VmId is the VM identifier
+	VmId string
+	// NameHint provides a name suggestion for the snapshot
+	NameHint string
+	// Description provides context for the snapshot
+	Description string
+	// IncludeMemory indicates whether to include memory state
+	IncludeMemory bool
+	// Quiesce indicates whether to quiesce the filesystem
+	Quiesce bool
+}
+
+// SnapshotCreateResponse contains the result of snapshot creation
+type SnapshotCreateResponse struct {
+	// SnapshotId is the provider-specific snapshot identifier
+	SnapshotId string
+	// Task references an async operation if applicable
+	Task *TaskRef
+}
+
 // PowerState represents VM power states
 type PowerState string
 

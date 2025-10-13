@@ -863,17 +863,232 @@ func (p *Provider) TaskStatus(ctx context.Context, req *providerv1.TaskStatusReq
 
 // SnapshotCreate creates a snapshot of a virtual machine
 func (p *Provider) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotCreateRequest) (*providerv1.SnapshotCreateResponse, error) {
-	return nil, errors.NewUnimplemented("SnapshotCreate operation not yet implemented for vSphere")
+	if p.client == nil {
+		return nil, fmt.Errorf("vSphere client not configured")
+	}
+
+	p.logger.Info("Creating VM snapshot",
+		"vm_id", req.VmId,
+		"name_hint", req.NameHint,
+		"include_memory", req.IncludeMemory)
+
+	// Set datacenter context for finder
+	datacenter, err := p.finder.DefaultDatacenter(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find default datacenter: %w", err)
+	}
+	p.finder.SetDatacenter(datacenter)
+
+	// Create VM reference from ID
+	vmRef := types.ManagedObjectReference{
+		Type:  "VirtualMachine",
+		Value: req.VmId,
+	}
+
+	vm := object.NewVirtualMachine(p.client.Client, vmRef)
+
+	// Generate snapshot name if not provided
+	snapshotName := req.NameHint
+	if snapshotName == "" {
+		snapshotName = fmt.Sprintf("snapshot-%d", time.Now().Unix())
+	}
+
+	// Description defaults to empty string if not provided
+	description := req.Description
+
+	// Quiesce filesystem (false by default, requires VMware Tools)
+	// TODO: Make this configurable via API when proto is updated
+	quiesce := false
+
+	// Create the snapshot
+	// Parameters: name, description, includeMemory, quiesce
+	p.logger.Info("Initiating snapshot creation",
+		"vm_id", req.VmId,
+		"snapshot_name", snapshotName,
+		"memory", req.IncludeMemory,
+		"quiesce", quiesce)
+
+	task, err := vm.CreateSnapshot(ctx, snapshotName, description, req.IncludeMemory, quiesce)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create snapshot task: %w", err)
+	}
+
+	// Wait for snapshot creation to complete
+	taskInfo, err := task.WaitForResult(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot creation failed: %w", err)
+	}
+
+	// Extract snapshot reference from task result
+	if taskInfo.Result == nil {
+		return nil, fmt.Errorf("snapshot creation completed but no snapshot reference returned")
+	}
+
+	snapshotRef, ok := taskInfo.Result.(types.ManagedObjectReference)
+	if !ok {
+		return nil, fmt.Errorf("unexpected task result type: %T", taskInfo.Result)
+	}
+
+	p.logger.Info("Snapshot created successfully",
+		"vm_id", req.VmId,
+		"snapshot_id", snapshotRef.Value,
+		"snapshot_name", snapshotName)
+
+	return &providerv1.SnapshotCreateResponse{
+		SnapshotId: snapshotRef.Value,
+	}, nil
 }
 
 // SnapshotDelete deletes a snapshot
 func (p *Provider) SnapshotDelete(ctx context.Context, req *providerv1.SnapshotDeleteRequest) (*providerv1.TaskResponse, error) {
-	return nil, errors.NewUnimplemented("SnapshotDelete operation not yet implemented for vSphere")
+	if p.client == nil {
+		return nil, fmt.Errorf("vSphere client not configured")
+	}
+
+	p.logger.Info("Deleting VM snapshot", "vm_id", req.VmId, "snapshot_id", req.SnapshotId)
+
+	// Set datacenter context for finder
+	datacenter, err := p.finder.DefaultDatacenter(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find default datacenter: %w", err)
+	}
+	p.finder.SetDatacenter(datacenter)
+
+	// Create VM reference from ID
+	vmRef := types.ManagedObjectReference{
+		Type:  "VirtualMachine",
+		Value: req.VmId,
+	}
+
+	vm := object.NewVirtualMachine(p.client.Client, vmRef)
+
+	// Get the VM's snapshot tree to find the specific snapshot
+	var vmObj mo.VirtualMachine
+	err = vm.Properties(ctx, vm.Reference(), []string{"snapshot"}, &vmObj)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get VM snapshot properties: %w", err)
+	}
+
+	if vmObj.Snapshot == nil {
+		return nil, fmt.Errorf("VM has no snapshots")
+	}
+
+	// Find the snapshot by ID in the snapshot tree
+	snapshot := p.findSnapshotByID(vmObj.Snapshot.RootSnapshotList, req.SnapshotId)
+	if snapshot == nil {
+		return nil, fmt.Errorf("snapshot not found: %s", req.SnapshotId)
+	}
+
+	// Remove the snapshot using RemoveSnapshot_Task method
+	// removeChildren: false = consolidate child snapshots into parent
+	// consolidate: true = merge snapshot disks after removal
+	removeChildren := false
+	consolidate := true
+
+	task, err := vm.RemoveSnapshot(ctx, snapshot.Snapshot.Value, removeChildren, &consolidate)
+	if err != nil {
+		return nil, fmt.Errorf("failed to start snapshot removal: %w", err)
+	}
+
+	// Wait for snapshot deletion to complete
+	_, err = task.WaitForResult(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot deletion failed: %w", err)
+	}
+
+	p.logger.Info("Snapshot deleted successfully", "vm_id", req.VmId, "snapshot_id", req.SnapshotId)
+
+	return &providerv1.TaskResponse{}, nil
 }
 
 // SnapshotRevert reverts to a snapshot
 func (p *Provider) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotRevertRequest) (*providerv1.TaskResponse, error) {
-	return nil, errors.NewUnimplemented("SnapshotRevert operation not yet implemented for vSphere")
+	if p.client == nil {
+		return nil, fmt.Errorf("vSphere client not configured")
+	}
+
+	p.logger.Info("Reverting to VM snapshot", "vm_id", req.VmId, "snapshot_id", req.SnapshotId)
+
+	// Set datacenter context for finder
+	datacenter, err := p.finder.DefaultDatacenter(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find default datacenter: %w", err)
+	}
+	p.finder.SetDatacenter(datacenter)
+
+	// Create VM reference from ID
+	vmRef := types.ManagedObjectReference{
+		Type:  "VirtualMachine",
+		Value: req.VmId,
+	}
+
+	vm := object.NewVirtualMachine(p.client.Client, vmRef)
+
+	// Get the VM's snapshot tree to find the specific snapshot
+	var vmObj mo.VirtualMachine
+	err = vm.Properties(ctx, vm.Reference(), []string{"snapshot", "runtime.powerState"}, &vmObj)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get VM properties: %w", err)
+	}
+
+	if vmObj.Snapshot == nil {
+		return nil, fmt.Errorf("VM has no snapshots")
+	}
+
+	// Find the snapshot by ID in the snapshot tree
+	snapshot := p.findSnapshotByID(vmObj.Snapshot.RootSnapshotList, req.SnapshotId)
+	if snapshot == nil {
+		return nil, fmt.Errorf("snapshot not found: %s", req.SnapshotId)
+	}
+
+	// Store original power state for restoration if needed
+	originalPowerState := vmObj.Runtime.PowerState
+	p.logger.Info("VM current power state", "vm_id", req.VmId, "power_state", originalPowerState)
+
+	// Revert to the snapshot
+	// suppressPowerOn: false = power on if snapshot contains memory state
+	// TODO: Make this configurable via API when proto is updated
+	suppressPowerOn := false
+
+	task, err := vm.RevertToSnapshot(ctx, snapshot.Snapshot.Value, suppressPowerOn)
+	if err != nil {
+		return nil, fmt.Errorf("failed to start snapshot revert: %w", err)
+	}
+
+	// Wait for snapshot revert to complete
+	_, err = task.WaitForResult(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot revert failed: %w", err)
+	}
+
+	p.logger.Info("Snapshot revert completed successfully",
+		"vm_id", req.VmId,
+		"snapshot_id", req.SnapshotId)
+
+	return &providerv1.TaskResponse{}, nil
+}
+
+// findSnapshotByID recursively searches for a snapshot by its ManagedObjectReference value
+func (p *Provider) findSnapshotByID(snapshots []types.VirtualMachineSnapshotTree, snapshotID string) *types.VirtualMachineSnapshotTree {
+	for i := range snapshots {
+		if snapshots[i].Snapshot.Value == snapshotID {
+			return &snapshots[i]
+		}
+
+		// Also check by snapshot name as a fallback
+		if snapshots[i].Name == snapshotID {
+			return &snapshots[i]
+		}
+
+		// Recursively search child snapshots
+		if len(snapshots[i].ChildSnapshotList) > 0 {
+			if found := p.findSnapshotByID(snapshots[i].ChildSnapshotList, snapshotID); found != nil {
+				return found
+			}
+		}
+	}
+
+	return nil
 }
 
 // Clone clones a virtual machine

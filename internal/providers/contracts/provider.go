@@ -104,4 +104,16 @@ type Provider interface {
 
 	// IsTaskComplete checks if an async task is complete
 	IsTaskComplete(ctx context.Context, taskRef string) (done bool, err error)
+
+	// TaskStatus returns detailed status of an async task
+	TaskStatus(ctx context.Context, taskRef string) (TaskStatus, error)
+
+	// SnapshotCreate creates a VM snapshot
+	SnapshotCreate(ctx context.Context, req SnapshotCreateRequest) (SnapshotCreateResponse, error)
+
+	// SnapshotDelete deletes a VM snapshot
+	SnapshotDelete(ctx context.Context, vmId string, snapshotId string) (taskRef string, err error)
+
+	// SnapshotRevert reverts a VM to a snapshot
+	SnapshotRevert(ctx context.Context, vmId string, snapshotId string) (taskRef string, err error)
 }
