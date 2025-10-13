@@ -774,6 +774,8 @@ func (v *VirshProvider) snapshotExists(ctx context.Context, domainName, snapshot
 }
 
 // getSnapshotInfo returns information about a specific snapshot
+//
+//nolint:unused // Keeping for future snapshot management features
 func (v *VirshProvider) getSnapshotInfo(ctx context.Context, domainName, snapshotName string) (map[string]string, error) {
 	result, err := v.runVirshCommand(ctx, "snapshot-info", domainName, snapshotName)
 	if err != nil {
@@ -797,6 +799,8 @@ func (v *VirshProvider) getSnapshotInfo(ctx context.Context, domainName, snapsho
 }
 
 // listSnapshots returns all snapshots for a domain
+//
+//nolint:unused // Keeping for future snapshot listing/querying features
 func (v *VirshProvider) listSnapshots(ctx context.Context, domainName string) ([]string, error) {
 	result, err := v.runVirshCommand(ctx, "snapshot-list", domainName, "--name")
 	if err != nil {
