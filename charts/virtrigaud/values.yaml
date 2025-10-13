@@ -348,11 +348,14 @@ crdUpgrade:
   # When enabled, CRDs will be applied during both 'helm install' and 'helm upgrade'
   enabled: true
   
-  # Image for kubectl container that applies CRDs
-  # Using official Kubernetes kubectl image from registry.k8s.io
+  # Image for kubectl container that applies CRDs  
+  # Using alpine/k8s which includes kubectl and shell in a minimal Alpine image
+  # Note: registry.k8s.io/kubectl doesn't have a shell needed for our script
+  # IMPORTANT: This tag is for kubectl version, NOT VirtRigaud version!
+  # Do not override with Chart.AppVersion or release version
   image:
-    repository: registry.k8s.io/kubectl
-    tag: "v1.31.0"
+    repository: alpine/k8s
+    tag: "1.31.0"  # kubectl version - keep in sync with your cluster
     pullPolicy: IfNotPresent
   
   # Job configuration

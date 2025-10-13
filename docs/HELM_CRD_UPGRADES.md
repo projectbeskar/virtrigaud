@@ -86,8 +86,8 @@ crdUpgrade:
   enabled: true  # Enable/disable automatic upgrades
   
   image:
-    repository: registry.k8s.io/kubectl
-    tag: "v1.31.0"
+    repository: alpine/k8s  # Alpine-based image with kubectl and shell
+    tag: "1.31.0"
   
   backoffLimit: 3
   ttlSecondsAfterFinished: 300
@@ -225,8 +225,8 @@ kubectl describe clusterrole <role-name>
 ```yaml
 crdUpgrade:
   image:
-    repository: registry.k8s.io/kubectl
-    tag: "v1.31.0"
+    repository: alpine/k8s
+    tag: "1.31.0"
     pullPolicy: IfNotPresent
 ```
 
