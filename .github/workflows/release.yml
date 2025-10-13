@@ -278,8 +278,10 @@ jobs:
         sed -i "/^providers:/,/^  libvirt:/ { /    image:/,/      tag:/ s/      tag: \".*\"/      tag: \"${{ needs.prepare.outputs.tag }}\"/; }" charts/virtrigaud/values.yaml
         sed -i "/^providers:/,/^  vsphere:/ { /    image:/,/      tag:/ s/      tag: \".*\"/      tag: \"${{ needs.prepare.outputs.tag }}\"/; }" charts/virtrigaud/values.yaml
         sed -i "/^providers:/,/^  proxmox:/ { /    image:/,/      tag:/ s/      tag: \".*\"/      tag: \"${{ needs.prepare.outputs.tag }}\"/; }" charts/virtrigaud/values.yaml
-        # Update crdUpgrade kubectl image to point to our built image
-        sed -i "/^crdUpgrade:/,/^  image:/ { s|    repository: .*|    repository: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/kubectl|; s/    tag: \".*\"/    tag: \"${{ needs.prepare.outputs.tag }}\"/; }" charts/virtrigaud/values.yaml
+        # Update crdUpgrade kubectl image to point to our built image (using line numbers to be precise)
+        CRDUPGRADE_START=$(grep -n "^crdUpgrade:" charts/virtrigaud/values.yaml | cut -d: -f1)
+        CRDUPGRADE_END=$((CRDUPGRADE_START + 20))
+        sed -i "${CRDUPGRADE_START},${CRDUPGRADE_END} { s|repository: ghcr.io/projectbeskar/virtrigaud/kubectl|repository: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/kubectl|; s/tag: \"v.*\"/tag: \"${{ needs.prepare.outputs.tag }}\"/; }" charts/virtrigaud/values.yaml
 
     - name: Sync CRDs to Helm chart
       run: |
