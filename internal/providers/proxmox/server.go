@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	v1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/providers/proxmox/pveapi"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/capabilities"
@@ -696,10 +697,48 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*pveapi.VM
 
 	// Parse VMImage for template
 	if req.ImageJson != "" {
-		var image map[string]interface{}
-		if err := json.Unmarshal([]byte(req.ImageJson), &image); err == nil {
-			if template, ok := image["source"].(string); ok {
-				config.Template = template
+		var imageSpec v1beta1.VMImageSpec
+		if err := json.Unmarshal([]byte(req.ImageJson), &imageSpec); err == nil {
+			// Check for Proxmox-specific image source
+			if imageSpec.Source.Proxmox != nil {
+				proxmoxSource := imageSpec.Source.Proxmox
+
+				// Set template ID or name
+				if proxmoxSource.TemplateID != nil {
+					config.Template = fmt.Sprintf("%d", *proxmoxSource.TemplateID)
+				} else if proxmoxSource.TemplateName != "" {
+					config.Template = proxmoxSource.TemplateName
+				}
+
+				// Set storage if specified
+				if proxmoxSource.Storage != "" {
+					config.Storage = proxmoxSource.Storage
+				}
+
+				// Set node if specified (for template location)
+				if proxmoxSource.Node != "" {
+					// Store node hint for later use
+					if config.Custom == nil {
+						config.Custom = make(map[string]string)
+					}
+					config.Custom["template_node"] = proxmoxSource.Node
+				}
+
+				// Set clone type (full vs linked)
+				if proxmoxSource.FullClone != nil && !*proxmoxSource.FullClone {
+					if config.Custom == nil {
+						config.Custom = make(map[string]string)
+					}
+					config.Custom["full_clone"] = "0" // Linked clone
+				}
+			} else {
+				// Fallback: try to parse as raw string (for backwards compatibility)
+				var legacyImage map[string]interface{}
+				if err := json.Unmarshal([]byte(req.ImageJson), &legacyImage); err == nil {
+					if template, ok := legacyImage["source"].(string); ok {
+						config.Template = template
+					}
+				}
 			}
 		}
 	}

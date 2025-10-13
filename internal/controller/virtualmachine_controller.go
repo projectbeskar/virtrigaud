@@ -492,6 +492,14 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 		}
 	}
 
+	if vmImage.Spec.Source.Proxmox != nil {
+		if vmImage.Spec.Source.Proxmox.TemplateID != nil {
+			image.TemplateName = fmt.Sprintf("%d", *vmImage.Spec.Source.Proxmox.TemplateID)
+		} else if vmImage.Spec.Source.Proxmox.TemplateName != "" {
+			image.TemplateName = vmImage.Spec.Source.Proxmox.TemplateName
+		}
+	}
+
 	// Convert Networks
 	var networkAttachments []contracts.NetworkAttachment
 	for i, netRef := range vm.Spec.Networks {
@@ -515,6 +523,14 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 					attachment.Bridge = net.Spec.Network.Libvirt.Bridge.Name
 				}
 				attachment.Model = net.Spec.Network.Libvirt.Model
+			}
+
+			if net.Spec.Network.Proxmox != nil {
+				attachment.Bridge = net.Spec.Network.Proxmox.Bridge
+				attachment.Model = net.Spec.Network.Proxmox.Model
+				if net.Spec.Network.Proxmox.VLANTag != nil {
+					attachment.VLAN = *net.Spec.Network.Proxmox.VLANTag
+				}
 			}
 
 			// MacAddress is not part of NetworkConfig in v1beta1, skip for now

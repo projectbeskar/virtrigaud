@@ -52,6 +52,10 @@ type NetworkConfig struct {
 	// +optional
 	Libvirt *LibvirtNetworkConfig `json:"libvirt,omitempty"`
 
+	// Proxmox contains Proxmox VE-specific network configuration
+	// +optional
+	Proxmox *ProxmoxNetworkConfig `json:"proxmox,omitempty"`
+
 	// Type specifies the network type
 	// +optional
 	// +kubebuilder:default="bridged"
@@ -702,6 +706,44 @@ type VMNetworkAttachmentList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []VMNetworkAttachment `json:"items"`
+}
+
+// ProxmoxNetworkConfig defines Proxmox VE-specific network configuration
+type ProxmoxNetworkConfig struct {
+	// Bridge specifies the Linux bridge
+	// +optional
+	// +kubebuilder:validation:MaxLength=15
+	// +kubebuilder:validation:Pattern="^vmbr[0-9]+$"
+	// Examples: "vmbr0", "vmbr1", "vmbr2"
+	Bridge string `json:"bridge,omitempty"`
+
+	// Model specifies the network card model
+	// +optional
+	// +kubebuilder:default="virtio"
+	// +kubebuilder:validation:Enum=virtio;e1000;rtl8139;vmxnet3
+	Model string `json:"model,omitempty"`
+
+	// VLANTag specifies the VLAN tag
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=4094
+	VLANTag *int32 `json:"vlanTag,omitempty"`
+
+	// Firewall enables the Proxmox firewall for this interface
+	// +optional
+	// +kubebuilder:default=false
+	Firewall *bool `json:"firewall,omitempty"`
+
+	// RateLimit specifies the bandwidth limit in MB/s
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	RateLimit *int32 `json:"rateLimit,omitempty"`
+
+	// MTU specifies the Maximum Transmission Unit
+	// +optional
+	// +kubebuilder:validation:Minimum=68
+	// +kubebuilder:validation:Maximum=65520
+	MTU *int32 `json:"mtu,omitempty"`
 }
 
 func init() {

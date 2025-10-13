@@ -363,3 +363,26 @@ For provider-specific configuration and capabilities, see the [Provider Document
 ---
 
 **Full Changelog**: https://github.com/projectbeskar/virtrigaud/compare/v0.2.0...v0.2.1
+### Proxmox Provider CRD Integration
+
+**Added**:
+- `ProxmoxImageSource` type for VMImage CRDs
+  - Support for template ID or template name references
+  - Storage pool selection
+  - Node specification for template location
+  - Full clone vs linked clone selection
+  - Disk format configuration (qcow2, raw, vmdk)
+- `ProxmoxNetworkConfig` type for VMNetworkAttachment CRDs
+  - Linux bridge selection (vmbr0, vmbr1, etc.)
+  - Network card model selection (virtio, e1000, rtl8139, vmxnet3)
+  - VLAN tagging support
+  - Proxmox firewall integration
+  - Bandwidth rate limiting
+  - MTU configuration
+- Controller integration for Proxmox-specific fields
+- Provider parsing logic for new CRD types
+- Complete documentation in `docs/providers/PROXMOX.md`
+- Working examples in `examples/proxmox/`
+
+**Impact**: Users can now create and manage Proxmox VMs using native Kubernetes CRDs, achieving feature parity with vSphere and LibVirt providers.
+
