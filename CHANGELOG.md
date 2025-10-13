@@ -5,7 +5,7 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.2] - 2025-10-13
 
 ### Added
 
@@ -55,14 +55,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Retention policies (maxAge, deleteOnVMDelete, maxCount)
   - Automated scheduling support via cron expressions
   - Snapshot metadata and tagging
-- **vSphere Provider Implementation** ✅ **COMPLETED**:
+- **vSphere Provider Implementation**:
   - Full govmomi-based snapshot operations (Create, Delete, Revert)
   - Memory snapshot support for powered-on VMs
   - Filesystem quiescing with VMware Tools integration
   - Automatic power state handling during revert
   - Hierarchical snapshot tree navigation
   - Synchronous operations for immediate completion
-- **LibVirt Provider Implementation** ✅ **COMPLETED**:
+- **LibVirt Provider Implementation**:
   - Full virsh-based snapshot operations (Create, Delete, Revert)
   - Memory snapshot support for running VMs with qcow2 storage
   - Disk-only snapshots for VMs with incompatible storage backends
@@ -72,11 +72,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Synchronous operations with immediate feedback
   - Snapshot name sanitization for virsh compatibility
   - Helper methods for snapshot listing and querying
-- **Proxmox Provider Implementation** ✅ **FULLY FUNCTIONAL**:
+- **Proxmox Provider Implementation** **mock-work**:
   - Complete snapshot lifecycle support
   - Memory state inclusion (vmstate)
   - Async task handling with status tracking
-- **Controller Integration** ✅ **PRODUCTION READY**:
+- **Controller Integration**:
   - Real provider RPC calls (no more simulation)
   - Proper task status polling for async operations
   - Comprehensive error handling and reporting
@@ -97,7 +97,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 #### vSphere Provider
 - **Placement Override Bug**: Fixed critical bug where VirtualMachine `spec.placement.folder`, `spec.placement.datastore`, and `spec.placement.cluster` overrides were not being respected by the vSphere provider. The provider was always using the default values from the Provider CRD instead of honoring the per-VM placement overrides specified in the VirtualMachine manifest. VMs are now correctly created in the specified folder, datastore, and cluster when placement overrides are provided.
 
-## [0.2.1] - 2025-01-29
+## [0.2.1] - 2025-09-29
 
 ### Patch Release: Critical Fixes and Documentation Updates
 
@@ -179,7 +179,7 @@ This release includes important fixes identified by the community and addresses 
 
 ---
 
-## [0.2.0] - 2025-01-15
+## [0.2.0] - 2025-09-15
 
 ### Major Release: Production-Ready Provider Architecture
 
