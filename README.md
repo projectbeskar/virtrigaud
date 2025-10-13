@@ -70,7 +70,7 @@ graph TB
         VMC -.-> CTRL
         VMI -.-> CTRL
         PR -.-> CTRL
-        VMNA -,-> CTRL
+        VMNA -.-> CTRL
         
         CTRL -->|gRPC/TLS| VSP
         CTRL -->|gRPC/TLS| LVP
