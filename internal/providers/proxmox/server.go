@@ -41,6 +41,15 @@ type Provider struct {
 	logger       *slog.Logger
 }
 
+// readCredentialFile reads a credential from a mounted secret file
+func readCredentialFile(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
 // New creates a new Proxmox provider
 func New() *Provider {
 	// Get capabilities for Proxmox VE
@@ -53,24 +62,39 @@ func New() *Provider {
 		endpoint = os.Getenv("PVE_ENDPOINT")
 	}
 
-	tokenID := os.Getenv("PROVIDER_TOKEN_ID")
+	// Read credentials from mounted secret files (primary method)
+	tokenID := readCredentialFile("/etc/virtrigaud/credentials/token_id")
+	tokenSecret := readCredentialFile("/etc/virtrigaud/credentials/token_secret")
+	username := readCredentialFile("/etc/virtrigaud/credentials/username")
+	password := readCredentialFile("/etc/virtrigaud/credentials/password")
+
+	// Fallback to environment variables if files don't exist
 	if tokenID == "" {
-		tokenID = os.Getenv("PVE_TOKEN_ID")
+		tokenID = os.Getenv("PROVIDER_TOKEN_ID")
+		if tokenID == "" {
+			tokenID = os.Getenv("PVE_TOKEN_ID")
+		}
 	}
 
-	tokenSecret := os.Getenv("PROVIDER_TOKEN_SECRET")
 	if tokenSecret == "" {
-		tokenSecret = os.Getenv("PVE_TOKEN_SECRET")
+		tokenSecret = os.Getenv("PROVIDER_TOKEN_SECRET")
+		if tokenSecret == "" {
+			tokenSecret = os.Getenv("PVE_TOKEN_SECRET")
+		}
 	}
 
-	username := os.Getenv("PROVIDER_USERNAME")
 	if username == "" {
-		username = os.Getenv("PVE_USERNAME")
+		username = os.Getenv("PROVIDER_USERNAME")
+		if username == "" {
+			username = os.Getenv("PVE_USERNAME")
+		}
 	}
 
-	password := os.Getenv("PROVIDER_PASSWORD")
 	if password == "" {
-		password = os.Getenv("PVE_PASSWORD")
+		password = os.Getenv("PROVIDER_PASSWORD")
+		if password == "" {
+			password = os.Getenv("PVE_PASSWORD")
+		}
 	}
 
 	insecureSkipVerify := os.Getenv("TLS_INSECURE_SKIP_VERIFY") == "true" || os.Getenv("PVE_INSECURE_SKIP_VERIFY") == "true"
