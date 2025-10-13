@@ -1,0 +1,129 @@
+{{- if .Values.crdUpgrade.enabled }}
+---
+# ServiceAccount for CRD upgrade job
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "virtrigaud.fullname" . }}-crd-upgrade
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "virtrigaud.labels" . | nindent 4 }}
+    app.kubernetes.io/component: crd-upgrade
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+---
+# ClusterRole for applying CRDs
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "virtrigaud.fullname" . }}-crd-upgrade
+  labels:
+    {{- include "virtrigaud.labels" . | nindent 4 }}
+    app.kubernetes.io/component: crd-upgrade
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+rules:
+- apiGroups: ["apiextensions.k8s.io"]
+  resources: ["customresourcedefinitions"]
+  verbs: ["get", "list", "create", "update", "patch"]
+---
+# ClusterRoleBinding for CRD upgrade job
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "virtrigaud.fullname" . }}-crd-upgrade
+  labels:
+    {{- include "virtrigaud.labels" . | nindent 4 }}
+    app.kubernetes.io/component: crd-upgrade
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "virtrigaud.fullname" . }}-crd-upgrade
+subjects:
+- kind: ServiceAccount
+  name: {{ include "virtrigaud.fullname" . }}-crd-upgrade
+  namespace: {{ .Release.Namespace }}
+---
+# Job to apply CRDs during install/upgrade
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "virtrigaud.fullname" . }}-crd-upgrade-{{ .Release.Revision }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "virtrigaud.labels" . | nindent 4 }}
+    app.kubernetes.io/component: crd-upgrade
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.crdUpgrade.backoffLimit }}
+  ttlSecondsAfterFinished: {{ .Values.crdUpgrade.ttlSecondsAfterFinished }}
+  template:
+    metadata:
+      name: {{ include "virtrigaud.fullname" . }}-crd-upgrade
+      labels:
+        {{- include "virtrigaud.labels" . | nindent 8 }}
+        app.kubernetes.io/component: crd-upgrade
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: {{ include "virtrigaud.fullname" . }}-crd-upgrade
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: kubectl-apply
+        image: {{ .Values.crdUpgrade.image.repository }}:{{ .Values.crdUpgrade.image.tag }}
+        imagePullPolicy: {{ .Values.crdUpgrade.image.pullPolicy }}
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 65532
+          capabilities:
+            drop:
+              - ALL
+        command:
+        - /bin/sh
+        - -c
+        - |
+          set -e
+          echo "🔄 Applying VirtRigaud CRDs..."
+          
+          # Apply each CRD with server-side apply for better upgrade handling
+          for crd in /crds/*.yaml; do
+            echo "📋 Applying $(basename $crd)..."
+            kubectl apply --server-side=true --force-conflicts -f "$crd"
+          done
+          
+          echo "✅ CRDs successfully applied!"
+          
+          # Wait a moment for CRDs to be established
+          sleep {{ .Values.crdUpgrade.waitSeconds }}
+          
+          echo "🎉 CRD upgrade complete!"
+        volumeMounts:
+        - name: crds
+          mountPath: /crds
+          readOnly: true
+        resources:
+          {{- toYaml .Values.crdUpgrade.resources | nindent 10 }}
+      volumes:
+      - name: crds
+        configMap:
+          name: {{ include "virtrigaud.fullname" . }}-crds
+{{- end }}
+

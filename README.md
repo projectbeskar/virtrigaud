@@ -124,8 +124,11 @@ graph TB
      --set providers.proxmox.enabled=false \
      --version v0.2.2
    
-   # Skip CRDs if already installed separately
-   helm install virtrigaud virtrigaud/virtrigaud -n virtrigaud-system --create-namespace --skip-crds
+   # CRDs are automatically upgraded during 'helm upgrade' (default behavior)
+   # To disable automatic CRD upgrades, use:
+   helm install virtrigaud virtrigaud/virtrigaud \
+     -n virtrigaud-system --create-namespace \
+     --set crdUpgrade.enabled=false
    ```
 
 3. **Verify the installation**:
@@ -134,7 +137,19 @@ graph TB
    kubectl get pods -n virtrigaud-system
    
    # Check CRDs
-   kubectl get crd | grep virtrigaud-system
+   kubectl get crd | grep virtrigaud
+   
+   # Verify CRD upgrade job completed (if enabled)
+   kubectl get jobs -n virtrigaud-system -l app.kubernetes.io/component=crd-upgrade
+   ```
+
+4. **Upgrade VirtRigaud** (CRDs are automatically upgraded):
+   ```bash
+   # Standard upgrade - CRDs are automatically updated
+   helm upgrade virtrigaud virtrigaud/virtrigaud -n virtrigaud-system
+   
+   # The chart uses Helm hooks to apply CRDs during upgrade
+   # No manual CRD management needed!
    ```
 
 ### Development Installation

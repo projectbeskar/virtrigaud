@@ -340,3 +340,31 @@ testing:
       vmCount: 10
       concurrency: 2
       duration: 300s
+
+# CRD Upgrade configuration
+# Automatically upgrades CRDs during helm upgrade (not just install)
+crdUpgrade:
+  # Enable automatic CRD upgrade via Helm hooks
+  # When enabled, CRDs will be applied during both 'helm install' and 'helm upgrade'
+  enabled: true
+  
+  # Image for kubectl container that applies CRDs
+  # Using official Kubernetes kubectl image from registry.k8s.io
+  image:
+    repository: registry.k8s.io/kubectl
+    tag: "v1.31.0"
+    pullPolicy: IfNotPresent
+  
+  # Job configuration
+  backoffLimit: 3  # Number of retries before considering job failed
+  ttlSecondsAfterFinished: 300  # Cleanup job after 5 minutes
+  waitSeconds: 5  # Wait time after applying CRDs for them to be established
+  
+  # Resources for the CRD upgrade job
+  resources:
+    limits:
+      cpu: 100m
+      memory: 128Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
