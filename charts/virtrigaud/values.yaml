@@ -349,13 +349,13 @@ crdUpgrade:
   enabled: true
   
   # Image for kubectl container that applies CRDs  
-  # Using alpine/k8s which includes kubectl and shell in a minimal Alpine image
-  # Note: registry.k8s.io/kubectl doesn't have a shell needed for our script
-  # IMPORTANT: This tag is for kubectl version, NOT VirtRigaud version!
-  # Do not override with Chart.AppVersion or release version
+  # Using our own kubectl image built from Alpine with kubectl and shell
+  # This image is built and published as part of the VirtRigaud release process
+  # Note: During development, this defaults to the current version, but in production
+  #       it will be updated to match the release tag
   image:
-    repository: alpine/k8s
-    tag: "1.31.0"  # kubectl version - keep in sync with your cluster
+    repository: ghcr.io/projectbeskar/virtrigaud/kubectl
+    tag: "v0.2.0"  # Updated during release to match VirtRigaud version
     pullPolicy: IfNotPresent
   
   # Job configuration

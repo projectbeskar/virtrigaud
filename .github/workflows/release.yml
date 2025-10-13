@@ -52,7 +52,7 @@ jobs:
     timeout-minutes: 30
     strategy:
       matrix:
-        component: [manager, provider-libvirt, provider-vsphere, provider-proxmox]
+        component: [manager, provider-libvirt, provider-vsphere, provider-proxmox, kubectl]
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -96,13 +96,24 @@ jobs:
           type=semver,pattern={{major}}
           type=ref,event=tag
 
+    - name: Determine Dockerfile path
+      id: dockerfile
+      run: |
+        if [ "${{ matrix.component }}" = "manager" ]; then
+          echo "path=./build/Dockerfile.manager" >> $GITHUB_OUTPUT
+        elif [ "${{ matrix.component }}" = "kubectl" ]; then
+          echo "path=./build/Dockerfile.kubectl" >> $GITHUB_OUTPUT
+        else
+          echo "path=./cmd/${{ matrix.component }}/Dockerfile" >> $GITHUB_OUTPUT
+        fi
+
     - name: Build and push
       id: build
       uses: docker/build-push-action@v6
       timeout-minutes: 20
       with:
         context: .
-        file: ${{ matrix.component == 'manager' && './build/Dockerfile.manager' || format('./cmd/{0}/Dockerfile', matrix.component) }}
+        file: ${{ steps.dockerfile.outputs.path }}
         platforms: linux/amd64
         push: true
         tags: ${{ steps.meta.outputs.tags }}
@@ -127,7 +138,7 @@ jobs:
     timeout-minutes: 20
     strategy:
       matrix:
-        component: [manager, provider-libvirt, provider-vsphere, provider-proxmox]
+        component: [manager, provider-libvirt, provider-vsphere, provider-proxmox, kubectl]
     steps:
     - name: Retry Docker login for security scan
       run: |
@@ -192,7 +203,7 @@ jobs:
     timeout-minutes: 15
     strategy:
       matrix:
-        component: [manager, provider-libvirt, provider-vsphere, provider-proxmox]
+        component: [manager, provider-libvirt, provider-vsphere, provider-proxmox, kubectl]
     steps:
     - name: Retry Docker login for SBOM generation
       run: |
@@ -259,8 +270,15 @@ jobs:
         sed -i "s/version: .*/version: ${{ needs.prepare.outputs.version }}/" charts/virtrigaud/Chart.yaml
         sed -i "s/appVersion: .*/appVersion: \"${{ needs.prepare.outputs.tag }}\"/" charts/virtrigaud/Chart.yaml
         
-        # Update image tags in values.yaml
-        sed -i "s/tag: \".*\"/tag: \"${{ needs.prepare.outputs.tag }}\"/" charts/virtrigaud/values.yaml
+        # Update VirtRigaud component image tags in values.yaml (but not kubectl image)
+        # Update manager image tag
+        sed -i "/^manager:/,/^  image:/ s/    tag: \".*\"/    tag: \"${{ needs.prepare.outputs.tag }}\"/" charts/virtrigaud/values.yaml
+        # Update provider image tags
+        sed -i "/^providers:/,/^  libvirt:/ { /    image:/,/      tag:/ s/      tag: \".*\"/      tag: \"${{ needs.prepare.outputs.tag }}\"/; }" charts/virtrigaud/values.yaml
+        sed -i "/^providers:/,/^  vsphere:/ { /    image:/,/      tag:/ s/      tag: \".*\"/      tag: \"${{ needs.prepare.outputs.tag }}\"/; }" charts/virtrigaud/values.yaml
+        sed -i "/^providers:/,/^  proxmox:/ { /    image:/,/      tag:/ s/      tag: \".*\"/      tag: \"${{ needs.prepare.outputs.tag }}\"/; }" charts/virtrigaud/values.yaml
+        # Update crdUpgrade kubectl image to point to our built image
+        sed -i "/^crdUpgrade:/,/^  image:/ { s|    repository: .*|    repository: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/kubectl|; s/    tag: \".*\"/    tag: \"${{ needs.prepare.outputs.tag }}\"/; }" charts/virtrigaud/values.yaml
 
     - name: Sync CRDs to Helm chart
       run: |
@@ -357,6 +375,7 @@ jobs:
         - Provider Libvirt: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/provider-libvirt:${{ needs.prepare.outputs.tag }}\`
         - Provider vSphere: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/provider-vsphere:${{ needs.prepare.outputs.tag }}\`
         - Provider Proxmox: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/provider-proxmox:${{ needs.prepare.outputs.tag }}\`
+        - Kubectl: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/kubectl:${{ needs.prepare.outputs.tag }}\`
         
         ## Installation
         

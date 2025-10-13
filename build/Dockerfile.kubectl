@@ -1,0 +1,27 @@
+# Dockerfile for VirtRigaud kubectl utility image
+# This image is used by Helm hooks to apply CRDs during installation/upgrade
+FROM alpine:3.20
+
+# Install kubectl from official Kubernetes release
+ARG KUBECTL_VERSION=1.31.0
+RUN apk add --no-cache curl ca-certificates bash && \
+    curl -LO "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/amd64/kubectl" && \
+    curl -LO "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/amd64/kubectl.sha256" && \
+    echo "$(cat kubectl.sha256)  kubectl" | sha256sum -c && \
+    install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl && \
+    rm kubectl kubectl.sha256 && \
+    apk del curl && \
+    rm -rf /var/cache/apk/*
+
+# Create non-root user for running kubectl
+RUN addgroup -g 65532 nonroot && \
+    adduser -u 65532 -G nonroot -s /bin/sh -D nonroot
+
+USER 65532:65532
+
+# Verify installation
+RUN kubectl version --client
+
+ENTRYPOINT ["/usr/local/bin/kubectl"]
+CMD ["version", "--client"]
+

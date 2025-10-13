@@ -107,8 +107,8 @@ helm upgrade virtrigaud virtrigaud/virtrigaud \
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `crdUpgrade.enabled` | Enable automatic CRD upgrade during helm upgrade | `true` |
-| `crdUpgrade.image.repository` | kubectl image repository | `alpine/k8s` |
-| `crdUpgrade.image.tag` | kubectl image tag | `1.31.0` |
+| `crdUpgrade.image.repository` | kubectl image repository | `ghcr.io/projectbeskar/virtrigaud/kubectl` |
+| `crdUpgrade.image.tag` | kubectl image tag (auto-updated during release) | `v0.2.0` |
 | `crdUpgrade.backoffLimit` | Job retry limit | `3` |
 | `crdUpgrade.ttlSecondsAfterFinished` | Job cleanup time | `300` |
 | `crdUpgrade.waitSeconds` | Wait time after applying CRDs | `5` |

@@ -20,6 +20,21 @@ This means users had to manually apply CRD updates before upgrading, which was:
 
 VirtRigaud uses **Helm Hooks** with a Kubernetes Job to automatically apply CRDs during both install and upgrade:
 
+### kubectl Image
+
+VirtRigaud builds and publishes its own `kubectl` image as part of the release process. This image:
+
+- Based on Alpine Linux for minimal size (~50MB)
+- Includes kubectl 1.31.0 binary from official Kubernetes releases
+- Includes bash and shell for scripting support
+- Runs as non-root user (UID 65532)
+- Verified with SHA256 checksums
+- Signed with Cosign and includes SBOM
+
+The image is automatically built and tagged to match each VirtRigaud release version, ensuring version consistency across all components.
+
+**Image Location**: `ghcr.io/projectbeskar/virtrigaud/kubectl:<version>`
+
 ### How It Works
 
 1. **Pre-Upgrade Hook**: Before the main upgrade starts, a Job is created
@@ -86,8 +101,8 @@ crdUpgrade:
   enabled: true  # Enable/disable automatic upgrades
   
   image:
-    repository: alpine/k8s  # Alpine-based image with kubectl and shell
-    tag: "1.31.0"
+    repository: ghcr.io/projectbeskar/virtrigaud/kubectl  # VirtRigaud kubectl image
+    tag: "v0.2.0"  # Auto-updated to match release version
   
   backoffLimit: 3
   ttlSecondsAfterFinished: 300
@@ -225,8 +240,8 @@ kubectl describe clusterrole <role-name>
 ```yaml
 crdUpgrade:
   image:
-    repository: alpine/k8s
-    tag: "1.31.0"
+    repository: ghcr.io/projectbeskar/virtrigaud/kubectl
+    tag: "v0.2.2-rc1"  # Use matching VirtRigaud version
     pullPolicy: IfNotPresent
 ```
 
