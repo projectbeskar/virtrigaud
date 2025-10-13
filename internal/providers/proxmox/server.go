@@ -47,17 +47,49 @@ func New() *Provider {
 	caps := GetProviderCapabilities()
 
 	// Create PVE client from environment
+	// Support both PVE_* (legacy) and PROVIDER_* (new standard) env vars
+	endpoint := os.Getenv("PROVIDER_ENDPOINT")
+	if endpoint == "" {
+		endpoint = os.Getenv("PVE_ENDPOINT")
+	}
+
+	tokenID := os.Getenv("PROVIDER_TOKEN_ID")
+	if tokenID == "" {
+		tokenID = os.Getenv("PVE_TOKEN_ID")
+	}
+
+	tokenSecret := os.Getenv("PROVIDER_TOKEN_SECRET")
+	if tokenSecret == "" {
+		tokenSecret = os.Getenv("PVE_TOKEN_SECRET")
+	}
+
+	username := os.Getenv("PROVIDER_USERNAME")
+	if username == "" {
+		username = os.Getenv("PVE_USERNAME")
+	}
+
+	password := os.Getenv("PROVIDER_PASSWORD")
+	if password == "" {
+		password = os.Getenv("PVE_PASSWORD")
+	}
+
+	insecureSkipVerify := os.Getenv("TLS_INSECURE_SKIP_VERIFY") == "true" || os.Getenv("PVE_INSECURE_SKIP_VERIFY") == "true"
+
 	config := &pveapi.Config{
-		Endpoint:           os.Getenv("PVE_ENDPOINT"),
-		TokenID:            os.Getenv("PVE_TOKEN_ID"),
-		TokenSecret:        os.Getenv("PVE_TOKEN_SECRET"),
-		Username:           os.Getenv("PVE_USERNAME"),
-		Password:           os.Getenv("PVE_PASSWORD"),
-		InsecureSkipVerify: os.Getenv("PVE_INSECURE_SKIP_VERIFY") == "true",
+		Endpoint:           endpoint,
+		TokenID:            tokenID,
+		TokenSecret:        tokenSecret,
+		Username:           username,
+		Password:           password,
+		InsecureSkipVerify: insecureSkipVerify,
 	}
 
 	// Parse node selector
-	if nodeSelector := os.Getenv("PVE_NODE_SELECTOR"); nodeSelector != "" {
+	nodeSelector := os.Getenv("PROVIDER_NODE_SELECTOR")
+	if nodeSelector == "" {
+		nodeSelector = os.Getenv("PVE_NODE_SELECTOR")
+	}
+	if nodeSelector != "" {
 		config.NodeSelector = strings.Split(nodeSelector, ",")
 		for i := range config.NodeSelector {
 			config.NodeSelector[i] = strings.TrimSpace(config.NodeSelector[i])
@@ -65,7 +97,11 @@ func New() *Provider {
 	}
 
 	// Parse CA bundle
-	if caBundle := os.Getenv("PVE_CA_BUNDLE"); caBundle != "" {
+	caBundle := os.Getenv("PROVIDER_CA_BUNDLE")
+	if caBundle == "" {
+		caBundle = os.Getenv("PVE_CA_BUNDLE")
+	}
+	if caBundle != "" {
 		config.CABundle = []byte(caBundle)
 	}
 
