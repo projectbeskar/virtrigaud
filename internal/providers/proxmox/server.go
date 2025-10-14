@@ -853,8 +853,8 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*pveapi.VM
 		// First try parsing as contracts.VMImage (sent by controller)
 		var contractsImage map[string]interface{}
 		if err := json.Unmarshal([]byte(req.ImageJson), &contractsImage); err == nil {
-			// Check for template_name field (from contracts.VMImage)
-			if templateName, ok := contractsImage["template_name"].(string); ok && templateName != "" {
+			// Check for TemplateName field (from contracts.VMImage - note capital T)
+			if templateName, ok := contractsImage["TemplateName"].(string); ok && templateName != "" {
 				config.Template = templateName
 				p.logger.Info("Parsed template from contracts.VMImage", "template", templateName)
 			}
@@ -864,7 +864,7 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*pveapi.VM
 				config.Storage = storage
 			}
 		}
-		
+
 		// Fallback: try to parse as VMImageSpec for backwards compatibility
 		if config.Template == "" {
 			var imageSpec v1beta1.VMImageSpec
