@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -179,7 +180,7 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 	}
 
 	// Check if VM already exists (idempotency)
-	if existing, err := p.client.GetVM(ctx, node, vmConfig.VMID); err == nil && existing != nil {
+	if existing, existErr := p.client.GetVM(ctx, node, vmConfig.VMID); existErr == nil && existing != nil {
 		// VM exists, check if it matches our requirements
 		if existing.Name == req.Name {
 			p.logger.Info("VM already exists with same name, skipping creation",
@@ -187,16 +188,97 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 			return &providerv1.CreateResponse{
 				Id: fmt.Sprintf("%d", vmConfig.VMID),
 			}, nil
-		} else {
-			// VM exists but with different name, generate new VMID
-			p.logger.Warn("VM exists with different name, generating new VMID",
-				"existing_vmid", vmConfig.VMID, "existing_name", existing.Name, "requested_name", req.Name)
-			vmConfig.VMID = int(time.Now().Unix()%999999) + 100000
 		}
+		// VM exists but with different name, generate new VMID
+		p.logger.Warn("VM exists with different name, generating new VMID",
+			"existing_vmid", vmConfig.VMID, "existing_name", existing.Name, "requested_name", req.Name)
+		vmConfig.VMID = int(time.Now().Unix()%999999) + 100000
 	}
 
-	// Create the VM with better error handling
-	taskID, err := p.client.CreateVM(ctx, node, vmConfig)
+	var taskID string
+
+	// Determine if we need to clone from a template or create a new VM
+	if vmConfig.Template != "" {
+		// Parse template ID from the Template field
+		templateID, parseErr := strconv.Atoi(vmConfig.Template)
+		if parseErr != nil {
+			return nil, errors.NewInvalidSpec("invalid template ID '%s': %v", vmConfig.Template, parseErr)
+		}
+
+		// Clone from template
+		p.logger.Info("Cloning VM from template", "template_id", templateID, "new_vmid", vmConfig.VMID)
+
+		// Set full clone flag
+		if vmConfig.Custom == nil {
+			vmConfig.Custom = make(map[string]string)
+		}
+		vmConfig.Custom["full"] = "1" // Full clone by default
+
+		taskID, err = p.client.CloneVM(ctx, node, templateID, vmConfig)
+		if err != nil {
+			return nil, errors.NewInvalidSpec("failed to clone template: %v", err)
+		}
+
+		// Wait for clone to complete
+		if taskID != "" {
+			if err = p.client.WaitForTask(ctx, node, taskID); err != nil {
+				return nil, errors.NewInternal("clone task failed: %v", err)
+			}
+		}
+
+		// After cloning, we need to reconfigure the VM with cloud-init settings
+		if len(req.UserData) > 0 || vmConfig.SSHKeys != "" {
+			p.logger.Info("Reconfiguring cloned VM with cloud-init", "vmid", vmConfig.VMID)
+
+			// Build reconfiguration values for cloud-init
+			reconfigValues := url.Values{}
+			if vmConfig.IDE2 != "" {
+				reconfigValues.Set("ide2", vmConfig.IDE2)
+			}
+			if vmConfig.SSHKeys != "" {
+				reconfigValues.Set("sshkeys", vmConfig.SSHKeys)
+			}
+			if vmConfig.CIUser != "" {
+				reconfigValues.Set("ciuser", vmConfig.CIUser)
+			}
+			// Set boot order: disk first, then cloud-init drive
+			reconfigValues.Set("boot", "order=scsi0;ide2")
+
+			// Add network config (these should already be in the cloned VM, but just to be safe)
+			for _, netConfig := range vmConfig.Networks {
+				netString := p.buildNetworkString(netConfig)
+				if netString != "" {
+					reconfigValues.Set(fmt.Sprintf("net%d", netConfig.Index), netString)
+				}
+			}
+			// Add IP config
+			for _, ipConfig := range vmConfig.IPConfigs {
+				ipString := p.buildIPConfigString(ipConfig)
+				if ipString != "" {
+					reconfigValues.Set(fmt.Sprintf("ipconfig%d", ipConfig.Index), ipString)
+				}
+			}
+
+			// Reconfigure the cloned VM with cloud-init settings
+			taskID, err = p.client.ReconfigureVMRaw(ctx, node, vmConfig.VMID, reconfigValues)
+			if err != nil {
+				return nil, errors.NewInternal("failed to reconfigure VM: %v", err)
+			}
+			
+			// Wait for reconfiguration if async
+			if taskID != "" {
+				if err = p.client.WaitForTask(ctx, node, taskID); err != nil {
+					return nil, errors.NewInternal("reconfigure task failed: %v", err)
+				}
+			}
+		}
+	} else {
+		// Create a new VM (not from template)
+		p.logger.Info("Creating new VM", "vmid", vmConfig.VMID)
+		taskID, err = p.client.CreateVM(ctx, node, vmConfig)
+	}
+
+	// Handle errors
 	if err != nil {
 		// Map specific PVE errors to appropriate SDK errors
 		errMsg := err.Error()
@@ -914,27 +996,27 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*pveapi.VM
 					inKeys = true
 					continue
 				}
-			if inKeys && strings.HasPrefix(strings.TrimSpace(line), "- ") {
-				key := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "- "))
-				key = strings.Trim(key, "\"'")
-				// Extra safety: ensure no trailing/leading whitespace including newlines
-				key = strings.TrimSpace(key)
-				if key != "" {
-					// DEBUG: Log extracted SSH key with length and escaped representation
-					slog.Info("DEBUG SSH extraction", "location", "server.go", "len", len(key), "repr", key)
-					sshKeys = append(sshKeys, key)
+				if inKeys && strings.HasPrefix(strings.TrimSpace(line), "- ") {
+					key := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "- "))
+					key = strings.Trim(key, "\"'")
+					// Extra safety: ensure no trailing/leading whitespace including newlines
+					key = strings.TrimSpace(key)
+					if key != "" {
+						// DEBUG: Log extracted SSH key with length and escaped representation
+						slog.Info("DEBUG SSH extraction", "location", "server.go", "len", len(key), "repr", key)
+						sshKeys = append(sshKeys, key)
+					}
+				} else if inKeys && !strings.HasPrefix(strings.TrimSpace(line), " ") {
+					inKeys = false
 				}
-			} else if inKeys && !strings.HasPrefix(strings.TrimSpace(line), " ") {
-				inKeys = false
 			}
-		}
-		if len(sshKeys) > 0 {
-			// Join multiple keys with newline separator (no trailing newline)
-			// Then trim again to be absolutely sure
-			config.SSHKeys = strings.TrimSpace(strings.Join(sshKeys, "\n"))
-			// DEBUG: Log final SSH keys value
-			slog.Info("DEBUG SSH after join", "location", "server.go", "len", len(config.SSHKeys), "repr", config.SSHKeys)
-		}
+			if len(sshKeys) > 0 {
+				// Join multiple keys with newline separator (no trailing newline)
+				// Then trim again to be absolutely sure
+				config.SSHKeys = strings.TrimSpace(strings.Join(sshKeys, "\n"))
+				// DEBUG: Log final SSH keys value
+				slog.Info("DEBUG SSH after join", "location", "server.go", "len", len(config.SSHKeys), "repr", config.SSHKeys)
+			}
 		}
 
 		// Extract username
@@ -1017,3 +1099,32 @@ func parseMemory(memory string) (int64, error) {
 	// Assume bytes
 	return strconv.ParseInt(memory, 10, 64)
 }
+
+// buildNetworkString constructs network configuration string for Proxmox
+func (p *Provider) buildNetworkString(netConfig pveapi.NetworkConfig) string {
+	// Format: virtio,bridge=vmbr0[,tag=100][,firewall=1]
+	result := fmt.Sprintf("%s,bridge=%s", netConfig.Model, netConfig.Bridge)
+	if netConfig.VLAN > 0 {
+		result += fmt.Sprintf(",tag=%d", netConfig.VLAN)
+	}
+	if netConfig.MAC != "" {
+		result += fmt.Sprintf(",mac=%s", netConfig.MAC)
+	}
+	if netConfig.Firewall {
+		result += ",firewall=1"
+	}
+	return result
+}
+
+// buildIPConfigString constructs IP configuration string for Proxmox
+func (p *Provider) buildIPConfigString(ipConfig pveapi.IPConfig) string {
+	if ipConfig.DHCP {
+		return "ip=dhcp"
+	}
+	result := fmt.Sprintf("ip=%s", ipConfig.IP)
+	if ipConfig.Gateway != "" {
+		result += fmt.Sprintf(",gw=%s", ipConfig.Gateway)
+	}
+	return result
+}
+

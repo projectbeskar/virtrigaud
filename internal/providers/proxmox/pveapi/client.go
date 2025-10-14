@@ -984,3 +984,32 @@ var (
 	ErrTaskFailed           = fmt.Errorf("task failed")
 	ErrDiskShrinkNotAllowed = fmt.Errorf("disk shrinking not allowed")
 )
+
+// ReconfigureVMRaw reconfigures a VM with raw url.Values parameters
+// This is useful for cloud-init and other parameters not in ReconfigureConfig
+func (c *Client) ReconfigureVMRaw(ctx context.Context, node string, vmid int, values url.Values) (string, error) {
+	path := fmt.Sprintf("/api2/json/nodes/%s/qemu/%d/config", node, vmid)
+
+	resp, err := c.request(ctx, "PUT", path, values)
+	if err != nil {
+		return "", fmt.Errorf("failed to reconfigure VM: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // Response body close in defer is not critical
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("reconfigure VM failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var apiResp APIResponse
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return "", fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	// Return task ID if operation is async
+	if taskID, ok := apiResp.Data.(string); ok {
+		return taskID, nil
+	}
+
+	return "", nil // Synchronous operation completed
+}
