@@ -920,6 +920,8 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*pveapi.VM
 				// Extra safety: ensure no trailing/leading whitespace including newlines
 				key = strings.TrimSpace(key)
 				if key != "" {
+					// DEBUG: Log extracted SSH key with length and escaped representation
+					slog.Info("DEBUG SSH extraction", "location", "server.go", "len", len(key), "repr", key)
 					sshKeys = append(sshKeys, key)
 				}
 			} else if inKeys && !strings.HasPrefix(strings.TrimSpace(line), " ") {
@@ -930,6 +932,8 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*pveapi.VM
 			// Join multiple keys with newline separator (no trailing newline)
 			// Then trim again to be absolutely sure
 			config.SSHKeys = strings.TrimSpace(strings.Join(sshKeys, "\n"))
+			// DEBUG: Log final SSH keys value
+			slog.Info("DEBUG SSH after join", "location", "server.go", "len", len(config.SSHKeys), "repr", config.SSHKeys)
 		}
 		}
 

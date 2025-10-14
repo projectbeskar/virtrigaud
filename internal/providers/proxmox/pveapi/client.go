@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -211,13 +212,21 @@ func (c *Client) request(ctx context.Context, method, path string, body interfac
 			// Result: space → %20 → %2520
 			var encoded string
 			if sshKey := data.Get("sshkeys"); sshKey != "" {
+				// DEBUG: Log original value from url.Values
+				slog.Info("DEBUG SSH request original", "location", "client.go", "len", len(sshKey), "repr", sshKey)
+				
 				// Remove from url.Values to prevent automatic encoding
 				data.Del("sshkeys")
 				
 				// Clean and double-encode
 				cleanedKey := strings.TrimSpace(sshKey)
+				slog.Info("DEBUG SSH request trimmed", "location", "client.go", "len", len(cleanedKey), "repr", cleanedKey)
+				
 				firstEncode := url.QueryEscape(cleanedKey)     // ssh-ed25519%20AAAA...
+				slog.Info("DEBUG SSH request 1st encode", "location", "client.go", "len", len(firstEncode), "repr", firstEncode)
+				
 				doubleEncoded := url.QueryEscape(firstEncode)  // ssh-ed25519%2520AAAA...
+				slog.Info("DEBUG SSH request 2nd encode", "location", "client.go", "len", len(doubleEncoded), "repr", doubleEncoded)
 				
 				// Encode other parameters normally
 				baseEncoded := data.Encode()
@@ -228,8 +237,11 @@ func (c *Client) request(ctx context.Context, method, path string, body interfac
 				} else {
 					encoded = "sshkeys=" + doubleEncoded
 				}
+				
+				slog.Info("DEBUG SSH request final body", "location", "client.go", "body", encoded)
 			} else {
 				// No sshkeys, use standard encoding
+				slog.Info("DEBUG SSH request", "location", "client.go", "status", "no sshkeys found")
 				encoded = data.Encode()
 			}
 			reqBody = strings.NewReader(encoded)
@@ -550,6 +562,9 @@ func (c *Client) configToValues(config *VMConfig) url.Values {
 		// DO NOT pre-encode! Let url.Values handle the encoding naturally.
 		// Just clean up trailing newlines/whitespace
 		cleanedKeys := strings.TrimSpace(config.SSHKeys)
+		// DEBUG: Log SSH keys before setting in url.Values
+		slog.Info("DEBUG SSH configToValues", "location", "client.go", "config_len", len(config.SSHKeys), "config_repr", config.SSHKeys)
+		slog.Info("DEBUG SSH configToValues cleaned", "location", "client.go", "cleaned_len", len(cleanedKeys), "cleaned_repr", cleanedKeys)
 		values.Set("sshkeys", cleanedKeys)
 	}
 
