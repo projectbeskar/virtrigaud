@@ -914,20 +914,23 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*pveapi.VM
 					inKeys = true
 					continue
 				}
-				if inKeys && strings.HasPrefix(strings.TrimSpace(line), "- ") {
-					key := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "- "))
-					key = strings.Trim(key, "\"'")
-					if key != "" {
-						sshKeys = append(sshKeys, key)
-					}
-				} else if inKeys && !strings.HasPrefix(strings.TrimSpace(line), " ") {
-					inKeys = false
+			if inKeys && strings.HasPrefix(strings.TrimSpace(line), "- ") {
+				key := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "- "))
+				key = strings.Trim(key, "\"'")
+				// Extra safety: ensure no trailing/leading whitespace including newlines
+				key = strings.TrimSpace(key)
+				if key != "" {
+					sshKeys = append(sshKeys, key)
 				}
+			} else if inKeys && !strings.HasPrefix(strings.TrimSpace(line), " ") {
+				inKeys = false
 			}
-			if len(sshKeys) > 0 {
-				// Join multiple keys with newline, but ensure no trailing newline
-				config.SSHKeys = strings.Join(sshKeys, "\n")
-			}
+		}
+		if len(sshKeys) > 0 {
+			// Join multiple keys with newline separator (no trailing newline)
+			// Then trim again to be absolutely sure
+			config.SSHKeys = strings.TrimSpace(strings.Join(sshKeys, "\n"))
+		}
 		}
 
 		// Extract username
