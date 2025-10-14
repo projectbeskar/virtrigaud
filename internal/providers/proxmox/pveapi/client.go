@@ -519,8 +519,10 @@ func (c *Client) configToValues(config *VMConfig) url.Values {
 		values.Set("cipassword", config.CIPasswd)
 	}
 	if config.SSHKeys != "" {
-		// URL encode SSH keys as required by Proxmox API
-		values.Set("sshkeys", url.QueryEscape(config.SSHKeys))
+		// DO NOT pre-encode! Let url.Values handle the encoding naturally.
+		// Just clean up trailing newlines/whitespace
+		cleanedKeys := strings.TrimSpace(config.SSHKeys)
+		values.Set("sshkeys", cleanedKeys)
 	}
 
 	// Configure network interfaces
