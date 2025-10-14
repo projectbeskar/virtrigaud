@@ -850,15 +850,22 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*pveapi.VM
 	// Parse VMImage for template
 	// The controller sends contracts.VMImage which has the template in TemplateName field
 	if req.ImageJson != "" {
+		// DEBUG: Log the raw ImageJson to see what we're actually receiving
+		p.logger.Info("DEBUG: Received ImageJson", "json", req.ImageJson)
+		
 		// First try parsing as contracts.VMImage (sent by controller)
 		var contractsImage map[string]interface{}
 		if err := json.Unmarshal([]byte(req.ImageJson), &contractsImage); err == nil {
+			p.logger.Info("DEBUG: Parsed ImageJson as map", "keys", fmt.Sprintf("%v", contractsImage))
+			
 			// Check for TemplateName field (from contracts.VMImage - note capital T)
 			if templateName, ok := contractsImage["TemplateName"].(string); ok && templateName != "" {
 				config.Template = templateName
 				p.logger.Info("Parsed template from contracts.VMImage", "template", templateName)
+			} else {
+				p.logger.Info("DEBUG: TemplateName not found or empty", "TemplateName", contractsImage["TemplateName"])
 			}
-			
+
 			// Check for storage hint
 			if storage, ok := contractsImage["storage"].(string); ok && storage != "" {
 				config.Storage = storage
