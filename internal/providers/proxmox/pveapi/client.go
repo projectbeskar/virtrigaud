@@ -214,36 +214,36 @@ func (c *Client) request(ctx context.Context, method, path string, body interfac
 			if sshKey := data.Get("sshkeys"); sshKey != "" {
 				// DEBUG: Log original value from url.Values
 				slog.Info("DEBUG SSH request original", "location", "client.go", "len", len(sshKey), "repr", sshKey)
-				
+
 				// Remove from url.Values to prevent automatic encoding
 				data.Del("sshkeys")
-				
-			// Clean and double-encode
-			cleanedKey := strings.TrimSpace(sshKey)
-			slog.Info("DEBUG SSH request trimmed", "location", "client.go", "len", len(cleanedKey), "repr", cleanedKey)
-			
-			// Custom encoding for sshkeys: Proxmox needs %20 for space (not +)
-			// We manually encode characters that need escaping
-			firstEncode := url.QueryEscape(cleanedKey)
-			// Fix: QueryEscape uses + for space, replace with %20
-			firstEncode = strings.ReplaceAll(firstEncode, "+", "%20")
-			slog.Info("DEBUG SSH request 1st encode", "location", "client.go", "len", len(firstEncode), "repr", firstEncode)
-			
-			// Second encode: apply QueryEscape again and replace + with %20
-			doubleEncoded := url.QueryEscape(firstEncode)
-			doubleEncoded = strings.ReplaceAll(doubleEncoded, "+", "%20")
-			slog.Info("DEBUG SSH request 2nd encode", "location", "client.go", "len", len(doubleEncoded), "repr", doubleEncoded)
-				
+
+				// Clean and double-encode
+				cleanedKey := strings.TrimSpace(sshKey)
+				slog.Info("DEBUG SSH request trimmed", "location", "client.go", "len", len(cleanedKey), "repr", cleanedKey)
+
+				// Custom encoding for sshkeys: Proxmox needs %20 for space (not +)
+				// We manually encode characters that need escaping
+				firstEncode := url.QueryEscape(cleanedKey)
+				// Fix: QueryEscape uses + for space, replace with %20
+				firstEncode = strings.ReplaceAll(firstEncode, "+", "%20")
+				slog.Info("DEBUG SSH request 1st encode", "location", "client.go", "len", len(firstEncode), "repr", firstEncode)
+
+				// Second encode: apply QueryEscape again and replace + with %20
+				doubleEncoded := url.QueryEscape(firstEncode)
+				doubleEncoded = strings.ReplaceAll(doubleEncoded, "+", "%20")
+				slog.Info("DEBUG SSH request 2nd encode", "location", "client.go", "len", len(doubleEncoded), "repr", doubleEncoded)
+
 				// Encode other parameters normally
 				baseEncoded := data.Encode()
-				
+
 				// Manually append double-encoded sshkeys (no further encoding)
 				if baseEncoded != "" {
 					encoded = baseEncoded + "&sshkeys=" + doubleEncoded
 				} else {
 					encoded = "sshkeys=" + doubleEncoded
 				}
-				
+
 				slog.Info("DEBUG SSH request final body", "location", "client.go", "body", encoded)
 			} else {
 				// No sshkeys, use standard encoding

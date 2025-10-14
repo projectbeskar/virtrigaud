@@ -22,7 +22,7 @@ spec:
     name: pve-credentials
   runtime:
     mode: Remote
-    image: "ghcr.io/projectbeskar/virtrigaud/provider-proxmox:v0.2.3-rc11"
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-proxmox:v0.2.3-rc12"
     service:
       port: 9090
 ---
