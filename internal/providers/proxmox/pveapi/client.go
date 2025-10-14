@@ -214,8 +214,11 @@ func (c *Client) request(ctx context.Context, method, path string, body interfac
 				data.Del("sshkeys")
 				baseEncoded := data.Encode()
 
+				// CRITICAL: Trim any whitespace/newlines before encoding!
+				cleanedKey := strings.TrimSpace(sshKey)
+
 				// Manually URL-encode the SSH key (spaces as %20, not +)
-				encodedKey := url.QueryEscape(sshKey)
+				encodedKey := url.QueryEscape(cleanedKey)
 
 				// Rebuild the form body with properly encoded sshkeys
 				if baseEncoded != "" {
