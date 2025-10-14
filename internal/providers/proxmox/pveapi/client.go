@@ -218,15 +218,21 @@ func (c *Client) request(ctx context.Context, method, path string, body interfac
 				// Remove from url.Values to prevent automatic encoding
 				data.Del("sshkeys")
 				
-				// Clean and double-encode
-				cleanedKey := strings.TrimSpace(sshKey)
-				slog.Info("DEBUG SSH request trimmed", "location", "client.go", "len", len(cleanedKey), "repr", cleanedKey)
-				
-				firstEncode := url.QueryEscape(cleanedKey)     // ssh-ed25519%20AAAA...
-				slog.Info("DEBUG SSH request 1st encode", "location", "client.go", "len", len(firstEncode), "repr", firstEncode)
-				
-				doubleEncoded := url.QueryEscape(firstEncode)  // ssh-ed25519%2520AAAA...
-				slog.Info("DEBUG SSH request 2nd encode", "location", "client.go", "len", len(doubleEncoded), "repr", doubleEncoded)
+			// Clean and double-encode
+			cleanedKey := strings.TrimSpace(sshKey)
+			slog.Info("DEBUG SSH request trimmed", "location", "client.go", "len", len(cleanedKey), "repr", cleanedKey)
+			
+			// Custom encoding for sshkeys: Proxmox needs %20 for space (not +)
+			// We manually encode characters that need escaping
+			firstEncode := url.QueryEscape(cleanedKey)
+			// Fix: QueryEscape uses + for space, replace with %20
+			firstEncode = strings.ReplaceAll(firstEncode, "+", "%20")
+			slog.Info("DEBUG SSH request 1st encode", "location", "client.go", "len", len(firstEncode), "repr", firstEncode)
+			
+			// Second encode: apply QueryEscape again and replace + with %20
+			doubleEncoded := url.QueryEscape(firstEncode)
+			doubleEncoded = strings.ReplaceAll(doubleEncoded, "+", "%20")
+			slog.Info("DEBUG SSH request 2nd encode", "location", "client.go", "len", len(doubleEncoded), "repr", doubleEncoded)
 				
 				// Encode other parameters normally
 				baseEncoded := data.Encode()
