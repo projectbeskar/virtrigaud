@@ -204,26 +204,29 @@ func (c *Client) request(ctx context.Context, method, path string, body interfac
 	var reqBody io.Reader
 	if body != nil {
 		if data, ok := body.(url.Values); ok {
-			// Special handling for sshkeys parameter to match working Python implementation:
-			// Python: sshKey = quote(sshKey, safe='') -> encodes spaces as %20
-			// We replicate this by pre-encoding sshkeys and manually appending it
+			// Special handling for sshkeys parameter:
+			// Python working code does DOUBLE encoding:
+			//   1. quote(sshKey, safe='') - first encoding
+			//   2. wPost form-encodes the dictionary - second encoding
+			// Result: space → %20 → %2520
 			var encoded string
 			if sshKey := data.Get("sshkeys"); sshKey != "" {
-				// Remove sshkeys from standard encoding
+				// Remove from url.Values to prevent automatic encoding
 				data.Del("sshkeys")
 				
-				// Clean and pre-encode (spaces become %20, not +)
+				// Clean and double-encode
 				cleanedKey := strings.TrimSpace(sshKey)
-				encodedKey := url.QueryEscape(cleanedKey)
+				firstEncode := url.QueryEscape(cleanedKey)     // ssh-ed25519%20AAAA...
+				doubleEncoded := url.QueryEscape(firstEncode)  // ssh-ed25519%2520AAAA...
 				
 				// Encode other parameters normally
 				baseEncoded := data.Encode()
 				
-				// Manually append pre-encoded sshkeys to prevent re-encoding
+				// Manually append double-encoded sshkeys (no further encoding)
 				if baseEncoded != "" {
-					encoded = baseEncoded + "&sshkeys=" + encodedKey
+					encoded = baseEncoded + "&sshkeys=" + doubleEncoded
 				} else {
-					encoded = "sshkeys=" + encodedKey
+					encoded = "sshkeys=" + doubleEncoded
 				}
 			} else {
 				// No sshkeys, use standard encoding

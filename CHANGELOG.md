@@ -9,15 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-#### Proxmox Provider SSH Keys Encoding (rc1-rc8)
-- **Root Issue**: Proxmox API's `sshkeys` parameter requires specific URL encoding format (`%20` for spaces) that differs from standard form encoding (`+` for spaces)
-- **Discovery**: Found working Python implementation using `quote(sshKey, safe='')` which encodes spaces as `%20` instead of `+`
-- **Solution**: Implemented special handling in `request()` function to pre-encode sshkeys with `url.QueryEscape()` (matching Python's `quote()`), then manually append to form body to prevent url.Values from re-encoding with `+`
+#### Proxmox Provider SSH Keys Encoding (rc1-rc9)
+- **Root Issue**: Proxmox API's `sshkeys` parameter requires **double URL encoding** due to its internal decoding behavior
+- **Discovery**: Found working Python implementation that does `quote(sshKey, safe='')` followed by `wPost(data)` which form-encodes again, resulting in double encoding
+- **Solution**: Implemented double encoding in `request()` function:
+  1. `TrimSpace()` removes trailing newlines from SSH keys
+  2. First `url.QueryEscape()`: space → `%20`, + → `%2B`
+  3. Second `url.QueryEscape()`: `%20` → `%2520`, `%2B` → `%252B`
+  4. Manual string concatenation to prevent triple encoding
 - **Technical Details**: 
-  - `TrimSpace()` removes trailing newlines from SSH keys
-  - `url.QueryEscape()` encodes spaces as `%20` (not `+`)
-  - Manual string concatenation bypasses url.Values.Encode() for sshkeys only
-  - Other parameters still use standard form encoding
+  - Proxmox HTTP layer decodes once: `%2520` → `%20`
+  - Proxmox sshkeys parser decodes again: `%20` → space
+  - Final result: Original SSH key correctly restored
+  - Other parameters use standard single encoding
 - **Impact**: Proxmox VMs can now be created with cloud-init SSH key injection working correctly
 
 ### Added
