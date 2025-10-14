@@ -77,10 +77,12 @@ pve_api_call() {
             -H "$auth_header" \
             "$url"
     else
+        # Use --data (not --data-raw) to send form data
+        # This properly handles form encoding without double-encoding
         curl -k -s -X POST \
             -H "$auth_header" \
             -H "Content-Type: application/x-www-form-urlencoded" \
-            --data-raw "$data" \
+            --data "$data" \
             "$url"
     fi
 }
