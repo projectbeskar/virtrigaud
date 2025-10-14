@@ -925,6 +925,7 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*pveapi.VM
 				}
 			}
 			if len(sshKeys) > 0 {
+				// Join multiple keys with newline, but ensure no trailing newline
 				config.SSHKeys = strings.Join(sshKeys, "\n")
 			}
 		}
