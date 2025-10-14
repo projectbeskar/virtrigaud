@@ -229,7 +229,7 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 		// After cloning, we need to reconfigure the VM with cloud-init settings
 		if len(req.UserData) > 0 || vmConfig.SSHKeys != "" {
 			p.logger.Info("Reconfiguring cloned VM with cloud-init", "vmid", vmConfig.VMID)
-			
+
 			// Auto-detect primary boot disk from cloned VM
 			primaryDisk, err := p.client.DetectPrimaryDisk(ctx, node, vmConfig.VMID)
 			if err != nil {
@@ -237,7 +237,7 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 				primaryDisk = "scsi0"
 			}
 			p.logger.Info("Detected primary boot disk", "vmid", vmConfig.VMID, "disk", primaryDisk)
-			
+
 			// Build reconfiguration values for cloud-init
 			reconfigValues := url.Values{}
 			if vmConfig.IDE2 != "" {
@@ -848,47 +848,58 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*pveapi.VM
 	}
 
 	// Parse VMImage for template
+	// The controller sends contracts.VMImage which has the template in TemplateName field
 	if req.ImageJson != "" {
-		var imageSpec v1beta1.VMImageSpec
-		if err := json.Unmarshal([]byte(req.ImageJson), &imageSpec); err == nil {
-			// Check for Proxmox-specific image source
-			if imageSpec.Source.Proxmox != nil {
-				proxmoxSource := imageSpec.Source.Proxmox
+		// First try parsing as contracts.VMImage (sent by controller)
+		var contractsImage map[string]interface{}
+		if err := json.Unmarshal([]byte(req.ImageJson), &contractsImage); err == nil {
+			// Check for template_name field (from contracts.VMImage)
+			if templateName, ok := contractsImage["template_name"].(string); ok && templateName != "" {
+				config.Template = templateName
+				p.logger.Info("Parsed template from contracts.VMImage", "template", templateName)
+			}
+			
+			// Check for storage hint
+			if storage, ok := contractsImage["storage"].(string); ok && storage != "" {
+				config.Storage = storage
+			}
+		}
+		
+		// Fallback: try to parse as VMImageSpec for backwards compatibility
+		if config.Template == "" {
+			var imageSpec v1beta1.VMImageSpec
+			if err := json.Unmarshal([]byte(req.ImageJson), &imageSpec); err == nil {
+				// Check for Proxmox-specific image source
+				if imageSpec.Source.Proxmox != nil {
+					proxmoxSource := imageSpec.Source.Proxmox
 
-				// Set template ID or name
-				if proxmoxSource.TemplateID != nil {
-					config.Template = fmt.Sprintf("%d", *proxmoxSource.TemplateID)
-				} else if proxmoxSource.TemplateName != "" {
-					config.Template = proxmoxSource.TemplateName
-				}
-
-				// Set storage if specified
-				if proxmoxSource.Storage != "" {
-					config.Storage = proxmoxSource.Storage
-				}
-
-				// Set node if specified (for template location)
-				if proxmoxSource.Node != "" {
-					// Store node hint for later use
-					if config.Custom == nil {
-						config.Custom = make(map[string]string)
+					// Set template ID or name
+					if proxmoxSource.TemplateID != nil {
+						config.Template = fmt.Sprintf("%d", *proxmoxSource.TemplateID)
+					} else if proxmoxSource.TemplateName != "" {
+						config.Template = proxmoxSource.TemplateName
 					}
-					config.Custom["template_node"] = proxmoxSource.Node
-				}
 
-				// Set clone type (full vs linked)
-				if proxmoxSource.FullClone != nil && !*proxmoxSource.FullClone {
-					if config.Custom == nil {
-						config.Custom = make(map[string]string)
+					// Set storage if specified
+					if proxmoxSource.Storage != "" {
+						config.Storage = proxmoxSource.Storage
 					}
-					config.Custom["full_clone"] = "0" // Linked clone
-				}
-			} else {
-				// Fallback: try to parse as raw string (for backwards compatibility)
-				var legacyImage map[string]interface{}
-				if err := json.Unmarshal([]byte(req.ImageJson), &legacyImage); err == nil {
-					if template, ok := legacyImage["source"].(string); ok {
-						config.Template = template
+
+					// Set node if specified (for template location)
+					if proxmoxSource.Node != "" {
+						// Store node hint for later use
+						if config.Custom == nil {
+							config.Custom = make(map[string]string)
+						}
+						config.Custom["template_node"] = proxmoxSource.Node
+					}
+
+					// Set clone type (full vs linked)
+					if proxmoxSource.FullClone != nil && !*proxmoxSource.FullClone {
+						if config.Custom == nil {
+							config.Custom = make(map[string]string)
+						}
+						config.Custom["full_clone"] = "0" // Linked clone
 					}
 				}
 			}
