@@ -204,7 +204,31 @@ func (c *Client) request(ctx context.Context, method, path string, body interfac
 	var reqBody io.Reader
 	if body != nil {
 		if data, ok := body.(url.Values); ok {
-			encoded := data.Encode()
+			// Special handling for sshkeys parameter to match working Python implementation:
+			// Python: sshKey = quote(sshKey, safe='') -> encodes spaces as %20
+			// We replicate this by pre-encoding sshkeys and manually appending it
+			var encoded string
+			if sshKey := data.Get("sshkeys"); sshKey != "" {
+				// Remove sshkeys from standard encoding
+				data.Del("sshkeys")
+				
+				// Clean and pre-encode (spaces become %20, not +)
+				cleanedKey := strings.TrimSpace(sshKey)
+				encodedKey := url.QueryEscape(cleanedKey)
+				
+				// Encode other parameters normally
+				baseEncoded := data.Encode()
+				
+				// Manually append pre-encoded sshkeys to prevent re-encoding
+				if baseEncoded != "" {
+					encoded = baseEncoded + "&sshkeys=" + encodedKey
+				} else {
+					encoded = "sshkeys=" + encodedKey
+				}
+			} else {
+				// No sshkeys, use standard encoding
+				encoded = data.Encode()
+			}
 			reqBody = strings.NewReader(encoded)
 		} else {
 			jsonData, err := json.Marshal(body)

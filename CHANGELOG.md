@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+#### Proxmox Provider SSH Keys Encoding (rc1-rc8)
+- **Root Issue**: Proxmox API's `sshkeys` parameter requires specific URL encoding format (`%20` for spaces) that differs from standard form encoding (`+` for spaces)
+- **Discovery**: Found working Python implementation using `quote(sshKey, safe='')` which encodes spaces as `%20` instead of `+`
+- **Solution**: Implemented special handling in `request()` function to pre-encode sshkeys with `url.QueryEscape()` (matching Python's `quote()`), then manually append to form body to prevent url.Values from re-encoding with `+`
+- **Technical Details**: 
+  - `TrimSpace()` removes trailing newlines from SSH keys
+  - `url.QueryEscape()` encodes spaces as `%20` (not `+`)
+  - Manual string concatenation bypasses url.Values.Encode() for sshkeys only
+  - Other parameters still use standard form encoding
+- **Impact**: Proxmox VMs can now be created with cloud-init SSH key injection working correctly
+
 ### Added
 
 #### Nested Virtualization Support
