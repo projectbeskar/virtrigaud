@@ -6,7 +6,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.3-rc9
-    created: "2025-10-14T17:33:51.126674984Z"
+    created: "2025-10-14T17:54:37.050921963Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 43e135ea7bc4ad9c57f78ef88fefce544505427613411678aa952f69103186cf
@@ -34,7 +34,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.3-rc8
-    created: "2025-10-14T17:33:51.124429941Z"
+    created: "2025-10-14T17:54:37.048131338Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: cabca2efd5870f5b01d446281d2e14321246c42deb61cd7d34cea2b7d372c92a
@@ -62,7 +62,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.3-rc7
-    created: "2025-10-14T17:33:51.121564691Z"
+    created: "2025-10-14T17:54:37.045891795Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 318c2926026ac800b693c686e337bbd562d7f93f2146cd52c96357fb0e069b8d
@@ -90,7 +90,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.3-rc6
-    created: "2025-10-14T17:33:51.119316141Z"
+    created: "2025-10-14T17:54:37.04307039Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: b9a04fb03d955d8e410c969d571edd1f59e4040484ee1751719f7f1b71e6b773
@@ -118,7 +118,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.3-rc5
-    created: "2025-10-14T17:33:51.116437862Z"
+    created: "2025-10-14T17:54:37.040869169Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 43db55e2c9c09487f724e3fbf62b762cc6dd365b81c7ad883f99da7f8f366eef
@@ -146,7 +146,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.3-rc4
-    created: "2025-10-14T17:33:51.114214339Z"
+    created: "2025-10-14T17:54:37.038057441Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 8a3573a540afb289140d85e3f9e7d1b39aa7eb27ca385ffe411f2bde3e7898c1
@@ -174,7 +174,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.3-rc3
-    created: "2025-10-14T17:33:51.111425604Z"
+    created: "2025-10-14T17:54:37.035849618Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 4ca349259ec69f503360d19a6a0fc7fc70fd63cfc730ad1e76b2e2f0c138591c
@@ -202,7 +202,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.3-rc2
-    created: "2025-10-14T17:33:51.109180731Z"
+    created: "2025-10-14T17:54:37.03301284Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 1083534168847231463930a4f4e9ded822ba8584bbff23bf8a821812dfc17506
@@ -229,8 +229,36 @@ entries:
       category: Infrastructure
       licenses: Apache-2.0
     apiVersion: v2
+    appVersion: v0.2.3-rc19
+    created: "2025-10-14T17:54:37.030824563Z"
+    description: A Kubernetes operator for managing virtual machines across multiple
+      hypervisors
+    digest: 8373a3d4a7ec463f1757e15f9dad5d49454278f4d04e72f62d1aaca70ed3df39
+    home: https://github.com/projectbeskar/virtrigaud
+    keywords:
+    - virtualization
+    - vmware
+    - vsphere
+    - libvirt
+    - kvm
+    - operator
+    - kubernetes
+    maintainers:
+    - email: maintainers@virtrigaud.io
+      name: Virtrigaud Maintainers
+    name: virtrigaud
+    sources:
+    - https://github.com/projectbeskar/virtrigaud
+    type: application
+    urls:
+    - https://projectbeskar.github.io/virtrigaud/virtrigaud-0.2.3-rc19.tgz
+    version: 0.2.3-rc19
+  - annotations:
+      category: Infrastructure
+      licenses: Apache-2.0
+    apiVersion: v2
     appVersion: v0.2.3-rc18
-    created: "2025-10-14T17:33:51.106226043Z"
+    created: "2025-10-14T17:54:37.028579048Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: e0a514adee0ea6a4bf721836bb178b3ba19a9fa9a0a4c361a2ccb09d2cfeae66
@@ -258,7 +286,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.3-rc17
-    created: "2025-10-14T17:33:51.103962826Z"
+    created: "2025-10-14T17:54:37.025524089Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: fbf6a4a30d1657a6da29d0151d3a7a0abca319f76259a824fd4cf2b683d09674
@@ -286,7 +314,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.3-rc16
-    created: "2025-10-14T17:33:51.101555849Z"
+    created: "2025-10-14T17:54:37.023297159Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: a0cd59183f0a61c560c904c03b7c975d916aa7242ced88614ef41c75923d607e
@@ -314,7 +342,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.3-rc15
-    created: "2025-10-14T17:33:51.098489114Z"
+    created: "2025-10-14T17:54:37.020369605Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: a5a11b1aff2bf7540704aff2ba5ecb3a729603eb88ca4f178c7feea471a5f45c
@@ -342,7 +370,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.3-rc14
-    created: "2025-10-14T17:33:51.09621144Z"
+    created: "2025-10-14T17:54:37.018130854Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 086edc25e7db8a8a143e4237f1c08044216f4d79674cbb290630f9c73b20b8bd
@@ -370,7 +398,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.3-rc12
-    created: "2025-10-14T17:33:51.0932553Z"
+    created: "2025-10-14T17:54:37.015232016Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 07d5d45197a584e5d771e0b39cb3ec106638344f6b5bbabf3518d3ebc1872253
@@ -398,7 +426,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.3-rc11
-    created: "2025-10-14T17:33:51.09096932Z"
+    created: "2025-10-14T17:54:37.012985951Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 3e5a72c286606c9152e04095c7ee273f1db8444e106cb8f20730fbf7a9d1f3c5
@@ -426,7 +454,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.3-rc10
-    created: "2025-10-14T17:33:51.087821322Z"
+    created: "2025-10-14T17:54:37.010100888Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 522aa52dda0bc7e6f849c83a2164f65145b7829c00705aac1e9399c54ab328c2
@@ -454,7 +482,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.3-rc1
-    created: "2025-10-14T17:33:51.085571741Z"
+    created: "2025-10-14T17:54:37.007859602Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: fbf1cd8caefecea330d39d406683c4675d3818569270b17c512a51f9d0b1e235
@@ -482,7 +510,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.3-13
-    created: "2025-10-14T17:33:51.083248291Z"
+    created: "2025-10-14T17:54:37.005036553Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: c3d13f5a6ea72cbc97c73fd3541d65b60976772b38eb75dbfeb4209ed196dd4e
@@ -510,7 +538,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.2
-    created: "2025-10-14T17:33:51.080147946Z"
+    created: "2025-10-14T17:54:37.002810846Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: c99527811a7c3ebe7ce157a18001907fe90e92edfdc0ca9f787c6ae4eb95d259
@@ -538,7 +566,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.2-rc1
-    created: "2025-10-14T17:33:51.077867326Z"
+    created: "2025-10-14T17:54:36.999415898Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 1fdc245cdc555065b8328064ff3bc7923f81440c0920a49ef31048bcdb5b5097
@@ -566,7 +594,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.1
-    created: "2025-10-14T17:33:51.074805143Z"
+    created: "2025-10-14T17:54:36.997225136Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 9eb4d299d4fa226f2a8b84be7cb5047b8279f9b4f3d100148a420e586c9a77b1
@@ -594,7 +622,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.1-rc2
-    created: "2025-10-14T17:33:51.072682259Z"
+    created: "2025-10-14T17:54:36.995109535Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 1a95973af5b25346aeaf6e639e417e6f56ed4db4765199b28aaaab22bd647014
@@ -622,7 +650,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.1-rc1
-    created: "2025-10-14T17:33:51.069970752Z"
+    created: "2025-10-14T17:54:36.992309949Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 9d98becc2cfee73a2005a1b857201c6ea702c6a12f5fe8b1e4d55622283a0946
@@ -650,7 +678,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0
-    created: "2025-10-14T17:33:51.067862345Z"
+    created: "2025-10-14T17:54:36.990224514Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 9474219b216aeb503ccf711f38af8e3dc32053bf3d663055ed958bb4635d9d03
@@ -678,7 +706,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc9
-    created: "2025-10-14T17:33:51.064796789Z"
+    created: "2025-10-14T17:54:36.987468281Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 5cfd0174b37c2e0fb992bad9c6aab4fdce06ffffb77851fdcecde04adf663f30
@@ -706,7 +734,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc8
-    created: "2025-10-14T17:33:51.062713228Z"
+    created: "2025-10-14T17:54:36.98540072Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 5aa188989e0cfb6202b989134c2a59f22891871eeeccc3ed933178ad44b074d2
@@ -734,7 +762,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc7
-    created: "2025-10-14T17:33:51.060482592Z"
+    created: "2025-10-14T17:54:36.982526171Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: e73be09581af024f73417c3872303cfedc51ed890d1fcc4b662f5998d0e7a065
@@ -762,7 +790,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc69
-    created: "2025-10-14T17:33:51.057562104Z"
+    created: "2025-10-14T17:54:36.980462918Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 2eb708f9564db5b5301fd689595eb1922e2be292aa1c1775ee3c33533064a42f
@@ -790,7 +818,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc68
-    created: "2025-10-14T17:33:51.055489595Z"
+    created: "2025-10-14T17:54:36.978019194Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: d2101f4dd5c9d943cc9557d5af10cde3e3bf371dde0bf945d97b5b23b2274d42
@@ -818,7 +846,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc67
-    created: "2025-10-14T17:33:51.0528132Z"
+    created: "2025-10-14T17:54:36.975523452Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 8735d0e09feac33f2d685e17e8a69670046aa792be2dc7474220e538a1d9971d
@@ -846,7 +874,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc66
-    created: "2025-10-14T17:33:51.050670989Z"
+    created: "2025-10-14T17:54:36.973417599Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: b37713ff87aafe39ad5543bc4084b66d96f3955ad6a74f745f042265f6f4216a
@@ -874,7 +902,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc65
-    created: "2025-10-14T17:33:51.047949807Z"
+    created: "2025-10-14T17:54:36.970633274Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 217e8acf69e44910da4fd726a18f151d8ac51608fcac3c9f6d78cbe392763b7e
@@ -902,7 +930,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc64
-    created: "2025-10-14T17:33:51.045874181Z"
+    created: "2025-10-14T17:54:36.968529275Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 08d0ffcb3e4aa080fe99704dae9a4567e79a3c03c184f963307b5778a21f7d9e
@@ -930,7 +958,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc63
-    created: "2025-10-14T17:33:51.043105736Z"
+    created: "2025-10-14T17:54:36.965761881Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 26748c1682c08884a143be0d88f87904281de0fdbb78a47f24ddcb5b33dbc467
@@ -958,7 +986,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc62
-    created: "2025-10-14T17:33:51.041016233Z"
+    created: "2025-10-14T17:54:36.963655958Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: cd7714f9723e642c302e5d670d19b07ac72b7c495c95d764858ba3b2c9dd533f
@@ -986,7 +1014,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc61
-    created: "2025-10-14T17:33:51.038843626Z"
+    created: "2025-10-14T17:54:36.960882614Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: a7bb6c2bfad93677b44cf9f2efdaa904196f028bda80aca0d0e2ca872c63c51c
@@ -1014,7 +1042,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc60
-    created: "2025-10-14T17:33:51.0359971Z"
+    created: "2025-10-14T17:54:36.958829479Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: db23f2ae512d7aa521699ae45094f373e905f2bac4979d382bfa54b45138cbe4
@@ -1042,7 +1070,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc6
-    created: "2025-10-14T17:33:51.03392438Z"
+    created: "2025-10-14T17:54:36.956040243Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: a49f9e1abd4bf97e73c4cf57d5420487a11ca889ac236672b67f53c996ed2d0d
@@ -1070,7 +1098,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc59
-    created: "2025-10-14T17:33:51.031190698Z"
+    created: "2025-10-14T17:54:36.95396132Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: cff60d7d8147668a61c0c0ef82e26065f2dc1b3ae4b7635a569652028cf0463b
@@ -1098,7 +1126,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc58
-    created: "2025-10-14T17:33:51.029059538Z"
+    created: "2025-10-14T17:54:36.951885734Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 90ccc8011edb84844f1b05200fdde9b481eec744812510c557981298fa5ff7e6
@@ -1126,7 +1154,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc57
-    created: "2025-10-14T17:33:51.026556135Z"
+    created: "2025-10-14T17:54:36.949017569Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: cb6f8b2b33f4e772e95a76a131a7f4f4a8785277503b0fdf03765fac6cd31d16
@@ -1154,7 +1182,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc56
-    created: "2025-10-14T17:33:51.024157414Z"
+    created: "2025-10-14T17:54:36.946951571Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 4d33dd17a5efd47eb94fe0f8a6f37a9d43348ae1d77932e7454e210b1d86da98
@@ -1182,7 +1210,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc55
-    created: "2025-10-14T17:33:51.022028929Z"
+    created: "2025-10-14T17:54:36.944278827Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: f933d1d63dd371c24a33d89142361032e2aa0b2366a1b1ed0f9f0c85003ee9d4
@@ -1210,7 +1238,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc54
-    created: "2025-10-14T17:33:51.019217465Z"
+    created: "2025-10-14T17:54:36.942214863Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 00be0c4f0a7e2b6938871f1f444e895176d3a68c61763504d09392946753fe6a
@@ -1238,7 +1266,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc53
-    created: "2025-10-14T17:33:51.017119958Z"
+    created: "2025-10-14T17:54:36.939458707Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: a133951f95b19e0c49205fc79266ee46437debff9a837c65d499335d1b250850
@@ -1266,7 +1294,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc52
-    created: "2025-10-14T17:33:51.014301077Z"
+    created: "2025-10-14T17:54:36.937397519Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: e919d874af84f4302268150e48c0ef7976673206c09e3e47156a0497fb6faf2c
@@ -1294,7 +1322,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc51
-    created: "2025-10-14T17:33:51.012013504Z"
+    created: "2025-10-14T17:54:36.934760066Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: f9e578322c5cabffb987b7fc75a04a0b75b6fa91a22838b98391ce74bf86ffb2
@@ -1322,7 +1350,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc50
-    created: "2025-10-14T17:33:51.009382799Z"
+    created: "2025-10-14T17:54:36.932662889Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: fa1e06678ccf3464aaaf165cbf4349bcd12d7e3d4c7715885f1abe5b29951cd3
@@ -1350,7 +1378,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc5
-    created: "2025-10-14T17:33:51.006880197Z"
+    created: "2025-10-14T17:54:36.928640961Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: eba199611f42d66a35464191f418808c394caa9740a8151d53fefc99f4ccb32c
@@ -1378,7 +1406,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc49
-    created: "2025-10-14T17:33:51.004736122Z"
+    created: "2025-10-14T17:54:36.926589651Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 6d381d242203dec4e0e891ad2a73c348675e5ce7152aff05ad0f1c1d15a4fe0e
@@ -1406,7 +1434,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc48
-    created: "2025-10-14T17:33:51.001878854Z"
+    created: "2025-10-14T17:54:36.924031696Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: a76db31083f9d503283728c3af683f1a9f30d6408e399db40734416ecaefdf45
@@ -1434,7 +1462,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc47
-    created: "2025-10-14T17:33:50.999776648Z"
+    created: "2025-10-14T17:54:36.921760314Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: f3c2e0ed74fd2d98603c1db900e2709fb57b22133ebce301b816af215faef135
@@ -1462,7 +1490,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc46
-    created: "2025-10-14T17:33:50.997094212Z"
+    created: "2025-10-14T17:54:36.919666914Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: a36713e12ad6d1cdff4ee9b5ed31fd8fd560b39c431c1eb14c5a5509fa51bbbc
@@ -1490,7 +1518,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc45
-    created: "2025-10-14T17:33:50.994991585Z"
+    created: "2025-10-14T17:54:36.916852528Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: e9ea71cf8e0d1db5897d4055f3f6521d7792bf76c65ee8d17c130ce3b8f12eeb
@@ -1518,7 +1546,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc44
-    created: "2025-10-14T17:33:50.991752124Z"
+    created: "2025-10-14T17:54:36.914484274Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 109850e62cc972bbc5d0f76af5a60cbe8b126aba1d5b44b59ecb4e210da7e941
@@ -1546,7 +1574,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc43
-    created: "2025-10-14T17:33:50.989641182Z"
+    created: "2025-10-14T17:54:36.911620825Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: a4a6af54a71efab8be983efd74f4dabc5db45aaba71fc86b41101689c823b78a
@@ -1574,7 +1602,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc42
-    created: "2025-10-14T17:33:50.987139615Z"
+    created: "2025-10-14T17:54:36.909548255Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 8ec56be74ab8818c86d4c329d69f5d8b3eb8f483419b3bf70a363e802208486d
@@ -1602,7 +1630,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc41
-    created: "2025-10-14T17:33:50.984778258Z"
+    created: "2025-10-14T17:54:36.906741477Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 8b98c73d17849779fa1dc20da2cede726593942d635f0df63d04f76895e2cb45
@@ -1630,7 +1658,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc40
-    created: "2025-10-14T17:33:50.98269105Z"
+    created: "2025-10-14T17:54:36.904685769Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 44399a17fe5df55666b16e014c031323e42d453eabdc079d1a4d7dd9382e44dd
@@ -1658,7 +1686,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc4
-    created: "2025-10-14T17:33:50.979944695Z"
+    created: "2025-10-14T17:54:36.901874948Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 29d54189c796d83e61c7efc1c7e19c5b709a8f530a05ddefbe131c9134842374
@@ -1686,7 +1714,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc39
-    created: "2025-10-14T17:33:50.977838742Z"
+    created: "2025-10-14T17:54:36.899827305Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 937165ee6126c8084852a864cf0e4a265ac487933aaadab8badec87d71ade337
@@ -1714,7 +1742,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc38
-    created: "2025-10-14T17:33:50.974865288Z"
+    created: "2025-10-14T17:54:36.897732493Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 6fceb635466965138a4f38de8b5a409ad8e4e8de1849e29bc6c27248aa02196c
@@ -1742,7 +1770,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc37
-    created: "2025-10-14T17:33:50.972778291Z"
+    created: "2025-10-14T17:54:36.89492553Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: bf9f4683a96ffd192e5c4a1f5cebb07959e0311e6d9da564fb75558896da647a
@@ -1770,7 +1798,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc36
-    created: "2025-10-14T17:33:50.970027371Z"
+    created: "2025-10-14T17:54:36.892837681Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 79b2b605fa02460b36ab8d57b679583ae84335bd7218c0842b9bd465154c6945
@@ -1798,7 +1826,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc35
-    created: "2025-10-14T17:33:50.967944632Z"
+    created: "2025-10-14T17:54:36.89017095Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: e1128a59d8173c06ee59cb7617ca78c3b362e99c690d676df2ed405557a21c11
@@ -1826,7 +1854,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc34
-    created: "2025-10-14T17:33:50.965304498Z"
+    created: "2025-10-14T17:54:36.88807185Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 37b809f3422ad118caee72ec91354f9ebc68289f6cff2628b059e666eba9ee21
@@ -1854,7 +1882,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc33
-    created: "2025-10-14T17:33:50.963186223Z"
+    created: "2025-10-14T17:54:36.885472111Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 5a6f7939ac8f49e5d774c29c3700a5026eb82d0091c97b981ec4d7ac512a4a0a
@@ -1882,7 +1910,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc32
-    created: "2025-10-14T17:33:50.960485467Z"
+    created: "2025-10-14T17:54:36.883358083Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 5ea5405a9ebc526e05d77e94ee1bc4deb1636a8f1783860c2b2c2825abcb44e5
@@ -1910,7 +1938,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc30
-    created: "2025-10-14T17:33:50.958360458Z"
+    created: "2025-10-14T17:54:36.880776772Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: a8e89469ac9f4fecd2f107d9af1f0bc7e7bd958eb8174b54f051ae067fb2821e
@@ -1938,7 +1966,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc3
-    created: "2025-10-14T17:33:50.955613532Z"
+    created: "2025-10-14T17:54:36.878721754Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 64e983b8ba4deff3690b66ad63b57058a9fd973f40b0f5d48e814a5c9ed06ce9
@@ -1966,7 +1994,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc29
-    created: "2025-10-14T17:33:50.952765059Z"
+    created: "2025-10-14T17:54:36.876617905Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: d09965e746727b429fff1a7d94a30507a95e54ce8da0407acf1eb03b9968757b
@@ -1994,7 +2022,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc28
-    created: "2025-10-14T17:33:50.950583003Z"
+    created: "2025-10-14T17:54:36.873881891Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 5a0f3b919066ffb654ad23524a6cc58b753297c8fe862285a4d77a66a09b4cb0
@@ -2022,7 +2050,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc27
-    created: "2025-10-14T17:33:50.946558772Z"
+    created: "2025-10-14T17:54:36.871808519Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 8488eb27bed8141fa880f4d470758a2c3c41517af3dbd52506aaae55df56a104
@@ -2050,7 +2078,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc26
-    created: "2025-10-14T17:33:50.942837575Z"
+    created: "2025-10-14T17:54:36.868807943Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: dd486c190d153a5f34085cc55acc53822e8c1fffe3b19577e0371134a4ba08c4
@@ -2078,7 +2106,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc25
-    created: "2025-10-14T17:33:50.938359492Z"
+    created: "2025-10-14T17:54:36.866746373Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: b22284531592792bf800d283920302bc15829a8c5d6ebb3f7ef389d963145e0a
@@ -2106,7 +2134,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc24
-    created: "2025-10-14T17:33:50.93625883Z"
+    created: "2025-10-14T17:54:36.864282258Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 2d15b8fbe3f03f85a1a48f6795902e7f80ba2638dde4a1889e9fa852f488850e
@@ -2134,7 +2162,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc23
-    created: "2025-10-14T17:33:50.932997891Z"
+    created: "2025-10-14T17:54:36.861857408Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: ffa469fac6d11068f18406f3588a9f2713dccd7ec74578c98dc110e2f35fb99d
@@ -2162,7 +2190,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc22
-    created: "2025-10-14T17:33:50.929287464Z"
+    created: "2025-10-14T17:54:36.859763618Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 525835b2383a59edbe5cafee4681b6b8693a490f4ce2c2a3ac74ceed78cf6968
@@ -2190,7 +2218,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc21
-    created: "2025-10-14T17:33:50.925576917Z"
+    created: "2025-10-14T17:54:36.857119042Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 509082db8c7bd9c0db075efef1b5aaddaa022c3c42e39c1aecab988c49eaf23d
@@ -2218,7 +2246,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc20
-    created: "2025-10-14T17:33:50.92254847Z"
+    created: "2025-10-14T17:54:36.854999523Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 5115f13d92b7e70745ac5da2320673de740aec352932567efe8150472321cb15
@@ -2246,7 +2274,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc2
-    created: "2025-10-14T17:33:50.920451594Z"
+    created: "2025-10-14T17:54:36.851614002Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 730a6323576a2816466fe0a5fd0b9c485c49abed12d930fc2f8f50a0e397b18c
@@ -2274,7 +2302,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc19
-    created: "2025-10-14T17:33:50.917595176Z"
+    created: "2025-10-14T17:54:36.849542103Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: a8651368725f0e0be232e85a9e1829e765e06fc796782046971dd67677cdbe9d
@@ -2302,7 +2330,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc18
-    created: "2025-10-14T17:33:50.9154821Z"
+    created: "2025-10-14T17:54:36.847447691Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: ee50b63a28f51d374d5aec22fae5ed42bf40b1105e03d70fadf88a7d1e964efc
@@ -2330,7 +2358,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc17
-    created: "2025-10-14T17:33:50.912688046Z"
+    created: "2025-10-14T17:54:36.84480312Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: a70682adb0d5d715612102badb559e73bcf81ddee3efeef70246e0bfc7711de5
@@ -2358,7 +2386,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc16
-    created: "2025-10-14T17:33:50.910584278Z"
+    created: "2025-10-14T17:54:36.842598863Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: ab22e589eab12cfc5e19d4d357651e1f7d6b809b9e20b1ef44c7a251d9157939
@@ -2386,7 +2414,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc15
-    created: "2025-10-14T17:33:50.907725769Z"
+    created: "2025-10-14T17:54:36.839777386Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 7354eeb13d7e6b8029a430f4f4798560cb9032706093a68fee44ab39f17d1921
@@ -2414,7 +2442,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc14
-    created: "2025-10-14T17:33:50.905634704Z"
+    created: "2025-10-14T17:54:36.837712951Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 2efb68e073f8411657bc9ef8f6a1d2a99a62d65a4ed0664c3ebda09689a15fd5
@@ -2442,7 +2470,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc13
-    created: "2025-10-14T17:33:50.902812417Z"
+    created: "2025-10-14T17:54:36.835096875Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: b6cdc7f277dd6dd198f13bb139f00a42964fe0af3d08cef4b93651df503db5e3
@@ -2470,7 +2498,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc12
-    created: "2025-10-14T17:33:50.900668473Z"
+    created: "2025-10-14T17:54:36.832967589Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: e3f59d23d385971998dab5a5d529e6403cb1c47dce47359f25c1e6e226670b9c
@@ -2498,7 +2526,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc10
-    created: "2025-10-14T17:33:50.897834898Z"
+    created: "2025-10-14T17:54:36.830193222Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 840cd66bcc061139fb3fb938aeb3a6a26ccc7229237e76bd3322119d3383d53e
@@ -2526,7 +2554,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.2.0-rc1
-    created: "2025-10-14T17:33:50.89572612Z"
+    created: "2025-10-14T17:54:36.828112506Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: bab77fd0a45bbe47f80a69808f57b9401fc77290cddf39d78cdffa97498246a8
@@ -2554,7 +2582,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.1.1
-    created: "2025-10-14T17:33:50.892744909Z"
+    created: "2025-10-14T17:54:36.826011152Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: d99683ad546089de32dfb6941a1ed67e272e5c7c949e44b0c249f8c30ebd2bed
@@ -2582,7 +2610,7 @@ entries:
       licenses: Apache-2.0
     apiVersion: v2
     appVersion: v0.1.0
-    created: "2025-10-14T17:33:50.89024087Z"
+    created: "2025-10-14T17:54:36.822788182Z"
     description: A Kubernetes operator for managing virtual machines across multiple
       hypervisors
     digest: 63c08d7992c66d454d4583902689b729f304ea43bd8124da968f93fd9d760892
@@ -2605,4 +2633,4 @@ entries:
     urls:
     - https://projectbeskar.github.io/virtrigaud/virtrigaud-0.1.0.tgz
     version: 0.1.0
-generated: "2025-10-14T17:33:50.889160338Z"
+generated: "2025-10-14T17:54:36.82176688Z"
