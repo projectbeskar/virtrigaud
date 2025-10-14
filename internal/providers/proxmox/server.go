@@ -229,7 +229,15 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 		// After cloning, we need to reconfigure the VM with cloud-init settings
 		if len(req.UserData) > 0 || vmConfig.SSHKeys != "" {
 			p.logger.Info("Reconfiguring cloned VM with cloud-init", "vmid", vmConfig.VMID)
-
+			
+			// Auto-detect primary boot disk from cloned VM
+			primaryDisk, err := p.client.DetectPrimaryDisk(ctx, node, vmConfig.VMID)
+			if err != nil {
+				p.logger.Warn("Failed to detect primary disk, using scsi0 as fallback", "error", err)
+				primaryDisk = "scsi0"
+			}
+			p.logger.Info("Detected primary boot disk", "vmid", vmConfig.VMID, "disk", primaryDisk)
+			
 			// Build reconfiguration values for cloud-init
 			reconfigValues := url.Values{}
 			if vmConfig.IDE2 != "" {
@@ -241,8 +249,10 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 			if vmConfig.CIUser != "" {
 				reconfigValues.Set("ciuser", vmConfig.CIUser)
 			}
-			// Set boot order: disk first, then cloud-init drive
-			reconfigValues.Set("boot", "order=scsi0;ide2")
+			// Set boot order: detected primary disk first, then cloud-init drive
+			bootOrder := fmt.Sprintf("order=%s;ide2", primaryDisk)
+			reconfigValues.Set("boot", bootOrder)
+			p.logger.Info("Setting boot order", "vmid", vmConfig.VMID, "boot", bootOrder)
 
 			// Add network config (these should already be in the cloned VM, but just to be safe)
 			for _, netConfig := range vmConfig.Networks {
@@ -264,7 +274,7 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 			if err != nil {
 				return nil, errors.NewInternal("failed to reconfigure VM: %v", err)
 			}
-			
+
 			// Wait for reconfiguration if async
 			if taskID != "" {
 				if err = p.client.WaitForTask(ctx, node, taskID); err != nil {
@@ -1127,4 +1137,3 @@ func (p *Provider) buildIPConfigString(ipConfig pveapi.IPConfig) string {
 	}
 	return result
 }
-

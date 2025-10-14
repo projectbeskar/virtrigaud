@@ -1013,3 +1013,37 @@ func (c *Client) ReconfigureVMRaw(ctx context.Context, node string, vmid int, va
 
 	return "", nil // Synchronous operation completed
 }
+
+
+// DetectPrimaryDisk detects the primary boot disk from VM configuration
+// Returns the disk identifier (e.g., "scsi0", "virtio0", "sata0", "ide0")
+func (c *Client) DetectPrimaryDisk(ctx context.Context, node string, vmid int) (string, error) {
+	config, err := c.GetVMConfig(ctx, node, vmid)
+	if err != nil {
+		return "", err
+	}
+
+	// Check for disks in order of preference: virtio, scsi, sata, ide
+	diskPrefixes := []string{"virtio", "scsi", "sata", "ide"}
+	
+	for _, prefix := range diskPrefixes {
+		for i := 0; i < 16; i++ { // Proxmox supports up to 16 devices per bus
+			diskKey := fmt.Sprintf("%s%d", prefix, i)
+			if diskValue, exists := config[diskKey]; exists {
+				// Check if it's actually a disk (not just a string or empty)
+				if diskStr, ok := diskValue.(string); ok && diskStr != "" {
+					// Make sure it's not a cdrom
+					if !strings.Contains(strings.ToLower(diskStr), "media=cdrom") {
+						return diskKey, nil
+					}
+				}
+			}
+		}
+	}
+
+	// Fallback to scsi0 if nothing found
+	return "scsi0", nil
+}
+
+// DetectPrimaryDisk detects the primary boot disk from VM configuration
+// Returns the disk identifier (e.g., "scsi0", "virtio0", "sata0", "ide0")
