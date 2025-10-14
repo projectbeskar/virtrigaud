@@ -213,9 +213,9 @@ configure_vm() {
     local data="cores=${VM_CORES}&memory=${VM_MEMORY}"
     data="${data}&ciuser=${CI_USER}"
     data="${data}&sshkeys=${encoded_key}"
-    data="${data}&ipconfig0=dhcp"  # Fixed: just "dhcp", not "ip=dhcp"
+    data="${data}&ipconfig0=ip=dhcp"  # Proxmox expects "ip=dhcp" format
     data="${data}&ide2=${STORAGE}:cloudinit"
-    data="${data}&net0=model=virtio,bridge=${NETWORK_BRIDGE}"  # Fixed: model= prefix
+    data="${data}&net0=virtio,bridge=${NETWORK_BRIDGE}"  # First value is model (no prefix needed)
     
     log_info "Configuration request data (first 200 chars): ${data:0:200}..."
     
