@@ -204,30 +204,7 @@ func (c *Client) request(ctx context.Context, method, path string, body interfac
 	var reqBody io.Reader
 	if body != nil {
 		if data, ok := body.(url.Values); ok {
-			// Special handling for sshkeys parameter:
-			// Proxmox expects URL encoding (%20) not form encoding (+) for spaces
 			encoded := data.Encode()
-
-			// If sshkeys is present, we need to fix the encoding
-			if sshKey := data.Get("sshkeys"); sshKey != "" {
-				// Remove sshkeys from the encoded string
-				data.Del("sshkeys")
-				baseEncoded := data.Encode()
-
-				// CRITICAL: Trim any whitespace/newlines before encoding!
-				cleanedKey := strings.TrimSpace(sshKey)
-
-				// Manually URL-encode the SSH key (spaces as %20, not +)
-				encodedKey := url.QueryEscape(cleanedKey)
-
-				// Rebuild the form body with properly encoded sshkeys
-				if baseEncoded != "" {
-					encoded = baseEncoded + "&sshkeys=" + encodedKey
-				} else {
-					encoded = "sshkeys=" + encodedKey
-				}
-			}
-
 			reqBody = strings.NewReader(encoded)
 		} else {
 			jsonData, err := json.Marshal(body)
