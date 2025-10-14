@@ -272,8 +272,10 @@ jobs:
         sed -i "s/appVersion: .*/appVersion: \"${{ needs.prepare.outputs.tag }}\"/" charts/virtrigaud/Chart.yaml
         
         # Update VirtRigaud component image tags in values.yaml (but not kubectl image)
-        # Update manager image tag
-        sed -i "/^manager:/,/^  image:/ s/    tag: \".*\"/    tag: \"${{ needs.prepare.outputs.tag }}\"/" charts/virtrigaud/values.yaml
+        # Update manager image tag (use line range to be precise)
+        MANAGER_START=$(grep -n "^manager:" charts/virtrigaud/values.yaml | cut -d: -f1)
+        MANAGER_END=$((MANAGER_START + 10))
+        sed -i "${MANAGER_START},${MANAGER_END} s/    tag: \".*\"/    tag: \"${{ needs.prepare.outputs.tag }}\"/" charts/virtrigaud/values.yaml
         # Update provider image tags
         sed -i "/^providers:/,/^  libvirt:/ { /    image:/,/      tag:/ s/      tag: \".*\"/      tag: \"${{ needs.prepare.outputs.tag }}\"/; }" charts/virtrigaud/values.yaml
         sed -i "/^providers:/,/^  vsphere:/ { /    image:/,/      tag:/ s/      tag: \".*\"/      tag: \"${{ needs.prepare.outputs.tag }}\"/; }" charts/virtrigaud/values.yaml
