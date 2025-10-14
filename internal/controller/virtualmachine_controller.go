@@ -392,6 +392,8 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 	vmImage *infravirtrigaudiov1beta1.VMImage,
 	networks []*infravirtrigaudiov1beta1.VMNetworkAttachment,
 ) contracts.CreateRequest {
+	log := ctrl.Log.WithName("buildCreateRequest")
+	
 	// Convert VMClass
 	class := contracts.VMClass{
 		CPU:              vmClass.Spec.CPU,
@@ -493,11 +495,22 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 	}
 
 	if vmImage.Spec.Source.Proxmox != nil {
+		log.Info("DEBUG controller: Proxmox image source found",
+			"templateID", vmImage.Spec.Source.Proxmox.TemplateID,
+			"templateName", vmImage.Spec.Source.Proxmox.TemplateName)
+		
 		if vmImage.Spec.Source.Proxmox.TemplateID != nil {
 			image.TemplateName = fmt.Sprintf("%d", *vmImage.Spec.Source.Proxmox.TemplateID)
+			log.Info("DEBUG controller: Set TemplateName from TemplateID",
+				"templateID", *vmImage.Spec.Source.Proxmox.TemplateID,
+				"image.TemplateName", image.TemplateName)
 		} else if vmImage.Spec.Source.Proxmox.TemplateName != "" {
 			image.TemplateName = vmImage.Spec.Source.Proxmox.TemplateName
+			log.Info("DEBUG controller: Set TemplateName from TemplateName",
+				"image.TemplateName", image.TemplateName)
 		}
+	} else {
+		log.Info("DEBUG controller: Proxmox image source is nil")
 	}
 
 	// Convert Networks
