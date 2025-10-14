@@ -895,7 +895,12 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*pveapi.VM
 
 	// Configure cloud-init if user data provided
 	if len(req.UserData) > 0 {
-		config.IDE2 = "cloudinit"
+		// IDE2 needs storage pool prefix, use the configured storage or default to 'local'
+		storage := config.Storage
+		if storage == "" {
+			storage = "local"
+		}
+		config.IDE2 = fmt.Sprintf("%s:cloudinit", storage)
 
 		// Extract SSH keys and user from cloud-init data if possible
 		userData := string(req.UserData)

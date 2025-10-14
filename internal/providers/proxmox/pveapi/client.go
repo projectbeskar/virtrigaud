@@ -311,7 +311,32 @@ func (c *Client) CreateVM(ctx context.Context, node string, config *VMConfig) (s
 func (c *Client) CloneVM(ctx context.Context, node string, vmid int, config *VMConfig) (string, error) {
 	path := fmt.Sprintf("/api2/json/nodes/%s/qemu/%d/clone", node, vmid)
 
-	values := c.configToValues(config)
+	// Build clone-specific parameters (per Proxmox API spec)
+	// Only send parameters accepted by /clone endpoint
+	values := url.Values{}
+
+	if config.VMID != 0 {
+		values.Set("newid", strconv.Itoa(config.VMID))
+	}
+	if config.Name != "" {
+		values.Set("name", config.Name)
+	}
+	if config.Storage != "" {
+		values.Set("storage", config.Storage)
+	}
+	// Check if full clone is requested via Custom map
+	if fullClone, ok := config.Custom["full"]; ok {
+		values.Set("full", fullClone)
+	}
+	if target, ok := config.Custom["target"]; ok {
+		values.Set("target", target)
+	}
+	if description, ok := config.Custom["description"]; ok {
+		values.Set("description", description)
+	}
+	if format, ok := config.Custom["format"]; ok {
+		values.Set("format", format)
+	}
 
 	resp, err := c.request(ctx, "POST", path, values)
 	if err != nil {
@@ -494,7 +519,8 @@ func (c *Client) configToValues(config *VMConfig) url.Values {
 		values.Set("cipassword", config.CIPasswd)
 	}
 	if config.SSHKeys != "" {
-		values.Set("sshkeys", config.SSHKeys)
+		// URL encode SSH keys as required by Proxmox API
+		values.Set("sshkeys", url.QueryEscape(config.SSHKeys))
 	}
 
 	// Configure network interfaces
@@ -565,7 +591,8 @@ func (c *Client) buildNetworkString(netConfig NetworkConfig) string {
 // buildIPConfigString constructs the IP configuration string for PVE
 func (c *Client) buildIPConfigString(ipConfig IPConfig) string {
 	if ipConfig.DHCP {
-		return "dhcp=1"
+		// Proxmox expects "ip=dhcp" not "dhcp=1"
+		return "ip=dhcp"
 	}
 
 	var parts []string
