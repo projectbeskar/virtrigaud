@@ -7,24 +7,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+#### Proxmox Provider - Production Ready
+- **Template Cloning Support**: Full VM cloning from Proxmox templates
+  - Automatic template detection from VMImage CRD `templateID` or `templateName`
+  - Full clone and linked clone support via `fullClone` parameter
+  - Proper storage pool selection during clone operation
+  - Clone task monitoring with async operation support
+- **Intelligent Boot Order Configuration**: 
+  - Auto-detection of primary boot disk from cloned template
+  - Support for multiple disk types: scsi, virtio, sata, ide
+  - Automatic boot order generation (e.g., `boot=order=scsi0;ide2`)
+  - Exclusion of CD-ROM devices from boot order
+- **Cloud-Init Integration**:
+  - Complete cloud-init configuration via `ide2:cloudinit` device
+  - SSH key injection with proper URL encoding
+  - User creation and authentication setup
+  - Network configuration (static IP and DHCP)
+  - Package installation and custom commands via runcmd
+- **Complete CRD Support**:
+  - ProxmoxImageSource integration for template-based deployments
+  - ProxmoxNetworkConfig for bridge and VLAN configuration
+  - Controller parsing of Proxmox-specific fields
+  - Provider RPC implementation for all VM operations
+- **Production Features**:
+  - VM creation, power management, deletion
+  - Status reporting with IP address detection
+  - Task-based async operations with progress tracking
+  - Comprehensive error handling and logging
+
 ### Fixed
 
-#### Proxmox Provider SSH Keys Encoding (rc1-rc9)
+#### Proxmox Provider
+
+**SSH Keys Encoding (rc1-rc12)**:
 - **Root Issue**: Proxmox API's `sshkeys` parameter requires **double URL encoding** due to its internal decoding behavior
 - **Discovery**: Found working Python implementation that does `quote(sshKey, safe='')` followed by `wPost(data)` which form-encodes again, resulting in double encoding
 - **Solution**: Implemented double encoding in `request()` function:
   1. `TrimSpace()` removes trailing newlines from SSH keys
-  2. First `url.QueryEscape()`: space → `%20`, + → `%2B`
-  3. Second `url.QueryEscape()`: `%20` → `%2520`, `%2B` → `%252B`
-  4. Manual string concatenation to prevent triple encoding
+  2. First `url.QueryEscape()`: space -> %20, + -> %2B
+  3. Replace + with %20: ensures spaces are encoded as %20, not +
+  4. Second encoding pass: %20 -> %2520, %2B -> %252B
+  5. Manual string concatenation to prevent triple encoding
 - **Technical Details**: 
-  - Proxmox HTTP layer decodes once: `%2520` → `%20`
-  - Proxmox sshkeys parser decodes again: `%20` → space
+  - Proxmox HTTP layer decodes once: %2520 -> %20
+  - Proxmox sshkeys parser decodes again: %20 -> space
   - Final result: Original SSH key correctly restored
   - Other parameters use standard single encoding
 - **Impact**: Proxmox VMs can now be created with cloud-init SSH key injection working correctly
 
-### Added
+**Template Cloning and Boot Order (rc13-rc16)**:
+- **Root Issue**: Provider was creating new VMs instead of cloning from templates, causing boot failures
+- **Fix**: Implemented proper template detection and cloning workflow:
+  1. Parse `TemplateName` from VMImage CRD (via controller)
+  2. Call CloneVM API with template ID and storage configuration
+  3. Wait for clone task completion
+  4. Detect primary boot disk from cloned VM config
+  5. Reconfigure VM with cloud-init and correct boot order
+- **Boot Order Detection**: Added intelligent disk detection that:
+  - Scans VM config for disk attachments (virtio, scsi, sata, ide)
+  - Filters out CD-ROM devices
+  - Prioritizes modern disk types (virtio > scsi > sata > ide)
+  - Constructs proper boot parameter (e.g., `boot=order=scsi0;ide2`)
+- **Impact**: Proxmox VMs now boot correctly from cloned templates with proper disk configuration
+
+**Controller Image Source Parsing (rc17-rc19)**:
+- **Root Issue**: Controller was sending empty `TemplateName` to provider, causing fallback to VM creation
+- **Cause**: JSON field name mismatch - controller uses `TemplateName` (capital T) but provider expected `template_name` (snake_case)
+- **Fix**: Updated provider to parse `TemplateName` field correctly from contracts.VMImage JSON
+- **Debug Process**: Added comprehensive debug logging in both controller and provider to trace data flow
+- **Impact**: Template ID from VMImage CRD is now correctly transmitted to Proxmox provider
+
+#### Release Workflow
+
+**Helm Chart Image Tag Updates (Fixed)**:
+- **Root Issue**: Manager and provider images were not being updated during Helm releases, staying pinned to v0.2.0
+- **Cause**: sed patterns in release workflow used incorrect range expressions that stopped before reaching the `tag:` lines
+  - Manager pattern: `/^manager:/,/^  image:/` stopped at line 16, but `tag:` is on line 18
+  - Provider patterns: Nested ranges didn't reach `tag:` lines which appear after provider names
+- **Fix**: Replaced fragile regex ranges with precise line-number-based patterns:
+  - Manager: `MANAGER_START` to `MANAGER_START+10`
+  - LibVirt: `LIBVIRT_START` to `LIBVIRT_START+15`
+  - vSphere: `VSPHERE_START` to `VSPHERE_START+15`
+  - Proxmox: `PROXMOX_START` to `PROXMOX_START+15`
+  - kubectl: Already using line numbers (no change needed)
+- **Impact**: All component images (manager, providers, kubectl) now update correctly to match release version
+- **Testing**: Future releases will have consistent image tags across all deployments
+
+### Added (Continued)
 
 #### Nested Virtualization Support
 - **VMClass PerformanceProfile**: Added `nestedVirtualization` field to enable nested virtualization capabilities in VMs, allowing VMs to run their own hypervisors and nested virtual machines
@@ -89,10 +160,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Synchronous operations with immediate feedback
   - Snapshot name sanitization for virsh compatibility
   - Helper methods for snapshot listing and querying
-- **Proxmox Provider Implementation** ✅ **FULLY FUNCTIONAL**:
+- **Proxmox Provider Implementation** ✅ **PRODUCTION READY**:
   - Complete snapshot lifecycle support
   - Memory state inclusion (vmstate)
   - Async task handling with status tracking
+  - Full VM creation from templates with cloud-init
+  - Intelligent boot order configuration
+  - SSH key injection with proper encoding
+  - Network configuration with bridge support
+  - Storage pool management
 - **Controller Integration** ✅ **PRODUCTION READY**:
   - Real provider RPC calls (no more simulation)
   - Proper task status polling for async operations
@@ -380,26 +456,34 @@ For provider-specific configuration and capabilities, see the [Provider Document
 ---
 
 **Full Changelog**: https://github.com/projectbeskar/virtrigaud/compare/v0.2.0...v0.2.1
-### Proxmox Provider CRD Integration
+#### Proxmox Provider CRD Integration (Completed)
 
-**Added**:
-- `ProxmoxImageSource` type for VMImage CRDs
-  - Support for template ID or template name references
-  - Storage pool selection
-  - Node specification for template location
-  - Full clone vs linked clone selection
-  - Disk format configuration (qcow2, raw, vmdk)
-- `ProxmoxNetworkConfig` type for VMNetworkAttachment CRDs
-  - Linux bridge selection (vmbr0, vmbr1, etc.)
-  - Network card model selection (virtio, e1000, rtl8139, vmxnet3)
-  - VLAN tagging support
-  - Proxmox firewall integration
-  - Bandwidth rate limiting
-  - MTU configuration
-- Controller integration for Proxmox-specific fields
-- Provider parsing logic for new CRD types
-- Complete documentation in `docs/providers/PROXMOX.md`
+The Proxmox provider now has full CRD integration for template-based VM deployment:
+
+**VMImage CRD - ProxmoxImageSource**:
+- Template ID or template name references
+- Storage pool selection for cloned VMs
+- Node specification for template location
+- Full clone vs linked clone selection
+- Disk format configuration (qcow2, raw, vmdk)
+
+**VMNetworkAttachment CRD - ProxmoxNetworkConfig**:
+- Linux bridge selection (vmbr0, vmbr1, etc.)
+- Network card model selection (virtio, e1000, rtl8139, vmxnet3)
+- VLAN tagging support
+- Proxmox firewall integration
+- Bandwidth rate limiting
+- MTU configuration
+
+**Controller Integration**:
+- Full parsing of Proxmox-specific fields from CRDs
+- Conversion to provider contracts and gRPC messages
+- Proper JSON field mapping (TemplateName, Bridge, Model, etc.)
+
+**Documentation**:
+- Complete provider documentation in `docs/providers/PROXMOX.md`
 - Working examples in `examples/proxmox/`
+- Troubleshooting guides for common issues
 
-**Impact**: Users can now create and manage Proxmox VMs using native Kubernetes CRDs, achieving feature parity with vSphere and LibVirt providers.
+**Impact**: The Proxmox provider now has feature parity with vSphere and LibVirt providers, enabling production-ready VM management on Proxmox VE clusters via Kubernetes CRDs.
 
