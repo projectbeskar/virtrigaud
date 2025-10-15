@@ -1,6 +1,6 @@
 # Provider Capabilities Matrix
 
-This document provides a comprehensive overview of VirtRigaud provider capabilities as of v0.2.0.
+This document provides a comprehensive overview of VirtRigaud provider capabilities as of v0.2.3.
 
 ## Overview
 
@@ -23,7 +23,7 @@ All providers implement these core operations:
 |----------|--------|---------------|----------|
 | **vSphere** | ✅ Production Ready | govmomi-based | Stable |
 | **Libvirt/KVM** | ✅ Production Ready | virsh-based | Stable |
-| **Proxmox VE** | 🚧 In Development | REST API-based | Beta |
+| **Proxmox VE** | ✅ Production Ready | REST API-based | Beta |
 | **Mock** | ✅ Complete | In-memory simulation | Testing |
 
 ## Comprehensive Capability Matrix
@@ -38,6 +38,9 @@ All providers implement these core operations:
 | **Reboot** | ✅ | ✅ | ✅ | ✅ | Graceful and forced restart |
 | **Suspend** | ✅ | ❌ | ✅ | ✅ | Memory state preservation |
 | **Describe** | ✅ | ✅ | ✅ | ✅ | VM state and properties |
+| **Reconfigure** | ✅ | ⚠️ | ✅ | ✅ | CPU/Memory/Disk changes (Libvirt requires restart) |
+| **TaskStatus** | ✅ | N/A | ✅ | ✅ | Async operation tracking |
+| **ConsoleURL** | ✅ | ✅ | ⚠️ | ✅ | Remote console access (Proxmox planned) |
 
 ### Resource Management
 
@@ -79,10 +82,10 @@ All providers implement these core operations:
 | Capability | vSphere | Libvirt | Proxmox | Mock | Notes |
 |------------|---------|---------|---------|------|-------|
 | **Template Deployment** | ✅ | ✅ | ✅ | ✅ | Deploy from templates |
-| **Clone Operations** | ✅ | ✅ | ✅ | ✅ | VM duplication |
-| **Linked Clones** | ✅ | ✅ | ✅ | ✅ | COW-based clones |
+| **Clone Operations** | ✅ Complete | ✅ | ✅ | ✅ | Full VM duplication with snapshot support |
+| **Linked Clones** | ✅ | ❌ | ✅ | ✅ | COW-based clones with automatic snapshot creation |
 | **Full Clones** | ✅ | ✅ | ✅ | ✅ | Independent copies |
-| **VM Reconfiguration** | ✅ | ⚠️ Restart Required | ✅ | ✅ | Resource modification |
+| **VM Reconfiguration** | ✅ Complete | ⚠️ Restart Required | ✅ | ✅ | Online resource modification |
 
 ### Snapshot Operations
 
@@ -135,6 +138,8 @@ All providers implement these core operations:
 | **Health Checks** | ✅ | ✅ | ✅ | ✅ | VM and guest health |
 | **Alerting** | ✅ | ❌ | ✅ | ✅ | Threshold-based notifications |
 | **Historical Data** | ✅ | ❌ | ✅ | ✅ | Performance history |
+| **Console URL Generation** | ✅ | ✅ | ⚠️ | ✅ | Web/VNC console access (Proxmox planned) |
+| **Guest Agent Integration** | ✅ | ✅ | ✅ Complete | ✅ | IP detection and guest info |
 
 ## Provider-Specific Features
 
@@ -149,6 +154,10 @@ All providers implement these core operations:
 - **Storage vMotion**: Live storage migration
 - **vSAN Integration**: Hyper-converged storage
 - **NSX Integration**: Software-defined networking
+- **Hot Reconfiguration**: Online CPU/memory/disk changes with hot-add support
+- **TaskStatus Tracking**: Real-time async operation monitoring via govmomi
+- **Clone Operations**: Full and linked clones with automatic snapshot handling
+- **Web Console URLs**: Direct vSphere web client console access
 
 ### Libvirt/KVM Exclusive
 
@@ -159,6 +168,8 @@ All providers implement these core operations:
 - **Storage Pool Flexibility**: Multiple storage backend support
 - **Cloud Image Support**: Direct cloud image deployment
 - **Host Device Passthrough**: Hardware device assignment
+- **Reconfiguration Support**: CPU/memory/disk changes via virsh (restart required)
+- **VNC Console Access**: Direct VNC console URL generation for remote viewers
 
 ### Proxmox VE Exclusive
 
@@ -168,6 +179,9 @@ All providers implement these core operations:
 - **Cluster Management**: Multi-node cluster support
 - **ZFS Integration**: Advanced filesystem features
 - **Ceph Integration**: Distributed storage
+- **Guest Agent IP Detection**: Accurate IP address extraction via QEMU guest agent
+- **Hot-plug Reconfiguration**: Online CPU/memory/disk modifications
+- **Complete CRD Integration**: Full Kubernetes custom resource support
 
 ### Mock Provider Features
 
@@ -198,10 +212,10 @@ All providers implement these core operations:
 
 All provider images are available from the GitHub Container Registry:
 
-- **vSphere**: `ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.2.0`
-- **Libvirt**: `ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.2.0`
-- **Proxmox**: `ghcr.io/projectbeskar/virtrigaud/provider-proxmox:v0.2.0`
-- **Mock**: `ghcr.io/projectbeskar/virtrigaud/provider-mock:v0.2.0`
+- **vSphere**: `ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.2.3`
+- **Libvirt**: `ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.2.3`
+- **Proxmox**: `ghcr.io/projectbeskar/virtrigaud/provider-proxmox:v0.2.3`
+- **Mock**: `ghcr.io/projectbeskar/virtrigaud/provider-mock:v0.2.3`
 
 ## Choosing a Provider
 
@@ -275,16 +289,19 @@ All provider images are available from the GitHub Container Registry:
 
 | Feature Category | vSphere | Libvirt | Proxmox | Mock |
 |-----------------|---------|---------|---------|------|
-| **Production Ready** | ✅ | ✅ | ⚠️ Beta | ✅ Testing |
-| **Documentation** | Complete | Complete | Partial | Complete |
+| **Production Ready** | ✅ | ✅ | ✅ Beta | ✅ Testing |
+| **Documentation** | Complete | Complete | Complete | Complete |
 | **Community Support** | Active | Active | Growing | N/A |
 | **Enterprise Support** | Available | Available | Available | N/A |
 
 ## Version History
 
+- **v0.2.3**: Provider feature parity - Reconfigure, Clone, TaskStatus, ConsoleURL
+- **v0.2.2**: Nested virtualization, TPM support, comprehensive snapshot management
+- **v0.2.1**: Critical fixes, documentation updates, VMClass disk settings
 - **v0.2.0**: Production-ready vSphere and Libvirt providers
 - **v0.1.0**: Initial provider framework and mock implementation
 
 ---
 
-*This document reflects VirtRigaud v0.2.0 capabilities. For the latest updates, see the [VirtRigaud documentation](https://projectbeskar.github.io/virtrigaud/).*
+*This document reflects VirtRigaud v0.2.3 capabilities. For the latest updates, see the [VirtRigaud documentation](https://projectbeskar.github.io/virtrigaud/).*

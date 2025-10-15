@@ -122,7 +122,7 @@ graph TB
      --set providers.vsphere.enabled=true \
      --set providers.libvirt.enabled=true \
      --set providers.proxmox.enabled=false \
-     --version v0.2.2
+     --version v0.2.3
    
    # CRDs are automatically upgraded during 'helm upgrade' (default behavior)
    # To disable automatic CRD upgrades, use:
@@ -242,40 +242,53 @@ For detailed instructions, see [Quick Start Guide](docs/getting-started/quicksta
   - VM creation from templates
   - Power management (On/Off/ShutDown)
   - Resource configuration (CPU/Memory/Disks)
+  - **Hot reconfiguration** (CPU/Memory/Disk resizing)
+  - **VM cloning** (full and linked clones)
+  - **Async task tracking** with TaskStatus RPC
+  - **Web console URLs** for direct VM access
   - Cloud-init support via guestinfo
   - Network configuration with portgroups
-  - Async task monitoring
+  - Snapshot management with memory state
   
-- **Libvirt/KVM** - **Pre-Release**
+- **Libvirt/KVM** - **Production Ready**
   - VM creation from qcow2 images
   - Power management (On/Off/Reboot)  
   - Resource configuration (CPU/Memory/Disks)
+  - **Reconfiguration** (CPU/Memory/Disk - requires VM restart)
+  - **VNC console URLs** for remote VM access
   - Cloud-init support via nocloud ISO
   - Network configuration with bridges/networks
   - Storage pool and volume management
+  - Snapshot management (storage-dependent)
+  - QEMU guest agent integration
 
-- **Proxmox VE** - **In Development**
+- **Proxmox VE** - **Production Ready (Beta)**
   - VM creation from templates or ISO
   - Power management (On/Off/Reboot)
   - **Hot-plug reconfiguration** (CPU/Memory/Disk)
   - **Snapshot management** (with memory state)
+  - **Guest agent integration** for accurate IP detection
   - **Multi-NIC networking** with VLAN support
   - **Linked/Full cloning**
   - **Image import** from URLs
   - Cloud-init support with static IPs
   - Async task monitoring with jittered backoff
+  - Complete CRD integration
 
 ### Provider Feature Matrix
 
 | Feature | vSphere | Libvirt | Proxmox | Notes |
 |---------|---------|---------|---------|-------|
 | **Core Operations** | ✅ | ✅ | ✅ | Create/Delete/Power/Describe |
-| **Hot Reconfiguration** | ⚠️ Limited | ❌ | ✅ | CPU/Memory online changes |
+| **Reconfiguration** | ✅ | ⚠️ | ✅ | CPU/Memory/Disk changes (Libvirt requires restart) |
 | **Disk Expansion** | ✅ | ✅ | ✅ | Online disk growth |
 | **Snapshots** | ✅ | ✅ | ✅ | VM state snapshots |
 | **Memory Snapshots** | ✅ | ❌ | ✅ | Include RAM in snapshots |
-| **Cloning** | ✅ | ✅ | ✅ | VM duplication |
+| **Cloning** | ✅ | ✅ | ✅ | Full and linked clones |
 | **Linked Clones** | ✅ | ❌ | ✅ | COW-based fast clones |
+| **Task Tracking** | ✅ | N/A | ✅ | Async operation monitoring |
+| **Console URLs** | ✅ | ✅ | ⚠️ | vSphere web console, VNC (Proxmox planned) |
+| **Guest Agent** | ✅ | ✅ | ✅ | IP detection and guest info |
 | **Image Import** | ❌ | ✅ | ✅ | Import from URLs/files |
 | **Multi-NIC** | ✅ | ✅ | ✅ | Multiple network interfaces |
 | **VLAN Support** | ✅ | ✅ | ✅ | 802.1Q VLAN tagging |

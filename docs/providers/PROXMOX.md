@@ -13,6 +13,7 @@ The Proxmox provider enables VirtRigaud to manage virtual machines on Proxmox VE
 - ✅ Cloud-init integration
 - ✅ Snapshot management (create, delete, revert)
 - ✅ VM reconfiguration (CPU, memory, disk)
+- ✅ QEMU guest agent integration for IP detection (v0.2.3+)
 - ✅ Multi-node cluster support
 
 ## Configuration

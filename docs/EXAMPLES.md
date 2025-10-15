@@ -61,12 +61,12 @@ spec:
     name: provider-creds
   runtime:
     mode: Remote              # Required - only mode supported
-    image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.2.0"
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.2.3"
     service:
       port: 9090
 ```
 
-### Current API Schema (v0.2.0)
+### Current API Schema (v0.2.3)
 
 - **VMClass**: Standard Kubernetes resource quantities (`cpus: 4`, `memory: "4Gi"`)
 - **VMImage**: Provider-specific source configurations
