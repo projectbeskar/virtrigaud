@@ -566,8 +566,33 @@ func (p *Provider) Describe(ctx context.Context, req *providerv1.DescribeRequest
 	consoleURL := fmt.Sprintf("%s/#v1:0:=qemu/%d:4:5:=console",
 		strings.TrimSuffix(endpoint, "/api2"), vmid)
 
-	// TODO: Extract IP addresses from guest agent or network config
+	// Extract IP addresses from guest agent
 	var ips []string
+	if vm.Status == "running" {
+		// Try to get IP addresses from QEMU guest agent
+		interfaces, err := p.client.GetGuestNetworkInterfaces(ctx, node, vmid)
+		if err != nil {
+			p.logger.Debug("Failed to get guest network interfaces (guest agent may not be available)", "error", err)
+		} else {
+			// Extract IP addresses from interfaces
+			for _, iface := range interfaces {
+				// Skip loopback interface
+				if iface.Name == "lo" {
+					continue
+				}
+
+				for _, ipAddr := range iface.IPAddresses {
+					// Filter out link-local addresses
+					ip := ipAddr.IPAddress
+					if ip != "" && !strings.HasPrefix(ip, "127.") &&
+						!strings.HasPrefix(ip, "169.254.") &&
+						!strings.HasPrefix(ip, "fe80:") {
+						ips = append(ips, ip)
+					}
+				}
+			}
+		}
+	}
 
 	// Provider-specific details
 	providerRaw := map[string]string{
@@ -852,12 +877,12 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*pveapi.VM
 	if req.ImageJson != "" {
 		// DEBUG: Log the raw ImageJson to see what we're actually receiving
 		p.logger.Info("DEBUG: Received ImageJson", "json", req.ImageJson)
-		
+
 		// First try parsing as contracts.VMImage (sent by controller)
 		var contractsImage map[string]interface{}
 		if err := json.Unmarshal([]byte(req.ImageJson), &contractsImage); err == nil {
 			p.logger.Info("DEBUG: Parsed ImageJson as map", "keys", fmt.Sprintf("%v", contractsImage))
-			
+
 			// Check for TemplateName field (from contracts.VMImage - note capital T)
 			if templateName, ok := contractsImage["TemplateName"].(string); ok && templateName != "" {
 				config.Template = templateName

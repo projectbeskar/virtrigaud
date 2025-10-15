@@ -1014,7 +1014,6 @@ func (c *Client) ReconfigureVMRaw(ctx context.Context, node string, vmid int, va
 	return "", nil // Synchronous operation completed
 }
 
-
 // DetectPrimaryDisk detects the primary boot disk from VM configuration
 // Returns the disk identifier (e.g., "scsi0", "virtio0", "sata0", "ide0")
 func (c *Client) DetectPrimaryDisk(ctx context.Context, node string, vmid int) (string, error) {
@@ -1025,7 +1024,7 @@ func (c *Client) DetectPrimaryDisk(ctx context.Context, node string, vmid int) (
 
 	// Check for disks in order of preference: virtio, scsi, sata, ide
 	diskPrefixes := []string{"virtio", "scsi", "sata", "ide"}
-	
+
 	for _, prefix := range diskPrefixes {
 		for i := 0; i < 16; i++ { // Proxmox supports up to 16 devices per bus
 			diskKey := fmt.Sprintf("%s%d", prefix, i)
@@ -1045,5 +1044,52 @@ func (c *Client) DetectPrimaryDisk(ctx context.Context, node string, vmid int) (
 	return "scsi0", nil
 }
 
-// DetectPrimaryDisk detects the primary boot disk from VM configuration
-// Returns the disk identifier (e.g., "scsi0", "virtio0", "sata0", "ide0")
+// GuestNetworkInterface represents a network interface from the guest agent
+type GuestNetworkInterface struct {
+	Name        string           `json:"name"`
+	HWAddr      string           `json:"hardware-address"`
+	IPAddresses []GuestIPAddress `json:"ip-addresses"`
+}
+
+// GuestIPAddress represents an IP address from the guest agent
+type GuestIPAddress struct {
+	IPAddress     string `json:"ip-address"`
+	IPAddressType string `json:"ip-address-type"` // "ipv4" or "ipv6"
+	Prefix        int    `json:"prefix"`
+}
+
+// GetGuestNetworkInterfaces retrieves network interfaces from the QEMU guest agent
+func (c *Client) GetGuestNetworkInterfaces(ctx context.Context, node string, vmid int) ([]GuestNetworkInterface, error) {
+	path := fmt.Sprintf("/api2/json/nodes/%s/qemu/%d/agent/network-get-interfaces", node, vmid)
+
+	resp, err := c.request(ctx, "GET", path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get guest network interfaces: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("get guest network interfaces failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var apiResp APIResponse
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	// Marshal and unmarshal to convert from interface{} to our struct
+	dataBytes, err := json.Marshal(apiResp.Data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal guest network data: %w", err)
+	}
+
+	var result struct {
+		Result []GuestNetworkInterface `json:"result"`
+	}
+	if err := json.Unmarshal(dataBytes, &result); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal guest network interfaces: %w", err)
+	}
+
+	return result.Result, nil
+}
