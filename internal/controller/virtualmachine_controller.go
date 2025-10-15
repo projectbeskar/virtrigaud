@@ -393,7 +393,7 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 	networks []*infravirtrigaudiov1beta1.VMNetworkAttachment,
 ) contracts.CreateRequest {
 	log := ctrl.Log.WithName("buildCreateRequest")
-	
+
 	// Convert VMClass
 	class := contracts.VMClass{
 		CPU:              vmClass.Spec.CPU,
@@ -498,7 +498,7 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 		log.Info("DEBUG controller: Proxmox image source found",
 			"templateID", vmImage.Spec.Source.Proxmox.TemplateID,
 			"templateName", vmImage.Spec.Source.Proxmox.TemplateName)
-		
+
 		if vmImage.Spec.Source.Proxmox.TemplateID != nil {
 			image.TemplateName = fmt.Sprintf("%d", *vmImage.Spec.Source.Proxmox.TemplateID)
 			log.Info("DEBUG controller: Set TemplateName from TemplateID",

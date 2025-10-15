@@ -369,7 +369,7 @@ func (s *Server) handleCloneVM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	targetVMIDStr := r.FormValue("vmid")
+	targetVMIDStr := r.FormValue("newid")
 	targetVMID, err := strconv.Atoi(targetVMIDStr)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, "Invalid target VMID")
