@@ -5,11 +5,58 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.3] 
 
 ### Added
 
-#### Proxmox Provider - Production Ready
+#### vSphere Provider
+- **VM Reconfiguration Support**: Complete implementation of dynamic VM reconfiguration
+  - Online CPU adjustment for running VMs (hot-add when supported by guest OS)
+  - Online memory adjustment for running VMs (hot-add when supported)
+  - Disk resizing with safety checks to prevent data loss (shrinking prevented)
+  - Intelligent change detection to avoid unnecessary reconfigurations
+  - Memory parsing support for multiple units (Mi, Gi, MiB, GiB)
+  - Automatic fallback to offline changes when online modification is not supported
+- **Asynchronous Task Tracking**: Full TaskStatus RPC implementation
+  - Real-time monitoring of vSphere async operations via govmomi
+  - Task state reporting (queued, running, success, error)
+  - Error information extraction from failed tasks
+  - Progress tracking with percentage completion
+  - Integration with vSphere task manager for reliable operation status
+- **VM Cloning Operations**: Complete clone functionality
+  - Full clone support for independent VM copies
+  - Linked clone support for space-efficient template-based deployments
+  - Automatic snapshot creation for linked clones when no snapshot exists
+  - Proper disk relocation and storage configuration
+  - Clone naming and folder placement control
+- **Console URL Generation**: Web-based VM console access
+  - Automatic vSphere web client console URL generation
+  - Direct browser-based VM console access via vCenter
+  - URL includes VM instance UUID for reliable identification
+  - Integration with vCenter endpoint for proper routing
+
+#### Libvirt Provider
+- **VM Reconfiguration Support**: Complete virsh-based reconfiguration
+  - Online CPU adjustment via `virsh setvcpus --live` for running VMs
+  - Online memory adjustment via `virsh setmem --live` for running VMs
+  - Offline configuration updates for stopped VMs via `virsh setvcpus/setmem --config`
+  - Disk volume resizing via storage provider integration
+  - Automatic VM info parsing to extract current CPU and memory settings
+  - Graceful handling of operations requiring VM restart
+  - Memory unit conversion and validation (bytes, KiB, MiB, GiB)
+- **VNC Console URL Generation**: Remote console access support
+  - Automatic VNC port extraction from domain XML configuration
+  - VNC console URL generation for direct viewer connections
+  - Support for standard VNC clients and web-based VNC viewers
+  - Integration with libvirt graphics configuration
+
+#### Proxmox Provider
+- **Guest Agent IP Detection**: Enhanced network information retrieval
+  - QEMU guest agent integration for accurate IP address detection
+  - Extraction of all network interfaces from running VMs
+  - Automatic filtering of loopback and link-local addresses
+  - Support for both IPv4 and IPv6 address reporting
+  - Real-time IP information when guest agent is installed and running
 - **Template Cloning Support**: Full VM cloning from Proxmox templates
   - Automatic template detection from VMImage CRD `templateID` or `templateName`
   - Full clone and linked clone support via `fullClone` parameter
@@ -39,25 +86,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+#### vSphere Provider
+
+**Reconfigure Type Mismatch**:
+- **Root Issue**: Memory comparison in Reconfigure function caused compilation error due to type mismatch between int64 and int32
+- **Cause**: govmomi's `VirtualMachineConfigInfo.Hardware.MemoryMB` field is int32, but comparison was using int64
+- **Fix**: Added explicit type casting `int64(vmMo.Config.Hardware.MemoryMB)` to ensure type compatibility
+- **Impact**: Reconfigure operations now compile and execute correctly without type errors
+
+#### Libvirt Provider
+
+**Missing Standard Library Imports**:
+- **Root Issue**: Reconfigure and Describe functions referenced undefined packages causing compilation failures
+- **Cause**: Implementation added `strconv` usage for integer conversion and `net/url` for URL parsing without importing packages
+- **Fix**: Added missing imports:
+  - `import "strconv"` for string-to-integer conversions in CPU/memory parsing
+  - `import "net/url"` for VNC console URL construction
+- **Impact**: Provider now compiles successfully and all reconfiguration and console URL features work correctly
+
 #### Proxmox Provider
 
-**SSH Keys Encoding (rc1-rc12)**:
+**SSH Keys Encoding**:
 - **Root Issue**: Proxmox API's `sshkeys` parameter requires **double URL encoding** due to its internal decoding behavior
-- **Discovery**: Found working Python implementation that does `quote(sshKey, safe='')` followed by `wPost(data)` which form-encodes again, resulting in double encoding
-- **Solution**: Implemented double encoding in `request()` function:
-  1. `TrimSpace()` removes trailing newlines from SSH keys
-  2. First `url.QueryEscape()`: space -> %20, + -> %2B
-  3. Replace + with %20: ensures spaces are encoded as %20, not +
-  4. Second encoding pass: %20 -> %2520, %2B -> %252B
-  5. Manual string concatenation to prevent triple encoding
-- **Technical Details**: 
-  - Proxmox HTTP layer decodes once: %2520 -> %20
-  - Proxmox sshkeys parser decodes again: %20 -> space
-  - Final result: Original SSH key correctly restored
-  - Other parameters use standard single encoding
-- **Impact**: Proxmox VMs can now be created with cloud-init SSH key injection working correctly
-
-**Template Cloning and Boot Order (rc13-rc16)**:
+**Template Cloning and Boot Order**:
 - **Root Issue**: Provider was creating new VMs instead of cloning from templates, causing boot failures
 - **Fix**: Implemented proper template detection and cloning workflow:
   1. Parse `TemplateName` from VMImage CRD (via controller)
@@ -68,11 +119,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Boot Order Detection**: Added intelligent disk detection that:
   - Scans VM config for disk attachments (virtio, scsi, sata, ide)
   - Filters out CD-ROM devices
-  - Prioritizes modern disk types (virtio > scsi > sata > ide)
+  - Prioritizes disk types (virtio > scsi > sata > ide)
   - Constructs proper boot parameter (e.g., `boot=order=scsi0;ide2`)
-- **Impact**: Proxmox VMs now boot correctly from cloned templates with proper disk configuration
 
-**Controller Image Source Parsing (rc17-rc19)**:
+
+**Controller Image Source Parsing**:
 - **Root Issue**: Controller was sending empty `TemplateName` to provider, causing fallback to VM creation
 - **Cause**: JSON field name mismatch - controller uses `TemplateName` (capital T) but provider expected `template_name` (snake_case)
 - **Fix**: Updated provider to parse `TemplateName` field correctly from contracts.VMImage JSON
@@ -81,7 +132,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Release Workflow
 
-**Helm Chart Image Tag Updates (Fixed)**:
+**Helm Chart Image Tag Updates**:
 - **Root Issue**: Manager and provider images were not being updated during Helm releases, staying pinned to v0.2.0
 - **Cause**: sed patterns in release workflow used incorrect range expressions that stopped before reaching the `tag:` lines
   - Manager pattern: `/^manager:/,/^  image:/` stopped at line 16, but `tag:` is on line 18
@@ -91,9 +142,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - LibVirt: `LIBVIRT_START` to `LIBVIRT_START+15`
   - vSphere: `VSPHERE_START` to `VSPHERE_START+15`
   - Proxmox: `PROXMOX_START` to `PROXMOX_START+15`
-  - kubectl: Already using line numbers (no change needed)
 - **Impact**: All component images (manager, providers, kubectl) now update correctly to match release version
-- **Testing**: Future releases will have consistent image tags across all deployments
+
+
+## [0.2.2] - 2025-10-13
 
 ### Added (Continued)
 
@@ -135,7 +187,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Creating isolated lab environments for security testing
 - Educational scenarios for learning virtualization technologies
 
-#### VM Snapshot Management (Production Ready)
+#### VM Snapshot Management
 - **Complete VMSnapshot CRD**: Full-featured API for VM snapshot lifecycle management
   - Snapshot creation with memory state and filesystem quiescing options
   - Snapshot deletion with proper cleanup
@@ -143,14 +195,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Retention policies (maxAge, deleteOnVMDelete, maxCount)
   - Automated scheduling support via cron expressions
   - Snapshot metadata and tagging
-- **vSphere Provider Implementation** ✅ **COMPLETED**:
+- **vSphere Provider Implementation**:
   - Full govmomi-based snapshot operations (Create, Delete, Revert)
   - Memory snapshot support for powered-on VMs
   - Filesystem quiescing with VMware Tools integration
   - Automatic power state handling during revert
   - Hierarchical snapshot tree navigation
   - Synchronous operations for immediate completion
-- **LibVirt Provider Implementation** ✅ **COMPLETED**:
+- **LibVirt Provider Implementation**:
   - Full virsh-based snapshot operations (Create, Delete, Revert)
   - Memory snapshot support for running VMs with qcow2 storage
   - Disk-only snapshots for VMs with incompatible storage backends
@@ -160,7 +212,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Synchronous operations with immediate feedback
   - Snapshot name sanitization for virsh compatibility
   - Helper methods for snapshot listing and querying
-- **Proxmox Provider Implementation** ✅ **PRODUCTION READY**:
+- **Proxmox Provider Implementation**:
   - Complete snapshot lifecycle support
   - Memory state inclusion (vmstate)
   - Async task handling with status tracking
@@ -169,7 +221,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - SSH key injection with proper encoding
   - Network configuration with bridge support
   - Storage pool management
-- **Controller Integration** ✅ **PRODUCTION READY**:
+- **Controller Integration**:
   - Real provider RPC calls (no more simulation)
   - Proper task status polling for async operations
   - Comprehensive error handling and reporting
