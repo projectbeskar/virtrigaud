@@ -453,6 +453,45 @@ spec:
                         pattern: ^(https?|ftp)://.*
                         type: string
                     type: object
+                  proxmox:
+                    description: Proxmox contains Proxmox VE-specific image configuration
+                    properties:
+                      format:
+                        default: qcow2
+                        description: Format specifies the disk format
+                        enum:
+                        - raw
+                        - qcow2
+                        - vmdk
+                        type: string
+                      fullClone:
+                        default: true
+                        description: FullClone determines if this should be a full
+                          clone (default) or linked clone
+                        type: boolean
+                      node:
+                        description: Node specifies the Proxmox node where the template
+                          exists
+                        maxLength: 255
+                        type: string
+                      storage:
+                        description: |-
+                          Storage specifies the Proxmox storage for cloning
+                          Examples: "local-lvm", "vms", "nfs-storage"
+                        maxLength: 255
+                        type: string
+                      templateID:
+                        description: TemplateID specifies an existing Proxmox template
+                          VMID
+                        maximum: 999999999
+                        minimum: 100
+                        type: integer
+                      templateName:
+                        description: TemplateName specifies an existing Proxmox template
+                          name
+                        maxLength: 255
+                        type: string
+                    type: object
                   registry:
                     description: Registry contains container registry image configuration
                     properties:

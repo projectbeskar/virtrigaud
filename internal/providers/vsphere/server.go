@@ -556,7 +556,7 @@ func (p *Provider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureR
 		if memory, ok := classData["memory"].(string); ok {
 			memMiB, err := p.parseMemory(memory)
 			if err == nil {
-				newMemoryMB := int64(memMiB)
+				newMemoryMB := memMiB
 				currentMemoryMB := int64(vmMo.Config.Hardware.MemoryMB)
 				if newMemoryMB != currentMemoryMB {
 					p.logger.Info("Memory change requested", "vm_id", req.Id, "old_mb", currentMemoryMB, "new_mb", newMemoryMB)
@@ -577,7 +577,7 @@ func (p *Provider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureR
 				sizeGiB, err := p.parseMemory(sizeStr)
 				if err == nil {
 					// Convert MiB to GiB (if parseMemory returns MiB)
-					sizeGB := int64(sizeGiB / 1024)
+					sizeGB := sizeGiB / 1024
 					if sizeGB > 0 {
 						// Find the primary disk
 						var primaryDisk *types.VirtualDisk
