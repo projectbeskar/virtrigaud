@@ -1,6 +1,6 @@
 # VirtRigaud Examples
 
-This directory contains comprehensive examples for VirtRigaud v0.2.1+, showcasing all features and capabilities.
+This directory contains comprehensive examples for VirtRigaud v0.2.3+, showcasing all features and capabilities.
 
 ## Quick Start Examples
 
@@ -34,76 +34,104 @@ This directory contains comprehensive examples for VirtRigaud v0.2.1+, showcasin
 - **[multi-provider-example.yaml](multi-provider-example.yaml)** - Multiple providers in one cluster
 - **[libvirt-complete-example.yaml](libvirt-complete-example.yaml)** - Complete LibVirt deployment
 
-## v0.2.1 Feature Summary
+## v0.2.3 Feature Summary
 
-### 🔄 Enhanced Power Management
+### 🔧 VM Reconfiguration (vSphere, Libvirt, Proxmox)
 ```yaml
-# Graceful shutdown with VMware Tools
-powerState: "OffGraceful"
-
-lifecycle:
-  gracefulShutdownTimeout: "90s"  # Configurable timeout
-  preStop:
-    exec:
-      command: ["/bin/bash", "-c", "systemctl stop nginx && sync"]
+# Online resource changes (vSphere, Proxmox)
+# Offline changes (Libvirt - requires restart)
+spec:
+  vmClassRef: medium  # Change from small to medium
+  powerState: "On"
 ```
 
-### ⚙️ Hardware Version Management (vSphere)
+### 📋 Async Task Tracking (vSphere, Proxmox)
 ```yaml
-extraConfig:
-  "vsphere.hardwareVersion": "21"  # ESXi 8.0+ features
+# Automatic tracking of long-running operations
+# Real-time progress and error reporting
 ```
 
-### 💾 Proper Disk Sizing
+### 🖥️ Console Access (vSphere, Libvirt)
 ```yaml
-diskDefaults:
-  type: thin
-  size: "100Gi"  # Now properly respected across all providers
-
-disks:
-- name: data
-  sizeGiB: 500  # Additional disks with correct sizing
+# Web console URLs automatically generated
+status:
+  consoleURL: "https://vcenter.example.com/ui/app/vm..."  # vSphere
+  # or
+  consoleURL: "vnc://libvirt-host:5900"  # Libvirt VNC
 ```
 
-### 🚀 Enhanced Lifecycle Management
+### 🌐 Guest Agent Integration (Proxmox)
 ```yaml
-lifecycle:
-  postStart:
-    exec:
-      command: ["/bin/bash", "-c", "echo 'VM started' >> /var/log/startup.log"]
-  preStop:
-    exec:
-      command: ["/bin/bash", "-c", "systemctl stop services && sync"]
+# Accurate IP detection via QEMU guest agent
+status:
+  ipAddresses:
+    - 192.168.1.100
+    - fd00::1234:5678:9abc:def0
 ```
+
+### 📦 VM Cloning (vSphere)
+```yaml
+# Full and linked clones with automatic snapshot handling
+spec:
+  vmImageRef: source-vm
+  cloneType: linked  # or "full"
+```
+
+### 🔄 Previous Features (v0.2.1)
+
+- **Graceful Shutdown**: OffGraceful power state with VMware Tools
+- **Hardware Version Management**: vSphere hardware version control
+- **Proper Disk Sizing**: Correct disk allocation across providers
+- **Enhanced Lifecycle Management**: postStart/preStop hooks
 
 ## Usage Patterns
 
-### Testing v0.2.1 Features
+### Testing v0.2.3 Features
 
-1. **Start with the feature showcase**:
+1. **Test VM reconfiguration**:
    ```bash
-   kubectl apply -f v021-feature-showcase.yaml
+   # Change VM class to trigger reconfiguration
+   kubectl patch virtualmachine my-vm --type='merge' \
+     -p='{"spec":{"vmClassRef":"medium"}}'
+   
+   # Watch the reconfiguration process
+   kubectl get vm my-vm -w
    ```
 
-2. **Test graceful shutdown**:
+2. **Access VM console**:
    ```bash
-   kubectl patch virtualmachine v021-feature-demo --type='merge' \
-     -p='{"spec":{"powerState":"OffGraceful"}}'
+   # Get console URL from VM status
+   kubectl get vm my-vm -o jsonpath='{.status.consoleURL}'
+   
+   # For VNC (Libvirt): Use any VNC client
+   vncviewer $(kubectl get vm my-vm -o jsonpath='{.status.consoleURL}' | sed 's/vnc:\/\///')
    ```
 
-3. **Monitor graceful shutdown**:
+3. **Monitor async tasks** (vSphere, Proxmox):
    ```bash
-   kubectl logs -f deployment/virtrigaud-provider-[provider-name]
+   # Watch task progress in provider logs
+   kubectl logs -f deployment/virtrigaud-provider-vsphere
    ```
 
-4. **Verify hardware version** (vSphere):
+4. **Verify guest agent** (Proxmox):
    ```bash
-   kubectl exec -it vm-name -- vmware-toolbox-cmd stat raw text session
+   # Check IP addresses from guest agent
+   kubectl get vm my-vm -o jsonpath='{.status.ipAddresses}'
    ```
 
-5. **Check disk sizes**:
+5. **Test VM cloning** (vSphere):
    ```bash
-   kubectl exec -it vm-name -- df -h
+   # Create a clone of existing VM
+   kubectl apply -f - <<EOF
+   apiVersion: infra.virtrigaud.io/v1beta1
+   kind: VirtualMachine
+   metadata:
+     name: web-server-clone
+   spec:
+     vmClassRef: small
+     vmImageRef: web-server-01
+     cloneType: linked
+   EOF
    ```
 
 ### Development Workflow
@@ -140,8 +168,10 @@ docs/examples/
 
 ## Version Compatibility
 
-- **v0.2.1+**: All examples with v0.2.1 features (OffGraceful, hardware version, disk sizing)
-- **v0.2.0**: Examples without v0.2.1-specific features still work
+- **v0.2.3+**: All examples with v0.2.3 features (Reconfigure, Clone, TaskStatus, ConsoleURL, Guest Agent)
+- **v0.2.2**: Nested virtualization, TPM support, snapshot management
+- **v0.2.1**: Graceful shutdown, hardware version, disk sizing fixes
+- **v0.2.0**: Initial production-ready providers
 - **v0.1.x**: Legacy examples in git history
 
 ## Need Help?

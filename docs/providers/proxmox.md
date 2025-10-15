@@ -10,6 +10,7 @@ This provider implements the VirtRigaud provider interface to manage VM lifecycl
 - **Delete**: Remove VMs and associated resources
 - **Power**: Start, stop, and reboot virtual machines
 - **Describe**: Query VM state, IPs, and console access
+- **Guest Agent Integration**: Enhanced IP detection via QEMU guest agent (v0.2.3+)
 - **Reconfigure**: Hot-plug CPU/memory changes, disk expansion
 - **Clone**: Create linked or full clones of existing VMs
 - **Snapshot**: Create, delete, and revert VM snapshots with memory state
@@ -62,7 +63,7 @@ API tokens provide secure, scope-limited access without exposing user passwords.
        name: pve-credentials
      runtime:
        mode: Remote
-       image: "ghcr.io/projectbeskar/virtrigaud/provider-proxmox:v0.2.0"
+       image: "ghcr.io/projectbeskar/virtrigaud/provider-proxmox:v0.2.3"
        service:
          port: 9090
    ```
@@ -452,7 +453,7 @@ spec:
     spec:
       containers:
       - name: provider-proxmox
-        image: ghcr.io/projectbeskar/virtrigaud/provider-proxmox:v0.2.0
+        image: ghcr.io/projectbeskar/virtrigaud/provider-proxmox:v0.2.3
         envFrom:
         - secretRef:
             name: proxmox-credentials
@@ -596,6 +597,68 @@ Or use Proxmox IP configuration:
 # This would be handled by the provider internally
 # when processing network specifications
 ```
+
+## Guest Agent Integration (v0.2.3+)
+
+The Proxmox provider now integrates with the QEMU Guest Agent for enhanced VM monitoring:
+
+### IP Address Detection
+
+When a VM is running, the provider automatically queries the QEMU guest agent to retrieve accurate IP addresses:
+
+```yaml
+# IP addresses are automatically populated in VM status
+kubectl get vm my-vm -o yaml
+
+status:
+  phase: Running
+  ipAddresses:
+    - 192.168.1.100
+    - fd00::1234:5678:9abc:def0
+```
+
+### Features
+
+- **Automatic IP Detection**: Retrieves all network interface IPs from running VMs
+- **IPv4 and IPv6 Support**: Reports both address families
+- **Smart Filtering**: Excludes loopback (127.0.0.1, ::1) and link-local (169.254.x.x, fe80::) addresses
+- **Real-time Updates**: Information updated during Describe operations
+- **Graceful Degradation**: Falls back gracefully when guest agent is not available
+
+### Requirements
+
+For guest agent integration to work, the VM must have:
+
+1. **QEMU Guest Agent Installed**:
+   ```bash
+   # Ubuntu/Debian
+   apt-get install qemu-guest-agent
+   
+   # CentOS/RHEL
+   yum install qemu-guest-agent
+   
+   # Enable and start the service
+   systemctl enable --now qemu-guest-agent
+   ```
+
+2. **VM Configuration**: Guest agent is automatically enabled during VM creation
+
+### Implementation Details
+
+The provider:
+1. Checks if VM is in running state
+2. Makes API call to `/api2/json/nodes/{node}/qemu/{vmid}/agent/network-get-interfaces`
+3. Parses network interface details from guest agent response
+4. Filters out irrelevant addresses (loopback, link-local)
+5. Populates `status.ipAddresses` field
+
+### Troubleshooting
+
+If IP addresses are not appearing:
+- Verify guest agent is installed: `systemctl status qemu-guest-agent`
+- Check Proxmox VM options: `qm config <vmid> | grep agent`
+- Ensure VM has network connectivity
+- Check provider logs for guest agent errors
 
 ## Cloning Behavior
 

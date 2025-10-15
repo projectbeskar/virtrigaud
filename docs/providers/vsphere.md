@@ -10,9 +10,11 @@ This provider implements the VirtRigaud provider interface to manage VM lifecycl
 - **Delete**: Remove VMs and associated storage (with configurable retention)
 - **Power**: Start, stop, restart, and suspend virtual machines
 - **Describe**: Query VM state, resource usage, guest info, and vSphere properties
-- **Reconfigure**: Hot-add CPU/memory, resize disks, modify network adapters
-- **Clone**: Create full or linked clones from existing VMs or templates
+- **Reconfigure**: Hot-add CPU/memory, resize disks, modify network adapters (v0.2.3+)
+- **Clone**: Create full or linked clones from existing VMs or templates (v0.2.3+)
 - **Snapshot**: Create, delete, and revert VM snapshots with memory state
+- **TaskStatus**: Track asynchronous operations with progress monitoring (v0.2.3+)
+- **ConsoleURL**: Generate vSphere web client console URLs (v0.2.3+)
 - **ImagePrepare**: Import OVF/OVA, deploy from content library, or ensure template existence
 
 ## Prerequisites
@@ -61,7 +63,7 @@ spec:
   insecureSkipVerify: false
   runtime:
     mode: Remote
-    image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.2.0"
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.2.3"
     service:
       port: 9090
 ```
@@ -409,6 +411,107 @@ spec:
 ```
 
 ## Advanced Features
+
+### VM Reconfiguration (v0.2.3+)
+
+The vSphere provider supports online VM reconfiguration for CPU, memory, and disk resources:
+
+```yaml
+# Reconfigure VM resources
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: web-server
+spec:
+  vmClassRef: medium  # Change from small to medium
+  powerState: "On"
+```
+
+**Capabilities**:
+- **Online CPU Changes**: Hot-add CPUs to running VMs (requires guest OS support)
+- **Online Memory Changes**: Hot-add memory to running VMs (requires guest OS support)
+- **Disk Resizing**: Expand disks online (shrinking not supported for safety)
+- **Automatic Fallback**: Falls back to offline changes if hot-add not supported
+- **Intelligent Detection**: Only applies changes when needed
+
+**Memory Format Support**:
+- Standard units: `2Gi`, `4096Mi`, `2048MiB`, `2GiB`
+- Parser handles multiple memory unit formats
+
+**Limitations**:
+- Disk shrinking prevented to avoid data loss
+- Some guest operating systems require special configuration for hot-add
+- BIOS firmware VMs have limited hot-add support (use EFI firmware)
+
+### VM Cloning (v0.2.3+)
+
+Create full or linked clones of existing VMs and templates:
+
+```yaml
+# Clone from existing VM
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: web-server-02
+spec:
+  vmClassRef: small
+  vmImageRef: web-server-01  # Source VM
+  cloneType: linked  # or "full"
+```
+
+**Clone Types**:
+- **Full Clone**: Independent copy with separate storage
+- **Linked Clone**: Space-efficient copy using snapshots
+  - Automatically creates snapshot if none exists
+  - Requires less storage and faster creation
+  - Parent VM must remain available
+
+**Use Cases**:
+- Rapid test environment provisioning
+- Development environment duplication
+- Template-based deployments
+- Disaster recovery scenarios
+
+### Task Status Tracking (v0.2.3+)
+
+Monitor asynchronous vSphere operations in real-time:
+
+```yaml
+# VirtRigaud automatically tracks long-running operations
+# No manual configuration needed
+
+# Task tracking provides:
+# - Real-time task state (queued, running, success, error)
+# - Progress percentage
+# - Error messages for failed tasks
+# - Integration with vSphere task manager
+```
+
+**Features**:
+- Automatic tracking of all async operations
+- Progress monitoring via govmomi task manager
+- Detailed error reporting
+- Task history visibility in vCenter
+
+### Console Access (v0.2.3+)
+
+Generate direct vSphere web client console URLs:
+
+```yaml
+# Access provided in VM status
+kubectl get vm web-server -o yaml
+
+status:
+  consolURL: "https://vcenter.example.com/ui/app/vm;nav=h/urn:vmomi:VirtualMachine:vm-123:xxxxx/summary"
+  phase: Running
+```
+
+**Features**:
+- Direct browser-based VM console access
+- No additional tools required
+- Works with vSphere web client
+- Includes VM instance UUID for reliable identification
+- Generated automatically in Describe operations
 
 ### Template Management
 

@@ -20,6 +20,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -279,10 +281,202 @@ func (p *Provider) Reconfigure(ctx context.Context, id string, desired contracts
 		return "", contracts.NewRetryableError("virsh provider not initialized", nil)
 	}
 
-	// TODO: Implement reconfiguration via virsh
-	log.Printf("INFO Would reconfigure domain: %s", id)
+	hasChanges := false
+	requiresRestart := false
 
+	// Get current domain state
+	domainState, err := p.virshProvider.getDomainState(ctx, id)
+	if err != nil {
+		return "", contracts.NewRetryableError("failed to get domain state", err)
+	}
+
+	isRunning := domainState == "running"
+	log.Printf("INFO Domain %s current state: %s", id, domainState)
+
+	// Get current domain info for comparison
+	currentInfo, err := p.virshProvider.getDomainInfo(ctx, id)
+	if err != nil {
+		return "", contracts.NewRetryableError("failed to get current domain info", err)
+	}
+
+	// Handle CPU changes
+	if desired.Class.CPU > 0 {
+		currentCPUs, err := p.extractCPUCount(currentInfo)
+		if err == nil && currentCPUs != desired.Class.CPU {
+			log.Printf("INFO CPU change requested for %s: %d -> %d", id, currentCPUs, desired.Class.CPU)
+
+			if isRunning {
+				// Try online CPU change with --live flag
+				_, err = p.virshProvider.runVirshCommand(ctx, "setvcpus", id,
+					fmt.Sprintf("%d", desired.Class.CPU), "--live")
+				if err != nil {
+					log.Printf("WARN Online CPU change failed, will require restart: %v", err)
+					requiresRestart = true
+				} else {
+					log.Printf("INFO Successfully changed CPUs online for domain: %s", id)
+					hasChanges = true
+				}
+			} else {
+				// Domain is off, change config
+				_, err = p.virshProvider.runVirshCommand(ctx, "setvcpus", id,
+					fmt.Sprintf("%d", desired.Class.CPU), "--config")
+				if err != nil {
+					log.Printf("WARN Failed to set CPUs in config: %v", err)
+					requiresRestart = true
+				} else {
+					hasChanges = true
+				}
+			}
+		}
+	}
+
+	// Handle Memory changes
+	if desired.Class.MemoryMiB > 0 {
+		currentMemoryKB, err := p.extractMemoryKB(currentInfo)
+		desiredMemoryKB := int64(desired.Class.MemoryMiB) * 1024 // Convert MiB to KiB
+
+		if err == nil && currentMemoryKB != desiredMemoryKB {
+			log.Printf("INFO Memory change requested for %s: %d KiB -> %d KiB", id, currentMemoryKB, desiredMemoryKB)
+
+			if isRunning {
+				// Try online memory change with --live flag
+				_, err = p.virshProvider.runVirshCommand(ctx, "setmem", id,
+					fmt.Sprintf("%dK", desiredMemoryKB), "--live")
+				if err != nil {
+					log.Printf("WARN Online memory change failed, will require restart: %v", err)
+					requiresRestart = true
+				} else {
+					log.Printf("INFO Successfully changed memory online for domain: %s", id)
+					hasChanges = true
+				}
+			} else {
+				// Domain is off, change config
+				_, err = p.virshProvider.runVirshCommand(ctx, "setmem", id,
+					fmt.Sprintf("%dK", desiredMemoryKB), "--config")
+				if err != nil {
+					log.Printf("WARN Failed to set memory in config: %v", err)
+					requiresRestart = true
+				} else {
+					// Also update max memory
+					_, _ = p.virshProvider.runVirshCommand(ctx, "setmaxmem", id,
+						fmt.Sprintf("%dK", desiredMemoryKB), "--config")
+					hasChanges = true
+				}
+			}
+		}
+	}
+
+	// Handle Disk changes
+	if len(desired.Disks) > 0 || (desired.Class.DiskDefaults != nil && desired.Class.DiskDefaults.SizeGiB > 0) {
+		storageProvider := NewStorageProvider(p.virshProvider)
+
+		// Get desired disk size
+		var desiredDiskGB int
+		if desired.Class.DiskDefaults != nil && desired.Class.DiskDefaults.SizeGiB > 0 {
+			desiredDiskGB = int(desired.Class.DiskDefaults.SizeGiB)
+		}
+
+		if desiredDiskGB > 0 {
+			// Find the VM's disk volume
+			volumeName := fmt.Sprintf("%s-disk", id)
+
+			// Try to resize the volume
+			log.Printf("INFO Attempting to resize disk for VM %s to %dGB", id, desiredDiskGB)
+			err = storageProvider.ResizeVolume(ctx, "default", volumeName, desiredDiskGB)
+			if err != nil {
+				log.Printf("WARN Disk resize failed: %v", err)
+				// Disk resize failure is not fatal, just log it
+			} else {
+				log.Printf("INFO Successfully resized disk for VM: %s", id)
+				hasChanges = true
+			}
+		}
+	}
+
+	// Log reconfiguration results
+	if !hasChanges && !requiresRestart {
+		log.Printf("INFO No configuration changes needed for domain: %s", id)
+		return "", nil
+	}
+
+	if requiresRestart {
+		log.Printf("WARN Some changes for domain %s require a restart to take effect", id)
+		// Note: The caller (controller) should handle restarting the VM if needed
+	}
+
+	log.Printf("INFO Successfully reconfigured domain: %s", id)
 	return "", nil
+}
+
+// getVNCPort extracts the VNC port from domain XML
+func (p *Provider) getVNCPort(ctx context.Context, domainName string) (int, error) {
+	// Get domain XML
+	result, err := p.virshProvider.runVirshCommand(ctx, "dumpxml", domainName)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get domain XML: %w", err)
+	}
+
+	// Parse XML to find VNC port
+	// Look for <graphics type='vnc' port='XXXX'/>
+	lines := strings.Split(result.Stdout, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.Contains(line, "<graphics") && strings.Contains(line, "type='vnc'") {
+			// Extract port attribute
+			if portIdx := strings.Index(line, "port='"); portIdx != -1 {
+				portStart := portIdx + 6 // len("port='")
+				portEnd := strings.Index(line[portStart:], "'")
+				if portEnd > 0 {
+					portStr := line[portStart : portStart+portEnd]
+					port, err := strconv.Atoi(portStr)
+					if err == nil && port > 0 {
+						return port, nil
+					}
+				}
+			}
+		}
+	}
+
+	return 0, fmt.Errorf("VNC port not found in domain XML")
+}
+
+// extractCPUCount extracts the CPU count from domain info map
+func (p *Provider) extractCPUCount(domainInfo map[string]string) (int32, error) {
+	cpuStr, exists := domainInfo["CPU(s)"]
+	if !exists {
+		return 0, fmt.Errorf("CPU count not found in domain info")
+	}
+
+	cpuCount, err := strconv.ParseInt(cpuStr, 10, 32)
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse CPU count: %w", err)
+	}
+
+	return int32(cpuCount), nil
+}
+
+// extractMemoryKB extracts the memory in KiB from domain info map
+func (p *Provider) extractMemoryKB(domainInfo map[string]string) (int64, error) {
+	memStr, exists := domainInfo["Max memory"]
+	if !exists {
+		// Try alternative key
+		memStr, exists = domainInfo["Used memory"]
+		if !exists {
+			return 0, fmt.Errorf("memory not found in domain info")
+		}
+	}
+
+	// Parse memory string (format: "XXXXXX KiB")
+	memStr = strings.TrimSpace(memStr)
+	memStr = strings.TrimSuffix(memStr, " KiB")
+	memStr = strings.TrimSuffix(memStr, " kB")
+
+	memKB, err := strconv.ParseInt(memStr, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse memory: %w", err)
+	}
+
+	return memKB, nil
 }
 
 // Describe returns comprehensive VM information using virsh (enhanced monitoring like vSphere)
@@ -436,12 +630,35 @@ func (p *Provider) Describe(ctx context.Context, id string) (contracts.DescribeR
 		domainInfo["guest_os"] = domainInfo["OS Type"]
 	}
 
+	// Generate console URL (VNC/SPICE access info)
+	consoleURL := ""
+	if powerState == "On" {
+		// Try to get VNC display information
+		vncPort, err := p.getVNCPort(ctx, id)
+		if err == nil && vncPort > 0 {
+			// Build VNC URL
+			// Extract host from libvirt URI
+			host := "localhost" // Default to localhost
+			if p.virshProvider != nil && p.virshProvider.uri != "" {
+				if parsedURI, err := url.Parse(p.virshProvider.uri); err == nil && parsedURI.Host != "" {
+					host = parsedURI.Host
+					// Remove port from host if present
+					if colonIdx := strings.Index(host, ":"); colonIdx != -1 {
+						host = host[:colonIdx]
+					}
+				}
+			}
+			consoleURL = fmt.Sprintf("vnc://%s:%d", host, vncPort)
+			domainInfo["vnc_port"] = fmt.Sprintf("%d", vncPort)
+		}
+	}
+
 	// Convert virsh domain info to contracts format
 	response := contracts.DescribeResponse{
 		Exists:      true,
 		PowerState:  string(powerState),
 		IPs:         ips,
-		ConsoleURL:  "",         // TODO: Generate VNC/console URL if needed
+		ConsoleURL:  consoleURL,
 		ProviderRaw: domainInfo, // Pass the enhanced domain info as provider-specific data
 	}
 

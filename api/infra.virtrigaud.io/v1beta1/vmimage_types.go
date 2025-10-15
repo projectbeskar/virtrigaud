@@ -60,6 +60,10 @@ type ImageSource struct {
 	// DataVolume contains DataVolume-based image configuration
 	// +optional
 	DataVolume *DataVolumeImageSource `json:"dataVolume,omitempty"`
+
+	// Proxmox contains Proxmox VE-specific image configuration
+	// +optional
+	Proxmox *ProxmoxImageSource `json:"proxmox,omitempty"`
 }
 
 // VSphereImageSource defines vSphere-specific image configuration
@@ -254,6 +258,42 @@ type DataVolumeImageSource struct {
 	// +kubebuilder:validation:Pattern="^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
 	// +kubebuilder:validation:MaxLength=63
 	Namespace string `json:"namespace,omitempty"`
+}
+
+// ProxmoxImageSource defines Proxmox VE-specific image configuration
+type ProxmoxImageSource struct {
+	// TemplateID specifies an existing Proxmox template VMID
+	// +optional
+	// +kubebuilder:validation:Minimum=100
+	// +kubebuilder:validation:Maximum=999999999
+	TemplateID *int `json:"templateID,omitempty"`
+
+	// TemplateName specifies an existing Proxmox template name
+	// +optional
+	// +kubebuilder:validation:MaxLength=255
+	TemplateName string `json:"templateName,omitempty"`
+
+	// Storage specifies the Proxmox storage for cloning
+	// +optional
+	// +kubebuilder:validation:MaxLength=255
+	// Examples: "local-lvm", "vms", "nfs-storage"
+	Storage string `json:"storage,omitempty"`
+
+	// Node specifies the Proxmox node where the template exists
+	// +optional
+	// +kubebuilder:validation:MaxLength=255
+	Node string `json:"node,omitempty"`
+
+	// Format specifies the disk format
+	// +optional
+	// +kubebuilder:default="qcow2"
+	// +kubebuilder:validation:Enum=raw;qcow2;vmdk
+	Format string `json:"format,omitempty"`
+
+	// FullClone determines if this should be a full clone (default) or linked clone
+	// +optional
+	// +kubebuilder:default=true
+	FullClone *bool `json:"fullClone,omitempty"`
 }
 
 // ImageFormat represents the format of a VM image

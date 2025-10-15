@@ -10,9 +10,10 @@ This provider implements the VirtRigaud provider interface to manage VM lifecycl
 - **Delete**: Remove VMs and associated storage volumes (with cleanup)
 - **Power**: Start, stop, and reboot virtual machines
 - **Describe**: Query VM state, resource usage, guest agent information, and network details
-- **Reconfigure**: Modify VM resources (currently requires VM restart)
+- **Reconfigure**: Modify VM resources (v0.2.3+ - requires VM restart)
 - **Clone**: Create new VMs based on existing VM configurations
 - **Snapshot**: Create, delete, and revert VM snapshots (storage-dependent)
+- **ConsoleURL**: Generate VNC console URLs for remote access (v0.2.3+)
 - **ImagePrepare**: Download and prepare cloud images from URLs
 - **Storage Management**: Advanced storage pool and volume operations
 - **Cloud-Init**: Full NoCloud datasource support with ISO generation
@@ -62,7 +63,7 @@ spec:
     name: libvirt-local-credentials
   runtime:
     mode: Remote
-    image: "ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.2.0"
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.2.3"
     service:
       port: 9090
 ```
@@ -86,7 +87,7 @@ spec:
     name: libvirt-ssh-credentials
   runtime:
     mode: Remote
-    image: "ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.2.0"
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.2.3"
     service:
       port: 9090
 ```
@@ -127,7 +128,7 @@ spec:
     name: libvirt-tls-credentials
   runtime:
     mode: Remote
-    image: "ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.2.0"
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.2.3"
     service:
       port: 9090
 ```
@@ -704,6 +705,79 @@ providers:
         value: "1"
     endpoint: "qemu:///system"
 ```
+
+## Advanced Features
+
+### VM Reconfiguration (v0.2.3+)
+
+The Libvirt provider supports VM reconfiguration for CPU, memory, and disk resources:
+
+```yaml
+# Reconfigure VM resources
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: web-server
+spec:
+  vmClassRef: medium  # Change from small to medium
+  powerState: "On"
+```
+
+**Capabilities**:
+- **Online CPU Changes**: Modify CPU count using `virsh setvcpus --live` for running VMs
+- **Online Memory Changes**: Modify memory using `virsh setmem --live` for running VMs
+- **Disk Resizing**: Expand disk volumes via storage provider integration
+- **Offline Configuration**: Updates persistent config for stopped VMs via `--config` flag
+
+**Important Notes**:
+- Most changes require VM restart for full effect
+- Online changes apply to running VM but may need restart for persistence
+- Disk shrinking not supported for safety
+- Memory format parsing supports bytes, KiB, MiB, GiB
+
+**Implementation Details**:
+- Uses `virsh setvcpus --live --config` for CPU changes
+- Uses `virsh setmem --live --config` for memory changes  
+- Parses current VM configuration with `virsh dominfo`
+- Integrates with storage provider for volume resizing
+
+### VNC Console Access (v0.2.3+)
+
+Generate VNC console URLs for direct VM access:
+
+```yaml
+# Access provided in VM status
+kubectl get vm web-server -o yaml
+
+status:
+  consoleURL: "vnc://libvirt-host.example.com:5900"
+  phase: Running
+```
+
+**Features**:
+- Automatic VNC port extraction from domain XML
+- Direct connection URLs for VNC clients
+- Support for standard VNC viewers (TigerVNC, RealVNC, etc.)
+- Web-based VNC viewers compatible (noVNC)
+
+**VNC Client Usage**:
+```bash
+# Using vncviewer
+vncviewer libvirt-host.example.com:5900
+
+# Using TigerVNC
+tigervnc libvirt-host.example.com:5900
+
+# Web browser (with noVNC)
+# Access through web-based VNC proxy
+```
+
+**Configuration**:
+VNC is automatically configured during VM creation. The provider:
+1. Extracts VNC configuration from domain XML using `virsh dumpxml`
+2. Parses the graphics port number  
+3. Constructs the VNC URL with host and port
+4. Returns URL in Describe operations
 
 ## Advanced Configuration
 

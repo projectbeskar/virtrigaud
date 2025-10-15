@@ -21,11 +21,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	v1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/providers/proxmox/pveapi"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/capabilities"
@@ -40,23 +42,79 @@ type Provider struct {
 	logger       *slog.Logger
 }
 
+// readCredentialFile reads a credential from a mounted secret file
+func readCredentialFile(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
 // New creates a new Proxmox provider
 func New() *Provider {
 	// Get capabilities for Proxmox VE
 	caps := GetProviderCapabilities()
 
 	// Create PVE client from environment
+	// Support both PVE_* (legacy) and PROVIDER_* (new standard) env vars
+	endpoint := os.Getenv("PROVIDER_ENDPOINT")
+	if endpoint == "" {
+		endpoint = os.Getenv("PVE_ENDPOINT")
+	}
+
+	// Read credentials from mounted secret files (primary method)
+	tokenID := readCredentialFile("/etc/virtrigaud/credentials/token_id")
+	tokenSecret := readCredentialFile("/etc/virtrigaud/credentials/token_secret")
+	username := readCredentialFile("/etc/virtrigaud/credentials/username")
+	password := readCredentialFile("/etc/virtrigaud/credentials/password")
+
+	// Fallback to environment variables if files don't exist
+	if tokenID == "" {
+		tokenID = os.Getenv("PROVIDER_TOKEN_ID")
+		if tokenID == "" {
+			tokenID = os.Getenv("PVE_TOKEN_ID")
+		}
+	}
+
+	if tokenSecret == "" {
+		tokenSecret = os.Getenv("PROVIDER_TOKEN_SECRET")
+		if tokenSecret == "" {
+			tokenSecret = os.Getenv("PVE_TOKEN_SECRET")
+		}
+	}
+
+	if username == "" {
+		username = os.Getenv("PROVIDER_USERNAME")
+		if username == "" {
+			username = os.Getenv("PVE_USERNAME")
+		}
+	}
+
+	if password == "" {
+		password = os.Getenv("PROVIDER_PASSWORD")
+		if password == "" {
+			password = os.Getenv("PVE_PASSWORD")
+		}
+	}
+
+	insecureSkipVerify := os.Getenv("TLS_INSECURE_SKIP_VERIFY") == "true" || os.Getenv("PVE_INSECURE_SKIP_VERIFY") == "true"
+
 	config := &pveapi.Config{
-		Endpoint:           os.Getenv("PVE_ENDPOINT"),
-		TokenID:            os.Getenv("PVE_TOKEN_ID"),
-		TokenSecret:        os.Getenv("PVE_TOKEN_SECRET"),
-		Username:           os.Getenv("PVE_USERNAME"),
-		Password:           os.Getenv("PVE_PASSWORD"),
-		InsecureSkipVerify: os.Getenv("PVE_INSECURE_SKIP_VERIFY") == "true",
+		Endpoint:           endpoint,
+		TokenID:            tokenID,
+		TokenSecret:        tokenSecret,
+		Username:           username,
+		Password:           password,
+		InsecureSkipVerify: insecureSkipVerify,
 	}
 
 	// Parse node selector
-	if nodeSelector := os.Getenv("PVE_NODE_SELECTOR"); nodeSelector != "" {
+	nodeSelector := os.Getenv("PROVIDER_NODE_SELECTOR")
+	if nodeSelector == "" {
+		nodeSelector = os.Getenv("PVE_NODE_SELECTOR")
+	}
+	if nodeSelector != "" {
 		config.NodeSelector = strings.Split(nodeSelector, ",")
 		for i := range config.NodeSelector {
 			config.NodeSelector[i] = strings.TrimSpace(config.NodeSelector[i])
@@ -64,7 +122,11 @@ func New() *Provider {
 	}
 
 	// Parse CA bundle
-	if caBundle := os.Getenv("PVE_CA_BUNDLE"); caBundle != "" {
+	caBundle := os.Getenv("PROVIDER_CA_BUNDLE")
+	if caBundle == "" {
+		caBundle = os.Getenv("PVE_CA_BUNDLE")
+	}
+	if caBundle != "" {
 		config.CABundle = []byte(caBundle)
 	}
 
@@ -118,7 +180,7 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 	}
 
 	// Check if VM already exists (idempotency)
-	if existing, err := p.client.GetVM(ctx, node, vmConfig.VMID); err == nil && existing != nil {
+	if existing, existErr := p.client.GetVM(ctx, node, vmConfig.VMID); existErr == nil && existing != nil {
 		// VM exists, check if it matches our requirements
 		if existing.Name == req.Name {
 			p.logger.Info("VM already exists with same name, skipping creation",
@@ -126,16 +188,107 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 			return &providerv1.CreateResponse{
 				Id: fmt.Sprintf("%d", vmConfig.VMID),
 			}, nil
-		} else {
-			// VM exists but with different name, generate new VMID
-			p.logger.Warn("VM exists with different name, generating new VMID",
-				"existing_vmid", vmConfig.VMID, "existing_name", existing.Name, "requested_name", req.Name)
-			vmConfig.VMID = int(time.Now().Unix()%999999) + 100000
 		}
+		// VM exists but with different name, generate new VMID
+		p.logger.Warn("VM exists with different name, generating new VMID",
+			"existing_vmid", vmConfig.VMID, "existing_name", existing.Name, "requested_name", req.Name)
+		vmConfig.VMID = int(time.Now().Unix()%999999) + 100000
 	}
 
-	// Create the VM with better error handling
-	taskID, err := p.client.CreateVM(ctx, node, vmConfig)
+	var taskID string
+
+	// Determine if we need to clone from a template or create a new VM
+	if vmConfig.Template != "" {
+		// Parse template ID from the Template field
+		templateID, parseErr := strconv.Atoi(vmConfig.Template)
+		if parseErr != nil {
+			return nil, errors.NewInvalidSpec("invalid template ID '%s': %v", vmConfig.Template, parseErr)
+		}
+
+		// Clone from template
+		p.logger.Info("Cloning VM from template", "template_id", templateID, "new_vmid", vmConfig.VMID)
+
+		// Set full clone flag
+		if vmConfig.Custom == nil {
+			vmConfig.Custom = make(map[string]string)
+		}
+		vmConfig.Custom["full"] = "1" // Full clone by default
+
+		taskID, err = p.client.CloneVM(ctx, node, templateID, vmConfig)
+		if err != nil {
+			return nil, errors.NewInvalidSpec("failed to clone template: %v", err)
+		}
+
+		// Wait for clone to complete
+		if taskID != "" {
+			if err = p.client.WaitForTask(ctx, node, taskID); err != nil {
+				return nil, errors.NewInternal("clone task failed: %v", err)
+			}
+		}
+
+		// After cloning, we need to reconfigure the VM with cloud-init settings
+		if len(req.UserData) > 0 || vmConfig.SSHKeys != "" {
+			p.logger.Info("Reconfiguring cloned VM with cloud-init", "vmid", vmConfig.VMID)
+
+			// Auto-detect primary boot disk from cloned VM
+			primaryDisk, err := p.client.DetectPrimaryDisk(ctx, node, vmConfig.VMID)
+			if err != nil {
+				p.logger.Warn("Failed to detect primary disk, using scsi0 as fallback", "error", err)
+				primaryDisk = "scsi0"
+			}
+			p.logger.Info("Detected primary boot disk", "vmid", vmConfig.VMID, "disk", primaryDisk)
+
+			// Build reconfiguration values for cloud-init
+			reconfigValues := url.Values{}
+			if vmConfig.IDE2 != "" {
+				reconfigValues.Set("ide2", vmConfig.IDE2)
+			}
+			if vmConfig.SSHKeys != "" {
+				reconfigValues.Set("sshkeys", vmConfig.SSHKeys)
+			}
+			if vmConfig.CIUser != "" {
+				reconfigValues.Set("ciuser", vmConfig.CIUser)
+			}
+			// Set boot order: detected primary disk first, then cloud-init drive
+			bootOrder := fmt.Sprintf("order=%s;ide2", primaryDisk)
+			reconfigValues.Set("boot", bootOrder)
+			p.logger.Info("Setting boot order", "vmid", vmConfig.VMID, "boot", bootOrder)
+
+			// Add network config (these should already be in the cloned VM, but just to be safe)
+			for _, netConfig := range vmConfig.Networks {
+				netString := p.buildNetworkString(netConfig)
+				if netString != "" {
+					reconfigValues.Set(fmt.Sprintf("net%d", netConfig.Index), netString)
+				}
+			}
+			// Add IP config
+			for _, ipConfig := range vmConfig.IPConfigs {
+				ipString := p.buildIPConfigString(ipConfig)
+				if ipString != "" {
+					reconfigValues.Set(fmt.Sprintf("ipconfig%d", ipConfig.Index), ipString)
+				}
+			}
+
+			// Reconfigure the cloned VM with cloud-init settings
+			taskID, err = p.client.ReconfigureVMRaw(ctx, node, vmConfig.VMID, reconfigValues)
+			if err != nil {
+				return nil, errors.NewInternal("failed to reconfigure VM: %v", err)
+			}
+
+			// Wait for reconfiguration if async
+			if taskID != "" {
+				if err = p.client.WaitForTask(ctx, node, taskID); err != nil {
+					return nil, errors.NewInternal("reconfigure task failed: %v", err)
+				}
+			}
+		}
+	} else {
+		// Create a new VM (not from template)
+		p.logger.Info("Creating new VM", "vmid", vmConfig.VMID)
+		taskID, err = p.client.CreateVM(ctx, node, vmConfig)
+	}
+
+	// Handle errors
 	if err != nil {
 		// Map specific PVE errors to appropriate SDK errors
 		errMsg := err.Error()
@@ -413,8 +566,33 @@ func (p *Provider) Describe(ctx context.Context, req *providerv1.DescribeRequest
 	consoleURL := fmt.Sprintf("%s/#v1:0:=qemu/%d:4:5:=console",
 		strings.TrimSuffix(endpoint, "/api2"), vmid)
 
-	// TODO: Extract IP addresses from guest agent or network config
+	// Extract IP addresses from guest agent
 	var ips []string
+	if vm.Status == "running" {
+		// Try to get IP addresses from QEMU guest agent
+		interfaces, err := p.client.GetGuestNetworkInterfaces(ctx, node, vmid)
+		if err != nil {
+			p.logger.Debug("Failed to get guest network interfaces (guest agent may not be available)", "error", err)
+		} else {
+			// Extract IP addresses from interfaces
+			for _, iface := range interfaces {
+				// Skip loopback interface
+				if iface.Name == "lo" {
+					continue
+				}
+
+				for _, ipAddr := range iface.IPAddresses {
+					// Filter out link-local addresses
+					ip := ipAddr.IPAddress
+					if ip != "" && !strings.HasPrefix(ip, "127.") &&
+						!strings.HasPrefix(ip, "169.254.") &&
+						!strings.HasPrefix(ip, "fe80:") {
+						ips = append(ips, ip)
+					}
+				}
+			}
+		}
+	}
 
 	// Provider-specific details
 	providerRaw := map[string]string{
@@ -695,11 +873,67 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*pveapi.VM
 	}
 
 	// Parse VMImage for template
+	// The controller sends contracts.VMImage which has the template in TemplateName field
 	if req.ImageJson != "" {
-		var image map[string]interface{}
-		if err := json.Unmarshal([]byte(req.ImageJson), &image); err == nil {
-			if template, ok := image["source"].(string); ok {
-				config.Template = template
+		// DEBUG: Log the raw ImageJson to see what we're actually receiving
+		p.logger.Info("DEBUG: Received ImageJson", "json", req.ImageJson)
+
+		// First try parsing as contracts.VMImage (sent by controller)
+		var contractsImage map[string]interface{}
+		if err := json.Unmarshal([]byte(req.ImageJson), &contractsImage); err == nil {
+			p.logger.Info("DEBUG: Parsed ImageJson as map", "keys", fmt.Sprintf("%v", contractsImage))
+
+			// Check for TemplateName field (from contracts.VMImage - note capital T)
+			if templateName, ok := contractsImage["TemplateName"].(string); ok && templateName != "" {
+				config.Template = templateName
+				p.logger.Info("Parsed template from contracts.VMImage", "template", templateName)
+			} else {
+				p.logger.Info("DEBUG: TemplateName not found or empty", "TemplateName", contractsImage["TemplateName"])
+			}
+
+			// Check for storage hint
+			if storage, ok := contractsImage["storage"].(string); ok && storage != "" {
+				config.Storage = storage
+			}
+		}
+
+		// Fallback: try to parse as VMImageSpec for backwards compatibility
+		if config.Template == "" {
+			var imageSpec v1beta1.VMImageSpec
+			if err := json.Unmarshal([]byte(req.ImageJson), &imageSpec); err == nil {
+				// Check for Proxmox-specific image source
+				if imageSpec.Source.Proxmox != nil {
+					proxmoxSource := imageSpec.Source.Proxmox
+
+					// Set template ID or name
+					if proxmoxSource.TemplateID != nil {
+						config.Template = fmt.Sprintf("%d", *proxmoxSource.TemplateID)
+					} else if proxmoxSource.TemplateName != "" {
+						config.Template = proxmoxSource.TemplateName
+					}
+
+					// Set storage if specified
+					if proxmoxSource.Storage != "" {
+						config.Storage = proxmoxSource.Storage
+					}
+
+					// Set node if specified (for template location)
+					if proxmoxSource.Node != "" {
+						// Store node hint for later use
+						if config.Custom == nil {
+							config.Custom = make(map[string]string)
+						}
+						config.Custom["template_node"] = proxmoxSource.Node
+					}
+
+					// Set clone type (full vs linked)
+					if proxmoxSource.FullClone != nil && !*proxmoxSource.FullClone {
+						if config.Custom == nil {
+							config.Custom = make(map[string]string)
+						}
+						config.Custom["full_clone"] = "0" // Linked clone
+					}
+				}
 			}
 		}
 	}
@@ -796,7 +1030,12 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*pveapi.VM
 
 	// Configure cloud-init if user data provided
 	if len(req.UserData) > 0 {
-		config.IDE2 = "cloudinit"
+		// IDE2 needs storage pool prefix, use the configured storage or default to 'local'
+		storage := config.Storage
+		if storage == "" {
+			storage = "local"
+		}
+		config.IDE2 = fmt.Sprintf("%s:cloudinit", storage)
 
 		// Extract SSH keys and user from cloud-init data if possible
 		userData := string(req.UserData)
@@ -813,7 +1052,11 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*pveapi.VM
 				if inKeys && strings.HasPrefix(strings.TrimSpace(line), "- ") {
 					key := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "- "))
 					key = strings.Trim(key, "\"'")
+					// Extra safety: ensure no trailing/leading whitespace including newlines
+					key = strings.TrimSpace(key)
 					if key != "" {
+						// DEBUG: Log extracted SSH key with length and escaped representation
+						slog.Info("DEBUG SSH extraction", "location", "server.go", "len", len(key), "repr", key)
 						sshKeys = append(sshKeys, key)
 					}
 				} else if inKeys && !strings.HasPrefix(strings.TrimSpace(line), " ") {
@@ -821,7 +1064,11 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*pveapi.VM
 				}
 			}
 			if len(sshKeys) > 0 {
-				config.SSHKeys = strings.Join(sshKeys, "\n")
+				// Join multiple keys with newline separator (no trailing newline)
+				// Then trim again to be absolutely sure
+				config.SSHKeys = strings.TrimSpace(strings.Join(sshKeys, "\n"))
+				// DEBUG: Log final SSH keys value
+				slog.Info("DEBUG SSH after join", "location", "server.go", "len", len(config.SSHKeys), "repr", config.SSHKeys)
 			}
 		}
 
@@ -904,4 +1151,32 @@ func parseMemory(memory string) (int64, error) {
 	}
 	// Assume bytes
 	return strconv.ParseInt(memory, 10, 64)
+}
+
+// buildNetworkString constructs network configuration string for Proxmox
+func (p *Provider) buildNetworkString(netConfig pveapi.NetworkConfig) string {
+	// Format: virtio,bridge=vmbr0[,tag=100][,firewall=1]
+	result := fmt.Sprintf("%s,bridge=%s", netConfig.Model, netConfig.Bridge)
+	if netConfig.VLAN > 0 {
+		result += fmt.Sprintf(",tag=%d", netConfig.VLAN)
+	}
+	if netConfig.MAC != "" {
+		result += fmt.Sprintf(",mac=%s", netConfig.MAC)
+	}
+	if netConfig.Firewall {
+		result += ",firewall=1"
+	}
+	return result
+}
+
+// buildIPConfigString constructs IP configuration string for Proxmox
+func (p *Provider) buildIPConfigString(ipConfig pveapi.IPConfig) string {
+	if ipConfig.DHCP {
+		return "ip=dhcp"
+	}
+	result := fmt.Sprintf("ip=%s", ipConfig.IP)
+	if ipConfig.Gateway != "" {
+		result += fmt.Sprintf(",gw=%s", ipConfig.Gateway)
+	}
+	return result
 }

@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -204,7 +205,52 @@ func (c *Client) request(ctx context.Context, method, path string, body interfac
 	var reqBody io.Reader
 	if body != nil {
 		if data, ok := body.(url.Values); ok {
-			reqBody = strings.NewReader(data.Encode())
+			// Special handling for sshkeys parameter:
+			// Python working code does DOUBLE encoding:
+			//   1. quote(sshKey, safe='') - first encoding
+			//   2. wPost form-encodes the dictionary - second encoding
+			// Result: space → %20 → %2520
+			var encoded string
+			if sshKey := data.Get("sshkeys"); sshKey != "" {
+				// DEBUG: Log original value from url.Values
+				slog.Info("DEBUG SSH request original", "location", "client.go", "len", len(sshKey), "repr", sshKey)
+
+				// Remove from url.Values to prevent automatic encoding
+				data.Del("sshkeys")
+
+				// Clean and double-encode
+				cleanedKey := strings.TrimSpace(sshKey)
+				slog.Info("DEBUG SSH request trimmed", "location", "client.go", "len", len(cleanedKey), "repr", cleanedKey)
+
+				// Custom encoding for sshkeys: Proxmox needs %20 for space (not +)
+				// We manually encode characters that need escaping
+				firstEncode := url.QueryEscape(cleanedKey)
+				// Fix: QueryEscape uses + for space, replace with %20
+				firstEncode = strings.ReplaceAll(firstEncode, "+", "%20")
+				slog.Info("DEBUG SSH request 1st encode", "location", "client.go", "len", len(firstEncode), "repr", firstEncode)
+
+				// Second encode: apply QueryEscape again and replace + with %20
+				doubleEncoded := url.QueryEscape(firstEncode)
+				doubleEncoded = strings.ReplaceAll(doubleEncoded, "+", "%20")
+				slog.Info("DEBUG SSH request 2nd encode", "location", "client.go", "len", len(doubleEncoded), "repr", doubleEncoded)
+
+				// Encode other parameters normally
+				baseEncoded := data.Encode()
+
+				// Manually append double-encoded sshkeys (no further encoding)
+				if baseEncoded != "" {
+					encoded = baseEncoded + "&sshkeys=" + doubleEncoded
+				} else {
+					encoded = "sshkeys=" + doubleEncoded
+				}
+
+				slog.Info("DEBUG SSH request final body", "location", "client.go", "body", encoded)
+			} else {
+				// No sshkeys, use standard encoding
+				slog.Info("DEBUG SSH request", "location", "client.go", "status", "no sshkeys found")
+				encoded = data.Encode()
+			}
+			reqBody = strings.NewReader(encoded)
 		} else {
 			jsonData, err := json.Marshal(body)
 			if err != nil {
@@ -311,7 +357,32 @@ func (c *Client) CreateVM(ctx context.Context, node string, config *VMConfig) (s
 func (c *Client) CloneVM(ctx context.Context, node string, vmid int, config *VMConfig) (string, error) {
 	path := fmt.Sprintf("/api2/json/nodes/%s/qemu/%d/clone", node, vmid)
 
-	values := c.configToValues(config)
+	// Build clone-specific parameters (per Proxmox API spec)
+	// Only send parameters accepted by /clone endpoint
+	values := url.Values{}
+
+	if config.VMID != 0 {
+		values.Set("newid", strconv.Itoa(config.VMID))
+	}
+	if config.Name != "" {
+		values.Set("name", config.Name)
+	}
+	if config.Storage != "" {
+		values.Set("storage", config.Storage)
+	}
+	// Check if full clone is requested via Custom map
+	if fullClone, ok := config.Custom["full"]; ok {
+		values.Set("full", fullClone)
+	}
+	if target, ok := config.Custom["target"]; ok {
+		values.Set("target", target)
+	}
+	if description, ok := config.Custom["description"]; ok {
+		values.Set("description", description)
+	}
+	if format, ok := config.Custom["format"]; ok {
+		values.Set("format", format)
+	}
 
 	resp, err := c.request(ctx, "POST", path, values)
 	if err != nil {
@@ -494,7 +565,13 @@ func (c *Client) configToValues(config *VMConfig) url.Values {
 		values.Set("cipassword", config.CIPasswd)
 	}
 	if config.SSHKeys != "" {
-		values.Set("sshkeys", config.SSHKeys)
+		// DO NOT pre-encode! Let url.Values handle the encoding naturally.
+		// Just clean up trailing newlines/whitespace
+		cleanedKeys := strings.TrimSpace(config.SSHKeys)
+		// DEBUG: Log SSH keys before setting in url.Values
+		slog.Info("DEBUG SSH configToValues", "location", "client.go", "config_len", len(config.SSHKeys), "config_repr", config.SSHKeys)
+		slog.Info("DEBUG SSH configToValues cleaned", "location", "client.go", "cleaned_len", len(cleanedKeys), "cleaned_repr", cleanedKeys)
+		values.Set("sshkeys", cleanedKeys)
 	}
 
 	// Configure network interfaces
@@ -565,7 +642,8 @@ func (c *Client) buildNetworkString(netConfig NetworkConfig) string {
 // buildIPConfigString constructs the IP configuration string for PVE
 func (c *Client) buildIPConfigString(ipConfig IPConfig) string {
 	if ipConfig.DHCP {
-		return "dhcp=1"
+		// Proxmox expects "ip=dhcp" not "dhcp=1"
+		return "ip=dhcp"
 	}
 
 	var parts []string
@@ -906,3 +984,112 @@ var (
 	ErrTaskFailed           = fmt.Errorf("task failed")
 	ErrDiskShrinkNotAllowed = fmt.Errorf("disk shrinking not allowed")
 )
+
+// ReconfigureVMRaw reconfigures a VM with raw url.Values parameters
+// This is useful for cloud-init and other parameters not in ReconfigureConfig
+func (c *Client) ReconfigureVMRaw(ctx context.Context, node string, vmid int, values url.Values) (string, error) {
+	path := fmt.Sprintf("/api2/json/nodes/%s/qemu/%d/config", node, vmid)
+
+	resp, err := c.request(ctx, "PUT", path, values)
+	if err != nil {
+		return "", fmt.Errorf("failed to reconfigure VM: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // Response body close in defer is not critical
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("reconfigure VM failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var apiResp APIResponse
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return "", fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	// Return task ID if operation is async
+	if taskID, ok := apiResp.Data.(string); ok {
+		return taskID, nil
+	}
+
+	return "", nil // Synchronous operation completed
+}
+
+// DetectPrimaryDisk detects the primary boot disk from VM configuration
+// Returns the disk identifier (e.g., "scsi0", "virtio0", "sata0", "ide0")
+func (c *Client) DetectPrimaryDisk(ctx context.Context, node string, vmid int) (string, error) {
+	config, err := c.GetVMConfig(ctx, node, vmid)
+	if err != nil {
+		return "", err
+	}
+
+	// Check for disks in order of preference: virtio, scsi, sata, ide
+	diskPrefixes := []string{"virtio", "scsi", "sata", "ide"}
+
+	for _, prefix := range diskPrefixes {
+		for i := 0; i < 16; i++ { // Proxmox supports up to 16 devices per bus
+			diskKey := fmt.Sprintf("%s%d", prefix, i)
+			if diskValue, exists := config[diskKey]; exists {
+				// Check if it's actually a disk (not just a string or empty)
+				if diskStr, ok := diskValue.(string); ok && diskStr != "" {
+					// Make sure it's not a cdrom
+					if !strings.Contains(strings.ToLower(diskStr), "media=cdrom") {
+						return diskKey, nil
+					}
+				}
+			}
+		}
+	}
+
+	// Fallback to scsi0 if nothing found
+	return "scsi0", nil
+}
+
+// GuestNetworkInterface represents a network interface from the guest agent
+type GuestNetworkInterface struct {
+	Name        string           `json:"name"`
+	HWAddr      string           `json:"hardware-address"`
+	IPAddresses []GuestIPAddress `json:"ip-addresses"`
+}
+
+// GuestIPAddress represents an IP address from the guest agent
+type GuestIPAddress struct {
+	IPAddress     string `json:"ip-address"`
+	IPAddressType string `json:"ip-address-type"` // "ipv4" or "ipv6"
+	Prefix        int    `json:"prefix"`
+}
+
+// GetGuestNetworkInterfaces retrieves network interfaces from the QEMU guest agent
+func (c *Client) GetGuestNetworkInterfaces(ctx context.Context, node string, vmid int) ([]GuestNetworkInterface, error) {
+	path := fmt.Sprintf("/api2/json/nodes/%s/qemu/%d/agent/network-get-interfaces", node, vmid)
+
+	resp, err := c.request(ctx, "GET", path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get guest network interfaces: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("get guest network interfaces failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var apiResp APIResponse
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	// Marshal and unmarshal to convert from interface{} to our struct
+	dataBytes, err := json.Marshal(apiResp.Data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal guest network data: %w", err)
+	}
+
+	var result struct {
+		Result []GuestNetworkInterface `json:"result"`
+	}
+	if err := json.Unmarshal(dataBytes, &result); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal guest network interfaces: %w", err)
+	}
+
+	return result.Result, nil
+}

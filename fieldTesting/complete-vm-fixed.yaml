@@ -1,0 +1,115 @@
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pve-credentials
+  namespace: default
+type: Opaque
+stringData:
+  token_id: "root@pam!mytoken"
+  token_secret: "af777916-e07a-41f0-b373-f83b722505f6"
+---
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: Provider
+metadata:
+  name: proxmox-prod
+  namespace: default
+spec:
+  type: proxmox
+  insecureSkipVerify: true
+  endpoint: https://172.16.56.190:8006
+  credentialSecretRef:
+    name: pve-credentials
+  runtime:
+    mode: Remote
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-proxmox:v0.2.3-rc20"
+    service:
+      port: 9090
+---
+# Small VM class for development workloads
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMClass
+metadata:
+  name: small-prox
+  namespace: default
+spec:
+  cpu: 2
+  memory: "4Gi"
+  diskDefaults:
+    size: "20Gi"
+    type: "thin"  # Changed from "scsi" to "thin"
+---
+# Proxmox VM Image referencing a template
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMImage
+metadata:
+  name: ubuntu-24-04-prox
+  namespace: default
+spec:
+  source:
+    proxmox:
+      templateID: 9000              # VMID of the template in Proxmox
+      storage: "vms"                # Storage pool for the cloned VM
+      node: "pve"                   # Proxmox node where template exists
+      fullClone: true               # Create a full clone (not linked)
+      format: "qcow2"
+  # Removed distribution section - it's optional
+---
+# Basic network configuration using Proxmox bridge
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMNetworkAttachment
+metadata:
+  name: lan-network-prox
+  namespace: default
+spec:
+  network:
+    proxmox:
+      bridge: "vmbr0"               # Linux bridge name
+      model: "virtio"               # Network card model
+      # vlanTag: 100                # Optional VLAN tag - commented out for now
+      firewall: false               # Disable Proxmox firewall
+  ipAllocation:
+    type: "DHCP"
+---
+# Simple development VM
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: dev-vm-01
+  namespace: default
+spec:
+  providerRef:
+    name: proxmox-prod
+  classRef:
+    name: small-prox
+  imageRef:
+    name: ubuntu-24-04-prox
+  networks:
+    - name: lan-network-prox
+      networkRef:
+        name: lan-network-prox
+  powerState: "On"
+  placement:
+    datastore: "vms"  # Force Proxmox to use 'vms' storage pool instead of 'local'
+  userData:
+    cloudInit:
+      inline: |
+        #cloud-config
+        hostname: dev-vm-01
+        fqdn: dev-vm-01.lab.k8
+        users:
+          - name: wrkode
+            sudo: ALL=(ALL) NOPASSWD:ALL
+            shell: /bin/bash
+            ssh_authorized_keys:
+              - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIN7lHIuo2QJBkdVDL79bl+tEmJh3pBz7rHImwvNMjenK
+        packages:
+          - curl
+          - git
+          - docker.io
+        runcmd:
+          - systemctl enable docker
+          - systemctl start docker
+          - usermod -aG docker wrkode
+        final_message: "VM dev-vm-01 is ready!"
+

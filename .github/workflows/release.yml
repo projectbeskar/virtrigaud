@@ -272,12 +272,20 @@ jobs:
         sed -i "s/appVersion: .*/appVersion: \"${{ needs.prepare.outputs.tag }}\"/" charts/virtrigaud/Chart.yaml
         
         # Update VirtRigaud component image tags in values.yaml (but not kubectl image)
-        # Update manager image tag
-        sed -i "/^manager:/,/^  image:/ s/    tag: \".*\"/    tag: \"${{ needs.prepare.outputs.tag }}\"/" charts/virtrigaud/values.yaml
-        # Update provider image tags
-        sed -i "/^providers:/,/^  libvirt:/ { /    image:/,/      tag:/ s/      tag: \".*\"/      tag: \"${{ needs.prepare.outputs.tag }}\"/; }" charts/virtrigaud/values.yaml
-        sed -i "/^providers:/,/^  vsphere:/ { /    image:/,/      tag:/ s/      tag: \".*\"/      tag: \"${{ needs.prepare.outputs.tag }}\"/; }" charts/virtrigaud/values.yaml
-        sed -i "/^providers:/,/^  proxmox:/ { /    image:/,/      tag:/ s/      tag: \".*\"/      tag: \"${{ needs.prepare.outputs.tag }}\"/; }" charts/virtrigaud/values.yaml
+        # Update manager image tag (use line range to be precise)
+        MANAGER_START=$(grep -n "^manager:" charts/virtrigaud/values.yaml | cut -d: -f1)
+        MANAGER_END=$((MANAGER_START + 10))
+        sed -i "${MANAGER_START},${MANAGER_END} s/    tag: \".*\"/    tag: \"${{ needs.prepare.outputs.tag }}\"/" charts/virtrigaud/values.yaml
+        # Update provider image tags (use line ranges to be precise)
+        LIBVIRT_START=$(grep -n "^  libvirt:" charts/virtrigaud/values.yaml | cut -d: -f1)
+        LIBVIRT_END=$((LIBVIRT_START + 15))
+        sed -i "${LIBVIRT_START},${LIBVIRT_END} s/      tag: \".*\"/      tag: \"${{ needs.prepare.outputs.tag }}\"/" charts/virtrigaud/values.yaml
+        VSPHERE_START=$(grep -n "^  vsphere:" charts/virtrigaud/values.yaml | cut -d: -f1)
+        VSPHERE_END=$((VSPHERE_START + 15))
+        sed -i "${VSPHERE_START},${VSPHERE_END} s/      tag: \".*\"/      tag: \"${{ needs.prepare.outputs.tag }}\"/" charts/virtrigaud/values.yaml
+        PROXMOX_START=$(grep -n "^  proxmox:" charts/virtrigaud/values.yaml | cut -d: -f1)
+        PROXMOX_END=$((PROXMOX_START + 15))
+        sed -i "${PROXMOX_START},${PROXMOX_END} s/      tag: \".*\"/      tag: \"${{ needs.prepare.outputs.tag }}\"/" charts/virtrigaud/values.yaml
         # Update crdUpgrade kubectl image to point to our built image (using line numbers to be precise)
         CRDUPGRADE_START=$(grep -n "^crdUpgrade:" charts/virtrigaud/values.yaml | cut -d: -f1)
         CRDUPGRADE_END=$((CRDUPGRADE_START + 20))

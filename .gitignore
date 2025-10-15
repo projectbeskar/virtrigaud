@@ -44,3 +44,4 @@ vm-simple-example.yaml
 vsphere-provider-example.yaml
 libvirt-monitoring-test.yaml
 *release-checklist*
+*PROXMOX_*

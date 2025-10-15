@@ -5,9 +5,149 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.2.2] - 2025-10-13
+## [0.2.3] - 2025-10-13 
 
 ### Added
+
+#### vSphere Provider
+- **VM Reconfiguration Support**: Complete implementation of dynamic VM reconfiguration
+  - Online CPU adjustment for running VMs (hot-add when supported by guest OS)
+  - Online memory adjustment for running VMs (hot-add when supported)
+  - Disk resizing with safety checks to prevent data loss (shrinking prevented)
+  - Intelligent change detection to avoid unnecessary reconfigurations
+  - Memory parsing support for multiple units (Mi, Gi, MiB, GiB)
+  - Automatic fallback to offline changes when online modification is not supported
+- **Asynchronous Task Tracking**: Full TaskStatus RPC implementation
+  - Real-time monitoring of vSphere async operations via govmomi
+  - Task state reporting (queued, running, success, error)
+  - Error information extraction from failed tasks
+  - Progress tracking with percentage completion
+  - Integration with vSphere task manager for reliable operation status
+- **VM Cloning Operations**: Complete clone functionality
+  - Full clone support for independent VM copies
+  - Linked clone support for space-efficient template-based deployments
+  - Automatic snapshot creation for linked clones when no snapshot exists
+  - Proper disk relocation and storage configuration
+  - Clone naming and folder placement control
+- **Console URL Generation**: Web-based VM console access
+  - Automatic vSphere web client console URL generation
+  - Direct browser-based VM console access via vCenter
+  - URL includes VM instance UUID for reliable identification
+  - Integration with vCenter endpoint for proper routing
+
+#### Libvirt Provider
+- **VM Reconfiguration Support**: Complete virsh-based reconfiguration
+  - Online CPU adjustment via `virsh setvcpus --live` for running VMs
+  - Online memory adjustment via `virsh setmem --live` for running VMs
+  - Offline configuration updates for stopped VMs via `virsh setvcpus/setmem --config`
+  - Disk volume resizing via storage provider integration
+  - Automatic VM info parsing to extract current CPU and memory settings
+  - Graceful handling of operations requiring VM restart
+  - Memory unit conversion and validation (bytes, KiB, MiB, GiB)
+- **VNC Console URL Generation**: Remote console access support
+  - Automatic VNC port extraction from domain XML configuration
+  - VNC console URL generation for direct viewer connections
+  - Support for standard VNC clients and web-based VNC viewers
+  - Integration with libvirt graphics configuration
+
+#### Proxmox Provider
+- **Guest Agent IP Detection**: Enhanced network information retrieval
+  - QEMU guest agent integration for accurate IP address detection
+  - Extraction of all network interfaces from running VMs
+  - Automatic filtering of loopback and link-local addresses
+  - Support for both IPv4 and IPv6 address reporting
+  - Real-time IP information when guest agent is installed and running
+- **Template Cloning Support**: Full VM cloning from Proxmox templates
+  - Automatic template detection from VMImage CRD `templateID` or `templateName`
+  - Full clone and linked clone support via `fullClone` parameter
+  - Proper storage pool selection during clone operation
+  - Clone task monitoring with async operation support
+- **Intelligent Boot Order Configuration**: 
+  - Auto-detection of primary boot disk from cloned template
+  - Support for multiple disk types: scsi, virtio, sata, ide
+  - Automatic boot order generation (e.g., `boot=order=scsi0;ide2`)
+  - Exclusion of CD-ROM devices from boot order
+- **Cloud-Init Integration**:
+  - Complete cloud-init configuration via `ide2:cloudinit` device
+  - SSH key injection with proper URL encoding
+  - User creation and authentication setup
+  - Network configuration (static IP and DHCP)
+  - Package installation and custom commands via runcmd
+- **Complete CRD Support**:
+  - ProxmoxImageSource integration for template-based deployments
+  - ProxmoxNetworkConfig for bridge and VLAN configuration
+  - Controller parsing of Proxmox-specific fields
+  - Provider RPC implementation for all VM operations
+- **Production Features**:
+  - VM creation, power management, deletion
+  - Status reporting with IP address detection
+  - Task-based async operations with progress tracking
+  - Comprehensive error handling and logging
+
+### Fixed
+
+#### vSphere Provider
+
+**Reconfigure Type Mismatch**:
+- **Root Issue**: Memory comparison in Reconfigure function caused compilation error due to type mismatch between int64 and int32
+- **Cause**: govmomi's `VirtualMachineConfigInfo.Hardware.MemoryMB` field is int32, but comparison was using int64
+- **Fix**: Added explicit type casting `int64(vmMo.Config.Hardware.MemoryMB)` to ensure type compatibility
+- **Impact**: Reconfigure operations now compile and execute correctly without type errors
+
+#### Libvirt Provider
+
+**Missing Standard Library Imports**:
+- **Root Issue**: Reconfigure and Describe functions referenced undefined packages causing compilation failures
+- **Cause**: Implementation added `strconv` usage for integer conversion and `net/url` for URL parsing without importing packages
+- **Fix**: Added missing imports:
+  - `import "strconv"` for string-to-integer conversions in CPU/memory parsing
+  - `import "net/url"` for VNC console URL construction
+- **Impact**: Provider now compiles successfully and all reconfiguration and console URL features work correctly
+
+#### Proxmox Provider
+
+**SSH Keys Encoding**:
+- **Root Issue**: Proxmox API's `sshkeys` parameter requires **double URL encoding** due to its internal decoding behavior
+**Template Cloning and Boot Order**:
+- **Root Issue**: Provider was creating new VMs instead of cloning from templates, causing boot failures
+- **Fix**: Implemented proper template detection and cloning workflow:
+  1. Parse `TemplateName` from VMImage CRD (via controller)
+  2. Call CloneVM API with template ID and storage configuration
+  3. Wait for clone task completion
+  4. Detect primary boot disk from cloned VM config
+  5. Reconfigure VM with cloud-init and correct boot order
+- **Boot Order Detection**: Added intelligent disk detection that:
+  - Scans VM config for disk attachments (virtio, scsi, sata, ide)
+  - Filters out CD-ROM devices
+  - Prioritizes disk types (virtio > scsi > sata > ide)
+  - Constructs proper boot parameter (e.g., `boot=order=scsi0;ide2`)
+
+
+**Controller Image Source Parsing**:
+- **Root Issue**: Controller was sending empty `TemplateName` to provider, causing fallback to VM creation
+- **Cause**: JSON field name mismatch - controller uses `TemplateName` (capital T) but provider expected `template_name` (snake_case)
+- **Fix**: Updated provider to parse `TemplateName` field correctly from contracts.VMImage JSON
+- **Debug Process**: Added comprehensive debug logging in both controller and provider to trace data flow
+- **Impact**: Template ID from VMImage CRD is now correctly transmitted to Proxmox provider
+
+#### Release Workflow
+
+**Helm Chart Image Tag Updates**:
+- **Root Issue**: Manager and provider images were not being updated during Helm releases, staying pinned to v0.2.0
+- **Cause**: sed patterns in release workflow used incorrect range expressions that stopped before reaching the `tag:` lines
+  - Manager pattern: `/^manager:/,/^  image:/` stopped at line 16, but `tag:` is on line 18
+  - Provider patterns: Nested ranges didn't reach `tag:` lines which appear after provider names
+- **Fix**: Replaced fragile regex ranges with precise line-number-based patterns:
+  - Manager: `MANAGER_START` to `MANAGER_START+10`
+  - LibVirt: `LIBVIRT_START` to `LIBVIRT_START+15`
+  - vSphere: `VSPHERE_START` to `VSPHERE_START+15`
+  - Proxmox: `PROXMOX_START` to `PROXMOX_START+15`
+- **Impact**: All component images (manager, providers, kubectl) now update correctly to match release version
+
+
+## [0.2.2] - 2025-10-13
+
+### Added (Continued)
 
 #### Nested Virtualization Support
 - **VMClass PerformanceProfile**: Added `nestedVirtualization` field to enable nested virtualization capabilities in VMs, allowing VMs to run their own hypervisors and nested virtual machines
@@ -47,7 +187,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Creating isolated lab environments for security testing
 - Educational scenarios for learning virtualization technologies
 
-#### VM Snapshot Management (Production Ready)
+#### VM Snapshot Management
 - **Complete VMSnapshot CRD**: Full-featured API for VM snapshot lifecycle management
   - Snapshot creation with memory state and filesystem quiescing options
   - Snapshot deletion with proper cleanup
@@ -72,10 +212,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Synchronous operations with immediate feedback
   - Snapshot name sanitization for virsh compatibility
   - Helper methods for snapshot listing and querying
-- **Proxmox Provider Implementation** **mock-work**:
+- **Proxmox Provider Implementation**:
   - Complete snapshot lifecycle support
   - Memory state inclusion (vmstate)
   - Async task handling with status tracking
+  - Full VM creation from templates with cloud-init
+  - Intelligent boot order configuration
+  - SSH key injection with proper encoding
+  - Network configuration with bridge support
+  - Storage pool management
 - **Controller Integration**:
   - Real provider RPC calls (no more simulation)
   - Proper task status polling for async operations
@@ -363,3 +508,34 @@ For provider-specific configuration and capabilities, see the [Provider Document
 ---
 
 **Full Changelog**: https://github.com/projectbeskar/virtrigaud/compare/v0.2.0...v0.2.1
+#### Proxmox Provider CRD Integration (Completed)
+
+The Proxmox provider now has full CRD integration for template-based VM deployment:
+
+**VMImage CRD - ProxmoxImageSource**:
+- Template ID or template name references
+- Storage pool selection for cloned VMs
+- Node specification for template location
+- Full clone vs linked clone selection
+- Disk format configuration (qcow2, raw, vmdk)
+
+**VMNetworkAttachment CRD - ProxmoxNetworkConfig**:
+- Linux bridge selection (vmbr0, vmbr1, etc.)
+- Network card model selection (virtio, e1000, rtl8139, vmxnet3)
+- VLAN tagging support
+- Proxmox firewall integration
+- Bandwidth rate limiting
+- MTU configuration
+
+**Controller Integration**:
+- Full parsing of Proxmox-specific fields from CRDs
+- Conversion to provider contracts and gRPC messages
+- Proper JSON field mapping (TemplateName, Bridge, Model, etc.)
+
+**Documentation**:
+- Complete provider documentation in `docs/providers/PROXMOX.md`
+- Working examples in `examples/proxmox/`
+- Troubleshooting guides for common issues
+
+**Impact**: The Proxmox provider now has feature parity with vSphere and LibVirt providers, enabling production-ready VM management on Proxmox VE clusters via Kubernetes CRDs.
+

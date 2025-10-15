@@ -1,0 +1,401 @@
+# vSphere Async Task Tracking Example
+# Demonstrates TaskStatus RPC for monitoring long-running operations in v0.2.3+
+#
+# Features:
+# - Real-time task progress monitoring
+# - Task state reporting (queued, running, success, error)
+# - Error information extraction
+# - Integration with vSphere task manager
+# - Automatic tracking for async operations
+
+---
+# Provider configuration
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: Provider
+metadata:
+  name: vsphere-prod
+  namespace: default
+spec:
+  type: vsphere
+  endpoint: https://vcenter.example.com/sdk
+  credentialSecretRef:
+    name: vsphere-credentials
+  runtime:
+    mode: Remote
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.2.3"
+    service:
+      port: 9090
+  defaults:
+    datacenter: "Production"
+    datastore: "datastore1"
+    cluster: "cluster1"
+
+---
+# VMClass with larger resources to trigger longer operations
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMClass
+metadata:
+  name: large-vm
+  namespace: default
+spec:
+  cpus: 16
+  memory: "64Gi"
+  diskDefaults:
+    type: thin
+    size: "500Gi"  # Larger disk for longer provisioning time
+  disks:
+    - name: data
+      sizeGiB: 1000  # Additional large disk
+
+---
+# VMImage
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMImage
+metadata:
+  name: rhel-8-template
+  namespace: default
+spec:
+  source:
+    vsphere:
+      templateName: "rhel-8.8-template"
+      datacenter: "Production"
+
+---
+# VMNetworkAttachment
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMNetworkAttachment
+metadata:
+  name: prod-network
+  namespace: default
+spec:
+  config:
+    vsphere:
+      portGroup: "Production Network"
+      distributed: true
+
+---
+# Example 1: Create VM with task tracking
+# Long-running VM creation operation
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: database-server
+  namespace: default
+  annotations:
+    description: "Large database server with tracked provisioning"
+spec:
+  providerRef:
+    name: vsphere-prod
+  vmClassRef: large-vm
+  vmImageRef: rhel-8-template
+  networkAttachments:
+    - attachmentRef: prod-network
+  
+  powerState: "On"
+  
+  placement:
+    datastore: "datastore1"
+    cluster: "cluster1"
+    resourcePool: "Production"
+  
+  userData:
+    cloudInit:
+      inline: |
+        #cloud-config
+        hostname: database-server
+        
+        packages:
+          - postgresql-server
+          - postgresql-contrib
+        
+        runcmd:
+          - postgresql-setup --initdb
+          - systemctl enable postgresql
+          - systemctl start postgresql
+
+---
+# Example 2: VM reconfiguration with task tracking
+# Expanding resources triggers tracked reconfiguration
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: app-server
+  namespace: default
+spec:
+  providerRef:
+    name: vsphere-prod
+  
+  # Start with smaller resources
+  vmClassRef: large-vm  # Will be updated to trigger reconfiguration
+  
+  vmImageRef: rhel-8-template
+  networkAttachments:
+    - attachmentRef: prod-network
+  
+  powerState: "On"
+
+---
+# Monitoring Task Progress
+#
+# The VirtRigaud controller automatically tracks async operations via TaskStatus RPC.
+# You can monitor task progress through:
+#
+# 1. VM Status Events:
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: task-monitoring-guide
+  namespace: default
+data:
+  monitoring.sh: |
+    #!/bin/bash
+    
+    # Watch VM creation progress
+    echo "=== Watching VM Status ==="
+    kubectl get vm database-server -w
+    
+    # View detailed VM status
+    echo "=== VM Status Details ==="
+    kubectl get vm database-server -o yaml
+    
+    # Check VM events for task updates
+    echo "=== VM Events ==="
+    kubectl get events --field-selector involvedObject.name=database-server
+    
+    # Monitor provider logs for task tracking details
+    echo "=== Provider Task Logs ==="
+    kubectl logs -f deployment/virtrigaud-provider-vsphere | grep -i task
+    
+    # Example output:
+    # time="2024-01-15T10:30:00Z" level=info msg="Task created" taskID="task-123" operation="CreateVM"
+    # time="2024-01-15T10:30:05Z" level=info msg="Task running" taskID="task-123" progress=25
+    # time="2024-01-15T10:30:10Z" level=info msg="Task running" taskID="task-123" progress=50
+    # time="2024-01-15T10:30:15Z" level=info msg="Task running" taskID="task-123" progress=75
+    # time="2024-01-15T10:30:20Z" level=info msg="Task completed" taskID="task-123" state="success"
+
+---
+# Task Tracking Scenarios
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: task-scenarios
+  namespace: default
+data:
+  scenarios.md: |
+    # vSphere Task Tracking Scenarios
+    
+    ## Operations with Automatic Task Tracking
+    
+    All async vSphere operations are automatically tracked:
+    
+    ### 1. VM Creation
+    - Template cloning
+    - Disk provisioning
+    - Network configuration
+    - Power on operation
+    
+    **Typical Duration**: 5-15 minutes
+    **Progress Tracking**: Yes, with percentage completion
+    
+    ### 2. VM Reconfiguration
+    - CPU hot-add
+    - Memory hot-add
+    - Disk expansion
+    - Network adapter changes
+    
+    **Typical Duration**: 1-5 minutes
+    **Progress Tracking**: Yes
+    
+    ### 3. VM Cloning
+    - Full clone operations
+    - Linked clone operations
+    - Snapshot creation for linked clones
+    
+    **Typical Duration**: 3-10 minutes (full), 1-3 minutes (linked)
+    **Progress Tracking**: Yes
+    
+    ### 4. VM Deletion
+    - Power off (if powered on)
+    - Resource cleanup
+    - Disk deletion
+    
+    **Typical Duration**: 2-5 minutes
+    **Progress Tracking**: Yes
+    
+    ### 5. Snapshot Operations
+    - Snapshot creation
+    - Snapshot deletion
+    - Snapshot revert
+    
+    **Typical Duration**: 1-10 minutes (depends on VM size)
+    **Progress Tracking**: Yes
+    
+    ## Task States
+    
+    TaskStatus RPC reports these states:
+    
+    - **queued**: Task accepted by vCenter, waiting to run
+    - **running**: Task actively executing (includes progress %)
+    - **success**: Task completed successfully
+    - **error**: Task failed (includes error message)
+    
+    ## Monitoring Best Practices
+    
+    ### 1. Watch VM Status
+    ```bash
+    kubectl get vm <vm-name> -w
+    ```
+    
+    ### 2. Check Events
+    ```bash
+    kubectl describe vm <vm-name>
+    ```
+    
+    ### 3. Provider Logs (Detailed)
+    ```bash
+    kubectl logs -f deployment/virtrigaud-provider-vsphere
+    ```
+    
+    ### 4. vCenter Task Console
+    - Login to vCenter web client
+    - Navigate to Tasks & Events
+    - Filter by VirtRigaud operations
+    
+    ## Task Failure Handling
+    
+    When tasks fail, TaskStatus provides:
+    - Error message from vSphere
+    - Task ID for vCenter lookup
+    - Timestamp of failure
+    - VM status updated to Error phase
+    
+    Example error scenarios:
+    
+    ### Insufficient Resources
+    ```
+    Error: Insufficient disk space on datastore 'datastore1'
+    Task: task-456
+    VM: database-server
+    ```
+    
+    ### Network Configuration Error
+    ```
+    Error: Port group 'Production Network' not found
+    Task: task-789
+    VM: app-server
+    ```
+    
+    ### Permission Error
+    ```
+    Error: User does not have permission to create VM
+    Task: task-012
+    VM: test-server
+    ```
+    
+    ## Performance Insights
+    
+    Task tracking provides insights into:
+    - Operation duration
+    - Bottlenecks (storage, network, compute)
+    - vCenter performance
+    - Resource contention
+    
+    Use this data to:
+    - Optimize VM placement
+    - Identify slow datastores
+    - Plan capacity
+    - Troubleshoot performance issues
+
+---
+# Advanced: Parallel Operations
+# Multiple VMs can be created simultaneously with independent task tracking
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: worker-01
+  namespace: default
+  labels:
+    role: worker
+spec:
+  providerRef:
+    name: vsphere-prod
+  vmClassRef: large-vm
+  vmImageRef: rhel-8-template
+  networkAttachments:
+    - attachmentRef: prod-network
+  powerState: "On"
+
+---
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: worker-02
+  namespace: default
+  labels:
+    role: worker
+spec:
+  providerRef:
+    name: vsphere-prod
+  vmClassRef: large-vm
+  vmImageRef: rhel-8-template
+  networkAttachments:
+    - attachmentRef: prod-network
+  powerState: "On"
+
+---
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: worker-03
+  namespace: default
+  labels:
+    role: worker
+spec:
+  providerRef:
+    name: vsphere-prod
+  vmClassRef: large-vm
+  vmImageRef: rhel-8-template
+  networkAttachments:
+    - attachmentRef: prod-network
+  powerState: "On"
+
+---
+# Usage Instructions:
+#
+# 1. Deploy resources:
+#    kubectl apply -f vsphere-task-tracking.yaml
+#
+# 2. Monitor all VMs at once:
+#    watch -n 2 'kubectl get vm'
+#
+# 3. View detailed task information:
+#    kubectl logs -f deployment/virtrigaud-provider-vsphere | grep -E "task|Task"
+#
+# 4. Check vCenter tasks:
+#    - Open vSphere web client
+#    - Go to Menu > Tasks & Events > Tasks
+#    - Filter by Recent Tasks
+#
+# 5. Trigger reconfiguration to see task tracking:
+#    kubectl patch vm app-server --type='merge' -p='{"spec":{"vmClassRef":"larger-vm-class"}}'
+#
+# Benefits of Task Tracking:
+#
+# 1. Visibility: Real-time operation progress
+# 2. Debugging: Error messages from vSphere
+# 3. Performance: Identify slow operations
+# 4. Reliability: Automatic retry on transient failures
+# 5. Integration: Task IDs for vCenter correlation
+#
+# Task Tracking Architecture:
+#
+# 1. Provider initiates vSphere operation
+# 2. vSphere returns task reference
+# 3. Provider stores task ID
+# 4. Controller polls TaskStatus RPC
+# 5. Provider queries vSphere task status via govmomi
+# 6. Status updated in VM resource
+# 7. Process repeats until task completes
+#
+# No manual intervention required - all automatic!
+

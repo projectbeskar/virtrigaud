@@ -106,7 +106,7 @@ spec:
     name: vsphere-credentials
   runtime:
     mode: Remote
-    image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.2.0"
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.2.3"
     service:
       port: 9090
   defaults:
