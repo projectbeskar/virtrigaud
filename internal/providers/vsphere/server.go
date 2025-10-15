@@ -498,7 +498,179 @@ func (p *Provider) fallbackToPowerOff(ctx context.Context, vm *object.VirtualMac
 
 // Reconfigure reconfigures a virtual machine
 func (p *Provider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureRequest) (*providerv1.TaskResponse, error) {
-	return nil, errors.NewUnimplemented("Reconfigure operation not yet implemented for vSphere")
+	if p.client == nil {
+		return nil, fmt.Errorf("vSphere client not configured")
+	}
+
+	p.logger.Info("Reconfiguring virtual machine", "vm_id", req.Id)
+
+	// Set datacenter context for finder
+	datacenter, err := p.finder.DefaultDatacenter(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find default datacenter: %w", err)
+	}
+	p.finder.SetDatacenter(datacenter)
+
+	// Create VM reference from ID
+	vmRef := types.ManagedObjectReference{
+		Type:  "VirtualMachine",
+		Value: req.Id,
+	}
+
+	vm := object.NewVirtualMachine(p.client.Client, vmRef)
+
+	// Get current VM properties
+	var vmMo mo.VirtualMachine
+	err = vm.Properties(ctx, vm.Reference(), []string{
+		"config.hardware.numCPU",
+		"config.hardware.memoryMB",
+		"config.hardware.device",
+		"runtime.powerState",
+	}, &vmMo)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get VM properties: %w", err)
+	}
+
+	// Parse the desired configuration from JSON
+	var desired map[string]interface{}
+	if err := json.Unmarshal([]byte(req.DesiredJson), &desired); err != nil {
+		return nil, fmt.Errorf("failed to parse desired configuration: %w", err)
+	}
+
+	// Build the reconfiguration spec
+	configSpec := &types.VirtualMachineConfigSpec{}
+	hasChanges := false
+
+	// Handle CPU changes
+	if classData, ok := desired["class"].(map[string]interface{}); ok {
+		if cpus, ok := classData["cpus"].(float64); ok {
+			newCPUs := int32(cpus)
+			if newCPUs != vmMo.Config.Hardware.NumCPU {
+				p.logger.Info("CPU change requested", "vm_id", req.Id, "old", vmMo.Config.Hardware.NumCPU, "new", newCPUs)
+				configSpec.NumCPUs = newCPUs
+				hasChanges = true
+			}
+		}
+
+		// Handle memory changes (memory is in MiB in the request)
+		if memory, ok := classData["memory"].(string); ok {
+			memMiB, err := p.parseMemory(memory)
+			if err == nil {
+				newMemoryMB := int64(memMiB)
+				currentMemoryMB := int64(vmMo.Config.Hardware.MemoryMB)
+				if newMemoryMB != currentMemoryMB {
+					p.logger.Info("Memory change requested", "vm_id", req.Id, "old_mb", currentMemoryMB, "new_mb", newMemoryMB)
+					configSpec.MemoryMB = newMemoryMB
+					hasChanges = true
+				}
+			} else {
+				p.logger.Warn("Failed to parse memory value", "memory", memory, "error", err)
+			}
+		}
+	}
+
+	// Handle disk changes
+	if disksData, ok := desired["disks"].([]interface{}); ok && len(disksData) > 0 {
+		// Get the first disk (primary disk) for resizing
+		if diskData, ok := disksData[0].(map[string]interface{}); ok {
+			if sizeStr, ok := diskData["size"].(string); ok {
+				sizeGiB, err := p.parseMemory(sizeStr)
+				if err == nil {
+					// Convert MiB to GiB (if parseMemory returns MiB)
+					sizeGB := int64(sizeGiB / 1024)
+					if sizeGB > 0 {
+						// Find the primary disk
+						var primaryDisk *types.VirtualDisk
+						for _, device := range vmMo.Config.Hardware.Device {
+							if disk, ok := device.(*types.VirtualDisk); ok {
+								primaryDisk = disk
+								break
+							}
+						}
+
+						if primaryDisk != nil {
+							currentSizeGB := primaryDisk.CapacityInKB / (1024 * 1024)
+							if sizeGB > currentSizeGB {
+								p.logger.Info("Disk resize requested", "vm_id", req.Id, "old_gb", currentSizeGB, "new_gb", sizeGB)
+
+								// Create a new disk with updated size
+								newDisk := *primaryDisk
+								newDisk.CapacityInKB = sizeGB * 1024 * 1024 // Convert GB to KB
+
+								deviceSpec := &types.VirtualDeviceConfigSpec{
+									Operation: types.VirtualDeviceConfigSpecOperationEdit,
+									Device:    &newDisk,
+								}
+
+								configSpec.DeviceChange = append(configSpec.DeviceChange, deviceSpec)
+								hasChanges = true
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// If no changes, return success immediately
+	if !hasChanges {
+		p.logger.Info("No configuration changes needed", "vm_id", req.Id)
+		return &providerv1.TaskResponse{}, nil
+	}
+
+	// Perform the reconfiguration
+	p.logger.Info("Applying VM reconfiguration", "vm_id", req.Id)
+	task, err := vm.Reconfigure(ctx, *configSpec)
+	if err != nil {
+		return nil, fmt.Errorf("failed to start reconfiguration: %w", err)
+	}
+
+	// Wait for the reconfiguration to complete
+	_, err = task.WaitForResult(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("reconfiguration failed: %w", err)
+	}
+
+	p.logger.Info("VM reconfigured successfully", "vm_id", req.Id)
+
+	// Return empty task response since we completed synchronously
+	return &providerv1.TaskResponse{}, nil
+}
+
+// parseMemory parses memory strings like "2Gi", "2048Mi" to MiB
+func (p *Provider) parseMemory(memStr string) (int64, error) {
+	memStr = strings.TrimSpace(memStr)
+
+	if strings.HasSuffix(memStr, "Gi") {
+		val, err := strconv.ParseFloat(strings.TrimSuffix(memStr, "Gi"), 64)
+		if err != nil {
+			return 0, err
+		}
+		return int64(val * 1024), nil // Convert GiB to MiB
+	}
+
+	if strings.HasSuffix(memStr, "Mi") {
+		val, err := strconv.ParseInt(strings.TrimSuffix(memStr, "Mi"), 10, 64)
+		if err != nil {
+			return 0, err
+		}
+		return val, nil
+	}
+
+	if strings.HasSuffix(memStr, "Ki") {
+		val, err := strconv.ParseFloat(strings.TrimSuffix(memStr, "Ki"), 64)
+		if err != nil {
+			return 0, err
+		}
+		return int64(val / 1024), nil // Convert KiB to MiB
+	}
+
+	// Try parsing as raw number (assume MiB)
+	val, err := strconv.ParseInt(memStr, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid memory format: %s", memStr)
+	}
+	return val, nil
 }
 
 // HardwareUpgrade upgrades the hardware version of a virtual machine
@@ -773,11 +945,22 @@ func (p *Provider) Describe(ctx context.Context, req *providerv1.DescribeRequest
 		uptimeSeconds,
 		bootTime)
 
+	// Generate console URL for vSphere web client
+	consoleURL := ""
+	if p.config != nil && p.config.Endpoint != "" {
+		// vSphere web client URL format: https://{vcenter}/ui/app/vm;nav=v/urn:vmomi:VirtualMachine:{vm-id}:{instance-uuid}
+		// Simpler format that works for most vSphere versions
+		consoleURL = fmt.Sprintf("%s/ui/#?extensionId=vsphere.core.vm.summary&objectId=urn:vmomi:VirtualMachine:%s:%s",
+			strings.TrimSuffix(p.config.Endpoint, "/sdk"),
+			req.Id,
+			vmMo.Summary.Config.InstanceUuid)
+	}
+
 	return &providerv1.DescribeResponse{
 		Exists:          true,
 		PowerState:      powerState,
 		Ips:             ips,
-		ConsoleUrl:      "", // TODO: Generate console URL if needed
+		ConsoleUrl:      consoleURL,
 		ProviderRawJson: providerRawJson,
 	}, nil
 }
@@ -858,7 +1041,69 @@ func (p *Provider) addCloudInitToConfigSpec(configSpec *types.VirtualMachineConf
 
 // TaskStatus checks the status of an async task
 func (p *Provider) TaskStatus(ctx context.Context, req *providerv1.TaskStatusRequest) (*providerv1.TaskStatusResponse, error) {
-	return nil, errors.NewUnimplemented("TaskStatus operation not yet implemented for vSphere")
+	if p.client == nil {
+		return nil, fmt.Errorf("vSphere client not configured")
+	}
+
+	if req.Task == nil || req.Task.Id == "" {
+		return nil, fmt.Errorf("task reference is required")
+	}
+
+	p.logger.Debug("Checking task status", "task_id", req.Task.Id)
+
+	// Create task reference from ID
+	// vSphere task IDs are ManagedObjectReference values
+	taskRef := types.ManagedObjectReference{
+		Type:  "Task",
+		Value: req.Task.Id,
+	}
+
+	task := object.NewTask(p.client.Client, taskRef)
+
+	// Get task info
+	taskInfo, err := task.WaitForResult(ctx, nil)
+	if err != nil {
+		// Task failed or error getting status
+		p.logger.Error("Task failed or error getting status", "task_id", req.Task.Id, "error", err)
+		return &providerv1.TaskStatusResponse{
+			Done:  true,
+			Error: fmt.Sprintf("task failed: %v", err),
+		}, nil
+	}
+
+	// Check task state
+	isDone := false
+	errorMsg := ""
+
+	switch taskInfo.State {
+	case types.TaskInfoStateSuccess:
+		isDone = true
+		p.logger.Debug("Task completed successfully", "task_id", req.Task.Id)
+	case types.TaskInfoStateError:
+		isDone = true
+		if taskInfo.Error != nil {
+			errorMsg = taskInfo.Error.LocalizedMessage
+		} else {
+			errorMsg = "task failed with unknown error"
+		}
+		p.logger.Error("Task completed with error", "task_id", req.Task.Id, "error", errorMsg)
+	case types.TaskInfoStateQueued:
+		isDone = false
+		p.logger.Debug("Task is queued", "task_id", req.Task.Id)
+	case types.TaskInfoStateRunning:
+		isDone = false
+		p.logger.Debug("Task is running", "task_id", req.Task.Id, "progress", taskInfo.Progress)
+	default:
+		// Unknown state, consider it done to avoid hanging
+		isDone = true
+		errorMsg = fmt.Sprintf("unexpected task state: %s", taskInfo.State)
+		p.logger.Warn("Task in unexpected state", "task_id", req.Task.Id, "state", taskInfo.State)
+	}
+
+	return &providerv1.TaskStatusResponse{
+		Done:  isDone,
+		Error: errorMsg,
+	}, nil
 }
 
 // SnapshotCreate creates a snapshot of a virtual machine
@@ -1093,7 +1338,150 @@ func (p *Provider) findSnapshotByID(snapshots []types.VirtualMachineSnapshotTree
 
 // Clone clones a virtual machine
 func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*providerv1.CloneResponse, error) {
-	return nil, errors.NewUnimplemented("Clone operation not yet implemented for vSphere")
+	if p.client == nil {
+		return nil, fmt.Errorf("vSphere client not configured")
+	}
+
+	p.logger.Info("Cloning virtual machine", "source_vm_id", req.SourceVmId, "target_name", req.TargetName, "linked", req.Linked)
+
+	// Set datacenter context for finder
+	datacenter, err := p.finder.DefaultDatacenter(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find default datacenter: %w", err)
+	}
+	p.finder.SetDatacenter(datacenter)
+
+	// Create source VM reference from ID
+	sourceVMRef := types.ManagedObjectReference{
+		Type:  "VirtualMachine",
+		Value: req.SourceVmId,
+	}
+
+	sourceVM := object.NewVirtualMachine(p.client.Client, sourceVMRef)
+
+	// Determine which cluster to use (provider default)
+	clusterName := p.config.DefaultCluster
+	cluster, err := p.finder.ClusterComputeResource(ctx, clusterName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find cluster '%s': %w", clusterName, err)
+	}
+
+	resourcePool, err := cluster.ResourcePool(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get resource pool from cluster: %w", err)
+	}
+
+	// Determine which datastore to use (provider default)
+	datastoreName := p.config.DefaultDatastore
+	datastore, err := p.finder.Datastore(ctx, datastoreName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find datastore '%s': %w", datastoreName, err)
+	}
+
+	// Determine which folder to use (provider default)
+	folderName := p.config.DefaultFolder
+	folder, err := p.finder.Folder(ctx, folderName)
+	if err != nil {
+		// If folder doesn't exist, use the datacenter's default VM folder
+		p.logger.Warn("Failed to find folder, using datacenter default VM folder", "folder", folderName, "error", err)
+		folder, err = p.finder.Folder(ctx, datacenter.Name()+"/vm")
+		if err != nil {
+			return nil, fmt.Errorf("failed to find datacenter VM folder: %w", err)
+		}
+	}
+
+	// Create the clone specification
+	cloneSpec := &types.VirtualMachineCloneSpec{
+		Location: types.VirtualMachineRelocateSpec{
+			Datastore: types.NewReference(datastore.Reference()),
+			Pool:      types.NewReference(resourcePool.Reference()),
+		},
+		PowerOn:  false, // Don't power on automatically
+		Template: false,
+	}
+
+	// Handle linked clone if requested
+	if req.Linked {
+		p.logger.Info("Creating linked clone", "source_vm_id", req.SourceVmId)
+
+		// For linked clone, we need to specify a snapshot
+		// Get the current snapshot or create one
+		var sourceVMObj mo.VirtualMachine
+		err = sourceVM.Properties(ctx, sourceVM.Reference(), []string{"snapshot"}, &sourceVMObj)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get source VM properties: %w", err)
+		}
+
+		var snapshotRef *types.ManagedObjectReference
+		if sourceVMObj.Snapshot != nil && len(sourceVMObj.Snapshot.RootSnapshotList) > 0 {
+			// Use the most recent snapshot
+			snapshots := sourceVMObj.Snapshot.RootSnapshotList
+			latestSnapshot := &snapshots[len(snapshots)-1]
+			snapshotRef = &latestSnapshot.Snapshot
+			p.logger.Info("Using existing snapshot for linked clone", "snapshot", latestSnapshot.Name)
+		} else {
+			// Create a snapshot for the linked clone
+			p.logger.Info("Creating snapshot for linked clone", "source_vm_id", req.SourceVmId)
+			snapshotName := fmt.Sprintf("clone-base-%d", time.Now().Unix())
+			snapshotTask, err := sourceVM.CreateSnapshot(ctx, snapshotName, "Snapshot for linked clone", false, false)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create snapshot for linked clone: %w", err)
+			}
+
+			taskInfo, err := snapshotTask.WaitForResult(ctx, nil)
+			if err != nil {
+				return nil, fmt.Errorf("snapshot creation failed: %w", err)
+			}
+
+			if taskInfo.Result == nil {
+				return nil, fmt.Errorf("snapshot creation completed but no snapshot reference returned")
+			}
+
+			snapshotRefResult, ok := taskInfo.Result.(types.ManagedObjectReference)
+			if !ok {
+				return nil, fmt.Errorf("unexpected snapshot task result type: %T", taskInfo.Result)
+			}
+			snapshotRef = &snapshotRefResult
+		}
+
+		// Set up linked clone with snapshot
+		cloneSpec.Location.DiskMoveType = string(types.VirtualMachineRelocateDiskMoveOptionsCreateNewChildDiskBacking)
+		cloneSpec.Snapshot = snapshotRef
+	} else {
+		// Full clone
+		p.logger.Info("Creating full clone", "source_vm_id", req.SourceVmId)
+		cloneSpec.Location.DiskMoveType = string(types.VirtualMachineRelocateDiskMoveOptionsMoveAllDiskBackingsAndAllowSharing)
+	}
+
+	// Perform the clone operation
+	p.logger.Info("Cloning virtual machine", "source_vm_id", req.SourceVmId, "target_name", req.TargetName)
+
+	cloneTask, err := sourceVM.Clone(ctx, folder, req.TargetName, *cloneSpec)
+	if err != nil {
+		return nil, fmt.Errorf("failed to start clone operation: %w", err)
+	}
+
+	// Wait for the clone task to complete
+	taskInfo, err := cloneTask.WaitForResult(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("clone task failed: %w", err)
+	}
+
+	// Get the new VM reference
+	targetVMRef, ok := taskInfo.Result.(types.ManagedObjectReference)
+	if !ok {
+		return nil, fmt.Errorf("unexpected result type from clone task: %T", taskInfo.Result)
+	}
+
+	// Get the target VM's managed object ID
+	targetVMID := targetVMRef.Value
+
+	p.logger.Info("Virtual machine cloned successfully", "source_vm_id", req.SourceVmId, "target_vm_id", targetVMID, "target_name", req.TargetName)
+
+	return &providerv1.CloneResponse{
+		TargetVmId: targetVMID,
+		// No task reference since we completed synchronously
+	}, nil
 }
 
 // ImagePrepare prepares an image/template
