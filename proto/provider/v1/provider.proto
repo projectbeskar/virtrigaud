@@ -144,6 +144,62 @@ message ImagePrepareRequest {
   string storage_hint = 3; // Storage location hint (datastore, pool, etc.)
 }
 
+// Disk export operations for migration
+message ExportDiskRequest {
+  string vm_id = 1;            // VM identifier
+  string disk_id = 2;          // Disk identifier (optional, defaults to primary disk)
+  string snapshot_id = 3;      // Snapshot to export from (optional)
+  string destination_url = 4;  // Where to upload the disk (S3, HTTP, etc.)
+  string format = 5;           // Desired export format (qcow2, vmdk, raw)
+  bool compress = 6;           // Enable compression during export
+  map<string, string> credentials = 7; // Credentials for destination (access keys, tokens)
+}
+
+message ExportDiskResponse {
+  string export_id = 1;        // Export operation identifier
+  TaskRef task = 2;            // Task reference for async tracking
+  int64 estimated_size_bytes = 3; // Estimated size of export
+  string checksum = 4;         // Checksum of exported disk (SHA256)
+}
+
+// Disk import operations for migration
+message ImportDiskRequest {
+  string source_url = 1;       // Where to download the disk from (S3, HTTP, etc.)
+  string storage_hint = 2;     // Target storage location (datastore, pool, etc.)
+  string format = 3;           // Source disk format (qcow2, vmdk, raw)
+  string target_name = 4;      // Name for the imported disk
+  bool verify_checksum = 5;    // Verify checksum after import
+  string expected_checksum = 6; // Expected checksum (SHA256)
+  map<string, string> credentials = 7; // Credentials for source (access keys, tokens)
+}
+
+message ImportDiskResponse {
+  string disk_id = 1;          // Imported disk identifier
+  string path = 2;             // Path to imported disk
+  TaskRef task = 3;            // Task reference for async tracking
+  int64 actual_size_bytes = 4; // Actual size of imported disk
+  string checksum = 5;         // Checksum of imported disk (SHA256)
+}
+
+// Get disk information for migration planning
+message GetDiskInfoRequest {
+  string vm_id = 1;            // VM identifier
+  string disk_id = 2;          // Disk identifier (optional, defaults to primary disk)
+  string snapshot_id = 3;      // Get info for specific snapshot (optional)
+}
+
+message GetDiskInfoResponse {
+  string disk_id = 1;          // Disk identifier
+  string format = 2;           // Disk format (qcow2, vmdk, raw)
+  int64 virtual_size_bytes = 3; // Virtual size (capacity)
+  int64 actual_size_bytes = 4;  // Actual size (allocated)
+  string path = 5;             // Path or location
+  bool is_bootable = 6;        // Is this a boot disk
+  repeated string snapshots = 7; // Available snapshots
+  string backing_file = 8;     // Backing file (for linked clones)
+  map<string, string> metadata = 9; // Additional provider-specific metadata
+}
+
 // Capability check - what features does this provider support
 message GetCapabilitiesRequest {}
 
@@ -156,6 +212,11 @@ message GetCapabilitiesResponse {
   bool supports_image_import = 6;
   repeated string supported_disk_types = 7;
   repeated string supported_network_types = 8;
+  bool supports_disk_export = 9;           // Can export disks for migration
+  bool supports_disk_import = 10;          // Can import disks from external sources
+  repeated string supported_export_formats = 11; // Supported export formats (qcow2, vmdk, raw)
+  repeated string supported_import_formats = 12; // Supported import formats
+  bool supports_export_compression = 13;   // Supports compression during export
 }
 
 // Provider service definition
@@ -197,4 +258,9 @@ service Provider {
   
   // Get provider capabilities
   rpc GetCapabilities(GetCapabilitiesRequest) returns (GetCapabilitiesResponse);
+  
+  // Disk migration operations
+  rpc ExportDisk(ExportDiskRequest) returns (ExportDiskResponse);
+  rpc ImportDisk(ImportDiskRequest) returns (ImportDiskResponse);
+  rpc GetDiskInfo(GetDiskInfoRequest) returns (GetDiskInfoResponse);
 }

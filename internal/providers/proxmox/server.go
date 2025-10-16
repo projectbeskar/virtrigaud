@@ -1180,3 +1180,255 @@ func (p *Provider) buildIPConfigString(ipConfig pveapi.IPConfig) string {
 	}
 	return result
 }
+
+// GetDiskInfo retrieves detailed information about a VM's disk
+func (p *Provider) GetDiskInfo(ctx context.Context, req *providerv1.GetDiskInfoRequest) (*providerv1.GetDiskInfoResponse, error) {
+	if p.client == nil {
+		return nil, errors.NewUnavailable("PVE client not configured", nil)
+	}
+
+	p.logger.Info("Getting disk info", "vm_id", req.VmId)
+
+	// Parse VM reference
+	vmid, node, err := p.parseVMReference(req.VmId)
+	if err != nil {
+		return nil, errors.NewInvalidSpec("invalid VM reference: %v", err)
+	}
+
+	// Get VM configuration
+	config, err := p.client.GetVMConfig(ctx, node, vmid)
+	if err != nil {
+		return nil, errors.NewInternal("failed to get VM config: %v", err)
+	}
+
+	// Get VM info for additional details
+	vmInfo, err := p.client.GetVM(ctx, node, vmid)
+	if err != nil {
+		p.logger.Warn("Failed to get VM info", "error", err)
+	}
+
+	// Find primary disk (scsi0, virtio0, sata0, or ide0)
+	diskID := "scsi0" // default
+	if req.DiskId != "" {
+		diskID = req.DiskId
+	}
+
+	// Get disk config
+	var diskInfo string
+	var found bool
+	if val, ok := config[diskID]; ok {
+		if strVal, ok := val.(string); ok {
+			diskInfo = strVal
+			found = true
+		}
+	}
+
+	if !found {
+		return nil, errors.NewNotFound("disk %s not found", diskID)
+	}
+
+	// Parse disk info (format: "local-lvm:vm-100-disk-0,size=32G")
+	parts := strings.Split(diskInfo, ",")
+	var storagePath, size string
+	if len(parts) > 0 {
+		storagePath = parts[0]
+	}
+	for _, part := range parts {
+		if strings.HasPrefix(part, "size=") {
+			size = strings.TrimPrefix(part, "size=")
+		}
+	}
+
+	// Parse size to bytes
+	virtualSizeBytes, err := p.parseDiskSize(size)
+	if err != nil {
+		p.logger.Warn("Failed to parse disk size", "size", size, "error", err)
+		virtualSizeBytes = 0
+	}
+
+	// Actual size is same as virtual size for Proxmox (thin provisioning)
+	// Can be refined later by querying actual disk usage from storage API
+	actualSizeBytes := virtualSizeBytes
+	_ = vmInfo // Use vmInfo to avoid unused variable warning
+
+	// Determine format from storage type
+	format := "qcow2" // default for Proxmox
+	if strings.Contains(storagePath, "raw") || strings.Contains(diskInfo, "raw") {
+		format = "raw"
+	}
+
+	// Get snapshots
+	snapshotList, err := p.client.ListSnapshots(ctx, node, vmid)
+	if err != nil {
+		p.logger.Warn("Failed to list snapshots", "error", err)
+		snapshotList = []*pveapi.Snapshot{}
+	}
+
+	// Convert snapshots to string list
+	snapshots := make([]string, 0, len(snapshotList))
+	for _, snap := range snapshotList {
+		snapshots = append(snapshots, snap.Name)
+	}
+
+	response := &providerv1.GetDiskInfoResponse{
+		DiskId:           diskID,
+		Format:           format,
+		VirtualSizeBytes: virtualSizeBytes,
+		ActualSizeBytes:  actualSizeBytes,
+		Path:             storagePath,
+		IsBootable:       true, // Primary disk is always bootable
+		Snapshots:        snapshots,
+		BackingFile:      "",
+		Metadata: map[string]string{
+			"node":    node,
+			"vmid":    fmt.Sprintf("%d", vmid),
+			"storage": storagePath,
+		},
+	}
+
+	p.logger.Info("Disk info retrieved", "disk_id", diskID, "format", format, "size_bytes", virtualSizeBytes)
+	return response, nil
+}
+
+// ExportDisk exports a VM disk for migration
+func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskRequest) (*providerv1.ExportDiskResponse, error) {
+	if p.client == nil {
+		return nil, errors.NewUnavailable("PVE client not configured", nil)
+	}
+
+	p.logger.Info("Exporting disk", "vm_id", req.VmId, "destination", req.DestinationUrl)
+
+	// Parse VM reference
+	vmid, _, err := p.parseVMReference(req.VmId)
+	if err != nil {
+		return nil, errors.NewInvalidSpec("invalid VM reference: %v", err)
+	}
+
+	// Get disk information first
+	diskInfo, err := p.GetDiskInfo(ctx, &providerv1.GetDiskInfoRequest{
+		VmId:       req.VmId,
+		DiskId:     req.DiskId,
+		SnapshotId: req.SnapshotId,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get disk info: %w", err)
+	}
+
+	// Validate format compatibility
+	if req.Format != "" && req.Format != "qcow2" && req.Format != "raw" {
+		return nil, errors.NewInvalidSpec("unsupported export format: %s (proxmox supports qcow2, raw)", req.Format)
+	}
+
+	exportID := fmt.Sprintf("export-%d-%d", vmid, time.Now().Unix())
+
+	// TODO: Implement actual disk export with storage layer
+	// Proxmox-specific approach:
+	// 1. Use vzdump to create a backup
+	// 2. Extract disk from backup
+	// 3. Upload to DestinationURL using storage layer
+	// 4. Track progress via PVE task API
+
+	p.logger.Info("Export prepared", "export_id", exportID, "disk_path", diskInfo.Path)
+	p.logger.Warn("Actual export not yet implemented - requires storage layer")
+
+	response := &providerv1.ExportDiskResponse{
+		ExportId:           exportID,
+		Task:               nil, // Will be async when implemented
+		EstimatedSizeBytes: diskInfo.ActualSizeBytes,
+		Checksum:           "", // TODO: Calculate checksum
+	}
+
+	return response, nil
+}
+
+// ImportDisk imports a disk from an external source
+func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskRequest) (*providerv1.ImportDiskResponse, error) {
+	if p.client == nil {
+		return nil, errors.NewUnavailable("PVE client not configured", nil)
+	}
+
+	p.logger.Info("Importing disk", "source", req.SourceUrl, "storage", req.StorageHint)
+
+	// Find appropriate node (will be used when implementing actual import)
+	_, err := p.client.FindNode(ctx)
+	if err != nil {
+		return nil, errors.NewInternal("failed to find node: %v", err)
+	}
+
+	// Determine storage
+	storage := "local-lvm"
+	if req.StorageHint != "" {
+		storage = req.StorageHint
+	}
+
+	// Validate format
+	if req.Format != "" && req.Format != "qcow2" && req.Format != "raw" {
+		return nil, errors.NewInvalidSpec("unsupported import format: %s (proxmox supports qcow2, raw)", req.Format)
+	}
+
+	// TODO: Implement actual disk import with storage layer
+	// Proxmox-specific approach:
+	// 1. Download disk from SourceURL using storage layer
+	// 2. Verify checksum if requested
+	// 3. Import to PVE storage using qm importdisk or storage API
+	// 4. Track progress via PVE task API
+
+	p.logger.Warn("Actual import not yet implemented - requires storage layer")
+
+	// Generate disk ID
+	diskID := req.TargetName
+	if diskID == "" {
+		diskID = fmt.Sprintf("vm-imported-%d-disk-0", time.Now().Unix())
+	}
+
+	response := &providerv1.ImportDiskResponse{
+		DiskId:          diskID,
+		Path:            fmt.Sprintf("%s:%s", storage, diskID),
+		Task:            nil, // Will be async when implemented
+		ActualSizeBytes: 0,   // TODO: Get actual size after import
+		Checksum:        "",  // TODO: Calculate checksum
+	}
+
+	return response, nil
+}
+
+// parseDiskSize converts Proxmox disk size string (e.g., "32G", "1024M") to bytes
+func (p *Provider) parseDiskSize(sizeStr string) (int64, error) {
+	if sizeStr == "" {
+		return 0, fmt.Errorf("empty size string")
+	}
+
+	// Remove trailing spaces
+	sizeStr = strings.TrimSpace(sizeStr)
+
+	// Extract number and unit
+	var value float64
+	var unit string
+
+	// Try to parse with scanf
+	n, err := fmt.Sscanf(sizeStr, "%f%s", &value, &unit)
+	if err != nil || n < 1 {
+		return 0, fmt.Errorf("invalid size format: %s", sizeStr)
+	}
+
+	// Default to bytes if no unit
+	if n == 1 {
+		return int64(value), nil
+	}
+
+	// Convert to bytes based on unit
+	switch strings.ToUpper(unit) {
+	case "B":
+		return int64(value), nil
+	case "K", "KB", "KIB":
+		return int64(value * 1024), nil
+	case "M", "MB", "MIB":
+		return int64(value * 1024 * 1024), nil
+	case "G", "GB", "GIB":
+		return int64(value * 1024 * 1024 * 1024), nil
+	case "T", "TB", "TIB":
+		return int64(value * 1024 * 1024 * 1024 * 1024), nil
+	default:
+		return 0, fmt.Errorf("unknown unit: %s", unit)
+	}
+}

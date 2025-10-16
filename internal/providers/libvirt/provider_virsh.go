@@ -1273,3 +1273,214 @@ func (p *Provider) TaskStatus(ctx context.Context, taskRef string) (contracts.Ta
 		Message:     "Task completed",
 	}, nil
 }
+
+// parseStorageSize converts storage size strings (e.g., "20 GiB", "1024 MiB") to bytes
+func parseStorageSize(sizeStr string) (int64, error) {
+	sizeStr = strings.TrimSpace(sizeStr)
+	parts := strings.Fields(sizeStr)
+
+	if len(parts) == 0 {
+		return 0, fmt.Errorf("empty size string")
+	}
+
+	var value float64
+	var unit string
+
+	if len(parts) == 1 {
+		// Assume bytes if no unit specified
+		val, err := strconv.ParseInt(parts[0], 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("invalid size value: %w", err)
+		}
+		return val, nil
+	}
+
+	// Parse value and unit
+	val, err := strconv.ParseFloat(parts[0], 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid size value: %w", err)
+	}
+	value = val
+	unit = strings.ToUpper(parts[1])
+
+	// Convert to bytes
+	switch unit {
+	case "B", "BYTES":
+		return int64(value), nil
+	case "KB", "KIB":
+		return int64(value * 1024), nil
+	case "MB", "MIB":
+		return int64(value * 1024 * 1024), nil
+	case "GB", "GIB":
+		return int64(value * 1024 * 1024 * 1024), nil
+	case "TB", "TIB":
+		return int64(value * 1024 * 1024 * 1024 * 1024), nil
+	default:
+		return 0, fmt.Errorf("unknown unit: %s", unit)
+	}
+}
+
+// GetDiskInfo retrieves detailed information about a VM's disk
+func (p *Provider) GetDiskInfo(ctx context.Context, req contracts.GetDiskInfoRequest) (contracts.GetDiskInfoResponse, error) {
+	log.Printf("INFO Getting disk info for VM: %s", req.VmId)
+
+	if p.virshProvider == nil {
+		return contracts.GetDiskInfoResponse{}, contracts.NewRetryableError("virsh provider not initialized", nil)
+	}
+
+	storageProvider := NewStorageProvider(p.virshProvider)
+
+	// Get primary disk volume name (convention: vmname-disk)
+	diskVolumeName := fmt.Sprintf("%s-disk", req.VmId)
+	if req.DiskId != "" {
+		diskVolumeName = req.DiskId
+	}
+
+	// Get volume information
+	volume, err := storageProvider.GetVolumeInfo(ctx, "default", diskVolumeName)
+	if err != nil {
+		return contracts.GetDiskInfoResponse{}, fmt.Errorf("failed to get volume info: %w", err)
+	}
+
+	// Parse volume size
+	virtualSize, err := parseStorageSize(volume.Capacity)
+	if err != nil {
+		log.Printf("WARN Failed to parse capacity: %v, using 0", err)
+		virtualSize = 0
+	}
+
+	actualSize, err := parseStorageSize(volume.Allocation)
+	if err != nil {
+		log.Printf("WARN Failed to parse allocation: %v, using 0", err)
+		actualSize = 0
+	}
+
+	// Get snapshots for this domain
+	snapshots, err := p.virshProvider.listSnapshots(ctx, req.VmId)
+	if err != nil {
+		log.Printf("WARN Failed to list snapshots: %v", err)
+		snapshots = []string{}
+	}
+
+	// Determine if this is a boot disk (primary disk is always bootable)
+	isBootable := (req.DiskId == "" || req.DiskId == diskVolumeName)
+
+	response := contracts.GetDiskInfoResponse{
+		DiskId:           diskVolumeName,
+		Format:           volume.Format,
+		VirtualSizeBytes: virtualSize,
+		ActualSizeBytes:  actualSize,
+		Path:             volume.Path,
+		IsBootable:       isBootable,
+		Snapshots:        snapshots,
+		BackingFile:      "", // TODO: Parse backing file from volume XML
+		Metadata: map[string]string{
+			"pool": volume.Pool,
+			"type": volume.Type,
+		},
+	}
+
+	log.Printf("INFO Disk info retrieved: %s (format=%s, virtual=%d bytes, actual=%d bytes)",
+		response.DiskId, response.Format, response.VirtualSizeBytes, response.ActualSizeBytes)
+
+	return response, nil
+}
+
+// ExportDisk exports a VM disk for migration
+func (p *Provider) ExportDisk(ctx context.Context, req contracts.ExportDiskRequest) (contracts.ExportDiskResponse, error) {
+	log.Printf("INFO Exporting disk for VM: %s to %s", req.VmId, req.DestinationURL)
+
+	if p.virshProvider == nil {
+		return contracts.ExportDiskResponse{}, contracts.NewRetryableError("virsh provider not initialized", nil)
+	}
+
+	// Get disk information first
+	diskInfo, err := p.GetDiskInfo(ctx, contracts.GetDiskInfoRequest{
+		VmId:       req.VmId,
+		DiskId:     req.DiskId,
+		SnapshotId: req.SnapshotId,
+	})
+	if err != nil {
+		return contracts.ExportDiskResponse{}, fmt.Errorf("failed to get disk info: %w", err)
+	}
+
+	// Validate format compatibility
+	if req.Format != "" && req.Format != "qcow2" && req.Format != "raw" {
+		return contracts.ExportDiskResponse{}, fmt.Errorf("unsupported export format: %s (libvirt supports qcow2, raw)", req.Format)
+	}
+
+	// For now, return information about the export
+	// The actual upload to S3/HTTP will be implemented with the storage layer
+	exportId := fmt.Sprintf("export-%s-%d", req.VmId, time.Now().Unix())
+
+	// TODO: Implement actual disk export with storage layer
+	// This will involve:
+	// 1. If SnapshotId is specified, export from snapshot
+	// 2. Calculate checksum of the disk
+	// 3. Upload to DestinationURL using storage layer
+	// 4. Track progress and report status
+
+	log.Printf("INFO Export prepared for disk: %s (path=%s)", diskInfo.DiskId, diskInfo.Path)
+	log.Printf("WARN Actual export to %s not yet implemented - requires storage layer", req.DestinationURL)
+
+	response := contracts.ExportDiskResponse{
+		ExportId:           exportId,
+		TaskRef:            "", // Synchronous for now
+		EstimatedSizeBytes: diskInfo.ActualSizeBytes,
+		Checksum:           "", // TODO: Calculate checksum
+	}
+
+	return response, nil
+}
+
+// ImportDisk imports a disk from an external source
+func (p *Provider) ImportDisk(ctx context.Context, req contracts.ImportDiskRequest) (contracts.ImportDiskResponse, error) {
+	log.Printf("INFO Importing disk from %s to storage: %s", req.SourceURL, req.StorageHint)
+
+	if p.virshProvider == nil {
+		return contracts.ImportDiskResponse{}, contracts.NewRetryableError("virsh provider not initialized", nil)
+	}
+
+	storageProvider := NewStorageProvider(p.virshProvider)
+
+	// Determine storage pool
+	storagePool := "default"
+	if req.StorageHint != "" {
+		storagePool = req.StorageHint
+	}
+
+	// Ensure storage pool exists and is active
+	if err := storageProvider.ensurePoolActive(ctx, storagePool); err != nil {
+		return contracts.ImportDiskResponse{}, fmt.Errorf("failed to ensure storage pool: %w", err)
+	}
+
+	// Validate format
+	if req.Format != "" && req.Format != "qcow2" && req.Format != "raw" {
+		return contracts.ImportDiskResponse{}, fmt.Errorf("unsupported import format: %s (libvirt supports qcow2, raw)", req.Format)
+	}
+
+	// TODO: Implement actual disk import with storage layer
+	// This will involve:
+	// 1. Download disk from SourceURL using storage layer
+	// 2. Verify checksum if requested
+	// 3. Create volume in storage pool from downloaded file
+	// 4. Track progress and report status
+
+	log.Printf("WARN Actual import from %s not yet implemented - requires storage layer", req.SourceURL)
+
+	// For now, return placeholder response
+	diskId := req.TargetName
+	if diskId == "" {
+		diskId = fmt.Sprintf("imported-disk-%d", time.Now().Unix())
+	}
+
+	response := contracts.ImportDiskResponse{
+		DiskId:          diskId,
+		Path:            fmt.Sprintf("/var/lib/libvirt/images/%s.qcow2", diskId),
+		TaskRef:         "", // Synchronous for now
+		ActualSizeBytes: 0,  // TODO: Get actual size after import
+		Checksum:        "", // TODO: Calculate checksum
+	}
+
+	return response, nil
+}
