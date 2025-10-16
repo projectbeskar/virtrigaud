@@ -1,0 +1,93 @@
+# Example: Migrate a VM from VMware vSphere to Proxmox VE
+#
+# This example demonstrates migrating a Windows Server VM from vSphere
+# to Proxmox using NFS for intermediate storage.
+#
+# Prerequisites:
+# - Source VM "windows-server-2022" running on vSphere
+# - Target Proxmox provider configured
+# - NFS share mounted at /mnt/migrations on both providers
+# - Sufficient space on NFS for VM disk
+
+---
+# VMMigration Resource
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMMigration
+metadata:
+  name: windows-vsphere-to-proxmox
+  namespace: production
+  labels:
+    app: windows-server
+    os: windows
+    migration-type: platform-migration
+  annotations:
+    migration.virtrigaud.io/requestor: ops-team@example.com
+    migration.virtrigaud.io/reason: "Migrating to Proxmox cluster"
+spec:
+  # Source: vSphere VM
+  sourceName: windows-server-2022
+  sourceNamespace: production
+  
+  # Target: Proxmox
+  targetProviderRef:
+    name: proxmox-cluster
+    namespace: default
+  targetName: windows-server-2022-pve
+  targetNamespace: production
+  targetStorageHint: local-lvm            # Proxmox storage
+  
+  # Resource hints for target VM
+  targetResourceHints:
+    cpu: 4
+    memory: 8192                          # 8GB RAM
+  
+  # Network configuration
+  targetNetworkHints:
+    - name: eth0
+      bridge: vmbr0                       # Proxmox bridge
+  
+  # Intermediate Storage: NFS
+  storage:
+    type: nfs
+    path: /mnt/migrations
+    endpoint: nfs.example.com
+  
+  # Cleanup: Conservative approach
+  cleanupPolicy:
+    deleteIntermediate: true              # Clean up NFS after migration
+    deleteSnapshot: true                  # Remove snapshot
+    deleteSource: false                   # Keep source (important!)
+  
+  # Retry: Aggressive retry for reliability
+  retryPolicy:
+    maxAttempts: 5
+    backoffDuration: 10m
+    maxBackoffDuration: 1h
+
+# What happens:
+# 1. Controller validates windows-server-2022 on vSphere
+# 2. Creates snapshot of windows-server-2022
+# 3. vSphere provider downloads VMDK from datastore
+# 4. Converts vmdk → qcow2 using qemu-img
+# 5. Copies qcow2 to /mnt/migrations (NFS)
+# 6. Proxmox provider reads qcow2 from /mnt/migrations
+# 7. Uploads to Proxmox local-lvm storage
+# 8. Creates new VM "windows-server-2022-pve" in Proxmox
+# 9. Configures CPU, memory, and network
+# 10. Validates target VM creation
+# 11. Cleans up NFS and snapshot
+# 12. Sets status.phase = "Ready"
+
+# Monitor progress:
+#   kubectl get vmmigration windows-vsphere-to-proxmox -w
+#
+# Validate target VM:
+#   # Log into Proxmox web UI
+#   # Start windows-server-2022-pve
+#   # Verify Windows boots correctly
+#   # Test network connectivity
+#
+# After validation, optionally delete source:
+#   # Only after confirming target works!
+#   # kubectl delete vm windows-server-2022 -n production
+

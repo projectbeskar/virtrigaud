@@ -1447,7 +1447,7 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 	if targetFormat != diskInfo.Format {
 		p.logger.Info("Converting disk format", "from", diskInfo.Format, "to", targetFormat)
 		convertedPath := fmt.Sprintf("/tmp/%s-converted.%s", exportID, targetFormat)
-		
+
 		// Use diskutil for conversion
 		qemuImg := diskutil.NewQemuImg()
 		err = qemuImg.Convert(ctx, diskutil.ConvertOptions{
@@ -1460,7 +1460,7 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 		if err != nil {
 			return nil, errors.NewInternal("failed to convert disk format: %v", err)
 		}
-		
+
 		uploadPath = convertedPath
 		defer os.Remove(convertedPath)
 	} else {
@@ -1666,7 +1666,7 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 	if targetFormat != "qcow2" {
 		p.logger.Info("Converting to target format", "target_format", targetFormat)
 		convertedPath := fmt.Sprintf("/tmp/%s-converted.%s", diskID, targetFormat)
-		
+
 		// Use diskutil for conversion
 		qemuImg := diskutil.NewQemuImg()
 		err = qemuImg.Convert(ctx, diskutil.ConvertOptions{
@@ -1678,7 +1678,7 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 		if err != nil {
 			return nil, errors.NewInternal("failed to convert disk format: %v", err)
 		}
-		
+
 		importPath = convertedPath
 		defer os.Remove(convertedPath)
 	} else {
