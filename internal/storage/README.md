@@ -8,6 +8,7 @@ The storage package implements a pluggable storage backend system that supports 
 
 - **S3-compatible storage** (AWS S3, MinIO, etc.)
 - **HTTP/HTTPS storage** (simple file servers)
+- **NFS storage** (Network File System for on-premises)
 
 ## Interfaces
 
@@ -85,6 +86,99 @@ config := storage.StorageConfig{
 **URL Formats**:
 - `https://fileserver.example.com/path/to/file`
 - `http://fileserver.example.com/path/to/file`
+
+### NFS Storage
+
+NFS (Network File System) storage backend for on-premises deployments with shared NFS mounts.
+
+**Features**:
+- Direct filesystem operations (native performance)
+- Atomic writes via temporary files and rename
+- SHA256 checksum validation
+- Progress tracking for large files
+- Resume support via file seeking
+- Metadata storage in sidecar files
+- Automatic directory creation
+- Mount verification on initialization
+- Efficient buffered I/O with configurable buffer size
+
+**Configuration**:
+```go
+config := storage.StorageConfig{
+    Type:      "nfs",
+    Endpoint:  "/mnt/nfs-share",  // Mount point
+    ChunkSize: 32 * 1024 * 1024,  // 32MB buffer
+}
+```
+
+**Prerequisites**:
+- NFS share must be pre-mounted on the host/pod
+- Mount point must have read/write permissions
+- Sufficient disk space on NFS share
+
+**URL Formats**:
+- `nfs://relative/path/to/file`
+- `/absolute/path/to/file`
+- `relative/path/to/file`
+
+**Mount Setup Example**:
+```bash
+# Mount NFS share
+sudo mount -t nfs nfs-server:/export/vm-migrations /mnt/nfs-share
+
+# Verify mount
+df -h /mnt/nfs-share
+```
+
+**Kubernetes Mount Example**:
+```yaml
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: nfs-migration-pv
+spec:
+  capacity:
+    storage: 1Ti
+  accessModes:
+    - ReadWriteMany
+  nfs:
+    server: nfs-server.example.com
+    path: /export/vm-migrations
+  mountOptions:
+    - hard
+    - nfsvers=4.1
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nfs-migration-pvc
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 1Ti
+```
+
+**Performance Considerations**:
+- NFS performance depends on network and NFS server
+- Use NFSv4.1 or later for best performance
+- Consider `async` mount option for write performance (trade-off: less durability)
+- Mount options: `rsize=1048576,wsize=1048576` for large transfers
+- Local SSD cache on NFS server improves performance significantly
+
+**Advantages**:
+- No additional infrastructure needed (uses existing NFS)
+- Native filesystem performance
+- Simple setup and management
+- Works well for on-premises deployments
+- No API rate limits or quotas
+
+**Disadvantages**:
+- Requires NFS mount to be pre-configured
+- Single point of failure (NFS server)
+- Network dependency
+- No built-in replication (depends on NFS setup)
 
 ## Usage Examples
 
@@ -180,6 +274,150 @@ func main() {
     }
     
     fmt.Printf("Download complete! Checksum: %s\n", resp.Checksum)
+}
+```
+
+### NFS-Specific Examples
+
+#### Upload to NFS
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "github.com/projectbeskar/virtrigaud/internal/storage"
+)
+
+func main() {
+    // Create NFS storage backend
+    config := storage.StorageConfig{
+        Type:      "nfs",
+        Endpoint:  "/mnt/nfs-migration-share", // NFS mount point
+        ChunkSize: 32 * 1024 * 1024,           // 32MB buffer
+    }
+    
+    store, err := storage.NewStorage(config)
+    if err != nil {
+        panic(err)
+    }
+    defer store.Close()
+    
+    // Upload file to NFS
+    req := storage.UploadRequest{
+        SourcePath:     "/var/lib/libvirt/images/vm-disk.qcow2",
+        DestinationURL: "nfs://vm-exports/libvirt/vm-disk.qcow2",
+        Metadata: map[string]string{
+            "vm-name": "test-vm-01",
+            "source":  "libvirt",
+        },
+        ProgressCallback: func(transferred, total int64) {
+            pct := float64(transferred) / float64(total) * 100
+            fmt.Printf("Upload Progress: %.2f%% (%d/%d bytes)\n", pct, transferred, total)
+        },
+    }
+    
+    resp, err := store.Upload(context.Background(), req)
+    if err != nil {
+        panic(err)
+    }
+    
+    fmt.Printf("NFS Upload complete!\n")
+    fmt.Printf("  URL: %s\n", resp.URL)
+    fmt.Printf("  Checksum: %s\n", resp.Checksum)
+    fmt.Printf("  Bytes: %d\n", resp.BytesTransferred)
+}
+```
+
+#### Download from NFS
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "github.com/projectbeskar/virtrigaud/internal/storage"
+)
+
+func main() {
+    // Create NFS storage backend
+    config := storage.StorageConfig{
+        Type:     "nfs",
+        Endpoint: "/mnt/nfs-migration-share",
+    }
+    
+    store, err := storage.NewStorage(config)
+    if err != nil {
+        panic(err)
+    }
+    defer store.Close()
+    
+    // Download file from NFS
+    req := storage.DownloadRequest{
+        SourceURL:        "nfs://vm-exports/libvirt/vm-disk.qcow2",
+        DestinationPath:  "/var/lib/proxmox/images/imported-disk.qcow2",
+        VerifyChecksum:   true,
+        ExpectedChecksum: "sha256-checksum-here",
+        ProgressCallback: func(transferred, total int64) {
+            pct := float64(transferred) / float64(total) * 100
+            rate := float64(transferred) / 1024 / 1024 // MB
+            fmt.Printf("Download: %.2f%% (%.2f MB)\n", pct, rate)
+        },
+    }
+    
+    resp, err := store.Download(context.Background(), req)
+    if err != nil {
+        panic(err)
+    }
+    
+    fmt.Printf("NFS Download complete!\n")
+    fmt.Printf("  Checksum: %s\n", resp.Checksum)
+    fmt.Printf("  Size: %d bytes\n", resp.ContentLength)
+}
+```
+
+#### Get NFS File Metadata
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "github.com/projectbeskar/virtrigaud/internal/storage"
+)
+
+func main() {
+    config := storage.StorageConfig{
+        Type:     "nfs",
+        Endpoint: "/mnt/nfs-migration-share",
+    }
+    
+    store, err := storage.NewStorage(config)
+    if err != nil {
+        panic(err)
+    }
+    defer store.Close()
+    
+    // Get metadata
+    metadata, err := store.GetMetadata(
+        context.Background(),
+        "nfs://vm-exports/libvirt/vm-disk.qcow2",
+    )
+    if err != nil {
+        panic(err)
+    }
+    
+    fmt.Printf("File Metadata:\n")
+    fmt.Printf("  Size: %d bytes\n", metadata.Size)
+    fmt.Printf("  Checksum: %s\n", metadata.Checksum)
+    fmt.Printf("  Modified: %s\n", metadata.LastModified)
+    fmt.Printf("  Custom Metadata:\n")
+    for k, v := range metadata.CustomMetadata {
+        fmt.Printf("    %s: %s\n", k, v)
+    }
 }
 ```
 

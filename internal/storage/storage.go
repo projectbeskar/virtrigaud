@@ -156,6 +156,8 @@ func NewStorage(config StorageConfig) (Storage, error) {
 		return NewS3Storage(config)
 	case "http", "https":
 		return NewHTTPStorage(config)
+	case "nfs":
+		return NewNFSStorage(config)
 	default:
 		return nil, &StorageError{
 			Type:    ErrorTypeInvalidConfig,

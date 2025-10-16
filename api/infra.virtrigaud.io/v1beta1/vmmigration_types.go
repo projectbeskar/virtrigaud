@@ -210,7 +210,7 @@ type ValidationChecks struct {
 // MigrationStorage defines storage backend configuration
 type MigrationStorage struct {
 	// Type specifies the storage backend type
-	// +kubebuilder:validation:Enum=s3;minio;http;https
+	// +kubebuilder:validation:Enum=s3;minio;http;https;nfs
 	Type string `json:"type"`
 
 	// Endpoint is the storage endpoint URL
