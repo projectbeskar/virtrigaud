@@ -40,6 +40,9 @@ rules:
   - vmsnapshots/status
   - vmclones
   - vmclones/status
+  - vmmigrations
+  - vmmigrations/status
+  - vmmigrations/finalizers
   - vmsets
   - vmsets/status
   - vmplacementpolicies
@@ -149,6 +152,9 @@ rules:
   - vmsnapshots/status
   - vmclones
   - vmclones/status
+  - vmmigrations
+  - vmmigrations/status
+  - vmmigrations/finalizers
   - vmsets
   - vmsets/status
   - vmplacementpolicies
