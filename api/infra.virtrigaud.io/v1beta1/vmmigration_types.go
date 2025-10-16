@@ -285,6 +285,26 @@ type VMMigrationStatus struct {
 	// +optional
 	SnapshotRef string `json:"snapshotRef,omitempty"`
 
+	// SnapshotID is the provider-specific snapshot identifier
+	// +optional
+	SnapshotID string `json:"snapshotID,omitempty"`
+
+	// ExportID is the export operation identifier
+	// +optional
+	ExportID string `json:"exportID,omitempty"`
+
+	// ImportID is the import operation identifier
+	// +optional
+	ImportID string `json:"importID,omitempty"`
+
+	// TaskRef is the current task reference for async operations
+	// +optional
+	TaskRef string `json:"taskRef,omitempty"`
+
+	// TargetVMID is the provider-specific target VM identifier
+	// +optional
+	TargetVMID string `json:"targetVMID,omitempty"`
+
 	// StartTime is when the migration started
 	// +optional
 	StartTime *metav1.Time `json:"startTime,omitempty"`
@@ -413,6 +433,14 @@ type MigrationDiskInfo struct {
 	// Checksum is the SHA256 checksum of the disk
 	// +optional
 	Checksum string `json:"checksum,omitempty"`
+
+	// SourceChecksum is the SHA256 checksum of the source disk
+	// +optional
+	SourceChecksum string `json:"sourceChecksum,omitempty"`
+
+	// TargetChecksum is the SHA256 checksum of the target disk
+	// +optional
+	TargetChecksum string `json:"targetChecksum,omitempty"`
 }
 
 // MigrationStorageInfo contains information about intermediate storage

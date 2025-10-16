@@ -520,6 +520,10 @@ spec:
                   checksum:
                     description: Checksum is the SHA256 checksum of the disk
                     type: string
+                  sourceChecksum:
+                    description: SourceChecksum is the SHA256 checksum of the source
+                      disk
+                    type: string
                   sourceDiskID:
                     description: SourceDiskID is the source disk identifier
                     type: string
@@ -533,6 +537,10 @@ spec:
                     description: SourceSize is the source disk size in bytes
                     pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                     x-kubernetes-int-or-string: true
+                  targetChecksum:
+                    description: TargetChecksum is the SHA256 checksum of the target
+                      disk
+                    type: string
                   targetDiskID:
                     description: TargetDiskID is the target disk identifier
                     type: string
@@ -547,6 +555,12 @@ spec:
                     pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                     x-kubernetes-int-or-string: true
                 type: object
+              exportID:
+                description: ExportID is the export operation identifier
+                type: string
+              importID:
+                description: ImportID is the import operation identifier
+                type: string
               lastRetryTime:
                 description: LastRetryTime is when the migration was last retried
                 format: date-time
@@ -625,6 +639,9 @@ spec:
                   retried
                 format: int32
                 type: integer
+              snapshotID:
+                description: SnapshotID is the provider-specific snapshot identifier
+                type: string
               snapshotRef:
                 description: SnapshotRef references the source snapshot used for migration
                 type: string
@@ -654,6 +671,9 @@ spec:
                     description: URL is the intermediate storage URL
                     type: string
                 type: object
+              targetVMID:
+                description: TargetVMID is the provider-specific target VM identifier
+                type: string
               targetVMRef:
                 description: TargetVMRef references the created target VM
                 properties:
@@ -665,6 +685,9 @@ spec:
                 required:
                 - name
                 type: object
+              taskRef:
+                description: TaskRef is the current task reference for async operations
+                type: string
               validationResults:
                 description: ValidationResults contains results of validation checks
                 properties:

@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -278,16 +279,111 @@ func (r *VMMigrationReconciler) handleSnapshottingPhase(ctx context.Context, mig
 	logger := logging.FromContext(ctx)
 	logger.Info("Handling snapshotting phase")
 
-	// TODO: Implement snapshot creation
-	// For now, transition to exporting phase
+	// Get source VM
+	sourceVM, err := r.getSourceVM(ctx, migration)
+	if err != nil {
+		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to get source VM: %v", err))
+	}
+
+	// Check if user specified a snapshot to use
+	if migration.Spec.Source.SnapshotRef != nil {
+		// Use existing snapshot
+		migration.Status.SnapshotID = migration.Spec.Source.SnapshotRef.Name
+		migration.Status.Phase = infrav1beta1.MigrationPhaseExporting
+		migration.Status.Message = fmt.Sprintf("Using existing snapshot %s", migration.Status.SnapshotID)
+
+		k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionSnapshotting,
+			metav1.ConditionTrue, "SnapshotSelected",
+			"Using existing snapshot")
+
+		if err := r.updateStatus(ctx, migration); err != nil {
+			return ctrl.Result{}, err
+		}
+
+		return ctrl.Result{Requeue: true}, nil
+	}
+
+	// Get source provider
+	var sourceProviderRef infrav1beta1.ObjectRef
+	if migration.Spec.Source.ProviderRef != nil {
+		sourceProviderRef = *migration.Spec.Source.ProviderRef
+	} else {
+		sourceProviderRef = sourceVM.Spec.ProviderRef
+	}
+	sourceProvider, err := r.getProvider(ctx, sourceProviderRef, migration.Namespace)
+	if err != nil {
+		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to get source provider: %v", err))
+	}
+
+	// Get provider instance
+	providerInstance, err := r.getProviderInstance(ctx, sourceProvider)
+	if err != nil {
+		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to get provider instance: %v", err))
+	}
+
+	// Check if we already created a snapshot
+	if migration.Status.SnapshotID != "" {
+		// Check if snapshot is complete
+		// For now, assume it's complete and transition to export
+		// TODO: Check snapshot status via provider
+		migration.Status.Phase = infrav1beta1.MigrationPhaseExporting
+		migration.Status.Message = "Snapshot ready, starting export"
+
+		k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionSnapshotting,
+			metav1.ConditionTrue, "SnapshotComplete",
+			"Source VM snapshot created")
+
+		r.Recorder.Event(migration, "Normal", "SnapshotComplete", "Source VM snapshot created")
+
+		if err := r.updateStatus(ctx, migration); err != nil {
+			return ctrl.Result{}, err
+		}
+
+		return ctrl.Result{Requeue: true}, nil
+	}
+
+	// Create snapshot
+	snapshotName := fmt.Sprintf("%s-migration-%s", migration.Spec.Source.VMRef.Name, migration.UID[:8])
+	snapshotReq := contracts.SnapshotCreateRequest{
+		VmId:          sourceVM.Status.ID,
+		NameHint:      snapshotName,
+		Description:   fmt.Sprintf("Migration snapshot for %s", migration.Name),
+		IncludeMemory: false, // Disk-only snapshot for migration
+		Quiesce:       false,
+	}
+
+	logger.Info("Creating migration snapshot", "snapshot_name", snapshotName)
+	snapshotResp, err := providerInstance.SnapshotCreate(ctx, snapshotReq)
+	if err != nil {
+		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to create snapshot: %v", err))
+	}
+
+	// Store snapshot ID in status
+	migration.Status.SnapshotID = snapshotResp.SnapshotId
+	migration.Status.Message = fmt.Sprintf("Snapshot %s created", snapshotResp.SnapshotId)
+
+	// If there's a task, we need to wait for it to complete
+	if snapshotResp.Task != nil && snapshotResp.Task.ID != "" {
+		migration.Status.TaskRef = snapshotResp.Task.ID
+		logger.Info("Snapshot creation task started, waiting for completion", "task_id", snapshotResp.Task.ID)
+
+		if err := r.updateStatus(ctx, migration); err != nil {
+			return ctrl.Result{}, err
+		}
+
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+
+	// Snapshot created synchronously, move to export
 	migration.Status.Phase = infrav1beta1.MigrationPhaseExporting
-	migration.Status.Message = "Snapshot created, preparing export"
+	migration.Status.Message = "Snapshot created, starting export"
+	migration.Status.TaskRef = ""
 
 	k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionSnapshotting,
 		metav1.ConditionTrue, "SnapshotComplete",
 		"Source VM snapshot created")
 
-	r.Recorder.Event(migration, "Normal", "SnapshotComplete", "Source VM snapshot created")
+	r.Recorder.Event(migration, "Normal", "SnapshotComplete", fmt.Sprintf("Snapshot %s created", snapshotResp.SnapshotId))
 
 	if err := r.updateStatus(ctx, migration); err != nil {
 		return ctrl.Result{}, err
@@ -301,16 +397,141 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 	logger := logging.FromContext(ctx)
 	logger.Info("Handling exporting phase")
 
-	// TODO: Implement disk export
-	// For now, transition to transferring phase
-	migration.Status.Phase = infrav1beta1.MigrationPhaseTransferring
-	migration.Status.Message = "Disk exported, starting transfer"
+	// Get source VM
+	sourceVM, err := r.getSourceVM(ctx, migration)
+	if err != nil {
+		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to get source VM: %v", err))
+	}
+
+	// Get source provider
+	var sourceProviderRef infrav1beta1.ObjectRef
+	if migration.Spec.Source.ProviderRef != nil {
+		sourceProviderRef = *migration.Spec.Source.ProviderRef
+	} else {
+		sourceProviderRef = sourceVM.Spec.ProviderRef
+	}
+	sourceProvider, err := r.getProvider(ctx, sourceProviderRef, migration.Namespace)
+	if err != nil {
+		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to get source provider: %v", err))
+	}
+
+	// Get provider instance
+	providerInstance, err := r.getProviderInstance(ctx, sourceProvider)
+	if err != nil {
+		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to get provider instance: %v", err))
+	}
+
+	// Check if export is already in progress
+	if migration.Status.ExportID != "" {
+		// Check export task status if there is one
+		if migration.Status.TaskRef != "" {
+			done, err := providerInstance.IsTaskComplete(ctx, migration.Status.TaskRef)
+			if err != nil {
+				logger.Error(err, "Failed to check export task status")
+				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			}
+
+			if !done {
+				logger.Info("Export task still running", "task_id", migration.Status.TaskRef)
+				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			}
+
+			// Task complete, check status
+			taskStatus, err := providerInstance.TaskStatus(ctx, migration.Status.TaskRef)
+			if err != nil {
+				return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to get export task status: %v", err))
+			}
+
+			if taskStatus.Error != "" {
+				return r.transitionToFailed(ctx, migration, fmt.Sprintf("Export failed: %s", taskStatus.Error))
+			}
+
+			logger.Info("Export task completed successfully")
+		}
+
+		// Export complete, transition to importing (skip transfer phase for direct export)
+		migration.Status.Phase = infrav1beta1.MigrationPhaseImporting
+		migration.Status.Message = "Disk exported successfully"
+		migration.Status.TaskRef = ""
+
+		k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionExporting,
+			metav1.ConditionTrue, "ExportComplete",
+			"Source VM disk exported")
+
+		r.Recorder.Event(migration, "Normal", "ExportComplete", "Disk exported successfully")
+
+		if err := r.updateStatus(ctx, migration); err != nil {
+			return ctrl.Result{}, err
+		}
+
+		return ctrl.Result{Requeue: true}, nil
+	}
+
+	// Generate destination URL for export
+	destinationURL, err := r.generateStorageURL(ctx, migration, "export")
+	if err != nil {
+		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to generate storage URL: %v", err))
+	}
+
+	// Determine disk format
+	diskFormat := "qcow2" // Default for Libvirt/Proxmox
+	if migration.Spec.Options != nil && migration.Spec.Options.DiskFormat != "" {
+		diskFormat = migration.Spec.Options.DiskFormat
+	}
+
+	// Build export request
+	exportReq := contracts.ExportDiskRequest{
+		VmId:           sourceVM.Status.ID,
+		DiskId:         "", // Empty means export primary disk
+		SnapshotId:     migration.Status.SnapshotID,
+		DestinationURL: destinationURL,
+		Format:         diskFormat,
+		Compress:       migration.Spec.Options != nil && migration.Spec.Options.Compress,
+		Credentials:    make(map[string]string),
+	}
+
+	// TODO: Load credentials from storage secret if configured
+
+	logger.Info("Starting disk export", "vm_id", sourceVM.Status.ID, "destination", destinationURL)
+	exportResp, err := providerInstance.ExportDisk(ctx, exportReq)
+	if err != nil {
+		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to start disk export: %v", err))
+	}
+
+	// Store export info in status
+	migration.Status.ExportID = exportResp.ExportId
+	migration.Status.Message = fmt.Sprintf("Exporting disk (estimated size: %d bytes)", exportResp.EstimatedSizeBytes)
+
+	// Initialize disk info in status
+	if migration.Status.DiskInfo == nil {
+		migration.Status.DiskInfo = &infrav1beta1.MigrationDiskInfo{}
+	}
+	migration.Status.DiskInfo.SourceDiskID = exportReq.DiskId
+	migration.Status.DiskInfo.SourceFormat = diskFormat
+	migration.Status.DiskInfo.SourceChecksum = exportResp.Checksum
+
+	// If there's a task, we need to wait for it
+	if exportResp.TaskRef != "" {
+		migration.Status.TaskRef = exportResp.TaskRef
+		logger.Info("Export task started", "task_id", exportResp.TaskRef, "export_id", exportResp.ExportId)
+
+		if err := r.updateStatus(ctx, migration); err != nil {
+			return ctrl.Result{}, err
+		}
+
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	// Export completed synchronously, transition to importing
+	migration.Status.Phase = infrav1beta1.MigrationPhaseImporting
+	migration.Status.Message = "Disk exported successfully"
+	migration.Status.TaskRef = ""
 
 	k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionExporting,
 		metav1.ConditionTrue, "ExportComplete",
 		"Source VM disk exported")
 
-	r.Recorder.Event(migration, "Normal", "ExportComplete", "Source VM disk exported")
+	r.Recorder.Event(migration, "Normal", "ExportComplete", fmt.Sprintf("Disk exported to %s", destinationURL))
 
 	if err := r.updateStatus(ctx, migration); err != nil {
 		return ctrl.Result{}, err
@@ -367,16 +588,134 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 	logger := logging.FromContext(ctx)
 	logger.Info("Handling importing phase")
 
-	// TODO: Implement disk import
-	// For now, transition to creating phase
+	// Get target provider
+	targetProvider, err := r.getProvider(ctx, migration.Spec.Target.ProviderRef, migration.Namespace)
+	if err != nil {
+		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to get target provider: %v", err))
+	}
+
+	// Get provider instance
+	providerInstance, err := r.getProviderInstance(ctx, targetProvider)
+	if err != nil {
+		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to get target provider instance: %v", err))
+	}
+
+	// Check if import is already in progress
+	if migration.Status.ImportID != "" {
+		// Check import task status if there is one
+		if migration.Status.TaskRef != "" {
+			done, err := providerInstance.IsTaskComplete(ctx, migration.Status.TaskRef)
+			if err != nil {
+				logger.Error(err, "Failed to check import task status")
+				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			}
+
+			if !done {
+				logger.Info("Import task still running", "task_id", migration.Status.TaskRef)
+				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			}
+
+			// Task complete, check status
+			taskStatus, err := providerInstance.TaskStatus(ctx, migration.Status.TaskRef)
+			if err != nil {
+				return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to get import task status: %v", err))
+			}
+
+			if taskStatus.Error != "" {
+				return r.transitionToFailed(ctx, migration, fmt.Sprintf("Import failed: %s", taskStatus.Error))
+			}
+
+			logger.Info("Import task completed successfully")
+		}
+
+		// Import complete, transition to creating
+		migration.Status.Phase = infrav1beta1.MigrationPhaseCreating
+		migration.Status.Message = "Disk imported, creating target VM"
+		migration.Status.TaskRef = ""
+
+		k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionImporting,
+			metav1.ConditionTrue, "ImportComplete",
+			"Disk imported to target provider")
+
+		r.Recorder.Event(migration, "Normal", "ImportComplete", "Disk imported successfully")
+
+		if err := r.updateStatus(ctx, migration); err != nil {
+			return ctrl.Result{}, err
+		}
+
+		return ctrl.Result{Requeue: true}, nil
+	}
+
+	// Generate source URL (same as export destination)
+	sourceURL, err := r.generateStorageURL(ctx, migration, "export")
+	if err != nil {
+		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to generate source URL: %v", err))
+	}
+
+	// Determine disk format
+	diskFormat := "qcow2" // Default
+	if migration.Spec.Options != nil && migration.Spec.Options.DiskFormat != "" {
+		diskFormat = migration.Spec.Options.DiskFormat
+	}
+
+	// Build import request
+	importReq := contracts.ImportDiskRequest{
+		SourceURL:        sourceURL,
+		StorageHint:      "", // Let provider choose
+		Format:           diskFormat,
+		TargetName:       fmt.Sprintf("%s-migrated", migration.Spec.Target.Name),
+		VerifyChecksum:   migration.Spec.Options == nil || migration.Spec.Options.VerifyChecksums,
+		ExpectedChecksum: "",
+		Credentials:      make(map[string]string),
+	}
+
+	// Set expected checksum if available
+	if migration.Status.DiskInfo != nil && migration.Status.DiskInfo.SourceChecksum != "" {
+		importReq.ExpectedChecksum = migration.Status.DiskInfo.SourceChecksum
+	}
+
+	// TODO: Load credentials from storage secret if configured
+
+	logger.Info("Starting disk import", "source", sourceURL, "target_name", importReq.TargetName)
+	importResp, err := providerInstance.ImportDisk(ctx, importReq)
+	if err != nil {
+		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to start disk import: %v", err))
+	}
+
+	// Store import info in status
+	migration.Status.ImportID = importResp.DiskId
+	migration.Status.Message = fmt.Sprintf("Importing disk (size: %d bytes)", importResp.ActualSizeBytes)
+
+	// Update disk info in status
+	if migration.Status.DiskInfo == nil {
+		migration.Status.DiskInfo = &infrav1beta1.MigrationDiskInfo{}
+	}
+	migration.Status.DiskInfo.TargetDiskID = importResp.DiskId
+	migration.Status.DiskInfo.TargetFormat = diskFormat
+	migration.Status.DiskInfo.TargetChecksum = importResp.Checksum
+
+	// If there's a task, we need to wait for it
+	if importResp.TaskRef != "" {
+		migration.Status.TaskRef = importResp.TaskRef
+		logger.Info("Import task started", "task_id", importResp.TaskRef, "import_id", importResp.DiskId)
+
+		if err := r.updateStatus(ctx, migration); err != nil {
+			return ctrl.Result{}, err
+		}
+
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	// Import completed synchronously, transition to creating
 	migration.Status.Phase = infrav1beta1.MigrationPhaseCreating
 	migration.Status.Message = "Disk imported, creating target VM"
+	migration.Status.TaskRef = ""
 
 	k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionImporting,
 		metav1.ConditionTrue, "ImportComplete",
 		"Disk imported to target provider")
 
-	r.Recorder.Event(migration, "Normal", "ImportComplete", "Disk imported to target provider")
+	r.Recorder.Event(migration, "Normal", "ImportComplete", fmt.Sprintf("Disk imported as %s", importResp.DiskId))
 
 	if err := r.updateStatus(ctx, migration); err != nil {
 		return ctrl.Result{}, err
@@ -390,18 +729,112 @@ func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migrati
 	logger := logging.FromContext(ctx)
 	logger.Info("Handling creating phase")
 
-	// TODO: Implement VM creation on target provider
-	// For now, transition to validating target phase
-	migration.Status.Phase = infrav1beta1.MigrationPhaseValidatingTarget
-	migration.Status.Message = "Target VM created, validating"
+	// Check if target VM already exists
+	targetVMName := migration.Spec.Target.Name
+	if targetVMName == "" {
+		targetVMName = fmt.Sprintf("%s-migrated", migration.Spec.Source.VMRef.Name)
+	}
 
-	r.Recorder.Event(migration, "Normal", "TargetVMCreated", "Target VM created successfully")
+	targetNamespace := migration.Spec.Target.Namespace
+	if targetNamespace == "" {
+		targetNamespace = migration.Namespace
+	}
+
+	// Check if VM CR already exists
+	existingVM := &infrav1beta1.VirtualMachine{}
+	vmKey := client.ObjectKey{
+		Namespace: targetNamespace,
+		Name:      targetVMName,
+	}
+
+	err := r.Get(ctx, vmKey, existingVM)
+	if err == nil {
+		// VM already exists, check if it's ready
+		if existingVM.Status.ID != "" && existingVM.Status.Phase == "Ready" {
+			// VM is ready, store reference and transition to validation
+			migration.Status.TargetVMID = existingVM.Status.ID
+			migration.Status.Phase = infrav1beta1.MigrationPhaseValidatingTarget
+			migration.Status.Message = "Target VM ready, validating"
+
+			if err := r.updateStatus(ctx, migration); err != nil {
+				return ctrl.Result{}, err
+			}
+
+			return ctrl.Result{Requeue: true}, nil
+		}
+
+		// VM exists but not ready yet, wait
+		logger.Info("Target VM exists but not ready, waiting", "vm", targetVMName, "phase", existingVM.Status.Phase)
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	if client.IgnoreNotFound(err) != nil {
+		// Error other than not found
+		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to check target VM: %v", err))
+	}
+
+	// VM doesn't exist, create it
+	logger.Info("Creating target VM", "name", targetVMName)
+
+	targetVM := &infrav1beta1.VirtualMachine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      targetVMName,
+			Namespace: targetNamespace,
+			Labels:    migration.Spec.Target.Labels,
+			Annotations: map[string]string{
+				"virtrigaud.io/migrated-from": fmt.Sprintf("%s/%s", migration.Namespace, migration.Spec.Source.VMRef.Name),
+				"virtrigaud.io/migration":     fmt.Sprintf("%s/%s", migration.Namespace, migration.Name),
+			},
+		},
+		Spec: infrav1beta1.VirtualMachineSpec{
+			ProviderRef: migration.Spec.Target.ProviderRef,
+		},
+	}
+
+	// Merge user-provided annotations
+	if migration.Spec.Target.Annotations != nil {
+		for k, v := range migration.Spec.Target.Annotations {
+			targetVM.Annotations[k] = v
+		}
+	}
+
+	// Set class ref if provided
+	if migration.Spec.Target.ClassRef != nil {
+		targetVM.Spec.ClassRef = infrav1beta1.ObjectRef{
+			Name:      migration.Spec.Target.ClassRef.Name,
+			Namespace: migration.Namespace,
+		}
+	}
+
+	// Set networks if provided
+	if len(migration.Spec.Target.Networks) > 0 {
+		targetVM.Spec.Networks = migration.Spec.Target.Networks
+	}
+
+	// TODO: Set disks - need to reference the imported disk
+	// For now, we'll let the provider handle disk attachment based on imported disk ID
+
+	// Set placement if provided
+	if migration.Spec.Target.PlacementRef != nil {
+		targetVM.Spec.PlacementRef = migration.Spec.Target.PlacementRef
+	}
+
+	// Create the VM resource
+	if err := r.Create(ctx, targetVM); err != nil {
+		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to create target VM: %v", err))
+	}
+
+	logger.Info("Target VM created", "name", targetVMName)
+	r.Recorder.Event(migration, "Normal", "TargetVMCreated", fmt.Sprintf("Created target VM %s", targetVMName))
+
+	migration.Status.Message = fmt.Sprintf("Target VM %s created, waiting for provisioning", targetVMName)
 
 	if err := r.updateStatus(ctx, migration); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	return ctrl.Result{Requeue: true}, nil
+	// Requeue to check VM status
+	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 }
 
 // handleValidatingTargetPhase validates the migrated VM
@@ -409,8 +842,42 @@ func (r *VMMigrationReconciler) handleValidatingTargetPhase(ctx context.Context,
 	logger := logging.FromContext(ctx)
 	logger.Info("Handling target validation phase")
 
-	// TODO: Implement target VM validation
-	// For now, transition to ready phase
+	// Get target VM name
+	targetVMName := migration.Spec.Target.Name
+	if targetVMName == "" {
+		targetVMName = fmt.Sprintf("%s-migrated", migration.Spec.Source.VMRef.Name)
+	}
+
+	targetNamespace := migration.Spec.Target.Namespace
+	if targetNamespace == "" {
+		targetNamespace = migration.Namespace
+	}
+
+	// Get target VM
+	targetVM := &infrav1beta1.VirtualMachine{}
+	vmKey := client.ObjectKey{
+		Namespace: targetNamespace,
+		Name:      targetVMName,
+	}
+
+	if err := r.Get(ctx, vmKey, targetVM); err != nil {
+		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to get target VM: %v", err))
+	}
+
+	// Verify VM is ready
+	if targetVM.Status.Phase != "Ready" {
+		logger.Info("Target VM not ready yet", "phase", targetVM.Status.Phase)
+		migration.Status.Message = fmt.Sprintf("Waiting for target VM to be ready (current: %s)", targetVM.Status.Phase)
+
+		if err := r.updateStatus(ctx, migration); err != nil {
+			return ctrl.Result{}, err
+		}
+
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	// VM is ready, mark migration as complete
+	migration.Status.TargetVMID = targetVM.Status.ID
 	migration.Status.Phase = infrav1beta1.MigrationPhaseReady
 	migration.Status.Message = "Migration completed successfully"
 	migration.Status.CompletionTime = &metav1.Time{Time: time.Now()}
@@ -419,7 +886,9 @@ func (r *VMMigrationReconciler) handleValidatingTargetPhase(ctx context.Context,
 		metav1.ConditionTrue, "MigrationComplete",
 		"VM migration completed successfully")
 
-	r.Recorder.Event(migration, "Normal", "MigrationComplete", "VM migration completed successfully")
+	r.Recorder.Event(migration, "Normal", "MigrationComplete", fmt.Sprintf("VM migrated successfully to %s/%s", targetNamespace, targetVMName))
+
+	logger.Info("Migration completed successfully", "target_vm", fmt.Sprintf("%s/%s", targetNamespace, targetVMName))
 
 	if err := r.updateStatus(ctx, migration); err != nil {
 		return ctrl.Result{}, err
@@ -592,6 +1061,54 @@ func (r *VMMigrationReconciler) updateStatus(ctx context.Context, migration *inf
 		return err
 	}
 	return nil
+}
+
+// generateStorageURL generates a storage URL for the migration
+func (r *VMMigrationReconciler) generateStorageURL(ctx context.Context, migration *infrav1beta1.VMMigration, stage string) (string, error) {
+	// If no storage is configured, return an error
+	if migration.Spec.Storage == nil {
+		return "", fmt.Errorf("storage configuration is required for migration")
+	}
+
+	storageConfig := migration.Spec.Storage
+
+	// Generate a unique path for this migration
+	migrationPath := fmt.Sprintf("vmmigrations/%s/%s/%s.qcow2",
+		migration.Namespace,
+		migration.Name,
+		stage)
+
+	// Build URL based on storage type
+	switch storageConfig.Type {
+	case "s3", "minio":
+		// S3 URL format: s3://bucket/path
+		bucket := storageConfig.Bucket
+		if bucket == "" {
+			bucket = "vm-migrations"
+		}
+		return fmt.Sprintf("s3://%s/%s", bucket, migrationPath), nil
+
+	case "http", "https":
+		// HTTP URL format: http(s)://endpoint/path
+		endpoint := storageConfig.Endpoint
+		if endpoint == "" {
+			return "", fmt.Errorf("endpoint is required for HTTP storage")
+		}
+		// Ensure endpoint doesn't end with /
+		endpoint = strings.TrimSuffix(endpoint, "/")
+		return fmt.Sprintf("%s/%s", endpoint, migrationPath), nil
+
+	case "nfs":
+		// NFS URL format: nfs://path
+		endpoint := storageConfig.Endpoint
+		if endpoint == "" {
+			return "", fmt.Errorf("endpoint (mount path) is required for NFS storage")
+		}
+		return fmt.Sprintf("nfs://%s", migrationPath), nil
+
+	default:
+		return "", fmt.Errorf("unsupported storage type: %s", storageConfig.Type)
+	}
 }
 
 // SetupWithManager sets up the controller with the Manager
