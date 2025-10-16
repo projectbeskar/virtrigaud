@@ -2227,26 +2227,101 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 	}
 	defer storageClient.Close()
 
-	// For now, we'll use a placeholder for the actual disk export
-	// TODO: Implement OVF export or datastore file access
-	p.logger.Warn("vSphere disk export using placeholder - full OVF export integration pending")
-	p.logger.Info("Note: Will use OVF export or datastore file manager to export VMDK")
+	// Create datastore file manager
+	dsManager := NewDatastoreFileManager(p)
 
-	// For actual implementation:
-	// 1. Use vm.Export() to create OVF/OVA
-	// 2. Extract VMDK from OVA
-	// 3. Convert format if needed
-	// 4. Upload using storage layer
-	// 5. Clean up temporary files
+	// Create a temporary file to download VMDK
+	tempFile := fmt.Sprintf("/tmp/%s.vmdk", exportID)
+	defer func() {
+		// Clean up temp file
+		_ = os.Remove(tempFile)
+	}()
+
+	// Download VMDK from datastore
+	p.logger.Info("Downloading VMDK from datastore", "disk_path", diskInfo.Path)
+	
+	file, err := os.Create(tempFile)
+	if err != nil {
+		return nil, errors.NewInternal("failed to create temp file: %v", err)
+	}
+	defer file.Close()
+
+	// Download with progress tracking
+	downloadProgress := func(transferred, total int64) {
+		if total > 0 {
+			progress := float64(transferred) / float64(total) * 100
+			p.logger.Debug("Download progress", "percent", progress, "transferred", transferred, "total", total)
+		}
+	}
+
+	err = dsManager.DownloadFile(ctx, diskInfo.Path, file, downloadProgress)
+	if err != nil {
+		return nil, errors.NewInternal("failed to download VMDK: %v", err)
+	}
+
+	// Close file to flush writes
+	file.Close()
+
+	// Convert format if needed
+	var uploadPath string
+	if targetFormat != "vmdk" {
+		p.logger.Info("Converting VMDK to target format", "target_format", targetFormat)
+		convertedPath := fmt.Sprintf("/tmp/%s.%s", exportID, targetFormat)
+		
+		// TODO: Add qemu-img conversion for format conversion
+		// For now, we'll just use the VMDK
+		p.logger.Warn("Format conversion not yet implemented, uploading VMDK")
+		uploadPath = tempFile
+		defer os.Remove(convertedPath)
+	} else {
+		uploadPath = tempFile
+	}
+
+	// Upload to destination storage
+	p.logger.Info("Uploading disk to storage", "destination", req.DestinationUrl)
+	
+	// Re-open file for reading
+	uploadFile, err := os.Open(uploadPath)
+	if err != nil {
+		return nil, errors.NewInternal("failed to open file for upload: %v", err)
+	}
+	defer uploadFile.Close()
+
+	// Get file size
+	stat, err := uploadFile.Stat()
+	if err != nil {
+		return nil, errors.NewInternal("failed to stat file: %v", err)
+	}
+
+	// Upload with progress tracking
+	uploadProgress := func(transferred, total int64) {
+		if total > 0 {
+			progress := float64(transferred) / float64(total) * 100
+			p.logger.Debug("Upload progress", "percent", progress, "transferred", transferred, "total", total)
+		}
+	}
+
+	uploadReq := storage.UploadRequest{
+		Reader:           uploadFile,
+		DestinationURL:   req.DestinationUrl,
+		ContentLength:    stat.Size(),
+		ProgressCallback: uploadProgress,
+	}
+
+	uploadResp, err := storageClient.Upload(ctx, uploadReq)
+	if err != nil {
+		return nil, errors.NewInternal("failed to upload disk: %v", err)
+	}
+
+	p.logger.Info("Disk export completed", "export_id", exportID, "checksum", uploadResp.Checksum, "bytes", uploadResp.BytesTransferred)
 
 	response := &providerv1.ExportDiskResponse{
 		ExportId:           exportID,
-		Task:               nil, // Would be async with actual OVF export
-		EstimatedSizeBytes: diskInfo.ActualSizeBytes,
-		Checksum:           "", // Would be from uploadResp.Checksum
+		Task:               nil, // Synchronous operation
+		EstimatedSizeBytes: uploadResp.BytesTransferred,
+		Checksum:           uploadResp.Checksum,
 	}
 
-	p.logger.Info("Export prepared", "export_id", exportID, "disk_path", diskInfo.Path)
 	return response, nil
 }
 
@@ -2344,28 +2419,106 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 	}
 	defer storageClient.Close()
 
-	// For now, we'll use a placeholder for the actual disk import
-	// TODO: Implement full download + datastore upload
-	p.logger.Warn("vSphere disk import using placeholder - full datastore file manager integration pending")
-	p.logger.Info("Note: Will download and upload VMDK to datastore")
+	// Create datastore file manager
+	dsManager := NewDatastoreFileManager(p)
 
-	// For actual implementation:
-	// 1. Download using storage.Download()
-	// 2. Convert to VMDK if source is qcow2/raw
-	// 3. Upload to datastore using govmomi datastore file manager
-	// 4. Verify upload and create disk reference
+	// Create temporary file for download
+	tempFile := fmt.Sprintf("/tmp/%s-import", diskID)
+	defer func() {
+		_ = os.Remove(tempFile)
+	}()
+
+	// Download from storage
+	p.logger.Info("Downloading disk from storage", "source", req.SourceUrl)
+	
+	file, err := os.Create(tempFile)
+	if err != nil {
+		return nil, errors.NewInternal("failed to create temp file: %v", err)
+	}
+	defer file.Close()
+
+	// Download with progress tracking
+	downloadProgress := func(transferred, total int64) {
+		if total > 0 {
+			progress := float64(transferred) / float64(total) * 100
+			p.logger.Debug("Download progress", "percent", progress, "transferred", transferred, "total", total)
+		}
+	}
+
+	downloadReq := storage.DownloadRequest{
+		SourceURL:        req.SourceUrl,
+		Writer:           file,
+		VerifyChecksum:   req.VerifyChecksum,
+		ExpectedChecksum: req.ExpectedChecksum,
+		ProgressCallback: downloadProgress,
+	}
+
+	downloadResp, err := storageClient.Download(ctx, downloadReq)
+	if err != nil {
+		return nil, errors.NewInternal("failed to download disk: %v", err)
+	}
+
+	// Close file to flush writes
+	file.Close()
+
+	p.logger.Info("Download completed", "bytes", downloadResp.BytesTransferred, "checksum", downloadResp.Checksum)
+
+	// Convert to VMDK if needed
+	var vmdkPath string
+	if targetFormat != "vmdk" {
+		p.logger.Info("Converting to VMDK format", "source_format", targetFormat)
+		vmdkPath = fmt.Sprintf("/tmp/%s.vmdk", diskID)
+		
+		// TODO: Add qemu-img conversion
+		// For now, assume it's already VMDK
+		p.logger.Warn("Format conversion not yet implemented, assuming VMDK")
+		vmdkPath = tempFile
+		defer os.Remove(vmdkPath)
+	} else {
+		vmdkPath = tempFile
+	}
+
+	// Upload to datastore
+	p.logger.Info("Uploading VMDK to datastore", "datastore", datastore, "disk_id", diskID)
+	
+	// Re-open file for reading
+	uploadFile, err := os.Open(vmdkPath)
+	if err != nil {
+		return nil, errors.NewInternal("failed to open file for datastore upload: %v", err)
+	}
+	defer uploadFile.Close()
+
+	// Get file size
+	stat, err := uploadFile.Stat()
+	if err != nil {
+		return nil, errors.NewInternal("failed to stat file: %v", err)
+	}
 
 	// Generate datastore path
 	diskPath := fmt.Sprintf("[%s] %s/%s.vmdk", datastore, diskID, diskID)
+	
+	// Upload to datastore with progress tracking
+	uploadProgress := func(transferred, total int64) {
+		if total > 0 {
+			progress := float64(transferred) / float64(total) * 100
+			p.logger.Debug("Datastore upload progress", "percent", progress, "transferred", transferred, "total", total)
+		}
+	}
+
+	err = dsManager.UploadFile(ctx, uploadFile, diskPath, stat.Size(), uploadProgress)
+	if err != nil {
+		return nil, errors.NewInternal("failed to upload to datastore: %v", err)
+	}
+
+	p.logger.Info("Disk import completed", "disk_id", diskID, "path", diskPath)
 
 	response := &providerv1.ImportDiskResponse{
 		DiskId:          diskID,
 		Path:            diskPath,
-		Task:            nil, // Would be async with actual datastore upload
-		ActualSizeBytes: 0,   // Would be from downloadResp.ContentLength
-		Checksum:        "",  // Would be from downloadResp.Checksum
+		Task:            nil, // Synchronous operation
+		ActualSizeBytes: downloadResp.ContentLength,
+		Checksum:        downloadResp.Checksum,
 	}
 
-	p.logger.Info("Disk import prepared", "disk_id", diskID, "path", diskPath)
 	return response, nil
 }

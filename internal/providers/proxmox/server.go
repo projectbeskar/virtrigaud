@@ -1409,7 +1409,7 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 	// TODO: Implement vzdump-based export or direct disk access
 	// This is a simplified version for MVP
 	p.logger.Warn("Proxmox disk export using placeholder - full vzdump integration pending")
-	
+
 	p.logger.Info("Export prepared", "export_id", exportID, "disk_path", diskInfo.Path, "format", targetFormat)
 
 	// Placeholder: In production, this would upload the actual disk

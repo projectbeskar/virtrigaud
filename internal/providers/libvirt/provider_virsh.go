@@ -1454,7 +1454,7 @@ func (p *Provider) ExportDisk(ctx context.Context, req contracts.ExportDiskReque
 
 	// Upload to destination using storage layer
 	log.Printf("INFO Uploading disk to: %s", req.DestinationURL)
-	
+
 	// Parse the destination URL to get storage configuration
 	parsedURL, err := storage.ParseStorageURL(req.DestinationURL)
 	if err != nil {
@@ -1580,9 +1580,9 @@ func (p *Provider) ImportDisk(ctx context.Context, req contracts.ImportDiskReque
 
 	// Download to temporary location
 	tempPath := fmt.Sprintf("/tmp/%s-download.img", diskId)
-	
+
 	log.Printf("INFO Downloading disk from %s to %s", req.SourceURL, tempPath)
-	
+
 	// Parse the source URL to get storage configuration
 	parsedURL, err := storage.ParseStorageURL(req.SourceURL)
 	if err != nil {
@@ -1660,9 +1660,9 @@ func (p *Provider) ImportDisk(ctx context.Context, req contracts.ImportDiskReque
 
 	checksum := downloadResp.Checksum
 	fileSizeBytes := downloadResp.ContentLength
-	
+
 	log.Printf("INFO Download completed: %d bytes, checksum=%s", fileSizeBytes, checksum)
-	
+
 	// Cleanup temp file on exit
 	defer func() {
 		_, _ = p.virshProvider.runVirshCommand(ctx, "!", "rm", "-f", tempPath)
