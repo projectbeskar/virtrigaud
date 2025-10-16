@@ -21,7 +21,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"hash"
 	"io"
 	"log"
 	"os"
@@ -410,10 +409,10 @@ func (n *NFSStorage) Download(ctx context.Context, req DownloadRequest) (Downloa
 				destFile.Close()
 			}
 			if !downloadSuccess {
-				os.Remove(tempPath)
+				_ = os.Remove(tempPath) // Best effort cleanup
 			} else {
 				// Atomic rename on success
-				os.Rename(tempPath, req.DestinationPath)
+				_ = os.Rename(tempPath, req.DestinationPath) // Best effort
 			}
 		}()
 
@@ -706,24 +705,25 @@ func (n *NFSStorage) loadMetadata(filePath string) (string, map[string]string, e
 }
 
 // nfsProgressReader wraps an io.Reader to track progress and calculate checksum
-type nfsProgressReader struct {
-	reader      io.Reader
-	total       int64
-	transferred int64
-	callback    func(int64, int64)
-	hasher      hash.Hash
-}
+// nfsProgressReader is currently unused but kept for potential future use
+// type nfsProgressReader struct {
+// 	reader      io.Reader
+// 	total       int64
+// 	transferred int64
+// 	callback    func(int64, int64)
+// 	hasher      hash.Hash
+// }
 
-func (pr *nfsProgressReader) Read(p []byte) (int, error) {
-	n, err := pr.reader.Read(p)
-	if n > 0 {
-		pr.transferred += int64(n)
-		if pr.hasher != nil {
-			pr.hasher.Write(p[:n])
-		}
-		if pr.callback != nil {
-			pr.callback(pr.transferred, pr.total)
-		}
-	}
-	return n, err
-}
+// func (pr *nfsProgressReader) Read(p []byte) (int, error) {
+// 	n, err := pr.reader.Read(p)
+// 	if n > 0 {
+// 		pr.transferred += int64(n)
+// 		if pr.hasher != nil {
+// 			pr.hasher.Write(p[:n])
+// 		}
+// 		if pr.callback != nil {
+// 			pr.callback(pr.transferred, pr.total)
+// 		}
+// 	}
+// 	return n, err
+// }

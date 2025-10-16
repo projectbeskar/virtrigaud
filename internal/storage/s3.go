@@ -395,11 +395,11 @@ func (s *S3Storage) GetMetadata(ctx context.Context, url string) (FileMetadata, 
 	}
 
 	metadata := FileMetadata{
-		URL:          url,
-		Size:         aws.Int64Value(result.ContentLength),
-		ETag:         aws.StringValue(result.ETag),
-		ContentType:  aws.StringValue(result.ContentType),
-		LastModified: result.LastModified.Format(time.RFC3339),
+		URL:            url,
+		Size:           aws.Int64Value(result.ContentLength),
+		ETag:           aws.StringValue(result.ETag),
+		ContentType:    aws.StringValue(result.ContentType),
+		LastModified:   result.LastModified.Format(time.RFC3339),
 		CustomMetadata: make(map[string]string),
 	}
 
@@ -510,7 +510,6 @@ type progressWriter struct {
 	transferred int64
 	callback    func(int64, int64)
 	hasher      hash.Hash
-	offset      int64
 }
 
 func (pw *progressWriter) WriteAt(p []byte, off int64) (int, error) {
@@ -530,7 +529,6 @@ func (pw *progressWriter) WriteAt(p []byte, off int64) (int, error) {
 // writerAtWrapper wraps an io.Writer to implement io.WriterAt
 type writerAtWrapper struct {
 	writer io.Writer
-	offset int64
 }
 
 func (w *writerAtWrapper) WriteAt(p []byte, off int64) (n int, err error) {
@@ -538,4 +536,3 @@ func (w *writerAtWrapper) WriteAt(p []byte, off int64) (n int, err error) {
 	// For non-sequential writes, we'd need a more complex buffer
 	return w.writer.Write(p)
 }
-

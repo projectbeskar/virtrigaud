@@ -1,0 +1,37 @@
+# Basic VM Migration Example
+# Migrates a VM from one provider to another with minimal configuration
+
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMMigration
+metadata:
+  name: basic-migration
+  namespace: default
+spec:
+  # Source VM to migrate
+  source:
+    vmRef:
+      name: my-source-vm
+    createSnapshot: true  # Create snapshot before migration
+  
+  # Target configuration
+  target:
+    name: my-target-vm
+    providerRef:
+      name: target-provider
+      namespace: virtrigaud-system
+    classRef:
+      name: standard-vm
+    networks:
+      - name: default
+  
+  # Storage for intermediate disk transfer
+  storage:
+    type: nfs
+    endpoint: /mnt/nfs-migrations
+  
+  # Migration options with sensible defaults
+  options:
+    diskFormat: qcow2
+    compress: false
+    verifyChecksums: true
+
