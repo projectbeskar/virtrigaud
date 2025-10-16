@@ -38,6 +38,7 @@ import (
 	"github.com/vmware/govmomi/vim25/soap"
 	"github.com/vmware/govmomi/vim25/types"
 
+	"github.com/projectbeskar/virtrigaud/internal/storage"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/errors"
 )
@@ -2077,12 +2078,12 @@ func (p *Provider) GetDiskInfo(ctx context.Context, req *providerv1.GetDiskInfoR
 	// Extract disk information
 	diskLabel := targetDisk.DeviceInfo.GetDescription().Label
 	virtualSizeBytes := targetDisk.CapacityInKB * 1024 // Convert KB to bytes
-	
+
 	// Determine disk path and backing
 	var diskPath string
 	var backingFile string
 	format := "vmdk" // vSphere uses VMDK format
-	
+
 	if backing, ok := targetDisk.Backing.(*types.VirtualDiskFlatVer2BackingInfo); ok {
 		diskPath = backing.FileName
 		backingFile = backing.Parent.GetVirtualDeviceFileBackingInfo().FileName
@@ -2110,7 +2111,7 @@ func (p *Provider) GetDiskInfo(ctx context.Context, req *providerv1.GetDiskInfoR
 		Snapshots:        snapshots,
 		BackingFile:      backingFile,
 		Metadata: map[string]string{
-			"device_key": fmt.Sprintf("%d", targetDisk.Key),
+			"device_key":  fmt.Sprintf("%d", targetDisk.Key),
 			"unit_number": fmt.Sprintf("%d", targetDisk.UnitNumber),
 		},
 	}
@@ -2170,6 +2171,67 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 	p.logger.Warn("vSphere disk export requires OVF export API - simplified implementation")
 	p.logger.Info("Note: Full implementation would use govmomi OVF export and datastore file access")
 
+	// Parse storage URL and create storage client
+	parsedURL, err := storage.ParseStorageURL(req.DestinationUrl)
+	if err != nil {
+		return nil, errors.NewInvalidSpec("invalid destination URL: %v", err)
+	}
+
+	// Build storage config
+	storageConfig := storage.StorageConfig{
+		Type:    parsedURL.Type,
+		Timeout: 300,
+		UseSSL:  true,
+	}
+
+	// Apply credentials
+	if req.Credentials != nil {
+		if accessKey, ok := req.Credentials["accessKey"]; ok {
+			storageConfig.AccessKey = accessKey
+		}
+		if secretKey, ok := req.Credentials["secretKey"]; ok {
+			storageConfig.SecretKey = secretKey
+		}
+		if token, ok := req.Credentials["token"]; ok {
+			storageConfig.Token = token
+		}
+		if endpoint, ok := req.Credentials["endpoint"]; ok {
+			storageConfig.Endpoint = endpoint
+		}
+		if region, ok := req.Credentials["region"]; ok {
+			storageConfig.Region = region
+		}
+	}
+
+	// Configure based on storage type
+	switch parsedURL.Type {
+	case "s3":
+		storageConfig.Bucket = parsedURL.Bucket
+		if storageConfig.Region == "" {
+			storageConfig.Region = "us-east-1"
+		}
+	case "http", "https":
+		if storageConfig.Endpoint == "" {
+			storageConfig.Endpoint = parsedURL.Endpoint
+		}
+	case "nfs":
+		if storageConfig.Endpoint == "" {
+			storageConfig.Endpoint = parsedURL.Path
+		}
+	}
+
+	// Create storage client
+	storageClient, err := storage.NewStorage(storageConfig)
+	if err != nil {
+		return nil, errors.NewInternal("failed to create storage client: %v", err)
+	}
+	defer storageClient.Close()
+
+	// For now, we'll use a placeholder for the actual disk export
+	// TODO: Implement OVF export or datastore file access
+	p.logger.Warn("vSphere disk export using placeholder - full OVF export integration pending")
+	p.logger.Info("Note: Will use OVF export or datastore file manager to export VMDK")
+
 	// For actual implementation:
 	// 1. Use vm.Export() to create OVF/OVA
 	// 2. Extract VMDK from OVA
@@ -2181,7 +2243,7 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 		ExportId:           exportID,
 		Task:               nil, // Would be async with actual OVF export
 		EstimatedSizeBytes: diskInfo.ActualSizeBytes,
-		Checksum:           "", // Calculated during actual export
+		Checksum:           "", // Would be from uploadResp.Checksum
 	}
 
 	p.logger.Info("Export prepared", "export_id", exportID, "disk_path", diskInfo.Path)
@@ -2226,14 +2288,72 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 	// 4. Create disk descriptor
 	// 5. Return disk reference
 
+	// Parse storage URL and create storage client
+	parsedURL, err := storage.ParseStorageURL(req.SourceUrl)
+	if err != nil {
+		return nil, errors.NewInvalidSpec("invalid source URL: %v", err)
+	}
+
+	// Build storage config
+	storageConfig := storage.StorageConfig{
+		Type:    parsedURL.Type,
+		Timeout: 300,
+		UseSSL:  true,
+	}
+
+	// Apply credentials
+	if req.Credentials != nil {
+		if accessKey, ok := req.Credentials["accessKey"]; ok {
+			storageConfig.AccessKey = accessKey
+		}
+		if secretKey, ok := req.Credentials["secretKey"]; ok {
+			storageConfig.SecretKey = secretKey
+		}
+		if token, ok := req.Credentials["token"]; ok {
+			storageConfig.Token = token
+		}
+		if endpoint, ok := req.Credentials["endpoint"]; ok {
+			storageConfig.Endpoint = endpoint
+		}
+		if region, ok := req.Credentials["region"]; ok {
+			storageConfig.Region = region
+		}
+	}
+
+	// Configure based on storage type
+	switch parsedURL.Type {
+	case "s3":
+		storageConfig.Bucket = parsedURL.Bucket
+		if storageConfig.Region == "" {
+			storageConfig.Region = "us-east-1"
+		}
+	case "http", "https":
+		if storageConfig.Endpoint == "" {
+			storageConfig.Endpoint = parsedURL.Endpoint
+		}
+	case "nfs":
+		if storageConfig.Endpoint == "" {
+			storageConfig.Endpoint = parsedURL.Path
+		}
+	}
+
+	// Create storage client
+	storageClient, err := storage.NewStorage(storageConfig)
+	if err != nil {
+		return nil, errors.NewInternal("failed to create storage client: %v", err)
+	}
+	defer storageClient.Close()
+
+	// For now, we'll use a placeholder for the actual disk import
+	// TODO: Implement full download + datastore upload
+	p.logger.Warn("vSphere disk import using placeholder - full datastore file manager integration pending")
+	p.logger.Info("Note: Will download and upload VMDK to datastore")
+
 	// For actual implementation:
 	// 1. Download using storage.Download()
 	// 2. Convert to VMDK if source is qcow2/raw
 	// 3. Upload to datastore using govmomi datastore file manager
 	// 4. Verify upload and create disk reference
-
-	p.logger.Warn("vSphere disk import requires datastore file manager - placeholder implementation")
-	p.logger.Info("Note: Full implementation would upload VMDK to datastore and create disk reference")
 
 	// Generate datastore path
 	diskPath := fmt.Sprintf("[%s] %s/%s.vmdk", datastore, diskID, diskID)
@@ -2242,8 +2362,8 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 		DiskId:          diskID,
 		Path:            diskPath,
 		Task:            nil, // Would be async with actual datastore upload
-		ActualSizeBytes: 0,   // Will be populated after import
-		Checksum:        "",  // Will be calculated during import
+		ActualSizeBytes: 0,   // Would be from downloadResp.ContentLength
+		Checksum:        "",  // Would be from downloadResp.Checksum
 	}
 
 	p.logger.Info("Disk import prepared", "disk_id", diskID, "path", diskPath)

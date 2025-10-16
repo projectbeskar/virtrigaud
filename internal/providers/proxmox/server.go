@@ -29,6 +29,7 @@ import (
 
 	v1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/providers/proxmox/pveapi"
+	"github.com/projectbeskar/virtrigaud/internal/storage"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/capabilities"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/errors"
@@ -1330,15 +1331,15 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 	// 2. Extract the disk from VMA archive
 	// 3. Convert if necessary
 	// 4. Upload to destination
-	
+
 	p.logger.Info("Creating backup for disk export", "vmid", vmid, "node", node)
-	
+
 	// For now, we'll use a simplified approach:
 	// - Stop the VM if required
 	// - Use qemu-img to convert/copy the disk
 	// - Calculate checksum
 	// Note: Full implementation would use vzdump and handle running VMs
-	
+
 	p.logger.Warn("Using simplified disk export (not using vzdump)")
 	p.logger.Info("Note: For production, implement vzdump-based export for running VMs")
 
@@ -1348,19 +1349,81 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 		return nil, errors.NewInvalidSpec("invalid disk path format: %s", diskInfo.Path)
 	}
 
-	// For actual implementation with storage layer integration:
-	// 1. Create temporary export file
-	// 2. Use qemu-img or vzdump to export
-	// 3. Upload using storage.Upload() 
-	// 4. Clean up temporary file
+	// Parse storage URL and create storage client
+	parsedURL, err := storage.ParseStorageURL(req.DestinationUrl)
+	if err != nil {
+		return nil, errors.NewInvalidSpec("invalid destination URL: %v", err)
+	}
+
+	// Build storage config
+	storageConfig := storage.StorageConfig{
+		Type:    parsedURL.Type,
+		Timeout: 300,
+		UseSSL:  true,
+	}
+
+	// Apply credentials
+	if req.Credentials != nil {
+		if accessKey, ok := req.Credentials["accessKey"]; ok {
+			storageConfig.AccessKey = accessKey
+		}
+		if secretKey, ok := req.Credentials["secretKey"]; ok {
+			storageConfig.SecretKey = secretKey
+		}
+		if token, ok := req.Credentials["token"]; ok {
+			storageConfig.Token = token
+		}
+		if endpoint, ok := req.Credentials["endpoint"]; ok {
+			storageConfig.Endpoint = endpoint
+		}
+		if region, ok := req.Credentials["region"]; ok {
+			storageConfig.Region = region
+		}
+	}
+
+	// Configure based on storage type
+	switch parsedURL.Type {
+	case "s3":
+		storageConfig.Bucket = parsedURL.Bucket
+		if storageConfig.Region == "" {
+			storageConfig.Region = "us-east-1"
+		}
+	case "http", "https":
+		if storageConfig.Endpoint == "" {
+			storageConfig.Endpoint = parsedURL.Endpoint
+		}
+	case "nfs":
+		if storageConfig.Endpoint == "" {
+			storageConfig.Endpoint = parsedURL.Path
+		}
+	}
+
+	// Create storage client
+	storageClient, err := storage.NewStorage(storageConfig)
+	if err != nil {
+		return nil, errors.NewInternal("failed to create storage client: %v", err)
+	}
+	defer storageClient.Close()
+
+	// For now, we'll use a placeholder for the actual disk export
+	// TODO: Implement vzdump-based export or direct disk access
+	// This is a simplified version for MVP
+	p.logger.Warn("Proxmox disk export using placeholder - full vzdump integration pending")
 	
 	p.logger.Info("Export prepared", "export_id", exportID, "disk_path", diskInfo.Path, "format", targetFormat)
+
+	// Placeholder: In production, this would upload the actual disk
+	// uploadResp, err := storageClient.Upload(ctx, storage.UploadRequest{
+	//     SourcePath: diskExportPath,
+	//     DestinationURL: req.DestinationUrl,
+	//     ContentLength: diskInfo.ActualSizeBytes,
+	// })
 
 	response := &providerv1.ExportDiskResponse{
 		ExportId:           exportID,
 		Task:               nil, // Synchronous for now (would be async with vzdump)
 		EstimatedSizeBytes: diskInfo.ActualSizeBytes,
-		Checksum:           "", // Calculated during actual export
+		Checksum:           "", // Would be from uploadResp.Checksum
 	}
 
 	return response, nil
@@ -1381,9 +1444,9 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 	}
 
 	// Determine storage
-	storage := "local-lvm"
+	pveStorage := "local-lvm"
 	if req.StorageHint != "" {
-		storage = req.StorageHint
+		pveStorage = req.StorageHint
 	}
 
 	// Determine target format
@@ -1400,11 +1463,11 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 	if diskID == "" {
 		diskID = fmt.Sprintf("imported-%d", time.Now().Unix())
 	}
-	
+
 	// Generate a temporary VMID for qm importdisk
 	tempVMID := int(time.Now().Unix()%999999) + 100000
 
-	p.logger.Info("Preparing disk import", "disk_id", diskID, "node", node, "storage", storage, "format", targetFormat)
+	p.logger.Info("Preparing disk import", "disk_id", diskID, "node", node, "storage", pveStorage, "format", targetFormat)
 
 	// Proxmox disk import strategy:
 	// 1. Download disk from SourceURL to temp location
@@ -1412,24 +1475,84 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 	// 3. Use `qm importdisk` to import into Proxmox storage
 	// 4. Return the imported disk reference
 
-	// For actual implementation:
-	// 1. Download using storage.Download()
-	// 2. Use PVE API or qm importdisk command
-	// 3. Track progress via task API
-	// 4. Clean up temporary files
+	// Parse storage URL and create storage client
+	parsedURL, err := storage.ParseStorageURL(req.SourceUrl)
+	if err != nil {
+		return nil, errors.NewInvalidSpec("invalid source URL: %v", err)
+	}
 
-	p.logger.Warn("Disk import placeholder - actual implementation requires storage layer integration")
-	p.logger.Info("Note: Will use qm importdisk or storage API to import downloaded disk")
+	// Build storage config
+	storageConfig := storage.StorageConfig{
+		Type:    parsedURL.Type,
+		Timeout: 300,
+		UseSSL:  true,
+	}
+
+	// Apply credentials
+	if req.Credentials != nil {
+		if accessKey, ok := req.Credentials["accessKey"]; ok {
+			storageConfig.AccessKey = accessKey
+		}
+		if secretKey, ok := req.Credentials["secretKey"]; ok {
+			storageConfig.SecretKey = secretKey
+		}
+		if token, ok := req.Credentials["token"]; ok {
+			storageConfig.Token = token
+		}
+		if endpoint, ok := req.Credentials["endpoint"]; ok {
+			storageConfig.Endpoint = endpoint
+		}
+		if region, ok := req.Credentials["region"]; ok {
+			storageConfig.Region = region
+		}
+	}
+
+	// Configure based on storage type
+	switch parsedURL.Type {
+	case "s3":
+		storageConfig.Bucket = parsedURL.Bucket
+		if storageConfig.Region == "" {
+			storageConfig.Region = "us-east-1"
+		}
+	case "http", "https":
+		if storageConfig.Endpoint == "" {
+			storageConfig.Endpoint = parsedURL.Endpoint
+		}
+	case "nfs":
+		if storageConfig.Endpoint == "" {
+			storageConfig.Endpoint = parsedURL.Path
+		}
+	}
+
+	// Create storage client
+	storageClient, err := storage.NewStorage(storageConfig)
+	if err != nil {
+		return nil, errors.NewInternal("failed to create storage client: %v", err)
+	}
+	defer storageClient.Close()
+
+	// For now, we'll use a placeholder for the actual disk import
+	// TODO: Implement full download + qm importdisk integration
+	p.logger.Warn("Proxmox disk import using placeholder - full qm importdisk integration pending")
+	p.logger.Info("Note: Will download and use qm importdisk to import disk")
+
+	// Placeholder: In production, this would download the disk
+	// downloadResp, err := storageClient.Download(ctx, storage.DownloadRequest{
+	//     SourceURL: req.SourceUrl,
+	//     DestinationPath: "/tmp/import-"+diskID,
+	//     VerifyChecksum: req.VerifyChecksum,
+	//     ExpectedChecksum: req.ExpectedChecksum,
+	// })
 
 	// Placeholder response
-	diskPath := fmt.Sprintf("%s:vm-%d-disk-0", storage, tempVMID)
+	diskPath := fmt.Sprintf("%s:vm-%d-disk-0", pveStorage, tempVMID)
 
 	response := &providerv1.ImportDiskResponse{
 		DiskId:          diskID,
 		Path:            diskPath,
 		Task:            nil, // Will be async with actual implementation
-		ActualSizeBytes: 0,   // Will be populated after import
-		Checksum:        "",  // Will be calculated during import
+		ActualSizeBytes: 0,   // Would be from downloadResp.ContentLength
+		Checksum:        "",  // Would be from downloadResp.Checksum
 	}
 
 	return response, nil

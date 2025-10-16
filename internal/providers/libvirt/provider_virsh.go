@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
+	"github.com/projectbeskar/virtrigaud/internal/storage"
 )
 
 // Clean provider implementation using only virsh
@@ -1425,15 +1426,15 @@ func (p *Provider) ExportDisk(ctx context.Context, req contracts.ExportDiskReque
 
 	// Check if format conversion is needed
 	needsConversion := (targetFormat != diskInfo.Format)
-	
+
 	var uploadPath string
 	var cleanup func()
-	
+
 	if needsConversion {
 		// Convert disk format using qemu-img
 		log.Printf("INFO Converting disk from %s to %s", diskInfo.Format, targetFormat)
 		tempPath := fmt.Sprintf("/tmp/%s.%s", exportId, targetFormat)
-		
+
 		// Run qemu-img convert
 		convertCmd := fmt.Sprintf("qemu-img convert -f %s -O %s '%s' '%s'",
 			diskInfo.Format, targetFormat, diskPath, tempPath)
@@ -1441,7 +1442,7 @@ func (p *Provider) ExportDisk(ctx context.Context, req contracts.ExportDiskReque
 		if err != nil {
 			return contracts.ExportDiskResponse{}, fmt.Errorf("failed to convert disk format: %w, output: %s", err, result.Stderr)
 		}
-		
+
 		uploadPath = tempPath
 		cleanup = func() {
 			_, _ = p.virshProvider.runVirshCommand(ctx, "!", "rm", "-f", tempPath)
@@ -1454,25 +1455,82 @@ func (p *Provider) ExportDisk(ctx context.Context, req contracts.ExportDiskReque
 	// Upload to destination using storage layer
 	log.Printf("INFO Uploading disk to: %s", req.DestinationURL)
 	
-	// Note: Actual storage layer integration would happen here
-	// For now, we'll use a simple file copy or assume the storage is accessible
-	// In production, this should use the storage.Storage interface
-	
-	// Calculate checksum during upload
-	checksumCmd := fmt.Sprintf("sha256sum '%s' | awk '{print $1}'", uploadPath)
-	checksumResult, err := p.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", checksumCmd)
+	// Parse the destination URL to get storage configuration
+	parsedURL, err := storage.ParseStorageURL(req.DestinationURL)
 	if err != nil {
-		log.Printf("WARN Failed to calculate checksum: %v", err)
+		return contracts.ExportDiskResponse{}, fmt.Errorf("invalid destination URL: %w", err)
 	}
-	checksum := strings.TrimSpace(checksumResult.Stdout)
 
-	// For actual implementation, we would:
-	// 1. Parse the DestinationURL to determine storage type (s3://, http://, nfs://)
-	// 2. Create appropriate storage backend using storage.NewStorage()
-	// 3. Use storage.Upload() with progress callback
-	// 4. Handle errors and cleanup
-	
-	log.Printf("INFO Disk export completed: %s (checksum=%s)", exportId, checksum)
+	// Build storage config from URL and credentials
+	storageConfig := storage.StorageConfig{
+		Type:    parsedURL.Type,
+		Timeout: 300, // 5 minutes
+		UseSSL:  true,
+	}
+
+	// Apply credentials from request
+	if req.Credentials != nil {
+		if accessKey, ok := req.Credentials["accessKey"]; ok {
+			storageConfig.AccessKey = accessKey
+		}
+		if secretKey, ok := req.Credentials["secretKey"]; ok {
+			storageConfig.SecretKey = secretKey
+		}
+		if token, ok := req.Credentials["token"]; ok {
+			storageConfig.Token = token
+		}
+		if endpoint, ok := req.Credentials["endpoint"]; ok {
+			storageConfig.Endpoint = endpoint
+		}
+		if region, ok := req.Credentials["region"]; ok {
+			storageConfig.Region = region
+		}
+	}
+
+	// Set type-specific configuration
+	switch parsedURL.Type {
+	case "s3":
+		storageConfig.Bucket = parsedURL.Bucket
+		if storageConfig.Region == "" {
+			storageConfig.Region = "us-east-1"
+		}
+	case "http", "https":
+		if storageConfig.Endpoint == "" {
+			storageConfig.Endpoint = parsedURL.Endpoint
+		}
+	case "nfs":
+		if storageConfig.Endpoint == "" {
+			storageConfig.Endpoint = parsedURL.Path
+		}
+	}
+
+	// Create storage client
+	storageClient, err := storage.NewStorage(storageConfig)
+	if err != nil {
+		return contracts.ExportDiskResponse{}, fmt.Errorf("failed to create storage client: %w", err)
+	}
+	defer storageClient.Close()
+
+	// Upload the disk
+	uploadReq := storage.UploadRequest{
+		SourcePath:     uploadPath,
+		DestinationURL: req.DestinationURL,
+		ContentLength:  diskInfo.ActualSizeBytes,
+		ProgressCallback: func(transferred, total int64) {
+			if total > 0 {
+				progress := float64(transferred) / float64(total) * 100
+				log.Printf("INFO Upload progress: %.2f%% (%d/%d bytes)", progress, transferred, total)
+			}
+		},
+	}
+
+	uploadResp, err := storageClient.Upload(ctx, uploadReq)
+	if err != nil {
+		return contracts.ExportDiskResponse{}, fmt.Errorf("failed to upload disk: %w", err)
+	}
+
+	checksum := uploadResp.Checksum
+	log.Printf("INFO Disk export completed: %s (checksum=%s, uploaded=%d bytes)", exportId, checksum, uploadResp.BytesTransferred)
 
 	response := contracts.ExportDiskResponse{
 		ExportId:           exportId,
@@ -1525,55 +1583,98 @@ func (p *Provider) ImportDisk(ctx context.Context, req contracts.ImportDiskReque
 	
 	log.Printf("INFO Downloading disk from %s to %s", req.SourceURL, tempPath)
 	
-	// For actual implementation, we would:
-	// 1. Parse SourceURL to determine storage type
-	// 2. Create appropriate storage backend
-	// 3. Use storage.Download() with progress callback
-	// For now, we'll use wget/curl as a placeholder
-	
-	downloadCmd := fmt.Sprintf("curl -L -o '%s' '%s' || wget -O '%s' '%s'",
-		tempPath, req.SourceURL, tempPath, req.SourceURL)
-	result, err := p.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", downloadCmd)
+	// Parse the source URL to get storage configuration
+	parsedURL, err := storage.ParseStorageURL(req.SourceURL)
 	if err != nil {
-		return contracts.ImportDiskResponse{}, fmt.Errorf("failed to download disk: %w, output: %s", err, result.Stderr)
+		return contracts.ImportDiskResponse{}, fmt.Errorf("invalid source URL: %w", err)
 	}
+
+	// Build storage config from URL and credentials
+	storageConfig := storage.StorageConfig{
+		Type:    parsedURL.Type,
+		Timeout: 300, // 5 minutes
+		UseSSL:  true,
+	}
+
+	// Apply credentials from request
+	if req.Credentials != nil {
+		if accessKey, ok := req.Credentials["accessKey"]; ok {
+			storageConfig.AccessKey = accessKey
+		}
+		if secretKey, ok := req.Credentials["secretKey"]; ok {
+			storageConfig.SecretKey = secretKey
+		}
+		if token, ok := req.Credentials["token"]; ok {
+			storageConfig.Token = token
+		}
+		if endpoint, ok := req.Credentials["endpoint"]; ok {
+			storageConfig.Endpoint = endpoint
+		}
+		if region, ok := req.Credentials["region"]; ok {
+			storageConfig.Region = region
+		}
+	}
+
+	// Set type-specific configuration
+	switch parsedURL.Type {
+	case "s3":
+		storageConfig.Bucket = parsedURL.Bucket
+		if storageConfig.Region == "" {
+			storageConfig.Region = "us-east-1"
+		}
+	case "http", "https":
+		if storageConfig.Endpoint == "" {
+			storageConfig.Endpoint = parsedURL.Endpoint
+		}
+	case "nfs":
+		if storageConfig.Endpoint == "" {
+			storageConfig.Endpoint = parsedURL.Path
+		}
+	}
+
+	// Create storage client
+	storageClient, err := storage.NewStorage(storageConfig)
+	if err != nil {
+		return contracts.ImportDiskResponse{}, fmt.Errorf("failed to create storage client: %w", err)
+	}
+	defer storageClient.Close()
+
+	// Download the disk
+	downloadReq := storage.DownloadRequest{
+		SourceURL:        req.SourceURL,
+		DestinationPath:  tempPath,
+		VerifyChecksum:   req.VerifyChecksum,
+		ExpectedChecksum: req.ExpectedChecksum,
+		ProgressCallback: func(transferred, total int64) {
+			if total > 0 {
+				progress := float64(transferred) / float64(total) * 100
+				log.Printf("INFO Download progress: %.2f%% (%d/%d bytes)", progress, transferred, total)
+			}
+		},
+	}
+
+	downloadResp, err := storageClient.Download(ctx, downloadReq)
+	if err != nil {
+		return contracts.ImportDiskResponse{}, fmt.Errorf("failed to download disk: %w", err)
+	}
+
+	checksum := downloadResp.Checksum
+	fileSizeBytes := downloadResp.ContentLength
+	
+	log.Printf("INFO Download completed: %d bytes, checksum=%s", fileSizeBytes, checksum)
 	
 	// Cleanup temp file on exit
 	defer func() {
 		_, _ = p.virshProvider.runVirshCommand(ctx, "!", "rm", "-f", tempPath)
 	}()
 
-	// Calculate checksum if requested
-	var checksum string
-	if req.VerifyChecksum && req.ExpectedChecksum != "" {
-		checksumCmd := fmt.Sprintf("sha256sum '%s' | awk '{print $1}'", tempPath)
-		checksumResult, err := p.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", checksumCmd)
-		if err != nil {
-			return contracts.ImportDiskResponse{}, fmt.Errorf("failed to calculate checksum: %w", err)
-		}
-		checksum = strings.TrimSpace(checksumResult.Stdout)
-		
-		if checksum != req.ExpectedChecksum {
-			return contracts.ImportDiskResponse{}, fmt.Errorf("checksum mismatch: expected=%s, got=%s", req.ExpectedChecksum, checksum)
-		}
-		log.Printf("INFO Checksum verified: %s", checksum)
-	}
-
-	// Get downloaded file size
-	sizeCmd := fmt.Sprintf("stat -c %%s '%s'", tempPath)
-	sizeResult, err := p.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", sizeCmd)
-	if err != nil {
-		log.Printf("WARN Failed to get file size: %v", err)
-	}
-	fileSizeBytes, _ := strconv.ParseInt(strings.TrimSpace(sizeResult.Stdout), 10, 64)
-
 	// Create volume in storage pool from the downloaded file
 	log.Printf("INFO Creating volume %s in pool %s from downloaded file", diskId, storagePool)
-	
+
 	// First, copy the file to the storage pool directory
 	poolPath := "/var/lib/libvirt/images" // Default path, should be queried from pool
 	diskPath := fmt.Sprintf("%s/%s.%s", poolPath, diskId, targetFormat)
-	
+
 	// Copy with conversion if needed
 	convertCmd := fmt.Sprintf("qemu-img convert -O %s '%s' '%s'", targetFormat, tempPath, diskPath)
 	convertResult, err := p.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", convertCmd)
