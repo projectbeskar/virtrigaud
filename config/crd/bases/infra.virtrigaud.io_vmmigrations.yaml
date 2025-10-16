@@ -1,0 +1,694 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.17.2
+  name: vmmigrations.infra.virtrigaud.io
+spec:
+  group: infra.virtrigaud.io
+  names:
+    kind: VMMigration
+    listKind: VMMigrationList
+    plural: vmmigrations
+    shortNames:
+    - vmmig
+    singular: vmmigration
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.source.vmRef.name
+      name: Source
+      type: string
+    - jsonPath: .spec.target.name
+      name: Target
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.progress.percentage
+      name: Progress
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1beta1
+    schema:
+      openAPIV3Schema:
+        description: VMMigration is the Schema for the vmmigrations API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: VMMigrationSpec defines the desired state of VMMigration
+            properties:
+              metadata:
+                description: Metadata contains migration metadata
+                properties:
+                  createdBy:
+                    description: CreatedBy identifies who or what created the migration
+                    maxLength: 255
+                    type: string
+                  environment:
+                    description: Environment specifies the environment
+                    enum:
+                    - dev
+                    - staging
+                    - prod
+                    - test
+                    type: string
+                  project:
+                    description: Project identifies the project this migration belongs
+                      to
+                    maxLength: 255
+                    type: string
+                  purpose:
+                    description: Purpose describes the purpose of the migration
+                    enum:
+                    - disaster-recovery
+                    - cloud-migration
+                    - provider-change
+                    - testing
+                    - maintenance
+                    type: string
+                  tags:
+                    additionalProperties:
+                      type: string
+                    description: Tags are key-value pairs for categorizing the migration
+                    maxProperties: 50
+                    type: object
+                type: object
+              options:
+                description: Options defines migration options
+                properties:
+                  cleanupPolicy:
+                    default: OnSuccess
+                    description: CleanupPolicy defines cleanup behavior
+                    enum:
+                    - Always
+                    - OnSuccess
+                    - Never
+                    type: string
+                  compress:
+                    default: false
+                    description: Compress enables compression during transfer
+                    type: boolean
+                  diskFormat:
+                    description: DiskFormat specifies the desired disk format for
+                      the target
+                    enum:
+                    - qcow2
+                    - vmdk
+                    - raw
+                    type: string
+                  retryPolicy:
+                    description: RetryPolicy defines retry behavior for failed operations
+                    properties:
+                      backoffMultiplier:
+                        default: 2
+                        description: BackoffMultiplier is the multiplier for exponential
+                          backoff
+                        format: int32
+                        maximum: 10
+                        minimum: 1
+                        type: integer
+                      maxRetries:
+                        default: 3
+                        description: MaxRetries is the maximum number of retry attempts
+                        format: int32
+                        maximum: 10
+                        minimum: 0
+                        type: integer
+                      retryDelay:
+                        default: 5m
+                        description: RetryDelay is the delay between retry attempts
+                        type: string
+                    type: object
+                  timeout:
+                    default: 4h
+                    description: Timeout defines the maximum time for the entire migration
+                    type: string
+                  validationChecks:
+                    description: ValidationChecks defines validation checks to perform
+                    properties:
+                      checkBoot:
+                        default: false
+                        description: CheckBoot verifies VM boots successfully
+                        type: boolean
+                      checkChecksum:
+                        default: true
+                        description: CheckChecksum verifies checksums match
+                        type: boolean
+                      checkConnectivity:
+                        default: false
+                        description: CheckConnectivity tests network connectivity
+                        type: boolean
+                      checkDiskSize:
+                        default: true
+                        description: CheckDiskSize verifies disk size matches
+                        type: boolean
+                    type: object
+                  verifyChecksums:
+                    default: true
+                    description: VerifyChecksums enables checksum verification
+                    type: boolean
+                type: object
+              source:
+                description: Source defines the source VM to migrate from
+                properties:
+                  createSnapshot:
+                    default: true
+                    description: CreateSnapshot indicates whether to create a snapshot
+                      before migration
+                    type: boolean
+                  deleteAfterMigration:
+                    default: false
+                    description: DeleteAfterMigration deletes source VM after successful
+                      migration
+                    type: boolean
+                  powerOffBeforeMigration:
+                    default: false
+                    description: PowerOffBeforeMigration ensures VM is powered off
+                      before migration
+                    type: boolean
+                  providerRef:
+                    description: ProviderRef explicitly specifies the source provider
+                      (optional, auto-detected from VM)
+                    properties:
+                      name:
+                        description: Name of the referenced object
+                        maxLength: 253
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                      namespace:
+                        description: Namespace of the referenced object (defaults
+                          to current namespace)
+                        maxLength: 63
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  snapshotRef:
+                    description: SnapshotRef references a specific snapshot to migrate
+                      from
+                    properties:
+                      name:
+                        description: Name of the referenced object
+                        maxLength: 253
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  vmRef:
+                    description: VMRef references the source virtual machine
+                    properties:
+                      name:
+                        description: Name of the referenced object
+                        maxLength: 253
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                    required:
+                    - name
+                    type: object
+                required:
+                - vmRef
+                type: object
+              storage:
+                description: Storage defines storage backend configuration for transfer
+                properties:
+                  bucket:
+                    description: Bucket for S3-compatible storage
+                    type: string
+                  credentialsSecretRef:
+                    description: CredentialsSecretRef references credentials for storage
+                      access
+                    properties:
+                      name:
+                        description: Name of the referenced object
+                        maxLength: 253
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  endpoint:
+                    description: Endpoint is the storage endpoint URL
+                    type: string
+                  insecureSkipVerify:
+                    default: false
+                    description: InsecureSkipVerify skips SSL certificate verification
+                    type: boolean
+                  prefix:
+                    description: Prefix for storage paths (optional namespace)
+                    type: string
+                  region:
+                    description: Region for S3-compatible storage
+                    type: string
+                  type:
+                    description: Type specifies the storage backend type
+                    enum:
+                    - s3
+                    - minio
+                    - http
+                    - https
+                    type: string
+                required:
+                - type
+                type: object
+              target:
+                description: Target defines the target provider and configuration
+                properties:
+                  annotations:
+                    additionalProperties:
+                      type: string
+                    description: Annotations defines annotations to apply to the target
+                      VM
+                    maxProperties: 50
+                    type: object
+                  classRef:
+                    description: ClassRef references the VM class for resource allocation
+                    properties:
+                      name:
+                        description: Name of the referenced object
+                        maxLength: 253
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  disks:
+                    description: Disks defines disk configuration overrides
+                    items:
+                      description: DiskSpec defines a disk configuration
+                      properties:
+                        expandPolicy:
+                          default: Offline
+                          description: ExpandPolicy defines how the disk can be expanded
+                          enum:
+                          - Online
+                          - Offline
+                          type: string
+                        name:
+                          description: Name is the disk identifier
+                          maxLength: 63
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                          type: string
+                        sizeGiB:
+                          description: SizeGiB is the size of the disk in GiB
+                          format: int32
+                          maximum: 65536
+                          minimum: 1
+                          type: integer
+                        storageClass:
+                          description: StorageClass specifies the storage class (optional)
+                          type: string
+                        type:
+                          default: thin
+                          description: Type specifies the disk type (provider-specific)
+                          enum:
+                          - thin
+                          - thick
+                          - eagerzeroedthick
+                          - ssd
+                          - hdd
+                          type: string
+                      required:
+                      - name
+                      - sizeGiB
+                      type: object
+                    maxItems: 20
+                    type: array
+                  imageRef:
+                    description: ImageRef references the VM image (usually not needed
+                      for migration)
+                    properties:
+                      name:
+                        description: Name of the referenced object
+                        maxLength: 253
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  labels:
+                    additionalProperties:
+                      type: string
+                    description: Labels defines labels to apply to the target VM
+                    maxProperties: 50
+                    type: object
+                  name:
+                    description: Name is the name for the target VM
+                    maxLength: 253
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                  namespace:
+                    description: Namespace is the namespace for the target VM (defaults
+                      to source namespace)
+                    maxLength: 63
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                  networks:
+                    description: Networks defines network configuration for target
+                      VM
+                    items:
+                      description: VMNetworkRef represents a reference to a network
+                        attachment
+                      properties:
+                        ipAddress:
+                          description: IPAddress specifies a static IP address (optional)
+                          pattern: ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$
+                          type: string
+                        macAddress:
+                          description: MACAddress specifies a static MAC address (optional)
+                          pattern: ^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$
+                          type: string
+                        name:
+                          description: Name is the name of this network attachment
+                          maxLength: 63
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                          type: string
+                        networkRef:
+                          description: NetworkRef references the VMNetworkAttachment
+                          properties:
+                            name:
+                              description: Name of the referenced object
+                              maxLength: 253
+                              pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                              type: string
+                            namespace:
+                              description: Namespace of the referenced object (defaults
+                                to current namespace)
+                              maxLength: 63
+                              pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                              type: string
+                          required:
+                          - name
+                          type: object
+                      required:
+                      - name
+                      - networkRef
+                      type: object
+                    maxItems: 10
+                    type: array
+                  placementRef:
+                    description: PlacementRef references placement policy for the
+                      target VM
+                    properties:
+                      name:
+                        description: Name of the referenced object
+                        maxLength: 253
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  powerOn:
+                    default: false
+                    description: PowerOn indicates whether to power on the target
+                      VM after migration
+                    type: boolean
+                  providerRef:
+                    description: ProviderRef references the target provider
+                    properties:
+                      name:
+                        description: Name of the referenced object
+                        maxLength: 253
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                      namespace:
+                        description: Namespace of the referenced object (defaults
+                          to current namespace)
+                        maxLength: 63
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                    required:
+                    - name
+                    type: object
+                required:
+                - name
+                - providerRef
+                type: object
+            required:
+            - source
+            - target
+            type: object
+          status:
+            description: VMMigrationStatus defines the observed state of VMMigration
+            properties:
+              completionTime:
+                description: CompletionTime is when the migration completed
+                format: date-time
+                type: string
+              conditions:
+                description: Conditions represent the current service state
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              diskInfo:
+                description: DiskInfo contains information about the migrated disk
+                properties:
+                  checksum:
+                    description: Checksum is the SHA256 checksum of the disk
+                    type: string
+                  sourceDiskID:
+                    description: SourceDiskID is the source disk identifier
+                    type: string
+                  sourceFormat:
+                    description: SourceFormat is the source disk format
+                    type: string
+                  sourceSize:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: SourceSize is the source disk size in bytes
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  targetDiskID:
+                    description: TargetDiskID is the target disk identifier
+                    type: string
+                  targetFormat:
+                    description: TargetFormat is the target disk format
+                    type: string
+                  targetSize:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: TargetSize is the target disk size in bytes
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                type: object
+              lastRetryTime:
+                description: LastRetryTime is when the migration was last retried
+                format: date-time
+                type: string
+              message:
+                description: Message provides additional details about the current
+                  state
+                type: string
+              observedGeneration:
+                description: ObservedGeneration reflects the generation observed by
+                  the controller
+                format: int64
+                type: integer
+              phase:
+                description: Phase represents the current phase of the migration
+                enum:
+                - Pending
+                - Validating
+                - Snapshotting
+                - Exporting
+                - Transferring
+                - Converting
+                - Importing
+                - Creating
+                - Validating-Target
+                - Ready
+                - Failed
+                type: string
+              progress:
+                description: Progress shows the migration operation progress
+                properties:
+                  currentPhase:
+                    description: CurrentPhase is the current phase being executed
+                    enum:
+                    - Pending
+                    - Validating
+                    - Snapshotting
+                    - Exporting
+                    - Transferring
+                    - Converting
+                    - Importing
+                    - Creating
+                    - Validating-Target
+                    - Ready
+                    - Failed
+                    type: string
+                  eta:
+                    description: ETA is the estimated time to completion
+                    type: string
+                  percentage:
+                    description: Percentage is the overall completion percentage (0-100)
+                    format: int32
+                    maximum: 100
+                    minimum: 0
+                    type: integer
+                  phaseStartTime:
+                    description: PhaseStartTime is when the current phase started
+                    format: date-time
+                    type: string
+                  totalBytes:
+                    description: TotalBytes is the total bytes to transfer
+                    format: int64
+                    type: integer
+                  transferRate:
+                    description: TransferRate is the current transfer rate in bytes
+                      per second
+                    format: int64
+                    type: integer
+                  transferredBytes:
+                    description: TransferredBytes is the bytes transferred so far
+                    format: int64
+                    type: integer
+                type: object
+              retryCount:
+                description: RetryCount is the number of times the migration has been
+                  retried
+                format: int32
+                type: integer
+              snapshotRef:
+                description: SnapshotRef references the source snapshot used for migration
+                type: string
+              startTime:
+                description: StartTime is when the migration started
+                format: date-time
+                type: string
+              storageInfo:
+                description: StorageInfo contains information about intermediate storage
+                properties:
+                  cleanedUp:
+                    description: CleanedUp indicates if intermediate storage was cleaned
+                      up
+                    type: boolean
+                  size:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: Size is the size of data in intermediate storage
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  uploadedAt:
+                    description: UploadedAt is when the data was uploaded
+                    format: date-time
+                    type: string
+                  url:
+                    description: URL is the intermediate storage URL
+                    type: string
+                type: object
+              targetVMRef:
+                description: TargetVMRef references the created target VM
+                properties:
+                  name:
+                    description: Name of the referenced object
+                    maxLength: 253
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                required:
+                - name
+                type: object
+              validationResults:
+                description: ValidationResults contains results of validation checks
+                properties:
+                  bootSuccess:
+                    description: BootSuccess indicates if the target VM booted successfully
+                    type: boolean
+                  checksumMatch:
+                    description: ChecksumMatch indicates if checksums match
+                    type: boolean
+                  connectivitySuccess:
+                    description: ConnectivitySuccess indicates if network connectivity
+                      works
+                    type: boolean
+                  diskSizeMatch:
+                    description: DiskSizeMatch indicates if disk sizes match
+                    type: boolean
+                  validationErrors:
+                    description: ValidationErrors lists any validation errors
+                    items:
+                      type: string
+                    type: array
+                type: object
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
