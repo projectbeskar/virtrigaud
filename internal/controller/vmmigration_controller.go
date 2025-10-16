@@ -902,10 +902,60 @@ func (r *VMMigrationReconciler) handleReadyPhase(ctx context.Context, migration 
 	logger := logging.FromContext(ctx)
 	logger.Info("Migration is ready")
 
-	// TODO: Handle post-migration cleanup if configured
-	// - Delete source VM if requested
-	// - Cleanup intermediate storage
-	// - Remove snapshots
+	// Check if cleanup has already been performed
+	if migration.Status.StorageInfo != nil && migration.Status.StorageInfo.CleanedUp {
+		return ctrl.Result{}, nil
+	}
+
+	// Perform post-migration cleanup
+	cleanupPerformed := false
+
+	// 1. Cleanup intermediate storage
+	if migration.Spec.Storage != nil {
+		if err := r.cleanupIntermediateStorage(ctx, migration); err != nil {
+			logger.Error(err, "Failed to cleanup intermediate storage, will retry")
+			// Don't fail the migration, just log and retry
+			return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+		}
+		cleanupPerformed = true
+		logger.Info("Intermediate storage cleaned up")
+	}
+
+	// 2. Delete source snapshot if it was created for migration
+	if migration.Status.SnapshotID != "" && migration.Spec.Source.SnapshotRef == nil {
+		// Only delete if we created the snapshot (not if user provided one)
+		if err := r.deleteSourceSnapshot(ctx, migration); err != nil {
+			logger.Error(err, "Failed to delete source snapshot, will retry")
+			return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+		}
+		cleanupPerformed = true
+		logger.Info("Source snapshot deleted", "snapshot_id", migration.Status.SnapshotID)
+	}
+
+	// 3. Delete source VM if requested
+	if migration.Spec.Source.DeleteAfterMigration {
+		if err := r.deleteSourceVM(ctx, migration); err != nil {
+			logger.Error(err, "Failed to delete source VM, will retry")
+			return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+		}
+		cleanupPerformed = true
+		logger.Info("Source VM deleted")
+	}
+
+	// Mark cleanup as complete
+	if cleanupPerformed {
+		if migration.Status.StorageInfo == nil {
+			migration.Status.StorageInfo = &infrav1beta1.MigrationStorageInfo{}
+		}
+		migration.Status.StorageInfo.CleanedUp = true
+		migration.Status.Message = "Migration completed, cleanup finished"
+
+		if err := r.updateStatus(ctx, migration); err != nil {
+			return ctrl.Result{}, err
+		}
+
+		r.Recorder.Event(migration, "Normal", "CleanupComplete", "Post-migration cleanup completed")
+	}
 
 	return ctrl.Result{}, nil
 }
@@ -915,9 +965,97 @@ func (r *VMMigrationReconciler) handleFailedPhase(ctx context.Context, migration
 	logger := logging.FromContext(ctx)
 	logger.Info("Migration is in failed state", "message", migration.Status.Message)
 
-	// TODO: Implement retry logic based on retry policy
-	// For now, just requeue after a delay
-	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+	// Check if retry is configured and allowed
+	if migration.Spec.Options == nil || migration.Spec.Options.RetryPolicy == nil {
+		logger.Info("No retry policy configured, migration remains failed")
+		return ctrl.Result{}, nil
+	}
+
+	retryPolicy := migration.Spec.Options.RetryPolicy
+	maxRetries := int32(3) // Default
+	if retryPolicy.MaxRetries != nil {
+		maxRetries = *retryPolicy.MaxRetries
+	}
+
+	// Check if we've exceeded max retries
+	if migration.Status.RetryCount >= maxRetries {
+		logger.Info("Max retries exceeded, migration remains failed",
+			"retries", migration.Status.RetryCount,
+			"max_retries", maxRetries)
+		migration.Status.Message = fmt.Sprintf("Migration failed after %d retries: %s",
+			migration.Status.RetryCount, migration.Status.Message)
+		if err := r.updateStatus(ctx, migration); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
+	}
+
+	// Calculate backoff delay
+	baseDelay := 5 * time.Minute // Default delay
+	if retryPolicy.RetryDelay != nil {
+		baseDelay = retryPolicy.RetryDelay.Duration
+	}
+
+	backoffMultiplier := int32(2) // Default multiplier
+	if retryPolicy.BackoffMultiplier != nil {
+		backoffMultiplier = *retryPolicy.BackoffMultiplier
+	}
+
+	// Exponential backoff: delay = baseDelay * multiplier^retryCount (capped at 30 minutes)
+	retryDelay := baseDelay * time.Duration(1)
+	for i := int32(0); i < migration.Status.RetryCount; i++ {
+		retryDelay *= time.Duration(backoffMultiplier)
+	}
+
+	maxDelay := 30 * time.Minute
+	if retryDelay > maxDelay {
+		retryDelay = maxDelay
+	}
+
+	// Check if enough time has passed since last retry
+	now := time.Now()
+	if migration.Status.LastRetryTime != nil {
+		timeSinceLastRetry := now.Sub(migration.Status.LastRetryTime.Time)
+		if timeSinceLastRetry < retryDelay {
+			// Not enough time has passed, requeue
+			remainingWait := retryDelay - timeSinceLastRetry
+			logger.Info("Waiting before retry", "remaining_wait", remainingWait)
+			return ctrl.Result{RequeueAfter: remainingWait}, nil
+		}
+	}
+
+	// Perform retry
+	logger.Info("Retrying migration",
+		"retry_count", migration.Status.RetryCount+1,
+		"max_retries", maxRetries,
+		"retry_delay", retryDelay)
+
+	// Increment retry counter
+	migration.Status.RetryCount++
+	migration.Status.LastRetryTime = &metav1.Time{Time: now}
+
+	// Reset to appropriate phase based on where we failed
+	// For simplicity, restart from validation phase
+	migration.Status.Phase = infrav1beta1.MigrationPhasePending
+	migration.Status.Message = fmt.Sprintf("Retrying migration (attempt %d/%d)",
+		migration.Status.RetryCount, maxRetries)
+
+	// Clear task references
+	migration.Status.TaskRef = ""
+
+	// Update conditions
+	k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionFailed,
+		metav1.ConditionFalse, "Retrying",
+		fmt.Sprintf("Retrying migration (attempt %d/%d)", migration.Status.RetryCount, maxRetries))
+
+	r.Recorder.Event(migration, "Normal", "RetryingMigration",
+		fmt.Sprintf("Retrying migration (attempt %d/%d)", migration.Status.RetryCount, maxRetries))
+
+	if err := r.updateStatus(ctx, migration); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	return ctrl.Result{Requeue: true}, nil
 }
 
 // handleDeletion handles deletion of VMMigration resources
@@ -925,10 +1063,73 @@ func (r *VMMigrationReconciler) handleDeletion(ctx context.Context, migration *i
 	logger := logging.FromContext(ctx)
 	logger.Info("Handling VMMigration deletion")
 
-	// TODO: Cleanup resources
-	// - Delete intermediate storage artifacts
-	// - Remove temporary snapshots
-	// - Cancel in-progress operations
+	// Perform cleanup operations
+	cleanupErrors := []error{}
+
+	// 1. Cleanup intermediate storage
+	if migration.Spec.Storage != nil && (migration.Status.StorageInfo == nil || !migration.Status.StorageInfo.CleanedUp) {
+		if err := r.cleanupIntermediateStorage(ctx, migration); err != nil {
+			logger.Error(err, "Failed to cleanup intermediate storage during deletion")
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("storage cleanup: %w", err))
+		} else {
+			logger.Info("Intermediate storage cleaned up during deletion")
+		}
+	}
+
+	// 2. Delete migration-created snapshot if exists
+	if migration.Status.SnapshotID != "" && migration.Spec.Source.SnapshotRef == nil {
+		if err := r.deleteSourceSnapshot(ctx, migration); err != nil {
+			logger.Error(err, "Failed to delete source snapshot during deletion")
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("snapshot cleanup: %w", err))
+		} else {
+			logger.Info("Source snapshot cleaned up during deletion")
+		}
+	}
+
+	// 3. Delete partially created target VM if migration failed
+	if migration.Status.Phase == infrav1beta1.MigrationPhaseFailed || migration.Status.Phase == infrav1beta1.MigrationPhaseCreating {
+		targetVMName := migration.Spec.Target.Name
+		if targetVMName == "" {
+			targetVMName = fmt.Sprintf("%s-migrated", migration.Spec.Source.VMRef.Name)
+		}
+		targetNamespace := migration.Spec.Target.Namespace
+		if targetNamespace == "" {
+			targetNamespace = migration.Namespace
+		}
+
+		targetVM := &infrav1beta1.VirtualMachine{}
+		vmKey := client.ObjectKey{
+			Namespace: targetNamespace,
+			Name:      targetVMName,
+		}
+
+		// Check if target VM exists
+		if err := r.Get(ctx, vmKey, targetVM); err == nil {
+			// Only delete if it has our migration annotation
+			if targetVM.Annotations != nil {
+				if migrationRef, ok := targetVM.Annotations["virtrigaud.io/migration"]; ok {
+					expectedRef := fmt.Sprintf("%s/%s", migration.Namespace, migration.Name)
+					if migrationRef == expectedRef {
+						logger.Info("Deleting partially created target VM", "vm", targetVMName)
+						if err := r.Delete(ctx, targetVM); err != nil {
+							logger.Error(err, "Failed to delete target VM during cleanup")
+							cleanupErrors = append(cleanupErrors, fmt.Errorf("target VM cleanup: %w", err))
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// If there were errors, log them but continue with finalizer removal
+	if len(cleanupErrors) > 0 {
+		logger.Info("Cleanup completed with errors", "error_count", len(cleanupErrors))
+		for i, err := range cleanupErrors {
+			logger.Error(err, "Cleanup error", "index", i)
+		}
+		r.Recorder.Event(migration, "Warning", "CleanupErrors",
+			fmt.Sprintf("Cleanup completed with %d errors", len(cleanupErrors)))
+	}
 
 	// Remove finalizer
 	const finalizerName = "vmmigration.infra.virtrigaud.io/finalizer"
@@ -1109,6 +1310,110 @@ func (r *VMMigrationReconciler) generateStorageURL(ctx context.Context, migratio
 	default:
 		return "", fmt.Errorf("unsupported storage type: %s", storageConfig.Type)
 	}
+}
+
+// cleanupIntermediateStorage removes temporary disk files from intermediate storage
+func (r *VMMigrationReconciler) cleanupIntermediateStorage(ctx context.Context, migration *infrav1beta1.VMMigration) error {
+	logger := logging.FromContext(ctx)
+
+	if migration.Spec.Storage == nil {
+		return nil
+	}
+
+	// Create storage client
+	storageConfig := storage.StorageConfig{
+		Type:     migration.Spec.Storage.Type,
+		Endpoint: migration.Spec.Storage.Endpoint,
+		Bucket:   migration.Spec.Storage.Bucket,
+		Region:   migration.Spec.Storage.Region,
+	}
+
+	store, err := storage.NewStorage(storageConfig)
+	if err != nil {
+		return fmt.Errorf("failed to create storage client: %w", err)
+	}
+	defer store.Close()
+
+	// Delete export file
+	exportURL, err := r.generateStorageURL(ctx, migration, "export")
+	if err != nil {
+		logger.Error(err, "Failed to generate export URL for cleanup")
+	} else {
+		if err := store.Delete(ctx, exportURL); err != nil {
+			logger.Error(err, "Failed to delete export file", "url", exportURL)
+			// Continue with other cleanup even if this fails
+		} else {
+			logger.Info("Deleted export file", "url", exportURL)
+		}
+	}
+
+	return nil
+}
+
+// deleteSourceSnapshot deletes the migration-created snapshot
+func (r *VMMigrationReconciler) deleteSourceSnapshot(ctx context.Context, migration *infrav1beta1.VMMigration) error {
+	logger := logging.FromContext(ctx)
+
+	// Get source VM
+	sourceVM, err := r.getSourceVM(ctx, migration)
+	if err != nil {
+		return fmt.Errorf("failed to get source VM: %w", err)
+	}
+
+	// Get source provider
+	var sourceProviderRef infrav1beta1.ObjectRef
+	if migration.Spec.Source.ProviderRef != nil {
+		sourceProviderRef = *migration.Spec.Source.ProviderRef
+	} else {
+		sourceProviderRef = sourceVM.Spec.ProviderRef
+	}
+
+	sourceProvider, err := r.getProvider(ctx, sourceProviderRef, migration.Namespace)
+	if err != nil {
+		return fmt.Errorf("failed to get source provider: %w", err)
+	}
+
+	// Get provider instance
+	providerInstance, err := r.getProviderInstance(ctx, sourceProvider)
+	if err != nil {
+		return fmt.Errorf("failed to get provider instance: %w", err)
+	}
+
+	// Delete snapshot
+	logger.Info("Deleting source snapshot", "snapshot_id", migration.Status.SnapshotID)
+	taskRef, err := providerInstance.SnapshotDelete(ctx, sourceVM.Status.ID, migration.Status.SnapshotID)
+	if err != nil {
+		return fmt.Errorf("failed to delete snapshot: %w", err)
+	}
+
+	// If there's a task, wait for it to complete
+	if taskRef != "" {
+		logger.Info("Snapshot deletion task started, waiting for completion", "task_id", taskRef)
+		// For cleanup, we'll do best effort - don't wait indefinitely
+		// The task will complete asynchronously
+	}
+
+	return nil
+}
+
+// deleteSourceVM deletes the source VM after successful migration
+func (r *VMMigrationReconciler) deleteSourceVM(ctx context.Context, migration *infrav1beta1.VMMigration) error {
+	logger := logging.FromContext(ctx)
+
+	// Get source VM
+	sourceVM, err := r.getSourceVM(ctx, migration)
+	if err != nil {
+		return fmt.Errorf("failed to get source VM: %w", err)
+	}
+
+	logger.Info("Deleting source VM", "vm", fmt.Sprintf("%s/%s", sourceVM.Namespace, sourceVM.Name))
+
+	// Delete the VM resource
+	if err := r.Delete(ctx, sourceVM); err != nil {
+		return fmt.Errorf("failed to delete source VM: %w", err)
+	}
+
+	return nil
 }
 
 // SetupWithManager sets up the controller with the Manager
