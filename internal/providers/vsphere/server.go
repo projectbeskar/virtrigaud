@@ -38,6 +38,7 @@ import (
 	"github.com/vmware/govmomi/vim25/soap"
 	"github.com/vmware/govmomi/vim25/types"
 
+	"github.com/projectbeskar/virtrigaud/internal/diskutil"
 	"github.com/projectbeskar/virtrigaud/internal/storage"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/errors"
@@ -2239,7 +2240,7 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 
 	// Download VMDK from datastore
 	p.logger.Info("Downloading VMDK from datastore", "disk_path", diskInfo.Path)
-	
+
 	file, err := os.Create(tempFile)
 	if err != nil {
 		return nil, errors.NewInternal("failed to create temp file: %v", err)
@@ -2268,10 +2269,20 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 		p.logger.Info("Converting VMDK to target format", "target_format", targetFormat)
 		convertedPath := fmt.Sprintf("/tmp/%s.%s", exportID, targetFormat)
 		
-		// TODO: Add qemu-img conversion for format conversion
-		// For now, we'll just use the VMDK
-		p.logger.Warn("Format conversion not yet implemented, uploading VMDK")
-		uploadPath = tempFile
+		// Use diskutil for conversion
+		qemuImg := diskutil.NewQemuImg()
+		err = qemuImg.Convert(ctx, diskutil.ConvertOptions{
+			SourcePath:        tempFile,
+			DestinationPath:   convertedPath,
+			SourceFormat:      diskutil.FormatVMDK,
+			DestinationFormat: diskutil.SupportedFormat(targetFormat),
+			Compression:       false, // No compression for migration (faster)
+		})
+		if err != nil {
+			return nil, errors.NewInternal("failed to convert VMDK format: %v", err)
+		}
+		
+		uploadPath = convertedPath
 		defer os.Remove(convertedPath)
 	} else {
 		uploadPath = tempFile
@@ -2279,7 +2290,7 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 
 	// Upload to destination storage
 	p.logger.Info("Uploading disk to storage", "destination", req.DestinationUrl)
-	
+
 	// Re-open file for reading
 	uploadFile, err := os.Open(uploadPath)
 	if err != nil {
@@ -2430,7 +2441,7 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 
 	// Download from storage
 	p.logger.Info("Downloading disk from storage", "source", req.SourceUrl)
-	
+
 	file, err := os.Create(tempFile)
 	if err != nil {
 		return nil, errors.NewInternal("failed to create temp file: %v", err)
@@ -2469,10 +2480,18 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 		p.logger.Info("Converting to VMDK format", "source_format", targetFormat)
 		vmdkPath = fmt.Sprintf("/tmp/%s.vmdk", diskID)
 		
-		// TODO: Add qemu-img conversion
-		// For now, assume it's already VMDK
-		p.logger.Warn("Format conversion not yet implemented, assuming VMDK")
-		vmdkPath = tempFile
+		// Use diskutil for conversion
+		qemuImg := diskutil.NewQemuImg()
+		err = qemuImg.Convert(ctx, diskutil.ConvertOptions{
+			SourcePath:        tempFile,
+			DestinationPath:   vmdkPath,
+			DestinationFormat: diskutil.FormatVMDK,
+			Compression:       false, // No compression for migration (faster)
+		})
+		if err != nil {
+			return nil, errors.NewInternal("failed to convert to VMDK format: %v", err)
+		}
+		
 		defer os.Remove(vmdkPath)
 	} else {
 		vmdkPath = tempFile
@@ -2480,7 +2499,7 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 
 	// Upload to datastore
 	p.logger.Info("Uploading VMDK to datastore", "datastore", datastore, "disk_id", diskID)
-	
+
 	// Re-open file for reading
 	uploadFile, err := os.Open(vmdkPath)
 	if err != nil {
@@ -2496,7 +2515,7 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 
 	// Generate datastore path
 	diskPath := fmt.Sprintf("[%s] %s/%s.vmdk", datastore, diskID, diskID)
-	
+
 	// Upload to datastore with progress tracking
 	uploadProgress := func(transferred, total int64) {
 		if total > 0 {

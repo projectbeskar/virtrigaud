@@ -21,10 +21,12 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/projectbeskar/virtrigaud/internal/diskutil"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/storage"
 )
@@ -1435,17 +1437,22 @@ func (p *Provider) ExportDisk(ctx context.Context, req contracts.ExportDiskReque
 		log.Printf("INFO Converting disk from %s to %s", diskInfo.Format, targetFormat)
 		tempPath := fmt.Sprintf("/tmp/%s.%s", exportId, targetFormat)
 
-		// Run qemu-img convert
-		convertCmd := fmt.Sprintf("qemu-img convert -f %s -O %s '%s' '%s'",
-			diskInfo.Format, targetFormat, diskPath, tempPath)
-		result, err := p.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", convertCmd)
+		// Use diskutil package for conversion
+		qemuImg := diskutil.NewQemuImg()
+		err := qemuImg.Convert(ctx, diskutil.ConvertOptions{
+			SourcePath:        diskPath,
+			DestinationPath:   tempPath,
+			SourceFormat:      diskutil.SupportedFormat(diskInfo.Format),
+			DestinationFormat: diskutil.SupportedFormat(targetFormat),
+			Compression:       false, // No compression for migration (faster)
+		})
 		if err != nil {
-			return contracts.ExportDiskResponse{}, fmt.Errorf("failed to convert disk format: %w, output: %s", err, result.Stderr)
+			return contracts.ExportDiskResponse{}, fmt.Errorf("failed to convert disk format: %w", err)
 		}
 
 		uploadPath = tempPath
 		cleanup = func() {
-			_, _ = p.virshProvider.runVirshCommand(ctx, "!", "rm", "-f", tempPath)
+			_ = os.Remove(tempPath)
 		}
 		defer cleanup()
 	} else {
@@ -1675,11 +1682,17 @@ func (p *Provider) ImportDisk(ctx context.Context, req contracts.ImportDiskReque
 	poolPath := "/var/lib/libvirt/images" // Default path, should be queried from pool
 	diskPath := fmt.Sprintf("%s/%s.%s", poolPath, diskId, targetFormat)
 
-	// Copy with conversion if needed
-	convertCmd := fmt.Sprintf("qemu-img convert -O %s '%s' '%s'", targetFormat, tempPath, diskPath)
-	convertResult, err := p.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", convertCmd)
+	// Copy with conversion using diskutil
+	log.Printf("INFO Converting disk to target format: %s", targetFormat)
+	qemuImg := diskutil.NewQemuImg()
+	err = qemuImg.Convert(ctx, diskutil.ConvertOptions{
+		SourcePath:        tempPath,
+		DestinationPath:   diskPath,
+		DestinationFormat: diskutil.SupportedFormat(targetFormat),
+		Compression:       false, // No compression for migration (faster)
+	})
 	if err != nil {
-		return contracts.ImportDiskResponse{}, fmt.Errorf("failed to convert/copy disk: %w, output: %s", err, convertResult.Stderr)
+		return contracts.ImportDiskResponse{}, fmt.Errorf("failed to convert/copy disk: %w", err)
 	}
 
 	// The disk is now in place at diskPath

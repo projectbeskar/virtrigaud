@@ -28,6 +28,7 @@ import (
 	"time"
 
 	v1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
+	"github.com/projectbeskar/virtrigaud/internal/diskutil"
 	"github.com/projectbeskar/virtrigaud/internal/providers/proxmox/pveapi"
 	"github.com/projectbeskar/virtrigaud/internal/storage"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
@@ -1418,7 +1419,7 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 
 	// Download from Proxmox storage
 	p.logger.Info("Downloading disk from Proxmox storage", "storage", pveStorage, "volid", volid)
-	
+
 	file, err := os.Create(tempFile)
 	if err != nil {
 		return nil, errors.NewInternal("failed to create temp file: %v", err)
@@ -1447,9 +1448,20 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 		p.logger.Info("Converting disk format", "from", diskInfo.Format, "to", targetFormat)
 		convertedPath := fmt.Sprintf("/tmp/%s-converted.%s", exportID, targetFormat)
 		
-		// TODO: Add qemu-img conversion
-		p.logger.Warn("Format conversion not yet implemented, uploading original format")
-		uploadPath = tempFile
+		// Use diskutil for conversion
+		qemuImg := diskutil.NewQemuImg()
+		err = qemuImg.Convert(ctx, diskutil.ConvertOptions{
+			SourcePath:        tempFile,
+			DestinationPath:   convertedPath,
+			SourceFormat:      diskutil.SupportedFormat(diskInfo.Format),
+			DestinationFormat: diskutil.SupportedFormat(targetFormat),
+			Compression:       false, // No compression for migration (faster)
+		})
+		if err != nil {
+			return nil, errors.NewInternal("failed to convert disk format: %v", err)
+		}
+		
+		uploadPath = convertedPath
 		defer os.Remove(convertedPath)
 	} else {
 		uploadPath = tempFile
@@ -1457,7 +1469,7 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 
 	// Upload to destination storage
 	p.logger.Info("Uploading disk to storage", "destination", req.DestinationUrl)
-	
+
 	// Re-open file for reading
 	uploadFile, err := os.Open(uploadPath)
 	if err != nil {
@@ -1616,7 +1628,7 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 
 	// Download from storage
 	p.logger.Info("Downloading disk from storage", "source", req.SourceUrl)
-	
+
 	file, err := os.Create(tempFile)
 	if err != nil {
 		return nil, errors.NewInternal("failed to create temp file: %v", err)
@@ -1655,9 +1667,19 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 		p.logger.Info("Converting to target format", "target_format", targetFormat)
 		convertedPath := fmt.Sprintf("/tmp/%s-converted.%s", diskID, targetFormat)
 		
-		// TODO: Add qemu-img conversion
-		p.logger.Warn("Format conversion not yet implemented, using downloaded format")
-		importPath = tempFile
+		// Use diskutil for conversion
+		qemuImg := diskutil.NewQemuImg()
+		err = qemuImg.Convert(ctx, diskutil.ConvertOptions{
+			SourcePath:        tempFile,
+			DestinationPath:   convertedPath,
+			DestinationFormat: diskutil.SupportedFormat(targetFormat),
+			Compression:       false, // No compression for migration (faster)
+		})
+		if err != nil {
+			return nil, errors.NewInternal("failed to convert disk format: %v", err)
+		}
+		
+		importPath = convertedPath
 		defer os.Remove(convertedPath)
 	} else {
 		importPath = tempFile
@@ -1665,7 +1687,7 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 
 	// Upload to Proxmox storage
 	p.logger.Info("Uploading to Proxmox storage", "storage", pveStorage, "disk_id", diskID)
-	
+
 	// Re-open file for reading
 	uploadFile, err := os.Open(importPath)
 	if err != nil {
@@ -1681,7 +1703,7 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 
 	// Generate filename for Proxmox storage
 	filename := fmt.Sprintf("%d/vm-%d-disk-0.%s", tempVMID, tempVMID, targetFormat)
-	
+
 	// Upload to Proxmox storage with progress tracking
 	uploadProgress := func(transferred, total int64) {
 		if total > 0 {

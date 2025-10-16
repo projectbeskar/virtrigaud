@@ -69,7 +69,7 @@ func (dfm *DatastoreFileManager) DownloadFile(ctx context.Context, datastorePath
 	if progressCallback != nil {
 		var transferred int64
 		totalSize := int64(-1) // Unknown size for datastore downloads
-		
+
 		// Create progress reader
 		progressReader := &progressTrackingReader{
 			reader: resp,
@@ -78,7 +78,7 @@ func (dfm *DatastoreFileManager) DownloadFile(ctx context.Context, datastorePath
 				progressCallback(transferred, totalSize)
 			},
 		}
-		
+
 		_, err = io.Copy(writer, progressReader)
 	} else {
 		_, err = io.Copy(writer, resp)
@@ -121,7 +121,7 @@ func (dfm *DatastoreFileManager) UploadFile(ctx context.Context, reader io.Reade
 
 	// Construct upload URL
 	dsURL := datastore.NewURL(filePath)
-	
+
 	// Wrap reader with progress tracking
 	var uploadReader io.Reader = reader
 	if progressCallback != nil {
@@ -200,7 +200,7 @@ func (dfm *DatastoreFileManager) createDirectory(ctx context.Context, datastore 
 
 	// Create file manager
 	fileManager := object.NewFileManager(dfm.provider.client.Client)
-	
+
 	// Create directory
 	err = fileManager.MakeDirectory(ctx, datastore.Path(dirPath), datacenter, true)
 	if err != nil {
@@ -227,7 +227,7 @@ func parseDatastorePath(datastorePath string) (datastoreName string, filePath st
 
 	datastoreName = datastorePath[1:closeIdx]
 	filePath = strings.TrimSpace(datastorePath[closeIdx+1:])
-	
+
 	// Remove leading slash if present
 	filePath = strings.TrimPrefix(filePath, "/")
 
@@ -247,4 +247,3 @@ func (ptr *progressTrackingReader) Read(p []byte) (n int, err error) {
 	}
 	return n, err
 }
-

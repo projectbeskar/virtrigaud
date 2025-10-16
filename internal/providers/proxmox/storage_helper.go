@@ -44,10 +44,10 @@ func NewStorageManager(client *pveapi.Client, node string) *StorageManager {
 // This uses direct file access for directory-based storage
 func (sm *StorageManager) DownloadVolume(ctx context.Context, storage, volid string, writer io.Writer, progressCallback func(int64, int64)) error {
 	// Try direct file access first (works for dir, nfs storage)
-	// Volume ID format examples: 
+	// Volume ID format examples:
 	//   - local:100/vm-100-disk-0.qcow2
 	//   - local:100/base-100-disk-0.qcow2
-	
+
 	return sm.downloadDirectFile(ctx, storage, volid, writer, progressCallback)
 }
 
@@ -58,7 +58,7 @@ func (sm *StorageManager) downloadDirectFile(ctx context.Context, storage, volid
 	// Common paths:
 	//   - /var/lib/vz/images/{vmid}/vm-{vmid}-disk-{N}.qcow2 (local storage)
 	//   - /mnt/pve/{storage}/images/{vmid}/vm-{vmid}-disk-{N}.qcow2 (nfs)
-	
+
 	// Try multiple common paths
 	paths := []string{
 		fmt.Sprintf("/var/lib/vz/images/%s", volid),
@@ -110,7 +110,6 @@ func (sm *StorageManager) downloadDirectFile(ctx context.Context, storage, volid
 	return nil
 }
 
-
 // UploadVolume uploads a disk volume to Proxmox storage
 func (sm *StorageManager) UploadVolume(ctx context.Context, reader io.Reader, storage, filename string, contentLength int64, progressCallback func(int64, int64)) (string, error) {
 	// Use direct file access for directory-based storage
@@ -134,7 +133,7 @@ func (sm *StorageManager) uploadDirectFile(ctx context.Context, reader io.Reader
 	for _, basePath := range basePaths {
 		fullPath = filepath.Join(basePath, filename)
 		dir = filepath.Dir(fullPath)
-		
+
 		// Try to create directory
 		err = os.MkdirAll(dir, 0755)
 		if err == nil {
@@ -192,7 +191,6 @@ func (sm *StorageManager) uploadDirectFile(ctx context.Context, reader io.Reader
 	return volid, nil
 }
 
-
 // DeleteVolume deletes a volume from Proxmox storage
 func (sm *StorageManager) DeleteVolume(ctx context.Context, storage, volid string) error {
 	// Try to delete from common paths
@@ -231,4 +229,3 @@ func (ptr *progressTrackingReader) Read(p []byte) (n int, err error) {
 	}
 	return n, err
 }
-
