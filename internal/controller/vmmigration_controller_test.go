@@ -18,7 +18,6 @@ package controller
 
 import (
 	"context"
-	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -32,11 +31,6 @@ import (
 	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/runtime/remote"
 )
-
-func TestVMMigrationController(t *testing.T) {
-	RegisterFailHandler(Fail)
-	RunSpecs(t, "VMMigration Controller Suite")
-}
 
 var _ = Describe("VMMigration Controller", func() {
 	var (

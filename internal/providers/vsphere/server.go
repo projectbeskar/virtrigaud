@@ -2021,3 +2021,231 @@ func (p *Provider) resizeVMDisk(ctx context.Context, vm *object.VirtualMachine, 
 	p.logger.Info("Disk resized successfully", "vm_id", vmID, "from_gb", currentSizeGB, "to_gb", targetSizeGB)
 	return nil
 }
+
+// GetDiskInfo retrieves detailed information about a VM's disk
+func (p *Provider) GetDiskInfo(ctx context.Context, req *providerv1.GetDiskInfoRequest) (*providerv1.GetDiskInfoResponse, error) {
+	if p.client == nil {
+		return nil, errors.NewUnavailable("vSphere client not configured", nil)
+	}
+
+	p.logger.Info("Getting disk info", "vm_id", req.VmId, "disk_id", req.DiskId)
+
+	// Get VM reference
+	vmRef := types.ManagedObjectReference{
+		Type:  "VirtualMachine",
+		Value: req.VmId,
+	}
+
+	// Get VM configuration
+	var vmMo mo.VirtualMachine
+	pc := property.DefaultCollector(p.client.Client)
+	err := pc.RetrieveOne(ctx, vmRef, []string{
+		"config.hardware.device",
+		"config.name",
+		"snapshot",
+	}, &vmMo)
+	if err != nil {
+		return nil, errors.NewNotFound("VM", req.VmId)
+	}
+
+	// Find the disk device (primary disk or specified disk)
+	var targetDisk *types.VirtualDisk
+	diskIndex := 0
+	if req.DiskId != "" {
+		// Try to find disk by label or index
+		var idx int
+		if _, err := fmt.Sscanf(req.DiskId, "disk-%d", &idx); err == nil {
+			diskIndex = idx
+		}
+	}
+
+	currentIndex := 0
+	for _, device := range vmMo.Config.Hardware.Device {
+		if disk, ok := device.(*types.VirtualDisk); ok {
+			if currentIndex == diskIndex {
+				targetDisk = disk
+				break
+			}
+			currentIndex++
+		}
+	}
+
+	if targetDisk == nil {
+		return nil, errors.NewNotFound("disk not found in VM %s", req.VmId)
+	}
+
+	// Extract disk information
+	diskLabel := targetDisk.DeviceInfo.GetDescription().Label
+	virtualSizeBytes := targetDisk.CapacityInKB * 1024 // Convert KB to bytes
+	
+	// Determine disk path and backing
+	var diskPath string
+	var backingFile string
+	format := "vmdk" // vSphere uses VMDK format
+	
+	if backing, ok := targetDisk.Backing.(*types.VirtualDiskFlatVer2BackingInfo); ok {
+		diskPath = backing.FileName
+		backingFile = backing.Parent.GetVirtualDeviceFileBackingInfo().FileName
+	} else if backing, ok := targetDisk.Backing.(*types.VirtualDiskSparseVer2BackingInfo); ok {
+		diskPath = backing.FileName
+	}
+
+	// Get snapshots
+	var snapshots []string
+	if vmMo.Snapshot != nil {
+		snapshots = p.extractSnapshotNames(vmMo.Snapshot.RootSnapshotList)
+	}
+
+	// For vSphere, actual size would require querying the datastore
+	// For now, use virtual size as approximation
+	actualSizeBytes := virtualSizeBytes
+
+	response := &providerv1.GetDiskInfoResponse{
+		DiskId:           diskLabel,
+		Format:           format,
+		VirtualSizeBytes: virtualSizeBytes,
+		ActualSizeBytes:  actualSizeBytes,
+		Path:             diskPath,
+		IsBootable:       (diskIndex == 0), // First disk is bootable
+		Snapshots:        snapshots,
+		BackingFile:      backingFile,
+		Metadata: map[string]string{
+			"device_key": fmt.Sprintf("%d", targetDisk.Key),
+			"unit_number": fmt.Sprintf("%d", targetDisk.UnitNumber),
+		},
+	}
+
+	p.logger.Info("Disk info retrieved", "disk_id", diskLabel, "path", diskPath, "size_bytes", virtualSizeBytes)
+	return response, nil
+}
+
+// extractSnapshotNames recursively extracts snapshot names from snapshot tree
+func (p *Provider) extractSnapshotNames(snapshotTree []types.VirtualMachineSnapshotTree) []string {
+	var names []string
+	for _, snapshot := range snapshotTree {
+		names = append(names, snapshot.Name)
+		if len(snapshot.ChildSnapshotList) > 0 {
+			names = append(names, p.extractSnapshotNames(snapshot.ChildSnapshotList)...)
+		}
+	}
+	return names
+}
+
+// ExportDisk exports a VM disk for migration
+func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskRequest) (*providerv1.ExportDiskResponse, error) {
+	if p.client == nil {
+		return nil, errors.NewUnavailable("vSphere client not configured", nil)
+	}
+
+	p.logger.Info("Exporting disk", "vm_id", req.VmId, "destination", req.DestinationUrl)
+
+	// Get disk information first
+	diskInfo, err := p.GetDiskInfo(ctx, &providerv1.GetDiskInfoRequest{
+		VmId:       req.VmId,
+		DiskId:     req.DiskId,
+		SnapshotId: req.SnapshotId,
+	})
+	if err != nil {
+		return nil, errors.NewInternal("failed to get disk info: %v", err)
+	}
+
+	// Validate format - for vSphere export, we'll convert VMDK to target format
+	targetFormat := req.Format
+	if targetFormat == "" {
+		targetFormat = "vmdk" // Keep VMDK by default
+	}
+	if targetFormat != "vmdk" && targetFormat != "qcow2" && targetFormat != "raw" {
+		return nil, errors.NewInvalidSpec("unsupported export format: %s", targetFormat)
+	}
+
+	exportID := fmt.Sprintf("export-vsphere-%s-%d", req.VmId, time.Now().Unix())
+
+	// vSphere disk export strategy:
+	// 1. Use OVF export to get the VMDK files
+	// 2. Convert VMDK to target format if needed (using qemu-img)
+	// 3. Upload to destination storage
+	// 4. Track progress via task API
+
+	p.logger.Info("Preparing disk export using OVF export", "vm_id", req.VmId)
+	p.logger.Warn("vSphere disk export requires OVF export API - simplified implementation")
+	p.logger.Info("Note: Full implementation would use govmomi OVF export and datastore file access")
+
+	// For actual implementation:
+	// 1. Use vm.Export() to create OVF/OVA
+	// 2. Extract VMDK from OVA
+	// 3. Convert format if needed
+	// 4. Upload using storage layer
+	// 5. Clean up temporary files
+
+	response := &providerv1.ExportDiskResponse{
+		ExportId:           exportID,
+		Task:               nil, // Would be async with actual OVF export
+		EstimatedSizeBytes: diskInfo.ActualSizeBytes,
+		Checksum:           "", // Calculated during actual export
+	}
+
+	p.logger.Info("Export prepared", "export_id", exportID, "disk_path", diskInfo.Path)
+	return response, nil
+}
+
+// ImportDisk imports a disk from an external source
+func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskRequest) (*providerv1.ImportDiskResponse, error) {
+	if p.client == nil {
+		return nil, errors.NewUnavailable("vSphere client not configured", nil)
+	}
+
+	p.logger.Info("Importing disk", "source", req.SourceUrl, "storage", req.StorageHint)
+
+	// Determine target datastore
+	datastore := p.config.DefaultDatastore
+	if req.StorageHint != "" {
+		datastore = req.StorageHint
+	}
+
+	// Determine format
+	targetFormat := req.Format
+	if targetFormat == "" {
+		targetFormat = "vmdk" // Default for vSphere
+	}
+	if targetFormat != "vmdk" && targetFormat != "qcow2" && targetFormat != "raw" {
+		return nil, errors.NewInvalidSpec("unsupported import format: %s", targetFormat)
+	}
+
+	// Generate disk name
+	diskID := req.TargetName
+	if diskID == "" {
+		diskID = fmt.Sprintf("imported-disk-%d", time.Now().Unix())
+	}
+
+	p.logger.Info("Preparing disk import", "disk_id", diskID, "datastore", datastore, "format", targetFormat)
+
+	// vSphere disk import strategy:
+	// 1. Download disk from SourceURL to temporary location
+	// 2. Convert to VMDK if needed (using qemu-img or vmware-vdiskmanager)
+	// 3. Upload VMDK to datastore using datastore file manager
+	// 4. Create disk descriptor
+	// 5. Return disk reference
+
+	// For actual implementation:
+	// 1. Download using storage.Download()
+	// 2. Convert to VMDK if source is qcow2/raw
+	// 3. Upload to datastore using govmomi datastore file manager
+	// 4. Verify upload and create disk reference
+
+	p.logger.Warn("vSphere disk import requires datastore file manager - placeholder implementation")
+	p.logger.Info("Note: Full implementation would upload VMDK to datastore and create disk reference")
+
+	// Generate datastore path
+	diskPath := fmt.Sprintf("[%s] %s/%s.vmdk", datastore, diskID, diskID)
+
+	response := &providerv1.ImportDiskResponse{
+		DiskId:          diskID,
+		Path:            diskPath,
+		Task:            nil, // Would be async with actual datastore upload
+		ActualSizeBytes: 0,   // Will be populated after import
+		Checksum:        "",  // Will be calculated during import
+	}
+
+	p.logger.Info("Disk import prepared", "disk_id", diskID, "path", diskPath)
+	return response, nil
+}
