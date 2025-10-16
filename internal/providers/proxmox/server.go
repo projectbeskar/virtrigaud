@@ -1405,25 +1405,99 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 	}
 	defer storageClient.Close()
 
-	// For now, we'll use a placeholder for the actual disk export
-	// TODO: Implement vzdump-based export or direct disk access
-	// This is a simplified version for MVP
-	p.logger.Warn("Proxmox disk export using placeholder - full vzdump integration pending")
+	// Create storage manager for Proxmox disk access
+	storageManager := NewStorageManager(p.client, node)
 
-	p.logger.Info("Export prepared", "export_id", exportID, "disk_path", diskInfo.Path, "format", targetFormat)
+	// Create temporary file for download
+	pveStorage := storageParts[0]
+	volid := storageParts[1]
+	tempFile := fmt.Sprintf("/tmp/%s", exportID)
+	defer func() {
+		_ = os.Remove(tempFile)
+	}()
 
-	// Placeholder: In production, this would upload the actual disk
-	// uploadResp, err := storageClient.Upload(ctx, storage.UploadRequest{
-	//     SourcePath: diskExportPath,
-	//     DestinationURL: req.DestinationUrl,
-	//     ContentLength: diskInfo.ActualSizeBytes,
-	// })
+	// Download from Proxmox storage
+	p.logger.Info("Downloading disk from Proxmox storage", "storage", pveStorage, "volid", volid)
+	
+	file, err := os.Create(tempFile)
+	if err != nil {
+		return nil, errors.NewInternal("failed to create temp file: %v", err)
+	}
+	defer file.Close()
+
+	// Download with progress tracking
+	downloadProgress := func(transferred, total int64) {
+		if total > 0 {
+			progress := float64(transferred) / float64(total) * 100
+			p.logger.Debug("Download progress", "percent", progress, "transferred", transferred, "total", total)
+		}
+	}
+
+	err = storageManager.DownloadVolume(ctx, pveStorage, volid, file, downloadProgress)
+	if err != nil {
+		return nil, errors.NewInternal("failed to download disk from Proxmox storage: %v", err)
+	}
+
+	// Close file to flush writes
+	file.Close()
+
+	// Convert format if needed
+	var uploadPath string
+	if targetFormat != diskInfo.Format {
+		p.logger.Info("Converting disk format", "from", diskInfo.Format, "to", targetFormat)
+		convertedPath := fmt.Sprintf("/tmp/%s-converted.%s", exportID, targetFormat)
+		
+		// TODO: Add qemu-img conversion
+		p.logger.Warn("Format conversion not yet implemented, uploading original format")
+		uploadPath = tempFile
+		defer os.Remove(convertedPath)
+	} else {
+		uploadPath = tempFile
+	}
+
+	// Upload to destination storage
+	p.logger.Info("Uploading disk to storage", "destination", req.DestinationUrl)
+	
+	// Re-open file for reading
+	uploadFile, err := os.Open(uploadPath)
+	if err != nil {
+		return nil, errors.NewInternal("failed to open file for upload: %v", err)
+	}
+	defer uploadFile.Close()
+
+	// Get file size
+	stat, err := uploadFile.Stat()
+	if err != nil {
+		return nil, errors.NewInternal("failed to stat file: %v", err)
+	}
+
+	// Upload with progress tracking
+	uploadProgress := func(transferred, total int64) {
+		if total > 0 {
+			progress := float64(transferred) / float64(total) * 100
+			p.logger.Debug("Upload progress", "percent", progress, "transferred", transferred, "total", total)
+		}
+	}
+
+	uploadReq := storage.UploadRequest{
+		Reader:           uploadFile,
+		DestinationURL:   req.DestinationUrl,
+		ContentLength:    stat.Size(),
+		ProgressCallback: uploadProgress,
+	}
+
+	uploadResp, err := storageClient.Upload(ctx, uploadReq)
+	if err != nil {
+		return nil, errors.NewInternal("failed to upload disk: %v", err)
+	}
+
+	p.logger.Info("Disk export completed", "export_id", exportID, "checksum", uploadResp.Checksum, "bytes", uploadResp.BytesTransferred)
 
 	response := &providerv1.ExportDiskResponse{
 		ExportId:           exportID,
-		Task:               nil, // Synchronous for now (would be async with vzdump)
-		EstimatedSizeBytes: diskInfo.ActualSizeBytes,
-		Checksum:           "", // Would be from uploadResp.Checksum
+		Task:               nil, // Synchronous operation
+		EstimatedSizeBytes: uploadResp.BytesTransferred,
+		Checksum:           uploadResp.Checksum,
 	}
 
 	return response, nil
@@ -1531,28 +1605,104 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 	}
 	defer storageClient.Close()
 
-	// For now, we'll use a placeholder for the actual disk import
-	// TODO: Implement full download + qm importdisk integration
-	p.logger.Warn("Proxmox disk import using placeholder - full qm importdisk integration pending")
-	p.logger.Info("Note: Will download and use qm importdisk to import disk")
+	// Create storage manager for Proxmox disk upload
+	storageManager := NewStorageManager(p.client, node)
 
-	// Placeholder: In production, this would download the disk
-	// downloadResp, err := storageClient.Download(ctx, storage.DownloadRequest{
-	//     SourceURL: req.SourceUrl,
-	//     DestinationPath: "/tmp/import-"+diskID,
-	//     VerifyChecksum: req.VerifyChecksum,
-	//     ExpectedChecksum: req.ExpectedChecksum,
-	// })
+	// Create temporary file for download
+	tempFile := fmt.Sprintf("/tmp/%s-import", diskID)
+	defer func() {
+		_ = os.Remove(tempFile)
+	}()
 
-	// Placeholder response
-	diskPath := fmt.Sprintf("%s:vm-%d-disk-0", pveStorage, tempVMID)
+	// Download from storage
+	p.logger.Info("Downloading disk from storage", "source", req.SourceUrl)
+	
+	file, err := os.Create(tempFile)
+	if err != nil {
+		return nil, errors.NewInternal("failed to create temp file: %v", err)
+	}
+	defer file.Close()
+
+	// Download with progress tracking
+	downloadProgress := func(transferred, total int64) {
+		if total > 0 {
+			progress := float64(transferred) / float64(total) * 100
+			p.logger.Debug("Download progress", "percent", progress, "transferred", transferred, "total", total)
+		}
+	}
+
+	downloadReq := storage.DownloadRequest{
+		SourceURL:        req.SourceUrl,
+		Writer:           file,
+		VerifyChecksum:   req.VerifyChecksum,
+		ExpectedChecksum: req.ExpectedChecksum,
+		ProgressCallback: downloadProgress,
+	}
+
+	downloadResp, err := storageClient.Download(ctx, downloadReq)
+	if err != nil {
+		return nil, errors.NewInternal("failed to download disk: %v", err)
+	}
+
+	// Close file to flush writes
+	file.Close()
+
+	p.logger.Info("Download completed", "bytes", downloadResp.BytesTransferred, "checksum", downloadResp.Checksum)
+
+	// Convert to target format if needed
+	var importPath string
+	if targetFormat != "qcow2" {
+		p.logger.Info("Converting to target format", "target_format", targetFormat)
+		convertedPath := fmt.Sprintf("/tmp/%s-converted.%s", diskID, targetFormat)
+		
+		// TODO: Add qemu-img conversion
+		p.logger.Warn("Format conversion not yet implemented, using downloaded format")
+		importPath = tempFile
+		defer os.Remove(convertedPath)
+	} else {
+		importPath = tempFile
+	}
+
+	// Upload to Proxmox storage
+	p.logger.Info("Uploading to Proxmox storage", "storage", pveStorage, "disk_id", diskID)
+	
+	// Re-open file for reading
+	uploadFile, err := os.Open(importPath)
+	if err != nil {
+		return nil, errors.NewInternal("failed to open file for Proxmox upload: %v", err)
+	}
+	defer uploadFile.Close()
+
+	// Get file size
+	stat, err := uploadFile.Stat()
+	if err != nil {
+		return nil, errors.NewInternal("failed to stat file: %v", err)
+	}
+
+	// Generate filename for Proxmox storage
+	filename := fmt.Sprintf("%d/vm-%d-disk-0.%s", tempVMID, tempVMID, targetFormat)
+	
+	// Upload to Proxmox storage with progress tracking
+	uploadProgress := func(transferred, total int64) {
+		if total > 0 {
+			progress := float64(transferred) / float64(total) * 100
+			p.logger.Debug("Proxmox upload progress", "percent", progress, "transferred", transferred, "total", total)
+		}
+	}
+
+	volid, err := storageManager.UploadVolume(ctx, uploadFile, pveStorage, filename, stat.Size(), uploadProgress)
+	if err != nil {
+		return nil, errors.NewInternal("failed to upload to Proxmox storage: %v", err)
+	}
+
+	p.logger.Info("Disk import completed", "disk_id", diskID, "volid", volid)
 
 	response := &providerv1.ImportDiskResponse{
 		DiskId:          diskID,
-		Path:            diskPath,
-		Task:            nil, // Will be async with actual implementation
-		ActualSizeBytes: 0,   // Would be from downloadResp.ContentLength
-		Checksum:        "",  // Would be from downloadResp.Checksum
+		Path:            volid,
+		Task:            nil, // Synchronous operation
+		ActualSizeBytes: downloadResp.ContentLength,
+		Checksum:        downloadResp.Checksum,
 	}
 
 	return response, nil
