@@ -201,4 +201,3 @@ const (
 	// ErrorTypeOperationFailed indicates a generic operation failure
 	ErrorTypeOperationFailed ErrorType = "OperationFailed"
 )
-

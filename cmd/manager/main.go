@@ -161,6 +161,30 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "VMNetworkAttachment")
 		os.Exit(1)
 	}
+	
+	// Register VMSnapshot controller
+	vmsnapshotReconciler := controller.NewVMSnapshotReconciler(
+		mgr.GetClient(),
+		mgr.GetScheme(),
+		remoteResolver,
+		mgr.GetEventRecorderFor("vmsnapshot-controller"),
+	)
+	if err = vmsnapshotReconciler.SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "VMSnapshot")
+		os.Exit(1)
+	}
+	
+	// Register VMMigration controller
+	vmmigrationReconciler := controller.NewVMMigrationReconciler(
+		mgr.GetClient(),
+		mgr.GetScheme(),
+		remoteResolver,
+		mgr.GetEventRecorderFor("vmmigration-controller"),
+	)
+	if err = vmmigrationReconciler.SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "VMMigration")
+		os.Exit(1)
+	}
 	//+kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

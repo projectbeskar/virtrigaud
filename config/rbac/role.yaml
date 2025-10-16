@@ -48,6 +48,7 @@ rules:
   resources:
   - providers
   - virtualmachines
+  - vmmigrations
   - vmsnapshots
   verbs:
   - create
@@ -62,6 +63,7 @@ rules:
   resources:
   - providers/finalizers
   - virtualmachines/finalizers
+  - vmmigrations/finalizers
   - vmsnapshots/finalizers
   verbs:
   - update
@@ -70,6 +72,7 @@ rules:
   resources:
   - providers/status
   - virtualmachines/status
+  - vmmigrations/status
   - vmsnapshots/status
   verbs:
   - get

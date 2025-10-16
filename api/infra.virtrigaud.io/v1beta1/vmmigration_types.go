@@ -463,8 +463,14 @@ const (
 	VMMigrationConditionReady = "Ready"
 	// VMMigrationConditionValidating indicates whether validation is in progress
 	VMMigrationConditionValidating = "Validating"
+	// VMMigrationConditionSnapshotting indicates whether snapshotting is in progress
+	VMMigrationConditionSnapshotting = "Snapshotting"
+	// VMMigrationConditionExporting indicates whether disk export is in progress
+	VMMigrationConditionExporting = "Exporting"
 	// VMMigrationConditionTransferring indicates whether transfer is in progress
 	VMMigrationConditionTransferring = "Transferring"
+	// VMMigrationConditionImporting indicates whether disk import is in progress
+	VMMigrationConditionImporting = "Importing"
 	// VMMigrationConditionFailed indicates whether the migration has failed
 	VMMigrationConditionFailed = "Failed"
 )
@@ -524,4 +530,3 @@ type VMMigrationList struct {
 func init() {
 	SchemeBuilder.Register(&VMMigration{}, &VMMigrationList{})
 }
-
