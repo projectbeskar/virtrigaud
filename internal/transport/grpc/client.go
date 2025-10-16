@@ -349,6 +349,104 @@ func (c *Client) SnapshotRevert(ctx context.Context, vmId string, snapshotId str
 	return "", nil
 }
 
+// ExportDisk exports a VM disk for migration
+func (c *Client) ExportDisk(ctx context.Context, req contracts.ExportDiskRequest) (contracts.ExportDiskResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute) // Long timeout for disk export
+	defer cancel()
+
+	grpcReq := &providerv1.ExportDiskRequest{
+		VmId:           req.VmId,
+		DiskId:         req.DiskId,
+		SnapshotId:     req.SnapshotId,
+		DestinationUrl: req.DestinationURL,
+		Format:         req.Format,
+		Compress:       req.Compress,
+		Credentials:    req.Credentials,
+	}
+
+	resp, err := c.client.ExportDisk(ctx, grpcReq)
+	if err != nil {
+		return contracts.ExportDiskResponse{}, c.mapGRPCError("exportDisk", err)
+	}
+
+	result := contracts.ExportDiskResponse{
+		ExportId:           resp.ExportId,
+		EstimatedSizeBytes: resp.EstimatedSizeBytes,
+		Checksum:           resp.Checksum,
+	}
+
+	if resp.Task != nil {
+		result.TaskRef = resp.Task.Id
+	}
+
+	return result, nil
+}
+
+// ImportDisk imports a disk from an external source
+func (c *Client) ImportDisk(ctx context.Context, req contracts.ImportDiskRequest) (contracts.ImportDiskResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute) // Long timeout for disk import
+	defer cancel()
+
+	grpcReq := &providerv1.ImportDiskRequest{
+		SourceUrl:        req.SourceURL,
+		StorageHint:      req.StorageHint,
+		Format:           req.Format,
+		TargetName:       req.TargetName,
+		VerifyChecksum:   req.VerifyChecksum,
+		ExpectedChecksum: req.ExpectedChecksum,
+		Credentials:      req.Credentials,
+	}
+
+	resp, err := c.client.ImportDisk(ctx, grpcReq)
+	if err != nil {
+		return contracts.ImportDiskResponse{}, c.mapGRPCError("importDisk", err)
+	}
+
+	result := contracts.ImportDiskResponse{
+		DiskId:          resp.DiskId,
+		Path:            resp.Path,
+		ActualSizeBytes: resp.ActualSizeBytes,
+		Checksum:        resp.Checksum,
+	}
+
+	if resp.Task != nil {
+		result.TaskRef = resp.Task.Id
+	}
+
+	return result, nil
+}
+
+// GetDiskInfo retrieves detailed information about a VM disk
+func (c *Client) GetDiskInfo(ctx context.Context, req contracts.GetDiskInfoRequest) (contracts.GetDiskInfoResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+
+	grpcReq := &providerv1.GetDiskInfoRequest{
+		VmId:       req.VmId,
+		DiskId:     req.DiskId,
+		SnapshotId: req.SnapshotId,
+	}
+
+	resp, err := c.client.GetDiskInfo(ctx, grpcReq)
+	if err != nil {
+		return contracts.GetDiskInfoResponse{}, c.mapGRPCError("getDiskInfo", err)
+	}
+
+	result := contracts.GetDiskInfoResponse{
+		DiskId:           resp.DiskId,
+		Format:           resp.Format,
+		VirtualSizeBytes: resp.VirtualSizeBytes,
+		ActualSizeBytes:  resp.ActualSizeBytes,
+		Path:             resp.Path,
+		IsBootable:       resp.IsBootable,
+		Snapshots:        resp.Snapshots,
+		BackingFile:      resp.BackingFile,
+		Metadata:         resp.Metadata,
+	}
+
+	return result, nil
+}
+
 // convertCreateRequest converts contracts.CreateRequest to gRPC format
 func (c *Client) convertCreateRequest(req contracts.CreateRequest) (*providerv1.CreateRequest, error) {
 	grpcReq := &providerv1.CreateRequest{

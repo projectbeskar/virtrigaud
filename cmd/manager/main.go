@@ -161,7 +161,7 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "VMNetworkAttachment")
 		os.Exit(1)
 	}
-	
+
 	// Register VMSnapshot controller
 	vmsnapshotReconciler := controller.NewVMSnapshotReconciler(
 		mgr.GetClient(),
@@ -173,7 +173,7 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "VMSnapshot")
 		os.Exit(1)
 	}
-	
+
 	// Register VMMigration controller
 	vmmigrationReconciler := controller.NewVMMigrationReconciler(
 		mgr.GetClient(),
