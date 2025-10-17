@@ -45,3 +45,4 @@ vsphere-provider-example.yaml
 libvirt-monitoring-test.yaml
 *release-checklist*
 *PROXMOX_*
+.cursor/
