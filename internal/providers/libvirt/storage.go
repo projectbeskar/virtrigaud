@@ -212,8 +212,14 @@ func (s *StorageProvider) CreateVolume(ctx context.Context, poolName, volumeName
 	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chown", "libvirt-qemu:kvm", volume.Path); err != nil {
 		log.Printf("WARN Failed to set ownership: %v", err)
 	}
-	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chmod", "777", volume.Path); err != nil {
+	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chmod", "666", volume.Path); err != nil {
 		log.Printf("WARN Failed to set permissions: %v", err)
+	}
+
+	// Fix SELinux context if SELinux is enabled
+	log.Printf("INFO Restoring SELinux context for %s", volume.Path)
+	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "restorecon", volume.Path); err != nil {
+		log.Printf("WARN Failed to restore SELinux context (may not be using SELinux): %v", err)
 	}
 
 	log.Printf("INFO Successfully created storage volume: %s", volumeName)
@@ -323,11 +329,17 @@ func (s *StorageProvider) DownloadCloudImage(ctx context.Context, imageURL, volu
 	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chown", "libvirt-qemu:kvm", targetPath); err != nil {
 		log.Printf("WARN Failed to set ownership: %v", err)
 	}
-	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chmod", "777", targetPath); err != nil {
+	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chmod", "666", targetPath); err != nil {
 		log.Printf("WARN Failed to set permissions: %v", err)
 	}
 
-	// Refresh storage pool to recognize new volume
+	// Fix SELinux context if SELinux is enabled
+	log.Printf("INFO Restoring SELinux context for %s", targetPath)
+	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "restorecon", targetPath); err != nil {
+		log.Printf("WARN Failed to restore SELinux context (may not be using SELinux): %v", err)
+	}
+
+	// Refresh storage pool to recognize new volume and update metadata
 	if _, err := s.virshProvider.runVirshCommand(ctx, "pool-refresh", poolName); err != nil {
 		log.Printf("WARN Failed to refresh storage pool: %v", err)
 	}
@@ -572,8 +584,19 @@ func (s *StorageProvider) CreateVolumeFromImageFile(ctx context.Context, sourceI
 	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chown", "libvirt-qemu:kvm", targetPath); err != nil {
 		log.Printf("WARN Failed to set ownership: %v", err)
 	}
-	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chmod", "777", targetPath); err != nil {
+	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chmod", "666", targetPath); err != nil {
 		log.Printf("WARN Failed to set permissions: %v", err)
+	}
+
+	// Fix SELinux context if SELinux is enabled
+	log.Printf("INFO Restoring SELinux context for %s", targetPath)
+	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "restorecon", targetPath); err != nil {
+		log.Printf("WARN Failed to restore SELinux context (may not be using SELinux): %v", err)
+	}
+
+	// Refresh storage pool to recognize new volume
+	if _, err := s.virshProvider.runVirshCommand(ctx, "pool-refresh", "default"); err != nil {
+		log.Printf("WARN Failed to refresh storage pool: %v", err)
 	}
 
 	log.Printf("INFO Successfully created volume from image file: %s", volumeName)
