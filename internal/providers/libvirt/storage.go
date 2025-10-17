@@ -518,10 +518,11 @@ func (s *StorageProvider) CreateVolumeFromImageFile(ctx context.Context, sourceI
 	targetPath := filepath.Join(poolInfo.Path, fmt.Sprintf("%s.qcow2", volumeName))
 
 	// Check if source image exists on remote host
-	checkCmd := fmt.Sprintf("[ -f '%s' ] && echo 'exists' || echo 'not found'", sourceImagePath)
-	checkResult, err := s.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", checkCmd)
-	if err != nil || !strings.Contains(checkResult.Stdout, "exists") {
-		return nil, fmt.Errorf("source image file not found: %s (output: %s)", sourceImagePath, checkResult.Stdout)
+	// Use test command directly instead of bash -c for simplicity
+	_, err = s.virshProvider.runVirshCommand(ctx, "!", "test", "-f", sourceImagePath)
+	if err != nil {
+		// test returns non-zero if file doesn't exist
+		return nil, fmt.Errorf("source image file not found: %s", sourceImagePath)
 	}
 
 	log.Printf("INFO Source image verified: %s", sourceImagePath)
