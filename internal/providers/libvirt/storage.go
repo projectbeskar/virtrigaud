@@ -207,6 +207,15 @@ func (s *StorageProvider) CreateVolume(ctx context.Context, poolName, volumeName
 		return nil, fmt.Errorf("failed to get created volume info: %w", err)
 	}
 
+	// Fix ownership and permissions for libvirt access
+	log.Printf("INFO Setting proper ownership and permissions for %s", volume.Path)
+	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chown", "libvirt-qemu:kvm", volume.Path); err != nil {
+		log.Printf("WARN Failed to set ownership: %v", err)
+	}
+	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chmod", "777", volume.Path); err != nil {
+		log.Printf("WARN Failed to set permissions: %v", err)
+	}
+
 	log.Printf("INFO Successfully created storage volume: %s", volumeName)
 	return volume, nil
 }
@@ -308,6 +317,15 @@ func (s *StorageProvider) DownloadCloudImage(ctx context.Context, imageURL, volu
 
 	// Clean up temporary file
 	_, _ = s.virshProvider.runVirshCommand(ctx, "!", "rm", "-f", tempImage)
+
+	// Fix ownership and permissions for libvirt access
+	log.Printf("INFO Setting proper ownership and permissions for %s", targetPath)
+	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chown", "libvirt-qemu:kvm", targetPath); err != nil {
+		log.Printf("WARN Failed to set ownership: %v", err)
+	}
+	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chmod", "777", targetPath); err != nil {
+		log.Printf("WARN Failed to set permissions: %v", err)
+	}
 
 	// Refresh storage pool to recognize new volume
 	if _, err := s.virshProvider.runVirshCommand(ctx, "pool-refresh", poolName); err != nil {
@@ -547,6 +565,15 @@ func (s *StorageProvider) CreateVolumeFromImageFile(ctx context.Context, sourceI
 			log.Printf("WARN Failed to resize image (may already be correct size): %v", err)
 			// Don't fail here - the image may already be the right size or larger
 		}
+	}
+
+	// Fix ownership and permissions for libvirt access
+	log.Printf("INFO Setting proper ownership and permissions for %s", targetPath)
+	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chown", "libvirt-qemu:kvm", targetPath); err != nil {
+		log.Printf("WARN Failed to set ownership: %v", err)
+	}
+	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chmod", "777", targetPath); err != nil {
+		log.Printf("WARN Failed to set permissions: %v", err)
 	}
 
 	log.Printf("INFO Successfully created volume from image file: %s", volumeName)
