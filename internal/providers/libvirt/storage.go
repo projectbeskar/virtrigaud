@@ -212,11 +212,11 @@ func (s *StorageProvider) CreateVolume(ctx context.Context, poolName, volumeName
 	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chown", "libvirt-qemu:kvm", volume.Path); err != nil {
 		log.Printf("WARN Failed to set ownership: %v", err)
 	}
-	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chmod", "666", volume.Path); err != nil {
+	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chmod", "777", volume.Path); err != nil {
 		log.Printf("WARN Failed to set permissions: %v", err)
 	}
 
-	// Fix SELinux context if SELinux is enabled
+	// Fix SELinux context if SELinux is enabled (will fail gracefully if not)
 	log.Printf("INFO Restoring SELinux context for %s", volume.Path)
 	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "restorecon", volume.Path); err != nil {
 		log.Printf("WARN Failed to restore SELinux context (may not be using SELinux): %v", err)
@@ -329,11 +329,11 @@ func (s *StorageProvider) DownloadCloudImage(ctx context.Context, imageURL, volu
 	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chown", "libvirt-qemu:kvm", targetPath); err != nil {
 		log.Printf("WARN Failed to set ownership: %v", err)
 	}
-	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chmod", "666", targetPath); err != nil {
+	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chmod", "777", targetPath); err != nil {
 		log.Printf("WARN Failed to set permissions: %v", err)
 	}
 
-	// Fix SELinux context if SELinux is enabled
+	// Fix SELinux context if SELinux is enabled (will fail gracefully if not)
 	log.Printf("INFO Restoring SELinux context for %s", targetPath)
 	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "restorecon", targetPath); err != nil {
 		log.Printf("WARN Failed to restore SELinux context (may not be using SELinux): %v", err)
@@ -584,11 +584,11 @@ func (s *StorageProvider) CreateVolumeFromImageFile(ctx context.Context, sourceI
 	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chown", "libvirt-qemu:kvm", targetPath); err != nil {
 		log.Printf("WARN Failed to set ownership: %v", err)
 	}
-	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chmod", "666", targetPath); err != nil {
+	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chmod", "777", targetPath); err != nil {
 		log.Printf("WARN Failed to set permissions: %v", err)
 	}
 
-	// Fix SELinux context if SELinux is enabled
+	// Fix SELinux context if SELinux is enabled (will fail gracefully if not)
 	log.Printf("INFO Restoring SELinux context for %s", targetPath)
 	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "restorecon", targetPath); err != nil {
 		log.Printf("WARN Failed to restore SELinux context (may not be using SELinux): %v", err)
