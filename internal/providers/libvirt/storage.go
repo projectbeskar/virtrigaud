@@ -88,8 +88,8 @@ func (s *StorageProvider) EnsureDefaultStoragePool(ctx context.Context) error {
 	if hasDefaultPool {
 		// Check if the existing pool uses the correct path
 		poolInfo, err := s.virshProvider.runVirshCommand(ctx, "pool-dumpxml", "default")
-		if err == nil && strings.Contains(poolInfo.Stdout, "/var/lib/libvirt/images") {
-			// Old pool with wrong path - delete and recreate
+		if err == nil && !strings.Contains(poolInfo.Stdout, "/var/lib/libvirt/images") {
+			// Old pool with wrong path (e.g., /home/wrkode/libvirt-images) - delete and recreate
 			log.Printf("INFO Deleting old default storage pool with incorrect path")
 			_, _ = s.virshProvider.runVirshCommand(ctx, "pool-destroy", "default")
 			_, _ = s.virshProvider.runVirshCommand(ctx, "pool-undefine", "default")
@@ -116,8 +116,8 @@ func (s *StorageProvider) EnsureDefaultStoragePool(ctx context.Context) error {
 
 // createDefaultStoragePool creates the default storage pool
 func (s *StorageProvider) createDefaultStoragePool(ctx context.Context) error {
-	// Use user-writable directory for storage pool to avoid permission issues
-	poolPath := "/home/wrkode/libvirt-images"
+	// Use standard libvirt directory for storage pool
+	poolPath := "/var/lib/libvirt/images"
 	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "mkdir", "-p", poolPath); err != nil {
 		return fmt.Errorf("failed to create pool directory: %w", err)
 	}
