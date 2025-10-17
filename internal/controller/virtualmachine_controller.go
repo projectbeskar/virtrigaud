@@ -394,6 +394,13 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 ) contracts.CreateRequest {
 	log := ctrl.Log.WithName("buildCreateRequest")
 
+	log.Info("DEBUG buildCreateRequest called",
+		"vm", vm.Name,
+		"vmImage", vmImage.Name,
+		"hasLibvirtSource", vmImage.Spec.Source.Libvirt != nil,
+		"hasVSphereSource", vmImage.Spec.Source.VSphere != nil,
+		"hasProxmoxSource", vmImage.Spec.Source.Proxmox != nil)
+
 	// Convert VMClass
 	class := contracts.VMClass{
 		CPU:              vmClass.Spec.CPU,
@@ -492,6 +499,28 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 		if vmImage.Spec.Source.VSphere.ChecksumType != "" {
 			image.ChecksumType = string(vmImage.Spec.Source.VSphere.ChecksumType)
 		}
+	}
+
+	if vmImage.Spec.Source.Libvirt != nil {
+		log.Info("DEBUG controller: Libvirt image source found",
+			"path", vmImage.Spec.Source.Libvirt.Path,
+			"url", vmImage.Spec.Source.Libvirt.URL,
+			"format", vmImage.Spec.Source.Libvirt.Format)
+		image.Path = vmImage.Spec.Source.Libvirt.Path
+		image.URL = vmImage.Spec.Source.Libvirt.URL
+		image.Format = string(vmImage.Spec.Source.Libvirt.Format)
+		if vmImage.Spec.Source.Libvirt.Checksum != "" {
+			image.Checksum = vmImage.Spec.Source.Libvirt.Checksum
+		}
+		if vmImage.Spec.Source.Libvirt.ChecksumType != "" {
+			image.ChecksumType = string(vmImage.Spec.Source.Libvirt.ChecksumType)
+		}
+		log.Info("DEBUG controller: Set image from Libvirt source",
+			"image.Path", image.Path,
+			"image.URL", image.URL,
+			"image.Format", image.Format)
+	} else {
+		log.Info("DEBUG controller: Libvirt image source is nil")
 	}
 
 	if vmImage.Spec.Source.Proxmox != nil {

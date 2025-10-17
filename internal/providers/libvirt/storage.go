@@ -284,13 +284,13 @@ func (s *StorageProvider) DownloadCloudImage(ctx context.Context, imageURL, volu
 	// Convert and resize image if needed
 	if sizeGB > 0 {
 		log.Printf("INFO Converting and resizing image to %dGB", sizeGB)
-		
+
 		// First convert the image
 		result, err = s.virshProvider.runVirshCommand(ctx, "!", "qemu-img", "convert", "-f", "qcow2", "-O", "qcow2", tempImage, targetPath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert image: %w, output: %s", err, result.Stderr)
 		}
-		
+
 		// Then resize it
 		sizeSpec := fmt.Sprintf("%dG", sizeGB)
 		result, err = s.virshProvider.runVirshCommand(ctx, "!", "qemu-img", "resize", targetPath, sizeSpec)
@@ -497,6 +497,68 @@ func (s *StorageProvider) GetPredefinedTemplates() []*ImageTemplate {
 			Description: "Debian 12 Cloud Image",
 		},
 	}
+}
+
+// CreateVolumeFromImageFile creates a volume by copying from an existing image file
+func (s *StorageProvider) CreateVolumeFromImageFile(ctx context.Context, sourceImagePath, volumeName, poolName string, sizeGB int) (*StorageVolume, error) {
+	log.Printf("INFO Creating volume %s from image file %s", volumeName, sourceImagePath)
+
+	// Ensure pool is active
+	if err := s.ensurePoolActive(ctx, poolName); err != nil {
+		return nil, fmt.Errorf("failed to ensure pool is active: %w", err)
+	}
+
+	// Get pool path
+	poolInfo, err := s.GetPoolInfo(ctx, poolName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get pool info: %w", err)
+	}
+
+	// Create target volume path
+	targetPath := filepath.Join(poolInfo.Path, fmt.Sprintf("%s.qcow2", volumeName))
+
+	// Check if source image exists on remote host
+	checkCmd := fmt.Sprintf("[ -f '%s' ] && echo 'exists' || echo 'not found'", sourceImagePath)
+	checkResult, err := s.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", checkCmd)
+	if err != nil || !strings.Contains(checkResult.Stdout, "exists") {
+		return nil, fmt.Errorf("source image file not found: %s (output: %s)", sourceImagePath, checkResult.Stdout)
+	}
+
+	log.Printf("INFO Source image verified: %s", sourceImagePath)
+
+	// Copy and convert image to target path
+	log.Printf("INFO Converting and resizing image: %s -> %s", sourceImagePath, targetPath)
+
+	// Convert the source image to the target location
+	result, err := s.virshProvider.runVirshCommand(ctx, "!", "qemu-img", "convert",
+		"-f", "qcow2", "-O", "qcow2", sourceImagePath, targetPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert image: %w, output: %s", err, result.Stderr)
+	}
+
+	// Resize the disk if a specific size is requested
+	if sizeGB > 0 {
+		sizeSpec := fmt.Sprintf("%dG", sizeGB)
+		log.Printf("INFO Resizing disk to %s", sizeSpec)
+
+		result, err = s.virshProvider.runVirshCommand(ctx, "!", "qemu-img", "resize", targetPath, sizeSpec)
+		if err != nil {
+			log.Printf("WARN Failed to resize image (may already be correct size): %v", err)
+			// Don't fail here - the image may already be the right size or larger
+		}
+	}
+
+	log.Printf("INFO Successfully created volume from image file: %s", volumeName)
+
+	// Get volume information
+	volume := &StorageVolume{
+		Name:   volumeName,
+		Pool:   poolName,
+		Path:   targetPath,
+		Format: "qcow2",
+	}
+
+	return volume, nil
 }
 
 // CreateVolumeFromTemplate downloads and prepares a volume from a predefined template

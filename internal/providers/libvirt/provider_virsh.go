@@ -91,18 +91,28 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, req contracts.Crea
 
 	// Check if VMImage is specified in the request
 	if imageSpec := p.extractImageSpec(req); imageSpec != "" {
-		log.Printf("INFO Creating disk from image template: %s", imageSpec)
+		log.Printf("INFO Creating disk from image: %s", imageSpec)
 
-		// Try to create volume from predefined template
-		volume, err := storageProvider.CreateVolumeFromTemplate(ctx, imageSpec, diskVolumeName, "default", diskSizeGB)
+		var volume *StorageVolume
+		var err error
+
+		// Determine how to handle the image based on its type
+		if strings.HasPrefix(imageSpec, "http://") || strings.HasPrefix(imageSpec, "https://") {
+			// Handle URL - download the image
+			log.Printf("INFO Downloading cloud image from URL: %s", imageSpec)
+			volume, err = storageProvider.DownloadCloudImage(ctx, imageSpec, diskVolumeName, "default", diskSizeGB)
+		} else if strings.HasPrefix(imageSpec, "/") {
+			// Handle absolute path - copy from existing image file
+			log.Printf("INFO Creating disk from local template file: %s", imageSpec)
+			volume, err = storageProvider.CreateVolumeFromImageFile(ctx, imageSpec, diskVolumeName, "default", diskSizeGB)
+		} else {
+			// Handle template name - look up in predefined templates
+			log.Printf("INFO Creating disk from predefined template: %s", imageSpec)
+			volume, err = storageProvider.CreateVolumeFromTemplate(ctx, imageSpec, diskVolumeName, "default", diskSizeGB)
+		}
+
 		if err != nil {
-			// Fallback: try to download directly if it's a URL
-			if strings.HasPrefix(imageSpec, "http") {
-				volume, err = storageProvider.DownloadCloudImage(ctx, imageSpec, diskVolumeName, "default", diskSizeGB)
-			}
-			if err != nil {
-				return "", fmt.Errorf("failed to create disk from image: %w", err)
-			}
+			return "", fmt.Errorf("failed to create disk from image: %w", err)
 		}
 		diskPath = volume.Path
 	} else {
@@ -774,12 +784,27 @@ func (p *Provider) GetGuestInfo(ctx context.Context, id string) (*GuestAgentInfo
 
 // extractImageSpec extracts the image specification from the request
 func (p *Provider) extractImageSpec(req contracts.CreateRequest) string {
-	// Check for image specification in the request name or other fields
-	// For now, default to Ubuntu 22.04 as a bootable cloud image
-	// This can be extended to support different image specifications
+	// Priority 1: Use explicit path from VMImage (for local template images)
+	if req.Image.Path != "" {
+		log.Printf("INFO Using image path from VMImage: %s", req.Image.Path)
+		return req.Image.Path
+	}
 
-	// Default to Ubuntu 22.04 if no image specified
-	return "ubuntu-22.04-server"
+	// Priority 2: Use URL from VMImage (for remote images)
+	if req.Image.URL != "" {
+		log.Printf("INFO Using image URL from VMImage: %s", req.Image.URL)
+		return req.Image.URL
+	}
+
+	// Priority 3: Use template name if provided
+	if req.Image.TemplateName != "" {
+		log.Printf("INFO Using template name from VMImage: %s", req.Image.TemplateName)
+		return req.Image.TemplateName
+	}
+
+	// No image specified - will create empty disk
+	log.Printf("INFO No image specified in VMImage, will create empty disk")
+	return ""
 }
 
 // extractDiskSize extracts the disk size from VMClass DiskDefaults
