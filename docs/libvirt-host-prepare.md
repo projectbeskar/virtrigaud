@@ -455,46 +455,47 @@ ssh user@vm-ip "sudo cat /var/log/cloud-init.log | grep ERROR"
 
 **Default Behavior (v0.3.7-dev+):**
 
-Virtrigaud **does not include network configuration** in cloud-init meta-data. This allows cloud images to use their pre-configured default networking, which typically enables DHCP on all interfaces.
+Virtrigaud provides **default DHCP networking** in cloud-init meta-data using version 1 format. This ensures VMs get network connectivity out of the box while allowing users to override with custom configuration.
 
-**Why No Network Config?**
-
-All major cloud images come with working DHCP networking by default:
-- **Ubuntu/Debian**: Pre-configured via `/etc/netplan/50-cloud-init.yaml` or dhclient
-- **RHEL/CentOS/Fedora**: Pre-configured via NetworkManager or network-scripts
-- **openSUSE**: Pre-configured via Wicked or NetworkManager
-- **Windows**: Pre-configured via Windows DHCP client
-
-Adding network configuration in meta-data causes cloud-init to take over network management, which can lead to:
-- Timeouts waiting for network to be "ready"
-- Network configuration being regenerated on every boot
-- Requirement for reboots to apply changes
-- Conflicts with existing network configuration
-
-**Meta-data Format:**
+**Default Network Configuration:**
 ```yaml
-instance-id: vm-name
-local-hostname: vm-name
-# No network configuration - uses distro defaults
+network:
+  version: 1
+  config:
+    - type: physical
+      name: eth0
+      subnets:
+        - type: dhcp
+    - type: physical
+      name: ens3
+      subnets:
+        - type: dhcp
+    - type: physical
+      name: enp0s3
+      subnets:
+        - type: dhcp
 ```
 
-**How It Works:**
+**Why Version 1 Format?**
 
-1. Cloud-init starts without network configuration
-2. Uses "fallback networking" - relies on distro's existing DHCP configuration
-3. Network comes up via the OS's native network manager
-4. Works immediately on first boot across all distributions
-5. No reboots required
+Version 1 network configuration:
+- ✅ Works across all major distributions (Ubuntu, RHEL, CentOS, Fedora, Debian, openSUSE)
+- ✅ Applies immediately without requiring reboot
+- ✅ Cloud-init translates to distro-specific formats (NetworkManager, ifcfg, netplan, etc.)
+- ✅ Multiple interface names ensure compatibility with different naming schemes
+- ✅ Does NOT cause netplan regeneration on Ubuntu
 
-**For Custom Networking:**
+**Configuring Custom Networking:**
 
-If you need custom network configuration, provide it in your **user-data** (not meta-data):
+Users can override the default DHCP configuration by providing network configuration in their **user-data**. User-data network configuration takes precedence over meta-data.
 
-**Option 1: Write custom network files**
+#### Option 1: Static IP Configuration
+
+**For Ubuntu/Debian (using write_files):**
 ```yaml
 #cloud-config
 write_files:
-  - path: /etc/netplan/99-custom.yaml
+  - path: /etc/netplan/99-static.yaml
     permissions: '0644'
     content: |
       network:
@@ -502,32 +503,126 @@ write_files:
         ethernets:
           ens3:
             addresses: [192.168.1.100/24]
-            gateway4: 192.168.1.1
+            routes:
+              - to: default
+                via: 192.168.1.1
             nameservers:
-              addresses: [8.8.8.8]
+              addresses: [8.8.8.8, 8.8.4.4]
 runcmd:
   - netplan apply
 ```
 
-**Option 2: Use distribution-specific commands**
+**For RHEL/CentOS (using nmcli):**
 ```yaml
 #cloud-config
 runcmd:
-  # For RHEL/CentOS with nmcli
-  - nmcli con mod "System eth0" ipv4.addresses 192.168.1.100/24
-  - nmcli con mod "System eth0" ipv4.method manual
-  - nmcli con up "System eth0"
+  - nmcli con mod "System ens3" ipv4.addresses 192.168.1.100/24
+  - nmcli con mod "System ens3" ipv4.gateway 192.168.1.1
+  - nmcli con mod "System ens3" ipv4.dns "8.8.8.8 8.8.4.4"
+  - nmcli con mod "System ens3" ipv4.method manual
+  - nmcli con up "System ens3"
 ```
 
-**Option 3: Provide network_config in user-data**
+**Universal approach (cloud-init network key in user-data):**
 ```yaml
 #cloud-config
 network:
-  version: 2
-  ethernets:
-    eth0:
-      dhcp4: true
+  version: 1
+  config:
+    - type: physical
+      name: ens3
+      subnets:
+        - type: static
+          address: 192.168.1.100/24
+          gateway: 192.168.1.1
+          dns_nameservers:
+            - 8.8.8.8
+            - 8.8.4.4
 ```
+
+#### Option 2: Custom DHCP Configuration
+
+**With specific DNS servers:**
+```yaml
+#cloud-config
+network:
+  version: 1
+  config:
+    - type: physical
+      name: ens3
+      subnets:
+        - type: dhcp
+          dns_nameservers:
+            - 1.1.1.1
+            - 1.0.0.1
+```
+
+**With MTU and other options:**
+```yaml
+#cloud-config
+network:
+  version: 1
+  config:
+    - type: physical
+      name: ens3
+      mtu: 9000
+      subnets:
+        - type: dhcp
+```
+
+#### Option 3: Multiple Network Interfaces
+
+```yaml
+#cloud-config
+network:
+  version: 1
+  config:
+    - type: physical
+      name: ens3
+      subnets:
+        - type: dhcp
+    - type: physical
+      name: ens4
+      subnets:
+        - type: static
+          address: 10.0.0.100/24
+```
+
+#### Option 4: VLAN Configuration
+
+```yaml
+#cloud-config
+network:
+  version: 1
+  config:
+    - type: physical
+      name: ens3
+      subnets:
+        - type: dhcp
+    - type: vlan
+      name: ens3.100
+      vlan_id: 100
+      vlan_link: ens3
+      subnets:
+        - type: static
+          address: 192.168.100.10/24
+```
+
+**Important Notes:**
+
+1. **Network config in user-data overrides meta-data**: If you provide network configuration in your user-data, the default DHCP configuration in meta-data is ignored.
+
+2. **Interface naming**: Use the actual interface name for your VM. Common names:
+   - `eth0` - Traditional naming
+   - `ens3` - Predictable naming (most common for virtualized environments)
+   - `enp0s3` - Predictable naming with PCI info
+
+3. **Testing**: After changing network configuration, you can test with:
+   ```bash
+   cloud-init clean --logs
+   cloud-init init --local
+   cloud-init init
+   ```
 
 ### Windows Support
 

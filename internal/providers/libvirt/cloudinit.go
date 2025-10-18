@@ -64,6 +64,7 @@ func (c *CloudInitProvider) PrepareCloudInit(ctx context.Context, config CloudIn
 	if config.MetaData == "" {
 		config.MetaData = c.generateMetaData(config.InstanceID, config.Hostname)
 	}
+	log.Printf("DEBUG Generated meta-data (length=%d): %s", len(config.MetaData), config.MetaData)
 
 	// Write user-data file remotely
 	userDataPath := filepath.Join(remoteDir, "user-data")
@@ -125,26 +126,41 @@ func (c *CloudInitProvider) createRemoteCloudInitISO(ctx context.Context, source
 
 // generateMetaData creates basic metadata for the VM instance
 func (c *CloudInitProvider) generateMetaData(instanceID, hostname string) string {
-	// Basic metadata following cloud-init NoCloud format
-	// We intentionally DO NOT include any network configuration here.
+	// Basic metadata following cloud-init NoCloud format with default DHCP networking
 	//
-	// Why: All major cloud images (Ubuntu, RHEL, CentOS, Fedora, Debian, etc.) come
-	// pre-configured with DHCP networking that works out of the box. Adding network
-	// configuration in meta-data causes cloud-init to:
-	// 1. Take over network management
-	// 2. Potentially regenerate network configs
-	// 3. Cause timeouts waiting for network to be "ready"
-	// 4. May require reboots for changes to take effect
+	// We provide a default network configuration using version 1 format which:
+	// 1. Works across all major distributions (Ubuntu, RHEL, CentOS, Fedora, Debian, etc.)
+	// 2. Enables DHCP on common interface names (eth0, ens3, enp0s3)
+	// 3. Does NOT cause netplan regeneration (version 1 is applied directly)
+	// 4. Can be overridden by users via network config in user-data
 	//
-	// By omitting network config, cloud-init uses "fallback networking" which relies
-	// on the distro's existing network configuration, avoiding all these issues.
+	// Version 1 format advantages:
+	// - Immediate application without reboot
+	// - Cloud-init translates to distro-specific configs (NetworkManager, ifcfg, netplan, etc.)
+	// - Multiple interface names ensure compatibility with different naming schemes
 	//
-	// Users who need custom networking can provide it in their user-data via:
-	// - write_files to create custom network configs
-	// - runcmd to modify network settings
-	// - Direct network configuration in the network_config key (advanced)
+	// Users who need custom networking (static IP, custom DNS, VLANs, etc.) can provide
+	// network configuration in their user-data which will take precedence over this default.
 	metadata := fmt.Sprintf(`instance-id: %s
 local-hostname: %s
+network:
+  version: 1
+  config:
+    - type: physical
+      name: eth0
+      subnets:
+        - type: dhcp
+          control: auto
+    - type: physical
+      name: ens3
+      subnets:
+        - type: dhcp
+          control: auto
+    - type: physical
+      name: enp0s3
+      subnets:
+        - type: dhcp
+          control: auto
 `, instanceID, hostname)
 
 	return metadata
