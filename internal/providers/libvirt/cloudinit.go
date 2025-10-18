@@ -126,17 +126,13 @@ func (c *CloudInitProvider) createRemoteCloudInitISO(ctx context.Context, source
 // generateMetaData creates basic metadata for the VM instance
 func (c *CloudInitProvider) generateMetaData(instanceID, hostname string) string {
 	// Basic metadata following cloud-init NoCloud format
-	// Using version 2 network config with match-all to support modern interface naming (ens3, enp0s3, etc.)
+	// NOTE: We intentionally DO NOT include network config in meta-data because:
+	// 1. Ubuntu cloud images default to DHCP already via /etc/netplan/50-cloud-init.yaml
+	// 2. Network config in meta-data causes cloud-init to regenerate netplan which requires reboot
+	// 3. Modern distros handle DHCP automatically without explicit cloud-init config
+	// If custom network config is needed, it should be in user-data via write_files or runcmd
 	metadata := fmt.Sprintf(`instance-id: %s
 local-hostname: %s
-network:
-  version: 2
-  ethernets:
-    any:
-      match:
-        name: "e*"
-      dhcp4: true
-      dhcp6: false
 `, instanceID, hostname)
 
 	return metadata

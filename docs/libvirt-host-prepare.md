@@ -442,7 +442,30 @@ sudo chmod 644 /var/lib/libvirt/images/*-cidata.iso
 
 # Verify cloud-init disk is attached
 virsh dumpxml <vm-name> | grep -A 5 "device='cdrom'"
+
+# Check cloud-init status inside VM
+ssh user@vm-ip "cloud-init status"
+# Should show: status: done
+
+# If cloud-init is stuck, check logs
+ssh user@vm-ip "sudo cat /var/log/cloud-init.log | grep ERROR"
 ```
+
+### Cloud-init Requires Reboot
+
+**Symptom:** VM network doesn't work or cloud-init doesn't complete until after a reboot
+
+**Explanation:** This issue has been **fixed** in Virtrigaud. Previously, network configuration in `meta-data` caused cloud-init to regenerate netplan configs which required a reboot.
+
+**Current Behavior (v0.3.7-dev+):**
+- Virtrigaud NO LONGER includes network configuration in `meta-data`
+- Ubuntu cloud images default to DHCP automatically via `/etc/netplan/50-cloud-init.yaml`
+- VMs get network connectivity immediately on first boot without reboot
+
+**If you still experience this:**
+1. Ensure you're using the latest provider image
+2. Check that your custom cloud-init doesn't include conflicting network config
+3. For custom networking, use `write_files` to create netplan configs in user-data instead of meta-data
 
 ### "Pending Changes" in Cockpit
 
