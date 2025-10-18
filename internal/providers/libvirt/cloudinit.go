@@ -126,19 +126,18 @@ func (c *CloudInitProvider) createRemoteCloudInitISO(ctx context.Context, source
 // generateMetaData creates basic metadata for the VM instance
 func (c *CloudInitProvider) generateMetaData(instanceID, hostname string) string {
 	// Basic metadata following cloud-init NoCloud format
-	metadata := fmt.Sprintf(`{
-  "instance-id": "%s",
-  "local-hostname": "%s",
-  "network": {
-    "version": 1,
-    "config": [
-      {
-        "type": "dhcp",
-        "interface": "eth0"
-      }
-    ]
-  }
-}`, instanceID, hostname)
+	// Using version 2 network config with match-all to support modern interface naming (ens3, enp0s3, etc.)
+	metadata := fmt.Sprintf(`instance-id: %s
+local-hostname: %s
+network:
+  version: 2
+  ethernets:
+    any:
+      match:
+        name: "e*"
+      dhcp4: true
+      dhcp6: false
+`, instanceID, hostname)
 
 	return metadata
 }
