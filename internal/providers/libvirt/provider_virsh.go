@@ -845,6 +845,67 @@ final_message: "VM %s is ready!"
 `, vmName, vmName, vmName)
 }
 
+// generateNetworkInterfacesXML creates network interface XML from network attachments
+func (p *Provider) generateNetworkInterfacesXML(networks []contracts.NetworkAttachment) string {
+	if len(networks) == 0 {
+		// Default to user network if no networks specified
+		return `    <interface type='user'>
+      <model type='virtio'/>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x03' function='0x0'/>
+    </interface>`
+	}
+
+	var interfacesXML string
+	for idx, net := range networks {
+		// Determine network model (default to virtio)
+		model := "virtio"
+		if net.Model != "" {
+			model = net.Model
+		}
+
+		// Determine PCI slot (start at 0x03, increment for each interface)
+		pciSlot := fmt.Sprintf("0x%02x", 3+idx)
+
+		// Generate MAC address if specified
+		macXML := ""
+		if net.MacAddress != "" {
+			macXML = fmt.Sprintf("\n      <mac address='%s'/>", net.MacAddress)
+		}
+
+		var interfaceXML string
+
+		// Determine interface type and configuration
+		if net.Bridge != "" {
+			// Bridge network
+			interfaceXML = fmt.Sprintf(`    <interface type='bridge'>%s
+      <source bridge='%s'/>
+      <model type='%s'/>
+      <address type='pci' domain='0x0000' bus='0x00' slot='%s' function='0x0'/>
+    </interface>`, macXML, net.Bridge, model, pciSlot)
+		} else if net.NetworkName != "" {
+			// Libvirt managed network
+			interfaceXML = fmt.Sprintf(`    <interface type='network'>%s
+      <source network='%s'/>
+      <model type='%s'/>
+      <address type='pci' domain='0x0000' bus='0x00' slot='%s' function='0x0'/>
+    </interface>`, macXML, net.NetworkName, model, pciSlot)
+		} else {
+			// Default to user network (NAT)
+			interfaceXML = fmt.Sprintf(`    <interface type='user'>%s
+      <model type='%s'/>
+      <address type='pci' domain='0x0000' bus='0x00' slot='%s' function='0x0'/>
+    </interface>`, macXML, model, pciSlot)
+		}
+
+		if idx > 0 {
+			interfacesXML += "\n"
+		}
+		interfacesXML += interfaceXML
+	}
+
+	return interfacesXML
+}
+
 // generateDomainXMLWithStorage creates libvirt domain XML with proper storage configuration
 func (p *Provider) generateDomainXMLWithStorage(req contracts.CreateRequest, diskPath, cloudInitISOPath string) (string, error) {
 	// Extract specifications from request
@@ -948,6 +1009,9 @@ func (p *Provider) generateDomainXMLWithStorage(req contracts.CreateRequest, dis
     </tpm>`
 	}
 
+	// Generate network interfaces based on request
+	networkInterfacesXML := p.generateNetworkInterfacesXML(req.Networks)
+
 	domainXML := fmt.Sprintf(`<domain type='qemu'>
   <name>%s</name>
   <uuid>%s</uuid>
@@ -993,10 +1057,7 @@ func (p *Provider) generateDomainXMLWithStorage(req contracts.CreateRequest, dis
     <controller type='virtio-serial' index='0'>
       <address type='pci' domain='0x0000' bus='0x00' slot='0x06' function='0x0'/>
     </controller>
-    <interface type='user'>
-      <model type='virtio'/>
-      <address type='pci' domain='0x0000' bus='0x00' slot='0x03' function='0x0'/>
-    </interface>
+%s
     <serial type='pty'>
       <target type='isa-serial' port='0'>
         <model name='isa-serial'/>
@@ -1037,7 +1098,8 @@ func (p *Provider) generateDomainXMLWithStorage(req contracts.CreateRequest, dis
 		osXML,
 		featuresXML,
 		cpuXML,
-		devicesXML)
+		devicesXML,
+		networkInterfacesXML)
 
 	return domainXML, nil
 }
