@@ -206,9 +206,9 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, req contracts.Crea
 	return req.Name, nil
 }
 
-// Delete removes a VM using virsh
+// Delete removes a VM using virsh and cleans up all associated resources
 func (p *Provider) Delete(ctx context.Context, id string) (taskRef string, err error) {
-	log.Printf("INFO Deleting VM: %s", id)
+	log.Printf("INFO Deleting VM and all associated resources: %s", id)
 
 	if p.virshProvider == nil {
 		return "", contracts.NewRetryableError("virsh provider not initialized", nil)
@@ -229,8 +229,24 @@ func (p *Provider) Delete(ctx context.Context, id string) (taskRef string, err e
 	}
 
 	if !domainExists {
-		log.Printf("INFO Domain %s does not exist, already deleted", id)
+		log.Printf("INFO Domain %s does not exist, cleaning up any remaining resources", id)
+		// Even if domain doesn't exist, try to clean up orphaned resources
+		p.cleanupOrphanedResources(ctx, id)
 		return "", nil
+	}
+
+	// Get disk paths before deleting the domain
+	diskPaths, err := p.getDomainDiskPaths(ctx, id)
+	if err != nil {
+		log.Printf("WARN Failed to get disk paths for %s: %v", id, err)
+		// Continue with deletion even if we can't get disk paths
+	}
+
+	// Get cloud-init ISO path before deleting the domain
+	cloudInitISOPath, err := p.getCloudInitISOPath(ctx, id)
+	if err != nil {
+		log.Printf("WARN Failed to get cloud-init ISO path for %s: %v", id, err)
+		// Continue with deletion
 	}
 
 	// Stop the domain if running
@@ -239,13 +255,173 @@ func (p *Provider) Delete(ctx context.Context, id string) (taskRef string, err e
 		// Continue with undefine even if destroy fails
 	}
 
-	// Remove the domain definition
+	// Remove the domain definition (this should also remove storage if --remove-all-storage is used)
+	// However, we'll explicitly delete disks to ensure cleanup
 	if err := p.virshProvider.undefineDomain(ctx, id); err != nil {
 		return "", contracts.NewRetryableError("failed to undefine domain", err)
 	}
 
-	log.Printf("INFO Successfully deleted domain: %s", id)
+	// Delete disk images
+	if len(diskPaths) > 0 {
+		log.Printf("INFO Deleting %d disk(s) for VM %s", len(diskPaths), id)
+		for _, diskPath := range diskPaths {
+			if err := p.deleteDiskFile(ctx, diskPath); err != nil {
+				log.Printf("WARN Failed to delete disk %s: %v", diskPath, err)
+				// Continue with other deletions
+			} else {
+				log.Printf("INFO Successfully deleted disk: %s", diskPath)
+			}
+		}
+	}
+
+	// Delete cloud-init ISO
+	if cloudInitISOPath != "" {
+		if err := p.deleteCloudInitResources(ctx, id, cloudInitISOPath); err != nil {
+			log.Printf("WARN Failed to delete cloud-init resources: %v", err)
+			// Continue - not a critical error
+		} else {
+			log.Printf("INFO Successfully deleted cloud-init resources for: %s", id)
+		}
+	}
+
+	log.Printf("INFO Successfully deleted domain and all resources: %s", id)
 	return "", nil
+}
+
+// getDomainDiskPaths retrieves all disk paths for a domain
+func (p *Provider) getDomainDiskPaths(ctx context.Context, domainName string) ([]string, error) {
+	// Get domain XML to extract disk paths
+	result, err := p.virshProvider.runVirshCommand(ctx, "dumpxml", domainName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to dump domain XML: %w", err)
+	}
+
+	var diskPaths []string
+
+	// Parse XML to find disk source files
+	// Look for lines like: <source file='/var/lib/libvirt/images/vm-disk.qcow2'/>
+	lines := strings.Split(result.Stdout, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.Contains(line, "<source file=") && strings.Contains(line, "device='disk'") == false {
+			// Extract the file path from <source file='...'/>
+			start := strings.Index(line, "file='")
+			if start == -1 {
+				start = strings.Index(line, "file=\"")
+			}
+			if start != -1 {
+				start += 6 // len("file='") or len("file=\"")
+				end := strings.IndexAny(line[start:], "\"'")
+				if end != -1 {
+					diskPath := line[start : start+end]
+					// Skip cloud-init ISOs (we'll handle those separately)
+					if !strings.HasSuffix(diskPath, "-cidata.iso") && !strings.HasSuffix(diskPath, "cloud-init.iso") {
+						diskPaths = append(diskPaths, diskPath)
+					}
+				}
+			}
+		}
+	}
+
+	return diskPaths, nil
+}
+
+// getCloudInitISOPath retrieves the cloud-init ISO path for a domain
+func (p *Provider) getCloudInitISOPath(ctx context.Context, domainName string) (string, error) {
+	// Get domain XML
+	result, err := p.virshProvider.runVirshCommand(ctx, "dumpxml", domainName)
+	if err != nil {
+		return "", fmt.Errorf("failed to dump domain XML: %w", err)
+	}
+
+	// Look for cloud-init ISO in XML
+	lines := strings.Split(result.Stdout, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.Contains(line, "<source file=") {
+			// Extract the file path
+			start := strings.Index(line, "file='")
+			if start == -1 {
+				start = strings.Index(line, "file=\"")
+			}
+			if start != -1 {
+				start += 6
+				end := strings.IndexAny(line[start:], "\"'")
+				if end != -1 {
+					filePath := line[start : start+end]
+					// Check if this is a cloud-init ISO
+					if strings.HasSuffix(filePath, "cloud-init.iso") || strings.Contains(filePath, "virtrigaud-cloudinit") {
+						return filePath, nil
+					}
+				}
+			}
+		}
+	}
+
+	return "", nil
+}
+
+// deleteDiskFile deletes a disk file from the libvirt host
+func (p *Provider) deleteDiskFile(ctx context.Context, diskPath string) error {
+	log.Printf("INFO Deleting disk file: %s", diskPath)
+
+	// Use rm to delete the disk file
+	_, err := p.virshProvider.runVirshCommand(ctx, "!", "sudo", "rm", "-f", diskPath)
+	if err != nil {
+		return fmt.Errorf("failed to delete disk file %s: %w", diskPath, err)
+	}
+
+	return nil
+}
+
+// deleteCloudInitResources deletes cloud-init ISO and associated files
+func (p *Provider) deleteCloudInitResources(ctx context.Context, domainName, isoPath string) error {
+	log.Printf("INFO Deleting cloud-init resources for: %s", domainName)
+
+	// Delete the cloud-init directory which contains ISO, user-data, and meta-data
+	// Extract directory from ISO path by removing the filename
+	lastSlash := strings.LastIndex(isoPath, "/")
+	cloudInitDir := isoPath
+	if lastSlash != -1 {
+		cloudInitDir = isoPath[:lastSlash]
+	}
+
+	_, err := p.virshProvider.runVirshCommand(ctx, "!", "rm", "-rf", cloudInitDir)
+	if err != nil {
+		return fmt.Errorf("failed to delete cloud-init directory %s: %w", cloudInitDir, err)
+	}
+
+	return nil
+}
+
+// cleanupOrphanedResources attempts to clean up any resources that might be left behind
+func (p *Provider) cleanupOrphanedResources(ctx context.Context, domainName string) {
+	log.Printf("INFO Cleaning up orphaned resources for: %s", domainName)
+
+	// Try to delete disk files with common naming patterns
+	diskPatterns := []string{
+		fmt.Sprintf("/var/lib/libvirt/images/%s-disk.qcow2", domainName),
+		fmt.Sprintf("/var/lib/libvirt/images/%s.qcow2", domainName),
+		fmt.Sprintf("/var/lib/libvirt/images/%s-disk", domainName),
+	}
+
+	for _, diskPath := range diskPatterns {
+		_, err := p.virshProvider.runVirshCommand(ctx, "!", "sudo", "rm", "-f", diskPath)
+		if err != nil {
+			log.Printf("DEBUG Could not delete potential orphaned disk %s: %v", diskPath, err)
+		} else {
+			log.Printf("INFO Cleaned up orphaned disk: %s", diskPath)
+		}
+	}
+
+	// Try to delete cloud-init directory
+	cloudInitDir := fmt.Sprintf("/tmp/virtrigaud-cloudinit/%s", domainName)
+	_, err := p.virshProvider.runVirshCommand(ctx, "!", "rm", "-rf", cloudInitDir)
+	if err != nil {
+		log.Printf("DEBUG Could not delete cloud-init directory %s: %v", cloudInitDir, err)
+	} else {
+		log.Printf("INFO Cleaned up orphaned cloud-init directory: %s", cloudInitDir)
+	}
 }
 
 // Power controls VM power state using virsh

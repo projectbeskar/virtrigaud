@@ -453,59 +453,81 @@ ssh user@vm-ip "sudo cat /var/log/cloud-init.log | grep ERROR"
 
 ### Cloud-init Network Configuration
 
-**Symptom:** VM network doesn't work, requires reboot, or cloud-init doesn't complete
+**Default Behavior (v0.3.7-dev+):**
 
-**Explanation:** Virtrigaud uses cloud-init **version 2 network configuration** format in meta-data, which is supported across all major Linux distributions. Cloud-init automatically translates this to the appropriate network manager for each distro.
+Virtrigaud **does not include network configuration** in cloud-init meta-data. This allows cloud images to use their pre-configured default networking, which typically enables DHCP on all interfaces.
 
-**Current Behavior (v0.3.7-dev+):**
-- Network config uses version 2 format (netplan YAML syntax)
-- Cloud-init translates to distribution-specific network configuration:
-  - **Ubuntu/Debian**: Netplan → systemd-networkd
-  - **RHEL/CentOS/Rocky/Alma**: NetworkManager or network-scripts (ifcfg files)
-  - **Fedora**: NetworkManager
-  - **openSUSE**: Wicked or NetworkManager
-- Wildcard interface matching (`name: "e*"`) works across different naming schemes
-- **Note**: On Ubuntu, netplan regeneration may require a reboot for network to fully function
+**Why No Network Config?**
 
-**Meta-data Network Config:**
+All major cloud images come with working DHCP networking by default:
+- **Ubuntu/Debian**: Pre-configured via `/etc/netplan/50-cloud-init.yaml` or dhclient
+- **RHEL/CentOS/Fedora**: Pre-configured via NetworkManager or network-scripts
+- **openSUSE**: Pre-configured via Wicked or NetworkManager
+- **Windows**: Pre-configured via Windows DHCP client
+
+Adding network configuration in meta-data causes cloud-init to take over network management, which can lead to:
+- Timeouts waiting for network to be "ready"
+- Network configuration being regenerated on every boot
+- Requirement for reboots to apply changes
+- Conflicts with existing network configuration
+
+**Meta-data Format:**
 ```yaml
 instance-id: vm-name
 local-hostname: vm-name
+# No network configuration - uses distro defaults
+```
+
+**How It Works:**
+
+1. Cloud-init starts without network configuration
+2. Uses "fallback networking" - relies on distro's existing DHCP configuration
+3. Network comes up via the OS's native network manager
+4. Works immediately on first boot across all distributions
+5. No reboots required
+
+**For Custom Networking:**
+
+If you need custom network configuration, provide it in your **user-data** (not meta-data):
+
+**Option 1: Write custom network files**
+```yaml
+#cloud-config
+write_files:
+  - path: /etc/netplan/99-custom.yaml
+    permissions: '0644'
+    content: |
+      network:
+        version: 2
+        ethernets:
+          ens3:
+            addresses: [192.168.1.100/24]
+            gateway4: 192.168.1.1
+            nameservers:
+              addresses: [8.8.8.8]
+runcmd:
+  - netplan apply
+```
+
+**Option 2: Use distribution-specific commands**
+```yaml
+#cloud-config
+runcmd:
+  # For RHEL/CentOS with nmcli
+  - nmcli con mod "System eth0" ipv4.addresses 192.168.1.100/24
+  - nmcli con mod "System eth0" ipv4.method manual
+  - nmcli con up "System eth0"
+```
+
+**Option 3: Provide network_config in user-data**
+```yaml
+#cloud-config
 network:
   version: 2
   ethernets:
     eth0:
-      match:
-        name: "e*"
       dhcp4: true
-      dhcp6: false
 ```
-
-**Distribution-Specific Behavior:**
-
-| Distribution | Network Manager | Cloud-init Translation | Reboot Required? |
-|--------------|----------------|------------------------|------------------|
-| Ubuntu 18.04+ | netplan + systemd-networkd | Writes to `/etc/netplan/50-cloud-init.yaml` | Sometimes* |
-| Debian 11+ | netplan or ifupdown | Depends on installed tools | Maybe |
-| RHEL/CentOS 7 | network-scripts | Writes to `/etc/sysconfig/network-scripts/ifcfg-*` | No |
-| RHEL/CentOS 8+ | NetworkManager | Writes to `/etc/NetworkManager/system-connections/` | No |
-| Fedora | NetworkManager | Writes to `/etc/NetworkManager/system-connections/` | No |
-| openSUSE | Wicked/NetworkManager | Writes distribution-specific configs | No |
-
-*On Ubuntu, if cloud-init regenerates netplan configuration, `netplan apply` may not fully activate the network until after a reboot.
-
-**Workaround for Ubuntu Reboot Issue:**
-If you need immediate network without reboot on Ubuntu, include this in your user-data:
-```yaml
-runcmd:
-  - netplan apply
-  - systemctl restart systemd-networkd
-```
-
-**For Custom Networking:**
-- Provide custom network config in user-data using `write_files`
-- Use distribution-specific network configuration formats as needed
-- For complex scenarios, consider using `runcmd` to configure networking directly
 
 ### Windows Support
 
