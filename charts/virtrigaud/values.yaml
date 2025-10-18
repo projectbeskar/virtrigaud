@@ -91,7 +91,7 @@ providers:
     replicaCount: 1
     image:
       repository: projectbeskar/virtrigaud/provider-libvirt
-      tag: "v0.3.0-dev"
+      tag: "v0.3.17-dev"
     resources:
       limits:
         cpu: 1000m

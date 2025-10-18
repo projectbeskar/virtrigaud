@@ -116,12 +116,25 @@ graph TB
    # Basic installation (CRDs included automatically)
    helm install virtrigaud virtrigaud/virtrigaud -n virtrigaud-system --create-namespace
    
-   # With custom values
+   # With custom values and provider selection
    helm install virtrigaud virtrigaud/virtrigaud \
      -n virtrigaud-system --create-namespace \
      --set providers.vsphere.enabled=true \
      --set providers.libvirt.enabled=true \
      --set providers.proxmox.enabled=false \
+     --version v0.2.3
+   
+   # With libvirt credentials configured (recommended)
+   # First, create the credentials secret:
+   kubectl create secret generic libvirt-credentials -n virtrigaud-system \
+     --from-literal=username=your-ssh-username \
+     --from-literal=password='your-ssh-password'
+   
+   # Then install with credentials configured:
+   helm install virtrigaud virtrigaud/virtrigaud \
+     -n virtrigaud-system --create-namespace \
+     --set providers.libvirt.enabled=true \
+     --set providers.libvirt.credentialSecretRef.name=libvirt-credentials \
      --version v0.2.3
    
    # CRDs are automatically upgraded during 'helm upgrade' (default behavior)
@@ -148,6 +161,14 @@ graph TB
    # Standard upgrade - CRDs are automatically updated
    helm upgrade virtrigaud virtrigaud/virtrigaud -n virtrigaud-system
    
+   # Upgrade with provider configuration
+   helm upgrade virtrigaud virtrigaud/virtrigaud \
+     -n virtrigaud-system \
+     --set providers.vsphere.enabled=true \
+     --set providers.libvirt.enabled=true \
+     --set providers.libvirt.credentialSecretRef.name=libvirt-credentials \
+     --set providers.proxmox.enabled=true
+   
    # The chart uses Helm hooks to apply CRDs during upgrade
    # No manual CRD management needed!
    ```
@@ -164,16 +185,76 @@ graph TB
    make run
    ```
 
+### Provider Credentials Setup
+
+Before creating VMs, you need to configure credentials for your hypervisor providers.
+
+#### Libvirt/KVM Provider Credentials
+
+For Libvirt providers using SSH authentication, create a secret in the `virtrigaud-system` namespace:
+
+```bash
+# Create credentials secret for Libvirt provider
+kubectl create secret generic libvirt-credentials -n virtrigaud-system \
+  --from-literal=username=your-ssh-username \
+  --from-literal=password='your-ssh-password'
+
+# Or with SSH key (recommended for production)
+kubectl create secret generic libvirt-credentials -n virtrigaud-system \
+  --from-literal=username=your-ssh-username \
+  --from-file=ssh-privatekey=~/.ssh/id_rsa
+
+# Install/Upgrade Helm with libvirt credentials
+helm upgrade virtrigaud virtrigaud/virtrigaud \
+  --namespace virtrigaud-system \
+  --set providers.libvirt.enabled=true \
+  --set providers.libvirt.credentialSecretRef.name=libvirt-credentials \
+  --version v0.3.17-dev
+```
+
+**Important Notes:**
+- The credentials secret must be in the **same namespace** as the provider (virtrigaud-system)
+- The secret should contain keys: `username`, `password`, and/or `ssh-privatekey`
+- For SSH key authentication, use `ssh-privatekey` key in the secret
+
+#### vSphere Provider Credentials
+
+For vSphere providers, create credentials in the namespace where you'll deploy VMs:
+
+```bash
+# Create credentials secret for vSphere
+kubectl create secret generic vsphere-creds \
+  --from-literal=username=administrator@vsphere.local \
+  --from-literal=password=your-password
+```
+
 ### Using VirtRigaud
 
 1. **Create a Provider** (one-time setup per hypervisor):
+
+   **Libvirt/KVM Provider Example:**
    ```bash
-   # Create credentials secret
-   kubectl create secret generic vsphere-creds \
-     --from-literal=username=admin \
-     --from-literal=password=yourpassword
-   
-   # Create Provider resource
+   kubectl apply -f - <<EOF
+   apiVersion: infra.virtrigaud.io/v1beta1
+   kind: Provider
+   metadata:
+     name: libvirt-kvm
+     namespace: default
+   spec:
+     type: libvirt
+     endpoint: "qemu+ssh://192.168.1.10/system"
+     credentialSecretRef:
+       name: libvirt-creds  # Secret in the same namespace (default)
+     runtime:
+       mode: Remote
+       image: "ghcr.io/projectbeskar/virtrigaud/provider-libvirt:latest"
+       service:
+         port: 9090
+   EOF
+   ```
+
+   **vSphere Provider Example:**
+   ```bash
    kubectl apply -f - <<EOF
    apiVersion: infra.virtrigaud.io/v1beta1
    kind: Provider
