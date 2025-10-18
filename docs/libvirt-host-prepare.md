@@ -453,35 +453,78 @@ ssh user@vm-ip "sudo cat /var/log/cloud-init.log | grep ERROR"
 
 ### Cloud-init Network Configuration
 
-**Symptom:** VM network doesn't work, times out, or cloud-init doesn't complete
+**Symptom:** VM network doesn't work, requires reboot, or cloud-init doesn't complete
 
-**Explanation:** Virtrigaud uses cloud-init **version 1 network config** in `meta-data` which provides DHCP configuration for common interface names (eth0, ens3, enp0s3).
+**Explanation:** Virtrigaud uses cloud-init **version 2 network configuration** format in meta-data, which is supported across all major Linux distributions. Cloud-init automatically translates this to the appropriate network manager for each distro.
 
 **Current Behavior (v0.3.7-dev+):**
-- Network config is provided in `meta-data` using version 1 format
-- Multiple common interface names are configured to handle different naming schemes
-- Configuration applies immediately without requiring netplan regeneration
-- VMs get network connectivity on first boot without reboot
+- Network config uses version 2 format (netplan YAML syntax)
+- Cloud-init translates to distribution-specific network configuration:
+  - **Ubuntu/Debian**: Netplan → systemd-networkd
+  - **RHEL/CentOS/Rocky/Alma**: NetworkManager or network-scripts (ifcfg files)
+  - **Fedora**: NetworkManager
+  - **openSUSE**: Wicked or NetworkManager
+- Wildcard interface matching (`name: "e*"`) works across different naming schemes
+- **Note**: On Ubuntu, netplan regeneration may require a reboot for network to fully function
 
-**Network Config Format:**
+**Meta-data Network Config:**
 ```yaml
+instance-id: vm-name
+local-hostname: vm-name
 network:
-  version: 1
-  config:
-    - type: physical
-      name: eth0
-      subnets:
-        - type: dhcp
-    - type: physical
-      name: ens3
-      subnets:
-        - type: dhcp
+  version: 2
+  ethernets:
+    eth0:
+      match:
+        name: "e*"
+      dhcp4: true
+      dhcp6: false
+```
+
+**Distribution-Specific Behavior:**
+
+| Distribution | Network Manager | Cloud-init Translation | Reboot Required? |
+|--------------|----------------|------------------------|------------------|
+| Ubuntu 18.04+ | netplan + systemd-networkd | Writes to `/etc/netplan/50-cloud-init.yaml` | Sometimes* |
+| Debian 11+ | netplan or ifupdown | Depends on installed tools | Maybe |
+| RHEL/CentOS 7 | network-scripts | Writes to `/etc/sysconfig/network-scripts/ifcfg-*` | No |
+| RHEL/CentOS 8+ | NetworkManager | Writes to `/etc/NetworkManager/system-connections/` | No |
+| Fedora | NetworkManager | Writes to `/etc/NetworkManager/system-connections/` | No |
+| openSUSE | Wicked/NetworkManager | Writes distribution-specific configs | No |
+
+*On Ubuntu, if cloud-init regenerates netplan configuration, `netplan apply` may not fully activate the network until after a reboot.
+
+**Workaround for Ubuntu Reboot Issue:**
+If you need immediate network without reboot on Ubuntu, include this in your user-data:
+```yaml
+runcmd:
+  - netplan apply
+  - systemctl restart systemd-networkd
 ```
 
 **For Custom Networking:**
-- Use version 1 format in meta-data for immediate application
-- Or use `write_files` in user-data to create netplan configs (requires reboot)
-- Avoid version 2 network config in meta-data (causes netplan regeneration)
+- Provide custom network config in user-data using `write_files`
+- Use distribution-specific network configuration formats as needed
+- For complex scenarios, consider using `runcmd` to configure networking directly
+
+### Windows Support
+
+**Note:** Windows cloud images typically use **cloudbase-init** instead of cloud-init, which has different configuration requirements:
+
+- **Network Configuration**: Windows images usually auto-configure networking via DHCP without explicit cloud-init config
+- **Meta-data Format**: Cloudbase-init accepts the same meta-data format but ignores network configuration
+- **User-data**: Use PowerShell scripts or unattend.xml format in user-data
+- **Guest Agent**: Windows requires **QEMU Guest Agent for Windows** to be installed for IP detection
+
+**Example Windows User-data:**
+```yaml
+#ps1_sysnative
+# PowerShell script for Windows initialization
+Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False
+Install-WindowsFeature -Name Web-Server -IncludeManagementTools
+```
+
+For detailed Windows support, refer to [Cloudbase-init documentation](https://cloudbase-init.readthedocs.io/).
 
 ### "Pending Changes" in Cockpit
 
