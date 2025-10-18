@@ -99,6 +99,11 @@ providers:
       requests:
         cpu: 200m
         memory: 256Mi
+    # Optional: Reference to secret containing libvirt credentials
+    # When set, credentials will be mounted to /etc/virtrigaud/credentials
+    # Secret should contain keys: username, password, and/or ssh-privatekey
+    credentialSecretRef:
+      name: ""
 
   # vSphere provider  
   vsphere:

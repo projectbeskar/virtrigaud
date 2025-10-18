@@ -53,12 +53,25 @@ spec:
           periodSeconds: 10
         resources:
           {{- toYaml .Values.providers.libvirt.resources | nindent 10 }}
+        env:
+        - name: PROVIDER_TYPE
+          value: "libvirt"
         volumeMounts:
         - name: tmp
           mountPath: /tmp
+        {{- if .Values.providers.libvirt.credentialSecretRef }}
+        - name: provider-credentials
+          mountPath: /etc/virtrigaud/credentials
+          readOnly: true
+        {{- end }}
       volumes:
       - name: tmp
         emptyDir: {}
+      {{- if .Values.providers.libvirt.credentialSecretRef }}
+      - name: provider-credentials
+        secret:
+          secretName: {{ .Values.providers.libvirt.credentialSecretRef.name }}
+      {{- end }}
       {{- with .Values.global.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

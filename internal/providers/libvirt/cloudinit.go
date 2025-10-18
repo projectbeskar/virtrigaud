@@ -128,39 +128,53 @@ func (c *CloudInitProvider) createRemoteCloudInitISO(ctx context.Context, source
 func (c *CloudInitProvider) generateMetaData(instanceID, hostname string) string {
 	// Basic metadata following cloud-init NoCloud format with default DHCP networking
 	//
-	// We provide a default network configuration using version 1 format which:
-	// 1. Works across all major distributions (Ubuntu, RHEL, CentOS, Fedora, Debian, etc.)
-	// 2. Enables DHCP on common interface names (eth0, ens3, enp0s3)
-	// 3. Does NOT cause netplan regeneration (version 1 is applied directly)
-	// 4. Can be overridden by users via network config in user-data
+	// Multi-Distribution Support:
+	// - Ubuntu/Debian: Uses netplan or NetworkManager depending on version
+	// - RHEL/CentOS/Rocky/Alma: Uses NetworkManager or network-scripts
+	// - Fedora: Uses NetworkManager
+	// - openSUSE/SLES: Uses Wicked or NetworkManager
+	// - Arch: Uses systemd-networkd or NetworkManager
 	//
-	// Version 1 format advantages:
-	// - Immediate application without reboot
-	// - Cloud-init translates to distro-specific configs (NetworkManager, ifcfg, netplan, etc.)
-	// - Multiple interface names ensure compatibility with different naming schemes
+	// Cloud-init version 1 format:
+	// - Immediate application without requiring reboot
+	// - Cloud-init translates to distro-specific configs automatically
+	// - Multiple interface names ensure compatibility with different naming schemes:
+	//   * eth0 - Traditional naming (older distros, custom configs)
+	//   * ens3 - Predictable naming for virtio (most common in VMs)
+	//   * enp0s3 - Predictable naming with PCI info
+	//   * enp1s0 - Alternative PCI-based naming
 	//
-	// Users who need custom networking (static IP, custom DNS, VLANs, etc.) can provide
-	// network configuration in their user-data which will take precedence over this default.
+	// User Override: Users can provide custom networking in user-data which takes precedence.
+	// Windows Support: Windows VMs should use cloudbase-init specific configuration (see docs).
 	metadata := fmt.Sprintf(`instance-id: %s
 local-hostname: %s
 network:
   version: 1
   config:
+    # Traditional interface naming (older distros, custom configs)
     - type: physical
       name: eth0
       subnets:
-        - type: dhcp
-          control: auto
+        - type: dhcp4
+        - type: dhcp6
+    # Predictable naming - most common for virtio NICs in VMs
     - type: physical
       name: ens3
       subnets:
-        - type: dhcp
-          control: auto
+        - type: dhcp4
+        - type: dhcp6
+    # Predictable naming with PCI slot info
     - type: physical
       name: enp0s3
       subnets:
-        - type: dhcp
-          control: auto
+        - type: dhcp4
+        - type: dhcp6
+    # Alternative PCI-based naming
+    - type: physical
+      name: enp1s0
+      subnets:
+        - type: dhcp4
+        - type: dhcp6
 `, instanceID, hostname)
 
 	return metadata

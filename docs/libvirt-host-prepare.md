@@ -626,7 +626,72 @@ network:
 
 ### Windows Support
 
-**Note:** Windows cloud images typically use **cloudbase-init** instead of cloud-init, which has different configuration requirements:
+**Note:** Windows cloud images use **cloudbase-init** instead of cloud-init. Virtrigaud supports Windows VMs with specific configuration requirements:
+
+#### Windows Network Configuration
+
+Cloudbase-init uses different configuration formats than cloud-init. Here's how to configure Windows VMs:
+
+**DHCP Configuration (Default):**
+```yaml
+#cloud-config
+# For Windows, this section is interpreted by cloudbase-init
+users:
+  - name: Administrator
+    passwd: MySecurePassword123!
+    groups: Administrators
+
+# Network configuration for Windows (cloudbase-init)
+# By default, Windows will use DHCP if no network config is provided
+```
+
+**Static IP Configuration for Windows:**
+```yaml
+#cloud-config
+users:
+  - name: Administrator
+    passwd: MySecurePassword123!
+    groups: Administrators
+
+runcmd:
+  # Configure static IP using PowerShell
+  - 'powershell.exe -Command "New-NetIPAddress -InterfaceAlias \"Ethernet\" -IPAddress 192.168.1.100 -PrefixLength 24 -DefaultGateway 192.168.1.1"'
+  - 'powershell.exe -Command "Set-DnsClientServerAddress -InterfaceAlias \"Ethernet\" -ServerAddresses 8.8.8.8,8.8.4.4"'
+```
+
+**Alternative: Using write_files for Windows netsh:**
+```yaml
+#cloud-config
+write_files:
+  - path: C:\configure-network.cmd
+    permissions: '0755'
+    content: |
+      netsh interface ip set address "Ethernet" static 192.168.1.100 255.255.255.0 192.168.1.1
+      netsh interface ip set dns "Ethernet" static 8.8.8.8
+      netsh interface ip add dns "Ethernet" 8.8.4.4 index=2
+
+runcmd:
+  - 'C:\configure-network.cmd'
+```
+
+#### Windows Image Requirements
+
+1. **Cloudbase-init must be pre-installed** in the Windows cloud image
+2. **VirtIO drivers** must be installed for network and disk access
+3. **Guest agent** (qemu-guest-agent for Windows) should be installed for IP detection
+
+#### Windows Cloud Images
+
+Common sources for Windows cloud images with cloudbase-init:
+- **Official**: Build your own using [cloudbase-init documentation](https://cloudbase-init.readthedocs.io/)
+- **Community**: Check your hypervisor vendor's marketplace for pre-configured images
+
+#### Important Windows Notes
+
+1. **Password Complexity**: Windows requires complex passwords by default
+2. **Interface Names**: Windows uses "Ethernet", "Ethernet 2", etc. instead of eth0/ens3
+3. **First Boot**: Windows first boot takes longer than Linux (driver installation, etc.)
+4. **Guest Agent**: Install qemu-guest-agent for Windows to enable IP detection in Virtrigaud
 
 - **Network Configuration**: Windows images usually auto-configure networking via DHCP without explicit cloud-init config
 - **Meta-data Format**: Cloudbase-init accepts the same meta-data format but ignores network configuration
