@@ -451,21 +451,37 @@ ssh user@vm-ip "cloud-init status"
 ssh user@vm-ip "sudo cat /var/log/cloud-init.log | grep ERROR"
 ```
 
-### Cloud-init Requires Reboot
+### Cloud-init Network Configuration
 
-**Symptom:** VM network doesn't work or cloud-init doesn't complete until after a reboot
+**Symptom:** VM network doesn't work, times out, or cloud-init doesn't complete
 
-**Explanation:** This issue has been **fixed** in Virtrigaud. Previously, network configuration in `meta-data` caused cloud-init to regenerate netplan configs which required a reboot.
+**Explanation:** Virtrigaud uses cloud-init **version 1 network config** in `meta-data` which provides DHCP configuration for common interface names (eth0, ens3, enp0s3).
 
 **Current Behavior (v0.3.7-dev+):**
-- Virtrigaud NO LONGER includes network configuration in `meta-data`
-- Ubuntu cloud images default to DHCP automatically via `/etc/netplan/50-cloud-init.yaml`
-- VMs get network connectivity immediately on first boot without reboot
+- Network config is provided in `meta-data` using version 1 format
+- Multiple common interface names are configured to handle different naming schemes
+- Configuration applies immediately without requiring netplan regeneration
+- VMs get network connectivity on first boot without reboot
 
-**If you still experience this:**
-1. Ensure you're using the latest provider image
-2. Check that your custom cloud-init doesn't include conflicting network config
-3. For custom networking, use `write_files` to create netplan configs in user-data instead of meta-data
+**Network Config Format:**
+```yaml
+network:
+  version: 1
+  config:
+    - type: physical
+      name: eth0
+      subnets:
+        - type: dhcp
+    - type: physical
+      name: ens3
+      subnets:
+        - type: dhcp
+```
+
+**For Custom Networking:**
+- Use version 1 format in meta-data for immediate application
+- Or use `write_files` in user-data to create netplan configs (requires reboot)
+- Avoid version 2 network config in meta-data (causes netplan regeneration)
 
 ### "Pending Changes" in Cockpit
 
