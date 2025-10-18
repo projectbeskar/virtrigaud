@@ -259,6 +259,15 @@ func (p *Provider) Power(ctx context.Context, id string, op contracts.PowerOp) (
 	switch op {
 	case contracts.PowerOpOn:
 		err = p.virshProvider.startDomain(ctx, id)
+		// After starting, sync the persistent XML to match the running state
+		// This prevents "pending changes" in Cockpit by ensuring the persistent
+		// definition matches what libvirt expanded (e.g., CPU features)
+		if err == nil {
+			if syncErr := p.syncPersistentXML(ctx, id); syncErr != nil {
+				log.Printf("WARN Failed to sync persistent XML for %s: %v", id, syncErr)
+				// Don't fail the power on operation for this
+			}
+		}
 	case contracts.PowerOpOff:
 		err = p.virshProvider.stopDomain(ctx, id)
 	case contracts.PowerOpReboot:
@@ -267,6 +276,12 @@ func (p *Provider) Power(ctx context.Context, id string, op contracts.PowerOp) (
 			log.Printf("WARN Failed to stop domain for reboot: %v", stopErr)
 		}
 		err = p.virshProvider.startDomain(ctx, id)
+		// Sync persistent XML after reboot as well
+		if err == nil {
+			if syncErr := p.syncPersistentXML(ctx, id); syncErr != nil {
+				log.Printf("WARN Failed to sync persistent XML for %s: %v", id, syncErr)
+			}
+		}
 	case contracts.PowerOpShutdownGraceful:
 		// Graceful shutdown for libvirt - attempt guest shutdown, fallback to force stop
 		err = p.virshProvider.shutdownDomain(ctx, id)
@@ -284,6 +299,44 @@ func (p *Provider) Power(ctx context.Context, id string, op contracts.PowerOp) (
 
 	log.Printf("INFO Successfully performed power operation %s on %s", op, id)
 	return "", nil
+}
+
+// syncPersistentXML updates the persistent domain definition to match the running state
+// This prevents "pending changes" in management tools like Cockpit by ensuring the
+// persistent XML matches what libvirt expanded (e.g., host-model CPU to specific features)
+func (p *Provider) syncPersistentXML(ctx context.Context, domainName string) error {
+	log.Printf("INFO Syncing persistent XML definition for domain: %s", domainName)
+
+	// Get the running domain XML (this includes expanded CPU features, etc.)
+	result, err := p.virshProvider.runVirshCommand(ctx, "dumpxml", domainName)
+	if err != nil {
+		return fmt.Errorf("failed to dump running XML: %w", err)
+	}
+
+	// Write the running XML to a temporary file
+	remotePath := fmt.Sprintf("/tmp/%s-sync.xml", domainName)
+	heredocMarker := "EOF_SYNC_" + fmt.Sprintf("%d", time.Now().UnixNano())
+	command := fmt.Sprintf("cat > '%s' << '%s'\n%s\n%s", remotePath, heredocMarker, result.Stdout, heredocMarker)
+
+	_, err = p.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", command)
+	if err != nil {
+		return fmt.Errorf("failed to write sync XML file: %w", err)
+	}
+
+	// Define the domain again with the running XML (this updates the persistent definition)
+	_, err = p.virshProvider.runVirshCommand(ctx, "define", remotePath)
+	if err != nil {
+		return fmt.Errorf("failed to redefine domain: %w", err)
+	}
+
+	// Clean up temporary file
+	_, cleanupErr := p.virshProvider.runVirshCommand(ctx, "!", "rm", "-f", remotePath)
+	if cleanupErr != nil {
+		log.Printf("WARN Failed to cleanup sync XML file: %v", cleanupErr)
+	}
+
+	log.Printf("INFO Successfully synced persistent XML for domain: %s", domainName)
+	return nil
 }
 
 // Reconfigure updates VM configuration using virsh

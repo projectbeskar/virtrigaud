@@ -444,6 +444,22 @@ sudo chmod 644 /var/lib/libvirt/images/*-cidata.iso
 virsh dumpxml <vm-name> | grep -A 5 "device='cdrom'"
 ```
 
+### "Pending Changes" in Cockpit
+
+**Symptom:** Cockpit shows "pending changes" for CPU/Network after VM creation
+
+**Explanation:** This is normal behavior. When a VM is created with `cpu mode='host-model'`, libvirt dynamically expands this to specific CPU features when the VM starts. Virtrigaud automatically syncs the persistent definition with the running configuration to eliminate this warning.
+
+**If the warning persists:**
+```bash
+# Manually sync the persistent definition
+virsh dumpxml <vm-name> > /tmp/vm.xml
+virsh define /tmp/vm.xml
+
+# Verify no differences remain
+diff <(virsh dumpxml <vm-name> --inactive) <(virsh dumpxml <vm-name>)
+```
+
 ## Security Considerations
 
 ### Production Environments
