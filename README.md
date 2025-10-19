@@ -111,25 +111,26 @@ graph TB
    helm repo update
    ```
 
-2. **Install VirtRigaud**:
+2. **Install VirtRigaud** (Manager only - Providers are created via CRs):
    ```bash
-   # Basic installation (CRDs included automatically)
-   helm install virtrigaud virtrigaud/virtrigaud -n virtrigaud-system --create-namespace
-   
-   # With custom values and provider selection
+   # Install VirtRigaud manager (CRDs included automatically)
+   # Note: Providers are NOT enabled via Helm - they are created as Provider CRs
    helm install virtrigaud virtrigaud/virtrigaud \
      -n virtrigaud-system --create-namespace \
-     --set providers.vsphere.enabled=true \
-     --set providers.libvirt.enabled=true \
-     --set providers.proxmox.enabled=false \
-     --version v0.2.3
+     --set providers.vsphere.enabled=false \
+     --set providers.libvirt.enabled=false \
+     --set providers.proxmox.enabled=false
    
-   # CRDs are automatically upgraded during 'helm upgrade' (default behavior)
-   # To disable automatic CRD upgrades, use:
+   # Or simply install with default values (all providers disabled by default in future versions)
+   helm install virtrigaud virtrigaud/virtrigaud -n virtrigaud-system --create-namespace
+   
+   # To disable automatic CRD upgrades:
    helm install virtrigaud virtrigaud/virtrigaud \
      -n virtrigaud-system --create-namespace \
      --set crdUpgrade.enabled=false
    ```
+   
+   > **Important**: Do not enable providers via Helm flags. Instead, create Provider CRs (see step 1 in "Using VirtRigaud" below) which automatically deploy provider pods with proper credential management.
 
 3. **Verify the installation**:
    ```bash
@@ -148,15 +149,12 @@ graph TB
    # Standard upgrade - CRDs are automatically updated
    helm upgrade virtrigaud virtrigaud/virtrigaud -n virtrigaud-system
    
-   # Upgrade with provider configuration
-   helm upgrade virtrigaud virtrigaud/virtrigaud \
-     -n virtrigaud-system \
-     --set providers.vsphere.enabled=true \
-     --set providers.libvirt.enabled=true \
-     --set providers.proxmox.enabled=true
-   
    # The chart uses Helm hooks to apply CRDs during upgrade
    # No manual CRD management needed!
+   
+   # To upgrade provider images, update the Provider CR's spec.runtime.image field:
+   kubectl patch provider <provider-name> -n <namespace> --type=merge \
+     -p '{"spec":{"runtime":{"image":"ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.3.18-dev"}}}'
    ```
 
 ### Development Installation
@@ -174,6 +172,27 @@ graph TB
 ### Using VirtRigaud
 
 1. **Create a Provider** (one-time setup per hypervisor):
+
+   First, create a credentials secret in the namespace where you'll create the Provider:
+   
+   ```bash
+   # For Libvirt (SSH authentication)
+   kubectl create secret generic libvirt-creds -n default \
+     --from-literal=username=your-ssh-username \
+     --from-literal=password='your-ssh-password'
+   
+   # Or with SSH key (recommended)
+   kubectl create secret generic libvirt-creds -n default \
+     --from-literal=username=your-ssh-username \
+     --from-file=ssh-privatekey=~/.ssh/id_rsa
+   
+   # For vSphere
+   kubectl create secret generic vsphere-creds -n default \
+     --from-literal=username=administrator@vsphere.local \
+     --from-literal=password='your-password'
+   ```
+
+   Then create the Provider CR that references the secret:
 
    **Libvirt/KVM Provider Example:**
    ```bash
@@ -217,7 +236,13 @@ graph TB
    EOF
    ```
 
-   > **How it works**: VirtRigaud automatically translates your Provider configuration into command-line arguments and environment variables for the provider pod. See [Remote Provider Documentation](docs/REMOTE_PROVIDERS.md#configuration-flow-provider-resource--provider-pod) for details.
+   > **How it works**: When you create a Provider CR, the VirtRigaud Provider Controller:
+   > 1. Creates a dedicated Deployment in the same namespace as the Provider CR
+   > 2. Mounts the credentials secret specified in `credentialSecretRef`
+   > 3. Creates a Service for the provider pod
+   > 4. The provider pod connects to your hypervisor using the mounted credentials
+   > 
+   > Each Provider CR gets its own isolated provider deployment with its own credentials. This is more secure than shared multi-tenant providers. See [Remote Provider Documentation](docs/REMOTE_PROVIDERS.md#configuration-flow-provider-resource--provider-pod) for details.
 
 2. **Create VM resources using the Provider**:
    ```bash
