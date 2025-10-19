@@ -1429,9 +1429,15 @@ func (r *VMMigrationReconciler) generateStorageURL(ctx context.Context, migratio
 	// Build URL based on storage type
 	switch storageConfig.Type {
 	case "pvc", "":
-		// PVC URL format: pvc://path
-		// The path is relative to the PVC mount point
-		return fmt.Sprintf("pvc://%s", migrationPath), nil
+		// Get the PVC name from status (set during validation phase)
+		pvcName := migration.Status.StoragePVCName
+		if pvcName == "" {
+			return "", fmt.Errorf("storage PVC name not set in migration status")
+		}
+
+		// PVC URL format: pvc://<pvc-name>/<path>
+		// Provider pods have PVCs mounted at /mnt/migration-storage/<pvc-name>
+		return fmt.Sprintf("pvc://%s/%s", pvcName, migrationPath), nil
 
 	default:
 		return "", fmt.Errorf("unsupported storage type: %s", storageConfig.Type)

@@ -94,21 +94,12 @@ func (p *PVCStorage) verifyMount() error {
 		}
 	}
 
-	// Test write access by creating a temporary file
-	testFile := filepath.Join(p.mountPath, ".virtrigaud-storage-test")
-	f, err := os.Create(testFile)
-	if err != nil {
-		return &StorageError{
-			Type:    ErrorTypePermissionDenied,
-			Message: fmt.Sprintf("PVC mount is not writable: %s", p.mountPath),
-			Cause:   err,
-		}
-	}
-	f.Close()
-	os.Remove(testFile)
+	// Note: We don't test write access to the parent mount path here
+	// because PVCs are mounted as subdirectories (e.g., /mnt/migration-storage/<pvc-name>)
+	// Write access will be tested when actually writing files
 
 	p.verified = true
-	log.Printf("DEBUG PVC mount verified: %s", p.mountPath)
+	log.Printf("INFO PVC mount path verified: %s", p.mountPath)
 	return nil
 }
 
@@ -511,7 +502,7 @@ func (p *PVCStorage) Close() error {
 func (p *PVCStorage) parsePath(url string) (string, error) {
 	url = strings.TrimSpace(url)
 
-	// Handle pvc:// URL format
+	// Handle pvc:// URL format: pvc://<pvc-name>/<file-path>
 	url = strings.TrimPrefix(url, "pvc://")
 
 	// Ensure path doesn't try to escape the mount
@@ -522,21 +513,24 @@ func (p *PVCStorage) parsePath(url string) (string, error) {
 		}
 	}
 
-	// Make absolute path within mount
-	var absPath string
-	if filepath.IsAbs(url) {
-		// If it's already absolute, ensure it's within our mount
-		if !strings.HasPrefix(url, p.mountPath) {
-			return "", &StorageError{
-				Type:    ErrorTypeInvalidConfig,
-				Message: fmt.Sprintf("path must be within PVC mount: %s", p.mountPath),
-			}
+	// Parse the URL to extract PVC name and file path
+	// Format: <pvc-name>/<file-path>
+	// Example: rbc-demo-migration-storage/vmmigrations/default/rbc-demo-migration/export.qcow2
+	parts := strings.SplitN(url, "/", 2)
+	if len(parts) < 2 {
+		return "", &StorageError{
+			Type:    ErrorTypeInvalidConfig,
+			Message: "invalid PVC URL format: expected pvc://<pvc-name>/<file-path>",
 		}
-		absPath = filepath.Clean(url)
-	} else {
-		// Relative path - join with mount path
-		absPath = filepath.Join(p.mountPath, url)
 	}
+
+	pvcName := parts[0]
+	filePath := parts[1]
+
+	// Construct the full path: /mnt/migration-storage/<pvc-name>/<file-path>
+	absPath := filepath.Join("/mnt/migration-storage", pvcName, filePath)
+
+	log.Printf("DEBUG Parsed PVC path: url=%s pvc=%s file=%s abs=%s", url, pvcName, filePath, absPath)
 
 	return absPath, nil
 }
