@@ -258,11 +258,20 @@ func (r *VMMigrationReconciler) handleValidatingPhase(ctx context.Context, migra
 		}
 
 		// Store PVC name in migration status for later use
-		if migration.Status.StoragePVCName == "" {
+		pvcJustCreated := migration.Status.StoragePVCName == ""
+		if pvcJustCreated {
 			migration.Status.StoragePVCName = pvcName
 			if err := r.updateStatus(ctx, migration); err != nil {
 				return ctrl.Result{}, err
 			}
+
+			// Wait for providers to restart with new PVC mount
+			// This gives providers time to update their deployments and restart pods
+			logger.Info("Waiting for providers to restart with PVC mount", "pvc", pvcName)
+			if err := r.waitForProvidersReady(ctx, migration); err != nil {
+				return r.transitionToFailed(ctx, migration, fmt.Sprintf("Providers not ready after PVC mount: %v", err))
+			}
+			logger.Info("Providers ready with PVC mounted", "pvc", pvcName)
 		}
 
 		logger.Info("Migration storage PVC ready", "pvc", pvcName)
@@ -1225,6 +1234,27 @@ func (r *VMMigrationReconciler) getProvider(ctx context.Context, providerRef inf
 	return provider, nil
 }
 
+// getSourceProvider retrieves the source provider for a migration
+func (r *VMMigrationReconciler) getSourceProvider(ctx context.Context, migration *infrav1beta1.VMMigration) (*infrav1beta1.Provider, error) {
+	var sourceProviderRef infrav1beta1.ObjectRef
+	if migration.Spec.Source.ProviderRef != nil {
+		sourceProviderRef = *migration.Spec.Source.ProviderRef
+	} else {
+		// Auto-detect from source VM
+		sourceVM, err := r.getSourceVM(ctx, migration)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get source VM: %w", err)
+		}
+		sourceProviderRef = sourceVM.Spec.ProviderRef
+	}
+	return r.getProvider(ctx, sourceProviderRef, migration.Namespace)
+}
+
+// getTargetProvider retrieves the target provider for a migration
+func (r *VMMigrationReconciler) getTargetProvider(ctx context.Context, migration *infrav1beta1.VMMigration) (*infrav1beta1.Provider, error) {
+	return r.getProvider(ctx, migration.Spec.Target.ProviderRef, migration.Namespace)
+}
+
 // isProviderReady checks if a provider is ready
 func (r *VMMigrationReconciler) isProviderReady(provider *infrav1beta1.Provider) bool {
 	// Check if provider has the ProviderAvailable condition set to True
@@ -1387,7 +1417,128 @@ func (r *VMMigrationReconciler) ensureMigrationPVC(ctx context.Context, migratio
 	logger.Info("Successfully created migration PVC", "pvc", pvcName)
 	r.Recorder.Event(migration, "Normal", "PVCCreated", fmt.Sprintf("Created migration storage PVC: %s", pvcName))
 
+	// Trigger provider reconciliation to mount the new PVC
+	// This will cause provider pods to restart with the new PVC mounted
+	if err := r.triggerProviderReconciliation(ctx, migration); err != nil {
+		logger.Error(err, "Failed to trigger provider reconciliation", "pvc", pvcName)
+		// Don't fail - reconciliation will happen eventually
+	}
+
 	return pvcName, nil
+}
+
+// triggerProviderReconciliation triggers reconciliation of both source and target providers
+// by annotating them, causing provider pods to restart with updated PVC mounts
+func (r *VMMigrationReconciler) triggerProviderReconciliation(ctx context.Context, migration *infrav1beta1.VMMigration) error {
+	logger := logging.FromContext(ctx)
+	timestamp := fmt.Sprintf("%d", time.Now().Unix())
+
+	// Trigger source provider
+	sourceProvider, err := r.getSourceProvider(ctx, migration)
+	if err != nil {
+		return fmt.Errorf("failed to get source provider: %w", err)
+	}
+
+	if sourceProvider.Annotations == nil {
+		sourceProvider.Annotations = make(map[string]string)
+	}
+	sourceProvider.Annotations["virtrigaud.io/reconcile-trigger"] = timestamp
+	sourceProvider.Annotations["virtrigaud.io/migration-pvc"] = migration.Status.StoragePVCName
+
+	if err := r.Update(ctx, sourceProvider); err != nil {
+		return fmt.Errorf("failed to annotate source provider: %w", err)
+	}
+	logger.Info("Triggered source provider reconciliation", "provider", sourceProvider.Name)
+
+	// Trigger target provider
+	targetProvider, err := r.getTargetProvider(ctx, migration)
+	if err != nil {
+		return fmt.Errorf("failed to get target provider: %w", err)
+	}
+
+	if targetProvider.Annotations == nil {
+		targetProvider.Annotations = make(map[string]string)
+	}
+	targetProvider.Annotations["virtrigaud.io/reconcile-trigger"] = timestamp
+	targetProvider.Annotations["virtrigaud.io/migration-pvc"] = migration.Status.StoragePVCName
+
+	if err := r.Update(ctx, targetProvider); err != nil {
+		return fmt.Errorf("failed to annotate target provider: %w", err)
+	}
+	logger.Info("Triggered target provider reconciliation", "provider", targetProvider.Name)
+
+	return nil
+}
+
+// waitForProvidersReady waits for both source and target providers to be ready
+// after a PVC mount update (which triggers pod restart)
+func (r *VMMigrationReconciler) waitForProvidersReady(ctx context.Context, migration *infrav1beta1.VMMigration) error {
+	logger := logging.FromContext(ctx)
+	timeout := 5 * time.Minute
+	pollInterval := 5 * time.Second
+
+	logger.Info("Waiting for providers to be ready after PVC mount update")
+
+	// Wait for source provider
+	sourceProvider, err := r.getSourceProvider(ctx, migration)
+	if err != nil {
+		return fmt.Errorf("failed to get source provider: %w", err)
+	}
+
+	if err := r.waitForProviderReady(ctx, sourceProvider, timeout, pollInterval); err != nil {
+		return fmt.Errorf("source provider not ready: %w", err)
+	}
+
+	// Wait for target provider
+	targetProvider, err := r.getTargetProvider(ctx, migration)
+	if err != nil {
+		return fmt.Errorf("failed to get target provider: %w", err)
+	}
+
+	if err := r.waitForProviderReady(ctx, targetProvider, timeout, pollInterval); err != nil {
+		return fmt.Errorf("target provider not ready: %w", err)
+	}
+
+	logger.Info("All providers are ready")
+	return nil
+}
+
+// waitForProviderReady waits for a single provider to be ready
+func (r *VMMigrationReconciler) waitForProviderReady(ctx context.Context, provider *infrav1beta1.Provider, timeout, pollInterval time.Duration) error {
+	logger := logging.FromContext(ctx)
+	deadline := time.Now().Add(timeout)
+
+	for {
+		// Check if context is cancelled
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		// Check timeout
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timeout waiting for provider %s to be ready", provider.Name)
+		}
+
+		// Refresh provider status
+		currentProvider := &infrav1beta1.Provider{}
+		if err := r.Get(ctx, types.NamespacedName{
+			Name:      provider.Name,
+			Namespace: provider.Namespace,
+		}, currentProvider); err != nil {
+			logger.Error(err, "Failed to get provider status", "provider", provider.Name)
+			time.Sleep(pollInterval)
+			continue
+		}
+
+		// Check if provider is available and runtime ready
+		if r.isProviderReady(currentProvider) {
+			logger.Info("Provider is ready", "provider", provider.Name)
+			return nil
+		}
+
+		logger.Info("Waiting for provider to be ready", "provider", provider.Name)
+		time.Sleep(pollInterval)
+	}
 }
 
 // getProviderInstance retrieves a provider gRPC client

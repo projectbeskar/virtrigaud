@@ -454,9 +454,16 @@ spec:
 #### How It Works
 
 1. **PVC Creation**: VirtRigaud automatically creates a PVC with the specified StorageClass and size (or uses an existing one)
-2. **Automatic Mounting**: Provider pods automatically discover and mount migration PVCs in their namespace
-3. **Data Transfer**: Source provider exports VM disk to PVC, target provider imports from PVC
-4. **Automatic Cleanup**: PVC is deleted when the `VMMigration` resource is removed (if auto-created)
+2. **Provider Restart**: Provider pods automatically restart to mount the new PVC (5-15 second disruption)
+3. **Automatic Mounting**: Provider pods discover and mount migration PVCs during startup
+4. **Data Transfer**: Source provider exports VM disk to PVC, target provider imports from PVC
+5. **Automatic Cleanup**: PVC is deleted when the `VMMigration` resource is removed (if auto-created)
+
+**Important Notes:**
+- **Brief Service Disruption**: When a migration is created, both source and target provider pods will restart to mount the migration PVC. This causes a brief (5-15 second) disruption to VM operations managed by those providers.
+- **Graceful Termination**: Providers have a 30-second graceful termination period to complete in-flight operations before shutdown.
+- **Automatic Recovery**: After providers restart and become healthy, the migration proceeds automatically.
+- **Production Consideration**: Plan migrations during maintenance windows or ensure redundant providers if continuous availability is required.
 
 #### Storage Size Recommendations
 
@@ -470,6 +477,8 @@ spec:
 - Verify StorageClass exists: `kubectl get storageclass`
 - Check PVC status: `kubectl get pvc -n <namespace>`
 - View PVC events: `kubectl describe pvc <pvc-name> -n <namespace>`
+- Check provider pods are restarting: `kubectl get pods -n <namespace> | grep provider`
+- View provider logs during restart: `kubectl logs -n <namespace> <provider-pod> --previous`
 
 **Migration fails with "PVC mount not writable":**
 - Verify PVC has `ReadWriteMany` access mode

@@ -326,12 +326,13 @@ func (r *ProviderReconciler) reconcileDeployment(ctx context.Context, provider *
 					},
 				},
 				Spec: corev1.PodSpec{
-					Containers:    []corev1.Container{*container},
-					Volumes:       r.buildPodVolumes(provider),
-					NodeSelector:  provider.Spec.Runtime.NodeSelector,
-					Tolerations:   provider.Spec.Runtime.Tolerations,
-					Affinity:      provider.Spec.Runtime.Affinity,
-					RestartPolicy: corev1.RestartPolicyAlways,
+					Containers:                    []corev1.Container{*container},
+					Volumes:                       r.buildPodVolumes(provider),
+					NodeSelector:                  provider.Spec.Runtime.NodeSelector,
+					Tolerations:                   provider.Spec.Runtime.Tolerations,
+					Affinity:                      provider.Spec.Runtime.Affinity,
+					RestartPolicy:                 corev1.RestartPolicyAlways,
+					TerminationGracePeriodSeconds: util.Int64Ptr(30), // Allow time for graceful shutdown
 				},
 			},
 		},
@@ -527,6 +528,15 @@ func (r *ProviderReconciler) buildProviderContainer(provider *infravirtrigaudiov
 			},
 			InitialDelaySeconds: 5,
 			PeriodSeconds:       10,
+		},
+		Lifecycle: &corev1.Lifecycle{
+			PreStop: &corev1.LifecycleHandler{
+				Exec: &corev1.ExecAction{
+					// Sleep to allow in-flight gRPC requests to complete
+					// The gRPC server should handle graceful shutdown internally
+					Command: []string{"/bin/sh", "-c", "sleep 15"},
+				},
+			},
 		},
 	}
 
