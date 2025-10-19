@@ -71,6 +71,19 @@ rules:
   - patch
   - update
   - watch
+# PersistentVolumeClaims for VM migration storage
+- apiGroups:
+  - ""
+  resources:
+  - persistentvolumeclaims
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
 # Deployment resources for remote providers
 - apiGroups:
   - apps
@@ -175,6 +188,19 @@ rules:
   - configmaps
   - services
   - events
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+# PersistentVolumeClaims for VM migration storage
+- apiGroups:
+  - ""
+  resources:
+  - persistentvolumeclaims
   verbs:
   - create
   - delete
