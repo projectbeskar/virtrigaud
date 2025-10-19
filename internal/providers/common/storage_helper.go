@@ -17,29 +17,10 @@ limitations under the License.
 package common
 
 import (
-	"context"
 	"fmt"
-
-	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/projectbeskar/virtrigaud/internal/storage"
 )
-
-// GetStorageFromURL creates a storage client from a URL and optional credentials
-// This is a convenience wrapper around storage.NewStorageFromURL for use in providers
-func GetStorageFromURL(ctx context.Context, k8sClient client.Client, storageURL string, credentialsSecretRef *types.NamespacedName) (storage.Storage, error) {
-	if storageURL == "" {
-		return nil, fmt.Errorf("storage URL is required")
-	}
-
-	storageClient, err := storage.NewStorageFromURL(ctx, k8sClient, storageURL, credentialsSecretRef)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create storage client: %w", err)
-	}
-
-	return storageClient, nil
-}
 
 // ProgressCallbackFunc is a function type for progress reporting
 type ProgressCallbackFunc func(bytesTransferred int64, totalBytes int64)
@@ -93,4 +74,3 @@ func IsRetryableStorageError(err error) bool {
 		return true
 	}
 }
-

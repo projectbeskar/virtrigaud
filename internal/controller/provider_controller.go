@@ -50,6 +50,7 @@ type ProviderReconciler struct {
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=providers/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile manages Provider resources and their runtime deployments
@@ -452,6 +453,10 @@ func (r *ProviderReconciler) buildProviderContainer(provider *infravirtrigaudiov
 		})
 	}
 
+	// Auto-discover and mount migration PVCs
+	migrationMounts := r.discoverMigrationVolumeMounts(context.Background(), provider.Namespace)
+	volumeMounts = append(volumeMounts, migrationMounts...)
+
 	// Default security context
 	securityContext := &corev1.SecurityContext{
 		RunAsNonRoot:             util.BoolPtr(true),
@@ -550,7 +555,85 @@ func (r *ProviderReconciler) buildPodVolumes(provider *infravirtrigaudiov1beta1.
 		})
 	}
 
+	// Auto-discover and mount migration PVCs
+	// This allows providers to access migration storage without manual configuration
+	migrationVolumes := r.discoverMigrationPVCs(context.Background(), provider.Namespace)
+	volumes = append(volumes, migrationVolumes...)
+
 	return volumes
+}
+
+// discoverMigrationPVCs finds all migration PVCs in the namespace and returns volume definitions for them
+func (r *ProviderReconciler) discoverMigrationPVCs(ctx context.Context, namespace string) []corev1.Volume {
+	var volumes []corev1.Volume
+
+	// List all PVCs in the namespace with migration labels
+	pvcList := &corev1.PersistentVolumeClaimList{}
+	err := r.List(ctx, pvcList,
+		client.InNamespace(namespace),
+		client.MatchingLabels{
+			"virtrigaud.io/component": "migration-storage",
+		},
+	)
+
+	if err != nil {
+		// Log error but don't fail - migrations might not be active
+		return volumes
+	}
+
+	// Create a volume for each migration PVC
+	for _, pvc := range pvcList.Items {
+		// Generate a safe volume name from PVC name (K8s volume names must be DNS label)
+		volumeName := fmt.Sprintf("migration-%s", pvc.Name)
+
+		volumes = append(volumes, corev1.Volume{
+			Name: volumeName,
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: pvc.Name,
+				},
+			},
+		})
+	}
+
+	return volumes
+}
+
+// discoverMigrationVolumeMounts finds all migration PVCs and returns volume mounts for them
+func (r *ProviderReconciler) discoverMigrationVolumeMounts(ctx context.Context, namespace string) []corev1.VolumeMount {
+	var mounts []corev1.VolumeMount
+
+	// List all PVCs in the namespace with migration labels
+	pvcList := &corev1.PersistentVolumeClaimList{}
+	err := r.List(ctx, pvcList,
+		client.InNamespace(namespace),
+		client.MatchingLabels{
+			"virtrigaud.io/component": "migration-storage",
+		},
+	)
+
+	if err != nil {
+		// Log error but don't fail - migrations might not be active
+		return mounts
+	}
+
+	// Create a volume mount for each migration PVC
+	for _, pvc := range pvcList.Items {
+		// Generate a safe volume name (must match the volume name in buildPodVolumes)
+		volumeName := fmt.Sprintf("migration-%s", pvc.Name)
+
+		// Mount at /mnt/migration-storage/<pvc-name>
+		// This allows multiple migration PVCs to be mounted if needed
+		mountPath := fmt.Sprintf("/mnt/migration-storage/%s", pvc.Name)
+
+		mounts = append(mounts, corev1.VolumeMount{
+			Name:      volumeName,
+			MountPath: mountPath,
+			ReadOnly:  false, // Migrations need read-write access
+		})
+	}
+
+	return mounts
 }
 
 // cleanupRemoteRuntime cleans up deployment and service for remote providers

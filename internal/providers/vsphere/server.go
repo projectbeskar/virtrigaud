@@ -2172,56 +2172,13 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 	p.logger.Warn("vSphere disk export requires OVF export API - simplified implementation")
 	p.logger.Info("Note: Full implementation would use govmomi OVF export and datastore file access")
 
-	// Parse storage URL and create storage client
-	parsedURL, err := storage.ParseStorageURL(req.DestinationUrl)
-	if err != nil {
-		return nil, errors.NewInvalidSpec("invalid destination URL: %v", err)
-	}
-
-	// Build storage config
+	// Create PVC storage client for migration
+	// The provider pod has the migration PVC mounted at /mnt/migration-storage/<pvc-name>
 	storageConfig := storage.StorageConfig{
-		Type:    parsedURL.Type,
-		Timeout: 300,
-		UseSSL:  true,
+		Type:      "pvc",
+		MountPath: "/mnt/migration-storage",
 	}
 
-	// Apply credentials
-	if req.Credentials != nil {
-		if accessKey, ok := req.Credentials["accessKey"]; ok {
-			storageConfig.AccessKey = accessKey
-		}
-		if secretKey, ok := req.Credentials["secretKey"]; ok {
-			storageConfig.SecretKey = secretKey
-		}
-		if token, ok := req.Credentials["token"]; ok {
-			storageConfig.Token = token
-		}
-		if endpoint, ok := req.Credentials["endpoint"]; ok {
-			storageConfig.Endpoint = endpoint
-		}
-		if region, ok := req.Credentials["region"]; ok {
-			storageConfig.Region = region
-		}
-	}
-
-	// Configure based on storage type
-	switch parsedURL.Type {
-	case "s3":
-		storageConfig.Bucket = parsedURL.Bucket
-		if storageConfig.Region == "" {
-			storageConfig.Region = "us-east-1"
-		}
-	case "http", "https":
-		if storageConfig.Endpoint == "" {
-			storageConfig.Endpoint = parsedURL.Endpoint
-		}
-	case "nfs":
-		if storageConfig.Endpoint == "" {
-			storageConfig.Endpoint = parsedURL.Path
-		}
-	}
-
-	// Create storage client
 	storageClient, err := storage.NewStorage(storageConfig)
 	if err != nil {
 		return nil, errors.NewInternal("failed to create storage client: %v", err)
@@ -2268,7 +2225,7 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 	if targetFormat != "vmdk" {
 		p.logger.Info("Converting VMDK to target format", "target_format", targetFormat)
 		convertedPath := fmt.Sprintf("/tmp/%s.%s", exportID, targetFormat)
-		
+
 		// Use diskutil for conversion
 		qemuImg := diskutil.NewQemuImg()
 		err = qemuImg.Convert(ctx, diskutil.ConvertOptions{
@@ -2281,7 +2238,7 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 		if err != nil {
 			return nil, errors.NewInternal("failed to convert VMDK format: %v", err)
 		}
-		
+
 		uploadPath = convertedPath
 		defer os.Remove(convertedPath)
 	} else {
@@ -2374,56 +2331,13 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 	// 4. Create disk descriptor
 	// 5. Return disk reference
 
-	// Parse storage URL and create storage client
-	parsedURL, err := storage.ParseStorageURL(req.SourceUrl)
-	if err != nil {
-		return nil, errors.NewInvalidSpec("invalid source URL: %v", err)
-	}
-
-	// Build storage config
+	// Create PVC storage client for migration
+	// The provider pod has the migration PVC mounted at /mnt/migration-storage/<pvc-name>
 	storageConfig := storage.StorageConfig{
-		Type:    parsedURL.Type,
-		Timeout: 300,
-		UseSSL:  true,
+		Type:      "pvc",
+		MountPath: "/mnt/migration-storage",
 	}
 
-	// Apply credentials
-	if req.Credentials != nil {
-		if accessKey, ok := req.Credentials["accessKey"]; ok {
-			storageConfig.AccessKey = accessKey
-		}
-		if secretKey, ok := req.Credentials["secretKey"]; ok {
-			storageConfig.SecretKey = secretKey
-		}
-		if token, ok := req.Credentials["token"]; ok {
-			storageConfig.Token = token
-		}
-		if endpoint, ok := req.Credentials["endpoint"]; ok {
-			storageConfig.Endpoint = endpoint
-		}
-		if region, ok := req.Credentials["region"]; ok {
-			storageConfig.Region = region
-		}
-	}
-
-	// Configure based on storage type
-	switch parsedURL.Type {
-	case "s3":
-		storageConfig.Bucket = parsedURL.Bucket
-		if storageConfig.Region == "" {
-			storageConfig.Region = "us-east-1"
-		}
-	case "http", "https":
-		if storageConfig.Endpoint == "" {
-			storageConfig.Endpoint = parsedURL.Endpoint
-		}
-	case "nfs":
-		if storageConfig.Endpoint == "" {
-			storageConfig.Endpoint = parsedURL.Path
-		}
-	}
-
-	// Create storage client
 	storageClient, err := storage.NewStorage(storageConfig)
 	if err != nil {
 		return nil, errors.NewInternal("failed to create storage client: %v", err)
@@ -2479,7 +2393,7 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 	if targetFormat != "vmdk" {
 		p.logger.Info("Converting to VMDK format", "source_format", targetFormat)
 		vmdkPath = fmt.Sprintf("/tmp/%s.vmdk", diskID)
-		
+
 		// Use diskutil for conversion
 		qemuImg := diskutil.NewQemuImg()
 		err = qemuImg.Convert(ctx, diskutil.ConvertOptions{
@@ -2491,7 +2405,7 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 		if err != nil {
 			return nil, errors.NewInternal("failed to convert to VMDK format: %v", err)
 		}
-		
+
 		defer os.Remove(vmdkPath)
 	} else {
 		vmdkPath = tempFile

@@ -572,7 +572,7 @@ func (s *StorageProvider) CreateVolumeFromImageFile(ctx context.Context, sourceI
 		sizeSpec := fmt.Sprintf("%dG", sizeGB)
 		log.Printf("INFO Resizing disk to %s", sizeSpec)
 
-		result, err = s.virshProvider.runVirshCommand(ctx, "!", "qemu-img", "resize", targetPath, sizeSpec)
+		_, err = s.virshProvider.runVirshCommand(ctx, "!", "qemu-img", "resize", targetPath, sizeSpec)
 		if err != nil {
 			log.Printf("WARN Failed to resize image (may already be correct size): %v", err)
 			// Don't fail here - the image may already be the right size or larger

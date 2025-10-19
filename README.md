@@ -373,6 +373,113 @@ If CRDs are missing after Helm install:
    helm install virtrigaud virtrigaud/virtrigaud -n virtrigaud-system --create-namespace
    ```
 
+## VM Migration
+
+VirtRigaud supports live VM migrations between different hypervisors (e.g., vSphere to Libvirt) using Kubernetes-native storage.
+
+### Migration Storage Requirements
+
+VM migrations require intermediate storage for transferring VM disk images. VirtRigaud uses **Kubernetes PersistentVolumeClaims (PVCs)** as the migration storage backend.
+
+#### Prerequisites
+
+1. **StorageClass with ReadWriteMany (RWX) Access**
+   
+   You need a StorageClass that supports `ReadWriteMany` access mode, allowing multiple provider pods to access the migration storage simultaneously. Common options include:
+
+   - **NFS-based storage** (nfs-subdir-external-provisioner, NFS CSI driver)
+   - **CephFS** (Ceph storage cluster)
+   - **GlusterFS** (Gluster storage cluster)
+   - **Cloud provider file storage** (AWS EFS, Azure Files, GCP Filestore)
+
+2. **Create a StorageClass**
+
+   Example NFS StorageClass:
+
+   ```yaml
+   apiVersion: storage.k8s.io/v1
+   kind: StorageClass
+   metadata:
+     name: nfs-migration-storage
+   provisioner: nfs.csi.k8s.io  # Or your NFS provisioner
+   parameters:
+     server: nfs-server.example.com
+     share: /exports/virtrigaud-migrations
+   volumeBindingMode: Immediate
+   reclaimPolicy: Delete
+   ```
+
+   Apply the StorageClass:
+   ```bash
+   kubectl apply -f nfs-storageclass.yaml
+   ```
+
+3. **Verify StorageClass**
+
+   ```bash
+   kubectl get storageclass nfs-migration-storage
+   ```
+
+#### Migration Configuration
+
+When creating a `VMMigration` resource, configure the storage as follows:
+
+```yaml
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMMigration
+metadata:
+  name: vm-migration-example
+  namespace: default
+spec:
+  source:
+    vmRef:
+      name: source-vm
+  target:
+    providerRef:
+      name: target-provider
+    vmRef:
+      name: target-vm
+  storage:
+    type: pvc  # Required: must be 'pvc'
+    pvc:
+      # Option 1: Auto-create PVC (recommended)
+      storageClassName: nfs-migration-storage
+      size: 100Gi
+      accessMode: ReadWriteMany  # Required for multi-provider access
+      
+      # Option 2: Use existing PVC
+      # name: existing-migration-pvc
+```
+
+#### How It Works
+
+1. **PVC Creation**: VirtRigaud automatically creates a PVC with the specified StorageClass and size (or uses an existing one)
+2. **Automatic Mounting**: Provider pods automatically discover and mount migration PVCs in their namespace
+3. **Data Transfer**: Source provider exports VM disk to PVC, target provider imports from PVC
+4. **Automatic Cleanup**: PVC is deleted when the `VMMigration` resource is removed (if auto-created)
+
+#### Storage Size Recommendations
+
+- Calculate required size: `source_vm_disk_size * 1.2` (20% overhead for conversion)
+- Minimum recommended: 50Gi
+- Large VMs: Match source disk size + 20GB overhead
+
+#### Troubleshooting
+
+**Migration stuck in "Validating" phase:**
+- Verify StorageClass exists: `kubectl get storageclass`
+- Check PVC status: `kubectl get pvc -n <namespace>`
+- View PVC events: `kubectl describe pvc <pvc-name> -n <namespace>`
+
+**Migration fails with "PVC mount not writable":**
+- Verify PVC has `ReadWriteMany` access mode
+- Check provider pod can mount the PVC: `kubectl describe pod <provider-pod> -n <namespace>`
+- Verify NFS/storage backend is accessible from cluster nodes
+
+**Provider pod fails to start:**
+- Check provider logs: `kubectl logs <provider-pod> -n <namespace>`
+- Verify PVC is bound: `kubectl get pvc <pvc-name> -n <namespace>`
+
 ## Development
 
 ### Prerequisites

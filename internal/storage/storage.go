@@ -123,45 +123,25 @@ type FileMetadata struct {
 
 // StorageConfig contains storage backend configuration
 type StorageConfig struct {
-	// Type specifies the storage backend type (s3, http, etc.)
+	// Type specifies the storage backend type (pvc only)
 	Type string
-	// Endpoint is the storage endpoint URL
-	Endpoint string
-	// Bucket for S3-compatible storage
-	Bucket string
-	// Region for S3-compatible storage
-	Region string
-	// AccessKey for authentication
-	AccessKey string
-	// SecretKey for authentication
-	SecretKey string
-	// Token for token-based authentication
-	Token string
-	// UseSSL enables SSL/TLS
-	UseSSL bool
-	// InsecureSkipVerify skips SSL certificate verification
-	InsecureSkipVerify bool
-	// Timeout for operations (in seconds)
-	Timeout int
-	// MaxRetries for failed operations
-	MaxRetries int
-	// ChunkSize for multipart uploads (in bytes)
-	ChunkSize int64
+	// PVCName is the name of the PVC to use
+	PVCName string
+	// PVCNamespace is the namespace of the PVC
+	PVCNamespace string
+	// MountPath is where the PVC is mounted in the pod
+	MountPath string
 }
 
 // NewStorage creates a new storage backend based on the configuration
 func NewStorage(config StorageConfig) (Storage, error) {
 	switch config.Type {
-	case "s3", "minio":
-		return NewS3Storage(config)
-	case "http", "https":
-		return NewHTTPStorage(config)
-	case "nfs":
-		return NewNFSStorage(config)
+	case "pvc", "":
+		return NewPVCStorage(config)
 	default:
 		return nil, &StorageError{
 			Type:    ErrorTypeInvalidConfig,
-			Message: "unsupported storage type: " + config.Type,
+			Message: "unsupported storage type (only 'pvc' is supported): " + config.Type,
 		}
 	}
 }

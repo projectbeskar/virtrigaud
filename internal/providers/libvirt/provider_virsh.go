@@ -303,7 +303,7 @@ func (p *Provider) getDomainDiskPaths(ctx context.Context, domainName string) ([
 	lines := strings.Split(result.Stdout, "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		if strings.Contains(line, "<source file=") && strings.Contains(line, "device='disk'") == false {
+		if strings.Contains(line, "<source file=") && !strings.Contains(line, "device='disk'") {
 			// Extract the file path from <source file='...'/>
 			start := strings.Index(line, "file='")
 			if start == -1 {
@@ -1722,59 +1722,19 @@ func (p *Provider) ExportDisk(ctx context.Context, req contracts.ExportDiskReque
 		uploadPath = diskPath
 	}
 
-	// Upload to destination using storage layer
+	// Upload to destination using PVC storage layer
 	log.Printf("INFO Uploading disk to: %s", req.DestinationURL)
 
-	// Parse the destination URL to get storage configuration
-	parsedURL, err := storage.ParseStorageURL(req.DestinationURL)
-	if err != nil {
-		return contracts.ExportDiskResponse{}, fmt.Errorf("invalid destination URL: %w", err)
-	}
-
-	// Build storage config from URL and credentials
+	// For PVC storage, the migration controller provides the mount path in the PVC environment
+	// The provider pod has the migration PVC mounted at /mnt/migration-storage/<pvc-name>
+	// We use a generic storage config that will be resolved by the storage layer
 	storageConfig := storage.StorageConfig{
-		Type:    parsedURL.Type,
-		Timeout: 300, // 5 minutes
-		UseSSL:  true,
+		Type: "pvc",
+		// The PVC mount path will be auto-detected from environment or default to /mnt/migration-storage
+		MountPath: "/mnt/migration-storage",
 	}
 
-	// Apply credentials from request
-	if req.Credentials != nil {
-		if accessKey, ok := req.Credentials["accessKey"]; ok {
-			storageConfig.AccessKey = accessKey
-		}
-		if secretKey, ok := req.Credentials["secretKey"]; ok {
-			storageConfig.SecretKey = secretKey
-		}
-		if token, ok := req.Credentials["token"]; ok {
-			storageConfig.Token = token
-		}
-		if endpoint, ok := req.Credentials["endpoint"]; ok {
-			storageConfig.Endpoint = endpoint
-		}
-		if region, ok := req.Credentials["region"]; ok {
-			storageConfig.Region = region
-		}
-	}
-
-	// Set type-specific configuration
-	switch parsedURL.Type {
-	case "s3":
-		storageConfig.Bucket = parsedURL.Bucket
-		if storageConfig.Region == "" {
-			storageConfig.Region = "us-east-1"
-		}
-	case "http", "https":
-		if storageConfig.Endpoint == "" {
-			storageConfig.Endpoint = parsedURL.Endpoint
-		}
-	case "nfs":
-		if storageConfig.Endpoint == "" {
-			storageConfig.Endpoint = parsedURL.Path
-		}
-	}
-
-	// Create storage client
+	// Create PVC storage client
 	storageClient, err := storage.NewStorage(storageConfig)
 	if err != nil {
 		return contracts.ExportDiskResponse{}, fmt.Errorf("failed to create storage client: %w", err)
@@ -1853,56 +1813,15 @@ func (p *Provider) ImportDisk(ctx context.Context, req contracts.ImportDiskReque
 
 	log.Printf("INFO Downloading disk from %s to %s", req.SourceURL, tempPath)
 
-	// Parse the source URL to get storage configuration
-	parsedURL, err := storage.ParseStorageURL(req.SourceURL)
-	if err != nil {
-		return contracts.ImportDiskResponse{}, fmt.Errorf("invalid source URL: %w", err)
-	}
-
-	// Build storage config from URL and credentials
+	// For PVC storage, the migration controller provides the mount path in the PVC environment
+	// The provider pod has the migration PVC mounted at /mnt/migration-storage/<pvc-name>
 	storageConfig := storage.StorageConfig{
-		Type:    parsedURL.Type,
-		Timeout: 300, // 5 minutes
-		UseSSL:  true,
+		Type: "pvc",
+		// The PVC mount path will be auto-detected from environment or default to /mnt/migration-storage
+		MountPath: "/mnt/migration-storage",
 	}
 
-	// Apply credentials from request
-	if req.Credentials != nil {
-		if accessKey, ok := req.Credentials["accessKey"]; ok {
-			storageConfig.AccessKey = accessKey
-		}
-		if secretKey, ok := req.Credentials["secretKey"]; ok {
-			storageConfig.SecretKey = secretKey
-		}
-		if token, ok := req.Credentials["token"]; ok {
-			storageConfig.Token = token
-		}
-		if endpoint, ok := req.Credentials["endpoint"]; ok {
-			storageConfig.Endpoint = endpoint
-		}
-		if region, ok := req.Credentials["region"]; ok {
-			storageConfig.Region = region
-		}
-	}
-
-	// Set type-specific configuration
-	switch parsedURL.Type {
-	case "s3":
-		storageConfig.Bucket = parsedURL.Bucket
-		if storageConfig.Region == "" {
-			storageConfig.Region = "us-east-1"
-		}
-	case "http", "https":
-		if storageConfig.Endpoint == "" {
-			storageConfig.Endpoint = parsedURL.Endpoint
-		}
-	case "nfs":
-		if storageConfig.Endpoint == "" {
-			storageConfig.Endpoint = parsedURL.Path
-		}
-	}
-
-	// Create storage client
+	// Create PVC storage client
 	storageClient, err := storage.NewStorage(storageConfig)
 	if err != nil {
 		return contracts.ImportDiskResponse{}, fmt.Errorf("failed to create storage client: %w", err)

@@ -233,42 +233,43 @@ spec:
               storage:
                 description: Storage defines storage backend configuration for transfer
                 properties:
-                  bucket:
-                    description: Bucket for S3-compatible storage
-                    type: string
-                  credentialsSecretRef:
-                    description: CredentialsSecretRef references credentials for storage
-                      access
+                  pvc:
+                    description: PVC specifies PVC-based storage configuration
                     properties:
-                      name:
-                        description: Name of the referenced object
-                        maxLength: 253
-                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                      accessMode:
+                        default: ReadWriteMany
+                        description: AccessMode for auto-created PVC
+                        enum:
+                        - ReadWriteOnce
+                        - ReadWriteMany
+                        - ReadOnlyMany
                         type: string
-                    required:
-                    - name
+                      mountPath:
+                        default: /mnt/migration-storage
+                        description: MountPath within pods where PVC is mounted
+                        type: string
+                      name:
+                        description: |-
+                          Name of an existing PVC to use for migration storage
+                          If not specified, a temporary PVC will be created
+                        type: string
+                      size:
+                        description: |-
+                          Size for auto-created PVC (e.g., "100Gi")
+                          Required if Name is not specified
+                        pattern: ^[0-9]+(\.[0-9]+)?(Ei?|Pi?|Ti?|Gi?|Mi?|Ki?)$
+                        type: string
+                      storageClassName:
+                        description: |-
+                          StorageClassName for auto-created PVC
+                          Required if Name is not specified
+                        type: string
                     type: object
-                  endpoint:
-                    description: Endpoint is the storage endpoint URL
-                    type: string
-                  insecureSkipVerify:
-                    default: false
-                    description: InsecureSkipVerify skips SSL certificate verification
-                    type: boolean
-                  prefix:
-                    description: Prefix for storage paths (optional namespace)
-                    type: string
-                  region:
-                    description: Region for S3-compatible storage
-                    type: string
                   type:
+                    default: pvc
                     description: Type specifies the storage backend type
                     enum:
-                    - s3
-                    - minio
-                    - http
-                    - https
-                    - nfs
+                    - pvc
                     type: string
                 required:
                 - type
@@ -671,6 +672,10 @@ spec:
                     description: URL is the intermediate storage URL
                     type: string
                 type: object
+              storagePVCName:
+                description: StoragePVCName is the name of the PVC used for migration
+                  storage
+                type: string
               targetVMID:
                 description: TargetVMID is the provider-specific target VM identifier
                 type: string

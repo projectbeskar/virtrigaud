@@ -19,11 +19,14 @@ package controller
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -72,6 +75,7 @@ func NewVMMigrationReconciler(
 //+kubebuilder:rbac:groups=infra.virtrigaud.io,resources=providers,verbs=get;list;watch
 //+kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 //+kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+//+kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop
 func (r *VMMigrationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -246,6 +250,22 @@ func (r *VMMigrationReconciler) handleValidatingPhase(ctx context.Context, migra
 		if err := r.validateStorageConfig(ctx, migration.Spec.Storage); err != nil {
 			return r.transitionToFailed(ctx, migration, fmt.Sprintf("Invalid storage configuration: %v", err))
 		}
+
+		// Ensure PVC exists or create it
+		pvcName, err := r.ensureMigrationPVC(ctx, migration)
+		if err != nil {
+			return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to ensure migration PVC: %v", err))
+		}
+
+		// Store PVC name in migration status for later use
+		if migration.Status.StoragePVCName == "" {
+			migration.Status.StoragePVCName = pvcName
+			if err := r.updateStatus(ctx, migration); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+
+		logger.Info("Migration storage PVC ready", "pvc", pvcName)
 	}
 
 	// Validation complete, transition to next phase
@@ -1223,25 +1243,151 @@ func (r *VMMigrationReconciler) validateStorageConfig(ctx context.Context, stora
 		return fmt.Errorf("storage configuration is required")
 	}
 
-	// Create storage config
-	config := storage.StorageConfig{
-		Type:     storageConfig.Type,
-		Endpoint: storageConfig.Endpoint,
-		Bucket:   storageConfig.Bucket,
-		Region:   storageConfig.Region,
+	// Validate storage type
+	if storageConfig.Type != "pvc" && storageConfig.Type != "" {
+		return fmt.Errorf("unsupported storage type: %s (only 'pvc' is supported)", storageConfig.Type)
 	}
 
-	// TODO: Load credentials from CredentialsSecretRef if provided
-	// For now, just validate the basic configuration
-
-	// Try to create storage instance to validate config
-	store, err := storage.NewStorage(config)
-	if err != nil {
-		return fmt.Errorf("failed to create storage backend: %w", err)
+	// Validate PVC configuration
+	if storageConfig.PVC == nil {
+		return fmt.Errorf("pvc configuration is required when using pvc storage type")
 	}
-	defer store.Close()
+
+	pvcConfig := storageConfig.PVC
+
+	// If using existing PVC, validate it exists
+	if pvcConfig.Name != "" {
+		// PVC name specified - it must exist
+		// We'll verify this in the actual migration phases
+		return nil
+	}
+
+	// Auto-create PVC validation
+	if pvcConfig.StorageClassName == "" {
+		return fmt.Errorf("storageClassName is required when PVC name is not specified (auto-create mode)")
+	}
+
+	if pvcConfig.Size == "" {
+		return fmt.Errorf("size is required when PVC name is not specified (auto-create mode)")
+	}
+
+	// Validate access mode
+	if pvcConfig.AccessMode != "" {
+		validModes := map[string]bool{
+			"ReadWriteOnce": true,
+			"ReadWriteMany": true,
+			"ReadOnlyMany":  true,
+		}
+		if !validModes[pvcConfig.AccessMode] {
+			return fmt.Errorf("invalid access mode: %s", pvcConfig.AccessMode)
+		}
+	}
 
 	return nil
+}
+
+// ensureMigrationPVC ensures the PVC for migration storage exists
+// Returns the PVC name and any error
+func (r *VMMigrationReconciler) ensureMigrationPVC(ctx context.Context, migration *infrav1beta1.VMMigration) (string, error) {
+	logger := logging.FromContext(ctx)
+
+	if migration.Spec.Storage == nil || migration.Spec.Storage.PVC == nil {
+		return "", fmt.Errorf("storage PVC configuration is missing")
+	}
+
+	pvcConfig := migration.Spec.Storage.PVC
+
+	// If PVC name specified, verify it exists
+	if pvcConfig.Name != "" {
+		pvc := &corev1.PersistentVolumeClaim{}
+		err := r.Get(ctx, types.NamespacedName{
+			Name:      pvcConfig.Name,
+			Namespace: migration.Namespace,
+		}, pvc)
+		if err != nil {
+			if errors.IsNotFound(err) {
+				return "", fmt.Errorf("specified PVC %s not found in namespace %s", pvcConfig.Name, migration.Namespace)
+			}
+			return "", fmt.Errorf("failed to get PVC %s: %w", pvcConfig.Name, err)
+		}
+		logger.Info("Using existing PVC for migration", "pvc", pvcConfig.Name)
+		return pvcConfig.Name, nil
+	}
+
+	// Auto-create PVC
+	pvcName := fmt.Sprintf("%s-storage", migration.Name)
+
+	// Check if PVC already exists
+	existingPVC := &corev1.PersistentVolumeClaim{}
+	err := r.Get(ctx, types.NamespacedName{
+		Name:      pvcName,
+		Namespace: migration.Namespace,
+	}, existingPVC)
+
+	if err == nil {
+		// PVC already exists
+		logger.Info("Migration PVC already exists", "pvc", pvcName)
+		return pvcName, nil
+	}
+
+	if !errors.IsNotFound(err) {
+		return "", fmt.Errorf("failed to check for existing PVC: %w", err)
+	}
+
+	// Create new PVC
+	logger.Info("Creating migration PVC", "pvc", pvcName, "storageClass", pvcConfig.StorageClassName, "size", pvcConfig.Size)
+
+	// Set default access mode if not specified
+	accessMode := corev1.ReadWriteMany
+	if pvcConfig.AccessMode != "" {
+		accessMode = corev1.PersistentVolumeAccessMode(pvcConfig.AccessMode)
+	}
+
+	// Parse size
+	quantity, err := resource.ParseQuantity(pvcConfig.Size)
+	if err != nil {
+		return "", fmt.Errorf("invalid PVC size %s: %w", pvcConfig.Size, err)
+	}
+
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      pvcName,
+			Namespace: migration.Namespace,
+			Labels: map[string]string{
+				"app.kubernetes.io/managed-by": "virtrigaud",
+				"virtrigaud.io/migration":      migration.Name,
+				"virtrigaud.io/component":      "migration-storage",
+			},
+			Annotations: map[string]string{
+				"virtrigaud.io/created-by": "vmmigration-controller",
+			},
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			StorageClassName: &pvcConfig.StorageClassName,
+			AccessModes: []corev1.PersistentVolumeAccessMode{
+				accessMode,
+			},
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: quantity,
+				},
+			},
+		},
+	}
+
+	// Set owner reference so PVC is cleaned up when migration is deleted
+	if err := controllerutil.SetControllerReference(migration, pvc, r.Scheme); err != nil {
+		return "", fmt.Errorf("failed to set owner reference on PVC: %w", err)
+	}
+
+	if err := r.Create(ctx, pvc); err != nil {
+		return "", fmt.Errorf("failed to create PVC: %w", err)
+	}
+
+	logger.Info("Successfully created migration PVC", "pvc", pvcName)
+	r.Recorder.Event(migration, "Normal", "PVCCreated", fmt.Sprintf("Created migration storage PVC: %s", pvcName))
+
+	return pvcName, nil
 }
 
 // getProviderInstance retrieves a provider gRPC client
@@ -1282,31 +1428,10 @@ func (r *VMMigrationReconciler) generateStorageURL(ctx context.Context, migratio
 
 	// Build URL based on storage type
 	switch storageConfig.Type {
-	case "s3", "minio":
-		// S3 URL format: s3://bucket/path
-		bucket := storageConfig.Bucket
-		if bucket == "" {
-			bucket = "vm-migrations"
-		}
-		return fmt.Sprintf("s3://%s/%s", bucket, migrationPath), nil
-
-	case "http", "https":
-		// HTTP URL format: http(s)://endpoint/path
-		endpoint := storageConfig.Endpoint
-		if endpoint == "" {
-			return "", fmt.Errorf("endpoint is required for HTTP storage")
-		}
-		// Ensure endpoint doesn't end with /
-		endpoint = strings.TrimSuffix(endpoint, "/")
-		return fmt.Sprintf("%s/%s", endpoint, migrationPath), nil
-
-	case "nfs":
-		// NFS URL format: nfs://path
-		endpoint := storageConfig.Endpoint
-		if endpoint == "" {
-			return "", fmt.Errorf("endpoint (mount path) is required for NFS storage")
-		}
-		return fmt.Sprintf("nfs://%s", migrationPath), nil
+	case "pvc", "":
+		// PVC URL format: pvc://path
+		// The path is relative to the PVC mount point
+		return fmt.Sprintf("pvc://%s", migrationPath), nil
 
 	default:
 		return "", fmt.Errorf("unsupported storage type: %s", storageConfig.Type)
@@ -1322,11 +1447,23 @@ func (r *VMMigrationReconciler) cleanupIntermediateStorage(ctx context.Context, 
 	}
 
 	// Create storage client
+	// Determine PVC mount path based on the PVC name
+	pvcName := migration.Status.StoragePVCName
+	if pvcName == "" && migration.Spec.Storage.PVC != nil && migration.Spec.Storage.PVC.Name != "" {
+		pvcName = migration.Spec.Storage.PVC.Name
+	}
+
+	// Set mount path to match provider controller's mount location
+	mountPath := fmt.Sprintf("/mnt/migration-storage/%s", pvcName)
+	if migration.Spec.Storage.PVC != nil && migration.Spec.Storage.PVC.MountPath != "" {
+		mountPath = migration.Spec.Storage.PVC.MountPath
+	}
+
 	storageConfig := storage.StorageConfig{
-		Type:     migration.Spec.Storage.Type,
-		Endpoint: migration.Spec.Storage.Endpoint,
-		Bucket:   migration.Spec.Storage.Bucket,
-		Region:   migration.Spec.Storage.Region,
+		Type:         "pvc",
+		PVCName:      pvcName,
+		PVCNamespace: migration.Namespace,
+		MountPath:    mountPath,
 	}
 
 	store, err := storage.NewStorage(storageConfig)

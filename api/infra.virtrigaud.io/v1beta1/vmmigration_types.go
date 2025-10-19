@@ -210,33 +210,43 @@ type ValidationChecks struct {
 // MigrationStorage defines storage backend configuration
 type MigrationStorage struct {
 	// Type specifies the storage backend type
-	// +kubebuilder:validation:Enum=s3;minio;http;https;nfs
+	// +kubebuilder:validation:Enum=pvc
+	// +kubebuilder:default=pvc
 	Type string `json:"type"`
 
-	// Endpoint is the storage endpoint URL
+	// PVC specifies PVC-based storage configuration
 	// +optional
-	Endpoint string `json:"endpoint,omitempty"`
+	PVC *PVCStorageConfig `json:"pvc,omitempty"`
+}
 
-	// Bucket for S3-compatible storage
+// PVCStorageConfig defines PVC storage configuration
+type PVCStorageConfig struct {
+	// Name of an existing PVC to use for migration storage
+	// If not specified, a temporary PVC will be created
 	// +optional
-	Bucket string `json:"bucket,omitempty"`
+	Name string `json:"name,omitempty"`
 
-	// Region for S3-compatible storage
+	// StorageClassName for auto-created PVC
+	// Required if Name is not specified
 	// +optional
-	Region string `json:"region,omitempty"`
+	StorageClassName string `json:"storageClassName,omitempty"`
 
-	// CredentialsSecretRef references credentials for storage access
+	// Size for auto-created PVC (e.g., "100Gi")
+	// Required if Name is not specified
 	// +optional
-	CredentialsSecretRef *LocalObjectReference `json:"credentialsSecretRef,omitempty"`
+	// +kubebuilder:validation:Pattern="^[0-9]+(\\.[0-9]+)?(Ei?|Pi?|Ti?|Gi?|Mi?|Ki?)$"
+	Size string `json:"size,omitempty"`
 
-	// InsecureSkipVerify skips SSL certificate verification
+	// AccessMode for auto-created PVC
 	// +optional
-	// +kubebuilder:default=false
-	InsecureSkipVerify bool `json:"insecureSkipVerify,omitempty"`
+	// +kubebuilder:validation:Enum=ReadWriteOnce;ReadWriteMany;ReadOnlyMany
+	// +kubebuilder:default=ReadWriteMany
+	AccessMode string `json:"accessMode,omitempty"`
 
-	// Prefix for storage paths (optional namespace)
+	// MountPath within pods where PVC is mounted
 	// +optional
-	Prefix string `json:"prefix,omitempty"`
+	// +kubebuilder:default="/mnt/migration-storage"
+	MountPath string `json:"mountPath,omitempty"`
 }
 
 // MigrationMetadata contains migration metadata
@@ -324,6 +334,10 @@ type VMMigrationStatus struct {
 	// StorageInfo contains information about intermediate storage
 	// +optional
 	StorageInfo *MigrationStorageInfo `json:"storageInfo,omitempty"`
+
+	// StoragePVCName is the name of the PVC used for migration storage
+	// +optional
+	StoragePVCName string `json:"storagePVCName,omitempty"`
 
 	// Conditions represent the current service state
 	// +optional

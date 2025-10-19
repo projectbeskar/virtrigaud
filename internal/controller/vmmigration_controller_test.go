@@ -179,63 +179,31 @@ var _ = Describe("VMMigration Controller", func() {
 			}
 		})
 
-		Context("with S3 storage", func() {
-			It("should generate correct S3 URL", func() {
+		Context("with PVC storage", func() {
+			It("should generate correct PVC URL", func() {
 				migration.Spec.Storage = &infrav1beta1.MigrationStorage{
-					Type:   "s3",
-					Bucket: "my-bucket",
+					Type: "pvc",
+					PVC: &infrav1beta1.PVCStorageConfig{
+						Name: "test-pvc",
+					},
 				}
 
 				url, err := reconciler.generateStorageURL(ctx, migration, "export")
 				Expect(err).NotTo(HaveOccurred())
-				Expect(url).To(Equal("s3://my-bucket/vmmigrations/default/test-migration/export.qcow2"))
+				Expect(url).To(Equal("pvc://vmmigrations/default/test-migration/export.qcow2"))
 			})
 
-			It("should use default bucket when not specified", func() {
+			It("should default to PVC when type is empty", func() {
 				migration.Spec.Storage = &infrav1beta1.MigrationStorage{
-					Type: "s3",
+					Type: "",
+					PVC: &infrav1beta1.PVCStorageConfig{
+						Name: "test-pvc",
+					},
 				}
 
 				url, err := reconciler.generateStorageURL(ctx, migration, "export")
 				Expect(err).NotTo(HaveOccurred())
-				Expect(url).To(Equal("s3://vm-migrations/vmmigrations/default/test-migration/export.qcow2"))
-			})
-		})
-
-		Context("with HTTP storage", func() {
-			It("should generate correct HTTP URL", func() {
-				migration.Spec.Storage = &infrav1beta1.MigrationStorage{
-					Type:     "http",
-					Endpoint: "http://storage.example.com",
-				}
-
-				url, err := reconciler.generateStorageURL(ctx, migration, "export")
-				Expect(err).NotTo(HaveOccurred())
-				Expect(url).To(Equal("http://storage.example.com/vmmigrations/default/test-migration/export.qcow2"))
-			})
-
-			It("should trim trailing slash from endpoint", func() {
-				migration.Spec.Storage = &infrav1beta1.MigrationStorage{
-					Type:     "http",
-					Endpoint: "http://storage.example.com/",
-				}
-
-				url, err := reconciler.generateStorageURL(ctx, migration, "export")
-				Expect(err).NotTo(HaveOccurred())
-				Expect(url).To(Equal("http://storage.example.com/vmmigrations/default/test-migration/export.qcow2"))
-			})
-		})
-
-		Context("with NFS storage", func() {
-			It("should generate correct NFS URL", func() {
-				migration.Spec.Storage = &infrav1beta1.MigrationStorage{
-					Type:     "nfs",
-					Endpoint: "/mnt/nfs-share",
-				}
-
-				url, err := reconciler.generateStorageURL(ctx, migration, "export")
-				Expect(err).NotTo(HaveOccurred())
-				Expect(url).To(Equal("nfs://vmmigrations/default/test-migration/export.qcow2"))
+				Expect(url).To(Equal("pvc://vmmigrations/default/test-migration/export.qcow2"))
 			})
 		})
 

@@ -30,74 +30,10 @@ func TestStorage(t *testing.T) {
 
 var _ = Describe("Storage Factory", func() {
 	Describe("NewStorage", func() {
-		Context("with S3 storage type", func() {
-			It("should create S3 storage", func() {
-				config := StorageConfig{
-					Type:      "s3",
-					Endpoint:  "https://s3.amazonaws.com",
-					Bucket:    "test-bucket",
-					Region:    "us-east-1",
-					AccessKey: "test-key",
-					SecretKey: "test-secret",
-				}
-
-				storage, err := NewStorage(config)
-				Expect(err).NotTo(HaveOccurred())
-				Expect(storage).NotTo(BeNil())
-
-				err = storage.Close()
-				Expect(err).NotTo(HaveOccurred())
-			})
-		})
-
-		Context("with MinIO storage type", func() {
-			It("should create S3-compatible storage", func() {
-				config := StorageConfig{
-					Type:      "minio",
-					Endpoint:  "https://minio.example.com",
-					Bucket:    "test-bucket",
-					AccessKey: "test-key",
-					SecretKey: "test-secret",
-				}
-
-				storage, err := NewStorage(config)
-				Expect(err).NotTo(HaveOccurred())
-				Expect(storage).NotTo(BeNil())
-
-				err = storage.Close()
-				Expect(err).NotTo(HaveOccurred())
-			})
-		})
-
-		Context("with HTTP storage type", func() {
-			It("should create HTTP storage", func() {
-				config := StorageConfig{
-					Type:     "http",
-					Endpoint: "http://storage.example.com",
-				}
-
-				storage, err := NewStorage(config)
-				Expect(err).NotTo(HaveOccurred())
-				Expect(storage).NotTo(BeNil())
-
-				err = storage.Close()
-				Expect(err).NotTo(HaveOccurred())
-			})
-		})
-
-		Context("with HTTPS storage type", func() {
-			It("should create HTTPS storage", func() {
-				config := StorageConfig{
-					Type:     "https",
-					Endpoint: "https://storage.example.com",
-				}
-
-				storage, err := NewStorage(config)
-				Expect(err).NotTo(HaveOccurred())
-				Expect(storage).NotTo(BeNil())
-
-				err = storage.Close()
-				Expect(err).NotTo(HaveOccurred())
+		Context("with PVC storage type", func() {
+			It("should create PVC storage when mount path exists", func() {
+				// Skip test if mount path doesn't exist (normal in unit tests)
+				Skip("PVC storage requires actual mounted PVC path")
 			})
 		})
 

@@ -1350,56 +1350,13 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 		return nil, errors.NewInvalidSpec("invalid disk path format: %s", diskInfo.Path)
 	}
 
-	// Parse storage URL and create storage client
-	parsedURL, err := storage.ParseStorageURL(req.DestinationUrl)
-	if err != nil {
-		return nil, errors.NewInvalidSpec("invalid destination URL: %v", err)
-	}
-
-	// Build storage config
+	// Create PVC storage client for migration
+	// The provider pod has the migration PVC mounted at /mnt/migration-storage/<pvc-name>
 	storageConfig := storage.StorageConfig{
-		Type:    parsedURL.Type,
-		Timeout: 300,
-		UseSSL:  true,
+		Type:      "pvc",
+		MountPath: "/mnt/migration-storage",
 	}
 
-	// Apply credentials
-	if req.Credentials != nil {
-		if accessKey, ok := req.Credentials["accessKey"]; ok {
-			storageConfig.AccessKey = accessKey
-		}
-		if secretKey, ok := req.Credentials["secretKey"]; ok {
-			storageConfig.SecretKey = secretKey
-		}
-		if token, ok := req.Credentials["token"]; ok {
-			storageConfig.Token = token
-		}
-		if endpoint, ok := req.Credentials["endpoint"]; ok {
-			storageConfig.Endpoint = endpoint
-		}
-		if region, ok := req.Credentials["region"]; ok {
-			storageConfig.Region = region
-		}
-	}
-
-	// Configure based on storage type
-	switch parsedURL.Type {
-	case "s3":
-		storageConfig.Bucket = parsedURL.Bucket
-		if storageConfig.Region == "" {
-			storageConfig.Region = "us-east-1"
-		}
-	case "http", "https":
-		if storageConfig.Endpoint == "" {
-			storageConfig.Endpoint = parsedURL.Endpoint
-		}
-	case "nfs":
-		if storageConfig.Endpoint == "" {
-			storageConfig.Endpoint = parsedURL.Path
-		}
-	}
-
-	// Create storage client
 	storageClient, err := storage.NewStorage(storageConfig)
 	if err != nil {
 		return nil, errors.NewInternal("failed to create storage client: %v", err)
@@ -1561,56 +1518,13 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 	// 3. Use `qm importdisk` to import into Proxmox storage
 	// 4. Return the imported disk reference
 
-	// Parse storage URL and create storage client
-	parsedURL, err := storage.ParseStorageURL(req.SourceUrl)
-	if err != nil {
-		return nil, errors.NewInvalidSpec("invalid source URL: %v", err)
-	}
-
-	// Build storage config
+	// Create PVC storage client for migration
+	// The provider pod has the migration PVC mounted at /mnt/migration-storage/<pvc-name>
 	storageConfig := storage.StorageConfig{
-		Type:    parsedURL.Type,
-		Timeout: 300,
-		UseSSL:  true,
+		Type:      "pvc",
+		MountPath: "/mnt/migration-storage",
 	}
 
-	// Apply credentials
-	if req.Credentials != nil {
-		if accessKey, ok := req.Credentials["accessKey"]; ok {
-			storageConfig.AccessKey = accessKey
-		}
-		if secretKey, ok := req.Credentials["secretKey"]; ok {
-			storageConfig.SecretKey = secretKey
-		}
-		if token, ok := req.Credentials["token"]; ok {
-			storageConfig.Token = token
-		}
-		if endpoint, ok := req.Credentials["endpoint"]; ok {
-			storageConfig.Endpoint = endpoint
-		}
-		if region, ok := req.Credentials["region"]; ok {
-			storageConfig.Region = region
-		}
-	}
-
-	// Configure based on storage type
-	switch parsedURL.Type {
-	case "s3":
-		storageConfig.Bucket = parsedURL.Bucket
-		if storageConfig.Region == "" {
-			storageConfig.Region = "us-east-1"
-		}
-	case "http", "https":
-		if storageConfig.Endpoint == "" {
-			storageConfig.Endpoint = parsedURL.Endpoint
-		}
-	case "nfs":
-		if storageConfig.Endpoint == "" {
-			storageConfig.Endpoint = parsedURL.Path
-		}
-	}
-
-	// Create storage client
 	storageClient, err := storage.NewStorage(storageConfig)
 	if err != nil {
 		return nil, errors.NewInternal("failed to create storage client: %v", err)
