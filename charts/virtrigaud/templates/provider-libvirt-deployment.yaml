@@ -59,19 +59,9 @@ spec:
         volumeMounts:
         - name: tmp
           mountPath: /tmp
-        {{- if .Values.providers.libvirt.credentialSecretRef }}
-        - name: provider-credentials
-          mountPath: /etc/virtrigaud/credentials
-          readOnly: true
-        {{- end }}
       volumes:
       - name: tmp
         emptyDir: {}
-      {{- if .Values.providers.libvirt.credentialSecretRef }}
-      - name: provider-credentials
-        secret:
-          secretName: {{ .Values.providers.libvirt.credentialSecretRef.name }}
-      {{- end }}
       {{- with .Values.global.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
