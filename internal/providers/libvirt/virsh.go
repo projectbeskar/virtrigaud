@@ -660,16 +660,30 @@ func (v *VirshProvider) getDomainIPAddresses(ctx context.Context, domainName str
 			parts := strings.Fields(line)
 			if len(parts) >= 4 {
 				// Format: Name MAC address Protocol Address
+				interfaceName := parts[0]
 				ip := parts[3]
-				if ip != "N/A" && ip != "-" && ip != "127.0.0.1" {
-					// Remove CIDR notation if present
-					if strings.Contains(ip, "/") {
-						ip = strings.Split(ip, "/")[0]
-					}
-					// Skip loopback and IPv6 link-local addresses
-					if !strings.HasPrefix(ip, "fe80:") && !strings.HasPrefix(ip, "::1") {
-						ips = append(ips, ip)
-					}
+
+				// Skip loopback interface and invalid entries
+				if interfaceName == "lo" || interfaceName == "-" || ip == "N/A" || ip == "-" {
+					continue
+				}
+
+				// Remove CIDR notation if present (must be done before IP filtering)
+				if strings.Contains(ip, "/") {
+					ip = strings.Split(ip, "/")[0]
+				}
+
+				// Filter out unwanted IPs:
+				// - Loopback addresses (127.0.0.1, ::1)
+				// - IPv6 link-local addresses (fe80::)
+				if ip == "127.0.0.1" || ip == "::1" || strings.HasPrefix(ip, "fe80:") {
+					continue
+				}
+
+				// Only include IPs from interfaces starting with 'e' (eth*, ens*, enp*, etc.)
+				// This excludes docker, virbr, and other virtual interfaces
+				if strings.HasPrefix(interfaceName, "e") {
+					ips = append(ips, ip)
 				}
 			}
 		}
