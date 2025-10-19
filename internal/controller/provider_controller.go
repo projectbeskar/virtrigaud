@@ -457,6 +457,12 @@ func (r *ProviderReconciler) buildProviderContainer(provider *infravirtrigaudiov
 	migrationMounts := r.discoverMigrationVolumeMounts(context.Background(), provider.Namespace)
 	volumeMounts = append(volumeMounts, migrationMounts...)
 
+	// Mount temporary directory (needed for read-only root filesystem)
+	volumeMounts = append(volumeMounts, corev1.VolumeMount{
+		Name:      "tmp",
+		MountPath: "/tmp",
+	})
+
 	// Default security context
 	securityContext := &corev1.SecurityContext{
 		RunAsNonRoot:             util.BoolPtr(true),
@@ -559,6 +565,14 @@ func (r *ProviderReconciler) buildPodVolumes(provider *infravirtrigaudiov1beta1.
 	// This allows providers to access migration storage without manual configuration
 	migrationVolumes := r.discoverMigrationPVCs(context.Background(), provider.Namespace)
 	volumes = append(volumes, migrationVolumes...)
+
+	// Add temporary directory volume (needed for read-only root filesystem)
+	volumes = append(volumes, corev1.Volume{
+		Name: "tmp",
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{},
+		},
+	})
 
 	return volumes
 }
