@@ -1207,9 +1207,10 @@ func (r *VMMigrationReconciler) getProvider(ctx context.Context, providerRef inf
 
 // isProviderReady checks if a provider is ready
 func (r *VMMigrationReconciler) isProviderReady(provider *infrav1beta1.Provider) bool {
-	// Check if provider has the Ready condition set to True
+	// Check if provider has the ProviderAvailable condition set to True
+	// The Provider CRD uses "ProviderAvailable" and "ProviderRuntimeReady" conditions
 	for _, condition := range provider.Status.Conditions {
-		if condition.Type == "Ready" && condition.Status == metav1.ConditionTrue {
+		if condition.Type == "ProviderAvailable" && condition.Status == metav1.ConditionTrue {
 			return true
 		}
 	}
