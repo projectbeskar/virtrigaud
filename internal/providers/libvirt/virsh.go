@@ -624,31 +624,66 @@ func (v *VirshProvider) getDomainNetworkInfo(ctx context.Context, domainName str
 	return info, nil
 }
 
-// getDomainIPAddresses attempts to get IP addresses via guest agent
+// getDomainIPAddresses attempts to get IP addresses via multiple sources
 func (v *VirshProvider) getDomainIPAddresses(ctx context.Context, domainName string) (string, error) {
-	result, err := v.runVirshCommand(ctx, "domifaddr", domainName)
-	if err != nil {
-		return "", err
-	}
-
 	ips := []string{}
-	lines := strings.Split(strings.TrimSpace(result.Stdout), "\n")
-	for i, line := range lines {
-		if i == 0 || strings.HasPrefix(line, "-") {
-			continue // Skip header lines
+
+	// Try multiple sources in order of preference:
+	// 1. Guest agent (most reliable, requires qemu-guest-agent installed)
+	// 2. DHCP lease (default, may be empty if network is bridged)
+	// 3. ARP table (fallback, may not work in all network configurations)
+
+	sources := []string{"agent", "lease", "arp"}
+
+	for _, source := range sources {
+		var result *VirshResult
+		var err error
+
+		if source == "lease" {
+			// Default source, no need to specify
+			result, err = v.runVirshCommand(ctx, "domifaddr", domainName)
+		} else {
+			result, err = v.runVirshCommand(ctx, "domifaddr", domainName, "--source", source)
 		}
-		parts := strings.Fields(line)
-		if len(parts) >= 4 {
-			// Format: Name MAC address Protocol Address
-			ip := parts[3]
-			if ip != "N/A" && ip != "-" {
-				// Remove CIDR notation if present
-				if strings.Contains(ip, "/") {
-					ip = strings.Split(ip, "/")[0]
+
+		if err != nil {
+			log.Printf("DEBUG Failed to get IPs from source '%s' for %s: %v", source, domainName, err)
+			continue
+		}
+
+		// Parse the output
+		lines := strings.Split(strings.TrimSpace(result.Stdout), "\n")
+		for i, line := range lines {
+			if i == 0 || strings.HasPrefix(line, "-") || strings.TrimSpace(line) == "" {
+				continue // Skip header lines and empty lines
+			}
+			parts := strings.Fields(line)
+			if len(parts) >= 4 {
+				// Format: Name MAC address Protocol Address
+				ip := parts[3]
+				if ip != "N/A" && ip != "-" && ip != "127.0.0.1" {
+					// Remove CIDR notation if present
+					if strings.Contains(ip, "/") {
+						ip = strings.Split(ip, "/")[0]
+					}
+					// Skip loopback and IPv6 link-local addresses
+					if !strings.HasPrefix(ip, "fe80:") && !strings.HasPrefix(ip, "::1") {
+						ips = append(ips, ip)
+					}
 				}
-				ips = append(ips, ip)
 			}
 		}
+
+		// If we found IPs from this source, stop trying other sources
+		if len(ips) > 0 {
+			log.Printf("DEBUG Successfully retrieved %d IP(s) from source '%s' for %s", len(ips), source, domainName)
+			break
+		}
+	}
+
+	if len(ips) == 0 {
+		log.Printf("DEBUG No IP addresses found for domain %s from any source", domainName)
+		return "", nil
 	}
 
 	return strings.Join(ips, ","), nil
