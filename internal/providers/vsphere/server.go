@@ -1926,8 +1926,30 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 
 	p.logger.Info("Virtual machine created successfully", "vm_id", vmID, "name", spec.Name)
 
-	// Resize disk if specified in VMClass
+	// Get the new VM object for further operations
 	newVM := object.NewVirtualMachine(p.client.Client, vmRef)
+
+	// Apply extraConfig settings via reconfiguration (nested virt, VT-d, etc.)
+	// These settings are often ignored during clone and must be applied separately
+	if len(extraConfig) > 0 {
+		p.logger.Info("Applying advanced CPU settings via reconfiguration", "vm_id", vmID, "settings_count", len(extraConfig))
+		reconfigSpec := types.VirtualMachineConfigSpec{
+			ExtraConfig: extraConfig,
+		}
+
+		reconfigTask, err := newVM.Reconfigure(ctx, reconfigSpec)
+		if err != nil {
+			p.logger.Warn("Failed to start reconfiguration for CPU settings", "vm_id", vmID, "error", err)
+		} else {
+			if _, err := reconfigTask.WaitForResult(ctx, nil); err != nil {
+				p.logger.Warn("Reconfiguration task failed for CPU settings", "vm_id", vmID, "error", err)
+			} else {
+				p.logger.Info("Advanced CPU settings applied successfully", "vm_id", vmID)
+			}
+		}
+	}
+
+	// Resize disk if specified in VMClass
 	if spec.DiskSizeGB > 0 {
 		if err := p.resizeVMDisk(ctx, newVM, spec.DiskSizeGB, vmID); err != nil {
 			p.logger.Warn("Failed to resize VM disk", "vm_id", vmID, "target_size_gb", spec.DiskSizeGB, "error", err)
