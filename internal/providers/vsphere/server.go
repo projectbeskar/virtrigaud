@@ -1938,6 +1938,23 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 	// These settings are often ignored during clone and must be applied separately
 	// IMPORTANT: Also re-apply cloud-init to ensure guestinfo.* properties are preserved
 	if len(extraConfig) > 0 || spec.CloudInit != "" {
+		// Verify VM is powered off before reconfiguring
+		powerState, err := newVM.PowerState(ctx)
+		if err != nil {
+			return "", fmt.Errorf("failed to check power state before reconfiguration: %w", err)
+		}
+		if powerState != types.VirtualMachinePowerStatePoweredOff {
+			p.logger.Warn("VM is not powered off before reconfiguration, powering off", "vm_id", vmID, "power_state", powerState)
+			powerOffTask, err := newVM.PowerOff(ctx)
+			if err != nil {
+				return "", fmt.Errorf("failed to power off VM before reconfiguration: %w", err)
+			}
+			if _, err := powerOffTask.WaitForResult(ctx, nil); err != nil {
+				return "", fmt.Errorf("power off task failed before reconfiguration: %w", err)
+			}
+			p.logger.Info("VM powered off successfully for reconfiguration", "vm_id", vmID)
+		}
+
 		reconfigSpec := types.VirtualMachineConfigSpec{
 			ExtraConfig: extraConfig,
 		}
@@ -1946,7 +1963,7 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 		if spec.CloudInit != "" {
 			p.logger.Info("Re-applying cloud-init configuration during reconfiguration", "vm_id", vmID)
 			if err := p.addCloudInitToConfigSpec(&reconfigSpec, spec.CloudInit); err != nil {
-				p.logger.Warn("Failed to re-add cloud-init during reconfiguration", "vm_id", vmID, "error", err)
+				return "", fmt.Errorf("failed to re-add cloud-init during reconfiguration: %w", err)
 			}
 		}
 
@@ -1967,16 +1984,27 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 			"settings_count", len(reconfigSpec.ExtraConfig),
 			"settings", strings.Join(settingsList, ", "))
 
+		// Start reconfiguration task
 		reconfigTask, err := newVM.Reconfigure(ctx, reconfigSpec)
 		if err != nil {
-			p.logger.Warn("Failed to start reconfiguration", "vm_id", vmID, "error", err)
-		} else {
-			if _, err := reconfigTask.WaitForResult(ctx, nil); err != nil {
-				p.logger.Warn("Reconfiguration task failed", "vm_id", vmID, "error", err)
-			} else {
-				p.logger.Info("Configuration applied successfully via reconfiguration", "vm_id", vmID)
-			}
+			return "", fmt.Errorf("failed to start reconfiguration task: %w", err)
 		}
+
+		// Wait for reconfiguration to complete - this is CRITICAL
+		p.logger.Info("Waiting for reconfiguration task to complete", "vm_id", vmID)
+		taskInfo, err := reconfigTask.WaitForResult(ctx, nil)
+		if err != nil {
+			return "", fmt.Errorf("reconfiguration task failed: %w", err)
+		}
+		if taskInfo.State != types.TaskInfoStateSuccess {
+			return "", fmt.Errorf("reconfiguration task did not complete successfully: state=%s", taskInfo.State)
+		}
+
+		p.logger.Info("Configuration applied successfully via reconfiguration", "vm_id", vmID)
+
+		// Brief delay to ensure vSphere has committed the changes
+		time.Sleep(2 * time.Second)
+		p.logger.Info("Post-reconfiguration delay completed", "vm_id", vmID)
 	}
 
 	// Resize disk if specified in VMClass
