@@ -1934,78 +1934,8 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 	// Get the new VM object for further operations
 	newVM := object.NewVirtualMachine(p.client.Client, vmRef)
 
-	// Apply extraConfig settings via reconfiguration (nested virt, VT-d, etc.)
-	// These settings are often ignored during clone and must be applied separately
-	// IMPORTANT: Also re-apply cloud-init to ensure guestinfo.* properties are preserved
-	if len(extraConfig) > 0 || spec.CloudInit != "" {
-		// Verify VM is powered off before reconfiguring
-		powerState, err := newVM.PowerState(ctx)
-		if err != nil {
-			return "", fmt.Errorf("failed to check power state before reconfiguration: %w", err)
-		}
-		if powerState != types.VirtualMachinePowerStatePoweredOff {
-			p.logger.Warn("VM is not powered off before reconfiguration, powering off", "vm_id", vmID, "power_state", powerState)
-			powerOffTask, err := newVM.PowerOff(ctx)
-			if err != nil {
-				return "", fmt.Errorf("failed to power off VM before reconfiguration: %w", err)
-			}
-			if _, err := powerOffTask.WaitForResult(ctx, nil); err != nil {
-				return "", fmt.Errorf("power off task failed before reconfiguration: %w", err)
-			}
-			p.logger.Info("VM powered off successfully for reconfiguration", "vm_id", vmID)
-		}
-
-		reconfigSpec := types.VirtualMachineConfigSpec{
-			ExtraConfig: extraConfig,
-		}
-
-		// Re-apply cloud-init configuration to ensure it's not lost during reconfiguration
-		if spec.CloudInit != "" {
-			p.logger.Info("Re-applying cloud-init configuration during reconfiguration", "vm_id", vmID)
-			if err := p.addCloudInitToConfigSpec(&reconfigSpec, spec.CloudInit); err != nil {
-				return "", fmt.Errorf("failed to re-add cloud-init during reconfiguration: %w", err)
-			}
-		}
-
-		// Log the settings being applied
-		settingsList := make([]string, 0, len(reconfigSpec.ExtraConfig))
-		for _, setting := range reconfigSpec.ExtraConfig {
-			if optVal, ok := setting.(*types.OptionValue); ok {
-				// Don't log full cloud-init data (too verbose)
-				if strings.HasPrefix(optVal.Key, "guestinfo.") {
-					settingsList = append(settingsList, fmt.Sprintf("%s=<cloud-init-data>", optVal.Key))
-				} else {
-					settingsList = append(settingsList, fmt.Sprintf("%s=%v", optVal.Key, optVal.Value))
-				}
-			}
-		}
-		p.logger.Info("Applying configuration via reconfiguration",
-			"vm_id", vmID,
-			"settings_count", len(reconfigSpec.ExtraConfig),
-			"settings", strings.Join(settingsList, ", "))
-
-		// Start reconfiguration task
-		reconfigTask, err := newVM.Reconfigure(ctx, reconfigSpec)
-		if err != nil {
-			return "", fmt.Errorf("failed to start reconfiguration task: %w", err)
-		}
-
-		// Wait for reconfiguration to complete - this is CRITICAL
-		p.logger.Info("Waiting for reconfiguration task to complete", "vm_id", vmID)
-		taskInfo, err := reconfigTask.WaitForResult(ctx, nil)
-		if err != nil {
-			return "", fmt.Errorf("reconfiguration task failed: %w", err)
-		}
-		if taskInfo.State != types.TaskInfoStateSuccess {
-			return "", fmt.Errorf("reconfiguration task did not complete successfully: state=%s", taskInfo.State)
-		}
-
-		p.logger.Info("Configuration applied successfully via reconfiguration", "vm_id", vmID)
-
-		// Brief delay to ensure vSphere has committed the changes
-		time.Sleep(2 * time.Second)
-		p.logger.Info("Post-reconfiguration delay completed", "vm_id", vmID)
-	}
+	// NOTE: extraConfig and cloud-init are already applied during CloneVM_Task above
+	// No post-clone reconfiguration needed - rely on clone-time settings
 
 	// Resize disk if specified in VMClass
 	if spec.DiskSizeGB > 0 {
