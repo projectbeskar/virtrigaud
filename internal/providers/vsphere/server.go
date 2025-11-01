@@ -1797,9 +1797,14 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 	}
 
 	// Configure CPU and memory hot-add
+	// Note: CPU hot-add is incompatible with nested virtualization
 	if spec.CPUHotAddEnabled {
-		p.logger.Info("Enabling CPU hot-add", "vm_name", spec.Name)
-		configSpec.CpuHotAddEnabled = &spec.CPUHotAddEnabled
+		if spec.NestedVirtualization {
+			p.logger.Warn("CPU hot-add is incompatible with nested virtualization, skipping CPU hot-add", "vm_name", spec.Name)
+		} else {
+			p.logger.Info("Enabling CPU hot-add", "vm_name", spec.Name)
+			configSpec.CpuHotAddEnabled = &spec.CPUHotAddEnabled
+		}
 	}
 
 	if spec.MemoryHotAddEnabled {
@@ -1931,20 +1936,45 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 
 	// Apply extraConfig settings via reconfiguration (nested virt, VT-d, etc.)
 	// These settings are often ignored during clone and must be applied separately
-	if len(extraConfig) > 0 {
-		p.logger.Info("Applying advanced CPU settings via reconfiguration", "vm_id", vmID, "settings_count", len(extraConfig))
+	// IMPORTANT: Also re-apply cloud-init to ensure guestinfo.* properties are preserved
+	if len(extraConfig) > 0 || spec.CloudInit != "" {
 		reconfigSpec := types.VirtualMachineConfigSpec{
 			ExtraConfig: extraConfig,
 		}
 
+		// Re-apply cloud-init configuration to ensure it's not lost during reconfiguration
+		if spec.CloudInit != "" {
+			p.logger.Info("Re-applying cloud-init configuration during reconfiguration", "vm_id", vmID)
+			if err := p.addCloudInitToConfigSpec(&reconfigSpec, spec.CloudInit); err != nil {
+				p.logger.Warn("Failed to re-add cloud-init during reconfiguration", "vm_id", vmID, "error", err)
+			}
+		}
+
+		// Log the settings being applied
+		settingsList := make([]string, 0, len(reconfigSpec.ExtraConfig))
+		for _, setting := range reconfigSpec.ExtraConfig {
+			if optVal, ok := setting.(*types.OptionValue); ok {
+				// Don't log full cloud-init data (too verbose)
+				if strings.HasPrefix(optVal.Key, "guestinfo.") {
+					settingsList = append(settingsList, fmt.Sprintf("%s=<cloud-init-data>", optVal.Key))
+				} else {
+					settingsList = append(settingsList, fmt.Sprintf("%s=%v", optVal.Key, optVal.Value))
+				}
+			}
+		}
+		p.logger.Info("Applying configuration via reconfiguration",
+			"vm_id", vmID,
+			"settings_count", len(reconfigSpec.ExtraConfig),
+			"settings", strings.Join(settingsList, ", "))
+
 		reconfigTask, err := newVM.Reconfigure(ctx, reconfigSpec)
 		if err != nil {
-			p.logger.Warn("Failed to start reconfiguration for CPU settings", "vm_id", vmID, "error", err)
+			p.logger.Warn("Failed to start reconfiguration", "vm_id", vmID, "error", err)
 		} else {
 			if _, err := reconfigTask.WaitForResult(ctx, nil); err != nil {
-				p.logger.Warn("Reconfiguration task failed for CPU settings", "vm_id", vmID, "error", err)
+				p.logger.Warn("Reconfiguration task failed", "vm_id", vmID, "error", err)
 			} else {
-				p.logger.Info("Advanced CPU settings applied successfully", "vm_id", vmID)
+				p.logger.Info("Configuration applied successfully via reconfiguration", "vm_id", vmID)
 			}
 		}
 	}
