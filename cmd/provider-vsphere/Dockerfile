@@ -1,5 +1,5 @@
 # Build stage for vSphere provider (pure Go, no CGO)
-FROM golang:1.23-bookworm AS builder
+FROM golang:1.25-bookworm AS builder
 
 WORKDIR /workspace
 
