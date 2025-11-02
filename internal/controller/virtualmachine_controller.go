@@ -98,30 +98,36 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	vm.Status.ObservedGeneration = vm.Generation
 
 	// Get dependencies
+	logger.V(1).Info("Resolving VM dependencies", "provider", vm.Spec.ProviderRef.Name, "class", vm.Spec.ClassRef.Name, "image", vm.Spec.ImageRef.Name)
 	provider, vmClass, vmImage, networks, err := r.getDependencies(ctx, vm)
 	if err != nil {
-		logger.Error(err, "Failed to get dependencies")
+		logger.Error(err, "Failed to get dependencies - will retry in 5s", "provider", vm.Spec.ProviderRef.Name, "class", vm.Spec.ClassRef.Name, "image", vm.Spec.ImageRef.Name)
 		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonWaitingForDependencies, err.Error())
 		r.updateStatus(ctx, vm)
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
+	logger.V(1).Info("Dependencies resolved successfully")
 
 	// Get provider instance (remote or in-process)
+	logger.V(1).Info("Getting provider instance", "provider", provider.Name, "runtime_phase", provider.Status.Runtime.Phase, "endpoint", provider.Status.Runtime.Endpoint)
 	providerInstance, err := r.getProviderInstance(ctx, provider)
 	if err != nil {
-		logger.Error(err, "Failed to get provider instance")
+		logger.Error(err, "Failed to get provider instance - will retry in 5s", "provider", provider.Name, "runtime_phase", provider.Status.Runtime.Phase)
 		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, err.Error())
 		r.updateStatus(ctx, vm)
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
+	logger.V(1).Info("Provider instance obtained successfully", "provider", provider.Name)
 
 	// Validate provider
+	logger.V(1).Info("Validating provider connectivity")
 	if err := providerInstance.Validate(ctx); err != nil {
-		logger.Error(err, "Provider validation failed")
+		logger.Error(err, "Provider validation failed - will retry in 5s", "provider", provider.Name)
 		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Provider validation failed: %v", err))
 		r.updateStatus(ctx, vm)
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
+	logger.V(1).Info("Provider validation successful", "provider", provider.Name)
 
 	// Check if we have an active task
 	if vm.Status.LastTaskRef != "" {
@@ -130,14 +136,14 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 			logger.Error(err, "Failed to check task status")
 			k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Failed to check task: %v", err))
 			r.updateStatus(ctx, vm)
-			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 		}
 
 		if !done {
 			logger.Info("Task still in progress", "taskRef", vm.Status.LastTaskRef)
 			k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonTaskInProgress, "Task in progress")
 			r.updateStatus(ctx, vm)
-			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 		}
 
 		// Task completed, clear it
@@ -156,7 +162,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		logger.Error(err, "Failed to describe VM")
 		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Failed to describe VM: %v", err))
 		r.updateStatus(ctx, vm)
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
 	if !desc.Exists {
@@ -214,7 +220,7 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 		if err := r.Get(ctx, providerKey, provider); err != nil {
 			if !errors.IsNotFound(err) {
 				logger.Error(err, "Failed to get provider for deletion")
-				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 			}
 			// Provider not found, continue with cleanup
 		} else {
@@ -330,7 +336,7 @@ func (r *VirtualMachineReconciler) createVM(
 		logger.Error(err, "Failed to create VM")
 		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Failed to create VM: %v", err))
 		r.updateStatus(ctx, vm)
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
 	// Update status
@@ -343,7 +349,7 @@ func (r *VirtualMachineReconciler) createVM(
 	}
 
 	r.updateStatus(ctx, vm)
-	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 }
 
 // adjustPowerState adjusts the VM power state
@@ -365,7 +371,7 @@ func (r *VirtualMachineReconciler) adjustPowerState(
 		powerOp = contracts.PowerOpShutdownGraceful
 	default:
 		logger.Error(nil, "Unsupported power state", "state", desiredState)
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
 	taskRef, err := provider.Power(ctx, vm.Status.ID, powerOp)
@@ -373,7 +379,7 @@ func (r *VirtualMachineReconciler) adjustPowerState(
 		logger.Error(err, "Failed to adjust power state")
 		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Failed to adjust power state: %v", err))
 		r.updateStatus(ctx, vm)
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
 	if taskRef != "" {
@@ -382,7 +388,7 @@ func (r *VirtualMachineReconciler) adjustPowerState(
 	}
 
 	r.updateStatus(ctx, vm)
-	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 }
 
 // buildCreateRequest builds a provider create request from VM spec
@@ -636,10 +642,10 @@ func (r *VirtualMachineReconciler) updateStatus(ctx context.Context, vm *infravi
 func (r *VirtualMachineReconciler) getRequeueInterval(vm *infravirtrigaudiov1beta1.VirtualMachine, desc contracts.DescribeResponse) time.Duration {
 	// Fast polling intervals for various states
 	const (
-		fastPoll   = 30 * time.Second // For transitional states
-		normalPoll = 2 * time.Minute  // For stable running VMs
-		slowPoll   = 5 * time.Minute  // For stable powered-off VMs
-		errorPoll  = 30 * time.Second // For error conditions
+		fastPoll   = 5 * time.Second // For transitional states
+		normalPoll = 2 * time.Minute // For stable running VMs
+		slowPoll   = 5 * time.Minute // For stable powered-off VMs
+		errorPoll  = 5 * time.Second // For error conditions
 	)
 
 	// Check if VM has no IP addresses yet (waiting for DHCP/network)
