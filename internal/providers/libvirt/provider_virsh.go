@@ -1725,13 +1725,17 @@ func (p *Provider) ExportDisk(ctx context.Context, req contracts.ExportDiskReque
 	// Upload to destination using PVC storage layer
 	log.Printf("INFO Uploading disk to: %s", req.DestinationURL)
 
-	// For PVC storage, the migration controller provides the mount path in the PVC environment
-	// The provider pod has the migration PVC mounted at /mnt/migration-storage/<pvc-name>
-	// We use a generic storage config that will be resolved by the storage layer
+	// Extract PVC name from destination URL to determine mount path
+	// URL format: pvc://<pvc-name>/<file-path>
+	// Provider pods have PVCs mounted at /mnt/migration-storage/<pvc-name>
+	pvcMountPath, err := extractPVCMountPath(req.DestinationURL)
+	if err != nil {
+		return contracts.ExportDiskResponse{}, fmt.Errorf("failed to extract PVC mount path: %w", err)
+	}
+
 	storageConfig := storage.StorageConfig{
-		Type: "pvc",
-		// The PVC mount path will be auto-detected from environment or default to /mnt/migration-storage
-		MountPath: "/mnt/migration-storage",
+		Type:      "pvc",
+		MountPath: pvcMountPath,
 	}
 
 	// Create PVC storage client
@@ -1813,12 +1817,17 @@ func (p *Provider) ImportDisk(ctx context.Context, req contracts.ImportDiskReque
 
 	log.Printf("INFO Downloading disk from %s to %s", req.SourceURL, tempPath)
 
-	// For PVC storage, the migration controller provides the mount path in the PVC environment
-	// The provider pod has the migration PVC mounted at /mnt/migration-storage/<pvc-name>
+	// Extract PVC name from source URL to determine mount path
+	// URL format: pvc://<pvc-name>/<file-path>
+	// Provider pods have PVCs mounted at /mnt/migration-storage/<pvc-name>
+	pvcMountPath, err := extractPVCMountPath(req.SourceURL)
+	if err != nil {
+		return contracts.ImportDiskResponse{}, fmt.Errorf("failed to extract PVC mount path: %w", err)
+	}
+
 	storageConfig := storage.StorageConfig{
-		Type: "pvc",
-		// The PVC mount path will be auto-detected from environment or default to /mnt/migration-storage
-		MountPath: "/mnt/migration-storage",
+		Type:      "pvc",
+		MountPath: pvcMountPath,
 	}
 
 	// Create PVC storage client
@@ -1893,4 +1902,30 @@ func (p *Provider) ImportDisk(ctx context.Context, req contracts.ImportDiskReque
 	}
 
 	return response, nil
+}
+
+// extractPVCMountPath extracts the PVC name from a PVC URL and returns the mount path
+// PVC URLs have the format: pvc://<pvc-name>/<file-path>
+// Provider pods mount PVCs at: /mnt/migration-storage/<pvc-name>
+func extractPVCMountPath(url string) (string, error) {
+	// Remove pvc:// prefix
+	url = strings.TrimPrefix(url, "pvc://")
+
+	// Extract PVC name (first path component)
+	parts := strings.SplitN(url, "/", 2)
+	if len(parts) < 2 {
+		return "", fmt.Errorf("invalid PVC URL format: expected pvc://<pvc-name>/<file-path>, got: %s", url)
+	}
+
+	pvcName := parts[0]
+	if pvcName == "" {
+		return "", fmt.Errorf("empty PVC name in URL: %s", url)
+	}
+
+	// Construct mount path
+	mountPath := fmt.Sprintf("/mnt/migration-storage/%s", pvcName)
+
+	log.Printf("DEBUG Extracted PVC mount path: url=%s pvc=%s mount=%s", url, pvcName, mountPath)
+
+	return mountPath, nil
 }
