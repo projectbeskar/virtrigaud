@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -30,6 +31,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
@@ -1503,10 +1505,28 @@ func (r *VMMigrationReconciler) waitForProvidersReady(ctx context.Context, migra
 	return nil
 }
 
-// waitForProviderReady waits for a single provider to be ready
+// waitForProviderReady waits for a single provider to be ready with PVC mounted
+// This function ensures that:
+// 1. The provider deployment has been updated with the migration PVC
+// 2. New pods with the PVC mount are Running and Ready
+// 3. Old pods without the PVC have been terminated
 func (r *VMMigrationReconciler) waitForProviderReady(ctx context.Context, provider *infrav1beta1.Provider, timeout, pollInterval time.Duration) error {
 	logger := logging.FromContext(ctx)
 	deadline := time.Now().Add(timeout)
+
+	// Get the PVC name from migration annotations on the provider
+	pvcName := provider.Annotations["virtrigaud.io/migration-pvc"]
+	if pvcName == "" {
+		logger.Info("No migration PVC annotation on provider, checking basic readiness", "provider", provider.Name)
+		return r.waitForProviderBasicReady(ctx, provider, timeout, pollInterval)
+	}
+
+	logger.Info("Waiting for provider pods with PVC mount to be ready",
+		"provider", provider.Name,
+		"pvc", pvcName,
+		"timeout", timeout)
+
+	deploymentName := fmt.Sprintf("virtrigaud-provider-%s-%s", provider.Namespace, provider.Name)
 
 	for {
 		// Check if context is cancelled
@@ -1516,10 +1536,184 @@ func (r *VMMigrationReconciler) waitForProviderReady(ctx context.Context, provid
 
 		// Check timeout
 		if time.Now().After(deadline) {
+			return fmt.Errorf("timeout waiting for provider %s pods with PVC %s to be ready", provider.Name, pvcName)
+		}
+
+		// Check deployment status
+		deployment := &appsv1.Deployment{}
+		if err := r.Get(ctx, types.NamespacedName{
+			Name:      deploymentName,
+			Namespace: provider.Namespace,
+		}, deployment); err != nil {
+			logger.Error(err, "Failed to get provider deployment", "deployment", deploymentName)
+			time.Sleep(pollInterval)
+			continue
+		}
+
+		// Verify deployment has the PVC volume
+		hasPVC := false
+		for _, vol := range deployment.Spec.Template.Spec.Volumes {
+			if vol.PersistentVolumeClaim != nil && vol.PersistentVolumeClaim.ClaimName == pvcName {
+				hasPVC = true
+				break
+			}
+		}
+
+		if !hasPVC {
+			logger.Info("Deployment doesn't have PVC yet, waiting for provider controller to update",
+				"deployment", deploymentName,
+				"pvc", pvcName)
+			time.Sleep(pollInterval)
+			continue
+		}
+
+		// Check if deployment rollout is complete
+		// All replicas must be updated and ready
+		if deployment.Status.UpdatedReplicas < *deployment.Spec.Replicas {
+			logger.Info("Waiting for deployment to update all replicas",
+				"deployment", deploymentName,
+				"updated", deployment.Status.UpdatedReplicas,
+				"desired", *deployment.Spec.Replicas)
+			time.Sleep(pollInterval)
+			continue
+		}
+
+		if deployment.Status.ReadyReplicas < *deployment.Spec.Replicas {
+			logger.Info("Waiting for all replicas to be ready",
+				"deployment", deploymentName,
+				"ready", deployment.Status.ReadyReplicas,
+				"desired", *deployment.Spec.Replicas)
+			time.Sleep(pollInterval)
+			continue
+		}
+
+		// Verify actual pods have the PVC mounted and are ready
+		podList := &corev1.PodList{}
+		labelSelector := client.MatchingLabels{
+			"app.kubernetes.io/name":     "virtrigaud-provider",
+			"app.kubernetes.io/instance": provider.Name,
+		}
+
+		if err := r.List(ctx, podList, client.InNamespace(provider.Namespace), labelSelector); err != nil {
+			logger.Error(err, "Failed to list provider pods", "provider", provider.Name)
+			time.Sleep(pollInterval)
+			continue
+		}
+
+		if len(podList.Items) == 0 {
+			logger.Info("No pods found for provider yet", "provider", provider.Name)
+			time.Sleep(pollInterval)
+			continue
+		}
+
+		// Check each pod
+		allPodsReady := true
+		podsWithPVC := 0
+
+		for i := range podList.Items {
+			pod := &podList.Items[i]
+
+			// Skip terminating pods
+			if pod.DeletionTimestamp != nil {
+				logger.Info("Skipping terminating pod",
+					"pod", pod.Name,
+					"deletionTimestamp", pod.DeletionTimestamp)
+				continue
+			}
+
+			// Check if pod has the PVC mounted
+			podHasPVC := false
+			for _, vol := range pod.Spec.Volumes {
+				if vol.PersistentVolumeClaim != nil && vol.PersistentVolumeClaim.ClaimName == pvcName {
+					podHasPVC = true
+					break
+				}
+			}
+
+			if !podHasPVC {
+				logger.Info("Pod doesn't have PVC mount, waiting for new pod",
+					"pod", pod.Name,
+					"pvc", pvcName)
+				allPodsReady = false
+				continue
+			}
+
+			podsWithPVC++
+
+			// Check pod phase
+			if pod.Status.Phase != corev1.PodRunning {
+				logger.Info("Pod not running yet",
+					"pod", pod.Name,
+					"phase", pod.Status.Phase)
+				allPodsReady = false
+				continue
+			}
+
+			// Check pod ready condition
+			podReady := false
+			for _, cond := range pod.Status.Conditions {
+				if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
+					podReady = true
+					break
+				}
+			}
+
+			if !podReady {
+				logger.Info("Pod not ready yet",
+					"pod", pod.Name,
+					"conditions", pod.Status.Conditions)
+				allPodsReady = false
+				continue
+			}
+
+			// Check container statuses
+			for _, cs := range pod.Status.ContainerStatuses {
+				if !cs.Ready {
+					logger.Info("Container not ready",
+						"pod", pod.Name,
+						"container", cs.Name,
+						"ready", cs.Ready)
+					allPodsReady = false
+				}
+			}
+		}
+
+		if podsWithPVC == 0 {
+			logger.Info("No pods with PVC mount found yet, waiting", "pvc", pvcName)
+			time.Sleep(pollInterval)
+			continue
+		}
+
+		if !allPodsReady {
+			logger.Info("Some pods not ready yet, waiting",
+				"podsWithPVC", podsWithPVC)
+			time.Sleep(pollInterval)
+			continue
+		}
+
+		// All checks passed
+		logger.Info("Provider pods with PVC are ready",
+			"provider", provider.Name,
+			"pvc", pvcName,
+			"podsReady", podsWithPVC)
+		return nil
+	}
+}
+
+// waitForProviderBasicReady performs basic provider readiness check (fallback when no PVC)
+func (r *VMMigrationReconciler) waitForProviderBasicReady(ctx context.Context, provider *infrav1beta1.Provider, timeout, pollInterval time.Duration) error {
+	logger := logging.FromContext(ctx)
+	deadline := time.Now().Add(timeout)
+
+	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		if time.Now().After(deadline) {
 			return fmt.Errorf("timeout waiting for provider %s to be ready", provider.Name)
 		}
 
-		// Refresh provider status
 		currentProvider := &infrav1beta1.Provider{}
 		if err := r.Get(ctx, types.NamespacedName{
 			Name:      provider.Name,
@@ -1530,7 +1724,6 @@ func (r *VMMigrationReconciler) waitForProviderReady(ctx context.Context, provid
 			continue
 		}
 
-		// Check if provider is available and runtime ready
 		if r.isProviderReady(currentProvider) {
 			logger.Info("Provider is ready", "provider", provider.Name)
 			return nil
@@ -1715,5 +1908,8 @@ func (r *VMMigrationReconciler) deleteSourceVM(ctx context.Context, migration *i
 func (r *VMMigrationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&infrav1beta1.VMMigration{}).
+		WithOptions(controller.Options{
+			MaxConcurrentReconciles: 10, // Support up to 10 concurrent migrations
+		}).
 		Complete(r)
 }
