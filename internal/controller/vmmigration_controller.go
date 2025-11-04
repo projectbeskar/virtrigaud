@@ -270,7 +270,7 @@ func (r *VMMigrationReconciler) handleValidatingPhase(ctx context.Context, migra
 			// Wait for providers to restart with new PVC mount
 			// This gives providers time to update their deployments and restart pods
 			logger.Info("Waiting for providers to restart with PVC mount", "pvc", pvcName)
-			if err := r.waitForProvidersReady(ctx, migration); err != nil {
+			if err := r.waitForProvidersReady(ctx, migration, pvcName); err != nil {
 				return r.transitionToFailed(ctx, migration, fmt.Sprintf("Providers not ready after PVC mount: %v", err))
 			}
 			logger.Info("Providers ready with PVC mounted", "pvc", pvcName)
@@ -1474,12 +1474,12 @@ func (r *VMMigrationReconciler) triggerProviderReconciliation(ctx context.Contex
 
 // waitForProvidersReady waits for both source and target providers to be ready
 // after a PVC mount update (which triggers pod restart)
-func (r *VMMigrationReconciler) waitForProvidersReady(ctx context.Context, migration *infrav1beta1.VMMigration) error {
+func (r *VMMigrationReconciler) waitForProvidersReady(ctx context.Context, migration *infrav1beta1.VMMigration, pvcName string) error {
 	logger := logging.FromContext(ctx)
 	timeout := 5 * time.Minute
 	pollInterval := 5 * time.Second
 
-	logger.Info("Waiting for providers to be ready after PVC mount update")
+	logger.Info("Waiting for providers to be ready after PVC mount update", "pvc", pvcName)
 
 	// Wait for source provider
 	sourceProvider, err := r.getSourceProvider(ctx, migration)
@@ -1487,7 +1487,7 @@ func (r *VMMigrationReconciler) waitForProvidersReady(ctx context.Context, migra
 		return fmt.Errorf("failed to get source provider: %w", err)
 	}
 
-	if err := r.waitForProviderReady(ctx, sourceProvider, timeout, pollInterval); err != nil {
+	if err := r.waitForProviderReady(ctx, sourceProvider, pvcName, timeout, pollInterval); err != nil {
 		return fmt.Errorf("source provider not ready: %w", err)
 	}
 
@@ -1497,7 +1497,7 @@ func (r *VMMigrationReconciler) waitForProvidersReady(ctx context.Context, migra
 		return fmt.Errorf("failed to get target provider: %w", err)
 	}
 
-	if err := r.waitForProviderReady(ctx, targetProvider, timeout, pollInterval); err != nil {
+	if err := r.waitForProviderReady(ctx, targetProvider, pvcName, timeout, pollInterval); err != nil {
 		return fmt.Errorf("target provider not ready: %w", err)
 	}
 
@@ -1510,14 +1510,13 @@ func (r *VMMigrationReconciler) waitForProvidersReady(ctx context.Context, migra
 // 1. The provider deployment has been updated with the migration PVC
 // 2. New pods with the PVC mount are Running and Ready
 // 3. Old pods without the PVC have been terminated
-func (r *VMMigrationReconciler) waitForProviderReady(ctx context.Context, provider *infrav1beta1.Provider, timeout, pollInterval time.Duration) error {
+func (r *VMMigrationReconciler) waitForProviderReady(ctx context.Context, provider *infrav1beta1.Provider, pvcName string, timeout, pollInterval time.Duration) error {
 	logger := logging.FromContext(ctx)
 	deadline := time.Now().Add(timeout)
 
-	// Get the PVC name from migration annotations on the provider
-	pvcName := provider.Annotations["virtrigaud.io/migration-pvc"]
+	// If no PVC name provided, just check basic readiness
 	if pvcName == "" {
-		logger.Info("No migration PVC annotation on provider, checking basic readiness", "provider", provider.Name)
+		logger.Info("No migration PVC specified, checking basic readiness", "provider", provider.Name)
 		return r.waitForProviderBasicReady(ctx, provider, timeout, pollInterval)
 	}
 
