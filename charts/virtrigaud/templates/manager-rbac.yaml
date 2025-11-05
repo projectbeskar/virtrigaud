@@ -84,6 +84,15 @@ rules:
   - patch
   - update
   - watch
+# Pods for VM migration provider readiness checks
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
 # Deployment resources for remote providers
 - apiGroups:
   - apps
@@ -208,6 +217,15 @@ rules:
   - list
   - patch
   - update
+  - watch
+# Pods for VM migration provider readiness checks
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
   - watch
 # Deployment resources for remote providers
 - apiGroups:
