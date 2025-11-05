@@ -1107,7 +1107,30 @@ func (r *VMMigrationReconciler) handleDeletion(ctx context.Context, migration *i
 		}
 	}
 
-	// 2. Delete migration-created snapshot if exists
+	// 2. Explicitly delete PVC if it exists (in addition to owner reference cleanup)
+	if migration.Status.StoragePVCName != "" {
+		pvc := &corev1.PersistentVolumeClaim{}
+		pvcKey := client.ObjectKey{
+			Namespace: migration.Namespace,
+			Name:      migration.Status.StoragePVCName,
+		}
+		if err := r.Get(ctx, pvcKey, pvc); err == nil {
+			logger.Info("Explicitly deleting PVC", "pvc_name", migration.Status.StoragePVCName)
+			if err := r.Delete(ctx, pvc); err != nil && !errors.IsNotFound(err) {
+				logger.Error(err, "Failed to delete PVC during cleanup", "pvc_name", migration.Status.StoragePVCName)
+				cleanupErrors = append(cleanupErrors, fmt.Errorf("PVC cleanup: %w", err))
+			} else {
+				logger.Info("PVC deleted successfully", "pvc_name", migration.Status.StoragePVCName)
+			}
+		} else if !errors.IsNotFound(err) {
+			logger.Error(err, "Failed to get PVC during cleanup", "pvc_name", migration.Status.StoragePVCName)
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("PVC get: %w", err))
+		} else {
+			logger.Info("PVC already deleted", "pvc_name", migration.Status.StoragePVCName)
+		}
+	}
+
+	// 3. Delete migration-created snapshot if exists
 	if migration.Status.SnapshotID != "" && migration.Spec.Source.SnapshotRef == nil {
 		if err := r.deleteSourceSnapshot(ctx, migration); err != nil {
 			logger.Error(err, "Failed to delete source snapshot during deletion")
@@ -1117,7 +1140,7 @@ func (r *VMMigrationReconciler) handleDeletion(ctx context.Context, migration *i
 		}
 	}
 
-	// 3. Delete partially created target VM if migration failed
+	// 4. Delete partially created target VM if migration failed
 	if migration.Status.Phase == infrav1beta1.MigrationPhaseFailed || migration.Status.Phase == infrav1beta1.MigrationPhaseCreating {
 		targetVMName := migration.Spec.Target.Name
 		if targetVMName == "" {
