@@ -94,7 +94,13 @@ func main() {
 		TLSOpts: tlsOpts,
 	})
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	// Configure client with rate limiting to prevent API server overload
+	// These settings prevent reconciliation storms from overwhelming etcd/API server
+	restConfig := ctrl.GetConfigOrDie()
+	restConfig.QPS = 50    // Max 50 queries per second to API server
+	restConfig.Burst = 100 // Allow bursts up to 100 requests
+
+	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Scheme: scheme,
 		Metrics: server.Options{
 			BindAddress:   metricsAddr,

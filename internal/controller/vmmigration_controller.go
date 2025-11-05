@@ -1744,14 +1744,52 @@ func (r *VMMigrationReconciler) getProviderInstance(ctx context.Context, provide
 	return providerClient, nil
 }
 
-// updateStatus updates the migration status
+// updateStatus updates the migration status with retry on conflicts
 func (r *VMMigrationReconciler) updateStatus(ctx context.Context, migration *infrav1beta1.VMMigration) error {
-	if err := r.Status().Update(ctx, migration); err != nil {
-		logger := logging.FromContext(ctx)
+	logger := logging.FromContext(ctx)
+
+	// Retry with exponential backoff on conflicts
+	maxRetries := 3
+	baseDelay := 100 * time.Millisecond
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		err := r.Status().Update(ctx, migration)
+		if err == nil {
+			return nil
+		}
+
+		// If it's a conflict error, retry after a delay
+		if errors.IsConflict(err) {
+			if attempt < maxRetries-1 {
+				delay := baseDelay * time.Duration(1<<uint(attempt)) // Exponential backoff
+				logger.V(1).Info("Status update conflict, retrying",
+					"attempt", attempt+1,
+					"maxRetries", maxRetries,
+					"delay", delay)
+				time.Sleep(delay)
+
+				// Refresh the object before retrying
+				fresh := &infrav1beta1.VMMigration{}
+				if err := r.Get(ctx, types.NamespacedName{
+					Name:      migration.Name,
+					Namespace: migration.Namespace,
+				}, fresh); err != nil {
+					logger.Error(err, "Failed to refresh VMMigration")
+					return err
+				}
+
+				// Copy status to fresh object
+				fresh.Status = migration.Status
+				*migration = *fresh
+				continue
+			}
+		}
+
 		logger.Error(err, "Failed to update VMMigration status")
 		return err
 	}
-	return nil
+
+	return fmt.Errorf("failed to update status after %d attempts", maxRetries)
 }
 
 // generateStorageURL generates a storage URL for the migration
