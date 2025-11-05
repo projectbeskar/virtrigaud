@@ -96,9 +96,10 @@ func main() {
 
 	// Configure client with rate limiting to prevent API server overload
 	// These settings prevent reconciliation storms from overwhelming etcd/API server
+	// Conservative settings for cluster stability
 	restConfig := ctrl.GetConfigOrDie()
-	restConfig.QPS = 50    // Max 50 queries per second to API server
-	restConfig.Burst = 100 // Allow bursts up to 100 requests
+	restConfig.QPS = 20    // Max 20 queries per second to API server
+	restConfig.Burst = 40  // Allow bursts up to 40 requests
 
 	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Scheme: scheme,

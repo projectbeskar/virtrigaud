@@ -133,6 +133,28 @@ func (r *VMMigrationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{Requeue: true}, nil
 	}
 
+	// Short-circuit for migrations in terminal failed state (max retries exceeded)
+	// This prevents continuous reconciliation of permanently failed migrations
+	if migration.Status.Phase == infrav1beta1.MigrationPhaseFailed {
+		if migration.Spec.Options != nil && migration.Spec.Options.RetryPolicy != nil {
+			maxRetries := int32(3) // Default
+			if migration.Spec.Options.RetryPolicy.MaxRetries != nil {
+				maxRetries = *migration.Spec.Options.RetryPolicy.MaxRetries
+			}
+			if migration.Status.RetryCount >= maxRetries {
+				// Migration has permanently failed, no need to reconcile further
+				logger.V(1).Info("Migration permanently failed, skipping reconciliation",
+					"retries", migration.Status.RetryCount,
+					"max_retries", maxRetries)
+				return ctrl.Result{}, nil
+			}
+		} else {
+			// No retry policy, migration is permanently failed
+			logger.V(1).Info("Migration failed with no retry policy, skipping reconciliation")
+			return ctrl.Result{}, nil
+		}
+	}
+
 	// Handle migration lifecycle based on phase
 	switch migration.Status.Phase {
 	case infrav1beta1.MigrationPhasePending:
@@ -1219,7 +1241,9 @@ func (r *VMMigrationReconciler) transitionToFailed(ctx context.Context, migratio
 		return ctrl.Result{}, err
 	}
 
-	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+	// Don't requeue here - let handleFailedPhase manage retry timing
+	// This prevents continuous reconciliation loops that can overwhelm the API server
+	return ctrl.Result{Requeue: true}, nil
 }
 
 // Helper functions
@@ -1969,7 +1993,7 @@ func (r *VMMigrationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&infrav1beta1.VMMigration{}).
 		WithOptions(controller.Options{
-			MaxConcurrentReconciles: 10, // Support up to 10 concurrent migrations
+			MaxConcurrentReconciles: 3, // Limit concurrent reconciliations to prevent API server overload
 		}).
 		Complete(r)
 }
