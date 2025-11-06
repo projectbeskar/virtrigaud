@@ -1742,7 +1742,17 @@ func (r *VMMigrationReconciler) waitForProviderReady(ctx context.Context, provid
 			continue
 		}
 
-		// All checks passed
+		// All checks passed - pods are ready
+		// Add grace period for NFS mounts to fully stabilize
+		// Even though pod is "Ready", NFS mounts can take a few extra seconds
+		logger.Info("Provider pods ready, waiting for NFS mount to stabilize",
+			"provider", provider.Name,
+			"pvc", pvcName,
+			"podsReady", podsWithPVC,
+			"gracePeriod", "10s")
+		
+		time.Sleep(10 * time.Second)
+		
 		logger.Info("Provider pods with PVC are ready",
 			"provider", provider.Name,
 			"pvc", pvcName,
