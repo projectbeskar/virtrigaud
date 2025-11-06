@@ -51,6 +51,13 @@ func (dfm *DatastoreFileManager) DownloadFile(ctx context.Context, datastorePath
 		return fmt.Errorf("invalid datastore path: %w", err)
 	}
 
+	// Set datacenter context for finder
+	datacenter, err := dfm.provider.finder.DefaultDatacenter(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get datacenter: %w", err)
+	}
+	dfm.provider.finder.SetDatacenter(datacenter)
+
 	// Find the datastore
 	datastore, err := dfm.provider.finder.Datastore(ctx, dsName)
 	if err != nil {
@@ -103,6 +110,13 @@ func (dfm *DatastoreFileManager) UploadFile(ctx context.Context, reader io.Reade
 	if err != nil {
 		return fmt.Errorf("invalid datastore path: %w", err)
 	}
+
+	// Set datacenter context for finder
+	datacenter, err := dfm.provider.finder.DefaultDatacenter(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get datacenter: %w", err)
+	}
+	dfm.provider.finder.SetDatacenter(datacenter)
 
 	// Find the datastore
 	datastore, err := dfm.provider.finder.Datastore(ctx, dsName)
@@ -162,16 +176,17 @@ func (dfm *DatastoreFileManager) DeleteFile(ctx context.Context, datastorePath s
 		return fmt.Errorf("invalid datastore path: %w", err)
 	}
 
+	// Set datacenter context for finder
+	datacenter, err := dfm.provider.finder.DefaultDatacenter(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get datacenter: %w", err)
+	}
+	dfm.provider.finder.SetDatacenter(datacenter)
+
 	// Find the datastore
 	datastore, err := dfm.provider.finder.Datastore(ctx, dsName)
 	if err != nil {
 		return fmt.Errorf("failed to find datastore %s: %w", dsName, err)
-	}
-
-	// Get datacenter for file manager
-	datacenter, err := dfm.provider.finder.DefaultDatacenter(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get datacenter: %w", err)
 	}
 
 	// Create file manager and delete
