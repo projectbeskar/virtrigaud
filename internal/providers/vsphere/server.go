@@ -34,10 +34,8 @@ import (
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/property"
 	"github.com/vmware/govmomi/session"
-	"github.com/vmware/govmomi/task"
 	"github.com/vmware/govmomi/vim25"
 	"github.com/vmware/govmomi/vim25/mo"
-	"github.com/vmware/govmomi/vim25/progress"
 	"github.com/vmware/govmomi/vim25/soap"
 	"github.com/vmware/govmomi/vim25/types"
 
@@ -197,56 +195,29 @@ func (p *Provider) cloneDiskToStreamOptimized(ctx context.Context, sourcePath, d
 	// Create VirtualDiskManager
 	virtualDiskManager := object.NewVirtualDiskManager(p.client.Client)
 
-	// Clone disk to streamOptimized format
-	// StreamOptimized is a single-file compressed format ideal for export/migration
+	// Clone disk to sparseMonolithic format
+	// SparseMonolithic is a single-file compressed format ideal for export/migration
+	// It's the format typically used in OVF/OVA exports and is universally compatible
 	spec := &types.VirtualDiskSpec{
-		DiskType:    string(types.VirtualDiskTypeStreamOptimized),
+		DiskType:    string(types.VirtualDiskTypeSparseMonolithic),
 		AdapterType: string(types.VirtualDiskAdapterTypeLsiLogic),
 	}
 
-	p.logger.Info("Starting disk clone operation", "source", sourcePath, "dest", destPath, "format", "streamOptimized")
+	p.logger.Info("Starting disk clone operation", "source", sourcePath, "dest", destPath, "format", "sparseMonolithic")
 
-	task, err := virtualDiskManager.CopyVirtualDisk(ctx, sourcePath, datacenter, destPath, datacenter, spec, nil)
+	task, err := virtualDiskManager.CopyVirtualDisk(ctx, sourcePath, datacenter, destPath, datacenter, spec, false)
 	if err != nil {
 		return fmt.Errorf("failed to start disk clone: %w", err)
 	}
 
-	// Wait for task completion with progress tracking
-	_, err = task.WaitForResult(ctx, &progressLogger{
-		logger: p.logger,
-		taskType: "disk_clone",
-	})
+	// Wait for task completion
+	err = task.Wait(ctx)
 	if err != nil {
 		return fmt.Errorf("disk clone failed: %w", err)
 	}
 
 	p.logger.Info("Disk clone completed successfully", "destination", destPath)
 	return nil
-}
-
-// progressLogger implements govmomi's progress.Sinker interface for task progress logging
-type progressLogger struct {
-	logger   *slog.Logger
-	taskType string
-	lastPct  int32
-}
-
-func (pl *progressLogger) Sink() chan<- progress.Report {
-	ch := make(chan progress.Report)
-	go func() {
-		for report := range ch {
-			if report.Percentage != pl.lastPct {
-				pl.lastPct = report.Percentage
-				if report.Percentage%10 == 0 || report.Percentage == 100 {
-					pl.logger.Info("Task progress",
-						"task", pl.taskType,
-						"percent", report.Percentage,
-						"detail", report.Detail)
-				}
-			}
-		}
-	}()
-	return ch
 }
 
 // Validate validates the provider configuration and connectivity
