@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -33,8 +34,10 @@ import (
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/property"
 	"github.com/vmware/govmomi/session"
+	"github.com/vmware/govmomi/task"
 	"github.com/vmware/govmomi/vim25"
 	"github.com/vmware/govmomi/vim25/mo"
+	"github.com/vmware/govmomi/vim25/progress"
 	"github.com/vmware/govmomi/vim25/soap"
 	"github.com/vmware/govmomi/vim25/types"
 
@@ -176,6 +179,74 @@ func createVSphereClient(config *Config) (*govmomi.Client, *find.Finder, error) 
 	finder := find.NewFinder(client.Client, true)
 
 	return client, finder, nil
+}
+
+// cloneDiskToStreamOptimized clones a disk to streamOptimized format using VirtualDiskManager
+// This handles all VMDK formats including sesparse, flat, thick, and thin
+func (p *Provider) cloneDiskToStreamOptimized(ctx context.Context, sourcePath, destPath string) error {
+	if p.client == nil {
+		return fmt.Errorf("vSphere client not initialized")
+	}
+
+	// Get datacenter
+	datacenter, err := p.finder.DefaultDatacenter(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get datacenter: %w", err)
+	}
+
+	// Create VirtualDiskManager
+	virtualDiskManager := object.NewVirtualDiskManager(p.client.Client)
+
+	// Clone disk to streamOptimized format
+	// StreamOptimized is a single-file compressed format ideal for export/migration
+	spec := &types.VirtualDiskSpec{
+		DiskType:    string(types.VirtualDiskTypeStreamOptimized),
+		AdapterType: string(types.VirtualDiskAdapterTypeLsiLogic),
+	}
+
+	p.logger.Info("Starting disk clone operation", "source", sourcePath, "dest", destPath, "format", "streamOptimized")
+
+	task, err := virtualDiskManager.CopyVirtualDisk(ctx, sourcePath, datacenter, destPath, datacenter, spec, nil)
+	if err != nil {
+		return fmt.Errorf("failed to start disk clone: %w", err)
+	}
+
+	// Wait for task completion with progress tracking
+	_, err = task.WaitForResult(ctx, &progressLogger{
+		logger: p.logger,
+		taskType: "disk_clone",
+	})
+	if err != nil {
+		return fmt.Errorf("disk clone failed: %w", err)
+	}
+
+	p.logger.Info("Disk clone completed successfully", "destination", destPath)
+	return nil
+}
+
+// progressLogger implements govmomi's progress.Sinker interface for task progress logging
+type progressLogger struct {
+	logger   *slog.Logger
+	taskType string
+	lastPct  int32
+}
+
+func (pl *progressLogger) Sink() chan<- progress.Report {
+	ch := make(chan progress.Report)
+	go func() {
+		for report := range ch {
+			if report.Percentage != pl.lastPct {
+				pl.lastPct = report.Percentage
+				if report.Percentage%10 == 0 || report.Percentage == 100 {
+					pl.logger.Info("Task progress",
+						"task", pl.taskType,
+						"percent", report.Percentage,
+						"detail", report.Detail)
+				}
+			}
+		}
+	}()
+	return ch
 }
 
 // Validate validates the provider configuration and connectivity
@@ -2208,21 +2279,54 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 	// Create datastore file manager
 	dsManager := NewDatastoreFileManager(p)
 
-	// Create a temporary directory for VMDK files (needed for multi-file VMDKs like sesparse)
+	// Create a temporary directory for VMDK export
 	tempDir := fmt.Sprintf("/tmp/%s", exportID)
 	err = os.MkdirAll(tempDir, 0755)
 	if err != nil {
 		return nil, errors.NewInternal("failed to create temp directory", err)
 	}
 	defer func() {
-		// Clean up temp directory
+		// Clean up temp directory and temporary cloned disk
 		_ = os.RemoveAll(tempDir)
 	}()
 
-	// Download VMDK descriptor from datastore
-	p.logger.Info("Downloading VMDK descriptor from datastore", "disk_path", diskInfo.Path)
+	// Strategy: Use VirtualDiskManager to clone disk to streamOptimized format
+	// This handles all VMDK types (sesparse, flat, thick, thin) and produces a single downloadable file
+	p.logger.Info("Cloning disk to streamOptimized format for export", "source_disk", diskInfo.Path)
 
-	tempFile := fmt.Sprintf("%s/descriptor.vmdk", tempDir)
+	// Parse source datastore path
+	srcDsName, srcFilePath, err := parseDatastorePath(diskInfo.Path)
+	if err != nil {
+		return nil, errors.NewInternal("failed to parse source datastore path", err)
+	}
+
+	// Create temporary destination path for streamOptimized clone
+	// Use a unique name to avoid conflicts
+	tempDiskName := fmt.Sprintf("virtrigaud-export-%s-%d.vmdk", req.VmId, time.Now().Unix())
+	destPath := path.Join(path.Dir(srcFilePath), tempDiskName)
+	destDatastorePath := fmt.Sprintf("[%s] %s", srcDsName, destPath)
+
+	p.logger.Info("Creating streamOptimized clone", "source", diskInfo.Path, "destination", destDatastorePath)
+
+	// Get VirtualDiskManager
+	err = p.cloneDiskToStreamOptimized(ctx, diskInfo.Path, destDatastorePath)
+	if err != nil {
+		return nil, errors.NewInternal("failed to clone disk to streamOptimized format", err)
+	}
+
+	// Ensure cleanup of temporary disk on datastore
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := dsManager.DeleteFile(cleanupCtx, destDatastorePath); err != nil {
+			p.logger.Warn("Failed to cleanup temporary disk on datastore", "path", destDatastorePath, "error", err)
+		} else {
+			p.logger.Info("Cleaned up temporary disk from datastore", "path", destDatastorePath)
+		}
+	}()
+
+	// Now download the streamOptimized VMDK (single file, no extent files)
+	tempFile := fmt.Sprintf("%s/disk.vmdk", tempDir)
 	file, err := os.Create(tempFile)
 	if err != nil {
 		return nil, errors.NewInternal("failed to create temp file", err)
@@ -2232,55 +2336,22 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 	downloadProgress := func(transferred, total int64) {
 		if total > 0 {
 			progress := float64(transferred) / float64(total) * 100
-			p.logger.Debug("Download progress", "percent", progress, "transferred", transferred, "total", total)
+			if int(progress)%10 == 0 { // Log every 10%
+				p.logger.Info("Download progress", "percent", fmt.Sprintf("%.1f%%", progress))
+			}
 		}
 	}
 
-	err = dsManager.DownloadFile(ctx, diskInfo.Path, file, downloadProgress)
+	p.logger.Info("Downloading streamOptimized VMDK", "source", destDatastorePath)
+	err = dsManager.DownloadFile(ctx, destDatastorePath, file, downloadProgress)
 	if err != nil {
 		file.Close()
-		return nil, errors.NewInternal("failed to download VMDK descriptor", err)
+		return nil, errors.NewInternal("failed to download streamOptimized VMDK", err)
 	}
 
 	// Close file to flush writes
 	file.Close()
-
-	// Parse VMDK descriptor to find extent files (for multi-file VMDKs like sesparse)
-	descriptor, err := parseVMDKDescriptor(tempFile)
-	if err != nil {
-		p.logger.Warn("Failed to parse VMDK descriptor, assuming single-file VMDK", "error", err)
-		descriptor = &VMDKDescriptor{
-			DescriptorPath: tempFile,
-			ExtentFiles:    []string{},
-		}
-	}
-
-	// Download extent files if any
-	if len(descriptor.ExtentFiles) > 0 {
-		p.logger.Info("VMDK has extent files, downloading them", "count", len(descriptor.ExtentFiles), "files", descriptor.ExtentFiles)
-		basePath := extractDatastoreBasePath(diskInfo.Path)
-		
-		for _, extentFile := range descriptor.ExtentFiles {
-			// Construct full datastore path for extent file
-			extentPath := constructDatastorePath(basePath, extentFile)
-			localPath := fmt.Sprintf("%s/%s", tempDir, extentFile)
-			
-			p.logger.Info("Downloading extent file", "datastore_path", extentPath, "local_path", localPath)
-			
-			extentFileHandle, err := os.Create(localPath)
-			if err != nil {
-				return nil, errors.NewInternal("failed to create extent file", err)
-			}
-			
-			err = dsManager.DownloadFile(ctx, extentPath, extentFileHandle, nil)
-			extentFileHandle.Close()
-			if err != nil {
-				p.logger.Info("Failed to download extent file", "extent", extentFile, "error", err)
-				return nil, errors.NewInternal("failed to download VMDK extent file: "+extentFile, err)
-			}
-		}
-		p.logger.Info("All extent files downloaded successfully")
-	}
+	p.logger.Info("Download complete", "file", tempFile)
 
 	// Convert format if needed
 	var uploadPath string
