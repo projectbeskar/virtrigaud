@@ -527,10 +527,12 @@ func (p *PVCStorage) parsePath(url string) (string, error) {
 	pvcName := parts[0]
 	filePath := parts[1]
 
-	// Construct the full path: /mnt/migration-storage/<pvc-name>/<file-path>
-	absPath := filepath.Join("/mnt/migration-storage", pvcName, filePath)
+	// Construct the full path using the configured mount path
+	// MountPath should already include the PVC name (e.g., /mnt/migration-storage/<pvc-name>)
+	// So we just append the file path
+	absPath := filepath.Join(p.mountPath, filePath)
 
-	log.Printf("DEBUG Parsed PVC path: url=%s pvc=%s file=%s abs=%s", url, pvcName, filePath, absPath)
+	log.Printf("DEBUG Parsed PVC path: url=%s pvc=%s file=%s mount=%s abs=%s", url, pvcName, filePath, p.mountPath, absPath)
 
 	return absPath, nil
 }

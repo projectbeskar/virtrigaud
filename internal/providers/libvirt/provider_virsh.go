@@ -1728,10 +1728,18 @@ func (p *Provider) ExportDisk(ctx context.Context, req contracts.ExportDiskReque
 	// Configure storage client
 	// URL format: pvc://<pvc-name>/<file-path>
 	// Provider pods have PVCs mounted at /mnt/migration-storage/<pvc-name>
-	// The storage client's parsePath will handle appending the PVC name from the URL
+	// Extract PVC name from URL to construct the correct mount path
+	pvcName, err := extractPVCNameFromURL(req.DestinationURL)
+	if err != nil {
+		return contracts.ExportDiskResponse{}, fmt.Errorf("failed to extract PVC name from URL: %w", err)
+	}
+
+	// Mount path matches where the controller mounts PVCs: /mnt/migration-storage/<pvc-name>
+	mountPath := fmt.Sprintf("/mnt/migration-storage/%s", pvcName)
+
 	storageConfig := storage.StorageConfig{
 		Type:      "pvc",
-		MountPath: "/mnt/migration-storage",
+		MountPath: mountPath,
 	}
 
 	// Create PVC storage client
@@ -1816,10 +1824,18 @@ func (p *Provider) ImportDisk(ctx context.Context, req contracts.ImportDiskReque
 	// Configure storage client
 	// URL format: pvc://<pvc-name>/<file-path>
 	// Provider pods have PVCs mounted at /mnt/migration-storage/<pvc-name>
-	// The storage client's parsePath will handle appending the PVC name from the URL
+	// Extract PVC name from URL to construct the correct mount path
+	pvcName, err := extractPVCNameFromURL(req.SourceURL)
+	if err != nil {
+		return contracts.ImportDiskResponse{}, fmt.Errorf("failed to extract PVC name from URL: %w", err)
+	}
+
+	// Mount path matches where the controller mounts PVCs: /mnt/migration-storage/<pvc-name>
+	mountPath := fmt.Sprintf("/mnt/migration-storage/%s", pvcName)
+
 	storageConfig := storage.StorageConfig{
 		Type:      "pvc",
-		MountPath: "/mnt/migration-storage",
+		MountPath: mountPath,
 	}
 
 	// Create PVC storage client
