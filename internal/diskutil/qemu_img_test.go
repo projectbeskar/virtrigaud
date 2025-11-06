@@ -146,7 +146,7 @@ func TestQemuImgIsInstalled(t *testing.T) {
 	// In CI/CD, you might want to skip this or mock it
 	installed := q.IsInstalled()
 	t.Logf("qemu-img installed: %v", installed)
-	
+
 	// We don't fail if not installed, just log it
 	// In real tests, you might want to skip tests that require qemu-img
 }
@@ -216,4 +216,3 @@ func TestNewQemuImgWithPath(t *testing.T) {
 		t.Errorf("BinaryPath = %s, want %s", q.BinaryPath, customPath)
 	}
 }
-

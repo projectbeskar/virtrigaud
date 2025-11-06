@@ -2186,7 +2186,7 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 	// URL format: pvc://<pvc-name>/<file-path>
 	// Provider pods have PVCs mounted at /mnt/migration-storage/<pvc-name>
 	// Extract PVC name from URL to construct the correct mount path
-	pvcName, err := extractPVCNameFromURL(req.DestinationURL)
+	pvcName, err := extractPVCNameFromURL(req.DestinationUrl)
 	if err != nil {
 		return nil, errors.NewInternal("failed to extract PVC name from URL: %v", err)
 	}
@@ -2355,7 +2355,7 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 	// URL format: pvc://<pvc-name>/<file-path>
 	// Provider pods have PVCs mounted at /mnt/migration-storage/<pvc-name>
 	// Extract PVC name from URL to construct the correct mount path
-	pvcName, err := extractPVCNameFromURL(req.SourceURL)
+	pvcName, err := extractPVCNameFromURL(req.SourceUrl)
 	if err != nil {
 		return nil, errors.NewInternal("failed to extract PVC name from URL: %v", err)
 	}

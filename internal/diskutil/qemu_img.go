@@ -138,7 +138,7 @@ func (q *QemuImg) Convert(ctx context.Context, opts ConvertOptions) error {
 
 	// Execute command
 	cmd := exec.CommandContext(ctx, q.BinaryPath, args...)
-	
+
 	// Capture output for progress tracking
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -183,7 +183,7 @@ func (q *QemuImg) Create(ctx context.Context, imagePath string, format Supported
 	// Execute qemu-img create command
 	args := []string{"create", "-f", string(format), imagePath, sizeStr}
 	cmd := exec.CommandContext(ctx, q.BinaryPath, args...)
-	
+
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("qemu-img create failed: %w, output: %s", err, string(output))
@@ -386,4 +386,3 @@ func parseHumanSize(s string) (int64, error) {
 		return 0, fmt.Errorf("unknown unit: %s", unit)
 	}
 }
-

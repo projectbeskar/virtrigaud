@@ -98,8 +98,8 @@ func main() {
 	// These settings prevent reconciliation storms from overwhelming etcd/API server
 	// Conservative settings for cluster stability
 	restConfig := ctrl.GetConfigOrDie()
-	restConfig.QPS = 20    // Max 20 queries per second to API server
-	restConfig.Burst = 40  // Allow bursts up to 40 requests
+	restConfig.QPS = 20   // Max 20 queries per second to API server
+	restConfig.Burst = 40 // Allow bursts up to 40 requests
 
 	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Scheme: scheme,
