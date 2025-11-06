@@ -1888,10 +1888,13 @@ func (r *VMMigrationReconciler) cleanupIntermediateStorage(ctx context.Context, 
 	}
 
 	// Set mount path to match provider controller's mount location
-	mountPath := fmt.Sprintf("/mnt/migration-storage/%s", pvcName)
+	// Provider controller always mounts PVCs at /mnt/migration-storage/<pvc-name>
+	// If user specified a custom base path, use it, but always append PVC name
+	basePath := "/mnt/migration-storage"
 	if migration.Spec.Storage.PVC != nil && migration.Spec.Storage.PVC.MountPath != "" {
-		mountPath = migration.Spec.Storage.PVC.MountPath
+		basePath = migration.Spec.Storage.PVC.MountPath
 	}
+	mountPath := fmt.Sprintf("%s/%s", basePath, pvcName)
 
 	storageConfig := storage.StorageConfig{
 		Type:         "pvc",
