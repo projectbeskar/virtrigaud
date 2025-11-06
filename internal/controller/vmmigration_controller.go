@@ -545,8 +545,13 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 
 	// TODO: Load credentials from storage secret if configured
 
+	// Create extended context for export operation (disk exports can take a long time)
+	// For large disks (80GB+), clone + download + convert + upload can take 30+ minutes
+	exportCtx, exportCancel := context.WithTimeout(ctx, 1*time.Hour)
+	defer exportCancel()
+
 	logger.Info("Starting disk export", "vm_id", sourceVM.Status.ID, "destination", destinationURL)
-	exportResp, err := providerInstance.ExportDisk(ctx, exportReq)
+	exportResp, err := providerInstance.ExportDisk(exportCtx, exportReq)
 	if err != nil {
 		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to start disk export: %v", err))
 	}
