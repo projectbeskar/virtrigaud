@@ -2338,6 +2338,46 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 	file.Close()
 	p.logger.Info("Download complete", "file", tempFile)
 
+	// Parse VMDK descriptor to find extent files (for multi-file VMDKs like sesparse)
+	// Even though we requested sparseMonolithic, vSphere may still create multi-file VMDKs
+	descriptor, err := parseVMDKDescriptor(tempFile)
+	if err != nil {
+		p.logger.Warn("Failed to parse VMDK descriptor, assuming single-file VMDK", "error", err)
+		descriptor = &VMDKDescriptor{
+			DescriptorPath: tempFile,
+			ExtentFiles:    []string{},
+		}
+	}
+
+	// Download extent files if any
+	if len(descriptor.ExtentFiles) > 0 {
+		p.logger.Info("VMDK has extent files, downloading them", "count", len(descriptor.ExtentFiles), "files", descriptor.ExtentFiles)
+		basePath := extractDatastoreBasePath(destDatastorePath)
+		
+		for _, extentFile := range descriptor.ExtentFiles {
+			// Construct full datastore path for extent file
+			extentPath := constructDatastorePath(basePath, extentFile)
+			localPath := fmt.Sprintf("%s/%s", tempDir, extentFile)
+			
+			p.logger.Info("Downloading extent file", "datastore_path", extentPath, "local_path", localPath)
+			
+			extentFileHandle, err := os.Create(localPath)
+			if err != nil {
+				return nil, errors.NewInternal("failed to create extent file", err)
+			}
+			
+			err = dsManager.DownloadFile(ctx, extentPath, extentFileHandle, nil)
+			extentFileHandle.Close()
+			if err != nil {
+				p.logger.Warn("Failed to download extent file", "extent", extentFile, "error", err)
+				// Continue anyway - qemu-img might work without all extents
+			} else {
+				p.logger.Info("Extent file downloaded successfully", "file", extentFile)
+			}
+		}
+		p.logger.Info("All available extent files downloaded")
+	}
+
 	// Convert format if needed
 	var uploadPath string
 	if targetFormat != "vmdk" {
