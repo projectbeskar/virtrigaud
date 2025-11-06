@@ -2158,7 +2158,7 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 		SnapshotId: req.SnapshotId,
 	})
 	if err != nil {
-		return nil, errors.NewInternal("failed to get disk info: %v", err)
+		return nil, errors.NewInternal("failed to get disk info", err)
 	}
 
 	// Validate format - for vSphere export, we'll convert VMDK to target format
@@ -2188,7 +2188,7 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 	// Extract PVC name from URL to construct the correct mount path
 	pvcName, err := extractPVCNameFromURL(req.DestinationUrl)
 	if err != nil {
-		return nil, errors.NewInternal("failed to extract PVC name from URL: %v", err)
+		return nil, errors.NewInternal("failed to extract PVC name from URL", err)
 	}
 
 	// Mount path matches where the controller mounts PVCs: /mnt/migration-storage/<pvc-name>
@@ -2201,7 +2201,7 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 
 	storageClient, err := storage.NewStorage(storageConfig)
 	if err != nil {
-		return nil, errors.NewInternal("failed to create storage client: %v", err)
+		return nil, errors.NewInternal("failed to create storage client", err)
 	}
 	defer storageClient.Close()
 
@@ -2220,7 +2220,7 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 
 	file, err := os.Create(tempFile)
 	if err != nil {
-		return nil, errors.NewInternal("failed to create temp file: %v", err)
+		return nil, errors.NewInternal("failed to create temp file", err)
 	}
 	defer file.Close()
 
@@ -2234,7 +2234,7 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 
 	err = dsManager.DownloadFile(ctx, diskInfo.Path, file, downloadProgress)
 	if err != nil {
-		return nil, errors.NewInternal("failed to download VMDK: %v", err)
+		return nil, errors.NewInternal("failed to download VMDK", err)
 	}
 
 	// Close file to flush writes
@@ -2256,7 +2256,7 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 			Compression:       false, // No compression for migration (faster)
 		})
 		if err != nil {
-			return nil, errors.NewInternal("failed to convert VMDK format: %v", err)
+			return nil, errors.NewInternal("failed to convert VMDK format", err)
 		}
 
 		uploadPath = convertedPath
@@ -2271,14 +2271,14 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 	// Re-open file for reading
 	uploadFile, err := os.Open(uploadPath)
 	if err != nil {
-		return nil, errors.NewInternal("failed to open file for upload: %v", err)
+		return nil, errors.NewInternal("failed to open file for upload", err)
 	}
 	defer uploadFile.Close()
 
 	// Get file size
 	stat, err := uploadFile.Stat()
 	if err != nil {
-		return nil, errors.NewInternal("failed to stat file: %v", err)
+		return nil, errors.NewInternal("failed to stat file", err)
 	}
 
 	// Upload with progress tracking
@@ -2298,7 +2298,7 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 
 	uploadResp, err := storageClient.Upload(ctx, uploadReq)
 	if err != nil {
-		return nil, errors.NewInternal("failed to upload disk: %v", err)
+		return nil, errors.NewInternal("failed to upload disk", err)
 	}
 
 	p.logger.Info("Disk export completed", "export_id", exportID, "checksum", uploadResp.Checksum, "bytes", uploadResp.BytesTransferred)
@@ -2357,7 +2357,7 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 	// Extract PVC name from URL to construct the correct mount path
 	pvcName, err := extractPVCNameFromURL(req.SourceUrl)
 	if err != nil {
-		return nil, errors.NewInternal("failed to extract PVC name from URL: %v", err)
+		return nil, errors.NewInternal("failed to extract PVC name from URL", err)
 	}
 
 	// Mount path matches where the controller mounts PVCs: /mnt/migration-storage/<pvc-name>
@@ -2370,7 +2370,7 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 
 	storageClient, err := storage.NewStorage(storageConfig)
 	if err != nil {
-		return nil, errors.NewInternal("failed to create storage client: %v", err)
+		return nil, errors.NewInternal("failed to create storage client", err)
 	}
 	defer storageClient.Close()
 
@@ -2388,7 +2388,7 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 
 	file, err := os.Create(tempFile)
 	if err != nil {
-		return nil, errors.NewInternal("failed to create temp file: %v", err)
+		return nil, errors.NewInternal("failed to create temp file", err)
 	}
 	defer file.Close()
 
@@ -2410,7 +2410,7 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 
 	downloadResp, err := storageClient.Download(ctx, downloadReq)
 	if err != nil {
-		return nil, errors.NewInternal("failed to download disk: %v", err)
+		return nil, errors.NewInternal("failed to download disk", err)
 	}
 
 	// Close file to flush writes
@@ -2433,7 +2433,7 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 			Compression:       false, // No compression for migration (faster)
 		})
 		if err != nil {
-			return nil, errors.NewInternal("failed to convert to VMDK format: %v", err)
+			return nil, errors.NewInternal("failed to convert to VMDK format", err)
 		}
 
 		defer os.Remove(vmdkPath)
@@ -2447,14 +2447,14 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 	// Re-open file for reading
 	uploadFile, err := os.Open(vmdkPath)
 	if err != nil {
-		return nil, errors.NewInternal("failed to open file for datastore upload: %v", err)
+		return nil, errors.NewInternal("failed to open file for datastore upload", err)
 	}
 	defer uploadFile.Close()
 
 	// Get file size
 	stat, err := uploadFile.Stat()
 	if err != nil {
-		return nil, errors.NewInternal("failed to stat file: %v", err)
+		return nil, errors.NewInternal("failed to stat file", err)
 	}
 
 	// Generate datastore path
@@ -2470,7 +2470,7 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 
 	err = dsManager.UploadFile(ctx, uploadFile, diskPath, stat.Size(), uploadProgress)
 	if err != nil {
-		return nil, errors.NewInternal("failed to upload to datastore: %v", err)
+		return nil, errors.NewInternal("failed to upload to datastore", err)
 	}
 
 	p.logger.Info("Disk import completed", "disk_id", diskID, "path", diskPath)
