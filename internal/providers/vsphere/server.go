@@ -2208,21 +2208,25 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 	// Create datastore file manager
 	dsManager := NewDatastoreFileManager(p)
 
-	// Create a temporary file to download VMDK
-	tempFile := fmt.Sprintf("/tmp/%s.vmdk", exportID)
+	// Create a temporary directory for VMDK files (needed for multi-file VMDKs like sesparse)
+	tempDir := fmt.Sprintf("/tmp/%s", exportID)
+	err = os.MkdirAll(tempDir, 0755)
+	if err != nil {
+		return nil, errors.NewInternal("failed to create temp directory", err)
+	}
 	defer func() {
-		// Clean up temp file
-		_ = os.Remove(tempFile)
+		// Clean up temp directory
+		_ = os.RemoveAll(tempDir)
 	}()
 
-	// Download VMDK from datastore
-	p.logger.Info("Downloading VMDK from datastore", "disk_path", diskInfo.Path)
+	// Download VMDK descriptor from datastore
+	p.logger.Info("Downloading VMDK descriptor from datastore", "disk_path", diskInfo.Path)
 
+	tempFile := fmt.Sprintf("%s/descriptor.vmdk", tempDir)
 	file, err := os.Create(tempFile)
 	if err != nil {
 		return nil, errors.NewInternal("failed to create temp file", err)
 	}
-	defer file.Close()
 
 	// Download with progress tracking
 	downloadProgress := func(transferred, total int64) {
@@ -2234,17 +2238,55 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 
 	err = dsManager.DownloadFile(ctx, diskInfo.Path, file, downloadProgress)
 	if err != nil {
-		return nil, errors.NewInternal("failed to download VMDK", err)
+		file.Close()
+		return nil, errors.NewInternal("failed to download VMDK descriptor", err)
 	}
 
 	// Close file to flush writes
 	file.Close()
 
+	// Parse VMDK descriptor to find extent files (for multi-file VMDKs like sesparse)
+	descriptor, err := parseVMDKDescriptor(tempFile)
+	if err != nil {
+		p.logger.Warn("Failed to parse VMDK descriptor, assuming single-file VMDK", "error", err)
+		descriptor = &VMDKDescriptor{
+			DescriptorPath: tempFile,
+			ExtentFiles:    []string{},
+		}
+	}
+
+	// Download extent files if any
+	if len(descriptor.ExtentFiles) > 0 {
+		p.logger.Info("VMDK has extent files, downloading them", "count", len(descriptor.ExtentFiles), "files", descriptor.ExtentFiles)
+		basePath := extractDatastoreBasePath(diskInfo.Path)
+		
+		for _, extentFile := range descriptor.ExtentFiles {
+			// Construct full datastore path for extent file
+			extentPath := constructDatastorePath(basePath, extentFile)
+			localPath := fmt.Sprintf("%s/%s", tempDir, extentFile)
+			
+			p.logger.Info("Downloading extent file", "datastore_path", extentPath, "local_path", localPath)
+			
+			extentFileHandle, err := os.Create(localPath)
+			if err != nil {
+				return nil, errors.NewInternal("failed to create extent file", err)
+			}
+			
+			err = dsManager.DownloadFile(ctx, extentPath, extentFileHandle, nil)
+			extentFileHandle.Close()
+			if err != nil {
+				p.logger.Info("Failed to download extent file", "extent", extentFile, "error", err)
+				return nil, errors.NewInternal("failed to download VMDK extent file: "+extentFile, err)
+			}
+		}
+		p.logger.Info("All extent files downloaded successfully")
+	}
+
 	// Convert format if needed
 	var uploadPath string
 	if targetFormat != "vmdk" {
 		p.logger.Info("Converting VMDK to target format", "target_format", targetFormat)
-		convertedPath := fmt.Sprintf("/tmp/%s.%s", exportID, targetFormat)
+		convertedPath := fmt.Sprintf("%s/converted.%s", tempDir, targetFormat)
 
 		// Use diskutil for conversion
 		qemuImg := diskutil.NewQemuImg()
@@ -2260,7 +2302,7 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 		}
 
 		uploadPath = convertedPath
-		defer os.Remove(convertedPath)
+		// No need for explicit cleanup - tempDir cleanup will handle it
 	} else {
 		uploadPath = tempFile
 	}
