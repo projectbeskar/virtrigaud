@@ -2261,26 +2261,40 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 		_ = os.RemoveAll(tempDir)
 	}()
 
-	// Strategy: Use VirtualDiskManager to clone disk to streamOptimized format
+	// Strategy: Use VirtualDiskManager to clone disk to sparseMonolithic format
 	// This handles all VMDK types (sesparse, flat, thick, thin) and produces a single downloadable file
-	p.logger.Info("Cloning disk to streamOptimized format for export", "source_disk", diskInfo.Path)
+	// IMPORTANT: For VMs with snapshots, we must use the BASE disk, not the snapshot delta disk
+	// VirtualDiskManager cannot clone snapshot delta disks directly
+	
+	sourceDiskPath := diskInfo.Path
+	
+	// If we have a backing file (parent disk), use it instead of the current disk
+	// This happens when the VM has snapshots - Path is the delta disk, BackingFile is the base
+	if diskInfo.BackingFile != "" {
+		p.logger.Info("VM has snapshots, using base disk for export", 
+			"delta_disk", diskInfo.Path, 
+			"base_disk", diskInfo.BackingFile)
+		sourceDiskPath = diskInfo.BackingFile
+	}
+	
+	p.logger.Info("Cloning disk to sparseMonolithic format for export", "source_disk", sourceDiskPath)
 
 	// Parse source datastore path
-	srcDsName, srcFilePath, err := parseDatastorePath(diskInfo.Path)
+	srcDsName, srcFilePath, err := parseDatastorePath(sourceDiskPath)
 	if err != nil {
 		return nil, errors.NewInternal("failed to parse source datastore path", err)
 	}
 
-	// Create temporary destination path for streamOptimized clone
+	// Create temporary destination path for sparseMonolithic clone
 	// Use a unique name to avoid conflicts
 	tempDiskName := fmt.Sprintf("virtrigaud-export-%s-%d.vmdk", req.VmId, time.Now().Unix())
 	destPath := path.Join(path.Dir(srcFilePath), tempDiskName)
 	destDatastorePath := fmt.Sprintf("[%s] %s", srcDsName, destPath)
 
-	p.logger.Info("Creating streamOptimized clone", "source", diskInfo.Path, "destination", destDatastorePath)
+	p.logger.Info("Creating sparseMonolithic clone", "source", sourceDiskPath, "destination", destDatastorePath)
 
 	// Get VirtualDiskManager
-	err = p.cloneDiskToStreamOptimized(ctx, diskInfo.Path, destDatastorePath)
+	err = p.cloneDiskToStreamOptimized(ctx, sourceDiskPath, destDatastorePath)
 	if err != nil {
 		return nil, errors.NewInternal("failed to clone disk to streamOptimized format", err)
 	}
