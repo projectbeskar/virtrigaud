@@ -464,6 +464,119 @@ func (s *Server) GetCapabilities(ctx context.Context, req *providerv1.GetCapabil
 	}, nil
 }
 
+// ImportDisk imports a disk from an external source (for VM migration)
+func (s *Server) ImportDisk(ctx context.Context, req *providerv1.ImportDiskRequest) (*providerv1.ImportDiskResponse, error) {
+	log.Printf("INFO Starting disk import from %s", req.SourceUrl)
+
+	// Get the provider instance and cast to libvirt Provider
+	libvirtProvider, ok := s.provider.(*Provider)
+	if !ok || libvirtProvider == nil || libvirtProvider.virshProvider == nil {
+		return nil, fmt.Errorf("libvirt provider not initialized")
+	}
+
+	// Parse source URL (expecting file:// URL from PVC mount)
+	sourceURL := req.SourceUrl
+	if !strings.HasPrefix(sourceURL, "file://") {
+		return nil, fmt.Errorf("unsupported source URL scheme (expected file://): %s", sourceURL)
+	}
+
+	// Extract file path from URL
+	sourcePath := strings.TrimPrefix(sourceURL, "file://")
+	log.Printf("INFO Importing disk from path: %s", sourcePath)
+
+	// Validate source file exists
+	_, err := libvirtProvider.virshProvider.runVirshCommand(ctx, "!", "test", "-f", sourcePath)
+	if err != nil {
+		return nil, fmt.Errorf("source disk file not found: %s (error: %w)", sourcePath, err)
+	}
+
+	// Get source disk info using qemu-img
+	infoResult, err := libvirtProvider.virshProvider.runVirshCommand(ctx, "!", "qemu-img", "info", "--output=json", sourcePath)
+	if err != nil {
+		log.Printf("WARN Failed to get source disk info: %v", err)
+	} else {
+		log.Printf("DEBUG Source disk info: %s", infoResult.Stdout)
+	}
+
+	// Generate target volume name from TargetName or source filename
+	volumeName := req.TargetName
+	if volumeName == "" {
+		// Extract filename without extension
+		parts := strings.Split(sourcePath, "/")
+		fileName := parts[len(parts)-1]
+		volumeName = strings.TrimSuffix(fileName, ".qcow2")
+		volumeName = strings.TrimSuffix(volumeName, ".vmdk")
+		volumeName = strings.TrimSuffix(volumeName, ".raw")
+		volumeName = fmt.Sprintf("%s-imported", volumeName)
+	}
+
+	log.Printf("INFO Target volume name: %s", volumeName)
+
+	// Determine target pool (use StorageHint or default to "default")
+	poolName := "default"
+	if req.StorageHint != "" {
+		poolName = req.StorageHint
+	}
+
+	// Create storage provider
+	storageProvider := NewStorageProvider(libvirtProvider.virshProvider)
+
+	// Ensure target pool exists and is active
+	if err := storageProvider.EnsureDefaultStoragePool(ctx); err != nil {
+		return nil, fmt.Errorf("failed to ensure storage pool: %w", err)
+	}
+
+	// Import the disk using CreateVolumeFromImageFile
+	// This will copy, convert to qcow2, and set proper permissions
+	log.Printf("INFO Importing disk to pool %s as volume %s", poolName, volumeName)
+	volume, err := storageProvider.CreateVolumeFromImageFile(ctx, sourcePath, volumeName, poolName, 0)
+	if err != nil {
+		return nil, fmt.Errorf("failed to import disk: %w", err)
+	}
+
+	log.Printf("INFO Disk successfully imported to: %s", volume.Path)
+
+	// Get actual size of imported disk
+	var actualSizeBytes int64
+	statResult, err := libvirtProvider.virshProvider.runVirshCommand(ctx, "!", "stat", "-c", "%s", volume.Path)
+	if err == nil {
+		_, _ = fmt.Sscanf(strings.TrimSpace(statResult.Stdout), "%d", &actualSizeBytes)
+	}
+
+	// Calculate checksum if requested
+	checksum := ""
+	if req.VerifyChecksum {
+		log.Printf("INFO Calculating SHA256 checksum of imported disk...")
+		checksumResult, err := libvirtProvider.virshProvider.runVirshCommand(ctx, "!", "sha256sum", volume.Path)
+		if err != nil {
+			log.Printf("WARN Failed to calculate checksum: %v", err)
+		} else {
+			// sha256sum output format: "<checksum> <filename>"
+			parts := strings.Fields(checksumResult.Stdout)
+			if len(parts) > 0 {
+				checksum = parts[0]
+				log.Printf("INFO Calculated checksum: %s", checksum)
+
+				// Verify against expected checksum if provided
+				if req.ExpectedChecksum != "" && req.ExpectedChecksum != checksum {
+					return nil, fmt.Errorf("checksum mismatch: expected %s, got %s", req.ExpectedChecksum, checksum)
+				}
+			}
+		}
+	}
+
+	// Generate disk ID (volume name in libvirt)
+	diskID := volumeName
+
+	return &providerv1.ImportDiskResponse{
+		DiskId:          diskID,
+		Path:            volume.Path,
+		ActualSizeBytes: actualSizeBytes,
+		Checksum:        checksum,
+		// No task reference - import is synchronous
+	}, nil
+}
+
 // Helper functions for generating IDs and timestamps (shared with vSphere)
 func generateTimestamp() int64 {
 	return time.Now().Unix()
