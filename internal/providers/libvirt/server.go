@@ -474,14 +474,24 @@ func (s *Server) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReque
 		return nil, fmt.Errorf("libvirt provider not initialized")
 	}
 
-	// Parse source URL (expecting file:// URL from PVC mount)
+	// Parse source URL (expecting pvc:// or file:// URL)
 	sourceURL := req.SourceUrl
-	if !strings.HasPrefix(sourceURL, "file://") {
-		return nil, fmt.Errorf("unsupported source URL scheme (expected file://): %s", sourceURL)
+	var sourcePath string
+
+	if strings.HasPrefix(sourceURL, "pvc://") {
+		// PVC URL format: pvc://<pvc-name>/<path>
+		// Provider pods have PVCs mounted at /mnt/migration-storage/<pvc-name>
+		pvcURL := strings.TrimPrefix(sourceURL, "pvc://")
+		sourcePath = fmt.Sprintf("/mnt/migration-storage/%s", pvcURL)
+		log.Printf("INFO Converting PVC URL to file path: %s -> %s", sourceURL, sourcePath)
+	} else if strings.HasPrefix(sourceURL, "file://") {
+		// Direct file path
+		sourcePath = strings.TrimPrefix(sourceURL, "file://")
+		log.Printf("INFO Using direct file path: %s", sourcePath)
+	} else {
+		return nil, fmt.Errorf("unsupported source URL scheme (expected pvc:// or file://): %s", sourceURL)
 	}
 
-	// Extract file path from URL
-	sourcePath := strings.TrimPrefix(sourceURL, "file://")
 	log.Printf("INFO Importing disk from path: %s", sourcePath)
 
 	// Validate source file exists
