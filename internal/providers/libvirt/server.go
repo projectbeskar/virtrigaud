@@ -23,6 +23,7 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 	"time"
@@ -628,26 +629,32 @@ func (s *Server) copyDiskToRemote(ctx context.Context, virshProvider *VirshProvi
 		log.Printf("WARN Failed to create remote directory (may already exist): %v", err)
 	}
 
-	// Copy disk file using scp (with sshpass for password auth)
+	// Copy disk file using scp (run locally from the pod, not through SSH)
 	log.Printf("INFO Copying disk file (%s) to remote host via scp...", localPath)
 	
-	// Use sshpass with scp for password authentication
+	// Run scp LOCALLY on the pod to copy to remote host
+	var cmd *exec.Cmd
 	if virshProvider.credentials.Password != "" {
-		result, err := virshProvider.runVirshCommand(ctx, "!", "sshpass", "-e", "scp",
+		// Use sshpass with scp for password authentication
+		cmd = exec.CommandContext(ctx, "sshpass", "-e", "scp",
 			"-o", "StrictHostKeyChecking=accept-new",
 			"-o", "UserKnownHostsFile=/tmp/known_hosts",
 			localPath,
 			fmt.Sprintf("%s:%s", sshTarget, remotePath))
-		if err != nil {
-			return "", fmt.Errorf("scp failed: %w, output: %s", err, result.Stderr)
-		}
+		// Set password via environment variable for sshpass
+		cmd.Env = append(os.Environ(), fmt.Sprintf("SSHPASS=%s", virshProvider.credentials.Password))
 	} else {
 		// Fallback to scp without sshpass (for key-based auth)
-		result, err := virshProvider.runVirshCommand(ctx, "!", "scp", localPath,
+		cmd = exec.CommandContext(ctx, "scp",
+			"-o", "StrictHostKeyChecking=accept-new",
+			"-o", "UserKnownHostsFile=/tmp/known_hosts",
+			localPath,
 			fmt.Sprintf("%s:%s", sshTarget, remotePath))
-		if err != nil {
-			return "", fmt.Errorf("scp failed: %w, output: %s", err, result.Stderr)
-		}
+	}
+	
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("scp failed: %w, output: %s", err, string(output))
 	}
 
 	log.Printf("INFO Successfully copied disk file to remote host: %s", remotePath)
