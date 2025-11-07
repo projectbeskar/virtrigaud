@@ -21,6 +21,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -494,18 +496,9 @@ func (s *Server) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReque
 
 	log.Printf("INFO Importing disk from path: %s", sourcePath)
 
-	// Validate source file exists
-	_, err := libvirtProvider.virshProvider.runVirshCommand(ctx, "!", "test", "-f", sourcePath)
-	if err != nil {
-		return nil, fmt.Errorf("source disk file not found: %s (error: %w)", sourcePath, err)
-	}
-
-	// Get source disk info using qemu-img
-	infoResult, err := libvirtProvider.virshProvider.runVirshCommand(ctx, "!", "qemu-img", "info", "--output=json", sourcePath)
-	if err != nil {
-		log.Printf("WARN Failed to get source disk info: %v", err)
-	} else {
-		log.Printf("DEBUG Source disk info: %s", infoResult.Stdout)
+	// Validate source file exists locally
+	if _, err := os.Stat(sourcePath); err != nil {
+		return nil, fmt.Errorf("source disk file not found locally: %s (error: %w)", sourcePath, err)
 	}
 
 	// Generate target volume name from TargetName or source filename
@@ -521,6 +514,30 @@ func (s *Server) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReque
 	}
 
 	log.Printf("INFO Target volume name: %s", volumeName)
+
+	// Copy disk file to remote libvirt host (if using SSH connection)
+	var finalSourcePath string
+	if strings.Contains(libvirtProvider.virshProvider.uri, "ssh://") {
+		log.Printf("INFO Copying disk file to remote libvirt host...")
+		remotePath, err := s.copyDiskToRemote(ctx, libvirtProvider.virshProvider, sourcePath, volumeName)
+		if err != nil {
+			return nil, fmt.Errorf("failed to copy disk to remote host: %w", err)
+		}
+		finalSourcePath = remotePath
+		log.Printf("INFO Disk copied to remote host: %s", finalSourcePath)
+	} else {
+		// Local libvirt connection - use source path directly
+		finalSourcePath = sourcePath
+		log.Printf("INFO Using local libvirt connection with path: %s", finalSourcePath)
+	}
+
+	// Get source disk info using qemu-img
+	infoResult, err := libvirtProvider.virshProvider.runVirshCommand(ctx, "!", "qemu-img", "info", "--output=json", sourcePath)
+	if err != nil {
+		log.Printf("WARN Failed to get source disk info: %v", err)
+	} else {
+		log.Printf("DEBUG Source disk info: %s", infoResult.Stdout)
+	}
 
 	// Determine target pool (use StorageHint or default to "default")
 	poolName := "default"
@@ -539,7 +556,7 @@ func (s *Server) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReque
 	// Import the disk using CreateVolumeFromImageFile
 	// This will copy, convert to qcow2, and set proper permissions
 	log.Printf("INFO Importing disk to pool %s as volume %s", poolName, volumeName)
-	volume, err := storageProvider.CreateVolumeFromImageFile(ctx, sourcePath, volumeName, poolName, 0)
+	volume, err := storageProvider.CreateVolumeFromImageFile(ctx, finalSourcePath, volumeName, poolName, 0)
 	if err != nil {
 		return nil, fmt.Errorf("failed to import disk: %w", err)
 	}
@@ -585,6 +602,56 @@ func (s *Server) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReque
 		Checksum:        checksum,
 		// No task reference - import is synchronous
 	}, nil
+}
+
+// copyDiskToRemote copies a disk file from local pod storage to the remote libvirt host
+func (s *Server) copyDiskToRemote(ctx context.Context, virshProvider *VirshProvider, localPath, volumeName string) (string, error) {
+	// Remote path for imported disks
+	remoteDir := "/tmp/virtrigaud-imports"
+	remotePath := fmt.Sprintf("%s/%s.qcow2", remoteDir, volumeName)
+
+	// Extract SSH target (user@host) from URI
+	parsedURI, err := url.Parse(virshProvider.uri)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse libvirt URI: %w", err)
+	}
+
+	user := parsedURI.User.Username()
+	host := parsedURI.Host
+	sshTarget := fmt.Sprintf("%s@%s", user, host)
+
+	log.Printf("INFO Creating remote import directory on %s", sshTarget)
+
+	// Create remote directory
+	_, err = virshProvider.runVirshCommand(ctx, "!", "mkdir", "-p", remoteDir)
+	if err != nil {
+		log.Printf("WARN Failed to create remote directory (may already exist): %v", err)
+	}
+
+	// Copy disk file using scp (with sshpass for password auth)
+	log.Printf("INFO Copying disk file (%s) to remote host via scp...", localPath)
+	
+	// Use sshpass with scp for password authentication
+	if virshProvider.credentials.Password != "" {
+		result, err := virshProvider.runVirshCommand(ctx, "!", "sshpass", "-e", "scp",
+			"-o", "StrictHostKeyChecking=accept-new",
+			"-o", "UserKnownHostsFile=/tmp/known_hosts",
+			localPath,
+			fmt.Sprintf("%s:%s", sshTarget, remotePath))
+		if err != nil {
+			return "", fmt.Errorf("scp failed: %w, output: %s", err, result.Stderr)
+		}
+	} else {
+		// Fallback to scp without sshpass (for key-based auth)
+		result, err := virshProvider.runVirshCommand(ctx, "!", "scp", localPath,
+			fmt.Sprintf("%s:%s", sshTarget, remotePath))
+		if err != nil {
+			return "", fmt.Errorf("scp failed: %w, output: %s", err, result.Stderr)
+		}
+	}
+
+	log.Printf("INFO Successfully copied disk file to remote host: %s", remotePath)
+	return remotePath, nil
 }
 
 // Helper functions for generating IDs and timestamps (shared with vSphere)
