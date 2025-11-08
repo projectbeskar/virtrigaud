@@ -840,8 +840,10 @@ func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migrati
 			Namespace: targetNamespace,
 			Labels:    migration.Spec.Target.Labels,
 			Annotations: map[string]string{
-				"virtrigaud.io/migrated-from": fmt.Sprintf("%s/%s", migration.Namespace, migration.Spec.Source.VMRef.Name),
-				"virtrigaud.io/migration":     fmt.Sprintf("%s/%s", migration.Namespace, migration.Name),
+				"virtrigaud.io/migrated-from":    fmt.Sprintf("%s/%s", migration.Namespace, migration.Spec.Source.VMRef.Name),
+				"virtrigaud.io/migration":        fmt.Sprintf("%s/%s", migration.Namespace, migration.Name),
+				"virtrigaud.io/imported-disk-id": migration.Status.ImportID,
+				"virtrigaud.io/disk-checksum":    migration.Status.DiskInfo.TargetChecksum,
 			},
 		},
 		Spec: infrav1beta1.VirtualMachineSpec{
@@ -869,8 +871,21 @@ func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migrati
 		targetVM.Spec.Networks = migration.Spec.Target.Networks
 	}
 
-	// TODO: Set disks - need to reference the imported disk
-	// For now, we'll let the provider handle disk attachment based on imported disk ID
+	// Set imported disk reference
+	// This references the disk that was imported during the migration
+	targetVM.Spec.ImportedDisk = &infrav1beta1.ImportedDiskRef{
+		DiskID: migration.Status.ImportID,
+		Format: migration.Status.DiskInfo.TargetFormat,
+		Source: "migration",
+		MigrationRef: &infrav1beta1.LocalObjectReference{
+			Name: migration.Name,
+		},
+	}
+
+	logger.Info("Target VM configured with imported disk",
+		"disk_id", migration.Status.ImportID,
+		"format", migration.Status.DiskInfo.TargetFormat,
+		"checksum", migration.Status.DiskInfo.TargetChecksum)
 
 	// Set placement if provided
 	if migration.Spec.Target.PlacementRef != nil {

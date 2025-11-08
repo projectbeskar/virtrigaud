@@ -27,7 +27,7 @@ func TestVirtualMachine_Basic(t *testing.T) {
 			ClassRef: ObjectRef{
 				Name: "test-class",
 			},
-			ImageRef: ObjectRef{
+			ImageRef: &ObjectRef{
 				Name: "test-image",
 			},
 			Networks: []VMNetworkRef{
@@ -100,7 +100,7 @@ func TestVirtualMachine_BetaAlphaBeta_RoundTrip(t *testing.T) {
 			ClassRef: ObjectRef{
 				Name: "test-class",
 			},
-			ImageRef: ObjectRef{
+			ImageRef: &ObjectRef{
 				Name: "test-image",
 			},
 			Networks: []VMNetworkRef{
@@ -327,11 +327,11 @@ func TestVMSet_BetaAlphaBeta_RoundTrip(t *testing.T) {
 		Spec: VMSetSpec{
 			Replicas: func() *int32 { r := int32(3); return &r }(),
 			Template: VMSetTemplate{
-				Spec: VirtualMachineSpec{
-					ProviderRef: ObjectRef{Name: "test-provider"},
-					ClassRef:    ObjectRef{Name: "test-class"},
-					ImageRef:    ObjectRef{Name: "test-image"},
-				},
+			Spec: VirtualMachineSpec{
+				ProviderRef: ObjectRef{Name: "test-provider"},
+				ClassRef:    ObjectRef{Name: "test-class"},
+				ImageRef:    &ObjectRef{Name: "test-image"},
+			},
 			},
 		},
 	}

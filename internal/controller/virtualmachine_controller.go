@@ -287,17 +287,20 @@ func (r *VirtualMachineReconciler) getDependencies(ctx context.Context, vm *infr
 		return nil, nil, nil, nil, fmt.Errorf("failed to get vmclass %s: %w", vm.Spec.ClassRef.Name, err)
 	}
 
-	// Get VMImage
-	vmImage := &infravirtrigaudiov1beta1.VMImage{}
-	imageKey := types.NamespacedName{
-		Name:      vm.Spec.ImageRef.Name,
-		Namespace: vm.Namespace,
-	}
-	if vm.Spec.ImageRef.Namespace != "" {
-		imageKey.Namespace = vm.Spec.ImageRef.Namespace
-	}
-	if err := r.Get(ctx, imageKey, vmImage); err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("failed to get vmimage %s: %w", vm.Spec.ImageRef.Name, err)
+	// Get VMImage (only if ImageRef is specified, not ImportedDisk)
+	var vmImage *infravirtrigaudiov1beta1.VMImage
+	if vm.Spec.ImageRef != nil {
+		vmImage = &infravirtrigaudiov1beta1.VMImage{}
+		imageKey := types.NamespacedName{
+			Name:      vm.Spec.ImageRef.Name,
+			Namespace: vm.Namespace,
+		}
+		if vm.Spec.ImageRef.Namespace != "" {
+			imageKey.Namespace = vm.Spec.ImageRef.Namespace
+		}
+		if err := r.Get(ctx, imageKey, vmImage); err != nil {
+			return nil, nil, nil, nil, fmt.Errorf("failed to get vmimage %s: %w", vm.Spec.ImageRef.Name, err)
+		}
 	}
 
 	// Get VMNetworkAttachments
@@ -327,6 +330,24 @@ func (r *VirtualMachineReconciler) createVM(
 	networks []*infravirtrigaudiov1beta1.VMNetworkAttachment,
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
+
+	// Validate that either ImageRef or ImportedDisk is specified
+	if vm.Spec.ImageRef == nil && vm.Spec.ImportedDisk == nil {
+		err := fmt.Errorf("either imageRef or importedDisk must be specified")
+		logger.Error(err, "Invalid VM specification")
+		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, err.Error())
+		r.updateStatus(ctx, vm)
+		return ctrl.Result{}, err
+	}
+
+	// Validate mutual exclusivity
+	if vm.Spec.ImageRef != nil && vm.Spec.ImportedDisk != nil {
+		err := fmt.Errorf("imageRef and importedDisk are mutually exclusive")
+		logger.Error(err, "Invalid VM specification")
+		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, err.Error())
+		r.updateStatus(ctx, vm)
+		return ctrl.Result{}, err
+	}
 
 	// Build create request
 	req := r.buildCreateRequest(vm, vmClass, vmImage, networks)
@@ -401,12 +422,23 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 ) contracts.CreateRequest {
 	log := ctrl.Log.WithName("buildCreateRequest")
 
-	log.Info("DEBUG buildCreateRequest called",
-		"vm", vm.Name,
-		"vmImage", vmImage.Name,
-		"hasLibvirtSource", vmImage.Spec.Source.Libvirt != nil,
-		"hasVSphereSource", vmImage.Spec.Source.VSphere != nil,
-		"hasProxmoxSource", vmImage.Spec.Source.Proxmox != nil)
+	// Check if using imported disk or template
+	usingImportedDisk := vm.Spec.ImportedDisk != nil
+	
+	if usingImportedDisk {
+		log.Info("DEBUG buildCreateRequest called with imported disk",
+			"vm", vm.Name,
+			"diskID", vm.Spec.ImportedDisk.DiskID,
+			"format", vm.Spec.ImportedDisk.Format,
+			"source", vm.Spec.ImportedDisk.Source)
+	} else if vmImage != nil {
+		log.Info("DEBUG buildCreateRequest called with vmImage template",
+			"vm", vm.Name,
+			"vmImage", vmImage.Name,
+			"hasLibvirtSource", vmImage.Spec.Source.Libvirt != nil,
+			"hasVSphereSource", vmImage.Spec.Source.VSphere != nil,
+			"hasProxmoxSource", vmImage.Spec.Source.Proxmox != nil)
+	}
 
 	// Convert VMClass
 	class := contracts.VMClass{
@@ -491,62 +523,101 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 		}
 	}
 
-	// Convert VMImage
-	image := contracts.VMImage{
-		Format:       "template", // Default for vSphere
-		ChecksumType: "sha256",
-	}
+	// Convert VMImage - handle both imported disk and template cases
+	var image contracts.VMImage
+	
+	if usingImportedDisk {
+		// VM uses an imported disk (e.g., from migration)
+		disk := vm.Spec.ImportedDisk
+		
+		// Set format (default to qcow2 if not specified)
+		format := disk.Format
+		if format == "" {
+			format = "qcow2"
+		}
+		
+		// Determine path based on provider and disk ID
+		diskPath := disk.Path
+		if diskPath == "" {
+			// If path not provided, construct default path based on disk ID
+			// For libvirt: /var/lib/libvirt/images/{diskID}.{format}
+			// For vSphere: [datastore] path/{diskID}.{format}
+			// Providers can override this based on their conventions
+			diskPath = fmt.Sprintf("/var/lib/libvirt/images/%s.%s", disk.DiskID, format)
+			log.Info("Using default disk path for imported disk",
+				"diskID", disk.DiskID,
+				"path", diskPath)
+		}
+		
+		image = contracts.VMImage{
+			Path:         diskPath,
+			Format:       format,
+			ChecksumType: "sha256",
+		}
+		
+		log.Info("Built image reference from imported disk",
+			"diskID", disk.DiskID,
+			"path", image.Path,
+			"format", image.Format,
+			"source", disk.Source)
+	} else if vmImage != nil {
+		// VM uses a template image
+		image = contracts.VMImage{
+			Format:       "template", // Default for vSphere
+			ChecksumType: "sha256",
+		}
 
-	if vmImage.Spec.Source.VSphere != nil {
-		image.TemplateName = vmImage.Spec.Source.VSphere.TemplateName
-		image.URL = vmImage.Spec.Source.VSphere.OVAURL
-		if vmImage.Spec.Source.VSphere.Checksum != "" {
-			image.Checksum = vmImage.Spec.Source.VSphere.Checksum
+		if vmImage.Spec.Source.VSphere != nil {
+			image.TemplateName = vmImage.Spec.Source.VSphere.TemplateName
+			image.URL = vmImage.Spec.Source.VSphere.OVAURL
+			if vmImage.Spec.Source.VSphere.Checksum != "" {
+				image.Checksum = vmImage.Spec.Source.VSphere.Checksum
+			}
+			if vmImage.Spec.Source.VSphere.ChecksumType != "" {
+				image.ChecksumType = string(vmImage.Spec.Source.VSphere.ChecksumType)
+			}
 		}
-		if vmImage.Spec.Source.VSphere.ChecksumType != "" {
-			image.ChecksumType = string(vmImage.Spec.Source.VSphere.ChecksumType)
-		}
-	}
 
-	if vmImage.Spec.Source.Libvirt != nil {
-		log.Info("DEBUG controller: Libvirt image source found",
-			"path", vmImage.Spec.Source.Libvirt.Path,
-			"url", vmImage.Spec.Source.Libvirt.URL,
-			"format", vmImage.Spec.Source.Libvirt.Format)
-		image.Path = vmImage.Spec.Source.Libvirt.Path
-		image.URL = vmImage.Spec.Source.Libvirt.URL
-		image.Format = string(vmImage.Spec.Source.Libvirt.Format)
-		if vmImage.Spec.Source.Libvirt.Checksum != "" {
-			image.Checksum = vmImage.Spec.Source.Libvirt.Checksum
+		if vmImage.Spec.Source.Libvirt != nil {
+			log.Info("DEBUG controller: Libvirt image source found",
+				"path", vmImage.Spec.Source.Libvirt.Path,
+				"url", vmImage.Spec.Source.Libvirt.URL,
+				"format", vmImage.Spec.Source.Libvirt.Format)
+			image.Path = vmImage.Spec.Source.Libvirt.Path
+			image.URL = vmImage.Spec.Source.Libvirt.URL
+			image.Format = string(vmImage.Spec.Source.Libvirt.Format)
+			if vmImage.Spec.Source.Libvirt.Checksum != "" {
+				image.Checksum = vmImage.Spec.Source.Libvirt.Checksum
+			}
+			if vmImage.Spec.Source.Libvirt.ChecksumType != "" {
+				image.ChecksumType = string(vmImage.Spec.Source.Libvirt.ChecksumType)
+			}
+			log.Info("DEBUG controller: Set image from Libvirt source",
+				"image.Path", image.Path,
+				"image.URL", image.URL,
+				"image.Format", image.Format)
+		} else {
+			log.Info("DEBUG controller: Libvirt image source is nil")
 		}
-		if vmImage.Spec.Source.Libvirt.ChecksumType != "" {
-			image.ChecksumType = string(vmImage.Spec.Source.Libvirt.ChecksumType)
-		}
-		log.Info("DEBUG controller: Set image from Libvirt source",
-			"image.Path", image.Path,
-			"image.URL", image.URL,
-			"image.Format", image.Format)
-	} else {
-		log.Info("DEBUG controller: Libvirt image source is nil")
-	}
 
-	if vmImage.Spec.Source.Proxmox != nil {
-		log.Info("DEBUG controller: Proxmox image source found",
-			"templateID", vmImage.Spec.Source.Proxmox.TemplateID,
-			"templateName", vmImage.Spec.Source.Proxmox.TemplateName)
+		if vmImage.Spec.Source.Proxmox != nil {
+			log.Info("DEBUG controller: Proxmox image source found",
+				"templateID", vmImage.Spec.Source.Proxmox.TemplateID,
+				"templateName", vmImage.Spec.Source.Proxmox.TemplateName)
 
-		if vmImage.Spec.Source.Proxmox.TemplateID != nil {
-			image.TemplateName = fmt.Sprintf("%d", *vmImage.Spec.Source.Proxmox.TemplateID)
-			log.Info("DEBUG controller: Set TemplateName from TemplateID",
-				"templateID", *vmImage.Spec.Source.Proxmox.TemplateID,
-				"image.TemplateName", image.TemplateName)
-		} else if vmImage.Spec.Source.Proxmox.TemplateName != "" {
-			image.TemplateName = vmImage.Spec.Source.Proxmox.TemplateName
-			log.Info("DEBUG controller: Set TemplateName from TemplateName",
-				"image.TemplateName", image.TemplateName)
+			if vmImage.Spec.Source.Proxmox.TemplateID != nil {
+				image.TemplateName = fmt.Sprintf("%d", *vmImage.Spec.Source.Proxmox.TemplateID)
+				log.Info("DEBUG controller: Set TemplateName from TemplateID",
+					"templateID", *vmImage.Spec.Source.Proxmox.TemplateID,
+					"image.TemplateName", image.TemplateName)
+			} else if vmImage.Spec.Source.Proxmox.TemplateName != "" {
+				image.TemplateName = vmImage.Spec.Source.Proxmox.TemplateName
+				log.Info("DEBUG controller: Set TemplateName from TemplateName",
+					"image.TemplateName", image.TemplateName)
+			}
+		} else {
+			log.Info("DEBUG controller: Proxmox image source is nil")
 		}
-	} else {
-		log.Info("DEBUG controller: Proxmox image source is nil")
 	}
 
 	// Convert Networks
