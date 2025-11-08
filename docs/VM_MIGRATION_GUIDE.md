@@ -277,22 +277,60 @@ Shows:
 
 ## Cleanup
 
+### VM Lifecycle and Deletion Behavior
+
+**Important**: VirtRigaud follows a separation of concerns pattern for VM lifecycle management:
+
+- **Successful migrations**: The target `VirtualMachine` is **completely independent** of the `VMMigration` resource
+- **Failed migrations**: Partially created VMs are automatically cleaned up
+- **Migration deletion**: Deleting a `VMMigration` resource **never** deletes successfully migrated VMs
+
+This ensures that:
+- ✅ Production VMs persist independently after migration completes
+- ✅ You can safely delete migration resources to clean up artifacts
+- ✅ Failed/partial VMs are automatically cleaned up
+- ✅ Clear audit trail remains via VM annotations
+
 ### Manual Cleanup
 
-Delete the migration resource:
+Delete the migration resource after completion:
 
 ```bash
 kubectl delete vmmigration migrate-vm
 ```
 
 This automatically cleans up:
-- Intermediate storage artifacts
-- Migration-created snapshots
-- Partially created target VMs (if failed)
+- ✅ Intermediate storage artifacts (PVCs, uploaded disks)
+- ✅ Migration-created snapshots
+- ✅ Partially created target VMs (only if migration failed)
+- ❌ **Never** deletes successfully migrated VMs
+
+The migrated VM remains and must be deleted separately if needed:
+
+```bash
+# Only if you want to delete the migrated VM
+kubectl delete virtualmachine my-vm-migrated
+```
+
+### Migration Completion Marker
+
+When a migration completes successfully, the target VM receives a special annotation:
+
+```yaml
+metadata:
+  annotations:
+    virtrigaud.io/migration-completed: "true"
+    virtrigaud.io/migration-completed-at: "2025-11-08T15:30:00Z"
+```
+
+This marker:
+- Protects the VM from deletion when the migration is removed
+- Provides an audit trail of when the migration completed
+- Indicates the VM is production-ready and independent
 
 ### Cleanup Configuration
 
-Control cleanup behavior:
+Control cleanup behavior for source resources:
 
 ```yaml
 spec:

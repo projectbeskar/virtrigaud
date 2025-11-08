@@ -961,6 +961,21 @@ func (r *VMMigrationReconciler) handleValidatingTargetPhase(ctx context.Context,
 
 	r.Recorder.Event(migration, "Normal", "MigrationComplete", fmt.Sprintf("VM migrated successfully to %s/%s", targetNamespace, targetVMName))
 
+	// Mark the target VM as completed to prevent deletion when migration is removed
+	// This annotation protects the VM from being deleted with the migration resource
+	if targetVM.Annotations == nil {
+		targetVM.Annotations = make(map[string]string)
+	}
+	targetVM.Annotations["virtrigaud.io/migration-completed"] = "true"
+	targetVM.Annotations["virtrigaud.io/migration-completed-at"] = time.Now().Format(time.RFC3339)
+	if err := r.Update(ctx, targetVM); err != nil {
+		logger.Error(err, "Failed to mark VM as migration-completed")
+		// Don't fail the migration for this - the VM is already created and working
+		// The annotation is just a safety marker
+	} else {
+		logger.Info("Marked target VM as migration-completed", "vm", fmt.Sprintf("%s/%s", targetNamespace, targetVMName))
+	}
+
 	logger.Info("Migration completed successfully", "target_vm", fmt.Sprintf("%s/%s", targetNamespace, targetVMName))
 
 	if err := r.updateStatus(ctx, migration); err != nil {
@@ -1183,6 +1198,8 @@ func (r *VMMigrationReconciler) handleDeletion(ctx context.Context, migration *i
 	}
 
 	// 4. Delete partially created target VM if migration failed
+	// IMPORTANT: Never delete VMs that have been marked as migration-completed
+	// This ensures that successfully migrated VMs persist independently of the migration resource
 	if migration.Status.Phase == infrav1beta1.MigrationPhaseFailed || migration.Status.Phase == infrav1beta1.MigrationPhaseCreating {
 		targetVMName := migration.Spec.Target.Name
 		if targetVMName == "" {
@@ -1201,8 +1218,14 @@ func (r *VMMigrationReconciler) handleDeletion(ctx context.Context, migration *i
 
 		// Check if target VM exists
 		if err := r.Get(ctx, vmKey, targetVM); err == nil {
-			// Only delete if it has our migration annotation
-			if targetVM.Annotations != nil {
+			// Check if VM has migration-completed marker
+			if targetVM.Annotations != nil && targetVM.Annotations["virtrigaud.io/migration-completed"] == "true" {
+				logger.Info("Target VM has migration-completed marker, skipping deletion",
+					"vm", targetVMName,
+					"completed_at", targetVM.Annotations["virtrigaud.io/migration-completed-at"])
+				// VM is a successfully migrated VM, never delete it
+			} else if targetVM.Annotations != nil {
+				// Only delete if it has our migration annotation AND no completion marker
 				if migrationRef, ok := targetVM.Annotations["virtrigaud.io/migration"]; ok {
 					expectedRef := fmt.Sprintf("%s/%s", migration.Namespace, migration.Name)
 					if migrationRef == expectedRef {
@@ -1210,6 +1233,8 @@ func (r *VMMigrationReconciler) handleDeletion(ctx context.Context, migration *i
 						if err := r.Delete(ctx, targetVM); err != nil {
 							logger.Error(err, "Failed to delete target VM during cleanup")
 							cleanupErrors = append(cleanupErrors, fmt.Errorf("target VM cleanup: %w", err))
+						} else {
+							logger.Info("Partially created target VM deleted successfully", "vm", targetVMName)
 						}
 					}
 				}
