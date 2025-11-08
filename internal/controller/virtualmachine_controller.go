@@ -99,10 +99,16 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	vm.Status.ObservedGeneration = vm.Generation
 
 	// Get dependencies
-	logger.V(1).Info("Resolving VM dependencies", "provider", vm.Spec.ProviderRef.Name, "class", vm.Spec.ClassRef.Name, "image", vm.Spec.ImageRef.Name)
+	imageRefName := ""
+	if vm.Spec.ImageRef != nil {
+		imageRefName = vm.Spec.ImageRef.Name
+	} else if vm.Spec.ImportedDisk != nil {
+		imageRefName = fmt.Sprintf("imported:%s", vm.Spec.ImportedDisk.DiskID)
+	}
+	logger.V(1).Info("Resolving VM dependencies", "provider", vm.Spec.ProviderRef.Name, "class", vm.Spec.ClassRef.Name, "image", imageRefName)
 	provider, vmClass, vmImage, networks, err := r.getDependencies(ctx, vm)
 	if err != nil {
-		logger.Error(err, "Failed to get dependencies - will retry in 5s", "provider", vm.Spec.ProviderRef.Name, "class", vm.Spec.ClassRef.Name, "image", vm.Spec.ImageRef.Name)
+		logger.Error(err, "Failed to get dependencies - will retry in 5s", "provider", vm.Spec.ProviderRef.Name, "class", vm.Spec.ClassRef.Name, "image", imageRefName)
 		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonWaitingForDependencies, err.Error())
 		r.updateStatus(ctx, vm)
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
