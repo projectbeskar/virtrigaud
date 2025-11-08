@@ -403,10 +403,87 @@ See `docs/examples/` for complete examples:
 - `vmmigration-advanced.yaml`: Advanced configuration
 - `vmmigration-cross-namespace.yaml`: Cross-namespace migration
 
+## How Migrated VMs Are Created
+
+### ImportedDisk Feature
+
+Migrated VMs use the `ImportedDisk` field instead of `ImageRef` in the VirtualMachine spec. This provides:
+
+**Benefits:**
+- Full audit trail via `migrationRef`
+- Disk metadata (format, source, size)
+- Type-safe validation
+- Clear separation between template-based and disk-based VMs
+
+**Example:**
+
+When a migration completes, the target VM is automatically created with:
+
+```yaml
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: my-vm-migrated
+  namespace: default
+  annotations:
+    virtrigaud.io/migrated-from: "default/my-source-vm"
+    virtrigaud.io/migration: "default/my-migration"
+    virtrigaud.io/imported-disk-id: "my-vm-migrated-disk"
+spec:
+  providerRef:
+    name: target-provider
+  classRef:
+    name: medium-vm
+  # ImportedDisk is set instead of imageRef
+  importedDisk:
+    diskID: my-vm-migrated-disk
+    format: qcow2
+    source: migration
+    migrationRef:
+      name: my-migration
+  networks:
+    - name: default
+```
+
+**Key Points:**
+- `importedDisk` and `imageRef` are mutually exclusive
+- `importedDisk.diskID` references the disk imported during migration
+- `migrationRef` provides traceability back to the migration resource
+- Providers automatically resolve disk paths based on `diskID`
+
+### Manual Disk Import (Advanced)
+
+You can also create VMs from manually imported disks:
+
+```yaml
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: manual-disk-vm
+spec:
+  providerRef:
+    name: libvirt-provider
+  classRef:
+    name: medium-vm
+  importedDisk:
+    diskID: my-manual-disk
+    path: /var/lib/libvirt/images/my-manual-disk.qcow2  # Optional: explicit path
+    format: qcow2
+    source: manual  # Options: migration, clone, import, snapshot, manual
+    sizeGiB: 40  # Optional: for capacity planning
+```
+
+This is useful for:
+- Importing VMs from external sources
+- Using cloned disks
+- Working with snapshot-based disks
+- Migrating VMs manually
+
 ## API Reference
 
 For detailed API documentation, see:
 - [VMMigration CRD Reference](API_REFERENCE.md#vmmigration)
 - [Migration Status Fields](API_REFERENCE.md#vmmigrationstatus)
 - [Storage Configuration](API_REFERENCE.md#migrationstorage)
+- [ImportedDiskRef API](API_REFERENCE.md#importeddiskref)
 
