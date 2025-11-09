@@ -582,13 +582,16 @@ func (s *StorageProvider) CreateVolumeFromImageFile(ctx context.Context, sourceI
 		}
 		
 		// Get volume size
-		var capacity int64
+		var capacityStr string
 		infoResult, err := s.virshProvider.runVirshCommand(ctx, "!", "qemu-img", "info", "--output=json", sourceImagePath)
 		if err == nil {
 			var diskInfo map[string]interface{}
 			if err := json.Unmarshal([]byte(infoResult.Stdout), &diskInfo); err == nil {
 				if virtualSize, ok := diskInfo["virtual-size"].(float64); ok {
-					capacity = int64(virtualSize)
+					// Convert bytes to human-readable format (e.g., "3.2 GiB")
+					capacityBytes := int64(virtualSize)
+					capacityGiB := float64(capacityBytes) / (1024 * 1024 * 1024)
+					capacityStr = fmt.Sprintf("%.2f GiB", capacityGiB)
 				}
 			}
 		}
@@ -600,7 +603,7 @@ func (s *StorageProvider) CreateVolumeFromImageFile(ctx context.Context, sourceI
 			Name:     volName,
 			Pool:     poolName,
 			Path:     sourceImagePath,
-			Capacity: capacity,
+			Capacity: capacityStr,
 			Format:   "qcow2",
 		}, nil
 	}
