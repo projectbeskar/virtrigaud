@@ -24,6 +24,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -808,7 +809,12 @@ func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migrati
 	err := r.Get(ctx, vmKey, existingVM)
 	if err == nil {
 		// VM already exists, check if it's ready
-		if existingVM.Status.ID != "" && existingVM.Status.Phase == "Ready" {
+		// IMPORTANT: Check the Ready condition, NOT the Phase field
+		// VirtualMachine does not have a "Ready" phase - it uses conditions
+		readyCondition := meta.FindStatusCondition(existingVM.Status.Conditions, "Ready")
+		isReady := existingVM.Status.ID != "" && readyCondition != nil && readyCondition.Status == metav1.ConditionTrue
+		
+		if isReady {
 			// VM is ready, store reference and transition to validation
 			migration.Status.TargetVMID = existingVM.Status.ID
 			migration.Status.Phase = infrav1beta1.MigrationPhaseValidatingTarget
@@ -822,7 +828,11 @@ func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migrati
 		}
 
 		// VM exists but not ready yet, wait
-		logger.Info("Target VM exists but not ready, waiting", "vm", targetVMName, "phase", existingVM.Status.Phase)
+		readyStatus := "not set"
+		if readyCondition != nil {
+			readyStatus = string(readyCondition.Status)
+		}
+		logger.Info("Target VM exists but not ready, waiting", "vm", targetVMName, "readyCondition", readyStatus, "phase", existingVM.Status.Phase)
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
@@ -937,10 +947,17 @@ func (r *VMMigrationReconciler) handleValidatingTargetPhase(ctx context.Context,
 		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to get target VM: %v", err))
 	}
 
-	// Verify VM is ready
-	if targetVM.Status.Phase != "Ready" {
-		logger.Info("Target VM not ready yet", "phase", targetVM.Status.Phase)
-		migration.Status.Message = fmt.Sprintf("Waiting for target VM to be ready (current: %s)", targetVM.Status.Phase)
+	// Verify VM is ready by checking the Ready condition
+	readyCondition := meta.FindStatusCondition(targetVM.Status.Conditions, "Ready")
+	isReady := readyCondition != nil && readyCondition.Status == metav1.ConditionTrue
+	
+	if !isReady {
+		readyStatus := "not set"
+		if readyCondition != nil {
+			readyStatus = string(readyCondition.Status)
+		}
+		logger.Info("Target VM not ready yet", "readyCondition", readyStatus, "phase", targetVM.Status.Phase)
+		migration.Status.Message = fmt.Sprintf("Waiting for target VM to be ready (current Ready condition: %s)", readyStatus)
 
 		if err := r.updateStatus(ctx, migration); err != nil {
 			return ctrl.Result{}, err
