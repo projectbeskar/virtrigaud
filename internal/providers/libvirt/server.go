@@ -607,8 +607,9 @@ func (s *Server) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReque
 
 // copyDiskToRemote copies a disk file from local pod storage to the remote libvirt host
 func (s *Server) copyDiskToRemote(ctx context.Context, virshProvider *VirshProvider, localPath, volumeName string) (string, error) {
-	// Remote path for imported disks
-	remoteDir := "/tmp/virtrigaud-imports"
+	// IMPORTANT: Copy directly to libvirt pool directory for efficient in-place usage
+	// This allows CreateVolumeFromImageFile to detect and use the disk without copying
+	remoteDir := "/var/lib/libvirt/images"
 	remotePath := fmt.Sprintf("%s/%s.qcow2", remoteDir, volumeName)
 
 	// Extract SSH target (user@host) from URI
@@ -621,12 +622,12 @@ func (s *Server) copyDiskToRemote(ctx context.Context, virshProvider *VirshProvi
 	host := parsedURI.Host
 	sshTarget := fmt.Sprintf("%s@%s", user, host)
 
-	log.Printf("INFO Creating remote import directory on %s", sshTarget)
+	log.Printf("INFO Ensuring libvirt pool directory exists on %s", sshTarget)
 
-	// Create remote directory
-	_, err = virshProvider.runVirshCommand(ctx, "!", "mkdir", "-p", remoteDir)
+	// Ensure pool directory exists (usually already exists, but safe to check)
+	_, err = virshProvider.runVirshCommand(ctx, "!", "sudo", "mkdir", "-p", remoteDir)
 	if err != nil {
-		log.Printf("WARN Failed to create remote directory (may already exist): %v", err)
+		log.Printf("WARN Failed to ensure pool directory exists (may already exist): %v", err)
 	}
 
 	// Copy disk file using scp (run locally from the pod, not through SSH)
