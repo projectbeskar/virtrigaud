@@ -247,8 +247,9 @@ spec:
                         maxItems: 20
                         type: array
                       imageRef:
-                        description: ImageRef references the VMImage to use as base
-                          template
+                        description: |-
+                          ImageRef references the VMImage to use as base template.
+                          Either ImageRef or ImportedDisk must be specified, but not both.
                         properties:
                           name:
                             description: Name of the referenced object
@@ -263,6 +264,66 @@ spec:
                             type: string
                         required:
                         - name
+                        type: object
+                      importedDisk:
+                        description: |-
+                          ImportedDisk references a pre-imported disk (e.g., from migration).
+                          Either ImageRef or ImportedDisk must be specified, but not both.
+                        properties:
+                          diskID:
+                            description: |-
+                              DiskID is the provider-specific disk identifier.
+                              For libvirt, this is typically the volume name.
+                            maxLength: 253
+                            minLength: 1
+                            type: string
+                          format:
+                            default: qcow2
+                            description: Format specifies the disk format (qcow2,
+                              vmdk, raw, etc.).
+                            enum:
+                            - qcow2
+                            - vmdk
+                            - raw
+                            - vdi
+                            - vhdx
+                            type: string
+                          migrationRef:
+                            description: |-
+                              MigrationRef references the VMMigration that imported this disk.
+                              This provides traceability and audit trail for migrated disks.
+                            properties:
+                              name:
+                                description: Name of the referenced object
+                                maxLength: 253
+                                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                type: string
+                            required:
+                            - name
+                            type: object
+                          path:
+                            description: |-
+                              Path is the optional disk path on the provider (e.g., /var/lib/libvirt/images/disk.qcow2).
+                              If not specified, the provider will determine the path based on DiskID.
+                            type: string
+                          sizeGiB:
+                            description: |-
+                              SizeGiB specifies the expected disk size in GiB.
+                              Used for validation and capacity planning.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                          source:
+                            description: Source indicates where the disk came from.
+                            enum:
+                            - migration
+                            - clone
+                            - import
+                            - snapshot
+                            - manual
+                            type: string
+                        required:
+                        - diskID
                         type: object
                       lifecycle:
                         description: Lifecycle defines VM lifecycle configuration
@@ -604,7 +665,6 @@ spec:
                         type: object
                     required:
                     - classRef
-                    - imageRef
                     - providerRef
                     type: object
                 required:
