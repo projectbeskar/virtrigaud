@@ -201,9 +201,6 @@ Updated provider images are available from GitHub Container Registry:
 - **Provider Support**: Placement policies require provider-specific implementation
 - **Policy Evaluation**: Policy evaluation occurs during VM creation only
 
-### Acknowledgments
-
-This release includes significant contributions from the VirtRigaud development team and community feedback. Special thanks to all contributors who helped shape this major release with cross-provider migration capabilities and advanced lifecycle management features.
 
 ---
 
