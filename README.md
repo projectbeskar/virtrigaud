@@ -9,6 +9,9 @@ Virtrigaud is a Kubernetes operator that enables declarative management of virtu
 ## Features
 
 - **Multi-Hypervisor Support**: Manage VMs across vSphere, Libvirt/KVM, and Proxmox VE simultaneously
+- **Cross-Provider VM Migration**: Migrate VMs between different hypervisor platforms using Kubernetes-native storage (currently tested: vSphere to Libvirt/KVM)
+- **Multi-VM Management**: Declarative management of VM sets with rolling updates and replica management
+- **Advanced Placement Policies**: Fine-grained VM placement rules with affinity, anti-affinity, and resource constraints
 - **Declarative API**: Define VM resources using Kubernetes CRDs with stable v1beta1 API
 - **Production-Ready Providers**: Full integration for vSphere (govmomi), Libvirt/KVM, and Proxmox VE
 - **Cloud-Init Support**: Initialize VMs with cloud-init configuration across all providers
@@ -154,7 +157,7 @@ graph TB
    
    # To upgrade provider images, update the Provider CR's spec.runtime.image field:
    kubectl patch provider <provider-name> -n <namespace> --type=merge \
-     -p '{"spec":{"runtime":{"image":"ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.3.18-dev"}}}'
+     -p '{"spec":{"runtime":{"image":"ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.3.0"}}}'
    ```
 
 ### Development Installation
@@ -282,6 +285,11 @@ For detailed instructions, see [Quick Start Guide](docs/getting-started/quicksta
 - **VMImage**: References base templates/images
 - **VMNetworkAttachment**: Defines network configurations
 - **Provider**: Configures hypervisor connection details
+- **VMMigration**: Cross-provider VM migration resource
+- **VMSet**: Multi-VM management with rolling updates
+- **VMPlacementPolicy**: Advanced VM placement rules and constraints
+- **VMSnapshot**: VM snapshot lifecycle management
+- **VMClone**: VM cloning operations
 
 ## Supported Providers
 
@@ -375,7 +383,7 @@ If CRDs are missing after Helm install:
 
 ## VM Migration
 
-VirtRigaud supports live VM migrations between different hypervisors (e.g., vSphere to Libvirt) using Kubernetes-native storage.
+VirtRigaud supports VM migrations between different hypervisors using Kubernetes-native storage. **Note**: Currently only tested from vSphere to Libvirt/KVM. Other provider combinations are not yet fully tested.
 
 ### Migration Storage Requirements
 

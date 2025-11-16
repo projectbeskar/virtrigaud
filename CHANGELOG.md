@@ -5,6 +5,208 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2025-11-16
+
+### Major Release: Cross-Provider VM Migration and Advanced Lifecycle Management
+
+This release introduces VM migration capabilities, multi-VM management, and advanced placement policies. VirtRigaud v0.3.0 enables VM migrations between different hypervisor platforms (currently tested: vSphere to Libvirt/KVM) and provides enterprise-grade VM lifecycle management features.
+
+### Added
+
+#### VM Migration (VMMigration CRD)
+- **Cross-Provider Migration**: VM migration support between different hypervisor providers (currently tested: vSphere to Libvirt/KVM)
+- **PVC-Based Storage**: Kubernetes PersistentVolumeClaims (PVCs) as intermediate storage for migration transfers
+- **Automatic Storage Management**: Auto-creation and cleanup of migration PVCs with ReadWriteMany access mode
+- **Format Conversion**: Automatic disk format conversion (qcow2, VMDK, raw) during migration
+- **Progress Tracking**: Real-time migration progress with phase tracking and percentage completion
+- **Checksum Validation**: SHA256 checksum verification for data integrity
+- **Migration Phases**: Comprehensive phase tracking (Pending, Validating, Snapshotting, Exporting, Transferring, Converting, Importing, Creating, Validating-Target, Ready, Failed)
+- **Retry Policies**: Configurable retry behavior with exponential backoff
+- **Validation Checks**: Optional validation checks for disk size, checksum, boot success, and connectivity
+- **Snapshot Integration**: Automatic snapshot creation before migration with optional snapshot references
+- **Provider Restart Management**: Automatic provider pod restart to mount migration PVCs with graceful shutdown
+- **Storage URL Format**: PVC-based storage URLs for provider communication
+- **Migration Metadata**: Purpose tracking, project identification, and environment tagging
+- **Cleanup Policies**: Configurable cleanup behavior (Always, OnSuccess, Never)
+- **Documentation**: Complete migration guide with examples and troubleshooting
+
+#### Multi-VM Management (VMSet CRD)
+- **Replica Management**: Declarative management of multiple VM instances with replica count
+- **Rolling Updates**: Rolling update strategy for VM sets with configurable max surge and max unavailable
+- **OnDelete Strategy**: OnDelete update strategy for manual control
+- **Recreate Strategy**: Complete replacement strategy for major updates
+- **MinReadySeconds**: Configurable minimum ready time before considering VM ready
+- **Revision History**: Configurable retention of old VMSet revisions
+- **PVC Retention**: PersistentVolumeClaim retention policies for VM disks
+- **Ordinal Management**: Sequential ordering of VM indices with configurable start offset
+- **Service Integration**: Service name reference for VM set management
+- **Volume Claim Templates**: Template-based PVC creation for VM sets
+- **Label Selectors**: Label-based VM selection and matching
+- **Status Tracking**: Comprehensive status tracking with ready replicas, updated replicas, and conditions
+
+#### Advanced Placement Policies (VMPlacementPolicy CRD)
+- **Hard Constraints**: Mandatory placement constraints for clusters, datastores, hosts, folders, resource pools, networks, zones, and regions
+- **Soft Constraints**: Preferred placement constraints with weight-based scoring
+- **Anti-Affinity Rules**: VM anti-affinity rules to prevent co-location
+- **Affinity Rules**: VM affinity rules to encourage co-location
+- **Resource Constraints**: Resource-based placement constraints (CPU, memory, storage)
+- **Security Constraints**: Security-based placement constraints for compliance
+- **Priority and Weight**: Configurable priority and weight for policy evaluation
+- **Label Selectors**: Label-based policy matching for VMs
+- **Topology Spread**: Topology spread constraints for distribution across zones
+- **Placement Scoring**: Weighted scoring system for placement decisions
+- **Policy References**: VM-level placement policy references via PlacementRef
+
+#### ImportedDisk Support
+- **ImportedDisk Field**: New VirtualMachine spec field for referencing pre-imported disks from migrations
+- **Migration References**: Automatic migration reference tracking in imported disks
+- **Disk Metadata**: Format, source, and size metadata for imported disks
+- **Type Safety**: Type-safe validation for imported disk references
+- **Separation of Concerns**: Clear separation between template-based and disk-based VM creation
+
+#### Provider Enhancements
+
+**vSphere Provider:**
+- **Migration Export**: VMDK export support for migration operations
+- **Migration Import**: VMDK import support with format conversion
+- **Disk Path Fixes**: Corrected disk path handling for migration storage
+- **Enhanced Error Handling**: Improved error messages for migration operations
+
+**Libvirt Provider:**
+- **Migration Export**: qcow2 export support for migration operations
+- **Migration Import**: qcow2 import support with in-place detection
+- **Disk Path Fixes**: Fixed disk copy path to use pool directory instead of /tmp
+- **In-Place Detection**: Intelligent detection of disks already in pool directory
+- **SCP Transfer**: Secure copy protocol support for disk transfers
+- **Format Conversion**: qemu-img-based format conversion support
+
+**Proxmox Provider:**
+- **Migration Export**: Disk export support for migration operations
+- **Migration Import**: Disk import support with format conversion
+- **Storage Integration**: Enhanced storage pool integration for migrations
+
+#### Controller Enhancements
+- **Migration Controller**: Complete VMMigration controller implementation
+- **VMSet Controller**: VMSet controller for multi-VM management
+- **Placement Policy Controller**: VMPlacementPolicy controller for advanced placement
+- **Provider Restart Coordination**: Automatic provider pod restart coordination for PVC mounting
+- **PVC Management**: Automatic PVC creation, mounting, and cleanup
+- **Status Reconciliation**: Enhanced status reconciliation for all CRDs
+- **Event Recording**: Comprehensive event recording for all operations
+
+#### Storage Layer
+- **PVC Storage Backend**: PVC-based storage backend for migrations
+- **Storage URL Parsing**: PVC URL parsing and path resolution
+- **Mount Path Management**: Automatic mount path management for provider pods
+- **Storage Discovery**: Automatic discovery of migration PVCs
+- **Volume Mount Management**: Dynamic volume mount management for providers
+
+### Fixed
+
+#### Migration Fixes
+- **Disk Path Issue**: Fixed disk copy path in Libvirt provider to use pool directory instead of /tmp
+- **In-Place Detection**: Fixed in-place disk detection logic to correctly identify migrated disks
+- **VM Creation**: Fixed VM creation to use imported disks instead of creating fresh template copies
+- **Data Preservation**: Ensured migrated VM data is preserved during migration
+- **PVC Mount Path**: Fixed PVC mount path resolution for provider pods
+- **Provider Restart**: Fixed provider restart timing and coordination
+- **Storage URL Format**: Corrected storage URL format to include PVC name
+
+#### Provider Fixes
+- **Libvirt Disk Import**: Fixed disk import to correctly handle in-place detection
+- **vSphere Export**: Fixed VMDK export path handling
+- **Proxmox Import**: Fixed disk import path resolution
+- **Connection Management**: Improved gRPC connection management during provider restarts
+- **Error Handling**: Enhanced error handling for migration operations
+
+#### Controller Fixes
+- **PVC Creation**: Fixed PVC creation timing and error handling
+- **Provider Reconciliation**: Fixed provider reconciliation trigger mechanism
+- **Status Updates**: Fixed status update timing and consistency
+- **Event Recording**: Fixed event recording for migration operations
+
+### Enhanced
+
+#### Documentation
+- **Migration Guide**: Complete VM migration guide with examples and troubleshooting
+- **Migration Architecture**: Detailed migration storage architecture documentation
+- **VMSet Documentation**: VMSet usage and examples documentation
+- **Placement Policy Guide**: VMPlacementPolicy configuration guide
+- **Advanced Lifecycle**: Enhanced advanced lifecycle management documentation
+- **API Reference**: Updated API reference with new CRDs
+
+#### Examples
+- **Migration Examples**: Complete migration examples for all provider combinations
+- **VMSet Examples**: VMSet examples with rolling updates
+- **Placement Policy Examples**: VMPlacementPolicy configuration examples
+- **Multi-Provider Examples**: Enhanced multi-provider examples
+
+### Technical Details
+
+#### New CRDs
+- **VMMigration**: Cross-provider VM migration resource
+- **VMSet**: Multi-VM management resource
+- **VMPlacementPolicy**: Advanced placement policy resource
+
+#### API Changes
+- **VirtualMachine**: Added ImportedDisk field and PlacementRef field
+- **Backward Compatibility**: Maintains full backward compatibility with v0.2.x
+- **CRD Schemas**: Enhanced CRD schemas with comprehensive validation
+
+#### Storage Architecture
+- **PVC-Based Storage**: Per-migration PVC approach with automatic provider restart
+- **ReadWriteMany Access**: Requires StorageClass with ReadWriteMany access mode
+- **Automatic Cleanup**: Automatic PVC cleanup on migration completion or deletion
+- **Provider Restart**: Brief (5-15 second) provider pod restart for PVC mounting
+
+### Deployment Notes
+
+#### Container Images
+Updated provider images are available from GitHub Container Registry:
+- **Manager**: `ghcr.io/projectbeskar/virtrigaud/manager:v0.3.0`
+- **vSphere Provider**: `ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.3.0`
+- **LibVirt Provider**: `ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.3.0`
+- **Proxmox Provider**: `ghcr.io/projectbeskar/virtrigaud/provider-proxmox:v0.3.0`
+- **Mock Provider**: `ghcr.io/projectbeskar/virtrigaud/provider-mock:v0.3.0`
+
+#### Helm Charts
+- **Main Chart**: `virtrigaud/virtrigaud:0.3.0`
+- **Provider Runtime Chart**: `virtrigaud/virtrigaud-provider-runtime:0.3.0`
+
+#### Prerequisites
+- **StorageClass**: Requires StorageClass with ReadWriteMany access mode for migrations
+- **Kubernetes**: Kubernetes 1.24+ recommended
+- **Provider Versions**: All providers updated to v0.3.0
+
+#### Upgrade Path
+- Direct upgrade from v0.2.x with no manual intervention required
+- Existing deployments will automatically benefit from new features
+- Migration features require StorageClass with ReadWriteMany access mode
+- No configuration changes needed for standard deployments
+
+### Known Limitations
+
+#### Migration
+- **Testing Status**: Currently only tested from vSphere to Libvirt/KVM. Other provider combinations (Libvirt to vSphere, Proxmox migrations, etc.) are not yet fully tested
+- **Provider Restart**: Brief (5-15 second) provider pod restart required for PVC mounting
+- **Concurrent Migrations**: Multiple migrations may cause multiple provider restarts
+- **Storage Requirements**: Requires StorageClass with ReadWriteMany access mode
+- **Network Bandwidth**: Migration speed depends on network bandwidth and storage performance
+
+#### VMSet
+- **Rolling Updates**: Rolling updates may cause brief VM unavailability during updates
+- **Replica Limits**: Maximum 1000 replicas per VMSet
+
+#### Placement Policies
+- **Provider Support**: Placement policies require provider-specific implementation
+- **Policy Evaluation**: Policy evaluation occurs during VM creation only
+
+### Acknowledgments
+
+This release includes significant contributions from the VirtRigaud development team and community feedback. Special thanks to all contributors who helped shape this major release with cross-provider migration capabilities and advanced lifecycle management features.
+
+---
+
 ## [0.2.3] - 2025-10-13 
 
 ### Added
