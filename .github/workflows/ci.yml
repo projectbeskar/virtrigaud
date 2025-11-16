@@ -93,7 +93,7 @@ jobs:
     - name: Run golangci-lint
       uses: golangci/golangci-lint-action@v6
       with:
-        version: v1.64.8
+        version: latest
         args: --timeout=10m
 
   security:
@@ -115,14 +115,17 @@ jobs:
 
     - name: Run Gosec Security Scanner (excluding libvirt)
       run: |
-        go install github.com/securego/gosec/v2/cmd/gosec@v2.21.4
+        go install github.com/securego/gosec/v2/cmd/gosec@latest
         
         # Run gosec with timeout and better error handling
+        # Exclude vendor, modules, and problematic dependencies
         timeout 300s $(go env GOPATH)/bin/gosec \
           -fmt sarif \
           -out gosec.sarif \
           -exclude-dir=internal/providers/libvirt \
           -exclude-dir=test/integration \
+          -exclude-dir=vendor \
+          -exclude-dir=$(go env GOPATH)/pkg/mod \
           -exclude=G104,G204,G304 \
           ./... || {
           
