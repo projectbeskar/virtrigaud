@@ -187,10 +187,11 @@ var _ = Describe("VMMigration Controller", func() {
 						Name: "test-pvc",
 					},
 				}
+				migration.Status.StoragePVCName = "test-pvc"
 
 				url, err := reconciler.generateStorageURL(ctx, migration, "export")
 				Expect(err).NotTo(HaveOccurred())
-				Expect(url).To(Equal("pvc://vmmigrations/default/test-migration/export.qcow2"))
+				Expect(url).To(Equal("pvc://test-pvc/vmmigrations/default/test-migration/export.qcow2"))
 			})
 
 			It("should default to PVC when type is empty", func() {
@@ -200,10 +201,11 @@ var _ = Describe("VMMigration Controller", func() {
 						Name: "test-pvc",
 					},
 				}
+				migration.Status.StoragePVCName = "test-pvc"
 
 				url, err := reconciler.generateStorageURL(ctx, migration, "export")
 				Expect(err).NotTo(HaveOccurred())
-				Expect(url).To(Equal("pvc://vmmigrations/default/test-migration/export.qcow2"))
+				Expect(url).To(Equal("pvc://test-pvc/vmmigrations/default/test-migration/export.qcow2"))
 			})
 		})
 
