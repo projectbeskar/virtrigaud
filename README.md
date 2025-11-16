@@ -9,6 +9,9 @@ Virtrigaud is a Kubernetes operator that enables declarative management of virtu
 ## Features
 
 - **Multi-Hypervisor Support**: Manage VMs across vSphere, Libvirt/KVM, and Proxmox VE simultaneously
+- **Cross-Provider VM Migration**: Migrate VMs between different hypervisor platforms using Kubernetes-native storage (currently tested: vSphere to Libvirt/KVM)
+- **Multi-VM Management**: Declarative management of VM sets with rolling updates and replica management
+- **Advanced Placement Policies**: Fine-grained VM placement rules with affinity, anti-affinity, and resource constraints
 - **Declarative API**: Define VM resources using Kubernetes CRDs with stable v1beta1 API
 - **Production-Ready Providers**: Full integration for vSphere (govmomi), Libvirt/KVM, and Proxmox VE
 - **Cloud-Init Support**: Initialize VMs with cloud-init configuration across all providers
@@ -111,25 +114,26 @@ graph TB
    helm repo update
    ```
 
-2. **Install VirtRigaud**:
+2. **Install VirtRigaud** (Manager only - Providers are created via CRs):
    ```bash
-   # Basic installation (CRDs included automatically)
-   helm install virtrigaud virtrigaud/virtrigaud -n virtrigaud-system --create-namespace
-   
-   # With custom values
+   # Install VirtRigaud manager (CRDs included automatically)
+   # Note: Providers are NOT enabled via Helm - they are created as Provider CRs
    helm install virtrigaud virtrigaud/virtrigaud \
      -n virtrigaud-system --create-namespace \
-     --set providers.vsphere.enabled=true \
-     --set providers.libvirt.enabled=true \
-     --set providers.proxmox.enabled=false \
-     --version v0.2.3
+     --set providers.vsphere.enabled=false \
+     --set providers.libvirt.enabled=false \
+     --set providers.proxmox.enabled=false
    
-   # CRDs are automatically upgraded during 'helm upgrade' (default behavior)
-   # To disable automatic CRD upgrades, use:
+   # Or simply install with default values (all providers disabled by default in future versions)
+   helm install virtrigaud virtrigaud/virtrigaud -n virtrigaud-system --create-namespace
+   
+   # To disable automatic CRD upgrades:
    helm install virtrigaud virtrigaud/virtrigaud \
      -n virtrigaud-system --create-namespace \
      --set crdUpgrade.enabled=false
    ```
+   
+   > **Important**: Do not enable providers via Helm flags. Instead, create Provider CRs (see step 1 in "Using VirtRigaud" below) which automatically deploy provider pods with proper credential management.
 
 3. **Verify the installation**:
    ```bash
@@ -150,6 +154,10 @@ graph TB
    
    # The chart uses Helm hooks to apply CRDs during upgrade
    # No manual CRD management needed!
+   
+   # To upgrade provider images, update the Provider CR's spec.runtime.image field:
+   kubectl patch provider <provider-name> -n <namespace> --type=merge \
+     -p '{"spec":{"runtime":{"image":"ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.3.0"}}}'
    ```
 
 ### Development Installation
@@ -167,13 +175,51 @@ graph TB
 ### Using VirtRigaud
 
 1. **Create a Provider** (one-time setup per hypervisor):
-   ```bash
-   # Create credentials secret
-   kubectl create secret generic vsphere-creds \
-     --from-literal=username=admin \
-     --from-literal=password=yourpassword
+
+   First, create a credentials secret in the namespace where you'll create the Provider:
    
-   # Create Provider resource
+   ```bash
+   # For Libvirt (SSH authentication)
+   kubectl create secret generic libvirt-creds -n default \
+     --from-literal=username=your-ssh-username \
+     --from-literal=password='your-ssh-password'
+   
+   # Or with SSH key (recommended)
+   kubectl create secret generic libvirt-creds -n default \
+     --from-literal=username=your-ssh-username \
+     --from-file=ssh-privatekey=~/.ssh/id_rsa
+   
+   # For vSphere
+   kubectl create secret generic vsphere-creds -n default \
+     --from-literal=username=administrator@vsphere.local \
+     --from-literal=password='your-password'
+   ```
+
+   Then create the Provider CR that references the secret:
+
+   **Libvirt/KVM Provider Example:**
+   ```bash
+   kubectl apply -f - <<EOF
+   apiVersion: infra.virtrigaud.io/v1beta1
+   kind: Provider
+   metadata:
+     name: libvirt-kvm
+     namespace: default
+   spec:
+     type: libvirt
+     endpoint: "qemu+ssh://192.168.1.10/system"
+     credentialSecretRef:
+       name: libvirt-creds  # Secret in the same namespace (default)
+     runtime:
+       mode: Remote
+       image: "ghcr.io/projectbeskar/virtrigaud/provider-libvirt:latest"
+       service:
+         port: 9090
+   EOF
+   ```
+
+   **vSphere Provider Example:**
+   ```bash
    kubectl apply -f - <<EOF
    apiVersion: infra.virtrigaud.io/v1beta1
    kind: Provider
@@ -193,7 +239,13 @@ graph TB
    EOF
    ```
 
-   > **How it works**: VirtRigaud automatically translates your Provider configuration into command-line arguments and environment variables for the provider pod. See [Remote Provider Documentation](docs/REMOTE_PROVIDERS.md#configuration-flow-provider-resource--provider-pod) for details.
+   > **How it works**: When you create a Provider CR, the VirtRigaud Provider Controller:
+   > 1. Creates a dedicated Deployment in the same namespace as the Provider CR
+   > 2. Mounts the credentials secret specified in `credentialSecretRef`
+   > 3. Creates a Service for the provider pod
+   > 4. The provider pod connects to your hypervisor using the mounted credentials
+   > 
+   > Each Provider CR gets its own isolated provider deployment with its own credentials. This is more secure than shared multi-tenant providers. See [Remote Provider Documentation](docs/REMOTE_PROVIDERS.md#configuration-flow-provider-resource--provider-pod) for details.
 
 2. **Create VM resources using the Provider**:
    ```bash
@@ -233,6 +285,11 @@ For detailed instructions, see [Quick Start Guide](docs/getting-started/quicksta
 - **VMImage**: References base templates/images
 - **VMNetworkAttachment**: Defines network configurations
 - **Provider**: Configures hypervisor connection details
+- **VMMigration**: Cross-provider VM migration resource
+- **VMSet**: Multi-VM management with rolling updates
+- **VMPlacementPolicy**: Advanced VM placement rules and constraints
+- **VMSnapshot**: VM snapshot lifecycle management
+- **VMClone**: VM cloning operations
 
 ## Supported Providers
 
@@ -323,6 +380,122 @@ If CRDs are missing after Helm install:
    helm uninstall virtrigaud -n virtrigaud-system
    helm install virtrigaud virtrigaud/virtrigaud -n virtrigaud-system --create-namespace
    ```
+
+## VM Migration
+
+VirtRigaud supports VM migrations between different hypervisors using Kubernetes-native storage. **Note**: Currently only tested from vSphere to Libvirt/KVM. Other provider combinations are not yet fully tested.
+
+### Migration Storage Requirements
+
+VM migrations require intermediate storage for transferring VM disk images. VirtRigaud uses **Kubernetes PersistentVolumeClaims (PVCs)** as the migration storage backend.
+
+#### Prerequisites
+
+1. **StorageClass with ReadWriteMany (RWX) Access**
+   
+   You need a StorageClass that supports `ReadWriteMany` access mode, allowing multiple provider pods to access the migration storage simultaneously. Common options include:
+
+   - **NFS-based storage** (nfs-subdir-external-provisioner, NFS CSI driver)
+   - **CephFS** (Ceph storage cluster)
+   - **GlusterFS** (Gluster storage cluster)
+   - **Cloud provider file storage** (AWS EFS, Azure Files, GCP Filestore)
+
+2. **Create a StorageClass**
+
+   Example NFS StorageClass:
+
+   ```yaml
+   apiVersion: storage.k8s.io/v1
+   kind: StorageClass
+   metadata:
+     name: nfs-migration-storage
+   provisioner: nfs.csi.k8s.io  # Or your NFS provisioner
+   parameters:
+     server: nfs-server.example.com
+     share: /exports/virtrigaud-migrations
+   volumeBindingMode: Immediate
+   reclaimPolicy: Delete
+   ```
+
+   Apply the StorageClass:
+   ```bash
+   kubectl apply -f nfs-storageclass.yaml
+   ```
+
+3. **Verify StorageClass**
+
+   ```bash
+   kubectl get storageclass nfs-migration-storage
+   ```
+
+#### Migration Configuration
+
+When creating a `VMMigration` resource, configure the storage as follows:
+
+```yaml
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMMigration
+metadata:
+  name: vm-migration-example
+  namespace: default
+spec:
+  source:
+    vmRef:
+      name: source-vm
+  target:
+    providerRef:
+      name: target-provider
+    vmRef:
+      name: target-vm
+  storage:
+    type: pvc  # Required: must be 'pvc'
+    pvc:
+      # Option 1: Auto-create PVC (recommended)
+      storageClassName: nfs-migration-storage
+      size: 100Gi
+      accessMode: ReadWriteMany  # Required for multi-provider access
+      
+      # Option 2: Use existing PVC
+      # name: existing-migration-pvc
+```
+
+#### How It Works
+
+1. **PVC Creation**: VirtRigaud automatically creates a PVC with the specified StorageClass and size (or uses an existing one)
+2. **Provider Restart**: Provider pods automatically restart to mount the new PVC (5-15 second disruption)
+3. **Automatic Mounting**: Provider pods discover and mount migration PVCs during startup
+4. **Data Transfer**: Source provider exports VM disk to PVC, target provider imports from PVC
+5. **Automatic Cleanup**: PVC is deleted when the `VMMigration` resource is removed (if auto-created)
+
+**Important Notes:**
+- **Brief Service Disruption**: When a migration is created, both source and target provider pods will restart to mount the migration PVC. This causes a brief (5-15 second) disruption to VM operations managed by those providers.
+- **Graceful Termination**: Providers have a 30-second graceful termination period to complete in-flight operations before shutdown.
+- **Automatic Recovery**: After providers restart and become healthy, the migration proceeds automatically.
+- **Production Consideration**: Plan migrations during maintenance windows or ensure redundant providers if continuous availability is required.
+
+#### Storage Size Recommendations
+
+- Calculate required size: `source_vm_disk_size * 1.2` (20% overhead for conversion)
+- Minimum recommended: 50Gi
+- Large VMs: Match source disk size + 20GB overhead
+
+#### Troubleshooting
+
+**Migration stuck in "Validating" phase:**
+- Verify StorageClass exists: `kubectl get storageclass`
+- Check PVC status: `kubectl get pvc -n <namespace>`
+- View PVC events: `kubectl describe pvc <pvc-name> -n <namespace>`
+- Check provider pods are restarting: `kubectl get pods -n <namespace> | grep provider`
+- View provider logs during restart: `kubectl logs -n <namespace> <provider-pod> --previous`
+
+**Migration fails with "PVC mount not writable":**
+- Verify PVC has `ReadWriteMany` access mode
+- Check provider pod can mount the PVC: `kubectl describe pod <provider-pod> -n <namespace>`
+- Verify NFS/storage backend is accessible from cluster nodes
+
+**Provider pod fails to start:**
+- Check provider logs: `kubectl logs <provider-pod> -n <namespace>`
+- Verify PVC is bound: `kubectl get pvc <pvc-name> -n <namespace>`
 
 ## Development
 

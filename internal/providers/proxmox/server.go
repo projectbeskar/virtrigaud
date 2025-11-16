@@ -28,7 +28,9 @@ import (
 	"time"
 
 	v1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
+	"github.com/projectbeskar/virtrigaud/internal/diskutil"
 	"github.com/projectbeskar/virtrigaud/internal/providers/proxmox/pveapi"
+	"github.com/projectbeskar/virtrigaud/internal/storage"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/capabilities"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/errors"
@@ -222,7 +224,7 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 		// Wait for clone to complete
 		if taskID != "" {
 			if err = p.client.WaitForTask(ctx, node, taskID); err != nil {
-				return nil, errors.NewInternal("clone task failed: %v", err)
+				return nil, errors.NewInternal("clone task failed", err)
 			}
 		}
 
@@ -272,13 +274,13 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 			// Reconfigure the cloned VM with cloud-init settings
 			taskID, err = p.client.ReconfigureVMRaw(ctx, node, vmConfig.VMID, reconfigValues)
 			if err != nil {
-				return nil, errors.NewInternal("failed to reconfigure VM: %v", err)
+				return nil, errors.NewInternal("failed to reconfigure VM", err)
 			}
 
 			// Wait for reconfiguration if async
 			if taskID != "" {
 				if err = p.client.WaitForTask(ctx, node, taskID); err != nil {
-					return nil, errors.NewInternal("reconfigure task failed: %v", err)
+					return nil, errors.NewInternal("reconfigure task failed", err)
 				}
 			}
 		}
@@ -307,7 +309,7 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 		if strings.Contains(errMsg, "timeout") || strings.Contains(errMsg, "connection") {
 			return nil, errors.NewUnavailable("Proxmox VE API unavailable: %v", err)
 		}
-		return nil, errors.NewInternal("failed to create VM: %v", err)
+		return nil, errors.NewInternal("failed to create VM", err)
 	}
 
 	result := &providerv1.CreateResponse{
@@ -334,7 +336,7 @@ func (p *Provider) Delete(ctx context.Context, req *providerv1.DeleteRequest) (*
 
 	taskID, err := p.client.DeleteVM(ctx, node, vmid)
 	if err != nil {
-		return nil, errors.NewInternal("failed to delete VM: %v", err)
+		return nil, errors.NewInternal("failed to delete VM", err)
 	}
 
 	result := &providerv1.TaskResponse{}
@@ -372,7 +374,7 @@ func (p *Provider) Power(ctx context.Context, req *providerv1.PowerRequest) (*pr
 
 	taskID, err := p.client.PowerOperation(ctx, node, vmid, operation)
 	if err != nil {
-		return nil, errors.NewInternal("failed to perform power operation: %v", err)
+		return nil, errors.NewInternal("failed to perform power operation", err)
 	}
 
 	result := &providerv1.TaskResponse{}
@@ -397,7 +399,7 @@ func (p *Provider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureR
 	// Get current VM configuration to check what can be changed online
 	currentConfig, err := p.client.GetVMConfig(ctx, node, vmid)
 	if err != nil {
-		return nil, errors.NewInternal("failed to get current VM config: %v", err)
+		return nil, errors.NewInternal("failed to get current VM config", err)
 	}
 
 	// Parse the desired configuration
@@ -481,7 +483,7 @@ func (p *Provider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureR
 														// Use ResizeDisk for disk expansion
 														taskID, err := p.client.ResizeDisk(ctx, node, vmid, diskKey, sizeGB)
 														if err != nil {
-															return nil, errors.NewInternal("failed to resize disk: %v", err)
+															return nil, errors.NewInternal("failed to resize disk", err)
 														}
 
 														result := &providerv1.TaskResponse{}
@@ -507,7 +509,7 @@ func (p *Provider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureR
 	if config.CPUs != nil || config.Memory != nil {
 		taskID, err := p.client.ReconfigureVM(ctx, node, vmid, config)
 		if err != nil {
-			return nil, errors.NewInternal("failed to reconfigure VM: %v", err)
+			return nil, errors.NewInternal("failed to reconfigure VM", err)
 		}
 
 		result := &providerv1.TaskResponse{}
@@ -544,7 +546,7 @@ func (p *Provider) Describe(ctx context.Context, req *providerv1.DescribeRequest
 				PowerState: "notfound",
 			}, nil
 		}
-		return nil, errors.NewInternal("failed to describe VM: %v", err)
+		return nil, errors.NewInternal("failed to describe VM", err)
 	}
 
 	// Convert PVE status to standard power state
@@ -676,7 +678,7 @@ func (p *Provider) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotC
 	// Create snapshot
 	taskID, err := p.client.CreateSnapshot(ctx, node, vmid, snapName, req.Description, req.IncludeMemory)
 	if err != nil {
-		return nil, errors.NewInternal("failed to create snapshot: %v", err)
+		return nil, errors.NewInternal("failed to create snapshot", err)
 	}
 
 	result := &providerv1.SnapshotCreateResponse{
@@ -703,7 +705,7 @@ func (p *Provider) SnapshotDelete(ctx context.Context, req *providerv1.SnapshotD
 
 	taskID, err := p.client.DeleteSnapshot(ctx, node, vmid, req.SnapshotId)
 	if err != nil {
-		return nil, errors.NewInternal("failed to delete snapshot: %v", err)
+		return nil, errors.NewInternal("failed to delete snapshot", err)
 	}
 
 	result := &providerv1.TaskResponse{}
@@ -727,7 +729,7 @@ func (p *Provider) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotR
 
 	taskID, err := p.client.RevertSnapshot(ctx, node, vmid, req.SnapshotId)
 	if err != nil {
-		return nil, errors.NewInternal("failed to revert snapshot: %v", err)
+		return nil, errors.NewInternal("failed to revert snapshot", err)
 	}
 
 	result := &providerv1.TaskResponse{}
@@ -765,7 +767,7 @@ func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*pr
 
 	taskID, err := p.client.CloneVM(ctx, sourceNode, sourceVMID, config)
 	if err != nil {
-		return nil, errors.NewInternal("failed to clone VM: %v", err)
+		return nil, errors.NewInternal("failed to clone VM", err)
 	}
 
 	result := &providerv1.CloneResponse{
@@ -788,7 +790,7 @@ func (p *Provider) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepar
 	// Find appropriate node and storage
 	node, err := p.client.FindNode(ctx)
 	if err != nil {
-		return nil, errors.NewInternal("failed to find node: %v", err)
+		return nil, errors.NewInternal("failed to find node", err)
 	}
 
 	// Default storage - could be made configurable
@@ -829,7 +831,7 @@ func (p *Provider) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepar
 	// Prepare the image/template
 	taskID, err := p.client.PrepareImage(ctx, node, storage, imageURL, templateName)
 	if err != nil {
-		return nil, errors.NewInternal("failed to prepare image: %v", err)
+		return nil, errors.NewInternal("failed to prepare image", err)
 	}
 
 	result := &providerv1.TaskResponse{}
@@ -1179,4 +1181,526 @@ func (p *Provider) buildIPConfigString(ipConfig pveapi.IPConfig) string {
 		result += fmt.Sprintf(",gw=%s", ipConfig.Gateway)
 	}
 	return result
+}
+
+// GetDiskInfo retrieves detailed information about a VM's disk
+func (p *Provider) GetDiskInfo(ctx context.Context, req *providerv1.GetDiskInfoRequest) (*providerv1.GetDiskInfoResponse, error) {
+	if p.client == nil {
+		return nil, errors.NewUnavailable("PVE client not configured", nil)
+	}
+
+	p.logger.Info("Getting disk info", "vm_id", req.VmId)
+
+	// Parse VM reference
+	vmid, node, err := p.parseVMReference(req.VmId)
+	if err != nil {
+		return nil, errors.NewInvalidSpec("invalid VM reference: %v", err)
+	}
+
+	// Get VM configuration
+	config, err := p.client.GetVMConfig(ctx, node, vmid)
+	if err != nil {
+		return nil, errors.NewInternal("failed to get VM config", err)
+	}
+
+	// Get VM info for additional details
+	vmInfo, err := p.client.GetVM(ctx, node, vmid)
+	if err != nil {
+		p.logger.Warn("Failed to get VM info", "error", err)
+	}
+
+	// Find primary disk (scsi0, virtio0, sata0, or ide0)
+	diskID := "scsi0" // default
+	if req.DiskId != "" {
+		diskID = req.DiskId
+	}
+
+	// Get disk config
+	var diskInfo string
+	var found bool
+	if val, ok := config[diskID]; ok {
+		if strVal, ok := val.(string); ok {
+			diskInfo = strVal
+			found = true
+		}
+	}
+
+	if !found {
+		return nil, errors.NewNotFound("disk %s not found", diskID)
+	}
+
+	// Parse disk info (format: "local-lvm:vm-100-disk-0,size=32G")
+	parts := strings.Split(diskInfo, ",")
+	var storagePath, size string
+	if len(parts) > 0 {
+		storagePath = parts[0]
+	}
+	for _, part := range parts {
+		if strings.HasPrefix(part, "size=") {
+			size = strings.TrimPrefix(part, "size=")
+		}
+	}
+
+	// Parse size to bytes
+	virtualSizeBytes, err := p.parseDiskSize(size)
+	if err != nil {
+		p.logger.Warn("Failed to parse disk size", "size", size, "error", err)
+		virtualSizeBytes = 0
+	}
+
+	// Actual size is same as virtual size for Proxmox (thin provisioning)
+	// Can be refined later by querying actual disk usage from storage API
+	actualSizeBytes := virtualSizeBytes
+	_ = vmInfo // Use vmInfo to avoid unused variable warning
+
+	// Determine format from storage type
+	format := "qcow2" // default for Proxmox
+	if strings.Contains(storagePath, "raw") || strings.Contains(diskInfo, "raw") {
+		format = "raw"
+	}
+
+	// Get snapshots
+	snapshotList, err := p.client.ListSnapshots(ctx, node, vmid)
+	if err != nil {
+		p.logger.Warn("Failed to list snapshots", "error", err)
+		snapshotList = []*pveapi.Snapshot{}
+	}
+
+	// Convert snapshots to string list
+	snapshots := make([]string, 0, len(snapshotList))
+	for _, snap := range snapshotList {
+		snapshots = append(snapshots, snap.Name)
+	}
+
+	response := &providerv1.GetDiskInfoResponse{
+		DiskId:           diskID,
+		Format:           format,
+		VirtualSizeBytes: virtualSizeBytes,
+		ActualSizeBytes:  actualSizeBytes,
+		Path:             storagePath,
+		IsBootable:       true, // Primary disk is always bootable
+		Snapshots:        snapshots,
+		BackingFile:      "",
+		Metadata: map[string]string{
+			"node":    node,
+			"vmid":    fmt.Sprintf("%d", vmid),
+			"storage": storagePath,
+		},
+	}
+
+	p.logger.Info("Disk info retrieved", "disk_id", diskID, "format", format, "size_bytes", virtualSizeBytes)
+	return response, nil
+}
+
+// ExportDisk exports a VM disk for migration
+func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskRequest) (*providerv1.ExportDiskResponse, error) {
+	if p.client == nil {
+		return nil, errors.NewUnavailable("PVE client not configured", nil)
+	}
+
+	p.logger.Info("Exporting disk", "vm_id", req.VmId, "destination", req.DestinationUrl)
+
+	// Parse VM reference
+	vmid, node, err := p.parseVMReference(req.VmId)
+	if err != nil {
+		return nil, errors.NewInvalidSpec("invalid VM reference: %v", err)
+	}
+
+	// Get disk information first
+	diskInfo, err := p.GetDiskInfo(ctx, &providerv1.GetDiskInfoRequest{
+		VmId:       req.VmId,
+		DiskId:     req.DiskId,
+		SnapshotId: req.SnapshotId,
+	})
+	if err != nil {
+		return nil, errors.NewInternal("failed to get disk info", err)
+	}
+
+	// Validate format compatibility
+	targetFormat := req.Format
+	if targetFormat == "" {
+		targetFormat = diskInfo.Format
+	}
+	if targetFormat != "qcow2" && targetFormat != "raw" && targetFormat != "vmdk" {
+		return nil, errors.NewInvalidSpec("unsupported export format: %s", targetFormat)
+	}
+
+	exportID := fmt.Sprintf("export-%d-%d", vmid, time.Now().Unix())
+
+	// Proxmox disk export strategy:
+	// 1. Use vzdump to create a backup (VMA format)
+	// 2. Extract the disk from VMA archive
+	// 3. Convert if necessary
+	// 4. Upload to destination
+
+	p.logger.Info("Creating backup for disk export", "vmid", vmid, "node", node)
+
+	// For now, we'll use a simplified approach:
+	// - Stop the VM if required
+	// - Use qemu-img to convert/copy the disk
+	// - Calculate checksum
+	// Note: Full implementation would use vzdump and handle running VMs
+
+	p.logger.Warn("Using simplified disk export (not using vzdump)")
+	p.logger.Info("Note: For production, implement vzdump-based export for running VMs")
+
+	// Parse storage path (format: "storage:vm-100-disk-0")
+	storageParts := strings.Split(diskInfo.Path, ":")
+	if len(storageParts) != 2 {
+		return nil, errors.NewInvalidSpec("invalid disk path format: %s", diskInfo.Path)
+	}
+
+	// Configure storage client
+	// URL format: pvc://<pvc-name>/<file-path>
+	// Provider pods have PVCs mounted at /mnt/migration-storage/<pvc-name>
+	// Extract PVC name from URL to construct the correct mount path
+	pvcName, err := extractPVCNameFromURL(req.DestinationUrl)
+	if err != nil {
+		return nil, errors.NewInternal("failed to extract PVC name from URL", err)
+	}
+
+	// Mount path matches where the controller mounts PVCs: /mnt/migration-storage/<pvc-name>
+	mountPath := fmt.Sprintf("/mnt/migration-storage/%s", pvcName)
+
+	storageConfig := storage.StorageConfig{
+		Type:      "pvc",
+		MountPath: mountPath,
+	}
+
+	storageClient, err := storage.NewStorage(storageConfig)
+	if err != nil {
+		return nil, errors.NewInternal("failed to create storage client", err)
+	}
+	defer storageClient.Close()
+
+	// Create storage manager for Proxmox disk access
+	storageManager := NewStorageManager(p.client, node)
+
+	// Create temporary file for download
+	pveStorage := storageParts[0]
+	volid := storageParts[1]
+	tempFile := fmt.Sprintf("/tmp/%s", exportID)
+	defer func() {
+		_ = os.Remove(tempFile)
+	}()
+
+	// Download from Proxmox storage
+	p.logger.Info("Downloading disk from Proxmox storage", "storage", pveStorage, "volid", volid)
+
+	file, err := os.Create(tempFile)
+	if err != nil {
+		return nil, errors.NewInternal("failed to create temp file", err)
+	}
+	defer file.Close()
+
+	// Download with progress tracking
+	downloadProgress := func(transferred, total int64) {
+		if total > 0 {
+			progress := float64(transferred) / float64(total) * 100
+			p.logger.Debug("Download progress", "percent", progress, "transferred", transferred, "total", total)
+		}
+	}
+
+	err = storageManager.DownloadVolume(ctx, pveStorage, volid, file, downloadProgress)
+	if err != nil {
+		return nil, errors.NewInternal("failed to download disk from Proxmox storage", err)
+	}
+
+	// Close file to flush writes
+	file.Close()
+
+	// Convert format if needed
+	var uploadPath string
+	if targetFormat != diskInfo.Format {
+		p.logger.Info("Converting disk format", "from", diskInfo.Format, "to", targetFormat)
+		convertedPath := fmt.Sprintf("/tmp/%s-converted.%s", exportID, targetFormat)
+
+		// Use diskutil for conversion
+		qemuImg := diskutil.NewQemuImg()
+		err = qemuImg.Convert(ctx, diskutil.ConvertOptions{
+			SourcePath:        tempFile,
+			DestinationPath:   convertedPath,
+			SourceFormat:      diskutil.SupportedFormat(diskInfo.Format),
+			DestinationFormat: diskutil.SupportedFormat(targetFormat),
+			Compression:       false, // No compression for migration (faster)
+		})
+		if err != nil {
+			return nil, errors.NewInternal("failed to convert disk format", err)
+		}
+
+		uploadPath = convertedPath
+		defer os.Remove(convertedPath)
+	} else {
+		uploadPath = tempFile
+	}
+
+	// Upload to destination storage
+	p.logger.Info("Uploading disk to storage", "destination", req.DestinationUrl)
+
+	// Re-open file for reading
+	uploadFile, err := os.Open(uploadPath)
+	if err != nil {
+		return nil, errors.NewInternal("failed to open file for upload", err)
+	}
+	defer uploadFile.Close()
+
+	// Get file size
+	stat, err := uploadFile.Stat()
+	if err != nil {
+		return nil, errors.NewInternal("failed to stat file", err)
+	}
+
+	// Upload with progress tracking
+	uploadProgress := func(transferred, total int64) {
+		if total > 0 {
+			progress := float64(transferred) / float64(total) * 100
+			p.logger.Debug("Upload progress", "percent", progress, "transferred", transferred, "total", total)
+		}
+	}
+
+	uploadReq := storage.UploadRequest{
+		Reader:           uploadFile,
+		DestinationURL:   req.DestinationUrl,
+		ContentLength:    stat.Size(),
+		ProgressCallback: uploadProgress,
+	}
+
+	uploadResp, err := storageClient.Upload(ctx, uploadReq)
+	if err != nil {
+		return nil, errors.NewInternal("failed to upload disk", err)
+	}
+
+	p.logger.Info("Disk export completed", "export_id", exportID, "checksum", uploadResp.Checksum, "bytes", uploadResp.BytesTransferred)
+
+	response := &providerv1.ExportDiskResponse{
+		ExportId:           exportID,
+		Task:               nil, // Synchronous operation
+		EstimatedSizeBytes: uploadResp.BytesTransferred,
+		Checksum:           uploadResp.Checksum,
+	}
+
+	return response, nil
+}
+
+// ImportDisk imports a disk from an external source
+func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskRequest) (*providerv1.ImportDiskResponse, error) {
+	if p.client == nil {
+		return nil, errors.NewUnavailable("PVE client not configured", nil)
+	}
+
+	p.logger.Info("Importing disk", "source", req.SourceUrl, "storage", req.StorageHint)
+
+	// Find appropriate node
+	node, err := p.client.FindNode(ctx)
+	if err != nil {
+		return nil, errors.NewInternal("failed to find node", err)
+	}
+
+	// Determine storage
+	pveStorage := "local-lvm"
+	if req.StorageHint != "" {
+		pveStorage = req.StorageHint
+	}
+
+	// Determine target format
+	targetFormat := req.Format
+	if targetFormat == "" {
+		targetFormat = "qcow2" // Default
+	}
+	if targetFormat != "qcow2" && targetFormat != "raw" && targetFormat != "vmdk" {
+		return nil, errors.NewInvalidSpec("unsupported import format: %s", targetFormat)
+	}
+
+	// Generate disk ID and VMID for import
+	diskID := req.TargetName
+	if diskID == "" {
+		diskID = fmt.Sprintf("imported-%d", time.Now().Unix())
+	}
+
+	// Generate a temporary VMID for qm importdisk
+	tempVMID := int(time.Now().Unix()%999999) + 100000
+
+	p.logger.Info("Preparing disk import", "disk_id", diskID, "node", node, "storage", pveStorage, "format", targetFormat)
+
+	// Proxmox disk import strategy:
+	// 1. Download disk from SourceURL to temp location
+	// 2. Verify checksum if requested
+	// 3. Use `qm importdisk` to import into Proxmox storage
+	// 4. Return the imported disk reference
+
+	// Configure storage client
+	// URL format: pvc://<pvc-name>/<file-path>
+	// Provider pods have PVCs mounted at /mnt/migration-storage/<pvc-name>
+	// Extract PVC name from URL to construct the correct mount path
+	pvcName, err := extractPVCNameFromURL(req.SourceUrl)
+	if err != nil {
+		return nil, errors.NewInternal("failed to extract PVC name from URL", err)
+	}
+
+	// Mount path matches where the controller mounts PVCs: /mnt/migration-storage/<pvc-name>
+	mountPath := fmt.Sprintf("/mnt/migration-storage/%s", pvcName)
+
+	storageConfig := storage.StorageConfig{
+		Type:      "pvc",
+		MountPath: mountPath,
+	}
+
+	storageClient, err := storage.NewStorage(storageConfig)
+	if err != nil {
+		return nil, errors.NewInternal("failed to create storage client", err)
+	}
+	defer storageClient.Close()
+
+	// Create storage manager for Proxmox disk upload
+	storageManager := NewStorageManager(p.client, node)
+
+	// Create temporary file for download
+	tempFile := fmt.Sprintf("/tmp/%s-import", diskID)
+	defer func() {
+		_ = os.Remove(tempFile)
+	}()
+
+	// Download from storage
+	p.logger.Info("Downloading disk from storage", "source", req.SourceUrl)
+
+	file, err := os.Create(tempFile)
+	if err != nil {
+		return nil, errors.NewInternal("failed to create temp file", err)
+	}
+	defer file.Close()
+
+	// Download with progress tracking
+	downloadProgress := func(transferred, total int64) {
+		if total > 0 {
+			progress := float64(transferred) / float64(total) * 100
+			p.logger.Debug("Download progress", "percent", progress, "transferred", transferred, "total", total)
+		}
+	}
+
+	downloadReq := storage.DownloadRequest{
+		SourceURL:        req.SourceUrl,
+		Writer:           file,
+		VerifyChecksum:   req.VerifyChecksum,
+		ExpectedChecksum: req.ExpectedChecksum,
+		ProgressCallback: downloadProgress,
+	}
+
+	downloadResp, err := storageClient.Download(ctx, downloadReq)
+	if err != nil {
+		return nil, errors.NewInternal("failed to download disk", err)
+	}
+
+	// Close file to flush writes
+	file.Close()
+
+	p.logger.Info("Download completed", "bytes", downloadResp.BytesTransferred, "checksum", downloadResp.Checksum)
+
+	// Convert to target format if needed
+	var importPath string
+	if targetFormat != "qcow2" {
+		p.logger.Info("Converting to target format", "target_format", targetFormat)
+		convertedPath := fmt.Sprintf("/tmp/%s-converted.%s", diskID, targetFormat)
+
+		// Use diskutil for conversion
+		qemuImg := diskutil.NewQemuImg()
+		err = qemuImg.Convert(ctx, diskutil.ConvertOptions{
+			SourcePath:        tempFile,
+			DestinationPath:   convertedPath,
+			DestinationFormat: diskutil.SupportedFormat(targetFormat),
+			Compression:       false, // No compression for migration (faster)
+		})
+		if err != nil {
+			return nil, errors.NewInternal("failed to convert disk format", err)
+		}
+
+		importPath = convertedPath
+		defer os.Remove(convertedPath)
+	} else {
+		importPath = tempFile
+	}
+
+	// Upload to Proxmox storage
+	p.logger.Info("Uploading to Proxmox storage", "storage", pveStorage, "disk_id", diskID)
+
+	// Re-open file for reading
+	uploadFile, err := os.Open(importPath)
+	if err != nil {
+		return nil, errors.NewInternal("failed to open file for Proxmox upload", err)
+	}
+	defer uploadFile.Close()
+
+	// Get file size
+	stat, err := uploadFile.Stat()
+	if err != nil {
+		return nil, errors.NewInternal("failed to stat file", err)
+	}
+
+	// Generate filename for Proxmox storage
+	filename := fmt.Sprintf("%d/vm-%d-disk-0.%s", tempVMID, tempVMID, targetFormat)
+
+	// Upload to Proxmox storage with progress tracking
+	uploadProgress := func(transferred, total int64) {
+		if total > 0 {
+			progress := float64(transferred) / float64(total) * 100
+			p.logger.Debug("Proxmox upload progress", "percent", progress, "transferred", transferred, "total", total)
+		}
+	}
+
+	volid, err := storageManager.UploadVolume(ctx, uploadFile, pveStorage, filename, stat.Size(), uploadProgress)
+	if err != nil {
+		return nil, errors.NewInternal("failed to upload to Proxmox storage", err)
+	}
+
+	p.logger.Info("Disk import completed", "disk_id", diskID, "volid", volid)
+
+	response := &providerv1.ImportDiskResponse{
+		DiskId:          diskID,
+		Path:            volid,
+		Task:            nil, // Synchronous operation
+		ActualSizeBytes: downloadResp.ContentLength,
+		Checksum:        downloadResp.Checksum,
+	}
+
+	return response, nil
+}
+
+// parseDiskSize converts Proxmox disk size string (e.g., "32G", "1024M") to bytes
+func (p *Provider) parseDiskSize(sizeStr string) (int64, error) {
+	if sizeStr == "" {
+		return 0, fmt.Errorf("empty size string")
+	}
+
+	// Remove trailing spaces
+	sizeStr = strings.TrimSpace(sizeStr)
+
+	// Extract number and unit
+	var value float64
+	var unit string
+
+	// Try to parse with scanf
+	n, err := fmt.Sscanf(sizeStr, "%f%s", &value, &unit)
+	if err != nil || n < 1 {
+		return 0, fmt.Errorf("invalid size format: %s", sizeStr)
+	}
+
+	// Default to bytes if no unit
+	if n == 1 {
+		return int64(value), nil
+	}
+
+	// Convert to bytes based on unit
+	switch strings.ToUpper(unit) {
+	case "B":
+		return int64(value), nil
+	case "K", "KB", "KIB":
+		return int64(value * 1024), nil
+	case "M", "MB", "MIB":
+		return int64(value * 1024 * 1024), nil
+	case "G", "GB", "GIB":
+		return int64(value * 1024 * 1024 * 1024), nil
+	case "T", "TB", "TIB":
+		return int64(value * 1024 * 1024 * 1024 * 1024), nil
+	default:
+		return 0, fmt.Errorf("unknown unit: %s", unit)
+	}
 }

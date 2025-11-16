@@ -15,7 +15,7 @@ manager:
   # Image configuration
   image:
     repository: projectbeskar/virtrigaud/manager
-    tag: "v0.2.0"
+    tag: "v0.3.0"
     pullPolicy: IfNotPresent
 
   # Replica count for manager
@@ -91,7 +91,7 @@ providers:
     replicaCount: 1
     image:
       repository: projectbeskar/virtrigaud/provider-libvirt
-      tag: "v0.2.0"
+      tag: "v0.3.17-dev"
     resources:
       limits:
         cpu: 1000m
@@ -106,7 +106,7 @@ providers:
     replicaCount: 1
     image:
       repository: projectbeskar/virtrigaud/provider-vsphere
-      tag: "v0.2.0"
+      tag: "v0.3.0"
     resources:
       limits:
         cpu: 1000m
@@ -121,7 +121,7 @@ providers:
     replicaCount: 1
     image:
       repository: projectbeskar/virtrigaud/provider-proxmox
-      tag: "v0.2.0"
+      tag: "v0.3.0"
     resources:
       limits:
         cpu: 1000m
@@ -355,7 +355,7 @@ crdUpgrade:
   #       it will be updated to match the release tag
   image:
     repository: ghcr.io/projectbeskar/virtrigaud/kubectl
-    tag: "v0.2.0"  # Updated during release to match VirtRigaud version
+    tag: "v0.3.0"  # Updated during release to match VirtRigaud version
     pullPolicy: IfNotPresent
   
   # Job configuration

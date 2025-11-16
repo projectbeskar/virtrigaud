@@ -18,6 +18,7 @@ package libvirt
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"path/filepath"
@@ -88,8 +89,8 @@ func (s *StorageProvider) EnsureDefaultStoragePool(ctx context.Context) error {
 	if hasDefaultPool {
 		// Check if the existing pool uses the correct path
 		poolInfo, err := s.virshProvider.runVirshCommand(ctx, "pool-dumpxml", "default")
-		if err == nil && strings.Contains(poolInfo.Stdout, "/var/lib/libvirt/images") {
-			// Old pool with wrong path - delete and recreate
+		if err == nil && !strings.Contains(poolInfo.Stdout, "/var/lib/libvirt/images") {
+			// Old pool with wrong path (e.g., /home/wrkode/libvirt-images) - delete and recreate
 			log.Printf("INFO Deleting old default storage pool with incorrect path")
 			_, _ = s.virshProvider.runVirshCommand(ctx, "pool-destroy", "default")
 			_, _ = s.virshProvider.runVirshCommand(ctx, "pool-undefine", "default")
@@ -116,8 +117,8 @@ func (s *StorageProvider) EnsureDefaultStoragePool(ctx context.Context) error {
 
 // createDefaultStoragePool creates the default storage pool
 func (s *StorageProvider) createDefaultStoragePool(ctx context.Context) error {
-	// Use user-writable directory for storage pool to avoid permission issues
-	poolPath := "/home/wrkode/libvirt-images"
+	// Use standard libvirt directory for storage pool
+	poolPath := "/var/lib/libvirt/images"
 	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "mkdir", "-p", poolPath); err != nil {
 		return fmt.Errorf("failed to create pool directory: %w", err)
 	}
@@ -207,6 +208,21 @@ func (s *StorageProvider) CreateVolume(ctx context.Context, poolName, volumeName
 		return nil, fmt.Errorf("failed to get created volume info: %w", err)
 	}
 
+	// Fix ownership and permissions for libvirt access
+	log.Printf("INFO Setting proper ownership and permissions for %s", volume.Path)
+	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chown", "libvirt-qemu:kvm", volume.Path); err != nil {
+		log.Printf("WARN Failed to set ownership: %v", err)
+	}
+	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chmod", "777", volume.Path); err != nil {
+		log.Printf("WARN Failed to set permissions: %v", err)
+	}
+
+	// Fix SELinux context if SELinux is enabled (will fail gracefully if not)
+	log.Printf("INFO Restoring SELinux context for %s", volume.Path)
+	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "restorecon", volume.Path); err != nil {
+		log.Printf("WARN Failed to restore SELinux context (may not be using SELinux): %v", err)
+	}
+
 	log.Printf("INFO Successfully created storage volume: %s", volumeName)
 	return volume, nil
 }
@@ -284,13 +300,13 @@ func (s *StorageProvider) DownloadCloudImage(ctx context.Context, imageURL, volu
 	// Convert and resize image if needed
 	if sizeGB > 0 {
 		log.Printf("INFO Converting and resizing image to %dGB", sizeGB)
-		
+
 		// First convert the image
 		result, err = s.virshProvider.runVirshCommand(ctx, "!", "qemu-img", "convert", "-f", "qcow2", "-O", "qcow2", tempImage, targetPath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert image: %w, output: %s", err, result.Stderr)
 		}
-		
+
 		// Then resize it
 		sizeSpec := fmt.Sprintf("%dG", sizeGB)
 		result, err = s.virshProvider.runVirshCommand(ctx, "!", "qemu-img", "resize", targetPath, sizeSpec)
@@ -309,7 +325,22 @@ func (s *StorageProvider) DownloadCloudImage(ctx context.Context, imageURL, volu
 	// Clean up temporary file
 	_, _ = s.virshProvider.runVirshCommand(ctx, "!", "rm", "-f", tempImage)
 
-	// Refresh storage pool to recognize new volume
+	// Fix ownership and permissions for libvirt access
+	log.Printf("INFO Setting proper ownership and permissions for %s", targetPath)
+	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chown", "libvirt-qemu:kvm", targetPath); err != nil {
+		log.Printf("WARN Failed to set ownership: %v", err)
+	}
+	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chmod", "777", targetPath); err != nil {
+		log.Printf("WARN Failed to set permissions: %v", err)
+	}
+
+	// Fix SELinux context if SELinux is enabled (will fail gracefully if not)
+	log.Printf("INFO Restoring SELinux context for %s", targetPath)
+	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "restorecon", targetPath); err != nil {
+		log.Printf("WARN Failed to restore SELinux context (may not be using SELinux): %v", err)
+	}
+
+	// Refresh storage pool to recognize new volume and update metadata
 	if _, err := s.virshProvider.runVirshCommand(ctx, "pool-refresh", poolName); err != nil {
 		log.Printf("WARN Failed to refresh storage pool: %v", err)
 	}
@@ -497,6 +528,139 @@ func (s *StorageProvider) GetPredefinedTemplates() []*ImageTemplate {
 			Description: "Debian 12 Cloud Image",
 		},
 	}
+}
+
+// CreateVolumeFromImageFile creates a volume by copying from an existing image file
+func (s *StorageProvider) CreateVolumeFromImageFile(ctx context.Context, sourceImagePath, volumeName, poolName string, sizeGB int) (*StorageVolume, error) {
+	log.Printf("INFO Creating volume %s from image file %s", volumeName, sourceImagePath)
+
+	// Ensure pool is active
+	if err := s.ensurePoolActive(ctx, poolName); err != nil {
+		return nil, fmt.Errorf("failed to ensure pool is active: %w", err)
+	}
+
+	// Get pool path
+	poolInfo, err := s.GetPoolInfo(ctx, poolName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get pool info: %w", err)
+	}
+
+	// Create target volume path
+	targetPath := filepath.Join(poolInfo.Path, fmt.Sprintf("%s.qcow2", volumeName))
+
+	// Check if source image exists on remote host
+	// Use test command directly instead of bash -c for simplicity
+	_, err = s.virshProvider.runVirshCommand(ctx, "!", "test", "-f", sourceImagePath)
+	if err != nil {
+		// test returns non-zero if file doesn't exist
+		return nil, fmt.Errorf("source image file not found: %s", sourceImagePath)
+	}
+
+	log.Printf("INFO Source image verified: %s", sourceImagePath)
+
+	// IMPORTANT: Check if source is already in the pool directory and has the correct format
+	// This happens with imported disks from migrations - they're already in place
+	sourceDir := filepath.Dir(sourceImagePath)
+	sourceBase := filepath.Base(sourceImagePath)
+	poolPath := poolInfo.Path
+	
+	if sourceDir == poolPath && strings.HasSuffix(sourceImagePath, ".qcow2") {
+		log.Printf("INFO Source image is already in pool directory with correct format: %s", sourceImagePath)
+		log.Printf("INFO Using existing disk directly without copying (typical for imported/migrated disks)")
+		
+		// Ensure proper ownership and permissions
+		if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chown", "libvirt-qemu:kvm", sourceImagePath); err != nil {
+			log.Printf("WARN Failed to set ownership on existing disk: %v", err)
+		}
+		if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chmod", "777", sourceImagePath); err != nil {
+			log.Printf("WARN Failed to set permissions on existing disk: %v", err)
+		}
+		
+		// Refresh pool to recognize the volume
+		if _, err := s.virshProvider.runVirshCommand(ctx, "pool-refresh", poolName); err != nil {
+			log.Printf("WARN Failed to refresh storage pool: %v", err)
+		}
+		
+		// Get volume size
+		var capacityStr string
+		infoResult, err := s.virshProvider.runVirshCommand(ctx, "!", "qemu-img", "info", "--output=json", sourceImagePath)
+		if err == nil {
+			var diskInfo map[string]interface{}
+			if err := json.Unmarshal([]byte(infoResult.Stdout), &diskInfo); err == nil {
+				if virtualSize, ok := diskInfo["virtual-size"].(float64); ok {
+					// Convert bytes to human-readable format (e.g., "3.2 GiB")
+					capacityBytes := int64(virtualSize)
+					capacityGiB := float64(capacityBytes) / (1024 * 1024 * 1024)
+					capacityStr = fmt.Sprintf("%.2f GiB", capacityGiB)
+				}
+			}
+		}
+		
+		// Extract volume name from source path (remove .qcow2 extension)
+		volName := strings.TrimSuffix(sourceBase, ".qcow2")
+		
+		return &StorageVolume{
+			Name:     volName,
+			Pool:     poolName,
+			Path:     sourceImagePath,
+			Capacity: capacityStr,
+			Format:   "qcow2",
+		}, nil
+	}
+
+	// Source is not in pool directory or wrong format - need to copy/convert
+	log.Printf("INFO Source is external or wrong format - copying and converting: %s -> %s", sourceImagePath, targetPath)
+
+	// Convert the source image to the target location
+	result, err := s.virshProvider.runVirshCommand(ctx, "!", "qemu-img", "convert",
+		"-f", "qcow2", "-O", "qcow2", sourceImagePath, targetPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert image: %w, output: %s", err, result.Stderr)
+	}
+
+	// Resize the disk if a specific size is requested
+	if sizeGB > 0 {
+		sizeSpec := fmt.Sprintf("%dG", sizeGB)
+		log.Printf("INFO Resizing disk to %s", sizeSpec)
+
+		_, err = s.virshProvider.runVirshCommand(ctx, "!", "qemu-img", "resize", targetPath, sizeSpec)
+		if err != nil {
+			log.Printf("WARN Failed to resize image (may already be correct size): %v", err)
+			// Don't fail here - the image may already be the right size or larger
+		}
+	}
+
+	// Fix ownership and permissions for libvirt access
+	log.Printf("INFO Setting proper ownership and permissions for %s", targetPath)
+	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chown", "libvirt-qemu:kvm", targetPath); err != nil {
+		log.Printf("WARN Failed to set ownership: %v", err)
+	}
+	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chmod", "777", targetPath); err != nil {
+		log.Printf("WARN Failed to set permissions: %v", err)
+	}
+
+	// Fix SELinux context if SELinux is enabled (will fail gracefully if not)
+	log.Printf("INFO Restoring SELinux context for %s", targetPath)
+	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "restorecon", targetPath); err != nil {
+		log.Printf("WARN Failed to restore SELinux context (may not be using SELinux): %v", err)
+	}
+
+	// Refresh storage pool to recognize new volume
+	if _, err := s.virshProvider.runVirshCommand(ctx, "pool-refresh", "default"); err != nil {
+		log.Printf("WARN Failed to refresh storage pool: %v", err)
+	}
+
+	log.Printf("INFO Successfully created volume from image file: %s", volumeName)
+
+	// Get volume information
+	volume := &StorageVolume{
+		Name:   volumeName,
+		Pool:   poolName,
+		Path:   targetPath,
+		Format: "qcow2",
+	}
+
+	return volume, nil
 }
 
 // CreateVolumeFromTemplate downloads and prepares a volume from a predefined template

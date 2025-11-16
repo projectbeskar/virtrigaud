@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -98,30 +99,42 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	vm.Status.ObservedGeneration = vm.Generation
 
 	// Get dependencies
+	imageRefName := ""
+	if vm.Spec.ImageRef != nil {
+		imageRefName = vm.Spec.ImageRef.Name
+	} else if vm.Spec.ImportedDisk != nil {
+		imageRefName = fmt.Sprintf("imported:%s", vm.Spec.ImportedDisk.DiskID)
+	}
+	logger.V(1).Info("Resolving VM dependencies", "provider", vm.Spec.ProviderRef.Name, "class", vm.Spec.ClassRef.Name, "image", imageRefName)
 	provider, vmClass, vmImage, networks, err := r.getDependencies(ctx, vm)
 	if err != nil {
-		logger.Error(err, "Failed to get dependencies")
+		logger.Error(err, "Failed to get dependencies - will retry in 5s", "provider", vm.Spec.ProviderRef.Name, "class", vm.Spec.ClassRef.Name, "image", imageRefName)
 		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonWaitingForDependencies, err.Error())
 		r.updateStatus(ctx, vm)
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
+	logger.V(1).Info("Dependencies resolved successfully")
 
 	// Get provider instance (remote or in-process)
+	logger.V(1).Info("Getting provider instance", "provider", provider.Name, "runtime_phase", provider.Status.Runtime.Phase, "endpoint", provider.Status.Runtime.Endpoint)
 	providerInstance, err := r.getProviderInstance(ctx, provider)
 	if err != nil {
-		logger.Error(err, "Failed to get provider instance")
+		logger.Error(err, "Failed to get provider instance - will retry in 5s", "provider", provider.Name, "runtime_phase", provider.Status.Runtime.Phase)
 		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, err.Error())
 		r.updateStatus(ctx, vm)
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
+	logger.V(1).Info("Provider instance obtained successfully", "provider", provider.Name)
 
 	// Validate provider
+	logger.V(1).Info("Validating provider connectivity")
 	if err := providerInstance.Validate(ctx); err != nil {
-		logger.Error(err, "Provider validation failed")
+		logger.Error(err, "Provider validation failed - will retry in 5s", "provider", provider.Name)
 		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Provider validation failed: %v", err))
 		r.updateStatus(ctx, vm)
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
+	logger.V(1).Info("Provider validation successful", "provider", provider.Name)
 
 	// Check if we have an active task
 	if vm.Status.LastTaskRef != "" {
@@ -130,14 +143,14 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 			logger.Error(err, "Failed to check task status")
 			k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Failed to check task: %v", err))
 			r.updateStatus(ctx, vm)
-			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 		}
 
 		if !done {
 			logger.Info("Task still in progress", "taskRef", vm.Status.LastTaskRef)
 			k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonTaskInProgress, "Task in progress")
 			r.updateStatus(ctx, vm)
-			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 		}
 
 		// Task completed, clear it
@@ -156,7 +169,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		logger.Error(err, "Failed to describe VM")
 		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Failed to describe VM: %v", err))
 		r.updateStatus(ctx, vm)
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
 	if !desc.Exists {
@@ -214,7 +227,7 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 		if err := r.Get(ctx, providerKey, provider); err != nil {
 			if !errors.IsNotFound(err) {
 				logger.Error(err, "Failed to get provider for deletion")
-				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 			}
 			// Provider not found, continue with cleanup
 		} else {
@@ -280,17 +293,20 @@ func (r *VirtualMachineReconciler) getDependencies(ctx context.Context, vm *infr
 		return nil, nil, nil, nil, fmt.Errorf("failed to get vmclass %s: %w", vm.Spec.ClassRef.Name, err)
 	}
 
-	// Get VMImage
-	vmImage := &infravirtrigaudiov1beta1.VMImage{}
-	imageKey := types.NamespacedName{
-		Name:      vm.Spec.ImageRef.Name,
-		Namespace: vm.Namespace,
-	}
-	if vm.Spec.ImageRef.Namespace != "" {
-		imageKey.Namespace = vm.Spec.ImageRef.Namespace
-	}
-	if err := r.Get(ctx, imageKey, vmImage); err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("failed to get vmimage %s: %w", vm.Spec.ImageRef.Name, err)
+	// Get VMImage (only if ImageRef is specified, not ImportedDisk)
+	var vmImage *infravirtrigaudiov1beta1.VMImage
+	if vm.Spec.ImageRef != nil {
+		vmImage = &infravirtrigaudiov1beta1.VMImage{}
+		imageKey := types.NamespacedName{
+			Name:      vm.Spec.ImageRef.Name,
+			Namespace: vm.Namespace,
+		}
+		if vm.Spec.ImageRef.Namespace != "" {
+			imageKey.Namespace = vm.Spec.ImageRef.Namespace
+		}
+		if err := r.Get(ctx, imageKey, vmImage); err != nil {
+			return nil, nil, nil, nil, fmt.Errorf("failed to get vmimage %s: %w", vm.Spec.ImageRef.Name, err)
+		}
 	}
 
 	// Get VMNetworkAttachments
@@ -321,6 +337,24 @@ func (r *VirtualMachineReconciler) createVM(
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
+	// Validate that either ImageRef or ImportedDisk is specified
+	if vm.Spec.ImageRef == nil && vm.Spec.ImportedDisk == nil {
+		err := fmt.Errorf("either imageRef or importedDisk must be specified")
+		logger.Error(err, "Invalid VM specification")
+		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, err.Error())
+		r.updateStatus(ctx, vm)
+		return ctrl.Result{}, err
+	}
+
+	// Validate mutual exclusivity
+	if vm.Spec.ImageRef != nil && vm.Spec.ImportedDisk != nil {
+		err := fmt.Errorf("imageRef and importedDisk are mutually exclusive")
+		logger.Error(err, "Invalid VM specification")
+		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, err.Error())
+		r.updateStatus(ctx, vm)
+		return ctrl.Result{}, err
+	}
+
 	// Build create request
 	req := r.buildCreateRequest(vm, vmClass, vmImage, networks)
 
@@ -330,7 +364,7 @@ func (r *VirtualMachineReconciler) createVM(
 		logger.Error(err, "Failed to create VM")
 		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Failed to create VM: %v", err))
 		r.updateStatus(ctx, vm)
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
 	// Update status
@@ -343,7 +377,7 @@ func (r *VirtualMachineReconciler) createVM(
 	}
 
 	r.updateStatus(ctx, vm)
-	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 }
 
 // adjustPowerState adjusts the VM power state
@@ -365,7 +399,7 @@ func (r *VirtualMachineReconciler) adjustPowerState(
 		powerOp = contracts.PowerOpShutdownGraceful
 	default:
 		logger.Error(nil, "Unsupported power state", "state", desiredState)
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
 	taskRef, err := provider.Power(ctx, vm.Status.ID, powerOp)
@@ -373,7 +407,7 @@ func (r *VirtualMachineReconciler) adjustPowerState(
 		logger.Error(err, "Failed to adjust power state")
 		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Failed to adjust power state: %v", err))
 		r.updateStatus(ctx, vm)
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
 	if taskRef != "" {
@@ -382,7 +416,7 @@ func (r *VirtualMachineReconciler) adjustPowerState(
 	}
 
 	r.updateStatus(ctx, vm)
-	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 }
 
 // buildCreateRequest builds a provider create request from VM spec
@@ -393,6 +427,24 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 	networks []*infravirtrigaudiov1beta1.VMNetworkAttachment,
 ) contracts.CreateRequest {
 	log := ctrl.Log.WithName("buildCreateRequest")
+
+	// Check if using imported disk or template
+	usingImportedDisk := vm.Spec.ImportedDisk != nil
+	
+	if usingImportedDisk {
+		log.Info("DEBUG buildCreateRequest called with imported disk",
+			"vm", vm.Name,
+			"diskID", vm.Spec.ImportedDisk.DiskID,
+			"format", vm.Spec.ImportedDisk.Format,
+			"source", vm.Spec.ImportedDisk.Source)
+	} else if vmImage != nil {
+		log.Info("DEBUG buildCreateRequest called with vmImage template",
+			"vm", vm.Name,
+			"vmImage", vmImage.Name,
+			"hasLibvirtSource", vmImage.Spec.Source.Libvirt != nil,
+			"hasVSphereSource", vmImage.Spec.Source.VSphere != nil,
+			"hasProxmoxSource", vmImage.Spec.Source.Proxmox != nil)
+	}
 
 	// Convert VMClass
 	class := contracts.VMClass{
@@ -477,40 +529,101 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 		}
 	}
 
-	// Convert VMImage
-	image := contracts.VMImage{
-		Format:       "template", // Default for vSphere
-		ChecksumType: "sha256",
-	}
-
-	if vmImage.Spec.Source.VSphere != nil {
-		image.TemplateName = vmImage.Spec.Source.VSphere.TemplateName
-		image.URL = vmImage.Spec.Source.VSphere.OVAURL
-		if vmImage.Spec.Source.VSphere.Checksum != "" {
-			image.Checksum = vmImage.Spec.Source.VSphere.Checksum
+	// Convert VMImage - handle both imported disk and template cases
+	var image contracts.VMImage
+	
+	if usingImportedDisk {
+		// VM uses an imported disk (e.g., from migration)
+		disk := vm.Spec.ImportedDisk
+		
+		// Set format (default to qcow2 if not specified)
+		format := disk.Format
+		if format == "" {
+			format = "qcow2"
 		}
-		if vmImage.Spec.Source.VSphere.ChecksumType != "" {
-			image.ChecksumType = string(vmImage.Spec.Source.VSphere.ChecksumType)
+		
+		// Determine path based on provider and disk ID
+		diskPath := disk.Path
+		if diskPath == "" {
+			// If path not provided, construct default path based on disk ID
+			// For libvirt: /var/lib/libvirt/images/{diskID}.{format}
+			// For vSphere: [datastore] path/{diskID}.{format}
+			// Providers can override this based on their conventions
+			diskPath = fmt.Sprintf("/var/lib/libvirt/images/%s.%s", disk.DiskID, format)
+			log.Info("Using default disk path for imported disk",
+				"diskID", disk.DiskID,
+				"path", diskPath)
 		}
-	}
-
-	if vmImage.Spec.Source.Proxmox != nil {
-		log.Info("DEBUG controller: Proxmox image source found",
-			"templateID", vmImage.Spec.Source.Proxmox.TemplateID,
-			"templateName", vmImage.Spec.Source.Proxmox.TemplateName)
-
-		if vmImage.Spec.Source.Proxmox.TemplateID != nil {
-			image.TemplateName = fmt.Sprintf("%d", *vmImage.Spec.Source.Proxmox.TemplateID)
-			log.Info("DEBUG controller: Set TemplateName from TemplateID",
-				"templateID", *vmImage.Spec.Source.Proxmox.TemplateID,
-				"image.TemplateName", image.TemplateName)
-		} else if vmImage.Spec.Source.Proxmox.TemplateName != "" {
-			image.TemplateName = vmImage.Spec.Source.Proxmox.TemplateName
-			log.Info("DEBUG controller: Set TemplateName from TemplateName",
-				"image.TemplateName", image.TemplateName)
+		
+		image = contracts.VMImage{
+			Path:         diskPath,
+			Format:       format,
+			ChecksumType: "sha256",
 		}
-	} else {
-		log.Info("DEBUG controller: Proxmox image source is nil")
+		
+		log.Info("Built image reference from imported disk",
+			"diskID", disk.DiskID,
+			"path", image.Path,
+			"format", image.Format,
+			"source", disk.Source)
+	} else if vmImage != nil {
+		// VM uses a template image
+		image = contracts.VMImage{
+			Format:       "template", // Default for vSphere
+			ChecksumType: "sha256",
+		}
+
+		if vmImage.Spec.Source.VSphere != nil {
+			image.TemplateName = vmImage.Spec.Source.VSphere.TemplateName
+			image.URL = vmImage.Spec.Source.VSphere.OVAURL
+			if vmImage.Spec.Source.VSphere.Checksum != "" {
+				image.Checksum = vmImage.Spec.Source.VSphere.Checksum
+			}
+			if vmImage.Spec.Source.VSphere.ChecksumType != "" {
+				image.ChecksumType = string(vmImage.Spec.Source.VSphere.ChecksumType)
+			}
+		}
+
+		if vmImage.Spec.Source.Libvirt != nil {
+			log.Info("DEBUG controller: Libvirt image source found",
+				"path", vmImage.Spec.Source.Libvirt.Path,
+				"url", vmImage.Spec.Source.Libvirt.URL,
+				"format", vmImage.Spec.Source.Libvirt.Format)
+			image.Path = vmImage.Spec.Source.Libvirt.Path
+			image.URL = vmImage.Spec.Source.Libvirt.URL
+			image.Format = string(vmImage.Spec.Source.Libvirt.Format)
+			if vmImage.Spec.Source.Libvirt.Checksum != "" {
+				image.Checksum = vmImage.Spec.Source.Libvirt.Checksum
+			}
+			if vmImage.Spec.Source.Libvirt.ChecksumType != "" {
+				image.ChecksumType = string(vmImage.Spec.Source.Libvirt.ChecksumType)
+			}
+			log.Info("DEBUG controller: Set image from Libvirt source",
+				"image.Path", image.Path,
+				"image.URL", image.URL,
+				"image.Format", image.Format)
+		} else {
+			log.Info("DEBUG controller: Libvirt image source is nil")
+		}
+
+		if vmImage.Spec.Source.Proxmox != nil {
+			log.Info("DEBUG controller: Proxmox image source found",
+				"templateID", vmImage.Spec.Source.Proxmox.TemplateID,
+				"templateName", vmImage.Spec.Source.Proxmox.TemplateName)
+
+			if vmImage.Spec.Source.Proxmox.TemplateID != nil {
+				image.TemplateName = fmt.Sprintf("%d", *vmImage.Spec.Source.Proxmox.TemplateID)
+				log.Info("DEBUG controller: Set TemplateName from TemplateID",
+					"templateID", *vmImage.Spec.Source.Proxmox.TemplateID,
+					"image.TemplateName", image.TemplateName)
+			} else if vmImage.Spec.Source.Proxmox.TemplateName != "" {
+				image.TemplateName = vmImage.Spec.Source.Proxmox.TemplateName
+				log.Info("DEBUG controller: Set TemplateName from TemplateName",
+					"image.TemplateName", image.TemplateName)
+			}
+		} else {
+			log.Info("DEBUG controller: Proxmox image source is nil")
+		}
 	}
 
 	// Convert Networks
@@ -607,10 +720,10 @@ func (r *VirtualMachineReconciler) updateStatus(ctx context.Context, vm *infravi
 func (r *VirtualMachineReconciler) getRequeueInterval(vm *infravirtrigaudiov1beta1.VirtualMachine, desc contracts.DescribeResponse) time.Duration {
 	// Fast polling intervals for various states
 	const (
-		fastPoll   = 30 * time.Second // For transitional states
-		normalPoll = 2 * time.Minute  // For stable running VMs
-		slowPoll   = 5 * time.Minute  // For stable powered-off VMs
-		errorPoll  = 30 * time.Second // For error conditions
+		fastPoll   = 5 * time.Second // For transitional states
+		normalPoll = 2 * time.Minute // For stable running VMs
+		slowPoll   = 5 * time.Minute // For stable powered-off VMs
+		errorPoll  = 5 * time.Second // For error conditions
 	)
 
 	// Check if VM has no IP addresses yet (waiting for DHCP/network)
@@ -654,6 +767,9 @@ func (r *VirtualMachineReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				// Handle deletion in Reconcile through finalizers
 				return false
 			},
+		}).
+		WithOptions(controller.Options{
+			MaxConcurrentReconciles: 10, // Process up to 10 VMs in parallel
 		}).
 		Named("virtualmachine").
 		Complete(r)

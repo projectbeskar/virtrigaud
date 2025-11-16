@@ -1,0 +1,121 @@
+# Example: Migrate a VM from Proxmox VE to Libvirt/KVM
+#
+# This example demonstrates migrating a database server from Proxmox
+# to a standalone KVM host using HTTP storage.
+#
+# Prerequisites:
+# - Source VM "postgres-db" running on Proxmox
+# - Target Libvirt provider configured
+# - HTTP server accessible for file storage
+# - HTTP credentials in secret
+
+---
+# HTTP Storage Credentials Secret
+apiVersion: v1
+kind: Secret
+metadata:
+  name: fileserver-credentials
+  namespace: databases
+type: Opaque
+stringData:
+  token: Bearer_your-secure-api-token-here
+  # Or use username/password:
+  # username: admin
+  # password: secret123
+
+---
+# VMMigration Resource
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMMigration
+metadata:
+  name: postgres-proxmox-to-kvm
+  namespace: databases
+  labels:
+    app: postgresql
+    tier: database
+    migration-type: infrastructure-change
+spec:
+  # Source: Proxmox VM
+  sourceName: postgres-db
+  sourceNamespace: databases
+  
+  # Target: Libvirt/KVM
+  targetProviderRef:
+    name: kvm-host1
+    namespace: default
+  targetName: postgres-db-kvm
+  targetNamespace: databases
+  targetStorageHint: default              # Libvirt storage pool
+  targetDiskFormat: qcow2                 # Explicit format
+  
+  # Resource allocation
+  targetResourceHints:
+    cpu: 8
+    memory: 32768                         # 32GB RAM
+    disk: 500                             # 500GB disk
+  
+  # Network configuration
+  targetNetworkHints:
+    - name: eth0
+      bridge: virbr0                      # Libvirt bridge
+  
+  # Intermediate Storage: HTTP Server
+  storage:
+    type: http
+    endpoint: https://fileserver.example.com/vm-exports
+    credentialsSecretRef:
+      name: fileserver-credentials
+      namespace: databases
+  
+  # Cleanup: Keep source for safety
+  cleanupPolicy:
+    deleteIntermediate: true              # Clean up HTTP storage
+    deleteSnapshot: true                  # Remove snapshot
+    deleteSource: false                   # Keep source DB
+  
+  # Retry: Important for database migration
+  retryPolicy:
+    maxAttempts: 5
+    backoffDuration: 10m
+    maxBackoffDuration: 1h
+
+# What happens:
+# 1. Controller validates postgres-db on Proxmox
+# 2. Creates snapshot of postgres-db (stops writes temporarily)
+# 3. Proxmox provider exports disk (qcow2 format)
+# 4. Uploads qcow2 to HTTP server
+# 5. Libvirt provider downloads qcow2 from HTTP
+# 6. Copies to /var/lib/libvirt/images/
+# 7. Creates new VM "postgres-db-kvm" in Libvirt
+# 8. Configures CPU, memory, and network
+# 9. Validates target VM creation
+# 10. Cleans up HTTP storage and snapshot
+# 11. Sets status.phase = "Ready"
+
+# Important notes for database migration:
+# 1. Stop database writes before migration (if possible)
+# 2. Take application-level backup before migration
+# 3. Verify data integrity after migration
+# 4. Update application connection strings
+# 5. Monitor target VM performance
+
+# Monitor progress:
+#   kubectl get vmmigration postgres-proxmox-to-kvm -w
+#
+# After migration:
+#   1. Start target VM:
+#      virsh start postgres-db-kvm
+#   
+#   2. Verify PostgreSQL starts:
+#      virsh console postgres-db-kvm
+#      systemctl status postgresql
+#   
+#   3. Test database connectivity:
+#      psql -h postgres-db-kvm -U postgres -c "SELECT version();"
+#   
+#   4. Run data integrity checks
+#   
+#   5. Update DNS/load balancer to point to new VM
+#   
+#   6. Monitor for 24-48 hours before removing source
+

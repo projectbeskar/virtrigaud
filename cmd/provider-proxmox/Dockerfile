@@ -1,5 +1,5 @@
 # Build the provider binary
-FROM --platform=${BUILDPLATFORM:-linux/amd64} golang:1.23 as builder
+FROM --platform=${BUILDPLATFORM:-linux/amd64} golang:1.25 as builder
 ARG BUILDPLATFORM
 ARG TARGETPLATFORM
 ARG VERSION="dev"

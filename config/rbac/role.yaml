@@ -14,14 +14,7 @@ rules:
 - apiGroups:
   - ""
   resources:
-  - secrets
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - ""
-  resources:
+  - persistentvolumeclaims
   - services
   verbs:
   - create
@@ -30,6 +23,14 @@ rules:
   - list
   - patch
   - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
   - watch
 - apiGroups:
   - apps
@@ -48,6 +49,7 @@ rules:
   resources:
   - providers
   - virtualmachines
+  - vmmigrations
   - vmsnapshots
   verbs:
   - create
@@ -62,6 +64,7 @@ rules:
   resources:
   - providers/finalizers
   - virtualmachines/finalizers
+  - vmmigrations/finalizers
   - vmsnapshots/finalizers
   verbs:
   - update
@@ -70,6 +73,7 @@ rules:
   resources:
   - providers/status
   - virtualmachines/status
+  - vmmigrations/status
   - vmsnapshots/status
   verbs:
   - get

@@ -1,0 +1,84 @@
+# Example: Migrate a VM from Libvirt/KVM to VMware vSphere
+#
+# This example demonstrates migrating a Linux VM from a Libvirt host
+# to a vSphere cluster using S3 for intermediate storage.
+#
+# Prerequisites:
+# - Source VM "ubuntu-server" running on Libvirt provider
+# - Target vSphere provider configured
+# - S3 bucket "vm-migrations" accessible
+# - AWS credentials in secret "aws-s3-creds"
+
+---
+# S3 Credentials Secret
+apiVersion: v1
+kind: Secret
+metadata:
+  name: aws-s3-creds
+  namespace: default
+type: Opaque
+stringData:
+  accessKey: AKIAIOSFODNN7EXAMPLE
+  secretKey: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+  region: us-east-1
+
+---
+# VMMigration Resource
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMMigration
+metadata:
+  name: ubuntu-libvirt-to-vsphere
+  namespace: default
+  labels:
+    app: ubuntu-server
+    migration-type: platform-upgrade
+spec:
+  # Source: Libvirt VM
+  sourceName: ubuntu-server
+  sourceNamespace: default
+  
+  # Target: vSphere
+  targetProviderRef:
+    name: vsphere-prod
+    namespace: default
+  targetName: ubuntu-server-vsphere
+  targetStorageHint: datastore1           # vSphere datastore
+  
+  # Intermediate Storage: S3
+  storage:
+    type: s3
+    bucket: vm-migrations
+    region: us-east-1
+    credentialsSecretRef:
+      name: aws-s3-creds
+      namespace: default
+  
+  # Cleanup: Keep source VM for rollback
+  cleanupPolicy:
+    deleteIntermediate: true              # Clean up S3 after migration
+    deleteSnapshot: true                  # Remove snapshot after success
+    deleteSource: false                   # Keep source VM (recommended)
+  
+  # Retry: Automatic retry on failure
+  retryPolicy:
+    maxAttempts: 3
+    backoffDuration: 5m
+    maxBackoffDuration: 30m
+
+# What happens:
+# 1. Controller validates ubuntu-server exists on Libvirt
+# 2. Creates snapshot of ubuntu-server
+# 3. Libvirt provider exports disk (qcow2 format)
+# 4. Converts qcow2 → vmdk using qemu-img
+# 5. Uploads vmdk to s3://vm-migrations/
+# 6. vSphere provider downloads vmdk from S3
+# 7. Uploads vmdk to datastore1
+# 8. Creates new VM "ubuntu-server-vsphere" in vSphere
+# 9. Validates target VM creation
+# 10. Cleans up S3 and snapshot
+# 11. Sets status.phase = "Ready"
+
+# Monitor progress:
+#   kubectl get vmmigration ubuntu-libvirt-to-vsphere -w
+#   kubectl describe vmmigration ubuntu-libvirt-to-vsphere
+

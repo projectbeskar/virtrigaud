@@ -156,6 +156,100 @@ type SnapshotCreateResponse struct {
 	Task *TaskRef
 }
 
+// ExportDiskRequest defines a disk export request for migration
+type ExportDiskRequest struct {
+	// VmId is the VM identifier
+	VmId string
+	// DiskId identifies which disk to export (empty = primary disk)
+	DiskId string
+	// SnapshotId specifies a snapshot to export from (optional)
+	SnapshotId string
+	// DestinationURL where to upload the disk (S3, HTTP, etc.)
+	DestinationURL string
+	// Format specifies the desired export format (qcow2, vmdk, raw)
+	Format string
+	// Compress enables compression during export
+	Compress bool
+	// Credentials for accessing the destination
+	Credentials map[string]string
+}
+
+// ExportDiskResponse contains the result of a disk export operation
+type ExportDiskResponse struct {
+	// ExportId is the export operation identifier
+	ExportId string
+	// TaskRef references an async operation if applicable
+	TaskRef string
+	// EstimatedSizeBytes is the estimated size of the export
+	EstimatedSizeBytes int64
+	// Checksum is the SHA256 checksum of the exported disk
+	Checksum string
+}
+
+// ImportDiskRequest defines a disk import request for migration
+type ImportDiskRequest struct {
+	// SourceURL where to download the disk from (S3, HTTP, etc.)
+	SourceURL string
+	// StorageHint suggests target storage location (datastore, pool, etc.)
+	StorageHint string
+	// Format specifies the source disk format (qcow2, vmdk, raw)
+	Format string
+	// TargetName is the name for the imported disk
+	TargetName string
+	// VerifyChecksum enables checksum verification after import
+	VerifyChecksum bool
+	// ExpectedChecksum is the expected SHA256 checksum
+	ExpectedChecksum string
+	// Credentials for accessing the source
+	Credentials map[string]string
+}
+
+// ImportDiskResponse contains the result of a disk import operation
+type ImportDiskResponse struct {
+	// DiskId is the imported disk identifier
+	DiskId string
+	// Path to the imported disk in provider storage
+	Path string
+	// TaskRef references an async operation if applicable
+	TaskRef string
+	// ActualSizeBytes is the actual size of the imported disk
+	ActualSizeBytes int64
+	// Checksum is the SHA256 checksum of the imported disk
+	Checksum string
+}
+
+// GetDiskInfoRequest defines a request for disk information
+type GetDiskInfoRequest struct {
+	// VmId is the VM identifier
+	VmId string
+	// DiskId identifies which disk (empty = primary disk)
+	DiskId string
+	// SnapshotId gets info for a specific snapshot (optional)
+	SnapshotId string
+}
+
+// GetDiskInfoResponse contains detailed disk information
+type GetDiskInfoResponse struct {
+	// DiskId is the disk identifier
+	DiskId string
+	// Format is the disk format (qcow2, vmdk, raw)
+	Format string
+	// VirtualSizeBytes is the virtual size (capacity)
+	VirtualSizeBytes int64
+	// ActualSizeBytes is the actual size (allocated)
+	ActualSizeBytes int64
+	// Path is the path or location of the disk
+	Path string
+	// IsBootable indicates if this is a boot disk
+	IsBootable bool
+	// Snapshots lists available snapshots for this disk
+	Snapshots []string
+	// BackingFile is the backing file (for linked clones)
+	BackingFile string
+	// Metadata contains additional provider-specific metadata
+	Metadata map[string]string
+}
+
 // PowerState represents VM power states
 type PowerState string
 

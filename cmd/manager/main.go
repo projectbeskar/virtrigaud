@@ -94,7 +94,14 @@ func main() {
 		TLSOpts: tlsOpts,
 	})
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	// Configure client with rate limiting to prevent API server overload
+	// These settings prevent reconciliation storms from overwhelming etcd/API server
+	// Conservative settings for cluster stability
+	restConfig := ctrl.GetConfigOrDie()
+	restConfig.QPS = 20   // Max 20 queries per second to API server
+	restConfig.Burst = 40 // Allow bursts up to 40 requests
+
+	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Scheme: scheme,
 		Metrics: server.Options{
 			BindAddress:   metricsAddr,
@@ -159,6 +166,30 @@ func main() {
 		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "VMNetworkAttachment")
+		os.Exit(1)
+	}
+
+	// Register VMSnapshot controller
+	vmsnapshotReconciler := controller.NewVMSnapshotReconciler(
+		mgr.GetClient(),
+		mgr.GetScheme(),
+		remoteResolver,
+		mgr.GetEventRecorderFor("vmsnapshot-controller"),
+	)
+	if err = vmsnapshotReconciler.SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "VMSnapshot")
+		os.Exit(1)
+	}
+
+	// Register VMMigration controller
+	vmmigrationReconciler := controller.NewVMMigrationReconciler(
+		mgr.GetClient(),
+		mgr.GetScheme(),
+		remoteResolver,
+		mgr.GetEventRecorderFor("vmmigration-controller"),
+	)
+	if err = vmmigrationReconciler.SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "VMMigration")
 		os.Exit(1)
 	}
 	//+kubebuilder:scaffold:builder

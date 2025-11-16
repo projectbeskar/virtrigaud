@@ -1,5 +1,5 @@
 # Build stage with CGO support for libvirt
-FROM golang:1.23-bookworm AS builder
+FROM golang:1.25-bookworm AS builder
 
 # Install libvirt development libraries and SSH client
 RUN apt-get update && apt-get install -y \

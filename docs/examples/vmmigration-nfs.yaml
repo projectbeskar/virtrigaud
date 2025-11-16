@@ -1,0 +1,77 @@
+# VM Migration with NFS Storage
+# Uses NFS shared storage for on-premises migrations
+
+# PersistentVolume for NFS storage
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: nfs-migration-storage
+spec:
+  capacity:
+    storage: 1Ti
+  accessModes:
+    - ReadWriteMany
+  nfs:
+    server: nfs-server.company.local
+    path: /export/vm-migrations
+  mountOptions:
+    - hard
+    - nfsvers=4.1
+    - rsize=1048576
+    - wsize=1048576
+---
+# PersistentVolumeClaim
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nfs-migration-storage
+  namespace: virtrigaud-system
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 1Ti
+---
+# VM Migration using NFS
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMMigration
+metadata:
+  name: libvirt-to-proxmox-migration
+  namespace: default
+spec:
+  source:
+    vmRef:
+      name: legacy-app-libvirt
+    createSnapshot: true
+    # Power off VM before migration for consistency
+    powerOffBeforeMigration: true
+  
+  target:
+    name: legacy-app-proxmox
+    providerRef:
+      name: proxmox-cluster
+      namespace: virtrigaud-system
+    classRef:
+      name: standard-4cpu-8gb
+    networks:
+      - name: vlan-100-production
+    placementRef:
+      name: proxmox-node-2
+  
+  # NFS storage - must be mounted at same path on all provider pods
+  storage:
+    type: nfs
+    endpoint: /mnt/nfs-migrations  # Mount point on provider pods
+  
+  options:
+    diskFormat: qcow2
+    compress: false  # NFS is fast, no need for compression
+    verifyChecksums: true
+    timeout: 4h
+    
+    retryPolicy:
+      maxRetries: 3
+      retryDelay: 3m
+      backoffMultiplier: 2
+

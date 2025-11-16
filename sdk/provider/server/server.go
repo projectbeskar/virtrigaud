@@ -106,11 +106,11 @@ func DefaultConfig() *Config {
 		ServiceName:     "provider",
 		KeepAlive: &KeepAliveConfig{
 			ServerParameters: &keepalive.ServerParameters{
-				MaxConnectionIdle:     15 * time.Second,
-				MaxConnectionAge:      30 * time.Second,
-				MaxConnectionAgeGrace: 5 * time.Second,
-				Time:                  5 * time.Second,
-				Timeout:               1 * time.Second,
+				MaxConnectionIdle:     15 * time.Minute, // Increased from 15s to support long operations
+				MaxConnectionAge:      2 * time.Hour,     // Increased from 30s to support disk exports
+				MaxConnectionAgeGrace: 5 * time.Minute,   // Increased from 5s for graceful shutdown
+				Time:                  30 * time.Second,  // Increased from 5s for keep-alive pings
+				Timeout:               10 * time.Second,  // Increased from 1s for keep-alive timeout
 			},
 			EnforcementPolicy: &keepalive.EnforcementPolicy{
 				MinTime:             5 * time.Second,

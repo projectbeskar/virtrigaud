@@ -53,6 +53,9 @@ spec:
           periodSeconds: 10
         resources:
           {{- toYaml .Values.providers.libvirt.resources | nindent 10 }}
+        env:
+        - name: PROVIDER_TYPE
+          value: "libvirt"
         volumeMounts:
         - name: tmp
           mountPath: /tmp

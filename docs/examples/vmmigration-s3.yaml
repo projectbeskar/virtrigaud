@@ -1,0 +1,77 @@
+# VM Migration with S3 Storage
+# Uses AWS S3 for intermediate disk storage during migration
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: s3-migration-credentials
+  namespace: default
+type: Opaque
+stringData:
+  accessKey: "AKIAIOSFODNN7EXAMPLE"
+  secretKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+---
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMMigration
+metadata:
+  name: migration-with-s3
+  namespace: default
+  labels:
+    app: my-app
+    environment: production
+spec:
+  source:
+    vmRef:
+      name: prod-app-server
+    # Use existing snapshot instead of creating new one
+    snapshotRef:
+      name: pre-migration-snapshot
+    createSnapshot: false
+    # Optionally delete source VM after successful migration
+    deleteAfterMigration: false
+  
+  target:
+    name: prod-app-server-migrated
+    providerRef:
+      name: proxmox-production
+      namespace: infra
+    classRef:
+      name: high-performance
+    networks:
+      - name: production-network
+      - name: management-network
+    labels:
+      app: my-app
+      environment: production
+      migrated: "true"
+    annotations:
+      description: "Migrated from vSphere to Proxmox"
+  
+  # S3 storage configuration
+  storage:
+    type: s3
+    bucket: company-vm-migrations
+    region: us-east-1
+    endpoint: https://s3.amazonaws.com
+    credentialsSecretRef:
+      name: s3-migration-credentials
+  
+  # Advanced options
+  options:
+    diskFormat: qcow2
+    compress: true  # Compress for transfer
+    verifyChecksums: true
+    timeout: 6h
+    
+    # Retry configuration
+    retryPolicy:
+      maxRetries: 3
+      retryDelay: 5m
+      backoffMultiplier: 2
+  
+  # Migration metadata
+  metadata:
+    purpose: "Infrastructure consolidation"
+    project: "cloud-migration-2025"
+    owner: "platform-team"
+

@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -38,6 +39,8 @@ import (
 	"github.com/vmware/govmomi/vim25/soap"
 	"github.com/vmware/govmomi/vim25/types"
 
+	"github.com/projectbeskar/virtrigaud/internal/diskutil"
+	"github.com/projectbeskar/virtrigaud/internal/storage"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/errors"
 )
@@ -174,6 +177,47 @@ func createVSphereClient(config *Config) (*govmomi.Client, *find.Finder, error) 
 	finder := find.NewFinder(client.Client, true)
 
 	return client, finder, nil
+}
+
+// cloneDiskToStreamOptimized clones a disk to streamOptimized format using VirtualDiskManager
+// This handles all VMDK formats including sesparse, flat, thick, and thin
+func (p *Provider) cloneDiskToStreamOptimized(ctx context.Context, sourcePath, destPath string) error {
+	if p.client == nil {
+		return fmt.Errorf("vSphere client not initialized")
+	}
+
+	// Get datacenter
+	datacenter, err := p.finder.DefaultDatacenter(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get datacenter: %w", err)
+	}
+
+	// Create VirtualDiskManager
+	virtualDiskManager := object.NewVirtualDiskManager(p.client.Client)
+
+	// Clone disk to sparseMonolithic format
+	// SparseMonolithic is a single-file compressed format ideal for export/migration
+	// It's the format typically used in OVF/OVA exports and is universally compatible
+	spec := &types.VirtualDiskSpec{
+		DiskType:    string(types.VirtualDiskTypeSparseMonolithic),
+		AdapterType: string(types.VirtualDiskAdapterTypeLsiLogic),
+	}
+
+	p.logger.Info("Starting disk clone operation", "source", sourcePath, "dest", destPath, "format", "sparseMonolithic")
+
+	task, err := virtualDiskManager.CopyVirtualDisk(ctx, sourcePath, datacenter, destPath, datacenter, spec, false)
+	if err != nil {
+		return fmt.Errorf("failed to start disk clone: %w", err)
+	}
+
+	// Wait for task completion
+	err = task.Wait(ctx)
+	if err != nil {
+		return fmt.Errorf("disk clone failed: %w", err)
+	}
+
+	p.logger.Info("Disk clone completed successfully", "destination", destPath)
+	return nil
 }
 
 // Validate validates the provider configuration and connectivity
@@ -1795,9 +1839,14 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 	}
 
 	// Configure CPU and memory hot-add
+	// Note: CPU hot-add is incompatible with nested virtualization
 	if spec.CPUHotAddEnabled {
-		p.logger.Info("Enabling CPU hot-add", "vm_name", spec.Name)
-		configSpec.CpuHotAddEnabled = &spec.CPUHotAddEnabled
+		if spec.NestedVirtualization {
+			p.logger.Warn("CPU hot-add is incompatible with nested virtualization, skipping CPU hot-add", "vm_name", spec.Name)
+		} else {
+			p.logger.Info("Enabling CPU hot-add", "vm_name", spec.Name)
+			configSpec.CpuHotAddEnabled = &spec.CPUHotAddEnabled
+		}
 	}
 
 	if spec.MemoryHotAddEnabled {
@@ -1924,8 +1973,13 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 
 	p.logger.Info("Virtual machine created successfully", "vm_id", vmID, "name", spec.Name)
 
-	// Resize disk if specified in VMClass
+	// Get the new VM object for further operations
 	newVM := object.NewVirtualMachine(p.client.Client, vmRef)
+
+	// NOTE: extraConfig and cloud-init are already applied during CloneVM_Task above
+	// No post-clone reconfiguration needed - rely on clone-time settings
+
+	// Resize disk if specified in VMClass
 	if spec.DiskSizeGB > 0 {
 		if err := p.resizeVMDisk(ctx, newVM, spec.DiskSizeGB, vmID); err != nil {
 			p.logger.Warn("Failed to resize VM disk", "vm_id", vmID, "target_size_gb", spec.DiskSizeGB, "error", err)
@@ -2020,4 +2074,552 @@ func (p *Provider) resizeVMDisk(ctx context.Context, vm *object.VirtualMachine, 
 
 	p.logger.Info("Disk resized successfully", "vm_id", vmID, "from_gb", currentSizeGB, "to_gb", targetSizeGB)
 	return nil
+}
+
+// GetDiskInfo retrieves detailed information about a VM's disk
+func (p *Provider) GetDiskInfo(ctx context.Context, req *providerv1.GetDiskInfoRequest) (*providerv1.GetDiskInfoResponse, error) {
+	if p.client == nil {
+		return nil, errors.NewUnavailable("vSphere client not configured", nil)
+	}
+
+	p.logger.Info("Getting disk info", "vm_id", req.VmId, "disk_id", req.DiskId)
+
+	// Get VM reference
+	vmRef := types.ManagedObjectReference{
+		Type:  "VirtualMachine",
+		Value: req.VmId,
+	}
+
+	// Get VM configuration
+	var vmMo mo.VirtualMachine
+	pc := property.DefaultCollector(p.client.Client)
+	err := pc.RetrieveOne(ctx, vmRef, []string{
+		"config.hardware.device",
+		"config.name",
+		"snapshot",
+	}, &vmMo)
+	if err != nil {
+		return nil, errors.NewNotFound("VM", req.VmId)
+	}
+
+	// Find the disk device (primary disk or specified disk)
+	var targetDisk *types.VirtualDisk
+	diskIndex := 0
+	if req.DiskId != "" {
+		// Try to find disk by label or index
+		var idx int
+		if _, err := fmt.Sscanf(req.DiskId, "disk-%d", &idx); err == nil {
+			diskIndex = idx
+		}
+	}
+
+	currentIndex := 0
+	for _, device := range vmMo.Config.Hardware.Device {
+		if disk, ok := device.(*types.VirtualDisk); ok {
+			if currentIndex == diskIndex {
+				targetDisk = disk
+				break
+			}
+			currentIndex++
+		}
+	}
+
+	if targetDisk == nil {
+		return nil, errors.NewNotFound("disk not found in VM %s", req.VmId)
+	}
+
+	// Extract disk information
+	diskLabel := targetDisk.DeviceInfo.GetDescription().Label
+	virtualSizeBytes := targetDisk.CapacityInKB * 1024 // Convert KB to bytes
+
+	// Determine disk path and backing
+	var diskPath string
+	var backingFile string
+	format := "vmdk" // vSphere uses VMDK format
+
+	if backing, ok := targetDisk.Backing.(*types.VirtualDiskFlatVer2BackingInfo); ok {
+		diskPath = backing.FileName
+		backingFile = backing.Parent.GetVirtualDeviceFileBackingInfo().FileName
+	} else if backing, ok := targetDisk.Backing.(*types.VirtualDiskSparseVer2BackingInfo); ok {
+		diskPath = backing.FileName
+	}
+
+	// Get snapshots
+	var snapshots []string
+	if vmMo.Snapshot != nil {
+		snapshots = p.extractSnapshotNames(vmMo.Snapshot.RootSnapshotList)
+	}
+
+	// For vSphere, actual size would require querying the datastore
+	// For now, use virtual size as approximation
+	actualSizeBytes := virtualSizeBytes
+
+	response := &providerv1.GetDiskInfoResponse{
+		DiskId:           diskLabel,
+		Format:           format,
+		VirtualSizeBytes: virtualSizeBytes,
+		ActualSizeBytes:  actualSizeBytes,
+		Path:             diskPath,
+		IsBootable:       (diskIndex == 0), // First disk is bootable
+		Snapshots:        snapshots,
+		BackingFile:      backingFile,
+		Metadata: map[string]string{
+			"device_key":  fmt.Sprintf("%d", targetDisk.Key),
+			"unit_number": fmt.Sprintf("%d", targetDisk.UnitNumber),
+		},
+	}
+
+	p.logger.Info("Disk info retrieved", "disk_id", diskLabel, "path", diskPath, "size_bytes", virtualSizeBytes)
+	return response, nil
+}
+
+// extractSnapshotNames recursively extracts snapshot names from snapshot tree
+func (p *Provider) extractSnapshotNames(snapshotTree []types.VirtualMachineSnapshotTree) []string {
+	var names []string
+	for _, snapshot := range snapshotTree {
+		names = append(names, snapshot.Name)
+		if len(snapshot.ChildSnapshotList) > 0 {
+			names = append(names, p.extractSnapshotNames(snapshot.ChildSnapshotList)...)
+		}
+	}
+	return names
+}
+
+// ExportDisk exports a VM disk for migration
+func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskRequest) (*providerv1.ExportDiskResponse, error) {
+	if p.client == nil {
+		return nil, errors.NewUnavailable("vSphere client not configured", nil)
+	}
+
+	p.logger.Info("Exporting disk", "vm_id", req.VmId, "destination", req.DestinationUrl)
+
+	// Get disk information first
+	diskInfo, err := p.GetDiskInfo(ctx, &providerv1.GetDiskInfoRequest{
+		VmId:       req.VmId,
+		DiskId:     req.DiskId,
+		SnapshotId: req.SnapshotId,
+	})
+	if err != nil {
+		return nil, errors.NewInternal("failed to get disk info", err)
+	}
+
+	// Validate format - for vSphere export, we'll convert VMDK to target format
+	targetFormat := req.Format
+	if targetFormat == "" {
+		targetFormat = "vmdk" // Keep VMDK by default
+	}
+	if targetFormat != "vmdk" && targetFormat != "qcow2" && targetFormat != "raw" {
+		return nil, errors.NewInvalidSpec("unsupported export format: %s", targetFormat)
+	}
+
+	exportID := fmt.Sprintf("export-vsphere-%s-%d", req.VmId, time.Now().Unix())
+
+	// vSphere disk export strategy:
+	// 1. Use OVF export to get the VMDK files
+	// 2. Convert VMDK to target format if needed (using qemu-img)
+	// 3. Upload to destination storage
+	// 4. Track progress via task API
+
+	p.logger.Info("Preparing disk export using OVF export", "vm_id", req.VmId)
+	p.logger.Warn("vSphere disk export requires OVF export API - simplified implementation")
+	p.logger.Info("Note: Full implementation would use govmomi OVF export and datastore file access")
+
+	// Configure storage client
+	// URL format: pvc://<pvc-name>/<file-path>
+	// Provider pods have PVCs mounted at /mnt/migration-storage/<pvc-name>
+	// Extract PVC name from URL to construct the correct mount path
+	pvcName, err := extractPVCNameFromURL(req.DestinationUrl)
+	if err != nil {
+		return nil, errors.NewInternal("failed to extract PVC name from URL", err)
+	}
+
+	// Mount path matches where the controller mounts PVCs: /mnt/migration-storage/<pvc-name>
+	mountPath := fmt.Sprintf("/mnt/migration-storage/%s", pvcName)
+
+	storageConfig := storage.StorageConfig{
+		Type:      "pvc",
+		MountPath: mountPath,
+	}
+
+	storageClient, err := storage.NewStorage(storageConfig)
+	if err != nil {
+		return nil, errors.NewInternal("failed to create storage client", err)
+	}
+	defer storageClient.Close()
+
+	// Create datastore file manager
+	dsManager := NewDatastoreFileManager(p)
+
+	// Create a temporary directory for VMDK export
+	tempDir := fmt.Sprintf("/tmp/%s", exportID)
+	err = os.MkdirAll(tempDir, 0755)
+	if err != nil {
+		return nil, errors.NewInternal("failed to create temp directory", err)
+	}
+	defer func() {
+		// Clean up temp directory and temporary cloned disk
+		_ = os.RemoveAll(tempDir)
+	}()
+
+	// Strategy: Use VirtualDiskManager to clone disk to sparseMonolithic format
+	// This handles all VMDK types (sesparse, flat, thick, thin) and produces a single downloadable file
+	// IMPORTANT: For VMs with snapshots, we must use the BASE disk, not the snapshot delta disk
+	// VirtualDiskManager cannot clone snapshot delta disks directly
+	
+	sourceDiskPath := diskInfo.Path
+	
+	// If we have a backing file (parent disk), use it instead of the current disk
+	// This happens when the VM has snapshots - Path is the delta disk, BackingFile is the base
+	if diskInfo.BackingFile != "" {
+		p.logger.Info("VM has snapshots, using base disk for export", 
+			"delta_disk", diskInfo.Path, 
+			"base_disk", diskInfo.BackingFile)
+		sourceDiskPath = diskInfo.BackingFile
+	}
+	
+	p.logger.Info("Cloning disk to sparseMonolithic format for export", "source_disk", sourceDiskPath)
+
+	// Parse source datastore path
+	srcDsName, srcFilePath, err := parseDatastorePath(sourceDiskPath)
+	if err != nil {
+		return nil, errors.NewInternal("failed to parse source datastore path", err)
+	}
+
+	// Create temporary destination path for sparseMonolithic clone
+	// Use a unique name to avoid conflicts
+	tempDiskName := fmt.Sprintf("virtrigaud-export-%s-%d.vmdk", req.VmId, time.Now().Unix())
+	destPath := path.Join(path.Dir(srcFilePath), tempDiskName)
+	destDatastorePath := fmt.Sprintf("[%s] %s", srcDsName, destPath)
+
+	p.logger.Info("Creating sparseMonolithic clone", "source", sourceDiskPath, "destination", destDatastorePath)
+
+	// Get VirtualDiskManager
+	err = p.cloneDiskToStreamOptimized(ctx, sourceDiskPath, destDatastorePath)
+	if err != nil {
+		return nil, errors.NewInternal("failed to clone disk to streamOptimized format", err)
+	}
+
+	// Ensure cleanup of temporary disk on datastore
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := dsManager.DeleteFile(cleanupCtx, destDatastorePath); err != nil {
+			p.logger.Warn("Failed to cleanup temporary disk on datastore", "path", destDatastorePath, "error", err)
+		} else {
+			p.logger.Info("Cleaned up temporary disk from datastore", "path", destDatastorePath)
+		}
+	}()
+
+	// Now download the streamOptimized VMDK (single file, no extent files)
+	tempFile := fmt.Sprintf("%s/disk.vmdk", tempDir)
+	file, err := os.Create(tempFile)
+	if err != nil {
+		return nil, errors.NewInternal("failed to create temp file", err)
+	}
+
+	// Download with progress tracking
+	downloadProgress := func(transferred, total int64) {
+		if total > 0 {
+			progress := float64(transferred) / float64(total) * 100
+			if int(progress)%10 == 0 { // Log every 10%
+				p.logger.Info("Download progress", "percent", fmt.Sprintf("%.1f%%", progress))
+			}
+		}
+	}
+
+	p.logger.Info("Downloading streamOptimized VMDK", "source", destDatastorePath)
+	err = dsManager.DownloadFile(ctx, destDatastorePath, file, downloadProgress)
+	if err != nil {
+		file.Close()
+		return nil, errors.NewInternal("failed to download streamOptimized VMDK", err)
+	}
+
+	// Close file to flush writes
+	file.Close()
+	p.logger.Info("Download complete", "file", tempFile)
+
+	// Parse VMDK descriptor to find extent files (for multi-file VMDKs like sesparse)
+	// Even though we requested sparseMonolithic, vSphere may still create multi-file VMDKs
+	descriptor, err := parseVMDKDescriptor(tempFile)
+	if err != nil {
+		p.logger.Warn("Failed to parse VMDK descriptor, assuming single-file VMDK", "error", err)
+		descriptor = &VMDKDescriptor{
+			DescriptorPath: tempFile,
+			ExtentFiles:    []string{},
+		}
+	}
+
+	// Download extent files if any
+	if len(descriptor.ExtentFiles) > 0 {
+		p.logger.Info("VMDK has extent files, downloading them", "count", len(descriptor.ExtentFiles), "files", descriptor.ExtentFiles)
+		basePath := extractDatastoreBasePath(destDatastorePath)
+		
+		for _, extentFile := range descriptor.ExtentFiles {
+			// Construct full datastore path for extent file
+			extentPath := constructDatastorePath(basePath, extentFile)
+			localPath := fmt.Sprintf("%s/%s", tempDir, extentFile)
+			
+			p.logger.Info("Downloading extent file", "datastore_path", extentPath, "local_path", localPath)
+			
+			extentFileHandle, err := os.Create(localPath)
+			if err != nil {
+				return nil, errors.NewInternal("failed to create extent file", err)
+			}
+			
+			err = dsManager.DownloadFile(ctx, extentPath, extentFileHandle, nil)
+			extentFileHandle.Close()
+			if err != nil {
+				p.logger.Warn("Failed to download extent file", "extent", extentFile, "error", err)
+				// Continue anyway - qemu-img might work without all extents
+			} else {
+				p.logger.Info("Extent file downloaded successfully", "file", extentFile)
+			}
+		}
+		p.logger.Info("All available extent files downloaded")
+	}
+
+	// Convert format if needed
+	var uploadPath string
+	if targetFormat != "vmdk" {
+		p.logger.Info("Converting VMDK to target format", "target_format", targetFormat)
+		convertedPath := fmt.Sprintf("%s/converted.%s", tempDir, targetFormat)
+
+		// Use diskutil for conversion
+		qemuImg := diskutil.NewQemuImg()
+		err = qemuImg.Convert(ctx, diskutil.ConvertOptions{
+			SourcePath:        tempFile,
+			DestinationPath:   convertedPath,
+			SourceFormat:      diskutil.FormatVMDK,
+			DestinationFormat: diskutil.SupportedFormat(targetFormat),
+			Compression:       false, // No compression for migration (faster)
+		})
+		if err != nil {
+			return nil, errors.NewInternal("failed to convert VMDK format", err)
+		}
+
+		uploadPath = convertedPath
+		// No need for explicit cleanup - tempDir cleanup will handle it
+	} else {
+		uploadPath = tempFile
+	}
+
+	// Upload to destination storage
+	p.logger.Info("Uploading disk to storage", "destination", req.DestinationUrl)
+
+	// Re-open file for reading
+	uploadFile, err := os.Open(uploadPath)
+	if err != nil {
+		return nil, errors.NewInternal("failed to open file for upload", err)
+	}
+	defer uploadFile.Close()
+
+	// Get file size
+	stat, err := uploadFile.Stat()
+	if err != nil {
+		return nil, errors.NewInternal("failed to stat file", err)
+	}
+
+	// Upload with progress tracking
+	uploadProgress := func(transferred, total int64) {
+		if total > 0 {
+			progress := float64(transferred) / float64(total) * 100
+			p.logger.Debug("Upload progress", "percent", progress, "transferred", transferred, "total", total)
+		}
+	}
+
+	uploadReq := storage.UploadRequest{
+		Reader:           uploadFile,
+		DestinationURL:   req.DestinationUrl,
+		ContentLength:    stat.Size(),
+		ProgressCallback: uploadProgress,
+	}
+
+	uploadResp, err := storageClient.Upload(ctx, uploadReq)
+	if err != nil {
+		return nil, errors.NewInternal("failed to upload disk", err)
+	}
+
+	p.logger.Info("Disk export completed", "export_id", exportID, "checksum", uploadResp.Checksum, "bytes", uploadResp.BytesTransferred)
+
+	response := &providerv1.ExportDiskResponse{
+		ExportId:           exportID,
+		Task:               nil, // Synchronous operation
+		EstimatedSizeBytes: uploadResp.BytesTransferred,
+		Checksum:           uploadResp.Checksum,
+	}
+
+	return response, nil
+}
+
+// ImportDisk imports a disk from an external source
+func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskRequest) (*providerv1.ImportDiskResponse, error) {
+	if p.client == nil {
+		return nil, errors.NewUnavailable("vSphere client not configured", nil)
+	}
+
+	p.logger.Info("Importing disk", "source", req.SourceUrl, "storage", req.StorageHint)
+
+	// Determine target datastore
+	datastore := p.config.DefaultDatastore
+	if req.StorageHint != "" {
+		datastore = req.StorageHint
+	}
+
+	// Determine format
+	targetFormat := req.Format
+	if targetFormat == "" {
+		targetFormat = "vmdk" // Default for vSphere
+	}
+	if targetFormat != "vmdk" && targetFormat != "qcow2" && targetFormat != "raw" {
+		return nil, errors.NewInvalidSpec("unsupported import format: %s", targetFormat)
+	}
+
+	// Generate disk name
+	diskID := req.TargetName
+	if diskID == "" {
+		diskID = fmt.Sprintf("imported-disk-%d", time.Now().Unix())
+	}
+
+	p.logger.Info("Preparing disk import", "disk_id", diskID, "datastore", datastore, "format", targetFormat)
+
+	// vSphere disk import strategy:
+	// 1. Download disk from SourceURL to temporary location
+	// 2. Convert to VMDK if needed (using qemu-img or vmware-vdiskmanager)
+	// 3. Upload VMDK to datastore using datastore file manager
+	// 4. Create disk descriptor
+	// 5. Return disk reference
+
+	// Configure storage client
+	// URL format: pvc://<pvc-name>/<file-path>
+	// Provider pods have PVCs mounted at /mnt/migration-storage/<pvc-name>
+	// Extract PVC name from URL to construct the correct mount path
+	pvcName, err := extractPVCNameFromURL(req.SourceUrl)
+	if err != nil {
+		return nil, errors.NewInternal("failed to extract PVC name from URL", err)
+	}
+
+	// Mount path matches where the controller mounts PVCs: /mnt/migration-storage/<pvc-name>
+	mountPath := fmt.Sprintf("/mnt/migration-storage/%s", pvcName)
+
+	storageConfig := storage.StorageConfig{
+		Type:      "pvc",
+		MountPath: mountPath,
+	}
+
+	storageClient, err := storage.NewStorage(storageConfig)
+	if err != nil {
+		return nil, errors.NewInternal("failed to create storage client", err)
+	}
+	defer storageClient.Close()
+
+	// Create datastore file manager
+	dsManager := NewDatastoreFileManager(p)
+
+	// Create temporary file for download
+	tempFile := fmt.Sprintf("/tmp/%s-import", diskID)
+	defer func() {
+		_ = os.Remove(tempFile)
+	}()
+
+	// Download from storage
+	p.logger.Info("Downloading disk from storage", "source", req.SourceUrl)
+
+	file, err := os.Create(tempFile)
+	if err != nil {
+		return nil, errors.NewInternal("failed to create temp file", err)
+	}
+	defer file.Close()
+
+	// Download with progress tracking
+	downloadProgress := func(transferred, total int64) {
+		if total > 0 {
+			progress := float64(transferred) / float64(total) * 100
+			p.logger.Debug("Download progress", "percent", progress, "transferred", transferred, "total", total)
+		}
+	}
+
+	downloadReq := storage.DownloadRequest{
+		SourceURL:        req.SourceUrl,
+		Writer:           file,
+		VerifyChecksum:   req.VerifyChecksum,
+		ExpectedChecksum: req.ExpectedChecksum,
+		ProgressCallback: downloadProgress,
+	}
+
+	downloadResp, err := storageClient.Download(ctx, downloadReq)
+	if err != nil {
+		return nil, errors.NewInternal("failed to download disk", err)
+	}
+
+	// Close file to flush writes
+	file.Close()
+
+	p.logger.Info("Download completed", "bytes", downloadResp.BytesTransferred, "checksum", downloadResp.Checksum)
+
+	// Convert to VMDK if needed
+	var vmdkPath string
+	if targetFormat != "vmdk" {
+		p.logger.Info("Converting to VMDK format", "source_format", targetFormat)
+		vmdkPath = fmt.Sprintf("/tmp/%s.vmdk", diskID)
+
+		// Use diskutil for conversion
+		qemuImg := diskutil.NewQemuImg()
+		err = qemuImg.Convert(ctx, diskutil.ConvertOptions{
+			SourcePath:        tempFile,
+			DestinationPath:   vmdkPath,
+			DestinationFormat: diskutil.FormatVMDK,
+			Compression:       false, // No compression for migration (faster)
+		})
+		if err != nil {
+			return nil, errors.NewInternal("failed to convert to VMDK format", err)
+		}
+
+		defer os.Remove(vmdkPath)
+	} else {
+		vmdkPath = tempFile
+	}
+
+	// Upload to datastore
+	p.logger.Info("Uploading VMDK to datastore", "datastore", datastore, "disk_id", diskID)
+
+	// Re-open file for reading
+	uploadFile, err := os.Open(vmdkPath)
+	if err != nil {
+		return nil, errors.NewInternal("failed to open file for datastore upload", err)
+	}
+	defer uploadFile.Close()
+
+	// Get file size
+	stat, err := uploadFile.Stat()
+	if err != nil {
+		return nil, errors.NewInternal("failed to stat file", err)
+	}
+
+	// Generate datastore path
+	diskPath := fmt.Sprintf("[%s] %s/%s.vmdk", datastore, diskID, diskID)
+
+	// Upload to datastore with progress tracking
+	uploadProgress := func(transferred, total int64) {
+		if total > 0 {
+			progress := float64(transferred) / float64(total) * 100
+			p.logger.Debug("Datastore upload progress", "percent", progress, "transferred", transferred, "total", total)
+		}
+	}
+
+	err = dsManager.UploadFile(ctx, uploadFile, diskPath, stat.Size(), uploadProgress)
+	if err != nil {
+		return nil, errors.NewInternal("failed to upload to datastore", err)
+	}
+
+	p.logger.Info("Disk import completed", "disk_id", diskID, "path", diskPath)
+
+	response := &providerv1.ImportDiskResponse{
+		DiskId:          diskID,
+		Path:            diskPath,
+		Task:            nil, // Synchronous operation
+		ActualSizeBytes: downloadResp.ContentLength,
+		Checksum:        downloadResp.Checksum,
+	}
+
+	return response, nil
 }

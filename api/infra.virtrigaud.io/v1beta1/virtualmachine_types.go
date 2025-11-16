@@ -33,8 +33,15 @@ type VirtualMachineSpec struct {
 	// ClassRef references the VMClass that defines resource allocation
 	ClassRef ObjectRef `json:"classRef"`
 
-	// ImageRef references the VMImage to use as base template
-	ImageRef ObjectRef `json:"imageRef"`
+	// ImageRef references the VMImage to use as base template.
+	// Either ImageRef or ImportedDisk must be specified, but not both.
+	// +optional
+	ImageRef *ObjectRef `json:"imageRef,omitempty"`
+
+	// ImportedDisk references a pre-imported disk (e.g., from migration).
+	// Either ImageRef or ImportedDisk must be specified, but not both.
+	// +optional
+	ImportedDisk *ImportedDiskRef `json:"importedDisk,omitempty"`
 
 	// Networks specifies network attachments for the VM
 	// +optional
@@ -385,6 +392,44 @@ type DiskSpec struct {
 	// StorageClass specifies the storage class (optional)
 	// +optional
 	StorageClass string `json:"storageClass,omitempty"`
+}
+
+// ImportedDiskRef references a disk that was imported via migration or other means.
+// This allows VMs to be created from pre-existing disk images rather than templates.
+type ImportedDiskRef struct {
+	// DiskID is the provider-specific disk identifier.
+	// For libvirt, this is typically the volume name.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	DiskID string `json:"diskID"`
+
+	// Path is the optional disk path on the provider (e.g., /var/lib/libvirt/images/disk.qcow2).
+	// If not specified, the provider will determine the path based on DiskID.
+	// +optional
+	Path string `json:"path,omitempty"`
+
+	// Format specifies the disk format (qcow2, vmdk, raw, etc.).
+	// +optional
+	// +kubebuilder:default="qcow2"
+	// +kubebuilder:validation:Enum=qcow2;vmdk;raw;vdi;vhdx
+	Format string `json:"format,omitempty"`
+
+	// Source indicates where the disk came from.
+	// +optional
+	// +kubebuilder:validation:Enum=migration;clone;import;snapshot;manual
+	Source string `json:"source,omitempty"`
+
+	// MigrationRef references the VMMigration that imported this disk.
+	// This provides traceability and audit trail for migrated disks.
+	// +optional
+	MigrationRef *LocalObjectReference `json:"migrationRef,omitempty"`
+
+	// SizeGiB specifies the expected disk size in GiB.
+	// Used for validation and capacity planning.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	SizeGiB int32 `json:"sizeGiB,omitempty"`
 }
 
 // UserData defines cloud-init configuration

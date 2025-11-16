@@ -21,6 +21,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/url"
+	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 	"time"
@@ -462,6 +465,201 @@ func (s *Server) GetCapabilities(ctx context.Context, req *providerv1.GetCapabil
 		SupportedDiskTypes:          []string{"qcow2", "raw", "vmdk"},
 		SupportedNetworkTypes:       []string{"virtio", "e1000", "rtl8139"},
 	}, nil
+}
+
+// ImportDisk imports a disk from an external source (for VM migration)
+func (s *Server) ImportDisk(ctx context.Context, req *providerv1.ImportDiskRequest) (*providerv1.ImportDiskResponse, error) {
+	log.Printf("INFO Starting disk import from %s", req.SourceUrl)
+
+	// Get the provider instance and cast to libvirt Provider
+	libvirtProvider, ok := s.provider.(*Provider)
+	if !ok || libvirtProvider == nil || libvirtProvider.virshProvider == nil {
+		return nil, fmt.Errorf("libvirt provider not initialized")
+	}
+
+	// Parse source URL (expecting pvc:// or file:// URL)
+	sourceURL := req.SourceUrl
+	var sourcePath string
+
+	if strings.HasPrefix(sourceURL, "pvc://") {
+		// PVC URL format: pvc://<pvc-name>/<path>
+		// Provider pods have PVCs mounted at /mnt/migration-storage/<pvc-name>
+		pvcURL := strings.TrimPrefix(sourceURL, "pvc://")
+		sourcePath = fmt.Sprintf("/mnt/migration-storage/%s", pvcURL)
+		log.Printf("INFO Converting PVC URL to file path: %s -> %s", sourceURL, sourcePath)
+	} else if strings.HasPrefix(sourceURL, "file://") {
+		// Direct file path
+		sourcePath = strings.TrimPrefix(sourceURL, "file://")
+		log.Printf("INFO Using direct file path: %s", sourcePath)
+	} else {
+		return nil, fmt.Errorf("unsupported source URL scheme (expected pvc:// or file://): %s", sourceURL)
+	}
+
+	log.Printf("INFO Importing disk from path: %s", sourcePath)
+
+	// Validate source file exists locally
+	if _, err := os.Stat(sourcePath); err != nil {
+		return nil, fmt.Errorf("source disk file not found locally: %s (error: %w)", sourcePath, err)
+	}
+
+	// Generate target volume name from TargetName or source filename
+	volumeName := req.TargetName
+	if volumeName == "" {
+		// Extract filename without extension
+		parts := strings.Split(sourcePath, "/")
+		fileName := parts[len(parts)-1]
+		volumeName = strings.TrimSuffix(fileName, ".qcow2")
+		volumeName = strings.TrimSuffix(volumeName, ".vmdk")
+		volumeName = strings.TrimSuffix(volumeName, ".raw")
+		volumeName = fmt.Sprintf("%s-imported", volumeName)
+	}
+
+	log.Printf("INFO Target volume name: %s", volumeName)
+
+	// Copy disk file to remote libvirt host (if using SSH connection)
+	var finalSourcePath string
+	if strings.Contains(libvirtProvider.virshProvider.uri, "ssh://") {
+		log.Printf("INFO Copying disk file to remote libvirt host...")
+		remotePath, err := s.copyDiskToRemote(ctx, libvirtProvider.virshProvider, sourcePath, volumeName)
+		if err != nil {
+			return nil, fmt.Errorf("failed to copy disk to remote host: %w", err)
+		}
+		finalSourcePath = remotePath
+		log.Printf("INFO Disk copied to remote host: %s", finalSourcePath)
+	} else {
+		// Local libvirt connection - use source path directly
+		finalSourcePath = sourcePath
+		log.Printf("INFO Using local libvirt connection with path: %s", finalSourcePath)
+	}
+
+	// Get source disk info using qemu-img
+	infoResult, err := libvirtProvider.virshProvider.runVirshCommand(ctx, "!", "qemu-img", "info", "--output=json", sourcePath)
+	if err != nil {
+		log.Printf("WARN Failed to get source disk info: %v", err)
+	} else {
+		log.Printf("DEBUG Source disk info: %s", infoResult.Stdout)
+	}
+
+	// Determine target pool (use StorageHint or default to "default")
+	poolName := "default"
+	if req.StorageHint != "" {
+		poolName = req.StorageHint
+	}
+
+	// Create storage provider
+	storageProvider := NewStorageProvider(libvirtProvider.virshProvider)
+
+	// Ensure target pool exists and is active
+	if err := storageProvider.EnsureDefaultStoragePool(ctx); err != nil {
+		return nil, fmt.Errorf("failed to ensure storage pool: %w", err)
+	}
+
+	// Import the disk using CreateVolumeFromImageFile
+	// This will copy, convert to qcow2, and set proper permissions
+	log.Printf("INFO Importing disk to pool %s as volume %s", poolName, volumeName)
+	volume, err := storageProvider.CreateVolumeFromImageFile(ctx, finalSourcePath, volumeName, poolName, 0)
+	if err != nil {
+		return nil, fmt.Errorf("failed to import disk: %w", err)
+	}
+
+	log.Printf("INFO Disk successfully imported to: %s", volume.Path)
+
+	// Get actual size of imported disk
+	var actualSizeBytes int64
+	statResult, err := libvirtProvider.virshProvider.runVirshCommand(ctx, "!", "stat", "-c", "%s", volume.Path)
+	if err == nil {
+		_, _ = fmt.Sscanf(strings.TrimSpace(statResult.Stdout), "%d", &actualSizeBytes)
+	}
+
+	// Calculate checksum if requested
+	checksum := ""
+	if req.VerifyChecksum {
+		log.Printf("INFO Calculating SHA256 checksum of imported disk...")
+		checksumResult, err := libvirtProvider.virshProvider.runVirshCommand(ctx, "!", "sha256sum", volume.Path)
+		if err != nil {
+			log.Printf("WARN Failed to calculate checksum: %v", err)
+		} else {
+			// sha256sum output format: "<checksum> <filename>"
+			parts := strings.Fields(checksumResult.Stdout)
+			if len(parts) > 0 {
+				checksum = parts[0]
+				log.Printf("INFO Calculated checksum: %s", checksum)
+
+				// Verify against expected checksum if provided
+				if req.ExpectedChecksum != "" && req.ExpectedChecksum != checksum {
+					return nil, fmt.Errorf("checksum mismatch: expected %s, got %s", req.ExpectedChecksum, checksum)
+				}
+			}
+		}
+	}
+
+	// Generate disk ID (volume name in libvirt)
+	diskID := volumeName
+
+	return &providerv1.ImportDiskResponse{
+		DiskId:          diskID,
+		Path:            volume.Path,
+		ActualSizeBytes: actualSizeBytes,
+		Checksum:        checksum,
+		// No task reference - import is synchronous
+	}, nil
+}
+
+// copyDiskToRemote copies a disk file from local pod storage to the remote libvirt host
+func (s *Server) copyDiskToRemote(ctx context.Context, virshProvider *VirshProvider, localPath, volumeName string) (string, error) {
+	// IMPORTANT: Copy directly to libvirt pool directory for efficient in-place usage
+	// This allows CreateVolumeFromImageFile to detect and use the disk without copying
+	remoteDir := "/var/lib/libvirt/images"
+	remotePath := fmt.Sprintf("%s/%s.qcow2", remoteDir, volumeName)
+
+	// Extract SSH target (user@host) from URI
+	parsedURI, err := url.Parse(virshProvider.uri)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse libvirt URI: %w", err)
+	}
+
+	user := parsedURI.User.Username()
+	host := parsedURI.Host
+	sshTarget := fmt.Sprintf("%s@%s", user, host)
+
+	log.Printf("INFO Ensuring libvirt pool directory exists on %s", sshTarget)
+
+	// Ensure pool directory exists (usually already exists, but safe to check)
+	_, err = virshProvider.runVirshCommand(ctx, "!", "sudo", "mkdir", "-p", remoteDir)
+	if err != nil {
+		log.Printf("WARN Failed to ensure pool directory exists (may already exist): %v", err)
+	}
+
+	// Copy disk file using scp (run locally from the pod, not through SSH)
+	log.Printf("INFO Copying disk file (%s) to remote host via scp...", localPath)
+	
+	// Run scp LOCALLY on the pod to copy to remote host
+	var cmd *exec.Cmd
+	if virshProvider.credentials.Password != "" {
+		// Use sshpass with scp for password authentication
+		cmd = exec.CommandContext(ctx, "sshpass", "-e", "scp",
+			"-o", "StrictHostKeyChecking=accept-new",
+			"-o", "UserKnownHostsFile=/tmp/known_hosts",
+			localPath,
+			fmt.Sprintf("%s:%s", sshTarget, remotePath))
+		// Set password via environment variable for sshpass
+		cmd.Env = append(os.Environ(), fmt.Sprintf("SSHPASS=%s", virshProvider.credentials.Password))
+	} else {
+		// Fallback to scp without sshpass (for key-based auth)
+		cmd = exec.CommandContext(ctx, "scp",
+			"-o", "StrictHostKeyChecking=accept-new",
+			"-o", "UserKnownHostsFile=/tmp/known_hosts",
+			localPath,
+			fmt.Sprintf("%s:%s", sshTarget, remotePath))
+	}
+	
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("scp failed: %w, output: %s", err, string(output))
+	}
+
+	log.Printf("INFO Successfully copied disk file to remote host: %s", remotePath)
+	return remotePath, nil
 }
 
 // Helper functions for generating IDs and timestamps (shared with vSphere)

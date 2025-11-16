@@ -24,7 +24,7 @@ func CreateSimpleVirtualMachineBeta() *v1beta1.VirtualMachine {
 			ClassRef: v1beta1.ObjectRef{
 				Name: "test-class",
 			},
-			ImageRef: v1beta1.ObjectRef{
+			ImageRef: &v1beta1.ObjectRef{
 				Name: "test-image",
 			},
 			Networks: []v1beta1.VMNetworkRef{

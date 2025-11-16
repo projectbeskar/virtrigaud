@@ -21,11 +21,14 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/projectbeskar/virtrigaud/internal/diskutil"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
+	"github.com/projectbeskar/virtrigaud/internal/storage"
 )
 
 // Clean provider implementation using only virsh
@@ -88,18 +91,28 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, req contracts.Crea
 
 	// Check if VMImage is specified in the request
 	if imageSpec := p.extractImageSpec(req); imageSpec != "" {
-		log.Printf("INFO Creating disk from image template: %s", imageSpec)
+		log.Printf("INFO Creating disk from image: %s", imageSpec)
 
-		// Try to create volume from predefined template
-		volume, err := storageProvider.CreateVolumeFromTemplate(ctx, imageSpec, diskVolumeName, "default", diskSizeGB)
+		var volume *StorageVolume
+		var err error
+
+		// Determine how to handle the image based on its type
+		if strings.HasPrefix(imageSpec, "http://") || strings.HasPrefix(imageSpec, "https://") {
+			// Handle URL - download the image
+			log.Printf("INFO Downloading cloud image from URL: %s", imageSpec)
+			volume, err = storageProvider.DownloadCloudImage(ctx, imageSpec, diskVolumeName, "default", diskSizeGB)
+		} else if strings.HasPrefix(imageSpec, "/") {
+			// Handle absolute path - copy from existing image file
+			log.Printf("INFO Creating disk from local template file: %s", imageSpec)
+			volume, err = storageProvider.CreateVolumeFromImageFile(ctx, imageSpec, diskVolumeName, "default", diskSizeGB)
+		} else {
+			// Handle template name - look up in predefined templates
+			log.Printf("INFO Creating disk from predefined template: %s", imageSpec)
+			volume, err = storageProvider.CreateVolumeFromTemplate(ctx, imageSpec, diskVolumeName, "default", diskSizeGB)
+		}
+
 		if err != nil {
-			// Fallback: try to download directly if it's a URL
-			if strings.HasPrefix(imageSpec, "http") {
-				volume, err = storageProvider.DownloadCloudImage(ctx, imageSpec, diskVolumeName, "default", diskSizeGB)
-			}
-			if err != nil {
-				return "", fmt.Errorf("failed to create disk from image: %w", err)
-			}
+			return "", fmt.Errorf("failed to create disk from image: %w", err)
 		}
 		diskPath = volume.Path
 	} else {
@@ -193,9 +206,9 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, req contracts.Crea
 	return req.Name, nil
 }
 
-// Delete removes a VM using virsh
+// Delete removes a VM using virsh and cleans up all associated resources
 func (p *Provider) Delete(ctx context.Context, id string) (taskRef string, err error) {
-	log.Printf("INFO Deleting VM: %s", id)
+	log.Printf("INFO Deleting VM and all associated resources: %s", id)
 
 	if p.virshProvider == nil {
 		return "", contracts.NewRetryableError("virsh provider not initialized", nil)
@@ -216,8 +229,24 @@ func (p *Provider) Delete(ctx context.Context, id string) (taskRef string, err e
 	}
 
 	if !domainExists {
-		log.Printf("INFO Domain %s does not exist, already deleted", id)
+		log.Printf("INFO Domain %s does not exist, cleaning up any remaining resources", id)
+		// Even if domain doesn't exist, try to clean up orphaned resources
+		p.cleanupOrphanedResources(ctx, id)
 		return "", nil
+	}
+
+	// Get disk paths before deleting the domain
+	diskPaths, err := p.getDomainDiskPaths(ctx, id)
+	if err != nil {
+		log.Printf("WARN Failed to get disk paths for %s: %v", id, err)
+		// Continue with deletion even if we can't get disk paths
+	}
+
+	// Get cloud-init ISO path before deleting the domain
+	cloudInitISOPath, err := p.getCloudInitISOPath(ctx, id)
+	if err != nil {
+		log.Printf("WARN Failed to get cloud-init ISO path for %s: %v", id, err)
+		// Continue with deletion
 	}
 
 	// Stop the domain if running
@@ -226,13 +255,173 @@ func (p *Provider) Delete(ctx context.Context, id string) (taskRef string, err e
 		// Continue with undefine even if destroy fails
 	}
 
-	// Remove the domain definition
+	// Remove the domain definition (this should also remove storage if --remove-all-storage is used)
+	// However, we'll explicitly delete disks to ensure cleanup
 	if err := p.virshProvider.undefineDomain(ctx, id); err != nil {
 		return "", contracts.NewRetryableError("failed to undefine domain", err)
 	}
 
-	log.Printf("INFO Successfully deleted domain: %s", id)
+	// Delete disk images
+	if len(diskPaths) > 0 {
+		log.Printf("INFO Deleting %d disk(s) for VM %s", len(diskPaths), id)
+		for _, diskPath := range diskPaths {
+			if err := p.deleteDiskFile(ctx, diskPath); err != nil {
+				log.Printf("WARN Failed to delete disk %s: %v", diskPath, err)
+				// Continue with other deletions
+			} else {
+				log.Printf("INFO Successfully deleted disk: %s", diskPath)
+			}
+		}
+	}
+
+	// Delete cloud-init ISO
+	if cloudInitISOPath != "" {
+		if err := p.deleteCloudInitResources(ctx, id, cloudInitISOPath); err != nil {
+			log.Printf("WARN Failed to delete cloud-init resources: %v", err)
+			// Continue - not a critical error
+		} else {
+			log.Printf("INFO Successfully deleted cloud-init resources for: %s", id)
+		}
+	}
+
+	log.Printf("INFO Successfully deleted domain and all resources: %s", id)
 	return "", nil
+}
+
+// getDomainDiskPaths retrieves all disk paths for a domain
+func (p *Provider) getDomainDiskPaths(ctx context.Context, domainName string) ([]string, error) {
+	// Get domain XML to extract disk paths
+	result, err := p.virshProvider.runVirshCommand(ctx, "dumpxml", domainName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to dump domain XML: %w", err)
+	}
+
+	var diskPaths []string
+
+	// Parse XML to find disk source files
+	// Look for lines like: <source file='/var/lib/libvirt/images/vm-disk.qcow2'/>
+	lines := strings.Split(result.Stdout, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.Contains(line, "<source file=") && !strings.Contains(line, "device='disk'") {
+			// Extract the file path from <source file='...'/>
+			start := strings.Index(line, "file='")
+			if start == -1 {
+				start = strings.Index(line, "file=\"")
+			}
+			if start != -1 {
+				start += 6 // len("file='") or len("file=\"")
+				end := strings.IndexAny(line[start:], "\"'")
+				if end != -1 {
+					diskPath := line[start : start+end]
+					// Skip cloud-init ISOs (we'll handle those separately)
+					if !strings.HasSuffix(diskPath, "-cidata.iso") && !strings.HasSuffix(diskPath, "cloud-init.iso") {
+						diskPaths = append(diskPaths, diskPath)
+					}
+				}
+			}
+		}
+	}
+
+	return diskPaths, nil
+}
+
+// getCloudInitISOPath retrieves the cloud-init ISO path for a domain
+func (p *Provider) getCloudInitISOPath(ctx context.Context, domainName string) (string, error) {
+	// Get domain XML
+	result, err := p.virshProvider.runVirshCommand(ctx, "dumpxml", domainName)
+	if err != nil {
+		return "", fmt.Errorf("failed to dump domain XML: %w", err)
+	}
+
+	// Look for cloud-init ISO in XML
+	lines := strings.Split(result.Stdout, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.Contains(line, "<source file=") {
+			// Extract the file path
+			start := strings.Index(line, "file='")
+			if start == -1 {
+				start = strings.Index(line, "file=\"")
+			}
+			if start != -1 {
+				start += 6
+				end := strings.IndexAny(line[start:], "\"'")
+				if end != -1 {
+					filePath := line[start : start+end]
+					// Check if this is a cloud-init ISO
+					if strings.HasSuffix(filePath, "cloud-init.iso") || strings.Contains(filePath, "virtrigaud-cloudinit") {
+						return filePath, nil
+					}
+				}
+			}
+		}
+	}
+
+	return "", nil
+}
+
+// deleteDiskFile deletes a disk file from the libvirt host
+func (p *Provider) deleteDiskFile(ctx context.Context, diskPath string) error {
+	log.Printf("INFO Deleting disk file: %s", diskPath)
+
+	// Use rm to delete the disk file
+	_, err := p.virshProvider.runVirshCommand(ctx, "!", "sudo", "rm", "-f", diskPath)
+	if err != nil {
+		return fmt.Errorf("failed to delete disk file %s: %w", diskPath, err)
+	}
+
+	return nil
+}
+
+// deleteCloudInitResources deletes cloud-init ISO and associated files
+func (p *Provider) deleteCloudInitResources(ctx context.Context, domainName, isoPath string) error {
+	log.Printf("INFO Deleting cloud-init resources for: %s", domainName)
+
+	// Delete the cloud-init directory which contains ISO, user-data, and meta-data
+	// Extract directory from ISO path by removing the filename
+	lastSlash := strings.LastIndex(isoPath, "/")
+	cloudInitDir := isoPath
+	if lastSlash != -1 {
+		cloudInitDir = isoPath[:lastSlash]
+	}
+
+	_, err := p.virshProvider.runVirshCommand(ctx, "!", "rm", "-rf", cloudInitDir)
+	if err != nil {
+		return fmt.Errorf("failed to delete cloud-init directory %s: %w", cloudInitDir, err)
+	}
+
+	return nil
+}
+
+// cleanupOrphanedResources attempts to clean up any resources that might be left behind
+func (p *Provider) cleanupOrphanedResources(ctx context.Context, domainName string) {
+	log.Printf("INFO Cleaning up orphaned resources for: %s", domainName)
+
+	// Try to delete disk files with common naming patterns
+	diskPatterns := []string{
+		fmt.Sprintf("/var/lib/libvirt/images/%s-disk.qcow2", domainName),
+		fmt.Sprintf("/var/lib/libvirt/images/%s.qcow2", domainName),
+		fmt.Sprintf("/var/lib/libvirt/images/%s-disk", domainName),
+	}
+
+	for _, diskPath := range diskPatterns {
+		_, err := p.virshProvider.runVirshCommand(ctx, "!", "sudo", "rm", "-f", diskPath)
+		if err != nil {
+			log.Printf("DEBUG Could not delete potential orphaned disk %s: %v", diskPath, err)
+		} else {
+			log.Printf("INFO Cleaned up orphaned disk: %s", diskPath)
+		}
+	}
+
+	// Try to delete cloud-init directory
+	cloudInitDir := fmt.Sprintf("/tmp/virtrigaud-cloudinit/%s", domainName)
+	_, err := p.virshProvider.runVirshCommand(ctx, "!", "rm", "-rf", cloudInitDir)
+	if err != nil {
+		log.Printf("DEBUG Could not delete cloud-init directory %s: %v", cloudInitDir, err)
+	} else {
+		log.Printf("INFO Cleaned up orphaned cloud-init directory: %s", cloudInitDir)
+	}
 }
 
 // Power controls VM power state using virsh
@@ -246,6 +435,15 @@ func (p *Provider) Power(ctx context.Context, id string, op contracts.PowerOp) (
 	switch op {
 	case contracts.PowerOpOn:
 		err = p.virshProvider.startDomain(ctx, id)
+		// After starting, sync the persistent XML to match the running state
+		// This prevents "pending changes" in Cockpit by ensuring the persistent
+		// definition matches what libvirt expanded (e.g., CPU features)
+		if err == nil {
+			if syncErr := p.syncPersistentXML(ctx, id); syncErr != nil {
+				log.Printf("WARN Failed to sync persistent XML for %s: %v", id, syncErr)
+				// Don't fail the power on operation for this
+			}
+		}
 	case contracts.PowerOpOff:
 		err = p.virshProvider.stopDomain(ctx, id)
 	case contracts.PowerOpReboot:
@@ -254,6 +452,12 @@ func (p *Provider) Power(ctx context.Context, id string, op contracts.PowerOp) (
 			log.Printf("WARN Failed to stop domain for reboot: %v", stopErr)
 		}
 		err = p.virshProvider.startDomain(ctx, id)
+		// Sync persistent XML after reboot as well
+		if err == nil {
+			if syncErr := p.syncPersistentXML(ctx, id); syncErr != nil {
+				log.Printf("WARN Failed to sync persistent XML for %s: %v", id, syncErr)
+			}
+		}
 	case contracts.PowerOpShutdownGraceful:
 		// Graceful shutdown for libvirt - attempt guest shutdown, fallback to force stop
 		err = p.virshProvider.shutdownDomain(ctx, id)
@@ -271,6 +475,44 @@ func (p *Provider) Power(ctx context.Context, id string, op contracts.PowerOp) (
 
 	log.Printf("INFO Successfully performed power operation %s on %s", op, id)
 	return "", nil
+}
+
+// syncPersistentXML updates the persistent domain definition to match the running state
+// This prevents "pending changes" in management tools like Cockpit by ensuring the
+// persistent XML matches what libvirt expanded (e.g., host-model CPU to specific features)
+func (p *Provider) syncPersistentXML(ctx context.Context, domainName string) error {
+	log.Printf("INFO Syncing persistent XML definition for domain: %s", domainName)
+
+	// Get the running domain XML (this includes expanded CPU features, etc.)
+	result, err := p.virshProvider.runVirshCommand(ctx, "dumpxml", domainName)
+	if err != nil {
+		return fmt.Errorf("failed to dump running XML: %w", err)
+	}
+
+	// Write the running XML to a temporary file
+	remotePath := fmt.Sprintf("/tmp/%s-sync.xml", domainName)
+	heredocMarker := "EOF_SYNC_" + fmt.Sprintf("%d", time.Now().UnixNano())
+	command := fmt.Sprintf("cat > '%s' << '%s'\n%s\n%s", remotePath, heredocMarker, result.Stdout, heredocMarker)
+
+	_, err = p.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", command)
+	if err != nil {
+		return fmt.Errorf("failed to write sync XML file: %w", err)
+	}
+
+	// Define the domain again with the running XML (this updates the persistent definition)
+	_, err = p.virshProvider.runVirshCommand(ctx, "define", remotePath)
+	if err != nil {
+		return fmt.Errorf("failed to redefine domain: %w", err)
+	}
+
+	// Clean up temporary file
+	_, cleanupErr := p.virshProvider.runVirshCommand(ctx, "!", "rm", "-f", remotePath)
+	if cleanupErr != nil {
+		log.Printf("WARN Failed to cleanup sync XML file: %v", cleanupErr)
+	}
+
+	log.Printf("INFO Successfully synced persistent XML for domain: %s", domainName)
+	return nil
 }
 
 // Reconfigure updates VM configuration using virsh
@@ -771,12 +1013,27 @@ func (p *Provider) GetGuestInfo(ctx context.Context, id string) (*GuestAgentInfo
 
 // extractImageSpec extracts the image specification from the request
 func (p *Provider) extractImageSpec(req contracts.CreateRequest) string {
-	// Check for image specification in the request name or other fields
-	// For now, default to Ubuntu 22.04 as a bootable cloud image
-	// This can be extended to support different image specifications
+	// Priority 1: Use explicit path from VMImage (for local template images)
+	if req.Image.Path != "" {
+		log.Printf("INFO Using image path from VMImage: %s", req.Image.Path)
+		return req.Image.Path
+	}
 
-	// Default to Ubuntu 22.04 if no image specified
-	return "ubuntu-22.04-server"
+	// Priority 2: Use URL from VMImage (for remote images)
+	if req.Image.URL != "" {
+		log.Printf("INFO Using image URL from VMImage: %s", req.Image.URL)
+		return req.Image.URL
+	}
+
+	// Priority 3: Use template name if provided
+	if req.Image.TemplateName != "" {
+		log.Printf("INFO Using template name from VMImage: %s", req.Image.TemplateName)
+		return req.Image.TemplateName
+	}
+
+	// No image specified - will create empty disk
+	log.Printf("INFO No image specified in VMImage, will create empty disk")
+	return ""
 }
 
 // extractDiskSize extracts the disk size from VMClass DiskDefaults
@@ -815,6 +1072,67 @@ runcmd:
   
 final_message: "VM %s is ready!"
 `, vmName, vmName, vmName)
+}
+
+// generateNetworkInterfacesXML creates network interface XML from network attachments
+func (p *Provider) generateNetworkInterfacesXML(networks []contracts.NetworkAttachment) string {
+	if len(networks) == 0 {
+		// Default to user network if no networks specified
+		return `    <interface type='user'>
+      <model type='virtio'/>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x03' function='0x0'/>
+    </interface>`
+	}
+
+	var interfacesXML string
+	for idx, net := range networks {
+		// Determine network model (default to virtio)
+		model := "virtio"
+		if net.Model != "" {
+			model = net.Model
+		}
+
+		// Determine PCI slot (start at 0x03, increment for each interface)
+		pciSlot := fmt.Sprintf("0x%02x", 3+idx)
+
+		// Generate MAC address if specified
+		macXML := ""
+		if net.MacAddress != "" {
+			macXML = fmt.Sprintf("\n      <mac address='%s'/>", net.MacAddress)
+		}
+
+		var interfaceXML string
+
+		// Determine interface type and configuration
+		if net.Bridge != "" {
+			// Bridge network
+			interfaceXML = fmt.Sprintf(`    <interface type='bridge'>%s
+      <source bridge='%s'/>
+      <model type='%s'/>
+      <address type='pci' domain='0x0000' bus='0x00' slot='%s' function='0x0'/>
+    </interface>`, macXML, net.Bridge, model, pciSlot)
+		} else if net.NetworkName != "" {
+			// Libvirt managed network
+			interfaceXML = fmt.Sprintf(`    <interface type='network'>%s
+      <source network='%s'/>
+      <model type='%s'/>
+      <address type='pci' domain='0x0000' bus='0x00' slot='%s' function='0x0'/>
+    </interface>`, macXML, net.NetworkName, model, pciSlot)
+		} else {
+			// Default to user network (NAT)
+			interfaceXML = fmt.Sprintf(`    <interface type='user'>%s
+      <model type='%s'/>
+      <address type='pci' domain='0x0000' bus='0x00' slot='%s' function='0x0'/>
+    </interface>`, macXML, model, pciSlot)
+		}
+
+		if idx > 0 {
+			interfacesXML += "\n"
+		}
+		interfacesXML += interfaceXML
+	}
+
+	return interfacesXML
 }
 
 // generateDomainXMLWithStorage creates libvirt domain XML with proper storage configuration
@@ -920,6 +1238,9 @@ func (p *Provider) generateDomainXMLWithStorage(req contracts.CreateRequest, dis
     </tpm>`
 	}
 
+	// Generate network interfaces based on request
+	networkInterfacesXML := p.generateNetworkInterfacesXML(req.Networks)
+
 	domainXML := fmt.Sprintf(`<domain type='qemu'>
   <name>%s</name>
   <uuid>%s</uuid>
@@ -965,10 +1286,7 @@ func (p *Provider) generateDomainXMLWithStorage(req contracts.CreateRequest, dis
     <controller type='virtio-serial' index='0'>
       <address type='pci' domain='0x0000' bus='0x00' slot='0x06' function='0x0'/>
     </controller>
-    <interface type='user'>
-      <model type='virtio'/>
-      <address type='pci' domain='0x0000' bus='0x00' slot='0x03' function='0x0'/>
-    </interface>
+%s
     <serial type='pty'>
       <target type='isa-serial' port='0'>
         <model name='isa-serial'/>
@@ -999,59 +1317,6 @@ func (p *Provider) generateDomainXMLWithStorage(req contracts.CreateRequest, dis
     <memballoon model='virtio'>
       <address type='pci' domain='0x0000' bus='0x00' slot='0x08' function='0x0'/>
     </memballoon>
-    <controller type='usb' index='0' model='ich9-ehci1'>
-      <address type='pci' domain='0x0000' bus='0x00' slot='0x05' function='0x7'/>
-    </controller>
-    <controller type='usb' index='0' model='ich9-uhci1'>
-      <master startport='0'/>
-      <address type='pci' domain='0x0000' bus='0x00' slot='0x05' function='0x0' multifunction='on'/>
-    </controller>
-    <controller type='usb' index='0' model='ich9-uhci2'>
-      <master startport='2'/>
-      <address type='pci' domain='0x0000' bus='0x00' slot='0x05' function='0x1'/>
-    </controller>
-    <controller type='usb' index='0' model='ich9-uhci3'>
-      <master startport='4'/>
-      <address type='pci' domain='0x0000' bus='0x00' slot='0x05' function='0x2'/>
-    </controller>
-    <controller type='pci' index='0' model='pci-root'/>
-    <controller type='ide' index='0'>
-      <address type='pci' domain='0x0000' bus='0x00' slot='0x01' function='0x1'/>
-    </controller>
-    <controller type='virtio-serial' index='0'>
-      <address type='pci' domain='0x0000' bus='0x00' slot='0x06' function='0x0'/>
-    </controller>
-    <interface type='user'>
-      <model type='virtio'/>
-      <address type='pci' domain='0x0000' bus='0x00' slot='0x03' function='0x0'/>
-    </interface>
-    <serial type='pty'>
-      <target type='isa-serial' port='0'>
-        <model name='isa-serial'/>
-      </target>
-    </serial>
-    <console type='pty'>
-      <target type='serial' port='0'/>
-    </console>
-    <channel type='unix'>
-      <target type='virtio' name='org.qemu.guest_agent.0'/>
-      <address type='virtio-serial' controller='0' bus='0' port='1'/>
-    </channel>
-    <input type='tablet' bus='usb'>
-      <address type='usb' bus='0' port='1'/>
-    </input>
-    <input type='mouse' bus='ps2'/>
-    <input type='keyboard' bus='ps2'/>
-    <graphics type='vnc' port='-1' autoport='yes' listen='127.0.0.1'>
-      <listen type='address' address='127.0.0.1'/>
-    </graphics>
-    <video>
-      <model type='cirrus' vram='16384' heads='1' primary='yes'/>
-      <address type='pci' domain='0x0000' bus='0x00' slot='0x02' function='0x0'/>
-    </video>
-    <memballoon model='virtio'>
-      <address type='pci' domain='0x0000' bus='0x00' slot='0x08' function='0x0'/>
-    </memballoon>
   </devices>
 </domain>`,
 		req.Name,
@@ -1062,7 +1327,8 @@ func (p *Provider) generateDomainXMLWithStorage(req contracts.CreateRequest, dis
 		osXML,
 		featuresXML,
 		cpuXML,
-		devicesXML)
+		devicesXML,
+		networkInterfacesXML)
 
 	return domainXML, nil
 }
@@ -1273,3 +1539,376 @@ func (p *Provider) TaskStatus(ctx context.Context, taskRef string) (contracts.Ta
 		Message:     "Task completed",
 	}, nil
 }
+
+// parseStorageSize converts storage size strings (e.g., "20 GiB", "1024 MiB") to bytes
+func parseStorageSize(sizeStr string) (int64, error) {
+	sizeStr = strings.TrimSpace(sizeStr)
+	parts := strings.Fields(sizeStr)
+
+	if len(parts) == 0 {
+		return 0, fmt.Errorf("empty size string")
+	}
+
+	var value float64
+	var unit string
+
+	if len(parts) == 1 {
+		// Assume bytes if no unit specified
+		val, err := strconv.ParseInt(parts[0], 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("invalid size value: %w", err)
+		}
+		return val, nil
+	}
+
+	// Parse value and unit
+	val, err := strconv.ParseFloat(parts[0], 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid size value: %w", err)
+	}
+	value = val
+	unit = strings.ToUpper(parts[1])
+
+	// Convert to bytes
+	switch unit {
+	case "B", "BYTES":
+		return int64(value), nil
+	case "KB", "KIB":
+		return int64(value * 1024), nil
+	case "MB", "MIB":
+		return int64(value * 1024 * 1024), nil
+	case "GB", "GIB":
+		return int64(value * 1024 * 1024 * 1024), nil
+	case "TB", "TIB":
+		return int64(value * 1024 * 1024 * 1024 * 1024), nil
+	default:
+		return 0, fmt.Errorf("unknown unit: %s", unit)
+	}
+}
+
+// GetDiskInfo retrieves detailed information about a VM's disk
+func (p *Provider) GetDiskInfo(ctx context.Context, req contracts.GetDiskInfoRequest) (contracts.GetDiskInfoResponse, error) {
+	log.Printf("INFO Getting disk info for VM: %s", req.VmId)
+
+	if p.virshProvider == nil {
+		return contracts.GetDiskInfoResponse{}, contracts.NewRetryableError("virsh provider not initialized", nil)
+	}
+
+	storageProvider := NewStorageProvider(p.virshProvider)
+
+	// Get primary disk volume name (convention: vmname-disk)
+	diskVolumeName := fmt.Sprintf("%s-disk", req.VmId)
+	if req.DiskId != "" {
+		diskVolumeName = req.DiskId
+	}
+
+	// Get volume information
+	volume, err := storageProvider.GetVolumeInfo(ctx, "default", diskVolumeName)
+	if err != nil {
+		return contracts.GetDiskInfoResponse{}, fmt.Errorf("failed to get volume info: %w", err)
+	}
+
+	// Parse volume size
+	virtualSize, err := parseStorageSize(volume.Capacity)
+	if err != nil {
+		log.Printf("WARN Failed to parse capacity: %v, using 0", err)
+		virtualSize = 0
+	}
+
+	actualSize, err := parseStorageSize(volume.Allocation)
+	if err != nil {
+		log.Printf("WARN Failed to parse allocation: %v, using 0", err)
+		actualSize = 0
+	}
+
+	// Get snapshots for this domain
+	snapshots, err := p.virshProvider.listSnapshots(ctx, req.VmId)
+	if err != nil {
+		log.Printf("WARN Failed to list snapshots: %v", err)
+		snapshots = []string{}
+	}
+
+	// Determine if this is a boot disk (primary disk is always bootable)
+	isBootable := (req.DiskId == "" || req.DiskId == diskVolumeName)
+
+	response := contracts.GetDiskInfoResponse{
+		DiskId:           diskVolumeName,
+		Format:           volume.Format,
+		VirtualSizeBytes: virtualSize,
+		ActualSizeBytes:  actualSize,
+		Path:             volume.Path,
+		IsBootable:       isBootable,
+		Snapshots:        snapshots,
+		BackingFile:      "", // TODO: Parse backing file from volume XML
+		Metadata: map[string]string{
+			"pool": volume.Pool,
+			"type": volume.Type,
+		},
+	}
+
+	log.Printf("INFO Disk info retrieved: %s (format=%s, virtual=%d bytes, actual=%d bytes)",
+		response.DiskId, response.Format, response.VirtualSizeBytes, response.ActualSizeBytes)
+
+	return response, nil
+}
+
+// ExportDisk exports a VM disk for migration
+func (p *Provider) ExportDisk(ctx context.Context, req contracts.ExportDiskRequest) (contracts.ExportDiskResponse, error) {
+	log.Printf("INFO Exporting disk for VM: %s to %s", req.VmId, req.DestinationURL)
+
+	if p.virshProvider == nil {
+		return contracts.ExportDiskResponse{}, contracts.NewRetryableError("virsh provider not initialized", nil)
+	}
+
+	// Get disk information first
+	diskInfo, err := p.GetDiskInfo(ctx, contracts.GetDiskInfoRequest{
+		VmId:       req.VmId,
+		DiskId:     req.DiskId,
+		SnapshotId: req.SnapshotId,
+	})
+	if err != nil {
+		return contracts.ExportDiskResponse{}, fmt.Errorf("failed to get disk info: %w", err)
+	}
+
+	// Validate format compatibility
+	targetFormat := req.Format
+	if targetFormat == "" {
+		targetFormat = diskInfo.Format // Use source format
+	}
+	if targetFormat != "qcow2" && targetFormat != "raw" {
+		return contracts.ExportDiskResponse{}, fmt.Errorf("unsupported export format: %s (libvirt supports qcow2, raw)", targetFormat)
+	}
+
+	exportId := fmt.Sprintf("export-%s-%d", req.VmId, time.Now().Unix())
+	diskPath := diskInfo.Path
+
+	// If snapshot is specified, use snapshot path
+	if req.SnapshotId != "" {
+		// For snapshot export, we need to find the snapshot backing file
+		// For now, we'll use the same path (snapshot-aware export would be more complex)
+		log.Printf("INFO Exporting from snapshot: %s", req.SnapshotId)
+	}
+
+	// Check if format conversion is needed
+	needsConversion := (targetFormat != diskInfo.Format)
+
+	var uploadPath string
+	var cleanup func()
+
+	if needsConversion {
+		// Convert disk format using qemu-img
+		log.Printf("INFO Converting disk from %s to %s", diskInfo.Format, targetFormat)
+		tempPath := fmt.Sprintf("/tmp/%s.%s", exportId, targetFormat)
+
+		// Use diskutil package for conversion
+		qemuImg := diskutil.NewQemuImg()
+		err := qemuImg.Convert(ctx, diskutil.ConvertOptions{
+			SourcePath:        diskPath,
+			DestinationPath:   tempPath,
+			SourceFormat:      diskutil.SupportedFormat(diskInfo.Format),
+			DestinationFormat: diskutil.SupportedFormat(targetFormat),
+			Compression:       false, // No compression for migration (faster)
+		})
+		if err != nil {
+			return contracts.ExportDiskResponse{}, fmt.Errorf("failed to convert disk format: %w", err)
+		}
+
+		uploadPath = tempPath
+		cleanup = func() {
+			_ = os.Remove(tempPath)
+		}
+		defer cleanup()
+	} else {
+		uploadPath = diskPath
+	}
+
+	// Upload to destination using PVC storage layer
+	log.Printf("INFO Uploading disk to: %s", req.DestinationURL)
+
+	// Configure storage client
+	// URL format: pvc://<pvc-name>/<file-path>
+	// Provider pods have PVCs mounted at /mnt/migration-storage/<pvc-name>
+	// Extract PVC name from URL to construct the correct mount path
+	pvcName, err := extractPVCNameFromURL(req.DestinationURL)
+	if err != nil {
+		return contracts.ExportDiskResponse{}, fmt.Errorf("failed to extract PVC name from URL: %w", err)
+	}
+
+	// Mount path matches where the controller mounts PVCs: /mnt/migration-storage/<pvc-name>
+	mountPath := fmt.Sprintf("/mnt/migration-storage/%s", pvcName)
+
+	storageConfig := storage.StorageConfig{
+		Type:      "pvc",
+		MountPath: mountPath,
+	}
+
+	// Create PVC storage client
+	storageClient, err := storage.NewStorage(storageConfig)
+	if err != nil {
+		return contracts.ExportDiskResponse{}, fmt.Errorf("failed to create storage client: %w", err)
+	}
+	defer storageClient.Close()
+
+	// Upload the disk
+	uploadReq := storage.UploadRequest{
+		SourcePath:     uploadPath,
+		DestinationURL: req.DestinationURL,
+		ContentLength:  diskInfo.ActualSizeBytes,
+		ProgressCallback: func(transferred, total int64) {
+			if total > 0 {
+				progress := float64(transferred) / float64(total) * 100
+				log.Printf("INFO Upload progress: %.2f%% (%d/%d bytes)", progress, transferred, total)
+			}
+		},
+	}
+
+	uploadResp, err := storageClient.Upload(ctx, uploadReq)
+	if err != nil {
+		return contracts.ExportDiskResponse{}, fmt.Errorf("failed to upload disk: %w", err)
+	}
+
+	checksum := uploadResp.Checksum
+	log.Printf("INFO Disk export completed: %s (checksum=%s, uploaded=%d bytes)", exportId, checksum, uploadResp.BytesTransferred)
+
+	response := contracts.ExportDiskResponse{
+		ExportId:           exportId,
+		TaskRef:            "", // Synchronous operation
+		EstimatedSizeBytes: diskInfo.ActualSizeBytes,
+		Checksum:           checksum,
+	}
+
+	return response, nil
+}
+
+// ImportDisk imports a disk from an external source
+func (p *Provider) ImportDisk(ctx context.Context, req contracts.ImportDiskRequest) (contracts.ImportDiskResponse, error) {
+	log.Printf("INFO Importing disk from %s to storage: %s", req.SourceURL, req.StorageHint)
+
+	if p.virshProvider == nil {
+		return contracts.ImportDiskResponse{}, contracts.NewRetryableError("virsh provider not initialized", nil)
+	}
+
+	storageProvider := NewStorageProvider(p.virshProvider)
+
+	// Determine storage pool
+	storagePool := "default"
+	if req.StorageHint != "" {
+		storagePool = req.StorageHint
+	}
+
+	// Ensure storage pool exists and is active
+	if err := storageProvider.ensurePoolActive(ctx, storagePool); err != nil {
+		return contracts.ImportDiskResponse{}, fmt.Errorf("failed to ensure storage pool: %w", err)
+	}
+
+	// Determine target format
+	targetFormat := req.Format
+	if targetFormat == "" {
+		targetFormat = "qcow2" // Default to qcow2
+	}
+	if targetFormat != "qcow2" && targetFormat != "raw" {
+		return contracts.ImportDiskResponse{}, fmt.Errorf("unsupported import format: %s (libvirt supports qcow2, raw)", targetFormat)
+	}
+
+	// Generate disk ID
+	diskId := req.TargetName
+	if diskId == "" {
+		diskId = fmt.Sprintf("imported-disk-%d", time.Now().Unix())
+	}
+
+	// Download to temporary location
+	tempPath := fmt.Sprintf("/tmp/%s-download.img", diskId)
+
+	log.Printf("INFO Downloading disk from %s to %s", req.SourceURL, tempPath)
+
+	// Configure storage client
+	// URL format: pvc://<pvc-name>/<file-path>
+	// Provider pods have PVCs mounted at /mnt/migration-storage/<pvc-name>
+	// Extract PVC name from URL to construct the correct mount path
+	pvcName, err := extractPVCNameFromURL(req.SourceURL)
+	if err != nil {
+		return contracts.ImportDiskResponse{}, fmt.Errorf("failed to extract PVC name from URL: %w", err)
+	}
+
+	// Mount path matches where the controller mounts PVCs: /mnt/migration-storage/<pvc-name>
+	mountPath := fmt.Sprintf("/mnt/migration-storage/%s", pvcName)
+
+	storageConfig := storage.StorageConfig{
+		Type:      "pvc",
+		MountPath: mountPath,
+	}
+
+	// Create PVC storage client
+	storageClient, err := storage.NewStorage(storageConfig)
+	if err != nil {
+		return contracts.ImportDiskResponse{}, fmt.Errorf("failed to create storage client: %w", err)
+	}
+	defer storageClient.Close()
+
+	// Download the disk
+	downloadReq := storage.DownloadRequest{
+		SourceURL:        req.SourceURL,
+		DestinationPath:  tempPath,
+		VerifyChecksum:   req.VerifyChecksum,
+		ExpectedChecksum: req.ExpectedChecksum,
+		ProgressCallback: func(transferred, total int64) {
+			if total > 0 {
+				progress := float64(transferred) / float64(total) * 100
+				log.Printf("INFO Download progress: %.2f%% (%d/%d bytes)", progress, transferred, total)
+			}
+		},
+	}
+
+	downloadResp, err := storageClient.Download(ctx, downloadReq)
+	if err != nil {
+		return contracts.ImportDiskResponse{}, fmt.Errorf("failed to download disk: %w", err)
+	}
+
+	checksum := downloadResp.Checksum
+	fileSizeBytes := downloadResp.ContentLength
+
+	log.Printf("INFO Download completed: %d bytes, checksum=%s", fileSizeBytes, checksum)
+
+	// Cleanup temp file on exit
+	defer func() {
+		_, _ = p.virshProvider.runVirshCommand(ctx, "!", "rm", "-f", tempPath)
+	}()
+
+	// Create volume in storage pool from the downloaded file
+	log.Printf("INFO Creating volume %s in pool %s from downloaded file", diskId, storagePool)
+
+	// First, copy the file to the storage pool directory
+	poolPath := "/var/lib/libvirt/images" // Default path, should be queried from pool
+	diskPath := fmt.Sprintf("%s/%s.%s", poolPath, diskId, targetFormat)
+
+	// Copy with conversion using diskutil
+	log.Printf("INFO Converting disk to target format: %s", targetFormat)
+	qemuImg := diskutil.NewQemuImg()
+	err = qemuImg.Convert(ctx, diskutil.ConvertOptions{
+		SourcePath:        tempPath,
+		DestinationPath:   diskPath,
+		DestinationFormat: diskutil.SupportedFormat(targetFormat),
+		Compression:       false, // No compression for migration (faster)
+	})
+	if err != nil {
+		return contracts.ImportDiskResponse{}, fmt.Errorf("failed to convert/copy disk: %w", err)
+	}
+
+	// The disk is now in place at diskPath
+	// For libvirt, the file being in the correct location is sufficient
+	// The volume will be referenced when creating a VM with this disk
+	finalPath := diskPath
+
+	log.Printf("INFO Disk import completed: %s (path=%s)", diskId, finalPath)
+
+	response := contracts.ImportDiskResponse{
+		DiskId:          diskId,
+		Path:            finalPath,
+		TaskRef:         "", // Synchronous operation
+		ActualSizeBytes: fileSizeBytes,
+		Checksum:        checksum,
+	}
+
+	return response, nil
+}
+

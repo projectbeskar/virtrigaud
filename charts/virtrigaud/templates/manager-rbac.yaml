@@ -40,6 +40,9 @@ rules:
   - vmsnapshots/status
   - vmclones
   - vmclones/status
+  - vmmigrations
+  - vmmigrations/status
+  - vmmigrations/finalizers
   - vmsets
   - vmsets/status
   - vmplacementpolicies
@@ -67,6 +70,28 @@ rules:
   - list
   - patch
   - update
+  - watch
+# PersistentVolumeClaims for VM migration storage
+- apiGroups:
+  - ""
+  resources:
+  - persistentvolumeclaims
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+# Pods for VM migration provider readiness checks
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
   - watch
 # Deployment resources for remote providers
 - apiGroups:
@@ -149,6 +174,9 @@ rules:
   - vmsnapshots/status
   - vmclones
   - vmclones/status
+  - vmmigrations
+  - vmmigrations/status
+  - vmmigrations/finalizers
   - vmsets
   - vmsets/status
   - vmplacementpolicies
@@ -176,6 +204,28 @@ rules:
   - list
   - patch
   - update
+  - watch
+# PersistentVolumeClaims for VM migration storage
+- apiGroups:
+  - ""
+  resources:
+  - persistentvolumeclaims
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+# Pods for VM migration provider readiness checks
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
   - watch
 # Deployment resources for remote providers
 - apiGroups:

@@ -116,4 +116,16 @@ type Provider interface {
 
 	// SnapshotRevert reverts a VM to a snapshot
 	SnapshotRevert(ctx context.Context, vmId string, snapshotId string) (taskRef string, err error)
+
+	// ExportDisk exports a VM disk for migration
+	// Returns export identifier and optional task reference for async operations
+	ExportDisk(ctx context.Context, req ExportDiskRequest) (ExportDiskResponse, error)
+
+	// ImportDisk imports a disk from an external source
+	// Returns disk identifier and optional task reference for async operations
+	ImportDisk(ctx context.Context, req ImportDiskRequest) (ImportDiskResponse, error)
+
+	// GetDiskInfo retrieves detailed information about a VM disk
+	// Useful for migration planning and validation
+	GetDiskInfo(ctx context.Context, req GetDiskInfoRequest) (GetDiskInfoResponse, error)
 }
