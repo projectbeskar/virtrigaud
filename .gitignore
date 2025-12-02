@@ -36,6 +36,9 @@ go.work
 dist/
 *.tgz
 
+# Documentation build
+docs/book/
+
 # Development files
 libvirtVM.yaml
 libvirtVM-corrected.yaml

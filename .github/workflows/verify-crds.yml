@@ -1,0 +1,71 @@
+name: Verify CRD Synchronization
+
+on:
+  pull_request:
+    paths:
+      - 'api/infra.virtrigaud.io/v1beta1/**_types.go'
+      - 'config/crd/bases/*.yaml'
+      - 'charts/virtrigaud/crds/*.yaml'
+  push:
+    branches: [main, develop]
+    paths:
+      - 'api/infra.virtrigaud.io/v1beta1/**_types.go'
+      - 'config/crd/bases/*.yaml'
+      - 'charts/virtrigaud/crds/*.yaml'
+
+jobs:
+  verify-crd-sync:
+    name: Verify CRD YAMLs Match Go Types
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: go.mod
+        cache: true
+
+    - name: Install controller-gen
+      run: |
+        go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.17.2
+
+    - name: Run CRD verification
+      run: |
+        chmod +x hack/verify-crd-sync.sh
+        ./hack/verify-crd-sync.sh
+
+    - name: Comment on PR (if verification fails)
+      if: failure() && github.event_name == 'pull_request'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: `## ❌ CRD Verification Failed
+
+            The CRD YAML files are out of sync with the Go type definitions.
+
+            **To fix this:**
+            \`\`\`bash
+            make generate manifests sync-helm-crds
+            git add api/ config/crd/ charts/virtrigaud/crds/
+            git commit --amend --no-edit
+            git push --force-with-lease
+            \`\`\`
+
+            **Why this happened:**
+            You modified Go types in \`api/infra.virtrigaud.io/v1beta1/*_types.go\` but didn't regenerate the CRD YAMLs.
+
+            **Prevent this in the future:**
+            Install the pre-commit hook:
+            \`\`\`bash
+            ./hack/setup-git-hooks.sh
+            \`\`\`
+
+            This will automatically regenerate CRDs when you commit changes to type definitions.`
+          })

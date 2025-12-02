@@ -545,6 +545,56 @@ make test
 make generate manifests
 ```
 
+### Working with CRDs
+
+VirtRigaud uses **Go types as the source of truth** for CRDs. YAML files are auto-generated using controller-gen.
+
+#### One-Time Setup (Recommended)
+
+Install git hooks to automatically regenerate CRDs when you commit changes:
+
+```bash
+make setup-git-hooks
+```
+
+After installation, the pre-commit hook will automatically:
+- Detect changes to `*_types.go` files
+- Regenerate CRD YAMLs and DeepCopy methods
+- Sync CRDs to Helm chart
+- Add generated files to your commit
+- Run formatting and linting
+
+#### Manual CRD Workflow
+
+```bash
+# Edit CRD type definitions
+vim api/infra.virtrigaud.io/v1beta1/virtualmachine_types.go
+
+# Regenerate everything (CRDs, DeepCopy, sync to Helm)
+make update-crds
+
+# Verify CRDs are in sync
+make verify-crd-sync
+
+# Verify Helm chart CRDs match generated CRDs
+make verify-helm-crds
+```
+
+#### Helpful Commands
+
+```bash
+# Regenerate all CRD files at once
+make update-crds
+
+# Verify CRD synchronization
+make verify-crd-sync
+
+# Install git hooks
+make setup-git-hooks
+```
+
+📖 **Full CRD development guide:** [CRD Development Workflow](docs/src/development/crd-workflow.md)
+
 ### Running locally
 
 ```bash

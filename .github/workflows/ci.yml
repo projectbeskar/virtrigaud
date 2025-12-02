@@ -218,9 +218,101 @@ jobs:
       run: |
         # Reset go.mod changes caused by go mod tidy in CI
         git checkout HEAD -- go.mod go.sum 2>/dev/null || true
-        
+
         # Check for other generated file changes
         git diff --exit-code || (echo "Generated files are out of sync. Please run 'make generate && make manifests && make proto' and commit the changes." && exit 1)
+
+  docs_build:
+    name: Verify Documentation Build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install crd-ref-docs
+        run: |
+          go install github.com/elastic/crd-ref-docs@latest
+          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+
+      - name: Install mdBook
+        uses: peaceiris/actions-mdbook@v2
+        with:
+          mdbook-version: 'latest'
+
+      - name: Verify documentation tools
+        run: |
+          echo "=== Verifying required tools ==="
+          command -v mdbook && echo "✅ mdBook installed" || (echo "❌ mdBook missing" && exit 1)
+          command -v crd-ref-docs && echo "✅ crd-ref-docs installed" || (echo "❌ crd-ref-docs missing" && exit 1)
+          command -v go && echo "✅ Go installed" || (echo "❌ Go missing" && exit 1)
+
+      - name: Generate CRD manifests
+        run: make manifests
+
+      - name: Build documentation
+        run: |
+          echo "=== Building documentation ==="
+          make docs-build
+
+      - name: Verify documentation artifacts
+        run: |
+          echo "=== Verifying documentation build artifacts ==="
+
+          # Check that mdBook built successfully
+          if [ ! -f "docs/book/index.html" ]; then
+            echo "❌ Error: index.html not found in docs/book/"
+            exit 1
+          fi
+
+          # Check that API documentation was generated
+          if [ ! -f "docs/src/api-reference/README.md" ]; then
+            echo "❌ Error: API reference README not generated"
+            exit 1
+          fi
+
+          if [ ! -f "docs/src/api-reference/api-types.md" ]; then
+            echo "❌ Error: API types documentation not generated"
+            exit 1
+          fi
+
+          if [ ! -f "docs/src/api-reference/provider-contract.md" ]; then
+            echo "❌ Error: Provider contract documentation not generated"
+            exit 1
+          fi
+
+          echo "✅ All documentation artifacts verified successfully"
+
+          # Show generated files
+          echo ""
+          echo "=== Generated Documentation Files ==="
+          ls -lh docs/src/api-reference/
+          echo ""
+          echo "=== Documentation Build Output ==="
+          ls -lh docs/book/
+
+      - name: Check for broken links (optional)
+        continue-on-error: true
+        run: |
+          echo "=== Checking for common documentation issues ==="
+
+          # Check for empty files
+          find docs/src/api-reference -name "*.md" -size 0 && echo "⚠️ Warning: Empty documentation files found" || echo "✅ No empty files"
+
+          # Count generated documentation
+          echo ""
+          echo "=== Documentation Statistics ==="
+          echo "Total API reference files: $(find docs/src/api-reference -name '*.md' | wc -l)"
+          echo "Total source documentation files: $(find docs/src -name '*.md' | wc -l)"
+          echo "Total built HTML files: $(find docs/book -name '*.html' | wc -l)"
 
   build:
     name: Build

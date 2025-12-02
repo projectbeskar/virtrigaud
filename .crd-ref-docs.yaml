@@ -1,0 +1,24 @@
+renderer:
+  kubebuilder:
+    # Use full mode to include all available information
+    mode: full
+
+processor:
+  # Ignore common Kubernetes metadata fields that don't need documentation
+  ignoreFields:
+    - TypeMeta
+    - ObjectMeta
+    - ListMeta
+
+  # Ignore the following groups/versions
+  # ignoreGroupVersions: []
+
+  # Ignore the following types
+  # ignoreTypes: []
+
+# Output format configuration
+output:
+  # Use markdown renderer (default)
+  markdown:
+    # Use headers instead of bold for field names
+    useHeaders: true

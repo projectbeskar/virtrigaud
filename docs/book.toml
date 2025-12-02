@@ -1,0 +1,60 @@
+[book]
+title = "VirtRigaud Documentation"
+authors = ["William Rizzo", "Erick Bourgeois", "VirtRigaud Contributors"]
+description = "Kubernetes operator for managing virtual machines across multiple hypervisors"
+src = "src"
+language = "en"
+
+# Multilingual support: Ready for translation
+# To add a new language:
+# 1. Create docs/src-<lang>/ directory (e.g., docs/src-fr/)
+# 2. Copy SUMMARY.md and all .md files
+# 3. Translate the content
+# 4. Add [language.<lang>] section below
+# 5. Build with: mdbook build -d book/<lang>
+#
+# [language.fr]
+# name = "Français"
+# src = "src-fr"
+
+[build]
+build-dir = "book"
+create-missing = true
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/projectbeskar/virtrigaud"
+git-repository-icon = "fa-github"
+edit-url-template = "https://github.com/projectbeskar/virtrigaud/edit/main/docs/{path}"
+additional-css = ["theme/custom.css"]
+additional-js = ["mermaid.min.js", "mermaid-init.js"]
+
+[output.html.fold]
+enable = false    # whether or not to enable section folding
+level = 0
+
+[output.html.search]
+enable = true
+limit-results = 30
+teaser-word-count = 30
+use-boolean-and = true
+boost-title = 2
+boost-hierarchy = 1
+boost-paragraph = 1
+expand = true
+heading-split-level = 3
+
+[output.html.playground]
+editable = false
+copyable = true
+line-numbers = true
+
+[preprocessor.links]
+
+[preprocessor.index]
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"
+renderer = ["html"]
+optional = true

@@ -1,0 +1,199 @@
+name: Documentation
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'docs/**'
+      - 'api/**/*_types.go'
+      - 'internal/**/*.go'
+      - 'sdk/**/*.go'
+      - 'hack/generate-api-docs.sh'
+      - '.crd-ref-docs.yaml'
+      - '.github/workflows/docs.yml'
+  workflow_dispatch:
+    inputs:
+      force_deploy:
+        description: 'Force deploy documentation even without changes'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow only one concurrent deployment, skipping runs queued between the run in-progress and latest queued.
+# However, do NOT cancel in-progress runs as we want to allow these production deployments to complete.
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+env:
+  GO_VERSION: '1.23'
+
+jobs:
+  build:
+    name: Build Documentation
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for accurate git info
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Install crd-ref-docs
+        run: |
+          go install github.com/elastic/crd-ref-docs@latest
+          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+
+      - name: Install mdBook
+        uses: peaceiris/actions-mdbook@v2
+        with:
+          mdbook-version: 'latest'
+
+      - name: Verify tools
+        run: |
+          echo "=== Verifying required tools ==="
+          command -v mdbook && echo "✅ mdBook installed" || echo "❌ mdBook missing"
+          command -v crd-ref-docs && echo "✅ crd-ref-docs installed" || echo "❌ crd-ref-docs missing"
+          command -v go && echo "✅ Go installed" || echo "❌ Go missing"
+
+      - name: Generate CRD manifests
+        run: |
+          echo "=== Generating CRD manifests ==="
+          make manifests
+
+      - name: Generate API documentation
+        run: |
+          echo "=== Generating API documentation from Go source ==="
+          make docs-api
+
+      - name: Detect available languages
+        id: detect-languages
+        run: |
+          echo "=== Detecting available languages ==="
+          cd docs
+          # Extract language codes from book.toml
+          LANGUAGES=$(grep -E '^\[language\.' book.toml | sed 's/\[language\.\(.*\)\]/\1/' | tr '\n' ' ')
+          if [ -z "$LANGUAGES" ]; then
+            LANGUAGES="en"
+          fi
+          echo "languages=$LANGUAGES" >> $GITHUB_OUTPUT
+          echo "📚 Found languages: $LANGUAGES"
+
+      - name: Build documentation with mdBook
+        run: |
+          echo "=== Building documentation with mdBook ==="
+          cd docs
+
+          # Build default English documentation
+          echo "Building English (default)..."
+          mdbook build
+
+          # Build additional languages if configured
+          LANGUAGES="${{ steps.detect-languages.outputs.languages }}"
+          for lang in $LANGUAGES; do
+            if [ "$lang" != "en" ] && [ -d "src-$lang" ]; then
+              echo "Building $lang documentation..."
+              # Create language-specific build
+              mdbook build -d book/$lang --config "language=$lang" || {
+                echo "⚠️  Warning: Failed to build $lang documentation"
+                continue
+              }
+              echo "✅ Built $lang documentation"
+            fi
+          done
+
+          # Create language selector index if multiple languages exist
+          if [ $(echo $LANGUAGES | wc -w) -gt 1 ]; then
+            echo "Creating multilingual index..."
+            cat > book/index.html << 'EOF'
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <meta charset="utf-8">
+            <title>VirtRigaud Documentation</title>
+            <style>
+              body { font-family: sans-serif; max-width: 600px; margin: 100px auto; text-align: center; }
+              h1 { color: #333; }
+              .languages { display: flex; flex-wrap: wrap; justify-content: center; gap: 20px; margin-top: 40px; }
+              .language-link { padding: 20px 40px; background: #0066cc; color: white; text-decoration: none; border-radius: 8px; font-size: 18px; }
+              .language-link:hover { background: #0052a3; }
+            </style>
+          </head>
+          <body>
+            <h1>VirtRigaud Documentation</h1>
+            <p>Choose your language / Choisissez votre langue</p>
+            <div class="languages">
+          EOF
+            for lang in $LANGUAGES; do
+              case $lang in
+                en) echo '<a href="./en/" class="language-link">English</a>' >> book/index.html ;;
+                fr) echo '<a href="./fr/" class="language-link">Français</a>' >> book/index.html ;;
+                es) echo '<a href="./es/" class="language-link">Español</a>' >> book/index.html ;;
+                de) echo '<a href="./de/" class="language-link">Deutsch</a>' >> book/index.html ;;
+                ja) echo '<a href="./ja/" class="language-link">日本語</a>' >> book/index.html ;;
+                zh) echo '<a href="./zh/" class="language-link">中文</a>' >> book/index.html ;;
+                *) echo "<a href=\"./$lang/\" class=\"language-link\">$lang</a>" >> book/index.html ;;
+              esac
+            done
+            cat >> book/index.html << 'EOF'
+            </div>
+          </body>
+          </html>
+          EOF
+            # Move English to en/ subdirectory
+            if [ ! -d "book/en" ]; then
+              mkdir -p book/en
+              # Move all files except language subdirectories
+              find book -maxdepth 1 -type f -exec mv {} book/en/ \;
+              find book -maxdepth 1 -type d ! -name book ! -name en ! -name fr ! -name es ! -name de ! -name ja ! -name zh -exec mv {} book/en/ \;
+            fi
+          fi
+
+      - name: Verify documentation build
+        run: |
+          echo "=== Verifying documentation build ==="
+          ls -lah docs/book/
+          if [ ! -f "docs/book/index.html" ]; then
+            echo "❌ Error: index.html not found in docs/book/"
+            exit 1
+          fi
+          echo "✅ Documentation built successfully"
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/book
+
+  deploy:
+    name: Deploy to GitHub Pages
+    runs-on: ubuntu-22.04
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+      - name: Output deployment URL
+        run: |
+          echo "📚 Documentation deployed successfully!"
+          echo "🔗 URL: ${{ steps.deployment.outputs.page_url }}"

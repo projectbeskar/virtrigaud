@@ -78,6 +78,18 @@ verify-helm-crds: manifests ## Verify Helm chart CRDs are in sync with generated
 		rm -rf "$$temp_dir"; \
 	fi
 
+.PHONY: verify-crd-sync
+verify-crd-sync: ## Verify CRD YAMLs are in sync with Go type definitions
+	@./hack/verify-crd-sync.sh
+
+.PHONY: setup-git-hooks
+setup-git-hooks: ## Install git hooks for automatic CRD regeneration
+	@./hack/setup-git-hooks.sh
+
+.PHONY: update-crds
+update-crds: generate manifests sync-helm-crds ## Regenerate all CRD-related files (use after modifying *_types.go)
+	@echo "✅ All CRD files regenerated and synced"
+
 .PHONY: dev-deploy
 dev-deploy: ## Deploy to local Kind cluster for development
 	./hack/dev-deploy.sh deploy
@@ -162,14 +174,6 @@ test-e2e: manifests generate fmt vet ## Run the e2e tests. Expected an isolated 
 		exit 1; \
 	}
 	go test ./test/e2e/ -v -ginkgo.v
-
-.PHONY: lint
-lint: golangci-lint ## Run golangci-lint linter
-	$(GOLANGCI_LINT) run
-
-.PHONY: lint-fix
-lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
-	$(GOLANGCI_LINT) run --fix
 
 .PHONY: lint-config
 lint-config: golangci-lint ## Verify golangci-lint linter configuration
@@ -322,6 +326,59 @@ build-installer: sync-helm-crds generate kustomize ## Generate a consolidated YA
 	cd config/manager && $(KUSTOMIZE) edit set image controller=${IMG}
 	$(KUSTOMIZE) build config/default > dist/install.yaml
 
+##@ Documentation
+
+.PHONY: docs-api
+docs-api: ## Generate API reference documentation from CRD types
+	@test -f $(CRD_REF_DOCS) || { \
+		echo "Error: crd-ref-docs is not installed."; \
+		echo "Install it with: go install github.com/elastic/crd-ref-docs@latest"; \
+		exit 1; \
+	}
+	@echo "Generating API documentation from CRD types..."
+	@mkdir -p docs/src/api-reference
+	@$(CRD_REF_DOCS) \
+		--source-path=./api/infra.virtrigaud.io/v1beta1 \
+		--config=.crd-ref-docs.yaml \
+		--renderer=markdown \
+		--output-path=./docs/src/api-reference/crds.md
+	@echo "✅ API documentation generated at docs/src/api-reference/crds.md"
+
+.PHONY: docs-build
+docs-build: docs-api ## Build documentation using mdBook
+	@command -v mdbook >/dev/null 2>&1 || { \
+		echo "Error: mdbook is not installed. Install it with: cargo install mdbook"; \
+		exit 1; \
+	}
+	@echo "Building documentation..."
+	@cd docs && mdbook build
+	@echo "✅ Documentation built successfully in docs/book/"
+
+.PHONY: docs-serve
+docs-serve: ## Serve documentation locally using mdBook
+	@command -v mdbook >/dev/null 2>&1 || { \
+		echo "Error: mdbook is not installed. Install it with: cargo install mdbook"; \
+		exit 1; \
+	}
+	@echo "Starting documentation server..."
+	@echo "📖 Documentation will be available at http://localhost:3000"
+	@cd docs && mdbook serve --open
+
+.PHONY: docs-clean
+docs-clean: ## Clean documentation build artifacts
+	@echo "Cleaning documentation build..."
+	@rm -rf docs/book
+	@echo "✅ Documentation build artifacts cleaned"
+
+.PHONY: docs-watch
+docs-watch: ## Watch and rebuild documentation on changes
+	@command -v mdbook >/dev/null 2>&1 || { \
+		echo "Error: mdbook is not installed. Install it with: cargo install mdbook"; \
+		exit 1; \
+	}
+	@echo "Watching documentation for changes..."
+	@cd docs && mdbook watch
+
 ##@ Deployment
 
 .PHONY: helm-package
@@ -372,6 +429,7 @@ CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
 BUF ?= $(LOCALBIN)/buf
+CRD_REF_DOCS ?= $(GOBIN)/crd-ref-docs
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.6.0

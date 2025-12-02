@@ -430,7 +430,7 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 
 	// Check if using imported disk or template
 	usingImportedDisk := vm.Spec.ImportedDisk != nil
-	
+
 	if usingImportedDisk {
 		log.Info("DEBUG buildCreateRequest called with imported disk",
 			"vm", vm.Name,
@@ -531,17 +531,17 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 
 	// Convert VMImage - handle both imported disk and template cases
 	var image contracts.VMImage
-	
+
 	if usingImportedDisk {
 		// VM uses an imported disk (e.g., from migration)
 		disk := vm.Spec.ImportedDisk
-		
+
 		// Set format (default to qcow2 if not specified)
 		format := disk.Format
 		if format == "" {
 			format = "qcow2"
 		}
-		
+
 		// Determine path based on provider and disk ID
 		diskPath := disk.Path
 		if diskPath == "" {
@@ -554,13 +554,13 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 				"diskID", disk.DiskID,
 				"path", diskPath)
 		}
-		
+
 		image = contracts.VMImage{
 			Path:         diskPath,
 			Format:       format,
 			ChecksumType: "sha256",
 		}
-		
+
 		log.Info("Built image reference from imported disk",
 			"diskID", disk.DiskID,
 			"path", image.Path,

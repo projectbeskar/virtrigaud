@@ -1,17 +1,60 @@
 #!/bin/bash
 # Pre-commit hook for virtrigaud
-# This script runs formatting and linting checks before commits
+# This script runs formatting, linting, and CRD generation checks before commits
 
 set -e
 
 echo "🔧 Running pre-commit checks..."
+
+# Track if any CRD type files were modified
+CRD_TYPES_CHANGED=false
+for file in $(git diff --cached --name-only --diff-filter=ACM); do
+    if [[ "$file" == api/infra.virtrigaud.io/v1beta1/*_types.go ]]; then
+        CRD_TYPES_CHANGED=true
+        echo "📋 Detected CRD type change: $file"
+    fi
+done
+
+# If CRD types changed, regenerate CRDs and manifests
+if [ "$CRD_TYPES_CHANGED" = true ]; then
+    echo "🔄 CRD types changed - regenerating CRD YAMLs and DeepCopy methods..."
+
+    # Generate DeepCopy methods
+    echo "  1. Generating DeepCopy methods..."
+    make generate || {
+        echo "❌ Failed to generate DeepCopy methods"
+        exit 1
+    }
+
+    # Generate CRD manifests
+    echo "  2. Generating CRD YAML manifests..."
+    make manifests || {
+        echo "❌ Failed to generate CRD manifests"
+        exit 1
+    }
+
+    # Sync CRDs to Helm chart
+    echo "  3. Syncing CRDs to Helm chart..."
+    make sync-helm-crds || {
+        echo "❌ Failed to sync Helm CRDs"
+        exit 1
+    }
+
+    # Add generated files to the commit
+    echo "  4. Adding generated files to commit..."
+    git add api/**/zz_generated.deepcopy.go
+    git add config/crd/bases/*.yaml
+    git add charts/virtrigaud/crds/*.yaml
+
+    echo "✅ CRD regeneration complete - generated files added to commit"
+fi
 
 # Format code
 echo "📝 Formatting code..."
 if command -v gofumpt &> /dev/null; then
     gofumpt -l -w .
 else
-    echo "⚠️  gofumpt not found, skipping formatting"
+    make fmt
 fi
 
 # Organize imports
@@ -21,8 +64,14 @@ else
     echo "⚠️  gci not found, skipping import organization"
 fi
 
+# Add formatted files to commit if any were changed
+git diff --name-only | grep '\.go$' | xargs -r git add || true
+
 # Run linter
 echo "🔍 Running linter..."
-make lint-check
+make lint-check || {
+    echo "❌ Linting failed - please fix issues before committing"
+    exit 1
+}
 
 echo "✅ Pre-commit checks passed!"

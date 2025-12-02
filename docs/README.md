@@ -1,94 +1,209 @@
-# Virtrigaud Documentation
+# VirtRigaud Documentation
 
-Welcome to the Virtrigaud documentation. Virtrigaud is a Kubernetes operator for managing virtual machines across multiple hypervisors including vSphere, Libvirt/KVM, and Proxmox VE.
+This directory contains the source for VirtRigaud documentation built with [mdBook](https://rust-lang.github.io/mdBook/).
 
-## Quick Navigation
+## 🌍 Multilingual Support
 
-### Getting Started
-- [15-Minute Quickstart](getting-started/quickstart.md) - Get up and running quickly
-- [Installation Guide](install-helm-only.md) - Helm installation instructions
-- [Helm CRD Upgrades](HELM_CRD_UPGRADES.md) - Managing CRD updates
+VirtRigaud documentation supports multiple languages. Currently available:
 
-### Core Documentation
-- [Custom Resource Definitions](CRDs.md) - Complete API reference
-- [Examples](EXAMPLES.md) - Practical configuration examples
-- [Provider Documentation](PROVIDERS.md) - Provider development guide
-- [Provider Capabilities Matrix](PROVIDERS_CAPABILITIES.md) - Feature comparison
+- **English** (`src/`) - Primary language
 
-### Provider-Specific Guides
-- [vSphere Provider](providers/vsphere.md) - VMware vCenter/ESXi integration
-- [Libvirt Provider](providers/libvirt.md) - KVM/QEMU virtualization
-- [Proxmox VE Provider](providers/proxmox.md) - Proxmox Virtual Environment
-- [Provider Tutorial](providers/tutorial.md) - Build your own provider
-- [Provider Versioning](providers/versioning.md) - Version management
+### Adding a Translation
 
-### Advanced Features
-- [VM Lifecycle Management](ADVANCED_LIFECYCLE.md) - Advanced VM operations
-- [Nested Virtualization](NESTED_VIRTUALIZATION.md) - Run hypervisors in VMs
-- [Graceful Shutdown](GRACEFUL_SHUTDOWN.md) - Proper VM shutdown handling
-- [VM Snapshots](ADVANCED_LIFECYCLE.md#snapshots) - Backup and restore
-- [Remote Providers](REMOTE_PROVIDERS.md) - Provider architecture
+See [TRANSLATION_GUIDE.md](TRANSLATION_GUIDE.md) for detailed instructions on contributing translations.
 
-### Operations & Administration
-- [Observability](OBSERVABILITY.md) - Monitoring and metrics
-- [Security](SECURITY.md) - Security best practices
-- [Resilience](RESILIENCE.md) - High availability and fault tolerance
-- [Upgrade Guide](UPGRADE.md) - Version upgrade procedures
-- [vSphere Hardware Versions](VSPHERE_HARDWARE_VERSION.md) - Hardware compatibility
+**Quick start:**
 
-### Security Configuration
-- [Bearer Token Authentication](providers/security/bearer-token.md)
-- [mTLS Configuration](providers/security/mtls.md)
-- [External Secrets](providers/security/external-secrets.md)
-- [Network Policies](providers/security/network-policies.md)
+1. Copy the `src/` directory to `src-<language-code>/`
+2. Translate all `.md` files
+3. Add language configuration to `book.toml`
+4. Submit a pull request
 
-### API Reference
-- [CLI Tools Reference](CLI.md) - Command-line interface guide
-- [CLI API Reference](api-reference/cli.md) - Detailed CLI documentation
-- [Metrics Catalog](api-reference/metrics.md) - Available metrics
-- [Provider Catalog](catalog.md) - Available providers
+## 📚 Building Documentation
 
-### Development
-- [Testing Workflows Locally](TESTING_WORKFLOWS_LOCALLY.md) - Local CI/CD testing
-- [Contributing](../CONTRIBUTING.md) - Contribution guidelines
-- [Development Guide](../DEVELOPMENT.md) - Developer setup
+### Prerequisites
 
-### Examples Directory
-- [Example README](examples/README.md) - Overview of all examples
-- [Complete Examples](examples/) - Working configuration files
-- [Advanced Examples](examples/advanced/) - Complex scenarios
-- [Security Examples](examples/security/) - Security configurations
+- [mdBook](https://rust-lang.github.io/mdBook/) (latest version)
+- [mdbook-mermaid](https://github.com/badboy/mdbook-mermaid) (for diagrams)
+- [Go](https://golang.org/) 1.23+ (for API docs generation)
+- [crd-ref-docs](https://github.com/elastic/crd-ref-docs) (for CRD documentation)
 
-## Version Information
+### Installation
 
-This documentation covers **Virtrigaud v0.2.3**.
+```bash
+# Install mdBook
+cargo install mdbook
 
-### Recent Changes
-- **v0.2.3**: Provider feature parity - Reconfigure, Clone, TaskStatus, ConsoleURL
-- **v0.2.2**: Nested virtualization, TPM support, snapshot management
-- **v0.2.1**: Critical fixes and documentation updates
-- **v0.2.0**: Production-ready vSphere and Libvirt providers
+# Install mdbook-mermaid
+cargo install mdbook-mermaid
 
-See [CHANGELOG.md](../CHANGELOG.md) for complete version history.
+# Install mdbook-mermaid support
+mdbook-mermaid install .
 
-## Provider Status
+# Install crd-ref-docs
+go install github.com/elastic/crd-ref-docs@latest
+```
 
-| Provider | Status | Maturity | Documentation |
-|----------|--------|----------|---------------|
-| vSphere | Production Ready | Stable | [Guide](providers/vsphere.md) |
-| Libvirt/KVM | Production Ready | Stable | [Guide](providers/libvirt.md) |
-| Proxmox VE | Production Ready | Beta | [Guide](providers/proxmox.md) |
-| Mock | Complete | Testing | [PROVIDERS.md](PROVIDERS.md) |
+### Build Commands
 
-## Support
+```bash
+# Build English documentation (default)
+cd docs
+mdbook build
 
-- **GitHub Issues**: [github.com/projectbeskar/virtrigaud/issues](https://github.com/projectbeskar/virtrigaud/issues)
-- **Discussions**: [github.com/projectbeskar/virtrigaud/discussions](https://github.com/projectbeskar/virtrigaud/discussions)
-- **Slack**: #virtrigaud on Kubernetes Slack
+# Build all languages (if translations exist)
+mdbook build
 
-## Quick Links
+# Serve locally for development
+mdbook serve --open
 
-- [Main README](../README.md) - Project overview
-- [CHANGELOG](../CHANGELOG.md) - Version history
-- [Contributing](../CONTRIBUTING.md) - How to contribute
-- [License](../LICENSE) - Apache License 2.0
+# Clean build artifacts
+mdbook clean
+```
+
+### Using Make
+
+From the project root:
+
+```bash
+# Generate API documentation from Go source
+make docs-api
+
+# Build complete documentation
+make docs-build
+
+# Serve documentation locally
+make docs-serve
+
+# Clean documentation build
+make docs-clean
+```
+
+## 📁 Directory Structure
+
+```
+docs/
+├── book.toml              # mdBook configuration
+├── README.md              # This file
+├── TRANSLATION_GUIDE.md   # Translation instructions
+├── src/                   # English documentation source
+│   ├── SUMMARY.md         # Table of contents (MUST be uppercase)
+│   ├── readme.md          # Introduction
+│   ├── getting-started/   # Getting started guides
+│   ├── guide/             # User guides
+│   ├── advanced/          # Advanced topics
+│   ├── operations/        # Operations & troubleshooting
+│   ├── development/       # Developer guides
+│   ├── api-reference/     # API documentation
+│   └── ...
+├── src-fr/                # French translation (example, when added)
+├── theme/                 # Custom CSS and assets
+│   └── custom.css
+├── mermaid.min.js         # Mermaid diagram library
+└── mermaid-init.js        # Mermaid initialization
+```
+
+## 🎨 Customization
+
+### Theme
+
+Custom CSS is in `theme/custom.css`. Modify this file to change the documentation appearance.
+
+### Mermaid Diagrams
+
+Mermaid diagrams are supported for architecture and flow diagrams:
+
+````markdown
+```mermaid
+graph LR
+    A[User] --> B[Kubernetes API]
+    B --> C[VirtRigaud Controller]
+    C --> D[Provider]
+    D --> E[Hypervisor]
+```
+````
+
+## 🚀 Deployment
+
+Documentation is automatically built and deployed to GitHub Pages when changes are pushed to the `main` branch.
+
+The CI workflow (`.github/workflows/docs.yml`) handles:
+- Generating CRD documentation from Go source
+- Building all language versions
+- Creating a language selector page (if multiple languages)
+- Deploying to GitHub Pages
+
+## 📝 Writing Documentation
+
+### Style Guide
+
+- Use clear, concise language
+- Include code examples for technical concepts
+- Add mermaid diagrams for complex architectures
+- Link to related pages using relative paths
+- Use admonitions for important notes:
+
+```markdown
+> **Note**: Important information here
+
+> **Warning**: Critical warning here
+
+> **Tip**: Helpful tip here
+```
+
+### File Naming
+
+- Use lowercase with hyphens: `my-page-name.md`
+- Keep names descriptive but concise
+- Match directory names to content themes
+- **Exception**: `SUMMARY.md` MUST be uppercase (mdBook requirement)
+
+### Link Format
+
+Use relative links to other pages:
+
+```markdown
+See [Installation Guide](../installation/installation.md) for details.
+```
+
+## 🧪 Testing
+
+Before submitting documentation changes:
+
+1. **Build locally**: `mdbook build`
+2. **Check for errors**: Look for build warnings
+3. **Test links**: Verify all internal links work
+4. **Preview**: `mdbook serve` and review in browser
+5. **Validate markdown**: Use a linter like markdownlint
+
+## 🤝 Contributing
+
+We welcome documentation contributions!
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Test locally
+5. Submit a pull request
+
+For translations, see [TRANSLATION_GUIDE.md](TRANSLATION_GUIDE.md).
+
+## 📖 Resources
+
+- [mdBook Documentation](https://rust-lang.github.io/mdBook/)
+- [mdBook User Guide](https://rust-lang.github.io/mdBook/guide/creating.html)
+- [Mermaid Documentation](https://mermaid-js.github.io/mermaid/)
+- [Markdown Guide](https://www.markdownguide.org/)
+
+## 🐛 Issues
+
+Found a problem with the documentation?
+
+- [Open an issue](https://github.com/projectbeskar/virtrigaud/issues)
+- [Start a discussion](https://github.com/projectbeskar/virtrigaud/discussions)
+
+## 📜 License
+
+Documentation is licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+
+Code examples in documentation are licensed under [Apache 2.0](../LICENSE).

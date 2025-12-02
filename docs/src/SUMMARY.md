@@ -1,0 +1,120 @@
+# Summary
+
+[Introduction](readme.md)
+
+# Getting Started
+
+- [Installation](installation/installation.md)
+  - [Prerequisites](installation/prerequisites.md)
+  - [Quick Start](getting-started/quickstart.md)
+  - [Installing CRDs](installation/crds.md)
+  - [Deploying the Controller](installation/controller.md)
+  - [Helm Installation](install-helm-only.md)
+  - [Helm CRD Upgrades](helm-crd-upgrades.md)
+- [Basic Concepts](concepts/concepts.md)
+  - [Architecture Overview](concepts/architecture.md)
+  - [Architecture Diagrams](concepts/architecture-diagrams.md)
+  - [Custom Resource Definitions](crds.md)
+  - [Provider Architecture](providers.md)
+  - [Provider Capabilities](providers-capabilities.md)
+  - [Remote Providers](remote-providers.md)
+  - [Status Update Logic](concepts/status-update-logic.md)
+
+# User Guide
+
+- [Managing Virtual Machines](guide/virtual-machines.md)
+  - [Creating VMs](guide/creating-vms.md)
+  - [VM Configuration](guide/vm-configuration.md)
+  - [VM Lifecycle](advanced-lifecycle.md)
+  - [Graceful Shutdown](graceful-shutdown.md)
+- [Provider Configuration](guide/providers.md)
+  - [vSphere Provider](providers/vsphere.md)
+  - [Libvirt Provider](providers/libvirt.md)
+  - [Proxmox Provider](providers/proxmox.md)
+  - [Provider Tutorial](providers/tutorial.md)
+  - [Libvirt Host Preparation](libvirt-host-prepare.md)
+- [VM Migration](guide/migration.md)
+  - [Migration User Guide](migration/user-guide.md)
+  - [VM Migration Guide](vm-migration-guide.md)
+
+# Operations
+
+- [Configuration](operations/configuration.md)
+  - [Provider Versioning](providers/versioning.md)
+  - [Resource Management](operations/resources.md)
+  - [RBAC](operations/rbac.md)
+- [Monitoring](operations/monitoring.md)
+  - [Observability](observability.md)
+  - [Status Conditions](operations/status.md)
+  - [Logging](operations/logging.md)
+  - [Metrics Catalog](api-reference/metrics.md)
+- [Troubleshooting](operations/troubleshooting.md)
+  - [Common Issues](operations/common-issues.md)
+  - [Debugging](operations/debugging.md)
+  - [FAQ](operations/faq.md)
+- [Maintenance](operations/maintenance.md)
+  - [Upgrade Guide](upgrade.md)
+  - [Resilience](resilience.md)
+
+# Advanced Topics
+
+- [High Availability](advanced/ha.md)
+  - [Cluster Configuration](advanced/cluster-config.md)
+  - [Failover Strategies](advanced/failover.md)
+- [Security](advanced/security.md)
+  - [Security Overview](security.md)
+  - [Bearer Token Authentication](providers/security/bearer-token.md)
+  - [mTLS Configuration](providers/security/mtls.md)
+  - [External Secrets](providers/security/external-secrets.md)
+  - [Network Policies](providers/security/network-policies.md)
+- [Performance](advanced/performance.md)
+  - [Nested Virtualization](nested-virtualization.md)
+  - [vSphere Hardware Versions](vsphere-hardware-version.md)
+  - [Tuning](advanced/tuning.md)
+- [Integration](advanced/integration.md)
+  - [Custom Providers](advanced/custom-providers.md)
+  - [GitOps](advanced/gitops.md)
+
+# Developer Guide
+
+- [Development Setup](development/setup.md)
+  - [Building from Source](development/building.md)
+  - [Running Tests](development/testing.md)
+  - [Testing Workflows Locally](testing-workflows-locally.md)
+  - [Development Workflow](development/workflow.md)
+- [Architecture Deep Dive](development/architecture-deep-dive.md)
+  - [Controller Design](development/controller-design.md)
+  - [Reconciliation Logic](development/reconciliation.md)
+  - [Provider Integration](development/provider-integration.md)
+  - [CRD Development Workflow](development/crd-workflow.md)
+- [Contributing](development/contributing.md)
+  - [Code Style](development/code-style.md)
+  - [Testing Guidelines](development/testing-guidelines.md)
+  - [Pull Request Process](development/pr-process.md)
+
+# Reference
+
+- [API Reference](api-reference/readme.md)
+  - [CRD API Reference](api-reference/crds.md)
+  - [API Types](api-reference/api-types.md)
+  - [Provider Contract](api-reference/provider-contract.md)
+  - [SDK Reference](api-reference/sdk.md)
+  - [Utilities](api-reference/utilities.md)
+  - [VirtualMachine Spec](reference/virtualmachine-spec.md)
+  - [VMClass Spec](reference/vmclass-spec.md)
+  - [Provider Spec](reference/provider-spec.md)
+  - [Status Conditions](reference/status-conditions.md)
+- [CLI Reference](reference/cli.md)
+  - [CLI Tools Reference](cli.md)
+  - [CLI API Reference](api-reference/cli.md)
+- [Provider Catalog](catalog.md)
+- [Migration API Reference](migration/api-reference.md)
+- [Examples](reference/examples.md)
+  - [Basic Examples](examples.md)
+  - [Simple Setup](reference/examples-simple.md)
+  - [Production Setup](reference/examples-production.md)
+
+---
+
+[Changelog](changelog.md)
+[License](license.md)

@@ -2265,18 +2265,18 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 	// This handles all VMDK types (sesparse, flat, thick, thin) and produces a single downloadable file
 	// IMPORTANT: For VMs with snapshots, we must use the BASE disk, not the snapshot delta disk
 	// VirtualDiskManager cannot clone snapshot delta disks directly
-	
+
 	sourceDiskPath := diskInfo.Path
-	
+
 	// If we have a backing file (parent disk), use it instead of the current disk
 	// This happens when the VM has snapshots - Path is the delta disk, BackingFile is the base
 	if diskInfo.BackingFile != "" {
-		p.logger.Info("VM has snapshots, using base disk for export", 
-			"delta_disk", diskInfo.Path, 
+		p.logger.Info("VM has snapshots, using base disk for export",
+			"delta_disk", diskInfo.Path,
 			"base_disk", diskInfo.BackingFile)
 		sourceDiskPath = diskInfo.BackingFile
 	}
-	
+
 	p.logger.Info("Cloning disk to sparseMonolithic format for export", "source_disk", sourceDiskPath)
 
 	// Parse source datastore path
@@ -2353,19 +2353,19 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 	if len(descriptor.ExtentFiles) > 0 {
 		p.logger.Info("VMDK has extent files, downloading them", "count", len(descriptor.ExtentFiles), "files", descriptor.ExtentFiles)
 		basePath := extractDatastoreBasePath(destDatastorePath)
-		
+
 		for _, extentFile := range descriptor.ExtentFiles {
 			// Construct full datastore path for extent file
 			extentPath := constructDatastorePath(basePath, extentFile)
 			localPath := fmt.Sprintf("%s/%s", tempDir, extentFile)
-			
+
 			p.logger.Info("Downloading extent file", "datastore_path", extentPath, "local_path", localPath)
-			
+
 			extentFileHandle, err := os.Create(localPath)
 			if err != nil {
 				return nil, errors.NewInternal("failed to create extent file", err)
 			}
-			
+
 			err = dsManager.DownloadFile(ctx, extentPath, extentFileHandle, nil)
 			extentFileHandle.Close()
 			if err != nil {
