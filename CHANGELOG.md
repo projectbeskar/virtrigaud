@@ -5,6 +5,69 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2025-12-05 15:00] - Standardize Project Name Capitalization
+**Author:** @eribourg (Erick Bourgeois)
+
+### Changed
+- `docs/`: All occurrences of "Virtrigaud" changed to "VirtRigaud" (correct capitalization)
+- Applied to all Markdown and TOML files in documentation
+
+### Why
+The project name is "VirtRigaud" with capital V and R. Inconsistent capitalization was causing confusion and looked unprofessional in documentation.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
+---
+
+## [2025-12-04 14:50] - Add Makefile Targets for Documentation
+**Author:** @ebourgeois (Erick Bourgeois)
+
+### Added
+- `Makefile`: Documentation build targets
+  - `make docs-build`: Build documentation using mdbook
+  - `make docs-serve`: Serve documentation with live reload at http://localhost:3000
+  - `make docs-clean`: Clean documentation build artifacts
+  - `make docs-watch`: Alias for docs-serve
+
+### Changed
+- Makefile now includes `##@ Documentation` section with mdbook integration
+
+### Why
+Simplifies documentation workflow by providing standard make targets. Users can easily build, serve, and clean documentation without remembering mdbook commands.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
+---
+
+## [2025-12-03 14:45] - Add mdbook Configuration
+**Author:** @ebourgeois (Erick Bourgeois)
+
+### Added
+- `docs/book.toml`: mdbook configuration file for documentation site
+- `docs/src/SUMMARY.md`: Table of contents generated from README.md structure
+- `docs/.gitignore`: Ignore mdbook build output directory
+
+### Changed
+- Documentation structure now supports mdbook for better browsing and navigation
+- All documentation files symlinked into `docs/src/` for mdbook compatibility
+
+### Why
+mdbook provides a better reading experience for documentation with navigation, search, and a clean interface. This allows users to browse documentation locally or deploy it as a website.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
 ## [0.3.0] - 2025-11-16
 
 ### Major Release: Cross-Provider VM Migration and Advanced Lifecycle Management

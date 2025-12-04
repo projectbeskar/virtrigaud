@@ -1,10 +1,10 @@
-# Virtrigaud Observability Guide
+# VirtRigaud Observability Guide
 
-This document describes the comprehensive observability features of Virtrigaud, including structured logging, metrics, tracing, and monitoring.
+This document describes the comprehensive observability features of VirtRigaud, including structured logging, metrics, tracing, and monitoring.
 
 ## Overview
 
-Virtrigaud provides production-grade observability through:
+VirtRigaud provides production-grade observability through:
 
 - **Structured JSON Logging** with correlation IDs and automatic secret redaction
 - **Comprehensive Prometheus Metrics** for all components and operations

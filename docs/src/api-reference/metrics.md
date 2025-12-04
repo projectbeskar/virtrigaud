@@ -1,6 +1,6 @@
 # Metrics Catalog
 
-Virtrigaud exposes comprehensive metrics for monitoring and observability. All metrics are available at the `/metrics` endpoint on port 8080.
+VirtRigaud exposes comprehensive metrics for monitoring and observability. All metrics are available at the `/metrics` endpoint on port 8080.
 
 ## Manager Metrics
 

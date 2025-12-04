@@ -2,7 +2,7 @@
 
 ## Supported Versions
 
-We actively support the following versions of Virtrigaud with security updates:
+We actively support the following versions of VirtRigaud with security updates:
 
 | Version | Supported          |
 | ------- | ------------------ |
@@ -11,7 +11,7 @@ We actively support the following versions of Virtrigaud with security updates:
 
 ## Reporting a Vulnerability
 
-The Virtrigaud team takes security vulnerabilities seriously. We appreciate your efforts to responsibly disclose your findings, and will make every effort to acknowledge your contributions.
+The VirtRigaud team takes security vulnerabilities seriously. We appreciate your efforts to responsibly disclose your findings, and will make every effort to acknowledge your contributions.
 
 ### How to Report
 
@@ -43,7 +43,7 @@ You should receive a response within 48 hours. If for some reason you do not, pl
 
 ### General Security
 
-- Virtrigaud runs with minimal privileges and follows security best practices
+- VirtRigaud runs with minimal privileges and follows security best practices
 - All communications with providers use TLS encryption
 - Sensitive data (credentials, user data) is properly handled and never logged
 - RBAC is enforced to limit access to resources
@@ -125,7 +125,7 @@ We use the following severity levels:
 1. **Use namespace isolation**: Deploy in dedicated namespace
 2. **Apply network policies**: Restrict network access
 3. **Enable Pod Security Standards**: Use strict or baseline profiles
-4. **Regular updates**: Keep Virtrigaud and dependencies updated
+4. **Regular updates**: Keep VirtRigaud and dependencies updated
 5. **Monitor security advisories**: Subscribe to security notifications
 
 ### Credential Management
@@ -151,7 +151,7 @@ We use the following severity levels:
 
 ## Compliance
 
-Virtrigaud is designed to support compliance with various security frameworks:
+VirtRigaud is designed to support compliance with various security frameworks:
 
 - **SOC 2**: Control implementation guidance available
 - **ISO 27001**: Security control mapping provided
@@ -187,8 +187,8 @@ For security-related questions that are not vulnerabilities, you can:
 
 ## Recognition
 
-We maintain a security hall of fame for researchers who have helped improve Virtrigaud security:
+We maintain a security hall of fame for researchers who have helped improve VirtRigaud security:
 
 - [Security Contributors](docs/security/contributors.md)
 
-Thank you to all the security researchers who have contributed to making Virtrigaud more secure!
+Thank you to all the security researchers who have contributed to making VirtRigaud more secure!

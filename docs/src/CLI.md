@@ -299,7 +299,7 @@ vrtg diag bundle [flags]
 ```
 
 **Flags:**
-- `--output`: Output file path (default: virtrigaud-diag-<timestamp>.tar.gz)
+- `--output`: Output file path (default: virtrigaud-diag-\<timestamp\>.tar.gz)
 - `--include-logs`: Include provider logs in bundle
 - `--since`: Collect logs since timestamp
 
