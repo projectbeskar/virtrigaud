@@ -1,6 +1,6 @@
 # Libvirt Host Preparation Guide
 
-This guide provides detailed instructions on preparing a Libvirt/KVM host to work with Virtrigaud.
+This guide provides detailed instructions on preparing a Libvirt/KVM host to work with VirtRigaud.
 
 ## Table of Contents
 - [Prerequisites](#prerequisites)
@@ -77,7 +77,7 @@ sudo systemctl restart libvirtd
 
 ### SSH User Configuration
 
-Create or configure a user for Virtrigaud to connect via SSH:
+Create or configure a user for VirtRigaud to connect via SSH:
 
 ```bash
 # If the user doesn't exist, create it
@@ -93,10 +93,10 @@ sudo chmod 0440 /etc/sudoers.d/virt-admin
 
 ### SSH Key Setup
 
-Set up SSH key authentication for the Virtrigaud provider:
+Set up SSH key authentication for the VirtRigaud provider:
 
 ```bash
-# On your Kubernetes/Virtrigaud host, generate an SSH key if needed
+# On your Kubernetes/VirtRigaud host, generate an SSH key if needed
 ssh-keygen -t ed25519 -f ~/.ssh/virtrigaud_libvirt -N ""
 
 # Copy the public key to the Libvirt host
@@ -110,7 +110,7 @@ ssh -i ~/.ssh/virtrigaud_libvirt virt-admin@<libvirt-host> "virsh version"
 
 ### Default Storage Pool
 
-Virtrigaud uses `/var/lib/libvirt/images` as the default storage location. Ensure proper permissions:
+VirtRigaud uses `/var/lib/libvirt/images` as the default storage location. Ensure proper permissions:
 
 ```bash
 # Verify directory permissions
@@ -263,7 +263,7 @@ sudo semanage fcontext -a -t virt_image_t "/vm-pool01(/.*)?"
 sudo restorecon -Rv /vm-pool01
 ```
 
-**Note:** Virtrigaud automatically runs `restorecon` on disk images after creation, but this will fail silently if SELinux is not installed.
+**Note:** VirtRigaud automatically runs `restorecon` on disk images after creation, but this will fail silently if SELinux is not installed.
 
 ### AppArmor (Ubuntu/Debian)
 
@@ -341,7 +341,7 @@ sudo wget https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-am
 sudo chown libvirt-qemu:kvm noble-server-cloudimg-amd64.img
 sudo chmod 777 noble-server-cloudimg-amd64.img
 
-# Create a test VM via Virtrigaud or manually with virt-install
+# Create a test VM via VirtRigaud or manually with virt-install
 ```
 
 ## Troubleshooting
@@ -455,7 +455,7 @@ ssh user@vm-ip "sudo cat /var/log/cloud-init.log | grep ERROR"
 
 **Default Behavior (v0.3.7-dev+):**
 
-Virtrigaud provides **default DHCP networking** in cloud-init meta-data using version 1 format. This ensures VMs get network connectivity out of the box while allowing users to override with custom configuration.
+VirtRigaud provides **default DHCP networking** in cloud-init meta-data using version 1 format. This ensures VMs get network connectivity out of the box while allowing users to override with custom configuration.
 
 **Default Network Configuration:**
 ```yaml
@@ -626,7 +626,7 @@ network:
 
 ### Windows Support
 
-**Note:** Windows cloud images use **cloudbase-init** instead of cloud-init. Virtrigaud supports Windows VMs with specific configuration requirements:
+**Note:** Windows cloud images use **cloudbase-init** instead of cloud-init. VirtRigaud supports Windows VMs with specific configuration requirements:
 
 #### Windows Network Configuration
 
@@ -691,7 +691,7 @@ Common sources for Windows cloud images with cloudbase-init:
 1. **Password Complexity**: Windows requires complex passwords by default
 2. **Interface Names**: Windows uses "Ethernet", "Ethernet 2", etc. instead of eth0/ens3
 3. **First Boot**: Windows first boot takes longer than Linux (driver installation, etc.)
-4. **Guest Agent**: Install qemu-guest-agent for Windows to enable IP detection in Virtrigaud
+4. **Guest Agent**: Install qemu-guest-agent for Windows to enable IP detection in VirtRigaud
 
 - **Network Configuration**: Windows images usually auto-configure networking via DHCP without explicit cloud-init config
 - **Meta-data Format**: Cloudbase-init accepts the same meta-data format but ignores network configuration
@@ -712,7 +712,7 @@ For detailed Windows support, refer to [Cloudbase-init documentation](https://cl
 
 **Symptom:** Cockpit shows "pending changes" for CPU/Network after VM creation
 
-**Explanation:** This is normal behavior. When a VM is created with `cpu mode='host-model'`, libvirt dynamically expands this to specific CPU features when the VM starts. Virtrigaud automatically syncs the persistent definition with the running configuration to eliminate this warning.
+**Explanation:** This is normal behavior. When a VM is created with `cpu mode='host-model'`, libvirt dynamically expands this to specific CPU features when the VM starts. VirtRigaud automatically syncs the persistent definition with the running configuration to eliminate this warning.
 
 **If the warning persists:**
 ```bash
@@ -757,15 +757,15 @@ sudo chmod 0440 /etc/sudoers.d/virtrigaud
 - [Libvirt Documentation](https://libvirt.org/docs.html)
 - [KVM Documentation](https://www.linux-kvm.org/page/Documents)
 - [Cloud-init Documentation](https://cloudinit.readthedocs.io/)
-- [Virtrigaud Provider Documentation](./PROVIDERS.md)
-- [Virtrigaud Remote Providers Guide](./REMOTE_PROVIDERS.md)
+- [VirtRigaud Provider Documentation](./PROVIDERS.md)
+- [VirtRigaud Remote Providers Guide](./REMOTE_PROVIDERS.md)
 
 ## Support
 
 If you encounter issues not covered in this guide:
 
-1. Check the Virtrigaud provider logs: `kubectl logs -n <namespace> deploy/virtrigaud-provider-<name>`
+1. Check the VirtRigaud provider logs: `kubectl logs -n <namespace> deploy/virtrigaud-provider-<name>`
 2. Check libvirt logs: `sudo journalctl -u libvirtd -f`
 3. Enable debug logging: Set `LIBVIRT_DEBUG=1` in provider environment
-4. Open an issue on the Virtrigaud GitHub repository with detailed logs and configuration
+4. Open an issue on the VirtRigaud GitHub repository with detailed logs and configuration
 

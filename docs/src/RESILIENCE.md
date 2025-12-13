@@ -1,10 +1,10 @@
-# Virtrigaud Resilience Guide
+# VirtRigaud Resilience Guide
 
-This document describes the resilience patterns and error handling mechanisms in Virtrigaud.
+This document describes the resilience patterns and error handling mechanisms in VirtRigaud.
 
 ## Overview
 
-Virtrigaud implements comprehensive resilience patterns:
+VirtRigaud implements comprehensive resilience patterns:
 
 - **Error Taxonomy** - Structured error classification
 - **Circuit Breakers** - Protection against cascading failures  
@@ -16,7 +16,7 @@ Virtrigaud implements comprehensive resilience patterns:
 
 ### Error Types
 
-Virtrigaud classifies all errors into specific categories:
+VirtRigaud classifies all errors into specific categories:
 
 | Type | Retryable | Description | Example |
 |------|-----------|-------------|---------|
@@ -289,7 +289,7 @@ func (pm *ProviderManager) getLimiter(providerType, provider string) *rate.Limit
 
 ### VM Conditions
 
-Virtrigaud sets standard conditions based on operations:
+VirtRigaud sets standard conditions based on operations:
 
 | Condition | Status | Reason | Description |
 |-----------|--------|--------|-------------|
