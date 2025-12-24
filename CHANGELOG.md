@@ -5,6 +5,40 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2025-12-16 22:30] - Add Documentation Workflow and CRD API Reference Generation
+**Author:** @ebourgeois (Erick Bourgeois)
+
+### Added
+- `.github/workflows/docs.yaml`: GitHub Actions workflow for building and deploying documentation
+  - Automatically builds documentation on pushes to `main` and PRs
+  - Generates CRD API reference from Go types
+  - Installs mdBook and mdbook-mermaid preprocessor
+  - Deploys to GitHub Pages on main branch
+- `docs/crd-ref-docs-config.yaml`: Configuration for CRD API reference generation
+- `Makefile`: Enhanced `docs` target to generate CRD API reference and build mdBook
+  - Now generates API reference from `api/infra.virtrigaud.io/v1beta1` types
+  - Uses `crd-ref-docs` tool for automatic API documentation
+  - `docs-build` is now an alias for the comprehensive `docs` target
+
+### Changed
+- Documentation workflow now mirrors bindy's approach with mdBook + API reference generation
+- `docs` target is now the primary documentation build command (replaces basic `docs-build`)
+
+### Why
+- Automates documentation deployment to GitHub Pages for easier access
+- Generates CRD API reference directly from Go types (single source of truth)
+- Ensures documentation stays in sync with code changes
+- Provides CI/CD validation for documentation builds
+- Improves developer experience with automatic API documentation
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
+---
+
 ## [2025-12-05 15:00] - Standardize Project Name Capitalization
 **Author:** @eribourg (Erick Bourgeois)
 
