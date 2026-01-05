@@ -49,6 +49,7 @@ type ProviderReconciler struct {
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=providers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=providers/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=providers/finalizers,verbs=update
+// +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=virtualmachines,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch
@@ -95,6 +96,23 @@ func (r *ProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	// Handle remote runtime reconciliation
 	result, err := r.reconcileRemoteRuntime(ctx, &provider)
+
+	// Count connected VMs
+	connectedVMs, countErr := r.countConnectedVMs(ctx, &provider)
+	if countErr != nil {
+		logger.V(1).Info("Failed to count connected VMs", "error", countErr)
+		// Don't fail reconciliation if counting fails, just log it
+	} else {
+		provider.Status.ConnectedVMs = connectedVMs
+	}
+
+	// Set healthy status based on ProviderAvailable condition
+	providerAvailable := k8s.GetCondition(provider.Status.Conditions, "ProviderAvailable")
+	provider.Status.Healthy = providerAvailable != nil && providerAvailable.Status == metav1.ConditionTrue
+	if provider.Status.Healthy {
+		now := metav1.Now()
+		provider.Status.LastHealthCheck = &now
+	}
 
 	// Update provider status
 	provider.Status.ObservedGeneration = provider.Generation
@@ -659,6 +677,32 @@ func (r *ProviderReconciler) discoverMigrationVolumeMounts(ctx context.Context, 
 	}
 
 	return mounts
+}
+
+// countConnectedVMs counts the number of VirtualMachines managed by this provider
+func (r *ProviderReconciler) countConnectedVMs(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) (int32, error) {
+	// List all VirtualMachines
+	vmList := &infravirtrigaudiov1beta1.VirtualMachineList{}
+	if err := r.List(ctx, vmList); err != nil {
+		return 0, fmt.Errorf("failed to list VirtualMachines: %w", err)
+	}
+
+	// Count VMs that reference this provider
+	count := int32(0)
+	for _, vm := range vmList.Items {
+		// Check if VM references this provider
+		// Provider namespace defaults to VM namespace if not specified
+		providerNamespace := vm.Namespace
+		if vm.Spec.ProviderRef.Namespace != "" {
+			providerNamespace = vm.Spec.ProviderRef.Namespace
+		}
+
+		if vm.Spec.ProviderRef.Name == provider.Name && providerNamespace == provider.Namespace {
+			count++
+		}
+	}
+
+	return count, nil
 }
 
 // cleanupRemoteRuntime cleans up deployment and service for remote providers
