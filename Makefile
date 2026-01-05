@@ -416,6 +416,50 @@ buf: $(BUF) ## Download buf locally if necessary.
 $(BUF): $(LOCALBIN)
 	$(call go-install-tool,$(BUF),github.com/bufbuild/buf/cmd/buf,$(BUF_VERSION))
 
+##@ Documentation
+
+.PHONY: docs
+docs: ## Build all documentation (mdBook + CRD API reference)
+	@echo "Building all documentation..."
+	@command -v mdbook >/dev/null 2>&1 || { \
+		echo "❌ mdbook is not installed."; \
+		echo "Install with: brew install mdbook (macOS) or cargo install mdbook"; \
+		exit 1; \
+	}
+	@echo "Generating CRD API reference documentation..."
+	@mkdir -p docs/src/reference
+	@go run github.com/elastic/crd-ref-docs@latest \
+		--source-path=./api/infra.virtrigaud.io/v1beta1 \
+		--config=docs/crd-ref-docs-config.yaml \
+		--renderer=markdown \
+		--output-path=docs/src/reference/api.md 2>/dev/null || \
+		echo "# API Reference\n\nCRD documentation will be generated automatically." > docs/src/reference/api.md
+	@echo "Building mdBook documentation..."
+	@cd docs && mdbook build
+	@echo "✅ Documentation built successfully in docs/book/"
+
+.PHONY: docs-build
+docs-build: docs ## Alias for docs target
+
+.PHONY: docs-serve
+docs-serve: ## Serve documentation with live reload (default: http://localhost:3000)
+	@command -v mdbook >/dev/null 2>&1 || { \
+		echo "❌ mdbook is not installed."; \
+		echo "Install with: brew install mdbook (macOS) or cargo install mdbook"; \
+		exit 1; \
+	}
+	@echo "Serving documentation at http://localhost:3000"
+	@cd docs && mdbook serve
+
+.PHONY: docs-clean
+docs-clean: ## Clean documentation build artifacts
+	@echo "Cleaning documentation build artifacts..."
+	@rm -rf docs/book
+	@echo "✅ Documentation cleaned"
+
+.PHONY: docs-watch
+docs-watch: docs-serve ## Alias for docs-serve (watch for changes and rebuild)
+
 # go-install-tool will 'go install' any package with custom target and name of binary, if it doesn't exist
 # $1 - target path with name of binary
 # $2 - package url which can be installed

@@ -1,0 +1,47 @@
+[book]
+title = "VirtRigaud Documentation"
+authors = ["William Rizzo", "Erick Bourgeois", "VirtRigaud Contributors"]
+description = "Kubernetes operator for managing virtual machines across multiple hypervisors"
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+create-missing = false
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "navy"
+smart-punctuation = true
+mathjax-support = false
+git-repository-url = "https://github.com/projectbeskar/virtrigaud"
+edit-url-template = "https://github.com/projectbeskar/virtrigaud/edit/main/docs/{path}"
+site-url = "/virtrigaud/"
+cname = ""
+additional-css = ["theme/custom.css"]
+additional-js = ["theme/page-toc.js"]
+no-section-label = false
+
+[output.html.fold]
+enable = true
+level = 0
+
+[output.html.search]
+enable = true
+limit-results = 30
+teaser-word-count = 30
+use-boolean-and = true
+boost-title = 2
+boost-hierarchy = 1
+boost-paragraph = 1
+expand = true
+heading-split-level = 3
+
+[output.html.playground]
+editable = false
+copyable = true
+copy-js = true
+
+[preprocessor.links]
+
+[preprocessor.index]

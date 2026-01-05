@@ -1,10 +1,10 @@
 # Advanced VM Lifecycle Management
 
-This document describes the advanced VM lifecycle features in Virtrigaud, including reconfiguration, snapshots, cloning, multi-VM sets, and placement policies.
+This document describes the advanced VM lifecycle features in VirtRigaud, including reconfiguration, snapshots, cloning, multi-VM sets, and placement policies.
 
 ## Overview
 
-Virtrigaud Stage E introduces comprehensive VM lifecycle management capabilities that go beyond basic create/delete operations:
+VirtRigaud Stage E introduces comprehensive VM lifecycle management capabilities that go beyond basic create/delete operations:
 
 - **VM Reconfiguration**: Modify CPU, memory, and disk resources of running VMs
 - **Snapshot Management**: Create, delete, and revert VM snapshots
@@ -17,7 +17,7 @@ Virtrigaud Stage E introduces comprehensive VM lifecycle management capabilities
 
 ### Online vs Offline Reconfiguration
 
-Virtrigaud supports both online (hot) and offline reconfiguration depending on provider capabilities:
+VirtRigaud supports both online (hot) and offline reconfiguration depending on provider capabilities:
 
 **vSphere**: Supports online CPU/memory changes and hot disk expansion
 **Libvirt**: Typically requires power cycle for resource changes

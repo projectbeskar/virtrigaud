@@ -1,6 +1,6 @@
 # 15-Minute Quickstart
 
-This guide will get you up and running with Virtrigaud in 15 minutes using both vSphere and Libvirt providers.
+This guide will get you up and running with VirtRigaud in 15 minutes using both vSphere and Libvirt providers.
 
 ## Prerequisites
 
@@ -18,12 +18,12 @@ This guide will get you up and running with Virtrigaud in 15 minutes using both 
 
 All resources support seamless conversion between API versions via webhooks.
 
-## Step 1: Install Virtrigaud
+## Step 1: Install VirtRigaud
 
 ### Using Helm (Recommended)
 
 ```bash
-# Add the Virtrigaud Helm repository
+# Add the VirtRigaud Helm repository
 helm repo add virtrigaud https://projectbeskar.github.io/virtrigaud
 helm repo update
 
@@ -373,7 +373,7 @@ kubectl delete vmsnapshot my-vm-snapshot
 kubectl delete vmclone my-vm-clone
 kubectl delete vmset web-servers
 
-# Uninstall Virtrigaud (optional)
+# Uninstall VirtRigaud (optional)
 helm uninstall virtrigaud -n virtrigaud-system
 kubectl delete namespace virtrigaud-system
 ```

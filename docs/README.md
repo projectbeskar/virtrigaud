@@ -1,6 +1,6 @@
-# Virtrigaud Documentation
+# VirtRigaud Documentation
 
-Welcome to the Virtrigaud documentation. Virtrigaud is a Kubernetes operator for managing virtual machines across multiple hypervisors including vSphere, Libvirt/KVM, and Proxmox VE.
+Welcome to the VirtRigaud documentation. VirtRigaud is a Kubernetes operator for managing virtual machines across multiple hypervisors including vSphere, Libvirt/KVM, and Proxmox VE.
 
 ## Quick Navigation
 
@@ -62,7 +62,7 @@ Welcome to the Virtrigaud documentation. Virtrigaud is a Kubernetes operator for
 
 ## Version Information
 
-This documentation covers **Virtrigaud v0.2.3**.
+This documentation covers **VirtRigaud v0.2.3**.
 
 ### Recent Changes
 - **v0.2.3**: Provider feature parity - Reconfigure, Clone, TaskStatus, ConsoleURL

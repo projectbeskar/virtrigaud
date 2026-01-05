@@ -4,7 +4,7 @@ This guide covers installing virtrigaud using only Helm (without pre-applying CR
 
 ## Helm-only Install
 
-Virtrigaud can be installed using only Helm, which will automatically install all required CRDs including conversion webhook configuration.
+VirtRigaud can be installed using only Helm, which will automatically install all required CRDs including conversion webhook configuration.
 
 ### Prerequisites
 
