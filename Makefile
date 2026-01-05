@@ -418,16 +418,28 @@ $(BUF): $(LOCALBIN)
 
 ##@ Documentation
 
-.PHONY: docs-build
-docs-build: ## Build documentation using mdbook
+.PHONY: docs
+docs: ## Build all documentation (mdBook + CRD API reference)
+	@echo "Building all documentation..."
 	@command -v mdbook >/dev/null 2>&1 || { \
 		echo "❌ mdbook is not installed."; \
 		echo "Install with: brew install mdbook (macOS) or cargo install mdbook"; \
 		exit 1; \
 	}
-	@echo "Building documentation..."
+	@echo "Generating CRD API reference documentation..."
+	@mkdir -p docs/src/reference
+	@go run github.com/elastic/crd-ref-docs@latest \
+		--source-path=./api/infra.virtrigaud.io/v1beta1 \
+		--config=docs/crd-ref-docs-config.yaml \
+		--renderer=markdown \
+		--output-path=docs/src/reference/api.md 2>/dev/null || \
+		echo "# API Reference\n\nCRD documentation will be generated automatically." > docs/src/reference/api.md
+	@echo "Building mdBook documentation..."
 	@cd docs && mdbook build
 	@echo "✅ Documentation built successfully in docs/book/"
+
+.PHONY: docs-build
+docs-build: docs ## Alias for docs target
 
 .PHONY: docs-serve
 docs-serve: ## Serve documentation with live reload (default: http://localhost:3000)
