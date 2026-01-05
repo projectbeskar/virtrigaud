@@ -1881,6 +1881,299 @@ func (x *GetDiskInfoResponse) GetMetadata() map[string]string {
 	return nil
 }
 
+// List all VMs managed by this provider
+type ListVMsResponse struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	Vms []*VMInfo `protobuf:"bytes,1,rep,name=vms,proto3" json:"vms,omitempty"`
+}
+
+func (x *ListVMsResponse) Reset() {
+	*x = ListVMsResponse{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_provider_v1_provider_proto_msgTypes[28]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *ListVMsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListVMsResponse) ProtoMessage() {}
+
+func (x *ListVMsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_provider_v1_provider_proto_msgTypes[28]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListVMsResponse.ProtoReflect.Descriptor instead.
+func (*ListVMsResponse) Descriptor() ([]byte, []int) {
+	return file_provider_v1_provider_proto_rawDescGZIP(), []int{28}
+}
+
+func (x *ListVMsResponse) GetVms() []*VMInfo {
+	if x != nil {
+		return x.Vms
+	}
+	return nil
+}
+
+type VMInfo struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	Id          string            `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`                                                                                                                              // Provider-specific VM identifier
+	Name        string            `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`                                                                                                                          // VM name
+	PowerState  string            `protobuf:"bytes,3,opt,name=power_state,json=powerState,proto3" json:"power_state,omitempty"`                                                                                            // Current power state
+	Ips         []string          `protobuf:"bytes,4,rep,name=ips,proto3" json:"ips,omitempty"`                                                                                                                            // IP addresses
+	Cpu         int32             `protobuf:"varint,5,opt,name=cpu,proto3" json:"cpu,omitempty"`                                                                                                                           // Number of virtual CPUs
+	MemoryMib   int64             `protobuf:"varint,6,opt,name=memory_mib,json=memoryMib,proto3" json:"memory_mib,omitempty"`                                                                                              // Memory in MiB
+	Disks       []*DiskInfo       `protobuf:"bytes,7,rep,name=disks,proto3" json:"disks,omitempty"`                                                                                                                        // Disk information
+	Networks    []*NetworkInfo    `protobuf:"bytes,8,rep,name=networks,proto3" json:"networks,omitempty"`                                                                                                                  // Network information
+	ProviderRaw map[string]string `protobuf:"bytes,9,rep,name=provider_raw,json=providerRaw,proto3" json:"provider_raw,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"` // Provider-specific metadata
+}
+
+func (x *VMInfo) Reset() {
+	*x = VMInfo{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_provider_v1_provider_proto_msgTypes[29]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *VMInfo) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*VMInfo) ProtoMessage() {}
+
+func (x *VMInfo) ProtoReflect() protoreflect.Message {
+	mi := &file_provider_v1_provider_proto_msgTypes[29]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use VMInfo.ProtoReflect.Descriptor instead.
+func (*VMInfo) Descriptor() ([]byte, []int) {
+	return file_provider_v1_provider_proto_rawDescGZIP(), []int{29}
+}
+
+func (x *VMInfo) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *VMInfo) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *VMInfo) GetPowerState() string {
+	if x != nil {
+		return x.PowerState
+	}
+	return ""
+}
+
+func (x *VMInfo) GetIps() []string {
+	if x != nil {
+		return x.Ips
+	}
+	return nil
+}
+
+func (x *VMInfo) GetCpu() int32 {
+	if x != nil {
+		return x.Cpu
+	}
+	return 0
+}
+
+func (x *VMInfo) GetMemoryMib() int64 {
+	if x != nil {
+		return x.MemoryMib
+	}
+	return 0
+}
+
+func (x *VMInfo) GetDisks() []*DiskInfo {
+	if x != nil {
+		return x.Disks
+	}
+	return nil
+}
+
+func (x *VMInfo) GetNetworks() []*NetworkInfo {
+	if x != nil {
+		return x.Networks
+	}
+	return nil
+}
+
+func (x *VMInfo) GetProviderRaw() map[string]string {
+	if x != nil {
+		return x.ProviderRaw
+	}
+	return nil
+}
+
+type DiskInfo struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	Id      string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`                           // Disk identifier
+	Path    string `protobuf:"bytes,2,opt,name=path,proto3" json:"path,omitempty"`                       // Disk path
+	SizeGib int32  `protobuf:"varint,3,opt,name=size_gib,json=sizeGib,proto3" json:"size_gib,omitempty"` // Disk size in GiB
+	Format  string `protobuf:"bytes,4,opt,name=format,proto3" json:"format,omitempty"`                   // Disk format (qcow2, vmdk, raw, etc.)
+}
+
+func (x *DiskInfo) Reset() {
+	*x = DiskInfo{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_provider_v1_provider_proto_msgTypes[30]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *DiskInfo) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DiskInfo) ProtoMessage() {}
+
+func (x *DiskInfo) ProtoReflect() protoreflect.Message {
+	mi := &file_provider_v1_provider_proto_msgTypes[30]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DiskInfo.ProtoReflect.Descriptor instead.
+func (*DiskInfo) Descriptor() ([]byte, []int) {
+	return file_provider_v1_provider_proto_rawDescGZIP(), []int{30}
+}
+
+func (x *DiskInfo) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *DiskInfo) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *DiskInfo) GetSizeGib() int32 {
+	if x != nil {
+		return x.SizeGib
+	}
+	return 0
+}
+
+func (x *DiskInfo) GetFormat() string {
+	if x != nil {
+		return x.Format
+	}
+	return ""
+}
+
+type NetworkInfo struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	Name      string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`                            // Network name
+	Mac       string `protobuf:"bytes,2,opt,name=mac,proto3" json:"mac,omitempty"`                              // MAC address
+	IpAddress string `protobuf:"bytes,3,opt,name=ip_address,json=ipAddress,proto3" json:"ip_address,omitempty"` // IP address if static
+}
+
+func (x *NetworkInfo) Reset() {
+	*x = NetworkInfo{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_provider_v1_provider_proto_msgTypes[31]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *NetworkInfo) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NetworkInfo) ProtoMessage() {}
+
+func (x *NetworkInfo) ProtoReflect() protoreflect.Message {
+	mi := &file_provider_v1_provider_proto_msgTypes[31]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use NetworkInfo.ProtoReflect.Descriptor instead.
+func (*NetworkInfo) Descriptor() ([]byte, []int) {
+	return file_provider_v1_provider_proto_rawDescGZIP(), []int{31}
+}
+
+func (x *NetworkInfo) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *NetworkInfo) GetMac() string {
+	if x != nil {
+		return x.Mac
+	}
+	return ""
+}
+
+func (x *NetworkInfo) GetIpAddress() string {
+	if x != nil {
+		return x.IpAddress
+	}
+	return ""
+}
+
 // Capability check - what features does this provider support
 type GetCapabilitiesRequest struct {
 	state         protoimpl.MessageState
@@ -1891,7 +2184,7 @@ type GetCapabilitiesRequest struct {
 func (x *GetCapabilitiesRequest) Reset() {
 	*x = GetCapabilitiesRequest{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_provider_v1_provider_proto_msgTypes[28]
+		mi := &file_provider_v1_provider_proto_msgTypes[32]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -1904,7 +2197,7 @@ func (x *GetCapabilitiesRequest) String() string {
 func (*GetCapabilitiesRequest) ProtoMessage() {}
 
 func (x *GetCapabilitiesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_provider_v1_provider_proto_msgTypes[28]
+	mi := &file_provider_v1_provider_proto_msgTypes[32]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1917,7 +2210,7 @@ func (x *GetCapabilitiesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetCapabilitiesRequest.ProtoReflect.Descriptor instead.
 func (*GetCapabilitiesRequest) Descriptor() ([]byte, []int) {
-	return file_provider_v1_provider_proto_rawDescGZIP(), []int{28}
+	return file_provider_v1_provider_proto_rawDescGZIP(), []int{32}
 }
 
 type GetCapabilitiesResponse struct {
@@ -1943,7 +2236,7 @@ type GetCapabilitiesResponse struct {
 func (x *GetCapabilitiesResponse) Reset() {
 	*x = GetCapabilitiesResponse{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_provider_v1_provider_proto_msgTypes[29]
+		mi := &file_provider_v1_provider_proto_msgTypes[33]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -1956,7 +2249,7 @@ func (x *GetCapabilitiesResponse) String() string {
 func (*GetCapabilitiesResponse) ProtoMessage() {}
 
 func (x *GetCapabilitiesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_provider_v1_provider_proto_msgTypes[29]
+	mi := &file_provider_v1_provider_proto_msgTypes[33]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1969,7 +2262,7 @@ func (x *GetCapabilitiesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetCapabilitiesResponse.ProtoReflect.Descriptor instead.
 func (*GetCapabilitiesResponse) Descriptor() ([]byte, []int) {
-	return file_provider_v1_provider_proto_rawDescGZIP(), []int{29}
+	return file_provider_v1_provider_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *GetCapabilitiesResponse) GetSupportsReconfigureOnline() bool {
@@ -2292,7 +2585,46 @@ var file_provider_v1_provider_proto_rawDesc = []byte{
 	0x61, 0x1a, 0x3b, 0x0a, 0x0d, 0x4d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x45, 0x6e, 0x74,
 	0x72, 0x79, 0x12, 0x10, 0x0a, 0x03, 0x6b, 0x65, 0x79, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52,
 	0x03, 0x6b, 0x65, 0x79, 0x12, 0x14, 0x0a, 0x05, 0x76, 0x61, 0x6c, 0x75, 0x65, 0x18, 0x02, 0x20,
-	0x01, 0x28, 0x09, 0x52, 0x05, 0x76, 0x61, 0x6c, 0x75, 0x65, 0x3a, 0x02, 0x38, 0x01, 0x22, 0x18,
+	0x01, 0x28, 0x09, 0x52, 0x05, 0x76, 0x61, 0x6c, 0x75, 0x65, 0x3a, 0x02, 0x38, 0x01, 0x22, 0x38,
+	0x0a, 0x0f, 0x4c, 0x69, 0x73, 0x74, 0x56, 0x4d, 0x73, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73,
+	0x65, 0x12, 0x25, 0x0a, 0x03, 0x76, 0x6d, 0x73, 0x18, 0x01, 0x20, 0x03, 0x28, 0x0b, 0x32, 0x13,
+	0x2e, 0x70, 0x72, 0x6f, 0x76, 0x69, 0x64, 0x65, 0x72, 0x2e, 0x76, 0x31, 0x2e, 0x56, 0x4d, 0x49,
+	0x6e, 0x66, 0x6f, 0x52, 0x03, 0x76, 0x6d, 0x73, 0x22, 0xfc, 0x02, 0x0a, 0x06, 0x56, 0x4d, 0x49,
+	0x6e, 0x66, 0x6f, 0x12, 0x0e, 0x0a, 0x02, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52,
+	0x02, 0x69, 0x64, 0x12, 0x12, 0x0a, 0x04, 0x6e, 0x61, 0x6d, 0x65, 0x18, 0x02, 0x20, 0x01, 0x28,
+	0x09, 0x52, 0x04, 0x6e, 0x61, 0x6d, 0x65, 0x12, 0x1f, 0x0a, 0x0b, 0x70, 0x6f, 0x77, 0x65, 0x72,
+	0x5f, 0x73, 0x74, 0x61, 0x74, 0x65, 0x18, 0x03, 0x20, 0x01, 0x28, 0x09, 0x52, 0x0a, 0x70, 0x6f,
+	0x77, 0x65, 0x72, 0x53, 0x74, 0x61, 0x74, 0x65, 0x12, 0x10, 0x0a, 0x03, 0x69, 0x70, 0x73, 0x18,
+	0x04, 0x20, 0x03, 0x28, 0x09, 0x52, 0x03, 0x69, 0x70, 0x73, 0x12, 0x10, 0x0a, 0x03, 0x63, 0x70,
+	0x75, 0x18, 0x05, 0x20, 0x01, 0x28, 0x05, 0x52, 0x03, 0x63, 0x70, 0x75, 0x12, 0x1d, 0x0a, 0x0a,
+	0x6d, 0x65, 0x6d, 0x6f, 0x72, 0x79, 0x5f, 0x6d, 0x69, 0x62, 0x18, 0x06, 0x20, 0x01, 0x28, 0x03,
+	0x52, 0x09, 0x6d, 0x65, 0x6d, 0x6f, 0x72, 0x79, 0x4d, 0x69, 0x62, 0x12, 0x2b, 0x0a, 0x05, 0x64,
+	0x69, 0x73, 0x6b, 0x73, 0x18, 0x07, 0x20, 0x03, 0x28, 0x0b, 0x32, 0x15, 0x2e, 0x70, 0x72, 0x6f,
+	0x76, 0x69, 0x64, 0x65, 0x72, 0x2e, 0x76, 0x31, 0x2e, 0x44, 0x69, 0x73, 0x6b, 0x49, 0x6e, 0x66,
+	0x6f, 0x52, 0x05, 0x64, 0x69, 0x73, 0x6b, 0x73, 0x12, 0x34, 0x0a, 0x08, 0x6e, 0x65, 0x74, 0x77,
+	0x6f, 0x72, 0x6b, 0x73, 0x18, 0x08, 0x20, 0x03, 0x28, 0x0b, 0x32, 0x18, 0x2e, 0x70, 0x72, 0x6f,
+	0x76, 0x69, 0x64, 0x65, 0x72, 0x2e, 0x76, 0x31, 0x2e, 0x4e, 0x65, 0x74, 0x77, 0x6f, 0x72, 0x6b,
+	0x49, 0x6e, 0x66, 0x6f, 0x52, 0x08, 0x6e, 0x65, 0x74, 0x77, 0x6f, 0x72, 0x6b, 0x73, 0x12, 0x47,
+	0x0a, 0x0c, 0x70, 0x72, 0x6f, 0x76, 0x69, 0x64, 0x65, 0x72, 0x5f, 0x72, 0x61, 0x77, 0x18, 0x09,
+	0x20, 0x03, 0x28, 0x0b, 0x32, 0x24, 0x2e, 0x70, 0x72, 0x6f, 0x76, 0x69, 0x64, 0x65, 0x72, 0x2e,
+	0x76, 0x31, 0x2e, 0x56, 0x4d, 0x49, 0x6e, 0x66, 0x6f, 0x2e, 0x50, 0x72, 0x6f, 0x76, 0x69, 0x64,
+	0x65, 0x72, 0x52, 0x61, 0x77, 0x45, 0x6e, 0x74, 0x72, 0x79, 0x52, 0x0b, 0x70, 0x72, 0x6f, 0x76,
+	0x69, 0x64, 0x65, 0x72, 0x52, 0x61, 0x77, 0x1a, 0x3e, 0x0a, 0x10, 0x50, 0x72, 0x6f, 0x76, 0x69,
+	0x64, 0x65, 0x72, 0x52, 0x61, 0x77, 0x45, 0x6e, 0x74, 0x72, 0x79, 0x12, 0x10, 0x0a, 0x03, 0x6b,
+	0x65, 0x79, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x03, 0x6b, 0x65, 0x79, 0x12, 0x14, 0x0a,
+	0x05, 0x76, 0x61, 0x6c, 0x75, 0x65, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x05, 0x76, 0x61,
+	0x6c, 0x75, 0x65, 0x3a, 0x02, 0x38, 0x01, 0x22, 0x61, 0x0a, 0x08, 0x44, 0x69, 0x73, 0x6b, 0x49,
+	0x6e, 0x66, 0x6f, 0x12, 0x0e, 0x0a, 0x02, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52,
+	0x02, 0x69, 0x64, 0x12, 0x12, 0x0a, 0x04, 0x70, 0x61, 0x74, 0x68, 0x18, 0x02, 0x20, 0x01, 0x28,
+	0x09, 0x52, 0x04, 0x70, 0x61, 0x74, 0x68, 0x12, 0x19, 0x0a, 0x08, 0x73, 0x69, 0x7a, 0x65, 0x5f,
+	0x67, 0x69, 0x62, 0x18, 0x03, 0x20, 0x01, 0x28, 0x05, 0x52, 0x07, 0x73, 0x69, 0x7a, 0x65, 0x47,
+	0x69, 0x62, 0x12, 0x16, 0x0a, 0x06, 0x66, 0x6f, 0x72, 0x6d, 0x61, 0x74, 0x18, 0x04, 0x20, 0x01,
+	0x28, 0x09, 0x52, 0x06, 0x66, 0x6f, 0x72, 0x6d, 0x61, 0x74, 0x22, 0x52, 0x0a, 0x0b, 0x4e, 0x65,
+	0x74, 0x77, 0x6f, 0x72, 0x6b, 0x49, 0x6e, 0x66, 0x6f, 0x12, 0x12, 0x0a, 0x04, 0x6e, 0x61, 0x6d,
+	0x65, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x04, 0x6e, 0x61, 0x6d, 0x65, 0x12, 0x10, 0x0a,
+	0x03, 0x6d, 0x61, 0x63, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x03, 0x6d, 0x61, 0x63, 0x12,
+	0x1d, 0x0a, 0x0a, 0x69, 0x70, 0x5f, 0x61, 0x64, 0x64, 0x72, 0x65, 0x73, 0x73, 0x18, 0x03, 0x20,
+	0x01, 0x28, 0x09, 0x52, 0x09, 0x69, 0x70, 0x41, 0x64, 0x64, 0x72, 0x65, 0x73, 0x73, 0x22, 0x18,
 	0x0a, 0x16, 0x47, 0x65, 0x74, 0x43, 0x61, 0x70, 0x61, 0x62, 0x69, 0x6c, 0x69, 0x74, 0x69, 0x65,
 	0x73, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x22, 0xf5, 0x05, 0x0a, 0x17, 0x47, 0x65, 0x74,
 	0x43, 0x61, 0x70, 0x61, 0x62, 0x69, 0x6c, 0x69, 0x74, 0x69, 0x65, 0x73, 0x52, 0x65, 0x73, 0x70,
@@ -2349,7 +2681,7 @@ var file_provider_v1_provider_proto_rawDesc = []byte{
 	0x4f, 0x50, 0x5f, 0x4f, 0x46, 0x46, 0x10, 0x02, 0x12, 0x13, 0x0a, 0x0f, 0x50, 0x4f, 0x57, 0x45,
 	0x52, 0x5f, 0x4f, 0x50, 0x5f, 0x52, 0x45, 0x42, 0x4f, 0x4f, 0x54, 0x10, 0x03, 0x12, 0x1e, 0x0a,
 	0x1a, 0x50, 0x4f, 0x57, 0x45, 0x52, 0x5f, 0x4f, 0x50, 0x5f, 0x53, 0x48, 0x55, 0x54, 0x44, 0x4f,
-	0x57, 0x4e, 0x5f, 0x47, 0x52, 0x41, 0x43, 0x45, 0x46, 0x55, 0x4c, 0x10, 0x04, 0x32, 0xa4, 0x0a,
+	0x57, 0x4e, 0x5f, 0x47, 0x52, 0x41, 0x43, 0x45, 0x46, 0x55, 0x4c, 0x10, 0x04, 0x32, 0xe1, 0x0a,
 	0x0a, 0x08, 0x50, 0x72, 0x6f, 0x76, 0x69, 0x64, 0x65, 0x72, 0x12, 0x47, 0x0a, 0x08, 0x56, 0x61,
 	0x6c, 0x69, 0x64, 0x61, 0x74, 0x65, 0x12, 0x1c, 0x2e, 0x70, 0x72, 0x6f, 0x76, 0x69, 0x64, 0x65,
 	0x72, 0x2e, 0x76, 0x31, 0x2e, 0x56, 0x61, 0x6c, 0x69, 0x64, 0x61, 0x74, 0x65, 0x52, 0x65, 0x71,
@@ -2432,19 +2764,22 @@ var file_provider_v1_provider_proto_rawDesc = []byte{
 	0x47, 0x65, 0x74, 0x44, 0x69, 0x73, 0x6b, 0x49, 0x6e, 0x66, 0x6f, 0x52, 0x65, 0x71, 0x75, 0x65,
 	0x73, 0x74, 0x1a, 0x20, 0x2e, 0x70, 0x72, 0x6f, 0x76, 0x69, 0x64, 0x65, 0x72, 0x2e, 0x76, 0x31,
 	0x2e, 0x47, 0x65, 0x74, 0x44, 0x69, 0x73, 0x6b, 0x49, 0x6e, 0x66, 0x6f, 0x52, 0x65, 0x73, 0x70,
-	0x6f, 0x6e, 0x73, 0x65, 0x42, 0xb3, 0x01, 0x0a, 0x0f, 0x63, 0x6f, 0x6d, 0x2e, 0x70, 0x72, 0x6f,
-	0x76, 0x69, 0x64, 0x65, 0x72, 0x2e, 0x76, 0x31, 0x42, 0x0d, 0x50, 0x72, 0x6f, 0x76, 0x69, 0x64,
-	0x65, 0x72, 0x50, 0x72, 0x6f, 0x74, 0x6f, 0x50, 0x01, 0x5a, 0x44, 0x67, 0x69, 0x74, 0x68, 0x75,
-	0x62, 0x2e, 0x63, 0x6f, 0x6d, 0x2f, 0x70, 0x72, 0x6f, 0x6a, 0x65, 0x63, 0x74, 0x62, 0x65, 0x73,
-	0x6b, 0x61, 0x72, 0x2f, 0x76, 0x69, 0x72, 0x74, 0x72, 0x69, 0x67, 0x61, 0x75, 0x64, 0x2f, 0x70,
-	0x72, 0x6f, 0x74, 0x6f, 0x2f, 0x72, 0x70, 0x63, 0x2f, 0x70, 0x72, 0x6f, 0x76, 0x69, 0x64, 0x65,
-	0x72, 0x2f, 0x76, 0x31, 0x3b, 0x70, 0x72, 0x6f, 0x76, 0x69, 0x64, 0x65, 0x72, 0x76, 0x31, 0xa2,
-	0x02, 0x03, 0x50, 0x58, 0x58, 0xaa, 0x02, 0x0b, 0x50, 0x72, 0x6f, 0x76, 0x69, 0x64, 0x65, 0x72,
-	0x2e, 0x56, 0x31, 0xca, 0x02, 0x0b, 0x50, 0x72, 0x6f, 0x76, 0x69, 0x64, 0x65, 0x72, 0x5c, 0x56,
-	0x31, 0xe2, 0x02, 0x17, 0x50, 0x72, 0x6f, 0x76, 0x69, 0x64, 0x65, 0x72, 0x5c, 0x56, 0x31, 0x5c,
-	0x47, 0x50, 0x42, 0x4d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0xea, 0x02, 0x0c, 0x50, 0x72,
-	0x6f, 0x76, 0x69, 0x64, 0x65, 0x72, 0x3a, 0x3a, 0x56, 0x31, 0x62, 0x06, 0x70, 0x72, 0x6f, 0x74,
-	0x6f, 0x33,
+	0x6f, 0x6e, 0x73, 0x65, 0x12, 0x3b, 0x0a, 0x07, 0x4c, 0x69, 0x73, 0x74, 0x56, 0x4d, 0x73, 0x12,
+	0x12, 0x2e, 0x70, 0x72, 0x6f, 0x76, 0x69, 0x64, 0x65, 0x72, 0x2e, 0x76, 0x31, 0x2e, 0x45, 0x6d,
+	0x70, 0x74, 0x79, 0x1a, 0x1c, 0x2e, 0x70, 0x72, 0x6f, 0x76, 0x69, 0x64, 0x65, 0x72, 0x2e, 0x76,
+	0x31, 0x2e, 0x4c, 0x69, 0x73, 0x74, 0x56, 0x4d, 0x73, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73,
+	0x65, 0x42, 0xb3, 0x01, 0x0a, 0x0f, 0x63, 0x6f, 0x6d, 0x2e, 0x70, 0x72, 0x6f, 0x76, 0x69, 0x64,
+	0x65, 0x72, 0x2e, 0x76, 0x31, 0x42, 0x0d, 0x50, 0x72, 0x6f, 0x76, 0x69, 0x64, 0x65, 0x72, 0x50,
+	0x72, 0x6f, 0x74, 0x6f, 0x50, 0x01, 0x5a, 0x44, 0x67, 0x69, 0x74, 0x68, 0x75, 0x62, 0x2e, 0x63,
+	0x6f, 0x6d, 0x2f, 0x70, 0x72, 0x6f, 0x6a, 0x65, 0x63, 0x74, 0x62, 0x65, 0x73, 0x6b, 0x61, 0x72,
+	0x2f, 0x76, 0x69, 0x72, 0x74, 0x72, 0x69, 0x67, 0x61, 0x75, 0x64, 0x2f, 0x70, 0x72, 0x6f, 0x74,
+	0x6f, 0x2f, 0x72, 0x70, 0x63, 0x2f, 0x70, 0x72, 0x6f, 0x76, 0x69, 0x64, 0x65, 0x72, 0x2f, 0x76,
+	0x31, 0x3b, 0x70, 0x72, 0x6f, 0x76, 0x69, 0x64, 0x65, 0x72, 0x76, 0x31, 0xa2, 0x02, 0x03, 0x50,
+	0x58, 0x58, 0xaa, 0x02, 0x0b, 0x50, 0x72, 0x6f, 0x76, 0x69, 0x64, 0x65, 0x72, 0x2e, 0x56, 0x31,
+	0xca, 0x02, 0x0b, 0x50, 0x72, 0x6f, 0x76, 0x69, 0x64, 0x65, 0x72, 0x5c, 0x56, 0x31, 0xe2, 0x02,
+	0x17, 0x50, 0x72, 0x6f, 0x76, 0x69, 0x64, 0x65, 0x72, 0x5c, 0x56, 0x31, 0x5c, 0x47, 0x50, 0x42,
+	0x4d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0xea, 0x02, 0x0c, 0x50, 0x72, 0x6f, 0x76, 0x69,
+	0x64, 0x65, 0x72, 0x3a, 0x3a, 0x56, 0x31, 0x62, 0x06, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x33,
 }
 
 var (
@@ -2460,7 +2795,7 @@ func file_provider_v1_provider_proto_rawDescGZIP() []byte {
 }
 
 var file_provider_v1_provider_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_provider_v1_provider_proto_msgTypes = make([]protoimpl.MessageInfo, 33)
+var file_provider_v1_provider_proto_msgTypes = make([]protoimpl.MessageInfo, 38)
 var file_provider_v1_provider_proto_goTypes = []any{
 	(PowerOp)(0),                    // 0: provider.v1.PowerOp
 	(*TaskRef)(nil),                 // 1: provider.v1.TaskRef
@@ -2491,11 +2826,16 @@ var file_provider_v1_provider_proto_goTypes = []any{
 	(*ImportDiskResponse)(nil),      // 26: provider.v1.ImportDiskResponse
 	(*GetDiskInfoRequest)(nil),      // 27: provider.v1.GetDiskInfoRequest
 	(*GetDiskInfoResponse)(nil),     // 28: provider.v1.GetDiskInfoResponse
-	(*GetCapabilitiesRequest)(nil),  // 29: provider.v1.GetCapabilitiesRequest
-	(*GetCapabilitiesResponse)(nil), // 30: provider.v1.GetCapabilitiesResponse
-	nil,                             // 31: provider.v1.ExportDiskRequest.CredentialsEntry
-	nil,                             // 32: provider.v1.ImportDiskRequest.CredentialsEntry
-	nil,                             // 33: provider.v1.GetDiskInfoResponse.MetadataEntry
+	(*ListVMsResponse)(nil),         // 29: provider.v1.ListVMsResponse
+	(*VMInfo)(nil),                  // 30: provider.v1.VMInfo
+	(*DiskInfo)(nil),                // 31: provider.v1.DiskInfo
+	(*NetworkInfo)(nil),             // 32: provider.v1.NetworkInfo
+	(*GetCapabilitiesRequest)(nil),  // 33: provider.v1.GetCapabilitiesRequest
+	(*GetCapabilitiesResponse)(nil), // 34: provider.v1.GetCapabilitiesResponse
+	nil,                             // 35: provider.v1.ExportDiskRequest.CredentialsEntry
+	nil,                             // 36: provider.v1.ImportDiskRequest.CredentialsEntry
+	nil,                             // 37: provider.v1.GetDiskInfoResponse.MetadataEntry
+	nil,                             // 38: provider.v1.VMInfo.ProviderRawEntry
 }
 var file_provider_v1_provider_proto_depIdxs = []int32{
 	1,  // 0: provider.v1.CreateResponse.task:type_name -> provider.v1.TaskRef
@@ -2504,50 +2844,56 @@ var file_provider_v1_provider_proto_depIdxs = []int32{
 	1,  // 3: provider.v1.TaskStatusRequest.task:type_name -> provider.v1.TaskRef
 	1,  // 4: provider.v1.SnapshotCreateResponse.task:type_name -> provider.v1.TaskRef
 	1,  // 5: provider.v1.CloneResponse.task:type_name -> provider.v1.TaskRef
-	31, // 6: provider.v1.ExportDiskRequest.credentials:type_name -> provider.v1.ExportDiskRequest.CredentialsEntry
+	35, // 6: provider.v1.ExportDiskRequest.credentials:type_name -> provider.v1.ExportDiskRequest.CredentialsEntry
 	1,  // 7: provider.v1.ExportDiskResponse.task:type_name -> provider.v1.TaskRef
-	32, // 8: provider.v1.ImportDiskRequest.credentials:type_name -> provider.v1.ImportDiskRequest.CredentialsEntry
+	36, // 8: provider.v1.ImportDiskRequest.credentials:type_name -> provider.v1.ImportDiskRequest.CredentialsEntry
 	1,  // 9: provider.v1.ImportDiskResponse.task:type_name -> provider.v1.TaskRef
-	33, // 10: provider.v1.GetDiskInfoResponse.metadata:type_name -> provider.v1.GetDiskInfoResponse.MetadataEntry
-	3,  // 11: provider.v1.Provider.Validate:input_type -> provider.v1.ValidateRequest
-	5,  // 12: provider.v1.Provider.Create:input_type -> provider.v1.CreateRequest
-	7,  // 13: provider.v1.Provider.Delete:input_type -> provider.v1.DeleteRequest
-	8,  // 14: provider.v1.Provider.Power:input_type -> provider.v1.PowerRequest
-	9,  // 15: provider.v1.Provider.Reconfigure:input_type -> provider.v1.ReconfigureRequest
-	10, // 16: provider.v1.Provider.HardwareUpgrade:input_type -> provider.v1.HardwareUpgradeRequest
-	12, // 17: provider.v1.Provider.Describe:input_type -> provider.v1.DescribeRequest
-	14, // 18: provider.v1.Provider.TaskStatus:input_type -> provider.v1.TaskStatusRequest
-	16, // 19: provider.v1.Provider.SnapshotCreate:input_type -> provider.v1.SnapshotCreateRequest
-	18, // 20: provider.v1.Provider.SnapshotDelete:input_type -> provider.v1.SnapshotDeleteRequest
-	19, // 21: provider.v1.Provider.SnapshotRevert:input_type -> provider.v1.SnapshotRevertRequest
-	20, // 22: provider.v1.Provider.Clone:input_type -> provider.v1.CloneRequest
-	22, // 23: provider.v1.Provider.ImagePrepare:input_type -> provider.v1.ImagePrepareRequest
-	29, // 24: provider.v1.Provider.GetCapabilities:input_type -> provider.v1.GetCapabilitiesRequest
-	23, // 25: provider.v1.Provider.ExportDisk:input_type -> provider.v1.ExportDiskRequest
-	25, // 26: provider.v1.Provider.ImportDisk:input_type -> provider.v1.ImportDiskRequest
-	27, // 27: provider.v1.Provider.GetDiskInfo:input_type -> provider.v1.GetDiskInfoRequest
-	4,  // 28: provider.v1.Provider.Validate:output_type -> provider.v1.ValidateResponse
-	6,  // 29: provider.v1.Provider.Create:output_type -> provider.v1.CreateResponse
-	11, // 30: provider.v1.Provider.Delete:output_type -> provider.v1.TaskResponse
-	11, // 31: provider.v1.Provider.Power:output_type -> provider.v1.TaskResponse
-	11, // 32: provider.v1.Provider.Reconfigure:output_type -> provider.v1.TaskResponse
-	11, // 33: provider.v1.Provider.HardwareUpgrade:output_type -> provider.v1.TaskResponse
-	13, // 34: provider.v1.Provider.Describe:output_type -> provider.v1.DescribeResponse
-	15, // 35: provider.v1.Provider.TaskStatus:output_type -> provider.v1.TaskStatusResponse
-	17, // 36: provider.v1.Provider.SnapshotCreate:output_type -> provider.v1.SnapshotCreateResponse
-	11, // 37: provider.v1.Provider.SnapshotDelete:output_type -> provider.v1.TaskResponse
-	11, // 38: provider.v1.Provider.SnapshotRevert:output_type -> provider.v1.TaskResponse
-	21, // 39: provider.v1.Provider.Clone:output_type -> provider.v1.CloneResponse
-	11, // 40: provider.v1.Provider.ImagePrepare:output_type -> provider.v1.TaskResponse
-	30, // 41: provider.v1.Provider.GetCapabilities:output_type -> provider.v1.GetCapabilitiesResponse
-	24, // 42: provider.v1.Provider.ExportDisk:output_type -> provider.v1.ExportDiskResponse
-	26, // 43: provider.v1.Provider.ImportDisk:output_type -> provider.v1.ImportDiskResponse
-	28, // 44: provider.v1.Provider.GetDiskInfo:output_type -> provider.v1.GetDiskInfoResponse
-	28, // [28:45] is the sub-list for method output_type
-	11, // [11:28] is the sub-list for method input_type
-	11, // [11:11] is the sub-list for extension type_name
-	11, // [11:11] is the sub-list for extension extendee
-	0,  // [0:11] is the sub-list for field type_name
+	37, // 10: provider.v1.GetDiskInfoResponse.metadata:type_name -> provider.v1.GetDiskInfoResponse.MetadataEntry
+	30, // 11: provider.v1.ListVMsResponse.vms:type_name -> provider.v1.VMInfo
+	31, // 12: provider.v1.VMInfo.disks:type_name -> provider.v1.DiskInfo
+	32, // 13: provider.v1.VMInfo.networks:type_name -> provider.v1.NetworkInfo
+	38, // 14: provider.v1.VMInfo.provider_raw:type_name -> provider.v1.VMInfo.ProviderRawEntry
+	3,  // 15: provider.v1.Provider.Validate:input_type -> provider.v1.ValidateRequest
+	5,  // 16: provider.v1.Provider.Create:input_type -> provider.v1.CreateRequest
+	7,  // 17: provider.v1.Provider.Delete:input_type -> provider.v1.DeleteRequest
+	8,  // 18: provider.v1.Provider.Power:input_type -> provider.v1.PowerRequest
+	9,  // 19: provider.v1.Provider.Reconfigure:input_type -> provider.v1.ReconfigureRequest
+	10, // 20: provider.v1.Provider.HardwareUpgrade:input_type -> provider.v1.HardwareUpgradeRequest
+	12, // 21: provider.v1.Provider.Describe:input_type -> provider.v1.DescribeRequest
+	14, // 22: provider.v1.Provider.TaskStatus:input_type -> provider.v1.TaskStatusRequest
+	16, // 23: provider.v1.Provider.SnapshotCreate:input_type -> provider.v1.SnapshotCreateRequest
+	18, // 24: provider.v1.Provider.SnapshotDelete:input_type -> provider.v1.SnapshotDeleteRequest
+	19, // 25: provider.v1.Provider.SnapshotRevert:input_type -> provider.v1.SnapshotRevertRequest
+	20, // 26: provider.v1.Provider.Clone:input_type -> provider.v1.CloneRequest
+	22, // 27: provider.v1.Provider.ImagePrepare:input_type -> provider.v1.ImagePrepareRequest
+	33, // 28: provider.v1.Provider.GetCapabilities:input_type -> provider.v1.GetCapabilitiesRequest
+	23, // 29: provider.v1.Provider.ExportDisk:input_type -> provider.v1.ExportDiskRequest
+	25, // 30: provider.v1.Provider.ImportDisk:input_type -> provider.v1.ImportDiskRequest
+	27, // 31: provider.v1.Provider.GetDiskInfo:input_type -> provider.v1.GetDiskInfoRequest
+	2,  // 32: provider.v1.Provider.ListVMs:input_type -> provider.v1.Empty
+	4,  // 33: provider.v1.Provider.Validate:output_type -> provider.v1.ValidateResponse
+	6,  // 34: provider.v1.Provider.Create:output_type -> provider.v1.CreateResponse
+	11, // 35: provider.v1.Provider.Delete:output_type -> provider.v1.TaskResponse
+	11, // 36: provider.v1.Provider.Power:output_type -> provider.v1.TaskResponse
+	11, // 37: provider.v1.Provider.Reconfigure:output_type -> provider.v1.TaskResponse
+	11, // 38: provider.v1.Provider.HardwareUpgrade:output_type -> provider.v1.TaskResponse
+	13, // 39: provider.v1.Provider.Describe:output_type -> provider.v1.DescribeResponse
+	15, // 40: provider.v1.Provider.TaskStatus:output_type -> provider.v1.TaskStatusResponse
+	17, // 41: provider.v1.Provider.SnapshotCreate:output_type -> provider.v1.SnapshotCreateResponse
+	11, // 42: provider.v1.Provider.SnapshotDelete:output_type -> provider.v1.TaskResponse
+	11, // 43: provider.v1.Provider.SnapshotRevert:output_type -> provider.v1.TaskResponse
+	21, // 44: provider.v1.Provider.Clone:output_type -> provider.v1.CloneResponse
+	11, // 45: provider.v1.Provider.ImagePrepare:output_type -> provider.v1.TaskResponse
+	34, // 46: provider.v1.Provider.GetCapabilities:output_type -> provider.v1.GetCapabilitiesResponse
+	24, // 47: provider.v1.Provider.ExportDisk:output_type -> provider.v1.ExportDiskResponse
+	26, // 48: provider.v1.Provider.ImportDisk:output_type -> provider.v1.ImportDiskResponse
+	28, // 49: provider.v1.Provider.GetDiskInfo:output_type -> provider.v1.GetDiskInfoResponse
+	29, // 50: provider.v1.Provider.ListVMs:output_type -> provider.v1.ListVMsResponse
+	33, // [33:51] is the sub-list for method output_type
+	15, // [15:33] is the sub-list for method input_type
+	15, // [15:15] is the sub-list for extension type_name
+	15, // [15:15] is the sub-list for extension extendee
+	0,  // [0:15] is the sub-list for field type_name
 }
 
 func init() { file_provider_v1_provider_proto_init() }
@@ -2893,7 +3239,7 @@ func file_provider_v1_provider_proto_init() {
 			}
 		}
 		file_provider_v1_provider_proto_msgTypes[28].Exporter = func(v any, i int) any {
-			switch v := v.(*GetCapabilitiesRequest); i {
+			switch v := v.(*ListVMsResponse); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -2905,6 +3251,54 @@ func file_provider_v1_provider_proto_init() {
 			}
 		}
 		file_provider_v1_provider_proto_msgTypes[29].Exporter = func(v any, i int) any {
+			switch v := v.(*VMInfo); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_provider_v1_provider_proto_msgTypes[30].Exporter = func(v any, i int) any {
+			switch v := v.(*DiskInfo); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_provider_v1_provider_proto_msgTypes[31].Exporter = func(v any, i int) any {
+			switch v := v.(*NetworkInfo); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_provider_v1_provider_proto_msgTypes[32].Exporter = func(v any, i int) any {
+			switch v := v.(*GetCapabilitiesRequest); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_provider_v1_provider_proto_msgTypes[33].Exporter = func(v any, i int) any {
 			switch v := v.(*GetCapabilitiesResponse); i {
 			case 0:
 				return &v.state
@@ -2923,7 +3317,7 @@ func file_provider_v1_provider_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: file_provider_v1_provider_proto_rawDesc,
 			NumEnums:      1,
-			NumMessages:   33,
+			NumMessages:   38,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

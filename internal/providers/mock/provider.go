@@ -376,6 +376,64 @@ func (p *Provider) Describe(ctx context.Context, req *providerv1.DescribeRequest
 	}, nil
 }
 
+// ListVMs returns all VMs managed by this provider
+func (p *Provider) ListVMs(ctx context.Context, req *providerv1.Empty) (*providerv1.ListVMsResponse, error) {
+	p.simulateDelay()
+
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	var vmInfos []*providerv1.VMInfo
+
+	for _, vm := range p.vms {
+		// Create sample disk info
+		disks := []*providerv1.DiskInfo{
+			{
+				Id:      fmt.Sprintf("%s-disk-0", vm.ID),
+				Path:    fmt.Sprintf("/var/lib/libvirt/images/%s.qcow2", vm.ID),
+				SizeGib: 20,
+				Format:  "qcow2",
+			},
+		}
+
+		// Create sample network info
+		networks := []*providerv1.NetworkInfo{
+			{
+				Name:      "default",
+				Mac:       fmt.Sprintf("52:54:00:%02x:%02x:%02x", rand.Intn(256), rand.Intn(256), rand.Intn(256)),
+				IpAddress: "",
+			},
+		}
+		if len(vm.IPs) > 0 {
+			networks[0].IpAddress = vm.IPs[0]
+		}
+
+		// Build provider raw metadata
+		providerRaw := make(map[string]string)
+		providerRaw["vm_id"] = vm.ID
+		providerRaw["power_state"] = vm.PowerState
+		providerRaw["console_url"] = vm.ConsoleURL
+
+		vmInfo := &providerv1.VMInfo{
+			Id:          vm.ID,
+			Name:        vm.Name,
+			PowerState:  vm.PowerState,
+			Ips:         vm.IPs,
+			Cpu:         2, // Default CPU
+			MemoryMib:   4096, // Default 4 GiB
+			Disks:       disks,
+			Networks:    networks,
+			ProviderRaw: providerRaw,
+		}
+
+		vmInfos = append(vmInfos, vmInfo)
+	}
+
+	return &providerv1.ListVMsResponse{
+		Vms: vmInfos,
+	}, nil
+}
+
 // TaskStatus checks the status of an async task.
 func (p *Provider) TaskStatus(ctx context.Context, req *providerv1.TaskStatusRequest) (*providerv1.TaskStatusResponse, error) {
 	p.simulateDelay()

@@ -24,6 +24,7 @@ Welcome to the Virtrigaud documentation. Virtrigaud is a Kubernetes operator for
 
 ### Advanced Features
 - [VM Lifecycle Management](ADVANCED_LIFECYCLE.md) - Advanced VM operations
+- [VM Adoption](VM_ADOPTION.md) - Onboard existing VMs into VirtRigaud
 - [Nested Virtualization](NESTED_VIRTUALIZATION.md) - Run hypervisors in VMs
 - [Graceful Shutdown](GRACEFUL_SHUTDOWN.md) - Proper VM shutdown handling
 - [VM Snapshots](ADVANCED_LIFECYCLE.md#snapshots) - Backup and restore

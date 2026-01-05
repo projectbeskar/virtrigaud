@@ -1664,6 +1664,152 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 	return response, nil
 }
 
+// ListVMs returns all VMs managed by this provider
+func (p *Provider) ListVMs(ctx context.Context, req *providerv1.Empty) (*providerv1.ListVMsResponse, error) {
+	p.logger.Info("Listing all virtual machines")
+
+	if p.client == nil {
+		return nil, fmt.Errorf("Proxmox client not configured")
+	}
+
+	// Get nodes from config (or discover)
+	nodes := p.client.Config().NodeSelector
+	if len(nodes) == 0 {
+		// Default to discovering nodes - for now, use a placeholder
+		// In a real implementation, you'd discover nodes via API
+		return nil, fmt.Errorf("node selector not configured")
+	}
+
+	var allVMs []*providerv1.VMInfo
+
+	// List VMs from each node
+	for _, node := range nodes {
+		vms, err := p.client.ListVMs(ctx, node)
+		if err != nil {
+			p.logger.Warn("Failed to list VMs from node", "node", node, "error", err)
+			continue
+		}
+
+		for _, vm := range vms {
+			// Skip templates
+			if vm.Template == 1 {
+				continue
+			}
+
+			// Get VM config for detailed information
+			config, err := p.client.GetVMConfig(ctx, node, vm.VMID)
+			if err != nil {
+				p.logger.Warn("Failed to get VM config", "vmid", vm.VMID, "error", err)
+				continue
+			}
+
+			// Extract power state
+			powerState := "Off"
+			if vm.Status == "running" {
+				powerState = "On"
+			}
+
+			// Extract CPU and memory
+			cpu := int32(vm.CPUs)
+			if cpu == 0 {
+				if cores, ok := config["cores"].(float64); ok {
+					cpu = int32(cores)
+				} else {
+					cpu = 1 // Default
+				}
+			}
+
+			memoryMiB := vm.Memory / (1024 * 1024) // Convert bytes to MiB
+			if memoryMiB == 0 {
+				if mem, ok := config["memory"].(float64); ok {
+					memoryMiB = int64(mem)
+				} else {
+					memoryMiB = 1024 // Default 1 GiB
+				}
+			}
+
+			// Extract disk information
+			var disks []*providerv1.DiskInfo
+			for key, value := range config {
+				if strings.HasPrefix(key, "virtio") || strings.HasPrefix(key, "scsi") || strings.HasPrefix(key, "ide") || strings.HasPrefix(key, "sata") {
+					if diskStr, ok := value.(string); ok && diskStr != "" {
+						// Parse disk string format: storage:size,format=qcow2
+						parts := strings.Split(diskStr, ",")
+						diskPath := parts[0]
+						format := "qcow2"
+						for _, part := range parts[1:] {
+							if strings.HasPrefix(part, "format=") {
+								format = strings.TrimPrefix(part, "format=")
+							}
+						}
+
+						// Extract size if available
+						sizeGiB := int32(0)
+						if sizeParts := strings.Split(diskPath, ":"); len(sizeParts) > 1 {
+							if size, err := strconv.ParseInt(sizeParts[1], 10, 32); err == nil {
+								sizeGiB = int32(size)
+							}
+						}
+
+						diskInfo := &providerv1.DiskInfo{
+							Id:      fmt.Sprintf("%d-%s", vm.VMID, key),
+							Path:    diskPath,
+							SizeGib: sizeGiB,
+							Format:  format,
+						}
+						disks = append(disks, diskInfo)
+					}
+				}
+			}
+
+			// Extract network information
+			var networks []*providerv1.NetworkInfo
+			for key, value := range config {
+				if strings.HasPrefix(key, "net") {
+					if netStr, ok := value.(string); ok && netStr != "" {
+						// Parse network string: model=...,mac=...,bridge=...
+						networkInfo := &providerv1.NetworkInfo{}
+						parts := strings.Split(netStr, ",")
+						for _, part := range parts {
+							if strings.HasPrefix(part, "mac=") {
+								networkInfo.Mac = strings.TrimPrefix(part, "mac=")
+							} else if strings.HasPrefix(part, "bridge=") {
+								networkInfo.Name = strings.TrimPrefix(part, "bridge=")
+							}
+						}
+						networks = append(networks, networkInfo)
+					}
+				}
+			}
+
+			// Build provider raw metadata
+			providerRaw := make(map[string]string)
+			providerRaw["vmid"] = strconv.Itoa(vm.VMID)
+			providerRaw["node"] = node
+			providerRaw["status"] = vm.Status
+			providerRaw["power_state"] = powerState
+
+			vmInfo := &providerv1.VMInfo{
+				Id:          strconv.Itoa(vm.VMID),
+				Name:        vm.Name,
+				PowerState:  powerState,
+				Ips:         []string{}, // IPs would need guest agent or other method
+				Cpu:         cpu,
+				MemoryMib:   memoryMiB,
+				Disks:       disks,
+				Networks:    networks,
+				ProviderRaw: providerRaw,
+			}
+
+			allVMs = append(allVMs, vmInfo)
+		}
+	}
+
+	return &providerv1.ListVMsResponse{
+		Vms: allVMs,
+	}, nil
+}
+
 // parseDiskSize converts Proxmox disk size string (e.g., "32G", "1024M") to bytes
 func (p *Provider) parseDiskSize(sizeStr string) (int64, error) {
 	if sizeStr == "" {

@@ -327,6 +327,33 @@ type ProviderStatus struct {
 	// ResourceUsage provides resource usage statistics
 	// +optional
 	ResourceUsage *ProviderResourceUsage `json:"resourceUsage,omitempty"`
+
+	// Adoption tracks VM adoption status
+	// +optional
+	Adoption *ProviderAdoptionStatus `json:"adoption,omitempty"`
+}
+
+// ProviderAdoptionStatus tracks VM adoption progress
+type ProviderAdoptionStatus struct {
+	// LastDiscoveryTime is when VMs were last discovered
+	// +optional
+	LastDiscoveryTime *metav1.Time `json:"lastDiscoveryTime,omitempty"`
+
+	// DiscoveredVMs is the count of VMs found in provider
+	// +optional
+	DiscoveredVMs int32 `json:"discoveredVMs,omitempty"`
+
+	// AdoptedVMs is the count of VMs successfully adopted
+	// +optional
+	AdoptedVMs int32 `json:"adoptedVMs,omitempty"`
+
+	// FailedAdoptions is the count of failed adoption attempts
+	// +optional
+	FailedAdoptions int32 `json:"failedAdoptions,omitempty"`
+
+	// Message provides details about adoption status
+	// +optional
+	Message string `json:"message,omitempty"`
 }
 
 // ProviderCapability represents a provider capability

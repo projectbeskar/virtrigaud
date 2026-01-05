@@ -2623,3 +2623,147 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 
 	return response, nil
 }
+
+// ListVMs returns all VMs managed by this provider
+func (p *Provider) ListVMs(ctx context.Context, req *providerv1.Empty) (*providerv1.ListVMsResponse, error) {
+	if p.client == nil {
+		return nil, fmt.Errorf("vSphere client not configured")
+	}
+
+	p.logger.Info("Listing all virtual machines")
+
+	// Set datacenter context for finder
+	datacenter, err := p.finder.DefaultDatacenter(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find default datacenter: %w", err)
+	}
+	p.finder.SetDatacenter(datacenter)
+
+	// Find all VMs in the datacenter
+	vms, err := p.finder.VirtualMachineList(ctx, "*")
+	if err != nil {
+		return nil, fmt.Errorf("failed to list virtual machines: %w", err)
+	}
+
+	p.logger.Info("Found VMs", "count", len(vms))
+
+	// Collect VM information
+	var vmInfos []*providerv1.VMInfo
+	pc := property.DefaultCollector(p.client.Client)
+
+	for _, vm := range vms {
+		// Get VM properties
+		var vmMo mo.VirtualMachine
+		err := pc.RetrieveOne(ctx, vm.Reference(), []string{
+			"summary.config.name",
+			"summary.config.numCpu",
+			"summary.config.memorySizeMB",
+			"summary.runtime.powerState",
+			"guest.ipAddress",
+			"guest.net",
+			"config.hardware.device",
+		}, &vmMo)
+
+		if err != nil {
+			p.logger.Warn("Failed to retrieve VM properties, skipping", "vm", vm.Name(), "error", err)
+			continue
+		}
+
+		// Extract power state
+		powerState := p.mapVSpherePowerState(string(vmMo.Summary.Runtime.PowerState))
+
+		// Extract IP addresses
+		var ips []string
+		if vmMo.Guest != nil {
+			if vmMo.Guest.IpAddress != "" {
+				ips = append(ips, vmMo.Guest.IpAddress)
+			}
+			if vmMo.Guest.Net != nil {
+				for _, netInfo := range vmMo.Guest.Net {
+					if netInfo.IpConfig != nil {
+						for _, ipConfig := range netInfo.IpConfig.IpAddress {
+							ip := ipConfig.IpAddress
+							if ip != "" && !contains(ips, ip) && p.isValidIPAddress(ip) {
+								ips = append(ips, ip)
+							}
+						}
+					}
+				}
+			}
+		}
+
+		// Extract disk information
+		var disks []*providerv1.DiskInfo
+		if vmMo.Config != nil {
+			for _, device := range vmMo.Config.Hardware.Device {
+				if disk, ok := device.(*types.VirtualDisk); ok {
+					// Get disk size in GiB
+					sizeGiB := int32(disk.CapacityInBytes / (1024 * 1024 * 1024))
+					if sizeGiB == 0 && disk.CapacityInBytes > 0 {
+						sizeGiB = 1 // Round up to at least 1 GiB
+					}
+
+					diskID := fmt.Sprintf("%d", disk.Key)
+					diskPath := ""
+					if disk.Backing != nil {
+						if backing, ok := disk.Backing.(*types.VirtualDiskFlatVer2BackingInfo); ok {
+							diskPath = backing.FileName
+						}
+					}
+
+					diskInfo := &providerv1.DiskInfo{
+						Id:      diskID,
+						Path:    diskPath,
+						SizeGib: sizeGiB,
+						Format:  "vmdk",
+					}
+					disks = append(disks, diskInfo)
+				}
+			}
+		}
+
+		// Extract network information
+		var networks []*providerv1.NetworkInfo
+		if vmMo.Config != nil {
+			for _, device := range vmMo.Config.Hardware.Device {
+				if nic, ok := device.(*types.VirtualEthernetCard); ok {
+					networkInfo := &providerv1.NetworkInfo{
+						Mac: nic.MacAddress,
+					}
+					if nic.Backing != nil {
+						if networkBacking, ok := nic.Backing.(*types.VirtualEthernetCardNetworkBackingInfo); ok {
+							networkInfo.Name = networkBacking.DeviceName
+						}
+					}
+					networks = append(networks, networkInfo)
+				}
+			}
+		}
+
+		// Build provider raw metadata
+		providerRaw := make(map[string]string)
+		providerRaw["vm_id"] = vmMo.Summary.Config.Name
+		providerRaw["power_state"] = powerState
+		if vmMo.Summary.Config.GuestFullName != "" {
+			providerRaw["guest_os"] = vmMo.Summary.Config.GuestFullName
+		}
+
+		vmInfo := &providerv1.VMInfo{
+			Id:          vm.Reference().Value, // Use ManagedObjectReference value as ID
+			Name:        vmMo.Summary.Config.Name,
+			PowerState:  powerState,
+			Ips:         ips,
+			Cpu:         vmMo.Summary.Config.NumCpu,
+			MemoryMib:   int64(vmMo.Summary.Config.MemorySizeMB),
+			Disks:       disks,
+			Networks:    networks,
+			ProviderRaw: providerRaw,
+		}
+
+		vmInfos = append(vmInfos, vmInfo)
+	}
+
+	return &providerv1.ListVMsResponse{
+		Vms: vmInfos,
+	}, nil
+}

@@ -128,4 +128,52 @@ type Provider interface {
 	// GetDiskInfo retrieves detailed information about a VM disk
 	// Useful for migration planning and validation
 	GetDiskInfo(ctx context.Context, req GetDiskInfoRequest) (GetDiskInfoResponse, error)
+
+	// ListVMs returns all VMs managed by this provider
+	// Used for discovery and adoption of existing VMs
+	ListVMs(ctx context.Context) ([]VMInfo, error)
+}
+
+// VMInfo contains basic information about a VM for discovery
+type VMInfo struct {
+	// ID is the provider-specific VM identifier
+	ID string
+	// Name is the VM name
+	Name string
+	// PowerState is the current power state
+	PowerState string
+	// IPs contains assigned IP addresses
+	IPs []string
+	// CPU is the number of virtual CPUs
+	CPU int32
+	// MemoryMiB is the amount of memory in MiB
+	MemoryMiB int64
+	// Disks contains disk information
+	Disks []DiskInfo
+	// Networks contains network information
+	Networks []NetworkInfo
+	// ProviderRaw contains provider-specific metadata
+	ProviderRaw map[string]string
+}
+
+// DiskInfo contains information about a VM disk
+type DiskInfo struct {
+	// ID is the disk identifier
+	ID string
+	// Path is the disk path
+	Path string
+	// SizeGiB is the disk size in GiB
+	SizeGiB int32
+	// Format is the disk format (qcow2, vmdk, etc.)
+	Format string
+}
+
+// NetworkInfo contains information about a VM network interface
+type NetworkInfo struct {
+	// Name is the network name
+	Name string
+	// MAC is the MAC address
+	MAC string
+	// IPAddress is the IP address if static
+	IPAddress string
 }
