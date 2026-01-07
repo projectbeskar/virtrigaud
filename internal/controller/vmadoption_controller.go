@@ -84,6 +84,7 @@ type VMAdoptionReconciler struct {
 // Reconcile handles adoption requests
 func (r *VMAdoptionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
+	logger.Info("VMAdoption controller reconciling Provider", "provider", req.NamespacedName)
 
 	// Fetch the Provider
 	var provider infravirtrigaudiov1beta1.Provider
@@ -98,6 +99,7 @@ func (r *VMAdoptionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	// Check if adoption is requested
 	adoptVMs := provider.Annotations[AdoptionAnnotation]
+	logger.Info("Checking adoption annotation", "provider", provider.Name, "adoptVMs", adoptVMs)
 	if adoptVMs != "true" {
 		// Clear adoption status if annotation is removed
 		if provider.Status.Adoption != nil {
@@ -510,6 +512,11 @@ func (r *VMAdoptionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			MaxConcurrentReconciles: 1, // Process one provider at a time
 		}).
 		WithEventFilter(predicate.Funcs{
+			CreateFunc: func(e event.CreateEvent) bool {
+				// Reconcile if adoption annotation is set
+				adoptVal := e.Object.GetAnnotations()[AdoptionAnnotation]
+				return adoptVal == "true"
+			},
 			UpdateFunc: func(e event.UpdateEvent) bool {
 				// Reconcile if adoption annotation changed
 				oldAdoptVal := e.ObjectOld.GetAnnotations()[AdoptionAnnotation]
