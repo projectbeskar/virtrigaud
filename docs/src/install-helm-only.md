@@ -15,12 +15,21 @@ VirtRigaud can be installed using only Helm, which will automatically install al
 ### Installation
 
 ```bash
-# Install virtrigaud from OCI registry (no authentication required for public repos)
-helm install virtrigaud oci://ghcr.io/projectbeskar/virtrigaud/charts/virtrigaud \
+# Add the virtrigaud Helm repository
+helm repo add virtrigaud https://projectbeskar.github.io/virtrigaud
+helm repo update
+
+# Or install directly from source
+git clone https://github.com/projectbeskar/virtrigaud.git
+cd virtrigaud
+
+# Install virtrigaud with CRDs
+helm install virtrigaud charts/virtrigaud \
   --namespace virtrigaud \
   --create-namespace \
   --wait \
   --timeout 10m
+```
 
 # Or install directly from source
 git clone https://github.com/projectbeskar/virtrigaud.git
@@ -203,7 +212,7 @@ metadata:
 spec:
   source:
     chart: virtrigaud
-    repoURL: oci://ghcr.io/projectbeskar/virtrigaud/charts
+    repoURL: https://projectbeskar.github.io/virtrigaud
     targetRevision: "1.0.0"
     helm:
       values: |

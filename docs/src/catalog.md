@@ -19,9 +19,12 @@ The VirtRigaud Provider Catalog lists all verified and community providers avail
 To install a provider in your Kubernetes cluster, use the VirtRigaud provider runtime Helm chart:
 
 ```bash
-# Install a provider using the runtime chart from OCI registry
-# No authentication required - charts are publicly accessible
-helm install my-vsphere-provider oci://ghcr.io/projectbeskar/virtrigaud/charts/virtrigaud-provider-runtime \
+# Add the VirtRigaud Helm repository
+helm repo add virtrigaud https://projectbeskar.github.io/virtrigaud
+helm repo update
+
+# Install a provider using the runtime chart
+helm install my-vsphere-provider virtrigaud/virtrigaud-provider-runtime \
   --namespace vsphere-providers \
   --create-namespace \
   --set image.repository=ghcr.io/projectbeskar/virtrigaud/provider-vsphere \

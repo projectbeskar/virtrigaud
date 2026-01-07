@@ -23,21 +23,24 @@ All resources support seamless conversion between API versions via webhooks.
 ### Using Helm (Recommended)
 
 ```bash
+# Add the VirtRigaud Helm repository
+helm repo add virtrigaud https://projectbeskar.github.io/virtrigaud
+helm repo update
+
 # Install with default settings (CRDs included automatically)
-# No authentication required - charts are publicly accessible
-helm install virtrigaud oci://ghcr.io/projectbeskar/virtrigaud/charts/virtrigaud \
+helm install virtrigaud virtrigaud/virtrigaud \
   --namespace virtrigaud-system \
   --create-namespace
 
 # Or install with specific providers enabled
-helm install virtrigaud oci://ghcr.io/projectbeskar/virtrigaud/charts/virtrigaud \
+helm install virtrigaud virtrigaud/virtrigaud \
   --namespace virtrigaud-system \
   --create-namespace \
   --set providers.vsphere.enabled=true \
   --set providers.libvirt.enabled=true
 
 # To skip CRDs if already installed separately
-helm install virtrigaud oci://ghcr.io/projectbeskar/virtrigaud/charts/virtrigaud \
+helm install virtrigaud virtrigaud/virtrigaud \
   --namespace virtrigaud-system \
   --create-namespace \
   --skip-crds

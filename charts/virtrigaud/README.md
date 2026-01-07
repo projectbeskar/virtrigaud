@@ -19,16 +19,15 @@ This Helm chart installs VirtRigaud, a Kubernetes operator for managing virtual 
 ### Quick Start
 
 ```bash
-# Install VirtRigaud directly from OCI registry (no authentication required for public repos)
-helm install virtrigaud oci://ghcr.io/projectbeskar/virtrigaud/charts/virtrigaud \
+# Add the Helm repository
+helm repo add virtrigaud https://projectbeskar.github.io/virtrigaud
+helm repo update
+
+# Install VirtRigaud
+helm install virtrigaud virtrigaud/virtrigaud \
   -n virtrigaud-system \
   --create-namespace
 ```
-
-**Note**: 
-- Helm 3.8+ is required for OCI registry support
-- **No authentication required** - VirtRigaud charts are publicly accessible
-- If Helm prompts for authentication, you can skip it or use any GitHub username (authentication is not enforced for public repos)
 
 ### Custom Installation
 
@@ -58,7 +57,7 @@ helm install virtrigaud charts/virtrigaud \
 By default, VirtRigaud automatically upgrades CRDs during `helm upgrade`:
 
 ```bash
-helm upgrade virtrigaud oci://ghcr.io/projectbeskar/virtrigaud/charts/virtrigaud \
+helm upgrade virtrigaud virtrigaud/virtrigaud \
   -n virtrigaud-system
 ```
 

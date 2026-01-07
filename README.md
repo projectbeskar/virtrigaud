@@ -108,23 +108,27 @@ graph TB
 
 ### Installation via Helm (Recommended)
 
-1. **Install VirtRigaud** (Manager only - Providers are created via CRs):
-   > **Note**: No authentication required - VirtRigaud charts are publicly accessible from GitHub Container Registry.
+1. **Add the Helm repository**:
+   ```bash
+   helm repo add virtrigaud https://projectbeskar.github.io/virtrigaud
+   helm repo update
+   ```
+
+2. **Install VirtRigaud** (Manager only - Providers are created via CRs):
    ```bash
    # Install VirtRigaud manager (CRDs included automatically)
    # Note: Providers are NOT enabled via Helm - they are created as Provider CRs
-   helm install virtrigaud oci://ghcr.io/projectbeskar/virtrigaud/charts/virtrigaud \
+   helm install virtrigaud virtrigaud/virtrigaud \
      -n virtrigaud-system --create-namespace \
      --set providers.vsphere.enabled=false \
      --set providers.libvirt.enabled=false \
      --set providers.proxmox.enabled=false
    
    # Or simply install with default values (all providers disabled by default in future versions)
-   helm install virtrigaud oci://ghcr.io/projectbeskar/virtrigaud/charts/virtrigaud \
-     -n virtrigaud-system --create-namespace
+   helm install virtrigaud virtrigaud/virtrigaud -n virtrigaud-system --create-namespace
    
    # To disable automatic CRD upgrades:
-   helm install virtrigaud oci://ghcr.io/projectbeskar/virtrigaud/charts/virtrigaud \
+   helm install virtrigaud virtrigaud/virtrigaud \
      -n virtrigaud-system --create-namespace \
      --set crdUpgrade.enabled=false
    ```
@@ -146,7 +150,7 @@ graph TB
 4. **Upgrade VirtRigaud** (CRDs are automatically upgraded):
    ```bash
    # Standard upgrade - CRDs are automatically updated
-   helm upgrade virtrigaud oci://ghcr.io/projectbeskar/virtrigaud/charts/virtrigaud -n virtrigaud-system
+   helm upgrade virtrigaud virtrigaud/virtrigaud -n virtrigaud-system
    
    # The chart uses Helm hooks to apply CRDs during upgrade
    # No manual CRD management needed!
@@ -374,7 +378,7 @@ If CRDs are missing after Helm install:
 3. **Re-install with CRDs**:
    ```bash
    helm uninstall virtrigaud -n virtrigaud-system
-   helm install virtrigaud oci://ghcr.io/projectbeskar/virtrigaud/charts/virtrigaud -n virtrigaud-system --create-namespace
+   helm install virtrigaud virtrigaud/virtrigaud -n virtrigaud-system --create-namespace
    ```
 
 ## VM Migration

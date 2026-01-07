@@ -391,8 +391,10 @@ jobs:
         ## Installation
         
         \`\`\`bash
-        helm registry login ${{ env.REGISTRY }} -u ${{ github.actor }} -p ${{ secrets.GITHUB_TOKEN }}
-        helm install virtrigaud oci://${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/charts/virtrigaud --version ${{ needs.prepare.outputs.version }}
+        # Note: Helm OCI requires authentication even for public repos
+        # In CI/CD, we use GITHUB_TOKEN for authentication
+        helm repo add virtrigaud https://projectbeskar.github.io/virtrigaud
+        helm install virtrigaud virtrigaud/virtrigaud --version ${{ needs.prepare.outputs.version }}
         \`\`\`
         
         ## Security
@@ -486,12 +488,38 @@ jobs:
         prerelease: ${{ contains(needs.prepare.outputs.tag, '-') }}
         fail_on_unmatched_files: false
 
-  publish-helm-chart-oci:
-    name: Publish Helm Chart to OCI Registry
+  update-helm-repo:
+    name: Update Helm Repository
     runs-on: ubuntu-latest
-    needs: [prepare, build-helm-chart]
+    needs: [prepare, create-release]
     if: github.repository == 'projectbeskar/virtrigaud'
     steps:
+    - name: Checkout gh-pages
+      uses: actions/checkout@v4
+      with:
+        ref: gh-pages
+        path: gh-pages
+        token: ${{ secrets.GITHUB_TOKEN }}
+      continue-on-error: true
+
+    - name: Create gh-pages branch if it doesn't exist
+      run: |
+        if [ ! -d "gh-pages" ] || [ ! -f "gh-pages/.git/HEAD" ]; then
+          echo "Creating gh-pages branch..."
+          rm -rf gh-pages
+          mkdir gh-pages
+          cd gh-pages
+          git init
+          git checkout -b gh-pages
+          git remote add origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          echo "# Helm Repository" > README.md
+          git add README.md
+          git commit -m "Initialize gh-pages branch"
+          git push -u origin gh-pages
+        fi
+
     - name: Install Helm
       uses: azure/setup-helm@v3
       with:
@@ -503,37 +531,30 @@ jobs:
         name: helm-chart
         path: ./charts
 
-    - name: Login to GitHub Container Registry
+    - name: Update Helm repository
       run: |
-        echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.REGISTRY }} \
-          -u ${{ github.actor }} \
-          --password-stdin
-
-    - name: Push Helm chart to OCI registry
-      run: |
-        CHART_FILE=$(find ./charts -name "*.tgz" | head -1)
-        if [ -z "$CHART_FILE" ]; then
-          echo "Error: No Helm chart file found"
-          exit 1
+        cd gh-pages
+        
+        # Ensure we're on gh-pages branch
+        git checkout gh-pages 2>/dev/null || git checkout -b gh-pages
+        
+        # Copy new chart (preserve docs/ directory if it exists)
+        cp ../charts/*.tgz ./
+        
+        # Update index
+        helm repo index . --url https://projectbeskar.github.io/virtrigaud
+        
+        # Configure git
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        
+        # Check if there are changes
+        if git diff --quiet && git diff --cached --quiet; then
+          echo "No changes to commit"
+        else
+          git add .
+          git commit -m "Release Helm chart ${{ needs.prepare.outputs.tag }} [skip ci]"
+          
+          # Set upstream and push
+          git push --set-upstream origin gh-pages
         fi
-        
-        # Extract chart name and version from filename
-        CHART_BASENAME=$(basename "$CHART_FILE" .tgz)
-        CHART_NAME=$(echo "$CHART_BASENAME" | cut -d- -f1)
-        CHART_VERSION=$(echo "$CHART_BASENAME" | cut -d- -f2-)
-        
-        # OCI registry path: ghcr.io/projectbeskar/virtrigaud/charts/virtrigaud
-        OCI_REGISTRY="${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/charts/$CHART_NAME"
-        
-        echo "Pushing chart to OCI registry: $OCI_REGISTRY"
-        echo "Chart file: $CHART_FILE"
-        echo "Chart version: $CHART_VERSION"
-        
-        # Push chart to OCI registry
-        # Helm automatically uses the chart version from Chart.yaml
-        helm push "$CHART_FILE" "oci://$OCI_REGISTRY"
-        
-        echo "Successfully published Helm chart to OCI registry"
-        echo "OCI Registry: oci://$OCI_REGISTRY"
-        echo "Chart version: $CHART_VERSION"
-        echo "Install with: helm install virtrigaud oci://$OCI_REGISTRY --version $CHART_VERSION"
