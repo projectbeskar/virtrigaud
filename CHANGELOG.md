@@ -5,6 +5,64 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-01-07 09:00] - VM Adoption Feature and Infrastructure Improvements
+**Author:** @wrkode (William Rizzo)
+
+### Added
+
+#### VM Adoption
+- VM adoption controller for discovering and managing existing VMs not created by VirtRigaud
+- Annotation-driven adoption via `virtrigaud.io/adopt-vms: "true"`
+- Flexible filtering system via `virtrigaud.io/adopt-filter` annotation with support for:
+  - Name pattern matching (regex)
+  - Power state filtering
+  - CPU and memory range filtering
+- Automatic VirtualMachine CR creation for discovered unmanaged VMs
+- Automatic VMClass generation based on discovered VM properties
+- Adoption status tracking in Provider status with discovery time, counts, and error messages
+- Provider interface extension with `ListVMs()` method implemented across all providers (vSphere, Libvirt, Proxmox, Mock)
+- gRPC API extension with `ListVMs` RPC and VMInfo message types
+
+#### Provider Status Enhancements
+- `ConnectedVMs` count field in Provider status showing number of managed VMs
+- `Healthy` status field indicating provider availability
+- Status fields now properly populate in `kubectl get providers` output
+
+### Fixed
+
+#### GitHub Pages Conflict
+- Resolved conflict between documentation and Helm chart hosting
+- Documentation now served from `/docs` subdirectory
+- Helm charts remain at root for backward compatibility
+- Both coexist in `gh-pages` branch without conflicts
+
+### Changed
+
+#### Documentation
+- Updated docs workflow to publish to `gh-pages/docs/` directory
+- Updated release workflow to preserve docs directory when publishing charts
+- Added comprehensive VM Adoption guide (`docs/src/VM_ADOPTION.md`)
+- Added VM adoption examples (`docs/src/examples/vm-adoption-example.yaml`)
+- Updated installation guides with correct GitHub Pages URLs
+
+#### API Changes
+- Added `AdoptionStatus` field to `ProviderStatus` with tracking fields
+- New Provider annotations: `virtrigaud.io/adopt-vms` and `virtrigaud.io/adopt-filter`
+
+### Why
+- Enables onboarding of existing VMs into VirtRigaud management without manual CR creation
+- Provides flexible filtering to adopt only specific VMs based on criteria
+- Resolves GitHub Pages hosting conflict allowing both docs and charts to coexist
+- Improves Provider status visibility for operational monitoring
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] New feature (opt-in via annotations)
+
+---
+
 ## [2025-12-16 22:30] - Add Documentation Workflow and CRD API Reference Generation
 **Author:** @ebourgeois (Erick Bourgeois)
 

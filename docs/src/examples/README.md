@@ -16,6 +16,7 @@ This directory contains comprehensive examples for VirtRigaud v0.2.3+, showcasin
 ### Resource Examples
 - **[vmimage-ubuntu.yaml](vmimage-ubuntu.yaml)** - VM image configuration
 - **[vmnetwork-app.yaml](vmnetwork-app.yaml)** - Network attachment configuration
+- **[vm-adoption-example.yaml](vm-adoption-example.yaml)** - VM adoption with filters
 
 ## v0.2.1 Feature Examples
 

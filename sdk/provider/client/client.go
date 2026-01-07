@@ -258,6 +258,16 @@ func (c *Client) Describe(ctx context.Context, req *providerv1.DescribeRequest) 
 	return resp, errors.FromGRPCError(err)
 }
 
+// ListVMs lists all VMs managed by the provider.
+func (c *Client) ListVMs(ctx context.Context) ([]*providerv1.VMInfo, error) {
+	ctx = c.withTimeout(ctx, "/provider.v1.Provider/ListVMs")
+	resp, err := c.client.ListVMs(ctx, &providerv1.Empty{})
+	if err != nil {
+		return nil, errors.FromGRPCError(err)
+	}
+	return resp.Vms, nil
+}
+
 // TaskStatus checks the status of an async task.
 func (c *Client) TaskStatus(ctx context.Context, req *providerv1.TaskStatusRequest) (*providerv1.TaskStatusResponse, error) {
 	ctx = c.withTimeout(ctx, "/provider.v1.Provider/TaskStatus")

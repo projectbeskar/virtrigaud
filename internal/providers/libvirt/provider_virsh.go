@@ -1912,3 +1912,146 @@ func (p *Provider) ImportDisk(ctx context.Context, req contracts.ImportDiskReque
 	return response, nil
 }
 
+// ListVMs returns all VMs managed by this provider
+func (p *Provider) ListVMs(ctx context.Context) ([]contracts.VMInfo, error) {
+	log.Printf("INFO Listing all virtual machines")
+
+	if p.virshProvider == nil {
+		return nil, contracts.NewRetryableError("virsh provider not initialized", nil)
+	}
+
+	// List all domains
+	domains, err := p.virshProvider.listDomains(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list domains: %w", err)
+	}
+
+	log.Printf("INFO Found %d domains", len(domains))
+
+	var vmInfos []contracts.VMInfo
+	guestAgent := NewGuestAgentProvider(p.virshProvider)
+
+	for _, domain := range domains {
+		// Get domain information
+		domainInfo, err := p.virshProvider.getDomainInfo(ctx, domain.Name)
+		if err != nil {
+			log.Printf("WARN Failed to get domain info for %s: %v", domain.Name, err)
+			continue
+		}
+
+		// Extract power state
+		powerState := p.mapLibvirtPowerState(domainInfo["State"])
+
+		// Extract IP addresses
+		var ips []string
+		if guestIPs := domainInfo["guest_ip_addresses"]; guestIPs != "" {
+			ips = strings.Split(guestIPs, ",")
+			// Filter out empty strings
+			var validIPs []string
+			for _, ip := range ips {
+				ip = strings.TrimSpace(ip)
+				if ip != "" {
+					validIPs = append(validIPs, ip)
+				}
+			}
+			ips = validIPs
+		}
+
+		// Extract CPU count
+		cpu, err := p.extractCPUCount(domainInfo)
+		if err != nil {
+			log.Printf("WARN Failed to extract CPU count for %s: %v", domain.Name, err)
+			cpu = 1 // Default to 1 CPU
+		}
+
+		// Extract memory (convert from KiB to MiB)
+		memoryKB, err := p.extractMemoryKB(domainInfo)
+		if err != nil {
+			log.Printf("WARN Failed to extract memory for %s: %v", domain.Name, err)
+			memoryKB = 1024 // Default to 1 GiB
+		}
+		memoryMiB := memoryKB / 1024
+
+		// Extract disk information
+		var disks []contracts.DiskInfo
+		diskPaths, err := p.getDomainDiskPaths(ctx, domain.Name)
+		if err == nil {
+			for i, diskPath := range diskPaths {
+				// Get disk size
+				sizeGiB := int32(0)
+				if stat, err := os.Stat(diskPath); err == nil {
+					sizeGiB = int32(stat.Size() / (1024 * 1024 * 1024))
+					if sizeGiB == 0 && stat.Size() > 0 {
+						sizeGiB = 1
+					}
+				}
+
+				// Detect disk format from path
+				format := "qcow2"
+				if strings.HasSuffix(diskPath, ".raw") {
+					format = "raw"
+				} else if strings.HasSuffix(diskPath, ".vmdk") {
+					format = "vmdk"
+				}
+
+				diskInfo := contracts.DiskInfo{
+					ID:      fmt.Sprintf("%s-disk-%d", domain.Name, i),
+					Path:    diskPath,
+					SizeGiB: sizeGiB,
+					Format:  format,
+				}
+				disks = append(disks, diskInfo)
+			}
+		}
+
+		// Extract network information
+		var networks []contracts.NetworkInfo
+		// Try to get network info from guest agent if VM is running
+		powerStateStr := string(powerState)
+		if powerStateStr == "On" {
+			if guestInfo, err := guestAgent.GetGuestInfo(ctx, domain.Name); err == nil {
+				for _, iface := range guestInfo.NetworkInterfaces {
+					networkInfo := contracts.NetworkInfo{
+						Name:      iface.Name,
+						MAC:       iface.HardwareAddr,
+						IPAddress: "",
+					}
+					if len(iface.IPAddresses) > 0 {
+						networkInfo.IPAddress = iface.IPAddresses[0]
+					}
+					networks = append(networks, networkInfo)
+				}
+			}
+		}
+
+		// Build provider raw metadata
+		providerRaw := make(map[string]string)
+		providerRaw["domain_name"] = domain.Name
+		providerRaw["domain_id"] = domain.ID
+		providerRaw["state"] = domain.State
+		providerRaw["power_state"] = powerStateStr
+		if domainInfo["UUID"] != "" {
+			providerRaw["uuid"] = domainInfo["UUID"]
+		}
+		if domainInfo["Guest OS"] != "" {
+			providerRaw["guest_os"] = domainInfo["Guest OS"]
+		}
+
+		vmInfo := contracts.VMInfo{
+			ID:          domain.Name, // Use domain name as ID
+			Name:        domain.Name,
+			PowerState:  powerStateStr,
+			IPs:         ips,
+			CPU:         cpu,
+			MemoryMiB:   memoryMiB,
+			Disks:       disks,
+			Networks:    networks,
+			ProviderRaw: providerRaw,
+		}
+
+		vmInfos = append(vmInfos, vmInfo)
+	}
+
+	return vmInfos, nil
+}
+

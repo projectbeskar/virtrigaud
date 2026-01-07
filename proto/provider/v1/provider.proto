@@ -200,6 +200,36 @@ message GetDiskInfoResponse {
   map<string, string> metadata = 9; // Additional provider-specific metadata
 }
 
+// List all VMs managed by this provider
+message ListVMsResponse {
+  repeated VMInfo vms = 1;
+}
+
+message VMInfo {
+  string id = 1;                // Provider-specific VM identifier
+  string name = 2;              // VM name
+  string power_state = 3;       // Current power state
+  repeated string ips = 4;      // IP addresses
+  int32 cpu = 5;                // Number of virtual CPUs
+  int64 memory_mib = 6;         // Memory in MiB
+  repeated DiskInfo disks = 7;  // Disk information
+  repeated NetworkInfo networks = 8; // Network information
+  map<string, string> provider_raw = 9; // Provider-specific metadata
+}
+
+message DiskInfo {
+  string id = 1;        // Disk identifier
+  string path = 2;      // Disk path
+  int32 size_gib = 3;   // Disk size in GiB
+  string format = 4;    // Disk format (qcow2, vmdk, raw, etc.)
+}
+
+message NetworkInfo {
+  string name = 1;        // Network name
+  string mac = 2;         // MAC address
+  string ip_address = 3;  // IP address if static
+}
+
 // Capability check - what features does this provider support
 message GetCapabilitiesRequest {}
 
@@ -263,4 +293,7 @@ service Provider {
   rpc ExportDisk(ExportDiskRequest) returns (ExportDiskResponse);
   rpc ImportDisk(ImportDiskRequest) returns (ImportDiskResponse);
   rpc GetDiskInfo(GetDiskInfoRequest) returns (GetDiskInfoResponse);
+  
+  // List all VMs managed by this provider
+  rpc ListVMs(Empty) returns (ListVMsResponse);
 }

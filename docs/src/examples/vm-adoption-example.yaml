@@ -1,0 +1,138 @@
+---
+# Example: VM Adoption with Filters
+# This example demonstrates how to enable VM adoption on a Provider
+# with various filter configurations.
+
+# Example 1: Basic VM Adoption (adopt all unmanaged VMs)
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: Provider
+metadata:
+  name: vsphere-prod
+  namespace: default
+  annotations:
+    virtrigaud.io/adopt-vms: "true"
+spec:
+  type: vsphere
+  remote: true
+  vsphere:
+    server: vcenter.example.com
+    datacenter: Production
+    credentials:
+      secretRef:
+        name: vsphere-prod-credentials
+        namespace: default
+---
+# Example 2: Adopt Only Production VMs (name pattern filter)
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: Provider
+metadata:
+  name: vsphere-prod-filtered
+  namespace: default
+  annotations:
+    virtrigaud.io/adopt-vms: "true"
+    virtrigaud.io/adopt-filter: '{"namePattern": "^prod-.*"}'
+spec:
+  type: vsphere
+  remote: true
+  vsphere:
+    server: vcenter.example.com
+    datacenter: Production
+    credentials:
+      secretRef:
+        name: vsphere-prod-credentials
+        namespace: default
+---
+# Example 3: Adopt Only Powered-On VMs
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: Provider
+metadata:
+  name: vsphere-prod-online
+  namespace: default
+  annotations:
+    virtrigaud.io/adopt-vms: "true"
+    virtrigaud.io/adopt-filter: '{"powerState": "on"}'
+spec:
+  type: vsphere
+  remote: true
+  vsphere:
+    server: vcenter.example.com
+    datacenter: Production
+    credentials:
+      secretRef:
+        name: vsphere-prod-credentials
+        namespace: default
+---
+# Example 4: Adopt VMs with Resource Requirements
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: Provider
+metadata:
+  name: vsphere-prod-large
+  namespace: default
+  annotations:
+    virtrigaud.io/adopt-vms: "true"
+    virtrigaud.io/adopt-filter: '{"minCPU": 4, "minMemoryMiB": 8192}'
+spec:
+  type: vsphere
+  remote: true
+  vsphere:
+    server: vcenter.example.com
+    datacenter: Production
+    credentials:
+      secretRef:
+        name: vsphere-prod-credentials
+        namespace: default
+---
+# Example 5: Complex Filter (production VMs, powered on, 2-8 CPUs)
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: Provider
+metadata:
+  name: vsphere-prod-complex
+  namespace: default
+  annotations:
+    virtrigaud.io/adopt-vms: "true"
+    virtrigaud.io/adopt-filter: '{"namePattern": "^prod-.*", "powerState": "on", "minCPU": 2, "maxCPU": 8}'
+spec:
+  type: vsphere
+  remote: true
+  vsphere:
+    server: vcenter.example.com
+    datacenter: Production
+    credentials:
+      secretRef:
+        name: vsphere-prod-credentials
+        namespace: default
+---
+# Example 6: Libvirt Provider with Filter
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: Provider
+metadata:
+  name: libvirt-kvm-prod
+  namespace: default
+  annotations:
+    virtrigaud.io/adopt-vms: "true"
+    virtrigaud.io/adopt-filter: '{"namePattern": "^app-.*", "powerState": "on"}'
+spec:
+  type: libvirt
+  remote: true
+  libvirt:
+    uri: qemu:///system
+---
+# Example 7: Proxmox Provider with Filter
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: Provider
+metadata:
+  name: proxmox-prod
+  namespace: default
+  annotations:
+    virtrigaud.io/adopt-vms: "true"
+    virtrigaud.io/adopt-filter: '{"minCPU": 2, "minMemoryMiB": 4096}'
+spec:
+  type: proxmox
+  remote: true
+  proxmox:
+    server: proxmox.example.com
+    credentials:
+      secretRef:
+        name: proxmox-prod-credentials
+        namespace: default
+

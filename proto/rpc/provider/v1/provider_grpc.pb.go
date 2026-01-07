@@ -36,6 +36,7 @@ const (
 	Provider_ExportDisk_FullMethodName      = "/provider.v1.Provider/ExportDisk"
 	Provider_ImportDisk_FullMethodName      = "/provider.v1.Provider/ImportDisk"
 	Provider_GetDiskInfo_FullMethodName     = "/provider.v1.Provider/GetDiskInfo"
+	Provider_ListVMs_FullMethodName         = "/provider.v1.Provider/ListVMs"
 )
 
 // ProviderClient is the client API for Provider service.
@@ -74,6 +75,8 @@ type ProviderClient interface {
 	ExportDisk(ctx context.Context, in *ExportDiskRequest, opts ...grpc.CallOption) (*ExportDiskResponse, error)
 	ImportDisk(ctx context.Context, in *ImportDiskRequest, opts ...grpc.CallOption) (*ImportDiskResponse, error)
 	GetDiskInfo(ctx context.Context, in *GetDiskInfoRequest, opts ...grpc.CallOption) (*GetDiskInfoResponse, error)
+	// List all VMs managed by this provider
+	ListVMs(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*ListVMsResponse, error)
 }
 
 type providerClient struct {
@@ -254,6 +257,16 @@ func (c *providerClient) GetDiskInfo(ctx context.Context, in *GetDiskInfoRequest
 	return out, nil
 }
 
+func (c *providerClient) ListVMs(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*ListVMsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListVMsResponse)
+	err := c.cc.Invoke(ctx, Provider_ListVMs_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ProviderServer is the server API for Provider service.
 // All implementations must embed UnimplementedProviderServer
 // for forward compatibility.
@@ -290,6 +303,8 @@ type ProviderServer interface {
 	ExportDisk(context.Context, *ExportDiskRequest) (*ExportDiskResponse, error)
 	ImportDisk(context.Context, *ImportDiskRequest) (*ImportDiskResponse, error)
 	GetDiskInfo(context.Context, *GetDiskInfoRequest) (*GetDiskInfoResponse, error)
+	// List all VMs managed by this provider
+	ListVMs(context.Context, *Empty) (*ListVMsResponse, error)
 	mustEmbedUnimplementedProviderServer()
 }
 
@@ -350,6 +365,9 @@ func (UnimplementedProviderServer) ImportDisk(context.Context, *ImportDiskReques
 }
 func (UnimplementedProviderServer) GetDiskInfo(context.Context, *GetDiskInfoRequest) (*GetDiskInfoResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetDiskInfo not implemented")
+}
+func (UnimplementedProviderServer) ListVMs(context.Context, *Empty) (*ListVMsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListVMs not implemented")
 }
 func (UnimplementedProviderServer) mustEmbedUnimplementedProviderServer() {}
 func (UnimplementedProviderServer) testEmbeddedByValue()                  {}
@@ -678,6 +696,24 @@ func _Provider_GetDiskInfo_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Provider_ListVMs_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(Empty)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProviderServer).ListVMs(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Provider_ListVMs_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProviderServer).ListVMs(ctx, req.(*Empty))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Provider_ServiceDesc is the grpc.ServiceDesc for Provider service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -752,6 +788,10 @@ var Provider_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetDiskInfo",
 			Handler:    _Provider_GetDiskInfo_Handler,
+		},
+		{
+			MethodName: "ListVMs",
+			Handler:    _Provider_ListVMs_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

@@ -605,6 +605,59 @@ func (s *Server) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReque
 	}, nil
 }
 
+// ListVMs returns all VMs managed by this provider
+func (s *Server) ListVMs(ctx context.Context, req *providerv1.Empty) (*providerv1.ListVMsResponse, error) {
+	if s.provider == nil {
+		return nil, fmt.Errorf("provider not initialized")
+	}
+
+	vmInfos, err := s.provider.ListVMs(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list VMs: %w", err)
+	}
+
+	// Convert contracts.VMInfo to providerv1.VMInfo
+	var protoVMInfos []*providerv1.VMInfo
+	for _, vmInfo := range vmInfos {
+		// Convert disks
+		var protoDisks []*providerv1.DiskInfo
+		for _, disk := range vmInfo.Disks {
+			protoDisks = append(protoDisks, &providerv1.DiskInfo{
+				Id:      disk.ID,
+				Path:    disk.Path,
+				SizeGib: disk.SizeGiB,
+				Format:  disk.Format,
+			})
+		}
+
+		// Convert networks
+		var protoNetworks []*providerv1.NetworkInfo
+		for _, net := range vmInfo.Networks {
+			protoNetworks = append(protoNetworks, &providerv1.NetworkInfo{
+				Name:       net.Name,
+				Mac:        net.MAC,
+				IpAddress:  net.IPAddress,
+			})
+		}
+
+		protoVMInfos = append(protoVMInfos, &providerv1.VMInfo{
+			Id:          vmInfo.ID,
+			Name:        vmInfo.Name,
+			PowerState:  vmInfo.PowerState,
+			Ips:         vmInfo.IPs,
+			Cpu:         vmInfo.CPU,
+			MemoryMib:   vmInfo.MemoryMiB,
+			Disks:       protoDisks,
+			Networks:    protoNetworks,
+			ProviderRaw: vmInfo.ProviderRaw,
+		})
+	}
+
+	return &providerv1.ListVMsResponse{
+		Vms: protoVMInfos,
+	}, nil
+}
+
 // copyDiskToRemote copies a disk file from local pod storage to the remote libvirt host
 func (s *Server) copyDiskToRemote(ctx context.Context, virshProvider *VirshProvider, localPath, volumeName string) (string, error) {
 	// IMPORTANT: Copy directly to libvirt pool directory for efficient in-place usage

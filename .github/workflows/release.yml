@@ -391,6 +391,8 @@ jobs:
         ## Installation
         
         \`\`\`bash
+        # Note: Helm OCI requires authentication even for public repos
+        # In CI/CD, we use GITHUB_TOKEN for authentication
         helm repo add virtrigaud https://projectbeskar.github.io/virtrigaud
         helm install virtrigaud virtrigaud/virtrigaud --version ${{ needs.prepare.outputs.version }}
         \`\`\`
@@ -536,7 +538,7 @@ jobs:
         # Ensure we're on gh-pages branch
         git checkout gh-pages 2>/dev/null || git checkout -b gh-pages
         
-        # Copy new chart
+        # Copy new chart (preserve docs/ directory if it exists)
         cp ../charts/*.tgz ./
         
         # Update index
@@ -551,7 +553,7 @@ jobs:
           echo "No changes to commit"
         else
           git add .
-          git commit -m "Release Helm chart ${{ needs.prepare.outputs.tag }}"
+          git commit -m "Release Helm chart ${{ needs.prepare.outputs.tag }} [skip ci]"
           
           # Set upstream and push
           git push --set-upstream origin gh-pages

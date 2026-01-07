@@ -283,6 +283,31 @@ func (c *Client) request(ctx context.Context, method, path string, body interfac
 	return c.httpClient.Do(req)
 }
 
+// ListVMs lists all VMs on a node
+func (c *Client) ListVMs(ctx context.Context, node string) ([]*VM, error) {
+	path := fmt.Sprintf("/api2/json/nodes/%s/qemu", node)
+
+	resp, err := c.request(ctx, "GET", path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list VMs: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // Response body close in defer is not critical
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to list VMs: status %d", resp.StatusCode)
+	}
+
+	var apiResp struct {
+		Data []*VM `json:"data"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return nil, fmt.Errorf("failed to decode VM list: %w", err)
+	}
+
+	return apiResp.Data, nil
+}
+
 // GetVM retrieves information about a specific VM
 func (c *Client) GetVM(ctx context.Context, node string, vmid int) (*VM, error) {
 	path := fmt.Sprintf("/api2/json/nodes/%s/qemu/%d/status/current", node, vmid)

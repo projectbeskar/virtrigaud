@@ -15,7 +15,7 @@ VirtRigaud can be installed using only Helm, which will automatically install al
 ### Installation
 
 ```bash
-# Add the virtrigaud Helm repository (if available)
+# Add the virtrigaud Helm repository
 helm repo add virtrigaud https://projectbeskar.github.io/virtrigaud
 helm repo update
 
@@ -24,6 +24,16 @@ git clone https://github.com/projectbeskar/virtrigaud.git
 cd virtrigaud
 
 # Install virtrigaud with CRDs
+helm install virtrigaud charts/virtrigaud \
+  --namespace virtrigaud \
+  --create-namespace \
+  --wait \
+  --timeout 10m
+```
+
+# Or install directly from source
+git clone https://github.com/projectbeskar/virtrigaud.git
+cd virtrigaud
 helm install virtrigaud charts/virtrigaud \
   --namespace virtrigaud \
   --create-namespace \

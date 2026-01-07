@@ -447,6 +447,58 @@ func (c *Client) GetDiskInfo(ctx context.Context, req contracts.GetDiskInfoReque
 	return result, nil
 }
 
+// ListVMs implements contracts.Provider
+func (c *Client) ListVMs(ctx context.Context) ([]contracts.VMInfo, error) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+
+	resp, err := c.client.ListVMs(ctx, &providerv1.Empty{})
+	if err != nil {
+		return nil, c.mapGRPCError("listVMs", err)
+	}
+
+	// Convert proto VMInfo to contracts VMInfo
+	var vmInfos []contracts.VMInfo
+	for _, protoVM := range resp.Vms {
+		// Convert disks
+		var disks []contracts.DiskInfo
+		for _, protoDisk := range protoVM.Disks {
+			disks = append(disks, contracts.DiskInfo{
+				ID:      protoDisk.Id,
+				Path:    protoDisk.Path,
+				SizeGiB: protoDisk.SizeGib,
+				Format:  protoDisk.Format,
+			})
+		}
+
+		// Convert networks
+		var networks []contracts.NetworkInfo
+		for _, protoNet := range protoVM.Networks {
+			networks = append(networks, contracts.NetworkInfo{
+				Name:      protoNet.Name,
+				MAC:       protoNet.Mac,
+				IPAddress: protoNet.IpAddress,
+			})
+		}
+
+		vmInfo := contracts.VMInfo{
+			ID:          protoVM.Id,
+			Name:        protoVM.Name,
+			PowerState:  protoVM.PowerState,
+			IPs:         protoVM.Ips,
+			CPU:         protoVM.Cpu,
+			MemoryMiB:   protoVM.MemoryMib,
+			Disks:       disks,
+			Networks:    networks,
+			ProviderRaw: protoVM.ProviderRaw,
+		}
+
+		vmInfos = append(vmInfos, vmInfo)
+	}
+
+	return vmInfos, nil
+}
+
 // convertCreateRequest converts contracts.CreateRequest to gRPC format
 func (c *Client) convertCreateRequest(req contracts.CreateRequest) (*providerv1.CreateRequest, error) {
 	grpcReq := &providerv1.CreateRequest{
