@@ -154,6 +154,7 @@ func (r *VMAdoptionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// Update discovery status
 	now := metav1.Now()
 	provider.Status.Adoption.LastDiscoveryTime = &now
+	// #nosec G115 -- len() returns int, conversion to int32 is safe for VM counts (max 2^31-1 VMs is unrealistic)
 	provider.Status.Adoption.DiscoveredVMs = int32(len(unmanagedVMs))
 
 	// Adopt VMs
