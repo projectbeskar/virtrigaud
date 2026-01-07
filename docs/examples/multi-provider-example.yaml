@@ -1,0 +1,187 @@
+# Multi-provider example showing both vSphere and Libvirt VMs in one cluster
+
+# vSphere Provider Configuration
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: Provider
+metadata:
+  name: vsphere-datacenter1
+  namespace: default
+spec:
+  type: vsphere
+  endpoint: https://vcenter.dc1.example.com
+  credentialSecretRef:
+    name: vsphere-creds
+  defaults:
+    datastore: ssd-datastore
+    cluster: prod-cluster
+    folder: virtrigaud-vms
+
+---
+# Libvirt Provider Configuration  
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: Provider
+metadata:
+  name: libvirt-edge
+  namespace: default
+spec:
+  type: libvirt
+  endpoint: qemu+tcp://edge-kvm.example.com/system
+  credentialSecretRef:
+    name: libvirt-creds
+  defaults:
+    cluster: edge
+
+---
+# Shared VM Classes
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMClass
+metadata:
+  name: web-tier
+spec:
+  cpu: 4
+  memory: "8Gi"
+  firmware: UEFI
+  diskDefaults:
+    size: "100Gi"
+
+---
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMClass
+metadata:
+  name: edge-small
+spec:
+  cpu: 2
+  memory: "4Gi"
+  firmware: BIOS
+  diskDefaults:
+    size: "50Gi"
+
+---
+# Images for different providers
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMImage
+metadata:
+  name: ubuntu-multi
+spec:
+  source:
+    vsphere:
+      templateName: "ubuntu-22.04-server"
+  prepare:
+    onMissing: Fail
+
+---
+# Networks for different providers
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMNetworkAttachment
+metadata:
+  name: production-network
+spec:
+  network:
+    vsphere:
+      portgroup: "Production-VLAN100"
+  ipAllocation:
+    type: DHCP
+
+---
+# VM running on vSphere
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: web-server-vsphere
+  labels:
+    tier: web
+    provider: vsphere
+spec:
+  providerRef:
+    name: vsphere-datacenter1
+  classRef:
+    name: web-tier
+  imageRef:
+    name: ubuntu-multi
+  networks:
+    - name: production-network
+  powerState: On
+  userData:
+    cloudInit:
+      inline: |
+        #cloud-config
+        hostname: web-server-vsphere
+        packages: [nginx, htop]
+        runcmd:
+          - systemctl enable --now nginx
+  tags:
+    - environment:production
+    - tier:web
+    - provider:vsphere
+
+---
+# VM running on Libvirt (edge location)
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: edge-cache-libvirt
+  labels:
+    tier: cache
+    provider: libvirt
+spec:
+  providerRef:
+    name: libvirt-edge
+  classRef:
+    name: edge-small
+  imageRef:
+    name: ubuntu-multi
+  networks:
+    - name: production-network
+  powerState: On
+  userData:
+    cloudInit:
+      inline: |
+        #cloud-config
+        hostname: edge-cache-libvirt
+        packages: [redis-server, htop]
+        runcmd:
+          - systemctl enable --now redis-server
+  tags:
+    - environment:production
+    - tier:cache
+    - provider:libvirt
+    - location:edge
+
+---
+# Another vSphere VM for comparison
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: api-server-vsphere
+  labels:
+    tier: api
+    provider: vsphere
+spec:
+  providerRef:
+    name: vsphere-datacenter1
+  classRef:
+    name: web-tier
+  imageRef:
+    name: ubuntu-multi
+  networks:
+    - name: production-network
+      networkRef:
+        name: production-network
+  disks:
+    - name: api-data
+      sizeGiB: 200
+      type: thick
+  powerState: On
+  userData:
+    cloudInit:
+      inline: |
+        #cloud-config
+        hostname: api-server-vsphere
+        packages: [docker.io, htop]
+        runcmd:
+          - systemctl enable --now docker
+          - usermod -aG docker ubuntu
+  tags:
+    - environment:production
+    - tier:api
+    - provider:vsphere

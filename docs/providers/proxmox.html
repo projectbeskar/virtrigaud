@@ -1,0 +1,1196 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Proxmox VE Provider - VirtRigaud Documentation</title>
+
+
+        <!-- Custom HTML head -->
+        
+        <meta name="description" content="Kubernetes operator for managing virtual machines across multiple hypervisors">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="../highlight.css">
+        <link rel="stylesheet" href="../tomorrow-night.css">
+        <link rel="stylesheet" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../theme/custom.css">
+
+    </head>
+    <body class="sidebar-visible no-js">
+    <div id="body-container">
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "../";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
+        </script>
+
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            var html = document.querySelector('html');
+            html.classList.remove('light')
+            html.classList.add(theme);
+            var body = document.querySelector('body');
+            body.classList.remove('no-js')
+            body.classList.add('js');
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var body = document.querySelector('body');
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            body.classList.remove('sidebar-visible');
+            body.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <div class="sidebar-scrollbox">
+                <ol class="chapter"><li class="chapter-item affix "><a href="../index.html">Introduction</a></li><li class="chapter-item affix "><li class="part-title">Getting Started</li><li class="chapter-item "><a href="../getting-started/quickstart.html"><strong aria-hidden="true">1.</strong> 15-Minute Quickstart</a></li><li class="chapter-item "><a href="../install-helm-only.html"><strong aria-hidden="true">2.</strong> Installation Guide</a></li><li class="chapter-item "><a href="../HELM_CRD_UPGRADES.html"><strong aria-hidden="true">3.</strong> Helm CRD Upgrades</a></li><li class="chapter-item affix "><li class="part-title">Core Documentation</li><li class="chapter-item "><a href="../CRDs.html"><strong aria-hidden="true">4.</strong> Custom Resource Definitions</a></li><li class="chapter-item "><a href="../EXAMPLES.html"><strong aria-hidden="true">5.</strong> Examples</a></li><li class="chapter-item "><a href="../PROVIDERS.html"><strong aria-hidden="true">6.</strong> Provider Documentation</a></li><li class="chapter-item "><a href="../PROVIDERS_CAPABILITIES.html"><strong aria-hidden="true">7.</strong> Provider Capabilities Matrix</a></li><li class="chapter-item affix "><li class="part-title">Provider-Specific Guides</li><li class="chapter-item "><a href="../providers/vsphere.html"><strong aria-hidden="true">8.</strong> vSphere Provider</a></li><li class="chapter-item "><a href="../providers/libvirt.html"><strong aria-hidden="true">9.</strong> Libvirt Provider</a></li><li class="chapter-item expanded "><a href="../providers/proxmox.html" class="active"><strong aria-hidden="true">10.</strong> Proxmox VE Provider</a></li><li class="chapter-item "><a href="../providers/tutorial.html"><strong aria-hidden="true">11.</strong> Provider Tutorial</a></li><li class="chapter-item "><a href="../providers/versioning.html"><strong aria-hidden="true">12.</strong> Provider Versioning</a></li><li class="chapter-item affix "><li class="part-title">Advanced Features</li><li class="chapter-item "><a href="../ADVANCED_LIFECYCLE.html"><strong aria-hidden="true">13.</strong> VM Lifecycle Management</a></li><li class="chapter-item "><a href="../NESTED_VIRTUALIZATION.html"><strong aria-hidden="true">14.</strong> Nested Virtualization</a></li><li class="chapter-item "><a href="../GRACEFUL_SHUTDOWN.html"><strong aria-hidden="true">15.</strong> Graceful Shutdown</a></li><li class="chapter-item "><a href="../REMOTE_PROVIDERS.html"><strong aria-hidden="true">16.</strong> Remote Providers</a></li><li class="chapter-item affix "><li class="part-title">Operations & Administration</li><li class="chapter-item "><a href="../OBSERVABILITY.html"><strong aria-hidden="true">17.</strong> Observability</a></li><li class="chapter-item "><a href="../SECURITY.html"><strong aria-hidden="true">18.</strong> Security</a></li><li class="chapter-item "><a href="../RESILIENCE.html"><strong aria-hidden="true">19.</strong> Resilience</a></li><li class="chapter-item "><a href="../UPGRADE.html"><strong aria-hidden="true">20.</strong> Upgrade Guide</a></li><li class="chapter-item "><a href="../VSPHERE_HARDWARE_VERSION.html"><strong aria-hidden="true">21.</strong> vSphere Hardware Versions</a></li><li class="chapter-item affix "><li class="part-title">Security Configuration</li><li class="chapter-item "><a href="../providers/security/bearer-token.html"><strong aria-hidden="true">22.</strong> Bearer Token Authentication</a></li><li class="chapter-item "><a href="../providers/security/mtls.html"><strong aria-hidden="true">23.</strong> mTLS Configuration</a></li><li class="chapter-item "><a href="../providers/security/external-secrets.html"><strong aria-hidden="true">24.</strong> External Secrets</a></li><li class="chapter-item "><a href="../providers/security/network-policies.html"><strong aria-hidden="true">25.</strong> Network Policies</a></li><li class="chapter-item affix "><li class="part-title">API Reference</li><li class="chapter-item "><a href="../CLI.html"><strong aria-hidden="true">26.</strong> CLI Tools Reference</a></li><li class="chapter-item "><a href="../api-reference/cli.html"><strong aria-hidden="true">27.</strong> CLI API Reference</a></li><li class="chapter-item "><a href="../api-reference/metrics.html"><strong aria-hidden="true">28.</strong> Metrics Catalog</a></li><li class="chapter-item "><a href="../catalog.html"><strong aria-hidden="true">29.</strong> Provider Catalog</a></li><li class="chapter-item affix "><li class="part-title">Development</li><li class="chapter-item "><a href="../TESTING_WORKFLOWS_LOCALLY.html"><strong aria-hidden="true">30.</strong> Testing Workflows Locally</a></li><li class="chapter-item "><a href="../../../CONTRIBUTING.html"><strong aria-hidden="true">31.</strong> Contributing</a></li><li class="chapter-item "><a href="../../../DEVELOPMENT.html"><strong aria-hidden="true">32.</strong> Development Guide</a></li><li class="chapter-item affix "><li class="part-title">Examples</li><li class="chapter-item "><a href="../examples/index.html"><strong aria-hidden="true">33.</strong> Example README</a></li></ol>
+            </div>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <!-- Track and set sidebar scroll position -->
+        <script>
+            var sidebarScrollbox = document.querySelector('#sidebar .sidebar-scrollbox');
+            sidebarScrollbox.addEventListener('click', function(e) {
+                if (e.target.tagName === 'A') {
+                    sessionStorage.setItem('sidebar-scroll', sidebarScrollbox.scrollTop);
+                }
+            }, { passive: true });
+            var sidebarScrollTop = sessionStorage.getItem('sidebar-scroll');
+            sessionStorage.removeItem('sidebar-scroll');
+            if (sidebarScrollTop) {
+                // preserve sidebar scroll position when navigating via links within sidebar
+                sidebarScrollbox.scrollTop = sidebarScrollTop;
+            } else {
+                // scroll sidebar to current active section when navigating via "next/previous chapter" buttons
+                var activeSection = document.querySelector('#sidebar .active');
+                if (activeSection) {
+                    activeSection.scrollIntoView({ block: 'center' });
+                }
+            }
+        </script>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">VirtRigaud Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/projectbeskar/virtrigaud" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/projectbeskar/virtrigaud/edit/main/docs/src/providers/proxmox.md" title="Suggest an edit" aria-label="Suggest an edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="proxmox-ve-provider"><a class="header" href="#proxmox-ve-provider">Proxmox VE Provider</a></h1>
+<p>The Proxmox VE provider enables VirtRigaud to manage virtual machines on Proxmox Virtual Environment (PVE) clusters using the native Proxmox API.</p>
+<h2 id="overview"><a class="header" href="#overview">Overview</a></h2>
+<p>This provider implements the VirtRigaud provider interface to manage VM lifecycle operations on Proxmox VE:</p>
+<ul>
+<li><strong>Create</strong>: Create VMs from templates or ISO images with cloud-init support</li>
+<li><strong>Delete</strong>: Remove VMs and associated resources</li>
+<li><strong>Power</strong>: Start, stop, and reboot virtual machines</li>
+<li><strong>Describe</strong>: Query VM state, IPs, and console access</li>
+<li><strong>Guest Agent Integration</strong>: Enhanced IP detection via QEMU guest agent (v0.2.3+)</li>
+<li><strong>Reconfigure</strong>: Hot-plug CPU/memory changes, disk expansion</li>
+<li><strong>Clone</strong>: Create linked or full clones of existing VMs</li>
+<li><strong>Snapshot</strong>: Create, delete, and revert VM snapshots with memory state</li>
+<li><strong>ImagePrepare</strong>: Import and prepare VM templates from URLs or ensure existence</li>
+</ul>
+<h2 id="prerequisites"><a class="header" href="#prerequisites">Prerequisites</a></h2>
+<p><strong>⚠️ IMPORTANT: Active Proxmox VE Server Required</strong></p>
+<p>The Proxmox provider requires a running Proxmox VE server to function. Unlike some providers that can operate in simulation mode, this provider performs actual API calls to Proxmox VE during startup and operation.</p>
+<h3 id="requirements"><a class="header" href="#requirements">Requirements:</a></h3>
+<ul>
+<li><strong>Proxmox VE 7.0 or later</strong> (running and accessible)</li>
+<li><strong>API token or user account</strong> with appropriate privileges</li>
+<li><strong>Network connectivity</strong> from VirtRigaud to Proxmox API (port 8006/HTTPS)</li>
+<li><strong>Valid TLS configuration</strong> (production) or skip verification (development)</li>
+</ul>
+<h3 id="testingdevelopment"><a class="header" href="#testingdevelopment">Testing/Development:</a></h3>
+<p>If you don’t have a Proxmox VE server available:</p>
+<ul>
+<li>Use <a href="https://pve.proxmox.com/wiki/Installation">Proxmox VE in a VM</a> for testing</li>
+<li>Consider alternative providers (libvirt, vSphere) for local development</li>
+<li>The provider will fail startup validation without a reachable Proxmox endpoint</li>
+</ul>
+<h2 id="authentication"><a class="header" href="#authentication">Authentication</a></h2>
+<p>The Proxmox provider supports two authentication methods:</p>
+<h3 id="api-token-authentication-recommended"><a class="header" href="#api-token-authentication-recommended">API Token Authentication (Recommended)</a></h3>
+<p>API tokens provide secure, scope-limited access without exposing user passwords.</p>
+<ol>
+<li>
+<p><strong>Create API Token in Proxmox</strong>:</p>
+<pre><code class="language-bash"># In Proxmox web UI: Datacenter -&gt; Permissions -&gt; API Tokens
+# Or via CLI:
+pveum user token add &lt;USER@REALM&gt; &lt;TOKENID&gt; --privsep 0
+</code></pre>
+</li>
+<li>
+<p><strong>Configure Provider</strong>:</p>
+<pre><code class="language-yaml">apiVersion: infra.virtrigaud.io/v1beta1
+kind: Provider
+metadata:
+  name: proxmox-prod
+  namespace: default
+spec:
+  type: proxmox
+  endpoint: https://pve.example.com:8006
+  credentialSecretRef:
+    name: pve-credentials
+  runtime:
+    mode: Remote
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-proxmox:v0.2.3"
+    service:
+      port: 9090
+</code></pre>
+</li>
+<li>
+<p><strong>Create Credentials Secret</strong>:</p>
+<pre><code class="language-yaml">apiVersion: v1
+kind: Secret
+metadata:
+  name: pve-credentials
+  namespace: default
+type: Opaque
+stringData:
+  token_id: "virtrigaud@pve!vrtg-token"
+  token_secret: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+</code></pre>
+</li>
+</ol>
+<h3 id="session-cookie-authentication-optional"><a class="header" href="#session-cookie-authentication-optional">Session Cookie Authentication (Optional)</a></h3>
+<p>For environments that cannot use API tokens:</p>
+<pre><code class="language-yaml">apiVersion: v1
+kind: Secret
+metadata:
+  name: pve-credentials
+  namespace: default
+type: Opaque
+stringData:
+  username: "virtrigaud@pve"
+  password: "secure-password"
+</code></pre>
+<h2 id="deployment-configuration"><a class="header" href="#deployment-configuration">Deployment Configuration</a></h2>
+<h3 id="required-environment-variables"><a class="header" href="#required-environment-variables">Required Environment Variables</a></h3>
+<p>The Proxmox provider <strong>requires</strong> environment variables to connect to your Proxmox VE server. Configure these variables in your Helm values file:</p>
+<div class="table-wrapper"><table><thead><tr><th>Variable</th><th>Required</th><th>Description</th><th>Example</th></tr></thead><tbody>
+<tr><td><code>PVE_ENDPOINT</code></td><td>✅ <strong>Yes</strong></td><td>Proxmox VE API endpoint URL</td><td><code>https://pve.example.com:8006</code></td></tr>
+<tr><td><code>PVE_USERNAME</code></td><td>✅ <strong>Yes</strong>*</td><td>Username for password auth</td><td><code>root@pam</code> or <code>user@realm</code></td></tr>
+<tr><td><code>PVE_PASSWORD</code></td><td>✅ <strong>Yes</strong>*</td><td>Password for username</td><td><code>secure-password</code></td></tr>
+<tr><td><code>PVE_TOKEN_ID</code></td><td>✅ <strong>Yes</strong>**</td><td>API token ID (alternative)</td><td><code>user@realm!tokenid</code></td></tr>
+<tr><td><code>PVE_TOKEN_SECRET</code></td><td>✅ <strong>Yes</strong>**</td><td>API token secret (alternative)</td><td><code>xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx</code></td></tr>
+<tr><td><code>PVE_INSECURE_SKIP_VERIFY</code></td><td>🔵 Optional</td><td>Skip TLS verification</td><td><code>true</code> (dev only)</td></tr>
+</tbody></table>
+</div>
+<blockquote>
+<p><strong>*</strong> Either username/password OR token authentication is required<br />
+<strong>**</strong> API token authentication is recommended for production</p>
+</blockquote>
+<h3 id="helm-configuration-examples"><a class="header" href="#helm-configuration-examples">Helm Configuration Examples</a></h3>
+<h4 id="usernamepassword-authentication"><a class="header" href="#usernamepassword-authentication">Username/Password Authentication</a></h4>
+<pre><code class="language-yaml"># values.yaml
+providers:
+  proxmox:
+    enabled: true
+    env:
+      - name: PVE_ENDPOINT
+        value: "https://your-proxmox-server.example.com:8006"
+      - name: PVE_USERNAME
+        value: "root@pam"
+      - name: PVE_PASSWORD
+        value: "your-secure-password"
+</code></pre>
+<h4 id="api-token-authentication-recommended-1"><a class="header" href="#api-token-authentication-recommended-1">API Token Authentication (Recommended)</a></h4>
+<pre><code class="language-yaml"># values.yaml  
+providers:
+  proxmox:
+    enabled: true
+    env:
+      - name: PVE_ENDPOINT
+        value: "https://your-proxmox-server.example.com:8006"
+      - name: PVE_TOKEN_ID
+        value: "virtrigaud@pve!automation"
+      - name: PVE_TOKEN_SECRET
+        value: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+</code></pre>
+<h4 id="using-kubernetes-secrets-production"><a class="header" href="#using-kubernetes-secrets-production">Using Kubernetes Secrets (Production)</a></h4>
+<p>For production environments, use Kubernetes secrets:</p>
+<pre><code class="language-yaml"># Create secret first
+apiVersion: v1
+kind: Secret
+metadata:
+  name: proxmox-credentials
+type: Opaque
+stringData:
+  PVE_ENDPOINT: "https://your-proxmox-server.example.com:8006"
+  PVE_TOKEN_ID: "virtrigaud@pve!automation"  
+  PVE_TOKEN_SECRET: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+
+---
+# values.yaml - Reference the secret
+providers:
+  proxmox:
+    enabled: true
+    env:
+      - name: PVE_ENDPOINT
+        valueFrom:
+          secretKeyRef:
+            name: proxmox-credentials
+            key: PVE_ENDPOINT
+      - name: PVE_TOKEN_ID
+        valueFrom:
+          secretKeyRef:
+            name: proxmox-credentials
+            key: PVE_TOKEN_ID
+      - name: PVE_TOKEN_SECRET
+        valueFrom:
+          secretKeyRef:
+            name: proxmox-credentials
+            key: PVE_TOKEN_SECRET
+</code></pre>
+<h3 id="configuration-validation"><a class="header" href="#configuration-validation">Configuration Validation</a></h3>
+<p>The provider validates configuration at startup and will <strong>fail to start</strong> if:</p>
+<ul>
+<li>✅ <code>PVE_ENDPOINT</code> is missing or invalid</li>
+<li>✅ Neither username/password nor token credentials are provided</li>
+<li>✅ Proxmox server is unreachable</li>
+<li>✅ Authentication fails</li>
+</ul>
+<h4 id="error-examples"><a class="header" href="#error-examples">Error Examples</a></h4>
+<pre><code class="language-bash"># Missing endpoint
+ERROR Failed to create PVE client error="endpoint is required"
+
+# Invalid endpoint format  
+ERROR Failed to create PVE client error="invalid endpoint URL"
+
+# Authentication failure
+ERROR Failed to authenticate error="authentication failed: invalid credentials"
+
+# Connection failure
+ERROR Failed to connect error="dial tcp: no route to host"
+</code></pre>
+<h3 id="development-vs-production"><a class="header" href="#development-vs-production">Development vs Production</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Environment</th><th>Endpoint</th><th>Authentication</th><th>TLS</th><th>Notes</th></tr></thead><tbody>
+<tr><td><strong>Development</strong></td><td><code>https://pve-test.local:8006</code></td><td>Username/Password</td><td>Skip verify</td><td>Use <code>PVE_INSECURE_SKIP_VERIFY=true</code></td></tr>
+<tr><td><strong>Staging</strong></td><td><code>https://pve-staging.company.com:8006</code></td><td>API Token</td><td>Custom CA</td><td>Configure CA bundle</td></tr>
+<tr><td><strong>Production</strong></td><td><code>https://pve.company.com:8006</code></td><td>API Token</td><td>Valid cert</td><td>Use Kubernetes secrets</td></tr>
+</tbody></table>
+</div>
+<h2 id="tls-configuration"><a class="header" href="#tls-configuration">TLS Configuration</a></h2>
+<h3 id="self-signed-certificates-development"><a class="header" href="#self-signed-certificates-development">Self-Signed Certificates (Development)</a></h3>
+<p>For test environments with self-signed certificates:</p>
+<pre><code class="language-yaml">spec:
+  runtime:
+    env:
+      - name: PVE_INSECURE_SKIP_VERIFY
+        value: "true"
+</code></pre>
+<h3 id="custom-ca-certificate-production"><a class="header" href="#custom-ca-certificate-production">Custom CA Certificate (Production)</a></h3>
+<p>For production with custom CA:</p>
+<pre><code class="language-yaml">apiVersion: v1
+kind: Secret
+metadata:
+  name: pve-credentials
+type: Opaque
+stringData:
+  ca.crt: |
+    -----BEGIN CERTIFICATE-----
+    MIIDXTCCAkWgAwIBAgIJAL...
+    -----END CERTIFICATE-----
+</code></pre>
+<h2 id="reconfiguration-support"><a class="header" href="#reconfiguration-support">Reconfiguration Support</a></h2>
+<h3 id="online-reconfiguration"><a class="header" href="#online-reconfiguration">Online Reconfiguration</a></h3>
+<p>The Proxmox provider supports online (hot-plug) reconfiguration for:</p>
+<ul>
+<li><strong>CPU</strong>: Add/remove vCPUs while VM is running (guest OS support required)</li>
+<li><strong>Memory</strong>: Increase memory using balloon driver (guest tools required)</li>
+<li><strong>Disk Expansion</strong>: Expand disks online (disk shrinking not supported)</li>
+</ul>
+<h3 id="reconfigure-matrix"><a class="header" href="#reconfigure-matrix">Reconfigure Matrix</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Operation</th><th>Online Support</th><th>Requirements</th><th>Notes</th></tr></thead><tbody>
+<tr><td>CPU increase</td><td>✅ Yes</td><td>Guest OS support</td><td>Most modern Linux/Windows</td></tr>
+<tr><td>CPU decrease</td><td>✅ Yes</td><td>Guest OS support</td><td>May require guest cooperation</td></tr>
+<tr><td>Memory increase</td><td>✅ Yes</td><td>Balloon driver</td><td>Install qemu-guest-agent</td></tr>
+<tr><td>Memory decrease</td><td>⚠️ Limited</td><td>Balloon driver + guest</td><td>May require power cycle</td></tr>
+<tr><td>Disk expand</td><td>✅ Yes</td><td>Online resize support</td><td>Filesystem resize separate</td></tr>
+<tr><td>Disk shrink</td><td>❌ No</td><td>Not supported</td><td>Security/data protection</td></tr>
+</tbody></table>
+</div>
+<h3 id="example-reconfiguration"><a class="header" href="#example-reconfiguration">Example Reconfiguration</a></h3>
+<pre><code class="language-yaml"># Scale up VM resources
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: web-server
+spec:
+  # ... existing spec ...
+  classRef:
+    name: large  # Changed from 'small'
+---
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMClass
+metadata:
+  name: large
+spec:
+  cpus: 8        # Increased from 2
+  memory: "16Gi" # Increased from 4Gi
+</code></pre>
+<h2 id="snapshot-management"><a class="header" href="#snapshot-management">Snapshot Management</a></h2>
+<h3 id="snapshot-features"><a class="header" href="#snapshot-features">Snapshot Features</a></h3>
+<ul>
+<li><strong>Memory Snapshots</strong>: Include VM memory state for consistent restore</li>
+<li><strong>Crash-Consistent</strong>: Without memory for faster snapshots</li>
+<li><strong>Snapshot Trees</strong>: Nested snapshots with parent-child relationships</li>
+<li><strong>Metadata</strong>: Description and timestamp tracking</li>
+</ul>
+<h3 id="snapshot-operations"><a class="header" href="#snapshot-operations">Snapshot Operations</a></h3>
+<pre><code class="language-yaml"># Create snapshot with memory
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMSnapshot
+metadata:
+  name: before-upgrade
+spec:
+  vmRef:
+    name: web-server
+  description: "Pre-maintenance snapshot"
+  includeMemory: true  # Include running memory state
+</code></pre>
+<pre><code class="language-bash"># Create snapshot via kubectl
+kubectl create vmsnapshot before-upgrade \
+  --vm=web-server \
+  --description="Before major upgrade" \
+  --include-memory=true
+</code></pre>
+<h2 id="multi-nic-networking"><a class="header" href="#multi-nic-networking">Multi-NIC Networking</a></h2>
+<h3 id="network-configuration"><a class="header" href="#network-configuration">Network Configuration</a></h3>
+<p>The provider supports multiple network interfaces with:</p>
+<ul>
+<li><strong>Bridge Assignment</strong>: Map to Proxmox bridges (vmbr0, vmbr1, etc.)</li>
+<li><strong>VLAN Tagging</strong>: 802.1Q VLAN support</li>
+<li><strong>Static IPs</strong>: Cloud-init integration for network configuration</li>
+<li><strong>MAC Addresses</strong>: Custom MAC assignment</li>
+</ul>
+<h3 id="example-multi-nic-vm"><a class="header" href="#example-multi-nic-vm">Example Multi-NIC VM</a></h3>
+<pre><code class="language-yaml">apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: multi-nic-vm
+spec:
+  providerRef:
+    name: proxmox-prod
+  classRef:
+    name: medium
+  imageRef:
+    name: ubuntu-22
+  networks:
+    # Primary LAN interface
+    - name: lan
+      bridge: vmbr0
+      staticIP:
+        address: "192.168.1.100/24"
+        gateway: "192.168.1.1"
+        dns: ["8.8.8.8", "1.1.1.1"]
+    
+    # DMZ interface with VLAN
+    - name: dmz
+      bridge: vmbr1
+      vlan: 100
+      staticIP:
+        address: "10.0.100.50/24"
+    
+    # Management interface
+    - name: mgmt
+      bridge: vmbr2
+      mac: "02:00:00:aa:bb:cc"
+</code></pre>
+<h3 id="network-bridge-mapping"><a class="header" href="#network-bridge-mapping">Network Bridge Mapping</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Network Name</th><th>Default Bridge</th><th>Use Case</th></tr></thead><tbody>
+<tr><td><code>lan</code>, <code>default</code></td><td>vmbr0</td><td>General LAN connectivity</td></tr>
+<tr><td><code>dmz</code></td><td>vmbr1</td><td>DMZ/public services</td></tr>
+<tr><td><code>mgmt</code>, <code>management</code></td><td>vmbr2</td><td>Management network</td></tr>
+<tr><td><code>vmbr*</code></td><td>Same name</td><td>Direct bridge reference</td></tr>
+</tbody></table>
+</div>
+<h2 id="configuration"><a class="header" href="#configuration">Configuration</a></h2>
+<h3 id="required-environment-variables-1"><a class="header" href="#required-environment-variables-1">Required Environment Variables</a></h3>
+<p><strong>⚠️ The provider requires environment variables to connect to Proxmox VE:</strong></p>
+<div class="table-wrapper"><table><thead><tr><th>Variable</th><th>Description</th><th>Required</th><th>Default</th><th>Example</th></tr></thead><tbody>
+<tr><td><code>PVE_ENDPOINT</code></td><td>Proxmox API endpoint URL</td><td><strong>Yes</strong></td><td>-</td><td><code>https://pve.example.com:8006/api2</code></td></tr>
+<tr><td><code>PVE_TOKEN_ID</code></td><td>API token identifier</td><td>Yes*</td><td>-</td><td><code>virtrigaud@pve!vrtg-token</code></td></tr>
+<tr><td><code>PVE_TOKEN_SECRET</code></td><td>API token secret</td><td>Yes*</td><td>-</td><td><code>xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx</code></td></tr>
+<tr><td><code>PVE_USERNAME</code></td><td>Username for session auth</td><td>Yes*</td><td>-</td><td><code>virtrigaud@pve</code></td></tr>
+<tr><td><code>PVE_PASSWORD</code></td><td>Password for session auth</td><td>Yes*</td><td>-</td><td><code>secure-password</code></td></tr>
+<tr><td><code>PVE_NODE_SELECTOR</code></td><td>Preferred nodes (comma-separated)</td><td>No</td><td>Auto-detect</td><td><code>pve-node-1,pve-node-2</code></td></tr>
+<tr><td><code>PVE_INSECURE_SKIP_VERIFY</code></td><td>Skip TLS verification</td><td>No</td><td><code>false</code></td><td><code>true</code></td></tr>
+<tr><td><code>PVE_CA_BUNDLE</code></td><td>Custom CA certificate</td><td>No</td><td>-</td><td><code>-----BEGIN CERTIFICATE-----...</code></td></tr>
+</tbody></table>
+</div>
+<p>* Either token (<code>PVE_TOKEN_ID</code> + <code>PVE_TOKEN_SECRET</code>) or username/password (<code>PVE_USERNAME</code> + <code>PVE_PASSWORD</code>) is required</p>
+<h3 id="deployment-configuration-1"><a class="header" href="#deployment-configuration-1">Deployment Configuration</a></h3>
+<p>The provider needs environment variables to connect to Proxmox. Here are complete deployment examples:</p>
+<h4 id="using-helm-values"><a class="header" href="#using-helm-values">Using Helm Values</a></h4>
+<pre><code class="language-yaml"># values.yaml
+providers:
+  proxmox:
+    enabled: true
+    env:
+      - name: PVE_ENDPOINT
+        value: "https://pve.example.com:8006/api2"
+      - name: PVE_TOKEN_ID
+        value: "virtrigaud@pve!vrtg-token"
+      - name: PVE_TOKEN_SECRET
+        value: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+      - name: PVE_INSECURE_SKIP_VERIFY
+        value: "true"  # Only for development!
+      - name: PVE_NODE_SELECTOR
+        value: "pve-node-1,pve-node-2"  # Optional
+</code></pre>
+<h4 id="using-kubernetes-secrets-recommended"><a class="header" href="#using-kubernetes-secrets-recommended">Using Kubernetes Secrets (Recommended)</a></h4>
+<pre><code class="language-yaml"># Create secret with credentials
+apiVersion: v1
+kind: Secret
+metadata:
+  name: proxmox-credentials
+  namespace: virtrigaud-system
+type: Opaque
+stringData:
+  PVE_ENDPOINT: "https://pve.example.com:8006/api2"
+  PVE_TOKEN_ID: "virtrigaud@pve!vrtg-token"
+  PVE_TOKEN_SECRET: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+  PVE_INSECURE_SKIP_VERIFY: "false"
+
+---
+# Reference secret in deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: virtrigaud-provider-proxmox
+spec:
+  template:
+    spec:
+      containers:
+      - name: provider-proxmox
+        image: ghcr.io/projectbeskar/virtrigaud/provider-proxmox:v0.2.3
+        envFrom:
+        - secretRef:
+            name: proxmox-credentials
+</code></pre>
+<h4 id="developmenttesting-configuration"><a class="header" href="#developmenttesting-configuration">Development/Testing Configuration</a></h4>
+<pre><code class="language-yaml"># For development with a local Proxmox VE instance
+providers:
+  proxmox:
+    enabled: true
+    env:
+      - name: PVE_ENDPOINT
+        value: "https://192.168.1.100:8006/api2"
+      - name: PVE_USERNAME
+        value: "root@pam"
+      - name: PVE_PASSWORD
+        value: "your-password"
+      - name: PVE_INSECURE_SKIP_VERIFY
+        value: "true"
+</code></pre>
+<h3 id="node-selection"><a class="header" href="#node-selection">Node Selection</a></h3>
+<p>The provider can be configured to prefer specific nodes:</p>
+<pre><code class="language-yaml">env:
+  - name: PVE_NODE_SELECTOR
+    value: "pve-node-1,pve-node-2"
+</code></pre>
+<p>If not specified, the provider will automatically select nodes based on availability.</p>
+<h2 id="vm-configuration"><a class="header" href="#vm-configuration">VM Configuration</a></h2>
+<h3 id="vmclass-specification"><a class="header" href="#vmclass-specification">VMClass Specification</a></h3>
+<p>Define CPU and memory resources:</p>
+<pre><code class="language-yaml">apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMClass
+metadata:
+  name: small
+spec:
+  cpus: 2
+  memory: "4Gi"
+  # Proxmox-specific settings
+  spec:
+    machine: "q35"
+    bios: "uefi"
+</code></pre>
+<h3 id="vmimage-specification"><a class="header" href="#vmimage-specification">VMImage Specification</a></h3>
+<p>Reference Proxmox templates:</p>
+<pre><code class="language-yaml">apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMImage
+metadata:
+  name: ubuntu-22
+spec:
+  source: "ubuntu-22-template"  # Template name in Proxmox
+  # Or clone from existing VM:
+  # source: "9000"  # VMID to clone from
+</code></pre>
+<h3 id="virtualmachine-example"><a class="header" href="#virtualmachine-example">VirtualMachine Example</a></h3>
+<pre><code class="language-yaml">apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: web-server
+spec:
+  providerRef:
+    name: proxmox-prod
+  classRef:
+    name: small
+  imageRef:
+    name: ubuntu-22
+  powerState: On
+  networks:
+    - name: lan
+      # Maps to Proxmox bridge or VLAN configuration
+  disks:
+    - name: root
+      size: "40Gi"
+  userData:
+    cloudInit:
+      inline: |
+        #cloud-config
+        hostname: web-server
+        users:
+          - name: ubuntu
+            ssh_authorized_keys:
+              - "ssh-ed25519 AAAA..."
+        packages:
+          - nginx
+</code></pre>
+<h2 id="cloud-init-integration"><a class="header" href="#cloud-init-integration">Cloud-Init Integration</a></h2>
+<p>The provider automatically configures cloud-init for supported VMs:</p>
+<h3 id="automatic-configuration"><a class="header" href="#automatic-configuration">Automatic Configuration</a></h3>
+<ul>
+<li><strong>IDE2 Device</strong>: Attached as cloudinit drive</li>
+<li><strong>User Data</strong>: Rendered from VirtualMachine spec</li>
+<li><strong>Network Config</strong>: Generated from network specifications</li>
+<li><strong>SSH Keys</strong>: Extracted from userData or secrets</li>
+</ul>
+<h3 id="static-ip-configuration"><a class="header" href="#static-ip-configuration">Static IP Configuration</a></h3>
+<p>Configure static IPs using cloud-init:</p>
+<pre><code class="language-yaml">userData:
+  cloudInit:
+    inline: |
+      #cloud-config
+      write_files:
+        - path: /etc/netplan/01-static.yaml
+          content: |
+            network:
+              version: 2
+              ethernets:
+                ens18:
+                  addresses: [192.168.1.100/24]
+                  gateway4: 192.168.1.1
+                  nameservers:
+                    addresses: [8.8.8.8, 1.1.1.1]
+</code></pre>
+<p>Or use Proxmox IP configuration:</p>
+<pre><code class="language-yaml"># This would be handled by the provider internally
+# when processing network specifications
+</code></pre>
+<h2 id="guest-agent-integration-v023"><a class="header" href="#guest-agent-integration-v023">Guest Agent Integration (v0.2.3+)</a></h2>
+<p>The Proxmox provider now integrates with the QEMU Guest Agent for enhanced VM monitoring:</p>
+<h3 id="ip-address-detection"><a class="header" href="#ip-address-detection">IP Address Detection</a></h3>
+<p>When a VM is running, the provider automatically queries the QEMU guest agent to retrieve accurate IP addresses:</p>
+<pre><code class="language-yaml"># IP addresses are automatically populated in VM status
+kubectl get vm my-vm -o yaml
+
+status:
+  phase: Running
+  ipAddresses:
+    - 192.168.1.100
+    - fd00::1234:5678:9abc:def0
+</code></pre>
+<h3 id="features"><a class="header" href="#features">Features</a></h3>
+<ul>
+<li><strong>Automatic IP Detection</strong>: Retrieves all network interface IPs from running VMs</li>
+<li><strong>IPv4 and IPv6 Support</strong>: Reports both address families</li>
+<li><strong>Smart Filtering</strong>: Excludes loopback (127.0.0.1, ::1) and link-local (169.254.x.x, fe80::) addresses</li>
+<li><strong>Real-time Updates</strong>: Information updated during Describe operations</li>
+<li><strong>Graceful Degradation</strong>: Falls back gracefully when guest agent is not available</li>
+</ul>
+<h3 id="requirements-1"><a class="header" href="#requirements-1">Requirements</a></h3>
+<p>For guest agent integration to work, the VM must have:</p>
+<ol>
+<li>
+<p><strong>QEMU Guest Agent Installed</strong>:</p>
+<pre><code class="language-bash"># Ubuntu/Debian
+apt-get install qemu-guest-agent
+
+# CentOS/RHEL
+yum install qemu-guest-agent
+
+# Enable and start the service
+systemctl enable --now qemu-guest-agent
+</code></pre>
+</li>
+<li>
+<p><strong>VM Configuration</strong>: Guest agent is automatically enabled during VM creation</p>
+</li>
+</ol>
+<h3 id="implementation-details"><a class="header" href="#implementation-details">Implementation Details</a></h3>
+<p>The provider:</p>
+<ol>
+<li>Checks if VM is in running state</li>
+<li>Makes API call to <code>/api2/json/nodes/{node}/qemu/{vmid}/agent/network-get-interfaces</code></li>
+<li>Parses network interface details from guest agent response</li>
+<li>Filters out irrelevant addresses (loopback, link-local)</li>
+<li>Populates <code>status.ipAddresses</code> field</li>
+</ol>
+<h3 id="troubleshooting"><a class="header" href="#troubleshooting">Troubleshooting</a></h3>
+<p>If IP addresses are not appearing:</p>
+<ul>
+<li>Verify guest agent is installed: <code>systemctl status qemu-guest-agent</code></li>
+<li>Check Proxmox VM options: <code>qm config &lt;vmid&gt; | grep agent</code></li>
+<li>Ensure VM has network connectivity</li>
+<li>Check provider logs for guest agent errors</li>
+</ul>
+<h2 id="cloning-behavior"><a class="header" href="#cloning-behavior">Cloning Behavior</a></h2>
+<h3 id="linked-clones-default"><a class="header" href="#linked-clones-default">Linked Clones (Default)</a></h3>
+<p>Efficient space usage, faster creation:</p>
+<pre><code class="language-yaml">apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMClone
+metadata:
+  name: web-clone
+spec:
+  sourceVMRef:
+    name: template-vm
+  linkedClone: true  # Default
+</code></pre>
+<h3 id="full-clones"><a class="header" href="#full-clones">Full Clones</a></h3>
+<p>Independent copies, slower creation:</p>
+<pre><code class="language-yaml">spec:
+  linkedClone: false
+</code></pre>
+<h2 id="snapshots"><a class="header" href="#snapshots">Snapshots</a></h2>
+<p>Create and manage VM snapshots:</p>
+<pre><code class="language-yaml">apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMSnapshot
+metadata:
+  name: before-upgrade
+spec:
+  vmRef:
+    name: web-server
+  description: "Snapshot before system upgrade"
+</code></pre>
+<h2 id="troubleshooting-1"><a class="header" href="#troubleshooting-1">Troubleshooting</a></h2>
+<h3 id="common-issues"><a class="header" href="#common-issues">Common Issues</a></h3>
+<h4 id="authentication-failures"><a class="header" href="#authentication-failures">Authentication Failures</a></h4>
+<pre><code>Error: failed to connect to Proxmox VE: authentication failed
+</code></pre>
+<p><strong>Solutions</strong>:</p>
+<ul>
+<li>Verify API token permissions</li>
+<li>Check token expiration</li>
+<li>Ensure user has VM.* privileges</li>
+</ul>
+<h4 id="tls-certificate-errors"><a class="header" href="#tls-certificate-errors">TLS Certificate Errors</a></h4>
+<pre><code>Error: x509: certificate signed by unknown authority
+</code></pre>
+<p><strong>Solutions</strong>:</p>
+<ul>
+<li>Add custom CA certificate to credentials secret</li>
+<li>Use <code>PVE_INSECURE_SKIP_VERIFY=true</code> for testing</li>
+<li>Verify certificate chain</li>
+</ul>
+<h4 id="vm-creation-failures"><a class="header" href="#vm-creation-failures">VM Creation Failures</a></h4>
+<pre><code>Error: create VM failed with status 400: storage 'local-lvm' does not exist
+</code></pre>
+<p><strong>Solutions</strong>:</p>
+<ul>
+<li>Verify storage configuration in Proxmox</li>
+<li>Check node availability</li>
+<li>Ensure sufficient resources</li>
+</ul>
+<h3 id="debug-logging"><a class="header" href="#debug-logging">Debug Logging</a></h3>
+<p>Enable debug logging for troubleshooting:</p>
+<pre><code class="language-yaml">env:
+  - name: LOG_LEVEL
+    value: "debug"
+</code></pre>
+<h3 id="health-checks"><a class="header" href="#health-checks">Health Checks</a></h3>
+<p>Monitor provider health:</p>
+<pre><code class="language-bash"># Check provider pod logs
+kubectl logs -n virtrigaud-system deployment/provider-proxmox
+
+# Test connectivity
+kubectl exec -n virtrigaud-system deployment/provider-proxmox -- \
+  curl -k https://pve.example.com:8006/api2/json/version
+</code></pre>
+<h2 id="performance-considerations"><a class="header" href="#performance-considerations">Performance Considerations</a></h2>
+<h3 id="resource-allocation"><a class="header" href="#resource-allocation">Resource Allocation</a></h3>
+<p>For production environments:</p>
+<pre><code class="language-yaml">resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+</code></pre>
+<h3 id="concurrent-operations"><a class="header" href="#concurrent-operations">Concurrent Operations</a></h3>
+<p>The provider handles concurrent VM operations efficiently but consider:</p>
+<ul>
+<li>Node capacity limits</li>
+<li>Storage I/O constraints</li>
+<li>Network bandwidth</li>
+</ul>
+<h3 id="task-polling"><a class="header" href="#task-polling">Task Polling</a></h3>
+<p>Task completion is polled every 2 seconds with a 5-minute timeout. These can be tuned via environment variables if needed.</p>
+<h2 id="minimal-proxmox-ve-permissions"><a class="header" href="#minimal-proxmox-ve-permissions">Minimal Proxmox VE Permissions</a></h2>
+<h3 id="required-api-token-permissions"><a class="header" href="#required-api-token-permissions">Required API Token Permissions</a></h3>
+<p>Create an API token with these minimal privileges:</p>
+<pre><code class="language-bash"># Create user for VirtRigaud
+pveum user add virtrigaud@pve --comment "VirtRigaud Provider"
+
+# Create API token
+pveum user token add virtrigaud@pve vrtg-token --privsep 1
+
+# Grant minimal required permissions
+pveum acl modify / --users virtrigaud@pve --roles PVEVMAdmin,PVEDatastoreUser
+
+# Custom role with minimal permissions (alternative)
+pveum role add VirtRigaud --privs "VM.Allocate,VM.Audit,VM.Config.CPU,VM.Config.Memory,VM.Config.Disk,VM.Config.Network,VM.Config.Options,VM.Monitor,VM.PowerMgmt,VM.Snapshot,VM.Clone,Datastore.Allocate,Datastore.AllocateSpace,Pool.Allocate"
+pveum acl modify / --users virtrigaud@pve --roles VirtRigaud
+</code></pre>
+<h3 id="permission-details"><a class="header" href="#permission-details">Permission Details</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Permission</th><th>Usage</th><th>Required</th></tr></thead><tbody>
+<tr><td><code>VM.Allocate</code></td><td>Create new VMs</td><td>✅ Core</td></tr>
+<tr><td><code>VM.Audit</code></td><td>Read VM configuration</td><td>✅ Core</td></tr>
+<tr><td><code>VM.Config.*</code></td><td>Modify VM settings</td><td>✅ Reconfigure</td></tr>
+<tr><td><code>VM.Monitor</code></td><td>VM status monitoring</td><td>✅ Core</td></tr>
+<tr><td><code>VM.PowerMgmt</code></td><td>Power operations</td><td>✅ Core</td></tr>
+<tr><td><code>VM.Snapshot</code></td><td>Snapshot operations</td><td>⚠️ Optional</td></tr>
+<tr><td><code>VM.Clone</code></td><td>VM cloning</td><td>⚠️ Optional</td></tr>
+<tr><td><code>Datastore.Allocate</code></td><td>Create VM disks</td><td>✅ Core</td></tr>
+<tr><td><code>Pool.Allocate</code></td><td>Resource pool usage</td><td>⚠️ Optional</td></tr>
+</tbody></table>
+</div>
+<h3 id="token-rotation-procedure"><a class="header" href="#token-rotation-procedure">Token Rotation Procedure</a></h3>
+<pre><code class="language-bash"># 1. Create new token
+NEW_TOKEN=$(pveum user token add virtrigaud@pve vrtg-token-2 --privsep 1 --output-format json | jq -r '.value')
+
+# 2. Update Kubernetes secret
+kubectl patch secret pve-credentials -n virtrigaud-system --type='merge' -p='{"stringData":{"token_id":"virtrigaud@pve!vrtg-token-2","token_secret":"'$NEW_TOKEN'"}}'
+
+# 3. Restart provider to use new token
+kubectl rollout restart deployment provider-proxmox -n virtrigaud-system
+
+# 4. Verify new token works
+kubectl logs deployment/provider-proxmox -n virtrigaud-system
+
+# 5. Remove old token
+pveum user token remove virtrigaud@pve vrtg-token
+</code></pre>
+<h2 id="networkpolicy-examples"><a class="header" href="#networkpolicy-examples">NetworkPolicy Examples</a></h2>
+<h3 id="production-networkpolicy"><a class="header" href="#production-networkpolicy">Production NetworkPolicy</a></h3>
+<pre><code class="language-yaml">apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: provider-proxmox-netpol
+  namespace: virtrigaud-system
+spec:
+  podSelector:
+    matchLabels:
+      app: provider-proxmox
+  policyTypes: [Ingress, Egress]
+  
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: virtrigaud-manager
+    ports: [9443, 8080]
+  
+  egress:
+  # DNS resolution
+  - to: []
+    ports: [53]
+  
+  # Proxmox VE API
+  - to:
+    - ipBlock:
+        cidr: 192.168.1.0/24  # Your PVE network
+    ports: [8006]
+</code></pre>
+<h3 id="development-networkpolicy"><a class="header" href="#development-networkpolicy">Development NetworkPolicy</a></h3>
+<pre><code class="language-yaml">apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: provider-proxmox-dev-netpol
+  namespace: virtrigaud-system
+spec:
+  podSelector:
+    matchLabels:
+      app: provider-proxmox
+      environment: development
+  egress:
+  - to: []  # Allow all egress for development
+</code></pre>
+<h2 id="storage-and-placement"><a class="header" href="#storage-and-placement">Storage and Placement</a></h2>
+<h3 id="storage-class-mapping"><a class="header" href="#storage-class-mapping">Storage Class Mapping</a></h3>
+<p>Configure storage placement for different workloads:</p>
+<pre><code class="language-yaml"># High-performance storage
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMClass
+metadata:
+  name: high-performance
+spec:
+  cpus: 8
+  memory: "32Gi"
+  storage:
+    class: "nvme-storage"  # Maps to PVE storage
+    type: "thin"           # Thin provisioning
+    
+# Standard storage
+apiVersion: infra.virtrigaud.io/v1beta1  
+kind: VMClass
+metadata:
+  name: standard
+spec:
+  cpus: 4
+  memory: "8Gi"
+  storage:
+    class: "ssd-storage"
+    type: "thick"          # Thick provisioning
+</code></pre>
+<h3 id="placement-policies"><a class="header" href="#placement-policies">Placement Policies</a></h3>
+<pre><code class="language-yaml">apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMPlacementPolicy
+metadata:
+  name: production-placement
+spec:
+  nodeSelector:
+    - "pve-node-1"
+    - "pve-node-2"
+  antiAffinity:
+    - key: "vm.type"
+      operator: "In"
+      values: ["database"]
+  constraints:
+    maxVMsPerNode: 10
+    minFreeMemory: "4Gi"
+</code></pre>
+<h2 id="performance-testing"><a class="header" href="#performance-testing">Performance Testing</a></h2>
+<h3 id="load-test-results"><a class="header" href="#load-test-results">Load Test Results</a></h3>
+<p>Performance benchmarks using virtrigaud-loadgen against fake PVE server:</p>
+<div class="table-wrapper"><table><thead><tr><th>Operation</th><th>P50 Latency</th><th>P95 Latency</th><th>Throughput</th><th>Notes</th></tr></thead><tbody>
+<tr><td>Create VM</td><td>2.3s</td><td>4.1s</td><td>12 ops/min</td><td>Including cloud-init</td></tr>
+<tr><td>Power On</td><td>800ms</td><td>1.2s</td><td>45 ops/min</td><td>Async operation</td></tr>
+<tr><td>Power Off</td><td>650ms</td><td>1.1s</td><td>50 ops/min</td><td>Graceful shutdown</td></tr>
+<tr><td>Describe</td><td>120ms</td><td>200ms</td><td>200 ops/min</td><td>Status query</td></tr>
+<tr><td>Reconfigure CPU</td><td>1.8s</td><td>3.2s</td><td>15 ops/min</td><td>Online hot-plug</td></tr>
+<tr><td>Snapshot Create</td><td>3.5s</td><td>6.8s</td><td>8 ops/min</td><td>With memory</td></tr>
+<tr><td>Clone (Linked)</td><td>1.9s</td><td>3.4s</td><td>12 ops/min</td><td>Fast COW clone</td></tr>
+</tbody></table>
+</div>
+<h3 id="running-performance-tests"><a class="header" href="#running-performance-tests">Running Performance Tests</a></h3>
+<pre><code class="language-bash"># Deploy fake PVE server for testing
+kubectl apply -f test/performance/proxmox-loadtest.yaml
+
+# Run performance test
+kubectl create job proxmox-perf-test --from=cronjob/proxmox-performance-test
+
+# View results
+kubectl logs job/proxmox-perf-test -f
+</code></pre>
+<h2 id="security-best-practices"><a class="header" href="#security-best-practices">Security Best Practices</a></h2>
+<ol>
+<li><strong>Use API Tokens</strong>: Prefer API tokens over username/password</li>
+<li><strong>Least Privilege</strong>: Grant minimal required permissions (see above)</li>
+<li><strong>TLS Verification</strong>: Always verify certificates in production</li>
+<li><strong>Secret Management</strong>: Use Kubernetes secrets with proper RBAC</li>
+<li><strong>Network Policies</strong>: Restrict provider network access (see examples)</li>
+<li><strong>Regular Rotation</strong>: Rotate API tokens quarterly</li>
+<li><strong>Audit Logging</strong>: Enable PVE audit logs for provider actions</li>
+<li><strong>Resource Quotas</strong>: Limit provider resource consumption</li>
+</ol>
+<h2 id="examples"><a class="header" href="#examples">Examples</a></h2>
+<h3 id="multi-node-setup"><a class="header" href="#multi-node-setup">Multi-Node Setup</a></h3>
+<pre><code class="language-yaml">apiVersion: infra.virtrigaud.io/v1beta1
+kind: Provider
+metadata:
+  name: proxmox-cluster
+spec:
+  type: proxmox
+  endpoint: https://pve-cluster.example.com:8006
+  runtime:
+    env:
+      - name: PVE_NODE_SELECTOR
+        value: "pve-1,pve-2,pve-3"
+</code></pre>
+<h3 id="high-availability-configuration"><a class="header" href="#high-availability-configuration">High-Availability Configuration</a></h3>
+<pre><code class="language-yaml">apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: provider-proxmox
+spec:
+  replicas: 2
+  template:
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  app: provider-proxmox
+              topologyKey: kubernetes.io/hostname
+</code></pre>
+<h2 id="troubleshooting-2"><a class="header" href="#troubleshooting-2">Troubleshooting</a></h2>
+<h3 id="common-issues-1"><a class="header" href="#common-issues-1">Common Issues</a></h3>
+<h4 id="-endpoint-is-required-error"><a class="header" href="#-endpoint-is-required-error">❌ “endpoint is required” Error</a></h4>
+<p><strong>Symptom</strong>: Provider pod crashes with <code>ERROR Failed to create PVE client error="endpoint is required"</code></p>
+<p><strong>Cause</strong>: Missing or empty <code>PVE_ENDPOINT</code> environment variable</p>
+<p><strong>Solution</strong>:</p>
+<pre><code class="language-yaml"># Ensure PVE_ENDPOINT is set in deployment
+env:
+  - name: PVE_ENDPOINT
+    value: "https://your-proxmox.example.com:8006/api2"
+</code></pre>
+<h4 id="-connection-timeoutrefused"><a class="header" href="#-connection-timeoutrefused">❌ Connection Timeout/Refused</a></h4>
+<p><strong>Symptom</strong>: Provider fails with connection timeouts or “connection refused”</p>
+<p><strong>Cause</strong>: Network connectivity issues or wrong endpoint URL</p>
+<p><strong>Solutions</strong>:</p>
+<ol>
+<li>
+<p><strong>Verify endpoint</strong>: Test from a pod in the cluster:</p>
+<pre><code class="language-bash">kubectl run test-curl --rm -i --tty --image=curlimages/curl -- \
+  curl -k https://your-proxmox.example.com:8006/api2/json/version
+</code></pre>
+</li>
+<li>
+<p><strong>Check firewall</strong>: Ensure port 8006 is accessible from Kubernetes cluster</p>
+</li>
+<li>
+<p><strong>Verify URL format</strong>: Should be <code>https://hostname:8006/api2</code> (note the <code>/api2</code> path)</p>
+</li>
+</ol>
+<h4 id="-tls-certificate-errors"><a class="header" href="#-tls-certificate-errors">❌ TLS Certificate Errors</a></h4>
+<p><strong>Symptom</strong>: <code>x509: certificate signed by unknown authority</code></p>
+<p><strong>Solutions</strong>:</p>
+<ul>
+<li><strong>Development</strong>: Set <code>PVE_INSECURE_SKIP_VERIFY=true</code> (not for production!)</li>
+<li><strong>Production</strong>: Provide valid TLS certificates or CA bundle</li>
+</ul>
+<h4 id="-authentication-failures"><a class="header" href="#-authentication-failures">❌ Authentication Failures</a></h4>
+<p><strong>Symptom</strong>: <code>401 Unauthorized</code> or <code>authentication failure</code></p>
+<p><strong>Solutions</strong>:</p>
+<ol>
+<li>
+<p><strong>Verify token permissions</strong>:</p>
+<pre><code class="language-bash"># Test API token manually
+curl -k "https://pve.example.com:8006/api2/json/version" \
+  -H "Authorization: PVEAPIToken=USER@REALM!TOKENID=SECRET"
+</code></pre>
+</li>
+<li>
+<p><strong>Check user privileges</strong>: Ensure user has VM management permissions</p>
+</li>
+<li>
+<p><strong>Verify token format</strong>: Should be <code>user@realm!tokenid</code> (note the <code>!</code>)</p>
+</li>
+</ol>
+<h4 id="-provider-not-starting"><a class="header" href="#-provider-not-starting">❌ Provider Not Starting</a></h4>
+<p><strong>Symptom</strong>: Pod in <code>CrashLoopBackOff</code> or <code>0/1 Ready</code></p>
+<p><strong>Diagnostic Steps</strong>:</p>
+<pre><code class="language-bash"># Check pod logs
+kubectl logs -n virtrigaud-system deployment/virtrigaud-provider-proxmox
+
+# Check environment variables
+kubectl describe pod -n virtrigaud-system -l app.kubernetes.io/component=provider-proxmox
+
+# Verify configuration
+kubectl get secret proxmox-credentials -o yaml
+</code></pre>
+<h3 id="validation-commands"><a class="header" href="#validation-commands">Validation Commands</a></h3>
+<p>Test your Proxmox connection before deploying:</p>
+<pre><code class="language-bash"># 1. Test network connectivity
+telnet your-proxmox.example.com 8006
+
+# 2. Test API endpoint
+curl -k https://your-proxmox.example.com:8006/api2/json/version
+
+# 3. Test authentication
+curl -k "https://your-proxmox.example.com:8006/api2/json/nodes" \
+  -H "Authorization: PVEAPIToken=USER@REALM!TOKENID=SECRET"
+
+# 4. Test from within cluster
+kubectl run debug --rm -i --tty --image=curlimages/curl -- sh
+# Then run curl commands from inside the pod
+</code></pre>
+<h3 id="debug-logging-1"><a class="header" href="#debug-logging-1">Debug Logging</a></h3>
+<p>Enable verbose logging for the provider:</p>
+<pre><code class="language-yaml">providers:
+  proxmox:
+    env:
+      - name: LOG_LEVEL
+        value: "debug"
+      - name: PVE_ENDPOINT
+        value: "https://pve.example.com:8006/api2"
+</code></pre>
+<h2 id="api-reference"><a class="header" href="#api-reference">API Reference</a></h2>
+<p>For complete API reference, see the <a href="../api-reference/">Provider API Documentation</a>.</p>
+<h2 id="contributing"><a class="header" href="#contributing">Contributing</a></h2>
+<p>To contribute to the Proxmox provider:</p>
+<ol>
+<li>See the <a href="../tutorial.html">Provider Development Guide</a></li>
+<li>Check the <a href="https://github.com/projectbeskar/virtrigaud">GitHub repository</a></li>
+<li>Review <a href="https://github.com/projectbeskar/virtrigaud/labels/provider%2Fproxmox">open issues</a></li>
+</ol>
+<h2 id="support"><a class="header" href="#support">Support</a></h2>
+<ul>
+<li><strong>Documentation</strong>: <a href="https://projectbeskar.github.io/virtrigaud/">VirtRigaud Docs</a></li>
+<li><strong>Issues</strong>: <a href="https://github.com/projectbeskar/virtrigaud/issues">GitHub Issues</a></li>
+<li><strong>Community</strong>: <a href="https://discord.gg/projectbeskar">Discord</a></li>
+</ul>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../providers/libvirt.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../providers/tutorial.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../providers/libvirt.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../providers/tutorial.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="../theme/page-toc.js"></script>
+
+
+    </div>
+    </body>
+</html>

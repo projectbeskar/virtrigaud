@@ -1,0 +1,616 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>mTLS Configuration - VirtRigaud Documentation</title>
+
+
+        <!-- Custom HTML head -->
+        
+        <meta name="description" content="Kubernetes operator for managing virtual machines across multiple hypervisors">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../../favicon.svg">
+        <link rel="shortcut icon" href="../../favicon.png">
+        <link rel="stylesheet" href="../../css/variables.css">
+        <link rel="stylesheet" href="../../css/general.css">
+        <link rel="stylesheet" href="../../css/chrome.css">
+        <link rel="stylesheet" href="../../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="../../highlight.css">
+        <link rel="stylesheet" href="../../tomorrow-night.css">
+        <link rel="stylesheet" href="../../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../../theme/custom.css">
+
+    </head>
+    <body class="sidebar-visible no-js">
+    <div id="body-container">
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "../../";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
+        </script>
+
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            var html = document.querySelector('html');
+            html.classList.remove('light')
+            html.classList.add(theme);
+            var body = document.querySelector('body');
+            body.classList.remove('no-js')
+            body.classList.add('js');
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var body = document.querySelector('body');
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            body.classList.remove('sidebar-visible');
+            body.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <div class="sidebar-scrollbox">
+                <ol class="chapter"><li class="chapter-item affix "><a href="../../index.html">Introduction</a></li><li class="chapter-item affix "><li class="part-title">Getting Started</li><li class="chapter-item "><a href="../../getting-started/quickstart.html"><strong aria-hidden="true">1.</strong> 15-Minute Quickstart</a></li><li class="chapter-item "><a href="../../install-helm-only.html"><strong aria-hidden="true">2.</strong> Installation Guide</a></li><li class="chapter-item "><a href="../../HELM_CRD_UPGRADES.html"><strong aria-hidden="true">3.</strong> Helm CRD Upgrades</a></li><li class="chapter-item affix "><li class="part-title">Core Documentation</li><li class="chapter-item "><a href="../../CRDs.html"><strong aria-hidden="true">4.</strong> Custom Resource Definitions</a></li><li class="chapter-item "><a href="../../EXAMPLES.html"><strong aria-hidden="true">5.</strong> Examples</a></li><li class="chapter-item "><a href="../../PROVIDERS.html"><strong aria-hidden="true">6.</strong> Provider Documentation</a></li><li class="chapter-item "><a href="../../PROVIDERS_CAPABILITIES.html"><strong aria-hidden="true">7.</strong> Provider Capabilities Matrix</a></li><li class="chapter-item affix "><li class="part-title">Provider-Specific Guides</li><li class="chapter-item "><a href="../../providers/vsphere.html"><strong aria-hidden="true">8.</strong> vSphere Provider</a></li><li class="chapter-item "><a href="../../providers/libvirt.html"><strong aria-hidden="true">9.</strong> Libvirt Provider</a></li><li class="chapter-item "><a href="../../providers/proxmox.html"><strong aria-hidden="true">10.</strong> Proxmox VE Provider</a></li><li class="chapter-item "><a href="../../providers/tutorial.html"><strong aria-hidden="true">11.</strong> Provider Tutorial</a></li><li class="chapter-item "><a href="../../providers/versioning.html"><strong aria-hidden="true">12.</strong> Provider Versioning</a></li><li class="chapter-item affix "><li class="part-title">Advanced Features</li><li class="chapter-item "><a href="../../ADVANCED_LIFECYCLE.html"><strong aria-hidden="true">13.</strong> VM Lifecycle Management</a></li><li class="chapter-item "><a href="../../NESTED_VIRTUALIZATION.html"><strong aria-hidden="true">14.</strong> Nested Virtualization</a></li><li class="chapter-item "><a href="../../GRACEFUL_SHUTDOWN.html"><strong aria-hidden="true">15.</strong> Graceful Shutdown</a></li><li class="chapter-item "><a href="../../REMOTE_PROVIDERS.html"><strong aria-hidden="true">16.</strong> Remote Providers</a></li><li class="chapter-item affix "><li class="part-title">Operations & Administration</li><li class="chapter-item "><a href="../../OBSERVABILITY.html"><strong aria-hidden="true">17.</strong> Observability</a></li><li class="chapter-item "><a href="../../SECURITY.html"><strong aria-hidden="true">18.</strong> Security</a></li><li class="chapter-item "><a href="../../RESILIENCE.html"><strong aria-hidden="true">19.</strong> Resilience</a></li><li class="chapter-item "><a href="../../UPGRADE.html"><strong aria-hidden="true">20.</strong> Upgrade Guide</a></li><li class="chapter-item "><a href="../../VSPHERE_HARDWARE_VERSION.html"><strong aria-hidden="true">21.</strong> vSphere Hardware Versions</a></li><li class="chapter-item affix "><li class="part-title">Security Configuration</li><li class="chapter-item "><a href="../../providers/security/bearer-token.html"><strong aria-hidden="true">22.</strong> Bearer Token Authentication</a></li><li class="chapter-item expanded "><a href="../../providers/security/mtls.html" class="active"><strong aria-hidden="true">23.</strong> mTLS Configuration</a></li><li class="chapter-item "><a href="../../providers/security/external-secrets.html"><strong aria-hidden="true">24.</strong> External Secrets</a></li><li class="chapter-item "><a href="../../providers/security/network-policies.html"><strong aria-hidden="true">25.</strong> Network Policies</a></li><li class="chapter-item affix "><li class="part-title">API Reference</li><li class="chapter-item "><a href="../../CLI.html"><strong aria-hidden="true">26.</strong> CLI Tools Reference</a></li><li class="chapter-item "><a href="../../api-reference/cli.html"><strong aria-hidden="true">27.</strong> CLI API Reference</a></li><li class="chapter-item "><a href="../../api-reference/metrics.html"><strong aria-hidden="true">28.</strong> Metrics Catalog</a></li><li class="chapter-item "><a href="../../catalog.html"><strong aria-hidden="true">29.</strong> Provider Catalog</a></li><li class="chapter-item affix "><li class="part-title">Development</li><li class="chapter-item "><a href="../../TESTING_WORKFLOWS_LOCALLY.html"><strong aria-hidden="true">30.</strong> Testing Workflows Locally</a></li><li class="chapter-item "><a href="../../../../CONTRIBUTING.html"><strong aria-hidden="true">31.</strong> Contributing</a></li><li class="chapter-item "><a href="../../../../DEVELOPMENT.html"><strong aria-hidden="true">32.</strong> Development Guide</a></li><li class="chapter-item affix "><li class="part-title">Examples</li><li class="chapter-item "><a href="../../examples/index.html"><strong aria-hidden="true">33.</strong> Example README</a></li></ol>
+            </div>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <!-- Track and set sidebar scroll position -->
+        <script>
+            var sidebarScrollbox = document.querySelector('#sidebar .sidebar-scrollbox');
+            sidebarScrollbox.addEventListener('click', function(e) {
+                if (e.target.tagName === 'A') {
+                    sessionStorage.setItem('sidebar-scroll', sidebarScrollbox.scrollTop);
+                }
+            }, { passive: true });
+            var sidebarScrollTop = sessionStorage.getItem('sidebar-scroll');
+            sessionStorage.removeItem('sidebar-scroll');
+            if (sidebarScrollTop) {
+                // preserve sidebar scroll position when navigating via links within sidebar
+                sidebarScrollbox.scrollTop = sidebarScrollTop;
+            } else {
+                // scroll sidebar to current active section when navigating via "next/previous chapter" buttons
+                var activeSection = document.querySelector('#sidebar .active');
+                if (activeSection) {
+                    activeSection.scrollIntoView({ block: 'center' });
+                }
+            }
+        </script>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">VirtRigaud Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/projectbeskar/virtrigaud" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/projectbeskar/virtrigaud/edit/main/docs/src/providers/security/mtls.md" title="Suggest an edit" aria-label="Suggest an edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="mtls-security-configuration"><a class="header" href="#mtls-security-configuration">mTLS Security Configuration</a></h1>
+<p>This guide covers how to configure mutual TLS (mTLS) authentication between VirtRigaud managers and providers.</p>
+<h2 id="overview"><a class="header" href="#overview">Overview</a></h2>
+<p>mTLS provides strong authentication and encryption for gRPC communication between the VirtRigaud manager and provider services. It ensures:</p>
+<ul>
+<li><strong>Authentication</strong>: Both client and server verify each other’s certificates</li>
+<li><strong>Encryption</strong>: All traffic is encrypted in transit</li>
+<li><strong>Certificate Pinning</strong>: Specific certificate authorities are trusted</li>
+<li><strong>Certificate Rotation</strong>: Automated certificate renewal</li>
+</ul>
+<h2 id="certificate-management"><a class="header" href="#certificate-management">Certificate Management</a></h2>
+<h3 id="1-generate-ca-certificate"><a class="header" href="#1-generate-ca-certificate">1. Generate CA Certificate</a></h3>
+<pre><code class="language-bash"># Create CA private key
+openssl genrsa -out ca-key.pem 4096
+
+# Create CA certificate
+openssl req -new -x509 -key ca-key.pem -out ca-cert.pem -days 365 \
+  -subj "/C=US/ST=CA/L=San Francisco/O=VirtRigaud/CN=VirtRigaud CA"
+</code></pre>
+<h3 id="2-generate-server-certificate-provider"><a class="header" href="#2-generate-server-certificate-provider">2. Generate Server Certificate (Provider)</a></h3>
+<pre><code class="language-bash"># Create server private key
+openssl genrsa -out server-key.pem 4096
+
+# Create server certificate signing request
+openssl req -new -key server-key.pem -out server-csr.pem \
+  -subj "/C=US/ST=CA/L=San Francisco/O=VirtRigaud/CN=provider-service"
+
+# Sign server certificate
+openssl x509 -req -in server-csr.pem -CA ca-cert.pem -CAkey ca-key.pem \
+  -CAcreateserial -out server-cert.pem -days 365 \
+  -extensions v3_req -extfile &lt;(cat &lt;&lt;EOF
+[v3_req]
+keyUsage = keyEncipherment, dataEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName = @alt_names
+[alt_names]
+DNS.1 = provider-service
+DNS.2 = provider-service.default.svc.cluster.local
+DNS.3 = localhost
+IP.1 = 127.0.0.1
+EOF
+)
+</code></pre>
+<h3 id="3-generate-client-certificate-manager"><a class="header" href="#3-generate-client-certificate-manager">3. Generate Client Certificate (Manager)</a></h3>
+<pre><code class="language-bash"># Create client private key
+openssl genrsa -out client-key.pem 4096
+
+# Create client certificate signing request
+openssl req -new -key client-key.pem -out client-csr.pem \
+  -subj "/C=US/ST=CA/L=San Francisco/O=VirtRigaud/CN=manager-client"
+
+# Sign client certificate
+openssl x509 -req -in client-csr.pem -CA ca-cert.pem -CAkey ca-key.pem \
+  -CAcreateserial -out client-cert.pem -days 365 \
+  -extensions v3_req -extfile &lt;(cat &lt;&lt;EOF
+[v3_req]
+keyUsage = keyEncipherment, dataEncipherment
+extendedKeyUsage = clientAuth
+EOF
+)
+</code></pre>
+<h2 id="kubernetes-secret-configuration"><a class="header" href="#kubernetes-secret-configuration">Kubernetes Secret Configuration</a></h2>
+<h3 id="provider-tls-secret"><a class="header" href="#provider-tls-secret">Provider TLS Secret</a></h3>
+<pre><code class="language-yaml">apiVersion: v1
+kind: Secret
+metadata:
+  name: provider-tls
+  namespace: default
+type: kubernetes.io/tls
+data:
+  tls.crt: # base64 encoded server-cert.pem
+  tls.key: # base64 encoded server-key.pem
+  ca.crt: # base64 encoded ca-cert.pem
+</code></pre>
+<h3 id="manager-tls-secret"><a class="header" href="#manager-tls-secret">Manager TLS Secret</a></h3>
+<pre><code class="language-yaml">apiVersion: v1
+kind: Secret
+metadata:
+  name: manager-tls
+  namespace: virtrigaud-system
+type: kubernetes.io/tls
+data:
+  tls.crt: # base64 encoded client-cert.pem
+  tls.key: # base64 encoded client-key.pem
+  ca.crt: # base64 encoded ca-cert.pem
+</code></pre>
+<h2 id="provider-configuration"><a class="header" href="#provider-configuration">Provider Configuration</a></h2>
+<h3 id="sdk-server-configuration"><a class="header" href="#sdk-server-configuration">SDK Server Configuration</a></h3>
+<pre><code class="language-go">package main
+
+import (
+    "crypto/tls"
+    "crypto/x509"
+    "fmt"
+    "io/ioutil"
+    
+    "github.com/projectbeskar/virtrigaud/sdk/provider/server"
+)
+
+func main() {
+    // Load certificates
+    cert, err := tls.LoadX509KeyPair("/etc/tls/tls.crt", "/etc/tls/tls.key")
+    if err != nil {
+        panic(fmt.Sprintf("Failed to load server certificates: %v", err))
+    }
+    
+    // Load CA certificate for client verification
+    caCert, err := ioutil.ReadFile("/etc/tls/ca.crt")
+    if err != nil {
+        panic(fmt.Sprintf("Failed to load CA certificate: %v", err))
+    }
+    
+    caCertPool := x509.NewCertPool()
+    if !caCertPool.AppendCertsFromPEM(caCert) {
+        panic("Failed to parse CA certificate")
+    }
+    
+    // Configure TLS
+    tlsConfig := &amp;tls.Config{
+        Certificates: []tls.Certificate{cert},
+        ClientAuth:   tls.RequireAndVerifyClientCert,
+        ClientCAs:    caCertPool,
+        MinVersion:   tls.VersionTLS12,
+        CipherSuites: []uint16{
+            tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+            tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
+            tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+            tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
+        },
+    }
+    
+    // Create server with mTLS
+    srv, err := server.New(&amp;server.Config{
+        Port:      9443,
+        TLS:       tlsConfig,
+        EnableTLS: true,
+    })
+    if err != nil {
+        panic(fmt.Sprintf("Failed to create server: %v", err))
+    }
+    
+    // Register your provider implementation here
+    // providerv1.RegisterProviderServiceServer(srv.GRPCServer(), &amp;YourProvider{})
+    
+    if err := srv.Serve(); err != nil {
+        panic(fmt.Sprintf("Server failed: %v", err))
+    }
+}
+</code></pre>
+<h3 id="helm-chart-values-provider-runtime"><a class="header" href="#helm-chart-values-provider-runtime">Helm Chart Values (Provider Runtime)</a></h3>
+<pre><code class="language-yaml"># values-mtls.yaml
+tls:
+  enabled: true
+  secretName: provider-tls
+
+# Mount TLS certificates
+volumes:
+  - name: tls-certs
+    secret:
+      secretName: provider-tls
+
+volumeMounts:
+  - name: tls-certs
+    mountPath: /etc/tls
+    readOnly: true
+
+# Environment variables for TLS
+env:
+  - name: TLS_ENABLED
+    value: "true"
+  - name: TLS_CERT_PATH
+    value: "/etc/tls/tls.crt"
+  - name: TLS_KEY_PATH
+    value: "/etc/tls/tls.key"
+  - name: TLS_CA_PATH
+    value: "/etc/tls/ca.crt"
+</code></pre>
+<h2 id="manager-configuration"><a class="header" href="#manager-configuration">Manager Configuration</a></h2>
+<h3 id="client-tls-configuration"><a class="header" href="#client-tls-configuration">Client TLS Configuration</a></h3>
+<pre><code class="language-go">// In manager code
+func createProviderClient(endpoint string) (providerv1.ProviderServiceClient, error) {
+    // Load client certificates
+    cert, err := tls.LoadX509KeyPair("/etc/manager-tls/tls.crt", "/etc/manager-tls/tls.key")
+    if err != nil {
+        return nil, fmt.Errorf("failed to load client certificates: %w", err)
+    }
+    
+    // Load CA certificate for server verification
+    caCert, err := ioutil.ReadFile("/etc/manager-tls/ca.crt")
+    if err != nil {
+        return nil, fmt.Errorf("failed to load CA certificate: %w", err)
+    }
+    
+    caCertPool := x509.NewCertPool()
+    if !caCertPool.AppendCertsFromPEM(caCert) {
+        return nil, fmt.Errorf("failed to parse CA certificate")
+    }
+    
+    // Configure TLS
+    tlsConfig := &amp;tls.Config{
+        Certificates: []tls.Certificate{cert},
+        RootCAs:      caCertPool,
+        ServerName:   "provider-service", // Must match server certificate CN/SAN
+        MinVersion:   tls.VersionTLS12,
+    }
+    
+    // Create gRPC connection with mTLS
+    conn, err := grpc.Dial(endpoint,
+        grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)),
+    )
+    if err != nil {
+        return nil, fmt.Errorf("failed to connect: %w", err)
+    }
+    
+    return providerv1.NewProviderServiceClient(conn), nil
+}
+</code></pre>
+<h2 id="certificate-rotation"><a class="header" href="#certificate-rotation">Certificate Rotation</a></h2>
+<h3 id="using-cert-manager"><a class="header" href="#using-cert-manager">Using cert-manager</a></h3>
+<pre><code class="language-yaml"># Install cert-manager first
+# kubectl apply -f https://github.com/jetstack/cert-manager/releases/download/v1.12.0/cert-manager.yaml
+
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: virtrigaud-ca-issuer
+spec:
+  ca:
+    secretName: virtrigaud-ca-secret
+
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: provider-tls
+  namespace: default
+spec:
+  secretName: provider-tls
+  issuerRef:
+    name: virtrigaud-ca-issuer
+    kind: ClusterIssuer
+  commonName: provider-service
+  dnsNames:
+    - provider-service
+    - provider-service.default.svc.cluster.local
+  duration: 8760h # 1 year
+  renewBefore: 720h # 30 days before expiry
+</code></pre>
+<h3 id="manual-rotation-script"><a class="header" href="#manual-rotation-script">Manual Rotation Script</a></h3>
+<pre><code class="language-bash">#!/bin/bash
+# rotate-certs.sh
+
+NAMESPACE=${1:-default}
+SECRET_NAME=${2:-provider-tls}
+
+echo "Rotating certificates for $SECRET_NAME in namespace $NAMESPACE"
+
+# Generate new certificates (using the same process as above)
+# ...
+
+# Update Kubernetes secret
+kubectl create secret tls $SECRET_NAME \
+  --cert=server-cert.pem \
+  --key=server-key.pem \
+  --namespace=$NAMESPACE \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+# Add CA certificate to the secret
+kubectl patch secret $SECRET_NAME -n $NAMESPACE \
+  --patch="$(cat &lt;&lt;EOF
+data:
+  ca.crt: $(base64 -w 0 ca-cert.pem)
+EOF
+)"
+
+# Restart provider deployment to pick up new certificates
+kubectl rollout restart deployment/provider-deployment -n $NAMESPACE
+
+echo "Certificate rotation completed"
+</code></pre>
+<h2 id="security-best-practices"><a class="header" href="#security-best-practices">Security Best Practices</a></h2>
+<h3 id="1-certificate-validation"><a class="header" href="#1-certificate-validation">1. Certificate Validation</a></h3>
+<pre><code class="language-go">// Always validate certificate chains
+func validateCertificate(cert *x509.Certificate, caCert *x509.Certificate) error {
+    roots := x509.NewCertPool()
+    roots.AddCert(caCert)
+    
+    opts := x509.VerifyOptions{
+        Roots: roots,
+        KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+    }
+    
+    _, err := cert.Verify(opts)
+    return err
+}
+</code></pre>
+<h3 id="2-certificate-pinning"><a class="header" href="#2-certificate-pinning">2. Certificate Pinning</a></h3>
+<pre><code class="language-go">// Pin specific certificate or CA
+func createTLSConfigWithPinning(expectedCertFingerprint string) *tls.Config {
+    return &amp;tls.Config{
+        VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+            if len(rawCerts) == 0 {
+                return fmt.Errorf("no certificates provided")
+            }
+            
+            cert, err := x509.ParseCertificate(rawCerts[0])
+            if err != nil {
+                return err
+            }
+            
+            fingerprint := sha256.Sum256(cert.Raw)
+            if hex.EncodeToString(fingerprint[:]) != expectedCertFingerprint {
+                return fmt.Errorf("certificate fingerprint mismatch")
+            }
+            
+            return nil
+        },
+    }
+}
+</code></pre>
+<h3 id="3-monitoring-and-alerting"><a class="header" href="#3-monitoring-and-alerting">3. Monitoring and Alerting</a></h3>
+<pre><code class="language-yaml"># Prometheus AlertManager rules
+groups:
+  - name: virtrigaud.certificates
+    rules:
+      - alert: CertificateExpiringSoon
+        expr: (cert_manager_certificate_expiration_timestamp_seconds - time()) / 86400 &lt; 30
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Certificate expiring soon"
+          description: "Certificate {{ $labels.name }} expires in less than 30 days"
+      
+      - alert: CertificateExpired
+        expr: cert_manager_certificate_expiration_timestamp_seconds &lt; time()
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Certificate expired"
+          description: "Certificate {{ $labels.name }} has expired"
+</code></pre>
+<h2 id="troubleshooting"><a class="header" href="#troubleshooting">Troubleshooting</a></h2>
+<h3 id="common-issues"><a class="header" href="#common-issues">Common Issues</a></h3>
+<ol>
+<li>
+<p><strong>Certificate chain issues</strong></p>
+<pre><code class="language-bash"># Verify certificate chain
+openssl verify -CAfile ca-cert.pem server-cert.pem
+</code></pre>
+</li>
+<li>
+<p><strong>SAN mismatch</strong></p>
+<pre><code class="language-bash"># Check certificate SAN entries
+openssl x509 -in server-cert.pem -text -noout | grep -A1 "Subject Alternative Name"
+</code></pre>
+</li>
+<li>
+<p><strong>TLS handshake failures</strong></p>
+<pre><code class="language-bash"># Test TLS connection
+openssl s_client -connect provider-service:9443 -cert client-cert.pem -key client-key.pem -CAfile ca-cert.pem
+</code></pre>
+</li>
+<li>
+<p><strong>Clock skew issues</strong></p>
+<pre><code class="language-bash"># Ensure time synchronization
+ntpdate -s time.nist.gov
+</code></pre>
+</li>
+</ol>
+<h3 id="debug-commands"><a class="header" href="#debug-commands">Debug Commands</a></h3>
+<pre><code class="language-bash"># Check certificate validity
+kubectl get secret provider-tls -o yaml | grep tls.crt | base64 -d | openssl x509 -text -noout
+
+# Monitor certificate expiration
+kubectl get certificates
+
+# Check provider logs for TLS errors
+kubectl logs deployment/provider-deployment | grep -i tls
+</code></pre>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../../providers/security/bearer-token.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../../providers/security/external-secrets.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../../providers/security/bearer-token.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../../providers/security/external-secrets.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../../elasticlunr.min.js"></script>
+        <script src="../../mark.min.js"></script>
+        <script src="../../searcher.js"></script>
+
+        <script src="../../clipboard.min.js"></script>
+        <script src="../../highlight.js"></script>
+        <script src="../../book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="../../theme/page-toc.js"></script>
+
+
+    </div>
+    </body>
+</html>

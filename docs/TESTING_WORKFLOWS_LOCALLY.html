@@ -1,0 +1,571 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Testing Workflows Locally - VirtRigaud Documentation</title>
+
+
+        <!-- Custom HTML head -->
+        
+        <meta name="description" content="Kubernetes operator for managing virtual machines across multiple hypervisors">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon.svg">
+        <link rel="shortcut icon" href="favicon.png">
+        <link rel="stylesheet" href="css/variables.css">
+        <link rel="stylesheet" href="css/general.css">
+        <link rel="stylesheet" href="css/chrome.css">
+        <link rel="stylesheet" href="css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="highlight.css">
+        <link rel="stylesheet" href="tomorrow-night.css">
+        <link rel="stylesheet" href="ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="theme/custom.css">
+
+    </head>
+    <body class="sidebar-visible no-js">
+    <div id="body-container">
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
+        </script>
+
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            var html = document.querySelector('html');
+            html.classList.remove('light')
+            html.classList.add(theme);
+            var body = document.querySelector('body');
+            body.classList.remove('no-js')
+            body.classList.add('js');
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var body = document.querySelector('body');
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            body.classList.remove('sidebar-visible');
+            body.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <div class="sidebar-scrollbox">
+                <ol class="chapter"><li class="chapter-item affix "><a href="index.html">Introduction</a></li><li class="chapter-item affix "><li class="part-title">Getting Started</li><li class="chapter-item "><a href="getting-started/quickstart.html"><strong aria-hidden="true">1.</strong> 15-Minute Quickstart</a></li><li class="chapter-item "><a href="install-helm-only.html"><strong aria-hidden="true">2.</strong> Installation Guide</a></li><li class="chapter-item "><a href="HELM_CRD_UPGRADES.html"><strong aria-hidden="true">3.</strong> Helm CRD Upgrades</a></li><li class="chapter-item affix "><li class="part-title">Core Documentation</li><li class="chapter-item "><a href="CRDs.html"><strong aria-hidden="true">4.</strong> Custom Resource Definitions</a></li><li class="chapter-item "><a href="EXAMPLES.html"><strong aria-hidden="true">5.</strong> Examples</a></li><li class="chapter-item "><a href="PROVIDERS.html"><strong aria-hidden="true">6.</strong> Provider Documentation</a></li><li class="chapter-item "><a href="PROVIDERS_CAPABILITIES.html"><strong aria-hidden="true">7.</strong> Provider Capabilities Matrix</a></li><li class="chapter-item affix "><li class="part-title">Provider-Specific Guides</li><li class="chapter-item "><a href="providers/vsphere.html"><strong aria-hidden="true">8.</strong> vSphere Provider</a></li><li class="chapter-item "><a href="providers/libvirt.html"><strong aria-hidden="true">9.</strong> Libvirt Provider</a></li><li class="chapter-item "><a href="providers/proxmox.html"><strong aria-hidden="true">10.</strong> Proxmox VE Provider</a></li><li class="chapter-item "><a href="providers/tutorial.html"><strong aria-hidden="true">11.</strong> Provider Tutorial</a></li><li class="chapter-item "><a href="providers/versioning.html"><strong aria-hidden="true">12.</strong> Provider Versioning</a></li><li class="chapter-item affix "><li class="part-title">Advanced Features</li><li class="chapter-item "><a href="ADVANCED_LIFECYCLE.html"><strong aria-hidden="true">13.</strong> VM Lifecycle Management</a></li><li class="chapter-item "><a href="NESTED_VIRTUALIZATION.html"><strong aria-hidden="true">14.</strong> Nested Virtualization</a></li><li class="chapter-item "><a href="GRACEFUL_SHUTDOWN.html"><strong aria-hidden="true">15.</strong> Graceful Shutdown</a></li><li class="chapter-item "><a href="REMOTE_PROVIDERS.html"><strong aria-hidden="true">16.</strong> Remote Providers</a></li><li class="chapter-item affix "><li class="part-title">Operations & Administration</li><li class="chapter-item "><a href="OBSERVABILITY.html"><strong aria-hidden="true">17.</strong> Observability</a></li><li class="chapter-item "><a href="SECURITY.html"><strong aria-hidden="true">18.</strong> Security</a></li><li class="chapter-item "><a href="RESILIENCE.html"><strong aria-hidden="true">19.</strong> Resilience</a></li><li class="chapter-item "><a href="UPGRADE.html"><strong aria-hidden="true">20.</strong> Upgrade Guide</a></li><li class="chapter-item "><a href="VSPHERE_HARDWARE_VERSION.html"><strong aria-hidden="true">21.</strong> vSphere Hardware Versions</a></li><li class="chapter-item affix "><li class="part-title">Security Configuration</li><li class="chapter-item "><a href="providers/security/bearer-token.html"><strong aria-hidden="true">22.</strong> Bearer Token Authentication</a></li><li class="chapter-item "><a href="providers/security/mtls.html"><strong aria-hidden="true">23.</strong> mTLS Configuration</a></li><li class="chapter-item "><a href="providers/security/external-secrets.html"><strong aria-hidden="true">24.</strong> External Secrets</a></li><li class="chapter-item "><a href="providers/security/network-policies.html"><strong aria-hidden="true">25.</strong> Network Policies</a></li><li class="chapter-item affix "><li class="part-title">API Reference</li><li class="chapter-item "><a href="CLI.html"><strong aria-hidden="true">26.</strong> CLI Tools Reference</a></li><li class="chapter-item "><a href="api-reference/cli.html"><strong aria-hidden="true">27.</strong> CLI API Reference</a></li><li class="chapter-item "><a href="api-reference/metrics.html"><strong aria-hidden="true">28.</strong> Metrics Catalog</a></li><li class="chapter-item "><a href="catalog.html"><strong aria-hidden="true">29.</strong> Provider Catalog</a></li><li class="chapter-item affix "><li class="part-title">Development</li><li class="chapter-item expanded "><a href="TESTING_WORKFLOWS_LOCALLY.html" class="active"><strong aria-hidden="true">30.</strong> Testing Workflows Locally</a></li><li class="chapter-item "><a href="../../CONTRIBUTING.html"><strong aria-hidden="true">31.</strong> Contributing</a></li><li class="chapter-item "><a href="../../DEVELOPMENT.html"><strong aria-hidden="true">32.</strong> Development Guide</a></li><li class="chapter-item affix "><li class="part-title">Examples</li><li class="chapter-item "><a href="examples/index.html"><strong aria-hidden="true">33.</strong> Example README</a></li></ol>
+            </div>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <!-- Track and set sidebar scroll position -->
+        <script>
+            var sidebarScrollbox = document.querySelector('#sidebar .sidebar-scrollbox');
+            sidebarScrollbox.addEventListener('click', function(e) {
+                if (e.target.tagName === 'A') {
+                    sessionStorage.setItem('sidebar-scroll', sidebarScrollbox.scrollTop);
+                }
+            }, { passive: true });
+            var sidebarScrollTop = sessionStorage.getItem('sidebar-scroll');
+            sessionStorage.removeItem('sidebar-scroll');
+            if (sidebarScrollTop) {
+                // preserve sidebar scroll position when navigating via links within sidebar
+                sidebarScrollbox.scrollTop = sidebarScrollTop;
+            } else {
+                // scroll sidebar to current active section when navigating via "next/previous chapter" buttons
+                var activeSection = document.querySelector('#sidebar .active');
+                if (activeSection) {
+                    activeSection.scrollIntoView({ block: 'center' });
+                }
+            }
+        </script>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">VirtRigaud Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/projectbeskar/virtrigaud" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/projectbeskar/virtrigaud/edit/main/docs/src/TESTING_WORKFLOWS_LOCALLY.md" title="Suggest an edit" aria-label="Suggest an edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="testing-github-actions-workflows-locally"><a class="header" href="#testing-github-actions-workflows-locally">Testing GitHub Actions Workflows Locally</a></h1>
+<p>This guide explains how to test VirtRigaud’s GitHub Actions workflows locally before pushing to save on GitHub Actions costs and catch issues early.</p>
+<h2 id="overview"><a class="header" href="#overview">Overview</a></h2>
+<p>We provide several scripts to test workflows locally:</p>
+<div class="table-wrapper"><table><thead><tr><th>Script</th><th>Purpose</th><th>Dependencies</th><th>Use Case</th></tr></thead><tbody>
+<tr><td><code>hack/test-workflows-locally.sh</code></td><td><strong>Main orchestrator</strong> using <code>act</code></td><td><code>act</code>, <code>docker</code></td><td>Full GitHub Actions simulation</td></tr>
+<tr><td><code>hack/test-lint-locally.sh</code></td><td><strong>Lint workflow</strong> replica</td><td><code>go</code>, <code>golangci-lint</code></td><td>Quick lint testing</td></tr>
+<tr><td><code>hack/test-ci-locally.sh</code></td><td><strong>CI workflow</strong> replica</td><td><code>go</code>, <code>helm</code>, system deps</td><td>Comprehensive CI testing</td></tr>
+<tr><td><code>hack/test-release-locally.sh</code></td><td><strong>Release workflow</strong> simulation</td><td><code>docker</code>, <code>helm</code>, <code>go</code></td><td>Release preparation testing</td></tr>
+<tr><td><code>hack/test-helm-locally.sh</code></td><td><strong>Helm charts</strong> testing</td><td><code>helm</code>, <code>kind</code>, <code>kubectl</code></td><td>Chart validation and deployment</td></tr>
+</tbody></table>
+</div>
+<h2 id="quick-start"><a class="header" href="#quick-start">Quick Start</a></h2>
+<h3 id="1-setup-first-time"><a class="header" href="#1-setup-first-time">1. Setup (First Time)</a></h3>
+<pre><code class="language-bash"># Install dependencies and configure act
+./hack/test-workflows-locally.sh setup
+</code></pre>
+<p>This will:</p>
+<ul>
+<li>Install <code>act</code> (GitHub Actions runner)</li>
+<li>Create <code>.actrc</code> configuration</li>
+<li>Create <code>.env.local</code> with environment variables</li>
+<li>Create <code>.secrets</code> file (update with real values if needed)</li>
+</ul>
+<h3 id="2-quick-validation"><a class="header" href="#2-quick-validation">2. Quick Validation</a></h3>
+<pre><code class="language-bash"># Fast syntax check of all workflows
+./hack/test-workflows-locally.sh smoke
+</code></pre>
+<h3 id="3-test-individual-workflows"><a class="header" href="#3-test-individual-workflows">3. Test Individual Workflows</a></h3>
+<pre><code class="language-bash"># Test lint workflow (fastest)
+./hack/test-lint-locally.sh
+
+# Test CI workflow (comprehensive)
+./hack/test-ci-locally.sh
+
+# Test Helm charts
+./hack/test-helm-locally.sh
+
+# Test release workflow (requires Docker)
+./hack/test-release-locally.sh v0.2.0-test
+</code></pre>
+<h2 id="detailed-usage"><a class="header" href="#detailed-usage">Detailed Usage</a></h2>
+<h3 id="lint-testing-test-lint-locallysh"><a class="header" href="#lint-testing-test-lint-locallysh">Lint Testing (<code>test-lint-locally.sh</code>)</a></h3>
+<p>Replicates the <code>lint.yml</code> workflow:</p>
+<pre><code class="language-bash"># Quick lint test
+./hack/test-lint-locally.sh
+</code></pre>
+<p><strong>What it tests:</strong></p>
+<ul>
+<li>Go version compatibility</li>
+<li>golangci-lint installation and execution</li>
+<li>Comprehensive code linting (matching CI exactly)</li>
+</ul>
+<p><strong>Requirements:</strong></p>
+<ul>
+<li>Go 1.21+</li>
+<li>Internet access (to download golangci-lint if needed)</li>
+</ul>
+<h3 id="ci-testing-test-ci-locallysh"><a class="header" href="#ci-testing-test-ci-locallysh">CI Testing (<code>test-ci-locally.sh</code>)</a></h3>
+<p>Replicates the <code>ci.yml</code> workflow jobs:</p>
+<pre><code class="language-bash"># Interactive mode (asks about optional jobs)
+./hack/test-ci-locally.sh
+
+# Quick essential tests only
+./hack/test-ci-locally.sh quick
+
+# Full CI replication including security scans
+./hack/test-ci-locally.sh full
+</code></pre>
+<p><strong>Jobs tested:</strong></p>
+<ul>
+<li><strong>test</strong>: Go tests and coverage</li>
+<li><strong>lint</strong>: Code linting with golangci-lint</li>
+<li><strong>generate</strong>: Code and manifest generation</li>
+<li><strong>build</strong>: Binary compilation</li>
+<li><strong>build-tools</strong>: CLI tools compilation</li>
+<li><strong>helm</strong>: Helm chart validation</li>
+<li><strong>security</strong>: Security scanning (optional)</li>
+</ul>
+<p><strong>Requirements:</strong></p>
+<ul>
+<li>Go 1.23+</li>
+<li>Helm 3.12+</li>
+<li>System dependencies (libvirt-dev on Linux)</li>
+<li>Python 3 (for YAML validation)</li>
+</ul>
+<h3 id="release-testing-test-release-locallysh"><a class="header" href="#release-testing-test-release-locallysh">Release Testing (<code>test-release-locally.sh</code>)</a></h3>
+<p>Simulates the <code>release.yml</code> workflow:</p>
+<pre><code class="language-bash"># Test with default tag
+./hack/test-release-locally.sh
+
+# Test with specific tag
+./hack/test-release-locally.sh v0.3.0-rc.1
+
+# Skip image building (faster)
+./hack/test-release-locally.sh --no-images
+</code></pre>
+<p><strong>What it tests:</strong></p>
+<ul>
+<li>Container image building and pushing (to local registry)</li>
+<li>Helm chart packaging with version updates</li>
+<li>CLI tools building for multiple platforms</li>
+<li>Changelog generation</li>
+<li>Checksum creation</li>
+<li>Container image smoke testing</li>
+</ul>
+<p><strong>Requirements:</strong></p>
+<ul>
+<li>Docker</li>
+<li>Go 1.23+</li>
+<li>Helm 3.12+</li>
+<li>Local Docker registry (started automatically)</li>
+</ul>
+<h3 id="helm-testing-test-helm-locallysh"><a class="header" href="#helm-testing-test-helm-locallysh">Helm Testing (<code>test-helm-locally.sh</code>)</a></h3>
+<p>Tests Helm charts with real Kubernetes:</p>
+<pre><code class="language-bash"># Full helm test suite
+./hack/test-helm-locally.sh
+
+# Individual test types
+./hack/test-helm-locally.sh lint     # Chart linting only
+./hack/test-helm-locally.sh template # Template rendering only
+./hack/test-helm-locally.sh crd      # CRD installation only
+./hack/test-helm-locally.sh main     # Main chart installation
+./hack/test-helm-locally.sh runtime  # Runtime chart installation
+
+# Cleanup after testing
+./hack/test-helm-locally.sh cleanup
+</code></pre>
+<p><strong>What it tests:</strong></p>
+<ul>
+<li>Helm chart linting (<code>helm lint</code>)</li>
+<li>Template rendering with various value files</li>
+<li>CRD installation and functionality</li>
+<li>Chart installation in Kind cluster</li>
+<li>Pod readiness and basic functionality</li>
+</ul>
+<p><strong>Requirements:</strong></p>
+<ul>
+<li>Helm 3.12+</li>
+<li>Kind (Kubernetes in Docker)</li>
+<li>kubectl</li>
+<li>Docker</li>
+</ul>
+<h3 id="act-based-testing-test-workflows-locallysh"><a class="header" href="#act-based-testing-test-workflows-locallysh">Act-Based Testing (<code>test-workflows-locally.sh</code>)</a></h3>
+<p>Uses <code>act</code> to run actual GitHub Actions workflows:</p>
+<pre><code class="language-bash"># Setup first time
+./hack/test-workflows-locally.sh setup
+
+# Test individual workflows
+./hack/test-workflows-locally.sh lint
+./hack/test-workflows-locally.sh ci
+./hack/test-workflows-locally.sh runtime
+
+# Test all workflows (interactive)
+./hack/test-workflows-locally.sh all
+
+# Cleanup
+./hack/test-workflows-locally.sh cleanup
+</code></pre>
+<p><strong>Advanced usage:</strong></p>
+<ul>
+<li>Supports secrets from <code>.secrets</code> file</li>
+<li>Uses reusable containers for speed</li>
+<li>Artifact handling with local storage</li>
+<li>Environment variable injection</li>
+</ul>
+<h2 id="configuration-files"><a class="header" href="#configuration-files">Configuration Files</a></h2>
+<h3 id="actrc"><a class="header" href="#actrc"><code>.actrc</code></a></h3>
+<pre><code class="language-bash"># Act configuration for GitHub Actions simulation
+-P ubuntu-latest=catthehacker/ubuntu:act-22.04
+-P ubuntu-22.04=catthehacker/ubuntu:act-22.04  
+-P ubuntu-24.04=catthehacker/ubuntu:act-22.04
+--container-daemon-socket /var/run/docker.sock
+--reuse
+--rm
+</code></pre>
+<h3 id="envlocal"><a class="header" href="#envlocal"><code>.env.local</code></a></h3>
+<pre><code class="language-bash"># Local environment variables
+GO_VERSION=1.23
+GOLANGCI_LINT_VERSION=v1.64.8
+REGISTRY=localhost:5000
+IMAGE_NAME_PREFIX=virtrigaud
+GITHUB_ACTOR=local-user
+GITHUB_REPOSITORY=projectbeskar/virtrigaud
+# ... more environment variables
+</code></pre>
+<h3 id="secrets-optional"><a class="header" href="#secrets-optional"><code>.secrets</code> (optional)</a></h3>
+<pre><code class="language-bash"># GitHub token for release workflows
+GITHUB_TOKEN=your_github_token_here
+REGISTRY=localhost:5000
+</code></pre>
+<h2 id="workflow-specific-notes"><a class="header" href="#workflow-specific-notes">Workflow-Specific Notes</a></h2>
+<h3 id="lint-workflow-lintyml"><a class="header" href="#lint-workflow-lintyml">Lint Workflow (<code>lint.yml</code>)</a></h3>
+<ul>
+<li><strong>Fast</strong>: Usually completes in 1-2 minutes</li>
+<li><strong>Requirements</strong>: Minimal (Go + golangci-lint)</li>
+<li><strong>Run before</strong>: Every commit</li>
+<li><strong>Catches</strong>: Code style, syntax, and simple errors</li>
+</ul>
+<h3 id="ci-workflow-ciyml"><a class="header" href="#ci-workflow-ciyml">CI Workflow (<code>ci.yml</code>)</a></h3>
+<ul>
+<li><strong>Comprehensive</strong>: Tests building, testing, security</li>
+<li><strong>Duration</strong>: 10-20 minutes for full run</li>
+<li><strong>Platform deps</strong>: LibVirt requires Linux for full testing</li>
+<li><strong>Run before</strong>: Pull requests and major changes</li>
+</ul>
+<h3 id="release-workflow-releaseyml"><a class="header" href="#release-workflow-releaseyml">Release Workflow (<code>release.yml</code>)</a></h3>
+<ul>
+<li><strong>Complex</strong>: Multi-platform builds, signing, publishing</li>
+<li><strong>Duration</strong>: 20-30 minutes</li>
+<li><strong>Local only</strong>: Uses local registry, no real publishing</li>
+<li><strong>Run before</strong>: Creating releases</li>
+</ul>
+<h3 id="runtime-chart-workflow-runtime-chartyml"><a class="header" href="#runtime-chart-workflow-runtime-chartyml">Runtime Chart Workflow (<code>runtime-chart.yml</code>)</a></h3>
+<ul>
+<li><strong>Kubernetes focused</strong>: Tests provider runtime charts</li>
+<li><strong>Requirements</strong>: Kind cluster</li>
+<li><strong>Duration</strong>: 5-10 minutes</li>
+<li><strong>Run before</strong>: Chart changes</li>
+</ul>
+<h2 id="best-practices"><a class="header" href="#best-practices">Best Practices</a></h2>
+<h3 id="daily-development-workflow"><a class="header" href="#daily-development-workflow">Daily Development Workflow</a></h3>
+<pre><code class="language-bash"># Before committing
+./hack/test-lint-locally.sh
+
+# Before pushing feature branch
+./hack/test-ci-locally.sh quick
+
+# Before creating PR
+./hack/test-ci-locally.sh full
+</code></pre>
+<h3 id="pre-release-workflow"><a class="header" href="#pre-release-workflow">Pre-Release Workflow</a></h3>
+<pre><code class="language-bash"># Test release preparation
+./hack/test-release-locally.sh v0.2.0-rc.1
+
+# Test chart deployment
+./hack/test-helm-locally.sh full
+
+# Test with act for full simulation
+./hack/test-workflows-locally.sh all
+</code></pre>
+<h3 id="troubleshooting"><a class="header" href="#troubleshooting">Troubleshooting</a></h3>
+<h4 id="common-issues"><a class="header" href="#common-issues">Common Issues</a></h4>
+<ol>
+<li>
+<p><strong>Docker permission denied</strong></p>
+<pre><code class="language-bash">sudo usermod -aG docker $USER
+# Then logout/login
+</code></pre>
+</li>
+<li>
+<p><strong>LibVirt dependencies missing</strong></p>
+<pre><code class="language-bash"># Ubuntu/Debian
+sudo apt-get install libvirt-dev pkg-config
+
+# Skip libvirt tests on non-Linux
+./hack/test-ci-locally.sh quick
+</code></pre>
+</li>
+<li>
+<p><strong>Kind cluster creation fails</strong></p>
+<pre><code class="language-bash"># Clean up and retry
+kind delete cluster --name virtrigaud-test
+./hack/test-helm-locally.sh
+</code></pre>
+</li>
+<li>
+<p><strong>Act fails with container errors</strong></p>
+<pre><code class="language-bash"># Clean up act containers
+docker ps -a | grep "act-" | awk '{print $1}' | xargs docker rm -f
+
+# Rebuild without cache
+./hack/test-workflows-locally.sh cleanup
+./hack/test-workflows-locally.sh setup
+</code></pre>
+</li>
+</ol>
+<h4 id="debugging-tips"><a class="header" href="#debugging-tips">Debugging Tips</a></h4>
+<ul>
+<li><strong>Check logs</strong>: All scripts provide detailed logging</li>
+<li><strong>Use dry-run</strong>: Most scripts support <code>--help</code> for options</li>
+<li><strong>Incremental testing</strong>: Start with <code>lint</code>, then <code>ci quick</code>, then full tests</li>
+<li><strong>Docker cleanup</strong>: Regular <code>docker system prune</code> helps with space</li>
+</ul>
+<h3 id="performance-tips"><a class="header" href="#performance-tips">Performance Tips</a></h3>
+<ol>
+<li><strong>Use quick modes</strong> for daily development</li>
+<li><strong>Skip expensive jobs</strong> like security scans during iteration</li>
+<li><strong>Reuse Kind clusters</strong> with <code>./hack/test-helm-locally.sh</code></li>
+<li><strong>Use local registry</strong> for container testing</li>
+<li><strong>Run parallel tests</strong> when possible</li>
+</ol>
+<h2 id="integration-with-development"><a class="header" href="#integration-with-development">Integration with Development</a></h2>
+<h3 id="git-hooks"><a class="header" href="#git-hooks">Git Hooks</a></h3>
+<p>Add to <code>.git/hooks/pre-push</code>:</p>
+<pre><code class="language-bash">#!/bin/bash
+echo "Running local lint check before push..."
+./hack/test-lint-locally.sh
+</code></pre>
+<h3 id="ide-integration"><a class="header" href="#ide-integration">IDE Integration</a></h3>
+<p>Many IDEs can run these scripts as build tasks:</p>
+<p><strong>VS Code</strong> (<code>.vscode/tasks.json</code>):</p>
+<pre><code class="language-json">{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Test Lint Locally",
+      "type": "shell", 
+      "command": "./hack/test-lint-locally.sh",
+      "group": "test",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "shared"
+      }
+    }
+  ]
+}
+</code></pre>
+<h3 id="ci-cost-optimization"><a class="header" href="#ci-cost-optimization">CI Cost Optimization</a></h3>
+<p>By testing locally first:</p>
+<ul>
+<li><strong>Reduce failed CI runs</strong> by ~80%</li>
+<li><strong>Save GitHub Actions minutes</strong></li>
+<li><strong>Faster feedback</strong> (local runs are often faster)</li>
+<li><strong>Better debugging</strong> (local environment is easier to inspect)</li>
+</ul>
+<h2 id="conclusion"><a class="header" href="#conclusion">Conclusion</a></h2>
+<p>These local testing scripts allow you to:</p>
+<p>✅ <strong>Catch issues early</strong> before they reach GitHub Actions<br />
+✅ <strong>Save costs</strong> by reducing failed CI runs<br />
+✅ <strong>Debug faster</strong> with local environment access<br />
+✅ <strong>Test thoroughly</strong> with multiple approaches<br />
+✅ <strong>Iterate quickly</strong> during development</p>
+<p>Start with the lint script for daily use, and gradually incorporate the full test suite for comprehensive validation before releases.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="catalog.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../../CONTRIBUTING.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="catalog.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../../CONTRIBUTING.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr.min.js"></script>
+        <script src="mark.min.js"></script>
+        <script src="searcher.js"></script>
+
+        <script src="clipboard.min.js"></script>
+        <script src="highlight.js"></script>
+        <script src="book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="theme/page-toc.js"></script>
+
+
+    </div>
+    </body>
+</html>

@@ -1,0 +1,372 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Graceful Shutdown - VirtRigaud Documentation</title>
+
+
+        <!-- Custom HTML head -->
+        
+        <meta name="description" content="Kubernetes operator for managing virtual machines across multiple hypervisors">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon.svg">
+        <link rel="shortcut icon" href="favicon.png">
+        <link rel="stylesheet" href="css/variables.css">
+        <link rel="stylesheet" href="css/general.css">
+        <link rel="stylesheet" href="css/chrome.css">
+        <link rel="stylesheet" href="css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="highlight.css">
+        <link rel="stylesheet" href="tomorrow-night.css">
+        <link rel="stylesheet" href="ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="theme/custom.css">
+
+    </head>
+    <body class="sidebar-visible no-js">
+    <div id="body-container">
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
+        </script>
+
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            var html = document.querySelector('html');
+            html.classList.remove('light')
+            html.classList.add(theme);
+            var body = document.querySelector('body');
+            body.classList.remove('no-js')
+            body.classList.add('js');
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var body = document.querySelector('body');
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            body.classList.remove('sidebar-visible');
+            body.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <div class="sidebar-scrollbox">
+                <ol class="chapter"><li class="chapter-item affix "><a href="index.html">Introduction</a></li><li class="chapter-item affix "><li class="part-title">Getting Started</li><li class="chapter-item "><a href="getting-started/quickstart.html"><strong aria-hidden="true">1.</strong> 15-Minute Quickstart</a></li><li class="chapter-item "><a href="install-helm-only.html"><strong aria-hidden="true">2.</strong> Installation Guide</a></li><li class="chapter-item "><a href="HELM_CRD_UPGRADES.html"><strong aria-hidden="true">3.</strong> Helm CRD Upgrades</a></li><li class="chapter-item affix "><li class="part-title">Core Documentation</li><li class="chapter-item "><a href="CRDs.html"><strong aria-hidden="true">4.</strong> Custom Resource Definitions</a></li><li class="chapter-item "><a href="EXAMPLES.html"><strong aria-hidden="true">5.</strong> Examples</a></li><li class="chapter-item "><a href="PROVIDERS.html"><strong aria-hidden="true">6.</strong> Provider Documentation</a></li><li class="chapter-item "><a href="PROVIDERS_CAPABILITIES.html"><strong aria-hidden="true">7.</strong> Provider Capabilities Matrix</a></li><li class="chapter-item affix "><li class="part-title">Provider-Specific Guides</li><li class="chapter-item "><a href="providers/vsphere.html"><strong aria-hidden="true">8.</strong> vSphere Provider</a></li><li class="chapter-item "><a href="providers/libvirt.html"><strong aria-hidden="true">9.</strong> Libvirt Provider</a></li><li class="chapter-item "><a href="providers/proxmox.html"><strong aria-hidden="true">10.</strong> Proxmox VE Provider</a></li><li class="chapter-item "><a href="providers/tutorial.html"><strong aria-hidden="true">11.</strong> Provider Tutorial</a></li><li class="chapter-item "><a href="providers/versioning.html"><strong aria-hidden="true">12.</strong> Provider Versioning</a></li><li class="chapter-item affix "><li class="part-title">Advanced Features</li><li class="chapter-item "><a href="ADVANCED_LIFECYCLE.html"><strong aria-hidden="true">13.</strong> VM Lifecycle Management</a></li><li class="chapter-item "><a href="NESTED_VIRTUALIZATION.html"><strong aria-hidden="true">14.</strong> Nested Virtualization</a></li><li class="chapter-item expanded "><a href="GRACEFUL_SHUTDOWN.html" class="active"><strong aria-hidden="true">15.</strong> Graceful Shutdown</a></li><li class="chapter-item "><a href="REMOTE_PROVIDERS.html"><strong aria-hidden="true">16.</strong> Remote Providers</a></li><li class="chapter-item affix "><li class="part-title">Operations & Administration</li><li class="chapter-item "><a href="OBSERVABILITY.html"><strong aria-hidden="true">17.</strong> Observability</a></li><li class="chapter-item "><a href="SECURITY.html"><strong aria-hidden="true">18.</strong> Security</a></li><li class="chapter-item "><a href="RESILIENCE.html"><strong aria-hidden="true">19.</strong> Resilience</a></li><li class="chapter-item "><a href="UPGRADE.html"><strong aria-hidden="true">20.</strong> Upgrade Guide</a></li><li class="chapter-item "><a href="VSPHERE_HARDWARE_VERSION.html"><strong aria-hidden="true">21.</strong> vSphere Hardware Versions</a></li><li class="chapter-item affix "><li class="part-title">Security Configuration</li><li class="chapter-item "><a href="providers/security/bearer-token.html"><strong aria-hidden="true">22.</strong> Bearer Token Authentication</a></li><li class="chapter-item "><a href="providers/security/mtls.html"><strong aria-hidden="true">23.</strong> mTLS Configuration</a></li><li class="chapter-item "><a href="providers/security/external-secrets.html"><strong aria-hidden="true">24.</strong> External Secrets</a></li><li class="chapter-item "><a href="providers/security/network-policies.html"><strong aria-hidden="true">25.</strong> Network Policies</a></li><li class="chapter-item affix "><li class="part-title">API Reference</li><li class="chapter-item "><a href="CLI.html"><strong aria-hidden="true">26.</strong> CLI Tools Reference</a></li><li class="chapter-item "><a href="api-reference/cli.html"><strong aria-hidden="true">27.</strong> CLI API Reference</a></li><li class="chapter-item "><a href="api-reference/metrics.html"><strong aria-hidden="true">28.</strong> Metrics Catalog</a></li><li class="chapter-item "><a href="catalog.html"><strong aria-hidden="true">29.</strong> Provider Catalog</a></li><li class="chapter-item affix "><li class="part-title">Development</li><li class="chapter-item "><a href="TESTING_WORKFLOWS_LOCALLY.html"><strong aria-hidden="true">30.</strong> Testing Workflows Locally</a></li><li class="chapter-item "><a href="../../CONTRIBUTING.html"><strong aria-hidden="true">31.</strong> Contributing</a></li><li class="chapter-item "><a href="../../DEVELOPMENT.html"><strong aria-hidden="true">32.</strong> Development Guide</a></li><li class="chapter-item affix "><li class="part-title">Examples</li><li class="chapter-item "><a href="examples/index.html"><strong aria-hidden="true">33.</strong> Example README</a></li></ol>
+            </div>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <!-- Track and set sidebar scroll position -->
+        <script>
+            var sidebarScrollbox = document.querySelector('#sidebar .sidebar-scrollbox');
+            sidebarScrollbox.addEventListener('click', function(e) {
+                if (e.target.tagName === 'A') {
+                    sessionStorage.setItem('sidebar-scroll', sidebarScrollbox.scrollTop);
+                }
+            }, { passive: true });
+            var sidebarScrollTop = sessionStorage.getItem('sidebar-scroll');
+            sessionStorage.removeItem('sidebar-scroll');
+            if (sidebarScrollTop) {
+                // preserve sidebar scroll position when navigating via links within sidebar
+                sidebarScrollbox.scrollTop = sidebarScrollTop;
+            } else {
+                // scroll sidebar to current active section when navigating via "next/previous chapter" buttons
+                var activeSection = document.querySelector('#sidebar .active');
+                if (activeSection) {
+                    activeSection.scrollIntoView({ block: 'center' });
+                }
+            }
+        </script>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">VirtRigaud Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/projectbeskar/virtrigaud" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/projectbeskar/virtrigaud/edit/main/docs/src/GRACEFUL_SHUTDOWN.md" title="Suggest an edit" aria-label="Suggest an edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="graceful-shutdown-feature"><a class="header" href="#graceful-shutdown-feature">Graceful Shutdown Feature</a></h1>
+<p>The virtrigaud VM management platform now supports graceful shutdown of virtual machines to prevent data corruption and ensure proper cleanup of running processes.</p>
+<h2 id="overview"><a class="header" href="#overview">Overview</a></h2>
+<p>Graceful shutdown uses VM guest tools (VMware Tools, QEMU Guest Agent, etc.) to properly shut down the operating system before powering off the virtual machine. This prevents data corruption and allows applications to save their state properly.</p>
+<h2 id="power-states"><a class="header" href="#power-states">Power States</a></h2>
+<p>virtrigaud supports three power states:</p>
+<ul>
+<li><code>On</code>: Power on the VM</li>
+<li><code>Off</code>: Hard power off (immediate shutdown without guest OS notification)</li>
+<li><code>OffGraceful</code>: Graceful shutdown using guest tools with automatic fallback to hard power off</li>
+</ul>
+<h2 id="configuration"><a class="header" href="#configuration">Configuration</a></h2>
+<h3 id="basic-usage"><a class="header" href="#basic-usage">Basic Usage</a></h3>
+<pre><code class="language-yaml">apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: my-vm
+spec:
+  powerState: OffGraceful  # Use graceful shutdown
+  # ... other configuration
+</code></pre>
+<h3 id="advanced-configuration-with-lifecycle-hooks"><a class="header" href="#advanced-configuration-with-lifecycle-hooks">Advanced Configuration with Lifecycle Hooks</a></h3>
+<pre><code class="language-yaml">apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: my-vm
+spec:
+  powerState: OffGraceful
+  
+  lifecycle:
+    # Timeout for graceful shutdown (default: 60s)
+    gracefulShutdownTimeout: "120s"
+    
+    # Pre-stop hook runs before shutdown
+    preStop:
+      exec:
+        command:
+          - "/bin/bash"
+          - "-c"
+          - |
+            # Save application state
+            systemctl stop my-application
+            # Sync filesystem
+            sync
+</code></pre>
+<h2 id="how-it-works"><a class="header" href="#how-it-works">How It Works</a></h2>
+<h3 id="vsphere-provider"><a class="header" href="#vsphere-provider">vSphere Provider</a></h3>
+<ol>
+<li><strong>Guest Tools Check</strong>: Verifies VMware Tools is installed and running</li>
+<li><strong>Graceful Shutdown</strong>: Calls <code>vm.ShutdownGuest()</code> to initiate OS shutdown</li>
+<li><strong>Monitoring</strong>: Polls VM power state every 2 seconds</li>
+<li><strong>Timeout Handling</strong>: Falls back to hard power off if timeout is reached</li>
+<li><strong>Fallback</strong>: Uses <code>vm.PowerOff()</code> if graceful shutdown fails</li>
+</ol>
+<h3 id="libvirt-provider"><a class="header" href="#libvirt-provider">Libvirt Provider</a></h3>
+<ol>
+<li><strong>Graceful Attempt</strong>: Uses <code>virsh shutdown</code> command</li>
+<li><strong>Fallback</strong>: Falls back to <code>virsh destroy</code> if shutdown fails</li>
+<li><strong>Guest Agent</strong>: Requires QEMU Guest Agent for best results</li>
+</ol>
+<h3 id="proxmox-provider"><a class="header" href="#proxmox-provider">Proxmox Provider</a></h3>
+<ol>
+<li><strong>API Call</strong>: Uses Proxmox <code>shutdown</code> API endpoint</li>
+<li><strong>Built-in Timeout</strong>: Proxmox handles timeout and fallback internally</li>
+</ol>
+<h2 id="default-timeouts"><a class="header" href="#default-timeouts">Default Timeouts</a></h2>
+<ul>
+<li><strong>vSphere</strong>: 60 seconds (configurable via gRPC request)</li>
+<li><strong>Libvirt</strong>: Immediate fallback if <code>virsh shutdown</code> fails</li>
+<li><strong>Proxmox</strong>: Managed by Proxmox server configuration</li>
+</ul>
+<h2 id="requirements"><a class="header" href="#requirements">Requirements</a></h2>
+<h3 id="vmware-vsphere"><a class="header" href="#vmware-vsphere">VMware vSphere</a></h3>
+<ul>
+<li>VMware Tools must be installed and running in the guest OS</li>
+<li>Guest OS must support ACPI shutdown signals</li>
+</ul>
+<h3 id="libvirtkvm"><a class="header" href="#libvirtkvm">Libvirt/KVM</a></h3>
+<ul>
+<li>QEMU Guest Agent recommended for reliable graceful shutdown</li>
+<li>Guest OS must support ACPI shutdown signals</li>
+</ul>
+<h3 id="proxmox"><a class="header" href="#proxmox">Proxmox</a></h3>
+<ul>
+<li>QEMU Guest Agent recommended</li>
+<li>Guest OS must support ACPI shutdown signals</li>
+</ul>
+<h2 id="best-practices"><a class="header" href="#best-practices">Best Practices</a></h2>
+<ol>
+<li><strong>Always Install Guest Tools</strong>: Ensure VMware Tools or QEMU Guest Agent is installed</li>
+<li><strong>Test Graceful Shutdown</strong>: Verify your VMs respond properly to shutdown signals</li>
+<li><strong>Set Appropriate Timeouts</strong>: Allow enough time for applications to shut down gracefully</li>
+<li><strong>Use Lifecycle Hooks</strong>: Implement pre-stop hooks for critical applications</li>
+<li><strong>Monitor Logs</strong>: Check provider logs to verify graceful shutdown is working</li>
+</ol>
+<h2 id="troubleshooting"><a class="header" href="#troubleshooting">Troubleshooting</a></h2>
+<h3 id="graceful-shutdown-not-working"><a class="header" href="#graceful-shutdown-not-working">Graceful Shutdown Not Working</a></h3>
+<ol>
+<li>
+<p><strong>Check Guest Tools Status</strong>:</p>
+<pre><code class="language-bash"># For VMware
+vmware-toolbox-cmd stat running
+
+# For QEMU/KVM
+systemctl status qemu-guest-agent
+</code></pre>
+</li>
+<li>
+<p><strong>Verify ACPI Support</strong>:</p>
+<pre><code class="language-bash"># Check if ACPI shutdown is supported
+cat /proc/acpi/button/power/*/info
+</code></pre>
+</li>
+<li>
+<p><strong>Test Manual Shutdown</strong>:</p>
+<pre><code class="language-bash"># Test graceful shutdown manually
+sudo shutdown -h now
+</code></pre>
+</li>
+</ol>
+<h3 id="timeout-issues"><a class="header" href="#timeout-issues">Timeout Issues</a></h3>
+<p>If VMs consistently hit the graceful shutdown timeout:</p>
+<ol>
+<li><strong>Increase Timeout</strong>: Set a longer <code>gracefulShutdownTimeout</code></li>
+<li><strong>Optimize Applications</strong>: Ensure applications shut down quickly</li>
+<li><strong>Check System Resources</strong>: Verify the system isn’t under heavy load</li>
+</ol>
+<h3 id="fallback-to-hard-power-off"><a class="header" href="#fallback-to-hard-power-off">Fallback to Hard Power Off</a></h3>
+<p>The provider will automatically fall back to hard power off if:</p>
+<ul>
+<li>Guest tools are not available</li>
+<li>Graceful shutdown times out</li>
+<li>Guest tools command fails</li>
+</ul>
+<p>This ensures VMs are always powered off even if graceful shutdown isn’t possible.</p>
+<h2 id="examples"><a class="header" href="#examples">Examples</a></h2>
+<p>See <code>examples/graceful-shutdown-vm.yaml</code> for complete examples of using graceful shutdown with various configurations.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="NESTED_VIRTUALIZATION.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="REMOTE_PROVIDERS.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="NESTED_VIRTUALIZATION.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="REMOTE_PROVIDERS.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr.min.js"></script>
+        <script src="mark.min.js"></script>
+        <script src="searcher.js"></script>
+
+        <script src="clipboard.min.js"></script>
+        <script src="highlight.js"></script>
+        <script src="book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="theme/page-toc.js"></script>
+
+
+    </div>
+    </body>
+</html>

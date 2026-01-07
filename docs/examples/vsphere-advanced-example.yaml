@@ -1,0 +1,236 @@
+# Advanced vSphere Provider Example (v0.2.1+)
+# This demonstrates running the vSphere provider with all v0.2.1 features:
+# - OffGraceful shutdown support
+# - Hardware version management
+# - Proper disk sizing
+# - Remote provider deployment
+
+# vSphere credentials
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vsphere-creds
+  namespace: default
+type: Opaque
+stringData:
+  username: "administrator@vsphere.local"
+  password: "your-vcenter-password"
+
+---
+# TLS certificates for provider gRPC communication
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vsphere-provider-tls
+  namespace: default
+type: kubernetes.io/tls
+data:
+  # Generate with your certificate authority
+  tls.crt: LS0tLS1CRUdJTi... # base64 encoded cert
+  tls.key: LS0tLS1CRUdJTi... # base64 encoded key
+stringData:
+  ca.crt: |
+    -----BEGIN CERTIFICATE-----
+    # Your CA certificate for mTLS verification
+    -----END CERTIFICATE-----
+
+---
+# Remote vSphere Provider Configuration
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: Provider
+metadata:
+  name: vsphere-datacenter1
+  namespace: default
+spec:
+  type: vsphere
+  endpoint: https://vcenter.dc1.example.com/sdk
+  credentialSecretRef:
+    name: vsphere-creds
+  insecureSkipVerify: false  # Use proper TLS in production
+  
+  defaults:
+    datastore: ssd-datastore
+    cluster: prod-cluster
+    folder: virtrigaud-vms
+  
+  # Remote runtime configuration
+  runtime:
+    mode: Remote
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.2.3"
+    service:
+      port: 9090
+
+---
+# VM Class for enterprise workloads (v0.2.1+ features)
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMClass
+metadata:
+  name: enterprise-medium
+  namespace: default
+spec:
+  cpu: 4
+  memory: "8Gi"
+  firmware: UEFI
+  diskDefaults:
+    type: thin
+    size: "100Gi"  # v0.2.1: Disk size now properly respected
+  guestToolsPolicy: install
+  extraConfig:
+    # vSphere performance tuning
+    "sched.cpu.latencySensitivity": "high"
+    "numa.nodeAffinity": "0"
+    # v0.2.1: Hardware version management
+    "vsphere.hardwareVersion": "21"  # ESXi 8.0+ compatibility
+
+---
+# VM Image from vSphere template
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMImage
+metadata:
+  name: ubuntu-22-template
+  namespace: default
+spec:
+  source:
+    vsphere:
+      templateName: "ubuntu-22.04-server-template"
+  prepare:
+    onMissing: Fail
+
+---
+# Enterprise network configuration
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMNetworkAttachment
+metadata:
+  name: production-vlan
+  namespace: default
+spec:
+  network:
+    vsphere:
+      portgroup: "Production-VLAN100"
+      distributed: true
+  ipAllocation:
+    type: DHCP
+
+---
+# Virtual Machine using remote vSphere provider
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: web-server-remote
+  namespace: default
+  labels:
+    tier: web
+    provider: vsphere
+    runtime: remote
+    environment: production
+spec:
+  providerRef:
+    name: vsphere-datacenter1
+  classRef:
+    name: enterprise-medium
+  imageRef:
+    name: ubuntu-22-template
+  networks:
+  - name: production-vlan
+    networkRef:
+      name: production-vlan
+  
+  disks:
+  - name: app-data
+    sizeGiB: 200
+    type: thick
+  - name: logs
+    sizeGiB: 50
+    type: thin
+  
+  placement:
+    datacenter: "DC1"
+    cluster: "prod-cluster"
+    datastore: "ssd-datastore"
+    folder: "virtrigaud-vms/web-tier"
+  
+  powerState: "On"
+  
+  # v0.2.1: Enhanced lifecycle management
+  lifecycle:
+    gracefulShutdownTimeout: "120s"  # Allow 2 minutes for graceful shutdown
+    preStop:
+      exec:
+        command:
+        - "/bin/bash"
+        - "-c"
+        - |
+          # Graceful application shutdown
+          systemctl stop nginx
+          systemctl stop my-web-app
+          # Sync filesystems
+          sync
+          sleep 5
+  
+  userData:
+    cloudInit:
+      inline: |
+        #cloud-config
+        hostname: web-server-remote
+        fqdn: web-server-remote.dc1.example.com
+        
+        users:
+        - name: ubuntu
+          sudo: ALL=(ALL) NOPASSWD:ALL
+          shell: /bin/bash
+          ssh_authorized_keys:
+          - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAB... # Your SSH key
+        
+        # Mount additional disks
+        disk_setup:
+          /dev/sdb:
+            table_type: gpt
+            layout: true
+          /dev/sdc:
+            table_type: gpt  
+            layout: true
+        
+        fs_setup:
+        - device: /dev/sdb1
+          filesystem: ext4
+          label: app-data
+        - device: /dev/sdc1
+          filesystem: ext4
+          label: logs
+        
+        mounts:
+        - ["/dev/sdb1", "/opt/app", "ext4", "defaults", "0", "2"]
+        - ["/dev/sdc1", "/var/log/app", "ext4", "defaults", "0", "2"]
+        
+        packages:
+        - open-vm-tools
+        - nginx
+        - htop
+        - curl
+        - rsync
+        
+        runcmd:
+        - systemctl enable --now open-vm-tools
+        - systemctl enable --now nginx
+        - mkdir -p /opt/app /var/log/app
+        - chown -R www-data:www-data /opt/app /var/log/app
+        - echo '<h1>Remote vSphere VM via virtrigaud!</h1>' > /var/www/html/index.html
+        - echo '<p>Runtime: Remote Provider</p>' >> /var/www/html/index.html
+        - echo '<p>Provider: vSphere</p>' >> /var/www/html/index.html
+        
+        final_message: "Remote vSphere VM is ready! Runtime: remote, Provider: vSphere"
+  
+  tags:
+  - environment:production
+  - tier:web
+  - provider:vsphere
+  - runtime:remote
+  - datacenter:dc1
+
+---
+# Example: How to gracefully shutdown this VM (v0.2.1+)
+# kubectl patch virtualmachine web-server-remote --type='merge' -p='{"spec":{"powerState":"OffGraceful"}}'
+# This will:
+# 1. Execute the preStop hook (stop nginx, stop my-web-app, sync)
+# 2. Attempt graceful shutdown using VMware Tools (120s timeout)
+# 3. Fall back to hard power off if graceful shutdown fails

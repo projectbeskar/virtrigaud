@@ -1,0 +1,160 @@
+---
+# Example: Testing disk size configuration across providers
+# This example demonstrates different disk sizes to verify the fix
+
+# VMClass with 50GB disk
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMClass
+metadata:
+  name: large-disk-class
+  namespace: virtrigaud-system
+spec:
+  cpu: 2
+  memory: 4Gi
+  firmware: BIOS
+  
+  diskDefaults:
+    type: thin
+    sizeGiB: 50  # 50GB disk (was being ignored before fix)
+
+---
+# VMClass with 100GB disk
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMClass
+metadata:
+  name: xlarge-disk-class
+  namespace: virtrigaud-system
+spec:
+  cpu: 4
+  memory: 8Gi
+  firmware: UEFI
+  
+  diskDefaults:
+    type: thick
+    sizeGiB: 100  # 100GB disk (was being ignored before fix)
+
+---
+# VMClass with small 30GB disk
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMClass
+metadata:
+  name: small-disk-class
+  namespace: virtrigaud-system
+spec:
+  cpu: 1
+  memory: 2Gi
+  firmware: BIOS
+  
+  diskDefaults:
+    type: thin
+    sizeGiB: 30  # 30GB disk (was being ignored before fix)
+
+---
+# Test VM with 50GB disk (vSphere)
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: test-vsphere-50gb
+  namespace: default
+spec:
+  powerState: On
+  
+  providerRef:
+    name: vsphere-provider
+    namespace: virtrigaud-system
+  
+  classRef:
+    name: large-disk-class  # Should get 50GB disk
+    namespace: virtrigaud-system
+  
+  imageRef:
+    name: ubuntu-22-04-template
+    namespace: virtrigaud-system
+
+---
+# Test VM with 100GB disk (vSphere)
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: test-vsphere-100gb
+  namespace: default
+spec:
+  powerState: On
+  
+  providerRef:
+    name: vsphere-provider
+    namespace: virtrigaud-system
+  
+  classRef:
+    name: xlarge-disk-class  # Should get 100GB disk
+    namespace: virtrigaud-system
+  
+  imageRef:
+    name: ubuntu-22-04-template
+    namespace: virtrigaud-system
+
+---
+# Test VM with 30GB disk (LibVirt)
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: test-libvirt-30gb
+  namespace: default
+spec:
+  powerState: On
+  
+  providerRef:
+    name: libvirt-provider
+    namespace: virtrigaud-system
+  
+  classRef:
+    name: small-disk-class  # Should get 30GB disk (not 20GB default)
+    namespace: virtrigaud-system
+  
+  imageRef:
+    name: ubuntu-22-04
+    namespace: virtrigaud-system
+
+---
+# Test VM with 50GB disk (LibVirt)
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: test-libvirt-50gb
+  namespace: default
+spec:
+  powerState: On
+  
+  providerRef:
+    name: libvirt-provider
+    namespace: virtrigaud-system
+  
+  classRef:
+    name: large-disk-class  # Should get 50GB disk (not 20GB default)
+    namespace: virtrigaud-system
+  
+  imageRef:
+    name: ubuntu-22-04
+    namespace: virtrigaud-system
+
+---
+# Test VM with 100GB disk (Proxmox - should already work)
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: test-proxmox-100gb
+  namespace: default
+spec:
+  powerState: On
+  
+  providerRef:
+    name: proxmox-provider
+    namespace: virtrigaud-system
+  
+  classRef:
+    name: xlarge-disk-class  # Should get 100GB disk (already working)
+    namespace: virtrigaud-system
+  
+  imageRef:
+    name: ubuntu-22-04-template
+    namespace: virtrigaud-system

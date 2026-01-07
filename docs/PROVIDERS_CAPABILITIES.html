@@ -1,0 +1,525 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Provider Capabilities Matrix - VirtRigaud Documentation</title>
+
+
+        <!-- Custom HTML head -->
+        
+        <meta name="description" content="Kubernetes operator for managing virtual machines across multiple hypervisors">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon.svg">
+        <link rel="shortcut icon" href="favicon.png">
+        <link rel="stylesheet" href="css/variables.css">
+        <link rel="stylesheet" href="css/general.css">
+        <link rel="stylesheet" href="css/chrome.css">
+        <link rel="stylesheet" href="css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="highlight.css">
+        <link rel="stylesheet" href="tomorrow-night.css">
+        <link rel="stylesheet" href="ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="theme/custom.css">
+
+    </head>
+    <body class="sidebar-visible no-js">
+    <div id="body-container">
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
+        </script>
+
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            var html = document.querySelector('html');
+            html.classList.remove('light')
+            html.classList.add(theme);
+            var body = document.querySelector('body');
+            body.classList.remove('no-js')
+            body.classList.add('js');
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var body = document.querySelector('body');
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            body.classList.remove('sidebar-visible');
+            body.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <div class="sidebar-scrollbox">
+                <ol class="chapter"><li class="chapter-item affix "><a href="index.html">Introduction</a></li><li class="chapter-item affix "><li class="part-title">Getting Started</li><li class="chapter-item "><a href="getting-started/quickstart.html"><strong aria-hidden="true">1.</strong> 15-Minute Quickstart</a></li><li class="chapter-item "><a href="install-helm-only.html"><strong aria-hidden="true">2.</strong> Installation Guide</a></li><li class="chapter-item "><a href="HELM_CRD_UPGRADES.html"><strong aria-hidden="true">3.</strong> Helm CRD Upgrades</a></li><li class="chapter-item affix "><li class="part-title">Core Documentation</li><li class="chapter-item "><a href="CRDs.html"><strong aria-hidden="true">4.</strong> Custom Resource Definitions</a></li><li class="chapter-item "><a href="EXAMPLES.html"><strong aria-hidden="true">5.</strong> Examples</a></li><li class="chapter-item "><a href="PROVIDERS.html"><strong aria-hidden="true">6.</strong> Provider Documentation</a></li><li class="chapter-item expanded "><a href="PROVIDERS_CAPABILITIES.html" class="active"><strong aria-hidden="true">7.</strong> Provider Capabilities Matrix</a></li><li class="chapter-item affix "><li class="part-title">Provider-Specific Guides</li><li class="chapter-item "><a href="providers/vsphere.html"><strong aria-hidden="true">8.</strong> vSphere Provider</a></li><li class="chapter-item "><a href="providers/libvirt.html"><strong aria-hidden="true">9.</strong> Libvirt Provider</a></li><li class="chapter-item "><a href="providers/proxmox.html"><strong aria-hidden="true">10.</strong> Proxmox VE Provider</a></li><li class="chapter-item "><a href="providers/tutorial.html"><strong aria-hidden="true">11.</strong> Provider Tutorial</a></li><li class="chapter-item "><a href="providers/versioning.html"><strong aria-hidden="true">12.</strong> Provider Versioning</a></li><li class="chapter-item affix "><li class="part-title">Advanced Features</li><li class="chapter-item "><a href="ADVANCED_LIFECYCLE.html"><strong aria-hidden="true">13.</strong> VM Lifecycle Management</a></li><li class="chapter-item "><a href="NESTED_VIRTUALIZATION.html"><strong aria-hidden="true">14.</strong> Nested Virtualization</a></li><li class="chapter-item "><a href="GRACEFUL_SHUTDOWN.html"><strong aria-hidden="true">15.</strong> Graceful Shutdown</a></li><li class="chapter-item "><a href="REMOTE_PROVIDERS.html"><strong aria-hidden="true">16.</strong> Remote Providers</a></li><li class="chapter-item affix "><li class="part-title">Operations & Administration</li><li class="chapter-item "><a href="OBSERVABILITY.html"><strong aria-hidden="true">17.</strong> Observability</a></li><li class="chapter-item "><a href="SECURITY.html"><strong aria-hidden="true">18.</strong> Security</a></li><li class="chapter-item "><a href="RESILIENCE.html"><strong aria-hidden="true">19.</strong> Resilience</a></li><li class="chapter-item "><a href="UPGRADE.html"><strong aria-hidden="true">20.</strong> Upgrade Guide</a></li><li class="chapter-item "><a href="VSPHERE_HARDWARE_VERSION.html"><strong aria-hidden="true">21.</strong> vSphere Hardware Versions</a></li><li class="chapter-item affix "><li class="part-title">Security Configuration</li><li class="chapter-item "><a href="providers/security/bearer-token.html"><strong aria-hidden="true">22.</strong> Bearer Token Authentication</a></li><li class="chapter-item "><a href="providers/security/mtls.html"><strong aria-hidden="true">23.</strong> mTLS Configuration</a></li><li class="chapter-item "><a href="providers/security/external-secrets.html"><strong aria-hidden="true">24.</strong> External Secrets</a></li><li class="chapter-item "><a href="providers/security/network-policies.html"><strong aria-hidden="true">25.</strong> Network Policies</a></li><li class="chapter-item affix "><li class="part-title">API Reference</li><li class="chapter-item "><a href="CLI.html"><strong aria-hidden="true">26.</strong> CLI Tools Reference</a></li><li class="chapter-item "><a href="api-reference/cli.html"><strong aria-hidden="true">27.</strong> CLI API Reference</a></li><li class="chapter-item "><a href="api-reference/metrics.html"><strong aria-hidden="true">28.</strong> Metrics Catalog</a></li><li class="chapter-item "><a href="catalog.html"><strong aria-hidden="true">29.</strong> Provider Catalog</a></li><li class="chapter-item affix "><li class="part-title">Development</li><li class="chapter-item "><a href="TESTING_WORKFLOWS_LOCALLY.html"><strong aria-hidden="true">30.</strong> Testing Workflows Locally</a></li><li class="chapter-item "><a href="../../CONTRIBUTING.html"><strong aria-hidden="true">31.</strong> Contributing</a></li><li class="chapter-item "><a href="../../DEVELOPMENT.html"><strong aria-hidden="true">32.</strong> Development Guide</a></li><li class="chapter-item affix "><li class="part-title">Examples</li><li class="chapter-item "><a href="examples/index.html"><strong aria-hidden="true">33.</strong> Example README</a></li></ol>
+            </div>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <!-- Track and set sidebar scroll position -->
+        <script>
+            var sidebarScrollbox = document.querySelector('#sidebar .sidebar-scrollbox');
+            sidebarScrollbox.addEventListener('click', function(e) {
+                if (e.target.tagName === 'A') {
+                    sessionStorage.setItem('sidebar-scroll', sidebarScrollbox.scrollTop);
+                }
+            }, { passive: true });
+            var sidebarScrollTop = sessionStorage.getItem('sidebar-scroll');
+            sessionStorage.removeItem('sidebar-scroll');
+            if (sidebarScrollTop) {
+                // preserve sidebar scroll position when navigating via links within sidebar
+                sidebarScrollbox.scrollTop = sidebarScrollTop;
+            } else {
+                // scroll sidebar to current active section when navigating via "next/previous chapter" buttons
+                var activeSection = document.querySelector('#sidebar .active');
+                if (activeSection) {
+                    activeSection.scrollIntoView({ block: 'center' });
+                }
+            }
+        </script>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">VirtRigaud Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/projectbeskar/virtrigaud" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/projectbeskar/virtrigaud/edit/main/docs/src/PROVIDERS_CAPABILITIES.md" title="Suggest an edit" aria-label="Suggest an edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="provider-capabilities-matrix"><a class="header" href="#provider-capabilities-matrix">Provider Capabilities Matrix</a></h1>
+<p>This document provides a comprehensive overview of VirtRigaud provider capabilities as of v0.2.3.</p>
+<h2 id="overview"><a class="header" href="#overview">Overview</a></h2>
+<p>VirtRigaud supports multiple hypervisor platforms through a provider architecture. Each provider implements the core VirtRigaud API while supporting platform-specific features and capabilities.</p>
+<h2 id="core-provider-interface"><a class="header" href="#core-provider-interface">Core Provider Interface</a></h2>
+<p>All providers implement these core operations:</p>
+<ul>
+<li><strong>Validate</strong>: Test provider connectivity and credentials</li>
+<li><strong>Create</strong>: Create new virtual machines</li>
+<li><strong>Delete</strong>: Remove virtual machines and cleanup resources</li>
+<li><strong>Power</strong>: Control VM power state (On/Off/Reboot)</li>
+<li><strong>Describe</strong>: Query VM state and properties</li>
+<li><strong>GetCapabilities</strong>: Report provider-specific capabilities</li>
+</ul>
+<h2 id="provider-status"><a class="header" href="#provider-status">Provider Status</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Provider</th><th>Status</th><th>Implementation</th><th>Maturity</th></tr></thead><tbody>
+<tr><td><strong>vSphere</strong></td><td>✅ Production Ready</td><td>govmomi-based</td><td>Stable</td></tr>
+<tr><td><strong>Libvirt/KVM</strong></td><td>✅ Production Ready</td><td>virsh-based</td><td>Stable</td></tr>
+<tr><td><strong>Proxmox VE</strong></td><td>✅ Production Ready</td><td>REST API-based</td><td>Beta</td></tr>
+<tr><td><strong>Mock</strong></td><td>✅ Complete</td><td>In-memory simulation</td><td>Testing</td></tr>
+</tbody></table>
+</div>
+<h2 id="comprehensive-capability-matrix"><a class="header" href="#comprehensive-capability-matrix">Comprehensive Capability Matrix</a></h2>
+<h3 id="core-operations"><a class="header" href="#core-operations">Core Operations</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Capability</th><th>vSphere</th><th>Libvirt</th><th>Proxmox</th><th>Mock</th><th>Notes</th></tr></thead><tbody>
+<tr><td><strong>VM Create</strong></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>All providers support VM creation</td></tr>
+<tr><td><strong>VM Delete</strong></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>With resource cleanup</td></tr>
+<tr><td><strong>Power On/Off</strong></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>Basic power management</td></tr>
+<tr><td><strong>Reboot</strong></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>Graceful and forced restart</td></tr>
+<tr><td><strong>Suspend</strong></td><td>✅</td><td>❌</td><td>✅</td><td>✅</td><td>Memory state preservation</td></tr>
+<tr><td><strong>Describe</strong></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>VM state and properties</td></tr>
+<tr><td><strong>Reconfigure</strong></td><td>✅</td><td>⚠️</td><td>✅</td><td>✅</td><td>CPU/Memory/Disk changes (Libvirt requires restart)</td></tr>
+<tr><td><strong>TaskStatus</strong></td><td>✅</td><td>N/A</td><td>✅</td><td>✅</td><td>Async operation tracking</td></tr>
+<tr><td><strong>ConsoleURL</strong></td><td>✅</td><td>✅</td><td>⚠️</td><td>✅</td><td>Remote console access (Proxmox planned)</td></tr>
+</tbody></table>
+</div>
+<h3 id="resource-management"><a class="header" href="#resource-management">Resource Management</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Capability</th><th>vSphere</th><th>Libvirt</th><th>Proxmox</th><th>Mock</th><th>Notes</th></tr></thead><tbody>
+<tr><td><strong>CPU Configuration</strong></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>Cores, sockets, threading</td></tr>
+<tr><td><strong>Memory Allocation</strong></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>Static memory sizing</td></tr>
+<tr><td><strong>Hot CPU Add</strong></td><td>✅</td><td>❌</td><td>✅</td><td>✅</td><td>Online CPU expansion</td></tr>
+<tr><td><strong>Hot Memory Add</strong></td><td>✅</td><td>❌</td><td>✅</td><td>✅</td><td>Online memory expansion</td></tr>
+<tr><td><strong>Resource Reservations</strong></td><td>✅</td><td>❌</td><td>✅</td><td>✅</td><td>Guaranteed resources</td></tr>
+<tr><td><strong>Resource Limits</strong></td><td>✅</td><td>❌</td><td>✅</td><td>✅</td><td>Resource capping</td></tr>
+</tbody></table>
+</div>
+<h3 id="storage-operations"><a class="header" href="#storage-operations">Storage Operations</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Capability</th><th>vSphere</th><th>Libvirt</th><th>Proxmox</th><th>Mock</th><th>Notes</th></tr></thead><tbody>
+<tr><td><strong>Disk Creation</strong></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>Virtual disk provisioning</td></tr>
+<tr><td><strong>Disk Expansion</strong></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>Online disk growth</td></tr>
+<tr><td><strong>Multiple Disks</strong></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>Multi-disk VMs</td></tr>
+<tr><td><strong>Thin Provisioning</strong></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>Space-efficient disks</td></tr>
+<tr><td><strong>Thick Provisioning</strong></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>Pre-allocated storage</td></tr>
+<tr><td><strong>Storage Policies</strong></td><td>✅</td><td>❌</td><td>✅</td><td>✅</td><td>Policy-based placement</td></tr>
+<tr><td><strong>Storage Pools</strong></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>Organized storage management</td></tr>
+</tbody></table>
+</div>
+<h3 id="network-configuration"><a class="header" href="#network-configuration">Network Configuration</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Capability</th><th>vSphere</th><th>Libvirt</th><th>Proxmox</th><th>Mock</th><th>Notes</th></tr></thead><tbody>
+<tr><td><strong>Basic Networking</strong></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>Single network interface</td></tr>
+<tr><td><strong>Multiple NICs</strong></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>Multi-interface VMs</td></tr>
+<tr><td><strong>VLAN Support</strong></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>Network segmentation</td></tr>
+<tr><td><strong>Static IP</strong></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>Fixed IP assignment</td></tr>
+<tr><td><strong>DHCP</strong></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>Dynamic IP assignment</td></tr>
+<tr><td><strong>Bridge Networks</strong></td><td>❌</td><td>✅</td><td>✅</td><td>✅</td><td>Direct host bridging</td></tr>
+<tr><td><strong>Distributed Switches</strong></td><td>✅</td><td>❌</td><td>❌</td><td>✅</td><td>Advanced vSphere networking</td></tr>
+</tbody></table>
+</div>
+<h3 id="vm-lifecycle"><a class="header" href="#vm-lifecycle">VM Lifecycle</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Capability</th><th>vSphere</th><th>Libvirt</th><th>Proxmox</th><th>Mock</th><th>Notes</th></tr></thead><tbody>
+<tr><td><strong>Template Deployment</strong></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>Deploy from templates</td></tr>
+<tr><td><strong>Clone Operations</strong></td><td>✅ Complete</td><td>✅</td><td>✅</td><td>✅</td><td>Full VM duplication with snapshot support</td></tr>
+<tr><td><strong>Linked Clones</strong></td><td>✅</td><td>❌</td><td>✅</td><td>✅</td><td>COW-based clones with automatic snapshot creation</td></tr>
+<tr><td><strong>Full Clones</strong></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>Independent copies</td></tr>
+<tr><td><strong>VM Reconfiguration</strong></td><td>✅ Complete</td><td>⚠️ Restart Required</td><td>✅</td><td>✅</td><td>Online resource modification</td></tr>
+</tbody></table>
+</div>
+<h3 id="snapshot-operations"><a class="header" href="#snapshot-operations">Snapshot Operations</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Capability</th><th>vSphere</th><th>Libvirt</th><th>Proxmox</th><th>Mock</th><th>Notes</th></tr></thead><tbody>
+<tr><td><strong>Create Snapshots</strong></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>Point-in-time captures</td></tr>
+<tr><td><strong>Delete Snapshots</strong></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>Snapshot cleanup</td></tr>
+<tr><td><strong>Revert Snapshots</strong></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>Restore VM state</td></tr>
+<tr><td><strong>Memory Snapshots</strong></td><td>✅</td><td>❌</td><td>✅</td><td>✅</td><td>Include RAM state</td></tr>
+<tr><td><strong>Quiesced Snapshots</strong></td><td>✅</td><td>❌</td><td>✅</td><td>✅</td><td>Consistent filesystem</td></tr>
+<tr><td><strong>Snapshot Trees</strong></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>Hierarchical snapshots</td></tr>
+</tbody></table>
+</div>
+<h3 id="image-management"><a class="header" href="#image-management">Image Management</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Capability</th><th>vSphere</th><th>Libvirt</th><th>Proxmox</th><th>Mock</th><th>Notes</th></tr></thead><tbody>
+<tr><td><strong>OVA/OVF Import</strong></td><td>✅</td><td>❌</td><td>✅</td><td>✅</td><td>Standard VM formats</td></tr>
+<tr><td><strong>Cloud Image Download</strong></td><td>❌</td><td>✅</td><td>✅</td><td>✅</td><td>Remote image fetch</td></tr>
+<tr><td><strong>Content Libraries</strong></td><td>✅</td><td>❌</td><td>❌</td><td>✅</td><td>Centralized image management</td></tr>
+<tr><td><strong>Image Conversion</strong></td><td>❌</td><td>✅</td><td>✅</td><td>✅</td><td>Format transformation</td></tr>
+<tr><td><strong>Image Caching</strong></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>Performance optimization</td></tr>
+</tbody></table>
+</div>
+<h3 id="guest-operating-system"><a class="header" href="#guest-operating-system">Guest Operating System</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Capability</th><th>vSphere</th><th>Libvirt</th><th>Proxmox</th><th>Mock</th><th>Notes</th></tr></thead><tbody>
+<tr><td><strong>Cloud-Init</strong></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>Guest initialization</td></tr>
+<tr><td><strong>Guest Tools</strong></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>Enhanced guest integration</td></tr>
+<tr><td><strong>Guest Agent</strong></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>Runtime guest communication</td></tr>
+<tr><td><strong>Guest Customization</strong></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>OS-specific customization</td></tr>
+<tr><td><strong>Guest Monitoring</strong></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>Resource usage tracking</td></tr>
+</tbody></table>
+</div>
+<h3 id="advanced-features"><a class="header" href="#advanced-features">Advanced Features</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Capability</th><th>vSphere</th><th>Libvirt</th><th>Proxmox</th><th>Mock</th><th>Notes</th></tr></thead><tbody>
+<tr><td><strong>High Availability</strong></td><td>✅</td><td>❌</td><td>✅</td><td>✅</td><td>Automatic failover</td></tr>
+<tr><td><strong>DRS/Load Balancing</strong></td><td>✅</td><td>❌</td><td>❌</td><td>✅</td><td>Resource optimization</td></tr>
+<tr><td><strong>Fault Tolerance</strong></td><td>✅</td><td>❌</td><td>❌</td><td>✅</td><td>Zero-downtime protection</td></tr>
+<tr><td><strong>vMotion/Migration</strong></td><td>✅</td><td>❌</td><td>✅</td><td>✅</td><td>Live VM migration</td></tr>
+<tr><td><strong>Resource Pools</strong></td><td>✅</td><td>❌</td><td>✅</td><td>✅</td><td>Hierarchical resource mgmt</td></tr>
+<tr><td><strong>Affinity Rules</strong></td><td>✅</td><td>❌</td><td>✅</td><td>✅</td><td>VM placement policies</td></tr>
+</tbody></table>
+</div>
+<h3 id="monitoring--observability"><a class="header" href="#monitoring--observability">Monitoring &amp; Observability</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Capability</th><th>vSphere</th><th>Libvirt</th><th>Proxmox</th><th>Mock</th><th>Notes</th></tr></thead><tbody>
+<tr><td><strong>Performance Metrics</strong></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>CPU, memory, disk, network</td></tr>
+<tr><td><strong>Event Logging</strong></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>Operation audit trail</td></tr>
+<tr><td><strong>Health Checks</strong></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>VM and guest health</td></tr>
+<tr><td><strong>Alerting</strong></td><td>✅</td><td>❌</td><td>✅</td><td>✅</td><td>Threshold-based notifications</td></tr>
+<tr><td><strong>Historical Data</strong></td><td>✅</td><td>❌</td><td>✅</td><td>✅</td><td>Performance history</td></tr>
+<tr><td><strong>Console URL Generation</strong></td><td>✅</td><td>✅</td><td>⚠️</td><td>✅</td><td>Web/VNC console access (Proxmox planned)</td></tr>
+<tr><td><strong>Guest Agent Integration</strong></td><td>✅</td><td>✅</td><td>✅ Complete</td><td>✅</td><td>IP detection and guest info</td></tr>
+</tbody></table>
+</div>
+<h2 id="provider-specific-features"><a class="header" href="#provider-specific-features">Provider-Specific Features</a></h2>
+<h3 id="vsphere-exclusive"><a class="header" href="#vsphere-exclusive">vSphere Exclusive</a></h3>
+<ul>
+<li><strong>vCenter Integration</strong>: Full vCenter Server and ESXi support</li>
+<li><strong>Content Library</strong>: Centralized template and ISO management</li>
+<li><strong>Distributed Resource Scheduler (DRS)</strong>: Automatic load balancing</li>
+<li><strong>vMotion</strong>: Live migration between hosts</li>
+<li><strong>High Availability (HA)</strong>: Automatic VM restart on host failure</li>
+<li><strong>Fault Tolerance</strong>: Zero-downtime VM protection</li>
+<li><strong>Storage vMotion</strong>: Live storage migration</li>
+<li><strong>vSAN Integration</strong>: Hyper-converged storage</li>
+<li><strong>NSX Integration</strong>: Software-defined networking</li>
+<li><strong>Hot Reconfiguration</strong>: Online CPU/memory/disk changes with hot-add support</li>
+<li><strong>TaskStatus Tracking</strong>: Real-time async operation monitoring via govmomi</li>
+<li><strong>Clone Operations</strong>: Full and linked clones with automatic snapshot handling</li>
+<li><strong>Web Console URLs</strong>: Direct vSphere web client console access</li>
+</ul>
+<h3 id="libvirtkvm-exclusive"><a class="header" href="#libvirtkvm-exclusive">Libvirt/KVM Exclusive</a></h3>
+<ul>
+<li><strong>Virsh Integration</strong>: Command-line management</li>
+<li><strong>QEMU Guest Agent</strong>: Advanced guest OS integration</li>
+<li><strong>KVM Optimization</strong>: Native Linux virtualization</li>
+<li><strong>Bridge Networking</strong>: Direct host network bridging</li>
+<li><strong>Storage Pool Flexibility</strong>: Multiple storage backend support</li>
+<li><strong>Cloud Image Support</strong>: Direct cloud image deployment</li>
+<li><strong>Host Device Passthrough</strong>: Hardware device assignment</li>
+<li><strong>Reconfiguration Support</strong>: CPU/memory/disk changes via virsh (restart required)</li>
+<li><strong>VNC Console Access</strong>: Direct VNC console URL generation for remote viewers</li>
+</ul>
+<h3 id="proxmox-ve-exclusive"><a class="header" href="#proxmox-ve-exclusive">Proxmox VE Exclusive</a></h3>
+<ul>
+<li><strong>Web UI Integration</strong>: Built-in management interface</li>
+<li><strong>Container Support</strong>: LXC container management</li>
+<li><strong>Backup Integration</strong>: Built-in backup and restore</li>
+<li><strong>Cluster Management</strong>: Multi-node cluster support</li>
+<li><strong>ZFS Integration</strong>: Advanced filesystem features</li>
+<li><strong>Ceph Integration</strong>: Distributed storage</li>
+<li><strong>Guest Agent IP Detection</strong>: Accurate IP address extraction via QEMU guest agent</li>
+<li><strong>Hot-plug Reconfiguration</strong>: Online CPU/memory/disk modifications</li>
+<li><strong>Complete CRD Integration</strong>: Full Kubernetes custom resource support</li>
+</ul>
+<h3 id="mock-provider-features"><a class="header" href="#mock-provider-features">Mock Provider Features</a></h3>
+<ul>
+<li><strong>Testing Scenarios</strong>: Configurable failure modes</li>
+<li><strong>Performance Simulation</strong>: Controllable operation delays</li>
+<li><strong>Sample Data</strong>: Pre-populated demonstration VMs</li>
+<li><strong>Development Support</strong>: Full API coverage for testing</li>
+</ul>
+<h2 id="supported-disk-types"><a class="header" href="#supported-disk-types">Supported Disk Types</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Provider</th><th>Disk Formats</th><th>Notes</th></tr></thead><tbody>
+<tr><td><strong>vSphere</strong></td><td>thin, thick, eagerZeroedThick</td><td>vSphere native formats</td></tr>
+<tr><td><strong>Libvirt</strong></td><td>qcow2, raw, vmdk</td><td>QEMU-supported formats</td></tr>
+<tr><td><strong>Proxmox</strong></td><td>qcow2, raw, vmdk</td><td>Proxmox storage formats</td></tr>
+<tr><td><strong>Mock</strong></td><td>thin, thick, raw, qcow2</td><td>Simulated formats</td></tr>
+</tbody></table>
+</div>
+<h2 id="supported-network-types"><a class="header" href="#supported-network-types">Supported Network Types</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Provider</th><th>Network Types</th><th>Notes</th></tr></thead><tbody>
+<tr><td><strong>vSphere</strong></td><td>distributed, standard, vlan</td><td>vSphere networking</td></tr>
+<tr><td><strong>Libvirt</strong></td><td>virtio, e1000, rtl8139</td><td>QEMU network adapters</td></tr>
+<tr><td><strong>Proxmox</strong></td><td>virtio, e1000, rtl8139</td><td>Proxmox network models</td></tr>
+<tr><td><strong>Mock</strong></td><td>bridge, nat, distributed</td><td>Simulated network types</td></tr>
+</tbody></table>
+</div>
+<h2 id="provider-images"><a class="header" href="#provider-images">Provider Images</a></h2>
+<p>All provider images are available from the GitHub Container Registry:</p>
+<ul>
+<li><strong>vSphere</strong>: <code>ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.2.3</code></li>
+<li><strong>Libvirt</strong>: <code>ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.2.3</code></li>
+<li><strong>Proxmox</strong>: <code>ghcr.io/projectbeskar/virtrigaud/provider-proxmox:v0.2.3</code></li>
+<li><strong>Mock</strong>: <code>ghcr.io/projectbeskar/virtrigaud/provider-mock:v0.2.3</code></li>
+</ul>
+<h2 id="choosing-a-provider"><a class="header" href="#choosing-a-provider">Choosing a Provider</a></h2>
+<h3 id="use-vsphere-when"><a class="header" href="#use-vsphere-when">Use vSphere When:</a></h3>
+<ul>
+<li>You have existing VMware infrastructure</li>
+<li>You need enterprise features (HA, DRS, vMotion)</li>
+<li>You require advanced networking (NSX, distributed switches)</li>
+<li>You need centralized management (vCenter)</li>
+</ul>
+<h3 id="use-libvirtkvm-when"><a class="header" href="#use-libvirtkvm-when">Use Libvirt/KVM When:</a></h3>
+<ul>
+<li>You want open-source virtualization</li>
+<li>You’re running on Linux hosts</li>
+<li>You need cost-effective virtualization</li>
+<li>You want direct host integration</li>
+</ul>
+<h3 id="use-proxmox-ve-when"><a class="header" href="#use-proxmox-ve-when">Use Proxmox VE When:</a></h3>
+<ul>
+<li>You need both VMs and containers</li>
+<li>You want integrated backup solutions</li>
+<li>You need cluster management</li>
+<li>You want web-based management</li>
+</ul>
+<h3 id="use-mock-provider-when"><a class="header" href="#use-mock-provider-when">Use Mock Provider When:</a></h3>
+<ul>
+<li>You’re developing or testing VirtRigaud</li>
+<li>You need to simulate VM operations</li>
+<li>You’re creating demos or training materials</li>
+<li>You’re testing VirtRigaud without hypervisors</li>
+</ul>
+<h2 id="performance-considerations"><a class="header" href="#performance-considerations">Performance Considerations</a></h2>
+<h3 id="vsphere"><a class="header" href="#vsphere">vSphere</a></h3>
+<ul>
+<li><strong>Best for</strong>: Large-scale enterprise deployments</li>
+<li><strong>Scalability</strong>: Hundreds to thousands of VMs</li>
+<li><strong>Overhead</strong>: Higher due to feature richness</li>
+<li><strong>Resource Efficiency</strong>: Excellent with DRS</li>
+</ul>
+<h3 id="libvirtkvm"><a class="header" href="#libvirtkvm">Libvirt/KVM</a></h3>
+<ul>
+<li><strong>Best for</strong>: Linux-based deployments</li>
+<li><strong>Scalability</strong>: Moderate to large deployments</li>
+<li><strong>Overhead</strong>: Low, near-native performance</li>
+<li><strong>Resource Efficiency</strong>: Good with proper tuning</li>
+</ul>
+<h3 id="proxmox-ve"><a class="header" href="#proxmox-ve">Proxmox VE</a></h3>
+<ul>
+<li><strong>Best for</strong>: SMB and mixed workloads</li>
+<li><strong>Scalability</strong>: Small to medium deployments</li>
+<li><strong>Overhead</strong>: Moderate</li>
+<li><strong>Resource Efficiency</strong>: Good with clustering</li>
+</ul>
+<h2 id="future-roadmap"><a class="header" href="#future-roadmap">Future Roadmap</a></h2>
+<h3 id="planned-enhancements"><a class="header" href="#planned-enhancements">Planned Enhancements</a></h3>
+<h4 id="vsphere-1"><a class="header" href="#vsphere-1">vSphere</a></h4>
+<ul>
+<li>vSphere 8.0 support</li>
+<li>Enhanced NSX integration</li>
+<li>GPU passthrough support</li>
+<li>vSAN policy automation</li>
+</ul>
+<h4 id="libvirt"><a class="header" href="#libvirt">Libvirt</a></h4>
+<ul>
+<li>Live migration support</li>
+<li>SR-IOV networking</li>
+<li>NUMA topology optimization</li>
+<li>Enhanced performance monitoring</li>
+</ul>
+<h4 id="proxmox"><a class="header" href="#proxmox">Proxmox</a></h4>
+<ul>
+<li>HA configuration</li>
+<li>Storage replication</li>
+<li>Advanced networking</li>
+<li>Performance optimizations</li>
+</ul>
+<h2 id="support-matrix"><a class="header" href="#support-matrix">Support Matrix</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Feature Category</th><th>vSphere</th><th>Libvirt</th><th>Proxmox</th><th>Mock</th></tr></thead><tbody>
+<tr><td><strong>Production Ready</strong></td><td>✅</td><td>✅</td><td>✅ Beta</td><td>✅ Testing</td></tr>
+<tr><td><strong>Documentation</strong></td><td>Complete</td><td>Complete</td><td>Complete</td><td>Complete</td></tr>
+<tr><td><strong>Community Support</strong></td><td>Active</td><td>Active</td><td>Growing</td><td>N/A</td></tr>
+<tr><td><strong>Enterprise Support</strong></td><td>Available</td><td>Available</td><td>Available</td><td>N/A</td></tr>
+</tbody></table>
+</div>
+<h2 id="version-history"><a class="header" href="#version-history">Version History</a></h2>
+<ul>
+<li><strong>v0.2.3</strong>: Provider feature parity - Reconfigure, Clone, TaskStatus, ConsoleURL</li>
+<li><strong>v0.2.2</strong>: Nested virtualization, TPM support, comprehensive snapshot management</li>
+<li><strong>v0.2.1</strong>: Critical fixes, documentation updates, VMClass disk settings</li>
+<li><strong>v0.2.0</strong>: Production-ready vSphere and Libvirt providers</li>
+<li><strong>v0.1.0</strong>: Initial provider framework and mock implementation</li>
+</ul>
+<hr />
+<p><em>This document reflects VirtRigaud v0.2.3 capabilities. For the latest updates, see the <a href="https://projectbeskar.github.io/virtrigaud/">VirtRigaud documentation</a>.</em></p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="PROVIDERS.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="providers/vsphere.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="PROVIDERS.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="providers/vsphere.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr.min.js"></script>
+        <script src="mark.min.js"></script>
+        <script src="searcher.js"></script>
+
+        <script src="clipboard.min.js"></script>
+        <script src="highlight.js"></script>
+        <script src="book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="theme/page-toc.js"></script>
+
+
+    </div>
+    </body>
+</html>

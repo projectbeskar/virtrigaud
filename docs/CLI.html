@@ -1,0 +1,990 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>CLI Tools Reference - VirtRigaud Documentation</title>
+
+
+        <!-- Custom HTML head -->
+        
+        <meta name="description" content="Kubernetes operator for managing virtual machines across multiple hypervisors">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon.svg">
+        <link rel="shortcut icon" href="favicon.png">
+        <link rel="stylesheet" href="css/variables.css">
+        <link rel="stylesheet" href="css/general.css">
+        <link rel="stylesheet" href="css/chrome.css">
+        <link rel="stylesheet" href="css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="highlight.css">
+        <link rel="stylesheet" href="tomorrow-night.css">
+        <link rel="stylesheet" href="ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="theme/custom.css">
+
+    </head>
+    <body class="sidebar-visible no-js">
+    <div id="body-container">
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
+        </script>
+
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            var html = document.querySelector('html');
+            html.classList.remove('light')
+            html.classList.add(theme);
+            var body = document.querySelector('body');
+            body.classList.remove('no-js')
+            body.classList.add('js');
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var body = document.querySelector('body');
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            body.classList.remove('sidebar-visible');
+            body.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <div class="sidebar-scrollbox">
+                <ol class="chapter"><li class="chapter-item affix "><a href="index.html">Introduction</a></li><li class="chapter-item affix "><li class="part-title">Getting Started</li><li class="chapter-item "><a href="getting-started/quickstart.html"><strong aria-hidden="true">1.</strong> 15-Minute Quickstart</a></li><li class="chapter-item "><a href="install-helm-only.html"><strong aria-hidden="true">2.</strong> Installation Guide</a></li><li class="chapter-item "><a href="HELM_CRD_UPGRADES.html"><strong aria-hidden="true">3.</strong> Helm CRD Upgrades</a></li><li class="chapter-item affix "><li class="part-title">Core Documentation</li><li class="chapter-item "><a href="CRDs.html"><strong aria-hidden="true">4.</strong> Custom Resource Definitions</a></li><li class="chapter-item "><a href="EXAMPLES.html"><strong aria-hidden="true">5.</strong> Examples</a></li><li class="chapter-item "><a href="PROVIDERS.html"><strong aria-hidden="true">6.</strong> Provider Documentation</a></li><li class="chapter-item "><a href="PROVIDERS_CAPABILITIES.html"><strong aria-hidden="true">7.</strong> Provider Capabilities Matrix</a></li><li class="chapter-item affix "><li class="part-title">Provider-Specific Guides</li><li class="chapter-item "><a href="providers/vsphere.html"><strong aria-hidden="true">8.</strong> vSphere Provider</a></li><li class="chapter-item "><a href="providers/libvirt.html"><strong aria-hidden="true">9.</strong> Libvirt Provider</a></li><li class="chapter-item "><a href="providers/proxmox.html"><strong aria-hidden="true">10.</strong> Proxmox VE Provider</a></li><li class="chapter-item "><a href="providers/tutorial.html"><strong aria-hidden="true">11.</strong> Provider Tutorial</a></li><li class="chapter-item "><a href="providers/versioning.html"><strong aria-hidden="true">12.</strong> Provider Versioning</a></li><li class="chapter-item affix "><li class="part-title">Advanced Features</li><li class="chapter-item "><a href="ADVANCED_LIFECYCLE.html"><strong aria-hidden="true">13.</strong> VM Lifecycle Management</a></li><li class="chapter-item "><a href="NESTED_VIRTUALIZATION.html"><strong aria-hidden="true">14.</strong> Nested Virtualization</a></li><li class="chapter-item "><a href="GRACEFUL_SHUTDOWN.html"><strong aria-hidden="true">15.</strong> Graceful Shutdown</a></li><li class="chapter-item "><a href="REMOTE_PROVIDERS.html"><strong aria-hidden="true">16.</strong> Remote Providers</a></li><li class="chapter-item affix "><li class="part-title">Operations & Administration</li><li class="chapter-item "><a href="OBSERVABILITY.html"><strong aria-hidden="true">17.</strong> Observability</a></li><li class="chapter-item "><a href="SECURITY.html"><strong aria-hidden="true">18.</strong> Security</a></li><li class="chapter-item "><a href="RESILIENCE.html"><strong aria-hidden="true">19.</strong> Resilience</a></li><li class="chapter-item "><a href="UPGRADE.html"><strong aria-hidden="true">20.</strong> Upgrade Guide</a></li><li class="chapter-item "><a href="VSPHERE_HARDWARE_VERSION.html"><strong aria-hidden="true">21.</strong> vSphere Hardware Versions</a></li><li class="chapter-item affix "><li class="part-title">Security Configuration</li><li class="chapter-item "><a href="providers/security/bearer-token.html"><strong aria-hidden="true">22.</strong> Bearer Token Authentication</a></li><li class="chapter-item "><a href="providers/security/mtls.html"><strong aria-hidden="true">23.</strong> mTLS Configuration</a></li><li class="chapter-item "><a href="providers/security/external-secrets.html"><strong aria-hidden="true">24.</strong> External Secrets</a></li><li class="chapter-item "><a href="providers/security/network-policies.html"><strong aria-hidden="true">25.</strong> Network Policies</a></li><li class="chapter-item affix "><li class="part-title">API Reference</li><li class="chapter-item expanded "><a href="CLI.html" class="active"><strong aria-hidden="true">26.</strong> CLI Tools Reference</a></li><li class="chapter-item "><a href="api-reference/cli.html"><strong aria-hidden="true">27.</strong> CLI API Reference</a></li><li class="chapter-item "><a href="api-reference/metrics.html"><strong aria-hidden="true">28.</strong> Metrics Catalog</a></li><li class="chapter-item "><a href="catalog.html"><strong aria-hidden="true">29.</strong> Provider Catalog</a></li><li class="chapter-item affix "><li class="part-title">Development</li><li class="chapter-item "><a href="TESTING_WORKFLOWS_LOCALLY.html"><strong aria-hidden="true">30.</strong> Testing Workflows Locally</a></li><li class="chapter-item "><a href="../../CONTRIBUTING.html"><strong aria-hidden="true">31.</strong> Contributing</a></li><li class="chapter-item "><a href="../../DEVELOPMENT.html"><strong aria-hidden="true">32.</strong> Development Guide</a></li><li class="chapter-item affix "><li class="part-title">Examples</li><li class="chapter-item "><a href="examples/index.html"><strong aria-hidden="true">33.</strong> Example README</a></li></ol>
+            </div>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <!-- Track and set sidebar scroll position -->
+        <script>
+            var sidebarScrollbox = document.querySelector('#sidebar .sidebar-scrollbox');
+            sidebarScrollbox.addEventListener('click', function(e) {
+                if (e.target.tagName === 'A') {
+                    sessionStorage.setItem('sidebar-scroll', sidebarScrollbox.scrollTop);
+                }
+            }, { passive: true });
+            var sidebarScrollTop = sessionStorage.getItem('sidebar-scroll');
+            sessionStorage.removeItem('sidebar-scroll');
+            if (sidebarScrollTop) {
+                // preserve sidebar scroll position when navigating via links within sidebar
+                sidebarScrollbox.scrollTop = sidebarScrollTop;
+            } else {
+                // scroll sidebar to current active section when navigating via "next/previous chapter" buttons
+                var activeSection = document.querySelector('#sidebar .active');
+                if (activeSection) {
+                    activeSection.scrollIntoView({ block: 'center' });
+                }
+            }
+        </script>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">VirtRigaud Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/projectbeskar/virtrigaud" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/projectbeskar/virtrigaud/edit/main/docs/src/CLI.md" title="Suggest an edit" aria-label="Suggest an edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="cli-tools-reference"><a class="header" href="#cli-tools-reference">CLI Tools Reference</a></h1>
+<p>VirtRigaud provides a comprehensive set of command-line tools for managing virtual machines, developing providers, running conformance tests, and performing load testing. This guide covers all available CLI tools and their usage.</p>
+<h2 id="overview"><a class="header" href="#overview">Overview</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Tool</th><th>Purpose</th><th>Target Users</th></tr></thead><tbody>
+<tr><td><a href="#vrtg"><code>vrtg</code></a></td><td>Main CLI for VM management and operations</td><td>End users, DevOps teams, System administrators</td></tr>
+<tr><td><a href="#vcts"><code>vcts</code></a></td><td>Conformance testing suite</td><td>Provider developers, QA teams, CI/CD pipelines</td></tr>
+<tr><td><a href="#vrtg-provider"><code>vrtg-provider</code></a></td><td>Provider development toolkit</td><td>Provider developers, Contributors</td></tr>
+<tr><td><a href="#virtrigaud-loadgen"><code>virtrigaud-loadgen</code></a></td><td>Load testing and benchmarking</td><td>Performance engineers, SREs</td></tr>
+</tbody></table>
+</div>
+<h2 id="installation"><a class="header" href="#installation">Installation</a></h2>
+<h3 id="from-github-releases"><a class="header" href="#from-github-releases">From GitHub Releases</a></h3>
+<pre><code class="language-bash"># Download the latest release
+export VIRTRIGAUD_VERSION="v0.2.1"
+export PLATFORM="linux-amd64"  # or darwin-amd64, windows-amd64
+
+# Install main CLI tool
+curl -L "https://github.com/projectbeskar/virtrigaud/releases/download/${VIRTRIGAUD_VERSION}/vrtg-${PLATFORM}" -o vrtg
+chmod +x vrtg
+sudo mv vrtg /usr/local/bin/
+
+# Install all CLI tools
+curl -L "https://github.com/projectbeskar/virtrigaud/releases/download/${VIRTRIGAUD_VERSION}/virtrigaud-cli-${PLATFORM}.tar.gz" | tar xz
+sudo mv vrtg vcts vrtg-provider virtrigaud-loadgen /usr/local/bin/
+</code></pre>
+<h3 id="from-source"><a class="header" href="#from-source">From Source</a></h3>
+<pre><code class="language-bash">git clone https://github.com/projectbeskar/virtrigaud.git
+cd virtrigaud
+
+# Build all CLI tools
+make build-cli
+
+# Install to /usr/local/bin
+sudo make install-cli
+
+# Or install to custom location
+make install-cli PREFIX=/usr/local
+</code></pre>
+<h3 id="using-go"><a class="header" href="#using-go">Using Go</a></h3>
+<pre><code class="language-bash"># Install specific version
+go install github.com/projectbeskar/virtrigaud/cmd/vrtg@v0.2.1
+go install github.com/projectbeskar/virtrigaud/cmd/vcts@v0.2.1
+go install github.com/projectbeskar/virtrigaud/cmd/vrtg-provider@v0.2.1
+go install github.com/projectbeskar/virtrigaud/cmd/virtrigaud-loadgen@v0.2.1
+
+# Install latest
+go install github.com/projectbeskar/virtrigaud/cmd/vrtg@latest
+</code></pre>
+<h3 id="completion"><a class="header" href="#completion">Completion</a></h3>
+<p>Enable shell completion for enhanced productivity:</p>
+<pre><code class="language-bash"># Bash
+vrtg completion bash &gt; /etc/bash_completion.d/vrtg
+source /etc/bash_completion.d/vrtg
+
+# Zsh
+vrtg completion zsh &gt; "${fpath[1]}/_vrtg"
+
+# Fish
+vrtg completion fish &gt; ~/.config/fish/completions/vrtg.fish
+
+# PowerShell
+vrtg completion powershell | Out-String | Invoke-Expression
+</code></pre>
+<hr />
+<h2 id="vrtg"><a class="header" href="#vrtg">vrtg</a></h2>
+<p>The main CLI tool for managing VirtRigaud resources and virtual machines.</p>
+<h3 id="global-flags"><a class="header" href="#global-flags">Global Flags</a></h3>
+<pre><code class="language-bash">--kubeconfig string   Path to kubeconfig file (default: $KUBECONFIG or ~/.kube/config)
+--namespace string    Kubernetes namespace (default: "default")
+--output string       Output format: table, json, yaml (default: "table")
+--timeout duration    Operation timeout (default: 30s)
+--verbose             Enable verbose output
+-h, --help           Help for vrtg
+</code></pre>
+<h3 id="commands"><a class="header" href="#commands">Commands</a></h3>
+<h4 id="vm---virtual-machine-management"><a class="header" href="#vm---virtual-machine-management">vm - Virtual Machine Management</a></h4>
+<p>Manage virtual machines with comprehensive lifecycle operations.</p>
+<pre><code class="language-bash"># List virtual machines
+vrtg vm list [flags]
+
+# Describe a virtual machine
+vrtg vm describe &lt;name&gt; [flags]
+
+# Show VM events
+vrtg vm events &lt;name&gt; [flags]
+
+# Get VM console URL
+vrtg vm console-url &lt;name&gt; [flags]
+</code></pre>
+<p><strong>Flags:</strong></p>
+<ul>
+<li><code>--all-namespaces</code>: List VMs across all namespaces</li>
+<li><code>--label-selector</code>: Filter by labels (e.g., <code>app=web,env=prod</code>)</li>
+<li><code>--field-selector</code>: Filter by fields (e.g., <code>spec.powerState=On</code>)</li>
+<li><code>--sort-by</code>: Sort output by column (name, namespace, powerState, provider)</li>
+<li><code>--watch</code>: Watch for changes</li>
+</ul>
+<p><strong>Examples:</strong></p>
+<pre><code class="language-bash"># List all VMs in table format
+vrtg vm list
+
+# List VMs with custom output format
+vrtg vm list --output json --namespace production
+
+# List VMs across all namespaces
+vrtg vm list --all-namespaces
+
+# Filter VMs by labels
+vrtg vm list --label-selector environment=production,tier=web
+
+# Watch VM status changes
+vrtg vm list --watch
+
+# Get detailed VM information
+vrtg vm describe my-vm --output yaml
+
+# Get VM console URL
+vrtg vm console-url my-vm
+
+# Show recent VM events
+vrtg vm events my-vm
+</code></pre>
+<h4 id="provider---provider-management"><a class="header" href="#provider---provider-management">provider - Provider Management</a></h4>
+<p>Manage provider configurations and monitor their health.</p>
+<pre><code class="language-bash"># List providers
+vrtg provider list [flags]
+
+# Show provider status
+vrtg provider status &lt;name&gt; [flags]
+
+# Show provider logs
+vrtg provider logs &lt;name&gt; [flags]
+</code></pre>
+<p><strong>Flags:</strong></p>
+<ul>
+<li><code>--follow</code>: Follow log output (for logs command)</li>
+<li><code>--tail</code>: Number of lines to show from end of logs (default: 100)</li>
+<li><code>--since</code>: Show logs since timestamp (e.g., 1h, 30m)</li>
+</ul>
+<p><strong>Examples:</strong></p>
+<pre><code class="language-bash"># List all providers
+vrtg provider list
+
+# Check provider status
+vrtg provider status vsphere-provider
+
+# View provider logs
+vrtg provider logs vsphere-provider --tail 50
+
+# Follow provider logs in real-time
+vrtg provider logs vsphere-provider --follow
+
+# Show logs from last hour
+vrtg provider logs vsphere-provider --since 1h
+</code></pre>
+<h4 id="snapshot---snapshot-management"><a class="header" href="#snapshot---snapshot-management">snapshot - Snapshot Management</a></h4>
+<p>Manage VM snapshots for backup and recovery.</p>
+<pre><code class="language-bash"># Create a VM snapshot
+vrtg snapshot create &lt;vm-name&gt; &lt;snapshot-name&gt; [flags]
+
+# List snapshots
+vrtg snapshot list [vm-name] [flags]
+
+# Revert VM to snapshot
+vrtg snapshot revert &lt;vm-name&gt; &lt;snapshot-name&gt; [flags]
+</code></pre>
+<p><strong>Flags for create:</strong></p>
+<ul>
+<li><code>--description</code>: Snapshot description</li>
+<li><code>--include-memory</code>: Include memory state in snapshot</li>
+</ul>
+<p><strong>Examples:</strong></p>
+<pre><code class="language-bash"># Create a simple snapshot
+vrtg snapshot create my-vm pre-upgrade
+
+# Create snapshot with description and memory
+vrtg snapshot create my-vm pre-maintenance \
+  --description "Before maintenance window" \
+  --include-memory
+
+# List all snapshots
+vrtg snapshot list
+
+# List snapshots for specific VM
+vrtg snapshot list my-vm
+
+# Revert to a snapshot
+vrtg snapshot revert my-vm pre-upgrade
+</code></pre>
+<h4 id="clone---vm-cloning"><a class="header" href="#clone---vm-cloning">clone - VM Cloning</a></h4>
+<p>Clone virtual machines for rapid provisioning.</p>
+<pre><code class="language-bash"># Clone a virtual machine
+vrtg clone run &lt;source-vm&gt; &lt;target-vm&gt; [flags]
+
+# List clone operations
+vrtg clone list [flags]
+</code></pre>
+<p><strong>Flags for run:</strong></p>
+<ul>
+<li><code>--linked</code>: Create linked clone (faster, space-efficient)</li>
+<li><code>--target-namespace</code>: Namespace for target VM</li>
+<li><code>--customize</code>: Apply customization during clone</li>
+</ul>
+<p><strong>Examples:</strong></p>
+<pre><code class="language-bash"># Simple VM clone
+vrtg clone run template-vm new-vm
+
+# Linked clone for development
+vrtg clone run production-vm dev-vm --linked
+
+# Clone to different namespace
+vrtg clone run template-vm test-vm --target-namespace testing
+
+# List clone operations
+vrtg clone list
+</code></pre>
+<h4 id="conformance---provider-testing"><a class="header" href="#conformance---provider-testing">conformance - Provider Testing</a></h4>
+<p>Run conformance tests against providers.</p>
+<pre><code class="language-bash"># Run conformance tests
+vrtg conformance run &lt;provider&gt; [flags]
+</code></pre>
+<p><strong>Flags:</strong></p>
+<ul>
+<li><code>--output-dir</code>: Directory for test results</li>
+<li><code>--skip-tests</code>: Comma-separated list of tests to skip</li>
+<li><code>--timeout</code>: Test timeout (default: 30m)</li>
+</ul>
+<p><strong>Examples:</strong></p>
+<pre><code class="language-bash"># Run conformance tests
+vrtg conformance run vsphere-provider
+
+# Run tests with custom timeout
+vrtg conformance run vsphere-provider --timeout 1h
+
+# Skip specific tests
+vrtg conformance run vsphere-provider --skip-tests "test-large-vms,test-network"
+</code></pre>
+<h4 id="diag---diagnostics"><a class="header" href="#diag---diagnostics">diag - Diagnostics</a></h4>
+<p>Diagnostic tools for troubleshooting.</p>
+<pre><code class="language-bash"># Create diagnostic bundle
+vrtg diag bundle [flags]
+</code></pre>
+<p><strong>Flags:</strong></p>
+<ul>
+<li><code>--output</code>: Output file path (default: virtrigaud-diag-&lt;timestamp&gt;.tar.gz)</li>
+<li><code>--include-logs</code>: Include provider logs in bundle</li>
+<li><code>--since</code>: Collect logs since timestamp</li>
+</ul>
+<p><strong>Examples:</strong></p>
+<pre><code class="language-bash"># Create diagnostic bundle
+vrtg diag bundle
+
+# Create bundle with logs from last 2 hours
+vrtg diag bundle --include-logs --since 2h
+
+# Custom output location
+vrtg diag bundle --output /tmp/debug-bundle.tar.gz
+</code></pre>
+<h4 id="init---installation"><a class="header" href="#init---installation">init - Installation</a></h4>
+<p>Initialize VirtRigaud in a Kubernetes cluster.</p>
+<pre><code class="language-bash"># Initialize virtrigaud
+vrtg init [flags]
+</code></pre>
+<p><strong>Flags:</strong></p>
+<ul>
+<li><code>--chart-version</code>: Helm chart version to install</li>
+<li><code>--namespace</code>: Installation namespace (default: virtrigaud-system)</li>
+<li><code>--values</code>: Values file for Helm chart</li>
+<li><code>--dry-run</code>: Show what would be installed</li>
+</ul>
+<p><strong>Examples:</strong></p>
+<pre><code class="language-bash"># Basic installation
+vrtg init
+
+# Install specific version
+vrtg init --chart-version v0.2.1
+
+# Install with custom values
+vrtg init --values custom-values.yaml
+
+# Dry run to see what would be installed
+vrtg init --dry-run
+</code></pre>
+<hr />
+<h2 id="vcts"><a class="header" href="#vcts">vcts</a></h2>
+<p>VirtRigaud Conformance Test Suite - runs standardized tests against providers.</p>
+<h3 id="usage"><a class="header" href="#usage">Usage</a></h3>
+<pre><code class="language-bash">vcts [command] [flags]
+</code></pre>
+<h3 id="global-flags-1"><a class="header" href="#global-flags-1">Global Flags</a></h3>
+<pre><code class="language-bash">--kubeconfig string   Path to kubeconfig file
+--namespace string    Kubernetes namespace (default: "virtrigaud-system")
+--provider string     Provider name to test
+--output-dir string   Output directory for test results (default: "./conformance-results")
+--skip-tests strings  Comma-separated list of tests to skip
+--timeout duration    Test timeout (default: 30m)
+--parallel int        Number of parallel test executions (default: 1)
+--verbose             Enable verbose output
+</code></pre>
+<h3 id="commands-1"><a class="header" href="#commands-1">Commands</a></h3>
+<h4 id="run---execute-tests"><a class="header" href="#run---execute-tests">run - Execute Tests</a></h4>
+<pre><code class="language-bash"># Run all conformance tests
+vcts run --provider vsphere-provider
+
+# Run with custom settings
+vcts run --provider vsphere-provider \
+  --timeout 1h \
+  --parallel 3 \
+  --output-dir /tmp/test-results
+
+# Skip specific tests
+vcts run --provider libvirt-provider \
+  --skip-tests "test-snapshots,test-linked-clones"
+
+# Verbose output for debugging
+vcts run --provider proxmox-provider --verbose
+</code></pre>
+<h4 id="list---list-available-tests"><a class="header" href="#list---list-available-tests">list - List Available Tests</a></h4>
+<pre><code class="language-bash"># List all available tests
+vcts list
+
+# List tests for specific capability
+vcts list --capability snapshots
+</code></pre>
+<h4 id="validate---validate-provider"><a class="header" href="#validate---validate-provider">validate - Validate Provider</a></h4>
+<pre><code class="language-bash"># Validate provider configuration
+vcts validate --provider vsphere-provider
+
+# Check provider connectivity
+vcts validate --provider vsphere-provider --check-connectivity
+</code></pre>
+<h3 id="test-categories"><a class="header" href="#test-categories">Test Categories</a></h3>
+<ol>
+<li><strong>Basic Operations</strong>: VM creation, deletion, power operations</li>
+<li><strong>Lifecycle Management</strong>: Start, stop, restart, suspend operations</li>
+<li><strong>Resource Management</strong>: CPU, memory, disk operations</li>
+<li><strong>Networking</strong>: Network configuration and connectivity</li>
+<li><strong>Storage</strong>: Disk operations, resizing, multiple disks</li>
+<li><strong>Snapshots</strong>: Create, list, revert, delete snapshots</li>
+<li><strong>Cloning</strong>: VM cloning and linked clones</li>
+<li><strong>Error Handling</strong>: Provider error scenarios</li>
+<li><strong>Performance</strong>: Basic performance benchmarks</li>
+</ol>
+<h3 id="output-formats"><a class="header" href="#output-formats">Output Formats</a></h3>
+<p>Test results are available in multiple formats:</p>
+<ul>
+<li><strong>JUnit XML</strong>: For CI/CD integration</li>
+<li><strong>JSON</strong>: Machine-readable format</li>
+<li><strong>HTML</strong>: Human-readable report</li>
+<li><strong>TAP</strong>: Test Anything Protocol</li>
+</ul>
+<hr />
+<h2 id="vrtg-provider"><a class="header" href="#vrtg-provider">vrtg-provider</a></h2>
+<p>Provider development toolkit for creating and managing VirtRigaud providers.</p>
+<h3 id="usage-1"><a class="header" href="#usage-1">Usage</a></h3>
+<pre><code class="language-bash">vrtg-provider [command] [flags]
+</code></pre>
+<h3 id="global-flags-2"><a class="header" href="#global-flags-2">Global Flags</a></h3>
+<pre><code class="language-bash">--verbose     Enable verbose output
+--help        Help for vrtg-provider
+</code></pre>
+<h3 id="commands-2"><a class="header" href="#commands-2">Commands</a></h3>
+<h4 id="init---initialize-provider"><a class="header" href="#init---initialize-provider">init - Initialize Provider</a></h4>
+<p>Bootstrap a new provider project with scaffolding.</p>
+<pre><code class="language-bash">vrtg-provider init &lt;provider-name&gt; [flags]
+</code></pre>
+<p><strong>Flags:</strong></p>
+<ul>
+<li><code>--template</code>: Template to use (grpc, rest, hybrid)</li>
+<li><code>--output-dir</code>: Output directory (default: current directory)</li>
+<li><code>--module</code>: Go module name</li>
+<li><code>--author</code>: Author name for generated files</li>
+</ul>
+<p><strong>Examples:</strong></p>
+<pre><code class="language-bash"># Create basic gRPC provider
+vrtg-provider init my-provider --template grpc
+
+# Create with custom module
+vrtg-provider init my-provider \
+  --template grpc \
+  --module github.com/myorg/my-provider \
+  --author "John Doe &lt;john@example.com&gt;"
+
+# Create in specific directory
+vrtg-provider init my-provider \
+  --output-dir /path/to/providers \
+  --template grpc
+</code></pre>
+<h4 id="generate---code-generation"><a class="header" href="#generate---code-generation">generate - Code Generation</a></h4>
+<p>Generate boilerplate code for provider implementation.</p>
+<pre><code class="language-bash">vrtg-provider generate [type] [flags]
+</code></pre>
+<p><strong>Types:</strong></p>
+<ul>
+<li><code>client</code>: Generate client code</li>
+<li><code>server</code>: Generate server implementation</li>
+<li><code>tests</code>: Generate test scaffolding</li>
+<li><code>docs</code>: Generate documentation templates</li>
+</ul>
+<p><strong>Examples:</strong></p>
+<pre><code class="language-bash"># Generate client code
+vrtg-provider generate client --provider my-provider
+
+# Generate test scaffolding
+vrtg-provider generate tests --provider my-provider
+
+# Generate documentation
+vrtg-provider generate docs --provider my-provider
+</code></pre>
+<h4 id="verify---verification"><a class="header" href="#verify---verification">verify - Verification</a></h4>
+<p>Verify provider implementation and compliance.</p>
+<pre><code class="language-bash">vrtg-provider verify [flags]
+</code></pre>
+<p><strong>Flags:</strong></p>
+<ul>
+<li><code>--provider-dir</code>: Provider directory to verify</li>
+<li><code>--check-interface</code>: Verify interface compliance</li>
+<li><code>--check-docs</code>: Verify documentation completeness</li>
+<li><code>--check-tests</code>: Verify test coverage</li>
+</ul>
+<p><strong>Examples:</strong></p>
+<pre><code class="language-bash"># Basic verification
+vrtg-provider verify --provider-dir ./my-provider
+
+# Comprehensive check
+vrtg-provider verify \
+  --provider-dir ./my-provider \
+  --check-interface \
+  --check-docs \
+  --check-tests
+</code></pre>
+<h4 id="publish---publishing"><a class="header" href="#publish---publishing">publish - Publishing</a></h4>
+<p>Prepare provider for publishing and distribution.</p>
+<pre><code class="language-bash">vrtg-provider publish [flags]
+</code></pre>
+<p><strong>Flags:</strong></p>
+<ul>
+<li><code>--provider-dir</code>: Provider directory</li>
+<li><code>--version</code>: Version to publish</li>
+<li><code>--registry</code>: Container registry</li>
+<li><code>--chart-repo</code>: Helm chart repository</li>
+</ul>
+<p><strong>Examples:</strong></p>
+<pre><code class="language-bash"># Publish provider
+vrtg-provider publish \
+  --provider-dir ./my-provider \
+  --version v1.0.0 \
+  --registry ghcr.io/myorg
+
+# Publish with Helm chart
+vrtg-provider publish \
+  --provider-dir ./my-provider \
+  --version v1.0.0 \
+  --registry ghcr.io/myorg \
+  --chart-repo https://charts.myorg.com
+</code></pre>
+<h3 id="provider-template-structure"><a class="header" href="#provider-template-structure">Provider Template Structure</a></h3>
+<pre><code>my-provider/
+├── cmd/
+│   └── provider/
+│       └── main.go              # Provider entry point
+├── internal/
+│   ├── provider/
+│   │   ├── server.go           # gRPC server implementation
+│   │   ├── client.go           # Provider client
+│   │   └── types.go            # Provider-specific types
+│   └── config/
+│       └── config.go           # Configuration management
+├── pkg/
+│   └── api/                    # Public API interfaces
+├── test/
+│   ├── conformance/            # Conformance tests
+│   └── integration/            # Integration tests
+├── deploy/
+│   ├── helm/                   # Helm charts
+│   └── k8s/                    # Kubernetes manifests
+├── docs/                       # Documentation
+├── Dockerfile                  # Container image
+├── Makefile                    # Build automation
+└── README.md                   # Provider documentation
+</code></pre>
+<hr />
+<h2 id="virtrigaud-loadgen"><a class="header" href="#virtrigaud-loadgen">virtrigaud-loadgen</a></h2>
+<p>Load testing and benchmarking tool for VirtRigaud deployments.</p>
+<h3 id="usage-2"><a class="header" href="#usage-2">Usage</a></h3>
+<pre><code class="language-bash">virtrigaud-loadgen [command] [flags]
+</code></pre>
+<h3 id="global-flags-3"><a class="header" href="#global-flags-3">Global Flags</a></h3>
+<pre><code class="language-bash">--kubeconfig string   Path to kubeconfig file
+--namespace string    Kubernetes namespace (default: "default")  
+--output-dir string   Output directory for results (default: "./loadgen-results")
+--config-file string  Load generation configuration file
+--dry-run            Show what would be executed without running
+--verbose            Enable verbose output
+</code></pre>
+<h3 id="commands-3"><a class="header" href="#commands-3">Commands</a></h3>
+<h4 id="run---execute-load-test"><a class="header" href="#run---execute-load-test">run - Execute Load Test</a></h4>
+<pre><code class="language-bash">virtrigaud-loadgen run [flags]
+</code></pre>
+<p><strong>Flags:</strong></p>
+<ul>
+<li><code>--vms</code>: Number of VMs to create (default: 10)</li>
+<li><code>--duration</code>: Test duration (default: 10m)</li>
+<li><code>--ramp-up</code>: Ramp-up time (default: 2m)</li>
+<li><code>--workers</code>: Number of concurrent workers (default: 5)</li>
+<li><code>--provider</code>: Provider to test against</li>
+<li><code>--vm-class</code>: VMClass to use for test VMs</li>
+<li><code>--vm-image</code>: VMImage to use for test VMs</li>
+</ul>
+<p><strong>Examples:</strong></p>
+<pre><code class="language-bash"># Basic load test
+virtrigaud-loadgen run --vms 50 --duration 15m
+
+# Comprehensive load test
+virtrigaud-loadgen run \
+  --vms 100 \
+  --duration 30m \
+  --ramp-up 5m \
+  --workers 10 \
+  --provider vsphere-provider
+
+# Test with specific configuration
+virtrigaud-loadgen run --config-file loadtest-config.yaml
+</code></pre>
+<h4 id="config---configuration-management"><a class="header" href="#config---configuration-management">config - Configuration Management</a></h4>
+<pre><code class="language-bash"># Generate sample configuration
+virtrigaud-loadgen config generate --output sample-config.yaml
+
+# Validate configuration
+virtrigaud-loadgen config validate --config-file my-config.yaml
+</code></pre>
+<h3 id="configuration-file"><a class="header" href="#configuration-file">Configuration File</a></h3>
+<pre><code class="language-yaml"># loadtest-config.yaml
+metadata:
+  name: "production-load-test"
+  description: "Load test for production environment"
+
+spec:
+  # Test parameters
+  vms: 100
+  duration: "30m"
+  rampUp: "5m"
+  workers: 10
+  
+  # Target configuration
+  provider: "vsphere-provider"
+  namespace: "loadtest"
+  
+  # VM configuration
+  vmClass: "standard-vm"
+  vmImage: "ubuntu-22-04"
+  
+  # Test scenarios
+  scenarios:
+    - name: "vm-lifecycle"
+      weight: 70
+      operations:
+        - create
+        - start
+        - stop
+        - delete
+    
+    - name: "vm-operations"
+      weight: 20
+      operations:
+        - snapshot
+        - clone
+        - reconfigure
+    
+    - name: "provider-stress"
+      weight: 10
+      operations:
+        - rapid-create-delete
+        - concurrent-operations
+
+  # Reporting
+  reporting:
+    formats: ["json", "html", "csv"]
+    metrics:
+      - response-time
+      - throughput
+      - error-rate
+      - resource-usage
+</code></pre>
+<h3 id="metrics-and-reporting"><a class="header" href="#metrics-and-reporting">Metrics and Reporting</a></h3>
+<p>Load test results include:</p>
+<ul>
+<li><strong>Performance Metrics</strong>: Response times, throughput, latency percentiles</li>
+<li><strong>Error Analysis</strong>: Error rates, failure patterns, error categorization</li>
+<li><strong>Resource Usage</strong>: CPU, memory, network utilization</li>
+<li><strong>Provider Metrics</strong>: Provider-specific performance indicators</li>
+<li><strong>Trend Analysis</strong>: Performance over time, bottleneck identification</li>
+</ul>
+<h3 id="output-formats-1"><a class="header" href="#output-formats-1">Output Formats</a></h3>
+<ul>
+<li><strong>JSON</strong>: Machine-readable results for automation</li>
+<li><strong>HTML</strong>: Interactive dashboard with charts and graphs</li>
+<li><strong>CSV</strong>: Raw data for further analysis</li>
+<li><strong>Prometheus</strong>: Metrics export for monitoring systems</li>
+</ul>
+<hr />
+<h2 id="advanced-usage"><a class="header" href="#advanced-usage">Advanced Usage</a></h2>
+<h3 id="automation-and-scripting"><a class="header" href="#automation-and-scripting">Automation and Scripting</a></h3>
+<h4 id="bash-integration"><a class="header" href="#bash-integration">Bash Integration</a></h4>
+<pre><code class="language-bash">#!/bin/bash
+# VM management script
+
+# Function to check VM status
+check_vm_status() {
+  local vm_name=$1
+  vrtg vm describe "$vm_name" --output json | jq -r '.status.powerState'
+}
+
+# Wait for VM to be ready
+wait_for_vm() {
+  local vm_name=$1
+  local timeout=300
+  local count=0
+  
+  while [ $count -lt $timeout ]; do
+    status=$(check_vm_status "$vm_name")
+    if [ "$status" = "On" ]; then
+      echo "VM $vm_name is ready"
+      return 0
+    fi
+    sleep 5
+    count=$((count + 5))
+  done
+  
+  echo "Timeout waiting for VM $vm_name"
+  return 1
+}
+
+# Create and wait for VM
+vrtg vm create --file vm-config.yaml
+wait_for_vm "my-vm"
+</code></pre>
+<h4 id="cicd-integration"><a class="header" href="#cicd-integration">CI/CD Integration</a></h4>
+<pre><code class="language-yaml"># .github/workflows/vm-test.yml
+name: VM Integration Test
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Install vrtg CLI
+        run: |
+          curl -L "https://github.com/projectbeskar/virtrigaud/releases/latest/download/vrtg-linux-amd64" -o vrtg
+          chmod +x vrtg
+          sudo mv vrtg /usr/local/bin/
+      
+      - name: Setup kubeconfig
+        run: echo "${{ secrets.KUBECONFIG }}" | base64 -d &gt; ~/.kube/config
+      
+      - name: Run conformance tests
+        run: vcts run --provider test-provider --output-dir test-results
+      
+      - name: Upload test results
+        uses: actions/upload-artifact@v3
+        with:
+          name: conformance-results
+          path: test-results/
+</code></pre>
+<h3 id="configuration-management"><a class="header" href="#configuration-management">Configuration Management</a></h3>
+<h4 id="environment-specific-configurations"><a class="header" href="#environment-specific-configurations">Environment-specific Configurations</a></h4>
+<pre><code class="language-bash"># Development environment
+export VRTG_KUBECONFIG=~/.kube/dev-config
+export VRTG_NAMESPACE=development
+export VRTG_OUTPUT=yaml
+
+# Production environment  
+export VRTG_KUBECONFIG=~/.kube/prod-config
+export VRTG_NAMESPACE=production
+export VRTG_OUTPUT=json
+
+# Use environment-specific settings
+vrtg vm list  # Uses environment variables
+</code></pre>
+<h4 id="configuration-files"><a class="header" href="#configuration-files">Configuration Files</a></h4>
+<p>Create <code>~/.vrtg/config.yaml</code>:</p>
+<pre><code class="language-yaml">contexts:
+  development:
+    kubeconfig: ~/.kube/dev-config
+    namespace: development
+    output: yaml
+    timeout: 30s
+  
+  production:
+    kubeconfig: ~/.kube/prod-config
+    namespace: production
+    output: json
+    timeout: 60s
+
+current-context: development
+
+aliases:
+  ls: vm list
+  get: vm describe
+  logs: provider logs
+</code></pre>
+<h3 id="troubleshooting"><a class="header" href="#troubleshooting">Troubleshooting</a></h3>
+<h4 id="common-issues"><a class="header" href="#common-issues">Common Issues</a></h4>
+<ol>
+<li><strong>Connection Issues</strong></li>
+</ol>
+<pre><code class="language-bash"># Check cluster connectivity
+vrtg provider list
+
+# Validate kubeconfig
+kubectl cluster-info
+
+# Check provider logs
+vrtg provider logs &lt;provider-name&gt; --tail 100
+</code></pre>
+<ol start="2">
+<li><strong>Permission Issues</strong></li>
+</ol>
+<pre><code class="language-bash"># Check RBAC permissions
+kubectl auth can-i create virtualmachines
+
+# Get current user context
+kubectl auth whoami
+</code></pre>
+<ol start="3">
+<li><strong>Provider Issues</strong></li>
+</ol>
+<pre><code class="language-bash"># Check provider status
+vrtg provider status &lt;provider-name&gt;
+
+# Run diagnostics
+vrtg diag bundle --include-logs
+</code></pre>
+<h4 id="debug-mode"><a class="header" href="#debug-mode">Debug Mode</a></h4>
+<p>Enable debug output:</p>
+<pre><code class="language-bash"># Global debug flag
+vrtg --verbose vm list
+
+# Provider-specific debugging
+vrtg provider logs &lt;provider-name&gt; --follow --verbose
+
+# Conformance test debugging
+vcts run --provider &lt;provider-name&gt; --verbose
+</code></pre>
+<h2 id="see-also"><a class="header" href="#see-also">See Also</a></h2>
+<ul>
+<li><a href="getting-started/quickstart.html">Getting Started Guide</a></li>
+<li><a href="providers/development.html">Provider Development</a></li>
+<li><a href="api-reference/">API Reference</a></li>
+<li><a href="examples/">Examples</a></li>
+<li><a href="RESILIENCE.html">Troubleshooting</a></li>
+</ul>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="providers/security/network-policies.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="api-reference/cli.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="providers/security/network-policies.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="api-reference/cli.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr.min.js"></script>
+        <script src="mark.min.js"></script>
+        <script src="searcher.js"></script>
+
+        <script src="clipboard.min.js"></script>
+        <script src="highlight.js"></script>
+        <script src="book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="theme/page-toc.js"></script>
+
+
+    </div>
+    </body>
+</html>

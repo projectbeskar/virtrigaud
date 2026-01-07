@@ -1,0 +1,1071 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>vSphere Provider - VirtRigaud Documentation</title>
+
+
+        <!-- Custom HTML head -->
+        
+        <meta name="description" content="Kubernetes operator for managing virtual machines across multiple hypervisors">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="../highlight.css">
+        <link rel="stylesheet" href="../tomorrow-night.css">
+        <link rel="stylesheet" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../theme/custom.css">
+
+    </head>
+    <body class="sidebar-visible no-js">
+    <div id="body-container">
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "../";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
+        </script>
+
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            var html = document.querySelector('html');
+            html.classList.remove('light')
+            html.classList.add(theme);
+            var body = document.querySelector('body');
+            body.classList.remove('no-js')
+            body.classList.add('js');
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var body = document.querySelector('body');
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            body.classList.remove('sidebar-visible');
+            body.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <div class="sidebar-scrollbox">
+                <ol class="chapter"><li class="chapter-item affix "><a href="../index.html">Introduction</a></li><li class="chapter-item affix "><li class="part-title">Getting Started</li><li class="chapter-item "><a href="../getting-started/quickstart.html"><strong aria-hidden="true">1.</strong> 15-Minute Quickstart</a></li><li class="chapter-item "><a href="../install-helm-only.html"><strong aria-hidden="true">2.</strong> Installation Guide</a></li><li class="chapter-item "><a href="../HELM_CRD_UPGRADES.html"><strong aria-hidden="true">3.</strong> Helm CRD Upgrades</a></li><li class="chapter-item affix "><li class="part-title">Core Documentation</li><li class="chapter-item "><a href="../CRDs.html"><strong aria-hidden="true">4.</strong> Custom Resource Definitions</a></li><li class="chapter-item "><a href="../EXAMPLES.html"><strong aria-hidden="true">5.</strong> Examples</a></li><li class="chapter-item "><a href="../PROVIDERS.html"><strong aria-hidden="true">6.</strong> Provider Documentation</a></li><li class="chapter-item "><a href="../PROVIDERS_CAPABILITIES.html"><strong aria-hidden="true">7.</strong> Provider Capabilities Matrix</a></li><li class="chapter-item affix "><li class="part-title">Provider-Specific Guides</li><li class="chapter-item expanded "><a href="../providers/vsphere.html" class="active"><strong aria-hidden="true">8.</strong> vSphere Provider</a></li><li class="chapter-item "><a href="../providers/libvirt.html"><strong aria-hidden="true">9.</strong> Libvirt Provider</a></li><li class="chapter-item "><a href="../providers/proxmox.html"><strong aria-hidden="true">10.</strong> Proxmox VE Provider</a></li><li class="chapter-item "><a href="../providers/tutorial.html"><strong aria-hidden="true">11.</strong> Provider Tutorial</a></li><li class="chapter-item "><a href="../providers/versioning.html"><strong aria-hidden="true">12.</strong> Provider Versioning</a></li><li class="chapter-item affix "><li class="part-title">Advanced Features</li><li class="chapter-item "><a href="../ADVANCED_LIFECYCLE.html"><strong aria-hidden="true">13.</strong> VM Lifecycle Management</a></li><li class="chapter-item "><a href="../NESTED_VIRTUALIZATION.html"><strong aria-hidden="true">14.</strong> Nested Virtualization</a></li><li class="chapter-item "><a href="../GRACEFUL_SHUTDOWN.html"><strong aria-hidden="true">15.</strong> Graceful Shutdown</a></li><li class="chapter-item "><a href="../REMOTE_PROVIDERS.html"><strong aria-hidden="true">16.</strong> Remote Providers</a></li><li class="chapter-item affix "><li class="part-title">Operations & Administration</li><li class="chapter-item "><a href="../OBSERVABILITY.html"><strong aria-hidden="true">17.</strong> Observability</a></li><li class="chapter-item "><a href="../SECURITY.html"><strong aria-hidden="true">18.</strong> Security</a></li><li class="chapter-item "><a href="../RESILIENCE.html"><strong aria-hidden="true">19.</strong> Resilience</a></li><li class="chapter-item "><a href="../UPGRADE.html"><strong aria-hidden="true">20.</strong> Upgrade Guide</a></li><li class="chapter-item "><a href="../VSPHERE_HARDWARE_VERSION.html"><strong aria-hidden="true">21.</strong> vSphere Hardware Versions</a></li><li class="chapter-item affix "><li class="part-title">Security Configuration</li><li class="chapter-item "><a href="../providers/security/bearer-token.html"><strong aria-hidden="true">22.</strong> Bearer Token Authentication</a></li><li class="chapter-item "><a href="../providers/security/mtls.html"><strong aria-hidden="true">23.</strong> mTLS Configuration</a></li><li class="chapter-item "><a href="../providers/security/external-secrets.html"><strong aria-hidden="true">24.</strong> External Secrets</a></li><li class="chapter-item "><a href="../providers/security/network-policies.html"><strong aria-hidden="true">25.</strong> Network Policies</a></li><li class="chapter-item affix "><li class="part-title">API Reference</li><li class="chapter-item "><a href="../CLI.html"><strong aria-hidden="true">26.</strong> CLI Tools Reference</a></li><li class="chapter-item "><a href="../api-reference/cli.html"><strong aria-hidden="true">27.</strong> CLI API Reference</a></li><li class="chapter-item "><a href="../api-reference/metrics.html"><strong aria-hidden="true">28.</strong> Metrics Catalog</a></li><li class="chapter-item "><a href="../catalog.html"><strong aria-hidden="true">29.</strong> Provider Catalog</a></li><li class="chapter-item affix "><li class="part-title">Development</li><li class="chapter-item "><a href="../TESTING_WORKFLOWS_LOCALLY.html"><strong aria-hidden="true">30.</strong> Testing Workflows Locally</a></li><li class="chapter-item "><a href="../../../CONTRIBUTING.html"><strong aria-hidden="true">31.</strong> Contributing</a></li><li class="chapter-item "><a href="../../../DEVELOPMENT.html"><strong aria-hidden="true">32.</strong> Development Guide</a></li><li class="chapter-item affix "><li class="part-title">Examples</li><li class="chapter-item "><a href="../examples/index.html"><strong aria-hidden="true">33.</strong> Example README</a></li></ol>
+            </div>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <!-- Track and set sidebar scroll position -->
+        <script>
+            var sidebarScrollbox = document.querySelector('#sidebar .sidebar-scrollbox');
+            sidebarScrollbox.addEventListener('click', function(e) {
+                if (e.target.tagName === 'A') {
+                    sessionStorage.setItem('sidebar-scroll', sidebarScrollbox.scrollTop);
+                }
+            }, { passive: true });
+            var sidebarScrollTop = sessionStorage.getItem('sidebar-scroll');
+            sessionStorage.removeItem('sidebar-scroll');
+            if (sidebarScrollTop) {
+                // preserve sidebar scroll position when navigating via links within sidebar
+                sidebarScrollbox.scrollTop = sidebarScrollTop;
+            } else {
+                // scroll sidebar to current active section when navigating via "next/previous chapter" buttons
+                var activeSection = document.querySelector('#sidebar .active');
+                if (activeSection) {
+                    activeSection.scrollIntoView({ block: 'center' });
+                }
+            }
+        </script>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">VirtRigaud Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/projectbeskar/virtrigaud" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/projectbeskar/virtrigaud/edit/main/docs/src/providers/vsphere.md" title="Suggest an edit" aria-label="Suggest an edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="vsphere-provider"><a class="header" href="#vsphere-provider">vSphere Provider</a></h1>
+<p>The vSphere provider enables VirtRigaud to manage virtual machines on VMware vSphere environments, including vCenter Server and standalone ESXi hosts. This provider is designed for enterprise production environments with comprehensive support for vSphere features.</p>
+<h2 id="overview"><a class="header" href="#overview">Overview</a></h2>
+<p>This provider implements the VirtRigaud provider interface to manage VM lifecycle operations on VMware vSphere:</p>
+<ul>
+<li><strong>Create</strong>: Create VMs from templates, content libraries, or OVF/OVA files</li>
+<li><strong>Delete</strong>: Remove VMs and associated storage (with configurable retention)</li>
+<li><strong>Power</strong>: Start, stop, restart, and suspend virtual machines</li>
+<li><strong>Describe</strong>: Query VM state, resource usage, guest info, and vSphere properties</li>
+<li><strong>Reconfigure</strong>: Hot-add CPU/memory, resize disks, modify network adapters (v0.2.3+)</li>
+<li><strong>Clone</strong>: Create full or linked clones from existing VMs or templates (v0.2.3+)</li>
+<li><strong>Snapshot</strong>: Create, delete, and revert VM snapshots with memory state</li>
+<li><strong>TaskStatus</strong>: Track asynchronous operations with progress monitoring (v0.2.3+)</li>
+<li><strong>ConsoleURL</strong>: Generate vSphere web client console URLs (v0.2.3+)</li>
+<li><strong>ImagePrepare</strong>: Import OVF/OVA, deploy from content library, or ensure template existence</li>
+</ul>
+<h2 id="prerequisites"><a class="header" href="#prerequisites">Prerequisites</a></h2>
+<p><strong>⚠️ IMPORTANT: Active vSphere Environment Required</strong></p>
+<p>The vSphere provider connects to VMware vSphere infrastructure and requires active vCenter Server or ESXi hosts.</p>
+<h3 id="requirements"><a class="header" href="#requirements">Requirements:</a></h3>
+<ul>
+<li><strong>vCenter Server 7.0+</strong> or <strong>ESXi 7.0+</strong> (running and accessible)</li>
+<li><strong>User account</strong> with appropriate privileges for VM management</li>
+<li><strong>Network connectivity</strong> from VirtRigaud to vCenter/ESXi (HTTPS/443)</li>
+<li><strong>vSphere infrastructure</strong>:
+<ul>
+<li>Configured datacenters, clusters, and hosts</li>
+<li>Storage (datastores) for VM files</li>
+<li>Networks (port groups) for VM connectivity</li>
+<li>Resource pools for VM placement (optional)</li>
+</ul>
+</li>
+</ul>
+<h3 id="testingdevelopment"><a class="header" href="#testingdevelopment">Testing/Development:</a></h3>
+<p>For development environments:</p>
+<ul>
+<li>Use <strong>VMware vSphere Hypervisor (ESXi)</strong> free version</li>
+<li><strong>vCenter Server Appliance</strong> evaluation license</li>
+<li><strong>VMware Workstation/Fusion</strong> with nested ESXi</li>
+<li><strong>EVE-NG</strong> or <strong>GNS3</strong> with vSphere emulation</li>
+</ul>
+<h2 id="authentication"><a class="header" href="#authentication">Authentication</a></h2>
+<p>The vSphere provider supports multiple authentication methods:</p>
+<h3 id="usernamepassword-authentication-common"><a class="header" href="#usernamepassword-authentication-common">Username/Password Authentication (Common)</a></h3>
+<p>Standard vSphere user authentication:</p>
+<pre><code class="language-yaml">apiVersion: infra.virtrigaud.io/v1beta1
+kind: Provider
+metadata:
+  name: vsphere-prod
+  namespace: default
+spec:
+  type: vsphere
+  endpoint: https://vcenter.example.com/sdk
+  credentialSecretRef:
+    name: vsphere-credentials
+  # Optional: Skip TLS verification (development only)
+  insecureSkipVerify: false
+  runtime:
+    mode: Remote
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.2.3"
+    service:
+      port: 9090
+</code></pre>
+<p>Create credentials secret:</p>
+<pre><code class="language-yaml">apiVersion: v1
+kind: Secret
+metadata:
+  name: vsphere-credentials
+  namespace: default
+type: Opaque
+stringData:
+  username: "virtrigaud@vsphere.local"
+  password: "SecurePassword123!"
+</code></pre>
+<h3 id="session-token-authentication-advanced"><a class="header" href="#session-token-authentication-advanced">Session Token Authentication (Advanced)</a></h3>
+<p>For environments using external authentication:</p>
+<pre><code class="language-yaml">apiVersion: v1
+kind: Secret
+metadata:
+  name: vsphere-token
+  namespace: default
+type: Opaque
+stringData:
+  token: "vmware-api-session-id:abcd1234..."
+</code></pre>
+<h3 id="service-account-authentication-recommended"><a class="header" href="#service-account-authentication-recommended">Service Account Authentication (Recommended)</a></h3>
+<p>Create a dedicated service account with minimal required privileges:</p>
+<pre><code class="language-yaml"># vSphere privileges for VirtRigaud service account:
+# - Datastore: Allocate space, Browse datastore, Low level file operations
+# - Network: Assign network  
+# - Resource: Assign virtual machine to resource pool
+# - Virtual machine: All privileges (or subset based on requirements)
+# - Global: Enable methods, Disable methods, Licenses
+</code></pre>
+<h2 id="configuration"><a class="header" href="#configuration">Configuration</a></h2>
+<h3 id="connection-endpoints"><a class="header" href="#connection-endpoints">Connection Endpoints</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Endpoint Type</th><th>Format</th><th>Use Case</th></tr></thead><tbody>
+<tr><td>vCenter Server</td><td><code>https://vcenter.example.com/sdk</code></td><td>Multi-host management (recommended)</td></tr>
+<tr><td>vCenter FQDN</td><td><code>https://vcenter.corp.local/sdk</code></td><td>Internal domain environments</td></tr>
+<tr><td>vCenter IP</td><td><code>https://192.168.1.10/sdk</code></td><td>Direct IP access</td></tr>
+<tr><td>ESXi Host</td><td><code>https://esxi-host.example.com</code></td><td>Single host environments</td></tr>
+</tbody></table>
+</div>
+<h3 id="deployment-configuration"><a class="header" href="#deployment-configuration">Deployment Configuration</a></h3>
+<h4 id="using-helm-values"><a class="header" href="#using-helm-values">Using Helm Values</a></h4>
+<pre><code class="language-yaml"># values.yaml
+providers:
+  vsphere:
+    enabled: true
+    endpoint: "https://vcenter.example.com/sdk"
+    insecureSkipVerify: false  # Set to true for self-signed certificates
+    credentialSecretRef:
+      name: vsphere-credentials
+      namespace: virtrigaud-system
+</code></pre>
+<h4 id="production-configuration-with-tls"><a class="header" href="#production-configuration-with-tls">Production Configuration with TLS</a></h4>
+<pre><code class="language-yaml"># Create secret with credentials and TLS certificates
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vsphere-secure-credentials
+  namespace: virtrigaud-system
+type: Opaque
+stringData:
+  username: "svc-virtrigaud@vsphere.local"
+  password: "SecurePassword123!"
+  # Optional: Custom CA certificate for vCenter
+  ca.crt: |
+    -----BEGIN CERTIFICATE-----
+    # Your vCenter CA certificate here
+    -----END CERTIFICATE-----
+
+---
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: Provider
+metadata:
+  name: vsphere-production
+  namespace: virtrigaud-system
+spec:
+  type: vsphere
+  endpoint: https://vcenter.prod.example.com/sdk
+  credentialSecretRef:
+    name: vsphere-secure-credentials
+  insecureSkipVerify: false
+</code></pre>
+<h4 id="development-configuration"><a class="header" href="#development-configuration">Development Configuration</a></h4>
+<pre><code class="language-yaml"># For development with self-signed certificates
+providers:
+  vsphere:
+    enabled: true
+    endpoint: "https://esxi-dev.local"
+    insecureSkipVerify: true  # Only for development!
+    credentialSecretRef:
+      name: vsphere-dev-credentials
+</code></pre>
+<h4 id="multi-vcenter-configuration"><a class="header" href="#multi-vcenter-configuration">Multi-vCenter Configuration</a></h4>
+<pre><code class="language-yaml"># Deploy multiple providers for different vCenters
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: Provider
+metadata:
+  name: vsphere-datacenter-a
+spec:
+  type: vsphere
+  endpoint: https://vcenter-a.example.com/sdk
+  credentialSecretRef:
+    name: vsphere-credentials-a
+
+---
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: Provider
+metadata:
+  name: vsphere-datacenter-b
+spec:
+  type: vsphere
+  endpoint: https://vcenter-b.example.com/sdk
+  credentialSecretRef:
+    name: vsphere-credentials-b
+</code></pre>
+<h2 id="vsphere-infrastructure-setup"><a class="header" href="#vsphere-infrastructure-setup">vSphere Infrastructure Setup</a></h2>
+<h3 id="required-vsphere-objects"><a class="header" href="#required-vsphere-objects">Required vSphere Objects</a></h3>
+<p>The provider expects the following vSphere infrastructure to be configured:</p>
+<h4 id="datacenters-and-clusters"><a class="header" href="#datacenters-and-clusters">Datacenters and Clusters</a></h4>
+<pre><code class="language-bash"># Example vSphere hierarchy:
+Datacenter: "Production"
+├── Cluster: "Compute-Cluster"
+│   ├── ESXi Host: esxi-01.example.com
+│   ├── ESXi Host: esxi-02.example.com
+│   └── ESXi Host: esxi-03.example.com
+├── Datastores:
+│   ├── "datastore-ssd"     # High-performance storage
+│   ├── "datastore-hdd"     # Standard storage
+│   └── "datastore-backup"  # Backup storage
+└── Networks:
+    ├── "VM Network"        # Default VM network
+    ├── "DMZ-Network"       # DMZ port group
+    └── "Management"        # Management network
+</code></pre>
+<h4 id="resource-pools-optional"><a class="header" href="#resource-pools-optional">Resource Pools (Optional)</a></h4>
+<pre><code class="language-bash"># Create resource pools for workload isolation
+Datacenter: "Production"
+└── Cluster: "Compute-Cluster"
+    └── Resource Pools:
+        ├── "Development"    # Dev workloads (lower priority)
+        ├── "Production"     # Prod workloads (high priority)
+        └── "Testing"        # Test workloads (medium priority)
+</code></pre>
+<h2 id="vm-configuration"><a class="header" href="#vm-configuration">VM Configuration</a></h2>
+<h3 id="vmclass-specification"><a class="header" href="#vmclass-specification">VMClass Specification</a></h3>
+<p>Define CPU, memory, and vSphere-specific settings:</p>
+<pre><code class="language-yaml">apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMClass
+metadata:
+  name: standard-vm
+spec:
+  cpus: 4
+  memory: "8Gi"
+  # vSphere-specific configuration
+  spec:
+    # VM hardware settings
+    hardware:
+      version: "vmx-19"              # Hardware version
+      firmware: "efi"                # BIOS or EFI
+      secureBoot: true               # Secure boot (EFI only)
+      enableCpuHotAdd: true          # Hot-add CPU
+      enableMemoryHotAdd: true       # Hot-add memory
+    
+    # CPU configuration
+    cpu:
+      coresPerSocket: 2              # CPU topology
+      enableVirtualization: false    # Nested virtualization
+      reservationMHz: 1000           # CPU reservation
+      limitMHz: 4000                 # CPU limit
+    
+    # Memory configuration  
+    memory:
+      reservationMB: 2048            # Memory reservation
+      limitMB: 8192                  # Memory limit
+      shareLevel: "normal"           # Memory shares (low/normal/high)
+    
+    # Storage configuration
+    storage:
+      diskFormat: "thin"             # thick/thin/eagerZeroedThick
+      storagePolicy: "VM Storage Policy - SSD"  # vSAN storage policy
+    
+    # vSphere placement
+    placement:
+      datacenter: "Production"       # Target datacenter
+      cluster: "Compute-Cluster"     # Target cluster  
+      resourcePool: "Production"     # Target resource pool
+      datastore: "datastore-ssd"     # Preferred datastore
+      folder: "/vm/virtrigaud"       # VM folder
+</code></pre>
+<h3 id="vmimage-specification"><a class="header" href="#vmimage-specification">VMImage Specification</a></h3>
+<p>Reference vSphere templates, content library items, or OVF files:</p>
+<pre><code class="language-yaml">apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMImage
+metadata:
+  name: ubuntu-22-04-template
+spec:
+  # Template from vSphere inventory
+  source:
+    template: "ubuntu-22.04-template"
+    datacenter: "Production"
+    folder: "/vm/templates"
+  
+  # Or from content library
+  # source:
+  #   contentLibrary: "OS Templates"
+  #   item: "ubuntu-22.04-cloud"
+  
+  # Or from OVF/OVA URL
+  # source:
+  #   ovf: "https://releases.ubuntu.com/22.04/ubuntu-22.04-server-cloudimg-amd64.ova"
+  
+  # Guest OS identification
+  guestOS: "ubuntu64Guest"
+  
+  # Customization specification
+  customization:
+    type: "cloudInit"              # cloudInit, sysprep, or linux
+    spec: "ubuntu-cloud-init"      # Reference to customization spec
+</code></pre>
+<h3 id="complete-vm-example"><a class="header" href="#complete-vm-example">Complete VM Example</a></h3>
+<pre><code class="language-yaml">apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: web-application
+spec:
+  providerRef:
+    name: vsphere-prod
+  classRef:
+    name: standard-vm
+  imageRef:
+    name: ubuntu-22-04-template
+  powerState: On
+  
+  # Disk configuration
+  disks:
+    - name: root
+      size: "100Gi"
+      storageClass: "ssd-storage"
+      # vSphere-specific disk options
+      spec:
+        diskMode: "persistent"       # persistent, independent_persistent, independent_nonpersistent
+        diskFormat: "thin"           # thick, thin, eagerZeroedThick
+        controllerType: "scsi"       # scsi, ide, nvme
+        unitNumber: 0                # SCSI unit number
+    
+    - name: data
+      size: "500Gi" 
+      storageClass: "hdd-storage"
+      spec:
+        diskFormat: "thick"
+        controllerType: "scsi"
+        unitNumber: 1
+  
+  # Network configuration
+  networks:
+    # Primary application network
+    - name: app-network
+      portGroup: "VM Network"
+      # Optional: Static IP assignment
+      staticIP:
+        address: "192.168.100.50/24"
+        gateway: "192.168.100.1"
+        dns: ["192.168.1.10", "8.8.8.8"]
+    
+    # Management network
+    - name: mgmt-network
+      portGroup: "Management"
+      # DHCP assignment (default)
+  
+  # vSphere-specific placement
+  placement:
+    datacenter: "Production"
+    cluster: "Compute-Cluster"
+    resourcePool: "Production"
+    folder: "/vm/applications"
+    datastore: "datastore-ssd"      # Override class default
+    host: "esxi-01.example.com"      # Pin to specific host (optional)
+  
+  # Guest customization
+  userData:
+    cloudInit:
+      inline: |
+        #cloud-config
+        hostname: web-application
+        users:
+          - name: ubuntu
+            sudo: ALL=(ALL) NOPASSWD:ALL
+            ssh_authorized_keys:
+              - "ssh-ed25519 AAAA..."
+        packages:
+          - nginx
+          - docker.io
+          - open-vm-tools          # VMware tools for guest integration
+        runcmd:
+          - systemctl enable nginx
+          - systemctl enable docker
+          - systemctl enable open-vm-tools
+</code></pre>
+<h2 id="advanced-features"><a class="header" href="#advanced-features">Advanced Features</a></h2>
+<h3 id="vm-reconfiguration-v023"><a class="header" href="#vm-reconfiguration-v023">VM Reconfiguration (v0.2.3+)</a></h3>
+<p>The vSphere provider supports online VM reconfiguration for CPU, memory, and disk resources:</p>
+<pre><code class="language-yaml"># Reconfigure VM resources
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: web-server
+spec:
+  vmClassRef: medium  # Change from small to medium
+  powerState: "On"
+</code></pre>
+<p><strong>Capabilities</strong>:</p>
+<ul>
+<li><strong>Online CPU Changes</strong>: Hot-add CPUs to running VMs (requires guest OS support)</li>
+<li><strong>Online Memory Changes</strong>: Hot-add memory to running VMs (requires guest OS support)</li>
+<li><strong>Disk Resizing</strong>: Expand disks online (shrinking not supported for safety)</li>
+<li><strong>Automatic Fallback</strong>: Falls back to offline changes if hot-add not supported</li>
+<li><strong>Intelligent Detection</strong>: Only applies changes when needed</li>
+</ul>
+<p><strong>Memory Format Support</strong>:</p>
+<ul>
+<li>Standard units: <code>2Gi</code>, <code>4096Mi</code>, <code>2048MiB</code>, <code>2GiB</code></li>
+<li>Parser handles multiple memory unit formats</li>
+</ul>
+<p><strong>Limitations</strong>:</p>
+<ul>
+<li>Disk shrinking prevented to avoid data loss</li>
+<li>Some guest operating systems require special configuration for hot-add</li>
+<li>BIOS firmware VMs have limited hot-add support (use EFI firmware)</li>
+</ul>
+<h3 id="vm-cloning-v023"><a class="header" href="#vm-cloning-v023">VM Cloning (v0.2.3+)</a></h3>
+<p>Create full or linked clones of existing VMs and templates:</p>
+<pre><code class="language-yaml"># Clone from existing VM
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: web-server-02
+spec:
+  vmClassRef: small
+  vmImageRef: web-server-01  # Source VM
+  cloneType: linked  # or "full"
+</code></pre>
+<p><strong>Clone Types</strong>:</p>
+<ul>
+<li><strong>Full Clone</strong>: Independent copy with separate storage</li>
+<li><strong>Linked Clone</strong>: Space-efficient copy using snapshots
+<ul>
+<li>Automatically creates snapshot if none exists</li>
+<li>Requires less storage and faster creation</li>
+<li>Parent VM must remain available</li>
+</ul>
+</li>
+</ul>
+<p><strong>Use Cases</strong>:</p>
+<ul>
+<li>Rapid test environment provisioning</li>
+<li>Development environment duplication</li>
+<li>Template-based deployments</li>
+<li>Disaster recovery scenarios</li>
+</ul>
+<h3 id="task-status-tracking-v023"><a class="header" href="#task-status-tracking-v023">Task Status Tracking (v0.2.3+)</a></h3>
+<p>Monitor asynchronous vSphere operations in real-time:</p>
+<pre><code class="language-yaml"># VirtRigaud automatically tracks long-running operations
+# No manual configuration needed
+
+# Task tracking provides:
+# - Real-time task state (queued, running, success, error)
+# - Progress percentage
+# - Error messages for failed tasks
+# - Integration with vSphere task manager
+</code></pre>
+<p><strong>Features</strong>:</p>
+<ul>
+<li>Automatic tracking of all async operations</li>
+<li>Progress monitoring via govmomi task manager</li>
+<li>Detailed error reporting</li>
+<li>Task history visibility in vCenter</li>
+</ul>
+<h3 id="console-access-v023"><a class="header" href="#console-access-v023">Console Access (v0.2.3+)</a></h3>
+<p>Generate direct vSphere web client console URLs:</p>
+<pre><code class="language-yaml"># Access provided in VM status
+kubectl get vm web-server -o yaml
+
+status:
+  consolURL: "https://vcenter.example.com/ui/app/vm;nav=h/urn:vmomi:VirtualMachine:vm-123:xxxxx/summary"
+  phase: Running
+</code></pre>
+<p><strong>Features</strong>:</p>
+<ul>
+<li>Direct browser-based VM console access</li>
+<li>No additional tools required</li>
+<li>Works with vSphere web client</li>
+<li>Includes VM instance UUID for reliable identification</li>
+<li>Generated automatically in Describe operations</li>
+</ul>
+<h3 id="template-management"><a class="header" href="#template-management">Template Management</a></h3>
+<h4 id="creating-templates"><a class="header" href="#creating-templates">Creating Templates</a></h4>
+<pre><code class="language-yaml"># Convert existing VM to template
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMTemplate
+metadata:
+  name: create-ubuntu-template
+spec:
+  sourceVM: "ubuntu-base-vm"
+  datacenter: "Production"
+  targetFolder: "/vm/templates"
+  templateName: "ubuntu-22.04-template"
+  
+  # Template metadata
+  annotation: |
+    Ubuntu 22.04 LTS Template
+    Created: 2024-01-15
+    Includes: cloud-init, open-vm-tools
+  
+  # Template customization
+  powerOff: true                   # Power off before conversion
+  removeSnapshots: true           # Clean up snapshots
+  updateTools: true               # Update VMware tools
+</code></pre>
+<h4 id="content-library-integration"><a class="header" href="#content-library-integration">Content Library Integration</a></h4>
+<pre><code class="language-yaml"># Deploy from content library
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMImage  
+metadata:
+  name: centos-stream-9
+spec:
+  source:
+    contentLibrary: "OS Templates"
+    item: "CentOS-Stream-9"
+    datacenter: "Production"
+  
+  # Content library item properties
+  properties:
+    version: "9.0"
+    provider: "CentOS"
+    osType: "linux"
+</code></pre>
+<h3 id="storage-policies"><a class="header" href="#storage-policies">Storage Policies</a></h3>
+<pre><code class="language-yaml"># VMClass with vSAN storage policy
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMClass
+metadata:
+  name: high-performance
+spec:
+  cpus: 8
+  memory: "32Gi"
+  spec:
+    storage:
+      # vSAN storage policies
+      homePolicy: "VM Storage Policy - Performance"    # VM home/config files
+      diskPolicy: "VM Storage Policy - SSD Only"       # Virtual disks
+      swapPolicy: "VM Storage Policy - Standard"        # Swap files
+      
+      # Traditional storage
+      datastoreCluster: "DatastoreCluster-SSD"         # Datastore cluster
+      antiAffinityRules: true                          # VM anti-affinity
+</code></pre>
+<h3 id="network-advanced-configuration"><a class="header" href="#network-advanced-configuration">Network Advanced Configuration</a></h3>
+<pre><code class="language-yaml"># Advanced networking with distributed switches
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMNetworkAttachment
+metadata:
+  name: advanced-networking
+spec:
+  networks:
+    # Distributed port group
+    - name: frontend
+      portGroup: "DPG-Frontend-VLAN100"
+      distributedSwitch: "DSwitch-Production"
+      vlan: 100
+      
+    # NSX-T logical switch
+    - name: backend  
+      portGroup: "LS-Backend-App"
+      nsx: true
+      securityPolicy: "Backend-Security-Policy"
+      
+    # SR-IOV for high performance
+    - name: storage
+      portGroup: "DPG-Storage-VLAN200"
+      sriov: true
+      bandwidth:
+        reservation: 1000  # Mbps
+        limit: 10000      # Mbps
+        shares: 100       # Priority
+</code></pre>
+<h3 id="high-availability"><a class="header" href="#high-availability">High Availability</a></h3>
+<pre><code class="language-yaml"># VM with HA/DRS settings
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: critical-application
+spec:
+  providerRef:
+    name: vsphere-prod
+  # ... other config ...
+  
+  # High availability configuration
+  availability:
+    # HA restart priority
+    restartPriority: "high"          # disabled, low, medium, high
+    isolationResponse: "powerOff"    # none, powerOff, shutdown
+    vmMonitoring: "vmMonitoringOnly" # vmMonitoringDisabled, vmMonitoringOnly, vmAndAppMonitoring
+    
+    # DRS configuration
+    drsAutomationLevel: "fullyAutomated"  # manual, partiallyAutomated, fullyAutomated
+    drsVmBehavior: "fullyAutomated"       # manual, partiallyAutomated, fullyAutomated
+    
+    # Anti-affinity rules
+    antiAffinityGroups: ["web-tier", "database-tier"]
+    
+    # Host affinity (pin to specific hosts)
+    hostAffinityGroups: ["production-hosts"]
+</code></pre>
+<h3 id="snapshot-management"><a class="header" href="#snapshot-management">Snapshot Management</a></h3>
+<pre><code class="language-yaml"># Advanced snapshot configuration
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMSnapshot
+metadata:
+  name: pre-upgrade-snapshot
+spec:
+  vmRef:
+    name: web-application
+  
+  # Snapshot settings
+  name: "Pre-upgrade snapshot"
+  description: "Snapshot before application upgrade"
+  memory: true                    # Include memory state
+  quiesce: true                   # Quiesce guest filesystem
+  
+  # Retention policy
+  retention:
+    maxSnapshots: 3               # Keep max 3 snapshots
+    maxAge: "7d"                  # Delete after 7 days
+    
+  # Schedule (optional)
+  schedule: "0 2 * * 0"          # Weekly at 2 AM Sunday
+</code></pre>
+<h2 id="troubleshooting"><a class="header" href="#troubleshooting">Troubleshooting</a></h2>
+<h3 id="common-issues"><a class="header" href="#common-issues">Common Issues</a></h3>
+<h4 id="-connection-failed"><a class="header" href="#-connection-failed">❌ Connection Failed</a></h4>
+<p><strong>Symptom</strong>: <code>failed to connect to vSphere: connection refused</code></p>
+<p><strong>Causes &amp; Solutions</strong>:</p>
+<ol>
+<li>
+<p><strong>Network connectivity</strong>:</p>
+<pre><code class="language-bash"># Test connectivity to vCenter
+telnet vcenter.example.com 443
+
+# Test from Kubernetes pod
+kubectl run debug --rm -i --tty --image=curlimages/curl -- \
+  curl -k https://vcenter.example.com
+</code></pre>
+</li>
+<li>
+<p><strong>DNS resolution</strong>:</p>
+<pre><code class="language-bash"># Test DNS resolution
+nslookup vcenter.example.com
+
+# Use IP address if DNS fails
+</code></pre>
+</li>
+<li>
+<p><strong>Firewall rules</strong>: Ensure port 443 is accessible from Kubernetes cluster</p>
+</li>
+</ol>
+<h4 id="-authentication-failed"><a class="header" href="#-authentication-failed">❌ Authentication Failed</a></h4>
+<p><strong>Symptom</strong>: <code>Login failed: incorrect user name or password</code></p>
+<p><strong>Solutions</strong>:</p>
+<ol>
+<li>
+<p><strong>Verify credentials</strong>:</p>
+<pre><code class="language-bash"># Test credentials manually
+kubectl get secret vsphere-credentials -o yaml
+
+# Decode and verify
+echo "base64-password" | base64 -d
+</code></pre>
+</li>
+<li>
+<p><strong>Check user permissions</strong>:</p>
+<ul>
+<li>Verify user exists in vCenter</li>
+<li>Check assigned roles and privileges</li>
+<li>Ensure user is not locked out</li>
+</ul>
+</li>
+<li>
+<p><strong>Test login via vSphere Client</strong>: Verify credentials work in the GUI</p>
+</li>
+</ol>
+<h4 id="-insufficient-privileges"><a class="header" href="#-insufficient-privileges">❌ Insufficient Privileges</a></h4>
+<p><strong>Symptom</strong>: <code>operation requires privilege 'VirtualMachine.Interact.PowerOn'</code></p>
+<p><strong>Solution</strong>: Grant required privileges to the service account:</p>
+<pre><code class="language-bash"># Required privileges for VirtRigaud:
+# - Datastore privileges:
+#   * Datastore.AllocateSpace
+#   * Datastore.Browse  
+#   * Datastore.FileManagement
+# - Network privileges:
+#   * Network.Assign
+# - Resource privileges:
+#   * Resource.AssignVMToPool
+# - Virtual machine privileges:
+#   * VirtualMachine.* (all) or specific subset
+# - Global privileges:
+#   * Global.EnableMethods
+#   * Global.DisableMethods
+</code></pre>
+<h4 id="-template-not-found"><a class="header" href="#-template-not-found">❌ Template Not Found</a></h4>
+<p><strong>Symptom</strong>: <code>template 'ubuntu-template' not found</code></p>
+<p><strong>Solutions</strong>:</p>
+<pre><code class="language-bash"># List available templates
+govc ls /datacenter/vm/templates/
+
+# Check template path and permissions
+govc object.collect -s vm/templates/ubuntu-template summary.config.name
+
+# Verify template is properly marked as template
+govc object.collect -s vm/templates/ubuntu-template config.template
+</code></pre>
+<h4 id="-datastore-issues"><a class="header" href="#-datastore-issues">❌ Datastore Issues</a></h4>
+<p><strong>Symptom</strong>: <code>insufficient disk space</code> or <code>datastore not accessible</code></p>
+<p><strong>Solutions</strong>:</p>
+<pre><code class="language-bash"># Check datastore capacity
+govc datastore.info datastore-name
+
+# List accessible datastores
+govc datastore.ls
+
+# Check datastore cluster configuration
+govc cluster.ls
+</code></pre>
+<h4 id="-network-configuration"><a class="header" href="#-network-configuration">❌ Network Configuration</a></h4>
+<p><strong>Symptom</strong>: <code>network 'VM Network' not found</code></p>
+<p><strong>Solutions</strong>:</p>
+<pre><code class="language-bash"># List available networks
+govc ls /datacenter/network/
+
+# Check distributed port groups
+govc dvs.portgroup.info
+
+# Verify network accessibility from cluster
+govc cluster.network.info
+</code></pre>
+<h3 id="validation-commands"><a class="header" href="#validation-commands">Validation Commands</a></h3>
+<p>Test your vSphere setup before deploying:</p>
+<pre><code class="language-bash"># 1. Install and configure govc CLI tool
+export GOVC_URL='https://vcenter.example.com'
+export GOVC_USERNAME='administrator@vsphere.local'
+export GOVC_PASSWORD='password'
+export GOVC_INSECURE=1  # for self-signed certificates
+
+# 2. Test connectivity
+govc about
+
+# 3. List datacenters
+govc ls
+
+# 4. List clusters and hosts
+govc ls /datacenter/host/
+
+# 5. List datastores
+govc ls /datacenter/datastore/
+
+# 6. List networks
+govc ls /datacenter/network/
+
+# 7. List templates
+govc ls /datacenter/vm/templates/
+
+# 8. Test VM creation (dry run)
+govc vm.create -c 1 -m 1024 -g ubuntu64Guest -net "VM Network" test-vm
+govc vm.destroy test-vm
+</code></pre>
+<h3 id="debug-logging"><a class="header" href="#debug-logging">Debug Logging</a></h3>
+<p>Enable verbose logging for the vSphere provider:</p>
+<pre><code class="language-yaml">providers:
+  vsphere:
+    env:
+      - name: LOG_LEVEL
+        value: "debug"
+      - name: GOVMOMI_DEBUG
+        value: "true"
+    endpoint: "https://vcenter.example.com"
+</code></pre>
+<p>Monitor vSphere tasks:</p>
+<pre><code class="language-bash"># Monitor recent tasks in vCenter
+govc task.ls
+
+# Get details of specific task
+govc task.info task-123
+</code></pre>
+<h2 id="performance-optimization"><a class="header" href="#performance-optimization">Performance Optimization</a></h2>
+<h3 id="resource-allocation"><a class="header" href="#resource-allocation">Resource Allocation</a></h3>
+<pre><code class="language-yaml"># High-performance VMClass
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMClass
+metadata:
+  name: performance-optimized
+spec:
+  cpus: 16
+  memory: "64Gi"
+  spec:
+    cpu:
+      coresPerSocket: 8            # Match physical CPU topology
+      reservationMHz: 8000         # Guarantee CPU resources
+      shares: 2000                 # High priority (normal=1000)
+      enableVirtualization: false  # Disable if not needed for performance
+    
+    memory:
+      reservationMB: 65536         # Guarantee memory
+      shares: 2000                 # High priority
+      shareLevel: "high"           # Alternative to shares value
+    
+    hardware:
+      enableCpuHotAdd: false       # Better performance when disabled
+      enableMemoryHotAdd: false    # Better performance when disabled
+      
+    # NUMA configuration for large VMs
+    numa:
+      enabled: true
+      coresPerSocket: 8            # Align with NUMA topology
+</code></pre>
+<h3 id="storage-optimization"><a class="header" href="#storage-optimization">Storage Optimization</a></h3>
+<pre><code class="language-yaml"># Storage-optimized configuration
+spec:
+  storage:
+    diskFormat: "eagerZeroedThick"  # Best performance, more space usage
+    controllerType: "pvscsi"        # Paravirtual SCSI for better performance
+    multiwriter: false              # Disable unless needed
+    
+    # vSAN optimization
+    storagePolicy: "Performance-Tier"
+    cachingPolicy: "writethrough"   # or "writeback" for better performance
+    
+    # Multiple controllers for high IOPS
+    scsiControllers:
+      - type: "pvscsi"
+        busNumber: 0
+        maxDevices: 15
+      - type: "pvscsi" 
+        busNumber: 1
+        maxDevices: 15
+</code></pre>
+<h3 id="network-optimization"><a class="header" href="#network-optimization">Network Optimization</a></h3>
+<pre><code class="language-yaml"># High-performance networking
+networks:
+  - name: high-performance
+    portGroup: "DPG-HighPerf-SR-IOV"
+    adapter: "vmxnet3"             # Best performance adapter
+    sriov: true                    # SR-IOV for near-native performance
+    bandwidth:
+      reservation: 1000            # Guaranteed bandwidth (Mbps)
+      limit: 10000                 # Maximum bandwidth (Mbps)
+      shares: 100                  # Priority level
+</code></pre>
+<h2 id="api-reference"><a class="header" href="#api-reference">API Reference</a></h2>
+<p>For complete API reference, see the <a href="../api-reference/">Provider API Documentation</a>.</p>
+<h2 id="contributing"><a class="header" href="#contributing">Contributing</a></h2>
+<p>To contribute to the vSphere provider:</p>
+<ol>
+<li>See the <a href="../tutorial.html">Provider Development Guide</a></li>
+<li>Check the <a href="https://github.com/projectbeskar/virtrigaud">GitHub repository</a></li>
+<li>Review <a href="https://github.com/projectbeskar/virtrigaud/labels/provider%2Fvsphere">open issues</a></li>
+</ol>
+<h2 id="support"><a class="header" href="#support">Support</a></h2>
+<ul>
+<li><strong>Documentation</strong>: <a href="https://projectbeskar.github.io/virtrigaud/">VirtRigaud Docs</a></li>
+<li><strong>Issues</strong>: <a href="https://github.com/projectbeskar/virtrigaud/issues">GitHub Issues</a></li>
+<li><strong>Community</strong>: <a href="https://discord.gg/projectbeskar">Discord</a></li>
+<li><strong>VMware</strong>: <a href="https://developer.vmware.com/apis/vsphere-automation/">vSphere API Documentation</a></li>
+<li><strong>govc</strong>: <a href="https://github.com/vmware/govmomi/tree/master/govc">govc CLI Tool</a></li>
+</ul>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../PROVIDERS_CAPABILITIES.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../providers/libvirt.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../PROVIDERS_CAPABILITIES.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../providers/libvirt.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="../theme/page-toc.js"></script>
+
+
+    </div>
+    </body>
+</html>

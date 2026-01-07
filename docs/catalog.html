@@ -1,0 +1,478 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Provider Catalog - VirtRigaud Documentation</title>
+
+
+        <!-- Custom HTML head -->
+        
+        <meta name="description" content="Kubernetes operator for managing virtual machines across multiple hypervisors">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon.svg">
+        <link rel="shortcut icon" href="favicon.png">
+        <link rel="stylesheet" href="css/variables.css">
+        <link rel="stylesheet" href="css/general.css">
+        <link rel="stylesheet" href="css/chrome.css">
+        <link rel="stylesheet" href="css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="highlight.css">
+        <link rel="stylesheet" href="tomorrow-night.css">
+        <link rel="stylesheet" href="ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="theme/custom.css">
+
+    </head>
+    <body class="sidebar-visible no-js">
+    <div id="body-container">
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
+        </script>
+
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            var html = document.querySelector('html');
+            html.classList.remove('light')
+            html.classList.add(theme);
+            var body = document.querySelector('body');
+            body.classList.remove('no-js')
+            body.classList.add('js');
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var body = document.querySelector('body');
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            body.classList.remove('sidebar-visible');
+            body.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <div class="sidebar-scrollbox">
+                <ol class="chapter"><li class="chapter-item affix "><a href="index.html">Introduction</a></li><li class="chapter-item affix "><li class="part-title">Getting Started</li><li class="chapter-item "><a href="getting-started/quickstart.html"><strong aria-hidden="true">1.</strong> 15-Minute Quickstart</a></li><li class="chapter-item "><a href="install-helm-only.html"><strong aria-hidden="true">2.</strong> Installation Guide</a></li><li class="chapter-item "><a href="HELM_CRD_UPGRADES.html"><strong aria-hidden="true">3.</strong> Helm CRD Upgrades</a></li><li class="chapter-item affix "><li class="part-title">Core Documentation</li><li class="chapter-item "><a href="CRDs.html"><strong aria-hidden="true">4.</strong> Custom Resource Definitions</a></li><li class="chapter-item "><a href="EXAMPLES.html"><strong aria-hidden="true">5.</strong> Examples</a></li><li class="chapter-item "><a href="PROVIDERS.html"><strong aria-hidden="true">6.</strong> Provider Documentation</a></li><li class="chapter-item "><a href="PROVIDERS_CAPABILITIES.html"><strong aria-hidden="true">7.</strong> Provider Capabilities Matrix</a></li><li class="chapter-item affix "><li class="part-title">Provider-Specific Guides</li><li class="chapter-item "><a href="providers/vsphere.html"><strong aria-hidden="true">8.</strong> vSphere Provider</a></li><li class="chapter-item "><a href="providers/libvirt.html"><strong aria-hidden="true">9.</strong> Libvirt Provider</a></li><li class="chapter-item "><a href="providers/proxmox.html"><strong aria-hidden="true">10.</strong> Proxmox VE Provider</a></li><li class="chapter-item "><a href="providers/tutorial.html"><strong aria-hidden="true">11.</strong> Provider Tutorial</a></li><li class="chapter-item "><a href="providers/versioning.html"><strong aria-hidden="true">12.</strong> Provider Versioning</a></li><li class="chapter-item affix "><li class="part-title">Advanced Features</li><li class="chapter-item "><a href="ADVANCED_LIFECYCLE.html"><strong aria-hidden="true">13.</strong> VM Lifecycle Management</a></li><li class="chapter-item "><a href="NESTED_VIRTUALIZATION.html"><strong aria-hidden="true">14.</strong> Nested Virtualization</a></li><li class="chapter-item "><a href="GRACEFUL_SHUTDOWN.html"><strong aria-hidden="true">15.</strong> Graceful Shutdown</a></li><li class="chapter-item "><a href="REMOTE_PROVIDERS.html"><strong aria-hidden="true">16.</strong> Remote Providers</a></li><li class="chapter-item affix "><li class="part-title">Operations & Administration</li><li class="chapter-item "><a href="OBSERVABILITY.html"><strong aria-hidden="true">17.</strong> Observability</a></li><li class="chapter-item "><a href="SECURITY.html"><strong aria-hidden="true">18.</strong> Security</a></li><li class="chapter-item "><a href="RESILIENCE.html"><strong aria-hidden="true">19.</strong> Resilience</a></li><li class="chapter-item "><a href="UPGRADE.html"><strong aria-hidden="true">20.</strong> Upgrade Guide</a></li><li class="chapter-item "><a href="VSPHERE_HARDWARE_VERSION.html"><strong aria-hidden="true">21.</strong> vSphere Hardware Versions</a></li><li class="chapter-item affix "><li class="part-title">Security Configuration</li><li class="chapter-item "><a href="providers/security/bearer-token.html"><strong aria-hidden="true">22.</strong> Bearer Token Authentication</a></li><li class="chapter-item "><a href="providers/security/mtls.html"><strong aria-hidden="true">23.</strong> mTLS Configuration</a></li><li class="chapter-item "><a href="providers/security/external-secrets.html"><strong aria-hidden="true">24.</strong> External Secrets</a></li><li class="chapter-item "><a href="providers/security/network-policies.html"><strong aria-hidden="true">25.</strong> Network Policies</a></li><li class="chapter-item affix "><li class="part-title">API Reference</li><li class="chapter-item "><a href="CLI.html"><strong aria-hidden="true">26.</strong> CLI Tools Reference</a></li><li class="chapter-item "><a href="api-reference/cli.html"><strong aria-hidden="true">27.</strong> CLI API Reference</a></li><li class="chapter-item "><a href="api-reference/metrics.html"><strong aria-hidden="true">28.</strong> Metrics Catalog</a></li><li class="chapter-item expanded "><a href="catalog.html" class="active"><strong aria-hidden="true">29.</strong> Provider Catalog</a></li><li class="chapter-item affix "><li class="part-title">Development</li><li class="chapter-item "><a href="TESTING_WORKFLOWS_LOCALLY.html"><strong aria-hidden="true">30.</strong> Testing Workflows Locally</a></li><li class="chapter-item "><a href="../../CONTRIBUTING.html"><strong aria-hidden="true">31.</strong> Contributing</a></li><li class="chapter-item "><a href="../../DEVELOPMENT.html"><strong aria-hidden="true">32.</strong> Development Guide</a></li><li class="chapter-item affix "><li class="part-title">Examples</li><li class="chapter-item "><a href="examples/index.html"><strong aria-hidden="true">33.</strong> Example README</a></li></ol>
+            </div>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <!-- Track and set sidebar scroll position -->
+        <script>
+            var sidebarScrollbox = document.querySelector('#sidebar .sidebar-scrollbox');
+            sidebarScrollbox.addEventListener('click', function(e) {
+                if (e.target.tagName === 'A') {
+                    sessionStorage.setItem('sidebar-scroll', sidebarScrollbox.scrollTop);
+                }
+            }, { passive: true });
+            var sidebarScrollTop = sessionStorage.getItem('sidebar-scroll');
+            sessionStorage.removeItem('sidebar-scroll');
+            if (sidebarScrollTop) {
+                // preserve sidebar scroll position when navigating via links within sidebar
+                sidebarScrollbox.scrollTop = sidebarScrollTop;
+            } else {
+                // scroll sidebar to current active section when navigating via "next/previous chapter" buttons
+                var activeSection = document.querySelector('#sidebar .active');
+                if (activeSection) {
+                    activeSection.scrollIntoView({ block: 'center' });
+                }
+            }
+        </script>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">VirtRigaud Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/projectbeskar/virtrigaud" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/projectbeskar/virtrigaud/edit/main/docs/src/catalog.md" title="Suggest an edit" aria-label="Suggest an edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="provider-catalog"><a class="header" href="#provider-catalog">Provider Catalog</a></h1>
+<p><em>Last updated: 2025-08-26T14:30:00Z</em></p>
+<p>The VirtRigaud Provider Catalog lists all verified and community providers available for the VirtRigaud virtualization management platform. All providers in this catalog have been tested for conformance and compatibility.</p>
+<h2 id="provider-overview"><a class="header" href="#provider-overview">Provider Overview</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Provider</th><th>Description</th><th>Capabilities</th><th>Conformance</th><th>Maintainer</th><th>License</th></tr></thead><tbody>
+<tr><td><strong>Mock Provider</strong></td><td>A mock provider for testing and demonstrations</td><td>core, snapshot, clone, image-prepare, advanced</td><td><img src="https://img.shields.io/badge/conformance-pass-green" alt="Conformance" /></td><td>virtrigaud@projectbeskar.com</td><td>Apache-2.0</td></tr>
+<tr><td><strong>vSphere Provider</strong></td><td>VMware vSphere provider for VirtRigaud</td><td>core, snapshot, clone, advanced</td><td><img src="https://img.shields.io/badge/conformance-pass-green" alt="Conformance" /></td><td>virtrigaud@projectbeskar.com</td><td>Apache-2.0</td></tr>
+<tr><td><strong>Libvirt Provider</strong></td><td>Libvirt/KVM provider for VirtRigaud</td><td>core, snapshot, clone</td><td><img src="https://img.shields.io/badge/conformance-partial-yellow" alt="Conformance" /></td><td>virtrigaud@projectbeskar.com</td><td>Apache-2.0</td></tr>
+</tbody></table>
+</div>
+<h2 id="quick-start"><a class="header" href="#quick-start">Quick Start</a></h2>
+<h3 id="installing-a-provider"><a class="header" href="#installing-a-provider">Installing a Provider</a></h3>
+<p>To install a provider in your Kubernetes cluster, use the VirtRigaud provider runtime Helm chart:</p>
+<pre><code class="language-bash"># Add the VirtRigaud Helm repository
+helm repo add virtrigaud https://projectbeskar.github.io/virtrigaud
+helm repo update
+
+# Install a provider using the runtime chart
+helm install my-vsphere-provider virtrigaud/virtrigaud-provider-runtime \
+  --namespace vsphere-providers \
+  --create-namespace \
+  --set image.repository=ghcr.io/projectbeskar/virtrigaud/provider-vsphere \
+  --set image.tag=0.1.1 \
+  --set env[0].name=VSPHERE_SERVER \
+  --set env[0].value=vcenter.example.com
+</code></pre>
+<h3 id="provider-discovery"><a class="header" href="#provider-discovery">Provider Discovery</a></h3>
+<p>Once installed, providers automatically register with the VirtRigaud manager. You can list available providers:</p>
+<pre><code class="language-bash">kubectl get providers -n virtrigaud-system
+</code></pre>
+<h2 id="provider-details"><a class="header" href="#provider-details">Provider Details</a></h2>
+<h3 id="mock-provider"><a class="header" href="#mock-provider">Mock Provider</a></h3>
+<ul>
+<li><strong>Image:</strong> <code>ghcr.io/projectbeskar/virtrigaud/provider-mock:0.1.1</code></li>
+<li><strong>Repository:</strong> <a href="https://github.com/projectbeskar/virtrigaud">https://github.com/projectbeskar/virtrigaud</a></li>
+<li><strong>Maturity:</strong> stable</li>
+<li><strong>Tags:</strong> testing, development, demo</li>
+<li><strong>Documentation:</strong> <a href="https://projectbeskar.github.io/virtrigaud/providers/mock/">https://projectbeskar.github.io/virtrigaud/providers/mock/</a></li>
+</ul>
+<p>The mock provider is perfect for:</p>
+<ul>
+<li>Testing VirtRigaud functionality</li>
+<li>Development and CI/CD pipelines</li>
+<li>Learning provider concepts</li>
+<li>Demonstrating VirtRigaud capabilities</li>
+</ul>
+<p><strong>Installation:</strong></p>
+<pre><code class="language-bash">helm install mock-provider virtrigaud/virtrigaud-provider-runtime \
+  --namespace development \
+  --create-namespace \
+  --set image.repository=ghcr.io/projectbeskar/virtrigaud/provider-mock \
+  --set image.tag=0.1.1 \
+  --set env[0].name=LOG_LEVEL \
+  --set env[0].value=debug
+</code></pre>
+<h3 id="vsphere-provider"><a class="header" href="#vsphere-provider">vSphere Provider</a></h3>
+<ul>
+<li><strong>Image:</strong> <code>ghcr.io/projectbeskar/virtrigaud/provider-vsphere:0.1.1</code></li>
+<li><strong>Repository:</strong> <a href="https://github.com/projectbeskar/virtrigaud">https://github.com/projectbeskar/virtrigaud</a></li>
+<li><strong>Maturity:</strong> beta</li>
+<li><strong>Tags:</strong> vmware, vsphere, enterprise</li>
+<li><strong>Documentation:</strong> <a href="https://projectbeskar.github.io/virtrigaud/providers/vsphere/">https://projectbeskar.github.io/virtrigaud/providers/vsphere/</a></li>
+</ul>
+<p>The vSphere provider enables VirtRigaud to manage VMware vSphere environments, including:</p>
+<ul>
+<li>VM lifecycle management (create, update, delete)</li>
+<li>Power operations (on, off, restart, suspend)</li>
+<li>Snapshot management</li>
+<li>VM cloning and templates</li>
+<li>Resource allocation and configuration</li>
+</ul>
+<p><strong>Prerequisites:</strong></p>
+<ul>
+<li>VMware vSphere 6.7 or later</li>
+<li>vCenter Server credentials</li>
+<li>Network connectivity to vCenter API</li>
+</ul>
+<p><strong>Installation:</strong></p>
+<pre><code class="language-bash"># Create secret for vSphere credentials
+kubectl create secret generic vsphere-credentials \
+  --namespace vsphere-providers \
+  --from-literal=username=your-username \
+  --from-literal=password=your-password
+
+# Install provider
+helm install vsphere-provider virtrigaud/virtrigaud-provider-runtime \
+  --namespace vsphere-providers \
+  --create-namespace \
+  --set image.repository=ghcr.io/projectbeskar/virtrigaud/provider-vsphere \
+  --set image.tag=0.1.1 \
+  --set env[0].name=VSPHERE_SERVER \
+  --set env[0].value=vcenter.example.com \
+  --set env[1].name=VSPHERE_USERNAME \
+  --set env[1].valueFrom.secretKeyRef.name=vsphere-credentials \
+  --set env[1].valueFrom.secretKeyRef.key=username \
+  --set env[2].name=VSPHERE_PASSWORD \
+  --set env[2].valueFrom.secretKeyRef.name=vsphere-credentials \
+  --set env[2].valueFrom.secretKeyRef.key=password
+</code></pre>
+<h3 id="libvirt-provider"><a class="header" href="#libvirt-provider">Libvirt Provider</a></h3>
+<ul>
+<li><strong>Image:</strong> <code>ghcr.io/projectbeskar/virtrigaud/provider-libvirt:0.1.1</code></li>
+<li><strong>Repository:</strong> <a href="https://github.com/projectbeskar/virtrigaud">https://github.com/projectbeskar/virtrigaud</a></li>
+<li><strong>Maturity:</strong> beta</li>
+<li><strong>Tags:</strong> libvirt, kvm, qemu, open-source</li>
+<li><strong>Documentation:</strong> <a href="https://projectbeskar.github.io/virtrigaud/providers/libvirt/">https://projectbeskar.github.io/virtrigaud/providers/libvirt/</a></li>
+</ul>
+<p>The libvirt provider manages KVM/QEMU virtual machines through libvirt, supporting:</p>
+<ul>
+<li>VM lifecycle management</li>
+<li>Power state control</li>
+<li>Snapshot operations</li>
+<li>Basic cloning capabilities</li>
+<li>Local and remote libvirt connections</li>
+</ul>
+<p><strong>Prerequisites:</strong></p>
+<ul>
+<li>Libvirt daemon running on target hosts</li>
+<li>SSH access for remote connections</li>
+<li>Shared storage for multi-host deployments</li>
+</ul>
+<p><strong>Installation:</strong></p>
+<pre><code class="language-bash">helm install libvirt-provider virtrigaud/virtrigaud-provider-runtime \
+  --namespace libvirt-providers \
+  --create-namespace \
+  --set image.repository=ghcr.io/projectbeskar/virtrigaud/provider-libvirt \
+  --set image.tag=0.1.1 \
+  --set env[0].name=LIBVIRT_URI \
+  --set env[0].value=qemu:///system \
+  --set securityContext.runAsUser=0 \
+  --set podSecurityContext.runAsUser=0
+</code></pre>
+<h2 id="capability-profiles"><a class="header" href="#capability-profiles">Capability Profiles</a></h2>
+<p>VirtRigaud defines several capability profiles that providers can implement:</p>
+<h3 id="core-profile"><a class="header" href="#core-profile">Core Profile</a></h3>
+<p><strong>Required for all providers</strong></p>
+<ul>
+<li><code>vm.create</code> - Create virtual machines</li>
+<li><code>vm.read</code> - Get virtual machine information</li>
+<li><code>vm.update</code> - Update virtual machine configuration</li>
+<li><code>vm.delete</code> - Delete virtual machines</li>
+<li><code>vm.power</code> - Control power state (on/off/restart)</li>
+<li><code>vm.list</code> - List virtual machines</li>
+</ul>
+<h3 id="snapshot-profile"><a class="header" href="#snapshot-profile">Snapshot Profile</a></h3>
+<p><strong>Optional - for providers supporting VM snapshots</strong></p>
+<ul>
+<li><code>vm.snapshot.create</code> - Create VM snapshots</li>
+<li><code>vm.snapshot.list</code> - List VM snapshots</li>
+<li><code>vm.snapshot.delete</code> - Delete VM snapshots</li>
+<li><code>vm.snapshot.restore</code> - Restore VM from snapshot</li>
+</ul>
+<h3 id="clone-profile"><a class="header" href="#clone-profile">Clone Profile</a></h3>
+<p><strong>Optional - for providers supporting VM cloning</strong></p>
+<ul>
+<li><code>vm.clone</code> - Clone virtual machines</li>
+<li><code>vm.template</code> - Create and manage VM templates</li>
+</ul>
+<h3 id="image-prepare-profile"><a class="header" href="#image-prepare-profile">Image Prepare Profile</a></h3>
+<p><strong>Optional - for providers with image management</strong></p>
+<ul>
+<li><code>image.prepare</code> - Prepare VM images</li>
+<li><code>image.list</code> - List available images</li>
+<li><code>image.upload</code> - Upload custom images</li>
+</ul>
+<h3 id="advanced-profile"><a class="header" href="#advanced-profile">Advanced Profile</a></h3>
+<p><strong>Optional - for advanced provider features</strong></p>
+<ul>
+<li><code>vm.migrate</code> - Live migrate VMs between hosts</li>
+<li><code>vm.resize</code> - Dynamic resource allocation</li>
+<li><code>vm.backup</code> - Backup and restore operations</li>
+<li><code>vm.monitoring</code> - Advanced monitoring and metrics</li>
+</ul>
+<h2 id="contributing-a-provider"><a class="header" href="#contributing-a-provider">Contributing a Provider</a></h2>
+<p>Want to add your provider to the catalog? Follow these steps:</p>
+<h3 id="1-develop-your-provider"><a class="header" href="#1-develop-your-provider">1. Develop Your Provider</a></h3>
+<p>Use the <a href="./providers/tutorial.html">Provider Developer Tutorial</a> to create your provider using the VirtRigaud SDK.</p>
+<h3 id="2-ensure-conformance"><a class="header" href="#2-ensure-conformance">2. Ensure Conformance</a></h3>
+<p>Run the VirtRigaud Conformance Test Suite (VCTS) to verify your provider meets the requirements:</p>
+<pre><code class="language-bash"># Install the VCTS tool
+go install github.com/projectbeskar/virtrigaud/cmd/vcts@latest
+
+# Run conformance tests
+vcts run --provider-endpoint=localhost:9443 --profile=core
+</code></pre>
+<h3 id="3-publish-to-catalog"><a class="header" href="#3-publish-to-catalog">3. Publish to Catalog</a></h3>
+<p>Use the <code>vrtg-provider publish</code> command to submit your provider:</p>
+<pre><code class="language-bash">vrtg-provider publish \
+  --name your-provider \
+  --image ghcr.io/yourorg/your-provider \
+  --tag v1.0.0 \
+  --repo https://github.com/yourorg/your-provider \
+  --maintainer your-email@example.com \
+  --license Apache-2.0
+</code></pre>
+<p>This will:</p>
+<ol>
+<li>Run conformance tests</li>
+<li>Generate provider badges</li>
+<li>Create a catalog entry</li>
+<li>Open a pull request to add your provider</li>
+</ol>
+<h3 id="4-catalog-requirements"><a class="header" href="#4-catalog-requirements">4. Catalog Requirements</a></h3>
+<p>To be included in the catalog, providers must:</p>
+<ul>
+<li>✅ Pass VCTS core profile tests</li>
+<li>✅ Include comprehensive documentation</li>
+<li>✅ Provide Helm chart for deployment</li>
+<li>✅ Follow security best practices</li>
+<li>✅ Include proper error handling</li>
+<li>✅ Support health checks and metrics</li>
+<li>✅ Have active maintenance and support</li>
+</ul>
+<h2 id="provider-support-matrix"><a class="header" href="#provider-support-matrix">Provider Support Matrix</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Provider</th><th>Kubernetes</th><th>VirtRigaud</th><th>Go Version</th><th>Platforms</th></tr></thead><tbody>
+<tr><td>Mock</td><td>1.25+</td><td>0.1.0+</td><td>1.23+</td><td>linux/amd64, linux/arm64</td></tr>
+<tr><td>vSphere</td><td>1.25+</td><td>0.1.0+</td><td>1.23+</td><td>linux/amd64, linux/arm64</td></tr>
+<tr><td>Libvirt</td><td>1.25+</td><td>0.1.0+</td><td>1.23+</td><td>linux/amd64</td></tr>
+</tbody></table>
+</div>
+<h2 id="community-and-support"><a class="header" href="#community-and-support">Community and Support</a></h2>
+<ul>
+<li><strong>Documentation:</strong> <a href="https://projectbeskar.github.io/virtrigaud/providers/">VirtRigaud Provider Docs</a></li>
+<li><strong>Issues:</strong> <a href="https://github.com/projectbeskar/virtrigaud/issues">GitHub Issues</a></li>
+<li><strong>Discussions:</strong> <a href="https://github.com/projectbeskar/virtrigaud/discussions">GitHub Discussions</a></li>
+<li><strong>Slack:</strong> <a href="https://virtrigaud.slack.com">VirtRigaud Community</a></li>
+</ul>
+<h2 id="versioning-and-compatibility"><a class="header" href="#versioning-and-compatibility">Versioning and Compatibility</a></h2>
+<p>Providers follow semantic versioning (SemVer) and maintain compatibility with VirtRigaud versions:</p>
+<ul>
+<li><strong>Major versions</strong> (1.0.0 → 2.0.0): Breaking changes to APIs or behavior</li>
+<li><strong>Minor versions</strong> (1.0.0 → 1.1.0): New features, backward compatible</li>
+<li><strong>Patch versions</strong> (1.0.0 → 1.0.1): Bug fixes, security updates</li>
+</ul>
+<p><strong>Compatibility Policy:</strong></p>
+<ul>
+<li>Current VirtRigaud version supports providers from current major version</li>
+<li>Providers should support at least 2 minor versions of VirtRigaud</li>
+<li>Breaking changes require migration documentation</li>
+</ul>
+<h2 id="license-and-legal"><a class="header" href="#license-and-legal">License and Legal</a></h2>
+<p>All providers in this catalog are open source and follow the licensing terms specified in their individual repositories. The catalog itself is maintained under the Apache 2.0 license.</p>
+<p><strong>Trademark Notice:</strong> VMware and vSphere are trademarks of VMware, Inc. KVM and QEMU are trademarks of their respective owners. All trademarks are the property of their respective owners.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="api-reference/metrics.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="TESTING_WORKFLOWS_LOCALLY.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="api-reference/metrics.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="TESTING_WORKFLOWS_LOCALLY.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr.min.js"></script>
+        <script src="mark.min.js"></script>
+        <script src="searcher.js"></script>
+
+        <script src="clipboard.min.js"></script>
+        <script src="highlight.js"></script>
+        <script src="book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="theme/page-toc.js"></script>
+
+
+    </div>
+    </body>
+</html>

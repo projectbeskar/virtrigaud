@@ -1,0 +1,974 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Libvirt Provider - VirtRigaud Documentation</title>
+
+
+        <!-- Custom HTML head -->
+        
+        <meta name="description" content="Kubernetes operator for managing virtual machines across multiple hypervisors">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="../highlight.css">
+        <link rel="stylesheet" href="../tomorrow-night.css">
+        <link rel="stylesheet" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../theme/custom.css">
+
+    </head>
+    <body class="sidebar-visible no-js">
+    <div id="body-container">
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "../";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
+        </script>
+
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            var html = document.querySelector('html');
+            html.classList.remove('light')
+            html.classList.add(theme);
+            var body = document.querySelector('body');
+            body.classList.remove('no-js')
+            body.classList.add('js');
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var body = document.querySelector('body');
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            body.classList.remove('sidebar-visible');
+            body.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <div class="sidebar-scrollbox">
+                <ol class="chapter"><li class="chapter-item affix "><a href="../index.html">Introduction</a></li><li class="chapter-item affix "><li class="part-title">Getting Started</li><li class="chapter-item "><a href="../getting-started/quickstart.html"><strong aria-hidden="true">1.</strong> 15-Minute Quickstart</a></li><li class="chapter-item "><a href="../install-helm-only.html"><strong aria-hidden="true">2.</strong> Installation Guide</a></li><li class="chapter-item "><a href="../HELM_CRD_UPGRADES.html"><strong aria-hidden="true">3.</strong> Helm CRD Upgrades</a></li><li class="chapter-item affix "><li class="part-title">Core Documentation</li><li class="chapter-item "><a href="../CRDs.html"><strong aria-hidden="true">4.</strong> Custom Resource Definitions</a></li><li class="chapter-item "><a href="../EXAMPLES.html"><strong aria-hidden="true">5.</strong> Examples</a></li><li class="chapter-item "><a href="../PROVIDERS.html"><strong aria-hidden="true">6.</strong> Provider Documentation</a></li><li class="chapter-item "><a href="../PROVIDERS_CAPABILITIES.html"><strong aria-hidden="true">7.</strong> Provider Capabilities Matrix</a></li><li class="chapter-item affix "><li class="part-title">Provider-Specific Guides</li><li class="chapter-item "><a href="../providers/vsphere.html"><strong aria-hidden="true">8.</strong> vSphere Provider</a></li><li class="chapter-item expanded "><a href="../providers/libvirt.html" class="active"><strong aria-hidden="true">9.</strong> Libvirt Provider</a></li><li class="chapter-item "><a href="../providers/proxmox.html"><strong aria-hidden="true">10.</strong> Proxmox VE Provider</a></li><li class="chapter-item "><a href="../providers/tutorial.html"><strong aria-hidden="true">11.</strong> Provider Tutorial</a></li><li class="chapter-item "><a href="../providers/versioning.html"><strong aria-hidden="true">12.</strong> Provider Versioning</a></li><li class="chapter-item affix "><li class="part-title">Advanced Features</li><li class="chapter-item "><a href="../ADVANCED_LIFECYCLE.html"><strong aria-hidden="true">13.</strong> VM Lifecycle Management</a></li><li class="chapter-item "><a href="../NESTED_VIRTUALIZATION.html"><strong aria-hidden="true">14.</strong> Nested Virtualization</a></li><li class="chapter-item "><a href="../GRACEFUL_SHUTDOWN.html"><strong aria-hidden="true">15.</strong> Graceful Shutdown</a></li><li class="chapter-item "><a href="../REMOTE_PROVIDERS.html"><strong aria-hidden="true">16.</strong> Remote Providers</a></li><li class="chapter-item affix "><li class="part-title">Operations & Administration</li><li class="chapter-item "><a href="../OBSERVABILITY.html"><strong aria-hidden="true">17.</strong> Observability</a></li><li class="chapter-item "><a href="../SECURITY.html"><strong aria-hidden="true">18.</strong> Security</a></li><li class="chapter-item "><a href="../RESILIENCE.html"><strong aria-hidden="true">19.</strong> Resilience</a></li><li class="chapter-item "><a href="../UPGRADE.html"><strong aria-hidden="true">20.</strong> Upgrade Guide</a></li><li class="chapter-item "><a href="../VSPHERE_HARDWARE_VERSION.html"><strong aria-hidden="true">21.</strong> vSphere Hardware Versions</a></li><li class="chapter-item affix "><li class="part-title">Security Configuration</li><li class="chapter-item "><a href="../providers/security/bearer-token.html"><strong aria-hidden="true">22.</strong> Bearer Token Authentication</a></li><li class="chapter-item "><a href="../providers/security/mtls.html"><strong aria-hidden="true">23.</strong> mTLS Configuration</a></li><li class="chapter-item "><a href="../providers/security/external-secrets.html"><strong aria-hidden="true">24.</strong> External Secrets</a></li><li class="chapter-item "><a href="../providers/security/network-policies.html"><strong aria-hidden="true">25.</strong> Network Policies</a></li><li class="chapter-item affix "><li class="part-title">API Reference</li><li class="chapter-item "><a href="../CLI.html"><strong aria-hidden="true">26.</strong> CLI Tools Reference</a></li><li class="chapter-item "><a href="../api-reference/cli.html"><strong aria-hidden="true">27.</strong> CLI API Reference</a></li><li class="chapter-item "><a href="../api-reference/metrics.html"><strong aria-hidden="true">28.</strong> Metrics Catalog</a></li><li class="chapter-item "><a href="../catalog.html"><strong aria-hidden="true">29.</strong> Provider Catalog</a></li><li class="chapter-item affix "><li class="part-title">Development</li><li class="chapter-item "><a href="../TESTING_WORKFLOWS_LOCALLY.html"><strong aria-hidden="true">30.</strong> Testing Workflows Locally</a></li><li class="chapter-item "><a href="../../../CONTRIBUTING.html"><strong aria-hidden="true">31.</strong> Contributing</a></li><li class="chapter-item "><a href="../../../DEVELOPMENT.html"><strong aria-hidden="true">32.</strong> Development Guide</a></li><li class="chapter-item affix "><li class="part-title">Examples</li><li class="chapter-item "><a href="../examples/index.html"><strong aria-hidden="true">33.</strong> Example README</a></li></ol>
+            </div>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <!-- Track and set sidebar scroll position -->
+        <script>
+            var sidebarScrollbox = document.querySelector('#sidebar .sidebar-scrollbox');
+            sidebarScrollbox.addEventListener('click', function(e) {
+                if (e.target.tagName === 'A') {
+                    sessionStorage.setItem('sidebar-scroll', sidebarScrollbox.scrollTop);
+                }
+            }, { passive: true });
+            var sidebarScrollTop = sessionStorage.getItem('sidebar-scroll');
+            sessionStorage.removeItem('sidebar-scroll');
+            if (sidebarScrollTop) {
+                // preserve sidebar scroll position when navigating via links within sidebar
+                sidebarScrollbox.scrollTop = sidebarScrollTop;
+            } else {
+                // scroll sidebar to current active section when navigating via "next/previous chapter" buttons
+                var activeSection = document.querySelector('#sidebar .active');
+                if (activeSection) {
+                    activeSection.scrollIntoView({ block: 'center' });
+                }
+            }
+        </script>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">VirtRigaud Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/projectbeskar/virtrigaud" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/projectbeskar/virtrigaud/edit/main/docs/src/providers/libvirt.md" title="Suggest an edit" aria-label="Suggest an edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="libvirtkvm-provider"><a class="header" href="#libvirtkvm-provider">LibVirt/KVM Provider</a></h1>
+<p>The LibVirt provider enables VirtRigaud to manage virtual machines on KVM/QEMU hypervisors using the LibVirt API. This provider runs as a dedicated pod that communicates with LibVirt daemons locally or remotely, making it ideal for development, on-premises deployments, and cloud environments.</p>
+<h2 id="overview"><a class="header" href="#overview">Overview</a></h2>
+<p>This provider implements the VirtRigaud provider interface to manage VM lifecycle operations on LibVirt/KVM:</p>
+<ul>
+<li><strong>Create</strong>: Create VMs from cloud images with comprehensive cloud-init support</li>
+<li><strong>Delete</strong>: Remove VMs and associated storage volumes (with cleanup)</li>
+<li><strong>Power</strong>: Start, stop, and reboot virtual machines</li>
+<li><strong>Describe</strong>: Query VM state, resource usage, guest agent information, and network details</li>
+<li><strong>Reconfigure</strong>: Modify VM resources (v0.2.3+ - requires VM restart)</li>
+<li><strong>Clone</strong>: Create new VMs based on existing VM configurations</li>
+<li><strong>Snapshot</strong>: Create, delete, and revert VM snapshots (storage-dependent)</li>
+<li><strong>ConsoleURL</strong>: Generate VNC console URLs for remote access (v0.2.3+)</li>
+<li><strong>ImagePrepare</strong>: Download and prepare cloud images from URLs</li>
+<li><strong>Storage Management</strong>: Advanced storage pool and volume operations</li>
+<li><strong>Cloud-Init</strong>: Full NoCloud datasource support with ISO generation</li>
+<li><strong>QEMU Guest Agent</strong>: Integration for enhanced guest OS monitoring</li>
+<li><strong>Network Configuration</strong>: Support for various network types and bridges</li>
+</ul>
+<h2 id="prerequisites"><a class="header" href="#prerequisites">Prerequisites</a></h2>
+<p>The LibVirt provider connects to a LibVirt daemon (libvirtd) which can run locally or remotely. This makes it flexible for both development and production environments.</p>
+<h3 id="connection-options"><a class="header" href="#connection-options">Connection Options:</a></h3>
+<ul>
+<li><strong>Local LibVirt</strong>: Connects to local libvirtd via <code>qemu:///system</code> (ideal for development)</li>
+<li><strong>Remote LibVirt</strong>: Connects to remote libvirtd over SSH/TLS (production)</li>
+<li><strong>Container LibVirt</strong>: Works with containerized libvirt or KubeVirt</li>
+</ul>
+<h3 id="requirements"><a class="header" href="#requirements">Requirements:</a></h3>
+<ul>
+<li><strong>LibVirt daemon</strong> (libvirtd) running locally or accessible remotely</li>
+<li><strong>KVM/QEMU</strong> hypervisor support (hardware virtualization recommended)</li>
+<li><strong>Storage pools</strong> configured for VM disk storage</li>
+<li><strong>Network bridges</strong> or interfaces for VM networking</li>
+<li><strong>Appropriate permissions</strong> for VM management operations</li>
+</ul>
+<h3 id="development-setup"><a class="header" href="#development-setup">Development Setup:</a></h3>
+<p>For local development, you can:</p>
+<ul>
+<li><strong>Linux</strong>: Install <code>libvirt-daemon-system</code> and <code>qemu-kvm</code> packages</li>
+<li><strong>macOS/Windows</strong>: Use remote LibVirt or nested virtualization</li>
+<li><strong>Testing</strong>: The provider can connect to local libvirtd without complex infrastructure</li>
+</ul>
+<h2 id="authentication--connection"><a class="header" href="#authentication--connection">Authentication &amp; Connection</a></h2>
+<p>The LibVirt provider supports multiple connection methods:</p>
+<h3 id="local-libvirt-connection"><a class="header" href="#local-libvirt-connection">Local LibVirt Connection</a></h3>
+<p>For connecting to a LibVirt daemon on the same host as the provider pod:</p>
+<pre><code class="language-yaml">apiVersion: infra.virtrigaud.io/v1beta1
+kind: Provider
+metadata:
+  name: libvirt-local
+  namespace: default
+spec:
+  type: libvirt
+  endpoint: "qemu:///system"  # Local system connection
+  credentialSecretRef:
+    name: libvirt-local-credentials
+  runtime:
+    mode: Remote
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.2.3"
+    service:
+      port: 9090
+</code></pre>
+<p><strong>Note</strong>: When using local connections, ensure the provider pod has appropriate permissions to access the LibVirt socket.</p>
+<h3 id="remote-connection-with-ssh"><a class="header" href="#remote-connection-with-ssh">Remote Connection with SSH</a></h3>
+<p>For remote LibVirt over SSH:</p>
+<pre><code class="language-yaml">apiVersion: infra.virtrigaud.io/v1beta1
+kind: Provider
+metadata:
+  name: libvirt-remote
+  namespace: default
+spec:
+  type: libvirt
+  endpoint: "qemu+ssh://user@libvirt-host/system"
+  credentialSecretRef:
+    name: libvirt-ssh-credentials
+  runtime:
+    mode: Remote
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.2.3"
+    service:
+      port: 9090
+</code></pre>
+<p>Create SSH credentials secret:</p>
+<pre><code class="language-yaml">apiVersion: v1
+kind: Secret
+metadata:
+  name: libvirt-ssh-credentials
+  namespace: default
+type: Opaque
+stringData:
+  username: "libvirt-user"
+  # For key-based auth (recommended):
+  tls.key: |
+    -----BEGIN PRIVATE KEY-----
+    # Your SSH private key here
+    -----END PRIVATE KEY-----
+  # For password auth (less secure):
+  password: "your-password"
+</code></pre>
+<h3 id="remote-connection-with-tls"><a class="header" href="#remote-connection-with-tls">Remote Connection with TLS</a></h3>
+<p>For remote LibVirt over TLS:</p>
+<pre><code class="language-yaml">apiVersion: infra.virtrigaud.io/v1beta1
+kind: Provider
+metadata:
+  name: libvirt-tls
+  namespace: default
+spec:
+  type: libvirt
+  endpoint: "qemu+tls://libvirt-host:16514/system"
+  credentialSecretRef:
+    name: libvirt-tls-credentials
+  runtime:
+    mode: Remote
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.2.3"
+    service:
+      port: 9090
+</code></pre>
+<p>Create TLS credentials secret:</p>
+<pre><code class="language-yaml">apiVersion: v1
+kind: Secret
+metadata:
+  name: libvirt-tls-credentials
+  namespace: default
+type: kubernetes.io/tls
+data:
+  tls.crt: # Base64 encoded client certificate
+  tls.key: # Base64 encoded client private key
+  ca.crt:  # Base64 encoded CA certificate
+</code></pre>
+<h2 id="configuration"><a class="header" href="#configuration">Configuration</a></h2>
+<h3 id="connection-uris"><a class="header" href="#connection-uris">Connection URIs</a></h3>
+<p>The LibVirt provider supports standard LibVirt connection URIs:</p>
+<div class="table-wrapper"><table><thead><tr><th>URI Format</th><th>Description</th><th>Use Case</th></tr></thead><tbody>
+<tr><td><code>qemu:///system</code></td><td>Local system connection</td><td>Development, single-host</td></tr>
+<tr><td><code>qemu+ssh://user@host/system</code></td><td>SSH connection</td><td>Remote access with SSH</td></tr>
+<tr><td><code>qemu+tls://host:16514/system</code></td><td>TLS connection</td><td>Secure remote access</td></tr>
+<tr><td><code>qemu+tcp://host:16509/system</code></td><td>TCP connection</td><td>Insecure remote (testing only)</td></tr>
+</tbody></table>
+</div>
+<p><strong>⚠️ Note</strong>: All LibVirt URI schemes are now supported in the CRD validation pattern.</p>
+<h3 id="deployment-configuration"><a class="header" href="#deployment-configuration">Deployment Configuration</a></h3>
+<h4 id="using-helm-values"><a class="header" href="#using-helm-values">Using Helm Values</a></h4>
+<pre><code class="language-yaml"># values.yaml
+providers:
+  libvirt:
+    enabled: true
+    endpoint: "qemu:///system"  # Adjust for your environment
+    # For remote connections:
+    # endpoint: "qemu+ssh://user@libvirt-host/system"
+    credentialSecretRef:
+      name: libvirt-credentials  # Optional for local connections
+</code></pre>
+<h4 id="development-configuration"><a class="header" href="#development-configuration">Development Configuration</a></h4>
+<pre><code class="language-yaml"># For local development with LibVirt
+providers:
+  libvirt:
+    enabled: true
+    endpoint: "qemu:///system"
+    runtime:
+      # Mount host libvirt socket (for local access)
+      volumes:
+      - name: libvirt-sock
+        hostPath:
+          path: /var/run/libvirt/libvirt-sock
+      volumeMounts:
+      - name: libvirt-sock
+        mountPath: /var/run/libvirt/libvirt-sock
+</code></pre>
+<h4 id="production-configuration"><a class="header" href="#production-configuration">Production Configuration</a></h4>
+<pre><code class="language-yaml"># For production with remote LibVirt
+apiVersion: v1
+kind: Secret
+metadata:
+  name: libvirt-credentials
+  namespace: virtrigaud-system
+type: Opaque
+stringData:
+  username: "virtrigaud-service"
+  tls.crt: |
+    -----BEGIN CERTIFICATE-----
+    # Client certificate for TLS authentication
+    -----END CERTIFICATE-----
+  tls.key: |
+    -----BEGIN PRIVATE KEY-----
+    # Client private key
+    -----END PRIVATE KEY-----
+  ca.crt: |
+    -----BEGIN CERTIFICATE-----
+    # CA certificate
+    -----END CERTIFICATE-----
+
+---
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: Provider
+metadata:
+  name: libvirt-production
+  namespace: virtrigaud-system
+spec:
+  type: libvirt
+  endpoint: "qemu+tls://libvirt.example.com:16514/system"
+  credentialSecretRef:
+    name: libvirt-credentials
+</code></pre>
+<h2 id="storage-configuration"><a class="header" href="#storage-configuration">Storage Configuration</a></h2>
+<h3 id="storage-pools"><a class="header" href="#storage-pools">Storage Pools</a></h3>
+<p>LibVirt requires storage pools for VM disks. Common configurations:</p>
+<pre><code class="language-bash"># Create directory-based storage pool
+virsh pool-define-as default dir --target /var/lib/libvirt/images
+virsh pool-build default
+virsh pool-start default
+virsh pool-autostart default
+
+# Create LVM-based storage pool (performance)
+virsh pool-define-as lvm-pool logical --source-name vg-libvirt --target /dev/vg-libvirt
+virsh pool-start lvm-pool
+virsh pool-autostart lvm-pool
+</code></pre>
+<h3 id="vmclass-storage-specification"><a class="header" href="#vmclass-storage-specification">VMClass Storage Specification</a></h3>
+<pre><code class="language-yaml">apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMClass
+metadata:
+  name: standard
+spec:
+  cpus: 2
+  memory: "4Gi"
+  # LibVirt-specific storage settings
+  spec:
+    storage:
+      pool: "default"        # Storage pool name
+      format: "qcow2"        # Disk format (qcow2, raw)
+      cache: "writethrough"  # Cache mode
+      io: "threads"          # I/O mode
+</code></pre>
+<h2 id="network-configuration"><a class="header" href="#network-configuration">Network Configuration</a></h2>
+<h3 id="network-setup"><a class="header" href="#network-setup">Network Setup</a></h3>
+<p>Configure LibVirt networks for VM connectivity:</p>
+<pre><code class="language-bash"># Create NAT network (default)
+virsh net-define /usr/share/libvirt/networks/default.xml
+virsh net-start default
+virsh net-autostart default
+
+# Create bridge network (for external access)
+cat &gt; /tmp/bridge-network.xml &lt;&lt; EOF
+&lt;network&gt;
+  &lt;name&gt;br0&lt;/name&gt;
+  &lt;forward mode='bridge'/&gt;
+  &lt;bridge name='br0'/&gt;
+&lt;/network&gt;
+EOF
+virsh net-define /tmp/bridge-network.xml
+virsh net-start br0
+</code></pre>
+<h3 id="network-bridge-mapping"><a class="header" href="#network-bridge-mapping">Network Bridge Mapping</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Network Name</th><th>LibVirt Network</th><th>Use Case</th></tr></thead><tbody>
+<tr><td><code>default</code>, <code>nat</code></td><td>default</td><td>NAT networking</td></tr>
+<tr><td><code>bridge</code>, <code>br0</code></td><td>br0</td><td>Bridged networking</td></tr>
+<tr><td><code>isolated</code></td><td>isolated</td><td>Host-only networking</td></tr>
+</tbody></table>
+</div>
+<h3 id="vm-network-configuration"><a class="header" href="#vm-network-configuration">VM Network Configuration</a></h3>
+<pre><code class="language-yaml">apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: web-server
+spec:
+  providerRef:
+    name: libvirt-local
+  networks:
+    # Use default NAT network
+    - name: default
+    # Use bridged network for external access
+    - name: bridge
+      bridge: br0
+      mac: "52:54:00:12:34:56"  # Optional MAC address
+</code></pre>
+<h2 id="vm-configuration"><a class="header" href="#vm-configuration">VM Configuration</a></h2>
+<h3 id="vmclass-specification"><a class="header" href="#vmclass-specification">VMClass Specification</a></h3>
+<p>Define hardware resources and LibVirt-specific settings:</p>
+<pre><code class="language-yaml">apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMClass
+metadata:
+  name: development
+spec:
+  cpus: 2
+  memory: "4Gi"
+  # LibVirt-specific configuration
+  spec:
+    machine: "pc-i440fx-2.12"  # Machine type
+    cpu:
+      mode: "host-model"       # CPU mode (host-model, host-passthrough)
+      topology:
+        sockets: 1
+        cores: 2
+        threads: 1
+    features:
+      acpi: true
+      apic: true
+      pae: true
+    clock:
+      offset: "utc"
+      timers:
+        rtc: "catchup"
+        pit: "delay"
+        hpet: false
+</code></pre>
+<h3 id="vmimage-specification"><a class="header" href="#vmimage-specification">VMImage Specification</a></h3>
+<p>Reference existing disk images or templates:</p>
+<pre><code class="language-yaml">apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMImage
+metadata:
+  name: ubuntu-22-04
+spec:
+  source:
+    # Path to existing image in storage pool
+    disk: "/var/lib/libvirt/images/ubuntu-22.04-base.qcow2"
+    # Or reference by pool and volume
+    # pool: "default"
+    # volume: "ubuntu-22.04-base"
+  format: "qcow2"
+  
+  # Cloud-init preparation
+  cloudInit:
+    enabled: true
+    userDataTemplate: |
+      #cloud-config
+      hostname: {{"{{ .Name }}"}}
+      users:
+        - name: ubuntu
+          sudo: ALL=(ALL) NOPASSWD:ALL
+          ssh_authorized_keys:
+            - {{"{{ .SSHPublicKey }}"}}
+</code></pre>
+<h3 id="complete-vm-example"><a class="header" href="#complete-vm-example">Complete VM Example</a></h3>
+<pre><code class="language-yaml">apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: dev-workstation
+spec:
+  providerRef:
+    name: libvirt-local
+  classRef:
+    name: development
+  imageRef:
+    name: ubuntu-22-04
+  powerState: On
+  
+  # Disk configuration
+  disks:
+    - name: root
+      size: "50Gi"
+      storageClass: "fast-ssd"  # Maps to LibVirt storage pool
+  
+  # Network configuration  
+  networks:
+    - name: default  # NAT network for internet
+    - name: bridge   # Bridge for LAN access
+      staticIP:
+        address: "192.168.1.100/24"
+        gateway: "192.168.1.1"
+        dns: ["8.8.8.8", "1.1.1.1"]
+  
+  # Cloud-init user data
+  userData:
+    cloudInit:
+      inline: |
+        #cloud-config
+        hostname: dev-workstation
+        users:
+          - name: developer
+            sudo: ALL=(ALL) NOPASSWD:ALL
+            shell: /bin/bash
+            ssh_authorized_keys:
+              - "ssh-ed25519 AAAA..."
+        packages:
+          - build-essential
+          - docker.io
+          - code
+        runcmd:
+          - systemctl enable docker
+          - usermod -aG docker developer
+</code></pre>
+<h2 id="cloud-init-integration"><a class="header" href="#cloud-init-integration">Cloud-Init Integration</a></h2>
+<h3 id="automatic-configuration"><a class="header" href="#automatic-configuration">Automatic Configuration</a></h3>
+<p>The LibVirt provider automatically handles cloud-init setup:</p>
+<ul>
+<li><strong>ISO Generation</strong>: Creates cloud-init ISO with user-data and meta-data</li>
+<li><strong>Attachment</strong>: Attaches ISO as CD-ROM device to VM</li>
+<li><strong>Network Config</strong>: Generates network configuration from VM spec</li>
+<li><strong>User Data</strong>: Renders templates with VM-specific values</li>
+</ul>
+<h3 id="advanced-cloud-init"><a class="header" href="#advanced-cloud-init">Advanced Cloud-Init</a></h3>
+<pre><code class="language-yaml">userData:
+  cloudInit:
+    inline: |
+      #cloud-config
+      hostname: {{"{{ .Name }}"}}
+      
+      # Network configuration (if not using DHCP)
+      network:
+        version: 2
+        ethernets:
+          ens3:
+            addresses: [192.168.1.100/24]
+            gateway4: 192.168.1.1
+            nameservers:
+              addresses: [8.8.8.8, 1.1.1.1]
+      
+      # Storage configuration
+      disk_setup:
+        /dev/vdb:
+          table_type: gpt
+          layout: true
+      
+      fs_setup:
+        - device: /dev/vdb1
+          filesystem: ext4
+          label: data
+      
+      mounts:
+        - [/dev/vdb1, /data, ext4, defaults]
+      
+      # Package installation
+      packages:
+        - qemu-guest-agent  # Enable guest agent
+        - cloud-init
+        - curl
+      
+      # Enable services
+      runcmd:
+        - systemctl enable qemu-guest-agent
+        - systemctl start qemu-guest-agent
+</code></pre>
+<h2 id="performance-optimization"><a class="header" href="#performance-optimization">Performance Optimization</a></h2>
+<h3 id="kvm-optimization"><a class="header" href="#kvm-optimization">KVM Optimization</a></h3>
+<pre><code class="language-yaml"># VMClass with performance optimizations
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMClass
+metadata:
+  name: high-performance
+spec:
+  cpus: 8
+  memory: "16Gi"
+  spec:
+    cpu:
+      mode: "host-passthrough"  # Best performance
+      topology:
+        sockets: 1
+        cores: 8
+        threads: 1
+    # NUMA topology for large VMs
+    numa:
+      cells:
+        - id: 0
+          cpus: "0-7"
+          memory: "16"
+    
+    # Virtio devices for performance
+    devices:
+      disk:
+        bus: "virtio"
+        cache: "none"
+        io: "native"
+      network:
+        model: "virtio"
+      video:
+        model: "virtio"
+</code></pre>
+<h3 id="storage-performance"><a class="header" href="#storage-performance">Storage Performance</a></h3>
+<pre><code class="language-bash"># Create high-performance storage pool
+virsh pool-define-as ssd-pool logical --source-name vg-ssd --target /dev/vg-ssd
+virsh pool-start ssd-pool
+
+# Use raw format for better performance (larger disk usage)
+virsh vol-create-as ssd-pool vm-disk 100G --format raw
+
+# Enable native AIO and disable cache for direct I/O
+# (configured automatically by provider based on VMClass)
+</code></pre>
+<h2 id="troubleshooting"><a class="header" href="#troubleshooting">Troubleshooting</a></h2>
+<h3 id="common-issues"><a class="header" href="#common-issues">Common Issues</a></h3>
+<h4 id="-connection-failed"><a class="header" href="#-connection-failed">❌ Connection Failed</a></h4>
+<p><strong>Symptom</strong>: <code>failed to connect to Libvirt: &lt;error&gt;</code></p>
+<p><strong>Causes &amp; Solutions</strong>:</p>
+<ol>
+<li>
+<p><strong>Local connection issues</strong>:</p>
+<pre><code class="language-bash"># Check libvirtd status
+sudo systemctl status libvirtd
+
+# Start if not running
+sudo systemctl start libvirtd
+sudo systemctl enable libvirtd
+
+# Test connection
+virsh -c qemu:///system list
+</code></pre>
+</li>
+<li>
+<p><strong>Remote SSH connection</strong>:</p>
+<pre><code class="language-bash"># Test SSH connectivity
+ssh user@libvirt-host virsh list
+
+# Check SSH key permissions
+chmod 600 ~/.ssh/id_rsa
+</code></pre>
+</li>
+<li>
+<p><strong>Remote TLS connection</strong>:</p>
+<pre><code class="language-bash"># Verify certificates
+openssl x509 -in client-cert.pem -text -noout
+
+# Test TLS connection
+virsh -c qemu+tls://host:16514/system list
+</code></pre>
+</li>
+</ol>
+<h4 id="-permission-denied"><a class="header" href="#-permission-denied">❌ Permission Denied</a></h4>
+<p><strong>Symptom</strong>: <code>authentication failed</code> or <code>permission denied</code></p>
+<p><strong>Solutions</strong>:</p>
+<pre><code class="language-bash"># Add user to libvirt group
+sudo usermod -a -G libvirt $USER
+
+# Check libvirt group membership
+groups $USER
+
+# Verify permissions on libvirt socket
+ls -la /var/run/libvirt/libvirt-sock
+
+# For containerized providers, ensure socket is mounted
+</code></pre>
+<h4 id="-storage-pool-not-found"><a class="header" href="#-storage-pool-not-found">❌ Storage Pool Not Found</a></h4>
+<p><strong>Symptom</strong>: <code>storage pool 'default' not found</code></p>
+<p><strong>Solution</strong>:</p>
+<pre><code class="language-bash"># List available pools
+virsh pool-list --all
+
+# Create default pool if missing
+virsh pool-define-as default dir --target /var/lib/libvirt/images
+virsh pool-build default
+virsh pool-start default
+virsh pool-autostart default
+
+# Verify pool is active
+virsh pool-info default
+</code></pre>
+<h4 id="-network-not-available"><a class="header" href="#-network-not-available">❌ Network Not Available</a></h4>
+<p><strong>Symptom</strong>: <code>network 'default' not found</code></p>
+<p><strong>Solution</strong>:</p>
+<pre><code class="language-bash"># List networks
+virsh net-list --all
+
+# Start default network
+virsh net-start default
+virsh net-autostart default
+
+# Create bridge network if needed
+virsh net-define /usr/share/libvirt/networks/default.xml
+</code></pre>
+<h4 id="-kvm-not-available"><a class="header" href="#-kvm-not-available">❌ KVM Not Available</a></h4>
+<p><strong>Symptom</strong>: <code>KVM is not available</code> or <code>hardware acceleration not available</code></p>
+<p><strong>Solutions</strong>:</p>
+<ol>
+<li>
+<p><strong>Check virtualization support</strong>:</p>
+<pre><code class="language-bash"># Check CPU virtualization features
+egrep -c '(vmx|svm)' /proc/cpuinfo
+
+# Check KVM modules
+lsmod | grep kvm
+
+# Load KVM modules if missing
+sudo modprobe kvm
+sudo modprobe kvm_intel  # or kvm_amd
+</code></pre>
+</li>
+<li>
+<p><strong>BIOS/UEFI settings</strong>: Enable Intel VT-x or AMD-V</p>
+</li>
+<li>
+<p><strong>Nested virtualization</strong>: If running in a VM, enable nested virtualization</p>
+</li>
+</ol>
+<h3 id="validation-commands"><a class="header" href="#validation-commands">Validation Commands</a></h3>
+<p>Test your LibVirt setup before deploying:</p>
+<pre><code class="language-bash"># 1. Test LibVirt connection
+virsh -c qemu:///system list
+
+# 2. Check storage pools
+virsh pool-list --all
+
+# 3. Check networks
+virsh net-list --all
+
+# 4. Test VM creation (simple test)
+virt-install --name test-vm --memory 512 --vcpus 1 \
+  --disk size=1 --network network=default \
+  --boot cdrom --noautoconsole --dry-run
+
+# 5. From within Kubernetes pod
+kubectl run debug --rm -i --tty --image=ubuntu:22.04 -- bash
+# Then test virsh commands if socket is mounted
+</code></pre>
+<h3 id="debug-logging"><a class="header" href="#debug-logging">Debug Logging</a></h3>
+<p>Enable verbose logging for the LibVirt provider:</p>
+<pre><code class="language-yaml">providers:
+  libvirt:
+    env:
+      - name: LOG_LEVEL
+        value: "debug"
+      - name: LIBVIRT_DEBUG
+        value: "1"
+    endpoint: "qemu:///system"
+</code></pre>
+<h2 id="advanced-features"><a class="header" href="#advanced-features">Advanced Features</a></h2>
+<h3 id="vm-reconfiguration-v023"><a class="header" href="#vm-reconfiguration-v023">VM Reconfiguration (v0.2.3+)</a></h3>
+<p>The Libvirt provider supports VM reconfiguration for CPU, memory, and disk resources:</p>
+<pre><code class="language-yaml"># Reconfigure VM resources
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: web-server
+spec:
+  vmClassRef: medium  # Change from small to medium
+  powerState: "On"
+</code></pre>
+<p><strong>Capabilities</strong>:</p>
+<ul>
+<li><strong>Online CPU Changes</strong>: Modify CPU count using <code>virsh setvcpus --live</code> for running VMs</li>
+<li><strong>Online Memory Changes</strong>: Modify memory using <code>virsh setmem --live</code> for running VMs</li>
+<li><strong>Disk Resizing</strong>: Expand disk volumes via storage provider integration</li>
+<li><strong>Offline Configuration</strong>: Updates persistent config for stopped VMs via <code>--config</code> flag</li>
+</ul>
+<p><strong>Important Notes</strong>:</p>
+<ul>
+<li>Most changes require VM restart for full effect</li>
+<li>Online changes apply to running VM but may need restart for persistence</li>
+<li>Disk shrinking not supported for safety</li>
+<li>Memory format parsing supports bytes, KiB, MiB, GiB</li>
+</ul>
+<p><strong>Implementation Details</strong>:</p>
+<ul>
+<li>Uses <code>virsh setvcpus --live --config</code> for CPU changes</li>
+<li>Uses <code>virsh setmem --live --config</code> for memory changes</li>
+<li>Parses current VM configuration with <code>virsh dominfo</code></li>
+<li>Integrates with storage provider for volume resizing</li>
+</ul>
+<h3 id="vnc-console-access-v023"><a class="header" href="#vnc-console-access-v023">VNC Console Access (v0.2.3+)</a></h3>
+<p>Generate VNC console URLs for direct VM access:</p>
+<pre><code class="language-yaml"># Access provided in VM status
+kubectl get vm web-server -o yaml
+
+status:
+  consoleURL: "vnc://libvirt-host.example.com:5900"
+  phase: Running
+</code></pre>
+<p><strong>Features</strong>:</p>
+<ul>
+<li>Automatic VNC port extraction from domain XML</li>
+<li>Direct connection URLs for VNC clients</li>
+<li>Support for standard VNC viewers (TigerVNC, RealVNC, etc.)</li>
+<li>Web-based VNC viewers compatible (noVNC)</li>
+</ul>
+<p><strong>VNC Client Usage</strong>:</p>
+<pre><code class="language-bash"># Using vncviewer
+vncviewer libvirt-host.example.com:5900
+
+# Using TigerVNC
+tigervnc libvirt-host.example.com:5900
+
+# Web browser (with noVNC)
+# Access through web-based VNC proxy
+</code></pre>
+<p><strong>Configuration</strong>:
+VNC is automatically configured during VM creation. The provider:</p>
+<ol>
+<li>Extracts VNC configuration from domain XML using <code>virsh dumpxml</code></li>
+<li>Parses the graphics port number</li>
+<li>Constructs the VNC URL with host and port</li>
+<li>Returns URL in Describe operations</li>
+</ol>
+<h2 id="advanced-configuration"><a class="header" href="#advanced-configuration">Advanced Configuration</a></h2>
+<h3 id="high-availability-setup"><a class="header" href="#high-availability-setup">High Availability Setup</a></h3>
+<pre><code class="language-yaml"># Multiple LibVirt hosts for HA
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: Provider
+metadata:
+  name: libvirt-cluster
+spec:
+  type: libvirt
+  # Use load balancer or failover endpoint
+  endpoint: "qemu+tls://libvirt-cluster.example.com:16514/system"
+  runtime:
+    replicas: 2  # Multiple provider instances
+    affinity:
+      podAntiAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchLabels:
+                app: libvirt-provider
+            topologyKey: kubernetes.io/hostname
+</code></pre>
+<h3 id="gpu-passthrough"><a class="header" href="#gpu-passthrough">GPU Passthrough</a></h3>
+<pre><code class="language-yaml"># VMClass with GPU passthrough
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMClass
+metadata:
+  name: gpu-workstation
+spec:
+  cpus: 8
+  memory: "32Gi"
+  spec:
+    devices:
+      hostdev:
+        - type: "pci"
+          source:
+            address:
+              domain: "0x0000"
+              bus: "0x01"
+              slot: "0x00"
+              function: "0x0"
+          managed: true
+</code></pre>
+<h2 id="api-reference"><a class="header" href="#api-reference">API Reference</a></h2>
+<p>For complete API reference, see the <a href="../api-reference/">Provider API Documentation</a>.</p>
+<h2 id="contributing"><a class="header" href="#contributing">Contributing</a></h2>
+<p>To contribute to the LibVirt provider:</p>
+<ol>
+<li>See the <a href="../tutorial.html">Provider Development Guide</a></li>
+<li>Check the <a href="https://github.com/projectbeskar/virtrigaud">GitHub repository</a></li>
+<li>Review <a href="https://github.com/projectbeskar/virtrigaud/labels/provider%2Flibvirt">open issues</a></li>
+</ol>
+<h2 id="support"><a class="header" href="#support">Support</a></h2>
+<ul>
+<li><strong>Documentation</strong>: <a href="https://projectbeskar.github.io/virtrigaud/">VirtRigaud Docs</a></li>
+<li><strong>Issues</strong>: <a href="https://github.com/projectbeskar/virtrigaud/issues">GitHub Issues</a></li>
+<li><strong>Community</strong>: <a href="https://discord.gg/projectbeskar">Discord</a></li>
+<li><strong>LibVirt</strong>: <a href="https://libvirt.org/docs.html">libvirt.org</a></li>
+</ul>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../providers/vsphere.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../providers/proxmox.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../providers/vsphere.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../providers/proxmox.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="../theme/page-toc.js"></script>
+
+
+    </div>
+    </body>
+</html>

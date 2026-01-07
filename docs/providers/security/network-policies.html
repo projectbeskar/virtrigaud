@@ -1,0 +1,894 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Network Policies - VirtRigaud Documentation</title>
+
+
+        <!-- Custom HTML head -->
+        
+        <meta name="description" content="Kubernetes operator for managing virtual machines across multiple hypervisors">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../../favicon.svg">
+        <link rel="shortcut icon" href="../../favicon.png">
+        <link rel="stylesheet" href="../../css/variables.css">
+        <link rel="stylesheet" href="../../css/general.css">
+        <link rel="stylesheet" href="../../css/chrome.css">
+        <link rel="stylesheet" href="../../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="../../highlight.css">
+        <link rel="stylesheet" href="../../tomorrow-night.css">
+        <link rel="stylesheet" href="../../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../../theme/custom.css">
+
+    </head>
+    <body class="sidebar-visible no-js">
+    <div id="body-container">
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "../../";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
+        </script>
+
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            var html = document.querySelector('html');
+            html.classList.remove('light')
+            html.classList.add(theme);
+            var body = document.querySelector('body');
+            body.classList.remove('no-js')
+            body.classList.add('js');
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var body = document.querySelector('body');
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            body.classList.remove('sidebar-visible');
+            body.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <div class="sidebar-scrollbox">
+                <ol class="chapter"><li class="chapter-item affix "><a href="../../index.html">Introduction</a></li><li class="chapter-item affix "><li class="part-title">Getting Started</li><li class="chapter-item "><a href="../../getting-started/quickstart.html"><strong aria-hidden="true">1.</strong> 15-Minute Quickstart</a></li><li class="chapter-item "><a href="../../install-helm-only.html"><strong aria-hidden="true">2.</strong> Installation Guide</a></li><li class="chapter-item "><a href="../../HELM_CRD_UPGRADES.html"><strong aria-hidden="true">3.</strong> Helm CRD Upgrades</a></li><li class="chapter-item affix "><li class="part-title">Core Documentation</li><li class="chapter-item "><a href="../../CRDs.html"><strong aria-hidden="true">4.</strong> Custom Resource Definitions</a></li><li class="chapter-item "><a href="../../EXAMPLES.html"><strong aria-hidden="true">5.</strong> Examples</a></li><li class="chapter-item "><a href="../../PROVIDERS.html"><strong aria-hidden="true">6.</strong> Provider Documentation</a></li><li class="chapter-item "><a href="../../PROVIDERS_CAPABILITIES.html"><strong aria-hidden="true">7.</strong> Provider Capabilities Matrix</a></li><li class="chapter-item affix "><li class="part-title">Provider-Specific Guides</li><li class="chapter-item "><a href="../../providers/vsphere.html"><strong aria-hidden="true">8.</strong> vSphere Provider</a></li><li class="chapter-item "><a href="../../providers/libvirt.html"><strong aria-hidden="true">9.</strong> Libvirt Provider</a></li><li class="chapter-item "><a href="../../providers/proxmox.html"><strong aria-hidden="true">10.</strong> Proxmox VE Provider</a></li><li class="chapter-item "><a href="../../providers/tutorial.html"><strong aria-hidden="true">11.</strong> Provider Tutorial</a></li><li class="chapter-item "><a href="../../providers/versioning.html"><strong aria-hidden="true">12.</strong> Provider Versioning</a></li><li class="chapter-item affix "><li class="part-title">Advanced Features</li><li class="chapter-item "><a href="../../ADVANCED_LIFECYCLE.html"><strong aria-hidden="true">13.</strong> VM Lifecycle Management</a></li><li class="chapter-item "><a href="../../NESTED_VIRTUALIZATION.html"><strong aria-hidden="true">14.</strong> Nested Virtualization</a></li><li class="chapter-item "><a href="../../GRACEFUL_SHUTDOWN.html"><strong aria-hidden="true">15.</strong> Graceful Shutdown</a></li><li class="chapter-item "><a href="../../REMOTE_PROVIDERS.html"><strong aria-hidden="true">16.</strong> Remote Providers</a></li><li class="chapter-item affix "><li class="part-title">Operations & Administration</li><li class="chapter-item "><a href="../../OBSERVABILITY.html"><strong aria-hidden="true">17.</strong> Observability</a></li><li class="chapter-item "><a href="../../SECURITY.html"><strong aria-hidden="true">18.</strong> Security</a></li><li class="chapter-item "><a href="../../RESILIENCE.html"><strong aria-hidden="true">19.</strong> Resilience</a></li><li class="chapter-item "><a href="../../UPGRADE.html"><strong aria-hidden="true">20.</strong> Upgrade Guide</a></li><li class="chapter-item "><a href="../../VSPHERE_HARDWARE_VERSION.html"><strong aria-hidden="true">21.</strong> vSphere Hardware Versions</a></li><li class="chapter-item affix "><li class="part-title">Security Configuration</li><li class="chapter-item "><a href="../../providers/security/bearer-token.html"><strong aria-hidden="true">22.</strong> Bearer Token Authentication</a></li><li class="chapter-item "><a href="../../providers/security/mtls.html"><strong aria-hidden="true">23.</strong> mTLS Configuration</a></li><li class="chapter-item "><a href="../../providers/security/external-secrets.html"><strong aria-hidden="true">24.</strong> External Secrets</a></li><li class="chapter-item expanded "><a href="../../providers/security/network-policies.html" class="active"><strong aria-hidden="true">25.</strong> Network Policies</a></li><li class="chapter-item affix "><li class="part-title">API Reference</li><li class="chapter-item "><a href="../../CLI.html"><strong aria-hidden="true">26.</strong> CLI Tools Reference</a></li><li class="chapter-item "><a href="../../api-reference/cli.html"><strong aria-hidden="true">27.</strong> CLI API Reference</a></li><li class="chapter-item "><a href="../../api-reference/metrics.html"><strong aria-hidden="true">28.</strong> Metrics Catalog</a></li><li class="chapter-item "><a href="../../catalog.html"><strong aria-hidden="true">29.</strong> Provider Catalog</a></li><li class="chapter-item affix "><li class="part-title">Development</li><li class="chapter-item "><a href="../../TESTING_WORKFLOWS_LOCALLY.html"><strong aria-hidden="true">30.</strong> Testing Workflows Locally</a></li><li class="chapter-item "><a href="../../../../CONTRIBUTING.html"><strong aria-hidden="true">31.</strong> Contributing</a></li><li class="chapter-item "><a href="../../../../DEVELOPMENT.html"><strong aria-hidden="true">32.</strong> Development Guide</a></li><li class="chapter-item affix "><li class="part-title">Examples</li><li class="chapter-item "><a href="../../examples/index.html"><strong aria-hidden="true">33.</strong> Example README</a></li></ol>
+            </div>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <!-- Track and set sidebar scroll position -->
+        <script>
+            var sidebarScrollbox = document.querySelector('#sidebar .sidebar-scrollbox');
+            sidebarScrollbox.addEventListener('click', function(e) {
+                if (e.target.tagName === 'A') {
+                    sessionStorage.setItem('sidebar-scroll', sidebarScrollbox.scrollTop);
+                }
+            }, { passive: true });
+            var sidebarScrollTop = sessionStorage.getItem('sidebar-scroll');
+            sessionStorage.removeItem('sidebar-scroll');
+            if (sidebarScrollTop) {
+                // preserve sidebar scroll position when navigating via links within sidebar
+                sidebarScrollbox.scrollTop = sidebarScrollTop;
+            } else {
+                // scroll sidebar to current active section when navigating via "next/previous chapter" buttons
+                var activeSection = document.querySelector('#sidebar .active');
+                if (activeSection) {
+                    activeSection.scrollIntoView({ block: 'center' });
+                }
+            }
+        </script>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">VirtRigaud Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/projectbeskar/virtrigaud" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/projectbeskar/virtrigaud/edit/main/docs/src/providers/security/network-policies.md" title="Suggest an edit" aria-label="Suggest an edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="network-policies-for-provider-security"><a class="header" href="#network-policies-for-provider-security">Network Policies for Provider Security</a></h1>
+<p>This guide covers Kubernetes NetworkPolicy configurations to secure communication between VirtRigaud components and provider services.</p>
+<h2 id="overview"><a class="header" href="#overview">Overview</a></h2>
+<p>NetworkPolicies provide network-level security by controlling traffic flow between pods, namespaces, and external endpoints. For VirtRigaud providers, this includes:</p>
+<ul>
+<li><strong>Ingress Control</strong>: Restricting which services can communicate with providers</li>
+<li><strong>Egress Control</strong>: Limiting provider access to external hypervisor endpoints</li>
+<li><strong>Namespace Isolation</strong>: Preventing cross-tenant communication</li>
+<li><strong>External Access</strong>: Controlling access to hypervisor management interfaces</li>
+</ul>
+<h2 id="basic-networkpolicy-template"><a class="header" href="#basic-networkpolicy-template">Basic NetworkPolicy Template</a></h2>
+<h3 id="provider-ingress-policy"><a class="header" href="#provider-ingress-policy">Provider Ingress Policy</a></h3>
+<pre><code class="language-yaml">apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: provider-ingress
+  namespace: provider-namespace
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: virtrigaud-provider
+  policyTypes:
+    - Ingress
+  ingress:
+    # Allow from VirtRigaud manager
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: virtrigaud-system
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: virtrigaud-manager
+      ports:
+        - protocol: TCP
+          port: 9443  # gRPC provider port
+    
+    # Allow health checks from monitoring
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: monitoring
+        - podSelector:
+            matchLabels:
+              app: prometheus
+      ports:
+        - protocol: TCP
+          port: 8080  # Health/metrics port
+    
+    # Allow from same namespace (for debugging)
+    - from:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 8080
+</code></pre>
+<h3 id="provider-egress-policy"><a class="header" href="#provider-egress-policy">Provider Egress Policy</a></h3>
+<pre><code class="language-yaml">apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: provider-egress
+  namespace: provider-namespace
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: virtrigaud-provider
+  policyTypes:
+    - Egress
+  egress:
+    # Allow DNS resolution
+    - to: []
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    
+    # Allow HTTPS to Kubernetes API
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: kube-system
+      ports:
+        - protocol: TCP
+          port: 443
+    
+    # Allow access to hypervisor management interfaces
+    - to: []
+      ports:
+        - protocol: TCP
+          port: 443  # vCenter HTTPS
+        - protocol: TCP
+          port: 80   # vCenter HTTP (if needed)
+    
+    # For libvirt providers - allow access to hypervisor nodes
+    - to:
+        - podSelector:
+            matchLabels:
+              node-role.kubernetes.io/worker: "true"
+      ports:
+        - protocol: TCP
+          port: 16509  # libvirt daemon
+</code></pre>
+<h2 id="environment-specific-policies"><a class="header" href="#environment-specific-policies">Environment-Specific Policies</a></h2>
+<h3 id="vsphere-provider"><a class="header" href="#vsphere-provider">vSphere Provider</a></h3>
+<pre><code class="language-yaml">apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: vsphere-provider-policy
+  namespace: vsphere-providers
+  labels:
+    provider: vsphere
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: virtrigaud-provider-runtime
+      provider: vsphere
+  policyTypes:
+    - Ingress
+    - Egress
+  
+  ingress:
+    # Manager access
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: virtrigaud-system
+      ports:
+        - protocol: TCP
+          port: 9443
+    
+    # Monitoring access
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: monitoring
+      ports:
+        - protocol: TCP
+          port: 8080
+
+  egress:
+    # DNS
+    - to: []
+      ports:
+        - protocol: UDP
+          port: 53
+    
+    # vCenter access (specific IP ranges)
+    - to:
+        - ipBlock:
+            cidr: 10.0.0.0/8
+            except:
+              - 10.244.0.0/16  # Exclude pod network
+      ports:
+        - protocol: TCP
+          port: 443
+    
+    - to:
+        - ipBlock:
+            cidr: 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
+    
+    # ESXi host access for direct operations
+    - to:
+        - ipBlock:
+            cidr: 10.1.0.0/24  # ESXi management network
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 902   # vCenter agent
+</code></pre>
+<h3 id="libvirt-provider"><a class="header" href="#libvirt-provider">Libvirt Provider</a></h3>
+<pre><code class="language-yaml">apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: libvirt-provider-policy
+  namespace: libvirt-providers
+  labels:
+    provider: libvirt
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: virtrigaud-provider-runtime
+      provider: libvirt
+  policyTypes:
+    - Ingress
+    - Egress
+  
+  ingress:
+    # Manager access
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: virtrigaud-system
+      ports:
+        - protocol: TCP
+          port: 9443
+    
+    # Monitoring access
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: monitoring
+      ports:
+        - protocol: TCP
+          port: 8080
+
+  egress:
+    # DNS
+    - to: []
+      ports:
+        - protocol: UDP
+          port: 53
+    
+    # Access to hypervisor nodes
+    - to: []
+      ports:
+        - protocol: TCP
+          port: 16509  # libvirt daemon
+        - protocol: TCP
+          port: 22     # SSH for remote libvirt
+    
+    # Access to shared storage (NFS, iSCSI, etc.)
+    - to:
+        - ipBlock:
+            cidr: 10.2.0.0/24  # Storage network
+      ports:
+        - protocol: TCP
+          port: 2049  # NFS
+        - protocol: TCP
+          port: 3260  # iSCSI
+        - protocol: UDP
+          port: 111   # RPC portmapper
+</code></pre>
+<h3 id="mock-provider-development"><a class="header" href="#mock-provider-development">Mock Provider (Development)</a></h3>
+<pre><code class="language-yaml">apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mock-provider-policy
+  namespace: development
+  labels:
+    provider: mock
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: virtrigaud-provider-runtime
+      provider: mock
+  policyTypes:
+    - Ingress
+    - Egress
+  
+  ingress:
+    # Allow from manager and other development pods
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              environment: development
+      ports:
+        - protocol: TCP
+          port: 9443
+        - protocol: TCP
+          port: 8080
+
+  egress:
+    # Allow all egress for development environment
+    - to: []
+</code></pre>
+<h2 id="multi-tenant-isolation"><a class="header" href="#multi-tenant-isolation">Multi-Tenant Isolation</a></h2>
+<h3 id="tenant-namespace-policies"><a class="header" href="#tenant-namespace-policies">Tenant Namespace Policies</a></h3>
+<pre><code class="language-yaml"># Template for tenant-specific policies
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tenant-isolation
+  namespace: tenant-{{TENANT_NAME}}
+  labels:
+    tenant: "{{TENANT_NAME}}"
+spec:
+  podSelector: {}  # Apply to all pods in namespace
+  policyTypes:
+    - Ingress
+    - Egress
+  
+  ingress:
+    # Allow from same tenant namespace
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              tenant: "{{TENANT_NAME}}"
+    
+    # Allow from VirtRigaud system namespace
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: virtrigaud-system
+    
+    # Allow from monitoring namespace
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: monitoring
+
+  egress:
+    # Allow to same tenant namespace
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              tenant: "{{TENANT_NAME}}"
+    
+    # Allow to VirtRigaud system namespace
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: virtrigaud-system
+    
+    # DNS resolution
+    - to: []
+      ports:
+        - protocol: UDP
+          port: 53
+    
+    # External hypervisor access (tenant-specific IP ranges)
+    - to:
+        - ipBlock:
+            cidr: "{{TENANT_HYPERVISOR_CIDR}}"
+      ports:
+        - protocol: TCP
+          port: 443
+</code></pre>
+<h3 id="cross-tenant-communication-prevention"><a class="header" href="#cross-tenant-communication-prevention">Cross-Tenant Communication Prevention</a></h3>
+<pre><code class="language-yaml">apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-cross-tenant
+  namespace: tenant-production
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  
+  ingress:
+    # Explicitly deny from other tenant namespaces
+    - from: []
+      # Empty from selector with explicit namespace exclusions
+  
+  egress:
+    # Explicitly deny to other tenant namespaces
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: virtrigaud-system
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: monitoring
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              tenant: production
+    # Deny all other namespace access
+</code></pre>
+<h2 id="advanced-policies"><a class="header" href="#advanced-policies">Advanced Policies</a></h2>
+<h3 id="time-based-access-control"><a class="header" href="#time-based-access-control">Time-Based Access Control</a></h3>
+<pre><code class="language-yaml"># Use external controllers like OPA Gatekeeper for time-based policies
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: timerestriction
+spec:
+  crd:
+    spec:
+      names:
+        kind: TimeRestriction
+      validation:
+        type: object
+        properties:
+          allowedHours:
+            type: array
+            items:
+              type: integer
+            description: "Allowed hours (0-23) for network access"
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package timerestriction
+        
+        violation[{"msg": msg}] {
+          current_hour := time.now_ns() / 1000000000 / 3600 % 24
+          not current_hour in input.parameters.allowedHours
+          msg := sprintf("Network access not allowed at hour %v", [current_hour])
+        }
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: TimeRestriction
+metadata:
+  name: business-hours-only
+spec:
+  match:
+    kinds:
+      - apiGroups: ["networking.k8s.io"]
+        kinds: ["NetworkPolicy"]
+    namespaces: ["production"]
+  parameters:
+    allowedHours: [8, 9, 10, 11, 12, 13, 14, 15, 16, 17]  # 8 AM - 5 PM
+</code></pre>
+<h3 id="dynamic-ip-allow-listing"><a class="header" href="#dynamic-ip-allow-listing">Dynamic IP Allow-listing</a></h3>
+<pre><code class="language-yaml">apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: dynamic-hypervisor-access
+  namespace: provider-namespace
+  annotations:
+    # Use external controllers to update IP blocks dynamically
+    network-policy-controller/update-interval: "300s"
+    network-policy-controller/ip-source: "configmap:hypervisor-ips"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: virtrigaud-provider
+  policyTypes:
+    - Egress
+  egress:
+    # Will be dynamically updated by controller
+    - to:
+        - ipBlock:
+            cidr: 10.0.0.0/8
+    # Static rules remain
+    - to: []
+      ports:
+        - protocol: UDP
+          port: 53
+</code></pre>
+<h2 id="monitoring-and-troubleshooting"><a class="header" href="#monitoring-and-troubleshooting">Monitoring and Troubleshooting</a></h2>
+<h3 id="networkpolicy-monitoring"><a class="header" href="#networkpolicy-monitoring">NetworkPolicy Monitoring</a></h3>
+<pre><code class="language-yaml"># ServiceMonitor for network policy violations
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: networkpolicy-monitoring
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: networkpolicy-exporter
+  endpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics
+
+---
+# Example alerts for network policy violations
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: networkpolicy-alerts
+  namespace: monitoring
+spec:
+  groups:
+    - name: networkpolicy.rules
+      rules:
+        - alert: NetworkPolicyDeniedConnections
+          expr: increase(networkpolicy_denied_connections_total[5m]) &gt; 10
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High number of denied network connections"
+            description: "{{ $labels.source_namespace }}/{{ $labels.source_pod }} had {{ $value }} denied connections to {{ $labels.dest_namespace }}/{{ $labels.dest_pod }}"
+</code></pre>
+<h3 id="debug-networkpolicies"><a class="header" href="#debug-networkpolicies">Debug NetworkPolicies</a></h3>
+<pre><code class="language-bash">#!/bin/bash
+# debug-networkpolicy.sh
+
+NAMESPACE=${1:-default}
+POD_NAME=${2}
+
+echo "=== NetworkPolicy Debug for $NAMESPACE/$POD_NAME ==="
+
+# List all NetworkPolicies in namespace
+echo "NetworkPolicies in namespace $NAMESPACE:"
+kubectl get networkpolicy -n $NAMESPACE
+
+# Show specific NetworkPolicy details
+echo -e "\nNetworkPolicy details:"
+kubectl get networkpolicy -n $NAMESPACE -o yaml
+
+# Test connectivity
+if [ ! -z "$POD_NAME" ]; then
+    echo -e "\nTesting connectivity from $POD_NAME:"
+    
+    # Test DNS resolution
+    kubectl exec -n $NAMESPACE $POD_NAME -- nslookup kubernetes.default.svc.cluster.local
+    
+    # Test internal connectivity
+    kubectl exec -n $NAMESPACE $POD_NAME -- wget -qO- --timeout=5 http://kubernetes.default.svc.cluster.local/api
+    
+    # Test external connectivity (adjust as needed)
+    kubectl exec -n $NAMESPACE $POD_NAME -- wget -qO- --timeout=5 https://google.com
+fi
+
+# Check iptables rules (if accessible)
+echo -e "\nIPTables rules (if accessible):"
+kubectl get nodes -o wide
+echo "Run the following on a node to see iptables:"
+echo "sudo iptables -L -n | grep -E '(KUBE|Chain)'"
+</code></pre>
+<h3 id="cni-specific-troubleshooting"><a class="header" href="#cni-specific-troubleshooting">CNI-Specific Troubleshooting</a></h3>
+<h4 id="calico"><a class="header" href="#calico">Calico</a></h4>
+<pre><code class="language-bash"># Check Calico network policies
+kubectl get networkpolicy --all-namespaces
+kubectl get globalnetworkpolicy
+
+# Check Calico endpoints
+kubectl get endpoints --all-namespaces
+
+# Debug Calico connectivity
+kubectl exec -it -n kube-system &lt;calico-node-pod&gt; -- /bin/sh
+calicoctl get wep --all-namespaces
+calicoctl get netpol --all-namespaces
+</code></pre>
+<h4 id="cilium"><a class="header" href="#cilium">Cilium</a></h4>
+<pre><code class="language-bash"># Check Cilium network policies
+kubectl get cnp --all-namespaces  # Cilium Network Policies
+kubectl get ccnp --all-namespaces # Cilium Cluster Network Policies
+
+# Debug Cilium connectivity
+kubectl exec -it -n kube-system &lt;cilium-pod&gt; -- cilium endpoint list
+kubectl exec -it -n kube-system &lt;cilium-pod&gt; -- cilium policy get
+</code></pre>
+<h2 id="security-best-practices"><a class="header" href="#security-best-practices">Security Best Practices</a></h2>
+<h3 id="1-principle-of-least-privilege"><a class="header" href="#1-principle-of-least-privilege">1. Principle of Least Privilege</a></h3>
+<pre><code class="language-yaml"># Example: Minimal egress for a provider
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: minimal-egress-example
+spec:
+  podSelector:
+    matchLabels:
+      app: provider
+  policyTypes:
+    - Egress
+  egress:
+    # Only allow what's absolutely necessary
+    - to: []
+      ports:
+        - protocol: UDP
+          port: 53  # DNS only
+    - to:
+        - ipBlock:
+            cidr: 10.1.1.100/32  # Specific vCenter IP only
+      ports:
+        - protocol: TCP
+          port: 443  # HTTPS only
+</code></pre>
+<h3 id="2-default-deny-policies"><a class="header" href="#2-default-deny-policies">2. Default Deny Policies</a></h3>
+<pre><code class="language-yaml"># Apply default deny to all namespaces
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: production
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  # Empty ingress/egress rules = deny all
+</code></pre>
+<h3 id="3-regular-policy-auditing"><a class="header" href="#3-regular-policy-auditing">3. Regular Policy Auditing</a></h3>
+<pre><code class="language-bash">#!/bin/bash
+# audit-networkpolicies.sh
+
+echo "=== NetworkPolicy Audit Report ==="
+echo "Generated: $(date)"
+echo
+
+# Check for namespaces without NetworkPolicies
+echo "Namespaces without NetworkPolicies:"
+for ns in $(kubectl get namespaces -o jsonpath='{.items[*].metadata.name}'); do
+    if [ $(kubectl get networkpolicy -n $ns --no-headers 2&gt;/dev/null | wc -l) -eq 0 ]; then
+        echo "  - $ns (WARNING: No network policies)"
+    fi
+done
+
+echo
+
+# Check for overly permissive policies
+echo "Potentially overly permissive policies:"
+kubectl get networkpolicy --all-namespaces -o json | jq -r '
+  .items[] | 
+  select(
+    (.spec.egress[]?.to // []) | length == 0 or
+    (.spec.ingress[]?.from // []) | length == 0
+  ) | 
+  "\(.metadata.namespace)/\(.metadata.name) - Check for overly broad rules"
+'
+
+echo
+
+# Check for unused NetworkPolicies
+echo "NetworkPolicies with no matching pods:"
+kubectl get networkpolicy --all-namespaces -o json | jq -r '
+  .items[] as $np |
+  $np.metadata.namespace as $ns |
+  $np.spec.podSelector as $selector |
+  if ($selector | keys | length) == 0 then
+    "\($ns)/\($np.metadata.name) - Applies to all pods in namespace"
+  else
+    "\($ns)/\($np.metadata.name) - Check if pods match selector"
+  end
+'
+</code></pre>
+<h3 id="4-integration-with-service-mesh"><a class="header" href="#4-integration-with-service-mesh">4. Integration with Service Mesh</a></h3>
+<pre><code class="language-yaml"># Example: Istio integration with NetworkPolicies
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: istio-compatible-policy
+spec:
+  podSelector:
+    matchLabels:
+      app: provider
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow Istio sidecar communication
+    - from:
+        - podSelector:
+            matchLabels:
+              app: istio-proxy
+      ports:
+        - protocol: TCP
+          port: 15090  # Istio pilot
+    # Your application ports
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: virtrigaud-system
+      ports:
+        - protocol: TCP
+          port: 9443
+  egress:
+    # Allow Istio control plane
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: istio-system
+      ports:
+        - protocol: TCP
+          port: 15010  # Pilot
+        - protocol: TCP
+          port: 15011  # Pilot secure
+</code></pre>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../../providers/security/external-secrets.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../../CLI.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../../providers/security/external-secrets.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../../CLI.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../../elasticlunr.min.js"></script>
+        <script src="../../mark.min.js"></script>
+        <script src="../../searcher.js"></script>
+
+        <script src="../../clipboard.min.js"></script>
+        <script src="../../highlight.js"></script>
+        <script src="../../book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="../../theme/page-toc.js"></script>
+
+
+    </div>
+    </body>
+</html>

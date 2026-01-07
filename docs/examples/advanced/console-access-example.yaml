@@ -1,0 +1,466 @@
+# VM Console Access Example
+# Demonstrates console URL generation in v0.2.3+
+#
+# Features:
+# - vSphere: Web-based console via vCenter
+# - Libvirt: VNC console URL for direct access
+# - Automatic URL generation in VM status
+# - Multiple access methods
+
+---
+# vSphere Provider Configuration
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: Provider
+metadata:
+  name: vsphere-prod
+  namespace: default
+spec:
+  type: vsphere
+  endpoint: https://vcenter.example.com/sdk
+  credentialSecretRef:
+    name: vsphere-credentials
+  runtime:
+    mode: Remote
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.2.3"
+    service:
+      port: 9090
+  defaults:
+    datacenter: "Production"
+    datastore: "datastore1"
+    cluster: "cluster1"
+
+---
+# Libvirt Provider Configuration
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: Provider
+metadata:
+  name: libvirt-local
+  namespace: default
+spec:
+  type: libvirt
+  endpoint: "qemu:///system"
+  credentialSecretRef:
+    name: libvirt-credentials
+  runtime:
+    mode: Remote
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.2.3"
+    service:
+      port: 9090
+  defaults:
+    storagePool: "default"
+    network: "default"
+
+---
+# VMClass for console demos
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMClass
+metadata:
+  name: console-demo
+  namespace: default
+spec:
+  cpus: 2
+  memory: "4Gi"
+  diskDefaults:
+    type: thin
+    size: "50Gi"
+
+---
+# vSphere VMImage
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMImage
+metadata:
+  name: ubuntu-vsphere
+  namespace: default
+spec:
+  source:
+    vsphere:
+      templateName: "ubuntu-22.04-template"
+
+---
+# Libvirt VMImage
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMImage
+metadata:
+  name: ubuntu-libvirt
+  namespace: default
+spec:
+  source:
+    http:
+      url: "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img"
+
+---
+# Example 1: vSphere VM with Web Console Access
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: vsphere-console-demo
+  namespace: default
+  annotations:
+    description: "VM with vSphere web console access"
+spec:
+  providerRef:
+    name: vsphere-prod
+  vmClassRef: console-demo
+  vmImageRef: ubuntu-vsphere
+  
+  powerState: "On"
+  
+  userData:
+    cloudInit:
+      inline: |
+        #cloud-config
+        hostname: vsphere-console
+        
+        users:
+          - name: admin
+            sudo: ALL=(ALL) NOPASSWD:ALL
+            shell: /bin/bash
+            ssh_authorized_keys:
+              - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC...
+        
+        # Configure VNC for additional access methods
+        packages:
+          - tigervnc-standalone-server
+          - open-vm-tools
+        
+        runcmd:
+          - systemctl enable open-vm-tools
+          - systemctl start open-vm-tools
+
+---
+# Example 2: Libvirt VM with VNC Console Access
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: libvirt-console-demo
+  namespace: default
+  annotations:
+    description: "VM with VNC console access"
+spec:
+  providerRef:
+    name: libvirt-local
+  vmClassRef: console-demo
+  vmImageRef: ubuntu-libvirt
+  
+  powerState: "On"
+  
+  userData:
+    cloudInit:
+      inline: |
+        #cloud-config
+        hostname: libvirt-console
+        
+        users:
+          - name: admin
+            sudo: ALL=(ALL) NOPASSWD:ALL
+            shell: /bin/bash
+            password: '$6$rounds=4096$saltsalt$hashed_password'
+            chpasswd: { expire: False }
+        
+        packages:
+          - qemu-guest-agent
+        
+        runcmd:
+          - systemctl enable qemu-guest-agent
+          - systemctl start qemu-guest-agent
+
+---
+# Console Access Guide
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: console-access-guide
+  namespace: default
+data:
+  access-methods.md: |
+    # VM Console Access Methods
+    
+    ## vSphere Web Console (v0.2.3+)
+    
+    ### Automatic URL Generation
+    Console URLs are automatically generated and available in VM status:
+    
+    ```bash
+    # Get console URL
+    kubectl get vm vsphere-console-demo -o jsonpath='{.status.consoleURL}'
+    
+    # Output:
+    # https://vcenter.example.com/ui/app/vm;nav=h/urn:vmomi:VirtualMachine:vm-123:xxxxx/summary
+    ```
+    
+    ### Access Steps
+    1. Get the console URL from VM status
+    2. Open URL in web browser
+    3. Login with vCenter credentials
+    4. Console opens automatically in vSphere web client
+    
+    ### Features
+    - **Full keyboard/mouse support**
+    - **Copy/paste between host and VM**
+    - **Screen resolution adjustment**
+    - **Power controls (reset, suspend)**
+    - **Snapshot integration**
+    - **USB device redirection**
+    - **Multi-monitor support**
+    
+    ### Browser Compatibility
+    - Chrome/Chromium: Full support
+    - Firefox: Full support  
+    - Safari: Full support
+    - Edge: Full support
+    
+    ### Authentication
+    Console access uses your vCenter credentials:
+    - SSO (Single Sign-On)
+    - Active Directory integration
+    - LDAP authentication
+    - Local vCenter users
+    
+    ## Libvirt VNC Console (v0.2.3+)
+    
+    ### Automatic URL Generation
+    VNC URLs are automatically generated:
+    
+    ```bash
+    # Get VNC console URL
+    kubectl get vm libvirt-console-demo -o jsonpath='{.status.consoleURL}'
+    
+    # Output:
+    # vnc://libvirt-host.example.com:5900
+    ```
+    
+    ### Access with VNC Clients
+    
+    #### TigerVNC (Recommended)
+    ```bash
+    # Install TigerVNC
+    apt-get install tigervnc-viewer  # Ubuntu/Debian
+    yum install tigervnc            # CentOS/RHEL
+    
+    # Connect to VM
+    CONSOLE_URL=$(kubectl get vm libvirt-console-demo -o jsonpath='{.status.consoleURL}')
+    vncviewer ${CONSOLE_URL#vnc://}
+    ```
+    
+    #### RealVNC
+    ```bash
+    # Download from https://www.realvnc.com
+    # Connect to: libvirt-host.example.com:5900
+    ```
+    
+    #### noVNC (Web-based)
+    ```bash
+    # Deploy noVNC proxy
+    kubectl apply -f - <<EOF
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: novnc-proxy
+    spec:
+      replicas: 1
+      selector:
+        matchLabels:
+          app: novnc
+      template:
+        metadata:
+          labels:
+            app: novnc
+        spec:
+          containers:
+          - name: novnc
+            image: theasp/novnc:latest
+            ports:
+            - containerPort: 8080
+            env:
+            - name: VNC_SERVER
+              value: "libvirt-host.example.com:5900"
+    ---
+    apiVersion: v1
+    kind: Service
+    metadata:
+      name: novnc-proxy
+    spec:
+      selector:
+        app: novnc
+      ports:
+      - port: 80
+        targetPort: 8080
+      type: LoadBalancer
+    EOF
+    
+    # Access via browser: http://<service-ip>
+    ```
+    
+    ### VNC Features
+    - **Full keyboard/mouse support**
+    - **Clipboard sharing (client-dependent)**
+    - **View-only mode**
+    - **Connection encryption (via SSH tunnel)**
+    - **Multiple simultaneous viewers**
+    
+    ### Security Best Practices
+    
+    #### SSH Tunneling for VNC
+    Secure VNC connections over SSH:
+    
+    ```bash
+    # Create SSH tunnel
+    ssh -L 5900:localhost:5900 user@libvirt-host.example.com
+    
+    # Connect VNC to localhost
+    vncviewer localhost:5900
+    ```
+    
+    #### VNC Password Protection
+    ```bash
+    # Set VNC password on Libvirt host
+    virsh edit <vm-name>
+    
+    # Add password to VNC configuration:
+    <graphics type='vnc' port='5900' passwd='your-password'/>
+    ```
+
+  troubleshooting.md: |
+    # Console Access Troubleshooting
+    
+    ## vSphere Console Issues
+    
+    ### Issue: Console URL is empty
+    **Cause**: VM not fully created or vCenter connection issue
+    **Solution**:
+    ```bash
+    # Check VM phase
+    kubectl get vm vsphere-console-demo -o jsonpath='{.status.phase}'
+    # Should be "Running"
+    
+    # Check provider logs
+    kubectl logs deployment/virtrigaud-provider-vsphere | grep -i console
+    ```
+    
+    ### Issue: "Not Authenticated" error
+    **Cause**: Not logged into vCenter or session expired
+    **Solution**: 
+    - Login to vCenter web client first
+    - Open console URL in same browser
+    
+    ### Issue: Console is black/blank
+    **Cause**: VM is powered off or booting
+    **Solution**:
+    ```bash
+    # Verify power state
+    kubectl get vm vsphere-console-demo -o jsonpath='{.spec.powerState}'
+    
+    # Wait for boot to complete
+    sleep 60
+    ```
+    
+    ## Libvirt VNC Console Issues
+    
+    ### Issue: VNC connection refused
+    **Cause**: VNC not listening or firewall blocking
+    **Solution**:
+    ```bash
+    # Check if VNC is listening
+    virsh dumpxml <vm-name> | grep graphics
+    
+    # Check firewall
+    sudo ufw allow 5900/tcp
+    # or
+    sudo firewall-cmd --add-port=5900/tcp --permanent
+    ```
+    
+    ### Issue: VNC asks for password
+    **Cause**: VNC password protection enabled
+    **Solution**:
+    - Check with Libvirt administrator for password
+    - Or use noVNC with auto-login configured
+    
+    ### Issue: Poor VNC performance
+    **Cause**: Network latency or low bandwidth
+    **Solution**:
+    - Use SSH tunnel for compression
+    - Reduce color depth in VNC client
+    - Use TigerVNC with optimized settings
+
+  automation.sh: |
+    #!/bin/bash
+    # Console Access Automation Script
+    
+    VM_NAME="${1:-vsphere-console-demo}"
+    
+    echo "=== Getting console access for VM: $VM_NAME ==="
+    
+    # Get VM provider type
+    PROVIDER_TYPE=$(kubectl get vm "$VM_NAME" -o jsonpath='{.spec.providerRef.name}')
+    
+    # Get console URL
+    CONSOLE_URL=$(kubectl get vm "$VM_NAME" -o jsonpath='{.status.consoleURL}')
+    
+    if [ -z "$CONSOLE_URL" ]; then
+        echo "Error: Console URL not available yet"
+        echo "VM might still be starting..."
+        exit 1
+    fi
+    
+    echo "Console URL: $CONSOLE_URL"
+    
+    # Detect provider and open appropriately
+    if [[ $CONSOLE_URL == https://* ]]; then
+        echo "vSphere console detected"
+        echo "Opening in browser..."
+        xdg-open "$CONSOLE_URL" 2>/dev/null || open "$CONSOLE_URL" 2>/dev/null || echo "Please open manually: $CONSOLE_URL"
+    elif [[ $CONSOLE_URL == vnc://* ]]; then
+        echo "Libvirt VNC console detected"
+        VNC_HOST=$(echo "$CONSOLE_URL" | sed 's|vnc://||')
+        echo "Connecting with VNC viewer..."
+        vncviewer "$VNC_HOST" 2>/dev/null || echo "Please install vncviewer and run: vncviewer $VNC_HOST"
+    else
+        echo "Unknown console type: $CONSOLE_URL"
+    fi
+
+---
+# Usage Instructions:
+#
+# 1. Deploy resources:
+#    kubectl apply -f console-access-example.yaml
+#
+# 2. Wait for VMs to be ready:
+#    kubectl get vm -w
+#
+# 3. Access vSphere console:
+#    # Get URL
+#    VSPHERE_CONSOLE=$(kubectl get vm vsphere-console-demo -o jsonpath='{.status.consoleURL}')
+#    
+#    # Open in browser
+#    xdg-open "$VSPHERE_CONSOLE"  # Linux
+#    open "$VSPHERE_CONSOLE"       # macOS
+#    start "$VSPHERE_CONSOLE"      # Windows
+#
+# 4. Access Libvirt VNC console:
+#    # Get VNC URL
+#    VNC_URL=$(kubectl get vm libvirt-console-demo -o jsonpath='{.status.consoleURL}')
+#    
+#    # Connect with VNC viewer
+#    vncviewer ${VNC_URL#vnc://}
+#
+# 5. Use automation script:
+#    kubectl create -f console-access-example.yaml
+#    kubectl exec -it <kubectl-pod> -- bash /scripts/automation.sh vsphere-console-demo
+#
+# Console Access Use Cases:
+#
+# 1. **Initial Setup**: Configure VM before SSH is available
+# 2. **Troubleshooting**: Debug boot issues, network problems
+# 3. **OS Installation**: Install operating systems interactively
+# 4. **Rescue Mode**: Access VMs when SSH is unavailable
+# 5. **GUI Applications**: Access VMs running graphical interfaces
+# 6. **Training/Demos**: Show VM operations in real-time
+#
+# Security Considerations:
+#
+# - vSphere: Uses vCenter authentication (SSO, LDAP, AD)
+# - VNC: Consider SSH tunneling for encryption
+# - Network Policies: Restrict console access to authorized users
+# - Audit Logging: Track console access in vCenter/Kubernetes
+# - Time Limits: Implement session timeouts where appropriate
+

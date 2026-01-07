@@ -1,0 +1,1495 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Provider Tutorial - VirtRigaud Documentation</title>
+
+
+        <!-- Custom HTML head -->
+        
+        <meta name="description" content="Kubernetes operator for managing virtual machines across multiple hypervisors">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="../highlight.css">
+        <link rel="stylesheet" href="../tomorrow-night.css">
+        <link rel="stylesheet" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../theme/custom.css">
+
+    </head>
+    <body class="sidebar-visible no-js">
+    <div id="body-container">
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "../";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
+        </script>
+
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            var html = document.querySelector('html');
+            html.classList.remove('light')
+            html.classList.add(theme);
+            var body = document.querySelector('body');
+            body.classList.remove('no-js')
+            body.classList.add('js');
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var body = document.querySelector('body');
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            body.classList.remove('sidebar-visible');
+            body.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <div class="sidebar-scrollbox">
+                <ol class="chapter"><li class="chapter-item affix "><a href="../index.html">Introduction</a></li><li class="chapter-item affix "><li class="part-title">Getting Started</li><li class="chapter-item "><a href="../getting-started/quickstart.html"><strong aria-hidden="true">1.</strong> 15-Minute Quickstart</a></li><li class="chapter-item "><a href="../install-helm-only.html"><strong aria-hidden="true">2.</strong> Installation Guide</a></li><li class="chapter-item "><a href="../HELM_CRD_UPGRADES.html"><strong aria-hidden="true">3.</strong> Helm CRD Upgrades</a></li><li class="chapter-item affix "><li class="part-title">Core Documentation</li><li class="chapter-item "><a href="../CRDs.html"><strong aria-hidden="true">4.</strong> Custom Resource Definitions</a></li><li class="chapter-item "><a href="../EXAMPLES.html"><strong aria-hidden="true">5.</strong> Examples</a></li><li class="chapter-item "><a href="../PROVIDERS.html"><strong aria-hidden="true">6.</strong> Provider Documentation</a></li><li class="chapter-item "><a href="../PROVIDERS_CAPABILITIES.html"><strong aria-hidden="true">7.</strong> Provider Capabilities Matrix</a></li><li class="chapter-item affix "><li class="part-title">Provider-Specific Guides</li><li class="chapter-item "><a href="../providers/vsphere.html"><strong aria-hidden="true">8.</strong> vSphere Provider</a></li><li class="chapter-item "><a href="../providers/libvirt.html"><strong aria-hidden="true">9.</strong> Libvirt Provider</a></li><li class="chapter-item "><a href="../providers/proxmox.html"><strong aria-hidden="true">10.</strong> Proxmox VE Provider</a></li><li class="chapter-item expanded "><a href="../providers/tutorial.html" class="active"><strong aria-hidden="true">11.</strong> Provider Tutorial</a></li><li class="chapter-item "><a href="../providers/versioning.html"><strong aria-hidden="true">12.</strong> Provider Versioning</a></li><li class="chapter-item affix "><li class="part-title">Advanced Features</li><li class="chapter-item "><a href="../ADVANCED_LIFECYCLE.html"><strong aria-hidden="true">13.</strong> VM Lifecycle Management</a></li><li class="chapter-item "><a href="../NESTED_VIRTUALIZATION.html"><strong aria-hidden="true">14.</strong> Nested Virtualization</a></li><li class="chapter-item "><a href="../GRACEFUL_SHUTDOWN.html"><strong aria-hidden="true">15.</strong> Graceful Shutdown</a></li><li class="chapter-item "><a href="../REMOTE_PROVIDERS.html"><strong aria-hidden="true">16.</strong> Remote Providers</a></li><li class="chapter-item affix "><li class="part-title">Operations & Administration</li><li class="chapter-item "><a href="../OBSERVABILITY.html"><strong aria-hidden="true">17.</strong> Observability</a></li><li class="chapter-item "><a href="../SECURITY.html"><strong aria-hidden="true">18.</strong> Security</a></li><li class="chapter-item "><a href="../RESILIENCE.html"><strong aria-hidden="true">19.</strong> Resilience</a></li><li class="chapter-item "><a href="../UPGRADE.html"><strong aria-hidden="true">20.</strong> Upgrade Guide</a></li><li class="chapter-item "><a href="../VSPHERE_HARDWARE_VERSION.html"><strong aria-hidden="true">21.</strong> vSphere Hardware Versions</a></li><li class="chapter-item affix "><li class="part-title">Security Configuration</li><li class="chapter-item "><a href="../providers/security/bearer-token.html"><strong aria-hidden="true">22.</strong> Bearer Token Authentication</a></li><li class="chapter-item "><a href="../providers/security/mtls.html"><strong aria-hidden="true">23.</strong> mTLS Configuration</a></li><li class="chapter-item "><a href="../providers/security/external-secrets.html"><strong aria-hidden="true">24.</strong> External Secrets</a></li><li class="chapter-item "><a href="../providers/security/network-policies.html"><strong aria-hidden="true">25.</strong> Network Policies</a></li><li class="chapter-item affix "><li class="part-title">API Reference</li><li class="chapter-item "><a href="../CLI.html"><strong aria-hidden="true">26.</strong> CLI Tools Reference</a></li><li class="chapter-item "><a href="../api-reference/cli.html"><strong aria-hidden="true">27.</strong> CLI API Reference</a></li><li class="chapter-item "><a href="../api-reference/metrics.html"><strong aria-hidden="true">28.</strong> Metrics Catalog</a></li><li class="chapter-item "><a href="../catalog.html"><strong aria-hidden="true">29.</strong> Provider Catalog</a></li><li class="chapter-item affix "><li class="part-title">Development</li><li class="chapter-item "><a href="../TESTING_WORKFLOWS_LOCALLY.html"><strong aria-hidden="true">30.</strong> Testing Workflows Locally</a></li><li class="chapter-item "><a href="../../../CONTRIBUTING.html"><strong aria-hidden="true">31.</strong> Contributing</a></li><li class="chapter-item "><a href="../../../DEVELOPMENT.html"><strong aria-hidden="true">32.</strong> Development Guide</a></li><li class="chapter-item affix "><li class="part-title">Examples</li><li class="chapter-item "><a href="../examples/index.html"><strong aria-hidden="true">33.</strong> Example README</a></li></ol>
+            </div>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <!-- Track and set sidebar scroll position -->
+        <script>
+            var sidebarScrollbox = document.querySelector('#sidebar .sidebar-scrollbox');
+            sidebarScrollbox.addEventListener('click', function(e) {
+                if (e.target.tagName === 'A') {
+                    sessionStorage.setItem('sidebar-scroll', sidebarScrollbox.scrollTop);
+                }
+            }, { passive: true });
+            var sidebarScrollTop = sessionStorage.getItem('sidebar-scroll');
+            sessionStorage.removeItem('sidebar-scroll');
+            if (sidebarScrollTop) {
+                // preserve sidebar scroll position when navigating via links within sidebar
+                sidebarScrollbox.scrollTop = sidebarScrollTop;
+            } else {
+                // scroll sidebar to current active section when navigating via "next/previous chapter" buttons
+                var activeSection = document.querySelector('#sidebar .active');
+                if (activeSection) {
+                    activeSection.scrollIntoView({ block: 'center' });
+                }
+            }
+        </script>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">VirtRigaud Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/projectbeskar/virtrigaud" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/projectbeskar/virtrigaud/edit/main/docs/src/providers/tutorial.md" title="Suggest an edit" aria-label="Suggest an edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="provider-developer-tutorial"><a class="header" href="#provider-developer-tutorial">Provider Developer Tutorial</a></h1>
+<p>This comprehensive tutorial walks you through creating a complete VirtRigaud provider from scratch. By the end, you’ll have a fully functional provider that can create, manage, and delete virtual machines.</p>
+<h2 id="prerequisites"><a class="header" href="#prerequisites">Prerequisites</a></h2>
+<p>Before starting this tutorial, ensure you have:</p>
+<ul>
+<li>Go 1.23 or later installed</li>
+<li>Docker installed for containerization</li>
+<li>kubectl and a Kubernetes cluster (Kind/minikube for local development)</li>
+<li>Helm 3.x installed</li>
+<li>Basic understanding of gRPC and protobuf</li>
+</ul>
+<h2 id="tutorial-overview"><a class="header" href="#tutorial-overview">Tutorial Overview</a></h2>
+<p>We’ll build a <strong>File Provider</strong> that manages “virtual machines” as JSON files on disk. While not practical for production, this provider demonstrates all the core concepts without requiring actual hypervisor access.</p>
+<p><strong>What we’ll build:</strong></p>
+<ul>
+<li>A complete provider implementation using the VirtRigaud SDK</li>
+<li>Conformance tests that pass VCTS core profile</li>
+<li>A Helm chart for deployment</li>
+<li>CI/CD integration</li>
+<li>Publication to the provider catalog</li>
+</ul>
+<h2 id="step-1-initialize-your-provider-project"><a class="header" href="#step-1-initialize-your-provider-project">Step 1: Initialize Your Provider Project</a></h2>
+<h3 id="11-create-project-structure"><a class="header" href="#11-create-project-structure">1.1 Create Project Structure</a></h3>
+<pre><code class="language-bash"># Create project directory
+mkdir virtrigaud-provider-file
+cd virtrigaud-provider-file
+
+# Initialize the provider project
+vrtg-provider init file
+</code></pre>
+<p>The <code>vrtg-provider init</code> command creates the following structure:</p>
+<pre><code>virtrigaud-provider-file/
+├── cmd/
+│   └── provider-file/
+│       ├── main.go
+│       └── Dockerfile
+├── internal/
+│   └── provider/
+│       ├── provider.go
+│       ├── capabilities.go
+│       └── provider_test.go
+├── charts/
+│   └── provider-file/
+│       ├── Chart.yaml
+│       ├── values.yaml
+│       └── templates/
+├── .github/
+│   └── workflows/
+│       └── ci.yml
+├── Makefile
+├── go.mod
+├── go.sum
+├── .gitignore
+└── README.md
+</code></pre>
+<h3 id="12-examine-generated-files"><a class="header" href="#12-examine-generated-files">1.2 Examine Generated Files</a></h3>
+<p><strong>main.go</strong> - Entry point that sets up the gRPC server:</p>
+<pre><code class="language-go">package main
+
+import (
+    "log"
+    
+    "github.com/projectbeskar/virtrigaud/sdk/provider/server"
+    "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
+    "virtrigaud-provider-file/internal/provider"
+)
+
+func main() {
+    // Create provider instance
+    p, err := provider.New()
+    if err != nil {
+        log.Fatalf("Failed to create provider: %v", err)
+    }
+    
+    // Configure server
+    config := &amp;server.Config{
+        Port:        9443,
+        HealthPort:  8080,
+        EnableTLS:   false,
+    }
+    
+    srv, err := server.New(config)
+    if err != nil {
+        log.Fatalf("Failed to create server: %v", err)
+    }
+    
+    // Register provider service
+    providerv1.RegisterProviderServiceServer(srv.GRPCServer(), p)
+    
+    // Start server
+    log.Println("Starting file provider on port 9443...")
+    if err := srv.Serve(); err != nil {
+        log.Fatalf("Server failed: %v", err)
+    }
+}
+</code></pre>
+<p><strong>go.mod</strong> - Module definition with SDK dependency:</p>
+<pre><code class="language-go">module virtrigaud-provider-file
+
+go 1.23
+
+require (
+    github.com/projectbeskar/virtrigaud/sdk v0.1.0
+    github.com/projectbeskar/virtrigaud/proto v0.1.0
+)
+</code></pre>
+<h2 id="step-2-implement-the-core-provider"><a class="header" href="#step-2-implement-the-core-provider">Step 2: Implement the Core Provider</a></h2>
+<h3 id="21-design-the-file-provider"><a class="header" href="#21-design-the-file-provider">2.1 Design the File Provider</a></h3>
+<p>Our file provider will:</p>
+<ul>
+<li>Store VM metadata as JSON files in <code>/var/lib/virtrigaud/vms/</code></li>
+<li>Use filename as VM ID</li>
+<li>Simulate power operations with state files</li>
+<li>Support basic CRUD operations</li>
+</ul>
+<h3 id="22-define-the-vm-model"><a class="header" href="#22-define-the-vm-model">2.2 Define the VM Model</a></h3>
+<p>Create <code>internal/provider/vm.go</code>:</p>
+<pre><code class="language-go">package provider
+
+import (
+    "encoding/json"
+    "fmt"
+    "io/ioutil"
+    "os"
+    "path/filepath"
+    "time"
+    
+    "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
+)
+
+type VirtualMachine struct {
+    ID          string                 `json:"id"`
+    Name        string                 `json:"name"`
+    Spec        *providerv1.VMSpec     `json:"spec"`
+    Status      *providerv1.VMStatus   `json:"status"`
+    CreatedAt   time.Time              `json:"created_at"`
+    UpdatedAt   time.Time              `json:"updated_at"`
+}
+
+type FileStore struct {
+    baseDir string
+}
+
+func NewFileStore(baseDir string) *FileStore {
+    return &amp;FileStore{baseDir: baseDir}
+}
+
+func (fs *FileStore) Save(vm *VirtualMachine) error {
+    if err := os.MkdirAll(fs.baseDir, 0755); err != nil {
+        return fmt.Errorf("failed to create directory: %w", err)
+    }
+    
+    vm.UpdatedAt = time.Now()
+    data, err := json.MarshalIndent(vm, "", "  ")
+    if err != nil {
+        return fmt.Errorf("failed to marshal VM: %w", err)
+    }
+    
+    filename := filepath.Join(fs.baseDir, vm.ID+".json")
+    return ioutil.WriteFile(filename, data, 0644)
+}
+
+func (fs *FileStore) Load(id string) (*VirtualMachine, error) {
+    filename := filepath.Join(fs.baseDir, id+".json")
+    data, err := ioutil.ReadFile(filename)
+    if err != nil {
+        if os.IsNotExist(err) {
+            return nil, fmt.Errorf("VM not found: %s", id)
+        }
+        return nil, fmt.Errorf("failed to read VM file: %w", err)
+    }
+    
+    var vm VirtualMachine
+    if err := json.Unmarshal(data, &amp;vm); err != nil {
+        return nil, fmt.Errorf("failed to unmarshal VM: %w", err)
+    }
+    
+    return &amp;vm, nil
+}
+
+func (fs *FileStore) Delete(id string) error {
+    filename := filepath.Join(fs.baseDir, id+".json")
+    if err := os.Remove(filename); err != nil &amp;&amp; !os.IsNotExist(err) {
+        return fmt.Errorf("failed to delete VM file: %w", err)
+    }
+    return nil
+}
+
+func (fs *FileStore) List() ([]*VirtualMachine, error) {
+    files, err := ioutil.ReadDir(fs.baseDir)
+    if err != nil {
+        if os.IsNotExist(err) {
+            return []*VirtualMachine{}, nil
+        }
+        return nil, fmt.Errorf("failed to read directory: %w", err)
+    }
+    
+    var vms []*VirtualMachine
+    for _, file := range files {
+        if !file.IsDir() &amp;&amp; filepath.Ext(file.Name()) == ".json" {
+            id := file.Name()[:len(file.Name())-5] // Remove .json extension
+            vm, err := fs.Load(id)
+            if err != nil {
+                continue // Skip invalid files
+            }
+            vms = append(vms, vm)
+        }
+    }
+    
+    return vms, nil
+}
+</code></pre>
+<h3 id="23-implement-the-provider-interface"><a class="header" href="#23-implement-the-provider-interface">2.3 Implement the Provider Interface</a></h3>
+<p>Update <code>internal/provider/provider.go</code>:</p>
+<pre><code class="language-go">package provider
+
+import (
+    "context"
+    "fmt"
+    "os"
+    "path/filepath"
+    "time"
+    
+    "github.com/google/uuid"
+    "google.golang.org/grpc/codes"
+    "google.golang.org/grpc/status"
+    
+    "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
+    "github.com/projectbeskar/virtrigaud/sdk/provider/capabilities"
+    "github.com/projectbeskar/virtrigaud/sdk/provider/errors"
+)
+
+type Provider struct {
+    store *FileStore
+    caps  *capabilities.ProviderCapabilities
+}
+
+func New() (*Provider, error) {
+    // Get storage directory from environment or use default
+    baseDir := os.Getenv("PROVIDER_STORAGE_DIR")
+    if baseDir == "" {
+        baseDir = "/var/lib/virtrigaud/vms"
+    }
+    
+    // Create capabilities
+    caps := &amp;capabilities.ProviderCapabilities{
+        ProviderInfo: &amp;providerv1.ProviderInfo{
+            Name:        "file",
+            Version:     "0.1.0",
+            Description: "File-based virtual machine provider for development and testing",
+        },
+        SupportedCapabilities: []capabilities.Capability{
+            capabilities.CapabilityCore,
+            capabilities.CapabilitySnapshot,
+            capabilities.CapabilityClone,
+        },
+    }
+    
+    return &amp;Provider{
+        store: NewFileStore(baseDir),
+        caps:  caps,
+    }, nil
+}
+
+// GetCapabilities returns provider capabilities
+func (p *Provider) GetCapabilities(ctx context.Context, req *providerv1.GetCapabilitiesRequest) (*providerv1.GetCapabilitiesResponse, error) {
+    return &amp;providerv1.GetCapabilitiesResponse{
+        ProviderId: "file-provider",
+        Capabilities: []*providerv1.Capability{
+            {
+                Name:        "vm.create",
+                Supported:   true,
+                Description: "Create virtual machines",
+            },
+            {
+                Name:        "vm.read",
+                Supported:   true,
+                Description: "Read virtual machine information",
+            },
+            {
+                Name:        "vm.update",
+                Supported:   true,
+                Description: "Update virtual machine configuration",
+            },
+            {
+                Name:        "vm.delete",
+                Supported:   true,
+                Description: "Delete virtual machines",
+            },
+            {
+                Name:        "vm.power",
+                Supported:   true,
+                Description: "Control virtual machine power state",
+            },
+            {
+                Name:        "vm.snapshot",
+                Supported:   true,
+                Description: "Create and manage VM snapshots",
+            },
+            {
+                Name:        "vm.clone",
+                Supported:   true,
+                Description: "Clone virtual machines",
+            },
+        },
+    }, nil
+}
+
+// CreateVM creates a new virtual machine
+func (p *Provider) CreateVM(ctx context.Context, req *providerv1.CreateVMRequest) (*providerv1.CreateVMResponse, error) {
+    // Validate request
+    if req.Name == "" {
+        return nil, errors.NewInvalidSpec("VM name is required")
+    }
+    
+    if req.Spec == nil {
+        return nil, errors.NewInvalidSpec("VM spec is required")
+    }
+    
+    // Generate unique ID
+    vmID := uuid.New().String()
+    
+    // Create VM object
+    vm := &amp;VirtualMachine{
+        ID:   vmID,
+        Name: req.Name,
+        Spec: req.Spec,
+        Status: &amp;providerv1.VMStatus{
+            State:   "Creating",
+            Message: "VM is being created",
+        },
+        CreatedAt: time.Now(),
+        UpdatedAt: time.Now(),
+    }
+    
+    // Save to store
+    if err := p.store.Save(vm); err != nil {
+        return nil, status.Errorf(codes.Internal, "failed to save VM: %v", err)
+    }
+    
+    // Simulate creation time
+    go func() {
+        time.Sleep(2 * time.Second)
+        vm.Status.State = "Running"
+        vm.Status.Message = "VM is running"
+        p.store.Save(vm)
+    }()
+    
+    return &amp;providerv1.CreateVMResponse{
+        VmId:   vmID,
+        Status: vm.Status,
+    }, nil
+}
+
+// GetVM retrieves virtual machine information
+func (p *Provider) GetVM(ctx context.Context, req *providerv1.GetVMRequest) (*providerv1.GetVMResponse, error) {
+    if req.VmId == "" {
+        return nil, errors.NewInvalidSpec("VM ID is required")
+    }
+    
+    vm, err := p.store.Load(req.VmId)
+    if err != nil {
+        return nil, errors.NewNotFound("VM not found: %s", req.VmId)
+    }
+    
+    return &amp;providerv1.GetVMResponse{
+        VmId:   vm.ID,
+        Name:   vm.Name,
+        Spec:   vm.Spec,
+        Status: vm.Status,
+    }, nil
+}
+
+// UpdateVM updates virtual machine configuration
+func (p *Provider) UpdateVM(ctx context.Context, req *providerv1.UpdateVMRequest) (*providerv1.UpdateVMResponse, error) {
+    if req.VmId == "" {
+        return nil, errors.NewInvalidSpec("VM ID is required")
+    }
+    
+    vm, err := p.store.Load(req.VmId)
+    if err != nil {
+        return nil, errors.NewNotFound("VM not found: %s", req.VmId)
+    }
+    
+    // Update spec if provided
+    if req.Spec != nil {
+        vm.Spec = req.Spec
+        vm.Status.Message = "VM configuration updated"
+        
+        if err := p.store.Save(vm); err != nil {
+            return nil, status.Errorf(codes.Internal, "failed to save VM: %v", err)
+        }
+    }
+    
+    return &amp;providerv1.UpdateVMResponse{
+        Status: vm.Status,
+    }, nil
+}
+
+// DeleteVM deletes a virtual machine
+func (p *Provider) DeleteVM(ctx context.Context, req *providerv1.DeleteVMRequest) (*providerv1.DeleteVMResponse, error) {
+    if req.VmId == "" {
+        return nil, errors.NewInvalidSpec("VM ID is required")
+    }
+    
+    // Check if VM exists
+    _, err := p.store.Load(req.VmId)
+    if err != nil {
+        return nil, errors.NewNotFound("VM not found: %s", req.VmId)
+    }
+    
+    // Delete VM
+    if err := p.store.Delete(req.VmId); err != nil {
+        return nil, status.Errorf(codes.Internal, "failed to delete VM: %v", err)
+    }
+    
+    return &amp;providerv1.DeleteVMResponse{
+        Success: true,
+        Message: "VM deleted successfully",
+    }, nil
+}
+
+// PowerVM controls virtual machine power state
+func (p *Provider) PowerVM(ctx context.Context, req *providerv1.PowerVMRequest) (*providerv1.PowerVMResponse, error) {
+    if req.VmId == "" {
+        return nil, errors.NewInvalidSpec("VM ID is required")
+    }
+    
+    vm, err := p.store.Load(req.VmId)
+    if err != nil {
+        return nil, errors.NewNotFound("VM not found: %s", req.VmId)
+    }
+    
+    // Update power state based on operation
+    switch req.PowerOp {
+    case providerv1.PowerOp_POWER_OP_ON:
+        vm.Status.State = "Running"
+        vm.Status.Message = "VM is running"
+    case providerv1.PowerOp_POWER_OP_OFF:
+        vm.Status.State = "Stopped"
+        vm.Status.Message = "VM is stopped"
+    case providerv1.PowerOp_POWER_OP_REBOOT:
+        vm.Status.State = "Rebooting"
+        vm.Status.Message = "VM is rebooting"
+        // Simulate reboot
+        go func() {
+            time.Sleep(3 * time.Second)
+            vm.Status.State = "Running"
+            vm.Status.Message = "VM is running"
+            p.store.Save(vm)
+        }()
+    default:
+        return nil, errors.NewInvalidSpec("unsupported power operation: %v", req.PowerOp)
+    }
+    
+    if err := p.store.Save(vm); err != nil {
+        return nil, status.Errorf(codes.Internal, "failed to save VM: %v", err)
+    }
+    
+    return &amp;providerv1.PowerVMResponse{
+        Status: vm.Status,
+    }, nil
+}
+
+// ListVMs lists all virtual machines
+func (p *Provider) ListVMs(ctx context.Context, req *providerv1.ListVMsRequest) (*providerv1.ListVMsResponse, error) {
+    vms, err := p.store.List()
+    if err != nil {
+        return nil, status.Errorf(codes.Internal, "failed to list VMs: %v", err)
+    }
+    
+    var vmInfos []*providerv1.VMInfo
+    for _, vm := range vms {
+        vmInfos = append(vmInfos, &amp;providerv1.VMInfo{
+            VmId:   vm.ID,
+            Name:   vm.Name,
+            Status: vm.Status,
+        })
+    }
+    
+    return &amp;providerv1.ListVMsResponse{
+        Vms: vmInfos,
+    }, nil
+}
+
+// CreateSnapshot creates a VM snapshot
+func (p *Provider) CreateSnapshot(ctx context.Context, req *providerv1.CreateSnapshotRequest) (*providerv1.CreateSnapshotResponse, error) {
+    if req.VmId == "" {
+        return nil, errors.NewInvalidSpec("VM ID is required")
+    }
+    
+    vm, err := p.store.Load(req.VmId)
+    if err != nil {
+        return nil, errors.NewNotFound("VM not found: %s", req.VmId)
+    }
+    
+    // Create snapshot (simulate by copying VM file)
+    snapshotID := uuid.New().String()
+    snapshotPath := filepath.Join(filepath.Dir(p.store.baseDir), "snapshots")
+    
+    if err := os.MkdirAll(snapshotPath, 0755); err != nil {
+        return nil, status.Errorf(codes.Internal, "failed to create snapshot directory: %v", err)
+    }
+    
+    // Copy VM data to snapshot
+    snapshotVM := *vm
+    snapshotVM.ID = snapshotID
+    snapshotStore := NewFileStore(snapshotPath)
+    
+    if err := snapshotStore.Save(&amp;snapshotVM); err != nil {
+        return nil, status.Errorf(codes.Internal, "failed to save snapshot: %v", err)
+    }
+    
+    return &amp;providerv1.CreateSnapshotResponse{
+        SnapshotId: snapshotID,
+        Status: &amp;providerv1.TaskStatus{
+            State:   "Completed",
+            Message: "Snapshot created successfully",
+        },
+    }, nil
+}
+
+// CloneVM clones a virtual machine
+func (p *Provider) CloneVM(ctx context.Context, req *providerv1.CloneVMRequest) (*providerv1.CloneVMResponse, error) {
+    if req.SourceVmId == "" {
+        return nil, errors.NewInvalidSpec("Source VM ID is required")
+    }
+    
+    if req.CloneName == "" {
+        return nil, errors.NewInvalidSpec("Clone name is required")
+    }
+    
+    // Load source VM
+    sourceVM, err := p.store.Load(req.SourceVmId)
+    if err != nil {
+        return nil, errors.NewNotFound("Source VM not found: %s", req.SourceVmId)
+    }
+    
+    // Create clone
+    cloneID := uuid.New().String()
+    cloneVM := &amp;VirtualMachine{
+        ID:   cloneID,
+        Name: req.CloneName,
+        Spec: sourceVM.Spec, // Copy spec from source
+        Status: &amp;providerv1.VMStatus{
+            State:   "Stopped",
+            Message: "Clone created successfully",
+        },
+        CreatedAt: time.Now(),
+        UpdatedAt: time.Now(),
+    }
+    
+    if err := p.store.Save(cloneVM); err != nil {
+        return nil, status.Errorf(codes.Internal, "failed to save clone: %v", err)
+    }
+    
+    return &amp;providerv1.CloneVMResponse{
+        CloneVmId: cloneID,
+        Status: &amp;providerv1.TaskStatus{
+            State:   "Completed",
+            Message: "VM cloned successfully",
+        },
+    }, nil
+}
+</code></pre>
+<h2 id="step-3-add-tests-and-validation"><a class="header" href="#step-3-add-tests-and-validation">Step 3: Add Tests and Validation</a></h2>
+<h3 id="31-create-unit-tests"><a class="header" href="#31-create-unit-tests">3.1 Create Unit Tests</a></h3>
+<p>Create <code>internal/provider/provider_test.go</code>:</p>
+<pre><code class="language-go">package provider
+
+import (
+    "context"
+    "os"
+    "path/filepath"
+    "testing"
+    "time"
+    
+    "github.com/stretchr/testify/assert"
+    "github.com/stretchr/testify/require"
+    
+    "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
+)
+
+func TestProvider_CreateVM(t *testing.T) {
+    // Create temporary directory for testing
+    tmpDir, err := os.MkdirTemp("", "file-provider-test")
+    require.NoError(t, err)
+    defer os.RemoveAll(tmpDir)
+    
+    // Set storage directory
+    os.Setenv("PROVIDER_STORAGE_DIR", tmpDir)
+    defer os.Unsetenv("PROVIDER_STORAGE_DIR")
+    
+    // Create provider
+    p, err := New()
+    require.NoError(t, err)
+    
+    // Test VM creation
+    req := &amp;providerv1.CreateVMRequest{
+        Name: "test-vm",
+        Spec: &amp;providerv1.VMSpec{
+            Cpu:    2,
+            Memory: 4096,
+            Image:  "ubuntu:20.04",
+        },
+    }
+    
+    resp, err := p.CreateVM(context.Background(), req)
+    require.NoError(t, err)
+    assert.NotEmpty(t, resp.VmId)
+    assert.Equal(t, "Creating", resp.Status.State)
+    
+    // Verify VM file was created
+    vmFile := filepath.Join(tmpDir, resp.VmId+".json")
+    assert.FileExists(t, vmFile)
+}
+
+func TestProvider_GetVM(t *testing.T) {
+    tmpDir, err := os.MkdirTemp("", "file-provider-test")
+    require.NoError(t, err)
+    defer os.RemoveAll(tmpDir)
+    
+    os.Setenv("PROVIDER_STORAGE_DIR", tmpDir)
+    defer os.Unsetenv("PROVIDER_STORAGE_DIR")
+    
+    p, err := New()
+    require.NoError(t, err)
+    
+    // Create VM first
+    createReq := &amp;providerv1.CreateVMRequest{
+        Name: "test-vm",
+        Spec: &amp;providerv1.VMSpec{
+            Cpu:    2,
+            Memory: 4096,
+        },
+    }
+    
+    createResp, err := p.CreateVM(context.Background(), createReq)
+    require.NoError(t, err)
+    
+    // Get VM
+    getReq := &amp;providerv1.GetVMRequest{
+        VmId: createResp.VmId,
+    }
+    
+    getResp, err := p.GetVM(context.Background(), getReq)
+    require.NoError(t, err)
+    assert.Equal(t, createResp.VmId, getResp.VmId)
+    assert.Equal(t, "test-vm", getResp.Name)
+    assert.Equal(t, int32(2), getResp.Spec.Cpu)
+}
+
+func TestProvider_PowerVM(t *testing.T) {
+    tmpDir, err := os.MkdirTemp("", "file-provider-test")
+    require.NoError(t, err)
+    defer os.RemoveAll(tmpDir)
+    
+    os.Setenv("PROVIDER_STORAGE_DIR", tmpDir)
+    defer os.Unsetenv("PROVIDER_STORAGE_DIR")
+    
+    p, err := New()
+    require.NoError(t, err)
+    
+    // Create VM
+    createReq := &amp;providerv1.CreateVMRequest{
+        Name: "test-vm",
+        Spec: &amp;providerv1.VMSpec{Cpu: 1, Memory: 1024},
+    }
+    
+    createResp, err := p.CreateVM(context.Background(), createReq)
+    require.NoError(t, err)
+    
+    // Power off VM
+    powerReq := &amp;providerv1.PowerVMRequest{
+        VmId:    createResp.VmId,
+        PowerOp: providerv1.PowerOp_POWER_OP_OFF,
+    }
+    
+    powerResp, err := p.PowerVM(context.Background(), powerReq)
+    require.NoError(t, err)
+    assert.Equal(t, "Stopped", powerResp.Status.State)
+    
+    // Power on VM
+    powerReq.PowerOp = providerv1.PowerOp_POWER_OP_ON
+    powerResp, err = p.PowerVM(context.Background(), powerReq)
+    require.NoError(t, err)
+    assert.Equal(t, "Running", powerResp.Status.State)
+}
+
+func TestProvider_GetCapabilities(t *testing.T) {
+    p, err := New()
+    require.NoError(t, err)
+    
+    req := &amp;providerv1.GetCapabilitiesRequest{}
+    resp, err := p.GetCapabilities(context.Background(), req)
+    require.NoError(t, err)
+    
+    assert.Equal(t, "file-provider", resp.ProviderId)
+    assert.NotEmpty(t, resp.Capabilities)
+    
+    // Check for core capabilities
+    capNames := make(map[string]bool)
+    for _, cap := range resp.Capabilities {
+        capNames[cap.Name] = cap.Supported
+    }
+    
+    assert.True(t, capNames["vm.create"])
+    assert.True(t, capNames["vm.read"])
+    assert.True(t, capNames["vm.delete"])
+    assert.True(t, capNames["vm.power"])
+}
+
+func TestProvider_CloneVM(t *testing.T) {
+    tmpDir, err := os.MkdirTemp("", "file-provider-test")
+    require.NoError(t, err)
+    defer os.RemoveAll(tmpDir)
+    
+    os.Setenv("PROVIDER_STORAGE_DIR", tmpDir)
+    defer os.Unsetenv("PROVIDER_STORAGE_DIR")
+    
+    p, err := New()
+    require.NoError(t, err)
+    
+    // Create source VM
+    createReq := &amp;providerv1.CreateVMRequest{
+        Name: "source-vm",
+        Spec: &amp;providerv1.VMSpec{
+            Cpu:    4,
+            Memory: 8192,
+            Image:  "centos:8",
+        },
+    }
+    
+    createResp, err := p.CreateVM(context.Background(), createReq)
+    require.NoError(t, err)
+    
+    // Clone VM
+    cloneReq := &amp;providerv1.CloneVMRequest{
+        SourceVmId: createResp.VmId,
+        CloneName:  "cloned-vm",
+    }
+    
+    cloneResp, err := p.CloneVM(context.Background(), cloneReq)
+    require.NoError(t, err)
+    assert.NotEmpty(t, cloneResp.CloneVmId)
+    assert.NotEqual(t, createResp.VmId, cloneResp.CloneVmId)
+    
+    // Verify clone has same specs as source
+    getReq := &amp;providerv1.GetVMRequest{
+        VmId: cloneResp.CloneVmId,
+    }
+    
+    getResp, err := p.GetVM(context.Background(), getReq)
+    require.NoError(t, err)
+    assert.Equal(t, "cloned-vm", getResp.Name)
+    assert.Equal(t, int32(4), getResp.Spec.Cpu)
+    assert.Equal(t, int32(8192), getResp.Spec.Memory)
+    assert.Equal(t, "centos:8", getResp.Spec.Image)
+}
+</code></pre>
+<h3 id="32-add-build-and-test-targets"><a class="header" href="#32-add-build-and-test-targets">3.2 Add Build and Test Targets</a></h3>
+<p>Update the <code>Makefile</code>:</p>
+<pre><code class="language-makefile"># File Provider Makefile
+
+.PHONY: help build test lint clean run docker-build docker-push
+
+help: ## Show this help message
+	@echo 'Usage: make [target]'
+	@echo ''
+	@echo 'Targets:'
+	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  %-15s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+
+build: ## Build the provider binary
+	go build -o bin/provider-file ./cmd/provider-file
+
+test: ## Run tests
+	go test -v ./...
+
+test-coverage: ## Run tests with coverage
+	go test -v -coverprofile=coverage.out ./...
+	go tool cover -html=coverage.out -o coverage.html
+
+lint: ## Run linters
+	golangci-lint run ./...
+
+clean: ## Clean build artifacts
+	rm -rf bin/
+	rm -f coverage.out coverage.html
+
+run: build ## Run the provider locally
+	PROVIDER_STORAGE_DIR=/tmp/virtrigaud-file ./bin/provider-file
+
+docker-build: ## Build Docker image
+	docker build -f cmd/provider-file/Dockerfile -t provider-file:latest .
+
+docker-push: docker-build ## Build and push Docker image
+	docker tag provider-file:latest ghcr.io/yourorg/provider-file:latest
+	docker push ghcr.io/yourorg/provider-file:latest
+
+# Development targets
+dev-setup: ## Set up development environment
+	go mod download
+	go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+
+integration-test: build ## Run integration tests
+	./scripts/integration-test.sh
+</code></pre>
+<h2 id="step-4-test-with-vcts-virtrigaud-conformance-test-suite"><a class="header" href="#step-4-test-with-vcts-virtrigaud-conformance-test-suite">Step 4: Test with VCTS (VirtRigaud Conformance Test Suite)</a></h2>
+<h3 id="41-install-vcts"><a class="header" href="#41-install-vcts">4.1 Install VCTS</a></h3>
+<pre><code class="language-bash"># Build VCTS from the main repository
+go install github.com/projectbeskar/virtrigaud/cmd/vcts@latest
+</code></pre>
+<h3 id="42-create-vcts-configuration"><a class="header" href="#42-create-vcts-configuration">4.2 Create VCTS Configuration</a></h3>
+<p>Create <code>vcts-config.yaml</code>:</p>
+<pre><code class="language-yaml">provider:
+  name: "file"
+  endpoint: "localhost:9443"
+  tls: false
+  
+profiles:
+  core:
+    enabled: true
+    vm_specs:
+      - name: "basic"
+        cpu: 1
+        memory: 1024
+        image: "test:latest"
+      - name: "medium"
+        cpu: 2
+        memory: 4096
+        image: "ubuntu:20.04"
+        
+  snapshot:
+    enabled: true
+    
+  clone:
+    enabled: true
+
+tests:
+  timeout: "30s"
+  parallel: false
+  cleanup: true
+</code></pre>
+<h3 id="43-run-conformance-tests"><a class="header" href="#43-run-conformance-tests">4.3 Run Conformance Tests</a></h3>
+<pre><code class="language-bash"># Start the provider
+make run &amp;
+PROVIDER_PID=$!
+
+# Wait for provider to start
+sleep 3
+
+# Run VCTS core profile
+vcts run --config vcts-config.yaml --profile core
+
+# Run all enabled profiles
+vcts run --config vcts-config.yaml --profile all
+
+# Stop the provider
+kill $PROVIDER_PID
+</code></pre>
+<p>Expected output:</p>
+<pre><code>✅ Core Profile Tests
+  ✅ Provider.GetCapabilities
+  ✅ Provider.CreateVM
+  ✅ Provider.GetVM
+  ✅ Provider.UpdateVM
+  ✅ Provider.DeleteVM
+  ✅ Provider.PowerVM
+  ✅ Provider.ListVMs
+
+✅ Snapshot Profile Tests
+  ✅ Provider.CreateSnapshot
+
+✅ Clone Profile Tests
+  ✅ Provider.CloneVM
+
+🎉 All tests passed! Provider is conformant.
+</code></pre>
+<h2 id="step-5-create-helm-chart-for-deployment"><a class="header" href="#step-5-create-helm-chart-for-deployment">Step 5: Create Helm Chart for Deployment</a></h2>
+<h3 id="51-chart-structure"><a class="header" href="#51-chart-structure">5.1 Chart Structure</a></h3>
+<p>The generated chart in <code>charts/provider-file/</code> includes:</p>
+<pre><code>charts/provider-file/
+├── Chart.yaml
+├── values.yaml
+├── templates/
+│   ├── deployment.yaml
+│   ├── service.yaml
+│   ├── serviceaccount.yaml
+│   ├── rbac.yaml
+│   └── _helpers.tpl
+└── examples/
+    └── values-development.yaml
+</code></pre>
+<h3 id="52-customize-chart-values"><a class="header" href="#52-customize-chart-values">5.2 Customize Chart Values</a></h3>
+<p>Update <code>charts/provider-file/values.yaml</code>:</p>
+<pre><code class="language-yaml"># Default values for provider-file
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/yourorg/provider-file
+  pullPolicy: IfNotPresent
+  tag: "0.1.0"
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  fsGroup: 2000
+  runAsNonRoot: true
+  runAsUser: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+    - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 1000
+
+service:
+  type: ClusterIP
+  port: 9443
+  healthPort: 8080
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+# Provider-specific configuration
+provider:
+  storageDir: "/var/lib/virtrigaud/vms"
+  logLevel: "info"
+
+# Persistent storage for VM data
+persistence:
+  enabled: true
+  accessMode: ReadWriteOnce
+  size: 10Gi
+  storageClass: ""
+</code></pre>
+<h3 id="53-test-helm-chart"><a class="header" href="#53-test-helm-chart">5.3 Test Helm Chart</a></h3>
+<pre><code class="language-bash"># Lint the chart
+helm lint charts/provider-file/
+
+# Template the chart
+helm template provider-file charts/provider-file/ \
+  --values charts/provider-file/values.yaml
+
+# Install to local cluster
+helm install provider-file charts/provider-file/ \
+  --namespace provider-file \
+  --create-namespace \
+  --values charts/provider-file/examples/values-development.yaml
+</code></pre>
+<h2 id="step-6-set-up-cicd"><a class="header" href="#step-6-set-up-cicd">Step 6: Set Up CI/CD</a></h2>
+<h3 id="61-github-actions-workflow"><a class="header" href="#61-github-actions-workflow">6.1 GitHub Actions Workflow</a></h3>
+<p>The generated <code>.github/workflows/ci.yml</code> includes:</p>
+<pre><code class="language-yaml">name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+env:
+  GO_VERSION: '1.23'
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+    
+    - name: Run tests
+      run: make test
+
+    - name: Run linting
+      run: make lint
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+    
+    - name: Build binary
+      run: make build
+
+    - name: Build Docker image
+      run: make docker-build
+
+  conformance:
+    name: Conformance Tests
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+    
+    - name: Build provider
+      run: make build
+
+    - name: Install VCTS
+      run: go install github.com/projectbeskar/virtrigaud/cmd/vcts@latest
+
+    - name: Run conformance tests
+      run: |
+        # Start provider in background
+        PROVIDER_STORAGE_DIR=/tmp/vcts-test ./bin/provider-file &amp;
+        PROVIDER_PID=$!
+        
+        # Wait for startup
+        sleep 5
+        
+        # Run VCTS
+        vcts run --config vcts-config.yaml --profile core
+        
+        # Clean up
+        kill $PROVIDER_PID
+
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    needs: [test, build, conformance]
+    if: github.event_name == 'push' &amp;&amp; github.ref == 'refs/heads/main'
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Build and push Docker image
+      run: |
+        echo ${{ secrets.GITHUB_TOKEN }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+        make docker-push
+
+    - name: Package Helm chart
+      run: |
+        helm package charts/provider-file/ -d dist/
+        
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: release-artifacts
+        path: |
+          bin/
+          dist/
+</code></pre>
+<h2 id="step-7-publish-to-provider-catalog"><a class="header" href="#step-7-publish-to-provider-catalog">Step 7: Publish to Provider Catalog</a></h2>
+<h3 id="71-run-provider-verification"><a class="header" href="#71-run-provider-verification">7.1 Run Provider Verification</a></h3>
+<pre><code class="language-bash"># Verify the provider meets all requirements
+vrtg-provider verify --profile all
+</code></pre>
+<h3 id="72-publish-to-catalog"><a class="header" href="#72-publish-to-catalog">7.2 Publish to Catalog</a></h3>
+<pre><code class="language-bash"># Publish to the VirtRigaud provider catalog
+vrtg-provider publish \
+  --name file \
+  --image ghcr.io/yourorg/provider-file \
+  --tag 0.1.0 \
+  --repo https://github.com/yourorg/virtrigaud-provider-file \
+  --maintainer your-email@example.com \
+  --license Apache-2.0
+</code></pre>
+<p>This command will:</p>
+<ol>
+<li>Run VCTS conformance tests</li>
+<li>Generate a provider badge</li>
+<li>Create a catalog entry</li>
+<li>Open a pull request to the main VirtRigaud repository</li>
+</ol>
+<h3 id="73-example-catalog-entry"><a class="header" href="#73-example-catalog-entry">7.3 Example Catalog Entry</a></h3>
+<p>The generated catalog entry will look like:</p>
+<pre><code class="language-yaml">- name: file
+  displayName: "File Provider"
+  description: "File-based virtual machine provider for development and testing"
+  repo: "https://github.com/yourorg/virtrigaud-provider-file"
+  image: "ghcr.io/yourorg/provider-file"
+  tag: "0.1.0"
+  capabilities:
+    - core
+    - snapshot
+    - clone
+  conformance:
+    profiles:
+      core: pass
+      snapshot: pass
+      clone: pass
+      image-prepare: skip
+      advanced: skip
+    report_url: "https://github.com/yourorg/virtrigaud-provider-file/actions"
+    badge_url: "https://img.shields.io/badge/conformance-pass-green"
+    last_tested: "2025-08-26T15:00:00Z"
+  maintainer: "your-email@example.com"
+  license: "Apache-2.0"
+  maturity: "beta"
+  tags:
+    - file
+    - development
+    - testing
+  documentation: "https://github.com/yourorg/virtrigaud-provider-file/blob/main/README.md"
+</code></pre>
+<h2 id="step-8-production-considerations"><a class="header" href="#step-8-production-considerations">Step 8: Production Considerations</a></h2>
+<h3 id="81-security-hardening"><a class="header" href="#81-security-hardening">8.1 Security Hardening</a></h3>
+<pre><code class="language-yaml"># Production values.yaml
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+    - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 65534
+
+podSecurityContext:
+  fsGroup: 65534
+  runAsNonRoot: true
+  runAsUser: 65534
+  seccompProfile:
+    type: RuntimeDefault
+
+networkPolicy:
+  enabled: true
+  ingress:
+    fromNamespaces:
+      - virtrigaud-system
+  egress:
+    - to: []
+      ports:
+        - protocol: UDP
+          port: 53
+</code></pre>
+<h3 id="82-observability"><a class="header" href="#82-observability">8.2 Observability</a></h3>
+<p>Add monitoring and logging:</p>
+<pre><code class="language-go">// Add to provider.go
+import (
+    "github.com/prometheus/client_golang/prometheus"
+    "github.com/prometheus/client_golang/prometheus/promauto"
+)
+
+var (
+    vmOperations = promauto.NewCounterVec(
+        prometheus.CounterOpts{
+            Name: "file_provider_vm_operations_total",
+            Help: "Total number of VM operations",
+        },
+        []string{"operation", "status"},
+    )
+    
+    vmOperationDuration = promauto.NewHistogramVec(
+        prometheus.HistogramOpts{
+            Name: "file_provider_vm_operation_duration_seconds",
+            Help: "Duration of VM operations",
+        },
+        []string{"operation"},
+    )
+)
+
+func (p *Provider) CreateVM(ctx context.Context, req *providerv1.CreateVMRequest) (*providerv1.CreateVMResponse, error) {
+    start := time.Now()
+    defer func() {
+        vmOperationDuration.WithLabelValues("create").Observe(time.Since(start).Seconds())
+    }()
+    
+    // ... existing implementation ...
+    
+    vmOperations.WithLabelValues("create", "success").Inc()
+    return resp, nil
+}
+</code></pre>
+<h3 id="83-performance-optimization"><a class="header" href="#83-performance-optimization">8.3 Performance Optimization</a></h3>
+<ul>
+<li>Add connection pooling for gRPC clients</li>
+<li>Implement caching for frequently accessed VMs</li>
+<li>Use background workers for long-running operations</li>
+<li>Add rate limiting and request validation</li>
+</ul>
+<h3 id="84-error-handling-and-resilience"><a class="header" href="#84-error-handling-and-resilience">8.4 Error Handling and Resilience</a></h3>
+<ul>
+<li>Implement circuit breakers for external dependencies</li>
+<li>Add retry logic with exponential backoff</li>
+<li>Use structured logging with correlation IDs</li>
+<li>Implement graceful shutdown handling</li>
+</ul>
+<h2 id="conclusion"><a class="header" href="#conclusion">Conclusion</a></h2>
+<p>You’ve successfully created a complete VirtRigaud provider! This tutorial covered:</p>
+<p>✅ <strong>Provider Implementation</strong> - Full gRPC service with all core operations<br />
+✅ <strong>SDK Integration</strong> - Using VirtRigaud SDK for server setup and utilities<br />
+✅ <strong>Testing</strong> - Unit tests and VCTS conformance validation<br />
+✅ <strong>Containerization</strong> - Docker images and Helm charts<br />
+✅ <strong>CI/CD</strong> - Automated testing and publishing<br />
+✅ <strong>Catalog Integration</strong> - Publishing to the provider ecosystem</p>
+<h2 id="next-steps"><a class="header" href="#next-steps">Next Steps</a></h2>
+<ol>
+<li>
+<p><strong>Explore Advanced Features</strong>:</p>
+<ul>
+<li>Add image management capabilities</li>
+<li>Implement networking configuration</li>
+<li>Add storage volume management</li>
+</ul>
+</li>
+<li>
+<p><strong>Integration Examples</strong>:</p>
+<ul>
+<li>Connect to real hypervisors (libvirt, vSphere, etc.)</li>
+<li>Add authentication and authorization</li>
+<li>Implement backup and disaster recovery</li>
+</ul>
+</li>
+<li>
+<p><strong>Community Contribution</strong>:</p>
+<ul>
+<li>Submit your provider to the catalog</li>
+<li>Contribute improvements to the SDK</li>
+<li>Help other developers with provider development</li>
+</ul>
+</li>
+<li>
+<p><strong>Production Deployment</strong>:</p>
+<ul>
+<li>Set up monitoring and alerting</li>
+<li>Implement proper security measures</li>
+<li>Plan for scaling and high availability</li>
+</ul>
+</li>
+</ol>
+<p>For more information, visit the <a href="https://projectbeskar.github.io/virtrigaud/">VirtRigaud documentation</a> or join our community discussions.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../providers/proxmox.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../providers/versioning.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../providers/proxmox.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../providers/versioning.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="../theme/page-toc.js"></script>
+
+
+    </div>
+    </body>
+</html>

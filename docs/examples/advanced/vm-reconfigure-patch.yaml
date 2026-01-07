@@ -1,0 +1,37 @@
+# VM Reconfiguration Example
+# This patch demonstrates how to modify a VM's resources after creation
+# Apply this after the initial VM is running to trigger reconfiguration
+
+---
+# Patch to upgrade web-server-01 resources
+# Apply with: kubectl patch vm web-server-01 --patch-file vm-reconfigure-patch.yaml --type merge
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: web-server-01
+  namespace: default
+spec:
+  # Increase CPU and memory
+  resources:
+    cpu: 4        # Upgrade from 2 to 4 CPUs
+    memory: "8Gi"  # Upgrade from 4GB to 8GB
+  
+  # Expand the data disk
+  disks:
+    - name: "data"
+      sizeGiB: 100    # Expand from 50GB to 100GB
+      type: "thin"
+    # Add a new disk
+    - name: "logs"
+      sizeGiB: 20
+      type: "thin"
+
+# The controller will detect these changes and:
+# 1. Try online reconfiguration if supported by the provider
+# 2. If online reconfiguration fails, orchestrate a graceful power cycle:
+#    a. Set condition ReconfigurePendingPowerCycle=True
+#    b. Power off the VM
+#    c. Apply the reconfiguration
+#    d. Power on the VM
+#    e. Update status.lastReconfigureTime
+# 3. Emit events and update conditions throughout the process

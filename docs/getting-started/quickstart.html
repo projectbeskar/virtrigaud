@@ -1,0 +1,561 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>15-Minute Quickstart - VirtRigaud Documentation</title>
+
+
+        <!-- Custom HTML head -->
+        
+        <meta name="description" content="Kubernetes operator for managing virtual machines across multiple hypervisors">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="../highlight.css">
+        <link rel="stylesheet" href="../tomorrow-night.css">
+        <link rel="stylesheet" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../theme/custom.css">
+
+    </head>
+    <body class="sidebar-visible no-js">
+    <div id="body-container">
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "../";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
+        </script>
+
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            var html = document.querySelector('html');
+            html.classList.remove('light')
+            html.classList.add(theme);
+            var body = document.querySelector('body');
+            body.classList.remove('no-js')
+            body.classList.add('js');
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var body = document.querySelector('body');
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            body.classList.remove('sidebar-visible');
+            body.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <div class="sidebar-scrollbox">
+                <ol class="chapter"><li class="chapter-item affix "><a href="../index.html">Introduction</a></li><li class="chapter-item affix "><li class="part-title">Getting Started</li><li class="chapter-item expanded "><a href="../getting-started/quickstart.html" class="active"><strong aria-hidden="true">1.</strong> 15-Minute Quickstart</a></li><li class="chapter-item "><a href="../install-helm-only.html"><strong aria-hidden="true">2.</strong> Installation Guide</a></li><li class="chapter-item "><a href="../HELM_CRD_UPGRADES.html"><strong aria-hidden="true">3.</strong> Helm CRD Upgrades</a></li><li class="chapter-item affix "><li class="part-title">Core Documentation</li><li class="chapter-item "><a href="../CRDs.html"><strong aria-hidden="true">4.</strong> Custom Resource Definitions</a></li><li class="chapter-item "><a href="../EXAMPLES.html"><strong aria-hidden="true">5.</strong> Examples</a></li><li class="chapter-item "><a href="../PROVIDERS.html"><strong aria-hidden="true">6.</strong> Provider Documentation</a></li><li class="chapter-item "><a href="../PROVIDERS_CAPABILITIES.html"><strong aria-hidden="true">7.</strong> Provider Capabilities Matrix</a></li><li class="chapter-item affix "><li class="part-title">Provider-Specific Guides</li><li class="chapter-item "><a href="../providers/vsphere.html"><strong aria-hidden="true">8.</strong> vSphere Provider</a></li><li class="chapter-item "><a href="../providers/libvirt.html"><strong aria-hidden="true">9.</strong> Libvirt Provider</a></li><li class="chapter-item "><a href="../providers/proxmox.html"><strong aria-hidden="true">10.</strong> Proxmox VE Provider</a></li><li class="chapter-item "><a href="../providers/tutorial.html"><strong aria-hidden="true">11.</strong> Provider Tutorial</a></li><li class="chapter-item "><a href="../providers/versioning.html"><strong aria-hidden="true">12.</strong> Provider Versioning</a></li><li class="chapter-item affix "><li class="part-title">Advanced Features</li><li class="chapter-item "><a href="../ADVANCED_LIFECYCLE.html"><strong aria-hidden="true">13.</strong> VM Lifecycle Management</a></li><li class="chapter-item "><a href="../NESTED_VIRTUALIZATION.html"><strong aria-hidden="true">14.</strong> Nested Virtualization</a></li><li class="chapter-item "><a href="../GRACEFUL_SHUTDOWN.html"><strong aria-hidden="true">15.</strong> Graceful Shutdown</a></li><li class="chapter-item "><a href="../REMOTE_PROVIDERS.html"><strong aria-hidden="true">16.</strong> Remote Providers</a></li><li class="chapter-item affix "><li class="part-title">Operations & Administration</li><li class="chapter-item "><a href="../OBSERVABILITY.html"><strong aria-hidden="true">17.</strong> Observability</a></li><li class="chapter-item "><a href="../SECURITY.html"><strong aria-hidden="true">18.</strong> Security</a></li><li class="chapter-item "><a href="../RESILIENCE.html"><strong aria-hidden="true">19.</strong> Resilience</a></li><li class="chapter-item "><a href="../UPGRADE.html"><strong aria-hidden="true">20.</strong> Upgrade Guide</a></li><li class="chapter-item "><a href="../VSPHERE_HARDWARE_VERSION.html"><strong aria-hidden="true">21.</strong> vSphere Hardware Versions</a></li><li class="chapter-item affix "><li class="part-title">Security Configuration</li><li class="chapter-item "><a href="../providers/security/bearer-token.html"><strong aria-hidden="true">22.</strong> Bearer Token Authentication</a></li><li class="chapter-item "><a href="../providers/security/mtls.html"><strong aria-hidden="true">23.</strong> mTLS Configuration</a></li><li class="chapter-item "><a href="../providers/security/external-secrets.html"><strong aria-hidden="true">24.</strong> External Secrets</a></li><li class="chapter-item "><a href="../providers/security/network-policies.html"><strong aria-hidden="true">25.</strong> Network Policies</a></li><li class="chapter-item affix "><li class="part-title">API Reference</li><li class="chapter-item "><a href="../CLI.html"><strong aria-hidden="true">26.</strong> CLI Tools Reference</a></li><li class="chapter-item "><a href="../api-reference/cli.html"><strong aria-hidden="true">27.</strong> CLI API Reference</a></li><li class="chapter-item "><a href="../api-reference/metrics.html"><strong aria-hidden="true">28.</strong> Metrics Catalog</a></li><li class="chapter-item "><a href="../catalog.html"><strong aria-hidden="true">29.</strong> Provider Catalog</a></li><li class="chapter-item affix "><li class="part-title">Development</li><li class="chapter-item "><a href="../TESTING_WORKFLOWS_LOCALLY.html"><strong aria-hidden="true">30.</strong> Testing Workflows Locally</a></li><li class="chapter-item "><a href="../../../CONTRIBUTING.html"><strong aria-hidden="true">31.</strong> Contributing</a></li><li class="chapter-item "><a href="../../../DEVELOPMENT.html"><strong aria-hidden="true">32.</strong> Development Guide</a></li><li class="chapter-item affix "><li class="part-title">Examples</li><li class="chapter-item "><a href="../examples/index.html"><strong aria-hidden="true">33.</strong> Example README</a></li></ol>
+            </div>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <!-- Track and set sidebar scroll position -->
+        <script>
+            var sidebarScrollbox = document.querySelector('#sidebar .sidebar-scrollbox');
+            sidebarScrollbox.addEventListener('click', function(e) {
+                if (e.target.tagName === 'A') {
+                    sessionStorage.setItem('sidebar-scroll', sidebarScrollbox.scrollTop);
+                }
+            }, { passive: true });
+            var sidebarScrollTop = sessionStorage.getItem('sidebar-scroll');
+            sessionStorage.removeItem('sidebar-scroll');
+            if (sidebarScrollTop) {
+                // preserve sidebar scroll position when navigating via links within sidebar
+                sidebarScrollbox.scrollTop = sidebarScrollTop;
+            } else {
+                // scroll sidebar to current active section when navigating via "next/previous chapter" buttons
+                var activeSection = document.querySelector('#sidebar .active');
+                if (activeSection) {
+                    activeSection.scrollIntoView({ block: 'center' });
+                }
+            }
+        </script>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">VirtRigaud Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/projectbeskar/virtrigaud" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/projectbeskar/virtrigaud/edit/main/docs/src/getting-started/quickstart.md" title="Suggest an edit" aria-label="Suggest an edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="15-minute-quickstart"><a class="header" href="#15-minute-quickstart">15-Minute Quickstart</a></h1>
+<p>This guide will get you up and running with VirtRigaud in 15 minutes using both vSphere and Libvirt providers.</p>
+<h2 id="prerequisites"><a class="header" href="#prerequisites">Prerequisites</a></h2>
+<ul>
+<li>Kubernetes cluster (1.24+)</li>
+<li>kubectl configured</li>
+<li>Helm 3.x</li>
+<li>Access to a vSphere environment (optional)</li>
+<li>Access to a Libvirt/KVM host (optional)</li>
+</ul>
+<h2 id="api-support"><a class="header" href="#api-support">API Support</a></h2>
+<p><strong>Default API</strong>: v1beta1 - The recommended stable API for all new deployments.</p>
+<p><strong>Legacy API</strong>: v1beta1 - Served for compatibility but deprecated. See the <a href="../upgrade/">upgrade guide</a> for migration instructions.</p>
+<p>All resources support seamless conversion between API versions via webhooks.</p>
+<h2 id="step-1-install-virtrigaud"><a class="header" href="#step-1-install-virtrigaud">Step 1: Install VirtRigaud</a></h2>
+<h3 id="using-helm-recommended"><a class="header" href="#using-helm-recommended">Using Helm (Recommended)</a></h3>
+<pre><code class="language-bash"># Add the VirtRigaud Helm repository
+helm repo add virtrigaud https://projectbeskar.github.io/virtrigaud
+helm repo update
+
+# Install with default settings (CRDs included automatically)
+helm install virtrigaud virtrigaud/virtrigaud \
+  --namespace virtrigaud-system \
+  --create-namespace
+
+# Or install with specific providers enabled
+helm install virtrigaud virtrigaud/virtrigaud \
+  --namespace virtrigaud-system \
+  --create-namespace \
+  --set providers.vsphere.enabled=true \
+  --set providers.libvirt.enabled=true
+
+# To skip CRDs if already installed separately
+helm install virtrigaud virtrigaud/virtrigaud \
+  --namespace virtrigaud-system \
+  --create-namespace \
+  --skip-crds
+</code></pre>
+<h3 id="using-kustomize"><a class="header" href="#using-kustomize">Using Kustomize</a></h3>
+<pre><code class="language-bash"># Clone the repository
+git clone https://github.com/projectbeskar/virtrigaud.git
+cd virtrigaud
+
+# Apply base installation
+kubectl apply -k deploy/kustomize/base
+
+# Or apply with overlays
+kubectl apply -k deploy/kustomize/overlays/standard
+</code></pre>
+<h2 id="step-2-verify-installation"><a class="header" href="#step-2-verify-installation">Step 2: Verify Installation</a></h2>
+<pre><code class="language-bash"># Check that the manager is running
+kubectl get pods -n virtrigaud-system
+
+# Check CRDs are installed
+kubectl get crds | grep virtrigaud
+
+# Verify API conversion is working (v1beta1 &lt;-&gt; v1beta1)
+kubectl get crd virtualmachines.infra.virtrigaud.io -o yaml | yq '.spec.conversion'
+
+# Check manager logs
+kubectl logs -n virtrigaud-system deployment/virtrigaud-manager
+</code></pre>
+<h2 id="step-3-configure-a-provider"><a class="header" href="#step-3-configure-a-provider">Step 3: Configure a Provider</a></h2>
+<h3 id="option-a-vsphere-provider"><a class="header" href="#option-a-vsphere-provider">Option A: vSphere Provider</a></h3>
+<p>Create a secret with vSphere credentials:</p>
+<pre><code class="language-bash">kubectl create secret generic vsphere-credentials \
+  --namespace default \
+  --from-literal=endpoint=https://vcenter.example.com \
+  --from-literal=username=administrator@vsphere.local \
+  --from-literal=password=your-password \
+  --from-literal=insecure=false
+</code></pre>
+<p>Create a vSphere provider:</p>
+<pre><code class="language-yaml">apiVersion: infra.virtrigaud.io/v1beta1
+kind: Provider
+metadata:
+  name: vsphere-prod
+  namespace: default
+spec:
+  type: vsphere
+  endpoint: https://vcenter.example.com
+  credentialSecretRef:
+    name: vsphere-credentials
+  runtime:
+    mode: Remote
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.2.3"
+    service:
+      port: 9090
+  defaults:
+    datastore: "datastore1"
+    cluster: "cluster1"
+    folder: "virtrigaud-vms"
+</code></pre>
+<h3 id="option-b-libvirt-provider"><a class="header" href="#option-b-libvirt-provider">Option B: Libvirt Provider</a></h3>
+<p>Create a secret with Libvirt connection details:</p>
+<pre><code class="language-bash">kubectl create secret generic libvirt-credentials \
+  --namespace default \
+  --from-literal=uri=qemu+ssh://root@libvirt-host.example.com/system \
+  --from-literal=username=root \
+  --from-literal=privateKey="$(cat ~/.ssh/id_rsa)"
+</code></pre>
+<p>Create a Libvirt provider:</p>
+<pre><code class="language-yaml">apiVersion: infra.virtrigaud.io/v1beta1
+kind: Provider
+metadata:
+  name: libvirt-lab
+  namespace: default
+spec:
+  type: libvirt
+  endpoint: qemu+ssh://root@libvirt-host.example.com/system
+  credentialSecretRef:
+    name: libvirt-credentials
+  runtime:
+    mode: Remote
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.2.0"
+    service:
+      port: 9090
+  defaults:
+    defaultStoragePool: "default"
+    defaultNetwork: "default"
+</code></pre>
+<p>Apply the provider configuration:</p>
+<pre><code class="language-bash">kubectl apply -f provider.yaml
+</code></pre>
+<blockquote>
+<p>💡 <strong>Behind the scenes</strong>: VirtRigaud automatically converts your Provider resource into the appropriate command-line arguments, environment variables, and secret mounts for the provider pod. See the <a href="../REMOTE_PROVIDERS.html#configuration-flow-provider-resource--provider-pod">configuration flow documentation</a> for complete details.</p>
+</blockquote>
+<h2 id="step-4-create-a-vm-class"><a class="header" href="#step-4-create-a-vm-class">Step 4: Create a VM Class</a></h2>
+<p>Define resource templates for your VMs:</p>
+<pre><code class="language-yaml">apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMClass
+metadata:
+  name: small
+  namespace: default
+spec:
+  cpu: 2
+  memoryMiB: 2048
+  disks:
+  - name: root
+    sizeGiB: 20
+    type: thin
+  networks:
+  - name: default
+    type: "VM Network"  # vSphere network name
+</code></pre>
+<pre><code class="language-bash">kubectl apply -f vmclass.yaml
+</code></pre>
+<h2 id="step-5-create-a-vm-image"><a class="header" href="#step-5-create-a-vm-image">Step 5: Create a VM Image</a></h2>
+<p>Define the base image for your VMs:</p>
+<h3 id="vsphere-image-ova"><a class="header" href="#vsphere-image-ova">vSphere Image (OVA)</a></h3>
+<pre><code class="language-yaml">apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMImage
+metadata:
+  name: ubuntu-20-04
+  namespace: virtrigaud-system
+spec:
+  source:
+    vsphere:
+      ovaURL: "https://cloud-images.ubuntu.com/releases/20.04/ubuntu-20.04-server-cloudimg-amd64.ova"
+      checksum: "sha256:abc123..."
+      datastore: "datastore1"
+      folder: "vm-templates"
+  prepare:
+    onMissing: Import
+    timeout: "30m"
+</code></pre>
+<h3 id="libvirt-image-qcow2"><a class="header" href="#libvirt-image-qcow2">Libvirt Image (qcow2)</a></h3>
+<pre><code class="language-yaml">apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMImage
+metadata:
+  name: ubuntu-20-04
+  namespace: virtrigaud-system
+spec:
+  source:
+    libvirt:
+      qcow2URL: "https://cloud-images.ubuntu.com/releases/20.04/ubuntu-20.04-server-cloudimg-amd64.img"
+      checksum: "sha256:def456..."
+      storagePool: "default"
+  prepare:
+    onMissing: Import
+    timeout: "30m"
+</code></pre>
+<pre><code class="language-bash">kubectl apply -f vmimage.yaml
+</code></pre>
+<h2 id="step-6-create-your-first-vm"><a class="header" href="#step-6-create-your-first-vm">Step 6: Create Your First VM</a></h2>
+<pre><code class="language-yaml">apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: my-first-vm
+  namespace: default
+spec:
+  providerRef:
+    name: vsphere-prod  # or libvirt-lab
+    namespace: default
+  classRef:
+    name: small
+    namespace: default
+  imageRef:
+    name: ubuntu-20-04
+    namespace: default
+  powerState: "On"
+  userData:
+    cloudInit:
+      inline: |
+        #cloud-config
+        users:
+          - name: ubuntu
+            sudo: ALL=(ALL) NOPASSWD:ALL
+            ssh_authorized_keys:
+              - ssh-rsa AAAAB3... your-public-key
+        packages:
+          - curl
+          - vim
+  networks:
+  - name: default
+    networkRef:
+      name: default-network
+      namespace: default
+</code></pre>
+<pre><code class="language-bash">kubectl apply -f vm.yaml
+</code></pre>
+<h2 id="step-7-monitor-vm-creation"><a class="header" href="#step-7-monitor-vm-creation">Step 7: Monitor VM Creation</a></h2>
+<pre><code class="language-bash"># Watch VM status
+kubectl get vm my-first-vm -w
+
+# Check detailed status
+kubectl describe vm my-first-vm
+
+# View events
+kubectl get events --field-selector involvedObject.name=my-first-vm
+
+# Check provider logs
+kubectl logs -n virtrigaud-system deployment/virtrigaud-provider-vsphere
+</code></pre>
+<h2 id="step-8-access-your-vm"><a class="header" href="#step-8-access-your-vm">Step 8: Access Your VM</a></h2>
+<pre><code class="language-bash"># Get VM IP address
+kubectl get vm my-first-vm -o jsonpath='{.status.ips[0]}'
+
+# Get console URL (if supported)
+kubectl get vm my-first-vm -o jsonpath='{.status.consoleURL}'
+
+# SSH to the VM (once it has an IP)
+ssh ubuntu@&lt;vm-ip&gt;
+</code></pre>
+<h2 id="step-9-try-advanced-operations"><a class="header" href="#step-9-try-advanced-operations">Step 9: Try Advanced Operations</a></h2>
+<h3 id="create-a-snapshot"><a class="header" href="#create-a-snapshot">Create a Snapshot</a></h3>
+<pre><code class="language-yaml">apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMSnapshot
+metadata:
+  name: my-vm-snapshot
+  namespace: default
+spec:
+  vmRef:
+    name: my-first-vm
+  nameHint: "pre-update-snapshot"
+  memory: true
+</code></pre>
+<h3 id="clone-the-vm"><a class="header" href="#clone-the-vm">Clone the VM</a></h3>
+<pre><code class="language-yaml">apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMClone
+metadata:
+  name: my-vm-clone
+  namespace: default
+spec:
+  sourceRef:
+    name: my-first-vm
+  target:
+    name: cloned-vm
+    classRef:
+      name: small
+      namespace: default
+  linked: true
+</code></pre>
+<h3 id="scale-with-vmset"><a class="header" href="#scale-with-vmset">Scale with VMSet</a></h3>
+<pre><code class="language-yaml">apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMSet
+metadata:
+  name: web-servers
+  namespace: default
+spec:
+  replicas: 3
+  template:
+    spec:
+      providerRef:
+        name: vsphere-prod
+        namespace: default
+      classRef:
+        name: small
+        namespace: default
+      imageRef:
+        name: ubuntu-20-04
+        namespace: default
+      powerState: "On"
+</code></pre>
+<h2 id="step-10-clean-up"><a class="header" href="#step-10-clean-up">Step 10: Clean Up</a></h2>
+<pre><code class="language-bash"># Delete VM
+kubectl delete vm my-first-vm
+
+# Delete snapshots and clones
+kubectl delete vmsnapshot my-vm-snapshot
+kubectl delete vmclone my-vm-clone
+kubectl delete vmset web-servers
+
+# Uninstall VirtRigaud (optional)
+helm uninstall virtrigaud -n virtrigaud-system
+kubectl delete namespace virtrigaud-system
+</code></pre>
+<h2 id="next-steps"><a class="header" href="#next-steps">Next Steps</a></h2>
+<ul>
+<li>Browse <a href="../examples/">Complete Examples</a> for production-ready configurations</li>
+<li>Explore the <a href="../user-guides/virtual-machines.html">VM Lifecycle Guide</a></li>
+<li>Learn about <a href="../user-guides/networking.html">Advanced Networking</a></li>
+<li>Set up <a href="../admin-guides/monitoring.html">Monitoring and Observability</a></li>
+<li>Configure <a href="../admin-guides/security.html">Security and RBAC</a></li>
+<li>Read the <a href="../REMOTE_PROVIDERS.html">Remote Providers Documentation</a></li>
+<li>Read the <a href="../developer/provider-guide.html">Provider Development Guide</a></li>
+</ul>
+<h2 id="troubleshooting"><a class="header" href="#troubleshooting">Troubleshooting</a></h2>
+<p>If you encounter issues:</p>
+<ol>
+<li>Check the <a href="../admin-guides/troubleshooting.html">Troubleshooting Guide</a></li>
+<li>Verify your provider credentials and connectivity</li>
+<li>Check the manager and provider logs</li>
+<li>Ensure your Kubernetes cluster meets the requirements</li>
+<li>File an issue on <a href="https://github.com/projectbeskar/virtrigaud/issues">GitHub</a></li>
+</ol>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../index.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../install-helm-only.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../index.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../install-helm-only.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="../theme/page-toc.js"></script>
+
+
+    </div>
+    </body>
+</html>

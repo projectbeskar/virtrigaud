@@ -1,0 +1,543 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Helm CRD Upgrades - VirtRigaud Documentation</title>
+
+
+        <!-- Custom HTML head -->
+        
+        <meta name="description" content="Kubernetes operator for managing virtual machines across multiple hypervisors">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon.svg">
+        <link rel="shortcut icon" href="favicon.png">
+        <link rel="stylesheet" href="css/variables.css">
+        <link rel="stylesheet" href="css/general.css">
+        <link rel="stylesheet" href="css/chrome.css">
+        <link rel="stylesheet" href="css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="highlight.css">
+        <link rel="stylesheet" href="tomorrow-night.css">
+        <link rel="stylesheet" href="ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="theme/custom.css">
+
+    </head>
+    <body class="sidebar-visible no-js">
+    <div id="body-container">
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
+        </script>
+
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            var html = document.querySelector('html');
+            html.classList.remove('light')
+            html.classList.add(theme);
+            var body = document.querySelector('body');
+            body.classList.remove('no-js')
+            body.classList.add('js');
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var body = document.querySelector('body');
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            body.classList.remove('sidebar-visible');
+            body.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <div class="sidebar-scrollbox">
+                <ol class="chapter"><li class="chapter-item affix "><a href="index.html">Introduction</a></li><li class="chapter-item affix "><li class="part-title">Getting Started</li><li class="chapter-item "><a href="getting-started/quickstart.html"><strong aria-hidden="true">1.</strong> 15-Minute Quickstart</a></li><li class="chapter-item "><a href="install-helm-only.html"><strong aria-hidden="true">2.</strong> Installation Guide</a></li><li class="chapter-item expanded "><a href="HELM_CRD_UPGRADES.html" class="active"><strong aria-hidden="true">3.</strong> Helm CRD Upgrades</a></li><li class="chapter-item affix "><li class="part-title">Core Documentation</li><li class="chapter-item "><a href="CRDs.html"><strong aria-hidden="true">4.</strong> Custom Resource Definitions</a></li><li class="chapter-item "><a href="EXAMPLES.html"><strong aria-hidden="true">5.</strong> Examples</a></li><li class="chapter-item "><a href="PROVIDERS.html"><strong aria-hidden="true">6.</strong> Provider Documentation</a></li><li class="chapter-item "><a href="PROVIDERS_CAPABILITIES.html"><strong aria-hidden="true">7.</strong> Provider Capabilities Matrix</a></li><li class="chapter-item affix "><li class="part-title">Provider-Specific Guides</li><li class="chapter-item "><a href="providers/vsphere.html"><strong aria-hidden="true">8.</strong> vSphere Provider</a></li><li class="chapter-item "><a href="providers/libvirt.html"><strong aria-hidden="true">9.</strong> Libvirt Provider</a></li><li class="chapter-item "><a href="providers/proxmox.html"><strong aria-hidden="true">10.</strong> Proxmox VE Provider</a></li><li class="chapter-item "><a href="providers/tutorial.html"><strong aria-hidden="true">11.</strong> Provider Tutorial</a></li><li class="chapter-item "><a href="providers/versioning.html"><strong aria-hidden="true">12.</strong> Provider Versioning</a></li><li class="chapter-item affix "><li class="part-title">Advanced Features</li><li class="chapter-item "><a href="ADVANCED_LIFECYCLE.html"><strong aria-hidden="true">13.</strong> VM Lifecycle Management</a></li><li class="chapter-item "><a href="NESTED_VIRTUALIZATION.html"><strong aria-hidden="true">14.</strong> Nested Virtualization</a></li><li class="chapter-item "><a href="GRACEFUL_SHUTDOWN.html"><strong aria-hidden="true">15.</strong> Graceful Shutdown</a></li><li class="chapter-item "><a href="REMOTE_PROVIDERS.html"><strong aria-hidden="true">16.</strong> Remote Providers</a></li><li class="chapter-item affix "><li class="part-title">Operations & Administration</li><li class="chapter-item "><a href="OBSERVABILITY.html"><strong aria-hidden="true">17.</strong> Observability</a></li><li class="chapter-item "><a href="SECURITY.html"><strong aria-hidden="true">18.</strong> Security</a></li><li class="chapter-item "><a href="RESILIENCE.html"><strong aria-hidden="true">19.</strong> Resilience</a></li><li class="chapter-item "><a href="UPGRADE.html"><strong aria-hidden="true">20.</strong> Upgrade Guide</a></li><li class="chapter-item "><a href="VSPHERE_HARDWARE_VERSION.html"><strong aria-hidden="true">21.</strong> vSphere Hardware Versions</a></li><li class="chapter-item affix "><li class="part-title">Security Configuration</li><li class="chapter-item "><a href="providers/security/bearer-token.html"><strong aria-hidden="true">22.</strong> Bearer Token Authentication</a></li><li class="chapter-item "><a href="providers/security/mtls.html"><strong aria-hidden="true">23.</strong> mTLS Configuration</a></li><li class="chapter-item "><a href="providers/security/external-secrets.html"><strong aria-hidden="true">24.</strong> External Secrets</a></li><li class="chapter-item "><a href="providers/security/network-policies.html"><strong aria-hidden="true">25.</strong> Network Policies</a></li><li class="chapter-item affix "><li class="part-title">API Reference</li><li class="chapter-item "><a href="CLI.html"><strong aria-hidden="true">26.</strong> CLI Tools Reference</a></li><li class="chapter-item "><a href="api-reference/cli.html"><strong aria-hidden="true">27.</strong> CLI API Reference</a></li><li class="chapter-item "><a href="api-reference/metrics.html"><strong aria-hidden="true">28.</strong> Metrics Catalog</a></li><li class="chapter-item "><a href="catalog.html"><strong aria-hidden="true">29.</strong> Provider Catalog</a></li><li class="chapter-item affix "><li class="part-title">Development</li><li class="chapter-item "><a href="TESTING_WORKFLOWS_LOCALLY.html"><strong aria-hidden="true">30.</strong> Testing Workflows Locally</a></li><li class="chapter-item "><a href="../../CONTRIBUTING.html"><strong aria-hidden="true">31.</strong> Contributing</a></li><li class="chapter-item "><a href="../../DEVELOPMENT.html"><strong aria-hidden="true">32.</strong> Development Guide</a></li><li class="chapter-item affix "><li class="part-title">Examples</li><li class="chapter-item "><a href="examples/index.html"><strong aria-hidden="true">33.</strong> Example README</a></li></ol>
+            </div>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <!-- Track and set sidebar scroll position -->
+        <script>
+            var sidebarScrollbox = document.querySelector('#sidebar .sidebar-scrollbox');
+            sidebarScrollbox.addEventListener('click', function(e) {
+                if (e.target.tagName === 'A') {
+                    sessionStorage.setItem('sidebar-scroll', sidebarScrollbox.scrollTop);
+                }
+            }, { passive: true });
+            var sidebarScrollTop = sessionStorage.getItem('sidebar-scroll');
+            sessionStorage.removeItem('sidebar-scroll');
+            if (sidebarScrollTop) {
+                // preserve sidebar scroll position when navigating via links within sidebar
+                sidebarScrollbox.scrollTop = sidebarScrollTop;
+            } else {
+                // scroll sidebar to current active section when navigating via "next/previous chapter" buttons
+                var activeSection = document.querySelector('#sidebar .active');
+                if (activeSection) {
+                    activeSection.scrollIntoView({ block: 'center' });
+                }
+            }
+        </script>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">VirtRigaud Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/projectbeskar/virtrigaud" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/projectbeskar/virtrigaud/edit/main/docs/src/HELM_CRD_UPGRADES.md" title="Suggest an edit" aria-label="Suggest an edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="automatic-crd-upgrades-in-virtrigaud-helm-chart"><a class="header" href="#automatic-crd-upgrades-in-virtrigaud-helm-chart">Automatic CRD Upgrades in VirtRigaud Helm Chart</a></h1>
+<h2 id="overview"><a class="header" href="#overview">Overview</a></h2>
+<p>VirtRigaud Helm chart now supports <strong>automatic CRD upgrades</strong> during <code>helm upgrade</code>. This eliminates the need for manual CRD management and provides a seamless upgrade experience.</p>
+<h2 id="the-problem"><a class="header" href="#the-problem">The Problem</a></h2>
+<p>By default, Helm has a limitation:</p>
+<ul>
+<li>CRDs are installed during <code>helm install</code></li>
+<li>CRDs are <strong>NOT upgraded</strong> during <code>helm upgrade</code></li>
+</ul>
+<p>This means users had to manually apply CRD updates before upgrading, which was:</p>
+<ul>
+<li>Error-prone</li>
+<li>Easy to forget</li>
+<li>Breaks GitOps workflows</li>
+<li>Causes version drift between chart and CRDs</li>
+</ul>
+<h2 id="the-solution"><a class="header" href="#the-solution">The Solution</a></h2>
+<p>VirtRigaud uses <strong>Helm Hooks</strong> with a Kubernetes Job to automatically apply CRDs during both install and upgrade:</p>
+<h3 id="kubectl-image"><a class="header" href="#kubectl-image">kubectl Image</a></h3>
+<p>VirtRigaud builds and publishes its own <code>kubectl</code> image as part of the release process. This image:</p>
+<ul>
+<li>Based on Alpine Linux for minimal size (~50MB)</li>
+<li>Includes kubectl 1.32.0 binary from official Kubernetes releases</li>
+<li>Includes bash and shell for scripting support</li>
+<li>Runs as non-root user (UID 65532)</li>
+<li>Verified with SHA256 checksums</li>
+<li>Signed with Cosign and includes SBOM</li>
+<li>Security scanned but uses official kubectl binary (vulnerabilities tracked upstream)</li>
+</ul>
+<p>The image is automatically built and tagged to match each VirtRigaud release version, ensuring version consistency across all components.</p>
+<p><strong>Image Location</strong>: <code>ghcr.io/projectbeskar/virtrigaud/kubectl:&lt;version&gt;</code></p>
+<h3 id="how-it-works"><a class="header" href="#how-it-works">How It Works</a></h3>
+<ol>
+<li><strong>Pre-Upgrade Hook</strong>: Before the main upgrade starts, a Job is created</li>
+<li><strong>CRD Application</strong>: The Job applies all CRDs using <code>kubectl apply --server-side</code></li>
+<li><strong>Safe Upgrades</strong>: Server-side apply handles conflicts gracefully</li>
+<li><strong>Automatic Cleanup</strong>: Job is deleted after successful completion</li>
+</ol>
+<h3 id="architecture"><a class="header" href="#architecture">Architecture</a></h3>
+<pre><code>helm upgrade virtrigaud
+    ↓
+[Pre-Upgrade Hook -10]
+    ↓
+ConfigMap with CRDs created
+    ↓
+[Pre-Upgrade Hook -5]
+    ↓
+ServiceAccount + RBAC created
+    ↓
+[Pre-Upgrade Hook 0]
+    ↓
+Job applies CRDs via kubectl
+    ↓
+[Standard Helm Resources]
+    ↓
+Manager &amp; Providers deployed
+    ↓
+[Hook Cleanup]
+    ↓
+Job &amp; Hook resources deleted
+</code></pre>
+<h2 id="features"><a class="header" href="#features">Features</a></h2>
+<h3 id="enabled-by-default"><a class="header" href="#enabled-by-default">Enabled by Default</a></h3>
+<p>No configuration needed - just works:</p>
+<pre><code class="language-bash">helm upgrade virtrigaud virtrigaud/virtrigaud -n virtrigaud-system
+</code></pre>
+<h3 id="server-side-apply"><a class="header" href="#server-side-apply">Server-Side Apply</a></h3>
+<p>Uses <code>kubectl apply --server-side</code> for:</p>
+<ul>
+<li>Safe conflict resolution</li>
+<li>Field management</li>
+<li>No ownership conflicts</li>
+</ul>
+<h3 id="gitops-compatible"><a class="header" href="#gitops-compatible">GitOps Compatible</a></h3>
+<p>Works seamlessly with:</p>
+<ul>
+<li><strong>ArgoCD</strong>: Helm hooks execute properly</li>
+<li><strong>Flux</strong>: Compatible with HelmRelease CRD upgrades</li>
+<li><strong>Terraform</strong>: Helm provider handles hooks</li>
+</ul>
+<h3 id="configurable"><a class="header" href="#configurable">Configurable</a></h3>
+<p>Customize the upgrade behavior:</p>
+<pre><code class="language-yaml">crdUpgrade:
+  enabled: true  # Enable/disable automatic upgrades
+  
+  image:
+    repository: ghcr.io/projectbeskar/virtrigaud/kubectl  # VirtRigaud kubectl image
+    tag: "v0.2.0"  # Auto-updated to match release version
+  
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 300
+  waitSeconds: 5
+  
+  resources:
+    limits:
+      cpu: 100m
+      memory: 128Mi
+</code></pre>
+<h2 id="usage-examples"><a class="header" href="#usage-examples">Usage Examples</a></h2>
+<h3 id="standard-upgrade-automatic-crds"><a class="header" href="#standard-upgrade-automatic-crds">Standard Upgrade (Automatic CRDs)</a></h3>
+<pre><code class="language-bash"># CRDs are automatically upgraded
+helm upgrade virtrigaud virtrigaud/virtrigaud \
+  -n virtrigaud-system
+</code></pre>
+<h3 id="disable-automatic-crd-upgrade"><a class="header" href="#disable-automatic-crd-upgrade">Disable Automatic CRD Upgrade</a></h3>
+<pre><code class="language-bash"># Disable if you manage CRDs separately
+helm upgrade virtrigaud virtrigaud/virtrigaud \
+  -n virtrigaud-system \
+  --set crdUpgrade.enabled=false
+</code></pre>
+<h3 id="manual-crd-management"><a class="header" href="#manual-crd-management">Manual CRD Management</a></h3>
+<pre><code class="language-bash"># Apply CRDs manually before upgrade
+kubectl apply -f charts/virtrigaud/crds/
+
+# Then upgrade without CRD management
+helm upgrade virtrigaud virtrigaud/virtrigaud \
+  -n virtrigaud-system \
+  --set crdUpgrade.enabled=false
+</code></pre>
+<h3 id="skip-crds-entirely"><a class="header" href="#skip-crds-entirely">Skip CRDs Entirely</a></h3>
+<pre><code class="language-bash"># Skip CRDs during upgrade (for external CRD management)
+helm upgrade virtrigaud virtrigaud/virtrigaud \
+  -n virtrigaud-system \
+  --skip-crds \
+  --set crdUpgrade.enabled=false
+</code></pre>
+<h2 id="gitops-integration"><a class="header" href="#gitops-integration">GitOps Integration</a></h2>
+<h3 id="argocd"><a class="header" href="#argocd">ArgoCD</a></h3>
+<pre><code class="language-yaml">apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: virtrigaud
+spec:
+  source:
+    chart: virtrigaud
+    targetRevision: 0.2.2
+    helm:
+      values: |
+        crdUpgrade:
+          enabled: true  # Automatic upgrades work!
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+</code></pre>
+<p><strong>Note</strong>: ArgoCD executes Helm hooks properly, so CRDs will be upgraded automatically.</p>
+<h3 id="flux"><a class="header" href="#flux">Flux</a></h3>
+<pre><code class="language-yaml">apiVersion: helm.toolkit.fluxcd.io/v2beta1
+kind: HelmRelease
+metadata:
+  name: virtrigaud
+spec:
+  chart:
+    spec:
+      chart: virtrigaud
+      version: 0.2.2
+  values:
+    crdUpgrade:
+      enabled: true  # Automatic upgrades work!
+  install:
+    crds: CreateReplace
+  upgrade:
+    crds: CreateReplace
+</code></pre>
+<p><strong>Note</strong>: Flux’s <code>crds: CreateReplace</code> works alongside our hook-based upgrades for maximum compatibility.</p>
+<h2 id="troubleshooting"><a class="header" href="#troubleshooting">Troubleshooting</a></h2>
+<h3 id="check-crd-upgrade-job"><a class="header" href="#check-crd-upgrade-job">Check CRD Upgrade Job</a></h3>
+<pre><code class="language-bash"># View job status
+kubectl get jobs -n virtrigaud-system -l app.kubernetes.io/component=crd-upgrade
+
+# View job logs
+kubectl logs -n virtrigaud-system -l app.kubernetes.io/component=crd-upgrade
+
+# View job details
+kubectl describe job -n virtrigaud-system -l app.kubernetes.io/component=crd-upgrade
+</code></pre>
+<h3 id="common-issues"><a class="header" href="#common-issues">Common Issues</a></h3>
+<h4 id="1-rbac-permissions"><a class="header" href="#1-rbac-permissions">1. RBAC Permissions</a></h4>
+<p><strong>Symptom</strong>: Job fails with “forbidden” errors</p>
+<p><strong>Solution</strong>: Ensure the ServiceAccount has CRD permissions:</p>
+<pre><code class="language-bash">kubectl get clusterrole -l app.kubernetes.io/component=crd-upgrade
+kubectl describe clusterrole &lt;role-name&gt;
+</code></pre>
+<h4 id="2-image-pull-failures"><a class="header" href="#2-image-pull-failures">2. Image Pull Failures</a></h4>
+<p><strong>Symptom</strong>: Job fails to start, ImagePullBackOff</p>
+<p><strong>Solution</strong>: Check image configuration:</p>
+<pre><code class="language-yaml">crdUpgrade:
+  image:
+    repository: ghcr.io/projectbeskar/virtrigaud/kubectl
+    tag: "v0.2.2-rc1"  # Use matching VirtRigaud version
+    pullPolicy: IfNotPresent
+</code></pre>
+<h4 id="3-crd-conflicts"><a class="header" href="#3-crd-conflicts">3. CRD Conflicts</a></h4>
+<p><strong>Symptom</strong>: Apply errors about field conflicts</p>
+<p><strong>Solution</strong>: Server-side apply handles this automatically, but you can force:</p>
+<pre><code class="language-bash">kubectl apply --server-side=true --force-conflicts -f charts/virtrigaud/crds/
+</code></pre>
+<h4 id="4-job-not-cleaning-up"><a class="header" href="#4-job-not-cleaning-up">4. Job Not Cleaning Up</a></h4>
+<p><strong>Symptom</strong>: Old jobs remain after upgrade</p>
+<p><strong>Solution</strong>: Adjust TTL or manually clean:</p>
+<pre><code class="language-bash">kubectl delete jobs -n virtrigaud-system -l app.kubernetes.io/component=crd-upgrade
+</code></pre>
+<h3 id="debug-mode"><a class="header" href="#debug-mode">Debug Mode</a></h3>
+<p>Enable verbose logging:</p>
+<pre><code class="language-bash">helm upgrade virtrigaud virtrigaud/virtrigaud \
+  -n virtrigaud-system \
+  --debug
+</code></pre>
+<h2 id="migration-guide"><a class="header" href="#migration-guide">Migration Guide</a></h2>
+<h3 id="migrating-from-manual-crd-management"><a class="header" href="#migrating-from-manual-crd-management">Migrating from Manual CRD Management</a></h3>
+<p>If you were previously managing CRDs manually:</p>
+<ol>
+<li>
+<p><strong>Enable automatic upgrades</strong>:</p>
+<pre><code class="language-bash">helm upgrade virtrigaud virtrigaud/virtrigaud \
+  -n virtrigaud-system \
+  --set crdUpgrade.enabled=true
+</code></pre>
+</li>
+<li>
+<p><strong>Verify CRDs are upgraded</strong>:</p>
+<pre><code class="language-bash">kubectl get crd -l app.kubernetes.io/name=virtrigaud
+</code></pre>
+</li>
+<li>
+<p><strong>Remove manual steps from your upgrade process</strong></p>
+</li>
+</ol>
+<h3 id="migrating-to-external-crd-management"><a class="header" href="#migrating-to-external-crd-management">Migrating to External CRD Management</a></h3>
+<p>If you want to manage CRDs externally (e.g., separate Helm chart):</p>
+<ol>
+<li>
+<p><strong>Disable automatic upgrades</strong>:</p>
+<pre><code class="language-yaml">crdUpgrade:
+  enabled: false
+</code></pre>
+</li>
+<li>
+<p><strong>Extract CRDs</strong>:</p>
+<pre><code class="language-bash">helm show crds virtrigaud/virtrigaud &gt; my-crds.yaml
+</code></pre>
+</li>
+<li>
+<p><strong>Manage CRDs separately</strong>:</p>
+<pre><code class="language-bash">kubectl apply -f my-crds.yaml
+</code></pre>
+</li>
+</ol>
+<h2 id="technical-details"><a class="header" href="#technical-details">Technical Details</a></h2>
+<h3 id="hook-weights"><a class="header" href="#hook-weights">Hook Weights</a></h3>
+<p>The upgrade process uses weighted hooks for proper ordering:</p>
+<div class="table-wrapper"><table><thead><tr><th>Weight</th><th>Resource</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>-10</code></td><td>ConfigMap</td><td>Store CRD content</td></tr>
+<tr><td><code>-5</code></td><td>RBAC</td><td>Create permissions</td></tr>
+<tr><td><code>0</code></td><td>Job</td><td>Apply CRDs</td></tr>
+</tbody></table>
+</div>
+<h3 id="resource-requirements"><a class="header" href="#resource-requirements">Resource Requirements</a></h3>
+<p>The CRD upgrade job is lightweight:</p>
+<pre><code class="language-yaml">resources:
+  limits:
+    cpu: 100m
+    memory: 128Mi
+  requests:
+    cpu: 50m
+    memory: 64Mi
+</code></pre>
+<h3 id="security"><a class="header" href="#security">Security</a></h3>
+<ul>
+<li>Runs as non-root user (65532)</li>
+<li>Read-only root filesystem</li>
+<li>No privilege escalation</li>
+<li>Minimal RBAC (only CRD permissions)</li>
+<li>Automatic cleanup after completion</li>
+</ul>
+<h3 id="compatibility"><a class="header" href="#compatibility">Compatibility</a></h3>
+<ul>
+<li><strong>Kubernetes</strong>: 1.25+</li>
+<li><strong>Helm</strong>: 3.8+</li>
+<li><strong>kubectl</strong>: 1.24+ (in Job image)</li>
+</ul>
+<h2 id="best-practices"><a class="header" href="#best-practices">Best Practices</a></h2>
+<ol>
+<li><strong>Use Automatic Upgrades</strong>: Enable by default for best UX</li>
+<li><strong>Monitor Job Logs</strong>: Check logs during first upgrade</li>
+<li><strong>Test in Dev First</strong>: Verify upgrades in non-production</li>
+<li><strong>Backup CRDs</strong>: Keep backups before major upgrades</li>
+<li><strong>Review Changelogs</strong>: Check for breaking CRD changes</li>
+</ol>
+<h2 id="faq"><a class="header" href="#faq">FAQ</a></h2>
+<h3 id="q-will-this-delete-my-existing-resources"><a class="header" href="#q-will-this-delete-my-existing-resources">Q: Will this delete my existing resources?</a></h3>
+<p><strong>A</strong>: No. CRD upgrades are additive and preserve existing Custom Resources.</p>
+<h3 id="q-what-happens-if-the-job-fails"><a class="header" href="#q-what-happens-if-the-job-fails">Q: What happens if the job fails?</a></h3>
+<p><strong>A</strong>: Helm upgrade will fail, leaving your cluster in the previous state. Fix the issue and retry.</p>
+<h3 id="q-can-i-use-this-with-argocd"><a class="header" href="#q-can-i-use-this-with-argocd">Q: Can I use this with ArgoCD?</a></h3>
+<p><strong>A</strong>: Yes! ArgoCD properly executes Helm hooks.</p>
+<h3 id="q-does-this-work-with-flux"><a class="header" href="#q-does-this-work-with-flux">Q: Does this work with Flux?</a></h3>
+<p><strong>A</strong>: Yes! Flux HelmRelease handles hooks correctly.</p>
+<h3 id="q-how-do-i-roll-back"><a class="header" href="#q-how-do-i-roll-back">Q: How do I roll back?</a></h3>
+<p><strong>A</strong>: Use <code>helm rollback</code>. CRDs are not rolled back (Kubernetes limitation).</p>
+<h3 id="q-can-i-customize-the-kubectl-image"><a class="header" href="#q-can-i-customize-the-kubectl-image">Q: Can I customize the kubectl image?</a></h3>
+<p><strong>A</strong>: Yes, via <code>crdUpgrade.image.repository</code> and <code>crdUpgrade.image.tag</code>. The default uses the official Kubernetes kubectl image from <code>registry.k8s.io</code>.</p>
+<h2 id="references"><a class="header" href="#references">References</a></h2>
+<ul>
+<li><a href="https://helm.sh/docs/topics/charts_hooks/">Helm Hooks Documentation</a></li>
+<li><a href="https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/">Kubernetes CRD Documentation</a></li>
+<li><a href="https://kubernetes.io/docs/reference/using-api/server-side-apply/">Server-Side Apply</a></li>
+</ul>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="install-helm-only.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="CRDs.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="install-helm-only.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="CRDs.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr.min.js"></script>
+        <script src="mark.min.js"></script>
+        <script src="searcher.js"></script>
+
+        <script src="clipboard.min.js"></script>
+        <script src="highlight.js"></script>
+        <script src="book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="theme/page-toc.js"></script>
+
+
+    </div>
+    </body>
+</html>

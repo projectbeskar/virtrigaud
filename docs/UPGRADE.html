@@ -1,0 +1,460 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Upgrade Guide - VirtRigaud Documentation</title>
+
+
+        <!-- Custom HTML head -->
+        
+        <meta name="description" content="Kubernetes operator for managing virtual machines across multiple hypervisors">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon.svg">
+        <link rel="shortcut icon" href="favicon.png">
+        <link rel="stylesheet" href="css/variables.css">
+        <link rel="stylesheet" href="css/general.css">
+        <link rel="stylesheet" href="css/chrome.css">
+        <link rel="stylesheet" href="css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="highlight.css">
+        <link rel="stylesheet" href="tomorrow-night.css">
+        <link rel="stylesheet" href="ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="theme/custom.css">
+
+    </head>
+    <body class="sidebar-visible no-js">
+    <div id="body-container">
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
+        </script>
+
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            var html = document.querySelector('html');
+            html.classList.remove('light')
+            html.classList.add(theme);
+            var body = document.querySelector('body');
+            body.classList.remove('no-js')
+            body.classList.add('js');
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var body = document.querySelector('body');
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            body.classList.remove('sidebar-visible');
+            body.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <div class="sidebar-scrollbox">
+                <ol class="chapter"><li class="chapter-item affix "><a href="index.html">Introduction</a></li><li class="chapter-item affix "><li class="part-title">Getting Started</li><li class="chapter-item "><a href="getting-started/quickstart.html"><strong aria-hidden="true">1.</strong> 15-Minute Quickstart</a></li><li class="chapter-item "><a href="install-helm-only.html"><strong aria-hidden="true">2.</strong> Installation Guide</a></li><li class="chapter-item "><a href="HELM_CRD_UPGRADES.html"><strong aria-hidden="true">3.</strong> Helm CRD Upgrades</a></li><li class="chapter-item affix "><li class="part-title">Core Documentation</li><li class="chapter-item "><a href="CRDs.html"><strong aria-hidden="true">4.</strong> Custom Resource Definitions</a></li><li class="chapter-item "><a href="EXAMPLES.html"><strong aria-hidden="true">5.</strong> Examples</a></li><li class="chapter-item "><a href="PROVIDERS.html"><strong aria-hidden="true">6.</strong> Provider Documentation</a></li><li class="chapter-item "><a href="PROVIDERS_CAPABILITIES.html"><strong aria-hidden="true">7.</strong> Provider Capabilities Matrix</a></li><li class="chapter-item affix "><li class="part-title">Provider-Specific Guides</li><li class="chapter-item "><a href="providers/vsphere.html"><strong aria-hidden="true">8.</strong> vSphere Provider</a></li><li class="chapter-item "><a href="providers/libvirt.html"><strong aria-hidden="true">9.</strong> Libvirt Provider</a></li><li class="chapter-item "><a href="providers/proxmox.html"><strong aria-hidden="true">10.</strong> Proxmox VE Provider</a></li><li class="chapter-item "><a href="providers/tutorial.html"><strong aria-hidden="true">11.</strong> Provider Tutorial</a></li><li class="chapter-item "><a href="providers/versioning.html"><strong aria-hidden="true">12.</strong> Provider Versioning</a></li><li class="chapter-item affix "><li class="part-title">Advanced Features</li><li class="chapter-item "><a href="ADVANCED_LIFECYCLE.html"><strong aria-hidden="true">13.</strong> VM Lifecycle Management</a></li><li class="chapter-item "><a href="NESTED_VIRTUALIZATION.html"><strong aria-hidden="true">14.</strong> Nested Virtualization</a></li><li class="chapter-item "><a href="GRACEFUL_SHUTDOWN.html"><strong aria-hidden="true">15.</strong> Graceful Shutdown</a></li><li class="chapter-item "><a href="REMOTE_PROVIDERS.html"><strong aria-hidden="true">16.</strong> Remote Providers</a></li><li class="chapter-item affix "><li class="part-title">Operations & Administration</li><li class="chapter-item "><a href="OBSERVABILITY.html"><strong aria-hidden="true">17.</strong> Observability</a></li><li class="chapter-item "><a href="SECURITY.html"><strong aria-hidden="true">18.</strong> Security</a></li><li class="chapter-item "><a href="RESILIENCE.html"><strong aria-hidden="true">19.</strong> Resilience</a></li><li class="chapter-item expanded "><a href="UPGRADE.html" class="active"><strong aria-hidden="true">20.</strong> Upgrade Guide</a></li><li class="chapter-item "><a href="VSPHERE_HARDWARE_VERSION.html"><strong aria-hidden="true">21.</strong> vSphere Hardware Versions</a></li><li class="chapter-item affix "><li class="part-title">Security Configuration</li><li class="chapter-item "><a href="providers/security/bearer-token.html"><strong aria-hidden="true">22.</strong> Bearer Token Authentication</a></li><li class="chapter-item "><a href="providers/security/mtls.html"><strong aria-hidden="true">23.</strong> mTLS Configuration</a></li><li class="chapter-item "><a href="providers/security/external-secrets.html"><strong aria-hidden="true">24.</strong> External Secrets</a></li><li class="chapter-item "><a href="providers/security/network-policies.html"><strong aria-hidden="true">25.</strong> Network Policies</a></li><li class="chapter-item affix "><li class="part-title">API Reference</li><li class="chapter-item "><a href="CLI.html"><strong aria-hidden="true">26.</strong> CLI Tools Reference</a></li><li class="chapter-item "><a href="api-reference/cli.html"><strong aria-hidden="true">27.</strong> CLI API Reference</a></li><li class="chapter-item "><a href="api-reference/metrics.html"><strong aria-hidden="true">28.</strong> Metrics Catalog</a></li><li class="chapter-item "><a href="catalog.html"><strong aria-hidden="true">29.</strong> Provider Catalog</a></li><li class="chapter-item affix "><li class="part-title">Development</li><li class="chapter-item "><a href="TESTING_WORKFLOWS_LOCALLY.html"><strong aria-hidden="true">30.</strong> Testing Workflows Locally</a></li><li class="chapter-item "><a href="../../CONTRIBUTING.html"><strong aria-hidden="true">31.</strong> Contributing</a></li><li class="chapter-item "><a href="../../DEVELOPMENT.html"><strong aria-hidden="true">32.</strong> Development Guide</a></li><li class="chapter-item affix "><li class="part-title">Examples</li><li class="chapter-item "><a href="examples/index.html"><strong aria-hidden="true">33.</strong> Example README</a></li></ol>
+            </div>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <!-- Track and set sidebar scroll position -->
+        <script>
+            var sidebarScrollbox = document.querySelector('#sidebar .sidebar-scrollbox');
+            sidebarScrollbox.addEventListener('click', function(e) {
+                if (e.target.tagName === 'A') {
+                    sessionStorage.setItem('sidebar-scroll', sidebarScrollbox.scrollTop);
+                }
+            }, { passive: true });
+            var sidebarScrollTop = sessionStorage.getItem('sidebar-scroll');
+            sessionStorage.removeItem('sidebar-scroll');
+            if (sidebarScrollTop) {
+                // preserve sidebar scroll position when navigating via links within sidebar
+                sidebarScrollbox.scrollTop = sidebarScrollTop;
+            } else {
+                // scroll sidebar to current active section when navigating via "next/previous chapter" buttons
+                var activeSection = document.querySelector('#sidebar .active');
+                if (activeSection) {
+                    activeSection.scrollIntoView({ block: 'center' });
+                }
+            }
+        </script>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">VirtRigaud Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/projectbeskar/virtrigaud" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/projectbeskar/virtrigaud/edit/main/docs/src/UPGRADE.md" title="Suggest an edit" aria-label="Suggest an edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="virtrigaud-upgrade-guide"><a class="header" href="#virtrigaud-upgrade-guide">VirtRigaud Upgrade Guide</a></h1>
+<p>This guide covers upgrading VirtRigaud installations, including CRD updates and breaking changes.</p>
+<h2 id="quick-upgrade"><a class="header" href="#quick-upgrade">Quick Upgrade</a></h2>
+<h3 id="helm-based-upgrade-recommended"><a class="header" href="#helm-based-upgrade-recommended">Helm-based Upgrade (Recommended)</a></h3>
+<pre><code class="language-bash"># 1. Update Helm repository
+helm repo update
+
+# 2. Check for breaking changes
+helm diff upgrade virtrigaud virtrigaud/virtrigaud --version v0.2.1
+
+# 3. Upgrade CRDs first (required for schema changes)
+helm pull virtrigaud/virtrigaud --version v0.2.1 --untar
+kubectl apply -f virtrigaud/crds/
+
+# 4. Upgrade VirtRigaud
+helm upgrade virtrigaud virtrigaud/virtrigaud \
+  --namespace virtrigaud-system \
+  --version v0.2.1
+</code></pre>
+<h3 id="alternative-direct-crd-download"><a class="header" href="#alternative-direct-crd-download">Alternative: Direct CRD Download</a></h3>
+<pre><code class="language-bash"># Download and apply CRDs from release
+curl -L "https://github.com/projectbeskar/virtrigaud/releases/download/v0.2.1/virtrigaud-crds.yaml" | kubectl apply -f -
+
+# Upgrade application
+helm upgrade virtrigaud virtrigaud/virtrigaud --version v0.2.1
+</code></pre>
+<h2 id="version-specific-upgrade-notes"><a class="header" href="#version-specific-upgrade-notes">Version-Specific Upgrade Notes</a></h2>
+<h3 id="v020--v021"><a class="header" href="#v020--v021">v0.2.0 → v0.2.1</a></h3>
+<p><strong>Breaking Changes:</strong></p>
+<ul>
+<li>✅ PowerState validation fixed (OffGraceful now supported)</li>
+<li>✅ Hardware version management added (vSphere only)</li>
+<li>✅ Disk size configuration respected</li>
+</ul>
+<p><strong>Required Actions:</strong></p>
+<ol>
+<li><strong>CRD Update Required</strong>: New powerState validation and schema changes</li>
+<li><strong>Provider Image Update</strong>: Ensure providers use v0.2.1+ images for new features</li>
+<li><strong>Field Testing</strong>: Verify OffGraceful, hardware version, and disk sizing work correctly</li>
+</ol>
+<p><strong>Upgrade Steps:</strong></p>
+<pre><code class="language-bash"># 1. Backup existing resources
+kubectl get virtualmachines,vmclasses,providers -A -o yaml &gt; virtrigaud-backup-v021.yaml
+
+# 2. Update CRDs (fixes OffGraceful validation)
+kubectl apply -f https://github.com/projectbeskar/virtrigaud/releases/download/v0.2.1/virtrigaud-crds.yaml
+
+# 3. Upgrade VirtRigaud
+helm upgrade virtrigaud virtrigaud/virtrigaud --version v0.2.1
+
+# 4. Verify OffGraceful works
+kubectl patch virtualmachine &lt;vm-name&gt; --type='merge' -p='{"spec":{"powerState":"OffGraceful"}}'
+</code></pre>
+<h2 id="rollback-procedures"><a class="header" href="#rollback-procedures">Rollback Procedures</a></h2>
+<h3 id="rollback-to-previous-version"><a class="header" href="#rollback-to-previous-version">Rollback to Previous Version</a></h3>
+<pre><code class="language-bash"># 1. Rollback application
+helm rollback virtrigaud &lt;revision&gt;
+
+# 2. Rollback CRDs (if schema breaking changes)
+kubectl apply -f https://github.com/projectbeskar/virtrigaud/releases/download/v0.2.0/virtrigaud-crds.yaml
+
+# 3. Verify resources still work
+kubectl get virtualmachines -A
+</code></pre>
+<h3 id="emergency-recovery"><a class="header" href="#emergency-recovery">Emergency Recovery</a></h3>
+<pre><code class="language-bash"># 1. Restore from backup
+kubectl apply -f virtrigaud-backup-v021.yaml
+
+# 2. Check controller logs
+kubectl logs -n virtrigaud-system deployment/virtrigaud-manager
+
+# 3. Force reconciliation
+kubectl annotate virtualmachine &lt;vm-name&gt; virtrigaud.io/force-sync="$(date)"
+</code></pre>
+<h2 id="automated-upgrade-with-gitops"><a class="header" href="#automated-upgrade-with-gitops">Automated Upgrade with GitOps</a></h2>
+<h3 id="argocd"><a class="header" href="#argocd">ArgoCD</a></h3>
+<pre><code class="language-yaml">apiVersion: argoproj.io/v1beta1
+kind: Application
+metadata:
+  name: virtrigaud
+spec:
+  source:
+    chart: virtrigaud
+    repoURL: https://projectbeskar.github.io/virtrigaud
+    targetRevision: "0.2.1"
+    helm:
+      parameters:
+      - name: manager.image.tag
+        value: "v0.2.1"
+  syncPolicy:
+    syncOptions:
+    - CreateNamespace=true
+    - Replace=true  # Required for CRD updates
+</code></pre>
+<h3 id="flux"><a class="header" href="#flux">Flux</a></h3>
+<pre><code class="language-yaml">apiVersion: helm.toolkit.fluxcd.io/v2beta1
+kind: HelmRelease
+metadata:
+  name: virtrigaud
+spec:
+  chart:
+    spec:
+      chart: virtrigaud
+      version: "0.2.1"
+      sourceRef:
+        kind: HelmRepository
+        name: virtrigaud
+  upgrade:
+    crds: CreateReplace  # Ensure CRDs are updated
+</code></pre>
+<h2 id="troubleshooting-upgrades"><a class="header" href="#troubleshooting-upgrades">Troubleshooting Upgrades</a></h2>
+<h3 id="crd-validation-errors"><a class="header" href="#crd-validation-errors">CRD Validation Errors</a></h3>
+<pre><code class="language-bash"># Check CRD status
+kubectl get crd virtualmachines.infra.virtrigaud.io -o yaml
+
+# Fix validation conflicts
+kubectl patch crd virtualmachines.infra.virtrigaud.io --type='json' -p='[{"op": "remove", "path": "/spec/versions/0/schema/openAPIV3Schema/properties/spec/properties/powerState/allOf"}]'
+</code></pre>
+<h3 id="provider-image-mismatch"><a class="header" href="#provider-image-mismatch">Provider Image Mismatch</a></h3>
+<pre><code class="language-bash"># Check provider images
+kubectl get providers -o jsonpath='{.items[*].spec.runtime.image}'
+
+# Update provider image
+kubectl patch provider &lt;provider-name&gt; --type='merge' -p='{"spec":{"runtime":{"image":"ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.2.1"}}}'
+</code></pre>
+<h3 id="resource-conflicts"><a class="header" href="#resource-conflicts">Resource Conflicts</a></h3>
+<pre><code class="language-bash"># Check for resource conflicts
+kubectl get events --sort-by=.metadata.creationTimestamp
+
+# Force resource refresh
+kubectl delete pod -l app.kubernetes.io/name=virtrigaud -n virtrigaud-system
+</code></pre>
+<h2 id="best-practices"><a class="header" href="#best-practices">Best Practices</a></h2>
+<h3 id="pre-upgrade-checklist"><a class="header" href="#pre-upgrade-checklist">Pre-Upgrade Checklist</a></h3>
+<ul>
+<li><input disabled="" type="checkbox"/>
+Backup all VirtRigaud resources</li>
+<li><input disabled="" type="checkbox"/>
+Check for breaking changes in release notes</li>
+<li><input disabled="" type="checkbox"/>
+Test upgrade in staging environment</li>
+<li><input disabled="" type="checkbox"/>
+Verify provider connectivity</li>
+<li><input disabled="" type="checkbox"/>
+Plan rollback strategy</li>
+</ul>
+<h3 id="post-upgrade-verification"><a class="header" href="#post-upgrade-verification">Post-Upgrade Verification</a></h3>
+<ul>
+<li><input disabled="" type="checkbox"/>
+All CRDs updated successfully</li>
+<li><input disabled="" type="checkbox"/>
+Controller manager running</li>
+<li><input disabled="" type="checkbox"/>
+Providers healthy and responsive</li>
+<li><input disabled="" type="checkbox"/>
+Existing VMs still manageable</li>
+<li><input disabled="" type="checkbox"/>
+New features working (OffGraceful, hardware version, etc.)</li>
+</ul>
+<h3 id="monitoring-during-upgrade"><a class="header" href="#monitoring-during-upgrade">Monitoring During Upgrade</a></h3>
+<pre><code class="language-bash"># Watch controller logs
+kubectl logs -n virtrigaud-system deployment/virtrigaud-manager -f
+
+# Monitor VM status
+kubectl get virtualmachines -A --watch
+
+# Check provider health
+kubectl get providers -o custom-columns=NAME:.metadata.name,STATUS:.status.conditions[0].type,MESSAGE:.status.conditions[0].message
+</code></pre>
+<h2 id="support-and-recovery"><a class="header" href="#support-and-recovery">Support and Recovery</a></h2>
+<p>If you encounter issues during upgrade:</p>
+<ol>
+<li><strong>Check Release Notes</strong>: https://github.com/projectbeskar/virtrigaud/releases</li>
+<li><strong>Review Logs</strong>: Controller and provider logs for error details</li>
+<li><strong>Community Support</strong>: GitHub issues and discussions</li>
+<li><strong>Emergency Rollback</strong>: Use documented rollback procedures</li>
+</ol>
+<p>Remember: Always test upgrades in non-production environments first!</p>
+<h2 id="development-workflow-v021"><a class="header" href="#development-workflow-v021">Development Workflow (v0.2.1+)</a></h2>
+<h3 id="automated-crd-synchronization"><a class="header" href="#automated-crd-synchronization">Automated CRD Synchronization</a></h3>
+<p>Starting with v0.2.1, VirtRigaud includes automated tooling to ensure CRDs stay in sync between development and Helm chart deployments.</p>
+<h4 id="for-developers"><a class="header" href="#for-developers">For Developers</a></h4>
+<pre><code class="language-bash"># Generate and sync CRDs automatically
+make sync-helm-crds
+
+# Verify CRDs are in sync
+make verify-helm-crds
+
+# Package Helm chart with latest CRDs
+make helm-package
+</code></pre>
+<h4 id="pre-commit-hooks"><a class="header" href="#pre-commit-hooks">Pre-commit Hooks</a></h4>
+<p>Install pre-commit hooks to automatically sync CRDs:</p>
+<pre><code class="language-bash"># Install pre-commit
+pip install pre-commit
+
+# Install hooks
+pre-commit install
+
+# CRDs will now sync automatically on commits that modify:
+# - api/**.go files
+# - config/crd/**.yaml files
+</code></pre>
+<h4 id="cicd-integration"><a class="header" href="#cicd-integration">CI/CD Integration</a></h4>
+<p>The CI/CD pipeline now automatically:</p>
+<ol>
+<li><strong>Validates CRD sync</strong> on every pull request</li>
+<li><strong>Syncs CRDs</strong> before Helm chart packaging in releases</li>
+<li><strong>Fails builds</strong> if Helm chart CRDs are out of sync</li>
+</ol>
+<p>This prevents the v0.2.1-rc2 issue where OffGraceful validation failed due to stale Helm chart CRDs.</p>
+<h3 id="repository-workflow"><a class="header" href="#repository-workflow">Repository Workflow</a></h3>
+<pre><code class="language-bash"># 1. Make API changes
+vim api/infra.virtrigaud.io/v1beta1/virtualmachine_types.go
+
+# 2. Generate and sync CRDs (automated by pre-commit)
+make sync-helm-crds
+
+# 3. Commit (hooks will verify sync)
+git add .
+git commit -m "feat: add new VM power states"
+
+# 4. CI validates everything is in sync
+git push origin feature-branch
+</code></pre>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="RESILIENCE.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="VSPHERE_HARDWARE_VERSION.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="RESILIENCE.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="VSPHERE_HARDWARE_VERSION.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr.min.js"></script>
+        <script src="mark.min.js"></script>
+        <script src="searcher.js"></script>
+
+        <script src="clipboard.min.js"></script>
+        <script src="highlight.js"></script>
+        <script src="book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="theme/page-toc.js"></script>
+
+
+    </div>
+    </body>
+</html>

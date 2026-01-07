@@ -1,0 +1,19 @@
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMClass
+metadata:
+  name: small
+  namespace: default
+spec:
+  cpu: 2
+  memory: "4Gi"
+  firmware: UEFI
+  diskDefaults:
+    type: thin
+    size: "40Gi"  # v0.2.1: Disk size now properly respected
+  guestToolsPolicy: install
+  # v0.2.1: Provider-specific configuration via extraConfig
+  extraConfig:
+    # vSphere: Hardware version (optional)
+    "vsphere.hardwareVersion": "19"  # ESXi 7.0+ compatibility
+    # Common optimizations
+    "tools.syncTime": "true"

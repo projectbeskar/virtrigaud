@@ -1,0 +1,692 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Provider Versioning - VirtRigaud Documentation</title>
+
+
+        <!-- Custom HTML head -->
+        
+        <meta name="description" content="Kubernetes operator for managing virtual machines across multiple hypervisors">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="../highlight.css">
+        <link rel="stylesheet" href="../tomorrow-night.css">
+        <link rel="stylesheet" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../theme/custom.css">
+
+    </head>
+    <body class="sidebar-visible no-js">
+    <div id="body-container">
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "../";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
+        </script>
+
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            var html = document.querySelector('html');
+            html.classList.remove('light')
+            html.classList.add(theme);
+            var body = document.querySelector('body');
+            body.classList.remove('no-js')
+            body.classList.add('js');
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var body = document.querySelector('body');
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            body.classList.remove('sidebar-visible');
+            body.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <div class="sidebar-scrollbox">
+                <ol class="chapter"><li class="chapter-item affix "><a href="../index.html">Introduction</a></li><li class="chapter-item affix "><li class="part-title">Getting Started</li><li class="chapter-item "><a href="../getting-started/quickstart.html"><strong aria-hidden="true">1.</strong> 15-Minute Quickstart</a></li><li class="chapter-item "><a href="../install-helm-only.html"><strong aria-hidden="true">2.</strong> Installation Guide</a></li><li class="chapter-item "><a href="../HELM_CRD_UPGRADES.html"><strong aria-hidden="true">3.</strong> Helm CRD Upgrades</a></li><li class="chapter-item affix "><li class="part-title">Core Documentation</li><li class="chapter-item "><a href="../CRDs.html"><strong aria-hidden="true">4.</strong> Custom Resource Definitions</a></li><li class="chapter-item "><a href="../EXAMPLES.html"><strong aria-hidden="true">5.</strong> Examples</a></li><li class="chapter-item "><a href="../PROVIDERS.html"><strong aria-hidden="true">6.</strong> Provider Documentation</a></li><li class="chapter-item "><a href="../PROVIDERS_CAPABILITIES.html"><strong aria-hidden="true">7.</strong> Provider Capabilities Matrix</a></li><li class="chapter-item affix "><li class="part-title">Provider-Specific Guides</li><li class="chapter-item "><a href="../providers/vsphere.html"><strong aria-hidden="true">8.</strong> vSphere Provider</a></li><li class="chapter-item "><a href="../providers/libvirt.html"><strong aria-hidden="true">9.</strong> Libvirt Provider</a></li><li class="chapter-item "><a href="../providers/proxmox.html"><strong aria-hidden="true">10.</strong> Proxmox VE Provider</a></li><li class="chapter-item "><a href="../providers/tutorial.html"><strong aria-hidden="true">11.</strong> Provider Tutorial</a></li><li class="chapter-item expanded "><a href="../providers/versioning.html" class="active"><strong aria-hidden="true">12.</strong> Provider Versioning</a></li><li class="chapter-item affix "><li class="part-title">Advanced Features</li><li class="chapter-item "><a href="../ADVANCED_LIFECYCLE.html"><strong aria-hidden="true">13.</strong> VM Lifecycle Management</a></li><li class="chapter-item "><a href="../NESTED_VIRTUALIZATION.html"><strong aria-hidden="true">14.</strong> Nested Virtualization</a></li><li class="chapter-item "><a href="../GRACEFUL_SHUTDOWN.html"><strong aria-hidden="true">15.</strong> Graceful Shutdown</a></li><li class="chapter-item "><a href="../REMOTE_PROVIDERS.html"><strong aria-hidden="true">16.</strong> Remote Providers</a></li><li class="chapter-item affix "><li class="part-title">Operations & Administration</li><li class="chapter-item "><a href="../OBSERVABILITY.html"><strong aria-hidden="true">17.</strong> Observability</a></li><li class="chapter-item "><a href="../SECURITY.html"><strong aria-hidden="true">18.</strong> Security</a></li><li class="chapter-item "><a href="../RESILIENCE.html"><strong aria-hidden="true">19.</strong> Resilience</a></li><li class="chapter-item "><a href="../UPGRADE.html"><strong aria-hidden="true">20.</strong> Upgrade Guide</a></li><li class="chapter-item "><a href="../VSPHERE_HARDWARE_VERSION.html"><strong aria-hidden="true">21.</strong> vSphere Hardware Versions</a></li><li class="chapter-item affix "><li class="part-title">Security Configuration</li><li class="chapter-item "><a href="../providers/security/bearer-token.html"><strong aria-hidden="true">22.</strong> Bearer Token Authentication</a></li><li class="chapter-item "><a href="../providers/security/mtls.html"><strong aria-hidden="true">23.</strong> mTLS Configuration</a></li><li class="chapter-item "><a href="../providers/security/external-secrets.html"><strong aria-hidden="true">24.</strong> External Secrets</a></li><li class="chapter-item "><a href="../providers/security/network-policies.html"><strong aria-hidden="true">25.</strong> Network Policies</a></li><li class="chapter-item affix "><li class="part-title">API Reference</li><li class="chapter-item "><a href="../CLI.html"><strong aria-hidden="true">26.</strong> CLI Tools Reference</a></li><li class="chapter-item "><a href="../api-reference/cli.html"><strong aria-hidden="true">27.</strong> CLI API Reference</a></li><li class="chapter-item "><a href="../api-reference/metrics.html"><strong aria-hidden="true">28.</strong> Metrics Catalog</a></li><li class="chapter-item "><a href="../catalog.html"><strong aria-hidden="true">29.</strong> Provider Catalog</a></li><li class="chapter-item affix "><li class="part-title">Development</li><li class="chapter-item "><a href="../TESTING_WORKFLOWS_LOCALLY.html"><strong aria-hidden="true">30.</strong> Testing Workflows Locally</a></li><li class="chapter-item "><a href="../../../CONTRIBUTING.html"><strong aria-hidden="true">31.</strong> Contributing</a></li><li class="chapter-item "><a href="../../../DEVELOPMENT.html"><strong aria-hidden="true">32.</strong> Development Guide</a></li><li class="chapter-item affix "><li class="part-title">Examples</li><li class="chapter-item "><a href="../examples/index.html"><strong aria-hidden="true">33.</strong> Example README</a></li></ol>
+            </div>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <!-- Track and set sidebar scroll position -->
+        <script>
+            var sidebarScrollbox = document.querySelector('#sidebar .sidebar-scrollbox');
+            sidebarScrollbox.addEventListener('click', function(e) {
+                if (e.target.tagName === 'A') {
+                    sessionStorage.setItem('sidebar-scroll', sidebarScrollbox.scrollTop);
+                }
+            }, { passive: true });
+            var sidebarScrollTop = sessionStorage.getItem('sidebar-scroll');
+            sessionStorage.removeItem('sidebar-scroll');
+            if (sidebarScrollTop) {
+                // preserve sidebar scroll position when navigating via links within sidebar
+                sidebarScrollbox.scrollTop = sidebarScrollTop;
+            } else {
+                // scroll sidebar to current active section when navigating via "next/previous chapter" buttons
+                var activeSection = document.querySelector('#sidebar .active');
+                if (activeSection) {
+                    activeSection.scrollIntoView({ block: 'center' });
+                }
+            }
+        </script>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">VirtRigaud Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/projectbeskar/virtrigaud" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/projectbeskar/virtrigaud/edit/main/docs/src/providers/versioning.md" title="Suggest an edit" aria-label="Suggest an edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="versioning--breaking-changes"><a class="header" href="#versioning--breaking-changes">Versioning &amp; Breaking Changes</a></h1>
+<p>This document outlines VirtRigaud’s approach to versioning, compatibility, and managing breaking changes across the provider ecosystem.</p>
+<h2 id="overview"><a class="header" href="#overview">Overview</a></h2>
+<p>VirtRigaud follows semantic versioning (SemVer) principles and maintains backward compatibility through careful API design and migration strategies. The system has multiple versioning dimensions:</p>
+<ul>
+<li><strong>VirtRigaud Core</strong> - The main platform (API server, manager, CRDs)</li>
+<li><strong>Provider SDK</strong> - Go SDK for building providers</li>
+<li><strong>Proto Contracts</strong> - gRPC/protobuf API definitions</li>
+<li><strong>Individual Providers</strong> - Each provider has independent versioning</li>
+</ul>
+<h2 id="semantic-versioning"><a class="header" href="#semantic-versioning">Semantic Versioning</a></h2>
+<p>All VirtRigaud components follow <a href="https://semver.org/">Semantic Versioning 2.0.0</a>:</p>
+<h3 id="version-format-majorminorpatch"><a class="header" href="#version-format-majorminorpatch">Version Format: MAJOR.MINOR.PATCH</a></h3>
+<ul>
+<li><strong>MAJOR</strong> (X.0.0): Breaking changes that require user action</li>
+<li><strong>MINOR</strong> (0.X.0): New features that are backward compatible</li>
+<li><strong>PATCH</strong> (0.0.X): Bug fixes and security updates</li>
+</ul>
+<h3 id="examples"><a class="header" href="#examples">Examples</a></h3>
+<pre><code>1.0.0 → 1.0.1  # Patch: Bug fixes only
+1.0.1 → 1.1.0  # Minor: New features, backward compatible
+1.1.0 → 2.0.0  # Major: Breaking changes
+</code></pre>
+<h2 id="component-versioning-strategy"><a class="header" href="#component-versioning-strategy">Component Versioning Strategy</a></h2>
+<h3 id="virtrigaud-core-apis"><a class="header" href="#virtrigaud-core-apis">VirtRigaud Core APIs</a></h3>
+<p>Kubernetes-style API versioning with multiple supported versions:</p>
+<pre><code class="language-yaml"># Supported API versions
+apiVersion: infra.virtrigaud.io/v1beta1  # Development/preview
+apiVersion: infra.virtrigaud.io/v1beta1   # Pre-release/testing
+apiVersion: infra.virtrigaud.io/v1        # Stable/production
+</code></pre>
+<p><strong>Stability Levels:</strong></p>
+<ul>
+<li><strong>Alpha (v1beta1)</strong>: Experimental, may change or be removed</li>
+<li><strong>Beta (v1beta1)</strong>: Well-tested, minimal changes expected</li>
+<li><strong>Stable (v1)</strong>: Production-ready, strong backward compatibility</li>
+</ul>
+<p><strong>Support Windows:</strong></p>
+<ul>
+<li>Alpha: Best effort, no guarantees</li>
+<li>Beta: Supported for 2 minor releases after stable equivalent</li>
+<li>Stable: Supported for 12 months after deprecation</li>
+</ul>
+<h3 id="provider-sdk-versioning"><a class="header" href="#provider-sdk-versioning">Provider SDK Versioning</a></h3>
+<p>SDK versions are independent of core VirtRigaud versions:</p>
+<pre><code class="language-go">// Go module versioning
+module github.com/projectbeskar/virtrigaud/sdk
+
+// Version tags
+sdk/v0.1.0    # Initial release
+sdk/v0.2.0    # New features
+sdk/v1.0.0    # First stable release
+sdk/v2.0.0    # Breaking changes (new module path: sdk/v2)
+</code></pre>
+<p><strong>SDK Compatibility Matrix:</strong></p>
+<div class="table-wrapper"><table><thead><tr><th>SDK Version</th><th>VirtRigaud Core</th><th>Go Version</th><th>Status</th></tr></thead><tbody>
+<tr><td>v0.1.x</td><td>0.1.0 - 0.2.x</td><td>1.23+</td><td>Beta</td></tr>
+<tr><td>v1.0.x</td><td>0.2.0 - 1.0.x</td><td>1.23+</td><td>Stable</td></tr>
+<tr><td>v1.1.x</td><td>0.3.0 - 1.1.x</td><td>1.23+</td><td>Stable</td></tr>
+<tr><td>v2.0.x</td><td>1.0.0+</td><td>1.24+</td><td>Future</td></tr>
+</tbody></table>
+</div>
+<h3 id="proto-contract-versioning"><a class="header" href="#proto-contract-versioning">Proto Contract Versioning</a></h3>
+<p>Protobuf APIs use both module versions and service versions:</p>
+<pre><code class="language-protobuf">// Service versioning in proto files
+package provider.v1;
+service ProviderService {
+  // API methods
+}
+
+// Module versioning
+module github.com/projectbeskar/virtrigaud/proto
+</code></pre>
+<p><strong>Proto Evolution Rules:</strong></p>
+<ul>
+<li>✅ Add new fields (with proper defaults)</li>
+<li>✅ Add new RPC methods</li>
+<li>✅ Add new enum values</li>
+<li>❌ Remove fields or methods</li>
+<li>❌ Change field types or semantics</li>
+<li>❌ Remove enum values</li>
+</ul>
+<h3 id="provider-versioning"><a class="header" href="#provider-versioning">Provider Versioning</a></h3>
+<p>Each provider maintains independent versioning:</p>
+<pre><code class="language-yaml"># Provider catalog entry
+name: vsphere
+tag: "1.2.3"      # Provider version
+sdk_version: "v1.0.0"  # SDK dependency
+proto_version: "v0.1.0"  # Proto dependency
+</code></pre>
+<h2 id="breaking-change-policy"><a class="header" href="#breaking-change-policy">Breaking Change Policy</a></h2>
+<h3 id="what-constitutes-a-breaking-change"><a class="header" href="#what-constitutes-a-breaking-change">What Constitutes a Breaking Change</a></h3>
+<p><strong>API Breaking Changes:</strong></p>
+<ul>
+<li>Removing or renaming API fields</li>
+<li>Changing field types or semantics</li>
+<li>Removing API endpoints or methods</li>
+<li>Changing required vs optional fields</li>
+<li>Modifying default behaviors</li>
+<li>Changing error codes or messages that clients depend on</li>
+</ul>
+<p><strong>SDK Breaking Changes:</strong></p>
+<ul>
+<li>Removing public functions, types, or methods</li>
+<li>Changing function signatures</li>
+<li>Modifying struct fields (without proper backward compatibility)</li>
+<li>Changing package import paths</li>
+<li>Removing or renaming configuration options</li>
+</ul>
+<p><strong>Proto Breaking Changes:</strong></p>
+<ul>
+<li>Removing fields or RPC methods</li>
+<li>Changing field numbers or types</li>
+<li>Removing enum values</li>
+<li>Modifying service or method names</li>
+</ul>
+<h3 id="breaking-change-process"><a class="header" href="#breaking-change-process">Breaking Change Process</a></h3>
+<h4 id="1-proposal-phase"><a class="header" href="#1-proposal-phase">1. Proposal Phase</a></h4>
+<pre><code class="language-markdown"># Breaking Change Proposal: [Title]
+
+## Summary
+Brief description of the change and motivation.
+
+## Motivation  
+Why is this change necessary? What problems does it solve?
+
+## Proposed Changes
+Detailed description of the changes.
+
+## Migration Path
+How will users migrate from old to new behavior?
+
+## Timeline
+- Deprecation announcement: v1.1.0
+- Breaking change implementation: v2.0.0
+- Legacy support removal: v3.0.0
+
+## Alternatives Considered
+What other approaches were considered?
+</code></pre>
+<h4 id="2-deprecation-phase"><a class="header" href="#2-deprecation-phase">2. Deprecation Phase</a></h4>
+<pre><code class="language-go">// Deprecated functions include clear migration guidance
+// Deprecated: Use NewCreateVMRequest instead. Will be removed in v2.0.0.
+func CreateVM(name string) *VMRequest {
+    return &amp;VMRequest{Name: name}
+}
+
+// New recommended approach
+func NewCreateVMRequest(spec *VMSpec) *CreateVMRequest {
+    return &amp;CreateVMRequest{Spec: spec}
+}
+</code></pre>
+<h4 id="3-migration-tools"><a class="header" href="#3-migration-tools">3. Migration Tools</a></h4>
+<pre><code class="language-bash"># Migration command examples
+vrtg-provider migrate --from v1 --to v2
+vrtg-provider check-compatibility --target-version v2.0.0
+</code></pre>
+<h4 id="4-communication"><a class="header" href="#4-communication">4. Communication</a></h4>
+<ul>
+<li>Release notes with migration guide</li>
+<li>Blog posts for major changes</li>
+<li>Community discussions and Q&amp;A</li>
+<li>Updated documentation</li>
+</ul>
+<h2 id="compatibility-testing"><a class="header" href="#compatibility-testing">Compatibility Testing</a></h2>
+<h3 id="automated-compatibility-checks"><a class="header" href="#automated-compatibility-checks">Automated Compatibility Checks</a></h3>
+<pre><code class="language-yaml"># .github/workflows/compatibility.yml
+name: Compatibility Check
+
+jobs:
+  compatibility-matrix:
+    strategy:
+      matrix:
+        sdk_version: [v1.0.0, v1.1.0, current]
+        provider_version: [v1.0.0, v1.1.0, current]
+    
+    steps:
+    - name: Test SDK ${{ matrix.sdk_version }} with Provider ${{ matrix.provider_version }}
+      run: |
+        # Build provider with specific SDK version
+        # Run conformance tests
+        # Report compatibility results
+</code></pre>
+<h3 id="buf-proto-compatibility"><a class="header" href="#buf-proto-compatibility">Buf Proto Compatibility</a></h3>
+<pre><code class="language-yaml"># proto/buf.yaml
+version: v1
+breaking:
+  use:
+    # Prevent breaking changes
+    - FILE_NO_DELETE
+    - FIELD_NO_DELETE
+    - FIELD_SAME_TYPE
+    - ENUM_VALUE_NO_DELETE
+    - RPC_NO_DELETE
+    - SERVICE_NO_DELETE
+  ignore:
+    # Allowed changes during alpha/beta
+    - "provider/v1beta1"
+</code></pre>
+<pre><code class="language-bash"># Check for breaking changes
+buf breaking --against 'https://github.com/projectbeskar/virtrigaud.git#branch=main'
+</code></pre>
+<h3 id="provider-compatibility-testing"><a class="header" href="#provider-compatibility-testing">Provider Compatibility Testing</a></h3>
+<pre><code class="language-bash"># Test provider against multiple VirtRigaud versions
+vcts run --provider ./provider --virtrigaud-version 0.1.0
+vcts run --provider ./provider --virtrigaud-version 0.2.0
+vcts run --provider ./provider --virtrigaud-version 1.0.0
+</code></pre>
+<h2 id="migration-strategies"><a class="header" href="#migration-strategies">Migration Strategies</a></h2>
+<h3 id="api-version-migration"><a class="header" href="#api-version-migration">API Version Migration</a></h3>
+<h4 id="example-virtualmachine-v1beta1--v1beta1"><a class="header" href="#example-virtualmachine-v1beta1--v1beta1">Example: VirtualMachine v1beta1 → v1beta1</a></h4>
+<pre><code class="language-go">// Conversion webhook approach
+func (src *v1beta1.VirtualMachine) ConvertTo(dst *v1beta1.VirtualMachine) error {
+    // Convert common fields
+    dst.ObjectMeta = src.ObjectMeta
+    
+    // Handle field migrations
+    if src.Spec.PowerState == "On" {
+        dst.Spec.PowerState = v1beta1.PowerStateOn
+    }
+    
+    // Set new fields with appropriate defaults
+    if dst.Spec.Phase == "" {
+        dst.Spec.Phase = v1beta1.PhaseUnknown
+    }
+    
+    return nil
+}
+</code></pre>
+<h4 id="gradual-migration-process"><a class="header" href="#gradual-migration-process">Gradual Migration Process</a></h4>
+<pre><code class="language-bash"># Phase 1: Dual support (both versions work)
+kubectl apply -f vm-v1beta1.yaml  # Still works
+kubectl apply -f vm-v1beta1.yaml   # Also works
+
+# Phase 2: Deprecation warning
+kubectl apply -f vm-v1beta1.yaml
+# Warning: v1beta1 is deprecated, use v1beta1
+
+# Phase 3: Conversion only (internal storage uses v1beta1)
+kubectl apply -f vm-v1beta1.yaml  # Automatically converted
+
+# Phase 4: Removal (after support window)
+kubectl apply -f vm-v1beta1.yaml  # Error: version not supported
+</code></pre>
+<h3 id="provider-sdk-migration"><a class="header" href="#provider-sdk-migration">Provider SDK Migration</a></h3>
+<h4 id="example-sdk-v1--v2"><a class="header" href="#example-sdk-v1--v2">Example: SDK v1 → v2</a></h4>
+<p><strong>SDK v1 (deprecated):</strong></p>
+<pre><code class="language-go">// Old SDK pattern
+func NewProvider(config Config) *Provider {
+    return &amp;Provider{config: config}
+}
+
+func (p *Provider) CreateVM(name string, cpu int, memory int) error {
+    // Implementation
+}
+</code></pre>
+<p><strong>SDK v2 (new):</strong></p>
+<pre><code class="language-go">// New SDK pattern with better types
+func NewProvider(config *Config) (*Provider, error) {
+    if err := config.Validate(); err != nil {
+        return nil, err
+    }
+    return &amp;Provider{config: config}, nil
+}
+
+func (p *Provider) CreateVM(ctx context.Context, req *CreateVMRequest) (*CreateVMResponse, error) {
+    // Implementation with proper context and structured types
+}
+</code></pre>
+<p><strong>Migration Bridge:</strong></p>
+<pre><code class="language-go">// sdk/v2/compat/v1.go - Compatibility layer
+package compat
+
+import (
+    v1 "github.com/projectbeskar/virtrigaud/sdk/provider"
+    v2 "github.com/projectbeskar/virtrigaud/sdk/v2/provider"
+)
+
+// Bridge for gradual migration
+func AdaptV1Provider(v1Provider v1.Provider) v2.Provider {
+    return &amp;v1ProviderAdapter{old: v1Provider}
+}
+
+type v1ProviderAdapter struct {
+    old v1.Provider
+}
+
+func (a *v1ProviderAdapter) CreateVM(ctx context.Context, req *v2.CreateVMRequest) (*v2.CreateVMResponse, error) {
+    // Convert v2 request to v1 format
+    err := a.old.CreateVM(req.Name, int(req.Spec.CPU), int(req.Spec.Memory))
+    
+    // Convert v1 response to v2 format
+    if err != nil {
+        return nil, err
+    }
+    
+    return &amp;v2.CreateVMResponse{
+        Status: "Created",
+    }, nil
+}
+</code></pre>
+<h3 id="configuration-migration"><a class="header" href="#configuration-migration">Configuration Migration</a></h3>
+<h4 id="example-configuration-schema-changes"><a class="header" href="#example-configuration-schema-changes">Example: Configuration Schema Changes</a></h4>
+<p><strong>v1 Configuration:</strong></p>
+<pre><code class="language-yaml"># provider-config-v1.yaml
+provider:
+  type: "vsphere"
+  server: "vcenter.example.com"
+  username: "admin"
+  password: "secret"
+</code></pre>
+<p><strong>v2 Configuration:</strong></p>
+<pre><code class="language-yaml"># provider-config-v2.yaml
+apiVersion: config.virtrigaud.io/v2
+kind: ProviderConfig
+metadata:
+  name: vsphere-config
+spec:
+  type: "vsphere"
+  connection:
+    endpoint: "vcenter.example.com"
+    authentication:
+      method: "basic"
+      secretRef:
+        name: "vsphere-credentials"
+  features:
+    snapshots: true
+    cloning: true
+</code></pre>
+<p><strong>Migration Command:</strong></p>
+<pre><code class="language-bash"># Automatic migration tool
+vrtg-provider config migrate \
+  --from provider-config-v1.yaml \
+  --to provider-config-v2.yaml \
+  --create-secret vsphere-credentials
+</code></pre>
+<h2 id="release-planning"><a class="header" href="#release-planning">Release Planning</a></h2>
+<h3 id="release-cadence"><a class="header" href="#release-cadence">Release Cadence</a></h3>
+<ul>
+<li><strong>Patch releases</strong>: As needed for critical bugs/security</li>
+<li><strong>Minor releases</strong>: Every 2-3 months</li>
+<li><strong>Major releases</strong>: Every 12-18 months</li>
+</ul>
+<h3 id="feature-lifecycle"><a class="header" href="#feature-lifecycle">Feature Lifecycle</a></h3>
+<pre><code>Experimental → Alpha → Beta → Stable → Deprecated → Removed
+     |          |       |       |         |          |
+     |          |       |       |         |          +-- After support window
+     |          |       |       |         +-- 2 releases notice
+     |          |       |       +-- Production ready
+     |          |       +-- Pre-release testing
+     |          +-- Public preview
+     +-- Internal/development only
+</code></pre>
+<h3 id="release-branch-strategy"><a class="header" href="#release-branch-strategy">Release Branch Strategy</a></h3>
+<pre><code>main                    # Current development
+├── release-0.1        # Patch releases for v0.1.x
+├── release-0.2        # Patch releases for v0.2.x
+└── release-1.0        # Patch releases for v1.0.x
+</code></pre>
+<h3 id="support-matrix"><a class="header" href="#support-matrix">Support Matrix</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Version</th><th>Status</th><th>Support Level</th><th>End of Life</th></tr></thead><tbody>
+<tr><td>1.0.x</td><td>Stable</td><td>Full support</td><td>2026-01-01</td></tr>
+<tr><td>0.2.x</td><td>Stable</td><td>Security only</td><td>2025-06-01</td></tr>
+<tr><td>0.1.x</td><td>Deprecated</td><td>None</td><td>2025-01-01</td></tr>
+</tbody></table>
+</div>
+<h2 id="best-practices"><a class="header" href="#best-practices">Best Practices</a></h2>
+<h3 id="for-provider-developers"><a class="header" href="#for-provider-developers">For Provider Developers</a></h3>
+<ol>
+<li>
+<p><strong>Version Dependencies Carefully</strong></p>
+<pre><code class="language-go">// Use specific versions, not floating
+require github.com/projectbeskar/virtrigaud/sdk v1.2.3
+</code></pre>
+</li>
+<li>
+<p><strong>Test Compatibility Early</strong></p>
+<pre><code class="language-bash"># Test against multiple SDK versions
+go mod edit -require=github.com/projectbeskar/virtrigaud/sdk@v1.1.0
+go test ./...
+go mod edit -require=github.com/projectbeskar/virtrigaud/sdk@v1.2.0
+go test ./...
+</code></pre>
+</li>
+<li>
+<p><strong>Handle Deprecations Gracefully</strong></p>
+<pre><code class="language-go">// Check for deprecated features
+if provider.IsDeprecated("vm.legacy-create") {
+    log.Warn("Using deprecated API, migrate to vm.create")
+}
+</code></pre>
+</li>
+<li>
+<p><strong>Document Breaking Changes</strong></p>
+<pre><code class="language-markdown"># CHANGELOG.md
+## [2.0.0] - 2025-01-15
+### BREAKING CHANGES
+- Removed deprecated `CreateVM` method, use `CreateVMRequest` instead
+- Changed configuration format, see migration guide
+
+### Migration Guide
+Old: `provider.CreateVM("vm1", 2, 4096)`
+New: `provider.CreateVM(ctx, &amp;CreateVMRequest{...})`
+</code></pre>
+</li>
+</ol>
+<h3 id="for-users"><a class="header" href="#for-users">For Users</a></h3>
+<ol>
+<li>
+<p><strong>Pin Versions in Production</strong></p>
+<pre><code class="language-yaml"># Helm values
+image:
+  tag: "1.2.3"  # Not "latest"
+</code></pre>
+</li>
+<li>
+<p><strong>Test Upgrades in Staging</strong></p>
+<pre><code class="language-bash"># Upgrade strategy
+helm upgrade provider-test virtrigaud/provider \
+  --version 1.3.0 \
+  --namespace staging
+</code></pre>
+</li>
+<li>
+<p><strong>Monitor Deprecation Warnings</strong></p>
+<pre><code class="language-bash"># Check for deprecation warnings
+kubectl logs -l app=provider | grep -i deprecat
+</code></pre>
+</li>
+<li>
+<p><strong>Plan Migration Windows</strong></p>
+<pre><code class="language-yaml"># Schedule upgrades during maintenance windows
+# Have rollback plans ready
+# Test compatibility thoroughly
+</code></pre>
+</li>
+</ol>
+<h2 id="future-considerations"><a class="header" href="#future-considerations">Future Considerations</a></h2>
+<h3 id="long-term-compatibility"><a class="header" href="#long-term-compatibility">Long-term Compatibility</a></h3>
+<ul>
+<li><strong>10-year Support Goal</strong>: Core APIs should remain usable for 10 years</li>
+<li><strong>Gradual Evolution</strong>: Prefer gradual evolution over revolutionary changes</li>
+<li><strong>Ecosystem Stability</strong>: Consider impact on the entire provider ecosystem</li>
+</ul>
+<h3 id="emerging-standards"><a class="header" href="#emerging-standards">Emerging Standards</a></h3>
+<ul>
+<li><strong>OCI Compliance</strong>: Align with OCI runtime and image standards</li>
+<li><strong>CNCF Integration</strong>: Follow CNCF project graduation requirements</li>
+<li><strong>Industry Standards</strong>: Adopt relevant industry standards as they emerge</li>
+</ul>
+<h3 id="technology-evolution"><a class="header" href="#technology-evolution">Technology Evolution</a></h3>
+<ul>
+<li><strong>Go Version Support</strong>: Support 2-3 latest Go versions</li>
+<li><strong>Kubernetes Compatibility</strong>: Support 3-4 latest Kubernetes versions</li>
+<li><strong>gRPC Evolution</strong>: Adapt to gRPC and protobuf improvements</li>
+</ul>
+<p>This versioning strategy ensures VirtRigaud can evolve while maintaining stability and compatibility for the provider ecosystem.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../providers/tutorial.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../ADVANCED_LIFECYCLE.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../providers/tutorial.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../ADVANCED_LIFECYCLE.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="../theme/page-toc.js"></script>
+
+
+    </div>
+    </body>
+</html>
