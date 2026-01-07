@@ -1952,6 +1952,29 @@ spec:
           status:
             description: ProviderStatus defines the observed state of Provider
             properties:
+              adoption:
+                description: Adoption tracks VM adoption status
+                properties:
+                  adoptedVMs:
+                    description: AdoptedVMs is the count of VMs successfully adopted
+                    format: int32
+                    type: integer
+                  discoveredVMs:
+                    description: DiscoveredVMs is the count of VMs found in provider
+                    format: int32
+                    type: integer
+                  failedAdoptions:
+                    description: FailedAdoptions is the count of failed adoption attempts
+                    format: int32
+                    type: integer
+                  lastDiscoveryTime:
+                    description: LastDiscoveryTime is when VMs were last discovered
+                    format: date-time
+                    type: string
+                  message:
+                    description: Message provides details about adoption status
+                    type: string
+                type: object
               capabilities:
                 description: Capabilities lists the provider's supported capabilities
                 items:

@@ -84,6 +84,16 @@ rules:
   resources:
   - vmclasses
   - vmimages
+  verbs:
+  - create
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - infra.virtrigaud.io
+  resources:
   - vmnetworkattachments
   verbs:
   - get

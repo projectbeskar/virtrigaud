@@ -520,11 +520,7 @@ func (r *VMAdoptionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				// Reconcile if filter annotation changed
 				oldFilterVal := e.ObjectOld.GetAnnotations()[AdoptionFilterAnnotation]
 				newFilterVal := e.ObjectNew.GetAnnotations()[AdoptionFilterAnnotation]
-				if oldFilterVal != newFilterVal {
-					return true
-				}
-
-				return false
+				return oldFilterVal != newFilterVal
 			},
 		}).
 		Complete(r)
