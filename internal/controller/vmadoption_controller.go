@@ -153,8 +153,18 @@ func (r *VMAdoptionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
 	}
 
-	// Update discovery status
+	// Check if we should skip discovery (if done recently)
 	now := metav1.Now()
+	if provider.Status.Adoption.LastDiscoveryTime != nil {
+		timeSinceLastDiscovery := time.Since(provider.Status.Adoption.LastDiscoveryTime.Time)
+		// Skip if discovery was done less than 5 minutes ago (unless forced by annotation change)
+		if timeSinceLastDiscovery < 5*time.Minute {
+			logger.Info("Skipping discovery, last discovery was recent", "timeSince", timeSinceLastDiscovery)
+			return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+		}
+	}
+
+	// Update discovery status
 	provider.Status.Adoption.LastDiscoveryTime = &now
 	// #nosec G115 -- len() returns int, conversion to int32 is safe for VM counts (max 2^31-1 VMs is unrealistic)
 	provider.Status.Adoption.DiscoveredVMs = int32(len(unmanagedVMs))
@@ -518,9 +528,14 @@ func (r *VMAdoptionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				return adoptVal == "true"
 			},
 			UpdateFunc: func(e event.UpdateEvent) bool {
+				// Only reconcile if adoption annotation is present
+				newAdoptVal := e.ObjectNew.GetAnnotations()[AdoptionAnnotation]
+				if newAdoptVal != "true" {
+					return false
+				}
+
 				// Reconcile if adoption annotation changed
 				oldAdoptVal := e.ObjectOld.GetAnnotations()[AdoptionAnnotation]
-				newAdoptVal := e.ObjectNew.GetAnnotations()[AdoptionAnnotation]
 				if oldAdoptVal != newAdoptVal {
 					return true
 				}
@@ -528,7 +543,34 @@ func (r *VMAdoptionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				// Reconcile if filter annotation changed
 				oldFilterVal := e.ObjectOld.GetAnnotations()[AdoptionFilterAnnotation]
 				newFilterVal := e.ObjectNew.GetAnnotations()[AdoptionFilterAnnotation]
-				return oldFilterVal != newFilterVal
+				if oldFilterVal != newFilterVal {
+					return true
+				}
+
+				// Reconcile if provider status changed (e.g., became ready)
+				// This ensures adoption runs when provider becomes available
+				oldProvider := e.ObjectOld.(*infravirtrigaudiov1beta1.Provider)
+				newProvider := e.ObjectNew.(*infravirtrigaudiov1beta1.Provider)
+				oldReady := r.isProviderReady(oldProvider)
+				newReady := r.isProviderReady(newProvider)
+				if !oldReady && newReady {
+					return true
+				}
+
+				// Reconcile if adoption status was just initialized
+				oldStatus := oldProvider.Status.Adoption
+				newStatus := newProvider.Status.Adoption
+				if oldStatus == nil && newStatus != nil {
+					return true
+				}
+
+				// Reconcile if generation changed (resource was updated)
+				// This catches cases where the resource was updated but annotations didn't change
+				if oldProvider.Generation != newProvider.Generation {
+					return true
+				}
+
+				return false
 			},
 		}).
 		Complete(r)
