@@ -377,7 +377,7 @@ func (p *Provider) Describe(ctx context.Context, req *providerv1.DescribeRequest
 }
 
 // ListVMs returns all VMs managed by this provider
-func (p *Provider) ListVMs(ctx context.Context, req *providerv1.Empty) (*providerv1.ListVMsResponse, error) {
+func (p *Provider) ListVMs(ctx context.Context, req *providerv1.ListVMsRequest) (*providerv1.ListVMsResponse, error) {
 	p.simulateDelay()
 
 	p.mu.RLock()
@@ -419,7 +419,7 @@ func (p *Provider) ListVMs(ctx context.Context, req *providerv1.Empty) (*provide
 			Name:        vm.Name,
 			PowerState:  vm.PowerState,
 			Ips:         vm.IPs,
-			Cpu:         2, // Default CPU
+			Cpu:         2,    // Default CPU
 			MemoryMib:   4096, // Default 4 GiB
 			Disks:       disks,
 			Networks:    networks,

@@ -76,7 +76,7 @@ type ProviderClient interface {
 	ImportDisk(ctx context.Context, in *ImportDiskRequest, opts ...grpc.CallOption) (*ImportDiskResponse, error)
 	GetDiskInfo(ctx context.Context, in *GetDiskInfoRequest, opts ...grpc.CallOption) (*GetDiskInfoResponse, error)
 	// List all VMs managed by this provider
-	ListVMs(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*ListVMsResponse, error)
+	ListVMs(ctx context.Context, in *ListVMsRequest, opts ...grpc.CallOption) (*ListVMsResponse, error)
 }
 
 type providerClient struct {
@@ -257,7 +257,7 @@ func (c *providerClient) GetDiskInfo(ctx context.Context, in *GetDiskInfoRequest
 	return out, nil
 }
 
-func (c *providerClient) ListVMs(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*ListVMsResponse, error) {
+func (c *providerClient) ListVMs(ctx context.Context, in *ListVMsRequest, opts ...grpc.CallOption) (*ListVMsResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ListVMsResponse)
 	err := c.cc.Invoke(ctx, Provider_ListVMs_FullMethodName, in, out, cOpts...)
@@ -304,7 +304,7 @@ type ProviderServer interface {
 	ImportDisk(context.Context, *ImportDiskRequest) (*ImportDiskResponse, error)
 	GetDiskInfo(context.Context, *GetDiskInfoRequest) (*GetDiskInfoResponse, error)
 	// List all VMs managed by this provider
-	ListVMs(context.Context, *Empty) (*ListVMsResponse, error)
+	ListVMs(context.Context, *ListVMsRequest) (*ListVMsResponse, error)
 	mustEmbedUnimplementedProviderServer()
 }
 
@@ -366,7 +366,7 @@ func (UnimplementedProviderServer) ImportDisk(context.Context, *ImportDiskReques
 func (UnimplementedProviderServer) GetDiskInfo(context.Context, *GetDiskInfoRequest) (*GetDiskInfoResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetDiskInfo not implemented")
 }
-func (UnimplementedProviderServer) ListVMs(context.Context, *Empty) (*ListVMsResponse, error) {
+func (UnimplementedProviderServer) ListVMs(context.Context, *ListVMsRequest) (*ListVMsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListVMs not implemented")
 }
 func (UnimplementedProviderServer) mustEmbedUnimplementedProviderServer() {}
@@ -697,7 +697,7 @@ func _Provider_GetDiskInfo_Handler(srv interface{}, ctx context.Context, dec fun
 }
 
 func _Provider_ListVMs_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(Empty)
+	in := new(ListVMsRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
@@ -709,7 +709,7 @@ func _Provider_ListVMs_Handler(srv interface{}, ctx context.Context, dec func(in
 		FullMethod: Provider_ListVMs_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ProviderServer).ListVMs(ctx, req.(*Empty))
+		return srv.(ProviderServer).ListVMs(ctx, req.(*ListVMsRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }

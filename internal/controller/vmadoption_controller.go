@@ -321,10 +321,10 @@ func (r *VMAdoptionReconciler) adoptVM(ctx context.Context, provider *infravirtr
 			PowerState: infravirtrigaudiov1beta1.PowerState(vmInfo.PowerState),
 		},
 		Status: infravirtrigaudiov1beta1.VirtualMachineStatus{
-			ID:        vmInfo.ID,
+			ID:         vmInfo.ID,
 			PowerState: infravirtrigaudiov1beta1.PowerState(vmInfo.PowerState),
-			IPs:       vmInfo.IPs,
-			Provider:  vmInfo.ProviderRaw,
+			IPs:        vmInfo.IPs,
+			Provider:   vmInfo.ProviderRaw,
 		},
 	}
 
@@ -394,8 +394,8 @@ func (r *VMAdoptionReconciler) ensureVMClass(ctx context.Context, vmInfo contrac
 			},
 		},
 		Spec: infravirtrigaudiov1beta1.VMClassSpec{
-			CPU:     cpu,
-			Memory:  resource.MustParse(fmt.Sprintf("%dMi", memoryMiB)),
+			CPU:      cpu,
+			Memory:   resource.MustParse(fmt.Sprintf("%dMi", memoryMiB)),
 			Firmware: infravirtrigaudiov1beta1.FirmwareTypeBIOS, // Default, can be enhanced to detect from VM
 		},
 	}
@@ -549,8 +549,14 @@ func (r *VMAdoptionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 				// Reconcile if provider status changed (e.g., became ready)
 				// This ensures adoption runs when provider becomes available
-				oldProvider := e.ObjectOld.(*infravirtrigaudiov1beta1.Provider)
-				newProvider := e.ObjectNew.(*infravirtrigaudiov1beta1.Provider)
+				oldProvider, ok := e.ObjectOld.(*infravirtrigaudiov1beta1.Provider)
+				if !ok {
+					return false
+				}
+				newProvider, ok := e.ObjectNew.(*infravirtrigaudiov1beta1.Provider)
+				if !ok {
+					return false
+				}
 				oldReady := r.isProviderReady(oldProvider)
 				newReady := r.isProviderReady(newProvider)
 				if !oldReady && newReady {
@@ -575,4 +581,3 @@ func (r *VMAdoptionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		}).
 		Complete(r)
 }
-

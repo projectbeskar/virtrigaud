@@ -55,7 +55,7 @@ func parseVMDKDescriptor(descriptorPath string) (*VMDKDescriptor, error) {
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		
+
 		// Skip comments and empty lines
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
@@ -92,7 +92,7 @@ func constructDatastorePath(basePath, filename string) string {
 		if endBracket != -1 {
 			datastoreName := basePath[:endBracket+1]
 			directory := strings.TrimSpace(basePath[endBracket+1:])
-			
+
 			// Construct full path
 			if directory != "" {
 				return fmt.Sprintf("%s %s/%s", datastoreName, directory, filename)
@@ -100,8 +100,7 @@ func constructDatastorePath(basePath, filename string) string {
 			return fmt.Sprintf("%s %s", datastoreName, filename)
 		}
 	}
-	
+
 	// Fallback: just join paths
 	return path.Join(basePath, filename)
 }
-

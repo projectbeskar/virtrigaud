@@ -813,7 +813,7 @@ func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migrati
 		// VirtualMachine does not have a "Ready" phase - it uses conditions
 		readyCondition := meta.FindStatusCondition(existingVM.Status.Conditions, "Ready")
 		isReady := existingVM.Status.ID != "" && readyCondition != nil && readyCondition.Status == metav1.ConditionTrue
-		
+
 		if isReady {
 			// VM is ready, store reference and transition to validation
 			migration.Status.TargetVMID = existingVM.Status.ID
@@ -950,7 +950,7 @@ func (r *VMMigrationReconciler) handleValidatingTargetPhase(ctx context.Context,
 	// Verify VM is ready by checking the Ready condition
 	readyCondition := meta.FindStatusCondition(targetVM.Status.Conditions, "Ready")
 	isReady := readyCondition != nil && readyCondition.Status == metav1.ConditionTrue
-	
+
 	if !isReady {
 		readyStatus := "not set"
 		if readyCondition != nil {
@@ -1807,9 +1807,9 @@ func (r *VMMigrationReconciler) waitForProviderReady(ctx context.Context, provid
 			"pvc", pvcName,
 			"podsReady", podsWithPVC,
 			"gracePeriod", "10s")
-		
+
 		time.Sleep(10 * time.Second)
-		
+
 		logger.Info("Provider pods with PVC are ready",
 			"provider", provider.Name,
 			"pvc", pvcName,

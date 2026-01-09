@@ -201,6 +201,8 @@ message GetDiskInfoResponse {
 }
 
 // List all VMs managed by this provider
+message ListVMsRequest {}
+
 message ListVMsResponse {
   repeated VMInfo vms = 1;
 }
@@ -295,5 +297,5 @@ service Provider {
   rpc GetDiskInfo(GetDiskInfoRequest) returns (GetDiskInfoResponse);
   
   // List all VMs managed by this provider
-  rpc ListVMs(Empty) returns (ListVMsResponse);
+  rpc ListVMs(ListVMsRequest) returns (ListVMsResponse);
 }

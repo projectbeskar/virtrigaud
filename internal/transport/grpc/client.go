@@ -452,7 +452,7 @@ func (c *Client) ListVMs(ctx context.Context) ([]contracts.VMInfo, error) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
-	resp, err := c.client.ListVMs(ctx, &providerv1.Empty{})
+	resp, err := c.client.ListVMs(ctx, &providerv1.ListVMsRequest{})
 	if err != nil {
 		return nil, c.mapGRPCError("listVMs", err)
 	}

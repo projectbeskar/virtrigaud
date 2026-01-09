@@ -606,7 +606,7 @@ func (s *Server) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReque
 }
 
 // ListVMs returns all VMs managed by this provider
-func (s *Server) ListVMs(ctx context.Context, req *providerv1.Empty) (*providerv1.ListVMsResponse, error) {
+func (s *Server) ListVMs(ctx context.Context, req *providerv1.ListVMsRequest) (*providerv1.ListVMsResponse, error) {
 	if s.provider == nil {
 		return nil, fmt.Errorf("provider not initialized")
 	}

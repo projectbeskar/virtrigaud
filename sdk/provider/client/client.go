@@ -261,7 +261,7 @@ func (c *Client) Describe(ctx context.Context, req *providerv1.DescribeRequest) 
 // ListVMs lists all VMs managed by the provider.
 func (c *Client) ListVMs(ctx context.Context) ([]*providerv1.VMInfo, error) {
 	ctx = c.withTimeout(ctx, "/provider.v1.Provider/ListVMs")
-	resp, err := c.client.ListVMs(ctx, &providerv1.Empty{})
+	resp, err := c.client.ListVMs(ctx, &providerv1.ListVMsRequest{})
 	if err != nil {
 		return nil, errors.FromGRPCError(err)
 	}

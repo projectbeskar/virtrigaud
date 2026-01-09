@@ -1665,7 +1665,7 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 }
 
 // ListVMs returns all VMs managed by this provider
-func (p *Provider) ListVMs(ctx context.Context, req *providerv1.Empty) (*providerv1.ListVMsResponse, error) {
+func (p *Provider) ListVMs(ctx context.Context, req *providerv1.ListVMsRequest) (*providerv1.ListVMsResponse, error) {
 	p.logger.Info("Listing all virtual machines")
 
 	if p.client == nil {

@@ -327,11 +327,11 @@ func TestVMSet_BetaAlphaBeta_RoundTrip(t *testing.T) {
 		Spec: VMSetSpec{
 			Replicas: func() *int32 { r := int32(3); return &r }(),
 			Template: VMSetTemplate{
-			Spec: VirtualMachineSpec{
-				ProviderRef: ObjectRef{Name: "test-provider"},
-				ClassRef:    ObjectRef{Name: "test-class"},
-				ImageRef:    &ObjectRef{Name: "test-image"},
-			},
+				Spec: VirtualMachineSpec{
+					ProviderRef: ObjectRef{Name: "test-provider"},
+					ClassRef:    ObjectRef{Name: "test-class"},
+					ImageRef:    &ObjectRef{Name: "test-image"},
+				},
 			},
 		},
 	}

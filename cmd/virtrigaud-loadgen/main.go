@@ -295,10 +295,10 @@ func (lg *LoadGenerator) performCreate(ctx context.Context, provider string, wor
 			Labels:    lg.config.VMTemplate.Labels,
 		},
 		Spec: infrav1beta1.VirtualMachineSpec{
-		ProviderRef: infrav1beta1.ObjectRef{Name: provider},
-		ClassRef:    infrav1beta1.ObjectRef{Name: lg.config.VMTemplate.ClassRef},
-		ImageRef:    &infrav1beta1.ObjectRef{Name: lg.config.VMTemplate.ImageRef},
-		PowerState:  "On",
+			ProviderRef: infrav1beta1.ObjectRef{Name: provider},
+			ClassRef:    infrav1beta1.ObjectRef{Name: lg.config.VMTemplate.ClassRef},
+			ImageRef:    &infrav1beta1.ObjectRef{Name: lg.config.VMTemplate.ImageRef},
+			PowerState:  "On",
 		},
 	}
 

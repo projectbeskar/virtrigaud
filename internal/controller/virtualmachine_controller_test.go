@@ -54,12 +54,12 @@ var _ = Describe("VirtualMachine Controller", func() {
 						ProviderRef: infravirtrigaudiov1beta1.ObjectRef{
 							Name: "test-provider",
 						},
-					ClassRef: infravirtrigaudiov1beta1.ObjectRef{
-						Name: "test-class",
-					},
-					ImageRef: &infravirtrigaudiov1beta1.ObjectRef{
-						Name: "test-image",
-					},
+						ClassRef: infravirtrigaudiov1beta1.ObjectRef{
+							Name: "test-class",
+						},
+						ImageRef: &infravirtrigaudiov1beta1.ObjectRef{
+							Name: "test-image",
+						},
 					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
