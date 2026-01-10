@@ -1998,6 +1998,7 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 		// Add SCSI controller
 		scsiController := &types.VirtualLsiLogicController{
 			VirtualSCSIController: types.VirtualSCSIController{
+				SharedBus: types.VirtualSCSISharingNoSharing, // Required: set sharing mode for SCSI controller
 				VirtualController: types.VirtualController{
 					VirtualDevice: types.VirtualDevice{
 						Key: -1,

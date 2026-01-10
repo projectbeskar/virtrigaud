@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -108,6 +109,15 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	logger.V(1).Info("Resolving VM dependencies", "provider", vm.Spec.ProviderRef.Name, "class", vm.Spec.ClassRef.Name, "image", imageRefName)
 	provider, vmClass, vmImage, networks, err := r.getDependencies(ctx, vm)
 	if err != nil {
+		// Check if Provider is missing - log at INFO level and skip reconciliation
+		// Check both wrapped errors and error message for "not found"
+		if errors.IsNotFound(err) || strings.Contains(err.Error(), "not found") {
+			logger.Info("Provider not found, skipping reconciliation until Provider exists", "provider", vm.Spec.ProviderRef.Name, "error", err.Error())
+			k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonWaitingForDependencies, fmt.Sprintf("Provider %s not found", vm.Spec.ProviderRef.Name))
+			r.updateStatus(ctx, vm)
+			// Requeue with longer interval when Provider is missing to reduce log noise
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
 		logger.Error(err, "Failed to get dependencies - will retry in 5s", "provider", vm.Spec.ProviderRef.Name, "class", vm.Spec.ClassRef.Name, "image", imageRefName)
 		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonWaitingForDependencies, err.Error())
 		r.updateStatus(ctx, vm)
@@ -277,6 +287,10 @@ func (r *VirtualMachineReconciler) getDependencies(ctx context.Context, vm *infr
 		providerKey.Namespace = vm.Spec.ProviderRef.Namespace
 	}
 	if err := r.Get(ctx, providerKey, provider); err != nil {
+		if errors.IsNotFound(err) {
+			// Provider doesn't exist yet - preserve the NotFound error for proper handling upstream
+			return nil, nil, nil, nil, fmt.Errorf("provider %s not found (namespace: %s): %w", vm.Spec.ProviderRef.Name, providerKey.Namespace, err)
+		}
 		return nil, nil, nil, nil, fmt.Errorf("failed to get provider %s: %w", vm.Spec.ProviderRef.Name, err)
 	}
 
