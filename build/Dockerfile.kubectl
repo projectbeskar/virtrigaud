@@ -6,8 +6,8 @@ FROM alpine:3.20
 # Using v1.32.0 which is built with Go 1.23.12+ (fixes CVE-2024-34156, CVE-2025-47907)
 ARG KUBECTL_VERSION=1.32.0
 RUN apk add --no-cache curl ca-certificates bash && \
-    curl -LO "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/amd64/kubectl" && \
-    curl -LO "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/amd64/kubectl.sha256" && \
+    curl --retry 5 --retry-delay 3 --retry-connrefused -f -L -o kubectl "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/amd64/kubectl" && \
+    curl --retry 5 --retry-delay 3 --retry-connrefused -f -L -o kubectl.sha256 "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/amd64/kubectl.sha256" && \
     echo "$(cat kubectl.sha256)  kubectl" | sha256sum -c && \
     install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl && \
     rm kubectl kubectl.sha256 && \
