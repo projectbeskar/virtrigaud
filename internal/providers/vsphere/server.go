@@ -1541,6 +1541,8 @@ type VMSpec struct {
 	DiskSizeGB                  int64
 	DiskType                    string
 	TemplateName                string
+	DiskPath                    string // Path to existing disk (for imported disks)
+	DiskFormat                  string // Format of existing disk (for imported disks)
 	NetworkName                 string
 	Firmware                    string
 	HardwareVersion             *int32 // VM hardware compatibility version
@@ -1635,13 +1637,25 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*VMSpec, e
 	if req.ImageJson != "" {
 		var vmImage struct {
 			TemplateName string `json:"TemplateName"`
+			Path         string `json:"Path"`
+			Format       string `json:"Format"`
 		}
 
 		if err := json.Unmarshal([]byte(req.ImageJson), &vmImage); err != nil {
 			return nil, fmt.Errorf("failed to parse VMImage JSON: %w", err)
 		}
 
-		spec.TemplateName = vmImage.TemplateName
+		// If Path is set, this is an imported disk (not a template)
+		if vmImage.Path != "" {
+			spec.DiskPath = vmImage.Path
+			spec.DiskFormat = vmImage.Format
+			if spec.DiskFormat == "" {
+				spec.DiskFormat = "vmdk" // Default for vSphere
+			}
+		} else {
+			// Otherwise, it's a template-based VM
+			spec.TemplateName = vmImage.TemplateName
+		}
 	}
 
 	// Parse Networks from JSON ([]contracts.NetworkAttachment structure)
@@ -1706,10 +1720,19 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 	}
 	p.finder.SetDatacenter(datacenter)
 
-	// Find the template VM
-	template, err := p.finder.VirtualMachine(ctx, spec.TemplateName)
-	if err != nil {
-		return "", fmt.Errorf("failed to find template VM '%s': %w", spec.TemplateName, err)
+	// Find the template VM (only if not using an imported disk)
+	var template *object.VirtualMachine
+	if spec.DiskPath == "" {
+		if spec.TemplateName == "" {
+			return "", fmt.Errorf("either templateName or diskPath must be specified")
+		}
+		template, err = p.finder.VirtualMachine(ctx, spec.TemplateName)
+		if err != nil {
+			return "", fmt.Errorf("failed to find template VM '%s': %w", spec.TemplateName, err)
+		}
+	} else {
+		// Using imported disk - skip template lookup
+		p.logger.Info("Using imported disk, skipping template lookup", "disk_path", spec.DiskPath, "disk_format", spec.DiskFormat)
 	}
 
 	// Determine which cluster to use (spec override or provider default)
@@ -1948,30 +1971,99 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 		}
 	}
 
-	// Perform the clone operation
-	p.logger.Info("Cloning virtual machine from template", "template", spec.TemplateName, "target", spec.Name)
+	var vmRef types.ManagedObjectReference
+	var vmID string
 
-	task, err := template.Clone(ctx, folder, spec.Name, *cloneSpec)
-	if err != nil {
-		return "", fmt.Errorf("failed to start clone operation: %w", err)
+	if spec.DiskPath != "" {
+		// Using imported disk - create VM from scratch and attach existing disk
+		p.logger.Info("Creating VM with imported disk", "disk_path", spec.DiskPath, "target", spec.Name)
+
+		// Create VM config spec with disk attachment
+		// Parse datastore path: [datastore] path/file.vmdk
+		diskBacking := &types.VirtualDiskFlatVer2BackingInfo{
+			VirtualDeviceFileBackingInfo: types.VirtualDeviceFileBackingInfo{
+				FileName: spec.DiskPath,
+			},
+			DiskMode: string(types.VirtualDiskModePersistent),
+		}
+
+		// Add disk device
+		diskDevice := &types.VirtualDisk{
+			VirtualDevice: types.VirtualDevice{
+				Key:     -1,
+				Backing: diskBacking,
+			},
+		}
+
+		// Add SCSI controller
+		scsiController := &types.VirtualLsiLogicController{
+			VirtualSCSIController: types.VirtualSCSIController{
+				VirtualController: types.VirtualController{
+					VirtualDevice: types.VirtualDevice{
+						Key: -1,
+					},
+					BusNumber: 0,
+				},
+			},
+		}
+
+		configSpec.DeviceChange = append(configSpec.DeviceChange,
+			&types.VirtualDeviceConfigSpec{
+				Operation: types.VirtualDeviceConfigSpecOperationAdd,
+				Device:    scsiController,
+			},
+			&types.VirtualDeviceConfigSpec{
+				Operation: types.VirtualDeviceConfigSpecOperationAdd,
+				Device:    diskDevice,
+			},
+		)
+
+		// Create VM using CreateVM_Task
+		vmFolder := folder
+		task, err := vmFolder.CreateVM(ctx, *configSpec, resourcePool, nil)
+		if err != nil {
+			return "", fmt.Errorf("failed to create VM: %w", err)
+		}
+
+		info, err := task.WaitForResult(ctx, nil)
+		if err != nil {
+			return "", fmt.Errorf("VM creation task failed: %w", err)
+		}
+
+		vmRef, ok := info.Result.(types.ManagedObjectReference)
+		if !ok {
+			return "", fmt.Errorf("unexpected result type from create task: %T", info.Result)
+		}
+
+		vmID = vmRef.Value
+		p.logger.Info("Virtual machine created successfully with imported disk", "vm_id", vmID, "name", spec.Name)
+	} else {
+		// Using template - clone from template
+		p.logger.Info("Cloning virtual machine from template", "template", spec.TemplateName, "target", spec.Name)
+
+		task, err := template.Clone(ctx, folder, spec.Name, *cloneSpec)
+		if err != nil {
+			return "", fmt.Errorf("failed to start clone operation: %w", err)
+		}
+
+		// Wait for the clone task to complete
+		info, err := task.WaitForResult(ctx, nil)
+		if err != nil {
+			return "", fmt.Errorf("clone task failed: %w", err)
+		}
+
+		// Get the new VM reference
+		var ok bool
+		vmRef, ok = info.Result.(types.ManagedObjectReference)
+		if !ok {
+			return "", fmt.Errorf("unexpected result type from clone task: %T", info.Result)
+		}
+
+		// Get the VM's managed object ID for returning
+		vmID = vmRef.Value
+
+		p.logger.Info("Virtual machine created successfully", "vm_id", vmID, "name", spec.Name)
 	}
-
-	// Wait for the clone task to complete
-	info, err := task.WaitForResult(ctx, nil)
-	if err != nil {
-		return "", fmt.Errorf("clone task failed: %w", err)
-	}
-
-	// Get the new VM reference
-	vmRef, ok := info.Result.(types.ManagedObjectReference)
-	if !ok {
-		return "", fmt.Errorf("unexpected result type from clone task: %T", info.Result)
-	}
-
-	// Get the VM's managed object ID for returning
-	vmID := vmRef.Value
-
-	p.logger.Info("Virtual machine created successfully", "vm_id", vmID, "name", spec.Name)
 
 	// Get the new VM object for further operations
 	newVM := object.NewVirtualMachine(p.client.Client, vmRef)
