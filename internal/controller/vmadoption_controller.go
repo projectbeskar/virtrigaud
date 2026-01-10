@@ -517,6 +517,7 @@ func (r *VMAdoptionReconciler) matchesFilter(vmInfo contracts.VMInfo, filter *VM
 // SetupWithManager sets up the controller with the Manager.
 func (r *VMAdoptionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
+		Named("vmadoption").
 		For(&infravirtrigaudiov1beta1.Provider{}).
 		WithOptions(controller.Options{
 			MaxConcurrentReconciles: 1, // Process one provider at a time
