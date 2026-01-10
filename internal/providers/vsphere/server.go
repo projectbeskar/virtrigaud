@@ -1978,6 +1978,9 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 		// Using imported disk - create VM from scratch and attach existing disk
 		p.logger.Info("Creating VM with imported disk", "disk_path", spec.DiskPath, "target", spec.Name)
 
+		// Set VM name in config spec (required for CreateVM)
+		configSpec.Name = spec.Name
+
 		// Create VM config spec with disk attachment
 		// Parse datastore path: [datastore] path/file.vmdk
 		diskBacking := &types.VirtualDiskFlatVer2BackingInfo{

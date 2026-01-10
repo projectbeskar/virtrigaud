@@ -351,7 +351,22 @@ func (r *VMAdoptionReconciler) adoptVM(ctx context.Context, provider *infravirtr
 		return fmt.Errorf("failed to create VirtualMachine CR: %w", err)
 	}
 
-	logger.Info("Successfully adopted VM", "vm_name", vmName)
+	// Update status separately - Kubernetes status subresource is not persisted during Create
+	// This is critical for adopted VMs: Status.ID must be set so VirtualMachine controller
+	// knows the VM already exists and skips creation
+	vm.Status.ID = vmInfo.ID
+	vm.Status.PowerState = infravirtrigaudiov1beta1.PowerState(vmInfo.PowerState)
+	vm.Status.IPs = vmInfo.IPs
+	vm.Status.Provider = vmInfo.ProviderRaw
+	if err := r.Status().Update(ctx, vm); err != nil {
+		// If status update fails, log error but don't fail adoption
+		// The VirtualMachine controller will reconcile and may try to create the VM
+		// but it should fail gracefully if the VM already exists
+		logger.Error(err, "Failed to update VirtualMachine status after adoption", "vm_name", vmName)
+		return fmt.Errorf("failed to update VM status: %w", err)
+	}
+
+	logger.Info("Successfully adopted VM", "vm_name", vmName, "vm_id", vmInfo.ID)
 	return nil
 }
 
