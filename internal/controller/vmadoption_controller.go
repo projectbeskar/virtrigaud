@@ -280,6 +280,27 @@ func (r *VMAdoptionReconciler) adoptVM(ctx context.Context, provider *infravirtr
 		Namespace: provider.Namespace,
 	}
 	if err := r.Get(ctx, vmKey, existingVM); err == nil {
+		// VM CR exists - check if it's an adopted VM that needs Status.ID fixed
+		if existingVM.Labels != nil && existingVM.Labels["virtrigaud.io/adopted"] == "true" {
+			if existingVM.Status.ID == "" {
+				// This is an adopted VM created before the status fix - update status now
+				logger.Info("Fixing Status.ID for existing adopted VM", "vm_name", vmName, "vm_id", vmInfo.ID)
+				existingVM.Status.ID = vmInfo.ID
+				existingVM.Status.PowerState = infravirtrigaudiov1beta1.PowerState(vmInfo.PowerState)
+				existingVM.Status.IPs = vmInfo.IPs
+				existingVM.Status.Provider = vmInfo.ProviderRaw
+				if err := r.Status().Update(ctx, existingVM); err != nil {
+					logger.Error(err, "Failed to update Status.ID for existing adopted VM", "vm_name", vmName)
+					return fmt.Errorf("failed to update VM status: %w", err)
+				}
+				logger.Info("Successfully fixed Status.ID for adopted VM", "vm_name", vmName, "vm_id", vmInfo.ID)
+				return nil
+			}
+			// Status.ID is already set, nothing to do
+			logger.Info("VirtualMachine CR already exists with Status.ID, skipping adoption", "vm_name", vmName, "vm_id", existingVM.Status.ID)
+			return nil
+		}
+		// Not an adopted VM, skip
 		logger.Info("VirtualMachine CR already exists, skipping adoption")
 		return nil
 	} else if !errors.IsNotFound(err) {

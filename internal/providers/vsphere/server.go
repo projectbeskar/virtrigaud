@@ -1961,16 +1961,6 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 
 	cloneSpec.Config = configSpec
 
-	// Add cloud-init data via guestinfo properties if provided
-	if spec.CloudInit != "" {
-		if err := p.addCloudInitToConfigSpec(configSpec, spec.CloudInit); err != nil {
-			p.logger.Warn("Failed to add cloud-init configuration", "error", err)
-			// Continue without cloud-init rather than failing
-		} else {
-			p.logger.Info("Added cloud-init configuration to VM", "vm_name", spec.Name)
-		}
-	}
-
 	var vmRef types.ManagedObjectReference
 	var vmID string
 
@@ -1978,8 +1968,19 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 		// Using imported disk - create VM from scratch and attach existing disk
 		p.logger.Info("Creating VM with imported disk", "disk_path", spec.DiskPath, "target", spec.Name)
 
-		// Set VM name in config spec (required for CreateVM)
+		// Set VM name in config spec FIRST (required for CreateVM and cloud-init)
 		configSpec.Name = spec.Name
+
+		// Add cloud-init data via guestinfo properties if provided
+		// Note: Must be called AFTER setting Name for imported disk VMs
+		if spec.CloudInit != "" {
+			if err := p.addCloudInitToConfigSpec(configSpec, spec.CloudInit); err != nil {
+				p.logger.Warn("Failed to add cloud-init configuration", "error", err)
+				// Continue without cloud-init rather than failing
+			} else {
+				p.logger.Info("Added cloud-init configuration to VM", "vm_name", spec.Name)
+			}
+		}
 
 		// Create VM config spec with disk attachment
 		// Parse datastore path: [datastore] path/file.vmdk
@@ -2043,6 +2044,19 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 		p.logger.Info("Virtual machine created successfully with imported disk", "vm_id", vmID, "name", spec.Name)
 	} else {
 		// Using template - clone from template
+		// Set VM name for template-based VMs (needed for cloud-init)
+		configSpec.Name = spec.Name
+
+		// Add cloud-init data via guestinfo properties if provided
+		if spec.CloudInit != "" {
+			if err := p.addCloudInitToConfigSpec(configSpec, spec.CloudInit); err != nil {
+				p.logger.Warn("Failed to add cloud-init configuration", "error", err)
+				// Continue without cloud-init rather than failing
+			} else {
+				p.logger.Info("Added cloud-init configuration to VM", "vm_name", spec.Name)
+			}
+		}
+
 		p.logger.Info("Cloning virtual machine from template", "template", spec.TemplateName, "target", spec.Name)
 
 		task, err := template.Clone(ctx, folder, spec.Name, *cloneSpec)
