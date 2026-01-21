@@ -56,7 +56,6 @@
 
 - [Testing Workflows Locally](TESTING_WORKFLOWS_LOCALLY.md)
 - [Contributing](../../CONTRIBUTING.md)
-- [Development Guide](../../DEVELOPMENT.md)
 
 # Examples
 

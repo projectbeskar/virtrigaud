@@ -1045,7 +1045,7 @@ func (p *Provider) mapVSpherePowerState(vspherePowerState string) string {
 }
 
 // addCloudInitToConfigSpec adds cloud-init data to VM configuration via guestinfo properties
-func (p *Provider) addCloudInitToConfigSpec(configSpec *types.VirtualMachineConfigSpec, cloudInitData string) error {
+func (p *Provider) addCloudInitToConfigSpec(configSpec *types.VirtualMachineConfigSpec, cloudInitData string, cloudInitMetaData string) error {
 	// VMware cloud-init datasource reads from guestinfo properties
 	// This is the standard way to pass cloud-init data to VMs in vSphere
 
@@ -1062,16 +1062,29 @@ func (p *Provider) addCloudInitToConfigSpec(configSpec *types.VirtualMachineConf
 			Key:   "guestinfo.userdata.encoding",
 			Value: "yaml", // Indicate this is YAML format
 		},
-		// Some cloud-init datasources also look for metadata
-		&types.OptionValue{
-			Key:   "guestinfo.metadata",
-			Value: `{"instance-id": "` + configSpec.Name + `"}`,
-		},
-		&types.OptionValue{
-			Key:   "guestinfo.metadata.encoding",
-			Value: "json",
-		},
 	}
+
+	// Add metadata - use custom if provided, otherwise use default
+	var metadataValue string
+	var metadataEncoding string
+	if cloudInitMetaData != "" {
+		// Use the provided custom metadata in YAML format
+		metadataValue = cloudInitMetaData
+		metadataEncoding = "yaml"
+	} else {
+		// Use default JSON metadata with instance-id
+		metadataValue = `{"instance-id": "` + configSpec.Name + `"}`
+		metadataEncoding = "json"
+	}
+
+	extraConfig = append(extraConfig, &types.OptionValue{
+		Key:   "guestinfo.metadata",
+		Value: metadataValue,
+	})
+	extraConfig = append(extraConfig, &types.OptionValue{
+		Key:   "guestinfo.metadata.encoding",
+		Value: metadataEncoding,
+	})
 
 	// Add to existing extra config or create new
 	if configSpec.ExtraConfig != nil {
@@ -1547,6 +1560,7 @@ type VMSpec struct {
 	Firmware                    string
 	HardwareVersion             *int32 // VM hardware compatibility version
 	CloudInit                   string // Cloud-init user data
+	CloudInitMetaData           string // Cloud-init metadata
 	NestedVirtualization        bool   // Enable nested virtualization
 	VirtualizationBasedSecurity bool   // Enable VBS features
 	CPUHotAddEnabled            bool   // Enable CPU hot-add
@@ -1676,6 +1690,11 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*VMSpec, e
 	// Parse UserData (cloud-init)
 	if len(req.UserData) > 0 {
 		spec.CloudInit = string(req.UserData)
+	}
+
+	// Parse MetaData (cloud-init metadata)
+	if len(req.MetaData) > 0 {
+		spec.CloudInitMetaData = string(req.MetaData)
 	}
 
 	// Parse Placement from JSON (contracts.Placement structure)
@@ -1974,7 +1993,7 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 		// Add cloud-init data via guestinfo properties if provided
 		// Note: Must be called AFTER setting Name for imported disk VMs
 		if spec.CloudInit != "" {
-			if err := p.addCloudInitToConfigSpec(configSpec, spec.CloudInit); err != nil {
+			if err := p.addCloudInitToConfigSpec(configSpec, spec.CloudInit, spec.CloudInitMetaData); err != nil {
 				p.logger.Warn("Failed to add cloud-init configuration", "error", err)
 				// Continue without cloud-init rather than failing
 			} else {
@@ -2049,7 +2068,7 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 
 		// Add cloud-init data via guestinfo properties if provided
 		if spec.CloudInit != "" {
-			if err := p.addCloudInitToConfigSpec(configSpec, spec.CloudInit); err != nil {
+			if err := p.addCloudInitToConfigSpec(configSpec, spec.CloudInit, spec.CloudInitMetaData); err != nil {
 				p.logger.Warn("Failed to add cloud-init configuration", "error", err)
 				// Continue without cloud-init rather than failing
 			} else {

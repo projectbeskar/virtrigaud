@@ -30,7 +30,8 @@ message ValidateResponse {
 message CreateRequest {
   string name = 1;
   bytes user_data = 2; // Already rendered cloud-init/ignition data
-  
+  bytes meta_data = 9; // Cloud-init metadata (YAML format)
+
   // JSON-encoded provider-agnostic specifications
   string class_json = 3;     // VMClass
   string image_json = 4;     // VMImage  

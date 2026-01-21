@@ -33,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
@@ -554,7 +555,7 @@ func (r *VMAdoptionReconciler) matchesFilter(vmInfo contracts.VMInfo, filter *VM
 func (r *VMAdoptionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		Named("vmadoption").
-		For(&infravirtrigaudiov1beta1.Provider{}).
+		Watches(&infravirtrigaudiov1beta1.Provider{}, &handler.EnqueueRequestForObject{}).
 		WithOptions(controller.Options{
 			MaxConcurrentReconciles: 1, // Process one provider at a time
 		}).

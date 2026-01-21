@@ -48,6 +48,8 @@ type CreateRequest struct {
 	Disks []DiskSpec
 	// UserData contains cloud-init/ignition configuration
 	UserData *UserData
+	// MetaData contains cloud-init metadata configuration
+	MetaData *MetaData
 	// Placement provides placement hints
 	Placement *Placement
 	// Tags are applied to the VM

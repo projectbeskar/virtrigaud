@@ -456,6 +456,30 @@ spec:
                                 type: object
                             type: object
                         type: object
+                      metaData:
+                        description: MetaData contains cloud-init metadata configuration
+                        properties:
+                          cloudInit:
+                            description: CloudInit contains cloud-init metadata configuration
+                            properties:
+                              inline:
+                                description: Inline contains inline cloud-init metadata
+                                  in YAML format
+                                type: string
+                              secretRef:
+                                description: SecretRef references a Secret containing
+                                  cloud-init metadata
+                                properties:
+                                  name:
+                                    description: Name of the referenced object
+                                    maxLength: 253
+                                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                    type: string
+                                required:
+                                - name
+                                type: object
+                            type: object
+                        type: object
                       networks:
                         description: Networks specifies network attachments for the
                           VM

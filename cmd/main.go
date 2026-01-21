@@ -254,13 +254,6 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "VMNetworkAttachment")
 		os.Exit(1)
 	}
-	if err = (&controller.ProviderReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "Provider")
-		os.Exit(1)
-	}
 	if err = (&controller.VMAdoptionReconciler{
 		Client:         mgr.GetClient(),
 		Scheme:         mgr.GetScheme(),

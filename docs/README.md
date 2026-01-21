@@ -12,6 +12,7 @@ Welcome to the VirtRigaud documentation. VirtRigaud is a Kubernetes operator for
 ### Core Documentation
 - [Custom Resource Definitions](CRDs.md) - Complete API reference
 - [Examples](EXAMPLES.md) - Practical configuration examples
+- [Cloud-Init Configuration](CLOUD_INIT.md) - UserData and MetaData guide
 - [Provider Documentation](PROVIDERS.md) - Provider development guide
 - [Provider Capabilities Matrix](PROVIDERS_CAPABILITIES.md) - Feature comparison
 
