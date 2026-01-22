@@ -5,6 +5,10 @@ PROVIDER_VSPHERE_IMG ?= ghcr.io/projectbeskar/virtrigaud/provider-vsphere:latest
 PROVIDER_PROXMOX_IMG ?= ghcr.io/projectbeskar/virtrigaud/provider-proxmox:latest
 TAG ?= latest
 
+# Platform configuration for multi-arch builds
+PLATFORM ?= linux/amd64
+BUILD_PLATFORMS ?= linux/arm64,linux/amd64
+
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
 GOBIN=$(shell go env GOPATH)/bin
@@ -273,9 +277,28 @@ release-sdk: ## Release SDK module with tags and generate docs
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
+# 
+# Examples:
+#   make docker-build                                    # Build for linux/amd64 (default)
+#   make docker-build PLATFORM=linux/arm64              # Build for ARM64
+#   make docker-build-multiplatform                      # Build and load for linux/amd64,linux/arm64
+#   make docker-buildx BUILD_PLATFORMS=linux/arm64,linux/amd64  # Build and push for multiple platforms
 .PHONY: docker-build
-docker-build: ## Build docker image with the manager.
-	$(CONTAINER_TOOL) build -t ${IMG} --build-arg VERSION=$(VERSION) --build-arg GIT_SHA=$(GIT_SHA) .
+docker-build: ## Build docker image with the manager for single platform
+	$(CONTAINER_TOOL) build --platform $(PLATFORM) -t ${IMG} \
+		--build-arg VERSION=$(VERSION) \
+		--build-arg GIT_SHA=$(GIT_SHA) \
+		--build-arg TARGETOS=$(shell echo $(PLATFORM) | cut -d'/' -f1) \
+		--build-arg TARGETARCH=$(shell echo $(PLATFORM) | cut -d'/' -f2) \
+		.
+
+.PHONY: docker-build-multiplatform
+docker-build-multiplatform: ## Build docker image for multiple platforms (without push)
+	$(CONTAINER_TOOL) buildx build --platform $(BUILD_PLATFORMS) -t ${IMG} \
+		--build-arg VERSION=$(VERSION) \
+		--build-arg GIT_SHA=$(GIT_SHA) \
+		--load \
+		.
 
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
@@ -283,21 +306,63 @@ docker-push: ## Push docker image with the manager.
 
 .PHONY: docker-provider-libvirt
 docker-provider-libvirt: ## Build docker image for libvirt provider
-	$(CONTAINER_TOOL) build -f cmd/provider-libvirt/Dockerfile -t $(PROVIDER_LIBVIRT_IMG) \
-		--build-arg VERSION=$(VERSION) --build-arg GIT_SHA=$(GIT_SHA) .
+	$(CONTAINER_TOOL) build --platform $(PLATFORM) -f cmd/provider-libvirt/Dockerfile -t $(PROVIDER_LIBVIRT_IMG) \
+		--build-arg VERSION=$(VERSION) \
+		--build-arg GIT_SHA=$(GIT_SHA) \
+		--build-arg TARGETOS=$(shell echo $(PLATFORM) | cut -d'/' -f1) \
+		--build-arg TARGETARCH=$(shell echo $(PLATFORM) | cut -d'/' -f2) \
+		.
 
 .PHONY: docker-provider-vsphere
 docker-provider-vsphere: ## Build docker image for vsphere provider
-	$(CONTAINER_TOOL) build -f cmd/provider-vsphere/Dockerfile -t $(PROVIDER_VSPHERE_IMG) \
-		--build-arg VERSION=$(VERSION) --build-arg GIT_SHA=$(GIT_SHA) .
+	$(CONTAINER_TOOL) build --platform $(PLATFORM) -f cmd/provider-vsphere/Dockerfile -t $(PROVIDER_VSPHERE_IMG) \
+		--build-arg VERSION=$(VERSION) \
+		--build-arg GIT_SHA=$(GIT_SHA) \
+		--build-arg TARGETOS=$(shell echo $(PLATFORM) | cut -d'/' -f1) \
+		--build-arg TARGETARCH=$(shell echo $(PLATFORM) | cut -d'/' -f2) \
+		.
 
 .PHONY: docker-provider-proxmox
 docker-provider-proxmox: ## Build docker image for proxmox provider
-	$(CONTAINER_TOOL) build -f cmd/provider-proxmox/Dockerfile -t $(PROVIDER_PROXMOX_IMG) \
-		--build-arg VERSION=$(VERSION) --build-arg GIT_SHA=$(GIT_SHA) .
+	$(CONTAINER_TOOL) build --platform $(PLATFORM) -f cmd/provider-proxmox/Dockerfile -t $(PROVIDER_PROXMOX_IMG) \
+		--build-arg VERSION=$(VERSION) \
+		--build-arg GIT_SHA=$(GIT_SHA) \
+		--build-arg TARGETOS=$(shell echo $(PLATFORM) | cut -d'/' -f1) \
+		--build-arg TARGETARCH=$(shell echo $(PLATFORM) | cut -d'/' -f2) \
+		.
 
 .PHONY: docker-providers
 docker-providers: docker-provider-libvirt docker-provider-vsphere docker-provider-proxmox ## Build all provider docker images
+
+.PHONY: docker-providers-multiplatform
+docker-providers-multiplatform: ## Build all provider images for multiple platforms
+	$(MAKE) docker-provider-libvirt-multiplatform
+	$(MAKE) docker-provider-vsphere-multiplatform
+	$(MAKE) docker-provider-proxmox-multiplatform
+
+.PHONY: docker-provider-libvirt-multiplatform
+docker-provider-libvirt-multiplatform: ## Build libvirt provider for multiple platforms
+	$(CONTAINER_TOOL) buildx build --platform $(BUILD_PLATFORMS) -f cmd/provider-libvirt/Dockerfile -t $(PROVIDER_LIBVIRT_IMG) \
+		--build-arg VERSION=$(VERSION) \
+		--build-arg GIT_SHA=$(GIT_SHA) \
+		--load \
+		.
+
+.PHONY: docker-provider-vsphere-multiplatform
+docker-provider-vsphere-multiplatform: ## Build vsphere provider for multiple platforms
+	$(CONTAINER_TOOL) buildx build --platform $(BUILD_PLATFORMS) -f cmd/provider-vsphere/Dockerfile -t $(PROVIDER_VSPHERE_IMG) \
+		--build-arg VERSION=$(VERSION) \
+		--build-arg GIT_SHA=$(GIT_SHA) \
+		--load \
+		.
+
+.PHONY: docker-provider-proxmox-multiplatform
+docker-provider-proxmox-multiplatform: ## Build proxmox provider for multiple platforms
+	$(CONTAINER_TOOL) buildx build --platform $(BUILD_PLATFORMS) -f cmd/provider-proxmox/Dockerfile -t $(PROVIDER_PROXMOX_IMG) \
+		--build-arg VERSION=$(VERSION) \
+		--build-arg GIT_SHA=$(GIT_SHA) \
+		--load \
+		.
 
 # PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
 # architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:
@@ -312,9 +377,48 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
 	- $(CONTAINER_TOOL) buildx create --name virtrigaud-builder
 	$(CONTAINER_TOOL) buildx use virtrigaud-builder
-	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile.cross .
+	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile.cross \
+		--build-arg VERSION=$(VERSION) \
+		--build-arg GIT_SHA=$(GIT_SHA) \
+		.
 	- $(CONTAINER_TOOL) buildx rm virtrigaud-builder
 	rm Dockerfile.cross
+
+.PHONY: docker-buildx-providers
+docker-buildx-providers: ## Build and push all provider images for cross-platform support
+	$(MAKE) docker-buildx-provider-libvirt
+	$(MAKE) docker-buildx-provider-vsphere
+	$(MAKE) docker-buildx-provider-proxmox
+
+.PHONY: docker-buildx-provider-libvirt
+docker-buildx-provider-libvirt: ## Build and push libvirt provider for cross-platform
+	- $(CONTAINER_TOOL) buildx create --name virtrigaud-libvirt-builder
+	$(CONTAINER_TOOL) buildx use virtrigaud-libvirt-builder
+	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) -f cmd/provider-libvirt/Dockerfile -t $(PROVIDER_LIBVIRT_IMG) \
+		--build-arg VERSION=$(VERSION) \
+		--build-arg GIT_SHA=$(GIT_SHA) \
+		.
+	- $(CONTAINER_TOOL) buildx rm virtrigaud-libvirt-builder
+
+.PHONY: docker-buildx-provider-vsphere
+docker-buildx-provider-vsphere: ## Build and push vsphere provider for cross-platform
+	- $(CONTAINER_TOOL) buildx create --name virtrigaud-vsphere-builder
+	$(CONTAINER_TOOL) buildx use virtrigaud-vsphere-builder
+	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) -f cmd/provider-vsphere/Dockerfile -t $(PROVIDER_VSPHERE_IMG) \
+		--build-arg VERSION=$(VERSION) \
+		--build-arg GIT_SHA=$(GIT_SHA) \
+		.
+	- $(CONTAINER_TOOL) buildx rm virtrigaud-vsphere-builder
+
+.PHONY: docker-buildx-provider-proxmox
+docker-buildx-provider-proxmox: ## Build and push proxmox provider for cross-platform
+	- $(CONTAINER_TOOL) buildx create --name virtrigaud-proxmox-builder
+	$(CONTAINER_TOOL) buildx use virtrigaud-proxmox-builder
+	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) -f cmd/provider-proxmox/Dockerfile -t $(PROVIDER_PROXMOX_IMG) \
+		--build-arg VERSION=$(VERSION) \
+		--build-arg GIT_SHA=$(GIT_SHA) \
+		.
+	- $(CONTAINER_TOOL) buildx rm virtrigaud-proxmox-builder
 
 .PHONY: build-installer
 build-installer: sync-helm-crds generate kustomize ## Generate a consolidated YAML with CRDs and deployment.

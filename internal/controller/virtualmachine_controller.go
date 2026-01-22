@@ -701,6 +701,17 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 		// TODO: Handle SecretRef
 	}
 
+	// Convert MetaData
+	var metaData *contracts.MetaData
+	if vm.Spec.MetaData != nil && vm.Spec.MetaData.CloudInit != nil {
+		if vm.Spec.MetaData.CloudInit.Inline != "" {
+			metaData = &contracts.MetaData{
+				MetaDataYAML: vm.Spec.MetaData.CloudInit.Inline,
+			}
+		}
+		// TODO: Handle SecretRef
+	}
+
 	// Convert Placement
 	var placement *contracts.Placement
 	if vm.Spec.Placement != nil {
@@ -718,6 +729,7 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 		Networks:  networkAttachments,
 		Disks:     disks,
 		UserData:  userData,
+		MetaData:  metaData,
 		Placement: placement,
 		Tags:      vm.Spec.Tags,
 	}

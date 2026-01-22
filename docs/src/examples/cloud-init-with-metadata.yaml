@@ -1,0 +1,162 @@
+# Example: VirtualMachine with Cloud-Init UserData and MetaData
+# This example demonstrates how to use both userData and metaData
+# for comprehensive cloud-init configuration
+
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: vm-with-custom-metadata
+  namespace: default
+spec:
+  providerRef:
+    name: vsphere-datacenter
+  classRef:
+    name: medium
+  imageRef:
+    name: ubuntu-22-04-template
+  
+  # UserData contains the cloud-init configuration
+  userData:
+    cloudInit:
+      inline: |
+        #cloud-config
+        # This is the standard cloud-init user-data
+        users:
+          - name: admin
+            sudo: ALL=(ALL) NOPASSWD:ALL
+            shell: /bin/bash
+            ssh_authorized_keys:
+              - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQ... admin@example.com
+          - name: developer
+            groups: docker
+            shell: /bin/bash
+        
+        packages:
+          - curl
+          - wget
+          - git
+          - docker.io
+        
+        runcmd:
+          - systemctl enable docker
+          - systemctl start docker
+          - echo "VM provisioning complete" > /var/log/cloud-init-complete.log
+  
+  # MetaData contains the cloud-init metadata
+  # This is sent to guestinfo.metadata in vSphere
+  metaData:
+    inline: |
+      # Cloud-init metadata in YAML format
+      instance-id: vm-with-custom-metadata-001
+      local-hostname: app-server-01
+      
+      # Network configuration (optional)
+      network:
+        version: 2
+        ethernets:
+          eth0:
+            dhcp4: true
+            dhcp6: false
+      
+      # Custom metadata fields
+      public-keys:
+        - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQ... key1@example.com
+        - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQ... key2@example.com
+      
+      # Additional custom metadata
+      region: us-west-2
+      availability-zone: us-west-2a
+      project: web-application
+      environment: production
+  
+  networks:
+    - name: primary
+      ipPolicy: dhcp
+  
+  powerState: On
+
+---
+# Example: VirtualMachine with MetaData from Secret
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vm-metadata-secret
+  namespace: default
+type: Opaque
+stringData:
+  metadata: |
+    instance-id: vm-from-secret-001
+    local-hostname: secure-server
+    region: eu-central-1
+    environment: staging
+
+---
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: vm-metadata-from-secret
+  namespace: default
+spec:
+  providerRef:
+    name: vsphere-datacenter
+  classRef:
+    name: small
+  imageRef:
+    name: ubuntu-22-04-template
+  
+  userData:
+    cloudInit:
+      inline: |
+        #cloud-config
+        packages:
+          - nginx
+        runcmd:
+          - systemctl enable nginx
+          - systemctl start nginx
+  
+  # MetaData from Kubernetes Secret
+  metaData:
+    secretRef:
+      name: vm-metadata-secret
+      key: metadata
+  
+  networks:
+    - name: web-tier
+      ipPolicy: dhcp
+  
+  powerState: On
+
+---
+# Example: VirtualMachine with default metadata (no metaData specified)
+# When metaData is not specified, VirtRigaud uses the default:
+# {"instance-id": "<vm-name>"}
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: vm-default-metadata
+  namespace: default
+spec:
+  providerRef:
+    name: vsphere-datacenter
+  classRef:
+    name: small
+  imageRef:
+    name: ubuntu-22-04-template
+  
+  userData:
+    cloudInit:
+      inline: |
+        #cloud-config
+        users:
+          - name: ubuntu
+            sudo: ALL=(ALL) NOPASSWD:ALL
+  
+  # No metaData specified - will use default:
+  # guestinfo.metadata = {"instance-id": "vm-default-metadata"}
+  # guestinfo.metadata.encoding = "json"
+  
+  networks:
+    - name: default
+      ipPolicy: dhcp
+  
+  powerState: On

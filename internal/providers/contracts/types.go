@@ -102,6 +102,12 @@ type UserData struct {
 	Type string
 }
 
+// MetaData contains cloud-init metadata configuration
+type MetaData struct {
+	// MetaDataYAML contains the cloud-init metadata in YAML format
+	MetaDataYAML string
+}
+
 // Placement provides VM placement hints
 type Placement struct {
 	// Datastore specifies preferred datastore

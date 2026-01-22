@@ -57,6 +57,10 @@ type VirtualMachineSpec struct {
 	// +optional
 	UserData *UserData `json:"userData,omitempty"`
 
+	// MetaData contains cloud-init metadata configuration
+	// +optional
+	MetaData *MetaData `json:"metaData,omitempty"`
+
 	// Placement provides hints for VM placement
 	// +optional
 	Placement *Placement `json:"placement,omitempty"`
@@ -450,6 +454,24 @@ type CloudInit struct {
 	Inline string `json:"inline,omitempty"`
 
 	// SecretRef references a Secret containing cloud-init data
+	// +optional
+	SecretRef *LocalObjectReference `json:"secretRef,omitempty"`
+}
+
+// MetaData defines cloud-init metadata configuration
+type MetaData struct {
+	// CloudInit contains cloud-init metadata configuration
+	// +optional
+	CloudInit *CloudInitMetaData `json:"cloudInit,omitempty"`
+}
+
+// CloudInitMetaData defines cloud-init metadata configuration
+type CloudInitMetaData struct {
+	// Inline contains inline cloud-init metadata in YAML format
+	// +optional
+	Inline string `json:"inline,omitempty"`
+
+	// SecretRef references a Secret containing cloud-init metadata
 	// +optional
 	SecretRef *LocalObjectReference `json:"secretRef,omitempty"`
 }

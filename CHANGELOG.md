@@ -5,6 +5,131 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-01-21 18:00] - Align MetaData Structure with UserData Pattern
+**Author:** @firestoned (Erick Bourgeois)
+
+### Changed
+- `api/infra.virtrigaud.io/v1beta1/virtualmachine_types.go`: Restructured MetaData type to match UserData pattern
+  - Changed from `spec.metaData.inline` to `spec.metaData.cloudInit.inline`
+  - Added new `CloudInitMetaData` type with `inline` and `secretRef` fields
+  - Updated `MetaData` type to nest `CloudInit` configuration
+- `internal/controller/virtualmachine_controller.go`: Updated metaData access to use nested structure
+- `docs/CLOUD_INIT.md`: Updated all examples to use `metaData.cloudInit.inline` syntax
+- `CHANGELOG.md`: Updated example YAML to reflect new structure
+
+### Why
+Provides consistent API pattern between userData and metaData fields. Both now follow the same structure:
+- `spec.userData.cloudInit.inline`
+- `spec.metaData.cloudInit.inline`
+
+This makes the API more intuitive and easier to learn.
+
+### Impact
+- [x] Breaking change (requires updating existing VirtualMachine manifests)
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+**Migration:** Users must update their VirtualMachine manifests from:
+```yaml
+metaData:
+  inline: |
+    instance-id: vm-001
+```
+To:
+```yaml
+metaData:
+  cloudInit:
+    inline: |
+      instance-id: vm-001
+```
+
+---
+
+## [2026-01-21 17:30] - Fix Duplicate ProviderReconciler Registration
+**Author:** @firestoned (Erick Bourgeois)
+
+### Fixed
+- `cmd/main.go`: Removed duplicate ProviderReconciler registration (lines 258-263)
+  - ProviderReconciler was registered twice, causing "controller with name provider already exists" error
+  - First registration at line 232 is correct and retained
+  - Duplicate registration removed to allow manager to start successfully
+
+### Why
+The manager was failing to start with error: "controller with name provider already exists. Controller names must be unique to avoid multiple controllers reporting the same metric."
+
+### Impact
+- [x] Breaking change (fixes manager startup failure)
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+---
+
+## [2026-01-21] - Add MetaData Support for Cloud-Init Metadata
+**Author:** @firestoned (Erick Bourgeois)
+
+### Added
+- `VirtualMachine.spec.metaData`: New field for cloud-init metadata configuration
+  - Supports inline YAML format (similar to userData)
+  - Sent to vSphere via `guestinfo.metadata`
+  - Falls back to default `{"instance-id": "<vm-name>"}` if not provided
+- `MetaData` type in CRD API with `inline` and `secretRef` support
+- `MetaData` support in contracts and controller
+- vSphere provider now accepts custom cloud-init metadata
+- **Documentation**:
+  - New comprehensive guide: [docs/CLOUD_INIT.md](docs/CLOUD_INIT.md)
+  - Updated CRD reference: [docs/CRDs.md](docs/CRDs.md)
+  - New example: [docs/examples/cloud-init-with-metadata.yaml](docs/examples/cloud-init-with-metadata.yaml)
+  - Updated main README with Cloud-Init Configuration link
+
+### Changed
+- vSphere `addCloudInitToConfigSpec` now accepts metadata parameter
+- Default metadata encoding is JSON, custom metadata uses YAML encoding
+- `VMCreateSpec` includes `CloudInitMetaData` field
+- CRD documentation now includes `metaData` field specification
+
+### Why
+Allows users to customize cloud-init metadata beyond the default instance-id. This is useful for:
+- Custom instance configuration
+- Network configuration via metadata
+- Vendor data and other cloud-init metadata features
+- Organizing VMs with custom metadata fields (region, environment, project, etc.)
+
+### Documentation
+Complete guide now available at [docs/CLOUD_INIT.md](docs/CLOUD_INIT.md) with:
+- Explanation of UserData vs MetaData
+- Basic and advanced examples
+- Kubernetes Secret integration
+- VMware vSphere implementation details
+- Best practices and troubleshooting
+- Network configuration examples
+
+### Example
+```yaml
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: my-vm
+spec:
+  metaData:
+    cloudInit:
+      inline: |
+        instance-id: custom-id
+        local-hostname: my-custom-hostname
+        network:
+          version: 2
+          ethernets:
+            eth0:
+              dhcp4: true
+  userData:
+    cloudInit:
+      inline: |
+        #cloud-config
+        users:
+          - name: admin
+```
+
 ## [0.3.0] [2026-01-10 19:00] - VM Adoption Feature and Infrastructure Improvements
 **Author:** @wrkode (William Rizzo)
 

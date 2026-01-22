@@ -16,6 +16,7 @@ The `VirtualMachine` CRD represents a virtual machine instance.
 | `networks` | `[]VMNetworkRef` | No | Network attachments |
 | `disks` | `[]DiskSpec` | No | Additional disks |
 | `userData` | `UserData` | No | Cloud-init configuration |
+| `metaData` | `MetaData` | No | Cloud-init metadata configuration |
 | `placement` | `Placement` | No | Placement hints |
 | `powerState` | `string` | No | Desired power state (On/Off) |
 | `tags` | `[]string` | No | Tags for organization |
@@ -191,6 +192,13 @@ spec:
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `cloudInit` | `CloudInitConfig` | No | Cloud-init configuration |
+
+### MetaData
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `inline` | `string` | No | Inline cloud-init metadata in YAML format |
+| `secretRef` | `ObjectRef` | No | Secret containing cloud-init metadata |
 
 ### CloudInitConfig
 
