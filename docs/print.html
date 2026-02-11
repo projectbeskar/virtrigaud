@@ -8462,50 +8462,54 @@ kubectl get providers -o custom-columns=NAME:.metadata.name,STATUS:.status.condi
 </ol>
 <p>Remember: Always test upgrades in non-production environments first!</p>
 <h2 id="development-workflow-v021"><a class="header" href="#development-workflow-v021">Development Workflow (v0.2.1+)</a></h2>
-<h3 id="automated-crd-synchronization"><a class="header" href="#automated-crd-synchronization">Automated CRD Synchronization</a></h3>
-<p>Starting with v0.2.1, VirtRigaud includes automated tooling to ensure CRDs stay in sync between development and Helm chart deployments.</p>
+<h3 id="crd-management"><a class="header" href="#crd-management">CRD Management</a></h3>
+<p>Starting with v0.2.1+, VirtRigaud uses a single-source-of-truth approach for CRDs:</p>
+<ul>
+<li><strong>Code</strong> is the source of truth (API types in <code>api/infra.virtrigaud.io/v1beta1</code>)</li>
+<li><strong><code>config/crd/bases/</code></strong> contains generated CRDs for local development and is checked into git</li>
+<li><strong><code>charts/virtrigaud/crds/</code></strong> CRDs are generated during Helm chart packaging and are NOT checked into git</li>
+</ul>
 <h4 id="for-developers"><a class="header" href="#for-developers">For Developers</a></h4>
-<pre><code class="language-bash"># Generate and sync CRDs automatically
-make sync-helm-crds
+<pre><code class="language-bash"># Generate CRDs for local development
+make gen-crds
 
-# Verify CRDs are in sync
-make verify-helm-crds
+# Generate CRDs for Helm chart packaging
+make gen-helm-crds
 
-# Package Helm chart with latest CRDs
+# Package Helm chart with generated CRDs
 make helm-package
 </code></pre>
 <h4 id="pre-commit-hooks"><a class="header" href="#pre-commit-hooks">Pre-commit Hooks</a></h4>
-<p>Install pre-commit hooks to automatically sync CRDs:</p>
+<p>Install pre-commit hooks to automatically generate CRDs:</p>
 <pre><code class="language-bash"># Install pre-commit
 pip install pre-commit
 
 # Install hooks
 pre-commit install
 
-# CRDs will now sync automatically on commits that modify:
+# CRDs will now be generated automatically on commits that modify:
 # - api/**.go files
-# - config/crd/**.yaml files
 </code></pre>
 <h4 id="cicd-integration"><a class="header" href="#cicd-integration">CI/CD Integration</a></h4>
-<p>The CI/CD pipeline now automatically:</p>
+<p>The CI/CD pipeline automatically:</p>
 <ol>
-<li><strong>Validates CRD sync</strong> on every pull request</li>
-<li><strong>Syncs CRDs</strong> before Helm chart packaging in releases</li>
-<li><strong>Fails builds</strong> if Helm chart CRDs are out of sync</li>
+<li><strong>Generates CRDs</strong> from code during builds</li>
+<li><strong>Includes CRDs in release artifacts</strong> for users to download</li>
+<li><strong>Generates Helm chart CRDs</strong> during packaging</li>
 </ol>
-<p>This prevents the v0.2.1-rc2 issue where OffGraceful validation failed due to stale Helm chart CRDs.</p>
+<p>This ensures CRDs are always up-to-date and not duplicated in the repository.</p>
 <h3 id="repository-workflow"><a class="header" href="#repository-workflow">Repository Workflow</a></h3>
 <pre><code class="language-bash"># 1. Make API changes
 vim api/infra.virtrigaud.io/v1beta1/virtualmachine_types.go
 
-# 2. Generate and sync CRDs (automated by pre-commit)
-make sync-helm-crds
+# 2. Generate CRDs (automated by pre-commit)
+make gen-crds
 
-# 3. Commit (hooks will verify sync)
+# 3. Commit changes
 git add .
 git commit -m "feat: add new VM power states"
 
-# 4. CI validates everything is in sync
+# 4. CI validates and builds with generated CRDs
 git push origin feature-branch
 </code></pre>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="vsphere-hardware-version-management"><a class="header" href="#vsphere-hardware-version-management">vSphere Hardware Version Management</a></h1>
@@ -13360,12 +13364,9 @@ pre-commit install
 <pre><code class="language-bash"># Edit API types
 vim api/infra.virtrigaud.io/v1beta1/virtualmachine_types.go
 
-# Generate code and sync CRDs
+# Generate code and CRDs
 make generate
-make sync-helm-crds
-
-# Verify everything is in sync
-make verify-helm-crds
+make gen-crds
 </code></pre>
 <h4 id="code-changes"><a class="header" href="#code-changes">Code Changes</a></h4>
 <p>For other code changes:</p>
@@ -13379,12 +13380,16 @@ make lint
 make fmt
 </code></pre>
 <h3 id="2-crd-management"><a class="header" href="#2-crd-management">2. CRD Management</a></h3>
-<p><strong>Important</strong>: Always keep CRDs synchronized between <code>config/crd/bases/</code> and <code>charts/virtrigaud/crds/</code>.</p>
-<pre><code class="language-bash"># After API changes, sync CRDs to Helm chart
-make sync-helm-crds
+<p><strong>Important</strong>: CRDs are generated from code (the source of truth) and are not duplicated in git.</p>
+<ul>
+<li><code>config/crd/bases/</code> - CRDs for local development and releases (checked into git)</li>
+<li><code>charts/virtrigaud/crds/</code> - CRDs for Helm charts (generated during packaging, not checked into git)</li>
+</ul>
+<pre><code class="language-bash"># After API changes, generate CRDs
+make gen-crds
 
-# Verify sync before committing
-make verify-helm-crds
+# For Helm chart development/packaging
+make gen-helm-crds
 </code></pre>
 <h3 id="3-testing"><a class="header" href="#3-testing">3. Testing</a></h3>
 <pre><code class="language-bash"># Unit tests
@@ -13506,8 +13511,8 @@ make test-provider-proxmox
 <ol>
 <li>
 <p><strong>Prepare release</strong>:</p>
-<pre><code class="language-bash"># Ensure CRDs are synced
-make sync-helm-crds
+<pre><code class="language-bash"># Generate CRDs for config directory (will be in release artifacts)
+make gen-crds
 
 # Update version in charts
 vim charts/virtrigaud/Chart.yaml
@@ -13533,14 +13538,15 @@ git push origin v0.2.1
 </li>
 </ol>
 <h2 id="common-issues-12"><a class="header" href="#common-issues-12">Common Issues</a></h2>
-<h3 id="crd-sync-issues"><a class="header" href="#crd-sync-issues">CRD Sync Issues</a></h3>
-<p>If you see “Helm chart CRDs are out of sync”:</p>
-<pre><code class="language-bash"># Fix with
-make sync-helm-crds
+<h3 id="crd-generation-issues"><a class="header" href="#crd-generation-issues">CRD Generation Issues</a></h3>
+<p>If you need to regenerate CRDs:</p>
+<pre><code class="language-bash"># For local development and config directory
+make gen-crds
 
-# Verify
-make verify-helm-crds
+# For Helm chart packaging
+make gen-helm-crds
 </code></pre>
+<p>Note: CRDs in <code>charts/virtrigaud/crds/</code> are generated during packaging and should not be committed to git.</p>
 <h3 id="test-failures"><a class="header" href="#test-failures">Test Failures</a></h3>
 <pre><code class="language-bash"># Clean and retry
 make clean

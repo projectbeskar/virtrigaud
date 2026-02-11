@@ -359,50 +359,54 @@ kubectl get providers -o custom-columns=NAME:.metadata.name,STATUS:.status.condi
 </ol>
 <p>Remember: Always test upgrades in non-production environments first!</p>
 <h2 id="development-workflow-v021"><a class="header" href="#development-workflow-v021">Development Workflow (v0.2.1+)</a></h2>
-<h3 id="automated-crd-synchronization"><a class="header" href="#automated-crd-synchronization">Automated CRD Synchronization</a></h3>
-<p>Starting with v0.2.1, VirtRigaud includes automated tooling to ensure CRDs stay in sync between development and Helm chart deployments.</p>
+<h3 id="crd-management"><a class="header" href="#crd-management">CRD Management</a></h3>
+<p>Starting with v0.2.1+, VirtRigaud uses a single-source-of-truth approach for CRDs:</p>
+<ul>
+<li><strong>Code</strong> is the source of truth (API types in <code>api/infra.virtrigaud.io/v1beta1</code>)</li>
+<li><strong><code>config/crd/bases/</code></strong> contains generated CRDs for local development and is checked into git</li>
+<li><strong><code>charts/virtrigaud/crds/</code></strong> CRDs are generated during Helm chart packaging and are NOT checked into git</li>
+</ul>
 <h4 id="for-developers"><a class="header" href="#for-developers">For Developers</a></h4>
-<pre><code class="language-bash"># Generate and sync CRDs automatically
-make sync-helm-crds
+<pre><code class="language-bash"># Generate CRDs for local development
+make gen-crds
 
-# Verify CRDs are in sync
-make verify-helm-crds
+# Generate CRDs for Helm chart packaging
+make gen-helm-crds
 
-# Package Helm chart with latest CRDs
+# Package Helm chart with generated CRDs
 make helm-package
 </code></pre>
 <h4 id="pre-commit-hooks"><a class="header" href="#pre-commit-hooks">Pre-commit Hooks</a></h4>
-<p>Install pre-commit hooks to automatically sync CRDs:</p>
+<p>Install pre-commit hooks to automatically generate CRDs:</p>
 <pre><code class="language-bash"># Install pre-commit
 pip install pre-commit
 
 # Install hooks
 pre-commit install
 
-# CRDs will now sync automatically on commits that modify:
+# CRDs will now be generated automatically on commits that modify:
 # - api/**.go files
-# - config/crd/**.yaml files
 </code></pre>
 <h4 id="cicd-integration"><a class="header" href="#cicd-integration">CI/CD Integration</a></h4>
-<p>The CI/CD pipeline now automatically:</p>
+<p>The CI/CD pipeline automatically:</p>
 <ol>
-<li><strong>Validates CRD sync</strong> on every pull request</li>
-<li><strong>Syncs CRDs</strong> before Helm chart packaging in releases</li>
-<li><strong>Fails builds</strong> if Helm chart CRDs are out of sync</li>
+<li><strong>Generates CRDs</strong> from code during builds</li>
+<li><strong>Includes CRDs in release artifacts</strong> for users to download</li>
+<li><strong>Generates Helm chart CRDs</strong> during packaging</li>
 </ol>
-<p>This prevents the v0.2.1-rc2 issue where OffGraceful validation failed due to stale Helm chart CRDs.</p>
+<p>This ensures CRDs are always up-to-date and not duplicated in the repository.</p>
 <h3 id="repository-workflow"><a class="header" href="#repository-workflow">Repository Workflow</a></h3>
 <pre><code class="language-bash"># 1. Make API changes
 vim api/infra.virtrigaud.io/v1beta1/virtualmachine_types.go
 
-# 2. Generate and sync CRDs (automated by pre-commit)
-make sync-helm-crds
+# 2. Generate CRDs (automated by pre-commit)
+make gen-crds
 
-# 3. Commit (hooks will verify sync)
+# 3. Commit changes
 git add .
 git commit -m "feat: add new VM power states"
 
-# 4. CI validates everything is in sync
+# 4. CI validates and builds with generated CRDs
 git push origin feature-branch
 </code></pre>
 
