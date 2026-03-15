@@ -1,0 +1,376 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>vSphere Datastore Clusters (StoragePod) - VirtRigaud Documentation</title>
+
+
+        <!-- Custom HTML head -->
+        
+        <meta name="description" content="Kubernetes operator for managing virtual machines across multiple hypervisors">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon.svg">
+        <link rel="shortcut icon" href="favicon.png">
+        <link rel="stylesheet" href="css/variables.css">
+        <link rel="stylesheet" href="css/general.css">
+        <link rel="stylesheet" href="css/chrome.css">
+        <link rel="stylesheet" href="css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="highlight.css">
+        <link rel="stylesheet" href="tomorrow-night.css">
+        <link rel="stylesheet" href="ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="theme/custom.css">
+
+    </head>
+    <body class="sidebar-visible no-js">
+    <div id="body-container">
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
+        </script>
+
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            var html = document.querySelector('html');
+            html.classList.remove('light')
+            html.classList.add(theme);
+            var body = document.querySelector('body');
+            body.classList.remove('no-js')
+            body.classList.add('js');
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var body = document.querySelector('body');
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            body.classList.remove('sidebar-visible');
+            body.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <div class="sidebar-scrollbox">
+                <ol class="chapter"><li class="chapter-item affix "><a href="index.html">Introduction</a></li><li class="chapter-item affix "><li class="part-title">Getting Started</li><li class="chapter-item "><a href="getting-started/quickstart.html"><strong aria-hidden="true">1.</strong> 15-Minute Quickstart</a></li><li class="chapter-item "><a href="install-helm-only.html"><strong aria-hidden="true">2.</strong> Installation Guide</a></li><li class="chapter-item "><a href="HELM_CRD_UPGRADES.html"><strong aria-hidden="true">3.</strong> Helm CRD Upgrades</a></li><li class="chapter-item affix "><li class="part-title">Core Documentation</li><li class="chapter-item "><a href="CRDs.html"><strong aria-hidden="true">4.</strong> Custom Resource Definitions</a></li><li class="chapter-item "><a href="EXAMPLES.html"><strong aria-hidden="true">5.</strong> Examples</a></li><li class="chapter-item "><a href="PROVIDERS.html"><strong aria-hidden="true">6.</strong> Provider Documentation</a></li><li class="chapter-item "><a href="PROVIDERS_CAPABILITIES.html"><strong aria-hidden="true">7.</strong> Provider Capabilities Matrix</a></li><li class="chapter-item affix "><li class="part-title">Provider-Specific Guides</li><li class="chapter-item "><a href="providers/vsphere.html"><strong aria-hidden="true">8.</strong> vSphere Provider</a></li><li class="chapter-item "><a href="providers/libvirt.html"><strong aria-hidden="true">9.</strong> Libvirt Provider</a></li><li class="chapter-item "><a href="providers/proxmox.html"><strong aria-hidden="true">10.</strong> Proxmox VE Provider</a></li><li class="chapter-item "><a href="providers/tutorial.html"><strong aria-hidden="true">11.</strong> Provider Tutorial</a></li><li class="chapter-item "><a href="providers/versioning.html"><strong aria-hidden="true">12.</strong> Provider Versioning</a></li><li class="chapter-item affix "><li class="part-title">Advanced Features</li><li class="chapter-item "><a href="ADVANCED_LIFECYCLE.html"><strong aria-hidden="true">13.</strong> VM Lifecycle Management</a></li><li class="chapter-item "><a href="NESTED_VIRTUALIZATION.html"><strong aria-hidden="true">14.</strong> Nested Virtualization</a></li><li class="chapter-item "><a href="GRACEFUL_SHUTDOWN.html"><strong aria-hidden="true">15.</strong> Graceful Shutdown</a></li><li class="chapter-item "><a href="REMOTE_PROVIDERS.html"><strong aria-hidden="true">16.</strong> Remote Providers</a></li><li class="chapter-item affix "><li class="part-title">Operations & Administration</li><li class="chapter-item "><a href="OBSERVABILITY.html"><strong aria-hidden="true">17.</strong> Observability</a></li><li class="chapter-item "><a href="SECURITY.html"><strong aria-hidden="true">18.</strong> Security</a></li><li class="chapter-item "><a href="RESILIENCE.html"><strong aria-hidden="true">19.</strong> Resilience</a></li><li class="chapter-item "><a href="UPGRADE.html"><strong aria-hidden="true">20.</strong> Upgrade Guide</a></li><li class="chapter-item "><a href="VSPHERE_HARDWARE_VERSION.html"><strong aria-hidden="true">21.</strong> vSphere Hardware Versions</a></li><li class="chapter-item expanded "><a href="VSPHERE_STORAGEPOD.html" class="active"><strong aria-hidden="true">22.</strong> vSphere Datastore Clusters (StoragePod)</a></li><li class="chapter-item affix "><li class="part-title">Security Configuration</li><li class="chapter-item "><a href="providers/security/bearer-token.html"><strong aria-hidden="true">23.</strong> Bearer Token Authentication</a></li><li class="chapter-item "><a href="providers/security/mtls.html"><strong aria-hidden="true">24.</strong> mTLS Configuration</a></li><li class="chapter-item "><a href="providers/security/external-secrets.html"><strong aria-hidden="true">25.</strong> External Secrets</a></li><li class="chapter-item "><a href="providers/security/network-policies.html"><strong aria-hidden="true">26.</strong> Network Policies</a></li><li class="chapter-item affix "><li class="part-title">API Reference</li><li class="chapter-item "><a href="CLI.html"><strong aria-hidden="true">27.</strong> CLI Tools Reference</a></li><li class="chapter-item "><a href="api-reference/cli.html"><strong aria-hidden="true">28.</strong> CLI API Reference</a></li><li class="chapter-item "><a href="api-reference/metrics.html"><strong aria-hidden="true">29.</strong> Metrics Catalog</a></li><li class="chapter-item "><a href="catalog.html"><strong aria-hidden="true">30.</strong> Provider Catalog</a></li><li class="chapter-item affix "><li class="part-title">Development</li><li class="chapter-item "><a href="TESTING_WORKFLOWS_LOCALLY.html"><strong aria-hidden="true">31.</strong> Testing Workflows Locally</a></li><li class="chapter-item "><a href="../../CONTRIBUTING.html"><strong aria-hidden="true">32.</strong> Contributing</a></li><li class="chapter-item affix "><li class="part-title">Examples</li><li class="chapter-item "><a href="examples/index.html"><strong aria-hidden="true">33.</strong> Example README</a></li></ol>
+            </div>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <!-- Track and set sidebar scroll position -->
+        <script>
+            var sidebarScrollbox = document.querySelector('#sidebar .sidebar-scrollbox');
+            sidebarScrollbox.addEventListener('click', function(e) {
+                if (e.target.tagName === 'A') {
+                    sessionStorage.setItem('sidebar-scroll', sidebarScrollbox.scrollTop);
+                }
+            }, { passive: true });
+            var sidebarScrollTop = sessionStorage.getItem('sidebar-scroll');
+            sessionStorage.removeItem('sidebar-scroll');
+            if (sidebarScrollTop) {
+                // preserve sidebar scroll position when navigating via links within sidebar
+                sidebarScrollbox.scrollTop = sidebarScrollTop;
+            } else {
+                // scroll sidebar to current active section when navigating via "next/previous chapter" buttons
+                var activeSection = document.querySelector('#sidebar .active');
+                if (activeSection) {
+                    activeSection.scrollIntoView({ block: 'center' });
+                }
+            }
+        </script>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">VirtRigaud Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/projectbeskar/virtrigaud" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/projectbeskar/virtrigaud/edit/main/docs/src/VSPHERE_STORAGEPOD.md" title="Suggest an edit" aria-label="Suggest an edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="vsphere-datastore-cluster-storagepod-support"><a class="header" href="#vsphere-datastore-cluster-storagepod-support">vSphere Datastore Cluster (StoragePod) Support</a></h1>
+<p>This document describes how to use vSphere Datastore Clusters (also known as StoragePods) for automatic datastore selection when provisioning virtual machines with virtrigaud.</p>
+<p><strong>Note: StoragePod support is specific to the vSphere provider and is not available for Libvirt or Proxmox.</strong></p>
+<h2 id="overview"><a class="header" href="#overview">Overview</a></h2>
+<p>A vSphere <strong>Datastore Cluster</strong> (internally called a <code>StoragePod</code>) is a logical grouping of datastores managed together as a single unit. When you specify a Datastore Cluster instead of an individual datastore, virtrigaud automatically selects the datastore within the cluster that has the <strong>most available free space</strong> at provisioning time.</p>
+<p>This simplifies VM placement in environments with multiple datastores: instead of tracking which individual datastore has capacity, you point to the cluster and let virtrigaud choose.</p>
+<h2 id="datastore-selection-strategy"><a class="header" href="#datastore-selection-strategy">Datastore Selection Strategy</a></h2>
+<p>virtrigaud uses a simple, predictable strategy: <strong>pick the datastore with the most free space</strong>. This distributes VMs across the cluster over time as datastores fill up.</p>
+<blockquote>
+<p>vSphere Storage DRS is not required to be enabled on the cluster. virtrigaud queries datastore summaries directly via the vSphere API.</p>
+</blockquote>
+<h2 id="configuration"><a class="header" href="#configuration">Configuration</a></h2>
+<h3 id="per-vm-placement-virtualmachine-spec"><a class="header" href="#per-vm-placement-virtualmachine-spec">Per-VM Placement (VirtualMachine spec)</a></h3>
+<p>Specify <code>storagePod</code> inside <code>spec.placement</code> on a <code>VirtualMachine</code> resource:</p>
+<pre><code class="language-yaml">apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: my-vm
+  namespace: virtrigaud-system
+spec:
+  providerRef:
+    name: vsphere-prod
+  classRef:
+    name: standard-2cpu-4gb
+  imageRef:
+    name: ubuntu-24-04
+  placement:
+    cluster: prod-cluster
+    storagePod: "Production-DS-Cluster"   # Datastore Cluster name
+    folder: /prod/vms
+</code></pre>
+<p>virtrigaud will inspect every datastore in <code>Production-DS-Cluster</code> and clone the VM onto the one with the most free space.</p>
+<h3 id="provider-level-default"><a class="header" href="#provider-level-default">Provider-Level Default</a></h3>
+<p>Set <code>spec.defaults.storagePod</code> on the <code>Provider</code> resource to apply a Datastore Cluster as the default for all VMs that do not specify their own placement:</p>
+<pre><code class="language-yaml">apiVersion: infra.virtrigaud.io/v1beta1
+kind: Provider
+metadata:
+  name: vsphere-prod
+  namespace: virtrigaud-system
+spec:
+  type: vsphere
+  endpoint: https://vcenter.example.com
+  credentialSecretRef:
+    name: vsphere-credentials
+  defaults:
+    cluster: prod-cluster
+    storagePod: "Production-DS-Cluster"   # cluster-wide default
+    folder: /prod/vms
+  runtime:
+    image: ghcr.io/projectbeskar/virtrigaud-provider-vsphere:latest
+</code></pre>
+<p>Alternatively, pass the default through the provider pod’s environment by adding it to <code>spec.runtime.env</code>:</p>
+<pre><code class="language-yaml">spec:
+  runtime:
+    env:
+      - name: PROVIDER_DEFAULT_STORAGE_POD
+        value: "Production-DS-Cluster"
+</code></pre>
+<h2 id="precedence-rules"><a class="header" href="#precedence-rules">Precedence Rules</a></h2>
+<p>When multiple sources specify storage placement, virtrigaud applies the following priority (highest to lowest):</p>
+<div class="table-wrapper"><table><thead><tr><th>Priority</th><th>Source</th><th>Field</th></tr></thead><tbody>
+<tr><td>1</td><td>VM spec — explicit datastore</td><td><code>spec.placement.datastore</code></td></tr>
+<tr><td>2</td><td>VM spec — StoragePod</td><td><code>spec.placement.storagePod</code></td></tr>
+<tr><td>3</td><td>Provider default — StoragePod</td><td><code>spec.defaults.storagePod</code> / <code>PROVIDER_DEFAULT_STORAGE_POD</code></td></tr>
+<tr><td>4</td><td>Provider default — datastore</td><td><code>spec.defaults.datastore</code> / <code>PROVIDER_DEFAULT_DATASTORE</code></td></tr>
+</tbody></table>
+</div>
+<p>An explicit <code>datastore</code> always wins. <code>storagePod</code> is only consulted when no explicit <code>datastore</code> is set.</p>
+<h2 id="examples"><a class="header" href="#examples">Examples</a></h2>
+<h3 id="storagepod-only-recommended-for-large-environments"><a class="header" href="#storagepod-only-recommended-for-large-environments">StoragePod only (recommended for large environments)</a></h3>
+<pre><code class="language-yaml">apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: web-server-01
+  namespace: virtrigaud-system
+spec:
+  providerRef:
+    name: vsphere-prod
+  classRef:
+    name: web-4cpu-8gb
+  imageRef:
+    name: ubuntu-24-04
+  placement:
+    cluster: prod-cluster
+    storagePod: "SSD-Datastore-Cluster"
+</code></pre>
+<h3 id="override-with-an-explicit-datastore-eg-for-compliance"><a class="header" href="#override-with-an-explicit-datastore-eg-for-compliance">Override with an explicit datastore (e.g. for compliance)</a></h3>
+<p>When you need a specific datastore—for example, a datastore dedicated to regulated workloads—set <code>datastore</code> and <code>storagePod</code> is ignored:</p>
+<pre><code class="language-yaml">  placement:
+    cluster: prod-cluster
+    datastore: "regulated-ds-01"    # StoragePod is ignored when this is set
+    storagePod: "SSD-Datastore-Cluster"
+</code></pre>
+<h3 id="use-different-clusters-for-different-teams-via-a-shared-provider"><a class="header" href="#use-different-clusters-for-different-teams-via-a-shared-provider">Use different clusters for different teams via a shared Provider</a></h3>
+<p>Combine a provider-level StoragePod default with per-VM overrides:</p>
+<pre><code class="language-yaml"># Provider default: route most VMs to the general-purpose cluster
+spec:
+  defaults:
+    cluster: general-cluster
+    storagePod: "General-DS-Cluster"
+</code></pre>
+<pre><code class="language-yaml"># High-performance VM overrides both cluster and StoragePod
+spec:
+  placement:
+    cluster: nvme-cluster
+    storagePod: "NVMe-DS-Cluster"
+</code></pre>
+<h2 id="how-it-works-internally"><a class="header" href="#how-it-works-internally">How it Works Internally</a></h2>
+<p>When a VM is created and a StoragePod is resolved:</p>
+<ol>
+<li>virtrigaud creates a container view scoped to the vSphere root folder and searches for <code>StoragePod</code> managed objects.</li>
+<li>It matches the named StoragePod and reads its <code>childEntity</code> list—the set of datastores it contains.</li>
+<li>For each child datastore the <code>summary.freeSpace</code> property is retrieved via the property collector.</li>
+<li>The datastore with the highest <code>freeSpace</code> is selected and used as the target in the clone specification (<code>VirtualMachineRelocateSpec.Datastore</code>).</li>
+</ol>
+<p>The selection happens at provisioning time; it is not re-evaluated on subsequent reconciliations or reboots.</p>
+<h2 id="troubleshooting"><a class="header" href="#troubleshooting">Troubleshooting</a></h2>
+<h3 id="storagepod-x-not-found"><a class="header" href="#storagepod-x-not-found">“StoragePod ‘X’ not found”</a></h3>
+<ul>
+<li>Verify the name exactly matches the Datastore Cluster name in vCenter (case-sensitive).</li>
+<li>Confirm the vCenter user account has <code>Datastore.Browse</code> privilege on the Datastore Cluster.</li>
+<li>Check provider pod logs for the container view query.</li>
+</ul>
+<h3 id="storagepod-x-contains-no-datastores"><a class="header" href="#storagepod-x-contains-no-datastores">“StoragePod ‘X’ contains no datastores”</a></h3>
+<p>The Datastore Cluster exists but is empty (no datastores are members). Add datastores to the cluster in vCenter.</p>
+<h3 id="failed-to-retrieve-datastores-from-storagepod"><a class="header" href="#failed-to-retrieve-datastores-from-storagepod">“failed to retrieve datastores from StoragePod”</a></h3>
+<p>The provider account lacks permission to read datastore summary properties. Grant <code>Datastore.Browse</code> on the individual datastores within the cluster.</p>
+<h3 id="vm-is-always-placed-on-the-same-datastore"><a class="header" href="#vm-is-always-placed-on-the-same-datastore">VM is always placed on the same datastore</a></h3>
+<p>This is expected when one datastore consistently has significantly more free space. It is not a bug.</p>
+<h3 id="checking-which-datastore-was-selected"><a class="header" href="#checking-which-datastore-was-selected">Checking which datastore was selected</a></h3>
+<p>The provider logs an <code>INFO</code> message at VM creation time:</p>
+<pre><code>INFO  Selected datastore from StoragePod  storagePod=Production-DS-Cluster  datastore=vsanDatastore-02  freeSpaceGiB=812
+</code></pre>
+<p>Check the provider pod logs to see the selection for any specific VM.</p>
+<h2 id="limitations"><a class="header" href="#limitations">Limitations</a></h2>
+<ul>
+<li><strong>Free-space only</strong>: virtrigaud does not use vSphere Storage DRS policies, IOPS limits, or storage tags when selecting a datastore. Only free space is considered.</li>
+<li><strong>Point-in-time selection</strong>: The datastore is chosen once at clone time. Subsequent Storage vMotion by Storage DRS is not prevented.</li>
+<li><strong>No rebalancing</strong>: virtrigaud does not rebalance existing VMs when free space changes.</li>
+<li><strong>vSphere only</strong>: This feature has no equivalent for Libvirt or Proxmox providers.</li>
+</ul>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="VSPHERE_HARDWARE_VERSION.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="providers/security/bearer-token.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="VSPHERE_HARDWARE_VERSION.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="providers/security/bearer-token.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr.min.js"></script>
+        <script src="mark.min.js"></script>
+        <script src="searcher.js"></script>
+
+        <script src="clipboard.min.js"></script>
+        <script src="highlight.js"></script>
+        <script src="book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="theme/page-toc.js"></script>
+
+
+    </div>
+    </body>
+</html>
