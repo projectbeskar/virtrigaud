@@ -22,6 +22,8 @@ import (
 	"strings"
 	"time"
 
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -56,6 +58,7 @@ type VirtualMachineReconciler struct {
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=vmnetworkattachments,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
 
 // Reconcile handles VirtualMachine reconciliation
 func (r *VirtualMachineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -146,6 +149,34 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	}
 	logger.V(1).Info("Provider validation successful", "provider", provider.Name)
 
+	// Check if a lifecycle Job is currently running
+	if vm.Status.LifecycleJobRef != "" {
+		done, failed, err := r.checkLifecycleJob(ctx, vm)
+		if err != nil {
+			logger.Error(err, "Lifecycle job failed", "job", vm.Status.LifecycleJobRef, "phase", vm.Status.LifecyclePhase)
+			k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Lifecycle job %s failed: %v", vm.Status.LifecycleJobRef, err))
+			vm.Status.LifecycleJobRef = ""
+			vm.Status.LifecyclePhase = ""
+			r.updateStatus(ctx, vm)
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		}
+		if !done {
+			logger.Info("Lifecycle job in progress", "job", vm.Status.LifecycleJobRef, "phase", vm.Status.LifecyclePhase)
+			r.updateStatus(ctx, vm)
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		}
+		_ = failed
+		phase := vm.Status.LifecyclePhase
+		vm.Status.LifecycleJobRef = ""
+		if phase == "preStart" {
+			vm.Status.LifecyclePhase = "preStart-done"
+		} else {
+			vm.Status.LifecyclePhase = ""
+		}
+		r.updateStatus(ctx, vm)
+		return ctrl.Result{Requeue: true}, nil
+	}
+
 	// Check if we have an active task
 	if vm.Status.LastTaskRef != "" {
 		done, err := providerInstance.IsTaskComplete(ctx, vm.Status.LastTaskRef)
@@ -202,7 +233,31 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 
 	if desc.PowerState != string(desiredPowerState) {
 		logger.Info("Power state mismatch, adjusting", "current", desc.PowerState, "desired", desiredPowerState)
+
+		// Run preStart hook before powering on (only when no hook is already in progress)
+		if desiredPowerState == infravirtrigaudiov1beta1.PowerStateOn &&
+			vm.Status.LifecyclePhase == "" &&
+			vm.Spec.Lifecycle != nil &&
+			vm.Spec.Lifecycle.PreStart != nil &&
+			vm.Spec.Lifecycle.PreStart.Job != nil {
+			logger.Info("Running preStart lifecycle job before power-on")
+			return r.startLifecycleJob(ctx, vm, vmClass, "preStart", vm.Spec.Lifecycle.PreStart.Job)
+		}
+
 		return r.adjustPowerState(ctx, vm, providerInstance, string(desiredPowerState))
+	}
+
+	// Power states match — handle any pending lifecycle phases
+	if vm.Status.LifecyclePhase == "preStart-done" {
+		vm.Status.LifecyclePhase = ""
+	}
+
+	if vm.Status.LifecyclePhase == "postStop-pending" {
+		if vm.Spec.Lifecycle != nil && vm.Spec.Lifecycle.PostStop != nil && vm.Spec.Lifecycle.PostStop.Job != nil {
+			logger.Info("Running postStop lifecycle job after power-off")
+			return r.startLifecycleJob(ctx, vm, vmClass, "postStop", vm.Spec.Lifecycle.PostStop.Job)
+		}
+		vm.Status.LifecyclePhase = ""
 	}
 
 	// VM is ready
@@ -429,8 +484,149 @@ func (r *VirtualMachineReconciler) adjustPowerState(
 		k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonUpdating, "Adjusting power state")
 	}
 
+	// Mark postStop as pending so it runs once the VM reaches the Off state.
+	if (powerOp == contracts.PowerOpOff || powerOp == contracts.PowerOpShutdownGraceful) &&
+		vm.Spec.Lifecycle != nil &&
+		vm.Spec.Lifecycle.PostStop != nil &&
+		vm.Spec.Lifecycle.PostStop.Job != nil {
+		vm.Status.LifecyclePhase = "postStop-pending"
+	}
+
 	r.updateStatus(ctx, vm)
 	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+}
+
+// startLifecycleJob creates a Kubernetes Job for the given lifecycle event and records it in status.
+func (r *VirtualMachineReconciler) startLifecycleJob(
+	ctx context.Context,
+	vm *infravirtrigaudiov1beta1.VirtualMachine,
+	vmClass *infravirtrigaudiov1beta1.VMClass,
+	event string,
+	action *infravirtrigaudiov1beta1.JobAction,
+) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	job := r.buildLifecycleJob(vm, vmClass, event, action)
+	if err := ctrl.SetControllerReference(vm, job, r.Scheme); err != nil {
+		logger.Error(err, "Failed to set owner reference on lifecycle job")
+		return ctrl.Result{}, err
+	}
+
+	if err := r.Create(ctx, job); err != nil && !errors.IsAlreadyExists(err) {
+		logger.Error(err, "Failed to create lifecycle job", "job", job.Name)
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
+
+	logger.Info("Lifecycle job created", "job", job.Name, "event", event)
+	vm.Status.LifecycleJobRef = job.Name
+	vm.Status.LifecyclePhase = event
+	r.updateStatus(ctx, vm)
+	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+}
+
+// checkLifecycleJob reports whether the tracked lifecycle Job has finished.
+// done=true means the Job is no longer running (succeeded or not found).
+// An error is returned only when the Job explicitly failed.
+func (r *VirtualMachineReconciler) checkLifecycleJob(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine) (done bool, failed bool, err error) {
+	job := &batchv1.Job{}
+	if getErr := r.Get(ctx, types.NamespacedName{Name: vm.Status.LifecycleJobRef, Namespace: vm.Namespace}, job); getErr != nil {
+		if errors.IsNotFound(getErr) {
+			return true, false, nil
+		}
+		return false, false, getErr
+	}
+
+	for _, cond := range job.Status.Conditions {
+		if cond.Type == batchv1.JobComplete && cond.Status == corev1.ConditionTrue {
+			return true, false, nil
+		}
+		if cond.Type == batchv1.JobFailed && cond.Status == corev1.ConditionTrue {
+			return true, true, fmt.Errorf("lifecycle job %s failed", job.Name)
+		}
+	}
+	return false, false, nil
+}
+
+// buildLifecycleJob constructs a batchv1.Job that receives VM details as environment variables.
+func (r *VirtualMachineReconciler) buildLifecycleJob(
+	vm *infravirtrigaudiov1beta1.VirtualMachine,
+	vmClass *infravirtrigaudiov1beta1.VMClass,
+	event string,
+	action *infravirtrigaudiov1beta1.JobAction,
+) *batchv1.Job {
+	cluster := ""
+	datastore := ""
+	if vm.Spec.Placement != nil {
+		cluster = vm.Spec.Placement.Cluster
+		datastore = vm.Spec.Placement.Datastore
+		if datastore == "" {
+			datastore = vm.Spec.Placement.StoragePod
+		}
+	}
+
+	env := []corev1.EnvVar{
+		{Name: "VM_NAME", Value: vm.Name},
+		{Name: "VM_NAMESPACE", Value: vm.Namespace},
+		{Name: "VM_CLASS", Value: vm.Spec.ClassRef.Name},
+		{Name: "VM_CLUSTER", Value: cluster},
+		{Name: "VM_DATASTORE", Value: datastore},
+		{Name: "VM_CPU", Value: fmt.Sprintf("%d", vmClass.Spec.CPU)},
+		{Name: "VM_MEMORY", Value: vmClass.Spec.Memory.String()},
+		{Name: "LIFECYCLE_EVENT", Value: event},
+	}
+
+	backoffLimit := int32(3)
+	if action.BackoffLimit != nil {
+		backoffLimit = *action.BackoffLimit
+	}
+
+	pullPolicy := corev1.PullIfNotPresent
+	if action.ImagePullPolicy != "" {
+		pullPolicy = corev1.PullPolicy(action.ImagePullPolicy)
+	}
+
+	var pullSecrets []corev1.LocalObjectReference
+	for _, s := range action.ImagePullSecrets {
+		pullSecrets = append(pullSecrets, corev1.LocalObjectReference{Name: s.Name})
+	}
+
+	// Build a unique job name scoped to this lifecycle event and power cycle.
+	eventSlug := strings.ToLower(strings.ReplaceAll(event, "-", ""))
+	suffix := fmt.Sprintf("-%s-%x", eventSlug, time.Now().Unix())
+	vmNamePart := vm.Name
+	if maxLen := 63 - len(suffix); len(vmNamePart) > maxLen {
+		vmNamePart = vmNamePart[:maxLen]
+	}
+
+	return &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      vmNamePart + suffix,
+			Namespace: vm.Namespace,
+			Labels: map[string]string{
+				"infra.virtrigaud.io/vm":              vm.Name,
+				"infra.virtrigaud.io/lifecycle-event": event,
+			},
+		},
+		Spec: batchv1.JobSpec{
+			BackoffLimit:          &backoffLimit,
+			ActiveDeadlineSeconds: action.ActiveDeadlineSeconds,
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					RestartPolicy:      corev1.RestartPolicyNever,
+					ServiceAccountName: action.ServiceAccountName,
+					ImagePullSecrets:   pullSecrets,
+					Containers: []corev1.Container{
+						{
+							Name:            "lifecycle",
+							Image:           action.Image,
+							ImagePullPolicy: pullPolicy,
+							Env:             env,
+						},
+					},
+				},
+			},
+		},
+	}
 }
 
 // buildCreateRequest builds a provider create request from VM spec
@@ -797,6 +993,7 @@ func (r *VirtualMachineReconciler) getProviderInstance(ctx context.Context, prov
 func (r *VirtualMachineReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&infravirtrigaudiov1beta1.VirtualMachine{}).
+		Owns(&batchv1.Job{}).
 		WithEventFilter(predicate.Funcs{
 			DeleteFunc: func(e event.DeleteEvent) bool {
 				// Handle deletion in Reconcile through finalizers

@@ -376,6 +376,299 @@ spec:
                                 required:
                                 - port
                                 type: object
+                              job:
+                                description: |-
+                                  Job specifies a Kubernetes Job to run. The Job will receive VM details
+                                  (name, cluster, VMClass, CPU, memory, datastore) as environment variables.
+                                properties:
+                                  activeDeadlineSeconds:
+                                    description: ActiveDeadlineSeconds specifies the
+                                      maximum duration in seconds that the Job may
+                                      run
+                                    format: int64
+                                    minimum: 1
+                                    type: integer
+                                  backoffLimit:
+                                    default: 3
+                                    description: BackoffLimit specifies the number
+                                      of retries before the Job is marked as failed
+                                    format: int32
+                                    minimum: 0
+                                    type: integer
+                                  image:
+                                    description: Image is the container image the
+                                      Job will run
+                                    type: string
+                                  imagePullPolicy:
+                                    default: IfNotPresent
+                                    description: ImagePullPolicy controls when the
+                                      image is pulled
+                                    enum:
+                                    - Always
+                                    - Never
+                                    - IfNotPresent
+                                    type: string
+                                  imagePullSecrets:
+                                    description: ImagePullSecrets is a list of Secret
+                                      names in the same namespace used to pull the
+                                      image
+                                    items:
+                                      description: LocalObjectReference represents
+                                        a reference to an object in the same namespace
+                                      properties:
+                                        name:
+                                          description: Name of the referenced object
+                                          maxLength: 253
+                                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                          type: string
+                                      required:
+                                      - name
+                                      type: object
+                                    maxItems: 10
+                                    type: array
+                                  serviceAccountName:
+                                    description: ServiceAccountName is the name of
+                                      the ServiceAccount to use for the Job pod
+                                    type: string
+                                required:
+                                - image
+                                type: object
+                              snapshot:
+                                description: Snapshot specifies a snapshot to create
+                                properties:
+                                  description:
+                                    description: Description provides context for
+                                      the snapshot
+                                    type: string
+                                  includeMemory:
+                                    description: IncludeMemory indicates whether to
+                                      include memory state
+                                    type: boolean
+                                  name:
+                                    description: Name is the name hint for the snapshot
+                                    type: string
+                                required:
+                                - name
+                                type: object
+                            type: object
+                          postStop:
+                            description: PostStop defines actions to take after the
+                              VM has been powered off
+                            properties:
+                              exec:
+                                description: Exec specifies a command to execute
+                                properties:
+                                  command:
+                                    description: Command is the command line to execute
+                                    items:
+                                      type: string
+                                    minItems: 1
+                                    type: array
+                                required:
+                                - command
+                                type: object
+                              httpGet:
+                                description: HTTPGet specifies an HTTP GET request
+                                properties:
+                                  host:
+                                    description: Host name to connect to (defaults
+                                      to VM IP)
+                                    type: string
+                                  path:
+                                    description: Path is the HTTP path to access
+                                    type: string
+                                  port:
+                                    description: Port is the port to access
+                                    format: int32
+                                    maximum: 65535
+                                    minimum: 1
+                                    type: integer
+                                  scheme:
+                                    default: HTTP
+                                    description: Scheme to use for connecting (HTTP
+                                      or HTTPS)
+                                    enum:
+                                    - HTTP
+                                    - HTTPS
+                                    type: string
+                                required:
+                                - port
+                                type: object
+                              job:
+                                description: |-
+                                  Job specifies a Kubernetes Job to run. The Job will receive VM details
+                                  (name, cluster, VMClass, CPU, memory, datastore) as environment variables.
+                                properties:
+                                  activeDeadlineSeconds:
+                                    description: ActiveDeadlineSeconds specifies the
+                                      maximum duration in seconds that the Job may
+                                      run
+                                    format: int64
+                                    minimum: 1
+                                    type: integer
+                                  backoffLimit:
+                                    default: 3
+                                    description: BackoffLimit specifies the number
+                                      of retries before the Job is marked as failed
+                                    format: int32
+                                    minimum: 0
+                                    type: integer
+                                  image:
+                                    description: Image is the container image the
+                                      Job will run
+                                    type: string
+                                  imagePullPolicy:
+                                    default: IfNotPresent
+                                    description: ImagePullPolicy controls when the
+                                      image is pulled
+                                    enum:
+                                    - Always
+                                    - Never
+                                    - IfNotPresent
+                                    type: string
+                                  imagePullSecrets:
+                                    description: ImagePullSecrets is a list of Secret
+                                      names in the same namespace used to pull the
+                                      image
+                                    items:
+                                      description: LocalObjectReference represents
+                                        a reference to an object in the same namespace
+                                      properties:
+                                        name:
+                                          description: Name of the referenced object
+                                          maxLength: 253
+                                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                          type: string
+                                      required:
+                                      - name
+                                      type: object
+                                    maxItems: 10
+                                    type: array
+                                  serviceAccountName:
+                                    description: ServiceAccountName is the name of
+                                      the ServiceAccount to use for the Job pod
+                                    type: string
+                                required:
+                                - image
+                                type: object
+                              snapshot:
+                                description: Snapshot specifies a snapshot to create
+                                properties:
+                                  description:
+                                    description: Description provides context for
+                                      the snapshot
+                                    type: string
+                                  includeMemory:
+                                    description: IncludeMemory indicates whether to
+                                      include memory state
+                                    type: boolean
+                                  name:
+                                    description: Name is the name hint for the snapshot
+                                    type: string
+                                required:
+                                - name
+                                type: object
+                            type: object
+                          preStart:
+                            description: PreStart defines actions to take before the
+                              VM is powered on
+                            properties:
+                              exec:
+                                description: Exec specifies a command to execute
+                                properties:
+                                  command:
+                                    description: Command is the command line to execute
+                                    items:
+                                      type: string
+                                    minItems: 1
+                                    type: array
+                                required:
+                                - command
+                                type: object
+                              httpGet:
+                                description: HTTPGet specifies an HTTP GET request
+                                properties:
+                                  host:
+                                    description: Host name to connect to (defaults
+                                      to VM IP)
+                                    type: string
+                                  path:
+                                    description: Path is the HTTP path to access
+                                    type: string
+                                  port:
+                                    description: Port is the port to access
+                                    format: int32
+                                    maximum: 65535
+                                    minimum: 1
+                                    type: integer
+                                  scheme:
+                                    default: HTTP
+                                    description: Scheme to use for connecting (HTTP
+                                      or HTTPS)
+                                    enum:
+                                    - HTTP
+                                    - HTTPS
+                                    type: string
+                                required:
+                                - port
+                                type: object
+                              job:
+                                description: |-
+                                  Job specifies a Kubernetes Job to run. The Job will receive VM details
+                                  (name, cluster, VMClass, CPU, memory, datastore) as environment variables.
+                                properties:
+                                  activeDeadlineSeconds:
+                                    description: ActiveDeadlineSeconds specifies the
+                                      maximum duration in seconds that the Job may
+                                      run
+                                    format: int64
+                                    minimum: 1
+                                    type: integer
+                                  backoffLimit:
+                                    default: 3
+                                    description: BackoffLimit specifies the number
+                                      of retries before the Job is marked as failed
+                                    format: int32
+                                    minimum: 0
+                                    type: integer
+                                  image:
+                                    description: Image is the container image the
+                                      Job will run
+                                    type: string
+                                  imagePullPolicy:
+                                    default: IfNotPresent
+                                    description: ImagePullPolicy controls when the
+                                      image is pulled
+                                    enum:
+                                    - Always
+                                    - Never
+                                    - IfNotPresent
+                                    type: string
+                                  imagePullSecrets:
+                                    description: ImagePullSecrets is a list of Secret
+                                      names in the same namespace used to pull the
+                                      image
+                                    items:
+                                      description: LocalObjectReference represents
+                                        a reference to an object in the same namespace
+                                      properties:
+                                        name:
+                                          description: Name of the referenced object
+                                          maxLength: 253
+                                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                          type: string
+                                      required:
+                                      - name
+                                      type: object
+                                    maxItems: 10
+                                    type: array
+                                  serviceAccountName:
+                                    description: ServiceAccountName is the name of
+                                      the ServiceAccount to use for the Job pod
+                                    type: string
+                                required:
+                                - image
+                                type: object
                               snapshot:
                                 description: Snapshot specifies a snapshot to create
                                 properties:
@@ -436,6 +729,63 @@ spec:
                                     type: string
                                 required:
                                 - port
+                                type: object
+                              job:
+                                description: |-
+                                  Job specifies a Kubernetes Job to run. The Job will receive VM details
+                                  (name, cluster, VMClass, CPU, memory, datastore) as environment variables.
+                                properties:
+                                  activeDeadlineSeconds:
+                                    description: ActiveDeadlineSeconds specifies the
+                                      maximum duration in seconds that the Job may
+                                      run
+                                    format: int64
+                                    minimum: 1
+                                    type: integer
+                                  backoffLimit:
+                                    default: 3
+                                    description: BackoffLimit specifies the number
+                                      of retries before the Job is marked as failed
+                                    format: int32
+                                    minimum: 0
+                                    type: integer
+                                  image:
+                                    description: Image is the container image the
+                                      Job will run
+                                    type: string
+                                  imagePullPolicy:
+                                    default: IfNotPresent
+                                    description: ImagePullPolicy controls when the
+                                      image is pulled
+                                    enum:
+                                    - Always
+                                    - Never
+                                    - IfNotPresent
+                                    type: string
+                                  imagePullSecrets:
+                                    description: ImagePullSecrets is a list of Secret
+                                      names in the same namespace used to pull the
+                                      image
+                                    items:
+                                      description: LocalObjectReference represents
+                                        a reference to an object in the same namespace
+                                      properties:
+                                        name:
+                                          description: Name of the referenced object
+                                          maxLength: 253
+                                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                          type: string
+                                      required:
+                                      - name
+                                      type: object
+                                    maxItems: 10
+                                    type: array
+                                  serviceAccountName:
+                                    description: ServiceAccountName is the name of
+                                      the ServiceAccount to use for the Job pod
+                                    type: string
+                                required:
+                                - image
                                 type: object
                               snapshot:
                                 description: Snapshot specifies a snapshot to create

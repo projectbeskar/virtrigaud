@@ -114,6 +114,14 @@ type VirtualMachineLifecycle struct {
 	// +optional
 	PostStart *LifecycleHandler `json:"postStart,omitempty"`
 
+	// PreStart defines actions to take before the VM is powered on
+	// +optional
+	PreStart *LifecycleHandler `json:"preStart,omitempty"`
+
+	// PostStop defines actions to take after the VM has been powered off
+	// +optional
+	PostStop *LifecycleHandler `json:"postStop,omitempty"`
+
 	// GracefulShutdownTimeout defines how long to wait for graceful shutdown
 	// +optional
 	// +kubebuilder:default="60s"
@@ -133,6 +141,45 @@ type LifecycleHandler struct {
 	// Snapshot specifies a snapshot to create
 	// +optional
 	Snapshot *SnapshotAction `json:"snapshot,omitempty"`
+
+	// Job specifies a Kubernetes Job to run. The Job will receive VM details
+	// (name, cluster, VMClass, CPU, memory, datastore) as environment variables.
+	// +optional
+	Job *JobAction `json:"job,omitempty"`
+}
+
+// JobAction describes a Kubernetes Job to execute as a lifecycle hook.
+// The controller automatically injects the following env vars into the container:
+//   - VM_NAME, VM_NAMESPACE, VM_CLASS, VM_CLUSTER, VM_DATASTORE, VM_CPU, VM_MEMORY, LIFECYCLE_EVENT
+type JobAction struct {
+	// Image is the container image the Job will run
+	Image string `json:"image"`
+
+	// ImagePullPolicy controls when the image is pulled
+	// +optional
+	// +kubebuilder:default="IfNotPresent"
+	// +kubebuilder:validation:Enum=Always;Never;IfNotPresent
+	ImagePullPolicy string `json:"imagePullPolicy,omitempty"`
+
+	// ImagePullSecrets is a list of Secret names in the same namespace used to pull the image
+	// +optional
+	// +kubebuilder:validation:MaxItems=10
+	ImagePullSecrets []LocalObjectReference `json:"imagePullSecrets,omitempty"`
+
+	// ServiceAccountName is the name of the ServiceAccount to use for the Job pod
+	// +optional
+	ServiceAccountName string `json:"serviceAccountName,omitempty"`
+
+	// BackoffLimit specifies the number of retries before the Job is marked as failed
+	// +optional
+	// +kubebuilder:default=3
+	// +kubebuilder:validation:Minimum=0
+	BackoffLimit *int32 `json:"backoffLimit,omitempty"`
+
+	// ActiveDeadlineSeconds specifies the maximum duration in seconds that the Job may run
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	ActiveDeadlineSeconds *int64 `json:"activeDeadlineSeconds,omitempty"`
 }
 
 // ExecAction describes a command to be executed
@@ -279,6 +326,15 @@ type VirtualMachineStatus struct {
 	// Message provides additional details about the current state
 	// +optional
 	Message string `json:"message,omitempty"`
+
+	// LifecycleJobRef is the name of the currently running lifecycle Job
+	// +optional
+	LifecycleJobRef string `json:"lifecycleJobRef,omitempty"`
+
+	// LifecyclePhase tracks the current lifecycle hook execution state.
+	// One of: "", "preStart", "preStart-done", "postStop-pending", "postStop"
+	// +optional
+	LifecyclePhase string `json:"lifecyclePhase,omitempty"`
 }
 
 // VirtualMachinePhase represents the phase of a VM
