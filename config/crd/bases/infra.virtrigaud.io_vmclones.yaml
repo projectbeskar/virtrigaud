@@ -694,6 +694,13 @@ spec:
                       description: VMNetworkRef represents a reference to a network
                         attachment
                       properties:
+                        dns:
+                          description: DNS specifies DNS server IP addresses (comma-separated)
+                          type: string
+                        gateway:
+                          description: Gateway specifies the default gateway IP address
+                          pattern: ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$
+                          type: string
                         ipAddress:
                           description: IPAddress specifies a static IP address (optional)
                           pattern: ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$
@@ -708,7 +715,9 @@ spec:
                           pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                         networkRef:
-                          description: NetworkRef references the VMNetworkAttachment
+                          description: |-
+                            NetworkRef references the VMNetworkAttachment (optional)
+                            When not specified, the template's pre-configured network adapter is used.
                           properties:
                             name:
                               description: Name of the referenced object
@@ -724,9 +733,15 @@ spec:
                           required:
                           - name
                           type: object
+                        prefix:
+                          description: Prefix specifies the network prefix length
+                            (e.g., 24 for /24)
+                          format: int32
+                          maximum: 32
+                          minimum: 1
+                          type: integer
                       required:
                       - name
-                      - networkRef
                       type: object
                     maxItems: 10
                     type: array

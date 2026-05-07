@@ -33,7 +33,7 @@ func TestVirtualMachine_Basic(t *testing.T) {
 			Networks: []VMNetworkRef{
 				{
 					Name: "network1",
-					NetworkRef: ObjectRef{
+					NetworkRef: &ObjectRef{
 						Name: "network1",
 					},
 					IPAddress: "192.168.1.10",
@@ -106,7 +106,7 @@ func TestVirtualMachine_BetaAlphaBeta_RoundTrip(t *testing.T) {
 			Networks: []VMNetworkRef{
 				{
 					Name: "network1",
-					NetworkRef: ObjectRef{
+					NetworkRef: &ObjectRef{
 						Name: "network1",
 					},
 					IPAddress: "192.168.1.10",

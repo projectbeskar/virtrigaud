@@ -30,7 +30,7 @@ func CreateSimpleVirtualMachineBeta() *v1beta1.VirtualMachine {
 			Networks: []v1beta1.VMNetworkRef{
 				{
 					Name: "network1",
-					NetworkRef: v1beta1.ObjectRef{
+					NetworkRef: &v1beta1.ObjectRef{
 						Name: "network1",
 					},
 					IPAddress: "192.168.1.10",
