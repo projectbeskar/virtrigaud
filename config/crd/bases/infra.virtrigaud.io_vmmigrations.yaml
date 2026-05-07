@@ -71,6 +71,8 @@ spec:
                     - staging
                     - prod
                     - test
+                    - qa
+                    - uat
                     type: string
                   project:
                     description: Project identifies the project this migration belongs
