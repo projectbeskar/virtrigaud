@@ -268,7 +268,7 @@ type MigrationMetadata struct {
 
 	// Environment specifies the environment
 	// +optional
-	// +kubebuilder:validation:Enum=dev;staging;prod;test
+	// +kubebuilder:validation:Enum=dev;staging;prod;test;qa;uat
 	Environment string `json:"environment,omitempty"`
 
 	// Tags are key-value pairs for categorizing the migration
