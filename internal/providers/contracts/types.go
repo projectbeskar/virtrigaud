@@ -74,6 +74,15 @@ type NetworkAttachment struct {
 	IPPolicy string
 	// StaticIP for static assignments
 	StaticIP string
+	// Prefix specifies the network prefix length (e.g., 24 for /24)
+	Prefix int32
+	// Gateway specifies the default gateway
+	Gateway string
+	// DNS specifies DNS servers (comma-separated)
+	DNS string
+	// PCISlotNumber specifies the PCI slot for predictable interface naming (vSphere)
+	// Common values: 192 for ens192, 224 for ens224, 256 for ens256
+	PCISlotNumber *int32
 }
 
 // DiskSpec defines disk requirements (provider-agnostic)

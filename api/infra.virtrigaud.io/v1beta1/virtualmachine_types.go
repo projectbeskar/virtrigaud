@@ -355,13 +355,30 @@ type VMNetworkRef struct {
 	// +kubebuilder:validation:MaxLength=63
 	Name string `json:"name"`
 
-	// NetworkRef references the VMNetworkAttachment
-	NetworkRef ObjectRef `json:"networkRef"`
+	// NetworkRef references the VMNetworkAttachment (optional)
+	// When not specified, the template's pre-configured network adapter is used.
+	// +optional
+	NetworkRef *ObjectRef `json:"networkRef,omitempty"`
 
 	// IPAddress specifies a static IP address (optional)
 	// +optional
 	// +kubebuilder:validation:Pattern="^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$"
 	IPAddress string `json:"ipAddress,omitempty"`
+
+	// Prefix specifies the network prefix length (e.g., 24 for /24)
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=32
+	Prefix int32 `json:"prefix,omitempty"`
+
+	// Gateway specifies the default gateway IP address
+	// +optional
+	// +kubebuilder:validation:Pattern="^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$"
+	Gateway string `json:"gateway,omitempty"`
+
+	// DNS specifies DNS server IP addresses (comma-separated)
+	// +optional
+	DNS string `json:"dns,omitempty"`
 
 	// MACAddress specifies a static MAC address (optional)
 	// +optional
