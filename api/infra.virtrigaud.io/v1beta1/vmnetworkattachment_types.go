@@ -109,6 +109,21 @@ type VSphereNetworkConfig struct {
 	// TrafficShaping defines traffic shaping settings
 	// +optional
 	TrafficShaping *TrafficShapingConfig `json:"trafficShaping,omitempty"`
+
+	// PCISlotNumber specifies the PCI slot number for the network adapter.
+	// This controls the predictable network interface naming in Linux (e.g., ens192).
+	// Common values: 192 for ens192, 224 for ens224, 256 for ens256.
+	// If not specified, vSphere assigns a slot automatically.
+	// +optional
+	// +kubebuilder:validation:Minimum=32
+	// +kubebuilder:validation:Maximum=1024
+	PCISlotNumber *int32 `json:"pciSlotNumber,omitempty"`
+
+	// AdapterType specifies the network adapter type
+	// +optional
+	// +kubebuilder:default="vmxnet3"
+	// +kubebuilder:validation:Enum=vmxnet3;e1000;e1000e
+	AdapterType string `json:"adapterType,omitempty"`
 }
 
 // DistributedSwitchConfig defines distributed virtual switch configuration
@@ -562,9 +577,9 @@ type NetworkMetadata struct {
 	// +kubebuilder:validation:MaxLength=1024
 	Description string `json:"description,omitempty"`
 
-	// Environment specifies the environment (dev, staging, prod)
+	// Environment specifies the environment (dev, staging, prod, qa, uat)
 	// +optional
-	// +kubebuilder:validation:Enum=dev;staging;prod;test
+	// +kubebuilder:validation:Enum=dev;staging;prod;test;qa;uat
 	Environment string `json:"environment,omitempty"`
 
 	// Tags are key-value pairs for categorizing

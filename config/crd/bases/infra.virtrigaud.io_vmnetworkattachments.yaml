@@ -192,12 +192,14 @@ spec:
                     type: string
                   environment:
                     description: Environment specifies the environment (dev, staging,
-                      prod)
+                      prod, qa, uat)
                     enum:
                     - dev
                     - staging
                     - prod
                     - test
+                    - qa
+                    - uat
                     type: string
                   tags:
                     additionalProperties:
@@ -362,6 +364,14 @@ spec:
                   vsphere:
                     description: VSphere contains vSphere-specific network configuration
                     properties:
+                      adapterType:
+                        default: vmxnet3
+                        description: AdapterType specifies the network adapter type
+                        enum:
+                        - vmxnet3
+                        - e1000
+                        - e1000e
+                        type: string
                       distributedSwitch:
                         description: DistributedSwitch specifies the distributed virtual
                           switch
@@ -383,6 +393,16 @@ spec:
                         required:
                         - name
                         type: object
+                      pciSlotNumber:
+                        description: |-
+                          PCISlotNumber specifies the PCI slot number for the network adapter.
+                          This controls the predictable network interface naming in Linux (e.g., ens192).
+                          Common values: 192 for ens192, 224 for ens224, 256 for ens256.
+                          If not specified, vSphere assigns a slot automatically.
+                        format: int32
+                        maximum: 1024
+                        minimum: 32
+                        type: integer
                       portgroup:
                         description: Portgroup specifies the vSphere portgroup name
                         maxLength: 255
