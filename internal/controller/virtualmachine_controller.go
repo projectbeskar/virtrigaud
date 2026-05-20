@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -370,7 +371,13 @@ func (r *VirtualMachineReconciler) createVM(
 	}
 
 	// Build create request
-	req := r.buildCreateRequest(vm, vmClass, vmImage, networks)
+	req, err := r.buildCreateRequest(ctx, vm, vmClass, vmImage, networks)
+	if err != nil {
+		logger.Error(err, "Failed to build create request")
+		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Failed to build create request: %v", err))
+		r.updateStatus(ctx, vm)
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
 
 	// Create VM
 	resp, err := provider.Create(ctx, req)
@@ -433,13 +440,15 @@ func (r *VirtualMachineReconciler) adjustPowerState(
 	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 }
 
-// buildCreateRequest builds a provider create request from VM spec
+// buildCreateRequest builds a provider create request from VM spec.
+// It resolves cloud-init user data and metadata from both inline content and Secret references.
 func (r *VirtualMachineReconciler) buildCreateRequest(
+	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
 	vmClass *infravirtrigaudiov1beta1.VMClass,
 	vmImage *infravirtrigaudiov1beta1.VMImage,
 	networks []*infravirtrigaudiov1beta1.VMNetworkAttachment,
-) contracts.CreateRequest {
+) (contracts.CreateRequest, error) {
 	log := ctrl.Log.WithName("buildCreateRequest")
 
 	// Check if using imported disk or template
@@ -698,27 +707,33 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 		log.V(1).Info("No additional disks configured", "vm", vm.Name)
 	}
 
-	// Convert UserData
+	// Convert UserData — resolve inline and/or SecretRef, merging if both present
 	var userData *contracts.UserData
 	if vm.Spec.UserData != nil && vm.Spec.UserData.CloudInit != nil {
-		userData = &contracts.UserData{
-			Type: "cloud-init",
+		cloudInitData, err := r.resolveCloudInitUserData(ctx, vm.Namespace, vm.Spec.UserData.CloudInit)
+		if err != nil {
+			return contracts.CreateRequest{}, fmt.Errorf("resolving cloud-init user data: %w", err)
 		}
-		if vm.Spec.UserData.CloudInit.Inline != "" {
-			userData.CloudInitData = vm.Spec.UserData.CloudInit.Inline
-		}
-		// TODO: Handle SecretRef
-	}
-
-	// Convert MetaData
-	var metaData *contracts.MetaData
-	if vm.Spec.MetaData != nil && vm.Spec.MetaData.CloudInit != nil {
-		if vm.Spec.MetaData.CloudInit.Inline != "" {
-			metaData = &contracts.MetaData{
-				MetaDataYAML: vm.Spec.MetaData.CloudInit.Inline,
+		if cloudInitData != "" {
+			userData = &contracts.UserData{
+				Type:          "cloud-init",
+				CloudInitData: cloudInitData,
 			}
 		}
-		// TODO: Handle SecretRef
+	}
+
+	// Convert MetaData — resolve inline and/or SecretRef, merging if both present
+	var metaData *contracts.MetaData
+	if vm.Spec.MetaData != nil && vm.Spec.MetaData.CloudInit != nil {
+		metaDataStr, err := r.resolveCloudInitMetaData(ctx, vm.Namespace, vm.Spec.MetaData.CloudInit)
+		if err != nil {
+			return contracts.CreateRequest{}, fmt.Errorf("resolving cloud-init metadata: %w", err)
+		}
+		if metaDataStr != "" {
+			metaData = &contracts.MetaData{
+				MetaDataYAML: metaDataStr,
+			}
+		}
 	}
 
 	// Convert Placement
@@ -750,7 +765,7 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 		MetaData:  metaData,
 		Placement: placement,
 		Tags:      vm.Spec.Tags,
-	}
+	}, nil
 }
 
 // updateStatus updates the VM status
@@ -758,6 +773,116 @@ func (r *VirtualMachineReconciler) updateStatus(ctx context.Context, vm *infravi
 	if err := r.Status().Update(ctx, vm); err != nil {
 		log.FromContext(ctx).Error(err, "Failed to update VirtualMachine status")
 	}
+}
+
+// resolveCloudInitUserData resolves the final cloud-config string for UserData.
+// If only Inline is set, it is returned as-is.
+// If only SecretRef is set, the secret data is fetched and returned.
+// If both are set, they are merged into a multi-part MIME document so that
+// cloud-init applies both configs (secretRef content is applied after inline).
+func (r *VirtualMachineReconciler) resolveCloudInitUserData(
+	ctx context.Context,
+	namespace string,
+	ci *infravirtrigaudiov1beta1.CloudInit,
+) (string, error) {
+	var parts []string
+
+	if ci.Inline != "" {
+		parts = append(parts, ci.Inline)
+	}
+
+	if ci.SecretRef != nil {
+		secret := &corev1.Secret{}
+		if err := r.Get(ctx, types.NamespacedName{Name: ci.SecretRef.Name, Namespace: namespace}, secret); err != nil {
+			return "", fmt.Errorf("failed to get cloud-init secret %q: %w", ci.SecretRef.Name, err)
+		}
+		data, err := extractCloudInitFromSecret(secret)
+		if err != nil {
+			return "", fmt.Errorf("cloud-init secret %q: %w", ci.SecretRef.Name, err)
+		}
+		parts = append(parts, data)
+	}
+
+	switch len(parts) {
+	case 0:
+		return "", nil
+	case 1:
+		return parts[0], nil
+	default:
+		return mergeCloudConfigParts(parts), nil
+	}
+}
+
+// resolveCloudInitMetaData resolves the final metadata YAML string.
+// If only Inline is set, it is returned as-is.
+// If only SecretRef is set, the secret data is fetched and returned.
+// If both are set, the inline content is placed first and the secret content
+// appended after a YAML document separator; later keys override earlier ones.
+func (r *VirtualMachineReconciler) resolveCloudInitMetaData(
+	ctx context.Context,
+	namespace string,
+	meta *infravirtrigaudiov1beta1.CloudInitMetaData,
+) (string, error) {
+	var parts []string
+
+	if meta.Inline != "" {
+		parts = append(parts, meta.Inline)
+	}
+
+	if meta.SecretRef != nil {
+		secret := &corev1.Secret{}
+		if err := r.Get(ctx, types.NamespacedName{Name: meta.SecretRef.Name, Namespace: namespace}, secret); err != nil {
+			return "", fmt.Errorf("failed to get metadata secret %q: %w", meta.SecretRef.Name, err)
+		}
+		data, err := extractMetaDataFromSecret(secret)
+		if err != nil {
+			return "", fmt.Errorf("metadata secret %q: %w", meta.SecretRef.Name, err)
+		}
+		parts = append(parts, data)
+	}
+
+	return strings.Join(parts, "\n"), nil
+}
+
+// mergeCloudConfigParts combines multiple cloud-config documents into a single
+// multi-part MIME message that cloud-init can process natively.
+func mergeCloudConfigParts(parts []string) string {
+	const boundary = "VIRTRIGAUD_CLOUD_INIT_BOUNDARY"
+	var buf strings.Builder
+	buf.WriteString("Content-Type: multipart/mixed; boundary=\"" + boundary + "\"\n")
+	buf.WriteString("MIME-Version: 1.0\n")
+	for _, p := range parts {
+		buf.WriteString("\n--" + boundary + "\n")
+		buf.WriteString("Content-Type: text/cloud-config; charset=\"utf-8\"\n")
+		buf.WriteString("MIME-Version: 1.0\n")
+		buf.WriteString("\n")
+		buf.WriteString(p)
+		buf.WriteString("\n")
+	}
+	buf.WriteString("\n--" + boundary + "--\n")
+	return buf.String()
+}
+
+// extractCloudInitFromSecret reads cloud-init user data from a Secret,
+// trying common key names in order of preference.
+func extractCloudInitFromSecret(secret *corev1.Secret) (string, error) {
+	for _, key := range []string{"userdata", "user-data", "cloud-init", "cloud-config"} {
+		if data, ok := secret.Data[key]; ok {
+			return string(data), nil
+		}
+	}
+	return "", fmt.Errorf("no recognised cloud-init key in secret (accepted keys: userdata, user-data, cloud-init, cloud-config)")
+}
+
+// extractMetaDataFromSecret reads cloud-init metadata from a Secret,
+// trying common key names in order of preference.
+func extractMetaDataFromSecret(secret *corev1.Secret) (string, error) {
+	for _, key := range []string{"metadata", "meta-data", "meta_data"} {
+		if data, ok := secret.Data[key]; ok {
+			return string(data), nil
+		}
+	}
+	return "", fmt.Errorf("no recognised metadata key in secret (accepted keys: metadata, meta-data, meta_data)")
 }
 
 // getRequeueInterval returns an intelligent requeue interval based on VM state
