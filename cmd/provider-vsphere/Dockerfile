@@ -47,10 +47,13 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
 # Runtime stage - use Debian slim for qemu-img support
 FROM ${BASE_IMAGE} as runtime
 
-# Install qemu-img and CA certificates
+# Install qemu-img and CA certificates, then upgrade any installed packages
+# to pick up security fixes that may not yet be baked into the base image
+# layer (matches the pattern used in cmd/provider-libvirt/Dockerfile).
 RUN apt-get update && apt-get install -y \
     qemu-utils \
     ca-certificates \
+    && apt-get upgrade -y \
     && rm -rf /var/lib/apt/lists/* \
     && echo "DEBIAN BUILD SUCCESS - QEMU-IMG AVAILABLE" \
     && which qemu-img \
