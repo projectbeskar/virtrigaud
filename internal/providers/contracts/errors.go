@@ -44,6 +44,8 @@ const (
 	ErrorTypeQuotaExceeded ErrorType = "QuotaExceeded"
 	// ErrorTypeConflict indicates resource conflict
 	ErrorTypeConflict ErrorType = "Conflict"
+	// ErrorTypeCircuitOpen indicates the circuit breaker is open (not retryable)
+	ErrorTypeCircuitOpen ErrorType = "CircuitOpen"
 )
 
 // ProviderError represents a categorized error from a provider
@@ -144,6 +146,15 @@ func NewUnavailableError(message string, cause error) *ProviderError {
 		Message:   message,
 		Cause:     cause,
 		Retryable: true,
+	}
+}
+
+// NewCircuitBreakerOpenError indicates the circuit breaker is open; callers should not retry.
+func NewCircuitBreakerOpenError(message string) *ProviderError {
+	return &ProviderError{
+		Type:      ErrorTypeCircuitOpen,
+		Message:   message,
+		Retryable: false,
 	}
 }
 

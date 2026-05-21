@@ -103,9 +103,8 @@ func NewCircuitBreaker(name, providerType, provider string, config *Config) *Cir
 func (cb *CircuitBreaker) Call(ctx context.Context, fn func(ctx context.Context) error) error {
 	// Check if we should allow the call
 	if !cb.allowCall() {
-		return contracts.NewUnavailableError(
+		return contracts.NewCircuitBreakerOpenError(
 			fmt.Sprintf("circuit breaker %s is open", cb.name),
-			nil,
 		)
 	}
 
@@ -130,7 +129,11 @@ func (cb *CircuitBreaker) allowCall() bool {
 		// Check if we should transition to half-open
 		if time.Since(cb.lastFailureTime) > cb.config.ResetTimeout {
 			cb.transitionToHalfOpen()
-			return true
+			// Count the first half-open probe (same as StateHalfOpen branch below)
+			if cb.halfOpenCalls < cb.config.HalfOpenMaxCalls {
+				cb.halfOpenCalls++
+				return true
+			}
 		}
 		return false
 	case StateHalfOpen:
