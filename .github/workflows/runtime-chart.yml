@@ -1,13 +1,14 @@
+---
 name: Runtime Chart
 
-on:
+"on":
   push:
-    branches: [ main, develop ]
+    branches: [main, develop]
     paths:
       - 'charts/virtrigaud-provider-runtime/**'
       - '.github/workflows/runtime-chart.yml'
   pull_request:
-    branches: [ main, develop ]
+    branches: [main, develop]
     paths:
       - 'charts/virtrigaud-provider-runtime/**'
       - '.github/workflows/runtime-chart.yml'
@@ -28,36 +29,36 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
-    - name: Set up Helm
-      uses: azure/setup-helm@v4
-      with:
-        version: 'latest'
+      - name: Set up Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4  # v4
+        with:
+          version: 'latest'
 
-    - name: Lint chart
-      run: helm lint charts/virtrigaud-provider-runtime/
+      - name: Lint chart
+        run: helm lint charts/virtrigaud-provider-runtime/
 
-    - name: Template chart with mock provider values
-      run: |
-        helm template test-mock charts/virtrigaud-provider-runtime/ \
-          -f charts/virtrigaud-provider-runtime/examples/values-mock.yaml
+      - name: Template chart with mock provider values
+        run: |
+          helm template test-mock charts/virtrigaud-provider-runtime/ \
+            -f charts/virtrigaud-provider-runtime/examples/values-mock.yaml
 
-    - name: Template chart with vSphere provider values
-      run: |
-        helm template test-vsphere charts/virtrigaud-provider-runtime/ \
-          -f charts/virtrigaud-provider-runtime/examples/values-vsphere.yaml
+      - name: Template chart with vSphere provider values
+        run: |
+          helm template test-vsphere charts/virtrigaud-provider-runtime/ \
+            -f charts/virtrigaud-provider-runtime/examples/values-vsphere.yaml
 
-    - name: Template chart with libvirt provider values
-      run: |
-        helm template test-libvirt charts/virtrigaud-provider-runtime/ \
-          -f charts/virtrigaud-provider-runtime/examples/values-libvirt.yaml
+      - name: Template chart with libvirt provider values
+        run: |
+          helm template test-libvirt charts/virtrigaud-provider-runtime/ \
+            -f charts/virtrigaud-provider-runtime/examples/values-libvirt.yaml
 
-    - name: Template chart with proxmox provider values
-      run: |
-        helm template test-proxmox charts/virtrigaud-provider-runtime/ \
-          -f charts/virtrigaud-provider-runtime/examples/values-proxmox.yaml
+      - name: Template chart with proxmox provider values
+        run: |
+          helm template test-proxmox charts/virtrigaud-provider-runtime/ \
+            -f charts/virtrigaud-provider-runtime/examples/values-proxmox.yaml
 
   kind-test:
     name: Kind Integration Test
@@ -65,206 +66,206 @@ jobs:
     timeout-minutes: 15
     needs: lint
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
-    - name: Set up Go
-      uses: actions/setup-go@v5
-      with:
-        go-version-file: go.mod
-        cache: true
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5
+        with:
+          go-version-file: go.mod
+          cache: true
 
-    - name: Set up Helm
-      uses: azure/setup-helm@v4
-      with:
-        version: 'latest'
+      - name: Set up Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4  # v4
+        with:
+          version: 'latest'
 
-    - name: Install kind
-      run: |
-        # Download and install kind
-        curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.22.0/kind-linux-amd64
-        chmod +x ./kind
-        sudo mv ./kind /usr/local/bin/kind
-        
-        # Verify installation
-        kind --version
+      - name: Install kind
+        run: |
+          # Download and install kind
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.22.0/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
 
-    - name: Create kind cluster
-      run: |
-        echo "🚀 Creating kind cluster..."
-        kind create cluster --name runtime-test --wait 60s
-        
-        echo "✅ Cluster created successfully"
-        kind get clusters
+          # Verify installation
+          kind --version
 
-    - name: Configure kubectl for kind cluster
-      run: |
-        echo "🔧 Configuring kubectl for kind cluster..."
-        kind get kubeconfig --name runtime-test > /tmp/kubeconfig
-        export KUBECONFIG=/tmp/kubeconfig
-        echo "KUBECONFIG=/tmp/kubeconfig" >> $GITHUB_ENV
-        
-        echo "✅ Testing kubectl connection..."
-        kubectl config current-context
-        kubectl get nodes
-        kubectl cluster-info
+      - name: Create kind cluster
+        run: |
+          echo "🚀 Creating kind cluster..."
+          kind create cluster --name runtime-test --wait 60s
 
-    - name: Build mock provider image
-      run: |
-        echo "🔨 Building mock provider with fixed RegisterProvider..."
-        
-        # Force clean build to pick up the server fix
-        docker build -f cmd/provider-mock/Dockerfile -t provider-mock:test . --no-cache
-        
-        echo "📦 Loading image into kind cluster..."
-        kind load docker-image provider-mock:test --name runtime-test
-        
-        echo "✅ Verifying image is loaded..."
-        docker exec runtime-test-control-plane crictl images | grep provider-mock || echo "Image not found in crictl"
+          echo "✅ Cluster created successfully"
+          kind get clusters
 
-    - name: Install runtime chart with mock provider
-      run: |
-        echo "📋 Installing runtime chart..."
-        echo "Using minimal configuration for mock provider..."
-        
-        # Create a minimal values file for testing
-        cat > /tmp/test-values.yaml << EOF
-        image:
-          repository: provider-mock
-          tag: test
-          pullPolicy: Never
-        
-        # Environment variables for mock provider
-        env:
-          - name: LOG_LEVEL
-            value: "debug"
-          - name: MOCK_SLOW_MODE
-            value: "false"
-          - name: MOCK_FAILURE_MODE
-            value: ""
-        
-        # Minimal resource requirements for testing
-        resources:
-          requests:
-            cpu: 100m
-            memory: 128Mi
-          limits:
-            cpu: 500m
-            memory: 512Mi
-        
-        # Configure gRPC health checks with generous timeouts for testing
-        livenessProbe:
-          grpc:
+      - name: Configure kubectl for kind cluster
+        run: |
+          echo "🔧 Configuring kubectl for kind cluster..."
+          kind get kubeconfig --name runtime-test > /tmp/kubeconfig
+          export KUBECONFIG=/tmp/kubeconfig
+          echo "KUBECONFIG=/tmp/kubeconfig" >> $GITHUB_ENV
+
+          echo "✅ Testing kubectl connection..."
+          kubectl config current-context
+          kubectl get nodes
+          kubectl cluster-info
+
+      - name: Build mock provider image
+        run: |
+          echo "🔨 Building mock provider with fixed RegisterProvider..."
+
+          # Force clean build to pick up the server fix
+          docker build -f cmd/provider-mock/Dockerfile -t provider-mock:test . --no-cache
+
+          echo "📦 Loading image into kind cluster..."
+          kind load docker-image provider-mock:test --name runtime-test
+
+          echo "✅ Verifying image is loaded..."
+          docker exec runtime-test-control-plane crictl images | grep provider-mock || echo "Image not found in crictl"
+
+      - name: Install runtime chart with mock provider
+        run: |
+          echo "📋 Installing runtime chart..."
+          echo "Using minimal configuration for mock provider..."
+
+          # Create a minimal values file for testing
+          cat > /tmp/test-values.yaml << EOF
+          image:
+            repository: provider-mock
+            tag: test
+            pullPolicy: Never
+
+          # Environment variables for mock provider
+          env:
+            - name: LOG_LEVEL
+              value: "debug"
+            - name: MOCK_SLOW_MODE
+              value: "false"
+            - name: MOCK_FAILURE_MODE
+              value: ""
+
+          # Minimal resource requirements for testing
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+
+          # Configure gRPC health checks with generous timeouts for testing
+          livenessProbe:
+            grpc:
+              port: 9443
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
+
+          readinessProbe:
+            grpc:
+              port: 9443
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
+
+          # Simple service configuration
+          service:
+            type: ClusterIP
             port: 9443
-          initialDelaySeconds: 60
-          periodSeconds: 30
-          timeoutSeconds: 10
-          failureThreshold: 5
-        
-        readinessProbe:
-          grpc:
-            port: 9443
-          initialDelaySeconds: 30
-          periodSeconds: 10
-          timeoutSeconds: 5
-          failureThreshold: 5
-        
-        # Simple service configuration
-        service:
-          type: ClusterIP
-          port: 9443
-          targetPort: grpc
-          additionalPorts:
-            - name: health
-              port: 8080
-              targetPort: health
-        EOF
-        
-        # Show the generated values for debugging
-        echo "📋 Generated values for installation:"
-        cat /tmp/test-values.yaml
-        
-        # Install with debug output but no wait initially
-        echo "🚀 Installing chart..."
-        helm install test-runtime charts/virtrigaud-provider-runtime/ \
-          -f /tmp/test-values.yaml \
-          --debug \
-          --timeout=5m
-        
-        echo "✅ Chart installed, checking status..."
-        
-        # Manual wait with detailed monitoring
-        echo "⏳ Waiting for deployment to be ready..."
-        kubectl get pods,deployments,services
-        
-        # Wait for deployment to have desired replicas
-        kubectl wait --for=condition=available deployment/test-runtime-virtrigaud-provider-runtime --timeout=300s || {
-          echo "❌ Deployment failed to become available, checking details..."
-          kubectl describe deployment test-runtime-virtrigaud-provider-runtime
-          kubectl describe pods -l app.kubernetes.io/name=virtrigaud-provider-runtime
-          kubectl logs -l app.kubernetes.io/name=virtrigaud-provider-runtime --tail=100 || echo "No logs available yet"
-          exit 1
-        }
+            targetPort: grpc
+            additionalPorts:
+              - name: health
+                port: 8080
+                targetPort: health
+          EOF
 
-    - name: Verify deployment is ready
-      run: |
-        echo "🔍 Checking deployment status..."
-        kubectl get pods -o wide
-        kubectl get services
-        kubectl get deployments
-        
-        echo "📋 Waiting for pods to be ready..."
-        kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=virtrigaud-provider-runtime --timeout=120s || {
-          echo "❌ Pods failed to become ready, checking logs..."
-          kubectl describe pods
-          kubectl logs -l app.kubernetes.io/name=virtrigaud-provider-runtime --tail=50
-          exit 1
-        }
-        
-        echo "✅ All pods are ready!"
+          # Show the generated values for debugging
+          echo "📋 Generated values for installation:"
+          cat /tmp/test-values.yaml
 
-    - name: Test basic functionality
-      run: |
-        echo "🧪 Testing basic functionality..."
-        kubectl get pods -l app.kubernetes.io/name=virtrigaud-provider-runtime
-        
-        # Check if the service is accessible
-        kubectl get endpoints
-        
-        echo "✅ Runtime chart deployment test completed successfully!"
+          # Install with debug output but no wait initially
+          echo "🚀 Installing chart..."
+          helm install test-runtime charts/virtrigaud-provider-runtime/ \
+            -f /tmp/test-values.yaml \
+            --debug \
+            --timeout=5m
 
-    - name: Cleanup test deployment
-      run: |
-        echo "🧹 Cleaning up test deployment..."
-        helm uninstall test-runtime || echo "Uninstall failed or already removed"
-        echo "✅ Cleanup completed"
+          echo "✅ Chart installed, checking status..."
 
-    - name: Check logs
-      if: failure()
-      run: |
-        echo "🔍 Checking cluster status and logs..."
-        
-        # Ensure kubectl is configured for kind cluster
-        if [ ! -f "/tmp/kubeconfig" ]; then
-          echo "⚠️  Kubeconfig not found, attempting to recreate..."
-          kind get kubeconfig --name runtime-test > /tmp/kubeconfig || echo "Failed to get kubeconfig"
-        fi
-        export KUBECONFIG=/tmp/kubeconfig
-        
-        echo "📋 Cluster context and nodes:"
-        kubectl config current-context || echo "No current context"
-        kubectl get nodes || echo "Failed to get nodes"
-        
-        echo "📋 Pod status:"
-        kubectl describe pods || echo "Failed to describe pods"
-        
-        echo "📋 Application logs:"
-        kubectl logs -l app.kubernetes.io/name=virtrigaud-provider-runtime || echo "No logs found"
+          # Manual wait with detailed monitoring
+          echo "⏳ Waiting for deployment to be ready..."
+          kubectl get pods,deployments,services
 
-    - name: Clean up
-      if: always()
-      run: |
-        helm uninstall test-runtime || true
+          # Wait for deployment to have desired replicas
+          kubectl wait --for=condition=available deployment/test-runtime-virtrigaud-provider-runtime --timeout=300s || {
+            echo "❌ Deployment failed to become available, checking details..."
+            kubectl describe deployment test-runtime-virtrigaud-provider-runtime
+            kubectl describe pods -l app.kubernetes.io/name=virtrigaud-provider-runtime
+            kubectl logs -l app.kubernetes.io/name=virtrigaud-provider-runtime --tail=100 || echo "No logs available yet"
+            exit 1
+          }
+
+      - name: Verify deployment is ready
+        run: |
+          echo "🔍 Checking deployment status..."
+          kubectl get pods -o wide
+          kubectl get services
+          kubectl get deployments
+
+          echo "📋 Waiting for pods to be ready..."
+          kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=virtrigaud-provider-runtime --timeout=120s || {
+            echo "❌ Pods failed to become ready, checking logs..."
+            kubectl describe pods
+            kubectl logs -l app.kubernetes.io/name=virtrigaud-provider-runtime --tail=50
+            exit 1
+          }
+
+          echo "✅ All pods are ready!"
+
+      - name: Test basic functionality
+        run: |
+          echo "🧪 Testing basic functionality..."
+          kubectl get pods -l app.kubernetes.io/name=virtrigaud-provider-runtime
+
+          # Check if the service is accessible
+          kubectl get endpoints
+
+          echo "✅ Runtime chart deployment test completed successfully!"
+
+      - name: Cleanup test deployment
+        run: |
+          echo "🧹 Cleaning up test deployment..."
+          helm uninstall test-runtime || echo "Uninstall failed or already removed"
+          echo "✅ Cleanup completed"
+
+      - name: Check logs
+        if: failure()
+        run: |
+          echo "🔍 Checking cluster status and logs..."
+
+          # Ensure kubectl is configured for kind cluster
+          if [! -f "/tmp/kubeconfig"]; then
+            echo "⚠️  Kubeconfig not found, attempting to recreate..."
+            kind get kubeconfig --name runtime-test > /tmp/kubeconfig || echo "Failed to get kubeconfig"
+          fi
+          export KUBECONFIG=/tmp/kubeconfig
+
+          echo "📋 Cluster context and nodes:"
+          kubectl config current-context || echo "No current context"
+          kubectl get nodes || echo "Failed to get nodes"
+
+          echo "📋 Pod status:"
+          kubectl describe pods || echo "Failed to describe pods"
+
+          echo "📋 Application logs:"
+          kubectl logs -l app.kubernetes.io/name=virtrigaud-provider-runtime || echo "No logs found"
+
+      - name: Clean up
+        if: always()
+        run: |
+          helm uninstall test-runtime || true
 
   package:
     name: Package Chart
@@ -273,105 +274,105 @@ jobs:
     needs: [lint, kind-test]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
-    - name: Set up Helm
-      uses: azure/setup-helm@v4
-      with:
-        version: 'latest'
+      - name: Set up Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4  # v4
+        with:
+          version: 'latest'
 
-    - name: Package chart
-      run: |
-        mkdir -p dist
-        helm package charts/virtrigaud-provider-runtime/ -d dist/
+      - name: Package chart
+        run: |
+          mkdir -p dist
+          helm package charts/virtrigaud-provider-runtime/ -d dist/
 
-    - name: Upload chart artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: runtime-chart
-        path: dist/*.tgz
+      - name: Upload chart artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: runtime-chart
+          path: dist/*.tgz
 
   crd-installation-test:
     name: CRD Installation Test
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
-    - name: Set up Go
-      uses: actions/setup-go@v5
-      with:
-        go-version-file: go.mod
-        cache: true
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5
+        with:
+          go-version-file: go.mod
+          cache: true
 
-    - name: Set up Helm
-      uses: azure/setup-helm@v4
-      with:
-        version: '3.12.0'
+      - name: Set up Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4  # v4
+        with:
+          version: '3.12.0'
 
-    - name: Set up kubectl
-      uses: azure/setup-kubectl@v4
-      with:
-        version: 'latest'
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@776406bce94f63e41d621b960d78ee25c8b76ede  # v4
+        with:
+          version: 'latest'
 
-    - name: Generate CRDs into Helm chart
-      run: make gen-helm-crds
+      - name: Generate CRDs into Helm chart
+        run: make gen-helm-crds
 
-    - name: Create kind cluster
-      uses: helm/kind-action@v1.14.0
-      with:
-        cluster_name: crd-test
-        kubectl_version: v1.31.0
-        node_image: kindest/node:v1.31.0@sha256:53df588e04085fd41ae12de0c3fe4c72f7013bba32a20e7325357a1ac94ba865
+      - name: Create kind cluster
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc  # v1.14.0
+        with:
+          cluster_name: crd-test
+          kubectl_version: v1.31.0
+          node_image: kindest/node:v1.31.0@sha256:53df588e04085fd41ae12de0c3fe4c72f7013bba32a20e7325357a1ac94ba865
 
-    - name: Test CRD installation via Helm
-      run: |
-        echo "🧪 Testing CRD installation..."
+      - name: Test CRD installation via Helm
+        run: |
+          echo "🧪 Testing CRD installation..."
 
-        # Test installing CRDs via main virtrigaud chart (CRDs only)
-        helm install virtrigaud-crds ./charts/virtrigaud \
-          --set manager.replicaCount=0 \
-          --set providers.libvirt.enabled=false \
-          --set providers.vsphere.enabled=false \
-          --set webhooks.enabled=false \
-          --set crdUpgrade.enabled=false \
-          --wait --timeout=5m
+          # Test installing CRDs via main virtrigaud chart (CRDs only)
+          helm install virtrigaud-crds ./charts/virtrigaud \
+            --set manager.replicaCount=0 \
+            --set providers.libvirt.enabled=false \
+            --set providers.vsphere.enabled=false \
+            --set webhooks.enabled=false \
+            --set crdUpgrade.enabled=false \
+            --wait --timeout=5m
 
-        # Verify CRDs are installed
-        echo "🔍 Verifying CRDs are installed..."
-        kubectl get crd | grep virtrigaud.io
-        
-        # Test CRD functionality by creating sample resources
-        echo "🧪 Testing CRD functionality..."
-        
-        # Create a secret for credentials
-        kubectl create secret generic test-credentials \
-          --from-literal=username=test \
-          --from-literal=password=test
-        
-        kubectl apply -f - <<EOF
-        apiVersion: infra.virtrigaud.io/v1beta1
-        kind: Provider
-        metadata:
-          name: test-provider
-        spec:
-          type: proxmox
-          endpoint: http://localhost:9443
-          credentialSecretRef:
-            name: test-credentials
-          runtime:
-            mode: Remote
-            image: "virtrigaud/provider-proxmox:latest"
-            service:
-              port: 9090
-        EOF
-        
-        # Verify resource was created
-        kubectl get provider test-provider
-        
-        # Clean up
-        kubectl delete provider test-provider
-        kubectl delete secret test-credentials
-        helm uninstall virtrigaud-crds
+          # Verify CRDs are installed
+          echo "🔍 Verifying CRDs are installed..."
+          kubectl get crd | grep virtrigaud.io
+
+          # Test CRD functionality by creating sample resources
+          echo "🧪 Testing CRD functionality..."
+
+          # Create a secret for credentials
+          kubectl create secret generic test-credentials \
+            --from-literal=username=test \
+            --from-literal=password=test
+
+          kubectl apply -f - <<EOF
+          apiVersion: infra.virtrigaud.io/v1beta1
+          kind: Provider
+          metadata:
+            name: test-provider
+          spec:
+            type: proxmox
+            endpoint: http://localhost:9443
+            credentialSecretRef:
+              name: test-credentials
+            runtime:
+              mode: Remote
+              image: "virtrigaud/provider-proxmox:latest"
+              service:
+                port: 9090
+          EOF
+
+          # Verify resource was created
+          kubectl get provider test-provider
+
+          # Clean up
+          kubectl delete provider test-provider
+          kubectl delete secret test-credentials
+          helm uninstall virtrigaud-crds

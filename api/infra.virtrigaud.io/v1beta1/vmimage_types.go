@@ -66,9 +66,15 @@ type ImageSource struct {
 	Proxmox *ProxmoxImageSource `json:"proxmox,omitempty"`
 }
 
-// VSphereImageSource defines vSphere-specific image configuration
+// VSphereImageSource defines vSphere-specific image configuration.
+//
+// This struct supports multiple ways to reference a VM template:
+//   - TemplateName: A simple template name or full inventory path
+//   - ContentLibrary: Reference to a vSphere Content Library item
+//   - OVAURL: URL to download and import an OVA file
 type VSphereImageSource struct {
-	// TemplateName references an existing vSphere template
+	// TemplateName references an existing vSphere template by name.
+	// This can be a simple name (searched globally) or a full inventory path.
 	// +optional
 	// +kubebuilder:validation:MaxLength=255
 	TemplateName string `json:"templateName,omitempty"`

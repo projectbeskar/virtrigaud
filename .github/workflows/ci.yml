@@ -1,10 +1,11 @@
+---
 name: CI
 
-on:
+"on":
   push:
-    branches: [ main, develop ]
+    branches: [main, develop]
   pull_request:
-    branches: [ main, develop ]
+    branches: [main, develop]
 
 env:
   GO_VERSION: '1.23'
@@ -26,196 +27,196 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
-    - name: Set up Go
-      uses: actions/setup-go@v5
-      with:
-        go-version-file: go.mod
-        cache: true
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5
+        with:
+          go-version-file: go.mod
+          cache: true
 
-    - name: Tidy Go modules
-      run: go mod tidy
+      - name: Tidy Go modules
+        run: go mod tidy
 
-    - name: Download dependencies
-      run: go mod download
+      - name: Download dependencies
+        run: go mod download
 
-    - name: Verify dependencies
-      run: go mod verify
+      - name: Verify dependencies
+        run: go mod verify
 
-    - name: Run go vet (excluding libvirt)
-      run: |
-        # Use go list to find all packages and exclude problematic ones
-        go list ./... | grep -v '/internal/providers/libvirt' | grep -v '/cmd/provider-libvirt' | grep -v '/test/integration' | xargs go vet
+      - name: Run go vet (excluding libvirt)
+        run: |
+          # Use go list to find all packages and exclude problematic ones
+          go list ./... | grep -v '/internal/providers/libvirt' | grep -v '/cmd/provider-libvirt' | grep -v '/test/integration' | xargs go vet
 
-    - name: Run tests (excluding libvirt)
-      run: |
-        # Use the Makefile target which properly sets up ENVTEST environment
-        make test
-        # The Makefile generates coverage in cover.out, rename it for codecov
-        mv cover.out coverage.out
+      - name: Run tests (excluding libvirt)
+        run: |
+          # Use the Makefile target which properly sets up ENVTEST environment
+          make test
+          # The Makefile generates coverage in cover.out, rename it for codecov
+          mv cover.out coverage.out
 
-    - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@v5
-      with:
-        files: ./coverage.out
-        flags: unittests
-        name: codecov-umbrella
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@75cd11691c0faa626561e295848008c8a7dddffe  # v5
+        with:
+          files: ./coverage.out
+          flags: unittests
+          name: codecov-umbrella
 
   lint:
     name: Lint
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
-    - name: Set up Go
-      uses: actions/setup-go@v5
-      with:
-        go-version-file: go.mod
-        cache: true
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5
+        with:
+          go-version-file: go.mod
+          cache: true
 
-    - name: Install libvirt dependencies for Go module resolution
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libvirt-dev pkg-config
+      - name: Install libvirt dependencies for Go module resolution
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libvirt-dev pkg-config
 
-    - name: Tidy Go modules
-      run: go mod tidy
+      - name: Tidy Go modules
+        run: go mod tidy
 
-    - name: Run golangci-lint
-      uses: golangci/golangci-lint-action@v9
-      with:
-        version: v2.1.6
-        args: --timeout=10m
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20  # v9
+        with:
+          version: v2.12.2
+          args: --timeout=10m
 
   security:
     name: Security Scan
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
-    - name: Set up Go
-      uses: actions/setup-go@v5
-      with:
-        go-version-file: go.mod
-        cache: true
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5
+        with:
+          go-version-file: go.mod
+          cache: true
 
-    - name: Tidy Go modules
-      run: go mod tidy
+      - name: Tidy Go modules
+        run: go mod tidy
 
-    - name: Run Gosec Security Scanner (excluding libvirt)
-      run: |
-        go install github.com/securego/gosec/v2/cmd/gosec@latest
-        
-        # Run gosec with timeout and better error handling
-        # Exclude vendor, modules, and problematic dependencies
-        timeout 300s $(go env GOPATH)/bin/gosec \
-          -fmt sarif \
-          -out gosec.sarif \
-          -exclude-dir=internal/providers/libvirt \
-          -exclude-dir=test/integration \
-          -exclude-dir=vendor \
-          -exclude-dir=$(go env GOPATH)/pkg/mod \
-          -exclude=G104,G204,G304 \
-          ./... || {
-          
-          echo "🔍 Gosec completed with issues or timeout. Checking results..."
-          
-          # Check if SARIF file was created
-          if [ -f gosec.sarif ]; then
-            echo "✅ SARIF file created. Checking for critical issues..."
-            
-            # Count critical/high severity issues 
-            CRITICAL_COUNT=$(grep -o '"level":"error"' gosec.sarif | wc -l || echo "0")
-            HIGH_COUNT=$(grep -o '"level":"warning"' gosec.sarif | wc -l || echo "0")
-            
-            echo "📊 Security scan results:"
-            echo "   - Critical issues: $CRITICAL_COUNT"
-            echo "   - High issues: $HIGH_COUNT"
-            
-            # Only fail on critical issues
-            if [ "$CRITICAL_COUNT" -gt 0 ]; then
-              echo "❌ Critical security issues found"
-              exit 1
+      - name: Run Gosec Security Scanner (excluding libvirt)
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@latest
+
+          # Run gosec with timeout and better error handling
+          # Exclude vendor, modules, and problematic dependencies
+          timeout 300s $(go env GOPATH)/bin/gosec \
+            -fmt sarif \
+            -out gosec.sarif \
+            -exclude-dir=internal/providers/libvirt \
+            -exclude-dir=test/integration \
+            -exclude-dir=vendor \
+            -exclude-dir=$(go env GOPATH)/pkg/mod \
+            -exclude=G104,G204,G304 \
+            ./... || {
+
+            echo "🔍 Gosec completed with issues or timeout. Checking results..."
+
+            # Check if SARIF file was created
+            if [ -f gosec.sarif ]; then
+              echo "✅ SARIF file created. Checking for critical issues..."
+
+              # Count critical/high severity issues
+              CRITICAL_COUNT=$(grep -o '"level":"error"' gosec.sarif | wc -l || echo "0")
+              HIGH_COUNT=$(grep -o '"level":"warning"' gosec.sarif | wc -l || echo "0")
+
+              echo "📊 Security scan results:"
+              echo "   - Critical issues: $CRITICAL_COUNT"
+              echo "   - High issues: $HIGH_COUNT"
+
+              # Only fail on critical issues
+              if [ "$CRITICAL_COUNT" -gt 0 ]; then
+                echo "❌ Critical security issues found"
+                exit 1
+              else
+                echo "✅ No critical security issues found"
+                exit 0
+              fi
             else
-              echo "✅ No critical security issues found"
-              exit 0
+              echo "❌ SARIF file not created - gosec failed to complete"
+              exit 1
             fi
-          else
-            echo "❌ SARIF file not created - gosec failed to complete"
-            exit 1
-          fi
-        }
+          }
 
-    - name: Upload SARIF file
-      uses: github/codeql-action/upload-sarif@v4
-      with:
-        sarif_file: gosec.sarif
+      - name: Upload SARIF file
+        uses: github/codeql-action/upload-sarif@9e0d7b8d25671d64c341c19c0152d693099fb5ba  # v4
+        with:
+          sarif_file: gosec.sarif
 
-    - name: Run Trivy vulnerability scanner in repo mode
-      uses: aquasecurity/trivy-action@0.35.0
-      with:
-        scan-type: 'fs'
-        scan-ref: '.'
-        format: 'sarif'
-        output: 'trivy-results.sarif'
+      - name: Run Trivy vulnerability scanner in repo mode
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1  # 0.35.0
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
 
-    - name: Upload Trivy scan results to GitHub Security tab
-      uses: github/codeql-action/upload-sarif@v4
-      with:
-        sarif_file: 'trivy-results.sarif'
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@9e0d7b8d25671d64c341c19c0152d693099fb5ba  # v4
+        with:
+          sarif_file: 'trivy-results.sarif'
 
   generate:
     name: Verify Generated Files
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
-    - name: Set up Go
-      uses: actions/setup-go@v5
-      with:
-        go-version-file: go.mod
-        cache: true
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5
+        with:
+          go-version-file: go.mod
+          cache: true
 
-    - name: Tidy Go modules
-      run: go mod tidy
+      - name: Tidy Go modules
+        run: go mod tidy
 
-    - name: Install controller-gen
-      run: go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.17.2
+      - name: Install controller-gen
+        run: go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.17.2
 
-    - name: Install protoc
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y protobuf-compiler
+      - name: Install protoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
 
-    - name: Install protoc plugins
-      run: |
-        go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
-        go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+      - name: Install protoc plugins
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
 
-    - name: Generate code
-      run: make generate
+      - name: Generate code
+        run: make generate
 
-    - name: Generate CRDs
-      run: make gen-crds
+      - name: Generate CRDs
+        run: make gen-crds
 
-    - name: Generate protobuf
-      run: make proto
+      - name: Generate protobuf
+        run: make proto
 
-    - name: Verify no changes
-      run: |
-        # Reset go.mod changes caused by go mod tidy in CI
-        git checkout HEAD -- go.mod go.sum 2>/dev/null || true
-        
-        # Check for other generated file changes
-        git diff --exit-code || (echo "Generated files are out of sync. Please run 'make generate && make manifests && make proto' and commit the changes." && exit 1)
+      - name: Verify no changes
+        run: |
+          # Reset go.mod changes caused by go mod tidy in CI
+          git checkout HEAD -- go.mod go.sum 2>/dev/null || true
+
+          # Check for other generated file changes
+          git diff --exit-code || (echo "Generated files are out of sync. Please run 'make generate && make manifests && make proto' and commit the changes." && exit 1)
 
   build:
     name: Build
@@ -226,43 +227,43 @@ jobs:
       matrix:
         component: [manager, provider-libvirt, provider-vsphere, provider-proxmox]
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
-    - name: Set up Go
-      uses: actions/setup-go@v5
-      with:
-        go-version-file: go.mod
-        cache: true
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5
+        with:
+          go-version-file: go.mod
+          cache: true
 
-    - name: Install libvirt (for provider-libvirt)
-      if: matrix.component == 'provider-libvirt'
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libvirt-dev pkg-config
+      - name: Install libvirt (for provider-libvirt)
+        if: matrix.component == 'provider-libvirt'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libvirt-dev pkg-config
 
-    - name: Build binary
-      run: |
-        case "${{ matrix.component }}" in
-          manager)
-            CGO_ENABLED=0 go build -o bin/manager ./cmd/manager
-            ;;
-          provider-libvirt)
-            CGO_ENABLED=1 go build -o bin/provider-libvirt ./cmd/provider-libvirt
-            ;;
-          provider-vsphere)
-            CGO_ENABLED=0 go build -o bin/provider-vsphere ./cmd/provider-vsphere
-            ;;
-          provider-proxmox)
-            CGO_ENABLED=0 go build -o bin/provider-proxmox ./cmd/provider-proxmox
-            ;;
-        esac
+      - name: Build binary
+        run: |
+          case "${{ matrix.component }}" in
+            manager)
+              CGO_ENABLED=0 go build -o bin/manager ./cmd/manager
+              ;;
+            provider-libvirt)
+              CGO_ENABLED=1 go build -o bin/provider-libvirt ./cmd/provider-libvirt
+              ;;
+            provider-vsphere)
+              CGO_ENABLED=0 go build -o bin/provider-vsphere ./cmd/provider-vsphere
+              ;;
+            provider-proxmox)
+              CGO_ENABLED=0 go build -o bin/provider-proxmox ./cmd/provider-proxmox
+              ;;
+          esac
 
-    - name: Upload binary
-      uses: actions/upload-artifact@v4
-      with:
-        name: ${{ matrix.component }}-binary
-        path: bin/${{ matrix.component }}*
+      - name: Upload binary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: ${{ matrix.component }}-binary
+          path: bin/${{ matrix.component }}*
 
   build-tools:
     name: Build Tools
@@ -270,27 +271,27 @@ jobs:
     timeout-minutes: 15
     needs: [test, lint]
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
-    - name: Set up Go
-      uses: actions/setup-go@v5
-      with:
-        go-version-file: go.mod
-        cache: true
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5
+        with:
+          go-version-file: go.mod
+          cache: true
 
-    - name: Build CLI tools
-      run: |
-        go build -o bin/vrtg ./cmd/vrtg
-        go build -o bin/vcts ./cmd/vcts
-        go build -o bin/virtrigaud-loadgen ./cmd/virtrigaud-loadgen
-        go build -o bin/vrtg-provider ./cmd/vrtg-provider
+      - name: Build CLI tools
+        run: |
+          go build -o bin/vrtg ./cmd/vrtg
+          go build -o bin/vcts ./cmd/vcts
+          go build -o bin/virtrigaud-loadgen ./cmd/virtrigaud-loadgen
+          go build -o bin/vrtg-provider ./cmd/vrtg-provider
 
-    - name: Upload tools
-      uses: actions/upload-artifact@v4
-      with:
-        name: cli-tools
-        path: bin/*
+      - name: Upload tools
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: cli-tools
+          path: bin/*
 
   build-images:
     name: Build Container Images
@@ -302,83 +303,83 @@ jobs:
       matrix:
         component: [manager, provider-libvirt, provider-vsphere, provider-proxmox]
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
-    - name: Set up QEMU
-      uses: docker/setup-qemu-action@v3
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130  # v3
 
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
 
-    - name: Log in to Container Registry
-      uses: docker/login-action@v3
-      with:
-        registry: ${{ env.REGISTRY }}
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Log in to Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Extract metadata
-      id: meta
-      uses: docker/metadata-action@v5
-      with:
-        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/${{ matrix.component }}
-        tags: |
-          type=ref,event=branch
-          type=sha,prefix={{branch}}-
-          type=raw,value=latest,enable={{is_default_branch}}
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051  # v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/${{ matrix.component }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
 
-    - name: Build and push development image
-      uses: docker/build-push-action@v6
-      with:
-        context: .
-        file: ${{ matrix.component == 'manager' && './build/Dockerfile.manager' || format('./cmd/{0}/Dockerfile', matrix.component) }}
-        platforms: linux/amd64,linux/arm64
-        push: true
-        tags: ${{ steps.meta.outputs.tags }}
-        labels: ${{ steps.meta.outputs.labels }}
-        # Disable GitHub Actions cache due to reliability issues
-        # cache-from: type=gha
-        # cache-to: type=gha,mode=max
+      - name: Build and push development image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+        with:
+          context: .
+          file: ${{ matrix.component == 'manager' && './build/Dockerfile.manager' || format('./cmd/{0}/Dockerfile', matrix.component) }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Disable GitHub Actions cache due to reliability issues
+          # cache-from: type=gha
+          # cache-to: type=gha,mode=max
 
   helm:
     name: Validate Helm Charts
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
-    - name: Set up Helm
-      uses: azure/setup-helm@v4
-      with:
-        version: 'v3.12.0'
+      - name: Set up Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4  # v4
+        with:
+          version: 'v3.12.0'
 
-    - name: Validate Helm charts
-      run: |
-        helm lint charts/virtrigaud
-        
-    - name: Validate rendered manifests
-      run: |
-        # Render Helm template (without cluster validation)
-        helm template virtrigaud charts/virtrigaud --values charts/virtrigaud/values.yaml > /tmp/rendered.yaml
-        
-        # Basic YAML validation - check if it's valid YAML
-        echo "Validating YAML syntax..."
-        python3 -c "
-        import yaml, sys
-        try:
-            with open('/tmp/rendered.yaml', 'r') as f:
-                yaml.safe_load_all(f)
-            print('✅ YAML syntax validation passed')
-        except yaml.YAMLError as e:
-            print(f'❌ YAML syntax error: {e}')
-            sys.exit(1)
-        "
-        
-        # Check for basic Kubernetes resource structure
-        echo "Checking for basic Kubernetes resource structure..."
-        grep -E "(apiVersion|kind|metadata)" /tmp/rendered.yaml > /dev/null && echo "✅ Basic Kubernetes structure found" || echo "⚠️  No Kubernetes resources found"
+      - name: Validate Helm charts
+        run: |
+          helm lint charts/virtrigaud
+
+      - name: Validate rendered manifests
+        run: |
+          # Render Helm template (without cluster validation)
+          helm template virtrigaud charts/virtrigaud --values charts/virtrigaud/values.yaml > /tmp/rendered.yaml
+
+          # Basic YAML validation - check if it's valid YAML
+          echo "Validating YAML syntax..."
+          python3 -c "
+          import yaml, sys
+          try:
+              with open('/tmp/rendered.yaml', 'r') as f:
+                  yaml.safe_load_all(f)
+              print('✅ YAML syntax validation passed')
+          except yaml.YAMLError as e:
+              print(f'❌ YAML syntax error: {e}')
+              sys.exit(1)
+          "
+
+          # Check for basic Kubernetes resource structure
+          echo "Checking for basic Kubernetes resource structure..."
+          grep -E "(apiVersion|kind|metadata)" /tmp/rendered.yaml > /dev/null && echo "✅ Basic Kubernetes structure found" || echo "⚠️  No Kubernetes resources found"
 
   conformance:
     name: Conformance Tests
@@ -386,32 +387,32 @@ jobs:
     timeout-minutes: 20
     needs: [build-tools]
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
-    - name: Set up Go
-      uses: actions/setup-go@v5
-      with:
-        go-version-file: go.mod
-        cache: true
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5
+        with:
+          go-version-file: go.mod
+          cache: true
 
-    - name: Download CLI tools
-      uses: actions/download-artifact@v4
-      with:
-        name: cli-tools
-        path: bin/
+      - name: Download CLI tools
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: cli-tools
+          path: bin/
 
-    - name: Make tools executable
-      run: chmod +x bin/*
+      - name: Make tools executable
+        run: chmod +x bin/*
 
-    - name: Validate conformance specs
-      run: ./bin/vcts validate test/conformance/specs/
+      - name: Validate conformance specs
+        run: ./bin/vcts validate test/conformance/specs/
 
-    - name: Upload conformance results
-      uses: actions/upload-artifact@v4
-      with:
-        name: conformance-validation
-        path: test/conformance/specs/
+      - name: Upload conformance results
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: conformance-validation
+          path: test/conformance/specs/
 
   integration:
     name: Integration Tests
@@ -419,41 +420,41 @@ jobs:
     timeout-minutes: 20
     needs: [build]
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
-    - name: Set up Go
-      uses: actions/setup-go@v5
-      with:
-        go-version-file: go.mod
-        cache: true
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5
+        with:
+          go-version-file: go.mod
+          cache: true
 
-    - name: Set up Kind cluster
-      uses: helm/kind-action@v1.14.0
-      with:
-        version: v0.24.0
-        cluster_name: virtrigaud-integration
-        kubectl_version: v1.31.0
-        node_image: kindest/node:v1.31.0@sha256:53df588e04085fd41ae12de0c3fe4c72f7013bba32a20e7325357a1ac94ba865
-        wait: 60s
-        verbosity: 1
+      - name: Set up Kind cluster
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc  # v1.14.0
+        with:
+          version: v0.24.0
+          cluster_name: virtrigaud-integration
+          kubectl_version: v1.31.0
+          node_image: kindest/node:v1.31.0@sha256:53df588e04085fd41ae12de0c3fe4c72f7013bba32a20e7325357a1ac94ba865
+          wait: 60s
+          verbosity: 1
 
-    - name: Install CRDs
-      run: make install
+      - name: Install CRDs
+        run: make install
 
-    - name: Run integration tests (excluding libvirt)
-      run: |
-        # Skip integration tests as they contain libvirt dependencies
-        # These tests should run separately in environments with libvirt
-        echo "Skipping integration tests in CI due to libvirt dependencies"
+      - name: Run integration tests (excluding libvirt)
+        run: |
+          # Skip integration tests as they contain libvirt dependencies
+          # These tests should run separately in environments with libvirt
+          echo "Skipping integration tests in CI due to libvirt dependencies"
 
-    - name: Upload test results
-      uses: actions/upload-artifact@v4
-      if: always()
-      with:
-        name: integration-test-results
-        path: test/integration/results/
-      continue-on-error: true
+      - name: Upload test results
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        if: always()
+        with:
+          name: integration-test-results
+          path: test/integration/results/
+        continue-on-error: true
 
   # Consolidated validation jobs (previously separate workflows)
   catalog-validation:
@@ -462,54 +463,54 @@ jobs:
     timeout-minutes: 10
     if: contains(github.event.head_commit.modified, 'providers/catalog.yaml') || contains(github.event.head_commit.added, 'providers/catalog.yaml')
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v6
-      with:
-        python-version: '3.11'
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        with:
+          python-version: '3.11'
 
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install jsonschema pyyaml
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install jsonschema pyyaml
 
-    - name: Validate catalog schema
-      run: |
-        python -c "
-        import yaml
-        import jsonschema
+      - name: Validate catalog schema
+        run: |
+          python -c "
+          import yaml
+          import jsonschema
 
-        # Define catalog schema
-        schema = {
-          'type': 'object',
-          'properties': {
-            'providers': {
-              'type': 'array',
-              'items': {
-                'type': 'object',
-                'properties': {
-                  'name': {'type': 'string'},
-                  'displayName': {'type': 'string'},
-                  'description': {'type': 'string'},
-                  'capabilities': {'type': 'array'},
-                  'conformance': {'type': 'object'}
-                },
-                'required': ['name', 'displayName', 'description']
+          # Define catalog schema
+          schema = {
+            'type': 'object',
+            'properties': {
+              'providers': {
+                'type': 'array',
+                'items': {
+                  'type': 'object',
+                  'properties': {
+                    'name': {'type': 'string'},
+                    'displayName': {'type': 'string'},
+                    'description': {'type': 'string'},
+                    'capabilities': {'type': 'array'},
+                    'conformance': {'type': 'object'}
+                  },
+                  'required': ['name', 'displayName', 'description']
+                }
               }
-            }
-          },
-          'required': ['providers']
-        }
+            },
+            'required': ['providers']
+          }
 
-        # Validate catalog.yaml
-        with open('providers/catalog.yaml', 'r') as f:
-            data = yaml.safe_load(f)
-        
-        jsonschema.validate(data, schema)
-        print('✅ Catalog schema validation passed')
-        "
+          # Validate catalog.yaml
+          with open('providers/catalog.yaml', 'r') as f:
+              data = yaml.safe_load(f)
+
+          jsonschema.validate(data, schema)
+          print('✅ Catalog schema validation passed')
+          "
 
   api-conversion-tests:
     name: API Conversion Tests
@@ -517,25 +518,25 @@ jobs:
     timeout-minutes: 15
     if: contains(github.event.head_commit.modified, 'api/') || contains(github.event.head_commit.added, 'api/') || contains(github.event.head_commit.modified, 'config/crd/') || contains(github.event.head_commit.added, 'config/crd/')
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
-    - name: Set up Go
-      uses: actions/setup-go@v5
-      with:
-        go-version: ${{ env.GO_VERSION }}
-        cache: true
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
 
-    - name: Verify single-version CRDs
-      run: |
-        echo "🔍 Verifying single v1beta1 version in CRDs..."
-        ./hack/verify-single-version.sh 
+      - name: Verify single-version CRDs
+        run: |
+          echo "🔍 Verifying single v1beta1 version in CRDs..."
+          ./hack/verify-single-version.sh
 
-    - name: Verify CRD generation
-      run: |
-        echo "🔍 Verifying CRD generation..."
-        make generate && git diff --exit-code
-        git diff --exit-code config/crd/ || (echo "❌ CRDs are out of sync" && exit 1)
+      - name: Verify CRD generation
+        run: |
+          echo "🔍 Verifying CRD generation..."
+          make generate && git diff --exit-code
+          git diff --exit-code config/crd/ || (echo "❌ CRDs are out of sync" && exit 1)
 
   ci:
     name: CI Summary
@@ -543,34 +544,34 @@ jobs:
     needs: [test, lint, security, generate, build, build-tools, helm, conformance, integration, catalog-validation, api-conversion-tests]
     if: always()
     steps:
-    - name: Check CI Results
-      run: |
-        echo "CI Summary:"
-        echo "- Test: ${{ needs.test.result }}"
-        echo "- Lint: ${{ needs.lint.result }}"
-        echo "- Security: ${{ needs.security.result }}"
-        echo "- Generate: ${{ needs.generate.result }}"
-        echo "- Build: ${{ needs.build.result }}"
-        echo "- Build Tools: ${{ needs.build-tools.result }}"
-        echo "- Helm: ${{ needs.helm.result }}"
-        echo "- Conformance: ${{ needs.conformance.result }}"
-        echo "- Integration: ${{ needs.integration.result }}"
-        echo "- Catalog Validation: ${{ needs.catalog-validation.result }}"
-        echo "- API Conversion Tests: ${{ needs.api-conversion-tests.result }}"
-        
-        # Fail if any required job failed
-        if [[ "${{ needs.test.result }}" != "success" ]] || \
-           [[ "${{ needs.lint.result }}" != "success" ]] || \
-           [[ "${{ needs.security.result }}" != "success" ]] || \
-           [[ "${{ needs.generate.result }}" != "success" ]] || \
-           [[ "${{ needs.build.result }}" != "success" ]] || \
-           [[ "${{ needs.build-tools.result }}" != "success" ]] || \
-           [[ "${{ needs.helm.result }}" != "success" ]] || \
-           [[ "${{ needs.conformance.result }}" != "success" ]] || \
-           ([[ "${{ needs.catalog-validation.result }}" != "success" ]] && [[ "${{ needs.catalog-validation.result }}" != "skipped" ]]) || \
-           ([[ "${{ needs.api-conversion-tests.result }}" != "success" ]] && [[ "${{ needs.api-conversion-tests.result }}" != "skipped" ]]); then
-          echo "❌ CI failed"
-          exit 1
-        fi
-        
-        echo "✅ CI passed"
+      - name: Check CI Results
+        run: |
+          echo "CI Summary:"
+          echo "- Test: ${{ needs.test.result }}"
+          echo "- Lint: ${{ needs.lint.result }}"
+          echo "- Security: ${{ needs.security.result }}"
+          echo "- Generate: ${{ needs.generate.result }}"
+          echo "- Build: ${{ needs.build.result }}"
+          echo "- Build Tools: ${{ needs.build-tools.result }}"
+          echo "- Helm: ${{ needs.helm.result }}"
+          echo "- Conformance: ${{ needs.conformance.result }}"
+          echo "- Integration: ${{ needs.integration.result }}"
+          echo "- Catalog Validation: ${{ needs.catalog-validation.result }}"
+          echo "- API Conversion Tests: ${{ needs.api-conversion-tests.result }}"
+
+          # Fail if any required job failed
+          if [[ "${{ needs.test.result }}" != "success" ]] || \
+             [[ "${{ needs.lint.result }}" != "success" ]] || \
+             [[ "${{ needs.security.result }}" != "success" ]] || \
+             [[ "${{ needs.generate.result }}" != "success" ]] || \
+             [[ "${{ needs.build.result }}" != "success" ]] || \
+             [[ "${{ needs.build-tools.result }}" != "success" ]] || \
+             [[ "${{ needs.helm.result }}" != "success" ]] || \
+             [[ "${{ needs.conformance.result }}" != "success" ]] || \
+             ([[ "${{ needs.catalog-validation.result }}" != "success" ]] && [[ "${{ needs.catalog-validation.result }}" != "skipped" ]]) || \
+             ([[ "${{ needs.api-conversion-tests.result }}" != "success" ]] && [[ "${{ needs.api-conversion-tests.result }}" != "skipped" ]]); then
+            echo "❌ CI failed"
+            exit 1
+          fi
+
+          echo "✅ CI passed"

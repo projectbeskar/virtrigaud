@@ -578,7 +578,9 @@ spec:
                         - name
                         type: object
                       templateName:
-                        description: TemplateName references an existing vSphere template
+                        description: |-
+                          TemplateName references an existing vSphere template by name.
+                          This can be a simple name (searched globally) or a full inventory path.
                         maxLength: 255
                         type: string
                     type: object
