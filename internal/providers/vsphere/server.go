@@ -2133,7 +2133,7 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*VMSpec, e
 	// Parse Disks from JSON ([]contracts.DiskSpec structure)
 	if req.DisksJson != "" {
 		var disks []struct {
-			Name string `json:"Name"`
+			Name    string `json:"Name"`
 			SizeGiB int32  `json:"SizeGiB"`
 			Type    string `json:"Type"`
 			SCSI    *struct {
@@ -2698,7 +2698,7 @@ func (p *Provider) attachAdditionalDisk(
 
 	// Find SCSI controllers indexed by bus number
 	scsiControllers := make(map[int32]types.BaseVirtualSCSIController)
-	controllerKeys := make(map[int32]int32) // busNumber -> controllerKey
+	controllerKeys := make(map[int32]int32)           // busNumber -> controllerKey
 	usedUnitNumbers := make(map[int32]map[int32]bool) // controllerKey -> unitNumber -> used
 
 	for _, device := range vmMo.Config.Hardware.Device {

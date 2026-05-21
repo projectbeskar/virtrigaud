@@ -36,15 +36,18 @@ import (
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
-
-	"github.com/projectbeskar/virtrigaud/internal/runtime/remote"
 )
 
-// VirtualMachineReconciler reconciles a VirtualMachine object
+// ProviderResolver resolves Provider resources to provider implementations.
+// Implemented by *remote.Resolver in production; can be mocked in tests.
+type ProviderResolver interface {
+	GetProvider(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) (contracts.Provider, error)
+}
+
 type VirtualMachineReconciler struct {
 	client.Client
 	Scheme         *runtime.Scheme
-	RemoteResolver *remote.Resolver
+	RemoteResolver ProviderResolver
 }
 
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=virtualmachines,verbs=get;list;watch;create;update;patch;delete
@@ -167,6 +170,31 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		vm.Status.LastTaskRef = ""
 	}
 
+	// Check if we have an active reconfigure task
+	if vm.Status.ReconfigureTaskRef != "" {
+		done, err := providerInstance.IsTaskComplete(ctx, vm.Status.ReconfigureTaskRef)
+		if err != nil {
+			logger.Error(err, "Failed to check reconfigure task status")
+			k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Failed to check reconfigure task: %v", err))
+			r.updateStatus(ctx, vm)
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		}
+
+		if !done {
+			logger.Info("Reconfigure task still in progress", "taskRef", vm.Status.ReconfigureTaskRef)
+			k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonTaskInProgress, "Reconfiguration in progress")
+			r.updateStatus(ctx, vm)
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		}
+
+		// Reconfigure task completed, update current resources and clear task ref
+		logger.Info("Reconfigure task completed", "taskRef", vm.Status.ReconfigureTaskRef)
+		r.updateCurrentResources(vm, vmClass)
+		vm.Status.ReconfigureTaskRef = ""
+		vm.Status.Phase = infravirtrigaudiov1beta1.VirtualMachinePhaseRunning
+		k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonReconcileSuccess, "VM reconfigured successfully")
+	}
+
 	// Ensure VM exists
 	if vm.Status.ID == "" {
 		logger.Info("Creating VM")
@@ -203,6 +231,16 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	if desc.PowerState != string(desiredPowerState) {
 		logger.Info("Power state mismatch, adjusting", "current", desc.PowerState, "desired", desiredPowerState)
 		return r.adjustPowerState(ctx, vm, providerInstance, string(desiredPowerState))
+	}
+
+	// Check if VMClass resources have changed and need reconfiguration
+	if r.needsReconfigure(vm, vmClass) {
+		logger.Info("VMClass resources changed, reconfiguring VM",
+			"currentCPU", r.getCurrentCPU(vm),
+			"desiredCPU", vmClass.Spec.CPU,
+			"currentMemoryMiB", r.getCurrentMemoryMiB(vm),
+			"desiredMemoryMiB", vmClass.Spec.Memory.Value()/(1024*1024))
+		return r.reconfigureVM(ctx, vm, providerInstance, vmClass, vmImage, networks)
 	}
 
 	// VM is ready
@@ -323,18 +361,23 @@ func (r *VirtualMachineReconciler) getDependencies(ctx context.Context, vm *infr
 		}
 	}
 
-	// Get VMNetworkAttachments
+	// Get VMNetworkAttachments (only for networks that have networkRef specified)
 	var networks []*infravirtrigaudiov1beta1.VMNetworkAttachment
 	for _, netRef := range vm.Spec.Networks {
-		network := &infravirtrigaudiov1beta1.VMNetworkAttachment{}
-		netKey := types.NamespacedName{
-			Name:      netRef.Name,
-			Namespace: vm.Namespace,
+		if netRef.NetworkRef != nil {
+			network := &infravirtrigaudiov1beta1.VMNetworkAttachment{}
+			netKey := types.NamespacedName{
+				Name:      netRef.NetworkRef.Name,
+				Namespace: vm.Namespace,
+			}
+			if err := r.Get(ctx, netKey, network); err != nil {
+				return nil, nil, nil, nil, fmt.Errorf("failed to get vmnetworkattachment %s: %w", netRef.NetworkRef.Name, err)
+			}
+			networks = append(networks, network)
+		} else {
+			// No networkRef - append nil to maintain index alignment with vm.Spec.Networks
+			networks = append(networks, nil)
 		}
-		if err := r.Get(ctx, netKey, network); err != nil {
-			return nil, nil, nil, nil, fmt.Errorf("failed to get vmnetworkattachment %s: %w", netRef.Name, err)
-		}
-		networks = append(networks, network)
 	}
 
 	return provider, vmClass, vmImage, networks, nil
@@ -383,6 +426,9 @@ func (r *VirtualMachineReconciler) createVM(
 
 	// Update status
 	vm.Status.ID = resp.ID
+	// Initialize current resources to track for future resize detection
+	r.updateCurrentResources(vm, vmClass)
+
 	if resp.TaskRef != "" {
 		vm.Status.LastTaskRef = resp.TaskRef
 		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonCreating, "VM creation initiated")
@@ -641,19 +687,30 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 	}
 
 	// Convert Networks
+	// NetworkRef is now optional - if not specified, use template's pre-configured NIC
+	// but still pass IP/prefix/gateway/DNS for guestinfo configuration
 	var networkAttachments []contracts.NetworkAttachment
 	for i, netRef := range vm.Spec.Networks {
-		if i < len(networks) {
+		attachment := contracts.NetworkAttachment{
+			Name:     netRef.Name,
+			StaticIP: netRef.IPAddress,
+			Prefix:   netRef.Prefix,
+			Gateway:  netRef.Gateway,
+			DNS:      netRef.DNS,
+		}
+
+		// Only look up VMNetworkAttachment if networkRef is specified
+		if netRef.NetworkRef != nil && i < len(networks) && networks[i] != nil {
 			net := networks[i]
-			attachment := contracts.NetworkAttachment{
-				Name:     netRef.Name,
-				StaticIP: netRef.IPAddress,
-			}
 
 			if net.Spec.Network.VSphere != nil {
 				attachment.NetworkName = net.Spec.Network.VSphere.Portgroup
 				if net.Spec.Network.VSphere.VLAN != nil && net.Spec.Network.VSphere.VLAN.VlanID != nil {
 					attachment.VLAN = *net.Spec.Network.VSphere.VLAN.VlanID
+				}
+				// Pass PCI slot number for predictable interface naming (e.g., ens192)
+				if net.Spec.Network.VSphere.PCISlotNumber != nil {
+					attachment.PCISlotNumber = net.Spec.Network.VSphere.PCISlotNumber
 				}
 			}
 
@@ -672,11 +729,13 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 					attachment.VLAN = *net.Spec.Network.Proxmox.VLANTag
 				}
 			}
-
-			// MacAddress is not part of NetworkConfig in v1beta1, skip for now
-
-			networkAttachments = append(networkAttachments, attachment)
+		} else if netRef.NetworkRef == nil {
+			log.V(1).Info("NetworkRef not specified, using template's pre-configured NIC with guestinfo for IP config",
+				"network", netRef.Name,
+				"ip", netRef.IPAddress)
 		}
+
+		networkAttachments = append(networkAttachments, attachment)
 	}
 
 	// Convert Disks
@@ -760,25 +819,135 @@ func (r *VirtualMachineReconciler) updateStatus(ctx context.Context, vm *infravi
 	}
 }
 
-// getRequeueInterval returns an intelligent requeue interval based on VM state
+// needsReconfigure checks if the VM needs to be reconfigured based on VMClass changes
+func (r *VirtualMachineReconciler) needsReconfigure(vm *infravirtrigaudiov1beta1.VirtualMachine, vmClass *infravirtrigaudiov1beta1.VMClass) bool {
+	// Get desired resources from VMClass (with possible overrides from VM spec)
+	desiredCPU := vmClass.Spec.CPU
+	desiredMemoryMiB := vmClass.Spec.Memory.Value() / (1024 * 1024)
+
+	// Check for VM-level resource overrides
+	if vm.Spec.Resources != nil {
+		if vm.Spec.Resources.CPU != nil {
+			desiredCPU = *vm.Spec.Resources.CPU
+		}
+		if vm.Spec.Resources.MemoryMiB != nil {
+			desiredMemoryMiB = *vm.Spec.Resources.MemoryMiB
+		}
+	}
+
+	// Get current resources from status
+	currentCPU := r.getCurrentCPU(vm)
+	currentMemoryMiB := r.getCurrentMemoryMiB(vm)
+
+	// If no current resources tracked, assume first reconcile after creation
+	// and update status without triggering reconfigure
+	if currentCPU == 0 && currentMemoryMiB == 0 {
+		return false
+	}
+
+	// Check if CPU or memory changed
+	return currentCPU != desiredCPU || currentMemoryMiB != desiredMemoryMiB
+}
+
+// getCurrentCPU returns the current CPU count from VM status
+func (r *VirtualMachineReconciler) getCurrentCPU(vm *infravirtrigaudiov1beta1.VirtualMachine) int32 {
+	if vm.Status.CurrentResources != nil && vm.Status.CurrentResources.CPU != nil {
+		return *vm.Status.CurrentResources.CPU
+	}
+	return 0
+}
+
+// getCurrentMemoryMiB returns the current memory in MiB from VM status
+func (r *VirtualMachineReconciler) getCurrentMemoryMiB(vm *infravirtrigaudiov1beta1.VirtualMachine) int64 {
+	if vm.Status.CurrentResources != nil && vm.Status.CurrentResources.MemoryMiB != nil {
+		return *vm.Status.CurrentResources.MemoryMiB
+	}
+	return 0
+}
+
+// reconfigureVM reconfigures the VM with new VMClass resources
+func (r *VirtualMachineReconciler) reconfigureVM(
+	ctx context.Context,
+	vm *infravirtrigaudiov1beta1.VirtualMachine,
+	provider contracts.Provider,
+	vmClass *infravirtrigaudiov1beta1.VMClass,
+	vmImage *infravirtrigaudiov1beta1.VMImage,
+	networks []*infravirtrigaudiov1beta1.VMNetworkAttachment,
+) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	// Build the desired configuration
+	req := r.buildCreateRequest(vm, vmClass, vmImage, networks)
+
+	// Call provider reconfigure
+	taskRef, err := provider.Reconfigure(ctx, vm.Status.ID, req)
+	if err != nil {
+		logger.Error(err, "Failed to reconfigure VM")
+		k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Failed to reconfigure VM: %v", err))
+		r.updateStatus(ctx, vm)
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
+
+	// Update status with reconfiguration info
+	vm.Status.Phase = infravirtrigaudiov1beta1.VirtualMachinePhaseReconfiguring
+	now := metav1.Now()
+	vm.Status.LastReconfigureTime = &now
+
+	if taskRef != "" {
+		vm.Status.ReconfigureTaskRef = taskRef
+		k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonUpdating, "VM reconfiguration in progress")
+	} else {
+		// Reconfigure completed synchronously, update current resources
+		r.updateCurrentResources(vm, vmClass)
+		vm.Status.Phase = infravirtrigaudiov1beta1.VirtualMachinePhaseRunning
+		k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonReconcileSuccess, "VM reconfigured successfully")
+		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonReconcileSuccess, "VM is ready")
+	}
+
+	r.updateStatus(ctx, vm)
+	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+}
+
+// updateCurrentResources updates the VM status with current resource allocation
+func (r *VirtualMachineReconciler) updateCurrentResources(vm *infravirtrigaudiov1beta1.VirtualMachine, vmClass *infravirtrigaudiov1beta1.VMClass) {
+	cpu := vmClass.Spec.CPU
+	memoryMiB := vmClass.Spec.Memory.Value() / (1024 * 1024)
+
+	// Check for VM-level resource overrides
+	if vm.Spec.Resources != nil {
+		if vm.Spec.Resources.CPU != nil {
+			cpu = *vm.Spec.Resources.CPU
+		}
+		if vm.Spec.Resources.MemoryMiB != nil {
+			memoryMiB = *vm.Spec.Resources.MemoryMiB
+		}
+	}
+
+	if vm.Status.CurrentResources == nil {
+		vm.Status.CurrentResources = &infravirtrigaudiov1beta1.VirtualMachineResources{}
+	}
+	vm.Status.CurrentResources.CPU = &cpu
+	vm.Status.CurrentResources.MemoryMiB = &memoryMiB
+}
+
 func (r *VirtualMachineReconciler) getRequeueInterval(vm *infravirtrigaudiov1beta1.VirtualMachine, desc contracts.DescribeResponse) time.Duration {
-	// Fast polling intervals for various states
+	// Polling intervals for various states
 	const (
-		fastPoll   = 5 * time.Second // For transitional states
-		normalPoll = 2 * time.Minute // For stable running VMs
-		slowPoll   = 5 * time.Minute // For stable powered-off VMs
-		errorPoll  = 5 * time.Second // For error conditions
+		fastPoll     = 10 * time.Second // For transitional states
+		waitingForIP = 10 * time.Second // Waiting for IP address (VMware Tools)
+		normalPoll   = 2 * time.Minute  // For stable running VMs
+		slowPoll     = 5 * time.Minute  // For stable powered-off VMs
 	)
 
-	// Check if VM has no IP addresses yet (waiting for DHCP/network)
+	// Check if VM has no IP addresses yet (waiting for DHCP/network or VMware Tools)
 	if desc.PowerState == "poweredOn" && len(desc.IPs) == 0 {
-		return fastPoll // Poll frequently until VM gets IP
+		return waitingForIP // Poll less frequently while waiting for IP
 	}
 
 	// Check VM power state for different polling frequencies
 	switch desc.PowerState {
 	case "poweredOn":
-		// VM is running - normal monitoring frequency
+		// VM is running and has IP - normal monitoring frequency
 		return normalPoll
 	case "poweredOff":
 		// VM is off - slower polling
@@ -799,7 +968,7 @@ func (r *VirtualMachineReconciler) getProviderInstance(ctx context.Context, prov
 		return nil, fmt.Errorf("no remote resolver available")
 	}
 
-	return r.RemoteResolver.GetProvider(ctx, provider)
+	return r.RemoteResolver.GetProvider(ctx, provider) //nolint:wrapcheck
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -807,6 +976,17 @@ func (r *VirtualMachineReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&infravirtrigaudiov1beta1.VirtualMachine{}).
 		WithEventFilter(predicate.Funcs{
+			UpdateFunc: func(e event.UpdateEvent) bool {
+				// Only reconcile if spec changed (ignore status-only updates)
+				// This prevents tight reconcile loops from status updates
+				oldVM, ok1 := e.ObjectOld.(*infravirtrigaudiov1beta1.VirtualMachine)
+				newVM, ok2 := e.ObjectNew.(*infravirtrigaudiov1beta1.VirtualMachine)
+				if ok1 && ok2 {
+					// Reconcile if generation changed (spec changed) or if being deleted
+					return oldVM.Generation != newVM.Generation || !newVM.DeletionTimestamp.IsZero()
+				}
+				return true
+			},
 			DeleteFunc: func(e event.DeleteEvent) bool {
 				// Handle deletion in Reconcile through finalizers
 				return false
