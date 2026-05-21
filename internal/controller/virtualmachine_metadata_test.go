@@ -17,151 +17,190 @@ limitations under the License.
 package controller
 
 import (
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
+	"context"
+	"strings"
+	"testing"
+
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-var _ = Describe("VirtualMachineReconciler buildCreateRequest with MetaData", func() {
-	var (
-		vm         *infravirtrigaudiov1beta1.VirtualMachine
-		vmClass    *infravirtrigaudiov1beta1.VMClass
-		vmImage    *infravirtrigaudiov1beta1.VMImage
-		networks   []*infravirtrigaudiov1beta1.VMNetworkAttachment
-		reconciler *VirtualMachineReconciler
-	)
+// newMetaTestFixtures returns a default VM, VMClass, and VMImage for inline metadata tests.
+// These tests do not require a live k8s cluster — the reconciler has no client.
+func newMetaTestFixtures() (*infravirtrigaudiov1beta1.VirtualMachine, *infravirtrigaudiov1beta1.VMClass, *infravirtrigaudiov1beta1.VMImage) {
+	vm := &infravirtrigaudiov1beta1.VirtualMachine{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-vm", Namespace: "default"},
+		Spec:       infravirtrigaudiov1beta1.VirtualMachineSpec{},
+	}
+	vmClass := &infravirtrigaudiov1beta1.VMClass{
+		ObjectMeta: metav1.ObjectMeta{Name: "small"},
+		Spec:       infravirtrigaudiov1beta1.VMClassSpec{CPU: 2, Memory: resource.MustParse("2Gi")},
+	}
+	vmImage := &infravirtrigaudiov1beta1.VMImage{
+		ObjectMeta: metav1.ObjectMeta{Name: "ubuntu-22.04"},
+		Spec:       infravirtrigaudiov1beta1.VMImageSpec{},
+	}
+	return vm, vmClass, vmImage
+}
 
-	BeforeEach(func() {
-		vm = &infravirtrigaudiov1beta1.VirtualMachine{}
-		vm.Name = "test-vm"
-		vm.Namespace = "default"
-		vm.Spec = infravirtrigaudiov1beta1.VirtualMachineSpec{}
+func TestBuildCreateRequest_Metadata_NilMetaData_NoMetaDataInRequest(t *testing.T) {
+	vm, vmClass, vmImage := newMetaTestFixtures()
+	vm.Spec.MetaData = nil
+	r := &VirtualMachineReconciler{}
 
-		vmClass = &infravirtrigaudiov1beta1.VMClass{}
-		vmClass.Name = "small"
-		vmClass.Spec = infravirtrigaudiov1beta1.VMClassSpec{
-			CPU:    2,
-			Memory: resource.MustParse("2Gi"),
-		}
+	req, err := r.buildCreateRequest(context.Background(), vm, vmClass, vmImage, nil)
 
-		vmImage = &infravirtrigaudiov1beta1.VMImage{}
-		vmImage.Name = "ubuntu-22.04"
-		vmImage.Spec = infravirtrigaudiov1beta1.VMImageSpec{}
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if req.MetaData != nil {
+		t.Error("expected MetaData to be nil when spec.MetaData is nil")
+	}
+}
 
-		networks = nil
+func TestBuildCreateRequest_Metadata_InlineYAML_IncludedInRequest(t *testing.T) {
+	vm, vmClass, vmImage := newMetaTestFixtures()
+	vm.Spec.MetaData = &infravirtrigaudiov1beta1.MetaData{
+		CloudInit: &infravirtrigaudiov1beta1.CloudInitMetaData{
+			Inline: "instance-id: test-vm-001\nlocal-hostname: test-server",
+		},
+	}
+	r := &VirtualMachineReconciler{}
 
-		reconciler = &VirtualMachineReconciler{}
-	})
+	req, err := r.buildCreateRequest(context.Background(), vm, vmClass, vmImage, nil)
 
-	Context("when metaData is nil", func() {
-		It("should not include metaData in the request", func() {
-			vm.Spec.MetaData = nil
-			req := reconciler.buildCreateRequest(vm, vmClass, vmImage, networks)
-			Expect(req.MetaData).To(BeNil())
-		})
-	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if req.MetaData == nil {
+		t.Fatal("expected MetaData to be set")
+	}
+	if !strings.Contains(req.MetaData.MetaDataYAML, "instance-id: test-vm-001") {
+		t.Errorf("expected inline content in MetaData, got: %q", req.MetaData.MetaDataYAML)
+	}
+}
 
-	Context("when metaData is specified with inline YAML", func() {
-		It("should include the inline metaData", func() {
-			vm.Spec.MetaData = &infravirtrigaudiov1beta1.MetaData{
-				CloudInit: &infravirtrigaudiov1beta1.CloudInitMetaData{
-					Inline: "instance-id: test-vm-001\nlocal-hostname: test-server",
-				},
-			}
-			req := reconciler.buildCreateRequest(vm, vmClass, vmImage, networks)
-			Expect(req.MetaData).ToNot(BeNil())
-			Expect(req.MetaData.MetaDataYAML).To(ContainSubstring("instance-id: test-vm-001"))
-		})
-	})
+func TestBuildCreateRequest_Metadata_NetworkConfig_Preserved(t *testing.T) {
+	vm, vmClass, vmImage := newMetaTestFixtures()
+	vm.Spec.MetaData = &infravirtrigaudiov1beta1.MetaData{
+		CloudInit: &infravirtrigaudiov1beta1.CloudInitMetaData{
+			Inline: "instance-id: test-vm-002\nnetwork:\n  version: 2\n  ethernets:\n    eth0:\n      dhcp4: true",
+		},
+	}
+	r := &VirtualMachineReconciler{}
 
-	Context("when metaData contains network configuration", func() {
-		It("should preserve the network config in metaData", func() {
-			vm.Spec.MetaData = &infravirtrigaudiov1beta1.MetaData{
-				CloudInit: &infravirtrigaudiov1beta1.CloudInitMetaData{
-					Inline: `instance-id: test-vm-002
-network:
-  version: 2
-  ethernets:
-    eth0:
-      dhcp4: true`,
-				},
-			}
-			req := reconciler.buildCreateRequest(vm, vmClass, vmImage, networks)
-			Expect(req.MetaData).ToNot(BeNil())
-			Expect(req.MetaData.MetaDataYAML).To(ContainSubstring("network:"))
-			Expect(req.MetaData.MetaDataYAML).To(ContainSubstring("version: 2"))
-		})
-	})
+	req, err := r.buildCreateRequest(context.Background(), vm, vmClass, vmImage, nil)
 
-	Context("when both userData and metaData are specified", func() {
-		It("should include both in the request", func() {
-			vm.Spec.UserData = &infravirtrigaudiov1beta1.UserData{
-				CloudInit: &infravirtrigaudiov1beta1.CloudInit{
-					Inline: "#cloud-config\npackages:\n  - nginx",
-				},
-			}
-			vm.Spec.MetaData = &infravirtrigaudiov1beta1.MetaData{
-				CloudInit: &infravirtrigaudiov1beta1.CloudInitMetaData{
-					Inline: "instance-id: test-vm-003",
-				},
-			}
-			req := reconciler.buildCreateRequest(vm, vmClass, vmImage, networks)
-			Expect(req.UserData).ToNot(BeNil())
-			Expect(req.MetaData).ToNot(BeNil())
-			Expect(req.UserData.CloudInitData).To(ContainSubstring("packages"))
-			Expect(req.MetaData.MetaDataYAML).To(ContainSubstring("instance-id"))
-		})
-	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if req.MetaData == nil {
+		t.Fatal("expected MetaData to be set")
+	}
+	if !strings.Contains(req.MetaData.MetaDataYAML, "network:") {
+		t.Error("expected network config in MetaData")
+	}
+	if !strings.Contains(req.MetaData.MetaDataYAML, "version: 2") {
+		t.Error("expected version: 2 in MetaData")
+	}
+}
 
-	Context("when metaData inline is empty string", func() {
-		It("should not include metaData", func() {
-			vm.Spec.MetaData = &infravirtrigaudiov1beta1.MetaData{
-				CloudInit: &infravirtrigaudiov1beta1.CloudInitMetaData{
-					Inline: "",
-				},
-			}
-			req := reconciler.buildCreateRequest(vm, vmClass, vmImage, networks)
-			Expect(req.MetaData).To(BeNil())
-		})
-	})
+func TestBuildCreateRequest_BothUserDataAndMetaData_BothIncluded(t *testing.T) {
+	vm, vmClass, vmImage := newMetaTestFixtures()
+	vm.Spec.UserData = &infravirtrigaudiov1beta1.UserData{
+		CloudInit: &infravirtrigaudiov1beta1.CloudInit{
+			Inline: "#cloud-config\npackages:\n  - nginx",
+		},
+	}
+	vm.Spec.MetaData = &infravirtrigaudiov1beta1.MetaData{
+		CloudInit: &infravirtrigaudiov1beta1.CloudInitMetaData{
+			Inline: "instance-id: test-vm-003",
+		},
+	}
+	r := &VirtualMachineReconciler{}
 
-	Context("when metaData contains public keys", func() {
-		It("should include the public keys", func() {
-			vm.Spec.MetaData = &infravirtrigaudiov1beta1.MetaData{
-				CloudInit: &infravirtrigaudiov1beta1.CloudInitMetaData{
-					Inline: `instance-id: test-vm-004
-public-keys:
-  - ssh-rsa AAAAB3NzaC1yc2E...`,
-				},
-			}
-			req := reconciler.buildCreateRequest(vm, vmClass, vmImage, networks)
-			Expect(req.MetaData).ToNot(BeNil())
-			Expect(req.MetaData.MetaDataYAML).To(ContainSubstring("public-keys"))
-		})
-	})
+	req, err := r.buildCreateRequest(context.Background(), vm, vmClass, vmImage, nil)
 
-	Context("when metaData has complex nested structure", func() {
-		It("should preserve the structure", func() {
-			vm.Spec.MetaData = &infravirtrigaudiov1beta1.MetaData{
-				CloudInit: &infravirtrigaudiov1beta1.CloudInitMetaData{
-					Inline: `instance-id: test-vm-005
-network:
-  version: 2
-  ethernets:
-    eth0:
-      addresses:
-        - 192.168.1.100/24
-custom:
-  tags:
-    - production
-    - web`,
-				},
-			}
-			req := reconciler.buildCreateRequest(vm, vmClass, vmImage, networks)
-			Expect(req.MetaData).ToNot(BeNil())
-			Expect(req.MetaData.MetaDataYAML).To(ContainSubstring("custom:"))
-			Expect(req.MetaData.MetaDataYAML).To(ContainSubstring("- production"))
-		})
-	})
-})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if req.UserData == nil {
+		t.Error("expected UserData to be set")
+	}
+	if req.MetaData == nil {
+		t.Error("expected MetaData to be set")
+	}
+	if !strings.Contains(req.UserData.CloudInitData, "packages") {
+		t.Errorf("expected packages in UserData, got: %q", req.UserData.CloudInitData)
+	}
+	if !strings.Contains(req.MetaData.MetaDataYAML, "instance-id") {
+		t.Errorf("expected instance-id in MetaData, got: %q", req.MetaData.MetaDataYAML)
+	}
+}
+
+func TestBuildCreateRequest_Metadata_EmptyInline_NoMetaData(t *testing.T) {
+	vm, vmClass, vmImage := newMetaTestFixtures()
+	vm.Spec.MetaData = &infravirtrigaudiov1beta1.MetaData{
+		CloudInit: &infravirtrigaudiov1beta1.CloudInitMetaData{
+			Inline: "",
+		},
+	}
+	r := &VirtualMachineReconciler{}
+
+	req, err := r.buildCreateRequest(context.Background(), vm, vmClass, vmImage, nil)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if req.MetaData != nil {
+		t.Errorf("expected MetaData to be nil when inline is empty, got: %+v", req.MetaData)
+	}
+}
+
+func TestBuildCreateRequest_Metadata_PublicKeys_Included(t *testing.T) {
+	vm, vmClass, vmImage := newMetaTestFixtures()
+	vm.Spec.MetaData = &infravirtrigaudiov1beta1.MetaData{
+		CloudInit: &infravirtrigaudiov1beta1.CloudInitMetaData{
+			Inline: "instance-id: test-vm-004\npublic-keys:\n  - ssh-rsa AAAAB3NzaC1yc2E...",
+		},
+	}
+	r := &VirtualMachineReconciler{}
+
+	req, err := r.buildCreateRequest(context.Background(), vm, vmClass, vmImage, nil)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if req.MetaData == nil {
+		t.Fatal("expected MetaData to be set")
+	}
+	if !strings.Contains(req.MetaData.MetaDataYAML, "public-keys") {
+		t.Errorf("expected public-keys in MetaData, got: %q", req.MetaData.MetaDataYAML)
+	}
+}
+
+func TestBuildCreateRequest_Metadata_ComplexNestedStructure_Preserved(t *testing.T) {
+	vm, vmClass, vmImage := newMetaTestFixtures()
+	vm.Spec.MetaData = &infravirtrigaudiov1beta1.MetaData{
+		CloudInit: &infravirtrigaudiov1beta1.CloudInitMetaData{
+			Inline: "instance-id: test-vm-005\ncustom:\n  tags:\n    - production\n    - web",
+		},
+	}
+	r := &VirtualMachineReconciler{}
+
+	req, err := r.buildCreateRequest(context.Background(), vm, vmClass, vmImage, nil)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if req.MetaData == nil {
+		t.Fatal("expected MetaData to be set")
+	}
+	if !strings.Contains(req.MetaData.MetaDataYAML, "custom:") {
+		t.Error("expected custom: in MetaData")
+	}
+	if !strings.Contains(req.MetaData.MetaDataYAML, "- production") {
+		t.Error("expected - production in MetaData")
+	}
+}

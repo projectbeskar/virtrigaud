@@ -141,7 +141,10 @@ func TestBuildCreateRequest_NoNetworks(t *testing.T) {
 		Spec: infravirtrigaudiov1beta1.VMClassSpec{CPU: 4, Memory: resource.MustParse("8Gi")},
 	}
 
-	req := r.buildCreateRequest(vm, vmClass, nil, nil)
+	req, err := r.buildCreateRequest(context.Background(), vm, vmClass, nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	if len(req.Networks) != 0 {
 		t.Errorf("expected 0 networks, got %d", len(req.Networks))
@@ -167,7 +170,10 @@ func TestBuildCreateRequest_NilNetworkRef_ElseBranch(t *testing.T) {
 		Spec: infravirtrigaudiov1beta1.VMClassSpec{CPU: 2, Memory: resource.MustParse("4Gi")},
 	}
 
-	req := r.buildCreateRequest(vm, vmClass, nil, networks)
+	req, err := r.buildCreateRequest(context.Background(), vm, vmClass, nil, networks)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	if len(req.Networks) != 1 {
 		t.Fatalf("expected 1 network attachment, got %d", len(req.Networks))
@@ -212,7 +218,10 @@ func TestBuildCreateRequest_VSphereNetwork_NilPCISlot(t *testing.T) {
 		Spec: infravirtrigaudiov1beta1.VMClassSpec{CPU: 2, Memory: resource.MustParse("4Gi")},
 	}
 
-	req := r.buildCreateRequest(vm, vmClass, nil, networks)
+	req, err := r.buildCreateRequest(context.Background(), vm, vmClass, nil, networks)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	if len(req.Networks) != 1 {
 		t.Fatalf("expected 1 network, got %d", len(req.Networks))
@@ -249,7 +258,10 @@ func TestBuildCreateRequest_VSphereNetwork_WithPCISlot(t *testing.T) {
 		Spec: infravirtrigaudiov1beta1.VMClassSpec{CPU: 2, Memory: resource.MustParse("4Gi")},
 	}
 
-	req := r.buildCreateRequest(vm, vmClass, nil, networks)
+	req, err := r.buildCreateRequest(context.Background(), vm, vmClass, nil, networks)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	if len(req.Networks) != 1 {
 		t.Fatalf("expected 1 network, got %d", len(req.Networks))
@@ -279,7 +291,10 @@ func TestBuildCreateRequest_NetworkRefWithNilNetworksEntry(t *testing.T) {
 		Spec: infravirtrigaudiov1beta1.VMClassSpec{CPU: 2, Memory: resource.MustParse("4Gi")},
 	}
 
-	req := r.buildCreateRequest(vm, vmClass, nil, networks)
+	req, err := r.buildCreateRequest(context.Background(), vm, vmClass, nil, networks)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	if len(req.Networks) != 1 {
 		t.Fatalf("expected 1 network, got %d", len(req.Networks))
@@ -312,7 +327,10 @@ func TestBuildCreateRequest_VMImageVSphere(t *testing.T) {
 		},
 	}
 
-	req := r.buildCreateRequest(vm, vmClass, vmImage, nil)
+	req, err := r.buildCreateRequest(context.Background(), vm, vmClass, vmImage, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	if req.Image.TemplateName != "rhel9-template" {
 		t.Errorf("expected TemplateName 'rhel9-template', got '%s'", req.Image.TemplateName)

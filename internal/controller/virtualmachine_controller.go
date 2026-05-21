@@ -413,7 +413,13 @@ func (r *VirtualMachineReconciler) createVM(
 	}
 
 	// Build create request
-	req := r.buildCreateRequest(vm, vmClass, vmImage, networks)
+	req, err := r.buildCreateRequest(ctx, vm, vmClass, vmImage, networks)
+	if err != nil {
+		logger.Error(err, "Failed to build create request")
+		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Failed to build create request: %v", err))
+		r.updateStatus(ctx, vm)
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
 
 	// Create VM
 	resp, err := provider.Create(ctx, req)
@@ -479,13 +485,15 @@ func (r *VirtualMachineReconciler) adjustPowerState(
 	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 }
 
-// buildCreateRequest builds a provider create request from VM spec
+// buildCreateRequest builds a provider create request from VM spec.
+// It resolves cloud-init user data and metadata from both inline content and Secret references.
 func (r *VirtualMachineReconciler) buildCreateRequest(
+	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
 	vmClass *infravirtrigaudiov1beta1.VMClass,
 	vmImage *infravirtrigaudiov1beta1.VMImage,
 	networks []*infravirtrigaudiov1beta1.VMNetworkAttachment,
-) contracts.CreateRequest {
+) (contracts.CreateRequest, error) {
 	log := ctrl.Log.WithName("buildCreateRequest")
 
 	// Check if using imported disk or template
@@ -757,27 +765,33 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 		log.V(1).Info("No additional disks configured", "vm", vm.Name)
 	}
 
-	// Convert UserData
+	// Convert UserData — resolve inline and/or SecretRef, merging if both present
 	var userData *contracts.UserData
 	if vm.Spec.UserData != nil && vm.Spec.UserData.CloudInit != nil {
-		userData = &contracts.UserData{
-			Type: "cloud-init",
+		cloudInitData, err := r.resolveCloudInitUserData(ctx, vm.Namespace, vm.Spec.UserData.CloudInit)
+		if err != nil {
+			return contracts.CreateRequest{}, fmt.Errorf("resolving cloud-init user data: %w", err)
 		}
-		if vm.Spec.UserData.CloudInit.Inline != "" {
-			userData.CloudInitData = vm.Spec.UserData.CloudInit.Inline
-		}
-		// TODO: Handle SecretRef
-	}
-
-	// Convert MetaData
-	var metaData *contracts.MetaData
-	if vm.Spec.MetaData != nil && vm.Spec.MetaData.CloudInit != nil {
-		if vm.Spec.MetaData.CloudInit.Inline != "" {
-			metaData = &contracts.MetaData{
-				MetaDataYAML: vm.Spec.MetaData.CloudInit.Inline,
+		if cloudInitData != "" {
+			userData = &contracts.UserData{
+				Type:          "cloud-init",
+				CloudInitData: cloudInitData,
 			}
 		}
-		// TODO: Handle SecretRef
+	}
+
+	// Convert MetaData — resolve inline and/or SecretRef, merging if both present
+	var metaData *contracts.MetaData
+	if vm.Spec.MetaData != nil && vm.Spec.MetaData.CloudInit != nil {
+		metaDataStr, err := r.resolveCloudInitMetaData(ctx, vm.Namespace, vm.Spec.MetaData.CloudInit)
+		if err != nil {
+			return contracts.CreateRequest{}, fmt.Errorf("resolving cloud-init metadata: %w", err)
+		}
+		if metaDataStr != "" {
+			metaData = &contracts.MetaData{
+				MetaDataYAML: metaDataStr,
+			}
+		}
 	}
 
 	// Convert Placement
@@ -809,7 +823,7 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 		MetaData:  metaData,
 		Placement: placement,
 		Tags:      vm.Spec.Tags,
-	}
+	}, nil
 }
 
 // updateStatus updates the VM status
@@ -877,7 +891,11 @@ func (r *VirtualMachineReconciler) reconfigureVM(
 	logger := log.FromContext(ctx)
 
 	// Build the desired configuration
-	req := r.buildCreateRequest(vm, vmClass, vmImage, networks)
+	req, err := r.buildCreateRequest(ctx, vm, vmClass, vmImage, networks)
+	if err != nil {
+		logger.Error(err, "Failed to build create request")
+		return ctrl.Result{}, err
+	}
 
 	// Call provider reconfigure
 	taskRef, err := provider.Reconfigure(ctx, vm.Status.ID, req)
