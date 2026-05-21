@@ -242,8 +242,12 @@ func (r *Redactor) Redact(input string) string {
 			// Replace capture groups with [REDACTED]
 			result = pattern.ReplaceAllStringFunc(result, func(match string) string {
 				submatches := pattern.FindStringSubmatch(match)
+				if len(submatches) > 2 {
+					// Key=value patterns: group 1 is the key name, group 2 is the secret value
+					return strings.Replace(match, submatches[2], "[REDACTED]", 1)
+				}
 				if len(submatches) > 1 {
-					// Replace the sensitive part (first capture group) with [REDACTED]
+					// Single capture group (e.g. URL password): redact that segment
 					return strings.Replace(match, submatches[1], "[REDACTED]", 1)
 				}
 				return match
