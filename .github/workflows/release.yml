@@ -1,6 +1,7 @@
+---
 name: Release
 
-on:
+"on":
   push:
     tags:
       - 'v*'
@@ -33,17 +34,17 @@ jobs:
       tag: ${{ steps.get-tag.outputs.tag }}
       version: ${{ steps.get-tag.outputs.version }}
     steps:
-    - name: Get tag
-      id: get-tag
-      run: |
-        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-          TAG="${{ github.event.inputs.tag }}"
-        else
-          TAG="${{ github.ref_name }}"
-        fi
-        VERSION=${TAG#v}
-        echo "tag=${TAG}" >> $GITHUB_OUTPUT
-        echo "version=${VERSION}" >> $GITHUB_OUTPUT
+      - name: Get tag
+        id: get-tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${{ github.ref_name }}"
+          fi
+          VERSION=${TAG#v}
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
 
   build-and-push:
     name: Build and Push Images
@@ -54,82 +55,82 @@ jobs:
       matrix:
         component: [manager, provider-libvirt, provider-vsphere, provider-proxmox, kubectl]
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
-    - name: Set up QEMU
-      uses: docker/setup-qemu-action@v3
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130  # v3
 
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-      with:
-        driver-opts: |
-          network=host
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+        with:
+          driver-opts: |
+            network=host
 
-    - name: Wait and retry Docker login
-      run: |
-        echo "Attempting Docker login with retry logic..."
-        for i in {1..3}; do
-          echo "Login attempt $i/3"
-          if docker login ${{ env.REGISTRY }} -u ${{ github.actor }} -p ${{ secrets.GITHUB_TOKEN }}; then
-            echo "Login successful on attempt $i"
-            break
-          else
-            echo "Login attempt $i failed"
-            if [ $i -eq 3 ]; then
-              echo "All login attempts failed"
-              exit 1
+      - name: Wait and retry Docker login
+        run: |
+          echo "Attempting Docker login with retry logic..."
+          for i in {1..3}; do
+            echo "Login attempt $i/3"
+            if docker login ${{ env.REGISTRY }} -u ${{ github.actor }} -p ${{ secrets.GITHUB_TOKEN }}; then
+              echo "Login successful on attempt $i"
+              break
+            else
+              echo "Login attempt $i failed"
+              if [ $i -eq 3 ]; then
+                echo "All login attempts failed"
+                exit 1
+              fi
+              echo "Waiting 30 seconds before retry..."
+              sleep 30
             fi
-            echo "Waiting 30 seconds before retry..."
-            sleep 30
+          done
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051  # v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/${{ matrix.component }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=ref,event=tag
+
+      - name: Determine Dockerfile path
+        id: dockerfile
+        run: |
+          if [ "${{ matrix.component }}" = "manager" ]; then
+            echo "path=./build/Dockerfile.manager" >> $GITHUB_OUTPUT
+          elif [ "${{ matrix.component }}" = "kubectl" ]; then
+            echo "path=./build/Dockerfile.kubectl" >> $GITHUB_OUTPUT
+          else
+            echo "path=./cmd/${{ matrix.component }}/Dockerfile" >> $GITHUB_OUTPUT
           fi
-        done
 
-    - name: Extract metadata
-      id: meta
-      uses: docker/metadata-action@v5
-      with:
-        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/${{ matrix.component }}
-        tags: |
-          type=semver,pattern={{version}}
-          type=semver,pattern={{major}}.{{minor}}
-          type=semver,pattern={{major}}
-          type=ref,event=tag
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+        timeout-minutes: 20
+        with:
+          context: .
+          file: ${{ steps.dockerfile.outputs.path }}
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Disable GitHub Actions cache due to reliability issues
+          # cache-from: type=gha
+          # cache-to: type=gha,mode=max
+          provenance: mode=max
+          sbom: true
 
-    - name: Determine Dockerfile path
-      id: dockerfile
-      run: |
-        if [ "${{ matrix.component }}" = "manager" ]; then
-          echo "path=./build/Dockerfile.manager" >> $GITHUB_OUTPUT
-        elif [ "${{ matrix.component }}" = "kubectl" ]; then
-          echo "path=./build/Dockerfile.kubectl" >> $GITHUB_OUTPUT
-        else
-          echo "path=./cmd/${{ matrix.component }}/Dockerfile" >> $GITHUB_OUTPUT
-        fi
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac  # v3
 
-    - name: Build and push
-      id: build
-      uses: docker/build-push-action@v6
-      timeout-minutes: 20
-      with:
-        context: .
-        file: ${{ steps.dockerfile.outputs.path }}
-        platforms: linux/amd64
-        push: true
-        tags: ${{ steps.meta.outputs.tags }}
-        labels: ${{ steps.meta.outputs.labels }}
-        # Disable GitHub Actions cache due to reliability issues
-        # cache-from: type=gha
-        # cache-to: type=gha,mode=max
-        provenance: mode=max
-        sbom: true
-
-    - name: Install Cosign
-      uses: sigstore/cosign-installer@v3
-
-    - name: Sign image
-      run: |
-        cosign sign --yes ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/${{ matrix.component }}@${{ steps.build.outputs.digest }}
+      - name: Sign image
+        run: |
+          cosign sign --yes ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/${{ matrix.component }}@${{ steps.build.outputs.digest }}
 
   security-scan:
     name: Security Scan Images
@@ -140,62 +141,62 @@ jobs:
       matrix:
         component: [manager, provider-libvirt, provider-vsphere, provider-proxmox, kubectl]
     steps:
-    - name: Retry Docker login for security scan
-      run: |
-        echo "Attempting Docker login for security scan..."
-        for i in {1..3}; do
-          echo "Login attempt $i/3"
-          if docker login ${{ env.REGISTRY }} -u ${{ github.actor }} -p ${{ secrets.GITHUB_TOKEN }}; then
-            echo "Login successful on attempt $i"
-            break
-          else
-            echo "Login attempt $i failed"
-            if [ $i -eq 3 ]; then
-              echo "All login attempts failed"
-              exit 1
+      - name: Retry Docker login for security scan
+        run: |
+          echo "Attempting Docker login for security scan..."
+          for i in {1..3}; do
+            echo "Login attempt $i/3"
+            if docker login ${{ env.REGISTRY }} -u ${{ github.actor }} -p ${{ secrets.GITHUB_TOKEN }}; then
+              echo "Login successful on attempt $i"
+              break
+            else
+              echo "Login attempt $i failed"
+              if [ $i -eq 3 ]; then
+                echo "All login attempts failed"
+                exit 1
+              fi
+              echo "Waiting 30 seconds before retry..."
+              sleep 30
             fi
-            echo "Waiting 30 seconds before retry..."
-            sleep 30
-          fi
-        done
+          done
 
-    - name: Wait for image propagation
-      run: |
-        echo "Waiting for image to be available in registry..."
-        sleep 30
-        
-        # Verify image exists before scanning
-        for i in {1..5}; do
-          if docker manifest inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/${{ matrix.component }}:${{ needs.prepare.outputs.tag }} > /dev/null 2>&1; then
-            echo "Image is available"
-            break
-          fi
-          echo "Attempt $i: Image not yet available, waiting..."
+      - name: Wait for image propagation
+        run: |
+          echo "Waiting for image to be available in registry..."
           sleep 30
-        done
 
-    - name: Run Trivy vulnerability scanner
-      uses: aquasecurity/trivy-action@0.35.0
-      with:
-        image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/${{ matrix.component }}:${{ needs.prepare.outputs.tag }}
-        format: 'sarif'
-        output: 'trivy-results-${{ matrix.component }}.sarif'
+          # Verify image exists before scanning
+          for i in {1..5}; do
+            if docker manifest inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/${{ matrix.component }}:${{ needs.prepare.outputs.tag }} > /dev/null 2>&1; then
+              echo "Image is available"
+              break
+            fi
+            echo "Attempt $i: Image not yet available, waiting..."
+            sleep 30
+          done
 
-    - name: Upload Trivy scan results
-      uses: github/codeql-action/upload-sarif@v4
-      with:
-        sarif_file: 'trivy-results-${{ matrix.component }}.sarif'
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1  # 0.35.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/${{ matrix.component }}:${{ needs.prepare.outputs.tag }}
+          format: 'sarif'
+          output: 'trivy-results-${{ matrix.component }}.sarif'
 
-    - name: Run Trivy for high/critical vulnerabilities
-      uses: aquasecurity/trivy-action@0.35.0
-      with:
-        image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/${{ matrix.component }}:${{ needs.prepare.outputs.tag }}
-        format: 'table'
-        # kubectl image uses official K8s binary - don't fail on its vulnerabilities
-        exit-code: ${{ matrix.component == 'kubectl' && '0' || '1' }}
-        ignore-unfixed: true
-        vuln-type: 'os,library'
-        severity: 'CRITICAL,HIGH'
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@9e0d7b8d25671d64c341c19c0152d693099fb5ba  # v4
+        with:
+          sarif_file: 'trivy-results-${{ matrix.component }}.sarif'
+
+      - name: Run Trivy for high/critical vulnerabilities
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1  # 0.35.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/${{ matrix.component }}:${{ needs.prepare.outputs.tag }}
+          format: 'table'
+          # kubectl image uses official K8s binary - don't fail on its vulnerabilities
+          exit-code: ${{ matrix.component == 'kubectl' && '0' || '1' }}
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
 
   generate-sbom:
     name: Generate SBOMs
@@ -206,106 +207,106 @@ jobs:
       matrix:
         component: [manager, provider-libvirt, provider-vsphere, provider-proxmox, kubectl]
     steps:
-    - name: Retry Docker login for SBOM generation
-      run: |
-        echo "Attempting Docker login for SBOM generation..."
-        for i in {1..3}; do
-          echo "Login attempt $i/3"
-          if docker login ${{ env.REGISTRY }} -u ${{ github.actor }} -p ${{ secrets.GITHUB_TOKEN }}; then
-            echo "Login successful on attempt $i"
-            break
-          else
-            echo "Login attempt $i failed"
-            if [ $i -eq 3 ]; then
-              echo "All login attempts failed"
-              exit 1
+      - name: Retry Docker login for SBOM generation
+        run: |
+          echo "Attempting Docker login for SBOM generation..."
+          for i in {1..3}; do
+            echo "Login attempt $i/3"
+            if docker login ${{ env.REGISTRY }} -u ${{ github.actor }} -p ${{ secrets.GITHUB_TOKEN }}; then
+              echo "Login successful on attempt $i"
+              break
+            else
+              echo "Login attempt $i failed"
+              if [ $i -eq 3 ]; then
+                echo "All login attempts failed"
+                exit 1
+              fi
+              echo "Waiting 30 seconds before retry..."
+              sleep 30
             fi
-            echo "Waiting 30 seconds before retry..."
-            sleep 30
-          fi
-        done
+          done
 
-    - name: Wait for image propagation
-      run: |
-        echo "Waiting for image to be available in registry..."
-        sleep 30
-        
-        # Verify image exists before generating SBOM
-        for i in {1..5}; do
-          if docker manifest inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/${{ matrix.component }}:${{ needs.prepare.outputs.tag }} > /dev/null 2>&1; then
-            echo "Image is available"
-            break
-          fi
-          echo "Attempt $i: Image not yet available, waiting..."
+      - name: Wait for image propagation
+        run: |
+          echo "Waiting for image to be available in registry..."
           sleep 30
-        done
 
-    - name: Generate SBOM
-      uses: anchore/sbom-action@v0
-      with:
-        image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/${{ matrix.component }}:${{ needs.prepare.outputs.tag }}
-        format: spdx-json
-        output-file: sbom-${{ matrix.component }}.spdx.json
+          # Verify image exists before generating SBOM
+          for i in {1..5}; do
+            if docker manifest inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/${{ matrix.component }}:${{ needs.prepare.outputs.tag }} > /dev/null 2>&1; then
+              echo "Image is available"
+              break
+            fi
+            echo "Attempt $i: Image not yet available, waiting..."
+            sleep 30
+          done
 
-    - name: Upload SBOM
-      uses: actions/upload-artifact@v4
-      with:
-        name: sbom-${{ matrix.component }}
-        path: sbom-${{ matrix.component }}.spdx.json
+      - name: Generate SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610  # v0
+        with:
+          image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/${{ matrix.component }}:${{ needs.prepare.outputs.tag }}
+          format: spdx-json
+          output-file: sbom-${{ matrix.component }}.spdx.json
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: sbom-${{ matrix.component }}
+          path: sbom-${{ matrix.component }}.spdx.json
 
   build-helm-chart:
     name: Build and Package Helm Chart
     runs-on: ubuntu-latest
     needs: prepare
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
-    - name: Install Helm
-      uses: azure/setup-helm@v4
-      with:
-        version: '3.12.0'
+      - name: Install Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4  # v4
+        with:
+          version: '3.12.0'
 
-    - name: Update chart version
-      run: |
-        sed -i "s/version: .*/version: ${{ needs.prepare.outputs.version }}/" charts/virtrigaud/Chart.yaml
-        sed -i "s/appVersion: .*/appVersion: \"${{ needs.prepare.outputs.tag }}\"/" charts/virtrigaud/Chart.yaml
-        
-        # Update VirtRigaud component image tags in values.yaml (but not kubectl image)
-        # Update manager image tag (use line range to be precise)
-        MANAGER_START=$(grep -n "^manager:" charts/virtrigaud/values.yaml | cut -d: -f1)
-        MANAGER_END=$((MANAGER_START + 10))
-        sed -i "${MANAGER_START},${MANAGER_END} s/    tag: \".*\"/    tag: \"${{ needs.prepare.outputs.tag }}\"/" charts/virtrigaud/values.yaml
-        # Update provider image tags (use line ranges to be precise)
-        LIBVIRT_START=$(grep -n "^  libvirt:" charts/virtrigaud/values.yaml | cut -d: -f1)
-        LIBVIRT_END=$((LIBVIRT_START + 15))
-        sed -i "${LIBVIRT_START},${LIBVIRT_END} s/      tag: \".*\"/      tag: \"${{ needs.prepare.outputs.tag }}\"/" charts/virtrigaud/values.yaml
-        VSPHERE_START=$(grep -n "^  vsphere:" charts/virtrigaud/values.yaml | cut -d: -f1)
-        VSPHERE_END=$((VSPHERE_START + 15))
-        sed -i "${VSPHERE_START},${VSPHERE_END} s/      tag: \".*\"/      tag: \"${{ needs.prepare.outputs.tag }}\"/" charts/virtrigaud/values.yaml
-        PROXMOX_START=$(grep -n "^  proxmox:" charts/virtrigaud/values.yaml | cut -d: -f1)
-        PROXMOX_END=$((PROXMOX_START + 15))
-        sed -i "${PROXMOX_START},${PROXMOX_END} s/      tag: \".*\"/      tag: \"${{ needs.prepare.outputs.tag }}\"/" charts/virtrigaud/values.yaml
-        # Update crdUpgrade kubectl image to point to our built image (using line numbers to be precise)
-        CRDUPGRADE_START=$(grep -n "^crdUpgrade:" charts/virtrigaud/values.yaml | cut -d: -f1)
-        CRDUPGRADE_END=$((CRDUPGRADE_START + 20))
-        sed -i "${CRDUPGRADE_START},${CRDUPGRADE_END} { s|repository: ghcr.io/projectbeskar/virtrigaud/kubectl|repository: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/kubectl|; s/tag: \"v.*\"/tag: \"${{ needs.prepare.outputs.tag }}\"/; }" charts/virtrigaud/values.yaml
+      - name: Update chart version
+        run: |
+          sed -i "s/version: .*/version: ${{ needs.prepare.outputs.version }}/" charts/virtrigaud/Chart.yaml
+          sed -i "s/appVersion: .*/appVersion: \"${{ needs.prepare.outputs.tag }}\"/" charts/virtrigaud/Chart.yaml
 
-    - name: Generate CRDs for Helm chart
-      run: |
-        # Generate CRDs directly into Helm chart directory
-        make gen-helm-crds
+          # Update VirtRigaud component image tags in values.yaml (but not kubectl image)
+          # Update manager image tag (use line range to be precise)
+          MANAGER_START=$(grep -n "^manager:" charts/virtrigaud/values.yaml | cut -d: -f1)
+          MANAGER_END=$((MANAGER_START + 10))
+          sed -i "${MANAGER_START},${MANAGER_END} s/    tag: \".*\"/    tag: \"${{ needs.prepare.outputs.tag }}\"/" charts/virtrigaud/values.yaml
+          # Update provider image tags (use line ranges to be precise)
+          LIBVIRT_START=$(grep -n "^  libvirt:" charts/virtrigaud/values.yaml | cut -d: -f1)
+          LIBVIRT_END=$((LIBVIRT_START + 15))
+          sed -i "${LIBVIRT_START},${LIBVIRT_END} s/      tag: \".*\"/      tag: \"${{ needs.prepare.outputs.tag }}\"/" charts/virtrigaud/values.yaml
+          VSPHERE_START=$(grep -n "^  vsphere:" charts/virtrigaud/values.yaml | cut -d: -f1)
+          VSPHERE_END=$((VSPHERE_START + 15))
+          sed -i "${VSPHERE_START},${VSPHERE_END} s/      tag: \".*\"/      tag: \"${{ needs.prepare.outputs.tag }}\"/" charts/virtrigaud/values.yaml
+          PROXMOX_START=$(grep -n "^  proxmox:" charts/virtrigaud/values.yaml | cut -d: -f1)
+          PROXMOX_END=$((PROXMOX_START + 15))
+          sed -i "${PROXMOX_START},${PROXMOX_END} s/      tag: \".*\"/      tag: \"${{ needs.prepare.outputs.tag }}\"/" charts/virtrigaud/values.yaml
+          # Update crdUpgrade kubectl image to point to our built image (using line numbers to be precise)
+          CRDUPGRADE_START=$(grep -n "^crdUpgrade:" charts/virtrigaud/values.yaml | cut -d: -f1)
+          CRDUPGRADE_END=$((CRDUPGRADE_START + 20))
+          sed -i "${CRDUPGRADE_START},${CRDUPGRADE_END} { s|repository: ghcr.io/projectbeskar/virtrigaud/kubectl|repository: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/kubectl|; s/tag: \"v.*\"/tag: \"${{ needs.prepare.outputs.tag }}\"/; }" charts/virtrigaud/values.yaml
 
-    - name: Package chart
-      run: |
-        mkdir -p helm-packages
-        helm package charts/virtrigaud --destination ./helm-packages/
+      - name: Generate CRDs for Helm chart
+        run: |
+          # Generate CRDs directly into Helm chart directory
+          make gen-helm-crds
 
-    - name: Upload chart
-      uses: actions/upload-artifact@v4
-      with:
-        name: helm-chart
-        path: helm-packages/*.tgz
+      - name: Package chart
+        run: |
+          mkdir -p helm-packages
+          helm package charts/virtrigaud --destination ./helm-packages/
+
+      - name: Upload chart
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: helm-chart
+          path: helm-packages/*.tgz
 
   build-cli-tools:
     name: Build CLI Tools
@@ -320,173 +321,173 @@ jobs:
           - os: windows
             arch: arm64
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
-    - name: Set up Go
-      uses: actions/setup-go@v5
-      with:
-        go-version-file: go.mod
-        cache: true
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5
+        with:
+          go-version-file: go.mod
+          cache: true
 
-    - name: Build CLI tools
-      run: |
-        mkdir -p dist
-        
-        # Set extension for Windows
-        EXT=""
-        if [ "${{ matrix.os }}" = "windows" ]; then
-          EXT=".exe"
-        fi
-        
-        # Build each tool
-        for tool in vrtg vcts virtrigaud-loadgen vrtg-provider; do
-          GOOS=${{ matrix.os }} GOARCH=${{ matrix.arch }} go build \
-            -ldflags="-s -w -X 'main.version=${{ needs.prepare.outputs.tag }}'" \
-            -o dist/${tool}-${{ matrix.os }}-${{ matrix.arch }}${EXT} \
-            ./cmd/${tool}
-        done
+      - name: Build CLI tools
+        run: |
+          mkdir -p dist
 
-    - name: Upload CLI tools
-      uses: actions/upload-artifact@v4
-      with:
-        name: cli-tools-${{ matrix.os }}-${{ matrix.arch }}
-        path: dist/*
+          # Set extension for Windows
+          EXT=""
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            EXT=".exe"
+          fi
+
+          # Build each tool
+          for tool in vrtg vcts virtrigaud-loadgen vrtg-provider; do
+            GOOS=${{ matrix.os }} GOARCH=${{ matrix.arch }} go build \
+              -ldflags="-s -w -X 'main.version=${{ needs.prepare.outputs.tag }}'" \
+              -o dist/${tool}-${{ matrix.os }}-${{ matrix.arch }}${EXT} \
+              ./cmd/${tool}
+          done
+
+      - name: Upload CLI tools
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: cli-tools-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/*
 
   generate-changelog:
     name: Generate Changelog
     runs-on: ubuntu-latest
     needs: prepare
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          fetch-depth: 0
 
-    - name: Generate changelog
-      id: changelog
-      run: |
-        # Get the previous tag
-        PREV_TAG=$(git tag --sort=version:refname | grep -B1 ${{ needs.prepare.outputs.tag }} | head -1)
-        if [ -z "$PREV_TAG" ] || [ "$PREV_TAG" = "${{ needs.prepare.outputs.tag }}" ]; then
-          PREV_TAG=$(git rev-list --max-parents=0 HEAD)
-        fi
-        
-        # Generate changelog
-        cat > CHANGELOG.md << EOF
-        # Changelog for ${{ needs.prepare.outputs.tag }}
-        
-        ## What's Changed
-        
-        $(git log --pretty=format:"- %s (%h)" ${PREV_TAG}..${{ needs.prepare.outputs.tag }} | head -20)
-        
-        ## Container Images
-        
-        - Manager: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/manager:${{ needs.prepare.outputs.tag }}\`
-        - Provider Libvirt: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/provider-libvirt:${{ needs.prepare.outputs.tag }}\`
-        - Provider vSphere: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/provider-vsphere:${{ needs.prepare.outputs.tag }}\`
-        - Provider Proxmox: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/provider-proxmox:${{ needs.prepare.outputs.tag }}\`
-        - Kubectl: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/kubectl:${{ needs.prepare.outputs.tag }}\`
-        
-        ## Installation
-        
-        \`\`\`bash
-        # Note: Helm OCI requires authentication even for public repos
-        # In CI/CD, we use GITHUB_TOKEN for authentication
-        helm repo add virtrigaud https://projectbeskar.github.io/virtrigaud
-        helm install virtrigaud virtrigaud/virtrigaud --version ${{ needs.prepare.outputs.version }}
-        \`\`\`
-        
-        ## Security
-        
-        All images are signed with Cosign and include Software Bill of Materials (SBOMs).
-        
-        **Full Changelog**: https://github.com/projectbeskar/virtrigaud/compare/${PREV_TAG}...${{ needs.prepare.outputs.tag }}
-        EOF
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # Get the previous tag
+          PREV_TAG=$(git tag --sort=version:refname | grep -B1 ${{ needs.prepare.outputs.tag }} | head -1)
+          if [ -z "$PREV_TAG" ] || [ "$PREV_TAG" = "${{ needs.prepare.outputs.tag }}" ]; then
+            PREV_TAG=$(git rev-list --max-parents=0 HEAD)
+          fi
 
-    - name: Upload changelog
-      uses: actions/upload-artifact@v4
-      with:
-        name: changelog
-        path: CHANGELOG.md
+          # Generate changelog
+          cat > CHANGELOG.md << EOF
+          # Changelog for ${{ needs.prepare.outputs.tag }}
+
+          ## What's Changed
+
+          $(git log --pretty=format:"- %s (%h)" ${PREV_TAG}..${{ needs.prepare.outputs.tag }} | head -20)
+
+          ## Container Images
+
+          - Manager: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/manager:${{ needs.prepare.outputs.tag }}\`
+          - Provider Libvirt: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/provider-libvirt:${{ needs.prepare.outputs.tag }}\`
+          - Provider vSphere: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/provider-vsphere:${{ needs.prepare.outputs.tag }}\`
+          - Provider Proxmox: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/provider-proxmox:${{ needs.prepare.outputs.tag }}\`
+          - Kubectl: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/kubectl:${{ needs.prepare.outputs.tag }}\`
+
+          ## Installation
+
+          \`\`\`bash
+          # Note: Helm OCI requires authentication even for public repos
+          # In CI/CD, we use GITHUB_TOKEN for authentication
+          helm repo add virtrigaud https://projectbeskar.github.io/virtrigaud
+          helm install virtrigaud virtrigaud/virtrigaud --version ${{ needs.prepare.outputs.version }}
+          \`\`\`
+
+          ## Security
+
+          All images are signed with Cosign and include Software Bill of Materials (SBOMs).
+
+          **Full Changelog**: https://github.com/projectbeskar/virtrigaud/compare/${PREV_TAG}...${{ needs.prepare.outputs.tag }}
+          EOF
+
+      - name: Upload changelog
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: changelog
+          path: CHANGELOG.md
 
   create-release:
     name: Create GitHub Release
     runs-on: ubuntu-latest
     needs: [prepare, build-and-push, security-scan, generate-sbom, build-helm-chart, build-cli-tools, generate-changelog]
     steps:
-    - name: Download all artifacts (with retry resilience)
-      id: download-artifacts
-      uses: actions/download-artifact@v4
-      continue-on-error: true
-      
-    - name: Retry failed artifact downloads
-      if: steps.download-artifacts.outcome == 'failure'
-      run: |
-        echo "Initial download failed, attempting selective downloads..."
-        
-        # Try downloading critical artifacts individually
-        for artifact in "helm-chart" "changelog" "cli-tools-linux-amd64" "cli-tools-darwin-amd64" "cli-tools-windows-amd64"; do
-          echo "Attempting to download $artifact..."
-          gh run download ${{ github.run_id }} --name "$artifact" --dir . || echo "Failed to download $artifact"
-        done
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Download all artifacts (with retry resilience)
+        id: download-artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        continue-on-error: true
 
-    - name: Debug artifact structure
-      run: |
-        echo "=== Artifact structure ==="
-        find . -type f -name "*.tgz" -o -name "*.spdx.json" -o -name "vrtg-*" -o -name "vcts-*" -o -name "virtrigaud-loadgen-*" | head -20
-        echo "=== Directory structure ==="
-        ls -la
-        echo "=== SBOM directories ==="
-        ls -la sbom-* 2>/dev/null || echo "No sbom-* directories found"
+      - name: Retry failed artifact downloads
+        if: steps.download-artifacts.outcome == 'failure'
+        run: |
+          echo "Initial download failed, attempting selective downloads..."
 
-    - name: Create checksums
-      run: |
-        # Create checksums for all available release artifacts
-        FILES=$(find . -type f \( -name "*.tgz" -o -name "*.spdx.json" -o -name "vrtg-*" -o -name "vcts-*" -o -name "virtrigaud-loadgen-*" \) 2>/dev/null | sort)
-        
-        if [ -n "$FILES" ]; then
-          echo "$FILES" | xargs sha256sum > checksums.txt
-          echo "Generated checksums for $(echo "$FILES" | wc -l) files:"
-          cat checksums.txt
-        else
-          echo "Warning: No files found for checksum generation - creating empty checksums.txt"
-          touch checksums.txt
-        fi
+          # Try downloading critical artifacts individually
+          for artifact in "helm-chart" "changelog" "cli-tools-linux-amd64" "cli-tools-darwin-amd64" "cli-tools-windows-amd64"; do
+            echo "Attempting to download $artifact..."
+            gh run download ${{ github.run_id }} --name "$artifact" --dir . || echo "Failed to download $artifact"
+          done
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Prepare release files
-      run: |
-        # Create a release directory and copy available files
-        mkdir -p release-files
-        
-        # Copy helm charts
-        find . -name "*.tgz" -type f -exec cp {} release-files/ \; 2>/dev/null || echo "No helm charts found"
-        
-        # Copy SBOM files 
-        find . -name "*.spdx.json" -type f -exec cp {} release-files/ \; 2>/dev/null || echo "No SBOM files found"
-        
-        # Copy CLI tools
-        find . -name "vrtg-*" -type f -exec cp {} release-files/ \; 2>/dev/null || echo "No vrtg tools found"
-        find . -name "vcts-*" -type f -exec cp {} release-files/ \; 2>/dev/null || echo "No vcts tools found"  
-        find . -name "virtrigaud-loadgen-*" -type f -exec cp {} release-files/ \; 2>/dev/null || echo "No loadgen tools found"
-        
-        # Copy checksums
-        cp checksums.txt release-files/ 2>/dev/null || echo "No checksums file found"
-        
-        echo "Release files prepared:"
-        ls -la release-files/
+      - name: Debug artifact structure
+        run: |
+          echo "=== Artifact structure ==="
+          find . -type f -name "*.tgz" -o -name "*.spdx.json" -o -name "vrtg-*" -o -name "vcts-*" -o -name "virtrigaud-loadgen-*" | head -20
+          echo "=== Directory structure ==="
+          ls -la
+          echo "=== SBOM directories ==="
+          ls -la sbom-* 2>/dev/null || echo "No sbom-* directories found"
 
-    - name: Create GitHub Release
-      uses: softprops/action-gh-release@v2
-      with:
-        tag_name: ${{ needs.prepare.outputs.tag }}
-        name: Release ${{ needs.prepare.outputs.tag }}
-        body_path: changelog/CHANGELOG.md
-        files: release-files/*
-        prerelease: ${{ contains(needs.prepare.outputs.tag, '-') }}
-        fail_on_unmatched_files: false
+      - name: Create checksums
+        run: |
+          # Create checksums for all available release artifacts
+          FILES=$(find . -type f \( -name "*.tgz" -o -name "*.spdx.json" -o -name "vrtg-*" -o -name "vcts-*" -o -name "virtrigaud-loadgen-*" \) 2>/dev/null | sort)
+
+          if [ -n "$FILES" ]; then
+            echo "$FILES" | xargs sha256sum > checksums.txt
+            echo "Generated checksums for $(echo "$FILES" | wc -l) files:"
+            cat checksums.txt
+          else
+            echo "Warning: No files found for checksum generation - creating empty checksums.txt"
+            touch checksums.txt
+          fi
+
+      - name: Prepare release files
+        run: |
+          # Create a release directory and copy available files
+          mkdir -p release-files
+
+          # Copy helm charts
+          find . -name "*.tgz" -type f -exec cp {} release-files/ \; 2>/dev/null || echo "No helm charts found"
+
+          # Copy SBOM files
+          find . -name "*.spdx.json" -type f -exec cp {} release-files/ \; 2>/dev/null || echo "No SBOM files found"
+
+          # Copy CLI tools
+          find . -name "vrtg-*" -type f -exec cp {} release-files/ \; 2>/dev/null || echo "No vrtg tools found"
+          find . -name "vcts-*" -type f -exec cp {} release-files/ \; 2>/dev/null || echo "No vcts tools found"
+          find . -name "virtrigaud-loadgen-*" -type f -exec cp {} release-files/ \; 2>/dev/null || echo "No loadgen tools found"
+
+          # Copy checksums
+          cp checksums.txt release-files/ 2>/dev/null || echo "No checksums file found"
+
+          echo "Release files prepared:"
+          ls -la release-files/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: Release ${{ needs.prepare.outputs.tag }}
+          body_path: changelog/CHANGELOG.md
+          files: release-files/*
+          prerelease: ${{ contains(needs.prepare.outputs.tag, '-') }}
+          fail_on_unmatched_files: false
 
   update-helm-repo:
     name: Update Helm Repository
@@ -494,67 +495,67 @@ jobs:
     needs: [prepare, create-release]
     if: github.repository == 'projectbeskar/virtrigaud'
     steps:
-    - name: Checkout gh-pages
-      uses: actions/checkout@v4
-      with:
-        ref: gh-pages
-        path: gh-pages
-        token: ${{ secrets.GITHUB_TOKEN }}
-      continue-on-error: true
+      - name: Checkout gh-pages
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          ref: gh-pages
+          path: gh-pages
+          token: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
 
-    - name: Create gh-pages branch if it doesn't exist
-      run: |
-        if [ ! -d "gh-pages" ] || [ ! -f "gh-pages/.git/HEAD" ]; then
-          echo "Creating gh-pages branch..."
-          rm -rf gh-pages
-          mkdir gh-pages
+      - name: Create gh-pages branch if it doesn't exist
+        run: |
+          if [ ! -d "gh-pages" ] || [ ! -f "gh-pages/.git/HEAD" ]; then
+            echo "Creating gh-pages branch..."
+            rm -rf gh-pages
+            mkdir gh-pages
+            cd gh-pages
+            git init
+            git checkout -b gh-pages
+            git remote add origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            echo "# Helm Repository" > README.md
+            git add README.md
+            git commit -m "Initialize gh-pages branch"
+            git push -u origin gh-pages
+          fi
+
+      - name: Install Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4  # v4
+        with:
+          version: '3.12.0'
+
+      - name: Download helm chart
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: helm-chart
+          path: ./charts
+
+      - name: Update Helm repository
+        run: |
           cd gh-pages
-          git init
-          git checkout -b gh-pages
-          git remote add origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+
+          # Ensure we're on gh-pages branch
+          git checkout gh-pages 2>/dev/null || git checkout -b gh-pages
+
+          # Copy new chart (preserve docs/ directory if it exists)
+          cp ../charts/*.tgz ./
+
+          # Update index
+          helm repo index . --url https://projectbeskar.github.io/virtrigaud
+
+          # Configure git
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          echo "# Helm Repository" > README.md
-          git add README.md
-          git commit -m "Initialize gh-pages branch"
-          git push -u origin gh-pages
-        fi
 
-    - name: Install Helm
-      uses: azure/setup-helm@v4
-      with:
-        version: '3.12.0'
+          # Check if there are changes
+          if git diff --quiet && git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git add .
+            git commit -m "Release Helm chart ${{ needs.prepare.outputs.tag }} [skip ci]"
 
-    - name: Download helm chart
-      uses: actions/download-artifact@v4
-      with:
-        name: helm-chart
-        path: ./charts
-
-    - name: Update Helm repository
-      run: |
-        cd gh-pages
-        
-        # Ensure we're on gh-pages branch
-        git checkout gh-pages 2>/dev/null || git checkout -b gh-pages
-        
-        # Copy new chart (preserve docs/ directory if it exists)
-        cp ../charts/*.tgz ./
-        
-        # Update index
-        helm repo index . --url https://projectbeskar.github.io/virtrigaud
-        
-        # Configure git
-        git config user.name "github-actions[bot]"
-        git config user.email "github-actions[bot]@users.noreply.github.com"
-        
-        # Check if there are changes
-        if git diff --quiet && git diff --cached --quiet; then
-          echo "No changes to commit"
-        else
-          git add .
-          git commit -m "Release Helm chart ${{ needs.prepare.outputs.tag }} [skip ci]"
-          
-          # Set upstream and push
-          git push --set-upstream origin gh-pages
-        fi
+            # Set upstream and push
+            git push --set-upstream origin gh-pages
+          fi

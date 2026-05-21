@@ -345,6 +345,170 @@ func TestVMSet_BetaAlphaBeta_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestVMNetworkAttachment_DeepCopy_PCISlotNumber(t *testing.T) {
+	pciSlot := int32(192)
+	src := &VMNetworkAttachment{
+		Spec: VMNetworkAttachmentSpec{
+			Network: NetworkConfig{
+				VSphere: &VSphereNetworkConfig{
+					PCISlotNumber: &pciSlot,
+				},
+			},
+		},
+	}
+
+	dst := src.DeepCopy()
+
+	if dst == nil {
+		t.Fatal("DeepCopy returned nil")
+	}
+	if dst.Spec.Network.VSphere == nil {
+		t.Fatal("VSphere network config is nil after DeepCopy")
+	}
+	if dst.Spec.Network.VSphere.PCISlotNumber == nil {
+		t.Fatal("PCISlotNumber is nil after DeepCopy")
+	}
+	if *dst.Spec.Network.VSphere.PCISlotNumber != 192 {
+		t.Errorf("Expected PCISlotNumber 192, got %d", *dst.Spec.Network.VSphere.PCISlotNumber)
+	}
+	// Verify pointer independence
+	*src.Spec.Network.VSphere.PCISlotNumber = 999
+	if *dst.Spec.Network.VSphere.PCISlotNumber != 192 {
+		t.Error("PCISlotNumber was not deep copied (shared pointer)")
+	}
+}
+
+func TestVMNetworkAttachment_DeepCopy_NilPCISlotNumber(t *testing.T) {
+	src := &VMNetworkAttachment{
+		Spec: VMNetworkAttachmentSpec{
+			Network: NetworkConfig{
+				VSphere: &VSphereNetworkConfig{
+					PCISlotNumber: nil,
+					Portgroup:     "pg-100",
+				},
+			},
+		},
+	}
+
+	dst := src.DeepCopy()
+
+	if dst == nil {
+		t.Fatal("DeepCopy returned nil")
+	}
+	if dst.Spec.Network.VSphere == nil {
+		t.Fatal("VSphere network config is nil after DeepCopy")
+	}
+	if dst.Spec.Network.VSphere.PCISlotNumber != nil {
+		t.Error("Expected PCISlotNumber to be nil after DeepCopy")
+	}
+	if dst.Spec.Network.VSphere.Portgroup != "pg-100" {
+		t.Errorf("Expected Portgroup 'pg-100', got '%s'", dst.Spec.Network.VSphere.Portgroup)
+	}
+}
+
+func TestVMNetworkRef_DeepCopy_NilNetworkRef(t *testing.T) {
+	vm := &VirtualMachine{
+		Spec: VirtualMachineSpec{
+			ProviderRef: ObjectRef{Name: "test-provider"},
+			ClassRef:    ObjectRef{Name: "test-class"},
+			Networks: []VMNetworkRef{
+				{
+					Name:       "eth0",
+					NetworkRef: nil,
+					IPAddress:  "10.0.0.1",
+				},
+			},
+		},
+	}
+
+	dst := vm.DeepCopy()
+
+	if dst == nil {
+		t.Fatal("DeepCopy returned nil")
+	}
+	if len(dst.Spec.Networks) != 1 {
+		t.Fatalf("Expected 1 network, got %d", len(dst.Spec.Networks))
+	}
+	if dst.Spec.Networks[0].NetworkRef != nil {
+		t.Error("Expected NetworkRef to be nil after DeepCopy")
+	}
+	if dst.Spec.Networks[0].IPAddress != "10.0.0.1" {
+		t.Errorf("Expected IPAddress '10.0.0.1', got '%s'", dst.Spec.Networks[0].IPAddress)
+	}
+}
+
+func TestVMNetworkRef_DeepCopy_NetworkRef(t *testing.T) {
+	vm := &VirtualMachine{
+		Spec: VirtualMachineSpec{
+			ProviderRef: ObjectRef{Name: "test-provider"},
+			ClassRef:    ObjectRef{Name: "test-class"},
+			Networks: []VMNetworkRef{
+				{
+					Name:       "eth0",
+					NetworkRef: &ObjectRef{Name: "my-network"},
+					IPAddress:  "10.0.0.1",
+				},
+			},
+		},
+	}
+
+	dst := vm.DeepCopy()
+
+	if dst == nil {
+		t.Fatal("DeepCopy returned nil")
+	}
+	if len(dst.Spec.Networks) != 1 {
+		t.Fatalf("Expected 1 network, got %d", len(dst.Spec.Networks))
+	}
+	if dst.Spec.Networks[0].NetworkRef == nil {
+		t.Fatal("NetworkRef should not be nil after DeepCopy")
+	}
+	if dst.Spec.Networks[0].NetworkRef.Name != "my-network" {
+		t.Errorf("Expected NetworkRef.Name 'my-network', got '%s'", dst.Spec.Networks[0].NetworkRef.Name)
+	}
+	// Verify pointer independence
+	vm.Spec.Networks[0].NetworkRef.Name = "changed"
+	if dst.Spec.Networks[0].NetworkRef.Name != "my-network" {
+		t.Error("NetworkRef was not deep copied (shared pointer)")
+	}
+}
+
+func TestVMClone_DeepCopy_Networks_Independence(t *testing.T) {
+	src := &VMClone{
+		Spec: VMCloneSpec{
+			Source: CloneSource{
+				VMRef: &LocalObjectReference{Name: "source-vm"},
+			},
+			Target: VMCloneTarget{
+				Name: "cloned-vm",
+				Networks: []VMNetworkRef{
+					{
+						Name:       "eth0",
+						NetworkRef: &ObjectRef{Name: "net-a"},
+					},
+				},
+			},
+		},
+	}
+
+	dst := src.DeepCopy()
+
+	if dst == nil {
+		t.Fatal("DeepCopy returned nil")
+	}
+	if len(dst.Spec.Target.Networks) != 1 {
+		t.Fatalf("Expected 1 network, got %d", len(dst.Spec.Target.Networks))
+	}
+	if dst.Spec.Target.Networks[0].NetworkRef == nil {
+		t.Fatal("NetworkRef should not be nil after DeepCopy")
+	}
+	// Verify pointer independence (deep copy, not shallow)
+	src.Spec.Target.Networks[0].NetworkRef.Name = "changed"
+	if dst.Spec.Target.Networks[0].NetworkRef.Name != "net-a" {
+		t.Error("VMClone Networks were not deep copied (shared NetworkRef pointer)")
+	}
+}
+
 func TestVMPlacementPolicy_BetaAlphaBeta_RoundTrip(t *testing.T) {
 	beta := &VMPlacementPolicy{
 		TypeMeta: metav1.TypeMeta{
