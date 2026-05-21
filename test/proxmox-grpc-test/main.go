@@ -25,7 +25,7 @@ func main() {
 	}
 	defer conn.Close()
 
-	client := providerv1.NewProviderServiceClient(conn)
+	client := providerv1.NewProviderClient(conn)
 	ctx := context.Background()
 
 	// Test 1: Validate connectivity
