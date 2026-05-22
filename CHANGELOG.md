@@ -12,6 +12,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2026-05-22 15:29] - Emit virtrigaud_build_info on manager startup
+**Author:** @williamrizzo (William Rizzo)
+
+### Fixed
+- `cmd/manager/main.go`: Call `metrics.SetupMetrics(version.Version, version.GitSHA, metrics.ComponentManager)` immediately after logger setup. Without this call the build_info `GaugeVec` from `internal/obs/metrics` stays empty after package init, and the `virtrigaud_build_info` family does NOT appear in the manager's `/metrics` output even with the PR #83 registry-binding fix correctly applied.
+
+### Why
+v0.3.3-rc2 deploy + smoke test on `vr1.lab.k8` exposed that PR #83 was a necessary-but-not-sufficient fix. The registry binding is structurally correct (verified by `internal/obs/metrics/metrics_test.go`) but Prometheus Vec metrics with zero observations do not appear in `/metrics` output. The only metric that wouldn't depend on reconcile activity is `virtrigaud_build_info`, which is populated by `SetupMetrics`. Nothing in production called `SetupMetrics`, so the family stayed empty and the smoke test continued to report `0 virtrigaud_* metric families` after upgrading to rc2 — same as rc1.
+
+This change makes the manager emit a `virtrigaud_build_info{version,git_sha,go_version,component}` sample on startup, providing the canary metric that release smoke tests can rely on, and serving as proof end-to-end that the registry binding works in production. Per-reconciler instrumentation (VirtualMachineReconciler, ProviderReconciler) for full operational visibility is deferred to v0.3.4.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (manager pod restart picks up the new SetupMetrics call)
+- [ ] Config change only
+- [ ] Documentation only
+
+### Verification
+After deploying the fix:
+```bash
+curl -s http://<manager>:8080/metrics | grep '^virtrigaud_build_info'
+# expect: virtrigaud_build_info{component="manager",git_sha="<sha>",go_version="go1.25.x",version="v0.3.3-rc3"} 1
+```
+
+---
+
 ## [2026-05-22 06:38] - Fix virtrigaud_* metrics not exposed on /metrics endpoint
 **Author:** @williamrizzo (William Rizzo)
 

@@ -36,7 +36,9 @@ import (
 
 	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/controller"
+	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 	"github.com/projectbeskar/virtrigaud/internal/runtime/remote"
+	"github.com/projectbeskar/virtrigaud/internal/version"
 )
 
 var (
@@ -77,6 +79,16 @@ func main() {
 
 	// Override the logger with flag-based options if provided
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	// Emit a virtrigaud_build_info{version,git_sha,go_version,component} sample
+	// so the manager's /metrics endpoint exposes a virtrigaud_* family at startup.
+	// Without this call the build_info GaugeVec stays empty and the family does
+	// not appear in /metrics output, defeating Prometheus-based release verification.
+	metrics.SetupMetrics(version.Version, version.GitSHA, metrics.ComponentManager)
+	setupLog.Info("virtrigaud metrics registered",
+		"version", version.Version,
+		"gitSHA", version.GitSHA,
+		"component", metrics.ComponentManager)
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
