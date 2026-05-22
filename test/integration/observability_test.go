@@ -63,6 +63,9 @@ func TestObservabilityIntegration(t *testing.T) {
 }
 
 func TestMetricsIntegration(t *testing.T) {
+	// Emit a build_info sample so the family appears in Gather() output.
+	metrics.SetupMetrics("test", "abc123", "test-component")
+
 	// Test reconcile metrics
 	reconcileMetrics := metrics.NewReconcileMetrics("VirtualMachine")
 

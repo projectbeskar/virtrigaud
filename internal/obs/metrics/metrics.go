@@ -22,12 +22,17 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
-	"sigs.k8s.io/controller-runtime/pkg/metrics"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 )
+
+// All virtrigaud metrics register with controller-runtime's metrics.Registry, which is
+// the registry served by the manager's /metrics endpoint. Using promauto's default
+// (global) registry would create the metrics in-process but never expose them.
+var registerer = promauto.With(ctrlmetrics.Registry)
 
 var (
 	// Build information
-	buildInfo = promauto.NewGaugeVec(
+	buildInfo = registerer.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "virtrigaud_build_info",
 			Help: "Build information for virtrigaud components",
@@ -36,7 +41,7 @@ var (
 	)
 
 	// Manager metrics
-	managerReconcileTotal = promauto.NewCounterVec(
+	managerReconcileTotal = registerer.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "virtrigaud_manager_reconcile_total",
 			Help: "Total number of reconcile operations by kind and outcome",
@@ -44,7 +49,7 @@ var (
 		[]string{"kind", "outcome"},
 	)
 
-	managerReconcileDuration = promauto.NewHistogramVec(
+	managerReconcileDuration = registerer.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:    "virtrigaud_manager_reconcile_duration_seconds",
 			Help:    "Duration of reconcile operations by kind",
@@ -53,7 +58,7 @@ var (
 		[]string{"kind"},
 	)
 
-	queueDepth = promauto.NewGaugeVec(
+	queueDepth = registerer.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "virtrigaud_queue_depth",
 			Help: "Current depth of work queue by kind",
@@ -62,7 +67,7 @@ var (
 	)
 
 	// VM operation metrics
-	vmOperationsTotal = promauto.NewCounterVec(
+	vmOperationsTotal = registerer.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "virtrigaud_vm_operations_total",
 			Help: "Total number of VM operations by operation, provider type, provider, and outcome",
@@ -71,7 +76,7 @@ var (
 	)
 
 	// Provider RPC metrics
-	providerRPCRequestsTotal = promauto.NewCounterVec(
+	providerRPCRequestsTotal = registerer.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "virtrigaud_provider_rpc_requests_total",
 			Help: "Total number of provider RPC requests by provider type, method, and code",
@@ -79,7 +84,7 @@ var (
 		[]string{"provider_type", "method", "code"},
 	)
 
-	providerRPCLatency = promauto.NewHistogramVec(
+	providerRPCLatency = registerer.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:    "virtrigaud_provider_rpc_latency_seconds",
 			Help:    "Latency of provider RPC requests by provider type and method",
@@ -89,7 +94,7 @@ var (
 	)
 
 	// Provider task metrics
-	providerTasksInflight = promauto.NewGaugeVec(
+	providerTasksInflight = registerer.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "virtrigaud_provider_tasks_inflight",
 			Help: "Number of inflight tasks by provider type and provider",
@@ -98,7 +103,7 @@ var (
 	)
 
 	// Error metrics
-	errorsTotal = promauto.NewCounterVec(
+	errorsTotal = registerer.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "virtrigaud_errors_total",
 			Help: "Total number of errors by reason and component",
@@ -107,7 +112,7 @@ var (
 	)
 
 	// IP discovery metrics
-	ipDiscoveryDuration = promauto.NewHistogramVec(
+	ipDiscoveryDuration = registerer.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:    "virtrigaud_ip_discovery_duration_seconds",
 			Help:    "Duration of IP discovery operations by provider type",
@@ -117,7 +122,7 @@ var (
 	)
 
 	// Circuit breaker metrics
-	circuitBreakerState = promauto.NewGaugeVec(
+	circuitBreakerState = registerer.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "virtrigaud_circuit_breaker_state",
 			Help: "Circuit breaker state (0=closed, 1=half-open, 2=open)",
@@ -125,7 +130,7 @@ var (
 		[]string{"provider_type", "provider"},
 	)
 
-	circuitBreakerFailures = promauto.NewCounterVec(
+	circuitBreakerFailures = registerer.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "virtrigaud_circuit_breaker_failures_total",
 			Help: "Total number of circuit breaker failures",
@@ -332,13 +337,9 @@ func (rt *RPCTimer) Finish(code string) {
 	rt.metrics.RecordRPC(rt.method, code, rt.timer.Duration())
 }
 
-// Init registers all metrics with the controller-runtime metrics registry
-func Init() {
-	// Metrics are automatically registered via promauto
-	// This function is for any additional setup if needed
-}
-
-// GetRegistry returns the Prometheus registry used by controller-runtime
+// GetRegistry returns the Prometheus registry used by controller-runtime,
+// which is the registry served by the manager's /metrics endpoint and into
+// which all virtrigaud_* metrics are registered.
 func GetRegistry() prometheus.Gatherer {
-	return metrics.Registry
+	return ctrlmetrics.Registry
 }

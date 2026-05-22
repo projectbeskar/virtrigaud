@@ -12,6 +12,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2026-05-22 06:38] - Fix virtrigaud_* metrics not exposed on /metrics endpoint
+**Author:** @williamrizzo (William Rizzo)
+
+### Fixed
+- `internal/obs/metrics/metrics.go`: Bind all 12 virtrigaud Prometheus metric vectors to controller-runtime's `metrics.Registry` (the registry served by the manager on `/metrics`) instead of promauto's default global registry. Previously the metrics were created in-process but never exposed because the manager's `/metrics` endpoint serves controller-runtime's registry, not promauto's default. Use `promauto.With(ctrlmetrics.Registry).New*` for: `virtrigaud_build_info`, `virtrigaud_manager_reconcile_total`, `virtrigaud_manager_reconcile_duration_seconds`, `virtrigaud_queue_depth`, `virtrigaud_vm_operations_total`, `virtrigaud_provider_rpc_requests_total`, `virtrigaud_provider_rpc_latency_seconds`, `virtrigaud_provider_tasks_inflight`, `virtrigaud_errors_total`, `virtrigaud_ip_discovery_duration_seconds`, `virtrigaud_circuit_breaker_state`, `virtrigaud_circuit_breaker_failures_total`.
+
+### Removed
+- `internal/obs/metrics/metrics.go`: Removed dead `Init()` function which had a misleading comment claiming promauto registered metrics with the controller-runtime registry; it had zero callers anywhere in the codebase.
+
+### Added
+- `internal/obs/metrics/metrics_test.go`: New unit tests `TestMetricsRegisteredInControllerRuntimeRegistry` and `TestSetupMetricsEmitsBuildInfo` asserting all 12 metric families appear in `GetRegistry().Gather()` after one observation each, and that `virtrigaud_build_info` carries the correct label values. These run under `make test` and serve as a regression canary.
+- `test/integration/observability_test.go`: Added missing `metrics.SetupMetrics(...)` call at the top of `TestMetricsIntegration` so the test is self-contained rather than relying on side effects from other tests. The integration test now passes when run directly (`go test ./test/integration/...`), though `make test` continues to exclude that path.
+
+### Why
+v0.3.3-rc1 smoke test on `vr1.lab.k8` confirmed that scraping `/metrics:8080` returned 41 metric families — all controller-runtime/workqueue/certwatcher/go_/process_ — with zero `virtrigaud_*` series. Root cause: `promauto.NewGaugeVec(...)` etc. bind to `prometheus.DefaultRegisterer`, which the manager does not serve. The bug shipped in v0.3.0 through v0.3.2 (originally introduced in commit `a849271 implement observability extensions`) and would have shipped in v0.3.3 without this fix. Observability is load-bearing for the project's banking-compliance posture; releasing without exposed metrics is a regression on every downstream operator that relies on Prometheus scraping. This change blocks v0.3.3 release until merged (cut v0.3.3-rc2 from this commit).
+
+### Impact
+- [ ] Breaking change (no public API change; vector variables are unexported and callers use the helper structs)
+- [x] Requires cluster rollout (`virtrigaud_*` metrics begin appearing once the new manager image is deployed)
+- [ ] Config change only
+- [ ] Documentation only
+
+### Verification
+After deploying the fix:
+```bash
+kubectl -n virtrigaud-system port-forward deploy/virtrigaud-controller-manager 8080:8080 &
+curl -s http://localhost:8080/metrics | grep -c '^virtrigaud_'
+# expect: 12 or more (one line per metric family + samples)
+curl -s http://localhost:8080/metrics | grep '^virtrigaud_build_info'
+# expect: virtrigaud_build_info{component="manager",git_sha="...",go_version="go...",version="v0.3.3-rc2"} 1
+```
+
+---
+
 ## [2026-03-17 22:10] - Add SCSI Controller Configuration for Additional Disks
 **Author:** @firestoned (Erick Bourgeois)
 
