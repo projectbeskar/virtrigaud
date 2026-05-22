@@ -119,6 +119,13 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Inject VERSION and GIT_SHA into the binary via ldflags so that
+          # internal/version reports accurate values (consumed by
+          # virtrigaud_build_info on /metrics). Dockerfiles that do not
+          # declare these ARGs ignore them silently.
+          build-args: |
+            VERSION=${{ needs.prepare.outputs.tag }}
+            GIT_SHA=${{ github.sha }}
           # Disable GitHub Actions cache due to reliability issues
           # cache-from: type=gha
           # cache-to: type=gha,mode=max

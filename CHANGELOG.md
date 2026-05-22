@@ -12,6 +12,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2026-05-22 18:27] - Inject VERSION and GIT_SHA into manager binary via ldflags
+**Author:** @williamrizzo (William Rizzo)
+
+### Fixed
+- `build/Dockerfile.manager`: Added `ARG VERSION=dev` and `ARG GIT_SHA=unknown` plus `-ldflags="-s -w -X 'github.com/projectbeskar/virtrigaud/internal/version.Version=${VERSION}' -X 'github.com/projectbeskar/virtrigaud/internal/version.GitSHA=${GIT_SHA}'"` on the `go build` step. The container image now reports accurate version metadata at runtime.
+- `.github/workflows/release.yml`: Added `build-args: VERSION / GIT_SHA` to the `docker/build-push-action` step so the release tag and commit SHA are passed into the container build. Dockerfiles that don't declare these ARGs (kubectl image, current provider images) silently ignore them — no impact.
+
+### Why
+v0.3.3-rc3 smoke test on `vr1.lab.k8` showed `virtrigaud_build_info{component="manager",git_sha="unknown",go_version="go1.25.10",version="dev"} 1` on `/metrics` instead of `version="v0.3.3-rc3"` and the real SHA. The metrics pipeline (registry binding from PR #83 + SetupMetrics call from PR #84) was working — the binary itself had never been built with ldflags to populate `internal/version`. Latent bug since the project's inception, but only became visible once `virtrigaud_build_info` was actually exposed. `virtrigaud_build_info` is the canonical way for operators to know which manager version is running; reporting `version="dev"` to Prometheus dashboards is actively misleading during incident response, which matters for the project's banking-grade operational posture.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (new manager image needed for labels to update)
+- [ ] Config change only
+- [ ] Documentation only
+
+### Verification
+After deploying the new image:
+```bash
+kubectl -n virtrigaud-system port-forward deploy/virtrigaud-manager 8080:8080 &
+curl -s http://localhost:8080/metrics | grep '^virtrigaud_build_info'
+# expect:
+# virtrigaud_build_info{component="manager",git_sha="<rc4-commit-sha>",go_version="...",version="v0.3.3-rc4"} 1
+```
+
+Local sanity check:
+```bash
+go build -ldflags="-s -w \
+  -X 'github.com/projectbeskar/virtrigaud/internal/version.Version=v0.3.3-rc4-sanity' \
+  -X 'github.com/projectbeskar/virtrigaud/internal/version.GitSHA=abc1234'" \
+  -o /tmp/manager ./cmd/manager/
+strings /tmp/manager | grep -E 'v0\.3\.3-rc4-sanity|abc1234'
+# both literals present in the resulting binary
+```
+
+---
+
 ## [2026-05-22 15:29] - Emit virtrigaud_build_info on manager startup
 **Author:** @williamrizzo (William Rizzo)
 
