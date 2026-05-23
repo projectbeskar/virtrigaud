@@ -25,6 +25,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
+	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 )
 
 // VMClassReconciler reconciles a VMClass object
@@ -46,7 +47,19 @@ type VMClassReconciler struct {
 //
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.20.4/pkg/reconcile
-func (r *VMClassReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *VMClassReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
+	timer := metrics.NewReconcileTimer("VMClass")
+	defer func() {
+		outcome := metrics.OutcomeSuccess
+		switch {
+		case retErr != nil:
+			outcome = metrics.OutcomeError
+		case result.Requeue || result.RequeueAfter > 0:
+			outcome = metrics.OutcomeRequeue
+		}
+		timer.Finish(outcome)
+	}()
+
 	_ = logf.FromContext(ctx)
 
 	// TODO(user): your logic here
