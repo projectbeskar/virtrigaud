@@ -216,35 +216,58 @@ type Redactor struct {
 	patterns []*regexp.Regexp
 }
 
-// NewRedactor creates a redactor with common sensitive patterns
+// NewRedactor creates a redactor with common sensitive patterns.
+//
+// PATTERN CONVENTION: when a pattern uses capture groups, the LAST capture
+// group must be the sensitive value to redact. Earlier groups are treated
+// as context (e.g. the field name in a kv-pair like "password=hunter2",
+// where group 1 = "password" and the last group = "hunter2"). Single-group
+// patterns put the sensitive value in their only group. Zero-group patterns
+// are replaced entirely. This convention is enforced by Redact() below.
 func NewRedactor() *Redactor {
 	patterns := []*regexp.Regexp{
-		// Passwords in URLs
+		// Passwords embedded in URLs, e.g. "https://user:hunter2@host".
+		// 1 group: the password (last group).
 		regexp.MustCompile(`://[^:]*:([^@]*?)@`),
-		// API keys and tokens
+		// Common credential kv-pairs in logs and config dumps.
+		// 2 groups: key name (context) + value (last group, sensitive).
 		regexp.MustCompile(`(?i)(api[_-]?key|token|secret|password|passwd|pwd)\s*[:=]\s*["']?([^"'\s]+)["']?`),
-		// Cloud-init user data (may contain sensitive info)
+		// Cloud-init user-data blobs (may contain credentials, ssh keys, etc).
+		// 2 groups: key name (context) + value (last group, sensitive).
 		regexp.MustCompile(`(?i)(user[_-]?data|userdata)\s*[:=]\s*["']?([^"'\n]{20,})["']?`),
-		// SSH keys
+		// SSH public keys (no capture group; whole match is replaced).
 		regexp.MustCompile(`ssh-[a-z0-9]+ [A-Za-z0-9+/=]+ `),
-		// Generic secrets (base64-like strings > 20 chars)
+		// Generic base64-like strings > 20 chars (no capture group; whole match).
 		regexp.MustCompile(`[A-Za-z0-9+/]{20,}={0,2}`),
 	}
 
 	return &Redactor{patterns: patterns}
 }
 
-// Redact removes sensitive information from strings
+// Redact removes sensitive information from strings.
+//
+// For patterns with capture groups, the LAST capture group is treated as the
+// sensitive value and replaced with "[REDACTED]". Earlier groups are kept
+// (they are typically context, e.g. the field name in "password=X"). This
+// convention is documented on NewRedactor.
+//
+// For patterns without capture groups, the entire match is replaced.
+//
+// Fixes issue #95: prior implementation replaced the FIRST capture group,
+// which for kv-pair patterns meant the field NAME was masked while the
+// secret VALUE survived in cleartext ("password=hunter2" -> "[REDACTED]=hunter2").
 func (r *Redactor) Redact(input string) string {
 	result := input
 	for _, pattern := range r.patterns {
 		if pattern.NumSubexp() > 0 {
-			// Replace capture groups with [REDACTED]
+			// Replace the LAST capture group with [REDACTED]. By the pattern
+			// convention this group is always the sensitive value.
 			result = pattern.ReplaceAllStringFunc(result, func(match string) string {
 				submatches := pattern.FindStringSubmatch(match)
 				if len(submatches) > 1 {
-					// Replace the sensitive part (first capture group) with [REDACTED]
-					return strings.Replace(match, submatches[1], "[REDACTED]", 1)
+					// submatches[0] is the full match; submatches[1..len-1]
+					// are the capture groups. The last one is the value.
+					return strings.Replace(match, submatches[len(submatches)-1], "[REDACTED]", 1)
 				}
 				return match
 			})
