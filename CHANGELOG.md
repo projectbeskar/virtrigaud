@@ -12,6 +12,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2026-05-23 09:23] - SECURITY: fix logging.Redact to mask values, not field names (closes #95)
+**Author:** @williamrizzo (William Rizzo)
+
+### Security
+- `internal/obs/logging/logging.go`: `Redactor.Redact` (and the convenience wrappers `RedactString`, `RedactMap`) previously replaced the FIRST capture group of every matched pattern. For two-group kv-pair patterns like `(password|token|...)\s*[:=]\s*([^\s]+)`, this meant the field NAME (group 1) was masked while the SECRET VALUE (group 2) survived in cleartext. Input `"password=hunter2"` produced `"[REDACTED]=hunter2"`.
+- Fix: replace the LAST capture group, by documented convention "the value is always the last group". Works correctly for both 1-group patterns (URL passwords) and 2-group patterns (kv-pairs); 0-group patterns continue to replace the entire match.
+
+### Added
+- `internal/obs/logging/logging_test.go`: New file. 6 tests with 22+ sub-cases covering:
+  - `TestRedactStringValuesNotKeys`: 13 sub-cases (equals/colon separators, `api_key` underscore + hyphen variants, case-insensitivity, all `password|passwd|pwd|token|secret` aliases, quoted values, multiple kv-pairs in one string, URL-embedded passwords incl. `qemu+ssh://`).
+  - `TestRedactStringNonSensitiveInputUntouched`: confirms harmless content passes through unchanged.
+  - `TestRedactMap`: confirms `RedactMap` masks whole values for sensitive keys, recursively masks values for non-sensitive keys, leaves harmless map entries alone.
+  - `TestRedactStringSSHPublicKey`, `TestIsSensitiveKey`, `TestRedactStringIdempotent`.
+
+### Changed
+- `test/integration/observability_test.go`: Removed the `t.Skip("blocked by #95 ...")` on `TestObservabilityIntegration`. The integration assertion `assert.NotContains(t, redacted, "secret123")` now passes against the fixed implementation.
+
+### Why
+Discovered during PR #98 (wiring `test/integration/` into CI) on 2026-05-23. `TestObservabilityIntegration` had been failing silently in the disabled CI job since the function shipped. The bug is real but has **zero production callsites today** — no code in `internal/controller/`, `internal/providers/`, or `internal/transport/` calls any redaction function. So no operator's v0.3.3 logs contain leaked secrets via this path. Still shipping as a security fix because (a) the function name implies behavior the implementation didn't deliver, giving any future caller a false sense of security; (b) banking-compliance posture demands rapid response to security findings even when current exposure is dormant; (c) the fix is small and isolated.
+
+Cut as v0.3.3.1 patch release (not rolled into v0.3.4 alongside the G-track) for clean per-incident release auditability.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (new manager image for the redaction behavior to take effect — only matters once a code path actually calls Redact)
+- [ ] Config change only
+- [ ] Documentation only
+
+### Verification
+Locally:
+```bash
+go test -v -run TestRedact ./internal/obs/logging/
+# PASS: 13 sub-tests
+go test -v -run TestObservabilityIntegration ./test/integration/
+# PASS: now un-skipped; log output proves the fix:
+#   Original: password=secret123 and api_key=abcdef
+#   Redacted: password=[REDACTED] and api_key=[REDACTED]
+```
+
+### References
+- Closes #95
+- Discovered by PR #98 (wiring observability_test into CI)
+- PROJECT_CONTEXT.md track K1 (renamed from previous "Active TODO" entry)
+
+---
+
 ## [2026-05-23 09:07] - Wire observability integration test into CI (closes #93)
 **Author:** @williamrizzo (William Rizzo)
 

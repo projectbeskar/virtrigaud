@@ -32,13 +32,6 @@ import (
 )
 
 func TestObservabilityIntegration(t *testing.T) {
-	// SECURITY: blocked by #95 - logging.RedactString redacts keys instead of
-	// values, leaking secrets into logs. Skipping this whole test until the
-	// underlying RedactString is fixed; the assertion at line 59 fails today
-	// because "password=secret123" becomes "[REDACTED]=secret123" (key
-	// masked, value intact). Once #95 lands, remove this t.Skip.
-	t.Skip("blocked by #95 - logging.RedactString redacts keys instead of values")
-
 	// Setup logging
 	logConfig := logging.DefaultConfig()
 	logConfig.Level = "debug"
