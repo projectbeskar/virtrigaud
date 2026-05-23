@@ -12,6 +12,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2026-05-23 14:02] - feat(obs): document + test CircuitBreakerMetrics lifecycle (closes #91)
+**Author:** @williamrizzo (William Rizzo)
+
+### Audit finding
+G5 began as "audit + add missing CircuitBreakerMetrics hooks." The audit revealed the instrumentation was **already complete**:
+- `NewCircuitBreaker` emits `SetState(Closed)` on construction (initial state)
+- `transitionToClosed` / `transitionToOpen` / `transitionToHalfOpen` each emit the corresponding `SetState` sample
+- `recordFailure` increments `RecordFailure` on every counted failure
+
+No new instrumentation calls were needed. The issue body's "not all transitions are recorded" was based on incomplete information; closing #91 with documentation + tests as the deliverable.
+
+### Added
+- `internal/resilience/circuitbreaker_metrics_test.go`: New file. 4 lifecycle tests asserting the metric contract end-to-end:
+  - `TestCircuitBreakerMetrics_InitialStateIsClosed` — construction emits `SetState(Closed)`
+  - `TestCircuitBreakerMetrics_FullLifecycle` — exercises closed → open → half-open → closed with `FailureThreshold=2`, asserting the gauge value matches the expected state at every step AND the failures counter increments on every counted failure
+  - `TestCircuitBreakerMetrics_FailureInHalfOpenReopens` — a failure during HalfOpen must re-set the gauge to Open (not leave it at HalfOpen)
+  - `TestCircuitBreakerMetrics_ResetEmitsClosedGauge` — explicit `Reset()` emits `SetState(Closed)`
+
+### Changed
+- `internal/resilience/circuitbreaker.go`: Doc comments at the metric call sites (`recordFailure`, `transitionToClosed`, `transitionToOpen`, `transitionToHalfOpen`) now explicitly state what metric is emitted, with what value, and what operators dashboard against. Makes the existing instrumentation contract visible without reading both this file and `internal/obs/metrics/metrics.go`.
+
+### Why
+Fifth and final in the G-track (#86). With this PR, **all 11 previously-empty `virtrigaud_*` metric families have at least one emission path**:
+- `virtrigaud_build_info` (v0.3.4 / PRs #83, #84, #85)
+- `virtrigaud_manager_reconcile_total` + `_duration_seconds` (G1-G3 / PRs #101, #103, #106)
+- `virtrigaud_errors_total` (G1-G3 across all reconcilers)
+- `virtrigaud_provider_rpc_requests_total` + `_latency_seconds` (G4 / PR #107)
+- `virtrigaud_circuit_breaker_state` + `_failures_total` (G5 / this PR — instrumentation already wired; this PR adds the test contract)
+
+Remaining unwired families (`virtrigaud_queue_depth`, `virtrigaud_vm_operations_total`, `virtrigaud_provider_tasks_inflight`, `virtrigaud_ip_discovery_duration_seconds`) are not in the G-track scope — they require their own design decisions about WHERE to record (controller queue depths require workqueue introspection; VM operations need a per-RPC mapping; etc.). Tracked as v0.3.6+ work.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout (no behavior change — only doc comments + new tests; the existing instrumentation was already wired)
+- [ ] Config change only
+- [ ] Documentation only
+
+Technically test-only + comments. Targeted for **v0.3.5**.
+
+### Verification
+```bash
+go test -v -count=1 -run TestCircuitBreakerMetrics ./internal/resilience/
+# PASS: 4 lifecycle tests
+make test  # resilience pkg coverage now 32.7%
+make test-integration  # still green
+```
+
+### References
+- Closes #91
+- Umbrella: #86 (G-track COMPLETE — all 5 sub-tasks closed)
+- Pattern: PRs #101 (G1), #103 (G2), #106 (G3 + K5), #107 (G4)
+- Coordinates with PR #100 (circuit-breaker correctness fix) — half-open semantics now both correct AND tested
+
+### After this merges: cut v0.3.5-rc1
+Per the release process established for v0.3.5:
+1. Tag `v0.3.5-rc1` from the merge commit
+2. Release workflow produces images + chart
+3. `helm upgrade --version v0.3.5-rc1 --reset-values` on `vr1.lab.k8`
+4. Smoke: `curl /metrics | grep '^virtrigaud_'` should now show 12+ families with samples (vs the 1 family that v0.3.4 ships)
+5. If smoke passes, tag `v0.3.5` final from the same commit
+
+---
+
 ## [2026-05-23 13:31] - feat(obs): wire ProviderRPCMetrics into gRPC client middleware (closes #90)
 **Author:** @williamrizzo (William Rizzo)
 
