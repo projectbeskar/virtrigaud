@@ -12,6 +12,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2026-05-23 13:31] - feat(obs): wire ProviderRPCMetrics into gRPC client middleware (closes #90)
+**Author:** @williamrizzo (William Rizzo)
+
+### Added
+- `internal/transport/grpc/client.go`: New `providerRPCMetricsInterceptor(providerType)` returns a `grpc.UnaryClientInterceptor` that wraps every outbound provider RPC. On each call it records `virtrigaud_provider_rpc_requests_total{provider_type,method,code}` and `virtrigaud_provider_rpc_latency_seconds{provider_type,method}` via the existing `metrics.NewRPCTimer` API.
+- `internal/transport/grpc/client.go`: New `shortRPCMethod(fullMethod)` helper that extracts the RPC name from gRPC's full path (`/provider.v1.Provider/Validate` → `Validate`).
+- `internal/transport/grpc/client.go`: New `grpcCodeString(err)` helper that returns the canonical gRPC status code string (`"OK"`, `"Unavailable"`, `"DeadlineExceeded"`, etc.) for the metric `code` label.
+- `internal/transport/grpc/client_metrics_test.go`: New file. 5 tests / 15 sub-cases covering: `shortRPCMethod` parsing (6 edge cases), `grpcCodeString` mapping (5 codes incl. nil and non-gRPC errors), and 4 bufconn-based integration tests exercising the interceptor against an in-process gRPC server (successful call, error propagation, latency histogram, deadline-exceeded). No real network.
+
+### Changed
+- `internal/transport/grpc/client.go`: `NewClient` signature now takes a `providerType string` parameter inserted between `endpoint` and `tlsConfig`. The new parameter populates the `provider_type` metric label on every RPC made through this client. Empty string is permitted (label will be empty) but production callers should pass `provider.Spec.Type`.
+- `internal/runtime/remote/resolver.go`: Updated the sole caller of `NewClient` to pass `string(provider.Spec.Type)` (the only callsite repo-wide; verified by `grep -rn "transport/grpc\".NewClient" --include="*.go"`).
+
+### Why
+Fourth in the G-track. Per-RPC latency + error code is the most operationally valuable single signal for the remote-provider architecture: it answers "which RPC method is slow?", "which provider type is flapping?", "are gRPC errors concentrated on specific endpoints?", and "what's our SLO baseline?" — questions that per-Kind reconcile counters (G1-G3) can't.
+
+The interceptor is the natural insertion point — every gRPC call goes through it without per-callsite changes. The 17+ `c.client.XXX(...)` callsites in `client.go` need no edits.
+
+Coordinates with ADR-0001 follow-up F3 (interceptor coverage audit) — this PR establishes the metrics interceptor; future PRs can layer logging/tracing interceptors using the same pattern.
+
+### Impact
+- [ ] Breaking change to public API (the `NewClient` signature change is internal-only; only `internal/runtime/remote/resolver.go` uses it; verified)
+- [x] Requires cluster rollout (new manager image needed to emit the additional families)
+- [ ] Config change only
+- [ ] Documentation only
+
+Targeted for **v0.3.5**.
+
+### Verification
+```bash
+go test -v -count=1 -run "TestShortRPCMethod|TestGrpcCodeString|TestProviderRPCMetricsInterceptor" ./internal/transport/grpc/
+# PASS: 5 tests / 15 sub-cases
+make test  # transport/grpc pkg coverage 0% -> 9.2% (first tests in this package)
+make test-integration  # still green
+```
+
+Post-deploy (after v0.3.5-rc1):
+```bash
+curl /metrics | grep '^virtrigaud_provider_rpc_requests_total'
+# expect samples with provider_type=libvirt|vsphere|proxmox, method=Validate|Create|Describe|..., code=OK|Unavailable|...
+curl /metrics | grep '^virtrigaud_provider_rpc_latency_seconds_bucket'
+# expect populated histogram per provider_type x method combination
+```
+
+### References
+- Closes #90
+- Umbrella: #86
+- Pattern: PRs #101 (G1), #103 (G2), #106 (G3 + K5)
+- Coordinates with ADR-0001 F3
+
+---
+
 ## [2026-05-23 12:46] - feat(obs): instrument remaining 6 reconcilers + fix double-count bug (closes #89, #105)
 **Author:** @williamrizzo (William Rizzo)
 

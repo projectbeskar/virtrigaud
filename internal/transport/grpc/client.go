@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc"
@@ -31,6 +32,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
+	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
@@ -41,8 +43,14 @@ type Client struct {
 	client providerv1.ProviderClient
 }
 
-// NewClient creates a new gRPC provider client
-func NewClient(ctx context.Context, endpoint string, tlsConfig *TLSConfig) (*Client, error) {
+// NewClient creates a new gRPC provider client.
+//
+// providerType is the value of the Provider CR's spec.type field (e.g.
+// "vsphere", "libvirt", "proxmox", "mock") and is used as a metric label
+// on every RPC call made through this client. Passing an empty string is
+// permitted (the label will be empty) but discouraged in production —
+// makes per-provider-type alerts impossible.
+func NewClient(ctx context.Context, endpoint string, providerType string, tlsConfig *TLSConfig) (*Client, error) {
 	// Connection timeout is handled by grpc.NewClient internally
 	_ = ctx // Context available for future timeout implementation
 
@@ -64,6 +72,9 @@ func NewClient(ctx context.Context, endpoint string, tlsConfig *TLSConfig) (*Cli
 		grpc.WithDefaultCallOptions(
 			grpc.WaitForReady(true),
 		),
+		// G4 (#90): record per-RPC latency + status code into the
+		// virtrigaud_provider_rpc_* metric families.
+		grpc.WithUnaryInterceptor(providerRPCMetricsInterceptor(providerType)),
 	)
 
 	conn, err := grpc.NewClient(endpoint, opts...)
@@ -76,6 +87,55 @@ func NewClient(ctx context.Context, endpoint string, tlsConfig *TLSConfig) (*Cli
 		conn:   conn,
 		client: client,
 	}, nil
+}
+
+// providerRPCMetricsInterceptor returns a UnaryClientInterceptor that
+// records every outbound RPC call's latency and gRPC status code to
+// virtrigaud_provider_rpc_requests_total{provider_type,method,code} and
+// virtrigaud_provider_rpc_latency_seconds{provider_type,method}.
+//
+// `method` is the proto-RPC short name (e.g. "Validate", "Create",
+// "Describe"), extracted from the full gRPC method path. `code` is the
+// stringified gRPC status code ("OK", "Unavailable", "DeadlineExceeded",
+// etc.). On nil error, code is "OK" by gRPC convention.
+//
+// The interceptor must never fail (panic, etc.) — if it did, every
+// provider RPC would break. We keep it intentionally minimal.
+func providerRPCMetricsInterceptor(providerType string) grpc.UnaryClientInterceptor {
+	return func(
+		ctx context.Context,
+		fullMethod string,
+		req, reply interface{},
+		cc *grpc.ClientConn,
+		invoker grpc.UnaryInvoker,
+		opts ...grpc.CallOption,
+	) error {
+		shortMethod := shortRPCMethod(fullMethod)
+		timer := metrics.NewRPCTimer(providerType, shortMethod)
+		err := invoker(ctx, fullMethod, req, reply, cc, opts...)
+		timer.Finish(grpcCodeString(err))
+		return err
+	}
+}
+
+// shortRPCMethod extracts the RPC method name from a full gRPC method
+// path. gRPC formats the path as "/<package>.<Service>/<Method>"
+// (e.g. "/provider.v1.Provider/Validate" -> "Validate"). Falls back to
+// the input unchanged if the format is unexpected, keeping the metric
+// label stable rather than silently dropping data.
+func shortRPCMethod(fullMethod string) string {
+	if idx := strings.LastIndex(fullMethod, "/"); idx >= 0 && idx < len(fullMethod)-1 {
+		return fullMethod[idx+1:]
+	}
+	return fullMethod
+}
+
+// grpcCodeString returns the stringified gRPC status code for the given
+// error. nil error -> "OK". Non-gRPC errors -> "Unknown" (matching gRPC's
+// own convention). The string is the canonical short form from
+// codes.Code.String() so metric labels match the gRPC reference docs.
+func grpcCodeString(err error) string {
+	return status.Code(err).String()
 }
 
 // Close closes the gRPC connection
