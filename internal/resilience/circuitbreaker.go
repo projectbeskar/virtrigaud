@@ -118,7 +118,17 @@ func (cb *CircuitBreaker) Call(ctx context.Context, fn func(ctx context.Context)
 	return err
 }
 
-// allowCall determines if a call should be allowed
+// allowCall determines if a call should be allowed.
+//
+// Semantics:
+//   - StateClosed: always allowed.
+//   - StateOpen: rejected until ResetTimeout has elapsed since the last
+//     failure, at which point we transition to half-open AND count the
+//     allowed call as a half-open call (the transition itself IS the
+//     first half-open call — see issue #96).
+//   - StateHalfOpen: allowed up to HalfOpenMaxCalls calls; subsequent calls
+//     are rejected until recordSuccess closes the circuit or
+//     recordFailure re-opens it.
 func (cb *CircuitBreaker) allowCall() bool {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
@@ -127,14 +137,16 @@ func (cb *CircuitBreaker) allowCall() bool {
 	case StateClosed:
 		return true
 	case StateOpen:
-		// Check if we should transition to half-open
-		if time.Since(cb.lastFailureTime) > cb.config.ResetTimeout {
-			cb.transitionToHalfOpen()
-			return true
+		// Check if we should transition to half-open.
+		if time.Since(cb.lastFailureTime) <= cb.config.ResetTimeout {
+			return false
 		}
-		return false
+		cb.transitionToHalfOpen()
+		// Intentional fallthrough to StateHalfOpen so the transition
+		// counts as the first half-open call (fix for #96).
+		fallthrough
 	case StateHalfOpen:
-		// Allow limited calls in half-open state
+		// Allow limited calls in half-open state.
 		if cb.halfOpenCalls < cb.config.HalfOpenMaxCalls {
 			cb.halfOpenCalls++
 			return true

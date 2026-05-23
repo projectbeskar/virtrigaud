@@ -12,6 +12,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2026-05-23 11:05] - Fix circuit-breaker half-open transition count + harden timing-fragile test (closes #96, #97)
+**Author:** @williamrizzo (William Rizzo)
+
+### Fixed
+- `internal/resilience/circuitbreaker.go`: `allowCall()` now counts the Open→HalfOpen transition itself as the first half-open call. Previously the transition reset `halfOpenCalls=0` and returned `true` without incrementing, so a circuit configured with `HalfOpenMaxCalls=N` actually required `N+1` successful calls to transition back to Closed instead of `N`. Implementation: `fallthrough` from the StateOpen case into the StateHalfOpen case so the same `halfOpenCalls++` logic runs uniformly. Closes #96.
+- `test/integration/observability_test.go`: `TestCombinedResiliencePolicy` now uses `ResetTimeout: 30 * time.Second` (was `50 * time.Millisecond`). The old value was shorter than the test's own retry-loop runtime, so by the time the "Next call should be fast-failed" assertion ran, the reset timeout had already elapsed and the circuit had correctly transitioned to half-open — invalidating the test's premise. The fix decouples the test from wall-clock timing; it was a test bug, not a behavioral bug in the circuit breaker. Closes #97.
+
+### Added
+- `internal/resilience/circuitbreaker_test.go`: New file. 4 focused unit tests covering the half-open contract:
+  - `TestHalfOpenTransitionCountsAsCall` — the regression canary for #96
+  - `TestOpenStateRejectsCallsBeforeResetTimeout` — pins "fast-fail when open" contract, asserts the returned error is a retryable ProviderError
+  - `TestHalfOpenFailureReOpensCircuit` — a single failure in half-open re-opens the circuit, regardless of HalfOpenMaxCalls
+  - `TestHalfOpenRejectsAfterMaxCalls` — once HalfOpenMaxCalls is reached, additional calls are rejected until recordSuccess transitions to Closed
+- `test/integration/observability_test.go`: Removed `t.Skip("blocked by #96")` on `TestCircuitBreakerIntegration` and `t.Skip("blocked by #97")` on `TestCombinedResiliencePolicy`. Both now run in `make test-integration` (which is gated in CI as of PR #98).
+
+### Why
+Both issues were discovered when `test/integration/observability_test.go` was wired into CI in PR #98 (which closed #93). #96 is a real code bug — minor production impact (circuits stay half-open one call longer than configured before transitioning to closed) but worth fixing for correctness and to make the codebase match its documented behavior. #97 is a pure test bug with zero production impact — the circuit breaker correctly enforces open-state for the configured `ResetTimeout` window; the test was just timing-fragile.
+
+Bundled into a single PR because both touch the same subsystem (`internal/resilience/circuitbreaker.go` + its integration tests), the fixes are small, and the new unit-test suite covers behavior shared by both.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (next manager image will include the corrected half-open transition behavior — circuits recover one call faster than before, otherwise unchanged)
+- [ ] Config change only
+- [ ] Documentation only
+
+Not a security fix. Targeted for **v0.3.5** alongside the G-track metrics instrumentation.
+
+### Verification
+```bash
+go test -v -run "TestHalfOpen|TestOpenState" ./internal/resilience/
+# PASS: 4 tests
+go test -v -run "TestCircuitBreakerIntegration|TestCombinedResiliencePolicy" ./test/integration/
+# PASS: 2 tests (formerly skipped)
+make test-integration
+# ok ... all tests pass, no skips remaining for these two
+```
+
+### References
+- Closes #96, Closes #97
+- Discovered by PR #98 / commit `3f49026` (CI wiring)
+- PROJECT_CONTEXT.md tracks K2 + K3
+
+---
+
 ## [2026-05-23 09:23] - SECURITY: fix logging.Redact to mask values, not field names (closes #95)
 **Author:** @williamrizzo (William Rizzo)
 
