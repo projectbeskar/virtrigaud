@@ -154,11 +154,6 @@ func TestHealthSystem(t *testing.T) {
 }
 
 func TestCircuitBreakerIntegration(t *testing.T) {
-	// Blocked by #96 - state assertion at line 207 fails (expected 0, actual 1).
-	// Could be test bug or code bug in internal/resilience/circuitbreaker.go.
-	// Skipping until #96 determines root cause. Remove this t.Skip in the fix PR.
-	t.Skip("blocked by #96 - circuit breaker state assertion fails")
-
 	config := &resilience.Config{
 		FailureThreshold: 3,
 		ResetTimeout:     100 * time.Millisecond,
@@ -257,18 +252,17 @@ func TestRetryIntegration(t *testing.T) {
 }
 
 func TestCombinedResiliencePolicy(t *testing.T) {
-	// Blocked by #97 - circuit-open isn't being enforced (lines 307-311):
-	// when circuit is open, the wrapped operation still executes. Potentially
-	// a real behavioral bug in internal/resilience/circuitbreaker.go that
-	// would mean circuit-open doesn't protect downstream providers in
-	// production. Skipping until #97 determines root cause + production
-	// impact. Remove this t.Skip in the fix PR.
-	t.Skip("blocked by #97 - circuit-open not enforced in CombinedResiliencePolicy")
-
-	// Create circuit breaker
+	// Create circuit breaker.
+	//
+	// ResetTimeout intentionally large (30s, much longer than the retry-loop
+	// total runtime of this test) so the "Next call should be fast-failed"
+	// assertion below is deterministic. Issue #97 traced the original test
+	// flakiness to a 50ms ResetTimeout that elapsed during the test's retry
+	// delays, causing the circuit to transition to half-open before the
+	// final assertion ran.
 	cbConfig := &resilience.Config{
 		FailureThreshold: 2,
-		ResetTimeout:     50 * time.Millisecond,
+		ResetTimeout:     30 * time.Second,
 		HalfOpenMaxCalls: 1,
 	}
 	cb := resilience.NewCircuitBreaker("test", "test-provider", "test", cbConfig)
