@@ -12,6 +12,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2026-05-23 11:58] - feat(obs): instrument ProviderReconciler with reconcile timer + error counter (closes #88)
+**Author:** @williamrizzo (William Rizzo)
+
+### Added
+- `internal/controller/provider_controller.go`: `Reconcile` now records `virtrigaud_manager_reconcile_total{kind="Provider",outcome=...}` and `virtrigaud_manager_reconcile_duration_seconds{kind="Provider"}` via a single deferred block that infers outcome from named return values. Mirrors the G1 pattern shipped for `VirtualMachineReconciler` in PR #101.
+- `internal/controller/provider_controller.go`: 6 `metrics.RecordError(reason, ComponentManager)` calls at the documented error sites in `Reconcile`, `handleDeletion`, and `reconcileRemoteRuntime`. New `errReason*` constants at the top of the file: `get-provider`, `runtime-spec-invalid`, `service-reconcile-failed`, `deployment-reconcile-failed`, `cleanup-failed`. No collisions with the VirtualMachine reconciler's taxonomy.
+- `internal/controller/provider_metrics_test.go`: New file. 3 focused unit tests using `client/fake` (no envtest needed):
+  - `TestProviderReconcile_Metrics_NotFoundIsSuccessOutcome` — IsNotFound is outcome=success
+  - `TestProviderReconcile_Metrics_MissingRuntimeIsErrorOutcome` — missing `spec.runtime` is outcome=error + `errors_total{reason="runtime-spec-invalid"}`
+  - `TestProviderReconcile_Metrics_DurationHistogramFires` — smoke that the histogram observes at least one sample under `kind="Provider"`
+
+### Why
+Second in the G-track sequence (after G1 / PR #101). `ProviderReconciler` reconciles Provider CRs into per-Provider Deployments + Services + Secrets, and its failure modes (missing runtime spec, Service/Deployment reconcile errors) are operationally distinct from VM reconcile failures. Per-Kind reconcile counters and a dedicated reason taxonomy let operators dashboard "Provider lifecycle health" separately from "VM lifecycle health."
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (new manager image needed to emit)
+- [ ] Config change only
+- [ ] Documentation only
+
+Targeted for **v0.3.5** alongside G1 (already merged), G3, G4, G5.
+
+### Verification
+Locally:
+```bash
+go test -v -count=1 -run TestProviderReconcile_Metrics ./internal/controller/
+# PASS: 3 tests
+make test  # controller coverage 21.6% -> 22.4%
+make test-integration  # still green
+```
+
+Post-deploy (after the full G-track lands + v0.3.5-rc1 deploys):
+```bash
+curl /metrics | grep '^virtrigaud_manager_reconcile_total{kind="Provider"'
+# expect non-zero samples for outcome=success|requeue|error
+```
+
+### References
+- Closes #88
+- Umbrella: #86
+- Pattern established by: #101 (G1)
+- PROJECT_CONTEXT.md G-track item G2
+
+---
+
 ## [2026-05-23 11:26] - feat(obs): instrument VirtualMachineReconciler with reconcile timer + structured error counter (closes #87)
 **Author:** @williamrizzo (William Rizzo)
 

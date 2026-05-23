@@ -38,7 +38,20 @@ import (
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
+	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 	"github.com/projectbeskar/virtrigaud/internal/util"
+)
+
+// Reason labels used in metrics.RecordError calls for the Provider
+// reconciler. See virtualmachine_controller.go for the naming convention.
+// These constants are package-local; the `errReason*` prefix prevents
+// collisions with the VirtualMachine reconciler's taxonomy.
+const (
+	errReasonGetProvider         = "get-provider"
+	errReasonRuntimeSpecInvalid  = "runtime-spec-invalid"
+	errReasonServiceReconcile    = "service-reconcile-failed"
+	errReasonDeploymentReconcile = "deployment-reconcile-failed"
+	errReasonCleanupFailed       = "cleanup-failed"
 )
 
 // ProviderReconciler reconciles a Provider object
@@ -56,8 +69,31 @@ type ProviderReconciler struct {
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
-// Reconcile manages Provider resources and their runtime deployments
-func (r *ProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+// Reconcile manages Provider resources and their runtime deployments.
+//
+// Observability: per-call timer + outcome inference via deferred block
+// emits `virtrigaud_manager_reconcile_total{kind="Provider",outcome=...}`
+// and `virtrigaud_manager_reconcile_duration_seconds{kind="Provider"}`.
+// Specific error sites also record `virtrigaud_errors_total{reason=...,
+// component="manager"}`. Reason taxonomy: see the `errReason*` constants
+// at the top of this file.
+//
+// Named return values (`result`, `retErr`) are required by the deferred
+// outcome-inference block — do not change the signature without updating
+// the defer.
+func (r *ProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
+	timer := metrics.NewReconcileTimer("Provider")
+	defer func() {
+		outcome := metrics.OutcomeSuccess
+		switch {
+		case retErr != nil:
+			outcome = metrics.OutcomeError
+		case result.Requeue || result.RequeueAfter > 0:
+			outcome = metrics.OutcomeRequeue
+		}
+		timer.Finish(outcome)
+	}()
+
 	logger := log.FromContext(ctx)
 
 	// Fetch the Provider
@@ -68,6 +104,7 @@ func (r *ProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			return ctrl.Result{}, nil
 		}
 		logger.Error(err, "Failed to get Provider")
+		metrics.RecordError(errReasonGetProvider, metrics.ComponentManager)
 		return ctrl.Result{}, err
 	}
 
@@ -89,6 +126,7 @@ func (r *ProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		if updateErr := r.Status().Update(ctx, &provider); updateErr != nil {
 			logger.Error(updateErr, "Failed to update Provider status")
 		}
+		metrics.RecordError(errReasonRuntimeSpecInvalid, metrics.ComponentManager)
 		return ctrl.Result{}, err
 	}
 
@@ -148,6 +186,7 @@ func (r *ProviderReconciler) handleDeletion(ctx context.Context, provider *infra
 	// Always clean up remote runtime resources (all providers are remote now)
 	if err := r.cleanupRemoteRuntime(ctx, provider); err != nil {
 		logger.Error(err, "Failed to cleanup remote runtime resources")
+		metrics.RecordError(errReasonCleanupFailed, metrics.ComponentManager)
 		return ctrl.Result{RequeueAfter: time.Minute}, err
 	}
 
@@ -163,6 +202,7 @@ func (r *ProviderReconciler) reconcileRemoteRuntime(ctx context.Context, provide
 		k8s.SetCondition(&provider.Status.Conditions, "ProviderRuntimeReady", metav1.ConditionFalse, "InvalidConfiguration", err.Error())
 		provider.Status.Runtime.Phase = infravirtrigaudiov1beta1.ProviderRuntimePhaseFailed
 		provider.Status.Runtime.Message = err.Error()
+		metrics.RecordError(errReasonRuntimeSpecInvalid, metrics.ComponentManager)
 		return ctrl.Result{RequeueAfter: time.Minute}, err
 	}
 
@@ -177,6 +217,7 @@ func (r *ProviderReconciler) reconcileRemoteRuntime(ctx context.Context, provide
 		k8s.SetCondition(&provider.Status.Conditions, "ProviderRuntimeReady", metav1.ConditionFalse, "ServiceError", fmt.Sprintf("Failed to create service: %v", err))
 		provider.Status.Runtime.Phase = infravirtrigaudiov1beta1.ProviderRuntimePhaseFailed
 		provider.Status.Runtime.Message = err.Error()
+		metrics.RecordError(errReasonServiceReconcile, metrics.ComponentManager)
 		return ctrl.Result{RequeueAfter: time.Minute}, err
 	}
 
@@ -187,6 +228,7 @@ func (r *ProviderReconciler) reconcileRemoteRuntime(ctx context.Context, provide
 		k8s.SetCondition(&provider.Status.Conditions, "ProviderRuntimeReady", metav1.ConditionFalse, "DeploymentError", fmt.Sprintf("Failed to create deployment: %v", err))
 		provider.Status.Runtime.Phase = infravirtrigaudiov1beta1.ProviderRuntimePhaseFailed
 		provider.Status.Runtime.Message = err.Error()
+		metrics.RecordError(errReasonDeploymentReconcile, metrics.ComponentManager)
 		return ctrl.Result{RequeueAfter: time.Minute}, err
 	}
 
