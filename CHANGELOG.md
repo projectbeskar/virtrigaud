@@ -12,6 +12,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2026-05-23 09:07] - Wire observability integration test into CI (closes #93)
+**Author:** @williamrizzo (William Rizzo)
+
+### Added
+- `Makefile`: New `test-integration` target — `go test -race -coverprofile=cover-integration.out ./test/integration/...`. Distinct from `make test` (unit, excludes integration) and `make test-e2e` (kind cluster + ginkgo).
+- `.github/workflows/ci.yml`: The existing `integration` job now actually runs `make test-integration` instead of `echo "Skipping..."`. Removed the stale Kind cluster + CRD install steps (the only active test under `test/integration/` is `observability_test.go`, which has no Kubernetes API dependency). Added codecov upload tagged `integration`.
+
+### Fixed
+- `.github/workflows/ci.yml`: Replaced the no-op `echo "Skipping integration tests in CI due to libvirt dependencies"` step. The "libvirt dependencies" claim was stale — `test/integration/observability_test.go` only imports `internal/obs/*` + `internal/providers/contracts` + `internal/resilience` (no cgo, no libvirt). The disabled file (`vm_lifecycle_test.go.disabled`) was the libvirt-dependent one but Go ignores files not ending in `.go`.
+
+### Security
+- This PR surfaces, but does not fix, a critical pre-existing security bug in `internal/obs/logging.RedactString`: the function redacts field NAMES rather than VALUES, so `"password=secret123"` becomes `"[REDACTED]=secret123"` with the secret in cleartext. Tracked as **#95 (P0)**. `TestObservabilityIntegration` is skipped in this PR pending #95's fix.
+
+### Test infrastructure
+- `test/integration/observability_test.go`: Marked 3 pre-existing failing tests with `t.Skip(...)` and explicit issue references:
+  - `TestObservabilityIntegration` — blocked by #95 (security: RedactString redacts keys not values)
+  - `TestCircuitBreakerIntegration` — blocked by #96 (state assertion mismatch)
+  - `TestCombinedResiliencePolicy` — blocked by #97 (circuit-open not enforced — possible behavioral bug)
+- 4 tests now run in CI on every PR: `TestMetricsIntegration`, `TestHealthSystem`, `TestRetryIntegration`, `TestObservabilityEndToEnd`. Each follow-up PR (#95, #96, #97) un-skips its test as it lands.
+
+### Why
+The v0.3.0 → v0.3.2 → v0.3.3-rc1 metrics regression went undetected for three minor releases because the test that catches it (`TestMetricsIntegration`) lives under `test/integration/` and `make test` explicitly excludes that path. CI ran a no-op for the integration job. This PR closes that gap so future metric-binding (and broader observability) regressions are caught at PR time.
+
+Discovering 3 pre-existing failures the moment we wired the gate up — including a security-relevant one — validates the choice to land H3 before the G-track instrumentation work begins.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+Affects CI only. Future PRs gain integration-test gating; the 3 skipped tests are tracked by their own issues and will un-skip in their fix PRs.
+
+### References
+- Closes #93
+- Discovered: #95 (security, P0), #96, #97
+- PROJECT_CONTEXT.md track H3
+
+---
+
 ## [2026-05-22 18:27] - Inject VERSION and GIT_SHA into manager binary via ldflags
 **Author:** @williamrizzo (William Rizzo)
 
