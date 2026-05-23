@@ -12,6 +12,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2026-05-23 12:24] - fix(ci): pin Build matrix checkout to v4 to mitigate K4 intermittent failure (refs #102)
+**Author:** @williamrizzo (William Rizzo)
+
+### Fixed
+- `.github/workflows/ci.yml`: Pinned the `build` matrix job's `actions/checkout` from v6.0.2 (`de0fac2e...`) back to v4 (`34e114876b...`). Added a `DO NOT bump without resolving #102` comment so future contributors don't silently re-introduce the issue.
+
+### Why
+The `Build (...)` matrix in `ci.yml` (4 components: manager + 3 providers) has been intermittently failing during the `actions/checkout@v6.0.2` step with `fatal: could not read Username for 'https://github.com': terminal prompts disabled` (3 observed occurrences in 24 hours; tracked as #102). The same `v6.0.2` works fine on every other job in the same workflow (test, lint, security, build-tools, build-images). The asymmetry suggests something specific to this matrix's checkout invocation — possibly the parallel-fetch of the `pull/<N>/merge` ref racing against GitHub-side ref availability, or a regression introduced when PR #74 bumped checkout from v4 → v6 (PR #74 only touched ci.yml, not release.yml).
+
+This is a **partial fix** targeted at the most common K4 occurrence shape:
+- ✅ Addresses 2 of 3 observed occurrences (both in `ci.yml`'s `build` matrix)
+- ⚠️ Does NOT address release-time K4 (`release.yml`'s `build-and-push` matrix was already on v4 when occurrence 1 hit during the failed v0.3.3.1 release attempt; root cause likely different)
+- ⚠️ Does NOT pin `ci.yml`'s `build-images` matrix (no observed failures there; pinning preventively is over-fitting)
+
+If K4 continues to fire after this pin lands, the next move is to wrap the affected checkout in a retry action (e.g., `nick-fields/retry`) as a belt-and-suspenders measure regardless of root cause.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [x] Config change only (CI workflow)
+- [ ] Documentation only
+
+CI-only change.
+
+### Verification
+- [x] YAML syntax is valid (will be confirmed by CI's own self-load on this PR)
+- [ ] **CI on this PR runs cleanly** — if green on first try, the pin works AND we've already broken K4's per-PR pattern.
+- [ ] **Next ~5 PRs in the G-track also run cleanly on first try** — that's the real evidence the pin solved the per-cycle friction.
+
+If K4 still hits a future PR's `build` matrix despite this pin, that disproves the v6-regression hypothesis and we widen the search (retry wrapper, GitHub Actions infra investigation, etc.).
+
+### References
+- Refs #102 (not Closes — see "partial fix" caveat above; close #102 after we see ~10 consecutive K4-free CI runs across the next few PRs)
+- Original v4→v6 bump: PR #74
+- Affected runs: PR #101 CI (run 26331518215, succeeded on rerun), post-#101 main CI (run 26331986052, succeeded on rerun), failed v0.3.3.1 release attempt (run 26329718832, never re-attempted; re-cut as v0.3.4)
+
+---
+
 ## [2026-05-23 11:58] - feat(obs): instrument ProviderReconciler with reconcile timer + error counter (closes #88)
 **Author:** @williamrizzo (William Rizzo)
 
