@@ -87,7 +87,9 @@ func (r *Resolver) getRemoteProvider(ctx context.Context, provider *infravirtrig
 		return nil, fmt.Errorf("failed to build TLS config: %w", err)
 	}
 
-	client, err := grpcClient.NewClient(ctx, provider.Status.Runtime.Endpoint, tlsConfig)
+	// provider.Spec.Type populates the `provider_type` label on every
+	// virtrigaud_provider_rpc_* sample emitted by this client (G4 / #90).
+	client, err := grpcClient.NewClient(ctx, provider.Status.Runtime.Endpoint, string(provider.Spec.Type), tlsConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create gRPC client: %w", err)
 	}
