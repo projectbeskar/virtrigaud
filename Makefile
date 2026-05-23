@@ -130,6 +130,11 @@ test: gen-crds generate fmt vet setup-envtest ## Run tests.
 	go list ./... | grep -v '/internal/providers/libvirt' | grep -v '/cmd/provider-libvirt' | grep -v '/test/e2e' | grep -v '/test/integration' | \
 	xargs go test -coverprofile cover.out
 
+.PHONY: test-integration
+test-integration: ## Run integration tests under test/integration/ (cross-package observability + future controller integration). Distinct from make test (unit) and make test-e2e (kind cluster + ginkgo).
+	@echo "Running integration tests under test/integration/..."
+	@go test -race -coverprofile=cover-integration.out ./test/integration/...
+
 .PHONY: envtest-setup
 envtest-setup: setup-envtest ## Install setup-envtest and export KUBEBUILDER_ASSETS for local runs
 	@echo "To run tests locally with envtest, export:"

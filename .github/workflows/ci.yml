@@ -429,24 +429,26 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Set up Kind cluster
-        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc  # v1.14.0
+      # NOTE: `test/integration/observability_test.go` is pure cross-package
+      # wiring (internal/obs/{logging,metrics,health} + resilience + contracts)
+      # and has no Kubernetes API or libvirt dependency. We deliberately skip
+      # Kind + CRD setup here to keep this job fast (saves ~60s/run). When a
+      # future integration test under test/integration/ requires a cluster
+      # (e.g. re-enabling vm_lifecycle_test.go.disabled), add Kind setup back
+      # behind a path filter or split into a second job.
+
+      - name: Tidy Go modules
+        run: go mod tidy
+
+      - name: Run integration tests
+        run: make test-integration
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@75cd11691c0faa626561e295848008c8a7dddffe  # v5
         with:
-          version: v0.24.0
-          cluster_name: virtrigaud-integration
-          kubectl_version: v1.31.0
-          node_image: kindest/node:v1.31.0@sha256:53df588e04085fd41ae12de0c3fe4c72f7013bba32a20e7325357a1ac94ba865
-          wait: 60s
-          verbosity: 1
-
-      - name: Install CRDs
-        run: make install
-
-      - name: Run integration tests (excluding libvirt)
-        run: |
-          # Skip integration tests as they contain libvirt dependencies
-          # These tests should run separately in environments with libvirt
-          echo "Skipping integration tests in CI due to libvirt dependencies"
+          files: ./cover-integration.out
+          flags: integration
+          name: codecov-integration
 
       - name: Upload test results
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
