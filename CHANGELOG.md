@@ -12,6 +12,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2026-05-23 11:26] - feat(obs): instrument VirtualMachineReconciler with reconcile timer + structured error counter (closes #87)
+**Author:** @williamrizzo (William Rizzo)
+
+### Added
+- `internal/controller/virtualmachine_controller.go`: Reconcile entry now records a per-call timer to `virtrigaud_manager_reconcile_total{kind="VirtualMachine",outcome=...}` + `virtrigaud_manager_reconcile_duration_seconds{kind="VirtualMachine"}` via a single deferred block that infers outcome from named return values (`success` / `error` / `requeue`).
+- `internal/controller/virtualmachine_controller.go`: 11 `metrics.RecordError(reason, ComponentManager)` calls at the documented error sites in Reconcile + reconcileVM + handleDeletion, emitting `virtrigaud_errors_total{reason=...,component="manager"}`. Structured reason taxonomy declared as `errReason*` constants at the top of the file: `get-vm`, `add-finalizer`, `remove-finalizer`, `deps-not-found`, `deps-error`, `provider-resolve`, `provider-validate`, `provider-describe`, `provider-task-status`, `provider-delete`.
+- `internal/controller/virtualmachine_metrics_test.go`: New file. 3 focused unit tests using `client/fake` (no envtest needed):
+  - `TestReconcile_Metrics_NotFoundIsSuccessOutcome` — reconciling a non-existent VM (IsNotFound) records outcome=success
+  - `TestReconcile_Metrics_MissingDepsIsRequeueOutcome` — reconciling a VM whose Provider is missing records outcome=requeue + `errors_total{reason="deps-not-found"}` (Provider-not-found is recoverable transient state, NOT outcome=error noise)
+  - `TestReconcile_Metrics_DurationHistogramFires` — smoke that the duration histogram observes at least one sample per reconcile
+
+### Why
+v0.3.3 wired up the metrics infrastructure (registry binding PR #83, SetupMetrics PR #84, accurate labels PR #85, integration-test CI gate PR #98) but only `virtrigaud_build_info` emitted samples. This change starts populating the 11 other registered metric families by instrumenting the primary work loop — `VirtualMachineReconciler` — which is expected to be the loudest emitter under normal operation. After this PR deploys, operators scraping `/metrics` will see non-zero `virtrigaud_manager_reconcile_total{kind="VirtualMachine",...}` samples and a populated `virtrigaud_errors_total` histogram from real reconcile activity.
+
+The dual-channel design (outcome timer + structured error counter) was deliberate: the outcome label answers "was this reconcile a success/error/requeue from controller-runtime's perspective", and the error reason answers "WHY". A Provider-not-found situation is `outcome=requeue` (we asked to come back in 30s, not an error) AND `errors_total{reason="deps-not-found"}` (we want to dashboard the volume of missing-dep blocking states). These don't always overlap — a `deps-error` from a k8s API issue produces `outcome=requeue + reason=deps-error`, while a finalizer add failure produces `outcome=error + reason=add-finalizer`.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (new manager image needed for the metrics to start emitting)
+- [ ] Config change only
+- [ ] Documentation only
+
+Targeted for **v0.3.5** alongside G2-G5 (other reconcilers + gRPC middleware + circuit breaker).
+
+### Verification
+Locally:
+```bash
+go test -v -count=1 -run TestReconcile_Metrics ./internal/controller/
+# PASS: 3 tests
+make test  # full unit suite still green; controller coverage 20.8% -> 21.6%
+make test-integration  # still green; no integration regressions
+```
+
+Post-deploy (after merging the G-track sequence and cutting v0.3.5-rc1):
+```bash
+kubectl -n virtrigaud-system port-forward deploy/virtrigaud-manager 8080:8080 &
+curl -s :8080/metrics | grep '^virtrigaud_manager_reconcile_total{kind="VirtualMachine"'
+# expect one or more samples with outcome=success|error|requeue
+curl -s :8080/metrics | grep '^virtrigaud_errors_total{component="manager"'
+# expect samples for whichever error reasons actually fired during cluster operation
+```
+
+### References
+- Closes #87
+- Umbrella: #86
+- PROJECT_CONTEXT.md G-track item G1
+- Companion PRs (G2-G5) coming next
+
+---
+
 ## [2026-05-23 11:05] - Fix circuit-breaker half-open transition count + harden timing-fragile test (closes #96, #97)
 **Author:** @williamrizzo (William Rizzo)
 

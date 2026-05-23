@@ -35,7 +35,28 @@ import (
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
+	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
+)
+
+// Reason labels used in metrics.RecordError calls for the VirtualMachine
+// reconciler. Keep this taxonomy small and operationally meaningful — the
+// `reason` label is cardinality-sensitive and drives operator alerting.
+//
+// Naming convention: kebab-case, prefix with the subsystem (`get-`, `deps-`,
+// `provider-`, `remove-`). A new reason should describe WHAT went wrong, not
+// WHICH return statement fired.
+const (
+	errReasonGetVM            = "get-vm"
+	errReasonAddFinalizer     = "add-finalizer"
+	errReasonRemoveFinalizer  = "remove-finalizer"
+	errReasonDepsNotFound     = "deps-not-found"
+	errReasonDepsError        = "deps-error"
+	errReasonProviderResolve  = "provider-resolve"
+	errReasonProviderValidate = "provider-validate"
+	errReasonProviderDescribe = "provider-describe"
+	errReasonProviderTask     = "provider-task-status"
+	errReasonProviderDelete   = "provider-delete"
 )
 
 // ProviderResolver resolves Provider resources to provider implementations.
@@ -60,8 +81,32 @@ type VirtualMachineReconciler struct {
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
-// Reconcile handles VirtualMachine reconciliation
-func (r *VirtualMachineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+// Reconcile handles VirtualMachine reconciliation.
+//
+// Observability: every reconcile run records its duration and outcome to
+// `virtrigaud_manager_reconcile_total{kind="VirtualMachine",outcome=...}`
+// and `virtrigaud_manager_reconcile_duration_seconds{kind="VirtualMachine"}`
+// via a deferred timer that infers outcome from the named return values.
+// Specific error sites also record `virtrigaud_errors_total{reason=...,
+// component="manager"}` so operators can dashboard the WHY behind requeues
+// and error returns. See the `errReason*` constants above for the taxonomy.
+//
+// Named return values (`result`, `retErr`) are required by the deferred
+// outcome-inference block — do not change the signature without updating
+// the defer.
+func (r *VirtualMachineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
+	timer := metrics.NewReconcileTimer("VirtualMachine")
+	defer func() {
+		outcome := metrics.OutcomeSuccess
+		switch {
+		case retErr != nil:
+			outcome = metrics.OutcomeError
+		case result.Requeue || result.RequeueAfter > 0:
+			outcome = metrics.OutcomeRequeue
+		}
+		timer.Finish(outcome)
+	}()
+
 	logger := log.FromContext(ctx)
 	logger.Info("Reconciling VirtualMachine", "name", req.Name, "namespace", req.Namespace)
 
@@ -73,6 +118,7 @@ func (r *VirtualMachineReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			return ctrl.Result{}, nil
 		}
 		logger.Error(err, "Failed to fetch VirtualMachine")
+		metrics.RecordError(errReasonGetVM, metrics.ComponentManager)
 		return ctrl.Result{}, err
 	}
 
@@ -85,6 +131,7 @@ func (r *VirtualMachineReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	if !k8s.HasFinalizer(vm, infravirtrigaudiov1beta1.VirtualMachineFinalizer) {
 		if err := k8s.AddFinalizer(ctx, r.Client, vm, infravirtrigaudiov1beta1.VirtualMachineFinalizer); err != nil {
 			logger.Error(err, "Failed to add finalizer")
+			metrics.RecordError(errReasonAddFinalizer, metrics.ComponentManager)
 			return ctrl.Result{}, err
 		}
 		// Requeue to continue reconciliation
@@ -117,12 +164,14 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		if errors.IsNotFound(err) || strings.Contains(err.Error(), "not found") {
 			logger.Info("Provider not found, skipping reconciliation until Provider exists", "provider", vm.Spec.ProviderRef.Name, "error", err.Error())
 			k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonWaitingForDependencies, fmt.Sprintf("Provider %s not found", vm.Spec.ProviderRef.Name))
+			metrics.RecordError(errReasonDepsNotFound, metrics.ComponentManager)
 			r.updateStatus(ctx, vm)
 			// Requeue with longer interval when Provider is missing to reduce log noise
 			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
 		logger.Error(err, "Failed to get dependencies - will retry in 5s", "provider", vm.Spec.ProviderRef.Name, "class", vm.Spec.ClassRef.Name, "image", imageRefName)
 		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonWaitingForDependencies, err.Error())
+		metrics.RecordError(errReasonDepsError, metrics.ComponentManager)
 		r.updateStatus(ctx, vm)
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
@@ -134,6 +183,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	if err != nil {
 		logger.Error(err, "Failed to get provider instance - will retry in 5s", "provider", provider.Name, "runtime_phase", provider.Status.Runtime.Phase)
 		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, err.Error())
+		metrics.RecordError(errReasonProviderResolve, metrics.ComponentManager)
 		r.updateStatus(ctx, vm)
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
@@ -144,6 +194,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	if err := providerInstance.Validate(ctx); err != nil {
 		logger.Error(err, "Provider validation failed - will retry in 5s", "provider", provider.Name)
 		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Provider validation failed: %v", err))
+		metrics.RecordError(errReasonProviderValidate, metrics.ComponentManager)
 		r.updateStatus(ctx, vm)
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
@@ -155,6 +206,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		if err != nil {
 			logger.Error(err, "Failed to check task status")
 			k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Failed to check task: %v", err))
+			metrics.RecordError(errReasonProviderTask, metrics.ComponentManager)
 			r.updateStatus(ctx, vm)
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 		}
@@ -176,6 +228,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		if err != nil {
 			logger.Error(err, "Failed to check reconfigure task status")
 			k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Failed to check reconfigure task: %v", err))
+			metrics.RecordError(errReasonProviderTask, metrics.ComponentManager)
 			r.updateStatus(ctx, vm)
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 		}
@@ -206,6 +259,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	if err != nil {
 		logger.Error(err, "Failed to describe VM")
 		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Failed to describe VM: %v", err))
+		metrics.RecordError(errReasonProviderDescribe, metrics.ComponentManager)
 		r.updateStatus(ctx, vm)
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
@@ -275,6 +329,7 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 		if err := r.Get(ctx, providerKey, provider); err != nil {
 			if !errors.IsNotFound(err) {
 				logger.Error(err, "Failed to get provider for deletion")
+				metrics.RecordError(errReasonDepsError, metrics.ComponentManager)
 				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 			}
 			// Provider not found, continue with cleanup
@@ -283,11 +338,13 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 			providerInstance, err := r.getProviderInstance(ctx, provider)
 			if err != nil {
 				logger.Error(err, "Failed to get provider instance for deletion")
+				metrics.RecordError(errReasonProviderResolve, metrics.ComponentManager)
 			} else {
 				logger.Info("Deleting VM from provider", "id", vm.Status.ID)
 				taskRef, err := providerInstance.Delete(ctx, vm.Status.ID)
 				if err != nil {
 					logger.Error(err, "Failed to delete VM from provider")
+					metrics.RecordError(errReasonProviderDelete, metrics.ComponentManager)
 					// Continue with cleanup even if deletion fails
 				} else if taskRef != "" {
 					logger.Info("VM deletion initiated", "taskRef", taskRef)
@@ -300,6 +357,7 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 	// Remove finalizer
 	if err := k8s.RemoveFinalizer(ctx, r.Client, vm, infravirtrigaudiov1beta1.VirtualMachineFinalizer); err != nil {
 		logger.Error(err, "Failed to remove finalizer")
+		metrics.RecordError(errReasonRemoveFinalizer, metrics.ComponentManager)
 		return ctrl.Result{}, err
 	}
 
