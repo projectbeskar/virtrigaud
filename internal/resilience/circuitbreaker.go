@@ -169,7 +169,13 @@ func (cb *CircuitBreaker) recordResult(err error) {
 	}
 }
 
-// recordFailure records a failure
+// recordFailure records a failure.
+//
+// Observability (G5 / #91): increments virtrigaud_circuit_breaker_
+// failures_total{provider_type, provider} via cb.metrics.RecordFailure
+// EVERY call -- not just transitions. The counter answers "how often
+// is this circuit's wrapped function failing?", which is operationally
+// distinct from the state gauge (which only tracks current state).
 func (cb *CircuitBreaker) recordFailure() {
 	cb.failures++
 	cb.lastFailureTime = time.Now()
@@ -200,7 +206,13 @@ func (cb *CircuitBreaker) recordSuccess() {
 	}
 }
 
-// transitionToClosed transitions to closed state
+// transitionToClosed transitions to closed state.
+//
+// Observability (G5 / #91): emits virtrigaud_circuit_breaker_state{
+// provider_type, provider} = 0 via cb.metrics.SetState. Operators
+// dashboard the gauge value (0=Closed, 1=HalfOpen, 2=Open) and alert
+// on `virtrigaud_circuit_breaker_state > 0` to detect any non-closed
+// state across the provider fleet.
 func (cb *CircuitBreaker) transitionToClosed() {
 	cb.state = StateClosed
 	cb.failures = 0
@@ -208,14 +220,25 @@ func (cb *CircuitBreaker) transitionToClosed() {
 	cb.metrics.SetState(metrics.CircuitBreakerClosed)
 }
 
-// transitionToOpen transitions to open state
+// transitionToOpen transitions to open state.
+//
+// Observability (G5 / #91): emits virtrigaud_circuit_breaker_state{
+// provider_type, provider} = 2 via cb.metrics.SetState. The provider's
+// next call attempt will fast-fail until ResetTimeout elapses and
+// allowCall transitions to half-open.
 func (cb *CircuitBreaker) transitionToOpen() {
 	cb.state = StateOpen
 	cb.halfOpenCalls = 0
 	cb.metrics.SetState(metrics.CircuitBreakerOpen)
 }
 
-// transitionToHalfOpen transitions to half-open state
+// transitionToHalfOpen transitions to half-open state.
+//
+// Observability (G5 / #91): emits virtrigaud_circuit_breaker_state{
+// provider_type, provider} = 1 via cb.metrics.SetState. The next
+// HalfOpenMaxCalls calls are admitted (including this transition,
+// see #96 fix in PR #100); a single failure during this window
+// re-opens the circuit.
 func (cb *CircuitBreaker) transitionToHalfOpen() {
 	cb.state = StateHalfOpen
 	cb.halfOpenCalls = 0
