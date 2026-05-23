@@ -12,6 +12,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2026-05-23 12:46] - feat(obs): instrument remaining 6 reconcilers + fix double-count bug (closes #89, #105)
+**Author:** @williamrizzo (William Rizzo)
+
+Two related changes in one PR (both touch the same files / pattern):
+
+### Fixed
+- `internal/controller/vmmigration_controller.go` and `internal/controller/vmsnapshot_controller.go`: **Double-count bug** (#105). Prior `Reconcile` used `defer timer.Finish(metrics.OutcomeSuccess)` — the argument was evaluated and captured at defer-time — alongside explicit `timer.Finish(metrics.OutcomeError)` on error paths. Errored reconciles recorded TWO samples (one error from the explicit call, one success from the deferred call) because the deferred Finish always ran. `RecordReconcile` is not idempotent. Inflated success counters and made error-rate alerts under-report. Refactored both files to the G1 pattern (named return values + single deferred outcome-inference block that uses the actual return state).
+
+### Added
+Six reconcilers now instrumented (closes #89):
+- `internal/controller/vmmigration_controller.go`: reconcile timer + `errReasonGetMigration` constant + `RecordError` on get/add-finalizer paths
+- `internal/controller/vmsnapshot_controller.go`: reconcile timer + `errReasonGetSnapshot` constant + `RecordError` on get/add-finalizer/get-VM paths
+- `internal/controller/vmadoption_controller.go`: reconcile timer + 3 new constants (`adoption-discover-failed`, `adoption-status-update`, `adoption-invalid-filter`) + `RecordError` at 4 sites
+- `internal/controller/vmclass_controller.go`: reconcile timer only (stub Reconciler, no error paths)
+- `internal/controller/vmimage_controller.go`: same
+- `internal/controller/vmnetworkattachment_controller.go`: same
+
+After this PR, all 8 reconcilers emit `virtrigaud_manager_reconcile_total{kind=...,outcome=...}` and `virtrigaud_manager_reconcile_duration_seconds{kind=...}`:
+- `VirtualMachine` (G1, #87, PR #101)
+- `Provider` (G2, #88, PR #103)
+- `VMMigration`, `VMSnapshot`, `VMAdoption`, `VMClass`, `VMImage`, `VMNetworkAttachment` (G3, this PR)
+
+### Added — tests
+- `internal/controller/g3_metrics_test.go`: 4 tests covering:
+  - `TestVMMigrationReconcile_NoDoubleCountOnSuccessfulNotFound` — regression canary for #105
+  - `TestVMSnapshotReconcile_NoDoubleCountOnSuccessfulNotFound` — same
+  - `TestG3_StubReconcilersEmitTimer` — table-driven across VMClass, VMImage, VMNetworkAttachment stubs; asserts outcome=success emits on no-op reconcile
+  - `TestVMAdoptionReconcile_NotFoundIsSuccessOutcome` — IsNotFound contract for VMAdoption
+
+### Why
+G3 was the bulk pass over the remaining reconcilers per the G-track umbrella (#86) — meant to be mostly mechanical after G1 and G2 established the pattern. The audit step (recommended in #89's body) turned up the double-count bug in the 2 reconcilers that already had partial instrumentation. Filed as #105 and bundled into the same PR because both fixes touch the same files and the refactor was the same.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (new manager image needed to emit the additional families AND to fix the double-count)
+- [ ] Config change only
+- [ ] Documentation only
+
+Targeted for **v0.3.5**.
+
+### Verification
+```bash
+go test -v -count=1 -run "TestG3|TestVMMigrationReconcile_NoDouble|TestVMSnapshotReconcile_NoDouble|TestVMAdoptionReconcile" ./internal/controller/
+# PASS: 6 sub-tests (4 top-level)
+make test  # controller pkg coverage 22.4% -> 24.0%
+make test-integration  # still green
+```
+
+Post-deploy (after v0.3.5-rc1 deploys):
+```bash
+curl /metrics | awk '/^virtrigaud_manager_reconcile_total/{print $1}' | sort -u
+# expect samples across all 8 reconcilers' kinds
+```
+
+### References
+- Closes #89 (G3)
+- Closes #105 (K5 double-count fix)
+- Umbrella: #86
+- Pattern: PRs #101 (G1), #103 (G2)
+- Pre-#105 bug shipping in: every release with `vmmigration` and `vmsnapshot` reconcilers that called the metrics package (at least v0.3.0+)
+
+---
+
 ## [2026-05-23 12:24] - fix(ci): pin Build matrix checkout to v4 to mitigate K4 intermittent failure (refs #102)
 **Author:** @williamrizzo (William Rizzo)
 

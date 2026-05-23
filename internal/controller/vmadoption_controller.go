@@ -39,8 +39,18 @@ import (
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
+	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/runtime/remote"
+)
+
+// Reason labels specific to the VMAdoption reconciler. Reuses the
+// errReasonGetProvider constant from provider_controller.go (same
+// operational meaning).
+const (
+	errReasonDiscoverVMs    = "adoption-discover-failed"
+	errReasonAdoptionStatus = "adoption-status-update"
+	errReasonInvalidFilter  = "adoption-invalid-filter"
 )
 
 const (
@@ -82,8 +92,29 @@ type VMAdoptionReconciler struct {
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=vmimages,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
-// Reconcile handles adoption requests
-func (r *VMAdoptionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+// Reconcile handles adoption requests.
+//
+// Observability: per-call timer + outcome inference via deferred block
+// emits `virtrigaud_manager_reconcile_total{kind="VMAdoption",outcome=...}`
+// + duration histogram. Specific error sites also record
+// `virtrigaud_errors_total{reason=...,component="manager"}`.
+//
+// Named return values (`result`, `retErr`) are required by the deferred
+// outcome-inference block — do not change the signature without updating
+// the defer.
+func (r *VMAdoptionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
+	timer := metrics.NewReconcileTimer("VMAdoption")
+	defer func() {
+		outcome := metrics.OutcomeSuccess
+		switch {
+		case retErr != nil:
+			outcome = metrics.OutcomeError
+		case result.Requeue || result.RequeueAfter > 0:
+			outcome = metrics.OutcomeRequeue
+		}
+		timer.Finish(outcome)
+	}()
+
 	logger := log.FromContext(ctx)
 	logger.Info("VMAdoption controller reconciling Provider", "provider", req.NamespacedName)
 
@@ -95,6 +126,7 @@ func (r *VMAdoptionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			return ctrl.Result{}, nil
 		}
 		logger.Error(err, "Failed to get Provider")
+		metrics.RecordError(errReasonGetProvider, metrics.ComponentManager)
 		return ctrl.Result{}, err
 	}
 
@@ -137,6 +169,7 @@ func (r *VMAdoptionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			if updateErr := r.Status().Update(ctx, &provider); updateErr != nil {
 				logger.Error(updateErr, "Failed to update adoption status")
 			}
+			metrics.RecordError(errReasonInvalidFilter, metrics.ComponentManager)
 			return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
 		}
 		filter = parsedFilter
@@ -151,6 +184,7 @@ func (r *VMAdoptionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		if updateErr := r.Status().Update(ctx, &provider); updateErr != nil {
 			logger.Error(updateErr, "Failed to update adoption status")
 		}
+		metrics.RecordError(errReasonDiscoverVMs, metrics.ComponentManager)
 		return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
 	}
 
@@ -193,6 +227,7 @@ func (r *VMAdoptionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	if err := r.Status().Update(ctx, &provider); err != nil {
 		logger.Error(err, "Failed to update adoption status")
+		metrics.RecordError(errReasonAdoptionStatus, metrics.ComponentManager)
 		return ctrl.Result{}, err
 	}
 

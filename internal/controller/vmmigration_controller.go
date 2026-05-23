@@ -44,6 +44,17 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/util/k8s"
 )
 
+// Reason labels used in metrics.RecordError calls for the VMMigration
+// reconciler. See virtualmachine_controller.go for the naming convention.
+// G3 currently instruments only the top-level Reconcile entry sites;
+// per-phase-handler instrumentation can be added in a follow-up PR.
+const (
+	errReasonGetMigration = "get-migration"
+	// errReasonAddFinalizer is shared with the VirtualMachine reconciler
+	// (declared in virtualmachine_controller.go); reuse that constant
+	// for the same operational meaning rather than redeclaring it.
+)
+
 // VMMigrationReconciler reconciles a VMMigration object
 type VMMigrationReconciler struct {
 	client.Client
@@ -80,10 +91,36 @@ func NewVMMigrationReconciler(
 //+kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 //+kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 
-// Reconcile is part of the main kubernetes reconciliation loop
-func (r *VMMigrationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+// Reconcile is part of the main kubernetes reconciliation loop.
+//
+// Observability: per-call timer + outcome inference via deferred block
+// emits `virtrigaud_manager_reconcile_total{kind="VMMigration",outcome=...}`
+// and `virtrigaud_manager_reconcile_duration_seconds{kind="VMMigration"}`.
+// Specific error sites also record `virtrigaud_errors_total{reason=...,
+// component="manager"}`. Reason taxonomy: see the `errReason*` constants
+// at the top of this file (added in G3).
+//
+// Named return values (`result`, `retErr`) are required by the deferred
+// outcome-inference block — do not change the signature without updating
+// the defer.
+//
+// Fixes issue #105: prior implementation used `defer timer.Finish(
+// metrics.OutcomeSuccess)` (argument captured immediately) plus explicit
+// `timer.Finish(metrics.OutcomeError)` on error paths. Errored reconciles
+// recorded TWO samples (one error + one success) because the deferred
+// Finish ran AFTER the explicit one. New pattern records exactly one.
+func (r *VMMigrationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
 	timer := metrics.NewReconcileTimer("VMMigration")
-	defer timer.Finish(metrics.OutcomeSuccess)
+	defer func() {
+		outcome := metrics.OutcomeSuccess
+		switch {
+		case retErr != nil:
+			outcome = metrics.OutcomeError
+		case result.Requeue || result.RequeueAfter > 0:
+			outcome = metrics.OutcomeRequeue
+		}
+		timer.Finish(outcome)
+	}()
 
 	// Add correlation context
 	ctx = logging.WithCorrelationID(ctx, fmt.Sprintf("vmmigration-%s", req.Name))
@@ -99,7 +136,7 @@ func (r *VMMigrationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			return ctrl.Result{}, nil
 		}
 		logger.Error(err, "Failed to get VMMigration")
-		timer.Finish(metrics.OutcomeError)
+		metrics.RecordError(errReasonGetMigration, metrics.ComponentManager)
 		return ctrl.Result{}, err
 	}
 
@@ -118,7 +155,7 @@ func (r *VMMigrationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		controllerutil.AddFinalizer(migration, finalizerName)
 		if err := r.Update(ctx, migration); err != nil {
 			logger.Error(err, "Failed to add finalizer")
-			timer.Finish(metrics.OutcomeError)
+			metrics.RecordError(errReasonAddFinalizer, metrics.ComponentManager)
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{Requeue: true}, nil

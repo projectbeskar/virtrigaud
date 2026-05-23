@@ -36,6 +36,12 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/util/k8s"
 )
 
+// Reason label specific to the VMSnapshot reconciler. Shared reasons
+// (errReasonAddFinalizer, errReasonGetVM) are declared in
+// virtualmachine_controller.go and reused here for the same operational
+// meaning.
+const errReasonGetSnapshot = "get-snapshot"
+
 // VMSnapshotReconciler reconciles a VMSnapshot object
 type VMSnapshotReconciler struct {
 	client.Client
@@ -69,10 +75,32 @@ func NewVMSnapshotReconciler(
 //+kubebuilder:rbac:groups=infra.virtrigaud.io,resources=virtualmachines,verbs=get;list;watch
 //+kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
-// Reconcile is part of the main kubernetes reconciliation loop
-func (r *VMSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+// Reconcile is part of the main kubernetes reconciliation loop.
+//
+// Observability: per-call timer + outcome inference via deferred block
+// emits `virtrigaud_manager_reconcile_total{kind="VMSnapshot",outcome=...}`
+// and `virtrigaud_manager_reconcile_duration_seconds{kind="VMSnapshot"}`.
+//
+// Named return values (`result`, `retErr`) are required by the deferred
+// outcome-inference block — do not change the signature without updating
+// the defer.
+//
+// Fixes issue #105: prior implementation used `defer timer.Finish(
+// metrics.OutcomeSuccess)` (argument captured immediately) plus explicit
+// `timer.Finish(metrics.OutcomeError)` on error paths. Errored reconciles
+// recorded TWO samples per reconcile. New pattern records exactly one.
+func (r *VMSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
 	timer := metrics.NewReconcileTimer("VMSnapshot")
-	defer timer.Finish(metrics.OutcomeSuccess)
+	defer func() {
+		outcome := metrics.OutcomeSuccess
+		switch {
+		case retErr != nil:
+			outcome = metrics.OutcomeError
+		case result.Requeue || result.RequeueAfter > 0:
+			outcome = metrics.OutcomeRequeue
+		}
+		timer.Finish(outcome)
+	}()
 
 	// Add correlation context
 	ctx = logging.WithCorrelationID(ctx, fmt.Sprintf("vmsnapshot-%s", req.Name))
@@ -88,7 +116,7 @@ func (r *VMSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			return ctrl.Result{}, nil
 		}
 		logger.Error(err, "Failed to get VMSnapshot")
-		timer.Finish(metrics.OutcomeError)
+		metrics.RecordError(errReasonGetSnapshot, metrics.ComponentManager)
 		return ctrl.Result{}, err
 	}
 
@@ -106,7 +134,7 @@ func (r *VMSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		controllerutil.AddFinalizer(snapshot, "snapshot.infra.virtrigaud.io/finalizer")
 		if err := r.Update(ctx, snapshot); err != nil {
 			logger.Error(err, "Failed to add finalizer")
-			timer.Finish(metrics.OutcomeError)
+			metrics.RecordError(errReasonAddFinalizer, metrics.ComponentManager)
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{Requeue: true}, nil
@@ -125,7 +153,7 @@ func (r *VMSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			fmt.Sprintf("Referenced VM not found: %v", err))
 		// Status update errors are intentionally ignored to avoid blocking reconciliation
 		_ = r.updateStatus(ctx, snapshot)
-		timer.Finish(metrics.OutcomeError)
+		metrics.RecordError(errReasonGetVM, metrics.ComponentManager)
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
