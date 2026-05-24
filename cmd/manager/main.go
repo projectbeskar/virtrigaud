@@ -37,6 +37,7 @@ import (
 	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/controller"
 	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
+	"github.com/projectbeskar/virtrigaud/internal/resilience"
 	"github.com/projectbeskar/virtrigaud/internal/runtime/remote"
 	"github.com/projectbeskar/virtrigaud/internal/version"
 )
@@ -145,8 +146,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Create the per-Provider CircuitBreaker registry shared across all
+	// gRPC clients (G6 / #111). DefaultConfig: FailureThreshold=10,
+	// ResetTimeout=60s, HalfOpenMaxCalls=3. The registry allocates one
+	// breaker per Provider CR; metric series with provider_type +
+	// provider labels emit on /metrics for each.
+	cbRegistry := resilience.NewRegistry(resilience.DefaultConfig())
+
 	// Create remote provider resolver (all providers are now remote)
-	remoteResolver := remote.NewResolver(mgr.GetClient())
+	remoteResolver := remote.NewResolver(mgr.GetClient(), cbRegistry)
 
 	if err = (&controller.VirtualMachineReconciler{
 		Client:         mgr.GetClient(),

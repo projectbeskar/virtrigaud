@@ -12,6 +12,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2026-05-24 08:02] - feat(obs): wire CircuitBreaker into provider gRPC RPC path (closes #111)
+**Author:** @williamrizzo (William Rizzo)
+
+### Audit finding
+v0.3.5 release smoke on `vr1.lab.k8` confirmed that `virtrigaud_circuit_breaker_state` and `virtrigaud_circuit_breaker_failures_total` emit zero samples in production despite G5 (PR #108) wiring all metric emission paths correctly. Root cause: **the CircuitBreaker code in `internal/resilience/` was never instantiated by any production caller**. The gRPC client in `internal/transport/grpc/client.go` had a G4 metrics interceptor but no resilience layer. Net effect: no real circuit-breaker protection on the manager→provider RPC path, AND no breaker metrics ever emitted. The package was correct but dead.
+
+### Added
+- `internal/transport/grpc/client.go`: New `providerCircuitBreakerInterceptor` — a `grpc.UnaryClientInterceptor` that wraps every outbound RPC with `CircuitBreaker.Call`. Chained AFTER the existing G4 metrics interceptor via `grpc.WithChainUnaryInterceptor`, so circuit-breaker rejections still show up in `virtrigaud_provider_rpc_requests_total{code="Unavailable"}` (no silent drops).
+- `internal/transport/grpc/client.go`: New `isInfraFailure` classifier — pins the gRPC-code policy that decides what counts as a "provider health" failure (tripping the breaker) vs a business error (passing through). Tripping codes: `Unavailable`, `DeadlineExceeded`, `Internal`, `Unknown`. Pass-through codes: `NotFound`, `InvalidArgument`, `AlreadyExists`, `FailedPrecondition`, `PermissionDenied`, `Unauthenticated`, `Canceled`, `ResourceExhausted`, `Aborted`, `OutOfRange`, `Unimplemented`. Documented inline with rationale per code.
+- `internal/transport/grpc/client_circuitbreaker_test.go`: New file. 5 tests covering: gRPC-code classification table (15 cases), infra errors trip the breaker after `FailureThreshold`, business errors never trip regardless of count, successful calls leave the breaker Closed, and the full `Closed → Open → HalfOpen → Closed` lifecycle through the interceptor (not just the underlying breaker).
+- `cmd/manager/main.go`: Constructs a `resilience.NewRegistry(resilience.DefaultConfig())` once at startup and threads it to `remote.NewResolver`. One CircuitBreaker per Provider CR is allocated lazily by the Resolver via `Registry.GetOrCreate("rpc", providerType, providerName)`.
+- `cmd/main.go` (parallel build path, see #92 H1): same wiring so this build path retains parity.
+
+### Changed
+- `internal/transport/grpc/client.go`: `NewClient` signature now accepts `cb *resilience.CircuitBreaker` (4th parameter, before `tlsConfig`). Passing `nil` disables circuit-breaker wiring — supported for unit tests that exercise real gRPC failure semantics without the breaker interposing.
+- `internal/runtime/remote/resolver.go`: `NewResolver` signature now accepts `cbRegistry *resilience.Registry` (2nd parameter). `getRemoteProvider` calls `cbRegistry.GetOrCreate(...)` per-Provider before passing the resulting breaker to `NewClient`. `CleanupClient` also calls `cbRegistry.Remove(...)` so deleted Providers stop emitting `virtrigaud_circuit_breaker_*` series and don't leak CB instances.
+- `internal/controller/vmmigration_controller_test.go`: Test now passes `nil` registry to `remote.NewResolver` (it uses a fake k8s client; no real gRPC dialing happens, so the wiring would be inert).
+
+### Why
+1. **Real circuit-breaker protection on the RPC path.** Before this change, a flapping hypervisor (e.g. the `kex_exchange_identification` libvirt SSH issue tracked as #I1) caused the manager to keep hammering the provider with retries — v0.3.5 smoke showed 22 `DeadlineExceeded` + 9 `Canceled` Validate RPCs against libvirt in a few minutes. With G6, after `FailureThreshold=10` infra failures, the breaker opens and short-circuits subsequent RPCs for `ResetTimeout=60s`, giving the downstream hypervisor room to recover and the manager room to free up reconcile slots.
+2. **`virtrigaud_circuit_breaker_*` metric families now emit.** Closes the last empty G-track family from the v0.3.5 smoke gap analysis (6/8 → 8/8 families with samples). Operators can dashboard `virtrigaud_circuit_breaker_state{provider_type, provider}` and alert on `state > 0` to catch any provider whose breaker is non-closed.
+3. **Opinionated classification matters.** A 1000-VM reconcile loop that gets `NotFound` for one missing VM shouldn't trip the breaker — the provider is healthy; the request was bad. Conversely, a single `Unavailable` from a dead provider pod IS a health signal. The classifier encodes this distinction at one place, with documented rationale per code, so future RPCs added to the proto inherit it automatically.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (new manager binary; new metrics emit after rollout)
+- [ ] Config change only
+- [ ] Documentation only
+
+### Notes
+- Config knobs (`FailureThreshold`, `ResetTimeout`, `HalfOpenMaxCalls`) use `resilience.DefaultConfig()` globally — no per-Provider CRD field. If operators ask for per-Provider tuning later, the wiring is straightforward (add `Spec.Runtime.CircuitBreaker` to the Provider CRD and pass through the Resolver).
+- Pre-existing tooling drift discovered during verify: `.golangci.yml` is v2 syntax (commit `8d3be28`), but Makefile pins `golangci-lint v1.64.8`. `make lint` fails. Independent of this PR; should be tracked as a separate tooling issue.
+- v0.3.6-rc1 smoke checklist should include: scale a provider deployment to 0, watch the breaker's state gauge flip `0 → 2` after `FailureThreshold` infra failures within `ResetTimeout`; scale back up and watch it transition `2 → 1 → 0` through HalfOpen. This proves the wiring end-to-end on the cluster.
+
+---
+
 ## [2026-05-23 14:02] - feat(obs): document + test CircuitBreakerMetrics lifecycle (closes #91)
 **Author:** @williamrizzo (William Rizzo)
 

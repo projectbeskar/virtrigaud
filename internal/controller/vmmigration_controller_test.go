@@ -54,9 +54,12 @@ var _ = Describe("VMMigration Controller", func() {
 
 		// Create reconciler with fake client
 		reconciler = &VMMigrationReconciler{
-			Client:         fakeClient,
-			Scheme:         s,
-			RemoteResolver: remote.NewResolver(fakeClient),
+			Client: fakeClient,
+			Scheme: s,
+			// Pass nil cbRegistry — this test exercises controller
+			// logic against a fake k8s client; no real gRPC dialing
+			// happens, so circuit-breaker wiring would be inert.
+			RemoteResolver: remote.NewResolver(fakeClient, nil),
 		}
 	})
 
