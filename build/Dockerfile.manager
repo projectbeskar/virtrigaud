@@ -1,5 +1,15 @@
 # Build the manager binary
-FROM golang:1.25 as builder
+#
+# H1 PR-2 (#116): BUILDER_IMAGE / BASE_IMAGE are parametrised so corporate
+# / banking deployments that cannot pull from docker.io or gcr.io can
+# point at their internal mirrors (Artifactory, Harbor, etc.) without
+# patching this Dockerfile. Defaults match the previously-hardcoded
+# images so upstream release behaviour is unchanged.
+ARG BUILDER_IMAGE=docker.io/golang:1.25
+ARG BASE_IMAGE=gcr.io/distroless/static:nonroot
+
+FROM ${BUILDER_IMAGE} AS builder
+
 ARG TARGETOS
 ARG TARGETARCH
 # VERSION and GIT_SHA are injected into internal/version via ldflags so that
@@ -9,7 +19,35 @@ ARG TARGETARCH
 ARG VERSION=dev
 ARG GIT_SHA=unknown
 
+# H1 PR-2 (#116): GOPROXY / GOINSECURE / GOPRIVATE / GOSUMDB passthrough
+# so corporate-proxy go module fetches work without rebuilding a custom
+# builder image. Defaults are empty (no override) except GOSUMDB which
+# uses the public sum database. The Makefile already passes these as
+# --build-arg values when set in the environment; receivers (the
+# provider Dockerfiles already declared these — this brings the manager
+# Dockerfile into line with the rest of the project).
+ARG GOPROXY=""
+ENV GOPROXY=${GOPROXY}
+ARG GOINSECURE=""
+ENV GOINSECURE=${GOINSECURE}
+ARG GOPRIVATE=""
+ENV GOPRIVATE=${GOPRIVATE}
+ARG GOSUMDB="sum.golang.org"
+ENV GOSUMDB=${GOSUMDB}
+
 WORKDIR /workspace
+
+# H1 PR-2 (#116): inject any corporate CA certificates BEFORE `go mod
+# download` so TLS-intercepting proxies don't break the module fetch.
+# Standard Debian/Ubuntu flow: drop .crt files in
+# /usr/local/share/ca-certificates/ and run update-ca-certificates to
+# rebuild the trust bundle (the orphan root Dockerfile used the wrong
+# directory, /etc/ssl/certs/, which update-ca-certificates ignores).
+# Upstream releases ship an empty ca-certs/ (only .gitkeep + README.md);
+# the COPY is a no-op as update-ca-certificates skips non-.crt files.
+COPY ca-certs/ /usr/local/share/ca-certificates/
+RUN update-ca-certificates
+
 # Copy the Go Modules manifests and local modules (needed for replace directives)
 COPY go.mod go.mod
 COPY go.sum go.sum
@@ -37,7 +75,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a \
 
 # Use distroless as minimal base image to package the manager binary
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
-FROM gcr.io/distroless/static:nonroot
+FROM ${BASE_IMAGE}
 WORKDIR /
 COPY --from=builder /workspace/manager .
 USER 65532:65532
