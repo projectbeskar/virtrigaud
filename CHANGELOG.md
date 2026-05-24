@@ -12,6 +12,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2026-05-24 10:09] - feat(cmd/manager): port --version flag, certwatcher, and metrics RBAC filter (H1 PR-1 / closes #114)
+**Author:** @williamrizzo (William Rizzo)
+
+### Audit finding
+First implementation chunk of the H1 build-path consolidation roadmap (see `fieldTesting/ADR-0002-build-path-consolidation.md`). Three features the local-dev orphan `cmd/main.go` had but the canonical `cmd/manager/main.go` lacked are now ported into the canonical entrypoint, with defaults preserved so existing deployments see zero behaviour change.
+
+### Added
+- `cmd/manager/main.go`: `versionString()` helper — single-line banner emitted by `--version`. Extracted from main() so it is unit-testable without subprocess execution. Format is `virtrigaud-manager <version.String()>`, pinned by `TestVersionString` so release-verification grep patterns stay stable.
+- `cmd/manager/main.go`: `--version` flag handler at the top of main(). Mirrors the cmd/main.go behaviour. Uses `os.Args[1]` lookup (not `flag.BoolVar` + `flag.Parse`) so `--version` works even when invalid flags follow and avoids the long help text on error.
+- `cmd/manager/main.go`: certificate-rotation flag set — `--webhook-cert-path`, `--webhook-cert-name`, `--webhook-cert-key`, `--metrics-cert-path`, `--metrics-cert-name`, `--metrics-cert-key`. All default to empty/`tls.crt`/`tls.key`, matching cmd/main.go.
+- `cmd/manager/main.go`: `sigs.k8s.io/controller-runtime/pkg/certwatcher` integration for both webhook and metrics endpoints. Hot cert rotation works once `--*-cert-path` is set. Watchers are registered as Runnables on the manager after controllers and are nil-guarded so zero-overhead at defaults.
+- `cmd/manager/main.go`: `sigs.k8s.io/controller-runtime/pkg/metrics/filters.WithAuthenticationAndAuthorization` wiring on the metrics endpoint. **Activates ONLY when `--metrics-secure=true`**, which currently defaults to `false`. When enabled, `/metrics` becomes an RBAC-checked resource (only ServiceAccounts with `get` on the `/metrics` nonResourceURL can scrape).
+- `cmd/manager/main.go`: imports `fmt`, `path/filepath`, `sigs.k8s.io/controller-runtime/pkg/certwatcher`, `sigs.k8s.io/controller-runtime/pkg/metrics/filters`. Renamed metrics-server alias from `server` to `metricsserver` for clarity (the prior unqualified name collided readability-wise with the controller-runtime `webhook` package).
+- `cmd/manager/main_test.go`: new file. `TestVersionString` pins the banner format and the contract that it delegates to `internal/version.String()` (the same source of truth as the `virtrigaud_build_info` metric label).
+
+### Changed
+- `cmd/manager/main.go`: webhook server construction now uses `webhookTLSOpts` (base `tlsOpts` plus the webhook certwatcher's `GetCertificate` callback when `--webhook-cert-path` is set). When the flag is unset, `webhookTLSOpts == tlsOpts` — no change vs. pre-PR.
+- `cmd/manager/main.go`: metrics server options are now built as a `metricsServerOptions` variable (rather than constructed inline inside `ctrl.NewManager`) so the `FilterProvider` and the metrics certwatcher's `GetCertificate` callback can be layered on conditionally. At defaults (`--metrics-secure=false`, `--metrics-cert-path=""`), the resulting `metricsserver.Options{...}` is byte-for-byte equivalent to the prior inline struct.
+
+### Why
+Per ADR-0002, the H1 consolidation needs four PRs in sequence. PR-1 is the prerequisite for retiring the local-dev orphan (PR-4): the canonical path must first absorb every feature the orphan had that operators may rely on. The three features ported here are exactly the ones flagged by the 2026-05-23 audit comment on #92 — `--version` (operators script against it), certwatcher (cert-manager renewals don't require pod restarts), and the metrics RBAC filter (banking-compliance posture, anonymous /metrics exposure is a routine audit finding).
+
+By keeping `--metrics-secure=false` as the default in this PR, every existing deployment sees identical behaviour. The default flip is a separate, breaking change held for v0.4.0 (PR-5).
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout (the manager binary gains features, but their activation requires explicit flag settings)
+- [ ] Config change only
+- [ ] Documentation only
+
+### Notes
+- `make build` still builds `cmd/main.go` (the orphan) — this PR does not touch Makefile targets. That redirection is PR-3 of the H1 roadmap, which also closes the latent bug #113 (orphan binary missing `virtrigaud_build_info` emission + VMSnapshot + VMMigration controllers).
+- `make lint` continues to fail locally on the pre-existing `.golangci.yml` v2 vs `golangci-lint v1.64.8` tooling drift; CI's runner-installed version is newer and passes. Tracked separately as future tooling work.
+- Manual smoke pre-merge: built with `-ldflags '-X .../version.Version=v0.3.6-h1pr1-dev -X .../version.GitSHA=$(git rev-parse HEAD)'`, ran `./bin/manager --version`, got `virtrigaud-manager v0.3.6-h1pr1-dev (66d0fbc9cef23bd6561bb1f86239660a3601433c)` with exit 0.
+
+---
+
 ## [2026-05-24 08:02] - feat(obs): wire CircuitBreaker into provider gRPC RPC path (closes #111)
 **Author:** @williamrizzo (William Rizzo)
 
