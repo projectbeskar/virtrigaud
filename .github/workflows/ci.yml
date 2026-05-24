@@ -267,7 +267,7 @@ jobs:
           esac
 
       - name: Upload binary
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: ${{ matrix.component }}-binary
           path: bin/${{ matrix.component }}*
@@ -295,7 +295,7 @@ jobs:
           go build -o bin/vrtg-provider ./cmd/vrtg-provider
 
       - name: Upload tools
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: cli-tools
           path: bin/*
@@ -416,7 +416,7 @@ jobs:
         run: ./bin/vcts validate test/conformance/specs/
 
       - name: Upload conformance results
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: conformance-validation
           path: test/conformance/specs/
@@ -458,7 +458,7 @@ jobs:
           name: codecov-integration
 
       - name: Upload test results
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         if: always()
         with:
           name: integration-test-results
