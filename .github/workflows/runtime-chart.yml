@@ -20,8 +20,6 @@ concurrency:
 permissions:
   contents: read
 
-env:
-
 jobs:
   lint:
     name: Lint Runtime Chart
