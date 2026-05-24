@@ -12,6 +12,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2026-05-24 21:27] - chore: bump Go toolchain floor to 1.26.0 and pin Dockerfiles to golang:1.26.3 (closes #122)
+**Author:** @williamrizzo (William Rizzo)
+
+### Audit finding
+Drift between the project's three Go layers:
+- `go.mod` floor: `go 1.24.0`
+- `sdk/go.mod` floor: `go 1.24.0`
+- `proto/go.mod` floor: `go 1.23` (most stale)
+- Dockerfiles: `golang:1.25(-bookworm)` (all 5 builder bases)
+- CI: `GO_VERSION: '1.23'` env var in `.github/workflows/{ci,runtime-chart}.yml` — unused because every job uses `go-version-file: go.mod` which trumps the env var
+
+This PR consolidates all three layers on the same target (Go 1.26) and clears the stale env var.
+
+### Changed
+- `go.mod`: `go 1.24.0` → `go 1.26.0`. Module-graph cleanup from `go mod tidy` reclassifies `prometheus/client_model` from indirect → direct (test code uses it directly; this was a long-standing miscategorization the new tidy detected).
+- `sdk/go.mod`: `go 1.24.0` → `go 1.26.0`. Module-graph cleanup prunes `cel.dev/expr v0.24.0` and `rogpeppe/go-internal v1.13.1` (already superseded by newer transitive versions; not removed manually, `go mod tidy` did it).
+- `proto/go.mod`: `go 1.23` → `go 1.26.0`. New `proto/go.sum` (14 lines) tracked; previously untracked because the module graph was simple enough that go.sum wasn't needed before the newer Go version.
+- `build/Dockerfile.manager`: `ARG BUILDER_IMAGE=docker.io/golang:1.25` → `ARG BUILDER_IMAGE=docker.io/golang:1.26.3`.
+- `cmd/provider-libvirt/Dockerfile`: `ARG BUILDER_IMAGE=golang:1.25-bookworm` → `ARG BUILDER_IMAGE=golang:1.26.3-bookworm`.
+- `cmd/provider-vsphere/Dockerfile`: same change.
+- `cmd/provider-mock/Dockerfile`: hardcoded `FROM golang:1.25-bookworm` → `FROM golang:1.26.3-bookworm` (this Dockerfile predates the BUILDER_IMAGE ARG pattern; left as-is for this PR).
+- `cmd/provider-proxmox/Dockerfile`: `ARG BUILDER_IMAGE=golang:1.25` → `ARG BUILDER_IMAGE=golang:1.26.3`.
+- `.github/workflows/ci.yml`: removed stale `GO_VERSION: '1.23'` env var (was unused — jobs use `go-version-file: go.mod`). Updated one straggler job (line ~535, the `Verify single-version CRDs` step in the CRD-verification workflow) from `go-version: ${{ env.GO_VERSION }}` to `go-version-file: go.mod` for consistency with the rest of the file.
+- `.github/workflows/runtime-chart.yml`: removed the same stale `GO_VERSION: '1.23'` env var.
+
+### Why
+1. **Closes the drift** between the three Go layers. Going forward, the source of truth is `go.mod`'s `go` directive plus the explicit Dockerfile pins.
+2. **Picks up 1.26 toolchain improvements** (runtime, stdlib, build tooling) without paying for them under release pressure.
+3. **Clears the stale CI env var** that pinned a version we no longer support and that misled contributors reading the workflow.
+4. **Prepares the tree for G7 work** (#123 umbrella) — wiring 4 more `virtrigaud_*` metric families lands next, and we don't want \"is this metric quirk because of an old Go version?\" being a confounder.
+
+### Safety evidence (hands-on, all collected before this PR was filed — see #122 issue body)
+- `go vet ./...` clean against bumped directive
+- `go build ./...` clean against bumped directive
+- `make test` 12/12 packages pass (the unrelated `test/e2e` failure requires a kind cluster and is excluded from `make test`)
+- `go mod tidy` in all 3 modules — zero source changes required; only go.sum cleanup
+- `docker.io/golang:1.26.3` AND `golang:1.26.3-bookworm` images pullable (manifest inspected)
+- Full Docker build chain: `golang:1.26.3` builder → `go 1.26.0` directive → manager binary → `./manager --version` works (exit 0). Built locally as `virtrigaud-manager:gobump-pr` from commit `b7bf3f9`, banner returned `virtrigaud-manager v0.3.6-gobump-pr (b7bf3f937017a331ff99fad356cc565a549afc74)`.
+
+### Impact
+- [ ] Breaking change (no public API or CRD surface changed)
+- [x] Requires cluster rollout — only for source-building consumers: anyone running `make build` or `make docker-build` (or any non-released artefact) needs **Go 1.26+** installed locally. Operators pulling the released images (`ghcr.io/projectbeskar/virtrigaud/manager:<tag>`) are unaffected because the release image embeds its own Go toolchain in the builder stage.
+- [ ] Config change only
+- [ ] Documentation only
+
+### Notes
+- Corporate forks that override `BUILDER_IMAGE` via `--build-arg` (enabled by PR #117 / H1 PR-2) can pin their own `golang:1.26.x` image from an internal mirror without patching the Dockerfile.
+- This is a standalone PR per the v0.3.6 plan agreed with William: Go bump first → G7 PRs second → v0.3.6-rc1 cut. A bisect surface stays clean if any downstream regression emerges.
+- Pre-existing `make lint` tooling drift (`.golangci.yml` v2 syntax vs `golangci-lint v1.64.8` Makefile pin) is unchanged — out of scope here; CI's runner-installed version passes.
+
+---
+
 ## [2026-05-24 12:47] - chore: delete cmd/main.go + root Dockerfile (H1 PR-4 / closes #92 H1 umbrella + #120)
 **Author:** @williamrizzo (William Rizzo)
 

@@ -1,5 +1,5 @@
 # Build stage with CGO support for libvirt
-ARG BUILDER_IMAGE=golang:1.25-bookworm
+ARG BUILDER_IMAGE=golang:1.26.3-bookworm
 ARG BASE_IMAGE=debian:bookworm-slim
 FROM ${BUILDER_IMAGE} AS builder
 
