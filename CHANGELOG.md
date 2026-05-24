@@ -12,6 +12,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2026-05-24 11:38] - fix(make): redirect build/run/docker-build/docker-buildx to canonical path; closes latent #113 (H1 PR-3 / closes #118)
+**Author:** @williamrizzo (William Rizzo)
+
+### Audit finding
+Third implementation chunk of the H1 build-path consolidation roadmap (`fieldTesting/ADR-0002-build-path-consolidation.md`). The Makefile's local-dev build targets (`make build`, `make run`, `make docker-build`, `make docker-build-multiplatform`, `make docker-buildx`) all invoked the orphan path — `cmd/main.go` and the root `Dockerfile`. That orphan path produces an **incomplete manager binary** (this is #113, the latent bug discovered during the H1 audit):
+
+- **No `metrics.SetupMetrics()` call** — local-dev manager never emits `virtrigaud_build_info`.
+- **VMSnapshot controller NOT registered** — local-dev manager could not reconcile `VMSnapshot` CRs at all.
+- **VMMigration controller NOT registered** — local-dev manager could not reconcile `VMMigration` CRs at all.
+
+Anyone using `make docker-build`, `make build`, `make run` for local testing has been running a half-working binary ever since these paths diverged.
+
+### Changed
+- `Makefile:build` target — now `go build ... ./cmd/manager` (was `cmd/main.go`).
+- `Makefile:run` target — now `go run ./cmd/manager` (was `./cmd/main.go`).
+- `Makefile:docker-build` target — now `$(CONTAINER_TOOL) build -f build/Dockerfile.manager ...` (was implicit `-f Dockerfile` pointing at the orphan root Dockerfile). All 10 `--build-arg` flags are preserved verbatim.
+- `Makefile:docker-build-multiplatform` target — same `-f build/Dockerfile.manager` redirect.
+- `Makefile:docker-buildx` target — `sed` source is now `build/Dockerfile.manager` (was root `Dockerfile`). The transformed `Dockerfile.cross` output continues to be written to and cleaned up from repo root.
+
+All five edits carry an inline `# H1 PR-3 (#118): ...` comment block explaining the redirect and pointing at #113.
+
+### Fixed
+- **#113** — `make docker-build`, `make build`, and `make run` now produce a manager binary functionally equivalent to the released image: emits `virtrigaud_build_info`, registers all 8 controllers (including VMSnapshot + VMMigration), exposes the `--version` handler from PR #115 (H1 PR-1).
+
+### Why
+1. **Fixes the silent #113 bug** at its root cause: the Makefile targets pointed at the wrong files. Every local-dev manager build before this commit was missing real functionality.
+2. **Cleans up the H1 surface area** before PR-4 (orphan deletion): after this PR lands, `cmd/main.go` and root `Dockerfile` are truly orphaned — no Makefile target, no CI workflow, no hack script references them anymore. (Verified — `hack/dev-deploy.sh` already used `-f build/Dockerfile.manager`; the CI `Build (manager)` matrix job already used `go build ./cmd/manager` directly.)
+3. **Brings local-dev parity with CI and release**: CI's `Build (manager)` job and the release workflow both target `cmd/manager/main.go` + `build/Dockerfile.manager`. Now `make build` matches.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout — only for local-dev workflows: anyone doing `make dev-deploy` after running `make docker-build` will pick up a manager binary with NEW controllers (VMSnapshot, VMMigration) and NEW metrics emission they were previously missing. This is the desired behaviour, but if local CRs of those kinds were left in a stale state, they will start being reconciled. Call out to local-dev users: review your VMSnapshot / VMMigration CRs after upgrading. CI and release builds are unaffected (already on canonical).
+- [ ] Config change only
+- [ ] Documentation only
+
+### Notes
+- **CI is unaffected.** `.github/workflows/ci.yml` line 256 uses `go build -o bin/manager ./cmd/manager` directly (not `make build`). Line 343's container-image matrix uses `./build/Dockerfile.manager` for manager (not `make docker-build`). The CI `Build (manager)` job was already on canonical; only local-dev workflows shift with this PR.
+- **`make dev-deploy` is unaffected.** `hack/dev-deploy.sh` line 148 already used `-f build/Dockerfile.manager`. The bug only bit users who reached for raw `make docker-build` or `make build`.
+- Manual smoke pre-merge:
+  - `make build` → `./bin/manager --version` returned `virtrigaud-manager v0.3.5-6-g4c1746d-dirty (4c1746da3...)`, exit 0.
+  - `strings ./bin/manager | grep -E 'vmsnapshot-controller|vmmigration-controller'` → both symbols present.
+  - `make docker-build CONTROLLER_IMG=virtrigaud-manager:h1pr3-test VERSION=v0.3.6-h1pr3-test` → image built; `docker run --rm virtrigaud-manager:h1pr3-test --version` returned `virtrigaud-manager v0.3.6-h1pr3-test (4c1746d...)`, exit 0.
+- This is the third PR in the H1 roadmap; PR-4 (delete `cmd/main.go` + root `Dockerfile`) is now unblocked and can land next.
+
+---
+
 ## [2026-05-24 10:50] - feat(build): add BUILDER_IMAGE/BASE_IMAGE/GOPROXY ARGs + CA-cert handling to build/Dockerfile.manager (H1 PR-2 / closes #116)
 **Author:** @williamrizzo (William Rizzo)
 

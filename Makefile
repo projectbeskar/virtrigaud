@@ -198,7 +198,11 @@ proto-breaking: buf ## Check for breaking changes in protocol buffer definitions
 
 .PHONY: build
 build: gen-crds generate fmt vet ## Build manager binary.
-	go build -ldflags "$(LDFLAGS)" -o bin/manager cmd/main.go
+	# H1 PR-3 (#118): build the CANONICAL manager entrypoint (cmd/manager/main.go),
+	# matching what build/Dockerfile.manager and the release pipeline build.
+	# The previous target built cmd/main.go which was silently missing
+	# metrics.SetupMetrics + VMSnapshot + VMMigration controllers (see #113).
+	go build -ldflags "$(LDFLAGS)" -o bin/manager ./cmd/manager
 
 .PHONY: build-provider-libvirt
 build-provider-libvirt: proto ## Build libvirt provider binary (requires CGO)
@@ -221,7 +225,8 @@ build-providers: build-provider-libvirt build-provider-vsphere build-provider-pr
 
 .PHONY: run
 run: gen-crds generate fmt vet ## Run a controller from your host.
-	go run ./cmd/main.go
+	# H1 PR-3 (#118): run the CANONICAL manager entrypoint. See `build` target above.
+	go run ./cmd/manager
 
 ##@ Module Release
 
@@ -281,7 +286,11 @@ release-sdk: ## Release SDK module with tags and generate docs
 #   make docker-buildx BUILD_PLATFORMS=linux/arm64,linux/amd64  # Build and push for multiple platforms
 .PHONY: docker-build
 docker-build: ## Build docker image with the manager.
-	$(CONTAINER_TOOL) build --platform $(PLATFORM) -t ${CONTROLLER_IMG} \
+	# H1 PR-3 (#118): -f build/Dockerfile.manager — use the CANONICAL Dockerfile
+	# (same one the release pipeline uses). The previous implicit `-f Dockerfile`
+	# pointed at the root Dockerfile + cmd/main.go, which was missing metrics
+	# setup + VMSnapshot + VMMigration controllers (see #113).
+	$(CONTAINER_TOOL) build --platform $(PLATFORM) -f build/Dockerfile.manager -t ${CONTROLLER_IMG} \
 		--build-arg VERSION="$(VERSION)" \
 		--build-arg GIT_SHA="$(GIT_SHA)" \
 		--build-arg TARGETOS="$(shell echo $(PLATFORM) | cut -d'/' -f1)" \
@@ -296,7 +305,8 @@ docker-build: ## Build docker image with the manager.
 
 .PHONY: docker-build-multiplatform
 docker-build-multiplatform: ## Build docker image for multiple platforms (without push)
-	$(CONTAINER_TOOL) buildx build --platform $(BUILD_PLATFORMS) -t ${CONTROLLER_IMG} \
+	# H1 PR-3 (#118): same redirect as `docker-build` — see comment above.
+	$(CONTAINER_TOOL) buildx build --platform $(BUILD_PLATFORMS) -f build/Dockerfile.manager -t ${CONTROLLER_IMG} \
 		--build-arg VERSION=$(VERSION) \
 		--build-arg GIT_SHA=$(GIT_SHA) \
 		--load \
@@ -393,8 +403,11 @@ docker-provider-proxmox-multiplatform: ## Build proxmox provider for multiple pl
 PLATFORMS ?= linux/arm64,linux/amd64,linux/s390x,linux/ppc64le
 .PHONY: docker-buildx
 docker-buildx: ## Build and push docker image for the manager for cross-platform support
-	# copy existing Dockerfile and insert --platform=${BUILDPLATFORM} into Dockerfile.cross, and preserve the original Dockerfile
-	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
+	# H1 PR-3 (#118): sed-transform the CANONICAL Dockerfile (build/Dockerfile.manager)
+	# into Dockerfile.cross at repo root, inserting --platform=${BUILDPLATFORM}
+	# into the FROM line(s). Was previously transforming the orphan root
+	# Dockerfile, building the wrong binary across all platforms (see #113).
+	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' build/Dockerfile.manager > Dockerfile.cross
 	- $(CONTAINER_TOOL) buildx create --name virtrigaud-builder
 	$(CONTAINER_TOOL) buildx use virtrigaud-builder
 	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${CONTROLLER_IMG} -f Dockerfile.cross \
