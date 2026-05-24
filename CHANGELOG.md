@@ -12,6 +12,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2026-05-24 12:47] - chore: delete cmd/main.go + root Dockerfile (H1 PR-4 / closes #92 H1 umbrella + #120)
+**Author:** @williamrizzo (William Rizzo)
+
+### Audit finding
+Final v0.3.6 chunk of the H1 build-path consolidation roadmap (`fieldTesting/ADR-0002-build-path-consolidation.md`). With PR-1 (#114 / PR #115), PR-2 (#116 / PR #117), and PR-3 (#118 / PR #119) all merged, the orphan local-dev path (`cmd/main.go` + root `Dockerfile`) is reachable from nowhere — no Makefile target, no CI workflow, no hack script, no release-engineering tooling, no fork-engineering tooling references either file. Delete them.
+
+### Removed
+- `cmd/main.go` (~303 LOC). The local-dev orphan manager entrypoint. Every feature it had that operators relied on was ported to the canonical `cmd/manager/main.go` in PR #115 (`--version` flag, certwatcher integration for webhook + metrics, `metrics/filters.WithAuthenticationAndAuthorization` RBAC filter). The two missing things that made it strictly inferior to the canonical (no `metrics.SetupMetrics`, no VMSnapshot controller, no VMMigration controller — tracked as the closed-by-PR-3 bug #113) are gone with it.
+- `Dockerfile` (repo root, ~58 LOC). The local-dev orphan Dockerfile that PR-3 already routed every Makefile target away from. The CA-cert handling pattern it carried was reimplemented correctly in `build/Dockerfile.manager` by PR #117 (using `/usr/local/share/ca-certificates/` instead of the orphan's broken `/etc/ssl/certs/` target, with a dedicated `ca-certs/` subdirectory rather than the orphan's repo-root glob).
+
+### Why
+1. **The H1 umbrella #92 closes here.** The original 2026-05-22 instinct (`rm cmd/main.go Dockerfile`) was wrong because the orphan path had real features the canonical lacked. After 4 PRs of careful porting + redirect + verify, this PR is the safe execution of that original instinct.
+2. **Stops the dual-path tax** that PR #112 (G6) had to pay (wiring the CircuitBreaker registry into both entrypoints). Future cross-cutting work touches one entrypoint only.
+3. **Removes the next-contributor footgun.** "Which Dockerfile builds the released image?" no longer has two plausible answers — the 30 minutes of confusion during the v0.3.3-rc4 hotfix cannot recur.
+
+### Impact
+- [ ] Breaking change (no public API or CRD surface changed)
+- [x] Requires cluster rollout — only for corporate **forks** that imported the deleted files. Fork-migration story: replace `-f Dockerfile` with `-f build/Dockerfile.manager`; replace `cmd/main.go` with `cmd/manager/main.go`. ADR-0002 has the full feature-parity table. Upstream operators see no change.
+- [ ] Config change only
+- [ ] Documentation only
+
+### Notes
+- **Verified deletion-safe before filing** (full grep matrix in #120's body): `.github/workflows/{ci,release}.yml`, `hack/{dev-deploy,test-release-locally}.sh`, and all 5 affected Makefile targets explicitly route the manager to `build/Dockerfile.manager` / `cmd/manager/main.go`. The remaining string-level references to `cmd/main.go` / `Dockerfile` in the tree after this PR are: historical CHANGELOG entries (do not edit past records), explanatory comments in `Makefile` + `cmd/manager/main.go` that point at H1 PR numbers (kept as project history), and `internal/scaffold/scaffold.go` which uses `"Dockerfile"` as the output filename of the scaffolding template (unrelated).
+- Manual smoke pre-merge (after deletion):
+  - `make build` → `./bin/manager --version` → `virtrigaud-manager v0.3.5-7-gd29fffd-dirty (d29fffd0...)`, exit 0.
+  - `make docker-build CONTROLLER_IMG=virtrigaud-manager:h1pr4-test VERSION=v0.3.6-h1pr4-test` → image built; `docker run --rm virtrigaud-manager:h1pr4-test --version` returned `virtrigaud-manager v0.3.6-h1pr4-test (d29fffd0...)`, exit 0.
+  - `go vet ./...` clean; `make test` 12/12 packages pass.
+  - The pre-existing `test/e2e` failure (kind-cluster-required, excluded from `make test`) is not affected by this PR.
+- **H1 roadmap status after this merges**:
+  - PR-1 / #114 (PR #115) ✅ MERGED
+  - PR-2 / #116 (PR #117) ✅ MERGED
+  - PR-3 / #118 (PR #119) ✅ MERGED (closes #113)
+  - PR-4 / #120 (this PR) ✅ closes #92 (H1 umbrella)
+  - PR-5 (v0.4.0 only — breaking `--metrics-secure` default flip) — deferred per ADR-0002.
+
+---
+
 ## [2026-05-24 11:38] - fix(make): redirect build/run/docker-build/docker-buildx to canonical path; closes latent #113 (H1 PR-3 / closes #118)
 **Author:** @williamrizzo (William Rizzo)
 
