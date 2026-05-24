@@ -12,6 +12,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2026-05-24 10:50] - feat(build): add BUILDER_IMAGE/BASE_IMAGE/GOPROXY ARGs + CA-cert handling to build/Dockerfile.manager (H1 PR-2 / closes #116)
+**Author:** @williamrizzo (William Rizzo)
+
+### Audit finding
+Second implementation chunk of the H1 build-path consolidation roadmap (`fieldTesting/ADR-0002-build-path-consolidation.md`). Audit on 2026-05-24 found that:
+- `Makefile:docker-build` already passes 10 build-args (`VERSION`, `GIT_SHA`, `TARGETOS`, `TARGETARCH`, `BUILDER_IMAGE`, `BASE_IMAGE`, `GOPROXY`, `GOINSECURE`, `GOPRIVATE`, `GOSUMDB`).
+- All 3 provider Dockerfiles (`cmd/provider-{libvirt,vsphere,proxmox}/Dockerfile`) already declare all 10 ARGs.
+- `build/Dockerfile.manager` declared only 4 of them — the other 6 were silently ignored. The manager Dockerfile was the project's only outlier.
+- The orphan root `Dockerfile` did declare all 10, **but** its CA-cert handling used `COPY *.crt /etc/ssl/certs/` which is broken in two ways: (1) the glob matches zero files on a fresh checkout (verified `ls *.crt` errors), and (2) `update-ca-certificates` reads inputs from `/usr/local/share/ca-certificates/`, not `/etc/ssl/certs/` — copying to the latter directly does nothing.
+
+### Added
+- `build/Dockerfile.manager`: `ARG BUILDER_IMAGE=docker.io/golang:1.25` and `ARG BASE_IMAGE=gcr.io/distroless/static:nonroot`, used in the corresponding `FROM` lines. Defaults match the previously-hardcoded images so upstream release builds produce byte-equivalent images.
+- `build/Dockerfile.manager`: `ARG GOPROXY=""`, `ARG GOINSECURE=""`, `ARG GOPRIVATE=""`, `ARG GOSUMDB="sum.golang.org"` with corresponding `ENV` lines. Matches the pattern used by all 3 provider Dockerfiles. Defaults preserve current upstream behaviour.
+- `build/Dockerfile.manager`: `COPY ca-certs/ /usr/local/share/ca-certificates/` + `RUN update-ca-certificates` **before** `RUN go mod download`. Required ordering so corporate TLS-intercepting proxies do not break the Go module fetch. Uses the correct Debian/Ubuntu directory (`/usr/local/share/ca-certificates/`), unlike the orphan's broken `/etc/ssl/certs/` path.
+- `ca-certs/.gitkeep`: new placeholder so the directory exists in the upstream tree. Without `.crt` files, the `COPY` + `update-ca-certificates` pair is a no-op (the script skips non-`.crt` files).
+- `ca-certs/README.md`: 50+ line operator guide. Covers when to populate this directory (corporate TLS proxies, internal module mirrors), how to use it (drop `.crt` files, rebuild), the builder-stage-only scope (NOT runtime CAs — those go via Kubernetes secrets/configmaps), and security warnings (one cert per file, never private keys, do not commit org-internal CAs to public forks).
+
+### Why
+1. **Brings the manager Dockerfile in line with the rest of the project.** All 3 provider Dockerfiles already declared these ARGs; the manager being the outlier was tech-debt that operators have to discover via failed builds in regulated environments.
+2. **Unblocks corporate / banking deployments without a Dockerfile fork.** Banking customers categorically cannot pull from `docker.io` or `gcr.io` in their production build pipelines. Without these ARGs they forked; forks drift. With them, an internal mirror override is one `--build-arg` away.
+3. **CA-cert handling fixes a latent bug from the orphan Dockerfile.** The orphan's `COPY *.crt /etc/ssl/certs/` was broken on fresh checkouts AND used the wrong directory. The corrected pattern in this PR (`ca-certs/` → `/usr/local/share/ca-certificates/`) works upstream as a no-op AND works for corporate forks that drop their certs in.
+4. **Subdirectory pattern limits the security blast radius.** ADR-0002 flagged the orphan's repo-root glob as a risk: any stray `.crt` file in the build context would have been shipped into the image. The dedicated `ca-certs/` subdirectory makes the intent explicit and confines what gets bundled.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (new manager image embeds the additional CA-cert handling layer — content-identical at defaults but cache key changes)
+- [ ] Config change only
+- [ ] Documentation only
+
+### Notes
+- Default behaviour is preserved at every level: `docker build -f build/Dockerfile.manager .` with no `--build-arg` overrides produces a functionally equivalent image to today's release. Verified pre-merge by building locally with default ARGs, then again with `--build-arg BUILDER_IMAGE=docker.io/golang:1.25 --build-arg GOSUMDB=off` — both produced runnable `--version`-correct images.
+- Manual smoke pre-merge: \
+  `docker build -f build/Dockerfile.manager --build-arg VERSION=v0.3.6-h1pr2-test --build-arg GIT_SHA=$(git rev-parse HEAD) -t virtrigaud-manager:h1pr2-test .` succeeded. \
+  `docker run --rm virtrigaud-manager:h1pr2-test --version` returned `virtrigaud-manager v0.3.6-h1pr2-test (23457f932...)` with exit 0. This proves PR-1 (`--version` handler) + PR-2 (Dockerfile parametrization) stack correctly.
+- The Makefile already passes all 10 build-args; the release workflow passes only `VERSION` + `GIT_SHA` (the new ARGs fall back to defaults — release behaviour unchanged). No Makefile or release.yml changes were needed in this PR.
+- Pre-existing `make lint` tooling drift remains as noted in #114.
+
+---
+
 ## [2026-05-24 10:09] - feat(cmd/manager): port --version flag, certwatcher, and metrics RBAC filter (H1 PR-1 / closes #114)
 **Author:** @williamrizzo (William Rizzo)
 
