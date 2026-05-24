@@ -1,6 +1,6 @@
 module github.com/projectbeskar/virtrigaud/sdk
 
-go 1.24.0
+go 1.26.0
 
 require (
 	github.com/projectbeskar/virtrigaud v0.1.0

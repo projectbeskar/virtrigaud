@@ -160,7 +160,10 @@ func getFieldName(obj interface{}) string {
 	}
 
 	v := reflect.ValueOf(obj)
-	if v.Kind() == reflect.Ptr {
+	// Go 1.18+ renamed reflect.Ptr to reflect.Pointer (the old name is
+	// a deprecated alias). Go 1.26's govet `inline` analyzer flags use
+	// of the old name. Switched as part of #122 (Go 1.26.3 bump).
+	if v.Kind() == reflect.Pointer {
 		if v.IsNil() {
 			return ""
 		}

@@ -20,9 +20,6 @@ concurrency:
 permissions:
   contents: read
 
-env:
-  GO_VERSION: '1.23'
-
 jobs:
   lint:
     name: Lint Runtime Chart
