@@ -40,6 +40,7 @@ import (
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/controller"
+	"github.com/projectbeskar/virtrigaud/internal/resilience"
 	"github.com/projectbeskar/virtrigaud/internal/runtime/remote"
 	"github.com/projectbeskar/virtrigaud/internal/version"
 )
@@ -213,8 +214,13 @@ func main() {
 
 	setupLog.Info("Starting virtrigaud manager", "version", version.String())
 
+	// G6 (#111): per-Provider CircuitBreaker registry. Mirrors the
+	// canonical cmd/manager/main.go wiring so this build path retains
+	// circuit-breaker protection if anyone ever ships it.
+	cbRegistry := resilience.NewRegistry(resilience.DefaultConfig())
+
 	// Create remote provider resolver (all providers are now remote)
-	remoteResolver := remote.NewResolver(mgr.GetClient())
+	remoteResolver := remote.NewResolver(mgr.GetClient(), cbRegistry)
 
 	setupLog.Info("Remote provider resolver initialized")
 

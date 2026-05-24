@@ -25,21 +25,43 @@ import (
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
+	"github.com/projectbeskar/virtrigaud/internal/resilience"
 	grpcClient "github.com/projectbeskar/virtrigaud/internal/transport/grpc"
 )
+
+// circuitBreakerName is the logical name passed to the resilience
+// Registry when getting/creating a CircuitBreaker per Provider CR. We
+// use a single name ("rpc") because today there is one breaker per
+// Provider that guards every RPC on that Provider's client. If we ever
+// want per-RPC-method breakers, this would become the RPC short name.
+const circuitBreakerName = "rpc"
 
 // Resolver resolves Provider objects to remote provider implementations
 type Resolver struct {
 	client       client.Client
 	clients      map[string]*grpcClient.Client
 	clientsMutex sync.RWMutex
+	// cbRegistry is the CircuitBreaker registry shared by all gRPC
+	// clients this resolver creates. May be nil — in which case clients
+	// are constructed without circuit-breaker protection (intended for
+	// tests that don't exercise the breaker path).
+	cbRegistry *resilience.Registry
 }
 
-// NewResolver creates a new remote provider resolver
-func NewResolver(k8sClient client.Client) *Resolver {
+// NewResolver creates a new remote provider resolver.
+//
+// cbRegistry is the shared CircuitBreaker registry used to allocate one
+// breaker per Provider CR. Passing nil disables circuit-breaker wiring
+// for clients created by this resolver — useful in tests with a fake
+// k8s client where the gRPC path is never actually dialed. Production
+// callers (cmd/manager/main.go) must pass a real registry so the G6
+// (#111) per-Provider breakers actually emit
+// virtrigaud_circuit_breaker_* samples.
+func NewResolver(k8sClient client.Client, cbRegistry *resilience.Registry) *Resolver {
 	return &Resolver{
-		client:  k8sClient,
-		clients: make(map[string]*grpcClient.Client),
+		client:     k8sClient,
+		clients:    make(map[string]*grpcClient.Client),
+		cbRegistry: cbRegistry,
 	}
 }
 
@@ -89,7 +111,14 @@ func (r *Resolver) getRemoteProvider(ctx context.Context, provider *infravirtrig
 
 	// provider.Spec.Type populates the `provider_type` label on every
 	// virtrigaud_provider_rpc_* sample emitted by this client (G4 / #90).
-	client, err := grpcClient.NewClient(ctx, provider.Status.Runtime.Endpoint, string(provider.Spec.Type), tlsConfig)
+	// One CircuitBreaker per Provider CR is allocated from the shared
+	// registry (G6 / #111); when cbRegistry is nil (test path), the
+	// gRPC client is constructed without breaker protection.
+	var cb *resilience.CircuitBreaker
+	if r.cbRegistry != nil {
+		cb = r.cbRegistry.GetOrCreate(circuitBreakerName, string(provider.Spec.Type), provider.Name)
+	}
+	client, err := grpcClient.NewClient(ctx, provider.Status.Runtime.Endpoint, string(provider.Spec.Type), cb, tlsConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create gRPC client: %w", err)
 	}
@@ -129,7 +158,13 @@ func (r *Resolver) buildTLSConfig(ctx context.Context, provider *infravirtrigaud
 	}, nil
 }
 
-// CleanupClient removes and closes a cached gRPC client
+// CleanupClient removes and closes a cached gRPC client.
+//
+// Also removes the per-Provider CircuitBreaker from the registry (G6 /
+// #111) so its metric series (virtrigaud_circuit_breaker_state and
+// _failures_total with this Provider's labels) stop being emitted once
+// the Provider CR is gone. Without this cleanup, deleted Providers
+// would leak both a CB struct and stale metric samples indefinitely.
 func (r *Resolver) CleanupClient(provider *infravirtrigaudiov1beta1.Provider) {
 	cacheKey := fmt.Sprintf("%s/%s", provider.Namespace, provider.Name)
 
@@ -139,6 +174,9 @@ func (r *Resolver) CleanupClient(provider *infravirtrigaudiov1beta1.Provider) {
 	if client, exists := r.clients[cacheKey]; exists {
 		client.Close() //nolint:errcheck // Client cleanup not critical
 		delete(r.clients, cacheKey)
+	}
+	if r.cbRegistry != nil {
+		r.cbRegistry.Remove(circuitBreakerName, string(provider.Spec.Type), provider.Name)
 	}
 }
 

@@ -34,6 +34,7 @@ import (
 
 	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
+	"github.com/projectbeskar/virtrigaud/internal/resilience"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
@@ -50,7 +51,15 @@ type Client struct {
 // on every RPC call made through this client. Passing an empty string is
 // permitted (the label will be empty) but discouraged in production —
 // makes per-provider-type alerts impossible.
-func NewClient(ctx context.Context, endpoint string, providerType string, tlsConfig *TLSConfig) (*Client, error) {
+//
+// cb is an optional CircuitBreaker wrapping every outbound RPC. When
+// non-nil, infrastructure-class gRPC errors (Unavailable, DeadlineExceeded,
+// Internal, Unknown) count toward the breaker's failure threshold; once
+// the threshold trips, subsequent RPCs short-circuit with a synthesized
+// Unavailable status until ResetTimeout elapses (G6 / #111). Pass nil to
+// disable circuit-breaker protection — useful in unit tests that exercise
+// real gRPC failure semantics without the breaker interposing.
+func NewClient(ctx context.Context, endpoint string, providerType string, cb *resilience.CircuitBreaker, tlsConfig *TLSConfig) (*Client, error) {
 	// Connection timeout is handled by grpc.NewClient internally
 	_ = ctx // Context available for future timeout implementation
 
@@ -66,15 +75,35 @@ func NewClient(ctx context.Context, endpoint string, providerType string, tlsCon
 		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	}
 
+	// Build the unary interceptor chain.
+	//
+	// Order is important and deliberate:
+	//   1. providerRPCMetricsInterceptor — records EVERY RPC (including
+	//      circuit-breaker rejections, which show up as code=Unavailable).
+	//      This means dashboards see "the breaker fast-failed this RPC"
+	//      as a normal Unavailable RPC, not a silent drop.
+	//   2. providerCircuitBreakerInterceptor — wraps the actual invoker.
+	//      When the breaker is open, returns Unavailable BEFORE invoker
+	//      runs, so step 1 still observes it.
+	unaryInterceptors := []grpc.UnaryClientInterceptor{
+		// G4 (#90): record per-RPC latency + status code into the
+		// virtrigaud_provider_rpc_* metric families.
+		providerRPCMetricsInterceptor(providerType),
+	}
+	if cb != nil {
+		// G6 (#111): wrap RPCs with circuit-breaker fast-fail. Infra
+		// errors count toward the threshold; business errors (NotFound,
+		// InvalidArgument, ...) pass through without tripping.
+		unaryInterceptors = append(unaryInterceptors, providerCircuitBreakerInterceptor(cb))
+	}
+
 	// Add retry and timeout configurations
 	opts = append(opts,
 		// grpc.WithBlock() removed as it's deprecated in newer gRPC versions
 		grpc.WithDefaultCallOptions(
 			grpc.WaitForReady(true),
 		),
-		// G4 (#90): record per-RPC latency + status code into the
-		// virtrigaud_provider_rpc_* metric families.
-		grpc.WithUnaryInterceptor(providerRPCMetricsInterceptor(providerType)),
+		grpc.WithChainUnaryInterceptor(unaryInterceptors...),
 	)
 
 	conn, err := grpc.NewClient(endpoint, opts...)
@@ -136,6 +165,99 @@ func shortRPCMethod(fullMethod string) string {
 // codes.Code.String() so metric labels match the gRPC reference docs.
 func grpcCodeString(err error) string {
 	return status.Code(err).String()
+}
+
+// providerCircuitBreakerInterceptor returns a UnaryClientInterceptor that
+// wraps every outbound RPC with the supplied CircuitBreaker. Implements
+// G6 / #111.
+//
+// Behaviour:
+//   - When the breaker is Closed or HalfOpen, the invoker runs normally.
+//     If it returns an infrastructure-class error (see isInfraFailure),
+//     that counts as a failure toward the breaker's threshold. Business
+//     errors (NotFound, InvalidArgument, ...) are returned to the caller
+//     unchanged AND do not trip the breaker — those are signs the
+//     provider is healthy and the request was bad, not the other way.
+//   - When the breaker is Open, the invoker does NOT run; the
+//     interceptor synthesises a codes.Unavailable status so the rest of
+//     the stack (the G4 metrics interceptor, c.mapGRPCError, callers
+//     doing `errors.Is(err, contracts.RetryableError)`) all treat it
+//     uniformly with any other "provider down" signal.
+//
+// The interceptor MUST NOT panic. If it did, every provider RPC would
+// break. We deliberately keep it small and free of allocation-heavy work.
+func providerCircuitBreakerInterceptor(cb *resilience.CircuitBreaker) grpc.UnaryClientInterceptor {
+	return func(
+		ctx context.Context,
+		fullMethod string,
+		req, reply interface{},
+		cc *grpc.ClientConn,
+		invoker grpc.UnaryInvoker,
+		opts ...grpc.CallOption,
+	) error {
+		var invokerErr error
+		cbErr := cb.Call(ctx, func(ctx context.Context) error {
+			invokerErr = invoker(ctx, fullMethod, req, reply, cc, opts...)
+			// Only infra failures count toward the breaker's threshold.
+			// Business errors are returned out-of-band via invokerErr.
+			if isInfraFailure(invokerErr) {
+				return invokerErr
+			}
+			return nil
+		})
+		// Circuit is open and rejected the call before the invoker ran:
+		// cb.Call returned an error but invokerErr is still its zero value.
+		// Synthesise a canonical gRPC Unavailable so downstream code paths
+		// (metrics interceptor, mapGRPCError, retry loops) behave as if the
+		// provider itself returned Unavailable.
+		if cbErr != nil && invokerErr == nil {
+			return status.Errorf(codes.Unavailable, "circuit breaker open: %v", cbErr)
+		}
+		return invokerErr
+	}
+}
+
+// isInfraFailure reports whether the given error is an infrastructure-
+// class gRPC failure that should count toward a CircuitBreaker's failure
+// threshold. Treats the following codes as infra failures:
+//
+//   - Unavailable        — provider pod down, network partition
+//   - DeadlineExceeded   — provider hung past the call timeout
+//   - Internal           — provider crashed mid-call
+//   - Unknown            — non-gRPC error from the transport layer
+//
+// Codes deliberately NOT counted as infra failures:
+//
+//   - OK                 — obviously a success
+//   - Canceled           — caller gave up, not the provider failing
+//   - NotFound,
+//     InvalidArgument,
+//     AlreadyExists,
+//     FailedPrecondition,
+//     PermissionDenied,
+//     Unauthenticated    — application/business errors: the provider is
+//     healthy, the request was bad
+//   - ResourceExhausted  — rate-limit signal: caller should back off this
+//     one call, not stop talking to the provider
+//   - Aborted, OutOfRange,
+//     Unimplemented      — protocol-level issues unrelated to provider
+//     health
+//
+// The classification is opinionated; rationale is documented in the G6
+// PR (#111) and CHANGELOG entry.
+func isInfraFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	switch status.Code(err) {
+	case codes.Unavailable,
+		codes.DeadlineExceeded,
+		codes.Internal,
+		codes.Unknown:
+		return true
+	default:
+		return false
+	}
 }
 
 // Close closes the gRPC connection
