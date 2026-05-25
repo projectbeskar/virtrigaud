@@ -12,6 +12,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2026-05-25 05:35] - feat(obs): wire virtrigaud_vm_operations_total in gRPC client VM-operation methods (G7.1 / closes #124)
+**Author:** @williamrizzo (William Rizzo)
+
+### Audit finding
+First implementation chunk of the G7 umbrella (#123). The `virtrigaud_vm_operations_total{operation,provider_type,provider,outcome}` metric family was registered in `internal/obs/metrics/metrics.go` and had a helper `(*VMOperationMetrics).RecordOperation(op, outcome)` — but **zero production callsites called the helper**. Same shape of dead-code-paradox bug that G6 (#111) closed for CircuitBreaker metrics.
+
+The G4 metrics interceptor (PR #107) already records the lower-level `virtrigaud_provider_rpc_requests_total{provider_type, method, code}` — the per-gRPC-method counter. G7.1 adds the **higher-level** per-VM-operation counter, which is what operators dashboard for questions like "how often does Create fail on the vsphere-prod Provider?" without having to know the gRPC method shape.
+
+### Added
+- `internal/transport/grpc/client.go`: `Client.vmOps *metrics.VMOperationMetrics` field, initialised by `NewClient` from the new `providerName` parameter (paired with the existing `providerType`).
+- `internal/transport/grpc/client.go`: `(*Client).recordVMOp(op string, retErr *error)` helper. Designed to be called via `defer c.recordVMOp(metrics.OpCreate, &retErr)` from each VM-operation method, with a named `retErr` return value. The pointer-to-error indirection is the load-bearing piece: it lets the deferred call evaluate the FINAL return value rather than the value at defer-time (always nil). Nil-safe on `c.vmOps` so tests that construct `&Client{...}` directly don't panic.
+- `internal/transport/grpc/client_vm_operations_test.go` (new): 4 tests covering:
+  - `TestRecordVMOp_NilVMOpsIsSafe` — pins the nil-safety contract on the helper.
+  - `TestRecordVMOp_OutcomeDerivation` — pins success vs error outcome derivation, including the defensive nil-`*error` path.
+  - `TestClient_VMOperations_RecordOnSuccess` — table-driven canary, all 5 VM-op methods × success path, asserts per-operation counter increments by exactly 1.
+  - `TestClient_VMOperations_RecordOnError` — same table × error path, asserts the `{outcome="error"}` sample increments. Catches the regression class where outcome derivation inverts.
+- `internal/transport/grpc/client_vm_operations_test.go`: new `fakeVMOpsServer` that implements all 5 VM-operation server handlers with a `fail` toggle. Single bufconn server can produce both metric outcomes without re-instantiating.
+
+### Changed
+- `internal/transport/grpc/client.go`: `NewClient` signature gains a `providerName string` parameter between `providerType` and `cb`. Empty string is permitted (label will be empty) but discouraged in production — `provider` is the second half of the `{provider_type, provider}` label pair that lets operators distinguish multiple Providers of the same type.
+- `internal/transport/grpc/client.go`: 5 VM-operation methods refactored to use named return values + `defer c.recordVMOp(metrics.Op<X>, &retErr)`:
+  - `Create` → `(result contracts.CreateResponse, retErr error)`
+  - `Delete` → `(taskRef string, retErr error)`
+  - `Power` → `(taskRef string, retErr error)`
+  - `Describe` → `(result contracts.DescribeResponse, retErr error)`
+  - `Reconfigure` → `(taskRef string, retErr error)`
+  Same shape as G1's named-return reconcile-timer pattern (PR #101). All other method bodies are unchanged.
+- `internal/runtime/remote/resolver.go`: passes `provider.Name` as the new `providerName` parameter to `NewClient`. Doc comment updated to call out which label `provider.Name` populates.
+- `internal/transport/grpc/client_metrics_test.go`: `newTestClient` initialises the new `vmOps` field so deferred `recordVMOp` calls in production methods remain safe under this test path.
+- `internal/transport/grpc/client_circuitbreaker_test.go`: same change to `newTestClientWithCB`; added `metrics` import.
+
+### Why
+1. **Closes the G7.1 part of the G7 umbrella (#123).** First of 4 deferred-from-G-track metric families to wire up.
+2. **Operator-facing signal that's been missing.** "How often is Create failing on this Provider?" is a routine question for an operator on call. Today (pre-merge) the answer requires knowing the gRPC method names and joining `virtrigaud_provider_rpc_requests_total` on labels. After this PR the answer is a single PromQL query on `virtrigaud_vm_operations_total{operation="Create", outcome="error"}`.
+3. **Sets the wiring pattern for the rest of G7.** The named-return + defer + nil-safe helper combo is the canonical pattern this codebase has converged on (G1 reconcile timer, G3 double-count fix, G6 circuit breaker). G7.2/G7.3/G7.4 should reuse it.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (manager binary gains new metric emission; new metric series appear on `/metrics` after rollout)
+- [ ] Config change only
+- [ ] Documentation only
+
+### Notes
+- `NewClient` signature change ripples to 3 call sites: `internal/runtime/remote/resolver.go` (production — passes `provider.Name`), and the two test helpers in `internal/transport/grpc/` (test — pass synthetic provider names). No other production callers exist.
+- The `Validate` RPC and the snapshot/task/disk-related methods are intentionally NOT instrumented with `vm_operations_total` — they are not VM operations in the operator-facing sense. The G4 interceptor still records every RPC at the lower level via `virtrigaud_provider_rpc_requests_total`.
+- Pre-merge verification: `make fmt` clean; `go vet ./...` clean; `make test` 12/12 packages pass with 0 FAIL; `make build` produces a working `bin/manager` with `--version` exit 0. The new test file adds 12 sub-test cases (4 tests × multiple operations).
+- Next in G7: G7.2 (file sub-issue when starting) — wire `virtrigaud_ip_discovery_duration_seconds` in the VirtualMachineReconciler IP-discovery path.
+
+---
+
 ## [2026-05-24 21:27] - chore: bump Go toolchain floor to 1.26.0 and pin Dockerfiles to golang:1.26.3 (closes #122)
 **Author:** @williamrizzo (William Rizzo)
 
