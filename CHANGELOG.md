@@ -12,6 +12,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2026-05-25 15:28] - security: bump go.opentelemetry.io/otel + sdk to v1.43.0 (closes #143; unblocks v0.3.6-rc1)
+**Author:** @wrkode (William Rizzo)
+
+### Audit finding
+First attempt to cut `v0.3.6-rc1` from main (commit `d1e08d0`, tag `f537176`, deleted) **failed the release workflow's Trivy scan on the manager image** with 3 HIGH-severity CVEs in the OpenTelemetry dependencies. The downstream `Create GitHub Release` + `Update Helm Repository` jobs were correctly skipped; the deleted rc1 tag never promoted.
+
+| CVE | Package | Installed | Fixed in |
+|---|---|---|---|
+| CVE-2026-29181 | `go.opentelemetry.io/otel` | v1.39.0 | 1.41.0 |
+| CVE-2026-24051 | `go.opentelemetry.io/otel/sdk` | v1.39.0 | 1.40.0 (Arbitrary Code Execution via PATH Hijacking) |
+| CVE-2026-39883 | `go.opentelemetry.io/otel/sdk` | v1.39.0 | 1.43.0 (BSD kenv command not using absolute path enables PATH hijacking) |
+
+### Security
+- `go.mod`: bump `go.opentelemetry.io/otel` v1.39.0 → **v1.43.0**
+- `go.mod`: bump `go.opentelemetry.io/otel/sdk` v1.39.0 → **v1.43.0**
+- `go.mod`: bump `go.opentelemetry.io/otel/trace` v1.39.0 → **v1.43.0**
+- `go.mod`: bump `go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc` v1.37.0 → **v1.43.0** (consistency across the otel module surface)
+- Indirect bumps from `go mod tidy`: `go.opentelemetry.io/otel/metric` v1.39.0 → v1.43.0, `go.opentelemetry.io/proto/otlp` v1.7.0 → v1.10.0, plus minor refresh of `golang.org/x/{oauth2,sync,sys,term,text,tools}` and `google.golang.org/{grpc,protobuf,genproto/googleapis/*}` to satisfy otel v1.43.0's module graph.
+
+### Why
+1. **Hard release blocker.** Trivy on the release workflow's manager-image scan exits 1 on any HIGH or CRITICAL CVE — by design. v0.3.6-rc1 could not be promoted with the old otel pin.
+2. **Banking-compliance posture** (per `CLAUDE.md`): PATH hijacking primitives are exactly the class of finding regulated environments will not accept. CVE-2026-24051 + CVE-2026-39883 both describe PATH hijacking vectors in the OpenTelemetry Go SDK.
+3. **Smallest possible upgrade surface.** Only `internal/obs/tracing/tracing.go` imports otel; no code changes are required by the bump itself. `go mod tidy` is the entire diff after the version pin.
+
+### Impact
+- [ ] Breaking change (no public API or CRD surface changed; otel API surface is stable across the v1.39 → v1.43 range we span)
+- [x] Requires cluster rollout (the manager image needs to be rebuilt with the new otel deps — that's what v0.3.6-rc1 will be)
+- [ ] Config change only
+- [ ] Documentation only
+
+### Notes
+- Verified locally pre-PR: `go vet ./...` clean; `go build ./...` clean; `make test` 12/12 packages with 0 FAIL; `docker build -f build/Dockerfile.manager` clean; `docker run virtrigaud-manager:otelfix --version` returns the expected banner.
+- The v0.3.6-rc1 attempt that surfaced this is run [26406778809](https://github.com/projectbeskar/virtrigaud/actions/runs/26406778809). After this PR merges, `v0.3.6-rc1` will be re-cut from the new HEAD.
+- The release workflow's Trivy scan is now the second post-Go-bump security-net catching real issues — this is the safety mechanism working as intended.
+
+---
+
 ## [2026-05-25 08:06] - chore(obs): deprecate virtrigaud_queue_depth in favor of controller-runtime's workqueue_depth (G7.4 / closes #131 + G7 umbrella #123)
 **Author:** @wrkode (William Rizzo)
 
