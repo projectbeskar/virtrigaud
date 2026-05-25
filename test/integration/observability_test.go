@@ -74,7 +74,13 @@ func TestMetricsIntegration(t *testing.T) {
 	time.Sleep(10 * time.Millisecond) // Simulate work
 	timer.Finish(metrics.OutcomeSuccess)
 
-	reconcileMetrics.SetQueueDepth(5)
+	// G7.4 (#131): SetQueueDepth is intentionally deprecated in favor of
+	// controller-runtime's workqueue_depth{name} metric. Helper remains
+	// callable for compile compatibility (and this smoke catches its
+	// accidental removal before the v0.4.0 cut). The nolint is the
+	// canonical way to signal "I know it's deprecated, I'm exercising
+	// it on purpose" so other readers don't try to "fix" it.
+	reconcileMetrics.SetQueueDepth(5) //nolint:staticcheck // SA1019: intentional smoke of deprecated helper, see G7.4 / #131
 
 	// Test VM operation metrics
 	vmMetrics := metrics.NewVMOperationMetrics("vsphere", "prod")

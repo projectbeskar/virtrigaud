@@ -12,8 +12,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2026-05-25 08:06] - chore(obs): deprecate virtrigaud_queue_depth in favor of controller-runtime's workqueue_depth (G7.4 / closes #131 + G7 umbrella #123)
+**Author:** @wrkode (William Rizzo)
+
+### Audit finding
+Fourth and final sub-issue of the G7 umbrella (#123). Smoke test on `vr1.lab.k8` post-G7.3 (PR #130) confirmed that controller-runtime's standard workqueue metric family is **already exposed on `/metrics`** and has been since v0.3.0:
+
+```
+workqueue_adds_total
+workqueue_depth                              ← functionally identical to virtrigaud_queue_depth
+workqueue_longest_running_processor_seconds
+workqueue_queue_duration_seconds_*
+workqueue_retries_total
+workqueue_unfinished_work_seconds
+workqueue_work_duration_seconds_*
+```
+
+`virtrigaud_queue_depth{kind}` is **redundant by construction** with `workqueue_depth{name}`. The originally-imagined wiring (custom `workqueue.MetricsProvider`) would have **silently replaced** the controller-runtime default and broken those 9 standard metrics for operators already scraping them — a breaking change disguised as a feature add.
+
+### Deprecated
+- `virtrigaud_queue_depth{kind}` gauge family — replaced by controller-runtime's `workqueue_depth{name=<controller-name>}`. The `Help` string emitted by Prometheus now begins with `[DEPRECATED v0.3.6 — use controller-runtime's workqueue_depth{name} instead. See CHANGELOG.]` so operators see the deprecation in their scrapes' `# HELP` lines.
+- `(*ReconcileMetrics).SetQueueDepth(depth float64)` helper — annotated with a Go `Deprecated:` paragraph. `go doc` and IDE tooling will flag any new callers. Production code does not call this helper (and never has).
+- Both will be removed in v0.4.0 or later. Out-of-tree code that imported the helper continues to compile + run; the call is just a no-op (gauge family still registered, just deprecated).
+
+### Operator migration recipe
+Replace your dashboards / alerts:
+```
+virtrigaud_queue_depth{kind="<X>"}    →    workqueue_depth{name="<controller-name>"}
+```
+Controller-name mapping (verified in `internal/controller/*.go`):
+
+| Reconciler | controller-runtime `name` label |
+|---|---|
+| `VirtualMachineReconciler` | `virtualmachine` |
+| `ProviderReconciler` | `provider` |
+| `VMClassReconciler` | `vmclass` |
+| `VMImageReconciler` | `vmimage` |
+| `VMNetworkAttachmentReconciler` | `vmnetworkattachment` |
+| `VMAdoptionReconciler` | `vmadoption` |
+| `VMSnapshotReconciler` | `vmsnapshot` (default = lower-cased Kind; no `Named()` override) |
+| `VMMigrationReconciler` | `vmmigration` (default = lower-cased Kind; no `Named()` override) |
+
+You also get 8 sibling metrics for free with the migration: `workqueue_adds_total`, `_queue_duration_seconds`, `_work_duration_seconds`, `_retries_total`, `_unfinished_work_seconds`, `_longest_running_processor_seconds`, etc.
+
+### Why
+1. **Don't reinvent existing controller-runtime metrics.** The original G7.4 issue framed this as "wire `virtrigaud_queue_depth` via custom `workqueue.MetricsProvider`," but that approach would either silently break 9 standard metrics (Option A) or require reconstructing controller-runtime's internal MetricsProvider (Option D — fragile across versions). Option C (deprecate) is the honest call.
+2. **Closes the G7 umbrella #123 cleanly.** All 4 deferred-from-G-track families are now addressed:
+   - G7.1 / PR #126 — `vm_operations_total` wired ✅
+   - G7.2 / PR #128 — `ip_discovery_duration_seconds` wired ✅
+   - G7.3 / PR #130 — `provider_tasks_inflight` wired ✅
+   - G7.4 / **this PR** — `queue_depth` deprecated in favor of `workqueue_depth`
+3. **Zero operator-visible breakage.** Existing scrapes of `virtrigaud_queue_depth` continue to work (gauge family still registered; helper still callable; values still empty since no production caller). The deprecation banner is visible in `# HELP` lines so operators see it on their next reload.
+
+### Impact
+- [ ] Breaking change (deprecation only; metric family still registered, helper still callable)
+- [x] Requires cluster rollout (only because the deprecation banner in `# HELP` shows up in the new image)
+- [ ] Config change only
+- [x] Documentation only (this is the bulk of the change)
+
+### Notes
+- After this lands, **11 of 12 `virtrigaud_*` families are wired** (G7.1 + G7.2 + G7.3 added 3, leaving only the 2 `virtrigaud_circuit_breaker_*` gaps that activate on `vr1.lab.k8` only after a v0.3.6-rc1 deploy — code already in main since G6 / PR #112). The 12th (`virtrigaud_queue_depth`) is explicitly deprecated in favor of the canonical controller-runtime equivalent.
+- v0.3.6 candidate work is now **complete**: G6 #112 + C2-B #94 + H1 #92 + Go-bump #122 + G7 umbrella #123 all closed. Next checkpoint: **cut v0.3.6-rc1**, deploy to `vr1.lab.k8`, run smoke (CB lifecycle + 3 new G7 families on `/metrics`).
+- Concurrent CHANGELOG hygiene change: previous entries' author-line GitHub handle updated from `@williamrizzo` to `@wrkode` to match the maintainer's actual handle (21 occurrences). Per-instruction: no separate commit ceremony.
+
+---
+
 ## [2026-05-25 07:12] - feat(obs): wire virtrigaud_provider_tasks_inflight per-Provider async-task tracker (G7.3 / closes #129)
-**Author:** @williamrizzo (William Rizzo)
+**Author:** @wrkode (William Rizzo)
 
 ### Audit finding
 Third sub-PR of the G7 umbrella (#123). `virtrigaud_provider_tasks_inflight{provider_type, provider}` was registered in `internal/obs/metrics/metrics.go` with helper `(*TaskMetrics).SetInflightTasks(count)` — same dead-code-paradox shape that G7.1 / G7.2 / G6 each fixed: zero production callsites.
@@ -60,7 +125,7 @@ Pre-PR: operators dashboarding "how many tasks is the manager currently tracking
 ---
 
 ## [2026-05-25 06:24] - feat(obs): wire virtrigaud_ip_discovery_duration_seconds in VirtualMachineReconciler (G7.2 / closes #127)
-**Author:** @williamrizzo (William Rizzo)
+**Author:** @wrkode (William Rizzo)
 
 ### Audit finding
 Second sub-PR of the G7 umbrella (#123). `virtrigaud_ip_discovery_duration_seconds{provider_type}` was registered in `internal/obs/metrics/metrics.go` with helper `metrics.RecordIPDiscovery(providerType, duration)` — same dead-code-paradox shape that G7.1 / G6 / etc. fixed: zero production callsites. The histogram has buckets 100ms-~51s which fits "VM CR creation → first IP visible" durations.
@@ -98,7 +163,7 @@ Second sub-PR of the G7 umbrella (#123). `virtrigaud_ip_discovery_duration_secon
 ---
 
 ## [2026-05-25 05:35] - feat(obs): wire virtrigaud_vm_operations_total in gRPC client VM-operation methods (G7.1 / closes #124)
-**Author:** @williamrizzo (William Rizzo)
+**Author:** @wrkode (William Rizzo)
 
 ### Audit finding
 First implementation chunk of the G7 umbrella (#123). The `virtrigaud_vm_operations_total{operation,provider_type,provider,outcome}` metric family was registered in `internal/obs/metrics/metrics.go` and had a helper `(*VMOperationMetrics).RecordOperation(op, outcome)` — but **zero production callsites called the helper**. Same shape of dead-code-paradox bug that G6 (#111) closed for CircuitBreaker metrics.
@@ -148,7 +213,7 @@ The G4 metrics interceptor (PR #107) already records the lower-level `virtrigaud
 ---
 
 ## [2026-05-24 21:27] - chore: bump Go toolchain floor to 1.26.0 and pin Dockerfiles to golang:1.26.3 (closes #122)
-**Author:** @williamrizzo (William Rizzo)
+**Author:** @wrkode (William Rizzo)
 
 ### Audit finding
 Drift between the project's three Go layers:
@@ -200,7 +265,7 @@ This PR consolidates all three layers on the same target (Go 1.26) and clears th
 ---
 
 ## [2026-05-24 12:47] - chore: delete cmd/main.go + root Dockerfile (H1 PR-4 / closes #92 H1 umbrella + #120)
-**Author:** @williamrizzo (William Rizzo)
+**Author:** @wrkode (William Rizzo)
 
 ### Audit finding
 Final v0.3.6 chunk of the H1 build-path consolidation roadmap (`fieldTesting/ADR-0002-build-path-consolidation.md`). With PR-1 (#114 / PR #115), PR-2 (#116 / PR #117), and PR-3 (#118 / PR #119) all merged, the orphan local-dev path (`cmd/main.go` + root `Dockerfile`) is reachable from nowhere — no Makefile target, no CI workflow, no hack script, no release-engineering tooling, no fork-engineering tooling references either file. Delete them.
@@ -237,7 +302,7 @@ Final v0.3.6 chunk of the H1 build-path consolidation roadmap (`fieldTesting/ADR
 ---
 
 ## [2026-05-24 11:38] - fix(make): redirect build/run/docker-build/docker-buildx to canonical path; closes latent #113 (H1 PR-3 / closes #118)
-**Author:** @williamrizzo (William Rizzo)
+**Author:** @wrkode (William Rizzo)
 
 ### Audit finding
 Third implementation chunk of the H1 build-path consolidation roadmap (`fieldTesting/ADR-0002-build-path-consolidation.md`). The Makefile's local-dev build targets (`make build`, `make run`, `make docker-build`, `make docker-build-multiplatform`, `make docker-buildx`) all invoked the orphan path — `cmd/main.go` and the root `Dockerfile`. That orphan path produces an **incomplete manager binary** (this is #113, the latent bug discovered during the H1 audit):
@@ -283,7 +348,7 @@ All five edits carry an inline `# H1 PR-3 (#118): ...` comment block explaining 
 ---
 
 ## [2026-05-24 10:50] - feat(build): add BUILDER_IMAGE/BASE_IMAGE/GOPROXY ARGs + CA-cert handling to build/Dockerfile.manager (H1 PR-2 / closes #116)
-**Author:** @williamrizzo (William Rizzo)
+**Author:** @wrkode (William Rizzo)
 
 ### Audit finding
 Second implementation chunk of the H1 build-path consolidation roadmap (`fieldTesting/ADR-0002-build-path-consolidation.md`). Audit on 2026-05-24 found that:
@@ -322,7 +387,7 @@ Second implementation chunk of the H1 build-path consolidation roadmap (`fieldTe
 ---
 
 ## [2026-05-24 10:09] - feat(cmd/manager): port --version flag, certwatcher, and metrics RBAC filter (H1 PR-1 / closes #114)
-**Author:** @williamrizzo (William Rizzo)
+**Author:** @wrkode (William Rizzo)
 
 ### Audit finding
 First implementation chunk of the H1 build-path consolidation roadmap (see `fieldTesting/ADR-0002-build-path-consolidation.md`). Three features the local-dev orphan `cmd/main.go` had but the canonical `cmd/manager/main.go` lacked are now ported into the canonical entrypoint, with defaults preserved so existing deployments see zero behaviour change.
@@ -359,7 +424,7 @@ By keeping `--metrics-secure=false` as the default in this PR, every existing de
 ---
 
 ## [2026-05-24 08:02] - feat(obs): wire CircuitBreaker into provider gRPC RPC path (closes #111)
-**Author:** @williamrizzo (William Rizzo)
+**Author:** @wrkode (William Rizzo)
 
 ### Audit finding
 v0.3.5 release smoke on `vr1.lab.k8` confirmed that `virtrigaud_circuit_breaker_state` and `virtrigaud_circuit_breaker_failures_total` emit zero samples in production despite G5 (PR #108) wiring all metric emission paths correctly. Root cause: **the CircuitBreaker code in `internal/resilience/` was never instantiated by any production caller**. The gRPC client in `internal/transport/grpc/client.go` had a G4 metrics interceptor but no resilience layer. Net effect: no real circuit-breaker protection on the manager→provider RPC path, AND no breaker metrics ever emitted. The package was correct but dead.
@@ -395,7 +460,7 @@ v0.3.5 release smoke on `vr1.lab.k8` confirmed that `virtrigaud_circuit_breaker_
 ---
 
 ## [2026-05-23 14:02] - feat(obs): document + test CircuitBreakerMetrics lifecycle (closes #91)
-**Author:** @williamrizzo (William Rizzo)
+**Author:** @wrkode (William Rizzo)
 
 ### Audit finding
 G5 began as "audit + add missing CircuitBreakerMetrics hooks." The audit revealed the instrumentation was **already complete**:
@@ -458,7 +523,7 @@ Per the release process established for v0.3.5:
 ---
 
 ## [2026-05-23 13:31] - feat(obs): wire ProviderRPCMetrics into gRPC client middleware (closes #90)
-**Author:** @williamrizzo (William Rizzo)
+**Author:** @wrkode (William Rizzo)
 
 ### Added
 - `internal/transport/grpc/client.go`: New `providerRPCMetricsInterceptor(providerType)` returns a `grpc.UnaryClientInterceptor` that wraps every outbound provider RPC. On each call it records `virtrigaud_provider_rpc_requests_total{provider_type,method,code}` and `virtrigaud_provider_rpc_latency_seconds{provider_type,method}` via the existing `metrics.NewRPCTimer` API.
@@ -510,7 +575,7 @@ curl /metrics | grep '^virtrigaud_provider_rpc_latency_seconds_bucket'
 ---
 
 ## [2026-05-23 12:46] - feat(obs): instrument remaining 6 reconcilers + fix double-count bug (closes #89, #105)
-**Author:** @williamrizzo (William Rizzo)
+**Author:** @wrkode (William Rizzo)
 
 Two related changes in one PR (both touch the same files / pattern):
 
@@ -573,7 +638,7 @@ curl /metrics | awk '/^virtrigaud_manager_reconcile_total/{print $1}' | sort -u
 ---
 
 ## [2026-05-23 12:24] - fix(ci): pin Build matrix checkout to v4 to mitigate K4 intermittent failure (refs #102)
-**Author:** @williamrizzo (William Rizzo)
+**Author:** @wrkode (William Rizzo)
 
 ### Fixed
 - `.github/workflows/ci.yml`: Pinned the `build` matrix job's `actions/checkout` from v6.0.2 (`de0fac2e...`) back to v4 (`34e114876b...`). Added a `DO NOT bump without resolving #102` comment so future contributors don't silently re-introduce the issue.
@@ -611,7 +676,7 @@ If K4 still hits a future PR's `build` matrix despite this pin, that disproves t
 ---
 
 ## [2026-05-23 11:58] - feat(obs): instrument ProviderReconciler with reconcile timer + error counter (closes #88)
-**Author:** @williamrizzo (William Rizzo)
+**Author:** @wrkode (William Rizzo)
 
 ### Added
 - `internal/controller/provider_controller.go`: `Reconcile` now records `virtrigaud_manager_reconcile_total{kind="Provider",outcome=...}` and `virtrigaud_manager_reconcile_duration_seconds{kind="Provider"}` via a single deferred block that infers outcome from named return values. Mirrors the G1 pattern shipped for `VirtualMachineReconciler` in PR #101.
@@ -656,7 +721,7 @@ curl /metrics | grep '^virtrigaud_manager_reconcile_total{kind="Provider"'
 ---
 
 ## [2026-05-23 11:26] - feat(obs): instrument VirtualMachineReconciler with reconcile timer + structured error counter (closes #87)
-**Author:** @williamrizzo (William Rizzo)
+**Author:** @wrkode (William Rizzo)
 
 ### Added
 - `internal/controller/virtualmachine_controller.go`: Reconcile entry now records a per-call timer to `virtrigaud_manager_reconcile_total{kind="VirtualMachine",outcome=...}` + `virtrigaud_manager_reconcile_duration_seconds{kind="VirtualMachine"}` via a single deferred block that infers outcome from named return values (`success` / `error` / `requeue`).
@@ -706,7 +771,7 @@ curl -s :8080/metrics | grep '^virtrigaud_errors_total{component="manager"'
 ---
 
 ## [2026-05-23 11:05] - Fix circuit-breaker half-open transition count + harden timing-fragile test (closes #96, #97)
-**Author:** @williamrizzo (William Rizzo)
+**Author:** @wrkode (William Rizzo)
 
 ### Fixed
 - `internal/resilience/circuitbreaker.go`: `allowCall()` now counts the Open→HalfOpen transition itself as the first half-open call. Previously the transition reset `halfOpenCalls=0` and returned `true` without incrementing, so a circuit configured with `HalfOpenMaxCalls=N` actually required `N+1` successful calls to transition back to Closed instead of `N`. Implementation: `fallthrough` from the StateOpen case into the StateHalfOpen case so the same `halfOpenCalls++` logic runs uniformly. Closes #96.
@@ -751,7 +816,7 @@ make test-integration
 ---
 
 ## [2026-05-23 09:23] - SECURITY: fix logging.Redact to mask values, not field names (closes #95)
-**Author:** @williamrizzo (William Rizzo)
+**Author:** @wrkode (William Rizzo)
 
 ### Security
 - `internal/obs/logging/logging.go`: `Redactor.Redact` (and the convenience wrappers `RedactString`, `RedactMap`) previously replaced the FIRST capture group of every matched pattern. For two-group kv-pair patterns like `(password|token|...)\s*[:=]\s*([^\s]+)`, this meant the field NAME (group 1) was masked while the SECRET VALUE (group 2) survived in cleartext. Input `"password=hunter2"` produced `"[REDACTED]=hunter2"`.
@@ -797,7 +862,7 @@ go test -v -run TestObservabilityIntegration ./test/integration/
 ---
 
 ## [2026-05-23 09:07] - Wire observability integration test into CI (closes #93)
-**Author:** @williamrizzo (William Rizzo)
+**Author:** @wrkode (William Rizzo)
 
 ### Added
 - `Makefile`: New `test-integration` target — `go test -race -coverprofile=cover-integration.out ./test/integration/...`. Distinct from `make test` (unit, excludes integration) and `make test-e2e` (kind cluster + ginkgo).
@@ -837,7 +902,7 @@ Affects CI only. Future PRs gain integration-test gating; the 3 skipped tests ar
 ---
 
 ## [2026-05-22 18:27] - Inject VERSION and GIT_SHA into manager binary via ldflags
-**Author:** @williamrizzo (William Rizzo)
+**Author:** @wrkode (William Rizzo)
 
 ### Fixed
 - `build/Dockerfile.manager`: Added `ARG VERSION=dev` and `ARG GIT_SHA=unknown` plus `-ldflags="-s -w -X 'github.com/projectbeskar/virtrigaud/internal/version.Version=${VERSION}' -X 'github.com/projectbeskar/virtrigaud/internal/version.GitSHA=${GIT_SHA}'"` on the `go build` step. The container image now reports accurate version metadata at runtime.
@@ -874,7 +939,7 @@ strings /tmp/manager | grep -E 'v0\.3\.3-rc4-sanity|abc1234'
 ---
 
 ## [2026-05-22 15:29] - Emit virtrigaud_build_info on manager startup
-**Author:** @williamrizzo (William Rizzo)
+**Author:** @wrkode (William Rizzo)
 
 ### Fixed
 - `cmd/manager/main.go`: Call `metrics.SetupMetrics(version.Version, version.GitSHA, metrics.ComponentManager)` immediately after logger setup. Without this call the build_info `GaugeVec` from `internal/obs/metrics` stays empty after package init, and the `virtrigaud_build_info` family does NOT appear in the manager's `/metrics` output even with the PR #83 registry-binding fix correctly applied.
@@ -900,7 +965,7 @@ curl -s http://<manager>:8080/metrics | grep '^virtrigaud_build_info'
 ---
 
 ## [2026-05-22 06:38] - Fix virtrigaud_* metrics not exposed on /metrics endpoint
-**Author:** @williamrizzo (William Rizzo)
+**Author:** @wrkode (William Rizzo)
 
 ### Fixed
 - `internal/obs/metrics/metrics.go`: Bind all 12 virtrigaud Prometheus metric vectors to controller-runtime's `metrics.Registry` (the registry served by the manager on `/metrics`) instead of promauto's default global registry. Previously the metrics were created in-process but never exposed because the manager's `/metrics` endpoint serves controller-runtime's registry, not promauto's default. Use `promauto.With(ctrlmetrics.Registry).New*` for: `virtrigaud_build_info`, `virtrigaud_manager_reconcile_total`, `virtrigaud_manager_reconcile_duration_seconds`, `virtrigaud_queue_depth`, `virtrigaud_vm_operations_total`, `virtrigaud_provider_rpc_requests_total`, `virtrigaud_provider_rpc_latency_seconds`, `virtrigaud_provider_tasks_inflight`, `virtrigaud_errors_total`, `virtrigaud_ip_discovery_duration_seconds`, `virtrigaud_circuit_breaker_state`, `virtrigaud_circuit_breaker_failures_total`.
