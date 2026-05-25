@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"google.golang.org/grpc"
@@ -50,6 +51,23 @@ type Client struct {
 	// (e.g. construct &Client{...} directly); recordVMOp is nil-safe to
 	// support that path.
 	vmOps *metrics.VMOperationMetrics
+
+	// tasks owns the virtrigaud_provider_tasks_inflight gauge for this
+	// Client (G7.3 / #129). Always non-nil for production clients via
+	// NewClient. trackTaskStart / trackTaskDone are nil-safe so test
+	// clients that bypass NewClient don't panic.
+	tasks *metrics.TaskMetrics
+	// inflightTasksMu guards inflightTasks.
+	inflightTasksMu sync.Mutex
+	// inflightTasks is the set of TaskRef IDs this Client returned from
+	// a task-creating RPC and has NOT yet observed Done=true on. The
+	// map-based set is what makes the gauge correct under double-poll
+	// (reconciler retries between observing Done and clearing
+	// vm.Status.LastTaskRef) and post-restart (the new manager's map
+	// starts empty; trackTaskDone on an unknown ID no-ops, which means
+	// the gauge measures "tasks THIS instance is tracking", not "tasks
+	// the provider thinks are in-flight").
+	inflightTasks map[string]struct{}
 }
 
 // NewClient creates a new gRPC provider client.
@@ -126,6 +144,13 @@ func NewClient(ctx context.Context, endpoint string, providerType string, provid
 	}
 
 	client := providerv1.NewProviderClient(conn)
+	// G7.3 (#129): per-Provider task-inflight tracker. Seed the gauge to
+	// 0 here so the virtrigaud_provider_tasks_inflight family appears on
+	// /metrics from boot (Prometheus gauges with labels don't show until
+	// first write), giving operators a stable label set to dashboard
+	// against even before the first async task fires.
+	taskMetrics := metrics.NewTaskMetrics(providerType, providerName)
+	taskMetrics.SetInflightTasks(0)
 	return &Client{
 		conn:   conn,
 		client: client,
@@ -133,7 +158,9 @@ func NewClient(ctx context.Context, endpoint string, providerType string, provid
 		// providerType + providerName so dashboards can answer
 		// "how often does Create fail on the vsphere-prod Provider?"
 		// independently of the gRPC-method-level G4 view.
-		vmOps: metrics.NewVMOperationMetrics(providerType, providerName),
+		vmOps:         metrics.NewVMOperationMetrics(providerType, providerName),
+		tasks:         taskMetrics,
+		inflightTasks: make(map[string]struct{}),
 	}, nil
 }
 
@@ -310,6 +337,66 @@ func (c *Client) recordVMOp(op string, retErr *error) {
 	c.vmOps.RecordOperation(op, outcome)
 }
 
+// trackTaskStart adds taskID to the inflight set and pushes the new
+// gauge value to virtrigaud_provider_tasks_inflight{provider_type,
+// provider}. G7.3 / #129.
+//
+// Called by every task-creating RPC right after a non-nil Task field
+// is observed in the response. taskID = "" or c.tasks = nil are no-ops
+// so the helper is safe under both the empty-TaskRef edge case and the
+// &Client{...}-direct-construction test path.
+//
+// Re-adding an ID already in the set is a no-op for the gauge (set
+// semantics) — this defends against pathological provider-server
+// behaviour returning the same TaskRef from two RPCs.
+func (c *Client) trackTaskStart(taskID string) {
+	if c.tasks == nil || taskID == "" {
+		return
+	}
+	c.inflightTasksMu.Lock()
+	if c.inflightTasks == nil {
+		c.inflightTasks = make(map[string]struct{})
+	}
+	if _, already := c.inflightTasks[taskID]; already {
+		c.inflightTasksMu.Unlock()
+		return
+	}
+	c.inflightTasks[taskID] = struct{}{}
+	n := float64(len(c.inflightTasks))
+	c.inflightTasksMu.Unlock()
+	c.tasks.SetInflightTasks(n)
+}
+
+// trackTaskDone removes taskID from the inflight set and pushes the
+// new gauge value. G7.3 / #129.
+//
+// Idempotent on unknown IDs (no-op): handles two real cases observed
+// in production-style flows:
+//  1. The reconciler crashes between observing Done=true and clearing
+//     vm.Status.LastTaskRef — next reconcile polls again, gets Done=true
+//     again, calls trackTaskDone again. Without this guard the gauge
+//     would decrement to -1.
+//  2. A new manager instance (post-restart) polls TaskStatus for a
+//     vm.Status.LastTaskRef recorded by the previous instance. The new
+//     instance's inflightTasks map starts empty, so the ID is unknown,
+//     and the gauge stays at 0 — matching the documented semantic that
+//     this gauge measures "tasks THIS manager instance is tracking",
+//     not "tasks the provider believes are in-flight".
+func (c *Client) trackTaskDone(taskID string) {
+	if c.tasks == nil || taskID == "" {
+		return
+	}
+	c.inflightTasksMu.Lock()
+	if _, ok := c.inflightTasks[taskID]; !ok {
+		c.inflightTasksMu.Unlock()
+		return
+	}
+	delete(c.inflightTasks, taskID)
+	n := float64(len(c.inflightTasks))
+	c.inflightTasksMu.Unlock()
+	c.tasks.SetInflightTasks(n)
+}
+
 // Close closes the gRPC connection
 func (c *Client) Close() error {
 	return c.conn.Close()
@@ -358,6 +445,7 @@ func (c *Client) Create(ctx context.Context, req contracts.CreateRequest) (resul
 
 	if resp.Task != nil {
 		result.TaskRef = resp.Task.Id
+		c.trackTaskStart(resp.Task.Id) // G7.3 (#129)
 	}
 
 	return result, nil
@@ -379,6 +467,7 @@ func (c *Client) Delete(ctx context.Context, id string) (taskRef string, retErr 
 	}
 
 	if resp.Task != nil {
+		c.trackTaskStart(resp.Task.Id) // G7.3 (#129)
 		return resp.Task.Id, nil
 	}
 
@@ -416,6 +505,7 @@ func (c *Client) Power(ctx context.Context, id string, op contracts.PowerOp) (ta
 	}
 
 	if resp.Task != nil {
+		c.trackTaskStart(resp.Task.Id) // G7.3 (#129)
 		return resp.Task.Id, nil
 	}
 
@@ -447,6 +537,7 @@ func (c *Client) Reconfigure(ctx context.Context, id string, desired contracts.C
 	}
 
 	if resp.Task != nil {
+		c.trackTaskStart(resp.Task.Id) // G7.3 (#129)
 		return resp.Task.Id, nil
 	}
 
@@ -507,9 +598,15 @@ func (c *Client) IsTaskComplete(ctx context.Context, taskRef string) (done bool,
 	}
 
 	if resp.Error != "" {
+		// Terminal failure also counts as task-done — decrement the
+		// inflight gauge before returning (G7.3 / #129).
+		c.trackTaskDone(taskRef)
 		return true, fmt.Errorf("task failed: %s", resp.Error)
 	}
 
+	if resp.Done {
+		c.trackTaskDone(taskRef) // G7.3 (#129)
+	}
 	return resp.Done, nil
 }
 
@@ -523,6 +620,13 @@ func (c *Client) TaskStatus(ctx context.Context, taskRef string) (contracts.Task
 	})
 	if err != nil {
 		return contracts.TaskStatus{}, c.mapGRPCError("taskStatus", err)
+	}
+
+	// Both terminal-success (Done=true) and terminal-failure (Error != "")
+	// flip the task out of the inflight set (G7.3 / #129). Idempotent on
+	// unknown taskRef so double-poll / post-restart polls are safe.
+	if resp.Done || resp.Error != "" {
+		c.trackTaskDone(taskRef)
 	}
 
 	return contracts.TaskStatus{
@@ -558,6 +662,7 @@ func (c *Client) SnapshotCreate(ctx context.Context, req contracts.SnapshotCreat
 		result.Task = &contracts.TaskRef{
 			ID: resp.Task.Id,
 		}
+		c.trackTaskStart(resp.Task.Id) // G7.3 (#129)
 	}
 
 	return result, nil
@@ -579,6 +684,7 @@ func (c *Client) SnapshotDelete(ctx context.Context, vmId string, snapshotId str
 	}
 
 	if resp.Task != nil {
+		c.trackTaskStart(resp.Task.Id) // G7.3 (#129)
 		return resp.Task.Id, nil
 	}
 
@@ -601,6 +707,7 @@ func (c *Client) SnapshotRevert(ctx context.Context, vmId string, snapshotId str
 	}
 
 	if resp.Task != nil {
+		c.trackTaskStart(resp.Task.Id) // G7.3 (#129)
 		return resp.Task.Id, nil
 	}
 
@@ -635,6 +742,7 @@ func (c *Client) ExportDisk(ctx context.Context, req contracts.ExportDiskRequest
 
 	if resp.Task != nil {
 		result.TaskRef = resp.Task.Id
+		c.trackTaskStart(resp.Task.Id) // G7.3 (#129)
 	}
 
 	return result, nil
@@ -669,6 +777,7 @@ func (c *Client) ImportDisk(ctx context.Context, req contracts.ImportDiskRequest
 
 	if resp.Task != nil {
 		result.TaskRef = resp.Task.Id
+		c.trackTaskStart(resp.Task.Id) // G7.3 (#129)
 	}
 
 	return result, nil

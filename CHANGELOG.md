@@ -12,6 +12,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2026-05-25 07:12] - feat(obs): wire virtrigaud_provider_tasks_inflight per-Provider async-task tracker (G7.3 / closes #129)
+**Author:** @williamrizzo (William Rizzo)
+
+### Audit finding
+Third sub-PR of the G7 umbrella (#123). `virtrigaud_provider_tasks_inflight{provider_type, provider}` was registered in `internal/obs/metrics/metrics.go` with helper `(*TaskMetrics).SetInflightTasks(count)` — same dead-code-paradox shape that G7.1 / G7.2 / G6 each fixed: zero production callsites.
+
+Pre-PR: operators dashboarding "how many tasks is the manager currently tracking per Provider?" got an empty family.
+
+### Added
+- `internal/transport/grpc/client.go`: `Client` struct gains three fields — `tasks *metrics.TaskMetrics`, `inflightTasksMu sync.Mutex`, and `inflightTasks map[string]struct{}`. The map-based set is the source of truth; the gauge value is set to `len(map)` after each change.
+- `internal/transport/grpc/client.go`: `(*Client).trackTaskStart(taskID string)` — adds taskID to the set and pushes the new gauge value. Nil-safe on `c.tasks`. Idempotent on duplicate IDs (defends against pathological provider-server behaviour returning the same TaskRef twice).
+- `internal/transport/grpc/client.go`: `(*Client).trackTaskDone(taskID string)` — removes taskID from the set and pushes the new gauge value. Idempotent on unknown IDs (handles two real-world cases: the reconciler crashes between observing Done=true and clearing `vm.Status.LastTaskRef`, and a new manager instance polls a TaskRef recorded by the previous instance — both must NOT push the gauge negative).
+- `internal/transport/grpc/client.go`: 9 task-creating method call sites now invoke `c.trackTaskStart(resp.Task.Id)` after observing a non-nil Task field: **Create, Delete, Power, Reconfigure, SnapshotCreate, SnapshotDelete, SnapshotRevert, ExportDisk, ImportDisk**. Each call site annotated with `// G7.3 (#129)`.
+- `internal/transport/grpc/client.go`: 2 task-polling methods now invoke `c.trackTaskDone(taskRef)` on terminal completion: **IsTaskComplete** (when `resp.Done` or `resp.Error != ""`) and **TaskStatus** (same condition).
+- `internal/transport/grpc/client.go`: `NewClient` seeds the gauge to 0 via `taskMetrics.SetInflightTasks(0)` so the family appears on `/metrics` from boot — operators get a stable label set to dashboard against even before the first async task fires.
+- `internal/transport/grpc/client_tasks_inflight_test.go` (new): 7 tests covering:
+  - `TestTrackTask_NilTasksIsSafe` — pins nil-safety on both helpers
+  - `TestTrackTask_StartAndDoneCycle` — pins the success path Start("a") → 1 → Start("b") → 2 → Done("a") → 1 → Done("b") → 0
+  - `TestTrackTask_DoubleDoneIsIdempotent` — pins the double-poll contract (reconciler retry between observing Done and clearing status ref)
+  - `TestTrackTask_UnknownDoneIsNoop` — pins the post-restart contract (new manager instance's set is empty; unknown Done must not push gauge negative)
+  - `TestTrackTask_StartIdempotentOnSameID` — pins the duplicate-Start defensive path
+  - `TestTrackTask_ConcurrentStartDoneIsRaceFree` — 200 goroutines (100 Start + 100 Done), verified clean under `go test -race`
+  - `TestClient_TaskLifecycle_EndToEnd` — integration via bufconn server: Create-returning-Task → gauge=1, IsTaskComplete-returning-Done → gauge=0
+- New `fakeTasksServer` in the test file: minimal `providerv1.ProviderServer` with `CreateTaskID` and `DoneOnPoll` toggles for the integration test.
+- Local `gaugeSample` helper in the test file (mirrors the existing `counterSampleByLabels` pattern; kept package-local).
+
+### Why
+1. **Closes G7.3 of the G7 umbrella (#123).** Third of 4 deferred metric families to wire.
+2. **Operator visibility into provider load.** "Is the libvirt provider drowning in concurrent migration tasks?" — pre-PR, no metric. Post-PR: `virtrigaud_provider_tasks_inflight{provider_type="libvirt"} > 5` is a sensible alert threshold.
+3. **Correct semantic across manager restarts.** The gauge measures "tasks **this manager instance** is tracking," not "tasks the provider believes are in-flight." This is intentional and documented — the per-instance count self-corrects within seconds as tasks complete and new ones start. Documented in helper GoDoc.
+4. **Race-free under concurrent reconciler load.** The mutex-guarded map handles the realistic case of multiple VirtualMachineReconciler workers (the controller-runtime workqueue defaults to 10 concurrent reconciles per controller, per `MaxConcurrentReconciles` in `SetupWithManager`) racing on the same Client. Verified with `go test -race`.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (manager binary gains new gauge emission)
+- [ ] Config change only
+- [ ] Documentation only
+
+### Notes
+- 9 task-creating sites is the full set verified in the audit on `main` post-#128 (Create / Delete / Power / Reconfigure / SnapshotCreate / SnapshotDelete / SnapshotRevert / ExportDisk / ImportDisk). All return `*providerv1.TaskResponse` (or have a Task field on a richer response struct). Any future RPC that returns a TaskRef must add a `trackTaskStart` call — would surface in code review since the pattern is uniform.
+- Both `IsTaskComplete` and `TaskStatus` instrument `trackTaskDone`. They wrap the same underlying gRPC RPC; the per-Client mutex serialises updates so calling both for the same task only decrements the gauge once (because the second call sees the ID already removed from the set and no-ops).
+- Pre-merge verification: `make fmt` clean; `go vet ./...` clean; `make test` 12/12 packages with 0 FAIL; new test file 7/7 sub-cases green; `go test -race ./internal/transport/grpc/...` clean; `make build` produces working `bin/manager` with `--version` exit 0.
+- After this lands, **10 of 12 expected `virtrigaud_*` families are wired in code**. The remaining gap is G7.4 (`virtrigaud_queue_depth`) plus the two `virtrigaud_circuit_breaker_*` families that emit on `vr1.lab.k8` only after a v0.3.6-rc1 deploy (code already in main since G6 / PR #112).
+- Next in G7: G7.4 (file sub-issue when starting) — wire `virtrigaud_queue_depth` (per-reconciler workqueue depth). Closes G7 umbrella #123.
+
+---
+
 ## [2026-05-25 06:24] - feat(obs): wire virtrigaud_ip_discovery_duration_seconds in VirtualMachineReconciler (G7.2 / closes #127)
 **Author:** @williamrizzo (William Rizzo)
 
