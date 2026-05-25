@@ -270,6 +270,14 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		return r.createVM(ctx, vm, providerInstance, vmClass, vmImage, networks)
 	}
 
+	// G7.2 (#127): record virtrigaud_ip_discovery_duration_seconds on
+	// the first reconcile that observes the no-IPs → has-IPs transition
+	// for this VM. Must be called BEFORE the vm.Status.IPs = desc.IPs
+	// assignment below so the gate sees the pre-update value of
+	// vm.Status.IPs. Idempotent across manager restarts because
+	// vm.Status.IPs is persisted in etcd.
+	recordIPDiscoveryIfFirstSeen(vm.Status.IPs, desc.IPs, vm.CreationTimestamp, string(provider.Spec.Type))
+
 	// Update status with current state
 	vm.Status.PowerState = infravirtrigaudiov1beta1.PowerState(desc.PowerState)
 	vm.Status.IPs = desc.IPs
@@ -1045,6 +1053,47 @@ func (r *VirtualMachineReconciler) getProviderInstance(ctx context.Context, prov
 	}
 
 	return r.RemoteResolver.GetProvider(ctx, provider) //nolint:wrapcheck
+}
+
+// recordIPDiscoveryIfFirstSeen emits a single
+// virtrigaud_ip_discovery_duration_seconds sample on the no-IPs →
+// has-IPs transition for this VM. Pure function (no reconciler state)
+// so it is unit-testable without standing up the full envtest harness.
+//
+// Inputs:
+//   - currentIPs: the value of vm.Status.IPs BEFORE the reconciler
+//     overwrites it with descIPs. The pre-update value is what tells us
+//     whether the VM has previously been observed with IPs.
+//   - descIPs:    the IPs the provider just reported via Describe.
+//   - creationTime: vm.CreationTimestamp. Used as the baseline for the
+//     duration measurement, so the metric reads as "kubectl apply →
+//     first IP visible". Zero-valued (defensive) → skip.
+//   - providerType: the value of provider.Spec.Type, used as the
+//     provider_type metric label.
+//
+// Gate semantics (all three must hold; otherwise skip silently):
+//  1. currentIPs is empty (we have not previously observed any IP)
+//  2. descIPs is non-empty (the provider just gave us an IP)
+//  3. creationTime is non-zero (CreationTimestamp is present)
+//
+// Idempotency across manager restarts is achieved at the persistence
+// layer: vm.Status.IPs is committed to etcd as soon as the gate fires
+// once (the very next line in Reconcile does
+// `vm.Status.IPs = desc.IPs`), so subsequent reconciles after the
+// transition see currentIPs non-empty and the gate short-circuits.
+//
+// G7.2 / #127.
+func recordIPDiscoveryIfFirstSeen(currentIPs, descIPs []string, creationTime metav1.Time, providerType string) {
+	if len(currentIPs) != 0 {
+		return // already observed IPs in a previous reconcile
+	}
+	if len(descIPs) == 0 {
+		return // VM still doesn't have an IP this round
+	}
+	if creationTime.IsZero() {
+		return // defensive — CRs fetched via the API server always have this
+	}
+	metrics.RecordIPDiscovery(providerType, time.Since(creationTime.Time))
 }
 
 // SetupWithManager sets up the controller with the Manager.
