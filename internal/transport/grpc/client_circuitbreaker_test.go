@@ -31,6 +31,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
+	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 	"github.com/projectbeskar/virtrigaud/internal/resilience"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
@@ -93,7 +94,16 @@ func newTestClientWithCB(t *testing.T, dialer func(context.Context, string) (net
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
-	return &Client{conn: conn, client: providerv1.NewProviderClient(conn)}, cb
+	// vmOps initialised so the deferred recordVMOp in production
+	// methods is safe — these CB tests only call Validate which does
+	// not record vm_operations_total, but the field needs to be
+	// non-nil for any future test that adds a VM-operation call here
+	// (G7.1 / #124).
+	return &Client{
+		conn:   conn,
+		client: providerv1.NewProviderClient(conn),
+		vmOps:  metrics.NewVMOperationMetrics(providerType, providerName),
+	}, cb
 }
 
 // TestProviderCircuitBreakerInterceptor_InfraErrorsTripBreaker drives

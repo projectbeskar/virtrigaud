@@ -111,6 +111,8 @@ func (r *Resolver) getRemoteProvider(ctx context.Context, provider *infravirtrig
 
 	// provider.Spec.Type populates the `provider_type` label on every
 	// virtrigaud_provider_rpc_* sample emitted by this client (G4 / #90).
+	// provider.Name populates the `provider` label on every
+	// virtrigaud_vm_operations_total sample (G7.1 / #124).
 	// One CircuitBreaker per Provider CR is allocated from the shared
 	// registry (G6 / #111); when cbRegistry is nil (test path), the
 	// gRPC client is constructed without breaker protection.
@@ -118,7 +120,7 @@ func (r *Resolver) getRemoteProvider(ctx context.Context, provider *infravirtrig
 	if r.cbRegistry != nil {
 		cb = r.cbRegistry.GetOrCreate(circuitBreakerName, string(provider.Spec.Type), provider.Name)
 	}
-	client, err := grpcClient.NewClient(ctx, provider.Status.Runtime.Endpoint, string(provider.Spec.Type), cb, tlsConfig)
+	client, err := grpcClient.NewClient(ctx, provider.Status.Runtime.Endpoint, string(provider.Spec.Type), provider.Name, cb, tlsConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create gRPC client: %w", err)
 	}

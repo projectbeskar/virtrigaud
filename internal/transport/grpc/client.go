@@ -42,6 +42,14 @@ import (
 type Client struct {
 	conn   *grpc.ClientConn
 	client providerv1.ProviderClient
+	// vmOps records per-VM-operation counters (G7.1 / #124). Always
+	// non-nil for production clients constructed via NewClient — the
+	// constructor initialises it from (providerType, providerName) even
+	// when those are empty strings, so recordVMOp can call into it
+	// without a nil check. May be nil in tests that bypass NewClient
+	// (e.g. construct &Client{...} directly); recordVMOp is nil-safe to
+	// support that path.
+	vmOps *metrics.VMOperationMetrics
 }
 
 // NewClient creates a new gRPC provider client.
@@ -52,6 +60,12 @@ type Client struct {
 // permitted (the label will be empty) but discouraged in production —
 // makes per-provider-type alerts impossible.
 //
+// providerName is the Provider CR's metadata.name (e.g. "vsphere-prod",
+// "libvirt-lab"). Used as the `provider` label on
+// virtrigaud_vm_operations_total samples emitted by this client (G7.1 /
+// #124). Empty string is permitted (label will be empty); discouraged
+// in production for the same reason as providerType.
+//
 // cb is an optional CircuitBreaker wrapping every outbound RPC. When
 // non-nil, infrastructure-class gRPC errors (Unavailable, DeadlineExceeded,
 // Internal, Unknown) count toward the breaker's failure threshold; once
@@ -59,7 +73,7 @@ type Client struct {
 // Unavailable status until ResetTimeout elapses (G6 / #111). Pass nil to
 // disable circuit-breaker protection — useful in unit tests that exercise
 // real gRPC failure semantics without the breaker interposing.
-func NewClient(ctx context.Context, endpoint string, providerType string, cb *resilience.CircuitBreaker, tlsConfig *TLSConfig) (*Client, error) {
+func NewClient(ctx context.Context, endpoint string, providerType string, providerName string, cb *resilience.CircuitBreaker, tlsConfig *TLSConfig) (*Client, error) {
 	// Connection timeout is handled by grpc.NewClient internally
 	_ = ctx // Context available for future timeout implementation
 
@@ -115,6 +129,11 @@ func NewClient(ctx context.Context, endpoint string, providerType string, cb *re
 	return &Client{
 		conn:   conn,
 		client: client,
+		// G7.1 (#124): per-VM-operation counter, labelled by
+		// providerType + providerName so dashboards can answer
+		// "how often does Create fail on the vsphere-prod Provider?"
+		// independently of the gRPC-method-level G4 view.
+		vmOps: metrics.NewVMOperationMetrics(providerType, providerName),
 	}, nil
 }
 
@@ -260,6 +279,37 @@ func isInfraFailure(err error) bool {
 	}
 }
 
+// recordVMOp records a virtrigaud_vm_operations_total sample for the
+// given operation. G7.1 / #124.
+//
+// Designed to be called via `defer c.recordVMOp(metrics.OpCreate,
+// &retErr)` from each VM-operation method, with a named `retErr` return
+// value. The pointer-to-error indirection is required so the deferred
+// call evaluates the FINAL return value of the enclosing function, not
+// the value of err at defer-time (which would always be nil, since the
+// defer runs before any explicit `return ...` evaluates).
+//
+// Nil-safe on c.vmOps (tests that construct &Client{...} directly
+// bypass NewClient and may not have it set). Production clients via
+// NewClient always have it initialised.
+//
+// Outcome derivation matches G1-G3's named-return reconcile pattern:
+//   - retErr == nil  → metrics.OutcomeSuccess
+//   - retErr != nil  → metrics.OutcomeError
+//
+// The provider/provider_type labels come from the values passed to
+// NewVMOperationMetrics at NewClient construction time.
+func (c *Client) recordVMOp(op string, retErr *error) {
+	if c.vmOps == nil {
+		return
+	}
+	outcome := metrics.OutcomeSuccess
+	if retErr != nil && *retErr != nil {
+		outcome = metrics.OutcomeError
+	}
+	c.vmOps.RecordOperation(op, outcome)
+}
+
 // Close closes the gRPC connection
 func (c *Client) Close() error {
 	return c.conn.Close()
@@ -282,8 +332,13 @@ func (c *Client) Validate(ctx context.Context) error {
 	return nil
 }
 
-// Create implements contracts.Provider
-func (c *Client) Create(ctx context.Context, req contracts.CreateRequest) (contracts.CreateResponse, error) {
+// Create implements contracts.Provider.
+//
+// Records virtrigaud_vm_operations_total{operation="Create",...} via
+// deferred recordVMOp using the named retErr return value (G7.1 / #124).
+func (c *Client) Create(ctx context.Context, req contracts.CreateRequest) (result contracts.CreateResponse, retErr error) {
+	defer c.recordVMOp(metrics.OpCreate, &retErr)
+
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
@@ -297,7 +352,7 @@ func (c *Client) Create(ctx context.Context, req contracts.CreateRequest) (contr
 		return contracts.CreateResponse{}, c.mapGRPCError("create", err)
 	}
 
-	result := contracts.CreateResponse{
+	result = contracts.CreateResponse{
 		ID: resp.Id,
 	}
 
@@ -308,8 +363,13 @@ func (c *Client) Create(ctx context.Context, req contracts.CreateRequest) (contr
 	return result, nil
 }
 
-// Delete implements contracts.Provider
-func (c *Client) Delete(ctx context.Context, id string) (taskRef string, err error) {
+// Delete implements contracts.Provider.
+//
+// Records virtrigaud_vm_operations_total{operation="Delete",...} via
+// deferred recordVMOp using the named retErr return value (G7.1 / #124).
+func (c *Client) Delete(ctx context.Context, id string) (taskRef string, retErr error) {
+	defer c.recordVMOp(metrics.OpDelete, &retErr)
+
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
@@ -325,8 +385,13 @@ func (c *Client) Delete(ctx context.Context, id string) (taskRef string, err err
 	return "", nil
 }
 
-// Power implements contracts.Provider
-func (c *Client) Power(ctx context.Context, id string, op contracts.PowerOp) (taskRef string, err error) {
+// Power implements contracts.Provider.
+//
+// Records virtrigaud_vm_operations_total{operation="Power",...} via
+// deferred recordVMOp using the named retErr return value (G7.1 / #124).
+func (c *Client) Power(ctx context.Context, id string, op contracts.PowerOp) (taskRef string, retErr error) {
+	defer c.recordVMOp(metrics.OpPower, &retErr)
+
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
@@ -357,8 +422,14 @@ func (c *Client) Power(ctx context.Context, id string, op contracts.PowerOp) (ta
 	return "", nil
 }
 
-// Reconfigure implements contracts.Provider
-func (c *Client) Reconfigure(ctx context.Context, id string, desired contracts.CreateRequest) (taskRef string, err error) {
+// Reconfigure implements contracts.Provider.
+//
+// Records virtrigaud_vm_operations_total{operation="Reconfigure",...}
+// via deferred recordVMOp using the named retErr return value (G7.1 /
+// #124).
+func (c *Client) Reconfigure(ctx context.Context, id string, desired contracts.CreateRequest) (taskRef string, retErr error) {
+	defer c.recordVMOp(metrics.OpReconfigure, &retErr)
+
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
@@ -382,8 +453,13 @@ func (c *Client) Reconfigure(ctx context.Context, id string, desired contracts.C
 	return "", nil
 }
 
-// Describe implements contracts.Provider
-func (c *Client) Describe(ctx context.Context, id string) (contracts.DescribeResponse, error) {
+// Describe implements contracts.Provider.
+//
+// Records virtrigaud_vm_operations_total{operation="Describe",...} via
+// deferred recordVMOp using the named retErr return value (G7.1 / #124).
+func (c *Client) Describe(ctx context.Context, id string) (result contracts.DescribeResponse, retErr error) {
+	defer c.recordVMOp(metrics.OpDescribe, &retErr)
+
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 

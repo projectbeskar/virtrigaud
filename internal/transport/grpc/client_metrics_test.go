@@ -166,7 +166,15 @@ func newTestClient(t *testing.T, dialer func(context.Context, string) (net.Conn,
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
-	return &Client{conn: conn, client: providerv1.NewProviderClient(conn)}
+	// vmOps initialised with providerType + empty providerName — keeps
+	// recordVMOp's defer in production methods nil-safe for this test
+	// path (G7.1 / #124). Tests asserting on vm_operations_total labels
+	// use a non-empty providerName per-call.
+	return &Client{
+		conn:   conn,
+		client: providerv1.NewProviderClient(conn),
+		vmOps:  metrics.NewVMOperationMetrics(providerType, ""),
+	}
 }
 
 // TestProviderRPCMetricsInterceptor_SuccessfulCall verifies that a
