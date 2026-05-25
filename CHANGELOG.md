@@ -5,10 +5,103 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.6] - 2026-05-25
+
+Headline observability + supply-chain release. v0.3.6-rc1 was deployed on `vr1.lab.k8`, smoke-tested, then tagged as v0.3.6 from the same commit.
+
+### Added (operator-visible)
+- **G6 CircuitBreaker on the provider gRPC RPC path** (#112). One CB per Provider CR allocated lazily from a shared `resilience.Registry`. The `virtrigaud_circuit_breaker_state{provider_type, provider}` gauge and `_failures_total` counter activate after this deploy and immediately surfaced the existing libvirt-SSH issue (#I1) on the v0.3.6-rc1 smoke — exactly the value the CB was supposed to provide.
+- **G7.1 `virtrigaud_vm_operations_total`** (#126). Per-Provider VM-operation counter; deferred-record on Create/Delete/Power/Describe/Reconfigure gRPC client methods.
+- **G7.2 `virtrigaud_ip_discovery_duration_seconds`** (#128). Per-Provider histogram measuring "kubectl apply → first IP visible in Status". Pure helper `recordIPDiscoveryIfFirstSeen` in `VirtualMachineReconciler`; idempotent across manager restarts via etcd-persisted vm.Status.IPs.
+- **G7.3 `virtrigaud_provider_tasks_inflight`** (#130). Per-Provider async-task tracker. Mutex-guarded inflight map; trackTaskStart in 9 task-creating RPCs; trackTaskDone in 2 task-polling methods. Race-free under controller-runtime's 10 concurrent reconciles. Gauge seeded to 0 at boot so the family appears on /metrics from the first scrape.
+- **H1 build-path consolidation** (#92 umbrella; PRs #115/#117/#119/#121). One manager entrypoint, one manager Dockerfile. Ported `--version` flag + `certwatcher` + `metrics/filters.WithAuthenticationAndAuthorization` to the canonical entrypoint; parametrised `build/Dockerfile.manager` with `BUILDER_IMAGE`/`BASE_IMAGE`/`GOPROXY`/CA-cert handling for corporate / banking deployments. Closed latent bug #113 (`make docker-build` was producing a manager binary missing metrics + VMSnapshot + VMMigration controllers).
+
+### Changed
+- **Go toolchain floor: 1.24.0 → 1.26.0** (#125). Pinned 5 builder Dockerfiles to `golang:1.26.3(-bookworm)`. Dropped stale `GO_VERSION: '1.23'` env var from CI workflows. **Source builders need Go 1.26+ installed locally**; binary consumers via released images unaffected.
+- **GitHub Actions Node.js 20 backlog fully cleared** (#78/#80/#138/#139/#141/#142): `actions/upload-artifact` → v7, `actions/download-artifact` → v8, `actions/setup-go` → v6.4.0, `docker/login-action` → v4.2.0, `docker/metadata-action` → v6.1.0, `docker/setup-buildx-action` → v4.1.0. Clears the 2026-09-16 hard removal deadline (#134, ongoing).
+- **Dependabot policy made explicit** (#135): added `allow: dependency-type: all` and `groups: ci-actions-non-major` for minor/patch batching while keeping major bumps individual. Top-of-file comments document the policy + Node 20 deadline + SHA-pin caveat.
+- **e2e suite gated behind `//go:build e2e`** (#133): default `go test ./...` no longer fails on TestE2E (which needs a kind cluster). Run e2e explicitly with `go test -tags=e2e ./test/e2e/...`.
+
+### Deprecated
+- **`virtrigaud_queue_depth` gauge family** and `(*ReconcileMetrics).SetQueueDepth` helper (#132). Redundant with controller-runtime's already-emitted `workqueue_depth{name}` (present on /metrics since v0.3.0). Help string carries `[DEPRECATED v0.3.6 — use workqueue_depth{name} instead]`; helper has `Deprecated:` GoDoc. Removal scheduled for v0.4.0 or later. Migration recipe: see #131.
+
+### Security
+- **`go.opentelemetry.io/otel` + `otel/sdk` + `otel/trace` + `otlptracegrpc` v1.39.0/v1.37.0 → v1.43.0** (#144 / closes #143). Closes 3 HIGH-severity CVEs (CVE-2026-29181, CVE-2026-24051, CVE-2026-39883 — last two are PATH hijacking primitives). First attempt to cut v0.3.6-rc1 was blocked by the release workflow's Trivy scan on the manager image catching these; bump unblocks the release.
+
+### Fixed
+- **#113 (latent)**: `make docker-build` and `make run` now produce a complete manager binary (emits `virtrigaud_build_info`, registers VMSnapshot + VMMigration controllers). Fix-by-construction in H1 PR-3 (#119).
+
+### Metric coverage after v0.3.6
+**11 of 12 `virtrigaud_*` families wired in code; the 12th explicitly deprecated.** Live on `vr1.lab.k8` post-deploy: 9 of those 11 emit immediately (G6 CB pair + G7.3 inflight + the 6 from v0.3.5); G7.1 (`vm_operations_total`) and G7.2 (`ip_discovery_duration_seconds`) start emitting on the first VM RPC and the first no-IPs → has-IPs transition respectively.
+
+### Process
+- **Release process followed `rc1 → smoke → final`** for the third consecutive release (v0.3.3 took 4 RCs; v0.3.5 and v0.3.6 each took 1). Trivy on the manager image caught a real CVE before promotion (otel CVEs above); the v0.3.6-rc1 attempt from commit `d1e08d0` was deleted and re-cut from `d707c02` after the security fix landed.
+
+### Author
+**Author:** @wrkode (William Rizzo) — all PRs in this release.
+
+---
+
 ## [0.3.3] - 2026-03-17
 
 ### Changed
 - Changelog organization with versioned release headers
+
+---
+
+## [2026-05-25 16:55] - chore(test): gate e2e suite behind //go:build e2e (closes #133)
+**Author:** @wrkode (William Rizzo)
+
+### Audit finding
+`test/e2e/TestE2E` fails on `go test ./...` because its `BeforeSuite` requires a running kind cluster + the manager image loaded (verified during G7.3 PR #130 pre-merge verify). The `make test` target works around this with an explicit `grep -v /test/e2e` exclude — fine for the make target, but raw `go test ./...` and IDE 'run all tests' buttons both hit the failure. Idiomatic Go solution: a build tag.
+
+### Added
+- `test/e2e/e2e_suite_test.go`, `test/e2e/e2e_test.go`: `//go:build e2e` on the first line. Excludes the suite from default `go test ./...` / `go vet ./...` runs.
+
+### Run the suite explicitly
+```bash
+go test -tags=e2e ./test/e2e/...
+```
+
+### Why
+- Default `go test ./...` runs cleanly across 13 packages instead of failing on TestE2E
+- IDE 'run all tests' integration works
+- Matches how other controller-runtime projects (cert-manager, capi, …) gate their e2e suites
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only — operator-visible behaviour unchanged; CI `make test` already excluded test/e2e
+
+### Notes
+- Supersedes the 5-day-old stale draft #71 (which had drifted ~60 files from main and would have hit huge rebase conflicts).
+- CI `Test` job uses `make test` (which already excludes test/e2e), so no CI behaviour change.
+
+---
+
+## [2026-05-25 12:08] - chore(ci): make Dependabot policy explicit + group non-major actions bumps (#135 / closes #134 in part)
+**Author:** @wrkode (William Rizzo)
+
+### Audit finding
+The May 22 Dependabot batch (#74–#82) cleared 5 of the 9 then-outdated GitHub Actions in our workflows. 4 remained on Node 20 with newer Node 24 majors available (`actions/setup-go`, `docker/login-action`, `docker/metadata-action`, `docker/setup-buildx-action`). Dependabot had not surfaced PRs for them, likely because of SHA-pinning + `# vX` version-comment hints making it conservative about major bumps. Hard deadline 2026-09-16.
+
+### Changed
+- `.github/dependabot.yml`: added top-of-file comment block (~25 lines) documenting the policy, the Node 20 deadline, the 4 outstanding actions, and the SHA-pinning caveat.
+- `.github/dependabot.yml`: explicit `allow: dependency-type: all` block (functionally equivalent to omitting the block; loud-and-clear intent for future maintainers).
+- `.github/dependabot.yml`: `groups: ci-actions-non-major` (`update-types: [minor, patch]`) so minor/patch bumps batch into one weekly PR per ecosystem while major bumps stay individual (matches the Tier A/B/C convention).
+
+### Why
+Make the major-bump-permitted policy loud; improve the per-week review experience by batching minor/patch noise; surface the Node 20 plan to anyone reading the config.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [x] Config change only
+- [ ] Documentation only
+
+### Notes
+- Worked exactly as intended: the next Monday Dependabot run surfaced the 4 outstanding Node 20 actions plus 3 others. Tracking issue #134 documents the rollout. The 4 backlog clears merged the same day (#138/#139/#141/#142); #137 (actions/checkout 4→6) intentionally deferred to preserve the K4 mitigation pin from PR #104; #140 (codecov-action 5→6) deferred to v0.3.7 (not Node 20 backlog).
 
 ---
 
