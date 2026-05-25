@@ -1,4 +1,28 @@
 ---
+# Dependabot configuration for VirtRigaud.
+#
+# Policy (per #134, 2026-05-25):
+#   - Major bumps ARE allowed. No `ignore` clause excludes any update
+#     type. Major version bumps for GitHub Actions are operationally
+#     significant (Node runtime changes, breaking API changes) and get
+#     reviewed individually; minor + patch bumps batch into a single PR
+#     per ecosystem to reduce review overhead.
+#   - The Node.js 20 deprecation in GitHub Actions has a 2026-09-16
+#     hard removal date. Actions still on Node 20 (per PROJECT_CONTEXT.md
+#     Risks-Watching) include: actions/setup-go (v5 → latest v6+),
+#     docker/login-action (v3 → v4+), docker/metadata-action (v5 → v6+),
+#     docker/setup-buildx-action (v3 → v4+). These have newer majors on
+#     Node 24; Dependabot should propose those bumps on its weekly run.
+#   - SHA-pinning caveat: our workflows use commit-SHA pinning with a
+#     trailing version comment (e.g. `actions/setup-go@<sha>  # v5`).
+#     Dependabot may be conservative about major bumps with SHA pins.
+#     If the weekly run does not propose v5→v6 (etc.), the fallback is
+#     a manual PR bumping the 4 outstanding actions to the latest SHA
+#     within the next major.
+#
+# Schedule: weekly Monday 09:00 America/Toronto — gives time during the
+# Monday business day to triage what landed before merging.
+
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -14,3 +38,21 @@ updates:
       - github-actions
     commit-message:
       prefix: "chore(deps)"
+
+    # Explicit allow block — documents intent that ALL update types
+    # (major + minor + patch) for ALL github-actions deps are eligible.
+    # Functionally equivalent to omitting the block, but makes the
+    # policy loud for future maintainers reading the config.
+    allow:
+      - dependency-type: all
+
+    # Group minor + patch bumps into one weekly PR per ecosystem; keep
+    # major bumps as individual PRs (so each major change gets its own
+    # review surface — matches what we did during the May 2026 Tier
+    # A/B/C batches where each action's major bump was a separate PR).
+    groups:
+      ci-actions-non-major:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
