@@ -12,6 +12,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2026-05-25 06:24] - feat(obs): wire virtrigaud_ip_discovery_duration_seconds in VirtualMachineReconciler (G7.2 / closes #127)
+**Author:** @williamrizzo (William Rizzo)
+
+### Audit finding
+Second sub-PR of the G7 umbrella (#123). `virtrigaud_ip_discovery_duration_seconds{provider_type}` was registered in `internal/obs/metrics/metrics.go` with helper `metrics.RecordIPDiscovery(providerType, duration)` — same dead-code-paradox shape that G7.1 / G6 / etc. fixed: zero production callsites. The histogram has buckets 100ms-~51s which fits "VM CR creation → first IP visible" durations.
+
+### Added
+- `internal/controller/virtualmachine_controller.go`: new pure helper `recordIPDiscoveryIfFirstSeen(currentIPs, descIPs []string, creationTime metav1.Time, providerType string)`. Gates on three conditions (currentIPs empty, descIPs non-empty, creationTime non-zero) and records `metrics.RecordIPDiscovery(providerType, time.Since(creationTime.Time))` when all three hold. Pure function (no reconciler state) so it is unit-testable without standing up the envtest harness.
+- `internal/controller/virtualmachine_ip_discovery_test.go` (new): 4 tests pinning all 4 gate paths:
+  - `TestRecordIPDiscoveryIfFirstSeen_NoIPsToNoIPs` — common "still waiting for DHCP" case; must NOT record.
+  - `TestRecordIPDiscoveryIfFirstSeen_FirstIPDiscovered` — load-bearing success path; records exactly 1 sample with correct `provider_type` label, sample-sum delta ≈ time-since-creationTime (4s-60s window absorbs CI scheduling jitter without flakiness).
+  - `TestRecordIPDiscoveryIfFirstSeen_AlreadyHadIPs` — idempotency-after-restart contract; must NOT re-record because `vm.Status.IPs` persists in etcd and subsequent reconciles see currentIPs non-empty.
+  - `TestRecordIPDiscoveryIfFirstSeen_ZeroCreationTimeIsSkipped` — defensive; must NOT record when CreationTimestamp is zero (would emit nonsensical durations like `time.Since(epoch)`).
+- `internal/controller/virtualmachine_ip_discovery_test.go`: also introduces two local histogram-introspection helpers (`histogramSampleCount`, `histogramSampleSum`) that mirror the existing `counterSample` pattern but for `*dto.Histogram` samples. Kept package-local so the helpers don't leak into production code.
+
+### Changed
+- `internal/controller/virtualmachine_controller.go`: in `Reconcile`, call `recordIPDiscoveryIfFirstSeen(vm.Status.IPs, desc.IPs, vm.CreationTimestamp, string(provider.Spec.Type))` **immediately before** `vm.Status.IPs = desc.IPs`. The ordering is load-bearing — the gate inspects the **pre-update** value of `vm.Status.IPs`. Inline comment block points at #127 and explains the ordering.
+
+### Why
+1. **Closes G7.2 of the G7 umbrella (#123).** Second of 4 deferred metric families to wire.
+2. **Operator-facing SLO answer.** "How long from `kubectl apply` to the VM having an IP?" was previously unanswerable from metrics; required scraping events and timestamps off `kubectl describe vm`. Post-PR: `histogram_quantile(0.95, sum(rate(virtrigaud_ip_discovery_duration_seconds_bucket{provider_type="libvirt"}[5m])) by (le))` gives the p95 IP-discovery latency for libvirt VMs over the last 5 minutes.
+3. **Adoption case handled**: an adopted VM (CR created against an existing running VM) will have `CreationTimestamp` = adoption time and IPs already populated by Describe on the first reconcile. The gate fires once on first observation with a small positive duration (adoption → reconcile latency), which is the correct semantic — operators learn how quickly post-adoption their metrics surfaced the VM state. Documented in the helper's GoDoc.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (manager binary gains new metric emission)
+- [ ] Config change only
+- [ ] Documentation only
+
+### Notes
+- The helper is **package-private** intentionally: it has no callers outside the reconciler today. If a different reconciler ever needs the same semantics it can be promoted to a shared helper at that point.
+- The histogram buckets (100ms-51.2s exponential) fit the expected operator-VM SLO range. Outliers above 51.2s land in the `+Inf` bucket — visible but not bucketed in detail. Acceptable for v0.3.6; can revisit if operators ask for finer resolution above 1 minute.
+- This is now **9 of 12** `virtrigaud_*` families wired (with G6 + G7.1 + G7.2 stacked). Remaining gaps: `virtrigaud_provider_tasks_inflight` (G7.3), `virtrigaud_queue_depth` (G7.4), plus the two `virtrigaud_circuit_breaker_*` families that emit on `vr1.lab.k8` only after a v0.3.6-rc1 deploy (the CB code is in main already since G6 / PR #112).
+- Pre-merge verification: `make fmt` clean; `go vet ./...` clean; `make test` 12/12 packages pass with 0 FAIL; new test file 4/4 sub-cases green; `make build` produces a working `bin/manager` with `--version` exit 0.
+- Next in G7: G7.3 (file sub-issue when starting) — wire `virtrigaud_provider_tasks_inflight` (per-Provider async task tracker).
+
+---
+
 ## [2026-05-25 05:35] - feat(obs): wire virtrigaud_vm_operations_total in gRPC client VM-operation methods (G7.1 / closes #124)
 **Author:** @williamrizzo (William Rizzo)
 
