@@ -58,10 +58,23 @@ var (
 		[]string{"kind"},
 	)
 
+	// queueDepth is DEPRECATED as of v0.3.6 (G7.4 / #131). controller-
+	// runtime already exposes the equivalent `workqueue_depth{name}` on
+	// the same /metrics endpoint via the standard
+	// k8s.io/client-go/util/workqueue MetricsProvider; reinventing it
+	// under a virtrigaud-namespaced name would only force operators to
+	// dashboard against two redundant series. The variable + helper
+	// remain for compile compatibility with any out-of-tree code that
+	// imported them. Will be removed in v0.4.0 or later — operators
+	// should migrate to workqueue_depth{name=<controller-name>}.
+	//
+	// Deprecated: use controller-runtime's workqueue_depth{name} metric
+	// instead. See CHANGELOG entry under #131 for the migration recipe
+	// (controller-name → reconciler kind mapping).
 	queueDepth = registerer.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "virtrigaud_queue_depth",
-			Help: "Current depth of work queue by kind",
+			Help: "[DEPRECATED v0.3.6 — use controller-runtime's workqueue_depth{name} instead. See CHANGELOG.] Current depth of work queue by kind.",
 		},
 		[]string{"kind"},
 	)
@@ -189,7 +202,27 @@ func (m *ReconcileMetrics) RecordReconcile(outcome string, duration time.Duratio
 	managerReconcileDuration.WithLabelValues(m.kind).Observe(duration.Seconds())
 }
 
-// SetQueueDepth sets the current queue depth
+// SetQueueDepth sets the current queue depth on the
+// virtrigaud_queue_depth{kind} gauge.
+//
+// Deprecated: virtrigaud_queue_depth is redundant with controller-
+// runtime's standard workqueue_depth{name} metric (already exposed on
+// /metrics since v0.3.0). Per G7.4 (#131), this helper remains
+// callable for compile compatibility but production code does not call
+// it. Operators should dashboard against
+// workqueue_depth{name=<controller-name>} instead. The mapping is:
+//
+//	workqueue_depth{name="virtualmachine"}        ← VirtualMachineReconciler  (Named explicitly)
+//	workqueue_depth{name="provider"}              ← ProviderReconciler        (Named explicitly)
+//	workqueue_depth{name="vmclass"}               ← VMClassReconciler         (Named explicitly)
+//	workqueue_depth{name="vmimage"}               ← VMImageReconciler         (Named explicitly)
+//	workqueue_depth{name="vmnetworkattachment"}   ← VMNetworkAttachmentReconciler (Named explicitly)
+//	workqueue_depth{name="vmadoption"}            ← VMAdoptionReconciler      (Named explicitly)
+//	workqueue_depth{name="vmsnapshot"}            ← VMSnapshotReconciler      (default = lower-cased Kind)
+//	workqueue_depth{name="vmmigration"}           ← VMMigrationReconciler     (default = lower-cased Kind)
+//
+// This helper + the underlying queueDepth GaugeVec will be removed in
+// v0.4.0 or later.
 func (m *ReconcileMetrics) SetQueueDepth(depth float64) {
 	queueDepth.WithLabelValues(m.kind).Set(depth)
 }
