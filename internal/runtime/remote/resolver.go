@@ -18,9 +18,15 @@ package remote
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"errors"
 	"fmt"
 	"sync"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
@@ -28,6 +34,35 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/resilience"
 	grpcClient "github.com/projectbeskar/virtrigaud/internal/transport/grpc"
 )
+
+// Required key names inside a Provider TLS Secret.
+//
+// Per ADR-0003 the canonical layout is `tls.crt` / `tls.key` / `ca.crt`,
+// matching the kube-apiserver / cert-manager / `kubernetes.io/tls`
+// convention. Both `kubernetes.io/tls`-typed Secrets (which carry
+// `tls.crt`/`tls.key` and accept `ca.crt` as an extra key) and plain
+// `Opaque` Secrets (all three keys explicit) are supported.
+const (
+	tlsSecretKeyCert = "tls.crt"
+	tlsSecretKeyKey  = "tls.key"
+	tlsSecretKeyCA   = "ca.crt"
+)
+
+// ErrTLSBlockMissing is returned from buildTLSConfig when the Provider
+// CR's spec.runtime.service.tls field is nil. Per ADR-0003 (Accepted
+// 2026-05-27, decision #3) v0.3.7 ships TLS-on-by-default with a "loud
+// failure" semantic: an unset tls block is an explicit operator-action
+// gate, not a silent plaintext fallback. The caller (ProviderController)
+// is expected to detect this error via errors.Is and surface a Condition
+// (`TLSConfigured=False, Reason=TLSBlockMissing`) instructing the
+// operator to either (a) provision a Secret and set tls.enabled=true, or
+// (b) explicitly set tls.enabled=false to keep plaintext.
+var ErrTLSBlockMissing = errors.New("provider.spec.runtime.service.tls is unset; v0.3.7 requires an explicit TLS decision (see umbrella #156 / ADR-0003)")
+
+// ErrTLSSecretRefMissing is returned when tls.enabled=true but
+// tls.secretRef is nil or empty. Without a Secret reference there is no
+// material to load.
+var ErrTLSSecretRefMissing = errors.New("provider.spec.runtime.service.tls.enabled=true requires a non-empty secretRef")
 
 // circuitBreakerName is the logical name passed to the resilience
 // Registry when getting/creating a CircuitBreaker per Provider CR. We
@@ -139,25 +174,134 @@ func (r *Resolver) getRemoteProvider(ctx context.Context, provider *infravirtrig
 	return client, nil
 }
 
-// buildTLSConfig builds TLS configuration for gRPC client based on provider spec
+// buildTLSConfig builds TLS configuration for the gRPC client from the
+// Provider CR's spec.runtime.service.tls block.
+//
+// Semantics (ADR-0003 / umbrella #156):
+//
+//   - tls block nil  → return ErrTLSBlockMissing. v0.3.7 ships TLS-on-
+//     by-default; the operator must make an explicit decision. The
+//     caller (ProviderController) detects this error with errors.Is and
+//     surfaces a `TLSConfigured=False, Reason=TLSBlockMissing` Condition
+//     instructing the operator to either provision a TLS Secret or
+//     explicitly opt out via tls.enabled=false.
+//   - tls.enabled=false → return (nil, nil). Explicit plaintext opt-out;
+//     manager dials over insecure credentials. Compensating control
+//     (NetworkPolicy + encrypted CNI) is the operator's responsibility.
+//   - tls.enabled=true  → load tls.crt / tls.key / ca.crt from the
+//     referenced Secret and build a *tls.Config with TLS1.3 floor.
+//
+// Both `kubernetes.io/tls`-typed Secrets (canonical tls.crt/tls.key plus
+// extra ca.crt) and plain Opaque Secrets (all three keys explicit) are
+// supported — both shapes are documented in the PR-4 operator runbook.
+//
+// This is the v0.3.7 baseline: a fresh *tls.Config is built per call.
+// Hot-reload via sigs.k8s.io/controller-runtime/pkg/certwatcher is the
+// scope of PR-3, not PR-1. Until then Kubernetes' Secret-to-Pod sync
+// (~60s) plus a fresh dial cycle is the rotation mechanism.
 func (r *Resolver) buildTLSConfig(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) (*grpcClient.TLSConfig, error) {
-	// If TLS is not enabled, return nil for insecure connection
-	// TLS configuration removed in v1beta1, always return nil for insecure connection
-	if true {
+	// Defensive: the calling path validates spec.Runtime != nil before
+	// reaching here, but make this function safe to call directly in
+	// tests against Providers with partial specs.
+	if provider.Spec.Runtime == nil || provider.Spec.Runtime.Service == nil || provider.Spec.Runtime.Service.TLS == nil {
+		return nil, ErrTLSBlockMissing
+	}
+	tlsSpec := provider.Spec.Runtime.Service.TLS
+
+	// Explicit plaintext opt-out. Visible to compliance auditors via
+	// the Condition the controller emits separately.
+	if !tlsSpec.Enabled {
 		return nil, nil
 	}
 
-	// For TLS-enabled providers, we would need to read the TLS secret
-	// This is a simplified implementation - in production you'd want to:
-	// 1. Read the TLS secret referenced in provider.Spec.Runtime.TLS.SecretRef
-	// 2. Extract tls.crt, tls.key, and ca.crt
-	// 3. Write them to temporary files or use in-memory certificates
-	// 4. Return the appropriate TLSConfig
+	if tlsSpec.SecretRef == nil || tlsSpec.SecretRef.Name == "" {
+		return nil, ErrTLSSecretRefMissing
+	}
 
-	// For now, return a basic TLS config that trusts the server certificate
-	return &grpcClient.TLSConfig{
-		Insecure: false, // This should be configurable for dev environments
-	}, nil
+	// Load the Secret. Per ADR-0003 the Secret lives in the Provider's
+	// namespace (single administrative boundary).
+	secret := &corev1.Secret{}
+	if err := r.client.Get(ctx, types.NamespacedName{
+		Namespace: provider.Namespace,
+		Name:      tlsSpec.SecretRef.Name,
+	}, secret); err != nil {
+		return nil, fmt.Errorf("get TLS Secret %s/%s: %w", provider.Namespace, tlsSpec.SecretRef.Name, err)
+	}
+
+	// Validate required keys are present. Both kubernetes.io/tls
+	// Secrets and Opaque Secrets are accepted as long as all three keys
+	// exist; this is the price of supporting per-operator PKI shapes
+	// (cert-manager-produced kubernetes.io/tls vs. hand-rolled Opaque).
+	var missing []string
+	certPEM, ok := secret.Data[tlsSecretKeyCert]
+	if !ok || len(certPEM) == 0 {
+		missing = append(missing, tlsSecretKeyCert)
+	}
+	keyPEM, ok := secret.Data[tlsSecretKeyKey]
+	if !ok || len(keyPEM) == 0 {
+		missing = append(missing, tlsSecretKeyKey)
+	}
+	caPEM, ok := secret.Data[tlsSecretKeyCA]
+	if !ok || len(caPEM) == 0 {
+		missing = append(missing, tlsSecretKeyCA)
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("TLS Secret %s/%s is missing required key(s): %v (expected: tls.crt, tls.key, ca.crt)",
+			provider.Namespace, tlsSpec.SecretRef.Name, missing)
+	}
+
+	// Parse certificate + key into a usable tls.Certificate.
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		return nil, fmt.Errorf("parse client cert/key from TLS Secret %s/%s: %w", provider.Namespace, tlsSpec.SecretRef.Name, err)
+	}
+
+	// Build the CA pool that the manager uses to verify the provider's
+	// server certificate.
+	caPool := x509.NewCertPool()
+	if !caPool.AppendCertsFromPEM(caPEM) {
+		return nil, fmt.Errorf("parse ca.crt from TLS Secret %s/%s: no valid PEM certificates found", provider.Namespace, tlsSpec.SecretRef.Name)
+	}
+
+	// ServerName mirrors how the dial target is constructed in
+	// reconcileRemoteRuntime: <service>.<namespace>.svc.cluster.local.
+	// Anchoring SNI to the Service FQDN lets operators mint provider
+	// server certs against a deterministic SAN.
+	serverName := fmt.Sprintf("virtrigaud-provider-%s-%s.%s.svc.cluster.local",
+		provider.Namespace, provider.Name, provider.Namespace)
+
+	// Loud, per-reconcile signal when the operator has opted into the
+	// dev-only escape hatch. ADR-0003 mandates a steady drumbeat in the
+	// manager log so this never silently survives into a regulated
+	// environment. Info level (logr has no Warn); the "WARNING:" prefix
+	// and structured K/V fields keep the line greppable.
+	if tlsSpec.InsecureSkipVerify {
+		ctrl.LoggerFrom(ctx).Info(
+			"WARNING: Provider has spec.runtime.service.tls.insecureSkipVerify=true; the manager will NOT verify the provider gRPC server certificate. Use only for lab / first-bootstrap scenarios; this defeats mTLS.",
+			"provider", provider.Name,
+			"namespace", provider.Namespace,
+		)
+	}
+
+	tlsCfg := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		RootCAs:      caPool,
+		MinVersion:   tls.VersionTLS13, // ADR-0003 floor.
+		ServerName:   serverName,
+		// InsecureSkipVerify is a dev-only escape hatch. Defaulting to
+		// false is enforced at the CRD schema level
+		// (+kubebuilder:default=false on the field) and we never flip
+		// it to true anywhere in this code path on the operator's
+		// behalf — only honour what they explicitly set on the CR. The
+		// gosec G402 suppression below uses the canonical
+		// `// #nosec G402 -- <reason>` form so it satisfies both
+		// golangci-lint's bundled gosec AND the standalone gosec
+		// binary that GitHub Advanced Security invokes (the two read
+		// different annotations).
+		InsecureSkipVerify: tlsSpec.InsecureSkipVerify, // #nosec G402 -- operator-controlled escape hatch per ADR-0003; default is false (CRD schema), value is logged at WARN when true
+	}
+
+	return &grpcClient.TLSConfig{PrebuiltConfig: tlsCfg}, nil
 }
 
 // CleanupClient removes and closes a cached gRPC client.

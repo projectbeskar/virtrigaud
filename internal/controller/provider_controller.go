@@ -52,7 +52,45 @@ const (
 	errReasonServiceReconcile    = "service-reconcile-failed"
 	errReasonDeploymentReconcile = "deployment-reconcile-failed"
 	errReasonCleanupFailed       = "cleanup-failed"
+	errReasonTLSNotConfigured    = "tls-not-configured"
 )
+
+// TLS Condition vocabulary surfaced on Provider.Status.Conditions by
+// the reconciler. Wired in v0.3.7 PR-1 (ADR-0003 / umbrella #156).
+//
+// Reasons:
+//   - TLSBlockMissing — spec.runtime.service.tls is nil. Loud-failure
+//     state; the reconciler refuses to create/update the Deployment
+//     until the operator makes an explicit TLS decision.
+//   - ExplicitlyDisabled — tls.enabled=false. Plaintext opt-out; visible
+//     to compliance auditors via this Condition.
+//   - SecretRefMissing — tls.enabled=true but secretRef is empty.
+//   - Enabled — tls.enabled=true with a referenced Secret; the
+//     Deployment is provisioned with the TLS volume mounted.
+const (
+	providerConditionTLSConfigured  = "TLSConfigured"
+	providerReasonTLSBlockMissing   = "TLSBlockMissing"
+	providerReasonTLSDisabled       = "ExplicitlyDisabled"
+	providerReasonTLSSecretRefEmpty = "SecretRefMissing"
+	providerReasonTLSEnabled        = "Enabled"
+)
+
+// tlsBlockMissingMessage is the operator-facing message attached to the
+// `TLSConfigured=False, Reason=TLSBlockMissing` Condition. Kept as a
+// package-level constant so the test suite can assert on it byte-for-
+// byte and the wording stays in lock-step with what the release notes
+// promise. See ADR-0003 / umbrella #156.
+const tlsBlockMissingMessage = "TLS is on-by-default in v0.3.7. To proceed: (a) provision a Secret with tls.crt/tls.key/ca.crt and set spec.runtime.service.tls.enabled=true with secretRef pointing at it, OR (b) explicitly set spec.runtime.service.tls.enabled=false to keep plaintext (lab / migration scenarios). See umbrella #156 for the runbook."
+
+// providerTLSMountPath is the in-pod path where the manager mounts the
+// provider's TLS Secret (matches the path documented in ADR-0003 and
+// consumed by PR-2 in the provider-side `main.go` files).
+const providerTLSMountPath = "/etc/virtrigaud/tls"
+
+// providerTLSVolumeName is the Pod volume name used for the provider's
+// TLS Secret. Referenced by both the Volume (in buildPodVolumes) and the
+// VolumeMount (in buildProviderContainer) — must match.
+const providerTLSVolumeName = "provider-tls"
 
 // ProviderReconciler reconciles a Provider object
 type ProviderReconciler struct {
@@ -206,6 +244,23 @@ func (r *ProviderReconciler) reconcileRemoteRuntime(ctx context.Context, provide
 		return ctrl.Result{RequeueAfter: time.Minute}, err
 	}
 
+	// Enforce the v0.3.7 TLS posture before provisioning anything.
+	// Per ADR-0003 / umbrella #156, an unset tls block is a "loud
+	// failure" — the manager refuses to deploy a provider until the
+	// operator makes an explicit TLS decision. The Condition is the
+	// visible signal; banking auditors verify posture by reading
+	// `kubectl get providers -o yaml`.
+	if !r.evaluateTLSPosture(ctx, provider) {
+		provider.Status.Runtime.Phase = infravirtrigaudiov1beta1.ProviderRuntimePhaseFailed
+		provider.Status.Runtime.Message = "TLS configuration required (see TLSConfigured Condition)"
+		k8s.SetCondition(&provider.Status.Conditions, "ProviderRuntimeReady", metav1.ConditionFalse, "TLSNotConfigured", "Refusing to deploy provider runtime without an explicit TLS decision")
+		metrics.RecordError(errReasonTLSNotConfigured, metrics.ComponentManager)
+		// Requeue on the same cadence as other config errors. Once the
+		// operator edits the CR the Watch fires regardless, so the
+		// requeue is just a belt-and-braces backstop.
+		return ctrl.Result{RequeueAfter: time.Minute}, nil
+	}
+
 	// Generate names for deployment and service
 	deploymentName := r.getDeploymentName(provider)
 	serviceName := r.getServiceName(provider)
@@ -260,6 +315,80 @@ func (r *ProviderReconciler) reconcileRemoteRuntime(ctx context.Context, provide
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// providerTLSEnabled returns true iff the operator has explicitly
+// declared TLS-enabled on the Provider CR. A nil tls block is NOT the
+// same as `enabled=false` — see evaluateTLSPosture for the loud-failure
+// semantics. Callers downstream of evaluateTLSPosture (e.g.
+// buildProviderContainer, buildPodVolumes) can rely on this helper
+// returning the correct boolean for both branches because the loud-
+// failure case short-circuits before reaching them.
+func providerTLSEnabled(provider *infravirtrigaudiov1beta1.Provider) bool {
+	if provider.Spec.Runtime == nil || provider.Spec.Runtime.Service == nil || provider.Spec.Runtime.Service.TLS == nil {
+		return false
+	}
+	return provider.Spec.Runtime.Service.TLS.Enabled
+}
+
+// evaluateTLSPosture sets the TLSConfigured Condition on the Provider
+// and returns true iff the reconciler may proceed to deploy the provider
+// runtime. It implements the ADR-0003 / umbrella #156 contract:
+//
+//   - tls block nil           → Condition=False, Reason=TLSBlockMissing.
+//     Operator-action required. Returns false (stop reconcile).
+//   - tls.enabled=false       → Condition=False, Reason=ExplicitlyDisabled.
+//     Visible to compliance auditors. Returns true (proceed plaintext).
+//   - tls.enabled=true, no
+//     secretRef               → Condition=False, Reason=SecretRefMissing.
+//     Returns false (stop reconcile).
+//   - tls.enabled=true with
+//     secretRef               → Condition=True, Reason=Enabled.
+//     Returns true (proceed with TLS).
+func (r *ProviderReconciler) evaluateTLSPosture(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) bool {
+	logger := log.FromContext(ctx)
+
+	tlsSpec := (*infravirtrigaudiov1beta1.ProviderTLSSpec)(nil)
+	if provider.Spec.Runtime != nil && provider.Spec.Runtime.Service != nil {
+		tlsSpec = provider.Spec.Runtime.Service.TLS
+	}
+
+	switch {
+	case tlsSpec == nil:
+		// Loud failure. The Condition message tells the operator
+		// exactly what to do; we never silently fall back to plaintext.
+		k8s.SetCondition(&provider.Status.Conditions,
+			providerConditionTLSConfigured, metav1.ConditionFalse,
+			providerReasonTLSBlockMissing, tlsBlockMissingMessage)
+		logger.Info("Provider has no TLS block on spec.runtime.service.tls; refusing to deploy until operator decides",
+			"provider", provider.Name, "namespace", provider.Namespace)
+		return false
+
+	case !tlsSpec.Enabled:
+		// Explicit plaintext opt-out. WARNING-level log so the
+		// operator running with --log-level=info still sees it.
+		k8s.SetCondition(&provider.Status.Conditions,
+			providerConditionTLSConfigured, metav1.ConditionFalse,
+			providerReasonTLSDisabled,
+			"TLS is explicitly disabled (tls.enabled=false); manager↔provider gRPC traffic will be plaintext. Compensating controls (NetworkPolicy + encrypted CNI) are the operator's responsibility.")
+		logger.Info("WARNING: Provider TLS explicitly disabled; gRPC traffic will be plaintext",
+			"provider", provider.Name, "namespace", provider.Namespace)
+		return true
+
+	case tlsSpec.SecretRef == nil || tlsSpec.SecretRef.Name == "":
+		k8s.SetCondition(&provider.Status.Conditions,
+			providerConditionTLSConfigured, metav1.ConditionFalse,
+			providerReasonTLSSecretRefEmpty,
+			"spec.runtime.service.tls.enabled=true but secretRef is missing. Set secretRef.name to a Secret containing tls.crt / tls.key / ca.crt.")
+		return false
+
+	default:
+		k8s.SetCondition(&provider.Status.Conditions,
+			providerConditionTLSConfigured, metav1.ConditionTrue,
+			providerReasonTLSEnabled,
+			fmt.Sprintf("TLS enabled; using Secret %q", tlsSpec.SecretRef.Name))
+		return true
+	}
 }
 
 // validateRemoteRuntimeSpec validates the remote runtime configuration
@@ -505,8 +634,17 @@ func (r *ProviderReconciler) buildProviderContainer(provider *infravirtrigaudiov
 		},
 	}
 
-	// Add TLS environment variable
-	tlsEnabled := false // TLS configuration removed in v1beta1
+	// Add TLS environment variable.
+	//
+	// Wired in v0.3.7 PR-1 (ADR-0003 / umbrella #156). Previously
+	// hardcoded to false; now reads from the existing
+	// `spec.runtime.service.tls.enabled` CRD field. The reconcile
+	// caller (reconcileRemoteRuntime → evaluateTLSPosture) gates this
+	// path so we only reach here when the operator has made an
+	// explicit decision (either tls.enabled=true with a Secret, or
+	// tls.enabled=false). Provider-side consumption of
+	// TLS_CERT_PATH/TLS_KEY_PATH/TLS_CA_PATH is PR-2's scope.
+	tlsEnabled := providerTLSEnabled(provider)
 	env = append(env, corev1.EnvVar{
 		Name:  "TLS_ENABLED",
 		Value: fmt.Sprintf("%t", tlsEnabled),
@@ -580,11 +718,13 @@ func (r *ProviderReconciler) buildProviderContainer(provider *infravirtrigaudiov
 		ReadOnly:  true,
 	})
 
-	// Mount TLS certificates if enabled
+	// Mount TLS certificates if enabled. Mount name matches the
+	// Volume produced in buildPodVolumes; mount path is the canonical
+	// location consumed by the PR-2 provider-side wiring.
 	if tlsEnabled {
 		volumeMounts = append(volumeMounts, corev1.VolumeMount{
-			Name:      "provider-tls",
-			MountPath: "/etc/virtrigaud/tls",
+			Name:      providerTLSVolumeName,
+			MountPath: providerTLSMountPath,
 			ReadOnly:  true,
 		})
 	}
@@ -699,14 +839,23 @@ func (r *ProviderReconciler) buildPodVolumes(provider *infravirtrigaudiov1beta1.
 		},
 	})
 
-	// Add TLS volume if enabled
-	// TLS configuration removed in v1beta1
-	if false {
+	// Add TLS volume if enabled.
+	//
+	// Wired in v0.3.7 PR-1 (ADR-0003 / umbrella #156). Previously
+	// dead-code-guarded by `if false`. The Secret reference comes
+	// from the existing `spec.runtime.service.tls.secretRef` CRD
+	// field; mount path matches providerTLSMountPath
+	// (/etc/virtrigaud/tls), which is what the PR-2 provider-side
+	// wiring will read TLS_CERT_PATH / TLS_KEY_PATH / TLS_CA_PATH
+	// against. evaluateTLSPosture has already guaranteed
+	// secretRef.Name is non-empty when we reach this code with
+	// tls.enabled=true.
+	if providerTLSEnabled(provider) {
 		volumes = append(volumes, corev1.Volume{
-			Name: "provider-tls",
+			Name: providerTLSVolumeName,
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
-					SecretName: "tls-secret",
+					SecretName: provider.Spec.Runtime.Service.TLS.SecretRef.Name,
 				},
 			},
 		})
