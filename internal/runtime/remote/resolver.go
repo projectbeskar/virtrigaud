@@ -26,6 +26,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
@@ -269,6 +270,19 @@ func (r *Resolver) buildTLSConfig(ctx context.Context, provider *infravirtrigaud
 	serverName := fmt.Sprintf("virtrigaud-provider-%s-%s.%s.svc.cluster.local",
 		provider.Namespace, provider.Name, provider.Namespace)
 
+	// Loud, per-reconcile signal when the operator has opted into the
+	// dev-only escape hatch. ADR-0003 mandates a steady drumbeat in the
+	// manager log so this never silently survives into a regulated
+	// environment. Info level (logr has no Warn); the "WARNING:" prefix
+	// and structured K/V fields keep the line greppable.
+	if tlsSpec.InsecureSkipVerify {
+		ctrl.LoggerFrom(ctx).Info(
+			"WARNING: Provider has spec.runtime.service.tls.insecureSkipVerify=true; the manager will NOT verify the provider gRPC server certificate. Use only for lab / first-bootstrap scenarios; this defeats mTLS.",
+			"provider", provider.Name,
+			"namespace", provider.Namespace,
+		)
+	}
+
 	tlsCfg := &tls.Config{
 		Certificates: []tls.Certificate{cert},
 		RootCAs:      caPool,
@@ -278,8 +292,13 @@ func (r *Resolver) buildTLSConfig(ctx context.Context, provider *infravirtrigaud
 		// false is enforced at the CRD schema level
 		// (+kubebuilder:default=false on the field) and we never flip
 		// it to true anywhere in this code path on the operator's
-		// behalf — only honour what they explicitly set on the CR.
-		InsecureSkipVerify: tlsSpec.InsecureSkipVerify, //nolint:gosec // operator-controlled dev escape hatch; see ADR-0003
+		// behalf — only honour what they explicitly set on the CR. The
+		// gosec G402 suppression below uses the canonical
+		// `// #nosec G402 -- <reason>` form so it satisfies both
+		// golangci-lint's bundled gosec AND the standalone gosec
+		// binary that GitHub Advanced Security invokes (the two read
+		// different annotations).
+		InsecureSkipVerify: tlsSpec.InsecureSkipVerify, // #nosec G402 -- operator-controlled escape hatch per ADR-0003; default is false (CRD schema), value is logged at WARN when true
 	}
 
 	return &grpcClient.TLSConfig{PrebuiltConfig: tlsCfg}, nil

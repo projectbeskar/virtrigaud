@@ -27,15 +27,20 @@ import (
 	"encoding/pem"
 	"errors"
 	"math/big"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
+
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
@@ -346,7 +351,10 @@ func TestBuildTLSConfig_EnabledTrue_KubernetesTLSSecret_Happy(t *testing.T) {
 
 // TestBuildTLSConfig_EnabledTrue_InsecureSkipVerifyHonored — the dev-
 // only escape hatch on the CRD field must propagate verbatim. We never
-// flip this on the operator's behalf; we only honour what's set.
+// flip this on the operator's behalf; we only honour what's set. The
+// path must also emit a WARNING log line (ADR-0003 mandates a steady
+// per-reconcile signal so the unsafe config can't silently survive
+// into a regulated environment).
 func TestBuildTLSConfig_EnabledTrue_InsecureSkipVerifyHonored(t *testing.T) {
 	sch := newResolverTestScheme(t)
 	certPEM, keyPEM := genTestCertPEM(t)
@@ -368,11 +376,37 @@ func TestBuildTLSConfig_EnabledTrue_InsecureSkipVerifyHonored(t *testing.T) {
 	cli := fake.NewClientBuilder().WithScheme(sch).WithObjects(secret).Build()
 	r := NewResolver(cli, nil)
 
-	cfg, err := r.buildTLSConfig(context.Background(), prov)
+	// Capture log output via a funcr.Logger injected through the
+	// controller-runtime log context. buildTLSConfig pulls its logger
+	// from ctrl.LoggerFrom(ctx).
+	var captured []string
+	logger := funcr.New(func(prefix, args string) {
+		captured = append(captured, args)
+	}, funcr.Options{Verbosity: 1})
+	ctx := ctrllog.IntoContext(context.Background(), logr.New(logger.GetSink()))
+
+	cfg, err := r.buildTLSConfig(ctx, prov)
 	require.NoError(t, err)
 	require.NotNil(t, cfg)
 	require.NotNil(t, cfg.PrebuiltConfig)
 
 	assert.True(t, cfg.PrebuiltConfig.InsecureSkipVerify,
 		"tls.insecureSkipVerify=true on the CR must propagate to the *tls.Config")
+
+	// Assert the WARNING log line was emitted with the structured K/V
+	// fields operators will grep for. We check substrings rather than
+	// exact string equality because funcr's formatter is free to
+	// reorder K/V pairs.
+	var warnLine string
+	for _, line := range captured {
+		if strings.Contains(line, "WARNING:") &&
+			strings.Contains(line, "insecureSkipVerify=true") &&
+			strings.Contains(line, "test-provider") &&
+			strings.Contains(line, "default") {
+			warnLine = line
+			break
+		}
+	}
+	assert.NotEmpty(t, warnLine,
+		"expected a WARNING log line naming the Provider when InsecureSkipVerify=true; got captured lines: %v", captured)
 }
