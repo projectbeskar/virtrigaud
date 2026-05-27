@@ -1,5 +1,8 @@
 # Basic VM Migration Example
-# Migrates a VM from one provider to another with minimal configuration
+# Migrates a VM from one provider to another with minimal configuration.
+#
+# storage.type is enum-constrained to "pvc" only (v0.3.6).
+# Only vSphere → Libvirt/KVM is currently tested.
 
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMMigration
@@ -11,8 +14,8 @@ spec:
   source:
     vmRef:
       name: my-source-vm
-    createSnapshot: true  # Create snapshot before migration
-  
+    createSnapshot: true
+
   # Target configuration
   target:
     name: my-target-vm
@@ -23,12 +26,16 @@ spec:
       name: standard-vm
     networks:
       - name: default
-  
-  # Storage for intermediate disk transfer
+
+  # PVC-backed intermediate storage (only supported type in v0.3.6).
+  # Requires a ReadWriteMany StorageClass (NFS, CephFS, etc.).
   storage:
-    type: nfs
-    endpoint: /mnt/nfs-migrations
-  
+    type: pvc
+    pvc:
+      storageClassName: nfs-migration-storage
+      size: 100Gi
+      accessMode: ReadWriteMany
+
   # Migration options with sensible defaults
   options:
     diskFormat: qcow2

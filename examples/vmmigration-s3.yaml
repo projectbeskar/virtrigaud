@@ -1,20 +1,12 @@
-# VM Migration with S3 Storage
-# Uses AWS S3 for intermediate disk storage during migration
+# NOTE: This file was formerly an S3 migration example.
+# S3 storage backend is NOT implemented in VirtRigaud v0.3.6.
+# MigrationStorage.Type is enum-constrained to "pvc" only.
+# This file has been replaced with an equivalent PVC-based example.
 
-apiVersion: v1
-kind: Secret
-metadata:
-  name: s3-migration-credentials
-  namespace: default
-type: Opaque
-stringData:
-  accessKey: "AKIAIOSFODNN7EXAMPLE"
-  secretKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
----
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMMigration
 metadata:
-  name: migration-with-s3
+  name: migration-pvc-example
   namespace: default
   labels:
     app: my-app
@@ -23,18 +15,16 @@ spec:
   source:
     vmRef:
       name: prod-app-server
-    # Use existing snapshot instead of creating new one
     snapshotRef:
       name: pre-migration-snapshot
     createSnapshot: false
-    # Optionally delete source VM after successful migration
     deleteAfterMigration: false
-  
+
   target:
     name: prod-app-server-migrated
     providerRef:
-      name: proxmox-production
-      namespace: infra
+      name: target-provider
+      namespace: default
     classRef:
       name: high-performance
     networks:
@@ -45,33 +35,30 @@ spec:
       environment: production
       migrated: "true"
     annotations:
-      description: "Migrated from vSphere to Proxmox"
-  
-  # S3 storage configuration
+      description: "Migrated to new provider"
+
+  # Storage: only "pvc" type is supported in v0.3.6.
+  # The previously-documented s3/http/nfs types do not exist.
+  # Use a ReadWriteMany StorageClass (NFS, CephFS, AWS EFS, etc.).
   storage:
-    type: s3
-    bucket: company-vm-migrations
-    region: us-east-1
-    endpoint: https://s3.amazonaws.com
-    credentialsSecretRef:
-      name: s3-migration-credentials
-  
-  # Advanced options
+    type: pvc
+    pvc:
+      storageClassName: nfs-migration-storage
+      size: 200Gi
+      accessMode: ReadWriteMany
+
   options:
     diskFormat: qcow2
-    compress: true  # Compress for transfer
+    compress: false
     verifyChecksums: true
-    timeout: 6h
-    
-    # Retry configuration
+    timeout: "6h"
     retryPolicy:
       maxRetries: 3
-      retryDelay: 5m
+      retryDelay: "5m"
       backoffMultiplier: 2
-  
-  # Migration metadata
-  metadata:
-    purpose: "Infrastructure consolidation"
-    project: "cloud-migration-2025"
-    owner: "platform-team"
 
+  metadata:
+    # Valid values: disaster-recovery, cloud-migration, provider-change, testing, maintenance
+    purpose: "provider-change"
+    project: "cloud-migration-2026"
+    createdBy: "platform-team"

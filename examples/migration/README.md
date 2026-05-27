@@ -1,235 +1,71 @@
 # VM Migration Examples
 
-This directory contains practical examples for migrating VMs between different hypervisor platforms using VirtRigaud.
+This directory contains examples for migrating VMs between hypervisor platforms using VirtRigaud.
+
+## v0.3.6 migration constraints
+
+Before using these examples, read the constraints:
+
+- **Only PVC storage is supported.** `storage.type` is enum-constrained to `"pvc"` in the API. The s3, http, and nfs URI storage types documented in older resources do not exist in v0.3.6.
+- **Only vSphere → Libvirt/KVM is tested.** Other migration directions are roadmap items and are marked with a WARNING in the respective example files.
+- **Requires a ReadWriteMany StorageClass.** NFS, CephFS, AWS EFS, and Azure Files are common options.
 
 ## Examples
 
-### Basic Cross-Platform Migrations
+| File | Direction | Status |
+|------|-----------|--------|
+| [libvirt-to-vsphere.yaml](./libvirt-to-vsphere.yaml) | Libvirt/KVM → vSphere | Untested (roadmap) |
+| [vsphere-to-proxmox.yaml](./vsphere-to-proxmox.yaml) | vSphere → Proxmox VE | Untested (roadmap) |
+| [proxmox-to-libvirt.yaml](./proxmox-to-libvirt.yaml) | Proxmox VE → Libvirt/KVM | Untested (roadmap) |
 
-1. **[libvirt-to-vsphere.yaml](./libvirt-to-vsphere.yaml)**
-   - Migrate Linux VM from Libvirt/KVM to VMware vSphere
-   - Uses S3 for intermediate storage
-   - Demonstrates qcow2 → VMDK conversion
-   - Production-ready example with retry policy
+For the tested vSphere → Libvirt/KVM path, see `examples/vmmigration-basic.yaml` in the parent directory.
 
-2. **[vsphere-to-proxmox.yaml](./vsphere-to-proxmox.yaml)**
-   - Migrate Windows Server from vSphere to Proxmox VE
-   - Uses NFS for intermediate storage
-   - Demonstrates VMDK → qcow2 conversion
-   - Includes resource and network configuration
+## Quick start
 
-3. **[proxmox-to-libvirt.yaml](./proxmox-to-libvirt.yaml)**
-   - Migrate database server from Proxmox to Libvirt/KVM
-   - Uses HTTP server for intermediate storage
-   - Best practices for database migration
-   - Conservative cleanup policy
+1. Create a ReadWriteMany StorageClass (example using NFS CSI driver):
 
-## Quick Start
+   ```yaml
+   apiVersion: storage.k8s.io/v1
+   kind: StorageClass
+   metadata:
+     name: nfs-migration-storage
+   provisioner: nfs.csi.k8s.io
+   parameters:
+     server: nfs-server.example.com
+     share: /exports/virtrigaud-migrations
+   volumeBindingMode: Immediate
+   reclaimPolicy: Delete
+   ```
 
-### 1. Choose an Example
+2. Customise the example YAML for your environment:
 
-Select the example that matches your migration scenario:
+   ```yaml
+   spec:
+     source:
+       vmRef:
+         name: your-source-vm
+     target:
+       name: your-target-vm
+       providerRef:
+         name: your-target-provider
+     storage:
+       type: pvc
+       pvc:
+         storageClassName: nfs-migration-storage
+         size: 200Gi
+         accessMode: ReadWriteMany
+   ```
 
-```bash
-# Libvirt to vSphere
-kubectl apply -f libvirt-to-vsphere.yaml
+3. Apply and monitor:
 
-# vSphere to Proxmox
-kubectl apply -f vsphere-to-proxmox.yaml
+   ```bash
+   kubectl apply -f your-migration.yaml
+   kubectl get vmmigration your-migration-name -w
+   kubectl describe vmmigration your-migration-name
+   ```
 
-# Proxmox to Libvirt
-kubectl apply -f proxmox-to-libvirt.yaml
-```
+## Reference
 
-### 2. Customize for Your Environment
-
-Edit the YAML file to match your environment:
-
-```yaml
-spec:
-  sourceName: your-vm-name              # Your source VM
-  sourceNamespace: your-namespace
-  
-  targetProviderRef:
-    name: your-provider                 # Your target provider
-  targetName: your-new-vm-name
-  
-  storage:
-    type: s3                            # or http, nfs
-    bucket: your-bucket
-    credentialsSecretRef:
-      name: your-credentials
-```
-
-### 3. Update Credentials
-
-Create appropriate credentials secret:
-
-```bash
-# For S3
-kubectl create secret generic aws-s3-creds \
-  --from-literal=accessKey=YOUR_ACCESS_KEY \
-  --from-literal=secretKey=YOUR_SECRET_KEY
-
-# For HTTP
-kubectl create secret generic http-creds \
-  --from-literal=token=Bearer_YOUR_TOKEN
-
-# NFS typically doesn't need credentials
-```
-
-### 4. Monitor Migration
-
-```bash
-# Watch migration status
-kubectl get vmmigration your-migration-name -w
-
-# View detailed status
-kubectl describe vmmigration your-migration-name
-
-# Check events
-kubectl get events --field-selector involvedObject.name=your-migration-name
-```
-
-## Example Scenarios
-
-### Development → Production
-
-Promote a VM from dev to production environment:
-
-```yaml
-sourceName: app-server-dev
-sourceNamespace: development
-targetName: app-server-prod
-targetNamespace: production
-```
-
-### Cross-Region Migration
-
-Migrate VM to different region/datacenter:
-
-```yaml
-storage:
-  type: s3
-  bucket: migrations-us-west
-  region: us-west-2
-```
-
-### Test Migration
-
-Test migration without deleting source:
-
-```yaml
-cleanupPolicy:
-  deleteSource: false               # Keep source
-targetName: test-migration-vm       # Different name
-```
-
-## Storage Backend Selection
-
-| Backend | Best For | Speed | Cost |
-|---------|----------|-------|------|
-| **S3** | Cross-region, large VMs | Medium | Low |
-| **HTTP** | Custom workflows | Fast | Varies |
-| **NFS** | Same datacenter | Fastest | Low |
-
-### When to Use Each
-
-- **S3**: Different data centers, cloud storage, large migrations
-- **HTTP**: When you have existing file storage infrastructure
-- **NFS**: Same data center, fastest performance, local network
-
-## Best Practices
-
-### Before Migration
-
-1. ✅ Test migration in non-production first
-2. ✅ Take application-level backup
-3. ✅ Document current VM configuration
-4. ✅ Plan downtime window (if needed)
-5. ✅ Verify network connectivity to storage
-6. ✅ Check disk space on all systems
-
-### During Migration
-
-1. 👁️ Monitor migration progress
-2. 👁️ Watch for errors or warnings
-3. 👁️ Check provider logs if issues occur
-4. 👁️ Verify network/storage performance
-
-### After Migration
-
-1. ✅ Validate target VM boots correctly
-2. ✅ Test application functionality
-3. ✅ Verify data integrity
-4. ✅ Update DNS/load balancers
-5. ✅ Monitor for 24-48 hours
-6. ✅ Document any issues/changes
-
-### Safety
-
-- **Always keep source VM** until target is validated
-- **Never set deleteSource: true** on first migration
-- **Test rollback procedures** before prod migration
-- **Have backup plan** in case migration fails
-
-## Troubleshooting
-
-### Migration Stuck
-
-```bash
-# Check phase
-kubectl get vmmigration my-migration -o jsonpath='{.status.phase}'
-
-# Check conditions
-kubectl get vmmigration my-migration -o jsonpath='{.status.conditions}'
-
-# Check provider logs
-kubectl logs -n virtrigaud-system deployment/provider-libvirt
-```
-
-### Storage Errors
-
-```bash
-# Verify credentials exist
-kubectl get secret aws-s3-creds
-
-# Test storage access manually
-aws s3 ls s3://my-bucket  # For S3
-curl -H "Authorization: Bearer TOKEN" https://storage/  # For HTTP
-ls /mnt/migrations  # For NFS
-```
-
-### Format Conversion Failed
-
-```bash
-# Check qemu-img is installed
-# On provider host:
-qemu-img --version
-
-# Check disk space
-df -h /tmp
-```
-
-## Additional Resources
-
-- [User Guide](../../docs/migration/user-guide.md) - Complete migration guide
-- [API Reference](../../docs/migration/api-reference.md) - Full API documentation
-- [Implementation Status](../../MIGRATION_IMPLEMENTATION_STATUS.md) - Technical details
-
-## Support
-
-For issues and questions:
-- GitHub Issues: https://github.com/projectbeskar/virtrigaud/issues
-- Documentation: https://virtrigaud.io/docs
-
-## Contributing
-
-Have a useful migration example? Please contribute!
-
-1. Create example YAML file
-2. Add clear comments explaining the scenario
-3. Include prerequisites and expected behavior
-4. Test the example
-5. Submit a pull request
-
+- [VMMigration CRD source](../../api/infra.virtrigaud.io/v1beta1/vmmigration_types.go)
+- [Migration Guide](https://projectbeskar.github.io/virtrigaud/operations/vm-migration/)
+- Open issues: [#147 mTLS](https://github.com/projectbeskar/virtrigaud/issues/147), [#148 provider auth](https://github.com/projectbeskar/virtrigaud/issues/148), [#153 Libvirt Clone stub](https://github.com/projectbeskar/virtrigaud/issues/153), [#154 Libvirt ImagePrepare stub](https://github.com/projectbeskar/virtrigaud/issues/154)

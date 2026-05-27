@@ -1,9 +1,15 @@
----
-# Example: VM Adoption with Filters
-# This example demonstrates how to enable VM adoption on a Provider
-# with various filter configurations.
+# VM Adoption Examples
+#
+# VMAdoption is a CONTROLLER built into the manager, not a CRD.
+# Adoption is triggered by annotations on the Provider CR.
+# The Provider spec uses the v1beta1 schema: type, endpoint,
+# credentialSecretRef, and runtime — NOT nested provider-specific blocks.
+#
+# The old spec fields (remote: true, vsphere.server, libvirt.uri,
+# proxmox.server, credentials.secretRef) do NOT exist in v0.3.6.
 
-# Example 1: Basic VM Adoption (adopt all unmanaged VMs)
+---
+# Example 1: vSphere Provider with VM Adoption enabled
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: Provider
 metadata:
@@ -13,16 +19,22 @@ metadata:
     virtrigaud.io/adopt-vms: "true"
 spec:
   type: vsphere
-  remote: true
-  vsphere:
-    server: vcenter.example.com
+  endpoint: "https://vcenter.example.com:443"
+  credentialSecretRef:
+    name: vsphere-prod-credentials
+    namespace: default
+  runtime:
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.3.6"
+    service:
+      port: 9443
+  defaults:
     datacenter: Production
-    credentials:
-      secretRef:
-        name: vsphere-prod-credentials
-        namespace: default
+    datastore: datastore1
+    cluster: cluster1
+
 ---
-# Example 2: Adopt Only Production VMs (name pattern filter)
+# Example 2: vSphere Provider — adopt only VMs matching a name pattern
+# The annotation value is passed to the VMAdoption controller as a filter hint.
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: Provider
 metadata:
@@ -33,76 +45,17 @@ metadata:
     virtrigaud.io/adopt-filter: '{"namePattern": "^prod-.*"}'
 spec:
   type: vsphere
-  remote: true
-  vsphere:
-    server: vcenter.example.com
-    datacenter: Production
-    credentials:
-      secretRef:
-        name: vsphere-prod-credentials
-        namespace: default
+  endpoint: "https://vcenter.example.com:443"
+  credentialSecretRef:
+    name: vsphere-prod-credentials
+    namespace: default
+  runtime:
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.3.6"
+    service:
+      port: 9443
+
 ---
-# Example 3: Adopt Only Powered-On VMs
-apiVersion: infra.virtrigaud.io/v1beta1
-kind: Provider
-metadata:
-  name: vsphere-prod-online
-  namespace: default
-  annotations:
-    virtrigaud.io/adopt-vms: "true"
-    virtrigaud.io/adopt-filter: '{"powerState": "on"}'
-spec:
-  type: vsphere
-  remote: true
-  vsphere:
-    server: vcenter.example.com
-    datacenter: Production
-    credentials:
-      secretRef:
-        name: vsphere-prod-credentials
-        namespace: default
----
-# Example 4: Adopt VMs with Resource Requirements
-apiVersion: infra.virtrigaud.io/v1beta1
-kind: Provider
-metadata:
-  name: vsphere-prod-large
-  namespace: default
-  annotations:
-    virtrigaud.io/adopt-vms: "true"
-    virtrigaud.io/adopt-filter: '{"minCPU": 4, "minMemoryMiB": 8192}'
-spec:
-  type: vsphere
-  remote: true
-  vsphere:
-    server: vcenter.example.com
-    datacenter: Production
-    credentials:
-      secretRef:
-        name: vsphere-prod-credentials
-        namespace: default
----
-# Example 5: Complex Filter (production VMs, powered on, 2-8 CPUs)
-apiVersion: infra.virtrigaud.io/v1beta1
-kind: Provider
-metadata:
-  name: vsphere-prod-complex
-  namespace: default
-  annotations:
-    virtrigaud.io/adopt-vms: "true"
-    virtrigaud.io/adopt-filter: '{"namePattern": "^prod-.*", "powerState": "on", "minCPU": 2, "maxCPU": 8}'
-spec:
-  type: vsphere
-  remote: true
-  vsphere:
-    server: vcenter.example.com
-    datacenter: Production
-    credentials:
-      secretRef:
-        name: vsphere-prod-credentials
-        namespace: default
----
-# Example 6: Libvirt Provider with Filter
+# Example 3: Libvirt Provider with VM Adoption enabled
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: Provider
 metadata:
@@ -110,14 +63,20 @@ metadata:
   namespace: default
   annotations:
     virtrigaud.io/adopt-vms: "true"
-    virtrigaud.io/adopt-filter: '{"namePattern": "^app-.*", "powerState": "on"}'
+    virtrigaud.io/adopt-filter: '{"namePattern": "^app-.*"}'
 spec:
   type: libvirt
-  remote: true
-  libvirt:
-    uri: qemu:///system
+  endpoint: "qemu+ssh://kvm-host.example.com/system"
+  credentialSecretRef:
+    name: libvirt-prod-credentials
+    namespace: default
+  runtime:
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.3.6"
+    service:
+      port: 9443
+
 ---
-# Example 7: Proxmox Provider with Filter
+# Example 4: Proxmox Provider with VM Adoption enabled
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: Provider
 metadata:
@@ -125,14 +84,13 @@ metadata:
   namespace: default
   annotations:
     virtrigaud.io/adopt-vms: "true"
-    virtrigaud.io/adopt-filter: '{"minCPU": 2, "minMemoryMiB": 4096}'
 spec:
   type: proxmox
-  remote: true
-  proxmox:
-    server: proxmox.example.com
-    credentials:
-      secretRef:
-        name: proxmox-prod-credentials
-        namespace: default
-
+  endpoint: "https://proxmox.example.com:8006"
+  credentialSecretRef:
+    name: proxmox-prod-credentials
+    namespace: default
+  runtime:
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-proxmox:v0.3.6"
+    service:
+      port: 9443

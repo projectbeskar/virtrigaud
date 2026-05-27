@@ -1,39 +1,26 @@
-# VM Migration with NFS Storage
-# Uses NFS shared storage for on-premises migrations
+# VM Migration using PVC-backed storage (NFS StorageClass)
+#
+# NOTE: VirtRigaud v0.3.6 only supports "pvc" as the migration storage type.
+# The previously-documented "nfs" type is not a valid MigrationStorage.Type value.
+# Use an NFS-backed StorageClass to achieve NFS storage for migrations.
+#
+# Currently tested migration path: vSphere → Libvirt/KVM only.
+# The Libvirt → Proxmox path shown here is roadmap and unverified.
 
-# PersistentVolume for NFS storage
-apiVersion: v1
-kind: PersistentVolume
+# NFS StorageClass — create once per cluster
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
 metadata:
   name: nfs-migration-storage
-spec:
-  capacity:
-    storage: 1Ti
-  accessModes:
-    - ReadWriteMany
-  nfs:
-    server: nfs-server.company.local
-    path: /export/vm-migrations
-  mountOptions:
-    - hard
-    - nfsvers=4.1
-    - rsize=1048576
-    - wsize=1048576
+provisioner: nfs.csi.k8s.io
+parameters:
+  server: nfs-server.company.local
+  share: /export/vm-migrations
+volumeBindingMode: Immediate
+reclaimPolicy: Delete
+
 ---
-# PersistentVolumeClaim
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: nfs-migration-storage
-  namespace: virtrigaud-system
-spec:
-  accessModes:
-    - ReadWriteMany
-  resources:
-    requests:
-      storage: 1Ti
----
-# VM Migration using NFS
+# VMMigration using the NFS-backed StorageClass
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMMigration
 metadata:
@@ -44,9 +31,8 @@ spec:
     vmRef:
       name: legacy-app-libvirt
     createSnapshot: true
-    # Power off VM before migration for consistency
     powerOffBeforeMigration: true
-  
+
   target:
     name: legacy-app-proxmox
     providerRef:
@@ -58,20 +44,21 @@ spec:
       - name: vlan-100-production
     placementRef:
       name: proxmox-node-2
-  
-  # NFS storage - must be mounted at same path on all provider pods
+
+  # storage.type must be "pvc" — the only accepted value in v0.3.6.
   storage:
-    type: nfs
-    endpoint: /mnt/nfs-migrations  # Mount point on provider pods
-  
+    type: pvc
+    pvc:
+      storageClassName: nfs-migration-storage
+      size: 200Gi
+      accessMode: ReadWriteMany
+
   options:
     diskFormat: qcow2
-    compress: false  # NFS is fast, no need for compression
+    compress: false
     verifyChecksums: true
-    timeout: 4h
-    
+    timeout: "4h"
     retryPolicy:
       maxRetries: 3
-      retryDelay: 3m
+      retryDelay: "3m"
       backoffMultiplier: 2
-
