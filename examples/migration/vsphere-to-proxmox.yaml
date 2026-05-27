@@ -1,16 +1,17 @@
 # Example: Migrate a VM from VMware vSphere to Proxmox VE
 #
-# This example demonstrates migrating a Windows Server VM from vSphere
-# to Proxmox using NFS for intermediate storage.
+# WARNING: This migration direction (vSphere → Proxmox) is NOT currently tested.
+# Only vSphere → Libvirt/KVM is tested in v0.3.6. Use this example with caution.
+#
+# This example previously showed NFS URI storage, which is NOT supported.
+# storage.type is constrained to "pvc" only. Use an NFS-backed StorageClass instead.
 #
 # Prerequisites:
 # - Source VM "windows-server-2022" running on vSphere
 # - Target Proxmox provider configured
-# - NFS share mounted at /mnt/migrations on both providers
-# - Sufficient space on NFS for VM disk
+# - A ReadWriteMany StorageClass (NFS, CephFS, etc.)
 
 ---
-# VMMigration Resource
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMMigration
 metadata:
@@ -24,70 +25,49 @@ metadata:
     migration.virtrigaud.io/requestor: ops-team@example.com
     migration.virtrigaud.io/reason: "Migrating to Proxmox cluster"
 spec:
-  # Source: vSphere VM
-  sourceName: windows-server-2022
-  sourceNamespace: production
-  
-  # Target: Proxmox
-  targetProviderRef:
-    name: proxmox-cluster
-    namespace: default
-  targetName: windows-server-2022-pve
-  targetNamespace: production
-  targetStorageHint: local-lvm            # Proxmox storage
-  
-  # Resource hints for target VM
-  targetResourceHints:
-    cpu: 4
-    memory: 8192                          # 8GB RAM
-  
-  # Network configuration
-  targetNetworkHints:
-    - name: eth0
-      bridge: vmbr0                       # Proxmox bridge
-  
-  # Intermediate Storage: NFS
-  storage:
-    type: nfs
-    path: /mnt/migrations
-    endpoint: nfs.example.com
-  
-  # Cleanup: Conservative approach
-  cleanupPolicy:
-    deleteIntermediate: true              # Clean up NFS after migration
-    deleteSnapshot: true                  # Remove snapshot
-    deleteSource: false                   # Keep source (important!)
-  
-  # Retry: Aggressive retry for reliability
-  retryPolicy:
-    maxAttempts: 5
-    backoffDuration: 10m
-    maxBackoffDuration: 1h
+  source:
+    vmRef:
+      name: windows-server-2022
+    createSnapshot: true
+    powerOffBeforeMigration: false
+    deleteAfterMigration: false     # Keep source until target is validated
 
-# What happens:
-# 1. Controller validates windows-server-2022 on vSphere
-# 2. Creates snapshot of windows-server-2022
-# 3. vSphere provider downloads VMDK from datastore
-# 4. Converts vmdk → qcow2 using qemu-img
-# 5. Copies qcow2 to /mnt/migrations (NFS)
-# 6. Proxmox provider reads qcow2 from /mnt/migrations
-# 7. Uploads to Proxmox local-lvm storage
-# 8. Creates new VM "windows-server-2022-pve" in Proxmox
-# 9. Configures CPU, memory, and network
-# 10. Validates target VM creation
-# 11. Cleans up NFS and snapshot
-# 12. Sets status.phase = "Ready"
+  target:
+    name: windows-server-2022-pve
+    namespace: production
+    providerRef:
+      name: proxmox-cluster
+      namespace: default
+    classRef:
+      name: windows-4cpu-8gb
+
+  # PVC-backed storage — only supported storage type in v0.3.6.
+  # Using an NFS-backed StorageClass achieves the same result as a direct NFS mount.
+  storage:
+    type: pvc
+    pvc:
+      storageClassName: nfs-migration-storage
+      size: 100Gi
+      accessMode: ReadWriteMany
+
+  options:
+    diskFormat: qcow2
+    compress: false
+    verifyChecksums: true
+    timeout: "4h"
+    retryPolicy:
+      maxRetries: 5
+      retryDelay: "10m"
+      backoffMultiplier: 2
+    cleanupPolicy: OnSuccess
+
+  metadata:
+    purpose: "provider-change"
+    environment: "prod"
+    createdBy: "ops-team"
 
 # Monitor progress:
 #   kubectl get vmmigration windows-vsphere-to-proxmox -w
 #
-# Validate target VM:
-#   # Log into Proxmox web UI
-#   # Start windows-server-2022-pve
-#   # Verify Windows boots correctly
-#   # Test network connectivity
-#
-# After validation, optionally delete source:
-#   # Only after confirming target works!
-#   # kubectl delete vm windows-server-2022 -n production
-
+# Validate target VM before removing source:
+#   Log into Proxmox web UI, start windows-server-2022-pve, verify Windows boots
