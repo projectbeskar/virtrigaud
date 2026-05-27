@@ -5,6 +5,34 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-05-27 15:11] - v0.3.7 PR-1: Wire mTLS through Resolver.buildTLSConfig + fix provider_controller breakage sites
+**Author:** @wrkode (William Rizzo)
+
+### Security
+- `internal/runtime/remote/resolver.go`: replaced the `(nil, nil)` short-circuit in `buildTLSConfig` with a real implementation that loads `tls.crt` / `tls.key` / `ca.crt` from the Secret referenced by `spec.runtime.service.tls.secretRef`. Builds a `*tls.Config` with `MinVersion=tls.VersionTLS13`, `RootCAs` from `ca.crt`, `Certificates` from `tls.crt`+`tls.key`, and `ServerName` anchored to the provider Service FQDN. Supports both `kubernetes.io/tls`-typed Secrets and plain `Opaque` Secrets carrying the same three keys. Honours the existing `tls.insecureSkipVerify` field as the dev-only escape hatch.
+- `internal/controller/provider_controller.go`: replaced hardcoded `tlsEnabled := false` (line 509) with a real read of `spec.runtime.service.tls.enabled` via the new `providerTLSEnabled` helper. Replaced the `if false { ... }` TLS volume guard (line 704) with `if providerTLSEnabled(provider)`; volume now points at the operator-supplied `secretRef.Name` and mounts at the canonical `/etc/virtrigaud/tls`.
+- `internal/controller/provider_controller.go`: added the loud-failure `TLSConfigured` Condition (`evaluateTLSPosture`). A Provider whose `spec.runtime.service.tls` is nil sets `TLSConfigured=False, Reason=TLSBlockMissing` with an operator-action message and refuses to provision a Deployment. The `ExplicitlyDisabled`, `SecretRefMissing`, and `Enabled` reasons cover the other branches. Banking auditors can grep `kubectl get providers -o yaml` for posture.
+
+### Added
+- `internal/runtime/remote/resolver.go`: exported sentinel errors `ErrTLSBlockMissing` and `ErrTLSSecretRefMissing` so callers can disambiguate the loud-failure branches via `errors.Is`.
+- `internal/transport/grpc/client.go`: new `TLSConfig.PrebuiltConfig *tls.Config` field — when non-nil it is used verbatim for gRPC transport credentials, bypassing the existing on-disk file-loading path. Resolver.buildTLSConfig uses this to hand the gRPC client a fully assembled `*tls.Config` built in-memory from the Secret bytes.
+- `internal/runtime/remote/resolver_test.go`: 11 new unit tests covering nil-TLS, nil-Service, enabled=false, missing-secretRef, missing-Secret, three missing-key cases, both `Opaque` and `kubernetes.io/tls` happy paths, and `InsecureSkipVerify` propagation.
+- `internal/controller/provider_controller_tls_test.go`: 4 new unit tests covering the four Condition branches plus Deployment-volume/mount construction for `tls.enabled=true`.
+
+### Fixed
+- `internal/runtime/remote/resolver.go`: removed the stale breadcrumb comment claiming "TLS configuration removed in v1beta1" — the CRD schema for `ProviderTLSSpec` has been present and validated all along; the runtime simply never read it.
+
+### Why
+The v0.3.6 documentation audit (close commit `7b539ae`) confirmed manager↔provider gRPC traffic ships plaintext despite the website's `operations/security.md` claiming TLS support, and despite the CRD field being fully present. PR-1 wires the existing CRD into the existing transport-credential machinery so the documented banking-deployability posture is no longer a compensating-controls-only story. Tracks umbrella #156 and progresses #147; PR-2 (provider-side `Auth.RequireTLS`) is the next sequential PR. See `fieldTesting/ADR-0003-mtls-and-provider-grpc-auth.md` (Accepted 2026-05-27) for the full design.
+
+### Impact
+- [x] Breaking change — existing v0.3.6 Provider CRs without a `spec.runtime.service.tls` block will fail to reconcile after upgrade (loud-failure `TLSConfigured=False, Reason=TLSBlockMissing` Condition; no Deployment created). The operator must either (a) provision a Secret and set `tls.enabled=true` with `secretRef`, or (b) explicitly set `tls.enabled=false` to keep plaintext. Release-note callout required for v0.3.7.
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+---
+
 ## [0.3.6] - 2026-05-25
 
 Headline observability + supply-chain release. v0.3.6-rc1 was deployed on `vr1.lab.k8`, smoke-tested, then tagged as v0.3.6 from the same commit.

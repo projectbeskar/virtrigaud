@@ -948,16 +948,45 @@ func (c *Client) mapGRPCError(operation string, err error) error {
 	}
 }
 
-// TLSConfig represents TLS configuration for gRPC clients
+// TLSConfig represents TLS configuration for gRPC clients.
+//
+// Two construction styles are supported, in priority order:
+//
+//  1. PrebuiltConfig — a fully assembled *tls.Config produced upstream
+//     (e.g. by Resolver.buildTLSConfig loading cert/key/ca PEM material
+//     from a Kubernetes Secret). When non-nil this field wins; all
+//     file-path fields below are ignored. This is the path used by the
+//     v0.3.7 mTLS wiring (ADR-0003 / umbrella #156).
+//  2. CertFile/KeyFile/CAFile — paths to PEM files on the local
+//     filesystem. Kept for the local-dev / on-disk-cert workflow.
+//
+// Insecure short-circuits both paths and produces a TLS config that
+// skips peer verification — dev-only escape hatch, never set in
+// production.
 type TLSConfig struct {
+	// PrebuiltConfig, when non-nil, is used as-is to build gRPC
+	// transport credentials. The caller is responsible for setting
+	// MinVersion, Certificates, RootCAs, ServerName, and any other
+	// fields it cares about.
+	PrebuiltConfig *tls.Config
+
 	CertFile string
 	KeyFile  string
 	CAFile   string
 	Insecure bool
 }
 
-// buildTLSCredentials builds gRPC transport credentials from TLS config
+// buildTLSCredentials builds gRPC transport credentials from TLS config.
+//
+// When config.PrebuiltConfig is non-nil it is honored verbatim — the
+// file-path fields are ignored. Otherwise the old on-disk loading path
+// is used, preserving backwards compatibility for any caller still
+// passing file paths.
 func buildTLSCredentials(config *TLSConfig) (credentials.TransportCredentials, error) {
+	if config.PrebuiltConfig != nil {
+		return credentials.NewTLS(config.PrebuiltConfig), nil
+	}
+
 	if config.Insecure {
 		return credentials.NewTLS(&tls.Config{InsecureSkipVerify: true}), nil
 	}
