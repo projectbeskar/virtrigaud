@@ -18,6 +18,7 @@ This directory contains Architecture Decision Records (ADRs) for VirtRigaud. ADR
 |---|-------|--------|------|---------|
 | [0001](./0001-transport-grpc-and-capi-integration.md) | Transport choice (gRPC) and CAPI integration layer | Accepted | 2026-05-22 | Settles gRPC as the manager↔provider transport and establishes that a future CAPI provider sits on top of VirtRigaud's CRDs (not gRPC). |
 | [0002](./0002-build-path-consolidation.md) | Consolidate two parallel manager build paths | Accepted | 2026-05-24 | H1 decision: retire the local-dev `cmd/main.go` + root `Dockerfile`; port missing features to the canonical path; shipped PRs 1–4 in v0.3.6; PR-5 (HTTPS-by-default metrics) deferred to v0.4.0. |
+| [0003](./0003-mtls-and-provider-grpc-auth.md) | Wire mTLS and provider gRPC authentication | Accepted | 2026-05-27 | Wire mTLS manager↔provider on the existing CRD surface, TLS-on-by-default (Option C) with per-Provider `tls.enabled=false` escape hatch; `validateTLSPeer` SAN allow-list (permissive empty); manual cert provisioning (no cert-manager template). Code-complete on `main` (PRs #157/#158/#159); targeted at v0.3.7. |
 
 ## Contributing an ADR
 
