@@ -5,6 +5,24 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-05-28 11:05] - v0.3.7 PR-4: Promote ADR-0003 (mTLS + provider gRPC auth) to docs/adr/
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `docs/adr/0003-mtls-and-provider-grpc-auth.md`: promoted the mTLS + provider-gRPC-auth design record from the gitignored `fieldTesting/` draft into the tracked ADR directory (mirrors the ADR-0001/0002 promotion pattern). Added an **"Implementation status — as shipped on `main`"** section that is authoritative where it conflicts with the original per-PR plan, documenting the three deviations between plan and reality: (1) provider config shipped as the `VIRTRIGAUD_PROVIDER_ALLOWED_SANS` / `VIRTRIGAUD_PROVIDER_INSECURE` env-var contract + on-disk cert detection (not the planned `TLS_CERT_PATH`/`AUTH_ALLOWED_SANS`); (2) the `--insecure-no-tls-providers` global flag was NOT built — per-Provider `tls.enabled=false` is the only escape hatch; (3) the operator runbook + example YAMLs + website `mtls.md` flip are deferred to the v0.3.7 release doc-sync. Marked PR-1 (#157), PR-2 (#158), PR-3 (#159) as Landed inline and fixed the companion-ADR relative links.
+- `docs/adr/README.md`: added the ADR-0003 index row (Accepted, 2026-05-27).
+
+### Why
+ADR-0003's implementation is code-complete on `main` (PRs #157/#158/#159). Promoting the design record out of the gitignored scratch area makes the mTLS/auth decision auditable and discoverable for operators and contributors — required by the regulated-deployment posture. Scoped to ADR-promotion-only per maintainer decision (2026-05-27): the website security pages document *released* reality and v0.3.7 is unreleased, so the operator-facing runbook + website updates wait for the v0.3.7 release doc-sync. PR-4 of 4 in the v0.3.7 security track (umbrella #156).
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
+---
+
 ## [2026-05-28 09:42] - v0.3.7 PR-3: Provider cert hot-reload (certwatcher) + Helm TLS surface + tls.enabled=false crash-loop fix
 **Author:** @wrkode (William Rizzo)
 
