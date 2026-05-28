@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"log/slog"
 	"os"
@@ -56,11 +57,37 @@ func main() {
 	}
 	logger := slog.New(handler)
 
+	// Resolve TLS material + auth contract from the canonical mount path
+	// and env-vars per ADR-0003 PR-2. The helper returns:
+	//   - (resolution, nil)                       → mTLS-mandatory
+	//   - (resolution, ErrInsecureModeOptedIn)    → plaintext (loud WARN)
+	//   - (nil, hard error)                       → refuse to start
+	tlsResolution, tlsErr := server.ResolveTLSAndAuth()
+	switch {
+	case tlsErr == nil:
+		logger.Info("mTLS enabled",
+			"cert_path", server.ProviderTLSCertFile,
+			"ca_path", server.ProviderTLSCAFile,
+			"require_client_cert", true,
+			"allowed_sans", tlsResolution.Auth.AllowedSANs,
+		)
+	case errors.Is(tlsErr, server.ErrInsecureModeOptedIn):
+		logger.Warn("STARTING IN PLAINTEXT MODE: VIRTRIGAUD_PROVIDER_INSECURE=true and no TLS material on disk. "+
+			"manager↔provider gRPC traffic is NOT encrypted and NOT authenticated. "+
+			"This is audit-flagged per ADR-0003.",
+			"mount_path", server.ProviderTLSMountPath,
+		)
+	default:
+		logger.Error("Failed to resolve TLS configuration", "error", tlsErr)
+		os.Exit(1)
+	}
+
 	// Create server configuration
 	config := server.DefaultConfig()
 	config.Port = port
 	config.HealthPort = healthPort
 	config.Logger = logger
+	config.TLS = tlsResolution.TLS
 	config.Middleware = &middleware.Config{
 		Logging: &middleware.LoggingConfig{
 			Enabled: true,
@@ -70,6 +97,7 @@ func main() {
 			Enabled: true,
 			Logger:  logger,
 		},
+		Auth: tlsResolution.Auth,
 	}
 
 	// Create server

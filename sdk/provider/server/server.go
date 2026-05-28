@@ -20,6 +20,7 @@ package server
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"log/slog"
 	"net"
@@ -107,10 +108,10 @@ func DefaultConfig() *Config {
 		KeepAlive: &KeepAliveConfig{
 			ServerParameters: &keepalive.ServerParameters{
 				MaxConnectionIdle:     15 * time.Minute, // Increased from 15s to support long operations
-				MaxConnectionAge:      2 * time.Hour,     // Increased from 30s to support disk exports
-				MaxConnectionAgeGrace: 5 * time.Minute,   // Increased from 5s for graceful shutdown
-				Time:                  30 * time.Second,  // Increased from 5s for keep-alive pings
-				Timeout:               10 * time.Second,  // Increased from 1s for keep-alive timeout
+				MaxConnectionAge:      2 * time.Hour,    // Increased from 30s to support disk exports
+				MaxConnectionAgeGrace: 5 * time.Minute,  // Increased from 5s for graceful shutdown
+				Time:                  30 * time.Second, // Increased from 5s for keep-alive pings
+				Timeout:               10 * time.Second, // Increased from 1s for keep-alive timeout
 			},
 			EnforcementPolicy: &keepalive.EnforcementPolicy{
 				MinTime:             5 * time.Second,
@@ -231,6 +232,15 @@ func (s *Server) RegisterProvider(service interface{}) {
 	s.grpcServer.RegisterService(&providerv1.Provider_ServiceDesc, service)
 }
 
+// GetServiceInfo returns the gRPC services registered on the underlying
+// server, keyed by fully-qualified service name. It is a thin pass-through
+// to grpc.Server.GetServiceInfo, primarily used by callers and tests to
+// confirm a provider service was registered (e.g. after the libvirt
+// SDK-migration in ADR-0003 PR-2).
+func (s *Server) GetServiceInfo() map[string]grpc.ServiceInfo {
+	return s.grpcServer.GetServiceInfo()
+}
+
 // Serve starts the gRPC server and blocks until shutdown.
 func (s *Server) Serve(ctx context.Context) error {
 	if !s.running.CompareAndSwap(false, true) {
@@ -338,21 +348,65 @@ func (s *Server) shutdown() error {
 }
 
 // buildTLSCredentials creates TLS credentials from the given config.
+//
+// When RequireClientCert is true the CA bundle at CAFile is loaded into
+// ClientCAs and ClientAuth is set to RequireAndVerifyClientCert — the TLS
+// stack then refuses any handshake that does not present a client cert
+// chained to that CA. The SDK middleware's validateTLSPeer then checks
+// the verified cert's SANs against AllowedSANs.
 func buildTLSCredentials(tlsConfig *TLSConfig) (credentials.TransportCredentials, error) {
+	config, err := buildServerTLSConfig(tlsConfig)
+	if err != nil {
+		return nil, err
+	}
+	return credentials.NewTLS(config), nil
+}
+
+// buildServerTLSConfig assembles the server-side *tls.Config from the given
+// TLSConfig. It is split out from buildTLSCredentials so the resulting
+// *tls.Config (MinVersion, ClientAuth, ClientCAs) can be asserted directly
+// in unit tests — credentials.NewTLS returns an opaque value that hides
+// those fields.
+//
+// The config always pins MinVersion to TLS 1.3 (ADR-0003 floor, matches the
+// manager-side dialer). When RequireClientCert is true the CA bundle at
+// CAFile is loaded into ClientCAs and ClientAuth is set to
+// RequireAndVerifyClientCert, so the TLS stack rejects any handshake without
+// a client cert chained to that CA before the auth interceptor even runs.
+func buildServerTLSConfig(tlsConfig *TLSConfig) (*tls.Config, error) {
+	// G304 is intentionally suppressed: CertFile/KeyFile/CAFile are
+	// operator-supplied configuration values, not user-controlled input.
+	// In production they resolve to the canonical /etc/virtrigaud/tls
+	// mount.
 	cert, err := tls.LoadX509KeyPair(tlsConfig.CertFile, tlsConfig.KeyFile)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load key pair: %w", err)
+		return nil, fmt.Errorf("failed to load key pair (cert=%s key=%s): %w",
+			tlsConfig.CertFile, tlsConfig.KeyFile, err)
 	}
 
 	config := &tls.Config{
 		Certificates: []tls.Certificate{cert},
-		ServerName:   "", // Will be set by gRPC
+		MinVersion:   tls.VersionTLS13, // ADR-0003 floor; matches manager-side.
 	}
 
 	if tlsConfig.RequireClientCert {
+		if tlsConfig.CAFile == "" {
+			return nil, fmt.Errorf("RequireClientCert=true requires CAFile to be set")
+		}
+		// #nosec G304 -- CAFile is operator-supplied configuration, not user input.
+		caPEM, err := os.ReadFile(tlsConfig.CAFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read client CA bundle (%s): %w",
+				tlsConfig.CAFile, err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caPEM) {
+			return nil, fmt.Errorf("failed to parse any certificates from CA bundle %s",
+				tlsConfig.CAFile)
+		}
+		config.ClientCAs = pool
 		config.ClientAuth = tls.RequireAndVerifyClientCert
-		// TODO: Load CA cert for client verification
 	}
 
-	return credentials.NewTLS(config), nil
+	return config, nil
 }

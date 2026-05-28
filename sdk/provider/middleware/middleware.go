@@ -19,6 +19,7 @@ package middleware
 
 import (
 	"context"
+	"crypto/x509"
 	"fmt"
 	"log/slog"
 	"runtime/debug"
@@ -26,6 +27,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
@@ -240,11 +242,16 @@ func authStreamInterceptor(config *AuthConfig) grpc.StreamServerInterceptor {
 }
 
 // authenticateRequest performs authentication checks.
+//
+// Errors returned from validateTLSPeer are already gRPC status errors carrying
+// the right code (Unauthenticated vs PermissionDenied) — pass them through so
+// callers can distinguish missing-cert from rejected-cert. Bearer-token failures
+// keep the existing PermissionDenied wrapping.
 func authenticateRequest(ctx context.Context, config *AuthConfig) error {
 	// Check mTLS if required
 	if config.RequireTLS {
 		if err := validateTLSPeer(ctx, config.AllowedSANs); err != nil {
-			return errors.NewPermissionDenied("TLS authentication failed").GRPCStatus().Err()
+			return err
 		}
 	}
 
@@ -258,18 +265,114 @@ func authenticateRequest(ctx context.Context, config *AuthConfig) error {
 	return nil
 }
 
-// validateTLSPeer validates the TLS peer certificate.
+// validateTLSPeer enforces the mTLS contract described in ADR-0003:
+//
+//   - no peer info / no TLS info / no verified chain → codes.Unauthenticated
+//     (the caller did not present a client cert that the TLS stack accepted)
+//   - empty AllowedSANs → ANY cert from the trusted CA is accepted
+//     (matches kube-apiserver client-cert auth; the trust boundary is the CA)
+//   - non-empty AllowedSANs → leaf cert must match at least one entry by
+//     DNS SAN, URI SAN, or CN (CN as last-resort fallback). Mismatch →
+//     codes.PermissionDenied with a log line naming the presented identity
+//     and the configured allow-list so operators can debug typos.
+//
+// The function returns gRPC status errors directly (not wrapped) so the
+// distinction between Unauthenticated and PermissionDenied propagates to
+// the client.
 func validateTLSPeer(ctx context.Context, allowedSANs []string) error {
 	p, ok := peer.FromContext(ctx)
 	if !ok {
-		return fmt.Errorf("no peer information")
+		slog.Default().Warn("mTLS rejection: no peer information on context")
+		return status.Error(codes.Unauthenticated, "mTLS required: no peer information")
 	}
 
-	// TODO: Implement TLS certificate validation
-	_ = p
-	_ = allowedSANs
+	if p.AuthInfo == nil {
+		slog.Default().Warn("mTLS rejection: connection is not TLS", "addr", p.Addr.String())
+		return status.Error(codes.Unauthenticated, "mTLS required: connection is not TLS")
+	}
 
-	return nil
+	tlsInfo, ok := p.AuthInfo.(credentials.TLSInfo)
+	if !ok {
+		slog.Default().Warn("mTLS rejection: AuthInfo is not TLSInfo",
+			"addr", p.Addr.String(),
+			"auth_type", p.AuthInfo.AuthType(),
+		)
+		return status.Error(codes.Unauthenticated, "mTLS required: TLS handshake info unavailable")
+	}
+
+	// VerifiedChains is the canonical source — populated only when the TLS
+	// stack itself validated the chain against the configured ClientCAs.
+	// PeerCertificates contains the raw presented certs and may be set
+	// without verification; we deliberately require VerifiedChains.
+	if len(tlsInfo.State.VerifiedChains) == 0 || len(tlsInfo.State.VerifiedChains[0]) == 0 {
+		slog.Default().Warn("mTLS rejection: client did not present a verified certificate",
+			"addr", p.Addr.String(),
+		)
+		return status.Error(codes.Unauthenticated, "mTLS required: no verified client certificate")
+	}
+
+	leaf := tlsInfo.State.VerifiedChains[0][0]
+
+	// Permissive default per ADR-0003 decision #5: empty allow-list trusts
+	// any cert signed by the configured CA. The TLS stack already verified
+	// the chain — that's the trust boundary.
+	if len(allowedSANs) == 0 {
+		return nil
+	}
+
+	if certMatchesAllowList(leaf, allowedSANs) {
+		return nil
+	}
+
+	slog.Default().Warn("mTLS rejection: client cert did not match allow-list",
+		"addr", p.Addr.String(),
+		"presented_cn", leaf.Subject.CommonName,
+		"presented_dns_sans", leaf.DNSNames,
+		"presented_uri_sans", formatURISANs(leaf),
+		"allowed_sans", allowedSANs,
+	)
+	return status.Error(codes.PermissionDenied,
+		"client certificate does not match the configured allow-list")
+}
+
+// certMatchesAllowList returns true when the leaf certificate carries any
+// SAN (DNS or URI) or CN that exactly matches an entry in allowedSANs.
+// CN is checked last as an explicit fallback for operators using legacy
+// CN-only certs; modern certs should populate the SAN extension.
+func certMatchesAllowList(leaf *x509.Certificate, allowedSANs []string) bool {
+	for _, allowed := range allowedSANs {
+		// DNS SANs (most common).
+		for _, dns := range leaf.DNSNames {
+			if dns == allowed {
+				return true
+			}
+		}
+		// URI SANs (SPIFFE-style identities).
+		for _, uri := range leaf.URIs {
+			if uri.String() == allowed {
+				return true
+			}
+		}
+		// CN fallback — last resort. Modern certs may have an empty CN; this
+		// only fires when CN is set and matches verbatim.
+		if leaf.Subject.CommonName != "" && leaf.Subject.CommonName == allowed {
+			return true
+		}
+	}
+	return false
+}
+
+// formatURISANs returns a slice of string representations for the leaf's URI
+// SANs, suitable for structured logging.
+func formatURISANs(leaf *x509.Certificate) []string {
+	if len(leaf.URIs) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(leaf.URIs))
+	for _, u := range leaf.URIs {
+		out = append(out, u.String())
+	}
+	return out
 }
 
 // validateBearerToken validates a bearer token.
