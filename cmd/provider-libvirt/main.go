@@ -18,22 +18,16 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
-	"net"
-	"net/http"
 	"os"
-	"os/signal"
-	"syscall"
-
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/health"
-	"google.golang.org/grpc/health/grpc_health_v1"
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt"
 	"github.com/projectbeskar/virtrigaud/internal/version"
-	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
+	"github.com/projectbeskar/virtrigaud/sdk/provider/middleware"
+	"github.com/projectbeskar/virtrigaud/sdk/provider/server"
 )
 
 func main() {
@@ -63,31 +57,68 @@ func main() {
 	}
 	logger := slog.New(handler)
 
-	// Create context that listens for the interrupt signal from the OS
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
-	// Create gRPC server
-	server := grpc.NewServer()
-
-	// Create Libvirt provider with SDK pattern (reads config from environment)
-	providerImpl := libvirt.New()
-	provider := libvirt.NewServer(providerImpl)
-
-	// Register the provider service
-	providerv1.RegisterProviderServer(server, provider)
-
-	// Register health service
-	healthServer := health.NewServer()
-	grpc_health_v1.RegisterHealthServer(server, healthServer)
-	healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
-
-	// Start gRPC server
-	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
-	if err != nil {
-		logger.Error("Failed to listen", "error", err)
+	// Resolve TLS material + auth contract from the canonical mount path
+	// and env-vars per ADR-0003 PR-2. See cmd/provider-vsphere/main.go
+	// for the contract.
+	tlsResolution, tlsErr := server.ResolveTLSAndAuth()
+	switch {
+	case tlsErr == nil:
+		logger.Info("mTLS enabled",
+			"cert_path", server.ProviderTLSCertFile,
+			"ca_path", server.ProviderTLSCAFile,
+			"require_client_cert", true,
+			"allowed_sans", tlsResolution.Auth.AllowedSANs,
+		)
+	case errors.Is(tlsErr, server.ErrInsecureModeOptedIn):
+		logger.Warn("STARTING IN PLAINTEXT MODE: VIRTRIGAUD_PROVIDER_INSECURE=true and no TLS material on disk. "+
+			"manager↔provider gRPC traffic is NOT encrypted and NOT authenticated. "+
+			"This is audit-flagged per ADR-0003.",
+			"mount_path", server.ProviderTLSMountPath,
+		)
+	default:
+		logger.Error("Failed to resolve TLS configuration", "error", tlsErr)
 		os.Exit(1)
 	}
+
+	// Build SDK server configuration.
+	//
+	// Migration note (ADR-0003 PR-2): this main previously used a raw
+	// grpc.NewServer() with no interceptors, a hand-rolled HTTP health
+	// server, and direct signal handling. We now route through the SDK
+	// server, which provides equivalent functionality (gRPC health
+	// protocol, HTTP /healthz + /readyz, SIGINT/SIGTERM graceful
+	// shutdown) plus the TLS + Auth interceptor chain the libvirt
+	// provider was missing.
+	config := server.DefaultConfig()
+	config.Port = port
+	config.HealthPort = healthPort
+	config.Logger = logger
+	config.TLS = tlsResolution.TLS
+	config.Middleware = &middleware.Config{
+		Logging: &middleware.LoggingConfig{
+			Enabled: true,
+			Logger:  logger,
+		},
+		Recovery: &middleware.RecoveryConfig{
+			Enabled: true,
+			Logger:  logger,
+		},
+		Auth: tlsResolution.Auth,
+	}
+
+	srv, err := server.New(config)
+	if err != nil {
+		logger.Error("Failed to create server", "error", err)
+		os.Exit(1)
+	}
+
+	// Create the libvirt provider via the SDK pattern. The libvirt
+	// internal package exposes a Server type that implements the
+	// generated providerv1.ProviderServer interface, which is exactly
+	// what RegisterProvider expects.
+	providerImpl := libvirt.New()
+	libvirtServer := libvirt.NewServer(providerImpl)
+	srv.RegisterProvider(libvirtServer)
 
 	logger.Info("Starting Libvirt provider server",
 		"version", version.String(),
@@ -102,48 +133,10 @@ func main() {
 		"supported_platforms", []string{"kvm", "qemu", "libvirt"},
 	)
 
-	// Create HTTP health server
-	healthMux := http.NewServeMux()
-	healthMux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
-	})
-	healthMux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ready"))
-	})
-
-	httpServer := &http.Server{
-		Addr:    fmt.Sprintf(":%d", healthPort),
-		Handler: healthMux,
+	if err := srv.Serve(context.Background()); err != nil {
+		logger.Error("Server failed", "error", err)
+		os.Exit(1)
 	}
-
-	logger.Info("Starting HTTP health server", "port", healthPort)
-
-	// Start gRPC server in a goroutine
-	go func() {
-		if err := server.Serve(lis); err != nil {
-			logger.Error("Failed to serve gRPC", "error", err)
-			os.Exit(1)
-		}
-	}()
-
-	// Start HTTP health server in a goroutine
-	go func() {
-		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Error("Failed to serve HTTP health server", "error", err)
-			os.Exit(1)
-		}
-	}()
-
-	// Wait for interrupt signal to gracefully shutdown the server
-	<-ctx.Done()
-
-	logger.Info("Shutting down gRPC server...")
-	server.GracefulStop()
-
-	logger.Info("Shutting down HTTP health server...")
-	_ = httpServer.Shutdown(context.Background())
 }
 
 // getLogLevel returns the log level from LOG_LEVEL environment variable.

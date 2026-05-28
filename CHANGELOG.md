@@ -5,6 +5,35 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-05-28 05:23] - v0.3.7 PR-2: Enforce provider-side mTLS auth + migrate libvirt onto the SDK server
+**Author:** @wrkode (William Rizzo)
+
+### Security
+- `sdk/provider/middleware/middleware.go`: implemented `validateTLSPeer` (previously a TODO stub that accepted any TLS caller). It extracts the verified client cert chain from the gRPC `peer.Peer` → `credentials.TLSInfo` and enforces the ADR-0003 SAN allow-list. No peer / no TLS / no verified chain → `codes.Unauthenticated`. Empty `AllowedSANs` → permissive (any cert the configured CA signed is accepted, matching kube-apiserver client-cert behaviour). Non-empty `AllowedSANs` → leaf cert must match by DNS SAN, URI SAN, or CN (CN as last-resort fallback); mismatch → `codes.PermissionDenied` with a structured log line naming the presented identity vs. the allow-list (SAN strings only, never the full cert).
+- `sdk/provider/middleware/middleware.go`: `authenticateRequest` now passes `validateTLSPeer`'s gRPC status error through unchanged instead of re-wrapping every TLS failure as `PermissionDenied`, so callers can distinguish missing-cert (Unauthenticated) from rejected-cert (PermissionDenied).
+- `sdk/provider/server/server.go`: completed the `RequireClientCert` path in `buildTLSCredentials` — the CA bundle at `CAFile` is now loaded into `tls.Config.ClientCAs` (was a `// TODO: Load CA cert` leaving mTLS verification non-functional) and `ClientAuth=RequireAndVerifyClientCert`. Pinned `MinVersion=tls.VersionTLS13` (ADR-0003 floor, matches the manager-side dialer). `#nosec G304` justifications added for the operator-supplied cert/CA file reads.
+- `cmd/provider-vsphere/main.go`, `cmd/provider-proxmox/main.go`, `cmd/provider-mock/main.go`: wired `config.TLS` + `config.Middleware.Auth` from `server.ResolveTLSAndAuth()`, so these providers serve mTLS and run the `validateTLSPeer` interceptor when TLS material is mounted. Plaintext-with-loud-WARN when the operator explicitly opts out; hard-fail-to-start when material is missing and no opt-out is set.
+- `cmd/provider-libvirt/main.go`: migrated off raw `grpc.NewServer()` onto the SDK `server.New(config)` so the libvirt provider inherits the same TLS + Auth interceptor chain (it previously bypassed auth entirely). Framework swap only — gRPC health protocol, HTTP `/healthz` + `/readyz`, and SIGINT/SIGTERM graceful shutdown are preserved; the SDK additionally applies the keepalive tuning the raw server lacked.
+
+### Added
+- `sdk/provider/server/tlsconfig.go`: new `ResolveTLSAndAuth` helper translating the ADR-0003 PR-2 contract (canonical `/etc/virtrigaud/tls` mount + `VIRTRIGAUD_PROVIDER_ALLOWED_SANS` / `VIRTRIGAUD_PROVIDER_INSECURE` env-vars) into a `TLSConfig`+`AuthConfig` pair. Three outcomes: files-present → mTLS-mandatory; files-absent + `VIRTRIGAUD_PROVIDER_INSECURE=true` → plaintext sentinel `ErrInsecureModeOptedIn`; files-absent + no opt-in → hard error. Mount-path constants (`ProviderTLSMountPath` etc.) cross-reference the PR-1 controller-side constants.
+- `sdk/provider/server/server.go`: extracted `buildServerTLSConfig` (returns the assertable `*tls.Config`) out of `buildTLSCredentials`, and added a `GetServiceInfo()` pass-through for registration assertions.
+- `sdk/provider/middleware/middleware_test.go`: unit tests for `validateTLSPeer` — no-peer / plaintext / no-verified-chain → Unauthenticated; empty allow-list → accept; DNS/URI/CN match → accept; allow-list miss → PermissionDenied; plus propagation tests through `authenticateRequest`.
+- `sdk/provider/server/tlsconfig_test.go`: unit tests for `parseAllowedSANs`, `isInsecureOptedIn`, and the `ResolveTLSAndAuth` branch table.
+- `sdk/provider/server/buildtls_test.go`: unit tests asserting the provider startup `*tls.Config` carries `MinVersion=TLS13` + `RequireAndVerifyClientCert` + a populated `ClientCAs` when certs are present, plus the no-client-cert and missing-CA/missing-cert error paths.
+- `cmd/provider-libvirt/main_test.go`: tests proving the libvirt `Server` still satisfies `providerv1.ProviderServer` and that the SDK-based server registers the `provider.v1.Provider` service the raw server did.
+
+### Why
+PR-1 (#157) encrypted the manager→provider channel but the provider gRPC servers still accepted any caller on the pod network and the libvirt provider bypassed the SDK auth chain entirely. PR-2 closes that gap: providers now refuse unauthenticated callers when TLS is configured (closes #148, finishes #147), and libvirt is unified onto the SDK so it can never silently regress to no-auth. Empty-SAN permissive default is the documented single-CA trust model (ADR-0003 decision #5). PR-2 of 4 in the v0.3.7 security track; see `fieldTesting/ADR-0003-mtls-and-provider-grpc-auth.md`.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout — provider pods gain new TLS-serving + auth-enforcing behaviour. With TLS material mounted (PR-1 path), providers now require a verified client cert. The explicit escape hatch is `VIRTRIGAUD_PROVIDER_INSECURE=true` (via `spec.runtime.env`) with no TLS material, which starts plaintext with a loud audit-flagged WARN.
+- [ ] Config change only
+- [ ] Documentation only
+
+---
+
 ## [2026-05-27 15:11] - v0.3.7 PR-1: Wire mTLS through Resolver.buildTLSConfig + fix provider_controller breakage sites
 **Author:** @wrkode (William Rizzo)
 
