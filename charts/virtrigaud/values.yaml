@@ -152,6 +152,44 @@ providers:
     #     value: "true"
     env: []
 
+# Provider mTLS configuration (ADR-0003, v0.3.7).
+#
+# This block governs the gRPC TLS posture of the chart-templated provider
+# Deployments (libvirt / vsphere / proxmox). It does NOT affect providers
+# deployed dynamically by the manager's ProviderController from Provider
+# CRs — those read their TLS posture from the Provider CR's
+# spec.runtime.service.tls block.
+#
+# Cert provisioning is the operator's responsibility (maintainer decision
+# 2026-05-27): the chart references an externally-provisioned Secret, it
+# does NOT mint certs. There is intentionally no cert-manager scaffolding
+# here. See docs/operations/security.md (PR-4) for the openssl recipe and
+# the Secret YAML template.
+#
+# Behaviour:
+#   - secretName set  → the Secret (keys tls.crt/tls.key/ca.crt) is mounted
+#     at /etc/virtrigaud/tls and the provider runs mTLS-mandatory.
+#   - secretName empty + insecure=true → no mount; VIRTRIGAUD_PROVIDER_INSECURE
+#     is set so the provider boots in audit-flagged plaintext mode.
+#   - secretName empty + insecure=false → no TLS env wiring is rendered; the
+#     provider's own ResolveTLSAndAuth hard-exits on start (secure-by-default).
+providerTLS:
+  # secretName is the name of an externally-provisioned Kubernetes Secret
+  # (type kubernetes.io/tls) containing tls.crt, tls.key, and ca.crt. Empty
+  # by default — operators opt in by setting it.
+  secretName: ""
+
+  # allowedSANs is a list of SAN/CN values the provider accepts from the
+  # manager's client certificate. Maps to VIRTRIGAUD_PROVIDER_ALLOWED_SANS
+  # (comma-joined). Empty (default) is permissive: any client cert signed by
+  # the configured CA is accepted (ADR-0003 decision #5).
+  allowedSANs: []
+
+  # insecure is the explicit plaintext escape hatch. Maps to
+  # VIRTRIGAUD_PROVIDER_INSECURE. Only honoured when secretName is empty.
+  # false by default (secure-by-default).
+  insecure: false
+
 # RBAC configuration
 rbac:
   # Enable RBAC

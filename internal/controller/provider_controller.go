@@ -87,6 +87,23 @@ const tlsBlockMissingMessage = "TLS is on-by-default in v0.3.7. To proceed: (a) 
 // consumed by PR-2 in the provider-side `main.go` files).
 const providerTLSMountPath = "/etc/virtrigaud/tls"
 
+// envProviderInsecure is the env-var name the provider-side
+// ResolveTLSAndAuth (sdk/provider/server/tlsconfig.go) consults to decide
+// whether a missing TLS mount is an intentional plaintext opt-out or a
+// misconfiguration. It MUST match sdk/provider/server.EnvInsecure
+// verbatim. It is duplicated here (not imported) because the SDK module
+// depends on the root module — importing the SDK from the controller
+// would invert that dependency, the same reason providerTLSMountPath is
+// duplicated.
+//
+// Wired in v0.3.7 PR-3 (ADR-0003 / umbrella #156): without this, a
+// tls.enabled=false Provider produces a pod with no TLS mount AND no
+// opt-out env-var, so ResolveTLSAndAuth takes its hard-error branch and
+// the provider crash-loops. Setting this to "true" on the plaintext path
+// is the integration glue that makes PR-1 (controller mount) and PR-2
+// (provider resolve) work together.
+const envProviderInsecure = "VIRTRIGAUD_PROVIDER_INSECURE"
+
 // providerTLSVolumeName is the Pod volume name used for the provider's
 // TLS Secret. Referenced by both the Volume (in buildPodVolumes) and the
 // VolumeMount (in buildProviderContainer) — must match.
@@ -649,6 +666,25 @@ func (r *ProviderReconciler) buildProviderContainer(provider *infravirtrigaudiov
 		Name:  "TLS_ENABLED",
 		Value: fmt.Sprintf("%t", tlsEnabled),
 	})
+
+	// Plaintext opt-out glue (v0.3.7 PR-3, ADR-0003 / umbrella #156).
+	//
+	// When tls.enabled=false the controller does NOT mount the TLS Secret,
+	// so the provider pod finds no cert files at /etc/virtrigaud/tls. The
+	// SDK's ResolveTLSAndAuth treats "no files + no opt-out" as a hard
+	// error and the provider refuses to start. We must therefore set the
+	// explicit opt-out env-var so ResolveTLSAndAuth takes its
+	// plaintext-opt-out branch (audit-flagged WARN) instead of
+	// crash-looping. We only reach this code after evaluateTLSPosture has
+	// confirmed an explicit tls.enabled=false (the nil-TLS loud-failure
+	// case short-circuits earlier), so setting the opt-out here can never
+	// silently downgrade an undecided Provider.
+	if !tlsEnabled {
+		env = append(env, corev1.EnvVar{
+			Name:  envProviderInsecure,
+			Value: "true",
+		})
+	}
 
 	// Add TLS insecure skip verify configuration
 	env = append(env, corev1.EnvVar{

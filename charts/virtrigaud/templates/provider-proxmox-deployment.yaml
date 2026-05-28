@@ -34,11 +34,15 @@ spec:
         args:
         - --port=9090
         - --health-port=8080
-        {{- if .Values.providers.proxmox.env }}
+        {{- $tlsEnv := include "virtrigaud.providerTLSEnv" . }}
+        {{- if or .Values.providers.proxmox.env ($tlsEnv | trim) }}
         env:
         {{- range .Values.providers.proxmox.env }}
         - name: {{ .name }}
           value: {{ .value | quote }}
+        {{- end }}
+        {{- with $tlsEnv | trim }}
+        {{- $tlsEnv | nindent 8 }}
         {{- end }}
         {{- end }}
         ports:
@@ -63,9 +67,11 @@ spec:
         volumeMounts:
         - name: tmp
           mountPath: /tmp
+        {{- include "virtrigaud.providerTLSVolumeMount" . | nindent 8 }}
       volumes:
       - name: tmp
         emptyDir: {}
+      {{- include "virtrigaud.providerTLSVolume" . | nindent 6 }}
       {{- with .Values.global.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
