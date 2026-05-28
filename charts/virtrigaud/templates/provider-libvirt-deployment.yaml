@@ -56,12 +56,15 @@ spec:
         env:
         - name: PROVIDER_TYPE
           value: "libvirt"
+        {{- include "virtrigaud.providerTLSEnv" . | nindent 8 }}
         volumeMounts:
         - name: tmp
           mountPath: /tmp
+        {{- include "virtrigaud.providerTLSVolumeMount" . | nindent 8 }}
       volumes:
       - name: tmp
         emptyDir: {}
+      {{- include "virtrigaud.providerTLSVolume" . | nindent 6 }}
       {{- with .Values.global.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

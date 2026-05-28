@@ -53,12 +53,19 @@ spec:
           periodSeconds: 10
         resources:
           {{- toYaml .Values.providers.vsphere.resources | nindent 10 }}
+        {{- $tlsEnv := include "virtrigaud.providerTLSEnv" . }}
+        {{- if $tlsEnv | trim }}
+        env:
+        {{- $tlsEnv | nindent 8 }}
+        {{- end }}
         volumeMounts:
         - name: tmp
           mountPath: /tmp
+        {{- include "virtrigaud.providerTLSVolumeMount" . | nindent 8 }}
       volumes:
       - name: tmp
         emptyDir: {}
+      {{- include "virtrigaud.providerTLSVolume" . | nindent 6 }}
       {{- with .Values.global.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

@@ -5,6 +5,36 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-05-28 09:42] - v0.3.7 PR-3: Provider cert hot-reload (certwatcher) + Helm TLS surface + tls.enabled=false crash-loop fix
+**Author:** @wrkode (William Rizzo)
+
+### Security
+- `sdk/provider/server/server.go`: implemented the long-declared-but-unwired `TLSConfig.AutoReload`. When `AutoReload=true` the SDK server now wires `tls.Config.GetCertificate` to a `sigs.k8s.io/controller-runtime/pkg/certwatcher.CertWatcher` (the same primitive the canonical manager already uses from ADR-0002 PR-1) instead of a static `Certificates` slice, so a rotated leaf cert/key is picked up on the next TLS handshake without a pod restart. The watcher's `Start` loop runs under `Serve`'s context (cancelled on shutdown — a proper cancellation story, no detached goroutine). When `AutoReload=false` the v0.3.7 PR-2 static-load path (`tls.LoadX509KeyPair` → `Certificates`) is preserved unchanged. `buildServerTLSConfig`/`buildTLSCredentials` now return the watcher alongside the `*tls.Config` so the caller can run it.
+- `sdk/provider/server/tlsconfig.go`: `ResolveTLSAndAuth` now sets `AutoReload: true` on the TLS-present branch, making hot-reload the default production posture for any provider that finds cert material on disk (ADR-0003 rotation section). Documented the v0.3.7 limitation honestly: only the LEAF cert/key hot-reload; the `ClientCAs` pool is loaded once and rotating the CA bundle still requires a provider restart (certwatcher has no CA-pool reload primitive).
+
+### Fixed
+- `internal/controller/provider_controller.go`: **fixed a latent crash-loop on the controller-managed provider path for `tls.enabled=false` Providers.** PR-1 mounts the TLS Secret only when `tls.enabled=true`; PR-2 made the provider hard-exit when it finds no cert files AND no explicit opt-out. The two together meant a controller-managed Provider with `tls.enabled=false` would have produced a pod with neither a TLS mount nor the opt-out env-var, so `ResolveTLSAndAuth` took its hard-error branch and the provider crash-looped on upgrade to v0.3.7. The controller now sets `VIRTRIGAUD_PROVIDER_INSECURE=true` on the provider container whenever `tls.enabled=false`, so the provider opts into audit-flagged plaintext instead of failing to start. Guarded behind `evaluateTLSPosture` (the nil-TLS loud-failure case short-circuits earlier) so the opt-out can never silently downgrade an undecided Provider. New package constant `envProviderInsecure` mirrors the SDK env-var name.
+
+### Added
+- `charts/virtrigaud/values.yaml`: new `providerTLS` block for the chart-templated (static) provider Deployments — `secretName` (externally-provisioned `kubernetes.io/tls` Secret with `tls.crt`/`tls.key`/`ca.crt`), `allowedSANs` (list, comma-joined into `VIRTRIGAUD_PROVIDER_ALLOWED_SANS`), and `insecure` (the plaintext escape hatch → `VIRTRIGAUD_PROVIDER_INSECURE`). **No cert-manager `Certificate`/issuer scaffolding** — operators provision the Secret themselves (ADR-0003 maintainer decision #1, 2026-05-27). This block governs only the chart-templated providers; controller-managed providers read their posture from the Provider CR's `spec.runtime.service.tls`.
+- `charts/virtrigaud/templates/_helpers.tpl`: three helpers — `virtrigaud.providerTLSEnv` (renders `VIRTRIGAUD_PROVIDER_ALLOWED_SANS` when a Secret is set, or `VIRTRIGAUD_PROVIDER_INSECURE=true` when `insecure=true` with no Secret, or nothing on the secure default so the provider hard-exits), `virtrigaud.providerTLSVolumeMount` (read-only mount at `/etc/virtrigaud/tls`), and `virtrigaud.providerTLSVolume`.
+- `charts/virtrigaud/templates/provider-{vsphere,proxmox,libvirt}-deployment.yaml`: wired the three helpers in, including correct merge with each template's pre-existing `env:` shape (proxmox merges with `providers.proxmox.env`; vsphere/libvirt append to their own env).
+- `sdk/provider/server/autoreload_test.go`: unit tests proving `AutoReload=true` installs the `GetCertificate` callback (and leaves `Certificates` empty), that the watcher picks up a rotated cert on disk (via `ReadCertificate`, avoiding flaky fsnotify timing), and that `AutoReload=false` keeps the static `Certificates` path with no watcher and nil `GetCertificate`.
+- `sdk/provider/server/buildtls_test.go`: extended the existing PR-2 tests for the new `(config, watcher, err)` signature and assert `watcher == nil` on the static path.
+- `internal/controller/provider_controller_tls_test.go`: extended the PR-1 tests to assert the `tls.enabled=false` pod carries `VIRTRIGAUD_PROVIDER_INSECURE=true` and the `tls.enabled=true` pod does NOT.
+- `sdk/go.mod`, `sdk/go.sum`: added `sigs.k8s.io/controller-runtime` as a direct dependency of the SDK module (for `certwatcher`).
+
+### Why
+The SDK `TLSConfig.AutoReload` field shipped declared-but-unconsumed; this PR makes it real so cert rotation is transparent (ADR-0003 rotation section). The Helm chart needed a TLS surface for operators who deploy providers statically rather than via Provider CRs. Most importantly, the end-to-end verification of the controller-managed path surfaced a real integration bug between PR-1 (mount only when enabled) and PR-2 (hard-exit when no certs) that would have crash-looped `tls.enabled=false` Providers on upgrade — fixed here. PR-3 of 4 in the v0.3.7 security track; see `fieldTesting/ADR-0003-mtls-and-provider-grpc-auth.md`.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout — provider pods gain hot-reload behaviour; the `tls.enabled=false` crash-loop fix changes the rendered provider Deployment (adds `VIRTRIGAUD_PROVIDER_INSECURE=true` on that path).
+- [x] Config change only — the Helm `providerTLS` block is new and opt-in (defaults to secure-by-default: no Secret, `insecure=false`).
+- [ ] Documentation only
+
+---
+
 ## [2026-05-28 05:23] - v0.3.7 PR-2: Enforce provider-side mTLS auth + migrate libvirt onto the SDK server
 **Author:** @wrkode (William Rizzo)
 

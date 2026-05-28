@@ -86,6 +86,20 @@ func getConditionByType(t *testing.T, conds []metav1.Condition, condType string)
 	return nil
 }
 
+// envValue returns the value of the named env var on the first container
+// of the Deployment, and whether it was present at all.
+func envValue(dep *appsv1.Deployment, name string) (value string, present bool) {
+	if len(dep.Spec.Template.Spec.Containers) == 0 {
+		return "", false
+	}
+	for _, e := range dep.Spec.Template.Spec.Containers[0].Env {
+		if e.Name == name {
+			return e.Value, true
+		}
+	}
+	return "", false
+}
+
 // TestProvider_TLSBlockMissing_LoudFailure — nil tls block must set
 // TLSConfigured=False/TLSBlockMissing, must NOT create a Deployment,
 // and must not return an error to controller-runtime (controller-
@@ -165,6 +179,19 @@ func TestProvider_TLSEnabledFalse_ProceedsWithoutVolume(t *testing.T) {
 		assert.NotEqual(t, providerTLSVolumeName, m.Name,
 			"plaintext-opt-out container must NOT mount the provider-tls volume")
 	}
+
+	// CRITICAL integration assertion (v0.3.7 PR-3, ADR-0003): the
+	// plaintext-opt-out pod MUST carry VIRTRIGAUD_PROVIDER_INSECURE=true.
+	// Without it the provider's ResolveTLSAndAuth finds no cert files and
+	// no opt-out, hard-errors, and the pod crash-loops on upgrade. This
+	// env-var is the glue that makes the tls.enabled=false path actually
+	// boot.
+	insecureVal, insecurePresent := envValue(dep, envProviderInsecure)
+	require.True(t, insecurePresent,
+		"tls.enabled=false pod must set %s so the provider opts into plaintext instead of crash-looping",
+		envProviderInsecure)
+	assert.Equal(t, "true", insecureVal,
+		"%s must be exactly \"true\" — ResolveTLSAndAuth matches the literal word", envProviderInsecure)
 
 	// Condition surfaces the opt-out.
 	latest := &infravirtrigaudiov1beta1.Provider{}
@@ -248,6 +275,15 @@ func TestProvider_TLSEnabledTrue_DeploymentHasVolume(t *testing.T) {
 	}
 	assert.Equal(t, "true", tlsEnabledEnv,
 		"TLS_ENABLED env var must reflect spec.runtime.service.tls.enabled")
+
+	// The TLS-on pod must NOT carry the plaintext opt-out env-var —
+	// otherwise the provider would skip TLS even though certs are mounted
+	// (the SDK's ResolveTLSAndAuth prefers on-disk files, but a spurious
+	// opt-out here would be a confusing footgun). PR-3 only sets the
+	// opt-out on the tls.enabled=false branch.
+	_, insecurePresent := envValue(dep, envProviderInsecure)
+	assert.False(t, insecurePresent,
+		"tls.enabled=true pod must NOT set %s", envProviderInsecure)
 
 	// Condition surfaces the enabled state.
 	latest := &infravirtrigaudiov1beta1.Provider{}

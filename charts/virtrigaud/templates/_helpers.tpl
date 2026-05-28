@@ -139,6 +139,66 @@ ca.crt: {{ $ca.Cert | b64enc }}
 {{- end }}
 
 {{/*
+Provider mTLS env vars (ADR-0003 v0.3.7 PR-3).
+
+Renders the VIRTRIGAUD_PROVIDER_* env entries for a chart-templated
+provider Deployment based on .Values.providerTLS. Emits nothing unless
+either a Secret is referenced or the insecure escape hatch is set, so the
+caller can include it unconditionally without producing an empty `env:`.
+
+  - secretName set        → VIRTRIGAUD_PROVIDER_ALLOWED_SANS (if any).
+                            TLS is mandatory by virtue of the mounted
+                            cert files; no insecure var is rendered.
+  - secretName empty +
+    insecure=true         → VIRTRIGAUD_PROVIDER_INSECURE=true.
+  - secretName empty +
+    insecure=false        → nothing (provider hard-exits — secure default).
+
+Include with the env-item indentation of the call site, e.g.
+  {{- include "virtrigaud.providerTLSEnv" . | nindent 8 }}
+*/}}
+{{- define "virtrigaud.providerTLSEnv" -}}
+{{- if .Values.providerTLS.secretName }}
+{{- with .Values.providerTLS.allowedSANs }}
+- name: VIRTRIGAUD_PROVIDER_ALLOWED_SANS
+  value: {{ join "," . | quote }}
+{{- end }}
+{{- else if .Values.providerTLS.insecure }}
+- name: VIRTRIGAUD_PROVIDER_INSECURE
+  value: "true"
+{{- end }}
+{{- end }}
+
+{{/*
+Provider mTLS volumeMount (ADR-0003 v0.3.7 PR-3).
+
+Renders the read-only mount of the TLS Secret at /etc/virtrigaud/tls
+(the canonical path the SDK's ResolveTLSAndAuth reads). Emits nothing
+when no Secret is referenced.
+*/}}
+{{- define "virtrigaud.providerTLSVolumeMount" -}}
+{{- if .Values.providerTLS.secretName }}
+- name: provider-tls
+  mountPath: /etc/virtrigaud/tls
+  readOnly: true
+{{- end }}
+{{- end }}
+
+{{/*
+Provider mTLS volume (ADR-0003 v0.3.7 PR-3).
+
+Renders the Secret volume sourcing the externally-provisioned TLS
+material. Emits nothing when no Secret is referenced.
+*/}}
+{{- define "virtrigaud.providerTLSVolume" -}}
+{{- if .Values.providerTLS.secretName }}
+- name: provider-tls
+  secret:
+    secretName: {{ .Values.providerTLS.secretName }}
+{{- end }}
+{{- end }}
+
+{{/*
 Generate network policy peer selectors
 */}}
 {{- define "virtrigaud.networkPolicyPeerSelectors" -}}

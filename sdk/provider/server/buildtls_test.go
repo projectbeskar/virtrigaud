@@ -84,7 +84,7 @@ func TestBuildServerTLSConfig_MTLS(t *testing.T) {
 	// Reuse the same self-signed cert as the client CA bundle.
 	caPath := certPath
 
-	cfg, err := buildServerTLSConfig(&TLSConfig{
+	cfg, watcher, err := buildServerTLSConfig(&TLSConfig{
 		CertFile:          certPath,
 		KeyFile:           keyPath,
 		CAFile:            caPath,
@@ -92,6 +92,9 @@ func TestBuildServerTLSConfig_MTLS(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("buildServerTLSConfig: unexpected error: %v", err)
+	}
+	if watcher != nil {
+		t.Error("watcher should be nil when AutoReload=false")
 	}
 	if cfg.MinVersion != tls.VersionTLS13 {
 		t.Errorf("MinVersion = %#x, want TLS 1.3 (%#x)", cfg.MinVersion, tls.VersionTLS13)
@@ -114,12 +117,15 @@ func TestBuildServerTLSConfig_NoClientCert(t *testing.T) {
 	dir := t.TempDir()
 	certPath, keyPath := writeTestKeyPair(t, dir, "tls.crt", "tls.key")
 
-	cfg, err := buildServerTLSConfig(&TLSConfig{
+	cfg, watcher, err := buildServerTLSConfig(&TLSConfig{
 		CertFile: certPath,
 		KeyFile:  keyPath,
 	})
 	if err != nil {
 		t.Fatalf("buildServerTLSConfig: unexpected error: %v", err)
+	}
+	if watcher != nil {
+		t.Error("watcher should be nil when AutoReload=false")
 	}
 	if cfg.MinVersion != tls.VersionTLS13 {
 		t.Errorf("MinVersion = %#x, want TLS 1.3", cfg.MinVersion)
@@ -139,7 +145,7 @@ func TestBuildServerTLSConfig_RequireClientCertWithoutCA(t *testing.T) {
 	dir := t.TempDir()
 	certPath, keyPath := writeTestKeyPair(t, dir, "tls.crt", "tls.key")
 
-	_, err := buildServerTLSConfig(&TLSConfig{
+	_, _, err := buildServerTLSConfig(&TLSConfig{
 		CertFile:          certPath,
 		KeyFile:           keyPath,
 		RequireClientCert: true, // CAFile deliberately empty
@@ -152,7 +158,7 @@ func TestBuildServerTLSConfig_RequireClientCertWithoutCA(t *testing.T) {
 // TestBuildServerTLSConfig_MissingCert ensures a missing cert/key pair is a
 // hard error (the provider must refuse to start, not boot without TLS).
 func TestBuildServerTLSConfig_MissingCert(t *testing.T) {
-	_, err := buildServerTLSConfig(&TLSConfig{
+	_, _, err := buildServerTLSConfig(&TLSConfig{
 		CertFile: "/nonexistent/tls.crt",
 		KeyFile:  "/nonexistent/tls.key",
 	})

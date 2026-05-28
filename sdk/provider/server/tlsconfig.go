@@ -87,11 +87,15 @@ type TLSResolution struct {
 //
 // Behavior table:
 //
-//	| files present | EnvInsecure | result                                            |
-//	|---------------|-------------|---------------------------------------------------|
-//	| yes           | (any)       | TLS+Auth populated; RequireClientCert+RequireTLS  |
-//	| no            | "true"      | nil TLS; Insecure=true; ErrInsecureModeOptedIn    |
-//	| no            | unset/other | hard error naming the missing files               |
+//	| files present | EnvInsecure | result                                                       |
+//	|---------------|-------------|--------------------------------------------------------------|
+//	| yes           | (any)       | TLS+Auth populated; RequireClientCert+RequireTLS; AutoReload  |
+//	| no            | "true"      | nil TLS; Insecure=true; ErrInsecureModeOptedIn               |
+//	| no            | unset/other | hard error naming the missing files                          |
+//
+// On the TLS-present branch AutoReload is set so the SDK server
+// hot-reloads the leaf cert/key on file change (ADR-0003 PR-3). The CA
+// bundle does not hot-reload; rotating it requires a provider restart.
 //
 // The hard-error branch is deliberate: a v0.3.7 provider that finds no
 // certs on disk and no explicit opt-out must refuse to start, otherwise
@@ -123,6 +127,12 @@ func ResolveTLSAndAuth() (*TLSResolution, error) {
 				KeyFile:           keyPath,
 				CAFile:            caPath,
 				RequireClientCert: true,
+				// Hot-reload the leaf cert by default on the TLS path —
+				// operators provisioning certs expect rotation to work
+				// without a pod restart (ADR-0003 PR-3). The CA bundle
+				// still requires a restart to rotate (see
+				// TLSConfig.AutoReload).
+				AutoReload: true,
 			},
 			Auth: &middleware.AuthConfig{
 				RequireTLS:  true,

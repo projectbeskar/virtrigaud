@@ -36,6 +36,7 @@ import (
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/keepalive"
+	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
 
 	healthcheck "github.com/projectbeskar/virtrigaud/internal/obs/health"
 	"github.com/projectbeskar/virtrigaud/internal/version"
@@ -84,7 +85,26 @@ type TLSConfig struct {
 	// RequireClientCert enables mTLS client authentication
 	RequireClientCert bool
 
-	// AutoReload enables automatic certificate reloading
+	// AutoReload enables hot-reload of the leaf certificate/key on file
+	// change, without a pod restart, via
+	// sigs.k8s.io/controller-runtime/pkg/certwatcher.
+	//
+	// When true (the recommended default for the TLS path — see
+	// ResolveTLSAndAuth, which leaves it zero-valued so callers can set
+	// it), the server wires tls.Config.GetCertificate to a CertWatcher
+	// whose Start loop runs for the lifetime of Serve's context. The
+	// rotated cert is picked up on the next TLS handshake.
+	//
+	// LIMITATION (v0.3.7): only the LEAF cert/key rotate hot. The
+	// ClientCAs pool used to verify the manager's client certificate is
+	// loaded once at startup into an immutable *x509.CertPool —
+	// certwatcher has no primitive for reloading a CA bundle. Rotating
+	// the CA still requires a provider pod restart. This is documented
+	// honestly rather than faked; see ADR-0003 PR-3.
+	//
+	// When false, the server preserves the static-load behaviour shipped
+	// in ADR-0003 PR-2: the cert/key are read once via
+	// tls.LoadX509KeyPair and never refreshed.
 	AutoReload bool
 }
 
@@ -130,6 +150,12 @@ type Server struct {
 	httpServer    *http.Server
 	logger        *slog.Logger
 	running       atomic.Bool
+
+	// certWatcher is non-nil only when TLS.AutoReload is true. Its Start
+	// loop is launched in Serve and cancelled when Serve's context is
+	// done, giving the goroutine a clean cancellation story (no bare
+	// go func without ctx — per project rules).
+	certWatcher *certwatcher.CertWatcher
 }
 
 // New creates a new provider server with the given configuration.
@@ -168,12 +194,19 @@ func New(config *Config) (*Server, error) {
 		}
 	}
 
-	// Add TLS credentials if configured
+	// Add TLS credentials if configured.
+	//
+	// When AutoReload is set we build a CertWatcher and wire its
+	// GetCertificate into the *tls.Config so the server picks up a
+	// rotated leaf cert on the next handshake. The watcher is retained on
+	// the Server so Serve can run its Start loop under the serve context.
+	var certWatcher *certwatcher.CertWatcher
 	if config.TLS != nil {
-		creds, err := buildTLSCredentials(config.TLS)
+		creds, watcher, err := buildTLSCredentials(config.TLS)
 		if err != nil {
 			return nil, fmt.Errorf("failed to build TLS credentials: %w", err)
 		}
+		certWatcher = watcher
 		opts = append(opts, grpc.Creds(creds))
 	}
 
@@ -218,6 +251,7 @@ func New(config *Config) (*Server, error) {
 		healthChecker: healthChecker,
 		httpServer:    httpServer,
 		logger:        config.Logger,
+		certWatcher:   certWatcher,
 	}, nil
 }
 
@@ -276,6 +310,23 @@ func (s *Server) Serve(ctx context.Context) error {
 
 	// Start servers in goroutines
 	errChan := make(chan error, 2)
+
+	// Start the certificate watcher (AutoReload path). Its Start loop is
+	// bound to serverCtx, so it stops when the server shuts down — a
+	// proper cancellation story rather than a detached goroutine. A
+	// watcher Start failure is non-fatal to serving (the already-loaded
+	// cert keeps working); we log it and continue.
+	if s.certWatcher != nil {
+		s.logger.Info("Starting TLS certificate watcher (AutoReload)",
+			"cert_file", s.config.TLS.CertFile,
+			"key_file", s.config.TLS.KeyFile,
+		)
+		go func() {
+			if err := s.certWatcher.Start(serverCtx); err != nil {
+				s.logger.Error("certificate watcher stopped with error", "error", err)
+			}
+		}()
+	}
 
 	// Start gRPC server
 	go func() {
@@ -354,59 +405,90 @@ func (s *Server) shutdown() error {
 // stack then refuses any handshake that does not present a client cert
 // chained to that CA. The SDK middleware's validateTLSPeer then checks
 // the verified cert's SANs against AllowedSANs.
-func buildTLSCredentials(tlsConfig *TLSConfig) (credentials.TransportCredentials, error) {
-	config, err := buildServerTLSConfig(tlsConfig)
+//
+// When AutoReload is set the returned *certwatcher.CertWatcher is non-nil
+// and the caller must run its Start loop; otherwise it is nil and the
+// leaf cert is loaded statically.
+func buildTLSCredentials(tlsConfig *TLSConfig) (credentials.TransportCredentials, *certwatcher.CertWatcher, error) {
+	config, watcher, err := buildServerTLSConfig(tlsConfig)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return credentials.NewTLS(config), nil
+	return credentials.NewTLS(config), watcher, nil
 }
 
 // buildServerTLSConfig assembles the server-side *tls.Config from the given
 // TLSConfig. It is split out from buildTLSCredentials so the resulting
-// *tls.Config (MinVersion, ClientAuth, ClientCAs) can be asserted directly
-// in unit tests — credentials.NewTLS returns an opaque value that hides
-// those fields.
+// *tls.Config (MinVersion, ClientAuth, ClientCAs, GetCertificate) can be
+// asserted directly in unit tests — credentials.NewTLS returns an opaque
+// value that hides those fields.
 //
 // The config always pins MinVersion to TLS 1.3 (ADR-0003 floor, matches the
 // manager-side dialer). When RequireClientCert is true the CA bundle at
 // CAFile is loaded into ClientCAs and ClientAuth is set to
 // RequireAndVerifyClientCert, so the TLS stack rejects any handshake without
 // a client cert chained to that CA before the auth interceptor even runs.
-func buildServerTLSConfig(tlsConfig *TLSConfig) (*tls.Config, error) {
-	// G304 is intentionally suppressed: CertFile/KeyFile/CAFile are
-	// operator-supplied configuration values, not user-controlled input.
-	// In production they resolve to the canonical /etc/virtrigaud/tls
-	// mount.
-	cert, err := tls.LoadX509KeyPair(tlsConfig.CertFile, tlsConfig.KeyFile)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load key pair (cert=%s key=%s): %w",
-			tlsConfig.CertFile, tlsConfig.KeyFile, err)
+//
+// Leaf-cert source depends on AutoReload:
+//
+//   - AutoReload=true  → a certwatcher.CertWatcher is created over
+//     (CertFile, KeyFile) and config.GetCertificate is wired to it. The
+//     returned watcher is non-nil; the caller MUST run its Start loop. The
+//     watcher reloads the leaf on file change; ClientCAs is still loaded
+//     once and does NOT hot-reload (see TLSConfig.AutoReload).
+//   - AutoReload=false → the leaf is loaded once via tls.LoadX509KeyPair
+//     into config.Certificates (the v0.3.7 PR-2 static behaviour). The
+//     returned watcher is nil.
+func buildServerTLSConfig(tlsConfig *TLSConfig) (*tls.Config, *certwatcher.CertWatcher, error) {
+	config := &tls.Config{
+		MinVersion: tls.VersionTLS13, // ADR-0003 floor; matches manager-side.
 	}
 
-	config := &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		MinVersion:   tls.VersionTLS13, // ADR-0003 floor; matches manager-side.
+	var watcher *certwatcher.CertWatcher
+	if tlsConfig.AutoReload {
+		w, err := certwatcher.New(tlsConfig.CertFile, tlsConfig.KeyFile)
+		if err != nil {
+			return nil, nil, fmt.Errorf(
+				"failed to create certificate watcher (cert=%s key=%s): %w",
+				tlsConfig.CertFile, tlsConfig.KeyFile, err)
+		}
+		watcher = w
+		config.GetCertificate = watcher.GetCertificate
+	} else {
+		// G304 is intentionally suppressed: CertFile/KeyFile/CAFile are
+		// operator-supplied configuration values, not user-controlled
+		// input. In production they resolve to the canonical
+		// /etc/virtrigaud/tls mount.
+		cert, err := tls.LoadX509KeyPair(tlsConfig.CertFile, tlsConfig.KeyFile)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to load key pair (cert=%s key=%s): %w",
+				tlsConfig.CertFile, tlsConfig.KeyFile, err)
+		}
+		config.Certificates = []tls.Certificate{cert}
 	}
 
 	if tlsConfig.RequireClientCert {
 		if tlsConfig.CAFile == "" {
-			return nil, fmt.Errorf("RequireClientCert=true requires CAFile to be set")
+			return nil, nil, fmt.Errorf("RequireClientCert=true requires CAFile to be set")
 		}
 		// #nosec G304 -- CAFile is operator-supplied configuration, not user input.
 		caPEM, err := os.ReadFile(tlsConfig.CAFile)
 		if err != nil {
-			return nil, fmt.Errorf("failed to read client CA bundle (%s): %w",
+			return nil, nil, fmt.Errorf("failed to read client CA bundle (%s): %w",
 				tlsConfig.CAFile, err)
 		}
 		pool := x509.NewCertPool()
 		if !pool.AppendCertsFromPEM(caPEM) {
-			return nil, fmt.Errorf("failed to parse any certificates from CA bundle %s",
+			return nil, nil, fmt.Errorf("failed to parse any certificates from CA bundle %s",
 				tlsConfig.CAFile)
 		}
+		// NOTE: ClientCAs is loaded once here. certwatcher only reloads
+		// the leaf cert/key; there is no hot-reload primitive for the CA
+		// pool in v0.3.7. Rotating the CA bundle still requires a
+		// provider pod restart. Documented on TLSConfig.AutoReload.
 		config.ClientCAs = pool
 		config.ClientAuth = tls.RequireAndVerifyClientCert
 	}
 
-	return config, nil
+	return config, watcher, nil
 }
