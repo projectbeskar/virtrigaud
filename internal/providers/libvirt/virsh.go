@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/url"
 	"os"
 	"os/exec"
@@ -34,6 +35,16 @@ type VirshProvider struct {
 	credentials *Credentials
 	uri         string
 	env         []string
+
+	// hostKey is the resolved SSH host-key verification policy (ADR-0004,
+	// #149). It is computed once in setupConnection and consumed by every
+	// SSH/scp call site so the on/off decision lives in exactly one place.
+	hostKey hostKeyPolicy
+
+	// logger is used for the structured host-key verification-mode audit log
+	// (WARN on the escape hatch, INFO when verifying). Defaults to
+	// slog.Default() when nil.
+	logger *slog.Logger
 }
 
 // VirshDomain represents a VM domain from virsh list output
@@ -139,8 +150,19 @@ func (v *VirshProvider) loadCredentialsFromEnv() error {
 	return nil
 }
 
-// setupConnection prepares the libvirt URI and environment for virsh commands
+// setupConnection prepares the libvirt URI and environment for virsh commands.
+//
+// As of #149 / ADR-0004 it also resolves the SSH host-key verification policy
+// (default ON; opt-out via LIBVIRT_INSECURE_SKIP_HOST_KEY_VERIFICATION=true),
+// emits the one-line verification-mode audit log, points the SSH transport at
+// the credentials-mounted known_hosts, and hard-fails (no TOFU) when
+// verification is on but no usable known_hosts material is present.
 func (v *VirshProvider) setupConnection() error {
+	// Resolve the host-key verification policy once for this provider process.
+	// Every SSH/scp call site consumes v.hostKey so the decision is taken here
+	// and nowhere else.
+	v.hostKey = resolveHostKeyPolicy()
+
 	// Get base URI from config
 	uri := v.config.Spec.Endpoint
 	if uri == "" {
@@ -161,12 +183,24 @@ func (v *VirshProvider) setupConnection() error {
 		}
 	}
 
-	// Add SSH options for container environments
+	// Add SSH options for container environments. Host-key handling is delegated
+	// to the centralized policy: insecure path restores no_verify=1, the
+	// verifying path omits it and relies on the verifying ~/.ssh/config +
+	// known_hosts written below.
 	if strings.Contains(parsedURI.Scheme, "ssh") {
 		query := parsedURI.Query()
-		query.Set("no_verify", "1") // Skip host key verification
-		query.Set("no_tty", "1")    // Non-interactive mode
+		v.hostKey.applyURIHostKeyOptions(query)
+		query.Set("no_tty", "1") // Non-interactive mode
 		parsedURI.RawQuery = query.Encode()
+
+		// Emit the one-line host-key verification-mode audit log (WARN on the
+		// escape hatch, INFO when verifying) and hard-fail if verification is on
+		// but no usable known_hosts is present (no TOFU).
+		v.hostKey.logVerificationMode(v.logger, parsedURI.Host)
+		if err := v.hostKey.verifyKnownHostsPresent(parsedURI.Host); err != nil {
+			return fmt.Errorf("libvirt SSH host-key verification pre-flight failed: %w", err)
+		}
+
 		log.Printf("INFO Added SSH options for container environment")
 	}
 
@@ -252,13 +286,13 @@ func (v *VirshProvider) runVirshCommand(ctx context.Context, args ...string) (*V
 			sshArgs := []string{
 				"-e", // Read password from SSHPASS environment variable
 				"ssh",
-				"-o", "StrictHostKeyChecking=accept-new",
 				"-o", "PasswordAuthentication=yes",
 				"-o", "PubkeyAuthentication=no",
-				"-o", "UserKnownHostsFile=/tmp/known_hosts",
 				"-o", "LogLevel=ERROR",
-				fmt.Sprintf("%s@%s", user, host),
 			}
+			// Host-key options come from the centralized policy (#149/ADR-0004).
+			sshArgs = append(sshArgs, v.hostKey.sshHostKeyOptions()...)
+			sshArgs = append(sshArgs, fmt.Sprintf("%s@%s", user, host))
 			sshArgs = append(sshArgs, directArgs...)
 
 			cmd = exec.CommandContext(ctx, "sshpass", sshArgs...)
@@ -284,14 +318,13 @@ func (v *VirshProvider) runVirshCommand(ctx context.Context, args ...string) (*V
 			sshArgs := []string{
 				"-e", // Read password from SSHPASS environment variable
 				"ssh",
-				"-o", "StrictHostKeyChecking=accept-new",
 				"-o", "PasswordAuthentication=yes",
 				"-o", "PubkeyAuthentication=no",
-				"-o", "UserKnownHostsFile=/tmp/known_hosts",
 				"-o", "LogLevel=ERROR",
-				fmt.Sprintf("%s@%s", user, host),
-				"virsh",
 			}
+			// Host-key options come from the centralized policy (#149/ADR-0004).
+			sshArgs = append(sshArgs, v.hostKey.sshHostKeyOptions()...)
+			sshArgs = append(sshArgs, fmt.Sprintf("%s@%s", user, host), "virsh")
 			sshArgs = append(sshArgs, args...)
 
 			cmd = exec.CommandContext(ctx, "sshpass", sshArgs...)
@@ -465,7 +498,11 @@ func (v *VirshProvider) getDomainInfo(ctx context.Context, domainName string) (m
 	return info, nil
 }
 
-// createSSHConfig creates an SSH configuration file for non-interactive authentication
+// createSSHConfig writes an SSH configuration file for non-interactive
+// authentication that honours the centralized host-key verification policy
+// (#149/ADR-0004). It is consumed by libvirt's own qemu+ssh:// transport (the
+// key-based path), so the config must enforce the same StrictHostKeyChecking +
+// UserKnownHostsFile that the explicit-argv password/scp paths use.
 func (v *VirshProvider) createSSHConfig() error {
 	sshDir := "/home/app/.ssh"
 	configPath := sshDir + "/config"
@@ -484,21 +521,18 @@ func (v *VirshProvider) createSSHConfig() error {
 		log.Printf("INFO Using /tmp as HOME for SSH config")
 	}
 
-	// SSH config content for automatic host key acceptance
-	sshConfig := `Host *
-    StrictHostKeyChecking accept-new
-    PasswordAuthentication yes
-    PubkeyAuthentication no
-    UserKnownHostsFile /tmp/known_hosts
-    LogLevel ERROR
-`
+	// SSH config content honouring the centralized host-key policy
+	// (#149/ADR-0004). Verifying by default (StrictHostKeyChecking yes +
+	// credentials-mounted known_hosts); legacy accept-new + /tmp/known_hosts
+	// only on the explicit escape-hatch path.
+	sshConfig := v.hostKey.sshConfigStanza()
 
 	// Write SSH config file
 	if err := os.WriteFile(configPath, []byte(sshConfig), 0600); err != nil {
 		return fmt.Errorf("failed to write SSH config: %w", err)
 	}
 
-	log.Printf("INFO Created SSH config at %s for automatic host key acceptance", configPath)
+	log.Printf("INFO Created SSH config at %s honouring host-key policy", configPath)
 	return nil
 }
 

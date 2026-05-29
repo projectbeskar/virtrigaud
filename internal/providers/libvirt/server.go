@@ -634,9 +634,9 @@ func (s *Server) ListVMs(ctx context.Context, req *providerv1.ListVMsRequest) (*
 		var protoNetworks []*providerv1.NetworkInfo
 		for _, net := range vmInfo.Networks {
 			protoNetworks = append(protoNetworks, &providerv1.NetworkInfo{
-				Name:       net.Name,
-				Mac:        net.MAC,
-				IpAddress:  net.IPAddress,
+				Name:      net.Name,
+				Mac:       net.MAC,
+				IpAddress: net.IPAddress,
 			})
 		}
 
@@ -685,27 +685,34 @@ func (s *Server) copyDiskToRemote(ctx context.Context, virshProvider *VirshProvi
 
 	// Copy disk file using scp (run locally from the pod, not through SSH)
 	log.Printf("INFO Copying disk file (%s) to remote host via scp...", localPath)
-	
+
+	// Host-key options come from the same centralized policy as the virsh
+	// paths (#149/ADR-0004) so the disk-image transfer is verified against the
+	// same trust material. Re-emit the verification-mode audit line for the scp
+	// connection and hard-fail before transfer if verification is on but no
+	// usable known_hosts is present (no TOFU).
+	virshProvider.hostKey.logVerificationMode(virshProvider.logger, host)
+	if err := virshProvider.hostKey.verifyKnownHostsPresent(host); err != nil {
+		return "", fmt.Errorf("libvirt scp host-key verification pre-flight failed: %w", err)
+	}
+	hostKeyOpts := virshProvider.hostKey.sshHostKeyOptions()
+
 	// Run scp LOCALLY on the pod to copy to remote host
 	var cmd *exec.Cmd
 	if virshProvider.credentials.Password != "" {
 		// Use sshpass with scp for password authentication
-		cmd = exec.CommandContext(ctx, "sshpass", "-e", "scp",
-			"-o", "StrictHostKeyChecking=accept-new",
-			"-o", "UserKnownHostsFile=/tmp/known_hosts",
-			localPath,
-			fmt.Sprintf("%s:%s", sshTarget, remotePath))
+		scpArgs := append([]string{"-e", "scp"}, hostKeyOpts...)
+		scpArgs = append(scpArgs, localPath, fmt.Sprintf("%s:%s", sshTarget, remotePath))
+		cmd = exec.CommandContext(ctx, "sshpass", scpArgs...)
 		// Set password via environment variable for sshpass
 		cmd.Env = append(os.Environ(), fmt.Sprintf("SSHPASS=%s", virshProvider.credentials.Password))
 	} else {
 		// Fallback to scp without sshpass (for key-based auth)
-		cmd = exec.CommandContext(ctx, "scp",
-			"-o", "StrictHostKeyChecking=accept-new",
-			"-o", "UserKnownHostsFile=/tmp/known_hosts",
-			localPath,
-			fmt.Sprintf("%s:%s", sshTarget, remotePath))
+		scpArgs := append([]string{}, hostKeyOpts...)
+		scpArgs = append(scpArgs, localPath, fmt.Sprintf("%s:%s", sshTarget, remotePath))
+		cmd = exec.CommandContext(ctx, "scp", scpArgs...)
 	}
-	
+
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("scp failed: %w, output: %s", err, string(output))
