@@ -251,6 +251,136 @@ jobs:
           cosign sign --yes --recursive \
             "${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/${{ matrix.component }}@${{ steps.index.outputs.digest }}"
 
+      # Capture the EXACT index digest that cosign just signed so the SLSA
+      # provenance generator (see the `provenance` job) attests the byte-
+      # identical manifest. Persisting the digest we signed — rather than
+      # re-resolving it downstream — removes any chance of the provenance
+      # subject drifting from the signed (and SBOM-attested) index. The
+      # collect-index-digests fan-in job assembles these per-component files
+      # into a component->digest map that the matrix provenance job reads.
+      - name: Record signed index digest for provenance
+        run: |
+          mkdir -p /tmp/index-digest
+          # Write "<component> <digest>" so the fan-in job can build a JSON map
+          # without needing to know the artifact-name -> component split.
+          printf '%s %s\n' \
+            "${{ matrix.component }}" \
+            "${{ steps.index.outputs.digest }}" \
+            > "/tmp/index-digest/${{ matrix.component }}"
+
+      - name: Upload signed index digest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: index-digest-${{ matrix.component }}
+          path: /tmp/index-digest/${{ matrix.component }}
+          if-no-files-found: error
+          retention-days: 1
+
+  # Stage 2b (fan-in): collapse the per-component `index-digest-<component>`
+  # artifacts produced by the matrix `merge-and-sign` job into a single
+  # component -> digest JSON map exposed as a job output. This is the standard
+  # way to feed a per-matrix value into a reusable-workflow `uses:` call:
+  # matrix-job step outputs do NOT fan out per matrix value to downstream jobs,
+  # so the `provenance` matrix job below reads its component's signed index
+  # digest out of this map instead. The digests collected here are byte-for-
+  # byte the ones `cosign sign --recursive` (and the SBOM `cosign attest`)
+  # covered, so signature, SBOM, and provenance all describe the same index.
+  collect-index-digests:
+    name: Collect Signed Index Digests
+    runs-on: ubuntu-latest
+    needs: merge-and-sign
+    timeout-minutes: 10
+    outputs:
+      map: ${{ steps.assemble.outputs.map }}
+    steps:
+      - name: Download all index-digest artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          path: /tmp/index-digests
+          pattern: index-digest-*
+          merge-multiple: true
+
+      - name: Assemble component -> {image,digest} map
+        id: assemble
+        env:
+          # Build the FULL image reference here, in a step that has the `env`
+          # context. The downstream `provenance` job calls a reusable workflow,
+          # and the `env` context is NOT available in a reusable-workflow `with:`
+          # block (only github/needs/strategy/matrix/inputs/vars are). So the
+          # image name must be resolved now and carried through the map; the
+          # provenance job then reads it via the `needs` context, which IS
+          # allowed in `with:`.
+          IMAGE_BASE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}
+        run: |
+          set -euo pipefail
+          # Each file is named after its component and contains a single line:
+          #   "<component> <sha256:...>"
+          # Fold them into a compact JSON object keyed by component name, with
+          # value {image, digest} so the provenance matrix job can pass both the
+          # generator's `image` and `digest` inputs without needing `env`.
+          MAP=$(cat /tmp/index-digests/* \
+            | jq -R -s -c --arg base "${IMAGE_BASE}" \
+                'split("\n")
+                | map(select(length > 0)
+                    | split(" ")
+                    | {key: .[0], value: {image: ($base + "/" + .[0]), digest: .[1]}})
+                | from_entries')
+          echo "Assembled index-digest map: ${MAP}"
+          echo "map=${MAP}" >> "$GITHUB_OUTPUT"
+
+  # Stage 2c: SLSA Build L3 provenance for the multi-arch index.
+  #
+  # WHY a separate generator (not buildx provenance: mode=max): the native
+  # per-arch + `imagetools create` merge cannot carry a buildx provenance
+  # attestation through the digest merge (it would orphan as an unknown/unknown
+  # manifest and break the merge — the same constraint that forced the SBOM to
+  # be re-attached via cosign). So provenance is generated independently against
+  # the already-signed index digest. Together with the recursive cosign sign
+  # (merge-and-sign) and the SBOM cosign attest (generate-sbom), this restores
+  # FULL attestation parity with the pre-#165 single-arch release (closes #169).
+  #
+  # The `digest` passed here is the SAME signed index digest captured in
+  # merge-and-sign (via collect-index-digests), so the provenance subject is
+  # byte-identical to the signed + SBOM-attested manifest.
+  provenance:
+    name: SLSA Provenance
+    needs: collect-index-digests
+    # The slsa-github-generator caller job must grant exactly these scopes
+    # (per the generator's documented contract for v2.1.0):
+    #   id-token: write -> mint the GH OIDC token the generator exchanges with
+    #                      Fulcio for a short-lived keyless signing cert.
+    #   packages: write -> push the provenance attestation to GHCR.
+    #   actions:  read  -> the generator reads this run's workflow metadata to
+    #                      embed non-forgeable builder identity in the predicate.
+    permissions:
+      id-token: write
+      packages: write
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [manager, provider-libvirt, provider-vsphere, provider-proxmox, kubectl]
+    # IMPORTANT — DO NOT SHA-PIN THIS REFERENCE.
+    # slsa-github-generator reusable workflows MUST be referenced by a semantic
+    # version git TAG (e.g. @v2.1.0), never a commit SHA and never a branch. The
+    # generator self-verifies its own source against the referenced tag to emit
+    # non-forgeable SLSA provenance (it resolves the calling ref via
+    # detect-workflow-js); pinning to a SHA breaks that self-verification and the
+    # generated provenance is rejected by verifiers. This is the ONE sanctioned
+    # exception to this repo's "SHA-pin every action" rule (see CLAUDE.md).
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.1.0
+    with:
+      # image + digest both come from the fan-in map (via the `needs` context,
+      # which IS allowed in a reusable-workflow `with:` block — `env` is not).
+      # The generator requires `image` WITHOUT a tag/digest, and `digest` of the
+      # form 'sha256:...'. The digest is byte-identical to the one cosign signed
+      # in merge-and-sign and the SBOM was attested against in generate-sbom.
+      image: ${{ fromJSON(needs.collect-index-digests.outputs.map)[matrix.component].image }}
+      digest: ${{ fromJSON(needs.collect-index-digests.outputs.map)[matrix.component].digest }}
+      registry-username: ${{ github.actor }}
+    secrets:
+      registry-password: ${{ secrets.GITHUB_TOKEN }}
+
   security-scan:
     name: Security Scan Images
     runs-on: ubuntu-latest
@@ -594,7 +724,10 @@ jobs:
   create-release:
     name: Create GitHub Release
     runs-on: ubuntu-latest
-    needs: [prepare, merge-and-sign, security-scan, generate-sbom, build-helm-chart, build-cli-tools, generate-changelog]
+    # provenance is a v0.3.7 release-blocker (full attestation parity, #169):
+    # gate the GitHub Release on SLSA provenance succeeding for every component,
+    # alongside the existing signing (merge-and-sign) and SBOM (generate-sbom).
+    needs: [prepare, merge-and-sign, security-scan, generate-sbom, provenance, build-helm-chart, build-cli-tools, generate-changelog]
     steps:
       - name: Download all artifacts (with retry resilience)
         id: download-artifacts
