@@ -83,7 +83,6 @@ rules:
   - infra.virtrigaud.io
   resources:
   - vmclasses
-  - vmimages
   verbs:
   - create
   - get
@@ -94,40 +93,9 @@ rules:
 - apiGroups:
   - infra.virtrigaud.io
   resources:
-  - vmnetworkattachments
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - infra.virtrigaud.io.infra.virtrigaud.io
-  resources:
-  - vmclasses
   - vmimages
   - vmnetworkattachments
   verbs:
-  - create
-  - delete
   - get
   - list
-  - patch
-  - update
   - watch
-- apiGroups:
-  - infra.virtrigaud.io.infra.virtrigaud.io
-  resources:
-  - vmclasses/finalizers
-  - vmimages/finalizers
-  - vmnetworkattachments/finalizers
-  verbs:
-  - update
-- apiGroups:
-  - infra.virtrigaud.io.infra.virtrigaud.io
-  resources:
-  - vmclasses/status
-  - vmimages/status
-  - vmnetworkattachments/status
-  verbs:
-  - get
-  - patch
-  - update
