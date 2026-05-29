@@ -376,7 +376,10 @@ jobs:
           file: ${{ matrix.component == 'manager' && './build/Dockerfile.manager' || format('./cmd/{0}/Dockerfile', matrix.component) }}
           platforms: linux/${{ matrix.arch }}
           labels: ${{ steps.meta.outputs.labels }}
-          outputs: type=image,push-by-digest=true,name-canonical=true,push=true
+          # push-by-digest still needs the repository NAME so buildx knows where
+          # to push the digest (the tag itself is applied later in merge-images).
+          # Omitting name= fails with "tag is needed when pushing to registry".
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/${{ matrix.component }},push-by-digest=true,name-canonical=true,push=true
           # Disable GitHub Actions cache due to reliability issues
           # cache-from: type=gha
           # cache-to: type=gha,mode=max

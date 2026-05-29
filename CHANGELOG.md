@@ -5,6 +5,21 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-05-29 15:05] - v0.3.7: Fix push-by-digest "tag is needed" in CI image build (fix-forward for #166)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `.github/workflows/ci.yml`: the per-arch `build-images` step used `outputs: type=image,push-by-digest=true,...` **without a `name=`**, so every leg (all 4 components × amd64+arm64) failed at buildx validation with `ERROR: tag is needed when pushing to registry` — the first post-merge `main` run after #166 failed all 8 legs in <20s. push-by-digest still needs the repository **name** so buildx knows where to push the digest (the tag is applied later in `merge-images`). Added `name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/${{ matrix.component }}` to the `outputs:`.
+
+### Why
+PR #166 (PR-A of #165) restructured dev-image builds to native per-arch runners + manifest merge, but omitted the `name=` token required by push-by-digest. `actionlint` can't catch it (it's a runtime buildx requirement). The fix was **validated locally end-to-end** against a `docker-container` buildx builder + a throwaway registry: the broken form reproduces the exact error; the fixed form builds + pushes both arches by digest and `imagetools create` assembles a valid multi-arch manifest. Unblocks the #165 PR-A validation on `main`.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [x] Config change only — CI build infra
+- [ ] Documentation only
+
 ## [2026-05-29 14:10] - v0.3.7: CI dev images build arm64 on native runners (PR-A of #165)
 **Author:** @wrkode (William Rizzo)
 
