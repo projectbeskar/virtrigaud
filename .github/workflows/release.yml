@@ -323,9 +323,24 @@ jobs:
     name: Generate SBOMs
     runs-on: ubuntu-latest
     # Depends on merge-and-sign: the release tag (the multi-arch manifest the
-    # SBOM is generated against) only exists after the merge step.
+    # SBOM is generated against) only exists after the merge step. This job
+    # also attaches the SBOM to the signed index as a keyless cosign
+    # attestation (see the "Attest SBOM" step below), so it requires the same
+    # OIDC token-minting permission that merge-and-sign uses to sign.
     needs: [prepare, merge-and-sign]
     timeout-minutes: 15
+    # The workflow-level `permissions:` block already grants id-token: write,
+    # which generate-sbom inherits. We pin the job-level scope explicitly so
+    # the keyless-cosign requirement is self-documenting and survives any
+    # future tightening of the workflow-level defaults:
+    #   id-token: write  -> mint the OIDC token cosign attest exchanges with
+    #                       Fulcio for a short-lived signing cert (keyless).
+    #   packages: write  -> push the attestation to GHCR alongside the image.
+    #   contents: read   -> baseline checkout/read scope.
+    permissions:
+      id-token: write
+      packages: write
+      contents: read
     strategy:
       matrix:
         component: [manager, provider-libvirt, provider-vsphere, provider-proxmox, kubectl]
@@ -376,6 +391,48 @@ jobs:
         with:
           name: sbom-${{ matrix.component }}
           path: sbom-${{ matrix.component }}.spdx.json
+
+      # --- SBOM-as-attestation -------------------------------------------------
+      # Restore the supply-chain control the old single-arch release provided
+      # via the buildx `sbom: true` setting. That setting cannot be re-added to
+      # the build step: with push-by-digest it orphans an `unknown/unknown`
+      # manifest into the digest set that breaks `imagetools create` during the
+      # merge (the whole reason PR-B switched to native per-arch merge). Instead
+      # we attach the Syft SPDX SBOM (already generated above) to the SIGNED
+      # multi-arch index as a keyless cosign attestation — same OIDC trust model
+      # as the `cosign sign` in merge-and-sign.
+      #
+      # SLSA *provenance* (the old buildx `provenance: mode=max`) is NOT restored
+      # here; that is tracked separately in #169.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5  # v4.1.0
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+
+      - name: Resolve manifest index digest
+        id: index
+        run: |
+          # Resolve the SAME multi-arch index digest that merge-and-sign signed.
+          # imagetools resolves the index digest identically regardless of which
+          # release tag it is queried through, so we use the release tag. Strip
+          # the surrounding quotes that {{json}} emits.
+          DIGEST=$(docker buildx imagetools inspect \
+            "${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/${{ matrix.component }}:${{ needs.prepare.outputs.tag }}" \
+            --format '{{json .Manifest.Digest}}' | tr -d '"')
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "Resolved index digest: ${DIGEST}"
+
+      - name: Attest SBOM to multi-arch index (keyless)
+        run: |
+          # --recursive attaches the attestation to the manifest INDEX and every
+          # per-arch child image it references, matching the recursive cosign
+          # sign in merge-and-sign so both amd64 and arm64 carry the SBOM. We
+          # attest by index digest (not tag) for an immutable, race-free target.
+          cosign attest --yes --recursive \
+            --type spdxjson \
+            --predicate "sbom-${{ matrix.component }}.spdx.json" \
+            "${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/${{ matrix.component }}@${{ steps.index.outputs.digest }}"
 
   build-helm-chart:
     name: Build and Package Helm Chart
