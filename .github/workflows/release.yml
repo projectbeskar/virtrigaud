@@ -555,11 +555,17 @@ jobs:
 
       - name: Attest SBOM to multi-arch index (keyless)
         run: |
-          # --recursive attaches the attestation to the manifest INDEX and every
-          # per-arch child image it references, matching the recursive cosign
-          # sign in merge-and-sign so both amd64 and arm64 carry the SBOM. We
+          # Attach the SBOM attestation to the manifest INDEX digest. NOTE:
+          # `cosign attest` does NOT support `--recursive` (only `cosign sign`
+          # does, and that flag was removed from `attest` in current cosign) —
+          # an earlier rc failed with "unknown flag: --recursive". Attesting the
+          # index is the correct + verifiable target: `cosign verify-attestation
+          # <image>:<tag>` resolves the tag -> index -> this attestation. We
           # attest by index digest (not tag) for an immutable, race-free target.
-          cosign attest --yes --recursive \
+          # The SBOM predicate is essentially arch-independent (Go module set),
+          # so an index-level attestation covers the released artifact; per-arch
+          # SBOM attestation would require per-arch Syft scans (future work).
+          cosign attest --yes \
             --type spdxjson \
             --predicate "sbom-${{ matrix.component }}.spdx.json" \
             "${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/${{ matrix.component }}@${{ steps.index.outputs.digest }}"
