@@ -5,6 +5,61 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-05-29 04:40] - v0.3.7: Libvirt SSH host-key verification on by default (closes #149)
+**Author:** @wrkode (William Rizzo)
+
+### Security
+- `internal/providers/libvirt/sshhostkey.go`: **new centralized host-key policy** — the single source of truth for the libvirt provider's SSH/scp host-key verification. `resolveHostKeyPolicy()` reads the new escape-hatch env var `LIBVIRT_INSECURE_SKIP_HOST_KEY_VERIFICATION` once (honoured only for the literal word `"true"`, case-insensitive/trimmed — mirrors ADR-0003's `isInsecureOptedIn`); `sshHostKeyOptions()`/`sshConfigStanza()`/`applyURIHostKeyOptions()` render the `-o StrictHostKeyChecking=…`/`UserKnownHostsFile=…` flags and `~/.ssh/config`/URI options; `verifyKnownHostsPresent()` is the loud hard-fail gate; `logVerificationMode()` emits the structured `slog` audit line. Trust material is read from `known_hosts` in the existing credentials Secret mount (`/etc/virtrigaud/credentials/known_hosts`) — zero controller/CRD change.
+- `internal/providers/libvirt/virsh.go`: closed three of the five bypass paths — removed unconditional `no_verify=1` on the `qemu+ssh://` URI (now gated by the policy), and replaced `StrictHostKeyChecking=accept-new` + ephemeral `UserKnownHostsFile=/tmp/known_hosts` on both the `sshpass`-direct (`!`) and the standard virsh-over-ssh argv builders with the centralized policy options. `createSSHConfig` now writes a verifying `~/.ssh/config` instead of `accept-new`. `setupConnection` resolves the policy once into `VirshProvider.hostKey`, emits the one-line verification-mode audit log, and hard-fails (no TOFU) when verification is on but no usable `known_hosts` is present.
+- `internal/providers/libvirt/server.go`: closed the remaining two bypass paths — the `scp` disk-image copy (`copyDiskToRemote`, both `sshpass`-password and key-based fallback) now consumes the same centralized host-key options, re-emits the verification-mode audit line, and re-runs the hard-fail gate before transfer.
+
+### Fixed
+- Libvirt SSH/scp no longer disables host-key verification on any code path. Pre-#149 every path used `no_verify=1` / `accept-new` against an emptyDir-backed `/tmp/known_hosts` that re-TOFU'd on every pod restart — strictly worse than classic TOFU and the exact MITM window #149 calls out. Verification is now on by default with a single, named, audit-visible escape hatch.
+
+### Added
+- `internal/providers/libvirt/sshhostkey_test.go`: table-driven coverage of the env-var parsing (`unset`/`""`/`false`/`1`/`yes`/`true`/`TRUE`/`  true  `), the secure and insecure option/config/URI output across all three transports (URI/key, password, scp), the actionable hard-fail error (asserts it names the host, the path, the `ssh-keyscan` recipe, and the env var), and the WARN/INFO `slog` audit lines via a captured handler.
+- `docs/adr/0004-libvirt-ssh-host-key-verification.md`: promoted ADR-0004 from the gitignored `fieldTesting/` draft into the tracked ADR directory; flipped Status to **Accepted (2026-05-27)**, converted Open Questions into a "Decisions resolved" table, and added an "Implementation status — as shipped" note (centralized helper, scp re-emit, `slog` audit, empty-file hard-fail, I1 interaction).
+- `docs/adr/README.md`: added the ADR-0004 index row (Accepted, 2026-05-27).
+
+### Why
+#149 is the last HIGH-severity item from the v0.3.6 security audit: the libvirt provider (a virsh-CLI-over-SSH provider) connected to remote hypervisors with SSH host-key verification disabled on every path, exposing the manager→hypervisor channel to MITM (SSH credential leak + injected `virsh`/disk-image tampering) — below the project's regulated-banking compliance posture. This makes verification secure-by-default and coherent with ADR-0003's manager→provider mTLS, closing both transport-trust boundaries in v0.3.7.
+
+### Impact
+- [x] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+> **Breaking change for v0.3.7 release notes.** Existing v0.3.6 libvirt Providers that connect over SSH and relied on the implicit `no_verify=1` will **stop connecting** after upgrade until the operator either (a) adds a `known_hosts` key to the credentials Secret referenced by `credentialSecretRef` (seed it from a trusted bastion: `ssh-keyscan -H <host> >> known_hosts`), OR (b) sets `LIBVIRT_INSECURE_SKIP_HOST_KEY_VERIFICATION=true` in the Provider's `spec.runtime.env` (audit-flagged WARN on every connection). This is intentional and the same breaking-change callout class as ADR-0003's nil-TLS-block loud failure.
+
+### Usage
+```yaml
+# Secure (default): seed the host key in the existing credentials Secret.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: libvirt-credentials
+  namespace: virtrigaud-system
+stringData:
+  ssh-privatekey: |
+    -----BEGIN OPENSSH PRIVATE KEY-----
+    ...
+  known_hosts: |
+    # output of: ssh-keyscan -H <libvirt-host> >> known_hosts
+    |1|...= ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...
+---
+# Escape hatch (lab/migration only — audit-flagged): per-Provider env var.
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: Provider
+spec:
+  runtime:
+    env:
+      - name: LIBVIRT_INSECURE_SKIP_HOST_KEY_VERIFICATION
+        value: "true"
+```
+
+---
+
 ## [2026-05-28 11:05] - v0.3.7 PR-4: Promote ADR-0003 (mTLS + provider gRPC auth) to docs/adr/
 **Author:** @wrkode (William Rizzo)
 
