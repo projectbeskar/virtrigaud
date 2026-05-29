@@ -5,6 +5,28 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-05-29 05:10] - v0.3.7: Tighten manager ServiceAccount RBAC to least-privilege (closes #152)
+**Author:** @wrkode (William Rizzo)
+
+### Security
+- `charts/virtrigaud/templates/manager-rbac.yaml`: **narrowed the manager ClusterRole/Role** (the RBAC that actually ships and binds to the manager SA, since this chart is hand-maintained — not generated from `config/rbac/`). Both the cluster-scoped and namespace-scoped branches were tightened identically: **`secrets` dropped from full CRUD (`create;delete;get;list;patch;update;watch`) to `get;list;watch`** — the manager only reads credential/cloud-init/TLS Secrets (`internal/controller/cloudinit.go`, `internal/runtime/remote/resolver.go`), it never writes them; **`configmaps` removed entirely** (no controller references ConfigMaps); the **phantom CRDs `vmclones`, `vmsets`, `vmplacementpolicies` (+/status) removed** (CRDs exist but no controller reconciles them); **`metrics.k8s.io` `pods`/`nodes` removed** (unused); **`deployments/status` removed** (the manager reads Deployment status off the object but never writes the status subresource); **`events` narrowed to `create;patch`**; and the CRD mega-rule split so **`vmimages`/`vmnetworkattachments` are read-only (`get;list;watch`)** and `vmclasses` keeps `create` without `delete`.
+- `internal/controller/vmclass_controller.go`, `internal/controller/vmimage_controller.go`, `internal/controller/vmnetworkattachment_controller.go`: fixed the `+kubebuilder:rbac` markers, which named a **doubled, non-existent apiGroup `infra.virtrigaud.io.infra.virtrigaud.io`** and granted `create;update;patch;delete` + status + finalizers on it. These three reconcilers are watch-only no-op stubs (informer cache via `For()` only), so the markers were corrected to `groups=infra.virtrigaud.io` and narrowed to `get;list;watch` — the minimum the controller-runtime cache requires. This eliminated an entire phantom rule block from the generated `config/rbac/role.yaml`.
+- `internal/controller/vmadoption_controller.go`: narrowed the `vmimages` marker from `get;list;watch;create;update;patch` to `get;list;watch` — the adoption controller references existing disks rather than minting VMImages (it does still create/update VirtualMachine and VMClass, which retain their write verbs).
+
+### Changed
+- `config/rbac/role.yaml`: regenerated via `make manifests` (controller-gen). Net effect of the marker fixes: the phantom `infra.virtrigaud.io.infra.virtrigaud.io` group (3 rules) is gone and `vmimages`/`vmnetworkattachments` collapse into a single read-only rule.
+
+### Why
+#152 is a MEDIUM-severity finding from the v0.3.6 security audit: the manager SA held broader Secret access (and other excess grants) than minimal-functional requires, so a compromised manager could create/mutate Secrets cluster-wide as a data-exfiltration or credential-tampering vehicle. Least-privilege RBAC shrinks that blast radius, which matters for the regulated-banking deployment posture. The marker fixes also remove dead grants (a doubled apiGroup) that no Kubernetes API server would ever evaluate.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+> **Requires cluster rollout** (`helm upgrade`) to apply the tightened ClusterRole/Role. The change is purely a verb/resource reduction matched against verified manager code paths; no controller logic, CRD, or provider RBAC was touched. Operators who extended the manager with custom controllers can re-add grants via `rbac.additionalRules` in values. **Residual risk:** envtest does not enforce RBAC, so unit tests cannot validate this — the real validation is the e2e suite running under the actual ServiceAccount. Recommend an e2e run before/after merge.
+
 ## [2026-05-29 04:40] - v0.3.7: Libvirt SSH host-key verification on by default (closes #149)
 **Author:** @wrkode (William Rizzo)
 

@@ -34,9 +34,13 @@ type VMImageReconciler struct {
 	Scheme *runtime.Scheme
 }
 
-// +kubebuilder:rbac:groups=infra.virtrigaud.io.infra.virtrigaud.io,resources=vmimages,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=infra.virtrigaud.io.infra.virtrigaud.io,resources=vmimages/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=infra.virtrigaud.io.infra.virtrigaud.io,resources=vmimages/finalizers,verbs=update
+// VMImageReconciler is a watch-only stub: its Reconcile is a no-op and it
+// holds an informer cache on VMImage via For(). Least-privilege (issue #152)
+// therefore grants only the get;list;watch the cache requires — VMImage is
+// read-only across the whole manager (no controller creates or mutates it).
+// The apiGroup is infra.virtrigaud.io; the previous doubled value generated a
+// phantom rule for a non-existent group.
+// +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=vmimages,verbs=get;list;watch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.

@@ -21,32 +21,25 @@ metadata:
     {{- include "virtrigaud.labels" . | nindent 4 }}
     app.kubernetes.io/component: manager
 rules:
-# Core virtrigaud resources
+# virtrigaud CRDs the manager actively manages (create + mutate + delete).
+# Verb sets are least-privilege per issue #152: only the resources whose
+# controllers actually write are granted write verbs. vmclones, vmsets and
+# vmplacementpolicies were dropped — no controller reconciles them.
 - apiGroups:
   - infra.virtrigaud.io
   resources:
   - virtualmachines
   - virtualmachines/status
   - virtualmachines/finalizers
-  - vmclasses
-  - vmclasses/status
-  - vmimages
-  - vmimages/status
-  - vmnetworkattachments
-  - vmnetworkattachments/status
   - providers
   - providers/status
+  - providers/finalizers
   - vmsnapshots
   - vmsnapshots/status
-  - vmclones
-  - vmclones/status
+  - vmsnapshots/finalizers
   - vmmigrations
   - vmmigrations/status
   - vmmigrations/finalizers
-  - vmsets
-  - vmsets/status
-  - vmplacementpolicies
-  - vmplacementpolicies/status
   verbs:
   - create
   - delete
@@ -55,14 +48,47 @@ rules:
   - patch
   - update
   - watch
-# Core Kubernetes resources
+# VMClass is created/updated by the adoption controller but never deleted by
+# the manager, so it omits the delete verb.
+- apiGroups:
+  - infra.virtrigaud.io
+  resources:
+  - vmclasses
+  - vmclasses/status
+  verbs:
+  - create
+  - get
+  - list
+  - patch
+  - update
+  - watch
+# VMImage and VMNetworkAttachment are read-only inputs: the manager resolves
+# them when building VMs but never creates or mutates them (issue #152).
+- apiGroups:
+  - infra.virtrigaud.io
+  resources:
+  - vmimages
+  - vmnetworkattachments
+  verbs:
+  - get
+  - list
+  - watch
+# Secrets hold provider credentials and TLS material. The manager only READS
+# them (cloud-init / credential / TLS Secret resolution); it never creates,
+# mutates, or deletes Secrets. Narrowed from full CRUD per issue #152.
 - apiGroups:
   - ""
   resources:
   - secrets
-  - configmaps
+  verbs:
+  - get
+  - list
+  - watch
+# Services for remote provider runtimes (provider_controller reconciles them).
+- apiGroups:
+  - ""
+  resources:
   - services
-  - events
   verbs:
   - create
   - delete
@@ -71,7 +97,15 @@ rules:
   - patch
   - update
   - watch
-# PersistentVolumeClaims for VM migration storage
+# Events: the manager only emits events (create/patch); it never lists/deletes.
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+# PersistentVolumeClaims for VM migration storage (vmmigration_controller).
 - apiGroups:
   - ""
   resources:
@@ -84,7 +118,8 @@ rules:
   - patch
   - update
   - watch
-# Pods for VM migration provider readiness checks
+# Pods for VM migration provider readiness checks (vmmigration_controller
+# lists provider pods to confirm the migration PVC is mounted). Read-only.
 - apiGroups:
   - ""
   resources:
@@ -93,12 +128,13 @@ rules:
   - get
   - list
   - watch
-# Deployment resources for remote providers
+# Deployment resources for remote providers (provider_controller reconciles
+# them). deployments/status dropped — the manager reads deployment status off
+# the object but never writes the status subresource.
 - apiGroups:
   - apps
   resources:
   - deployments
-  - deployments/status
   verbs:
   - create
   - delete
@@ -117,15 +153,6 @@ rules:
   - get
   - list
   - update
-# Metrics
-- apiGroups:
-  - metrics.k8s.io
-  resources:
-  - pods
-  - nodes
-  verbs:
-  - get
-  - list
 {{- with .Values.rbac.additionalRules }}
 {{- toYaml . | nindent 0 }}
 {{- end }}
@@ -155,32 +182,25 @@ metadata:
     {{- include "virtrigaud.labels" . | nindent 4 }}
     app.kubernetes.io/component: manager
 rules:
-# Core virtrigaud resources
+# virtrigaud CRDs the manager actively manages (create + mutate + delete).
+# Verb sets are least-privilege per issue #152: only the resources whose
+# controllers actually write are granted write verbs. vmclones, vmsets and
+# vmplacementpolicies were dropped — no controller reconciles them.
 - apiGroups:
   - infra.virtrigaud.io
   resources:
   - virtualmachines
   - virtualmachines/status
   - virtualmachines/finalizers
-  - vmclasses
-  - vmclasses/status
-  - vmimages
-  - vmimages/status
-  - vmnetworkattachments
-  - vmnetworkattachments/status
   - providers
   - providers/status
+  - providers/finalizers
   - vmsnapshots
   - vmsnapshots/status
-  - vmclones
-  - vmclones/status
+  - vmsnapshots/finalizers
   - vmmigrations
   - vmmigrations/status
   - vmmigrations/finalizers
-  - vmsets
-  - vmsets/status
-  - vmplacementpolicies
-  - vmplacementpolicies/status
   verbs:
   - create
   - delete
@@ -189,14 +209,47 @@ rules:
   - patch
   - update
   - watch
-# Core Kubernetes resources
+# VMClass is created/updated by the adoption controller but never deleted by
+# the manager, so it omits the delete verb.
+- apiGroups:
+  - infra.virtrigaud.io
+  resources:
+  - vmclasses
+  - vmclasses/status
+  verbs:
+  - create
+  - get
+  - list
+  - patch
+  - update
+  - watch
+# VMImage and VMNetworkAttachment are read-only inputs: the manager resolves
+# them when building VMs but never creates or mutates them (issue #152).
+- apiGroups:
+  - infra.virtrigaud.io
+  resources:
+  - vmimages
+  - vmnetworkattachments
+  verbs:
+  - get
+  - list
+  - watch
+# Secrets hold provider credentials and TLS material. The manager only READS
+# them (cloud-init / credential / TLS Secret resolution); it never creates,
+# mutates, or deletes Secrets. Narrowed from full CRUD per issue #152.
 - apiGroups:
   - ""
   resources:
   - secrets
-  - configmaps
+  verbs:
+  - get
+  - list
+  - watch
+# Services for remote provider runtimes (provider_controller reconciles them).
+- apiGroups:
+  - ""
+  resources:
   - services
-  - events
   verbs:
   - create
   - delete
@@ -205,7 +258,15 @@ rules:
   - patch
   - update
   - watch
-# PersistentVolumeClaims for VM migration storage
+# Events: the manager only emits events (create/patch); it never lists/deletes.
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+# PersistentVolumeClaims for VM migration storage (vmmigration_controller).
 - apiGroups:
   - ""
   resources:
@@ -218,7 +279,8 @@ rules:
   - patch
   - update
   - watch
-# Pods for VM migration provider readiness checks
+# Pods for VM migration provider readiness checks (vmmigration_controller
+# lists provider pods to confirm the migration PVC is mounted). Read-only.
 - apiGroups:
   - ""
   resources:
@@ -227,12 +289,13 @@ rules:
   - get
   - list
   - watch
-# Deployment resources for remote providers
+# Deployment resources for remote providers (provider_controller reconciles
+# them). deployments/status dropped — the manager reads deployment status off
+# the object but never writes the status subresource.
 - apiGroups:
   - apps
   resources:
   - deployments
-  - deployments/status
   verbs:
   - create
   - delete

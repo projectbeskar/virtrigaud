@@ -34,9 +34,14 @@ type VMClassReconciler struct {
 	Scheme *runtime.Scheme
 }
 
-// +kubebuilder:rbac:groups=infra.virtrigaud.io.infra.virtrigaud.io,resources=vmclasses,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=infra.virtrigaud.io.infra.virtrigaud.io,resources=vmclasses/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=infra.virtrigaud.io.infra.virtrigaud.io,resources=vmclasses/finalizers,verbs=update
+// VMClassReconciler is a watch-only stub: its Reconcile is a no-op and it
+// holds an informer cache on VMClass via For(). Least-privilege (issue #152)
+// therefore grants only the get;list;watch the cache requires — no write,
+// status, or finalizer verbs are exercised. (vmadoption_controller.go owns
+// the create/update grant for the VMClass objects it provisions during
+// adoption.) The apiGroup is infra.virtrigaud.io; the previous doubled value
+// generated a phantom rule for a non-existent group.
+// +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=vmclasses,verbs=get;list;watch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.

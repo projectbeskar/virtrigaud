@@ -85,11 +85,18 @@ type VMAdoptionReconciler struct {
 	RemoteResolver *remote.Resolver
 }
 
+// VMAdoptionReconciler watches Providers and, on the adoption annotation,
+// provisions VirtualMachine + VMClass objects for already-existing hypervisor
+// VMs. RBAC reflects exactly that (issue #152): it creates/updates
+// VirtualMachine and VMClass and writes Provider status, but only READS
+// VMImage — adoption references the existing disk rather than minting a
+// VMImage (see ensureVMClass / the adoptVM disk-reference path), so vmimages
+// is narrowed to get;list;watch.
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=providers,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=providers/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=virtualmachines,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=vmclasses,verbs=get;list;watch;create;update;patch
-// +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=vmimages,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=vmimages,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile handles adoption requests.
