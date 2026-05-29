@@ -5,6 +5,21 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-05-29 19:25] - v0.3.7: Fix SBOM attestation (cosign attest has no --recursive)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `.github/workflows/release.yml`: the `Generate SBOMs` job's SBOM attestation used `cosign attest --yes --recursive`, but `cosign attest` does **not** support `--recursive` (only `cosign sign` does; current cosign removed it from `attest`). The `v0.3.7-rc2` release run failed with `Error: unknown flag: --recursive` on the manager SBOM leg (fail-fast cancelled the rest), skipping `create-release`. Removed `--recursive`; the SBOM is now attested to the multi-arch **index** digest, which is the correct, verifiable target (`cosign verify-attestation <image>:<tag>` resolves tag → index → attestation).
+
+### Why
+rc2 proved the whole pipeline EXCEPT this: all 10 build legs, 5 manifest merges, `cosign sign --recursive` (index + both arch children), Trivy, and the full SLSA provenance generator chain all succeeded. Only the SBOM attestation flag was wrong. Index-level SBOM attestation is not a regression vs v0.3.6 (which was amd64-only with a single SBOM attestation) — the SBOM predicate is essentially arch-independent (Go module set). No supply-chain control weakened: signing stays recursive over index+children, SLSA provenance is per-component, SBOM covers the released artifact. Unblocks recutting `v0.3.7-rc3`.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [x] Config change only — release build infra
+- [ ] Documentation only
+
 ## [2026-05-29 18:40] - v0.3.7: Fix kubectl image arm64 build (hardcoded amd64 download)
 **Author:** @wrkode (William Rizzo)
 
