@@ -5,6 +5,30 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-05-29 06:49] - v0.3.7: Remediate reachable CVEs + add blocking govulncheck CI gate (closes #151)
+**Author:** @wrkode (William Rizzo)
+
+### Security
+- `go.mod`: bump `golang.org/x/net` v0.52.0 → **v0.55.0**. Clears all reachable `x/net` vulnerabilities (GO-2024-3218 / CVE-2024-45338 HTTP/2 HPACK exhaustion; GO-2025-3563 / CVE-2025-22872 `idna` tokenizer OOB; GO-2024-3112 GOAWAY flood) reachable via `internal/providers/proxmox/pveapi/client.go` (`http.Client.Do` → HTTP/2 transport + `idna.ToASCII`). Transitive co-bumps from `go mod tidy`: `x/sys` v0.42.0 → v0.45.0, `x/term` v0.41.0 → v0.43.0, `x/text` v0.35.0 → v0.37.0, `x/tools` v0.42.0 → v0.44.0.
+- `go.mod`, `sdk/go.mod`, `proto/go.mod`: raise `go` directive **1.26.0 → 1.26.3** across all three modules. `govulncheck` keys stdlib analysis off the module's `go` directive, not the running toolchain — modules declaring `go 1.26.0` continued to surface 14 stdlib CVEs (fixed in go1.26.1–1.26.3: `os`, `net/url`, `crypto/x509`, `net/mail`, `net/http`, etc.) even when built with a 1.26.3 toolchain. Container release images already build with `golang:1.26.3`; this aligns the directive with the actual build floor and stops source-build consumers on 1.26.0–1.26.2 from being exposed.
+- `.github/workflows/ci.yml`: add **`govulncheck` job** — runs `golang/govulncheck-action@b625fbe` (v1.0.4, SHA-pinned) on both the root module and `sdk/` module on every PR and push to `main`. Wired into the `ci` summary job's `needs` list so a reachable vulnerability finding **blocks merge**. Uses `go-version-file: go.mod` / `sdk/go.mod` so the scanner's stdlib analysis always matches the declared build floor.
+
+### Changed
+- `Makefile`: update `GOLANGCI_LINT_VERSION` v1.64.8 → **v2.12.2** and the install path from `github.com/golangci/golangci-lint/cmd/golangci-lint` to `github.com/golangci/golangci-lint/v2/cmd/golangci-lint`. The v1 binary was built with go1.24.6 and refused to process modules declaring `go 1.26.3` (hard error: "the Go language version used to build golangci-lint is lower than the targeted Go version"). v2.12.2 is the version CI's `golangci/golangci-lint-action@v9` already uses, so local and CI lint are now in sync.
+
+### Why
+`govulncheck ./...` on `main` prior to this PR produced 17 reachable findings split across two root causes: (1) three `x/net` CVEs reachable through the Proxmox PVE HTTP client; and (2) fourteen stdlib CVEs surfaced because the `go` directive was pinned to 1.26.0 while the fixes shipped in 1.26.1–1.26.3. The maintainer chose "remediate first, then gate" — adding a failing govulncheck CI job without first clearing the findings would have immediately broken CI. The new gate enforces zero-reachable-vulnerability hygiene going forward, closing a supply-chain gap that Trivy+gosec alone did not cover (those tools scan containers/source patterns; govulncheck traces the actual call graph).
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+> **Source-build floor raised to Go 1.26.3.** Consumers who build VirtRigaud from source (not from the published container images) and are running go1.26.0–go1.26.2 must upgrade their toolchain. Binary/image consumers are unaffected — release images already use `golang:1.26.3`.
+
+---
+
 ## [2026-05-29 05:10] - v0.3.7: Tighten manager ServiceAccount RBAC to least-privilege (closes #152)
 **Author:** @wrkode (William Rizzo)
 
