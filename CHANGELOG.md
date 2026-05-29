@@ -5,6 +5,21 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-05-29 18:40] - v0.3.7: Fix kubectl image arm64 build (hardcoded amd64 download)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `build/Dockerfile.kubectl`: the kubectl binary download URL hardcoded `linux/amd64`, so the new arm64 image (added in #165 PR-B) installed an amd64 binary and the `RUN kubectl version --client` verify failed with a syntax/exec error on the arm64 leg — failing the `v0.3.7-rc1` release run (`Build and Push Images (kubectl, arm64)`; all 4 real components built arm64 cleanly). Added `ARG TARGETARCH` (auto-populated by BuildKit per target platform) and switched both download URLs to `linux/${TARGETARCH}/kubectl`, matching the k8s release-URL convention.
+
+### Why
+The multi-arch release build (#165) added arm64 to all image components including the `kubectl` CRD-upgrade utility image, but that image downloads a prebuilt kubectl binary rather than cross-compiling Go — so it needed to be made arch-aware. Validated locally with `docker buildx build --platform linux/arm64`: the arm64 binary downloads and `kubectl version --client` reports `Client Version: v1.32.0`. Unblocks recutting `v0.3.7-rc2`.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [x] Config change only — release build infra
+- [ ] Documentation only
+
 ## [2026-05-29 16:20] - v0.3.7: Ship arm64 release images via native per-arch build + manifest merge, with full attestation parity (PR-B of #165; closes #169)
 **Author:** @wrkode (William Rizzo)
 
