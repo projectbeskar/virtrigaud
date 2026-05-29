@@ -5,6 +5,21 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-05-29 12:30] - v0.3.7: Fix `make test-e2e` to actually run the e2e suite (closes #146)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `Makefile`: the `test-e2e` target's `go test ./test/e2e/ -v -ginkgo.v` invocation now passes **`-tags=e2e`**. PR #133 added `//go:build e2e` constraints to `test/e2e/e2e_test.go` and `e2e_suite_test.go`, but the target was never updated to set the tag — so `go test` saw "build constraints exclude all Go files" and ran **zero** e2e tests. The failure was masked because the target's preamble exits early when no Kind cluster is present, so the broken `go test` line was rarely reached. Verified: `go test -tags=e2e -list '.*' ./test/e2e/` now discovers `TestE2E`; without the tag the package fails to build. The flag is additive (it only includes the `e2e`-tagged files; no untagged files are dropped).
+
+### Why
+A test target that silently runs nothing gives false confidence — the e2e suite has been effectively dark since PR #133. Restoring the tag makes `make test-e2e` exercise the Ginkgo e2e suite as intended on a Kind cluster.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [x] Config change only — build/test tooling; no runtime or shipped-artifact change
+- [ ] Documentation only
+
 ## [2026-05-29 06:49] - v0.3.7: Remediate reachable CVEs + add blocking govulncheck CI gate (closes #151)
 **Author:** @wrkode (William Rizzo)
 

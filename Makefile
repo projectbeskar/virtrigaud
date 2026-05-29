@@ -161,7 +161,7 @@ test-e2e: gen-crds generate fmt vet ## Run the e2e tests. Expected an isolated e
 		echo "No Kind cluster is running. Please start a Kind cluster before running the e2e tests."; \
 		exit 1; \
 	}
-	go test ./test/e2e/ -v -ginkgo.v
+	go test -tags=e2e ./test/e2e/ -v -ginkgo.v
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
