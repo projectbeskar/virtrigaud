@@ -5,6 +5,21 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-05-29 14:10] - v0.3.7: CI dev images build arm64 on native runners (PR-A of #165)
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `.github/workflows/ci.yml`: restructure the `build-images` job into the canonical two-stage multi-arch buildx pattern. **Stage 1** (`build-images`) fans out over `component × arch` (8 legs): the `arm64` legs now run on a **native `ubuntu-24.04-arm` GitHub-hosted runner** instead of QEMU emulation, the `amd64` legs on `ubuntu-22.04`. QEMU setup is dropped. Each leg builds a single native arch and pushes **by digest** (`outputs: type=image,push-by-digest=true,name-canonical=true,push=true`), exporting the digest as a per-`component`/`arch` artifact. **Stage 2** (`merge-images`, `needs: build-images`, per `component`) downloads the digests and runs `docker buildx imagetools create` to assemble the multi-arch manifest under the unchanged dev tags, then `imagetools inspect` to confirm. The published tag scheme (`:main`, `:main-<sha>`, `:latest`-on-default-branch), the image-name pattern (`${REGISTRY}/${IMAGE_NAME_PREFIX}/<component>`), and the per-component Dockerfile paths (manager → `build/Dockerfile.manager`, providers → `cmd/<component>/Dockerfile`) are preserved byte-for-byte. The build stays gated to `push` on `main` only, so PR CI does not exercise it.
+
+### Why
+The post-merge `main` run for #164 ended `cancelled`: the emulated `arm64` leg of the libvirt image (CGO + libvirt headers) hit the `timeout-minutes: 30` ceiling (libvirt 30m20s → cancelled → whole run cancelled). Building each architecture on its own native runner eliminates QEMU emulation entirely — native arm64 builds in minutes rather than ~25m emulated — and removes the timeout class of failure. This is **PR-A of #165** and covers the CI dev-image workflow only; the release workflow (`release.yml`, which adds `linux/arm64` to shipped images) is **PR-B** and is untouched here. Validation note: because `build-images` runs only on push to `main`, this is verified by the **post-merge `main` run**, not by this PR's own CI (where it shows skipped).
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [x] Config change only — CI build infrastructure; no runtime, Go, Dockerfile, or shipped-artifact change
+- [ ] Documentation only
+
 ## [2026-05-29 12:30] - v0.3.7: Fix `make test-e2e` to actually run the e2e suite (closes #146)
 **Author:** @wrkode (William Rizzo)
 
