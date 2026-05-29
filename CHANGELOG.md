@@ -5,6 +5,24 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-05-29 16:20] - v0.3.7: Ship arm64 release images via native per-arch build + manifest merge (PR-B of #165)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- **`linux/arm64` release images** — release-notes headline for v0.3.7. All five release components (`manager`, `provider-libvirt`, `provider-vsphere`, `provider-proxmox`, `kubectl`) now publish a **multi-arch (`linux/amd64,linux/arm64`)** manifest under the existing release tags, so arm64 clusters can run VirtRigaud in production. This is a new user-facing capability and must be called out in the v0.3.7 release notes + the provider image-arch matrix in docs.
+
+### Changed
+- `.github/workflows/release.yml`: restructure the release image build into the proven two-stage native multi-arch buildx pattern already validated in `ci.yml` (PR-A, #166/#167). **Stage 1** (`build-and-push`) now fans out over `component × arch` (10 legs): `amd64` legs on `ubuntu-22.04`, `arm64` legs on a **native `ubuntu-24.04-arm` runner** (QEMU removed), each building a single native arch and pushing **by digest** (`outputs: type=image,name=…,push-by-digest=true,name-canonical=true,push=true` — the `name=` form fixed in #167), uploading per-`component`/`arch` digest artifacts. The load-bearing `build-args` (VERSION/GIT_SHA ldflags → `virtrigaud_build_info`) are preserved on every leg. **Stage 2** (`merge-and-sign`, per component) downloads the digests, runs `docker buildx imagetools create` to assemble the multi-arch manifest under the **unchanged release tag scheme** (`type=semver,{{version}}` + `{{major}}.{{minor}}` + `{{major}}` + `type=ref,event=tag`), inspects it, resolves the manifest **index digest**, and `cosign sign --yes --recursive`'s that index — signing the index **and both per-arch child images**. `security-scan` (Trivy), `generate-sbom` (Syft), and `create-release` now depend on `merge-and-sign` (the release tag only exists after the merge); they scan/SBOM the multi-arch manifest by tag exactly as before (default platform = amd64, preserving prior coverage).
+
+### Why
+`release.yml` previously built `linux/amd64` only, so VirtRigaud shipped no arm64 release images. PR-B adds arm64 using the same native-per-arch + manifest-merge pattern proven in PR-A — native arm64 avoids the QEMU-emulation timeout that cancelled the #164 `main` run. The supply-chain controls (cosign signing, SBOM, Trivy) are preserved, with signing now covering **both arches** via `--recursive`. Validation caveat: `release.yml` is **tag-gated**, so PR CI does not exercise it — this is verified by a **`v0.3.7-rc1` tag** before v0.3.7 final (per the rc→smoke→final discipline). `actionlint` on `release.yml` is clean.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [x] Config change only — release CI infrastructure; adds the new arm64 release-image capability, no Go/Dockerfile/toolchain change
+- [ ] Documentation only
+
 ## [2026-05-29 15:05] - v0.3.7: Fix push-by-digest "tag is needed" in CI image build (fix-forward for #166)
 **Author:** @wrkode (William Rizzo)
 
