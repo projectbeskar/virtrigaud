@@ -30,6 +30,7 @@ import (
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
+	"github.com/projectbeskar/virtrigaud/sdk/provider/errors"
 )
 
 // Server implements the providerv1.ProviderServer interface for Libvirt
@@ -424,33 +425,27 @@ func (s *Server) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotRev
 	return &providerv1.TaskResponse{}, nil
 }
 
-// Clone creates a VM clone
+// Clone creates a VM clone.
+//
+// Not yet implemented for libvirt: a real implementation must perform a volume
+// clone (full or qcow2-backed for linked clones) plus a new domain definition.
+// Until that exists, this returns Unimplemented rather than a synthetic task
+// reference so callers receive an honest, actionable error instead of a
+// fabricated success that never produces a VM.
+// Tracked in https://github.com/projectbeskar/virtrigaud/issues/153.
 func (s *Server) Clone(ctx context.Context, req *providerv1.CloneRequest) (*providerv1.CloneResponse, error) {
-	// Libvirt supports cloning via volume clone + new domain definition
-	// Linked clones are supported with qcow2 backing files
-	targetVMID := fmt.Sprintf("vm-clone-%s", generateVMID())
-
-	// Simulate async clone operation
-	taskRef := &providerv1.TaskRef{
-		Id: fmt.Sprintf("task-clone-%s", generateTaskID()),
-	}
-
-	return &providerv1.CloneResponse{
-		TargetVmId: targetVMID,
-		Task:       taskRef,
-	}, nil
+	return nil, errors.NewUnimplemented("Clone operation is not implemented for libvirt (https://github.com/projectbeskar/virtrigaud/issues/153)")
 }
 
-// ImagePrepare prepares/imports a VM image
+// ImagePrepare prepares/imports a VM image.
+//
+// Not yet implemented for libvirt: a real implementation must download and/or
+// convert the image into a storage pool. Until that exists, this returns
+// Unimplemented rather than a synthetic task reference so callers are not given
+// a fabricated success for work that never happened.
+// Tracked in https://github.com/projectbeskar/virtrigaud/issues/154.
 func (s *Server) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepareRequest) (*providerv1.TaskResponse, error) {
-	// Libvirt supports downloading qcow2/raw images to storage pools
-	taskRef := &providerv1.TaskRef{
-		Id: fmt.Sprintf("task-image-prepare-%s", generateTaskID()),
-	}
-
-	return &providerv1.TaskResponse{
-		Task: taskRef,
-	}, nil
+	return nil, errors.NewUnimplemented("ImagePrepare operation is not implemented for libvirt (https://github.com/projectbeskar/virtrigaud/issues/154)")
 }
 
 // GetCapabilities returns the capabilities of the Libvirt provider
@@ -460,8 +455,8 @@ func (s *Server) GetCapabilities(ctx context.Context, req *providerv1.GetCapabil
 		SupportsDiskExpansionOnline: false, // Disk expansion usually requires power cycle
 		SupportsSnapshots:           true,  // Libvirt supports snapshots (storage-dependent)
 		SupportsMemorySnapshots:     false, // Memory snapshots not always supported
-		SupportsLinkedClones:        true,  // Supported via qcow2 backing files
-		SupportsImageImport:         true,  // Supports downloading images to storage pools
+		SupportsLinkedClones:        false, // Clone RPC not implemented yet (issue #153)
+		SupportsImageImport:         false, // ImagePrepare RPC not implemented yet (issue #154)
 		SupportedDiskTypes:          []string{"qcow2", "raw", "vmdk"},
 		SupportedNetworkTypes:       []string{"virtio", "e1000", "rtl8139"},
 	}, nil
@@ -725,14 +720,6 @@ func (s *Server) copyDiskToRemote(ctx context.Context, virshProvider *VirshProvi
 // Helper functions for generating IDs and timestamps (shared with vSphere)
 func generateTimestamp() int64 {
 	return time.Now().Unix()
-}
-
-func generateTaskID() string {
-	return fmt.Sprintf("%d-%d", time.Now().Unix(), time.Now().Nanosecond())
-}
-
-func generateVMID() string {
-	return fmt.Sprintf("vm-%d", time.Now().Unix())
 }
 
 // sanitizeSnapshotName ensures snapshot name is valid for virsh
