@@ -5,7 +5,7 @@
 # point at their internal mirrors (Artifactory, Harbor, etc.) without
 # patching this Dockerfile. Defaults match the previously-hardcoded
 # images so upstream release behaviour is unchanged.
-ARG BUILDER_IMAGE=docker.io/golang:1.26.3
+ARG BUILDER_IMAGE=docker.io/golang:1.26.4
 ARG BASE_IMAGE=gcr.io/distroless/static:nonroot
 
 FROM ${BUILDER_IMAGE} AS builder

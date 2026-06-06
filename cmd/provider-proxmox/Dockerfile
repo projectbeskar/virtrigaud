@@ -1,5 +1,5 @@
 # Build the provider binary
-ARG BUILDER_IMAGE=golang:1.26.3
+ARG BUILDER_IMAGE=golang:1.26.4
 ARG BASE_IMAGE=gcr.io/distroless/static:nonroot
 FROM --platform=${BUILDPLATFORM:-linux/amd64} ${BUILDER_IMAGE} as builder
 ARG BUILDPLATFORM
