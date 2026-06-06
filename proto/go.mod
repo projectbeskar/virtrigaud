@@ -1,6 +1,6 @@
 module github.com/projectbeskar/virtrigaud/proto
 
-go 1.26.3
+go 1.26.4
 
 require (
 	google.golang.org/grpc v1.67.1

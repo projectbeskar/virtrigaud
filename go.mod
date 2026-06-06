@@ -1,6 +1,6 @@
 module github.com/projectbeskar/virtrigaud
 
-go 1.26.3
+go 1.26.4
 
 // Local development replacements
 replace github.com/projectbeskar/virtrigaud/proto => ./proto

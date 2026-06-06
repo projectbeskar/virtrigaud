@@ -1,5 +1,5 @@
 # Build stage for vSphere provider (pure Go, no CGO)
-ARG BUILDER_IMAGE=golang:1.26.3-bookworm
+ARG BUILDER_IMAGE=golang:1.26.4-bookworm
 ARG BASE_IMAGE=debian:bookworm-slim
 FROM ${BUILDER_IMAGE} AS builder
 

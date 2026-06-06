@@ -5,6 +5,23 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-06 06:55] - Security: bump Go toolchain 1.26.3 → 1.26.4 (clears 3 stdlib CVEs)
+**Author:** @wrkode (William Rizzo)
+
+### Security
+- `go.mod`, `sdk/go.mod`, `proto/go.mod`: bump the `go` directive 1.26.3 → 1.26.4.
+- `build/Dockerfile.manager`, `cmd/provider-{libvirt,mock,proxmox,vsphere}/Dockerfile`: bump the golang builder image 1.26.3 → 1.26.4.
+- Clears three Go standard-library vulnerabilities flagged by `govulncheck` (all fixed in go1.26.4): **GO-2026-5037** (`crypto/x509`), **GO-2026-5038** (`mime`), **GO-2026-5039** (`net/textproto`).
+
+### Why
+The stdlib CVEs were disclosed after the last `main` CI run, so the required `govulncheck` job began failing repo-wide on every branch (including `main` HEAD), independent of any code change. Bumping the toolchain to the fixed release restores a green supply-chain scan and removes the `crypto/x509` exposure relevant to the project's regulated-deployment posture. Verified locally under go1.26.4: `govulncheck ./...` and `cd sdk && govulncheck ./...` both report "No vulnerabilities found"; `make lint`/`make build`/`make test` pass.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout — only to ship rebuilt images carrying the patched stdlib; running clusters are unaffected until upgraded
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-05-29 19:25] - v0.3.7: Fix SBOM attestation (cosign attest has no --recursive)
 **Author:** @wrkode (William Rizzo)
 
