@@ -127,7 +127,7 @@ func main() {
 		"port", port,
 		"health_port", healthPort,
 		"capabilities", []string{
-			"core", "snapshots", "linked-clones",
+			"core", "snapshots",
 			"online-reconfigure", "qemu-guest-agent",
 		},
 		"supported_platforms", []string{"kvm", "qemu", "libvirt"},

@@ -28,6 +28,7 @@ The stdlib CVEs were disclosed after the last `main` CI run, so the required `go
 ### Fixed
 - `internal/providers/libvirt/server.go`: `Clone` and `ImagePrepare` no longer fabricate a `TaskRef` for work they do not perform. They now return gRPC `Unimplemented` (via `sdk/provider/errors.NewUnimplemented`), so callers get an honest, actionable error instead of a fake success that never produces a VM/image. Removed the now-unused `generateTaskID`/`generateVMID` helpers.
 - `internal/providers/libvirt/server.go`: `GetCapabilities` now reports `SupportsLinkedClones=false` and `SupportsImageImport=false`, matching actual behavior (previously advertised `true`).
+- `cmd/provider-libvirt/main.go`: removed `linked-clones` from the provider's startup capabilities log banner so it no longer advertises a capability the provider does not implement.
 - `README.md`: corrected the provider capability matrix — Libvirt full clone / linked clones / Clone RPC / ImagePrepare RPC / Image Import are marked unsupported with issue references.
 
 ### Added
