@@ -36,10 +36,13 @@ helm install virtrigaud virtrigaud/virtrigaud \
 helm install virtrigaud virtrigaud/virtrigaud \
   -n virtrigaud-system \
   --create-namespace \
-  --set manager.replicaCount=2 \
-  --set providers.vsphere.enabled=true \
-  --set providers.libvirt.enabled=true
+  --set manager.replicaCount=2
 ```
+
+> Providers are normally deployed by the manager from `Provider` CRs — not via
+> Helm flags. The chart-templated `providers.*` Deployments are disabled by
+> default (#173); see [Provider Configuration](#provider-configuration) before
+> opting in.
 
 ### Installation from Local Chart
 
@@ -125,20 +128,27 @@ helm upgrade virtrigaud virtrigaud/virtrigaud \
 
 ### Provider Configuration
 
-Each provider (vSphere, Libvirt, Proxmox) can be enabled/disabled:
+In normal operation you do **not** enable providers here — the manager's
+ProviderController deploys provider pods automatically from `Provider` CRs
+(`spec.runtime`), which also wires each provider's TLS posture. The chart can
+optionally template standalone provider Deployments, but they are **disabled by
+default** (#173).
+
+> **If you opt in** (`providers.<name>.enabled: true`) you must also configure the
+> `providerTLS` block — set `providerTLS.secretName` (mTLS) or
+> `providerTLS.insecure=true` (audit-flagged plaintext). Otherwise the provider
+> fail-closes on startup (ADR-0003, v0.3.7 secure-by-default) and crash-loops.
 
 ```yaml
 providers:
   vsphere:
-    enabled: true
+    enabled: false  # opt-in; also requires providerTLS (see note above)
     replicaCount: 1
-    image:
-      tag: "v0.2.0"
-  
+
   libvirt:
-    enabled: true
+    enabled: false  # opt-in; also requires providerTLS (see note above)
     replicaCount: 1
-  
+
   proxmox:
     enabled: false
 ```

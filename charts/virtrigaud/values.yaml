@@ -84,10 +84,18 @@ manager:
   volumeMounts: []
 
 # Provider configuration
+#
+# These are OPTIONAL chart-templated standalone provider Deployments. They are
+# DISABLED by default (#173): in normal operation providers are deployed by the
+# manager's ProviderController from Provider CRs (spec.runtime), which wires the
+# provider's TLS posture from the CR. Enable one here only if you are NOT using a
+# Provider CR for it AND you have configured the providerTLS block below (set
+# providerTLS.secretName, or providerTLS.insecure=true) — otherwise the provider
+# fail-closes on startup per ADR-0003 (v0.3.7 secure-by-default) and crash-loops.
 providers:
   # Libvirt provider
   libvirt:
-    enabled: true
+    enabled: false
     replicaCount: 1
     image:
       repository: projectbeskar/virtrigaud/provider-libvirt
@@ -102,7 +110,7 @@ providers:
 
   # vSphere provider  
   vsphere:
-    enabled: true
+    enabled: false
     replicaCount: 1
     image:
       repository: projectbeskar/virtrigaud/provider-vsphere
