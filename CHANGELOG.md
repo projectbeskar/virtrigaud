@@ -22,6 +22,27 @@ The stdlib CVEs were disclosed after the last `main` CI run, so the required `go
 - [ ] Config change only
 - [ ] Documentation only
 
+## [2026-06-06 06:40] - Libvirt: honest Clone/ImagePrepare (return Unimplemented) + accurate capabilities
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/libvirt/server.go`: `Clone` and `ImagePrepare` no longer fabricate a `TaskRef` for work they do not perform. They now return gRPC `Unimplemented` (via `sdk/provider/errors.NewUnimplemented`), so callers get an honest, actionable error instead of a fake success that never produces a VM/image. Removed the now-unused `generateTaskID`/`generateVMID` helpers.
+- `internal/providers/libvirt/server.go`: `GetCapabilities` now reports `SupportsLinkedClones=false` and `SupportsImageImport=false`, matching actual behavior (previously advertised `true`).
+- `cmd/provider-libvirt/main.go`: removed `linked-clones` from the provider's startup capabilities log banner so it no longer advertises a capability the provider does not implement.
+- `README.md`: corrected the provider capability matrix — Libvirt full clone / linked clones / Clone RPC / ImagePrepare RPC / Image Import are marked unsupported with issue references.
+
+### Added
+- `internal/providers/libvirt/server_test.go`: tests asserting `Clone`/`ImagePrepare` return `Unimplemented` and that `GetCapabilities` reports honest clone/image-import flags (snapshots remain supported).
+
+### Why
+The libvirt Clone and ImagePrepare RPCs were stubs that fabricated task IDs and reported success while doing nothing, and the provider advertised both as supported. A fabricated `TaskRef` is worse than an honest error — the manager would poll a task that never completes. These RPCs are not reachable from any manager controller today (no `Clone`/`ImagePrepare` in the manager gRPC client or `contracts.Provider`; `VMClone` has no reconciler), so this change is libvirt-provider-local and does not alter any manager-driven flow. Addresses #153 and #154.
+
+### Impact
+- [ ] Breaking change — provider-internal behavior correction only; no CRD/operator API change and no manager flow reaches these RPCs
+- [ ] Requires cluster rollout — optional; effect only applies after the libvirt provider image is updated
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-05-29 19:25] - v0.3.7: Fix SBOM attestation (cosign attest has no --recursive)
 **Author:** @wrkode (William Rizzo)
 

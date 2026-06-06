@@ -115,7 +115,7 @@ Note: VMAdoption is a **controller** built into the manager, not a CRD.
 
 ## Provider Feature Matrix
 
-Per the [canonical capabilities matrix](https://projectbeskar.github.io/virtrigaud/providers/providers-capabilities/), verified against provider `GetCapabilities` responses in v0.3.6:
+Per the [canonical capabilities matrix](https://projectbeskar.github.io/virtrigaud/providers/providers-capabilities/), verified against provider `GetCapabilities` responses (Libvirt Clone/ImagePrepare corrected to unsupported — see [#153]/[#154]):
 
 | Feature | vSphere | Libvirt | Proxmox | Notes |
 |---------|---------|---------|---------|-------|
@@ -124,14 +124,14 @@ Per the [canonical capabilities matrix](https://projectbeskar.github.io/virtriga
 | **Disk Expansion** | ✅ | ⚠️ | ✅ | Libvirt: power-cycle required |
 | **Snapshots** | ✅ | ✅ | ✅ | Point-in-time captures |
 | **Memory Snapshots** | ❌ | ❌ | ✅ | RAM-inclusive snapshots (vSphere: no) |
-| **Cloning (full)** | ✅ | ✅ | ✅ | Independent copies |
-| **Linked Clones** | ✅ | ✅ | ✅ | COW-based (Libvirt: qcow2 backing) |
-| **Clone RPC** | ✅ | ⚠️ [#153] | ✅ | Libvirt Clone RPC is a stub in v0.3.6 |
-| **ImagePrepare RPC** | ✅ | ⚠️ [#154] | ✅ | Libvirt ImagePrepare is a stub in v0.3.6 |
+| **Cloning (full)** | ✅ | ❌ [#153] | ✅ | Libvirt: Clone RPC not implemented |
+| **Linked Clones** | ✅ | ❌ [#153] | ✅ | COW-based (vSphere/Proxmox); Libvirt: not implemented |
+| **Clone RPC** | ✅ | ❌ [#153] | ✅ | Libvirt Clone returns Unimplemented (honest; real impl tracked in #153) |
+| **ImagePrepare RPC** | ✅ | ❌ [#154] | ✅ | Libvirt ImagePrepare returns Unimplemented (honest; real impl tracked in #154) |
 | **Task Tracking** | ✅ | N/A | ✅ | Async operation monitoring |
 | **Console URLs** | ✅ | ✅ | ⚠️ | Proxmox console URL: planned |
 | **Guest Agent** | ✅ | ✅ | ✅ | IP detection and guest info |
-| **Image Import** | ✅ | ✅ | ✅ | vSphere: OVA/content library |
+| **Image Import** | ✅ | ❌ [#154] | ✅ | vSphere: OVA/content library; Libvirt: ImagePrepare not implemented |
 | **Multi-NIC** | ✅ | ✅ | ✅ | Multiple network interfaces |
 | **Circuit Breaker** | ✅ | ✅ | ✅ | One CB per Provider CR (v0.3.6) |
 
