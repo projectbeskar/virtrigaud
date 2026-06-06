@@ -5,6 +5,25 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-06 08:04] - Libvirt: wire ExportDisk/GetDiskInfo into the gRPC server (#177)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/libvirt/server.go`: added `Server.ExportDisk` and `Server.GetDiskInfo`, which delegate to the existing libvirt `Provider` implementations in `provider_virsh.go` (translating between the gRPC and provider-contract types). These RPCs were previously unreachable over gRPC — the embedded `UnimplementedProviderServer` answered them — so libvirt could not act as a disk-export source or report disk info for migration despite having working implementations.
+- `internal/providers/libvirt/server.go`: `GetCapabilities` now advertises `SupportsDiskExport=true`, `SupportsDiskImport=true`, `SupportedExportFormats=[qcow2, raw]`, `SupportedImportFormats=[qcow2, raw, vmdk]`, and `SupportsExportCompression=false`, matching the now-reachable behavior.
+
+### Added
+- `internal/providers/libvirt/server_test.go`: tests covering request/response type conversion for both RPCs (including the `DestinationUrl`→`DestinationURL` and `TaskRef`→`Task` mappings), the nil-provider error path, and the new capability flags. Uses an embedded-interface fake provider so only the two methods under test are implemented.
+
+### Why
+The libvirt provider already implemented `ExportDisk`/`GetDiskInfo` (in `provider_virsh.go`), but the gRPC `Server` never delegated to them, so the manager's migration controller received `Unimplemented`. Wiring them restores libvirt as a migration source and makes its capability advertisement honest. Fixes #177.
+
+### Impact
+- [ ] Breaking change — additive: an RPC that returned `Unimplemented` now returns real results
+- [ ] Requires cluster rollout — effect applies after the libvirt provider image is updated
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-06-06 06:55] - Security: bump Go toolchain 1.26.3 → 1.26.4 (clears 3 stdlib CVEs)
 **Author:** @wrkode (William Rizzo)
 

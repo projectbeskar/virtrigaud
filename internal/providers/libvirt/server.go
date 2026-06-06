@@ -459,6 +459,76 @@ func (s *Server) GetCapabilities(ctx context.Context, req *providerv1.GetCapabil
 		SupportsImageImport:         false, // ImagePrepare RPC not implemented yet (issue #154)
 		SupportedDiskTypes:          []string{"qcow2", "raw", "vmdk"},
 		SupportedNetworkTypes:       []string{"virtio", "e1000", "rtl8139"},
+		SupportsDiskExport:          true, // ExportDisk wired to virsh impl (issue #177)
+		SupportsDiskImport:          true, // ImportDisk wired (pvc:///file:// sources)
+		SupportedExportFormats:      []string{"qcow2", "raw"},
+		SupportedImportFormats:      []string{"qcow2", "raw", "vmdk"},
+		SupportsExportCompression:   false, // Export path does not compress (migration favours speed)
+	}, nil
+}
+
+// ExportDisk exports a VM disk for migration. It delegates to the libvirt
+// Provider implementation (provider_virsh.go), translating between the gRPC and
+// provider-contract types. Previously this RPC was unreachable over gRPC and
+// returned Unimplemented despite a working implementation (issue #177).
+func (s *Server) ExportDisk(ctx context.Context, req *providerv1.ExportDiskRequest) (*providerv1.ExportDiskResponse, error) {
+	if s.provider == nil {
+		return nil, fmt.Errorf("provider not initialized")
+	}
+
+	resp, err := s.provider.ExportDisk(ctx, contracts.ExportDiskRequest{
+		VmId:           req.VmId,
+		DiskId:         req.DiskId,
+		SnapshotId:     req.SnapshotId,
+		DestinationURL: req.DestinationUrl,
+		Format:         req.Format,
+		Compress:       req.Compress,
+		Credentials:    req.Credentials,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to export disk: %w", err)
+	}
+
+	result := &providerv1.ExportDiskResponse{
+		ExportId:           resp.ExportId,
+		EstimatedSizeBytes: resp.EstimatedSizeBytes,
+		Checksum:           resp.Checksum,
+	}
+	if resp.TaskRef != "" {
+		result.Task = &providerv1.TaskRef{Id: resp.TaskRef}
+	}
+
+	return result, nil
+}
+
+// GetDiskInfo returns details about a VM disk for migration planning. It
+// delegates to the libvirt Provider implementation (provider_virsh.go),
+// translating between the gRPC and provider-contract types. Previously this RPC
+// was unreachable over gRPC and returned Unimplemented (issue #177).
+func (s *Server) GetDiskInfo(ctx context.Context, req *providerv1.GetDiskInfoRequest) (*providerv1.GetDiskInfoResponse, error) {
+	if s.provider == nil {
+		return nil, fmt.Errorf("provider not initialized")
+	}
+
+	resp, err := s.provider.GetDiskInfo(ctx, contracts.GetDiskInfoRequest{
+		VmId:       req.VmId,
+		DiskId:     req.DiskId,
+		SnapshotId: req.SnapshotId,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get disk info: %w", err)
+	}
+
+	return &providerv1.GetDiskInfoResponse{
+		DiskId:           resp.DiskId,
+		Format:           resp.Format,
+		VirtualSizeBytes: resp.VirtualSizeBytes,
+		ActualSizeBytes:  resp.ActualSizeBytes,
+		Path:             resp.Path,
+		IsBootable:       resp.IsBootable,
+		Snapshots:        resp.Snapshots,
+		BackingFile:      resp.BackingFile,
+		Metadata:         resp.Metadata,
 	}, nil
 }
 
