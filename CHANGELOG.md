@@ -24,6 +24,23 @@ The libvirt provider already implemented `ExportDisk`/`GetDiskInfo` (in `provide
 - [ ] Config change only
 - [ ] Documentation only
 
+## [2026-06-06 07:50] - Chart: disable templated standalone providers by default (#173)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `charts/virtrigaud/values.yaml`: `providers.libvirt.enabled` and `providers.vsphere.enabled` now default to `false` (proxmox already was). Under the v0.3.7 secure-by-default provider auth (ADR-0003 / #148), a default `helm install` rendered standalone provider Deployments with neither TLS material nor the plaintext opt-out, so they fail-closed and crash-looped. Providers are normally deployed by the manager's ProviderController from `Provider` CRs; the chart-templated Deployments are an opt-in.
+- `charts/virtrigaud/README.md`: removed `--set providers.*.enabled=true` from the casual install example, updated the Provider Configuration section to the new defaults, and documented that opting in also requires the `providerTLS` block (`secretName` for mTLS, or `insecure=true` for audit-flagged plaintext) — otherwise the provider crash-loops.
+- `charts/virtrigaud/values.yaml`: added an explanatory comment on the `providers:` block describing the opt-in contract.
+
+### Why
+The out-of-box experience of the published chart was a crash-loop (the manager and CR-deployed providers were unaffected). Defaulting the templated providers to disabled matches the documented architecture — providers come from `Provider` CRs — and the opt-in path (verified via `helm template`) still wires `providerTLS` correctly. Fixes #173.
+
+### Impact
+- [ ] Breaking change — only affects operators who relied on the chart auto-templating standalone libvirt/vsphere providers (which were crash-looping anyway); they now set `providers.<name>.enabled=true` explicitly plus `providerTLS`.
+- [ ] Requires cluster rollout
+- [x] Chart + docs change only
+- [ ] Documentation only
+
 ## [2026-06-06 06:55] - Security: bump Go toolchain 1.26.3 → 1.26.4 (clears 3 stdlib CVEs)
 **Author:** @wrkode (William Rizzo)
 
