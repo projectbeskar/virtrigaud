@@ -41,6 +41,8 @@ import (
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
 	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
+	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
+	"github.com/projectbeskar/virtrigaud/internal/runtime/remote"
 	"github.com/projectbeskar/virtrigaud/internal/util"
 )
 
@@ -111,10 +113,37 @@ const envProviderInsecure = "VIRTRIGAUD_PROVIDER_INSECURE"
 // VolumeMount (in buildProviderContainer) — must match.
 const providerTLSVolumeName = "provider-tls"
 
+// Capability-reporting Condition vocabulary surfaced on
+// Provider.Status.Conditions (issue #176). The reconciler best-effort
+// queries the provider's GetCapabilities RPC once the provider runtime is
+// Running and surfaces the outcome here. This is purely informational: a
+// failure to report capabilities never flips Healthy or fails the
+// reconcile (see reconcileReportedCapabilities).
+//
+// Reasons:
+//   - CapabilitiesFetched — capabilities were fetched and recorded on
+//     Status.ReportedCapabilities.
+//   - CapabilitiesUnavailable — the provider could not be resolved, the
+//     resolved provider does not implement CapabilityReporter, or the
+//     GetCapabilities RPC failed. Best-effort; non-fatal.
+const (
+	providerConditionCapabilitiesReported = "CapabilitiesReported"
+	providerReasonCapabilitiesFetched     = "CapabilitiesFetched"
+	providerReasonCapabilitiesUnavailable = "CapabilitiesUnavailable"
+)
+
 // ProviderReconciler reconciles a Provider object
 type ProviderReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	// RemoteResolver resolves a Provider CR to a transport-level
+	// contracts.Provider (the gRPC client) so the reconciler can query the
+	// running provider — currently used to best-effort fetch capabilities
+	// for Status.ReportedCapabilities (issue #176). May be nil in tests
+	// that do not exercise capability reporting; reconcileReportedCapabilities
+	// is nil-safe and treats a nil resolver as "capabilities unavailable".
+	RemoteResolver *remote.Resolver
 }
 
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=providers,verbs=get;list;watch;create;update;patch;delete
@@ -210,6 +239,16 @@ func (r *ProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 		provider.Status.LastHealthCheck = &now
 	}
 
+	// Best-effort: once the provider is available and its runtime is
+	// Running, query and surface the provider's self-reported capabilities
+	// (issue #176). This must never fail the reconcile or flip Healthy —
+	// see reconcileReportedCapabilities.
+	if provider.Status.Healthy &&
+		provider.Status.Runtime != nil &&
+		provider.Status.Runtime.Phase == infravirtrigaudiov1beta1.ProviderRuntimePhaseRunning {
+		r.reconcileReportedCapabilities(ctx, &provider)
+	}
+
 	// Update provider status with retry on conflict
 	provider.Status.ObservedGeneration = provider.Generation
 	updateErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -234,6 +273,97 @@ func (r *ProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 	}
 
 	return result, err
+}
+
+// reconcileReportedCapabilities best-effort fetches the provider's
+// self-reported capabilities and records them on
+// Status.ReportedCapabilities plus a CapabilitiesReported Condition
+// (issue #176).
+//
+// This is strictly informational and MUST NOT affect reconcile outcome or
+// the Healthy/Available status:
+//   - A nil RemoteResolver, a resolve failure, a resolved provider that
+//     does not implement contracts.CapabilityReporter, or a failing
+//     GetCapabilities RPC all log at V(1)/info and set the Condition to
+//     False with reason CapabilitiesUnavailable. The previously-recorded
+//     ReportedCapabilities (if any) are left untouched so a transient blip
+//     does not erase a known-good snapshot.
+//   - On success the Condition is True (reason CapabilitiesFetched) and
+//     ReportedCapabilities is overwritten with the fresh snapshot.
+func (r *ProviderReconciler) reconcileReportedCapabilities(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) {
+	logger := log.FromContext(ctx)
+
+	if r.RemoteResolver == nil {
+		logger.V(1).Info("Skipping capability report: no remote resolver configured",
+			"provider", provider.Name, "namespace", provider.Namespace)
+		k8s.SetCondition(&provider.Status.Conditions,
+			providerConditionCapabilitiesReported, metav1.ConditionFalse,
+			providerReasonCapabilitiesUnavailable, "No remote resolver configured")
+		return
+	}
+
+	providerInstance, err := r.RemoteResolver.GetProvider(ctx, provider)
+	if err != nil {
+		logger.V(1).Info("Skipping capability report: failed to resolve provider",
+			"provider", provider.Name, "namespace", provider.Namespace, "error", err.Error())
+		k8s.SetCondition(&provider.Status.Conditions,
+			providerConditionCapabilitiesReported, metav1.ConditionFalse,
+			providerReasonCapabilitiesUnavailable,
+			fmt.Sprintf("Failed to resolve provider: %v", err))
+		return
+	}
+
+	reporter, ok := providerInstance.(contracts.CapabilityReporter)
+	if !ok {
+		// Fail open: a provider transport that does not implement the
+		// optional CapabilityReporter is not an error, just an absence of
+		// data. Never block on it.
+		logger.V(1).Info("Skipping capability report: provider does not implement CapabilityReporter",
+			"provider", provider.Name, "namespace", provider.Namespace)
+		k8s.SetCondition(&provider.Status.Conditions,
+			providerConditionCapabilitiesReported, metav1.ConditionFalse,
+			providerReasonCapabilitiesUnavailable,
+			"Provider does not report capabilities")
+		return
+	}
+
+	caps, err := reporter.GetCapabilities(ctx)
+	if err != nil {
+		logger.V(1).Info("Skipping capability report: GetCapabilities RPC failed",
+			"provider", provider.Name, "namespace", provider.Namespace, "error", err.Error())
+		k8s.SetCondition(&provider.Status.Conditions,
+			providerConditionCapabilitiesReported, metav1.ConditionFalse,
+			providerReasonCapabilitiesUnavailable,
+			fmt.Sprintf("GetCapabilities RPC failed: %v", err))
+		return
+	}
+
+	provider.Status.ReportedCapabilities = capabilitiesToReported(caps)
+	k8s.SetCondition(&provider.Status.Conditions,
+		providerConditionCapabilitiesReported, metav1.ConditionTrue,
+		providerReasonCapabilitiesFetched, "Provider capabilities reported")
+}
+
+// capabilitiesToReported maps the transport-agnostic contracts.Capabilities
+// onto the CRD-facing v1beta1.ReportedCapabilities surfaced on Provider
+// status (issue #176). The two structs are intentionally field-for-field
+// mirrors; this helper is the single conversion point.
+func capabilitiesToReported(caps contracts.Capabilities) *infravirtrigaudiov1beta1.ReportedCapabilities {
+	return &infravirtrigaudiov1beta1.ReportedCapabilities{
+		SupportsReconfigureOnline:   caps.SupportsReconfigureOnline,
+		SupportsDiskExpansionOnline: caps.SupportsDiskExpansionOnline,
+		SupportsSnapshots:           caps.SupportsSnapshots,
+		SupportsMemorySnapshots:     caps.SupportsMemorySnapshots,
+		SupportsLinkedClones:        caps.SupportsLinkedClones,
+		SupportsImageImport:         caps.SupportsImageImport,
+		SupportedDiskTypes:          caps.SupportedDiskTypes,
+		SupportedNetworkTypes:       caps.SupportedNetworkTypes,
+		SupportsDiskExport:          caps.SupportsDiskExport,
+		SupportsDiskImport:          caps.SupportsDiskImport,
+		SupportedExportFormats:      caps.SupportedExportFormats,
+		SupportedImportFormats:      caps.SupportedImportFormats,
+		SupportsExportCompression:   caps.SupportsExportCompression,
+	}
 }
 
 // handleDeletion cleans up remote runtime resources when Provider is deleted
