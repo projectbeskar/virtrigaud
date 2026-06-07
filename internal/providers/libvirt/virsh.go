@@ -261,9 +261,93 @@ type VirshResult struct {
 	Duration time.Duration
 }
 
-// runVirshCommand executes a virsh command with proper environment and error handling
-// Special case: if first arg is "!", execute the remaining args as a direct command (not virsh)
+// sshConnectMaxAttempts and sshConnectBaseBackoff bound the retry of a
+// virsh-over-SSH command when the SSH *connection* (not the virsh command)
+// fails transiently — e.g. the host throttles/refuses connections under
+// MaxStartups/fail2ban, surfacing as `kex_exchange_identification` (#191).
+// They are package vars (not consts) only so tests can shrink the backoff.
+var (
+	sshConnectMaxAttempts = 3
+	sshConnectBaseBackoff = 1 * time.Second
+)
+
+// transientSSHConnectError reports whether stderr indicates a transient SSH
+// *connection* failure — the host refused or closed the connection before the
+// remote command ran. These are safe to retry because the virsh command never
+// executed, so a retry cannot duplicate a side effect. Real virsh errors (e.g.
+// "domain not found") never match and are returned immediately (#191).
+func transientSSHConnectError(stderr string) bool {
+	s := strings.ToLower(stderr)
+	for _, m := range []string{
+		"kex_exchange_identification",      // host closed conn during key exchange (MaxStartups/fail2ban)
+		"connection closed by remote host", // host dropped the connection pre-auth
+		"connection reset by peer",
+		"connection refused",
+		"connection timed out",
+		"no route to host",
+		"ssh: connect to host",                 // generic ssh connect failure
+		"temporary failure in name resolution", // transient DNS
+	} {
+		if strings.Contains(s, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// runVirshCommand executes a virsh command, transparently retrying ONLY
+// transient SSH-connection failures (see transientSSHConnectError) with bounded
+// exponential backoff. Real virsh errors and the success path return on the
+// first attempt, so behavior is unchanged except under host-side SSH throttling
+// (#191). Retries stop early if the context is cancelled.
+//
+// Special case: if the first arg is "!", the remaining args run as a direct
+// command (not through virsh).
 func (v *VirshProvider) runVirshCommand(ctx context.Context, args ...string) (*VirshResult, error) {
+	return retryOnTransientSSH(ctx, func() (*VirshResult, error) {
+		return v.runVirshCommandOnce(ctx, args...)
+	})
+}
+
+// retryOnTransientSSH invokes attempt up to sshConnectMaxAttempts times, retrying
+// (with exponential backoff, honoring ctx) ONLY when the attempt's result stderr
+// indicates a transient SSH connection failure. Any other error — including a
+// real virsh command error — and the success path return immediately (#191).
+func retryOnTransientSSH(ctx context.Context, attempt func() (*VirshResult, error)) (*VirshResult, error) {
+	var result *VirshResult
+	var err error
+	backoff := sshConnectBaseBackoff
+
+	for n := 1; n <= sshConnectMaxAttempts; n++ {
+		result, err = attempt()
+		if err == nil {
+			return result, nil
+		}
+
+		stderr := ""
+		if result != nil {
+			stderr = result.Stderr
+		}
+		if n == sshConnectMaxAttempts || !transientSSHConnectError(stderr) {
+			return result, err
+		}
+
+		log.Printf("WARN Transient SSH connection failure (attempt %d/%d), retrying in %v: %s",
+			n, sshConnectMaxAttempts, backoff, strings.TrimSpace(stderr))
+		select {
+		case <-ctx.Done():
+			return result, err
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+	}
+	return result, err
+}
+
+// runVirshCommandOnce executes a virsh command once with proper environment and
+// error handling. Special case: if first arg is "!", execute the remaining args
+// as a direct command (not virsh).
+func (v *VirshProvider) runVirshCommandOnce(ctx context.Context, args ...string) (*VirshResult, error) {
 	start := time.Now()
 
 	var cmd *exec.Cmd

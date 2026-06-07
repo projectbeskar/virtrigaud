@@ -5,6 +5,24 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-07 17:05] - libvirt provider: retry transient SSH connection failures (#191)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/libvirt/virsh.go`: the libvirt provider runs every `virsh` command as a fresh `sshpass -e ssh` process, so a burst of operations opens a burst of SSH handshakes. When the libvirt host throttles connections (sshd `MaxStartups`, fail2ban) it closes the connection during key exchange, surfacing as `kex_exchange_identification: Connection closed by remote host` and tripping the provider circuit breaker. `runVirshCommand` now retries **only** transient SSH *connection* failures (classified from stderr: `kex_exchange_identification`, connection refused/reset/timed-out, no-route-to-host, transient DNS) with bounded exponential backoff (3 attempts), honoring context cancellation. Real virsh errors (e.g. "domain not found") and the success path return on the first attempt — behavior is unchanged except under host-side SSH throttling.
+
+### Added
+- `internal/providers/libvirt/virsh_retry_test.go`: tests for the transient-error classifier (transient connect errors vs. real virsh errors) and the retry loop (retries-then-succeeds, real-error-no-retry, attempt exhaustion, context-cancel).
+
+### Why
+Recurring on the lab (`I1`): host `172.16.56.8` repeatedly closed SSH connections during migration/clone E2E windows, making managed VMs appear unreachable. This makes a momentary host-side refusal recoverable instead of fatal. **The root cause is partly host-side** — operators must still tune `MaxStartups`/fail2ban on the libvirt host; connection multiplexing (ControlMaster) is tracked as a follow-up.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (libvirt provider only; no CRD/proto change)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-06-07 17:00] - vSphere provider: keep vCenter session alive + real-probe reconnect (#190)
 **Author:** @wrkode (William Rizzo)
 
