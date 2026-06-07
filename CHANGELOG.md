@@ -5,6 +5,24 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-07 12:05] - vSphere: advertise disk export/import capabilities accurately (#178)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/vsphere/server.go`: `GetCapabilities` now reports `SupportsDiskExport=true`, `SupportsDiskImport=true`, `SupportedExportFormats=[vmdk, qcow2, raw]`, `SupportedImportFormats=[vmdk, qcow2, raw]`, and `SupportsExportCompression=true`. These were previously left at the zero value (`false`/empty), understating capabilities that vSphere actually implements (`ExportDisk` clones to a compressed streamOptimized VMDK and converts to the target format; `ImportDisk` accepts and converts those formats).
+
+### Added
+- `internal/providers/vsphere/capabilities_test.go`: asserts the corrected disk-migration flags + formats, and that existing flags are unchanged.
+
+### Why
+The understated flags are harmless today (the manager surfaces but does not yet enforce capabilities) but become load-bearing once `--enforce-provider-capabilities` (#176) is enabled: gating on `SupportsDiskExport`/`SupportsDiskImport=false` would wrongly refuse vSphere migrations it can actually perform. Confirmed live on the lab during #176 validation — vSphere's `status.reportedCapabilities` showed disk export/import absent (false). This unblocks safely enabling capability gating. Fixes #178.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout — only to ship the rebuilt vSphere provider image; no behavior change (capabilities are advisory until gating is enabled)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-06-07 12:00] - Capability negotiation: surface provider capabilities + opt-in gating (#176)
 **Author:** @wrkode (William Rizzo)
 

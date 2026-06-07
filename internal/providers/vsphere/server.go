@@ -379,6 +379,14 @@ func (p *Provider) GetCapabilities(ctx context.Context, req *providerv1.GetCapab
 		SupportsImageImport:         true,
 		SupportedDiskTypes:          []string{"thin", "thick", "eager-zeroed"},
 		SupportedNetworkTypes:       []string{"standard", "distributed"},
+		// Disk migration: ExportDisk and ImportDisk are implemented (issue #178).
+		// Previously these were left at the zero value, understating real support
+		// and (once capability gating is enabled, #176) wrongly blocking migration.
+		SupportsDiskExport:        true,
+		SupportsDiskImport:        true,
+		SupportedExportFormats:    []string{"vmdk", "qcow2", "raw"}, // ExportDisk converts the streamOptimized VMDK to these
+		SupportedImportFormats:    []string{"vmdk", "qcow2", "raw"}, // ImportDisk accepts these and converts to VMDK
+		SupportsExportCompression: true,                             // export uses the compressed streamOptimized VMDK format
 	}, nil
 }
 
