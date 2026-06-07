@@ -64,6 +64,7 @@ rules:
   resources:
   - providers/finalizers
   - virtualmachines/finalizers
+  - vmclones/finalizers
   - vmmigrations/finalizers
   - vmsnapshots/finalizers
   verbs:
@@ -73,7 +74,9 @@ rules:
   resources:
   - providers/status
   - virtualmachines/status
+  - vmclones/status
   - vmmigrations/status
+  - vmsets/status
   - vmsnapshots/status
   verbs:
   - get
@@ -93,8 +96,19 @@ rules:
 - apiGroups:
   - infra.virtrigaud.io
   resources:
+  - vmclones
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - infra.virtrigaud.io
+  resources:
   - vmimages
   - vmnetworkattachments
+  - vmsets
   verbs:
   - get
   - list

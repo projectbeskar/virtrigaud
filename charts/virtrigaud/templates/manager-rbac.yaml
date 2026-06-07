@@ -23,8 +23,9 @@ metadata:
 rules:
 # virtrigaud CRDs the manager actively manages (create + mutate + delete).
 # Verb sets are least-privilege per issue #152: only the resources whose
-# controllers actually write are granted write verbs. vmclones, vmsets and
-# vmplacementpolicies were dropped — no controller reconciles them.
+# controllers actually write are granted write verbs. vmplacementpolicy
+# remains reference-only (no standalone controller); vmclones and vmsets now
+# have controllers and are granted their scoped verbs below (issue #179).
 - apiGroups:
   - infra.virtrigaud.io
   resources:
@@ -48,6 +49,39 @@ rules:
   - patch
   - update
   - watch
+# VMClone has a controller (issue #179) that updates the VMClone and its
+# status/finalizers but never creates or deletes VMClones (users do). It
+# creates VirtualMachines — that write verb is granted in the block above.
+- apiGroups:
+  - infra.virtrigaud.io
+  resources:
+  - vmclones
+  - vmclones/status
+  - vmclones/finalizers
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+# VMSet has a not-yet-active stub controller (issue #179) that only reports a
+# ControllerNotImplemented condition: read VMSets, write only their status.
+- apiGroups:
+  - infra.virtrigaud.io
+  resources:
+  - vmsets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - infra.virtrigaud.io
+  resources:
+  - vmsets/status
+  verbs:
+  - get
+  - patch
+  - update
 # VMClass is created/updated by the adoption controller but never deleted by
 # the manager, so it omits the delete verb.
 - apiGroups:
@@ -184,8 +218,9 @@ metadata:
 rules:
 # virtrigaud CRDs the manager actively manages (create + mutate + delete).
 # Verb sets are least-privilege per issue #152: only the resources whose
-# controllers actually write are granted write verbs. vmclones, vmsets and
-# vmplacementpolicies were dropped — no controller reconciles them.
+# controllers actually write are granted write verbs. vmplacementpolicy
+# remains reference-only (no standalone controller); vmclones and vmsets now
+# have controllers and are granted their scoped verbs below (issue #179).
 - apiGroups:
   - infra.virtrigaud.io
   resources:
@@ -209,6 +244,39 @@ rules:
   - patch
   - update
   - watch
+# VMClone has a controller (issue #179) that updates the VMClone and its
+# status/finalizers but never creates or deletes VMClones (users do). It
+# creates VirtualMachines — that write verb is granted in the block above.
+- apiGroups:
+  - infra.virtrigaud.io
+  resources:
+  - vmclones
+  - vmclones/status
+  - vmclones/finalizers
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+# VMSet has a not-yet-active stub controller (issue #179) that only reports a
+# ControllerNotImplemented condition: read VMSets, write only their status.
+- apiGroups:
+  - infra.virtrigaud.io
+  resources:
+  - vmsets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - infra.virtrigaud.io
+  resources:
+  - vmsets/status
+  verbs:
+  - get
+  - patch
+  - update
 # VMClass is created/updated by the adoption controller but never deleted by
 # the manager, so it omits the delete verb.
 - apiGroups:

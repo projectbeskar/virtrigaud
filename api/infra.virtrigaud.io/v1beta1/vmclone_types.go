@@ -484,6 +484,13 @@ type VMCloneStatus struct {
 	// +optional
 	TargetRef *LocalObjectReference `json:"targetRef,omitempty"`
 
+	// TargetVMID is the provider-specific identifier of the cloned VM as
+	// returned by the provider Clone operation. The controller persists it so
+	// the produced VirtualMachine CR's Status.ID can be seeded after an
+	// asynchronous clone task completes.
+	// +optional
+	TargetVMID string `json:"targetVMID,omitempty"`
+
 	// Phase represents the current phase of the clone operation
 	// +optional
 	Phase ClonePhase `json:"phase,omitempty"`

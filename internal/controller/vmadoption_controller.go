@@ -60,6 +60,16 @@ const (
 	// Format: JSON object with optional fields: namePattern, powerState, minCPU, minMemoryMiB, maxCPU, maxMemoryMiB
 	// Example: {"namePattern": "prod-.*", "powerState": "on", "minCPU": 2}
 	AdoptionFilterAnnotation = "virtrigaud.io/adopt-filter"
+	// AdoptedLabel marks a VirtualMachine CR whose underlying VM already
+	// exists on the provider (it was adopted from the hypervisor or produced
+	// by the clone controller) rather than created by the VirtualMachine
+	// controller. The VirtualMachine controller uses this label to avoid a
+	// double-create while the adopting/cloning controller is still setting
+	// Status.ID (issue #179).
+	AdoptedLabel = "virtrigaud.io/adopted"
+	// AdoptedLabelValue is the value AdoptedLabel must hold to mark a VM as
+	// adopted.
+	AdoptedLabelValue = "true"
 )
 
 // VMAdoptionFilter defines the filter criteria for VM adoption
@@ -324,7 +334,7 @@ func (r *VMAdoptionReconciler) adoptVM(ctx context.Context, provider *infravirtr
 	}
 	if err := r.Get(ctx, vmKey, existingVM); err == nil {
 		// VM CR exists - check if it's an adopted VM that needs Status.ID fixed
-		if existingVM.Labels != nil && existingVM.Labels["virtrigaud.io/adopted"] == "true" {
+		if existingVM.Labels != nil && existingVM.Labels[AdoptedLabel] == AdoptedLabelValue {
 			if existingVM.Status.ID == "" {
 				// This is an adopted VM created before the status fix - update status now
 				logger.Info("Fixing Status.ID for existing adopted VM", "vm_name", vmName, "vm_id", vmInfo.ID)
@@ -365,7 +375,7 @@ func (r *VMAdoptionReconciler) adoptVM(ctx context.Context, provider *infravirtr
 			Name:      vmName,
 			Namespace: provider.Namespace,
 			Labels: map[string]string{
-				"virtrigaud.io/adopted": "true",
+				AdoptedLabel: AdoptedLabelValue,
 			},
 		},
 		Spec: infravirtrigaudiov1beta1.VirtualMachineSpec{
@@ -469,7 +479,7 @@ func (r *VMAdoptionReconciler) ensureVMClass(ctx context.Context, vmInfo contrac
 			Name:      className,
 			Namespace: namespace,
 			Labels: map[string]string{
-				"virtrigaud.io/adopted": "true",
+				AdoptedLabel: AdoptedLabelValue,
 			},
 		},
 		Spec: infravirtrigaudiov1beta1.VMClassSpec{

@@ -39,6 +39,15 @@ import (
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
+// Compile-time assertions that the gRPC Client satisfies the core Provider
+// interface plus the optional capability interfaces it advertises via
+// type-assertion (issues #176, #179).
+var (
+	_ contracts.Provider           = (*Client)(nil)
+	_ contracts.CapabilityReporter = (*Client)(nil)
+	_ contracts.Cloner             = (*Client)(nil)
+)
+
 // Client wraps a gRPC provider client and implements the contracts.Provider interface
 type Client struct {
 	conn   *grpc.ClientConn
@@ -446,6 +455,42 @@ func (c *Client) GetCapabilities(ctx context.Context) (contracts.Capabilities, e
 		SupportedImportFormats:      resp.SupportedImportFormats,
 		SupportsExportCompression:   resp.SupportsExportCompression,
 	}, nil
+}
+
+// Clone implements contracts.Cloner. It clones an existing VM over gRPC so the
+// VMClone controller can produce a target VM on the source provider (issue
+// #179). Clone is exposed as an optional capability (type-asserted from
+// contracts.Provider), mirroring GetCapabilities, so providers that do not
+// support cloning are unaffected.
+func (c *Client) Clone(ctx context.Context, req contracts.CloneRequest) (contracts.CloneResponse, error) {
+	// Clone can be a long-running provider operation; use the same generous
+	// timeout as Create. The returned TaskRef lets the caller poll for
+	// completion regardless.
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+
+	resp, err := c.client.Clone(ctx, &providerv1.CloneRequest{
+		SourceVmId:    req.SourceVmID,
+		TargetName:    req.TargetName,
+		Linked:        req.Linked,
+		ClassJson:     req.ClassJSON,
+		PlacementJson: req.PlacementJSON,
+		CustomizeJson: req.CustomizeJSON,
+	})
+	if err != nil {
+		return contracts.CloneResponse{}, c.mapGRPCError("clone", err)
+	}
+
+	result := contracts.CloneResponse{
+		TargetVmID: resp.TargetVmId,
+	}
+
+	if resp.Task != nil {
+		result.TaskRef = resp.Task.Id
+		c.trackTaskStart(resp.Task.Id) // G7.3 (#129)
+	}
+
+	return result, nil
 }
 
 // Create implements contracts.Provider.

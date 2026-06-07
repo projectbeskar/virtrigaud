@@ -98,18 +98,18 @@ For a full security disclosure, see the [Security Operations Guide](https://proj
 
 ## CRDs (10 total, all v1beta1)
 
-| CRD | Short name | Description |
-|-----|-----------|-------------|
-| VirtualMachine | vm | A virtual machine instance |
-| VMClass | vmc | Resource profile (CPU, memory, disk) |
-| VMImage | vmi | Base template or image reference |
-| VMNetworkAttachment | vmna | Network configuration |
-| Provider | prov | Hypervisor connection + runtime config |
-| VMMigration | vmmig | Cross-provider VM migration |
-| VMSet | vmset | Multi-VM replica set |
-| VMPlacementPolicy | — | Placement rules (affinity, resources) |
-| VMSnapshot | — | Snapshot lifecycle management |
-| VMClone | — | Cloning operations |
+| CRD | Short name | Controller | Description |
+|-----|-----------|------------|-------------|
+| VirtualMachine | vm | active | A virtual machine instance |
+| VMClass | vmc | active | Resource profile (CPU, memory, disk) |
+| VMImage | vmi | active | Base template or image reference |
+| VMNetworkAttachment | vmna | active | Network configuration |
+| Provider | prov | active | Hypervisor connection + runtime config |
+| VMMigration | vmmig | active | Cross-provider VM migration |
+| VMSnapshot | — | active | Snapshot lifecycle management |
+| VMClone | vmclone | active (MVP) | Cloning operations — MVP: `source.vmRef` source, same-provider, full & linked clones |
+| VMSet | vmset | not yet active | Multi-VM replica set — controller is a stub that reports `Ready=False / ControllerNotImplemented` |
+| VMPlacementPolicy | — | reference-only | Placement rules (affinity, resources) — a policy object referenced by `VirtualMachine.spec.placementRef`; no standalone controller |
 
 Note: VMAdoption is a **controller** built into the manager, not a CRD.
 
