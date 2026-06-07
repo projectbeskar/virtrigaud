@@ -419,6 +419,35 @@ func (c *Client) Validate(ctx context.Context) error {
 	return nil
 }
 
+// GetCapabilities implements contracts.CapabilityReporter. It queries the
+// provider's advertised capabilities over gRPC so the manager can surface and
+// (when enabled) gate on them (issue #176).
+func (c *Client) GetCapabilities(ctx context.Context) (contracts.Capabilities, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	resp, err := c.client.GetCapabilities(ctx, &providerv1.GetCapabilitiesRequest{})
+	if err != nil {
+		return contracts.Capabilities{}, c.mapGRPCError("get capabilities", err)
+	}
+
+	return contracts.Capabilities{
+		SupportsReconfigureOnline:   resp.SupportsReconfigureOnline,
+		SupportsDiskExpansionOnline: resp.SupportsDiskExpansionOnline,
+		SupportsSnapshots:           resp.SupportsSnapshots,
+		SupportsMemorySnapshots:     resp.SupportsMemorySnapshots,
+		SupportsLinkedClones:        resp.SupportsLinkedClones,
+		SupportsImageImport:         resp.SupportsImageImport,
+		SupportedDiskTypes:          resp.SupportedDiskTypes,
+		SupportedNetworkTypes:       resp.SupportedNetworkTypes,
+		SupportsDiskExport:          resp.SupportsDiskExport,
+		SupportsDiskImport:          resp.SupportsDiskImport,
+		SupportedExportFormats:      resp.SupportedExportFormats,
+		SupportedImportFormats:      resp.SupportedImportFormats,
+		SupportsExportCompression:   resp.SupportsExportCompression,
+	}, nil
+}
+
 // Create implements contracts.Provider.
 //
 // Records virtrigaud_vm_operations_total{operation="Create",...} via

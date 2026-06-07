@@ -2094,6 +2094,70 @@ spec:
                   the controller
                 format: int64
                 type: integer
+              reportedCapabilities:
+                description: |-
+                  ReportedCapabilities is the provider's self-reported capability set,
+                  fetched from the provider GetCapabilities RPC (issue #176). It reflects
+                  what the running provider advertises and is consumed by the manager to
+                  surface features and (when capability enforcement is enabled) to gate
+                  capability-dependent operations.
+                properties:
+                  supportedDiskTypes:
+                    description: SupportedDiskTypes lists supported disk formats.
+                    items:
+                      type: string
+                    type: array
+                  supportedExportFormats:
+                    description: SupportedExportFormats lists supported export formats.
+                    items:
+                      type: string
+                    type: array
+                  supportedImportFormats:
+                    description: SupportedImportFormats lists supported import formats.
+                    items:
+                      type: string
+                    type: array
+                  supportedNetworkTypes:
+                    description: SupportedNetworkTypes lists supported NIC models.
+                    items:
+                      type: string
+                    type: array
+                  supportsDiskExpansionOnline:
+                    description: SupportsDiskExpansionOnline reports online disk expansion
+                      support.
+                    type: boolean
+                  supportsDiskExport:
+                    description: SupportsDiskExport reports disk export (migration
+                      source) support.
+                    type: boolean
+                  supportsDiskImport:
+                    description: SupportsDiskImport reports disk import (migration
+                      target) support.
+                    type: boolean
+                  supportsExportCompression:
+                    description: SupportsExportCompression reports export compression
+                      support.
+                    type: boolean
+                  supportsImageImport:
+                    description: SupportsImageImport reports image import/preparation
+                      support.
+                    type: boolean
+                  supportsLinkedClones:
+                    description: SupportsLinkedClones reports linked (copy-on-write)
+                      clone support.
+                    type: boolean
+                  supportsMemorySnapshots:
+                    description: SupportsMemorySnapshots reports memory-inclusive
+                      snapshot support.
+                    type: boolean
+                  supportsReconfigureOnline:
+                    description: SupportsReconfigureOnline reports online CPU/memory
+                      reconfigure support.
+                    type: boolean
+                  supportsSnapshots:
+                    description: SupportsSnapshots reports VM snapshot support.
+                    type: boolean
+                type: object
               resourceUsage:
                 description: ResourceUsage provides resource usage statistics
                 properties:
