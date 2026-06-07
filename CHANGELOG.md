@@ -5,6 +5,26 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-07 17:00] - vSphere provider: keep vCenter session alive + real-probe reconnect (#190)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/vsphere/server.go`: the vSphere provider established a govmomi session once at startup and never kept it warm, so after a long idle period (no managed vSphere VMs ⇒ no API traffic) the server-side vCenter session expired and the next operation failed with `NotAuthenticated`. Worse, `Validate` gated its reconnect on the cached `client.Valid()` (no round-trip), so it reported OK while operations failed. Two-part fix:
+  - **Keepalive handler** (`session/keepalive.NewHandlerSOAP`) installed in `createVSphereClient`, probing every `vSphereKeepAliveInterval` (5m, well under vCenter's 30m default) and re-logging-in on a failed probe — so the session never idles out.
+  - **`Validate` now probes the live session** (`methods.GetCurrentTime`) instead of trusting `client.Valid()`, and reconnects with a fresh login on failure. Since the manager calls `Validate` before operations, this is the safety net.
+
+### Added
+- `internal/providers/vsphere/session_test.go`: hermetic govmomi-`simulator` tests — keepalive handler is installed on the round-tripper, and `Validate` reconnects + reports OK after the session is dropped.
+
+### Why
+Observed on the lab: the `vsphere-prod` provider ran ~8 days idle (no managed vSphere VMs), then a clone `Create` failed `NotAuthenticated` while `Validate` returned OK; a pod restart was the only recovery. This makes the provider self-heal.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (vSphere provider only; no CRD/proto change)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-06-07 10:00] - Fix VMClone target-VM bind race (Status.ID seed) (#179 follow-up)
 **Author:** @wrkode (William Rizzo)
 
