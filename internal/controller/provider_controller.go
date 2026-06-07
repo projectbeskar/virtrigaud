@@ -34,7 +34,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
@@ -913,6 +915,25 @@ func (r *ProviderReconciler) buildPodVolumes(provider *infravirtrigaudiov1beta1.
 	return volumes
 }
 
+const (
+	// migrationPVCLabelKey and migrationPVCLabelValue identify a migration scratch
+	// PVC created by the VMMigration controller. The provider controller discovers
+	// these PVCs and mounts them into provider pods so migrations can read/write
+	// the transfer disk.
+	migrationPVCLabelKey   = "virtrigaud.io/component"
+	migrationPVCLabelValue = "migration-storage"
+)
+
+// migrationPVCIsMountable reports whether a discovered migration PVC should be
+// mounted into provider pods. PVCs that are being deleted are skipped: mounting a
+// Terminating PVC into a freshly-rolled provider pod makes that pod
+// unschedulable ("persistentvolumeclaim is being deleted") and, because the
+// running provider pod keeps the PVC mounted, prevents the PVC from ever
+// finishing deletion — which wedges the provider rollout (issue #184).
+func migrationPVCIsMountable(pvc *corev1.PersistentVolumeClaim) bool {
+	return pvc.DeletionTimestamp.IsZero()
+}
+
 // discoverMigrationPVCs finds all migration PVCs in the namespace and returns volume definitions for them
 func (r *ProviderReconciler) discoverMigrationPVCs(ctx context.Context, namespace string) []corev1.Volume {
 	var volumes []corev1.Volume
@@ -922,7 +943,7 @@ func (r *ProviderReconciler) discoverMigrationPVCs(ctx context.Context, namespac
 	err := r.List(ctx, pvcList,
 		client.InNamespace(namespace),
 		client.MatchingLabels{
-			"virtrigaud.io/component": "migration-storage",
+			migrationPVCLabelKey: migrationPVCLabelValue,
 		},
 	)
 
@@ -932,7 +953,12 @@ func (r *ProviderReconciler) discoverMigrationPVCs(ctx context.Context, namespac
 	}
 
 	// Create a volume for each migration PVC
-	for _, pvc := range pvcList.Items {
+	for i := range pvcList.Items {
+		pvc := &pvcList.Items[i]
+		if !migrationPVCIsMountable(pvc) {
+			continue // PVC is being deleted; do not mount it (issue #184)
+		}
+
 		// Generate a safe volume name from PVC name (K8s volume names must be DNS label)
 		volumeName := fmt.Sprintf("migration-%s", pvc.Name)
 
@@ -958,7 +984,7 @@ func (r *ProviderReconciler) discoverMigrationVolumeMounts(ctx context.Context, 
 	err := r.List(ctx, pvcList,
 		client.InNamespace(namespace),
 		client.MatchingLabels{
-			"virtrigaud.io/component": "migration-storage",
+			migrationPVCLabelKey: migrationPVCLabelValue,
 		},
 	)
 
@@ -968,7 +994,12 @@ func (r *ProviderReconciler) discoverMigrationVolumeMounts(ctx context.Context, 
 	}
 
 	// Create a volume mount for each migration PVC
-	for _, pvc := range pvcList.Items {
+	for i := range pvcList.Items {
+		pvc := &pvcList.Items[i]
+		if !migrationPVCIsMountable(pvc) {
+			continue // PVC is being deleted; do not mount it (issue #184)
+		}
+
 		// Generate a safe volume name (must match the volume name in buildPodVolumes)
 		volumeName := fmt.Sprintf("migration-%s", pvc.Name)
 
@@ -984,6 +1015,31 @@ func (r *ProviderReconciler) discoverMigrationVolumeMounts(ctx context.Context, 
 	}
 
 	return mounts
+}
+
+// providersForMigrationPVC maps a migration storage PVC event to reconcile
+// requests for every Provider in the PVC's namespace, so provider Deployments
+// are re-rolled promptly when a migration PVC appears or starts deleting —
+// rather than waiting for the next periodic resync (issue #184). Non-migration
+// PVCs are ignored.
+func (r *ProviderReconciler) providersForMigrationPVC(ctx context.Context, obj client.Object) []reconcile.Request {
+	if obj.GetLabels()[migrationPVCLabelKey] != migrationPVCLabelValue {
+		return nil
+	}
+
+	providerList := &infravirtrigaudiov1beta1.ProviderList{}
+	if err := r.List(ctx, providerList, client.InNamespace(obj.GetNamespace())); err != nil {
+		return nil
+	}
+
+	requests := make([]reconcile.Request, 0, len(providerList.Items))
+	for i := range providerList.Items {
+		p := &providerList.Items[i]
+		requests = append(requests, reconcile.Request{
+			NamespacedName: types.NamespacedName{Namespace: p.Namespace, Name: p.Name},
+		})
+	}
+	return requests
 }
 
 // countConnectedVMs counts the number of VirtualMachines managed by this provider
@@ -1048,6 +1104,13 @@ func (r *ProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&infravirtrigaudiov1beta1.Provider{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
+		// Re-reconcile a namespace's Providers when a migration storage PVC
+		// appears or starts deleting, so provider Deployments mount/unmount it
+		// promptly instead of waiting for the next resync (issue #184).
+		Watches(
+			&corev1.PersistentVolumeClaim{},
+			handler.EnqueueRequestsFromMapFunc(r.providersForMigrationPVC),
+		).
 		WithOptions(controller.Options{
 			MaxConcurrentReconciles: 5, // Process up to 5 providers in parallel
 		}).

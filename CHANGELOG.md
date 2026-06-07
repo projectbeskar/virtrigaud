@@ -5,6 +5,26 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-06 13:57] - Fix: migration PVCs being deleted no longer wedge the provider rollout (#184)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/controller/provider_controller.go`: `discoverMigrationPVCs` and `discoverMigrationVolumeMounts` now **skip migration PVCs that are being deleted** (`DeletionTimestamp != nil`). Mounting a `Terminating` PVC into a freshly-rolled provider pod made that pod unschedulable (`persistentvolumeclaim "<pvc>" is being deleted`); combined with the running pod holding the PVC, this deadlocked both the PVC deletion and the provider rollout.
+- `internal/controller/provider_controller.go`: the provider controller now **watches migration-storage PVCs** and re-reconciles the namespace's `Provider`s when one appears or starts deleting, so provider Deployments mount/unmount migration storage promptly instead of waiting for the next resync.
+- Extracted the migration-PVC label into `migrationPVCLabelKey`/`migrationPVCLabelValue` constants (was a repeated literal).
+
+### Added
+- `internal/controller/provider_controller_migration_test.go`: unit tests (fake client) asserting deleting PVCs are skipped by both discovery functions and that the PVC→Provider watch map function enqueues same-namespace providers (and ignores non-migration PVCs).
+
+### Why
+A `VMMigration` that fails or is deleted mid-flight leaves its scratch PVC being deleted while the long-running provider pod still mounts it. The provider controller previously re-mounted every `migration-storage` PVC unconditionally, so the deleting PVC could never be unmounted — wedging the source provider's next rollout and leaving the PVC stuck `Terminating`. Observed on the lab during #177 validation; recovery required manual finalizer/annotation surgery. Fixes #184.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout — manager image must be updated to get the fix
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-06-06 08:04] - Libvirt: wire ExportDisk/GetDiskInfo into the gRPC server (#177)
 **Author:** @wrkode (William Rizzo)
 
