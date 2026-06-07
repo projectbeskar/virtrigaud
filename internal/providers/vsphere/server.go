@@ -35,8 +35,10 @@ import (
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/property"
 	"github.com/vmware/govmomi/session"
+	"github.com/vmware/govmomi/session/keepalive"
 	"github.com/vmware/govmomi/view"
 	"github.com/vmware/govmomi/vim25"
+	"github.com/vmware/govmomi/vim25/methods"
 	"github.com/vmware/govmomi/vim25/mo"
 	"github.com/vmware/govmomi/vim25/soap"
 	"github.com/vmware/govmomi/vim25/types"
@@ -143,6 +145,11 @@ func loadCredentialsFromFiles(config *Config) error {
 	return nil
 }
 
+// vSphereKeepAliveInterval is how often the keepalive handler probes vCenter to
+// keep the session from idling out. It must be comfortably below the vCenter
+// session timeout (default 30 minutes); 5 minutes leaves wide margin (#190).
+const vSphereKeepAliveInterval = 5 * time.Minute
+
 // createVSphereClient establishes an authenticated govmomi session against the vCenter
 // SOAP API described by config and returns a connected govmomi.Client together with a
 // Finder configured to search the default datacenter.
@@ -190,8 +197,30 @@ func createVSphereClient(config *Config) (*govmomi.Client, *find.Finder, error) 
 		SessionManager: session.NewManager(vimClient),
 	}
 
-	// Login to vSphere with explicit credentials (proper govmomi authentication method)
 	userInfo := url.UserPassword(config.Username, config.Password)
+
+	// Keep the vCenter session warm so it does not silently expire during long
+	// idle periods. When no VirtRigaud-managed vSphere VMs exist there is no API
+	// traffic, the server-side session times out, and the next operation fails
+	// with NotAuthenticated even though the cached client looks valid (#190).
+	//
+	// The keepalive goroutine is started by the Login below (HandlerSOAP starts
+	// its ticker on a Login round-trip) and probes every vSphereKeepAliveInterval.
+	// On a failed probe it re-logs-in and returns nil so the goroutine keeps
+	// running; Start() is idempotent, so the re-login round-trip is safe. It
+	// returns an error — which permanently stops the goroutine — only when the
+	// re-login itself fails, in which case Validate's real-probe reconnect is the
+	// safety net.
+	vimClient.RoundTripper = keepalive.NewHandlerSOAP(vimClient.RoundTripper, vSphereKeepAliveInterval, func() error {
+		ctx := context.Background()
+		if _, err := methods.GetCurrentTime(ctx, vimClient); err != nil {
+			return client.Login(ctx, userInfo)
+		}
+		return nil
+	})
+
+	// Login to vSphere with explicit credentials (proper govmomi authentication
+	// method). This also starts the keepalive ticker configured above.
 	if err := client.Login(context.Background(), userInfo); err != nil {
 		return nil, nil, fmt.Errorf("failed to login to vSphere: %w", err)
 	}
@@ -339,14 +368,19 @@ func (p *Provider) Validate(ctx context.Context, req *providerv1.ValidateRequest
 		}, nil
 	}
 
-	// Test the connection by checking if the session is valid
-	if !p.client.Valid() {
-		// Try to reconnect
-		client, finder, err := createVSphereClient(p.config)
-		if err != nil {
+	// Probe the live session rather than trusting the cached client.Valid(),
+	// which returns true even after the server-side session has expired during a
+	// long idle — the exact failure mode where Validate reported OK while the
+	// next operation hit NotAuthenticated (#190). GetCurrentTime round-trips to
+	// vCenter; on failure, reconnect with a fresh login. Because the manager
+	// calls Validate before operations, this real probe is the safety net that
+	// complements the keepalive handler in createVSphereClient.
+	if _, err := methods.GetCurrentTime(ctx, p.client.Client); err != nil {
+		client, finder, rerr := createVSphereClient(p.config)
+		if rerr != nil {
 			return &providerv1.ValidateResponse{
 				Ok:      false,
-				Message: fmt.Sprintf("Failed to connect to vSphere: %v", err),
+				Message: fmt.Sprintf("Failed to connect to vSphere: %v", rerr),
 			}, nil
 		}
 		p.client = client
