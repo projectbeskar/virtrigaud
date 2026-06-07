@@ -2,7 +2,7 @@
 
 A Kubernetes operator for managing virtual machines across multiple hypervisors.
 
-**Version**: v0.3.6 — [CHANGELOG](CHANGELOG.md) | [Documentation](https://projectbeskar.github.io/virtrigaud)
+**Version**: v0.3.8 — [CHANGELOG](CHANGELOG.md) | [Documentation](https://projectbeskar.github.io/virtrigaud)
 
 ## Overview
 
@@ -14,14 +14,17 @@ The manager reconciles Kubernetes custom resources; each hypervisor runs as a se
 
 - **Multi-Hypervisor Support**: vSphere, Libvirt/KVM, and Proxmox VE simultaneously
 - **Cross-Provider VM Migration**: Migrate VMs between hypervisors using PVC-backed storage (currently tested: vSphere to Libvirt/KVM only; other directions are roadmap)
-- **Multi-VM Management**: Declarative VM sets with rolling updates and replica management
-- **Advanced Placement Policies**: Affinity, anti-affinity, and resource constraints
+- **VM Cloning (VMClone)**: Full and linked clones, MVP — `source.vmRef`, same-provider (vSphere/Proxmox; libvirt clone not implemented)
+- **VMSet CRD defined; controller not yet active**: Multi-VM replica set is defined but the controller is a stub that reports `Ready=False / ControllerNotImplemented`; rolling updates and replica management are roadmap
+- **VMPlacementPolicy (reference-only)**: Placement rules (affinity, anti-affinity, resource constraints) expressed as a policy object referenced by `VirtualMachine.spec.placementRef`; no standalone enforcement controller
 - **Declarative v1beta1 API**: Stable CRDs with OpenAPI validation
 - **Cloud-Init Support**: Cross-provider VM initialisation via cloud-init
 - **Power Management**: On/Off/Reboot/Graceful-Shutdown uniformly
 - **Async Task Tracking**: Long-running vSphere and Proxmox operations tracked via TaskStatus RPC
 - **Resource Reconfiguration**: CPU, memory, disk changes (online for vSphere/Proxmox; restart required for Libvirt)
 - **G6 Circuit Breaker**: One circuit breaker per Provider CR for automatic failure isolation (v0.3.6+)
+- **Secure-by-default gRPC**: mTLS wired end-to-end (TLS 1.3, SNI, certwatcher hot-reload); provider pods fail closed without credentials (#147/#148, v0.3.7)
+- **Libvirt SSH host-key verification**: `known_hosts` enforced by default; TOFU removed (#149, v0.3.7)
 - **Observability**: 11 `virtrigaud_*` Prometheus metric families (1 deprecated in v0.3.6; removal in v0.4.0)
 
 ## Architecture
@@ -88,13 +91,15 @@ graph TB
     PXP -->|REST API| PVE
 ```
 
-### Security status (v0.3.6)
+### Security status (v0.3.8)
 
-- **mTLS not yet default**: gRPC traffic between manager and provider pods is TLS-capable but mTLS is not wired through the provider `Resolver`; see issue [#147](https://github.com/projectbeskar/virtrigaud/issues/147).
-- **Provider gRPC servers do not enforce authentication**: provider pods accept any client; see issue [#148](https://github.com/projectbeskar/virtrigaud/issues/148).
-- **Libvirt SSH host-key verification skipped**: see issue [#149](https://github.com/projectbeskar/virtrigaud/issues/149).
+The following issues were open in v0.3.6 and resolved in v0.3.7; they are closed in this release:
 
-For a full security disclosure, see the [Security Operations Guide](https://projectbeskar.github.io/virtrigaud/operations/security/).
+- **mTLS wired end-to-end (#147, v0.3.7)**: manager↔provider gRPC TLS is wired through the provider `Resolver` with cert/key/CA loaded, TLS 1.3, SNI, and certwatcher hot-reload. Provider servers require and verify client certificates. Exception: the libvirt provider uses plaintext gRPC to its sidecar container and separately enforces SSH `known_hosts` — this is a documented maintainer choice, not a defect.
+- **Provider gRPC auth enforced, fail-closed (#148, v0.3.7)**: provider pods require TLS credentials and fail closed (crash-loop) at startup if credentials are absent, unless explicitly opted into insecure mode via the provider runtime config.
+- **Libvirt SSH host-key verification ON by default (#149, v0.3.7)**: the `no_verify=1` flag is removed; `known_hosts` is sourced from the credentials Secret. Trust-on-first-use (TOFU) is no longer the default.
+
+Verify these controls are correctly configured before relying on them in regulated environments. For full security guidance, see the [Security Operations Guide](https://projectbeskar.github.io/virtrigaud/operations/security/).
 
 ## CRDs (10 total, all v1beta1)
 
@@ -154,17 +159,17 @@ Per the [canonical capabilities matrix](https://projectbeskar.github.io/virtriga
    helm repo update
    ```
 
-2. **Install VirtRigaud** (version 0.3.6):
+2. **Install VirtRigaud** (version 0.3.8):
    ```bash
    helm install virtrigaud virtrigaud/virtrigaud \
-     --version 0.3.6 \
+     --version 0.3.8 \
      -n virtrigaud-system --create-namespace
    ```
 
    CRDs are installed automatically via Helm hooks. To disable automatic CRD upgrades:
    ```bash
    helm install virtrigaud virtrigaud/virtrigaud \
-     --version 0.3.6 \
+     --version 0.3.8 \
      -n virtrigaud-system --create-namespace \
      --set crdUpgrade.enabled=false
    ```
@@ -180,7 +185,7 @@ Per the [canonical capabilities matrix](https://projectbeskar.github.io/virtriga
 4. **Upgrade**:
    ```bash
    helm upgrade virtrigaud virtrigaud/virtrigaud \
-     --version 0.3.6 \
+     --version 0.3.8 \
      -n virtrigaud-system
    ```
 
@@ -239,7 +244,7 @@ Go 1.26+ is required for source builds.
      credentialSecretRef:
        name: libvirt-creds
      runtime:
-       image: "ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.3.6"
+       image: "ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.3.8"
        service:
          port: 9443
    ```
@@ -257,7 +262,7 @@ Go 1.26+ is required for source builds.
      credentialSecretRef:
        name: vsphere-creds
      runtime:
-       image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.3.6"
+       image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.3.8"
        service:
          port: 9443
    ```
@@ -309,7 +314,7 @@ For full migration documentation including provider restart behaviour, see the [
 
 The manager exposes Prometheus metrics at `:8080/metrics` (HTTP by default; flip `--metrics-secure=true` for HTTPS).
 
-11 of 12 `virtrigaud_*` metric families are wired in v0.3.6. `virtrigaud_queue_depth` is deprecated (use `workqueue_depth{name}` instead); removal scheduled for v0.4.0.
+11 of 12 `virtrigaud_*` metric families are active. `virtrigaud_queue_depth` was deprecated in v0.3.6 (use `workqueue_depth{name}` instead); removal scheduled for v0.4.0.
 
 For the full metric catalog see [Observability](https://projectbeskar.github.io/virtrigaud/operations/observability/).
 
@@ -326,7 +331,7 @@ kubectl apply -f charts/virtrigaud/crds/
 
 # Or reinstall
 helm uninstall virtrigaud -n virtrigaud-system
-helm install virtrigaud virtrigaud/virtrigaud --version 0.3.6 \
+helm install virtrigaud virtrigaud/virtrigaud --version 0.3.8 \
   -n virtrigaud-system --create-namespace
 ```
 
