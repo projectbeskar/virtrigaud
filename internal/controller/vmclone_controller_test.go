@@ -375,6 +375,73 @@ func TestVMClone_SourceMissing_Pending(t *testing.T) {
 	assert.Equal(t, 0, cp.cloneCnt)
 }
 
+// TestVMClone_ResumeSeedsStatusIDOnExistingTarget is the regression test for the
+// bind race found during lab E2E (PR #188 follow-up): a prior reconcile cloned
+// the VM (TargetVMID persisted) and created the adopted target VM CR, but the
+// Status.ID seed lost a race with the VirtualMachine controller and never landed
+// — leaving the cloned VM orphaned (empty Status.ID, waiting forever) while the
+// clone falsely reported Ready. On a subsequent reconcile, bindTargetVM must
+// re-seed Status.ID from the persisted TargetVMID WITHOUT issuing a second
+// clone, then finalize Ready.
+func TestVMClone_ResumeSeedsStatusIDOnExistingTarget(t *testing.T) {
+	s := cloneTestScheme(t)
+	ns := "default"
+
+	prov := runningProvider(ns, "prov-1")
+	src := sourceVMWithID(ns, "src-vm", "prov-1", "vm-source-123")
+
+	// The partial-bind state: target VM CR exists (adopted) but Status.ID empty.
+	target := &infrav1beta1.VirtualMachine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "clone-target",
+			Namespace: ns,
+			Labels:    map[string]string{AdoptedLabel: AdoptedLabelValue},
+		},
+		Spec: infrav1beta1.VirtualMachineSpec{
+			ProviderRef: infrav1beta1.ObjectRef{Name: "prov-1"},
+			ClassRef:    infrav1beta1.ObjectRef{Name: "src-class"},
+		},
+	}
+
+	// The clone already issued (TargetVMID persisted), not yet Ready.
+	clone := &infrav1beta1.VMClone{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "clone-resume",
+			Namespace:  ns,
+			Finalizers: []string{vmCloneFinalizer},
+		},
+		Spec: infrav1beta1.VMCloneSpec{
+			Source: infrav1beta1.CloneSource{VMRef: &infrav1beta1.LocalObjectReference{Name: "src-vm"}},
+			Target: infrav1beta1.VMCloneTarget{Name: "clone-target"},
+		},
+		Status: infrav1beta1.VMCloneStatus{
+			Phase:      infrav1beta1.ClonePhaseCloning,
+			TargetVMID: "vm-clone-999",
+		},
+	}
+
+	cp := &clonerProvider{cloneResp: contracts.CloneResponse{TargetVmID: "vm-clone-999"}}
+	r := newCloneReconciler(s, &stubResolver{provider: cp}, prov, src, target, clone)
+
+	reconcileTwice(t, r, client.ObjectKeyFromObject(clone))
+
+	// Must NOT re-clone when a target VM ID is already recorded.
+	assert.Equal(t, 0, cp.cloneCnt, "must not re-clone when TargetVMID is already set")
+
+	// Status.ID must now be seeded on the pre-existing target VM.
+	gotTarget := &infrav1beta1.VirtualMachine{}
+	require.NoError(t, r.Get(context.Background(),
+		client.ObjectKey{Namespace: ns, Name: "clone-target"}, gotTarget))
+	assert.Equal(t, "vm-clone-999", gotTarget.Status.ID, "Status.ID must be seeded on resume (no orphan)")
+
+	// And the clone finalizes Ready with a TargetRef.
+	got := &infrav1beta1.VMClone{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(clone), got))
+	assert.Equal(t, infrav1beta1.ClonePhaseReady, got.Status.Phase)
+	require.NotNil(t, got.Status.TargetRef)
+	assert.Equal(t, "clone-target", got.Status.TargetRef.Name)
+}
+
 // TestVMClone_DeletionDoesNotDeleteTarget: deleting a VMClone removes its
 // finalizer but leaves the produced target VM intact.
 func TestVMClone_DeletionDoesNotDeleteTarget(t *testing.T) {

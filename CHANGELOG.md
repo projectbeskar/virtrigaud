@@ -5,6 +5,21 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-07 10:00] - Fix VMClone target-VM bind race (Status.ID seed) (#179 follow-up)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/controller/vmclone_controller.go`: make the clone target-VM binding conflict-tolerant and idempotent. A live vSphere clone E2E found that the target VM's `Status.ID` seed (`Status().Update`) loses a race with the VirtualMachine controller — which reconciles the freshly-created adopted target VM immediately and bumps its resourceVersion — so the update failed with a conflict and the recovery path (`Target VM already exists → finalizeReady`) marked the clone `Ready` **without** re-seeding `Status.ID`, leaving the cloned VM orphaned (unmanaged) forever. The fix: persist `Status.TargetVMID` before binding; seed `Status.ID` via `RetryOnConflict` re-Getting the latest object; only finalize `Ready` once `Status.ID` is confirmed; resume binding off the persisted `TargetVMID` (never re-clone); poll the async task before binding; and refuse a pre-existing foreign VM with the target name instead of finalizing over it.
+
+### Why
+The MVP clone controller (#188) passed unit tests but the fake client did not reproduce the concurrent write from the VirtualMachine controller. The real vSphere clone succeeded (one VM, no double-create — the guard held) but the target VM CR was left with an empty `Status.ID`, so the cloned VM was never managed. This makes the bind step robust against the inherent controller-vs-controller race.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (manager only; no CRD/RBAC change)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-06-07 09:00] - VMClone controller (MVP), VMSet stub, VMPlacementPolicy reference-only, VM double-create guard (#179)
 **Author:** @wrkode (William Rizzo)
 
