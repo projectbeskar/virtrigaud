@@ -1,0 +1,45 @@
+# Basic VM Clone Example (MVP, issue #179)
+#
+# Clones an existing VirtualMachine into a new one on the SAME provider.
+#
+# MVP scope:
+#   - Only source.vmRef is supported (snapshotRef/templateRef/imageRef are
+#     not yet implemented and will set Phase=Failed).
+#   - Same-provider clone only: the cloned VM lives on the source VM's
+#     provider.
+#   - FullClone (default) and LinkedClone are supported. LinkedClone is
+#     pre-checked against the provider's reported capabilities; a provider
+#     that does not support linked clones will set Phase=Failed.
+#
+# The controller produces a VirtualMachine CR named spec.target.name, seeds
+# its Status.ID with the provider's cloned VM ID, and labels it
+# virtrigaud.io/adopted=true so the VirtualMachine controller does not try to
+# create a second VM. Deleting this VMClone does NOT delete the produced VM.
+
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMClone
+metadata:
+  name: basic-clone
+  namespace: default
+spec:
+  # Source: reference to an existing VirtualMachine CR in this namespace whose
+  # Status.ID is already populated (i.e. it has been provisioned).
+  source:
+    vmRef:
+      name: my-source-vm
+
+  # Target: the VirtualMachine CR the controller will create.
+  target:
+    name: my-cloned-vm
+    # Optional: override the VMClass for the clone. Defaults to the source
+    # VM's class when omitted.
+    classRef:
+      name: standard-vm
+    # Optional labels applied to the produced VM (the controller always also
+    # adds virtrigaud.io/adopted=true).
+    labels:
+      app: cloned-app
+
+  # Optional: clone behavior. Defaults to FullClone.
+  options:
+    type: FullClone # or LinkedClone (requires provider support)

@@ -357,6 +357,28 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "VMAdoption")
 		os.Exit(1)
 	}
+
+	// Register VMClone controller (MVP: vmRef source, same-provider, full/linked)
+	vmcloneReconciler := controller.NewVMCloneReconciler(
+		mgr.GetClient(),
+		mgr.GetScheme(),
+		remoteResolver,
+		mgr.GetEventRecorderFor("vmclone-controller"),
+	)
+	if err = vmcloneReconciler.SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "VMClone")
+		os.Exit(1)
+	}
+
+	// Register VMSet controller (not-yet-active stub; reports
+	// ControllerNotImplemented condition only)
+	if err = (&controller.VMSetReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "VMSet")
+		os.Exit(1)
+	}
 	//+kubebuilder:scaffold:builder
 
 	// Register cert watchers with the manager so they run as Runnables

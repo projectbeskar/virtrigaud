@@ -248,8 +248,25 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonReconcileSuccess, "VM reconfigured successfully")
 	}
 
-	// Ensure VM exists
+	// Ensure VM exists.
+	//
+	// An adopted VM (labeled virtrigaud.io/adopted=true) has its underlying
+	// hypervisor VM created by the adoption/clone controller, which then sets
+	// Status.ID out-of-band. Between the CR appearing and that Status.ID write
+	// landing, Status.ID is briefly empty. Creating here in that window would
+	// produce a SECOND VM on the provider — the exact double-create the clone
+	// controller's Status.ID write is meant to prevent. So we only enter the
+	// create path for non-adopted VMs; an adopted VM with an empty Status.ID
+	// waits for its ID to be set (issue #179).
 	if vm.Status.ID == "" {
+		if vmIsAdopted(vm) {
+			logger.Info("Adopted VM has no Status.ID yet; waiting for adoption/clone controller to set it (not creating)",
+				"name", vm.Name, "namespace", vm.Namespace)
+			k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionTrue,
+				k8s.ReasonWaitingForDependencies, "Waiting for adoption/clone controller to set Status.ID")
+			r.updateStatus(ctx, vm)
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		}
 		logger.Info("Creating VM")
 		return r.createVM(ctx, vm, providerInstance, vmClass, vmImage, networks)
 	}
@@ -1094,6 +1111,16 @@ func recordIPDiscoveryIfFirstSeen(currentIPs, descIPs []string, creationTime met
 		return // defensive — CRs fetched via the API server always have this
 	}
 	metrics.RecordIPDiscovery(providerType, time.Since(creationTime.Time))
+}
+
+// vmIsAdopted reports whether the VirtualMachine is marked adopted, i.e. its
+// underlying hypervisor VM is created by the adoption/clone controller (which
+// sets Status.ID out-of-band) rather than by the VirtualMachine controller.
+// The VirtualMachine controller consults this before its create decision to
+// avoid double-creating a VM whose Status.ID has not yet been written (issue
+// #179).
+func vmIsAdopted(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
+	return vm.Labels[AdoptedLabel] == AdoptedLabelValue
 }
 
 // SetupWithManager sets up the controller with the Manager.

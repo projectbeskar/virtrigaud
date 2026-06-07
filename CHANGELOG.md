@@ -5,6 +5,56 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-07 09:00] - VMClone controller (MVP), VMSet stub, VMPlacementPolicy reference-only, VM double-create guard (#179)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/providers/contracts/clone.go`: `CloneRequest`/`CloneResponse` structs and a narrow `Cloner` optional capability interface (mirrors `CapabilityReporter`; does NOT widen the core `Provider` interface).
+- `internal/transport/grpc/client.go`: `(*Client).Clone` implementing `contracts.Cloner` over the existing proto `Clone` RPC; compile-time assertions that `*Client` satisfies `Provider`, `CapabilityReporter`, and `Cloner`.
+- `internal/controller/vmclone_controller.go`: new VMClone reconciler (MVP) — `source.vmRef` only, same-provider, full & linked clones. Resolves source VM + provider, intrinsic linked-clone capability pre-check (fail-open), idempotent clone, task polling, and binds a target VirtualMachine CR (seeds `Status.ID`, `virtrigaud.io/adopted=true`, clone provenance annotations). Deleting a VMClone never deletes the produced VM.
+- `internal/controller/vmset_controller.go`: not-yet-active VMSet stub reconciler that sets `Ready=False / ControllerNotImplemented` and nothing else.
+- `api/infra.virtrigaud.io/v1beta1/vmclone_types.go`: additive `Status.TargetVMID` field to persist the provider's cloned VM ID across reconciles.
+- `cmd/manager/main.go`: register the VMClone and VMSet reconcilers.
+- `internal/controller/{vmclone,vmset,virtualmachine_controller_adopted}_controller_test.go`: unit tests — VMClone happy path / idempotency / linked-blocked / linked-fail-open / non-vmRef source / non-Cloner provider / source-missing / deletion-preserves-target; VMSet stub condition; Part B adopted-guard (no provider Create) + non-adopted control.
+- `examples/vmclone-basic.yaml`: vmRef-source full-clone example.
+
+### Changed
+- `internal/controller/virtualmachine_controller.go`: the create decision now skips create for a VM labeled `virtrigaud.io/adopted=true` while `Status.ID` is empty (requeues instead), preventing a double-create while the adoption/clone controller sets `Status.ID`. Behavior for normal VMs is unchanged. Added `vmIsAdopted` helper.
+- `internal/controller/vmadoption_controller.go`: promoted the `virtrigaud.io/adopted` label key/value to shared `AdoptedLabel`/`AdoptedLabelValue` constants and reuse them in place of literals.
+- `config/crd/bases/`, `charts/virtrigaud/crds/`: regenerated VMClone CRD with the new `targetVMID` status field.
+- `config/rbac/role.yaml`, `charts/virtrigaud/templates/manager-rbac.yaml`: added RBAC for `vmclones` (get/list/watch/update/patch + status + finalizers) and `vmsets` (get/list/watch + status); VirtualMachine create was already granted.
+- `README.md`: CRD table now lists controller status — VMClone active (MVP), VMSet not yet active (stub), VMPlacementPolicy reference-only.
+
+### Why
+VMClone, VMSet, and VMPlacementPolicy shipped as CRDs without controllers. This wires VMClone end-to-end (MVP), marks VMSet explicitly not-yet-active rather than silently inert, and documents VMPlacementPolicy as a reference-only policy object. The VirtualMachine double-create guard closes a real correctness gap: an adopted/cloned VM CR briefly has an empty `Status.ID`, during which the VM controller would otherwise create a second VM on the provider. libvirt's `Clone` is `Unimplemented`, so a libvirt clone surfaces a clear `Phase=Failed/ProviderError` rather than a silent no-op.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (CRD `targetVMID` field, new RBAC, two new controllers)
+- [ ] Config change only
+- [ ] Documentation only
+
+### Usage
+```yaml
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMClone
+metadata:
+  name: basic-clone
+  namespace: default
+spec:
+  source:
+    vmRef:
+      name: my-source-vm
+  target:
+    name: my-cloned-vm
+    classRef:
+      name: standard-vm
+  options:
+    type: FullClone   # or LinkedClone (requires provider support)
+```
+
+---
+
 ## [2026-06-07 12:05] - vSphere: advertise disk export/import capabilities accurately (#178)
 **Author:** @wrkode (William Rizzo)
 
