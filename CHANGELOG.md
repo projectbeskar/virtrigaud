@@ -5,6 +5,25 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-07 12:00] - Capability negotiation: surface provider capabilities + opt-in gating (#176)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/controller/provider_controller.go`: the Provider reconciler now best-effort queries the running provider's `GetCapabilities` RPC (once `ProviderAvailable` and runtime `Running`) and surfaces the result on `Provider.Status.ReportedCapabilities`, plus a `CapabilitiesReported` Condition (True `CapabilitiesFetched` / False `CapabilitiesUnavailable`). Consumed via the narrow `contracts.CapabilityReporter` extension interface (type-asserted from the resolved provider), so the core `contracts.Provider` interface is unchanged. Strictly best-effort: a nil resolver, resolve failure, non-reporter provider, or failing RPC logs at V(1) and never fails the reconcile or flips `Healthy`.
+- `cmd/manager/main.go`: new `--enforce-provider-capabilities` bool flag (**default false**). When off, snapshot/migration behavior is byte-for-byte unchanged. Threaded as `EnforceCapabilities` into the VMSnapshot and VMMigration reconcilers.
+- `internal/controller/vmsnapshot_controller.go`: when enforcement is on, the snapshot CREATE path gates on the provider's reported capabilities before calling `SnapshotCreate` — refusing with a Warning event + Failed/`UnsupportedByProvider` condition when `!SupportsSnapshots`, or when a memory-inclusive snapshot is requested and `!SupportsMemorySnapshots`. Fails open if the provider is not a `CapabilityReporter` or the query fails.
+- `internal/controller/vmmigration_controller.go`: when enforcement is on, the exporting phase gates on source `SupportsDiskExport` before `ExportDisk`, and the importing phase gates on target `SupportsDiskImport` before `ImportDisk`, failing the migration with a clear reason. Fails open if the provider is not a `CapabilityReporter` or the query fails.
+- `internal/controller/capability_gating_test.go`, `internal/controller/provider_controller_capabilities_test.go`: table-style unit tests with a fake `contracts.CapabilityReporter` provider asserting gating blocks when the flag is on and the capability is false, does not block when the flag is off or the capability is true, and fails open when the provider is not a `CapabilityReporter` or the RPC errors; plus the capabilities→status mapping and the provider-controller best-effort condition behavior.
+
+### Why
+Builds on the #176 foundation (capabilities contract, gRPC client method, CRD status field). Surfacing capabilities makes provider feature support observable to operators; gating prevents issuing operations a provider declares it cannot perform. Gating is opt-in because a provider that under-reports a capability (e.g. vSphere currently understates disk export/import) would otherwise block operations it can actually perform — operators must confirm capability flags are accurate before enabling.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout — manager image must be updated
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-06-06 13:57] - Fix: migration PVCs being deleted no longer wedge the provider rollout (#184)
 **Author:** @wrkode (William Rizzo)
 

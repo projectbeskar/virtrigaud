@@ -63,21 +63,34 @@ type VMMigrationReconciler struct {
 	RemoteResolver *remote.Resolver
 	Recorder       record.EventRecorder
 	metrics        *metrics.ReconcileMetrics
+
+	// EnforceCapabilities, when true, gates the migration export/import
+	// phases on the source/target providers' self-reported capabilities
+	// (issue #176). When false (the default) the migration phases are
+	// byte-for-byte unchanged. See gateDiskExport / gateDiskImport.
+	EnforceCapabilities bool
 }
 
-// NewVMMigrationReconciler creates a new VMMigration reconciler
+// NewVMMigrationReconciler creates a new VMMigration reconciler.
+//
+// enforceCapabilities mirrors the manager's --enforce-provider-capabilities
+// flag (issue #176); when true, the migration export/import phases are gated
+// on the source/target providers' self-reported capabilities. Pass false to
+// preserve the pre-#176 behaviour exactly.
 func NewVMMigrationReconciler(
 	client client.Client,
 	scheme *runtime.Scheme,
 	remoteResolver *remote.Resolver,
 	recorder record.EventRecorder,
+	enforceCapabilities bool,
 ) *VMMigrationReconciler {
 	return &VMMigrationReconciler{
-		Client:         client,
-		Scheme:         scheme,
-		RemoteResolver: remoteResolver,
-		Recorder:       recorder,
-		metrics:        metrics.NewReconcileMetrics("VMMigration"),
+		Client:              client,
+		Scheme:              scheme,
+		RemoteResolver:      remoteResolver,
+		Recorder:            recorder,
+		metrics:             metrics.NewReconcileMetrics("VMMigration"),
+		EnforceCapabilities: enforceCapabilities,
 	}
 }
 
@@ -588,6 +601,17 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 	exportCtx, exportCancel := context.WithTimeout(ctx, 1*time.Hour)
 	defer exportCancel()
 
+	// Capability gate (issue #176). When enforcement is enabled and the
+	// source provider reports it cannot export disks, fail the migration
+	// BEFORE issuing the export RPC. Fails open if the provider does not
+	// implement CapabilityReporter or the capability query fails. No-op when
+	// EnforceCapabilities is false.
+	if blocked, res := r.gateProviderCapability(ctx, migration, providerInstance,
+		func(caps contracts.Capabilities) bool { return caps.SupportsDiskExport },
+		"Source provider does not support disk export"); blocked {
+		return res, nil
+	}
+
 	logger.Info("Starting disk export", "vm_id", sourceVM.Status.ID, "destination", destinationURL)
 	exportResp, err := providerInstance.ExportDisk(exportCtx, exportReq)
 	if err != nil {
@@ -771,6 +795,17 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 	}
 
 	// TODO: Load credentials from storage secret if configured
+
+	// Capability gate (issue #176). When enforcement is enabled and the
+	// target provider reports it cannot import disks, fail the migration
+	// BEFORE issuing the import RPC. Fails open if the provider does not
+	// implement CapabilityReporter or the capability query fails. No-op when
+	// EnforceCapabilities is false.
+	if blocked, res := r.gateProviderCapability(ctx, migration, providerInstance,
+		func(caps contracts.Capabilities) bool { return caps.SupportsDiskImport },
+		"Target provider does not support disk import"); blocked {
+		return res, nil
+	}
 
 	logger.Info("Starting disk import", "source", sourceURL, "target_name", importReq.TargetName)
 	importResp, err := providerInstance.ImportDisk(ctx, importReq)
@@ -1887,6 +1922,57 @@ func (r *VMMigrationReconciler) waitForProviderBasicReady(ctx context.Context, p
 		logger.Info("Waiting for provider to be ready", "provider", provider.Name)
 		time.Sleep(pollInterval)
 	}
+}
+
+// gateProviderCapability enforces a single provider capability for a
+// migration phase (issue #176). It returns blocked=true (with the
+// ctrl.Result the caller should return) only when ALL of the following hold:
+//   - r.EnforceCapabilities is true, AND
+//   - providerInstance implements contracts.CapabilityReporter and its
+//     GetCapabilities call succeeds, AND
+//   - supported(caps) is false (the provider reports it cannot do this).
+//
+// In all other cases it returns blocked=false and the migration proceeds:
+//   - enforcement off → no-op (byte-for-byte unchanged phase),
+//   - provider is not a CapabilityReporter → FAIL OPEN (never block),
+//   - GetCapabilities errors → FAIL OPEN (transient; let the RPC speak),
+//   - provider reports the capability → proceed.
+//
+// When it blocks, it transitions the migration to Failed with the supplied
+// reason via transitionToFailed, so no provider RPC is issued.
+func (r *VMMigrationReconciler) gateProviderCapability(
+	ctx context.Context,
+	migration *infrav1beta1.VMMigration,
+	providerInstance contracts.Provider,
+	supported func(caps contracts.Capabilities) bool,
+	failureMessage string,
+) (blocked bool, result ctrl.Result) {
+	if !r.EnforceCapabilities {
+		return false, ctrl.Result{}
+	}
+
+	logger := logging.FromContext(ctx)
+
+	reporter, ok := providerInstance.(contracts.CapabilityReporter)
+	if !ok {
+		// Fail open: provider does not advertise capabilities.
+		logger.V(1).Info("Capability enforcement on but provider does not report capabilities; allowing migration step")
+		return false, ctrl.Result{}
+	}
+
+	caps, err := reporter.GetCapabilities(ctx)
+	if err != nil {
+		// Fail open: do not block on a transient capability-query failure.
+		logger.V(1).Info("Capability enforcement on but GetCapabilities failed; allowing migration step", "error", err.Error())
+		return false, ctrl.Result{}
+	}
+
+	if supported(caps) {
+		return false, ctrl.Result{}
+	}
+
+	res, _ := r.transitionToFailed(ctx, migration, failureMessage)
+	return true, res
 }
 
 // getProviderInstance retrieves a provider gRPC client

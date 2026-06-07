@@ -330,6 +330,14 @@ type ProviderStatus struct {
 	// +optional
 	Capabilities []ProviderCapability `json:"capabilities,omitempty"`
 
+	// ReportedCapabilities is the provider's self-reported capability set,
+	// fetched from the provider GetCapabilities RPC (issue #176). It reflects
+	// what the running provider advertises and is consumed by the manager to
+	// surface features and (when capability enforcement is enabled) to gate
+	// capability-dependent operations.
+	// +optional
+	ReportedCapabilities *ReportedCapabilities `json:"reportedCapabilities,omitempty"`
+
 	// Version reports the provider version
 	// +optional
 	Version string `json:"version,omitempty"`
@@ -345,6 +353,52 @@ type ProviderStatus struct {
 	// Adoption tracks VM adoption status
 	// +optional
 	Adoption *ProviderAdoptionStatus `json:"adoption,omitempty"`
+}
+
+// ReportedCapabilities mirrors the provider.v1 GetCapabilitiesResponse — the
+// capability set a provider advertises at runtime via the GetCapabilities RPC
+// (issue #176). All fields are optional and default to the zero value when a
+// provider does not advertise them.
+type ReportedCapabilities struct {
+	// SupportsReconfigureOnline reports online CPU/memory reconfigure support.
+	// +optional
+	SupportsReconfigureOnline bool `json:"supportsReconfigureOnline,omitempty"`
+	// SupportsDiskExpansionOnline reports online disk expansion support.
+	// +optional
+	SupportsDiskExpansionOnline bool `json:"supportsDiskExpansionOnline,omitempty"`
+	// SupportsSnapshots reports VM snapshot support.
+	// +optional
+	SupportsSnapshots bool `json:"supportsSnapshots,omitempty"`
+	// SupportsMemorySnapshots reports memory-inclusive snapshot support.
+	// +optional
+	SupportsMemorySnapshots bool `json:"supportsMemorySnapshots,omitempty"`
+	// SupportsLinkedClones reports linked (copy-on-write) clone support.
+	// +optional
+	SupportsLinkedClones bool `json:"supportsLinkedClones,omitempty"`
+	// SupportsImageImport reports image import/preparation support.
+	// +optional
+	SupportsImageImport bool `json:"supportsImageImport,omitempty"`
+	// SupportedDiskTypes lists supported disk formats.
+	// +optional
+	SupportedDiskTypes []string `json:"supportedDiskTypes,omitempty"`
+	// SupportedNetworkTypes lists supported NIC models.
+	// +optional
+	SupportedNetworkTypes []string `json:"supportedNetworkTypes,omitempty"`
+	// SupportsDiskExport reports disk export (migration source) support.
+	// +optional
+	SupportsDiskExport bool `json:"supportsDiskExport,omitempty"`
+	// SupportsDiskImport reports disk import (migration target) support.
+	// +optional
+	SupportsDiskImport bool `json:"supportsDiskImport,omitempty"`
+	// SupportedExportFormats lists supported export formats.
+	// +optional
+	SupportedExportFormats []string `json:"supportedExportFormats,omitempty"`
+	// SupportedImportFormats lists supported import formats.
+	// +optional
+	SupportedImportFormats []string `json:"supportedImportFormats,omitempty"`
+	// SupportsExportCompression reports export compression support.
+	// +optional
+	SupportsExportCompression bool `json:"supportsExportCompression,omitempty"`
 }
 
 // ProviderAdoptionStatus tracks VM adoption progress

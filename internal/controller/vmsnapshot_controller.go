@@ -42,6 +42,15 @@ import (
 // meaning.
 const errReasonGetSnapshot = "get-snapshot"
 
+// snapshotReasonUnsupportedByProvider is the condition reason and Warning
+// event reason used when capability enforcement (issue #176) blocks a
+// snapshot because the resolved provider reports it cannot perform the
+// requested operation (no snapshot support, or no memory-snapshot support
+// for a memory-inclusive request). Only emitted when
+// EnforceCapabilities is true and the provider implements
+// contracts.CapabilityReporter.
+const snapshotReasonUnsupportedByProvider = "UnsupportedByProvider"
+
 // VMSnapshotReconciler reconciles a VMSnapshot object
 type VMSnapshotReconciler struct {
 	client.Client
@@ -50,22 +59,35 @@ type VMSnapshotReconciler struct {
 	RemoteResolver *remote.Resolver
 	Recorder       record.EventRecorder
 	metrics        *metrics.ReconcileMetrics
+
+	// EnforceCapabilities, when true, gates the snapshot CREATE path on the
+	// provider's self-reported capabilities (issue #176). When false (the
+	// default) the create path is byte-for-byte unchanged. See the gate in
+	// createSnapshot.
+	EnforceCapabilities bool
 }
 
-// NewVMSnapshotReconciler creates a new VMSnapshot reconciler
+// NewVMSnapshotReconciler creates a new VMSnapshot reconciler.
+//
+// enforceCapabilities mirrors the manager's --enforce-provider-capabilities
+// flag (issue #176); when true, the snapshot CREATE path is gated on the
+// provider's self-reported capabilities. Pass false to preserve the
+// pre-#176 behaviour exactly.
 func NewVMSnapshotReconciler(
 	client client.Client,
 	scheme *runtime.Scheme,
 	remoteResolver *remote.Resolver,
 	recorder record.EventRecorder,
+	enforceCapabilities bool,
 ) *VMSnapshotReconciler {
 	return &VMSnapshotReconciler{
 		Client: client,
 		Scheme: scheme,
 
-		RemoteResolver: remoteResolver,
-		Recorder:       recorder,
-		metrics:        metrics.NewReconcileMetrics("VMSnapshot"),
+		RemoteResolver:      remoteResolver,
+		Recorder:            recorder,
+		metrics:             metrics.NewReconcileMetrics("VMSnapshot"),
+		EnforceCapabilities: enforceCapabilities,
 	}
 }
 
@@ -241,6 +263,15 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 
 	// Build snapshot create request
 	req := r.buildSnapshotCreateRequest(snapshot, vm)
+
+	// Capability gate (issue #176). When enforcement is enabled and the
+	// provider reports capabilities, refuse a snapshot the provider declares
+	// it cannot perform BEFORE issuing the RPC. Fails open: a provider that
+	// does not implement CapabilityReporter is never blocked. No-op when
+	// EnforceCapabilities is false.
+	if blocked, res := r.gateSnapshotCreate(ctx, snapshot, providerInstance, req); blocked {
+		return res, nil
+	}
 
 	// Call provider to create snapshot
 	resp, err := providerInstance.SnapshotCreate(ctx, req)
@@ -536,6 +567,87 @@ func (r *VMSnapshotReconciler) updateStatus(ctx context.Context, snapshot *infra
 		return err
 	}
 	return nil
+}
+
+// gateSnapshotCreate enforces provider capabilities for the snapshot CREATE
+// path (issue #176). It returns blocked=true (with the ctrl.Result the
+// caller should return) only when ALL of the following hold:
+//   - r.EnforceCapabilities is true, AND
+//   - providerInstance implements contracts.CapabilityReporter and its
+//     GetCapabilities call succeeds, AND
+//   - the provider reports it cannot satisfy the request: snapshots are
+//     unsupported, or the request includes memory and memory snapshots are
+//     unsupported.
+//
+// In all other cases it returns blocked=false and the snapshot proceeds:
+//   - enforcement off → no-op (byte-for-byte unchanged path),
+//   - provider is not a CapabilityReporter → FAIL OPEN (never block),
+//   - GetCapabilities errors → FAIL OPEN (transient; let the RPC speak),
+//   - provider reports the capability → proceed.
+//
+// When it blocks it sets the snapshot Phase to Failed, a Ready=False
+// condition with reason UnsupportedByProvider, and records a Warning event,
+// then persists status — so no provider RPC is issued.
+func (r *VMSnapshotReconciler) gateSnapshotCreate(
+	ctx context.Context,
+	snapshot *infrav1beta1.VMSnapshot,
+	providerInstance contracts.Provider,
+	req contracts.SnapshotCreateRequest,
+) (blocked bool, result ctrl.Result) {
+	if !r.EnforceCapabilities {
+		return false, ctrl.Result{}
+	}
+
+	logger := logging.FromContext(ctx)
+
+	reporter, ok := providerInstance.(contracts.CapabilityReporter)
+	if !ok {
+		// Fail open: provider does not advertise capabilities.
+		logger.V(1).Info("Capability enforcement on but provider does not report capabilities; allowing snapshot")
+		return false, ctrl.Result{}
+	}
+
+	caps, err := reporter.GetCapabilities(ctx)
+	if err != nil {
+		// Fail open: do not block on a transient capability-query failure.
+		logger.V(1).Info("Capability enforcement on but GetCapabilities failed; allowing snapshot", "error", err.Error())
+		return false, ctrl.Result{}
+	}
+
+	switch {
+	case !caps.SupportsSnapshots:
+		return true, r.blockSnapshot(ctx, snapshot,
+			"Provider does not support snapshots")
+	case req.IncludeMemory && !caps.SupportsMemorySnapshots:
+		return true, r.blockSnapshot(ctx, snapshot,
+			"Provider does not support memory-inclusive snapshots")
+	default:
+		return false, ctrl.Result{}
+	}
+}
+
+// blockSnapshot marks the snapshot as failed because capability enforcement
+// refused the operation (issue #176), records a Warning event, and persists
+// status. The returned ctrl.Result intentionally does not requeue: the
+// provider's capabilities are a property of the provider, so retrying the
+// same request on the same provider would fail identically. A spec change or
+// provider change re-triggers reconciliation via the watch.
+func (r *VMSnapshotReconciler) blockSnapshot(ctx context.Context, snapshot *infrav1beta1.VMSnapshot, message string) ctrl.Result {
+	logger := logging.FromContext(ctx)
+	logger.Info("Capability enforcement blocked snapshot", "message", message)
+
+	snapshot.Status.Phase = infrav1beta1.SnapshotPhaseFailed
+	snapshot.Status.Message = message
+	k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionReady,
+		metav1.ConditionFalse, snapshotReasonUnsupportedByProvider, message)
+	k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionCreating,
+		metav1.ConditionFalse, snapshotReasonUnsupportedByProvider, message)
+	r.Recorder.Event(snapshot, "Warning", snapshotReasonUnsupportedByProvider, message)
+
+	// Status update errors are intentionally ignored to avoid blocking
+	// reconciliation, matching the surrounding create-path error handling.
+	_ = r.updateStatus(ctx, snapshot)
+	return ctrl.Result{}
 }
 
 // getProviderInstance resolves a provider to a remote implementation

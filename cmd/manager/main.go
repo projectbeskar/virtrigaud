@@ -93,6 +93,7 @@ func main() {
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
+	var enforceProviderCapabilities bool
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
@@ -118,6 +119,20 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	// Capability enforcement (issue #176). OFF by default: when off,
+	// snapshot/migration behaviour is byte-for-byte unchanged. When on, the
+	// snapshot and migration controllers gate capability-dependent
+	// operations on the provider's self-reported capabilities (queried live
+	// over gRPC) and refuse operations a provider declares it does not
+	// support, instead of letting the RPC fail downstream. Opt-in because a
+	// provider that UNDER-reports a capability would otherwise block
+	// operations it can actually perform — operators must confirm their
+	// providers' capability flags are accurate before enabling this.
+	flag.BoolVar(&enforceProviderCapabilities, "enforce-provider-capabilities", false,
+		"If set, gate snapshot and migration operations on the provider's "+
+			"self-reported capabilities (issue #176). Opt-in: ensure provider "+
+			"capability flags are accurate before enabling, as under-reported "+
+			"capabilities will block otherwise-supported operations.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -278,8 +293,9 @@ func main() {
 		os.Exit(1)
 	}
 	if err = (&controller.ProviderReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:         mgr.GetClient(),
+		Scheme:         mgr.GetScheme(),
+		RemoteResolver: remoteResolver,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Provider")
 		os.Exit(1)
@@ -312,6 +328,7 @@ func main() {
 		mgr.GetScheme(),
 		remoteResolver,
 		mgr.GetEventRecorderFor("vmsnapshot-controller"),
+		enforceProviderCapabilities,
 	)
 	if err = vmsnapshotReconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "VMSnapshot")
@@ -324,6 +341,7 @@ func main() {
 		mgr.GetScheme(),
 		remoteResolver,
 		mgr.GetEventRecorderFor("vmmigration-controller"),
+		enforceProviderCapabilities,
 	)
 	if err = vmmigrationReconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "VMMigration")
