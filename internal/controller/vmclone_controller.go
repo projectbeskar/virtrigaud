@@ -26,6 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -228,24 +229,34 @@ func (r *VMCloneReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		}
 	}
 
-	// Idempotency: if we already produced a target VM, or one with the target
-	// name already exists, do not clone again — move straight to binding.
-	if clone.Status.TargetRef != nil && clone.Status.TargetRef.Name != "" {
+	// A clone task is still in flight (async clone): wait for it, then bind.
+	// Checked before TargetVMID so async clones don't bind before the provider
+	// has finished cloning.
+	if clone.Status.TaskRef != "" {
+		return r.pollCloneTask(ctx, clone, sourceVM, providerInstance, targetNamespace, linked)
+	}
+
+	// Idempotency. Once the Clone RPC has returned a target VM ID (persisted in
+	// status by startClone before it binds, and after any task completes), the
+	// clone itself is done — resume binding rather than re-cloning. bindTargetVM
+	// is idempotent and conflict-tolerant, so re-entering here after a partial
+	// bind (e.g. a Status.ID write that lost a race with the VirtualMachine
+	// controller) completes the binding instead of leaving the clone orphaned.
+	if clone.Status.TargetVMID != "" {
 		return r.bindTargetVM(ctx, clone, sourceVM, targetNamespace, clone.Status.TargetVMID, linked)
 	}
+
+	// No clone issued yet. Refuse if a VM with the target name already exists
+	// and was NOT produced by this clone (no recorded TargetVMID) — cloning
+	// over a foreign VM would be destructive.
 	existing := &infrav1beta1.VirtualMachine{}
 	existingKey := client.ObjectKey{Namespace: targetNamespace, Name: clone.Spec.Target.Name}
 	if err := r.Get(ctx, existingKey, existing); err == nil {
-		logger.Info("Target VM already exists, binding without re-clone", "vm", existingKey.Name)
-		return r.finalizeReady(ctx, clone, existing)
+		return r.markFailed(ctx, clone, infrav1beta1.VMCloneReasonProviderError,
+			fmt.Sprintf("target VM %q already exists and was not created by this clone", existingKey.Name)), nil
 	} else if !errors.IsNotFound(err) {
 		logger.Error(err, "Failed to check for existing target VM", "vm", existingKey.Name)
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-	}
-
-	// If a clone task is already in flight, poll it.
-	if clone.Status.TaskRef != "" {
-		return r.pollCloneTask(ctx, clone, sourceVM, providerInstance, targetNamespace, linked)
 	}
 
 	// Issue the clone.
@@ -303,15 +314,22 @@ func (r *VMCloneReconciler) startClone(
 	clone.Status.TargetVMID = resp.TargetVmID
 	clone.Status.TaskRef = resp.TaskRef
 
+	// Persist the target VM ID BEFORE attempting to bind. The bind step writes
+	// the target VM's Status.ID and can lose a race with the VirtualMachine
+	// controller, which reconciles the freshly-created adopted target VM
+	// immediately. If that happens and we requeue, this persisted TargetVMID is
+	// what lets the next reconcile resume binding (via the idempotency check)
+	// instead of issuing a second clone.
+	if err := r.updateStatus(ctx, clone); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// Synchronous clone (no task): bind the target VM immediately.
 	if resp.TaskRef == "" {
 		logger.Info("Clone completed synchronously", "target_vm_id", resp.TargetVmID)
 		return r.bindTargetVM(ctx, clone, sourceVM, targetNamespace, resp.TargetVmID, linked)
 	}
 
-	if err := r.updateStatus(ctx, clone); err != nil {
-		return ctrl.Result{}, err
-	}
 	logger.Info("Clone task started", "task_ref", resp.TaskRef)
 	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 }
@@ -341,14 +359,27 @@ func (r *VMCloneReconciler) pollCloneTask(
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
+	// Persist the cleared task ref before binding so a bind retry resumes via
+	// the TargetVMID idempotency path rather than re-polling a finished task.
 	clone.Status.TaskRef = ""
+	if err := r.updateStatus(ctx, clone); err != nil {
+		return ctrl.Result{}, err
+	}
 	return r.bindTargetVM(ctx, clone, sourceVM, targetNamespace, clone.Status.TargetVMID, linked)
 }
 
-// bindTargetVM creates (idempotently) the target VirtualMachine CR for a
-// completed clone and seeds its Status.ID with the provider-reported target VM
+// bindTargetVM ensures the target VirtualMachine CR exists for a completed
+// clone and that its Status.ID is seeded with the provider-reported target VM
 // ID. The adopted label plus the seeded Status.ID together stop the
 // VirtualMachine controller from creating a second VM (issue #179).
+//
+// It is idempotent and conflict-tolerant: it may run multiple times for the
+// same clone (the VirtualMachine controller reconciles the freshly-created,
+// adopted target VM immediately and bumps its resourceVersion, which would race
+// a naive Status().Update). The Status.ID seed therefore re-Gets the latest
+// object and retries on conflict, and the clone is only finalized Ready once
+// Status.ID is confirmed set — so a lost race resumes and completes the binding
+// instead of leaving the cloned VM orphaned.
 func (r *VMCloneReconciler) bindTargetVM(
 	ctx context.Context,
 	clone *infrav1beta1.VMClone,
@@ -366,19 +397,56 @@ func (r *VMCloneReconciler) bindTargetVM(
 	}
 
 	vmKey := client.ObjectKey{Namespace: targetNamespace, Name: clone.Spec.Target.Name}
+
+	// Ensure the target VM CR exists (idempotent across requeues).
 	targetVM := &infrav1beta1.VirtualMachine{}
-	err := r.Get(ctx, vmKey, targetVM)
-	switch {
-	case err == nil:
-		// Already created on a previous reconcile — finalize.
-		logger.Info("Target VM CR already exists", "vm", vmKey.Name)
-		return r.finalizeReady(ctx, clone, targetVM)
-	case !errors.IsNotFound(err):
+	switch err := r.Get(ctx, vmKey, targetVM); {
+	case errors.IsNotFound(err):
+		targetVM = r.buildTargetVM(clone, sourceVM, targetNamespace)
+		if createErr := r.Create(ctx, targetVM); createErr != nil && !errors.IsAlreadyExists(createErr) {
+			logger.Error(createErr, "Failed to create target VM CR", "vm", vmKey.Name)
+			return r.markFailed(ctx, clone, infrav1beta1.VMCloneReasonProviderError,
+				fmt.Sprintf("failed to create target VM: %v", createErr)), nil
+		}
+		r.Recorder.Event(clone, "Normal", infrav1beta1.VMCloneReasonCompleted,
+			fmt.Sprintf("Created target VM %q", vmKey.Name))
+	case err != nil:
 		logger.Error(err, "Failed to get target VM CR", "vm", vmKey.Name)
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
-	// Build the target VM CR.
+	// Seed Status.ID out-of-band (the status subresource is not persisted on
+	// Create) so the VirtualMachine controller adopts the already-cloned VM
+	// rather than creating a second one. Re-Get + retry on conflict because the
+	// VirtualMachine controller writes this same object concurrently.
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latest := &infrav1beta1.VirtualMachine{}
+		if getErr := r.Get(ctx, vmKey, latest); getErr != nil {
+			return getErr
+		}
+		if latest.Status.ID == targetVMID {
+			return nil
+		}
+		latest.Status.ID = targetVMID
+		return r.Status().Update(ctx, latest)
+	}); err != nil {
+		logger.Error(err, "Failed to seed Status.ID on target VM CR; will retry", "vm", vmKey.Name)
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
+
+	logger.Info("Target VM bound to cloned VM", "vm", vmKey.Name, "vm_id", targetVMID)
+	return r.finalizeReady(ctx, clone, targetVM)
+}
+
+// buildTargetVM constructs the target VirtualMachine CR for a clone: it carries
+// the adopted label and clone provenance annotations, inherits the source VM's
+// provider and class (unless the clone overrides the class), and copies the
+// requested networks/placement. Status.ID is seeded separately by bindTargetVM.
+func (r *VMCloneReconciler) buildTargetVM(
+	clone *infrav1beta1.VMClone,
+	sourceVM *infrav1beta1.VirtualMachine,
+	targetNamespace string,
+) *infrav1beta1.VirtualMachine {
 	labels := map[string]string{}
 	for k, v := range clone.Spec.Target.Labels {
 		labels[k] = v
@@ -398,7 +466,7 @@ func (r *VMCloneReconciler) bindTargetVM(
 		classRef = infrav1beta1.ObjectRef{Name: clone.Spec.Target.ClassRef.Name}
 	}
 
-	targetVM = &infrav1beta1.VirtualMachine{
+	targetVM := &infrav1beta1.VirtualMachine{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        clone.Spec.Target.Name,
 			Namespace:   targetNamespace,
@@ -416,35 +484,7 @@ func (r *VMCloneReconciler) bindTargetVM(
 	if clone.Spec.Target.PlacementRef != nil && clone.Spec.Target.PlacementRef.Name != "" {
 		targetVM.Spec.PlacementRef = &infrav1beta1.LocalObjectReference{Name: clone.Spec.Target.PlacementRef.Name}
 	}
-
-	if err := r.Create(ctx, targetVM); err != nil {
-		if errors.IsAlreadyExists(err) {
-			// Lost a race — re-fetch and finalize.
-			if getErr := r.Get(ctx, vmKey, targetVM); getErr != nil {
-				logger.Error(getErr, "Failed to re-fetch target VM after AlreadyExists", "vm", vmKey.Name)
-				return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
-			}
-			return r.finalizeReady(ctx, clone, targetVM)
-		}
-		logger.Error(err, "Failed to create target VM CR", "vm", vmKey.Name)
-		return r.markFailed(ctx, clone, infrav1beta1.VMCloneReasonProviderError,
-			fmt.Sprintf("failed to create target VM: %v", err)), nil
-	}
-
-	// Seed Status.ID out-of-band (the status subresource is not persisted on
-	// Create). This is what prevents the VirtualMachine controller from
-	// creating a second VM for the already-cloned target.
-	targetVM.Status.ID = targetVMID
-	if err := r.Status().Update(ctx, targetVM); err != nil {
-		logger.Error(err, "Failed to set Status.ID on target VM CR", "vm", vmKey.Name)
-		// The VM CR exists; retry the status write on the next reconcile.
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
-	}
-
-	logger.Info("Created target VM CR and seeded Status.ID", "vm", vmKey.Name, "vm_id", targetVMID)
-	r.Recorder.Event(clone, "Normal", infrav1beta1.VMCloneReasonCompleted,
-		fmt.Sprintf("Created target VM %q", vmKey.Name))
-	return r.finalizeReady(ctx, clone, targetVM)
+	return targetVM
 }
 
 // finalizeReady marks the VMClone Ready and records the target reference.
