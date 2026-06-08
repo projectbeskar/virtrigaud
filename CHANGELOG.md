@@ -5,6 +5,29 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-08 11:08] - Implement libvirt ImagePrepare RPC: import image into storage pool (#154)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/providers/libvirt/image.go`: real `ImagePrepare` logic for the libvirt provider. Resolves the target pool (request `StorageHint` → `source.libvirt.storagePool` → `default`), places the prepared template at `<poolPath>/<targetName>.qcow2`, and is idempotent — a re-run with the target already present is a cheap no-op (host `stat` probe). Source resolution: `source.libvirt.path` (host-local image) is converted into the pool directly; `source.libvirt.url` is downloaded **on the libvirt host** via `curl` (not streamed through the provider pod), converted with `qemu-img convert -O qcow2`, then the temp file is removed. Optional checksum verification (md5/sha1/sha256/sha512) runs on the host before commit; a mismatch removes the target and fails. Neither path nor url returns an `InvalidSpec` error rather than a fabricated success. Ownership/permissions/SELinux/pool-refresh reuse the existing `finalizeClonedDisk` helper.
+- `internal/providers/libvirt/image_test.go`: host-independent unit tests for image-JSON parsing (rich `v1beta1` `source.libvirt` shape vs flat `contracts.VMImage` shape vs empty/unparseable), target-pool precedence, target-path construction, checksum-tool selection, and the nil-provider / missing-target-name / no-source guard paths.
+
+### Changed
+- `internal/providers/libvirt/server.go`: replaced the `ImagePrepare` `Unimplemented` stub with a thin RPC wrapper that casts to `*Provider`, guards `virshProvider`, delegates to `Provider.imagePrepare`, and returns a `TaskResponse` with an empty `Task` (libvirt is synchronous). Flipped `GetCapabilities.SupportsImageImport` from `false` to `true`. Dropped the now-unused `sdk/provider/errors` import.
+- `internal/providers/libvirt/server_test.go`: replaced `TestServer_ImagePrepare_ReturnsUnimplemented` with a nil-provider guard test; flipped the `SupportsImageImport` assertion in `TestServer_GetCapabilities_HonestFlags` to expect `true`.
+
+### Why
+PR-1 of the image-prepare vertical slice (#154); libvirt was the last true provider-RPC gap among the production providers. Provider-only here — the manager-side transport client and VM/VMImage controller wiring land in later PRs (PR-4/PR-5).
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (libvirt provider image; no CRD/proto change)
+- [ ] Config change only
+- [ ] Documentation only
+
+### Notes
+- `ImagePrepare` is not yet invoked by any controller (transport client + VM controller wiring are PR-4/PR-5). This PR is validatable by calling the RPC directly via gRPC. Synchronous (empty `TaskRef`).
+
 ## [2026-06-08 11:05] - Fix libvirt full clone: copy the resolved disk path, not a guessed pool-volume name (#153)
 **Author:** @wrkode (William Rizzo)
 

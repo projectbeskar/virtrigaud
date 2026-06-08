@@ -22,8 +22,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
@@ -47,10 +45,13 @@ func TestServer_Clone_NilProvider(t *testing.T) {
 	assert.Contains(t, err.Error(), "not initialized")
 }
 
-// TestServer_ImagePrepare_ReturnsUnimplemented verifies that the libvirt
-// ImagePrepare RPC returns a gRPC Unimplemented status rather than a fabricated
-// task reference. ImagePrepare is not implemented for libvirt (issue #154).
-func TestServer_ImagePrepare_ReturnsUnimplemented(t *testing.T) {
+// TestServer_ImagePrepare_NilProvider verifies that the libvirt ImagePrepare RPC
+// fails cleanly when no provider is wired, rather than panicking. ImagePrepare is
+// now implemented (issue #154); the previous Unimplemented contract no longer
+// applies. The convert/download path requires a live libvirt host and is covered
+// by integration tests plus the host-independent unit tests in image_test.go;
+// here we only assert the nil-provider guard.
+func TestServer_ImagePrepare_NilProvider(t *testing.T) {
 	s := &Server{}
 
 	resp, err := s.ImagePrepare(context.Background(), &providerv1.ImagePrepareRequest{
@@ -59,8 +60,7 @@ func TestServer_ImagePrepare_ReturnsUnimplemented(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Nil(t, resp)
-	assert.Equal(t, codes.Unimplemented, status.Code(err),
-		"ImagePrepare must report Unimplemented so callers do not treat a no-op as success")
+	assert.Contains(t, err.Error(), "not initialized")
 }
 
 // TestServer_GetCapabilities_HonestFlags verifies that the libvirt provider
@@ -76,8 +76,8 @@ func TestServer_GetCapabilities_HonestFlags(t *testing.T) {
 	require.NotNil(t, caps)
 	assert.True(t, caps.SupportsLinkedClones,
 		"libvirt advertises linked clones now that Clone is implemented (issue #153)")
-	assert.False(t, caps.SupportsImageImport,
-		"libvirt must not advertise image import while ImagePrepare is unimplemented (issue #154)")
+	assert.True(t, caps.SupportsImageImport,
+		"libvirt advertises image import now that ImagePrepare is implemented (issue #154)")
 	assert.True(t, caps.SupportsSnapshots,
 		"libvirt snapshots are implemented and must remain advertised")
 }
