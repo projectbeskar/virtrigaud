@@ -29,11 +29,12 @@ import (
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
-// TestServer_Clone_ReturnsUnimplemented verifies that the libvirt Clone RPC
-// returns a gRPC Unimplemented status rather than a fabricated task reference.
-// Clone is not implemented for libvirt (issue #153); returning Unimplemented is
-// the honest contract until a real volume-clone implementation exists.
-func TestServer_Clone_ReturnsUnimplemented(t *testing.T) {
+// TestServer_Clone_NilProvider verifies that the libvirt Clone RPC fails
+// cleanly when no provider is wired, rather than panicking. Clone is now
+// implemented (issue #153); the previous Unimplemented contract no longer
+// applies. The full clone flow requires a live libvirt host and is covered by
+// integration tests; here we only assert the nil-provider guard.
+func TestServer_Clone_NilProvider(t *testing.T) {
 	s := &Server{}
 
 	resp, err := s.Clone(context.Background(), &providerv1.CloneRequest{
@@ -43,8 +44,7 @@ func TestServer_Clone_ReturnsUnimplemented(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Nil(t, resp)
-	assert.Equal(t, codes.Unimplemented, status.Code(err),
-		"Clone must report Unimplemented so callers do not treat a no-op as success")
+	assert.Contains(t, err.Error(), "not initialized")
 }
 
 // TestServer_ImagePrepare_ReturnsUnimplemented verifies that the libvirt
@@ -64,9 +64,9 @@ func TestServer_ImagePrepare_ReturnsUnimplemented(t *testing.T) {
 }
 
 // TestServer_GetCapabilities_HonestFlags verifies that the libvirt provider
-// advertises capabilities that match its actual behavior: linked clones and
-// image import are reported as unsupported (issues #153/#154) while snapshots
-// remain supported.
+// advertises capabilities that match its actual behavior: linked clones are now
+// supported (Clone implemented, issue #153), image import remains unsupported
+// (issue #154), and snapshots remain supported.
 func TestServer_GetCapabilities_HonestFlags(t *testing.T) {
 	s := &Server{}
 
@@ -74,8 +74,8 @@ func TestServer_GetCapabilities_HonestFlags(t *testing.T) {
 
 	require.NoError(t, err)
 	require.NotNil(t, caps)
-	assert.False(t, caps.SupportsLinkedClones,
-		"libvirt must not advertise linked clones while Clone is unimplemented (issue #153)")
+	assert.True(t, caps.SupportsLinkedClones,
+		"libvirt advertises linked clones now that Clone is implemented (issue #153)")
 	assert.False(t, caps.SupportsImageImport,
 		"libvirt must not advertise image import while ImagePrepare is unimplemented (issue #154)")
 	assert.True(t, caps.SupportsSnapshots,

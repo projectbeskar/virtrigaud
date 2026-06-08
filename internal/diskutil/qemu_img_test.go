@@ -196,6 +196,63 @@ func TestConvertOptions_Validation(t *testing.T) {
 	}
 }
 
+// TestCreateWithBacking_Validation verifies that CreateWithBacking rejects
+// missing required arguments before shelling out to qemu-img. The success path
+// (which actually invokes qemu-img and writes an overlay) is exercised by the
+// libvirt provider integration tests against a live host; here we only assert
+// the input-validation contract so it holds without qemu-img installed.
+func TestCreateWithBacking_Validation(t *testing.T) {
+	q := NewQemuImg()
+	ctx := context.Background()
+
+	tests := []struct {
+		name          string
+		imagePath     string
+		format        SupportedFormat
+		backingPath   string
+		backingFormat SupportedFormat
+		wantErr       bool
+	}{
+		{
+			name:          "missing image path",
+			format:        FormatQCOW2,
+			backingPath:   "/pool/base.qcow2",
+			backingFormat: FormatQCOW2,
+			wantErr:       true,
+		},
+		{
+			name:          "missing format",
+			imagePath:     "/pool/overlay.qcow2",
+			backingPath:   "/pool/base.qcow2",
+			backingFormat: FormatQCOW2,
+			wantErr:       true,
+		},
+		{
+			name:          "missing backing path",
+			imagePath:     "/pool/overlay.qcow2",
+			format:        FormatQCOW2,
+			backingFormat: FormatQCOW2,
+			wantErr:       true,
+		},
+		{
+			name:        "missing backing format",
+			imagePath:   "/pool/overlay.qcow2",
+			format:      FormatQCOW2,
+			backingPath: "/pool/base.qcow2",
+			wantErr:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := q.CreateWithBacking(ctx, tt.imagePath, tt.format, tt.backingPath, tt.backingFormat)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("CreateWithBacking() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestNewQemuImg(t *testing.T) {
 	q := NewQemuImg()
 	if q == nil {
