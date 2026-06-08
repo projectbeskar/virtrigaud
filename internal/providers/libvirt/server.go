@@ -30,7 +30,6 @@ import (
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
-	"github.com/projectbeskar/virtrigaud/sdk/provider/errors"
 )
 
 // Server implements the providerv1.ProviderServer interface for Libvirt
@@ -458,15 +457,33 @@ func (s *Server) Clone(ctx context.Context, req *providerv1.CloneRequest) (*prov
 	return result, nil
 }
 
-// ImagePrepare prepares/imports a VM image.
+// ImagePrepare prepares/imports a VM image into a libvirt storage pool, making it
+// available as a named template (<target_name>.qcow2) for subsequent VM creation
+// (issue #154).
 //
-// Not yet implemented for libvirt: a real implementation must download and/or
-// convert the image into a storage pool. Until that exists, this returns
-// Unimplemented rather than a synthetic task reference so callers are not given
-// a fabricated success for work that never happened.
-// Tracked in https://github.com/projectbeskar/virtrigaud/issues/154.
+// The request carries a JSON-encoded VMImage spec (req.ImageJson) describing the
+// source, a target template name, and an optional storage hint. The source may be
+// a path already present on the libvirt host or a URL to download on the host. The
+// image is converted into the resolved pool as a standalone qcow2; an existing
+// target is treated as an idempotent no-op (see Provider.imagePrepare).
+//
+// libvirt/qemu-img are synchronous, so this returns a TaskResponse with an empty
+// Task (no TaskRef); the controller treats an empty TaskRef as "completed
+// synchronously".
 func (s *Server) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepareRequest) (*providerv1.TaskResponse, error) {
-	return nil, errors.NewUnimplemented("ImagePrepare operation is not implemented for libvirt (https://github.com/projectbeskar/virtrigaud/issues/154)")
+	log.Printf("INFO ImagePrepare: target=%q storageHint=%q", req.TargetName, req.StorageHint)
+
+	libvirtProvider, ok := s.provider.(*Provider)
+	if !ok || libvirtProvider == nil || libvirtProvider.virshProvider == nil {
+		return nil, fmt.Errorf("libvirt provider not initialized")
+	}
+
+	if err := libvirtProvider.imagePrepare(ctx, req.ImageJson, req.TargetName, req.StorageHint); err != nil {
+		return nil, fmt.Errorf("failed to prepare image: %w", err)
+	}
+
+	// Synchronous: no task reference. An empty Task signals "completed".
+	return &providerv1.TaskResponse{}, nil
 }
 
 // GetCapabilities returns the capabilities of the Libvirt provider
@@ -477,7 +494,7 @@ func (s *Server) GetCapabilities(ctx context.Context, req *providerv1.GetCapabil
 		SupportsSnapshots:           true,  // Libvirt supports snapshots (storage-dependent)
 		SupportsMemorySnapshots:     false, // Memory snapshots not always supported
 		SupportsLinkedClones:        true,  // Clone RPC implemented: qcow2 overlay (linked) + vol-clone (full) (issue #153)
-		SupportsImageImport:         false, // ImagePrepare RPC not implemented yet (issue #154)
+		SupportsImageImport:         true,  // ImagePrepare RPC implemented: import/convert image into a storage pool (issue #154)
 		SupportedDiskTypes:          []string{"qcow2", "raw", "vmdk"},
 		SupportedNetworkTypes:       []string{"virtio", "e1000", "rtl8139"},
 		SupportsDiskExport:          true, // ExportDisk wired to virsh impl (issue #177)
