@@ -398,7 +398,8 @@ func (p *Provider) Validate(ctx context.Context, req *providerv1.ValidateRequest
 //
 //   - Online reconfiguration of CPU and memory (hot-add must be enabled on the VM)
 //   - Online disk expansion
-//   - Snapshots (disk-only; memory snapshots are not captured by default)
+//   - Snapshots (disk-only by default; RAM-inclusive snapshots are supported when
+//     the VM is powered on and the request sets IncludeMemory)
 //   - Linked clones (delta-disk backed clones sharing a parent disk)
 //   - Image import from external sources
 //   - Disk types: thin, thick, eager-zeroed
@@ -408,7 +409,7 @@ func (p *Provider) GetCapabilities(ctx context.Context, req *providerv1.GetCapab
 		SupportsReconfigureOnline:   true,
 		SupportsDiskExpansionOnline: true,
 		SupportsSnapshots:           true,
-		SupportsMemorySnapshots:     false, // vSphere snapshots don't include memory by default
+		SupportsMemorySnapshots:     true, // vSphere captures RAM-inclusive snapshots via CreateSnapshot(memory=true); requires the VM to be powered on
 		SupportsLinkedClones:        true,
 		SupportsImageImport:         true,
 		SupportedDiskTypes:          []string{"thin", "thick", "eager-zeroed"},
@@ -1527,8 +1528,8 @@ func (p *Provider) TaskStatus(ctx context.Context, req *providerv1.TaskStatusReq
 // "snapshot-<unix-timestamp>" is generated automatically.
 //
 // Memory: req.IncludeMemory controls whether the VM's in-memory state is captured.
-// Note that GetCapabilities reports SupportsMemorySnapshots: false, so callers should
-// generally pass false.
+// GetCapabilities reports SupportsMemorySnapshots: true; capturing memory requires the
+// VM to be powered on (vSphere rejects memory snapshots of a powered-off VM).
 //
 // Quiesce: filesystem quiescing (which requires VMware Tools and guest coordination) is
 // always disabled in this implementation. The SnapshotCreateResponse.SnapshotId contains

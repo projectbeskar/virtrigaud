@@ -48,5 +48,7 @@ func TestGetCapabilities_DiskMigration(t *testing.T) {
 	// Sanity: existing flags remain unchanged.
 	assert.True(t, caps.SupportsSnapshots)
 	assert.True(t, caps.SupportsLinkedClones)
-	assert.False(t, caps.SupportsMemorySnapshots)
+	// vSphere captures RAM-inclusive snapshots via CreateSnapshot(memory=true) when the
+	// VM is powered on; SnapshotCreate already honours req.IncludeMemory (issue #200).
+	assert.True(t, caps.SupportsMemorySnapshots)
 }

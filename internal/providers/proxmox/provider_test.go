@@ -232,6 +232,13 @@ func TestProxmoxProvider_GetCapabilities(t *testing.T) {
 	assert.Contains(t, resp.SupportedDiskTypes, "raw")
 	assert.Contains(t, resp.SupportedDiskTypes, "qcow2")
 	assert.Contains(t, resp.SupportedNetworkTypes, "bridge")
+	// Disk export/import are now advertised to match the implemented RPCs (#198).
+	assert.True(t, resp.SupportsDiskExport, "Proxmox implements ExportDisk")
+	assert.True(t, resp.SupportsDiskImport, "Proxmox implements ImportDisk")
+	assert.Contains(t, resp.SupportedExportFormats, "qcow2")
+	assert.Contains(t, resp.SupportedImportFormats, "vmdk")
+	// Export does not compress today, so it must NOT be advertised.
+	assert.False(t, resp.SupportsExportCompression)
 }
 
 // Helper functions

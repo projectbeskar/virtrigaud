@@ -28,6 +28,13 @@ func GetProviderCapabilities() *capabilities.Manager {
 		OnlineReconfigure().
 		OnlineDiskExpansion().
 		ImageImport().
+		// Disk export/import RPCs are implemented (ExportDisk/ImportDisk/
+		// GetDiskInfo accept qcow2/raw/vmdk); advertise them so capability
+		// gating (#176) doesn't wrongly block Proxmox disk migration (#198).
+		// ExportCompression is intentionally NOT advertised — the export path
+		// does not compress today.
+		DiskExport("qcow2", "raw", "vmdk").
+		DiskImport("qcow2", "raw", "vmdk").
 		DiskTypes("raw", "qcow2").
 		NetworkTypes("bridge", "vlan").
 		Build()
