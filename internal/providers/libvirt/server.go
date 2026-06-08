@@ -463,7 +463,7 @@ func (s *Server) GetCapabilities(ctx context.Context, req *providerv1.GetCapabil
 		SupportsDiskImport:          true, // ImportDisk wired (pvc:///file:// sources)
 		SupportedExportFormats:      []string{"qcow2", "raw"},
 		SupportedImportFormats:      []string{"qcow2", "raw", "vmdk"},
-		SupportsExportCompression:   false, // Export path does not compress (migration favours speed)
+		SupportsExportCompression:   true, // ExportDisk honors req.Compress via qemu-img -c for qcow2 (#199); default (Compress=false) is uncompressed for speed
 	}, nil
 }
 

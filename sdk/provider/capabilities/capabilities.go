@@ -44,6 +44,9 @@ const (
 	CapabilityMemorySnapshots     Capability = "memory_snapshots"
 	CapabilityLinkedClones        Capability = "linked_clones"
 	CapabilityImageImport         Capability = "image_import"
+	CapabilityDiskExport          Capability = "disk_export"
+	CapabilityDiskImport          Capability = "disk_import"
+	CapabilityExportCompression   Capability = "export_compression"
 	CapabilityTaskStatus          Capability = "task_status"
 
 	// Provider-specific capabilities
@@ -77,9 +80,11 @@ const (
 
 // Manager manages provider capabilities.
 type Manager struct {
-	capabilities          map[Capability]bool
-	supportedDiskTypes    []string
-	supportedNetworkTypes []string
+	capabilities           map[Capability]bool
+	supportedDiskTypes     []string
+	supportedNetworkTypes  []string
+	supportedExportFormats []string
+	supportedImportFormats []string
 }
 
 // NewManager creates a new capability manager.
@@ -118,6 +123,18 @@ func (m *Manager) SetSupportedNetworkTypes(types []string) *Manager {
 	return m
 }
 
+// SetSupportedExportFormats sets the supported disk-export formats.
+func (m *Manager) SetSupportedExportFormats(types []string) *Manager {
+	m.supportedExportFormats = types
+	return m
+}
+
+// SetSupportedImportFormats sets the supported disk-import formats.
+func (m *Manager) SetSupportedImportFormats(types []string) *Manager {
+	m.supportedImportFormats = types
+	return m
+}
+
 // GetCapabilities returns the capabilities response for gRPC.
 func (m *Manager) GetCapabilities(ctx context.Context, req *providerv1.GetCapabilitiesRequest) (*providerv1.GetCapabilitiesResponse, error) {
 	return &providerv1.GetCapabilitiesResponse{
@@ -129,6 +146,11 @@ func (m *Manager) GetCapabilities(ctx context.Context, req *providerv1.GetCapabi
 		SupportsImageImport:         m.HasCapability(CapabilityImageImport),
 		SupportedDiskTypes:          m.supportedDiskTypes,
 		SupportedNetworkTypes:       m.supportedNetworkTypes,
+		SupportsDiskExport:          m.HasCapability(CapabilityDiskExport),
+		SupportsDiskImport:          m.HasCapability(CapabilityDiskImport),
+		SupportsExportCompression:   m.HasCapability(CapabilityExportCompression),
+		SupportedExportFormats:      m.supportedExportFormats,
+		SupportedImportFormats:      m.supportedImportFormats,
 	}, nil
 }
 
@@ -258,6 +280,32 @@ func (b *Builder) OnlineDiskExpansion() *Builder {
 // TaskStatus adds task status checking capabilities.
 func (b *Builder) TaskStatus() *Builder {
 	b.manager.AddCapability(CapabilityTaskStatus)
+	return b
+}
+
+// DiskExport adds disk-export capability and, optionally, the supported export
+// formats (e.g. "qcow2", "raw", "vmdk").
+func (b *Builder) DiskExport(formats ...string) *Builder {
+	b.manager.AddCapability(CapabilityDiskExport)
+	if len(formats) > 0 {
+		b.manager.SetSupportedExportFormats(formats)
+	}
+	return b
+}
+
+// DiskImport adds disk-import capability and, optionally, the supported import
+// formats (e.g. "qcow2", "raw", "vmdk").
+func (b *Builder) DiskImport(formats ...string) *Builder {
+	b.manager.AddCapability(CapabilityDiskImport)
+	if len(formats) > 0 {
+		b.manager.SetSupportedImportFormats(formats)
+	}
+	return b
+}
+
+// ExportCompression marks that disk export can be compressed.
+func (b *Builder) ExportCompression() *Builder {
+	b.manager.AddCapability(CapabilityExportCompression)
 	return b
 }
 

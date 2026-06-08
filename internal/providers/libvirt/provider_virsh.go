@@ -1689,8 +1689,14 @@ func (p *Provider) ExportDisk(ctx context.Context, req contracts.ExportDiskReque
 		log.Printf("INFO Exporting from snapshot: %s", req.SnapshotId)
 	}
 
-	// Check if format conversion is needed
-	needsConversion := (targetFormat != diskInfo.Format)
+	// Conversion is needed when the export format differs from the source, OR
+	// when compression is requested for a compressible target (qcow2): qemu-img
+	// applies `-c` only during a convert pass, so we force one to honor
+	// req.Compress even when the format is unchanged (#199). Raw cannot be
+	// compressed, so compression of a raw target is a no-op (qemu-img ignores
+	// `-c` for raw) and does not force a conversion.
+	needsConversion := (targetFormat != diskInfo.Format) ||
+		(req.Compress && targetFormat == "qcow2")
 
 	var uploadPath string
 	var cleanup func()
@@ -1707,7 +1713,7 @@ func (p *Provider) ExportDisk(ctx context.Context, req contracts.ExportDiskReque
 			DestinationPath:   tempPath,
 			SourceFormat:      diskutil.SupportedFormat(diskInfo.Format),
 			DestinationFormat: diskutil.SupportedFormat(targetFormat),
-			Compression:       false, // No compression for migration (faster)
+			Compression:       req.Compress, // honor the caller's request (#199); diskutil applies it only to compressible formats (qcow2)
 		})
 		if err != nil {
 			return contracts.ExportDiskResponse{}, fmt.Errorf("failed to convert disk format: %w", err)
@@ -2054,4 +2060,3 @@ func (p *Provider) ListVMs(ctx context.Context) ([]contracts.VMInfo, error) {
 
 	return vmInfos, nil
 }
-

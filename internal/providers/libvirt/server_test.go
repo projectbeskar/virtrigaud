@@ -95,7 +95,7 @@ func TestServer_GetCapabilities_DiskMigration(t *testing.T) {
 	assert.True(t, caps.SupportsDiskImport, "ImportDisk is wired over gRPC")
 	assert.Equal(t, []string{"qcow2", "raw"}, caps.SupportedExportFormats)
 	assert.Equal(t, []string{"qcow2", "raw", "vmdk"}, caps.SupportedImportFormats)
-	assert.False(t, caps.SupportsExportCompression, "export path does not compress")
+	assert.True(t, caps.SupportsExportCompression, "ExportDisk honors req.Compress via qemu-img -c for qcow2 (#199)")
 }
 
 // fakeDiskProvider is a minimal contracts.Provider used to exercise the Server's

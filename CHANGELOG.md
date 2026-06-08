@@ -5,6 +5,27 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-08 07:30] - Capability parity quick wins: vSphere memory snapshots, libvirt export compression, Proxmox disk export/import (#198, #199, #200)
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `internal/providers/vsphere/server.go`: advertise `SupportsMemorySnapshots=true` (#200). The snapshot path already honors `req.IncludeMemory` (passes `memory` to `CreateSnapshot`); only the capability flag was understated. Memory snapshots require the VM to be powered on.
+- `internal/providers/libvirt/provider_virsh.go` + `server.go`: honor `req.Compress` in `ExportDisk` via `qemu-img -c` for qcow2 targets (forcing a convert pass when compression is requested for an unchanged format), and advertise `SupportsExportCompression=true` (#199). Default (`Compress=false`) export is byte-for-byte unchanged; raw targets are unaffected (qemu-img ignores `-c` for raw).
+- `sdk/provider/capabilities/capabilities.go`: the capability `Manager`/`Builder` could not express disk migration — `Manager.GetCapabilities` omitted the disk-export/import/compression fields entirely. Added `DiskExport(formats…)`, `DiskImport(formats…)`, `ExportCompression()` builder methods + the `Manager` mapping (#198). This is the reusable fix so any builder-based provider can advertise disk migration.
+- `internal/providers/proxmox/capabilities.go`: advertise `SupportsDiskExport`/`SupportsDiskImport` (+ formats `qcow2`/`raw`/`vmdk`) to match the implemented `ExportDisk`/`ImportDisk`/`GetDiskInfo` RPCs (#198). `SupportsExportCompression` left false (the Proxmox export path does not compress today).
+
+### Added
+- Tests: `sdk/provider/capabilities/capabilities_test.go` (disk-migration builder + mapping); updated vSphere/libvirt/Proxmox capability tests.
+
+### Why
+Part of the provider-capability-parity roadmap (umbrella #204). Each was a VirtRigaud reporting/wiring gap, not a hypervisor limitation. These corrections are load-bearing once `--enforce-provider-capabilities` (#176) is enabled — without them, capability gating would wrongly block Proxmox disk migration and under-report vSphere/libvirt support.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (provider images; no CRD/proto change)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-06-08 06:10] - CI/release: unify supply-chain verification format + close Node-20 action backlog (#172, #134)
 **Author:** @wrkode (William Rizzo)
 
