@@ -5,6 +5,33 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-08 11:18] - Audit + tighten Proxmox ImagePrepare to honor the contract (#154)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/proxmox/image.go` (new): real `parseProxmoxImageSource` replaces the untyped `map[string]interface{}` walk in `server.go`. It parses, in precedence: the rich `v1beta1` `source.proxmox.{templateID,templateName,storage,node,format}` shape and the generic `source.http.url` import shape, falling back to the flat `contracts.VMImage` (`TemplateName`/`URL`/`Format`) that `Create` round-trips. An empty/unparseable/source-less spec yields an empty source → the caller returns `InvalidSpec`, never a fabricated success — mirroring the libvirt (PR-1) and vSphere (PR-2) parsers.
+- `internal/providers/proxmox/image.go`: `ImagePrepare` now honors `req.TargetName`. Existing-template references (`source.proxmox.templateID`/`templateName`) are verify-only: the template must exist on the node and be `template=1` (`GetVM`/`ListVMs`), returning success if found and an honest `NotFound` if missing — no import. The `source.http.url` path imports into a template named `TargetName` and requires a non-empty `TargetName` (no name is ever fabricated from the URL basename).
+- `internal/providers/proxmox/image.go`: idempotency gate — when importing, if a template named `TargetName` already exists on the node, log and return success without downloading (consistent with libvirt/vSphere).
+
+### Changed
+- `internal/providers/proxmox/image.go`: storage precedence is `req.StorageHint` → `source.proxmox.storage` → `local-lvm` (documented last resort); node precedence is `source.proxmox.node` → `FindNode` default.
+- `internal/providers/proxmox/server.go`: removed the old loose `ImagePrepare` (ignored `target_name`, parsed the non-CRD `source.template` field, hardcoded storage, no idempotency); the method now lives in `image.go`. `SupportsImageImport` stays `true` — now contract-correct.
+- `internal/providers/proxmox/pveapi/client.go`: `PrepareImage` now takes `targetName` and `format`, POSTs the storage `download-url` with `content=import` (a cloud image becomes a VM disk → template, not an ISO) and a `filename` of `<targetName>.<format>` instead of the hardcoded `content=iso` + `imported-image.qcow2`. The verify-only "does the template exist" decode-and-discard probe was dropped (that check is now done provider-side).
+- `internal/providers/proxmox/pvefake/server.go`: added `GET /nodes/{node}/qemu` (list VMs, incl. templates) and `POST /nodes/{node}/storage/{storage}/download-url` handlers; the latter records the request via `LastDownloadRequest()` so tests can assert node/storage/content/filename/url propagation.
+- `internal/providers/proxmox/provider_test.go` + `image_test.go` (new): rewrote `TestProxmoxProvider_ImagePrepare` into focused cases using the real serialized shapes — existing template by name/ID (no-op), missing template (`NotFound`), URL import (asserts the PVE download-url call), storage precedence, missing `target_name` on import (`InvalidSpec`), empty/source-less spec (`InvalidSpec`), and idempotency — plus host-independent unit tests for `parseProxmoxImageSource` and storage precedence.
+
+### Why
+PR-3 of the image-prepare vertical slice (#154). The Proxmox ImagePrepare was implemented but loose — it ignored `target_name`, parsed non-CRD JSON shapes, and had no idempotency. This aligns it with the libvirt (PR-1) and vSphere (PR-2) contracts so the upcoming controller wiring (PR-5) can drive all three consistently.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (Proxmox provider image; no CRD/proto change)
+- [ ] Config change only
+- [ ] Documentation only
+
+### Notes
+- No real Proxmox lab available; validated via unit tests + the in-repo fake PVE server. The `content=import` semantics and the download-url → attach-to-VM → mark-as-template flow are asserted at the call level (the fake server records the request) but not against a live PVE — see the caveats in the PR description.
+
 ## [2026-06-08 11:14] - Implement vSphere ImagePrepare: OVA/OVF URL import as template (#154)
 **Author:** @wrkode (William Rizzo)
 

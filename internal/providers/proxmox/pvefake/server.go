@@ -34,13 +34,33 @@ import (
 
 // Server represents a fake Proxmox VE API server
 type Server struct {
-	router    *mux.Router
-	vms       map[int]*VM
-	tasks     map[string]*Task
-	snapshots map[string][]*Snapshot
-	mu        sync.RWMutex
-	logger    *slog.Logger
-	config    *Config
+	router       *mux.Router
+	vms          map[int]*VM
+	tasks        map[string]*Task
+	snapshots    map[string][]*Snapshot
+	lastDownload *DownloadRequest
+	mu           sync.RWMutex
+	logger       *slog.Logger
+	config       *Config
+}
+
+// DownloadRequest records the parameters of the most recent storage download-url
+// request so ImagePrepare tests can assert node/storage/content/filename/url
+// propagation.
+type DownloadRequest struct {
+	Node     string
+	Storage  string
+	Content  string
+	Filename string
+	URL      string
+}
+
+// LastDownloadRequest returns the most recent storage download-url request seen
+// by the fake server, or nil if none has occurred. Safe for concurrent use.
+func (s *Server) LastDownloadRequest() *DownloadRequest {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.lastDownload
 }
 
 // Config holds fake server configuration
@@ -153,6 +173,7 @@ func (s *Server) setupRoutes() {
 
 	// VM operations
 	api.HandleFunc("/nodes/{node}/qemu", s.handleCreateVM).Methods("POST")
+	api.HandleFunc("/nodes/{node}/qemu", s.handleListVMs).Methods("GET")
 	api.HandleFunc("/nodes/{node}/qemu/{vmid}", s.handleDeleteVM).Methods("DELETE")
 	api.HandleFunc("/nodes/{node}/qemu/{vmid}/status/current", s.handleGetVM).Methods("GET")
 	api.HandleFunc("/nodes/{node}/qemu/{vmid}/config", s.handleGetVMConfig).Methods("GET")
@@ -164,6 +185,9 @@ func (s *Server) setupRoutes() {
 	api.HandleFunc("/nodes/{node}/qemu/{vmid}/status/start", s.handlePowerOp("start")).Methods("POST")
 	api.HandleFunc("/nodes/{node}/qemu/{vmid}/status/stop", s.handlePowerOp("stop")).Methods("POST")
 	api.HandleFunc("/nodes/{node}/qemu/{vmid}/status/reboot", s.handlePowerOp("reboot")).Methods("POST")
+
+	// Storage operations
+	api.HandleFunc("/nodes/{node}/storage/{storage}/download-url", s.handleDownloadURL).Methods("POST")
 
 	// Task operations
 	api.HandleFunc("/nodes/{node}/tasks/{taskid}/status", s.handleGetTaskStatus).Methods("GET")
@@ -295,6 +319,53 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 
 	// Create async task
 	taskID := s.createTask(node, "qmcreate", strconv.Itoa(vmid))
+
+	s.writeResponse(w, taskID)
+}
+
+// handleListVMs handles listing VMs on a node (GET /nodes/{node}/qemu). It
+// returns all seeded/created VMs, including templates, so ImagePrepare's
+// verify-by-name and idempotency probes can find them.
+func (s *Server) handleListVMs(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	node := vars["node"]
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	list := make([]*VM, 0, len(s.vms))
+	for _, vm := range s.vms {
+		if vm.Node == "" || vm.Node == node {
+			list = append(list, vm)
+		}
+	}
+
+	s.writeResponse(w, list)
+}
+
+// handleDownloadURL handles the storage download-url import endpoint used by
+// ImagePrepare. It records the request parameters for later assertion and returns
+// an async task, mirroring PVE's behavior for a long-running download.
+func (s *Server) handleDownloadURL(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	node := vars["node"]
+	storage := vars["storage"]
+
+	if err := r.ParseForm(); err != nil {
+		s.writeError(w, http.StatusBadRequest, "Invalid form data")
+		return
+	}
+
+	s.mu.Lock()
+	s.lastDownload = &DownloadRequest{
+		Node:     node,
+		Storage:  storage,
+		Content:  r.FormValue("content"),
+		Filename: r.FormValue("filename"),
+		URL:      r.FormValue("url"),
+	}
+	taskID := s.createTask(node, "download", storage)
+	s.mu.Unlock()
 
 	s.writeResponse(w, taskID)
 }
