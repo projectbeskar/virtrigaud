@@ -192,6 +192,50 @@ func (q *QemuImg) Create(ctx context.Context, imagePath string, format Supported
 	return nil
 }
 
+// CreateWithBacking creates a new copy-on-write overlay image that references an
+// existing image as its read-only backing file. This is the building block for
+// linked clones: writes land in the new overlay while unchanged blocks are read
+// from the backing file. The backing file MUST NOT be modified or deleted while
+// the overlay exists — doing so corrupts the overlay.
+//
+// It runs:
+//
+//	qemu-img create -f <format> -b <backingPath> -F <backingFormat> <imagePath>
+//
+// backingFormat is required to avoid the qemu-img "backing file format not
+// specified" failure on modern qemu and to prevent format-probing ambiguity.
+func (q *QemuImg) CreateWithBacking(ctx context.Context, imagePath string, format SupportedFormat, backingPath string, backingFormat SupportedFormat) error {
+	if imagePath == "" {
+		return fmt.Errorf("image path is required")
+	}
+	if format == "" {
+		return fmt.Errorf("format is required")
+	}
+	if backingPath == "" {
+		return fmt.Errorf("backing path is required")
+	}
+	if backingFormat == "" {
+		return fmt.Errorf("backing format is required")
+	}
+
+	// qemu-img create -f qcow2 -b <backing> -F <backingFormat> <overlay>
+	args := []string{
+		"create",
+		"-f", string(format),
+		"-b", backingPath,
+		"-F", string(backingFormat),
+		imagePath,
+	}
+	cmd := exec.CommandContext(ctx, q.BinaryPath, args...)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("qemu-img create (backing) failed: %w, output: %s", err, string(output))
+	}
+
+	return nil
+}
+
 // Resize changes the size of a disk image
 func (q *QemuImg) Resize(ctx context.Context, imagePath string, newSizeBytes int64) error {
 	if imagePath == "" {

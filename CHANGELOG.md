@@ -5,6 +5,31 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-08 10:10] - Implement libvirt Clone RPC: qcow2 full + linked clones (#153)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/providers/libvirt/clone.go`: real `Provider.Clone` replacing the `Unimplemented` stub. Full clone copies the source disk via `virsh vol-clone`; linked clone creates a qcow2 overlay backed read-only by the source disk. Defines a new domain by rewriting the source's `dumpxml` with a fresh name, v4 UUID, and per-NIC locally-administered MAC, re-pointing the primary disk source (cloud-init CD-ROM left untouched). Best-effort CPU/memory `ClassJSON` overrides applied.
+- `internal/diskutil/qemu_img.go`: `QemuImg.CreateWithBacking` helper (`qemu-img create -f qcow2 -b <src> -F <fmt> <overlay>`) for copy-on-write overlays, with backing-format required.
+- `internal/providers/libvirt/clone_test.go`, `internal/diskutil/qemu_img_test.go`: unit tests for XML rewrite (fresh identity, multi-NIC, error paths), class overrides, UUID/MAC generation, backing-file arg validation, and provider/server guards.
+
+### Changed
+- `internal/providers/libvirt/server.go`: `Server.Clone` now delegates to `Provider.Clone` (proto↔contracts translation) instead of returning `Unimplemented`; `GetCapabilities` advertises `SupportsLinkedClones=true`. `SupportsImageImport` left false (#154).
+- `internal/providers/libvirt/server_test.go`: capability assertion flipped to `SupportsLinkedClones=true`; former Unimplemented test replaced by nil-provider guard.
+
+### Why
+The manager-side VMClone controller (#179) shipped gated on `SupportsLinkedClones`, but libvirt returned `Unimplemented`, so clone requests failed honestly but unusably. This implements same-provider qcow2 clones so LinkedClone works end-to-end on libvirt.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (libvirt provider image; no CRD/proto change)
+- [ ] Config change only
+- [ ] Documentation only
+
+### Notes
+- Linked-clone children are lifecycle-bound to the parent: the source disk must not be modified or deleted while overlays exist, or the clones corrupt.
+- `CustomizeJSON` (hostname/cloud-init) is logged-and-deferred in this MVP — the clone inherits the source's cloud-init; faithful customization (nocloud ISO regen) is a follow-up.
+
 ## [2026-06-08 07:30] - Capability parity quick wins: vSphere memory snapshots, libvirt export compression, Proxmox disk export/import (#198, #199, #200)
 **Author:** @wrkode (William Rizzo)
 

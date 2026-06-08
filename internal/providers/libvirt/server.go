@@ -425,16 +425,37 @@ func (s *Server) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotRev
 	return &providerv1.TaskResponse{}, nil
 }
 
-// Clone creates a VM clone.
-//
-// Not yet implemented for libvirt: a real implementation must perform a volume
-// clone (full or qcow2-backed for linked clones) plus a new domain definition.
-// Until that exists, this returns Unimplemented rather than a synthetic task
-// reference so callers receive an honest, actionable error instead of a
-// fabricated success that never produces a VM.
-// Tracked in https://github.com/projectbeskar/virtrigaud/issues/153.
+// Clone creates a VM clone. It delegates to the libvirt Provider
+// implementation (clone.go), translating between the gRPC and provider-contract
+// types. A full clone copies the source disk into an independent volume; a
+// linked clone (req.Linked) creates a qcow2 overlay backed by the source disk
+// and is therefore lifecycle-bound to it (issue #153).
 func (s *Server) Clone(ctx context.Context, req *providerv1.CloneRequest) (*providerv1.CloneResponse, error) {
-	return nil, errors.NewUnimplemented("Clone operation is not implemented for libvirt (https://github.com/projectbeskar/virtrigaud/issues/153)")
+	libvirtProvider, ok := s.provider.(*Provider)
+	if !ok || libvirtProvider == nil {
+		return nil, fmt.Errorf("libvirt provider not initialized")
+	}
+
+	resp, err := libvirtProvider.Clone(ctx, contracts.CloneRequest{
+		SourceVmID:    req.SourceVmId,
+		TargetName:    req.TargetName,
+		Linked:        req.Linked,
+		ClassJSON:     req.ClassJson,
+		PlacementJSON: req.PlacementJson,
+		CustomizeJSON: req.CustomizeJson,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to clone VM: %w", err)
+	}
+
+	result := &providerv1.CloneResponse{
+		TargetVmId: resp.TargetVmID,
+	}
+	if resp.TaskRef != "" {
+		result.Task = &providerv1.TaskRef{Id: resp.TaskRef}
+	}
+
+	return result, nil
 }
 
 // ImagePrepare prepares/imports a VM image.
@@ -455,7 +476,7 @@ func (s *Server) GetCapabilities(ctx context.Context, req *providerv1.GetCapabil
 		SupportsDiskExpansionOnline: false, // Disk expansion usually requires power cycle
 		SupportsSnapshots:           true,  // Libvirt supports snapshots (storage-dependent)
 		SupportsMemorySnapshots:     false, // Memory snapshots not always supported
-		SupportsLinkedClones:        false, // Clone RPC not implemented yet (issue #153)
+		SupportsLinkedClones:        true,  // Clone RPC implemented: qcow2 overlay (linked) + vol-clone (full) (issue #153)
 		SupportsImageImport:         false, // ImagePrepare RPC not implemented yet (issue #154)
 		SupportedDiskTypes:          []string{"qcow2", "raw", "vmdk"},
 		SupportedNetworkTypes:       []string{"virtio", "e1000", "rtl8139"},
