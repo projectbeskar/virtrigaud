@@ -918,58 +918,62 @@ func (c *Client) ListSnapshots(ctx context.Context, node string, vmid int) ([]*S
 	return snapshots, nil
 }
 
-// PrepareImage ensures a template/image exists, importing if necessary
-func (c *Client) PrepareImage(ctx context.Context, node, storage, imageURL, templateName string) (string, error) {
-	// First check if template already exists
-	if templateName != "" {
-		// Try to find existing template by name
-		path := fmt.Sprintf("/api2/json/nodes/%s/qemu", node)
-		resp, err := c.request(ctx, "GET", path, nil)
-		if err == nil {
-			defer resp.Body.Close() //nolint:errcheck // Response body close in defer is not critical
-			if resp.StatusCode == 200 {
-				var apiResp APIResponse
-				// Decode response for debugging - errors intentionally ignored
-				_ = json.NewDecoder(resp.Body).Decode(&apiResp) // best effort decode for debug info
-			}
-		}
+// PrepareImage downloads a disk image from imageURL into the given storage on a
+// node, named after templateName, returning the PVE task UPID that tracks the
+// transfer.
+//
+// It POSTs to the storage download-url endpoint with content=import: an importable
+// disk image (a cloud image that becomes a VM disk and, later, a template) is NOT
+// an ISO, so content=iso would be wrong and place it under the ISO content type.
+// The filename is derived from templateName and the requested format so the
+// resulting volume is addressable as the prepared template's backing disk; the
+// format hint lets PVE select the on-disk representation (qcow2/raw/vmdk).
+//
+// Idempotency (skip-if-template-exists) and the subsequent "convert imported disk
+// into a template VM" step are handled provider-side (see image.go); this client
+// call is the thin, correct transport for the download/import itself.
+func (c *Client) PrepareImage(ctx context.Context, node, storage, imageURL, templateName, format string) (string, error) {
+	if imageURL == "" {
+		// Nothing to import (verify-only paths never reach here); treat as a
+		// completed no-op so callers don't fabricate a task.
+		return "", nil
 	}
 
-	// If imageURL provided, simulate download/import
-	if imageURL != "" {
-		// In real implementation, this would:
-		// 1. Download the image to storage
-		// 2. Create VM from image
-		// 3. Convert to template
-		path := fmt.Sprintf("/api2/json/nodes/%s/storage/%s/download-url", node, storage)
-
-		values := url.Values{}
-		values.Set("content", "iso")
-		values.Set("filename", "imported-image.qcow2")
-		values.Set("url", imageURL)
-
-		resp, err := c.request(ctx, "POST", path, values)
-		if err != nil {
-			return "", fmt.Errorf("failed to import image: %w", err)
-		}
-		defer resp.Body.Close() //nolint:errcheck // Response body close in defer is not critical
-
-		if resp.StatusCode != 200 {
-			body, _ := io.ReadAll(resp.Body)
-			return "", fmt.Errorf("image import failed with status %d: %s", resp.StatusCode, string(body))
-		}
-
-		var apiResp APIResponse
-		if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
-			return "", fmt.Errorf("failed to decode response: %w", err)
-		}
-
-		if taskID, ok := apiResp.Data.(string); ok {
-			return taskID, nil
-		}
+	if format == "" {
+		format = "qcow2"
 	}
 
-	return "", nil // Template already exists or operation completed
+	path := fmt.Sprintf("/api2/json/nodes/%s/storage/%s/download-url", node, storage)
+
+	values := url.Values{}
+	// content=import: PVE places the downloaded disk under the "import" content
+	// type so it can be attached to a VM and converted to a template — unlike
+	// content=iso, which is for installer media.
+	values.Set("content", "import")
+	values.Set("filename", fmt.Sprintf("%s.%s", templateName, format))
+	values.Set("url", imageURL)
+
+	resp, err := c.request(ctx, "POST", path, values)
+	if err != nil {
+		return "", fmt.Errorf("failed to import image: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // Response body close in defer is not critical
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("image import failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var apiResp APIResponse
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return "", fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	if taskID, ok := apiResp.Data.(string); ok {
+		return taskID, nil
+	}
+
+	return "", nil
 }
 
 // GetVMConfig retrieves VM configuration

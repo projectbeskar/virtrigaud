@@ -24,6 +24,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/proxmox/pveapi"
 	"github.com/projectbeskar/virtrigaud/internal/providers/proxmox/pvefake"
@@ -358,45 +360,222 @@ func TestProxmoxProvider_Snapshots(t *testing.T) {
 	}
 }
 
-func TestProxmoxProvider_ImagePrepare(t *testing.T) {
-	// Start fake PVE server
-	_, endpoint, err := pvefake.StartFakeServer()
+// imagePrepareGRPCCode extracts the gRPC status code from an ImagePrepare error,
+// which the provider returns as an *errors.ProviderError (a gRPC status).
+func imagePrepareGRPCCode(t *testing.T, err error) codes.Code {
+	t.Helper()
+	require.Error(t, err)
+	st, ok := status.FromError(err)
+	require.True(t, ok, "expected a gRPC status error, got %T: %v", err, err)
+	return st.Code()
+}
+
+// TestProxmoxProvider_ImagePrepare_ExistingTemplateByName verifies that a
+// source.proxmox.templateName referencing the seeded template is a no-op success
+// (verify-only, no import, no task).
+func TestProxmoxProvider_ImagePrepare_ExistingTemplateByName(t *testing.T) {
+	server, endpoint, err := pvefake.StartFakeServer()
 	require.NoError(t, err)
-
-	// Create provider with fake server
 	provider := createTestProvider(endpoint)
-
 	ctx := context.Background()
 
-	// Test template ensure (existing template)
-	imagePrepareReq := &providerv1.ImagePrepareRequest{
-		ImageJson:   `{"name": "ubuntu-22-template"}`,
-		StorageHint: "local-lvm",
-	}
-
-	imagePrepareResp, err := provider.ImagePrepare(ctx, imagePrepareReq)
+	// ubuntu-22-template (VMID 9000, template=1) is seeded by the fake server.
+	resp, err := provider.ImagePrepare(ctx, &providerv1.ImagePrepareRequest{
+		ImageJson:  `{"source":{"proxmox":{"templateName":"ubuntu-22-template"}}}`,
+		TargetName: "ubuntu-22-template",
+	})
 	require.NoError(t, err)
+	assert.Nil(t, resp.Task, "verify-only must not return a task")
+	assert.Nil(t, server.LastDownloadRequest(), "verify-only must not trigger a download")
+}
 
-	// Wait for task if any
-	if imagePrepareResp.Task != nil {
-		err = waitForTask(ctx, provider, imagePrepareResp.Task.Id)
-		require.NoError(t, err)
-	}
-
-	// Test image import from URL
-	imagePrepareReq = &providerv1.ImagePrepareRequest{
-		ImageJson:   `{"source": {"url": "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img"}}`,
-		StorageHint: "local-lvm",
-	}
-
-	imagePrepareResp, err = provider.ImagePrepare(ctx, imagePrepareReq)
+// TestProxmoxProvider_ImagePrepare_ExistingTemplateByID verifies that a
+// source.proxmox.templateID referencing the seeded template is a no-op success.
+func TestProxmoxProvider_ImagePrepare_ExistingTemplateByID(t *testing.T) {
+	server, endpoint, err := pvefake.StartFakeServer()
 	require.NoError(t, err)
+	provider := createTestProvider(endpoint)
+	ctx := context.Background()
 
-	// Wait for import task
-	if imagePrepareResp.Task != nil {
-		err = waitForTask(ctx, provider, imagePrepareResp.Task.Id)
+	resp, err := provider.ImagePrepare(ctx, &providerv1.ImagePrepareRequest{
+		ImageJson:  `{"source":{"proxmox":{"templateID":9000}}}`,
+		TargetName: "ubuntu-22-template",
+	})
+	require.NoError(t, err)
+	assert.Nil(t, resp.Task)
+	assert.Nil(t, server.LastDownloadRequest())
+}
+
+// TestProxmoxProvider_ImagePrepare_MissingTemplateName verifies that referencing a
+// non-existent template by name returns an honest NotFound rather than a
+// fabricated success.
+func TestProxmoxProvider_ImagePrepare_MissingTemplateName(t *testing.T) {
+	_, endpoint, err := pvefake.StartFakeServer()
+	require.NoError(t, err)
+	provider := createTestProvider(endpoint)
+	ctx := context.Background()
+
+	_, err = provider.ImagePrepare(ctx, &providerv1.ImagePrepareRequest{
+		ImageJson:  `{"source":{"proxmox":{"templateName":"does-not-exist"}}}`,
+		TargetName: "does-not-exist",
+	})
+	assert.Equal(t, codes.NotFound, imagePrepareGRPCCode(t, err))
+}
+
+// TestProxmoxProvider_ImagePrepare_MissingTemplateID verifies that referencing a
+// non-existent template by VMID returns NotFound.
+func TestProxmoxProvider_ImagePrepare_MissingTemplateID(t *testing.T) {
+	_, endpoint, err := pvefake.StartFakeServer()
+	require.NoError(t, err)
+	provider := createTestProvider(endpoint)
+	ctx := context.Background()
+
+	_, err = provider.ImagePrepare(ctx, &providerv1.ImagePrepareRequest{
+		ImageJson:  `{"source":{"proxmox":{"templateID":424242}}}`,
+		TargetName: "missing",
+	})
+	assert.Equal(t, codes.NotFound, imagePrepareGRPCCode(t, err))
+}
+
+// TestProxmoxProvider_ImagePrepare_ImportFromURL verifies the source.http.url
+// import path issues the expected PVE download-url call with the target_name,
+// resolved storage, and content=import propagated.
+func TestProxmoxProvider_ImagePrepare_ImportFromURL(t *testing.T) {
+	server, endpoint, err := pvefake.StartFakeServer()
+	require.NoError(t, err)
+	provider := createTestProvider(endpoint)
+	ctx := context.Background()
+
+	const imgURL = "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img"
+	resp, err := provider.ImagePrepare(ctx, &providerv1.ImagePrepareRequest{
+		ImageJson:   `{"source":{"http":{"url":"` + imgURL + `"}}}`,
+		TargetName:  "jammy-base",
+		StorageHint: "local-lvm",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp.Task, "import must return a task to poll")
+
+	dl := server.LastDownloadRequest()
+	require.NotNil(t, dl, "import must POST a download-url request")
+	assert.Equal(t, "pve", dl.Node)
+	assert.Equal(t, "local-lvm", dl.Storage)
+	assert.Equal(t, "import", dl.Content, "cloud image is imported as a disk, not an ISO")
+	assert.Equal(t, "jammy-base.qcow2", dl.Filename, "filename derives from target_name + format")
+	assert.Equal(t, imgURL, dl.URL)
+
+	err = waitForTask(ctx, provider, resp.Task.Id)
+	require.NoError(t, err)
+}
+
+// TestProxmoxProvider_ImagePrepare_StoragePrecedence verifies storage resolution:
+// the request StorageHint wins over source.proxmox.storage, which wins over the
+// local-lvm default.
+func TestProxmoxProvider_ImagePrepare_StoragePrecedence(t *testing.T) {
+	ctx := context.Background()
+	const imgURL = "https://images.example.com/base.img"
+
+	t.Run("hint wins over source storage", func(t *testing.T) {
+		server, endpoint, err := pvefake.StartFakeServer()
 		require.NoError(t, err)
+		provider := createTestProvider(endpoint)
+
+		_, err = provider.ImagePrepare(ctx, &providerv1.ImagePrepareRequest{
+			ImageJson:   `{"source":{"proxmox":{"storage":"src-store"},"http":{"url":"` + imgURL + `"}}}`,
+			TargetName:  "p1",
+			StorageHint: "hint-store",
+		})
+		require.NoError(t, err)
+		require.NotNil(t, server.LastDownloadRequest())
+		assert.Equal(t, "hint-store", server.LastDownloadRequest().Storage)
+	})
+
+	t.Run("source storage wins over default", func(t *testing.T) {
+		server, endpoint, err := pvefake.StartFakeServer()
+		require.NoError(t, err)
+		provider := createTestProvider(endpoint)
+
+		_, err = provider.ImagePrepare(ctx, &providerv1.ImagePrepareRequest{
+			ImageJson:  `{"source":{"proxmox":{"storage":"src-store"},"http":{"url":"` + imgURL + `"}}}`,
+			TargetName: "p2",
+		})
+		require.NoError(t, err)
+		require.NotNil(t, server.LastDownloadRequest())
+		assert.Equal(t, "src-store", server.LastDownloadRequest().Storage)
+	})
+
+	t.Run("default when neither set", func(t *testing.T) {
+		server, endpoint, err := pvefake.StartFakeServer()
+		require.NoError(t, err)
+		provider := createTestProvider(endpoint)
+
+		_, err = provider.ImagePrepare(ctx, &providerv1.ImagePrepareRequest{
+			ImageJson:  `{"source":{"http":{"url":"` + imgURL + `"}}}`,
+			TargetName: "p3",
+		})
+		require.NoError(t, err)
+		require.NotNil(t, server.LastDownloadRequest())
+		assert.Equal(t, "local-lvm", server.LastDownloadRequest().Storage)
+	})
+}
+
+// TestProxmoxProvider_ImagePrepare_ImportRequiresTargetName verifies the import
+// path refuses to fabricate a name from the URL when target_name is empty.
+func TestProxmoxProvider_ImagePrepare_ImportRequiresTargetName(t *testing.T) {
+	server, endpoint, err := pvefake.StartFakeServer()
+	require.NoError(t, err)
+	provider := createTestProvider(endpoint)
+	ctx := context.Background()
+
+	_, err = provider.ImagePrepare(ctx, &providerv1.ImagePrepareRequest{
+		ImageJson:  `{"source":{"http":{"url":"https://images.example.com/base.img"}}}`,
+		TargetName: "",
+	})
+	assert.Equal(t, codes.InvalidArgument, imagePrepareGRPCCode(t, err))
+	assert.Nil(t, server.LastDownloadRequest(), "no download without a target name")
+}
+
+// TestProxmoxProvider_ImagePrepare_EmptySource verifies that an empty or
+// source-less spec yields InvalidSpec rather than a fabricated success.
+func TestProxmoxProvider_ImagePrepare_EmptySource(t *testing.T) {
+	server, endpoint, err := pvefake.StartFakeServer()
+	require.NoError(t, err)
+	provider := createTestProvider(endpoint)
+	ctx := context.Background()
+
+	for name, imageJSON := range map[string]string{
+		"empty json":       ``,
+		"empty object":     `{}`,
+		"empty source":     `{"source":{}}`,
+		"unrelated source": `{"source":{"registry":{"image":"foo:bar"}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := provider.ImagePrepare(ctx, &providerv1.ImagePrepareRequest{
+				ImageJson:  imageJSON,
+				TargetName: "whatever",
+			})
+			assert.Equal(t, codes.InvalidArgument, imagePrepareGRPCCode(t, err))
+		})
 	}
+	assert.Nil(t, server.LastDownloadRequest())
+}
+
+// TestProxmoxProvider_ImagePrepare_Idempotent verifies that importing to a
+// target_name that already exists as a template is a no-op success (no download).
+func TestProxmoxProvider_ImagePrepare_Idempotent(t *testing.T) {
+	server, endpoint, err := pvefake.StartFakeServer()
+	require.NoError(t, err)
+	provider := createTestProvider(endpoint)
+	ctx := context.Background()
+
+	// ubuntu-22-template already exists as a template in the seed data; importing
+	// to that name must skip the download entirely.
+	resp, err := provider.ImagePrepare(ctx, &providerv1.ImagePrepareRequest{
+		ImageJson:  `{"source":{"http":{"url":"https://images.example.com/base.img"}}}`,
+		TargetName: "ubuntu-22-template",
+	})
+	require.NoError(t, err)
+	assert.Nil(t, resp.Task, "idempotent no-op must not return a task")
+	assert.Nil(t, server.LastDownloadRequest(), "idempotent no-op must not download")
 }
 
 func TestProxmoxProvider_MultiNIC(t *testing.T) {

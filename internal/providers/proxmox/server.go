@@ -781,66 +781,8 @@ func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*pr
 	return result, nil
 }
 
-// ImagePrepare prepares an image for use
-func (p *Provider) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepareRequest) (*providerv1.TaskResponse, error) {
-	if p.client == nil {
-		return nil, errors.NewUnavailable("PVE client not configured", nil)
-	}
-
-	// Find appropriate node and storage
-	node, err := p.client.FindNode(ctx)
-	if err != nil {
-		return nil, errors.NewInternal("failed to find node", err)
-	}
-
-	// Default storage - could be made configurable
-	storage := "local-lvm"
-	if req.StorageHint != "" {
-		storage = req.StorageHint
-	}
-
-	// Determine if we need to import or just ensure template exists
-	templateName := ""
-	imageURL := ""
-
-	if req.ImageJson != "" {
-		// Parse JSON-encoded VMImage spec to determine template name or URL
-		var imageSpec map[string]interface{}
-		if err := json.Unmarshal([]byte(req.ImageJson), &imageSpec); err != nil {
-			return nil, errors.NewInvalidSpec("failed to parse image JSON: %v", err)
-		}
-
-		// Extract image source information
-		if source, ok := imageSpec["source"].(map[string]interface{}); ok {
-			if httpSource, ok := source["http"].(map[string]interface{}); ok {
-				if url, ok := httpSource["url"].(string); ok {
-					imageURL = url
-					// Generate template name from URL
-					parts := strings.Split(url, "/")
-					if len(parts) > 0 {
-						templateName = strings.TrimSuffix(parts[len(parts)-1], ".qcow2")
-						templateName = strings.TrimSuffix(templateName, ".ova")
-					}
-				}
-			} else if templateRef, ok := source["template"].(string); ok {
-				templateName = templateRef
-			}
-		}
-	}
-
-	// Prepare the image/template
-	taskID, err := p.client.PrepareImage(ctx, node, storage, imageURL, templateName)
-	if err != nil {
-		return nil, errors.NewInternal("failed to prepare image", err)
-	}
-
-	result := &providerv1.TaskResponse{}
-	if taskID != "" {
-		result.Task = &providerv1.TaskRef{Id: taskID}
-	}
-
-	return result, nil
-}
+// ImagePrepare is implemented in image.go (structured source parsing, target_name
+// handling, idempotency, and the verify-vs-import precedence).
 
 // GetCapabilities returns the provider's capabilities
 func (p *Provider) GetCapabilities(ctx context.Context, req *providerv1.GetCapabilitiesRequest) (*providerv1.GetCapabilitiesResponse, error) {
