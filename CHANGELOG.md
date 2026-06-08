@@ -5,6 +5,23 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-08 11:25] - Manager transport: contracts.ImagePreparer + gRPC client PrepareImage (#154)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/providers/contracts/image.go` (new): optional `ImagePreparer` capability mirroring `Cloner` — `ImagePrepareRequest{ImageJSON, TargetName, StorageHint}` → `ImagePrepareResponse{TaskRef}`, with a `PrepareImage` method. Callers type-assert a `Provider` to `ImagePreparer` to invoke a prepare without widening the core `Provider` interface, so in-process providers and fakes that don't support it are unaffected.
+- `internal/transport/grpc/client.go`: `*Client.PrepareImage` implements `ImagePreparer` — calls the provider `ImagePrepare` RPC (5-minute timeout like Create/Clone, `mapGRPCError`, `trackTaskStart` on a returned TaskRef) — plus a compile-time `_ contracts.ImagePreparer = (*Client)(nil)` assertion.
+- `internal/transport/grpc/client_imageprepare_test.go` (new): bufconn tests for request-field forwarding + async TaskRef surfacing, synchronous empty-task, and error mapping.
+
+### Why
+PR-4 of the image-prepare vertical slice (#154). Pure manager-side plumbing so the manager can *call* `ImagePrepare`; no reconcile behavior change yet. The VM/VMImage controller wiring that drives it (the CR-driven E2E) lands in PR-5.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (manager image; no CRD/proto change)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-06-08 11:18] - Audit + tighten Proxmox ImagePrepare to honor the contract (#154)
 **Author:** @wrkode (William Rizzo)
 
