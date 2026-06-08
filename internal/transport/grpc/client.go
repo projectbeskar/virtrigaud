@@ -41,11 +41,12 @@ import (
 
 // Compile-time assertions that the gRPC Client satisfies the core Provider
 // interface plus the optional capability interfaces it advertises via
-// type-assertion (issues #176, #179).
+// type-assertion (issues #176, #179, #154).
 var (
 	_ contracts.Provider           = (*Client)(nil)
 	_ contracts.CapabilityReporter = (*Client)(nil)
 	_ contracts.Cloner             = (*Client)(nil)
+	_ contracts.ImagePreparer      = (*Client)(nil)
 )
 
 // Client wraps a gRPC provider client and implements the contracts.Provider interface
@@ -485,6 +486,35 @@ func (c *Client) Clone(ctx context.Context, req contracts.CloneRequest) (contrac
 		TargetVmID: resp.TargetVmId,
 	}
 
+	if resp.Task != nil {
+		result.TaskRef = resp.Task.Id
+		c.trackTaskStart(resp.Task.Id) // G7.3 (#129)
+	}
+
+	return result, nil
+}
+
+// PrepareImage implements contracts.ImagePreparer (#154): it prepares/imports a
+// VM image into the provider as a template/image named req.TargetName.
+//
+// Image preparation can be a long-running provider operation (download + convert
+// + register), so it uses the same generous timeout as Create/Clone. When the
+// provider reports a TaskRef the caller polls it via IsTaskComplete; an empty
+// TaskRef means the operation completed synchronously.
+func (c *Client) PrepareImage(ctx context.Context, req contracts.ImagePrepareRequest) (contracts.ImagePrepareResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+
+	resp, err := c.client.ImagePrepare(ctx, &providerv1.ImagePrepareRequest{
+		ImageJson:   req.ImageJSON,
+		TargetName:  req.TargetName,
+		StorageHint: req.StorageHint,
+	})
+	if err != nil {
+		return contracts.ImagePrepareResponse{}, c.mapGRPCError("image prepare", err)
+	}
+
+	result := contracts.ImagePrepareResponse{}
 	if resp.Task != nil {
 		result.TaskRef = resp.Task.Id
 		c.trackTaskStart(resp.Task.Id) // G7.3 (#129)
