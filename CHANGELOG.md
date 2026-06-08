@@ -5,6 +5,34 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-08 11:14] - Implement vSphere ImagePrepare: OVA/OVF URL import as template (#154)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/providers/vsphere/image.go`: real `ImagePrepare` for the vSphere provider. Parses the image source from `ImageJson` (rich `v1beta1` `source.vsphere` shape — the only one able to carry `ovaURL`/`contentLibrary` — falling back to the flat `contracts.VMImage` `TemplateName`). Handles three source kinds in precedence order behind an idempotency gate: (1) if a template/VM named `target_name` already exists, return success without importing; (2) `source.vsphere.templateName` → verify the template exists (`finder.VirtualMachine`), no import, honest `NotFound` if missing; (3) `source.vsphere.contentLibrary` → verify the library item exists via vAPI (`vapi/rest` + `vapi/library`), then return a clear `InvalidSpec` (deploy-to-template is out of scope for this PR); (4) `source.vsphere.ovaURL` → the real import: resolve placement (resource pool from `DefaultCluster`, datastore from `storage_hint`→`DefaultDatastore`→`DefaultStoragePod`, folder from `DefaultFolder`→datacenter VM folder), download the OVA/OVF to a temp file, optionally verify its checksum (md5/sha1/sha256/sha512; sha256 default), import via govmomi `ovf/importer` (descriptor → `CreateImportSpec` → `ImportVApp` NFC lease → upload → complete) with thin disk provisioning, then `MarkAsTemplate`. Mid-import failures best-effort `Destroy` the partial VM so a retry starts clean.
+- `internal/providers/vsphere/image.go`: `findOVADescriptorName` resolves the OVF descriptor's **exact** entry name inside the OVA tar, skipping macOS **AppleDouble** sidecars (`._*`) and `__MACOSX/` entries, instead of relying on govmomi's `"*.ovf"` glob. OVAs repackaged on macOS pack a binary `._foo.ovf` sidecar *before* the real descriptor; the glob matched it first and the import failed with `XML syntax error: illegal character code U+0000`. Found during live validation against a real macOS-packaged Ubuntu 24.04 OVA.
+- `internal/providers/vsphere/image_test.go`: host-independent unit tests (source-JSON parsing, checksum-hasher selection, file-checksum match/mismatch/unknown, nil-client guard, AppleDouble descriptor resolution + no-descriptor error) plus vcsim integration tests that import a trivial OVA and assert a template named `target_name` results, that a re-run is a no-op, and that the templateName verify-only branch returns success when present and `NotFound` when absent.
+
+### Changed
+- `internal/providers/vsphere/server.go`: removed the `ImagePrepare` `Unimplemented` stub (the method now lives in `image.go`); updated the `SupportsImageImport: true` comment to reference the now-real implementation (#154). The capability stays `true` — it is now honest.
+
+### Why
+PR-2 of the image-prepare vertical slice (#154). Makes vSphere's existing
+SupportsImageImport=true honest by importing OVA/OVF from a URL into vCenter
+as a template via govmomi, instead of returning Unimplemented.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (vSphere provider image; no CRD/proto change)
+- [ ] Config change only
+- [ ] Documentation only
+
+### Notes
+- Synchronous import (empty TaskRef); very large OVAs may need async polling (future).
+- templateName/contentLibrary sources are verify-only; ovaURL does the real import.
+- **Deployment requirement:** the OVA disk upload uses an NFC lease that streams **directly from the provider to the ESXi host** (not via vCenter). The ESXi host(s) must therefore be DNS-resolvable and network-reachable from wherever the vSphere provider runs. This is inherent to vSphere NFC (the same applies to disk export/migration). Surfaced during live validation: vCenter returned a lease URL to `esxi.<domain>` which the provider pod could not resolve.
+- Live-validated against a real macOS-packaged Ubuntu 24.04 OVA on vCenter through descriptor parse → CreateImportSpec → ImportVApp → NFC lease; the byte upload requires ESXi reachability per the note above.
+
 ## [2026-06-08 11:08] - Implement libvirt ImagePrepare RPC: import image into storage pool (#154)
 **Author:** @wrkode (William Rizzo)
 

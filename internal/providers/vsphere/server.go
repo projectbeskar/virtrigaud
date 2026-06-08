@@ -411,7 +411,7 @@ func (p *Provider) GetCapabilities(ctx context.Context, req *providerv1.GetCapab
 		SupportsSnapshots:           true,
 		SupportsMemorySnapshots:     true, // vSphere captures RAM-inclusive snapshots via CreateSnapshot(memory=true); requires the VM to be powered on
 		SupportsLinkedClones:        true,
-		SupportsImageImport:         true,
+		SupportsImageImport:         true, // ImagePrepare imports an OVA/OVF URL into vCenter as a template (#154)
 		SupportedDiskTypes:          []string{"thin", "thick", "eager-zeroed"},
 		SupportedNetworkTypes:       []string{"standard", "distributed"},
 		// Disk migration: ExportDisk and ImportDisk are implemented (issue #178).
@@ -1946,12 +1946,9 @@ func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*pr
 	}, nil
 }
 
-// ImagePrepare implements the ProviderServer interface. Image preparation (converting
-// an external image into a vSphere template) is not yet implemented for this provider;
-// the method always returns an Unimplemented error.
-func (p *Provider) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepareRequest) (*providerv1.TaskResponse, error) {
-	return nil, errors.NewUnimplemented("ImagePrepare operation not yet implemented for vSphere")
-}
+// ImagePrepare is implemented in image.go: it imports an OVA/OVF from a URL into
+// vCenter as a template (or verifies an existing template / content-library item),
+// backing the SupportsImageImport capability (#154).
 
 // VMSpec represents the parsed virtual machine specification
 type VMSpec struct {
