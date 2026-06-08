@@ -5,6 +5,27 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-08 11:05] - Fix libvirt full clone: copy the resolved disk path, not a guessed pool-volume name (#153)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/libvirt/clone.go`: full clone (`FullClone`) no longer assumes the source disk is a libvirt storage volume named `<vmid>-disk` in the `default` pool. That assumption failed in the field with `error: Storage volume not found: no storage vol with matching path '<vmid>-disk'`, because the provider's create path does not name disks that way. Full clone now copies the **real disk path** resolved from the live domain (`domblklist`) via `qemu-img convert -O qcow2` on the libvirt host — the same naming-agnostic, path-based approach the linked-clone branch already used. `qemu-img convert` also flattens any backing chain, so the full copy is genuinely independent of the source (and of the base image the source may overlay).
+
+### Changed
+- `internal/providers/libvirt/clone.go`: extracted the post-create ownership/permission/SELinux/pool-refresh steps into a shared `finalizeClonedDisk` helper used by both full and linked clone; added `createFullCopy`; removed the `virsh vol-clone` path.
+
+### Why
+libvirt clone E2E validation on a real host (isolated test provider, fresh source VM) showed **linked clone succeeds** but **full clone fails** for exactly this reason. Full clone is the default clone type, so this made the common case unusable; the path-based copy mirrors the proven linked-clone path.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (libvirt provider image; no CRD/proto change)
+- [ ] Config change only
+- [ ] Documentation only
+
+### Notes
+- UEFI sources are still not fully handled: the domain-XML rewrite does not yet re-point the per-VM `<nvram>` varstore, so cloning a UEFI domain can collide on the NVRAM path. Use BIOS sources until that follow-up lands; tracked for #153 follow-up.
+
 ## [2026-06-08 10:10] - Implement libvirt Clone RPC: qcow2 full + linked clones (#153)
 **Author:** @wrkode (William Rizzo)
 
