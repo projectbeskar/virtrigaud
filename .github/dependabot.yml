@@ -8,11 +8,15 @@
 #     reviewed individually; minor + patch bumps batch into a single PR
 #     per ecosystem to reduce review overhead.
 #   - The Node.js 20 deprecation in GitHub Actions has a 2026-09-16
-#     hard removal date. Actions still on Node 20 (per PROJECT_CONTEXT.md
-#     Risks-Watching) include: actions/setup-go (v5 → latest v6+),
-#     docker/login-action (v3 → v4+), docker/metadata-action (v5 → v6+),
-#     docker/setup-buildx-action (v3 → v4+). These have newer majors on
-#     Node 24; Dependabot should propose those bumps on its weekly run.
+#     hard removal date.
+#     RESOLVED 2026-06-08 (#134): the four originally-outstanding actions are
+#     now on their Node-24 majors across all workflows —
+#     actions/setup-go (v6.4.0), docker/login-action (v4.2.0),
+#     docker/metadata-action (v6.1.0), docker/setup-buildx-action (v4.1.0).
+#     Remaining Node-20 holdouts are tracked separately and deliberately
+#     deferred: actions/checkout v4 (pinned for #102/K4 — see #137) and
+#     codecov-action v5 (#140). Dependabot keeps these current within their
+#     majors on the weekly run.
 #   - SHA-pinning caveat: our workflows use commit-SHA pinning with a
 #     trailing version comment (e.g. `actions/setup-go@<sha>  # v5`).
 #     Dependabot may be conservative about major bumps with SHA pins.

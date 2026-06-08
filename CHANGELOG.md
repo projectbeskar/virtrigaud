@@ -5,6 +5,22 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-08 06:10] - CI/release: unify supply-chain verification format + close Node-20 action backlog (#172, #134)
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `.github/workflows/release.yml`: pin both `Install Cosign` steps to `cosign-release: v2.6.3` (#172). cosign v3.0 flipped signing output to the new Sigstore-bundle (OCI 1.1 referrer) format, while `slsa-github-generator` still writes SLSA provenance to the legacy `.att` tag — so no single cosign version verified signature + SBOM + SLSA with default flags. v2.6.3 emits legacy `.sig`/`.att` tags that match the SLSA generator, restoring **single-cosign-version (any >= 2.2) verification of all three artifacts**. Verification-ergonomics only — all artifacts were already individually present and cryptographically valid.
+- `.github/dependabot.yml`: documented #134 resolution — the four originally-outstanding Node-20 actions (`actions/setup-go`, `docker/login-action`, `docker/metadata-action`, `docker/setup-buildx-action`) are now on their Node-24 majors across all workflows; remaining holdouts (`actions/checkout` v4 #137/K4, `codecov-action` v5 #140) are tracked + deferred.
+
+### Why
+Closes #172 (verification ergonomics) and #134 (Node-20 GitHub Actions deprecation, hard-deadlined 2026-09-16). The cosign change is the prerequisite for documenting a single, universally-verifiable supply-chain check.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [x] CI / release-workflow change only (takes effect on the next release; v0.3.8 shipped as-is)
+- [ ] Documentation only
+
 ## [2026-06-08 05:45] - libvirt provider: SSH ControlMaster connection multiplexing (#194)
 **Author:** @wrkode (William Rizzo)
 
