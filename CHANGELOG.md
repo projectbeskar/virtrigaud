@@ -5,6 +5,22 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-08 05:45] - libvirt provider: SSH ControlMaster connection multiplexing (#194)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/providers/libvirt/sshhostkey.go`: SSH **ControlMaster** connection multiplexing for the libvirt provider. A burst of `virsh`/`scp` invocations now reuses a single SSH connection (`ControlMaster=auto`, `ControlPath=/tmp/virtrigaud-ssh-%C`, `ControlPersist=60s`) instead of opening a fresh handshake per command — eliminating at the source the connection churn that can trip the libvirt host's sshd `MaxStartups`/fail2ban (the symptom #191 retries client-side). Wired into both `virsh` SSH branches (`virsh.go`), the `scp` disk-copy path (`server.go`), and the `~/.ssh/config` stanza used by libvirt's own `qemu+ssh://` transport. ON by default; escape hatch `LIBVIRT_SSH_DISABLE_MULTIPLEXING=true` reverts to one connection per command. The control socket lives under `/tmp` (writable in the provider container, wiped on restart, so no stale sockets survive), and `%C` keeps the path under the AF_UNIX limit.
+- `internal/providers/libvirt/sshmultiplex_test.go`: tests for the env escape hatch, the option builder (enabled/disabled), and the config-stanza multiplex lines.
+
+### Why
+Follow-up to #191 (which added client-side retry/backoff). Multiplexing removes the churn rather than just tolerating its symptom: steady-state, many `virsh` calls share one connection, so the host's per-source connection-rate limits are far less likely to trip.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (libvirt provider only; no CRD/proto change)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-06-07 17:05] - libvirt provider: retry transient SSH connection failures (#191)
 **Author:** @wrkode (William Rizzo)
 
