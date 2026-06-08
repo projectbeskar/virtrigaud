@@ -69,7 +69,55 @@ const (
 	// helper selects between.
 	strictYes       = "yes"
 	strictAcceptNew = "accept-new"
+
+	// EnvDisableSSHMultiplexing is the escape hatch that turns OFF SSH
+	// connection multiplexing (ControlMaster). Multiplexing is ON by default
+	// (#194) so a burst of `virsh`/`scp` invocations reuses a single SSH
+	// connection instead of opening a fresh handshake per command — the churn
+	// that can trip the libvirt host's sshd MaxStartups / fail2ban (the same
+	// symptom #191 retries client-side). Set to the literal "true"
+	// (case-insensitive, trimmed) to revert to one connection per command;
+	// any other value keeps multiplexing on. Settable per-Provider via
+	// spec.runtime.env, mirroring the other libvirt escape hatches.
+	EnvDisableSSHMultiplexing = "LIBVIRT_SSH_DISABLE_MULTIPLEXING"
+
+	// sshControlPath is the ssh ControlMaster socket path. `%C` is a short,
+	// fixed-length hash of (local host, remote host, port, user), keeping the
+	// path well under the AF_UNIX sun_path limit and unique per destination. It
+	// lives under /tmp — writable in the provider container and wiped on pod
+	// restart, so no stale control sockets survive a restart.
+	sshControlPath = "/tmp/virtrigaud-ssh-%C"
+
+	// sshControlPersist keeps the background master connection open this long
+	// after the last multiplexed session, so subsequent commands (and the next
+	// reconcile burst) reuse it instead of re-handshaking.
+	sshControlPersist = "60s"
 )
+
+// sshMultiplexingEnabled reports whether SSH ControlMaster connection sharing is
+// active. It is ON by default and disabled only by the explicit, greppable
+// escape hatch EnvDisableSSHMultiplexing=true (#194).
+func sshMultiplexingEnabled() bool {
+	return !strings.EqualFold(strings.TrimSpace(os.Getenv(EnvDisableSSHMultiplexing)), "true")
+}
+
+// sshMultiplexOptions returns the `ssh`/`scp` `-o key=value` flag pairs that
+// enable ControlMaster connection sharing, laid out as alternating
+// ["-o","k=v",...] so they spread directly into an argv builder. It returns nil
+// when multiplexing is disabled (EnvDisableSSHMultiplexing=true) so callers fall
+// back to a fresh connection per command. Reusing one connection across many
+// virsh/scp invocations collapses the SSH handshake churn that can trip the
+// host's MaxStartups/fail2ban (#191/#194). Independent of the host-key policy.
+func sshMultiplexOptions() []string {
+	if !sshMultiplexingEnabled() {
+		return nil
+	}
+	return []string{
+		"-o", "ControlMaster=auto",
+		"-o", "ControlPath=" + sshControlPath,
+		"-o", "ControlPersist=" + sshControlPersist,
+	}
+}
 
 // hostKeyPolicy captures the resolved SSH host-key verification posture for a
 // single provider process. It is computed once (resolveHostKeyPolicy) and then
@@ -128,13 +176,22 @@ func (p hostKeyPolicy) sshHostKeyOptions() []string {
 // any ssh invocation that reads the config (notably libvirt's own qemu+ssh://
 // transport) honours the same host-key policy as the explicit-argv paths.
 func (p hostKeyPolicy) sshConfigStanza() string {
-	return fmt.Sprintf(`Host *
+	stanza := fmt.Sprintf(`Host *
     StrictHostKeyChecking %s
     PasswordAuthentication yes
     PubkeyAuthentication no
     UserKnownHostsFile %s
     LogLevel ERROR
 `, p.strictHostKeyChecking(), p.knownHostsFile())
+	// Mirror the explicit-argv ControlMaster options into the config so that
+	// libvirt's own qemu+ssh:// transport also shares one connection (#194).
+	if sshMultiplexingEnabled() {
+		stanza += fmt.Sprintf(`    ControlMaster auto
+    ControlPath %s
+    ControlPersist %s
+`, sshControlPath, sshControlPersist)
+	}
+	return stanza
 }
 
 // applyURIHostKeyOptions sets the host-key-related query parameters on the

@@ -374,8 +374,10 @@ func (v *VirshProvider) runVirshCommandOnce(ctx context.Context, args ...string)
 				"-o", "PubkeyAuthentication=no",
 				"-o", "LogLevel=ERROR",
 			}
-			// Host-key options come from the centralized policy (#149/ADR-0004).
+			// Host-key options come from the centralized policy (#149/ADR-0004);
+			// ControlMaster multiplexing reuses one connection (#194).
 			sshArgs = append(sshArgs, v.hostKey.sshHostKeyOptions()...)
+			sshArgs = append(sshArgs, sshMultiplexOptions()...)
 			sshArgs = append(sshArgs, fmt.Sprintf("%s@%s", user, host))
 			sshArgs = append(sshArgs, directArgs...)
 
@@ -406,8 +408,10 @@ func (v *VirshProvider) runVirshCommandOnce(ctx context.Context, args ...string)
 				"-o", "PubkeyAuthentication=no",
 				"-o", "LogLevel=ERROR",
 			}
-			// Host-key options come from the centralized policy (#149/ADR-0004).
+			// Host-key options come from the centralized policy (#149/ADR-0004);
+			// ControlMaster multiplexing reuses one connection (#194).
 			sshArgs = append(sshArgs, v.hostKey.sshHostKeyOptions()...)
+			sshArgs = append(sshArgs, sshMultiplexOptions()...)
 			sshArgs = append(sshArgs, fmt.Sprintf("%s@%s", user, host), "virsh")
 			sshArgs = append(sshArgs, args...)
 

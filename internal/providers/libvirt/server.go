@@ -761,6 +761,8 @@ func (s *Server) copyDiskToRemote(ctx context.Context, virshProvider *VirshProvi
 		return "", fmt.Errorf("libvirt scp host-key verification pre-flight failed: %w", err)
 	}
 	hostKeyOpts := virshProvider.hostKey.sshHostKeyOptions()
+	// Share the SSH connection with the virsh path via ControlMaster (#194).
+	hostKeyOpts = append(hostKeyOpts, sshMultiplexOptions()...)
 
 	// Run scp LOCALLY on the pod to copy to remote host
 	var cmd *exec.Cmd
