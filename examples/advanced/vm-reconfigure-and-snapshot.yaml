@@ -1,9 +1,18 @@
 # Advanced VM Lifecycle Example: Reconfiguration and Snapshots
 # This example demonstrates:
 # 1. Creating a VM with initial configuration
-# 2. Taking a snapshot before making changes
+# 2. Taking a snapshot before making changes (including a RAM-inclusive memory snapshot)
 # 3. Reconfiguring the VM (CPU/memory changes)
 # 4. Using placement policies for advanced placement rules
+#
+# NOTE — Libvirt online reconfigure:
+#   For the reconfiguration step to work WITHOUT a power cycle on Libvirt/KVM,
+#   the VMClass MUST have cpuHotAddEnabled and/or memoryHotAddEnabled set to
+#   true, and the VM must have been CREATED with that class (headroom is
+#   provisioned at create time only). See the VMClass below and the Libvirt
+#   provider guide at https://projectbeskar.github.io/virtrigaud/providers/libvirt/
+#   for details.
+#   vSphere and Proxmox support online reconfigure unconditionally.
 
 ---
 # Placement policy for production workloads
@@ -47,6 +56,13 @@ spec:
 
 ---
 # VM Class defining resource tiers
+# cpuHotAddEnabled / memoryHotAddEnabled (Libvirt-specific):
+#   When true, the Libvirt provider provisions hotplug headroom at VM create time
+#   so that CPU and memory can be raised live (no power cycle) up to ~4× the
+#   initial values (vCPU ceiling capped at 64). These flags are ignored by the
+#   vSphere and Proxmox providers, which support online reconfigure unconditionally.
+#   VMs created without these flags (including all VMs created before v0.3.9) still
+#   require a power cycle for any reconfiguration on Libvirt.
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMClass
 metadata:
@@ -60,6 +76,9 @@ spec:
     type: thin
     size: "20Gi"
   guestToolsPolicy: install
+  performanceProfile:
+    cpuHotAddEnabled: true    # Libvirt: provision vCPU headroom at create (ceiling: min(4×initial, 64))
+    memoryHotAddEnabled: true # Libvirt: set balloon maximum to 4× initial memory at create
 
 ---
 # Initial VM configuration
@@ -129,6 +148,11 @@ spec:
 
 ---
 # Create a pre-change snapshot
+# memory: true — requests a RAM-inclusive checkpoint.
+#   Libvirt: full system checkpoint (disk + RAM) when the VM is running;
+#            silently downgraded to disk-only with a WARN if the VM is stopped.
+#   Proxmox: supports memory snapshots.
+#   vSphere:  full memory-inclusive snapshot via CreateSnapshot(memory=true) when the VM is powered on.
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMSnapshot
 metadata:
@@ -138,7 +162,7 @@ spec:
   vmRef:
     name: web-server-01
   nameHint: "pre-upgrade-snapshot"
-  memory: true  # Include memory state
+  memory: true  # Include memory state (Libvirt/Proxmox only; see comment above)
   description: "Snapshot before CPU/memory upgrade"
   retentionPolicy:
     maxAge: "7d"  # Keep for 7 days

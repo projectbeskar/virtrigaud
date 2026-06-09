@@ -14,14 +14,14 @@ The manager reconciles Kubernetes custom resources; each hypervisor runs as a se
 
 - **Multi-Hypervisor Support**: vSphere, Libvirt/KVM, and Proxmox VE simultaneously
 - **Cross-Provider VM Migration**: Migrate VMs between hypervisors using PVC-backed storage (currently tested: vSphere to Libvirt/KVM only; other directions are roadmap)
-- **VM Cloning (VMClone)**: Full and linked clones, MVP — `source.vmRef`, same-provider (vSphere/Proxmox; libvirt clone not implemented)
+- **VM Cloning (VMClone)**: Full and linked clones, MVP — `source.vmRef`, same-provider (vSphere/Proxmox/Libvirt; libvirt: qcow2 overlay for linked, full copy for full)
 - **VMSet CRD defined; controller not yet active**: Multi-VM replica set is defined but the controller is a stub that reports `Ready=False / ControllerNotImplemented`; rolling updates and replica management are roadmap
 - **VMPlacementPolicy (reference-only)**: Placement rules (affinity, anti-affinity, resource constraints) expressed as a policy object referenced by `VirtualMachine.spec.placementRef`; no standalone enforcement controller
 - **Declarative v1beta1 API**: Stable CRDs with OpenAPI validation
 - **Cloud-Init Support**: Cross-provider VM initialisation via cloud-init
 - **Power Management**: On/Off/Reboot/Graceful-Shutdown uniformly
 - **Async Task Tracking**: Long-running vSphere and Proxmox operations tracked via TaskStatus RPC
-- **Resource Reconfiguration**: CPU, memory, disk changes (online for vSphere/Proxmox; restart required for Libvirt)
+- **Resource Reconfiguration**: CPU, memory, disk changes (online for vSphere/Proxmox; online for Libvirt when VM was created with `cpuHotAddEnabled`/`memoryHotAddEnabled`, otherwise power-cycle)
 - **G6 Circuit Breaker**: One circuit breaker per Provider CR for automatic failure isolation (v0.3.6+)
 - **Secure-by-default gRPC**: mTLS wired end-to-end (TLS 1.3, SNI, certwatcher hot-reload); provider pods fail closed without credentials (#147/#148, v0.3.7)
 - **Libvirt SSH host-key verification**: `known_hosts` enforced by default; TOFU removed (#149, v0.3.7)
@@ -120,28 +120,31 @@ Note: VMAdoption is a **controller** built into the manager, not a CRD.
 
 ## Provider Feature Matrix
 
-Per the [canonical capabilities matrix](https://projectbeskar.github.io/virtrigaud/providers/providers-capabilities/), verified against provider `GetCapabilities` responses (Libvirt Clone/ImagePrepare corrected to unsupported — see [#153]/[#154]):
+Per the [canonical capabilities matrix](https://projectbeskar.github.io/virtrigaud/providers/providers-capabilities/), verified against provider `GetCapabilities` responses (v0.3.9: Libvirt Clone, ImagePrepare, online disk expansion, online reconfigure, and memory snapshots are now implemented):
 
 | Feature | vSphere | Libvirt | Proxmox | Notes |
 |---------|---------|---------|---------|-------|
 | **Core Operations** | ✅ | ✅ | ✅ | Create/Delete/Power/Describe |
-| **Reconfiguration** | ✅ | ⚠️ | ✅ | Libvirt requires VM restart |
-| **Disk Expansion** | ✅ | ⚠️ | ✅ | Libvirt: power-cycle required |
+| **Reconfiguration** | ✅ | ✅ | ✅ | Libvirt: online via `setvcpus/setmem --live` when VM was created with `cpuHotAddEnabled`/`memoryHotAddEnabled` (hotplug headroom provisioned at create, grows up to ~4× ceiling, vCPU hard cap 64); otherwise power-cycle ([#203]) |
+| **Disk Expansion** | ✅ | ✅ | ✅ | Libvirt: online grow via `virsh blockresize` (grow-only; desired ≤ current is a no-op) + best-effort in-guest FS grow via guest agent ([#201]) |
 | **Snapshots** | ✅ | ✅ | ✅ | Point-in-time captures |
-| **Memory Snapshots** | ❌ | ❌ | ✅ | RAM-inclusive snapshots (vSphere: no) |
-| **Cloning (full)** | ✅ | ❌ [#153] | ✅ | Libvirt: Clone RPC not implemented |
-| **Linked Clones** | ✅ | ❌ [#153] | ✅ | COW-based (vSphere/Proxmox); Libvirt: not implemented |
-| **Clone RPC** | ✅ | ❌ [#153] | ✅ | Libvirt Clone returns Unimplemented (honest; real impl tracked in #153) |
-| **ImagePrepare RPC** | ✅ | ❌ [#154] | ✅ | Libvirt ImagePrepare returns Unimplemented (honest; real impl tracked in #154) |
+| **Memory Snapshots** | ✅ | ✅ | ✅ | RAM-inclusive checkpoints for a **running** VM. vSphere: `CreateSnapshot(memory=true)`. Libvirt: `snapshot-create-as` without `--disk-only`; a stopped VM is honestly downgraded to disk-only with a WARN ([#202]). |
+| **Cloning (full)** | ✅ | ✅ | ✅ | Libvirt: full copy of resolved disk path (qemu-img convert / vol-clone), same-provider ([#153]) |
+| **Linked Clones** | ✅ | ✅ | ✅ | Libvirt: qcow2 overlay (backing-file COW), same-provider ([#153]). UEFI/secure-boot nvram re-point is a deferred follow-up (#208). |
+| **Clone RPC** | ✅ | ✅ | ✅ | Libvirt Clone implemented: linked (qcow2 overlay) + full copy, `source.vmRef`, same-provider ([#153]) |
+| **ImagePrepare RPC** | ✅ | ✅ | ✅ | Libvirt: import/convert image into a storage pool ([#154]) |
 | **Task Tracking** | ✅ | N/A | ✅ | Async operation monitoring |
 | **Console URLs** | ✅ | ✅ | ⚠️ | Proxmox console URL: planned |
 | **Guest Agent** | ✅ | ✅ | ✅ | IP detection and guest info |
-| **Image Import** | ✅ | ❌ [#154] | ✅ | vSphere: OVA/content library; Libvirt: ImagePrepare not implemented |
+| **Image Import** | ✅ | ✅ | ✅ | Libvirt: import into storage pool ([#154]). vSphere: OVA/content library. |
 | **Multi-NIC** | ✅ | ✅ | ✅ | Multiple network interfaces |
 | **Circuit Breaker** | ✅ | ✅ | ✅ | One CB per Provider CR (v0.3.6) |
 
 [#153]: https://github.com/projectbeskar/virtrigaud/issues/153
 [#154]: https://github.com/projectbeskar/virtrigaud/issues/154
+[#201]: https://github.com/projectbeskar/virtrigaud/issues/201
+[#202]: https://github.com/projectbeskar/virtrigaud/issues/202
+[#203]: https://github.com/projectbeskar/virtrigaud/issues/203
 
 ## Quick Start
 
