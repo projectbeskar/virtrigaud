@@ -552,7 +552,13 @@ func (p *Provider) Reconfigure(ctx context.Context, id string, desired contracts
 				_, err = p.virshProvider.runVirshCommand(ctx, "setvcpus", id,
 					fmt.Sprintf("%d", desired.Class.CPU), "--live")
 				if err != nil {
-					log.Printf("WARN Online CPU change failed, will require restart: %v", err)
+					// A `setvcpus --live` failure here means the desired vCPU
+					// count exceeds the hotplug headroom provisioned at create
+					// (the <vcpu> max), or the VM was created without
+					// CPUHotAddEnabled (no headroom at all). Either way the
+					// increase requires a power cycle to take effect (#203).
+					log.Printf("WARN Online CPU change to %d failed for %s: exceeds provisioned hotplug headroom (the <vcpu> max) or the VM was created without CPUHotAddEnabled; a power cycle is required to apply this increase: %v",
+						desired.Class.CPU, id, err)
 					requiresRestart = true
 				} else {
 					log.Printf("INFO Successfully changed CPUs online for domain: %s", id)
@@ -585,7 +591,14 @@ func (p *Provider) Reconfigure(ctx context.Context, id string, desired contracts
 				_, err = p.virshProvider.runVirshCommand(ctx, "setmem", id,
 					fmt.Sprintf("%dK", desiredMemoryKB), "--live")
 				if err != nil {
-					log.Printf("WARN Online memory change failed, will require restart: %v", err)
+					// `setmem --live` inflates the balloon up to the <memory>
+					// ceiling. A failure here means the desired memory exceeds
+					// the hotplug headroom provisioned at create (the <memory>
+					// balloon maximum), or the VM was created without
+					// MemoryHotAddEnabled (no headroom at all). Either way the
+					// increase requires a power cycle to take effect (#203).
+					log.Printf("WARN Online memory change to %d KiB failed for %s: exceeds provisioned hotplug headroom (the <memory> balloon maximum) or the VM was created without MemoryHotAddEnabled; a power cycle is required to apply this increase: %v",
+						desiredMemoryKB, id, err)
 					requiresRestart = true
 				} else {
 					log.Printf("INFO Successfully changed memory online for domain: %s", id)
@@ -1178,12 +1191,21 @@ func (p *Provider) generateDomainXMLWithStorage(req contracts.CreateRequest, dis
 
 	// Extract performance and security features
 	var nestedVirtualization bool
+	var cpuHotAddEnabled bool
+	var memoryHotAddEnabled bool
 	var vtdEnabled bool
 	var secureBoot bool
 	var tpmEnabled bool
 
 	if req.Class.PerformanceProfile != nil {
 		nestedVirtualization = req.Class.PerformanceProfile.NestedVirtualization
+		// CPU/MemoryHotAddEnabled provision hotplug headroom at create time so
+		// the live Reconfigure path (`setvcpus/setmem --live`) can grow a
+		// running VM up to the ~4× ceiling without a power cycle (#203). When
+		// these are false the emitted XML is byte-identical to the historical
+		// layout (no <vcpu current=...>, <memory>==<currentMemory>).
+		cpuHotAddEnabled = req.Class.PerformanceProfile.CPUHotAddEnabled
+		memoryHotAddEnabled = req.Class.PerformanceProfile.MemoryHotAddEnabled
 	}
 
 	if req.Class.SecurityProfile != nil {
@@ -1267,12 +1289,18 @@ func (p *Provider) generateDomainXMLWithStorage(req contracts.CreateRequest, dis
 	// Generate network interfaces based on request
 	networkInterfacesXML := p.generateNetworkInterfacesXML(req.Networks)
 
+	// Build the CPU/memory elements, provisioning hotplug headroom when the
+	// VMClass opts into CPU/MemoryHotAddEnabled (#203). When hot-add is off the
+	// rendered elements are byte-identical to the historical
+	// <memory>==<currentMemory>, <vcpu placement='static'>N</vcpu> layout.
+	cpuMem := buildCPUMemoryXML(cpuCount, memoryMB, cpuHotAddEnabled, memoryHotAddEnabled)
+
 	domainXML := fmt.Sprintf(`<domain type='qemu'>
   <name>%s</name>
   <uuid>%s</uuid>
-  <memory unit='MiB'>%d</memory>
-  <currentMemory unit='MiB'>%d</currentMemory>
-  <vcpu placement='static'>%d</vcpu>
+  %s
+  %s
+  %s
   <os>
 %s
   </os>
@@ -1347,9 +1375,9 @@ func (p *Provider) generateDomainXMLWithStorage(req contracts.CreateRequest, dis
 </domain>`,
 		req.Name,
 		uuid,
-		memoryMB,
-		memoryMB,
-		cpuCount,
+		cpuMem.Memory,
+		cpuMem.CurrentMemory,
+		cpuMem.VCPU,
 		osXML,
 		featuresXML,
 		cpuXML,

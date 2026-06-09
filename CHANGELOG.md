@@ -5,6 +5,35 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-09 07:52] - libvirt online CPU/memory reconfigure: hotplug headroom + live setvcpus/setmem (#203)
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `internal/providers/libvirt/provider_virsh.go`: the create-path now provisions hotplug headroom in the domain XML when the VMClass opts into `CPUHotAddEnabled`/`MemoryHotAddEnabled`. CPU becomes `<vcpu placement='static' current='<initial>'>=ceiling</vcpu>` (extra vCPUs start offline, brought online by `setvcpus --live`); memory becomes `<memory>=ceiling` (balloon maximum) with `<currentMemory>=initial` (so `setmem --live` can inflate up to the ceiling). When hot-add is disabled the emitted XML is byte-identical to before (`<vcpu placement='static'>N</vcpu>`, `<memory>==<currentMemory>==initial`) — no regression for existing/most VMs.
+- `internal/providers/libvirt/provider_virsh.go`: the `Reconfigure` online CPU/memory `--live` failure logs are now honest — they state the desired increase exceeds the provisioned hotplug headroom (the `<vcpu>` max / `<memory>` balloon maximum) or the VM was created without the hot-add flag, and that a power cycle is required. The CPU/memory comparison and `requiresRestart` fallback logic are unchanged.
+- `internal/providers/libvirt/server.go`: `GetCapabilities` now advertises `SupportsReconfigureOnline: true` — online CPU/mem reconfigure via `setvcpus/setmem --live` for VMs created with the hot-add flags (headroom provisioned at create), up to the ~4× ceiling, beyond which a power cycle is required.
+
+### Added
+- `internal/providers/libvirt/reconfigure_online.go`: `buildCPUMemoryXML` helper plus `computeHotplugCeilingVCPUs`/`computeHotplugCeilingMemoryMiB` with named, tunable constants — `hotplugResourceMultiplier` (4×) and `maxHotplugVCPUs` (64). The ceiling is floored to be strictly greater than the initial (so headroom always exists) and the vCPU ceiling is hard-capped; memory has no hard cap (the guest only allocates `currentMemory`).
+- `internal/providers/libvirt/reconfigure_online_test.go`: host-independent table tests for the CPU/memory XML helper (hot-add off = unchanged layout/no `current=`; hot-add on = `<vcpu current='<initial>'>` with ceiling max and memory ceiling > currentMemory) and the ceiling computation (4× multiplier, floor, CPU cap, no-headroom-at-cap).
+- `internal/providers/libvirt/server_test.go`: assert `SupportsReconfigureOnline` is now advertised.
+
+### Why
+KVM/QEMU supports live CPU and memory hotplug, but the prior libvirt create-path provisioned zero headroom (`<memory>==<currentMemory>`, `<vcpu>` with no `current<max`), so the existing `setvcpus/setmem --live` path could never grow a running VM past its boot size and the capability flag was understated as `false`. Provisioning the headroom at create (opt-in via the existing hot-add flags, no CRD/proto change) lets the live path actually grow the VM and lets the provider honestly advertise online reconfigure.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+Rebuild/redeploy the libvirt provider image. This **changes the domain XML for VMs created with `CPUHotAddEnabled`/`MemoryHotAddEnabled`** (headroom is provisioned at create time); VMs created without those flags are unaffected (byte-identical XML). No CRD or proto change.
+
+### Notes
+- Online grow is bounded by the ~4× ceiling provisioned at create; growing beyond the ceiling still requires a power cycle, and the `--live` failure log says so.
+- Headroom only exists for VMs created with the hot-add flags **after** this change — existing VMs (and VMs created without the flags) have no headroom and still need a power-cycle to grow CPU/memory.
+- Memory live grow inflates the balloon up to `<memory>`; it is balloon-based (`currentMemory`), not DIMM hotplug. The guest sees the new memory as the balloon deflates.
+- Follow-up: the clone path (`clone.go` `applyClassOverrides`) rewrites `<vcpu>`/`<memory>`/`<currentMemory>` and would drop the `current<max` headroom on a clone; preserving headroom across clone is a separate change and out of scope here.
 ## [2026-06-09 07:48] - libvirt memory-inclusive snapshots: advertise SupportsMemorySnapshots (#202)
 **Author:** @wrkode (William Rizzo)
 
