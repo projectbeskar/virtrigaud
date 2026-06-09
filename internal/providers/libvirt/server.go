@@ -518,12 +518,12 @@ func (s *Server) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepareR
 // GetCapabilities returns the capabilities of the Libvirt provider
 func (s *Server) GetCapabilities(ctx context.Context, req *providerv1.GetCapabilitiesRequest) (*providerv1.GetCapabilitiesResponse, error) {
 	return &providerv1.GetCapabilitiesResponse{
-		SupportsReconfigureOnline:   false, // Libvirt typically requires power cycle for CPU/memory changes
-		SupportsDiskExpansionOnline: true,  // Online grow via `virsh blockresize` + best-effort in-guest FS grow (resize2fs/xfs_growfs) when the guest agent is present; grow-only (#201)
-		SupportsSnapshots:           true,  // Libvirt supports snapshots (storage-dependent)
-		SupportsMemorySnapshots:     true,  // Full system checkpoints incl. RAM via `snapshot-create-as` without --disk-only; requires the VM running (#202)
-		SupportsLinkedClones:        true,  // Clone RPC implemented: qcow2 overlay (linked) + vol-clone (full) (issue #153)
-		SupportsImageImport:         true,  // ImagePrepare RPC implemented: import/convert image into a storage pool (issue #154)
+		SupportsReconfigureOnline:   true, // Online CPU/mem reconfigure via `setvcpus/setmem --live` for VMs created with CPU/MemoryHotAddEnabled (headroom provisioned at create); grows up to the ~4× ceiling, beyond which a power-cycle is required (#203)
+		SupportsDiskExpansionOnline: true, // Online grow via `virsh blockresize` + best-effort in-guest FS grow (resize2fs/xfs_growfs) when the guest agent is present; grow-only (#201)
+		SupportsSnapshots:           true, // Libvirt supports snapshots (storage-dependent)
+		SupportsMemorySnapshots:     true, // Full system checkpoints incl. RAM via `snapshot-create-as` without --disk-only; requires the VM running (#202)
+		SupportsLinkedClones:        true, // Clone RPC implemented: qcow2 overlay (linked) + vol-clone (full) (issue #153)
+		SupportsImageImport:         true, // ImagePrepare RPC implemented: import/convert image into a storage pool (issue #154)
 		SupportedDiskTypes:          []string{"qcow2", "raw", "vmdk"},
 		SupportedNetworkTypes:       []string{"virtio", "e1000", "rtl8139"},
 		SupportsDiskExport:          true, // ExportDisk wired to virsh impl (issue #177)

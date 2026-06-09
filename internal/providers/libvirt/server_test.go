@@ -82,6 +82,8 @@ func TestServer_GetCapabilities_HonestFlags(t *testing.T) {
 		"libvirt snapshots are implemented and must remain advertised")
 	assert.True(t, caps.SupportsDiskExpansionOnline,
 		"libvirt advertises online disk expansion now that Reconfigure grows the live block device via blockresize (issue #201)")
+	assert.True(t, caps.SupportsReconfigureOnline,
+		"libvirt advertises online CPU/memory reconfigure now that the create-path provisions hotplug headroom for VMs with CPU/MemoryHotAddEnabled and Reconfigure grows them live via setvcpus/setmem --live (issue #203)")
 }
 
 // TestServer_GetCapabilities_DiskMigration verifies the disk-migration
