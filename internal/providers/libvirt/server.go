@@ -499,7 +499,7 @@ func (s *Server) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepareR
 func (s *Server) GetCapabilities(ctx context.Context, req *providerv1.GetCapabilitiesRequest) (*providerv1.GetCapabilitiesResponse, error) {
 	return &providerv1.GetCapabilitiesResponse{
 		SupportsReconfigureOnline:   false, // Libvirt typically requires power cycle for CPU/memory changes
-		SupportsDiskExpansionOnline: false, // Disk expansion usually requires power cycle
+		SupportsDiskExpansionOnline: true,  // Online grow via `virsh blockresize` + best-effort in-guest FS grow (resize2fs/xfs_growfs) when the guest agent is present; grow-only (#201)
 		SupportsSnapshots:           true,  // Libvirt supports snapshots (storage-dependent)
 		SupportsMemorySnapshots:     false, // Memory snapshots not always supported
 		SupportsLinkedClones:        true,  // Clone RPC implemented: qcow2 overlay (linked) + vol-clone (full) (issue #153)

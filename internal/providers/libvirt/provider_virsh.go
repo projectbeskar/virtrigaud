@@ -608,7 +608,19 @@ func (p *Provider) Reconfigure(ctx context.Context, id string, desired contracts
 		}
 	}
 
-	// Handle Disk changes
+	// Handle Disk changes.
+	//
+	// Online (domain running): grow the live block device via `virsh
+	// blockresize` so QEMU exposes the new size immediately, then best-effort
+	// extend the in-guest filesystem via the guest agent. The target device and
+	// current size are resolved from the live domain (domblklist/domblkinfo),
+	// not the "<vmid>-disk" volume-name guess. Grow-only: shrinks are rejected
+	// (libvirt/qcow2 cannot shrink live) and resizing to the current size is a
+	// no-op. A blockresize failure is fatal to the disk step; the in-guest FS
+	// grow is non-fatal (#201).
+	//
+	// Offline (domain stopped): resize the backing volume so the larger size
+	// applies on next boot.
 	if len(desired.Disks) > 0 || (desired.Class.DiskDefaults != nil && desired.Class.DiskDefaults.SizeGiB > 0) {
 		storageProvider := NewStorageProvider(p.virshProvider)
 
@@ -619,18 +631,32 @@ func (p *Provider) Reconfigure(ctx context.Context, id string, desired contracts
 		}
 
 		if desiredDiskGB > 0 {
-			// Find the VM's disk volume
-			volumeName := fmt.Sprintf("%s-disk", id)
-
-			// Try to resize the volume
-			log.Printf("INFO Attempting to resize disk for VM %s to %dGB", id, desiredDiskGB)
-			err = storageProvider.ResizeVolume(ctx, "default", volumeName, desiredDiskGB)
-			if err != nil {
-				log.Printf("WARN Disk resize failed: %v", err)
-				// Disk resize failure is not fatal, just log it
+			if isRunning {
+				// Online live grow (grow-only + idempotent guards inside).
+				log.Printf("INFO Attempting online disk grow for running VM %s to %dGB", id, desiredDiskGB)
+				grew, gerr := p.growDiskOnline(ctx, id, desiredDiskGB, storageProvider)
+				if gerr != nil {
+					// The live block-device resize failing IS fatal to the disk
+					// step: the guest would not see the requested capacity.
+					log.Printf("WARN Online disk grow failed for VM %s: %v", id, gerr)
+					return "", contracts.NewRetryableError("online disk grow failed", gerr)
+				}
+				if grew {
+					hasChanges = true
+				}
 			} else {
-				log.Printf("INFO Successfully resized disk for VM: %s", id)
-				hasChanges = true
+				// Offline: resize the backing volume so the larger size applies
+				// on next boot. Find the VM's disk volume by the pool convention.
+				volumeName := fmt.Sprintf("%s-disk", id)
+				log.Printf("INFO Attempting offline disk resize for VM %s to %dGB", id, desiredDiskGB)
+				err = storageProvider.ResizeVolume(ctx, "default", volumeName, desiredDiskGB)
+				if err != nil {
+					log.Printf("WARN Offline disk resize failed: %v", err)
+					// Offline resize failure is not fatal, just log it.
+				} else {
+					log.Printf("INFO Successfully resized disk for VM: %s", id)
+					hasChanges = true
+				}
 			}
 		}
 	}
