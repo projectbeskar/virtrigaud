@@ -293,25 +293,22 @@ func (s *Server) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotCre
 
 	log.Printf("INFO Domain %s is in state: %s", req.VmId, domainState)
 
-	// Build virsh snapshot-create-as command
-	// Format: virsh snapshot-create-as DOMAIN NAME --description "DESC" [--disk-only] [--atomic]
-	args := []string{
-		"snapshot-create-as",
-		req.VmId,
-		snapshotName,
-		"--description", description,
-		"--atomic", // Ensure atomic operation
-	}
-
-	// Determine snapshot type based on domain state and request
-	if req.IncludeMemory && domainState == "running" {
-		// Memory snapshot (full system checkpoint including RAM)
-		log.Printf("INFO Creating memory snapshot (includes RAM state)")
-		// No --disk-only flag = full snapshot with memory
-	} else {
-		// Disk-only snapshot (faster, no memory state)
-		log.Printf("INFO Creating disk-only snapshot")
-		args = append(args, "--disk-only")
+	// Build the virsh snapshot-create-as arguments. A memory-inclusive (full
+	// system) snapshot omits --disk-only and is only possible for a RUNNING
+	// domain (there is no RAM state to capture otherwise); any other case is a
+	// disk-only snapshot.
+	args, memorySnapshot := buildSnapshotCreateArgs(req.VmId, snapshotName, description, req.IncludeMemory, domainState == "running")
+	switch {
+	case memorySnapshot:
+		log.Printf("INFO Creating memory snapshot (full system checkpoint including RAM) for domain %s", req.VmId)
+	case req.IncludeMemory:
+		// Honest downgrade: a stopped VM has no RAM state to capture. The
+		// snapshot still succeeds as disk-only; the caller is told why rather
+		// than silently advertising a memory snapshot that did not happen.
+		log.Printf("WARN Memory snapshot requested for domain %s but it is not running (state=%s); "+
+			"creating a disk-only snapshot — memory state cannot be captured for a stopped VM", req.VmId, domainState)
+	default:
+		log.Printf("INFO Creating disk-only snapshot for domain %s", req.VmId)
 	}
 
 	// Execute snapshot creation
@@ -327,6 +324,29 @@ func (s *Server) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotCre
 		SnapshotId: snapshotName,
 		// No task reference - libvirt snapshots are synchronous
 	}, nil
+}
+
+// buildSnapshotCreateArgs builds the `virsh snapshot-create-as` arguments and
+// reports whether the result is a memory-inclusive (full system) snapshot.
+//
+// A memory snapshot — a full system checkpoint that captures RAM together with
+// the disk state — is created by OMITTING --disk-only, and is only meaningful
+// for a RUNNING domain (a stopped domain has no RAM state). In every other case
+// (includeMemory false, or the domain not running) a --disk-only snapshot is
+// taken. The boolean lets the caller log/report honestly which kind was made.
+func buildSnapshotCreateArgs(vmID, name, description string, includeMemory, running bool) (args []string, memorySnapshot bool) {
+	args = []string{
+		"snapshot-create-as",
+		vmID,
+		name,
+		"--description", description,
+		"--atomic", // fail cleanly rather than leaving a half-created snapshot
+	}
+	if includeMemory && running {
+		// No --disk-only flag → full snapshot including memory.
+		return args, true
+	}
+	return append(args, "--disk-only"), false
 }
 
 // SnapshotDelete deletes a VM snapshot
@@ -501,7 +521,7 @@ func (s *Server) GetCapabilities(ctx context.Context, req *providerv1.GetCapabil
 		SupportsReconfigureOnline:   false, // Libvirt typically requires power cycle for CPU/memory changes
 		SupportsDiskExpansionOnline: true,  // Online grow via `virsh blockresize` + best-effort in-guest FS grow (resize2fs/xfs_growfs) when the guest agent is present; grow-only (#201)
 		SupportsSnapshots:           true,  // Libvirt supports snapshots (storage-dependent)
-		SupportsMemorySnapshots:     false, // Memory snapshots not always supported
+		SupportsMemorySnapshots:     true,  // Full system checkpoints incl. RAM via `snapshot-create-as` without --disk-only; requires the VM running (#202)
 		SupportsLinkedClones:        true,  // Clone RPC implemented: qcow2 overlay (linked) + vol-clone (full) (issue #153)
 		SupportsImageImport:         true,  // ImagePrepare RPC implemented: import/convert image into a storage pool (issue #154)
 		SupportedDiskTypes:          []string{"qcow2", "raw", "vmdk"},

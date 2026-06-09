@@ -5,6 +5,27 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-09 07:48] - libvirt memory-inclusive snapshots: advertise SupportsMemorySnapshots (#202)
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `internal/providers/libvirt/server.go`: advertise `SupportsMemorySnapshots=true`. `SnapshotCreate` already captures RAM for a running VM (full system checkpoint via `virsh snapshot-create-as` *without* `--disk-only`); the flag was understated. Extracted a testable `buildSnapshotCreateArgs` helper, and when a memory snapshot is requested for a **non-running** VM it now logs a clear WARN and creates a disk-only snapshot (honest downgrade — a stopped VM has no RAM state to capture) instead of silently behaving as if memory were captured.
+
+### Added
+- `internal/providers/libvirt/snapshot_test.go`: unit tests for the args helper (memory vs disk-only across running/stopped) + the `SupportsMemorySnapshots=true` capability.
+
+### Why
+KVM supports full-system checkpoints; the libvirt provider already created them when `IncludeMemory` was set on a running VM, but advertised the capability as `false`. This makes the flag honest (mirrors the vSphere memory-snapshot honesty fix #200).
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (libvirt provider image; no CRD/proto change)
+- [ ] Config change only
+- [ ] Documentation only
+
+### Notes
+- Memory snapshots require the VM running; the captured RAM state lives inside the qcow2 (≈ RAM size, so larger/slower than a disk-only snapshot). A memory snapshot requested for a stopped VM is downgraded to disk-only with a WARN.
+
 ## [2026-06-09 07:41] - libvirt online disk expansion: live blockresize + best-effort guest FS grow (#201)
 **Author:** @wrkode (William Rizzo)
 
