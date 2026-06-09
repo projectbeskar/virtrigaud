@@ -28,6 +28,36 @@ exception — Proxmox export compression, tracked as a low-priority follow-up (#
 
 The detailed per-change entries follow below.
 
+## [2026-06-09 08:15] - libvirt clone hardening: UEFI nvram re-point + hot-add headroom preservation (#208, #221)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/providers/libvirt/clone.go`: `rewriteNVRAMPath` derives a fresh per-clone UEFI varstore path from the SOURCE varstore's directory plus a `<targetName>_VARS.fd` basename, and `copyClonedNVRAM` copies the actual varstore file on the libvirt host (`sudo cp -f -- <src> <dst>` via the `!` direct-exec convention) so the clone gets an independent set of UEFI variables. `rewriteDomainXMLForClone` now also returns the source/target nvram paths it rewrote (empty for a BIOS source).
+- `internal/providers/libvirt/clone.go`: `cloneClassOverride`/`cloneClassPerfProfile` local structs that mirror the **v1beta1 `VMClassSpec`** shape the clone controller actually marshals — `cpu` (int), `memory` (a `resource.Quantity` such as `"8Gi"`, converted to MiB via `Memory.Value()/1MiB` to match the manager), and `performanceProfile.{cpuHotAddEnabled,memoryHotAddEnabled}` — so `applyClassOverrides` reads the real class JSON.
+- `internal/providers/libvirt/clone_test.go`: host-independent tests — UEFI nvram re-point (non-default dirs, `template=` attribute preserved, bare `<nvram/>` and missing-element no-ops), BIOS no-op, and hot-add headroom (hot-add class emits `<vcpu current=...>` ceiling + `<memory>`-ceiling > `<currentMemory>`; no flags = plain form unchanged; CPU-only leaves memory plain).
+
+### Changed
+- `internal/providers/libvirt/clone.go`: for a UEFI source the clone's per-VM `<os>...<nvram>` varstore is re-pointed to the fresh path and the source varstore is copied to it on the host; a failed copy logs a loud WARN rather than silently leaving the clone pointing at the source's varstore. A BIOS source (no `<nvram>`) is unchanged.
+- `internal/providers/libvirt/clone.go`: `applyClassOverrides` now renders `<vcpu>`/`<memory>`/`<currentMemory>` via the create-path `buildCPUMemoryXML` helper (#203), so a clone created with a hot-add-capable class keeps online-reconfigure headroom. When the flags are absent/false the emitted XML is byte-identical to before (no regression).
+
+### Fixed
+- `internal/providers/libvirt/clone.go`: a clone with a class override now actually honors the **memory** override. The previous `applyClassOverrides` unmarshalled into a struct whose memory field expected an int `memoryMiB`, but the clone controller marshals the v1beta1 `VMClassSpec` where memory is `"memory": "<quantity>"` — so the value never bound and the memory override (and, with #221, the memory headroom) silently did nothing. The override is now parsed as a `resource.Quantity`. The previous unit tests masked this by feeding a synthetic `memoryMiB` JSON that never occurs in production; they now use the real `"memory": "8Gi"` shape.
+
+### Why
+The clone XML rewrite was incomplete in three ways: (1) it kept the source's absolute UEFI `<nvram>` varstore path, so a UEFI clone shared the source's varstore — a define-time conflict or silent corruption of boot order / Secure Boot state — and never created its own; (2) `applyClassOverrides` emitted the plain no-headroom resource form, silently stripping a hot-add-capable clone of the live CPU/memory grow capability provisioned for non-clone VMs (#203); (3) the memory override never bound because the parse struct didn't match the v1beta1 memory-quantity shape the controller sends. This closes the clone-headroom follow-up called out in the #203 entry and makes the memory side of #221 actually functional end-to-end.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+Rebuild/redeploy the libvirt provider image. BIOS clones are unaffected. UEFI clones now get an independent varstore copy. Clones created with a hot-add-capable class now retain online-reconfigure headroom (the emitted XML differs only when the class sets the hot-add flags). No CRD or proto change.
+
+### Notes
+- The nvram path-derivation and resource-XML rewrite stay pure/string-only (fully unit-testable without a host); the side-effecting varstore `cp` happens in `Clone()` next to the disk copy, gated on the non-empty nvram paths returned by the rewrite.
+- Headroom preservation reuses `buildCPUMemoryXML`/the ceiling helpers from `reconfigure_online.go` (#203) — no duplicated policy.
+
 ## [2026-06-09 07:52] - libvirt online CPU/memory reconfigure: hotplug headroom + live setvcpus/setmem (#203)
 **Author:** @wrkode (William Rizzo)
 
