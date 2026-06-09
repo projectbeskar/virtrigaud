@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"strings"
 	"time"
@@ -57,6 +58,7 @@ const (
 	errReasonProviderDescribe = "provider-describe"
 	errReasonProviderTask     = "provider-task-status"
 	errReasonProviderDelete   = "provider-delete"
+	errReasonImagePrepare     = "image-prepare"
 )
 
 // ProviderResolver resolves Provider resources to provider implementations.
@@ -77,6 +79,7 @@ type VirtualMachineReconciler struct {
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=providers,verbs=get;list;watch
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=vmclasses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=vmimages,verbs=get;list;watch
+// +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=vmimages/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=vmnetworkattachments,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
@@ -199,6 +202,41 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 	logger.V(1).Info("Provider validation successful", "provider", provider.Name)
+
+	// Ensure the referenced image is prepared on this provider before creating
+	// the VM (lazy, VM-create-driven prepare — issue #154). This is a no-op for
+	// providers that do not advertise/implement image import, for ImportedDisk
+	// VMs, and for images already prepared on this provider; in those cases it
+	// returns (false, nil) and we fall through to the unchanged create path.
+	if requeue, err := r.EnsureImageOnProvider(ctx, vm, vmImage, provider, providerInstance); err != nil {
+		if stderrors.Is(err, errImagePrepareHold) {
+			// OnMissing forbids preparing (Fail/Wait); the condition is recorded
+			// on the VMImage. Reflect a waiting condition on the VM and requeue
+			// without treating it as a reconcile error.
+			logger.Info("Holding VM create: referenced image is not prepared and may not be imported",
+				"image", vmImage.Name, "provider", provider.Name)
+			k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonWaitingForDependencies,
+				fmt.Sprintf("Image %s not prepared on provider %s", vmImage.Name, provider.Name))
+			r.updateStatus(ctx, vm)
+			return imageEnsureResultToReconcile(), nil
+		}
+		logger.Error(err, "Failed to ensure image on provider - will retry in 5s",
+			"image", imageRefName, "provider", provider.Name)
+		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError,
+			fmt.Sprintf("Image prepare failed: %v", err))
+		metrics.RecordError(errReasonImagePrepare, metrics.ComponentManager)
+		r.updateStatus(ctx, vm)
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	} else if requeue {
+		// A prepare is in flight; surface a provisioning condition and requeue to
+		// poll it. We do NOT create the VM until the image is Ready on the provider.
+		logger.Info("Waiting for image prepare to complete before creating VM",
+			"image", vmImage.Name, "provider", provider.Name)
+		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonTaskInProgress,
+			fmt.Sprintf("Preparing image %s on provider %s", vmImage.Name, provider.Name))
+		r.updateStatus(ctx, vm)
+		return imageEnsureResultToReconcile(), nil
+	}
 
 	// Check if we have an active task
 	if vm.Status.LastTaskRef != "" {
