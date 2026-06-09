@@ -2,7 +2,7 @@
 
 A Kubernetes operator for managing virtual machines across multiple hypervisors.
 
-**Version**: v0.3.8 — [CHANGELOG](CHANGELOG.md) | [Documentation](https://projectbeskar.github.io/virtrigaud)
+**Version**: v0.3.9 — [CHANGELOG](CHANGELOG.md) | [Documentation](https://projectbeskar.github.io/virtrigaud)
 
 ## Overview
 
@@ -91,7 +91,7 @@ graph TB
     PXP -->|REST API| PVE
 ```
 
-### Security status (v0.3.8)
+### Security status (v0.3.9)
 
 The following issues were open in v0.3.6 and resolved in v0.3.7; they are closed in this release:
 
@@ -165,14 +165,14 @@ Per the [canonical capabilities matrix](https://projectbeskar.github.io/virtriga
 2. **Install VirtRigaud** (version 0.3.8):
    ```bash
    helm install virtrigaud virtrigaud/virtrigaud \
-     --version 0.3.8 \
+     --version 0.3.9 \
      -n virtrigaud-system --create-namespace
    ```
 
    CRDs are installed automatically via Helm hooks. To disable automatic CRD upgrades:
    ```bash
    helm install virtrigaud virtrigaud/virtrigaud \
-     --version 0.3.8 \
+     --version 0.3.9 \
      -n virtrigaud-system --create-namespace \
      --set crdUpgrade.enabled=false
    ```
@@ -188,7 +188,7 @@ Per the [canonical capabilities matrix](https://projectbeskar.github.io/virtriga
 4. **Upgrade**:
    ```bash
    helm upgrade virtrigaud virtrigaud/virtrigaud \
-     --version 0.3.8 \
+     --version 0.3.9 \
      -n virtrigaud-system
    ```
 
@@ -247,7 +247,7 @@ Go 1.26+ is required for source builds.
      credentialSecretRef:
        name: libvirt-creds
      runtime:
-       image: "ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.3.8"
+       image: "ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.3.9"
        service:
          port: 9443
    ```
@@ -265,7 +265,7 @@ Go 1.26+ is required for source builds.
      credentialSecretRef:
        name: vsphere-creds
      runtime:
-       image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.3.8"
+       image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.3.9"
        service:
          port: 9443
    ```
@@ -334,7 +334,7 @@ kubectl apply -f charts/virtrigaud/crds/
 
 # Or reinstall
 helm uninstall virtrigaud -n virtrigaud-system
-helm install virtrigaud virtrigaud/virtrigaud --version 0.3.8 \
+helm install virtrigaud virtrigaud/virtrigaud --version 0.3.9 \
   -n virtrigaud-system --create-namespace
 ```
 
