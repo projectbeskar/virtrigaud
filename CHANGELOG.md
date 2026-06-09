@@ -5,6 +5,29 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-09] - v0.3.9: libvirt feature parity + end-to-end image preparation
+**Author:** @wrkode (William Rizzo)
+
+Release roll-up. This release closes the libvirt capability gaps and makes image
+preparation reachable end-to-end through CRs across all providers. Full provider
+capability parity is achieved (umbrella #204 closed) with a single intentional
+exception — Proxmox export compression, tracked as a low-priority follow-up (#219).
+
+### Headline features
+- **libvirt Clone** (#153) — qcow2 overlay (linked) + full-copy clones, same-provider; resolves the real backing-disk path (fix #207).
+- **End-to-end image preparation** (#154) — `VMImage.spec.prepare` drives lazy, VM-create-time image import across libvirt / vSphere (real OVA/OVF URL import as template) / Proxmox; the controller writes `VMImage.status` (single-writer) and Create consumes the prepared location. See `docs/image-preparation.md` + ADR-0005.
+- **libvirt online disk expansion** (#201) — live `virsh blockresize` (grow-only) + best-effort in-guest filesystem grow via the guest agent.
+- **libvirt memory-inclusive snapshots** (#202) — RAM-inclusive checkpoints for a running VM; stopped VMs honestly downgrade to disk-only.
+- **libvirt online CPU/memory reconfigure** (#203) — live `setvcpus/setmem` for VMs created with `cpuHotAddEnabled`/`memoryHotAddEnabled` (headroom provisioned at create, up to a ~4× ceiling). See the [Libvirt provider guide](https://projectbeskar.github.io/virtrigaud/providers/libvirt/).
+- **Capability accuracy** (#198/#199/#200) — Proxmox advertises disk export/import; libvirt honors export compression; vSphere advertises memory snapshots.
+
+### Upgrade notes
+- **Requires cluster rollout.** Rebuild/redeploy the manager and provider images (providers are CR-managed via `spec.runtime.image`).
+- **Online CPU/memory reconfigure on libvirt requires the hot-add flags set on the `VMClass` at create time.** VMs created without them (including all pre-v0.3.9 VMs) still require a power-cycle to change CPU/memory. The emitted domain XML is byte-identical to v0.3.8 when the flags are off.
+- **No CRD or proto breaking changes.** `VMImage.status` gained additive image-prepare fields; `Provider.status.reportedCapabilities` reflects the new flags.
+
+The detailed per-change entries follow below.
+
 ## [2026-06-09 07:52] - libvirt online CPU/memory reconfigure: hotplug headroom + live setvcpus/setmem (#203)
 **Author:** @wrkode (William Rizzo)
 

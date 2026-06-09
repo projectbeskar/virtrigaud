@@ -1,6 +1,19 @@
 # VM Reconfiguration Example
 # This patch demonstrates how to modify a VM's resources after creation
 # Apply this after the initial VM is running to trigger reconfiguration
+#
+# NOTE — Libvirt online reconfigure:
+#   For CPU/memory changes to apply WITHOUT a power cycle on Libvirt/KVM, the VM
+#   must have been CREATED from a VMClass with cpuHotAddEnabled: true and/or
+#   memoryHotAddEnabled: true. The new values must also fall within the ~4×
+#   ceiling provisioned at create time (vCPU ceiling is hard-capped at 64).
+#   If either condition is not met, the provider logs a WARN and the controller
+#   orchestrates a graceful power cycle instead.
+#   For disk expansion: Libvirt grows the primary disk live via virsh blockresize
+#   (grow-only). A best-effort in-guest FS grow runs via the guest agent; if the
+#   guest agent is absent the block device is enlarged but the filesystem must be
+#   extended manually or via cloud-init.
+#   vSphere and Proxmox support online reconfigure and disk expansion unconditionally.
 
 ---
 # Patch to upgrade web-server-01 resources
