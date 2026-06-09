@@ -1234,6 +1234,28 @@ func (p *Provider) GetDiskInfo(ctx context.Context, req *providerv1.GetDiskInfoR
 	return response, nil
 }
 
+// exportNeedsConversion decides whether the export path must run a qemu-img
+// convert pass over the downloaded disk before upload.
+//
+// A pass is required when:
+//   - the requested target format differs from the source format (a genuine
+//     format conversion), OR
+//   - compression is requested AND the target format is qcow2. qemu-img applies
+//     internal compression (`-c`) only during a convert pass, so even a
+//     qcow2 -> qcow2 export must be forced through a pass to honor Compress.
+//
+// Compression is meaningful only for qcow2 in this provider. raw has no
+// container to compress into, and vmdk stream-optimized compression is not
+// produced on the Proxmox export path today; for those targets a Compress=true
+// request does not force a pass and produces uncompressed output. The advertised
+// ExportCompression capability is therefore honest specifically for qcow2.
+func exportNeedsConversion(sourceFormat, targetFormat string, compress bool) bool {
+	if targetFormat != sourceFormat {
+		return true
+	}
+	return compress && targetFormat == "qcow2"
+}
+
 // ExportDisk exports a VM disk for migration
 func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskRequest) (*providerv1.ExportDiskResponse, error) {
 	if p.client == nil {
@@ -1351,10 +1373,18 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 	// Close file to flush writes
 	file.Close()
 
-	// Convert format if needed
+	// Convert format and/or compress if needed.
+	//
+	// A qemu-img convert pass is required when the export format differs from
+	// the source, OR when compression is requested for a compressible target
+	// (qcow2): qemu-img applies `-c` only during a convert pass, so we force one
+	// to honor req.Compress even when the format is unchanged (#219). Raw and
+	// vmdk targets are not given a forced pass for compression here — see
+	// exportNeedsConversion for the exact rule.
 	var uploadPath string
-	if targetFormat != diskInfo.Format {
-		p.logger.Info("Converting disk format", "from", diskInfo.Format, "to", targetFormat)
+	if exportNeedsConversion(diskInfo.Format, targetFormat, req.Compress) {
+		p.logger.Info("Converting disk format",
+			"from", diskInfo.Format, "to", targetFormat, "compress", req.Compress)
 		convertedPath := fmt.Sprintf("/tmp/%s-converted.%s", exportID, targetFormat)
 
 		// Use diskutil for conversion
@@ -1364,7 +1394,9 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 			DestinationPath:   convertedPath,
 			SourceFormat:      diskutil.SupportedFormat(diskInfo.Format),
 			DestinationFormat: diskutil.SupportedFormat(targetFormat),
-			Compression:       false, // No compression for migration (faster)
+			// Honor the caller's request (#219). diskutil applies `-c` only to
+			// qcow2; for raw/vmdk targets this is a no-op at the qemu-img layer.
+			Compression: req.Compress,
 		})
 		if err != nil {
 			return nil, errors.NewInternal("failed to convert disk format", err)

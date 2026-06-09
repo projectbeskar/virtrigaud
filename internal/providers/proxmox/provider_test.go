@@ -239,8 +239,76 @@ func TestProxmoxProvider_GetCapabilities(t *testing.T) {
 	assert.True(t, resp.SupportsDiskImport, "Proxmox implements ImportDisk")
 	assert.Contains(t, resp.SupportedExportFormats, "qcow2")
 	assert.Contains(t, resp.SupportedImportFormats, "vmdk")
-	// Export does not compress today, so it must NOT be advertised.
-	assert.False(t, resp.SupportsExportCompression)
+	// ExportDisk honors req.Compress via a forced qemu-img convert pass with
+	// `-c` for qcow2 targets (#219), so compression is advertised.
+	assert.True(t, resp.SupportsExportCompression, "Proxmox ExportDisk compresses qcow2 targets when Compress=true (#219)")
+}
+
+func TestExportNeedsConversion(t *testing.T) {
+	tests := []struct {
+		name         string
+		sourceFormat string
+		targetFormat string
+		compress     bool
+		want         bool
+	}{
+		{
+			name:         "qcow2 to qcow2 without compression skips pass",
+			sourceFormat: "qcow2",
+			targetFormat: "qcow2",
+			compress:     false,
+			want:         false,
+		},
+		{
+			name:         "qcow2 to qcow2 with compression forces a pass",
+			sourceFormat: "qcow2",
+			targetFormat: "qcow2",
+			compress:     true,
+			want:         true,
+		},
+		{
+			name:         "format change always needs a pass",
+			sourceFormat: "raw",
+			targetFormat: "qcow2",
+			compress:     false,
+			want:         true,
+		},
+		{
+			name:         "format change with compression needs a pass",
+			sourceFormat: "vmdk",
+			targetFormat: "qcow2",
+			compress:     true,
+			want:         true,
+		},
+		{
+			name:         "raw to raw with compression does not force a pass (raw is not compressible)",
+			sourceFormat: "raw",
+			targetFormat: "raw",
+			compress:     true,
+			want:         false,
+		},
+		{
+			name:         "vmdk to vmdk with compression does not force a pass (vmdk compression not produced here)",
+			sourceFormat: "vmdk",
+			targetFormat: "vmdk",
+			compress:     true,
+			want:         false,
+		},
+		{
+			name:         "raw to raw without compression skips pass",
+			sourceFormat: "raw",
+			targetFormat: "raw",
+			compress:     false,
+			want:         false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := exportNeedsConversion(tt.sourceFormat, tt.targetFormat, tt.compress)
+			assert.Equal(t, tt.want, got)
+		})
+	}
 }
 
 // Helper functions
