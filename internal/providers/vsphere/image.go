@@ -206,12 +206,15 @@ func vsphereChecksumHasher(checksumType string) (h hash.Hash, ok bool) {
 //     verify its checksum, import it into vCenter via an NFC lease, and mark the
 //     resulting VM as a template.
 //
-// The import is driven synchronously, so the returned TaskResponse carries an
-// empty (nil) Task — consistent with the libvirt provider — which the controller
-// treats as "completed synchronously". Very large OVAs may eventually warrant an
-// async TaskRef the controller polls (a future enhancement; the gRPC client
-// timeout is tracked separately in PR-4 of #154).
-func (p *Provider) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepareRequest) (*providerv1.TaskResponse, error) {
+// The import is driven synchronously, so the returned ImagePrepareResponse
+// carries an empty (nil) Task — consistent with the libvirt provider — which the
+// controller treats as "completed synchronously". The response's
+// prepared_image_id is the template name vCenter addresses the prepared template
+// by (prepared_image_path is empty: vSphere has no on-disk path the manager
+// consumes). Very large OVAs may eventually warrant an async TaskRef the
+// controller polls (a future enhancement; the gRPC client timeout is tracked
+// separately in PR-4 of #154).
+func (p *Provider) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepareRequest) (*providerv1.ImagePrepareResponse, error) {
 	if p.client == nil || p.finder == nil {
 		return nil, errors.NewUnavailable("vSphere", fmt.Errorf("provider client not initialized"))
 	}
@@ -238,11 +241,12 @@ func (p *Provider) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepar
 	p.finder.SetDatacenter(datacenter)
 
 	// 1) Idempotency gate (load-bearing): a re-run must never re-import. If a
-	//    template/VM named targetName already exists, we are done.
+	//    template/VM named targetName already exists, we are done — the prepared
+	//    image is that template, addressed by name.
 	if vm := p.findExistingByName(ctx, targetName); vm != nil {
 		p.logger.Info("ImagePrepare: target already exists; nothing to do",
 			"target_name", targetName, "vm", vm.Reference().Value)
-		return &providerv1.TaskResponse{}, nil
+		return imagePrepareDone(targetName), nil
 	}
 
 	switch {
@@ -260,6 +264,16 @@ func (p *Provider) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepar
 			"ImagePrepare requires a vSphere image source with templateName, contentLibrary, or ovaURL " +
 				"(source.vsphere.*)")
 	}
+}
+
+// imagePrepareDone builds a synchronous-completion ImagePrepareResponse for a
+// vSphere prepare: an empty Task (the controller treats that as "completed
+// synchronously") plus prepared_image_id = the template name vCenter addresses
+// the prepared template by. prepared_image_path is left empty because vSphere
+// clones templates by name, not by an on-disk path the manager consumes (issue
+// #154, PR-6 / #214).
+func imagePrepareDone(templateName string) *providerv1.ImagePrepareResponse {
+	return &providerv1.ImagePrepareResponse{PreparedImageId: templateName}
 }
 
 // findExistingByName returns a VirtualMachine matching name (a plain name or an
@@ -289,7 +303,7 @@ func (p *Provider) findExistingByName(ctx context.Context, name string) *object.
 // template must already exist in vCenter. On success the prepared image is the
 // template itself, so no import is performed. A missing template yields an
 // honest NotFound rather than a fabricated success.
-func (p *Provider) imagePrepareVerifyTemplate(ctx context.Context, templateName string) (*providerv1.TaskResponse, error) {
+func (p *Provider) imagePrepareVerifyTemplate(ctx context.Context, templateName string) (*providerv1.ImagePrepareResponse, error) {
 	vm, err := p.finder.VirtualMachine(ctx, templateName)
 	if err != nil {
 		if _, ok := err.(*find.NotFoundError); ok {
@@ -299,7 +313,8 @@ func (p *Provider) imagePrepareVerifyTemplate(ctx context.Context, templateName 
 	}
 	p.logger.Info("ImagePrepare: template exists; nothing to import",
 		"template_name", templateName, "vm", vm.Reference().Value)
-	return &providerv1.TaskResponse{}, nil
+	// The prepared image is the named template itself.
+	return imagePrepareDone(templateName), nil
 }
 
 // imagePrepareVerifyContentLibrary implements the contentLibrary source: verify
@@ -308,7 +323,7 @@ func (p *Provider) imagePrepareVerifyTemplate(ctx context.Context, templateName 
 // out of scope for this PR; an existing-but-unhandled item returns a clear
 // InvalidSpec pointing the user at templateName/ovaURL rather than a fake
 // success.
-func (p *Provider) imagePrepareVerifyContentLibrary(ctx context.Context, ref *vsphereContentLibraryRef) (*providerv1.TaskResponse, error) {
+func (p *Provider) imagePrepareVerifyContentLibrary(ctx context.Context, ref *vsphereContentLibraryRef) (*providerv1.ImagePrepareResponse, error) {
 	if ref.Library == "" || ref.Item == "" {
 		return nil, errors.NewInvalidSpec("ImagePrepare contentLibrary requires both library and item")
 	}
@@ -358,7 +373,7 @@ func (p *Provider) imagePrepareVerifyContentLibrary(ctx context.Context, ref *vs
 // an NFC lease using govmomi's ovf/importer, marks the resulting VM as a
 // template, and cleans up the partially-created VM on any mid-import failure so a
 // retry starts clean.
-func (p *Provider) imagePrepareImportOVA(ctx context.Context, src vsphereImageSource, targetName, storageHint string) (*providerv1.TaskResponse, error) {
+func (p *Provider) imagePrepareImportOVA(ctx context.Context, src vsphereImageSource, targetName, storageHint string) (*providerv1.ImagePrepareResponse, error) {
 	placement, err := p.resolveImagePlacement(ctx, storageHint)
 	if err != nil {
 		return nil, err
@@ -435,7 +450,9 @@ func (p *Provider) imagePrepareImportOVA(ctx context.Context, src vsphereImageSo
 
 	p.logger.Info("ImagePrepare: imported OVA and marked as template",
 		"target_name", targetName, "vm", vm.Reference().Value)
-	return &providerv1.TaskResponse{}, nil
+	// The prepared image is the newly-imported template, addressed by its target
+	// name (which is also the name vCenter and the clone path resolve it by).
+	return imagePrepareDone(targetName), nil
 }
 
 // imagePlacement bundles the resolved vSphere placement objects for an OVA

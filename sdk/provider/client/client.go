@@ -303,8 +303,11 @@ func (c *Client) Clone(ctx context.Context, req *providerv1.CloneRequest) (*prov
 	return resp, errors.FromGRPCError(err)
 }
 
-// ImagePrepare prepares an image for use.
-func (c *Client) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepareRequest) (*providerv1.TaskResponse, error) {
+// ImagePrepare prepares an image for use. The response reports the prepared
+// image's provider-specific location (id/path) so callers can create VMs from
+// the prepared template instead of re-resolving the source (issue #154, PR-6 /
+// #214).
+func (c *Client) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepareRequest) (*providerv1.ImagePrepareResponse, error) {
 	ctx = c.withTimeout(ctx, "/provider.v1.Provider/ImagePrepare")
 	resp, err := c.client.ImagePrepare(ctx, req)
 	return resp, errors.FromGRPCError(err)

@@ -67,8 +67,12 @@ type ProviderClient interface {
 	SnapshotRevert(ctx context.Context, in *SnapshotRevertRequest, opts ...grpc.CallOption) (*TaskResponse, error)
 	// Clone operations
 	Clone(ctx context.Context, in *CloneRequest, opts ...grpc.CallOption) (*CloneResponse, error)
-	// Image preparation and import
-	ImagePrepare(ctx context.Context, in *ImagePrepareRequest, opts ...grpc.CallOption) (*TaskResponse, error)
+	// Image preparation and import. Returns the prepared image's provider-specific
+	// location (id/path) so the manager can later create VMs from the prepared
+	// template instead of re-resolving the original source. ImagePrepareResponse
+	// is wire-compatible with the TaskResponse this previously returned (task at
+	// field 1), so the change is non-breaking (issue #154, PR-6 / #214).
+	ImagePrepare(ctx context.Context, in *ImagePrepareRequest, opts ...grpc.CallOption) (*ImagePrepareResponse, error)
 	// Get provider capabilities
 	GetCapabilities(ctx context.Context, in *GetCapabilitiesRequest, opts ...grpc.CallOption) (*GetCapabilitiesResponse, error)
 	// Disk migration operations
@@ -207,9 +211,9 @@ func (c *providerClient) Clone(ctx context.Context, in *CloneRequest, opts ...gr
 	return out, nil
 }
 
-func (c *providerClient) ImagePrepare(ctx context.Context, in *ImagePrepareRequest, opts ...grpc.CallOption) (*TaskResponse, error) {
+func (c *providerClient) ImagePrepare(ctx context.Context, in *ImagePrepareRequest, opts ...grpc.CallOption) (*ImagePrepareResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(TaskResponse)
+	out := new(ImagePrepareResponse)
 	err := c.cc.Invoke(ctx, Provider_ImagePrepare_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
@@ -295,8 +299,12 @@ type ProviderServer interface {
 	SnapshotRevert(context.Context, *SnapshotRevertRequest) (*TaskResponse, error)
 	// Clone operations
 	Clone(context.Context, *CloneRequest) (*CloneResponse, error)
-	// Image preparation and import
-	ImagePrepare(context.Context, *ImagePrepareRequest) (*TaskResponse, error)
+	// Image preparation and import. Returns the prepared image's provider-specific
+	// location (id/path) so the manager can later create VMs from the prepared
+	// template instead of re-resolving the original source. ImagePrepareResponse
+	// is wire-compatible with the TaskResponse this previously returned (task at
+	// field 1), so the change is non-breaking (issue #154, PR-6 / #214).
+	ImagePrepare(context.Context, *ImagePrepareRequest) (*ImagePrepareResponse, error)
 	// Get provider capabilities
 	GetCapabilities(context.Context, *GetCapabilitiesRequest) (*GetCapabilitiesResponse, error)
 	// Disk migration operations
@@ -351,7 +359,7 @@ func (UnimplementedProviderServer) SnapshotRevert(context.Context, *SnapshotReve
 func (UnimplementedProviderServer) Clone(context.Context, *CloneRequest) (*CloneResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Clone not implemented")
 }
-func (UnimplementedProviderServer) ImagePrepare(context.Context, *ImagePrepareRequest) (*TaskResponse, error) {
+func (UnimplementedProviderServer) ImagePrepare(context.Context, *ImagePrepareRequest) (*ImagePrepareResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ImagePrepare not implemented")
 }
 func (UnimplementedProviderServer) GetCapabilities(context.Context, *GetCapabilitiesRequest) (*GetCapabilitiesResponse, error) {

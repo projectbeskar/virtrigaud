@@ -39,6 +39,16 @@ type ImagePrepareResponse struct {
 	// TaskRef references an async operation when the prepare is not synchronous;
 	// an empty TaskRef means the operation completed synchronously.
 	TaskRef string
+	// PreparedImageID is the provider-specific identifier of the prepared image
+	// (e.g. a vSphere/Proxmox template name or VMID). It is known at trigger time
+	// — even for async prepares — so the manager can stamp it onto VMImage.status
+	// and use it as the template ref when creating VMs (issue #154, PR-6 / #214).
+	// Empty for providers that address the prepared image by path only.
+	PreparedImageID string
+	// PreparedImagePath is the provider-specific path of the prepared image (e.g.
+	// a libvirt pool path, <poolPath>/<target>.qcow2). Empty for providers that
+	// address the prepared image by id/name only (vSphere, Proxmox).
+	PreparedImagePath string
 }
 
 // ImagePreparer is an optional capability of a Provider: it prepares/imports a

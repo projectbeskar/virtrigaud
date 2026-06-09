@@ -141,7 +141,7 @@ func TestBuildCreateRequest_NoNetworks(t *testing.T) {
 		Spec: infravirtrigaudiov1beta1.VMClassSpec{CPU: 4, Memory: resource.MustParse("8Gi")},
 	}
 
-	req, err := r.buildCreateRequest(context.Background(), vm, vmClass, nil, nil)
+	req, err := r.buildCreateRequest(context.Background(), vm, "", vmClass, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -170,7 +170,7 @@ func TestBuildCreateRequest_NilNetworkRef_ElseBranch(t *testing.T) {
 		Spec: infravirtrigaudiov1beta1.VMClassSpec{CPU: 2, Memory: resource.MustParse("4Gi")},
 	}
 
-	req, err := r.buildCreateRequest(context.Background(), vm, vmClass, nil, networks)
+	req, err := r.buildCreateRequest(context.Background(), vm, "", vmClass, nil, networks)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -218,7 +218,7 @@ func TestBuildCreateRequest_VSphereNetwork_NilPCISlot(t *testing.T) {
 		Spec: infravirtrigaudiov1beta1.VMClassSpec{CPU: 2, Memory: resource.MustParse("4Gi")},
 	}
 
-	req, err := r.buildCreateRequest(context.Background(), vm, vmClass, nil, networks)
+	req, err := r.buildCreateRequest(context.Background(), vm, "", vmClass, nil, networks)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -258,7 +258,7 @@ func TestBuildCreateRequest_VSphereNetwork_WithPCISlot(t *testing.T) {
 		Spec: infravirtrigaudiov1beta1.VMClassSpec{CPU: 2, Memory: resource.MustParse("4Gi")},
 	}
 
-	req, err := r.buildCreateRequest(context.Background(), vm, vmClass, nil, networks)
+	req, err := r.buildCreateRequest(context.Background(), vm, "", vmClass, nil, networks)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -291,7 +291,7 @@ func TestBuildCreateRequest_NetworkRefWithNilNetworksEntry(t *testing.T) {
 		Spec: infravirtrigaudiov1beta1.VMClassSpec{CPU: 2, Memory: resource.MustParse("4Gi")},
 	}
 
-	req, err := r.buildCreateRequest(context.Background(), vm, vmClass, nil, networks)
+	req, err := r.buildCreateRequest(context.Background(), vm, "", vmClass, nil, networks)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -327,7 +327,7 @@ func TestBuildCreateRequest_VMImageVSphere(t *testing.T) {
 		},
 	}
 
-	req, err := r.buildCreateRequest(context.Background(), vm, vmClass, vmImage, nil)
+	req, err := r.buildCreateRequest(context.Background(), vm, "", vmClass, vmImage, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

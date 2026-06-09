@@ -62,8 +62,14 @@ Status never contains secrets — only provider ids/paths/messages.
 
 ## What is and isn't done
 
-PR-5 (this lifecycle) proves that preparation **runs** through CRs and that status reflects
-it (`Importing` → `Ready`). Having the provider's `Create` **consume** the prepared
-template's path/id directly is a later, additive follow-up (PR-6). For libvirt and vSphere
-this is invisible today because their `Create` path already resolves the image source
-itself; the VM still creates regardless. See ADR-0005 "Out of scope".
+PR-5 wired preparation to **run** through CRs and reflect it in status (`Importing` →
+`Ready`). **PR-6 (#214) closes the loop**: the provider now returns *where* it placed the
+prepared image (`prepared_image_id` / `prepared_image_path`), the controller stamps that
+onto `status.providerStatus[provider].{id,path}`, and `Create` **consumes** it — cloning the
+prepared template (vSphere/Proxmox) or using the local prepared pool file (libvirt) instead
+of re-resolving (and re-downloading) the original source. A second VM from the same prepared
+image therefore skips the re-download. When an image is not yet prepared/available on the
+target provider, `Create` falls back to the original by-reference source resolution
+unchanged (no regression). The `ImagePrepare` RPC change is wire-compatible (the `task` ref
+stays at proto field 1), so manager and providers must roll together but no CRD spec field
+changed. See ADR-0005 "Out of scope" for the original PR-6 framing.

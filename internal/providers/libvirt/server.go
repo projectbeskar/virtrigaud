@@ -467,10 +467,14 @@ func (s *Server) Clone(ctx context.Context, req *providerv1.CloneRequest) (*prov
 // image is converted into the resolved pool as a standalone qcow2; an existing
 // target is treated as an idempotent no-op (see Provider.imagePrepare).
 //
-// libvirt/qemu-img are synchronous, so this returns a TaskResponse with an empty
-// Task (no TaskRef); the controller treats an empty TaskRef as "completed
-// synchronously".
-func (s *Server) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepareRequest) (*providerv1.TaskResponse, error) {
+// libvirt/qemu-img are synchronous, so this returns an ImagePrepareResponse with
+// an empty Task (no TaskRef); the controller treats an empty TaskRef as
+// "completed synchronously". The response also carries the prepared image's
+// location — prepared_image_id is the target name and prepared_image_path is the
+// absolute pool path (<poolPath>/<target>.qcow2) — so the manager can create VMs
+// from the prepared template instead of re-resolving the source (issue #154,
+// PR-6 / #214).
+func (s *Server) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepareRequest) (*providerv1.ImagePrepareResponse, error) {
 	log.Printf("INFO ImagePrepare: target=%q storageHint=%q", req.TargetName, req.StorageHint)
 
 	libvirtProvider, ok := s.provider.(*Provider)
@@ -478,12 +482,17 @@ func (s *Server) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepareR
 		return nil, fmt.Errorf("libvirt provider not initialized")
 	}
 
-	if err := libvirtProvider.imagePrepare(ctx, req.ImageJson, req.TargetName, req.StorageHint); err != nil {
+	preparedID, preparedPath, err := libvirtProvider.imagePrepare(ctx, req.ImageJson, req.TargetName, req.StorageHint)
+	if err != nil {
 		return nil, fmt.Errorf("failed to prepare image: %w", err)
 	}
 
-	// Synchronous: no task reference. An empty Task signals "completed".
-	return &providerv1.TaskResponse{}, nil
+	// Synchronous: no task reference. An empty Task signals "completed". The
+	// id/path tell the manager where the prepared template landed.
+	return &providerv1.ImagePrepareResponse{
+		PreparedImageId:   preparedID,
+		PreparedImagePath: preparedPath,
+	}, nil
 }
 
 // GetCapabilities returns the capabilities of the Libvirt provider

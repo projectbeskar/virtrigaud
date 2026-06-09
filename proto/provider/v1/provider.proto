@@ -145,6 +145,33 @@ message ImagePrepareRequest {
   string storage_hint = 3; // Storage location hint (datastore, pool, etc.)
 }
 
+// ImagePrepareResponse reports where the provider placed the prepared image so
+// the manager can later create VMs from that prepared location instead of
+// re-resolving (and possibly re-downloading) the original source (issue #154,
+// PR-6 / #214).
+//
+// It mirrors the CloneResponse precedent: `task` stays at field 1 so this
+// message is wire-compatible with the TaskResponse it replaces — a manager that
+// still decodes a TaskResponse reads field 1 (the TaskRef) unchanged, and the
+// new id/path fields are simply ignored by older decoders. The change is
+// therefore additive and non-breaking.
+message ImagePrepareResponse {
+  // task references an async prepare operation; an empty/nil task means the
+  // prepare completed synchronously. Field 1 is intentionally identical to
+  // TaskResponse.task for wire compatibility.
+  TaskRef task = 1;
+  // prepared_image_id is the provider-specific identifier of the prepared image
+  // — e.g. a vSphere template name / MoRef value, or a Proxmox template
+  // name/VMID. The manager stamps this onto VMImage.status and uses it as the
+  // template ref at create time. Known at trigger time even for async prepares.
+  string prepared_image_id = 2;
+  // prepared_image_path is the provider-specific path of the prepared image —
+  // e.g. a libvirt pool path (<poolPath>/<target>.qcow2). Empty for providers
+  // that address prepared images by id/name only (vSphere, Proxmox). Known at
+  // trigger time even for async prepares.
+  string prepared_image_path = 3;
+}
+
 // Disk export operations for migration
 message ExportDiskRequest {
   string vm_id = 1;            // VM identifier
@@ -286,8 +313,12 @@ service Provider {
   // Clone operations
   rpc Clone(CloneRequest) returns (CloneResponse);
   
-  // Image preparation and import
-  rpc ImagePrepare(ImagePrepareRequest) returns (TaskResponse);
+  // Image preparation and import. Returns the prepared image's provider-specific
+  // location (id/path) so the manager can later create VMs from the prepared
+  // template instead of re-resolving the original source. ImagePrepareResponse
+  // is wire-compatible with the TaskResponse this previously returned (task at
+  // field 1), so the change is non-breaking (issue #154, PR-6 / #214).
+  rpc ImagePrepare(ImagePrepareRequest) returns (ImagePrepareResponse);
   
   // Get provider capabilities
   rpc GetCapabilities(GetCapabilitiesRequest) returns (GetCapabilitiesResponse);

@@ -12,6 +12,14 @@ are no open questions: the trade-offs below were resolved up front.
 applying a `VMImage` + a `VirtualMachine` that references it drives an image prepare
 end-to-end through CRs. No proto change, no CRD **spec** change.
 
+**Follow-up delivered (PR-6 / [#214](https://github.com/projectbeskar/virtrigaud/issues/214))**:
+the "Make `Create` consume the prepared template" item under *Out of scope* below is now
+**done**. `ImagePrepare` returns the prepared location (`prepared_image_id`/
+`prepared_image_path`) — a wire-compatible, non-breaking proto change (the `task` ref stays
+at field 1, mirroring `CloneResponse`) — the controller stamps it onto
+`status.providerStatus[provider].{id,path}`, and `Create` overrides the image source with
+it. The *Out of scope* text below is retained as the historical PR-5 framing.
+
 **Author**: William Rizzo ([@wrkode](https://github.com/wrkode))
 
 **Related issues**:

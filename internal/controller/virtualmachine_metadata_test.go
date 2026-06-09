@@ -49,7 +49,7 @@ func TestBuildCreateRequest_Metadata_NilMetaData_NoMetaDataInRequest(t *testing.
 	vm.Spec.MetaData = nil
 	r := &VirtualMachineReconciler{}
 
-	req, err := r.buildCreateRequest(context.Background(), vm, vmClass, vmImage, nil)
+	req, err := r.buildCreateRequest(context.Background(), vm, "", vmClass, vmImage, nil)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -68,7 +68,7 @@ func TestBuildCreateRequest_Metadata_InlineYAML_IncludedInRequest(t *testing.T) 
 	}
 	r := &VirtualMachineReconciler{}
 
-	req, err := r.buildCreateRequest(context.Background(), vm, vmClass, vmImage, nil)
+	req, err := r.buildCreateRequest(context.Background(), vm, "", vmClass, vmImage, nil)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -90,7 +90,7 @@ func TestBuildCreateRequest_Metadata_NetworkConfig_Preserved(t *testing.T) {
 	}
 	r := &VirtualMachineReconciler{}
 
-	req, err := r.buildCreateRequest(context.Background(), vm, vmClass, vmImage, nil)
+	req, err := r.buildCreateRequest(context.Background(), vm, "", vmClass, vmImage, nil)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -120,7 +120,7 @@ func TestBuildCreateRequest_BothUserDataAndMetaData_BothIncluded(t *testing.T) {
 	}
 	r := &VirtualMachineReconciler{}
 
-	req, err := r.buildCreateRequest(context.Background(), vm, vmClass, vmImage, nil)
+	req, err := r.buildCreateRequest(context.Background(), vm, "", vmClass, vmImage, nil)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -148,7 +148,7 @@ func TestBuildCreateRequest_Metadata_EmptyInline_NoMetaData(t *testing.T) {
 	}
 	r := &VirtualMachineReconciler{}
 
-	req, err := r.buildCreateRequest(context.Background(), vm, vmClass, vmImage, nil)
+	req, err := r.buildCreateRequest(context.Background(), vm, "", vmClass, vmImage, nil)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -167,7 +167,7 @@ func TestBuildCreateRequest_Metadata_PublicKeys_Included(t *testing.T) {
 	}
 	r := &VirtualMachineReconciler{}
 
-	req, err := r.buildCreateRequest(context.Background(), vm, vmClass, vmImage, nil)
+	req, err := r.buildCreateRequest(context.Background(), vm, "", vmClass, vmImage, nil)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -189,7 +189,7 @@ func TestBuildCreateRequest_Metadata_ComplexNestedStructure_Preserved(t *testing
 	}
 	r := &VirtualMachineReconciler{}
 
-	req, err := r.buildCreateRequest(context.Background(), vm, vmClass, vmImage, nil)
+	req, err := r.buildCreateRequest(context.Background(), vm, "", vmClass, vmImage, nil)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

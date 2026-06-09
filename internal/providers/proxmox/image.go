@@ -215,11 +215,16 @@ func (p *Provider) resolveImageNode(ctx context.Context, sourceNode string) (str
 //     no-op success; otherwise the image is downloaded into the resolved storage
 //     and prepared as the named template.
 //
-// The import is driven by a PVE task, so the returned TaskResponse carries the
-// task ref when the API reports one (the controller polls it); a verify-only or
-// idempotent no-op returns an empty Task, which the controller treats as
-// "completed synchronously" — consistent with the libvirt and vSphere providers.
-func (p *Provider) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepareRequest) (*providerv1.TaskResponse, error) {
+// The import is driven by a PVE task, so the returned ImagePrepareResponse
+// carries the task ref when the API reports one (the controller polls it); a
+// verify-only or idempotent no-op returns an empty Task, which the controller
+// treats as "completed synchronously" — consistent with the libvirt and vSphere
+// providers. In every case prepared_image_id is the template's name/VMID, which
+// is deterministic and known at trigger time even on the async import path — so
+// the manager can stamp it immediately and create VMs from the prepared template
+// without re-resolving the source (issue #154, PR-6 / #214). prepared_image_path
+// is empty: Proxmox addresses templates by name/VMID, not an on-disk path.
+func (p *Provider) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepareRequest) (*providerv1.ImagePrepareResponse, error) {
 	if p.client == nil {
 		return nil, errors.NewUnavailable("PVE client not configured", nil)
 	}
@@ -266,7 +271,7 @@ func (p *Provider) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepar
 // template (template=1). On success the prepared image is the template itself, so
 // no import is performed. A missing template yields an honest NotFound rather than
 // a fabricated success.
-func (p *Provider) imagePrepareVerifyTemplate(ctx context.Context, node string, src proxmoxImageSource) (*providerv1.TaskResponse, error) {
+func (p *Provider) imagePrepareVerifyTemplate(ctx context.Context, node string, src proxmoxImageSource) (*providerv1.ImagePrepareResponse, error) {
 	// By VMID: a direct GetVM is cheaper and unambiguous.
 	if src.TemplateID != nil {
 		vmid := *src.TemplateID
@@ -283,7 +288,8 @@ func (p *Provider) imagePrepareVerifyTemplate(ctx context.Context, node string, 
 		}
 		p.logger.Info("ImagePrepare: template exists; nothing to import",
 			"node", node, "template_id", vmid, "name", vm.Name)
-		return &providerv1.TaskResponse{}, nil
+		// The prepared image is the existing template, addressed by its VMID.
+		return imagePrepareDone(fmt.Sprintf("%d", vmid)), nil
 	}
 
 	// By name: list templates on the node and match.
@@ -297,7 +303,8 @@ func (p *Provider) imagePrepareVerifyTemplate(ctx context.Context, node string, 
 	}
 	p.logger.Info("ImagePrepare: template exists; nothing to import",
 		"node", node, "template_name", name, "template_id", vm.VMID)
-	return &providerv1.TaskResponse{}, nil
+	// The prepared image is the existing template, addressed by its name.
+	return imagePrepareDone(name), nil
 }
 
 // findTemplateByName returns the template VM matching name on the node, or nil if
@@ -324,9 +331,10 @@ func (p *Provider) findTemplateByName(ctx context.Context, node, name string) (*
 // node, it returns success without importing. Otherwise it resolves the target
 // storage and asks PVE to download/convert the image into a template named
 // targetName.
-func (p *Provider) imagePrepareImport(ctx context.Context, node, targetName string, src proxmoxImageSource, storageHint string) (*providerv1.TaskResponse, error) {
+func (p *Provider) imagePrepareImport(ctx context.Context, node, targetName string, src proxmoxImageSource, storageHint string) (*providerv1.ImagePrepareResponse, error) {
 	// Idempotency gate (load-bearing): a re-run must never re-import. If a template
-	// named targetName already exists on the node, we are done.
+	// named targetName already exists on the node, we are done — the prepared image
+	// is that template, addressed by name.
 	existing, err := p.findTemplateByName(ctx, node, targetName)
 	if err != nil {
 		return nil, err
@@ -334,7 +342,7 @@ func (p *Provider) imagePrepareImport(ctx context.Context, node, targetName stri
 	if existing != nil {
 		p.logger.Info("ImagePrepare: target template already exists; nothing to do",
 			"node", node, "target_name", targetName, "template_id", existing.VMID)
-		return &providerv1.TaskResponse{}, nil
+		return imagePrepareDone(targetName), nil
 	}
 
 	storage := resolveImageStorage(storageHint, src.Storage)
@@ -353,11 +361,25 @@ func (p *Provider) imagePrepareImport(ctx context.Context, node, targetName stri
 			fmt.Sprintf("ImagePrepare: import image %q as template %q", src.URL, targetName), err)
 	}
 
-	result := &providerv1.TaskResponse{}
+	// The prepared template's name is deterministic and known here — populate
+	// prepared_image_id in the SAME response as the task ref so the manager can
+	// stamp the location now, even though the PVE task is still running (issue
+	// #154, PR-6 / #214). The manager keeps Available=false until the task
+	// completes, but it never has to re-discover the template name.
+	result := imagePrepareDone(targetName)
 	if taskID != "" {
 		result.Task = &providerv1.TaskRef{Id: taskID}
 	}
 	return result, nil
+}
+
+// imagePrepareDone builds an ImagePrepareResponse whose prepared_image_id is the
+// Proxmox template's name/VMID. prepared_image_path is left empty because Proxmox
+// clones templates by name/VMID, not an on-disk path the manager consumes. The
+// Task is left nil; callers populate it on the async import path (issue #154,
+// PR-6 / #214).
+func imagePrepareDone(templateRef string) *providerv1.ImagePrepareResponse {
+	return &providerv1.ImagePrepareResponse{PreparedImageId: templateRef}
 }
 
 // Compile-time assertion that the v1beta1 image source shape this provider parses
