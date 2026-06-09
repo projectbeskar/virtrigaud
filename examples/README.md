@@ -27,6 +27,7 @@ For full documentation see [https://projectbeskar.github.io/virtrigaud](https://
 | [vm-ubuntu-small.yaml](vm-ubuntu-small.yaml) | Simple Ubuntu VM |
 | [vmclass-small.yaml](vmclass-small.yaml) | VMClass resource profile |
 | [vmimage-ubuntu.yaml](vmimage-ubuntu.yaml) | VMImage configuration |
+| [vmimage-prepare-on-create.yaml](vmimage-prepare-on-create.yaml) | VMImage (libvirt URL source) + VirtualMachine showing the prepare-on-create flow (issue #154, ADR-0005) |
 | [vmnetwork-app.yaml](vmnetwork-app.yaml) | VMNetworkAttachment configuration |
 
 ## Provider Examples

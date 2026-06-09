@@ -1,0 +1,78 @@
+# Image-prepare-on-create flow (issue #154, ADR-0005)
+#
+# Applying this VMImage + VirtualMachine drives an image prepare end-to-end:
+# when the VirtualMachine controller reconciles the VM, it asks the libvirt
+# provider to PREPARE (download + import into the storage pool) the image
+# referenced by imageRef BEFORE creating the VM — but only if the provider
+# advertises SupportsImageImport (status.reportedCapabilities, issue #176).
+#
+# Watch the prepare happen on the VMImage status:
+#   kubectl get vmimage ubuntu-jammy-cloud -o jsonpath='{.status.phase}'      # Importing -> Ready
+#   kubectl get vmimage ubuntu-jammy-cloud -o jsonpath='{.status.availableOn}'  # [libvirt-1]
+#   kubectl get vmimage ubuntu-jammy-cloud -o wide
+#
+# Replace the placeholders below (providerRef/classRef names, the image URL and
+# checksum) with values for your environment. The URL must point at a real
+# cloud image reachable from the libvirt host.
+---
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMImage
+metadata:
+  name: ubuntu-jammy-cloud
+  namespace: default
+spec:
+  source:
+    libvirt:
+      # A cloud image URL the libvirt provider will download and import into a
+      # storage pool. Use a generic, public placeholder host — never an internal
+      # hostname.
+      url: "https://images.example.com/ubuntu/jammy-server-cloudimg-amd64.qcow2"
+      format: qcow2
+      checksum: "sha256:REPLACE_WITH_REAL_SHA256"
+      checksumType: sha256
+      # storagePool is optional; empty lets the provider choose its default pool.
+      storagePool: ""
+  prepare:
+    # Import (the default) prepares the image on the provider when it is missing.
+    # Use Fail to refuse creating the VM unless the image is already prepared,
+    # or Wait to hold for an out-of-band preparer. See ADR-0005.
+    onMissing: Import
+    validateChecksum: true
+  metadata:
+    displayName: "Ubuntu 22.04 LTS (cloud)"
+    description: "Ubuntu 22.04 LTS cloud image, prepared on first VM create"
+    version: "22.04"
+  distribution:
+    name: ubuntu
+    version: "22.04"
+    family: linux
+---
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: ubuntu-jammy-vm
+  namespace: default
+spec:
+  providerRef:
+    # A libvirt Provider whose status.reportedCapabilities.supportsImageImport
+    # is true. If the provider does not advertise image import, the VM is created
+    # by reference exactly as before (no prepare) — see ADR-0005.
+    name: libvirt-1
+  classRef:
+    name: small
+  imageRef:
+    name: ubuntu-jammy-cloud
+  networks:
+    - name: default
+      ipAddress: ""  # DHCP
+  powerState: On
+  userData:
+    cloudInit:
+      inline: |
+        #cloud-config
+        users:
+          - name: ubuntu
+            sudo: ALL=(ALL) NOPASSWD:ALL
+            shell: /bin/bash
+            ssh_authorized_keys:
+              - ssh-ed25519 AAAA... # Add your SSH key here

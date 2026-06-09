@@ -75,6 +75,7 @@ rules:
   - providers/status
   - virtualmachines/status
   - vmclones/status
+  - vmimages/status
   - vmmigrations/status
   - vmsets/status
   - vmsnapshots/status

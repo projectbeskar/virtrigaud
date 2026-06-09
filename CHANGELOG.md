@@ -5,6 +5,31 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-08 11:32] - Wire image-prepare into the controllers: lazy VM-create-driven prepare (#154)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/controller/virtualmachine_image_prepare.go` (new): `EnsureImageOnProvider`, called from `reconcileVM` after provider validation and before create. Lazy, VM-create-driven image preparation — the VirtualMachine controller is the trigger (it holds the `(image, provider)` pair) and the **single writer** of the prepare-related `VMImage` status fields. Capability-gated (no-op unless the provider instance implements `contracts.ImagePreparer` AND the Provider CR advertises `Status.ReportedCapabilities.SupportsImageImport` — #176), so providers that can't prepare fall through to the unchanged by-reference create path. Idempotent (skips when `ProviderStatus[provider].Available`); honors `Prepare.OnMissing` (Import default / Fail / Wait); triggers `PrepareImage`, persisting an async `PrepareTaskRef`+`Phase=Importing` and requeueing to poll via `IsTaskComplete`, or stamping completion immediately for a synchronous provider. On completion it records `ProviderStatus[provider]{Available}`, appends to `AvailableOn` (deduped), and sets `Ready`/`Phase=Ready`.
+- `internal/controller/virtualmachine_image_prepare_test.go` (new): sync + async (poll→complete) prepare, idempotency, no-regression (non-`ImagePreparer` and flag-false), `OnMissing=Fail`/`Wait`, prepare error, and a concurrent two-provider no-clobber case (clean under `-race`).
+- `docs/adr/0005-image-preparation-trigger-model.md`: records the lazy/VM-driven trigger, single-writer status strategy (avoids the #189-class race), `Ready`=OR-of-providers vs per-provider `ProviderStatus`/`AvailableOn`, and the deferred items (eager `prepareOn`; "Create consumes the prepared template").
+- `docs/image-preparation.md` + `examples/vmimage-prepare-on-create.yaml`: lifecycle + a `VMImage{source.libvirt.url}` + VM example.
+
+### Changed
+- `internal/controller/virtualmachine_controller.go`: call `EnsureImageOnProvider` in `reconcileVM`; hold create (requeue, not error) while a prepare is in flight or `OnMissing` forbids preparing. Added a `vmimages/status` get;update;patch RBAC marker (regenerated `config/rbac/role.yaml` + synced `charts/virtrigaud/templates/manager-rbac.yaml`); `vmimages` objects stay read-only.
+- `internal/controller/vmimage_controller.go`: documented as a deliberate no-op backstop — the VirtualMachine controller is the sole status writer to avoid a two-writer race.
+
+### Why
+PR-5 (the keystone) of the image-prepare vertical slice (#154): makes `ImagePrepare` reachable end-to-end through CRs — applying a `VMImage` + `VirtualMachine` now drives a provider image prepare and reflects it in `VMImage.status` (`phase`/`availableOn`/`providerStatus`).
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (manager image + RBAC; no CRD-spec/proto change)
+- [ ] Config change only
+- [ ] Documentation only
+
+### Notes
+- **No CRD-spec or proto change.** Follow-up (PR-6): make `Create` *consume* the prepared template (return the prepared image path/id from the provider). Until then the VM still creates from its own source resolution (libvirt Create already handles `url`/`path`/template), so a green VM does not by itself prove the prepared template was used — verify prepare via `VMImage.status`.
+
 ## [2026-06-08 11:25] - Manager transport: contracts.ImagePreparer + gRPC client PrepareImage (#154)
 **Author:** @wrkode (William Rizzo)
 
