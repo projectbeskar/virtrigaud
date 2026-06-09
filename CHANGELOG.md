@@ -5,6 +5,35 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-09 07:35] - ImagePrepare returns the prepared location; Create consumes it (#154, PR-6 / #214)
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `proto/provider/v1/provider.proto`: new `ImagePrepareResponse{task=1, prepared_image_id=2, prepared_image_path=3}`; `rpc ImagePrepare` now returns it (was `TaskResponse`). **Wire-compatible / non-breaking** — `task` stays field 1, so the bytes are identical to the `TaskResponse` it replaces (verified: both `Task` are `bytes,1`); mirrors the `CloneResponse` precedent. Regenerated `proto/rpc/provider/v1/*.pb.go` via `make proto` (do not hand-edit).
+- `internal/providers/contracts/image.go`: `ImagePrepareResponse` gains `PreparedImageID` + `PreparedImagePath`.
+- `internal/providers/libvirt/{image.go,server.go}`: internal `imagePrepare` now returns `(preparedID, preparedPath)`; the pool path (`<poolPath>/<target>.qcow2`) is threaded out and returned as `prepared_image_path` (id = target name), known even on the idempotent no-op and sync paths.
+- `internal/providers/vsphere/image.go`: returns `prepared_image_id` = the (verified or imported) template name; path empty (vSphere clones templates by name).
+- `internal/providers/proxmox/image.go`: returns `prepared_image_id` = the template name/VMID; on the **async** import path the deterministic id is returned in the SAME response as the `TaskRef` (location-at-trigger), not after the task.
+- `internal/providers/mock/provider.go`: returns deterministic id/path so conformance/tests can assert.
+- `internal/transport/grpc/client.go`: `PrepareImage` maps `prepared_image_id/path` → `contracts.ImagePrepareResponse.{PreparedImageID,PreparedImagePath}` (TaskRef + `trackTaskStart` unchanged).
+- `internal/controller/virtualmachine_image_prepare.go`: stamps the prepared location onto `VMImage.status.ProviderStatus[provider]{ID,Path}` — alongside `PrepareTaskRef` on the async path (Available stays false until the task completes), or with `Available=true` via the extended `markImagePrepared(id,path)` on the sync/completion path.
+- `internal/controller/virtualmachine_controller.go`: **consume** the prepared image at create — when `ProviderStatus[provider].Available`, `buildCreateRequest` overrides the source via `overrideImageWithPreparedLocation` (libvirt → `image.Path` + clear `URL`; vSphere → `image.TemplateName` + clear OVA `URL`; Proxmox → `image.TemplateName`). Falls back to the original source resolution when not prepared (no regression). `createVM`/`reconfigureVM`/`buildCreateRequest` thread the provider name.
+- `sdk/provider/client/client.go`: passthrough `ImagePrepare` return type updated to `*ImagePrepareResponse`.
+
+### Why
+Closes the image-prepare loop (#154): the manager prepared an image on a provider but `Create` still re-resolved the original source (re-downloading a URL per VM). The provider now reports WHERE it put the prepared image, the controller records it, and `Create` clones the prepared template / uses the local prepared pool file — so a second VM from the same prepared image skips the re-download. Closes #214.
+
+### Impact
+- [ ] Breaking change (gRPC change is wire-compatible: `task` stays field 1)
+- [x] Requires cluster rollout (coordinated manager + all-provider image rollout — proto change)
+- [ ] Config change only
+- [ ] Documentation only
+
+### Tests
+- `internal/transport/grpc/client_imageprepare_test.go`: assert `prepared_image_id/path` round-trip on both async and sync paths.
+- `internal/controller/virtualmachine_image_prepare_test.go`: assert `ProviderStatus[provider]{ID,Path}` is stamped (sync), stamped-but-not-Available at trigger then preserved on completion (async), and `TestOverrideImageWithPreparedLocation_Consume` (libvirt/vSphere/Proxmox override + not-Available + wrong-provider no-regression cases).
+- `internal/providers/{vsphere,proxmox}/*_test.go`: assert the prepared id (and async location-at-trigger for Proxmox import).
+
 ## [2026-06-08 11:32] - Wire image-prepare into the controllers: lazy VM-create-driven prepare (#154)
 **Author:** @wrkode (William Rizzo)
 

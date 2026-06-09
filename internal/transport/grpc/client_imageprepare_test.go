@@ -34,21 +34,26 @@ import (
 // (#154). It embeds the Unimplemented server so only ImagePrepare needs a body.
 type imagePrepareFakeServer struct {
 	providerv1.UnimplementedProviderServer
-	fn func(ctx context.Context, req *providerv1.ImagePrepareRequest) (*providerv1.TaskResponse, error)
+	fn func(ctx context.Context, req *providerv1.ImagePrepareRequest) (*providerv1.ImagePrepareResponse, error)
 }
 
-func (s *imagePrepareFakeServer) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepareRequest) (*providerv1.TaskResponse, error) {
+func (s *imagePrepareFakeServer) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepareRequest) (*providerv1.ImagePrepareResponse, error) {
 	return s.fn(ctx, req)
 }
 
 // TestClient_PrepareImage_AsyncTaskRef verifies the request fields are forwarded
-// and an async TaskRef is surfaced on the contract response.
+// and an async TaskRef plus the prepared-image location (id/path) are surfaced on
+// the contract response (#214).
 func TestClient_PrepareImage_AsyncTaskRef(t *testing.T) {
 	var got *providerv1.ImagePrepareRequest
 	dialer, cleanup := startBufconnServer(t, &imagePrepareFakeServer{
-		fn: func(_ context.Context, req *providerv1.ImagePrepareRequest) (*providerv1.TaskResponse, error) {
+		fn: func(_ context.Context, req *providerv1.ImagePrepareRequest) (*providerv1.ImagePrepareResponse, error) {
 			got = req
-			return &providerv1.TaskResponse{Task: &providerv1.TaskRef{Id: "task-42"}}, nil
+			return &providerv1.ImagePrepareResponse{
+				Task:              &providerv1.TaskRef{Id: "task-42"},
+				PreparedImageId:   "ubuntu-tmpl",
+				PreparedImagePath: "/pool/ubuntu-tmpl.qcow2",
+			}, nil
 		},
 	})
 	defer cleanup()
@@ -61,6 +66,9 @@ func TestClient_PrepareImage_AsyncTaskRef(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "task-42", resp.TaskRef)
+	// The prepared location round-trips even on the async path (known at trigger).
+	assert.Equal(t, "ubuntu-tmpl", resp.PreparedImageID)
+	assert.Equal(t, "/pool/ubuntu-tmpl.qcow2", resp.PreparedImagePath)
 
 	// Request fields forwarded verbatim (JSON / Json field-name mapping).
 	require.NotNil(t, got)
@@ -70,11 +78,15 @@ func TestClient_PrepareImage_AsyncTaskRef(t *testing.T) {
 }
 
 // TestClient_PrepareImage_SyncEmptyTask verifies a synchronous provider (nil
-// Task) yields an empty TaskRef, which the controller treats as "completed".
+// Task) yields an empty TaskRef, which the controller treats as "completed",
+// while still surfacing the prepared-image location (#214).
 func TestClient_PrepareImage_SyncEmptyTask(t *testing.T) {
 	dialer, cleanup := startBufconnServer(t, &imagePrepareFakeServer{
-		fn: func(_ context.Context, _ *providerv1.ImagePrepareRequest) (*providerv1.TaskResponse, error) {
-			return &providerv1.TaskResponse{}, nil
+		fn: func(_ context.Context, _ *providerv1.ImagePrepareRequest) (*providerv1.ImagePrepareResponse, error) {
+			return &providerv1.ImagePrepareResponse{
+				PreparedImageId:   "prepared-tmpl",
+				PreparedImagePath: "/pool/prepared-tmpl.qcow2",
+			}, nil
 		},
 	})
 	defer cleanup()
@@ -83,13 +95,15 @@ func TestClient_PrepareImage_SyncEmptyTask(t *testing.T) {
 	resp, err := cli.PrepareImage(context.Background(), contracts.ImagePrepareRequest{TargetName: "t"})
 	require.NoError(t, err)
 	assert.Empty(t, resp.TaskRef)
+	assert.Equal(t, "prepared-tmpl", resp.PreparedImageID)
+	assert.Equal(t, "/pool/prepared-tmpl.qcow2", resp.PreparedImagePath)
 }
 
 // TestClient_PrepareImage_ErrorMapped verifies a provider error is mapped through
 // mapGRPCError rather than leaking the raw gRPC status.
 func TestClient_PrepareImage_ErrorMapped(t *testing.T) {
 	dialer, cleanup := startBufconnServer(t, &imagePrepareFakeServer{
-		fn: func(_ context.Context, _ *providerv1.ImagePrepareRequest) (*providerv1.TaskResponse, error) {
+		fn: func(_ context.Context, _ *providerv1.ImagePrepareRequest) (*providerv1.ImagePrepareResponse, error) {
 			return nil, status.Error(codes.InvalidArgument, "bad image spec")
 		},
 	})

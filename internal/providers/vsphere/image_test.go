@@ -331,6 +331,9 @@ func TestImagePrepare_OVAImport_AndIdempotency(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	assert.Nil(t, resp.GetTask(), "synchronous import returns an empty task")
+	assert.Equal(t, targetName, resp.GetPreparedImageId(),
+		"prepared_image_id is the imported template's name (#214)")
+	assert.Empty(t, resp.GetPreparedImagePath(), "vSphere addresses templates by name, not path")
 
 	// The imported object exists and is a template.
 	vm, err := p.finder.VirtualMachine(context.Background(), targetName)
@@ -348,6 +351,8 @@ func TestImagePrepare_OVAImport_AndIdempotency(t *testing.T) {
 	})
 	require.NoError(t, err, "re-run must be a no-op, not re-import")
 	require.NotNil(t, resp2)
+	assert.Equal(t, targetName, resp2.GetPreparedImageId(),
+		"idempotent re-run still reports the prepared template id (#214)")
 }
 
 // TestImagePrepare_TemplateName_VerifyOnly_NotFound verifies the templateName
@@ -384,6 +389,9 @@ func TestImagePrepare_TemplateName_VerifyOnly_Exists(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotNil(t, resp)
+	// verify-only resolves the prepared image to the verified template name.
+	assert.Equal(t, existing, resp.GetPreparedImageId(),
+		"verify-only reports the existing template as the prepared id (#214)")
 }
 
 // TestImagePrepare_NoSource verifies an image spec with no usable vSphere source

@@ -187,20 +187,27 @@ func checksumTool(checksumType string) (tool string, ok bool) {
 // register (convert) the source image into the pool as <targetName>.qcow2,
 // optionally verifying the source checksum.
 //
-// It is synchronous (virsh/qemu-img are blocking), so it returns no task
-// reference; the gRPC layer maps a nil error to a TaskResponse with an empty
-// Task, which the controller treats as "completed synchronously".
-func (p *Provider) imagePrepare(ctx context.Context, imageJSON, targetName, storageHint string) error {
+// On success it returns the prepared image's location: the target name (used as
+// prepared_image_id) and the absolute pool path (prepared_image_path). The path
+// is known up front from the resolved pool — even when the target already exists
+// (idempotent no-op) — so the manager can consume the prepared template at
+// create time instead of re-resolving the original source (issue #154, PR-6 /
+// #214).
+//
+// It is synchronous (virsh/qemu-img are blocking), so the gRPC layer returns an
+// ImagePrepareResponse with an empty Task (which the controller treats as
+// "completed synchronously") alongside the returned id/path.
+func (p *Provider) imagePrepare(ctx context.Context, imageJSON, targetName, storageHint string) (preparedID, preparedPath string, err error) {
 	if p.virshProvider == nil {
-		return contracts.NewRetryableError("virsh provider not initialized", nil)
+		return "", "", contracts.NewRetryableError("virsh provider not initialized", nil)
 	}
 	if strings.TrimSpace(targetName) == "" {
-		return contracts.NewInvalidSpecError("ImagePrepare target name is required", nil)
+		return "", "", contracts.NewInvalidSpecError("ImagePrepare target name is required", nil)
 	}
 
 	src := parseLibvirtImageSource(imageJSON)
 	if src.Path == "" && src.URL == "" {
-		return contracts.NewInvalidSpecError(
+		return "", "", contracts.NewInvalidSpecError(
 			"ImagePrepare requires a libvirt image source with a path or url "+
 				"(source.libvirt.path / source.libvirt.url)", nil)
 	}
@@ -210,10 +217,10 @@ func (p *Provider) imagePrepare(ctx context.Context, imageJSON, targetName, stor
 	storageProvider := NewStorageProvider(p.virshProvider)
 	poolInfo, err := storageProvider.GetPoolInfo(ctx, poolName)
 	if err != nil {
-		return fmt.Errorf("get storage pool %q info: %w", poolName, err)
+		return "", "", fmt.Errorf("get storage pool %q info: %w", poolName, err)
 	}
 	if poolInfo.Path == "" {
-		return contracts.NewInvalidSpecError(
+		return "", "", contracts.NewInvalidSpecError(
 			fmt.Sprintf("storage pool %q has no filesystem path; cannot place image", poolName), nil)
 	}
 
@@ -221,11 +228,12 @@ func (p *Provider) imagePrepare(ctx context.Context, imageJSON, targetName, stor
 
 	// Idempotency (load-bearing): a re-run must be a cheap no-op. Probe the
 	// target file on the libvirt host directly; if it exists, the image is
-	// already prepared and we return without re-downloading/converting.
+	// already prepared and we return its location without re-downloading/
+	// converting.
 	if p.targetImageExists(ctx, targetPath) {
 		log.Printf("INFO ImagePrepare: target image %q already exists in pool %q; nothing to do",
 			targetPath, poolName)
-		return nil
+		return targetName, targetPath, nil
 	}
 
 	log.Printf("INFO ImagePrepare: preparing image %q into pool %q (path=%q url=%q)",
@@ -235,14 +243,14 @@ func (p *Provider) imagePrepare(ctx context.Context, imageJSON, targetName, stor
 		// Source already on the libvirt host: convert it into the pool as the
 		// named template. No download needed.
 		if err := p.verifyChecksum(ctx, src.Path, src.Checksum, src.ChecksumType); err != nil {
-			return err
+			return "", "", err
 		}
 		if err := p.convertIntoPool(ctx, src.Path, targetPath); err != nil {
-			return err
+			return "", "", err
 		}
 		p.finalizeClonedDisk(ctx, targetPath)
 		log.Printf("INFO ImagePrepare: prepared image %q at %q from host path", targetName, targetPath)
-		return nil
+		return targetName, targetPath, nil
 	}
 
 	// URL source: download ON THE LIBVIRT HOST (not through the provider pod) to
@@ -256,19 +264,19 @@ func (p *Provider) imagePrepare(ctx context.Context, imageJSON, targetName, stor
 	// removes it regardless of outcome.
 	tmpPath := filepath.Join(poolInfo.Path, fmt.Sprintf(".virtrigaud-imageprepare-%s.download", targetName))
 	if err := p.downloadOnHost(ctx, src.URL, tmpPath); err != nil {
-		return err
+		return "", "", err
 	}
 	defer p.removeHostFile(ctx, tmpPath)
 
 	if err := p.verifyChecksum(ctx, tmpPath, src.Checksum, src.ChecksumType); err != nil {
-		return err
+		return "", "", err
 	}
 	if err := p.convertIntoPool(ctx, tmpPath, targetPath); err != nil {
-		return err
+		return "", "", err
 	}
 	p.finalizeClonedDisk(ctx, targetPath)
 	log.Printf("INFO ImagePrepare: prepared image %q at %q from url", targetName, targetPath)
-	return nil
+	return targetName, targetPath, nil
 }
 
 // targetImageExists reports whether the prepared image already exists on the

@@ -514,7 +514,14 @@ func (c *Client) PrepareImage(ctx context.Context, req contracts.ImagePrepareReq
 		return contracts.ImagePrepareResponse{}, c.mapGRPCError("image prepare", err)
 	}
 
-	result := contracts.ImagePrepareResponse{}
+	// Surface the prepared image's provider-specific location so the controller
+	// can stamp it onto VMImage.status and create VMs from the prepared template
+	// instead of re-resolving the source (issue #154, PR-6 / #214). Both fields
+	// are populated even on the async path (the location is known at trigger time).
+	result := contracts.ImagePrepareResponse{
+		PreparedImageID:   resp.GetPreparedImageId(),
+		PreparedImagePath: resp.GetPreparedImagePath(),
+	}
 	if resp.Task != nil {
 		result.TaskRef = resp.Task.Id
 		c.trackTaskStart(resp.Task.Id) // G7.3 (#129)

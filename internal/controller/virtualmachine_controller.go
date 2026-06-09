@@ -306,7 +306,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 		}
 		logger.Info("Creating VM")
-		return r.createVM(ctx, vm, providerInstance, vmClass, vmImage, networks)
+		return r.createVM(ctx, vm, providerInstance, provider.Name, vmClass, vmImage, networks)
 	}
 
 	// VM exists, check current state
@@ -322,7 +322,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	if !desc.Exists {
 		logger.Info("VM no longer exists, recreating")
 		vm.Status.ID = ""
-		return r.createVM(ctx, vm, providerInstance, vmClass, vmImage, networks)
+		return r.createVM(ctx, vm, providerInstance, provider.Name, vmClass, vmImage, networks)
 	}
 
 	// G7.2 (#127): record virtrigaud_ip_discovery_duration_seconds on
@@ -357,7 +357,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 			"desiredCPU", vmClass.Spec.CPU,
 			"currentMemoryMiB", r.getCurrentMemoryMiB(vm),
 			"desiredMemoryMiB", vmClass.Spec.Memory.Value()/(1024*1024))
-		return r.reconfigureVM(ctx, vm, providerInstance, vmClass, vmImage, networks)
+		return r.reconfigureVM(ctx, vm, providerInstance, provider.Name, vmClass, vmImage, networks)
 	}
 
 	// VM is ready
@@ -509,6 +509,7 @@ func (r *VirtualMachineReconciler) createVM(
 	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
 	provider contracts.Provider,
+	providerName string,
 	vmClass *infravirtrigaudiov1beta1.VMClass,
 	vmImage *infravirtrigaudiov1beta1.VMImage,
 	networks []*infravirtrigaudiov1beta1.VMNetworkAttachment,
@@ -534,7 +535,7 @@ func (r *VirtualMachineReconciler) createVM(
 	}
 
 	// Build create request
-	req, err := r.buildCreateRequest(ctx, vm, vmClass, vmImage, networks)
+	req, err := r.buildCreateRequest(ctx, vm, providerName, vmClass, vmImage, networks)
 	if err != nil {
 		logger.Error(err, "Failed to build create request")
 		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Failed to build create request: %v", err))
@@ -611,6 +612,7 @@ func (r *VirtualMachineReconciler) adjustPowerState(
 func (r *VirtualMachineReconciler) buildCreateRequest(
 	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
+	providerName string,
 	vmClass *infravirtrigaudiov1beta1.VMClass,
 	vmImage *infravirtrigaudiov1beta1.VMImage,
 	networks []*infravirtrigaudiov1beta1.VMNetworkAttachment,
@@ -813,6 +815,21 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 		} else {
 			log.V(1).Info("Proxmox image source is nil")
 		}
+
+		// Consume the prepared image (issue #154, PR-6 / #214). When the image has
+		// been prepared and is Available on THIS provider, override the source with
+		// the prepared location recorded on VMImage.status — so Create clones the
+		// prepared template / uses the local prepared pool file instead of
+		// re-resolving (and re-downloading) the original source. Falls through to
+		// the by-reference source resolved above when the image is not prepared, so
+		// there is no regression for unprepared images or non-importing providers.
+		if overrode, detail := overrideImageWithPreparedLocation(&image, vmImage, providerName); overrode {
+			log.Info("Consuming prepared image at create (skipping source re-resolution)",
+				"vm", vm.Name, "image", vmImage.Name, "provider", providerName, "override", detail)
+		} else {
+			log.V(1).Info("Image not prepared on provider; using original source",
+				"vm", vm.Name, "image", vmImage.Name, "provider", providerName, "reason", detail)
+		}
 	}
 
 	// Convert Networks
@@ -947,6 +964,62 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 	}, nil
 }
 
+// overrideImageWithPreparedLocation rewrites the create-time image source to the
+// prepared location recorded on vmImage.status for providerName, closing the
+// image-prepare loop (issue #154, PR-6 / #214). The provider prepared the image
+// (downloaded/converted/imported it into a template or pool) and reported WHERE
+// it landed; this makes Create consume that prepared location instead of
+// re-resolving — and possibly re-downloading — the original source.
+//
+// It returns (true, detail) when an override was applied, or (false, reason) when
+// the original source is kept (image not prepared / not Available on this
+// provider, or no usable prepared location recorded). The fallback path is the
+// unchanged by-reference behavior, so unprepared images and non-importing
+// providers see no regression.
+//
+// The override is dispatched by the VMImage source kind:
+//   - libvirt: set image.Path to the prepared pool file and clear image.URL, so
+//     libvirt Create resolves /path → CreateVolumeFromImageFile instead of
+//     re-downloading the URL.
+//   - vSphere: set image.TemplateName to the prepared template name and clear
+//     image.URL (the OVA URL), so Create clones the prepared template.
+//   - Proxmox: set image.TemplateName to the prepared template name/VMID.
+func overrideImageWithPreparedLocation(
+	image *contracts.VMImage,
+	vmImage *infravirtrigaudiov1beta1.VMImage,
+	providerName string,
+) (overrode bool, detail string) {
+	ps, found := vmImage.Status.ProviderStatus[providerName]
+	if !found || !ps.Available {
+		return false, "not prepared/available on provider"
+	}
+
+	switch {
+	case vmImage.Spec.Source.Libvirt != nil:
+		if ps.Path == "" {
+			return false, "prepared but no pool path recorded"
+		}
+		image.Path = ps.Path
+		image.URL = "" // prefer the local prepared template over re-downloading
+		return true, fmt.Sprintf("libvirt path=%s", ps.Path)
+	case vmImage.Spec.Source.VSphere != nil:
+		if ps.ID == "" {
+			return false, "prepared but no template id recorded"
+		}
+		image.TemplateName = ps.ID
+		image.URL = "" // clear the OVA URL so Create clones the prepared template
+		return true, fmt.Sprintf("vsphere templateName=%s", ps.ID)
+	case vmImage.Spec.Source.Proxmox != nil:
+		if ps.ID == "" {
+			return false, "prepared but no template id recorded"
+		}
+		image.TemplateName = ps.ID
+		return true, fmt.Sprintf("proxmox templateName=%s", ps.ID)
+	default:
+		return false, "no recognized image source kind"
+	}
+}
+
 // updateStatus updates the VM status
 func (r *VirtualMachineReconciler) updateStatus(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine) {
 	if err := r.Status().Update(ctx, vm); err != nil {
@@ -1005,6 +1078,7 @@ func (r *VirtualMachineReconciler) reconfigureVM(
 	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
 	provider contracts.Provider,
+	providerName string,
 	vmClass *infravirtrigaudiov1beta1.VMClass,
 	vmImage *infravirtrigaudiov1beta1.VMImage,
 	networks []*infravirtrigaudiov1beta1.VMNetworkAttachment,
@@ -1012,7 +1086,7 @@ func (r *VirtualMachineReconciler) reconfigureVM(
 	logger := log.FromContext(ctx)
 
 	// Build the desired configuration
-	req, err := r.buildCreateRequest(ctx, vm, vmClass, vmImage, networks)
+	req, err := r.buildCreateRequest(ctx, vm, providerName, vmClass, vmImage, networks)
 	if err != nil {
 		logger.Error(err, "Failed to build create request")
 		return ctrl.Result{}, err

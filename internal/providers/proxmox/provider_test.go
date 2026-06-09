@@ -386,6 +386,9 @@ func TestProxmoxProvider_ImagePrepare_ExistingTemplateByName(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Nil(t, resp.Task, "verify-only must not return a task")
+	assert.Equal(t, "ubuntu-22-template", resp.GetPreparedImageId(),
+		"verify-only reports the existing template name as the prepared id (#214)")
+	assert.Empty(t, resp.GetPreparedImagePath(), "Proxmox addresses templates by name/VMID, not path")
 	assert.Nil(t, server.LastDownloadRequest(), "verify-only must not trigger a download")
 }
 
@@ -403,6 +406,8 @@ func TestProxmoxProvider_ImagePrepare_ExistingTemplateByID(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Nil(t, resp.Task)
+	assert.Equal(t, "9000", resp.GetPreparedImageId(),
+		"verify-only by VMID reports the template VMID as the prepared id (#214)")
 	assert.Nil(t, server.LastDownloadRequest())
 }
 
@@ -454,6 +459,11 @@ func TestProxmoxProvider_ImagePrepare_ImportFromURL(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotNil(t, resp.Task, "import must return a task to poll")
+	// Async-location-at-trigger (#214): the prepared template name is deterministic
+	// and returned in the SAME response as the task ref, before the task completes.
+	assert.Equal(t, "jammy-base", resp.GetPreparedImageId(),
+		"async import reports the prepared template id alongside the task ref")
+	assert.Empty(t, resp.GetPreparedImagePath())
 
 	dl := server.LastDownloadRequest()
 	require.NotNil(t, dl, "import must POST a download-url request")

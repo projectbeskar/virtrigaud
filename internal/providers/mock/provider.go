@@ -672,8 +672,11 @@ func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*pr
 	}, nil
 }
 
-// ImagePrepare prepares an image for use.
-func (p *Provider) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepareRequest) (*providerv1.TaskResponse, error) {
+// ImagePrepare prepares an image for use. It returns the prepared image's
+// deterministic location (prepared_image_id = the target name, prepared_image_path
+// = a synthetic pool path) alongside the async task ref, so conformance/tests can
+// assert the consume-the-prepared-image path end-to-end (issue #154, PR-6 / #214).
+func (p *Provider) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepareRequest) (*providerv1.ImagePrepareResponse, error) {
 	p.simulateDelay()
 
 	if p.shouldFail("image_prepare") {
@@ -695,10 +698,15 @@ func (p *Provider) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepar
 	// Complete image preparation after delay
 	go p.completeTaskAfterDelay(taskID, 15*time.Second)
 
-	return &providerv1.TaskResponse{
+	// Deterministic prepared location, known at trigger time (even though the
+	// task is still running): id = target name, path = synthetic pool path.
+	targetName := req.GetTargetName()
+	return &providerv1.ImagePrepareResponse{
 		Task: &providerv1.TaskRef{
 			Id: taskID,
 		},
+		PreparedImageId:   targetName,
+		PreparedImagePath: fmt.Sprintf("/var/lib/virtrigaud/mock/%s.qcow2", targetName),
 	}, nil
 }
 

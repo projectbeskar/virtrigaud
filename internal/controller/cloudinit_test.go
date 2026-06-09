@@ -451,7 +451,7 @@ func TestBuildCreateRequest_UserData_SecretRef(t *testing.T) {
 		Spec: infravirtrigaudiov1beta1.VMClassSpec{CPU: 2, Memory: resource.MustParse("4Gi")},
 	}
 
-	req, err := r.buildCreateRequest(context.Background(), vm, vmClass, nil, nil)
+	req, err := r.buildCreateRequest(context.Background(), vm, "", vmClass, nil, nil)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -492,7 +492,7 @@ func TestBuildCreateRequest_UserData_InlineAndSecretRef_Merged(t *testing.T) {
 		Spec: infravirtrigaudiov1beta1.VMClassSpec{CPU: 2, Memory: resource.MustParse("4Gi")},
 	}
 
-	req, err := r.buildCreateRequest(context.Background(), vm, vmClass, nil, nil)
+	req, err := r.buildCreateRequest(context.Background(), vm, "", vmClass, nil, nil)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -532,7 +532,7 @@ func TestBuildCreateRequest_UserData_SecretNotFound_ReturnsError(t *testing.T) {
 		Spec: infravirtrigaudiov1beta1.VMClassSpec{CPU: 2, Memory: resource.MustParse("4Gi")},
 	}
 
-	_, err := r.buildCreateRequest(context.Background(), vm, vmClass, nil, nil)
+	_, err := r.buildCreateRequest(context.Background(), vm, "", vmClass, nil, nil)
 
 	if err == nil {
 		t.Fatal("expected error for missing secret, got nil")
@@ -566,7 +566,7 @@ func TestBuildCreateRequest_MetaData_SecretRef(t *testing.T) {
 		Spec: infravirtrigaudiov1beta1.VMClassSpec{CPU: 2, Memory: resource.MustParse("4Gi")},
 	}
 
-	req, err := r.buildCreateRequest(context.Background(), vm, vmClass, nil, nil)
+	req, err := r.buildCreateRequest(context.Background(), vm, "", vmClass, nil, nil)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -600,7 +600,7 @@ func TestBuildCreateRequest_MetaData_SecretNotFound_ReturnsError(t *testing.T) {
 		Spec: infravirtrigaudiov1beta1.VMClassSpec{CPU: 2, Memory: resource.MustParse("4Gi")},
 	}
 
-	_, err := r.buildCreateRequest(context.Background(), vm, vmClass, nil, nil)
+	_, err := r.buildCreateRequest(context.Background(), vm, "", vmClass, nil, nil)
 
 	if err == nil {
 		t.Fatal("expected error for missing MetaData secret, got nil")
@@ -631,7 +631,7 @@ func TestBuildCreateRequest_UserData_EmptyCloudInit_ProducesNilUserData(t *testi
 		Spec: infravirtrigaudiov1beta1.VMClassSpec{CPU: 2, Memory: resource.MustParse("4Gi")},
 	}
 
-	req, err := r.buildCreateRequest(context.Background(), vm, vmClass, nil, nil)
+	req, err := r.buildCreateRequest(context.Background(), vm, "", vmClass, nil, nil)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -662,7 +662,7 @@ func TestBuildCreateRequest_MetaData_EmptyCloudInit_ProducesNilMetaData(t *testi
 		Spec: infravirtrigaudiov1beta1.VMClassSpec{CPU: 2, Memory: resource.MustParse("4Gi")},
 	}
 
-	req, err := r.buildCreateRequest(context.Background(), vm, vmClass, nil, nil)
+	req, err := r.buildCreateRequest(context.Background(), vm, "", vmClass, nil, nil)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -696,7 +696,7 @@ func TestBuildCreateRequest_UserData_SecretHasNoRecognisedKey_ReturnsError(t *te
 		Spec: infravirtrigaudiov1beta1.VMClassSpec{CPU: 2, Memory: resource.MustParse("4Gi")},
 	}
 
-	_, err := r.buildCreateRequest(context.Background(), vm, vmClass, nil, nil)
+	_, err := r.buildCreateRequest(context.Background(), vm, "", vmClass, nil, nil)
 
 	if err == nil {
 		t.Fatal("expected error for unrecognised secret key, got nil")
@@ -730,7 +730,7 @@ func TestBuildCreateRequest_MetaData_SecretHasNoRecognisedKey_ReturnsError(t *te
 		Spec: infravirtrigaudiov1beta1.VMClassSpec{CPU: 2, Memory: resource.MustParse("4Gi")},
 	}
 
-	_, err := r.buildCreateRequest(context.Background(), vm, vmClass, nil, nil)
+	_, err := r.buildCreateRequest(context.Background(), vm, "", vmClass, nil, nil)
 
 	if err == nil {
 		t.Fatal("expected error for unrecognised secret key, got nil")
@@ -765,7 +765,7 @@ func TestBuildCreateRequest_MetaData_InlineAndSecretRef_Concatenated(t *testing.
 		Spec: infravirtrigaudiov1beta1.VMClassSpec{CPU: 2, Memory: resource.MustParse("4Gi")},
 	}
 
-	req, err := r.buildCreateRequest(context.Background(), vm, vmClass, nil, nil)
+	req, err := r.buildCreateRequest(context.Background(), vm, "", vmClass, nil, nil)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

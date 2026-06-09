@@ -184,10 +184,12 @@ func (r *VirtualMachineReconciler) EnsureImageOnProvider(
 			}
 			return true, nil
 		}
-		// Task completed — stamp completion and let create proceed.
+		// Task completed — flip Available=true and let create proceed. The
+		// prepared location (id/path) was already stamped at trigger time, so
+		// pass empty id/path to preserve it.
 		logger.Info("Image prepare task completed",
 			"provider", provider.Name, "image", vmImage.Name, "taskRef", vmImage.Status.PrepareTaskRef)
-		if werr := r.markImagePrepared(ctx, vmImage, provider.Name); werr != nil {
+		if werr := r.markImagePrepared(ctx, vmImage, provider.Name, "", ""); werr != nil {
 			return false, werr
 		}
 		return false, nil
@@ -214,7 +216,11 @@ func (r *VirtualMachineReconciler) EnsureImageOnProvider(
 	}
 
 	if resp.TaskRef != "" {
-		// Asynchronous prepare — persist the task ref and requeue to poll it.
+		// Asynchronous prepare — persist the task ref and requeue to poll it. The
+		// prepared location (id/path) is already known at trigger time (issue #154
+		// PR-6 / #214), so stamp it onto ProviderStatus now even though Available
+		// stays false until the task completes. This lets the eventual create
+		// consume the prepared template without re-discovering its location.
 		if werr := r.writeImageStatus(ctx, vmImage, func(img *infravirtrigaudiov1beta1.VMImage) {
 			img.Status.PrepareTaskRef = resp.TaskRef
 			img.Status.Phase = infravirtrigaudiov1beta1.ImagePhaseImporting
@@ -222,6 +228,18 @@ func (r *VirtualMachineReconciler) EnsureImageOnProvider(
 			img.Status.Message = fmt.Sprintf("importing image into provider %q", provider.Name)
 			now := metav1.Now()
 			img.Status.LastPrepareTime = &now
+			if resp.PreparedImageID != "" || resp.PreparedImagePath != "" {
+				if img.Status.ProviderStatus == nil {
+					img.Status.ProviderStatus = map[string]infravirtrigaudiov1beta1.ProviderImageStatus{}
+				}
+				ps := img.Status.ProviderStatus[provider.Name]
+				ps.Available = false // not ready until the task completes
+				ps.ID = resp.PreparedImageID
+				ps.Path = resp.PreparedImagePath
+				ps.LastUpdated = &now
+				ps.Message = "image import in progress"
+				img.Status.ProviderStatus[provider.Name] = ps
+			}
 			meta.SetStatusCondition(&img.Status.Conditions, metav1.Condition{
 				Type:               infravirtrigaudiov1beta1.VMImageConditionImporting,
 				Status:             metav1.ConditionTrue,
@@ -233,15 +251,18 @@ func (r *VirtualMachineReconciler) EnsureImageOnProvider(
 			return false, werr
 		}
 		logger.Info("Image prepare started asynchronously; requeueing to poll",
-			"provider", provider.Name, "image", vmImage.Name, "taskRef", resp.TaskRef)
+			"provider", provider.Name, "image", vmImage.Name, "taskRef", resp.TaskRef,
+			"preparedID", resp.PreparedImageID, "preparedPath", resp.PreparedImagePath)
 		return true, nil
 	}
 
 	// Synchronous prepare (e.g. libvirt/vSphere import-on-call) — stamp
-	// completion immediately and let create proceed.
+	// completion immediately, recording the prepared location, and let create
+	// proceed.
 	logger.Info("Image prepared synchronously on provider",
-		"provider", provider.Name, "image", vmImage.Name)
-	if werr := r.markImagePrepared(ctx, vmImage, provider.Name); werr != nil {
+		"provider", provider.Name, "image", vmImage.Name,
+		"preparedID", resp.PreparedImageID, "preparedPath", resp.PreparedImagePath)
+	if werr := r.markImagePrepared(ctx, vmImage, provider.Name, resp.PreparedImageID, resp.PreparedImagePath); werr != nil {
 		return false, werr
 	}
 	return false, nil
@@ -290,14 +311,23 @@ func (r *VirtualMachineReconciler) markImagePreparing(
 }
 
 // markImagePrepared stamps a completed prepare for providerName: it records the
-// per-provider ProviderStatus entry, adds providerName to AvailableOn (deduped),
-// clears the PrepareTaskRef, and sets Ready/Phase=Ready. Ready is the OR across
-// providers — any provider having the image Available makes the image Ready —
-// while ProviderStatus/AvailableOn carry the per-provider truth.
+// per-provider ProviderStatus entry (including the prepared image's location —
+// id/path — so create can consume it instead of re-resolving the source, issue
+// #154 PR-6 / #214), adds providerName to AvailableOn (deduped), clears the
+// PrepareTaskRef, and sets Ready/Phase=Ready. Ready is the OR across providers —
+// any provider having the image Available makes the image Ready — while
+// ProviderStatus/AvailableOn carry the per-provider truth.
+//
+// id and path are the provider-specific location returned by PrepareImage. They
+// are known at trigger time even for async prepares; an empty id/path here
+// preserves whatever was already stamped (e.g. by the async trigger), so the
+// task-completion poll path can call this without the original response in hand.
 func (r *VirtualMachineReconciler) markImagePrepared(
 	ctx context.Context,
 	vmImage *infravirtrigaudiov1beta1.VMImage,
 	providerName string,
+	id string,
+	path string,
 ) error {
 	return r.writeImageStatus(ctx, vmImage, func(img *infravirtrigaudiov1beta1.VMImage) {
 		if img.Status.ProviderStatus == nil {
@@ -308,6 +338,15 @@ func (r *VirtualMachineReconciler) markImagePrepared(
 		ps.Available = true
 		ps.LastUpdated = &now
 		ps.Message = "image prepared"
+		// Stamp the prepared location; preserve any previously-stamped value when
+		// the caller passes an empty id/path (async completion poll re-uses what
+		// the trigger recorded).
+		if id != "" {
+			ps.ID = id
+		}
+		if path != "" {
+			ps.Path = path
+		}
 		img.Status.ProviderStatus[providerName] = ps
 
 		img.Status.AvailableOn = appendDedup(img.Status.AvailableOn, providerName)

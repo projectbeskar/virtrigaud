@@ -199,7 +199,7 @@ func TestChecksumTool(t *testing.T) {
 // interaction when the inner virsh provider is missing.
 func TestImagePrepare_NilVirshProvider(t *testing.T) {
 	p := &Provider{}
-	err := p.imagePrepare(context.Background(),
+	_, _, err := p.imagePrepare(context.Background(),
 		`{"source":{"libvirt":{"url":"https://x/y.qcow2"}}}`, "tmpl", "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not initialized")
@@ -212,7 +212,7 @@ func TestImagePrepare_MissingTargetName(t *testing.T) {
 	// sufficient because the target-name check short-circuits before any command
 	// runs.
 	p := &Provider{virshProvider: &VirshProvider{}}
-	err := p.imagePrepare(context.Background(),
+	_, _, err := p.imagePrepare(context.Background(),
 		`{"source":{"libvirt":{"url":"https://x/y.qcow2"}}}`, "  ", "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "target name is required")
@@ -222,12 +222,12 @@ func TestImagePrepare_MissingTargetName(t *testing.T) {
 // neither a path nor a url. This fires before any host interaction.
 func TestImagePrepare_NoSource(t *testing.T) {
 	p := &Provider{virshProvider: &VirshProvider{}}
-	err := p.imagePrepare(context.Background(), `{"source":{"libvirt":{}}}`, "tmpl", "")
+	_, _, err := p.imagePrepare(context.Background(), `{"source":{"libvirt":{}}}`, "tmpl", "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "path or url")
 
 	// Empty image JSON is likewise rejected (no fabricated success).
-	err = p.imagePrepare(context.Background(), "", "tmpl", "")
+	_, _, err = p.imagePrepare(context.Background(), "", "tmpl", "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "path or url")
 }
