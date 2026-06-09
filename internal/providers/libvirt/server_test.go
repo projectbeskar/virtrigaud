@@ -80,6 +80,8 @@ func TestServer_GetCapabilities_HonestFlags(t *testing.T) {
 		"libvirt advertises image import now that ImagePrepare is implemented (issue #154)")
 	assert.True(t, caps.SupportsSnapshots,
 		"libvirt snapshots are implemented and must remain advertised")
+	assert.True(t, caps.SupportsDiskExpansionOnline,
+		"libvirt advertises online disk expansion now that Reconfigure grows the live block device via blockresize (issue #201)")
 }
 
 // TestServer_GetCapabilities_DiskMigration verifies the disk-migration

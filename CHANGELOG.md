@@ -5,6 +5,32 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-09 07:41] - libvirt online disk expansion: live blockresize + best-effort guest FS grow (#201)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/providers/libvirt/disk_expand.go`: online disk-grow path for the libvirt provider. Resolves the primary disk target and current capacity from the live domain (`domblklist` + `domblkinfo`, NOT the `<vmid>-disk` volume-name guess), applies a grow-only/idempotency guard, persists the larger size to the backing volume, runs `virsh blockresize <dom> <target> <n>G` so live QEMU exposes the new size immediately, then best-effort extends the in-guest partition/filesystem via the guest agent (`growpart` → `resize2fs`/`xfs_growfs`).
+- `internal/providers/libvirt/disk_expand_test.go`: host-independent unit tests for target-device parsing, capacity parsing, the grow-only guard, the blockresize size-arg, and the FS-grow command sequence.
+
+### Changed
+- `internal/providers/libvirt/provider_virsh.go`: `Reconfigure` disk block now branches on domain state — running → `growDiskOnline` (live block-device resize is fatal on failure; in-guest FS grow is non-fatal); stopped → existing offline volume resize for next boot. CPU/memory paths unchanged.
+- `internal/providers/libvirt/server.go`: `GetCapabilities` now advertises `SupportsDiskExpansionOnline: true`.
+- `internal/providers/libvirt/server_test.go`: assert the online-disk-expansion capability is advertised.
+
+### Why
+KVM/QEMU supports growing a running VM's block device live via `blockresize`; the provider already resized the qcow2 volume but never told live QEMU or the guest, so the capability flag was honestly understated as `false`.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (libvirt provider image)
+- [ ] Config change only
+- [ ] Documentation only
+
+No CRD or proto change.
+
+### Notes
+Grow-only: shrinks are rejected and resizing to the current size is a no-op (libvirt/qcow2 cannot shrink a live device). The in-guest filesystem grow is best-effort and gated on the QEMU guest agent — without it (or for non-standard partition layouts) the block device is still grown but the operator must finish the FS grow via cloud-init or manually.
+
 ## [2026-06-09 07:35] - ImagePrepare returns the prepared location; Create consumes it (#154, PR-6 / #214)
 **Author:** @wrkode (William Rizzo)
 
