@@ -140,6 +140,13 @@ jobs:
               value: "false"
             - name: MOCK_FAILURE_MODE
               value: ""
+            # The mock provider is a test fixture with no real credentials, so
+            # opt it into plaintext gRPC. Without this it correctly fail-closes
+            # on the secure-by-default TLS requirement (#148, v0.3.7) and the pod
+            # crash-loops. Scoped to this Kind test only; the production
+            # fail-closed default is untouched (#224).
+            - name: VIRTRIGAUD_PROVIDER_INSECURE
+              value: "true"
 
           # Minimal resource requirements for testing
           resources:
