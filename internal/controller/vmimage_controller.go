@@ -34,23 +34,28 @@ type VMImageReconciler struct {
 	Scheme *runtime.Scheme
 }
 
-// VMImageReconciler is a watch-only stub: its Reconcile is a no-op and it
-// holds an informer cache on VMImage via For(). Least-privilege (issue #152)
-// therefore grants only the get;list;watch the cache requires — VMImage is
-// read-only across the whole manager (no controller creates or mutates it).
-// The apiGroup is infra.virtrigaud.io; the previous doubled value generated a
-// phantom rule for a non-existent group.
+// VMImageReconciler is intentionally a watch-only no-op backstop: it holds an
+// informer cache on VMImage via For() but performs no writes.
+//
+// Image preparation (issue #154) is driven entirely by the VirtualMachine
+// controller, which is the only actor holding the (image, provider) pair. That
+// controller is the SINGLE WRITER of the prepare-related VMImage status fields
+// (ProviderStatus, PrepareTaskRef, Phase, Ready, AvailableOn) and writes them
+// under retry.RetryOnConflict (see EnsureImageOnProvider). Keeping this
+// reconciler a no-op deliberately avoids a second writer and the two-writer
+// status race that bit issue #189 — there is no provider resolver wired here, so
+// it could not poll a prepare task to completion anyway. The triggering VM polls
+// its own prepare to completion.
+//
+// RBAC for vmimages/status get;update;patch is therefore granted on the
+// VirtualMachine reconciler (the writer), not here; this reconciler needs only
+// the get;list;watch its cache requires. The apiGroup is infra.virtrigaud.io.
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=vmimages,verbs=get;list;watch
 
-// Reconcile is part of the main kubernetes reconciliation loop which aims to
-// move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the VMImage object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
-//
-// For more details, check Reconcile and its Result here:
-// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.20.4/pkg/reconcile
+// Reconcile is a no-op backstop. The VirtualMachine controller is the sole
+// driver of VMImage preparation and status (issue #154); this reconciler exists
+// only to hold the VMImage informer cache. It records reconcile metrics for
+// consistency with the other reconcilers and returns without requeueing.
 func (r *VMImageReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
 	timer := metrics.NewReconcileTimer("VMImage")
 	defer func() {
@@ -66,8 +71,8 @@ func (r *VMImageReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 
 	_ = logf.FromContext(ctx)
 
-	// TODO(user): your logic here
-
+	// No-op: the VirtualMachine controller is the sole driver of VMImage
+	// preparation and status (issue #154). See the type doc above.
 	return ctrl.Result{}, nil
 }
 

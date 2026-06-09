@@ -98,6 +98,11 @@ rules:
   - watch
 # VMImage and VMNetworkAttachment are read-only inputs: the manager resolves
 # them when building VMs but never creates or mutates them (issue #152).
+# VMImage status is the exception: the VirtualMachine controller is the single
+# writer of the image-prepare status (ProviderStatus/PrepareTaskRef/Phase/Ready/
+# AvailableOn) during VM-create-driven preparation (issue #154), so vmimages/
+# status gets scoped get;patch;update — but the VMImage object itself stays
+# read-only.
 - apiGroups:
   - infra.virtrigaud.io
   resources:
@@ -107,6 +112,14 @@ rules:
   - get
   - list
   - watch
+- apiGroups:
+  - infra.virtrigaud.io
+  resources:
+  - vmimages/status
+  verbs:
+  - get
+  - patch
+  - update
 # Secrets hold provider credentials and TLS material. The manager only READS
 # them (cloud-init / credential / TLS Secret resolution); it never creates,
 # mutates, or deletes Secrets. Narrowed from full CRUD per issue #152.
@@ -293,6 +306,11 @@ rules:
   - watch
 # VMImage and VMNetworkAttachment are read-only inputs: the manager resolves
 # them when building VMs but never creates or mutates them (issue #152).
+# VMImage status is the exception: the VirtualMachine controller is the single
+# writer of the image-prepare status (ProviderStatus/PrepareTaskRef/Phase/Ready/
+# AvailableOn) during VM-create-driven preparation (issue #154), so vmimages/
+# status gets scoped get;patch;update — but the VMImage object itself stays
+# read-only.
 - apiGroups:
   - infra.virtrigaud.io
   resources:
@@ -302,6 +320,14 @@ rules:
   - get
   - list
   - watch
+- apiGroups:
+  - infra.virtrigaud.io
+  resources:
+  - vmimages/status
+  verbs:
+  - get
+  - patch
+  - update
 # Secrets hold provider credentials and TLS material. The manager only READS
 # them (cloud-init / credential / TLS Secret resolution); it never creates,
 # mutates, or deletes Secrets. Narrowed from full CRUD per issue #152.
