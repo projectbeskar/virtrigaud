@@ -31,9 +31,13 @@ func GetProviderCapabilities() *capabilities.Manager {
 		// Disk export/import RPCs are implemented (ExportDisk/ImportDisk/
 		// GetDiskInfo accept qcow2/raw/vmdk); advertise them so capability
 		// gating (#176) doesn't wrongly block Proxmox disk migration (#198).
-		// ExportCompression is intentionally NOT advertised — the export path
-		// does not compress today.
+		// ExportCompression is advertised: ExportDisk honors req.Compress by
+		// forcing a qemu-img convert pass with `-c` for qcow2 targets (#219).
+		// Compression is genuine only for qcow2; raw/vmdk exports remain
+		// uncompressed even when Compress=true, and the default (Compress=false)
+		// stays uncompressed for export speed.
 		DiskExport("qcow2", "raw", "vmdk").
+		ExportCompression().
 		DiskImport("qcow2", "raw", "vmdk").
 		DiskTypes("raw", "qcow2").
 		NetworkTypes("bridge", "vlan").

@@ -28,6 +28,27 @@ exception — Proxmox export compression, tracked as a low-priority follow-up (#
 
 The detailed per-change entries follow below.
 
+## [2026-06-09 13:10] - proxmox export compression (#219)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/providers/proxmox/server.go`: `exportNeedsConversion` helper — a pure, host-independent decision function that determines when the export path must run a `qemu-img` convert pass. It forces a pass when the target format differs from the source, or when `Compress=true` and the target is `qcow2` (qemu-img applies `-c` only during a convert pass).
+- `internal/providers/proxmox/provider_test.go`: `TestExportNeedsConversion` table test covering qcow2/raw/vmdk × compress combinations (no live Proxmox/qemu required).
+
+### Changed
+- `internal/providers/proxmox/server.go`: `ExportDisk` now honors `ExportDiskRequest.Compress`. Previously it hardcoded `Compression: false` and only converted when the format changed, so qcow2→qcow2 exports never compressed. It now forces a `qemu-img convert -c` pass for qcow2 targets when `Compress=true` and passes `req.Compress` through to `diskutil`.
+- `internal/providers/proxmox/capabilities.go`: advertise `ExportCompression()` and update the stale "does not compress today" comment to describe what is actually compressed (qcow2 only).
+- `internal/providers/proxmox/provider_test.go`: `TestProxmoxProvider_GetCapabilities` now asserts `SupportsExportCompression` is `True`.
+
+### Why
+The Proxmox provider implemented `ExportDisk` but silently ignored the `Compress` request flag, and the capability was deliberately withheld to stay honest (#153/#154/#204 posture: a `true` capability means the provider actually performs the operation). This makes export compression real for the common qcow2 case and only then advertises it. Compression is genuine for qcow2 only; raw has no container to compress into and vmdk stream-optimized output is not produced on this path, so those targets stay uncompressed even when `Compress=true` — documented in both the capability comment and the helper.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-06-09 08:15] - libvirt clone hardening: UEFI nvram re-point + hot-add headroom preservation (#208, #221)
 **Author:** @wrkode (William Rizzo)
 
