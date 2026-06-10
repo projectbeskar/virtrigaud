@@ -1078,7 +1078,13 @@ func (r *ProviderReconciler) discoverMigrationPVCs(ctx context.Context, namespac
 	)
 
 	if err != nil {
-		// Log error but don't fail - migrations might not be active
+		// Don't fail the deployment build — providers must keep running when no
+		// migration is active. But never swallow this silently: a denied List
+		// (missing RBAC) or an unsynced cache makes migration PVCs invisible, so
+		// the VMMigration controller would wait indefinitely for a mount that the
+		// provider can never apply. Surface it so the failure is diagnosable.
+		log.FromContext(ctx).Error(err, "failed to list migration PVCs; migration storage will not be mounted",
+			"namespace", namespace, "labelSelector", fmt.Sprintf("%s=%s", migrationPVCLabelKey, migrationPVCLabelValue))
 		return volumes
 	}
 
@@ -1119,7 +1125,10 @@ func (r *ProviderReconciler) discoverMigrationVolumeMounts(ctx context.Context, 
 	)
 
 	if err != nil {
-		// Log error but don't fail - migrations might not be active
+		// See discoverMigrationPVCs: never swallow this silently — an invisible
+		// migration PVC strands the VMMigration controller waiting for a mount.
+		log.FromContext(ctx).Error(err, "failed to list migration PVCs; migration storage will not be mounted",
+			"namespace", namespace, "labelSelector", fmt.Sprintf("%s=%s", migrationPVCLabelKey, migrationPVCLabelValue))
 		return mounts
 	}
 
