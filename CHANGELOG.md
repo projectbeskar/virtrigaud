@@ -5,6 +5,24 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-10 16:36] - Fix migration PVC-mount handshake: non-blocking, diagnosable, co-location-safe
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/controller/vmmigration_controller.go`: Replaced the blocking 5-minute `time.Sleep` poll (`waitForProvidersReady`/`waitForProviderReady`/`waitForProviderBasicReady`) that waited for both providers to mount the migration storage PVC with a single-shot, non-blocking check (`migrationProvidersMounted`/`providerMountReady`) plus `RequeueAfter`. The wait deadline is now derived from the PVC's creation timestamp so it survives requeues, and a timeout fails with an actionable message (the exact `kubectl` command to inspect) instead of an opaque "timeout waiting for provider pods" error. Removes a reconcile-worker-blocking anti-pattern that could wedge the migration.
+- `internal/controller/vmmigration_controller.go`: Added a fail-fast co-location guard for PVC-based migrations (#229). A migration whose source provider, target provider, and the migration itself are not all in one namespace now fails immediately with a clear message — a Kubernetes pod cannot mount a PVC across namespaces, so the transfer could never succeed and previously hung for the full timeout.
+- `internal/controller/provider_controller.go`: `discoverMigrationPVCs`/`discoverMigrationVolumeMounts` no longer swallow the PVC `List` error silently; a denied List (missing RBAC) or an unsynced cache is now logged at error level with the namespace and label selector, so an un-mountable migration PVC is diagnosable instead of silently stranding the VMMigration controller (#231 hardening).
+- `internal/controller/vmmigration_mount_test.go`: New table-driven unit tests for the single-shot mount evaluation, the source/target aggregate, the PVC-age deadline, and the cross-namespace fail-fast path.
+
+### Why
+Live cross-provider migration could hang for five minutes and then fail with an opaque timeout. The mount handshake blocked a reconcile worker with `time.Sleep` (violating the project's no-`time.Sleep`-for-synchronization rule), the cross-namespace topology was structurally impossible yet un-guarded, and a failed PVC `List` in the provider controller was invisible. Manager PVC RBAC is already present at HEAD (chart commits `40a6b26`/`ed852c6`), so this is the handshake reliability + diagnosability fix layered on top of it.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-06-09] - v0.3.9: libvirt feature parity + end-to-end image preparation
 **Author:** @wrkode (William Rizzo)
 
