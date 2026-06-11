@@ -5,6 +5,22 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-11 04:34] - Don't hold VM create for already-present image sources (#227)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/controller/virtualmachine_image_prepare.go`: A VM referencing a **reference-style** `VMImage` source — a libvirt pool-file `path`, an existing vSphere `templateName`/`contentLibrary`, or an existing Proxmox `templateID`/`templateName` — with `prepare.onMissing: Fail` was held in `WaitingForDependencies` forever, waiting for an import that has nothing to import. `EnsureImageOnProvider` now classifies the source via a new `imageSourceNeedsPrepare` helper and proceeds straight to create for already-present references (the by-reference create path consumes them directly). Import-style sources (libvirt/vSphere URLs, HTTP/registry/DataVolume pulls) are unchanged — they still prepare, and `onMissing: Fail` still holds them. Ambiguous sources (e.g. a libvirt source with both a path and a URL) prefer running the idempotent prepare, so no real import is ever silently skipped.
+- `internal/controller/virtualmachine_image_prepare_test.go`: Added a source-classification table test plus #227 regression tests (libvirt path + vSphere template with `onMissing: Fail` now skip the hold).
+
+### Why
+Discovered during the v0.3.9 lab E2E: a libvirt path-based image (the qcow2 already sits on the host) was held even though there is nothing to prepare. A wrong path/template now fails honestly at create time — where a missing backing artifact belongs — instead of being pre-held by the prepare gate.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-06-11 04:07] - Fix stale Makefile builder image (Go version drift)
 **Author:** @wrkode (William Rizzo)
 
