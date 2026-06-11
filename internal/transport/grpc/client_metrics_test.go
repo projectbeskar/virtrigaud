@@ -126,7 +126,8 @@ func labelsMatchPairs(got []*dto.LabelPair, want map[string]string) bool {
 // can simulate success and error responses.
 type fakeProviderServer struct {
 	providerv1.UnimplementedProviderServer
-	ValidateFn func(ctx context.Context, req *providerv1.ValidateRequest) (*providerv1.ValidateResponse, error)
+	ValidateFn        func(ctx context.Context, req *providerv1.ValidateRequest) (*providerv1.ValidateResponse, error)
+	GetCapabilitiesFn func(ctx context.Context, req *providerv1.GetCapabilitiesRequest) (*providerv1.GetCapabilitiesResponse, error)
 }
 
 func (f *fakeProviderServer) Validate(ctx context.Context, req *providerv1.ValidateRequest) (*providerv1.ValidateResponse, error) {
@@ -134,6 +135,13 @@ func (f *fakeProviderServer) Validate(ctx context.Context, req *providerv1.Valid
 		return f.ValidateFn(ctx, req)
 	}
 	return &providerv1.ValidateResponse{Ok: true}, nil
+}
+
+func (f *fakeProviderServer) GetCapabilities(ctx context.Context, req *providerv1.GetCapabilitiesRequest) (*providerv1.GetCapabilitiesResponse, error) {
+	if f.GetCapabilitiesFn != nil {
+		return f.GetCapabilitiesFn(ctx, req)
+	}
+	return &providerv1.GetCapabilitiesResponse{}, nil
 }
 
 // startBufconnServer brings up an in-process gRPC server backed by

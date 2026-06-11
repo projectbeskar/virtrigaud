@@ -455,6 +455,9 @@ func (c *Client) GetCapabilities(ctx context.Context) (contracts.Capabilities, e
 		SupportedExportFormats:      resp.SupportedExportFormats,
 		SupportedImportFormats:      resp.SupportedImportFormats,
 		SupportsExportCompression:   resp.SupportsExportCompression,
+		SupportedExportBackends:     resp.SupportedExportBackends,
+		SupportedImportBackends:     resp.SupportedImportBackends,
+		SupportedTransferModes:      resp.SupportedTransferModes,
 	}, nil
 }
 
@@ -831,13 +834,16 @@ func (c *Client) ExportDisk(ctx context.Context, req contracts.ExportDiskRequest
 	defer cancel()
 
 	grpcReq := &providerv1.ExportDiskRequest{
-		VmId:           req.VmId,
-		DiskId:         req.DiskId,
-		SnapshotId:     req.SnapshotId,
-		DestinationUrl: req.DestinationURL,
-		Format:         req.Format,
-		Compress:       req.Compress,
-		Credentials:    req.Credentials,
+		VmId:               req.VmId,
+		DiskId:             req.DiskId,
+		SnapshotId:         req.SnapshotId,
+		DestinationUrl:     req.DestinationURL,
+		Format:             req.Format,
+		Compress:           req.Compress,
+		Credentials:        req.Credentials,
+		BackendType:        req.BackendType,
+		TransferMode:       req.TransferMode,
+		StorageOptionsJson: req.StorageOptionsJSON,
 	}
 
 	resp, err := c.client.ExportDisk(ctx, grpcReq)
@@ -865,13 +871,16 @@ func (c *Client) ImportDisk(ctx context.Context, req contracts.ImportDiskRequest
 	defer cancel()
 
 	grpcReq := &providerv1.ImportDiskRequest{
-		SourceUrl:        req.SourceURL,
-		StorageHint:      req.StorageHint,
-		Format:           req.Format,
-		TargetName:       req.TargetName,
-		VerifyChecksum:   req.VerifyChecksum,
-		ExpectedChecksum: req.ExpectedChecksum,
-		Credentials:      req.Credentials,
+		SourceUrl:          req.SourceURL,
+		StorageHint:        req.StorageHint,
+		Format:             req.Format,
+		TargetName:         req.TargetName,
+		VerifyChecksum:     req.VerifyChecksum,
+		ExpectedChecksum:   req.ExpectedChecksum,
+		Credentials:        req.Credentials,
+		BackendType:        req.BackendType,
+		TransferMode:       req.TransferMode,
+		StorageOptionsJson: req.StorageOptionsJSON,
 	}
 
 	resp, err := c.client.ImportDisk(ctx, grpcReq)

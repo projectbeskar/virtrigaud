@@ -5,6 +5,32 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-11 14:05] - ADR-0006 Slice 0: storage-backend-agnostic migration surface (additive)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `api/infra.virtrigaud.io/v1beta1/vmmigration_types.go`: `MigrationStorage` gains `Type` enum `pvc;nfs;s3` (default `pvc`), `TransferMode` enum `auto;relay;direct` (default `auto`), and `NFS`/`S3` sub-configs. New `S3StorageConfig` (bucket/endpoint/region/prefix/`credentialsSecretRef`/`usePathStyle`) and `NFSStorageConfig` (server/export/path/`readOnly`). `usePathStyle`/`readOnly` are defaulted bools without `omitempty` (PR #235 footgun). Credentials are referenced via Secret, never inline.
+- `api/infra.virtrigaud.io/v1beta1/provider_types.go`: `ReportedCapabilities` gains `SupportedExportBackends`, `SupportedImportBackends`, `SupportedTransferModes` (empty == pvc-only / relay-only).
+- `proto/provider/v1/provider.proto`: additive fields — `ExportDiskRequest`/`ImportDiskRequest` `backend_type=8`, `transfer_mode=9`, `storage_options_json=10`; `GetCapabilitiesResponse` `supported_export_backends=14`, `supported_import_backends=15`, `supported_transfer_modes=16`. Added the host-vs-pod execution-contract comment block (bytes never traverse gRPC; relay = host→pod→backend, direct = host→backend).
+- `internal/storage/migration/backend.go`: new shared package with backend/transfer-mode constants, honest pvc-only/relay-only advertisement helpers, and `EnsurePVCBackend` (returns `codes.Unimplemented` for non-pvc) — the single source of truth used by every provider and the controller.
+- `sdk/provider/capabilities/capabilities.go`: `ExportBackends`/`ImportBackends`/`TransferModes` builder methods + Manager fields, mirroring the existing `SetSupportedExportFormats` pattern.
+
+### Changed
+- `internal/providers/{vsphere,libvirt,proxmox,mock}`: `GetCapabilities` now advertises the honest status quo — export/import backends `["pvc"]`, transfer modes `["relay"]` (the existing pod-side path is relay-shaped). `ExportDisk`/`ImportDisk` on vsphere/libvirt/proxmox reject any non-pvc `backend_type` with `Unimplemented` before doing work; empty `backend_type` keeps today's behavior. (Mock has no Export/Import RPCs and continues to return `Unimplemented` via the SDK base.)
+- `internal/controller/vmmigration_controller.go`: the Validating phase now fails fast (via `transitionToFailed`) when `storage.type` is `nfs`/`s3`, or when the requested backend/transfer mode is not in both the source provider's export set and the target provider's import set (read from each Provider's `status.reportedCapabilities`), with an actionable, ADR-referencing message. `ExportDisk`/`ImportDisk` requests now carry `backend_type` (default `pvc`) and `transfer_mode` (default `auto`); `storage_options_json` stays empty.
+- `internal/providers/contracts/` and `internal/transport/grpc/client.go`: the transport-agnostic `Capabilities`, `ExportDiskRequest`, `ImportDiskRequest` types and the manager-side client mapping carry the new fields end-to-end.
+
+### Why
+First slice of ADR-0006: establish the CRD/proto/capability surface for storage-backend-agnostic (NFS/S3) any-direction cross-hypervisor migration, and make every provider report honestly what it supports. This slice adds NO transfer logic — every non-pvc path returns `Unimplemented` and is rejected at validation — so the surface can land and be reviewed before the transfer slices build on it.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+> Additive and backward-compatible: existing `pvc` migrations are unchanged (empty/`pvc` backend and `auto`/`relay` mode behave exactly as before). The new CRD fields are optional with safe defaults; the new proto fields are additive (next free numbers, no renumbering). Providers must be rolled to advertise the new capability fields, but a not-yet-rolled provider reporting an empty set is treated as the implicit pvc-only/relay-only default, so pvc migrations are never wrongly blocked.
+
 ## [2026-06-11 04:34] - Don't hold VM create for already-present image sources (#227)
 **Author:** @wrkode (William Rizzo)
 

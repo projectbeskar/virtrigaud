@@ -41,6 +41,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/runtime/remote"
 	"github.com/projectbeskar/virtrigaud/internal/storage"
+	storagemigration "github.com/projectbeskar/virtrigaud/internal/storage/migration"
 	"github.com/projectbeskar/virtrigaud/internal/util/k8s"
 )
 
@@ -318,6 +319,15 @@ func (r *VMMigrationReconciler) handleValidatingPhase(ctx context.Context, migra
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	// Gate the requested storage backend and transfer mode against what both
+	// providers honestly report (ADR-0006 Slice 0). Only the pvc backend has
+	// transfer logic today; nfs/s3 — and any backend/mode the source's export
+	// set or the target's import set does not advertise — fail fast here with an
+	// actionable message instead of wedging in a later phase.
+	if msg := r.gateMigrationStorageBackend(migration, sourceProvider, targetProvider); msg != "" {
+		return r.transitionToFailed(ctx, migration, msg)
 	}
 
 	// Validate storage configuration
@@ -620,15 +630,21 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 		diskFormat = migration.Spec.Options.DiskFormat
 	}
 
-	// Build export request
+	// Build export request. backend_type/transfer_mode carry the requested
+	// staging backend (default pvc) and transfer mode (default auto) per
+	// ADR-0006; in Slice 0 these are always pvc/auto because the Validating
+	// phase rejects anything else. storage_options_json stays empty for now.
 	exportReq := contracts.ExportDiskRequest{
-		VmId:           sourceVM.Status.ID,
-		DiskId:         "", // Empty means export primary disk
-		SnapshotId:     migration.Status.SnapshotID,
-		DestinationURL: destinationURL,
-		Format:         diskFormat,
-		Compress:       migration.Spec.Options != nil && migration.Spec.Options.Compress,
-		Credentials:    make(map[string]string),
+		VmId:               sourceVM.Status.ID,
+		DiskId:             "", // Empty means export primary disk
+		SnapshotId:         migration.Status.SnapshotID,
+		DestinationURL:     destinationURL,
+		Format:             diskFormat,
+		Compress:           migration.Spec.Options != nil && migration.Spec.Options.Compress,
+		Credentials:        make(map[string]string),
+		BackendType:        migrationBackendType(migration),
+		TransferMode:       migrationTransferMode(migration),
+		StorageOptionsJSON: "",
 	}
 
 	// TODO: Load credentials from storage secret if configured
@@ -817,13 +833,16 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 
 	// Build import request
 	importReq := contracts.ImportDiskRequest{
-		SourceURL:        sourceURL,
-		StorageHint:      "", // Let provider choose
-		Format:           diskFormat,
-		TargetName:       fmt.Sprintf("%s-migrated", migration.Spec.Target.Name),
-		VerifyChecksum:   migration.Spec.Options == nil || migration.Spec.Options.VerifyChecksums,
-		ExpectedChecksum: "",
-		Credentials:      make(map[string]string),
+		SourceURL:          sourceURL,
+		StorageHint:        "", // Let provider choose
+		Format:             diskFormat,
+		TargetName:         fmt.Sprintf("%s-migrated", migration.Spec.Target.Name),
+		VerifyChecksum:     migration.Spec.Options == nil || migration.Spec.Options.VerifyChecksums,
+		ExpectedChecksum:   "",
+		Credentials:        make(map[string]string),
+		BackendType:        migrationBackendType(migration),
+		TransferMode:       migrationTransferMode(migration),
+		StorageOptionsJSON: "",
 	}
 
 	// Set expected checksum if available
@@ -1862,6 +1881,125 @@ func (r *VMMigrationReconciler) gateProviderCapability(
 
 	res, _ := r.transitionToFailed(ctx, migration, failureMessage)
 	return true, res
+}
+
+// migrationBackendType returns the requested staging backend for a migration,
+// defaulting to pvc when storage is unset or its type is empty (ADR-0006).
+func migrationBackendType(migration *infrav1beta1.VMMigration) string {
+	if migration.Spec.Storage == nil || migration.Spec.Storage.Type == "" {
+		return storagemigration.BackendPVC
+	}
+	return migration.Spec.Storage.Type
+}
+
+// migrationTransferMode returns the requested transfer mode for a migration,
+// defaulting to auto when storage is unset or its transferMode is empty
+// (ADR-0006).
+func migrationTransferMode(migration *infrav1beta1.VMMigration) string {
+	if migration.Spec.Storage == nil || migration.Spec.Storage.TransferMode == "" {
+		return storagemigration.TransferModeAuto
+	}
+	return migration.Spec.Storage.TransferMode
+}
+
+// reportedExportBackends returns a provider's advertised export backends,
+// treating an empty/absent set as the implicit pvc-only default of a provider
+// that predates ADR-0006 (matching the ReportedCapabilities field contract).
+func reportedExportBackends(p *infrav1beta1.Provider) []string {
+	if p.Status.ReportedCapabilities == nil || len(p.Status.ReportedCapabilities.SupportedExportBackends) == 0 {
+		return storagemigration.PVCOnlyExportBackends()
+	}
+	return p.Status.ReportedCapabilities.SupportedExportBackends
+}
+
+// reportedImportBackends returns a provider's advertised import backends,
+// treating an empty/absent set as the implicit pvc-only default.
+func reportedImportBackends(p *infrav1beta1.Provider) []string {
+	if p.Status.ReportedCapabilities == nil || len(p.Status.ReportedCapabilities.SupportedImportBackends) == 0 {
+		return storagemigration.PVCOnlyImportBackends()
+	}
+	return p.Status.ReportedCapabilities.SupportedImportBackends
+}
+
+// reportedTransferModes returns a provider's advertised transfer modes, treating
+// an empty/absent set as the implicit relay-only default.
+func reportedTransferModes(p *infrav1beta1.Provider) []string {
+	if p.Status.ReportedCapabilities == nil || len(p.Status.ReportedCapabilities.SupportedTransferModes) == 0 {
+		return storagemigration.RelayOnlyTransferModes()
+	}
+	return p.Status.ReportedCapabilities.SupportedTransferModes
+}
+
+// containsString reports whether want is present in set.
+func containsString(set []string, want string) bool {
+	for _, s := range set {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
+// gateMigrationStorageBackend validates the requested storage backend and
+// transfer mode against what the source provider can export to and the target
+// provider can import from (read from each Provider's
+// status.reportedCapabilities). It returns an empty string when the migration
+// may proceed, or an actionable failure message otherwise (ADR-0006 Slice 0).
+//
+// Only the pvc backend has transfer logic today, so nfs/s3 are always rejected;
+// the capability comparison additionally rejects a backend or transfer mode that
+// either provider does not advertise. The "auto" transfer mode is always
+// permitted — the controller resolves it to a concrete mode the providers
+// support at request-build time.
+func (r *VMMigrationReconciler) gateMigrationStorageBackend(
+	migration *infrav1beta1.VMMigration,
+	sourceProvider *infrav1beta1.Provider,
+	targetProvider *infrav1beta1.Provider,
+) string {
+	backend := migrationBackendType(migration)
+	mode := migrationTransferMode(migration)
+
+	// Slice 0: only pvc has transfer logic. Reject nfs/s3 up front with a
+	// message that points at the ADR, regardless of what a provider might
+	// (later) advertise.
+	if backend != storagemigration.BackendPVC {
+		return fmt.Sprintf(
+			"storage backend %q is not yet implemented; only %q is supported today (ADR-0006 Slice 0)",
+			backend, storagemigration.BackendPVC)
+	}
+
+	exportBackends := reportedExportBackends(sourceProvider)
+	if !containsString(exportBackends, backend) {
+		return fmt.Sprintf(
+			"storage backend %q not supported by source provider %q (supported: %v); see ADR-0006",
+			backend, sourceProvider.Name, exportBackends)
+	}
+
+	importBackends := reportedImportBackends(targetProvider)
+	if !containsString(importBackends, backend) {
+		return fmt.Sprintf(
+			"storage backend %q not supported by target provider %q (supported: %v); see ADR-0006",
+			backend, targetProvider.Name, importBackends)
+	}
+
+	// "auto" is resolved later against both providers' modes; only an explicit
+	// mode is gated here. Both providers must advertise the explicit mode.
+	if mode != storagemigration.TransferModeAuto {
+		sourceModes := reportedTransferModes(sourceProvider)
+		if !containsString(sourceModes, mode) {
+			return fmt.Sprintf(
+				"transfer mode %q not supported by source provider %q (supported: %v); see ADR-0006",
+				mode, sourceProvider.Name, sourceModes)
+		}
+		targetModes := reportedTransferModes(targetProvider)
+		if !containsString(targetModes, mode) {
+			return fmt.Sprintf(
+				"transfer mode %q not supported by target provider %q (supported: %v); see ADR-0006",
+				mode, targetProvider.Name, targetModes)
+		}
+	}
+
+	return ""
 }
 
 // getProviderInstance retrieves a provider gRPC client

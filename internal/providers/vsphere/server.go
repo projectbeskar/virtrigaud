@@ -45,6 +45,7 @@ import (
 
 	"github.com/projectbeskar/virtrigaud/internal/diskutil"
 	"github.com/projectbeskar/virtrigaud/internal/storage"
+	"github.com/projectbeskar/virtrigaud/internal/storage/migration"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/errors"
 )
@@ -422,6 +423,12 @@ func (p *Provider) GetCapabilities(ctx context.Context, req *providerv1.GetCapab
 		SupportedExportFormats:    []string{"vmdk", "qcow2", "raw"}, // ExportDisk converts the streamOptimized VMDK to these
 		SupportedImportFormats:    []string{"vmdk", "qcow2", "raw"}, // ImportDisk accepts these and converts to VMDK
 		SupportsExportCompression: true,                             // export uses the compressed streamOptimized VMDK format
+		// ADR-0006 Slice 0: advertise the status quo honestly. ExportDisk/
+		// ImportDisk only implement the pod-side (pvc, relay-shaped) staging
+		// path; nfs/s3 and direct transfer are not yet implemented.
+		SupportedExportBackends: migration.PVCOnlyExportBackends(),
+		SupportedImportBackends: migration.PVCOnlyImportBackends(),
+		SupportedTransferModes:  migration.RelayOnlyTransferModes(),
 	}, nil
 }
 
@@ -3271,6 +3278,12 @@ func (p *Provider) extractSnapshotNames(snapshotTree []types.VirtualMachineSnaps
 //
 // The operation runs synchronously; Task in the response is nil.
 func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskRequest) (*providerv1.ExportDiskResponse, error) {
+	// ADR-0006 Slice 0: only the legacy pvc staging path is implemented; reject
+	// nfs/s3 backends honestly instead of falling through to the pvc path.
+	if err := migration.EnsurePVCBackend(req.BackendType); err != nil {
+		return nil, err
+	}
+
 	if p.client == nil {
 		return nil, errors.NewUnavailable("vSphere client not configured", nil)
 	}
@@ -3554,6 +3567,12 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 // passed as VMImage.Path in a subsequent Create request. The operation runs
 // synchronously; Task in the response is nil.
 func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskRequest) (*providerv1.ImportDiskResponse, error) {
+	// ADR-0006 Slice 0: only the legacy pvc staging path is implemented; reject
+	// nfs/s3 backends honestly instead of falling through to the pvc path.
+	if err := migration.EnsurePVCBackend(req.BackendType); err != nil {
+		return nil, err
+	}
+
 	if p.client == nil {
 		return nil, errors.NewUnavailable("vSphere client not configured", nil)
 	}

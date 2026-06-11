@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/projectbeskar/virtrigaud/internal/storage/migration"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/capabilities"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/errors"
@@ -85,6 +86,13 @@ func NewProvider() *Provider {
 		OnlineDiskExpansion().
 		ImageImport().
 		TaskStatus().
+		// ADR-0006 Slice 0: advertise the status quo honestly. The mock's
+		// migration path (like the production providers) is pod-side only —
+		// pvc staging, relay-shaped; nfs/s3 and direct transfer are not
+		// implemented.
+		ExportBackends(migration.PVCOnlyExportBackends()...).
+		ImportBackends(migration.PVCOnlyImportBackends()...).
+		TransferModes(migration.RelayOnlyTransferModes()...).
 		DiskTypes("thin", "thick", "raw", "qcow2").
 		NetworkTypes("bridge", "nat", "distributed").
 		Build()
