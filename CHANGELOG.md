@@ -5,6 +5,22 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-11 06:10] - Keep `tls.enabled: false` durable on Provider (defaulted-bool footgun)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `api/infra.virtrigaud.io/v1beta1/provider_types.go`: Removed `omitempty` from `ProviderTLSSpec.Enabled` and `ProviderHealthCheck.Enabled` (both keep `+optional` and `+kubebuilder:default=true`). A non-pointer bool with `omitempty` **and** a default of `true` silently flips an explicit `false` back to `true` on any controller `Update`: `omitempty` drops the `false` on serialization, then the apiserver re-applies the default. For `tls.enabled=false` this meant an explicitly-plaintext provider would, after the next reconcile that re-writes its spec, fail the TLS posture gate (`enabled=true` + no `secretRef`) and wedge to `runtime.phase=Failed` with a healthy pod still running.
+- `api/infra.virtrigaud.io/v1beta1/provider_tls_marshal_test.go`: New round-trip tests asserting `Enabled=false` survives JSON marshal for both specs.
+
+### Why
+An operator who explicitly opts a provider out of TLS could see it silently flip back on and stop reconciling. The CRD OpenAPI schema is unchanged (the fields stay optional and default to `true`); only the Go serialization is corrected, so existing objects are unaffected.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-06-11 04:34] - Don't hold VM create for already-present image sources (#227)
 **Author:** @wrkode (William Rizzo)
 
