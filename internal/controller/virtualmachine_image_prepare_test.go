@@ -499,3 +499,99 @@ func TestOverrideImageWithPreparedLocation_Consume(t *testing.T) {
 		assert.Equal(t, "https://x/y.qcow2", image.URL)
 	})
 }
+
+// imageWithLibvirtPath returns a VMImage whose libvirt source is a concrete
+// pool-file PATH (already present on the host), with the given OnMissing action.
+func imageWithLibvirtPath(name string, onMissing infrav1beta1.ImageMissingAction) *infrav1beta1.VMImage {
+	img := &infrav1beta1.VMImage{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+		Spec: infrav1beta1.VMImageSpec{
+			Source: infrav1beta1.ImageSource{
+				Libvirt: &infrav1beta1.LibvirtImageSource{
+					Path:   "/vm-pool01/noble-server-cloudimg-amd64.img",
+					Format: infrav1beta1.ImageFormatQCOW2,
+				},
+			},
+		},
+	}
+	if onMissing != "" {
+		img.Spec.Prepare = &infrav1beta1.ImagePrepare{OnMissing: onMissing}
+	}
+	return img
+}
+
+// TestImageSourceNeedsPrepare classifies every source kind into import-style
+// (needs prepare) vs reference-style / already-present (issue #227).
+func TestImageSourceNeedsPrepare(t *testing.T) {
+	proxmoxTmplID := 9000
+	tests := []struct {
+		name string
+		src  infrav1beta1.ImageSource
+		want bool
+	}{
+		{"libvirt path (present)", infrav1beta1.ImageSource{Libvirt: &infrav1beta1.LibvirtImageSource{Path: "/p/a.qcow2"}}, false},
+		{"libvirt url (import)", infrav1beta1.ImageSource{Libvirt: &infrav1beta1.LibvirtImageSource{URL: "https://x/a.qcow2"}}, true},
+		{"libvirt path+url (import wins)", infrav1beta1.ImageSource{Libvirt: &infrav1beta1.LibvirtImageSource{Path: "/p/a.qcow2", URL: "https://x/a.qcow2"}}, true},
+		{"libvirt empty (ambiguous)", infrav1beta1.ImageSource{Libvirt: &infrav1beta1.LibvirtImageSource{}}, true},
+		{"vsphere template (present)", infrav1beta1.ImageSource{VSphere: &infrav1beta1.VSphereImageSource{TemplateName: "ubuntu-tmpl"}}, false},
+		{"vsphere content library (present)", infrav1beta1.ImageSource{VSphere: &infrav1beta1.VSphereImageSource{ContentLibrary: &infrav1beta1.ContentLibraryRef{}}}, false},
+		{"vsphere ova (import)", infrav1beta1.ImageSource{VSphere: &infrav1beta1.VSphereImageSource{OVAURL: "https://x/a.ova"}}, true},
+		{"vsphere template+ova (import wins)", infrav1beta1.ImageSource{VSphere: &infrav1beta1.VSphereImageSource{TemplateName: "t", OVAURL: "https://x/a.ova"}}, true},
+		{"proxmox templateID (present)", infrav1beta1.ImageSource{Proxmox: &infrav1beta1.ProxmoxImageSource{TemplateID: &proxmoxTmplID}}, false},
+		{"proxmox templateName (present)", infrav1beta1.ImageSource{Proxmox: &infrav1beta1.ProxmoxImageSource{TemplateName: "ubuntu"}}, false},
+		{"proxmox empty (ambiguous)", infrav1beta1.ImageSource{Proxmox: &infrav1beta1.ProxmoxImageSource{}}, true},
+		{"http (import)", infrav1beta1.ImageSource{HTTP: &infrav1beta1.HTTPImageSource{}}, true},
+		{"registry (import)", infrav1beta1.ImageSource{Registry: &infrav1beta1.RegistryImageSource{}}, true},
+		{"datavolume (import)", infrav1beta1.ImageSource{DataVolume: &infrav1beta1.DataVolumeImageSource{}}, true},
+		{"empty source", infrav1beta1.ImageSource{}, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			img := &infrav1beta1.VMImage{Spec: infrav1beta1.VMImageSpec{Source: tc.src}}
+			assert.Equal(t, tc.want, imageSourceNeedsPrepare(img))
+		})
+	}
+}
+
+// TestEnsureImageOnProvider_PathSourceSkipsHold is the #227 regression: a libvirt
+// PATH source (already present on the host) with Prepare.OnMissing=Fail must NOT
+// be held for an import — it has nothing to import — so create proceeds and no
+// Failed status is written.
+func TestEnsureImageOnProvider_PathSourceSkipsHold(t *testing.T) {
+	img := imageWithLibvirtPath("ubuntu-path", infrav1beta1.ImageMissingActionFail)
+	r, _ := newEnsureReconciler(t, img)
+	provider := importCapableProvider("libvirt-1") // implements ImagePreparer + advertises import
+	inst := &preparerProvider{}
+	vm := vmForImage(provider.Name, img.Name)
+
+	requeue, err := r.EnsureImageOnProvider(context.Background(), vm, img, provider, inst)
+	require.NoError(t, err, "path source must not return the hold sentinel")
+	assert.False(t, errors.Is(err, errImagePrepareHold))
+	assert.False(t, requeue, "path source needs no prepare; proceed to create")
+	assert.Equal(t, 0, inst.calls(), "path source must not trigger a prepare RPC")
+
+	persisted := reloadImage(t, r, img.Name)
+	assert.NotEqual(t, infrav1beta1.ImagePhaseFailed, persisted.Status.Phase,
+		"a present path source must not be recorded as Failed")
+}
+
+// TestEnsureImageOnProvider_VSphereTemplateSkipsHold mirrors #227 for an existing
+// vSphere template reference with OnMissing=Fail.
+func TestEnsureImageOnProvider_VSphereTemplateSkipsHold(t *testing.T) {
+	img := &infrav1beta1.VMImage{
+		ObjectMeta: metav1.ObjectMeta{Name: "win-tmpl", Namespace: "default"},
+		Spec: infrav1beta1.VMImageSpec{
+			Source:  infrav1beta1.ImageSource{VSphere: &infrav1beta1.VSphereImageSource{TemplateName: "win2022"}},
+			Prepare: &infrav1beta1.ImagePrepare{OnMissing: infrav1beta1.ImageMissingActionFail},
+		},
+	}
+	r, _ := newEnsureReconciler(t, img)
+	provider := importCapableProvider("vsphere-1")
+	inst := &preparerProvider{}
+	vm := vmForImage(provider.Name, img.Name)
+
+	requeue, err := r.EnsureImageOnProvider(context.Background(), vm, img, provider, inst)
+	require.NoError(t, err)
+	assert.False(t, requeue)
+	assert.Equal(t, 0, inst.calls())
+}

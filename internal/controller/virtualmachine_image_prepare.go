@@ -125,6 +125,22 @@ func (r *VirtualMachineReconciler) EnsureImageOnProvider(
 		return false, nil
 	}
 
+	// Reference-style sources need no import. A libvirt pool-file path, an
+	// existing vSphere template / content-library item, or an existing Proxmox
+	// template is already present on the provider — there is nothing to download
+	// or convert, so it is "available" by construction. Proceed straight to create
+	// using the source as-is, even when Prepare.OnMissing=Fail, rather than holding
+	// the VM for a prepare that need not (and will not) happen (issue #227). The
+	// by-reference create path already consumes these directly — see
+	// overrideImageWithPreparedLocation's fallback — and a wrong path/template
+	// still fails honestly at create time, which is where a missing backing
+	// artifact belongs.
+	if !imageSourceNeedsPrepare(vmImage) {
+		logger.V(1).Info("Image source is already present on the provider (no import needed); proceeding to create",
+			"provider", provider.Name, "image", vmImage.Name)
+		return false, nil
+	}
+
 	// Honor OnMissing. Default (and explicit Import) prepares. Fail records a
 	// terminal-ish condition and holds; Wait holds pending an out-of-band
 	// preparer without erroring. Both return errImagePrepareHold so reconcileVM
@@ -288,6 +304,49 @@ func imageMissingAction(vmImage *infravirtrigaudiov1beta1.VMImage) infravirtriga
 		return infravirtrigaudiov1beta1.ImageMissingActionImport
 	}
 	return vmImage.Spec.Prepare.OnMissing
+}
+
+// imageSourceNeedsPrepare reports whether the VMImage's source must be imported
+// onto the provider before a VM can use it.
+//
+// Import-style sources produce a NEW artifact on the provider and DO need
+// preparing: a libvirt download URL, a vSphere OVA URL, and any HTTP / container
+// registry / DataVolume pull.
+//
+// Reference-style sources point at something ALREADY PRESENT on the provider and
+// need NO preparation — a libvirt pool-file path, an existing vSphere template or
+// content-library item, or an existing Proxmox template (by id or name). These
+// are exactly the locations the by-reference create path already consumes
+// directly (see overrideImageWithPreparedLocation), so returning false for them
+// lets such an image create normally instead of being held for an import that
+// need not happen (issue #227).
+//
+// Ambiguous or unrecognized sources return true (prefer running the idempotent
+// prepare over silently skipping a real import): a libvirt source carrying BOTH a
+// path and a URL, an HTTP/Registry/DataVolume source, or an entirely empty
+// source.
+func imageSourceNeedsPrepare(vmImage *infravirtrigaudiov1beta1.VMImage) bool {
+	src := vmImage.Spec.Source
+	switch {
+	case src.Libvirt != nil:
+		// A pool-file path is already present; a URL must be downloaded. A source
+		// carrying both is treated as an import (URL wins) to avoid skipping a
+		// real download.
+		return src.Libvirt.URL != "" || src.Libvirt.Path == ""
+	case src.VSphere != nil:
+		// An OVA URL imports; an existing template or content-library item does not.
+		if src.VSphere.OVAURL != "" {
+			return true
+		}
+		return src.VSphere.TemplateName == "" && src.VSphere.ContentLibrary == nil
+	case src.Proxmox != nil:
+		// Proxmox sources only ever reference an existing template (by id or name);
+		// there is no import URL. Anything with a template reference is present.
+		return src.Proxmox.TemplateID == nil && src.Proxmox.TemplateName == ""
+	default:
+		// HTTP / Registry / DataVolume (always a fetch) or an unset source.
+		return true
+	}
 }
 
 // markImagePreparing records the in-progress (Importing) state on the VMImage
