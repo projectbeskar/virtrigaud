@@ -5,6 +5,21 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-11 04:07] - Fix stale Makefile builder image (Go version drift)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `Makefile`: Bumped `BUILDER_IMAGE ?= golang:1.25` → `golang:1.26.4` to match `go.mod` (`go 1.26.4`). The Makefile passes `BUILDER_IMAGE` as a `--build-arg` to the Dockerfiles (overriding their already-correct `golang:1.26.4` default), so the stale value made a plain `make docker-build` fail with `go: go.mod requires go >= 1.26.4 (running go 1.25.11; GOTOOLCHAIN=local)`. Added a comment to keep it in lockstep with `go.mod`.
+
+### Why
+Local container builds via `make docker-build`/`make docker-buildx` were broken unless the caller manually passed `BUILDER_IMAGE=`. CI and the release pipeline were unaffected — they build with `docker/build-push-action` against the Dockerfile (whose default is already `golang:1.26.4`) and resolve their Go toolchain from `go.mod` via `go-version-file`.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-06-10 16:36] - Fix migration PVC-mount handshake: non-blocking, diagnosable, co-location-safe
 **Author:** @wrkode (William Rizzo)
 
