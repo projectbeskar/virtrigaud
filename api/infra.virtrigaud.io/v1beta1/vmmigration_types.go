@@ -209,14 +209,79 @@ type ValidationChecks struct {
 
 // MigrationStorage defines storage backend configuration
 type MigrationStorage struct {
-	// Type specifies the storage backend type
-	// +kubebuilder:validation:Enum=pvc
+	// Type specifies the storage backend type used to stage the transferred
+	// disk between the source and target providers. "pvc" is the only backend
+	// with transfer logic today; "nfs" and "s3" are surface-only scaffolding
+	// (ADR-0006 Slice 0) and are rejected at the Validating phase until the
+	// corresponding transfer slices land.
+	// +kubebuilder:validation:Enum=pvc;nfs;s3
 	// +kubebuilder:default=pvc
 	Type string `json:"type"`
+
+	// TransferMode selects how disk bytes travel to/from the staging backend.
+	// "relay" routes bytes host→provider-pod→backend (today's pod-side path);
+	// "direct" routes bytes host→backend without a provider-pod hop; "auto"
+	// lets the controller pick based on what both providers advertise. Only
+	// "relay" is implemented today (ADR-0006 Slice 0).
+	// +optional
+	// +kubebuilder:validation:Enum=auto;relay;direct
+	// +kubebuilder:default=auto
+	TransferMode string `json:"transferMode,omitempty"`
 
 	// PVC specifies PVC-based storage configuration
 	// +optional
 	PVC *PVCStorageConfig `json:"pvc,omitempty"`
+
+	// NFS specifies NFS-based staging configuration. Surface-only in ADR-0006
+	// Slice 0 (no transfer logic yet).
+	// +optional
+	NFS *NFSStorageConfig `json:"nfs,omitempty"`
+
+	// S3 specifies S3-compatible object-storage staging configuration.
+	// Surface-only in ADR-0006 Slice 0 (no transfer logic yet).
+	// +optional
+	S3 *S3StorageConfig `json:"s3,omitempty"`
+}
+
+// S3StorageConfig defines S3-compatible object-storage configuration used to
+// stage a migration's transferred disk. Surface-only in ADR-0006 Slice 0.
+type S3StorageConfig struct {
+	// Bucket is the S3 bucket for the transfer object.
+	Bucket string `json:"bucket"`
+	// Endpoint overrides the S3 endpoint (empty = AWS default; set for MinIO/Ceph RGW).
+	// +optional
+	Endpoint string `json:"endpoint,omitempty"`
+	// Region is the S3 region for the bucket (empty = provider/SDK default).
+	// +optional
+	Region string `json:"region,omitempty"`
+	// Prefix is the key prefix for this migration's objects.
+	// +optional
+	Prefix string `json:"prefix,omitempty"`
+	// CredentialsSecretRef references a Secret holding the S3 credentials
+	// (access key / secret / optional session token). Credentials are NEVER inline.
+	CredentialsSecretRef ObjectRef `json:"credentialsSecretRef"`
+	// UsePathStyle selects path-style addressing (needed by most non-AWS S3).
+	// No `omitempty`: defaulted bool footgun (see PR #235 / ProviderTLSSpec.Enabled) —
+	// omitempty drops an explicit false and the apiserver re-defaults it.
+	// +optional
+	// +kubebuilder:default=false
+	UsePathStyle bool `json:"usePathStyle"`
+}
+
+// NFSStorageConfig defines NFS-based staging configuration used to stage a
+// migration's transferred disk. Surface-only in ADR-0006 Slice 0.
+type NFSStorageConfig struct {
+	// Server is the NFS server hostname or IP exporting the share.
+	Server string `json:"server"`
+	// Export is the exported NFS path on the server (e.g. "/exports/migrations").
+	Export string `json:"export"`
+	// Path is an optional sub-path within the export for this migration's data.
+	// +optional
+	Path string `json:"path,omitempty"`
+	// ReadOnly mounts the export read-only. No `omitempty` (defaulted bool footgun, PR #235).
+	// +optional
+	// +kubebuilder:default=false
+	ReadOnly bool `json:"readOnly"`
 }
 
 // PVCStorageConfig defines PVC storage configuration

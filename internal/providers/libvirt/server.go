@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
+	"github.com/projectbeskar/virtrigaud/internal/storage/migration"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
@@ -531,6 +532,12 @@ func (s *Server) GetCapabilities(ctx context.Context, req *providerv1.GetCapabil
 		SupportedExportFormats:      []string{"qcow2", "raw"},
 		SupportedImportFormats:      []string{"qcow2", "raw", "vmdk"},
 		SupportsExportCompression:   true, // ExportDisk honors req.Compress via qemu-img -c for qcow2 (#199); default (Compress=false) is uncompressed for speed
+		// ADR-0006 Slice 0: advertise the status quo honestly. ExportDisk/
+		// ImportDisk only implement the pod-side (pvc, relay-shaped) staging
+		// path; nfs/s3 and direct transfer are not yet implemented.
+		SupportedExportBackends: migration.PVCOnlyExportBackends(),
+		SupportedImportBackends: migration.PVCOnlyImportBackends(),
+		SupportedTransferModes:  migration.RelayOnlyTransferModes(),
 	}, nil
 }
 
@@ -539,6 +546,12 @@ func (s *Server) GetCapabilities(ctx context.Context, req *providerv1.GetCapabil
 // provider-contract types. Previously this RPC was unreachable over gRPC and
 // returned Unimplemented despite a working implementation (issue #177).
 func (s *Server) ExportDisk(ctx context.Context, req *providerv1.ExportDiskRequest) (*providerv1.ExportDiskResponse, error) {
+	// ADR-0006 Slice 0: only the legacy pvc staging path is implemented; reject
+	// nfs/s3 backends honestly instead of falling through to the pvc path.
+	if err := migration.EnsurePVCBackend(req.BackendType); err != nil {
+		return nil, err
+	}
+
 	if s.provider == nil {
 		return nil, fmt.Errorf("provider not initialized")
 	}
@@ -601,6 +614,12 @@ func (s *Server) GetDiskInfo(ctx context.Context, req *providerv1.GetDiskInfoReq
 
 // ImportDisk imports a disk from an external source (for VM migration)
 func (s *Server) ImportDisk(ctx context.Context, req *providerv1.ImportDiskRequest) (*providerv1.ImportDiskResponse, error) {
+	// ADR-0006 Slice 0: only the legacy pvc staging path is implemented; reject
+	// nfs/s3 backends honestly instead of falling through to the pvc path.
+	if err := migration.EnsurePVCBackend(req.BackendType); err != nil {
+		return nil, err
+	}
+
 	log.Printf("INFO Starting disk import from %s", req.SourceUrl)
 
 	// Get the provider instance and cast to libvirt Provider

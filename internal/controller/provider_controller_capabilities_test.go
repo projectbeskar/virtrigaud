@@ -95,6 +95,9 @@ func TestCapabilitiesToReported(t *testing.T) {
 		SupportedExportFormats:      []string{"qcow2"},
 		SupportedImportFormats:      []string{"vmdk"},
 		SupportsExportCompression:   true,
+		SupportedExportBackends:     []string{"pvc"},
+		SupportedImportBackends:     []string{"pvc"},
+		SupportedTransferModes:      []string{"relay"},
 	}
 
 	got := capabilitiesToReported(caps)
@@ -113,4 +116,8 @@ func TestCapabilitiesToReported(t *testing.T) {
 	assert.Equal(t, []string{"qcow2"}, got.SupportedExportFormats)
 	assert.Equal(t, []string{"vmdk"}, got.SupportedImportFormats)
 	assert.True(t, got.SupportsExportCompression)
+	// ADR-0006 Slice 0: backend/transfer-mode sets surface field-for-field.
+	assert.Equal(t, []string{"pvc"}, got.SupportedExportBackends)
+	assert.Equal(t, []string{"pvc"}, got.SupportedImportBackends)
+	assert.Equal(t, []string{"relay"}, got.SupportedTransferModes)
 }

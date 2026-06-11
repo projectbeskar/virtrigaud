@@ -189,6 +189,15 @@ type ExportDiskRequest struct {
 	Compress bool
 	// Credentials for accessing the destination
 	Credentials map[string]string
+	// BackendType names the staging backend ("pvc", "nfs", "s3"); empty means
+	// the legacy pvc path (ADR-0006 Slice 0).
+	BackendType string
+	// TransferMode selects the transfer path ("auto", "relay", "direct");
+	// empty/"auto" defers to the provider (ADR-0006 Slice 0).
+	TransferMode string
+	// StorageOptionsJSON carries backend-specific options as JSON (ADR-0006
+	// Slice 0: always empty).
+	StorageOptionsJSON string
 }
 
 // ExportDiskResponse contains the result of a disk export operation
@@ -219,6 +228,15 @@ type ImportDiskRequest struct {
 	ExpectedChecksum string
 	// Credentials for accessing the source
 	Credentials map[string]string
+	// BackendType names the staging backend ("pvc", "nfs", "s3"); empty means
+	// the legacy pvc path (ADR-0006 Slice 0).
+	BackendType string
+	// TransferMode selects the transfer path ("auto", "relay", "direct");
+	// empty/"auto" defers to the provider (ADR-0006 Slice 0).
+	TransferMode string
+	// StorageOptionsJSON carries backend-specific options as JSON (ADR-0006
+	// Slice 0: always empty).
+	StorageOptionsJSON string
 }
 
 // ImportDiskResponse contains the result of a disk import operation

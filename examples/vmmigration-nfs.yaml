@@ -1,13 +1,24 @@
-# VM Migration using PVC-backed storage (NFS StorageClass)
+# NFS-staged cross-hypervisor migration.
 #
-# NOTE: VirtRigaud v0.3.6 only supports "pvc" as the migration storage type.
-# The previously-documented "nfs" type is not a valid MigrationStorage.Type value.
-# Use an NFS-backed StorageClass to achieve NFS storage for migrations.
+# There are TWO ways to involve NFS, and they are different:
 #
-# Currently tested migration path: vSphere → Libvirt/KVM only.
-# The Libvirt → Proxmox path shown here is roadmap and unverified.
+#  1. WORKING TODAY — PVC backed by an NFS StorageClass. The migration uses the
+#     standard `storage.type: pvc` path; the PVC just happens to be provisioned
+#     on NFS. This is the recommended approach and is shown first below.
+#
+#  2. SURFACE ONLY (ADR-0006 Slice 0) — the native `storage.type: nfs` backend.
+#     It exists in the CRD/proto/capability surface but has NO transfer logic
+#     yet, so it is rejected at the Validating phase with:
+#
+#       storage backend "nfs" is not yet implemented; only "pvc" is supported
+#       today (ADR-0006 Slice 0)
+#
+#     The native-nfs snippet is shown second, commented, for review stability.
+#
+# Currently tested migration path: vSphere → Libvirt/KVM. Other directions are
+# roadmap.
 
-# NFS StorageClass — create once per cluster
+# NFS StorageClass — create once per cluster (approach #1).
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
@@ -20,7 +31,7 @@ volumeBindingMode: Immediate
 reclaimPolicy: Delete
 
 ---
-# VMMigration using the NFS-backed StorageClass
+# VMMigration using a PVC on the NFS-backed StorageClass (approach #1 — WORKS).
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMMigration
 metadata:
@@ -37,7 +48,7 @@ spec:
     name: legacy-app-proxmox
     providerRef:
       name: proxmox-cluster
-      namespace: virtrigaud-system
+      namespace: default
     classRef:
       name: standard-4cpu-8gb
     networks:
@@ -45,13 +56,27 @@ spec:
     placementRef:
       name: proxmox-node-2
 
-  # storage.type must be "pvc" — the only accepted value in v0.3.6.
+  # PVC on an NFS StorageClass — the working path today.
   storage:
     type: pvc
     pvc:
       storageClassName: nfs-migration-storage
       size: 200Gi
       accessMode: ReadWriteMany
+
+  # ----------------------------------------------------------------------------
+  # Approach #2 (ADR-0006 Slice 0, SURFACE ONLY — rejected at validation today):
+  # replace the `storage:` block above with the native nfs backend below.
+  #
+  # storage:
+  #   type: nfs
+  #   transferMode: auto        # auto | relay | direct
+  #   nfs:
+  #     server: nfs-server.company.local
+  #     export: /export/vm-migrations
+  #     path: legacy-app/        # optional sub-path within the export
+  #     readOnly: false
+  # ----------------------------------------------------------------------------
 
   options:
     diskFormat: qcow2

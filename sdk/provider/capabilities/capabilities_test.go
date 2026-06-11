@@ -74,3 +74,45 @@ func TestBuilder_DiskMigrationDefaultsFalse(t *testing.T) {
 		t.Error("export/import format lists should be empty when not advertised")
 	}
 }
+
+// TestBuilder_StorageBackends verifies the ADR-0006 backend/transfer-mode
+// builder methods surface on the gRPC GetCapabilitiesResponse so providers can
+// advertise their honest staging-backend support (ADR-0006 Slice 0).
+func TestBuilder_StorageBackends(t *testing.T) {
+	m := NewBuilder().
+		Core().
+		ExportBackends("pvc").
+		ImportBackends("pvc").
+		TransferModes("relay").
+		Build()
+
+	resp, err := m.GetCapabilities(context.Background(), &providerv1.GetCapabilitiesRequest{})
+	if err != nil {
+		t.Fatalf("GetCapabilities: %v", err)
+	}
+	if want := []string{"pvc"}; !reflect.DeepEqual(resp.SupportedExportBackends, want) {
+		t.Errorf("SupportedExportBackends = %v, want %v", resp.SupportedExportBackends, want)
+	}
+	if want := []string{"pvc"}; !reflect.DeepEqual(resp.SupportedImportBackends, want) {
+		t.Errorf("SupportedImportBackends = %v, want %v", resp.SupportedImportBackends, want)
+	}
+	if want := []string{"relay"}; !reflect.DeepEqual(resp.SupportedTransferModes, want) {
+		t.Errorf("SupportedTransferModes = %v, want %v", resp.SupportedTransferModes, want)
+	}
+}
+
+// TestBuilder_StorageBackendsDefaultEmpty verifies the backend/transfer-mode
+// lists default to empty (interpreted as pvc-only / relay-only by the manager)
+// when a provider does not advertise them.
+func TestBuilder_StorageBackendsDefaultEmpty(t *testing.T) {
+	m := NewBuilder().Core().Build()
+	resp, err := m.GetCapabilities(context.Background(), &providerv1.GetCapabilitiesRequest{})
+	if err != nil {
+		t.Fatalf("GetCapabilities: %v", err)
+	}
+	if len(resp.SupportedExportBackends) != 0 ||
+		len(resp.SupportedImportBackends) != 0 ||
+		len(resp.SupportedTransferModes) != 0 {
+		t.Error("backend/transfer-mode lists should be empty when not advertised")
+	}
+}

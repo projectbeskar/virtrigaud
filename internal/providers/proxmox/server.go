@@ -31,6 +31,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/diskutil"
 	"github.com/projectbeskar/virtrigaud/internal/providers/proxmox/pveapi"
 	"github.com/projectbeskar/virtrigaud/internal/storage"
+	"github.com/projectbeskar/virtrigaud/internal/storage/migration"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/capabilities"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/errors"
@@ -1258,6 +1259,12 @@ func exportNeedsConversion(sourceFormat, targetFormat string, compress bool) boo
 
 // ExportDisk exports a VM disk for migration
 func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskRequest) (*providerv1.ExportDiskResponse, error) {
+	// ADR-0006 Slice 0: only the legacy pvc staging path is implemented; reject
+	// nfs/s3 backends honestly instead of falling through to the pvc path.
+	if err := migration.EnsurePVCBackend(req.BackendType); err != nil {
+		return nil, err
+	}
+
 	if p.client == nil {
 		return nil, errors.NewUnavailable("PVE client not configured", nil)
 	}
@@ -1458,6 +1465,12 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 
 // ImportDisk imports a disk from an external source
 func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskRequest) (*providerv1.ImportDiskResponse, error) {
+	// ADR-0006 Slice 0: only the legacy pvc staging path is implemented; reject
+	// nfs/s3 backends honestly instead of falling through to the pvc path.
+	if err := migration.EnsurePVCBackend(req.BackendType); err != nil {
+		return nil, err
+	}
+
 	if p.client == nil {
 		return nil, errors.NewUnavailable("PVE client not configured", nil)
 	}

@@ -80,11 +80,14 @@ const (
 
 // Manager manages provider capabilities.
 type Manager struct {
-	capabilities           map[Capability]bool
-	supportedDiskTypes     []string
-	supportedNetworkTypes  []string
-	supportedExportFormats []string
-	supportedImportFormats []string
+	capabilities            map[Capability]bool
+	supportedDiskTypes      []string
+	supportedNetworkTypes   []string
+	supportedExportFormats  []string
+	supportedImportFormats  []string
+	supportedExportBackends []string
+	supportedImportBackends []string
+	supportedTransferModes  []string
 }
 
 // NewManager creates a new capability manager.
@@ -135,6 +138,27 @@ func (m *Manager) SetSupportedImportFormats(types []string) *Manager {
 	return m
 }
 
+// SetSupportedExportBackends sets the storage backends the provider can export
+// disks to ("pvc", "nfs", "s3"). Empty means pvc-only (ADR-0006 Slice 0).
+func (m *Manager) SetSupportedExportBackends(backends []string) *Manager {
+	m.supportedExportBackends = backends
+	return m
+}
+
+// SetSupportedImportBackends sets the storage backends the provider can import
+// disks from ("pvc", "nfs", "s3"). Empty means pvc-only (ADR-0006 Slice 0).
+func (m *Manager) SetSupportedImportBackends(backends []string) *Manager {
+	m.supportedImportBackends = backends
+	return m
+}
+
+// SetSupportedTransferModes sets the disk-transfer modes the provider supports
+// ("relay", "direct"). Empty means relay-only (ADR-0006 Slice 0).
+func (m *Manager) SetSupportedTransferModes(modes []string) *Manager {
+	m.supportedTransferModes = modes
+	return m
+}
+
 // GetCapabilities returns the capabilities response for gRPC.
 func (m *Manager) GetCapabilities(ctx context.Context, req *providerv1.GetCapabilitiesRequest) (*providerv1.GetCapabilitiesResponse, error) {
 	return &providerv1.GetCapabilitiesResponse{
@@ -151,6 +175,9 @@ func (m *Manager) GetCapabilities(ctx context.Context, req *providerv1.GetCapabi
 		SupportsExportCompression:   m.HasCapability(CapabilityExportCompression),
 		SupportedExportFormats:      m.supportedExportFormats,
 		SupportedImportFormats:      m.supportedImportFormats,
+		SupportedExportBackends:     m.supportedExportBackends,
+		SupportedImportBackends:     m.supportedImportBackends,
+		SupportedTransferModes:      m.supportedTransferModes,
 	}, nil
 }
 
@@ -306,6 +333,27 @@ func (b *Builder) DiskImport(formats ...string) *Builder {
 // ExportCompression marks that disk export can be compressed.
 func (b *Builder) ExportCompression() *Builder {
 	b.manager.AddCapability(CapabilityExportCompression)
+	return b
+}
+
+// ExportBackends sets the storage backends the provider can export disks to
+// ("pvc", "nfs", "s3"). Empty/unset means pvc-only (ADR-0006 Slice 0).
+func (b *Builder) ExportBackends(backends ...string) *Builder {
+	b.manager.SetSupportedExportBackends(backends)
+	return b
+}
+
+// ImportBackends sets the storage backends the provider can import disks from
+// ("pvc", "nfs", "s3"). Empty/unset means pvc-only (ADR-0006 Slice 0).
+func (b *Builder) ImportBackends(backends ...string) *Builder {
+	b.manager.SetSupportedImportBackends(backends)
+	return b
+}
+
+// TransferModes sets the disk-transfer modes the provider supports ("relay",
+// "direct"). Empty/unset means relay-only (ADR-0006 Slice 0).
+func (b *Builder) TransferModes(modes ...string) *Builder {
+	b.manager.SetSupportedTransferModes(modes)
 	return b
 }
 
