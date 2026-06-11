@@ -2,10 +2,11 @@
 
 ## Status
 
-**Proposed (2026-06-11)** — design reviewed with the maintainer; the open questions
-below are **resolved** (see *Resolved decisions*). This ADR supersedes the implicit
-"PVC-only" transfer model that shipped through v0.3.9 and establishes the architecture
-for the project's now-primary Key Value:
+**Accepted (2026-06-11)** — reviewed and accepted by the maintainer; the open questions
+below are **resolved** (see *Resolved decisions*). Implementation proceeds in phased
+slices (see *Phasing*); **Slice 0** (additive CRD/proto + honest capability surface) is
+the first to land. This ADR supersedes the implicit "PVC-only" transfer model that shipped
+through v0.3.9 and establishes the architecture for the project's now-primary Key Value:
 
 > **Regardless of the storage backend (NFS / S3), VirtRigaud must be able to migrate VMs
 > across hypervisors in *any* direction.**
