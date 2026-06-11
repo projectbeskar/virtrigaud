@@ -63,9 +63,17 @@ type ProviderServiceSpec struct {
 
 // ProviderTLSSpec defines TLS configuration for provider communication
 type ProviderTLSSpec struct {
-	// Enabled determines if TLS is enabled for provider communication
+	// Enabled determines if TLS is enabled for provider communication.
+	//
+	// Defaults to true. Deliberately NOT `omitempty`: this field has a default
+	// of true, so omitempty drops an explicit `false` when the object is
+	// re-serialized (e.g. by a controller Update), letting the apiserver
+	// re-apply the default and silently flip tls.enabled false→true — which
+	// then trips the TLS posture gate (enabled=true + no secretRef → runtime
+	// Failed). Always serializing it keeps an explicit plaintext opt-out durable.
+	// +optional
 	// +kubebuilder:default=true
-	Enabled bool `json:"enabled,omitempty"`
+	Enabled bool `json:"enabled"`
 
 	// SecretRef references a secret containing tls.crt, tls.key, and ca.crt
 	// +optional
@@ -248,10 +256,14 @@ type ProviderSpec struct {
 
 // ProviderHealthCheck defines health checking configuration
 type ProviderHealthCheck struct {
-	// Enabled indicates whether health checking is enabled
+	// Enabled indicates whether health checking is enabled.
+	//
+	// Defaults to true. Deliberately NOT `omitempty` — a defaulted bool with
+	// omitempty has its explicit `false` dropped and re-defaulted to true on
+	// the next write (see ProviderTLSSpec.Enabled for the full rationale).
 	// +optional
 	// +kubebuilder:default=true
-	Enabled bool `json:"enabled,omitempty"`
+	Enabled bool `json:"enabled"`
 
 	// Interval defines how often to check provider health
 	// +optional

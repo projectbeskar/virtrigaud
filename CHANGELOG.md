@@ -11,17 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - `api/infra.virtrigaud.io/v1beta1/vmmigration_types.go`: `MigrationStorage` gains `Type` enum `pvc;nfs;s3` (default `pvc`), `TransferMode` enum `auto;relay;direct` (default `auto`), and `NFS`/`S3` sub-configs. New `S3StorageConfig` (bucket/endpoint/region/prefix/`credentialsSecretRef`/`usePathStyle`) and `NFSStorageConfig` (server/export/path/`readOnly`). `usePathStyle`/`readOnly` are defaulted bools without `omitempty` (PR #235 footgun). Credentials are referenced via Secret, never inline.
 - `api/infra.virtrigaud.io/v1beta1/provider_types.go`: `ReportedCapabilities` gains `SupportedExportBackends`, `SupportedImportBackends`, `SupportedTransferModes` (empty == pvc-only / relay-only).
-- `proto/provider/v1/provider.proto`: additive fields — `ExportDiskRequest`/`ImportDiskRequest` `backend_type=8`, `transfer_mode=9`, `storage_options_json=10`; `GetCapabilitiesResponse` `supported_export_backends=14`, `supported_import_backends=15`, `supported_transfer_modes=16`. Added the host-vs-pod execution-contract comment block (bytes never traverse gRPC; relay = host→pod→backend, direct = host→backend).
+- `proto/provider/v1/provider.proto`: additive fields — `ExportDiskRequest`/`ImportDiskRequest` `backend_type=8`, `transfer_mode=9`, `storage_options_json=10`; `GetCapabilitiesResponse` `supported_export_backends=14`, `supported_import_backends=15`, `supported_transfer_modes=16`. Added the host-vs-pod execution-contract comment block (bytes never traverse gRPC; relay = host->pod->backend, direct = host->backend).
 - `internal/storage/migration/backend.go`: new shared package with backend/transfer-mode constants, honest pvc-only/relay-only advertisement helpers, and `EnsurePVCBackend` (returns `codes.Unimplemented` for non-pvc) — the single source of truth used by every provider and the controller.
 - `sdk/provider/capabilities/capabilities.go`: `ExportBackends`/`ImportBackends`/`TransferModes` builder methods + Manager fields, mirroring the existing `SetSupportedExportFormats` pattern.
 
 ### Changed
-- `internal/providers/{vsphere,libvirt,proxmox,mock}`: `GetCapabilities` now advertises the honest status quo — export/import backends `["pvc"]`, transfer modes `["relay"]` (the existing pod-side path is relay-shaped). `ExportDisk`/`ImportDisk` on vsphere/libvirt/proxmox reject any non-pvc `backend_type` with `Unimplemented` before doing work; empty `backend_type` keeps today's behavior. (Mock has no Export/Import RPCs and continues to return `Unimplemented` via the SDK base.)
-- `internal/controller/vmmigration_controller.go`: the Validating phase now fails fast (via `transitionToFailed`) when `storage.type` is `nfs`/`s3`, or when the requested backend/transfer mode is not in both the source provider's export set and the target provider's import set (read from each Provider's `status.reportedCapabilities`), with an actionable, ADR-referencing message. `ExportDisk`/`ImportDisk` requests now carry `backend_type` (default `pvc`) and `transfer_mode` (default `auto`); `storage_options_json` stays empty.
-- `internal/providers/contracts/` and `internal/transport/grpc/client.go`: the transport-agnostic `Capabilities`, `ExportDiskRequest`, `ImportDiskRequest` types and the manager-side client mapping carry the new fields end-to-end.
+- `internal/providers/{vsphere,libvirt,proxmox,mock}`: `GetCapabilities` now advertises the honest status quo — export/import backends `["pvc"]`, transfer modes `["relay"]`. `ExportDisk`/`ImportDisk` on vsphere/libvirt/proxmox reject any non-pvc `backend_type` with `Unimplemented`; empty `backend_type` keeps today's behavior.
+- `internal/controller/vmmigration_controller.go`: the Validating phase fails fast (via `transitionToFailed`) when `storage.type` is `nfs`/`s3`, or when the requested backend/transfer mode is not in both the source provider's export set and the target provider's import set, with an actionable, ADR-referencing message. Export/Import requests now carry `backend_type` (default `pvc`) and `transfer_mode` (default `auto`).
+- `internal/providers/contracts/` and `internal/transport/grpc/client.go`: the transport-agnostic `Capabilities`/`ExportDiskRequest`/`ImportDiskRequest` types and the manager-side client mapping carry the new fields end-to-end.
 
 ### Why
-First slice of ADR-0006: establish the CRD/proto/capability surface for storage-backend-agnostic (NFS/S3) any-direction cross-hypervisor migration, and make every provider report honestly what it supports. This slice adds NO transfer logic — every non-pvc path returns `Unimplemented` and is rejected at validation — so the surface can land and be reviewed before the transfer slices build on it.
+First slice of ADR-0006: establish the CRD/proto/capability surface for storage-backend-agnostic (NFS/S3) any-direction cross-hypervisor migration, and make every provider report honestly what it supports. This slice adds NO transfer logic — every non-pvc path returns `Unimplemented` and is rejected at validation.
 
 ### Impact
 - [ ] Breaking change
@@ -29,7 +29,23 @@ First slice of ADR-0006: establish the CRD/proto/capability surface for storage-
 - [ ] Config change only
 - [ ] Documentation only
 
-> Additive and backward-compatible: existing `pvc` migrations are unchanged (empty/`pvc` backend and `auto`/`relay` mode behave exactly as before). The new CRD fields are optional with safe defaults; the new proto fields are additive (next free numbers, no renumbering). Providers must be rolled to advertise the new capability fields, but a not-yet-rolled provider reporting an empty set is treated as the implicit pvc-only/relay-only default, so pvc migrations are never wrongly blocked.
+> Additive and backward-compatible: existing `pvc` migrations are unchanged. New CRD fields are optional with safe defaults; new proto fields are additive (next free numbers). A not-yet-rolled provider reporting an empty capability set is treated as the implicit pvc-only/relay-only default, so pvc migrations are never wrongly blocked.
+
+## [2026-06-11 06:10] - Keep `tls.enabled: false` durable on Provider (defaulted-bool footgun)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `api/infra.virtrigaud.io/v1beta1/provider_types.go`: Removed `omitempty` from `ProviderTLSSpec.Enabled` and `ProviderHealthCheck.Enabled` (both keep `+optional` and `+kubebuilder:default=true`). A non-pointer bool with `omitempty` **and** a default of `true` silently flips an explicit `false` back to `true` on any controller `Update`: `omitempty` drops the `false` on serialization, then the apiserver re-applies the default. For `tls.enabled=false` this meant an explicitly-plaintext provider would, after the next reconcile that re-writes its spec, fail the TLS posture gate (`enabled=true` + no `secretRef`) and wedge to `runtime.phase=Failed` with a healthy pod still running.
+- `api/infra.virtrigaud.io/v1beta1/provider_tls_marshal_test.go`: New round-trip tests asserting `Enabled=false` survives JSON marshal for both specs.
+
+### Why
+An operator who explicitly opts a provider out of TLS could see it silently flip back on and stop reconciling. The CRD OpenAPI schema is unchanged (the fields stay optional and default to `true`); only the Go serialization is corrected, so existing objects are unaffected.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
 
 ## [2026-06-11 04:34] - Don't hold VM create for already-present image sources (#227)
 **Author:** @wrkode (William Rizzo)

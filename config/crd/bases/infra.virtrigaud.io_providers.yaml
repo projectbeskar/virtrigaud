@@ -147,7 +147,12 @@ spec:
                 properties:
                   enabled:
                     default: true
-                    description: Enabled indicates whether health checking is enabled
+                    description: |-
+                      Enabled indicates whether health checking is enabled.
+
+                      Defaults to true. Deliberately NOT `omitempty` — a defaulted bool with
+                      omitempty has its explicit `false` dropped and re-defaulted to true on
+                      the next write (see ProviderTLSSpec.Enabled for the full rationale).
                     type: boolean
                   failureThreshold:
                     default: 3
@@ -1892,8 +1897,15 @@ spec:
                         properties:
                           enabled:
                             default: true
-                            description: Enabled determines if TLS is enabled for
-                              provider communication
+                            description: |-
+                              Enabled determines if TLS is enabled for provider communication.
+
+                              Defaults to true. Deliberately NOT `omitempty`: this field has a default
+                              of true, so omitempty drops an explicit `false` when the object is
+                              re-serialized (e.g. by a controller Update), letting the apiserver
+                              re-apply the default and silently flip tls.enabled false→true — which
+                              then trips the TLS posture gate (enabled=true + no secretRef → runtime
+                              Failed). Always serializing it keeps an explicit plaintext opt-out durable.
                             type: boolean
                           insecureSkipVerify:
                             default: false
