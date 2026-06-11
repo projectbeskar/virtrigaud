@@ -50,6 +50,15 @@ type Capabilities struct {
 	SupportedImportFormats []string
 	// SupportsExportCompression reports whether disk export can be compressed.
 	SupportsExportCompression bool
+	// SupportedExportBackends lists the storage backends the provider can export
+	// disks to ("pvc", "nfs", "s3"). Empty means pvc-only (ADR-0006 Slice 0).
+	SupportedExportBackends []string
+	// SupportedImportBackends lists the storage backends the provider can import
+	// disks from ("pvc", "nfs", "s3"). Empty means pvc-only (ADR-0006 Slice 0).
+	SupportedImportBackends []string
+	// SupportedTransferModes lists the disk-transfer modes the provider supports
+	// ("relay", "direct"). Empty means relay-only (ADR-0006 Slice 0).
+	SupportedTransferModes []string
 }
 
 // CapabilityReporter is an optional capability of a Provider: it reports the

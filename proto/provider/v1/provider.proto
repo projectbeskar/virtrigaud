@@ -172,6 +172,23 @@ message ImagePrepareResponse {
   string prepared_image_path = 3;
 }
 
+// Disk export/import host-vs-pod execution contract (ADR-0006).
+//
+// Disk bytes NEVER traverse this gRPC channel. ExportDisk/ImportDisk move bytes
+// between the hypervisor host and the staging backend out-of-band; the RPC only
+// orchestrates and returns identifiers/checksums.
+//
+// transfer_mode selects who touches the bytes:
+//   - "relay":  host -> provider-pod -> backend (today's pod-side path; the
+//               provider pod stages bytes through a mounted PVC).
+//   - "direct": host -> backend (the provider streams straight to the backend,
+//               e.g. S3, with no provider-pod hop).
+//   - "auto":   the manager/provider pick relay or direct from what both sides
+//               advertise in GetCapabilities.
+//
+// backend_type names the staging backend ("pvc" | "nfs" | "s3"); an empty value
+// means the legacy pvc path for wire compatibility with pre-ADR-0006 callers.
+
 // Disk export operations for migration
 message ExportDiskRequest {
   string vm_id = 1;            // VM identifier
@@ -181,6 +198,9 @@ message ExportDiskRequest {
   string format = 5;           // Desired export format (qcow2, vmdk, raw)
   bool compress = 6;           // Enable compression during export
   map<string, string> credentials = 7; // Credentials for destination (access keys, tokens)
+  string backend_type = 8;     // Staging backend: "pvc" | "nfs" | "s3"; empty == legacy pvc (ADR-0006)
+  string transfer_mode = 9;    // Transfer mode: "auto" | "relay" | "direct" (ADR-0006)
+  string storage_options_json = 10; // JSON-encoded backend-specific options (ADR-0006; empty in Slice 0)
 }
 
 message ExportDiskResponse {
@@ -190,7 +210,10 @@ message ExportDiskResponse {
   string checksum = 4;         // Checksum of exported disk (SHA256)
 }
 
-// Disk import operations for migration
+// Disk import operations for migration.
+// See the ExportDiskRequest host-vs-pod execution contract above: disk bytes
+// never traverse the gRPC channel; backend_type/transfer_mode carry the same
+// meaning for the import (target) side (ADR-0006).
 message ImportDiskRequest {
   string source_url = 1;       // Where to download the disk from (S3, HTTP, etc.)
   string storage_hint = 2;     // Target storage location (datastore, pool, etc.)
@@ -199,6 +222,9 @@ message ImportDiskRequest {
   bool verify_checksum = 5;    // Verify checksum after import
   string expected_checksum = 6; // Expected checksum (SHA256)
   map<string, string> credentials = 7; // Credentials for source (access keys, tokens)
+  string backend_type = 8;     // Staging backend: "pvc" | "nfs" | "s3"; empty == legacy pvc (ADR-0006)
+  string transfer_mode = 9;    // Transfer mode: "auto" | "relay" | "direct" (ADR-0006)
+  string storage_options_json = 10; // JSON-encoded backend-specific options (ADR-0006; empty in Slice 0)
 }
 
 message ImportDiskResponse {
@@ -277,6 +303,9 @@ message GetCapabilitiesResponse {
   repeated string supported_export_formats = 11; // Supported export formats (qcow2, vmdk, raw)
   repeated string supported_import_formats = 12; // Supported import formats
   bool supports_export_compression = 13;   // Supports compression during export
+  repeated string supported_export_backends = 14; // Export staging backends: "pvc"|"nfs"|"s3" (ADR-0006; empty == pvc-only)
+  repeated string supported_import_backends = 15; // Import staging backends: "pvc"|"nfs"|"s3" (ADR-0006; empty == pvc-only)
+  repeated string supported_transfer_modes = 16;  // Transfer modes: "relay"|"direct" (ADR-0006; empty == relay-only)
 }
 
 // Provider service definition

@@ -16,7 +16,10 @@ limitations under the License.
 
 package proxmox
 
-import "github.com/projectbeskar/virtrigaud/sdk/provider/capabilities"
+import (
+	"github.com/projectbeskar/virtrigaud/internal/storage/migration"
+	"github.com/projectbeskar/virtrigaud/sdk/provider/capabilities"
+)
 
 // GetProviderCapabilities returns the capabilities for the Proxmox provider
 func GetProviderCapabilities() *capabilities.Manager {
@@ -39,6 +42,12 @@ func GetProviderCapabilities() *capabilities.Manager {
 		DiskExport("qcow2", "raw", "vmdk").
 		ExportCompression().
 		DiskImport("qcow2", "raw", "vmdk").
+		// ADR-0006 Slice 0: advertise the status quo honestly. ExportDisk/
+		// ImportDisk only implement the pod-side (pvc, relay-shaped) staging
+		// path; nfs/s3 and direct transfer are not yet implemented.
+		ExportBackends(migration.PVCOnlyExportBackends()...).
+		ImportBackends(migration.PVCOnlyImportBackends()...).
+		TransferModes(migration.RelayOnlyTransferModes()...).
 		DiskTypes("raw", "qcow2").
 		NetworkTypes("bridge", "vlan").
 		Build()

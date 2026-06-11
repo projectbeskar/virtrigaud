@@ -235,6 +235,32 @@ spec:
               storage:
                 description: Storage defines storage backend configuration for transfer
                 properties:
+                  nfs:
+                    description: |-
+                      NFS specifies NFS-based staging configuration. Surface-only in ADR-0006
+                      Slice 0 (no transfer logic yet).
+                    properties:
+                      export:
+                        description: Export is the exported NFS path on the server
+                          (e.g. "/exports/migrations").
+                        type: string
+                      path:
+                        description: Path is an optional sub-path within the export
+                          for this migration's data.
+                        type: string
+                      readOnly:
+                        default: false
+                        description: 'ReadOnly mounts the export read-only. No `omitempty`
+                          (defaulted bool footgun, PR #235).'
+                        type: boolean
+                      server:
+                        description: Server is the NFS server hostname or IP exporting
+                          the share.
+                        type: string
+                    required:
+                    - export
+                    - server
+                    type: object
                   pvc:
                     description: PVC specifies PVC-based storage configuration
                     properties:
@@ -267,11 +293,81 @@ spec:
                           Required if Name is not specified
                         type: string
                     type: object
+                  s3:
+                    description: |-
+                      S3 specifies S3-compatible object-storage staging configuration.
+                      Surface-only in ADR-0006 Slice 0 (no transfer logic yet).
+                    properties:
+                      bucket:
+                        description: Bucket is the S3 bucket for the transfer object.
+                        type: string
+                      credentialsSecretRef:
+                        description: |-
+                          CredentialsSecretRef references a Secret holding the S3 credentials
+                          (access key / secret / optional session token). Credentials are NEVER inline.
+                        properties:
+                          name:
+                            description: Name of the referenced object
+                            maxLength: 253
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                            type: string
+                          namespace:
+                            description: Namespace of the referenced object (defaults
+                              to current namespace)
+                            maxLength: 63
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      endpoint:
+                        description: Endpoint overrides the S3 endpoint (empty = AWS
+                          default; set for MinIO/Ceph RGW).
+                        type: string
+                      prefix:
+                        description: Prefix is the key prefix for this migration's
+                          objects.
+                        type: string
+                      region:
+                        description: Region is the S3 region for the bucket (empty
+                          = provider/SDK default).
+                        type: string
+                      usePathStyle:
+                        default: false
+                        description: |-
+                          UsePathStyle selects path-style addressing (needed by most non-AWS S3).
+                          No `omitempty`: defaulted bool footgun (see PR #235 / ProviderTLSSpec.Enabled) —
+                          omitempty drops an explicit false and the apiserver re-defaults it.
+                        type: boolean
+                    required:
+                    - bucket
+                    - credentialsSecretRef
+                    type: object
+                  transferMode:
+                    default: auto
+                    description: |-
+                      TransferMode selects how disk bytes travel to/from the staging backend.
+                      "relay" routes bytes host→provider-pod→backend (today's pod-side path);
+                      "direct" routes bytes host→backend without a provider-pod hop; "auto"
+                      lets the controller pick based on what both providers advertise. Only
+                      "relay" is implemented today (ADR-0006 Slice 0).
+                    enum:
+                    - auto
+                    - relay
+                    - direct
+                    type: string
                   type:
                     default: pvc
-                    description: Type specifies the storage backend type
+                    description: |-
+                      Type specifies the storage backend type used to stage the transferred
+                      disk between the source and target providers. "pvc" is the only backend
+                      with transfer logic today; "nfs" and "s3" are surface-only scaffolding
+                      (ADR-0006 Slice 0) and are rejected at the Validating phase until the
+                      corresponding transfer slices land.
                     enum:
                     - pvc
+                    - nfs
+                    - s3
                     type: string
                 required:
                 - type

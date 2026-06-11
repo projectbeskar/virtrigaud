@@ -22,6 +22,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
@@ -100,6 +102,45 @@ func TestServer_GetCapabilities_DiskMigration(t *testing.T) {
 	assert.Equal(t, []string{"qcow2", "raw"}, caps.SupportedExportFormats)
 	assert.Equal(t, []string{"qcow2", "raw", "vmdk"}, caps.SupportedImportFormats)
 	assert.True(t, caps.SupportsExportCompression, "ExportDisk honors req.Compress via qemu-img -c for qcow2 (#199)")
+}
+
+// TestServer_GetCapabilities_StorageBackends verifies libvirt advertises the
+// honest ADR-0006 status quo: pvc-only export/import backends and relay-only
+// transfer (the existing pod-side path), and never nfs/s3 or direct.
+func TestServer_GetCapabilities_StorageBackends(t *testing.T) {
+	s := &Server{}
+
+	caps, err := s.GetCapabilities(context.Background(), &providerv1.GetCapabilitiesRequest{})
+
+	require.NoError(t, err)
+	require.NotNil(t, caps)
+	assert.Equal(t, []string{"pvc"}, caps.SupportedExportBackends)
+	assert.Equal(t, []string{"pvc"}, caps.SupportedImportBackends)
+	assert.Equal(t, []string{"relay"}, caps.SupportedTransferModes)
+}
+
+// TestServer_ExportImportDisk_NonPVCBackendUnimplemented verifies that an
+// ExportDisk/ImportDisk request naming a non-pvc backend (e.g. s3) is rejected
+// with codes.Unimplemented before any provider work, per ADR-0006 Slice 0. The
+// guard runs ahead of the nil-provider check, so a zero-value Server suffices.
+func TestServer_ExportImportDisk_NonPVCBackendUnimplemented(t *testing.T) {
+	s := &Server{}
+
+	_, exportErr := s.ExportDisk(context.Background(), &providerv1.ExportDiskRequest{
+		VmId:        "vm-1",
+		BackendType: "s3",
+	})
+	require.Error(t, exportErr)
+	assert.Equal(t, codes.Unimplemented, status.Code(exportErr),
+		"ExportDisk must reject a non-pvc backend with Unimplemented (ADR-0006 Slice 0)")
+
+	_, importErr := s.ImportDisk(context.Background(), &providerv1.ImportDiskRequest{
+		SourceUrl:   "s3://bucket/disk",
+		BackendType: "s3",
+	})
+	require.Error(t, importErr)
+	assert.Equal(t, codes.Unimplemented, status.Code(importErr),
+		"ImportDisk must reject a non-pvc backend with Unimplemented (ADR-0006 Slice 0)")
 }
 
 // fakeDiskProvider is a minimal contracts.Provider used to exercise the Server's

@@ -411,6 +411,21 @@ type ReportedCapabilities struct {
 	// SupportsExportCompression reports export compression support.
 	// +optional
 	SupportsExportCompression bool `json:"supportsExportCompression,omitempty"`
+	// SupportedExportBackends lists the storage backends the provider can export
+	// disks to (e.g. "pvc", "nfs", "s3"). Empty/absent means pvc-only, the
+	// pre-ADR-0006 default (ADR-0006 Slice 0).
+	// +optional
+	SupportedExportBackends []string `json:"supportedExportBackends,omitempty"`
+	// SupportedImportBackends lists the storage backends the provider can import
+	// disks from (e.g. "pvc", "nfs", "s3"). Empty/absent means pvc-only
+	// (ADR-0006 Slice 0).
+	// +optional
+	SupportedImportBackends []string `json:"supportedImportBackends,omitempty"`
+	// SupportedTransferModes lists the disk-transfer modes the provider supports
+	// (e.g. "relay", "direct"). Empty/absent means relay-only, the pod-side path
+	// that predates ADR-0006 (ADR-0006 Slice 0).
+	// +optional
+	SupportedTransferModes []string `json:"supportedTransferModes,omitempty"`
 }
 
 // ProviderAdoptionStatus tracks VM adoption progress

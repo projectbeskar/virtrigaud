@@ -363,6 +363,9 @@ func capabilitiesToReported(caps contracts.Capabilities) *infravirtrigaudiov1bet
 		SupportedExportFormats:      caps.SupportedExportFormats,
 		SupportedImportFormats:      caps.SupportedImportFormats,
 		SupportsExportCompression:   caps.SupportsExportCompression,
+		SupportedExportBackends:     caps.SupportedExportBackends,
+		SupportedImportBackends:     caps.SupportedImportBackends,
+		SupportedTransferModes:      caps.SupportedTransferModes,
 	}
 }
 
