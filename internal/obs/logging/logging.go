@@ -315,6 +315,10 @@ func isSensitiveKey(key string) bool {
 		"password", "passwd", "pwd", "secret", "token", "key", "auth",
 		"credential", "cred", "api_key", "apikey", "access_key", "private_key",
 		"tls.key", "client.key", "ssh_private_key", "userdata", "user_data",
+		// ADR-0006 S3 migration credential map keys. These already match the
+		// substrings above (key/secret/token), but are listed explicitly so the
+		// coverage is intentional and survives future edits to this list.
+		"accesskeyid", "secretaccesskey", "sessiontoken",
 	}
 
 	keyLower := strings.ToLower(key)

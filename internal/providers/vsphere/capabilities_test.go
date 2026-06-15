@@ -52,3 +52,39 @@ func TestGetCapabilities_DiskMigration(t *testing.T) {
 	// VM is powered on; SnapshotCreate already honours req.IncludeMemory (issue #200).
 	assert.True(t, caps.SupportsMemorySnapshots)
 }
+
+// TestGetCapabilities_StorageBackends verifies vSphere advertises the honest
+// ADR-0006 Slice 1 per-direction surface: as the SOURCE it exports to pvc AND s3
+// (vCenter datastore stream → pod → S3), but it still only IMPORTS from pvc
+// (S3→vSphere import is a later slice). Transfer is relay-only.
+func TestGetCapabilities_StorageBackends(t *testing.T) {
+	p := &Provider{}
+
+	caps, err := p.GetCapabilities(context.Background(), &providerv1.GetCapabilitiesRequest{})
+	require.NoError(t, err)
+	require.NotNil(t, caps)
+
+	assert.Equal(t, []string{"pvc", "s3"}, caps.SupportedExportBackends,
+		"vSphere exports to pvc and s3 in Slice 1 (SOURCE of vSphere→S3→libvirt)")
+	assert.Equal(t, []string{"pvc"}, caps.SupportedImportBackends,
+		"vSphere import stays pvc-only in Slice 1 (vSphere is SOURCE, not TARGET)")
+	assert.Equal(t, []string{"relay"}, caps.SupportedTransferModes)
+}
+
+// TestExportDisk_BackendGate verifies the ADR-0006 backend/mode gate at the top
+// of ExportDisk: nfs is Unimplemented, an explicit direct mode is InvalidArgument
+// (loud-fail, never a silent downgrade). These guards run before the nil-client
+// check, so a zero-value Provider suffices.
+func TestExportDisk_BackendGate(t *testing.T) {
+	p := &Provider{}
+
+	_, nfsErr := p.ExportDisk(context.Background(), &providerv1.ExportDiskRequest{
+		VmId: "vm-1", BackendType: "nfs",
+	})
+	require.Error(t, nfsErr)
+
+	_, directErr := p.ExportDisk(context.Background(), &providerv1.ExportDiskRequest{
+		VmId: "vm-1", BackendType: "s3", TransferMode: "direct",
+	})
+	require.Error(t, directErr, "explicit direct mode must fail loudly (ADR-0006 D2)")
+}

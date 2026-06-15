@@ -423,10 +423,12 @@ func (p *Provider) GetCapabilities(ctx context.Context, req *providerv1.GetCapab
 		SupportedExportFormats:    []string{"vmdk", "qcow2", "raw"}, // ExportDisk converts the streamOptimized VMDK to these
 		SupportedImportFormats:    []string{"vmdk", "qcow2", "raw"}, // ImportDisk accepts these and converts to VMDK
 		SupportsExportCompression: true,                             // export uses the compressed streamOptimized VMDK format
-		// ADR-0006 Slice 0: advertise the status quo honestly. ExportDisk/
-		// ImportDisk only implement the pod-side (pvc, relay-shaped) staging
-		// path; nfs/s3 and direct transfer are not yet implemented.
-		SupportedExportBackends: migration.PVCOnlyExportBackends(),
+		// ADR-0006 Slice 1: vSphere is the SOURCE of the vSphere → S3 → libvirt
+		// relay path. It EXPORTS to pvc AND s3 (vCenter datastore stream → pod →
+		// S3, native vmdk); it still only IMPORTS from pvc (S3 import into vSphere
+		// is the reverse direction, a later slice). Only the relay transfer mode
+		// is implemented; direct is not.
+		SupportedExportBackends: migration.PVCAndS3ExportBackends(),
 		SupportedImportBackends: migration.PVCOnlyImportBackends(),
 		SupportedTransferModes:  migration.RelayOnlyTransferModes(),
 	}, nil
@@ -3278,17 +3280,23 @@ func (p *Provider) extractSnapshotNames(snapshotTree []types.VirtualMachineSnaps
 //
 // The operation runs synchronously; Task in the response is nil.
 func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskRequest) (*providerv1.ExportDiskResponse, error) {
-	// ADR-0006 Slice 0: only the legacy pvc staging path is implemented; reject
-	// nfs/s3 backends honestly instead of falling through to the pvc path.
-	if err := migration.EnsurePVCBackend(req.BackendType); err != nil {
+	// ADR-0006: vSphere is a SOURCE for the S3 relay export (Slice 1). Accept pvc
+	// and s3; reject nfs/unknown honestly. Only the relay transfer mode is
+	// implemented; an explicit "direct" fails loudly (never a silent downgrade).
+	if err := migration.EnsurePVCOrS3Backend(req.BackendType); err != nil {
 		return nil, err
 	}
+	if err := migration.EnsureRelayMode(req.TransferMode); err != nil {
+		return nil, err
+	}
+	useS3 := req.BackendType == migration.BackendS3
 
 	if p.client == nil {
 		return nil, errors.NewUnavailable("vSphere client not configured", nil)
 	}
 
-	p.logger.Info("Exporting disk", "vm_id", req.VmId, "destination", req.DestinationUrl)
+	// Never log the credentials map (secret material); log only the backend.
+	p.logger.Info("Exporting disk", "vm_id", req.VmId, "destination", req.DestinationUrl, "backend", req.BackendType)
 
 	// Get disk information first
 	diskInfo, err := p.GetDiskInfo(ctx, &providerv1.GetDiskInfoRequest{
@@ -3309,6 +3317,14 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 		return nil, errors.NewInvalidSpec("unsupported export format: %s", targetFormat)
 	}
 
+	// ADR-0006 D4: the SOURCE exports its NATIVE format; the TARGET converts on
+	// import. For the S3 relay path vSphere always exports vmdk and libvirt
+	// converts vmdk→qcow2 on import. Force vmdk here regardless of req.Format so
+	// the staged object is the native disk.
+	if useS3 {
+		targetFormat = "vmdk"
+	}
+
 	exportID := fmt.Sprintf("export-vsphere-%s-%d", req.VmId, time.Now().Unix())
 
 	// vSphere disk export strategy:
@@ -3321,21 +3337,27 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 	p.logger.Warn("vSphere disk export requires OVF export API - simplified implementation")
 	p.logger.Info("Note: Full implementation would use govmomi OVF export and datastore file access")
 
-	// Configure storage client
-	// URL format: pvc://<pvc-name>/<file-path>
-	// Provider pods have PVCs mounted at /mnt/migration-storage/<pvc-name>
-	// Extract PVC name from URL to construct the correct mount path
-	pvcName, err := extractPVCNameFromURL(req.DestinationUrl)
-	if err != nil {
-		return nil, errors.NewInternal("failed to extract PVC name from URL", err)
-	}
-
-	// Mount path matches where the controller mounts PVCs: /mnt/migration-storage/<pvc-name>
-	mountPath := fmt.Sprintf("/mnt/migration-storage/%s", pvcName)
-
-	storageConfig := storage.StorageConfig{
-		Type:      "pvc",
-		MountPath: mountPath,
+	// Configure storage client for the requested backend (ADR-0006).
+	//   - s3:  the provider pod is the S3 client (relay export). Options come from
+	//          storage_options_json; credentials from the credentials map.
+	//   - pvc: the legacy path; the PVC is mounted at /mnt/migration-storage/<pvc>.
+	var storageConfig storage.StorageConfig
+	if useS3 {
+		storageConfig, err = migration.S3StorageConfigFromRequest(req.StorageOptionsJson, req.Credentials)
+		if err != nil {
+			return nil, errors.NewInvalidSpec("invalid s3 export configuration: %s", err.Error())
+		}
+	} else {
+		// URL format: pvc://<pvc-name>/<file-path>
+		// Provider pods have PVCs mounted at /mnt/migration-storage/<pvc-name>
+		pvcName, perr := extractPVCNameFromURL(req.DestinationUrl)
+		if perr != nil {
+			return nil, errors.NewInternal("failed to extract PVC name from URL", perr)
+		}
+		storageConfig = storage.StorageConfig{
+			Type:      "pvc",
+			MountPath: fmt.Sprintf("/mnt/migration-storage/%s", pvcName),
+		}
 	}
 
 	storageClient, err := storage.NewStorage(storageConfig)

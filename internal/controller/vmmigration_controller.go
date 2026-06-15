@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -336,67 +337,79 @@ func (r *VMMigrationReconciler) handleValidatingPhase(ctx context.Context, migra
 			return r.transitionToFailed(ctx, migration, fmt.Sprintf("Invalid storage configuration: %v", err))
 		}
 
-		// Fail fast on a cross-namespace topology (#229). The migration transfer
-		// PVC is mounted into both the source and target provider pods, and a
-		// Kubernetes pod can only mount a PVC from its own namespace. If either
-		// provider lives in a different namespace than the migration (and thus the
-		// PVC), the mount can never happen — reject it up front with an actionable
-		// message instead of letting the handshake time out opaquely.
-		if sourceProvider.Namespace != migration.Namespace || targetProvider.Namespace != migration.Namespace {
-			return r.transitionToFailed(ctx, migration, fmt.Sprintf(
-				"PVC-based migration requires the migration (%s), source provider (%s/%s) and target provider (%s/%s) "+
-					"to share one namespace; a pod cannot mount a PVC across namespaces",
-				migration.Namespace, sourceProvider.Namespace, sourceProvider.Name,
-				targetProvider.Namespace, targetProvider.Name))
-		}
-
-		// Ensure PVC exists or create it
-		pvcName, err := r.ensureMigrationPVC(ctx, migration)
-		if err != nil {
-			return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to ensure migration PVC: %v", err))
-		}
-
-		// Record the PVC name so later phases can find it.
-		if migration.Status.StoragePVCName == "" {
-			migration.Status.StoragePVCName = pvcName
-			if err := r.updateStatus(ctx, migration); err != nil {
-				return ctrl.Result{}, err
+		// The s3 backend (ADR-0006) stages bytes through external object storage,
+		// not a shared PVC, so it has NEITHER the cross-namespace constraint NOR a
+		// migration PVC to create. The provider pods are the S3 clients. Skip the
+		// PVC path entirely for s3.
+		if migrationBackendType(migration) == storagemigration.BackendS3 {
+			// Validate credentials resolve before any side effect (fail fast at
+			// Validating, never mid-export — ADR-0006 D6). Never log the values.
+			if _, err := r.loadS3Credentials(ctx, migration); err != nil {
+				return r.transitionToFailed(ctx, migration, fmt.Sprintf("Invalid s3 storage configuration: %v", err))
 			}
-		}
-
-		// Non-blocking wait for both providers to roll a pod with the PVC mounted.
-		// The provider controller watches migration PVCs and re-rolls its
-		// Deployment to attach them; rather than blocking a reconcile worker with
-		// a time.Sleep poll, evaluate the mount state once and requeue until it
-		// settles or the deadline (derived from the PVC's age) elapses.
-		ready, reason, err := r.migrationProvidersMounted(ctx, sourceProvider, targetProvider, pvcName)
-		if err != nil {
-			return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to check migration storage mount: %v", err))
-		}
-		if !ready {
-			exceeded, mErr := r.migrationMountDeadlineExceeded(ctx, migration, pvcName)
-			if mErr != nil {
-				return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to check migration storage mount: %v", mErr))
-			}
-			if exceeded {
+		} else {
+			// Fail fast on a cross-namespace topology (#229). The migration transfer
+			// PVC is mounted into both the source and target provider pods, and a
+			// Kubernetes pod can only mount a PVC from its own namespace. If either
+			// provider lives in a different namespace than the migration (and thus the
+			// PVC), the mount can never happen — reject it up front with an actionable
+			// message instead of letting the handshake time out opaquely.
+			if sourceProvider.Namespace != migration.Namespace || targetProvider.Namespace != migration.Namespace {
 				return r.transitionToFailed(ctx, migration, fmt.Sprintf(
-					"timed out after %s waiting for providers to mount migration PVC %s (%s); "+
-						"verify the provider Deployments rolled new pods and that those pods are Ready "+
-						"(kubectl -n %s get deploy,pod -l app.kubernetes.io/name=virtrigaud-provider)",
-					migrationMountTimeout, pvcName, reason, migration.Namespace))
+					"PVC-based migration requires the migration (%s), source provider (%s/%s) and target provider (%s/%s) "+
+						"to share one namespace; a pod cannot mount a PVC across namespaces",
+					migration.Namespace, sourceProvider.Namespace, sourceProvider.Name,
+					targetProvider.Namespace, targetProvider.Name))
 			}
 
-			k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionValidating,
-				metav1.ConditionFalse, "WaitingForStorageMount", reason)
-			migration.Status.Message = fmt.Sprintf("Waiting for providers to mount migration storage: %s", reason)
-			if err := r.updateStatus(ctx, migration); err != nil {
-				return ctrl.Result{}, err
+			// Ensure PVC exists or create it
+			pvcName, err := r.ensureMigrationPVC(ctx, migration)
+			if err != nil {
+				return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to ensure migration PVC: %v", err))
 			}
-			logger.Info("Waiting for providers to mount migration PVC", "pvc", pvcName, "reason", reason)
-			return ctrl.Result{RequeueAfter: migrationMountPollInterval}, nil
+
+			// Record the PVC name so later phases can find it.
+			if migration.Status.StoragePVCName == "" {
+				migration.Status.StoragePVCName = pvcName
+				if err := r.updateStatus(ctx, migration); err != nil {
+					return ctrl.Result{}, err
+				}
+			}
+
+			// Non-blocking wait for both providers to roll a pod with the PVC mounted.
+			// The provider controller watches migration PVCs and re-rolls its
+			// Deployment to attach them; rather than blocking a reconcile worker with
+			// a time.Sleep poll, evaluate the mount state once and requeue until it
+			// settles or the deadline (derived from the PVC's age) elapses.
+			ready, reason, err := r.migrationProvidersMounted(ctx, sourceProvider, targetProvider, pvcName)
+			if err != nil {
+				return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to check migration storage mount: %v", err))
+			}
+			if !ready {
+				exceeded, mErr := r.migrationMountDeadlineExceeded(ctx, migration, pvcName)
+				if mErr != nil {
+					return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to check migration storage mount: %v", mErr))
+				}
+				if exceeded {
+					return r.transitionToFailed(ctx, migration, fmt.Sprintf(
+						"timed out after %s waiting for providers to mount migration PVC %s (%s); "+
+							"verify the provider Deployments rolled new pods and that those pods are Ready "+
+							"(kubectl -n %s get deploy,pod -l app.kubernetes.io/name=virtrigaud-provider)",
+						migrationMountTimeout, pvcName, reason, migration.Namespace))
+				}
+
+				k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionValidating,
+					metav1.ConditionFalse, "WaitingForStorageMount", reason)
+				migration.Status.Message = fmt.Sprintf("Waiting for providers to mount migration storage: %s", reason)
+				if err := r.updateStatus(ctx, migration); err != nil {
+					return ctrl.Result{}, err
+				}
+				logger.Info("Waiting for providers to mount migration PVC", "pvc", pvcName, "reason", reason)
+				return ctrl.Result{RequeueAfter: migrationMountPollInterval}, nil
+			}
+
+			logger.Info("Migration storage PVC mounted on both providers", "pvc", pvcName)
 		}
-
-		logger.Info("Migration storage PVC mounted on both providers", "pvc", pvcName)
 	}
 
 	// Validation complete, transition to next phase
@@ -630,10 +643,21 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 		diskFormat = migration.Spec.Options.DiskFormat
 	}
 
-	// Build export request. backend_type/transfer_mode carry the requested
-	// staging backend (default pvc) and transfer mode (default auto) per
-	// ADR-0006; in Slice 0 these are always pvc/auto because the Validating
-	// phase rejects anything else. storage_options_json stays empty for now.
+	// Resolve the s3 staging options and credentials (ADR-0006). For the pvc
+	// backend these are empty/no-op, preserving the legacy behavior. Credentials
+	// come from the referenced Secret and are NEVER logged or placed in Status.
+	storageOptionsJSON, err := s3StorageOptionsJSON(migration)
+	if err != nil {
+		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to build storage options: %v", err))
+	}
+	creds, err := r.loadS3Credentials(ctx, migration)
+	if err != nil {
+		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to load storage credentials: %v", err))
+	}
+
+	// Build export request. backend_type carries the requested staging backend
+	// (default pvc); transfer_mode is resolved auto→relay (Slice 1 implements
+	// only relay). storage_options_json carries the non-secret s3 options.
 	exportReq := contracts.ExportDiskRequest{
 		VmId:               sourceVM.Status.ID,
 		DiskId:             "", // Empty means export primary disk
@@ -641,13 +665,11 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 		DestinationURL:     destinationURL,
 		Format:             diskFormat,
 		Compress:           migration.Spec.Options != nil && migration.Spec.Options.Compress,
-		Credentials:        make(map[string]string),
+		Credentials:        creds,
 		BackendType:        migrationBackendType(migration),
-		TransferMode:       migrationTransferMode(migration),
-		StorageOptionsJSON: "",
+		TransferMode:       resolveTransferMode(migration),
+		StorageOptionsJSON: storageOptionsJSON,
 	}
-
-	// TODO: Load credentials from storage secret if configured
 
 	// Create extended context for export operation (disk exports can take a long time)
 	// For large disks (80GB+), clone + download + convert + upload can take 30+ minutes
@@ -831,26 +853,43 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 		diskFormat = migration.Spec.Options.DiskFormat
 	}
 
-	// Build import request
+	// Resolve the s3 staging options and credentials (ADR-0006). For the pvc
+	// backend these are empty/no-op. Credentials come from the referenced Secret
+	// and are NEVER logged or placed in Status.
+	storageOptionsJSON, err := s3StorageOptionsJSON(migration)
+	if err != nil {
+		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to build storage options: %v", err))
+	}
+	creds, err := r.loadS3Credentials(ctx, migration)
+	if err != nil {
+		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to load storage credentials: %v", err))
+	}
+
+	// For the s3 backend the staged object is the SOURCE's native format (vmdk
+	// for the vSphere → libvirt path); the target converts on import (ADR D4).
+	importFormat := diskFormat
+	if migrationBackendType(migration) == storagemigration.BackendS3 {
+		importFormat = "vmdk"
+	}
+
+	// Build import request. transfer_mode is resolved auto→relay (Slice 1).
 	importReq := contracts.ImportDiskRequest{
 		SourceURL:          sourceURL,
 		StorageHint:        "", // Let provider choose
-		Format:             diskFormat,
+		Format:             importFormat,
 		TargetName:         fmt.Sprintf("%s-migrated", migration.Spec.Target.Name),
 		VerifyChecksum:     migration.Spec.Options == nil || migration.Spec.Options.VerifyChecksums,
 		ExpectedChecksum:   "",
-		Credentials:        make(map[string]string),
+		Credentials:        creds,
 		BackendType:        migrationBackendType(migration),
-		TransferMode:       migrationTransferMode(migration),
-		StorageOptionsJSON: "",
+		TransferMode:       resolveTransferMode(migration),
+		StorageOptionsJSON: storageOptionsJSON,
 	}
 
 	// Set expected checksum if available
 	if migration.Status.DiskInfo != nil && migration.Status.DiskInfo.SourceChecksum != "" {
 		importReq.ExpectedChecksum = migration.Status.DiskInfo.SourceChecksum
 	}
-
-	// TODO: Load credentials from storage secret if configured
 
 	// Capability gate (issue #176). When enforcement is enabled and the
 	// target provider reports it cannot import disks, fail the migration
@@ -1512,9 +1551,26 @@ func (r *VMMigrationReconciler) validateStorageConfig(ctx context.Context, stora
 		return fmt.Errorf("storage configuration is required")
 	}
 
-	// Validate storage type
-	if storageConfig.Type != "pvc" && storageConfig.Type != "" {
-		return fmt.Errorf("unsupported storage type: %s (only 'pvc' is supported)", storageConfig.Type)
+	// Validate storage type (ADR-0006: pvc and s3 have transfer logic).
+	switch storageConfig.Type {
+	case "pvc", "":
+		// validated below
+	case storagemigration.BackendS3:
+		// S3 staging: require a bucket and a credentials Secret reference. The
+		// actual credential values are validated when the Secret is read; here we
+		// only check the shape. No PVC is involved.
+		if storageConfig.S3 == nil {
+			return fmt.Errorf("s3 configuration is required when using s3 storage type")
+		}
+		if storageConfig.S3.Bucket == "" {
+			return fmt.Errorf("s3.bucket is required for s3 storage type")
+		}
+		if storageConfig.S3.CredentialsSecretRef.Name == "" {
+			return fmt.Errorf("s3.credentialsSecretRef is required for s3 storage type")
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported storage type: %s (supported: 'pvc', 's3')", storageConfig.Type)
 	}
 
 	// Validate PVC configuration
@@ -1902,6 +1958,78 @@ func migrationTransferMode(migration *infrav1beta1.VMMigration) string {
 	return migration.Spec.Storage.TransferMode
 }
 
+// resolveTransferMode collapses the requested transfer mode to the concrete mode
+// the providers actually run (ADR-0006 D2). Slice 1 implements only relay, so
+// "auto" resolves to "relay" and "relay" passes through. "direct" is rejected at
+// the gate before this is called, so it never reaches here.
+func resolveTransferMode(migration *infrav1beta1.VMMigration) string {
+	mode := migrationTransferMode(migration)
+	if mode == storagemigration.TransferModeAuto {
+		return storagemigration.TransferModeRelay
+	}
+	return mode
+}
+
+// s3StorageOptionsJSON builds the non-secret storage_options_json carried to a
+// provider for the s3 backend (ADR-0006). Returns "" for non-s3 backends.
+func s3StorageOptionsJSON(migration *infrav1beta1.VMMigration) (string, error) {
+	if migrationBackendType(migration) != storagemigration.BackendS3 {
+		return "", nil
+	}
+	s3 := migration.Spec.Storage.S3
+	if s3 == nil {
+		return "", fmt.Errorf("s3 storage configuration is required for s3 backend")
+	}
+	return storagemigration.MarshalStorageOptions(storagemigration.StorageOptions{
+		Backend:      storagemigration.BackendS3,
+		Bucket:       s3.Bucket,
+		Endpoint:     s3.Endpoint,
+		Region:       s3.Region,
+		Prefix:       s3.Prefix,
+		UsePathStyle: s3.UsePathStyle,
+	})
+}
+
+// loadS3Credentials reads the S3 access credentials from the Secret referenced by
+// MigrationStorage.S3.CredentialsSecretRef and returns them as the gRPC
+// credentials map keyed per ADR-0006. Returns an empty map (no error) for
+// non-s3 backends so callers can unconditionally merge the result. Credential
+// VALUES are secret material: this function never logs them, and the caller must
+// never place them in Status, events, or logs.
+func (r *VMMigrationReconciler) loadS3Credentials(ctx context.Context, migration *infrav1beta1.VMMigration) (map[string]string, error) {
+	if migrationBackendType(migration) != storagemigration.BackendS3 {
+		return map[string]string{}, nil
+	}
+	s3 := migration.Spec.Storage.S3
+	if s3 == nil || s3.CredentialsSecretRef.Name == "" {
+		return nil, fmt.Errorf("s3 backend requires storage.s3.credentialsSecretRef")
+	}
+
+	// The Secret lives in the migration's namespace (namespaced get only; #152).
+	secret := &corev1.Secret{}
+	key := types.NamespacedName{Namespace: migration.Namespace, Name: s3.CredentialsSecretRef.Name}
+	if err := r.Get(ctx, key, secret); err != nil {
+		return nil, fmt.Errorf("get s3 credentials secret %s/%s: %w", key.Namespace, key.Name, err)
+	}
+
+	accessKey := string(secret.Data[storagemigration.CredKeyAccessKeyID])
+	secretKey := string(secret.Data[storagemigration.CredKeySecretAccessKey])
+	if accessKey == "" || secretKey == "" {
+		return nil, fmt.Errorf(
+			"s3 credentials secret %s/%s must contain keys %q and %q",
+			key.Namespace, key.Name, storagemigration.CredKeyAccessKeyID, storagemigration.CredKeySecretAccessKey)
+	}
+
+	creds := map[string]string{
+		storagemigration.CredKeyAccessKeyID:     accessKey,
+		storagemigration.CredKeySecretAccessKey: secretKey,
+	}
+	if token := string(secret.Data[storagemigration.CredKeySessionToken]); token != "" {
+		creds[storagemigration.CredKeySessionToken] = token
+	}
+	return creds, nil
+}
+
 // reportedExportBackends returns a provider's advertised export backends,
 // treating an empty/absent set as the implicit pvc-only default of a provider
 // that predates ADR-0006 (matching the ReportedCapabilities field contract).
@@ -1944,13 +2072,15 @@ func containsString(set []string, want string) bool {
 // transfer mode against what the source provider can export to and the target
 // provider can import from (read from each Provider's
 // status.reportedCapabilities). It returns an empty string when the migration
-// may proceed, or an actionable failure message otherwise (ADR-0006 Slice 0).
+// may proceed, or an actionable failure message otherwise (ADR-0006).
 //
-// Only the pvc backend has transfer logic today, so nfs/s3 are always rejected;
-// the capability comparison additionally rejects a backend or transfer mode that
-// either provider does not advertise. The "auto" transfer mode is always
-// permitted — the controller resolves it to a concrete mode the providers
-// support at request-build time.
+// Per-direction honesty (ADR-0006 D6): the source's EXPORT set and the target's
+// IMPORT set are compared independently, so vSphere(export=[pvc,s3]) →
+// libvirt(import=[pvc,s3]) in relay is allowed (Slice 1) while the reverse
+// direction — libvirt(export=[pvc]) → vSphere(import=[pvc]) over s3 — fails fast
+// because neither end advertises s3 in that direction. nfs and direct are
+// rejected up front because no provider implements them yet. The "auto" transfer
+// mode is permitted here and resolved to a concrete mode at request-build time.
 func (r *VMMigrationReconciler) gateMigrationStorageBackend(
 	migration *infrav1beta1.VMMigration,
 	sourceProvider *infrav1beta1.Provider,
@@ -1959,13 +2089,20 @@ func (r *VMMigrationReconciler) gateMigrationStorageBackend(
 	backend := migrationBackendType(migration)
 	mode := migrationTransferMode(migration)
 
-	// Slice 0: only pvc has transfer logic. Reject nfs/s3 up front with a
-	// message that points at the ADR, regardless of what a provider might
-	// (later) advertise.
-	if backend != storagemigration.BackendPVC {
+	// Only pvc and s3 have transfer logic. nfs has none yet (ADR-0006 Slice 4),
+	// so reject it up front regardless of what a provider might (later) advertise.
+	if backend != storagemigration.BackendPVC && backend != storagemigration.BackendS3 {
 		return fmt.Sprintf(
-			"storage backend %q is not yet implemented; only %q is supported today (ADR-0006 Slice 0)",
-			backend, storagemigration.BackendPVC)
+			"storage backend %q is not yet implemented; supported today: %q, %q (ADR-0006)",
+			backend, storagemigration.BackendPVC, storagemigration.BackendS3)
+	}
+
+	// Only relay is implemented (ADR-0006 Slice 1). An explicit "direct" fails
+	// loudly here — never a silent downgrade — before any side effect.
+	if mode == storagemigration.TransferModeDirect {
+		return fmt.Sprintf(
+			"transfer mode %q is not yet implemented; only %q (and %q) are supported today (ADR-0006 Slice 1)",
+			storagemigration.TransferModeDirect, storagemigration.TransferModeRelay, storagemigration.TransferModeAuto)
 	}
 
 	exportBackends := reportedExportBackends(sourceProvider)
@@ -2070,15 +2207,13 @@ func (r *VMMigrationReconciler) generateStorageURL(ctx context.Context, migratio
 
 	storageConfig := migration.Spec.Storage
 
-	// Generate a unique path for this migration
-	migrationPath := fmt.Sprintf("vmmigrations/%s/%s/%s.qcow2",
-		migration.Namespace,
-		migration.Name,
-		stage)
-
-	// Build URL based on storage type
+	// Build URL based on storage type.
 	switch storageConfig.Type {
 	case "pvc", "":
+		// PVC stages a qcow2 (the legacy pod-side path).
+		migrationPath := fmt.Sprintf("vmmigrations/%s/%s/%s.qcow2",
+			migration.Namespace, migration.Name, stage)
+
 		// Get the PVC name from status (set during validation phase)
 		pvcName := migration.Status.StoragePVCName
 		if pvcName == "" {
@@ -2088,6 +2223,22 @@ func (r *VMMigrationReconciler) generateStorageURL(ctx context.Context, migratio
 		// PVC URL format: pvc://<pvc-name>/<path>
 		// Provider pods have PVCs mounted at /mnt/migration-storage/<pvc-name>
 		return fmt.Sprintf("pvc://%s/%s", pvcName, migrationPath), nil
+
+	case storagemigration.BackendS3:
+		// S3 stages the SOURCE's native format (ADR-0006 D4). For the Slice 1
+		// vSphere → S3 → libvirt path that is a vmdk; the target converts on
+		// import. Object key: <prefix>vmmigrations/<ns>/<name>/<stage>.vmdk.
+		if storageConfig.S3 == nil || storageConfig.S3.Bucket == "" {
+			return "", fmt.Errorf("s3 storage configuration (bucket) is required")
+		}
+		key := fmt.Sprintf("vmmigrations/%s/%s/%s.vmdk",
+			migration.Namespace, migration.Name, stage)
+		prefix := strings.Trim(storageConfig.S3.Prefix, "/")
+		if prefix != "" {
+			key = prefix + "/" + key
+		}
+		// s3://bucket/<prefix>/<key>
+		return fmt.Sprintf("s3://%s/%s", storageConfig.S3.Bucket, key), nil
 
 	default:
 		return "", fmt.Errorf("unsupported storage type: %s", storageConfig.Type)

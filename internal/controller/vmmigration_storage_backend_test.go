@@ -41,15 +41,34 @@ func migrationWithStorage(storage *infrav1beta1.MigrationStorage) *infrav1beta1.
 	return &infrav1beta1.VMMigration{Spec: infrav1beta1.VMMigrationSpec{Storage: storage}}
 }
 
-// TestGateMigrationStorageBackend covers the ADR-0006 Slice 0 Validating-phase
-// gate: nil/empty/pvc storage proceeds; s3/nfs are rejected with an actionable,
-// ADR-referencing message; and a backend/mode not advertised by a provider is
-// rejected naming that provider and its supported set.
+// s3MigrationStorage builds a minimal valid s3 VMMigration for gate tests (the
+// gate inspects type/transferMode, not the s3 sub-fields).
+func s3MigrationStorage(mode string) *infrav1beta1.VMMigration {
+	return migrationWithStorage(&infrav1beta1.MigrationStorage{
+		Type:         "s3",
+		TransferMode: mode,
+		S3: &infrav1beta1.S3StorageConfig{
+			Bucket:               "virtrigaud",
+			CredentialsSecretRef: infrav1beta1.ObjectRef{Name: "s3-creds"},
+		},
+	})
+}
+
+// TestGateMigrationStorageBackend covers the ADR-0006 Validating-phase gate:
+// nil/empty/pvc storage proceeds; nfs is rejected as unimplemented; s3 proceeds
+// ONLY when the source advertises s3 export AND the target advertises s3 import
+// (per-direction, Slice 1); an explicit direct mode is rejected; and a
+// backend/mode not advertised by a provider is rejected naming that provider.
 func TestGateMigrationStorageBackend(t *testing.T) {
 	r := &VMMigrationReconciler{}
 
 	pvcSrc := providerWithCaps("src", []string{"pvc"}, []string{"pvc"}, []string{"relay"})
 	pvcTgt := providerWithCaps("tgt", []string{"pvc"}, []string{"pvc"}, []string{"relay"})
+
+	// Slice 1 directional shape: vSphere (SOURCE) exports pvc+s3 but imports
+	// pvc-only; libvirt (TARGET) imports pvc+s3 but exports pvc-only.
+	vsphereSrc := providerWithCaps("vsphere", []string{"pvc", "s3"}, []string{"pvc"}, []string{"relay"})
+	libvirtTgt := providerWithCaps("libvirt", []string{"pvc"}, []string{"pvc", "s3"}, []string{"relay"})
 
 	tests := []struct {
 		name        string
@@ -78,11 +97,44 @@ func TestGateMigrationStorageBackend(t *testing.T) {
 			wantOK: true,
 		},
 		{
-			name:      "s3 rejected with ADR-referencing message",
-			migration: migrationWithStorage(&infrav1beta1.MigrationStorage{Type: "s3"}),
+			name:      "s3 vSphere→libvirt relay proceeds (Slice 1)",
+			migration: s3MigrationStorage("relay"),
+			source:    vsphereSrc, target: libvirtTgt,
+			wantOK: true,
+		},
+		{
+			name:      "s3 vSphere→libvirt auto proceeds (resolves to relay)",
+			migration: s3MigrationStorage("auto"),
+			source:    vsphereSrc, target: libvirtTgt,
+			wantOK: true,
+		},
+		{
+			name:      "s3 reverse direction rejected (libvirt can't export s3)",
+			migration: s3MigrationStorage("relay"),
+			source:    libvirtTgt, target: vsphereSrc, // swapped: libvirt as source, vsphere as target
+			wantOK:      false,
+			wantContain: []string{"source provider", `"s3"`, "ADR-0006"},
+		},
+		{
+			name:      "s3 rejected when target cannot import s3",
+			migration: s3MigrationStorage("relay"),
+			source:    vsphereSrc, target: pvcTgt, // target imports pvc-only
+			wantOK:      false,
+			wantContain: []string{"target provider", `"s3"`, "ADR-0006"},
+		},
+		{
+			name:      "s3 explicit direct mode rejected (Slice 1 relay-only)",
+			migration: s3MigrationStorage("direct"),
+			source:    vsphereSrc, target: libvirtTgt,
+			wantOK:      false,
+			wantContain: []string{"transfer mode", `"direct"`, "ADR-0006"},
+		},
+		{
+			name:      "s3 rejected when providers advertise pvc-only",
+			migration: s3MigrationStorage("relay"),
 			source:    pvcSrc, target: pvcTgt,
 			wantOK:      false,
-			wantContain: []string{`"s3"`, "ADR-0006"},
+			wantContain: []string{"source provider", `"s3"`},
 		},
 		{
 			name:      "nfs rejected",

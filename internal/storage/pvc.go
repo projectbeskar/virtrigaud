@@ -401,6 +401,29 @@ func (p *PVCStorage) Download(ctx context.Context, req DownloadRequest) (Downloa
 	}, nil
 }
 
+// UploadStream streams the reader to a file under the mount, computing SHA256
+// in-stream. It is the streaming-interface counterpart of Upload for the PVC
+// backend (ADR-0006); it reuses Upload's file I/O path.
+func (p *PVCStorage) UploadStream(ctx context.Context, req StreamUploadRequest) (UploadResponse, error) {
+	return p.Upload(ctx, UploadRequest{
+		DestinationURL: req.DestinationURL,
+		Reader:         req.Reader,
+		ContentLength:  req.ContentLength,
+	})
+}
+
+// DownloadStream streams a file under the mount to the writer, computing SHA256
+// in-stream and verifying it against ExpectedChecksum when set. It is the
+// streaming-interface counterpart of Download for the PVC backend (ADR-0006).
+func (p *PVCStorage) DownloadStream(ctx context.Context, req StreamDownloadRequest) (DownloadResponse, error) {
+	return p.Download(ctx, DownloadRequest{
+		SourceURL:        req.SourceURL,
+		Writer:           req.Writer,
+		VerifyChecksum:   req.ExpectedChecksum != "",
+		ExpectedChecksum: req.ExpectedChecksum,
+	})
+}
+
 // Delete removes a file from PVC storage
 func (p *PVCStorage) Delete(ctx context.Context, url string) error {
 	log.Printf("INFO Deleting from PVC storage: %s", url)

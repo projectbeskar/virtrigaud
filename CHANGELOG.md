@@ -5,6 +5,67 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-15 19:49] - ADR-0006 Slice 1: vSphere → S3 → libvirt cross-hypervisor transfer (relay)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/storage/s3.go`: new minio-go-backed S3 backend implementing the `Storage` interface against any S3-compatible store (rustfs/MinIO/Ceph RGW/AWS). Streaming `UploadStream` (auto-multipart `PutObject`) and `DownloadStream` (`GetObject`) compute SHA256 in-stream via `io.TeeReader`/`io.MultiWriter`. `http://` endpoint ⇒ plaintext; path-style via `usePathStyle`; credentials come from the request, never config/logs.
+- `internal/storage/storage.go`: `Storage` interface gains `UploadStream`/`DownloadStream` (+ `StreamUploadRequest`/`StreamDownloadRequest`); `StorageConfig` gains an `S3` block; `NewStorage` now constructs the `s3` backend.
+- `internal/storage/pvc.go`: PVC backend implements the new streaming methods via file I/O (keeps `pvc` working).
+- `internal/storage/migration/options.go`: shared `StorageOptions` (storage_options_json) marshal/parse and S3 credential-map key constants (`accessKeyID`/`secretAccessKey`/`sessionToken`).
+- `internal/storage/migration/storageconfig.go`: `S3StorageConfigFromRequest` builds a provider-side `storage.StorageConfig` from the gRPC options+credentials (shared by vSphere and libvirt).
+- `internal/storage/migration/backend.go`: `PVCAndS3Export/ImportBackends`, `RelayOnlyTransferModes`, `EnsurePVCOrS3Backend`, `EnsureRelayMode` (explicit `direct` ⇒ `InvalidArgument`, never a silent downgrade).
+- `internal/providers/libvirt/s3import.go`: libvirt TARGET S3 import — download from S3 and stream over SSH **stdin** into host-side `qemu-img convert -f vmdk -O qcow2 /dev/stdin <pool>/<vol>.qcow2` (target-owned conversion, ADR D4), then `qemu-img check` (ADR D5) and `pool-refresh`. New `runSSHStdin` streams stdin (pipe), never buffering the disk.
+- Tests: S3/PVC streaming + checksum round-trip, options/creds/gate/url controller tests, vSphere/libvirt capability flips, and an S3-credential redaction no-leak test (`internal/obs/logging`).
+
+### Changed
+- `internal/providers/vsphere/server.go`: `ExportDisk` accepts `backend_type=s3` (SOURCE) — stages the native vmdk and streams it to S3 with in-stream SHA256; `GetCapabilities` now advertises export `[pvc,s3]` (import stays `[pvc]`).
+- `internal/providers/libvirt/server.go`: `ImportDisk` accepts `backend_type=s3` (TARGET) via `importDiskFromS3`; `GetCapabilities` advertises import `[pvc,s3]` (export stays `[pvc]`).
+- `internal/controller/vmmigration_controller.go`: resolves `transferMode auto→relay` (rejects explicit `direct`); builds the `s3://bucket/prefix/<key>` URL; loads creds from `S3StorageConfig.credentialsSecretRef` into the gRPC `credentials` map; passes `storage_options_json`; per-direction gate now ALLOWS vSphere(export=s3)→libvirt(import=s3) in relay while the reverse direction still fails fast; skips PVC creation + the cross-namespace PVC check for the s3 backend.
+- `internal/obs/logging/logging.go`: redactor explicitly lists the S3 credential keys.
+- `examples/vmmigration-s3.yaml`: rewritten into a real vSphere→libvirt rustfs example (`http://rustfs.lab.k8:9000`, `usePathStyle: true`, `credentialsSecretRef`, sample Secret with placeholder keys).
+- `go.mod`/`go.sum`: add `github.com/minio/minio-go/v7`.
+
+### Why
+ADR-0006 Slice 1 delivers the first real cross-hypervisor disk transfer, proving the storage-backend-agnostic, pod-as-S3-client architecture end-to-end without a shared filesystem or a CSI PVC the hypervisor host cannot see. Scope is intentionally one direction (vSphere SOURCE → libvirt TARGET); capabilities are advertised honestly per direction so unsupported combinations fail fast at Validating.
+
+### Scope / follow-ups
+- vSphere→libvirt only. Reverse direction, Proxmox, NFS, and the `direct` transfer mode are later slices and are rejected with an ADR-referencing message.
+- vSphere export stages the vmdk to a temp file in the pod before the S3 upload (govmomi datastore download), then streams that file to S3; a fully streaming vCenter→S3 export is a follow-up.
+- minio auto-multipart satisfies "multipart now"; full crash-resume (UploadId/part state in Status) is OUT of scope — a failed transfer retries whole.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (new provider behavior; namespaced `get` on the S3 credentials Secret)
+- [ ] Config change only
+- [ ] Documentation only
+
+### Usage
+```yaml
+apiVersion: v1
+kind: Secret
+metadata: { name: s3-migration-credentials, namespace: default }
+stringData:
+  accessKeyID: "..."
+  secretAccessKey: "..."
+---
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMMigration
+spec:
+  source: { vmRef: { name: prod-app-server } }         # vSphere-backed VM
+  target: { name: prod-app-server-migrated, providerRef: { name: libvirt-provider } }
+  storage:
+    type: s3
+    transferMode: relay
+    s3:
+      bucket: virtrigaud
+      endpoint: http://rustfs.lab.k8:9000
+      usePathStyle: true
+      credentialsSecretRef: { name: s3-migration-credentials }
+```
+
+---
+
 ## [2026-06-11 14:05] - ADR-0006 Slice 0: storage-backend-agnostic migration surface (additive)
 **Author:** @wrkode (William Rizzo)
 

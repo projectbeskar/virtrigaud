@@ -60,31 +60,70 @@ const (
 )
 
 // PVCOnlyExportBackends is the honest export-backend set for a provider that
-// only implements the legacy pvc staging path (every production provider in
-// ADR-0006 Slice 0).
+// only implements the legacy pvc staging path.
 func PVCOnlyExportBackends() []string { return []string{BackendPVC} }
 
 // PVCOnlyImportBackends is the honest import-backend set for a provider that
-// only implements the legacy pvc staging path (every production provider in
-// ADR-0006 Slice 0).
+// only implements the legacy pvc staging path.
 func PVCOnlyImportBackends() []string { return []string{BackendPVC} }
 
+// PVCAndS3ExportBackends is the honest export-backend set for a provider that
+// implements both the legacy pvc path and the S3 relay export path. Used by the
+// vSphere provider as the SOURCE in ADR-0006 Slice 1 (vSphere → S3 → libvirt).
+func PVCAndS3ExportBackends() []string { return []string{BackendPVC, BackendS3} }
+
+// PVCAndS3ImportBackends is the honest import-backend set for a provider that
+// implements both the legacy pvc path and the S3 relay import path. Used by the
+// libvirt provider as the TARGET in ADR-0006 Slice 1 (vSphere → S3 → libvirt).
+func PVCAndS3ImportBackends() []string { return []string{BackendPVC, BackendS3} }
+
 // RelayOnlyTransferModes is the honest transfer-mode set for a provider that
-// only implements the pod-side (relay-shaped) path. The existing pvc path
-// stages bytes through the provider pod, i.e. it is relay-shaped; no provider
-// advertises "direct" in ADR-0006 Slice 0.
+// only implements the pod-side (relay) path. Both the legacy pvc path and the
+// ADR-0006 Slice 1 S3 path are relay-shaped (bytes flow host → provider-pod →
+// backend); no provider advertises "direct" before Slice 2.
 func RelayOnlyTransferModes() []string { return []string{TransferModeRelay} }
+
+// EnsureRelayMode returns a codes.InvalidArgument error if transferMode names a
+// mode other than relay/auto. Slice 1 implements only the relay (pod-as-backend-
+// client) path; an explicit "direct" must fail loudly, never silently downgrade
+// (ADR-0006 D2). Empty and "auto" are accepted: the controller resolves auto to
+// relay before issuing the RPC, so a provider treats both as relay.
+func EnsureRelayMode(transferMode string) error {
+	switch transferMode {
+	case "", TransferModeAuto, TransferModeRelay:
+		return nil
+	default:
+		return status.Errorf(codes.InvalidArgument,
+			"transfer mode %q not supported; only %q is implemented (ADR-0006 Slice 1)",
+			transferMode, TransferModeRelay)
+	}
+}
 
 // EnsurePVCBackend returns a codes.Unimplemented error if backendType names a
 // staging backend other than pvc. An empty backendType means the legacy pvc
-// path and is always accepted, preserving pre-ADR-0006 behavior. Providers call
-// this at the top of ExportDisk/ImportDisk so that non-pvc requests fail
-// honestly instead of silently falling through to the pvc path (ADR-0006 Slice
-// 0).
+// path and is always accepted, preserving pre-ADR-0006 behavior. Providers that
+// have NOT yet implemented a non-pvc path (libvirt export, vSphere import,
+// proxmox, mock) call this at the top of ExportDisk/ImportDisk so non-pvc
+// requests fail honestly instead of silently falling through to the pvc path.
 func EnsurePVCBackend(backendType string) error {
 	if backendType == "" || backendType == BackendPVC {
 		return nil
 	}
 	return status.Errorf(codes.Unimplemented,
-		"backend %q not yet supported (ADR-0006 Slice 0)", backendType)
+		"backend %q not yet supported on this provider/direction (ADR-0006)", backendType)
+}
+
+// EnsurePVCOrS3Backend returns a codes.Unimplemented error if backendType names
+// a staging backend other than pvc or s3. An empty backendType means the legacy
+// pvc path. Providers that implement the ADR-0006 Slice 1 S3 relay path in a
+// given direction (vSphere export, libvirt import) call this so pvc and s3 are
+// accepted while nfs/unknown still fail honestly.
+func EnsurePVCOrS3Backend(backendType string) error {
+	switch backendType {
+	case "", BackendPVC, BackendS3:
+		return nil
+	default:
+		return status.Errorf(codes.Unimplemented,
+			"backend %q not yet supported on this provider/direction (ADR-0006)", backendType)
+	}
 }

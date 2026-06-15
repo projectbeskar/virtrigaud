@@ -232,3 +232,25 @@ func TestRedactStringIdempotent(t *testing.T) {
 	assert.False(t, strings.Contains(twice, "hunter2"),
 		"secret must still be absent after second pass")
 }
+
+// TestRedactMapHidesS3MigrationCredentials is the ADR-0006 no-leak canary: the
+// S3 migration credential map keys (accessKeyID/secretAccessKey/sessionToken)
+// must be redacted by key so credential VALUES never reach logs/events/Status.
+func TestRedactMapHidesS3MigrationCredentials(t *testing.T) {
+	in := map[string]string{
+		"accessKeyID":     "AKIAEXAMPLE1234567",
+		"secretAccessKey": "ZmFrZS1zZWNyZXQtbm90LXJlYWw",
+		"sessionToken":    "FQoGZXIvYXdzEXAMPLEtoken",
+		"backend":         "s3", // non-sensitive context survives
+	}
+	out := RedactMap(in)
+	for _, k := range []string{"accessKeyID", "secretAccessKey", "sessionToken"} {
+		assert.Equal(t, "[REDACTED]", out[k], "value for %q must be redacted", k)
+	}
+	assert.Equal(t, "s3", out["backend"], "non-sensitive context should be preserved")
+	// Belt-and-suspenders: the raw secret material must not appear anywhere.
+	joined := strings.Join([]string{out["accessKeyID"], out["secretAccessKey"], out["sessionToken"]}, " ")
+	for _, secret := range []string{"AKIAEXAMPLE1234567", "ZmFrZS1zZWNyZXQtbm90LXJlYWw", "FQoGZXIvYXdzEXAMPLEtoken"} {
+		assert.False(t, strings.Contains(joined, secret), "secret %q leaked", secret)
+	}
+}

@@ -532,11 +532,13 @@ func (s *Server) GetCapabilities(ctx context.Context, req *providerv1.GetCapabil
 		SupportedExportFormats:      []string{"qcow2", "raw"},
 		SupportedImportFormats:      []string{"qcow2", "raw", "vmdk"},
 		SupportsExportCompression:   true, // ExportDisk honors req.Compress via qemu-img -c for qcow2 (#199); default (Compress=false) is uncompressed for speed
-		// ADR-0006 Slice 0: advertise the status quo honestly. ExportDisk/
-		// ImportDisk only implement the pod-side (pvc, relay-shaped) staging
-		// path; nfs/s3 and direct transfer are not yet implemented.
+		// ADR-0006 Slice 1: libvirt is the TARGET of the vSphere → S3 → libvirt
+		// relay path. It imports from pvc AND s3 (download + host-side vmdk→qcow2
+		// convert); it still only EXPORTS to pvc (libvirt-export-to-S3 is the
+		// reverse direction, a later slice). Only the relay transfer mode is
+		// implemented; direct is not.
 		SupportedExportBackends: migration.PVCOnlyExportBackends(),
-		SupportedImportBackends: migration.PVCOnlyImportBackends(),
+		SupportedImportBackends: migration.PVCAndS3ImportBackends(),
 		SupportedTransferModes:  migration.RelayOnlyTransferModes(),
 	}, nil
 }
@@ -614,10 +616,20 @@ func (s *Server) GetDiskInfo(ctx context.Context, req *providerv1.GetDiskInfoReq
 
 // ImportDisk imports a disk from an external source (for VM migration)
 func (s *Server) ImportDisk(ctx context.Context, req *providerv1.ImportDiskRequest) (*providerv1.ImportDiskResponse, error) {
-	// ADR-0006 Slice 0: only the legacy pvc staging path is implemented; reject
-	// nfs/s3 backends honestly instead of falling through to the pvc path.
-	if err := migration.EnsurePVCBackend(req.BackendType); err != nil {
+	// ADR-0006: libvirt is a TARGET for the S3 relay import (Slice 1). Accept pvc
+	// and s3; reject nfs/unknown honestly. Only the relay transfer mode is
+	// implemented; an explicit "direct" fails loudly.
+	if err := migration.EnsurePVCOrS3Backend(req.BackendType); err != nil {
 		return nil, err
+	}
+	if err := migration.EnsureRelayMode(req.TransferMode); err != nil {
+		return nil, err
+	}
+
+	// S3 relay import: download from S3 and stream into host-side qemu-img
+	// convert (vmdk→qcow2). Never logs the credentials map.
+	if req.BackendType == migration.BackendS3 {
+		return s.importDiskFromS3(ctx, req)
 	}
 
 	log.Printf("INFO Starting disk import from %s", req.SourceUrl)
