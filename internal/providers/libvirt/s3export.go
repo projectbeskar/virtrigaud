@@ -113,8 +113,12 @@ func (s *Server) exportDiskToS3(ctx context.Context, req *providerv1.ExportDiskR
 	// --- FLATTEN (ADR D4) ---
 	// Collapse the (possibly snapshot-overlay) backing chain into one standalone
 	// qcow2 on the host. -f qcow2 forces the source driver (no format probing of
-	// the overlay); -O qcow2 keeps the native format the target expects.
-	if res, err := vp.runVirshCommand(ctx, "!", "qemu-img", "convert", "-f", "qcow2", "-O", "qcow2",
+	// the overlay); -O qcow2 keeps the native format the target expects. -U skips
+	// the shared-disk lock so a still-running source (e.g. powerOffBeforeMigration
+	// not yet honored, or createSnapshot=false) can be read — this is a
+	// crash-consistent copy; a consistent copy still requires the source to be
+	// powered off or snapshotted first.
+	if res, err := vp.runVirshCommand(ctx, "!", "qemu-img", "convert", "-U", "-f", "qcow2", "-O", "qcow2",
 		shellQuote(srcPath), shellQuote(hostTmp)); err != nil {
 		return nil, fmt.Errorf("host-side qemu-img flatten (qcow2→standalone qcow2) failed: %w%s", err, qemuImgStderr(res))
 	}
