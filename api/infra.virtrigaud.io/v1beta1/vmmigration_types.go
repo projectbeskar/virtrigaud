@@ -454,6 +454,21 @@ const (
 	MigrationPhaseFailed MigrationPhase = "Failed"
 )
 
+// Cleanup policy values for MigrationOptions.CleanupPolicy. These mirror the
+// +kubebuilder:validation:Enum on that field; they exist as Go constants so the
+// controller never compares against bare string literals (CLAUDE.md rule).
+const (
+	// CleanupPolicyAlways removes migration-created artifacts regardless of the
+	// migration's terminal outcome.
+	CleanupPolicyAlways = "Always"
+	// CleanupPolicyOnSuccess removes migration-created artifacts only when the
+	// migration completes successfully. This is the default.
+	CleanupPolicyOnSuccess = "OnSuccess"
+	// CleanupPolicyNever retains all migration-created artifacts; the user opts
+	// out of cleanup entirely.
+	CleanupPolicyNever = "Never"
+)
+
 // MigrationProgress shows the migration operation progress
 type MigrationProgress struct {
 	// CurrentPhase is the current phase being executed
