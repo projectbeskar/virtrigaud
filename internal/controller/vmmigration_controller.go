@@ -978,11 +978,21 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to load storage credentials: %v", err))
 	}
 
-	// For the s3 backend the staged object is the SOURCE's native format (vmdk
-	// for the vSphere → libvirt path); the target converts on import (ADR D4).
+	// For the s3 backend the staged object is the SOURCE provider's native
+	// flattened format and the target converts on import (ADR-0006 D4). This is
+	// DIRECTION-AWARE and derived from the source provider type — never a
+	// hard-coded "vmdk": vSphere source -> vmdk (forward), libvirt source ->
+	// qcow2 (reverse). For non-s3 backends the legacy/spec-derived format is
+	// threaded unchanged.
 	importFormat := diskFormat
 	if migrationBackendType(migration) == storagemigration.BackendS3 {
-		importFormat = "vmdk"
+		sourceProvider, srcErr := r.getSourceProvider(ctx, migration)
+		if srcErr != nil {
+			return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to get source provider: %v", srcErr))
+		}
+		importFormat = stagedImportFormat(sourceProvider)
+		logger.Info("Derived s3 staged import format from source provider",
+			"source_provider_type", sourceProvider.Spec.Type, "import_format", importFormat)
 	}
 
 	// Build import request. transfer_mode is resolved auto→relay (Slice 1).
@@ -1033,17 +1043,45 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to start disk import: %v", err))
 	}
 
-	// Store import info in status
+	// Store import info in status.
+	//
+	// Space precheck (ADR-0006 Slice 2): there is intentionally NO target-side
+	// capacity gate here today, so nothing asserts that the imported disk's
+	// *used* size fits the target. This matters for vSphere: Approach 2 inflates
+	// the disk with CopyVirtualDisk, which materializes as eagerZeroedThick on
+	// VMFS — the target disk consumes its FULL provisioned (virtual) size, not
+	// the used size. importResp.ActualSizeBytes below is reported for the status
+	// message only and is NOT compared against any datastore capacity. If a
+	// target-side capacity gate is added later, it MUST budget the *virtual*
+	// (provisioned) size for vSphere targets, never the used/actual size.
 	migration.Status.ImportID = importResp.DiskId
 	migration.Status.Message = fmt.Sprintf("Importing disk (size: %d bytes)", importResp.ActualSizeBytes)
 
-	// Update disk info in status
+	// Update disk info in status.
+	//
+	// TargetFormat is the format the disk landed in on the TARGET provider,
+	// derived from the target provider type (vSphere target -> vmdk, libvirt
+	// target -> qcow2) rather than hard-defaulted to qcow2. For the forward
+	// vSphere -> libvirt path this still resolves to qcow2, so that path is
+	// unchanged; for the reverse libvirt -> vSphere path it correctly labels the
+	// landed disk as vmdk.
+	//
+	// TargetPath is the provider-native path returned by ImportDisk (e.g.
+	// "[datastore1] <id>/<id>.vmdk" for vSphere). It is CRITICAL for the reverse
+	// path: the VM controller must attach the disk at exactly this path rather
+	// than synthesizing a bogus libvirt-style path. The created target VM copies
+	// it into Spec.ImportedDisk.Path in the creating phase.
 	if migration.Status.DiskInfo == nil {
 		migration.Status.DiskInfo = &infrav1beta1.MigrationDiskInfo{}
 	}
 	migration.Status.DiskInfo.TargetDiskID = importResp.DiskId
-	migration.Status.DiskInfo.TargetFormat = diskFormat
+	migration.Status.DiskInfo.TargetFormat = landedTargetFormat(targetProvider)
+	migration.Status.DiskInfo.TargetPath = importResp.Path
 	migration.Status.DiskInfo.TargetChecksum = importResp.Checksum
+	logger.Info("Recorded imported disk info",
+		"target_disk_id", importResp.DiskId,
+		"target_format", migration.Status.DiskInfo.TargetFormat,
+		"target_path", importResp.Path)
 
 	// If there's a task, we need to wait for it
 	if importResp.TaskRef != "" {
@@ -1178,10 +1216,18 @@ func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migrati
 		targetVM.Spec.Networks = migration.Spec.Target.Networks
 	}
 
-	// Set imported disk reference
-	// This references the disk that was imported during the migration
+	// Set imported disk reference.
+	// This references the disk that was imported during the migration. Path is
+	// the authoritative provider-native location returned by ImportDisk and
+	// recorded in Status.DiskInfo.TargetPath. Propagating it is CRITICAL for a
+	// vSphere target: without it the VM controller would synthesize a libvirt
+	// "/var/lib/libvirt/images/<id>.<fmt>" path that does not exist on the
+	// target. When TargetPath is empty (older imports, or a provider that does
+	// not return one), Path stays empty and the VM controller falls back to its
+	// provider-default synthesis.
 	targetVM.Spec.ImportedDisk = &infrav1beta1.ImportedDiskRef{
 		DiskID: migration.Status.ImportID,
+		Path:   migration.Status.DiskInfo.TargetPath,
 		Format: migration.Status.DiskInfo.TargetFormat,
 		Source: "migration",
 		MigrationRef: &infrav1beta1.LocalObjectReference{
@@ -1191,6 +1237,7 @@ func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migrati
 
 	logger.Info("Target VM configured with imported disk",
 		"disk_id", migration.Status.ImportID,
+		"path", migration.Status.DiskInfo.TargetPath,
 		"format", migration.Status.DiskInfo.TargetFormat,
 		"checksum", migration.Status.DiskInfo.TargetChecksum)
 
@@ -2233,6 +2280,55 @@ func containsString(set []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// Native staged disk formats per provider family. The s3-relay path stages a
+// disk in the SOURCE provider's native flattened format and converts on import,
+// so the import format is derived from the source provider type and the landed
+// target disk's format is derived from the target provider type — never from a
+// hard-coded direction (ADR-0006 Slice 2).
+const (
+	// diskFormatQcow2 is the native staged/landed format for libvirt and proxmox.
+	diskFormatQcow2 = "qcow2"
+	// diskFormatVMDK is the native staged/landed format for vSphere.
+	diskFormatVMDK = "vmdk"
+)
+
+// nativeDiskFormat returns the provider family's native flattened disk format.
+// vSphere stages/lands vmdk; libvirt and proxmox (and any QEMU-backed family)
+// stage/land qcow2. Unknown/empty provider types fall back to qcow2, matching
+// the pre-ADR-0006 default and the libvirt-source forward assumption. This is
+// the single source of truth for both the import-format and target-format
+// derivations below, so the two can never disagree for the same provider.
+func nativeDiskFormat(p *infrav1beta1.Provider) string {
+	if p != nil && p.Spec.Type == infrav1beta1.ProviderTypeVSphere {
+		return diskFormatVMDK
+	}
+	return diskFormatQcow2
+}
+
+// stagedImportFormat returns the format of the staged object the TARGET provider
+// must read on import for an s3-relay migration. The staged object is the SOURCE
+// provider's native flattened format (vSphere source -> vmdk, libvirt/proxmox
+// source -> qcow2), regardless of migration direction. For non-s3 backends the
+// caller threads the legacy/spec-derived format instead; this is only consulted
+// on the s3 path.
+//
+// Note: contracts.ExportDiskResponse does not carry a Format field today, so the
+// staged format is derived from the source provider type rather than threaded
+// from the export response. If the contract later grows an authoritative
+// ExportDiskResponse.Format, prefer threading it and fall back to this.
+func stagedImportFormat(sourceProvider *infrav1beta1.Provider) string {
+	return nativeDiskFormat(sourceProvider)
+}
+
+// landedTargetFormat returns the format of the disk that the TARGET provider's
+// ImportDisk materializes natively (vSphere target -> vmdk, libvirt/proxmox
+// target -> qcow2). It labels Status.DiskInfo.TargetFormat and seeds the created
+// VirtualMachine's Spec.ImportedDisk.Format so the VM controller attaches the
+// disk with the correct on-disk format for the target hypervisor.
+func landedTargetFormat(targetProvider *infrav1beta1.Provider) string {
+	return nativeDiskFormat(targetProvider)
 }
 
 // gateMigrationStorageBackend validates the requested storage backend and

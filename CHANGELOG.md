@@ -5,6 +5,35 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-16 16:05] - ADR-0006 Slice 2 — reverse-direction (libvirt→vSphere) controller wiring
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `api/infra.virtrigaud.io/v1beta1/vmmigration_types.go`: additive `MigrationDiskInfo.TargetPath` status field — the provider-native path the target provider's `ImportDisk` returns (e.g. `[datastore1] <id>/<id>.vmdk` for vSphere). Regenerated `config/crd/bases/infra.virtrigaud.io_vmmigrations.yaml` (the only schema delta; `zz_generated.deepcopy.go` unchanged — plain `string`).
+- `internal/controller/vmmigration_controller.go`: direction-agnostic disk-format derivation keyed off **provider type** — `nativeDiskFormat`/`stagedImportFormat`/`landedTargetFormat` (vSphere→`vmdk`, libvirt/proxmox/unknown→`qcow2`), with `diskFormatQcow2`/`diskFormatVMDK` constants. One source of truth so the import-format and target-format derivations can never disagree.
+- `internal/controller/vmmigration_direction_test.go`: unit tests for (a) reverse libvirt→vSphere threading `Format=qcow2` to import + propagating `importResp.Path` to `TargetPath` + labeling `TargetFormat=vmdk`; (b) forward vSphere→libvirt unchanged (vmdk + libvirt pool path); (c) creating phase copying `TargetPath`→`ImportedDisk.Path`; (d) the provider-type→format table. Uses the `providerInstanceFn` seam.
+
+### Fixed
+- `internal/controller/vmmigration_controller.go` (`handleImportingPhase`): the s3 import format was hard-coded to `vmdk` (forward-path only). It is now derived from the **source** provider type, so the reverse path correctly threads `qcow2`. The source-checksum→`ImportDiskRequest.ExpectedChecksum` threading from Slice 1 is preserved.
+- `internal/controller/vmmigration_controller.go` (`handleImportingPhase`): the controller dropped `importResp.Path`; it now records it in `Status.DiskInfo.TargetPath`. `TargetFormat` is derived from the **target** provider type (was hard-defaulted to `qcow2`; resolves to `qcow2` for a libvirt target so the forward path is byte-identical, `vmdk` for a vSphere target).
+- `internal/controller/vmmigration_controller.go` (`handleCreatingPhase`): the created target VM's `Spec.ImportedDisk.Path` is now set from `Status.DiskInfo.TargetPath`.
+- `internal/controller/virtualmachine_controller.go`: the imported-disk path resolution now treats the synthesized `/var/lib/libvirt/images/<id>.<fmt>` form as an explicit libvirt-only **last resort** (only when `ImportedDisk.Path` is empty) and documents that vSphere targets always carry an explicit path. No behavior change when a path is set.
+
+### Why
+ADR-0006 Slice 2's provider data-paths (libvirt→S3 qcow2 export, vSphere←S3 import) were committed but the controller still assumed the forward (vSphere→libvirt) staged format and dropped the target disk path — so every reverse libvirt→vSphere migration would have imported with the wrong format and then attached a bogus libvirt path on a vSphere target. This wires the controller to be direction-agnostic by deriving format/path from provider type. Refs #236.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (manager image — CRD additive field + controller logic)
+- [ ] Config change only
+- [ ] Documentation only
+
+### Notes
+- vSphere space precheck: there is no target-side capacity gate today; nothing asserts the imported disk's used size fits. A code comment in `handleImportingPhase` documents that any future gate must budget the **virtual** (provisioned) size for vSphere targets, because Approach 2's `CopyVirtualDisk` materializes as eagerZeroedThick on VMFS.
+- The generic `gateMigrationStorageBackend` already permits libvirt→vSphere now that the provider capability sets advertise `s3` in both directions; it was verified, not changed.
+
+---
+
 ## [2026-06-16 14:30] - ADR-0006 Slice 2 — libvirt→S3 export & vSphere←S3 import (reverse relay) provider data-paths
 **Author:** @wrkode (William Rizzo)
 

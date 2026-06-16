@@ -520,6 +520,15 @@ type MigrationDiskInfo struct {
 	// +optional
 	TargetFormat string `json:"targetFormat,omitempty"`
 
+	// TargetPath is the provider-native path of the imported disk as returned by
+	// the target provider's ImportDisk (e.g. "[datastore1] disk-id/disk-id.vmdk"
+	// for vSphere, "/var/lib/libvirt/images/disk-id.qcow2" for libvirt). It is
+	// the authoritative location the created target VirtualMachine attaches; the
+	// controller copies it into Spec.ImportedDisk.Path. Empty until the import
+	// completes (ADR-0006 Slice 2).
+	// +optional
+	TargetPath string `json:"targetPath,omitempty"`
+
 	// TargetSize is the target disk size in bytes
 	// +optional
 	TargetSize *resource.Quantity `json:"targetSize,omitempty"`
