@@ -24,6 +24,7 @@ import (
 
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/vim25/types"
+	"github.com/vmware/govmomi/vmdk"
 
 	"github.com/projectbeskar/virtrigaud/internal/diskutil"
 	"github.com/projectbeskar/virtrigaud/internal/storage"
@@ -32,35 +33,48 @@ import (
 	"github.com/projectbeskar/virtrigaud/sdk/provider/errors"
 )
 
+// s3ImportSubformat is the qemu-img vmdk subformat the S3 import path MUST
+// produce. The vCenter NFC HttpNfcLease import (vmdk.Import) only accepts
+// streamOptimized — vmdk.Stat rejects every other subformat with
+// ErrInvalidFormat. This was de-risked GREEN against lab vCenter 8.0.2; the
+// earlier monolithicSparse + CopyVirtualDisk approach is rejected with "A
+// specified parameter was not correct: fileType" (Bug J). See hack/slice2probe.
+const s3ImportSubformat = "streamOptimized"
+
 // importDiskFromS3 implements the ADR-0006 Slice 2 vSphere TARGET path: download
-// the staged qcow2 object from S3, convert it to a monolithicSparse vmdk in the
-// pod, upload that vmdk to a datastore via the vCenter datastore-HTTP endpoint,
-// then ask VirtualDiskManager.CopyVirtualDisk to inflate it into a native,
-// attachable disk. It is the reverse of the libvirt TARGET path (Slice 1) and
-// the counterpart of the libvirt SOURCE export (s3export.go): libvirt exports
-// its native qcow2 and vSphere — the TARGET — owns the qcow2→vmdk conversion
-// (ADR D4).
+// the staged qcow2 object from S3, convert it to a streamOptimized vmdk in the
+// pod, then import it onto a datastore as a native, attachable thin disk via the
+// vCenter NFC HttpNfcLease transport (github.com/vmware/govmomi/vmdk.Import — the
+// same path govc's "import.vmdk" uses). It is the reverse of the libvirt TARGET
+// path (Slice 1) and the counterpart of the libvirt SOURCE export (s3export.go):
+// libvirt exports its native qcow2 and vSphere — the TARGET — owns the
+// qcow2→vmdk conversion (ADR D4).
 //
-// APPROACH 2 — why this exact sequence. This was de-risked GREEN in-cluster
-// against lab vCenter 8.0.2. The critical constraint:
-//
-//	streamOptimized is REJECTED by this ESXi at BOTH the NFC and the
-//	VirtualDiskManager layers, so it must NEVER be used for import.
-//
-// monolithicSparse, by contrast, uploads cleanly over the datastore-HTTP path
-// and CopyVirtualDisk inflates it to a thin native disk. Therefore:
+// MECHANISM (de-risked GREEN in-cluster against lab vCenter 8.0.2 — see
+// hack/slice2probe). The earlier "monolithicSparse + VirtualDiskManager.
+// CopyVirtualDisk" approach was found NOT to work on this vCenter: a hosted
+// (Workstation-format) vmdk uploaded as a raw datastore-HTTP file is rejected by
+// CopyVirtualDisk with "A specified parameter was not correct: fileType" for
+// EVERY combination of subformat (monolithicSparse / monolithicFlat /
+// streamOptimized), destination VirtualDiskSpec vs FileBackedVirtualDiskSpec,
+// DiskType (thin/preallocated/eagerZeroedThick/thick) and AdapterType
+// (lsiLogic/busLogic/ide). CopyVirtualDisk cannot ingest a foreign hosted vmdk
+// as a copy SOURCE. The supported path is the NFC import lease, which requires a
+// streamOptimized vmdk:
 //
 //  1. Download s3://… → /tmp/<id>.qcow2 (SHA256 verified vs ExpectedChecksum).
-//  2. qemu-img convert -O vmdk -o subformat=monolithicSparse → /tmp/<id>.vmdk.
-//  3. Upload /tmp/<id>.vmdk to a STAGING datastore path via the vCenter
-//     datastore-HTTP endpoint (DatastoreFileManager.UploadFile — NEVER a
-//     direct-ESXi URL).
-//  4. CopyVirtualDisk(staged → final) inflates the staged monolithicSparse vmdk
-//     into a native thin disk.
+//  2. qemu-img convert -O vmdk -o subformat=streamOptimized → /tmp/<id>.vmdk.
+//     streamOptimized is MANDATORY for the NFC lease (vmdk.Stat rejects any other
+//     subformat with ErrInvalidFormat).
+//  3. Resolve datastore + resource pool + folder + host placement.
+//  4. vmdk.Import: builds an OVF descriptor for the single disk, gets an
+//     HttpNfcLease via ImportVApp, uploads the streamOptimized stream over the
+//     lease, then detaches the disk and destroys the transient import VM —
+//     leaving a native thin VMDK at "[<ds>] <id>/<id>.vmdk".
 //  5. QueryVirtualDiskUuid(final) — an error or empty uuid means the import is
 //     corrupt; fail loudly.
-//  6. Delete the staging vmdk; clean up /tmp/<id>.*. On any post-upload failure,
-//     best-effort delete both staging and final so a failure leaves no orphans.
+//  6. On any failure after the lease has touched the datastore, best-effort
+//     delete the "[<ds>] <id>" folder so a failed import leaves no orphans.
 //
 // The disk lands transiently in /tmp in the pod (qcow2 + vmdk during convert);
 // both temps are removed unconditionally. True streaming is an ADR-0006
@@ -71,8 +85,10 @@ func (p *Provider) importDiskFromS3(ctx context.Context, req *providerv1.ImportD
 		return nil, errors.NewUnavailable("vSphere client not configured", nil)
 	}
 
-	// <id> is the stable name used for the temp files, the staging/final datastore
-	// paths, and the returned DiskId. It comes from req.TargetName.
+	// <id> is the stable name used for the temp files, the import VM/disk name,
+	// the final datastore path, and the returned DiskId. It comes from
+	// req.TargetName. vmdk.Import derives the on-datastore disk name from the local
+	// vmdk basename, so the local file MUST be named "<id>.vmdk".
 	id := req.TargetName
 	if id == "" {
 		id = fmt.Sprintf("imported-disk-%d", time.Now().Unix())
@@ -90,7 +106,7 @@ func (p *Provider) importDiskFromS3(ctx context.Context, req *providerv1.ImportD
 	}
 
 	// Never log the credentials map (secret material); log only the backend.
-	p.logger.Info("Importing disk from S3 (Approach 2: monolithicSparse + CopyVirtualDisk)",
+	p.logger.Info("Importing disk from S3 (streamOptimized + NFC lease vmdk.Import)",
 		"id", id, "source", req.SourceUrl, "src_format", srcFormat, "backend", req.BackendType, "storage_hint", req.StorageHint)
 
 	// --- 1. DOWNLOAD (ADR D5) ---
@@ -107,6 +123,8 @@ func (p *Provider) importDiskFromS3(ctx context.Context, req *providerv1.ImportD
 	defer s3client.Close()
 
 	srcLocal := fmt.Sprintf("/tmp/%s.%s", id, srcFormat)
+	// The local vmdk MUST be named "<id>.vmdk": vmdk.Import uses the basename
+	// (minus .vmdk) as the import entity / on-datastore disk name.
 	vmdkLocal := fmt.Sprintf("/tmp/%s.vmdk", id)
 	defer func() {
 		_ = os.Remove(srcLocal)
@@ -132,10 +150,11 @@ func (p *Provider) importDiskFromS3(ctx context.Context, req *providerv1.ImportD
 	p.logger.Info("S3 object downloaded to pod",
 		"bytes", dl.BytesTransferred, "sha256-verified", req.ExpectedChecksum != "")
 
-	// --- 2. CONVERT (ADR D4) — qcow2 → monolithicSparse vmdk ---
-	// monolithicSparse is MANDATORY (streamOptimized is rejected by ESXi at both
-	// the NFC and VirtualDiskManager layers). Pass it EXPLICITLY via the new
-	// Subformat option — do not rely on the qemu-img default subformat.
+	// --- 2. CONVERT (ADR D4) — qcow2 → streamOptimized vmdk ---
+	// streamOptimized is MANDATORY for the NFC lease import path: vmdk.Stat checks
+	// the compressed-sparse flag and rejects any other subformat with
+	// ErrInvalidFormat. Pass it EXPLICITLY via Subformat — do not rely on the
+	// qemu-img default (monolithicSparse), which the NFC reader cannot ingest.
 	qemuImg := diskutil.NewQemuImg()
 	if !qemuImg.IsInstalled() {
 		return nil, errors.NewInternal("qemu-img is not available in the provider image; cannot convert s3 import", nil)
@@ -145,13 +164,20 @@ func (p *Provider) importDiskFromS3(ctx context.Context, req *providerv1.ImportD
 		DestinationPath:   vmdkLocal,
 		SourceFormat:      diskutil.SupportedFormat(srcFormat),
 		DestinationFormat: diskutil.FormatVMDK,
-		Subformat:         "monolithicSparse", // MANDATORY for this ESXi import path
+		Subformat:         s3ImportSubformat, // MANDATORY for the NFC lease import path
 	}); err != nil {
-		return nil, errors.NewInternal("failed to convert s3 import to monolithicSparse vmdk", err)
+		return nil, errors.NewInternal("failed to convert s3 import to streamOptimized vmdk", err)
 	}
-	p.logger.Info("Converted s3 import to monolithicSparse vmdk", "vmdk", vmdkLocal)
+	p.logger.Info("Converted s3 import to streamOptimized vmdk", "vmdk", vmdkLocal)
 
-	// --- 3. RESOLVE datastore + datacenter ---
+	// Fail fast with a clear error if the converted file is not the streamOptimized
+	// format the NFC lease requires (defends against a future qemu-img default
+	// change or a Subformat regression).
+	if _, statErr := vmdk.Stat(vmdkLocal); statErr != nil {
+		return nil, errors.NewInternal("converted vmdk is not a valid streamOptimized image for NFC import", statErr)
+	}
+
+	// --- 3. RESOLVE datastore + placement (pool, folder, host) ---
 	datastore, err := p.resolveImportDatastore(ctx, req.StorageHint)
 	if err != nil {
 		return nil, errors.NewInternal("failed to resolve target datastore", err)
@@ -162,64 +188,51 @@ func (p *Provider) importDiskFromS3(ctx context.Context, req *providerv1.ImportD
 	if err != nil {
 		return nil, errors.NewInternal("failed to get datacenter", err)
 	}
+	p.finder.SetDatacenter(datacenter)
 
-	stagedPath := fmt.Sprintf("[%s] %s/%s-staged.vmdk", dsName, id, id)
+	pool, folder, host, err := p.resolveImportPlacement(ctx, datacenter)
+	if err != nil {
+		return nil, errors.NewInternal("failed to resolve import placement", err)
+	}
+
 	finalPath := fmt.Sprintf("[%s] %s/%s.vmdk", dsName, id, id)
+	folderPath := fmt.Sprintf("[%s] %s", dsName, id)
 
-	// --- 4. UPLOAD staged vmdk via vCenter datastore-HTTP ---
-	// DatastoreFileManager.UploadFile uses the vCenter datastore stream endpoint
-	// (datastore.Upload), NEVER a direct-ESXi URL — the de-risked transport.
-	dsManager := NewDatastoreFileManager(p)
-	uploadFile, err := os.Open(vmdkLocal)
-	if err != nil {
-		return nil, errors.NewInternal("failed to open vmdk for datastore upload", err)
-	}
-	stat, err := uploadFile.Stat()
-	if err != nil {
-		_ = uploadFile.Close()
-		return nil, errors.NewInternal("failed to stat vmdk", err)
-	}
-	uploadErr := dsManager.UploadFile(ctx, uploadFile, stagedPath, stat.Size(), nil)
-	_ = uploadFile.Close()
-	if uploadErr != nil {
-		return nil, errors.NewInternal("failed to upload staged vmdk to datastore", uploadErr)
-	}
-	p.logger.Info("Uploaded staged monolithicSparse vmdk to datastore (datastore-HTTP)", "staged", stagedPath)
-
-	// From here on, on ANY failure best-effort delete the staging AND final vmdk
-	// so a failed import leaves no orphan datastore files.
+	// From here on, on ANY failure best-effort delete the "[<ds>] <id>" folder so a
+	// failed import leaves no orphan datastore files (partial vmdk, descriptor).
 	importSucceeded := false
+	dsFileManager := NewDatastoreFileManager(p)
 	defer func() {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		defer cancel()
-		// Always remove the staging vmdk (it is intermediate even on success).
-		if err := dsManager.DeleteFile(cleanupCtx, stagedPath); err != nil {
-			p.logger.Warn("Failed to delete staging vmdk (manual cleanup may be needed)", "path", stagedPath, "error", err)
+		if importSucceeded {
+			return
 		}
-		// Remove the final vmdk only if the import did NOT complete cleanly.
-		if !importSucceeded {
-			if err := dsManager.DeleteFile(cleanupCtx, finalPath); err != nil {
-				p.logger.Warn("Failed to delete partial final vmdk after import failure", "path", finalPath, "error", err)
-			}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		defer cancel()
+		if err := dsFileManager.DeleteFile(cleanupCtx, folderPath); err != nil {
+			p.logger.Warn("Failed to delete partial import folder after failure (manual cleanup may be needed)", "path", folderPath, "error", err)
 		}
 	}()
 
-	// --- 5. INFLATE: CopyVirtualDisk(staged → final) to a native thin disk ---
-	vdm := object.NewVirtualDiskManager(p.client.Client)
-	spec := &types.VirtualDiskSpec{
-		DiskType:    string(types.VirtualDiskTypeThin),
-		AdapterType: string(types.VirtualDiskAdapterTypeLsiLogic),
-	}
-	p.logger.Info("Inflating staged vmdk to native disk via CopyVirtualDisk", "source", stagedPath, "dest", finalPath)
-	task, err := vdm.CopyVirtualDisk(ctx, stagedPath, datacenter, finalPath, datacenter, spec, false)
-	if err != nil {
-		return nil, errors.NewInternal("failed to start CopyVirtualDisk (staged → final)", err)
-	}
-	if err := task.Wait(ctx); err != nil {
-		return nil, errors.NewInternal("CopyVirtualDisk (staged → final) failed", err)
+	// --- 4. IMPORT via NFC lease: streamOptimized vmdk → native thin disk ---
+	// vmdk.Import builds a single-disk OVF, acquires an HttpNfcLease via
+	// ImportVApp, uploads the streamOptimized stream, then detaches the disk and
+	// destroys the transient import VM — leaving "[<ds>] <id>/<id>.vmdk".
+	p.logger.Info("Importing streamOptimized vmdk via NFC lease", "dest", finalPath, "datastore", dsName)
+	importErr := vmdk.Import(ctx, p.client.Client, vmdkLocal, datastore, vmdk.ImportParams{
+		Path:       id, // subdir => lands at [<ds>] <id>/<id>.vmdk
+		Type:       types.VirtualDiskTypeThin,
+		Force:      true, // overwrite a stale leftover from a previous failed attempt
+		Datacenter: datacenter,
+		Pool:       pool,
+		Folder:     folder,
+		Host:       host,
+	})
+	if importErr != nil {
+		return nil, errors.NewInternal("failed to import vmdk via NFC lease", importErr)
 	}
 
-	// --- 6. VERIFY: a real, queryable disk uuid proves a sound import ---
+	// --- 5. VERIFY: a real, queryable disk uuid proves a sound import ---
+	vdm := object.NewVirtualDiskManager(p.client.Client)
 	uuid, err := vdm.QueryVirtualDiskUuid(ctx, finalPath, datacenter)
 	if err != nil {
 		return nil, errors.NewInternal("imported disk failed uuid query (likely corrupt import)", err)
@@ -238,6 +251,43 @@ func (p *Provider) importDiskFromS3(ctx context.Context, req *providerv1.ImportD
 		ActualSizeBytes: dl.BytesTransferred,
 		Checksum:        dl.Checksum, // SHA256 of the transferred (pre-conversion) qcow2
 	}, nil
+}
+
+// resolveImportPlacement resolves the resource pool, VM folder, and host used by
+// vmdk.Import's ImportVApp/HttpNfcLease. It mirrors the Create path's placement
+// resolution: the resource pool comes from the provider's DefaultCluster (the
+// import VM is transient — it is destroyed immediately after the disk lands — so
+// any valid pool works), the folder from DefaultFolder (falling back to the
+// datacenter's default "vm" folder), and an explicit host is required by some
+// vCenter configurations for the NFC import to succeed.
+func (p *Provider) resolveImportPlacement(ctx context.Context, datacenter *object.Datacenter) (*object.ResourcePool, *object.Folder, *object.HostSystem, error) {
+	// Resource pool from the default cluster.
+	cluster, err := p.finder.ClusterComputeResource(ctx, p.config.DefaultCluster)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("find cluster %q: %w", p.config.DefaultCluster, err)
+	}
+	pool, err := cluster.ResourcePool(ctx)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("get resource pool from cluster %q: %w", p.config.DefaultCluster, err)
+	}
+
+	// Folder: provider default, falling back to the datacenter's default VM folder.
+	folder, err := p.finder.Folder(ctx, p.config.DefaultFolder)
+	if err != nil {
+		folder, err = p.finder.Folder(ctx, datacenter.Name()+"/vm")
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("find VM folder (default %q and datacenter default): %w", p.config.DefaultFolder, err)
+		}
+	}
+
+	// Host: pick the first host of the cluster. ImportVApp on some vCenter
+	// configurations returns a 500 without an explicit host placement.
+	var host *object.HostSystem
+	if hosts, herr := cluster.Hosts(ctx); herr == nil && len(hosts) > 0 {
+		host = hosts[0]
+	}
+
+	return pool, folder, host, nil
 }
 
 // resolveImportDatastore resolves the target datastore for an S3 import. It

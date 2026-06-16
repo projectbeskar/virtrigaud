@@ -55,11 +55,12 @@ type ConvertOptions struct {
 	// Subformat, when set, is passed verbatim as `-o subformat=<Subformat>` to
 	// qemu-img. It selects the on-disk variant of the destination format, e.g.
 	// "monolithicSparse" or "streamOptimized" for vmdk. Setting it explicitly is
-	// required for the vSphere S3 import (monolithicSparse is mandatory there;
-	// see internal/providers/vsphere — streamOptimized is rejected by ESXi at
-	// both the NFC and VirtualDiskManager layers), rather than relying on the
-	// qemu-img default subformat. When both Subformat and Compression are set,
-	// Subformat wins (it is the explicit, caller-chosen variant).
+	// required for the vSphere S3 import (streamOptimized is mandatory there: the
+	// disk is ingested via the vCenter NFC HttpNfcLease import, which only accepts
+	// streamOptimized — see internal/providers/vsphere/s3import.go), rather than
+	// relying on the qemu-img default subformat (monolithicSparse). When both
+	// Subformat and Compression are set, Subformat wins (it is the explicit,
+	// caller-chosen variant).
 	Subformat string
 
 	// ProgressCallback is called with progress updates (0-100)
