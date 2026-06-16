@@ -5,6 +5,70 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-16 06:55] - Fix VMMigration reconcile race issuing a duplicate ExportDisk/ImportDisk
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/controller/vmmigration_controller.go`: `handleExportingPhase` no longer returns `ctrl.Result{Requeue: true}` after the synchronous `ExportDisk` completes. The vSphere export is synchronous and ~16 minutes on real hardware; the immediate requeue re-entered `Reconcile` before the status write propagated to the informer cache, so the early guard read a stale `Phase=Exporting`/`ExportID==""` and issued a **second** `ExportDisk` (observed twice in the lab, ~1s apart). The handler now returns `ctrl.Result{}, nil` and relies on the status-update watch event (no status-filtering predicate in `SetupWithManager`) to re-drive reconcile with a fresh, consistent cache. The synchronous `handleImportingPhase` (`ImportDisk`, which writes the target qcow2) got the identical fix.
+- `internal/controller/vmmigration_controller.go`: hardened both long-op guards so a still-stale cache cannot re-issue the RPC. The export guard now treats `ExportID != ""` **OR** the durable `Exporting` condition being `True` **OR** an in-memory in-flight marker as "already exported → advance to Importing" (import guard mirrors this with the `Importing` condition). Before issuing `ExportDisk`/`ImportDisk` the reconciler claims a process-local `sync.Map` marker keyed by `UID/generation/op`; a duplicate reconcile that finds the marker already set skips the RPC and re-drives. The marker is released if the RPC errors so a legitimate retry can proceed. The marker is intentionally not persisted: on a manager restart it is lost, but the durable `ExportID`/condition is then consistent, so the persisted-state guard prevents a duplicate.
+
+### Added
+- `internal/controller/vmmigration_export_race_test.go`: regression tests proving a single migration drives **exactly one** `ExportDisk`/`ImportDisk` across an immediate stale-cache re-reconcile (counting fake provider returning a per-call-distinct checksum). Covers: no-immediate-requeue return, in-memory-guard-only suppression, durable-condition-guard suppression with an empty in-memory map (manager-restart model), the import-side counterpart, and a full-`Reconcile`-driven no-immediate-requeue assertion.
+
+### Why
+The exported streamOptimized VMDK is not byte-deterministic (same size, different SHA256). A duplicate export overwrites the staged S3 object with new bytes, while its `updateStatus` conflicts and drops — leaving `Status.DiskInfo.SourceChecksum` from export #1 but the object from export #2. The libvirt import then fails checksum verification (`expected != actual`), failing the whole migration. The invariant restored: the staged object and the recorded checksum always come from the same `ExportDisk` call.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (manager image — the reconciler runs in the manager; a manager dev image rebuild is required to validate in the lab)
+- [ ] Config change only
+- [ ] Documentation only
+
+---
+
+## [2026-06-16 06:10] - Fix libvirt S3 disk import: stage vmdk to a seekable host file before convert
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/libvirt/s3import.go`: `importDiskFromS3` no longer streams the S3 vmdk straight into `qemu-img convert -f vmdk /dev/stdin`. qemu-img's vmdk+file driver requires a seekable **regular file** (it seeks to read the streamOptimized footer/grain directory) and rejects a non-seekable pipe with `'file' driver requires '/dev/stdin' to be a regular file`. The import now uses a two-step host flow: **stage** the object via `cat > <hostTmp>` (sequential, pipe-friendly), then **convert** `qemu-img convert -f vmdk -O qcow2 <hostTmp> <target>.qcow2` against the seekable file. Bytes still flow S3 → pod → SSH → host (no CSI PVC), and the transfer SHA256 is still verified in-stream during the stage (ADR D5).
+- `internal/providers/libvirt/s3import.go`: the previous single-pipe design masked the real failure — qemu-img died in <100ms, closed the pipe read end, and the code reported the resulting `io: read/write on closed pipe` download error instead of the qemu-img message. Stage and convert are now separated so the **real** cause is surfaced: a stage download/checksum failure is reported as such; a convert/check failure surfaces qemu-img's **stderr** directly (new `qemuImgStderr` helper).
+- `internal/providers/libvirt/s3import.go`: the staged temp file is removed **unconditionally** (deferred `rm -f`, WARN on failure) so a failed import never leaks a multi-GB vmdk on the host. The temp lives in the pool directory (`<poolPath>/.virtrigaud-import-<vol>-<unixts>.vmdk`) so the convert stays intra-device (new `hostStagePath` helper).
+
+### Added
+- `internal/providers/libvirt/s3import_test.go`: host-independent tests for the staged-import flow — nil-provider and `ssh://`-transport guards, `hostStagePath` (pool co-location, dot-prefix, sanitized-name containment, distinct-from-target, trailing-slash normalization), `cat >` path quoting, and `qemuImgStderr` surfacing.
+
+### Why
+In the live ADR-0006 Slice 1 lab run (vSphere→S3→libvirt), the libvirt TARGET import failed instantly with a masked "closed pipe" error. Direct testing with qemu-img 8.2.2 confirmed qemu-img cannot read a vmdk from a non-seekable pipe; staging to a seekable host file before converting fixes the import and lets the real error through. The full vmdk lands transiently on the host (host disk = vmdk + qcow2 during convert); true streaming/`direct` mode is the ADR-0006 follow-up.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (libvirt provider image; relies on `qemu-img` already shipped)
+- [ ] Config change only
+- [ ] Documentation only
+
+---
+
+## [2026-06-16 05:26] - Fix vSphere ExportDisk uploading descriptor-only VMDK (multi-file flatten)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/vsphere/server.go`: `ExportDisk` now flattens a multi-file VMDK (tiny text descriptor + separate data extent(s), e.g. a `-sesparse.vmdk` delta produced when exporting a snapshot of a running VM) into a single self-contained streamOptimized VMDK with `qemu-img` and uploads THAT, instead of uploading only the ~586-byte descriptor with no disk data. The reported `Checksum`/`EstimatedSizeBytes` are now computed over exactly the uploaded flattened object.
+- `internal/providers/vsphere/server.go`: new `flattenVMDK` helper runs `qemu-img convert -f vmdk -O vmdk -o subformat=streamOptimized <descriptor> <flattened>`; it verifies `qemu-img` is present and fails loudly with the `qemu-img` stderr on failure. Single-file (no separate extents) VMDKs are uploaded as-is; qcow2/raw exports continue to convert directly (qemu-img already resolves the extents).
+
+### Added
+- `internal/providers/vsphere/export_disk_test.go`: regression tests for the flatten path — multi-file (descriptor + extent) flatten with byte-for-byte disk-content integrity, single-file no-op flatten, and loud-fail when `qemu-img` is absent. The qemu-img-dependent cases skip when the binary is unavailable.
+
+### Why
+In a live lab migration (ADR-0006 Slice 1, vSphere→S3→libvirt), vCenter presented the running firewall's snapshot disk as a descriptor + a `-sesparse.vmdk` extent. The export downloaded both but uploaded only the 586-byte descriptor, so the target's `qemu-img convert -f vmdk` produced garbage. Flattening before upload guarantees a single importable object with the actual disk data.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (vSphere provider image; relies on `qemu-img` from qemu-utils, already shipped)
+- [ ] Config change only
+- [ ] Documentation only
+
+---
+
 ## [2026-06-15 19:49] - ADR-0006 Slice 1: vSphere → S3 → libvirt cross-hypervisor transfer (relay)
 **Author:** @wrkode (William Rizzo)
 

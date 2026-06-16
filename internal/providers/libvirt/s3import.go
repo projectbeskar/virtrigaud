@@ -34,13 +34,25 @@ import (
 )
 
 // importDiskFromS3 implements the ADR-0006 Slice 1 libvirt TARGET path: download
-// the staged vmdk object from S3 and stream it over SSH stdin into
-// `qemu-img convert -f vmdk -O qcow2 /dev/stdin <poolPath>/<volume>.qcow2` ON THE
-// HOST (the target-owned vmdk→qcow2 conversion, ADR D4). The disk never lands in
-// a temp file in the pod and never traverses a CSI PVC: bytes flow S3 → pod → SSH
-// stdin → host qemu-img. Integrity is dual-checked (ADR D5): the S3 object's
-// SHA256 is verified against the source-reported checksum during download, then
-// `qemu-img check` validates the converted qcow2 on the host.
+// the staged vmdk object from S3 and convert it to qcow2 ON THE HOST (the
+// target-owned vmdk→qcow2 conversion, ADR D4). The disk never lands in a temp
+// file in the pod and never traverses a CSI PVC: bytes flow S3 → pod → SSH stdin
+// → host. Integrity is dual-checked (ADR D5): the S3 object's SHA256 is verified
+// against the source-reported checksum while it streams in (stage), then
+// `qemu-img check` validates the converted qcow2 on the host (convert).
+//
+// IMPORTANT: this is a two-step host flow (stage → convert), NOT a single
+// streamed `qemu-img convert /dev/stdin`. qemu-img's vmdk+file driver requires a
+// seekable REGULAR file — it seeks to read the streamOptimized footer/grain
+// directory — and refuses a non-seekable pipe (`/dev/stdin`) with "the 'file'
+// driver requires '<path>' to be a regular file". So we first stage the full
+// vmdk to a regular file on the host (via `cat > <hostTmp>`, a sequential
+// pipe-friendly write), then run `qemu-img convert` against that seekable file.
+//
+// Trade-off (documented): the full vmdk lands transiently on the host (host disk
+// usage = staged vmdk + converted qcow2 during conversion). The temp file is
+// removed unconditionally afterwards. True streaming / `direct` mode that avoids
+// the host-side stage is the ADR-0006 follow-up.
 //
 // Crash-resume of an interrupted transfer is OUT of scope for Slice 1: a failure
 // retries the whole import. This is the documented follow-up.
@@ -91,16 +103,24 @@ func (s *Server) importDiskFromS3(ctx context.Context, req *providerv1.ImportDis
 		volumeName = fmt.Sprintf("imported-disk-%d", time.Now().Unix())
 	}
 	volumeName = sanitizeVolumeName(volumeName)
-	targetPath := fmt.Sprintf("%s/%s.qcow2", strings.TrimRight(poolInfo.Path, "/"), volumeName)
+	poolPath := strings.TrimRight(poolInfo.Path, "/")
+	targetPath := fmt.Sprintf("%s/%s.qcow2", poolPath, volumeName)
+	// Stage the vmdk to a regular file in the SAME directory as the target so the
+	// later qemu-img convert reads/writes within one filesystem (no cross-device
+	// copy) and a leaked temp is co-located with the pool for easy cleanup.
+	stagePath := hostStagePath(poolPath, volumeName)
 
-	log.Printf("INFO Importing disk from S3 to libvirt host: backend=s3 pool=%s volume=%s target=%s",
-		poolName, volumeName, targetPath)
+	log.Printf("INFO Importing disk from S3 to libvirt host: backend=s3 pool=%s volume=%s stage=%s target=%s",
+		poolName, volumeName, stagePath, targetPath)
 
-	// Stream S3 → SSH stdin → host qemu-img convert. The pipe couples the S3
-	// download (DownloadStream, SHA256 verified in-stream) to the SSH stdin so
+	// --- STAGE (ADR D5 part 1) ---
+	// Stream S3 → SSH stdin → `cat > <stagePath>` on the host. cat writes
+	// sequentially (no seek), so the non-seekable pipe is fine here — unlike
+	// `qemu-img convert /dev/stdin`, which fails on a pipe. The pipe couples the
+	// S3 download (DownloadStream, SHA256 verified in-stream) to the SSH stdin so
 	// the disk is never buffered whole in the pod.
 	pr, pw := io.Pipe()
-	convertCmd := fmt.Sprintf("qemu-img convert -f vmdk -O qcow2 /dev/stdin %s", shellQuote(targetPath))
+	stageCmd := fmt.Sprintf("cat > %s", shellQuote(stagePath))
 
 	type dlResult struct {
 		resp storage.DownloadResponse
@@ -114,34 +134,56 @@ func (s *Server) importDiskFromS3(ctx context.Context, req *providerv1.ImportDis
 			ExpectedChecksum: req.ExpectedChecksum,
 		})
 		// Closing the writer with the download error propagates it to the SSH
-		// stdin reader so qemu-img sees EOF (clean) or a broken pipe (error).
+		// stdin reader so cat sees EOF (clean) or a broken pipe (error).
 		_ = pw.CloseWithError(derr)
 		dlCh <- dlResult{resp: resp, err: derr}
 	}()
 
-	sshErr := runSSHStdin(ctx, vp, pr, convertCmd)
-	// If the SSH/qemu-img side exited (especially on error) the download
-	// goroutine may still be blocked writing into the pipe. Unblock it with a
-	// closed-read-end error so it returns promptly instead of leaking; the
-	// DownloadStream error is then observed on dlCh.
+	stageErr := runSSHStdin(ctx, vp, pr, stageCmd)
+	// If the SSH/cat side exited (especially on error) the download goroutine may
+	// still be blocked writing into the pipe. Unblock it with a closed-read-end
+	// error so it returns promptly instead of leaking; the DownloadStream error
+	// is then observed on dlCh.
 	_ = pr.CloseWithError(io.ErrClosedPipe)
 	dl := <-dlCh
 
-	// Surface the download error first: it is the root cause when the SSH side
-	// fails because the stream broke (e.g. checksum mismatch).
+	// Cleanup the staged vmdk ALWAYS — success or failure — so a failed import
+	// never leaks a multi-GB temp on the host. Best-effort; WARN on failure.
+	defer func() {
+		if _, rmErr := vp.runVirshCommand(context.Background(), "!", "rm", "-f", stagePath); rmErr != nil {
+			log.Printf("WARN failed to remove staged import temp %s on host (manual cleanup may be needed): %v",
+				stagePath, rmErr)
+		}
+	}()
+
+	// Surface the REAL stage failure: the download/checksum error is the root
+	// cause when the stream broke (e.g. checksum mismatch); only if the download
+	// was clean do we attribute a stage failure to the host `cat`.
 	if dl.err != nil {
-		return nil, fmt.Errorf("s3 download/transfer failed: %w", dl.err)
+		return nil, fmt.Errorf("s3 download/transfer failed during stage: %w", dl.err)
 	}
-	if sshErr != nil {
-		return nil, fmt.Errorf("host-side qemu-img convert failed: %w", sshErr)
+	if stageErr != nil {
+		return nil, fmt.Errorf("host-side stage (cat to %s) failed: %w", stagePath, stageErr)
 	}
 
-	log.Printf("INFO S3 object transferred and converted: bytes=%d sha256-verified=%t",
+	log.Printf("INFO S3 object staged on host: bytes=%d sha256-verified=%t",
 		dl.resp.BytesTransferred, req.ExpectedChecksum != "")
 
-	// ADR D5 post-conversion validation: qemu-img check on the converted qcow2.
-	if _, err := vp.runVirshCommand(ctx, "!", "qemu-img", "check", targetPath); err != nil {
-		return nil, fmt.Errorf("qemu-img check failed on converted qcow2 %s: %w", targetPath, err)
+	// --- CONVERT (ADR D4) ---
+	// qemu-img reads the staged file (seekable regular file) and writes the
+	// target qcow2. On failure, surface qemu-img's stderr directly so the real
+	// cause is visible (no io.Pipe "closed pipe" masking).
+	if res, err := vp.runVirshCommand(ctx, "!", "qemu-img", "convert", "-f", "vmdk", "-O", "qcow2",
+		shellQuote(stagePath), shellQuote(targetPath)); err != nil {
+		return nil, fmt.Errorf("host-side qemu-img convert failed: %w%s", err, qemuImgStderr(res))
+	}
+
+	log.Printf("INFO Staged vmdk converted to qcow2 on host: target=%s", targetPath)
+
+	// --- VALIDATE (ADR D5 part 2) ---
+	// qemu-img check on the converted qcow2. Surface its stderr on failure too.
+	if res, err := vp.runVirshCommand(ctx, "!", "qemu-img", "check", shellQuote(targetPath)); err != nil {
+		return nil, fmt.Errorf("qemu-img check failed on converted qcow2 %s: %w%s", targetPath, err, qemuImgStderr(res))
 	}
 
 	// Make libvirt aware of the new volume.
@@ -221,6 +263,29 @@ func runSSHStdin(ctx context.Context, vp *VirshProvider, r io.Reader, remoteCmd 
 // command, escaping embedded single quotes.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// hostStagePath returns the path of the transient host-side staging file for a
+// vmdk import. It lives in the pool directory (same filesystem as the target so
+// the convert is intra-device) under a dot-prefixed, unix-ts-suffixed name so it
+// is distinguishable, hidden from a casual pool listing, and unlikely to collide
+// with a real volume. The .vmdk suffix matches the staged object's format.
+func hostStagePath(poolPath, volumeName string) string {
+	return fmt.Sprintf("%s/.virtrigaud-import-%s-%d.vmdk",
+		strings.TrimRight(poolPath, "/"), volumeName, time.Now().Unix())
+}
+
+// qemuImgStderr formats a VirshResult's stderr for appending to a wrapped error
+// so the underlying qemu-img message is surfaced instead of being masked. It
+// returns "" when there is no result or no stderr, keeping the error tidy.
+func qemuImgStderr(res *VirshResult) string {
+	if res == nil {
+		return ""
+	}
+	if s := strings.TrimSpace(res.Stderr); s != "" {
+		return fmt.Sprintf(" (qemu-img stderr: %s)", s)
+	}
+	return ""
 }
 
 // sanitizeVolumeName strips path separators and whitespace from a volume name so

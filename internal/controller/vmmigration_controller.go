@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -71,6 +72,61 @@ type VMMigrationReconciler struct {
 	// (issue #176). When false (the default) the migration phases are
 	// byte-for-byte unchanged. See gateDiskExport / gateDiskImport.
 	EnforceCapabilities bool
+
+	// longOpInFlight is an in-memory guard against re-issuing a long-running,
+	// non-idempotent migration RPC (ExportDisk / ImportDisk) when a reconcile
+	// re-enters before the prior status write has propagated to the informer
+	// cache. It is keyed by longOpKey(migration, op) and holds a sentinel for
+	// the duration of (and after) the RPC for a given object generation.
+	//
+	// This guards the cache-staleness race ONLY; controller-runtime already
+	// serializes reconciles per object key. The guard lives in the manager
+	// process and is intentionally NOT persisted: on a manager restart it is
+	// lost, but by then the durable Status (ExportID/ImportID + the
+	// Exporting/Importing condition) is internally consistent, so the
+	// persisted-state guard below (condition == True) prevents a duplicate RPC.
+	longOpInFlight sync.Map
+
+	// providerInstanceFn, when non-nil, overrides provider-instance resolution.
+	// Production leaves it nil and resolves a real gRPC client via
+	// RemoteResolver; tests inject a fake/counting provider here to exercise
+	// the export/import guards without standing up a gRPC server.
+	providerInstanceFn func(ctx context.Context, provider *infrav1beta1.Provider) (contracts.Provider, error)
+}
+
+// migrationLongOp identifies a long-running, non-idempotent migration RPC for
+// the purpose of the in-memory re-entrancy guard (longOpInFlight).
+type migrationLongOp string
+
+const (
+	// longOpExport marks the synchronous ExportDisk RPC.
+	longOpExport migrationLongOp = "export"
+	// longOpImport marks the synchronous ImportDisk RPC.
+	longOpImport migrationLongOp = "import"
+)
+
+// longOpKey builds the in-memory guard key for a migration's long-running RPC.
+// It is scoped to the object UID and generation so that a legitimate retry of a
+// *re-created* migration (new UID) or an intentionally re-driven spec (new
+// generation) is not wrongly suppressed, while same-generation cache-stale
+// re-entries are.
+func longOpKey(migration *infrav1beta1.VMMigration, op migrationLongOp) string {
+	return fmt.Sprintf("%s/%d/%s", migration.UID, migration.Generation, op)
+}
+
+// markLongOpStarted records that the given long-running RPC has been issued for
+// this migration generation. Returns true if this call won the race (i.e. the
+// op was not already marked), false if another reconcile already marked it.
+func (r *VMMigrationReconciler) markLongOpStarted(migration *infrav1beta1.VMMigration, op migrationLongOp) bool {
+	_, loaded := r.longOpInFlight.LoadOrStore(longOpKey(migration, op), struct{}{})
+	return !loaded
+}
+
+// longOpAlreadyStarted reports whether the given long-running RPC has already
+// been issued for this migration generation in this manager process.
+func (r *VMMigrationReconciler) longOpAlreadyStarted(migration *infrav1beta1.VMMigration, op migrationLongOp) bool {
+	_, loaded := r.longOpInFlight.Load(longOpKey(migration, op))
+	return loaded
 }
 
 // NewVMMigrationReconciler creates a new VMMigration reconciler.
@@ -585,8 +641,24 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to get provider instance: %v", err))
 	}
 
-	// Check if export is already in progress
-	if migration.Status.ExportID != "" {
+	// Check if export is already in progress or already completed.
+	//
+	// The guard is intentionally broader than the cache-read ExportID: a
+	// reconcile that re-enters immediately after a synchronous ExportDisk can
+	// observe a stale informer cache (Phase still Exporting, ExportID still "")
+	// even though the persisted object already advanced. Issuing ExportDisk
+	// again would overwrite the staged object with non-deterministic bytes
+	// whose checksum is then lost to a status-update conflict, corrupting the
+	// transfer (see CHANGELOG / GRPC race fix). To prevent that we also treat:
+	//   - the durable Exporting condition being True (persisted, survives
+	//     manager restart), and
+	//   - the in-memory in-flight marker (set just before the RPC, robust
+	//     against a cache that has not yet caught up to either of the above)
+	// as "export already issued for this generation → advance to Importing".
+	exportAlreadyDone := migration.Status.ExportID != "" ||
+		k8s.IsConditionTrue(migration.Status.Conditions, infrav1beta1.VMMigrationConditionExporting) ||
+		r.longOpAlreadyStarted(migration, longOpExport)
+	if exportAlreadyDone {
 		// Check export task status if there is one
 		if migration.Status.TaskRef != "" {
 			done, err := providerInstance.IsTaskComplete(ctx, migration.Status.TaskRef)
@@ -628,7 +700,12 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 			return ctrl.Result{}, err
 		}
 
-		return ctrl.Result{Requeue: true}, nil
+		// Do NOT immediate-requeue after a status write: re-reading the
+		// informer cache before it has caught up would re-observe Phase
+		// Exporting and could re-issue ExportDisk. The status update emits a
+		// watch event (no status-filtering predicate in SetupWithManager) that
+		// re-drives reconcile with a fresh, consistent cache.
+		return ctrl.Result{}, nil
 	}
 
 	// Generate destination URL for export
@@ -687,9 +764,24 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 		return res, nil
 	}
 
+	// Claim the in-memory export guard for this object generation BEFORE
+	// issuing the RPC. If another reconcile already claimed it, a duplicate
+	// ExportDisk would overwrite the staged object with non-deterministic
+	// bytes; skip the RPC and re-drive so the already-running/completed export
+	// drives the transition instead. This complements the durable
+	// ExportID/condition guard above against a still-stale cache.
+	if !r.markLongOpStarted(migration, longOpExport) {
+		logger.Info("Export already issued for this migration generation; skipping duplicate ExportDisk RPC")
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
 	logger.Info("Starting disk export", "vm_id", sourceVM.Status.ID, "destination", destinationURL)
 	exportResp, err := providerInstance.ExportDisk(exportCtx, exportReq)
 	if err != nil {
+		// The export RPC failed; release the in-memory guard so a future
+		// reconcile (e.g. after retry/backoff) can re-attempt the export for
+		// this generation. transitionToFailed records the failure durably.
+		r.longOpInFlight.Delete(longOpKey(migration, longOpExport))
 		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to start disk export: %v", err))
 	}
 
@@ -732,7 +824,15 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 		return ctrl.Result{}, err
 	}
 
-	return ctrl.Result{Requeue: true}, nil
+	// CRITICAL: do NOT immediate-requeue here. The synchronous ExportDisk above
+	// can take ~16 minutes; an immediate requeue re-reads the informer cache
+	// before this status write has propagated, re-observes Phase Exporting with
+	// an empty ExportID, and issues a SECOND ExportDisk — which overwrites the
+	// staged (non-deterministic) object while its checksum is lost to a
+	// conflicting status update, corrupting the transfer. The status write
+	// above emits a watch event (no status-filtering predicate in
+	// SetupWithManager) that re-drives reconcile with a fresh cache.
+	return ctrl.Result{}, nil
 }
 
 // handleTransferringPhase transfers the disk to intermediate storage
@@ -795,8 +895,18 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to get target provider instance: %v", err))
 	}
 
-	// Check if import is already in progress
-	if migration.Status.ImportID != "" {
+	// Check if import is already in progress or already completed.
+	//
+	// As with the export guard, this is intentionally broader than the
+	// cache-read ImportID. ImportDisk is also synchronous and long-running and
+	// writes the target qcow2; a duplicate driven by a stale cache would
+	// overwrite it. Treat the durable Importing condition being True and the
+	// in-memory in-flight marker as "import already issued for this generation
+	// → advance to Creating".
+	importAlreadyDone := migration.Status.ImportID != "" ||
+		k8s.IsConditionTrue(migration.Status.Conditions, infrav1beta1.VMMigrationConditionImporting) ||
+		r.longOpAlreadyStarted(migration, longOpImport)
+	if importAlreadyDone {
 		// Check import task status if there is one
 		if migration.Status.TaskRef != "" {
 			done, err := providerInstance.IsTaskComplete(ctx, migration.Status.TaskRef)
@@ -838,7 +948,9 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 			return ctrl.Result{}, err
 		}
 
-		return ctrl.Result{Requeue: true}, nil
+		// Do NOT immediate-requeue after a status write (see export phase): the
+		// status update re-drives reconcile with a fresh cache.
+		return ctrl.Result{}, nil
 	}
 
 	// Generate source URL (same as export destination)
@@ -902,9 +1014,21 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 		return res, nil
 	}
 
+	// Claim the in-memory import guard for this object generation BEFORE
+	// issuing the RPC. ImportDisk writes the target qcow2; a duplicate driven
+	// by a stale cache would overwrite it. If another reconcile already claimed
+	// it, skip the RPC and re-drive.
+	if !r.markLongOpStarted(migration, longOpImport) {
+		logger.Info("Import already issued for this migration generation; skipping duplicate ImportDisk RPC")
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
 	logger.Info("Starting disk import", "source", sourceURL, "target_name", importReq.TargetName)
 	importResp, err := providerInstance.ImportDisk(ctx, importReq)
 	if err != nil {
+		// Release the in-memory guard so a future reconcile can re-attempt the
+		// import for this generation after the failure is recorded.
+		r.longOpInFlight.Delete(longOpKey(migration, longOpImport))
 		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to start disk import: %v", err))
 	}
 
@@ -947,7 +1071,12 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 		return ctrl.Result{}, err
 	}
 
-	return ctrl.Result{Requeue: true}, nil
+	// CRITICAL: do NOT immediate-requeue here. ImportDisk above is synchronous
+	// and long-running and writes the target qcow2; an immediate requeue
+	// re-reads a stale cache (Phase still Importing, ImportID still "") and
+	// could re-issue ImportDisk, overwriting the just-written target disk. The
+	// status write re-drives reconcile with a fresh cache.
+	return ctrl.Result{}, nil
 }
 
 // handleCreatingPhase creates the target VM
@@ -2141,6 +2270,11 @@ func (r *VMMigrationReconciler) gateMigrationStorageBackend(
 
 // getProviderInstance retrieves a provider gRPC client
 func (r *VMMigrationReconciler) getProviderInstance(ctx context.Context, provider *infrav1beta1.Provider) (contracts.Provider, error) {
+	// Test hook: allow injecting a fake/counting provider without dialing gRPC.
+	if r.providerInstanceFn != nil {
+		return r.providerInstanceFn(ctx, provider)
+	}
+
 	// Resolve the provider client
 	providerClient, err := r.RemoteResolver.GetProvider(ctx, provider)
 	if err != nil {
