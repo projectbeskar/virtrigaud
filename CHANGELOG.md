@@ -5,6 +5,23 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-16 19:50] - Docs: ADR-0006 Slice 2 validated; reverse migration example + README
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `docs/adr/0006-storage-backend-agnostic-cross-hypervisor-migration.md`: added an *Implementation log — validated slices* section recording the as-built slicing (Slice 1 vSphere→libvirt and Slice 2 libvirt→vSphere over S3/`relay`, both end-to-end validated) and the Slice 2 findings: NFC streamOptimized import (not `CopyVirtualDisk`), `qemu-img` in the provider image, lease device-URL host rewrite to vCenter, `Unregister`-not-`Destroy` + folder idempotency, the cross-hypervisor `target.networks` requirement, and streaming robustness. Plus deferred follow-ups.
+- `examples/migration/libvirt-to-vsphere.yaml`: rewritten from the obsolete "untested / PVC-only / S3-not-supported" placeholder into the **validated S3 reverse-migration example**, including a `VMNetworkAttachment` + `target.networks` so the migrated vSphere VM gets a NIC.
+- `examples/migration/README.md`: replaced the stale "PVC-only / only vSphere→libvirt tested" constraints with the storage-agnostic S3 model; both vSphere↔libvirt S3 directions marked tested; S3 quick start.
+
+### Why
+ADR-0006 Slice 2 (libvirt→vSphere over S3) is implemented and validated on real hardware; the docs and example must reflect the working path and steer users away from the no-NIC trap. Refs #236.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
 ## [2026-06-16 19:35] - Remove dead, misleading build/Dockerfile.provider-{vsphere,libvirt}
 **Author:** @wrkode (William Rizzo)
 

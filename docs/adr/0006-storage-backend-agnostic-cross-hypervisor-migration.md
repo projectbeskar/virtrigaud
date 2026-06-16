@@ -11,6 +11,12 @@ through v0.3.9 and establishes the architecture for the project's now-primary Ke
 > **Regardless of the storage backend (NFS / S3), VirtRigaud must be able to migrate VMs
 > across hypervisors in *any* direction.**
 
+**Implementation status (2026-06-16)**: the S3 / `relay` paths for the
+**vSphere ↔ libvirt** pair — **Slice 1** (vSphere → libvirt) and **Slice 2**
+(libvirt → vSphere) — are implemented and **end-to-end validated** on real
+hardware. See *Implementation log — validated slices* below for the as-built
+slicing (which diverged from the original phasing) and the key findings.
+
 **Author**: William Rizzo ([@wrkode](https://github.com/wrkode))
 
 **Hypervisors in scope**: vSphere, Libvirt/KVM, Proxmox VE (a Proxmox lab host is being
@@ -281,6 +287,61 @@ Honest gaps (vmdk native consumption on libvirt/Proxmox; a host with no S3 egres
 
 Recommendation: **S3 before NFS, relay before direct, one provider pair at a time,
 libvirt-first.**
+
+---
+
+## Implementation log — validated slices (2026-06-16)
+
+The **as-built** slicing diverged from the planned phasing above: implementation
+prioritized the **vSphere ↔ libvirt cross-type pair over S3 / `relay`** (the
+highest-value proof — it exercises format conversion in both directions) ahead of
+the planned libvirt→libvirt and `direct`-mode slices. As shipped:
+
+- **Slice 1 — vSphere → S3 → libvirt (`relay`), validated.** The vSphere source
+  exports its native vmdk (flattened to a single monolithic file) to S3; the
+  libvirt target converts vmdk → qcow2 on the host during import. (#236.)
+- **Slice 2 — libvirt → S3 → vSphere (`relay`), validated 2026-06-16.** The
+  libvirt source flattens its disk to a standalone qcow2 and streams it to S3; the
+  vSphere target converts qcow2 → streamOptimized vmdk **in-pod** and imports it,
+  then creates the VM. E2E proof: a live Ubuntu 24.04 libvirt VM was migrated to
+  vCenter and powered on to a login prompt with its original hostname and a
+  connected vmxnet3 NIC.
+
+### Slice 2 decisions & findings (refine D3/D4 for the vSphere target)
+
+1. **vSphere import = qcow2 → streamOptimized vmdk → NFC `HttpNfcLease`, not
+   `CopyVirtualDisk`.** `CopyVirtualDisk` cannot ingest a foreign (qemu-img-built)
+   vmdk — every subformat fails with `parameter not correct: fileType`. The
+   provider instead runs `qemu-img convert -O vmdk -o subformat=streamOptimized`
+   and uploads through an `ImportVApp` lease. D4 conversion is therefore
+   **target-owned, executed in the provider pod**.
+2. **The vSphere provider image must carry `qemu-img`.** The runtime is
+   `debian:bookworm-slim` + `qemu-utils` (canonical `cmd/provider-vsphere/Dockerfile`).
+   The stale, unused `build/Dockerfile.provider-vsphere` (distroless, no qemu-img)
+   was removed so nobody ships an import-broken provider.
+3. **The NFC lease device URL is rewritten to the vCenter host.** The lease returns
+   an upload URL pointing at the ESXi host by FQDN, which an in-cluster provider pod
+   typically cannot resolve; the provider rewrites the host to the vCenter host
+   (the reachable `PROVIDER_ENDPOINT`, which proxies NFC).
+4. **The transient import VM is `Unregister`ed, not `Destroy`ed** (vCenter 8 faults
+   `Destroy` of a freshly imported VM), and the `[<ds>] <id>` import folder is
+   force-deleted before import so retries to a fixed target name stay idempotent
+   (otherwise `ImportVApp` lands the disk in a collision-suffixed `<id>_1` folder).
+5. **Cross-hypervisor networks must be re-specified on the target.** A raw-disk
+   migration carries the disk, not the NIC: `target.networks` must reference a
+   `VMNetworkAttachment` mapping to a vSphere portgroup, or the migrated VM boots
+   with no adapter. The guest's in-OS config (netplan) still targets the source's
+   virtio NIC — a guest-OS concern, out of scope for the raw-disk transfer.
+6. **Streaming robustness (both directions):** unknown-size S3 multipart part size
+   is bounded to avoid ~525 MiB part buffers (OOM); the libvirt export reads a
+   running source with `qemu-img convert -U`; and an export-stream failure surfaces
+   the real S3 error (e.g. a full backing store) instead of the downstream
+   `cat: exit status 255`.
+
+**Deferred follow-ups** (tracked): honor `source.powerOffBeforeMigration` and
+`target.powerOn:false` in the controller for both directions; snapshot of a
+multi-disk source carrying a cloud-init CDROM (`--diskspec`); Proxmox over S3; the
+NFS backend; and the `direct` transfer mode.
 
 ---
 

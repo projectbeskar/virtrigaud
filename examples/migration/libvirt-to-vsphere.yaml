@@ -1,18 +1,67 @@
-# Example: Migrate a VM from Libvirt/KVM to VMware vSphere
+# Cross-hypervisor migration over S3 (ADR-0006 Slice 2): libvirt/KVM → S3 → vSphere.
 #
-# WARNING: This migration direction (Libvirt → vSphere) is NOT currently tested.
-# Only vSphere → Libvirt/KVM is tested in v0.3.6. Use this example with caution
-# and validate in a non-production environment first.
+# This is the REVERSE of the Slice 1 vSphere→libvirt path and the first
+# libvirt-SOURCE / vSphere-TARGET cross-hypervisor disk transfer. The libvirt
+# SOURCE flattens its disk to a standalone qcow2 on the host and streams it up to
+# S3 through the provider pod; the vSphere TARGET downloads it, converts
+# qcow2 → streamOptimized vmdk in-pod with `qemu-img`, and imports it over an NFC
+# HttpNfcLease, then creates the VM from the imported disk. Bytes flow
+# host → pod → S3 → pod → vCenter; they NEVER traverse a CSI PVC.
 #
-# This example previously showed S3 storage, which is NOT supported.
-# storage.type is constrained to "pvc" only. All credential-based storage
-# (s3, http, nfs URI) has been removed; use a RWX StorageClass instead.
+# Format contract (ADR-0006 D4 — the TARGET converts on import):
+#   libvirt exports native qcow2  →  vSphere imports & converts to vmdk.
 #
-# Prerequisites:
-# - Source VM "ubuntu-server" running on Libvirt provider
-# - Target vSphere provider configured
-# - A ReadWriteMany StorageClass (e.g. nfs-migration-storage)
+# Transfer mode: relay (the universal floor — the provider pod is the S3 client,
+# so backend credentials never leave the pod). `auto` resolves to `relay` here.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# IMPORTANT — attach a network on the target.
+# A raw-disk migration carries the guest's disk, not its NIC. vSphere creates the
+# VM from the imported disk with NO network adapter unless `target.networks`
+# references a VMNetworkAttachment that maps to a vSphere portgroup. Cross-
+# hypervisor network names do not carry over (a libvirt bridge name is not a
+# vSphere portgroup), so you MUST name the target portgroup explicitly. Omitting
+# this produces a VM that boots with no NIC.
+#
+# Note also that the guest's in-OS network config (netplan/NetworkManager) was
+# written for the source's virtio NIC; on vSphere the adapter is vmxnet3 with a
+# new MAC, so the guest may need cloud-init/netplan to bring the new interface up
+# (DHCP-by-any-interface is the simplest). That is a guest-OS concern, outside
+# the scope of the raw-disk migration.
+# ─────────────────────────────────────────────────────────────────────────────
 
+# S3 credentials Secret. Credentials are ALWAYS referenced via a Secret — never
+# inline in the VMMigration. Required keys: accessKeyID, secretAccessKey.
+# Optional: sessionToken (STS / temporary credentials). The Secret must live in
+# the same namespace as the VMMigration.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: s3-migration-credentials
+  namespace: default
+type: Opaque
+stringData:
+  accessKeyID: "REPLACE_WITH_ACCESS_KEY_ID"
+  secretAccessKey: "REPLACE_WITH_SECRET_ACCESS_KEY"
+  # sessionToken: "REPLACE_WITH_SESSION_TOKEN"   # only for temporary/STS creds
+---
+# Target network mapping. Maps a logical attachment name to a vSphere portgroup;
+# referenced from target.networks below. Must live in the same namespace as the
+# VMMigration (the target VM is created there).
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMNetworkAttachment
+metadata:
+  name: vm-network
+  namespace: default
+spec:
+  network:
+    type: bridged
+    mtu: 1500
+    vsphere:
+      portgroup: "VM Network"     # the destination vSphere portgroup name
+      adapterType: vmxnet3
+  ipAllocation:
+    type: DHCP
 ---
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMMigration
@@ -23,45 +72,62 @@ metadata:
     app: ubuntu-server
     migration-type: platform-upgrade
 spec:
+  # SOURCE: a VM managed by a libvirt provider.
   source:
     vmRef:
-      name: ubuntu-server
-    createSnapshot: true
-    deleteAfterMigration: false   # Keep source VM for rollback
+      name: ubuntu-server          # an existing VirtualMachine backed by libvirt
+    # createSnapshot=false migrates a crash-consistent copy of the live disk
+    # (the export uses `qemu-img convert -U` so a running source can be read).
+    # For a quiescent copy, power the source off first (powerOffBeforeMigration)
+    # or set createSnapshot=true on a snapshot-capable single-disk source.
+    createSnapshot: false
+    powerOffBeforeMigration: true
+    deleteAfterMigration: false    # keep the source VM for rollback
 
+  # TARGET: create the migrated VM on a vSphere provider.
   target:
     name: ubuntu-server-vsphere
     providerRef:
-      name: vsphere-prod
+      name: vsphere-prod           # a Provider of type vSphere
       namespace: default
     classRef:
       name: standard-vm
+    # REQUIRED for network connectivity — see the header note.
+    networks:
+      - name: primary
+        networkRef:
+          name: vm-network
 
-  # PVC-backed storage — only supported storage type in v0.3.6.
-  # Requires a StorageClass with ReadWriteMany access mode.
+  # S3-compatible object storage staging. The lab target here is rustfs over
+  # plaintext HTTP with path-style addressing; swap for AWS S3 / MinIO / Ceph RGW
+  # as needed. Both provider pods must be able to reach this endpoint.
   storage:
-    type: pvc
-    pvc:
-      storageClassName: nfs-migration-storage
-      size: 100Gi
-      accessMode: ReadWriteMany
+    type: s3
+    transferMode: relay            # relay (implemented) | auto→relay
+    s3:
+      bucket: virtrigaud
+      endpoint: http://rustfs.lab.k8:9000   # http:// ⇒ plaintext; omit for AWS
+      region: us-east-1
+      prefix: ubuntu-server/        # object key prefix under the bucket
+      usePathStyle: true            # true for rustfs/MinIO/Ceph RGW; false for AWS
+      credentialsSecretRef:
+        name: s3-migration-credentials
 
   options:
+    # The SOURCE exports native qcow2 and the vSphere TARGET converts to vmdk on
+    # import (ADR-0006 D4). diskFormat names the landed target format.
     diskFormat: vmdk
     compress: false
-    verifyChecksums: true
-    timeout: "4h"
-    retryPolicy:
-      maxRetries: 3
-      retryDelay: "5m"
-      backoffMultiplier: 2
-    cleanupPolicy: OnSuccess
+    verifyChecksums: true          # SHA256 of the transferred object (ADR-0006 D5)
+    timeout: "6h"
+    cleanupPolicy: OnSuccess       # delete the staged S3 object once Ready
 
   metadata:
     purpose: "provider-change"
-    environment: "prod"
+    project: "cloud-migration-2026"
     createdBy: "platform-team"
 
 # Monitor progress:
 #   kubectl get vmmigration ubuntu-libvirt-to-vsphere -w
 #   kubectl describe vmmigration ubuntu-libvirt-to-vsphere
+# Phases: Validating → Exporting → Importing → Creating → Ready
