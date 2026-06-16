@@ -996,11 +996,12 @@ func (c *Client) convertCreateRequest(req contracts.CreateRequest) (*providerv1.
 	// Convert UserData
 	if req.UserData != nil {
 		grpcReq.UserData = []byte(req.UserData.CloudInitData)
+	}
 
-		// Convert MetaData
-		if req.MetaData != nil {
-			grpcReq.MetaData = []byte(req.MetaData.MetaDataYAML)
-		}
+	// Convert MetaData (independent of UserData; a VM may supply metadata
+	// such as network-config without any userdata)
+	if req.MetaData != nil {
+		grpcReq.MetaData = []byte(req.MetaData.MetaDataYAML)
 	}
 
 	// Convert each component to JSON

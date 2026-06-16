@@ -2013,15 +2013,23 @@ func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*pr
 
 // VMSpec represents the parsed virtual machine specification
 type VMSpec struct {
-	Name                        string
-	CPU                         int32
-	MemoryMB                    int64
-	DiskSizeGB                  int64
-	DiskType                    string
-	TemplateName                string
-	DiskPath                    string // Path to existing disk (for imported disks)
-	DiskFormat                  string // Format of existing disk (for imported disks)
-	NetworkName                 string
+	Name         string
+	CPU          int32
+	MemoryMB     int64
+	DiskSizeGB   int64
+	DiskType     string
+	TemplateName string
+	DiskPath     string // Path to existing disk (for imported disks)
+	DiskFormat   string // Format of existing disk (for imported disks)
+	NetworkName  string
+	// Static network configuration applied via guestinfo.network.* keys.
+	// Populated from the first entry of NetworksJson (VirtualMachine.spec.networks[0]).
+	// A guest-side script (baked into the template) reads these at boot to assign a
+	// static IP when DHCP is not used. Empty StaticIP means DHCP / template default.
+	StaticIP                    string // guestinfo.network.ip
+	Prefix                      int32  // guestinfo.network.prefix (CIDR prefix length, e.g. 24)
+	Gateway                     string // guestinfo.network.gateway
+	DNS                         string // guestinfo.network.dns (comma-separated)
 	Firmware                    string
 	HardwareVersion             *int32 // VM hardware compatibility version
 	CloudInit                   string // Cloud-init user data
@@ -2062,8 +2070,10 @@ type AdditionalDiskSpec struct {
 //   - req.ImageJson  — contracts.VMImage: TemplateName (for template clones) or Path +
 //     Format (for imported-disk VMs). When Path is non-empty, disk-based creation is
 //     used and TemplateName is ignored.
-//   - req.NetworksJson — []contracts.NetworkAttachment: only the first element's
-//     NetworkName is used to attach a single network adapter.
+//   - req.NetworksJson — []contracts.NetworkAttachment: the first element's
+//     NetworkName attaches a single network adapter, and its StaticIP/Prefix/
+//     Gateway/DNS are surfaced to the guest as guestinfo.network.* for static IP
+//     assignment (see createVirtualMachine).
 //   - req.UserData    — raw cloud-init user-data bytes.
 //   - req.MetaData    — raw cloud-init metadata bytes.
 //   - req.PlacementJson — contracts.Placement: optional per-VM overrides for Cluster,
@@ -2174,10 +2184,18 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*VMSpec, e
 		}
 	}
 
-	// Parse Networks from JSON ([]contracts.NetworkAttachment structure)
+	// Parse Networks from JSON ([]contracts.NetworkAttachment structure).
+	// Only the first attachment is consumed: NetworkName selects the portgroup and
+	// the static-IP fields (StaticIP/Prefix/Gateway/DNS) are surfaced to the guest
+	// via guestinfo.network.* in createVirtualMachine. Leaving StaticIP empty means
+	// DHCP / the template's existing configuration is used.
 	if req.NetworksJson != "" {
 		var networks []struct {
 			NetworkName string `json:"NetworkName"`
+			StaticIP    string `json:"StaticIP"`
+			Prefix      int32  `json:"Prefix"`
+			Gateway     string `json:"Gateway"`
+			DNS         string `json:"DNS"`
 		}
 
 		if err := json.Unmarshal([]byte(req.NetworksJson), &networks); err != nil {
@@ -2186,6 +2204,20 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*VMSpec, e
 
 		if len(networks) > 0 {
 			spec.NetworkName = networks[0].NetworkName
+			spec.StaticIP = networks[0].StaticIP
+			spec.Prefix = networks[0].Prefix
+			spec.Gateway = networks[0].Gateway
+			spec.DNS = networks[0].DNS
+
+			if spec.StaticIP != "" {
+				p.logger.Info("Parsed static network configuration",
+					"network", spec.NetworkName,
+					"ip", spec.StaticIP,
+					"prefix", spec.Prefix,
+					"gateway", spec.Gateway,
+					"dns", spec.DNS,
+					"vm_name", spec.Name)
+			}
 		}
 	}
 
@@ -2535,6 +2567,47 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 			}
 
 			configSpec.DeviceChange = append(configSpec.DeviceChange, deviceChange)
+		}
+	}
+
+	// Inject static network configuration via guestinfo.network.* keys.
+	//
+	// These are plain (non-base64) guestinfo properties read at boot by a guest-side
+	// script baked into the template (the same convention as `govc vm.change -e
+	// guestinfo.network.ip=...`). They are independent of the cloud-init guestinfo
+	// keys set by addCloudInitToConfigSpec: an image may honour one, the other, or
+	// both. When StaticIP is empty the guest falls back to DHCP / its template
+	// configuration, so nothing is written. prefix/gateway/dns are only written when
+	// meaningful to avoid handing the guest script a bogus "0" prefix or empty values.
+	if spec.StaticIP != "" {
+		p.logger.Info("Configuring static network via guestinfo",
+			"vm_name", spec.Name,
+			"ip", spec.StaticIP,
+			"prefix", spec.Prefix,
+			"gateway", spec.Gateway,
+			"dns", spec.DNS)
+
+		extraConfig = append(extraConfig, &types.OptionValue{
+			Key:   "guestinfo.network.ip",
+			Value: spec.StaticIP,
+		})
+		if spec.Prefix > 0 {
+			extraConfig = append(extraConfig, &types.OptionValue{
+				Key:   "guestinfo.network.prefix",
+				Value: fmt.Sprintf("%d", spec.Prefix),
+			})
+		}
+		if spec.Gateway != "" {
+			extraConfig = append(extraConfig, &types.OptionValue{
+				Key:   "guestinfo.network.gateway",
+				Value: spec.Gateway,
+			})
+		}
+		if spec.DNS != "" {
+			extraConfig = append(extraConfig, &types.OptionValue{
+				Key:   "guestinfo.network.dns",
+				Value: spec.DNS,
+			})
 		}
 	}
 
