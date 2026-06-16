@@ -5,6 +5,21 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-16 19:35] - Remove dead, misleading build/Dockerfile.provider-{vsphere,libvirt}
+**Author:** @wrkode (William Rizzo)
+
+### Removed
+- `build/Dockerfile.provider-vsphere`, `build/Dockerfile.provider-libvirt`: deleted. Neither is referenced by the Makefile, the release workflow, or any build script — the canonical provider images are built from `cmd/provider-<name>/Dockerfile` (and `build/Dockerfile.manager`/`Dockerfile.kubectl` remain the canonical manager/kubectl builds). The stale `build/Dockerfile.provider-vsphere` was actively wrong: it used a plain `gcr.io/distroless/static` runtime with **no `qemu-img`**, so anyone who built from it would get a vSphere provider that fails every ADR-0006 S3 import with `qemu-img is not available in the provider image`. The canonical `cmd/provider-vsphere/Dockerfile` already ships `qemu-utils` on a `debian:bookworm-slim` base, so the released image is correct; this just removes the trap.
+
+### Why
+While validating the Slice 2 reverse migration, a hand-built dev image based on the stale Dockerfile lacked `qemu-img` and broke the import. Removing the dead files leaves one source of truth per provider image and prevents the same mistake. Refs #236.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
 ## [2026-06-16 19:20] - vSphere S3 import: make the NFC import idempotent against a leftover folder
 **Author:** @wrkode (William Rizzo)
 
