@@ -18,6 +18,7 @@ package libvirt
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/url"
@@ -1650,29 +1651,40 @@ func (p *Provider) GetDiskInfo(ctx context.Context, req contracts.GetDiskInfoReq
 
 	storageProvider := NewStorageProvider(p.virshProvider)
 
-	// Get primary disk volume name (convention: vmname-disk)
-	diskVolumeName := fmt.Sprintf("%s-disk", req.VmId)
-	if req.DiskId != "" {
-		diskVolumeName = req.DiskId
+	// Resolve the primary disk path + format from the LIVE domain topology
+	// (domblklist via getDomainDiskPaths), NOT the fragile "<vmid>-disk" volume
+	// guess — that guess only holds for VirtRigaud-created volumes and fails for
+	// adopted/externally-created VMs (Bug G; same class as the clone #207 fix).
+	// resolvePrimaryDisk also skips cloud-init/CDROM devices.
+	diskPath, format, err := p.resolvePrimaryDisk(ctx, req.VmId, storageProvider)
+	if err != nil {
+		return contracts.GetDiskInfoResponse{}, fmt.Errorf("failed to resolve primary disk: %w", err)
+	}
+	// An explicit disk path (DiskId carrying a path) overrides the primary.
+	if req.DiskId != "" && strings.Contains(req.DiskId, "/") {
+		diskPath = req.DiskId
 	}
 
-	// Get volume information
-	volume, err := storageProvider.GetVolumeInfo(ctx, "default", diskVolumeName)
-	if err != nil {
-		return contracts.GetDiskInfoResponse{}, fmt.Errorf("failed to get volume info: %w", err)
-	}
-
-	// Parse volume size
-	virtualSize, err := parseStorageSize(volume.Capacity)
-	if err != nil {
-		log.Printf("WARN Failed to parse capacity: %v, using 0", err)
-		virtualSize = 0
-	}
-
-	actualSize, err := parseStorageSize(volume.Allocation)
-	if err != nil {
-		log.Printf("WARN Failed to parse allocation: %v, using 0", err)
-		actualSize = 0
+	// Read virtual + actual size (and confirm format) from the disk file itself
+	// via qemu-img — read-only with -U so a still-running source's write lock is
+	// ignored. Best-effort: sizes default to 0 (status-only) if it fails.
+	var virtualSize, actualSize int64
+	if res, qerr := p.virshProvider.runVirshCommand(ctx, "!", "qemu-img", "info", "-U", "--output=json", diskPath); qerr == nil {
+		var qi struct {
+			VirtualSize int64  `json:"virtual-size"`
+			ActualSize  int64  `json:"actual-size"`
+			Format      string `json:"format"`
+		}
+		if jerr := json.Unmarshal([]byte(res.Stdout), &qi); jerr == nil {
+			virtualSize, actualSize = qi.VirtualSize, qi.ActualSize
+			if qi.Format != "" {
+				format = qi.Format
+			}
+		} else {
+			log.Printf("WARN Failed to parse qemu-img info for %s: %v", diskPath, jerr)
+		}
+	} else {
+		log.Printf("WARN qemu-img info failed for %s (sizes default to 0): %v", diskPath, qerr)
 	}
 
 	// Get snapshots for this domain
@@ -1682,26 +1694,22 @@ func (p *Provider) GetDiskInfo(ctx context.Context, req contracts.GetDiskInfoReq
 		snapshots = []string{}
 	}
 
-	// Determine if this is a boot disk (primary disk is always bootable)
-	isBootable := (req.DiskId == "" || req.DiskId == diskVolumeName)
-
 	response := contracts.GetDiskInfoResponse{
-		DiskId:           diskVolumeName,
-		Format:           volume.Format,
+		DiskId:           diskPath,
+		Format:           format,
 		VirtualSizeBytes: virtualSize,
 		ActualSizeBytes:  actualSize,
-		Path:             volume.Path,
-		IsBootable:       isBootable,
+		Path:             diskPath,
+		IsBootable:       true, // resolvePrimaryDisk returns the primary/boot disk
 		Snapshots:        snapshots,
-		BackingFile:      "", // TODO: Parse backing file from volume XML
 		Metadata: map[string]string{
-			"pool": volume.Pool,
-			"type": volume.Type,
+			"pool": "default",
+			"type": "file",
 		},
 	}
 
-	log.Printf("INFO Disk info retrieved: %s (format=%s, virtual=%d bytes, actual=%d bytes)",
-		response.DiskId, response.Format, response.VirtualSizeBytes, response.ActualSizeBytes)
+	log.Printf("INFO Disk info retrieved: path=%s (format=%s, virtual=%d bytes, actual=%d bytes)",
+		response.Path, response.Format, response.VirtualSizeBytes, response.ActualSizeBytes)
 
 	return response, nil
 }
