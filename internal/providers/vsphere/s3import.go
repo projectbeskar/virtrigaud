@@ -20,9 +20,12 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/vmware/govmomi/object"
+	"github.com/vmware/govmomi/ovf"
+	"github.com/vmware/govmomi/vim25/soap"
 	"github.com/vmware/govmomi/vim25/types"
 	"github.com/vmware/govmomi/vmdk"
 
@@ -214,21 +217,18 @@ func (p *Provider) importDiskFromS3(ctx context.Context, req *providerv1.ImportD
 	}()
 
 	// --- 4. IMPORT via NFC lease: streamOptimized vmdk → native thin disk ---
-	// vmdk.Import builds a single-disk OVF, acquires an HttpNfcLease via
-	// ImportVApp, uploads the streamOptimized stream, then detaches the disk and
-	// destroys the transient import VM — leaving "[<ds>] <id>/<id>.vmdk".
+	// We drive the HttpNfcLease manually rather than calling vmdk.Import for two
+	// reasons specific to this remote-provider topology:
+	//   (a) the lease's device URL points at the ESXi host by FQDN (e.g.
+	//       esxi.lab.k8); the provider pod often cannot resolve that name via
+	//       cluster DNS, so we rewrite the host to the vCenter host, which proxies
+	//       NFC and is always reachable from the pod (it is PROVIDER_ENDPOINT);
+	//   (b) we Unregister (not Destroy) the transient import VM — vCenter 8 faults
+	//       Destroy of a freshly imported VM ("file ... is attached to vm").
+	// Net result is identical to vmdk.Import: "[<ds>] <id>/<id>.vmdk".
 	p.logger.Info("Importing streamOptimized vmdk via NFC lease", "dest", finalPath, "datastore", dsName)
-	importErr := vmdk.Import(ctx, p.client.Client, vmdkLocal, datastore, vmdk.ImportParams{
-		Path:       id, // subdir => lands at [<ds>] <id>/<id>.vmdk
-		Type:       types.VirtualDiskTypeThin,
-		Force:      true, // overwrite a stale leftover from a previous failed attempt
-		Datacenter: datacenter,
-		Pool:       pool,
-		Folder:     folder,
-		Host:       host,
-	})
-	if importErr != nil {
-		return nil, errors.NewInternal("failed to import vmdk via NFC lease", importErr)
+	if err := p.nfcImportStreamOptimized(ctx, vmdkLocal, id, datastore, datacenter, pool, folder, host); err != nil {
+		return nil, errors.NewInternal("failed to import vmdk via NFC lease", err)
 	}
 
 	// --- 5. VERIFY: a real, queryable disk uuid proves a sound import ---
@@ -253,8 +253,113 @@ func (p *Provider) importDiskFromS3(ctx context.Context, req *providerv1.ImportD
 	}, nil
 }
 
+// nfcImportStreamOptimized imports a local streamOptimized vmdk into the target
+// datastore as a native thin disk, driving the HttpNfcLease by hand so it works
+// from a remote provider pod. It mirrors govmomi's vmdk.Import but with two
+// topology-specific differences (see the call site): it rewrites each lease
+// device URL host to the vCenter host (the ESXi FQDN the lease returns is not
+// resolvable from the pod, and vCenter proxies NFC), and it Unregisters — rather
+// than Destroys — the transient import VM (vCenter 8 faults Destroy of a
+// just-imported VM). On success the disk lands at "[<ds>] <id>/<id>.vmdk".
+func (p *Provider) nfcImportStreamOptimized(
+	ctx context.Context,
+	localVMDK, id string,
+	datastore *object.Datastore,
+	datacenter *object.Datacenter,
+	pool *object.ResourcePool,
+	folder *object.Folder,
+	host *object.HostSystem,
+) error {
+	// Inspect the streamOptimized vmdk (capacity, on-disk size, geometry) and
+	// derive the single-disk OVF descriptor govmomi uses for the import spec.
+	disk, err := vmdk.Stat(localVMDK)
+	if err != nil {
+		return fmt.Errorf("stat streamOptimized vmdk %q: %w", localVMDK, err)
+	}
+	disk.ImportName = id // OVF EntityName => folder + disk basename become "<id>"
+	descriptor, err := disk.OVF()
+	if err != nil {
+		return fmt.Errorf("build single-disk OVF descriptor: %w", err)
+	}
+
+	// Best-effort delete a stale leftover target so the NFC upload doesn't land at
+	// a suffixed name (the deferred cleanup in ImportDisk also guards this).
+	target := fmt.Sprintf("%s/%s.vmdk", id, id)
+	fm := datastore.NewFileManager(datacenter, true)
+	if _, statErr := datastore.Stat(ctx, target); statErr == nil {
+		_ = fm.Delete(ctx, target)
+	}
+
+	ovfManager := ovf.NewManager(p.client.Client)
+	spec, err := ovfManager.CreateImportSpec(ctx, descriptor, pool, datastore, &types.OvfCreateImportSpecParams{
+		DiskProvisioning: string(types.OvfCreateImportSpecParamsDiskProvisioningTypeThin),
+		EntityName:       id,
+	})
+	if err != nil {
+		return fmt.Errorf("create import spec: %w", err)
+	}
+	if spec.Error != nil {
+		return fmt.Errorf("import spec rejected: %s", spec.Error[0].LocalizedMessage)
+	}
+
+	lease, err := pool.ImportVApp(ctx, spec.ImportSpec, folder, host)
+	if err != nil {
+		return fmt.Errorf("ImportVApp (acquire NFC lease): %w", err)
+	}
+	info, err := lease.Wait(ctx, spec.FileItem)
+	if err != nil {
+		return fmt.Errorf("wait for NFC lease ready: %w", err)
+	}
+
+	// (a) Rewrite the lease device URLs: the ESXi FQDN they carry is unresolvable
+	// from the provider pod; the vCenter host proxies NFC and is always reachable.
+	vcHost := p.client.Client.URL().Host
+	for i := range info.Items {
+		info.Items[i].URL.Host = vcHost
+	}
+
+	f, err := os.Open(filepath.Clean(localVMDK))
+	if err != nil {
+		_ = lease.Abort(ctx, nil)
+		return fmt.Errorf("open local vmdk for upload: %w", err)
+	}
+	uploadErr := func() error {
+		defer func() { _ = f.Close() }()
+		updater := lease.StartUpdater(ctx, info)
+		defer updater.Done()
+		if len(info.Items) == 0 {
+			return fmt.Errorf("NFC lease returned no upload items")
+		}
+		if err := lease.Upload(ctx, info.Items[0], f, soap.Upload{ContentLength: disk.Size}); err != nil {
+			return fmt.Errorf("NFC upload: %w", err)
+		}
+		return nil
+	}()
+	if uploadErr != nil {
+		_ = lease.Abort(ctx, nil)
+		return uploadErr
+	}
+	if err := lease.Complete(ctx); err != nil {
+		return fmt.Errorf("complete NFC lease: %w", err)
+	}
+
+	// (b) Detach the disk (keep the file) and Unregister the transient import VM.
+	// Unregister leaves the disk — and a small leftover .vmx/.nvram in the folder,
+	// which is harmless: the subsequent Create attaches "[<ds>] <id>/<id>.vmdk".
+	vm := object.NewVirtualMachine(p.client.Client, info.Entity)
+	if devs, derr := vm.Device(ctx); derr == nil {
+		if disks := devs.SelectByType((*types.VirtualDisk)(nil)); len(disks) > 0 {
+			_ = vm.RemoveDevice(ctx, true, disks...)
+		}
+	}
+	if err := vm.Unregister(ctx); err != nil {
+		p.logger.Warn("Failed to unregister transient import VM (leftover .vmx may remain in folder)", "vm", info.Entity.Value, "error", err)
+	}
+	return nil
+}
+
 // resolveImportPlacement resolves the resource pool, VM folder, and host used by
-// vmdk.Import's ImportVApp/HttpNfcLease. It mirrors the Create path's placement
+// the NFC import's ImportVApp/HttpNfcLease. It mirrors the Create path's placement
 // resolution: the resource pool comes from the provider's DefaultCluster (the
 // import VM is transient — it is destroyed immediately after the disk lands — so
 // any valid pool works), the folder from DefaultFolder (falling back to the
