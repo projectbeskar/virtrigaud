@@ -377,7 +377,7 @@ Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
 ## Authors
 
 - **William Rizzo** ([@wrkode](https://github.com/wrkode)) — project maintainer
-- **Erick Bourgeois** ([@firestoned](https://github.com/firestoned)) — contributor
+- **Erick Bourgeois** ([@ebourgeois](https://github.com/ebourgeois)) — project maintainer
 
 ## License
 
