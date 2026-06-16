@@ -105,8 +105,9 @@ func TestServer_GetCapabilities_DiskMigration(t *testing.T) {
 }
 
 // TestServer_GetCapabilities_StorageBackends verifies libvirt advertises the
-// honest ADR-0006 status quo: pvc-only export/import backends and relay-only
-// transfer (the existing pod-side path), and never nfs/s3 or direct.
+// honest ADR-0006 Slice 1 per-direction surface: as the TARGET it imports from
+// pvc AND s3, but it still only EXPORTS to pvc (libvirt→S3 export is a later
+// slice). Transfer is relay-only; direct is never advertised.
 func TestServer_GetCapabilities_StorageBackends(t *testing.T) {
 	s := &Server{}
 
@@ -114,16 +115,18 @@ func TestServer_GetCapabilities_StorageBackends(t *testing.T) {
 
 	require.NoError(t, err)
 	require.NotNil(t, caps)
-	assert.Equal(t, []string{"pvc"}, caps.SupportedExportBackends)
-	assert.Equal(t, []string{"pvc"}, caps.SupportedImportBackends)
+	assert.Equal(t, []string{"pvc"}, caps.SupportedExportBackends,
+		"libvirt export stays pvc-only in Slice 1 (libvirt is TARGET, not SOURCE)")
+	assert.Equal(t, []string{"pvc", "s3"}, caps.SupportedImportBackends,
+		"libvirt imports from pvc and s3 in Slice 1 (TARGET of vSphere→S3→libvirt)")
 	assert.Equal(t, []string{"relay"}, caps.SupportedTransferModes)
 }
 
-// TestServer_ExportImportDisk_NonPVCBackendUnimplemented verifies that an
-// ExportDisk/ImportDisk request naming a non-pvc backend (e.g. s3) is rejected
-// with codes.Unimplemented before any provider work, per ADR-0006 Slice 0. The
-// guard runs ahead of the nil-provider check, so a zero-value Server suffices.
-func TestServer_ExportImportDisk_NonPVCBackendUnimplemented(t *testing.T) {
+// TestServer_ExportDisk_S3BackendUnimplemented verifies that an ExportDisk
+// naming the s3 backend is still rejected with codes.Unimplemented: libvirt is
+// the TARGET (import) of the Slice-1 S3 path, not the SOURCE. The guard runs
+// ahead of the nil-provider check, so a zero-value Server suffices.
+func TestServer_ExportDisk_S3BackendUnimplemented(t *testing.T) {
 	s := &Server{}
 
 	_, exportErr := s.ExportDisk(context.Background(), &providerv1.ExportDiskRequest{
@@ -132,15 +135,38 @@ func TestServer_ExportImportDisk_NonPVCBackendUnimplemented(t *testing.T) {
 	})
 	require.Error(t, exportErr)
 	assert.Equal(t, codes.Unimplemented, status.Code(exportErr),
-		"ExportDisk must reject a non-pvc backend with Unimplemented (ADR-0006 Slice 0)")
+		"libvirt ExportDisk must reject s3: libvirt→S3 export is a later slice (ADR-0006)")
+}
+
+// TestServer_ImportDisk_DirectModeRejected verifies that an s3 ImportDisk with
+// an explicit direct transfer mode fails loudly (InvalidArgument) before any
+// provider work — never a silent downgrade (ADR-0006 D2). The mode guard runs
+// ahead of the provider dispatch, so a zero-value Server suffices.
+func TestServer_ImportDisk_DirectModeRejected(t *testing.T) {
+	s := &Server{}
 
 	_, importErr := s.ImportDisk(context.Background(), &providerv1.ImportDiskRequest{
-		SourceUrl:   "s3://bucket/disk",
-		BackendType: "s3",
+		SourceUrl:    "s3://bucket/disk.vmdk",
+		BackendType:  "s3",
+		TransferMode: "direct",
+	})
+	require.Error(t, importErr)
+	assert.Equal(t, codes.InvalidArgument, status.Code(importErr),
+		"explicit direct mode must fail loudly (ADR-0006 D2)")
+}
+
+// TestServer_ImportDisk_NFSBackendUnimplemented verifies nfs is still rejected
+// with Unimplemented on the import path (only pvc/s3 are implemented).
+func TestServer_ImportDisk_NFSBackendUnimplemented(t *testing.T) {
+	s := &Server{}
+
+	_, importErr := s.ImportDisk(context.Background(), &providerv1.ImportDiskRequest{
+		SourceUrl:   "nfs://server/export/disk",
+		BackendType: "nfs",
 	})
 	require.Error(t, importErr)
 	assert.Equal(t, codes.Unimplemented, status.Code(importErr),
-		"ImportDisk must reject a non-pvc backend with Unimplemented (ADR-0006 Slice 0)")
+		"nfs import is not yet implemented (ADR-0006 Slice 4)")
 }
 
 // fakeDiskProvider is a minimal contracts.Provider used to exercise the Server's

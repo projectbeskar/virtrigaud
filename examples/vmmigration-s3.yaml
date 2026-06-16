@@ -1,59 +1,85 @@
-# S3-staged cross-hypervisor migration (ADR-0006).
+# Cross-hypervisor migration over S3 (ADR-0006 Slice 1): vSphere → S3 → libvirt.
 #
-# SURFACE ONLY — NOT YET FUNCTIONAL. As of ADR-0006 Slice 0 the S3 storage
-# backend exists in the CRD/proto/capability surface but has NO transfer logic.
-# A migration with `storage.type: s3` is rejected at the Validating phase with:
+# This is the first REAL cross-hypervisor disk transfer: the vSphere SOURCE
+# exports its disk (native vmdk) and streams it up to S3 through the provider
+# pod; the libvirt TARGET downloads it from S3 and streams it over SSH into a
+# host-side `qemu-img convert -f vmdk -O qcow2` before creating the pool volume.
+# Bytes flow host/vCenter → pod → S3 → pod → host; they NEVER traverse a CSI PVC.
 #
-#   storage backend "s3" is not yet implemented; only "pvc" is supported today
-#   (ADR-0006 Slice 0)
+# Direction scope: vSphere is SOURCE-only and libvirt is TARGET-only for S3 in
+# this slice. The reverse direction (libvirt→S3 export, S3→vSphere import),
+# Proxmox, NFS, and the `direct` transfer mode are later slices and are rejected
+# with an actionable, ADR-referencing message at the Validating phase.
 #
-# This example documents the intended shape so it is review-stable as the
-# transfer slices land. For a working migration today, use `storage.type: pvc`
-# (see vmmigration-basic.yaml / vmmigration-advanced.yaml).
-
+# Transfer mode: relay (the universal floor — the provider pod is the S3 client,
+# so backend credentials never leave the pod). `auto` resolves to `relay` here.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# S3 credentials Secret. Credentials are ALWAYS referenced via a Secret — never
+# inline in the VMMigration. Required keys: accessKeyID, secretAccessKey.
+# Optional: sessionToken (STS / temporary credentials). The Secret must live in
+# the same namespace as the VMMigration. Replace the placeholders below with your
+# object-store credentials.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: s3-migration-credentials
+  namespace: default
+type: Opaque
+stringData:
+  accessKeyID: "REPLACE_WITH_ACCESS_KEY_ID"
+  secretAccessKey: "REPLACE_WITH_SECRET_ACCESS_KEY"
+  # sessionToken: "REPLACE_WITH_SESSION_TOKEN"   # only for temporary/STS creds
+---
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMMigration
 metadata:
-  name: migration-s3-example
+  name: migration-vsphere-to-libvirt-s3
   namespace: default
   labels:
     app: my-app
     environment: production
 spec:
+  # SOURCE: a VM managed by a vSphere provider.
   source:
     vmRef:
-      name: prod-app-server
+      name: prod-app-server      # an existing VirtualMachine backed by vSphere
     createSnapshot: false
     deleteAfterMigration: false
 
+  # TARGET: create the migrated VM on a libvirt provider.
   target:
     name: prod-app-server-migrated
     providerRef:
-      name: target-provider
+      name: libvirt-provider      # a Provider of type Libvirt
       namespace: default
     classRef:
       name: high-performance
     networks:
       - name: production-network
 
-  # S3-compatible object storage staging (AWS S3, MinIO, Ceph RGW).
-  # Credentials are ALWAYS referenced via a Secret — never inline.
+  # S3-compatible object storage staging. The lab target here is rustfs over
+  # plaintext HTTP with path-style addressing; swap for AWS S3 / MinIO / Ceph RGW
+  # as needed. The provider pods must be able to reach this endpoint.
   storage:
     type: s3
-    transferMode: auto        # auto | relay | direct
+    transferMode: relay          # relay (implemented) | auto→relay; direct is rejected (Slice 2)
     s3:
-      bucket: virtrigaud-migrations
-      # endpoint: https://minio.example.com   # set for MinIO/Ceph RGW; omit for AWS
-      region: eu-central-1
-      prefix: prod-app-server/
-      usePathStyle: false     # set true for most non-AWS S3 (MinIO/RGW)
+      bucket: virtrigaud
+      endpoint: http://rustfs.lab.k8:9000   # http:// ⇒ plaintext; omit for AWS
+      region: us-east-1
+      prefix: prod-app-server/    # object key prefix under the bucket
+      usePathStyle: true          # true for rustfs/MinIO/Ceph RGW; false for AWS
       credentialsSecretRef:
         name: s3-migration-credentials
 
   options:
+    # The SOURCE always exports its native format and the TARGET converts on
+    # import (ADR-0006 D4). For vSphere→libvirt the staged object is a vmdk and
+    # libvirt converts it to qcow2 on the host; diskFormat is advisory here.
     diskFormat: qcow2
     compress: false
-    verifyChecksums: true
+    verifyChecksums: true         # SHA256 of the transferred object (ADR-0006 D5)
     timeout: "6h"
 
   metadata:

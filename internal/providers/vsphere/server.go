@@ -355,6 +355,58 @@ func (p *Provider) cloneDiskToStreamOptimized(ctx context.Context, sourcePath, d
 	return nil
 }
 
+// flattenVMDK collapses a possibly multi-file VMDK (a tiny text descriptor plus
+// one or more separate data extents, e.g. a "-sesparse.vmdk" delta) into a single,
+// self-contained streamOptimized VMDK that carries all of the disk data.
+//
+// This is the fix for the ADR-0006 Slice 1 export bug: when a *running* VM is
+// snapshotted and exported, vCenter presents the disk as a descriptor + extent(s).
+// The descriptor (descriptorPath, ~hundreds of bytes) references the extents by
+// filename; both live in the same directory. Uploading the descriptor alone yields
+// an object with no disk data, so the target's "qemu-img convert -f vmdk" produces
+// garbage. Flattening with qemu-img reads the descriptor, resolves the extent(s),
+// and writes one importable file.
+//
+// descriptorPath is the local path to the downloaded descriptor (the ".vmdk" the
+// extents hang off). flattenedPath is where the single self-contained VMDK is
+// written. The output format is kept as vmdk (subformat=streamOptimized) because
+// ADR-0006 D4 makes the TARGET own the vmdk→qcow2 conversion; the source exports
+// its native format.
+//
+// qemu-img must be present in the provider image (it ships qemu-utils). If it is
+// missing, flattenVMDK fails loudly rather than silently uploading the descriptor.
+func (p *Provider) flattenVMDK(ctx context.Context, descriptorPath, flattenedPath string) error {
+	qemuImg := diskutil.NewQemuImg()
+	if !qemuImg.IsInstalled() {
+		return fmt.Errorf("qemu-img is not available in the provider image; cannot flatten multi-file VMDK %q", descriptorPath)
+	}
+
+	if version, verr := qemuImg.GetVersion(ctx); verr == nil {
+		p.logger.Info("Flattening multi-file VMDK to a single self-contained streamOptimized VMDK",
+			"descriptor", descriptorPath, "output", flattenedPath, "qemu_img", version)
+	} else {
+		p.logger.Info("Flattening multi-file VMDK to a single self-contained streamOptimized VMDK",
+			"descriptor", descriptorPath, "output", flattenedPath)
+	}
+
+	// qemu-img convert -p -f vmdk -O vmdk -o subformat=streamOptimized <descriptor> <flattened>
+	// Forcing SourceFormat=vmdk avoids format probing on the descriptor; Compression=true
+	// is what the diskutil wrapper maps to "-o subformat=streamOptimized" for vmdk output,
+	// producing a single self-contained streamOptimized file.
+	if err := qemuImg.Convert(ctx, diskutil.ConvertOptions{
+		SourcePath:        descriptorPath,
+		DestinationPath:   flattenedPath,
+		SourceFormat:      diskutil.FormatVMDK,
+		DestinationFormat: diskutil.FormatVMDK,
+		Compression:       true,
+	}); err != nil {
+		// qemuImg.Convert already includes the qemu-img stderr in the wrapped error.
+		return fmt.Errorf("flatten multi-file VMDK %q: %w", descriptorPath, err)
+	}
+
+	return nil
+}
+
 // Validate implements the ProviderServer interface. It verifies that the vSphere client
 // is initialized and that the current session is still active (govmomi.Client.Valid).
 // If the session has expired, Validate attempts to create a fresh client using the
@@ -423,10 +475,12 @@ func (p *Provider) GetCapabilities(ctx context.Context, req *providerv1.GetCapab
 		SupportedExportFormats:    []string{"vmdk", "qcow2", "raw"}, // ExportDisk converts the streamOptimized VMDK to these
 		SupportedImportFormats:    []string{"vmdk", "qcow2", "raw"}, // ImportDisk accepts these and converts to VMDK
 		SupportsExportCompression: true,                             // export uses the compressed streamOptimized VMDK format
-		// ADR-0006 Slice 0: advertise the status quo honestly. ExportDisk/
-		// ImportDisk only implement the pod-side (pvc, relay-shaped) staging
-		// path; nfs/s3 and direct transfer are not yet implemented.
-		SupportedExportBackends: migration.PVCOnlyExportBackends(),
+		// ADR-0006 Slice 1: vSphere is the SOURCE of the vSphere → S3 → libvirt
+		// relay path. It EXPORTS to pvc AND s3 (vCenter datastore stream → pod →
+		// S3, native vmdk); it still only IMPORTS from pvc (S3 import into vSphere
+		// is the reverse direction, a later slice). Only the relay transfer mode
+		// is implemented; direct is not.
+		SupportedExportBackends: migration.PVCAndS3ExportBackends(),
 		SupportedImportBackends: migration.PVCOnlyImportBackends(),
 		SupportedTransferModes:  migration.RelayOnlyTransferModes(),
 	}, nil
@@ -3269,26 +3323,45 @@ func (p *Provider) extractSnapshotNames(snapshotTree []types.VirtualMachineSnaps
 //     sparseMonolithic VMDK on the same datastore. This normalises the format and
 //     produces a single downloadable file regardless of the original VMDK subtype.
 //  3. DatastoreFileManager.DownloadFile transfers the temporary VMDK to a local temp
-//     directory. If the descriptor references extent files they are downloaded as well.
-//  4. If req.Format is not "vmdk", diskutil/qemu-img converts the downloaded VMDK to
-//     the requested format ("qcow2" or "raw"). Supported formats: "vmdk", "qcow2", "raw".
-//  5. The final file is uploaded to the destination PVC storage via the storage client.
+//     directory. When vCenter presents the disk as a multi-file VMDK (a small text
+//     descriptor plus one or more separate data extents, e.g. a "-sesparse.vmdk"
+//     delta — common when exporting a snapshot of a running VM) the extent files are
+//     downloaded alongside the descriptor.
+//  4. The downloaded VMDK is collapsed into a single, self-contained, importable file
+//     before upload:
+//     - If req.Format is "vmdk" (the S3-relay default; ADR-0006 D4 keeps conversion
+//     on the TARGET) and the descriptor referenced extents, flattenVMDK runs
+//     qemu-img to write one self-contained streamOptimized VMDK that carries all
+//     the disk data. A genuinely single-file VMDK is uploaded as-is.
+//     - If req.Format is "qcow2"/"raw", diskutil/qemu-img converts the descriptor
+//     (resolving its extents) directly into the requested format.
+//     This avoids the failure mode where only the tiny descriptor was uploaded,
+//     leaving the staged object with no disk data.
+//  5. The final self-contained file is uploaded to the destination storage (pvc or
+//     s3) via the storage client. The reported Checksum (SHA256) and
+//     EstimatedSizeBytes are computed over exactly the uploaded object.
 //  6. Temporary local files and the temporary datastore VMDK are cleaned up via deferred
 //     calls regardless of success or failure.
 //
 // The operation runs synchronously; Task in the response is nil.
 func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskRequest) (*providerv1.ExportDiskResponse, error) {
-	// ADR-0006 Slice 0: only the legacy pvc staging path is implemented; reject
-	// nfs/s3 backends honestly instead of falling through to the pvc path.
-	if err := migration.EnsurePVCBackend(req.BackendType); err != nil {
+	// ADR-0006: vSphere is a SOURCE for the S3 relay export (Slice 1). Accept pvc
+	// and s3; reject nfs/unknown honestly. Only the relay transfer mode is
+	// implemented; an explicit "direct" fails loudly (never a silent downgrade).
+	if err := migration.EnsurePVCOrS3Backend(req.BackendType); err != nil {
 		return nil, err
 	}
+	if err := migration.EnsureRelayMode(req.TransferMode); err != nil {
+		return nil, err
+	}
+	useS3 := req.BackendType == migration.BackendS3
 
 	if p.client == nil {
 		return nil, errors.NewUnavailable("vSphere client not configured", nil)
 	}
 
-	p.logger.Info("Exporting disk", "vm_id", req.VmId, "destination", req.DestinationUrl)
+	// Never log the credentials map (secret material); log only the backend.
+	p.logger.Info("Exporting disk", "vm_id", req.VmId, "destination", req.DestinationUrl, "backend", req.BackendType)
 
 	// Get disk information first
 	diskInfo, err := p.GetDiskInfo(ctx, &providerv1.GetDiskInfoRequest{
@@ -3309,6 +3382,14 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 		return nil, errors.NewInvalidSpec("unsupported export format: %s", targetFormat)
 	}
 
+	// ADR-0006 D4: the SOURCE exports its NATIVE format; the TARGET converts on
+	// import. For the S3 relay path vSphere always exports vmdk and libvirt
+	// converts vmdk→qcow2 on import. Force vmdk here regardless of req.Format so
+	// the staged object is the native disk.
+	if useS3 {
+		targetFormat = "vmdk"
+	}
+
 	exportID := fmt.Sprintf("export-vsphere-%s-%d", req.VmId, time.Now().Unix())
 
 	// vSphere disk export strategy:
@@ -3321,21 +3402,27 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 	p.logger.Warn("vSphere disk export requires OVF export API - simplified implementation")
 	p.logger.Info("Note: Full implementation would use govmomi OVF export and datastore file access")
 
-	// Configure storage client
-	// URL format: pvc://<pvc-name>/<file-path>
-	// Provider pods have PVCs mounted at /mnt/migration-storage/<pvc-name>
-	// Extract PVC name from URL to construct the correct mount path
-	pvcName, err := extractPVCNameFromURL(req.DestinationUrl)
-	if err != nil {
-		return nil, errors.NewInternal("failed to extract PVC name from URL", err)
-	}
-
-	// Mount path matches where the controller mounts PVCs: /mnt/migration-storage/<pvc-name>
-	mountPath := fmt.Sprintf("/mnt/migration-storage/%s", pvcName)
-
-	storageConfig := storage.StorageConfig{
-		Type:      "pvc",
-		MountPath: mountPath,
+	// Configure storage client for the requested backend (ADR-0006).
+	//   - s3:  the provider pod is the S3 client (relay export). Options come from
+	//          storage_options_json; credentials from the credentials map.
+	//   - pvc: the legacy path; the PVC is mounted at /mnt/migration-storage/<pvc>.
+	var storageConfig storage.StorageConfig
+	if useS3 {
+		storageConfig, err = migration.S3StorageConfigFromRequest(req.StorageOptionsJson, req.Credentials)
+		if err != nil {
+			return nil, errors.NewInvalidSpec("invalid s3 export configuration: %s", err.Error())
+		}
+	} else {
+		// URL format: pvc://<pvc-name>/<file-path>
+		// Provider pods have PVCs mounted at /mnt/migration-storage/<pvc-name>
+		pvcName, perr := extractPVCNameFromURL(req.DestinationUrl)
+		if perr != nil {
+			return nil, errors.NewInternal("failed to extract PVC name from URL", perr)
+		}
+		storageConfig = storage.StorageConfig{
+			Type:      "pvc",
+			MountPath: fmt.Sprintf("/mnt/migration-storage/%s", pvcName),
+		}
 	}
 
 	storageClient, err := storage.NewStorage(storageConfig)
@@ -3475,13 +3562,21 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 		p.logger.Info("All available extent files downloaded")
 	}
 
-	// Convert format if needed
+	// Decide what to upload.
+	//
+	// The downloaded "disk.vmdk" is only the VMDK *descriptor* when vCenter
+	// presents the snapshot export as a multi-file VMDK (descriptor + separate
+	// data extent(s), e.g. a "-sesparse.vmdk" delta). Uploading that descriptor
+	// alone produces a tiny object with no disk data — the original bug. The
+	// uploaded object must always be a single, self-contained, importable file.
 	var uploadPath string
-	if targetFormat != "vmdk" {
+	switch {
+	case targetFormat != "vmdk":
+		// Non-vmdk export (qcow2/raw): qemu-img convert resolves the descriptor +
+		// extents itself, so the converted file is already self-contained.
 		p.logger.Info("Converting VMDK to target format", "target_format", targetFormat)
 		convertedPath := fmt.Sprintf("%s/converted.%s", tempDir, targetFormat)
 
-		// Use diskutil for conversion
 		qemuImg := diskutil.NewQemuImg()
 		err = qemuImg.Convert(ctx, diskutil.ConvertOptions{
 			SourcePath:        tempFile,
@@ -3493,10 +3588,24 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 		if err != nil {
 			return nil, errors.NewInternal("failed to convert VMDK format", err)
 		}
-
 		uploadPath = convertedPath
-		// No need for explicit cleanup - tempDir cleanup will handle it
-	} else {
+		// tempDir cleanup handles the converted file.
+
+	case len(descriptor.ExtentFiles) > 0:
+		// vmdk export of a multi-file VMDK: flatten descriptor + extent(s) into a
+		// single self-contained streamOptimized VMDK and upload THAT (not the
+		// descriptor). This is the S3-relay path for a running VM's snapshot.
+		flattenedPath := fmt.Sprintf("%s/flattened.vmdk", tempDir)
+		if err = p.flattenVMDK(ctx, tempFile, flattenedPath); err != nil {
+			return nil, errors.NewInternal("failed to flatten multi-file VMDK", err)
+		}
+		uploadPath = flattenedPath
+		// tempDir cleanup handles the flattened file and the raw descriptor/extents.
+
+	default:
+		// vmdk export and the descriptor referenced no separate extents: the
+		// downloaded file is already a single self-contained VMDK, upload as-is.
+		p.logger.Info("VMDK is already single-file, uploading without flatten", "file", tempFile)
 		uploadPath = tempFile
 	}
 

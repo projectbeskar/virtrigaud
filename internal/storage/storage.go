@@ -30,6 +30,19 @@ type Storage interface {
 	// Download downloads a file from storage
 	Download(ctx context.Context, req DownloadRequest) (DownloadResponse, error)
 
+	// UploadStream streams data from an io.Reader into the backend, computing the
+	// SHA256 in-stream (ADR-0006 relay export). For S3 this is an auto-multipart
+	// PutObject; the PVC backend streams to a file. The reader is consumed in
+	// full; the backend does not buffer the whole object in memory.
+	UploadStream(ctx context.Context, req StreamUploadRequest) (UploadResponse, error)
+
+	// DownloadStream streams an object from the backend into an io.Writer,
+	// computing the SHA256 in-stream and verifying it against ExpectedChecksum
+	// when set (ADR-0006 relay import). For S3 this is a streaming GetObject; the
+	// PVC backend streams from a file. The writer receives the whole object; the
+	// backend does not buffer it in memory.
+	DownloadStream(ctx context.Context, req StreamDownloadRequest) (DownloadResponse, error)
+
 	// Delete removes a file from storage
 	Delete(ctx context.Context, url string) error
 
@@ -41,6 +54,29 @@ type Storage interface {
 
 	// Close closes any open connections
 	Close() error
+}
+
+// StreamUploadRequest contains parameters for a streaming upload (ADR-0006).
+type StreamUploadRequest struct {
+	// DestinationURL is the backend URL to upload to (e.g. "s3://bucket/key").
+	DestinationURL string
+	// Reader provides the data to upload. It is read to EOF.
+	Reader io.Reader
+	// ContentLength is the expected size in bytes, or -1 when unknown. For S3 a
+	// known size lets minio pick an efficient part size; -1 triggers streaming
+	// auto-multipart.
+	ContentLength int64
+}
+
+// StreamDownloadRequest contains parameters for a streaming download (ADR-0006).
+type StreamDownloadRequest struct {
+	// SourceURL is the backend URL to download from (e.g. "s3://bucket/key").
+	SourceURL string
+	// Writer receives the downloaded bytes. It is written in full before return.
+	Writer io.Writer
+	// ExpectedChecksum, when non-empty, is the SHA256 the downloaded object must
+	// match; a mismatch returns an ErrorTypeChecksumMismatch error.
+	ExpectedChecksum string
 }
 
 // UploadRequest contains parameters for uploading a file
@@ -123,25 +159,55 @@ type FileMetadata struct {
 
 // StorageConfig contains storage backend configuration
 type StorageConfig struct {
-	// Type specifies the storage backend type (pvc only)
+	// Type specifies the storage backend type ("pvc" or "s3"; "" == pvc).
 	Type string
-	// PVCName is the name of the PVC to use
+	// PVCName is the name of the PVC to use (pvc backend).
 	PVCName string
-	// PVCNamespace is the namespace of the PVC
+	// PVCNamespace is the namespace of the PVC (pvc backend).
 	PVCNamespace string
-	// MountPath is where the PVC is mounted in the pod
+	// MountPath is where the PVC is mounted in the pod (pvc backend).
 	MountPath string
+
+	// S3 holds the S3-compatible object-storage configuration (s3 backend,
+	// ADR-0006). Endpoint/bucket/region/path-style come from the migration's
+	// MigrationStorage.S3; credentials are delivered separately and never live in
+	// config or logs.
+	S3 *S3Config
 }
 
-// NewStorage creates a new storage backend based on the configuration
+// S3Config configures an S3-compatible object-storage backend (ADR-0006). The
+// provider pod is the S3 client; bytes flow host/vCenter → pod → S3 (export) and
+// S3 → pod → host (import), never via a CSI PVC.
+type S3Config struct {
+	// Endpoint is the S3 endpoint URL. An "http://" scheme selects plaintext HTTP
+	// (e.g. a lab rustfs/MinIO); empty means the AWS default endpoint.
+	Endpoint string
+	// Region is the S3 region (empty defaults to "us-east-1").
+	Region string
+	// Bucket is the S3 bucket holding the transfer object.
+	Bucket string
+	// UsePathStyle selects path-style addressing (needed by most non-AWS S3).
+	UsePathStyle bool
+
+	// AccessKeyID is the S3 access key ID. Secret material — never logged.
+	AccessKeyID string
+	// SecretAccessKey is the S3 secret access key. Secret material — never logged.
+	SecretAccessKey string
+	// SessionToken is the optional S3 session token (STS). Secret material.
+	SessionToken string
+}
+
+// NewStorage creates a new storage backend based on the configuration.
 func NewStorage(config StorageConfig) (Storage, error) {
 	switch config.Type {
 	case "pvc", "":
 		return NewPVCStorage(config)
+	case "s3":
+		return NewS3Storage(config)
 	default:
 		return nil, &StorageError{
 			Type:    ErrorTypeInvalidConfig,
-			Message: "unsupported storage type (only 'pvc' is supported): " + config.Type,
+			Message: "unsupported storage type (supported: 'pvc', 's3'): " + config.Type,
 		}
 	}
 }
