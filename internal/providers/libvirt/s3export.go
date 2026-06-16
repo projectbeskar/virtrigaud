@@ -164,9 +164,16 @@ func (s *Server) exportDiskToS3(ctx context.Context, req *providerv1.ExportDiskR
 	_ = pw.CloseWithError(streamErr)
 	ul := <-ulCh
 
-	// Surface the REAL failure: a host-side `cat` failure is the root cause when
-	// the stream broke at the source; only if the host side was clean do we
-	// attribute a stream failure to the S3 upload.
+	// Surface the REAL failure. When BOTH sides report an error, the upload error
+	// is almost always the root cause: a failed S3 upload closes the pipe's read
+	// end, which breaks the host-side `cat` with SIGPIPE — and ssh then reports a
+	// bare "exit status 255" with no stderr. Reporting only the cat error in that
+	// case masks the actual cause (e.g. an S3 auth/space/endpoint failure), so we
+	// include both, leading with the upload error.
+	if ul.err != nil && streamErr != nil {
+		return nil, fmt.Errorf("disk export stream failed: s3 upload: %w (host-side stream cat %s also failed: %v)",
+			ul.err, hostTmp, streamErr)
+	}
 	if streamErr != nil {
 		return nil, fmt.Errorf("host-side stream (cat %s) failed: %w", hostTmp, streamErr)
 	}

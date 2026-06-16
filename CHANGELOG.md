@@ -5,6 +5,36 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-16 18:10] - Surface the real S3 error on a libvirt export stream failure (un-mask)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/libvirt/s3export.go` (`exportDiskToS3`): when BOTH the host-side `cat` stream and the S3 upload reported an error, the code surfaced only the `cat` error — but that is almost always a downstream symptom (a failed S3 upload closes the pipe's read end, which breaks `cat` with SIGPIPE, and ssh then reports a bare `exit status 255` with no stderr). It now reports both, leading with the upload error, so the actual root cause (e.g. an S3 endpoint returning `503 service unavailable` or `erasure write quorum failed` when its disk is full) is no longer hidden behind `exit status 255`.
+
+### Why
+Found while validating the ADR-0006 Slice 2 reverse migration: a libvirt→vSphere export kept failing with an opaque `host-side stream (cat …) failed: exit status 255 (stderr: )`. The masking turned a one-line storage diagnosis into a multi-step investigation. Refs #236.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+## [2026-06-16 18:00] - vSphere S3 import: drive the NFC lease by hand, rewrite device URL to vCenter
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/vsphere/s3import.go` (`ImportDisk`): replaced the `vmdk.Import` call with a hand-driven `HttpNfcLease` import (`nfcImportStreamOptimized`). `vmdk.Import` uploads to the lease's device URL, which vCenter populates with the **ESXi host FQDN** (e.g. `esxi.lab.k8`); a remote provider pod reaches vCenter by IP (`PROVIDER_ENDPOINT`) and typically cannot resolve that ESXi name via cluster DNS, so the streamOptimized upload failed with `lookup esxi.lab.k8 … no such host`. The new path rewrites each lease device URL host to the vCenter host (which proxies NFC and is always reachable from the pod), and `Unregister`s — rather than `Destroy`s — the transient import VM (vCenter 8 faults `Destroy` of a freshly imported VM with `file … is attached to vm`). Net result is identical: `[<ds>] <id>/<id>.vmdk` left as a native thin disk.
+
+### Why
+ADR-0006 Slice 2's vSphere import target could acquire the NFC lease but never complete the upload from an in-cluster provider pod, because the lease's device URL is unresolvable there. This is the final data-path blocker for the reverse (libvirt→vSphere) migration. Refs #236.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-06-16 17:20] - Fix `createSnapshot: false` being impossible to set (defaulted-bool footgun)
 **Author:** @wrkode (William Rizzo)
 
