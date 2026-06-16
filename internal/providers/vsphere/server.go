@@ -2669,6 +2669,19 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 		// Set VM name in config spec FIRST (required for CreateVM and cloud-init)
 		configSpec.Name = spec.Name
 
+		// CreateVM_Task from scratch REQUIRES config.files.vmPathName (where to
+		// place the VM's home/.vmx). Derive the datastore from the imported disk
+		// path "[<ds>] <folder>/<file>.vmdk" → "[<ds>]"; vCenter then creates the
+		// VM under "[<ds>] <vmName>/". Without it CreateVM fails with
+		// "A specified parameter was not correct: config.files".
+		if strings.HasPrefix(spec.DiskPath, "[") {
+			if end := strings.Index(spec.DiskPath, "]"); end > 1 {
+				configSpec.Files = &types.VirtualMachineFileInfo{
+					VmPathName: spec.DiskPath[:end+1],
+				}
+			}
+		}
+
 		// Add cloud-init data via guestinfo properties if provided
 		// Note: Must be called AFTER setting Name for imported disk VMs
 		if spec.CloudInit != "" {
@@ -2689,11 +2702,16 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 			DiskMode: string(types.VirtualDiskModePersistent),
 		}
 
-		// Add disk device
+		// Add disk device: unique negative key (the controller below uses -1),
+		// attached to that SCSI controller (ControllerKey -1) at unit 0. Without a
+		// distinct Key + ControllerKey + UnitNumber, CreateVM rejects the spec.
+		diskUnit := int32(0)
 		diskDevice := &types.VirtualDisk{
 			VirtualDevice: types.VirtualDevice{
-				Key:     -1,
-				Backing: diskBacking,
+				Key:           -2,
+				ControllerKey: -1,
+				UnitNumber:    &diskUnit,
+				Backing:       diskBacking,
 			},
 		}
 
