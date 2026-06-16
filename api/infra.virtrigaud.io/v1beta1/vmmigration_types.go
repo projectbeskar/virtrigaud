@@ -55,10 +55,14 @@ type MigrationSource struct {
 	// +optional
 	SnapshotRef *LocalObjectReference `json:"snapshotRef,omitempty"`
 
-	// CreateSnapshot indicates whether to create a snapshot before migration
+	// CreateSnapshot indicates whether to create a snapshot before migration.
+	// NOTE: no `omitempty` — a defaulted (+kubebuilder:default=true) non-pointer
+	// bool with omitempty silently flips an explicit `false` back to `true` on any
+	// controller round-trip (omitempty drops false, the apiserver re-defaults), so
+	// `createSnapshot: false` would be impossible to set (same footgun as #235).
 	// +optional
 	// +kubebuilder:default=true
-	CreateSnapshot bool `json:"createSnapshot,omitempty"`
+	CreateSnapshot bool `json:"createSnapshot"`
 
 	// PowerOffBeforeMigration ensures VM is powered off before migration
 	// +optional

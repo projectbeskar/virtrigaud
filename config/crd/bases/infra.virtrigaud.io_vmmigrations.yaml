@@ -175,8 +175,12 @@ spec:
                 properties:
                   createSnapshot:
                     default: true
-                    description: CreateSnapshot indicates whether to create a snapshot
-                      before migration
+                    description: |-
+                      CreateSnapshot indicates whether to create a snapshot before migration.
+                      NOTE: no `omitempty` — a defaulted (+kubebuilder:default=true) non-pointer
+                      bool with omitempty silently flips an explicit `false` back to `true` on any
+                      controller round-trip (omitempty drops false, the apiserver re-defaults), so
+                      `createSnapshot: false` would be impossible to set (same footgun as #235).
                     type: boolean
                   deleteAfterMigration:
                     default: false

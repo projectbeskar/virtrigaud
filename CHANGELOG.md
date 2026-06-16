@@ -5,6 +5,21 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-16 17:20] - Fix `createSnapshot: false` being impossible to set (defaulted-bool footgun)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `api/infra.virtrigaud.io/v1beta1/vmmigration_types.go`: removed `omitempty` from `MigrationSource.CreateSnapshot` (kept `+kubebuilder:default=true`). The non-pointer bool with `omitempty` + a `true` default silently flipped an explicit `createSnapshot: false` back to `true` on the controller's status round-trip (same footgun class as the `tls.enabled` fix in #235), so a snapshot-free migration (e.g. of a powered-off source, or a multi-disk cloud-image VM whose CDROM breaks `--disk-only` snapshots) could not be requested.
+
+### Why
+Found while validating the ADR-0006 Slice 2 reverse migration: a `powerOffBeforeMigration: true` + `createSnapshot: false` run still attempted (and failed) a snapshot.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-06-16 16:05] - ADR-0006 Slice 2 — reverse-direction (libvirt→vSphere) controller wiring
 **Author:** @wrkode (William Rizzo)
 
