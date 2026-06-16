@@ -501,7 +501,7 @@ func (p *Provider) syncPersistentXML(ctx context.Context, domainName string) err
 	}
 
 	// Define the domain again with the running XML (this updates the persistent definition)
-	_, err = p.virshProvider.runVirshCommand(ctx, "define", remotePath)
+	_, err = p.virshProvider.runRemoteVirshCommand(ctx, "define", remotePath)
 	if err != nil {
 		return fmt.Errorf("failed to redefine domain: %w", err)
 	}
@@ -1417,7 +1417,7 @@ func (p *Provider) defineDomain(ctx context.Context, domainName string) error {
 	// Define domain from XML file
 	remotePath := fmt.Sprintf("/tmp/%s-domain.xml", domainName)
 
-	result, err := p.virshProvider.runVirshCommand(ctx, "define", remotePath)
+	result, err := p.virshProvider.runRemoteVirshCommand(ctx, "define", remotePath)
 	if err != nil {
 		return fmt.Errorf("failed to define domain: %w, output: %s", err, result.Stderr)
 	}

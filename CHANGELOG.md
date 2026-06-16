@@ -5,6 +5,30 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-17 08:57] - libvirt SSH private-key authentication works end-to-end
+**Author:** @jing2uo (Komh)
+
+### Fixed
+- `internal/providers/libvirt/virsh.go`: `setupConnection` now materialises the SSH private key to `/tmp/virtrigaud-libvirt/ssh-privatekey` (0600 in a 0700 dir) and pins `keyfile=&sshauth=privkey` on the `qemu+ssh://` URI, so libvirt's own transport authenticates with the key. The `~/.ssh/config` is written for **every** ssh URI (previously only when a password was set), and a write failure is a hard error on the key path. The `!` direct-exec handler and the standard virsh wrapper now branch password→`sshpass` / key→`ssh -i <keyfile>` / else local through a shared `sshKeyAuthOptions()` + `resolveSSHKeyFile()`; previously the key case fell through to **local** execution inside the pod, so every host command silently ran in the container.
+- `internal/providers/libvirt/sshhostkey.go`: `sshConfigStanza` emits `PubkeyAuthentication yes` (was `no`), which had disabled key auth for the config-reading transport.
+- `internal/providers/libvirt/server.go`: `copyDiskToRemote`'s key branch passes `-i <keyfile>` instead of a bare `scp` that could never authenticate; `ImportDisk` runs `qemu-img info` against the remote copy (`finalSourcePath`) rather than the pod-local `sourcePath`.
+- `internal/providers/libvirt/s3import.go`: `runSSHStdin`'s key branch passes `-i <keyfile>`.
+- `internal/providers/libvirt/storage.go` + `internal/providers/libvirt/provider_virsh.go`: `pool-define` and `define` run on the remote host via `runRemoteVirshCommand` (so `virsh` reads the host-local XML the provider wrote); they failed client-side under key auth before.
+- `internal/providers/libvirt/cloudinit.go`: `copyISOToRemote` uses host-side `! cp`/`! mkdir`/`! chmod` instead of hand-rolled `! ssh`/`! scp`; removed the now-unused `getSSHTarget()`.
+
+### Added
+- `internal/providers/libvirt/virsh.go`: `remoteVirshConnectURI` derives `qemu:///{system,session}` from the connection URI and `runRemoteVirshCommand` pins it with `-c`, so a remote `virsh` targets the same libvirtd whether the ssh user is root (system default) or non-root (session default) — also fixes the pre-existing password + non-root case.
+- `internal/providers/libvirt/sshkeyauth_test.go`: unit tests for key materialisation (content + 0600/0700 perms), `setupConnection` pinning `keyfile=`/`sshauth=privkey` on the key path and NOT on the password path, the `sshKeyAuthOptions` arg list, `resolveSSHKeyFile`, the `PubkeyAuthentication` flip, and `remoteVirshConnectURI` across the root/non-root × system/session quadrants.
+
+### Why
+The libvirt provider's private-key auth path was broken end-to-end (key never written, URI missing `keyfile=`, `PubkeyAuthentication no`, direct ssh/scp missing `-i`, and `define`/`pool-define` reading host files client-side). Only the password path worked, so a key-only Provider could not connect, import disks, or define VMs. This is the authentication counterpart to ADR-0004's host-key verification work on the same transport. Closes #248.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (provider image — the fix is in the libvirt provider)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-06-16 20:15] - Remove dead parseStorageSize (orphaned by the Bug G GetDiskInfo rewrite)
 **Author:** @wrkode (William Rizzo)
 

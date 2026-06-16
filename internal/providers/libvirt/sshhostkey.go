@@ -179,7 +179,7 @@ func (p hostKeyPolicy) sshConfigStanza() string {
 	stanza := fmt.Sprintf(`Host *
     StrictHostKeyChecking %s
     PasswordAuthentication yes
-    PubkeyAuthentication no
+    PubkeyAuthentication yes
     UserKnownHostsFile %s
     LogLevel ERROR
 `, p.strictHostKeyChecking(), p.knownHostsFile())
