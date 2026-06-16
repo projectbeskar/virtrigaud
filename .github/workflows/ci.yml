@@ -643,6 +643,11 @@ jobs:
           echo "🔍 Verifying single v1beta1 version in CRDs..."
           ./hack/verify-single-version.sh
 
+      - name: Verify CRD kustomization is in sync
+        run: |
+          echo "🔍 Verifying every CRD base is referenced in kustomization..."
+          ./hack/verify-crd-kustomization.sh
+
       - name: Verify CRD generation
         run: |
           echo "🔍 Verifying CRD generation..."
