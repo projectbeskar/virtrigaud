@@ -115,18 +115,20 @@ func TestServer_GetCapabilities_StorageBackends(t *testing.T) {
 
 	require.NoError(t, err)
 	require.NotNil(t, caps)
-	assert.Equal(t, []string{"pvc"}, caps.SupportedExportBackends,
-		"libvirt export stays pvc-only in Slice 1 (libvirt is TARGET, not SOURCE)")
+	assert.Equal(t, []string{"pvc", "s3"}, caps.SupportedExportBackends,
+		"libvirt exports to pvc and s3 in Slice 2 (SOURCE of libvirt→S3→vSphere reverse relay)")
 	assert.Equal(t, []string{"pvc", "s3"}, caps.SupportedImportBackends,
 		"libvirt imports from pvc and s3 in Slice 1 (TARGET of vSphere→S3→libvirt)")
 	assert.Equal(t, []string{"relay"}, caps.SupportedTransferModes)
 }
 
-// TestServer_ExportDisk_S3BackendUnimplemented verifies that an ExportDisk
-// naming the s3 backend is still rejected with codes.Unimplemented: libvirt is
-// the TARGET (import) of the Slice-1 S3 path, not the SOURCE. The guard runs
-// ahead of the nil-provider check, so a zero-value Server suffices.
-func TestServer_ExportDisk_S3BackendUnimplemented(t *testing.T) {
+// TestServer_ExportDisk_S3BackendPassesGate verifies that, as of ADR-0006 Slice
+// 2, an ExportDisk naming the s3 backend now PASSES the backend gate (libvirt is
+// the SOURCE of the libvirt→S3→vSphere reverse relay) and fails LATER — here at
+// the nil-provider check inside exportDiskToS3, NOT with codes.Unimplemented.
+// This is the inversion of the old Slice-1 "s3 export rejected" assertion and
+// mirrors the libvirt s3-IMPORT nil-provider test.
+func TestServer_ExportDisk_S3BackendPassesGate(t *testing.T) {
 	s := &Server{}
 
 	_, exportErr := s.ExportDisk(context.Background(), &providerv1.ExportDiskRequest{
@@ -134,8 +136,27 @@ func TestServer_ExportDisk_S3BackendUnimplemented(t *testing.T) {
 		BackendType: "s3",
 	})
 	require.Error(t, exportErr)
-	assert.Equal(t, codes.Unimplemented, status.Code(exportErr),
-		"libvirt ExportDisk must reject s3: libvirt→S3 export is a later slice (ADR-0006)")
+	assert.NotEqual(t, codes.Unimplemented, status.Code(exportErr),
+		"libvirt ExportDisk must NOT reject s3 in Slice 2: libvirt→S3 export is implemented (ADR-0006)")
+	assert.Contains(t, exportErr.Error(), "not initialized",
+		"s3 export must pass the gate and fail later at the nil-provider check")
+}
+
+// TestServer_ExportDisk_S3DirectModeRejected verifies that an s3 ExportDisk with
+// an explicit direct transfer mode fails loudly (InvalidArgument) before any
+// provider work — never a silent downgrade (ADR-0006 D2). The mode guard runs
+// ahead of the s3 dispatch, so a zero-value Server suffices.
+func TestServer_ExportDisk_S3DirectModeRejected(t *testing.T) {
+	s := &Server{}
+
+	_, exportErr := s.ExportDisk(context.Background(), &providerv1.ExportDiskRequest{
+		VmId:         "vm-1",
+		BackendType:  "s3",
+		TransferMode: "direct",
+	})
+	require.Error(t, exportErr)
+	assert.Equal(t, codes.InvalidArgument, status.Code(exportErr),
+		"explicit direct mode must fail loudly (ADR-0006 D2)")
 }
 
 // TestServer_ImportDisk_DirectModeRejected verifies that an s3 ImportDisk with

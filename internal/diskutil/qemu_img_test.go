@@ -18,6 +18,7 @@ package diskutil
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -191,6 +192,100 @@ func TestConvertOptions_Validation(t *testing.T) {
 			err := q.Convert(ctx, tt.opts)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Convert() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestBuildConvertArgs verifies the qemu-img convert argument emission, in
+// particular the ADR-0006 Slice 2 Subformat option and its precedence over the
+// Compression convenience mapping. The vSphere S3 import depends on
+// `-o subformat=monolithicSparse` being emitted exactly (streamOptimized is
+// rejected by ESXi), so this is a load-bearing contract.
+func TestBuildConvertArgs(t *testing.T) {
+	tests := []struct {
+		name     string
+		opts     ConvertOptions
+		wantArgs []string
+	}{
+		{
+			name: "explicit monolithicSparse subformat (vSphere import)",
+			opts: ConvertOptions{
+				SourcePath:        "/tmp/d.qcow2",
+				DestinationPath:   "/tmp/d.vmdk",
+				SourceFormat:      FormatQCOW2,
+				DestinationFormat: FormatVMDK,
+				Subformat:         "monolithicSparse",
+			},
+			wantArgs: []string{
+				"convert", "-p", "-f", "qcow2", "-O", "vmdk",
+				"-o", "subformat=monolithicSparse",
+				"/tmp/d.qcow2", "/tmp/d.vmdk",
+			},
+		},
+		{
+			name: "subformat wins over compression",
+			opts: ConvertOptions{
+				SourcePath:        "/tmp/d.qcow2",
+				DestinationPath:   "/tmp/d.vmdk",
+				DestinationFormat: FormatVMDK,
+				Compression:       true,
+				Subformat:         "monolithicSparse",
+			},
+			wantArgs: []string{
+				"convert", "-p", "-O", "vmdk",
+				"-o", "subformat=monolithicSparse",
+				"/tmp/d.qcow2", "/tmp/d.vmdk",
+			},
+		},
+		{
+			name: "compression still maps to streamOptimized for vmdk when no subformat",
+			opts: ConvertOptions{
+				SourcePath:        "/tmp/d.vmdk",
+				DestinationPath:   "/tmp/o.vmdk",
+				SourceFormat:      FormatVMDK,
+				DestinationFormat: FormatVMDK,
+				Compression:       true,
+			},
+			wantArgs: []string{
+				"convert", "-p", "-f", "vmdk", "-O", "vmdk",
+				"-o", "subformat=streamOptimized",
+				"/tmp/d.vmdk", "/tmp/o.vmdk",
+			},
+		},
+		{
+			name: "compression maps to -c for qcow2",
+			opts: ConvertOptions{
+				SourcePath:        "/tmp/d.raw",
+				DestinationPath:   "/tmp/o.qcow2",
+				DestinationFormat: FormatQCOW2,
+				Compression:       true,
+			},
+			wantArgs: []string{
+				"convert", "-p", "-O", "qcow2", "-c",
+				"/tmp/d.raw", "/tmp/o.qcow2",
+			},
+		},
+		{
+			name: "plain convert, no subformat, no compression",
+			opts: ConvertOptions{
+				SourcePath:        "/tmp/d.vmdk",
+				DestinationPath:   "/tmp/o.qcow2",
+				SourceFormat:      FormatVMDK,
+				DestinationFormat: FormatQCOW2,
+			},
+			wantArgs: []string{
+				"convert", "-p", "-f", "vmdk", "-O", "qcow2",
+				"/tmp/d.vmdk", "/tmp/o.qcow2",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := buildConvertArgs(tt.opts)
+			if strings.Join(got, " ") != strings.Join(tt.wantArgs, " ") {
+				t.Errorf("buildConvertArgs() =\n  %v\nwant\n  %v", got, tt.wantArgs)
 			}
 		})
 	}

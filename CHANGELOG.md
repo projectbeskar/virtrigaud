@@ -5,6 +5,31 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-16 14:30] - ADR-0006 Slice 2 — libvirt→S3 export & vSphere←S3 import (reverse relay) provider data-paths
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/providers/libvirt/s3export.go`: new libvirt SOURCE data-path `exportDiskToS3` for the reverse relay (libvirt→S3→vSphere). Requires an `ssh://` transport; resolves the source disk via `GetDiskInfo`; **flattens** the (possibly migration-snapshot-overlay) backing chain into one standalone qcow2 on the host with `qemu-img convert -f qcow2 -O qcow2 <src> <hostTmp>` (reads the full chain — not just the overlay); then streams `cat <hostTmp.qcow2>` host→pod→S3 via an `io.Pipe` coupling the new `runSSHStdout` to `storage.UploadStream` (SHA256 in-stream). Always best-effort `rm -f <hostTmp>` (deferred). Reports `Format = qcow2` (the staged object). New helpers `runSSHStdout` (the symmetric sibling of `runSSHStdin` — `cmd.Stdout = w`, same host-key/ControlMaster/sshpass handling) and `hostExportStagePath`.
+- `internal/providers/vsphere/s3import.go`: new vSphere TARGET data-path `importDiskFromS3` (Approach 2, de-risked GREEN on lab vCenter 8.0.2). Downloads the staged qcow2 to `/tmp/<id>.qcow2` (SHA256 verified vs `ExpectedChecksum`); converts qcow2→**monolithicSparse** vmdk (`monolithicSparse` is **mandatory** — streamOptimized is rejected by this ESXi at both the NFC and VirtualDiskManager layers); uploads the staged vmdk via the vCenter **datastore-HTTP** endpoint (`DatastoreFileManager.UploadFile`, never a direct-ESXi URL); inflates it to a native thin disk with `VirtualDiskManager.CopyVirtualDisk`; verifies via `QueryVirtualDiskUuid` (empty/error = corrupt → fail); deletes the staging vmdk and, on any post-upload failure, best-effort deletes both staging and final. New helper `resolveImportDatastore` (datastore name first, StoragePod/SDRS fallback).
+- `internal/diskutil/qemu_img.go`: new `ConvertOptions.Subformat` field — when set, `Convert()` emits `-o subformat=<Subformat>` (takes precedence over the `Compression` convenience mapping). The vSphere import passes `Subformat: "monolithicSparse"` explicitly rather than relying on the qemu-img default. Refactored the convert argument assembly into a pure, unit-testable `buildConvertArgs`.
+- Tests: `internal/providers/libvirt/s3export_test.go` (nil-provider, ssh-required, stage-path containment/quoting), `internal/providers/vsphere/capabilities_test.go` (s3-import passes-gate→`Unavailable` not `Unimplemented`; nfs stays `Unimplemented`), `internal/diskutil/qemu_img_test.go` `TestBuildConvertArgs` (Subformat emission + precedence).
+
+### Changed
+- `internal/providers/libvirt/server.go`: `ExportDisk` gate flipped from `EnsurePVCBackend` to `EnsurePVCOrS3Backend` + `EnsureRelayMode`; `s3` now dispatches to `exportDiskToS3`. `GetCapabilities.SupportedExportBackends` flipped to `PVCAndS3ExportBackends()`.
+- `internal/providers/vsphere/server.go`: `ImportDisk` gate flipped from `EnsurePVCBackend` to `EnsurePVCOrS3Backend`; `s3` now dispatches to `importDiskFromS3`. `GetCapabilities.SupportedImportBackends` flipped to `PVCAndS3ImportBackends()`.
+- `internal/providers/libvirt/server_test.go`: inverted `TestServer_ExportDisk_S3BackendUnimplemented` → `TestServer_ExportDisk_S3BackendPassesGate` (s3 now passes the gate, fails later at nil-provider, not `Unimplemented`); added `TestServer_ExportDisk_S3DirectModeRejected`; updated the storage-backends capability assertion.
+
+### Why
+ADR-0006 Slice 2 makes the cross-hypervisor migration bidirectional: libvirt becomes a SOURCE and vSphere a TARGET over the S3 relay. Owning BOTH ends in one change keeps the format contract consistent — libvirt stages **qcow2**, vSphere converts qcow2→monolithicSparse-vmdk locally and inflates via CopyVirtualDisk. This is the provider-boundary half; the controller wiring lands as a separate step. Refs #236.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (provider images — libvirt and vSphere providers)
+- [ ] Config change only
+- [ ] Documentation only
+
+---
+
 ## [2026-06-16 11:14] - Honor CleanupPolicy + reliably remove the migration source snapshot
 **Author:** @wrkode (William Rizzo)
 

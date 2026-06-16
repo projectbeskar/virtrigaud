@@ -475,13 +475,14 @@ func (p *Provider) GetCapabilities(ctx context.Context, req *providerv1.GetCapab
 		SupportedExportFormats:    []string{"vmdk", "qcow2", "raw"}, // ExportDisk converts the streamOptimized VMDK to these
 		SupportedImportFormats:    []string{"vmdk", "qcow2", "raw"}, // ImportDisk accepts these and converts to VMDK
 		SupportsExportCompression: true,                             // export uses the compressed streamOptimized VMDK format
-		// ADR-0006 Slice 1: vSphere is the SOURCE of the vSphere → S3 → libvirt
-		// relay path. It EXPORTS to pvc AND s3 (vCenter datastore stream → pod →
-		// S3, native vmdk); it still only IMPORTS from pvc (S3 import into vSphere
-		// is the reverse direction, a later slice). Only the relay transfer mode
-		// is implemented; direct is not.
+		// ADR-0006: vSphere is the SOURCE of the vSphere → S3 → libvirt relay
+		// (Slice 1) AND, as of Slice 2, the TARGET of the libvirt → S3 → vSphere
+		// reverse relay. It therefore both EXPORTS (vCenter datastore stream → pod
+		// → S3, native vmdk) and IMPORTS (download qcow2 → monolithicSparse vmdk →
+		// datastore-HTTP upload → CopyVirtualDisk inflate) over pvc AND s3. Only
+		// the relay transfer mode is implemented; direct is not.
 		SupportedExportBackends: migration.PVCAndS3ExportBackends(),
-		SupportedImportBackends: migration.PVCOnlyImportBackends(),
+		SupportedImportBackends: migration.PVCAndS3ImportBackends(),
 		SupportedTransferModes:  migration.RelayOnlyTransferModes(),
 	}, nil
 }
@@ -3749,10 +3750,18 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 // passed as VMImage.Path in a subsequent Create request. The operation runs
 // synchronously; Task in the response is nil.
 func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskRequest) (*providerv1.ImportDiskResponse, error) {
-	// ADR-0006 Slice 0: only the legacy pvc staging path is implemented; reject
-	// nfs/s3 backends honestly instead of falling through to the pvc path.
-	if err := migration.EnsurePVCBackend(req.BackendType); err != nil {
+	// ADR-0006: vSphere is a TARGET for the S3 relay import (Slice 2, the reverse
+	// of Slice 1's vSphere→S3→libvirt). Accept pvc and s3; reject nfs/unknown
+	// honestly instead of falling through to the pvc path.
+	if err := migration.EnsurePVCOrS3Backend(req.BackendType); err != nil {
 		return nil, err
+	}
+
+	// S3 relay import (Approach 2): download the staged qcow2, convert to a
+	// monolithicSparse vmdk, upload via datastore-HTTP, and inflate with
+	// CopyVirtualDisk. Never logs the credentials map.
+	if req.BackendType == migration.BackendS3 {
+		return p.importDiskFromS3(ctx, req)
 	}
 
 	if p.client == nil {
