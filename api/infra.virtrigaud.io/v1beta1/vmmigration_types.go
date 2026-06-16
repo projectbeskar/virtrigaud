@@ -55,10 +55,14 @@ type MigrationSource struct {
 	// +optional
 	SnapshotRef *LocalObjectReference `json:"snapshotRef,omitempty"`
 
-	// CreateSnapshot indicates whether to create a snapshot before migration
+	// CreateSnapshot indicates whether to create a snapshot before migration.
+	// NOTE: no `omitempty` — a defaulted (+kubebuilder:default=true) non-pointer
+	// bool with omitempty silently flips an explicit `false` back to `true` on any
+	// controller round-trip (omitempty drops false, the apiserver re-defaults), so
+	// `createSnapshot: false` would be impossible to set (same footgun as #235).
 	// +optional
 	// +kubebuilder:default=true
-	CreateSnapshot bool `json:"createSnapshot,omitempty"`
+	CreateSnapshot bool `json:"createSnapshot"`
 
 	// PowerOffBeforeMigration ensures VM is powered off before migration
 	// +optional
@@ -519,6 +523,15 @@ type MigrationDiskInfo struct {
 	// TargetFormat is the target disk format
 	// +optional
 	TargetFormat string `json:"targetFormat,omitempty"`
+
+	// TargetPath is the provider-native path of the imported disk as returned by
+	// the target provider's ImportDisk (e.g. "[datastore1] disk-id/disk-id.vmdk"
+	// for vSphere, "/var/lib/libvirt/images/disk-id.qcow2" for libvirt). It is
+	// the authoritative location the created target VirtualMachine attaches; the
+	// controller copies it into Spec.ImportedDisk.Path. Empty until the import
+	// completes (ADR-0006 Slice 2).
+	// +optional
+	TargetPath string `json:"targetPath,omitempty"`
 
 	// TargetSize is the target disk size in bytes
 	// +optional

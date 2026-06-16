@@ -5,6 +5,167 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-16 20:15] - Remove dead parseStorageSize (orphaned by the Bug G GetDiskInfo rewrite)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/libvirt/provider_virsh.go`: removed the now-unused `parseStorageSize` helper. The Bug G rewrite of `GetDiskInfo` switched to `qemu-img info -U --output=json` (which returns the virtual size directly), removing the only caller; `golangci-lint`'s `unused` linter flagged it (`go vet` does not catch unused functions). No behavior change.
+
+### Why
+CI Lint failed on the Slice 2 branch with `func parseStorageSize is unused`; the function was orphaned when its caller was replaced. Refs #236.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+## [2026-06-16 19:50] - Docs: ADR-0006 Slice 2 validated; reverse migration example + README
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `docs/adr/0006-storage-backend-agnostic-cross-hypervisor-migration.md`: added an *Implementation log — validated slices* section recording the as-built slicing (Slice 1 vSphere→libvirt and Slice 2 libvirt→vSphere over S3/`relay`, both end-to-end validated) and the Slice 2 findings: NFC streamOptimized import (not `CopyVirtualDisk`), `qemu-img` in the provider image, lease device-URL host rewrite to vCenter, `Unregister`-not-`Destroy` + folder idempotency, the cross-hypervisor `target.networks` requirement, and streaming robustness. Plus deferred follow-ups.
+- `examples/migration/libvirt-to-vsphere.yaml`: rewritten from the obsolete "untested / PVC-only / S3-not-supported" placeholder into the **validated S3 reverse-migration example**, including a `VMNetworkAttachment` + `target.networks` so the migrated vSphere VM gets a NIC.
+- `examples/migration/README.md`: replaced the stale "PVC-only / only vSphere→libvirt tested" constraints with the storage-agnostic S3 model; both vSphere↔libvirt S3 directions marked tested; S3 quick start.
+
+### Why
+ADR-0006 Slice 2 (libvirt→vSphere over S3) is implemented and validated on real hardware; the docs and example must reflect the working path and steer users away from the no-NIC trap. Refs #236.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
+## [2026-06-16 19:35] - Remove dead, misleading build/Dockerfile.provider-{vsphere,libvirt}
+**Author:** @wrkode (William Rizzo)
+
+### Removed
+- `build/Dockerfile.provider-vsphere`, `build/Dockerfile.provider-libvirt`: deleted. Neither is referenced by the Makefile, the release workflow, or any build script — the canonical provider images are built from `cmd/provider-<name>/Dockerfile` (and `build/Dockerfile.manager`/`Dockerfile.kubectl` remain the canonical manager/kubectl builds). The stale `build/Dockerfile.provider-vsphere` was actively wrong: it used a plain `gcr.io/distroless/static` runtime with **no `qemu-img`**, so anyone who built from it would get a vSphere provider that fails every ADR-0006 S3 import with `qemu-img is not available in the provider image`. The canonical `cmd/provider-vsphere/Dockerfile` already ships `qemu-utils` on a `debian:bookworm-slim` base, so the released image is correct; this just removes the trap.
+
+### Why
+While validating the Slice 2 reverse migration, a hand-built dev image based on the stale Dockerfile lacked `qemu-img` and broke the import. Removing the dead files leaves one source of truth per provider image and prevents the same mistake. Refs #236.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
+## [2026-06-16 19:20] - vSphere S3 import: make the NFC import idempotent against a leftover folder
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/vsphere/s3import.go` (`nfcImportStreamOptimized`): before importing, best-effort delete the entire `[<ds>] <id>` import folder (Force-overwrite intent), not just the target `<id>.vmdk` file. The import id is deterministic per migration (the controller uses `<target>-migrated`), so a retry after a prior attempt — or after a deleted target VM that left its disk folder behind — found the folder occupied; `ImportVApp` then placed the disk in a collision-suffixed folder (`<id>_1`), and the post-import disk-uuid query on the expected `[<ds>] <id>/<id>.vmdk` path failed with `File … was not found` ("likely corrupt import"). Deleting only the `.vmdk` was insufficient when the folder still held a prior `.vmx`/`.nvram`.
+
+### Why
+Surfaced re-running the ADR-0006 Slice 2 migration to the same target after an earlier validation run: the second import failed not because the disk was corrupt but because a stale datastore folder forced a name collision. Retries to a fixed target name must start from a clean folder. Refs #236.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+## [2026-06-16 18:10] - Surface the real S3 error on a libvirt export stream failure (un-mask)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/libvirt/s3export.go` (`exportDiskToS3`): when BOTH the host-side `cat` stream and the S3 upload reported an error, the code surfaced only the `cat` error — but that is almost always a downstream symptom (a failed S3 upload closes the pipe's read end, which breaks `cat` with SIGPIPE, and ssh then reports a bare `exit status 255` with no stderr). It now reports both, leading with the upload error, so the actual root cause (e.g. an S3 endpoint returning `503 service unavailable` or `erasure write quorum failed` when its disk is full) is no longer hidden behind `exit status 255`.
+
+### Why
+Found while validating the ADR-0006 Slice 2 reverse migration: a libvirt→vSphere export kept failing with an opaque `host-side stream (cat …) failed: exit status 255 (stderr: )`. The masking turned a one-line storage diagnosis into a multi-step investigation. Refs #236.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+## [2026-06-16 18:00] - vSphere S3 import: drive the NFC lease by hand, rewrite device URL to vCenter
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/vsphere/s3import.go` (`ImportDisk`): replaced the `vmdk.Import` call with a hand-driven `HttpNfcLease` import (`nfcImportStreamOptimized`). `vmdk.Import` uploads to the lease's device URL, which vCenter populates with the **ESXi host FQDN** (e.g. `esxi.lab.k8`); a remote provider pod reaches vCenter by IP (`PROVIDER_ENDPOINT`) and typically cannot resolve that ESXi name via cluster DNS, so the streamOptimized upload failed with `lookup esxi.lab.k8 … no such host`. The new path rewrites each lease device URL host to the vCenter host (which proxies NFC and is always reachable from the pod), and `Unregister`s — rather than `Destroy`s — the transient import VM (vCenter 8 faults `Destroy` of a freshly imported VM with `file … is attached to vm`). Net result is identical: `[<ds>] <id>/<id>.vmdk` left as a native thin disk.
+
+### Why
+ADR-0006 Slice 2's vSphere import target could acquire the NFC lease but never complete the upload from an in-cluster provider pod, because the lease's device URL is unresolvable there. This is the final data-path blocker for the reverse (libvirt→vSphere) migration. Refs #236.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+## [2026-06-16 17:20] - Fix `createSnapshot: false` being impossible to set (defaulted-bool footgun)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `api/infra.virtrigaud.io/v1beta1/vmmigration_types.go`: removed `omitempty` from `MigrationSource.CreateSnapshot` (kept `+kubebuilder:default=true`). The non-pointer bool with `omitempty` + a `true` default silently flipped an explicit `createSnapshot: false` back to `true` on the controller's status round-trip (same footgun class as the `tls.enabled` fix in #235), so a snapshot-free migration (e.g. of a powered-off source, or a multi-disk cloud-image VM whose CDROM breaks `--disk-only` snapshots) could not be requested.
+
+### Why
+Found while validating the ADR-0006 Slice 2 reverse migration: a `powerOffBeforeMigration: true` + `createSnapshot: false` run still attempted (and failed) a snapshot.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+## [2026-06-16 16:05] - ADR-0006 Slice 2 — reverse-direction (libvirt→vSphere) controller wiring
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `api/infra.virtrigaud.io/v1beta1/vmmigration_types.go`: additive `MigrationDiskInfo.TargetPath` status field — the provider-native path the target provider's `ImportDisk` returns (e.g. `[datastore1] <id>/<id>.vmdk` for vSphere). Regenerated `config/crd/bases/infra.virtrigaud.io_vmmigrations.yaml` (the only schema delta; `zz_generated.deepcopy.go` unchanged — plain `string`).
+- `internal/controller/vmmigration_controller.go`: direction-agnostic disk-format derivation keyed off **provider type** — `nativeDiskFormat`/`stagedImportFormat`/`landedTargetFormat` (vSphere→`vmdk`, libvirt/proxmox/unknown→`qcow2`), with `diskFormatQcow2`/`diskFormatVMDK` constants. One source of truth so the import-format and target-format derivations can never disagree.
+- `internal/controller/vmmigration_direction_test.go`: unit tests for (a) reverse libvirt→vSphere threading `Format=qcow2` to import + propagating `importResp.Path` to `TargetPath` + labeling `TargetFormat=vmdk`; (b) forward vSphere→libvirt unchanged (vmdk + libvirt pool path); (c) creating phase copying `TargetPath`→`ImportedDisk.Path`; (d) the provider-type→format table. Uses the `providerInstanceFn` seam.
+
+### Fixed
+- `internal/controller/vmmigration_controller.go` (`handleImportingPhase`): the s3 import format was hard-coded to `vmdk` (forward-path only). It is now derived from the **source** provider type, so the reverse path correctly threads `qcow2`. The source-checksum→`ImportDiskRequest.ExpectedChecksum` threading from Slice 1 is preserved.
+- `internal/controller/vmmigration_controller.go` (`handleImportingPhase`): the controller dropped `importResp.Path`; it now records it in `Status.DiskInfo.TargetPath`. `TargetFormat` is derived from the **target** provider type (was hard-defaulted to `qcow2`; resolves to `qcow2` for a libvirt target so the forward path is byte-identical, `vmdk` for a vSphere target).
+- `internal/controller/vmmigration_controller.go` (`handleCreatingPhase`): the created target VM's `Spec.ImportedDisk.Path` is now set from `Status.DiskInfo.TargetPath`.
+- `internal/controller/virtualmachine_controller.go`: the imported-disk path resolution now treats the synthesized `/var/lib/libvirt/images/<id>.<fmt>` form as an explicit libvirt-only **last resort** (only when `ImportedDisk.Path` is empty) and documents that vSphere targets always carry an explicit path. No behavior change when a path is set.
+
+### Why
+ADR-0006 Slice 2's provider data-paths (libvirt→S3 qcow2 export, vSphere←S3 import) were committed but the controller still assumed the forward (vSphere→libvirt) staged format and dropped the target disk path — so every reverse libvirt→vSphere migration would have imported with the wrong format and then attached a bogus libvirt path on a vSphere target. This wires the controller to be direction-agnostic by deriving format/path from provider type. Refs #236.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (manager image — CRD additive field + controller logic)
+- [ ] Config change only
+- [ ] Documentation only
+
+### Notes
+- vSphere space precheck: there is no target-side capacity gate today; nothing asserts the imported disk's used size fits. A code comment in `handleImportingPhase` documents that any future gate must budget the **virtual** (provisioned) size for vSphere targets, because Approach 2's `CopyVirtualDisk` materializes as eagerZeroedThick on VMFS.
+- The generic `gateMigrationStorageBackend` already permits libvirt→vSphere now that the provider capability sets advertise `s3` in both directions; it was verified, not changed.
+
+---
+
+## [2026-06-16 14:30] - ADR-0006 Slice 2 — libvirt→S3 export & vSphere←S3 import (reverse relay) provider data-paths
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/providers/libvirt/s3export.go`: new libvirt SOURCE data-path `exportDiskToS3` for the reverse relay (libvirt→S3→vSphere). Requires an `ssh://` transport; resolves the source disk via `GetDiskInfo`; **flattens** the (possibly migration-snapshot-overlay) backing chain into one standalone qcow2 on the host with `qemu-img convert -f qcow2 -O qcow2 <src> <hostTmp>` (reads the full chain — not just the overlay); then streams `cat <hostTmp.qcow2>` host→pod→S3 via an `io.Pipe` coupling the new `runSSHStdout` to `storage.UploadStream` (SHA256 in-stream). Always best-effort `rm -f <hostTmp>` (deferred). Reports `Format = qcow2` (the staged object). New helpers `runSSHStdout` (the symmetric sibling of `runSSHStdin` — `cmd.Stdout = w`, same host-key/ControlMaster/sshpass handling) and `hostExportStagePath`.
+- `internal/providers/vsphere/s3import.go`: new vSphere TARGET data-path `importDiskFromS3` (Approach 2, de-risked GREEN on lab vCenter 8.0.2). Downloads the staged qcow2 to `/tmp/<id>.qcow2` (SHA256 verified vs `ExpectedChecksum`); converts qcow2→**monolithicSparse** vmdk (`monolithicSparse` is **mandatory** — streamOptimized is rejected by this ESXi at both the NFC and VirtualDiskManager layers); uploads the staged vmdk via the vCenter **datastore-HTTP** endpoint (`DatastoreFileManager.UploadFile`, never a direct-ESXi URL); inflates it to a native thin disk with `VirtualDiskManager.CopyVirtualDisk`; verifies via `QueryVirtualDiskUuid` (empty/error = corrupt → fail); deletes the staging vmdk and, on any post-upload failure, best-effort deletes both staging and final. New helper `resolveImportDatastore` (datastore name first, StoragePod/SDRS fallback).
+- `internal/diskutil/qemu_img.go`: new `ConvertOptions.Subformat` field — when set, `Convert()` emits `-o subformat=<Subformat>` (takes precedence over the `Compression` convenience mapping). The vSphere import passes `Subformat: "monolithicSparse"` explicitly rather than relying on the qemu-img default. Refactored the convert argument assembly into a pure, unit-testable `buildConvertArgs`.
+- Tests: `internal/providers/libvirt/s3export_test.go` (nil-provider, ssh-required, stage-path containment/quoting), `internal/providers/vsphere/capabilities_test.go` (s3-import passes-gate→`Unavailable` not `Unimplemented`; nfs stays `Unimplemented`), `internal/diskutil/qemu_img_test.go` `TestBuildConvertArgs` (Subformat emission + precedence).
+
+### Changed
+- `internal/providers/libvirt/server.go`: `ExportDisk` gate flipped from `EnsurePVCBackend` to `EnsurePVCOrS3Backend` + `EnsureRelayMode`; `s3` now dispatches to `exportDiskToS3`. `GetCapabilities.SupportedExportBackends` flipped to `PVCAndS3ExportBackends()`.
+- `internal/providers/vsphere/server.go`: `ImportDisk` gate flipped from `EnsurePVCBackend` to `EnsurePVCOrS3Backend`; `s3` now dispatches to `importDiskFromS3`. `GetCapabilities.SupportedImportBackends` flipped to `PVCAndS3ImportBackends()`.
+- `internal/providers/libvirt/server_test.go`: inverted `TestServer_ExportDisk_S3BackendUnimplemented` → `TestServer_ExportDisk_S3BackendPassesGate` (s3 now passes the gate, fails later at nil-provider, not `Unimplemented`); added `TestServer_ExportDisk_S3DirectModeRejected`; updated the storage-backends capability assertion.
+
+### Why
+ADR-0006 Slice 2 makes the cross-hypervisor migration bidirectional: libvirt becomes a SOURCE and vSphere a TARGET over the S3 relay. Owning BOTH ends in one change keeps the format contract consistent — libvirt stages **qcow2**, vSphere converts qcow2→monolithicSparse-vmdk locally and inflates via CopyVirtualDisk. This is the provider-boundary half; the controller wiring lands as a separate step. Refs #236.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (provider images — libvirt and vSphere providers)
+- [ ] Config change only
+- [ ] Documentation only
+
+---
+
 ## [2026-06-16 11:14] - Honor CleanupPolicy + reliably remove the migration source snapshot
 **Author:** @wrkode (William Rizzo)
 

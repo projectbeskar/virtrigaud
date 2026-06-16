@@ -52,6 +52,17 @@ type ConvertOptions struct {
 	// Compression enables compression for formats that support it (qcow2, vmdk)
 	Compression bool
 
+	// Subformat, when set, is passed verbatim as `-o subformat=<Subformat>` to
+	// qemu-img. It selects the on-disk variant of the destination format, e.g.
+	// "monolithicSparse" or "streamOptimized" for vmdk. Setting it explicitly is
+	// required for the vSphere S3 import (streamOptimized is mandatory there: the
+	// disk is ingested via the vCenter NFC HttpNfcLease import, which only accepts
+	// streamOptimized — see internal/providers/vsphere/s3import.go), rather than
+	// relying on the qemu-img default subformat (monolithicSparse). When both
+	// Subformat and Compression are set, Subformat wins (it is the explicit,
+	// caller-chosen variant).
+	Subformat string
+
 	// ProgressCallback is called with progress updates (0-100)
 	ProgressCallback func(percent int)
 }
@@ -109,32 +120,8 @@ func (q *QemuImg) Convert(ctx context.Context, opts ConvertOptions) error {
 		return fmt.Errorf("destination format is required")
 	}
 
-	// Build qemu-img convert command
-	args := []string{"convert"}
-
-	// Add progress monitoring
-	args = append(args, "-p")
-
-	// Add source format if specified
-	if opts.SourceFormat != "" {
-		args = append(args, "-f", string(opts.SourceFormat))
-	}
-
-	// Add destination format
-	args = append(args, "-O", string(opts.DestinationFormat))
-
-	// Add compression if requested and supported
-	if opts.Compression {
-		switch opts.DestinationFormat {
-		case FormatQCOW2:
-			args = append(args, "-c")
-		case FormatVMDK:
-			args = append(args, "-o", "subformat=streamOptimized")
-		}
-	}
-
-	// Add source and destination paths
-	args = append(args, opts.SourcePath, opts.DestinationPath)
+	// Build qemu-img convert command (pure; unit-tested via buildConvertArgs).
+	args := buildConvertArgs(opts)
 
 	// Execute command
 	cmd := exec.CommandContext(ctx, q.BinaryPath, args...)
@@ -146,6 +133,49 @@ func (q *QemuImg) Convert(ctx context.Context, opts ConvertOptions) error {
 	}
 
 	return nil
+}
+
+// buildConvertArgs assembles the `qemu-img convert` argument vector for opts. It
+// is a pure function (no I/O) so the argument emission — in particular the
+// Subformat vs Compression precedence — is unit-testable without invoking
+// qemu-img. Callers must validate opts (non-empty source/destination/format)
+// before relying on the result.
+func buildConvertArgs(opts ConvertOptions) []string {
+	args := []string{"convert"}
+
+	// Add progress monitoring.
+	args = append(args, "-p")
+
+	// Add source format if specified.
+	if opts.SourceFormat != "" {
+		args = append(args, "-f", string(opts.SourceFormat))
+	}
+
+	// Add destination format.
+	args = append(args, "-O", string(opts.DestinationFormat))
+
+	// Subformat (explicit, caller-chosen on-disk variant) takes precedence over
+	// the Compression convenience mapping below: when set we emit exactly
+	// `-o subformat=<Subformat>` and skip the Compression-derived subformat so
+	// the caller's choice is honored verbatim (the vSphere import requires
+	// monolithicSparse explicitly, not the qemu-img default).
+	switch {
+	case opts.Subformat != "":
+		args = append(args, "-o", "subformat="+opts.Subformat)
+	case opts.Compression:
+		// Add compression if requested and supported.
+		switch opts.DestinationFormat {
+		case FormatQCOW2:
+			args = append(args, "-c")
+		case FormatVMDK:
+			args = append(args, "-o", "subformat=streamOptimized")
+		}
+	}
+
+	// Add source and destination paths.
+	args = append(args, opts.SourcePath, opts.DestinationPath)
+
+	return args
 }
 
 // Info retrieves information about a disk image

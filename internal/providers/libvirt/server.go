@@ -532,12 +532,13 @@ func (s *Server) GetCapabilities(ctx context.Context, req *providerv1.GetCapabil
 		SupportedExportFormats:      []string{"qcow2", "raw"},
 		SupportedImportFormats:      []string{"qcow2", "raw", "vmdk"},
 		SupportsExportCompression:   true, // ExportDisk honors req.Compress via qemu-img -c for qcow2 (#199); default (Compress=false) is uncompressed for speed
-		// ADR-0006 Slice 1: libvirt is the TARGET of the vSphere → S3 → libvirt
-		// relay path. It imports from pvc AND s3 (download + host-side vmdk→qcow2
-		// convert); it still only EXPORTS to pvc (libvirt-export-to-S3 is the
-		// reverse direction, a later slice). Only the relay transfer mode is
-		// implemented; direct is not.
-		SupportedExportBackends: migration.PVCOnlyExportBackends(),
+		// ADR-0006: libvirt is the TARGET of the vSphere → S3 → libvirt relay
+		// (Slice 1) AND, as of Slice 2, the SOURCE of the libvirt → S3 → vSphere
+		// reverse relay. It therefore both IMPORTS (download + host-side
+		// vmdk→qcow2 convert) and EXPORTS (host-side flatten to standalone qcow2 +
+		// stream) over pvc AND s3. Only the relay transfer mode is implemented;
+		// direct is not.
+		SupportedExportBackends: migration.PVCAndS3ExportBackends(),
 		SupportedImportBackends: migration.PVCAndS3ImportBackends(),
 		SupportedTransferModes:  migration.RelayOnlyTransferModes(),
 	}, nil
@@ -548,10 +549,21 @@ func (s *Server) GetCapabilities(ctx context.Context, req *providerv1.GetCapabil
 // provider-contract types. Previously this RPC was unreachable over gRPC and
 // returned Unimplemented despite a working implementation (issue #177).
 func (s *Server) ExportDisk(ctx context.Context, req *providerv1.ExportDiskRequest) (*providerv1.ExportDiskResponse, error) {
-	// ADR-0006 Slice 0: only the legacy pvc staging path is implemented; reject
-	// nfs/s3 backends honestly instead of falling through to the pvc path.
-	if err := migration.EnsurePVCBackend(req.BackendType); err != nil {
+	// ADR-0006: libvirt is a SOURCE for the S3 relay export (Slice 2, the reverse
+	// of Slice 1's vSphere→S3→libvirt). Accept pvc and s3; reject nfs/unknown
+	// honestly. Only the relay transfer mode is implemented; an explicit "direct"
+	// fails loudly (never a silent downgrade, ADR-0006 D2).
+	if err := migration.EnsurePVCOrS3Backend(req.BackendType); err != nil {
 		return nil, err
+	}
+	if err := migration.EnsureRelayMode(req.TransferMode); err != nil {
+		return nil, err
+	}
+
+	// S3 relay export: flatten the disk on the host and stream the standalone
+	// qcow2 up to S3. Never logs the credentials map.
+	if req.BackendType == migration.BackendS3 {
+		return s.exportDiskToS3(ctx, req)
 	}
 
 	if s.provider == nil {

@@ -22,6 +22,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
@@ -54,9 +56,10 @@ func TestGetCapabilities_DiskMigration(t *testing.T) {
 }
 
 // TestGetCapabilities_StorageBackends verifies vSphere advertises the honest
-// ADR-0006 Slice 1 per-direction surface: as the SOURCE it exports to pvc AND s3
-// (vCenter datastore stream → pod → S3), but it still only IMPORTS from pvc
-// (S3→vSphere import is a later slice). Transfer is relay-only.
+// ADR-0006 per-direction surface: it exports to pvc AND s3 (Slice 1 SOURCE,
+// vCenter datastore stream → pod → S3) AND, as of Slice 2, imports from pvc AND
+// s3 (TARGET of libvirt→S3→vSphere: download qcow2 → monolithicSparse vmdk →
+// datastore-HTTP → CopyVirtualDisk). Transfer is relay-only.
 func TestGetCapabilities_StorageBackends(t *testing.T) {
 	p := &Provider{}
 
@@ -66,8 +69,8 @@ func TestGetCapabilities_StorageBackends(t *testing.T) {
 
 	assert.Equal(t, []string{"pvc", "s3"}, caps.SupportedExportBackends,
 		"vSphere exports to pvc and s3 in Slice 1 (SOURCE of vSphere→S3→libvirt)")
-	assert.Equal(t, []string{"pvc"}, caps.SupportedImportBackends,
-		"vSphere import stays pvc-only in Slice 1 (vSphere is SOURCE, not TARGET)")
+	assert.Equal(t, []string{"pvc", "s3"}, caps.SupportedImportBackends,
+		"vSphere imports from pvc and s3 in Slice 2 (TARGET of libvirt→S3→vSphere)")
 	assert.Equal(t, []string{"relay"}, caps.SupportedTransferModes)
 }
 
@@ -87,4 +90,40 @@ func TestExportDisk_BackendGate(t *testing.T) {
 		VmId: "vm-1", BackendType: "s3", TransferMode: "direct",
 	})
 	require.Error(t, directErr, "explicit direct mode must fail loudly (ADR-0006 D2)")
+}
+
+// TestImportDisk_S3BackendPassesGate verifies that, as of ADR-0006 Slice 2, an
+// s3 ImportDisk now PASSES the backend gate (vSphere is the TARGET of the
+// libvirt→S3→vSphere reverse relay) and fails LATER — here at the nil-client
+// check inside importDiskFromS3 with codes.Unavailable, NOT with
+// codes.Unimplemented. This is the inversion of the old Slice-1 "s3 import
+// rejected" assertion and mirrors the export-S3 direct-mode gate test above.
+func TestImportDisk_S3BackendPassesGate(t *testing.T) {
+	p := &Provider{}
+
+	_, s3Err := p.ImportDisk(context.Background(), &providerv1.ImportDiskRequest{
+		SourceUrl:   "s3://bucket/disk.qcow2",
+		BackendType: "s3",
+		TargetName:  "imported",
+	})
+	require.Error(t, s3Err)
+	assert.NotEqual(t, codes.Unimplemented, status.Code(s3Err),
+		"vSphere ImportDisk must NOT reject s3 in Slice 2: s3 import is implemented (ADR-0006)")
+	assert.Equal(t, codes.Unavailable, status.Code(s3Err),
+		"s3 import must pass the gate and fail later at the nil-client check")
+}
+
+// TestImportDisk_NFSBackendUnimplemented verifies nfs is still rejected with
+// codes.Unimplemented on the import path (only pvc/s3 are implemented). The gate
+// runs before the nil-client check, so a zero-value Provider suffices.
+func TestImportDisk_NFSBackendUnimplemented(t *testing.T) {
+	p := &Provider{}
+
+	_, nfsErr := p.ImportDisk(context.Background(), &providerv1.ImportDiskRequest{
+		SourceUrl:   "nfs://server/export/disk",
+		BackendType: "nfs",
+	})
+	require.Error(t, nfsErr)
+	assert.Equal(t, codes.Unimplemented, status.Code(nfsErr),
+		"nfs import is not implemented (ADR-0006 Slice 4)")
 }

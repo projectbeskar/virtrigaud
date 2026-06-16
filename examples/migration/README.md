@@ -2,67 +2,78 @@
 
 This directory contains examples for migrating VMs between hypervisor platforms using VirtRigaud.
 
-## v0.3.6 migration constraints
+## Migration model
 
-Before using these examples, read the constraints:
+VirtRigaud's validated cross-hypervisor migration is **storage-backend-agnostic**
+(ADR-0006): the disk is staged through an object store (S3-compatible) and the
+**provider pod is the S3 client**, so the bytes flow host → pod → S3 → pod → host
+and **never traverse a CSI PVC**. The source exports its native disk format and
+the target converts on import. This is the recommended path for the
+vSphere ↔ libvirt directions.
 
-- **Only PVC storage is supported.** `storage.type` is enum-constrained to `"pvc"` in the API. The s3, http, and nfs URI storage types documented in older resources do not exist in v0.3.6.
-- **Only vSphere → Libvirt/KVM is tested.** Other migration directions are roadmap items and are marked with a WARNING in the respective example files.
-- **Requires a ReadWriteMany StorageClass.** NFS, CephFS, AWS EFS, and Azure Files are common options.
+A PVC-backed model also exists and is the basis for the (untested) Proxmox
+roadmap examples below; it requires a ReadWriteMany StorageClass.
+
+Key points before using these examples:
+
+- **S3 staging needs a credentials Secret** (`accessKeyID` / `secretAccessKey`,
+  optional `sessionToken`) in the same namespace as the VMMigration — never inline.
+- **Attach a network on the target.** A raw-disk migration carries the guest's
+  disk, not its NIC. For a vSphere target you MUST reference a `VMNetworkAttachment`
+  (mapping to a portgroup) via `target.networks`, or the migrated VM boots with no
+  NIC. See the header note in `libvirt-to-vsphere.yaml`.
+- **`relay` transfer mode** is the universal floor (credentials stay in the pod);
+  `auto` resolves to `relay`. `direct` is a roadmap item.
 
 ## Examples
 
-| File | Direction | Status |
-|------|-----------|--------|
-| [libvirt-to-vsphere.yaml](./libvirt-to-vsphere.yaml) | Libvirt/KVM → vSphere | Untested (roadmap) |
-| [vsphere-to-proxmox.yaml](./vsphere-to-proxmox.yaml) | vSphere → Proxmox VE | Untested (roadmap) |
-| [proxmox-to-libvirt.yaml](./proxmox-to-libvirt.yaml) | Proxmox VE → Libvirt/KVM | Untested (roadmap) |
+| File | Direction | Storage | Status |
+|------|-----------|---------|--------|
+| [`../vmmigration-s3.yaml`](../vmmigration-s3.yaml) | vSphere → Libvirt/KVM | S3 | **Tested** (ADR-0006 Slice 1) |
+| [libvirt-to-vsphere.yaml](./libvirt-to-vsphere.yaml) | Libvirt/KVM → vSphere | S3 | **Tested** (ADR-0006 Slice 2) |
+| [vsphere-to-proxmox.yaml](./vsphere-to-proxmox.yaml) | vSphere → Proxmox VE | PVC | Untested (roadmap) |
+| [proxmox-to-libvirt.yaml](./proxmox-to-libvirt.yaml) | Proxmox VE → Libvirt/KVM | PVC | Untested (roadmap) |
 
-For the tested vSphere → Libvirt/KVM path, see `examples/vmmigration-basic.yaml` in the parent directory.
+## Quick start (S3, vSphere ↔ libvirt)
 
-## Quick start
+1. Create the S3 credentials Secret in the migration's namespace:
 
-1. Create a ReadWriteMany StorageClass (example using NFS CSI driver):
+   ```bash
+   kubectl create secret generic s3-migration-credentials \
+     --from-literal=accessKeyID=YOUR_ACCESS_KEY \
+     --from-literal=secretAccessKey=YOUR_SECRET_KEY
+   ```
+
+2. For a vSphere **target**, define the destination network so the migrated VM
+   gets a NIC (skip for a libvirt target):
 
    ```yaml
-   apiVersion: storage.k8s.io/v1
-   kind: StorageClass
+   apiVersion: infra.virtrigaud.io/v1beta1
+   kind: VMNetworkAttachment
    metadata:
-     name: nfs-migration-storage
-   provisioner: nfs.csi.k8s.io
-   parameters:
-     server: nfs-server.example.com
-     share: /exports/virtrigaud-migrations
-   volumeBindingMode: Immediate
-   reclaimPolicy: Delete
-   ```
-
-2. Customise the example YAML for your environment:
-
-   ```yaml
+     name: vm-network
    spec:
-     source:
-       vmRef:
-         name: your-source-vm
-     target:
-       name: your-target-vm
-       providerRef:
-         name: your-target-provider
-     storage:
-       type: pvc
-       pvc:
-         storageClassName: nfs-migration-storage
-         size: 200Gi
-         accessMode: ReadWriteMany
+     network:
+       type: bridged
+       vsphere:
+         portgroup: "VM Network"
+         adapterType: vmxnet3
+     ipAllocation:
+       type: DHCP
    ```
 
-3. Apply and monitor:
+3. Customise the example YAML (`libvirt-to-vsphere.yaml` or `../vmmigration-s3.yaml`)
+   — source/target VM names, providerRefs, the S3 `endpoint`/`bucket`, and
+   `target.networks` — then apply and monitor:
 
    ```bash
    kubectl apply -f your-migration.yaml
-   kubectl get vmmigration your-migration-name -w
+   kubectl get vmmigration your-migration-name -w   # Validating→Exporting→Importing→Creating→Ready
    kubectl describe vmmigration your-migration-name
    ```
+
+For the PVC-backed roadmap examples (Proxmox), supply a ReadWriteMany
+StorageClass and use `storage.type: pvc` as shown in those files.
 
 ## Reference
 

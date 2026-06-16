@@ -733,16 +733,26 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 			format = "qcow2"
 		}
 
-		// Determine path based on provider and disk ID
+		// Determine the path of the imported disk on the target provider.
+		//
+		// PREFER the explicit Spec.ImportedDisk.Path: for a migration this is
+		// the authoritative provider-native path returned by the target
+		// provider's ImportDisk (propagated via VMMigration
+		// Status.DiskInfo.TargetPath). It is correct for ANY target hypervisor —
+		// e.g. "[datastore1] <id>/<id>.vmdk" for vSphere — and must not be
+		// overwritten with a synthesized one.
+		//
+		// Only when no path is set do we synthesize a default. The synthesized
+		// form is libvirt-specific (/var/lib/libvirt/images/<id>.<fmt>) and is a
+		// LAST RESORT for libvirt targets that imported a disk without reporting
+		// a path; it is NOT valid for a vSphere target, which is precisely why
+		// the migration controller now always propagates TargetPath for vSphere.
 		diskPath := disk.Path
 		if diskPath == "" {
-			// If path not provided, construct default path based on disk ID
-			// For libvirt: /var/lib/libvirt/images/{diskID}.{format}
-			// For vSphere: [datastore] path/{diskID}.{format}
-			// Providers can override this based on their conventions
 			diskPath = fmt.Sprintf("/var/lib/libvirt/images/%s.%s", disk.DiskID, format)
-			log.Info("Using default disk path for imported disk",
+			log.Info("No imported-disk path set; synthesizing libvirt default path (last resort)",
 				"diskID", disk.DiskID,
+				"format", format,
 				"path", diskPath)
 		}
 

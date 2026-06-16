@@ -475,13 +475,14 @@ func (p *Provider) GetCapabilities(ctx context.Context, req *providerv1.GetCapab
 		SupportedExportFormats:    []string{"vmdk", "qcow2", "raw"}, // ExportDisk converts the streamOptimized VMDK to these
 		SupportedImportFormats:    []string{"vmdk", "qcow2", "raw"}, // ImportDisk accepts these and converts to VMDK
 		SupportsExportCompression: true,                             // export uses the compressed streamOptimized VMDK format
-		// ADR-0006 Slice 1: vSphere is the SOURCE of the vSphere → S3 → libvirt
-		// relay path. It EXPORTS to pvc AND s3 (vCenter datastore stream → pod →
-		// S3, native vmdk); it still only IMPORTS from pvc (S3 import into vSphere
-		// is the reverse direction, a later slice). Only the relay transfer mode
-		// is implemented; direct is not.
+		// ADR-0006: vSphere is the SOURCE of the vSphere → S3 → libvirt relay
+		// (Slice 1) AND, as of Slice 2, the TARGET of the libvirt → S3 → vSphere
+		// reverse relay. It therefore both EXPORTS (vCenter datastore stream → pod
+		// → S3, native vmdk) and IMPORTS (download qcow2 → monolithicSparse vmdk →
+		// datastore-HTTP upload → CopyVirtualDisk inflate) over pvc AND s3. Only
+		// the relay transfer mode is implemented; direct is not.
 		SupportedExportBackends: migration.PVCAndS3ExportBackends(),
-		SupportedImportBackends: migration.PVCOnlyImportBackends(),
+		SupportedImportBackends: migration.PVCAndS3ImportBackends(),
 		SupportedTransferModes:  migration.RelayOnlyTransferModes(),
 	}, nil
 }
@@ -2668,6 +2669,28 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 		// Set VM name in config spec FIRST (required for CreateVM and cloud-init)
 		configSpec.Name = spec.Name
 
+		// CreateVM_Task from scratch REQUIRES config.files.vmPathName (where to
+		// place the VM's home/.vmx). Derive the datastore from the imported disk
+		// path "[<ds>] <folder>/<file>.vmdk" → "[<ds>]"; vCenter then creates the
+		// VM under "[<ds>] <vmName>/". Without it CreateVM fails with
+		// "A specified parameter was not correct: config.files".
+		if strings.HasPrefix(spec.DiskPath, "[") {
+			if end := strings.Index(spec.DiskPath, "]"); end > 1 {
+				configSpec.Files = &types.VirtualMachineFileInfo{
+					VmPathName: spec.DiskPath[:end+1],
+				}
+			}
+		}
+
+		// A VM created from scratch must declare a GuestId or vCenter rejects
+		// power-on with "Module GuestOS power on failed". A migration doesn't carry
+		// the source guest OS, so default to a generic 64-bit Linux guest (the
+		// common cross-hypervisor migration case); refine when the migration
+		// threads the real source OS.
+		if configSpec.GuestId == "" {
+			configSpec.GuestId = "otherLinux64Guest"
+		}
+
 		// Add cloud-init data via guestinfo properties if provided
 		// Note: Must be called AFTER setting Name for imported disk VMs
 		if spec.CloudInit != "" {
@@ -2688,11 +2711,16 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 			DiskMode: string(types.VirtualDiskModePersistent),
 		}
 
-		// Add disk device
+		// Add disk device: unique negative key (the controller below uses -1),
+		// attached to that SCSI controller (ControllerKey -1) at unit 0. Without a
+		// distinct Key + ControllerKey + UnitNumber, CreateVM rejects the spec.
+		diskUnit := int32(0)
 		diskDevice := &types.VirtualDisk{
 			VirtualDevice: types.VirtualDevice{
-				Key:     -1,
-				Backing: diskBacking,
+				Key:           -2,
+				ControllerKey: -1,
+				UnitNumber:    &diskUnit,
+				Backing:       diskBacking,
 			},
 		}
 
@@ -3749,10 +3777,18 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 // passed as VMImage.Path in a subsequent Create request. The operation runs
 // synchronously; Task in the response is nil.
 func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskRequest) (*providerv1.ImportDiskResponse, error) {
-	// ADR-0006 Slice 0: only the legacy pvc staging path is implemented; reject
-	// nfs/s3 backends honestly instead of falling through to the pvc path.
-	if err := migration.EnsurePVCBackend(req.BackendType); err != nil {
+	// ADR-0006: vSphere is a TARGET for the S3 relay import (Slice 2, the reverse
+	// of Slice 1's vSphere→S3→libvirt). Accept pvc and s3; reject nfs/unknown
+	// honestly instead of falling through to the pvc path.
+	if err := migration.EnsurePVCOrS3Backend(req.BackendType); err != nil {
 		return nil, err
+	}
+
+	// S3 relay import (Approach 2): download the staged qcow2, convert to a
+	// monolithicSparse vmdk, upload via datastore-HTTP, and inflate with
+	// CopyVirtualDisk. Never logs the credentials map.
+	if req.BackendType == migration.BackendS3 {
+		return p.importDiskFromS3(ctx, req)
 	}
 
 	if p.client == nil {
