@@ -523,6 +523,13 @@ jobs:
           image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/${{ matrix.component }}:${{ needs.prepare.outputs.tag }}
           format: spdx-json
           output-file: sbom-${{ matrix.component }}.spdx.json
+          # This job is intentionally scoped to contents: read (see permissions
+          # above). The SBOM is uploaded as a workflow artifact below and then
+          # attached to the GitHub Release by the create-release job, so the
+          # action's own release upload is redundant — and would fail with
+          # "Resource not accessible by integration" since it needs
+          # contents: write. Disable it.
+          upload-release-assets: false
 
       - name: Upload SBOM
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
