@@ -2682,6 +2682,15 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 			}
 		}
 
+		// A VM created from scratch must declare a GuestId or vCenter rejects
+		// power-on with "Module GuestOS power on failed". A migration doesn't carry
+		// the source guest OS, so default to a generic 64-bit Linux guest (the
+		// common cross-hypervisor migration case); refine when the migration
+		// threads the real source OS.
+		if configSpec.GuestId == "" {
+			configSpec.GuestId = "otherLinux64Guest"
+		}
+
 		// Add cloud-init data via guestinfo properties if provided
 		// Note: Must be called AFTER setting Name for imported disk VMs
 		if spec.CloudInit != "" {
