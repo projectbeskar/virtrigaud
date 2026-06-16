@@ -166,13 +166,19 @@ func (s *S3Storage) UploadStream(ctx context.Context, req StreamUploadRequest) (
 	tee := io.TeeReader(req.Reader, hasher)
 
 	size := req.ContentLength
+	opts := minio.PutObjectOptions{ContentType: "application/octet-stream"}
 	if size <= 0 {
 		size = -1 // minio streaming auto-multipart
+		// Bound the per-part buffer for unknown-size streams. minio otherwise
+		// sizes each part at ~525 MiB (maxMultipartPutObjectSize / maxPartsCount =
+		// 5 TiB / 10000), which OOM-kills a memory-limited provider pod. A 16 MiB
+		// part keeps memory bounded; the trade-off is an unknown-size object is
+		// capped at 16 MiB * 10000 ≈ 160 GiB (provide a real ContentLength to lift
+		// the cap for larger disks).
+		opts.PartSize = 16 * 1024 * 1024
 	}
 
-	info, err := s.client.PutObject(ctx, s.bucket, key, tee, size, minio.PutObjectOptions{
-		ContentType: "application/octet-stream",
-	})
+	info, err := s.client.PutObject(ctx, s.bucket, key, tee, size, opts)
 	if err != nil {
 		return UploadResponse{}, &StorageError{
 			Type:    ErrorTypeOperationFailed,
