@@ -5,6 +5,30 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-16 11:14] - Honor CleanupPolicy + reliably remove the migration source snapshot
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/controller/vmmigration_controller.go`: `deleteSourceSnapshot` now **awaits** the provider snapshot-delete task instead of fire-and-forget. After `SnapshotDelete` returns a `taskRef`, it polls `IsTaskComplete` with a bounded `wait.PollUntilContextTimeout(ctx, 3s, 2m, immediate)` (no `time.Sleep`), then checks `TaskStatus` and returns an error if `.Error != ""` — mirroring the existing `handleExportingPhase` await. The previous code logged "best effort — don't wait" and returned `nil`, so on CR deletion (`handleDeletion` calls it then removes the finalizer) the async delete was orphaned and the snapshot survived. This was the primary cause of the **4 accumulated `*-migration-*` snapshots** observed on the source VM after a live vSphere→libvirt run.
+- `internal/controller/vmmigration_controller.go`: `CleanupPolicy` is now consulted. New helper `cleanupAllowed(m)` returns `false` only when `Spec.Options.CleanupPolicy == "Never"`. `handleReadyPhase` gates both the intermediate-storage cleanup and the source-snapshot deletion behind `cleanupAllowed`, and `handleDeletion` gates the snapshot deletion the same way. Previously all three ran unconditionally, so `Never` was silently ignored. `DeleteAfterMigration` stays independent of policy (it is an explicit user action).
+- `internal/controller/vmmigration_controller.go`: `handleFailedPhase` now performs **best-effort** source-snapshot cleanup at both terminal exits (no-retry-policy and max-retries-exceeded) via new `cleanupSnapshotOnTerminalFailure`, gated on `cleanupAllowed && Status.SnapshotID != "" && Spec.Source.SnapshotRef == nil`. A migration that fails before `Ready` (the lab had no retry policy → immediately terminal) previously left its snapshot until the CR was deleted (and even then was orphaned by the bug above). A cleanup failure here is logged and swallowed so it cannot wedge an already-terminal migration; the await makes it usually succeed on the first pass.
+- `internal/controller/vmmigration_controller.go`: on a successful delete, `deleteSourceSnapshot` clears `Status.SnapshotID = ""` as an idempotency latch, so re-reconciles and `handleDeletion` skip a now-absent snapshot instead of re-issuing a delete against a stale ID.
+
+### Added
+- `api/infra.virtrigaud.io/v1beta1/vmmigration_types.go`: exported Go constants `CleanupPolicyAlways`, `CleanupPolicyOnSuccess`, `CleanupPolicyNever` mirroring the existing `+kubebuilder:validation:Enum` on `MigrationOptions.CleanupPolicy`. Purely additive — **no CRD schema change** (regen produces zero diff); they remove bare string literals from the controller per the CLAUDE.md global-constants rule.
+- `internal/controller/vmmigration_snapshot_cleanup_test.go`: unit tests (counting fake provider, `providerInstanceFn` seam) proving `deleteSourceSnapshot` polls the task to completion and surfaces a task error, clears `SnapshotID` on success, `Never` skips snapshot deletion on `Ready`, a terminally-failed migration deletes its snapshot under `OnSuccess`/`Always` but not `Never`, and terminal cleanup is best-effort (a delete failure does not wedge the migration). Plus a table test for `cleanupAllowed`.
+
+### Why
+A live vSphere→libvirt migration accumulated 4 source snapshots on real hardware, traced to three defects in the migration controller's snapshot cleanup: an orphaned async delete on CR deletion, an ignored `CleanupPolicy`, and no snapshot cleanup at terminal failure. The migration-created snapshot is an internal artifact left on the user's LIVE source VM, so it must be removed at any terminal state (Ready or Failed) unless the user opted out with `Never`. This is PR-1 of ADR-0006 Slice 2 prep and also fixes the FORWARD path; scope is the snapshot only (intermediate-storage-on-failure policy is out of scope). Refs #236.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (manager image — the reconciler runs in the manager)
+- [ ] Config change only
+- [ ] Documentation only
+
+---
+
 ## [2026-06-16 06:55] - Fix VMMigration reconcile race issuing a duplicate ExportDisk/ImportDisk
 **Author:** @wrkode (William Rizzo)
 

@@ -31,6 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -1311,26 +1312,32 @@ func (r *VMMigrationReconciler) handleReadyPhase(ctx context.Context, migration 
 	// Perform post-migration cleanup
 	cleanupPerformed := false
 
-	// 1. Cleanup intermediate storage
-	if migration.Spec.Storage != nil {
-		if err := r.cleanupIntermediateStorage(ctx, migration); err != nil {
-			logger.Error(err, "Failed to cleanup intermediate storage, will retry")
-			// Don't fail the migration, just log and retry
-			return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+	// CleanupPolicy=Never opts out of removing migration-created artifacts
+	// (intermediate storage + source snapshot). DeleteAfterMigration is handled
+	// independently below because it is an explicit user action, not policy.
+	if cleanupAllowed(migration) {
+		// 1. Cleanup intermediate storage
+		if migration.Spec.Storage != nil {
+			if err := r.cleanupIntermediateStorage(ctx, migration); err != nil {
+				logger.Error(err, "Failed to cleanup intermediate storage, will retry")
+				// Don't fail the migration, just log and retry
+				return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+			}
+			cleanupPerformed = true
+			logger.Info("Intermediate storage cleaned up")
 		}
-		cleanupPerformed = true
-		logger.Info("Intermediate storage cleaned up")
-	}
 
-	// 2. Delete source snapshot if it was created for migration
-	if migration.Status.SnapshotID != "" && migration.Spec.Source.SnapshotRef == nil {
-		// Only delete if we created the snapshot (not if user provided one)
-		if err := r.deleteSourceSnapshot(ctx, migration); err != nil {
-			logger.Error(err, "Failed to delete source snapshot, will retry")
-			return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+		// 2. Delete source snapshot if it was created for migration
+		if migration.Status.SnapshotID != "" && migration.Spec.Source.SnapshotRef == nil {
+			// Only delete if we created the snapshot (not if user provided one)
+			snapshotID := migration.Status.SnapshotID
+			if err := r.deleteSourceSnapshot(ctx, migration); err != nil {
+				logger.Error(err, "Failed to delete source snapshot, will retry")
+				return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+			}
+			cleanupPerformed = true
+			logger.Info("Source snapshot deleted", "snapshot_id", snapshotID)
 		}
-		cleanupPerformed = true
-		logger.Info("Source snapshot deleted", "snapshot_id", migration.Status.SnapshotID)
 	}
 
 	// 3. Delete source VM if requested
@@ -1369,6 +1376,7 @@ func (r *VMMigrationReconciler) handleFailedPhase(ctx context.Context, migration
 	// Check if retry is configured and allowed
 	if migration.Spec.Options == nil || migration.Spec.Options.RetryPolicy == nil {
 		logger.Info("No retry policy configured, migration remains failed")
+		r.cleanupSnapshotOnTerminalFailure(ctx, migration)
 		return ctrl.Result{}, nil
 	}
 
@@ -1385,6 +1393,7 @@ func (r *VMMigrationReconciler) handleFailedPhase(ctx context.Context, migration
 			"max_retries", maxRetries)
 		migration.Status.Message = fmt.Sprintf("Migration failed after %d retries: %s",
 			migration.Status.RetryCount, migration.Status.Message)
+		r.cleanupSnapshotOnTerminalFailure(ctx, migration)
 		if err := r.updateStatus(ctx, migration); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -1459,6 +1468,34 @@ func (r *VMMigrationReconciler) handleFailedPhase(ctx context.Context, migration
 	return ctrl.Result{Requeue: true}, nil
 }
 
+// cleanupSnapshotOnTerminalFailure best-effort removes the migration-created
+// source snapshot when the migration has reached a terminal Failed state and is
+// not going to be retried.
+//
+// Without this, a migration that fails before Ready (e.g. no retry policy, so it
+// is immediately terminal) leaves its snapshot on the LIVE source VM until the
+// CR is deleted — which, combined with the await fix in deleteSourceSnapshot, is
+// the accumulation observed on real hardware. The deletion is best-effort: a
+// cleanup error is logged and swallowed so a transient provider failure cannot
+// wedge a migration that is already terminal. Because deleteSourceSnapshot now
+// awaits the task, this usually succeeds on the first pass. Skipped when the
+// user opted out (CleanupPolicy=Never), when there is no migration-created
+// snapshot, or when the user supplied their own snapshot (SnapshotRef set).
+func (r *VMMigrationReconciler) cleanupSnapshotOnTerminalFailure(ctx context.Context, migration *infrav1beta1.VMMigration) {
+	if !cleanupAllowed(migration) || migration.Status.SnapshotID == "" || migration.Spec.Source.SnapshotRef != nil {
+		return
+	}
+
+	logger := logging.FromContext(ctx)
+	snapshotID := migration.Status.SnapshotID
+	if err := r.deleteSourceSnapshot(ctx, migration); err != nil {
+		logger.Error(err, "Failed to delete source snapshot on terminal failure (best-effort, continuing)",
+			"snapshot_id", snapshotID)
+		return
+	}
+	logger.Info("Source snapshot deleted on terminal failure", "snapshot_id", snapshotID)
+}
+
 // handleDeletion handles deletion of VMMigration resources
 func (r *VMMigrationReconciler) handleDeletion(ctx context.Context, migration *infrav1beta1.VMMigration) (ctrl.Result, error) {
 	logger := logging.FromContext(ctx)
@@ -1500,8 +1537,9 @@ func (r *VMMigrationReconciler) handleDeletion(ctx context.Context, migration *i
 		}
 	}
 
-	// 3. Delete migration-created snapshot if exists
-	if migration.Status.SnapshotID != "" && migration.Spec.Source.SnapshotRef == nil {
+	// 3. Delete migration-created snapshot if exists (unless the user opted out
+	// with CleanupPolicy=Never).
+	if cleanupAllowed(migration) && migration.Status.SnapshotID != "" && migration.Spec.Source.SnapshotRef == nil {
 		if err := r.deleteSourceSnapshot(ctx, migration); err != nil {
 			logger.Error(err, "Failed to delete source snapshot during deletion")
 			cleanupErrors = append(cleanupErrors, fmt.Errorf("snapshot cleanup: %w", err))
@@ -2432,6 +2470,23 @@ func (r *VMMigrationReconciler) cleanupIntermediateStorage(ctx context.Context, 
 	return nil
 }
 
+// cleanupAllowed reports whether the controller may remove migration-created
+// artifacts for the given migration.
+//
+// The source snapshot the migration creates is an internal artifact left on the
+// user's LIVE source VM; it is not something the user asked to keep, so we
+// remove it at any terminal state (Ready or Failed) by default. The only way to
+// retain it is to opt out explicitly with CleanupPolicy=Never. Always and
+// OnSuccess both permit cleanup here: at a terminal state OnSuccess and Always
+// are equivalent for this internal snapshot (a snapshot left on the source VM
+// has no value after the migration has terminated either way). The distinction
+// between Always and OnSuccess is reserved for future artifact classes; PR-1
+// only governs the snapshot.
+func cleanupAllowed(m *infrav1beta1.VMMigration) bool {
+	// Allowed unless the user explicitly opted out with CleanupPolicy=Never.
+	return m.Spec.Options == nil || m.Spec.Options.CleanupPolicy != infrav1beta1.CleanupPolicyNever
+}
+
 // deleteSourceSnapshot deletes the migration-created snapshot
 func (r *VMMigrationReconciler) deleteSourceSnapshot(ctx context.Context, migration *infrav1beta1.VMMigration) error {
 	logger := logging.FromContext(ctx)
@@ -2468,12 +2523,45 @@ func (r *VMMigrationReconciler) deleteSourceSnapshot(ctx context.Context, migrat
 		return fmt.Errorf("failed to delete snapshot: %w", err)
 	}
 
-	// If there's a task, wait for it to complete
+	// If the provider returned a task, AWAIT it to completion before returning.
+	// A fire-and-forget delete (the previous behavior) orphans the task on CR
+	// deletion: handleDeletion calls this then removes the finalizer, so the
+	// async snapshot delete never lands and the snapshot accumulates on the
+	// source VM. We poll with a bounded wait, mirroring the IsTaskComplete /
+	// TaskStatus await pattern in handleExportingPhase.
 	if taskRef != "" {
 		logger.Info("Snapshot deletion task started, waiting for completion", "task_id", taskRef)
-		// For cleanup, we'll do best effort - don't wait indefinitely
-		// The task will complete asynchronously
+
+		waitErr := wait.PollUntilContextTimeout(ctx, 3*time.Second, 2*time.Minute, true,
+			func(pollCtx context.Context) (bool, error) {
+				done, pollErr := providerInstance.IsTaskComplete(pollCtx, taskRef)
+				if pollErr != nil {
+					// Treat a transient poll error as "keep polling" rather than
+					// aborting the wait; the bounded timeout still caps total time.
+					logger.V(1).Info("Transient error polling snapshot delete task, retrying",
+						"task_id", taskRef, "error", pollErr.Error())
+					return false, nil
+				}
+				return done, nil
+			})
+		if waitErr != nil {
+			return fmt.Errorf("await snapshot delete task %s: %w", taskRef, waitErr)
+		}
+
+		// Task reported complete: verify it did not complete with an error.
+		taskStatus, statusErr := providerInstance.TaskStatus(ctx, taskRef)
+		if statusErr != nil {
+			return fmt.Errorf("get snapshot delete task %s status: %w", taskRef, statusErr)
+		}
+		if taskStatus.Error != "" {
+			return fmt.Errorf("snapshot delete task %s failed: %s", taskRef, taskStatus.Error)
+		}
 	}
+
+	// Idempotency latch: the snapshot is gone, so clear the recorded ID. A
+	// re-reconcile (or handleDeletion) then skips deleting a now-absent snapshot
+	// rather than issuing a second delete against a stale ID.
+	migration.Status.SnapshotID = ""
 
 	return nil
 }
