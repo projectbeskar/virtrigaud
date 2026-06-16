@@ -5,6 +5,21 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-16 19:20] - vSphere S3 import: make the NFC import idempotent against a leftover folder
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/vsphere/s3import.go` (`nfcImportStreamOptimized`): before importing, best-effort delete the entire `[<ds>] <id>` import folder (Force-overwrite intent), not just the target `<id>.vmdk` file. The import id is deterministic per migration (the controller uses `<target>-migrated`), so a retry after a prior attempt — or after a deleted target VM that left its disk folder behind — found the folder occupied; `ImportVApp` then placed the disk in a collision-suffixed folder (`<id>_1`), and the post-import disk-uuid query on the expected `[<ds>] <id>/<id>.vmdk` path failed with `File … was not found` ("likely corrupt import"). Deleting only the `.vmdk` was insufficient when the folder still held a prior `.vmx`/`.nvram`.
+
+### Why
+Surfaced re-running the ADR-0006 Slice 2 migration to the same target after an earlier validation run: the second import failed not because the disk was corrupt but because a stale datastore folder forced a name collision. Retries to a fixed target name must start from a clean folder. Refs #236.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-06-16 18:10] - Surface the real S3 error on a libvirt export stream failure (un-mask)
 **Author:** @wrkode (William Rizzo)
 

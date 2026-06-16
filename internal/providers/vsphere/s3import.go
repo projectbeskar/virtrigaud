@@ -282,13 +282,18 @@ func (p *Provider) nfcImportStreamOptimized(
 		return fmt.Errorf("build single-disk OVF descriptor: %w", err)
 	}
 
-	// Best-effort delete a stale leftover target so the NFC upload doesn't land at
-	// a suffixed name (the deferred cleanup in ImportDisk also guards this).
-	target := fmt.Sprintf("%s/%s.vmdk", id, id)
+	// Best-effort delete the entire leftover import folder "[<ds>] <id>" (Force
+	// semantics) before importing. The import id is deterministic per migration
+	// (the controller uses "<target>-migrated"), so a retry after a prior attempt
+	// — or after a deleted target VM that left its disk folder behind — would
+	// otherwise find the folder occupied; ImportVApp then places the disk in a
+	// collision-suffixed folder ("<id>_1"), which defeats the post-import uuid
+	// query on the expected "[<ds>] <id>/<id>.vmdk" path. Deleting just the target
+	// .vmdk is not enough when the folder still holds other leftovers (a prior
+	// .vmx/.nvram). fm.Delete on a missing path returns an error we intentionally
+	// ignore.
 	fm := datastore.NewFileManager(datacenter, true)
-	if _, statErr := datastore.Stat(ctx, target); statErr == nil {
-		_ = fm.Delete(ctx, target)
-	}
+	_ = fm.Delete(ctx, id)
 
 	ovfManager := ovf.NewManager(p.client.Client)
 	spec, err := ovfManager.CreateImportSpec(ctx, descriptor, pool, datastore, &types.OvfCreateImportSpecParams{
