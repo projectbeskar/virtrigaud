@@ -5,6 +5,21 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-16 20:15] - Remove dead parseStorageSize (orphaned by the Bug G GetDiskInfo rewrite)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/libvirt/provider_virsh.go`: removed the now-unused `parseStorageSize` helper. The Bug G rewrite of `GetDiskInfo` switched to `qemu-img info -U --output=json` (which returns the virtual size directly), removing the only caller; `golangci-lint`'s `unused` linter flagged it (`go vet` does not catch unused functions). No behavior change.
+
+### Why
+CI Lint failed on the Slice 2 branch with `func parseStorageSize is unused`; the function was orphaned when its caller was replaced. Refs #236.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-06-16 19:50] - Docs: ADR-0006 Slice 2 validated; reverse migration example + README
 **Author:** @wrkode (William Rizzo)
 

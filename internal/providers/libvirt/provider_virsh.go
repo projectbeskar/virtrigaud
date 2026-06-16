@@ -1595,52 +1595,6 @@ func (p *Provider) TaskStatus(ctx context.Context, taskRef string) (contracts.Ta
 	}, nil
 }
 
-// parseStorageSize converts storage size strings (e.g., "20 GiB", "1024 MiB") to bytes
-func parseStorageSize(sizeStr string) (int64, error) {
-	sizeStr = strings.TrimSpace(sizeStr)
-	parts := strings.Fields(sizeStr)
-
-	if len(parts) == 0 {
-		return 0, fmt.Errorf("empty size string")
-	}
-
-	var value float64
-	var unit string
-
-	if len(parts) == 1 {
-		// Assume bytes if no unit specified
-		val, err := strconv.ParseInt(parts[0], 10, 64)
-		if err != nil {
-			return 0, fmt.Errorf("invalid size value: %w", err)
-		}
-		return val, nil
-	}
-
-	// Parse value and unit
-	val, err := strconv.ParseFloat(parts[0], 64)
-	if err != nil {
-		return 0, fmt.Errorf("invalid size value: %w", err)
-	}
-	value = val
-	unit = strings.ToUpper(parts[1])
-
-	// Convert to bytes
-	switch unit {
-	case "B", "BYTES":
-		return int64(value), nil
-	case "KB", "KIB":
-		return int64(value * 1024), nil
-	case "MB", "MIB":
-		return int64(value * 1024 * 1024), nil
-	case "GB", "GIB":
-		return int64(value * 1024 * 1024 * 1024), nil
-	case "TB", "TIB":
-		return int64(value * 1024 * 1024 * 1024 * 1024), nil
-	default:
-		return 0, fmt.Errorf("unknown unit: %s", unit)
-	}
-}
-
 // GetDiskInfo retrieves detailed information about a VM's disk
 func (p *Provider) GetDiskInfo(ctx context.Context, req contracts.GetDiskInfoRequest) (contracts.GetDiskInfoResponse, error) {
 	log.Printf("INFO Getting disk info for VM: %s", req.VmId)
