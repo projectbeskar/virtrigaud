@@ -102,6 +102,67 @@ func TestDiscoverMigrationVolumeMounts_SkipsDeletingPVCs(t *testing.T) {
 	assert.Equal(t, "/mnt/migration-storage/mig-normal", mounts[0].MountPath)
 }
 
+// TestDiscoverMigration_MergesAllActive_AndDropsRemoved reproduces the two #230
+// bugs and asserts the discovery-rebuild model fixes both:
+//
+//  1. Parallel migrations no longer clobber each other — with TWO active migration
+//     PVCs in the namespace, discovery returns a volume+mount for BOTH (the desired
+//     set is rebuilt from the full PVC list each reconcile, not from one migration's
+//     context, so it is not last-writer-wins).
+//  2. Stale mounts are removed — once a PVC is gone, the next discovery no longer
+//     returns its volume/mount, so a provider re-reconcile drops it.
+func TestDiscoverMigration_MergesAllActive_AndDropsRemoved(t *testing.T) {
+	ctx := context.Background()
+	scheme := migrationTestScheme(t)
+	ns := "default"
+
+	a := migrationPVC("mig-a", ns, false)
+	b := migrationPVC("mig-b", ns, false)
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(a, b).Build()
+	r := &ProviderReconciler{Client: c, Scheme: scheme}
+
+	volNames := func() map[string]string {
+		out := map[string]string{}
+		for _, v := range r.discoverMigrationPVCs(ctx, ns) {
+			require.NotNil(t, v.PersistentVolumeClaim)
+			out[v.Name] = v.PersistentVolumeClaim.ClaimName
+		}
+		return out
+	}
+	mountNames := func() map[string]string {
+		out := map[string]string{}
+		for _, m := range r.discoverMigrationVolumeMounts(ctx, ns) {
+			out[m.Name] = m.MountPath
+		}
+		return out
+	}
+
+	// (1) Parallel merge: both active PVCs are present in the desired volume/mount set.
+	vols := volNames()
+	require.Len(t, vols, 2, "both concurrent migration PVCs must be mounted (no last-writer-wins)")
+	assert.Equal(t, "mig-a", vols["migration-mig-a"])
+	assert.Equal(t, "mig-b", vols["migration-mig-b"])
+
+	mounts := mountNames()
+	require.Len(t, mounts, 2)
+	assert.Equal(t, "/mnt/migration-storage/mig-a", mounts["migration-mig-a"])
+	assert.Equal(t, "/mnt/migration-storage/mig-b", mounts["migration-mig-b"])
+
+	// (2) Stale removal: delete mig-a entirely (no finalizer → actually removed). The
+	// next discovery rebuilds from the current PVC list and drops mig-a's volume/mount.
+	require.NoError(t, c.Delete(ctx, a))
+	vols = volNames()
+	require.Len(t, vols, 1, "removed PVC's volume must not survive the rebuild")
+	assert.Equal(t, "mig-b", vols["migration-mig-b"])
+	assert.NotContains(t, mountNames(), "migration-mig-a")
+
+	// Remove the last one too → the set is empty (no stale leftovers).
+	require.NoError(t, c.Delete(ctx, b))
+	assert.Empty(t, r.discoverMigrationPVCs(ctx, ns))
+	assert.Empty(t, r.discoverMigrationVolumeMounts(ctx, ns))
+}
+
 // TestProvidersForMigrationPVC verifies the watch map function enqueues every
 // Provider in the PVC's namespace for a migration PVC, and ignores non-migration
 // PVCs (issue #184).

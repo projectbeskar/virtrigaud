@@ -5,6 +5,21 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-17 15:30] - test: regression coverage for the migration-PVC mount lifecycle (#230)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/controller/provider_controller_migration_test.go`: `TestDiscoverMigration_MergesAllActive_AndDropsRemoved` reproduces both #230 bugs and asserts the discovery-rebuild model fixes them — (1) two concurrent migration PVCs both yield a volume+mount (no last-writer-wins clobber), and (2) once a PVC is removed, the next discovery drops its volume/mount (no stale leftover). Locks in the behavior delivered by #232/#184.
+
+### Why
+#230 was structurally addressed by the discovery-rebuild model but lacked an explicit regression test for the parallel-merge and stale-removal scenarios; this verifies and guards them. Closes #230.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-06-17 14:55] - chart: render the observability templates (ServiceMonitor, PrometheusRule, Grafana dashboard)
 **Author:** @wrkode (William Rizzo)
 
