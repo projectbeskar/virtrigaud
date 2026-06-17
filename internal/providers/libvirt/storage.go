@@ -146,7 +146,7 @@ func (s *StorageProvider) createDefaultStoragePool(ctx context.Context) error {
 	}
 
 	// Define the pool
-	if _, err := s.virshProvider.runVirshCommand(ctx, "pool-define", poolFile); err != nil {
+	if _, err := s.virshProvider.runRemoteVirshCommand(ctx, "pool-define", poolFile); err != nil {
 		return fmt.Errorf("failed to define storage pool: %w", err)
 	}
 

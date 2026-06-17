@@ -240,6 +240,9 @@ func runSSHStdin(ctx context.Context, vp *VirshProvider, r io.Reader, remoteCmd 
 		cmd.Env = append(os.Environ(), fmt.Sprintf("SSHPASS=%s", vp.credentials.Password))
 	} else {
 		sshArgs := []string{"-o", "LogLevel=ERROR"}
+		if strings.TrimSpace(vp.credentials.SSHPrivateKey) != "" {
+			sshArgs = append(sshArgs, sshKeyAuthOptions(resolveSSHKeyFile(parsedURI))...)
+		}
 		sshArgs = append(sshArgs, vp.hostKey.sshHostKeyOptions()...)
 		sshArgs = append(sshArgs, sshMultiplexOptions()...)
 		sshArgs = append(sshArgs, fmt.Sprintf("%s@%s", user, host), remoteCmd)

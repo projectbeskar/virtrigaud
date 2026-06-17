@@ -208,71 +208,21 @@ func (c *CloudInitProvider) copyISOToRemote(ctx context.Context, localPath, doma
 	remoteDir := "/var/lib/libvirt/images/cloud-init"
 	remotePath := fmt.Sprintf("%s/%s-cloud-init.iso", remoteDir, domainName)
 
-	// Get SSH connection string from provider credentials
-	sshTarget, err := c.getSSHTarget()
-	if err != nil {
-		return "", fmt.Errorf("failed to get SSH target: %w", err)
-	}
-
 	// Create remote directory
-	_, err = c.virshProvider.runVirshCommand(ctx, "!", "ssh", sshTarget,
-		"mkdir", "-p", remoteDir)
-	if err != nil {
-		log.Printf("WARN Failed to create remote directory (may already exist): %v", err)
+	if _, err := c.virshProvider.runVirshCommand(ctx, "!", "mkdir", "-p", remoteDir); err != nil {
+		return "", fmt.Errorf("failed to create remote cloud-init directory: %w", err)
 	}
 
-	// Copy ISO file using scp
-	result, err := c.virshProvider.runVirshCommand(ctx, "!", "scp", localPath,
-		fmt.Sprintf("%s:%s", sshTarget, remotePath))
-
+	result, err := c.virshProvider.runVirshCommand(ctx, "!", "cp", "-f", localPath, remotePath)
 	if err != nil {
-		return "", fmt.Errorf("scp failed: %w, output: %s", err, result.Stderr)
+		return "", fmt.Errorf("failed to copy cloud-init ISO on remote host: %w, output: %s", err, result.Stderr)
+	}
+	if _, err := c.virshProvider.runVirshCommand(ctx, "!", "chmod", "0644", remotePath); err != nil {
+		return "", fmt.Errorf("failed to chmod remote cloud-init ISO: %w", err)
 	}
 
-	log.Printf("INFO Copied cloud-init ISO to remote server: %s", remotePath)
+	log.Printf("INFO Copied cloud-init ISO on remote server: %s", remotePath)
 	return remotePath, nil
-}
-
-// getSSHTarget extracts the SSH connection target (user@host) from the provider configuration
-func (c *CloudInitProvider) getSSHTarget() (string, error) {
-	// Get credentials
-	if c.virshProvider.credentials == nil {
-		return "", fmt.Errorf("provider credentials not initialized")
-	}
-
-	username := c.virshProvider.credentials.Username
-	if username == "" {
-		return "", fmt.Errorf("username not configured in provider credentials")
-	}
-
-	// Extract hostname from endpoint URI
-	// Expected format: qemu+ssh://172.16.56.8/system or similar
-	endpoint := c.virshProvider.config.Spec.Endpoint
-	if endpoint == "" {
-		return "", fmt.Errorf("endpoint not configured")
-	}
-
-	// Parse the endpoint to extract the host
-	host := endpoint
-	// Remove protocol prefix if present
-	if strings.Contains(endpoint, "://") {
-		parts := strings.SplitN(endpoint, "://", 2)
-		if len(parts) == 2 {
-			host = parts[1]
-		}
-	}
-	// Remove path suffix if present (e.g., /system)
-	if strings.Contains(host, "/") {
-		host = strings.Split(host, "/")[0]
-	}
-	// Remove port if present
-	if strings.Contains(host, ":") {
-		host = strings.Split(host, ":")[0]
-	}
-
-	sshTarget := fmt.Sprintf("%s@%s", username, host)
-	log.Printf("INFO Using SSH target: %s", sshTarget)
-	return sshTarget, nil
 }
 
 // ExtractHostnameFromCloudInit extracts hostname from cloud-init YAML (like vSphere)

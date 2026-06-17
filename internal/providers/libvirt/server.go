@@ -708,7 +708,7 @@ func (s *Server) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReque
 	}
 
 	// Get source disk info using qemu-img
-	infoResult, err := libvirtProvider.virshProvider.runVirshCommand(ctx, "!", "qemu-img", "info", "--output=json", sourcePath)
+	infoResult, err := libvirtProvider.virshProvider.runVirshCommand(ctx, "!", "qemu-img", "info", "--output=json", finalSourcePath)
 	if err != nil {
 		log.Printf("WARN Failed to get source disk info: %v", err)
 	} else {
@@ -883,8 +883,12 @@ func (s *Server) copyDiskToRemote(ctx context.Context, virshProvider *VirshProvi
 		cmd = exec.CommandContext(ctx, "sshpass", scpArgs...)
 		// Set password via environment variable for sshpass
 		cmd.Env = append(os.Environ(), fmt.Sprintf("SSHPASS=%s", virshProvider.credentials.Password))
+	} else if strings.TrimSpace(virshProvider.credentials.SSHPrivateKey) != "" {
+		scpArgs := sshKeyAuthOptions(resolveSSHKeyFile(parsedURI))
+		scpArgs = append(scpArgs, hostKeyOpts...)
+		scpArgs = append(scpArgs, localPath, fmt.Sprintf("%s:%s", sshTarget, remotePath))
+		cmd = exec.CommandContext(ctx, "scp", scpArgs...)
 	} else {
-		// Fallback to scp without sshpass (for key-based auth)
 		scpArgs := append([]string{}, hostKeyOpts...)
 		scpArgs = append(scpArgs, localPath, fmt.Sprintf("%s:%s", sshTarget, remotePath))
 		cmd = exec.CommandContext(ctx, "scp", scpArgs...)

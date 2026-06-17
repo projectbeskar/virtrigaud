@@ -29,6 +29,11 @@ import (
 	"time"
 )
 
+const (
+	sshPrivateKeyDir  = "/tmp/virtrigaud-libvirt"
+	sshPrivateKeyPath = sshPrivateKeyDir + "/ssh-privatekey"
+)
+
 // VirshProvider implements a virsh command-line based libvirt provider
 type VirshProvider struct {
 	config      *ProviderConfig
@@ -183,14 +188,25 @@ func (v *VirshProvider) setupConnection() error {
 		}
 	}
 
+	isSSHURI := strings.Contains(parsedURI.Scheme, "ssh")
+
 	// Add SSH options for container environments. Host-key handling is delegated
 	// to the centralized policy: insecure path restores no_verify=1, the
 	// verifying path omits it and relies on the verifying ~/.ssh/config +
 	// known_hosts written below.
-	if strings.Contains(parsedURI.Scheme, "ssh") {
+	if isSSHURI {
 		query := parsedURI.Query()
 		v.hostKey.applyURIHostKeyOptions(query)
 		query.Set("no_tty", "1") // Non-interactive mode
+		if strings.TrimSpace(v.credentials.SSHPrivateKey) != "" {
+			keyPath, err := v.writeSSHPrivateKey()
+			if err != nil {
+				return fmt.Errorf("failed to write SSH private key for libvirt transport: %w", err)
+			}
+			query.Set("keyfile", keyPath)
+			query.Set("sshauth", "privkey")
+			log.Printf("INFO Configured key-based SSH authentication for libvirt transport keyfile=%s", keyPath)
+		}
 		parsedURI.RawQuery = query.Encode()
 
 		// Emit the one-line host-key verification-mode audit log (WARN on the
@@ -210,6 +226,15 @@ func (v *VirshProvider) setupConnection() error {
 	v.env = os.Environ()
 	v.env = append(v.env, fmt.Sprintf("LIBVIRT_DEFAULT_URI=%s", v.uri))
 
+	if isSSHURI {
+		if err := v.createSSHConfig(); err != nil {
+			if strings.TrimSpace(v.credentials.SSHPrivateKey) != "" {
+				return fmt.Errorf("failed to create SSH config for key-based libvirt transport: %w", err)
+			}
+			log.Printf("WARN Failed to create SSH config: %v", err)
+		}
+	}
+
 	// Set SSH authentication via environment variables for non-interactive use
 	if v.credentials.Password != "" {
 		// Use sshpass for non-interactive password authentication
@@ -218,16 +243,89 @@ func (v *VirshProvider) setupConnection() error {
 		// Set SSH options for non-interactive authentication
 		v.env = append(v.env, "SSH_ASKPASS_REQUIRE=never")
 
-		// Create SSH config for automatic host key acceptance
-		if err := v.createSSHConfig(); err != nil {
-			log.Printf("WARN Failed to create SSH config: %v", err)
-		}
-
 		log.Printf("INFO Configured non-interactive SSH authentication via sshpass")
 	}
 
 	log.Printf("INFO Configured virsh environment with URI: %s", v.uri)
 	return nil
+}
+
+func (v *VirshProvider) writeSSHPrivateKey() (string, error) {
+	if err := os.MkdirAll(sshPrivateKeyDir, 0700); err != nil {
+		return "", fmt.Errorf("failed to create SSH private key directory: %w", err)
+	}
+
+	key := strings.TrimSpace(v.credentials.SSHPrivateKey) + "\n"
+	if err := os.WriteFile(sshPrivateKeyPath, []byte(key), 0600); err != nil {
+		return "", fmt.Errorf("failed to write SSH private key: %w", err)
+	}
+	if err := os.Chmod(sshPrivateKeyPath, 0600); err != nil {
+		return "", fmt.Errorf("failed to chmod SSH private key: %w", err)
+	}
+	return sshPrivateKeyPath, nil
+}
+
+// sshKeyAuthOptions returns the ssh/scp flags that force key-based authentication
+// using keyFile. Shared by the direct-ssh ("!"), scp, and stdin-stream call sites
+// so the key is offered identically everywhere: the key lives at a non-default
+// path with no IdentityFile in ~/.ssh/config, so -i is mandatory, and
+// IdentitiesOnly + the explicit auth toggles stop ssh from wandering onto an agent
+// key or a password prompt.
+func sshKeyAuthOptions(keyFile string) []string {
+	return []string{
+		"-i", keyFile,
+		"-o", "IdentitiesOnly=yes",
+		"-o", "PasswordAuthentication=no",
+		"-o", "PubkeyAuthentication=yes",
+	}
+}
+
+// resolveSSHKeyFile picks the private-key path for a direct ssh/scp invocation:
+// the keyfile= pinned on the libvirt URI by setupConnection, falling back to the
+// well-known path writeSSHPrivateKey persists to.
+func resolveSSHKeyFile(parsedURI *url.URL) string {
+	if kf := parsedURI.Query().Get("keyfile"); kf != "" {
+		return kf
+	}
+	return sshPrivateKeyPath
+}
+
+// remoteVirshConnectURI derives the libvirt connection URI to hand to a `virsh`
+// process running ON the remote hypervisor host. The transport URI
+// qemu+ssh://user@host/system means "manage qemu:///system on host", so a
+// remote-side virsh must target that exact driver+path via -c. Without it the
+// command falls back to the ssh user's default (qemu:///system for root,
+// qemu:///session for non-root), which silently splits reads and writes across
+// two libvirtd instances. Returns "" when no driver/path can be derived, in which
+// case the caller omits -c and keeps the legacy (remote-default) behaviour.
+func remoteVirshConnectURI(rawURI string) string {
+	parsed, err := url.Parse(rawURI)
+	if err != nil {
+		return ""
+	}
+	driver := parsed.Scheme
+	if i := strings.IndexByte(driver, '+'); i >= 0 {
+		driver = driver[:i] // qemu+ssh -> qemu
+	}
+	path := strings.Trim(parsed.Path, "/") // /system -> system
+	if driver == "" || path == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s:///%s", driver, path)
+}
+
+// runRemoteVirshCommand runs `virsh <args>` ON the remote hypervisor host over SSH
+// (used for subcommands that must read a host-local file the provider wrote there,
+// e.g. define / pool-define). It pins -c to the connection URI's driver+path so the
+// command targets the same libvirtd as the rest of the provider whether the ssh
+// user is root (qemu:///system) or non-root (qemu:///session).
+func (v *VirshProvider) runRemoteVirshCommand(ctx context.Context, args ...string) (*VirshResult, error) {
+	cmd := []string{"!", "virsh"}
+	if uri := remoteVirshConnectURI(v.uri); uri != "" {
+		cmd = append(cmd, "-c", uri)
+	}
+	cmd = append(cmd, args...)
+	return v.runVirshCommand(ctx, cmd...)
 }
 
 // testConnection verifies that virsh can connect to the libvirt hypervisor
@@ -361,28 +459,45 @@ func (v *VirshProvider) runVirshCommandOnce(ctx context.Context, args ...string)
 			return nil, fmt.Errorf("no command specified after '!' prefix")
 		}
 
-		if v.credentials.Password != "" && strings.Contains(v.uri, "ssh://") {
-			// For remote execution, use SSH
+		if strings.Contains(v.uri, "ssh://") {
 			parsedURI, _ := url.Parse(v.uri)
 			host := parsedURI.Host
 			user := parsedURI.User.Username()
 
-			sshArgs := []string{
-				"-e", // Read password from SSHPASS environment variable
-				"ssh",
-				"-o", "PasswordAuthentication=yes",
-				"-o", "PubkeyAuthentication=no",
-				"-o", "LogLevel=ERROR",
-			}
-			// Host-key options come from the centralized policy (#149/ADR-0004);
-			// ControlMaster multiplexing reuses one connection (#194).
-			sshArgs = append(sshArgs, v.hostKey.sshHostKeyOptions()...)
-			sshArgs = append(sshArgs, sshMultiplexOptions()...)
-			sshArgs = append(sshArgs, fmt.Sprintf("%s@%s", user, host))
-			sshArgs = append(sshArgs, directArgs...)
+			if v.credentials.Password != "" {
+				// For remote execution with password authentication, use SSH via sshpass.
+				sshArgs := []string{
+					"-e", // Read password from SSHPASS environment variable
+					"ssh",
+					"-o", "PasswordAuthentication=yes",
+					"-o", "PubkeyAuthentication=no",
+					"-o", "LogLevel=ERROR",
+				}
+				// Host-key options come from the centralized policy (#149/ADR-0004);
+				// ControlMaster multiplexing reuses one connection (#194).
+				sshArgs = append(sshArgs, v.hostKey.sshHostKeyOptions()...)
+				sshArgs = append(sshArgs, sshMultiplexOptions()...)
+				sshArgs = append(sshArgs, fmt.Sprintf("%s@%s", user, host))
+				sshArgs = append(sshArgs, directArgs...)
 
-			cmd = exec.CommandContext(ctx, "sshpass", sshArgs...)
-			command = fmt.Sprintf("sshpass -e ssh %s@%s %s", user, host, strings.Join(directArgs, " "))
+				cmd = exec.CommandContext(ctx, "sshpass", sshArgs...)
+				command = fmt.Sprintf("sshpass -e ssh %s@%s %s", user, host, strings.Join(directArgs, " "))
+			} else if strings.TrimSpace(v.credentials.SSHPrivateKey) != "" {
+				keyFile := resolveSSHKeyFile(parsedURI)
+				sshArgs := sshKeyAuthOptions(keyFile)
+				sshArgs = append(sshArgs, "-o", "LogLevel=ERROR")
+				sshArgs = append(sshArgs, v.hostKey.sshHostKeyOptions()...)
+				sshArgs = append(sshArgs, sshMultiplexOptions()...)
+				sshArgs = append(sshArgs, fmt.Sprintf("%s@%s", user, host))
+				sshArgs = append(sshArgs, directArgs...)
+
+				cmd = exec.CommandContext(ctx, "ssh", sshArgs...)
+				command = fmt.Sprintf("ssh -i %s %s@%s %s", keyFile, user, host, strings.Join(directArgs, " "))
+			} else {
+				// Local execution
+				cmd = exec.CommandContext(ctx, directArgs[0], directArgs[1:]...)
+				command = strings.Join(directArgs, " ")
+			}
 		} else {
 			// Local execution
 			cmd = exec.CommandContext(ctx, directArgs[0], directArgs[1:]...)
@@ -413,10 +528,16 @@ func (v *VirshProvider) runVirshCommandOnce(ctx context.Context, args ...string)
 			sshArgs = append(sshArgs, v.hostKey.sshHostKeyOptions()...)
 			sshArgs = append(sshArgs, sshMultiplexOptions()...)
 			sshArgs = append(sshArgs, fmt.Sprintf("%s@%s", user, host), "virsh")
-			sshArgs = append(sshArgs, args...)
+			// Pin the remote virsh to the connection URI's libvirtd (root → system,
+			// non-root → session) instead of letting it pick the ssh user's default.
+			remoteVirshArgs := args
+			if uri := remoteVirshConnectURI(v.uri); uri != "" {
+				remoteVirshArgs = append([]string{"-c", uri}, args...)
+			}
+			sshArgs = append(sshArgs, remoteVirshArgs...)
 
 			cmd = exec.CommandContext(ctx, "sshpass", sshArgs...)
-			command = fmt.Sprintf("sshpass -e ssh %s@%s virsh %s", user, host, strings.Join(args, " "))
+			command = fmt.Sprintf("sshpass -e ssh %s@%s virsh %s", user, host, strings.Join(remoteVirshArgs, " "))
 			cmd.Env = v.env
 		} else {
 			// Standard virsh command for local or key-based connections
@@ -592,36 +713,40 @@ func (v *VirshProvider) getDomainInfo(ctx context.Context, domainName string) (m
 // key-based path), so the config must enforce the same StrictHostKeyChecking +
 // UserKnownHostsFile that the explicit-argv password/scp paths use.
 func (v *VirshProvider) createSSHConfig() error {
-	sshDir := "/home/app/.ssh"
-	configPath := sshDir + "/config"
-
-	// Ensure SSH directory exists
-	if err := os.MkdirAll(sshDir, 0700); err != nil {
-		log.Printf("DEBUG Failed to create SSH directory: %v", err)
-		// Try a different location if home directory is read-only
-		sshDir = "/tmp/.ssh"
-		configPath = sshDir + "/config"
-		if err := os.MkdirAll(sshDir, 0700); err != nil {
-			return fmt.Errorf("failed to create SSH directory: %w", err)
-		}
-		// Set SSH config path in environment
-		v.env = append(v.env, "HOME=/tmp")
-		log.Printf("INFO Using /tmp as HOME for SSH config")
-	}
-
 	// SSH config content honouring the centralized host-key policy
 	// (#149/ADR-0004). Verifying by default (StrictHostKeyChecking yes +
 	// credentials-mounted known_hosts); legacy accept-new + /tmp/known_hosts
 	// only on the explicit escape-hatch path.
 	sshConfig := v.hostKey.sshConfigStanza()
 
-	// Write SSH config file
-	if err := os.WriteFile(configPath, []byte(sshConfig), 0600); err != nil {
-		return fmt.Errorf("failed to write SSH config: %w", err)
+	var lastErr error
+	for _, candidate := range []struct {
+		dir  string
+		home string
+	}{
+		{dir: "/home/app/.ssh"},
+		{dir: "/tmp/.ssh", home: "/tmp"},
+	} {
+		configPath := candidate.dir + "/config"
+		if err := os.MkdirAll(candidate.dir, 0700); err != nil {
+			lastErr = err
+			log.Printf("DEBUG Failed to create SSH directory %s: %v", candidate.dir, err)
+			continue
+		}
+		if err := os.WriteFile(configPath, []byte(sshConfig), 0600); err != nil {
+			lastErr = err
+			log.Printf("DEBUG Failed to write SSH config at %s: %v", configPath, err)
+			continue
+		}
+		if candidate.home != "" {
+			v.env = append(v.env, "HOME="+candidate.home)
+			log.Printf("INFO Using %s as HOME for SSH config", candidate.home)
+		}
+		log.Printf("INFO Created SSH config at %s honouring host-key policy", configPath)
+		return nil
 	}
 
-	log.Printf("INFO Created SSH config at %s honouring host-key policy", configPath)
-	return nil
+	return fmt.Errorf("failed to create writable SSH config: %w", lastErr)
 }
 
 // Cleanup performs any necessary cleanup operations
