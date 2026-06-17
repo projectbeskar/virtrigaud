@@ -5,6 +5,21 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-17 10:05] - Keep the libvirt SSH private key off node disk (memory-backed volume)
+**Author:** @wrkode (William Rizzo)
+
+### Security
+- `internal/controller/provider_controller.go`: libvirt provider pods now get a dedicated **memory-backed (tmpfs) emptyDir** mounted at `/tmp/virtrigaud-libvirt` (the directory the libvirt provider materialises its SSH private key into, added in #249). Previously that path lived under the provider's main `/tmp`, a plain disk-backed `EmptyDir{}`, so a key written from the `credentialsSecretRef` Secret (itself tmpfs) would also persist at rest on the node's disk. The new volume is `Medium: Memory` with a small `4Mi` sizeLimit and is **scoped to libvirt providers** so the main `/tmp` stays disk-backed for multi-GB migration disk staging (a memory-backed `/tmp` would OOM vSphere's qcow2→vmdk conversion).
+
+### Why
+Hardening for the libvirt key-based SSH auth path: key material should never touch the node's disk. Surfaced during the security review of the libvirt key-auth fix (#249/#248). The mount path matches the libvirt provider's `sshPrivateKeyDir`.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (provider pods re-templated; libvirt provider pods gain one volume)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-06-17 08:57] - libvirt SSH private-key authentication works end-to-end
 **Author:** @jing2uo (Komh)
 

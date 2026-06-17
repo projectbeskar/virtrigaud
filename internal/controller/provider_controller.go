@@ -910,6 +910,19 @@ func (r *ProviderReconciler) buildProviderContainer(provider *infravirtrigaudiov
 		MountPath: "/tmp",
 	})
 
+	// Back the libvirt provider's SSH private-key directory with a memory-backed
+	// (tmpfs) volume so the key it materialises from the credentials Secret is
+	// never written to the node's disk-backed /tmp emptyDir. Nested under /tmp so
+	// the main /tmp stays disk-backed for multi-GB migration disk staging (a
+	// memory-backed /tmp would OOM disk conversion). Scoped to libvirt — only that
+	// provider writes an SSH key here.
+	if provider.Spec.Type == infravirtrigaudiov1beta1.ProviderTypeLibvirt {
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      sshKeyVolumeName,
+			MountPath: sshKeyMountPath,
+		})
+	}
+
 	// Default security context
 	securityContext := &corev1.SecurityContext{
 		RunAsNonRoot:             util.BoolPtr(true),
@@ -1045,8 +1058,34 @@ func (r *ProviderReconciler) buildPodVolumes(provider *infravirtrigaudiov1beta1.
 		},
 	})
 
+	// Memory-backed companion for the libvirt SSH key mount: keeps the private key
+	// in RAM (tmpfs), never on node disk. Small sizeLimit — only key material lives
+	// here. Scoped to libvirt providers (see the matching volume mount).
+	if provider.Spec.Type == infravirtrigaudiov1beta1.ProviderTypeLibvirt {
+		sshKeySizeLimit := resource.MustParse("4Mi")
+		volumes = append(volumes, corev1.Volume{
+			Name: sshKeyVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{
+					Medium:    corev1.StorageMediumMemory,
+					SizeLimit: &sshKeySizeLimit,
+				},
+			},
+		})
+	}
+
 	return volumes
 }
+
+const (
+	// sshKeyVolumeName and sshKeyMountPath back the libvirt provider's on-disk SSH
+	// private key with a memory-backed (tmpfs) emptyDir, so the key materialised
+	// from the credentials Secret never lands at rest on the node's disk-backed
+	// /tmp. sshKeyMountPath MUST match sshPrivateKeyDir in the libvirt provider
+	// (internal/providers/libvirt/virsh.go).
+	sshKeyVolumeName = "libvirt-ssh-key"
+	sshKeyMountPath  = "/tmp/virtrigaud-libvirt"
+)
 
 const (
 	// migrationPVCLabelKey and migrationPVCLabelValue identify a migration scratch
