@@ -1,0 +1,35 @@
+{{- /*
+ServiceMonitor for the manager's /metrics endpoint (Prometheus Operator).
+
+Gated on the values flags AND on the monitoring.coreos.com/v1 CRD being present
+in the cluster, so a chart install on a cluster without the Prometheus Operator
+skips this resource cleanly instead of failing with "no matches for kind
+ServiceMonitor". (For `helm template`, pass `--api-versions monitoring.coreos.com/v1`
+to render it.)
+*/ -}}
+{{- if and .Values.observability.prometheus.enabled .Values.observability.prometheus.serviceMonitor.enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "virtrigaud.managerServiceName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "virtrigaud.labels" . | nindent 4 }}
+    app.kubernetes.io/component: manager
+    {{- with (include "virtrigaud.serviceMonitorLabels" .) }}
+    {{- . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "virtrigaud.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: manager
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.observability.prometheus.serviceMonitor.interval | default "30s" }}
+      scrapeTimeout: {{ .Values.observability.prometheus.serviceMonitor.scrapeTimeout | default "10s" }}
+{{- end }}
