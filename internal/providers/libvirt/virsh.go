@@ -340,13 +340,22 @@ func (v *VirshProvider) testConnection(ctx context.Context) error {
 
 	log.Printf("INFO Connection successful! Libvirt version: %s", strings.TrimSpace(result.Stdout))
 
-	// Test domain listing to verify full functionality
-	domains, err := v.listDomains(ctx)
+	// Test domain listing to verify full functionality. Keep this lightweight:
+	// startup readiness should not run one domstate command per domain on busy
+	// libvirt hosts.
+	listResult, err := v.runVirshCommand(ctx, "list", "--all", "--name")
 	if err != nil {
 		return fmt.Errorf("connection established but domain listing failed: %w", err)
 	}
 
-	log.Printf("INFO Successfully listed %d domains", len(domains))
+	domainCount := 0
+	for _, line := range strings.Split(listResult.Stdout, "\n") {
+		if strings.TrimSpace(line) != "" {
+			domainCount++
+		}
+	}
+
+	log.Printf("INFO Successfully listed %d domains", domainCount)
 	return nil
 }
 

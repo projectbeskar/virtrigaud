@@ -22,6 +22,7 @@ import (
 	"log"
 	"log/slog"
 	"os"
+	"strings"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -195,13 +196,22 @@ func (p *Provider) Validate(ctx context.Context) error {
 		return contracts.NewRetryableError("virsh provider not initialized", nil)
 	}
 
-	// Test the connection by listing domains
-	domains, err := p.virshProvider.listDomains(ctx)
+	// Validate must stay lightweight: controllers call it before most provider
+	// operations. Do not use listDomains here; it runs domstate for every domain
+	// and can exceed the manager-side gRPC deadline on busy libvirt hosts.
+	result, err := p.virshProvider.runVirshCommand(ctx, "list", "--all", "--name")
 	if err != nil {
 		return contracts.NewRetryableError("virsh connection validation failed", err)
 	}
 
-	log.Printf("INFO Connection validation successful - found %d domains", len(domains))
+	domainCount := 0
+	for _, line := range strings.Split(result.Stdout, "\n") {
+		if strings.TrimSpace(line) != "" {
+			domainCount++
+		}
+	}
+
+	log.Printf("INFO Connection validation successful - found %d domains", domainCount)
 	return nil
 }
 
