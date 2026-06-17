@@ -1276,9 +1276,15 @@ func (p *Provider) generateDomainXMLWithStorage(req contracts.CreateRequest, dis
     <boot dev='cdrom'/>`
 	}
 
-	// Build devices XML with TPM if needed
-	devicesXML := fmt.Sprintf(`    <emulator>/usr/bin/qemu-system-x86_64</emulator>
-%s`, diskDevicesXML)
+	// Build devices XML with TPM if needed.
+	//
+	// Intentionally omit <emulator>: libvirt's qemu driver fills in the host's
+	// default emulator for the domain's (arch, machine, type) during define-time
+	// post-parse. Hard-coding /usr/bin/qemu-system-x86_64 broke hosts where the
+	// binary lives elsewhere (e.g. RHEL/CentOS at /usr/libexec/qemu-kvm). The
+	// provider talks to a possibly-remote libvirtd over SSH, so letting the
+	// remote daemon resolve its own emulator is both simpler and more correct.
+	devicesXML := diskDevicesXML
 
 	if tpmEnabled {
 		devicesXML += `
