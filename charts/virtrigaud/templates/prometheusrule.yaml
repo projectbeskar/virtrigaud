@@ -1,0 +1,68 @@
+{{- /*
+PrometheusRule with a small set of starter alerts for the manager (Prometheus
+Operator). Expressions use only metrics the manager actually exports. Gated on
+the values flags AND on the monitoring.coreos.com/v1 CRD being present, like the
+ServiceMonitor. Prometheus's own `{{ $labels.x }}` templating is wrapped in Helm
+raw-string literals so Helm does not try to evaluate it.
+*/ -}}
+{{- if and .Values.observability.prometheus.enabled .Values.observability.prometheus.prometheusRule.enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "virtrigaud.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "virtrigaud.labels" . | nindent 4 }}
+    app.kubernetes.io/component: manager
+    {{- with (include "virtrigaud.prometheusRuleLabels" .) }}
+    {{- . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: virtrigaud.rules
+      rules:
+        - alert: VirtRigaudManagerDown
+          expr: absent(virtrigaud_build_info)
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: {{ `VirtRigaud manager is not reporting metrics` | quote }}
+            description: {{ `No virtrigaud_build_info sample for 5m — the manager is down or its /metrics endpoint is unreachable.` | quote }}
+
+        - alert: VirtRigaudProviderCircuitBreakerOpen
+          # circuit_breaker_state: 0=closed, 1=half-open, 2=open
+          expr: virtrigaud_circuit_breaker_state == 2
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: {{ `Provider circuit breaker open ({{ $labels.provider }})` | quote }}
+            description: {{ `The circuit breaker for provider {{ $labels.provider }} ({{ $labels.provider_type }}) has been open for 5m — calls to this provider are failing fast.` | quote }}
+
+        - alert: VirtRigaudHighReconcileErrorRate
+          expr: |-
+            sum by (kind) (rate(virtrigaud_manager_reconcile_total{outcome="error"}[5m]))
+              /
+            sum by (kind) (rate(virtrigaud_manager_reconcile_total[5m]))
+              > 0.2
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: {{ `High reconcile error rate for {{ $labels.kind }}` | quote }}
+            description: {{ `More than 20% of {{ $labels.kind }} reconciles have errored over the last 15m.` | quote }}
+
+        - alert: VirtRigaudProviderRPCErrors
+          expr: |-
+            sum by (provider_type, method) (rate(virtrigaud_provider_rpc_requests_total{code!="OK"}[5m]))
+              /
+            sum by (provider_type, method) (rate(virtrigaud_provider_rpc_requests_total[5m]))
+              > 0.1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: {{ `Elevated provider RPC error rate ({{ $labels.provider_type }} {{ $labels.method }})` | quote }}
+            description: {{ `More than 10% of {{ $labels.method }} RPCs to {{ $labels.provider_type }} providers returned a non-OK status over the last 10m.` | quote }}
+{{- end }}

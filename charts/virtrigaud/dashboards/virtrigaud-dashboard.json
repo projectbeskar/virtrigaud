@@ -1,0 +1,50 @@
+{
+  "title": "VirtRigaud — Operator Overview",
+  "uid": "virtrigaud-overview",
+  "tags": ["virtrigaud"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": {"from": "now-6h", "to": "now"},
+  "templating": {"list": [
+    {"name": "datasource", "type": "datasource", "query": "prometheus", "current": {}, "hide": 0, "label": "Datasource"}
+  ]},
+  "panels": [
+    {"type": "stat", "title": "Build", "gridPos": {"h": 4, "w": 8, "x": 0, "y": 0},
+     "datasource": {"type": "prometheus", "uid": "${datasource}"},
+     "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "/^version$/"}, "textMode": "name", "colorMode": "none"},
+     "targets": [{"expr": "virtrigaud_build_info", "legendFormat": "{{version}} ({{go_version}})", "instant": true}]},
+    {"type": "stat", "title": "Circuit breaker state (per provider)", "gridPos": {"h": 4, "w": 8, "x": 8, "y": 0},
+     "datasource": {"type": "prometheus", "uid": "${datasource}"},
+     "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "background"},
+     "fieldConfig": {"defaults": {"mappings": [
+       {"type": "value", "options": {"0": {"text": "closed", "color": "green"}, "1": {"text": "half-open", "color": "yellow"}, "2": {"text": "open", "color": "red"}}}]}},
+     "targets": [{"expr": "virtrigaud_circuit_breaker_state", "legendFormat": "{{provider}}", "instant": true}]},
+    {"type": "stat", "title": "Provider tasks in-flight", "gridPos": {"h": 4, "w": 8, "x": 16, "y": 0},
+     "datasource": {"type": "prometheus", "uid": "${datasource}"},
+     "targets": [{"expr": "sum(virtrigaud_provider_tasks_inflight) by (provider)", "legendFormat": "{{provider}}", "instant": true}]},
+
+    {"type": "timeseries", "title": "Reconcile rate by kind & outcome", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+     "datasource": {"type": "prometheus", "uid": "${datasource}"},
+     "targets": [{"expr": "sum(rate(virtrigaud_manager_reconcile_total[5m])) by (kind, outcome)", "legendFormat": "{{kind}} / {{outcome}}"}]},
+    {"type": "timeseries", "title": "Reconcile p95 latency by kind (s)", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+     "datasource": {"type": "prometheus", "uid": "${datasource}"},
+     "fieldConfig": {"defaults": {"unit": "s"}},
+     "targets": [{"expr": "histogram_quantile(0.95, sum(rate(virtrigaud_manager_reconcile_duration_seconds_bucket[5m])) by (le, kind))", "legendFormat": "{{kind}}"}]},
+
+    {"type": "timeseries", "title": "Provider RPC rate by method & code", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12},
+     "datasource": {"type": "prometheus", "uid": "${datasource}"},
+     "targets": [{"expr": "sum(rate(virtrigaud_provider_rpc_requests_total[5m])) by (method, code)", "legendFormat": "{{method}} / {{code}}"}]},
+    {"type": "timeseries", "title": "Provider RPC p95 latency by method (s)", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12},
+     "datasource": {"type": "prometheus", "uid": "${datasource}"},
+     "fieldConfig": {"defaults": {"unit": "s"}},
+     "targets": [{"expr": "histogram_quantile(0.95, sum(rate(virtrigaud_provider_rpc_latency_seconds_bucket[5m])) by (le, method))", "legendFormat": "{{method}}"}]},
+
+    {"type": "timeseries", "title": "VM operations rate by op & outcome", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 20},
+     "datasource": {"type": "prometheus", "uid": "${datasource}"},
+     "targets": [{"expr": "sum(rate(virtrigaud_vm_operations_total[5m])) by (operation, outcome)", "legendFormat": "{{operation}} / {{outcome}}"}]},
+    {"type": "timeseries", "title": "Errors rate by reason & component", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 20},
+     "datasource": {"type": "prometheus", "uid": "${datasource}"},
+     "targets": [{"expr": "sum(rate(virtrigaud_errors_total[5m])) by (reason, component)", "legendFormat": "{{reason}} / {{component}}"}]}
+  ]
+}

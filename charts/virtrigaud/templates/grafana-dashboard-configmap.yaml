@@ -1,0 +1,25 @@
+{{- /*
+Grafana dashboard ConfigMap. The Grafana sidecar (kube-prometheus-stack's
+grafana.sidecar.dashboards) discovers ConfigMaps carrying the
+`grafana_dashboard: "1"` label (from observability.grafana.dashboards.labels)
+and auto-imports the JSON. No Prometheus-Operator CRD needed — it is a plain
+ConfigMap. The dashboard JSON lives in the chart at dashboards/.
+*/ -}}
+{{- if and .Values.observability.grafana.enabled .Values.observability.grafana.dashboards.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "virtrigaud.fullname" . }}-grafana-dashboards
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "virtrigaud.labels" . | nindent 4 }}
+    app.kubernetes.io/component: grafana-dashboard
+    {{- with (include "virtrigaud.grafanaDashboardLabels" .) }}
+    {{- . | nindent 4 }}
+    {{- end }}
+data:
+{{- range $path, $_ := .Files.Glob "dashboards/*.json" }}
+  {{ base $path }}: |
+{{ $.Files.Get $path | indent 4 }}
+{{- end }}
+{{- end }}

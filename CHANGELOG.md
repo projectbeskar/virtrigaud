@@ -5,6 +5,23 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-17 14:55] - chart: render the observability templates (ServiceMonitor, PrometheusRule, Grafana dashboard)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `charts/virtrigaud/templates/servicemonitor.yaml`: a Prometheus-Operator `ServiceMonitor` selecting the manager Service's `metrics` port (`/metrics`), gated on `observability.prometheus.{enabled,serviceMonitor.enabled}` **and** the `monitoring.coreos.com/v1` CRD being present (so an install without the operator skips it cleanly rather than failing the apply). `interval`/`scrapeTimeout`/extra labels come from values.
+- `charts/virtrigaud/templates/prometheusrule.yaml`: a `PrometheusRule` with four starter alerts that reference only metrics the manager actually exports — `VirtRigaudManagerDown` (`absent(virtrigaud_build_info)`), `VirtRigaudProviderCircuitBreakerOpen` (`virtrigaud_circuit_breaker_state == 2`), `VirtRigaudHighReconcileErrorRate` (error-outcome reconcile ratio > 20%), `VirtRigaudProviderRPCErrors` (non-OK RPC ratio > 10%). Same value + CRD gate.
+- `charts/virtrigaud/templates/grafana-dashboard-configmap.yaml` + `charts/virtrigaud/dashboards/virtrigaud-dashboard.json`: a Grafana dashboard ConfigMap (9 panels) labelled `grafana_dashboard: "1"` for the Grafana sidecar to auto-import, gated on `observability.grafana.{enabled,dashboards.enabled}`.
+
+### Why
+The `observability` values block (and its `serviceMonitorLabels`/`prometheusRuleLabels`/`grafanaDashboardLabels` helpers) already existed, but **no template rendered any of it** — setting `observability.prometheus.serviceMonitor.enabled=true` produced nothing, so operators wiring kube-prometheus-stack had to hand-roll a ServiceMonitor. Closes #228.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [x] Config change only
+- [ ] Documentation only
+
 ## [2026-06-17 10:05] - Keep the libvirt SSH private key off node disk (memory-backed volume)
 **Author:** @wrkode (William Rizzo)
 
