@@ -84,7 +84,7 @@ func TestProxmoxProvider_CreateAndDescribe(t *testing.T) {
 	describeResp, err := provider.Describe(ctx, describeReq)
 	require.NoError(t, err)
 	assert.True(t, describeResp.Exists)
-	assert.Equal(t, "off", describeResp.PowerState)
+	assert.Equal(t, "Off", describeResp.PowerState)
 	assert.NotEmpty(t, describeResp.ConsoleUrl)
 }
 
@@ -119,7 +119,7 @@ func TestProxmoxProvider_PowerOperations(t *testing.T) {
 	// Verify VM is running
 	describeResp, err := provider.Describe(ctx, &providerv1.DescribeRequest{Id: vmID})
 	require.NoError(t, err)
-	assert.Equal(t, "on", describeResp.PowerState)
+	assert.Equal(t, "On", describeResp.PowerState)
 
 	// Test power off
 	powerReq.Op = providerv1.PowerOp_POWER_OP_OFF
@@ -135,7 +135,7 @@ func TestProxmoxProvider_PowerOperations(t *testing.T) {
 	// Verify VM is stopped
 	describeResp, err = provider.Describe(ctx, &providerv1.DescribeRequest{Id: vmID})
 	require.NoError(t, err)
-	assert.Equal(t, "off", describeResp.PowerState)
+	assert.Equal(t, "Off", describeResp.PowerState)
 }
 
 func TestProxmoxProvider_Clone(t *testing.T) {
