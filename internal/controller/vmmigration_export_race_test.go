@@ -294,7 +294,8 @@ func importRaceFixture() (*infrav1beta1.Provider, *infrav1beta1.VMMigration) {
 // TestImportingPhase_SingleImportAcrossStaleReReconcile is the import-side
 // counterpart of the export race test. ImportDisk is also synchronous and
 // long-running and it WRITES the target qcow2; a duplicate driven by a stale
-// cache would overwrite it. The same guard + no-immediate-requeue fix applies.
+// cache would overwrite it. The guard plus the no-immediate-requeue (settle-delay)
+// transition to Creating prevents the duplicate while still guaranteeing progress.
 func TestImportingPhase_SingleImportAcrossStaleReReconcile(t *testing.T) {
 	ctx := context.Background()
 	prov := &countingMigrationProvider{}
@@ -305,7 +306,8 @@ func TestImportingPhase_SingleImportAcrossStaleReReconcile(t *testing.T) {
 	require.NoError(t, err)
 	require.EqualValues(t, 1, prov.importCalls.Load(), "first pass must issue exactly one ImportDisk")
 	assert.False(t, res.Requeue, "must NOT immediate-requeue after a long synchronous import")
-	assert.Zero(t, res.RequeueAfter)
+	assert.Equal(t, migrationImportSettleInterval, res.RequeueAfter,
+		"must requeue after a settle delay (not immediately) so the cache observes Phase=Creating without re-importing")
 	assert.Equal(t, infrav1beta1.MigrationPhaseCreating, migration.Status.Phase)
 	assert.Equal(t, "disk-1", migration.Status.ImportID)
 

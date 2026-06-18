@@ -1196,12 +1196,16 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 		return ctrl.Result{}, err
 	}
 
-	// CRITICAL: do NOT immediate-requeue here. ImportDisk above is synchronous
-	// and long-running and writes the target qcow2; an immediate requeue
-	// re-reads a stale cache (Phase still Importing, ImportID still "") and
-	// could re-issue ImportDisk, overwriting the just-written target disk. The
-	// status write re-drives reconcile with a fresh cache.
-	return ctrl.Result{}, nil
+	// Do NOT immediate-requeue here. ImportDisk above is synchronous and
+	// long-running and writes the target qcow2; an immediate requeue re-reads a
+	// stale cache (Phase still Importing, ImportID still "") and could re-issue
+	// ImportDisk, overwriting the just-written target disk. Requeue after a short
+	// settle delay instead: long enough for the informer cache to observe the
+	// Phase=Creating write, but guaranteed to re-drive the Creating phase even if
+	// the self-watch update event is coalesced or missed (relying on the status
+	// write alone to re-enqueue left a synchronous Proxmox import wedged in
+	// Creating).
+	return ctrl.Result{RequeueAfter: migrationImportSettleInterval}, nil
 }
 
 // handleCreatingPhase creates the target VM
@@ -1262,7 +1266,19 @@ func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migrati
 		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to check target VM: %v", err))
 	}
 
-	// VM doesn't exist, create it
+	// VM doesn't exist, create it.
+	//
+	// The imported-disk info must have been recorded during the Importing phase;
+	// the target VM references the landed disk through it. If it is nil the import
+	// did not persist disk info, so the target cannot be created correctly — fail
+	// loudly with a diagnosable message instead of dereferencing nil (which
+	// previously panicked in an infinite recover/requeue loop, wedging the
+	// migration in Creating forever).
+	if migration.Status.DiskInfo == nil {
+		return r.transitionToFailed(ctx, migration,
+			"import did not record disk info (status.diskInfo is nil); cannot create target VM")
+	}
+
 	logger.Info("Creating target VM", "name", targetVMName)
 
 	targetVM := &infrav1beta1.VirtualMachine{
@@ -2075,6 +2091,13 @@ const migrationMountTimeout = 5 * time.Minute
 // source VM to reach the Off power state when source.powerOffBeforeMigration is
 // set (the export is gated on it).
 const migrationPowerOffPollInterval = 5 * time.Second
+
+// migrationImportSettleInterval is the short requeue delay after a synchronous
+// ImportDisk completes and the phase advances to Creating. It is long enough for
+// the informer cache to observe the Phase=Creating write (avoiding a stale-cache
+// re-import) yet guarantees the Creating phase is re-driven even if the
+// self-watch update event is coalesced or missed.
+const migrationImportSettleInterval = 5 * time.Second
 
 // migrationMountPollInterval is the requeue cadence while waiting for the
 // provider controller to apply and roll out the migration PVC mount.
