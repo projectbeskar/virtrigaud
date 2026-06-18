@@ -119,6 +119,14 @@ func New() *Provider {
 		InsecureSkipVerify: insecureSkipVerify,
 	}
 
+	// Default PVE storage for disk-landing operations (e.g. the migration
+	// `qm importdisk` target) when the request/VM config names none.
+	defaultStorage := os.Getenv("PROVIDER_DEFAULT_STORAGE")
+	if defaultStorage == "" {
+		defaultStorage = os.Getenv("PVE_DEFAULT_STORAGE")
+	}
+	config.DefaultStorage = strings.TrimSpace(defaultStorage)
+
 	// Parse node selector
 	nodeSelector := os.Getenv("PROVIDER_NODE_SELECTOR")
 	if nodeSelector == "" {

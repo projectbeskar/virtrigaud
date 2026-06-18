@@ -41,9 +41,14 @@ type Config struct {
 	InsecureSkipVerify bool
 	CABundle           []byte
 	NodeSelector       []string
-	RequestTimeout     time.Duration
-	TaskPollInterval   time.Duration
-	TaskTimeout        time.Duration
+	// DefaultStorage is the PVE storage that disk-landing operations (notably the
+	// ADR-0006 migration `qm importdisk` target) use when neither the request nor
+	// the VM config names one. Empty falls back to the provider's compiled-in
+	// default. Set via PROVIDER_DEFAULT_STORAGE / PVE_DEFAULT_STORAGE.
+	DefaultStorage   string
+	RequestTimeout   time.Duration
+	TaskPollInterval time.Duration
+	TaskTimeout      time.Duration
 }
 
 // Client represents a Proxmox VE API client

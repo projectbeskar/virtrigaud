@@ -243,7 +243,14 @@ func (p *Provider) createFromImportedDisk(
 		return nil, errors.NewUnavailable("migration SSH data plane not configured; cannot attach imported disk via qm importdisk", nil)
 	}
 
+	// Resolve the target storage: explicit VM config wins, then the provider's
+	// configured default (PROVIDER_DEFAULT_STORAGE / PVE_DEFAULT_STORAGE), then the
+	// compiled-in fallback. A PVE node may not have local-lvm (e.g. a dir-storage
+	// node), so the default must be operator-configurable.
 	storageName := vmConfig.Storage
+	if storageName == "" && p.client != nil {
+		storageName = p.client.Config().DefaultStorage
+	}
 	if storageName == "" {
 		storageName = proxmoxImportTargetStorage
 	}
