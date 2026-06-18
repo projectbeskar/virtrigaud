@@ -6,10 +6,12 @@
 # host-side `qemu-img convert -f vmdk -O qcow2` before creating the pool volume.
 # Bytes flow host/vCenter → pod → S3 → pod → host; they NEVER traverse a CSI PVC.
 #
-# Direction scope: vSphere is SOURCE-only and libvirt is TARGET-only for S3 in
-# this slice. The reverse direction (libvirt→S3 export, S3→vSphere import),
-# Proxmox, NFS, and the `direct` transfer mode are later slices and are rejected
-# with an actionable, ADR-referencing message at the Validating phase.
+# Direction scope: all three hypervisors (vSphere, libvirt, Proxmox VE) are now
+# validated as both SOURCE and TARGET over S3 in any direction (ADR-0006 Slices
+# 1–3). This example shows vSphere → libvirt; see vmmigration-proxmox-s3.yaml for
+# a Proxmox direction. The NFS backend and the `direct` transfer mode are later
+# slices and are rejected with an actionable, ADR-referencing message at the
+# Validating phase.
 #
 # Transfer mode: relay (the universal floor — the provider pod is the S3 client,
 # so backend credentials never leave the pod). `auto` resolves to `relay` here.
