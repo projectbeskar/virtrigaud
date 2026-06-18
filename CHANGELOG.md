@@ -5,6 +5,28 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-18 20:40] - migration: wire powerOffBeforeMigration + Proxmox matrix validated (ADR-0006)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/controller/vmmigration_controller.go`: implemented `source.powerOffBeforeMigration` (Bug H) — previously a no-op. When set, the Validating phase now (1) aligns the source VM's desired `spec.powerState` to `Off` so the VirtualMachine reconciler does not race the export by powering the source back on (which would re-lock a vSphere disk mid-export and leave a non-deleted source running after the move), then (2) issues a hard, reliable power-off and gates the export on the source reaching `Off`. This is **required** for a vSphere source (ESXi locks a running VM's disk, so the streamOptimized clone fails with "…vmdk … is locked") and yields a quiescent disk for libvirt/Proxmox. A graceful guest shutdown is a documented future refinement. Unit tests in `vmmigration_poweroff_test.go`.
+
+### Fixed
+- `internal/providers/libvirt/s3import.go` (Bug P): honor `req.Format` for the staged source format instead of hardcoding vmdk — a libvirt/Proxmox source stages qcow2, which the import previously rejected as an "invalid VMDK image descriptor".
+- `internal/providers/proxmox/{server.go,s3import.go,pveapi/client.go}` (Bug Q): the migration `qm importdisk` target storage is now operator-configurable (`PROVIDER_DEFAULT_STORAGE`/`PVE_DEFAULT_STORAGE`) instead of a hardcoded `local-lvm`, so a dir-storage PVE node can be a migration target.
+- `internal/providers/proxmox/s3import.go` (Bug R): resolve the imported disk's volid from `qm config` rather than assuming the LVM naming — a directory store names the volume `<storage>:<vmid>/vm-<vmid>-disk-0.<ext>`, so `qm set --scsi0` previously failed with "unable to parse directory volume name".
+- `internal/providers/proxmox/server.go` (Bug U): `Describe` now returns the CRD power-state enum (`On`/`Off`) instead of lowercase `on`/`off`, which the manager rejected on the status write — stalling a migration into Proxmox even though the VM was created and running.
+- `internal/providers/vsphere/server.go` (Bug W): guard a nil parent backing in `GetDiskInfo` — exporting a freshly-imported/migrated VM (a base disk with no backing chain) panicked the provider with a nil-pointer dereference.
+
+### Why
+Validated the full any-direction S3 migration matrix for Proxmox end-to-end on real hardware — vSphere ⇄ Proxmox and libvirt ⇄ Proxmox all reach Ready — completing the three-hypervisor S3 phase of #236 (NFS remains). The power-off wiring is the v1 of source quiescing; the minimal-downtime variant (snapshot + change-block delta-sync + cutover) is tracked separately.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (manager + provider images)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-06-18 15:25] - feat(proxmox): S3 cross-hypervisor migration data path (ADR-0006)
 **Author:** @wrkode (William Rizzo)
 

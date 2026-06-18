@@ -472,6 +472,21 @@ func (r *VMMigrationReconciler) handleValidatingPhase(ctx context.Context, migra
 	// Validation complete, transition to next phase
 	logger.Info("Validation complete")
 
+	// Power off the source before export when requested. This gates the
+	// transition to snapshot/export until the source reports Off, so the disk is
+	// captured from a stopped VM. It is REQUIRED for a vSphere source — a running
+	// VM's disk is locked and cannot be cloned to streamOptimized (#236, Bug H).
+	if migration.Spec.Source.PowerOffBeforeMigration {
+		done, res, err := r.ensureSourcePoweredOff(ctx, migration)
+		if err != nil {
+			return r.transitionToFailed(ctx, migration,
+				fmt.Sprintf("Failed to power off source VM before migration: %v", err))
+		}
+		if !done {
+			return res, nil
+		}
+	}
+
 	// Check if we need to create a snapshot
 	if migration.Spec.Source.CreateSnapshot {
 		migration.Status.Phase = infrav1beta1.MigrationPhaseSnapshotting
@@ -493,6 +508,77 @@ func (r *VMMigrationReconciler) handleValidatingPhase(ctx context.Context, migra
 	}
 
 	return ctrl.Result{Requeue: true}, nil
+}
+
+// ensureSourcePoweredOff powers off the migration source when
+// spec.source.powerOffBeforeMigration is set, returning done=true only once the
+// source reports the Off power state. A stopped source yields a quiescent disk
+// and, for a vSphere source, is REQUIRED — ESXi locks a running VM's disk so it
+// cannot be cloned to streamOptimized. It first aligns the source VM's desired
+// power state (Spec.PowerState) to Off so the VirtualMachine reconciler does not
+// race the export by powering the source back on, then issues a hard power-off
+// (reliable, no guest-agent dependency; crash-consistent like a forced shutdown);
+// a graceful guest shutdown is a documented future refinement. While the VM is
+// still powering down it returns done=false with a requeue.
+func (r *VMMigrationReconciler) ensureSourcePoweredOff(ctx context.Context, migration *infrav1beta1.VMMigration) (bool, ctrl.Result, error) {
+	logger := logging.FromContext(ctx)
+
+	sourceVM, err := r.getSourceVM(ctx, migration)
+	if err != nil {
+		return false, ctrl.Result{}, fmt.Errorf("get source VM: %w", err)
+	}
+	if sourceVM.Status.ID == "" {
+		return false, ctrl.Result{}, fmt.Errorf("source VM %s has no provider ID yet", sourceVM.Name)
+	}
+
+	// Align the source VM's desired power state with the migration intent so the
+	// VirtualMachine reconciler does not race this controller back to On while the
+	// disk is being exported. Without this, the VM reconciler (whose desired state
+	// is Spec.PowerState, defaulting to On) re-powers the source mid-export — which
+	// can re-lock a vSphere disk and would, for a non-deleted source, leave the
+	// origin VM running after the move (split-brain). This patch is idempotent.
+	if sourceVM.Spec.PowerState != infrav1beta1.PowerStateOff {
+		patch := client.MergeFrom(sourceVM.DeepCopy())
+		sourceVM.Spec.PowerState = infrav1beta1.PowerStateOff
+		if err := r.Patch(ctx, sourceVM, patch); err != nil {
+			return false, ctrl.Result{}, fmt.Errorf("set source VM %s desired power state to Off: %w", sourceVM.Name, err)
+		}
+		logger.Info("Set source VM desired power state to Off for migration", "vm", sourceVM.Name)
+	}
+
+	sourceProvider, err := r.getProvider(ctx, sourceVM.Spec.ProviderRef, migration.Namespace)
+	if err != nil {
+		return false, ctrl.Result{}, fmt.Errorf("get source provider: %w", err)
+	}
+	providerInstance, err := r.getProviderInstance(ctx, sourceProvider)
+	if err != nil {
+		return false, ctrl.Result{}, fmt.Errorf("get source provider instance: %w", err)
+	}
+
+	desc, err := providerInstance.Describe(ctx, sourceVM.Status.ID)
+	if err != nil {
+		return false, ctrl.Result{}, fmt.Errorf("describe source VM: %w", err)
+	}
+	if desc.PowerState == string(contracts.PowerStateOff) {
+		logger.Info("Source VM is powered off; proceeding with migration", "vm", sourceVM.Name)
+		return true, ctrl.Result{}, nil
+	}
+
+	// Issue the power-off only while the VM is still On so a transitional state is
+	// not spammed with redundant power-off tasks; otherwise just keep polling.
+	if desc.PowerState == string(contracts.PowerStateOn) {
+		logger.Info("Powering off source VM before migration", "vm", sourceVM.Name, "id", sourceVM.Status.ID)
+		if _, err := providerInstance.Power(ctx, sourceVM.Status.ID, contracts.PowerOpOff); err != nil {
+			return false, ctrl.Result{}, fmt.Errorf("power off source VM: %w", err)
+		}
+		r.Recorder.Event(migration, "Normal", "SourcePowerOff", "Powering off source VM before migration")
+	}
+
+	migration.Status.Message = "Powering off source VM before migration"
+	if err := r.updateStatus(ctx, migration); err != nil {
+		return false, ctrl.Result{}, err
+	}
+	return false, ctrl.Result{RequeueAfter: migrationPowerOffPollInterval}, nil
 }
 
 // handleSnapshottingPhase creates a snapshot of the source VM
@@ -1984,6 +2070,11 @@ func (r *VMMigrationReconciler) triggerProviderReconciliation(ctx context.Contex
 // with a diagnosable error. It is measured from the PVC's creation time so the
 // budget is stable across reconciles and controller restarts.
 const migrationMountTimeout = 5 * time.Minute
+
+// migrationPowerOffPollInterval is the requeue cadence while waiting for a
+// source VM to reach the Off power state when source.powerOffBeforeMigration is
+// set (the export is gated on it).
+const migrationPowerOffPollInterval = 5 * time.Second
 
 // migrationMountPollInterval is the requeue cadence while waiting for the
 // provider controller to apply and roll out the migration PVC mount.
