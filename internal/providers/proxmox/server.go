@@ -584,15 +584,17 @@ func (p *Provider) Describe(ctx context.Context, req *providerv1.DescribeRequest
 		return nil, errors.NewInternal("failed to describe VM", err)
 	}
 
-	// Convert PVE status to standard power state
-	powerState := "unknown"
+	// Convert PVE status to the CRD's power-state enum ("On"/"Off"/"OffGraceful").
+	// The manager writes this value straight into VirtualMachine.status.powerState,
+	// so it MUST be a valid enum member — a lowercase "on"/"off" or "suspended" is
+	// rejected by API validation and stalls the VM (and any migration awaiting it).
+	// A suspended/paused guest is memory-resident, so it maps to On.
+	powerState := "Off"
 	switch vm.Status {
-	case "running":
-		powerState = "on"
+	case "running", "suspended", "paused":
+		powerState = "On"
 	case "stopped":
-		powerState = "off"
-	case "suspended", "paused":
-		powerState = "suspended"
+		powerState = "Off"
 	}
 
 	// Generate console URL
