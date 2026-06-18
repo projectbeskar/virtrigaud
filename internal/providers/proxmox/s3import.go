@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -297,14 +298,30 @@ func (p *Provider) createFromImportedDisk(
 
 	// 2. importdisk: lay the staged qcow2 into the VM's storage as an unused disk.
 	importCmd := buildImportDiskCommand(vmConfig.VMID, vmConfig.ImportedDiskPath, storageName, importFormat)
-	if _, stderr, err := p.ssh.runSSH(ctx, importCmd); err != nil {
+	importStdout, importStderr, err := p.ssh.runSSH(ctx, importCmd)
+	if err != nil {
 		return nil, errors.NewInternal(
-			fmt.Sprintf("qm importdisk failed for vmid %d (stderr: %s)", vmConfig.VMID, strings.TrimSpace(stderr)), err)
+			fmt.Sprintf("qm importdisk failed for vmid %d (stderr: %s)", vmConfig.VMID, strings.TrimSpace(importStderr)), err)
 	}
 
-	// 3a. Attach the imported disk as the virtio-scsi boot disk over SSH. These
-	// are simple, encoding-safe values (a volid and a boot order).
-	importedVolume := importedDiskVolume(storageName, vmConfig.VMID)
+	// 3a. Attach the imported disk as the virtio-scsi boot disk over SSH. The volid
+	// `qm importdisk` created differs by storage type (a directory store uses
+	// "<storage>:<vmid>/vm-<vmid>-disk-0.<ext>", LVM/ZFS use
+	// "<storage>:vm-<vmid>-disk-0"), so resolve it from the VM config's `unusedN:`
+	// entry — robust across PVE versions + storage types. Fall back to parsing
+	// importdisk's own output, then the conventional name.
+	importedVolume := ""
+	if cfgOut, _, cfgErr := p.ssh.runSSH(ctx, fmt.Sprintf("qm config %d", vmConfig.VMID)); cfgErr == nil {
+		importedVolume = parseUnusedVolid(cfgOut)
+	}
+	if importedVolume == "" {
+		importedVolume = parseImportedVolid(importStdout + "\n" + importStderr)
+	}
+	if importedVolume == "" {
+		importedVolume = importedDiskVolume(storageName, vmConfig.VMID)
+		p.logger.Warn("Could not resolve imported volid from qm config or importdisk output; using conventional name",
+			"vmid", vmConfig.VMID, "assumed_volume", importedVolume)
+	}
 	setCmd := buildImportedDiskSetCommand(vmConfig.VMID, importedVolume)
 	if _, stderr, err := p.ssh.runSSH(ctx, setCmd); err != nil {
 		return nil, errors.NewInternal(
@@ -346,11 +363,46 @@ func (p *Provider) createFromImportedDisk(
 	}, nil
 }
 
-// importedDiskVolume returns the PVE volid `qm importdisk` produces for the first
-// imported disk of a VM: "<storage>:vm-<vmid>-disk-0". qm importdisk always
-// numbers the imported disk disk-0 on a fresh (diskless) VM.
+// importedDiskVolume returns the conventional PVE volid for the first imported
+// disk of a VM on a block storage (LVM/ZFS): "<storage>:vm-<vmid>-disk-0". It is
+// only a FALLBACK for parseImportedVolid — a directory storage uses a different
+// shape ("<storage>:<vmid>/vm-<vmid>-disk-0.<ext>"), so always prefer the volid
+// parsed from the actual `qm importdisk` output.
 func importedDiskVolume(storage string, vmid int) string {
 	return fmt.Sprintf("%s:vm-%d-disk-0", storage, vmid)
+}
+
+// importedVolidRe matches the volid `qm importdisk` reports it created, e.g.:
+//
+//	Successfully imported disk as 'unused0:dir_store:910544/vm-910544-disk-0.raw'
+//
+// capturing the volid with the leading "unusedN:" assignment stripped (the form
+// `qm set --scsiN <volid>` expects).
+var importedVolidRe = regexp.MustCompile(`imported disk as ['"]?(?:unused\d+:)?([^'"\s]+)`)
+
+// parseImportedVolid extracts the PVE volid from `qm importdisk` output, working
+// for every storage type (it uses whatever importdisk actually created rather
+// than assuming a naming scheme). Returns "" when no volid can be parsed.
+func parseImportedVolid(output string) string {
+	if m := importedVolidRe.FindStringSubmatch(output); len(m) == 2 {
+		return strings.TrimSpace(m[1])
+	}
+	return ""
+}
+
+// unusedVolidRe matches the volid on an `unusedN:` line of `qm config` output:
+//
+//	unused0: dir_store:911288/vm-911288-disk-0.raw
+var unusedVolidRe = regexp.MustCompile(`(?m)^unused\d+:\s*(\S+)`)
+
+// parseUnusedVolid returns the volid of the first `unusedN:` entry in `qm config`
+// output — the disk `qm importdisk` just laid down on a fresh VM — or "" if none.
+// This is the version- and storage-robust way to learn the imported disk's volid.
+func parseUnusedVolid(qmConfig string) string {
+	if m := unusedVolidRe.FindStringSubmatch(qmConfig); len(m) == 2 {
+		return strings.TrimSpace(m[1])
+	}
+	return ""
 }
 
 // buildImportDiskCommand builds the `qm importdisk` command that lays the staged

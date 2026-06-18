@@ -269,3 +269,29 @@ func TestParseCreateRequest_TemplateWinsOverPath(t *testing.T) {
 	assert.Equal(t, "9000", cfg.Template)
 	assert.Empty(t, cfg.ImportedDiskPath, "template create must not capture the imported-disk path")
 }
+
+// TestParseImportedVolid covers parsing the volid from `qm importdisk` output
+// across storage types (Bug R: a directory store volid differs from the LVM
+// convention "<storage>:vm-<vmid>-disk-0").
+func TestParseImportedVolid(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{"dir", "Successfully imported disk as 'unused0:dir_store:910544/vm-910544-disk-0.raw'", "dir_store:910544/vm-910544-disk-0.raw"},
+		{"lvm", "Successfully imported disk as 'unused0:local-lvm:vm-100-disk-0'", "local-lvm:vm-100-disk-0"},
+		{"no-unused-prefix", "imported disk as 'cephpool:vm-7-disk-0'", "cephpool:vm-7-disk-0"},
+		{"none", "some unrelated importdisk chatter", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			assert.Equal(t, c.want, parseImportedVolid(c.in))
+		})
+	}
+}
+
+// TestParseUnusedVolid covers reading the imported disk's volid from qm config's
+// unusedN line (the version/storage-robust path for Bug R).
+func TestParseUnusedVolid(t *testing.T) {
+	cfg := "boot: order=net0\ncores: 2\nmemory: 4096\nname: ubuntu-on-proxmox\nscsihw: virtio-scsi-pci\nunused0: dir_store:911288/vm-911288-disk-0.raw\n"
+	assert.Equal(t, "dir_store:911288/vm-911288-disk-0.raw", parseUnusedVolid(cfg))
+	assert.Equal(t, "local-lvm:vm-7-disk-0", parseUnusedVolid("unused0: local-lvm:vm-7-disk-0"))
+	assert.Equal(t, "", parseUnusedVolid("boot: order=net0\ncores: 2\n"))
+}
