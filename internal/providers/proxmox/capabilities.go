@@ -42,11 +42,12 @@ func GetProviderCapabilities() *capabilities.Manager {
 		DiskExport("qcow2", "raw", "vmdk").
 		ExportCompression().
 		DiskImport("qcow2", "raw", "vmdk").
-		// ADR-0006 Slice 0: advertise the status quo honestly. ExportDisk/
-		// ImportDisk only implement the pod-side (pvc, relay-shaped) staging
-		// path; nfs/s3 and direct transfer are not yet implemented.
-		ExportBackends(migration.PVCOnlyExportBackends()...).
-		ImportBackends(migration.PVCOnlyImportBackends()...).
+		// ADR-0006: ExportDisk/ImportDisk implement BOTH the legacy pod-side
+		// (pvc, relay-shaped) staging path AND the S3 relay data path (bytes flow
+		// node ↔ provider-pod ↔ S3 over SSH; the pod is the S3 client). nfs and
+		// direct transfer remain unimplemented, so they are not advertised.
+		ExportBackends(migration.PVCAndS3ExportBackends()...).
+		ImportBackends(migration.PVCAndS3ImportBackends()...).
 		TransferModes(migration.RelayOnlyTransferModes()...).
 		DiskTypes("raw", "qcow2").
 		NetworkTypes("bridge", "vlan").

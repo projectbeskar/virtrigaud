@@ -242,6 +242,15 @@ func TestProxmoxProvider_GetCapabilities(t *testing.T) {
 	// ExportDisk honors req.Compress via a forced qemu-img convert pass with
 	// `-c` for qcow2 targets (#219), so compression is advertised.
 	assert.True(t, resp.SupportsExportCompression, "Proxmox ExportDisk compresses qcow2 targets when Compress=true (#219)")
+
+	// ADR-0006: Proxmox advertises BOTH the legacy pvc path and the S3 relay
+	// data path on export and import; nfs/direct remain unimplemented.
+	assert.Equal(t, []string{"pvc", "s3"}, resp.SupportedExportBackends,
+		"Proxmox advertises pvc + s3 export backends (ADR-0006)")
+	assert.Equal(t, []string{"pvc", "s3"}, resp.SupportedImportBackends,
+		"Proxmox advertises pvc + s3 import backends (ADR-0006)")
+	assert.Equal(t, []string{"relay"}, resp.SupportedTransferModes,
+		"both pvc and s3 paths are relay-shaped (bytes flow node ↔ pod ↔ backend)")
 }
 
 func TestExportNeedsConversion(t *testing.T) {

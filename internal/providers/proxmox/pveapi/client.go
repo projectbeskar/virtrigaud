@@ -150,6 +150,17 @@ type VMConfig struct {
 	Networks  []NetworkConfig   `json:"-"` // Will be mapped to net0, net1, etc.
 	IPConfigs []IPConfig        `json:"-"` // Will be mapped to ipconfig0, ipconfig1, etc.
 	Custom    map[string]string `json:"-"`
+
+	// ImportedDiskPath is the on-node filesystem path of a pre-staged disk image
+	// (e.g. an ADR-0006 migration import staged at /var/tmp/.virtrigaud-import-…).
+	// When set, the create path builds a bare VM shell and attaches this disk via
+	// `qm importdisk` instead of cloning a template (ADR-0006 Proxmox TARGET).
+	// Carried out-of-band (json:"-") so it never reaches the PVE config API body.
+	ImportedDiskPath string `json:"-"`
+
+	// ImportedDiskFormat is the on-disk format of ImportedDiskPath (e.g. qcow2).
+	// Empty defaults to qcow2.
+	ImportedDiskFormat string `json:"-"`
 }
 
 // NetworkConfig represents a VM network interface

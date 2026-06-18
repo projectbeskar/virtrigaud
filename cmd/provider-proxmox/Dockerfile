@@ -1,6 +1,9 @@
 # Build the provider binary
 ARG BUILDER_IMAGE=golang:1.26.4
-ARG BASE_IMAGE=gcr.io/distroless/static:nonroot
+# The Proxmox provider shells out to `ssh`/`sshpass` for the disk data plane
+# (qemu-img/qm/pvesm run ON the PVE node over SSH), so the runtime image needs an
+# ssh client + sshpass — a static-distroless base cannot carry them.
+ARG BASE_IMAGE=debian:bookworm-slim
 FROM --platform=${BUILDPLATFORM:-linux/amd64} ${BUILDER_IMAGE} as builder
 ARG BUILDPLATFORM
 ARG TARGETPLATFORM
@@ -47,11 +50,35 @@ RUN CGO_ENABLED=${CGO_ENABLED} GOOS=${GOOS} GOARCH=${GOARCH} go build \
     -ldflags="-X 'github.com/projectbeskar/virtrigaud/internal/version.Version=${VERSION}' -X 'github.com/projectbeskar/virtrigaud/internal/version.GitSHA=${GIT_SHA}'" \
     -a -o provider-proxmox cmd/provider-proxmox/main.go
 
-# Use distroless as minimal base image to package the provider binary
-# Refer to https://github.com/GoogleContainerTools/distroless for more details
+# Runtime image: needs an ssh client + sshpass for the SSH disk data plane.
 FROM ${BASE_IMAGE}
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    openssh-client \
+    sshpass \
+    curl \
+    && apt-get upgrade -y \
+    && rm -rf /var/lib/apt/lists/* \
+    && which ssh \
+    && which sshpass \
+    && ssh -V \
+    && sshpass -V
+
+# Non-root user with UID 65532 (matches the Kubernetes nonroot user).
+RUN groupadd -r app -g 65532 && useradd -r -g app -u 65532 -m -d /home/app -s /bin/bash app
+ENV HOME=/home/app
+RUN mkdir -p /home/app/.ssh && chown -R app:app /home/app && chmod 700 /home/app/.ssh
+
+# Directories for TLS and mounted credentials.
+RUN mkdir -p /etc/virtrigaud/tls /etc/virtrigaud/credentials && \
+    chown -R app:app /etc/virtrigaud
+
 WORKDIR /
 COPY --from=builder /workspace/provider-proxmox /usr/local/bin/provider-proxmox
-USER 65532:65532
+USER app
+
+EXPOSE 9443 8080
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:8080/healthz || exit 1
 
 ENTRYPOINT ["/usr/local/bin/provider-proxmox"]
