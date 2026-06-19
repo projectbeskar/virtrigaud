@@ -23,7 +23,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -235,42 +234,24 @@ func (c *Client) request(ctx context.Context, method, path string, body interfac
 			// Result: space → %20 → %2520
 			var encoded string
 			if sshKey := data.Get("sshkeys"); sshKey != "" {
-				// DEBUG: Log original value from url.Values
-				slog.Info("DEBUG SSH request original", "location", "client.go", "len", len(sshKey), "repr", sshKey)
-
-				// Remove from url.Values to prevent automatic encoding
+				// Remove from url.Values to prevent automatic encoding.
 				data.Del("sshkeys")
 
-				// Clean and double-encode
+				// Proxmox needs sshkeys DOUBLE-url-encoded with %20 for spaces
+				// (not +): the form encoder applies the second pass.
 				cleanedKey := strings.TrimSpace(sshKey)
-				slog.Info("DEBUG SSH request trimmed", "location", "client.go", "len", len(cleanedKey), "repr", cleanedKey)
+				firstEncode := strings.ReplaceAll(url.QueryEscape(cleanedKey), "+", "%20")
+				doubleEncoded := strings.ReplaceAll(url.QueryEscape(firstEncode), "+", "%20")
 
-				// Custom encoding for sshkeys: Proxmox needs %20 for space (not +)
-				// We manually encode characters that need escaping
-				firstEncode := url.QueryEscape(cleanedKey)
-				// Fix: QueryEscape uses + for space, replace with %20
-				firstEncode = strings.ReplaceAll(firstEncode, "+", "%20")
-				slog.Info("DEBUG SSH request 1st encode", "location", "client.go", "len", len(firstEncode), "repr", firstEncode)
-
-				// Second encode: apply QueryEscape again and replace + with %20
-				doubleEncoded := url.QueryEscape(firstEncode)
-				doubleEncoded = strings.ReplaceAll(doubleEncoded, "+", "%20")
-				slog.Info("DEBUG SSH request 2nd encode", "location", "client.go", "len", len(doubleEncoded), "repr", doubleEncoded)
-
-				// Encode other parameters normally
+				// Encode the other parameters normally, then append the
+				// already-encoded sshkeys verbatim.
 				baseEncoded := data.Encode()
-
-				// Manually append double-encoded sshkeys (no further encoding)
 				if baseEncoded != "" {
 					encoded = baseEncoded + "&sshkeys=" + doubleEncoded
 				} else {
 					encoded = "sshkeys=" + doubleEncoded
 				}
-
-				slog.Info("DEBUG SSH request final body", "location", "client.go", "body", encoded)
 			} else {
-				// No sshkeys, use standard encoding
-				slog.Info("DEBUG SSH request", "location", "client.go", "status", "no sshkeys found")
 				encoded = data.Encode()
 			}
 			reqBody = strings.NewReader(encoded)
@@ -463,6 +444,74 @@ func (c *Client) CloneVM(ctx context.Context, node string, vmid int, config *VMC
 	return "", fmt.Errorf("unexpected response format")
 }
 
+// StorageVolume is a volume as listed by /nodes/{node}/storage/{storage}/content.
+type StorageVolume struct {
+	VolID  string `json:"volid"`
+	Size   int64  `json:"size"`
+	Used   int64  `json:"used"`
+	Format string `json:"format"`
+}
+
+// GetStorageContent lists the volumes on a node's storage
+// (GET /nodes/{node}/storage/{storage}/content), so callers can read a disk's
+// real size/used/format instead of guessing from the VM config string.
+func (c *Client) GetStorageContent(ctx context.Context, node, storage string) ([]StorageVolume, error) {
+	path := fmt.Sprintf("/api2/json/nodes/%s/storage/%s/content", node, storage)
+	resp, err := c.request(ctx, "GET", path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get storage content: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // defer close is not critical
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("get storage content failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var out struct {
+		Data []StorageVolume `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("failed to decode storage content: %w", err)
+	}
+	return out.Data, nil
+}
+
+// GetNextVMID returns the next free VMID from the cluster (GET /cluster/nextid).
+// Allocating from PVE avoids the collisions a purely time-derived VMID risks when
+// two VMs are created within the same second or on a busy cluster.
+func (c *Client) GetNextVMID(ctx context.Context) (int, error) {
+	resp, err := c.request(ctx, "GET", "/api2/json/cluster/nextid", nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get next VMID: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // defer close is not critical
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return 0, fmt.Errorf("get next VMID failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var apiResp APIResponse
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return 0, fmt.Errorf("failed to decode next VMID response: %w", err)
+	}
+
+	// PVE returns the id as a string; some versions/proxies may return a number.
+	switch v := apiResp.Data.(type) {
+	case string:
+		id, err := strconv.Atoi(v)
+		if err != nil {
+			return 0, fmt.Errorf("invalid next VMID %q: %w", v, err)
+		}
+		return id, nil
+	case float64:
+		return int(v), nil
+	default:
+		return 0, fmt.Errorf("unexpected next VMID type %T", apiResp.Data)
+	}
+}
+
 // DeleteVM deletes a VM. When purge is true the destroy also removes the VM's
 // disk volumes and drops it from any backup/replication jobs
 // (purge=1&destroy-unreferenced-disks=1); a bare DELETE leaves the disks behind.
@@ -641,9 +690,6 @@ func (c *Client) configToValues(config *VMConfig) url.Values {
 		// DO NOT pre-encode! Let url.Values handle the encoding naturally.
 		// Just clean up trailing newlines/whitespace
 		cleanedKeys := strings.TrimSpace(config.SSHKeys)
-		// DEBUG: Log SSH keys before setting in url.Values
-		slog.Info("DEBUG SSH configToValues", "location", "client.go", "config_len", len(config.SSHKeys), "config_repr", config.SSHKeys)
-		slog.Info("DEBUG SSH configToValues cleaned", "location", "client.go", "cleaned_len", len(cleanedKeys), "cleaned_repr", cleanedKeys)
 		values.Set("sshkeys", cleanedKeys)
 	}
 

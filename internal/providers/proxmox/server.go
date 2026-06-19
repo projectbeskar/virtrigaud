@@ -203,7 +203,7 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 	}
 
 	// Parse the request
-	vmConfig, node, err := p.parseCreateRequest(req)
+	vmConfig, node, err := p.parseCreateRequest(ctx, req)
 	if err != nil {
 		return nil, errors.NewInvalidSpec("failed to parse create request: %v", err)
 	}
@@ -221,7 +221,7 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 		// VM exists but with different name, generate new VMID
 		p.logger.Warn("VM exists with different name, generating new VMID",
 			"existing_vmid", vmConfig.VMID, "existing_name", existing.Name, "requested_name", req.Name)
-		vmConfig.VMID = int(time.Now().Unix()%999999) + 100000
+		vmConfig.VMID = p.nextVMID(ctx)
 	}
 
 	// ADR-0006 Proxmox TARGET: when the request carries a pre-staged imported
@@ -828,6 +828,20 @@ func (p *Provider) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotR
 }
 
 // Clone clones a virtual machine
+// nextVMID allocates a VMID from the cluster (/cluster/nextid). On error it falls
+// back to a time-derived id (logging a warning) so VM creation does not hard-fail
+// when the endpoint is unavailable — but the API path is preferred because a
+// purely time-based id collides when two VMs are created in the same second
+// (#261 P2-2).
+func (p *Provider) nextVMID(ctx context.Context) int {
+	id, err := p.client.GetNextVMID(ctx)
+	if err != nil {
+		p.logger.Warn("Failed to allocate VMID via /cluster/nextid; falling back to a time-based id", "error", err)
+		return int(time.Now().Unix()%999999) + 100000
+	}
+	return id
+}
+
 // parseClassSizing extracts the CPU count and memory (MiB) from a marshaled
 // contracts.VMClass (keys "CPU"/"MemoryMiB"; no json tags). Returns zeros when
 // the JSON is empty or unparseable.
@@ -883,7 +897,7 @@ func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*pr
 	}
 
 	// Generate new VMID for clone
-	targetVMID := int(time.Now().Unix()%999999) + 100000 // Ensure 6-digit VMID
+	targetVMID := p.nextVMID(ctx)
 
 	config := &pveapi.VMConfig{
 		VMID:   targetVMID,
@@ -950,9 +964,9 @@ func (p *Provider) GetCapabilities(ctx context.Context, req *providerv1.GetCapab
 // Helper methods
 
 // parseCreateRequest parses the gRPC create request into PVE API format
-func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*pveapi.VMConfig, string, error) {
+func (p *Provider) parseCreateRequest(ctx context.Context, req *providerv1.CreateRequest) (*pveapi.VMConfig, string, error) {
 	// Generate VMID from name hash or use timestamp
-	vmid := int(time.Now().Unix()%999999) + 100000
+	vmid := p.nextVMID(ctx)
 
 	config := &pveapi.VMConfig{
 		VMID: vmid,
@@ -983,20 +997,13 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*pveapi.VM
 	// Parse VMImage for template
 	// The controller sends contracts.VMImage which has the template in TemplateName field
 	if req.ImageJson != "" {
-		// DEBUG: Log the raw ImageJson to see what we're actually receiving
-		p.logger.Info("DEBUG: Received ImageJson", "json", req.ImageJson)
-
 		// First try parsing as contracts.VMImage (sent by controller)
 		var contractsImage map[string]interface{}
 		if err := json.Unmarshal([]byte(req.ImageJson), &contractsImage); err == nil {
-			p.logger.Info("DEBUG: Parsed ImageJson as map", "keys", fmt.Sprintf("%v", contractsImage))
-
 			// Check for TemplateName field (from contracts.VMImage - note capital T)
 			if templateName, ok := contractsImage["TemplateName"].(string); ok && templateName != "" {
 				config.Template = templateName
 				p.logger.Info("Parsed template from contracts.VMImage", "template", templateName)
-			} else {
-				p.logger.Info("DEBUG: TemplateName not found or empty", "TemplateName", contractsImage["TemplateName"])
 			}
 
 			// ADR-0006 Proxmox TARGET: a migration's imported disk arrives as a
@@ -1177,8 +1184,6 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*pveapi.VM
 					// Extra safety: ensure no trailing/leading whitespace including newlines
 					key = strings.TrimSpace(key)
 					if key != "" {
-						// DEBUG: Log extracted SSH key with length and escaped representation
-						slog.Info("DEBUG SSH extraction", "location", "server.go", "len", len(key), "repr", key)
 						sshKeys = append(sshKeys, key)
 					}
 				} else if inKeys && !strings.HasPrefix(strings.TrimSpace(line), " ") {
@@ -1189,8 +1194,6 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*pveapi.VM
 				// Join multiple keys with newline separator (no trailing newline)
 				// Then trim again to be absolutely sure
 				config.SSHKeys = strings.TrimSpace(strings.Join(sshKeys, "\n"))
-				// DEBUG: Log final SSH keys value
-				slog.Info("DEBUG SSH after join", "location", "server.go", "len", len(config.SSHKeys), "repr", config.SSHKeys)
 			}
 		}
 
@@ -1368,15 +1371,40 @@ func (p *Provider) GetDiskInfo(ctx context.Context, req *providerv1.GetDiskInfoR
 		virtualSizeBytes = 0
 	}
 
-	// Actual size is same as virtual size for Proxmox (thin provisioning)
-	// Can be refined later by querying actual disk usage from storage API
-	actualSizeBytes := virtualSizeBytes
-	_ = vmInfo // Use vmInfo to avoid unused variable warning
+	_ = vmInfo // reserved for future enrichment
 
-	// Determine format from storage type
+	// Start from config-derived guesses, then prefer the real size/used/format
+	// from the storage volume when the storage API is reachable (#261 P2-1). The
+	// config string only carries the provisioned size and no thin usage, so the
+	// guesses are a fallback, not the source of truth.
+	actualSizeBytes := virtualSizeBytes
 	format := "qcow2" // default for Proxmox
 	if strings.Contains(storagePath, "raw") || strings.Contains(diskInfo, "raw") {
 		format = "raw"
+	}
+	if storage, _, ok := strings.Cut(storagePath, ":"); ok && storage != "" {
+		if vols, cerr := p.client.GetStorageContent(ctx, node, storage); cerr == nil {
+			for _, v := range vols {
+				if v.VolID != storagePath {
+					continue
+				}
+				if v.Format != "" {
+					format = v.Format
+				}
+				if v.Size > 0 {
+					virtualSizeBytes = v.Size
+				}
+				if v.Used > 0 {
+					actualSizeBytes = v.Used
+				} else {
+					actualSizeBytes = virtualSizeBytes
+				}
+				break
+			}
+		} else {
+			p.logger.Warn("Failed to query storage content for disk info; using config-derived values",
+				"storage", storage, "error", cerr)
+		}
 	}
 
 	// Get snapshots
@@ -1705,7 +1733,7 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 	}
 
 	// Generate a temporary VMID for qm importdisk
-	tempVMID := int(time.Now().Unix()%999999) + 100000
+	tempVMID := p.nextVMID(ctx)
 
 	p.logger.Info("Preparing disk import", "disk_id", diskID, "node", node, "storage", pveStorage, "format", targetFormat)
 
