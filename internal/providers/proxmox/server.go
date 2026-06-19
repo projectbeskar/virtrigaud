@@ -269,28 +269,8 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 		// runs for EVERY clone, independent of cloud-init — the cloud-init
 		// reconfigure below is gated and would otherwise skip a plain VM. (The
 		// diskless create path applies sizing via configToValues at create time.)
-		sizeValues := url.Values{}
-		if vmConfig.CPUs > 0 {
-			// VMClass CPU is the total vCPU count, but PVE computes vCPUs as
-			// sockets × cores. A template may carry sockets>1, which would multiply
-			// the requested count, so pin sockets=1 (the diskless create path
-			// already yields a single socket) and put the whole count in cores.
-			sizeValues.Set("cores", strconv.Itoa(vmConfig.CPUs))
-			sizeValues.Set("sockets", "1")
-		}
-		if vmConfig.Memory > 0 {
-			sizeValues.Set("memory", strconv.FormatInt(vmConfig.Memory, 10))
-		}
-		if len(sizeValues) > 0 {
-			sizeTask, serr := p.client.ReconfigureVMRaw(ctx, node, vmConfig.VMID, sizeValues)
-			if serr != nil {
-				return nil, errors.NewInternal("failed to apply VMClass sizing to cloned VM", serr)
-			}
-			if sizeTask != "" {
-				if werr := p.client.WaitForTask(ctx, node, sizeTask); werr != nil {
-					return nil, errors.NewInternal("VMClass sizing reconfigure task failed", werr)
-				}
-			}
+		if err := p.applyVMClassSizing(ctx, node, vmConfig.VMID, vmConfig.CPUs, vmConfig.Memory); err != nil {
+			return nil, errors.NewInternal("failed to apply VMClass sizing to cloned VM", err)
 		}
 
 		// After cloning, we need to reconfigure the VM with cloud-init settings
@@ -464,7 +444,18 @@ func (p *Provider) Power(ctx context.Context, req *providerv1.PowerRequest) (*pr
 		return nil, errors.NewInvalidSpec("unsupported power operation: %v", req.Op)
 	}
 
-	taskID, err := p.client.PowerOperation(ctx, node, vmid, operation)
+	var taskID string
+	if req.Op == providerv1.PowerOp_POWER_OP_SHUTDOWN_GRACEFUL && req.GracefulTimeoutSeconds > 0 {
+		// Honor the caller's graceful-shutdown deadline and escalate to a hard
+		// stop when it elapses (PVE `forceStop`), instead of ignoring the timeout
+		// and waiting on the guest indefinitely (#261 P1-4).
+		params := url.Values{}
+		params.Set("timeout", strconv.Itoa(int(req.GracefulTimeoutSeconds)))
+		params.Set("forceStop", "1")
+		taskID, err = p.client.PowerOperationWithParams(ctx, node, vmid, operation, params)
+	} else {
+		taskID, err = p.client.PowerOperation(ctx, node, vmid, operation)
+	}
 	if err != nil {
 		return nil, errors.NewInternal("failed to perform power operation", err)
 	}
@@ -837,6 +828,50 @@ func (p *Provider) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotR
 }
 
 // Clone clones a virtual machine
+// parseClassSizing extracts the CPU count and memory (MiB) from a marshaled
+// contracts.VMClass (keys "CPU"/"MemoryMiB"; no json tags). Returns zeros when
+// the JSON is empty or unparseable.
+func parseClassSizing(classJSON string) (cpus int, memoryMiB int64) {
+	if classJSON == "" {
+		return 0, 0
+	}
+	var class struct {
+		CPU       int32 `json:"CPU"`
+		MemoryMiB int32 `json:"MemoryMiB"`
+	}
+	if err := json.Unmarshal([]byte(classJSON), &class); err != nil {
+		return 0, 0
+	}
+	return int(class.CPU), int64(class.MemoryMiB)
+}
+
+// applyVMClassSizing reconfigures a VM to the VMClass CPU/memory. It is used
+// after a clone (which inherits the source/template hardware): the VMClass CPU
+// is the total vCPU count, so sockets is pinned to 1 and cores carries the whole
+// count (PVE computes vCPUs as sockets × cores), and MemoryMiB maps straight to
+// the PVE `memory` field. A zero count or memory is left untouched.
+func (p *Provider) applyVMClassSizing(ctx context.Context, node string, vmid, cpus int, memoryMiB int64) error {
+	vals := url.Values{}
+	if cpus > 0 {
+		vals.Set("cores", strconv.Itoa(cpus))
+		vals.Set("sockets", "1")
+	}
+	if memoryMiB > 0 {
+		vals.Set("memory", strconv.FormatInt(memoryMiB, 10))
+	}
+	if len(vals) == 0 {
+		return nil
+	}
+	task, err := p.client.ReconfigureVMRaw(ctx, node, vmid, vals)
+	if err != nil {
+		return err
+	}
+	if task != "" {
+		return p.client.WaitForTask(ctx, node, task)
+	}
+	return nil
+}
+
 func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*providerv1.CloneResponse, error) {
 	if p.client == nil {
 		return nil, errors.NewUnavailable("PVE client not configured", nil)
@@ -851,30 +886,57 @@ func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*pr
 	targetVMID := int(time.Now().Unix()%999999) + 100000 // Ensure 6-digit VMID
 
 	config := &pveapi.VMConfig{
-		VMID: targetVMID,
-		Name: req.TargetName,
+		VMID:   targetVMID,
+		Name:   req.TargetName,
+		Custom: map[string]string{},
 	}
-
 	if req.Linked {
-		config.Custom = map[string]string{"full": "0"}
+		config.Custom["full"] = "0"
 	} else {
-		config.Custom = map[string]string{"full": "1"}
+		config.Custom["full"] = "1"
 	}
 
-	taskID, err := p.client.CloneVM(ctx, sourceNode, sourceVMID, config)
+	// Honor placement overrides (#261 P1-2): the target node and storage. The
+	// clone request is issued to the source node; PVE's `target` parameter places
+	// the result on another node, so the post-clone sizing must use that node.
+	targetNode := sourceNode
+	if req.PlacementJson != "" {
+		var placement struct {
+			Host      string `json:"Host"`
+			Datastore string `json:"Datastore"`
+		}
+		if err := json.Unmarshal([]byte(req.PlacementJson), &placement); err == nil {
+			if placement.Host != "" {
+				config.Custom["target"] = placement.Host
+				targetNode = placement.Host
+			}
+			if placement.Datastore != "" {
+				config.Storage = placement.Datastore
+			}
+		}
+	}
+
+	cloneTask, err := p.client.CloneVM(ctx, sourceNode, sourceVMID, config)
 	if err != nil {
 		return nil, errors.NewInternal("failed to clone VM", err)
 	}
+	if cloneTask != "" {
+		if werr := p.client.WaitForTask(ctx, sourceNode, cloneTask); werr != nil {
+			return nil, errors.NewInternal("clone task failed", werr)
+		}
+	}
 
-	result := &providerv1.CloneResponse{
+	// Apply the VMClass sizing override (#261 P1-2): a clone inherits the source's
+	// cores/memory, so the requested class size must be set explicitly or the
+	// override is silently ignored.
+	cpus, memMiB := parseClassSizing(req.ClassJson)
+	if err := p.applyVMClassSizing(ctx, targetNode, targetVMID, cpus, memMiB); err != nil {
+		return nil, errors.NewInternal("failed to apply VMClass sizing to cloned VM", err)
+	}
+
+	return &providerv1.CloneResponse{
 		TargetVmId: fmt.Sprintf("%d", targetVMID),
-	}
-
-	if taskID != "" {
-		result.Task = &providerv1.TaskRef{Id: taskID}
-	}
-
-	return result, nil
+	}, nil
 }
 
 // ImagePrepare is implemented in image.go (structured source parsing, target_name
@@ -1797,12 +1859,15 @@ func (p *Provider) ListVMs(ctx context.Context, req *providerv1.ListVMsRequest) 
 		return nil, fmt.Errorf("Proxmox client not configured")
 	}
 
-	// Get nodes from config (or discover)
+	// Use the configured node selector, or discover the cluster's nodes via the
+	// API when none is set (#261 P1-4) instead of failing.
 	nodes := p.client.Config().NodeSelector
 	if len(nodes) == 0 {
-		// Default to discovering nodes - for now, use a placeholder
-		// In a real implementation, you'd discover nodes via API
-		return nil, fmt.Errorf("node selector not configured")
+		discovered, err := p.client.ListNodes(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("no node selector configured and node discovery failed: %w", err)
+		}
+		nodes = discovered
 	}
 
 	var allVMs []*providerv1.VMInfo

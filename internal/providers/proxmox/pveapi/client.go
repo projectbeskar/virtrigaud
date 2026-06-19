@@ -28,6 +28,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -56,6 +57,12 @@ type Client struct {
 	config     *Config
 	httpClient *http.Client
 	baseURL    *url.URL
+
+	// cachedNodes memoizes the cluster's node names (discovered via /nodes) for
+	// the client's lifetime; the node set rarely changes and a provider restart
+	// re-discovers it.
+	nodesMu     sync.Mutex
+	cachedNodes []string
 }
 
 // NewClient creates a new PVE API client
@@ -497,9 +504,19 @@ func (c *Client) DeleteVM(ctx context.Context, node string, vmid int, purge bool
 
 // PowerOperation performs a power operation on a VM
 func (c *Client) PowerOperation(ctx context.Context, node string, vmid int, operation string) (string, error) {
+	return c.PowerOperationWithParams(ctx, node, vmid, operation, nil)
+}
+
+// PowerOperationWithParams performs a power operation, passing extra POST
+// parameters to PVE (e.g. timeout/forceStop for a graceful shutdown).
+func (c *Client) PowerOperationWithParams(ctx context.Context, node string, vmid int, operation string, params url.Values) (string, error) {
 	path := fmt.Sprintf("/api2/json/nodes/%s/qemu/%d/status/%s", node, vmid, operation)
 
-	resp, err := c.request(ctx, "POST", path, nil)
+	var body interface{}
+	if len(params) > 0 {
+		body = params
+	}
+	resp, err := c.request(ctx, "POST", path, body)
 	if err != nil {
 		return "", fmt.Errorf("failed to perform power operation: %w", err)
 	}
@@ -728,14 +745,61 @@ func (c *Client) buildIPConfigString(ipConfig IPConfig) string {
 
 // FindNode selects an appropriate node for VM placement
 func (c *Client) FindNode(ctx context.Context) (string, error) {
-	// If node selector is configured, use the first available
+	// If a node selector is configured, use the first entry.
 	if len(c.config.NodeSelector) > 0 {
-		// TODO: Check node availability
 		return c.config.NodeSelector[0], nil
 	}
 
-	// TODO: Implement node discovery and selection logic
-	return "pve", nil // Default node name
+	// Otherwise discover the node from the cluster instead of assuming "pve" — a
+	// PVE node can be named anything, and a wrong node name makes every
+	// /nodes/<node>/... call 500 (#261 P1-4).
+	nodes, err := c.ListNodes(ctx)
+	if err != nil {
+		return "", fmt.Errorf("no NodeSelector configured and node discovery failed: %w", err)
+	}
+	return nodes[0], nil
+}
+
+// ListNodes returns the names of the nodes in the PVE cluster (GET /nodes). The
+// result is cached for the client's lifetime since the node set rarely changes.
+func (c *Client) ListNodes(ctx context.Context) ([]string, error) {
+	c.nodesMu.Lock()
+	defer c.nodesMu.Unlock()
+	if len(c.cachedNodes) > 0 {
+		return c.cachedNodes, nil
+	}
+
+	resp, err := c.request(ctx, "GET", "/api2/json/nodes", nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list nodes: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // defer close is not critical
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("list nodes failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var out struct {
+		Data []struct {
+			Node string `json:"node"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("failed to decode nodes response: %w", err)
+	}
+
+	nodes := make([]string, 0, len(out.Data))
+	for _, n := range out.Data {
+		if n.Node != "" {
+			nodes = append(nodes, n.Node)
+		}
+	}
+	if len(nodes) == 0 {
+		return nil, fmt.Errorf("PVE returned no nodes")
+	}
+	c.cachedNodes = nodes
+	return nodes, nil
 }
 
 // ReconfigureConfig represents VM reconfiguration parameters

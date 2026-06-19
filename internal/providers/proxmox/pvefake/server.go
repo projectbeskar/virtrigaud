@@ -39,6 +39,7 @@ type Server struct {
 	tasks        map[string]*Task
 	snapshots    map[string][]*Snapshot
 	lastDownload *DownloadRequest
+	lastPowerOp  *PowerOpRequest
 	mu           sync.RWMutex
 	logger       *slog.Logger
 	config       *Config
@@ -61,6 +62,22 @@ func (s *Server) LastDownloadRequest() *DownloadRequest {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.lastDownload
+}
+
+// PowerOpRequest records the most recent power operation and its parameters so
+// tests can assert e.g. graceful-shutdown timeout/forceStop propagation.
+type PowerOpRequest struct {
+	Operation string
+	Timeout   string
+	ForceStop string
+}
+
+// LastPowerOp returns the most recent power operation seen by the fake server,
+// or nil if none has occurred. Safe for concurrent use.
+func (s *Server) LastPowerOp() *PowerOpRequest {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.lastPowerOp
 }
 
 // Config holds fake server configuration
@@ -171,6 +188,9 @@ func NewServer() *Server {
 func (s *Server) setupRoutes() {
 	api := s.router.PathPrefix("/api2/json").Subrouter()
 
+	// Cluster nodes (discovery)
+	api.HandleFunc("/nodes", s.handleListNodes).Methods("GET")
+
 	// VM operations
 	api.HandleFunc("/nodes/{node}/qemu", s.handleCreateVM).Methods("POST")
 	api.HandleFunc("/nodes/{node}/qemu", s.handleListVMs).Methods("GET")
@@ -185,6 +205,7 @@ func (s *Server) setupRoutes() {
 	api.HandleFunc("/nodes/{node}/qemu/{vmid}/status/start", s.handlePowerOp("start")).Methods("POST")
 	api.HandleFunc("/nodes/{node}/qemu/{vmid}/status/stop", s.handlePowerOp("stop")).Methods("POST")
 	api.HandleFunc("/nodes/{node}/qemu/{vmid}/status/reboot", s.handlePowerOp("reboot")).Methods("POST")
+	api.HandleFunc("/nodes/{node}/qemu/{vmid}/status/shutdown", s.handlePowerOp("shutdown")).Methods("POST")
 
 	// Storage operations
 	api.HandleFunc("/nodes/{node}/storage/{storage}/download-url", s.handleDownloadURL).Methods("POST")
@@ -326,6 +347,16 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 // handleListVMs handles listing VMs on a node (GET /nodes/{node}/qemu). It
 // returns all seeded/created VMs, including templates, so ImagePrepare's
 // verify-by-name and idempotency probes can find them.
+// handleListNodes returns the cluster's nodes. It reports two nodes (one not
+// named "pve") so a test can prove the provider discovers the node from the API
+// rather than assuming the legacy "pve" default.
+func (s *Server) handleListNodes(w http.ResponseWriter, _ *http.Request) {
+	s.writeResponse(w, []map[string]interface{}{
+		{"node": "pve", "status": "online"},
+		{"node": "pve2", "status": "online"},
+	})
+}
+
 func (s *Server) handleListVMs(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	node := vars["node"]
@@ -507,6 +538,14 @@ func (s *Server) handlePowerOp(operation string) http.HandlerFunc {
 
 		s.mu.Lock()
 		defer s.mu.Unlock()
+
+		// Record the operation + params so tests can assert e.g. graceful-shutdown
+		// timeout/forceStop propagation.
+		s.lastPowerOp = &PowerOpRequest{
+			Operation: operation,
+			Timeout:   r.FormValue("timeout"),
+			ForceStop: r.FormValue("forceStop"),
+		}
 
 		vm, exists := s.vms[vmid]
 		if !exists {
