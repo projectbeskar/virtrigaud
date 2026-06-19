@@ -41,9 +41,14 @@ type Config struct {
 	InsecureSkipVerify bool
 	CABundle           []byte
 	NodeSelector       []string
-	RequestTimeout     time.Duration
-	TaskPollInterval   time.Duration
-	TaskTimeout        time.Duration
+	// DefaultStorage is the PVE storage that disk-landing operations (notably the
+	// ADR-0006 migration `qm importdisk` target) use when neither the request nor
+	// the VM config names one. Empty falls back to the provider's compiled-in
+	// default. Set via PROVIDER_DEFAULT_STORAGE / PVE_DEFAULT_STORAGE.
+	DefaultStorage   string
+	RequestTimeout   time.Duration
+	TaskPollInterval time.Duration
+	TaskTimeout      time.Duration
 }
 
 // Client represents a Proxmox VE API client
@@ -150,6 +155,17 @@ type VMConfig struct {
 	Networks  []NetworkConfig   `json:"-"` // Will be mapped to net0, net1, etc.
 	IPConfigs []IPConfig        `json:"-"` // Will be mapped to ipconfig0, ipconfig1, etc.
 	Custom    map[string]string `json:"-"`
+
+	// ImportedDiskPath is the on-node filesystem path of a pre-staged disk image
+	// (e.g. an ADR-0006 migration import staged at /var/tmp/.virtrigaud-import-…).
+	// When set, the create path builds a bare VM shell and attaches this disk via
+	// `qm importdisk` instead of cloning a template (ADR-0006 Proxmox TARGET).
+	// Carried out-of-band (json:"-") so it never reaches the PVE config API body.
+	ImportedDiskPath string `json:"-"`
+
+	// ImportedDiskFormat is the on-disk format of ImportedDiskPath (e.g. qcow2).
+	// Empty defaults to qcow2.
+	ImportedDiskFormat string `json:"-"`
 }
 
 // NetworkConfig represents a VM network interface

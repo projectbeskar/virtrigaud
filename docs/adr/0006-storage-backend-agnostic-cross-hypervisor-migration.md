@@ -11,16 +11,18 @@ through v0.3.9 and establishes the architecture for the project's now-primary Ke
 > **Regardless of the storage backend (NFS / S3), VirtRigaud must be able to migrate VMs
 > across hypervisors in *any* direction.**
 
-**Implementation status (2026-06-16)**: the S3 / `relay` paths for the
-**vSphere ↔ libvirt** pair — **Slice 1** (vSphere → libvirt) and **Slice 2**
-(libvirt → vSphere) — are implemented and **end-to-end validated** on real
-hardware. See *Implementation log — validated slices* below for the as-built
-slicing (which diverged from the original phasing) and the key findings.
+**Implementation status (2026-06-18)**: the S3 / `relay` paths now cover the
+**complete any-direction matrix across all three hypervisors** — vSphere ⇄
+libvirt (Slices 1–2) and Proxmox VE ⇄ libvirt and Proxmox VE ⇄ vSphere (Slice 3)
+— each implemented and **end-to-end validated** on real hardware. Only the **NFS**
+backend and the `direct` transfer mode remain. See *Implementation log —
+validated slices* below for the as-built slicing (which diverged from the original
+phasing) and the key findings.
 
 **Author**: William Rizzo ([@wrkode](https://github.com/wrkode))
 
-**Hypervisors in scope**: vSphere, Libvirt/KVM, Proxmox VE (a Proxmox lab host is being
-added for end-to-end validation).
+**Hypervisors in scope**: vSphere, Libvirt/KVM, Proxmox VE (all three validated
+end-to-end over S3).
 
 **Tracking**: [#236](https://github.com/projectbeskar/virtrigaud/issues/236).
 
@@ -306,6 +308,13 @@ the planned libvirt→libvirt and `direct`-mode slices. As shipped:
   then creates the VM. E2E proof: a live Ubuntu 24.04 libvirt VM was migrated to
   vCenter and powered on to a login prompt with its original hostname and a
   connected vmxnet3 NIC.
+- **Slice 3 — Proxmox VE, both directions, all pairs, validated 2026-06-18.**
+  Proxmox joins as a full source **and** target over S3 (`relay`), completing the
+  any-direction matrix across all three hypervisors. Validated end-to-end on real
+  hardware (`pve.lab.k8`): **Proxmox → libvirt**, **libvirt → Proxmox**,
+  **Proxmox → vSphere**, and **vSphere → Proxmox** all reach `Ready`. Combined
+  with Slices 1–2 (vSphere ⇄ libvirt) this closes the **complete 3-hypervisor S3
+  matrix** for #236; only the NFS backend and the `direct` mode remain.
 
 ### Slice 2 decisions & findings (refine D3/D4 for the vSphere target)
 
@@ -338,10 +347,55 @@ the planned libvirt→libvirt and `direct`-mode slices. As shipped:
    the real S3 error (e.g. a full backing store) instead of the downstream
    `cat: exit status 255`.
 
-**Deferred follow-ups** (tracked): honor `source.powerOffBeforeMigration` and
-`target.powerOn:false` in the controller for both directions; snapshot of a
-multi-disk source carrying a cloud-init CDROM (`--diskspec`); Proxmox over S3; the
-NFS backend; and the `direct` transfer mode.
+### Slice 3 (Proxmox) decisions & findings
+
+The Proxmox provider is a **hybrid**: an API-token control plane (the REST API)
+plus an **SSH data plane** to the PVE node. The disk lives on node storage and is
+manipulated with node-side tools (`qemu-img`, `qm`, `pvesm`), so — exactly as for
+libvirt — the bytes are read/written on the node and streamed over SSH into/out of
+the provider pod, which is the S3 client (`relay`). The SSH host-key verification
+(#149) and key-materialization (#249) machinery from the libvirt provider was
+ported verbatim.
+
+1. **Export** runs `qemu-img convert -U -O qcow2` against the node-resolved disk
+   path (via `pvesm path`) and streams the result to S3. `-U` allows reading a
+   disk whose VM may still be running.
+2. **Import** streams the S3 object to a node temp file, runs `qemu-img check`,
+   then creates a **diskless shell VM** and attaches the disk with
+   `qm importdisk <vmid> <file> <storage> --format qcow2` followed by `qm set`.
+3. **The import target storage is operator-configurable** (`PROVIDER_DEFAULT_STORAGE`
+   / `PVE_DEFAULT_STORAGE`), not hardcoded `local-lvm` — a dir-storage node (the
+   lab's `dir_store`) is a valid target. (Bug Q.)
+4. **The landed volid is resolved from `qm config`, not assumed.** A directory
+   store names the volume `<storage>:<vmid>/vm-<vmid>-disk-0.<ext>`, not the LVM
+   `<storage>:vm-<vmid>-disk-0`; `qm set --scsi0` must reference the real volid
+   that `importdisk` produced. (Bug R.)
+5. **`Describe` returns the CRD power-state enum (`On`/`Off`), not lowercase** —
+   the manager rejects a lowercase `status.powerState` on the write, which stalled
+   a migration *into* Proxmox even though the VM was created and running. (Bug U.)
+6. **The pod reaches the node by IP** (`PROVIDER_ENDPOINT` = the PVE IP), with the
+   `known_hosts` pinned to that IP, because in-cluster DNS does not resolve the
+   PVE hostname.
+
+### Source quiescing and Creating-phase robustness (both directions)
+
+7. **`source.powerOffBeforeMigration` is now honored** (was a no-op). The
+   controller aligns the source VM's desired `spec.powerState` to `Off` (so the
+   VirtualMachine reconciler does not race the export back to `On`) and hard-powers
+   it off, gating the export on `Off`. This is **required** for a vSphere source —
+   ESXi locks a running VM's disk so the streamOptimized clone fails with
+   "…vmdk … is locked" — and yields a quiescent disk everywhere. A graceful guest
+   shutdown and a minimal-downtime (snapshot + change-block delta-sync + cutover)
+   variant are tracked follow-ups. (Bug H.)
+8. **The synchronous-import → Creating transition requeues after a short settle
+   delay** instead of relying solely on the status-write self-watch event (which
+   can be coalesced/missed, wedging the migration in `Creating`), and
+   `handleCreatingPhase` **fails cleanly on nil `status.diskInfo`** instead of
+   panicking in an endless recover/requeue loop. (Bugs X, Y.)
+
+**Deferred follow-ups** (tracked): a graceful (guest-agent) source shutdown and the
+minimal-downtime migration variant; snapshot of a multi-disk source carrying a
+cloud-init CDROM (`--diskspec`); the NFS backend; and the `direct` transfer mode.
 
 ---
 

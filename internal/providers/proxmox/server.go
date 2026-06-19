@@ -43,6 +43,13 @@ type Provider struct {
 	client       *pveapi.Client
 	capabilities *capabilities.Manager
 	logger       *slog.Logger
+
+	// ssh is the migration DATA-plane transport to the PVE node (ADR-0006
+	// Slice 3). It is nil on a token-only deployment with no SSH credentials or
+	// no derivable host; the S3 export/import paths return an actionable error in
+	// that case rather than panicking. The control plane (Create/Delete/etc.)
+	// never depends on it.
+	ssh *sshTransport
 }
 
 // readCredentialFile reads a credential from a mounted secret file
@@ -112,6 +119,14 @@ func New() *Provider {
 		InsecureSkipVerify: insecureSkipVerify,
 	}
 
+	// Default PVE storage for disk-landing operations (e.g. the migration
+	// `qm importdisk` target) when the request/VM config names none.
+	defaultStorage := os.Getenv("PROVIDER_DEFAULT_STORAGE")
+	if defaultStorage == "" {
+		defaultStorage = os.Getenv("PVE_DEFAULT_STORAGE")
+	}
+	config.DefaultStorage = strings.TrimSpace(defaultStorage)
+
 	// Parse node selector
 	nodeSelector := os.Getenv("PROVIDER_NODE_SELECTOR")
 	if nodeSelector == "" {
@@ -139,10 +154,21 @@ func New() *Provider {
 		slog.Error("Failed to create PVE client", "error", err)
 	}
 
+	// Build the migration DATA-plane SSH transport to the PVE node (ADR-0006
+	// Slice 3). The SSH host is the SAME host as the API endpoint. Failure to
+	// derive a host (e.g. no endpoint set) is non-fatal: the control plane is
+	// unaffected, and the S3 export/import paths surface an actionable error if
+	// the transport is needed but unavailable.
+	sshTransport, sshErr := newSSHTransport(endpoint, slog.Default())
+	if sshErr != nil {
+		slog.Warn("Migration SSH data-plane transport unavailable (S3 migration disabled until configured)", "error", sshErr)
+	}
+
 	return &Provider{
 		client:       client,
 		capabilities: caps,
 		logger:       slog.Default(),
+		ssh:          sshTransport,
 	}
 }
 
@@ -196,6 +222,14 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 		p.logger.Warn("VM exists with different name, generating new VMID",
 			"existing_vmid", vmConfig.VMID, "existing_name", existing.Name, "requested_name", req.Name)
 		vmConfig.VMID = int(time.Now().Unix()%999999) + 100000
+	}
+
+	// ADR-0006 Proxmox TARGET: when the request carries a pre-staged imported
+	// disk (from a migration's ImportDisk), the create path builds a bare VM shell
+	// and attaches the staged disk via `qm importdisk` instead of cloning a
+	// template. Handled entirely by createFromImportedDisk and returns early.
+	if vmConfig.ImportedDiskPath != "" {
+		return p.createFromImportedDisk(ctx, req, vmConfig, node)
 	}
 
 	var taskID string
@@ -550,15 +584,17 @@ func (p *Provider) Describe(ctx context.Context, req *providerv1.DescribeRequest
 		return nil, errors.NewInternal("failed to describe VM", err)
 	}
 
-	// Convert PVE status to standard power state
-	powerState := "unknown"
+	// Convert PVE status to the CRD's power-state enum ("On"/"Off"/"OffGraceful").
+	// The manager writes this value straight into VirtualMachine.status.powerState,
+	// so it MUST be a valid enum member — a lowercase "on"/"off" or "suspended" is
+	// rejected by API validation and stalls the VM (and any migration awaiting it).
+	// A suspended/paused guest is memory-resident, so it maps to On.
+	powerState := "Off"
 	switch vm.Status {
-	case "running":
-		powerState = "on"
+	case "running", "suspended", "paused":
+		powerState = "On"
 	case "stopped":
-		powerState = "off"
-	case "suspended", "paused":
-		powerState = "suspended"
+		powerState = "Off"
 	}
 
 	// Generate console URL
@@ -834,6 +870,20 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*pveapi.VM
 				p.logger.Info("Parsed template from contracts.VMImage", "template", templateName)
 			} else {
 				p.logger.Info("DEBUG: TemplateName not found or empty", "TemplateName", contractsImage["TemplateName"])
+			}
+
+			// ADR-0006 Proxmox TARGET: a migration's imported disk arrives as a
+			// contracts.VMImage with a node-side Path (set by ImportDisk and
+			// threaded through VirtualMachine.Spec.ImportedDisk.Path) and no
+			// TemplateName. Capturing it here switches Create onto the
+			// importdisk-attach path. The Format guides the qemu-img/import format.
+			if path, ok := contractsImage["Path"].(string); ok && strings.TrimSpace(path) != "" && config.Template == "" {
+				config.ImportedDiskPath = strings.TrimSpace(path)
+				if format, ok := contractsImage["Format"].(string); ok && format != "" {
+					config.ImportedDiskFormat = format
+				}
+				p.logger.Info("Parsed imported-disk path from contracts.VMImage (migration import)",
+					"path", config.ImportedDiskPath, "format", config.ImportedDiskFormat)
 			}
 
 			// Check for storage hint
@@ -1259,10 +1309,15 @@ func exportNeedsConversion(sourceFormat, targetFormat string, compress bool) boo
 
 // ExportDisk exports a VM disk for migration
 func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskRequest) (*providerv1.ExportDiskResponse, error) {
-	// ADR-0006 Slice 0: only the legacy pvc staging path is implemented; reject
-	// nfs/s3 backends honestly instead of falling through to the pvc path.
-	if err := migration.EnsurePVCBackend(req.BackendType); err != nil {
+	// ADR-0006: accept the legacy pvc path and the S3 relay path; reject nfs and
+	// unknown backends honestly instead of silently falling through to pvc.
+	if err := migration.EnsurePVCOrS3Backend(req.BackendType); err != nil {
 		return nil, err
+	}
+
+	// ADR-0006 Proxmox SOURCE path: stream the node disk to S3 over SSH.
+	if req.BackendType == migration.BackendS3 {
+		return p.exportDiskToS3(ctx, req)
 	}
 
 	if p.client == nil {
@@ -1465,10 +1520,16 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 
 // ImportDisk imports a disk from an external source
 func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskRequest) (*providerv1.ImportDiskResponse, error) {
-	// ADR-0006 Slice 0: only the legacy pvc staging path is implemented; reject
-	// nfs/s3 backends honestly instead of falling through to the pvc path.
-	if err := migration.EnsurePVCBackend(req.BackendType); err != nil {
+	// ADR-0006: accept the legacy pvc path and the S3 relay path; reject nfs and
+	// unknown backends honestly instead of silently falling through to pvc.
+	if err := migration.EnsurePVCOrS3Backend(req.BackendType); err != nil {
 		return nil, err
+	}
+
+	// ADR-0006 Proxmox TARGET path: stage the S3 qcow2 on the node and return its
+	// path for the Create path to consume with qm importdisk.
+	if req.BackendType == migration.BackendS3 {
+		return p.importDiskFromS3(ctx, req)
 	}
 
 	if p.client == nil {

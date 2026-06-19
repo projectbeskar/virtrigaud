@@ -84,7 +84,7 @@ func TestProxmoxProvider_CreateAndDescribe(t *testing.T) {
 	describeResp, err := provider.Describe(ctx, describeReq)
 	require.NoError(t, err)
 	assert.True(t, describeResp.Exists)
-	assert.Equal(t, "off", describeResp.PowerState)
+	assert.Equal(t, "Off", describeResp.PowerState)
 	assert.NotEmpty(t, describeResp.ConsoleUrl)
 }
 
@@ -119,7 +119,7 @@ func TestProxmoxProvider_PowerOperations(t *testing.T) {
 	// Verify VM is running
 	describeResp, err := provider.Describe(ctx, &providerv1.DescribeRequest{Id: vmID})
 	require.NoError(t, err)
-	assert.Equal(t, "on", describeResp.PowerState)
+	assert.Equal(t, "On", describeResp.PowerState)
 
 	// Test power off
 	powerReq.Op = providerv1.PowerOp_POWER_OP_OFF
@@ -135,7 +135,7 @@ func TestProxmoxProvider_PowerOperations(t *testing.T) {
 	// Verify VM is stopped
 	describeResp, err = provider.Describe(ctx, &providerv1.DescribeRequest{Id: vmID})
 	require.NoError(t, err)
-	assert.Equal(t, "off", describeResp.PowerState)
+	assert.Equal(t, "Off", describeResp.PowerState)
 }
 
 func TestProxmoxProvider_Clone(t *testing.T) {
@@ -242,6 +242,15 @@ func TestProxmoxProvider_GetCapabilities(t *testing.T) {
 	// ExportDisk honors req.Compress via a forced qemu-img convert pass with
 	// `-c` for qcow2 targets (#219), so compression is advertised.
 	assert.True(t, resp.SupportsExportCompression, "Proxmox ExportDisk compresses qcow2 targets when Compress=true (#219)")
+
+	// ADR-0006: Proxmox advertises BOTH the legacy pvc path and the S3 relay
+	// data path on export and import; nfs/direct remain unimplemented.
+	assert.Equal(t, []string{"pvc", "s3"}, resp.SupportedExportBackends,
+		"Proxmox advertises pvc + s3 export backends (ADR-0006)")
+	assert.Equal(t, []string{"pvc", "s3"}, resp.SupportedImportBackends,
+		"Proxmox advertises pvc + s3 import backends (ADR-0006)")
+	assert.Equal(t, []string{"relay"}, resp.SupportedTransferModes,
+		"both pvc and s3 paths are relay-shaped (bytes flow node ↔ pod ↔ backend)")
 }
 
 func TestExportNeedsConversion(t *testing.T) {

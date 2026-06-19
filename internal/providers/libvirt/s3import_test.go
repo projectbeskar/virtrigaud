@@ -76,7 +76,7 @@ func TestHostStagePath(t *testing.T) {
 	const pool = "/var/lib/libvirt/images"
 	const vol = "imported-disk"
 
-	got := hostStagePath(pool, vol)
+	got := hostStagePath(pool, vol, "vmdk")
 
 	assert.True(t, strings.HasPrefix(got, pool+"/"),
 		"stage file must live in the pool directory for an intra-device convert; got %q", got)
@@ -88,13 +88,21 @@ func TestHostStagePath(t *testing.T) {
 	assert.Contains(t, base, vol, "stage file name must carry the volume name; got base %q", base)
 	assert.True(t, strings.HasSuffix(base, ".vmdk"),
 		"stage file keeps the pre-conversion .vmdk suffix; got base %q", base)
+
+	// A qcow2 source (libvirt/proxmox) stages with a .qcow2 suffix (Bug P).
+	gotQcow2 := hostStagePath(pool, vol, "qcow2")
+	assert.True(t, strings.HasSuffix(gotQcow2, ".qcow2"),
+		"a qcow2-format staged object keeps a .qcow2 suffix; got %q", gotQcow2)
+	// An empty format defaults to vmdk (back-compat with callers that don't set it).
+	assert.True(t, strings.HasSuffix(hostStagePath(pool, vol, ""), ".vmdk"),
+		"empty format must default to the .vmdk suffix")
 }
 
 // TestHostStagePath_TrailingSlashNormalized verifies a pool path with a trailing
 // slash does not produce a doubled separator (so the path stays valid on the
 // host).
 func TestHostStagePath_TrailingSlashNormalized(t *testing.T) {
-	got := hostStagePath("/pool/", "v1")
+	got := hostStagePath("/pool/", "v1", "vmdk")
 	assert.False(t, strings.Contains(got, "//"),
 		"trailing slash on the pool path must be normalized; got %q", got)
 	assert.True(t, strings.HasPrefix(got, "/pool/.virtrigaud-import-v1-"), "got %q", got)
@@ -108,7 +116,7 @@ func TestHostStagePath_DistinctFromTarget(t *testing.T) {
 	const vol = "disk0"
 	target := fmt.Sprintf("%s/%s.qcow2", pool, vol)
 
-	stage := hostStagePath(pool, vol)
+	stage := hostStagePath(pool, vol, "vmdk")
 
 	assert.NotEqual(t, target, stage, "stage and target must be distinct files")
 	assert.True(t, strings.HasSuffix(target, ".qcow2"))
@@ -125,7 +133,7 @@ func TestHostStagePath_SanitizedNameStaysContained(t *testing.T) {
 	// A hostile target name; sanitizeVolumeName neutralizes separators and "..".
 	vol := sanitizeVolumeName("../../etc/evil")
 
-	stage := hostStagePath(pool, vol)
+	stage := hostStagePath(pool, vol, "vmdk")
 
 	assert.False(t, strings.Contains(stage, ".."),
 		"sanitized stage path must not contain a parent-dir traversal; got %q", stage)

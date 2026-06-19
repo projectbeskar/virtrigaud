@@ -1,0 +1,96 @@
+# Cross-hypervisor migration over S3 (ADR-0006 Slice 3): vSphere → S3 → Proxmox VE.
+#
+# Proxmox VE participates as a full SOURCE and TARGET over S3, completing the
+# any-direction matrix across vSphere, libvirt, and Proxmox. This example moves a
+# vSphere VM onto a Proxmox node; the same shape works for any pairing — just swap
+# the source/target providers (libvirt → Proxmox, Proxmox → vSphere, etc.).
+#
+# Data path: the vSphere SOURCE exports its native vmdk and streams it up to S3
+# through the provider pod; the Proxmox TARGET streams the object from S3 to the
+# PVE node over SSH, runs `qemu-img convert -O qcow2`, then `qm importdisk` into a
+# freshly created shell VM. Bytes flow vCenter → pod → S3 → pod → node; they NEVER
+# traverse a CSI PVC.
+#
+# The Proxmox provider is a HYBRID: an API-token control plane (REST) plus an SSH
+# data plane to the PVE node. Its Secret therefore carries BOTH an API token
+# (token_id/token_secret) and SSH credentials (ssh_user + ssh_password and/or
+# ssh_privatekey) plus a pinned known_hosts — see the Provider/Secret for the
+# Proxmox provider itself; this VMMigration only references the S3 credentials.
+#
+# Transfer mode: relay (the universal floor — the provider pod is the S3 client,
+# so backend credentials never leave the pod). `auto` resolves to `relay` here.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# S3 credentials Secret (same-namespace as the VMMigration). Required keys:
+# accessKeyID, secretAccessKey. Optional: sessionToken (STS / temporary creds).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: s3-migration-credentials
+  namespace: default
+type: Opaque
+stringData:
+  accessKeyID: "REPLACE_WITH_ACCESS_KEY_ID"
+  secretAccessKey: "REPLACE_WITH_SECRET_ACCESS_KEY"
+  # sessionToken: "REPLACE_WITH_SESSION_TOKEN"   # only for temporary/STS creds
+---
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMMigration
+metadata:
+  name: migration-vsphere-to-proxmox-s3
+  namespace: default
+spec:
+  # SOURCE: a VM managed by a vSphere provider.
+  source:
+    vmRef:
+      name: prod-app-server          # an existing VirtualMachine backed by vSphere
+    createSnapshot: false
+    # Power the source off before exporting. REQUIRED for a vSphere source: ESXi
+    # locks a running VM's disk, so the streamOptimized export clone fails with
+    # "...vmdk ... is locked". The controller aligns the source VM's desired
+    # spec.powerState to Off (so it stays off for the whole transfer) and hard-
+    # powers it off before exporting. For an offline "move", pair with
+    # deleteAfterMigration: true.
+    powerOffBeforeMigration: true
+    deleteAfterMigration: false
+
+  # TARGET: create the migrated VM on a Proxmox VE provider.
+  target:
+    name: prod-app-server-on-pve
+    providerRef:
+      name: proxmox-provider          # a Provider of type Proxmox
+      namespace: default
+    classRef:
+      name: high-performance
+    powerOn: false
+    # A raw-disk migration carries the disk, not the NIC — re-specify the target
+    # network so the migrated VM boots with an adapter (map to a PVE bridge).
+    networks:
+      - name: production-network
+
+  # S3-compatible object storage staging. Swap rustfs for AWS S3 / MinIO / Ceph
+  # RGW as needed; the provider pods must be able to reach this endpoint.
+  storage:
+    type: s3
+    transferMode: relay               # relay (implemented) | auto→relay
+    s3:
+      bucket: virtrigaud
+      endpoint: http://rustfs.lab.k8:9000   # http:// ⇒ plaintext; omit for AWS
+      region: us-east-1
+      prefix: prod-app-server/
+      usePathStyle: true              # true for rustfs/MinIO/Ceph RGW; false for AWS
+      credentialsSecretRef:
+        name: s3-migration-credentials
+
+  options:
+    # The SOURCE always exports its native format and the TARGET converts on
+    # import (ADR-0006 D4). For vSphere→Proxmox the staged object is a vmdk and
+    # Proxmox converts it to qcow2 on the node; diskFormat is advisory here.
+    diskFormat: qcow2
+    compress: false
+    verifyChecksums: true             # SHA256 of the transferred object (ADR-0006 D5)
+    timeout: "6h"
+
+  metadata:
+    purpose: "provider-change"
+    createdBy: "platform-team"
