@@ -5,6 +5,23 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-19 08:45] - fix(proxmox): Clone overrides, graceful-shutdown timeout, node discovery (#261 P1)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/proxmox/server.go` (P1-2): `Clone` now applies the requested VMClass sizing and placement instead of dropping them. A PVE clone inherits the source's cores/memory, so the `ClassJson` override is applied in a post-clone reconfigure (shared `applyVMClassSizing` helper, also used by the template-create path), and `PlacementJson` is honored — the target node (`Host`) is threaded into the clone and the post-clone sizing, and the target storage (`Datastore`) into the clone.
+- `internal/providers/proxmox/server.go` + `pveapi/client.go` (P1-4): a `SHUTDOWN_GRACEFUL` power op now forwards `graceful_timeout_seconds` to the PVE shutdown endpoint and sets `forceStop=1` so it escalates to a hard stop when the deadline elapses, instead of ignoring the timeout. (New `PowerOperationWithParams`; the pveapi request builder already form-encodes params.)
+- `internal/providers/proxmox/pveapi/client.go` + `server.go` (P1-4): node discovery. `FindNode` and `ListVMs` no longer assume a node literally named `pve` — when no `NodeSelector` is configured they discover the cluster's nodes via `GET /nodes` (new cached `ListNodes`). A wrong node name otherwise 500s every API call on a cluster whose node isn't named `pve`.
+
+### Why
+Continues the Proxmox parity epic (#261) after the P0 delete fix (#262) and the P1 sizing fix (#263): closes the remaining P1 feature gaps where Clone silently ignored overrides, graceful shutdown ignored the caller's timeout, and node addressing was hardcoded.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (proxmox provider image)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-06-19 08:05] - fix(proxmox): honor VMClass CPU/memory; enforce relay-only transfer (#261 P1)
 **Author:** @wrkode (William Rizzo)
 
