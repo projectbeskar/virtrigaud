@@ -96,6 +96,15 @@ The `observability` values block (and its `serviceMonitorLabels`/`prometheusRule
 ### Why
 The provider must run unchanged against heterogeneous libvirt hosts. Hard-coding the Debian emulator path broke VM creation on RHEL-family hosts. Verified against a CentOS host (libvirt 4.5.0) and an Ubuntu host (libvirt 8.0.0): with the element omitted, each host's `dumpxml` shows its own emulator (`/usr/libexec/qemu-kvm` and `/usr/bin/qemu-system-x86_64` respectively) and `Provider/Create` succeeds.
 
+## [2026-06-17 11:00] - libvirt: lighten connection validation to avoid gRPC deadline
+**Author:** @jing2uo (Komh)
+
+### Fixed
+- `internal/providers/libvirt/provider.go` + `internal/providers/libvirt/virsh.go`: `Provider.Validate` and `VirshProvider.testConnection` no longer call `listDomains`, which issued one `virsh domstate` per domain on top of the initial `virsh list`. Over the `qemu+ssh://` transport every virsh call is a separate SSH round-trip, so that N+1 grows linearly with the number of domains on the host. `Validate` runs under the manager's 30s gRPC deadline and is invoked on every VM reconcile (and by the runtime resolver as a health check before reusing a provider client), so on a host with only ~40 domains the cold-SSH N+1 (~37s measured) exceeded the deadline and returned `DeadlineExceeded` — leaving VMs stuck `NotReady` in a 5s requeue loop and forcing the resolver to evict and reconnect. Both paths now run a single `virsh list --all --name` and count non-empty lines; the per-domain state the old code fetched was only used for a log count, never consumed.
+
+### Why
+Validation/readiness only need a reachability check, not per-domain state. Collapsing the N+1 to one command makes the cost O(1) and independent of how many VMs run on the host. Measured on two hosts (CentOS 7 / libvirt 4.5.0 with 44 domains; Ubuntu 22.04 / libvirt 8.0.0 with 38 domains): the old path took ~36–37s of cold-SSH round-trips against a 30s deadline, while the single `virsh list` is one round-trip.
+
 ## [2026-06-17 10:05] - Keep the libvirt SSH private key off node disk (memory-backed volume)
 **Author:** @wrkode (William Rizzo)
 
