@@ -40,6 +40,7 @@ type Server struct {
 	snapshots    map[string][]*Snapshot
 	lastDownload *DownloadRequest
 	lastPowerOp  *PowerOpRequest
+	nextID       int
 	mu           sync.RWMutex
 	logger       *slog.Logger
 	config       *Config
@@ -188,8 +189,9 @@ func NewServer() *Server {
 func (s *Server) setupRoutes() {
 	api := s.router.PathPrefix("/api2/json").Subrouter()
 
-	// Cluster nodes (discovery)
+	// Cluster
 	api.HandleFunc("/nodes", s.handleListNodes).Methods("GET")
+	api.HandleFunc("/cluster/nextid", s.handleClusterNextID).Methods("GET")
 
 	// VM operations
 	api.HandleFunc("/nodes/{node}/qemu", s.handleCreateVM).Methods("POST")
@@ -209,6 +211,7 @@ func (s *Server) setupRoutes() {
 
 	// Storage operations
 	api.HandleFunc("/nodes/{node}/storage/{storage}/download-url", s.handleDownloadURL).Methods("POST")
+	api.HandleFunc("/nodes/{node}/storage/{storage}/content", s.handleStorageContent).Methods("GET")
 
 	// Task operations
 	api.HandleFunc("/nodes/{node}/tasks/{taskid}/status", s.handleGetTaskStatus).Methods("GET")
@@ -355,6 +358,47 @@ func (s *Server) handleListNodes(w http.ResponseWriter, _ *http.Request) {
 		{"node": "pve", "status": "online"},
 		{"node": "pve2", "status": "online"},
 	})
+}
+
+// handleClusterNextID mimics PVE's /cluster/nextid: it returns a free VMID,
+// handing out monotonically increasing ids (skipping any already in use).
+func (s *Server) handleClusterNextID(w http.ResponseWriter, _ *http.Request) {
+	s.mu.Lock()
+	if s.nextID < 200000 {
+		s.nextID = 200000
+	}
+	for {
+		s.nextID++
+		if _, taken := s.vms[s.nextID]; !taken {
+			break
+		}
+	}
+	id := s.nextID
+	s.mu.Unlock()
+	s.writeResponse(w, strconv.Itoa(id))
+}
+
+// handleStorageContent mimics PVE's /nodes/{node}/storage/{storage}/content: it
+// lists each VM's primary disk volume with a real (thin) size/used/format, so
+// GetDiskInfo can report true values instead of guessing from the config string.
+// The reported size (20 GiB) deliberately differs from the config's 32 GiB so a
+// test can prove the values came from the storage API, not the config.
+func (s *Server) handleStorageContent(w http.ResponseWriter, r *http.Request) {
+	storage := mux.Vars(r)["storage"]
+
+	s.mu.RLock()
+	vols := make([]map[string]interface{}, 0, len(s.vms))
+	for vmid := range s.vms {
+		vols = append(vols, map[string]interface{}{
+			"volid":  fmt.Sprintf("%s:vm-%d-disk-0", storage, vmid),
+			"size":   int64(20 * 1024 * 1024 * 1024), // 20 GiB provisioned
+			"used":   int64(5 * 1024 * 1024 * 1024),  // 5 GiB actually used (thin)
+			"format": "raw",
+		})
+	}
+	s.mu.RUnlock()
+
+	s.writeResponse(w, vols)
 }
 
 func (s *Server) handleListVMs(w http.ResponseWriter, r *http.Request) {
@@ -790,6 +834,7 @@ func (s *Server) handleGetVMConfig(w http.ResponseWriter, r *http.Request) {
 		"memory": vm.Memory / (1024 * 1024), // Convert to MB
 		"name":   vm.Name,
 		"vmid":   vm.VMID,
+		"scsi0":  fmt.Sprintf("local-lvm:vm-%d-disk-0,size=32G", vmid),
 	}
 
 	// Add network interfaces

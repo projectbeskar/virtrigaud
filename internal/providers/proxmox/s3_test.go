@@ -244,7 +244,7 @@ func TestParseCreateRequest_ImportedDiskPath(t *testing.T) {
 		ImageJson: `{"Path":"/var/tmp/.virtrigaud-import-web-migrated.qcow2","Format":"qcow2"}`,
 	}
 
-	cfg, _, err := provider.parseCreateRequest(req)
+	cfg, _, err := provider.parseCreateRequest(context.Background(), req)
 	require.NoError(t, err)
 	assert.Equal(t, "/var/tmp/.virtrigaud-import-web-migrated.qcow2", cfg.ImportedDiskPath)
 	assert.Equal(t, "qcow2", cfg.ImportedDiskFormat)
@@ -264,7 +264,7 @@ func TestParseCreateRequest_TemplateWinsOverPath(t *testing.T) {
 		Name:      "tmpl-vm",
 		ImageJson: `{"TemplateName":"9000","Path":"/var/tmp/should-be-ignored.qcow2"}`,
 	}
-	cfg, _, err := provider.parseCreateRequest(req)
+	cfg, _, err := provider.parseCreateRequest(context.Background(), req)
 	require.NoError(t, err)
 	assert.Equal(t, "9000", cfg.Template)
 	assert.Empty(t, cfg.ImportedDiskPath, "template create must not capture the imported-disk path")

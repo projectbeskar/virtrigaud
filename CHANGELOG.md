@@ -5,6 +5,28 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-19 09:30] - fix(proxmox): collision-free VMIDs, real disk-info, drop key logging (#261 P2)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/proxmox/server.go` + `pveapi/client.go` (P2-2): VMIDs are now allocated from PVE's `GET /cluster/nextid` (new cached `GetNextVMID`, surfaced through a `nextVMID` helper used by all four allocation sites) instead of `time.Now().Unix() % 999999`. The timestamp scheme could collide on rapid creates and is not cluster-aware; `/cluster/nextid` returns a guaranteed-free id. The helper falls back to the timestamp (with a warning) only if the cluster API is unreachable.
+- `internal/providers/proxmox/server.go` + `pveapi/client.go` (P2-1): `GetDiskInfo` now reports the disk's real size/used/format read from `GET /nodes/{node}/storage/{storage}/content` (new `GetStorageContent`) instead of fabricating them — the old code reported `actualSize == virtualSize` (no thin usage) and guessed the format as `qcow2`/`raw` from a substring of the config string. Falls back to the config-derived guesses if the storage API is unreachable, so it never hard-fails.
+
+### Changed
+- `internal/providers/proxmox/server.go` (P2-3): removed the leftover `DEBUG: …` INFO log lines in the `Create` image-parse path (raw `ImageJson` dump, parsed-map dump, "TemplateName not found") — request-payload noise that violated the structured-logging convention.
+
+### Security
+- `internal/providers/proxmox/server.go` + `pveapi/client.go` (P2-3): removed the `DEBUG SSH ...` log lines in the cloud-init SSH-key encoding path that dumped public-key material and its base64/URL-encoding into the provider log. Compliance posture forbids logging credential-adjacent material; the noisy `log/slog` import is gone with them.
+
+### Why
+Final slice of the Proxmox parity epic (#261), after P0 (#262), P1-correctness (#263) and P1-features (#264). These are the P2 polish items from the audit: collision-free cluster-aware VMID allocation, honest disk metadata for migration sizing, and removing credential-adjacent debug logging. Closes the epic.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (proxmox provider image)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-06-19 08:45] - fix(proxmox): Clone overrides, graceful-shutdown timeout, node discovery (#261 P1)
 **Author:** @wrkode (William Rizzo)
 
