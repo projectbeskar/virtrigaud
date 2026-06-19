@@ -5,6 +5,24 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-19 11:30] - fix(vsphere): Reconfigure honors VMClass CPU/memory (wrong JSON keys) (#266)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/vsphere/server.go`: `Reconfigure` parsed `req.DesiredJson` (a marshaled `contracts.CreateRequest`) with the wrong keys — `class`/`cpus`/`memory` and `disks`/`size`. `VMClass`/`DiskSpec` carry **no** json tags, so the real keys are `Class.CPU`, `Class.MemoryMiB`, and `Disks[].SizeGiB`. Every key missed, so a VMClass CPU/memory change **silently no-opped while the RPC returned success** — and because the controller then treats the empty response as "completed synchronously" and updates status, the VM **reported the new size while the hardware stayed at the old one**, and drift detection never re-fired. Now parses the correct typed keys (mirroring the Create path and the libvirt/Proxmox providers), so `SupportsReconfigureOnline: true` is honest. Surfaced by the #261 cross-provider parity audit — the same wrong-key class that #261 P1-1 fixed for Proxmox.
+- `internal/providers/proxmox/server.go`: fixed the identical wrong-key bug in the Proxmox `Reconfigure` **disk-resize** branch (`desired["disks"]["size"]` → `Disks[].SizeGiB`). CPU/memory were already fixed in #261 P1-1; the disk branch was latent dead code (the controller only triggers Reconfigure on CPU/mem drift today, but it would silently drop a disk resize once that is wired).
+- Removed the now-unused `parseMemory` helpers from both providers — their only callers were the wrong-key paths; CPU/memory/size now arrive as numbers in the typed contract.
+
+### Why
+The Proxmox parity epic (#261) surfaced, via the cross-provider lens, that vSphere `Reconfigure` had the same wrong-JSON-key bug Proxmox just fixed — and worse, it corrupts status (reports a size the hardware never got). P0: a silently-wrong VM size in a regulated posture.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (vSphere + Proxmox provider images)
+- [ ] Config change only
+
+Closes #266.
+
 ## [2026-06-19 10:30] - docs(proxmox): align migration docs/examples with shipped parity; ExportCompression caveat (#261 P2-4)
 **Author:** @wrkode (William Rizzo)
 

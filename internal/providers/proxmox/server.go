@@ -535,48 +535,49 @@ func (p *Provider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureR
 		}
 	}
 
-	// Handle disk changes
-	if disksData, ok := desired["disks"].([]interface{}); ok {
+	// Handle disk changes. The marshaled contracts.CreateRequest nests disks under
+	// the tag-less key "Disks", each a DiskSpec with a numeric "SizeGiB" (GiB) and a
+	// "Name" — NOT "disks"/"size"/"name". Reading the wrong keys silently dropped
+	// every disk resize (same #261 wrong-key class as the CPU/memory fix above).
+	if disksData, ok := desired["Disks"].([]interface{}); ok {
 		for _, diskData := range disksData {
 			if disk, ok := diskData.(map[string]interface{}); ok {
-				if diskName, ok := disk["name"].(string); ok {
-					if sizeStr, ok := disk["size"].(string); ok {
-						if sizeBytes, err := parseMemory(sizeStr); err == nil {
-							sizeGB := sizeBytes / (1024 * 1024 * 1024)
+				if diskName, ok := disk["Name"].(string); ok {
+					if sizeVal, ok := disk["SizeGiB"].(float64); ok && sizeVal > 0 {
+						sizeGB := int64(sizeVal)
 
-							// Find corresponding disk in current config
-							diskKey := "scsi0" // Default to scsi0, could be smarter
-							if diskName == "root" {
-								diskKey = "scsi0"
-							}
+						// Find corresponding disk in current config
+						diskKey := "scsi0" // Default to scsi0, could be smarter
+						if diskName == "root" {
+							diskKey = "scsi0"
+						}
 
-							// Check current disk size to prevent shrinking
-							if currentDisk, exists := currentConfig[diskKey]; exists {
-								if currentDiskStr, ok := currentDisk.(string); ok {
-									// Parse current disk size from config string (e.g., "local:vm-100-disk-0,size=32G")
-									if strings.Contains(currentDiskStr, "size=") {
-										parts := strings.Split(currentDiskStr, ",")
-										for _, part := range parts {
-											if strings.HasPrefix(part, "size=") {
-												sizeStr := strings.TrimPrefix(part, "size=")
-												sizeStr = strings.TrimSuffix(sizeStr, "G")
-												if currentSize, err := strconv.ParseInt(sizeStr, 10, 64); err == nil {
-													if sizeGB < currentSize {
-														return nil, errors.NewInvalidSpec("disk shrinking not allowed: current=%dG, requested=%dG", currentSize, sizeGB)
+						// Check current disk size to prevent shrinking
+						if currentDisk, exists := currentConfig[diskKey]; exists {
+							if currentDiskStr, ok := currentDisk.(string); ok {
+								// Parse current disk size from config string (e.g., "local:vm-100-disk-0,size=32G")
+								if strings.Contains(currentDiskStr, "size=") {
+									parts := strings.Split(currentDiskStr, ",")
+									for _, part := range parts {
+										if strings.HasPrefix(part, "size=") {
+											sizeStr := strings.TrimPrefix(part, "size=")
+											sizeStr = strings.TrimSuffix(sizeStr, "G")
+											if currentSize, err := strconv.ParseInt(sizeStr, 10, 64); err == nil {
+												if sizeGB < currentSize {
+													return nil, errors.NewInvalidSpec("disk shrinking not allowed: current=%dG, requested=%dG", currentSize, sizeGB)
+												}
+												if sizeGB > currentSize {
+													// Use ResizeDisk for disk expansion
+													taskID, err := p.client.ResizeDisk(ctx, node, vmid, diskKey, sizeGB)
+													if err != nil {
+														return nil, errors.NewInternal("failed to resize disk", err)
 													}
-													if sizeGB > currentSize {
-														// Use ResizeDisk for disk expansion
-														taskID, err := p.client.ResizeDisk(ctx, node, vmid, diskKey, sizeGB)
-														if err != nil {
-															return nil, errors.NewInternal("failed to resize disk", err)
-														}
 
-														result := &providerv1.TaskResponse{}
-														if taskID != "" {
-															result.Task = &providerv1.TaskRef{Id: taskID}
-														}
-														return result, nil
+													result := &providerv1.TaskResponse{}
+													if taskID != "" {
+														result.Task = &providerv1.TaskRef{Id: taskID}
 													}
+													return result, nil
 												}
 											}
 										}
@@ -1248,34 +1249,6 @@ func (p *Provider) parseVMReference(ref string) (int, string, error) {
 	}
 
 	return 0, "", fmt.Errorf("invalid VM reference format: %s", ref)
-}
-
-// parseMemory converts memory string (e.g., "2Gi", "1024Mi") to bytes
-func parseMemory(memory string) (int64, error) {
-	memory = strings.TrimSpace(memory)
-	if strings.HasSuffix(memory, "Gi") {
-		val, err := strconv.ParseFloat(strings.TrimSuffix(memory, "Gi"), 64)
-		if err != nil {
-			return 0, err
-		}
-		return int64(val * 1024 * 1024 * 1024), nil
-	}
-	if strings.HasSuffix(memory, "Mi") {
-		val, err := strconv.ParseFloat(strings.TrimSuffix(memory, "Mi"), 64)
-		if err != nil {
-			return 0, err
-		}
-		return int64(val * 1024 * 1024), nil
-	}
-	if strings.HasSuffix(memory, "Ki") {
-		val, err := strconv.ParseFloat(strings.TrimSuffix(memory, "Ki"), 64)
-		if err != nil {
-			return 0, err
-		}
-		return int64(val * 1024), nil
-	}
-	// Assume bytes
-	return strconv.ParseInt(memory, 10, 64)
 }
 
 // buildNetworkString constructs network configuration string for Proxmox
