@@ -3366,7 +3366,12 @@ func (p *Provider) GetDiskInfo(ctx context.Context, req *providerv1.GetDiskInfoR
 
 	if backing, ok := targetDisk.Backing.(*types.VirtualDiskFlatVer2BackingInfo); ok {
 		diskPath = backing.FileName
-		backingFile = backing.Parent.GetVirtualDeviceFileBackingInfo().FileName
+		// Parent is non-nil only for a delta/linked-clone disk that sits on a
+		// backing chain; a plain base disk (e.g. a freshly imported/migrated VM)
+		// has no parent, so guard against a nil-pointer dereference.
+		if backing.Parent != nil {
+			backingFile = backing.Parent.GetVirtualDeviceFileBackingInfo().FileName
+		}
 	} else if backing, ok := targetDisk.Backing.(*types.VirtualDiskSparseVer2BackingInfo); ok {
 		diskPath = backing.FileName
 	}

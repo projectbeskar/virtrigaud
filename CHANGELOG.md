@@ -5,6 +5,57 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-18 20:40] - migration: wire powerOffBeforeMigration + Proxmox matrix validated (ADR-0006)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/controller/vmmigration_controller.go`: implemented `source.powerOffBeforeMigration` (Bug H) — previously a no-op. When set, the Validating phase now (1) aligns the source VM's desired `spec.powerState` to `Off` so the VirtualMachine reconciler does not race the export by powering the source back on (which would re-lock a vSphere disk mid-export and leave a non-deleted source running after the move), then (2) issues a hard, reliable power-off and gates the export on the source reaching `Off`. This is **required** for a vSphere source (ESXi locks a running VM's disk, so the streamOptimized clone fails with "…vmdk … is locked") and yields a quiescent disk for libvirt/Proxmox. A graceful guest shutdown is a documented future refinement. Unit tests in `vmmigration_poweroff_test.go`.
+
+### Fixed
+- `internal/providers/libvirt/s3import.go` (Bug P): honor `req.Format` for the staged source format instead of hardcoding vmdk — a libvirt/Proxmox source stages qcow2, which the import previously rejected as an "invalid VMDK image descriptor".
+- `internal/providers/proxmox/{server.go,s3import.go,pveapi/client.go}` (Bug Q): the migration `qm importdisk` target storage is now operator-configurable (`PROVIDER_DEFAULT_STORAGE`/`PVE_DEFAULT_STORAGE`) instead of a hardcoded `local-lvm`, so a dir-storage PVE node can be a migration target.
+- `internal/providers/proxmox/s3import.go` (Bug R): resolve the imported disk's volid from `qm config` rather than assuming the LVM naming — a directory store names the volume `<storage>:<vmid>/vm-<vmid>-disk-0.<ext>`, so `qm set --scsi0` previously failed with "unable to parse directory volume name".
+- `internal/providers/proxmox/server.go` (Bug U): `Describe` now returns the CRD power-state enum (`On`/`Off`) instead of lowercase `on`/`off`, which the manager rejected on the status write — stalling a migration into Proxmox even though the VM was created and running.
+- `internal/providers/vsphere/server.go` (Bug W): guard a nil parent backing in `GetDiskInfo` — exporting a freshly-imported/migrated VM (a base disk with no backing chain) panicked the provider with a nil-pointer dereference.
+- `internal/controller/vmmigration_controller.go` (Bug X): after a synchronous `ImportDisk`, the Importing→Creating transition returned with no requeue and relied solely on the status-write self-watch event to re-drive reconciliation — which can be coalesced or missed, wedging a migration in `Creating` forever (observed on the synchronous Proxmox import path). It now requeues after a short settle delay, which still lets the informer cache observe `Phase=Creating` (avoiding a stale-cache re-import) while guaranteeing the Creating phase runs.
+- `internal/controller/vmmigration_controller.go` (Bug Y): `handleCreatingPhase` dereferenced `status.diskInfo` with no nil check. A migration that reached `Creating` without recorded disk info panicked on the nil pointer — and because controller-runtime recovers and requeues, it crash-looped on that object forever. It now fails the migration cleanly with a diagnosable message (`status.diskInfo is nil; cannot create target VM`) instead of panicking. Unit test in `vmmigration_creating_test.go`.
+
+### Why
+Validated the full any-direction S3 migration matrix for Proxmox end-to-end on real hardware — vSphere ⇄ Proxmox and libvirt ⇄ Proxmox all reach Ready — completing the three-hypervisor S3 phase of #236 (NFS remains). The power-off wiring is the v1 of source quiescing; the minimal-downtime variant (snapshot + change-block delta-sync + cutover) is tracked separately.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (manager + provider images)
+- [ ] Config change only
+- [ ] Documentation only
+
+## [2026-06-18 15:25] - feat(proxmox): S3 cross-hypervisor migration data path (ADR-0006)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/providers/proxmox/ssh.go`: SSH DATA-plane transport to the PVE node (host derived from the SAME `PROVIDER_ENDPOINT` the API token uses; `root@pam` → node root). Ported from the libvirt provider: host-key verification policy (`PROXMOX_INSECURE_SKIP_HOST_KEY_VERIFICATION`, known_hosts hard-fail, #149), private-key materialization to `/tmp/virtrigaud-proxmox` at 0600/0700 (#249), sshpass (password) vs `ssh -i` (key) branches, ControlMaster multiplexing (`PROXMOX_SSH_DISABLE_MULTIPLEXING`, #194), and `runSSH`/`runSSHStdout`/`runSSHStdin` helpers. SSH creds loaded from `/etc/virtrigaud/credentials/{ssh_user,ssh_password,ssh_privatekey}` with `PROVIDER_*`/`PVE_*` env fallbacks. No secret is ever logged (paths only, `sshpass -e`, key via SSHPASS env).
+- `internal/providers/proxmox/s3export.go`: SOURCE path — resolve the disk's on-node path via `pvesm path <storage:volid>`, flatten with `qemu-img convert -U -f <fmt> -O qcow2` (honoring `req.Compress` via `-c`), then stream `cat <hostTmp>` → S3 over an io.Pipe (SHA256 in-stream, ContentLength:-1). Mirrors libvirt's error-precedence surfacing when both the cat stream and the S3 upload fail.
+- `internal/providers/proxmox/s3import.go`: TARGET path — stream the S3 qcow2 down to a node temp via `cat > <hostTmp>` (SHA256-verified), `qemu-img check` it, and return the node path. The Proxmox Create path (`createFromImportedDisk`) then builds a diskless VM shell and attaches the staged disk with `qm importdisk` + `qm set --scsi0 … --boot order=scsi0`; cloud-init (ide2/ciuser/sshkeys) is wired via the API `ReconfigureVMRaw` so multi-line SSH keys are url-encoded correctly (no `qm set --sshkeys` command-line pitfall).
+- `internal/providers/proxmox/{ssh_test.go,s3_test.go}`: unit coverage for SSH arg construction (password vs key branch, host-key + multiplex options, SSHPASS-not-in-argv, key file perms), host derivation, `pvesm path` parsing, export/import command construction, the imported-disk Create handoff, and backend rejection/no-SSH guards.
+
+### Changed
+- `internal/providers/proxmox/server.go`: `ExportDisk`/`ImportDisk` now accept the S3 backend (`EnsurePVCOrS3Backend`) and dispatch to the S3 paths; `parseCreateRequest` captures a migration import's node `Path` from the image JSON into the new `VMConfig.ImportedDiskPath`; `Create` routes to `createFromImportedDisk` when that path is set; the `Provider` gains a nil-safe `ssh *sshTransport`.
+- `internal/providers/proxmox/capabilities.go`: advertise pvc+s3 export/import backends (`PVCAndS3ExportBackends`/`PVCAndS3ImportBackends`) instead of pvc-only.
+- `internal/providers/proxmox/pveapi/client.go`: add out-of-band `VMConfig.ImportedDiskPath`/`ImportedDiskFormat` (json:"-") for the importdisk Create path.
+- `internal/providers/proxmox/provider_test.go`: capability assertions now expect the pvc+s3 backend set.
+- `cmd/provider-proxmox/Dockerfile`: runtime base switched from static-distroless to `debian:bookworm-slim` with `openssh-client` + `sshpass` (+ ca-certificates/curl) and a non-root `app` user — the SSH data plane shells out to `ssh`/`sshpass`, which distroless cannot carry (the Proxmox analog of the vSphere qemu-img Dockerfile gap).
+
+### Why
+ADR-0006 cross-hypervisor migration over S3 was DONE for vSphere↔libvirt but Proxmox had no working remote disk transport — its export/import were PVC-only and used a local-filesystem stub that only worked if the pod ran on the PVE node. This adds the SSH-to-node data plane so Proxmox can be a migration source and target, with the migration controller already treating it as qcow2-native (no controller change).
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (provider image bump; S3 migration also needs SSH creds in the Provider's credentials Secret)
+- [ ] Config change only
+- [ ] Documentation only
+
+---
+
 ## [2026-06-17 15:30] - test: regression coverage for the migration-PVC mount lifecycle (#230)
 **Author:** @wrkode (William Rizzo)
 
@@ -36,6 +87,14 @@ The `observability` values block (and its `serviceMonitorLabels`/`prometheusRule
 - [ ] Requires cluster rollout
 - [x] Config change only
 - [ ] Documentation only
+## [2026-06-17 13:03] - libvirt: drop hard-coded qemu emulator path
+**Author:** @jing2uo (Komh)
+
+### Fixed
+- `internal/providers/libvirt/provider_virsh.go`: `generateDomainXMLWithStorage` no longer hard-codes `<emulator>/usr/bin/qemu-system-x86_64</emulator>` in the generated domain XML. That path only exists on Debian/Ubuntu; on RHEL/CentOS the QEMU binary lives at `/usr/libexec/qemu-kvm`, so `Provider/Create` failed on those hosts. The `<emulator>` element is now omitted, and libvirt's qemu driver fills in the host's default emulator for the domain's `(arch, machine, type)` during define-time post-parse — the same resolution `virt-install` relies on. Because the provider talks to a possibly-remote libvirtd over SSH, the remote daemon resolves its own emulator, which is both simpler and more correct than reimplementing the selection in the provider.
+
+### Why
+The provider must run unchanged against heterogeneous libvirt hosts. Hard-coding the Debian emulator path broke VM creation on RHEL-family hosts. Verified against a CentOS host (libvirt 4.5.0) and an Ubuntu host (libvirt 8.0.0): with the element omitted, each host's `dumpxml` shows its own emulator (`/usr/libexec/qemu-kvm` and `/usr/bin/qemu-system-x86_64` respectively) and `Provider/Create` succeeds.
 
 ## [2026-06-17 11:00] - libvirt: lighten connection validation to avoid gRPC deadline
 **Author:** @jing2uo (Komh)
