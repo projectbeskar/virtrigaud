@@ -5,6 +5,22 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-19 08:05] - fix(proxmox): honor VMClass CPU/memory; enforce relay-only transfer (#261 P1)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/proxmox/server.go` (P1-1): `Create` and `Reconfigure` now read the VMClass CPU/memory from the correct keys. `ClassJson` is a marshaled `contracts.VMClass` (no JSON tags), so the keys are `CPU`/`MemoryMiB` — the old code read `cpus`/`memory` (and, in `Reconfigure`, the outer key `class` instead of `Class`), which never matched, so cores/memory stayed unset and **every Proxmox VM came up at the PVE default of 1 core / 512 MB regardless of its VMClass**. The fix is applied on both create paths: the diskless create (via `configToValues`) and the template clone (a PVE clone inherits the template's hardware, so `cores`/`memory` are now also set in the post-clone reconfigure). Mirrors the vSphere/libvirt parse of the same contract.
+- `internal/providers/proxmox/server.go` (P1-3): `ExportDisk`/`ImportDisk` now call `migration.EnsureRelayMode(req.TransferMode)`, so a `direct` transfer request fails with `InvalidArgument` instead of silently running as `relay` — Proxmox advertises relay-only (ADR-0006 D2). Matches libvirt's enforcement.
+
+### Why
+The first P0 fix (#262) addressed the delete-orphan incident; this P1 slice fixes the next-worst Proxmox parity gap surfaced by the audit (#261): silently undersized VMs (confirmed on real hardware — migrated VMs showed `cores=None, memory=None` in PVE) and a silently-downgraded transfer mode.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (proxmox provider image)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-06-19 07:20] - fix(proxmox): delete no longer orphans VMs; finalizer retained on delete failure (#261 P0)
 **Author:** @wrkode (William Rizzo)
 

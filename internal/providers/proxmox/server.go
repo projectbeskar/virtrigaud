@@ -263,6 +263,36 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 			}
 		}
 
+		// Apply the VMClass sizing on top of the cloned template. A PVE clone
+		// inherits the template's cores/memory, so they MUST be set explicitly or
+		// the VM comes up at the template's size, not the class's (#261 P1-1). This
+		// runs for EVERY clone, independent of cloud-init — the cloud-init
+		// reconfigure below is gated and would otherwise skip a plain VM. (The
+		// diskless create path applies sizing via configToValues at create time.)
+		sizeValues := url.Values{}
+		if vmConfig.CPUs > 0 {
+			// VMClass CPU is the total vCPU count, but PVE computes vCPUs as
+			// sockets × cores. A template may carry sockets>1, which would multiply
+			// the requested count, so pin sockets=1 (the diskless create path
+			// already yields a single socket) and put the whole count in cores.
+			sizeValues.Set("cores", strconv.Itoa(vmConfig.CPUs))
+			sizeValues.Set("sockets", "1")
+		}
+		if vmConfig.Memory > 0 {
+			sizeValues.Set("memory", strconv.FormatInt(vmConfig.Memory, 10))
+		}
+		if len(sizeValues) > 0 {
+			sizeTask, serr := p.client.ReconfigureVMRaw(ctx, node, vmConfig.VMID, sizeValues)
+			if serr != nil {
+				return nil, errors.NewInternal("failed to apply VMClass sizing to cloned VM", serr)
+			}
+			if sizeTask != "" {
+				if werr := p.client.WaitForTask(ctx, node, sizeTask); werr != nil {
+					return nil, errors.NewInternal("VMClass sizing reconfigure task failed", werr)
+				}
+			}
+		}
+
 		// After cloning, we need to reconfigure the VM with cloud-init settings
 		if len(req.UserData) > 0 || vmConfig.SSHKeys != "" {
 			p.logger.Info("Reconfiguring cloned VM with cloud-init", "vmid", vmConfig.VMID)
@@ -275,7 +305,8 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 			}
 			p.logger.Info("Detected primary boot disk", "vmid", vmConfig.VMID, "disk", primaryDisk)
 
-			// Build reconfiguration values for cloud-init
+			// Build reconfiguration values for cloud-init. Sizing (cores/memory) is
+			// already applied above for every clone, so it is not repeated here.
 			reconfigValues := url.Values{}
 			if vmConfig.IDE2 != "" {
 				reconfigValues.Set("ide2", vmConfig.IDE2)
@@ -472,9 +503,12 @@ func (p *Provider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureR
 	// Extract reconfiguration parameters
 	config := &pveapi.ReconfigureConfig{}
 
-	// Handle CPU changes
-	if classData, ok := desired["class"].(map[string]interface{}); ok {
-		if cpus, ok := classData["cpus"].(float64); ok {
+	// Handle CPU/memory changes. DesiredJson is a marshaled contracts.CreateRequest,
+	// so the nested VMClass is under the (tag-less) key "Class" with fields "CPU"
+	// and "MemoryMiB" — NOT "class"/"cpus"/"memory" (reading those silently
+	// dropped every reconfigure of CPU/memory; #261 P1-1).
+	if classData, ok := desired["Class"].(map[string]interface{}); ok {
+		if cpus, ok := classData["CPU"].(float64); ok && cpus > 0 {
 			cpuCount := int(cpus)
 			config.CPUs = &cpuCount
 
@@ -491,20 +525,19 @@ func (p *Provider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureR
 			}
 		}
 
-		// Handle memory changes
-		if memory, ok := classData["memory"].(string); ok {
-			if memBytes, err := parseMemory(memory); err == nil {
-				memMB := memBytes / (1024 * 1024)
-				config.Memory = &memMB
+		// Handle memory changes. MemoryMiB is already in MiB, which is what PVE's
+		// `memory` config field expects.
+		if mem, ok := classData["MemoryMiB"].(float64); ok && mem > 0 {
+			memMB := int64(mem)
+			config.Memory = &memMB
 
-				// Check if VM is running - memory changes may require power cycle for some guest OSes
-				vm, err := p.client.GetVM(ctx, node, vmid)
-				if err == nil && vm.Status == "running" {
-					// PVE supports online memory changes with balloon driver
-					if currentMem, exists := currentConfig["memory"]; exists {
-						if currentMemMB, ok := currentMem.(float64); ok && int64(currentMemMB) != memMB {
-							p.logger.Info("Memory change will be applied online (requires balloon driver)", "vmid", vmid, "old", int64(currentMemMB), "new", memMB)
-						}
+			// Check if VM is running - memory changes may require power cycle for some guest OSes
+			vm, err := p.client.GetVM(ctx, node, vmid)
+			if err == nil && vm.Status == "running" {
+				// PVE supports online memory changes with balloon driver
+				if currentMem, exists := currentConfig["memory"]; exists {
+					if currentMemMB, ok := currentMem.(float64); ok && int64(currentMemMB) != memMB {
+						p.logger.Info("Memory change will be applied online (requires balloon driver)", "vmid", vmid, "old", int64(currentMemMB), "new", memMB)
 					}
 				}
 			}
@@ -864,17 +897,23 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*pveapi.VM
 		Name: req.Name,
 	}
 
-	// Parse VMClass for CPU/memory
+	// Parse VMClass for CPU/memory. ClassJson is a marshaled contracts.VMClass,
+	// whose Go fields have NO json tags, so the keys are "CPU" and "MemoryMiB"
+	// (NOT "cpus"/"memory" — reading those left every Proxmox VM at the PVE
+	// default of 1 core / 512 MB regardless of the VMClass; #261 P1-1). This
+	// mirrors the vSphere/libvirt parse of the same contract. MemoryMiB is already
+	// in MiB, which is exactly what the PVE `memory` config field expects.
 	if req.ClassJson != "" {
-		var class map[string]interface{}
+		var class struct {
+			CPU       int32 `json:"CPU"`
+			MemoryMiB int32 `json:"MemoryMiB"`
+		}
 		if err := json.Unmarshal([]byte(req.ClassJson), &class); err == nil {
-			if cpus, ok := class["cpus"].(float64); ok {
-				config.CPUs = int(cpus)
+			if class.CPU > 0 {
+				config.CPUs = int(class.CPU)
 			}
-			if memory, ok := class["memory"].(string); ok {
-				if memBytes, err := parseMemory(memory); err == nil {
-					config.Memory = memBytes / (1024 * 1024) // Convert to MB
-				}
+			if class.MemoryMiB > 0 {
+				config.Memory = int64(class.MemoryMiB)
 			}
 		}
 	}
@@ -1340,6 +1379,12 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 	if err := migration.EnsurePVCOrS3Backend(req.BackendType); err != nil {
 		return nil, err
 	}
+	// Proxmox advertises relay-only transfer (RelayOnlyTransferModes); reject a
+	// `direct` request loudly instead of silently running it as relay (#261 P1-3,
+	// ADR-0006 D2). Mirrors the libvirt provider.
+	if err := migration.EnsureRelayMode(req.TransferMode); err != nil {
+		return nil, err
+	}
 
 	// ADR-0006 Proxmox SOURCE path: stream the node disk to S3 over SSH.
 	if req.BackendType == migration.BackendS3 {
@@ -1549,6 +1594,12 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 	// ADR-0006: accept the legacy pvc path and the S3 relay path; reject nfs and
 	// unknown backends honestly instead of silently falling through to pvc.
 	if err := migration.EnsurePVCOrS3Backend(req.BackendType); err != nil {
+		return nil, err
+	}
+	// Proxmox advertises relay-only transfer (RelayOnlyTransferModes); reject a
+	// `direct` request loudly instead of silently running it as relay (#261 P1-3,
+	// ADR-0006 D2). Mirrors the libvirt provider.
+	if err := migration.EnsureRelayMode(req.TransferMode); err != nil {
 		return nil, err
 	}
 
