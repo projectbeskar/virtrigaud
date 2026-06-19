@@ -863,10 +863,13 @@ func (p *Provider) fallbackToPowerOff(ctx context.Context, vm *object.VirtualMac
 // req.Id. The JSON payload is expected to contain a subset of the following top-level
 // keys:
 //
-//   - "class": object with "cpus" (number) and/or "memory" (string, e.g. "4Gi") fields
+//   - "Class": object with "CPU" (number) and/or "MemoryMiB" (number, MiB) fields
 //     for CPU and memory adjustments.
-//   - "disks": array where the first element may contain a "size" (string, e.g. "100Gi")
+//   - "Disks": array where the first element may carry a "SizeGiB" (number, GiB)
 //     field to expand the primary disk.
+//
+// These are the Go field names of the marshaled contracts.CreateRequest — VMClass
+// and DiskSpec carry NO json tags — NOT lowercase cpus/memory/size.
 //
 // Current values are retrieved from vCenter before building the change-spec so that
 // only actual differences trigger a ReconfigVM_Task. If no changes are detected the
@@ -907,8 +910,22 @@ func (p *Provider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureR
 		return nil, fmt.Errorf("failed to get VM properties: %w", err)
 	}
 
-	// Parse the desired configuration from JSON
-	var desired map[string]interface{}
+	// Parse the desired configuration. DesiredJson is a marshaled
+	// contracts.CreateRequest; VMClass and DiskSpec carry NO json tags, so the keys
+	// are the Go field names — Class.CPU, Class.MemoryMiB (numeric MiB), and
+	// Disks[].SizeGiB (numeric GiB). Reading lowercase cpus/memory/size (the prior
+	// bug) never matched, so every CPU/memory change was silently dropped while the
+	// RPC reported success — the VM stayed at its creation-time size and status
+	// falsely reported the new size. Mirror the typed parse the Create path uses.
+	var desired struct {
+		Class struct {
+			CPU       int32 `json:"CPU"`
+			MemoryMiB int32 `json:"MemoryMiB"`
+		} `json:"Class"`
+		Disks []struct {
+			SizeGiB int32 `json:"SizeGiB"`
+		} `json:"Disks"`
+	}
 	if err := json.Unmarshal([]byte(req.DesiredJson), &desired); err != nil {
 		return nil, fmt.Errorf("failed to parse desired configuration: %w", err)
 	}
@@ -917,73 +934,51 @@ func (p *Provider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureR
 	configSpec := &types.VirtualMachineConfigSpec{}
 	hasChanges := false
 
-	// Handle CPU changes
-	if classData, ok := desired["class"].(map[string]interface{}); ok {
-		if cpus, ok := classData["cpus"].(float64); ok {
-			newCPUs := int32(cpus)
-			if newCPUs != vmMo.Config.Hardware.NumCPU {
-				p.logger.Info("CPU change requested", "vm_id", req.Id, "old", vmMo.Config.Hardware.NumCPU, "new", newCPUs)
-				configSpec.NumCPUs = newCPUs
-				hasChanges = true
-			}
-		}
+	// CPU
+	if desired.Class.CPU > 0 && desired.Class.CPU != vmMo.Config.Hardware.NumCPU {
+		p.logger.Info("CPU change requested", "vm_id", req.Id, "old", vmMo.Config.Hardware.NumCPU, "new", desired.Class.CPU)
+		configSpec.NumCPUs = desired.Class.CPU
+		hasChanges = true
+	}
 
-		// Handle memory changes (memory is in MiB in the request)
-		if memory, ok := classData["memory"].(string); ok {
-			memMiB, err := p.parseMemory(memory)
-			if err == nil {
-				newMemoryMB := memMiB
-				currentMemoryMB := int64(vmMo.Config.Hardware.MemoryMB)
-				if newMemoryMB != currentMemoryMB {
-					p.logger.Info("Memory change requested", "vm_id", req.Id, "old_mb", currentMemoryMB, "new_mb", newMemoryMB)
-					configSpec.MemoryMB = newMemoryMB
-					hasChanges = true
-				}
-			} else {
-				p.logger.Warn("Failed to parse memory value", "memory", memory, "error", err)
-			}
+	// Memory (MemoryMiB is already MiB; vSphere MemoryMB is the same numeric value)
+	if desired.Class.MemoryMiB > 0 {
+		newMemoryMB := int64(desired.Class.MemoryMiB)
+		currentMemoryMB := int64(vmMo.Config.Hardware.MemoryMB)
+		if newMemoryMB != currentMemoryMB {
+			p.logger.Info("Memory change requested", "vm_id", req.Id, "old_mb", currentMemoryMB, "new_mb", newMemoryMB)
+			configSpec.MemoryMB = newMemoryMB
+			hasChanges = true
 		}
 	}
 
-	// Handle disk changes
-	if disksData, ok := desired["disks"].([]interface{}); ok && len(disksData) > 0 {
-		// Get the first disk (primary disk) for resizing
-		if diskData, ok := disksData[0].(map[string]interface{}); ok {
-			if sizeStr, ok := diskData["size"].(string); ok {
-				sizeGiB, err := p.parseMemory(sizeStr)
-				if err == nil {
-					// Convert MiB to GiB (if parseMemory returns MiB)
-					sizeGB := sizeGiB / 1024
-					if sizeGB > 0 {
-						// Find the primary disk
-						var primaryDisk *types.VirtualDisk
-						for _, device := range vmMo.Config.Hardware.Device {
-							if disk, ok := device.(*types.VirtualDisk); ok {
-								primaryDisk = disk
-								break
-							}
-						}
+	// Disk resize (grow-only): the primary disk's SizeGiB from the desired spec.
+	if len(desired.Disks) > 0 && desired.Disks[0].SizeGiB > 0 {
+		sizeGB := int64(desired.Disks[0].SizeGiB)
+		// Find the primary disk
+		var primaryDisk *types.VirtualDisk
+		for _, device := range vmMo.Config.Hardware.Device {
+			if disk, ok := device.(*types.VirtualDisk); ok {
+				primaryDisk = disk
+				break
+			}
+		}
+		if primaryDisk != nil {
+			currentSizeGB := primaryDisk.CapacityInKB / (1024 * 1024)
+			if sizeGB > currentSizeGB {
+				p.logger.Info("Disk resize requested", "vm_id", req.Id, "old_gb", currentSizeGB, "new_gb", sizeGB)
 
-						if primaryDisk != nil {
-							currentSizeGB := primaryDisk.CapacityInKB / (1024 * 1024)
-							if sizeGB > currentSizeGB {
-								p.logger.Info("Disk resize requested", "vm_id", req.Id, "old_gb", currentSizeGB, "new_gb", sizeGB)
+				// Create a new disk with updated size
+				newDisk := *primaryDisk
+				newDisk.CapacityInKB = sizeGB * 1024 * 1024 // Convert GiB to KB
 
-								// Create a new disk with updated size
-								newDisk := *primaryDisk
-								newDisk.CapacityInKB = sizeGB * 1024 * 1024 // Convert GB to KB
-
-								deviceSpec := &types.VirtualDeviceConfigSpec{
-									Operation: types.VirtualDeviceConfigSpecOperationEdit,
-									Device:    &newDisk,
-								}
-
-								configSpec.DeviceChange = append(configSpec.DeviceChange, deviceSpec)
-								hasChanges = true
-							}
-						}
-					}
+				deviceSpec := &types.VirtualDeviceConfigSpec{
+					Operation: types.VirtualDeviceConfigSpecOperationEdit,
+					Device:    &newDisk,
 				}
+
+				configSpec.DeviceChange = append(configSpec.DeviceChange, deviceSpec)
+				hasChanges = true
 			}
 		}
 	}
@@ -1011,50 +1006,6 @@ func (p *Provider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureR
 
 	// Return empty task response since we completed synchronously
 	return &providerv1.TaskResponse{}, nil
-}
-
-// parseMemory converts a Kubernetes-style quantity string to mebibytes (MiB).
-// Supported suffixes and their conversions:
-//
-//   - "Gi" — gibibytes, multiplied by 1024 to yield MiB.
-//   - "Mi" — mebibytes, returned as-is.
-//   - "Ki" — kibibytes, divided by 1024 to yield MiB (fractional KiB is truncated).
-//   - no suffix — assumed to already be MiB; parsed as a decimal integer.
-//
-// An error is returned for unrecognised suffixes or non-numeric values.
-func (p *Provider) parseMemory(memStr string) (int64, error) {
-	memStr = strings.TrimSpace(memStr)
-
-	if strings.HasSuffix(memStr, "Gi") {
-		val, err := strconv.ParseFloat(strings.TrimSuffix(memStr, "Gi"), 64)
-		if err != nil {
-			return 0, err
-		}
-		return int64(val * 1024), nil // Convert GiB to MiB
-	}
-
-	if strings.HasSuffix(memStr, "Mi") {
-		val, err := strconv.ParseInt(strings.TrimSuffix(memStr, "Mi"), 10, 64)
-		if err != nil {
-			return 0, err
-		}
-		return val, nil
-	}
-
-	if strings.HasSuffix(memStr, "Ki") {
-		val, err := strconv.ParseFloat(strings.TrimSuffix(memStr, "Ki"), 64)
-		if err != nil {
-			return 0, err
-		}
-		return int64(val / 1024), nil // Convert KiB to MiB
-	}
-
-	// Try parsing as raw number (assume MiB)
-	val, err := strconv.ParseInt(memStr, 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("invalid memory format: %s", memStr)
-	}
-	return val, nil
 }
 
 // HardwareUpgrade implements the ProviderServer interface. It upgrades the virtual
