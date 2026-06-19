@@ -87,6 +87,14 @@ The `observability` values block (and its `serviceMonitorLabels`/`prometheusRule
 - [ ] Requires cluster rollout
 - [x] Config change only
 - [ ] Documentation only
+## [2026-06-17 13:03] - libvirt: drop hard-coded qemu emulator path
+**Author:** @jing2uo (Komh)
+
+### Fixed
+- `internal/providers/libvirt/provider_virsh.go`: `generateDomainXMLWithStorage` no longer hard-codes `<emulator>/usr/bin/qemu-system-x86_64</emulator>` in the generated domain XML. That path only exists on Debian/Ubuntu; on RHEL/CentOS the QEMU binary lives at `/usr/libexec/qemu-kvm`, so `Provider/Create` failed on those hosts. The `<emulator>` element is now omitted, and libvirt's qemu driver fills in the host's default emulator for the domain's `(arch, machine, type)` during define-time post-parse — the same resolution `virt-install` relies on. Because the provider talks to a possibly-remote libvirtd over SSH, the remote daemon resolves its own emulator, which is both simpler and more correct than reimplementing the selection in the provider.
+
+### Why
+The provider must run unchanged against heterogeneous libvirt hosts. Hard-coding the Debian emulator path broke VM creation on RHEL-family hosts. Verified against a CentOS host (libvirt 4.5.0) and an Ubuntu host (libvirt 8.0.0): with the element omitted, each host's `dumpxml` shows its own emulator (`/usr/libexec/qemu-kvm` and `/usr/bin/qemu-system-x86_64` respectively) and `Provider/Create` succeeds.
 
 ## [2026-06-17 10:05] - Keep the libvirt SSH private key off node disk (memory-backed volume)
 **Author:** @wrkode (William Rizzo)
