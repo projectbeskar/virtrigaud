@@ -377,6 +377,27 @@ ported verbatim.
    `known_hosts` pinned to that IP, because in-cluster DNS does not resolve the
    PVE hostname.
 
+**Parity hardening (#261).** A follow-up audit — triggered by a delete-orphan
+incident — brought the Proxmox provider to capability parity with vSphere/libvirt
+(PRs #262/#263/#264/#265). Migration-relevant outcomes:
+
+- **Transfer mode is enforced at the RPC, not just advertised (D2).**
+  `ExportDisk`/`ImportDisk` call `migration.EnsureRelayMode(req.TransferMode)`, so
+  a `direct` request fails fast with `InvalidArgument` instead of silently
+  downgrading to `relay`. Proxmox advertises **S3/relay-only** backends and now
+  rejects anything else at the door (matching libvirt's enforcement).
+- **`ExportCompression` is qcow2-only.** `ExportDisk` honors `options.compress`
+  only when the export target format is qcow2 (`qemu-img convert -c`); raw and
+  vmdk outputs are written uncompressed even when `compress: true`. The capability
+  is advertised, but with this caveat — setting `compress: true` on a non-qcow2
+  export has no size effect.
+- **`GetDiskInfo` reports real metadata.** It reads the disk's true size/used/
+  format from the storage-content API (`/nodes/{node}/storage/{storage}/content`)
+  rather than guessing, improving migration sizing accuracy.
+- Out of band of migration, the same epic hardened Delete (stop-first + purge, no
+  orphaned VMs), VMClass sizing on Create/Reconfigure, and collision-free VMID
+  allocation via `/cluster/nextid`.
+
 ### Source quiescing and Creating-phase robustness (both directions)
 
 7. **`source.powerOffBeforeMigration` is now honored** (was a no-op). The

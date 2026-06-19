@@ -1,8 +1,10 @@
 # Basic VM Migration Example
 # Migrates a VM from one provider to another with minimal configuration.
 #
-# storage.type is enum-constrained to "pvc" only (v0.3.6).
-# Only vSphere → Libvirt/KVM is currently tested.
+# NOTE: this example uses the legacy PVC-backed storage path (compat-only).
+# The recommended, validated path is S3/relay across all three providers in any
+# direction — see vmmigration-s3.yaml and vmmigration-proxmox-s3.yaml. PVC does
+# NOT work for Proxmox or for host-resident libvirt disks.
 
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMMigration

@@ -8,11 +8,15 @@ VirtRigaud's validated cross-hypervisor migration is **storage-backend-agnostic*
 (ADR-0006): the disk is staged through an object store (S3-compatible) and the
 **provider pod is the S3 client**, so the bytes flow host → pod → S3 → pod → host
 and **never traverse a CSI PVC**. The source exports its native disk format and
-the target converts on import. This is the recommended path for the
-vSphere ↔ libvirt directions.
+the target converts on import. This is the validated path across **all three
+providers in any direction** — vSphere, libvirt, and Proxmox (ADR-0006 Slices
+1–3). The Proxmox provider is **S3/relay-only**: it does not advertise a PVC, NFS,
+or `direct` backend, so a `storage.type: pvc` migration with a Proxmox source or
+target fails capability validation.
 
-A PVC-backed model also exists and is the basis for the (untested) Proxmox
-roadmap examples below; it requires a ReadWriteMany StorageClass.
+A legacy PVC-backed model also exists for the vSphere/libvirt directions (a
+ReadWriteMany StorageClass), but it is compat-only and does not work for Proxmox
+or for host-resident libvirt disks the provider pod cannot reach.
 
 Key points before using these examples:
 
@@ -31,8 +35,8 @@ Key points before using these examples:
 |------|-----------|---------|--------|
 | [`../vmmigration-s3.yaml`](../vmmigration-s3.yaml) | vSphere → Libvirt/KVM | S3 | **Tested** (ADR-0006 Slice 1) |
 | [libvirt-to-vsphere.yaml](./libvirt-to-vsphere.yaml) | Libvirt/KVM → vSphere | S3 | **Tested** (ADR-0006 Slice 2) |
-| [vsphere-to-proxmox.yaml](./vsphere-to-proxmox.yaml) | vSphere → Proxmox VE | PVC | Untested (roadmap) |
-| [proxmox-to-libvirt.yaml](./proxmox-to-libvirt.yaml) | Proxmox VE → Libvirt/KVM | PVC | Untested (roadmap) |
+| [vsphere-to-proxmox.yaml](./vsphere-to-proxmox.yaml) | vSphere → Proxmox VE | S3 | **Tested** (ADR-0006 Slice 3) |
+| [proxmox-to-libvirt.yaml](./proxmox-to-libvirt.yaml) | Proxmox VE → Libvirt/KVM | S3 | **Tested** (ADR-0006 Slice 3) |
 
 ## Quick start (S3, vSphere ↔ libvirt)
 
@@ -72,8 +76,11 @@ Key points before using these examples:
    kubectl describe vmmigration your-migration-name
    ```
 
-For the PVC-backed roadmap examples (Proxmox), supply a ReadWriteMany
-StorageClass and use `storage.type: pvc` as shown in those files.
+The Proxmox directions (`vsphere-to-proxmox.yaml`, `proxmox-to-libvirt.yaml`) use
+the same S3/relay shape. Note that the Proxmox **Provider's** Secret must carry
+both an API token (`token_id`/`token_secret`) and SSH credentials (`ssh_user` +
+`ssh_password` and/or `ssh_privatekey`) plus a pinned `known_hosts`, because the
+Proxmox disk data plane runs `qemu-img`/`qm` on the PVE node over SSH.
 
 ## Reference
 

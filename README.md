@@ -283,11 +283,15 @@ Go 1.26+ is required for source builds.
 
 ## VM Migration
 
-VirtRigaud supports VM migration between providers using PVC-backed storage.
+VirtRigaud migrates VMs between providers by staging the disk through an
+S3-compatible object store (ADR-0006). The **provider pod is the S3 client**, so
+the bytes flow host → pod → S3 → pod → host and never traverse a CSI PVC; the
+source exports its native disk format and the target converts on import.
 
-**Currently tested**: vSphere → Libvirt/KVM only. Other directions (Libvirt → vSphere, any Proxmox path) are roadmap items and unverified.
-
-Migration requires a `ReadWriteMany` StorageClass (NFS, CephFS, or similar):
+**Validated**: all three providers in any direction — vSphere ↔ Libvirt/KVM ↔
+Proxmox VE (ADR-0006 Slices 1–3). The Proxmox provider participates as a full
+source and target and is **S3/relay-only** (it does not advertise PVC/NFS/`direct`
+backends).
 
 ```yaml
 apiVersion: infra.virtrigaud.io/v1beta1
@@ -304,12 +308,21 @@ spec:
     providerRef:
       name: target-provider
   storage:
-    type: pvc       # Only "pvc" is supported — s3/http/nfs are not implemented
-    pvc:
-      storageClassName: nfs-migration-storage
-      size: 100Gi
-      accessMode: ReadWriteMany
+    type: s3
+    transferMode: relay        # relay (implemented); auto → relay
+    s3:
+      bucket: virtrigaud
+      endpoint: http://minio.example:9000   # omit for AWS S3
+      region: us-east-1
+      usePathStyle: true                     # true for MinIO/Ceph/rustfs; false for AWS
+      credentialsSecretRef:
+        name: s3-migration-credentials       # keys: accessKeyID, secretAccessKey
 ```
+
+> A legacy `storage.type: pvc` model (ReadWriteMany StorageClass) remains for the
+> vSphere/libvirt directions but is compat-only — it does not work for Proxmox or
+> for host-resident libvirt disks. See [`examples/migration/`](examples/migration/)
+> for per-direction examples.
 
 For full migration documentation including provider restart behaviour, see the [Migration Guide](https://projectbeskar.github.io/virtrigaud/operations/vm-migration/).
 

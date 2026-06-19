@@ -1,9 +1,11 @@
 # Advanced VM Migration Example
 # Demonstrates available VMMigration configuration options for v0.3.6.
 #
-# IMPORTANT CONSTRAINTS:
-# - storage.type only accepts "pvc" (enum-constrained). s3/http/nfs are not implemented.
-# - Only vSphere → Libvirt/KVM migration is tested. Other paths are roadmap.
+# NOTES:
+# - This example uses the legacy PVC-backed storage path (compat-only). The
+#   recommended, validated path is S3/relay across all three providers in any
+#   direction — see vmmigration-s3.yaml and vmmigration-proxmox-s3.yaml. PVC does
+#   NOT work for Proxmox or for host-resident libvirt disks.
 # - Fields that don't exist on the CRD (options.type, options.storage.*,
 #   options.performance.*, source.providerRef) have been removed.
 

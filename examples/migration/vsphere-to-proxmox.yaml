@@ -1,16 +1,39 @@
-# Example: Migrate a VM from VMware vSphere to Proxmox VE
+# Example: Migrate a VM from VMware vSphere to Proxmox VE over S3 (ADR-0006 Slice 3).
 #
-# WARNING: This migration direction (vSphere → Proxmox) is NOT currently tested.
-# Only vSphere → Libvirt/KVM is tested in v0.3.6. Use this example with caution.
+# vSphere → Proxmox is validated end-to-end over the S3/relay path. The disk is
+# staged through an S3-compatible object store and the provider pod is the S3
+# client, so bytes flow vCenter → pod → S3 → pod → PVE node and NEVER traverse a
+# CSI PVC. (The Proxmox provider is S3/relay-only — it does NOT advertise
+# PVC/NFS/`direct` backends; a `storage.type: pvc` migration with a Proxmox target
+# fails capability validation.)
 #
-# This example previously showed NFS URI storage, which is NOT supported.
-# storage.type is constrained to "pvc" only. Use an NFS-backed StorageClass instead.
+# Data path: the vSphere SOURCE exports its native vmdk and streams it up to S3;
+# the Proxmox TARGET streams the object down to the PVE node over SSH, runs
+# `qemu-img convert -O qcow2`, then `qm importdisk` into a freshly created shell VM.
+#
+# The Proxmox provider is a HYBRID: an API-token control plane (REST) plus an SSH
+# data plane to the PVE node. The Proxmox Provider's Secret carries BOTH an API
+# token (token_id/token_secret) AND SSH credentials (ssh_user + ssh_password
+# and/or ssh_privatekey) plus a pinned known_hosts. This VMMigration only
+# references the S3 credentials below.
 #
 # Prerequisites:
-# - Source VM "windows-server-2022" running on vSphere
-# - Target Proxmox provider configured
-# - A ReadWriteMany StorageClass (NFS, CephFS, etc.)
-
+# - Source VM "windows-server-2022" managed by a vSphere provider
+# - Target Proxmox provider configured (API token + SSH credentials)
+# - An S3-compatible bucket reachable from both provider pods
+---
+# S3 credentials Secret (same namespace as the VMMigration). Required keys:
+# accessKeyID, secretAccessKey. Optional: sessionToken (STS / temporary creds).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: s3-migration-credentials
+  namespace: production
+type: Opaque
+stringData:
+  accessKeyID: "REPLACE_WITH_ACCESS_KEY_ID"
+  secretAccessKey: "REPLACE_WITH_SECRET_ACCESS_KEY"
+  # sessionToken: "REPLACE_WITH_SESSION_TOKEN"   # only for temporary/STS creds
 ---
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMMigration
@@ -28,39 +51,48 @@ spec:
   source:
     vmRef:
       name: windows-server-2022
-    createSnapshot: true
-    powerOffBeforeMigration: false
+    createSnapshot: false
+    # Power the source off before exporting. REQUIRED for a vSphere source: ESXi
+    # locks a running VM's disk, so the export clone fails with "...vmdk is locked".
+    powerOffBeforeMigration: true
     deleteAfterMigration: false     # Keep source until target is validated
-
   target:
     name: windows-server-2022-pve
-    namespace: production
     providerRef:
       name: proxmox-cluster
       namespace: default
     classRef:
       name: windows-4cpu-8gb
-
-  # PVC-backed storage — only supported storage type in v0.3.6.
-  # Using an NFS-backed StorageClass achieves the same result as a direct NFS mount.
+    powerOn: false
+    # A raw/qcow2 disk migration carries the disk, not the NIC — re-specify the
+    # target network so the migrated VM boots with an adapter (map to a PVE bridge).
+    networks:
+      - name: production-network
+  # S3-compatible object storage staging.
   storage:
-    type: pvc
-    pvc:
-      storageClassName: nfs-migration-storage
-      size: 100Gi
-      accessMode: ReadWriteMany
-
+    type: s3
+    transferMode: relay             # relay (implemented) | auto→relay
+    s3:
+      bucket: virtrigaud
+      endpoint: http://rustfs.lab.k8:9000   # http:// ⇒ plaintext; omit for AWS
+      region: us-east-1
+      prefix: windows-server-2022/
+      usePathStyle: true            # true for rustfs/MinIO/Ceph RGW; false for AWS
+      credentialsSecretRef:
+        name: s3-migration-credentials
   options:
+    # The SOURCE exports its native vmdk and the TARGET converts to qcow2 on import
+    # (ADR-0006 D4); diskFormat is advisory. NOTE: `compress` is honored only for
+    # qcow2 exports — raw/vmdk exports are not compressed even if set true.
     diskFormat: qcow2
     compress: false
-    verifyChecksums: true
+    verifyChecksums: true           # SHA256 of the transferred object (ADR-0006 D5)
     timeout: "4h"
     retryPolicy:
       maxRetries: 5
       retryDelay: "10m"
       backoffMultiplier: 2
     cleanupPolicy: OnSuccess
-
   metadata:
     purpose: "provider-change"
     environment: "prod"
@@ -70,4 +102,4 @@ spec:
 #   kubectl get vmmigration windows-vsphere-to-proxmox -w
 #
 # Validate target VM before removing source:
-#   Log into Proxmox web UI, start windows-server-2022-pve, verify Windows boots
+#   Log into the Proxmox web UI, start windows-server-2022-pve, verify Windows boots.
