@@ -42,12 +42,14 @@ func GetProviderCapabilities() *capabilities.Manager {
 		DiskExport("qcow2", "raw", "vmdk").
 		ExportCompression().
 		DiskImport("qcow2", "raw", "vmdk").
-		// ADR-0006: ExportDisk/ImportDisk implement BOTH the legacy pod-side
-		// (pvc, relay-shaped) staging path AND the S3 relay data path (bytes flow
-		// node ↔ provider-pod ↔ S3 over SSH; the pod is the S3 client). nfs and
-		// direct transfer remain unimplemented, so they are not advertised.
-		ExportBackends(migration.PVCAndS3ExportBackends()...).
-		ImportBackends(migration.PVCAndS3ImportBackends()...).
+		// ADR-0006: only the S3 relay data path is real for Proxmox — bytes flow
+		// node ↔ provider-pod ↔ S3 over SSH (the pod is the S3 client). The legacy
+		// pvc path (storage_helper.go) does os.Open on node-local image paths,
+		// which a remote provider pod can never reach, so pvc is NOT advertised
+		// (advertising it lets a migration select a backend that always fails).
+		// nfs and direct transfer remain unimplemented, so they are not advertised.
+		ExportBackends(migration.S3OnlyExportBackends()...).
+		ImportBackends(migration.S3OnlyImportBackends()...).
 		TransferModes(migration.RelayOnlyTransferModes()...).
 		DiskTypes("raw", "qcow2").
 		NetworkTypes("bridge", "vlan").

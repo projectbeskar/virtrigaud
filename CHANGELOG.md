@@ -5,6 +5,23 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-19 07:20] - fix(proxmox): delete no longer orphans VMs; finalizer retained on delete failure (#261 P0)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/controller/virtualmachine_controller.go` (P0-2, cross-cutting): `handleDeletion` no longer removes the VirtualMachine finalizer when the provider `Delete` fails. The old code logged the error and continued (`// Continue with cleanup even if deletion fails`), so a failed delete deleted the CR while leaving the hypervisor VM running — orphaning it on **any** provider (a real compliance problem for the regulated posture). It now keeps the finalizer and requeues on a real failure, treats a provider `NotFound` as already-deleted (idempotent), and honors a new `virtrigaud.io/force-delete: "true"` annotation as an operator escape hatch for a permanently-unreachable provider. Adds a `contracts.IsNotFound` helper and unit tests.
+- `internal/providers/proxmox/{server.go,pveapi/client.go}` (P0-1): the Proxmox `Delete` now stops a running VM first (Proxmox refuses to destroy a running VM — "VM <id> is running - destroy failed") and then destroys it with `purge=1&destroy-unreferenced-disks=1`, waiting for both tasks so a successful Delete means the VM is actually gone. Mirrors vSphere (power-off → Destroy) and libvirt (destroy → undefine). Also fixes the pveapi request builder to honor a query string instead of percent-encoding the `?` into the path. Fake PVE server now rejects destroying a running VM so the stop-first path is exercised by tests.
+- `internal/providers/proxmox/capabilities.go` (P0-3): drop the dishonest `pvc` disk export/import backend advertisement — the legacy pvc path `os.Open`s node-local image paths the provider pod can never reach, so only `s3` is advertised. Adds `migration.S3Only{Export,Import}Backends`.
+
+### Why
+A `kubectl delete virtualmachine` of Proxmox VMs removed the Kubernetes resources but left the VMs running on the hypervisor. Root cause was two bugs (a Proxmox `Delete` that can't destroy a running VM, and a controller that drops the finalizer even when the provider delete fails). This is the P0 slice of the Proxmox feature-parity epic (#261), which audits Proxmox against vSphere/libvirt.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (manager + proxmox provider images)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-06-18 20:40] - migration: wire powerOffBeforeMigration + Proxmox matrix validated (ADR-0006)
 **Author:** @wrkode (William Rizzo)
 

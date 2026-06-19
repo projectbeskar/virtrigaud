@@ -17,6 +17,7 @@ limitations under the License.
 package contracts
 
 import (
+	"errors"
 	"fmt"
 )
 
@@ -76,6 +77,15 @@ func (e *ProviderError) IsRetryable() bool {
 	return e.Retryable || e.Type == ErrorTypeRetryable ||
 		e.Type == ErrorTypeUnavailable || e.Type == ErrorTypeTimeout ||
 		e.Type == ErrorTypeRateLimit
+}
+
+// IsNotFound reports whether err is, or wraps, a provider NotFound error. The
+// transport client maps a gRPC codes.NotFound into a *ProviderError of this
+// type (see mapGRPCError), so controllers can treat an already-absent resource
+// as success rather than a failure.
+func IsNotFound(err error) bool {
+	var pe *ProviderError
+	return errors.As(err, &pe) && pe.Type == ErrorTypeNotFound
 }
 
 // NewNotFoundError creates a not found error
