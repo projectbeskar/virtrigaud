@@ -5,6 +5,27 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-19 10:30] - docs(proxmox): align migration docs/examples with shipped parity; ExportCompression caveat (#261 P2-4)
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `README.md`: rewrote the **VM Migration** section — the S3/relay path is the validated model across **all three providers in any direction** (vSphere ↔ libvirt ↔ Proxmox); the example now uses `storage.type: s3` and PVC is demoted to compat-only. The old text claimed "only vSphere → Libvirt tested" and "pvc only — s3/http/nfs not implemented", both false post-#236/#261.
+- `examples/migration/proxmox-to-libvirt.yaml`, `examples/migration/vsphere-to-proxmox.yaml`: rewrote from the stale, broken **PVC** shape to **S3/relay** (mirroring `vmmigration-proxmox-s3.yaml`). The Proxmox provider is S3-only, so the old `storage.type: pvc` examples failed capability validation against Proxmox.
+- `examples/migration/README.md`: marked both Proxmox directions **Tested (ADR-0006 Slice 3)** over S3; corrected the model description (all-direction S3, Proxmox S3-only); documented that the Proxmox Provider Secret needs both API-token and SSH creds.
+- `examples/vmmigration-basic.yaml`, `examples/vmmigration-advanced.yaml`: corrected headers — these are legacy PVC compat examples; S3 is the recommended/validated path; dropped the "only vSphere→libvirt tested / s3 not implemented" claims.
+
+### Added
+- `docs/adr/0006-storage-backend-agnostic-cross-hypervisor-migration.md`: a **parity-hardening (#261)** note in Slice 3 — relay-mode is now enforced at the RPC (`EnsureRelayMode`, `InvalidArgument` on `direct`), and **P2-4**: `ExportCompression` is qcow2-only (`compress: true` has no effect on raw/vmdk exports). The qcow2-only caveat is also surfaced in the rewritten example headers.
+
+### Why
+Closes the last open items on the Proxmox parity epic (#261): the P2-4 ExportCompression caveat was undocumented, and several in-repo migration docs/examples still described the pre-parity world (pvc-only, "untested" Proxmox), actively contradicting the shipped behavior.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
 ## [2026-06-19 09:30] - fix(proxmox): collision-free VMIDs, real disk-info, drop key logging (#261 P2)
 **Author:** @wrkode (William Rizzo)
 
