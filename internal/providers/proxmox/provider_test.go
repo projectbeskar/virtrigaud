@@ -216,6 +216,43 @@ func TestProxmoxProvider_Delete(t *testing.T) {
 	assert.False(t, describeResp.Exists)
 }
 
+// TestProxmoxProvider_DeleteRunningVMStopsFirst proves the #261 P0-1 fix: a
+// running VM is stopped before it is destroyed. The fake PVE server rejects a
+// destroy of a running VM (status 500 "is running - destroy failed", mirroring
+// real PVE), so a Delete that did not stop first would fail and orphan the VM.
+func TestProxmoxProvider_DeleteRunningVMStopsFirst(t *testing.T) {
+	_, endpoint, err := pvefake.StartFakeServer()
+	require.NoError(t, err)
+	provider := createTestProvider(endpoint)
+	ctx := context.Background()
+
+	createResp, err := provider.Create(ctx, &providerv1.CreateRequest{
+		Name:      "del-running",
+		ClassJson: `{"cpus": 1, "memory": "1Gi"}`,
+	})
+	require.NoError(t, err)
+	if createResp.Task != nil {
+		require.NoError(t, waitForTask(ctx, provider, createResp.Task.Id))
+	}
+
+	// Power it on so the hypervisor reports it running.
+	_, err = provider.Power(ctx, &providerv1.PowerRequest{Id: createResp.Id, Op: providerv1.PowerOp_POWER_OP_ON})
+	require.NoError(t, err)
+	desc, err := provider.Describe(ctx, &providerv1.DescribeRequest{Id: createResp.Id})
+	require.NoError(t, err)
+	require.Equal(t, "On", desc.PowerState, "VM should be running before the delete")
+
+	// Delete must stop the VM first, then destroy it — without the stop the fake
+	// returns 500 and this errors.
+	_, err = provider.Delete(ctx, &providerv1.DeleteRequest{Id: createResp.Id})
+	require.NoError(t, err, "Delete must stop a running VM before destroying it")
+
+	// VM is gone.
+	desc, err = provider.Describe(ctx, &providerv1.DescribeRequest{Id: createResp.Id})
+	require.NoError(t, err)
+	assert.False(t, desc.Exists, "VM must be destroyed after Delete")
+}
+
 func TestProxmoxProvider_GetCapabilities(t *testing.T) {
 	// Start fake PVE server
 	_, endpoint, err := pvefake.StartFakeServer()
@@ -243,14 +280,15 @@ func TestProxmoxProvider_GetCapabilities(t *testing.T) {
 	// `-c` for qcow2 targets (#219), so compression is advertised.
 	assert.True(t, resp.SupportsExportCompression, "Proxmox ExportDisk compresses qcow2 targets when Compress=true (#219)")
 
-	// ADR-0006: Proxmox advertises BOTH the legacy pvc path and the S3 relay
-	// data path on export and import; nfs/direct remain unimplemented.
-	assert.Equal(t, []string{"pvc", "s3"}, resp.SupportedExportBackends,
-		"Proxmox advertises pvc + s3 export backends (ADR-0006)")
-	assert.Equal(t, []string{"pvc", "s3"}, resp.SupportedImportBackends,
-		"Proxmox advertises pvc + s3 import backends (ADR-0006)")
+	// ADR-0006: Proxmox advertises ONLY the S3 relay data path. The legacy pvc
+	// path does os.Open on node-local image paths the provider pod can't reach,
+	// so advertising pvc would be dishonest (#261 P0-3). nfs/direct unimplemented.
+	assert.Equal(t, []string{"s3"}, resp.SupportedExportBackends,
+		"Proxmox advertises s3-only export backend (pvc is not reachable off-node)")
+	assert.Equal(t, []string{"s3"}, resp.SupportedImportBackends,
+		"Proxmox advertises s3-only import backend (pvc is not reachable off-node)")
 	assert.Equal(t, []string{"relay"}, resp.SupportedTransferModes,
-		"both pvc and s3 paths are relay-shaped (bytes flow node ↔ pod ↔ backend)")
+		"the s3 path is relay-shaped (bytes flow node ↔ pod ↔ backend)")
 }
 
 func TestExportNeedsConversion(t *testing.T) {

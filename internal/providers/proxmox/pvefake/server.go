@@ -386,8 +386,17 @@ func (s *Server) handleDeleteVM(w http.ResponseWriter, r *http.Request) {
 	defer s.mu.Unlock()
 
 	// Check if VM exists
-	if _, exists := s.vms[vmid]; !exists {
+	vm, exists := s.vms[vmid]
+	if !exists {
 		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	// PVE refuses to destroy a running VM — callers must stop it first. Mirroring
+	// that here makes the fake exercise the provider's stop-before-destroy path
+	// (#261 P0-1); a bare destroy of a running VM would orphan it.
+	if vm.Status == "running" {
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("VM %d is running - destroy failed", vmid))
 		return
 	}
 

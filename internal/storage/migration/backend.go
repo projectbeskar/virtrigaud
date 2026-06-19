@@ -77,6 +77,17 @@ func PVCAndS3ExportBackends() []string { return []string{BackendPVC, BackendS3} 
 // libvirt provider as the TARGET in ADR-0006 Slice 1 (vSphere → S3 → libvirt).
 func PVCAndS3ImportBackends() []string { return []string{BackendPVC, BackendS3} }
 
+// S3OnlyExportBackends is the honest export-backend set for a provider whose
+// only working transfer is S3. The Proxmox provider uses this: its disks live on
+// the PVE node and the provider pod is the S3 client (bytes flow node ↔ pod ↔ S3
+// over SSH). The legacy pvc path does os.Open on node-local image paths, which a
+// remote pod can never reach, so advertising pvc would be dishonest.
+func S3OnlyExportBackends() []string { return []string{BackendS3} }
+
+// S3OnlyImportBackends is the honest import-backend set for an S3-only provider
+// (the Proxmox TARGET). See S3OnlyExportBackends for why pvc is excluded.
+func S3OnlyImportBackends() []string { return []string{BackendS3} }
+
 // RelayOnlyTransferModes is the honest transfer-mode set for a provider that
 // only implements the pod-side (relay) path. Both the legacy pvc path and the
 // ADR-0006 Slice 1 S3 path are relay-shaped (bytes flow host → provider-pod →

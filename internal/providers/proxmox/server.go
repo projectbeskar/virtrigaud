@@ -369,17 +369,43 @@ func (p *Provider) Delete(ctx context.Context, req *providerv1.DeleteRequest) (*
 		return nil, errors.NewInvalidSpec("invalid VM reference: %v", err)
 	}
 
-	taskID, err := p.client.DeleteVM(ctx, node, vmid)
+	// Proxmox refuses to destroy a running VM ("VM <id> is running - destroy
+	// failed"), so stop it first and wait for the stop to complete — mirroring
+	// vSphere (power-off → Destroy) and libvirt (destroyDomain → undefine). If PVE
+	// no longer knows the VM, GetVM/DeleteVM treat it as already deleted, so a
+	// missing VM is not an error.
+	vm, err := p.client.GetVM(ctx, node, vmid)
+	if err == nil && vm != nil {
+		switch vm.Status {
+		case "running", "paused", "suspended":
+			stopTask, stopErr := p.client.PowerOperation(ctx, node, vmid, "stop")
+			if stopErr != nil {
+				return nil, errors.NewInternal("failed to stop VM before delete", stopErr)
+			}
+			if stopTask != "" {
+				if werr := p.client.WaitForTask(ctx, node, stopTask); werr != nil {
+					return nil, errors.NewInternal("failed waiting for VM to stop before delete", werr)
+				}
+			}
+		}
+	}
+
+	// Destroy with purge=1 so the config, disk volumes, and any backup/replication
+	// references are reclaimed (a bare DELETE leaves disks behind). Wait for the
+	// destroy task so a successful Delete RPC means the VM is actually gone — the
+	// controller removes the finalizer on success, so returning success while the
+	// VM still exists would orphan it.
+	taskID, err := p.client.DeleteVM(ctx, node, vmid, true)
 	if err != nil {
 		return nil, errors.NewInternal("failed to delete VM", err)
 	}
-
-	result := &providerv1.TaskResponse{}
 	if taskID != "" {
-		result.Task = &providerv1.TaskRef{Id: taskID}
+		if werr := p.client.WaitForTask(ctx, node, taskID); werr != nil {
+			return nil, errors.NewInternal("failed waiting for VM destroy task", werr)
+		}
 	}
 
-	return result, nil
+	return &providerv1.TaskResponse{}, nil
 }
 
 // Power performs power operations on a virtual machine

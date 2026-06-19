@@ -285,7 +285,9 @@ func (p *Provider) createFromImportedDisk(
 		if attachOK {
 			return
 		}
-		delTask, derr := p.client.DeleteVM(context.Background(), node, vmConfig.VMID)
+		// purge=true so the rollback also reclaims any disk already imported into
+		// the half-built shell (the shell is never started, so no stop is needed).
+		delTask, derr := p.client.DeleteVM(context.Background(), node, vmConfig.VMID, true)
 		if derr != nil {
 			p.logger.Warn("Failed to delete half-built VM shell after imported-disk failure (manual cleanup may be needed)",
 				"vmid", vmConfig.VMID, "error", derr)

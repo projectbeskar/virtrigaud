@@ -61,6 +61,23 @@ const (
 	errReasonImagePrepare     = "image-prepare"
 )
 
+// forceDeleteAnnotation, when set to "true" on a VirtualMachine, lets the
+// finalizer be removed even if the provider Delete keeps failing. It is the
+// operator escape hatch for a permanently-unreachable provider; by default a
+// failed Delete retains the finalizer and retries so the hypervisor VM is never
+// silently orphaned.
+const forceDeleteAnnotation = "virtrigaud.io/force-delete"
+
+// vmDeleteRetryInterval is the requeue cadence while a provider Delete keeps
+// failing (finalizer retained until it succeeds or force-delete is set).
+const vmDeleteRetryInterval = 15 * time.Second
+
+// hasForceDeleteAnnotation reports whether the VM carries the force-delete
+// escape-hatch annotation set to "true".
+func hasForceDeleteAnnotation(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
+	return vm.Annotations[forceDeleteAnnotation] == "true"
+}
+
 // ProviderResolver resolves Provider resources to provider implementations.
 // Implemented by *remote.Resolver in production; can be mocked in tests.
 type ProviderResolver interface {
@@ -405,13 +422,31 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 			} else {
 				logger.Info("Deleting VM from provider", "id", vm.Status.ID)
 				taskRef, err := providerInstance.Delete(ctx, vm.Status.ID)
-				if err != nil {
-					logger.Error(err, "Failed to delete VM from provider")
+				switch {
+				case err == nil:
+					if taskRef != "" {
+						logger.Info("VM deletion initiated", "taskRef", taskRef)
+						// TODO: Wait for task completion in future iterations
+					}
+				case contracts.IsNotFound(err):
+					// The hypervisor VM is already gone — nothing to orphan, so
+					// proceed to finalizer removal (idempotent delete).
+					logger.Info("VM already absent from provider; proceeding with cleanup", "id", vm.Status.ID)
+				case hasForceDeleteAnnotation(vm):
+					// Operator opted out of the safety gate: drop the finalizer even
+					// though the provider VM may be left behind. Logged loudly.
+					logger.Error(err, "Provider VM delete failed but force-delete annotation is set; removing finalizer (the provider VM may be orphaned)",
+						"id", vm.Status.ID, "annotation", forceDeleteAnnotation)
 					metrics.RecordError(errReasonProviderDelete, metrics.ComponentManager)
-					// Continue with cleanup even if deletion fails
-				} else if taskRef != "" {
-					logger.Info("VM deletion initiated", "taskRef", taskRef)
-					// TODO: Wait for task completion in future iterations
+				default:
+					// Real failure (e.g. PVE "VM is running - destroy failed"). Do
+					// NOT remove the finalizer — that would orphan the hypervisor VM.
+					// Retain it and requeue so the delete is retried; an operator can
+					// set the force-delete annotation to break out if needed.
+					logger.Error(err, "Failed to delete VM from provider; retaining finalizer and retrying",
+						"id", vm.Status.ID)
+					metrics.RecordError(errReasonProviderDelete, metrics.ComponentManager)
+					return ctrl.Result{RequeueAfter: vmDeleteRetryInterval}, nil
 				}
 			}
 		}

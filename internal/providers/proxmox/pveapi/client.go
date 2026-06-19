@@ -276,7 +276,15 @@ func (c *Client) request(ctx context.Context, method, path string, body interfac
 		}
 	}
 
-	reqURL := c.baseURL.ResolveReference(&url.URL{Path: path})
+	// Split an optional query string off the path: a url.URL with the query in
+	// its Path field would percent-encode the "?" (e.g. DELETE …/qemu/123?purge=1
+	// becomes …/qemu/123%3Fpurge=1), so set RawQuery explicitly.
+	ref := &url.URL{Path: path}
+	if i := strings.IndexByte(path, '?'); i >= 0 {
+		ref.Path = path[:i]
+		ref.RawQuery = path[i+1:]
+	}
+	reqURL := c.baseURL.ResolveReference(ref)
 	req, err := http.NewRequestWithContext(ctx, method, reqURL.String(), reqBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
@@ -448,9 +456,16 @@ func (c *Client) CloneVM(ctx context.Context, node string, vmid int, config *VMC
 	return "", fmt.Errorf("unexpected response format")
 }
 
-// DeleteVM deletes a VM
-func (c *Client) DeleteVM(ctx context.Context, node string, vmid int) (string, error) {
+// DeleteVM deletes a VM. When purge is true the destroy also removes the VM's
+// disk volumes and drops it from any backup/replication jobs
+// (purge=1&destroy-unreferenced-disks=1); a bare DELETE leaves the disks behind.
+// The VM must already be stopped — PVE returns 500 "VM is running - destroy
+// failed" otherwise (callers stop it first).
+func (c *Client) DeleteVM(ctx context.Context, node string, vmid int, purge bool) (string, error) {
 	path := fmt.Sprintf("/api2/json/nodes/%s/qemu/%d", node, vmid)
+	if purge {
+		path += "?purge=1&destroy-unreferenced-disks=1"
+	}
 
 	resp, err := c.request(ctx, "DELETE", path, nil)
 	if err != nil {
