@@ -5,6 +5,24 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-19 12:30] - fix(security): migration storage host allowlist closes live S3-endpoint SSRF; gates NFS (ADR-0006 C3, #236)
+**Author:** @wrkode (William Rizzo)
+
+### Security
+- `internal/storage/migration/addrpolicy.go` (new) + `internal/controller/vmmigration_controller.go`: a `VMMigration`'s `storage.s3.endpoint` is tenant-controlled and was dialed by the provider pod **with no host validation** — a live SSRF. A migration could point the pod at `169.254.169.254` (cloud-metadata), loopback, or an internal service, and the S3 SDK would present the configured credentials there. The controller now enforces a `HostPolicy` at the `Validating` phase: it **always** rejects loopback / link-local (including the metadata address) / unspecified / multicast targets, and — when the new allowlist is configured — anything outside it. Hostnames are resolved and **every** resolved address is checked (a validate-time DNS-rebind guard). RFC1918/private ranges stay permitted by default so on-prem storage works; regulated deployments should set the allowlist. The same gate is the hard prerequisite (ADR-0006 Slice 4, condition C3) for the NFS `direct`-mode backend, where the hypervisor host would dial the address — so it lands first.
+
+### Added
+- `cmd/manager/main.go`: `--migration-storage-allowed-hosts` flag (comma-separated IP/CIDR) wiring the allowlist into the VMMigration reconciler. Empty = permissive except the always-denied set.
+- `api/infra.virtrigaud.io/v1beta1/vmmigration_types.go`: `MaxLength` bounds on `S3StorageConfig.Endpoint` and `NFSStorageConfig.{Server,Export,Path}` (apiserver-side payload cap; CRDs regenerated).
+
+### Why
+The NFS migration security review (ADR-0006 Slice 4, C3) found the shipped S3 path dials an unvalidated, tenant-controlled endpoint — exploitable today — and that the NFS backend would extend the same exposure to the hypervisor host. This closes the live S3 SSRF and provides the reusable host gate the NFS slices build on.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (manager)
+- [ ] Config change only
+
 ## [2026-06-19 11:30] - fix(vsphere): Reconfigure honors VMClass CPU/memory (wrong JSON keys) (#266)
 **Author:** @wrkode (William Rizzo)
 

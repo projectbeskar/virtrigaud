@@ -247,10 +247,12 @@ spec:
                       export:
                         description: Export is the exported NFS path on the server
                           (e.g. "/exports/migrations").
+                        maxLength: 4096
                         type: string
                       path:
                         description: Path is an optional sub-path within the export
                           for this migration's data.
+                        maxLength: 4096
                         type: string
                       readOnly:
                         default: false
@@ -258,8 +260,10 @@ spec:
                           (defaulted bool footgun, PR #235).'
                         type: boolean
                       server:
-                        description: Server is the NFS server hostname or IP exporting
-                          the share.
+                        description: |-
+                          Server is the NFS server hostname or IP exporting the share. The host is
+                          gated by the controller's SSRF allowlist before it is dialed (ADR-0006 C3).
+                        maxLength: 253
                         type: string
                     required:
                     - export
@@ -325,8 +329,11 @@ spec:
                         - name
                         type: object
                       endpoint:
-                        description: Endpoint overrides the S3 endpoint (empty = AWS
-                          default; set for MinIO/Ceph RGW).
+                        description: |-
+                          Endpoint overrides the S3 endpoint (empty = AWS default; set for MinIO/Ceph RGW).
+                          The host is gated by the controller's SSRF allowlist before it is dialed
+                          (ADR-0006 C3). MaxLength bounds an apiserver-side payload.
+                        maxLength: 263
                         type: string
                       prefix:
                         description: Prefix is the key prefix for this migration's

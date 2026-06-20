@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -43,6 +44,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 	"github.com/projectbeskar/virtrigaud/internal/resilience"
 	"github.com/projectbeskar/virtrigaud/internal/runtime/remote"
+	storagemigration "github.com/projectbeskar/virtrigaud/internal/storage/migration"
 	"github.com/projectbeskar/virtrigaud/internal/version"
 )
 
@@ -94,6 +96,7 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var enforceProviderCapabilities bool
+	var migrationStorageAllowedHosts string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
@@ -133,6 +136,11 @@ func main() {
 			"self-reported capabilities (issue #176). Opt-in: ensure provider "+
 			"capability flags are accurate before enabling, as under-reported "+
 			"capabilities will block otherwise-supported operations.")
+	flag.StringVar(&migrationStorageAllowedHosts, "migration-storage-allowed-hosts", "",
+		"Comma-separated IP/CIDR allowlist for migration staging backends (the S3 "+
+			"endpoint host and NFS server). Empty = permissive except the always-denied "+
+			"loopback/link-local/metadata/multicast targets (ADR-0006 C3, SSRF gate). "+
+			"Set to lock migration egress to known storage networks.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -343,6 +351,12 @@ func main() {
 		mgr.GetEventRecorderFor("vmmigration-controller"),
 		enforceProviderCapabilities,
 	)
+	storageHostPolicy, hpErr := storagemigration.NewHostPolicy(strings.Split(migrationStorageAllowedHosts, ","))
+	if hpErr != nil {
+		setupLog.Error(hpErr, "invalid --migration-storage-allowed-hosts")
+		os.Exit(1)
+	}
+	vmmigrationReconciler.StorageHostPolicy = storageHostPolicy
 	if err = vmmigrationReconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "VMMigration")
 		os.Exit(1)

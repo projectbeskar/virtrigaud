@@ -74,6 +74,12 @@ type VMMigrationReconciler struct {
 	// byte-for-byte unchanged. See gateDiskExport / gateDiskImport.
 	EnforceCapabilities bool
 
+	// StorageHostPolicy gates the network address of a migration staging backend
+	// (S3 endpoint / NFS server) against an SSRF allowlist at the Validating
+	// phase (ADR-0006 C3). When nil, a default policy is used that still denies
+	// the always-forbidden loopback/link-local/metadata/multicast targets.
+	StorageHostPolicy *storagemigration.HostPolicy
+
 	// longOpInFlight is an in-memory guard against re-issuing a long-running,
 	// non-idempotent migration RPC (ExportDisk / ImportDisk) when a reconcile
 	// re-enters before the prior status write has propagated to the informer
@@ -1862,6 +1868,20 @@ func (r *VMMigrationReconciler) isProviderReady(provider *infrav1beta1.Provider)
 }
 
 // validateStorageConfig validates the storage configuration
+// defaultStorageHostPolicy denies only the always-forbidden SSRF targets
+// (loopback/link-local/metadata/multicast); used when no operator allowlist was
+// wired into the reconciler, so the SSRF gate is active by default.
+var defaultStorageHostPolicy, _ = storagemigration.NewHostPolicy(nil)
+
+// storageHostPolicy returns the reconciler's configured host policy, or the
+// deny-dangerous-only default when none was wired.
+func (r *VMMigrationReconciler) storageHostPolicy() *storagemigration.HostPolicy {
+	if r.StorageHostPolicy != nil {
+		return r.StorageHostPolicy
+	}
+	return defaultStorageHostPolicy
+}
+
 func (r *VMMigrationReconciler) validateStorageConfig(ctx context.Context, storageConfig *infrav1beta1.MigrationStorage) error {
 	if storageConfig == nil {
 		return fmt.Errorf("storage configuration is required")
@@ -1883,6 +1903,13 @@ func (r *VMMigrationReconciler) validateStorageConfig(ctx context.Context, stora
 		}
 		if storageConfig.S3.CredentialsSecretRef.Name == "" {
 			return fmt.Errorf("s3.credentialsSecretRef is required for s3 storage type")
+		}
+		// SSRF gate (ADR-0006 C3): the endpoint is tenant-controlled and is dialed
+		// by the provider pod (which also presents the S3 credentials there), so
+		// reject metadata/loopback/link-local targets and anything outside the
+		// operator allowlist before the migration proceeds.
+		if err := r.storageHostPolicy().ValidateS3Endpoint(storageConfig.S3.Endpoint); err != nil {
+			return fmt.Errorf("s3 endpoint not permitted: %w", err)
 		}
 		return nil
 	default:
