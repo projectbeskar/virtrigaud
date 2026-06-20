@@ -249,6 +249,14 @@ spec:
                           (e.g. "/exports/migrations").
                         maxLength: 4096
                         type: string
+                      gid:
+                        description: |-
+                          GID is the AUTH_SYS group ID presented to the NFS server (ADR-0006 C5).
+                          Unset = the data-plane process identity.
+                        format: int64
+                        maximum: 4294967295
+                        minimum: 0
+                        type: integer
                       path:
                         description: Path is an optional sub-path within the export
                           for this migration's data.
@@ -265,6 +273,16 @@ spec:
                           gated by the controller's SSRF allowlist before it is dialed (ADR-0006 C3).
                         maxLength: 253
                         type: string
+                      uid:
+                        description: |-
+                          UID is the AUTH_SYS user ID presented to the NFS server (ADR-0006 C5). The
+                          export's squash policy is the real authorization boundary; this lets an
+                          operator align the client identity with the export. Unset = the data-plane
+                          process identity (the provider pod or SSH user).
+                        format: int64
+                        maximum: 4294967295
+                        minimum: 0
+                        type: integer
                     required:
                     - export
                     - server

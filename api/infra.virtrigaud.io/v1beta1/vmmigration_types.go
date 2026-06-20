@@ -293,6 +293,20 @@ type NFSStorageConfig struct {
 	// +optional
 	// +kubebuilder:default=false
 	ReadOnly bool `json:"readOnly"`
+	// UID is the AUTH_SYS user ID presented to the NFS server (ADR-0006 C5). The
+	// export's squash policy is the real authorization boundary; this lets an
+	// operator align the client identity with the export. Unset = the data-plane
+	// process identity (the provider pod or SSH user).
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=4294967295
+	UID *int64 `json:"uid,omitempty"`
+	// GID is the AUTH_SYS group ID presented to the NFS server (ADR-0006 C5).
+	// Unset = the data-plane process identity.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=4294967295
+	GID *int64 `json:"gid,omitempty"`
 }
 
 // PVCStorageConfig defines PVC storage configuration
