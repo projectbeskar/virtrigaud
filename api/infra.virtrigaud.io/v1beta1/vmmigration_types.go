@@ -253,7 +253,10 @@ type S3StorageConfig struct {
 	// Bucket is the S3 bucket for the transfer object.
 	Bucket string `json:"bucket"`
 	// Endpoint overrides the S3 endpoint (empty = AWS default; set for MinIO/Ceph RGW).
+	// The host is gated by the controller's SSRF allowlist before it is dialed
+	// (ADR-0006 C3). MaxLength bounds an apiserver-side payload.
 	// +optional
+	// +kubebuilder:validation:MaxLength=263
 	Endpoint string `json:"endpoint,omitempty"`
 	// Region is the S3 region for the bucket (empty = provider/SDK default).
 	// +optional
@@ -275,12 +278,16 @@ type S3StorageConfig struct {
 // NFSStorageConfig defines NFS-based staging configuration used to stage a
 // migration's transferred disk. Surface-only in ADR-0006 Slice 0.
 type NFSStorageConfig struct {
-	// Server is the NFS server hostname or IP exporting the share.
+	// Server is the NFS server hostname or IP exporting the share. The host is
+	// gated by the controller's SSRF allowlist before it is dialed (ADR-0006 C3).
+	// +kubebuilder:validation:MaxLength=253
 	Server string `json:"server"`
 	// Export is the exported NFS path on the server (e.g. "/exports/migrations").
+	// +kubebuilder:validation:MaxLength=4096
 	Export string `json:"export"`
 	// Path is an optional sub-path within the export for this migration's data.
 	// +optional
+	// +kubebuilder:validation:MaxLength=4096
 	Path string `json:"path,omitempty"`
 	// ReadOnly mounts the export read-only. No `omitempty` (defaulted bool footgun, PR #235).
 	// +optional
