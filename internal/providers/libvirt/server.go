@@ -538,8 +538,8 @@ func (s *Server) GetCapabilities(ctx context.Context, req *providerv1.GetCapabil
 		// vmdk→qcow2 convert) and EXPORTS (host-side flatten to standalone qcow2 +
 		// stream) over pvc AND s3. Only the relay transfer mode is implemented;
 		// direct is not.
-		SupportedExportBackends: migration.PVCAndS3ExportBackends(),
-		SupportedImportBackends: migration.PVCAndS3ImportBackends(),
+		SupportedExportBackends: migration.PVCS3AndNFSExportBackends(),
+		SupportedImportBackends: migration.PVCS3AndNFSImportBackends(),
 		SupportedTransferModes:  migration.RelayOnlyTransferModes(),
 	}, nil
 }
@@ -553,11 +553,22 @@ func (s *Server) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReque
 	// of Slice 1's vSphere→S3→libvirt). Accept pvc and s3; reject nfs/unknown
 	// honestly. Only the relay transfer mode is implemented; an explicit "direct"
 	// fails loudly (never a silent downgrade, ADR-0006 D2).
-	if err := migration.EnsurePVCOrS3Backend(req.BackendType); err != nil {
+	if err := migration.EnsurePVCS3OrNFSBackend(req.BackendType); err != nil {
 		return nil, err
 	}
-	if err := migration.EnsureRelayMode(req.TransferMode); err != nil {
-		return nil, err
+	// Relay-mode enforcement applies to the s3 streaming path; the nfs transport
+	// is qemu-img-native (the host writes nfs:// directly via libnfs), so it is
+	// exempt from the relay/direct distinction (ADR-0006 Slice 4).
+	if req.BackendType != migration.BackendNFS {
+		if err := migration.EnsureRelayMode(req.TransferMode); err != nil {
+			return nil, err
+		}
+	}
+
+	// NFS export: the host's qemu-img writes the flattened qcow2 straight to the
+	// nfs:// export (no pod hop, no S3 client).
+	if req.BackendType == migration.BackendNFS {
+		return s.exportDiskToNFS(ctx, req)
 	}
 
 	// S3 relay export: flatten the disk on the host and stream the standalone
@@ -631,11 +642,19 @@ func (s *Server) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReque
 	// ADR-0006: libvirt is a TARGET for the S3 relay import (Slice 1). Accept pvc
 	// and s3; reject nfs/unknown honestly. Only the relay transfer mode is
 	// implemented; an explicit "direct" fails loudly.
-	if err := migration.EnsurePVCOrS3Backend(req.BackendType); err != nil {
+	if err := migration.EnsurePVCS3OrNFSBackend(req.BackendType); err != nil {
 		return nil, err
 	}
-	if err := migration.EnsureRelayMode(req.TransferMode); err != nil {
-		return nil, err
+	if req.BackendType != migration.BackendNFS {
+		if err := migration.EnsureRelayMode(req.TransferMode); err != nil {
+			return nil, err
+		}
+	}
+
+	// NFS import: the host's qemu-img reads the staged qcow2 straight from the
+	// nfs:// export and writes it into the target pool (ADR-0006 Slice 4).
+	if req.BackendType == migration.BackendNFS {
+		return s.importDiskFromNFS(ctx, req)
 	}
 
 	// S3 relay import: download from S3 and stream into host-side qemu-img

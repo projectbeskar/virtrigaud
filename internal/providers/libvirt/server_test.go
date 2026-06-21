@@ -115,10 +115,10 @@ func TestServer_GetCapabilities_StorageBackends(t *testing.T) {
 
 	require.NoError(t, err)
 	require.NotNil(t, caps)
-	assert.Equal(t, []string{"pvc", "s3"}, caps.SupportedExportBackends,
-		"libvirt exports to pvc and s3 in Slice 2 (SOURCE of libvirt→S3→vSphere reverse relay)")
-	assert.Equal(t, []string{"pvc", "s3"}, caps.SupportedImportBackends,
-		"libvirt imports from pvc and s3 in Slice 1 (TARGET of vSphere→S3→libvirt)")
+	assert.Equal(t, []string{"pvc", "s3", "nfs"}, caps.SupportedExportBackends,
+		"libvirt exports to pvc, s3 and nfs (NFS qemu-img transport, ADR-0006 Slice 4)")
+	assert.Equal(t, []string{"pvc", "s3", "nfs"}, caps.SupportedImportBackends,
+		"libvirt imports from pvc, s3 and nfs (NFS qemu-img transport, ADR-0006 Slice 4)")
 	assert.Equal(t, []string{"relay"}, caps.SupportedTransferModes)
 }
 
@@ -176,18 +176,41 @@ func TestServer_ImportDisk_DirectModeRejected(t *testing.T) {
 		"explicit direct mode must fail loudly (ADR-0006 D2)")
 }
 
-// TestServer_ImportDisk_NFSBackendUnimplemented verifies nfs is still rejected
-// with Unimplemented on the import path (only pvc/s3 are implemented).
-func TestServer_ImportDisk_NFSBackendUnimplemented(t *testing.T) {
+// TestServer_ImportDisk_NFSBackendPassesGate verifies that, as of ADR-0006 Slice
+// 4, an ImportDisk naming the nfs backend now PASSES the backend gate and is
+// exempt from the relay-mode gate (NFS uses qemu-img's native nfs:// transport),
+// failing LATER at the nil-provider check inside importDiskFromNFS — NOT with
+// codes.Unimplemented. Inversion of the old "nfs rejected" assertion.
+func TestServer_ImportDisk_NFSBackendPassesGate(t *testing.T) {
 	s := &Server{}
 
 	_, importErr := s.ImportDisk(context.Background(), &providerv1.ImportDiskRequest{
-		SourceUrl:   "nfs://server/export/disk",
+		SourceUrl:   "nfs://server/export/disk.qcow2",
 		BackendType: "nfs",
 	})
 	require.Error(t, importErr)
-	assert.Equal(t, codes.Unimplemented, status.Code(importErr),
-		"nfs import is not yet implemented (ADR-0006 Slice 4)")
+	assert.NotEqual(t, codes.Unimplemented, status.Code(importErr),
+		"libvirt ImportDisk must NOT reject nfs in Slice 4: the NFS qemu-img import is implemented")
+	assert.Contains(t, importErr.Error(), "not initialized",
+		"nfs import must pass the gate and fail later at the nil-provider check")
+}
+
+// TestServer_ExportDisk_NFSBackendPassesGate is the export-side sibling: nfs
+// export passes the gate (and the relay-mode exemption) and fails at the
+// nil-provider check, not with Unimplemented.
+func TestServer_ExportDisk_NFSBackendPassesGate(t *testing.T) {
+	s := &Server{}
+
+	_, exportErr := s.ExportDisk(context.Background(), &providerv1.ExportDiskRequest{
+		VmId:           "vm-1",
+		DestinationUrl: "nfs://server/export/disk.qcow2",
+		BackendType:    "nfs",
+	})
+	require.Error(t, exportErr)
+	assert.NotEqual(t, codes.Unimplemented, status.Code(exportErr),
+		"libvirt ExportDisk must NOT reject nfs in Slice 4")
+	assert.Contains(t, exportErr.Error(), "not initialized",
+		"nfs export must pass the gate and fail later at the nil-provider check")
 }
 
 // fakeDiskProvider is a minimal contracts.Provider used to exercise the Server's

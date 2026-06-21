@@ -77,6 +77,27 @@ func PVCAndS3ExportBackends() []string { return []string{BackendPVC, BackendS3} 
 // libvirt provider as the TARGET in ADR-0006 Slice 1 (vSphere → S3 → libvirt).
 func PVCAndS3ImportBackends() []string { return []string{BackendPVC, BackendS3} }
 
+// PVCS3AndNFSExportBackends is the honest export-backend set for a provider that
+// implements the legacy pvc path, the S3 relay export, AND the NFS qemu-img
+// export (ADR-0006 Slice 4). Used by the vSphere/libvirt providers once NFS is
+// wired.
+func PVCS3AndNFSExportBackends() []string { return []string{BackendPVC, BackendS3, BackendNFS} }
+
+// PVCS3AndNFSImportBackends is the honest import-backend set for a provider that
+// implements the legacy pvc path, the S3 relay import, AND the NFS qemu-img
+// import (ADR-0006 Slice 4).
+func PVCS3AndNFSImportBackends() []string { return []string{BackendPVC, BackendS3, BackendNFS} }
+
+// S3AndNFSExportBackends is the honest export-backend set for a provider whose
+// only working transfers are S3 and NFS (no legacy pvc path). Used by the
+// Proxmox provider once NFS is wired (its disks live on the PVE node; both S3 and
+// NFS run host/node-side via qemu-img).
+func S3AndNFSExportBackends() []string { return []string{BackendS3, BackendNFS} }
+
+// S3AndNFSImportBackends is the honest import-backend set for an S3+NFS provider
+// (the Proxmox TARGET).
+func S3AndNFSImportBackends() []string { return []string{BackendS3, BackendNFS} }
+
 // S3OnlyExportBackends is the honest export-backend set for a provider whose
 // only working transfer is S3. The Proxmox provider uses this: its disks live on
 // the PVE node and the provider pod is the S3 client (bytes flow node ↔ pod ↔ S3
@@ -136,5 +157,33 @@ func EnsurePVCOrS3Backend(backendType string) error {
 	default:
 		return status.Errorf(codes.Unimplemented,
 			"backend %q not yet supported on this provider/direction (ADR-0006)", backendType)
+	}
+}
+
+// EnsurePVCS3OrNFSBackend accepts pvc, s3, and nfs (and empty = legacy pvc).
+// Providers that implement the legacy pvc path, the S3 relay path, AND the NFS
+// qemu-img path (vSphere, libvirt) call this so nfs is accepted while unknown
+// backends still fail honestly (ADR-0006 Slice 4).
+func EnsurePVCS3OrNFSBackend(backendType string) error {
+	switch backendType {
+	case "", BackendPVC, BackendS3, BackendNFS:
+		return nil
+	default:
+		return status.Errorf(codes.Unimplemented,
+			"backend %q not yet supported on this provider/direction (ADR-0006)", backendType)
+	}
+}
+
+// EnsureS3OrNFSBackend accepts only s3 and nfs (no legacy pvc). The Proxmox
+// provider uses this: its disks live on the PVE node, so the pod-mounted pvc
+// path can never work, but both the S3 relay and the NFS qemu-img paths run
+// node-side (ADR-0006 Slice 4).
+func EnsureS3OrNFSBackend(backendType string) error {
+	switch backendType {
+	case BackendS3, BackendNFS:
+		return nil
+	default:
+		return status.Errorf(codes.Unimplemented,
+			"backend %q not supported on this provider; only s3 and nfs are implemented (ADR-0006)", backendType)
 	}
 }
