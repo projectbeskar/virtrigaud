@@ -2704,7 +2704,14 @@ func (r *VMMigrationReconciler) generateStorageURL(ctx context.Context, migratio
 		if nfs == nil || nfs.Server == "" || nfs.Export == "" {
 			return "", fmt.Errorf("nfs storage configuration (server, export) is required")
 		}
-		key := fmt.Sprintf("vmmigrations/%s/%s/%s.qcow2", migration.Namespace, migration.Name, stage)
+		// FLAT key (ADR-0006 Slice 4): unlike S3, where a "a/b/c.qcow2" key creates
+		// the prefix implicitly, NFS is a real filesystem — every parent directory
+		// must already exist, and qemu-img/libnfs (the only NFS client in the data
+		// plane) cannot mkdir. A nested key therefore fails the libnfs mount with
+		// MNT3ERR_NOENT. We encode namespace/name/stage into a SINGLE filename so the
+		// staged object stays unique and traceable while needing only the export
+		// root (or the operator's optional, pre-created `path`) to exist.
+		key := fmt.Sprintf("vmmigrations-%s-%s-%s.qcow2", migration.Namespace, migration.Name, stage)
 		return storagemigration.NFSURL(storagemigration.StorageOptions{
 			Server: nfs.Server,
 			Export: nfs.Export,
