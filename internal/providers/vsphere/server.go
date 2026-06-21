@@ -477,12 +477,14 @@ func (p *Provider) GetCapabilities(ctx context.Context, req *providerv1.GetCapab
 		SupportsExportCompression: true,                             // export uses the compressed streamOptimized VMDK format
 		// ADR-0006: vSphere is the SOURCE of the vSphere → S3 → libvirt relay
 		// (Slice 1) AND, as of Slice 2, the TARGET of the libvirt → S3 → vSphere
-		// reverse relay. It therefore both EXPORTS (vCenter datastore stream → pod
-		// → S3, native vmdk) and IMPORTS (download qcow2 → monolithicSparse vmdk →
-		// datastore-HTTP upload → CopyVirtualDisk inflate) over pvc AND s3. Only
-		// the relay transfer mode is implemented; direct is not.
-		SupportedExportBackends: migration.PVCAndS3ExportBackends(),
-		SupportedImportBackends: migration.PVCAndS3ImportBackends(),
+		// reverse relay, AND, as of Slice 4, both directions over NFS. It EXPORTS
+		// (vCenter datastore stream → pod, native vmdk → S3 upload OR → qcow2 on the
+		// nfs:// export) and IMPORTS (download/read qcow2 → streamOptimized vmdk →
+		// NFC HttpNfcLease) over pvc, s3 AND nfs. The s3/pvc paths are relay-only
+		// (direct is not implemented); nfs runs pod-side via qemu-img and the
+		// controller exempts it from the relay-mode check.
+		SupportedExportBackends: migration.PVCS3AndNFSExportBackends(),
+		SupportedImportBackends: migration.PVCS3AndNFSImportBackends(),
 		SupportedTransferModes:  migration.RelayOnlyTransferModes(),
 	}, nil
 }
@@ -3402,16 +3404,21 @@ func (p *Provider) extractSnapshotNames(snapshotTree []types.VirtualMachineSnaps
 //
 // The operation runs synchronously; Task in the response is nil.
 func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskRequest) (*providerv1.ExportDiskResponse, error) {
-	// ADR-0006: vSphere is a SOURCE for the S3 relay export (Slice 1). Accept pvc
-	// and s3; reject nfs/unknown honestly. Only the relay transfer mode is
-	// implemented; an explicit "direct" fails loudly (never a silent downgrade).
-	if err := migration.EnsurePVCOrS3Backend(req.BackendType); err != nil {
+	// ADR-0006: vSphere is a SOURCE for the S3 relay export (Slice 1) and the NFS
+	// qemu-img export (Slice 4). Accept pvc, s3, and nfs; reject unknown honestly.
+	// The s3/pvc paths are relay-only — an explicit "direct" fails loudly (never a
+	// silent downgrade); nfs runs pod-side via qemu-img's native transport and is
+	// exempt from the relay check.
+	if err := migration.EnsurePVCS3OrNFSBackend(req.BackendType); err != nil {
 		return nil, err
 	}
-	if err := migration.EnsureRelayMode(req.TransferMode); err != nil {
-		return nil, err
+	if req.BackendType != migration.BackendNFS {
+		if err := migration.EnsureRelayMode(req.TransferMode); err != nil {
+			return nil, err
+		}
 	}
 	useS3 := req.BackendType == migration.BackendS3
+	useNFS := req.BackendType == migration.BackendNFS
 
 	if p.client == nil {
 		return nil, errors.NewUnavailable("vSphere client not configured", nil)
@@ -3439,11 +3446,13 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 		return nil, errors.NewInvalidSpec("unsupported export format: %s", targetFormat)
 	}
 
-	// ADR-0006 D4: the SOURCE exports its NATIVE format; the TARGET converts on
-	// import. For the S3 relay path vSphere always exports vmdk and libvirt
-	// converts vmdk→qcow2 on import. Force vmdk here regardless of req.Format so
-	// the staged object is the native disk.
-	if useS3 {
+	// ADR-0006 D4: for the S3 relay path the SOURCE exports its NATIVE format and
+	// the TARGET converts on import — vSphere always exports vmdk and libvirt
+	// converts vmdk→qcow2 on import. Force vmdk here so the staged object is the
+	// native disk. For NFS we also force vmdk through the download/flatten pipeline,
+	// then convert that self-contained local vmdk → qcow2 straight onto the nfs://
+	// export in one qemu-img pass (the NFS backend always stages qcow2).
+	if useS3 || useNFS {
 		targetFormat = "vmdk"
 	}
 
@@ -3463,30 +3472,39 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 	//   - s3:  the provider pod is the S3 client (relay export). Options come from
 	//          storage_options_json; credentials from the credentials map.
 	//   - pvc: the legacy path; the PVC is mounted at /mnt/migration-storage/<pvc>.
-	var storageConfig storage.StorageConfig
-	if useS3 {
-		storageConfig, err = migration.S3StorageConfigFromRequest(req.StorageOptionsJson, req.Credentials)
-		if err != nil {
-			return nil, errors.NewInvalidSpec("invalid s3 export configuration: %s", err.Error())
+	//   - nfs: NO storage client — the pod's qemu-img writes qcow2 straight to the
+	//          nfs:// export over libnfs (Slice 4); only validate the URL here.
+	var storageClient storage.Storage
+	if useNFS {
+		if !strings.HasPrefix(strings.TrimSpace(req.DestinationUrl), "nfs://") {
+			return nil, errors.NewInvalidSpec("nfs export destination must be an nfs:// URL, got %q", req.DestinationUrl)
 		}
 	} else {
-		// URL format: pvc://<pvc-name>/<file-path>
-		// Provider pods have PVCs mounted at /mnt/migration-storage/<pvc-name>
-		pvcName, perr := extractPVCNameFromURL(req.DestinationUrl)
-		if perr != nil {
-			return nil, errors.NewInternal("failed to extract PVC name from URL", perr)
+		var storageConfig storage.StorageConfig
+		if useS3 {
+			storageConfig, err = migration.S3StorageConfigFromRequest(req.StorageOptionsJson, req.Credentials)
+			if err != nil {
+				return nil, errors.NewInvalidSpec("invalid s3 export configuration: %s", err.Error())
+			}
+		} else {
+			// URL format: pvc://<pvc-name>/<file-path>
+			// Provider pods have PVCs mounted at /mnt/migration-storage/<pvc-name>
+			pvcName, perr := extractPVCNameFromURL(req.DestinationUrl)
+			if perr != nil {
+				return nil, errors.NewInternal("failed to extract PVC name from URL", perr)
+			}
+			storageConfig = storage.StorageConfig{
+				Type:      "pvc",
+				MountPath: fmt.Sprintf("/mnt/migration-storage/%s", pvcName),
+			}
 		}
-		storageConfig = storage.StorageConfig{
-			Type:      "pvc",
-			MountPath: fmt.Sprintf("/mnt/migration-storage/%s", pvcName),
-		}
-	}
 
-	storageClient, err := storage.NewStorage(storageConfig)
-	if err != nil {
-		return nil, errors.NewInternal("failed to create storage client", err)
+		storageClient, err = storage.NewStorage(storageConfig)
+		if err != nil {
+			return nil, errors.NewInternal("failed to create storage client", err)
+		}
+		defer storageClient.Close()
 	}
-	defer storageClient.Close()
 
 	// Create datastore file manager
 	dsManager := NewDatastoreFileManager(p)
@@ -3666,6 +3684,25 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 		uploadPath = tempFile
 	}
 
+	// ADR-0006 Slice 4 NFS SOURCE leg: the self-contained local vmdk is written
+	// straight to the nfs:// export AS qcow2 by the pod's qemu-img (libnfs) — no
+	// storage-client upload. Returns early; the s3/pvc upload below is skipped.
+	if useNFS {
+		nfsURL := strings.TrimSpace(req.DestinationUrl)
+		p.logger.Info("Writing disk to NFS export", "destination", nfsURL, "local_vmdk", uploadPath)
+		if err := p.exportLocalVMDKToNFS(ctx, uploadPath, nfsURL); err != nil {
+			return nil, errors.NewInternal("failed to write disk to nfs export", err)
+		}
+		p.logger.Info("Disk export to NFS completed", "export_id", exportID, "destination", nfsURL)
+		return &providerv1.ExportDiskResponse{
+			ExportId: exportID,
+			Task:     nil, // synchronous
+			// No EstimatedSizeBytes/Checksum: qemu-img emits no in-stream byte SHA256
+			// over the libnfs write; integrity is established target-side (the import's
+			// qemu-img read + post-import uuid query) — ADR-0006 Slice 4.
+		}, nil
+	}
+
 	// Upload to destination storage
 	p.logger.Info("Uploading disk to storage", "destination", req.DestinationUrl)
 
@@ -3733,16 +3770,23 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 // passed as VMImage.Path in a subsequent Create request. The operation runs
 // synchronously; Task in the response is nil.
 func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskRequest) (*providerv1.ImportDiskResponse, error) {
-	// ADR-0006: vSphere is a TARGET for the S3 relay import (Slice 2, the reverse
-	// of Slice 1's vSphere→S3→libvirt). Accept pvc and s3; reject nfs/unknown
-	// honestly instead of falling through to the pvc path.
-	if err := migration.EnsurePVCOrS3Backend(req.BackendType); err != nil {
+	// ADR-0006: vSphere is a TARGET for the S3 relay import (Slice 2, the reverse of
+	// Slice 1's vSphere→S3→libvirt) and the NFS qemu-img import (Slice 4). Accept
+	// pvc, s3, and nfs; reject unknown honestly instead of falling through to pvc.
+	if err := migration.EnsurePVCS3OrNFSBackend(req.BackendType); err != nil {
 		return nil, err
 	}
 
+	// ADR-0006 Slice 4 NFS import: the pod's qemu-img reads the staged qcow2 from
+	// the nfs:// export and converts it to a streamOptimized vmdk, then imports it
+	// via the same NFC lease path as S3 (see nfs.go). Never logs credentials.
+	if req.BackendType == migration.BackendNFS {
+		return p.importDiskFromNFS(ctx, req)
+	}
+
 	// S3 relay import (Approach 2): download the staged qcow2, convert to a
-	// monolithicSparse vmdk, upload via datastore-HTTP, and inflate with
-	// CopyVirtualDisk. Never logs the credentials map.
+	// streamOptimized vmdk, and import via the vCenter NFC HttpNfcLease. Never logs
+	// the credentials map.
 	if req.BackendType == migration.BackendS3 {
 		return p.importDiskFromS3(ctx, req)
 	}
