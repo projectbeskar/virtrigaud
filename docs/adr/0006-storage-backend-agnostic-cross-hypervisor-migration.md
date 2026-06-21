@@ -315,6 +315,49 @@ the planned libvirt→libvirt and `direct`-mode slices. As shipped:
   **Proxmox → vSphere**, and **vSphere → Proxmox** all reach `Ready`. Combined
   with Slices 1–2 (vSphere ⇄ libvirt) this closes the **complete 3-hypervisor S3
   matrix** for #236; only the NFS backend and the `direct` mode remain.
+- **Slice 4 — NFS backend, all three providers, both directions, validated
+  2026-06-21.** The disk is staged on an NFS export and moved with **qemu-img's
+  native transport** (no PVC, no relay, no S3 credentials). libvirt (host-side) and
+  vSphere (pod-side) use qemu-img's `nfs://` libnfs driver directly; **Proxmox uses
+  a kernel NFS mount** because `pve-qemu-kvm` ships no libnfs driver (`qemu-img`
+  rejects `nfs://` with `Unknown protocol 'nfs'`). Validated end-to-end against an
+  OpenMediaVault server: libvirt↔libvirt, libvirt→vSphere, vSphere→libvirt,
+  libvirt→Proxmox, and Proxmox→libvirt all reach `Ready`. With the S3 matrix
+  (Slices 1–3) this completes #236's backend-agnostic goal; only the `direct` mode
+  and resumability hardening (Slice 5) remain.
+
+### Slice 4 decisions & findings (NFS backend)
+
+1. **qemu-img native transport, not a PVC mount.** libvirt and vSphere shell out to
+   `qemu-img convert` against an `nfs://<server><export>/<key>?uid=&gid=` URL — the
+   mature libnfs client qemu/KVM already use. No Go/Rust NFS client, no privileged
+   pod mount. The Debian `qemu-block-extra` package provides `block-nfs.so`; it is
+   baked into the vSphere provider image and is present on the libvirt host.
+2. **Proxmox cannot use libnfs — it kernel-mounts.** `pve-qemu-kvm` is built without
+   the libnfs block driver, so the Proxmox provider mounts the export with the
+   node's kernel NFS client (exactly how PVE's first-class NFS storage mounts) and
+   runs `qemu-img` against the mount. The export is **two-stage**: `qemu-img` as
+   root flattens the root-owned source to a local temp, then the temp is copied onto
+   the export as the migration's `nfs.uid/gid` via `setpriv` — a single process
+   cannot be both root (to read the source) and the share's uid (to write the
+   export), which only libnfs (URL-set uid) can decouple.
+3. **`nfs.uid`/`nfs.gid` (C5) are mandatory in practice.** AUTH_SYS authorizes by
+   the numeric uid/gid the client presents; each provider's qemu-img runs as a
+   different identity, so all legs must be pinned to the export owner's uid/gid or
+   the import fails `NFS3ERR_ACCES`. This was the first cross-provider lab finding.
+4. **The staged object is FLAT.** NFS is a real filesystem — it cannot create a
+   nested key's parent directories the way an S3 key prefix does (a nested key fails
+   the libnfs mount with `MNT3ERR_NOENT`). The controller stages
+   `vmmigrations-<ns>-<name>-<stage>.qcow2` in the export root.
+5. **Integrity is target-side.** qemu-img emits no in-stream byte checksum over the
+   NFS transport, so D5's dual checksum degrades to a target-side `qemu-img check` /
+   post-import uuid query rather than a SHA256 match. The security re-bless accepted
+   this for the qemu-img model.
+6. **Security posture (C6).** AUTH_SYS/NFSv3 is cleartext with no Kerberos; the
+   uid/gid is an assertion, not an authenticated identity. Operators must run the
+   export on a trusted network, keep `root_squash` on, and use one export per
+   tenant. The server host is SSRF-gated by `--migration-storage-allowed-hosts`
+   (C3, shared with S3).
 
 ### Slice 2 decisions & findings (refine D3/D4 for the vSphere target)
 

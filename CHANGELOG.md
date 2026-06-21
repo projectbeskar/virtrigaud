@@ -5,6 +5,22 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-21 15:30] - docs(migration): NFS backend guide, examples, and ADR-0006 Slice 4 validation (#236)
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `examples/vmmigration-nfs.yaml`: rewritten from the stale Slice-0 PVC-on-NFS model to the validated `storage.type: nfs` qemu-img backend (server/export/uid/gid), with inline requirements (mandatory `nfs.uid/gid`, reachability/ACL, host allowlist) and C6 hardening notes.
+- `examples/migration/README.md`: new **NFS staging backend** section (per-provider transport table, the mandatory uid/gid rule, flat staging object, C3 host allowlist, C6 cleartext/`root_squash`/one-export-per-tenant hardening); added the NFS example to the table; corrected the now-stale "Proxmox is S3-only" claim (Proxmox advertises s3 **and** nfs).
+- `docs/adr/0006-storage-backend-agnostic-cross-hypervisor-migration.md`: **Slice 4 — NFS backend, validated 2026-06-21** implementation-log entry + a "Slice 4 decisions & findings" subsection (qemu-img native transport; Proxmox kernel-mount because pve-qemu has no libnfs; uid/gid mandatory; flat key; target-side integrity; C6 posture).
+
+### Why
+Document the NFS migration backend lab-validated across all three providers in both directions, and the operational requirements operators must follow (uid/gid, export hardening).
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [x] Documentation only
+
 ## [2026-06-21 14:30] - fix(proxmox): NFS migration via kernel mount (pve-qemu lacks libnfs) (ADR-0006 Slice 4, #236)
 **Author:** @wrkode (William Rizzo)
 

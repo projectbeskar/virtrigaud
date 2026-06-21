@@ -1,89 +1,74 @@
-# NFS-staged cross-hypervisor migration.
+# VMMigration over the NFS staging backend (ADR-0006 Slice 4).
 #
-# There are TWO ways to involve NFS, and they are different:
+# The NFS backend stages the disk on an NFS export and moves it with qemu-img's
+# native transport — there is NO PVC and NO provider-pod relay. Each provider
+# reaches the export the way that is natural for it:
+#   - libvirt  : the libvirt HOST's qemu-img writes/reads nfs:// over libnfs.
+#   - vSphere  : the provider POD's qemu-img writes/reads nfs:// over libnfs.
+#   - Proxmox  : the PVE NODE kernel-mounts the export (pve-qemu has no libnfs)
+#                and qemu-img works against the mount.
 #
-#  1. WORKING TODAY — PVC backed by an NFS StorageClass. The migration uses the
-#     standard `storage.type: pvc` path; the PVC just happens to be provisioned
-#     on NFS. This is the recommended approach and is shown first below.
+# REQUIREMENTS (read before using):
+#   1. nfs.uid / nfs.gid are effectively MANDATORY for cross-provider migrations.
+#      AUTH_SYS authorizes by the numeric uid/gid the client presents, and each
+#      provider's qemu-img runs as a different process identity (the libvirt SSH
+#      user, the vSphere pod's uid 65532, the Proxmox node's root). Set uid/gid to
+#      the identity that OWNS the export's files so every provider can read AND
+#      write the same staged object. Omitting them works only when every leg
+#      happens to present a uid the export already trusts.
+#   2. The NFS server must be reachable from the data plane of BOTH providers
+#      (the hypervisor host/node for libvirt/Proxmox, the provider pod for
+#      vSphere) and must allow those client IPs in the export ACL.
+#   3. The server host must pass the operator's migration-storage host allowlist
+#      (--migration-storage-allowed-hosts); loopback/link-local/metadata targets
+#      are always rejected (ADR-0006 C3).
 #
-#  2. SURFACE ONLY (ADR-0006 Slice 0) — the native `storage.type: nfs` backend.
-#     It exists in the CRD/proto/capability surface but has NO transfer logic
-#     yet, so it is rejected at the Validating phase with:
-#
-#       storage backend "nfs" is not yet implemented; only "pvc" is supported
-#       today (ADR-0006 Slice 0)
-#
-#     The native-nfs snippet is shown second, commented, for review stability.
-#
-# Currently tested migration path: vSphere → Libvirt/KVM. Other directions are
-# roadmap.
-
-# NFS StorageClass — create once per cluster (approach #1).
-apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: nfs-migration-storage
-provisioner: nfs.csi.k8s.io
-parameters:
-  server: nfs-server.company.local
-  share: /export/vm-migrations
-volumeBindingMode: Immediate
-reclaimPolicy: Delete
-
----
-# VMMigration using a PVC on the NFS-backed StorageClass (approach #1 — WORKS).
+# Harden the export (ADR-0006 C6): one export per tenant, root_squash on, and
+# remember AUTH_SYS + NFSv3 are CLEARTEXT with no Kerberos — run it only on a
+# trusted migration network.
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMMigration
 metadata:
-  name: libvirt-to-proxmox-migration
+  name: app-libvirt-to-vsphere-nfs
   namespace: default
 spec:
   source:
     vmRef:
-      name: legacy-app-libvirt
-    createSnapshot: true
+      name: app-on-libvirt
+    # A powered-off source gives a clean cold copy; a snapshot is optional and
+    # not required for NFS. (Leave createSnapshot unset/false to avoid the
+    # multi-disk/CDROM snapshot pitfall.)
+    createSnapshot: false
     powerOffBeforeMigration: true
-
   target:
-    name: legacy-app-proxmox
+    name: app-on-vsphere
     providerRef:
-      name: proxmox-cluster
-      namespace: default
+      name: vsphere-prod
     classRef:
-      name: standard-4cpu-8gb
+      name: standard-2cpu-4gb
     networks:
-      - name: vlan-100-production
-    placementRef:
-      name: proxmox-node-2
-
-  # PVC on an NFS StorageClass — the working path today.
+      - name: primary
+        networkRef:
+          name: vm-network
+    powerOn: false
   storage:
-    type: pvc
-    pvc:
-      storageClassName: nfs-migration-storage
-      size: 200Gi
-      accessMode: ReadWriteMany
-
-  # ----------------------------------------------------------------------------
-  # Approach #2 (ADR-0006 Slice 0, SURFACE ONLY — rejected at validation today):
-  # replace the `storage:` block above with the native nfs backend below.
-  #
-  # storage:
-  #   type: nfs
-  #   transferMode: auto        # auto | relay | direct
-  #   nfs:
-  #     server: nfs-server.company.local
-  #     export: /export/vm-migrations
-  #     path: legacy-app/        # optional sub-path within the export
-  #     readOnly: false
-  # ----------------------------------------------------------------------------
-
+    type: nfs
+    nfs:
+      # NFS server exporting the staging share (IP or hostname; a hostname is
+      # resolved and SSRF-checked by the controller).
+      server: 172.16.56.13
+      # Absolute exported path on the server. The staged object is a single flat
+      # file in this export root: vmmigrations-<ns>-<name>-<stage>.qcow2 (NFS
+      # cannot auto-create directories the way S3 keys do).
+      export: /export/virtrigaud
+      # AUTH_SYS identity presented to the server — set to the export owner's
+      # uid/gid (see REQUIREMENTS above). Mandatory in practice for cross-provider.
+      uid: 1000
+      gid: 1000
+    # transferMode is informational for nfs: the qemu-img transport is neither
+    # "relay" nor pod-mediated, and the controller exempts nfs from the relay gate.
+    transferMode: auto
   options:
-    diskFormat: qcow2
-    compress: false
+    cleanupPolicy: OnSuccess
     verifyChecksums: true
-    timeout: "4h"
-    retryPolicy:
-      maxRetries: 3
-      retryDelay: "3m"
-      backoffMultiplier: 2
+    timeout: 1h
