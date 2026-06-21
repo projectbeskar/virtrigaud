@@ -50,8 +50,12 @@ FROM ${BASE_IMAGE} as runtime
 # Install qemu-img and CA certificates, then upgrade any installed packages
 # to pick up security fixes that may not yet be baked into the base image
 # layer (matches the pattern used in cmd/provider-libvirt/Dockerfile).
+# qemu-block-extra ships qemu's block-nfs.so (libnfs) driver, which the
+# ADR-0006 Slice 4 NFS migration backend uses to read/write nfs:// directly
+# from the pod's qemu-img — without it, qemu-img cannot open an nfs:// URL.
 RUN apt-get update && apt-get install -y \
     qemu-utils \
+    qemu-block-extra \
     ca-certificates \
     && apt-get upgrade -y \
     && rm -rf /var/lib/apt/lists/* \
