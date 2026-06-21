@@ -79,18 +79,68 @@ func TestBuildExportFlattenCommand(t *testing.T) {
 	})
 }
 
-// TestBuildNFSImportConvertCommand pins the node-side qemu-img argv that reads the
-// staged qcow2 from nfs:// into the node stage file: -f qcow2 -O qcow2, no -U
-// (static source), with both the nfs:// URL and the stage path shell-quoted so a
-// crafted URL cannot break out of the argument.
-func TestBuildNFSImportConvertCommand(t *testing.T) {
-	cmd := buildNFSImportConvertCommand(
-		"nfs://172.16.56.13/export/virtrigaud/vmmigrations/ns/web/import.qcow2",
-		"/var/tmp/.virtrigaud-import-web.qcow2")
-	assert.Equal(t,
-		"qemu-img convert -f qcow2 -O qcow2 'nfs://172.16.56.13/export/virtrigaud/vmmigrations/ns/web/import.qcow2' '/var/tmp/.virtrigaud-import-web.qcow2'",
-		cmd)
-	assert.NotContains(t, cmd, " -U ", "import source is a static staged file; -U is not needed")
+// TestNFSInMountRel covers resolving the staged object's in-mount path from the
+// controller-built nfs:// URL by stripping the export prefix, tolerating query
+// params, and rejecting traversal / out-of-export paths.
+func TestNFSInMountRel(t *testing.T) {
+	rel, err := nfsInMountRel("nfs://172.16.56.13/export/virtrigaud/vmmigrations-ns-m1-export.qcow2", "/export/virtrigaud")
+	require.NoError(t, err)
+	assert.Equal(t, "vmmigrations-ns-m1-export.qcow2", rel)
+
+	rel2, err := nfsInMountRel("nfs://h/export/x/f.qcow2?gid=1000&uid=1000", "/export/x")
+	require.NoError(t, err)
+	assert.Equal(t, "f.qcow2", rel2, "query params must not leak into the in-mount path")
+
+	if _, err := nfsInMountRel("nfs://h/export/x/../etc/passwd", "/export/x"); err == nil {
+		t.Error("path traversal must be rejected")
+	}
+	if _, err := nfsInMountRel("nfs://h/export/x", "/export/x"); err == nil {
+		t.Error("a URL that names only the export root (no object) must be rejected")
+	}
+}
+
+// TestNFSSetprivPrefix verifies qemu-img is dropped to the migration's uid/gid only
+// when both are set; otherwise it runs as the SSH user (root).
+func TestNFSSetprivPrefix(t *testing.T) {
+	u, g := int64(1000), int64(1000)
+	assert.Equal(t, "setpriv --reuid 1000 --regid 1000 --clear-groups ", nfsSetprivPrefix(&u, &g))
+	assert.Equal(t, "", nfsSetprivPrefix(nil, nil))
+	assert.Equal(t, "", nfsSetprivPrefix(&u, nil), "both uid and gid required to drop privileges")
+}
+
+// TestBuildNFSKernelMountScript pins the node-side kernel-mount wrapper: a fresh
+// temp mount point, vers=3 NFS mount of <server>:<export> quoted as one argument,
+// a trap that unmounts + removes the dir on exit, then the inner command.
+func TestBuildNFSKernelMountScript(t *testing.T) {
+	s := buildNFSKernelMountScript("172.16.56.13", "/export/virtrigaud", "INNER_CMD", "")
+	assert.Contains(t, s, "MNT=$(mktemp -d /var/tmp/.virtrigaud-nfsmnt-XXXXXX)")
+	assert.Contains(t, s, "mount -t nfs -o vers=3 '172.16.56.13:/export/virtrigaud' \"$MNT\"")
+	assert.Contains(t, s, "trap 'umount \"$MNT\" 2>/dev/null || true; rmdir \"$MNT\" 2>/dev/null || true' EXIT")
+	assert.True(t, strings.HasSuffix(s, "INNER_CMD"), "inner command runs after the mount")
+
+	// extraCleanup is folded into the trap (used by the export to rm the local temp).
+	s2 := buildNFSKernelMountScript("h", "/e", "X", `rm -f "$TMP" 2>/dev/null || true`)
+	assert.Contains(t, s2, `rmdir "$MNT" 2>/dev/null || true; rm -f "$TMP" 2>/dev/null || true' EXIT`)
+}
+
+// TestBuildNFSKernelExportScript pins the two-stage Proxmox export: qemu-img flattens
+// the root-owned source to a local temp (as root) and chmods it readable, then the
+// temp is copied onto the mounted export as the migration's uid/gid (setpriv); the
+// trap unmounts AND removes the temp on exit.
+func TestBuildNFSKernelExportScript(t *testing.T) {
+	u, g := int64(1000), int64(1000)
+	s := buildNFSKernelExportScript("172.16.56.13", "/export/virtrigaud",
+		"vmmigrations-ns-m1-export.qcow2", "qcow2", "/mnt/pve/dir/images/101/vm-101-disk-1.qcow2",
+		"/var/tmp/.virtrigaud-export-101.qcow2", &u, &g)
+	// stage 1: root flatten to local temp, then world-readable
+	assert.Contains(t, s, "TMP='/var/tmp/.virtrigaud-export-101.qcow2'")
+	assert.Contains(t, s, "qemu-img convert -U -f 'qcow2' -O qcow2 '/mnt/pve/dir/images/101/vm-101-disk-1.qcow2' \"$TMP\"")
+	assert.Contains(t, s, `chmod 0644 "$TMP"`)
+	// stage 2: dropped-privilege copy onto the export
+	assert.Contains(t, s, "mount -t nfs -o vers=3 '172.16.56.13:/export/virtrigaud' \"$MNT\"")
+	assert.Contains(t, s, `setpriv --reuid 1000 --regid 1000 --clear-groups cp "$TMP" "$MNT"/'vmmigrations-ns-m1-export.qcow2'`)
+	// the temp is removed on exit
+	assert.Contains(t, s, `rm -f "$TMP" 2>/dev/null || true`)
 }
 
 // TestProxmoxExportStagePath asserts the export stage path is in the staging dir,
