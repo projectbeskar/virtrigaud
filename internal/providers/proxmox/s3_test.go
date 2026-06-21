@@ -79,6 +79,20 @@ func TestBuildExportFlattenCommand(t *testing.T) {
 	})
 }
 
+// TestBuildNFSImportConvertCommand pins the node-side qemu-img argv that reads the
+// staged qcow2 from nfs:// into the node stage file: -f qcow2 -O qcow2, no -U
+// (static source), with both the nfs:// URL and the stage path shell-quoted so a
+// crafted URL cannot break out of the argument.
+func TestBuildNFSImportConvertCommand(t *testing.T) {
+	cmd := buildNFSImportConvertCommand(
+		"nfs://172.16.56.13/export/virtrigaud/vmmigrations/ns/web/import.qcow2",
+		"/var/tmp/.virtrigaud-import-web.qcow2")
+	assert.Equal(t,
+		"qemu-img convert -f qcow2 -O qcow2 'nfs://172.16.56.13/export/virtrigaud/vmmigrations/ns/web/import.qcow2' '/var/tmp/.virtrigaud-import-web.qcow2'",
+		cmd)
+	assert.NotContains(t, cmd, " -U ", "import source is a static staged file; -U is not needed")
+}
+
 // TestProxmoxExportStagePath asserts the export stage path is in the staging dir,
 // dot-prefixed and qcow2-suffixed, and sanitizes path separators out of the VM id
 // so it cannot escape the directory.
@@ -170,32 +184,43 @@ func s3GRPCCode(t *testing.T, err error) codes.Code {
 	return st.Code()
 }
 
-// TestExportDisk_NFSBackendRejected verifies the dispatch still rejects an
-// unimplemented backend (nfs) honestly, even though s3 is now accepted.
-func TestExportDisk_NFSBackendRejected(t *testing.T) {
+// TestExportDisk_NFSBackendPassesGate verifies the nfs backend is now accepted by
+// the dispatch (ADR-0006 Slice 4) and reaches the node-side data plane: with no
+// SSH transport it returns Unavailable, NOT the Unimplemented it returned before
+// the NFS provider existed. This proves the gate routes nfs to exportDiskToNFS.
+func TestExportDisk_NFSBackendPassesGate(t *testing.T) {
 	_, endpoint, err := pvefake.StartFakeServer()
 	require.NoError(t, err)
 	provider := createTestProvider(endpoint)
+	provider.ssh = nil // token-only deployment: data plane unavailable
 
 	_, err = provider.ExportDisk(context.Background(), &providerv1.ExportDiskRequest{
-		VmId:        "100",
-		BackendType: "nfs",
+		VmId:           "100",
+		BackendType:    "nfs",
+		DestinationUrl: "nfs://172.16.56.13/export/virtrigaud/vmmigrations/ns/web/export.qcow2",
 	})
-	assert.Equal(t, codes.Unimplemented, s3GRPCCode(t, err),
-		"nfs export backend is not implemented and must be rejected")
+	assert.NotEqual(t, codes.Unimplemented, s3GRPCCode(t, err),
+		"nfs export backend is implemented and must pass the gate")
+	assert.Equal(t, codes.Unavailable, s3GRPCCode(t, err),
+		"nfs export with no SSH data plane must return Unavailable")
 }
 
-// TestImportDisk_NFSBackendRejected mirrors the export rejection for import.
-func TestImportDisk_NFSBackendRejected(t *testing.T) {
+// TestImportDisk_NFSBackendPassesGate mirrors the export gate-pass for import.
+func TestImportDisk_NFSBackendPassesGate(t *testing.T) {
 	_, endpoint, err := pvefake.StartFakeServer()
 	require.NoError(t, err)
 	provider := createTestProvider(endpoint)
+	provider.ssh = nil
 
 	_, err = provider.ImportDisk(context.Background(), &providerv1.ImportDiskRequest{
 		BackendType: "nfs",
+		TargetName:  "web-migrated",
+		SourceUrl:   "nfs://172.16.56.13/export/virtrigaud/vmmigrations/ns/web/import.qcow2",
 	})
-	assert.Equal(t, codes.Unimplemented, s3GRPCCode(t, err),
-		"nfs import backend is not implemented and must be rejected")
+	assert.NotEqual(t, codes.Unimplemented, s3GRPCCode(t, err),
+		"nfs import backend is implemented and must pass the gate")
+	assert.Equal(t, codes.Unavailable, s3GRPCCode(t, err),
+		"nfs import with no SSH data plane must return Unavailable")
 }
 
 // TestExportDisk_S3NoSSHTransport verifies that an s3 export on a provider with no

@@ -42,14 +42,18 @@ func GetProviderCapabilities() *capabilities.Manager {
 		DiskExport("qcow2", "raw", "vmdk").
 		ExportCompression().
 		DiskImport("qcow2", "raw", "vmdk").
-		// ADR-0006: only the S3 relay data path is real for Proxmox — bytes flow
-		// node ↔ provider-pod ↔ S3 over SSH (the pod is the S3 client). The legacy
-		// pvc path (storage_helper.go) does os.Open on node-local image paths,
-		// which a remote provider pod can never reach, so pvc is NOT advertised
-		// (advertising it lets a migration select a backend that always fails).
-		// nfs and direct transfer remain unimplemented, so they are not advertised.
-		ExportBackends(migration.S3OnlyExportBackends()...).
-		ImportBackends(migration.S3OnlyImportBackends()...).
+		// ADR-0006: two real data paths for Proxmox, both node-side. (1) The S3
+		// relay — bytes flow node ↔ provider-pod ↔ S3 over SSH (the pod is the S3
+		// client). (2) The NFS qemu-img path (Slice 4) — the node's qemu-img reads/
+		// writes nfs:// directly over libnfs, no pod hop. The legacy pvc path
+		// (storage_helper.go) does os.Open on node-local image paths, which a
+		// remote provider pod can never reach, so pvc is NOT advertised (advertising
+		// it lets a migration select a backend that always fails).
+		ExportBackends(migration.S3AndNFSExportBackends()...).
+		ImportBackends(migration.S3AndNFSImportBackends()...).
+		// NFS runs node-side ("direct"-shaped), but the controller treats nfs's
+		// transfer mode as informational and exempts it from the relay check, so
+		// advertising relay (for the S3 path) remains accurate.
 		TransferModes(migration.RelayOnlyTransferModes()...).
 		DiskTypes("raw", "qcow2").
 		NetworkTypes("bridge", "vlan").

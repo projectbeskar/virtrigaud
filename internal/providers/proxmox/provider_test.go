@@ -280,15 +280,16 @@ func TestProxmoxProvider_GetCapabilities(t *testing.T) {
 	// `-c` for qcow2 targets (#219), so compression is advertised.
 	assert.True(t, resp.SupportsExportCompression, "Proxmox ExportDisk compresses qcow2 targets when Compress=true (#219)")
 
-	// ADR-0006: Proxmox advertises ONLY the S3 relay data path. The legacy pvc
-	// path does os.Open on node-local image paths the provider pod can't reach,
-	// so advertising pvc would be dishonest (#261 P0-3). nfs/direct unimplemented.
-	assert.Equal(t, []string{"s3"}, resp.SupportedExportBackends,
-		"Proxmox advertises s3-only export backend (pvc is not reachable off-node)")
-	assert.Equal(t, []string{"s3"}, resp.SupportedImportBackends,
-		"Proxmox advertises s3-only import backend (pvc is not reachable off-node)")
+	// ADR-0006: Proxmox advertises the S3 relay AND the NFS qemu-img data paths,
+	// both node-side (Slice 4). The legacy pvc path does os.Open on node-local
+	// image paths the provider pod can't reach, so advertising pvc would be
+	// dishonest (#261 P0-3); pvc stays excluded.
+	assert.Equal(t, []string{"s3", "nfs"}, resp.SupportedExportBackends,
+		"Proxmox advertises s3+nfs export backends (pvc is not reachable off-node)")
+	assert.Equal(t, []string{"s3", "nfs"}, resp.SupportedImportBackends,
+		"Proxmox advertises s3+nfs import backends (pvc is not reachable off-node)")
 	assert.Equal(t, []string{"relay"}, resp.SupportedTransferModes,
-		"the s3 path is relay-shaped (bytes flow node ↔ pod ↔ backend)")
+		"the s3 path is relay-shaped; nfs runs node-side and is exempt from the relay check")
 }
 
 func TestExportNeedsConversion(t *testing.T) {

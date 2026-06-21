@@ -1437,16 +1437,26 @@ func exportNeedsConversion(sourceFormat, targetFormat string, compress bool) boo
 
 // ExportDisk exports a VM disk for migration
 func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskRequest) (*providerv1.ExportDiskResponse, error) {
-	// ADR-0006: accept the legacy pvc path and the S3 relay path; reject nfs and
-	// unknown backends honestly instead of silently falling through to pvc.
-	if err := migration.EnsurePVCOrS3Backend(req.BackendType); err != nil {
+	// ADR-0006: Proxmox disks live on the PVE node, so the pod-mounted pvc path can
+	// never work; accept only the S3 relay and the NFS qemu-img paths (both run
+	// node-side) and reject pvc/unknown backends honestly (Slice 4).
+	if err := migration.EnsureS3OrNFSBackend(req.BackendType); err != nil {
 		return nil, err
 	}
-	// Proxmox advertises relay-only transfer (RelayOnlyTransferModes); reject a
-	// `direct` request loudly instead of silently running it as relay (#261 P1-3,
-	// ADR-0006 D2). Mirrors the libvirt provider.
-	if err := migration.EnsureRelayMode(req.TransferMode); err != nil {
-		return nil, err
+	// Proxmox's S3 path advertises relay-only transfer (RelayOnlyTransferModes);
+	// reject a `direct` request loudly instead of silently running it as relay
+	// (#261 P1-3, ADR-0006 D2). NFS is host/node-side by nature (the node's
+	// qemu-img writes nfs:// directly), so it is exempt from the relay check.
+	if req.BackendType != migration.BackendNFS {
+		if err := migration.EnsureRelayMode(req.TransferMode); err != nil {
+			return nil, err
+		}
+	}
+
+	// ADR-0006 Slice 4 Proxmox SOURCE path: the node's qemu-img writes the
+	// flattened qcow2 straight to the NFS export (libnfs), no pod hop.
+	if req.BackendType == migration.BackendNFS {
+		return p.exportDiskToNFS(ctx, req)
 	}
 
 	// ADR-0006 Proxmox SOURCE path: stream the node disk to S3 over SSH.
@@ -1654,16 +1664,26 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 
 // ImportDisk imports a disk from an external source
 func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskRequest) (*providerv1.ImportDiskResponse, error) {
-	// ADR-0006: accept the legacy pvc path and the S3 relay path; reject nfs and
-	// unknown backends honestly instead of silently falling through to pvc.
-	if err := migration.EnsurePVCOrS3Backend(req.BackendType); err != nil {
+	// ADR-0006: Proxmox disks live on the PVE node, so the pod-mounted pvc path can
+	// never work; accept only the S3 relay and the NFS qemu-img paths (both run
+	// node-side) and reject pvc/unknown backends honestly (Slice 4).
+	if err := migration.EnsureS3OrNFSBackend(req.BackendType); err != nil {
 		return nil, err
 	}
-	// Proxmox advertises relay-only transfer (RelayOnlyTransferModes); reject a
-	// `direct` request loudly instead of silently running it as relay (#261 P1-3,
-	// ADR-0006 D2). Mirrors the libvirt provider.
-	if err := migration.EnsureRelayMode(req.TransferMode); err != nil {
-		return nil, err
+	// Proxmox's S3 path advertises relay-only transfer (RelayOnlyTransferModes);
+	// reject a `direct` request loudly instead of silently running it as relay
+	// (#261 P1-3, ADR-0006 D2). NFS is host/node-side by nature (the node's
+	// qemu-img reads nfs:// directly), so it is exempt from the relay check.
+	if req.BackendType != migration.BackendNFS {
+		if err := migration.EnsureRelayMode(req.TransferMode); err != nil {
+			return nil, err
+		}
+	}
+
+	// ADR-0006 Slice 4 Proxmox TARGET path: the node's qemu-img reads the staged
+	// qcow2 from the NFS export and writes a node-local stage file for qm importdisk.
+	if req.BackendType == migration.BackendNFS {
+		return p.importDiskFromNFS(ctx, req)
 	}
 
 	// ADR-0006 Proxmox TARGET path: stage the S3 qcow2 on the node and return its

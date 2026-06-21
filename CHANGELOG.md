@@ -5,6 +5,24 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-21 09:30] - feat(proxmox): NFS migration via node-side qemu-img nfs:// (ADR-0006 Slice 4, #236)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/providers/proxmox/nfs.go` (new): `exportDiskToNFS` / `importDiskFromNFS`. The PVE NODE's `qemu-img` writes/reads the staged qcow2 **directly to/from the `nfs://` export over libnfs** (qemu's `block-nfs` driver) — no provider-pod hop, no S3 client. Export resolves the on-node disk path (`pvesm path`) and flattens straight to `nfs://` (reusing the tested `buildExportFlattenCommand` argv builder); import converts `nfs://` → a node-local stage file (new `buildNFSImportConvertCommand`) + `qemu-img check`, which the Create path then feeds to `qm importdisk` (Proxmox cannot `importdisk` an `nfs://` URL directly).
+- `internal/providers/proxmox/capabilities.go`: `GetCapabilities` now advertises `nfs` alongside `s3` in the export/import backends (`migration.S3AndNFS*`).
+
+### Changed
+- `internal/providers/proxmox/server.go`: `ExportDisk`/`ImportDisk` now gate on `migration.EnsureS3OrNFSBackend` (was `EnsurePVCOrS3Backend`) — this **accepts `nfs`, keeps `s3`, and now rejects `pvc`**, aligning the gate with Proxmox's long-standing honest advertisement (its disks live on the node, so the pod-mounted pvc path can never work). `nfs` is **exempt from the relay-mode gate** (it runs node-side, not relay); the `s3` path keeps its relay-only enforcement.
+
+### Why
+Second provider of the NFS backend (ADR-0006 Slice 4). Proxmox now advertises and serves `nfs` as both source and target over the node-side qemu-img transport, mirroring the libvirt host-side model. With libvirt + Proxmox both serving `nfs`, the first end-to-end NFS migration paths are now wireable. NFS integrity for this transport is the node-side `qemu-img check` (qemu-img emits no in-stream byte checksum). vSphere (pod-side) follows next; lab validation against the OMS server comes after.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (proxmox provider image)
+- [ ] Config change only
+
 ## [2026-06-19 14:15] - feat(libvirt): NFS migration via host-side qemu-img nfs:// (ADR-0006 Slice 4, #236)
 **Author:** @wrkode (William Rizzo)
 
