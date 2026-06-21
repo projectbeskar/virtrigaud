@@ -5,6 +5,22 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-19 13:15] - feat(migration): NFS staging coordinates + hardened nfs:// URL builder (ADR-0006 Slice 4, #236)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/storage/migration/nfs.go` (new): `NFSURL(opts, key)` — the single, hardened construction site for the libnfs/qemu-img `nfs://<server><export>/<path>/<key>[?uid=&gid=]` URL (ADR-0006 condition C7'). It rejects URL query/fragment delimiters (`?`/`&`/`#`), whitespace and control characters, and `..` traversal in the server/export/path/key, and range-checks uid/gid — so a tenant-controlled NFS coordinate cannot smuggle libnfs URL options or escape the export when the string is handed to `qemu-img` on argv.
+- `internal/storage/migration/options.go`: NFS fields on `StorageOptions` (`Server`, `Export`, `Path`, `UID`, `GID`) carried in the gRPC `storage_options_json`.
+- `api/infra.virtrigaud.io/v1beta1/vmmigration_types.go`: optional `uid`/`gid` on `NFSStorageConfig` (ADR-0006 C5), bounded to the AUTH_SYS uint32 range. CRDs + deepcopy regenerated.
+
+### Why
+Foundational, fully-unit-tested primitives for the qemu-img/libnfs NFS migration backend (the mechanism chosen at the security re-bless). No runtime behavior change yet — NFS stays gated off in the controller and providers; the wiring lands in the following slices.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (CRD update for the new `nfs.uid`/`nfs.gid` fields)
+- [ ] Config change only
+
 ## [2026-06-19 12:30] - fix(security): migration storage host allowlist closes live S3-endpoint SSRF; gates NFS (ADR-0006 C3, #236)
 **Author:** @wrkode (William Rizzo)
 

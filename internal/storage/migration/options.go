@@ -57,6 +57,20 @@ type StorageOptions struct {
 	// No omitempty: a defaulted bool must survive the JSON round-trip even when
 	// false (PR #235 footgun).
 	UsePathStyle bool `json:"usePathStyle"`
+
+	// --- NFS backend (ADR-0006 Slice 4) ---
+	// Server is the NFS server host. It is SSRF-validated by the controller before
+	// being shipped, and re-sanitised by NFSURL when the qemu-img URL is built.
+	Server string `json:"server,omitempty"`
+	// Export is the absolute exported path on the server (e.g. "/export/migrations").
+	Export string `json:"export,omitempty"`
+	// Path is an optional sub-path within the export for this migration's data.
+	Path string `json:"path,omitempty"`
+	// UID/GID are the AUTH_SYS identity presented to the NFS server via the libnfs
+	// URL query params. Nil means the qemu-img process identity (the pod or SSH
+	// user). The export's squash policy is the real authorization boundary.
+	UID *int64 `json:"uid,omitempty"`
+	GID *int64 `json:"gid,omitempty"`
 }
 
 // MarshalStorageOptions serializes StorageOptions to the compact JSON carried in
