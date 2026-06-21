@@ -5,6 +5,20 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-21 12:00] - fix(migration): NFS stages a FLAT object key (nested key fails libnfs mount) (ADR-0006 Slice 4, #236)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/controller/vmmigration_controller.go`: the NFS staging key is now a single flat filename `vmmigrations-<ns>-<name>-<stage>.qcow2` in the export root (or the operator's optional `path`), instead of the nested `vmmigrations/<ns>/<name>/<stage>.qcow2`. Unlike S3 — where a slashed key creates the prefix implicitly — NFS is a real filesystem: every parent directory must already exist, and qemu-img/libnfs (the only NFS client in the data plane) cannot `mkdir`. A nested key therefore failed the libnfs mount with `MNT3ERR_NOENT`. Surfaced by the first live libvirt↔libvirt NFS migration against the lab OpenMediaVault server.
+
+### Why
+Lab validation of the ADR-0006 Slice 4 NFS backend: a real qemu-img `nfs://` write cannot create intermediate directories, so the staged object must live where a directory already exists. ns/name/stage are encoded into the single filename so the object stays unique and traceable. The PVC and S3 backends are unchanged (PVC mkdirs on a mounted volume; S3 keys are flat prefixes).
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (manager)
+- [ ] Config change only
+
 ## [2026-06-21 10:15] - feat(vsphere): NFS migration via pod-side qemu-img nfs:// + qemu-block-extra image (ADR-0006 Slice 4, #236)
 **Author:** @wrkode (William Rizzo)
 

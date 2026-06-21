@@ -57,15 +57,24 @@ func TestStorageOptionsJSON_NFS(t *testing.T) {
 }
 
 // TestGenerateStorageURL_NFS verifies the controller builds the hardened nfs://
-// staging URL for an nfs migration.
+// staging URL for an nfs migration. The staging object is a FLAT filename in the
+// export root (not a nested key): NFS requires every parent directory to pre-exist
+// and qemu-img/libnfs cannot mkdir, so a nested key fails the mount with
+// MNT3ERR_NOENT (ADR-0006 Slice 4, lab-surfaced). ns/name/stage are encoded into
+// the single filename.
 func TestGenerateStorageURL_NFS(t *testing.T) {
 	r := &VMMigrationReconciler{}
 	got, err := r.generateStorageURL(context.Background(), nfsMigration("172.16.56.13", "/export/virtrigaud", ""), "export")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "nfs://172.16.56.13/export/virtrigaud/vmmigrations/mig/m1/export.qcow2"; got != want {
+	if want := "nfs://172.16.56.13/export/virtrigaud/vmmigrations-mig-m1-export.qcow2"; got != want {
 		t.Errorf("got %q want %q", got, want)
+	}
+	// The staged object must be a single path segment under the export — no '/'
+	// after the export root — or NFS cannot create it without a pre-made directory.
+	if strings.Count(strings.TrimPrefix(got, "nfs://172.16.56.13/export/virtrigaud/"), "/") != 0 {
+		t.Errorf("nfs staging key must be flat (no nested dirs), got %q", got)
 	}
 }
 
