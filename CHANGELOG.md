@@ -5,6 +5,20 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-21 14:30] - fix(proxmox): NFS migration via kernel mount (pve-qemu lacks libnfs) (ADR-0006 Slice 4, #236)
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `internal/providers/proxmox/nfs.go`: replace the qemu-img `nfs://` (libnfs) transport — shipped in #273 but **non-functional on a stock PVE node** (`pve-qemu-kvm` is built without the libnfs block driver; the node's qemu-img rejects `nfs://` with `Unknown protocol 'nfs'`) — with a **kernel NFS mount**, exactly how PVE's first-class NFS storage mounts. The export is two-stage: qemu-img as root flattens the (root-owned) source disk to a local temp, then the temp is copied onto the mounted export as the migration's `nfs.uid/gid` via `setpriv` (a single process cannot be both root, to read the source, and the share's uid, to write the export — only libnfs can decouple those, which is why libvirt/vSphere keep the libnfs path). The import mounts the export and converts the staged qcow2 to the node-local stage file as `nfs.uid/gid`, then `qm importdisk` consumes it. New helpers `buildNFSKernelMountScript`, `buildNFSKernelExportScript`, `nfsSetprivPrefix`, `nfsInMountRel`; the mount runs `vers=3` (numeric-uid AUTH_SYS) with a trap that unmounts + removes the temp on exit.
+
+### Why
+Lab validation against the OpenMediaVault server proved the libnfs approach cannot work on Proxmox (unlike libvirt/vSphere, whose images/hosts have libnfs). The kernel-mount transport is Proxmox-idiomatic, needs no extra packages, and honors `nfs.uid/gid` so the staged objects interoperate with the libvirt/vSphere providers (which present the same uid via the libnfs URL). Validated GREEN end-to-end: **libvirt→Proxmox import** and **Proxmox→libvirt export** (a freshly-imported VM round-tripped back to libvirt), both directions over NFS against the lab OMV.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (proxmox provider image)
+- [ ] Config change only
+
 ## [2026-06-21 12:00] - fix(migration): NFS stages a FLAT object key (nested key fails libnfs mount) (ADR-0006 Slice 4, #236)
 **Author:** @wrkode (William Rizzo)
 
