@@ -5,6 +5,25 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-19 13:45] - feat(migration): controller routes the nfs backend (qemu-img native transport) (ADR-0006 Slice 4, #236)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/controller/vmmigration_controller.go`: the VMMigration controller now routes `storage.type: nfs` on its side:
+  - `gateMigrationStorageBackend` accepts `nfs` and exempts it from relay/direct transfer-mode gating — NFS uses qemu-img's native `nfs://` transport (host-side for libvirt/Proxmox, pod-side for vSphere), not the stream-through-the-pod relay model.
+  - `validateStorageConfig` validates `nfs.server`/`nfs.export` and runs the server through the **same SSRF host gate** as the S3 endpoint (ADR-0006 C3); NFS carries no credentials Secret.
+  - `storageOptionsJSON` (renamed from `s3StorageOptionsJSON`) ships the NFS coordinates (server/export/path/uid/gid) in `storage_options_json`.
+  - `generateStorageURL` builds the hardened `nfs://…/<stage>.qcow2` URL via `NFSURL` (C7'); the staged object is qcow2 and the import format is derived as qcow2.
+  - The Validating-phase pre-flight skips the PVC cross-namespace check for nfs (it stages over the network, like s3).
+
+### Why
+Wires the controller for the NFS backend. NFS migrations now pass the controller's routing/validation; they still require the providers to advertise `nfs` and run the `qemu-img nfs://` transport (the next, per-provider slice), so end-to-end NFS is not yet active.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (manager)
+- [ ] Config change only
+
 ## [2026-06-19 13:15] - feat(migration): NFS staging coordinates + hardened nfs:// URL builder (ADR-0006 Slice 4, #236)
 **Author:** @wrkode (William Rizzo)
 

@@ -144,9 +144,9 @@ func TestLoadS3CredentialsFromSecret(t *testing.T) {
 // TestS3StorageOptionsJSON verifies the non-secret options JSON carries the
 // endpoint/bucket/region/prefix/path-style and never any credential material.
 func TestS3StorageOptionsJSON(t *testing.T) {
-	raw, err := s3StorageOptionsJSON(s3Migration("ns", "m", "auto"))
+	raw, err := storageOptionsJSON(s3Migration("ns", "m", "auto"))
 	if err != nil {
-		t.Fatalf("s3StorageOptionsJSON: %v", err)
+		t.Fatalf("storageOptionsJSON: %v", err)
 	}
 	opts, err := storagemigration.ParseStorageOptions(raw)
 	if err != nil {
@@ -167,7 +167,7 @@ func TestS3StorageOptionsJSON(t *testing.T) {
 	pvcMig := &infrav1beta1.VMMigration{Spec: infrav1beta1.VMMigrationSpec{
 		Storage: &infrav1beta1.MigrationStorage{Type: "pvc"},
 	}}
-	if raw, err := s3StorageOptionsJSON(pvcMig); err != nil || raw != "" {
-		t.Errorf("s3StorageOptionsJSON(pvc) = (%q,%v), want empty,nil", raw, err)
+	if raw, err := storageOptionsJSON(pvcMig); err != nil || raw != "" {
+		t.Errorf("storageOptionsJSON(pvc) = (%q,%v), want empty,nil", raw, err)
 	}
 }
