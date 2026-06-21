@@ -400,17 +400,21 @@ func (r *VMMigrationReconciler) handleValidatingPhase(ctx context.Context, migra
 			return r.transitionToFailed(ctx, migration, fmt.Sprintf("Invalid storage configuration: %v", err))
 		}
 
-		// The s3 backend (ADR-0006) stages bytes through external object storage,
-		// not a shared PVC, so it has NEITHER the cross-namespace constraint NOR a
-		// migration PVC to create. The provider pods are the S3 clients. Skip the
-		// PVC path entirely for s3.
-		if migrationBackendType(migration) == storagemigration.BackendS3 {
+		// The s3 and nfs backends (ADR-0006) stage bytes over the network, not a
+		// shared PVC, so they have NEITHER the cross-namespace constraint NOR a
+		// migration PVC to create. Skip the PVC path entirely for them.
+		switch migrationBackendType(migration) {
+		case storagemigration.BackendS3:
 			// Validate credentials resolve before any side effect (fail fast at
 			// Validating, never mid-export — ADR-0006 D6). Never log the values.
 			if _, err := r.loadS3Credentials(ctx, migration); err != nil {
 				return r.transitionToFailed(ctx, migration, fmt.Sprintf("Invalid s3 storage configuration: %v", err))
 			}
-		} else {
+		case storagemigration.BackendNFS:
+			// NFS stages over the network with no Kubernetes Secret and no PVC; the
+			// server + export were validated (incl. the SSRF host gate) in
+			// validateStorageConfig above. Nothing further to pre-flight here.
+		default:
 			// Fail fast on a cross-namespace topology (#229). The migration transfer
 			// PVC is mounted into both the source and target provider pods, and a
 			// Kubernetes pod can only mount a PVC from its own namespace. If either
@@ -816,7 +820,7 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 	// Resolve the s3 staging options and credentials (ADR-0006). For the pvc
 	// backend these are empty/no-op, preserving the legacy behavior. Credentials
 	// come from the referenced Secret and are NEVER logged or placed in Status.
-	storageOptionsJSON, err := s3StorageOptionsJSON(migration)
+	storageOpts, err := storageOptionsJSON(migration)
 	if err != nil {
 		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to build storage options: %v", err))
 	}
@@ -838,7 +842,7 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 		Credentials:        creds,
 		BackendType:        migrationBackendType(migration),
 		TransferMode:       resolveTransferMode(migration),
-		StorageOptionsJSON: storageOptionsJSON,
+		StorageOptionsJSON: storageOpts,
 	}
 
 	// Create extended context for export operation (disk exports can take a long time)
@@ -1061,7 +1065,7 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 	// Resolve the s3 staging options and credentials (ADR-0006). For the pvc
 	// backend these are empty/no-op. Credentials come from the referenced Secret
 	// and are NEVER logged or placed in Status.
-	storageOptionsJSON, err := s3StorageOptionsJSON(migration)
+	storageOpts, err := storageOptionsJSON(migration)
 	if err != nil {
 		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to build storage options: %v", err))
 	}
@@ -1077,7 +1081,8 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 	// qcow2 (reverse). For non-s3 backends the legacy/spec-derived format is
 	// threaded unchanged.
 	importFormat := diskFormat
-	if migrationBackendType(migration) == storagemigration.BackendS3 {
+	switch migrationBackendType(migration) {
+	case storagemigration.BackendS3:
 		sourceProvider, srcErr := r.getSourceProvider(ctx, migration)
 		if srcErr != nil {
 			return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to get source provider: %v", srcErr))
@@ -1085,6 +1090,10 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 		importFormat = stagedImportFormat(sourceProvider)
 		logger.Info("Derived s3 staged import format from source provider",
 			"source_provider_type", sourceProvider.Spec.Type, "import_format", importFormat)
+	case storagemigration.BackendNFS:
+		// NFS via qemu-img always stages a qcow2 (the export runs
+		// `qemu-img convert -O qcow2`); the target converts from qcow2.
+		importFormat = "qcow2"
 	}
 
 	// Build import request. transfer_mode is resolved auto→relay (Slice 1).
@@ -1098,7 +1107,7 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 		Credentials:        creds,
 		BackendType:        migrationBackendType(migration),
 		TransferMode:       resolveTransferMode(migration),
-		StorageOptionsJSON: storageOptionsJSON,
+		StorageOptionsJSON: storageOpts,
 	}
 
 	// Set expected checksum if available
@@ -1912,8 +1921,23 @@ func (r *VMMigrationReconciler) validateStorageConfig(ctx context.Context, stora
 			return fmt.Errorf("s3 endpoint not permitted: %w", err)
 		}
 		return nil
+	case storagemigration.BackendNFS:
+		// NFS staging: require a server + absolute export. The server is dialed by
+		// the data plane (the hypervisor host for libvirt/Proxmox, the pod for
+		// vSphere), so it passes the same SSRF gate as the S3 endpoint (ADR-0006
+		// C3). NFS carries no credentials Secret.
+		if storageConfig.NFS == nil {
+			return fmt.Errorf("nfs configuration is required when using nfs storage type")
+		}
+		if storageConfig.NFS.Server == "" || storageConfig.NFS.Export == "" {
+			return fmt.Errorf("nfs.server and nfs.export are required for nfs storage type")
+		}
+		if err := r.storageHostPolicy().ValidateHost(storageConfig.NFS.Server); err != nil {
+			return fmt.Errorf("nfs server not permitted: %w", err)
+		}
+		return nil
 	default:
-		return fmt.Errorf("unsupported storage type: %s (supported: 'pvc', 's3')", storageConfig.Type)
+		return fmt.Errorf("unsupported storage type: %s (supported: 'pvc', 's3', 'nfs')", storageConfig.Type)
 	}
 
 	// Validate PVC configuration
@@ -2325,24 +2349,41 @@ func resolveTransferMode(migration *infrav1beta1.VMMigration) string {
 	return mode
 }
 
-// s3StorageOptionsJSON builds the non-secret storage_options_json carried to a
-// provider for the s3 backend (ADR-0006). Returns "" for non-s3 backends.
-func s3StorageOptionsJSON(migration *infrav1beta1.VMMigration) (string, error) {
-	if migrationBackendType(migration) != storagemigration.BackendS3 {
+// storageOptionsJSON builds the non-secret storage_options_json carried to a
+// provider (ADR-0006). It dispatches on the backend: s3 ships the bucket/endpoint
+// options, nfs ships the server/export coordinates and uid/gid; pvc and unknown
+// backends carry no options ("").
+func storageOptionsJSON(migration *infrav1beta1.VMMigration) (string, error) {
+	switch migrationBackendType(migration) {
+	case storagemigration.BackendS3:
+		s3 := migration.Spec.Storage.S3
+		if s3 == nil {
+			return "", fmt.Errorf("s3 storage configuration is required for s3 backend")
+		}
+		return storagemigration.MarshalStorageOptions(storagemigration.StorageOptions{
+			Backend:      storagemigration.BackendS3,
+			Bucket:       s3.Bucket,
+			Endpoint:     s3.Endpoint,
+			Region:       s3.Region,
+			Prefix:       s3.Prefix,
+			UsePathStyle: s3.UsePathStyle,
+		})
+	case storagemigration.BackendNFS:
+		nfs := migration.Spec.Storage.NFS
+		if nfs == nil || nfs.Server == "" || nfs.Export == "" {
+			return "", fmt.Errorf("nfs storage configuration (server, export) is required for nfs backend")
+		}
+		return storagemigration.MarshalStorageOptions(storagemigration.StorageOptions{
+			Backend: storagemigration.BackendNFS,
+			Server:  nfs.Server,
+			Export:  nfs.Export,
+			Path:    nfs.Path,
+			UID:     nfs.UID,
+			GID:     nfs.GID,
+		})
+	default:
 		return "", nil
 	}
-	s3 := migration.Spec.Storage.S3
-	if s3 == nil {
-		return "", fmt.Errorf("s3 storage configuration is required for s3 backend")
-	}
-	return storagemigration.MarshalStorageOptions(storagemigration.StorageOptions{
-		Backend:      storagemigration.BackendS3,
-		Bucket:       s3.Bucket,
-		Endpoint:     s3.Endpoint,
-		Region:       s3.Region,
-		Prefix:       s3.Prefix,
-		UsePathStyle: s3.UsePathStyle,
-	})
 }
 
 // loadS3Credentials reads the S3 access credentials from the Secret referenced by
@@ -2493,17 +2534,22 @@ func (r *VMMigrationReconciler) gateMigrationStorageBackend(
 	backend := migrationBackendType(migration)
 	mode := migrationTransferMode(migration)
 
-	// Only pvc and s3 have transfer logic. nfs has none yet (ADR-0006 Slice 4),
-	// so reject it up front regardless of what a provider might (later) advertise.
-	if backend != storagemigration.BackendPVC && backend != storagemigration.BackendS3 {
+	// pvc, s3 and nfs have transfer logic (ADR-0006 Slices 1–4). Anything else is
+	// rejected up front regardless of what a provider might (later) advertise.
+	if backend != storagemigration.BackendPVC &&
+		backend != storagemigration.BackendS3 &&
+		backend != storagemigration.BackendNFS {
 		return fmt.Sprintf(
-			"storage backend %q is not yet implemented; supported today: %q, %q (ADR-0006)",
-			backend, storagemigration.BackendPVC, storagemigration.BackendS3)
+			"storage backend %q is not yet implemented; supported today: %q, %q, %q (ADR-0006)",
+			backend, storagemigration.BackendPVC, storagemigration.BackendS3, storagemigration.BackendNFS)
 	}
 
-	// Only relay is implemented (ADR-0006 Slice 1). An explicit "direct" fails
-	// loudly here — never a silent downgrade — before any side effect.
-	if mode == storagemigration.TransferModeDirect {
+	// The relay/direct streaming model applies to the pvc/s3 backends. NFS uses
+	// qemu-img's native nfs:// transport (host-side for libvirt/Proxmox, pod-side
+	// for vSphere), so the transfer-mode distinction does not apply and any mode
+	// is accepted. For pvc/s3, only relay is implemented — an explicit "direct"
+	// fails loudly here, never a silent downgrade.
+	if backend != storagemigration.BackendNFS && mode == storagemigration.TransferModeDirect {
 		return fmt.Sprintf(
 			"transfer mode %q is not yet implemented; only %q (and %q) are supported today (ADR-0006 Slice 1)",
 			storagemigration.TransferModeDirect, storagemigration.TransferModeRelay, storagemigration.TransferModeAuto)
@@ -2524,8 +2570,9 @@ func (r *VMMigrationReconciler) gateMigrationStorageBackend(
 	}
 
 	// "auto" is resolved later against both providers' modes; only an explicit
-	// mode is gated here. Both providers must advertise the explicit mode.
-	if mode != storagemigration.TransferModeAuto {
+	// mode is gated here. Both providers must advertise the explicit mode. NFS is
+	// exempt — its transport is qemu-img-native, not relay/direct.
+	if backend != storagemigration.BackendNFS && mode != storagemigration.TransferModeAuto {
 		sourceModes := reportedTransferModes(sourceProvider)
 		if !containsString(sourceModes, mode) {
 			return fmt.Sprintf(
@@ -2648,6 +2695,23 @@ func (r *VMMigrationReconciler) generateStorageURL(ctx context.Context, migratio
 		}
 		// s3://bucket/<prefix>/<key>
 		return fmt.Sprintf("s3://%s/%s", storageConfig.S3.Bucket, key), nil
+
+	case storagemigration.BackendNFS:
+		// NFS stages a qcow2 written/read by qemu-img's native nfs:// transport
+		// (libnfs). NFSURL is the single sanitised construction site (ADR-0006
+		// C7'); the host was SSRF-validated at the Validating phase (C3).
+		nfs := storageConfig.NFS
+		if nfs == nil || nfs.Server == "" || nfs.Export == "" {
+			return "", fmt.Errorf("nfs storage configuration (server, export) is required")
+		}
+		key := fmt.Sprintf("vmmigrations/%s/%s/%s.qcow2", migration.Namespace, migration.Name, stage)
+		return storagemigration.NFSURL(storagemigration.StorageOptions{
+			Server: nfs.Server,
+			Export: nfs.Export,
+			Path:   nfs.Path,
+			UID:    nfs.UID,
+			GID:    nfs.GID,
+		}, key)
 
 	default:
 		return "", fmt.Errorf("unsupported storage type: %s", storageConfig.Type)
