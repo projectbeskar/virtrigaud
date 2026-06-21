@@ -2,7 +2,7 @@
 
 A Kubernetes operator for managing virtual machines across multiple hypervisors.
 
-**Version**: v0.3.9 — [CHANGELOG](CHANGELOG.md) | [Documentation](https://projectbeskar.github.io/virtrigaud)
+**Version**: v0.3.11 — [CHANGELOG](CHANGELOG.md) | [Documentation](https://projectbeskar.github.io/virtrigaud)
 
 ## Overview
 
@@ -13,7 +13,7 @@ The manager reconciles Kubernetes custom resources; each hypervisor runs as a se
 ## Features
 
 - **Multi-Hypervisor Support**: vSphere, Libvirt/KVM, and Proxmox VE simultaneously
-- **Cross-Provider VM Migration**: Migrate VMs between hypervisors using PVC-backed storage (currently tested: vSphere to Libvirt/KVM only; other directions are roadmap)
+- **Cross-Provider VM Migration**: Storage-backend-agnostic disk migration between any two hypervisors — **S3** and **NFS** staging backends, validated across vSphere ⇄ Libvirt/KVM ⇄ Proxmox VE in **both directions** (ADR-0006). The disk is staged through object storage or an NFS export and moved with `qemu-img`; it never traverses a CSI PVC (PVC is compat-only). NFS uses qemu-img's native libnfs transport (kernel-mount on Proxmox). (v0.3.11)
 - **VM Cloning (VMClone)**: Full and linked clones, MVP — `source.vmRef`, same-provider (vSphere/Proxmox/Libvirt; libvirt: qcow2 overlay for linked, full copy for full)
 - **VMSet CRD defined; controller not yet active**: Multi-VM replica set is defined but the controller is a stub that reports `Ready=False / ControllerNotImplemented`; rolling updates and replica management are roadmap
 - **VMPlacementPolicy (reference-only)**: Placement rules (affinity, anti-affinity, resource constraints) expressed as a policy object referenced by `VirtualMachine.spec.placementRef`; no standalone enforcement controller
@@ -91,7 +91,7 @@ graph TB
     PXP -->|REST API| PVE
 ```
 
-### Security status (v0.3.9)
+### Security status (v0.3.11)
 
 The following issues were open in v0.3.6 and resolved in v0.3.7; they are closed in this release:
 
@@ -120,7 +120,7 @@ Note: VMAdoption is a **controller** built into the manager, not a CRD.
 
 ## Provider Feature Matrix
 
-Per the [canonical capabilities matrix](https://projectbeskar.github.io/virtrigaud/providers/providers-capabilities/), verified against provider `GetCapabilities` responses (v0.3.9: Libvirt Clone, ImagePrepare, online disk expansion, online reconfigure, and memory snapshots are now implemented):
+Per the [canonical capabilities matrix](https://projectbeskar.github.io/virtrigaud/providers/providers-capabilities/), verified against provider `GetCapabilities` responses (v0.3.11: the **NFS** migration staging backend is implemented across all three providers, both directions — alongside the **S3** backend; v0.3.9 added Libvirt Clone, ImagePrepare, online disk expansion, online reconfigure, and memory snapshots):
 
 | Feature | vSphere | Libvirt | Proxmox | Notes |
 |---------|---------|---------|---------|-------|
@@ -139,8 +139,10 @@ Per the [canonical capabilities matrix](https://projectbeskar.github.io/virtriga
 | **Image Import** | ✅ | ✅ | ✅ | Libvirt: import into storage pool ([#154]). vSphere: OVA/content library. |
 | **Multi-NIC** | ✅ | ✅ | ✅ | Multiple network interfaces |
 | **Circuit Breaker** | ✅ | ✅ | ✅ | One CB per Provider CR (v0.3.6) |
+| **Cross-Provider Migration** | ✅ | ✅ | ✅ | **S3 + NFS** staging backends, both directions, all pairs (ADR-0006, [#236]). vSphere stages pod-side; libvirt host-side; Proxmox node-side over SSH (NFS via kernel mount). PVC is compat-only. |
 
 [#153]: https://github.com/projectbeskar/virtrigaud/issues/153
+[#236]: https://github.com/projectbeskar/virtrigaud/issues/236
 [#154]: https://github.com/projectbeskar/virtrigaud/issues/154
 [#201]: https://github.com/projectbeskar/virtrigaud/issues/201
 [#202]: https://github.com/projectbeskar/virtrigaud/issues/202
@@ -165,14 +167,14 @@ Per the [canonical capabilities matrix](https://projectbeskar.github.io/virtriga
 2. **Install VirtRigaud** (version 0.3.8):
    ```bash
    helm install virtrigaud virtrigaud/virtrigaud \
-     --version 0.3.9 \
+     --version 0.3.11 \
      -n virtrigaud-system --create-namespace
    ```
 
    CRDs are installed automatically via Helm hooks. To disable automatic CRD upgrades:
    ```bash
    helm install virtrigaud virtrigaud/virtrigaud \
-     --version 0.3.9 \
+     --version 0.3.11 \
      -n virtrigaud-system --create-namespace \
      --set crdUpgrade.enabled=false
    ```
@@ -188,7 +190,7 @@ Per the [canonical capabilities matrix](https://projectbeskar.github.io/virtriga
 4. **Upgrade**:
    ```bash
    helm upgrade virtrigaud virtrigaud/virtrigaud \
-     --version 0.3.9 \
+     --version 0.3.11 \
      -n virtrigaud-system
    ```
 
@@ -247,7 +249,7 @@ Go 1.26+ is required for source builds.
      credentialSecretRef:
        name: libvirt-creds
      runtime:
-       image: "ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.3.9"
+       image: "ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.3.11"
        service:
          port: 9443
    ```
@@ -265,7 +267,7 @@ Go 1.26+ is required for source builds.
      credentialSecretRef:
        name: vsphere-creds
      runtime:
-       image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.3.9"
+       image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.3.11"
        service:
          port: 9443
    ```
@@ -283,15 +285,22 @@ Go 1.26+ is required for source builds.
 
 ## VM Migration
 
-VirtRigaud migrates VMs between providers by staging the disk through an
-S3-compatible object store (ADR-0006). The **provider pod is the S3 client**, so
-the bytes flow host → pod → S3 → pod → host and never traverse a CSI PVC; the
-source exports its native disk format and the target converts on import.
+VirtRigaud migrates VMs between providers by staging the disk on a **storage-agnostic
+backend** — S3-compatible object storage or an NFS export (ADR-0006). The disk
+never traverses a CSI PVC; the source exports its native disk format and the target
+converts on import.
 
-**Validated**: all three providers in any direction — vSphere ↔ Libvirt/KVM ↔
-Proxmox VE (ADR-0006 Slices 1–3). The Proxmox provider participates as a full
-source and target and is **S3/relay-only** (it does not advertise PVC/NFS/`direct`
-backends).
+- **S3**: the **provider pod is the S3 client**, so the bytes flow host → pod → S3 →
+  pod → host (the universal `relay` path).
+- **NFS**: the disk is staged on an NFS export and moved with `qemu-img`'s native
+  transport — libvirt (host-side) and vSphere (pod-side) use the `nfs://` libnfs
+  driver; Proxmox kernel-mounts the export (its `qemu-img` ships no libnfs). NFS
+  needs `nfs.uid/gid` set to the export owner; see [`examples/vmmigration-nfs.yaml`](examples/vmmigration-nfs.yaml).
+
+**Validated**: all three providers in **both directions** over **both backends** —
+vSphere ⇄ Libvirt/KVM ⇄ Proxmox VE (ADR-0006 Slices 1–4). The Proxmox provider
+participates as a full source and target and advertises **s3 and nfs** (not PVC: its
+disks live on the node, which a pod-mounted PVC can never reach).
 
 ```yaml
 apiVersion: infra.virtrigaud.io/v1beta1
@@ -347,7 +356,7 @@ kubectl apply -f charts/virtrigaud/crds/
 
 # Or reinstall
 helm uninstall virtrigaud -n virtrigaud-system
-helm install virtrigaud virtrigaud/virtrigaud --version 0.3.9 \
+helm install virtrigaud virtrigaud/virtrigaud --version 0.3.11 \
   -n virtrigaud-system --create-namespace
 ```
 
