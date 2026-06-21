@@ -5,6 +5,22 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-19 14:15] - feat(libvirt): NFS migration via host-side qemu-img nfs:// (ADR-0006 Slice 4, #236)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/providers/libvirt/nfs.go` (new): `exportDiskToNFS` / `importDiskFromNFS`. The libvirt HOST's `qemu-img` writes/reads the staged qcow2 **directly to/from the `nfs://` export over libnfs** (qemu's `block-nfs` driver) — no provider-pod hop, no S3 client, no host temp. Export = `qemu-img convert -U -f qcow2 -O qcow2 <vol> <nfs://…>`; import = `qemu-img convert <nfs://…> <pool-vol>` + `qemu-img check`. Reuses the existing SSH/disk-resolution machinery.
+- `internal/providers/libvirt/server.go`: `ExportDisk`/`ImportDisk` accept `nfs` (new `migration.EnsurePVCS3OrNFSBackend`) and **exempt it from the relay-mode gate** (NFS uses qemu-img's native transport, not relay); `GetCapabilities` now advertises `nfs` in the export/import backends.
+- `internal/storage/migration/backend.go`: NFS-inclusive gate + advertisement helpers (`EnsurePVCS3OrNFSBackend`, `EnsureS3OrNFSBackend`, `PVCS3AndNFS*`, `S3AndNFS*`).
+
+### Why
+First provider of the NFS backend (ADR-0006 Slice 4). libvirt now advertises and serves `nfs` as both source and target over the qemu-img transport. NFS integrity for this transport is the target-side `qemu-img check` (qemu-img emits no in-stream byte checksum). vSphere and Proxmox follow in the next slices; lab validation against the OMS server comes after.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (libvirt provider image)
+- [ ] Config change only
+
 ## [2026-06-19 13:45] - feat(migration): controller routes the nfs backend (qemu-img native transport) (ADR-0006 Slice 4, #236)
 **Author:** @wrkode (William Rizzo)
 
