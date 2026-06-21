@@ -67,17 +67,18 @@ func TestGetCapabilities_StorageBackends(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, caps)
 
-	assert.Equal(t, []string{"pvc", "s3"}, caps.SupportedExportBackends,
-		"vSphere exports to pvc and s3 in Slice 1 (SOURCE of vSphere→S3→libvirt)")
-	assert.Equal(t, []string{"pvc", "s3"}, caps.SupportedImportBackends,
-		"vSphere imports from pvc and s3 in Slice 2 (TARGET of libvirt→S3→vSphere)")
+	assert.Equal(t, []string{"pvc", "s3", "nfs"}, caps.SupportedExportBackends,
+		"vSphere exports to pvc, s3 (Slice 1/2) and nfs (Slice 4)")
+	assert.Equal(t, []string{"pvc", "s3", "nfs"}, caps.SupportedImportBackends,
+		"vSphere imports from pvc, s3 (Slice 2) and nfs (Slice 4)")
 	assert.Equal(t, []string{"relay"}, caps.SupportedTransferModes)
 }
 
-// TestExportDisk_BackendGate verifies the ADR-0006 backend/mode gate at the top
-// of ExportDisk: nfs is Unimplemented, an explicit direct mode is InvalidArgument
-// (loud-fail, never a silent downgrade). These guards run before the nil-client
-// check, so a zero-value Provider suffices.
+// TestExportDisk_BackendGate verifies the ADR-0006 backend/mode gate at the top of
+// ExportDisk: as of Slice 4, nfs PASSES the backend gate (it is implemented) and
+// fails LATER at the nil-client check with codes.Unavailable, NOT Unimplemented;
+// an explicit direct mode on the s3 path is still InvalidArgument (loud-fail, never
+// a silent downgrade). The gate + nil-client checks run on a zero-value Provider.
 func TestExportDisk_BackendGate(t *testing.T) {
 	p := &Provider{}
 
@@ -85,6 +86,10 @@ func TestExportDisk_BackendGate(t *testing.T) {
 		VmId: "vm-1", BackendType: "nfs",
 	})
 	require.Error(t, nfsErr)
+	assert.NotEqual(t, codes.Unimplemented, status.Code(nfsErr),
+		"nfs export is implemented in Slice 4 and must pass the gate")
+	assert.Equal(t, codes.Unavailable, status.Code(nfsErr),
+		"nfs export must pass the gate and fail later at the nil-client check")
 
 	_, directErr := p.ExportDisk(context.Background(), &providerv1.ExportDiskRequest{
 		VmId: "vm-1", BackendType: "s3", TransferMode: "direct",
@@ -113,17 +118,21 @@ func TestImportDisk_S3BackendPassesGate(t *testing.T) {
 		"s3 import must pass the gate and fail later at the nil-client check")
 }
 
-// TestImportDisk_NFSBackendUnimplemented verifies nfs is still rejected with
-// codes.Unimplemented on the import path (only pvc/s3 are implemented). The gate
-// runs before the nil-client check, so a zero-value Provider suffices.
-func TestImportDisk_NFSBackendUnimplemented(t *testing.T) {
+// TestImportDisk_NFSBackendPassesGate verifies that, as of ADR-0006 Slice 4, an nfs
+// ImportDisk now PASSES the backend gate (vSphere is a TARGET over NFS) and fails
+// LATER at the nil-client check inside importDiskFromNFS with codes.Unavailable,
+// NOT codes.Unimplemented. Mirrors the s3-import-passes-gate test above.
+func TestImportDisk_NFSBackendPassesGate(t *testing.T) {
 	p := &Provider{}
 
 	_, nfsErr := p.ImportDisk(context.Background(), &providerv1.ImportDiskRequest{
-		SourceUrl:   "nfs://server/export/disk",
+		SourceUrl:   "nfs://server/export/disk.qcow2",
 		BackendType: "nfs",
+		TargetName:  "imported",
 	})
 	require.Error(t, nfsErr)
-	assert.Equal(t, codes.Unimplemented, status.Code(nfsErr),
-		"nfs import is not implemented (ADR-0006 Slice 4)")
+	assert.NotEqual(t, codes.Unimplemented, status.Code(nfsErr),
+		"nfs import is implemented in Slice 4 and must pass the gate")
+	assert.Equal(t, codes.Unavailable, status.Code(nfsErr),
+		"nfs import must pass the gate and fail later at the nil-client check")
 }

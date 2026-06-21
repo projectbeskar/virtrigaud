@@ -5,6 +5,24 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-21 10:15] - feat(vsphere): NFS migration via pod-side qemu-img nfs:// + qemu-block-extra image (ADR-0006 Slice 4, #236)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/providers/vsphere/nfs.go` (new): `exportLocalVMDKToNFS` / `importDiskFromNFS`. Unlike libvirt/Proxmox (host/node-side), vSphere has no shell on the hypervisor, so it runs `qemu-img` **in the provider pod** — the same place it already converts for the S3 import. Export: the existing pipeline downloads + flattens the disk to a self-contained local vmdk, then the pod's qemu-img writes it **as qcow2 straight to the `nfs://` export over libnfs** (no S3 client, no second upload). Import: the pod's qemu-img reads the staged qcow2 **directly from `nfs://`** and converts it — in one pass — to the streamOptimized vmdk the vCenter NFC `HttpNfcLease` requires, then imports it via the **same `nfcImportStreamOptimized` path the S3 import uses** (the genuinely-subtle NFC logic stays shared; only the source leg differs).
+- `cmd/provider-vsphere/Dockerfile`: install `qemu-block-extra` — qemu's `block-nfs.so` (libnfs) driver. Without it the pod's qemu-img cannot open an `nfs://` URL.
+
+### Changed
+- `internal/providers/vsphere/server.go`: `ExportDisk`/`ImportDisk` gate on `migration.EnsurePVCS3OrNFSBackend` (accepts `nfs`, keeps pvc/s3); `nfs` is **exempt from the relay-mode gate** (it uses qemu-img's native transport, pod-side). `GetCapabilities` now advertises `nfs` in the export/import backends (`migration.PVCS3AndNFS*`). The export skips storage-client creation for `nfs` (validates the `nfs://` URL instead) and returns early after the qemu-img write; the import dispatches `nfs` to `importDiskFromNFS` before the s3 branch.
+
+### Why
+Third and final provider of the NFS backend (ADR-0006 Slice 4). With libvirt, Proxmox, and vSphere all advertising and serving `nfs`, every cross-hypervisor NFS migration path is now wireable end-to-end. vSphere's NFS legs reuse the lab-validated S3 download/flatten (export) and NFC lease import (import) machinery — only the byte-transport leg swaps to qemu-img's `nfs://` driver. NFS integrity is the post-import uuid query (qemu-img emits no in-stream byte checksum). Lab validation against the OMS server is the next step.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (vSphere provider image — adds `qemu-block-extra`)
+- [ ] Config change only
+
 ## [2026-06-21 09:30] - feat(proxmox): NFS migration via node-side qemu-img nfs:// (ADR-0006 Slice 4, #236)
 **Author:** @wrkode (William Rizzo)
 
