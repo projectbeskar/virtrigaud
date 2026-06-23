@@ -188,7 +188,7 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, req contracts.Crea
 	}
 
 	// Generate domain XML with proper disk and cloud-init ISO
-	domainXML, err := p.generateDomainXMLWithStorage(req, diskPath, cloudInitISOPath)
+	domainXML, err := p.generateDomainXMLWithStorage(ctx, req, diskPath, cloudInitISOPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to generate domain XML: %w", err)
 	}
@@ -1176,7 +1176,7 @@ func (p *Provider) generateNetworkInterfacesXML(networks []contracts.NetworkAtta
 }
 
 // generateDomainXMLWithStorage creates libvirt domain XML with proper storage configuration
-func (p *Provider) generateDomainXMLWithStorage(req contracts.CreateRequest, diskPath, cloudInitISOPath string) (string, error) {
+func (p *Provider) generateDomainXMLWithStorage(ctx context.Context, req contracts.CreateRequest, diskPath, cloudInitISOPath string) (string, error) {
 	// Extract specifications from request
 	cpuCount := int32(1)    // default
 	memoryMB := int64(1024) // default 1GB
@@ -1302,7 +1302,13 @@ func (p *Provider) generateDomainXMLWithStorage(req contracts.CreateRequest, dis
 	// <memory>==<currentMemory>, <vcpu placement='static'>N</vcpu> layout.
 	cpuMem := buildCPUMemoryXML(cpuCount, memoryMB, cpuHotAddEnabled, memoryHotAddEnabled)
 
-	domainXML := fmt.Sprintf(`<domain type='qemu'>
+	// Pick the domain type from the host: KVM for hardware acceleration when
+	// available, otherwise TCG software emulation. Hard-coding either value is
+	// wrong — 'qemu' cripples guests on KVM hosts (~100% CPU, glacial boot),
+	// while 'kvm' fails to start on hosts without /dev/kvm.
+	domainType := p.detectDomainType(ctx)
+
+	domainXML := fmt.Sprintf(`<domain type='%s'>
   <name>%s</name>
   <uuid>%s</uuid>
   %s
@@ -1380,6 +1386,7 @@ func (p *Provider) generateDomainXMLWithStorage(req contracts.CreateRequest, dis
     </memballoon>
   </devices>
 </domain>`,
+		domainType,
 		req.Name,
 		uuid,
 		cpuMem.Memory,
@@ -1392,6 +1399,20 @@ func (p *Provider) generateDomainXMLWithStorage(req contracts.CreateRequest, dis
 		networkInterfacesXML)
 
 	return domainXML, nil
+}
+
+// detectDomainType returns the libvirt <domain type> for new domains: "kvm" when
+// the (possibly remote) host exposes /dev/kvm (hardware acceleration), otherwise
+// "qemu" (TCG software emulation). qemu is the safe fallback — it starts on any
+// host, including when the probe itself fails — whereas a kvm domain fails to
+// start without /dev/kvm. The probe runs over the same ssh/local path as the
+// provider's other host-side checks (cf. the `test -f <image>` existence probe).
+func (p *Provider) detectDomainType(ctx context.Context) string {
+	if _, err := p.virshProvider.runVirshCommand(ctx, "!", "test", "-e", "/dev/kvm"); err != nil {
+		log.Printf("INFO Host has no usable /dev/kvm; using domain type 'qemu' (software emulation)")
+		return "qemu"
+	}
+	return "kvm"
 }
 
 // generateUUID creates a simple UUID for the domain
