@@ -139,9 +139,17 @@ func (v *VirshProvider) Initialize(ctx context.Context) error {
 		return fmt.Errorf("failed to setup connection: %w", err)
 	}
 
-	// Test the connection
+	// Test the connection. When the native control transport is selected, the
+	// virsh-over-ssh probe must NOT gate startup: native owns the control-plane
+	// liveness check (over libssh2, independent of the system ssh client's
+	// config discovery), and virsh remains only for lazily-used data-plane work,
+	// which will surface its own errors if/when invoked.
 	if err := v.testConnection(ctx); err != nil {
-		return fmt.Errorf("failed to connect to libvirt: %w", err)
+		if nativeTransportEnabled() {
+			log.Printf("WARN virsh connectivity probe failed but LIBVIRT_CONTROL_TRANSPORT=native is set; continuing (native handles control plane, virsh data-plane surfaces errors lazily): %v", err)
+		} else {
+			return fmt.Errorf("failed to connect to libvirt: %w", err)
+		}
 	}
 
 	log.Printf("INFO Successfully initialized virsh provider with endpoint: %s", v.uri)

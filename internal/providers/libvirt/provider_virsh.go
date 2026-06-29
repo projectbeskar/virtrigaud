@@ -763,6 +763,10 @@ func (p *Provider) extractMemoryKB(domainInfo map[string]string) (int64, error) 
 
 // Describe returns comprehensive VM information using virsh (enhanced monitoring like vSphere)
 func (p *Provider) Describe(ctx context.Context, id string) (contracts.DescribeResponse, error) {
+	if p.nativeTransport != nil {
+		return p.nativeTransport.Describe(ctx, id)
+	}
+
 	log.Printf("INFO Describing VM with comprehensive monitoring: %s", id)
 
 	if p.virshProvider == nil {

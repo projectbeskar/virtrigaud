@@ -41,6 +41,12 @@ type Provider struct {
 	// Virsh-based provider (replaces libvirt-go)
 	virshProvider *VirshProvider
 
+	// nativeTransport, when non-nil, serves the migrated control-plane methods
+	// (Validate/Describe) via the native libvirt-go SDK instead of virsh. Set
+	// only when LIBVIRT_CONTROL_TRANSPORT=native and the binary was built with
+	// -tags libvirt_native. nil => everything stays on virsh.
+	nativeTransport controlTransport
+
 	// cached credentials
 	credentials *Credentials
 }
@@ -144,6 +150,21 @@ func New() *Provider {
 		log.Printf("INFO Successfully initialized virsh provider")
 	}
 
+	// Opt-in native control transport for migrated hot paths (Validate/Describe),
+	// same as the K8s-API constructor. Container mode can't return an error, so a
+	// failure is logged loudly and leaves nativeTransport nil (callers fall back
+	// to virsh) rather than silently pretending native is active.
+	if nativeTransportEnabled() {
+		if nt, err := buildNativeTransport(virshProvider); err != nil {
+			log.Printf("ERROR LIBVIRT_CONTROL_TRANSPORT=native requested but failed to initialize (control plane stays on virsh): %v", err)
+		} else {
+			p.nativeTransport = nt
+			log.Printf("INFO libvirt control transport: native (libvirt-go SDK)")
+		}
+	} else {
+		log.Printf("INFO libvirt control transport: virsh")
+	}
+
 	return p
 }
 
@@ -186,12 +207,31 @@ func NewProvider(ctx context.Context, k8sClient client.Client, provider *v1beta1
 		return nil, contracts.NewRetryableError("failed to initialize virsh provider", err)
 	}
 
+	// Optionally bring up the native control transport for migrated hot paths
+	// (Validate/Describe). Opt-in via LIBVIRT_CONTROL_TRANSPORT=native. Fail
+	// closed if requested but unavailable — no silent downgrade (preserves the
+	// ADR-0004 trust contract; see docs/adr/0007-libvirt-native-control-transport.md
+	// and docs/adr/0008-libvirt-go-binding-and-transport-selection.md).
+	if nativeTransportEnabled() {
+		nt, err := buildNativeTransport(virshProvider)
+		if err != nil {
+			return nil, contracts.NewRetryableError("native control transport requested but failed to initialize", err)
+		}
+		p.nativeTransport = nt
+		log.Printf("INFO libvirt control transport: native (libvirt-go SDK)")
+	} else {
+		log.Printf("INFO libvirt control transport: virsh")
+	}
+
 	log.Printf("INFO Successfully created virsh-based provider via K8s API")
 	return p, nil
 }
 
 // Validate ensures the provider connection is healthy using virsh
 func (p *Provider) Validate(ctx context.Context) error {
+	if p.nativeTransport != nil {
+		return p.nativeTransport.Validate(ctx)
+	}
 	if p.virshProvider == nil {
 		return contracts.NewRetryableError("virsh provider not initialized", nil)
 	}
