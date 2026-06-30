@@ -1408,11 +1408,34 @@ func (p *Provider) generateDomainXMLWithStorage(ctx context.Context, req contrac
 // start without /dev/kvm. The probe runs over the same ssh/local path as the
 // provider's other host-side checks (cf. the `test -f <image>` existence probe).
 func (p *Provider) detectDomainType(ctx context.Context) string {
-	if _, err := p.virshProvider.runVirshCommand(ctx, "!", "test", "-e", "/dev/kvm"); err != nil {
-		log.Printf("INFO Host has no usable /dev/kvm; using domain type 'qemu' (software emulation)")
-		return "qemu"
+	// Happy path: one round-trip. `test -r` covers both "exists" and "readable".
+	if _, err := p.virshProvider.runVirshCommand(ctx, "!", "test", "-r", "/dev/kvm"); err == nil {
+		return domainTypeFromProbe(true, false)
 	}
-	return "kvm"
+	// Not readable — second probe (only on the failure path) tells the operator
+	// whether /dev/kvm is simply absent (expected on a TCG-only host) or present
+	// but unopenable (a host-side permission/cgroup misconfiguration to fix).
+	_, existsErr := p.virshProvider.runVirshCommand(ctx, "!", "test", "-e", "/dev/kvm")
+	return domainTypeFromProbe(false, existsErr == nil)
+}
+
+// domainTypeFromProbe maps the /dev/kvm probe outcomes to a domain type and logs
+// the reason for any fallback. readable = `test -r /dev/kvm` succeeded; exists is
+// consulted only when !readable (from `test -e`) to distinguish absent from
+// present-but-unreadable. Split out so the decision/logging is unit-testable
+// without execing the probe.
+func domainTypeFromProbe(readable, exists bool) string {
+	switch {
+	case readable:
+		return "kvm"
+	case exists:
+		log.Printf("WARN /dev/kvm is present but not readable by the libvirt/qemu user " +
+			"(device-cgroup or permission restriction); using domain type 'qemu' (software emulation). " +
+			"Grant the qemu user read access to /dev/kvm to enable hardware acceleration.")
+	default:
+		log.Printf("INFO Host has no /dev/kvm; using domain type 'qemu' (software emulation)")
+	}
+	return "qemu"
 }
 
 // generateUUID creates a simple UUID for the domain
