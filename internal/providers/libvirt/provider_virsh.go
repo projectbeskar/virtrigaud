@@ -2001,127 +2001,57 @@ func (p *Provider) ListVMs(ctx context.Context) ([]contracts.VMInfo, error) {
 	log.Printf("INFO Found %d domains", len(domains))
 
 	var vmInfos []contracts.VMInfo
-	guestAgent := NewGuestAgentProvider(p.virshProvider)
 
 	for _, domain := range domains {
-		// Get domain information
-		domainInfo, err := p.virshProvider.getDomainInfo(ctx, domain.Name)
+		// Everything ListVMs/adoption needs (cpu, memory, disk path+format, NIC
+		// MAC, uuid) lives in the domain XML, so one `virsh dumpxml` per domain
+		// replaces the old dominfo + 5 monitoring calls + 2 guest-agent probes
+		// that blocked on agent timeouts and blew the gRPC deadline. Power state
+		// comes from `virsh list` (already fetched in listDomains). IPs are not
+		// needed here — the normal VM reconcile discovers them after adoption.
+		raw, err := p.virshProvider.runVirshCommand(ctx, "dumpxml", domain.Name)
 		if err != nil {
-			log.Printf("WARN Failed to get domain info for %s: %v", domain.Name, err)
+			log.Printf("WARN Failed to dump XML for %s: %v", domain.Name, err)
+			continue
+		}
+		dx, err := parseDomainXML(raw.Stdout)
+		if err != nil {
+			log.Printf("WARN Failed to parse XML for %s: %v", domain.Name, err)
 			continue
 		}
 
-		// Extract power state
-		powerState := p.mapLibvirtPowerState(domainInfo["State"])
+		powerState := string(p.mapLibvirtPowerState(domain.State))
 
-		// Extract IP addresses
-		var ips []string
-		if guestIPs := domainInfo["guest_ip_addresses"]; guestIPs != "" {
-			ips = strings.Split(guestIPs, ",")
-			// Filter out empty strings
-			var validIPs []string
-			for _, ip := range ips {
-				ip = strings.TrimSpace(ip)
-				if ip != "" {
-					validIPs = append(validIPs, ip)
-				}
-			}
-			ips = validIPs
-		}
-
-		// Extract CPU count
-		cpu, err := p.extractCPUCount(domainInfo)
-		if err != nil {
-			log.Printf("WARN Failed to extract CPU count for %s: %v", domain.Name, err)
+		cpu := dx.VCPU
+		if cpu == 0 {
 			cpu = 1 // Default to 1 CPU
 		}
-
-		// Extract memory (convert from KiB to MiB)
-		memoryKB, err := p.extractMemoryKB(domainInfo)
+		memoryMiB, err := dx.MemoryMiB()
 		if err != nil {
-			log.Printf("WARN Failed to extract memory for %s: %v", domain.Name, err)
-			memoryKB = 1024 // Default to 1 GiB
-		}
-		memoryMiB := memoryKB / 1024
-
-		// Extract disk information
-		var disks []contracts.DiskInfo
-		diskPaths, err := p.getDomainDiskPaths(ctx, domain.Name)
-		if err == nil {
-			for i, diskPath := range diskPaths {
-				// Get disk size
-				sizeGiB := int32(0)
-				if stat, err := os.Stat(diskPath); err == nil {
-					sizeGiB = int32(stat.Size() / (1024 * 1024 * 1024))
-					if sizeGiB == 0 && stat.Size() > 0 {
-						sizeGiB = 1
-					}
-				}
-
-				// Detect disk format from path
-				format := "qcow2"
-				if strings.HasSuffix(diskPath, ".raw") {
-					format = "raw"
-				} else if strings.HasSuffix(diskPath, ".vmdk") {
-					format = "vmdk"
-				}
-
-				diskInfo := contracts.DiskInfo{
-					ID:      fmt.Sprintf("%s-disk-%d", domain.Name, i),
-					Path:    diskPath,
-					SizeGiB: sizeGiB,
-					Format:  format,
-				}
-				disks = append(disks, diskInfo)
-			}
+			log.Printf("WARN %s: %v; skipping", domain.Name, err)
+			continue
 		}
 
-		// Extract network information
-		var networks []contracts.NetworkInfo
-		// Try to get network info from guest agent if VM is running
-		powerStateStr := string(powerState)
-		if powerStateStr == "On" {
-			if guestInfo, err := guestAgent.GetGuestInfo(ctx, domain.Name); err == nil {
-				for _, iface := range guestInfo.NetworkInterfaces {
-					networkInfo := contracts.NetworkInfo{
-						Name:      iface.Name,
-						MAC:       iface.HardwareAddr,
-						IPAddress: "",
-					}
-					if len(iface.IPAddresses) > 0 {
-						networkInfo.IPAddress = iface.IPAddresses[0]
-					}
-					networks = append(networks, networkInfo)
-				}
-			}
+		providerRaw := map[string]string{
+			"domain_name": domain.Name,
+			"domain_id":   domain.ID,
+			"state":       domain.State,
+			"power_state": powerState,
+		}
+		if dx.UUID != "" {
+			providerRaw["uuid"] = dx.UUID
 		}
 
-		// Build provider raw metadata
-		providerRaw := make(map[string]string)
-		providerRaw["domain_name"] = domain.Name
-		providerRaw["domain_id"] = domain.ID
-		providerRaw["state"] = domain.State
-		providerRaw["power_state"] = powerStateStr
-		if domainInfo["UUID"] != "" {
-			providerRaw["uuid"] = domainInfo["UUID"]
-		}
-		if domainInfo["Guest OS"] != "" {
-			providerRaw["guest_os"] = domainInfo["Guest OS"]
-		}
-
-		vmInfo := contracts.VMInfo{
+		vmInfos = append(vmInfos, contracts.VMInfo{
 			ID:          domain.Name, // Use domain name as ID
 			Name:        domain.Name,
-			PowerState:  powerStateStr,
-			IPs:         ips,
+			PowerState:  powerState,
 			CPU:         cpu,
 			MemoryMiB:   memoryMiB,
-			Disks:       disks,
-			Networks:    networks,
+			Disks:       dx.Disks(domain.Name),
+			Networks:    dx.Networks(),
 			ProviderRaw: providerRaw,
-		}
-
-		vmInfos = append(vmInfos, vmInfo)
+		})
 	}
 
 	return vmInfos, nil
