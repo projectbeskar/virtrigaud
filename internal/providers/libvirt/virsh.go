@@ -592,36 +592,79 @@ func (v *VirshProvider) runVirshCommandOnce(ctx context.Context, args ...string)
 
 // listDomains lists all domains (VMs) using virsh
 func (v *VirshProvider) listDomains(ctx context.Context) ([]VirshDomain, error) {
-	// Get all domains (running and shut off)
-	result, err := v.runVirshCommand(ctx, "list", "--all", "--name")
+	// One `virsh list --all` yields name AND state for every domain, replacing the
+	// old per-domain `virsh domstate` N+1 (one SSH round-trip per VM).
+	result, err := v.runVirshCommand(ctx, "list", "--all")
 	if err != nil {
 		return nil, fmt.Errorf("failed to list domains: %w", err)
 	}
+	return parseDomainListTable(result.Stdout), nil
+}
 
-	var domains []VirshDomain
-	lines := strings.Split(strings.TrimSpace(result.Stdout), "\n")
+// parseDomainListTable parses `virsh list --all` table output (columns: Id,
+// Name, State). Both Name ("Windows Server 2019") and State ("shut off") can
+// contain spaces, so rows are sliced by the header's column byte-offsets, not
+// by whitespace splitting — Fields() would corrupt a spaced name. virsh sizes
+// each column to its widest value, so the State header offset always sits at or
+// past the longest name; the Name column safely absorbs interior spaces.
+func parseDomainListTable(stdout string) []VirshDomain {
+	lines := strings.Split(stdout, "\n")
 
+	// The dashed line separates the header from the rows; the header is above it.
+	sep := -1
 	for i, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
+		if strings.HasPrefix(strings.TrimSpace(line), "---") {
+			sep = i
+			break
+		}
+	}
+	if sep < 1 {
+		// No recognizable table. An empty host still prints header + separator,
+		// so reaching here means the format changed — warn instead of silently
+		// returning zero domains (which would look like "adopt nothing").
+		if strings.TrimSpace(stdout) != "" {
+			log.Printf("WARN virsh list output has no header separator; parsed 0 domains")
+		}
+		return nil
+	}
+	header := lines[sep-1]
+	nameAt := strings.Index(header, "Name")
+	stateAt := strings.Index(header, "State")
+	if nameAt < 0 || stateAt <= nameAt {
+		log.Printf("WARN virsh list header missing Name/State columns; parsed 0 domains")
+		return nil
+	}
+
+	// NOTE: byte offsets, not rune offsets. Fine for ASCII names (incl. spaces);
+	// a CJK domain name could misalign — sanitizeVMName makes that rare.
+	var domains []VirshDomain
+	for _, line := range lines[sep+1:] {
+		if strings.TrimSpace(line) == "" {
 			continue
 		}
-
-		// Get domain state
-		stateResult, err := v.runVirshCommand(ctx, "domstate", line)
-		state := "unknown"
-		if err == nil {
-			state = strings.TrimSpace(stateResult.Stdout)
+		name := strings.TrimSpace(colSlice(line, nameAt, stateAt))
+		state := strings.TrimSpace(colSlice(line, stateAt, len(line)))
+		if name == "" {
+			continue // malformed / short row
 		}
-
 		domains = append(domains, VirshDomain{
-			ID:    fmt.Sprintf("%d", i),
-			Name:  line,
+			ID:    fmt.Sprintf("%d", len(domains)),
+			Name:  name,
 			State: state,
 		})
 	}
+	return domains
+}
 
-	return domains, nil
+// colSlice returns line[from:to], clamped to the line length for short rows.
+func colSlice(line string, from, to int) string {
+	if from > len(line) {
+		return ""
+	}
+	if to > len(line) {
+		to = len(line)
+	}
+	return line[from:to]
 }
 
 // startDomain starts a defined domain

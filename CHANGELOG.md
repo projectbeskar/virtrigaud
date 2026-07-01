@@ -5,6 +5,21 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-30 17:00] - fix(libvirt): ListVMs dumps domain XML once, not per-domain SSH fan-out (#285)
+**Author:** @jing2uo (Komh)
+
+### Fixed
+- `internal/providers/libvirt/{provider_virsh.go,virsh.go,domainxml.go}`: `ListVMs` no longer fans out one `virsh domstate`/`dumpxml`/stat SSH round-trip per domain (the `1 + N` blow-up that tripped the reconcile deadline on hosts with many VMs). It now runs one `virsh list --all` for name+state and one `dumpxml` per domain parsed locally with `encoding/xml`, extracting only what list/adoption needs (identity, vCPU, memory, disk paths+format, NIC MACs). The same XML shape is returned by go-libvirt's `DomainGetXMLDesc`, so the parser carries straight over to the native-client work in #257.
+- `internal/providers/libvirt/virsh.go`: `parseDomainListTable` slices rows by the header's `Name`/`State` column byte-offsets instead of `strings.Fields`, so a domain named `Windows Server 2019` is no longer truncated to `Windows` with its power state mis-read as `Off` — a real adoption hazard, since adoption discovers pre-existing, human-named domains. It also warns instead of silently returning zero domains when the output has no header separator or no Name/State columns (an empty host still prints the separator, so that path means the format changed).
+- `internal/providers/libvirt/domainxml.go`: `MemoryMiB` reads the `<memory unit=…>` attribute and errors on a non-KiB unit rather than blindly dividing by 1024. dumpxml is always KiB today, so this is a guard for the go-libvirt XML path in #257, where the unit is not guaranteed.
+
+### Why
+On hosts with many domains the per-domain SSH fan-out pushed `ListVMs` past the reconcile deadline, so adoption/listing timed out. Collapsing to `1 + N` round-trips with local XML parsing fixes the deadline and, as a side effect, makes disk format come from `<driver type>` (more reliable than the old path-suffix guess).
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (libvirt provider image)
+- [ ] Config change only
 ## [2026-06-30 12:00] - fix(libvirt): select <domain type=kvm> when the host has /dev/kvm (#282)
 **Author:** @jing2uo (Komh)
 
