@@ -5,6 +5,21 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-06-30 12:00] - fix(libvirt): select <domain type=kvm> when the host has /dev/kvm (#282)
+**Author:** @jing2uo (Komh)
+
+### Fixed
+- `internal/providers/libvirt/provider_virsh.go`: probe the (possibly remote) host for a **readable** `/dev/kvm` (`test -r`) and render `<domain type='kvm'>` instead of the hard-coded `qemu`, restoring hardware acceleration. Falls back to `qemu` when `/dev/kvm` is absent, unreadable, or the probe fails. On the fallback path a second `test -e` probe distinguishes the two causes in the log: **absent** → `INFO` (expected on a TCG-only host), **present-but-unreadable** → `WARN` with remediation (grant the qemu user read access to fix device-cgroup/permission restrictions). Decision logic split into `domainTypeFromProbe` and covered by a table test.
+
+### Why
+Hard-coded `type='qemu'` forced TCG software emulation on KVM-capable hosts (~100% CPU, glacial boot). `test -r` (not `-e`) ensures a present-but-unopenable `/dev/kvm` — e.g. device-cgroup/permission restrictions in containerized libvirt — still falls back to `qemu` rather than rendering a `kvm` domain that fails to start; the absent-vs-unreadable log split tells the operator whether the fallback is expected or a misconfiguration they should fix. Fixes #282.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-06-21 15:30] - docs(migration): NFS backend guide, examples, and ADR-0006 Slice 4 validation (#236)
 **Author:** @wrkode (William Rizzo)
 
