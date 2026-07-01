@@ -5,6 +5,22 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-07-01 17:00] - chore(ci): bump actions/checkout to v7.0.0 and clear stale #102 pins
+**Author:** @williamrizzo (William Rizzo)
+
+### Changed
+- `.github/workflows/{ci,release,runtime-chart}.yml`: bump all `actions/checkout` steps from v6.0.3 to v7.0.0 (SHA-pinned). Supersedes the Dependabot PR (#281), which would have left two steps carrying stale `# v4 (pinned for #102)` labels on a v7 SHA.
+- `.github/workflows/ci.yml`: rewrite the two `#102` guard comments. `#102` (intermittent `actions/checkout@v6.0.2` failures on PR merge refs) is resolved and the repo had already moved those steps to v6.0.3, so the "pinned to v4 / DO NOT bump" warnings were misleading. They now read as a resolved historical note and track the standard version.
+
+### Why
+Keep CI actions current and remove documentation drift: the `# v4 (pinned for #102)` labels contradicted the actual (v6.0.3) SHA, and the "DO NOT bump" guards referenced a closed issue. Doing the bump and the comment fix in one change avoids landing a self-contradictory workflow.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] CI only
+
 ## [2026-07-01 16:16] - fix(libvirt): cap concurrent virsh forks + drop duplicate provider Validate (#288)
 **Author:** @jing2uo (Komh)
 
