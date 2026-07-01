@@ -8,6 +8,10 @@ env:
     value: "info"
   - name: LIBVIRT_URI
     value: "qemu:///system"
+  # Caps concurrent virsh/ssh subprocess forks so a reconcile burst can't exhaust
+  # the libvirt host's fork limit ("cannot fork child process"). Default 4 (#288).
+  # - name: VIRTRIGAUD_LIBVIRT_MAX_CONCURRENT_VIRSH
+  #   value: "4"
 
 resources:
   limits:

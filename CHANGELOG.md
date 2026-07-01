@@ -5,6 +5,23 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-07-01 16:16] - fix(libvirt): cap concurrent virsh forks + drop duplicate provider Validate (#288)
+**Author:** @jing2uo (Komh)
+
+### Changed
+- `internal/providers/libvirt/virsh.go`: bound concurrent virsh/ssh subprocess forks with a semaphore at the single exec chokepoint (`runVirshCommandOnce`). Default 4, override via `VIRTRIGAUD_LIBVIRT_MAX_CONCURRENT_VIRSH`. Context-aware acquire (no slot leaked on cancel); a nil semaphore (zero-value provider, e.g. tests) is unbounded.
+- `internal/controller/virtualmachine_controller.go`: remove the redundant provider `Validate` in `reconcileVM` — `Resolver.GetProvider` already validates the client on both the cached and new-client paths, and the image-prepare/create RPCs that follow are themselves the liveness test. Drops the now-dead `errReasonProviderValidate` const.
+- `charts/virtrigaud-provider-runtime/examples/values-libvirt.yaml`: document the `VIRTRIGAUD_LIBVIRT_MAX_CONCURRENT_VIRSH` knob (default 4).
+
+### Why
+Post-adoption, the manager reconciles every newly adopted VM with 10-way concurrency, and each reconcile validated the provider twice. libvirt `Validate` is a real `virsh list --all --name` over SSH, so the burst became a process-fork storm on the host: `cannot fork child process: Resource temporarily unavailable`. The semaphore caps the actually-exhausted resource (host forks) for all buffered virsh calls regardless of control-plane concurrency; dropping the duplicate Validate halves validation demand. (The s3import/s3export disk-stream and `scp` paths fork outside this cap by design — see the PR discussion.)
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (libvirt provider image)
+- [ ] Documentation only
+- **Metric attribution:** with `errReasonProviderValidate` removed, validation failures now count under `errReasonProviderResolve`. Any dashboard/alert keying on the `provider-validate` reason will go silent.
+
 ## [2026-06-30 17:00] - fix(libvirt): ListVMs dumps domain XML once, not per-domain SSH fan-out (#285)
 **Author:** @jing2uo (Komh)
 
@@ -20,6 +37,7 @@ On hosts with many domains the per-domain SSH fan-out pushed `ListVMs` past the 
 - [ ] Breaking change
 - [x] Requires cluster rollout (libvirt provider image)
 - [ ] Config change only
+
 ## [2026-06-30 12:00] - fix(libvirt): select <domain type=kvm> when the host has /dev/kvm (#282)
 **Author:** @jing2uo (Komh)
 

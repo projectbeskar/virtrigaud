@@ -25,6 +25,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -32,6 +33,16 @@ import (
 const (
 	sshPrivateKeyDir  = "/tmp/virtrigaud-libvirt"
 	sshPrivateKeyPath = sshPrivateKeyDir + "/ssh-privatekey"
+
+	// defaultMaxConcurrentVirsh bounds how many virsh/ssh subprocesses this
+	// provider forks at once. Each virsh-over-ssh call is a real process fork
+	// on the provider pod and the remote host; an unbounded burst (e.g. the
+	// post-adoption Validate storm with 10-way reconcile concurrency) exhausts
+	// the host fork limit and yields "cannot fork child process". Override with
+	// VIRTRIGAUD_LIBVIRT_MAX_CONCURRENT_VIRSH (see #288). This is a fixed cap; the
+	// strategic fix (#255/#256) is a persistent libvirt connection, after which
+	// it can be raised or removed.
+	defaultMaxConcurrentVirsh = 4
 )
 
 // VirshProvider implements a virsh command-line based libvirt provider
@@ -50,6 +61,12 @@ type VirshProvider struct {
 	// (WARN on the escape hatch, INFO when verifying). Defaults to
 	// slog.Default() when nil.
 	logger *slog.Logger
+
+	// execSem bounds concurrent virsh/ssh subprocess forks (see
+	// defaultMaxConcurrentVirsh). nil means unbounded (zero-value provider, e.g.
+	// in tests). Set by NewVirshProvider; shared across all goroutines using
+	// this provider instance.
+	execSem chan struct{}
 }
 
 // VirshDomain represents a VM domain from virsh list output
@@ -75,7 +92,36 @@ func (e *VirshError) Error() string {
 // NewVirshProvider creates a new virsh-based provider
 func NewVirshProvider(config *ProviderConfig) *VirshProvider {
 	return &VirshProvider{
-		config: config,
+		config:  config,
+		execSem: make(chan struct{}, maxConcurrentVirshFromEnv()),
+	}
+}
+
+// maxConcurrentVirshFromEnv returns the concurrent-virsh fork cap, honoring
+// VIRTRIGAUD_LIBVIRT_MAX_CONCURRENT_VIRSH (positive int) and falling back to
+// defaultMaxConcurrentVirsh otherwise.
+func maxConcurrentVirshFromEnv() int {
+	if s := os.Getenv("VIRTRIGAUD_LIBVIRT_MAX_CONCURRENT_VIRSH"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 {
+			return n
+		}
+		log.Printf("WARN Ignoring invalid VIRTRIGAUD_LIBVIRT_MAX_CONCURRENT_VIRSH=%q, using default %d", s, defaultMaxConcurrentVirsh)
+	}
+	return defaultMaxConcurrentVirsh
+}
+
+// acquireExecSlot blocks until a virsh/ssh fork slot is free or ctx is done,
+// returning a release func to call when the subprocess finishes. A nil execSem
+// (zero-value provider) is treated as unbounded.
+func (v *VirshProvider) acquireExecSlot(ctx context.Context) (release func(), err error) {
+	if v.execSem == nil {
+		return func() {}, nil
+	}
+	select {
+	case v.execSem <- struct{}{}:
+		return func() { <-v.execSem }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
 }
 
@@ -455,6 +501,14 @@ func retryOnTransientSSH(ctx context.Context, attempt func() (*VirshResult, erro
 // error handling. Special case: if first arg is "!", execute the remaining args
 // as a direct command (not virsh).
 func (v *VirshProvider) runVirshCommandOnce(ctx context.Context, args ...string) (*VirshResult, error) {
+	// Bound concurrent subprocess forks so a reconcile burst cannot exhaust the
+	// host fork limit (cannot fork child process). Held only across the fork.
+	release, err := v.acquireExecSlot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
 	start := time.Now()
 
 	var cmd *exec.Cmd
@@ -563,7 +617,7 @@ func (v *VirshProvider) runVirshCommandOnce(ctx context.Context, args ...string)
 	log.Printf("DEBUG Executing: %s", command)
 
 	// Run the command
-	err := cmd.Run()
+	err = cmd.Run()
 	duration := time.Since(start)
 
 	result := &VirshResult{

@@ -54,7 +54,6 @@ const (
 	errReasonDepsNotFound     = "deps-not-found"
 	errReasonDepsError        = "deps-error"
 	errReasonProviderResolve  = "provider-resolve"
-	errReasonProviderValidate = "provider-validate"
 	errReasonProviderDescribe = "provider-describe"
 	errReasonProviderTask     = "provider-task-status"
 	errReasonProviderDelete   = "provider-delete"
@@ -209,16 +208,13 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	}
 	logger.V(1).Info("Provider instance obtained successfully", "provider", provider.Name)
 
-	// Validate provider
-	logger.V(1).Info("Validating provider connectivity")
-	if err := providerInstance.Validate(ctx); err != nil {
-		logger.Error(err, "Provider validation failed - will retry in 5s", "provider", provider.Name)
-		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Provider validation failed: %v", err))
-		metrics.RecordError(errReasonProviderValidate, metrics.ComponentManager)
-		r.updateStatus(ctx, vm)
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
-	}
-	logger.V(1).Info("Provider validation successful", "provider", provider.Name)
+	// Provider liveness is already verified by getProviderInstance →
+	// Resolver.GetProvider (it validates the cached/new client before returning).
+	// Re-validating here doubled the real virsh-over-ssh Validate calls on every
+	// reconcile, which — under 10-way concurrency post-adoption — became a fork
+	// storm on the libvirt host (#288). The image-prepare / create RPCs below are
+	// themselves the liveness test: a dead provider fails them and the reconcile
+	// requeues.
 
 	// Ensure the referenced image is prepared on this provider before creating
 	// the VM (lazy, VM-create-driven prepare — issue #154). This is a no-op for
