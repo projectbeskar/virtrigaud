@@ -50,6 +50,7 @@ ARG TARGETARCH
 ARG VERSION=dev
 ARG GIT_SHA=unknown
 RUN CGO_ENABLED=1 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
+    -tags libvirt_native \
     -ldflags "-X github.com/projectbeskar/virtrigaud/internal/version.Version=${VERSION} -X github.com/projectbeskar/virtrigaud/internal/version.GitSHA=${GIT_SHA}" \
     -a -o provider-libvirt cmd/provider-libvirt/main.go
 
@@ -58,6 +59,7 @@ FROM ${BASE_IMAGE}
 RUN apt-get update && apt-get install -y \
     libvirt0 \
     libvirt-clients \
+    libssh2-1 \
     libxml2 \
     ca-certificates \
     openssh-client \
