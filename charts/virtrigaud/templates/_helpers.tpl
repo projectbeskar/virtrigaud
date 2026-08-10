@@ -62,6 +62,17 @@ Create the name of the service account to use
 {{- end }}
 
 {{/*
+Name of the dedicated, least-privilege ServiceAccount for a chart-templated
+provider Deployment. Each provider gets its OWN token-less identity with NO
+RoleBinding/ClusterRoleBinding — it never borrows the manager's SA (which holds
+cluster-wide secrets access). Call with a dict:
+  {{ include "virtrigaud.providerServiceAccountName" (dict "root" . "provider" "libvirt") }}
+*/}}
+{{- define "virtrigaud.providerServiceAccountName" -}}
+{{- printf "%s-provider-%s" (include "virtrigaud.fullname" .root) .provider -}}
+{{- end }}
+
+{{/*
 Create the name of the ClusterRole to use
 */}}
 {{- define "virtrigaud.clusterRoleName" -}}

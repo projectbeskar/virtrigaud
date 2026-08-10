@@ -51,12 +51,13 @@ import (
 // These constants are package-local; the `errReason*` prefix prevents
 // collisions with the VirtualMachine reconciler's taxonomy.
 const (
-	errReasonGetProvider         = "get-provider"
-	errReasonRuntimeSpecInvalid  = "runtime-spec-invalid"
-	errReasonServiceReconcile    = "service-reconcile-failed"
-	errReasonDeploymentReconcile = "deployment-reconcile-failed"
-	errReasonCleanupFailed       = "cleanup-failed"
-	errReasonTLSNotConfigured    = "tls-not-configured"
+	errReasonGetProvider             = "get-provider"
+	errReasonRuntimeSpecInvalid      = "runtime-spec-invalid"
+	errReasonServiceReconcile        = "service-reconcile-failed"
+	errReasonServiceAccountReconcile = "serviceaccount-reconcile-failed"
+	errReasonDeploymentReconcile     = "deployment-reconcile-failed"
+	errReasonCleanupFailed           = "cleanup-failed"
+	errReasonTLSNotConfigured        = "tls-not-configured"
 )
 
 // TLS Condition vocabulary surfaced on Provider.Status.Conditions by
@@ -152,6 +153,7 @@ type ProviderReconciler struct {
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=virtualmachines,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
@@ -413,9 +415,10 @@ func (r *ProviderReconciler) reconcileRemoteRuntime(ctx context.Context, provide
 		return ctrl.Result{RequeueAfter: time.Minute}, nil
 	}
 
-	// Generate names for deployment and service
+	// Generate names for deployment, service, and service account
 	deploymentName := r.getDeploymentName(provider)
 	serviceName := r.getServiceName(provider)
+	serviceAccountName := r.getServiceAccountName(provider)
 
 	// Reconcile Service first (needed for endpoint)
 	service, err := r.reconcileService(ctx, provider, serviceName)
@@ -425,6 +428,18 @@ func (r *ProviderReconciler) reconcileRemoteRuntime(ctx context.Context, provide
 		provider.Status.Runtime.Phase = infravirtrigaudiov1beta1.ProviderRuntimePhaseFailed
 		provider.Status.Runtime.Message = err.Error()
 		metrics.RecordError(errReasonServiceReconcile, metrics.ComponentManager)
+		return ctrl.Result{RequeueAfter: time.Minute}, err
+	}
+
+	// Reconcile the dedicated, least-privilege ServiceAccount before the
+	// Deployment, so the pod's serviceAccountName resolves to an existing
+	// (token-less, binding-less) identity instead of the namespace default SA.
+	if _, err := r.reconcileServiceAccount(ctx, provider, serviceAccountName); err != nil {
+		logger.Error(err, "Failed to reconcile service account")
+		k8s.SetCondition(&provider.Status.Conditions, "ProviderRuntimeReady", metav1.ConditionFalse, "ServiceAccountError", fmt.Sprintf("Failed to create service account: %v", err))
+		provider.Status.Runtime.Phase = infravirtrigaudiov1beta1.ProviderRuntimePhaseFailed
+		provider.Status.Runtime.Message = err.Error()
+		metrics.RecordError(errReasonServiceAccountReconcile, metrics.ComponentManager)
 		return ctrl.Result{RequeueAfter: time.Minute}, err
 	}
 
@@ -566,6 +581,22 @@ func (r *ProviderReconciler) getServiceName(provider *infravirtrigaudiov1beta1.P
 	return fmt.Sprintf("virtrigaud-provider-%s-%s", provider.Namespace, provider.Name)
 }
 
+// getServiceAccountName generates the name of the dedicated, least-privilege
+// ServiceAccount that backs a provider's pods. It intentionally matches the
+// Deployment/Service naming scheme (a per-provider identity keyed on
+// namespace+name) — the three are distinct Kubernetes kinds, so sharing the
+// name is safe and keeps the child resources easy to correlate.
+//
+// This ServiceAccount has NO RoleBinding or ClusterRoleBinding: provider pods
+// are gRPC servers that never touch the Kubernetes API at runtime (credentials
+// and TLS material reach them as kubelet-mounted Secret volumes + env, not via
+// API reads). Giving them their own token-less identity stops a compromised
+// provider — the component most exposed to hypervisor-controlled input — from
+// borrowing the manager's cluster-wide `secrets: get;list;watch` grant.
+func (r *ProviderReconciler) getServiceAccountName(provider *infravirtrigaudiov1beta1.Provider) string {
+	return fmt.Sprintf("virtrigaud-provider-%s-%s", provider.Namespace, provider.Name)
+}
+
 // reconcileService creates or updates the service for remote provider
 func (r *ProviderReconciler) reconcileService(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider, serviceName string) (*corev1.Service, error) {
 	port := int32(9443)
@@ -637,6 +668,61 @@ func (r *ProviderReconciler) reconcileService(ctx context.Context, provider *inf
 	return existing, nil
 }
 
+// reconcileServiceAccount creates or updates the dedicated, least-privilege
+// ServiceAccount that the provider's pods run under. The ServiceAccount is
+// owner-referenced to the Provider CR (so it is garbage-collected with it) and
+// carries NO RoleBinding/ClusterRoleBinding — provider pods need zero
+// Kubernetes API access. AutomountServiceAccountToken is pinned to false on the
+// ServiceAccount as a second line of defence in addition to the pod-spec-level
+// flag set in reconcileDeployment: even a pod template that forgot the flag
+// would still not receive a projected token.
+func (r *ProviderReconciler) reconcileServiceAccount(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider, serviceAccountName string) (*corev1.ServiceAccount, error) {
+	desired := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      serviceAccountName,
+			Namespace: provider.Namespace,
+			Labels: map[string]string{
+				"app.kubernetes.io/name":       "virtrigaud-provider",
+				"app.kubernetes.io/instance":   provider.Name,
+				"app.kubernetes.io/component":  "provider",
+				"app.kubernetes.io/managed-by": "virtrigaud",
+				"virtrigaud.io/provider-type":  string(provider.Spec.Type),
+			},
+		},
+		// Belt-and-braces with the pod-spec flag: never project a token.
+		AutomountServiceAccountToken: util.BoolPtr(false),
+	}
+
+	// Set owner reference so the ServiceAccount is garbage-collected when the
+	// Provider is deleted (matches Service/Deployment child-resource handling).
+	if err := controllerutil.SetControllerReference(provider, desired, r.Scheme); err != nil {
+		return nil, fmt.Errorf("failed to set controller reference on service account: %w", err)
+	}
+
+	// Check if the ServiceAccount already exists.
+	existing := &corev1.ServiceAccount{}
+	err := r.Get(ctx, types.NamespacedName{Name: serviceAccountName, Namespace: provider.Namespace}, existing)
+
+	if apierrors.IsNotFound(err) {
+		if err := r.Create(ctx, desired); err != nil {
+			return nil, fmt.Errorf("failed to create service account: %w", err)
+		}
+		return desired, nil
+	} else if err != nil {
+		return nil, fmt.Errorf("failed to get service account: %w", err)
+	}
+
+	// Reconcile drift on the fields we own (labels + automount posture),
+	// preserving any token/imagePullSecrets Kubernetes attaches out-of-band.
+	existing.Labels = desired.Labels
+	existing.AutomountServiceAccountToken = desired.AutomountServiceAccountToken
+	if err := r.Update(ctx, existing); err != nil {
+		return nil, fmt.Errorf("failed to update service account: %w", err)
+	}
+
+	return existing, nil
+}
+
 // reconcileDeployment creates or updates the deployment for remote provider
 func (r *ProviderReconciler) reconcileDeployment(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider, deploymentName string) (*appsv1.Deployment, error) {
 	// Default values
@@ -683,6 +769,14 @@ func (r *ProviderReconciler) reconcileDeployment(ctx context.Context, provider *
 					},
 				},
 				Spec: corev1.PodSpec{
+					// Run under the dedicated, least-privilege ServiceAccount
+					// (reconcileServiceAccount) — never the manager's SA nor the
+					// namespace default. AutomountServiceAccountToken=false means
+					// no Kubernetes API token is projected into the pod at all:
+					// provider pods are gRPC servers that never call the API
+					// (credentials/TLS arrive as kubelet-mounted Secret volumes).
+					ServiceAccountName:            r.getServiceAccountName(provider),
+					AutomountServiceAccountToken:  util.BoolPtr(false),
 					Containers:                    []corev1.Container{*container},
 					Volumes:                       r.buildPodVolumes(provider),
 					NodeSelector:                  provider.Spec.Runtime.NodeSelector,
@@ -1253,6 +1347,7 @@ func (r *ProviderReconciler) countConnectedVMs(ctx context.Context, provider *in
 func (r *ProviderReconciler) cleanupRemoteRuntime(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) error {
 	deploymentName := r.getDeploymentName(provider)
 	serviceName := r.getServiceName(provider)
+	serviceAccountName := r.getServiceAccountName(provider)
 
 	// Delete deployment
 	deployment := &appsv1.Deployment{
@@ -1276,6 +1371,19 @@ func (r *ProviderReconciler) cleanupRemoteRuntime(ctx context.Context, provider 
 		return fmt.Errorf("failed to delete service: %w", err)
 	}
 
+	// Delete the dedicated ServiceAccount. Owner-reference GC is the backstop,
+	// but delete it explicitly to match the Deployment/Service cleanup above and
+	// reclaim the provider identity promptly on Provider deletion.
+	serviceAccount := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      serviceAccountName,
+			Namespace: provider.Namespace,
+		},
+	}
+	if err := r.Delete(ctx, serviceAccount); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("failed to delete service account: %w", err)
+	}
+
 	return nil
 }
 
@@ -1285,6 +1393,7 @@ func (r *ProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&infravirtrigaudiov1beta1.Provider{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
+		Owns(&corev1.ServiceAccount{}).
 		// Re-reconcile a namespace's Providers when a migration storage PVC
 		// appears or starts deleting, so provider Deployments mount/unmount it
 		// promptly instead of waiting for the next resync (issue #184).
