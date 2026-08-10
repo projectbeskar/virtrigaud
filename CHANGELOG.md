@@ -5,29 +5,30 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2026-08-10 19:01] - deps: bump google.golang.org/grpc to v1.82.1 (GO-2026-6061)
+## [2026-08-10 19:01] - deps: bump grpc to v1.82.1 (GO-2026-6061) and x/text to v0.39.0 (GO-2026-5970)
 **Author:** @wrkode (William Rizzo)
 
 ### Security
 - `go.mod`, `go.sum`: bump `google.golang.org/grpc` v1.80.0 → **v1.82.1**; `go mod tidy` pulled `golang.org/x/oauth2` v0.35.0 → v0.36.0 and refreshed `google.golang.org/genproto/googleapis/{api,rpc}` to match grpc's module graph.
-- `sdk/go.mod`, `sdk/go.sum`: same bump, same transitive deltas (oauth2, genproto).
-- `proto/go.mod`, `proto/go.sum`: bumped too — `google.golang.org/grpc` v1.67.1 → **v1.82.1** and `google.golang.org/protobuf` v1.35.1 → v1.36.11 (pulled in transitively by grpc). A bigger jump than root/sdk since `proto/` had never moved off v1.67.1, but `go build ./...` and the generated `provider.pb.go` / `provider_grpc.pb.go` bindings are unaffected — no regen needed, no API change.
-- Clears **GO-2026-6061** (xDS RBAC authorization engine + HTTP/2 transport server), reachable per `govulncheck` through `internal/transport/grpc/client.go:256`, `internal/config/config.go:351`, and `cmd/provider-libvirt/main.go:136`.
+- `go.mod`, `go.sum`: bump `golang.org/x/text` v0.37.0 → **v0.39.0** (direct dep). `go get`/`go mod tidy` carried the rest of the `golang.org/x` family along to satisfy the module graph: `x/crypto` v0.51.0 → v0.53.0, `x/net` v0.55.0 → v0.56.0, `x/sync` v0.20.0 → v0.21.0, `x/sys` v0.45.0 → v0.46.0, `x/term` v0.43.0 → v0.44.0, `x/tools` v0.44.0 → v0.47.0.
+- `sdk/go.mod`, `sdk/go.sum`: same grpc bump; `x/text` moved to v0.39.0 as an indirect consequence of `go mod tidy` following root's new requirement (sdk depends on root via a local `replace`), with matching `x/net`/`x/sys`/`x/term` bumps.
+- `proto/go.mod`, `proto/go.sum`: bumped grpc v1.67.1 → **v1.82.1** and `google.golang.org/protobuf` v1.35.1 → v1.36.11 (pulled in transitively by grpc). A bigger jump than root/sdk since `proto/` had never moved off v1.67.1, but `go build ./...` and the generated `provider.pb.go` / `provider_grpc.pb.go` bindings are unaffected — no regen needed, no API change. `proto/`'s `x/text` stays at v0.37.0: it has no dependency path to root/sdk, and `go mod tidy` found nothing in its own graph (grpc + protobuf) requiring v0.39.0 — left alone rather than forced; `proto/` is also not govulncheck-gated in CI.
+- Clears **GO-2026-6061** (xDS RBAC authorization engine + HTTP/2 transport server in grpc), reachable per `govulncheck` through `internal/transport/grpc/client.go:256`, `internal/config/config.go:351`, and `cmd/provider-libvirt/main.go:136`.
+- Clears **GO-2026-5970** (infinite loop on invalid input in `golang.org/x/text`'s Unicode normalizer), reachable per `govulncheck` through `internal/providers/proxmox/pveapi/client.go:295` and `cmd/vrtg-provider/publish.go:292`.
 
 ### Why
-GO-2026-6061 is a newly-disclosed, reachable vulnerability in the gRPC transport/RBAC engine, and it was failing the blocking `govulncheck` CI job on every PR (root and sdk modules alike), including #296 and #297. v1.82.1 is the exact fixed version — taken deliberately over jumping further, to keep the delta minimal and the ripple risk low.
+Both CVEs are newly-disclosed, reachable vulnerabilities that were failing the blocking `govulncheck` CI job on every PR (root and sdk modules alike), including #296 and #297 — govulncheck fails the run on *any* reachable vulnerability, so a fix for grpc alone would have left the job red on GO-2026-5970. Both dependencies were bumped to their exact fixed versions (grpc v1.82.1, x/text v0.39.0) rather than further, to keep the delta minimal and the ripple risk low.
 
 ### Impact
 - [ ] Breaking change
-- [x] Requires cluster rollout — only to ship rebuilt manager/provider images carrying the patched grpc transport; running clusters are unaffected until upgraded
+- [x] Requires cluster rollout — only to ship rebuilt manager/provider images carrying the patched grpc transport and x/text normalizer; running clusters are unaffected until upgraded
 - [ ] Config change only
 - [ ] Documentation only
 
 ### Notes
-- Verified locally: `govulncheck ./...` (root) and `cd sdk && govulncheck ./...` both confirm GO-2026-6061 is fully gone — absent from every section of the scan (Symbol/Package/Module Results), not merely demoted to "imported but not called." A clean-`main` baseline scan (stashing this PR's changes) reproduced GO-2026-6061 as reachable before the bump, confirming the fix is what cleared it. `make fmt` (no diff), `make lint` (0 issues), `make test` (all packages pass), `make build` (clean); `go build ./...` also clean including the libvirt provider packages the Makefile excludes.
-- **Residual, pre-existing, unrelated finding — not fixed by this PR:** `govulncheck ./...` at root still exits non-zero after this bump, because of **GO-2026-5970** (`golang.org/x/text` v0.37.0, infinite loop on invalid input, fixed in v0.39.0), reachable via `internal/providers/proxmox/pveapi/client.go` and `cmd/vrtg-provider/publish.go`. The same clean-`main` baseline scan used to confirm GO-2026-6061 above shows GO-2026-5970 was *already* independently reachable on `main` before this PR — `x/text`'s version is untouched here. Left for a separate follow-up so this PR stays a minimal, single-purpose grpc bump; the sdk module doesn't reach GO-2026-5970 at all (`cd sdk && govulncheck ./...` is clean, exit 0).
-- `sdk/provider/client/client.go:331,337`: pre-existing `go vet` finding (discarded `context.WithTimeout` cancel funcs) noticed while sanity-vetting the sdk module post-bump. Unrelated to grpc; not part of any `make` gate today (sdk has no wired `vet`/`lint` Makefile target). Left as a follow-up.
-- `proto/rpc/provider/v1/json_fuzz_test.go`: pre-existing, unrelated — references types (`CreateVMRequest`, `VMSpec`, …) that don't match the current generated `provider.pb.go` (the real type is `CreateRequest`; no `VMSpec`/`DiskSpec`/`NetworkSpec` exist). Confirmed identically broken on `main` before this bump (same failure under the old grpc v1.67.1), so it is not a regression from the version jump. `proto/` has no wired `make` test target, so this doesn't block CI today. Left as a follow-up.
+- Verified locally: `govulncheck ./...` (root) and `cd sdk && govulncheck ./...` both now report **"No vulnerabilities found" (exit 0)** — GO-2026-6061 and GO-2026-5970 are both fully gone, not merely demoted to "imported but not called." A clean-`main` baseline scan (stashing this PR's changes) reproduced both as reachable — "Your code is affected by 2 vulnerabilities from 2 modules" — before the bumps, confirming the fixes are what cleared them. `make fmt` (no diff), `make lint` (0 issues), `make test` (all packages pass), `make build` (clean); `go build ./...` also clean at root (including the libvirt provider packages the Makefile excludes) and in `sdk/`.
+- `sdk/provider/client/client.go:331,337`: pre-existing `go vet` finding (discarded `context.WithTimeout` cancel funcs) noticed while sanity-vetting the sdk module post-bump. Unrelated to either CVE; not part of any `make` gate today (sdk has no wired `vet`/`lint` Makefile target). Flagged as a follow-up, not fixed here.
+- `proto/rpc/provider/v1/json_fuzz_test.go`: pre-existing, unrelated — references types (`CreateVMRequest`, `VMSpec`, …) that don't match the current generated `provider.pb.go` (the real type is `CreateRequest`; no `VMSpec`/`DiskSpec`/`NetworkSpec` exist). Confirmed identically broken on `main` before this PR (same failure under the old grpc v1.67.1), so it is not a regression from the version jump. `proto/` has no wired `make` test target, so this doesn't block CI today. Flagged as a follow-up, not fixed here.
 
 ## [2026-07-01 17:00] - chore(ci): bump actions/checkout to v7.0.0 and clear stale #102 pins
 **Author:** @williamrizzo (William Rizzo)
