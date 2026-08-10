@@ -1,5 +1,5 @@
 # Build the provider binary
-ARG BUILDER_IMAGE=golang:1.26.4
+ARG BUILDER_IMAGE=golang:1.26.5
 # The Proxmox provider shells out to `ssh`/`sshpass` for the disk data plane
 # (qemu-img/qm/pvesm run ON the PVE node over SSH), so the runtime image needs an
 # ssh client + sshpass — a static-distroless base cannot carry them.
