@@ -20,7 +20,11 @@ spec:
         {{- include "virtrigaud.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: provider-vsphere
     spec:
-      serviceAccountName: {{ include "virtrigaud.serviceAccountName" . }}
+      # Dedicated, least-privilege SA (no RoleBinding/ClusterRoleBinding); the
+      # provider never borrows the manager's cluster-privileged SA. No API token
+      # is projected — provider pods never call the Kubernetes API.
+      serviceAccountName: {{ include "virtrigaud.providerServiceAccountName" (dict "root" . "provider" "vsphere") }}
+      automountServiceAccountToken: false
       securityContext:
         {{- toYaml .Values.manager.podSecurityContext | nindent 8 }}
       containers:

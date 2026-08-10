@@ -144,6 +144,24 @@ rules:
   - patch
   - update
   - watch
+# ServiceAccounts: the provider_controller creates a dedicated, least-privilege
+# ServiceAccount per provider (with NO RoleBinding/ClusterRoleBinding) so
+# provider pods run under their own token-less identity instead of borrowing the
+# manager's cluster-privileged SA. The manager must be able to create/manage
+# that child SA. This grant is scoped to serviceaccounts only; it does NOT touch
+# the manager's own ServiceAccount or the secrets access declared above.
+- apiGroups:
+  - ""
+  resources:
+  - serviceaccounts
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
 # Events: the manager only emits events (create/patch); it never lists/deletes.
 - apiGroups:
   - ""
@@ -344,6 +362,24 @@ rules:
   - ""
   resources:
   - services
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+# ServiceAccounts: the provider_controller creates a dedicated, least-privilege
+# ServiceAccount per provider (with NO RoleBinding/ClusterRoleBinding) so
+# provider pods run under their own token-less identity instead of borrowing the
+# manager's cluster-privileged SA. The manager must be able to create/manage
+# that child SA. This grant is scoped to serviceaccounts only; it does NOT touch
+# the manager's own ServiceAccount or the secrets access declared above.
+- apiGroups:
+  - ""
+  resources:
+  - serviceaccounts
   verbs:
   - create
   - delete

@@ -50,6 +50,22 @@ Three newly-disclosed, reachable vulnerabilities were failing the blocking `govu
 ### Impact
 - [ ] Breaking change
 - [x] Requires cluster rollout (libvirt provider image)
+## [2026-08-10 14:30] - provider pods: dedicated least-privilege ServiceAccount
+**Author:** @wrkode (William Rizzo)
+
+### Security
+- `internal/controller/provider_controller.go`: controller-built provider Deployments now create and own a dedicated, per-provider `ServiceAccount` (owner-referenced to the Provider CR, deleted on cleanup) with NO RoleBinding/ClusterRoleBinding, and set `ServiceAccountName` + `AutomountServiceAccountToken: false` on the pod spec. Previously those pods ran as the namespace `default` ServiceAccount with its token automounted.
+- `charts/virtrigaud/templates/provider-serviceaccounts.yaml`: new template rendering one token-less `ServiceAccount` per enabled provider (libvirt/vsphere/proxmox), gated on the same `enabled` flags as the Deployments, with no bindings.
+- `charts/virtrigaud/templates/provider-{libvirt,vsphere,proxmox}-deployment.yaml`: point each provider Deployment at its dedicated ServiceAccount instead of the manager's, and set `automountServiceAccountToken: false` on the pod spec.
+- `charts/virtrigaud/templates/_helpers.tpl`: add the `virtrigaud.providerServiceAccountName` helper.
+- `charts/virtrigaud/templates/manager-rbac.yaml`, `config/rbac/role.yaml`: grant the manager `serviceaccounts` (create/get/list/watch/update/patch/delete) so it can manage the per-provider child SA. The manager's `secrets: get;list;watch` grant is deliberately unchanged.
+
+### Why
+Provider pods parse hypervisor-controlled input (domain XML, virsh/API output from remote hosts) and are the component most exposed to compromise, yet all three chart-templated provider Deployments borrowed the manager's ServiceAccount — which holds cluster-wide `secrets: get;list;watch` — and the controller-built Deployments ran as the namespace `default` SA with an automounted token. A compromised provider pod could therefore read every Secret in the cluster. Providers are gRPC servers that make zero Kubernetes API calls at runtime (credentials and TLS material arrive as kubelet-mounted Secret volumes, not API reads), so a token-less, binding-less identity removes that reach at no functional cost.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (provider pods roll to adopt the new ServiceAccount / automount setting; running VMs are unaffected — they live on the hypervisor host, not in the pod)
 - [ ] Config change only
 - [ ] Documentation only
 
