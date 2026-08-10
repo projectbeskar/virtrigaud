@@ -12,6 +12,12 @@ env:
   # the libvirt host's fork limit ("cannot fork child process"). Default 4 (#288).
   # - name: VIRTRIGAUD_LIBVIRT_MAX_CONCURRENT_VIRSH
   #   value: "4"
+  # Separate cap for long-lived disk-stream forks: S3 import/export SSH relays
+  # and the scp disk copy. Kept independent of VIRTRIGAUD_LIBVIRT_MAX_CONCURRENT_VIRSH
+  # so a multi-minute transfer can't starve short control/inventory virsh calls
+  # (or be starved by them). Default 2 (ADR-0008 PR 1).
+  # - name: VIRTRIGAUD_LIBVIRT_MAX_CONCURRENT_STREAM
+  #   value: "2"
 
 resources:
   limits:

@@ -33,6 +33,26 @@ Three newly-disclosed, reachable vulnerabilities were failing the blocking `govu
 - **GO-2026-5856 (the Go stdlib `crypto/tls` CVE) does not surface in local `govulncheck` here** — the local toolchain is already Go 1.26.5, which carries the fix. CI installs the `go.mod`-pinned Go version under `GOTOOLCHAIN=local`, so it built and scanned with 1.26.4 and flagged it; bumping the `go` directive (and the builder images, for the shipped binaries) to 1.26.5 is what clears it in CI. A classic local-vs-CI Go-version gap worth remembering for the next stdlib CVE.
 - `proto/rpc/provider/v1/json_fuzz_test.go`: pre-existing, unrelated — references types (`CreateVMRequest`, `VMSpec`, …) that don't match the current generated `provider.pb.go` (the real type is `CreateRequest`; no `VMSpec`/`DiskSpec`/`NetworkSpec` exist). Confirmed identically broken on `main` before this PR (same failure under the old grpc v1.67.1), so it is not a regression from the version jump. `proto/` has no wired `make` test target, so this doesn't block CI today. Flagged as a follow-up, not fixed here.
 
+## [2026-08-10 18:30] - libvirt: bound streaming forks separately from control calls
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/libvirt/virsh.go`: add a second semaphore, `streamSem` (default 2, override `VIRTRIGAUD_LIBVIRT_MAX_CONCURRENT_STREAM`), as a sibling to `execSem`. New `acquireStreamSlot` mirrors `acquireExecSlot` exactly — context-aware acquire, nil-means-unbounded for zero-value/test providers.
+- `internal/providers/libvirt/s3import.go`: `runSSHStdin` (the S3-import host-side stage relay) now acquires `streamSem` before forking `ssh`/`sshpass`, released when the stream ends.
+- `internal/providers/libvirt/s3export.go`: `runSSHStdout` (the S3-export host-side stream relay) now acquires `streamSem` before forking `ssh`/`sshpass`, released when the stream ends.
+- `internal/providers/libvirt/server.go`: `copyDiskToRemote` now acquires `streamSem` before forking `scp`/`sshpass`, scoped tightly around the fork so it doesn't hold a streaming slot across the function's separate `execSem`-guarded `mkdir` call.
+- `internal/providers/libvirt/virsh_execsem_test.go`: add `streamSem` parity tests (bounded allocation, nil-unbounded, blocks-at-cap-and-releases) plus `TestStreamSemIndependentOfExecSem`, proving a saturated `streamSem` never blocks `execSem` acquisition and vice versa.
+- `charts/virtrigaud-provider-runtime/examples/values-libvirt.yaml`: document the new `VIRTRIGAUD_LIBVIRT_MAX_CONCURRENT_STREAM` knob (default 2), alongside the existing `VIRTRIGAUD_LIBVIRT_MAX_CONCURRENT_VIRSH` entry.
+
+### Why
+`#288` (2026-07-01) added `execSem` to bound virsh/ssh forks at the single `runVirshCommandOnce` chokepoint, but its own CHANGELOG entry noted the gap explicitly: "the s3import/s3export disk-stream and `scp` paths fork outside this cap by design." Those seven call sites — `s3import.go:248,258`, `s3export.go:230,237`, `server.go:902,909,913` — are exactly the disk-streaming and scp paths most likely to run concurrently during a migration, i.e. a live latent instance of the same #288 fork-exhaustion class (documented at length in ADR-0008, `docs/adr/0008-libvirt-pure-go-driver-and-ssh-transport.md`, Fact 4 and staging-plan PR 1). Simply routing all seven through the existing `execSem` was rejected: these are long-lived transfers (a 40GB `qemu-img`/scp can run for many minutes), and holding one of only 4 `execSem` slots for that long would starve short control/inventory virsh calls queued behind it — the exact cross-starvation ADR-0008 warns about. A second, independently-sized budget (`streamSem`, default 2) closes the bypass without introducing that new failure mode in either direction.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (libvirt provider image)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-07-01 17:00] - chore(ci): bump actions/checkout to v7.0.0 and clear stale #102 pins
 **Author:** @williamrizzo (William Rizzo)
 

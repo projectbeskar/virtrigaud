@@ -201,6 +201,16 @@ func (s *Server) exportDiskToS3(ctx context.Context, req *providerv1.ExportDiskR
 // multiplexing as runSSHStdin / the virsh/scp paths (#149/ADR-0004, #194) so
 // trust material and connections are shared.
 func runSSHStdout(ctx context.Context, vp *VirshProvider, w io.Writer, remoteCmd string) error {
+	// Bound concurrent long-lived disk-stream forks separately from execSem's
+	// short control-call budget (see VirshProvider.streamSem) — this call can
+	// hold its subprocess for minutes streaming a multi-GB disk, and must not
+	// starve, or be starved by, short virsh control calls.
+	release, err := vp.acquireStreamSlot(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+
 	parsedURI, err := url.Parse(vp.uri)
 	if err != nil {
 		return fmt.Errorf("failed to parse libvirt URI: %w", err)

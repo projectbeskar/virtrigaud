@@ -893,6 +893,19 @@ func (s *Server) copyDiskToRemote(ctx context.Context, virshProvider *VirshProvi
 	// Share the SSH connection with the virsh path via ControlMaster (#194).
 	hostKeyOpts = append(hostKeyOpts, sshMultiplexOptions()...)
 
+	// Bound concurrent long-lived disk-stream forks separately from execSem's
+	// short control-call budget (see VirshProvider.streamSem) — scp can hold
+	// this subprocess for minutes copying a multi-GB disk, and must not
+	// starve, or be starved by, short virsh control calls. Scoped to just the
+	// scp fork itself (not the mkdir above, which already has its own
+	// execSem-guarded call via runVirshCommand) so the two budgets stay
+	// independent.
+	release, err := virshProvider.acquireStreamSlot(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer release()
+
 	// Run scp LOCALLY on the pod to copy to remote host
 	var cmd *exec.Cmd
 	if virshProvider.credentials.Password != "" {
