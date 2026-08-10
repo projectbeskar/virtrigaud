@@ -43,6 +43,20 @@ const (
 	// strategic fix (#255/#256) is a persistent libvirt connection, after which
 	// it can be raised or removed.
 	defaultMaxConcurrentVirsh = 4
+
+	// defaultMaxConcurrentStream bounds how many long-lived disk-stream
+	// subprocesses this provider forks at once: the S3 import/export SSH
+	// stdin/stdout relays (s3import.go/s3export.go) and the scp disk copy
+	// (server.go copyDiskToRemote). These hold their fork slot for the
+	// duration of a multi-minute transfer (a 40GB qemu-img/scp), not a quick
+	// control call, so they get their OWN small budget instead of sharing
+	// defaultMaxConcurrentVirsh — a single large export holding one of only 4
+	// execSem slots for minutes would starve inventory/control virsh calls
+	// queued behind it. Override with VIRTRIGAUD_LIBVIRT_MAX_CONCURRENT_STREAM.
+	// These 7 call sites forked subprocesses without ANY bound until this
+	// budget was added — a live latent instance of the #288 fork-exhaustion
+	// class (see ADR-0008 PR 1, docs/adr/0008-libvirt-pure-go-driver-and-ssh-transport.md).
+	defaultMaxConcurrentStream = 2
 )
 
 // VirshProvider implements a virsh command-line based libvirt provider
@@ -67,6 +81,17 @@ type VirshProvider struct {
 	// in tests). Set by NewVirshProvider; shared across all goroutines using
 	// this provider instance.
 	execSem chan struct{}
+
+	// streamSem bounds concurrent long-lived disk-stream subprocess forks —
+	// S3 import/export and the scp disk copy — SEPARATELY from execSem (see
+	// defaultMaxConcurrentStream). A multi-minute transfer must not compete
+	// with short control/inventory virsh calls for the same slot pool in
+	// either direction: sharing execSem would let one big export starve
+	// control calls behind it, and would let a control-call burst delay a
+	// transfer indefinitely. nil means unbounded (zero-value provider, e.g. in
+	// tests). Set by NewVirshProvider; shared across all goroutines using this
+	// provider instance.
+	streamSem chan struct{}
 }
 
 // VirshDomain represents a VM domain from virsh list output
@@ -92,8 +117,9 @@ func (e *VirshError) Error() string {
 // NewVirshProvider creates a new virsh-based provider
 func NewVirshProvider(config *ProviderConfig) *VirshProvider {
 	return &VirshProvider{
-		config:  config,
-		execSem: make(chan struct{}, maxConcurrentVirshFromEnv()),
+		config:    config,
+		execSem:   make(chan struct{}, maxConcurrentVirshFromEnv()),
+		streamSem: make(chan struct{}, maxConcurrentStreamFromEnv()),
 	}
 }
 
@@ -110,6 +136,22 @@ func maxConcurrentVirshFromEnv() int {
 	return defaultMaxConcurrentVirsh
 }
 
+// maxConcurrentStreamFromEnv returns the concurrent disk-stream fork cap
+// (S3 import/export SSH relays + scp disk copy), honoring
+// VIRTRIGAUD_LIBVIRT_MAX_CONCURRENT_STREAM (positive int) and falling back to
+// defaultMaxConcurrentStream otherwise. Deliberately independent of
+// maxConcurrentVirshFromEnv — see the streamSem field doc for why the two
+// budgets must not be merged.
+func maxConcurrentStreamFromEnv() int {
+	if s := os.Getenv("VIRTRIGAUD_LIBVIRT_MAX_CONCURRENT_STREAM"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 {
+			return n
+		}
+		log.Printf("WARN Ignoring invalid VIRTRIGAUD_LIBVIRT_MAX_CONCURRENT_STREAM=%q, using default %d", s, defaultMaxConcurrentStream)
+	}
+	return defaultMaxConcurrentStream
+}
+
 // acquireExecSlot blocks until a virsh/ssh fork slot is free or ctx is done,
 // returning a release func to call when the subprocess finishes. A nil execSem
 // (zero-value provider) is treated as unbounded.
@@ -120,6 +162,25 @@ func (v *VirshProvider) acquireExecSlot(ctx context.Context) (release func(), er
 	select {
 	case v.execSem <- struct{}{}:
 		return func() { <-v.execSem }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// acquireStreamSlot blocks until a disk-stream fork slot is free or ctx is
+// done, returning a release func to call when the subprocess finishes. A nil
+// streamSem (zero-value provider) is treated as unbounded. This is the
+// streaming counterpart to acquireExecSlot: callers doing a long-lived S3
+// import/export relay or an scp disk copy acquire here instead, so they never
+// contend with execSem's short control-call budget (see the streamSem field
+// doc).
+func (v *VirshProvider) acquireStreamSlot(ctx context.Context) (release func(), err error) {
+	if v.streamSem == nil {
+		return func() {}, nil
+	}
+	select {
+	case v.streamSem <- struct{}{}:
+		return func() { <-v.streamSem }, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
