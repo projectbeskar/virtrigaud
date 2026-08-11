@@ -5,6 +5,34 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-08-11 08:34] - Fix sdk Context Leak and Stale proto Fuzz Test; Add sdk/proto to the vet Gate
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `sdk/provider/client/client.go`: `withTimeout` discarded the `context.CancelFunc` from `context.WithTimeout` at both call sites (`go vet`'s `lostcancel` check) — since `withTimeout` runs on every RPC call, each call leaked a timer until its deadline fired. Changed the signature to `(context.Context, context.CancelFunc)`; the two no-timeout branches now return a no-op cancel so callers can `defer cancel()` unconditionally.
+- `sdk/provider/client/client.go`: updated all 14 RPC methods (Validate, Create, Delete, Power, Reconfigure, Describe, ListVMs, TaskStatus, SnapshotCreate, SnapshotDelete, SnapshotRevert, Clone, ImagePrepare, GetCapabilities) to `ctx, cancel := c.withTimeout(...); defer cancel()`.
+- `sdk/provider/client/client_test.go`: new file (package had zero prior test coverage) — 5 tests covering no-timeout, default `CallTimeout`, per-method override, zero-`CallTimeout`, and parent-cancellation propagation; the `CallTimeout` case is the direct regression check that `cancel()` now releases the context immediately instead of waiting out the deadline.
+- `proto/rpc/provider/v1/json_fuzz_test.go`: rewrote — it referenced types removed from the schema (`CreateVMRequest`, `VMSpec`, `DiskSpec`, `NetworkSpec`, `PowerVMRequest`, `CreateVMResponse`), so `go vet ./...` failed with `undefined: CreateVMRequest` and the file compiled zero coverage. All 8 fuzz functions now target the current generated types (`CreateRequest`, `VMInfo`/`DiskInfo`/`NetworkInfo`, `CreateResponse`/`TaskRef`, `PowerRequest`/`PowerOp`, `GetCapabilitiesResponse`, `DescribeResponse`), keeping the original coverage intent: JSON round-trip, malformed-input resilience, Unicode content, large payloads, field-name-casing tolerance.
+- `proto/rpc/provider/v1/json_fuzz_test.go`: added an `allValidUTF8` skip guard to the 5 fuzz functions that feed a fuzzed `string` straight into a proto string field. Go's native fuzzer generates arbitrary byte sequences with no UTF-8 guarantee, but proto3 `string` fields require valid UTF-8, so `protojson.Marshal` correctly errored on fuzzer-generated garbage — found by actually running the fuzzer (not just its seed corpus) while verifying the rewrite above. Verified clean afterward with the seed corpus plus ~250k–320k fuzz executions per affected function.
+
+### Changed
+- `Makefile`: added `vet-sdk` (`cd sdk && go vet ./...`) and `vet-proto` (`cd proto && go vet ./...`) targets; `vet` now depends on both, so `make vet`, `make test`, `make build`, and `make run` all cover the root, sdk, and proto modules.
+- `.github/workflows/ci.yml`: added "Run go vet (sdk module)" and "Run go vet (proto module)" steps to the `test` job immediately after the existing root vet step (renamed "Run go vet (root module, excluding libvirt)" for clarity), mirroring the per-module `cd sdk && ...` shape the `govulncheck` job already uses.
+
+### Why
+`sdk/` and `proto/` are separate Go modules with their own `go.mod`, so `go vet ./...` run from the repo root — in both `make vet` and CI — never reached them. Both bugs above hid there indefinitely as a result: the context leak shipped in the public provider SDK, and the fuzz test silently compiled to nothing. The prior entry (2026-08-10 19:20, below) flagged both explicitly as noticed-but-deferred follow-ups while sanity-vetting the sdk module during the grpc/x-text CVE bump; this PR closes both out and, more durably, makes sure `go vet` covers every module a defect could hide in going forward, not just the two it happened to catch this time.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+### Notes
+- `sdk/provider/client` is not compiled into any binary this repo ships (manager, provider-{vsphere,libvirt,proxmox,mock}, or the CLI tools) — it's only referenced from the SDK's own package doc. It's a convenience client for external provider authors building against the published `sdk` module, so this fix has no in-cluster blast radius today; it matters for anyone importing the SDK directly.
+- Verified: `make fmt` (no diff), `make lint` (0 issues), `make test` (all packages pass), `make build` (clean); `cd sdk && go vet ./... && go build ./... && go test ./...` and the same three commands in `proto/` all green. `go vet` in both modules surfaced only the two issues fixed above — nothing else was hiding.
+- Scope: deliberately did not touch the `internal/providers/libvirt` / `cmd/provider-libvirt` vet/test exclusions in the root Makefile/CI — that's a separate, known issue tracked against ADR-0008 (go-libvirt refactor).
+
 ## [2026-08-10 19:20] - deps: bump grpc v1.82.1, x/text v0.39.0, Go 1.26.5 (GO-2026-6061 / GO-2026-5970 / GO-2026-5856)
 **Author:** @wrkode (William Rizzo)
 

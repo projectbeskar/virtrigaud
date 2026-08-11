@@ -19,245 +19,247 @@ package providerv1
 import (
 	"encoding/json"
 	"testing"
+	"unicode/utf8"
 
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 )
 
-// FuzzCreateVMRequestJSON tests JSON marshaling/unmarshaling of CreateVMRequest
-func FuzzCreateVMRequestJSON(f *testing.F) {
-	// Add seed inputs
-	f.Add("test-vm", int32(2), int32(4096), "ubuntu:20.04", "vsphere-cluster")
-	f.Add("", int32(0), int32(0), "", "")
-	f.Add("fuzzy-vm-名前", int32(999), int32(999999), "windows/server:2019", "special-cluster")
+// NOTE: this file previously fuzzed CreateVMRequest/VMSpec/DiskSpec/
+// NetworkSpec/PowerVMRequest/CreateVMResponse — none of which exist in the
+// current schema, so `go vet ./...` failed with `undefined: CreateVMRequest`
+// and the file compiled zero coverage. It has been rewritten against the
+// current generated types. The schema shape also changed materially: a
+// CreateRequest no longer nests typed VMSpec/DiskSpec/NetworkSpec messages,
+// it carries the spec as opaque, pre-rendered JSON strings (class_json,
+// image_json, networks_json, disks_json, placement_json) that protojson
+// treats as plain strings. VMInfo/DiskInfo/NetworkInfo is the closest
+// current analog for nested-message and map-field coverage.
 
-	f.Fuzz(func(t *testing.T, name string, cpu, memory int32, image, cluster string) {
-		// Skip obviously invalid values that would cause protobuf issues
-		if cpu < 0 || memory < 0 {
-			t.Skip("Invalid CPU or memory values")
+// allValidUTF8 reports whether every string is valid UTF-8. proto3 `string`
+// fields (unlike `bytes`) are defined to always hold UTF-8 text, and
+// protojson.Marshal correctly rejects a message that violates that
+// invariant. Go's native fuzzer generates arbitrary byte sequences for a
+// `string` parameter with no such guarantee, so any fuzz case that assigns a
+// fuzzed string directly into a proto string field must skip non-UTF-8
+// input first -- otherwise the test "fails" on a fuzzer artifact rather than
+// a real bug.
+func allValidUTF8(strs ...string) bool {
+	for _, s := range strs {
+		if !utf8.ValidString(s) {
+			return false
+		}
+	}
+	return true
+}
+
+// FuzzCreateRequestJSON tests JSON marshaling/unmarshaling of CreateRequest.
+// Its *_json fields are opaque, pre-rendered JSON payloads carried as plain
+// proto strings -- protojson must round-trip them byte-for-byte without
+// attempting to interpret their contents, even when they are not valid JSON
+// themselves.
+func FuzzCreateRequestJSON(f *testing.F) {
+	f.Add("test-vm", "ubuntu:20.04", "vsphere-cluster", `{"cpu":2,"memoryMiB":4096}`)
+	f.Add("", "", "", "")
+	f.Add("fuzzy-vm-名前", "windows/server:2019", "special-cluster", `{"broken`)
+
+	f.Fuzz(func(t *testing.T, name, image, cluster, classJSON string) {
+		if !allValidUTF8(name, image, cluster, classJSON) {
+			t.Skip("fuzz-generated string is not valid UTF-8")
 		}
 
-		// Create original request
-		original := &CreateVMRequest{
-			Name: name,
-			Spec: &VMSpec{
-				Cpu:    cpu,
-				Memory: memory,
-				Image:  image,
-			},
-			Cluster: cluster,
+		original := &CreateRequest{
+			Name:          name,
+			UserData:      []byte(name),
+			ClassJson:     classJSON,
+			ImageJson:     image,
+			PlacementJson: cluster,
+			Tags:          []string{"env:test"},
 		}
 
-		// Test protojson marshaling
 		protoJSONBytes, err := protojson.Marshal(original)
 		if err != nil {
-			t.Fatalf("Failed to marshal to protojson: %v", err)
+			t.Fatalf("failed to marshal to protojson: %v", err)
 		}
 
-		// Test protojson unmarshaling
-		protoJSONUnmarshaled := &CreateVMRequest{}
-		err = protojson.Unmarshal(protoJSONBytes, protoJSONUnmarshaled)
-		if err != nil {
-			t.Fatalf("Failed to unmarshal from protojson: %v", err)
+		roundTripped := &CreateRequest{}
+		if err := protojson.Unmarshal(protoJSONBytes, roundTripped); err != nil {
+			t.Fatalf("failed to unmarshal from protojson: %v", err)
 		}
 
-		// Verify protojson round-trip
-		if !proto.Equal(original, protoJSONUnmarshaled) {
-			t.Errorf("protojson round-trip failed:\noriginal: %+v\nunmarshaled: %+v", original, protoJSONUnmarshaled)
+		if !proto.Equal(original, roundTripped) {
+			t.Errorf("protojson round-trip failed:\noriginal: %+v\nunmarshaled: %+v", original, roundTripped)
 		}
 
-		// Test standard JSON marshaling (should work for simple fields)
-		standardJSONBytes, err := json.Marshal(map[string]interface{}{
+		// name/image/cluster must also survive a plain encoding/json
+		// round-trip when carried in an ordinary map, since callers
+		// sometimes log or cache these values outside protojson.
+		standardJSONBytes, err := json.Marshal(map[string]string{
 			"name":    name,
-			"cpu":     cpu,
-			"memory":  memory,
 			"image":   image,
 			"cluster": cluster,
 		})
 		if err != nil {
-			t.Fatalf("Failed to marshal to standard JSON: %v", err)
+			t.Fatalf("failed to marshal to standard JSON: %v", err)
 		}
 
-		// Verify JSON is valid
-		var jsonData map[string]interface{}
-		err = json.Unmarshal(standardJSONBytes, &jsonData)
-		if err != nil {
-			t.Fatalf("Failed to unmarshal standard JSON: %v", err)
+		var jsonData map[string]string
+		if err := json.Unmarshal(standardJSONBytes, &jsonData); err != nil {
+			t.Fatalf("failed to unmarshal standard JSON: %v", err)
 		}
-
-		// Basic validation of JSON structure
-		if name != "" {
-			if jsonData["name"] != name {
-				t.Errorf("JSON name mismatch: expected %s, got %v", name, jsonData["name"])
-			}
+		if jsonData["name"] != name {
+			t.Errorf("JSON name mismatch: expected %q, got %q", name, jsonData["name"])
 		}
 	})
 }
 
-// FuzzVMSpecJSON tests JSON serialization of VMSpec with complex nested structures
-func FuzzVMSpecJSON(f *testing.F) {
-	f.Add(int32(4), int32(8192), "centos:8", int32(100), "ext4")
-	f.Add(int32(1), int32(512), "", int32(0), "")
+// FuzzVMInfoJSON tests JSON serialization of VMInfo, which nests repeated
+// DiskInfo/NetworkInfo messages plus a string map (provider_raw) -- the
+// closest current analog to the old (now nonexistent) VMSpec message for
+// exercising nested-structure and map-field round-trips.
+func FuzzVMInfoJSON(f *testing.F) {
+	f.Add(int32(4), int64(8192), int32(100), "qcow2", "region", "us-east")
+	f.Add(int32(1), int64(512), int32(0), "", "", "")
+	f.Add(int32(-1), int64(-1), int32(-1), "raw", "很长的键", "🌟value")
 
-	f.Fuzz(func(t *testing.T, cpu, memory int32, image string, diskSize int32, diskType string) {
-		if cpu < 0 || memory < 0 || diskSize < 0 {
-			t.Skip("Invalid resource values")
+	f.Fuzz(func(t *testing.T, cpu int32, memoryMib int64, diskSizeGib int32, diskFormat, metaKey, metaValue string) {
+		if !allValidUTF8(diskFormat, metaKey, metaValue) {
+			t.Skip("fuzz-generated string is not valid UTF-8")
 		}
 
-		// Create VMSpec with nested structures
-		spec := &VMSpec{
-			Cpu:    cpu,
-			Memory: memory,
-			Image:  image,
-			Disks: []*DiskSpec{
-				{
-					Size: diskSize,
-					Type: diskType,
-				},
+		info := &VMInfo{
+			Id:         "vm-123",
+			Name:       "test-vm",
+			PowerState: "poweredOn",
+			Cpu:        cpu,
+			MemoryMib:  memoryMib,
+			Disks: []*DiskInfo{
+				{Id: "disk-0", SizeGib: diskSizeGib, Format: diskFormat},
 			},
-			Network: &NetworkSpec{
-				Interfaces: []*NetworkInterface{
-					{
-						Name: "eth0",
-						Type: "vmxnet3",
-					},
-				},
+			Networks: []*NetworkInfo{
+				{Name: "eth0", Mac: "52:54:00:12:34:56"},
 			},
 		}
+		if metaKey != "" {
+			info.ProviderRaw = map[string]string{metaKey: metaValue}
+		}
 
-		// Test protojson serialization
-		jsonBytes, err := protojson.Marshal(spec)
+		jsonBytes, err := protojson.Marshal(info)
 		if err != nil {
-			t.Fatalf("Failed to marshal VMSpec: %v", err)
+			t.Fatalf("failed to marshal VMInfo: %v", err)
 		}
 
-		// Test deserialization
-		unmarshaled := &VMSpec{}
-		err = protojson.Unmarshal(jsonBytes, unmarshaled)
-		if err != nil {
-			t.Fatalf("Failed to unmarshal VMSpec: %v", err)
+		unmarshaled := &VMInfo{}
+		if err := protojson.Unmarshal(jsonBytes, unmarshaled); err != nil {
+			t.Fatalf("failed to unmarshal VMInfo: %v", err)
 		}
 
-		// Verify round-trip equality
-		if !proto.Equal(spec, unmarshaled) {
-			t.Errorf("VMSpec round-trip failed:\noriginal: %+v\nunmarshaled: %+v", spec, unmarshaled)
+		if !proto.Equal(info, unmarshaled) {
+			t.Errorf("VMInfo round-trip failed:\noriginal: %+v\nunmarshaled: %+v", info, unmarshaled)
 		}
-
-		// Test nested structure preservation
-		if len(unmarshaled.Disks) != len(spec.Disks) {
-			t.Errorf("Disk count mismatch: expected %d, got %d", len(spec.Disks), len(unmarshaled.Disks))
+		if len(unmarshaled.Disks) != len(info.Disks) {
+			t.Errorf("disk count mismatch: expected %d, got %d", len(info.Disks), len(unmarshaled.Disks))
 		}
-
-		if len(unmarshaled.Disks) > 0 && len(spec.Disks) > 0 {
-			if unmarshaled.Disks[0].Size != spec.Disks[0].Size {
-				t.Errorf("Disk size mismatch: expected %d, got %d", spec.Disks[0].Size, unmarshaled.Disks[0].Size)
-			}
+		if len(unmarshaled.Disks) > 0 && len(info.Disks) > 0 && unmarshaled.Disks[0].SizeGib != info.Disks[0].SizeGib {
+			t.Errorf("disk size mismatch: expected %d, got %d", info.Disks[0].SizeGib, unmarshaled.Disks[0].SizeGib)
+		}
+		if len(unmarshaled.ProviderRaw) != len(info.ProviderRaw) {
+			t.Errorf("provider_raw map size mismatch: expected %d, got %d", len(info.ProviderRaw), len(unmarshaled.ProviderRaw))
 		}
 	})
 }
 
-// FuzzProviderResponseJSON tests JSON serialization of various response types
+// FuzzProviderResponseJSON tests JSON serialization of the response types
+// returned by the Create and GetCapabilities RPCs, including CreateResponse's
+// nested TaskRef message.
 func FuzzProviderResponseJSON(f *testing.F) {
-	f.Add("vm-123", "Running", "provider-1", "Operation completed successfully")
-	f.Add("", "Unknown", "", "")
-	f.Add("很长的虚拟机名字", "Failed", "🌟provider", "Error: 💥 Something went wrong!")
+	f.Add("vm-123", "task-1", "qcow2", true)
+	f.Add("", "", "", false)
+	f.Add("很长的虚拟机名字", "🌟task", "🌟fmt", true)
 
-	f.Fuzz(func(t *testing.T, vmID, state, providerID, message string) {
-		// Test CreateVMResponse
-		createResp := &CreateVMResponse{
-			VmId: vmID,
-			Status: &VMStatus{
-				State:   state,
-				Message: message,
-			},
+	f.Fuzz(func(t *testing.T, vmID, taskID, diskType string, supportsSnapshots bool) {
+		if !allValidUTF8(vmID, taskID, diskType) {
+			t.Skip("fuzz-generated string is not valid UTF-8")
+		}
+
+		createResp := &CreateResponse{
+			Id:   vmID,
+			Task: &TaskRef{Id: taskID},
 		}
 
 		jsonBytes, err := protojson.Marshal(createResp)
 		if err != nil {
-			t.Fatalf("Failed to marshal CreateVMResponse: %v", err)
+			t.Fatalf("failed to marshal CreateResponse: %v", err)
 		}
 
-		unmarshaled := &CreateVMResponse{}
-		err = protojson.Unmarshal(jsonBytes, unmarshaled)
-		if err != nil {
-			t.Fatalf("Failed to unmarshal CreateVMResponse: %v", err)
+		unmarshaled := &CreateResponse{}
+		if err := protojson.Unmarshal(jsonBytes, unmarshaled); err != nil {
+			t.Fatalf("failed to unmarshal CreateResponse: %v", err)
 		}
-
 		if !proto.Equal(createResp, unmarshaled) {
-			t.Errorf("CreateVMResponse round-trip failed")
+			t.Errorf("CreateResponse round-trip failed")
 		}
 
-		// Test GetCapabilitiesResponse
 		capResp := &GetCapabilitiesResponse{
-			ProviderId: providerID,
-			Capabilities: []*Capability{
-				{
-					Name:        "vm.create",
-					Supported:   true,
-					Description: message,
-				},
-			},
+			SupportsSnapshots:  supportsSnapshots,
+			SupportedDiskTypes: []string{diskType},
 		}
 
 		jsonBytes, err = protojson.Marshal(capResp)
 		if err != nil {
-			t.Fatalf("Failed to marshal GetCapabilitiesResponse: %v", err)
+			t.Fatalf("failed to marshal GetCapabilitiesResponse: %v", err)
 		}
 
 		capUnmarshaled := &GetCapabilitiesResponse{}
-		err = protojson.Unmarshal(jsonBytes, capUnmarshaled)
-		if err != nil {
-			t.Fatalf("Failed to unmarshal GetCapabilitiesResponse: %v", err)
+		if err := protojson.Unmarshal(jsonBytes, capUnmarshaled); err != nil {
+			t.Fatalf("failed to unmarshal GetCapabilitiesResponse: %v", err)
 		}
-
 		if !proto.Equal(capResp, capUnmarshaled) {
 			t.Errorf("GetCapabilitiesResponse round-trip failed")
 		}
 	})
 }
 
-// FuzzEnumFieldsJSON tests JSON serialization of protobuf enum fields
+// FuzzEnumFieldsJSON tests JSON serialization of PowerRequest's PowerOp
+// enum field, including values outside the declared enum range -- proto3
+// enums are open, so unrecognized numbers must still round-trip losslessly.
 func FuzzEnumFieldsJSON(f *testing.F) {
-	f.Add(int32(0), int32(1), int32(2)) // PowerOp values
-	f.Add(int32(999), int32(-1), int32(100)) // Invalid enum values
+	f.Add("vm-1", int32(0))
+	f.Add("vm-1", int32(1))
+	f.Add("vm-1", int32(999)) // out-of-range enum value
 
-	f.Fuzz(func(t *testing.T, powerOp, vmState, taskState int32) {
-		// Create request with enum fields
-		powerReq := &PowerVMRequest{
-			VmId:     "test-vm",
-			PowerOp:  PowerOp(powerOp),
+	f.Fuzz(func(t *testing.T, id string, powerOp int32) {
+		if !allValidUTF8(id) {
+			t.Skip("fuzz-generated string is not valid UTF-8")
 		}
 
-		// Test JSON serialization of enums
+		powerReq := &PowerRequest{
+			Id: id,
+			Op: PowerOp(powerOp),
+		}
+
 		jsonBytes, err := protojson.Marshal(powerReq)
 		if err != nil {
-			t.Fatalf("Failed to marshal PowerVMRequest with enum: %v", err)
+			t.Fatalf("failed to marshal PowerRequest with enum: %v", err)
 		}
 
-		// Test deserialization
-		unmarshaled := &PowerVMRequest{}
-		err = protojson.Unmarshal(jsonBytes, unmarshaled)
-		if err != nil {
-			t.Fatalf("Failed to unmarshal PowerVMRequest with enum: %v", err)
+		unmarshaled := &PowerRequest{}
+		if err := protojson.Unmarshal(jsonBytes, unmarshaled); err != nil {
+			t.Fatalf("failed to unmarshal PowerRequest with enum: %v", err)
 		}
-
-		// Verify enum handling
 		if !proto.Equal(powerReq, unmarshaled) {
-			t.Errorf("PowerVMRequest with enum round-trip failed:\noriginal: %+v\nunmarshaled: %+v", powerReq, unmarshaled)
-		}
-
-		// Test that enum values are preserved or properly handled
-		if unmarshaled.PowerOp != powerReq.PowerOp {
-			// This might be expected for invalid enum values
-			t.Logf("Enum value changed during serialization: %v -> %v (may be expected for invalid values)", 
-				powerReq.PowerOp, unmarshaled.PowerOp)
+			t.Errorf("PowerRequest with enum round-trip failed:\noriginal: %+v\nunmarshaled: %+v", powerReq, unmarshaled)
 		}
 	})
 }
 
-// FuzzMalformedJSON tests resilience against malformed JSON input
+// FuzzMalformedJSON tests resilience against malformed JSON input across a
+// representative sample of the generated message types: scalar-only
+// (PowerRequest), opaque-JSON-string (CreateRequest), nested/map
+// (VMInfo), flat-bool-heavy (GetCapabilitiesResponse), and an
+// otherwise-untouched response type (DescribeResponse). Most malformed
+// input is expected to fail to unmarshal; it must never panic.
 func FuzzMalformedJSON(f *testing.F) {
-	// Add various malformed JSON examples
 	f.Add(`{"name": "test"`)                    // Missing closing brace
 	f.Add(`{"name": test"}`)                    // Missing opening quote
 	f.Add(`{"name": "test", "cpu": "not-int"}`) // Wrong type
@@ -269,97 +271,80 @@ func FuzzMalformedJSON(f *testing.F) {
 	f.Add(`true`)                               // Boolean
 
 	f.Fuzz(func(t *testing.T, jsonInput string) {
-		// Try to unmarshal into various message types
 		messages := []proto.Message{
-			&CreateVMRequest{},
-			&VMSpec{},
+			&CreateRequest{},
+			&VMInfo{},
 			&GetCapabilitiesResponse{},
-			&PowerVMRequest{},
-			&VMStatus{},
+			&PowerRequest{},
+			&DescribeResponse{},
 		}
 
 		for _, msg := range messages {
 			err := protojson.Unmarshal([]byte(jsonInput), msg)
-			// We expect most malformed JSON to fail, but it shouldn't panic
 			if err == nil {
-				t.Logf("Unexpectedly successful unmarshal of %q into %T", jsonInput, msg)
-				
-				// If it succeeded, try to marshal it back
-				_, marshalErr := protojson.Marshal(msg)
-				if marshalErr != nil {
-					t.Errorf("Successfully unmarshaled malformed JSON but failed to marshal back: %v", marshalErr)
+				// If it succeeded, marshaling it back out must also succeed.
+				if _, marshalErr := protojson.Marshal(msg); marshalErr != nil {
+					t.Errorf("successfully unmarshaled malformed JSON into %T but failed to marshal back: %v", msg, marshalErr)
 				}
 			}
 		}
 	})
 }
 
-// FuzzLargeJSON tests behavior with very large JSON payloads
+// FuzzLargeJSON tests behavior with very large JSON payloads.
 func FuzzLargeJSON(f *testing.F) {
-	f.Add(100, 1000)   // 100 disks, 1000 char strings
-	f.Add(10, 10000)   // 10 disks, 10000 char strings  
-	f.Add(1000, 100)   // 1000 disks, 100 char strings
+	f.Add(100, 1000) // 100 disks, 1000 char strings
+	f.Add(10, 10000) // 10 disks, 10000 char strings
+	f.Add(1000, 100) // 1000 disks, 100 char strings
 
 	f.Fuzz(func(t *testing.T, diskCount, stringLength int) {
-		// Limit to reasonable sizes to avoid timeouts
+		// Limit to reasonable sizes to avoid timeouts.
 		if diskCount > 1000 || stringLength > 10000 || diskCount < 0 || stringLength < 0 {
-			t.Skip("Skipping unreasonable sizes")
+			t.Skip("skipping unreasonable sizes")
 		}
 
-		// Create large VMSpec
-		spec := &VMSpec{
-			Cpu:    8,
-			Memory: 16384,
-			Image:  generateString("image-", stringLength),
+		info := &VMInfo{
+			Id:   "vm-large",
+			Name: generateString("name-", stringLength),
+			Cpu:  8,
 		}
-
-		// Add many disks
 		for i := 0; i < diskCount; i++ {
-			spec.Disks = append(spec.Disks, &DiskSpec{
-				Size: int32(i + 1),
-				Type: generateString("disk-type-", stringLength/10),
+			info.Disks = append(info.Disks, &DiskInfo{
+				Id:      generateString("disk-", stringLength/10),
+				SizeGib: int32(i + 1),
 			})
 		}
 
-		// Test serialization performance and correctness
-		jsonBytes, err := protojson.Marshal(spec)
+		jsonBytes, err := protojson.Marshal(info)
 		if err != nil {
-			t.Fatalf("Failed to marshal large VMSpec: %v", err)
+			t.Fatalf("failed to marshal large VMInfo: %v", err)
 		}
-
-		// Verify size is reasonable (basic sanity check)
 		if len(jsonBytes) == 0 {
-			t.Error("Marshaled JSON is empty")
+			t.Error("marshaled JSON is empty")
 		}
 
-		// Test deserialization
-		unmarshaled := &VMSpec{}
-		err = protojson.Unmarshal(jsonBytes, unmarshaled)
-		if err != nil {
-			t.Fatalf("Failed to unmarshal large VMSpec: %v", err)
+		unmarshaled := &VMInfo{}
+		if err := protojson.Unmarshal(jsonBytes, unmarshaled); err != nil {
+			t.Fatalf("failed to unmarshal large VMInfo: %v", err)
 		}
-
-		// Verify structure
-		if len(unmarshaled.Disks) != len(spec.Disks) {
-			t.Errorf("Disk count mismatch in large JSON: expected %d, got %d", len(spec.Disks), len(unmarshaled.Disks))
+		if len(unmarshaled.Disks) != len(info.Disks) {
+			t.Errorf("disk count mismatch in large JSON: expected %d, got %d", len(info.Disks), len(unmarshaled.Disks))
 		}
-
-		if unmarshaled.Cpu != spec.Cpu {
-			t.Errorf("CPU mismatch in large JSON: expected %d, got %d", spec.Cpu, unmarshaled.Cpu)
+		if unmarshaled.Cpu != info.Cpu {
+			t.Errorf("cpu mismatch in large JSON: expected %d, got %d", info.Cpu, unmarshaled.Cpu)
 		}
 	})
 }
 
-// generateString creates a string with the given prefix and target length
+// generateString creates a string with the given prefix and target length.
 func generateString(prefix string, targetLength int) string {
 	if targetLength <= len(prefix) {
 		return prefix[:targetLength]
 	}
-	
+
 	result := prefix
 	remaining := targetLength - len(prefix)
-	
-	// Fill with repeating pattern
+
 	pattern := "abcdefghijklmnopqrstuvwxyz0123456789"
 	for len(result) < targetLength {
 		if remaining < len(pattern) {
@@ -369,98 +354,97 @@ func generateString(prefix string, targetLength int) string {
 		result += pattern
 		remaining -= len(pattern)
 	}
-	
+
 	return result
 }
 
-// FuzzJSONFieldNames tests handling of various JSON field name cases
+// FuzzJSONFieldNames tests handling of various JSON field name cases when
+// unmarshaling into CreateRequest: protojson accepts both the proto field
+// name (snake_case, e.g. "class_json") and its JSON name (camelCase, e.g.
+// "classJson", protojson's default Marshal output); other casings are not
+// guaranteed to match and are expected to error rather than panic.
 func FuzzJSONFieldNames(f *testing.F) {
-	f.Add(`{"name": "test", "cpu": 2}`)                    // Standard camelCase
-	f.Add(`{"Name": "test", "CPU": 2}`)                    // PascalCase
-	f.Add(`{"vm_id": "test", "cpu_count": 2}`)             // snake_case
-	f.Add(`{"vm-id": "test", "cpu-count": 2}`)             // kebab-case
-	f.Add(`{"vmId": "test", "cpuCount": 2}`)               // camelCase variant
+	f.Add(`{"name": "test", "classJson": "{}"}`)   // camelCase (protojson default output)
+	f.Add(`{"name": "test", "class_json": "{}"}`)  // snake_case (proto field name)
+	f.Add(`{"Name": "test", "ClassJson": "{}"}`)   // PascalCase
+	f.Add(`{"name": "test", "class-json": "{}"}`)  // kebab-case
+	f.Add(`{"userData": "dGVzdA==", "name": "x"}`) // camelCase bytes field
 
 	f.Fuzz(func(t *testing.T, jsonInput string) {
-		// Test with CreateVMRequest which has various field types
-		req := &CreateVMRequest{}
+		req := &CreateRequest{}
 		err := protojson.Unmarshal([]byte(jsonInput), req)
-		
-		// Field name variations might not all work, but shouldn't panic
 		if err != nil {
-			t.Logf("Expected field name variation failure: %v", err)
+			t.Logf("expected field name variation failure: %v", err)
 			return
 		}
 
-		// If successful, verify we can marshal back
-		_, err = protojson.Marshal(req)
-		if err != nil {
-			t.Errorf("Successfully unmarshaled field name variation but failed to marshal back: %v", err)
+		if _, err := protojson.Marshal(req); err != nil {
+			t.Errorf("successfully unmarshaled field name variation but failed to marshal back: %v", err)
 		}
 	})
 }
 
-// FuzzJSONWithUnicodeContent tests handling of Unicode content in JSON
+// FuzzJSONWithUnicodeContent tests handling of Unicode content across a
+// scalar-string message (CreateRequest) and a nested-message field
+// (VMInfo.Networks[].Name).
 func FuzzJSONWithUnicodeContent(f *testing.F) {
-	f.Add("🚀 rocket vm", "💾 storage", "🌐 network")
-	f.Add("虚拟机", "存储", "网络")
-	f.Add("виртуальная машина", "хранилище", "сеть")
-	f.Add("máquina virtual", "almacenamiento", "red")
+	f.Add("🚀 rocket vm", "eth0", "💾 image")
+	f.Add("虚拟机", "网络", "存储")
+	f.Add("виртуальная машина", "сеть", "хранилище")
+	f.Add("máquina virtual", "red", "almacenamiento")
 
-	f.Fuzz(func(t *testing.T, vmName, diskType, networkName string) {
-		// Create spec with Unicode content
-		spec := &VMSpec{
-			Cpu:    2,
-			Memory: 4096,
-			Disks: []*DiskSpec{
-				{
-					Type: diskType,
-					Size: 100,
-				},
-			},
-			Network: &NetworkSpec{
-				Interfaces: []*NetworkInterface{
-					{
-						Name: networkName,
-						Type: "virtio",
-					},
-				},
-			},
+	f.Fuzz(func(t *testing.T, vmName, networkName, imageRef string) {
+		if !allValidUTF8(vmName, networkName, imageRef) {
+			t.Skip("fuzz-generated string is not valid UTF-8")
 		}
 
-		req := &CreateVMRequest{
-			Name: vmName,
-			Spec: spec,
+		info := &VMInfo{
+			Name:     vmName,
+			Networks: []*NetworkInfo{{Name: networkName}},
+		}
+		req := &CreateRequest{
+			Name:      vmName,
+			ImageJson: imageRef,
+			Tags:      []string{vmName},
 		}
 
-		// Test Unicode handling in JSON
-		jsonBytes, err := protojson.Marshal(req)
+		for _, msg := range []proto.Message{info, req} {
+			jsonBytes, err := protojson.Marshal(msg)
+			if err != nil {
+				t.Fatalf("failed to marshal Unicode content for %T: %v", msg, err)
+			}
+
+			var jsonObj map[string]any
+			if err := json.Unmarshal(jsonBytes, &jsonObj); err != nil {
+				t.Fatalf("generated invalid JSON with Unicode content for %T: %v", msg, err)
+			}
+		}
+
+		unmarshaledInfo := &VMInfo{}
+		infoBytes, err := protojson.Marshal(info)
 		if err != nil {
-			t.Fatalf("Failed to marshal Unicode content: %v", err)
+			t.Fatalf("failed to marshal Unicode VMInfo: %v", err)
+		}
+		if err := protojson.Unmarshal(infoBytes, unmarshaledInfo); err != nil {
+			t.Fatalf("failed to unmarshal Unicode VMInfo: %v", err)
+		}
+		if unmarshaledInfo.Name != vmName {
+			t.Errorf("Unicode VM name not preserved: expected %q, got %q", vmName, unmarshaledInfo.Name)
+		}
+		if len(unmarshaledInfo.Networks) > 0 && unmarshaledInfo.Networks[0].Name != networkName {
+			t.Errorf("Unicode network name not preserved: expected %q, got %q", networkName, unmarshaledInfo.Networks[0].Name)
 		}
 
-		// Verify JSON is valid
-		var jsonObj map[string]interface{}
-		err = json.Unmarshal(jsonBytes, &jsonObj)
+		unmarshaledReq := &CreateRequest{}
+		reqBytes, err := protojson.Marshal(req)
 		if err != nil {
-			t.Fatalf("Generated invalid JSON with Unicode content: %v", err)
+			t.Fatalf("failed to marshal Unicode CreateRequest: %v", err)
 		}
-
-		// Test round-trip
-		unmarshaled := &CreateVMRequest{}
-		err = protojson.Unmarshal(jsonBytes, unmarshaled)
-		if err != nil {
-			t.Fatalf("Failed to unmarshal Unicode content: %v", err)
+		if err := protojson.Unmarshal(reqBytes, unmarshaledReq); err != nil {
+			t.Fatalf("failed to unmarshal Unicode CreateRequest: %v", err)
 		}
-
-		// Verify Unicode content preservation
-		if unmarshaled.Name != vmName {
-			t.Errorf("Unicode VM name not preserved: expected %q, got %q", vmName, unmarshaled.Name)
-		}
-
-		if len(unmarshaled.Spec.Disks) > 0 && unmarshaled.Spec.Disks[0].Type != diskType {
-			t.Errorf("Unicode disk type not preserved: expected %q, got %q", diskType, unmarshaled.Spec.Disks[0].Type)
+		if unmarshaledReq.Name != vmName {
+			t.Errorf("Unicode CreateRequest name not preserved: expected %q, got %q", vmName, unmarshaledReq.Name)
 		}
 	})
 }
-
