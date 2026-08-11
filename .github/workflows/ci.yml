@@ -44,10 +44,21 @@ jobs:
       - name: Verify dependencies
         run: go mod verify
 
-      - name: Run go vet (excluding libvirt)
+      - name: Run go vet (root module, excluding libvirt)
         run: |
           # Use go list to find all packages and exclude problematic ones
           go list ./... | grep -v '/internal/providers/libvirt' | grep -v '/cmd/provider-libvirt' | grep -v '/test/integration' | xargs go vet
+
+      # sdk/ and proto/ are separate Go modules (their own go.mod), so the
+      # root `go vet ./...` above never reaches them — that let the sdk
+      # context leak (lostcancel) and the stale, non-compiling proto fuzz
+      # test hide indefinitely. Mirrors the per-module `cd` shape the
+      # govulncheck job below already uses.
+      - name: Run go vet (sdk module)
+        run: cd sdk && go vet ./...
+
+      - name: Run go vet (proto module)
+        run: cd proto && go vet ./...
 
       - name: Run tests (excluding libvirt)
         run: |

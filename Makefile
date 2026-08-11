@@ -123,9 +123,19 @@ fmt: ## Run go fmt against code.
 	@go list ./... | grep -v '/internal/providers/libvirt' | grep -v '/cmd/provider-libvirt' | grep -v '/test/integration' | xargs go fmt
 
 .PHONY: vet
-vet: ## Run go vet against code.
+vet: vet-sdk vet-proto ## Run go vet against the root module, then sdk/ and proto/ (each a separate Go module).
 	@echo "Running go vet (excluding libvirt packages)..."
 	@go list ./... | grep -v '/internal/providers/libvirt' | grep -v '/cmd/provider-libvirt' | grep -v '/test/integration' | xargs go vet
+
+.PHONY: vet-sdk
+vet-sdk: ## Run go vet against the sdk/ module. Separate Go module (sdk/go.mod): not reached by root `go vet ./...`.
+	@echo "Running go vet on sdk module..."
+	@cd sdk && go vet ./...
+
+.PHONY: vet-proto
+vet-proto: ## Run go vet against the proto/ module. Separate Go module (proto/go.mod): not reached by root `go vet ./...`.
+	@echo "Running go vet on proto module..."
+	@cd proto && go vet ./...
 
 .PHONY: test
 test: gen-crds generate fmt vet setup-envtest ## Run tests.

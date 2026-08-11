@@ -218,49 +218,56 @@ func (c *Client) Close() error {
 
 // Validate validates the provider configuration.
 func (c *Client) Validate(ctx context.Context, req *providerv1.ValidateRequest) (*providerv1.ValidateResponse, error) {
-	ctx = c.withTimeout(ctx, "/provider.v1.Provider/Validate")
+	ctx, cancel := c.withTimeout(ctx, "/provider.v1.Provider/Validate")
+	defer cancel()
 	resp, err := c.client.Validate(ctx, req)
 	return resp, errors.FromGRPCError(err)
 }
 
 // Create creates a new virtual machine.
 func (c *Client) Create(ctx context.Context, req *providerv1.CreateRequest) (*providerv1.CreateResponse, error) {
-	ctx = c.withTimeout(ctx, "/provider.v1.Provider/Create")
+	ctx, cancel := c.withTimeout(ctx, "/provider.v1.Provider/Create")
+	defer cancel()
 	resp, err := c.client.Create(ctx, req)
 	return resp, errors.FromGRPCError(err)
 }
 
 // Delete deletes a virtual machine.
 func (c *Client) Delete(ctx context.Context, req *providerv1.DeleteRequest) (*providerv1.TaskResponse, error) {
-	ctx = c.withTimeout(ctx, "/provider.v1.Provider/Delete")
+	ctx, cancel := c.withTimeout(ctx, "/provider.v1.Provider/Delete")
+	defer cancel()
 	resp, err := c.client.Delete(ctx, req)
 	return resp, errors.FromGRPCError(err)
 }
 
 // Power performs power operations on a virtual machine.
 func (c *Client) Power(ctx context.Context, req *providerv1.PowerRequest) (*providerv1.TaskResponse, error) {
-	ctx = c.withTimeout(ctx, "/provider.v1.Provider/Power")
+	ctx, cancel := c.withTimeout(ctx, "/provider.v1.Provider/Power")
+	defer cancel()
 	resp, err := c.client.Power(ctx, req)
 	return resp, errors.FromGRPCError(err)
 }
 
 // Reconfigure reconfigures a virtual machine.
 func (c *Client) Reconfigure(ctx context.Context, req *providerv1.ReconfigureRequest) (*providerv1.TaskResponse, error) {
-	ctx = c.withTimeout(ctx, "/provider.v1.Provider/Reconfigure")
+	ctx, cancel := c.withTimeout(ctx, "/provider.v1.Provider/Reconfigure")
+	defer cancel()
 	resp, err := c.client.Reconfigure(ctx, req)
 	return resp, errors.FromGRPCError(err)
 }
 
 // Describe describes a virtual machine's current state.
 func (c *Client) Describe(ctx context.Context, req *providerv1.DescribeRequest) (*providerv1.DescribeResponse, error) {
-	ctx = c.withTimeout(ctx, "/provider.v1.Provider/Describe")
+	ctx, cancel := c.withTimeout(ctx, "/provider.v1.Provider/Describe")
+	defer cancel()
 	resp, err := c.client.Describe(ctx, req)
 	return resp, errors.FromGRPCError(err)
 }
 
 // ListVMs lists all VMs managed by the provider.
 func (c *Client) ListVMs(ctx context.Context) ([]*providerv1.VMInfo, error) {
-	ctx = c.withTimeout(ctx, "/provider.v1.Provider/ListVMs")
+	ctx, cancel := c.withTimeout(ctx, "/provider.v1.Provider/ListVMs")
+	defer cancel()
 	resp, err := c.client.ListVMs(ctx, &providerv1.ListVMsRequest{})
 	if err != nil {
 		return nil, errors.FromGRPCError(err)
@@ -270,35 +277,40 @@ func (c *Client) ListVMs(ctx context.Context) ([]*providerv1.VMInfo, error) {
 
 // TaskStatus checks the status of an async task.
 func (c *Client) TaskStatus(ctx context.Context, req *providerv1.TaskStatusRequest) (*providerv1.TaskStatusResponse, error) {
-	ctx = c.withTimeout(ctx, "/provider.v1.Provider/TaskStatus")
+	ctx, cancel := c.withTimeout(ctx, "/provider.v1.Provider/TaskStatus")
+	defer cancel()
 	resp, err := c.client.TaskStatus(ctx, req)
 	return resp, errors.FromGRPCError(err)
 }
 
 // SnapshotCreate creates a VM snapshot.
 func (c *Client) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotCreateRequest) (*providerv1.SnapshotCreateResponse, error) {
-	ctx = c.withTimeout(ctx, "/provider.v1.Provider/SnapshotCreate")
+	ctx, cancel := c.withTimeout(ctx, "/provider.v1.Provider/SnapshotCreate")
+	defer cancel()
 	resp, err := c.client.SnapshotCreate(ctx, req)
 	return resp, errors.FromGRPCError(err)
 }
 
 // SnapshotDelete deletes a VM snapshot.
 func (c *Client) SnapshotDelete(ctx context.Context, req *providerv1.SnapshotDeleteRequest) (*providerv1.TaskResponse, error) {
-	ctx = c.withTimeout(ctx, "/provider.v1.Provider/SnapshotDelete")
+	ctx, cancel := c.withTimeout(ctx, "/provider.v1.Provider/SnapshotDelete")
+	defer cancel()
 	resp, err := c.client.SnapshotDelete(ctx, req)
 	return resp, errors.FromGRPCError(err)
 }
 
 // SnapshotRevert reverts a VM to a snapshot.
 func (c *Client) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotRevertRequest) (*providerv1.TaskResponse, error) {
-	ctx = c.withTimeout(ctx, "/provider.v1.Provider/SnapshotRevert")
+	ctx, cancel := c.withTimeout(ctx, "/provider.v1.Provider/SnapshotRevert")
+	defer cancel()
 	resp, err := c.client.SnapshotRevert(ctx, req)
 	return resp, errors.FromGRPCError(err)
 }
 
 // Clone clones a virtual machine.
 func (c *Client) Clone(ctx context.Context, req *providerv1.CloneRequest) (*providerv1.CloneResponse, error) {
-	ctx = c.withTimeout(ctx, "/provider.v1.Provider/Clone")
+	ctx, cancel := c.withTimeout(ctx, "/provider.v1.Provider/Clone")
+	defer cancel()
 	resp, err := c.client.Clone(ctx, req)
 	return resp, errors.FromGRPCError(err)
 }
@@ -308,37 +320,43 @@ func (c *Client) Clone(ctx context.Context, req *providerv1.CloneRequest) (*prov
 // the prepared template instead of re-resolving the source (issue #154, PR-6 /
 // #214).
 func (c *Client) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepareRequest) (*providerv1.ImagePrepareResponse, error) {
-	ctx = c.withTimeout(ctx, "/provider.v1.Provider/ImagePrepare")
+	ctx, cancel := c.withTimeout(ctx, "/provider.v1.Provider/ImagePrepare")
+	defer cancel()
 	resp, err := c.client.ImagePrepare(ctx, req)
 	return resp, errors.FromGRPCError(err)
 }
 
 // GetCapabilities gets the provider's capabilities.
 func (c *Client) GetCapabilities(ctx context.Context, req *providerv1.GetCapabilitiesRequest) (*providerv1.GetCapabilitiesResponse, error) {
-	ctx = c.withTimeout(ctx, "/provider.v1.Provider/GetCapabilities")
+	ctx, cancel := c.withTimeout(ctx, "/provider.v1.Provider/GetCapabilities")
+	defer cancel()
 	resp, err := c.client.GetCapabilities(ctx, req)
 	return resp, errors.FromGRPCError(err)
 }
 
-// withTimeout adds a timeout to the context if configured.
-func (c *Client) withTimeout(ctx context.Context, method string) context.Context {
+// withTimeout returns a context bound to the timeout configured for method,
+// along with the context.CancelFunc that releases the timer backing it.
+// Callers must always invoke the returned cancel func — typically via
+// `defer cancel()` immediately after this call returns — even when no
+// timeout ends up being applied: in that case the returned func is a no-op,
+// so the call pattern stays uniform across every RPC method regardless of
+// whether Config.Timeout is set.
+func (c *Client) withTimeout(ctx context.Context, method string) (context.Context, context.CancelFunc) {
 	if c.config.Timeout == nil {
-		return ctx
+		return ctx, func() {}
 	}
 
 	// Check for method-specific timeout
 	if timeout, ok := c.config.Timeout.PerMethodTimeouts[method]; ok {
-		timeoutCtx, _ := context.WithTimeout(ctx, timeout)
-		return timeoutCtx
+		return context.WithTimeout(ctx, timeout)
 	}
 
 	// Use default timeout
 	if c.config.Timeout.CallTimeout > 0 {
-		timeoutCtx, _ := context.WithTimeout(ctx, c.config.Timeout.CallTimeout)
-		return timeoutCtx
+		return context.WithTimeout(ctx, c.config.Timeout.CallTimeout)
 	}
 
-	return ctx
+	return ctx, func() {}
 }
 
 // buildTLSCredentials creates TLS credentials from the given config.
