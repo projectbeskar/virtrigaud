@@ -28,6 +28,7 @@ import (
 
 	v1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
+	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt/hostconn"
 )
 
 // Provider implements the contracts.Provider interface for Libvirt/KVM via virsh
@@ -38,8 +39,19 @@ type Provider struct {
 	// Kubernetes client for reading secrets
 	k8sClient client.Client
 
-	// Virsh-based provider (replaces libvirt-go)
+	// Virsh-based provider (replaces libvirt-go). Retained as the handle the
+	// package's own ~138 runVirshCommand call sites operate on; the gRPC Server
+	// reaches it through the registry seam instead (ADR-0008 PR 2).
 	virshProvider *VirshProvider
+
+	// registry owns the per-host connection(s). Today it holds exactly one Conn
+	// (built from PROVIDER_ENDPOINT, wrapping virshProvider); ADR-0007 P1 changes
+	// only the constructor to project N hosts from a mounted Secret.
+	registry hostconn.Registry
+
+	// hostID identifies the single host in the registry. Under ADR-0007 it equals
+	// the Host CR name.
+	hostID hostconn.HostID
 
 	// cached credentials
 	credentials *Credentials
@@ -89,8 +101,18 @@ type Config struct {
 	SSHPrivateKey string
 }
 
-// New creates a new Libvirt provider that reads configuration from environment and mounted secrets
-func New() *Provider {
+// New creates a new Libvirt provider that reads configuration from environment
+// and mounted secrets.
+//
+// It fails closed: if the virsh provider cannot initialize (bad/absent
+// credentials, unreachable host), New returns an error instead of a Provider so
+// the process never begins serving gRPC on a dead connection. This fixes the
+// prior behaviour where an Initialize failure was logged and swallowed
+// (provider.go:141), matching NewProvider and PR #291 finding B2. The caller
+// (cmd/provider-libvirt/main.go) exits non-zero on error, so the pod restarts
+// until the host is reachable rather than reporting healthy while every RPC
+// fails.
+func New() (*Provider, error) {
 	// Load configuration from environment (set by provider controller)
 	config := &Config{
 		Endpoint: os.Getenv("PROVIDER_ENDPOINT"),
@@ -136,15 +158,25 @@ func New() *Provider {
 		},
 	}
 
-	// Initialize the virsh provider
+	// Build the per-host connection seam (ADR-0008 PR 2). One host today, keyed
+	// off PROVIDER_ENDPOINT; ADR-0007 P1 changes only this to project N hosts.
+	hostID := hostIDFromEndpoint(config.Endpoint)
+	registry, err := hostconn.NewRegistry(newVirshConn(hostID, virshProvider))
+	if err != nil {
+		return nil, fmt.Errorf("build libvirt host registry: %w", err)
+	}
+	p.registry = registry
+	p.hostID = hostID
+
+	// Initialize the virsh provider — fail closed (B2). Previously this logged
+	// and continued, so the process could serve gRPC on a dead connection.
 	ctx := context.Background()
 	if err := virshProvider.Initialize(ctx); err != nil {
-		log.Printf("ERROR Failed to initialize virsh provider: %v", err)
-	} else {
-		log.Printf("INFO Successfully initialized virsh provider")
+		return nil, contracts.NewRetryableError("failed to initialize virsh provider", err)
 	}
 
-	return p
+	log.Printf("INFO Successfully initialized virsh provider")
+	return p, nil
 }
 
 // Removed old file-based credential loading - now using environment variables via virsh provider
@@ -181,6 +213,16 @@ func NewProvider(ctx context.Context, k8sClient client.Client, provider *v1beta1
 		credentials:   &Credentials{},
 	}
 
+	// Build the per-host connection seam (ADR-0008 PR 2), keyed off the
+	// provider's endpoint, so this path is consistent with New().
+	hostID := hostIDFromEndpoint(provider.Spec.Endpoint)
+	registry, err := hostconn.NewRegistry(newVirshConn(hostID, virshProvider))
+	if err != nil {
+		return nil, contracts.NewRetryableError("build libvirt host registry", err)
+	}
+	p.registry = registry
+	p.hostID = hostID
+
 	// Initialize the virsh provider
 	if err := virshProvider.Initialize(ctx); err != nil {
 		return nil, contracts.NewRetryableError("failed to initialize virsh provider", err)
@@ -189,6 +231,35 @@ func NewProvider(ctx context.Context, k8sClient client.Client, provider *v1beta1
 	log.Printf("INFO Successfully created virsh-based provider via K8s API")
 	return p, nil
 }
+
+// conn returns the libvirt connection for the provider's single host, obtained
+// from the registry seam (ADR-0008 PR 2) rather than the directly-held
+// virshProvider field. The gRPC Server uses this for the snapshot / import / disk
+// RPCs that previously type-asserted the concrete *Provider.
+//
+// It resolves the Conn through the Registry on every call (never caches it, per
+// the ADR's connection-lifecycle rule) and narrows the transport-neutral
+// hostconn.Conn to the richer libvirtConn view those RPCs need. A future
+// non-virsh transport that does not provide the virsh helpers fails here cleanly
+// rather than silently.
+func (p *Provider) conn(ctx context.Context) (libvirtConn, error) {
+	if p.registry == nil {
+		return nil, contracts.NewRetryableError("libvirt provider not initialized", nil)
+	}
+	c, err := p.registry.ConnFor(ctx, p.hostID)
+	if err != nil {
+		return nil, fmt.Errorf("get libvirt host connection %q: %w", p.hostID, err)
+	}
+	lc, ok := c.(libvirtConn)
+	if !ok {
+		return nil, fmt.Errorf("libvirt host connection %q does not support virsh operations", p.hostID)
+	}
+	return lc, nil
+}
+
+// Compile-time proof that *Provider satisfies the backend interface the gRPC
+// Server holds (server.go), so no concrete type assertion is needed there.
+var _ providerBackend = (*Provider)(nil)
 
 // Validate ensures the provider connection is healthy using virsh
 func (p *Provider) Validate(ctx context.Context) error {

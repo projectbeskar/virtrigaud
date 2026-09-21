@@ -5,6 +5,26 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-21 13:30] - Per-Host Connection Seam for the libvirt Provider (hostconn.Registry/Conn) — ADR-0008 PR 2
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `internal/providers/libvirt/hostconn/` (new package): the per-host connection seam — `HostID`, `Result`, the `Conn` interface (`HostID`/`Virsh`/`RunHost`/`Stream`/`Close`), the `Registry` interface (`ConnFor`/`Hosts`/`Evict`/`Close`), and a mutex-guarded default `Registry` with `NewRegistry(conns ...Conn)`. `Conn` deliberately splits control-plane exec (`Virsh`) from shell exec (`RunHost`/`Stream`) even though both ride virsh-over-SSH today, so ADR-0008 PR 4 can add a `Libvirt() *libvirt.Libvirt` accessor and route control ops through go-libvirt while the shell tenants (qemu-img, scp, sudo, …) stay on SSH. Tests cover ConnFor (the one host today), Hosts(), Evict, Close, context-cancellation, and the multi-host shape P1 will use (97.7% pkg coverage).
+- `internal/providers/libvirt/conn.go` (new): `virshConn`, the `Conn` implementation wrapping the existing `VirshProvider` (exec core, `execSem`/`streamSem` budgets, the `"!"` shell escape, streaming — all unchanged); the package-local `providerBackend` interface the gRPC `Server` now holds, and the richer `libvirtConn` view the six RPCs use (`getDomainState`/`snapshotExists`/`uri`/`copyDiskToRemote`/`storageProvider` over the seam). `Stream` reuses the tested `runSSHStdout` behind an `io.Pipe` (no exec-core change). `copyDiskToRemote` moved here from the `Server` (verbatim body, receiver `*VirshProvider`) so the gRPC layer no longer names `*VirshProvider`.
+- `internal/providers/libvirt/server.go`: **deleted the six `s.provider.(*Provider)` type assertions** (SnapshotCreate/Delete/Revert, Clone, ImagePrepare, ImportDisk — old lines 269/358/400/454/501/669) that reached into the unexported `.virshProvider` field and its methods. `Server.provider` and `NewServer` now take the `providerBackend` interface; the six RPCs obtain their per-host handle via `s.provider.conn(ctx)` (or call `Clone`/`imagePrepare` on the interface). The gRPC layer no longer depends on the concrete `*Provider`/`*VirshProvider` type — the hard prerequisite for swapping the transport (PR 3/PR 4).
+- `internal/providers/libvirt/provider.go`: `Provider` gains a `hostconn.Registry` + `hostID` (built from `PROVIDER_ENDPOINT`, wrapping the same `VirshProvider` its ~138 internal `runVirshCommand` call sites still use — those are untouched) and a `conn(ctx)` accessor. **`New()` now fails closed:** it returns `(*Provider, error)` and propagates an `Initialize` failure instead of logging-and-continuing (old `provider.go:141`), so the process never begins serving gRPC on a dead connection (PR #291 finding B2); `NewProvider` builds the same registry for consistency.
+- `cmd/provider-libvirt/main.go`: handle `New()`'s error return — log and `os.Exit(1)` so the pod restarts until the host is reachable rather than serving dead.
+- `internal/providers/libvirt/server_test.go`: `fakeDiskProvider` embed widened `contracts.Provider` → `providerBackend` to match the Server's new field type (structural; assertions unchanged). New `server_seam_test.go` exercises the six de-welded RPCs through a fake `providerBackend`/`libvirtConn` (no concrete `*Provider`, no live host).
+
+### Why
+The libvirt provider was welded to one host: `provider.go` built one `VirshProvider` and the gRPC layer reached the concrete type via six `s.provider.(*Provider)` assertions into unexported internals. This PR introduces the per-host connection seam (ADR-0008 PR 2) that ADR-0007's N-host clustering (P1 changes only the `Registry` constructor) and the go-libvirt transport (PR 3/PR 4 swap the `Conn` implementation) both build on, deletes the six assertions welding the gRPC layer to the concrete provider, and fixes `New()` serving on a dead connection. Behavior is preserved exactly — still virsh over the current SSH-subprocess transport, still one host, behind no flag.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout — behavior-preserving refactor; no on-the-wire or CRD change
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-09-21 12:29] - deps: bump grpc v1.83.2 + Go 1.26.6 (9 CVEs)
 **Author:** @wrkode (William Rizzo)
 
