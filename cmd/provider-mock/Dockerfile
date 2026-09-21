@@ -1,5 +1,5 @@
 # Build stage for mock provider
-FROM golang:1.26.5-bookworm AS builder
+FROM golang:1.26.6-bookworm AS builder
 
 WORKDIR /workspace
 
