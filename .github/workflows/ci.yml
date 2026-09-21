@@ -44,10 +44,10 @@ jobs:
       - name: Verify dependencies
         run: go mod verify
 
-      - name: Run go vet (root module, excluding libvirt)
+      - name: Run go vet (root module)
         run: |
-          # Use go list to find all packages and exclude problematic ones
-          go list ./... | grep -v '/internal/providers/libvirt' | grep -v '/cmd/provider-libvirt' | grep -v '/test/integration' | xargs go vet
+          # Use go list to find all packages and exclude the out-of-tree test trees
+          go list ./... | grep -v '/test/integration' | xargs go vet
 
       # sdk/ and proto/ are separate Go modules (their own go.mod), so the
       # root `go vet ./...` above never reaches them — that let the sdk
@@ -60,7 +60,7 @@ jobs:
       - name: Run go vet (proto module)
         run: cd proto && go vet ./...
 
-      - name: Run tests (excluding libvirt)
+      - name: Run tests
         run: |
           # Use the Makefile target which properly sets up ENVTEST environment
           make test
@@ -87,11 +87,6 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-
-      - name: Install libvirt dependencies for Go module resolution
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libvirt-dev pkg-config
 
       - name: Tidy Go modules
         run: go mod tidy
@@ -276,12 +271,6 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Install libvirt (for provider-libvirt)
-        if: matrix.component == 'provider-libvirt'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libvirt-dev pkg-config
-
       - name: Build binary
         run: |
           case "${{ matrix.component }}" in
@@ -289,7 +278,7 @@ jobs:
               CGO_ENABLED=0 go build -o bin/manager ./cmd/manager
               ;;
             provider-libvirt)
-              CGO_ENABLED=1 go build -o bin/provider-libvirt ./cmd/provider-libvirt
+              CGO_ENABLED=0 go build -o bin/provider-libvirt ./cmd/provider-libvirt
               ;;
             provider-vsphere)
               CGO_ENABLED=0 go build -o bin/provider-vsphere ./cmd/provider-vsphere
