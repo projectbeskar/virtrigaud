@@ -5,6 +5,32 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-21 12:29] - deps: bump grpc v1.83.2 + Go 1.26.6 (9 CVEs)
+**Author:** @wrkode (William Rizzo)
+
+### Security
+- `go.mod`, `go.sum`: bump `google.golang.org/grpc` v1.82.1 → **v1.83.2**. `go get`/`go mod tidy` carried grpc's own module-graph requirements along: `go.opentelemetry.io/otel`, `otel/metric`, `otel/sdk`, `otel/trace` v1.43.0 → v1.44.0, `go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp` v0.53.0 → v0.61.0, `golang.org/x/crypto` v0.53.0 → v0.55.0, `golang.org/x/net` v0.56.0 → v0.58.0, `golang.org/x/sync` v0.21.0 → v0.22.0, `golang.org/x/sys` v0.46.0 → v0.47.0, `golang.org/x/term` v0.44.0 → v0.45.0, `golang.org/x/text` v0.39.0 → v0.41.0, `golang.org/x/tools` v0.47.0 → v0.48.0, `cel.dev/expr` v0.25.1 → v0.25.2, and `google.golang.org/genproto/googleapis/{api,rpc}` to the matching pseudo-version.
+- `sdk/go.mod`, `sdk/go.sum`: same grpc bump; `go mod tidy` carried `x/net`, `x/sys`, `x/term`, `x/text`, and `genproto/googleapis/rpc` along to match root's new requirement (sdk depends on root via a local `replace`).
+- `proto/go.mod`, `proto/go.sum`: same grpc bump; `x/net` v0.55.0 → v0.58.0, `x/sys` v0.45.0 → v0.47.0, `x/text` v0.37.0 → v0.41.0, `genproto/googleapis/rpc` refreshed to match. `google.golang.org/protobuf` stays at v1.36.11 — grpc v1.83.2 didn't move it.
+- Clears **GO-2026-6443** (server panic via missing `:authority`/`Host` headers, fixed in grpc v1.82.2). Confirmed reachable at v1.82.1 before this bump via a baseline `govulncheck` scan: `cmd/provider-libvirt/main.go:136` (root) and `provider/server/server.go:333` (sdk), both through `grpc.Server.Serve` → `transport.http2Server.HandleStreams`.
+- Clears **GO-2026-6348** (HTTP/2 DATA-frame heap-exhaustion OOM, fixed in grpc v1.83.1) — v1.83.2 covers both with margin. Confirmed reachable at v1.82.1 via the same baseline scan: `internal/transport/grpc/client.go:256` and `internal/config/config.go:351` (root), `provider/client/client.go:271` and `provider/server/server.go:309` (sdk).
+- `go.mod`, `sdk/go.mod`, `proto/go.mod`, `Makefile`, `build/Dockerfile.manager`, `cmd/provider-{libvirt,mock,vsphere,proxmox}/Dockerfile`: bump the Go toolchain **1.26.5 → 1.26.6** — the `go` directive in all three modules and every builder-image pin, kept in lockstep per the Makefile note so shipped binaries also carry the patched standard library.
+- Clears seven Go standard-library vulnerabilities, all fixed in go1.26.6: **GO-2026-6218** (`net/url`), **GO-2026-6091** (`html/template`), **GO-2026-6090** (`crypto/tls`), **GO-2026-6089** (`net/http`), **GO-2026-6088** (`encoding/xml`), **GO-2026-5972** (`encoding/asn1`), **GO-2026-5026** (`net/http`).
+
+### Why
+Nine newly-disclosed, reachable vulnerabilities were failing the blocking `govulncheck` CI job on every PR and on `main` — the same recurrence pattern as the August 2026 bump (#298), just newer versions: two in grpc's HTTP/2 transport and seven in the Go standard library, fixed in grpc v1.83.2 and Go 1.26.6 respectively. govulncheck fails the run on any reachable vulnerability, so all nine had to clear together; the two dependency fixes above do that with no API or behavior change.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout — only to ship rebuilt manager/provider images carrying the patched grpc transport and standard library; running clusters are unaffected until upgraded
+- [ ] Config change only
+- [ ] Documentation only
+
+### Notes
+- Local toolchain is `go1.26.8` — newer than the 1.26.6 floor this PR sets, so `govulncheck` here genuinely scans against a patched standard library rather than relying on CI's `setup-go` to honor the `go.mod` bump. `govulncheck ./...` at root and `cd sdk && govulncheck ./...` (and `cd proto && govulncheck ./...`, not gated in CI but checked anyway) all report **"No vulnerabilities found"** for called code (exit 0), and none of the 9 target CVE IDs appear anywhere in any module's output — not even as unreached. Confirmed the two grpc CVEs were genuinely reachable pre-bump by scanning the prior commit (4031618, grpc v1.82.1) in a throwaway worktree — see call sites above — before re-scanning post-bump and watching both disappear entirely.
+- Root's `govulncheck -show verbose` surfaces 5 unrelated, pre-existing, **unreached** findings (2 "imported", 3 "required", none called): GO-2026-6094 (`github.com/google/cel-go` v0.22.0, version unchanged by this PR), GO-2026-5841 (`github.com/klauspost/compress` v1.18.6, version unchanged by this PR), and GO-2026-6355 / GO-2026-6354 / GO-2026-5932 (`golang.org/x/crypto`, bumped v0.53.0 → v0.55.0 as a transitive consequence of the grpc bump). The fix for two of the three `x/crypto` findings lands in v0.56.0, outside this PR's scope; all three affect the whole v0.53.0–v0.55.0 range, so this bump neither introduces nor worsens them. None are reachable, none affect the 0-vulnerabilities exit code, none are among the 9 CVEs this PR targets — flagged here for audit trail, not fixed in this PR.
+- `make fmt` (no diff), `make lint` (0 issues), `make test` (all packages pass), `make build` (clean); `go build ./...` also clean at root, `sdk/`, and `proto/`.
+
 ## [2026-08-11 08:34] - Fix sdk Context Leak and Stale proto Fuzz Test; Add sdk/proto to the vet Gate
 **Author:** @wrkode (William Rizzo)
 
