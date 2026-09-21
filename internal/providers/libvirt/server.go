@@ -21,9 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"net/url"
 	"os"
-	"os/exec"
 	"regexp"
 	"strings"
 	"time"
@@ -33,14 +31,23 @@ import (
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
-// Server implements the providerv1.ProviderServer interface for Libvirt
+// Server implements the providerv1.ProviderServer interface for Libvirt.
+//
+// It holds the provider through the providerBackend interface (satisfied by
+// *Provider), not the concrete type. This is the ADR-0008 PR 2 de-weld: the six
+// snapshot/clone/image/import RPCs that used to type-assert s.provider.(*Provider)
+// and reach into unexported fields now go through providerBackend and the
+// per-host connection seam, so an alternative transport (PR 3/PR 4) can be
+// swapped underneath without touching this layer.
 type Server struct {
 	providerv1.UnimplementedProviderServer
-	provider contracts.Provider
+	provider providerBackend
 }
 
-// NewServer creates a new Libvirt gRPC server
-func NewServer(provider contracts.Provider) *Server {
+// NewServer creates a new Libvirt gRPC server. provider is the libvirt provider
+// implementation (a *Provider); a nil provider yields a server whose RPCs report
+// "not initialized" until one is wired, which the health path and tests rely on.
+func NewServer(provider providerBackend) *Server {
 	return &Server{
 		provider: provider,
 	}
@@ -265,10 +272,14 @@ func (s *Server) parseCreateRequest(req *providerv1.CreateRequest) (contracts.Cr
 func (s *Server) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotCreateRequest) (*providerv1.SnapshotCreateResponse, error) {
 	log.Printf("INFO Creating snapshot for VM: %s", req.VmId)
 
-	// Get the provider instance and cast to libvirt Provider
-	libvirtProvider, ok := s.provider.(*Provider)
-	if !ok || libvirtProvider == nil || libvirtProvider.virshProvider == nil {
+	// Obtain the per-host connection through the seam (ADR-0008 PR 2) instead of
+	// type-asserting the concrete *Provider.
+	if s.provider == nil {
 		return nil, fmt.Errorf("libvirt provider not initialized")
+	}
+	conn, err := s.provider.conn(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	// Generate snapshot name if not provided
@@ -287,7 +298,7 @@ func (s *Server) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotCre
 	}
 
 	// Check if domain exists and get its state
-	domainState, err := libvirtProvider.virshProvider.getDomainState(ctx, req.VmId)
+	domainState, err := conn.getDomainState(ctx, req.VmId)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get domain state: %w", err)
 	}
@@ -312,8 +323,8 @@ func (s *Server) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotCre
 		log.Printf("INFO Creating disk-only snapshot for domain %s", req.VmId)
 	}
 
-	// Execute snapshot creation
-	result, err := libvirtProvider.virshProvider.runVirshCommand(ctx, args...)
+	// Execute snapshot creation (control-plane exec through the seam)
+	result, err := conn.Virsh(ctx, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create snapshot: %w", err)
 	}
@@ -354,14 +365,17 @@ func buildSnapshotCreateArgs(vmID, name, description string, includeMemory, runn
 func (s *Server) SnapshotDelete(ctx context.Context, req *providerv1.SnapshotDeleteRequest) (*providerv1.TaskResponse, error) {
 	log.Printf("INFO Deleting snapshot %s from VM: %s", req.SnapshotId, req.VmId)
 
-	// Get the provider instance and cast to libvirt Provider
-	libvirtProvider, ok := s.provider.(*Provider)
-	if !ok || libvirtProvider == nil || libvirtProvider.virshProvider == nil {
+	// Obtain the per-host connection through the seam (ADR-0008 PR 2).
+	if s.provider == nil {
 		return nil, fmt.Errorf("libvirt provider not initialized")
+	}
+	conn, err := s.provider.conn(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	// Check if snapshot exists
-	exists, err := libvirtProvider.virshProvider.snapshotExists(ctx, req.VmId, req.SnapshotId)
+	exists, err := conn.snapshotExists(ctx, req.VmId, req.SnapshotId)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check snapshot existence: %w", err)
 	}
@@ -381,7 +395,7 @@ func (s *Server) SnapshotDelete(ctx context.Context, req *providerv1.SnapshotDel
 		req.SnapshotId,
 	}
 
-	result, err := libvirtProvider.virshProvider.runVirshCommand(ctx, args...)
+	result, err := conn.Virsh(ctx, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to delete snapshot: %w", err)
 	}
@@ -396,14 +410,17 @@ func (s *Server) SnapshotDelete(ctx context.Context, req *providerv1.SnapshotDel
 func (s *Server) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotRevertRequest) (*providerv1.TaskResponse, error) {
 	log.Printf("INFO Reverting VM %s to snapshot: %s", req.VmId, req.SnapshotId)
 
-	// Get the provider instance and cast to libvirt Provider
-	libvirtProvider, ok := s.provider.(*Provider)
-	if !ok || libvirtProvider == nil || libvirtProvider.virshProvider == nil {
+	// Obtain the per-host connection through the seam (ADR-0008 PR 2).
+	if s.provider == nil {
 		return nil, fmt.Errorf("libvirt provider not initialized")
+	}
+	conn, err := s.provider.conn(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	// Check if snapshot exists
-	exists, err := libvirtProvider.virshProvider.snapshotExists(ctx, req.VmId, req.SnapshotId)
+	exists, err := conn.snapshotExists(ctx, req.VmId, req.SnapshotId)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check snapshot existence: %w", err)
 	}
@@ -413,7 +430,7 @@ func (s *Server) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotRev
 	}
 
 	// Get current domain state
-	domainState, err := libvirtProvider.virshProvider.getDomainState(ctx, req.VmId)
+	domainState, err := conn.getDomainState(ctx, req.VmId)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get domain state: %w", err)
 	}
@@ -434,7 +451,7 @@ func (s *Server) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotRev
 		args = append(args, "--running")
 	}
 
-	result, err := libvirtProvider.virshProvider.runVirshCommand(ctx, args...)
+	result, err := conn.Virsh(ctx, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to revert to snapshot: %w", err)
 	}
@@ -451,12 +468,11 @@ func (s *Server) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotRev
 // linked clone (req.Linked) creates a qcow2 overlay backed by the source disk
 // and is therefore lifecycle-bound to it (issue #153).
 func (s *Server) Clone(ctx context.Context, req *providerv1.CloneRequest) (*providerv1.CloneResponse, error) {
-	libvirtProvider, ok := s.provider.(*Provider)
-	if !ok || libvirtProvider == nil {
+	if s.provider == nil {
 		return nil, fmt.Errorf("libvirt provider not initialized")
 	}
 
-	resp, err := libvirtProvider.Clone(ctx, contracts.CloneRequest{
+	resp, err := s.provider.Clone(ctx, contracts.CloneRequest{
 		SourceVmID:    req.SourceVmId,
 		TargetName:    req.TargetName,
 		Linked:        req.Linked,
@@ -498,12 +514,11 @@ func (s *Server) Clone(ctx context.Context, req *providerv1.CloneRequest) (*prov
 func (s *Server) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepareRequest) (*providerv1.ImagePrepareResponse, error) {
 	log.Printf("INFO ImagePrepare: target=%q storageHint=%q", req.TargetName, req.StorageHint)
 
-	libvirtProvider, ok := s.provider.(*Provider)
-	if !ok || libvirtProvider == nil || libvirtProvider.virshProvider == nil {
+	if s.provider == nil {
 		return nil, fmt.Errorf("libvirt provider not initialized")
 	}
 
-	preparedID, preparedPath, err := libvirtProvider.imagePrepare(ctx, req.ImageJson, req.TargetName, req.StorageHint)
+	preparedID, preparedPath, err := s.provider.imagePrepare(ctx, req.ImageJson, req.TargetName, req.StorageHint)
 	if err != nil {
 		return nil, fmt.Errorf("failed to prepare image: %w", err)
 	}
@@ -665,10 +680,14 @@ func (s *Server) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReque
 
 	log.Printf("INFO Starting disk import from %s", req.SourceUrl)
 
-	// Get the provider instance and cast to libvirt Provider
-	libvirtProvider, ok := s.provider.(*Provider)
-	if !ok || libvirtProvider == nil || libvirtProvider.virshProvider == nil {
+	// Obtain the per-host connection through the seam (ADR-0008 PR 2) instead of
+	// type-asserting the concrete *Provider.
+	if s.provider == nil {
 		return nil, fmt.Errorf("libvirt provider not initialized")
+	}
+	conn, err := s.provider.conn(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	// Parse source URL (expecting pvc:// or file:// URL)
@@ -712,9 +731,9 @@ func (s *Server) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReque
 
 	// Copy disk file to remote libvirt host (if using SSH connection)
 	var finalSourcePath string
-	if strings.Contains(libvirtProvider.virshProvider.uri, "ssh://") {
+	if strings.Contains(conn.uri(), "ssh://") {
 		log.Printf("INFO Copying disk file to remote libvirt host...")
-		remotePath, err := s.copyDiskToRemote(ctx, libvirtProvider.virshProvider, sourcePath, volumeName)
+		remotePath, err := conn.copyDiskToRemote(ctx, sourcePath, volumeName)
 		if err != nil {
 			return nil, fmt.Errorf("failed to copy disk to remote host: %w", err)
 		}
@@ -726,8 +745,8 @@ func (s *Server) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReque
 		log.Printf("INFO Using local libvirt connection with path: %s", finalSourcePath)
 	}
 
-	// Get source disk info using qemu-img
-	infoResult, err := libvirtProvider.virshProvider.runVirshCommand(ctx, "!", "qemu-img", "info", "--output=json", finalSourcePath)
+	// Get source disk info using qemu-img (shell exec through the seam)
+	infoResult, err := conn.RunHost(ctx, "qemu-img", "info", "--output=json", finalSourcePath)
 	if err != nil {
 		log.Printf("WARN Failed to get source disk info: %v", err)
 	} else {
@@ -740,8 +759,8 @@ func (s *Server) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReque
 		poolName = req.StorageHint
 	}
 
-	// Create storage provider
-	storageProvider := NewStorageProvider(libvirtProvider.virshProvider)
+	// Create storage provider (bound to this host's connection)
+	storageProvider := conn.storageProvider()
 
 	// Ensure target pool exists and is active
 	if err := storageProvider.EnsureDefaultStoragePool(ctx); err != nil {
@@ -760,7 +779,7 @@ func (s *Server) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReque
 
 	// Get actual size of imported disk
 	var actualSizeBytes int64
-	statResult, err := libvirtProvider.virshProvider.runVirshCommand(ctx, "!", "stat", "-c", "%s", volume.Path)
+	statResult, err := conn.RunHost(ctx, "stat", "-c", "%s", volume.Path)
 	if err == nil {
 		_, _ = fmt.Sscanf(strings.TrimSpace(statResult.Stdout), "%d", &actualSizeBytes)
 	}
@@ -769,7 +788,7 @@ func (s *Server) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReque
 	checksum := ""
 	if req.VerifyChecksum {
 		log.Printf("INFO Calculating SHA256 checksum of imported disk...")
-		checksumResult, err := libvirtProvider.virshProvider.runVirshCommand(ctx, "!", "sha256sum", volume.Path)
+		checksumResult, err := conn.RunHost(ctx, "sha256sum", volume.Path)
 		if err != nil {
 			log.Printf("WARN Failed to calculate checksum: %v", err)
 		} else {
@@ -850,89 +869,6 @@ func (s *Server) ListVMs(ctx context.Context, req *providerv1.ListVMsRequest) (*
 	return &providerv1.ListVMsResponse{
 		Vms: protoVMInfos,
 	}, nil
-}
-
-// copyDiskToRemote copies a disk file from local pod storage to the remote libvirt host
-func (s *Server) copyDiskToRemote(ctx context.Context, virshProvider *VirshProvider, localPath, volumeName string) (string, error) {
-	// IMPORTANT: Copy directly to libvirt pool directory for efficient in-place usage
-	// This allows CreateVolumeFromImageFile to detect and use the disk without copying
-	remoteDir := "/var/lib/libvirt/images"
-	remotePath := fmt.Sprintf("%s/%s.qcow2", remoteDir, volumeName)
-
-	// Extract SSH target (user@host) from URI
-	parsedURI, err := url.Parse(virshProvider.uri)
-	if err != nil {
-		return "", fmt.Errorf("failed to parse libvirt URI: %w", err)
-	}
-
-	user := parsedURI.User.Username()
-	host := parsedURI.Host
-	sshTarget := fmt.Sprintf("%s@%s", user, host)
-
-	log.Printf("INFO Ensuring libvirt pool directory exists on %s", sshTarget)
-
-	// Ensure pool directory exists (usually already exists, but safe to check)
-	_, err = virshProvider.runVirshCommand(ctx, "!", "sudo", "mkdir", "-p", remoteDir)
-	if err != nil {
-		log.Printf("WARN Failed to ensure pool directory exists (may already exist): %v", err)
-	}
-
-	// Copy disk file using scp (run locally from the pod, not through SSH)
-	log.Printf("INFO Copying disk file (%s) to remote host via scp...", localPath)
-
-	// Host-key options come from the same centralized policy as the virsh
-	// paths (#149/ADR-0004) so the disk-image transfer is verified against the
-	// same trust material. Re-emit the verification-mode audit line for the scp
-	// connection and hard-fail before transfer if verification is on but no
-	// usable known_hosts is present (no TOFU).
-	virshProvider.hostKey.logVerificationMode(virshProvider.logger, host)
-	if err := virshProvider.hostKey.verifyKnownHostsPresent(host); err != nil {
-		return "", fmt.Errorf("libvirt scp host-key verification pre-flight failed: %w", err)
-	}
-	hostKeyOpts := virshProvider.hostKey.sshHostKeyOptions()
-	// Share the SSH connection with the virsh path via ControlMaster (#194).
-	hostKeyOpts = append(hostKeyOpts, sshMultiplexOptions()...)
-
-	// Bound concurrent long-lived disk-stream forks separately from execSem's
-	// short control-call budget (see VirshProvider.streamSem) — scp can hold
-	// this subprocess for minutes copying a multi-GB disk, and must not
-	// starve, or be starved by, short virsh control calls. Scoped to just the
-	// scp fork itself (not the mkdir above, which already has its own
-	// execSem-guarded call via runVirshCommand) so the two budgets stay
-	// independent.
-	release, err := virshProvider.acquireStreamSlot(ctx)
-	if err != nil {
-		return "", err
-	}
-	defer release()
-
-	// Run scp LOCALLY on the pod to copy to remote host
-	var cmd *exec.Cmd
-	if virshProvider.credentials.Password != "" {
-		// Use sshpass with scp for password authentication
-		scpArgs := append([]string{"-e", "scp"}, hostKeyOpts...)
-		scpArgs = append(scpArgs, localPath, fmt.Sprintf("%s:%s", sshTarget, remotePath))
-		cmd = exec.CommandContext(ctx, "sshpass", scpArgs...)
-		// Set password via environment variable for sshpass
-		cmd.Env = append(os.Environ(), fmt.Sprintf("SSHPASS=%s", virshProvider.credentials.Password))
-	} else if strings.TrimSpace(virshProvider.credentials.SSHPrivateKey) != "" {
-		scpArgs := sshKeyAuthOptions(resolveSSHKeyFile(parsedURI))
-		scpArgs = append(scpArgs, hostKeyOpts...)
-		scpArgs = append(scpArgs, localPath, fmt.Sprintf("%s:%s", sshTarget, remotePath))
-		cmd = exec.CommandContext(ctx, "scp", scpArgs...)
-	} else {
-		scpArgs := append([]string{}, hostKeyOpts...)
-		scpArgs = append(scpArgs, localPath, fmt.Sprintf("%s:%s", sshTarget, remotePath))
-		cmd = exec.CommandContext(ctx, "scp", scpArgs...)
-	}
-
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("scp failed: %w, output: %s", err, string(output))
-	}
-
-	log.Printf("INFO Successfully copied disk file to remote host: %s", remotePath)
-	return remotePath, nil
 }
 
 // Helper functions for generating IDs and timestamps (shared with vSphere)

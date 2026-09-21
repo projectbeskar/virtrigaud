@@ -213,12 +213,14 @@ func TestServer_ExportDisk_NFSBackendPassesGate(t *testing.T) {
 		"nfs export must pass the gate and fail later at the nil-provider check")
 }
 
-// fakeDiskProvider is a minimal contracts.Provider used to exercise the Server's
+// fakeDiskProvider is a minimal providerBackend used to exercise the Server's
 // ExportDisk/GetDiskInfo delegation and type conversion without a live libvirt.
 // It embeds the interface so only the two methods under test need real bodies;
-// no other interface method is invoked by these tests.
+// no other interface method (Clone/imagePrepare/conn or the base contract) is
+// invoked by these tests. The embed widened from contracts.Provider to
+// providerBackend when the Server's field type did (ADR-0008 PR 2).
 type fakeDiskProvider struct {
-	contracts.Provider
+	providerBackend
 
 	gotExport  contracts.ExportDiskRequest
 	exportResp contracts.ExportDiskResponse

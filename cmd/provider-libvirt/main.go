@@ -116,7 +116,15 @@ func main() {
 	// internal package exposes a Server type that implements the
 	// generated providerv1.ProviderServer interface, which is exactly
 	// what RegisterProvider expects.
-	providerImpl := libvirt.New()
+	//
+	// New() fails closed (ADR-0008 PR 2 / PR #291 B2): if the virsh provider
+	// cannot initialize its connection, we exit non-zero rather than serve gRPC
+	// on a dead connection. The pod restarts until the host is reachable.
+	providerImpl, err := libvirt.New()
+	if err != nil {
+		logger.Error("Failed to initialize libvirt provider", "error", err)
+		os.Exit(1)
+	}
 	libvirtServer := libvirt.NewServer(providerImpl)
 	srv.RegisterProvider(libvirtServer)
 
