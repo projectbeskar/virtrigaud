@@ -77,6 +77,14 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
 # curl and its HEALTHCHECK are dropped: inert under Kubernetes, which uses
 # liveness/readiness probes against the SDK server's own /healthz, not Docker
 # HEALTHCHECK.
+#
+# ADR-0008 PR 3 (#306) dropped the runtime apt-get's openssh-client/sshpass/curl
+# but accidentally removed this `FROM ${BASE_IMAGE}` too, so the runtime content
+# below (culminating in `COPY --from=builder`) collapsed back into the builder
+# stage and buildx failed with "circular dependency detected on stage: builder".
+# This line starts the runtime stage — mirroring cmd/provider-proxmox/Dockerfile.
+FROM ${BASE_IMAGE}
+
 RUN apt-get update && apt-get install -y \
     libvirt0 \
     libvirt-clients \

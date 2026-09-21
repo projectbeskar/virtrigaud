@@ -36,10 +36,10 @@ jobs:
           cache: true
 
       - name: Tidy Go modules
-        run: go mod tidy
+        run: ./hack/retry.sh go mod tidy
 
       - name: Download dependencies
-        run: go mod download
+        run: ./hack/retry.sh go mod download
 
       - name: Verify dependencies
         run: go mod verify
@@ -119,7 +119,7 @@ jobs:
           cache: true
 
       - name: Tidy Go modules
-        run: go mod tidy
+        run: ./hack/retry.sh go mod tidy
 
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@82606bf257cbaff209d206a39f5134f0cfbfd2ee  # v9
@@ -142,11 +142,11 @@ jobs:
           cache: true
 
       - name: Tidy Go modules
-        run: go mod tidy
+        run: ./hack/retry.sh go mod tidy
 
       - name: Run Gosec Security Scanner (excluding libvirt)
         run: |
-          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          ./hack/retry.sh go install github.com/securego/gosec/v2/cmd/gosec@latest
 
           # Run gosec with timeout and better error handling
           # Exclude vendor, modules, and problematic dependencies
@@ -224,7 +224,7 @@ jobs:
           cache: true
 
       - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+        run: ./hack/retry.sh go install golang.org/x/vuln/cmd/govulncheck@latest
 
       - name: Run govulncheck (root module)
         run: $(go env GOPATH)/bin/govulncheck ./...
@@ -247,10 +247,10 @@ jobs:
           cache: true
 
       - name: Tidy Go modules
-        run: go mod tidy
+        run: ./hack/retry.sh go mod tidy
 
       - name: Install controller-gen
-        run: go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.17.2
+        run: ./hack/retry.sh go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.17.2
 
       - name: Install protoc
         run: |
@@ -259,8 +259,8 @@ jobs:
 
       - name: Install protoc plugins
         run: |
-          go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
-          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+          ./hack/retry.sh go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+          ./hack/retry.sh go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
 
       - name: Generate code
         run: make generate
@@ -573,7 +573,7 @@ jobs:
       # behind a path filter or split into a second job.
 
       - name: Tidy Go modules
-        run: go mod tidy
+        run: ./hack/retry.sh go mod tidy
 
       - name: Run integration tests
         run: make test-integration
