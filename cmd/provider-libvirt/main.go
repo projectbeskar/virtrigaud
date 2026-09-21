@@ -24,6 +24,9 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	obsmetrics "github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt"
 	"github.com/projectbeskar/virtrigaud/internal/version"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/middleware"
@@ -105,6 +108,13 @@ func main() {
 		},
 		Auth: tlsResolution.Auth,
 	}
+
+	// Expose the provider's Prometheus registry at /metrics on the health port so
+	// the ADR-0008 D5 libvirt shadow-compare divergence metric
+	// (virtrigaud_libvirt_shadow_divergence_total) is scrapable for the production
+	// soak. Uses the same controller-runtime registry every virtrigaud_* metric
+	// registers with (internal/obs/metrics).
+	config.MetricsHandler = promhttp.HandlerFor(obsmetrics.GetRegistry(), promhttp.HandlerOpts{})
 
 	srv, err := server.New(config)
 	if err != nil {

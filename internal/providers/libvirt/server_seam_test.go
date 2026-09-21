@@ -80,6 +80,10 @@ func (f *fakeSeamConn) Libvirt(_ context.Context) (*golibvirt.Libvirt, error) {
 	return nil, errors.New("fakeSeamConn: Libvirt not implemented")
 }
 
+func (f *fakeSeamConn) callLibvirt(_ context.Context, _ func(*golibvirt.Libvirt) error) error {
+	return errors.New("fakeSeamConn: callLibvirt not implemented")
+}
+
 func (f *fakeSeamConn) Close() error { return nil }
 
 func (f *fakeSeamConn) getDomainState(_ context.Context, _ string) (string, error) {
