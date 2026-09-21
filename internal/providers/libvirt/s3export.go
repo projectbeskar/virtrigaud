@@ -19,11 +19,7 @@ package libvirt
 import (
 	"context"
 	"fmt"
-	"io"
 	"log"
-	"net/url"
-	"os"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -51,10 +47,12 @@ import (
 // carrying all the data. The standalone qcow2 is then streamed to S3.
 //
 // The bytes never land in a temp file in the pod and never traverse a CSI PVC:
-// they flow host (`cat <hostTmp.qcow2>`) → SSH stdout → pod → S3 via an
-// io.Pipe coupling runSSHStdout to storage.UploadStream (SHA256 computed
-// in-stream). Integrity is the in-stream SHA256 of the staged qcow2, reported
-// as the Checksum the target verifies on download (ADR D5).
+// they flow host (`cat <hostTmp.qcow2>`) → the per-host Conn's SSH-backed
+// Stream → pod → S3 (storage.UploadStream reads directly from the
+// io.ReadCloser Conn.Stream returns; no manual pipe-shuttling here since
+// ADR-0008 PR 3 — Stream already returns a pull-style reader). Integrity is
+// the in-stream SHA256 UploadStream computes, reported as the Checksum the
+// target verifies on download (ADR D5).
 //
 // The host-side flattened temp file (hostTmp.qcow2) lands transiently on the
 // host (host disk usage = flattened qcow2 during export). It is removed
@@ -65,21 +63,23 @@ import (
 // Crash-resume of an interrupted transfer is OUT of scope: a failure retries the
 // whole export. This is the documented follow-up.
 func (s *Server) exportDiskToS3(ctx context.Context, req *providerv1.ExportDiskRequest) (*providerv1.ExportDiskResponse, error) {
-	libvirtProvider, ok := s.provider.(*Provider)
-	if !ok || libvirtProvider == nil || libvirtProvider.virshProvider == nil {
+	if s.provider == nil {
 		return nil, fmt.Errorf("libvirt provider not initialized")
 	}
-	vp := libvirtProvider.virshProvider
+	conn, err := s.provider.conn(ctx)
+	if err != nil {
+		return nil, err
+	}
 
-	if !strings.Contains(vp.uri, "ssh://") {
+	if !strings.Contains(conn.uri(), "ssh://") {
 		// The flatten + stream-out runs on the libvirt host over SSH. A local
 		// connection is not the Slice 2 source shape.
-		return nil, fmt.Errorf("s3 export requires an ssh:// libvirt transport (host-side qemu-img flatten + stream); got %q", vp.uri)
+		return nil, fmt.Errorf("s3 export requires an ssh:// libvirt transport (host-side qemu-img flatten + stream); got %q", conn.uri())
 	}
 
 	// Resolve the source disk path on the host via GetDiskInfo (e.g. for
 	// demo-ubuntu-libvirt vda=/var/lib/libvirt/images/ubuntu-libvirt-demo.qcow2).
-	diskInfo, err := libvirtProvider.GetDiskInfo(ctx, contracts.GetDiskInfoRequest{
+	diskInfo, err := s.provider.GetDiskInfo(ctx, contracts.GetDiskInfoRequest{
 		VmId:       req.VmId,
 		DiskId:     req.DiskId,
 		SnapshotId: req.SnapshotId,
@@ -118,7 +118,7 @@ func (s *Server) exportDiskToS3(ctx context.Context, req *providerv1.ExportDiskR
 	// not yet honored, or createSnapshot=false) can be read — this is a
 	// crash-consistent copy; a consistent copy still requires the source to be
 	// powered off or snapshotted first.
-	if res, err := vp.runVirshCommand(ctx, "!", "qemu-img", "convert", "-U", "-f", "qcow2", "-O", "qcow2",
+	if res, err := conn.RunHost(ctx, "qemu-img", "convert", "-U", "-f", "qcow2", "-O", "qcow2",
 		shellQuote(srcPath), shellQuote(hostTmp)); err != nil {
 		return nil, fmt.Errorf("host-side qemu-img flatten (qcow2→standalone qcow2) failed: %w%s", err, qemuImgStderr(res))
 	}
@@ -126,7 +126,7 @@ func (s *Server) exportDiskToS3(ctx context.Context, req *providerv1.ExportDiskR
 	// Cleanup the flattened temp ALWAYS — success or failure — so a failed export
 	// never leaks a multi-GB temp on the host. Best-effort; WARN on failure.
 	defer func() {
-		if _, rmErr := vp.runVirshCommand(context.Background(), "!", "rm", "-f", hostTmp); rmErr != nil {
+		if _, rmErr := conn.RunHost(context.Background(), "rm", "-f", hostTmp); rmErr != nil {
 			log.Printf("WARN failed to remove flattened export temp %s on host (manual cleanup may be needed): %v",
 				hostTmp, rmErr)
 		}
@@ -135,129 +135,39 @@ func (s *Server) exportDiskToS3(ctx context.Context, req *providerv1.ExportDiskR
 	log.Printf("INFO Source disk flattened to standalone qcow2 on host: hostTmp=%s", hostTmp)
 
 	// --- STREAM (ADR D5) ---
-	// Stream host (`cat <hostTmp.qcow2>` → SSH stdout) → pod → S3. The pipe
-	// couples runSSHStdout's stdout to storage.UploadStream so the disk is never
-	// buffered whole in the pod; UploadStream computes the SHA256 in-stream.
-	pr, pw := io.Pipe()
+	// conn.Stream opens the remote `cat <hostTmp.qcow2>` and hands back its
+	// stdout as an io.ReadCloser; storage.UploadStream reads directly from it
+	// (SHA256 computed in-stream), so the disk is never buffered whole in the
+	// pod. Closing rc — including on an early return below — is what
+	// guarantees the remote command is torn down even if UploadStream gives up
+	// reading before EOF (e.g. an S3-side failure): Stream's reader is backed
+	// by an io.Pipe, so Close unblocks the host-side copy goroutine with
+	// io.ErrClosedPipe instead of leaving it blocked forever.
 	streamCmd := fmt.Sprintf("cat %s", shellQuote(hostTmp))
-
-	type ulResult struct {
-		resp storage.UploadResponse
-		err  error
+	rc, err := conn.Stream(ctx, streamCmd)
+	if err != nil {
+		return nil, fmt.Errorf("failed to start host-side stream (cat %s): %w", hostTmp, err)
 	}
-	ulCh := make(chan ulResult, 1)
-	go func() {
-		resp, uerr := s3client.UploadStream(ctx, storage.StreamUploadRequest{
-			DestinationURL: req.DestinationUrl,
-			Reader:         pr,
-			ContentLength:  -1, // size unknown; minio streaming auto-multipart
-		})
-		// Closing the read end with the upload error unblocks the SSH/cat side if
-		// the upload failed mid-stream (broken pipe) so it returns promptly.
-		_ = pr.CloseWithError(uerr)
-		ulCh <- ulResult{resp: resp, err: uerr}
-	}()
+	defer func() { _ = rc.Close() }()
 
-	streamErr := runSSHStdout(ctx, vp, pw, streamCmd)
-	// Close the write end so UploadStream sees EOF (clean) or, on a cat failure,
-	// an error that aborts the upload rather than uploading a truncated object.
-	_ = pw.CloseWithError(streamErr)
-	ul := <-ulCh
-
-	// Surface the REAL failure. When BOTH sides report an error, the upload error
-	// is almost always the root cause: a failed S3 upload closes the pipe's read
-	// end, which breaks the host-side `cat` with SIGPIPE — and ssh then reports a
-	// bare "exit status 255" with no stderr. Reporting only the cat error in that
-	// case masks the actual cause (e.g. an S3 auth/space/endpoint failure), so we
-	// include both, leading with the upload error.
-	if ul.err != nil && streamErr != nil {
-		return nil, fmt.Errorf("disk export stream failed: s3 upload: %w (host-side stream cat %s also failed: %v)",
-			ul.err, hostTmp, streamErr)
-	}
-	if streamErr != nil {
-		return nil, fmt.Errorf("host-side stream (cat %s) failed: %w", hostTmp, streamErr)
-	}
-	if ul.err != nil {
-		return nil, fmt.Errorf("s3 upload failed during stream: %w", ul.err)
+	ul, err := s3client.UploadStream(ctx, storage.StreamUploadRequest{
+		DestinationURL: req.DestinationUrl,
+		Reader:         rc,
+		ContentLength:  -1, // size unknown; minio streaming auto-multipart
+	})
+	if err != nil {
+		return nil, fmt.Errorf("s3 upload failed during stream: %w", err)
 	}
 
 	log.Printf("INFO Disk export to S3 completed: export_id=%s bytes=%d checksum=%s",
-		exportID, ul.resp.BytesTransferred, ul.resp.Checksum)
+		exportID, ul.BytesTransferred, ul.Checksum)
 
 	return &providerv1.ExportDiskResponse{
 		ExportId:           exportID,
 		Task:               nil, // synchronous
-		EstimatedSizeBytes: ul.resp.BytesTransferred,
-		Checksum:           ul.resp.Checksum, // SHA256 of the staged (qcow2) object
+		EstimatedSizeBytes: ul.BytesTransferred,
+		Checksum:           ul.Checksum, // SHA256 of the staged (qcow2) object
 	}, nil
-}
-
-// runSSHStdout runs a single command on the libvirt host over SSH, streaming the
-// command's stdout into w (a pipe), and returns when the command exits. It is
-// the symmetric sibling of runSSHStdin: instead of wiring a reader to the
-// remote process's stdin (cmd.Stdin = r) it wires the remote process's stdout to
-// w (cmd.Stdout = w), so a multi-GB disk streams OUT of the host without being
-// buffered in the pod. It reuses the same host-key policy and ControlMaster
-// multiplexing as runSSHStdin / the virsh/scp paths (#149/ADR-0004, #194) so
-// trust material and connections are shared.
-func runSSHStdout(ctx context.Context, vp *VirshProvider, w io.Writer, remoteCmd string) error {
-	// Bound concurrent long-lived disk-stream forks separately from execSem's
-	// short control-call budget (see VirshProvider.streamSem) — this call can
-	// hold its subprocess for minutes streaming a multi-GB disk, and must not
-	// starve, or be starved by, short virsh control calls.
-	release, err := vp.acquireStreamSlot(ctx)
-	if err != nil {
-		return err
-	}
-	defer release()
-
-	parsedURI, err := url.Parse(vp.uri)
-	if err != nil {
-		return fmt.Errorf("failed to parse libvirt URI: %w", err)
-	}
-	host := parsedURI.Host
-	user := parsedURI.User.Username()
-
-	// Host-key pre-flight: re-emit the audit line and hard-fail if verification
-	// is on but no usable known_hosts is present (no TOFU), matching scp/stdin.
-	vp.hostKey.logVerificationMode(vp.logger, host)
-	if err := vp.hostKey.verifyKnownHostsPresent(host); err != nil {
-		return fmt.Errorf("ssh stdout host-key verification pre-flight failed: %w", err)
-	}
-
-	var cmd *exec.Cmd
-	if vp.credentials.Password != "" {
-		sshArgs := []string{
-			"-e", // read password from SSHPASS
-			"ssh",
-			"-o", "PasswordAuthentication=yes",
-			"-o", "PubkeyAuthentication=no",
-			"-o", "LogLevel=ERROR",
-		}
-		sshArgs = append(sshArgs, vp.hostKey.sshHostKeyOptions()...)
-		sshArgs = append(sshArgs, sshMultiplexOptions()...)
-		sshArgs = append(sshArgs, fmt.Sprintf("%s@%s", user, host), remoteCmd)
-		cmd = exec.CommandContext(ctx, "sshpass", sshArgs...)
-		cmd.Env = append(os.Environ(), fmt.Sprintf("SSHPASS=%s", vp.credentials.Password))
-	} else {
-		sshArgs := []string{"-o", "LogLevel=ERROR"}
-		sshArgs = append(sshArgs, vp.hostKey.sshHostKeyOptions()...)
-		sshArgs = append(sshArgs, sshMultiplexOptions()...)
-		sshArgs = append(sshArgs, fmt.Sprintf("%s@%s", user, host), remoteCmd)
-		cmd = exec.CommandContext(ctx, "ssh", sshArgs...)
-		cmd.Env = vp.env
-	}
-
-	cmd.Stdout = w
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	cmd.Stdin = nil
-
-	log.Printf("DEBUG Executing SSH stdout stream: ssh %s@%s %q", user, host, remoteCmd)
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("%w (stderr: %s)", err, strings.TrimSpace(stderr.String()))
-	}
-	return nil
 }
 
 // hostExportStagePath returns the path of the transient host-side flattened

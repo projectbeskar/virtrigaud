@@ -27,19 +27,37 @@ resources:
     cpu: 200m
     memory: 256Mi
 
-# Security context for libvirt (may need privileged access)
+# Security context for libvirt.
+#
+# Hardened to match internal/controller/provider_controller.go's default
+# SecurityContext for the qemu+ssh:// model (ADR-0008 PR 3 review, #306):
+# non-root, read-only root filesystem, no privilege escalation, all Linux
+# capabilities dropped. The libvirt provider reaches its hypervisor host over
+# SSH (an in-process golang.org/x/crypto/ssh client as of ADR-0008 PR 3) —
+# it does not need SYS_ADMIN or a writable root filesystem to do that; the
+# SSH key comes from the mounted credentials Secret and is held in memory
+# only, never written to disk.
+#
+# NOTE: this example ALSO hostPath-mounts /var/run/libvirt and
+# /var/lib/libvirt below, which implies a provider pod co-located on the
+# libvirt host talking to the LOCAL socket — a different topology than the
+# qemu+ssh:// remote-host model these hardened defaults were designed for.
+# If you use the co-located/local-socket model, confirm UID 65532 can access
+# the host's libvirt-sock (typically root:libvirt, 0660) before relying on
+# runAsNonRoot here; the qemu+ssh:// model has no such constraint since it
+# never touches a local socket.
 securityContext:
-  allowPrivilegeEscalation: true
+  runAsNonRoot: true
+  runAsUser: 65532
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
   capabilities:
-    add:
-    - SYS_ADMIN
-  readOnlyRootFilesystem: false
-  runAsNonRoot: false
-  runAsUser: 0
+    drop:
+      - ALL
 
 podSecurityContext:
-  runAsNonRoot: false
-  runAsUser: 0
+  runAsNonRoot: true
+  runAsUser: 65532
 
 # RBAC permissions for libvirt provider
 rbac:
@@ -57,8 +75,22 @@ volumeMounts:
     mountPath: /var/run/libvirt
   - name: libvirt-storage
     mountPath: /var/lib/libvirt
+  # readOnlyRootFilesystem above makes /tmp itself read-only unless it is
+  # backed by its own writable volume, so mount one here — this chart's
+  # deployment.yaml has no default /tmp emptyDir of its own (unlike the
+  # manager-controller-created Provider pod path, which already carries one).
+  # Disk-backed (not tmpfs/memory): nothing in the libvirt provider pod writes
+  # multi-GB disk data to local /tmp after ADR-0008 PR 3 (S3/NFS migration
+  # staging happens on the remote host over SSH, not in this pod), but a
+  # plain writable /tmp is kept as a safety net for anything that still
+  # expects one (e.g. the local, non-ssh:// qemu:///system connection
+  # fallback, if ever used, execs virsh locally).
+  - name: tmp
+    mountPath: /tmp
 
 volumes:
+  - name: tmp
+    emptyDir: {}
   - name: libvirt-socket
     hostPath:
       path: /var/run/libvirt

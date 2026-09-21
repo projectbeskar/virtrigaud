@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt/hostconn"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
@@ -50,10 +51,11 @@ func TestImportDiskFromS3_NilProvider(t *testing.T) {
 // host-side qemu-img convert both need an SSH connection to the libvirt host. The
 // guard fires before any S3 client is built, so it is host-independent.
 func TestImportDiskFromS3_RequiresSSHTransport(t *testing.T) {
+	vp := &VirshProvider{uri: "qemu:///system"}
+	reg, err := hostconn.NewRegistry(newVirshConn("host-a", vp))
+	require.NoError(t, err)
 	s := &Server{
-		provider: &Provider{
-			virshProvider: &VirshProvider{uri: "qemu:///system"},
-		},
+		provider: &Provider{registry: reg, hostID: "host-a"},
 	}
 
 	resp, err := s.importDiskFromS3(context.Background(), &providerv1.ImportDiskRequest{
@@ -156,10 +158,10 @@ func TestStageCmdQuotesPath(t *testing.T) {
 // is visible, not masked by an io.Pipe error) and that the empty cases stay tidy.
 func TestQemuImgStderr(t *testing.T) {
 	assert.Equal(t, "", qemuImgStderr(nil), "nil result yields no suffix")
-	assert.Equal(t, "", qemuImgStderr(&VirshResult{Stderr: "   "}),
+	assert.Equal(t, "", qemuImgStderr(&hostconn.Result{Stderr: "   "}),
 		"whitespace-only stderr yields no suffix")
 
-	got := qemuImgStderr(&VirshResult{
+	got := qemuImgStderr(&hostconn.Result{
 		Stderr: "qemu-img: Could not open '/dev/stdin': 'file' driver requires '/dev/stdin' to be a regular file\n",
 	})
 	assert.Equal(t,

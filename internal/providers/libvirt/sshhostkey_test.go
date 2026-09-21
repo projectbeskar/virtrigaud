@@ -19,19 +19,14 @@ package libvirt
 import (
 	"bytes"
 	"log/slog"
-	"net/url"
-	"strings"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/ssh/knownhosts"
 )
-
-// optsToString flattens the alternating ["-o", "k=v", ...] option slice into a
-// single space-joined string for easy substring assertions.
-func optsToString(opts []string) string {
-	return strings.Join(opts, " ")
-}
 
 // TestResolveHostKeyPolicy_EnvParsing verifies the escape-hatch env var is
 // honoured ONLY for the literal word "true" (case-insensitive, trimmed) and
@@ -68,68 +63,90 @@ func TestResolveHostKeyPolicy_EnvParsing(t *testing.T) {
 	}
 }
 
-// TestHostKeyPolicy_SSHHostKeyOptions_Verifying asserts the verifying policy
-// produces StrictHostKeyChecking=yes pointing at the credentials-mounted
-// known_hosts, and never emits the insecure literals. This covers the password
-// (sshpass/ssh) and scp transports, which both consume sshHostKeyOptions.
-func TestHostKeyPolicy_SSHHostKeyOptions_Verifying(t *testing.T) {
-	policy := hostKeyPolicy{insecure: false}
-	opts := optsToString(policy.sshHostKeyOptions())
-
-	assert.Contains(t, opts, "StrictHostKeyChecking=yes")
-	assert.Contains(t, opts, "UserKnownHostsFile="+KnownHostsFile)
-	assert.Equal(t, "/etc/virtrigaud/credentials/known_hosts", KnownHostsFile,
-		"known_hosts must resolve inside the existing credentials mount")
-
-	assert.NotContains(t, opts, "accept-new")
-	assert.NotContains(t, opts, "/tmp/known_hosts")
-	assert.NotContains(t, opts, "no_verify")
+// TestHostKeyPolicy_HostKeyCallback_Insecure asserts the escape-hatch policy
+// builds a callback that accepts any host key. It deliberately IS
+// ssh.InsecureIgnoreHostKey (see the hostKeyCallback doc: SAST/audit tooling
+// greps for that exact symbol as the marker an insecure mode exists, so
+// hand-rolling an equivalent would hide it), guarded by a gosec G106 nolint
+// and reached only on the explicit env opt-out — never consulting
+// KnownHostsFile.
+func TestHostKeyPolicy_HostKeyCallback_Insecure(t *testing.T) {
+	cb, err := hostKeyPolicy{insecure: true}.hostKeyCallback()
+	require.NoError(t, err)
+	require.NotNil(t, cb)
+	// A callback that never errors, for any hostname/address/key, IS the
+	// insecure contract; there is no real handshake to drive here.
+	assert.NoError(t, cb("anything:22", nil, nil))
 }
 
-// TestHostKeyPolicy_SSHHostKeyOptions_Insecure asserts the escape-hatch policy
-// restores the legacy accept-new + ephemeral known_hosts behaviour.
-func TestHostKeyPolicy_SSHHostKeyOptions_Insecure(t *testing.T) {
-	policy := hostKeyPolicy{insecure: true}
-	opts := optsToString(policy.sshHostKeyOptions())
-
-	assert.Contains(t, opts, "StrictHostKeyChecking=accept-new")
-	assert.Contains(t, opts, "UserKnownHostsFile=/tmp/known_hosts")
-	assert.NotContains(t, opts, "StrictHostKeyChecking=yes")
+// TestHostKeyPolicy_HostKeyCallback_Verifying asserts the verifying policy
+// builds a knownhosts-backed callback (never nil, never an unconditional
+// accept) from KnownHostsFile. Acceptance/rejection behavior against a real
+// key is covered end-to-end in sshclient_test.go against an in-memory SSH
+// server.
+func TestHostKeyPolicy_HostKeyCallback_Verifying(t *testing.T) {
+	// KnownHostsFile does not exist in the test environment, so knownhosts.New
+	// itself fails — hostKeyCallback must surface that, not silently fall back
+	// to an accept-all callback.
+	_, err := hostKeyPolicy{insecure: false}.hostKeyCallback()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), KnownHostsFile)
 }
 
-// TestHostKeyPolicy_SSHConfigStanza covers the ~/.ssh/config body used by the
-// key-based qemu+ssh:// transport for both policies.
-func TestHostKeyPolicy_SSHConfigStanza(t *testing.T) {
-	verifying := hostKeyPolicy{insecure: false}.sshConfigStanza()
-	assert.Contains(t, verifying, "StrictHostKeyChecking yes")
-	assert.Contains(t, verifying, "UserKnownHostsFile "+KnownHostsFile)
-	assert.NotContains(t, verifying, "accept-new")
-	assert.NotContains(t, verifying, "/tmp/known_hosts")
+// TestKnownHostsHasEntry_SpecificHost is the #291 finding B6 regression test:
+// seeding known_hosts for one host must NOT make an unrelated host appear
+// "present". Before this fix, verifyKnownHostsPresent only checked the file
+// was non-empty, so a Provider seeded for host-a but pointed at host-b passed
+// the gate with zero trust material for host-b.
+func TestKnownHostsHasEntry_SpecificHost(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "known_hosts")
 
-	insecure := hostKeyPolicy{insecure: true}.sshConfigStanza()
-	assert.Contains(t, insecure, "StrictHostKeyChecking accept-new")
-	assert.Contains(t, insecure, "UserKnownHostsFile /tmp/known_hosts")
+	pub, err := probeHostKey() // any real ssh.PublicKey works as the seeded key
+	require.NoError(t, err)
+	line := knownhosts.Line([]string{"host-a"}, pub)
+	require.NoError(t, os.WriteFile(path, []byte(line+"\n"), 0o600))
+
+	present, err := knownHostsHasEntry(path, "host-a")
+	require.NoError(t, err)
+	assert.True(t, present, "host-a has a known_hosts entry and must be reported present")
+
+	present, err = knownHostsHasEntry(path, "host-b")
+	require.NoError(t, err)
+	assert.False(t, present, "host-b has NO known_hosts entry and must NOT be reported present just because host-a is (closes #291 B6)")
 }
 
-// TestHostKeyPolicy_ApplyURIHostKeyOptions covers the key-based URI transport:
-// no_verify=1 is set ONLY on the insecure path and deleted on the verifying
-// path.
-func TestHostKeyPolicy_ApplyURIHostKeyOptions(t *testing.T) {
-	t.Run("verifying drops no_verify", func(t *testing.T) {
-		q := url.Values{}
-		q.Set("no_verify", "1") // simulate a legacy/leftover value
-		hostKeyPolicy{insecure: false}.applyURIHostKeyOptions(q)
-		assert.Empty(t, q.Get("no_verify"))
-	})
-
-	t.Run("insecure sets no_verify", func(t *testing.T) {
-		q := url.Values{}
-		hostKeyPolicy{insecure: true}.applyURIHostKeyOptions(q)
-		assert.Equal(t, "1", q.Get("no_verify"))
-	})
+// TestKnownHostsHasEntry_MissingFile verifies a nonexistent known_hosts path
+// surfaces as an error (so verifyKnownHostsPresent's caller falls back to the
+// actionable hard-fail message), not a false "present".
+func TestKnownHostsHasEntry_MissingFile(t *testing.T) {
+	_, err := knownHostsHasEntry(filepath.Join(t.TempDir(), "does-not-exist"), "host-a")
+	assert.Error(t, err)
 }
 
-// TestHostKeyPolicy_VerifyKnownHostsPresent covers the loud hard-fail gate.
+// TestHostPort covers the host:port normalization used consistently by the
+// real dial and the known_hosts probe, including the IPv6 double-bracketing
+// trap: url.URL.Host already brackets a bare IPv6 literal ("[::1]"), and
+// net.JoinHostPort brackets any host containing a colon on its own — composing
+// the two naively produces "[[::1]]:22".
+func TestHostPort(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"", ""},
+		{"172.16.56.8", "172.16.56.8:22"},
+		{"172.16.56.8:2222", "172.16.56.8:2222"},
+		{"host.example.com", "host.example.com:22"},
+		{"[::1]", "[::1]:22"},
+		{"[::1]:2222", "[::1]:2222"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			assert.Equal(t, tc.want, hostPort(tc.in))
+		})
+	}
+}
+
+// TestHostKeyPolicy_VerifyKnownHostsPresent covers the loud hard-fail gate,
+// including the #291 B6 specific-host strengthening.
 func TestHostKeyPolicy_VerifyKnownHostsPresent(t *testing.T) {
 	t.Run("insecure path is a no-op", func(t *testing.T) {
 		err := hostKeyPolicy{insecure: true}.verifyKnownHostsPresent("172.16.56.8")
@@ -218,8 +235,12 @@ func TestSetupConnection_VerifyingMissingKnownHosts_HardFails(t *testing.T) {
 }
 
 // TestSetupConnection_EscapeHatch_SetsNoVerify confirms that with the escape
-// hatch engaged the URI carries no_verify=1 (legacy behaviour) and the missing
-// known_hosts does NOT block startup.
+// hatch engaged, setupConnection succeeds despite the missing known_hosts and
+// resolves v.hostKey.insecure — the in-process client (sshclient.go) reads
+// this flag on every dial. ADR-0008 PR 3 removed the no_verify=1 URI
+// query-param mechanism entirely (there is no more external ssh/virsh CLI
+// reading the URI), so unlike the pre-PR-3 test this no longer asserts
+// anything about v.uri's contents.
 func TestSetupConnection_EscapeHatch_SetsNoVerify(t *testing.T) {
 	t.Setenv(EnvInsecureSkipHostKeyVerification, "true")
 
@@ -232,12 +253,12 @@ func TestSetupConnection_EscapeHatch_SetsNoVerify(t *testing.T) {
 
 	err := v.setupConnection()
 	require.NoError(t, err)
-	assert.Contains(t, v.uri, "no_verify=1")
 	assert.True(t, v.hostKey.insecure)
 }
 
 // TestSetupConnection_VerifyingLocalURI_NoSSH confirms a local (non-SSH) URI is
-// unaffected by the host-key policy (no known_hosts requirement, no no_verify).
+// unaffected by the host-key policy (no known_hosts requirement) — there is no
+// host to dial.
 func TestSetupConnection_VerifyingLocalURI_NoSSH(t *testing.T) {
 	t.Setenv(EnvInsecureSkipHostKeyVerification, "")
 
@@ -248,5 +269,5 @@ func TestSetupConnection_VerifyingLocalURI_NoSSH(t *testing.T) {
 
 	err := v.setupConnection()
 	require.NoError(t, err)
-	assert.NotContains(t, v.uri, "no_verify")
+	assert.Equal(t, "qemu:///system", v.uri)
 }

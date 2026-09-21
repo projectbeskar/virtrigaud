@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt/hostconn"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
@@ -51,10 +52,11 @@ func TestExportDiskToS3_NilProvider(t *testing.T) {
 // connection to the libvirt host. The guard fires before any S3 client is built,
 // so it is host-independent.
 func TestExportDiskToS3_RequiresSSHTransport(t *testing.T) {
+	vp := &VirshProvider{uri: "qemu:///system"}
+	reg, err := hostconn.NewRegistry(newVirshConn("host-a", vp))
+	require.NoError(t, err)
 	s := &Server{
-		provider: &Provider{
-			virshProvider: &VirshProvider{uri: "qemu:///system"},
-		},
+		provider: &Provider{registry: reg, hostID: "host-a"},
 	}
 
 	resp, err := s.exportDiskToS3(context.Background(), &providerv1.ExportDiskRequest{
