@@ -105,22 +105,21 @@ func resolveHostKeyPolicy() hostKeyPolicy {
 // On the verifying (default) path this is golang.org/x/crypto/ssh/knownhosts,
 // backed by KnownHostsFile — the exact same trust material and matching
 // semantics (plain and hashed hostnames, multiple keys/host) a real `ssh`
-// binary would use with `-o UserKnownHostsFile=`. It is NEVER
-// ssh.InsecureIgnoreHostKey, on either path: the insecure/escape-hatch path
-// below is a hand-written callback that always accepts, functionally
-// equivalent to InsecureIgnoreHostKey but written out so it is not the
-// specific flagged symbol, is reached ONLY when the operator has explicitly
-// opted out (resolveHostKeyPolicy), and is loudly WARN-logged by
-// logVerificationMode on every connection.
+// binary would use with `-o UserKnownHostsFile=`.
+//
+// On the insecure/escape-hatch path this IS ssh.InsecureIgnoreHostKey,
+// deliberately: SAST/audit tooling (and a human grepping the tree) uses that
+// exact symbol as THE marker that an insecure host-key mode exists anywhere in
+// the codebase. Hand-rolling an equivalent always-accept callback to dodge the
+// gosec G106 finding would hide that marker instead of addressing it. The
+// nolint below documents why this specific call is acceptable: it is reached
+// ONLY when the operator has explicitly opted in via
+// EnvInsecureSkipHostKeyVerification=true (resolveHostKeyPolicy), and every
+// connection on this path is loudly WARN-logged by logVerificationMode.
 func (p hostKeyPolicy) hostKeyCallback() (ssh.HostKeyCallback, error) {
 	if p.insecure {
-		return func(_ string, _ net.Addr, _ ssh.PublicKey) error {
-			// Intentionally accept any host key: the operator explicitly set
-			// EnvInsecureSkipHostKeyVerification=true (audit-logged by
-			// logVerificationMode at connect time). ADR-0004's escape hatch,
-			// preserved verbatim by ADR-0008 PR 3.
-			return nil
-		}, nil
+		//nolint:gosec // G106: explicit, env-gated (LIBVIRT_INSECURE_SKIP_HOST_KEY_VERIFICATION), WARN-logged opt-out per ADR-0004
+		return ssh.InsecureIgnoreHostKey(), nil
 	}
 	cb, err := knownhosts.New(KnownHostsFile)
 	if err != nil {

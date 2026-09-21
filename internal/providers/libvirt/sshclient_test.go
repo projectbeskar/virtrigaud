@@ -22,6 +22,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -29,6 +30,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -50,9 +52,13 @@ import (
 
 // testSSHServerOpts configures the fixture's single allowed credential. Set
 // exactly one of password/authorizedKey to match the auth method under test.
+// connAttempts, if non-nil, is incremented once per accepted TCP connection —
+// i.e. once per dial attempt, regardless of whether the handshake that
+// follows succeeds — so a test can assert a failure was NOT retried.
 type testSSHServerOpts struct {
 	password      string
 	authorizedKey ssh.PublicKey
+	connAttempts  *atomic.Int32
 }
 
 // startTestSSHServer starts a loopback SSH server with hostKey as its host
@@ -90,6 +96,9 @@ func startTestSSHServer(t *testing.T, hostKey ssh.Signer, opts testSSHServerOpts
 			nConn, err := ln.Accept()
 			if err != nil {
 				return // listener closed (test cleanup)
+			}
+			if opts.connAttempts != nil {
+				opts.connAttempts.Add(1)
 			}
 			go serveTestSSHConn(nConn, config)
 		}
@@ -341,10 +350,10 @@ func TestDialSSH_RejectsMismatchedHostKey(t *testing.T) {
 }
 
 // TestDialSSH_InsecurePolicy_AcceptsAnyHostKey proves the escape hatch still
-// connects when known_hosts is empty/absent — functionally equivalent to
-// ssh.InsecureIgnoreHostKey, but never calling that symbol (hostKeyCallback's
-// doc explains why) — and is reached only via the explicit hostKeyPolicy{
-// insecure: true}, never the default.
+// connects when known_hosts is empty/absent — it deliberately uses
+// ssh.InsecureIgnoreHostKey directly (hostKeyCallback's doc explains why: a
+// greppable marker beats a hand-rolled equivalent) — and is reached only via
+// the explicit hostKeyPolicy{insecure: true}, never the default.
 func TestDialSSH_InsecurePolicy_AcceptsAnyHostKey(t *testing.T) {
 	hostKey := generateTestHostKey(t)
 	addr := startTestSSHServer(t, hostKey, testSSHServerOpts{password: "s3cret"})
@@ -601,4 +610,122 @@ func TestVirshConn_Stream_WiresThroughToRunSSHStdout(t *testing.T) {
 	got, err := io.ReadAll(rc)
 	require.NoError(t, err)
 	assert.Equal(t, "via-seam\n", string(got))
+}
+
+// --- non-transient classification: host-key mismatch / auth failure -------
+//
+// Security review of #306: a host-key MISMATCH and an authentication failure
+// are both wrapped by golang.org/x/crypto/ssh as "ssh: handshake failed:
+// ...", which would otherwise satisfy transientSSHConnectError's generic
+// "handshake failed" pattern and get silently retried 3x — masking a real
+// trust failure (or an active MITM) as a connectivity blip, and hammering a
+// wrong password/key against the host. These tests prove retryOnTransientSSH
+// stops on the FIRST attempt for both cases (asserted via the fixture's
+// connection-attempt counter, not just the returned error) and that the
+// failure is classifiable back to its structural cause.
+
+// TestClassifyNonTransientSSH is the direct unit test of the classifier.
+func TestClassifyNonTransientSSH(t *testing.T) {
+	t.Run("nil is transient-eligible (no error)", func(t *testing.T) {
+		nonTransient, reason := classifyNonTransientSSH(nil)
+		assert.False(t, nonTransient)
+		assert.Empty(t, reason)
+	})
+
+	t.Run("knownhosts.KeyError is a host-key mismatch", func(t *testing.T) {
+		keyErr := &knownhosts.KeyError{Want: []knownhosts.KnownKey{{Filename: "known_hosts"}}}
+		wrapped := fmt.Errorf("ssh handshake with host:22 failed: ssh: handshake failed: %w", keyErr)
+		nonTransient, reason := classifyNonTransientSSH(wrapped)
+		assert.True(t, nonTransient)
+		assert.Equal(t, "host-key mismatch", reason)
+	})
+
+	t.Run("unable to authenticate is an auth failure", func(t *testing.T) {
+		wrapped := errors.New("ssh handshake with host:22 failed: ssh: handshake failed: " +
+			"ssh: unable to authenticate, attempted methods [none password], no supported methods remain")
+		nonTransient, reason := classifyNonTransientSSH(wrapped)
+		assert.True(t, nonTransient)
+		assert.Equal(t, "authentication failure", reason)
+	})
+
+	t.Run("a genuine transient connect error is neither", func(t *testing.T) {
+		nonTransient, reason := classifyNonTransientSSH(errors.New("dial ssh host 1.2.3.4:22: i/o timeout"))
+		assert.False(t, nonTransient)
+		assert.Empty(t, reason)
+	})
+
+	t.Run("survives VirshError wrapping via Unwrap", func(t *testing.T) {
+		keyErr := &knownhosts.KeyError{Want: []knownhosts.KnownKey{{Filename: "known_hosts"}}}
+		cause := fmt.Errorf("ssh handshake with host:22 failed: ssh: handshake failed: %w", keyErr)
+		ve := &VirshError{Command: "virsh list", ExitCode: -1, Stderr: cause.Error(), Cause: cause}
+		nonTransient, reason := classifyNonTransientSSH(ve)
+		assert.True(t, nonTransient, "classifyNonTransientSSH must see through VirshError.Unwrap() to the real cause")
+		assert.Equal(t, "host-key mismatch", reason)
+	})
+}
+
+// TestRetryOnTransientSSH_HostKeyMismatch_NotRetried_SurfacesDistinctly is the
+// end-to-end proof: a real mismatched host key, driven through the full
+// runVirshCommand -> retryOnTransientSSH -> runOverSSH -> dialSSH stack
+// against the in-memory server, must (a) fail on the FIRST attempt only
+// (proven by the server's connection-attempt counter, not just inference from
+// timing) and (b) be classifiable back to *knownhosts.KeyError through the
+// returned error chain.
+func TestRetryOnTransientSSH_HostKeyMismatch_NotRetried_SurfacesDistinctly(t *testing.T) {
+	withFastBackoff(t)
+
+	realHostKey := generateTestHostKey(t)
+	wrongHostKey := generateTestHostKey(t) // seeded into known_hosts instead of the real one
+	var attempts atomic.Int32
+	addr := startTestSSHServer(t, realHostKey, testSSHServerOpts{password: "s3cret", connAttempts: &attempts})
+	useTempKnownHosts(t, knownhosts.Line([]string{addr}, wrongHostKey.PublicKey())+"\n")
+
+	v := testVirshProvider("virtrigaud", addr, &Credentials{Password: "s3cret"})
+	t.Cleanup(func() { _ = v.Cleanup() })
+
+	_, err := v.runVirshCommand(context.Background(), "list", "--all")
+	require.Error(t, err)
+
+	var keyErr *knownhosts.KeyError
+	assert.True(t, errors.As(err, &keyErr), "the returned error must unwrap to *knownhosts.KeyError, not just be a generic failure string")
+
+	assert.Equal(t, int32(1), attempts.Load(),
+		"a host-key mismatch must be attempted exactly once — retrying with the same mismatched key cannot succeed")
+}
+
+// TestRetryOnTransientSSH_AuthFailure_NotRetried_SurfacesDistinctly mirrors
+// the host-key test for the "plus the auth-failure case" half of the fix: a
+// wrong password must not be retried against the host either.
+func TestRetryOnTransientSSH_AuthFailure_NotRetried_SurfacesDistinctly(t *testing.T) {
+	withFastBackoff(t)
+
+	hostKey := generateTestHostKey(t)
+	var attempts atomic.Int32
+	addr := startTestSSHServer(t, hostKey, testSSHServerOpts{password: "s3cret", connAttempts: &attempts})
+	useTempKnownHosts(t, knownhosts.Line([]string{addr}, hostKey.PublicKey())+"\n")
+
+	v := testVirshProvider("virtrigaud", addr, &Credentials{Password: "WRONG-PASSWORD"})
+	t.Cleanup(func() { _ = v.Cleanup() })
+
+	_, err := v.runVirshCommand(context.Background(), "list", "--all")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unable to authenticate")
+
+	assert.Equal(t, int32(1), attempts.Load(),
+		"an authentication failure must be attempted exactly once — retrying with the same wrong password cannot succeed")
+}
+
+// TestTransientSSHConnectError_ExcludesKnownHostsAndAuth is the
+// defense-in-depth regression test for the text-matcher narrowing: even
+// called directly (bypassing classifyNonTransientSSH), the generic
+// "handshake failed" pattern must never fire for a knownhosts or
+// authentication failure message.
+func TestTransientSSHConnectError_ExcludesKnownHostsAndAuth(t *testing.T) {
+	assert.False(t, transientSSHConnectError(
+		"ssh handshake with host:22 failed: ssh: handshake failed: knownhosts: key mismatch"))
+	assert.False(t, transientSSHConnectError(
+		"ssh handshake with host:22 failed: ssh: handshake failed: ssh: unable to authenticate, "+
+			"attempted methods [none password], no supported methods remain"))
+	// A genuine handshake-stage drop with neither substring still matches.
+	assert.True(t, transientSSHConnectError("ssh handshake with host:22 failed: ssh: handshake failed: EOF"))
 }

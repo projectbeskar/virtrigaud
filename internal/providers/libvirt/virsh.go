@@ -19,6 +19,7 @@ package libvirt
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"log/slog"
@@ -31,6 +32,7 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 const (
@@ -116,12 +118,26 @@ type VirshError struct {
 	ExitCode int
 	Stderr   string
 	Stdout   string
+	// Cause is the original error that produced this VirshError, when
+	// available (e.g. the underlying *knownhosts.KeyError from a failed SSH
+	// handshake). Wired through Unwrap so callers can errors.As/errors.Is past
+	// this struct's stringified Command/Stderr/Stdout summary to classify the
+	// ACTUAL failure structurally instead of by substring-matching text — see
+	// classifyNonTransientSSH. May be nil (e.g. a plain non-zero remote exit
+	// has no more specific cause than the VirshError itself).
+	Cause error
 }
 
 func (e *VirshError) Error() string {
 	return fmt.Sprintf("virsh command '%s' failed (exit code %d): stderr=%s, stdout=%s",
 		e.Command, e.ExitCode, e.Stderr, e.Stdout)
 }
+
+// Unwrap returns the original error behind this VirshError, if any, so
+// errors.As/errors.Is can classify the underlying failure (e.g.
+// *knownhosts.KeyError, a host-key mismatch) rather than just this struct's
+// string summary.
+func (e *VirshError) Unwrap() error { return e.Cause }
 
 // NewVirshProvider creates a new virsh-based provider
 func NewVirshProvider(config *ProviderConfig) *VirshProvider {
@@ -436,8 +452,23 @@ var (
 // below, so the exact same class of failure (host slams the door during
 // connect/handshake, e.g. MaxStartups/fail2ban) is still classified as
 // transient and retried under the new transport.
+//
+// Security review of ADR-0008 PR 3 (#306): a host-key MISMATCH and an
+// authentication failure are BOTH wrapped by golang.org/x/crypto/ssh as
+// "ssh: handshake failed: ...", which would otherwise satisfy the generic
+// "handshake failed" pattern below and get retried 3x — silently masking a
+// real trust failure (or a MITM) as "transient connection blip", and
+// hammering a wrong password/key against the host. classifyNonTransientSSH is
+// the PRIMARY, structural gate against this in retryOnTransientSSH's main
+// loop (checked before this function is ever reached for those two cases);
+// the "knownhosts"/"unable to authenticate" exclusion here is defense in
+// depth so the text matcher alone can never misclassify them either, even if
+// that structural check were bypassed or this function were called directly.
 func transientSSHConnectError(stderr string) bool {
 	s := strings.ToLower(stderr)
+	if strings.Contains(s, "knownhosts") || strings.Contains(s, "unable to authenticate") {
+		return false
+	}
 	for _, m := range []string{
 		"kex_exchange_identification",      // host closed conn during key exchange (MaxStartups/fail2ban)
 		"connection closed by remote host", // host dropped the connection pre-auth
@@ -449,13 +480,51 @@ func transientSSHConnectError(stderr string) bool {
 		"temporary failure in name resolution", // transient DNS (OpenSSH CLI wording)
 		"i/o timeout",                          // Go net.Dialer timeout wording
 		"no such host",                         // Go DNS resolver wording
-		"handshake failed",                     // Go ssh: handshake dropped mid-negotiation
+		"handshake failed",                     // Go ssh: handshake dropped mid-negotiation (excludes knownhosts/auth above)
 	} {
 		if strings.Contains(s, m) {
 			return true
 		}
 	}
 	return false
+}
+
+// classifyNonTransientSSH reports whether err represents a definitive,
+// non-retryable SSH connection failure, and names which kind for a distinct
+// log line (security review of #306). Two cases are detected here so
+// retryOnTransientSSH's main loop never retries — and never merely logs as a
+// generic "transient connection failure" — either of them:
+//
+//   - host-key MISMATCH: the host IS present in known_hosts but presented a
+//     DIFFERENT key than the pinned one — precisely the MITM / unannounced
+//     key-rotation signal ADR-0004's whole design exists to catch. Detected
+//     structurally via errors.As against *knownhosts.KeyError with a
+//     populated Want (the "unknown host, no entry at all" case is a distinct,
+//     separately-and-already-non-retryable failure: it never reaches here
+//     because verifyKnownHostsPresent's pre-flight rejects it before any dial
+//     is attempted).
+//   - authentication failure: the configured password/key was rejected by the
+//     host. golang.org/x/crypto/ssh does not export a distinct error type for
+//     this on the client side, so it is detected via the stable
+//     "unable to authenticate" substring its client auth code has used for
+//     years (empirically confirmed against this exact ssh package version).
+//
+// Both must surface immediately — retrying with the SAME wrong host key or
+// the SAME wrong credentials cannot succeed, and for host-key mismatch
+// specifically, silently retrying would bury the one signal ADR-0004 exists
+// to make loud behind three rounds of "transient, retrying" WARN logs.
+func classifyNonTransientSSH(err error) (nonTransient bool, reason string) {
+	if err == nil {
+		return false, ""
+	}
+	var keyErr *knownhosts.KeyError
+	if errors.As(err, &keyErr) {
+		return true, "host-key mismatch"
+	}
+	if strings.Contains(err.Error(), "unable to authenticate") {
+		return true, "authentication failure"
+	}
+	return false, ""
 }
 
 // runVirshCommand executes a virsh command, transparently retrying ONLY
@@ -476,6 +545,12 @@ func (v *VirshProvider) runVirshCommand(ctx context.Context, args ...string) (*V
 // (with exponential backoff, honoring ctx) ONLY when the attempt's result stderr
 // indicates a transient SSH connection failure. Any other error — including a
 // real virsh command error — and the success path return immediately (#191).
+//
+// A host-key mismatch or an authentication failure (classifyNonTransientSSH)
+// is checked FIRST, before the generic transient-text classification, and
+// returns on the very first attempt with its own distinct log line — never
+// retried, never folded into the generic "transient connection failure" WARN
+// (security review of #306).
 func retryOnTransientSSH(ctx context.Context, attempt func() (*VirshResult, error)) (*VirshResult, error) {
 	var result *VirshResult
 	var err error
@@ -485,6 +560,17 @@ func retryOnTransientSSH(ctx context.Context, attempt func() (*VirshResult, erro
 		result, err = attempt()
 		if err == nil {
 			return result, nil
+		}
+
+		if nonTransient, reason := classifyNonTransientSSH(err); nonTransient {
+			if reason == "host-key mismatch" {
+				log.Printf("ERROR SSH host key presented by the remote host does NOT match known_hosts "+
+					"(possible MITM or an un-announced host-key rotation) — this is a trust failure, not a "+
+					"connectivity blip, and will NOT be retried: %v", err)
+			} else {
+				log.Printf("ERROR SSH %s — will NOT be retried with the same credentials: %v", reason, err)
+			}
+			return result, err
 		}
 
 		stderr := ""
@@ -600,6 +686,7 @@ func (v *VirshProvider) runLocal(ctx context.Context, argv []string) (*VirshResu
 			ExitCode: result.ExitCode,
 			Stderr:   result.Stderr,
 			Stdout:   result.Stdout,
+			Cause:    runErr,
 		}
 	}
 

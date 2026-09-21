@@ -64,9 +64,12 @@ func TestResolveHostKeyPolicy_EnvParsing(t *testing.T) {
 }
 
 // TestHostKeyPolicy_HostKeyCallback_Insecure asserts the escape-hatch policy
-// builds a callback that accepts any host key (functionally equivalent to
-// ssh.InsecureIgnoreHostKey, but never calling that specific symbol — see the
-// hostKeyCallback doc) without ever consulting KnownHostsFile.
+// builds a callback that accepts any host key. It deliberately IS
+// ssh.InsecureIgnoreHostKey (see the hostKeyCallback doc: SAST/audit tooling
+// greps for that exact symbol as the marker an insecure mode exists, so
+// hand-rolling an equivalent would hide it), guarded by a gosec G106 nolint
+// and reached only on the explicit env opt-out — never consulting
+// KnownHostsFile.
 func TestHostKeyPolicy_HostKeyCallback_Insecure(t *testing.T) {
 	cb, err := hostKeyPolicy{insecure: true}.hostKeyCallback()
 	require.NoError(t, err)
