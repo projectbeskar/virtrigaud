@@ -103,6 +103,15 @@ type VirshProvider struct {
 	// keepalive/liveness-probe/watchdog lifecycle is ADR-0008 PR 4.
 	sshMu     sync.Mutex
 	sshClient *ssh.Client
+
+	// golibvirtMu guards the lazy construction of golibvirt below (ADR-0008 PR
+	// 4a). golibvirt stays nil — meaning go-libvirt is fully dormant: no dial,
+	// no background goroutines — until the first Libvirt(ctx) call. Nothing in
+	// production calls that yet: PR 4a lands the pure-Go go-libvirt connection
+	// plumbing (golibvirt.go) only; PR 4b is what starts routing
+	// shadow-compare reads through it.
+	golibvirtMu sync.Mutex
+	golibvirt   *golibvirtHolder
 }
 
 // VirshDomain represents a VM domain from virsh list output
@@ -863,13 +872,26 @@ func (v *VirshProvider) getDomainInfo(ctx context.Context, domainName string) (m
 	return info, nil
 }
 
-// Cleanup releases the provider's resources. ADR-0008 PR 3: this now closes
-// the persistent in-process SSH client (sshclient.go), if one was dialed —
-// previously a no-op, since every virsh/ssh invocation was a stateless
-// subprocess with nothing to hold open. Called by virshConn.Close(), which the
-// hostconn.Registry invokes on Evict/Close.
+// Cleanup releases the provider's resources. ADR-0008 PR 3 made this close
+// the persistent in-process SSH client (sshclient.go), if one was dialed;
+// ADR-0008 PR 4a adds closing the go-libvirt connection lifecycle holder
+// (golibvirt.go), if Libvirt(ctx) was ever called — in normal operation it
+// never is, so this is a no-op in production today. The go-libvirt holder is
+// closed BEFORE the SSH client since it tunnels over it: closing it first
+// lets go-libvirt send its polite ProcConnectClose while the tunnel is still
+// up. Called by virshConn.Close(), which the hostconn.Registry invokes on
+// Evict/Close.
 func (v *VirshProvider) Cleanup() error {
 	log.Printf("INFO Cleaning up virsh provider")
+
+	v.golibvirtMu.Lock()
+	holder := v.golibvirt
+	v.golibvirt = nil
+	v.golibvirtMu.Unlock()
+	if holder != nil {
+		holder.close()
+	}
+
 	v.resetSSHClient()
 	return nil
 }

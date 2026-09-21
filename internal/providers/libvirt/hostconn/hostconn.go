@@ -49,6 +49,8 @@ import (
 	"context"
 	"io"
 	"time"
+
+	golibvirt "github.com/digitalocean/go-libvirt"
 )
 
 // HostID identifies one hypervisor host. Today exactly one exists, derived from
@@ -98,6 +100,23 @@ type Conn interface {
 	// export/import data plane (ADR-0006), so a multi-GB transfer is not buffered
 	// in the pod. The caller must Close the returned reader.
 	Stream(ctx context.Context, argv ...string) (io.ReadCloser, error)
+
+	// Libvirt returns the pure-Go go-libvirt client for this host (ADR-0008 PR
+	// 4a), connecting lazily over the same transport Virsh/RunHost/Stream use.
+	// ctx bounds only the connect/redial this call may need to perform — the
+	// returned client has NO per-call deadline of its own (go-libvirt exposes
+	// none across its ~488 RPC methods), so it does NOT bound any RPC a caller
+	// subsequently issues against the returned client. The implementation
+	// (internal/providers/libvirt/golibvirt.go) documents the full
+	// watchdog/keepalive/redial lifecycle that protects those RPCs; callers
+	// that need ctx to bound a call must go through that lifecycle's own
+	// invocation helper rather than calling the returned client directly.
+	//
+	// No production code path calls this yet: PR 4a lands the connection
+	// plumbing only, so go-libvirt stays fully dormant (no dial, no
+	// goroutines) until ADR-0008 PR 4b starts routing shadow-compare reads
+	// through it.
+	Libvirt(ctx context.Context) (*golibvirt.Libvirt, error)
 
 	// Close releases the connection's resources. It is invoked by the Registry on
 	// Evict/Close; ADR-0008 PR 4 closes the ssh.Client / go-libvirt handle here.

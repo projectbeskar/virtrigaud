@@ -25,6 +25,8 @@ import (
 	"os"
 	"strings"
 
+	golibvirt "github.com/digitalocean/go-libvirt"
+
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt/hostconn"
 )
@@ -154,6 +156,17 @@ func (c *virshConn) Stream(ctx context.Context, argv ...string) (io.ReadCloser, 
 		_ = pw.CloseWithError(err)
 	}()
 	return pr, nil
+}
+
+// Libvirt returns the pure-Go go-libvirt client for this host, connecting
+// lazily over the same persistent SSH client Virsh/RunHost/Stream use
+// (ADR-0008 PR 4a). See VirshProvider.Libvirt (golibvirt.go) for the
+// connection-lifecycle details — the watchdog, keepalive prober, and
+// redial-on-dead that make an unattended go-libvirt connection safe. No
+// production code path calls this yet: it exists so ADR-0008 PR 4b's
+// shadow-compare reads have a proven connection to build on.
+func (c *virshConn) Libvirt(ctx context.Context) (*golibvirt.Libvirt, error) {
+	return c.virsh.Libvirt(ctx)
 }
 
 // StreamIn runs a host command with r wired to its stdin and blocks until the
