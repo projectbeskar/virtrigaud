@@ -563,11 +563,11 @@ func (s *StorageProvider) CreateVolumeFromImageFile(ctx context.Context, sourceI
 	sourceDir := filepath.Dir(sourceImagePath)
 	sourceBase := filepath.Base(sourceImagePath)
 	poolPath := poolInfo.Path
-	
+
 	if sourceDir == poolPath && strings.HasSuffix(sourceImagePath, ".qcow2") {
 		log.Printf("INFO Source image is already in pool directory with correct format: %s", sourceImagePath)
 		log.Printf("INFO Using existing disk directly without copying (typical for imported/migrated disks)")
-		
+
 		// Ensure proper ownership and permissions
 		if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chown", "libvirt-qemu:kvm", sourceImagePath); err != nil {
 			log.Printf("WARN Failed to set ownership on existing disk: %v", err)
@@ -575,12 +575,12 @@ func (s *StorageProvider) CreateVolumeFromImageFile(ctx context.Context, sourceI
 		if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chmod", "777", sourceImagePath); err != nil {
 			log.Printf("WARN Failed to set permissions on existing disk: %v", err)
 		}
-		
+
 		// Refresh pool to recognize the volume
 		if _, err := s.virshProvider.runVirshCommand(ctx, "pool-refresh", poolName); err != nil {
 			log.Printf("WARN Failed to refresh storage pool: %v", err)
 		}
-		
+
 		// Get volume size
 		var capacityStr string
 		infoResult, err := s.virshProvider.runVirshCommand(ctx, "!", "qemu-img", "info", "--output=json", sourceImagePath)
@@ -595,10 +595,10 @@ func (s *StorageProvider) CreateVolumeFromImageFile(ctx context.Context, sourceI
 				}
 			}
 		}
-		
+
 		// Extract volume name from source path (remove .qcow2 extension)
 		volName := strings.TrimSuffix(sourceBase, ".qcow2")
-		
+
 		return &StorageVolume{
 			Name:     volName,
 			Pool:     poolName,

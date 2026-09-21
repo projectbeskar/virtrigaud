@@ -23,6 +23,22 @@ Nine newly-disclosed, reachable vulnerabilities were failing the blocking `govul
 ### Impact
 - [ ] Breaking change
 - [x] Requires cluster rollout — only to ship rebuilt manager/provider images carrying the patched grpc transport and standard library; running clusters are unaffected until upgraded
+## [2026-09-21 12:06] - Drop Vestigial CGO from libvirt Provider; Add libvirt to the vet/test Gate (ADR-0008 PR 0)
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `cmd/provider-libvirt/Dockerfile`: `CGO_ENABLED=1` → `0`; dropped `libvirt-dev`, `pkg-config`, `gcc` from the builder stage (the provider execs `virsh`/`ssh` via `os/exec` — it has never cgo-linked against libvirt; this was a leftover from a removed cgo libvirt binding).
+- `Makefile`: `build-provider-libvirt` now builds with `CGO_ENABLED=0`; the `fmt`, `vet`, and `test` targets no longer `grep -v` exclude `/internal/providers/libvirt` or `/cmd/provider-libvirt` — both are now part of the standard gate (the `/test/integration` and `/test/e2e` filters are untouched).
+- `.github/workflows/ci.yml`: `test` job's root `go vet` step no longer excludes libvirt (renamed from "(excluding libvirt)"); `build` job builds `provider-libvirt` with `CGO_ENABLED=0` and drops the now-dead `apt-get install libvirt-dev pkg-config` step for that leg; `lint` job drops the same now-dead `libvirt-dev`/`pkg-config` install ("for Go module resolution") since golangci-lint's own `govet` already covered this package with no path exclusion.
+- `hack/test-ci-locally.sh`: mirrored all of the above so the local CI-replication script matches `ci.yml` again — same stale `grep -v` exclusion, same dead `libvirt-dev` installs, same `CGO_ENABLED=1`, plus a Linux-only build guard on `provider-libvirt` that no longer applies to a pure-Go binary.
+- `internal/providers/libvirt/provider_virsh_helpers.go`, `internal/providers/libvirt/storage.go`: whitespace-only `gofmt` fixes (trailing blank line / trailing whitespace on blank lines), surfaced now that `make fmt` actually reaches this package.
+
+### Why
+`CGO_ENABLED=1` was vestigial: the libvirt provider is pure `os/exec` (no `import "C"` anywhere in the tree, confirmed by a repo-wide grep), a leftover from a cgo libvirt binding removed earlier. Because the flag stayed at 1, `internal/providers/libvirt` and `cmd/provider-libvirt` — the largest and most complex provider, serving real production VMs — stayed carved out of `make vet`/`make test`/CI via `grep -v`, hiding defects from every vet check (lostcancel, printf, unused results, etc.) the rest of the codebase gets by default. This is ADR-0008 PR 0: a safe, no-behavior-change foundation cleanup ahead of the go-libvirt driver refactor.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
 - [ ] Config change only
 - [ ] Documentation only
 
@@ -30,6 +46,10 @@ Nine newly-disclosed, reachable vulnerabilities were failing the blocking `govul
 - Local toolchain is `go1.26.8` — newer than the 1.26.6 floor this PR sets, so `govulncheck` here genuinely scans against a patched standard library rather than relying on CI's `setup-go` to honor the `go.mod` bump. `govulncheck ./...` at root and `cd sdk && govulncheck ./...` (and `cd proto && govulncheck ./...`, not gated in CI but checked anyway) all report **"No vulnerabilities found"** for called code (exit 0), and none of the 9 target CVE IDs appear anywhere in any module's output — not even as unreached. Confirmed the two grpc CVEs were genuinely reachable pre-bump by scanning the prior commit (4031618, grpc v1.82.1) in a throwaway worktree — see call sites above — before re-scanning post-bump and watching both disappear entirely.
 - Root's `govulncheck -show verbose` surfaces 5 unrelated, pre-existing, **unreached** findings (2 "imported", 3 "required", none called): GO-2026-6094 (`github.com/google/cel-go` v0.22.0, version unchanged by this PR), GO-2026-5841 (`github.com/klauspost/compress` v1.18.6, version unchanged by this PR), and GO-2026-6355 / GO-2026-6354 / GO-2026-5932 (`golang.org/x/crypto`, bumped v0.53.0 → v0.55.0 as a transitive consequence of the grpc bump). The fix for two of the three `x/crypto` findings lands in v0.56.0, outside this PR's scope; all three affect the whole v0.53.0–v0.55.0 range, so this bump neither introduces nor worsens them. None are reachable, none affect the 0-vulnerabilities exit code, none are among the 9 CVEs this PR targets — flagged here for audit trail, not fixed in this PR.
 - `make fmt` (no diff), `make lint` (0 issues), `make test` (all packages pass), `make build` (clean); `go build ./...` also clean at root, `sdk/`, and `proto/`.
+- `go vet ./internal/providers/libvirt/... ./cmd/provider-libvirt/...` came back clean — zero findings — so no vet-driven code fixes were needed and the vet un-exclusion landed in full (no bail-out/split required).
+- Verified: `make fmt` (no diff, after the one-time gofmt fixes above), `make lint` (0 issues), `make vet` (clean, libvirt included), `make test` (all packages pass, including `internal/providers/libvirt` and `cmd/provider-libvirt`), `make build` (clean), `make build-provider-libvirt` (clean), and `CGO_ENABLED=0 go build ./...` at root (clean). `ldd bin/provider-libvirt` now reports "not a dynamic executable" (previously dynamically linked via cgo) — empirical confirmation the flag flip took effect.
+- Deliberately left untouched: `gosec -exclude-dir=internal/providers/libvirt` in both `ci.yml` and `hack/test-ci-locally.sh` — gosec is a separate, larger security-lint cleanup, tracked as a follow-up, not part of this PR.
+- No new dependencies, no `hostconn` package, no driver swap — the go-libvirt refactor itself is PR 2+.
 
 ## [2026-08-11 08:34] - Fix sdk Context Leak and Stale proto Fuzz Test; Add sdk/proto to the vet Gate
 **Author:** @wrkode (William Rizzo)

@@ -20,4 +20,3 @@ func extractPVCNameFromURL(url string) (string, error) {
 
 	return parts[0], nil
 }
-

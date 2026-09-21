@@ -119,13 +119,13 @@ generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and
 
 .PHONY: fmt
 fmt: ## Run go fmt against code.
-	@echo "Formatting code (excluding libvirt packages)..."
-	@go list ./... | grep -v '/internal/providers/libvirt' | grep -v '/cmd/provider-libvirt' | grep -v '/test/integration' | xargs go fmt
+	@echo "Formatting code..."
+	@go list ./... | grep -v '/test/integration' | xargs go fmt
 
 .PHONY: vet
 vet: vet-sdk vet-proto ## Run go vet against the root module, then sdk/ and proto/ (each a separate Go module).
-	@echo "Running go vet (excluding libvirt packages)..."
-	@go list ./... | grep -v '/internal/providers/libvirt' | grep -v '/cmd/provider-libvirt' | grep -v '/test/integration' | xargs go vet
+	@echo "Running go vet..."
+	@go list ./... | grep -v '/test/integration' | xargs go vet
 
 .PHONY: vet-sdk
 vet-sdk: ## Run go vet against the sdk/ module. Separate Go module (sdk/go.mod): not reached by root `go vet ./...`.
@@ -139,9 +139,9 @@ vet-proto: ## Run go vet against the proto/ module. Separate Go module (proto/go
 
 .PHONY: test
 test: gen-crds generate fmt vet setup-envtest ## Run tests.
-	@echo "Running tests (excluding libvirt packages)..."
+	@echo "Running tests..."
 	@KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" \
-	go list ./... | grep -v '/internal/providers/libvirt' | grep -v '/cmd/provider-libvirt' | grep -v '/test/e2e' | grep -v '/test/integration' | \
+	go list ./... | grep -v '/test/e2e' | grep -v '/test/integration' | \
 	xargs go test -coverprofile cover.out
 
 .PHONY: test-integration
@@ -219,8 +219,8 @@ build: gen-crds generate fmt vet ## Build manager binary.
 	go build -ldflags "$(LDFLAGS)" -o bin/manager ./cmd/manager
 
 .PHONY: build-provider-libvirt
-build-provider-libvirt: proto ## Build libvirt provider binary (requires CGO)
-	CGO_ENABLED=1 go build -ldflags "$(LDFLAGS)" -o bin/provider-libvirt ./cmd/provider-libvirt
+build-provider-libvirt: proto ## Build libvirt provider binary
+	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o bin/provider-libvirt ./cmd/provider-libvirt
 
 .PHONY: build-provider-vsphere
 build-provider-vsphere: proto ## Build vsphere provider binary

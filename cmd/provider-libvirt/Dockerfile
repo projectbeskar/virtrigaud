@@ -1,13 +1,12 @@
-# Build stage with CGO support for libvirt
+# Build stage for libvirt provider (pure Go, no CGO)
 ARG BUILDER_IMAGE=golang:1.26.6-bookworm
 ARG BASE_IMAGE=debian:bookworm-slim
 FROM ${BUILDER_IMAGE} AS builder
 
-# Install libvirt development libraries and SSH client
+# Install SSH client and git (module resolution) — the provider execs
+# virsh/ssh as subprocesses, it does not cgo-link against libvirt, so no
+# libvirt-dev / pkg-config / gcc are needed here.
 RUN apt-get update && apt-get install -y \
-    libvirt-dev \
-    pkg-config \
-    gcc \
     openssh-client \
     git \
     && rm -rf /var/lib/apt/lists/*
@@ -49,7 +48,7 @@ ARG TARGETOS
 ARG TARGETARCH
 ARG VERSION=dev
 ARG GIT_SHA=unknown
-RUN CGO_ENABLED=1 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
     -ldflags "-X github.com/projectbeskar/virtrigaud/internal/version.Version=${VERSION} -X github.com/projectbeskar/virtrigaud/internal/version.GitSHA=${GIT_SHA}" \
     -a -o provider-libvirt cmd/provider-libvirt/main.go
 

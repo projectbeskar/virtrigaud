@@ -61,11 +61,11 @@ test_job() {
     log_info "Verifying dependencies..."
     go mod verify
     
-    # Run go vet (excluding libvirt)
-    log_info "Running go vet (excluding libvirt)..."
-    go list ./... | grep -v '/internal/providers/libvirt' | grep -v '/cmd/provider-libvirt' | grep -v '/test/integration' | xargs go vet
+    # Run go vet
+    log_info "Running go vet..."
+    go list ./... | grep -v '/test/integration' | xargs go vet
     
-    # Run tests (excluding libvirt) using Makefile
+    # Run tests using Makefile
     log_info "Running tests..."
     if make test; then
         # Check if coverage file was generated
@@ -82,18 +82,7 @@ test_job() {
 # Job: Lint
 lint_job() {
     log_info "Running lint job..."
-    
-    # Install libvirt dependencies for Go module resolution (if on Linux)
-    if [[ "$OSTYPE" == "linux-gnu"* ]]; then
-        log_info "Installing libvirt dependencies..."
-        if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get update >/dev/null 2>&1 || log_warning "Could not update package list"
-            sudo apt-get install -y libvirt-dev pkg-config >/dev/null 2>&1 || log_warning "Could not install libvirt-dev"
-        else
-            log_warning "apt-get not found, skipping libvirt dependencies"
-        fi
-    fi
-    
+
     # Go mod tidy
     go mod tidy
     
@@ -224,16 +213,7 @@ build_job() {
     log_info "Running build job..."
     
     local components=("manager" "provider-libvirt" "provider-vsphere" "provider-proxmox")
-    
-    # Install libvirt for provider-libvirt (if on Linux)
-    if [[ "$OSTYPE" == "linux-gnu"* ]]; then
-        log_info "Installing libvirt dependencies for provider-libvirt..."
-        if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get update >/dev/null 2>&1 || true
-            sudo apt-get install -y libvirt-dev pkg-config >/dev/null 2>&1 || log_warning "Could not install libvirt-dev"
-        fi
-    fi
-    
+
     mkdir -p bin
     
     for component in "${components[@]}"; do
@@ -244,11 +224,7 @@ build_job() {
                 CGO_ENABLED=0 go build -o bin/manager ./cmd/manager
                 ;;
             provider-libvirt)
-                if [[ "$OSTYPE" == "linux-gnu"* ]]; then
-                    CGO_ENABLED=1 go build -o bin/provider-libvirt ./cmd/provider-libvirt
-                else
-                    log_warning "Skipping provider-libvirt build on non-Linux OS"
-                fi
+                CGO_ENABLED=0 go build -o bin/provider-libvirt ./cmd/provider-libvirt
                 ;;
             provider-vsphere)
                 CGO_ENABLED=0 go build -o bin/provider-vsphere ./cmd/provider-vsphere
@@ -403,7 +379,7 @@ Jobs tested:
     - helm           Helm chart validation
     - security       Security scanning (optional)
 
-Note: Some jobs may require system dependencies (libvirt, protoc, etc.)
+Note: Some jobs may require system dependencies (protoc, etc.)
 EOF
 }
 
