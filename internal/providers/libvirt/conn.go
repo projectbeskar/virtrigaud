@@ -23,7 +23,6 @@ import (
 	"log"
 	"net/url"
 	"os"
-	"os/exec"
 	"strings"
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
@@ -74,11 +73,19 @@ type libvirtConn interface {
 	snapshotExists(ctx context.Context, domain, snapshot string) (bool, error)
 	// uri is the libvirt connection URI (the import RPC branches on ssh://).
 	uri() string
-	// copyDiskToRemote scp's a local disk file into the host image pool and
-	// returns the remote path.
+	// copyDiskToRemote copies a local disk file into the host image pool over
+	// the in-process SSH client (ADR-0008 PR 3: `cat > remotePath`, replacing
+	// scp) and returns the remote path.
 	copyDiskToRemote(ctx context.Context, localPath, volumeName string) (string, error)
 	// storageProvider returns the storage helper bound to this host.
 	storageProvider() *StorageProvider
+	// StreamIn runs a host command with r wired to its stdin and blocks until
+	// the command completes — the input-direction counterpart to Stream (which
+	// streams the host's stdout back to the caller). It is a libvirtConn extra
+	// (not part of the transport-neutral hostconn.Conn seam) because it exists
+	// specifically for the ADR-0006 S3 import path's host-side stage step
+	// (`cat > stagePath`), which the generic seam has no need to model.
+	StreamIn(ctx context.Context, r io.Reader, argv ...string) error
 }
 
 // virshConn is the per-host hostconn.Conn implementation backed by a
@@ -125,14 +132,15 @@ func (c *virshConn) RunHost(ctx context.Context, argv ...string) (*hostconn.Resu
 }
 
 // Stream runs a host command and returns its stdout as a stream (the
-// export/import data plane, ADR-0006). It reuses the existing, tested
-// runSSHStdout helper behind an io.Pipe so the transfer is not buffered in the
-// pod and holds a streamSem (not execSem) slot for its duration. The caller MUST
-// Close the returned reader.
+// export/import data plane, ADR-0006). It reuses the runSSHStdout helper
+// behind an io.Pipe so the transfer is not buffered in the pod and holds a
+// streamSem (not execSem) slot for its duration. The caller MUST Close the
+// returned reader.
 //
-// ADR-0008 PR 3 migrates the export/import call sites onto this method as part of
-// moving to in-process SSH; for now it is the seam's first-class streaming
-// primitive (targeting the SSH host path, as export/import always do).
+// ADR-0008 PR 3: runSSHStdout now rides the persistent in-process SSH client
+// (sshclient.go) instead of forking ssh/sshpass per call; this method's
+// signature, contract, and callers are unchanged — exportDiskToS3 (ADR-0006's
+// S3 export path) is the primary consumer.
 func (c *virshConn) Stream(ctx context.Context, argv ...string) (io.ReadCloser, error) {
 	if len(argv) == 0 {
 		return nil, fmt.Errorf("hostconn: Stream requires a command")
@@ -148,9 +156,22 @@ func (c *virshConn) Stream(ctx context.Context, argv ...string) (io.ReadCloser, 
 	return pr, nil
 }
 
-// Close releases the connection. Virsh-over-subprocess holds no persistent
-// socket today (Cleanup is a no-op); ADR-0008 PR 4 closes the ssh.Client /
-// go-libvirt handle here.
+// StreamIn runs a host command with r wired to its stdin and blocks until the
+// command completes (ADR-0008 PR 3, libvirtConn extra): the input-direction
+// counterpart to Stream, used by importDiskFromS3's host-side stage step
+// (`cat > stagePath`) and by copyDiskToRemote (`cat > remotePath`, the scp
+// replacement). It reuses the runSSHStdin helper, which holds a streamSem
+// (not execSem) slot for its duration, matching Stream/RunHost.
+func (c *virshConn) StreamIn(ctx context.Context, r io.Reader, argv ...string) error {
+	if len(argv) == 0 {
+		return fmt.Errorf("hostconn: StreamIn requires a command")
+	}
+	return runSSHStdin(ctx, c.virsh, r, strings.Join(argv, " "))
+}
+
+// Close releases the connection: ADR-0008 PR 3 closes the persistent
+// in-process SSH client, if one was dialed (sshclient.go); PR 4 adds the
+// go-libvirt handle alongside it.
 func (c *virshConn) Close() error { return c.virsh.Cleanup() }
 
 // getDomainState delegates to the wrapped VirshProvider (domstate).
@@ -207,88 +228,43 @@ func hostIDFromEndpoint(endpoint string) hostconn.HostID {
 }
 
 // copyDiskToRemote copies a disk file from local pod storage to the remote
-// libvirt host over scp, returning the remote path.
+// libvirt host, returning the remote path.
 //
-// This method was moved off the gRPC Server (ADR-0008 PR 2) so the server layer
-// no longer names *VirshProvider; the body is unchanged. It is reached through
-// the libvirtConn seam (virshConn.copyDiskToRemote). ADR-0008 PR 3 moves this
-// disk-stream site onto in-process SSH along with the other scp/ssh sites.
+// This method was moved off the gRPC Server (ADR-0008 PR 2); it is reached
+// through the libvirtConn seam (virshConn.copyDiskToRemote). ADR-0008 PR 3
+// replaces the former scp/sshpass subprocess with `cat > remotePath` over the
+// persistent in-process SSH client (runSSHStdin, sshclient.go) — the same
+// primitive importDiskFromS3's host-side stage step uses. Host-key
+// verification, auth-method selection, and the streamSem budget all now live
+// in runSSHStdin's single implementation instead of being re-derived here.
 func (v *VirshProvider) copyDiskToRemote(ctx context.Context, localPath, volumeName string) (string, error) {
 	// IMPORTANT: Copy directly to libvirt pool directory for efficient in-place usage
 	// This allows CreateVolumeFromImageFile to detect and use the disk without copying
 	remoteDir := "/var/lib/libvirt/images"
 	remotePath := fmt.Sprintf("%s/%s.qcow2", remoteDir, volumeName)
 
-	// Extract SSH target (user@host) from URI
-	parsedURI, err := url.Parse(v.uri)
-	if err != nil {
-		return "", fmt.Errorf("failed to parse libvirt URI: %w", err)
-	}
-
-	user := parsedURI.User.Username()
-	host := parsedURI.Host
-	sshTarget := fmt.Sprintf("%s@%s", user, host)
-
-	log.Printf("INFO Ensuring libvirt pool directory exists on %s", sshTarget)
+	log.Printf("INFO Ensuring libvirt pool directory exists on remote host")
 
 	// Ensure pool directory exists (usually already exists, but safe to check)
-	_, err = v.runVirshCommand(ctx, "!", "sudo", "mkdir", "-p", remoteDir)
-	if err != nil {
+	if _, err := v.runVirshCommand(ctx, "!", "sudo", "mkdir", "-p", remoteDir); err != nil {
 		log.Printf("WARN Failed to ensure pool directory exists (may already exist): %v", err)
 	}
 
-	// Copy disk file using scp (run locally from the pod, not through SSH)
-	log.Printf("INFO Copying disk file (%s) to remote host via scp...", localPath)
+	log.Printf("INFO Copying disk file (%s) to remote host over SSH...", localPath)
 
-	// Host-key options come from the same centralized policy as the virsh
-	// paths (#149/ADR-0004) so the disk-image transfer is verified against the
-	// same trust material. Re-emit the verification-mode audit line for the scp
-	// connection and hard-fail before transfer if verification is on but no
-	// usable known_hosts is present (no TOFU).
-	v.hostKey.logVerificationMode(v.logger, host)
-	if err := v.hostKey.verifyKnownHostsPresent(host); err != nil {
-		return "", fmt.Errorf("libvirt scp host-key verification pre-flight failed: %w", err)
-	}
-	hostKeyOpts := v.hostKey.sshHostKeyOptions()
-	// Share the SSH connection with the virsh path via ControlMaster (#194).
-	hostKeyOpts = append(hostKeyOpts, sshMultiplexOptions()...)
-
-	// Bound concurrent long-lived disk-stream forks separately from execSem's
-	// short control-call budget (see VirshProvider.streamSem) — scp can hold
-	// this subprocess for minutes copying a multi-GB disk, and must not
-	// starve, or be starved by, short virsh control calls. Scoped to just the
-	// scp fork itself (not the mkdir above, which already has its own
-	// execSem-guarded call via runVirshCommand) so the two budgets stay
-	// independent.
-	release, err := v.acquireStreamSlot(ctx)
+	f, err := os.Open(localPath)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("open local disk file %s for remote copy: %w", localPath, err)
 	}
-	defer release()
+	defer func() { _ = f.Close() }()
 
-	// Run scp LOCALLY on the pod to copy to remote host
-	var cmd *exec.Cmd
-	if v.credentials.Password != "" {
-		// Use sshpass with scp for password authentication
-		scpArgs := append([]string{"-e", "scp"}, hostKeyOpts...)
-		scpArgs = append(scpArgs, localPath, fmt.Sprintf("%s:%s", sshTarget, remotePath))
-		cmd = exec.CommandContext(ctx, "sshpass", scpArgs...)
-		// Set password via environment variable for sshpass
-		cmd.Env = append(os.Environ(), fmt.Sprintf("SSHPASS=%s", v.credentials.Password))
-	} else if strings.TrimSpace(v.credentials.SSHPrivateKey) != "" {
-		scpArgs := sshKeyAuthOptions(resolveSSHKeyFile(parsedURI))
-		scpArgs = append(scpArgs, hostKeyOpts...)
-		scpArgs = append(scpArgs, localPath, fmt.Sprintf("%s:%s", sshTarget, remotePath))
-		cmd = exec.CommandContext(ctx, "scp", scpArgs...)
-	} else {
-		scpArgs := append([]string{}, hostKeyOpts...)
-		scpArgs = append(scpArgs, localPath, fmt.Sprintf("%s:%s", sshTarget, remotePath))
-		cmd = exec.CommandContext(ctx, "scp", scpArgs...)
-	}
-
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("scp failed: %w, output: %s", err, string(output))
+	// remotePath is caller-derived (volumeName) and now lands inside a shell
+	// command line (`cat > path`) rather than scp's non-shell destination
+	// argument, so it must be shell-quoted here — a necessary adaptation to
+	// the transport shape change, not a behavior change to the copy itself.
+	remoteCmd := fmt.Sprintf("cat > %s", shellQuote(remotePath))
+	if err := runSSHStdin(ctx, v, f, remoteCmd); err != nil {
+		return "", fmt.Errorf("disk copy to remote host failed: %w", err)
 	}
 
 	log.Printf("INFO Successfully copied disk file to remote host: %s", remotePath)

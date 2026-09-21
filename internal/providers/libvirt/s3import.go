@@ -21,14 +21,12 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net/url"
-	"os"
-	"os/exec"
 	"strings"
 	"time"
 
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 
+	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt/hostconn"
 	"github.com/projectbeskar/virtrigaud/internal/storage"
 	"github.com/projectbeskar/virtrigaud/internal/storage/migration"
 )
@@ -57,16 +55,18 @@ import (
 // Crash-resume of an interrupted transfer is OUT of scope for Slice 1: a failure
 // retries the whole import. This is the documented follow-up.
 func (s *Server) importDiskFromS3(ctx context.Context, req *providerv1.ImportDiskRequest) (*providerv1.ImportDiskResponse, error) {
-	libvirtProvider, ok := s.provider.(*Provider)
-	if !ok || libvirtProvider == nil || libvirtProvider.virshProvider == nil {
+	if s.provider == nil {
 		return nil, fmt.Errorf("libvirt provider not initialized")
 	}
-	vp := libvirtProvider.virshProvider
+	conn, err := s.provider.conn(ctx)
+	if err != nil {
+		return nil, err
+	}
 
-	if !strings.Contains(vp.uri, "ssh://") {
+	if !strings.Contains(conn.uri(), "ssh://") {
 		// Relay-to-host conversion needs an SSH transport to stream into the
 		// host's qemu-img. A local connection is not the Slice 1 target shape.
-		return nil, fmt.Errorf("s3 import requires an ssh:// libvirt transport (host-side qemu-img conversion); got %q", vp.uri)
+		return nil, fmt.Errorf("s3 import requires an ssh:// libvirt transport (host-side qemu-img conversion); got %q", conn.uri())
 	}
 
 	// Build the S3 client (pod is the S3 client). Options come from
@@ -86,7 +86,7 @@ func (s *Server) importDiskFromS3(ctx context.Context, req *providerv1.ImportDis
 	if req.StorageHint != "" {
 		poolName = req.StorageHint
 	}
-	storageProvider := NewStorageProvider(vp)
+	storageProvider := conn.storageProvider()
 	if err := storageProvider.EnsureDefaultStoragePool(ctx); err != nil {
 		return nil, fmt.Errorf("failed to ensure storage pool: %w", err)
 	}
@@ -126,8 +126,8 @@ func (s *Server) importDiskFromS3(ctx context.Context, req *providerv1.ImportDis
 	// Stream S3 → SSH stdin → `cat > <stagePath>` on the host. cat writes
 	// sequentially (no seek), so the non-seekable pipe is fine here — unlike
 	// `qemu-img convert /dev/stdin`, which fails on a pipe. The pipe couples the
-	// S3 download (DownloadStream, SHA256 verified in-stream) to the SSH stdin so
-	// the disk is never buffered whole in the pod.
+	// S3 download (DownloadStream, SHA256 verified in-stream) to conn.StreamIn's
+	// blocking call so the disk is never buffered whole in the pod.
 	pr, pw := io.Pipe()
 	stageCmd := fmt.Sprintf("cat > %s", shellQuote(stagePath))
 
@@ -142,13 +142,13 @@ func (s *Server) importDiskFromS3(ctx context.Context, req *providerv1.ImportDis
 			Writer:           pw,
 			ExpectedChecksum: req.ExpectedChecksum,
 		})
-		// Closing the writer with the download error propagates it to the SSH
-		// stdin reader so cat sees EOF (clean) or a broken pipe (error).
+		// Closing the writer with the download error propagates it to
+		// StreamIn's reader so cat sees EOF (clean) or a broken pipe (error).
 		_ = pw.CloseWithError(derr)
 		dlCh <- dlResult{resp: resp, err: derr}
 	}()
 
-	stageErr := runSSHStdin(ctx, vp, pr, stageCmd)
+	stageErr := conn.StreamIn(ctx, pr, stageCmd)
 	// If the SSH/cat side exited (especially on error) the download goroutine may
 	// still be blocked writing into the pipe. Unblock it with a closed-read-end
 	// error so it returns promptly instead of leaking; the DownloadStream error
@@ -159,7 +159,7 @@ func (s *Server) importDiskFromS3(ctx context.Context, req *providerv1.ImportDis
 	// Cleanup the staged vmdk ALWAYS — success or failure — so a failed import
 	// never leaks a multi-GB temp on the host. Best-effort; WARN on failure.
 	defer func() {
-		if _, rmErr := vp.runVirshCommand(context.Background(), "!", "rm", "-f", stagePath); rmErr != nil {
+		if _, rmErr := conn.RunHost(context.Background(), "rm", "-f", stagePath); rmErr != nil {
 			log.Printf("WARN failed to remove staged import temp %s on host (manual cleanup may be needed): %v",
 				stagePath, rmErr)
 		}
@@ -182,7 +182,7 @@ func (s *Server) importDiskFromS3(ctx context.Context, req *providerv1.ImportDis
 	// qemu-img reads the staged file (seekable regular file) and writes the
 	// target qcow2. On failure, surface qemu-img's stderr directly so the real
 	// cause is visible (no io.Pipe "closed pipe" masking).
-	if res, err := vp.runVirshCommand(ctx, "!", "qemu-img", "convert", "-f", stagedFormat, "-O", "qcow2",
+	if res, err := conn.RunHost(ctx, "qemu-img", "convert", "-f", stagedFormat, "-O", "qcow2",
 		shellQuote(stagePath), shellQuote(targetPath)); err != nil {
 		return nil, fmt.Errorf("host-side qemu-img convert (%s→qcow2) failed: %w%s", stagedFormat, err, qemuImgStderr(res))
 	}
@@ -191,12 +191,12 @@ func (s *Server) importDiskFromS3(ctx context.Context, req *providerv1.ImportDis
 
 	// --- VALIDATE (ADR D5 part 2) ---
 	// qemu-img check on the converted qcow2. Surface its stderr on failure too.
-	if res, err := vp.runVirshCommand(ctx, "!", "qemu-img", "check", shellQuote(targetPath)); err != nil {
+	if res, err := conn.RunHost(ctx, "qemu-img", "check", shellQuote(targetPath)); err != nil {
 		return nil, fmt.Errorf("qemu-img check failed on converted qcow2 %s: %w%s", targetPath, err, qemuImgStderr(res))
 	}
 
 	// Make libvirt aware of the new volume.
-	if _, err := vp.runVirshCommand(ctx, "pool-refresh", poolName); err != nil {
+	if _, err := conn.Virsh(ctx, "pool-refresh", poolName); err != nil {
 		log.Printf("WARN pool-refresh failed after import (volume may still be usable by path): %v", err)
 	}
 
@@ -210,75 +210,6 @@ func (s *Server) importDiskFromS3(ctx context.Context, req *providerv1.ImportDis
 		ActualSizeBytes: dl.resp.BytesTransferred,
 		Checksum:        dl.resp.Checksum, // SHA256 of the transferred (pre-conversion) object
 	}, nil
-}
-
-// runSSHStdin runs a single command on the libvirt host over SSH, streaming
-// stdin from r (a pipe), and returns when the command exits. Unlike
-// runVirshCommandOnce it does NOT buffer the input in memory — it wires r to the
-// remote process's stdin so a multi-GB disk streams through. It reuses the same
-// host-key policy and ControlMaster multiplexing as the virsh/scp paths
-// (#149/ADR-0004, #194) so trust material and connections are shared.
-func runSSHStdin(ctx context.Context, vp *VirshProvider, r io.Reader, remoteCmd string) error {
-	// Bound concurrent long-lived disk-stream forks separately from execSem's
-	// short control-call budget (see VirshProvider.streamSem) — this call can
-	// hold its subprocess for minutes streaming a multi-GB disk, and must not
-	// starve, or be starved by, short virsh control calls.
-	release, err := vp.acquireStreamSlot(ctx)
-	if err != nil {
-		return err
-	}
-	defer release()
-
-	parsedURI, err := url.Parse(vp.uri)
-	if err != nil {
-		return fmt.Errorf("failed to parse libvirt URI: %w", err)
-	}
-	host := parsedURI.Host
-	user := parsedURI.User.Username()
-
-	// Host-key pre-flight: re-emit the audit line and hard-fail if verification
-	// is on but no usable known_hosts is present (no TOFU), matching scp.
-	vp.hostKey.logVerificationMode(vp.logger, host)
-	if err := vp.hostKey.verifyKnownHostsPresent(host); err != nil {
-		return fmt.Errorf("ssh stdin host-key verification pre-flight failed: %w", err)
-	}
-
-	var cmd *exec.Cmd
-	if vp.credentials.Password != "" {
-		sshArgs := []string{
-			"-e", // read password from SSHPASS
-			"ssh",
-			"-o", "PasswordAuthentication=yes",
-			"-o", "PubkeyAuthentication=no",
-			"-o", "LogLevel=ERROR",
-		}
-		sshArgs = append(sshArgs, vp.hostKey.sshHostKeyOptions()...)
-		sshArgs = append(sshArgs, sshMultiplexOptions()...)
-		sshArgs = append(sshArgs, fmt.Sprintf("%s@%s", user, host), remoteCmd)
-		cmd = exec.CommandContext(ctx, "sshpass", sshArgs...)
-		cmd.Env = append(os.Environ(), fmt.Sprintf("SSHPASS=%s", vp.credentials.Password))
-	} else {
-		sshArgs := []string{"-o", "LogLevel=ERROR"}
-		if strings.TrimSpace(vp.credentials.SSHPrivateKey) != "" {
-			sshArgs = append(sshArgs, sshKeyAuthOptions(resolveSSHKeyFile(parsedURI))...)
-		}
-		sshArgs = append(sshArgs, vp.hostKey.sshHostKeyOptions()...)
-		sshArgs = append(sshArgs, sshMultiplexOptions()...)
-		sshArgs = append(sshArgs, fmt.Sprintf("%s@%s", user, host), remoteCmd)
-		cmd = exec.CommandContext(ctx, "ssh", sshArgs...)
-		cmd.Env = vp.env
-	}
-
-	cmd.Stdin = r
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	cmd.Stdout = io.Discard
-
-	log.Printf("DEBUG Executing SSH stdin stream: ssh %s@%s %q", user, host, remoteCmd)
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("%w (stderr: %s)", err, strings.TrimSpace(stderr.String()))
-	}
-	return nil
 }
 
 // shellQuote single-quotes a path for safe interpolation into a remote shell
@@ -302,10 +233,11 @@ func hostStagePath(poolPath, volumeName, format string) string {
 		strings.TrimRight(poolPath, "/"), volumeName, time.Now().Unix(), format)
 }
 
-// qemuImgStderr formats a VirshResult's stderr for appending to a wrapped error
-// so the underlying qemu-img message is surfaced instead of being masked. It
-// returns "" when there is no result or no stderr, keeping the error tidy.
-func qemuImgStderr(res *VirshResult) string {
+// qemuImgStderr formats a hostconn.Result's stderr for appending to a wrapped
+// error so the underlying qemu-img message is surfaced instead of being
+// masked. It returns "" when there is no result or no stderr, keeping the
+// error tidy.
+func qemuImgStderr(res *hostconn.Result) string {
 	if res == nil {
 		return ""
 	}

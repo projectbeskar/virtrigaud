@@ -27,13 +27,13 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 )
 
 const (
-	sshPrivateKeyDir  = "/tmp/virtrigaud-libvirt"
-	sshPrivateKeyPath = sshPrivateKeyDir + "/ssh-privatekey"
-
 	// defaultMaxConcurrentVirsh bounds how many virsh/ssh subprocesses this
 	// provider forks at once. Each virsh-over-ssh call is a real process fork
 	// on the provider pod and the remote host; an unbounded burst (e.g. the
@@ -92,6 +92,15 @@ type VirshProvider struct {
 	// tests). Set by NewVirshProvider; shared across all goroutines using this
 	// provider instance.
 	streamSem chan struct{}
+
+	// sshMu guards sshClient. ADR-0008 PR 3: the persistent, lazily-dialed
+	// in-process SSH connection to this host (sshclient.go), reused across
+	// every Virsh/RunHost/Stream/StreamIn call instead of forking a fresh
+	// ssh/sshpass subprocess per call — this is the "strategic fix" #255/#256
+	// named. Redial-on-broken is handled per-call (withSession); the full
+	// keepalive/liveness-probe/watchdog lifecycle is ADR-0008 PR 4.
+	sshMu     sync.Mutex
+	sshClient *ssh.Client
 }
 
 // VirshDomain represents a VM domain from virsh list output
@@ -262,17 +271,25 @@ func (v *VirshProvider) loadCredentialsFromEnv() error {
 	return nil
 }
 
-// setupConnection prepares the libvirt URI and environment for virsh commands.
+// setupConnection parses the libvirt endpoint URI and resolves the SSH
+// host-key verification policy.
 //
-// As of #149 / ADR-0004 it also resolves the SSH host-key verification policy
-// (default ON; opt-out via LIBVIRT_INSECURE_SKIP_HOST_KEY_VERIFICATION=true),
-// emits the one-line verification-mode audit log, points the SSH transport at
-// the credentials-mounted known_hosts, and hard-fails (no TOFU) when
-// verification is on but no usable known_hosts material is present.
+// As of ADR-0008 PR 3 virsh and host-shell commands run over a persistent
+// in-process SSH client (sshclient.go), dialed lazily on first use — so
+// setupConnection no longer shells out to anything, writes an SSH private key
+// to disk, or generates a ~/.ssh/config: key material lives in memory only
+// (v.credentials.SSHPrivateKey), which is what unblocks a read-only root
+// filesystem for the provider pod. Its remaining job is unchanged in spirit
+// from #149 / ADR-0004: resolve the host-key policy (default ON; opt-out via
+// LIBVIRT_INSECURE_SKIP_HOST_KEY_VERIFICATION=true), emit the one-line
+// verification-mode audit log, and hard-fail (no TOFU) at startup when
+// verification is on but no usable known_hosts material is present — so a
+// misconfigured Provider fails loudly before serving any RPC, not on the
+// first reconcile.
 func (v *VirshProvider) setupConnection() error {
 	// Resolve the host-key verification policy once for this provider process.
-	// Every SSH/scp call site consumes v.hostKey so the decision is taken here
-	// and nowhere else.
+	// The in-process SSH client (sshclient.go) consumes v.hostKey on every
+	// dial, so the decision is taken here and nowhere else.
 	v.hostKey = resolveHostKeyPolicy()
 
 	// Get base URI from config
@@ -296,105 +313,24 @@ func (v *VirshProvider) setupConnection() error {
 	}
 
 	isSSHURI := strings.Contains(parsedURI.Scheme, "ssh")
+	v.uri = parsedURI.String()
+	v.env = os.Environ()
 
-	// Add SSH options for container environments. Host-key handling is delegated
-	// to the centralized policy: insecure path restores no_verify=1, the
-	// verifying path omits it and relies on the verifying ~/.ssh/config +
-	// known_hosts written below.
 	if isSSHURI {
-		query := parsedURI.Query()
-		v.hostKey.applyURIHostKeyOptions(query)
-		query.Set("no_tty", "1") // Non-interactive mode
-		if strings.TrimSpace(v.credentials.SSHPrivateKey) != "" {
-			keyPath, err := v.writeSSHPrivateKey()
-			if err != nil {
-				return fmt.Errorf("failed to write SSH private key for libvirt transport: %w", err)
-			}
-			query.Set("keyfile", keyPath)
-			query.Set("sshauth", "privkey")
-			log.Printf("INFO Configured key-based SSH authentication for libvirt transport keyfile=%s", keyPath)
-		}
-		parsedURI.RawQuery = query.Encode()
-
 		// Emit the one-line host-key verification-mode audit log (WARN on the
 		// escape hatch, INFO when verifying) and hard-fail if verification is on
-		// but no usable known_hosts is present (no TOFU).
+		// but no usable known_hosts is present (no TOFU). The in-process client
+		// re-verifies on every dial (dialSSH); this pre-flight just makes a
+		// misconfigured Provider fail at startup instead of on first use.
 		v.hostKey.logVerificationMode(v.logger, parsedURI.Host)
 		if err := v.hostKey.verifyKnownHostsPresent(parsedURI.Host); err != nil {
 			return fmt.Errorf("libvirt SSH host-key verification pre-flight failed: %w", err)
 		}
-
-		log.Printf("INFO Added SSH options for container environment")
-	}
-
-	v.uri = parsedURI.String()
-
-	// Set up environment variables for virsh
-	v.env = os.Environ()
-	v.env = append(v.env, fmt.Sprintf("LIBVIRT_DEFAULT_URI=%s", v.uri))
-
-	if isSSHURI {
-		if err := v.createSSHConfig(); err != nil {
-			if strings.TrimSpace(v.credentials.SSHPrivateKey) != "" {
-				return fmt.Errorf("failed to create SSH config for key-based libvirt transport: %w", err)
-			}
-			log.Printf("WARN Failed to create SSH config: %v", err)
-		}
-	}
-
-	// Set SSH authentication via environment variables for non-interactive use
-	if v.credentials.Password != "" {
-		// Use sshpass for non-interactive password authentication
-		v.env = append(v.env, fmt.Sprintf("SSHPASS=%s", v.credentials.Password))
-
-		// Set SSH options for non-interactive authentication
-		v.env = append(v.env, "SSH_ASKPASS_REQUIRE=never")
-
-		log.Printf("INFO Configured non-interactive SSH authentication via sshpass")
+		log.Printf("INFO Configured in-process SSH transport for libvirt host=%s", parsedURI.Host)
 	}
 
 	log.Printf("INFO Configured virsh environment with URI: %s", v.uri)
 	return nil
-}
-
-func (v *VirshProvider) writeSSHPrivateKey() (string, error) {
-	if err := os.MkdirAll(sshPrivateKeyDir, 0700); err != nil {
-		return "", fmt.Errorf("failed to create SSH private key directory: %w", err)
-	}
-
-	key := strings.TrimSpace(v.credentials.SSHPrivateKey) + "\n"
-	if err := os.WriteFile(sshPrivateKeyPath, []byte(key), 0600); err != nil {
-		return "", fmt.Errorf("failed to write SSH private key: %w", err)
-	}
-	if err := os.Chmod(sshPrivateKeyPath, 0600); err != nil {
-		return "", fmt.Errorf("failed to chmod SSH private key: %w", err)
-	}
-	return sshPrivateKeyPath, nil
-}
-
-// sshKeyAuthOptions returns the ssh/scp flags that force key-based authentication
-// using keyFile. Shared by the direct-ssh ("!"), scp, and stdin-stream call sites
-// so the key is offered identically everywhere: the key lives at a non-default
-// path with no IdentityFile in ~/.ssh/config, so -i is mandatory, and
-// IdentitiesOnly + the explicit auth toggles stop ssh from wandering onto an agent
-// key or a password prompt.
-func sshKeyAuthOptions(keyFile string) []string {
-	return []string{
-		"-i", keyFile,
-		"-o", "IdentitiesOnly=yes",
-		"-o", "PasswordAuthentication=no",
-		"-o", "PubkeyAuthentication=yes",
-	}
-}
-
-// resolveSSHKeyFile picks the private-key path for a direct ssh/scp invocation:
-// the keyfile= pinned on the libvirt URI by setupConnection, falling back to the
-// well-known path writeSSHPrivateKey persists to.
-func resolveSSHKeyFile(parsedURI *url.URL) string {
-	if kf := parsedURI.Query().Get("keyfile"); kf != "" {
-		return kf
-	}
-	return sshPrivateKeyPath
 }
 
 // remoteVirshConnectURI derives the libvirt connection URI to hand to a `virsh`
@@ -490,6 +426,16 @@ var (
 // remote command ran. These are safe to retry because the virsh command never
 // executed, so a retry cannot duplicate a side effect. Real virsh errors (e.g.
 // "domain not found") never match and are returned immediately (#191).
+//
+// ADR-0008 PR 3: a connect-stage failure now surfaces as a Go error from
+// net.Dialer/golang.org/x/crypto/ssh (runOverSSH copies its .Error() text into
+// the Stderr this function inspects — see the comment there) rather than the
+// OpenSSH CLI's own diagnostic text, so this list carries BOTH the original
+// OpenSSH-CLI wording (kept: harmless if never matched again, and still
+// exercised by local/test-only stderr) and the Go net/ssh equivalents added
+// below, so the exact same class of failure (host slams the door during
+// connect/handshake, e.g. MaxStartups/fail2ban) is still classified as
+// transient and retried under the new transport.
 func transientSSHConnectError(stderr string) bool {
 	s := strings.ToLower(stderr)
 	for _, m := range []string{
@@ -500,7 +446,10 @@ func transientSSHConnectError(stderr string) bool {
 		"connection timed out",
 		"no route to host",
 		"ssh: connect to host",                 // generic ssh connect failure
-		"temporary failure in name resolution", // transient DNS
+		"temporary failure in name resolution", // transient DNS (OpenSSH CLI wording)
+		"i/o timeout",                          // Go net.Dialer timeout wording
+		"no such host",                         // Go DNS resolver wording
+		"handshake failed",                     // Go ssh: handshake dropped mid-negotiation
 	} {
 		if strings.Contains(s, m) {
 			return true
@@ -558,10 +507,60 @@ func retryOnTransientSSH(ctx context.Context, attempt func() (*VirshResult, erro
 	return result, err
 }
 
-// runVirshCommandOnce executes a virsh command once with proper environment and
-// error handling. Special case: if first arg is "!", execute the remaining args
-// as a direct command (not virsh).
+// runVirshCommandOnce executes a virsh command once. Special case: if the
+// first arg is "!", execute the remaining args as a direct host-shell command
+// (not virsh).
+//
+// ADR-0008 PR 3: for an ssh:// connection, BOTH shapes now unify onto "run the
+// command on the host over our own persistent SSH client" (runOverSSH) —
+// previously a real virsh command (no "!") went through the LOCAL virsh binary
+// with LIBVIRT_DEFAULT_URI set, tunneling only the libvirt RPC wire protocol
+// over a forked ssh, while the "!" shell-escape already ran its command
+// directly on the host over an explicit ssh/sshpass fork. Unifying removes the
+// local virsh dependency for every ssh:// Provider (see the Dockerfile
+// libvirt-clients note) and, for a real virsh command, requires pinning `-c
+// <driver:///path>` explicitly (remoteVirshConnectURI) since there is no more
+// local LIBVIRT_DEFAULT_URI env var to imply it — virsh's own text output and
+// every downstream parser are unaffected; only how the bytes reach virsh
+// changes. A genuinely local (non-ssh) connection — e.g. qemu:///system, no
+// host to dial — is unaffected and still execs the local virsh/command
+// binary, now via -c instead of the (removed) LIBVIRT_DEFAULT_URI env var.
 func (v *VirshProvider) runVirshCommandOnce(ctx context.Context, args ...string) (*VirshResult, error) {
+	isSSH := strings.Contains(v.uri, "ssh://")
+
+	// Special handling for direct commands (prefixed with "!")
+	if len(args) > 0 && args[0] == "!" {
+		directArgs := args[1:] // Remove the "!" prefix
+		if len(directArgs) == 0 {
+			return nil, fmt.Errorf("no command specified after '!' prefix")
+		}
+		if isSSH {
+			return v.runOverSSH(ctx, strings.Join(directArgs, " "))
+		}
+		return v.runLocal(ctx, directArgs)
+	}
+
+	// Standard virsh command execution.
+	if isSSH {
+		// Pin the remote virsh to the connection URI's libvirtd (root ->
+		// system, non-root -> session) instead of letting it pick the ssh
+		// user's default — see remoteVirshConnectURI's doc for why this
+		// matters now that there is no LIBVIRT_DEFAULT_URI env var on the
+		// remote side to imply it.
+		virshArgs := args
+		if uri := remoteVirshConnectURI(v.uri); uri != "" {
+			virshArgs = append([]string{"-c", uri}, args...)
+		}
+		return v.runOverSSH(ctx, "virsh "+strings.Join(virshArgs, " "))
+	}
+	return v.runLocal(ctx, append([]string{"virsh", "-c", v.uri}, args...))
+}
+
+// runLocal executes argv as a local subprocess. It is reached only for a
+// genuinely local (non-ssh://) libvirt connection — there is no host to dial
+// — so it is unaffected by ADR-0008 PR 3's SSH transport change. The result
+// and error shape matches runOverSSH exactly.
+func (v *VirshProvider) runLocal(ctx context.Context, argv []string) (*VirshResult, error) {
 	// Bound concurrent subprocess forks so a reconcile burst cannot exhaust the
 	// host fork limit (cannot fork child process). Held only across the fork.
 	release, err := v.acquireExecSlot(ctx)
@@ -571,114 +570,17 @@ func (v *VirshProvider) runVirshCommandOnce(ctx context.Context, args ...string)
 	defer release()
 
 	start := time.Now()
-
-	var cmd *exec.Cmd
-	var command string
-
-	// Special handling for direct commands (prefixed with "!")
-	if len(args) > 0 && args[0] == "!" {
-		// Execute direct command (not through virsh)
-		directArgs := args[1:] // Remove the "!" prefix
-		if len(directArgs) == 0 {
-			return nil, fmt.Errorf("no command specified after '!' prefix")
-		}
-
-		if strings.Contains(v.uri, "ssh://") {
-			parsedURI, _ := url.Parse(v.uri)
-			host := parsedURI.Host
-			user := parsedURI.User.Username()
-
-			if v.credentials.Password != "" {
-				// For remote execution with password authentication, use SSH via sshpass.
-				sshArgs := []string{
-					"-e", // Read password from SSHPASS environment variable
-					"ssh",
-					"-o", "PasswordAuthentication=yes",
-					"-o", "PubkeyAuthentication=no",
-					"-o", "LogLevel=ERROR",
-				}
-				// Host-key options come from the centralized policy (#149/ADR-0004);
-				// ControlMaster multiplexing reuses one connection (#194).
-				sshArgs = append(sshArgs, v.hostKey.sshHostKeyOptions()...)
-				sshArgs = append(sshArgs, sshMultiplexOptions()...)
-				sshArgs = append(sshArgs, fmt.Sprintf("%s@%s", user, host))
-				sshArgs = append(sshArgs, directArgs...)
-
-				cmd = exec.CommandContext(ctx, "sshpass", sshArgs...)
-				command = fmt.Sprintf("sshpass -e ssh %s@%s %s", user, host, strings.Join(directArgs, " "))
-			} else if strings.TrimSpace(v.credentials.SSHPrivateKey) != "" {
-				keyFile := resolveSSHKeyFile(parsedURI)
-				sshArgs := sshKeyAuthOptions(keyFile)
-				sshArgs = append(sshArgs, "-o", "LogLevel=ERROR")
-				sshArgs = append(sshArgs, v.hostKey.sshHostKeyOptions()...)
-				sshArgs = append(sshArgs, sshMultiplexOptions()...)
-				sshArgs = append(sshArgs, fmt.Sprintf("%s@%s", user, host))
-				sshArgs = append(sshArgs, directArgs...)
-
-				cmd = exec.CommandContext(ctx, "ssh", sshArgs...)
-				command = fmt.Sprintf("ssh -i %s %s@%s %s", keyFile, user, host, strings.Join(directArgs, " "))
-			} else {
-				// Local execution
-				cmd = exec.CommandContext(ctx, directArgs[0], directArgs[1:]...)
-				command = strings.Join(directArgs, " ")
-			}
-		} else {
-			// Local execution
-			cmd = exec.CommandContext(ctx, directArgs[0], directArgs[1:]...)
-			command = strings.Join(directArgs, " ")
-		}
-		cmd.Env = v.env
-	} else {
-		// Standard virsh command execution
-		if v.credentials.Password != "" && strings.Contains(v.uri, "ssh://") {
-			// Build command: SSHPASS=password sshpass -e ssh -o [options] user@host virsh [args]
-			// This directly uses SSH with options rather than relying on config files
-
-			// Extract host and user from URI for direct SSH call
-			parsedURI, _ := url.Parse(v.uri)
-			host := parsedURI.Host
-			user := parsedURI.User.Username()
-
-			// Build SSH command with all necessary options
-			sshArgs := []string{
-				"-e", // Read password from SSHPASS environment variable
-				"ssh",
-				"-o", "PasswordAuthentication=yes",
-				"-o", "PubkeyAuthentication=no",
-				"-o", "LogLevel=ERROR",
-			}
-			// Host-key options come from the centralized policy (#149/ADR-0004);
-			// ControlMaster multiplexing reuses one connection (#194).
-			sshArgs = append(sshArgs, v.hostKey.sshHostKeyOptions()...)
-			sshArgs = append(sshArgs, sshMultiplexOptions()...)
-			sshArgs = append(sshArgs, fmt.Sprintf("%s@%s", user, host), "virsh")
-			// Pin the remote virsh to the connection URI's libvirtd (root → system,
-			// non-root → session) instead of letting it pick the ssh user's default.
-			remoteVirshArgs := args
-			if uri := remoteVirshConnectURI(v.uri); uri != "" {
-				remoteVirshArgs = append([]string{"-c", uri}, args...)
-			}
-			sshArgs = append(sshArgs, remoteVirshArgs...)
-
-			cmd = exec.CommandContext(ctx, "sshpass", sshArgs...)
-			command = fmt.Sprintf("sshpass -e ssh %s@%s virsh %s", user, host, strings.Join(remoteVirshArgs, " "))
-			cmd.Env = v.env
-		} else {
-			// Standard virsh command for local or key-based connections
-			cmd = exec.CommandContext(ctx, "virsh", args...)
-			command = "virsh " + strings.Join(args, " ")
-			cmd.Env = v.env
-		}
-	}
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd.Env = v.env
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
+	command := strings.Join(argv, " ")
 	log.Printf("DEBUG Executing: %s", command)
 
-	// Run the command
-	err = cmd.Run()
+	runErr := cmd.Run()
 	duration := time.Since(start)
 
 	result := &VirshResult{
@@ -689,7 +591,7 @@ func (v *VirshProvider) runVirshCommandOnce(ctx context.Context, args ...string)
 		Duration: duration,
 	}
 
-	if err != nil {
+	if runErr != nil {
 		log.Printf("ERROR Command failed: %s (exit code: %d, duration: %v)",
 			command, result.ExitCode, duration)
 		log.Printf("ERROR Stderr: %s", result.Stderr)
@@ -874,55 +776,14 @@ func (v *VirshProvider) getDomainInfo(ctx context.Context, domainName string) (m
 	return info, nil
 }
 
-// createSSHConfig writes an SSH configuration file for non-interactive
-// authentication that honours the centralized host-key verification policy
-// (#149/ADR-0004). It is consumed by libvirt's own qemu+ssh:// transport (the
-// key-based path), so the config must enforce the same StrictHostKeyChecking +
-// UserKnownHostsFile that the explicit-argv password/scp paths use.
-func (v *VirshProvider) createSSHConfig() error {
-	// SSH config content honouring the centralized host-key policy
-	// (#149/ADR-0004). Verifying by default (StrictHostKeyChecking yes +
-	// credentials-mounted known_hosts); legacy accept-new + /tmp/known_hosts
-	// only on the explicit escape-hatch path.
-	sshConfig := v.hostKey.sshConfigStanza()
-
-	var lastErr error
-	for _, candidate := range []struct {
-		dir  string
-		home string
-	}{
-		{dir: "/home/app/.ssh"},
-		{dir: "/tmp/.ssh", home: "/tmp"},
-	} {
-		configPath := candidate.dir + "/config"
-		if err := os.MkdirAll(candidate.dir, 0700); err != nil {
-			lastErr = err
-			log.Printf("DEBUG Failed to create SSH directory %s: %v", candidate.dir, err)
-			continue
-		}
-		if err := os.WriteFile(configPath, []byte(sshConfig), 0600); err != nil {
-			lastErr = err
-			log.Printf("DEBUG Failed to write SSH config at %s: %v", configPath, err)
-			continue
-		}
-		if candidate.home != "" {
-			v.env = append(v.env, "HOME="+candidate.home)
-			log.Printf("INFO Using %s as HOME for SSH config", candidate.home)
-		}
-		log.Printf("INFO Created SSH config at %s honouring host-key policy", configPath)
-		return nil
-	}
-
-	return fmt.Errorf("failed to create writable SSH config: %w", lastErr)
-}
-
-// Cleanup performs any necessary cleanup operations
+// Cleanup releases the provider's resources. ADR-0008 PR 3: this now closes
+// the persistent in-process SSH client (sshclient.go), if one was dialed —
+// previously a no-op, since every virsh/ssh invocation was a stateless
+// subprocess with nothing to hold open. Called by virshConn.Close(), which the
+// hostconn.Registry invokes on Evict/Close.
 func (v *VirshProvider) Cleanup() error {
 	log.Printf("INFO Cleaning up virsh provider")
-
-	// No persistent connections to close with virsh approach
-	// All commands are stateless
-
+	v.resetSSHClient()
 	return nil
 }
 

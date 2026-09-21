@@ -39,15 +39,18 @@ import (
 // fakeSeamConn is a libvirtConn implementation with no live host, used to drive
 // the snapshot RPCs through the seam and record the virsh commands issued.
 type fakeSeamConn struct {
-	id          hostconn.HostID
-	domainState string
-	domainErr   error
-	snapExists  bool
-	snapErr     error
-	virshErr    error
-	virshCalls  [][]string
-	runHostErr  error
-	runHostOut  string
+	id           hostconn.HostID
+	domainState  string
+	domainErr    error
+	snapExists   bool
+	snapErr      error
+	virshErr     error
+	virshCalls   [][]string
+	runHostErr   error
+	runHostOut   string
+	uriVal       string // defaults to "qemu+ssh://user@host/system" via uri() below when empty
+	streamInErr  error
+	streamInArgs []string
 }
 
 func (f *fakeSeamConn) HostID() hostconn.HostID { return f.id }
@@ -81,13 +84,23 @@ func (f *fakeSeamConn) snapshotExists(_ context.Context, _, _ string) (bool, err
 	return f.snapExists, f.snapErr
 }
 
-func (f *fakeSeamConn) uri() string { return "qemu+ssh://user@host/system" }
+func (f *fakeSeamConn) uri() string {
+	if f.uriVal != "" {
+		return f.uriVal
+	}
+	return "qemu+ssh://user@host/system"
+}
 
 func (f *fakeSeamConn) copyDiskToRemote(_ context.Context, _, _ string) (string, error) {
 	return "/var/lib/libvirt/images/x.qcow2", nil
 }
 
 func (f *fakeSeamConn) storageProvider() *StorageProvider { return nil }
+
+func (f *fakeSeamConn) StreamIn(_ context.Context, _ io.Reader, argv ...string) error {
+	f.streamInArgs = argv
+	return f.streamInErr
+}
 
 // fakeSeamProvider is a providerBackend that is NOT a *Provider — the whole point.
 // It hands the Server a fake connection and scripts Clone/imagePrepare.

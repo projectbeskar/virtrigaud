@@ -34,13 +34,15 @@ import (
 // for NFS (the host already has the disk and NFS reachability). The destination
 // is the controller-built, C7'-hardened nfs:// URL.
 func (s *Server) exportDiskToNFS(ctx context.Context, req *providerv1.ExportDiskRequest) (*providerv1.ExportDiskResponse, error) {
-	libvirtProvider, ok := s.provider.(*Provider)
-	if !ok || libvirtProvider == nil || libvirtProvider.virshProvider == nil {
+	if s.provider == nil {
 		return nil, fmt.Errorf("libvirt provider not initialized")
 	}
-	vp := libvirtProvider.virshProvider
-	if !strings.Contains(vp.uri, "ssh://") {
-		return nil, fmt.Errorf("nfs export requires an ssh:// libvirt transport (host-side qemu-img → nfs://); got %q", vp.uri)
+	conn, err := s.provider.conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !strings.Contains(conn.uri(), "ssh://") {
+		return nil, fmt.Errorf("nfs export requires an ssh:// libvirt transport (host-side qemu-img → nfs://); got %q", conn.uri())
 	}
 
 	nfsURL := strings.TrimSpace(req.DestinationUrl)
@@ -49,7 +51,7 @@ func (s *Server) exportDiskToNFS(ctx context.Context, req *providerv1.ExportDisk
 	}
 
 	// Resolve the source disk path on the host.
-	diskInfo, err := libvirtProvider.GetDiskInfo(ctx, contracts.GetDiskInfoRequest{
+	diskInfo, err := s.provider.GetDiskInfo(ctx, contracts.GetDiskInfoRequest{
 		VmId:       req.VmId,
 		DiskId:     req.DiskId,
 		SnapshotId: req.SnapshotId,
@@ -68,7 +70,7 @@ func (s *Server) exportDiskToNFS(ctx context.Context, req *providerv1.ExportDisk
 	// Flatten + write straight to the NFS export. -U reads a possibly-running
 	// source (crash-consistent; a consistent copy still needs power-off/snapshot
 	// first). qemu-img's libnfs driver performs the NFS write — no pod buffering.
-	if res, err := vp.runVirshCommand(ctx, "!", "qemu-img", "convert", "-U", "-f", "qcow2", "-O", "qcow2",
+	if res, err := conn.RunHost(ctx, "qemu-img", "convert", "-U", "-f", "qcow2", "-O", "qcow2",
 		shellQuote(srcPath), shellQuote(nfsURL)); err != nil {
 		return nil, fmt.Errorf("host-side qemu-img convert to nfs failed: %w%s", err, qemuImgStderr(res))
 	}
@@ -87,13 +89,15 @@ func (s *Server) exportDiskToNFS(ctx context.Context, req *providerv1.ExportDisk
 // host's qemu-img reads the staged qcow2 directly from the NFS export over libnfs
 // and writes it into the target storage pool. No download, no pod staging.
 func (s *Server) importDiskFromNFS(ctx context.Context, req *providerv1.ImportDiskRequest) (*providerv1.ImportDiskResponse, error) {
-	libvirtProvider, ok := s.provider.(*Provider)
-	if !ok || libvirtProvider == nil || libvirtProvider.virshProvider == nil {
+	if s.provider == nil {
 		return nil, fmt.Errorf("libvirt provider not initialized")
 	}
-	vp := libvirtProvider.virshProvider
-	if !strings.Contains(vp.uri, "ssh://") {
-		return nil, fmt.Errorf("nfs import requires an ssh:// libvirt transport (host-side qemu-img from nfs://); got %q", vp.uri)
+	conn, err := s.provider.conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !strings.Contains(conn.uri(), "ssh://") {
+		return nil, fmt.Errorf("nfs import requires an ssh:// libvirt transport (host-side qemu-img from nfs://); got %q", conn.uri())
 	}
 
 	nfsURL := strings.TrimSpace(req.SourceUrl)
@@ -106,7 +110,7 @@ func (s *Server) importDiskFromNFS(ctx context.Context, req *providerv1.ImportDi
 	if req.StorageHint != "" {
 		poolName = req.StorageHint
 	}
-	storageProvider := NewStorageProvider(vp)
+	storageProvider := conn.storageProvider()
 	if err := storageProvider.EnsureDefaultStoragePool(ctx); err != nil {
 		return nil, fmt.Errorf("failed to ensure storage pool: %w", err)
 	}
@@ -130,17 +134,17 @@ func (s *Server) importDiskFromNFS(ctx context.Context, req *providerv1.ImportDi
 		poolName, volumeName, nfsURL, targetPath)
 
 	// Read the staged qcow2 straight from NFS and write the pool volume.
-	if res, err := vp.runVirshCommand(ctx, "!", "qemu-img", "convert", "-f", "qcow2", "-O", "qcow2",
+	if res, err := conn.RunHost(ctx, "qemu-img", "convert", "-f", "qcow2", "-O", "qcow2",
 		shellQuote(nfsURL), shellQuote(targetPath)); err != nil {
 		return nil, fmt.Errorf("host-side qemu-img convert from nfs failed: %w%s", err, qemuImgStderr(res))
 	}
 
 	// Validate the converted qcow2 (ADR-0006 D5 structural integrity for NFS).
-	if res, err := vp.runVirshCommand(ctx, "!", "qemu-img", "check", shellQuote(targetPath)); err != nil {
+	if res, err := conn.RunHost(ctx, "qemu-img", "check", shellQuote(targetPath)); err != nil {
 		return nil, fmt.Errorf("qemu-img check failed on imported qcow2 %s: %w%s", targetPath, err, qemuImgStderr(res))
 	}
 
-	if _, err := vp.runVirshCommand(ctx, "pool-refresh", poolName); err != nil {
+	if _, err := conn.Virsh(ctx, "pool-refresh", poolName); err != nil {
 		log.Printf("WARN pool-refresh failed after import (volume may still be usable by path): %v", err)
 	}
 
