@@ -18,12 +18,15 @@ package libvirt
 
 import (
 	"strconv"
+	"strings"
 	"testing"
 
 	golibvirt "github.com/digitalocean/go-libvirt"
 	"github.com/digitalocean/go-libvirt/socket/dialers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 )
 
 // This is the ADR-0008 Tier-2 test: go-libvirt against a REAL libvirtd via the
@@ -120,4 +123,67 @@ func TestNativeVsVirshParity_TestDriver(t *testing.T) {
 
 	diverged := compareDescribe(virsh, native)
 	assert.Empty(t, diverged, "native and virsh projections of the same live domain must not diverge; got %v", diverged)
+}
+
+// TestBuildNativeList_TestDriver drives buildNativeList against the test driver and
+// asserts the projection the list comparator consumes (ADR-0008 PR 4c). This is the
+// go-libvirt ConnectListAllDomains + libvirtxml parse proof for the list family —
+// the thing a fake dialer cannot prove.
+func TestBuildNativeList_TestDriver(t *testing.T) {
+	lv := connectTestDriver(t)
+
+	vms, err := buildNativeList(lv)
+	require.NoError(t, err, "buildNativeList against the test driver")
+	require.NotEmpty(t, vms, "the test driver has at least its built-in 'test' domain")
+
+	var testVM *contracts.VMInfo
+	for i := range vms {
+		if vms[i].Name == "test" {
+			testVM = &vms[i]
+			break
+		}
+	}
+	require.NotNil(t, testVM, "the built-in 'test' domain must appear in the native list")
+
+	assert.Equal(t, "On", testVM.PowerState, "the test driver's default domain runs")
+	assert.NotEmpty(t, testVM.ProviderRaw["uuid"], "uuid parsed from XML")
+	assert.Greater(t, testVM.CPU, int32(0), "vcpu parsed from XML")
+	assert.Greater(t, testVM.MemoryMiB, int64(0), "memory parsed from XML (KiB->MiB guard applied)")
+}
+
+// TestNativeVsVirshListParity_TestDriver is the list shadow comparison end-to-end
+// against a real daemon: it builds the native list from go-libvirt and a synthetic
+// "virsh" list from the SAME domains' data — perturbed with the whitespace/case
+// formatting a real virsh answer carries — and asserts compareList finds zero
+// semantic divergence. This is the shape of evidence the D5 soak accumulates for the
+// list family, exercised here in CI.
+func TestNativeVsVirshListParity_TestDriver(t *testing.T) {
+	lv := connectTestDriver(t)
+
+	native, err := buildNativeList(lv)
+	require.NoError(t, err)
+	require.NotEmpty(t, native)
+
+	// The virsh and native list paths populate the SAME typed VMInfo shape, so a
+	// faithful virsh projection differs only in non-semantic formatting. Build it
+	// from the native values with case/whitespace perturbations that the comparator
+	// must canonicalize away, proving parity holds against real data.
+	virsh := make([]contracts.VMInfo, 0, len(native))
+	for _, n := range native {
+		raw := map[string]string{}
+		if u := n.ProviderRaw["uuid"]; u != "" {
+			raw["uuid"] = strings.ToUpper(u) // UUID case must canonicalize equal
+		}
+		virsh = append(virsh, contracts.VMInfo{
+			ID:          n.Name,
+			Name:        n.Name,
+			PowerState:  " " + n.PowerState + " ", // surrounding whitespace must canonicalize away
+			CPU:         n.CPU,
+			MemoryMiB:   n.MemoryMiB,
+			ProviderRaw: raw,
+		})
+	}
+
+	diverged := compareList(virsh, native)
+	assert.Empty(t, diverged, "native and virsh list projections of the same live domains must not diverge; got %v", diverged)
 }

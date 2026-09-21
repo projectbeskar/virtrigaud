@@ -86,6 +86,26 @@ func TestParseNativeConfig(t *testing.T) {
 			wantConfigured: map[nativeFamily]nativeMode{familyDescribe: modeShadow},
 			wantWarnings:   1,
 		},
+		{
+			name:           "bare list defaults to shadow (PR 4c family)",
+			raw:            "list",
+			wantConfigured: map[nativeFamily]nativeMode{familyList: modeShadow},
+		},
+		{
+			name:           "native:list is accepted by the grammar (configured native)",
+			raw:            "native:list",
+			wantConfigured: map[nativeFamily]nativeMode{familyList: modeNative},
+		},
+		{
+			name:           "off:list",
+			raw:            "off:list",
+			wantConfigured: map[nativeFamily]nativeMode{familyList: modeOff},
+		},
+		{
+			name:           "describe and list configured together, independently",
+			raw:            "shadow:describe,native:list",
+			wantConfigured: map[nativeFamily]nativeMode{familyDescribe: modeShadow, familyList: modeNative},
+		},
 	}
 
 	for _, tt := range tests {
@@ -122,6 +142,44 @@ func TestEffectiveModeDowngradesNativeToShadow(t *testing.T) {
 
 	unset, _ := parseNativeConfig("")
 	assert.Equal(t, modeOff, unset.effectiveMode(familyDescribe), "unset family is off")
+
+	// The same downgrade must apply generically to the list family (PR 4c) — it is
+	// picked up from knownFamilies, not special-cased.
+	nativeList, _ := parseNativeConfig("native:list")
+	assert.Equal(t, modeNative, nativeList.configuredMode(familyList), "configured stays native for the audit signal")
+	assert.Equal(t, modeShadow, nativeList.effectiveMode(familyList), "effective downgrades native->shadow for list too")
+
+	shadowList, _ := parseNativeConfig("shadow:list")
+	assert.Equal(t, modeShadow, shadowList.effectiveMode(familyList))
+
+	offList, _ := parseNativeConfig("off:list")
+	assert.Equal(t, modeOff, offList.effectiveMode(familyList))
+
+	unsetList, _ := parseNativeConfig("")
+	assert.Equal(t, modeOff, unsetList.effectiveMode(familyList), "unset list family is off")
+}
+
+// TestLoadNativeConfigPublishesListActiveDriver verifies loadNativeConfig publishes
+// the D4 active-driver audit metric for the list family (added in PR 4c): the signal
+// must exist for every known family, and it must report the EFFECTIVE driver.
+func TestLoadNativeConfigPublishesListActiveDriver(t *testing.T) {
+	t.Setenv("VIRTRIGAUD_LIBVIRT_NATIVE", "shadow:list")
+	loadNativeConfig(nil)
+
+	assert.Equal(t, float64(1), shadowCounter(t, "virtrigaud_libvirt_active_driver", map[string]string{"family": "list", "driver": "shadow"}))
+	assert.Equal(t, float64(0), shadowCounter(t, "virtrigaud_libvirt_active_driver", map[string]string{"family": "list", "driver": "virsh"}))
+	assert.Equal(t, float64(0), shadowCounter(t, "virtrigaud_libvirt_active_driver", map[string]string{"family": "list", "driver": "native"}))
+}
+
+// TestLoadNativeConfigDowngradesNativeListActiveDriver verifies that a list family
+// configured native is published as the EFFECTIVE driver (shadow) — the audit metric
+// reports what actually happens (the PR 4b/4c downgrade), not what was requested.
+func TestLoadNativeConfigDowngradesNativeListActiveDriver(t *testing.T) {
+	t.Setenv("VIRTRIGAUD_LIBVIRT_NATIVE", "native:list")
+	loadNativeConfig(nil)
+
+	assert.Equal(t, float64(1), shadowCounter(t, "virtrigaud_libvirt_active_driver", map[string]string{"family": "list", "driver": "shadow"}), "native is downgraded to shadow, and the metric reports the effective driver")
+	assert.Equal(t, float64(0), shadowCounter(t, "virtrigaud_libvirt_active_driver", map[string]string{"family": "list", "driver": "native"}))
 }
 
 // TestNativeModeString verifies the mode->driver-token mapping used by the

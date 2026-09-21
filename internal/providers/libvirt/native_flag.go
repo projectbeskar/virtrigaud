@@ -41,7 +41,7 @@ import (
 //	VIRTRIGAUD_LIBVIRT_NATIVE = entry ("," entry)*
 //	entry                     = [ mode ":" ] family
 //	mode                      = "off" | "shadow" | "native"     (default: shadow)
-//	family                    = "describe"                      (the only family in PR 4b)
+//	family                    = "describe" | "list"             (the families in PR 4b/4c)
 //
 // Whitespace-tolerant and case-insensitive. A bare family (no "mode:") defaults to
 // SHADOW — the safe transition default: you cannot accidentally flip a read to
@@ -95,13 +95,21 @@ type nativeFamily string
 
 const (
 	// familyDescribe is the side-effect-free "Describe first" read family — the
-	// only family ADR-0008 PR 4b wires through the shadow harness.
+	// first family ADR-0008 wired through the shadow harness (PR 4b).
 	familyDescribe nativeFamily = "describe"
+	// familyList is the ListVMs read family — the second family shadowed (PR 4c),
+	// soaking in parallel with describe. Like describe it never flips to native
+	// here: effectiveMode downgrades native to shadow, and the flip stays PR 5,
+	// gated on the D5 divergence soak.
+	familyList nativeFamily = "list"
 )
 
 // knownFamilies is the set of families this binary understands. A config naming a
 // family not in here is warned-and-ignored. Grows one entry per ported family.
-var knownFamilies = []nativeFamily{familyDescribe}
+// effectiveMode, loadNativeConfig (the active-driver metric loop), and the PR 4b
+// native->shadow downgrade all iterate this slice, so a new family is picked up
+// everywhere by appending it here — no per-family special-casing.
+var knownFamilies = []nativeFamily{familyDescribe, familyList}
 
 // nativeConfig is the parsed VIRTRIGAUD_LIBVIRT_NATIVE flag: the CONFIGURED mode
 // per family (default modeOff). It is immutable after construction (the env var is

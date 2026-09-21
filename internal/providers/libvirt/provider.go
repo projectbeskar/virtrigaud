@@ -77,6 +77,12 @@ type Provider struct {
 	// so unit tests can script native results/errors/panics without a live libvirtd.
 	describeNativeFn func(ctx context.Context, id string) (contracts.DescribeResponse, error)
 
+	// listNativeFn produces the go-libvirt shadow VMInfo list (ADR-0008 PR 4c). It
+	// defaults to (*Provider).listNative (the real go-libvirt path) and is a struct
+	// field, mirroring describeNativeFn, so unit tests can script native
+	// results/errors/panics without a live libvirtd.
+	listNativeFn func(ctx context.Context) ([]contracts.VMInfo, error)
+
 	// shadowWG tracks in-flight detached shadow goroutines so tests (and a future
 	// graceful shutdown) can drain them; each is independently time-bounded.
 	shadowWG sync.WaitGroup

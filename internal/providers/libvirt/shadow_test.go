@@ -311,3 +311,240 @@ func TestMaybeShadowDescribeSamplingSkips(t *testing.T) {
 	p.shadowWG.Wait()
 	assert.Equal(t, int64(2), calls.Load(), "n=2 shadows 2 of 4 calls")
 }
+
+// ---- ADR-0008 PR 4c: the list family (ListVMs) ----
+
+// listVM builds a contracts.VMInfo the way BOTH virsh's ListVMs and buildNativeList
+// populate it — the list comparator sees both sides as the same typed shape (name,
+// coarse power state, typed CPU/MemoryMiB, uuid in ProviderRaw), unlike describe
+// where the two drivers key ProviderRaw differently.
+func listVM(name, power, uuid string, cpu int32, memMiB int64) contracts.VMInfo {
+	raw := map[string]string{}
+	if uuid != "" {
+		raw["uuid"] = uuid
+	}
+	return contracts.VMInfo{ID: name, Name: name, PowerState: power, CPU: cpu, MemoryMiB: memMiB, ProviderRaw: raw}
+}
+
+// TestCompareList covers the list comparator: equal sets, per-field divergence,
+// canonicalization (whitespace/case), the "present on only one side is skipped"
+// rule, membership (virsh has a VM native misses), the ONE-directional membership
+// semantics (a native-extra domain is NOT flagged), and dedup of a field that
+// diverges across several VMs.
+func TestCompareList(t *testing.T) {
+	tests := []struct {
+		name     string
+		virsh    []contracts.VMInfo
+		native   []contracts.VMInfo
+		wantDiff []string
+	}{
+		{
+			name:     "identical set -> no divergence",
+			virsh:    []contracts.VMInfo{listVM("vm1", "On", "abc", 2, 4096), listVM("vm2", "Off", "def", 1, 2048)},
+			native:   []contracts.VMInfo{listVM("vm1", "On", "abc", 2, 4096), listVM("vm2", "Off", "def", 1, 2048)},
+			wantDiff: nil,
+		},
+		{
+			// Leading-zero normalization does not apply here (CPU/memory are typed
+			// ints, not virsh-formatted strings); the string fields still normalize
+			// for whitespace and case via canonLower.
+			name:     "formatting-only differences canonicalize equal (whitespace, case)",
+			virsh:    []contracts.VMInfo{listVM(" vm1 ", " on ", "ABC-DEF", 2, 4096)},
+			native:   []contracts.VMInfo{listVM("vm1", "On", "abc-def", 2, 4096)},
+			wantDiff: nil,
+		},
+		{
+			name:     "power_state divergence",
+			virsh:    []contracts.VMInfo{listVM("vm1", "On", "abc", 2, 4096)},
+			native:   []contracts.VMInfo{listVM("vm1", "Off", "abc", 2, 4096)},
+			wantDiff: []string{"power_state"},
+		},
+		{
+			name:     "uuid divergence",
+			virsh:    []contracts.VMInfo{listVM("vm1", "On", "abc", 2, 4096)},
+			native:   []contracts.VMInfo{listVM("vm1", "On", "xyz", 2, 4096)},
+			wantDiff: []string{"uuid"},
+		},
+		{
+			name:     "vcpu and memory divergence",
+			virsh:    []contracts.VMInfo{listVM("vm1", "On", "abc", 2, 4096)},
+			native:   []contracts.VMInfo{listVM("vm1", "On", "abc", 4, 8192)},
+			wantDiff: []string{"vcpu", "memory_mib"},
+		},
+		{
+			// virsh defaults a missing vcpu to 1 and an empty uuid is simply absent;
+			// the native side here produced neither (cpu 0, memory 0, no uuid), so
+			// those fields are skipped, not flagged — the list analogue of describe's
+			// "field present on only one side is skipped".
+			name:     "fields present on only one side are skipped, not divergent",
+			virsh:    []contracts.VMInfo{listVM("vm1", "On", "abc", 1, 4096)},
+			native:   []contracts.VMInfo{listVM("vm1", "On", "", 0, 0)},
+			wantDiff: nil,
+		},
+		{
+			name:     "membership: virsh has a VM native misses",
+			virsh:    []contracts.VMInfo{listVM("vm1", "On", "abc", 2, 4096), listVM("vm2", "Off", "def", 1, 2048)},
+			native:   []contracts.VMInfo{listVM("vm1", "On", "abc", 2, 4096)},
+			wantDiff: []string{membershipField},
+		},
+		{
+			// The one-directional rule: virsh skips domains whose dumpxml/parse fails
+			// (#285), so a native-extra domain is expected and benign — never flagged.
+			name:     "native-extra domain is NOT flagged",
+			virsh:    []contracts.VMInfo{listVM("vm1", "On", "abc", 2, 4096)},
+			native:   []contracts.VMInfo{listVM("vm1", "On", "abc", 2, 4096), listVM("vm2-extra", "On", "def", 1, 2048)},
+			wantDiff: nil,
+		},
+		{
+			name:     "membership is deduped across several missing VMs",
+			virsh:    []contracts.VMInfo{listVM("vm1", "On", "abc", 2, 4096), listVM("vm2", "On", "def", 1, 2048), listVM("vm3", "On", "ghi", 1, 1024)},
+			native:   []contracts.VMInfo{listVM("vm1", "On", "abc", 2, 4096)},
+			wantDiff: []string{membershipField},
+		},
+		{
+			name:     "a field diverging on several VMs is reported once",
+			virsh:    []contracts.VMInfo{listVM("vm1", "On", "abc", 2, 4096), listVM("vm2", "On", "def", 1, 2048)},
+			native:   []contracts.VMInfo{listVM("vm1", "Off", "abc", 2, 4096), listVM("vm2", "Off", "def", 1, 2048)},
+			wantDiff: []string{"power_state"},
+		},
+		{
+			name:     "empty on both sides -> no divergence",
+			virsh:    nil,
+			native:   nil,
+			wantDiff: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := compareList(tt.virsh, tt.native)
+			assert.ElementsMatch(t, tt.wantDiff, got)
+		})
+	}
+}
+
+// newShadowListTestProvider builds a Provider wired for shadow-compare of the list
+// family with a scripted native-list function — no live libvirtd, no registry.
+func newShadowListTestProvider(fn func(ctx context.Context) ([]contracts.VMInfo, error)) *Provider {
+	cfg, _ := parseNativeConfig("shadow:list")
+	return &Provider{
+		nativeCfg:     cfg,
+		shadowSampler: &sampler{n: 1},
+		listNativeFn:  fn,
+	}
+}
+
+// TestRunShadowListMeters verifies the synchronous core meters the right
+// compare-run result and per-field divergences for the list family.
+func TestRunShadowListMeters(t *testing.T) {
+	t.Run("equal meters result=equal, no divergence", func(t *testing.T) {
+		virsh := []contracts.VMInfo{listVM("vm1", "On", "abc", 2, 4096)}
+		native := []contracts.VMInfo{listVM("vm1", "On", "abc", 2, 4096)}
+		p := newShadowListTestProvider(func(context.Context) ([]contracts.VMInfo, error) { return native, nil })
+
+		before := shadowCounter(t, "virtrigaud_libvirt_shadow_compare_total", map[string]string{"family": "list", "result": obsmetrics.ShadowResultEqual})
+		p.runShadowList(context.Background(), virsh)
+		after := shadowCounter(t, "virtrigaud_libvirt_shadow_compare_total", map[string]string{"family": "list", "result": obsmetrics.ShadowResultEqual})
+		assert.Equal(t, before+1, after)
+	})
+
+	t.Run("divergent meters result=divergent + per-field divergence", func(t *testing.T) {
+		virsh := []contracts.VMInfo{listVM("vm1", "On", "abc", 2, 4096)}
+		native := []contracts.VMInfo{listVM("vm1", "Off", "abc", 4, 4096)}
+		p := newShadowListTestProvider(func(context.Context) ([]contracts.VMInfo, error) { return native, nil })
+
+		divBefore := shadowCounter(t, "virtrigaud_libvirt_shadow_compare_total", map[string]string{"family": "list", "result": obsmetrics.ShadowResultDivergent})
+		psBefore := shadowCounter(t, "virtrigaud_libvirt_shadow_divergence_total", map[string]string{"family": "list", "field": "power_state"})
+		vcpuBefore := shadowCounter(t, "virtrigaud_libvirt_shadow_divergence_total", map[string]string{"family": "list", "field": "vcpu"})
+
+		p.runShadowList(context.Background(), virsh)
+
+		assert.Equal(t, divBefore+1, shadowCounter(t, "virtrigaud_libvirt_shadow_compare_total", map[string]string{"family": "list", "result": obsmetrics.ShadowResultDivergent}))
+		assert.Equal(t, psBefore+1, shadowCounter(t, "virtrigaud_libvirt_shadow_divergence_total", map[string]string{"family": "list", "field": "power_state"}))
+		assert.Equal(t, vcpuBefore+1, shadowCounter(t, "virtrigaud_libvirt_shadow_divergence_total", map[string]string{"family": "list", "field": "vcpu"}))
+	})
+
+	t.Run("membership divergence meters the membership field", func(t *testing.T) {
+		virsh := []contracts.VMInfo{listVM("vm1", "On", "abc", 2, 4096), listVM("vm2", "On", "def", 1, 2048)}
+		native := []contracts.VMInfo{listVM("vm1", "On", "abc", 2, 4096)} // native missed vm2
+		p := newShadowListTestProvider(func(context.Context) ([]contracts.VMInfo, error) { return native, nil })
+
+		memBefore := shadowCounter(t, "virtrigaud_libvirt_shadow_divergence_total", map[string]string{"family": "list", "field": membershipField})
+		p.runShadowList(context.Background(), virsh)
+		memAfter := shadowCounter(t, "virtrigaud_libvirt_shadow_divergence_total", map[string]string{"family": "list", "field": membershipField})
+		assert.Equal(t, memBefore+1, memAfter)
+	})
+
+	t.Run("native error meters result=error, is not propagated", func(t *testing.T) {
+		virsh := []contracts.VMInfo{listVM("vm1", "On", "abc", 2, 4096)}
+		p := newShadowListTestProvider(func(context.Context) ([]contracts.VMInfo, error) {
+			return nil, errors.New("go-libvirt list boom")
+		})
+
+		before := shadowCounter(t, "virtrigaud_libvirt_shadow_compare_total", map[string]string{"family": "list", "result": obsmetrics.ShadowResultError})
+		// Must not panic or block; returns nothing.
+		p.runShadowList(context.Background(), virsh)
+		after := shadowCounter(t, "virtrigaud_libvirt_shadow_compare_total", map[string]string{"family": "list", "result": obsmetrics.ShadowResultError})
+		assert.Equal(t, before+1, after)
+	})
+}
+
+// TestMaybeShadowListPanicIsolation is the load-bearing safety property for the list
+// family: a panic in the shadow (go-libvirt) path is recovered, metered, and NOT
+// propagated — the caller of ListVMs is entirely unaffected. It exercises the shared
+// runDetachedShadow wrapper for family=list.
+func TestMaybeShadowListPanicIsolation(t *testing.T) {
+	p := newShadowListTestProvider(func(context.Context) ([]contracts.VMInfo, error) {
+		panic("go-libvirt list exploded")
+	})
+
+	before := shadowCounter(t, "virtrigaud_libvirt_shadow_compare_total", map[string]string{"family": "list", "result": obsmetrics.ShadowResultPanic})
+
+	assert.NotPanics(t, func() {
+		p.maybeShadowList(context.Background(), []contracts.VMInfo{listVM("vm1", "On", "abc", 2, 4096)})
+		p.shadowWG.Wait()
+	})
+
+	after := shadowCounter(t, "virtrigaud_libvirt_shadow_compare_total", map[string]string{"family": "list", "result": obsmetrics.ShadowResultPanic})
+	assert.Equal(t, before+1, after, "panic must be metered")
+}
+
+// TestMaybeShadowListOffIsNoOp verifies that with the list family off (the default),
+// the shadow path never runs — no goroutine, no native list call.
+func TestMaybeShadowListOffIsNoOp(t *testing.T) {
+	called := false
+	cfg, _ := parseNativeConfig("") // empty => list off
+	p := &Provider{
+		nativeCfg:     cfg,
+		shadowSampler: &sampler{n: 1},
+		listNativeFn: func(context.Context) ([]contracts.VMInfo, error) {
+			called = true
+			return nil, nil
+		},
+	}
+
+	p.maybeShadowList(context.Background(), []contracts.VMInfo{listVM("vm1", "On", "abc", 2, 4096)})
+	p.shadowWG.Wait()
+	assert.False(t, called, "shadow must not run when the list family is off")
+}
+
+// TestMaybeShadowListSamplingSkips verifies the sampling knob gates list dispatch:
+// with n=2, only every 2nd call shadows.
+func TestMaybeShadowListSamplingSkips(t *testing.T) {
+	var calls atomic.Int64
+	cfg, _ := parseNativeConfig("shadow:list")
+	p := &Provider{
+		nativeCfg:     cfg,
+		shadowSampler: &sampler{n: 2},
+		listNativeFn: func(context.Context) ([]contracts.VMInfo, error) {
+			calls.Add(1)
+			return []contracts.VMInfo{listVM("vm1", "On", "abc", 2, 4096)}, nil
+		},
+	}
+
+	for i := 0; i < 4; i++ {
+		p.maybeShadowList(context.Background(), []contracts.VMInfo{listVM("vm1", "On", "abc", 2, 4096)})
+	}
+	p.shadowWG.Wait()
+	assert.Equal(t, int64(2), calls.Load(), "n=2 shadows 2 of 4 calls")
+}
