@@ -5,6 +5,23 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-21 20:27] - CI: Retry Go-Module Fetches + Repair libvirt Dockerfile Runtime Stage — Unblock Image Builds
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `hack/retry.sh` (new) + `.github/workflows/ci.yml`: the network-fetching Go steps now run through a POSIX-bash retry-with-backoff wrapper (`RETRY_ATTEMPTS` default 4, exponential backoff from 8s, capped at 60s). Wrapped sites: every `go mod tidy` (the `test`, `lint`, `security`, `generate`, and `integration` jobs — 5 occurrences), `go mod download` (`test`), and the `go install …@…` tool installs — gosec (`security`), govulncheck (`govulncheck`), controller-gen and both protoc plugins (`generate`). A transient `proxy.golang.org` failure — `read "https://proxy.golang.org/.../@v/….zip": stream error … INTERNAL_ERROR; received from peer` mid-download — previously failed the `test`/`lint` jobs; because the image `build` job `needs: [test, lint]`, that flake silently skipped the provider-image push (e.g. `provider-libvirt`'s newest tag stuck at `main-a1d1f4d`). The wrapper absorbs the flake but still propagates the command's own non-zero exit after all attempts, so a **real** failure (a genuine `go.mod` drift, a compile break) still fails the job. The govulncheck/gosec **scans**, `go mod verify`, and the `generate` job's `go mod tidy` drift-check reset are deliberately left **unwrapped** so they still fail on a real vulnerability or drift.
+- `cmd/provider-libvirt/Dockerfile`: restore the runtime stage's `FROM ${BASE_IMAGE}` line, accidentally removed by [PR #306](https://github.com/projectbeskar/virtrigaud/pull/306) (ADR-0008 PR 3) when it dropped the runtime `openssh-client`/`sshpass`/`curl`. Without a second `FROM`, the runtime content (non-root user, `COPY --from=builder`) collapsed back into the builder stage and buildx failed with `circular dependency detected on stage: builder`, breaking the `build-images` job for `provider-libvirt` (amd64 + arm64). PR CI never caught it because the image build only runs on `push`, not `pull_request`. The runtime `ca-certificates` (needed for the provider's outbound S3/TLS migration traffic) and the `ENTRYPOINT` were already present and are unchanged; the fix is the single missing `FROM`, mirroring `cmd/provider-proxmox/Dockerfile`'s working two-`FROM` pattern. Verified with a full `docker build` (exit 0, `COPY --from=builder` now resolves into a distinct runtime stage).
+
+### Why
+Two independent breakages were keeping any provider image from shipping off `main`: a transient module-proxy flake fails `test`/`lint` and — via the `needs:`-gated image build — silently ships no image, and a missing `FROM` broke the libvirt image build outright. Both are CI-only reliability fixes.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+- **CI-only:** no Go source, CRD, proto, or runtime/API behavior change — only CI network-fetch resilience and a Dockerfile runtime-stage repair.
+
 ## [2026-09-21 19:30] - Shadow-Compare Reads + go-libvirt Describe for the libvirt Provider — ADR-0008 PR 4b
 **Author:** @wrkode (William Rizzo)
 
