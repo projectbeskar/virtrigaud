@@ -8,6 +8,7 @@ replace github.com/projectbeskar/virtrigaud/proto => ./proto
 replace github.com/projectbeskar/virtrigaud/sdk => ./sdk
 
 require (
+	github.com/digitalocean/go-libvirt v0.0.0-20260814190004-1a83157e1858
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/go-logr/logr v1.4.3
 	github.com/go-logr/zapr v1.3.0

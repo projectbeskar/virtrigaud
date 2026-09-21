@@ -26,6 +26,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	golibvirt "github.com/digitalocean/go-libvirt"
+
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt/hostconn"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
@@ -72,6 +74,10 @@ func (f *fakeSeamConn) RunHost(_ context.Context, _ ...string) (*hostconn.Result
 
 func (f *fakeSeamConn) Stream(_ context.Context, _ ...string) (io.ReadCloser, error) {
 	return io.NopCloser(strings.NewReader("")), nil
+}
+
+func (f *fakeSeamConn) Libvirt(_ context.Context) (*golibvirt.Libvirt, error) {
+	return nil, errors.New("fakeSeamConn: Libvirt not implemented")
 }
 
 func (f *fakeSeamConn) Close() error { return nil }

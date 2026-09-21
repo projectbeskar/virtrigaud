@@ -396,6 +396,49 @@ func TestRunOverSSH_ReusesPersistentClient(t *testing.T) {
 	assert.Same(t, client1, v.sshClient, "second call must reuse the SAME *ssh.Client, not redial")
 }
 
+// TestDialTunnel_UsesPersistentClientAndWrapsExhaustedRetry proves dialTunnel
+// (ADR-0008 PR 4a: the channel sshTunnelDialer/golibvirt.go multiplexes
+// go-libvirt's socket over) is built on the SAME persistent-client machinery
+// runOverSSH/RunHost/Stream already share (ensureSSHClient), not a second,
+// separate connection path, and that its withSession-style "redial once on
+// failure" retry ends in a clearly wrapped error rather than the raw
+// underlying one when both attempts are exhausted.
+//
+// The fixture only accepts "session" channels (serveTestSSHConn), so ANY
+// client.Dial (network "unix" or "tcp") is rejected at the SSH protocol
+// level on every attempt -- that is what drives dialTunnel's retry-once path
+// on EVERY call here, not a dead cached client, so this test does not (and,
+// against this fixture, cannot) assert object identity across calls the way
+// TestRunOverSSH_ReusesPersistentClient does for withSession: dialTunnel
+// itself has no way to distinguish "channel type rejected" from "cached
+// client is dead" either, by design, same as withSession's NewSession check.
+func TestDialTunnel_UsesPersistentClientAndWrapsExhaustedRetry(t *testing.T) {
+	hostKey := generateTestHostKey(t)
+	addr := startTestSSHServer(t, hostKey, testSSHServerOpts{password: "s3cret"})
+	useTempKnownHosts(t, knownhosts.Line([]string{addr}, hostKey.PublicKey())+"\n")
+
+	v := testVirshProvider("virtrigaud", addr, &Credentials{Password: "s3cret"})
+	t.Cleanup(func() { _ = v.Cleanup() })
+
+	_, err := v.dialTunnel(t.Context(), "unix", "/var/run/libvirt/libvirt-sock")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "open ssh-tunneled", "both retry attempts exhausted must surface the wrapped, final error")
+	assert.NotNil(t, v.sshClient, "the retry-once path must leave a freshly (re)dialed persistent client cached, exactly like withSession")
+}
+
+// TestDialTunnel_PropagatesSSHAuthFailure proves dialTunnel surfaces a real
+// SSH-layer connection failure (never even reaching the channel-open) as a
+// clear error rather than panicking or hanging.
+func TestDialTunnel_PropagatesSSHAuthFailure(t *testing.T) {
+	hostKey := generateTestHostKey(t)
+	addr := startTestSSHServer(t, hostKey, testSSHServerOpts{password: "s3cret"})
+	useTempKnownHosts(t, knownhosts.Line([]string{addr}, hostKey.PublicKey())+"\n")
+
+	v := testVirshProvider("virtrigaud", addr, &Credentials{Password: "wrong-password"})
+	_, err := v.dialTunnel(t.Context(), "unix", "/var/run/libvirt/libvirt-sock")
+	require.Error(t, err)
+}
+
 // TestRunOverSSH_NonZeroExitAndStderr proves VirshResult/VirshError carry the
 // exit code and stderr exactly as the former exec.Cmd-based transport did —
 // downstream parsers (and transientSSHConnectError's stderr inspection)

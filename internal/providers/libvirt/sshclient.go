@@ -188,6 +188,34 @@ func (v *VirshProvider) withSession(ctx context.Context, fn func(*ssh.Session) e
 	return fn(sess)
 }
 
+// dialTunnel opens a new channel multiplexed over the provider's persistent
+// SSH client — a raw net.Conn tunneled to network/addr on the remote host,
+// e.g. ("unix", libvirtSocketPath) for ADR-0008 PR 4a's go-libvirt
+// socket.Dialer (golibvirt.go). It mirrors withSession's redial-once-on-a
+// dead-cached-client behavior: opening a channel has no exec/session
+// semantics to fail the way NewSession does, so staleness is detected the
+// same way — the operation on the cached client fails — and exactly one
+// fresh dial is tried before the failure is returned as-is.
+func (v *VirshProvider) dialTunnel(ctx context.Context, network, addr string) (net.Conn, error) {
+	client, err := v.ensureSSHClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := client.Dial(network, addr)
+	if err != nil {
+		v.resetSSHClient()
+		client, err = v.ensureSSHClient(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("reconnect ssh client: %w", err)
+		}
+		conn, err = client.Dial(network, addr)
+		if err != nil {
+			return nil, fmt.Errorf("open ssh-tunneled %s socket %s: %w", network, addr, err)
+		}
+	}
+	return conn, nil
+}
+
 // runOverSSH runs remoteCmd ON the host over the persistent SSH client: both
 // real virsh commands (prefixed with "virsh" by the caller) and host shell
 // commands (the "!" escape) funnel here once the connection is ssh://. It

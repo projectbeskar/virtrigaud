@@ -22,6 +22,8 @@ import (
 	"io"
 	"strings"
 	"testing"
+
+	golibvirt "github.com/digitalocean/go-libvirt"
 )
 
 // fakeConn is a minimal Conn used to exercise the Registry without any real
@@ -40,6 +42,9 @@ func (f *fakeConn) RunHost(_ context.Context, _ ...string) (*Result, error) {
 }
 func (f *fakeConn) Stream(_ context.Context, _ ...string) (io.ReadCloser, error) {
 	return io.NopCloser(strings.NewReader("")), nil
+}
+func (f *fakeConn) Libvirt(_ context.Context) (*golibvirt.Libvirt, error) {
+	return nil, errors.New("fakeConn: Libvirt not implemented")
 }
 func (f *fakeConn) Close() error {
 	f.closed++
