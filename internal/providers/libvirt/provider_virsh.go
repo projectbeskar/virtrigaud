@@ -945,6 +945,15 @@ func (p *Provider) Describe(ctx context.Context, id string) (contracts.DescribeR
 	}
 
 	log.Printf("INFO Domain %s comprehensive state: power=%s, ips=%v, monitoring_data=collected", id, response.PowerState, ips)
+
+	// ADR-0008 PR 4b: when the describe family is in shadow mode, also run the
+	// go-libvirt Describe and meter any semantic divergence against this
+	// authoritative virsh response. This returns immediately (the shadow runs on a
+	// detached, time-bounded, panic-isolated goroutine) and NEVER alters what is
+	// returned here — reads do not flip to native until PR 5. No-op when shadow is
+	// off (the default), so pure virsh is unchanged.
+	p.maybeShadowDescribe(ctx, id, response)
+
 	return response, nil
 }
 

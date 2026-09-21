@@ -23,6 +23,8 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
+	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -55,6 +57,32 @@ type Provider struct {
 
 	// cached credentials
 	credentials *Credentials
+
+	// --- ADR-0008 PR 4b shadow-compare reads (see shadow.go / native_flag.go) ---
+
+	// nativeCfg is the parsed VIRTRIGAUD_LIBVIRT_NATIVE per-family driver flag (D4).
+	// Empty/unset => every family off => pure virsh, zero behavior change.
+	nativeCfg nativeConfig
+
+	// shadowSampler bounds how often a shadowed read is actually shadowed
+	// (VIRTRIGAUD_LIBVIRT_SHADOW_SAMPLE; default: every call).
+	shadowSampler *sampler
+
+	// shadowTimeoutValue bounds one shadow Describe's detached goroutine
+	// (VIRTRIGAUD_LIBVIRT_SHADOW_TIMEOUT; default: shadowDescribeDefaultTimeout).
+	shadowTimeoutValue time.Duration
+
+	// describeNativeFn produces the go-libvirt shadow DescribeResponse. It defaults
+	// to (*Provider).describeNative (the real go-libvirt path) and is a struct field
+	// so unit tests can script native results/errors/panics without a live libvirtd.
+	describeNativeFn func(ctx context.Context, id string) (contracts.DescribeResponse, error)
+
+	// shadowWG tracks in-flight detached shadow goroutines so tests (and a future
+	// graceful shutdown) can drain them; each is independently time-bounded.
+	shadowWG sync.WaitGroup
+
+	// logger is the provider's structured logger (defaults to slog.Default()).
+	logger *slog.Logger
 }
 
 // ProviderConfig represents the configuration for the provider
@@ -175,6 +203,10 @@ func New() (*Provider, error) {
 		return nil, contracts.NewRetryableError("failed to initialize virsh provider", err)
 	}
 
+	// Wire the ADR-0008 PR 4b shadow-compare reads (D4/D6). Off unless
+	// VIRTRIGAUD_LIBVIRT_NATIVE opts a family in; when off this is pure virsh.
+	p.initShadow(slog.Default())
+
 	log.Printf("INFO Successfully initialized virsh provider")
 	return p, nil
 }
@@ -227,6 +259,9 @@ func NewProvider(ctx context.Context, k8sClient client.Client, provider *v1beta1
 	if err := virshProvider.Initialize(ctx); err != nil {
 		return nil, contracts.NewRetryableError("failed to initialize virsh provider", err)
 	}
+
+	// Wire the ADR-0008 PR 4b shadow-compare reads (D4/D6), consistent with New().
+	p.initShadow(slog.Default())
 
 	log.Printf("INFO Successfully created virsh-based provider via K8s API")
 	return p, nil

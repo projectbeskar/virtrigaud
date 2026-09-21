@@ -61,6 +61,13 @@ type Config struct {
 	// Middleware configuration
 	Middleware *middleware.Config
 
+	// MetricsHandler, when non-nil, is served at /metrics on the health port. A
+	// provider binary passes promhttp over its Prometheus registry so provider-side
+	// metrics (e.g. the libvirt shadow-compare divergence counter, ADR-0008 D5) are
+	// scrapable. Left nil, no /metrics endpoint is exposed. Kept as an http.Handler
+	// so the SDK takes no dependency on any particular metrics registry.
+	MetricsHandler http.Handler
+
 	// KeepAlive settings
 	KeepAlive *KeepAliveConfig
 
@@ -235,6 +242,12 @@ func New(config *Config) (*Server, error) {
 	mux.Handle("/healthz", healthChecker.LivenessHandler())
 	mux.Handle("/readyz", healthChecker.ReadinessHandler())
 	mux.Handle("/health", healthChecker.HTTPHandler())
+	if config.MetricsHandler != nil {
+		// Provider-side Prometheus metrics (e.g. the ADR-0008 D5 libvirt
+		// shadow-compare divergence counter). Served on the health port so no new
+		// port/Service is needed for the D5 soak.
+		mux.Handle("/metrics", config.MetricsHandler)
+	}
 
 	httpServer := &http.Server{
 		Addr:         fmt.Sprintf(":%d", config.HealthPort),

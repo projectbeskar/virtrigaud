@@ -74,6 +74,36 @@ jobs:
           flags: unittests
           name: codecov-umbrella
 
+  # ADR-0008 Tier 2: exercise go-libvirt against a REAL libvirtd via the built-in
+  # test:///default driver (no KVM, no qemu, no privilege). This is what proves
+  # go-libvirt parses a live daemon's DomainGetXMLDesc into the right libvirtxml
+  # struct — the coverage PR #291 finding B4 called out as missing. The test
+  # itself auto-skips when no daemon is present, so `make test` above is
+  # unaffected; this job wires the daemon so it actually runs.
+  libvirt-integration:
+    name: Libvirt Integration (test:// driver)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install libvirt-daemon-system
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libvirt-daemon-system
+          sudo systemctl start libvirtd || sudo systemctl start libvirtd.socket || true
+          sudo usermod -aG libvirt "$USER" || true
+
+      - name: Run go-libvirt test:// integration tests
+        run: sudo -E env "PATH=$PATH" make test-libvirt-integration
+
   lint:
     name: Lint
     runs-on: ubuntu-22.04

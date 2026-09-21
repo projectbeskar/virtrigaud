@@ -149,6 +149,11 @@ test-integration: ## Run integration tests under test/integration/ (cross-packag
 	@echo "Running integration tests under test/integration/..."
 	@go test -race -coverprofile=cover-integration.out ./test/integration/...
 
+.PHONY: test-libvirt-integration
+test-libvirt-integration: ## Run the go-libvirt test:///default integration tests (ADR-0008 Tier 2). Needs a reachable libvirtd (libvirt-daemon-system; no KVM/privilege). Auto-skips if none — CI wires a libvirt-daemon-system service.
+	@echo "Running go-libvirt test:///default integration tests (skips if no libvirtd)..."
+	@go test -race -run 'TestBuildNativeDescribe|TestNativeVsVirshParity' -v ./internal/providers/libvirt/...
+
 .PHONY: envtest-setup
 envtest-setup: setup-envtest ## Install setup-envtest and export KUBEBUILDER_ASSETS for local runs
 	@echo "To run tests locally with envtest, export:"

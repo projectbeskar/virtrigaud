@@ -81,6 +81,14 @@ type libvirtConn interface {
 	copyDiskToRemote(ctx context.Context, localPath, volumeName string) (string, error)
 	// storageProvider returns the storage helper bound to this host.
 	storageProvider() *StorageProvider
+	// callLibvirt runs fn against this host's go-libvirt client under the
+	// connection-lifecycle watchdog (ADR-0008 PR 4a's golibvirtHolder.call): the
+	// ctx-bounded invocation the ADR-0008 PR 4b shadow-compare reads use instead of
+	// driving the raw client Libvirt(ctx) returns. It is a libvirtConn extra (not
+	// part of the transport-neutral hostconn.Conn seam) because bounding a
+	// per-call deadline is a go-libvirt-lifecycle concern the generic seam does not
+	// model — Libvirt(ctx) on the seam only bounds the connect, not a subsequent RPC.
+	callLibvirt(ctx context.Context, fn func(*golibvirt.Libvirt) error) error
 	// StreamIn runs a host command with r wired to its stdin and blocks until
 	// the command completes — the input-direction counterpart to Stream (which
 	// streams the host's stdout back to the caller). It is a libvirtConn extra
@@ -167,6 +175,14 @@ func (c *virshConn) Stream(ctx context.Context, argv ...string) (io.ReadCloser, 
 // shadow-compare reads have a proven connection to build on.
 func (c *virshConn) Libvirt(ctx context.Context) (*golibvirt.Libvirt, error) {
 	return c.virsh.Libvirt(ctx)
+}
+
+// callLibvirt runs fn against this host's go-libvirt client under the
+// connection-lifecycle watchdog (VirshProvider.callLibvirt -> golibvirtHolder.call).
+// See the libvirtConn.callLibvirt doc: this is the ctx-bounded invocation the
+// ADR-0008 PR 4b shadow-compare Describe uses.
+func (c *virshConn) callLibvirt(ctx context.Context, fn func(*golibvirt.Libvirt) error) error {
+	return c.virsh.callLibvirt(ctx, fn)
 }
 
 // StreamIn runs a host command with r wired to its stdin and blocks until the

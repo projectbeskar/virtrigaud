@@ -819,3 +819,26 @@ func (v *VirshProvider) Libvirt(ctx context.Context) (*golibvirt.Libvirt, error)
 
 	return holder.ensureConnected(ctx)
 }
+
+// callLibvirt runs fn against this host's go-libvirt client under the holder's
+// ctx-deadline watchdog (golibvirtHolder.call). This is the ctx-bounded invocation
+// the hostconn.Conn.Libvirt doc directs callers to use instead of driving the raw
+// client Libvirt(ctx) returns: go-libvirt has no per-call deadline of its own
+// (ADR-0008 Fact 5), so ctx bounds a call here only because call runs fn in a
+// goroutine and evicts the connection if ctx fires first. Cancellation is
+// therefore CONNECTION-scoped (a timeout drops the whole connection, failing any
+// concurrent sibling) — the documented, accepted blast radius, see call's doc.
+//
+// It connects lazily on first use exactly like Libvirt(ctx); a process that never
+// calls either keeps go-libvirt fully dormant. ADR-0008 PR 4b's shadow-compare
+// Describe is the first caller.
+func (v *VirshProvider) callLibvirt(ctx context.Context, fn func(*golibvirt.Libvirt) error) error {
+	v.golibvirtMu.Lock()
+	if v.golibvirt == nil {
+		v.golibvirt = newGolibvirtHolder(v)
+	}
+	holder := v.golibvirt
+	v.golibvirtMu.Unlock()
+
+	return holder.call(ctx, fn)
+}
