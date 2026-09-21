@@ -5,6 +5,30 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-21 22:49] - Shadow-compare the libvirt list family (ADR-0008 PR 4c)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/providers/libvirt/shadow.go`: the **`list` (ListVMs) read family** joins the ADR-0008 shadow-compare harness alongside `describe`, so it soaks in parallel. `buildNativeList` enumerates all domains (active+inactive) via go-libvirt `ConnectListAllDomains` and, per domain, projects the **same config-identity fields** the describe path uses — `name`, `uuid`, `power_state` (coarsened to "On"/"Off" via the shared `mapNativeDomainState`), `vcpu`, `memory_mib` (via `parseDomainLibvirtxml` + `domainMemoryMiB`) — into the same typed `contracts.VMInfo` shape virsh's `ListVMs` produces; **IPs/Disks/Networks are excluded** from the comparison projection (they carry guest-agent/qemu-img data, not config identity). `compareList` is an order-independent, deduplicating comparator keyed by domain name that reuses `canonLower`/`canonPositiveInt` and keeps the "compare only when both produced" rule per field. `listNative`/`runShadowList`/`maybeShadowList` mirror the describe trio on a **new shared `runDetachedShadow` wrapper** (detached, time-bounded, panic-recovered) that both families now dispatch through. A `listNativeFn` seam on `Provider` lets tests script native results/errors/panics without a libvirtd.
+- Tests: `shadow_test.go` (`compareList` equal / per-field / membership / canonicalization / native-extra-not-flagged / dedup; `runShadowList` metering incl. membership; panic isolation; off-is-no-op; sampling), `native_flag_test.go` (`list` parses, bare `list` defaults to shadow, `native:list` downgrades to shadow, `off:list`, active-driver metric published for `list` and its native→shadow downgrade), `shadow_integration_test.go` (`buildNativeList` + native/virsh **list parity** against a real `test://` libvirtd, auto-skipping without one).
+
+### Changed
+- `internal/providers/libvirt/native_flag.go`: add `familyList = "list"` to `knownFamilies` and to the flag grammar (`family = "describe" | "list"`); `effectiveMode`, the active-driver metric loop, and the PR 4b native→shadow downgrade pick it up **generically** (no special-casing).
+- `internal/providers/libvirt/provider_virsh.go`: `ListVMs` calls `maybeShadowList` immediately before returning its authoritative virsh answer — a no-op when shadow is off (the default), so pure virsh is unchanged.
+- `internal/providers/libvirt/provider.go`: `Provider` gains the `listNativeFn` field (mirrors `describeNativeFn`); `initShadow` defaults it to `listNative`.
+- `internal/providers/libvirt/shadow.go`: `maybeShadowDescribe` refactored onto the shared `runDetachedShadow` wrapper — behavior-identical, existing describe tests pass unchanged.
+- `docs/libvirt-shadow-reads.md`: document the `list` family, its one-directional `membership` semantics, and the per-family D5 gate.
+
+### Why
+Broaden the read surface under shadow so `list` (ListVMs, used for VM discovery/adoption) accumulates D5 divergence evidence **in parallel with** `describe` against the real production VM population, at zero risk. virsh remains authoritative and its answer is always what the caller receives; go-libvirt is observed and metered only. The native flip stays **PR 5**, gated per family on the `virtrigaud_libvirt_shadow_divergence_total{family="list"}` soak reading 0.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout — behavior-preserving; shadow is opt-in (`VIRTRIGAUD_LIBVIRT_NATIVE`), off by default (pure virsh)
+- [x] Config change only — new env-flag family value (`shadow:list`); no CRD/proto change; virsh remains authoritative
+- [ ] Documentation only
+- **Membership semantics (decision):** the `membership` divergence field is metered **only** when virsh returns a domain go-libvirt's list is MISSING (native failed to see a VM virsh saw). A **native-extra** domain is NOT flagged — virsh's `ListVMs` deliberately skips domains whose XML fails to parse (#285), so a native-extra domain is expected and benign; counting it would meter phantom drift.
+
 ## [2026-09-21 20:27] - CI: Retry Go-Module Fetches + Repair libvirt Dockerfile Runtime Stage — Unblock Image Builds
 **Author:** @wrkode (William Rizzo)
 
