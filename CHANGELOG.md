@@ -5,6 +5,21 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-22 07:13] - Commit and accept ADR-0007 and ADR-0008
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `docs/adr/0007-clustered-orchestrator-provider.md`, `docs/adr/0008-libvirt-pure-go-driver-and-ssh-transport.md`, `docs/adr/0007-0008-blocking-decisions.md`: commit the previously-untracked ADRs into the repo and mark 0007/0008 **Accepted**, each with a current implementation-status note (ADR-0008 shadow phase shipped, PR 5 native flip gated on the D5 soak; ADR-0007 P1 underway via the Host/HostPool CRDs).
+
+### Why
+The design records for work already shipping — ADR-0008 (go-libvirt shadow phase) and ADR-0007 (clustered-provider P1) — were untracked, and their status was stale ("Proposed / nothing implemented"). Committing them records the accepted decisions in-repo for auditability and resolves the ADR link added by the Host/HostPool CRD PR.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
 ## [2026-09-22 02:45] - Host and HostPool CRDs (ADR-0007 P1)
 **Author:** @wrkode (William Rizzo)
 
