@@ -12,6 +12,8 @@ resources:
 - bases/infra.virtrigaud.io_vmsets.yaml
 - bases/infra.virtrigaud.io_vmplacementpolicies.yaml
 - bases/infra.virtrigaud.io_vmmigrations.yaml
+- bases/infra.virtrigaud.io_hosts.yaml
+- bases/infra.virtrigaud.io_hostpools.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 # +kubebuilder:scaffold:crdkustomizewebhookpatch

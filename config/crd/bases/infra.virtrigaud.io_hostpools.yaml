@@ -1,0 +1,288 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.17.2
+  name: hostpools.infra.virtrigaud.io
+spec:
+  group: infra.virtrigaud.io
+  names:
+    kind: HostPool
+    listKind: HostPoolList
+    plural: hostpools
+    shortNames:
+    - hp
+    singular: hostpool
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.strategy
+      name: Strategy
+      type: string
+    - jsonPath: .spec.providerRef.name
+      name: Provider
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1beta1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          HostPool is the Schema for the hostpools API: a named group of Hosts under one
+          clustered Provider, carrying cluster scheduling and migration policy (ADR-0007
+          P1 inventory foundation). It is additive and does not affect single-host
+          (spec.topology=single) providers (ADR-0007 D9).
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              HostPoolSpec is admin-authored cluster policy for a named group of Hosts under
+              one clustered Provider (ADR-0007 D3): scheduling strategy, overcommit,
+              storage/network references, and the default migration policy.
+            properties:
+              migration:
+                description: Migration is the default migration policy for VMs in
+                  this pool.
+                properties:
+                  bandwidthMbps:
+                    description: BandwidthMbps optionally caps migration bandwidth
+                      in Mbps.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  defaultLive:
+                    default: true
+                    description: |-
+                      DefaultLive requests live (RAM-transfer) migration by default. When false,
+                      migrations tolerate downtime and may fall back to stage_copy. Defaults
+                      true.
+
+                      This is a defaulted bool and deliberately carries NO omitempty (the
+                      defaulted-bool footgun, ADR-0006/PR#235): with omitempty an explicit false
+                      would be dropped on marshal and the apiserver would re-apply the true
+                      default.
+                    type: boolean
+                  defaultStorageMode:
+                    default: shared
+                    description: |-
+                      DefaultStorageMode selects the intra-cluster data path (ADR-0007 D5).
+                      Defaults to shared.
+                    enum:
+                    - shared
+                    - block_all
+                    - block_inc
+                    - stage_copy
+                    type: string
+                  maxDowntimeMs:
+                    description: |-
+                      MaxDowntimeMs optionally caps the tolerated switchover downtime in
+                      milliseconds.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  requireTLS:
+                    default: false
+                    description: |-
+                      RequireTLS forces QEMU-native --tls on the migration data path (required in
+                      regulated/banking deployments). Defaults false.
+                    type: boolean
+                type: object
+              networks:
+                description: |-
+                  Networks are the named networks (bridge/VLAN/overlay) available in this
+                  pool; per-host presence is asserted via Host.spec.labels (ADR-0007 D6).
+                items:
+                  description: |-
+                    PoolNetworkRef names a network (bridge / VLAN / overlay) available in a
+                    HostPool. Per-host presence is asserted via Host.spec.labels (ADR-0007 D6).
+                  properties:
+                    name:
+                      description: |-
+                        Name is the network name (e.g. the bridge name shared across the pool). A
+                        matching Host.spec.labels entry asserts per-host presence.
+                      maxLength: 253
+                      minLength: 1
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
+              overcommit:
+                description: Overcommit ratios applied when computing allocatable
+                  capacity.
+                properties:
+                  cpu:
+                    description: |-
+                      CPU is the vCPU overcommit ratio (e.g. "4.0" = up to 4 vCPU per physical
+                      core). Empty means no CPU overcommit ("1.0").
+                    type: string
+                  memory:
+                    description: |-
+                      Memory is the memory overcommit ratio (e.g. "1.0" = no memory overcommit).
+                      Empty means no memory overcommit ("1.0").
+                    type: string
+                type: object
+              providerRef:
+                description: ProviderRef is the clustered Provider that owns this
+                  pool.
+                properties:
+                  name:
+                    description: Name of the referenced object
+                    maxLength: 253
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                  namespace:
+                    description: Namespace of the referenced object (defaults to current
+                      namespace)
+                    maxLength: 63
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                required:
+                - name
+                type: object
+              storagePools:
+                description: |-
+                  StoragePools are the named shared/local storage pools available in this
+                  pool. Per-host visibility is asserted via Host.spec.labels (ADR-0007 D6).
+                  Consumed, not deployed, by VirtRigaud.
+                items:
+                  description: |-
+                    StoragePoolRef names a shared or local storage pool available in a HostPool.
+                    Per-host visibility is asserted via Host.spec.labels (ADR-0007 D6). VirtRigaud
+                    consumes pre-set-up storage; it does not deploy it.
+                  properties:
+                    name:
+                      description: |-
+                        Name is the storage pool name (e.g. a libvirt pool name or an NFS export
+                        identifier). A matching Host.spec.labels entry asserts per-host visibility.
+                      maxLength: 253
+                      minLength: 1
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
+              strategy:
+                default: Spread
+                description: |-
+                  Strategy is the default scheduling strategy for VMs placed in this pool.
+                  Defaults to Spread.
+                enum:
+                - Spread
+                - BinPack
+                type: string
+            required:
+            - providerRef
+            type: object
+          status:
+            description: |-
+              HostPoolStatus aggregates member-host counts and readiness for the pool.
+
+              ADR-0007 specifies HostPool.status only in prose ("aggregates host counts +
+              readiness"). These fields are the smallest additive shape consistent with that
+              description and with the other kinds' status conventions (ObservedGeneration +
+              Conditions).
+            properties:
+              conditions:
+                description: Conditions represent the latest available observations
+                  of the pool's state.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              observedGeneration:
+                description: |-
+                  ObservedGeneration reflects the generation of the HostPool spec observed by
+                  the controller.
+                format: int64
+                type: integer
+              readyHosts:
+                description: ReadyHosts is the number of member Hosts reporting Health=Ready.
+                format: int32
+                type: integer
+              schedulableHosts:
+                description: |-
+                  SchedulableHosts is the number of member Hosts that are both Health=Ready
+                  and spec.schedulable=true.
+                format: int32
+                type: integer
+              totalHosts:
+                description: TotalHosts is the number of Hosts whose spec.poolRef
+                  points at this pool.
+                format: int32
+                type: integer
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

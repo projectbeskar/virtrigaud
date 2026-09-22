@@ -38,6 +38,12 @@ For full documentation see [https://projectbeskar.github.io/virtrigaud](https://
 | [provider-libvirt.yaml](provider-libvirt.yaml) | Libvirt/KVM provider configuration |
 | [vm-adoption-example.yaml](vm-adoption-example.yaml) | Provider CRs with VMAdoption annotation |
 
+## Clustered Provider Examples (ADR-0007 P1)
+
+| File | Description |
+|------|-------------|
+| [hostpool-clustered.yaml](hostpool-clustered.yaml) | `HostPool` (Spread) + two `Host`s — the clustered-libvirt inventory foundation. Additive; single-host providers unchanged. See [docs/clustered-provider-inventory.md](../docs/clustered-provider-inventory.md). |
+
 ## Provider-Specific Examples
 
 | File | Description |
