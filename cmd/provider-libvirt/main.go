@@ -135,6 +135,12 @@ func main() {
 		logger.Error("Failed to initialize libvirt provider", "error", err)
 		os.Exit(1)
 	}
+	// Graceful shutdown: after srv.Serve returns (SIGINT/SIGTERM, once the gRPC
+	// server has drained in-flight RPCs), release the provider's connection
+	// resources. In clustered mode (ADR-0007) this stops the host-inventory
+	// hot-reload watcher and drains the N-host registry; in single-host mode it
+	// closes the one connection. Skipped on the os.Exit paths (process dying).
+	defer func() { _ = providerImpl.Close() }()
 	libvirtServer := libvirt.NewServer(providerImpl)
 	srv.RegisterProvider(libvirtServer)
 

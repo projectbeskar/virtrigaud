@@ -84,6 +84,30 @@ type hostKeyPolicy struct {
 	// insecure is true when EnvInsecureSkipHostKeyVerification=true; host-key
 	// verification is disabled and a WARN is logged on every connection.
 	insecure bool
+
+	// knownHostsPath optionally overrides the file this policy verifies against.
+	// It is EMPTY on the single-host path (resolveHostKeyPolicy), where it falls
+	// back to the package-wide KnownHostsFile (the credential mount) — so that
+	// path stays byte-for-byte unchanged. A clustered host (ADR-0007 D3) sets it
+	// to a per-host file materialised from that host's inlined known_hosts bytes,
+	// so every host verifies against its OWN trust material through the exact
+	// same knownhosts.New logic — never a second, drifting host-key
+	// implementation (the #149 trap). Every host-key decision routes through
+	// knownHostsFile() so this override is honoured in exactly one place.
+	knownHostsPath string
+}
+
+// knownHostsFile is the file this policy verifies against: the per-policy
+// knownHostsPath override when set, otherwise the package-wide KnownHostsFile
+// (the single-host credential mount). Every host-key decision in this file
+// funnels through here so a clustered host can point at its own known_hosts
+// without forking the verification logic, and so the single-host path (empty
+// override) is unchanged.
+func (p hostKeyPolicy) knownHostsFile() string {
+	if p.knownHostsPath != "" {
+		return p.knownHostsPath
+	}
+	return KnownHostsFile
 }
 
 // resolveHostKeyPolicy reads the escape-hatch env var once and returns the
@@ -121,9 +145,10 @@ func (p hostKeyPolicy) hostKeyCallback() (ssh.HostKeyCallback, error) {
 		//nolint:gosec // G106: explicit, env-gated (LIBVIRT_INSECURE_SKIP_HOST_KEY_VERIFICATION), WARN-logged opt-out per ADR-0004
 		return ssh.InsecureIgnoreHostKey(), nil
 	}
-	cb, err := knownhosts.New(KnownHostsFile)
+	knownHosts := p.knownHostsFile()
+	cb, err := knownhosts.New(knownHosts)
 	if err != nil {
-		return nil, fmt.Errorf("load known_hosts %s: %w", KnownHostsFile, err)
+		return nil, fmt.Errorf("load known_hosts %s: %w", knownHosts, err)
 	}
 	return cb, nil
 }
@@ -158,13 +183,14 @@ func (p hostKeyPolicy) verifyKnownHostsPresent(host string) error {
 	// host — this keeps the "missing file entirely" error message distinct
 	// from "file present, host absent", matching the existing pre-#149-fix
 	// diagnostics operators already grep for.
-	if info, err := os.Stat(filepath.Clean(KnownHostsFile)); err != nil || info.Size() == 0 {
+	knownHosts := p.knownHostsFile()
+	if info, err := os.Stat(filepath.Clean(knownHosts)); err != nil || info.Size() == 0 {
 		return p.missingKnownHostsError(host)
 	}
 
-	present, err := knownHostsHasEntry(KnownHostsFile, host)
+	present, err := knownHostsHasEntry(knownHosts, host)
 	if err != nil {
-		return fmt.Errorf("libvirt SSH known_hosts at %s could not be read: %w", KnownHostsFile, err)
+		return fmt.Errorf("libvirt SSH known_hosts at %s could not be read: %w", knownHosts, err)
 	}
 	if !present {
 		return p.missingKnownHostsError(host)
@@ -181,7 +207,7 @@ func (p hostKeyPolicy) missingKnownHostsError(host string) error {
 			"`ssh-keyscan -H %s >> known_hosts` and add it as the `known_hosts` key in the "+
 			"credentials Secret referenced by the Provider's credentialSecretRef, OR set "+
 			"%s=true to connect without verification (audit-flagged, NOT recommended for production)",
-		host, KnownHostsFile, host, EnvInsecureSkipHostKeyVerification,
+		host, p.knownHostsFile(), host, EnvInsecureSkipHostKeyVerification,
 	)
 }
 
@@ -300,6 +326,6 @@ func (p hostKeyPolicy) logVerificationMode(logger *slog.Logger, host string) {
 	logger.Info("libvirt SSH host-key verification: enabled",
 		"provider", "libvirt",
 		"host", host,
-		"known_hosts", KnownHostsFile,
+		"known_hosts", p.knownHostsFile(),
 	)
 }

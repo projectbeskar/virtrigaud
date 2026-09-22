@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
+	"github.com/projectbeskar/virtrigaud/internal/clustered/hostsecret"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt/hostconn"
 )
@@ -46,14 +47,28 @@ type Provider struct {
 	// reaches it through the registry seam instead (ADR-0008 PR 2).
 	virshProvider *VirshProvider
 
-	// registry owns the per-host connection(s). Today it holds exactly one Conn
-	// (built from PROVIDER_ENDPOINT, wrapping virshProvider); ADR-0007 P1 changes
-	// only the constructor to project N hosts from a mounted Secret.
+	// registry owns the per-host connection(s). In single-host mode it holds
+	// exactly one Conn (built from PROVIDER_ENDPOINT, wrapping virshProvider); in
+	// clustered mode (ADR-0007 D3) it is the *hostconn.ClusterRegistry below,
+	// holding N host-keyed connections projected from the mounted inventory.
 	registry hostconn.Registry
 
-	// hostID identifies the single host in the registry. Under ADR-0007 it equals
-	// the Host CR name.
+	// hostID identifies the single host in single-host mode (equals the URI
+	// authority). It is empty in clustered mode, where connections are addressed
+	// by Host id via the registry, not through this single field.
 	hostID hostconn.HostID
+
+	// clusterReg is the N-host registry in CLUSTERED mode (ADR-0007 D3), nil in
+	// single-host mode. It is the same object as registry (a ClusterRegistry
+	// satisfies hostconn.Registry); the concrete handle is retained for the
+	// watcher and for shutdown draining.
+	clusterReg *hostconn.ClusterRegistry
+
+	// watcher hot-reloads clusterReg from the mounted inventory file in CLUSTERED
+	// mode (nil in single-host mode, and nil in clustered mode if the file-watch
+	// could not be established — the provider then serves the initially-loaded
+	// hosts without hot-reload). Stopped by Close before the registry is drained.
+	watcher *hostconn.Watcher
 
 	// cached credentials
 	credentials *Credentials
@@ -147,6 +162,14 @@ type Config struct {
 // until the host is reachable rather than reporting healthy while every RPC
 // fails.
 func New() (*Provider, error) {
+	// ADR-0007 D3/D9 mode detection: a mounted host-inventory file selects
+	// CLUSTERED topology (N host-keyed connections, hot-reloaded from the file);
+	// its ABSENCE keeps today's single-host path below byte-for-byte unchanged.
+	// The provider reads the mounted file only — never the Kubernetes API (#297).
+	if hostsFile := hostsFilePath(); clusteredModeEnabled(hostsFile) {
+		return newClusteredProvider(hostsFile)
+	}
+
 	// Load configuration from environment (set by provider controller)
 	config := &Config{
 		Endpoint: os.Getenv("PROVIDER_ENDPOINT"),
@@ -215,6 +238,79 @@ func New() (*Provider, error) {
 
 	log.Printf("INFO Successfully initialized virsh provider")
 	return p, nil
+}
+
+// newClusteredProvider builds the libvirt provider in CLUSTERED topology
+// (ADR-0007 D3): it projects N host-keyed connections from the mounted
+// inventory file and hot-reloads them when the file changes — lazy-open on
+// host-add, graceful-drain on host-remove — without ever reading the Kubernetes
+// API (#297).
+//
+// It fails-SAFE, not fails-closed: a malformed or unreadable inventory at
+// startup is NOT fatal (that would crash the whole clustered provider on one
+// bad render). It starts with an empty host set and lets the file-watcher
+// reconcile once the file becomes valid. Connections are NOT dialed here — the
+// dial waits for the first use of a host (lazy-open).
+func newClusteredProvider(hostsFile string) (*Provider, error) {
+	logger := slog.Default()
+	logger.Info("libvirt provider starting in CLUSTERED topology (ADR-0007)", "hosts_file", hostsFile)
+
+	inv, err := hostconn.LoadInventory(hostsFile)
+	if err != nil {
+		logger.Warn("libvirt clustered: initial host inventory unreadable; starting with an empty host set (watcher will reconcile when it becomes valid)",
+			"hosts_file", hostsFile, "error", err.Error())
+		inv = hostsecret.Inventory{SchemaVersion: hostsecret.SchemaVersion}
+	}
+
+	dialer := newClusterDialer(clusterKnownHostsDir(), logger)
+	reg, err := hostconn.NewClusterRegistry(inv, dialer, logger)
+	if err != nil {
+		return nil, fmt.Errorf("build clustered host registry: %w", err)
+	}
+
+	p := &Provider{
+		config:      &v1beta1.Provider{Spec: v1beta1.ProviderSpec{}},
+		k8sClient:   nil, // no K8s client in container mode (#297)
+		credentials: &Credentials{},
+		registry:    reg,
+		clusterReg:  reg,
+		hostID:      "", // clustered: connections are addressed by Host id, not one hostID
+		// virshProvider is a benign, uninitialized single-host handle. The legacy
+		// single-host RPC dispatch is not routed in clustered mode in this slice
+		// (no scheduler / target_host_id yet); keeping it non-nil means an
+		// accidental legacy call returns a clean error rather than a nil-deref.
+		virshProvider: NewVirshProvider(&ProviderConfig{Spec: ProviderSpec{}}),
+	}
+	p.initShadow(logger)
+
+	// Start the file-watch / hot-reload. A watcher-setup failure is non-fatal:
+	// serve the initially-loaded hosts without hot-reload rather than refuse to
+	// start.
+	if watcher, werr := hostconn.NewWatcher(hostsFile, reg, logger); werr != nil {
+		logger.Warn("libvirt clustered: host-inventory watch could not start; serving without hot-reload",
+			"hosts_file", hostsFile, "error", werr.Error())
+	} else {
+		watcher.Start()
+		p.watcher = watcher
+	}
+
+	logger.Info("libvirt clustered provider initialized", "hosts", len(reg.Hosts()))
+	return p, nil
+}
+
+// Close releases the provider's connection resources. In clustered mode it
+// stops the hot-reload watcher FIRST (so no reconcile races the drain) and then
+// drains/closes the registry; in single-host mode it closes the one connection.
+// It is invoked on graceful shutdown (cmd/provider-libvirt/main.go) after the
+// gRPC server has drained in-flight RPCs, so no in-flight operation is severed.
+func (p *Provider) Close() error {
+	if p.watcher != nil {
+		_ = p.watcher.Close()
+	}
+	if p.registry != nil {
+		return p.registry.Close()
+	}
+	return nil
 }
 
 // Removed old file-based credential loading - now using environment variables via virsh provider
