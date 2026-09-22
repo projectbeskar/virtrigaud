@@ -5,6 +5,29 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-22 19:30] - Clustered-aware Validate + inlined SSH-key parse regression suite (ADR-0007 P1)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/libvirt/provider.go`: **`Validate` is now clustered-aware.** In `topology: cluster` mode the provider has no single `PROVIDER_ENDPOINT`, but `Validate` still ran the single-host `virsh -c <endpoint> list` probe — i.e. `virsh -c "" list` (empty endpoint) — which fails `error: failed to connect to the hypervisor` (and `Cannot create user runtime directory '/home/app/.cache/libvirt': Read-only file system` on the provider pod). The manager then marked the provider runtime not-ready and the `Host` controller reported `ProviderUnavailable`, so `GetHostInfo` was never called and the whole clustered inventory flow was blocked. `Validate` now short-circuits in clustered mode (`p.clustered()`) into a new `validateClustered()` that checks the N-host registry is initialized and fronts **≥1** host from the mounted inventory — **dialing nothing** (per-host health is reported via `ListHosts`/`GetHostInfo`, which mark an unreachable host `NotReady` without failing the provider), returning a **retryable** not-ready while the registry is still empty. Mirrors #317's "legacy single-host dispatch is inert in clustered mode." **The single-host `Validate` path is byte-for-byte unchanged.**
+
+### Added
+- `internal/providers/libvirt/provider_validate_test.go`: `Validate` topology-dispatch tests — clustered `Validate` succeeds on registry readiness and **never touches the single-host virsh handle** (hermetic: with the handle `nil`'d, only the clustered path can return success, so this fails-before/passes-after independent of whether a `virsh` binary exists on the test host); zero-host clustered → retryable not-ready; **single-host still runs the `virsh … list` probe** (a fake `virsh` on `PATH` keeps it hermetic); nil-handle single-host error unchanged.
+- `internal/providers/libvirt/cluster_credential_roundtrip_test.go`: the **clustered SSH-credential regression suite** the real-lab validation showed was missing. A real ed25519 key is rendered into the inventory exactly as the controller does (#316: raw PEM → base64 `[]byte` in JSON) and consumed exactly as the provider does (#317: `LoadInventory` → `hostsecret.Unmarshal` → `string(...)`), proving the **raw PEM reaches `ssh.ParsePrivateKey`** (single base64 layer, never two) and yields a non-nil signer/`AuthMethod`; plus an **end-to-end** test that authenticates the inlined key over an in-memory SSH server (the `GetHostInfo`/`nodeinfo`-over-SSH path). Both assert **no credential material — raw or base64 — is ever logged.** Confirmed these fail with the exact lab symptom (`build ssh auth method: parse SSH private key: ssh: no key found`) if a second base64 layer is introduced on the consume side.
+
+### Changed
+- `internal/providers/libvirt/cluster_dialer.go`: added a **single-decode-layer invariant comment** at the per-host credential handoff so a future refactor cannot silently reintroduce a double-encode (the mechanism that yields `ssh: no key found`). No behavior change — the consume path already delivered raw PEM to the SSH transport; this pins the invariant in code alongside the new regression test.
+- `docs/clustered-provider-inventory.md`: documented that clustered `Validate` checks the **registry** (not a single host), and that the inlined `sshPrivateKey`/`knownHosts` are decoded **exactly once** on consume (no second base64 layer) before reaching `ssh.ParsePrivateKey` / the `knownhosts` file.
+
+### Why
+A real-lab ADR-0007 P1 validation surfaced two clustered-path issues the unit/`test://` tests missed. (1) A non-clustered-aware `Validate` blocked the entire inventory flow — a genuine defect, fixed here. (2) The reported `parse SSH private key: ssh: no key found` from the clustered `nodeinfo` path: the **committed** consume path already hands raw PEM to `ssh.ParsePrivateKey` correctly (verified end-to-end with ed25519/RSA/ECDSA keys) — the real gap was **test coverage**, because the pre-existing clustered tests used placeholder non-PEM key strings and never round-tripped a real key through `ParsePrivateKey`. This suite locks the single-decode-layer behavior against regression and reproduces the exact symptom if the layer count is ever wrong. Both issues are clustered-only; **single-host is unaffected**.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-09-22 18:00] - Host inventory-sync controller (GetHostInfo → Host.status) (ADR-0007 P1)
 **Author:** @wrkode (William Rizzo)
 

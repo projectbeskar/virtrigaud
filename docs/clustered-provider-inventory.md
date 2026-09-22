@@ -321,6 +321,29 @@ material. ADR-0004 is preserved per host and **not weakened** — a host with em
 `knownHosts` hard-fails verification at connect time unless the audit-flagged
 insecure escape hatch is set, exactly as the single-host path does.
 
+`sshPrivateKey` and `knownHosts` travel as base64 in the inventory JSON because
+they are Go `[]byte` fields; the provider decodes them **exactly once** (the JSON
+unmarshal) back to the raw PEM / raw `known_hosts` bytes and hands those straight
+to `ssh.ParsePrivateKey` / the `knownhosts` file. There is deliberately **no
+second decode** on the consume side — a spurious extra base64 layer would hand
+non-PEM bytes to the parser and fail with `ssh: no key found`. This single-layer
+round-trip is pinned by an end-to-end regression test (a real key rendered exactly
+as the controller renders it, consumed exactly as the provider consumes it, then
+authenticated over an in-memory SSH server), never logging the key material.
+
+**Readiness (`Validate`) — the registry, not a single host.** In clustered mode
+the provider has **no single `PROVIDER_ENDPOINT`**, so the readiness `Validate`
+the manager calls before it starts syncing hosts does **not** run the single-host
+`virsh -c <endpoint> list` probe (which, with no endpoint, would run `virsh -c ""
+list` and fail "cannot connect to the hypervisor"). Instead it validates the
+**clustered setup**: the connection registry is initialized and fronts **at least
+one** host loaded from the mounted inventory. It dials nothing — **per-host**
+reachability is reported through `ListHosts`/`GetHostInfo`, which mark an
+unreachable host `NotReady` without failing the whole provider. A registry that
+currently fronts zero hosts (e.g. a malformed inventory the watcher has not
+reconciled yet) reports a **retryable** not-ready so the manager re-checks once the
+inventory is valid. The single-host `Validate` path is unchanged.
+
 ## Host inventory-sync controller (operator side)
 
 The **`Host` controller** (`internal/controller/host_controller.go`) is the

@@ -137,6 +137,13 @@ func buildClusteredVirshProvider(h hostsecret.Host, knownHostsDir string, logger
 	// here; the clustered model is key-based SSH only (no inlined password).
 	vp.uri = endpoint
 	vp.env = os.Environ()
+	// SINGLE decode layer (ADR-0007 P1): hostsecret.Credentials.SSHPrivateKey is a
+	// []byte, so hostsecret.Unmarshal has ALREADY base64-decoded it back to the raw
+	// PEM the source Secret held. Hand that raw PEM straight to the SSH transport
+	// via string() — do NOT base64-decode (or re-encode) it again here. A second
+	// layer yields non-PEM bytes and ssh.ParsePrivateKey fails with
+	// "ssh: no key found" (the clustered-path symptom a real-lab validation hit).
+	// TestClusteredCredentialRoundTrip pins this end-to-end.
 	vp.credentials = &Credentials{SSHPrivateKey: string(h.Credentials.SSHPrivateKey)}
 	vp.hostKey = policy
 	vp.logger = logger
