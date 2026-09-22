@@ -5,6 +5,33 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-22 12:00] - Inline per-host credentials into the clustered host-inventory Secret (ADR-0007 P1)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/controller/provider_hostinventory.go`: per-host credential resolution in the host-inventory render loop. For each fronted `Host`, the controller resolves a credential Secret — `Host.spec.credentialSecretRef` if set, else the Provider's default `spec.credentialSecretRef` — reads it with the manager's existing `secrets: get` RBAC, and inlines the SSH material into that host's `credentials`. Adds a `HostCredentialsReady` Provider condition, a `HostCredentialsUnresolved` Warning event, and a structured log line — all naming host ids + coarse reasons only.
+- `internal/controller/provider_controller.go`: `ProviderReconciler.Recorder` (nil-safe) for the Warning event; `cmd/manager/main.go` wires `mgr.GetEventRecorderFor("provider-controller")`.
+- Tests: `hostsecret` byte-for-byte credential round-trip + omit-when-empty; controller per-host-ref vs Provider-default resolution, missing-secret skip (+ condition + event), malformed-secret skip, and a **no-leak** test asserting no key/known_hosts bytes (raw or base64) appear in captured logs or events while the material still reaches the rendered Secret.
+
+### Changed
+- `internal/clustered/hostsecret/hostsecret.go`: fleshed out the `Credentials` sub-struct — the placeholder `sshPrivateKeyRef`/`knownHostsRef` become `sshPrivateKey`/`knownHosts` (`[]byte`, base64 in JSON), mirroring the libvirt credential Secret keys `ssh-privatekey`/`known_hosts`. `schemaVersion` stays **1** (additive population of an already-declared field; nothing consumes it yet).
+- `docs/clustered-provider-inventory.md`: credential-resolution rules (per-host ref → Provider default), the missing/malformed skip behavior, and the #297 duplication tradeoff.
+
+### Why
+ADR-0007 D3: a thin, API-less clustered provider (post-#297) must connect to each host using material read solely from the mounted inventory file — never the Kubernetes API. This PR populates the `credentials` sub-document #315 left defined-but-empty, so a later provider-side PR consumes the inlined SSH key + known_hosts through the same code path as today's single-host credentials.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+### Security
+- **Credential material is now inlined** into the `Opaque`, Provider-owned `<provider>-hosts` Secret. This is a deliberate credential **duplication** (source Secret → rendered inventory Secret) — the #297 tradeoff that lets the provider read connection material from a file with no API access. Both Secrets share the same protection boundary. Key bytes are copied **verbatim** (no string round-trip, no trimming) and round-trip byte-for-byte.
+- **No credential value is ever logged, put in Status, or put in an event** — condition/event/log messages name host ids and coarse reasons only; a regression test asserts non-leakage.
+- **Fail-safe, never fail-open**: a host with a missing/unreadable/malformed credential Secret is **skipped** (not rendered half-usable, not failing the whole reconcile) and surfaced via the condition/event.
+- **No new RBAC.** The manager already holds `secrets: get;list;watch`; the provider ServiceAccount is untouched (still no RBAC, no projected token). `known_hosts` verification stays a provider-side connect-time policy (ADR-0004).
+
 ## [2026-09-22 10:30] - Clustered host-inventory Secret render + topology discriminator (ADR-0007 P1)
 **Author:** @wrkode (William Rizzo)
 

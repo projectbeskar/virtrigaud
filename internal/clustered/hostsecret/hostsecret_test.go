@@ -17,6 +17,7 @@ limitations under the License.
 package hostsecret
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -124,9 +125,10 @@ func TestMarshal_EmptyInventory(t *testing.T) {
 	assert.Empty(t, got.Hosts)
 }
 
-// TestMarshal_CredentialsAlwaysPresentButEmpty proves the security invariant of
-// the structural PR: the credentials sub-document is present (the key exists) but
-// empty ({}) — no credential value is ever rendered here.
+// TestMarshal_CredentialsAlwaysPresentButEmpty proves the schema-stability
+// invariant: the credentials key is ALWAYS present, and for a host with no
+// populated Credentials it renders as an empty object ({}) rather than null or a
+// missing key — so a consumer can always rely on the key existing.
 func TestMarshal_CredentialsAlwaysPresentButEmpty(t *testing.T) {
 	inv := Inventory{
 		SchemaVersion: SchemaVersion,
@@ -176,4 +178,72 @@ func TestRoundTrip(t *testing.T) {
 func TestUnmarshal_Invalid(t *testing.T) {
 	_, err := Unmarshal([]byte("{not json"))
 	require.Error(t, err)
+}
+
+// TestCredentials_RoundTripByteForByte proves inlined credential material — a
+// multi-line PEM private key and a known_hosts entry — survives Marshal→Unmarshal
+// byte-for-byte, with no PEM/newline/base64 corruption. This is the property the
+// clustered provider relies on when it later parses the key from the mounted file
+// through the same ssh.ParsePrivateKey / knownhosts path it uses today.
+func TestCredentials_RoundTripByteForByte(t *testing.T) {
+	// Realistic shapes (NOT real keys): embedded newlines, trailing newline, and
+	// a base64-ish body are exactly what would trip up a careless string/byte or
+	// double-base64 conversion.
+	privateKey := []byte("-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\nQyNTUxOQAAACAt+FAKE+MATERIAL+ONLY==\n-----END OPENSSH PRIVATE KEY-----\n")
+	knownHosts := []byte("host-a ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFAKEKNOWNHOSTSLINE\n")
+
+	inv := Inventory{
+		SchemaVersion: SchemaVersion,
+		Hosts: []Host{{
+			ID:       "host-a",
+			Endpoint: "qemu+ssh://virt@host-a/system",
+			Credentials: Credentials{
+				SSHPrivateKey: privateKey,
+				KnownHosts:    knownHosts,
+			},
+		}},
+	}
+
+	data, err := Marshal(inv)
+	require.NoError(t, err)
+
+	got, err := Unmarshal(data)
+	require.NoError(t, err)
+	require.Len(t, got.Hosts, 1)
+	assert.True(t, bytes.Equal(privateKey, got.Hosts[0].Credentials.SSHPrivateKey),
+		"SSH private key must round-trip byte-for-byte")
+	assert.True(t, bytes.Equal(knownHosts, got.Hosts[0].Credentials.KnownHosts),
+		"known_hosts must round-trip byte-for-byte")
+}
+
+// TestCredentials_OmitEmpty proves an unpopulated field is omitted (credentials
+// {} when both empty), while a populated field is present — so a rendered host
+// with a key but no known_hosts carries exactly sshPrivateKey and no knownHosts
+// key.
+func TestCredentials_OmitEmpty(t *testing.T) {
+	inv := Inventory{
+		SchemaVersion: SchemaVersion,
+		Hosts: []Host{
+			{ID: "empty", Endpoint: "e"},
+			{ID: "keyonly", Endpoint: "e", Credentials: Credentials{SSHPrivateKey: []byte("KEY")}},
+		},
+	}
+	data, err := Marshal(inv)
+	require.NoError(t, err)
+
+	var raw struct {
+		Hosts []struct {
+			ID          string         `json:"id"`
+			Credentials map[string]any `json:"credentials"`
+		} `json:"hosts"`
+	}
+	require.NoError(t, json.Unmarshal(data, &raw))
+	require.Len(t, raw.Hosts, 2)
+
+	// hosts are sorted by id: "empty" < "keyonly".
+	assert.Equal(t, map[string]any{}, raw.Hosts[0].Credentials, "empty credentials render as {}")
+	_, hasKey := raw.Hosts[1].Credentials["sshPrivateKey"]
+	assert.True(t, hasKey, "populated key must be present")
+	_, hasKH := raw.Hosts[1].Credentials["knownHosts"]
+	assert.False(t, hasKH, "absent known_hosts must be omitted, not rendered null/empty")
 }

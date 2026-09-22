@@ -17,9 +17,14 @@ limitations under the License.
 package controller
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"strings"
 	"testing"
 
+	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -27,13 +32,43 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/clustered/hostsecret"
 )
+
+// Fake (NOT real) SSH credential material used across the host-inventory
+// credential tests. The distinctive tokens make the no-leak assertions precise:
+// if any byte of these appears in a log line or event, the test fails.
+var (
+	testHostSSHKey     = []byte("-----BEGIN OPENSSH PRIVATE KEY-----\nZZZ-SECRET-KEY-MATERIAL-DO-NOT-LOG-0001\ndeadbeefcafe==\n-----END OPENSSH PRIVATE KEY-----\n")
+	testHostKnownHosts = []byte("host-a ssh-ed25519 AAAAC3-SECRET-KNOWN-HOSTS-DO-NOT-LOG-0002\n")
+)
+
+// credSecret builds an Opaque credential Secret in namespace "default" carrying
+// the given data keys, mirroring the shape a Provider/Host credentialSecretRef
+// points at.
+func credSecret(name string, data map[string][]byte) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+		Type:       corev1.SecretTypeOpaque,
+		Data:       data,
+	}
+}
+
+// sshCredData is the standard well-formed credential Secret payload (ssh key +
+// known_hosts), matching the libvirt credential Secret keys the render mirrors.
+func sshCredData() map[string][]byte {
+	return map[string][]byte{
+		"ssh-privatekey": testHostSSHKey,
+		"known_hosts":    testHostKnownHosts,
+	}
+}
 
 // clusterProvider builds a topology=cluster Provider with TLS explicitly
 // disabled, so a full Reconcile proceeds past the TLS-posture gate all the way
@@ -104,7 +139,7 @@ func TestProvider_ClusterTopology_RendersHostInventorySecret(t *testing.T) {
 
 	cli := fake.NewClientBuilder().
 		WithScheme(sch).
-		WithObjects(prov, hostB, hostA, otherProvider, crossNS).
+		WithObjects(prov, hostB, hostA, otherProvider, crossNS, credSecret("test-creds", sshCredData())).
 		WithStatusSubresource(&infravirtrigaudiov1beta1.Provider{}).
 		Build()
 	r := &ProviderReconciler{Client: cli, Scheme: sch}
@@ -140,8 +175,13 @@ func TestProvider_ClusterTopology_RendersHostInventorySecret(t *testing.T) {
 	assert.Equal(t, "host-b", inv.Hosts[1].ID)
 	assert.Equal(t, "qemu+ssh://virt@host-a/system", inv.Hosts[0].Endpoint)
 	assert.Equal(t, map[string]string{"storage.virtrigaud.io/pool-nfs01": "true"}, inv.Hosts[0].Labels)
-	assert.Equal(t, hostsecret.Credentials{}, inv.Hosts[0].Credentials,
-		"credentials must be empty in the structural PR — no credential material rendered")
+	// Both hosts fall back to the Provider default credentialSecretRef
+	// ("test-creds"), so each carries the inlined SSH key + known_hosts.
+	assert.True(t, bytes.Equal(testHostSSHKey, inv.Hosts[0].Credentials.SSHPrivateKey),
+		"host credentials must inline the SSH private key from the Provider default secret")
+	assert.True(t, bytes.Equal(testHostKnownHosts, inv.Hosts[0].Credentials.KnownHosts),
+		"host credentials must inline known_hosts from the Provider default secret")
+	assert.True(t, bytes.Equal(testHostSSHKey, inv.Hosts[1].Credentials.SSHPrivateKey))
 
 	// --- The Deployment mount --------------------------------------------
 	dep := &appsv1.Deployment{}
@@ -203,7 +243,8 @@ func TestProvider_HostInventory_Idempotent(t *testing.T) {
 	prov := clusterProvider("libvirt-cluster")
 	cli := fake.NewClientBuilder().
 		WithScheme(sch).
-		WithObjects(prov, hostCR("host-a", "libvirt-cluster", nil), hostCR("host-b", "libvirt-cluster", nil)).
+		WithObjects(prov, hostCR("host-a", "libvirt-cluster", nil), hostCR("host-b", "libvirt-cluster", nil),
+			credSecret("test-creds", sshCredData())).
 		WithStatusSubresource(&infravirtrigaudiov1beta1.Provider{}).
 		Build()
 	r := &ProviderReconciler{Client: cli, Scheme: sch}
@@ -230,7 +271,7 @@ func TestProvider_HostInventory_AddRemoveHost(t *testing.T) {
 	hostA := hostCR("host-a", "libvirt-cluster", nil)
 	cli := fake.NewClientBuilder().
 		WithScheme(sch).
-		WithObjects(prov, hostA).
+		WithObjects(prov, hostA, credSecret("test-creds", sshCredData())).
 		WithStatusSubresource(&infravirtrigaudiov1beta1.Provider{}).
 		Build()
 	r := &ProviderReconciler{Client: cli, Scheme: sch}
@@ -304,4 +345,217 @@ func TestProvidersForHostPool_MapsToProviderRef(t *testing.T) {
 
 	// A non-HostPool object yields no requests.
 	assert.Nil(t, r.providersForHostPool(context.Background(), &corev1.Secret{}))
+}
+
+// renderedInventory reads the host-inventory Secret and returns the full parsed
+// Inventory (hosts + inlined credentials), for credential-level assertions.
+func renderedInventory(t *testing.T, cli client.Client) hostsecret.Inventory {
+	t.Helper()
+	secret := &corev1.Secret{}
+	require.NoError(t, cli.Get(context.Background(),
+		types.NamespacedName{Name: "libvirt-cluster-hosts", Namespace: "default"}, secret))
+	inv, err := hostsecret.Unmarshal(secret.Data[hostsecret.SecretDataKey])
+	require.NoError(t, err)
+	return inv
+}
+
+// drainEvents non-blockingly collects everything a FakeRecorder has buffered.
+func drainEvents(rec *record.FakeRecorder) []string {
+	var out []string
+	for {
+		select {
+		case e := <-rec.Events:
+			out = append(out, e)
+		default:
+			return out
+		}
+	}
+}
+
+// TestProvider_HostInventory_PerHostCredentialSecretRef proves per-host
+// credential resolution: a Host with its own spec.credentialSecretRef uses that
+// Secret, while a Host without one falls back to the Provider's default
+// credentialSecretRef — each host inlining its OWN source material.
+func TestProvider_HostInventory_PerHostCredentialSecretRef(t *testing.T) {
+	sch := newProviderTLSScheme(t)
+	prov := clusterProvider("libvirt-cluster") // default credentialSecretRef: test-creds
+
+	hostAKey := []byte("-----BEGIN OPENSSH PRIVATE KEY-----\nHOST-A-OWN-KEY-0003\n-----END OPENSSH PRIVATE KEY-----\n")
+
+	// host-a overrides with its own secret; host-b falls back to the default.
+	hostA := hostCR("host-a", "libvirt-cluster", nil)
+	hostA.Spec.CredentialSecretRef = &infravirtrigaudiov1beta1.ObjectRef{Name: "host-a-creds"}
+	hostB := hostCR("host-b", "libvirt-cluster", nil)
+
+	cli := fake.NewClientBuilder().
+		WithScheme(sch).
+		WithObjects(prov, hostA, hostB,
+			credSecret("test-creds", sshCredData()),
+			credSecret("host-a-creds", map[string][]byte{"ssh-privatekey": hostAKey})).
+		WithStatusSubresource(&infravirtrigaudiov1beta1.Provider{}).
+		Build()
+	r := &ProviderReconciler{Client: cli, Scheme: sch}
+
+	require.NoError(t, r.reconcileHostInventorySecret(context.Background(), prov))
+
+	inv := renderedInventory(t, cli)
+	require.Len(t, inv.Hosts, 2)
+	// host-a uses its own key (and carries no known_hosts, which its secret omits).
+	assert.True(t, bytes.Equal(hostAKey, inv.Hosts[0].Credentials.SSHPrivateKey),
+		"host-a must inline its own credentialSecretRef key")
+	assert.Nil(t, inv.Hosts[0].Credentials.KnownHosts,
+		"host-a's secret has no known_hosts, so the field must be omitted")
+	// host-b falls back to the Provider default.
+	assert.True(t, bytes.Equal(testHostSSHKey, inv.Hosts[1].Credentials.SSHPrivateKey),
+		"host-b must fall back to the Provider default key")
+	assert.True(t, bytes.Equal(testHostKnownHosts, inv.Hosts[1].Credentials.KnownHosts))
+
+	// All hosts resolved -> HostCredentialsReady=True.
+	cond := getConditionByType(t, prov.Status.Conditions, conditionHostCredentialsReady)
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionTrue, cond.Status)
+	assert.Equal(t, reasonCredentialsResolved, cond.Reason)
+}
+
+// TestProvider_HostInventory_MissingCredentialSecret_SkipsHost proves a host
+// whose credential Secret is missing is SKIPPED from the render while its
+// siblings still render, and the skip is surfaced via a non-secret condition and
+// a Warning event that name the host id + reason but no credential value.
+func TestProvider_HostInventory_MissingCredentialSecret_SkipsHost(t *testing.T) {
+	sch := newProviderTLSScheme(t)
+	prov := clusterProvider("libvirt-cluster")
+
+	hostA := hostCR("host-a", "libvirt-cluster", nil) // falls back to test-creds (present)
+	hostB := hostCR("host-b", "libvirt-cluster", nil)
+	hostB.Spec.CredentialSecretRef = &infravirtrigaudiov1beta1.ObjectRef{Name: "missing-creds"} // absent
+
+	cli := fake.NewClientBuilder().
+		WithScheme(sch).
+		WithObjects(prov, hostA, hostB, credSecret("test-creds", sshCredData())).
+		WithStatusSubresource(&infravirtrigaudiov1beta1.Provider{}).
+		Build()
+	rec := record.NewFakeRecorder(10)
+	r := &ProviderReconciler{Client: cli, Scheme: sch, Recorder: rec}
+
+	require.NoError(t, r.reconcileHostInventorySecret(context.Background(), prov),
+		"one host's missing credentials must NOT fail the whole reconcile")
+
+	// Only host-a rendered; host-b was dropped.
+	assert.Equal(t, []string{"host-a"}, renderedHostIDs(t, cli))
+
+	// Condition surfaces the skip, names host-b, and leaks no key material.
+	cond := getConditionByType(t, prov.Status.Conditions, conditionHostCredentialsReady)
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+	assert.Equal(t, reasonCredentialsUnresolved, cond.Reason)
+	assert.Contains(t, cond.Message, "host-b")
+	assert.Contains(t, cond.Message, "not found")
+	assert.NotContains(t, cond.Message, "host-a", "a rendered host must not appear in the skip message")
+	assertNoCredentialLeak(t, cond.Message)
+
+	// A Warning event was emitted naming the same, and no key material.
+	events := drainEvents(rec)
+	require.Len(t, events, 1)
+	assert.Contains(t, events[0], "Warning")
+	assert.Contains(t, events[0], eventReasonCredentialsUnresolved)
+	assert.Contains(t, events[0], "host-b")
+	assertNoCredentialLeak(t, events[0])
+}
+
+// TestProvider_HostInventory_MalformedCredentialSecret_SkipsHost proves a host
+// whose credential Secret EXISTS but lacks the SSH private key is treated the
+// same as missing: skipped, siblings render, surfaced without leaking material.
+func TestProvider_HostInventory_MalformedCredentialSecret_SkipsHost(t *testing.T) {
+	sch := newProviderTLSScheme(t)
+	prov := clusterProvider("libvirt-cluster")
+
+	hostA := hostCR("host-a", "libvirt-cluster", nil) // test-creds (well-formed)
+	hostB := hostCR("host-b", "libvirt-cluster", nil)
+	hostB.Spec.CredentialSecretRef = &infravirtrigaudiov1beta1.ObjectRef{Name: "malformed-creds"}
+
+	// malformed-creds exists but carries only known_hosts (no ssh-privatekey) and
+	// a whitespace-only key must not count as present either.
+	malformed := credSecret("malformed-creds", map[string][]byte{
+		"known_hosts":    testHostKnownHosts,
+		"ssh-privatekey": []byte("   \n"),
+	})
+
+	cli := fake.NewClientBuilder().
+		WithScheme(sch).
+		WithObjects(prov, hostA, hostB, credSecret("test-creds", sshCredData()), malformed).
+		WithStatusSubresource(&infravirtrigaudiov1beta1.Provider{}).
+		Build()
+	r := &ProviderReconciler{Client: cli, Scheme: sch}
+
+	require.NoError(t, r.reconcileHostInventorySecret(context.Background(), prov))
+
+	assert.Equal(t, []string{"host-a"}, renderedHostIDs(t, cli))
+	cond := getConditionByType(t, prov.Status.Conditions, conditionHostCredentialsReady)
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+	assert.Contains(t, cond.Message, "host-b")
+	assert.Contains(t, cond.Message, "ssh-privatekey")
+	assertNoCredentialLeak(t, cond.Message)
+}
+
+// TestProvider_HostInventory_NoLeak is the core security assertion: across a
+// render that inlines real credential material AND skips a host, NO byte of the
+// key or known_hosts material (raw or base64) may appear in any captured log
+// line or event. The material must reach ONLY the rendered Secret.
+func TestProvider_HostInventory_NoLeak(t *testing.T) {
+	sch := newProviderTLSScheme(t)
+	prov := clusterProvider("libvirt-cluster")
+
+	hostA := hostCR("host-a", "libvirt-cluster", nil) // renders with real material
+	hostB := hostCR("host-b", "libvirt-cluster", nil)
+	hostB.Spec.CredentialSecretRef = &infravirtrigaudiov1beta1.ObjectRef{Name: "missing-creds"} // skipped
+
+	cli := fake.NewClientBuilder().
+		WithScheme(sch).
+		WithObjects(prov, hostA, hostB, credSecret("test-creds", sshCredData())).
+		WithStatusSubresource(&infravirtrigaudiov1beta1.Provider{}).
+		Build()
+	rec := record.NewFakeRecorder(10)
+	r := &ProviderReconciler{Client: cli, Scheme: sch, Recorder: rec}
+
+	// Capture ALL controller logs via a funcr sink injected through the log ctx.
+	var logbuf bytes.Buffer
+	logger := funcr.New(func(prefix, args string) {
+		logbuf.WriteString(prefix)
+		logbuf.WriteString(args)
+		logbuf.WriteByte('\n')
+	}, funcr.Options{Verbosity: 10})
+	ctx := ctrllog.IntoContext(context.Background(), logr.New(logger.GetSink()))
+
+	require.NoError(t, r.reconcileHostInventorySecret(ctx, prov))
+
+	// Sanity: the material DID flow into the rendered Secret (base64 in hosts.json)
+	// — so we are genuinely testing a path that carried it, not a no-op.
+	secret := &corev1.Secret{}
+	require.NoError(t, cli.Get(ctx,
+		types.NamespacedName{Name: "libvirt-cluster-hosts", Namespace: "default"}, secret))
+	keyB64 := base64.StdEncoding.EncodeToString(testHostSSHKey)
+	assert.Contains(t, string(secret.Data[hostsecret.SecretDataKey]), keyB64,
+		"the rendered Secret must carry the inlined key (base64) — otherwise the leak test is vacuous")
+
+	// The material must appear in NEITHER logs NOR events, raw or base64.
+	assertNoCredentialLeak(t, logbuf.String())
+	for _, e := range drainEvents(rec) {
+		assertNoCredentialLeak(t, e)
+	}
+	// And the skip signal for host-b is still present in the logs (proving we
+	// captured the surfacing path, not an empty buffer).
+	assert.Contains(t, logbuf.String(), "host-b")
+}
+
+// assertNoCredentialLeak fails if s contains any credential material — the raw
+// key/known_hosts bytes or their base64 (JSON) encodings.
+func assertNoCredentialLeak(t *testing.T, s string) {
+	t.Helper()
+	for _, secret := range [][]byte{testHostSSHKey, testHostKnownHosts} {
+		assert.NotContains(t, s, string(secret), "raw credential material leaked")
+		assert.NotContains(t, s, base64.StdEncoding.EncodeToString(secret), "base64 credential material leaked")
+		// A distinctive interior token, in case of any partial/transformed emission.
+		assert.False(t, strings.Contains(s, "DO-NOT-LOG"), "a credential token leaked")
+	}
 }

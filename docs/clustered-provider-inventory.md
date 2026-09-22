@@ -3,10 +3,11 @@
 > **Status:** ADR-0007 P1, in progress. **Additive and v1beta1-safe.** Single-host
 > providers and their VMs are unchanged (ADR-0007 D9). Shipped so far: the two
 > inventory CRDs (`Host`/`HostPool`), the `ListHosts`/`GetHostInfo` gRPC contract
-> (stubbed in every provider), the `Provider.spec.topology` discriminator, and the
+> (stubbed in every provider), the `Provider.spec.topology` discriminator, the
 > operator side of the projected-Secret pipeline (rendering host **metadata** into
-> a Provider-owned Secret mounted into the provider pod). Still to come: credential
-> inlining into that Secret (a dedicated security-reviewed PR), the provider-side
+> a Provider-owned Secret mounted into the provider pod), and **per-host credential
+> inlining** into that Secret (the SSH private key + known_hosts resolved from each
+> Host's / the Provider's `credentialSecretRef`). Still to come: the provider-side
 > file consumption / hot-reload, the `topology: cluster` validating webhook, the
 > scheduler, and migration (later P1/P2 slices).
 
@@ -148,36 +149,90 @@ The document schema (`schemaVersion` gates format evolution):
       "id": "host-a",
       "endpoint": "qemu+ssh://virt@host-a/system",
       "labels": { "storage.virtrigaud.io/pool-nfs01": "true" },
-      "credentials": {}
+      "credentials": {
+        "sshPrivateKey": "<base64 of the SSH private key>",
+        "knownHosts": "<base64 of the known_hosts entry>"
+      }
     }
   ]
 }
 ```
 
+`credentials` carries the SSH connection material as base64-encoded bytes (the
+JSON encoding of Go `[]byte`), copied verbatim from the source credential Secret
+so a PEM key round-trips with no corruption. It mirrors the libvirt credential
+Secret keys — `sshPrivateKey` ← `ssh-privatekey`, `knownHosts` ← `known_hosts` —
+so the provider consumes it through the same code path it uses for single-host
+credentials today. A rendered host always carries `sshPrivateKey`; `knownHosts`
+is present only when the source Secret has one (an unpopulated `credentials` still
+renders as `{}` for schema stability). The SSH **user** is not inlined — it is part
+of the `endpoint` URI (`qemu+ssh://user@host/system`); **password** auth is not
+inlined either (the clustered model standardizes on key-based SSH with
+`known_hosts` verification, ADR-0004).
+
 See [`examples/provider-libvirt-clustered.yaml`](../examples/provider-libvirt-clustered.yaml)
 for a `topology: cluster` Provider that pairs with the `hostpool-clustered.yaml`
 inventory.
 
+### How each host's credentials are resolved
+
+For every fronted `Host`, the Provider controller resolves one credential Secret
+and inlines its SSH material into that host's `credentials`:
+
+1. **Per-host override first.** If `Host.spec.credentialSecretRef` is set, that
+   Secret is used (its namespace defaults to the Host's namespace).
+2. **Provider default otherwise.** Otherwise the Provider's own
+   `spec.credentialSecretRef` is used (in the Provider's namespace — the same
+   Secret the single-host credential mount uses).
+
+The controller extracts the libvirt credential-Secret keys `ssh-privatekey`
+(mandatory) and `known_hosts` (optional) and copies the raw bytes verbatim into
+the rendered document. The **operator** performs these Secret reads with the RBAC
+it already holds (`secrets: get;list;watch`); **no new RBAC is added**, and the
+provider still reads only the mounted file — never the Kubernetes API (#297).
+
+#### Missing or malformed credentials → skip that host, never fail the reconcile
+
+If a host's credential Secret is **missing**, **unreadable**, or **has no
+`ssh-privatekey`**, the controller does **not** render a half-usable host and does
+**not** fail the whole reconcile. It **skips that one host** from the inventory and
+continues with the rest, then surfaces the skip:
+
+- a `HostCredentialsReady` **condition** on the Provider goes `False`
+  (reason `CredentialsUnresolved`), listing the skipped **host ids** and a coarse
+  **reason** (e.g. `credential secret default/foo not found`);
+- a **Warning event** (`HostCredentialsUnresolved`) is emitted on the Provider;
+- a structured **log** line records the same.
+
+None of these ever carry a credential value — only host ids and coarse reasons.
+This is deliberately **fail-safe, never fail-open**: an unresolvable host is
+withheld until its credentials are fixed (which re-triggers a re-render), rather
+than shipped in a broken state. `known_hosts` is intentionally **not** required at
+render time — the provider keeps enforcing its ADR-0004 host-key policy (hard-fail
+unless the audit-flagged insecure escape hatch is set) at connect time, so that
+one security decision stays in a single place.
+
 ### What is deliberately NOT wired yet
 
-This is the **structural half** of the pipeline. Rendered separately, under their
-own reviews:
+This slice delivers credential **delivery** into the Secret. Rendered separately,
+under their own reviews:
 
-- **No credential material.** The `credentials` sub-document is **defined but left
-  empty** in this slice — the render path never reads or logs any credential
-  value. Resolving each Host's (or the Provider's) `credentialSecretRef` and
-  inlining the material is a **dedicated, security-reviewed PR**.
 - **No provider consumption.** The provider mounts the Secret but does **not** read
   it yet; the file-watch / hot-reload (lazy-open on host-add, graceful-drain on
   host-remove) and the N-host connection map land in a later PR.
 - **No webhook.** The `topology: cluster` validating webhook (ADR-0007 D2) is a
   later PR.
 
-Security posture, unchanged from single-host: the rendered object is a `Secret`
-(so connection material stays out of namespace-readable config), owned by the
-Provider and GC'd with it; provider pods still hold **no** Kubernetes RBAC and no
-projected API token (#297); and the manager writes **only** the one
-`<provider>-hosts` Secret it owns (it never gains secret-delete).
+Security posture: the rendered object is an `Opaque` `Secret` (so connection
+material stays out of namespace-readable config), owned by the Provider and GC'd
+with it; provider pods still hold **no** Kubernetes RBAC and no projected API
+token (#297); and the manager writes **only** the one `<provider>-hosts` Secret it
+owns (it never gains secret-delete). Inlining the material **duplicates** it
+(source credential Secret → rendered inventory Secret) — a deliberate #297
+tradeoff: the no-API-access invariant requires the provider to read connection
+material from a file, so the operator copies it there once. Both Secrets share the
+same protection boundary (`Opaque`, owner-referenced, namespace-scoped), and the
+render path never logs, stores in Status, or events any credential value.
 
 ## What "clustered" does not mean (yet)
 
