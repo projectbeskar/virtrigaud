@@ -48,6 +48,10 @@ const (
 	CapabilityDiskImport          Capability = "disk_import"
 	CapabilityExportCompression   Capability = "export_compression"
 	CapabilityTaskStatus          Capability = "task_status"
+	// CapabilityClustering marks a provider that fronts multiple hosts and
+	// implements host inventory (ListHosts/GetHostInfo) plus host-targeted
+	// placement (ADR-0007 P1, D7).
+	CapabilityClustering Capability = "clustering"
 
 	// Provider-specific capabilities
 	CapabilityVSphere     Capability = "vsphere"
@@ -178,6 +182,7 @@ func (m *Manager) GetCapabilities(ctx context.Context, req *providerv1.GetCapabi
 		SupportedExportBackends:     m.supportedExportBackends,
 		SupportedImportBackends:     m.supportedImportBackends,
 		SupportedTransferModes:      m.supportedTransferModes,
+		SupportsClustering:          m.HasCapability(CapabilityClustering),
 	}, nil
 }
 
@@ -307,6 +312,13 @@ func (b *Builder) OnlineDiskExpansion() *Builder {
 // TaskStatus adds task status checking capabilities.
 func (b *Builder) TaskStatus() *Builder {
 	b.manager.AddCapability(CapabilityTaskStatus)
+	return b
+}
+
+// Clustering marks the provider as fronting multiple hosts with host inventory
+// (ListHosts/GetHostInfo) and host-targeted placement (ADR-0007 P1, D7).
+func (b *Builder) Clustering() *Builder {
+	b.manager.AddCapability(CapabilityClustering)
 	return b
 }
 

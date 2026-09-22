@@ -85,6 +85,12 @@ func (s *stubProvider) GetDiskInfo(_ context.Context, _ contracts.GetDiskInfoReq
 	return contracts.GetDiskInfoResponse{}, nil
 }
 func (s *stubProvider) ListVMs(_ context.Context) ([]contracts.VMInfo, error) { return nil, nil }
+func (s *stubProvider) ListHosts(_ context.Context) ([]contracts.HostInfo, error) {
+	return nil, nil
+}
+func (s *stubProvider) GetHostInfo(_ context.Context, _ string) (contracts.HostInfo, error) {
+	return contracts.HostInfo{}, nil
+}
 
 var _ = Describe("VirtualMachine Controller", func() {
 	Context("When reconciling a resource", func() {

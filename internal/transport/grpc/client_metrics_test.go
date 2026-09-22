@@ -128,6 +128,8 @@ type fakeProviderServer struct {
 	providerv1.UnimplementedProviderServer
 	ValidateFn        func(ctx context.Context, req *providerv1.ValidateRequest) (*providerv1.ValidateResponse, error)
 	GetCapabilitiesFn func(ctx context.Context, req *providerv1.GetCapabilitiesRequest) (*providerv1.GetCapabilitiesResponse, error)
+	ListHostsFn       func(ctx context.Context, req *providerv1.ListHostsRequest) (*providerv1.ListHostsResponse, error)
+	GetHostInfoFn     func(ctx context.Context, req *providerv1.GetHostInfoRequest) (*providerv1.HostInfo, error)
 }
 
 func (f *fakeProviderServer) Validate(ctx context.Context, req *providerv1.ValidateRequest) (*providerv1.ValidateResponse, error) {
@@ -142,6 +144,20 @@ func (f *fakeProviderServer) GetCapabilities(ctx context.Context, req *providerv
 		return f.GetCapabilitiesFn(ctx, req)
 	}
 	return &providerv1.GetCapabilitiesResponse{}, nil
+}
+
+func (f *fakeProviderServer) ListHosts(ctx context.Context, req *providerv1.ListHostsRequest) (*providerv1.ListHostsResponse, error) {
+	if f.ListHostsFn != nil {
+		return f.ListHostsFn(ctx, req)
+	}
+	return &providerv1.ListHostsResponse{}, nil
+}
+
+func (f *fakeProviderServer) GetHostInfo(ctx context.Context, req *providerv1.GetHostInfoRequest) (*providerv1.HostInfo, error) {
+	if f.GetHostInfoFn != nil {
+		return f.GetHostInfoFn(ctx, req)
+	}
+	return &providerv1.HostInfo{}, nil
 }
 
 // startBufconnServer brings up an in-process gRPC server backed by

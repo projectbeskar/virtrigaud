@@ -458,6 +458,7 @@ func (c *Client) GetCapabilities(ctx context.Context) (contracts.Capabilities, e
 		SupportedExportBackends:     resp.SupportedExportBackends,
 		SupportedImportBackends:     resp.SupportedImportBackends,
 		SupportedTransferModes:      resp.SupportedTransferModes,
+		SupportsClustering:          resp.SupportsClustering,
 	}, nil
 }
 
@@ -984,6 +985,77 @@ func (c *Client) ListVMs(ctx context.Context) ([]contracts.VMInfo, error) {
 	}
 
 	return vmInfos, nil
+}
+
+// ListHosts implements contracts.Provider. It returns the hosts a clustered
+// provider fronts (ADR-0007 P1). Single-host and thin-client providers return a
+// gRPC Unimplemented error, which mapGRPCError surfaces to the caller.
+func (c *Client) ListHosts(ctx context.Context) ([]contracts.HostInfo, error) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+
+	resp, err := c.client.ListHosts(ctx, &providerv1.ListHostsRequest{})
+	if err != nil {
+		return nil, c.mapGRPCError("listHosts", err)
+	}
+
+	hosts := make([]contracts.HostInfo, 0, len(resp.Hosts))
+	for _, protoHost := range resp.Hosts {
+		hosts = append(hosts, hostInfoFromProto(protoHost))
+	}
+
+	return hosts, nil
+}
+
+// GetHostInfo implements contracts.Provider. It refreshes a single host's
+// inventory (ADR-0007 P1) — cheaper than a full ListHosts poll. Non-clustered
+// providers return a gRPC Unimplemented error.
+func (c *Client) GetHostInfo(ctx context.Context, hostID string) (contracts.HostInfo, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	resp, err := c.client.GetHostInfo(ctx, &providerv1.GetHostInfoRequest{HostId: hostID})
+	if err != nil {
+		return contracts.HostInfo{}, c.mapGRPCError("getHostInfo", err)
+	}
+
+	return hostInfoFromProto(resp), nil
+}
+
+// hostInfoFromProto converts a provider.v1 HostInfo into the manager-side
+// contracts.HostInfo, including the HostHealth enum mapping. A nil proto host
+// yields the zero HostInfo.
+func hostInfoFromProto(h *providerv1.HostInfo) contracts.HostInfo {
+	if h == nil {
+		return contracts.HostInfo{}
+	}
+	return contracts.HostInfo{
+		ID:                 h.Id,
+		Address:            h.Address,
+		AllocatableCPU:     h.AllocatableCpu,
+		AllocatableMemMiB:  h.AllocatableMemMib,
+		AllocatableStorage: h.AllocatableStorage,
+		Health:             hostHealthFromProto(h.Health),
+		Labels:             h.Labels,
+		CPUModel:           h.CpuModel,
+		CPUFeatures:        h.CpuFeatures,
+		MachineTypes:       h.MachineTypes,
+		EmulatorVersion:    h.EmulatorVersion,
+	}
+}
+
+// hostHealthFromProto maps the provider.v1 HostHealth enum onto the
+// transport-agnostic contracts.HostHealth. Unknown/unspecified values map to
+// HostHealthUnspecified.
+func hostHealthFromProto(h providerv1.HostHealth) contracts.HostHealth {
+	switch h {
+	case providerv1.HostHealth_HOST_HEALTH_READY:
+		return contracts.HostHealthReady
+	case providerv1.HostHealth_HOST_HEALTH_NOT_READY:
+		return contracts.HostHealthNotReady
+	default:
+		return contracts.HostHealthUnspecified
+	}
 }
 
 // convertCreateRequest converts contracts.CreateRequest to gRPC format

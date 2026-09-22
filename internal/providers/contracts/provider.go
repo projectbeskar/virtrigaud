@@ -134,6 +134,18 @@ type Provider interface {
 	// ListVMs returns all VMs managed by this provider
 	// Used for discovery and adoption of existing VMs
 	ListVMs(ctx context.Context) ([]VMInfo, error)
+
+	// ListHosts returns every hypervisor host fronted by this provider.
+	// Clustered providers (ADR-0007 P1) report their host inventory here so the
+	// operator can schedule VMs across hosts; single-host and thin-client
+	// providers return an Unimplemented error and advertise
+	// Capabilities.SupportsClustering = false.
+	ListHosts(ctx context.Context) ([]HostInfo, error)
+
+	// GetHostInfo returns the current inventory for a single host — a cheaper
+	// refresh than a full ListHosts poll. Like ListHosts it is only implemented
+	// by clustered providers; others return an Unimplemented error.
+	GetHostInfo(ctx context.Context, hostID string) (HostInfo, error)
 }
 
 // VMInfo contains basic information about a VM for discovery

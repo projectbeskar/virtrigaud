@@ -37,6 +37,8 @@ const (
 	Provider_ImportDisk_FullMethodName      = "/provider.v1.Provider/ImportDisk"
 	Provider_GetDiskInfo_FullMethodName     = "/provider.v1.Provider/GetDiskInfo"
 	Provider_ListVMs_FullMethodName         = "/provider.v1.Provider/ListVMs"
+	Provider_ListHosts_FullMethodName       = "/provider.v1.Provider/ListHosts"
+	Provider_GetHostInfo_FullMethodName     = "/provider.v1.Provider/GetHostInfo"
 )
 
 // ProviderClient is the client API for Provider service.
@@ -81,6 +83,12 @@ type ProviderClient interface {
 	GetDiskInfo(ctx context.Context, in *GetDiskInfoRequest, opts ...grpc.CallOption) (*GetDiskInfoResponse, error)
 	// List all VMs managed by this provider
 	ListVMs(ctx context.Context, in *ListVMsRequest, opts ...grpc.CallOption) (*ListVMsResponse, error)
+	// Host inventory (ADR-0007 P1). Clustered providers report the hosts they
+	// front so the operator can schedule across them; single-host and thin-client
+	// providers return codes.Unimplemented and advertise supports_clustering =
+	// false. GetHostInfo is the cheaper single-host refresh.
+	ListHosts(ctx context.Context, in *ListHostsRequest, opts ...grpc.CallOption) (*ListHostsResponse, error)
+	GetHostInfo(ctx context.Context, in *GetHostInfoRequest, opts ...grpc.CallOption) (*HostInfo, error)
 }
 
 type providerClient struct {
@@ -271,6 +279,26 @@ func (c *providerClient) ListVMs(ctx context.Context, in *ListVMsRequest, opts .
 	return out, nil
 }
 
+func (c *providerClient) ListHosts(ctx context.Context, in *ListHostsRequest, opts ...grpc.CallOption) (*ListHostsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListHostsResponse)
+	err := c.cc.Invoke(ctx, Provider_ListHosts_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *providerClient) GetHostInfo(ctx context.Context, in *GetHostInfoRequest, opts ...grpc.CallOption) (*HostInfo, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(HostInfo)
+	err := c.cc.Invoke(ctx, Provider_GetHostInfo_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ProviderServer is the server API for Provider service.
 // All implementations must embed UnimplementedProviderServer
 // for forward compatibility.
@@ -313,6 +341,12 @@ type ProviderServer interface {
 	GetDiskInfo(context.Context, *GetDiskInfoRequest) (*GetDiskInfoResponse, error)
 	// List all VMs managed by this provider
 	ListVMs(context.Context, *ListVMsRequest) (*ListVMsResponse, error)
+	// Host inventory (ADR-0007 P1). Clustered providers report the hosts they
+	// front so the operator can schedule across them; single-host and thin-client
+	// providers return codes.Unimplemented and advertise supports_clustering =
+	// false. GetHostInfo is the cheaper single-host refresh.
+	ListHosts(context.Context, *ListHostsRequest) (*ListHostsResponse, error)
+	GetHostInfo(context.Context, *GetHostInfoRequest) (*HostInfo, error)
 	mustEmbedUnimplementedProviderServer()
 }
 
@@ -376,6 +410,12 @@ func (UnimplementedProviderServer) GetDiskInfo(context.Context, *GetDiskInfoRequ
 }
 func (UnimplementedProviderServer) ListVMs(context.Context, *ListVMsRequest) (*ListVMsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListVMs not implemented")
+}
+func (UnimplementedProviderServer) ListHosts(context.Context, *ListHostsRequest) (*ListHostsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListHosts not implemented")
+}
+func (UnimplementedProviderServer) GetHostInfo(context.Context, *GetHostInfoRequest) (*HostInfo, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetHostInfo not implemented")
 }
 func (UnimplementedProviderServer) mustEmbedUnimplementedProviderServer() {}
 func (UnimplementedProviderServer) testEmbeddedByValue()                  {}
@@ -722,6 +762,42 @@ func _Provider_ListVMs_Handler(srv interface{}, ctx context.Context, dec func(in
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Provider_ListHosts_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListHostsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProviderServer).ListHosts(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Provider_ListHosts_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProviderServer).ListHosts(ctx, req.(*ListHostsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Provider_GetHostInfo_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetHostInfoRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProviderServer).GetHostInfo(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Provider_GetHostInfo_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProviderServer).GetHostInfo(ctx, req.(*GetHostInfoRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Provider_ServiceDesc is the grpc.ServiceDesc for Provider service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -800,6 +876,14 @@ var Provider_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListVMs",
 			Handler:    _Provider_ListVMs_Handler,
+		},
+		{
+			MethodName: "ListHosts",
+			Handler:    _Provider_ListHosts_Handler,
+		},
+		{
+			MethodName: "GetHostInfo",
+			Handler:    _Provider_GetHostInfo_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

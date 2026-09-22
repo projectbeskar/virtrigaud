@@ -77,6 +77,28 @@ one `HostPool` (Spread strategy) with two `Host`s that both see storage pool
 `nfs01` and bridge `br-vlan100`, making shared-storage live migration between
 them possible once the migration slice ships.
 
+## Provider gRPC contract for inventory
+
+The wire contract the inventory-sync controller will call is now defined in
+`proto/provider/v1/provider.proto` (additive, no package bump):
+
+| Addition | Purpose |
+|----------|---------|
+| `rpc ListHosts(ListHostsRequest) returns (ListHostsResponse)` | Enumerate every host a clustered provider fronts. |
+| `rpc GetHostInfo(GetHostInfoRequest) returns (HostInfo)` | Cheaper single-host refresh (reconciling one `Host`). |
+| `message HostInfo` (fields 1–11) + `enum HostHealth` | Per-host inventory: id, address, allocatable CPU/mem/storage, health, labels, CPU model/features, machine types, emulator version. Mirrors `Host.status`. |
+| `bool supports_clustering` on `GetCapabilitiesResponse` (field 17) | A provider advertises here that it fronts a host set and implements the two RPCs above. |
+
+**These RPCs are contract-only today.** Every production provider (vSphere,
+libvirt, Proxmox) and the mock provider returns `codes.Unimplemented` for
+`ListHosts`/`GetHostInfo` and advertises `supports_clustering = false` —
+honesty-first (ADR-0007 D7). libvirt is the first hypervisor slated to implement
+them for real (N host connections keyed by `host_id`, reading `virsh nodeinfo` /
+`pool-info` / `domcapabilities`); that lands in a later ADR-0007 P1 PR alongside
+the projected-Secret and the inventory-sync controller. The manager-side gRPC
+client and the provider SDK already map the new messages, so the real
+implementation only has to fill in the host queries.
+
 ## What "clustered" does not mean (yet)
 
 - **No automatic HA / failover.** v1 detects and surfaces host-down and supports
