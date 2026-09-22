@@ -275,6 +275,27 @@ func (c *Client) ListVMs(ctx context.Context) ([]*providerv1.VMInfo, error) {
 	return resp.Vms, nil
 }
 
+// ListHosts lists the hypervisor hosts a clustered provider fronts (ADR-0007
+// P1). Non-clustered providers return a gRPC Unimplemented error.
+func (c *Client) ListHosts(ctx context.Context) ([]*providerv1.HostInfo, error) {
+	ctx, cancel := c.withTimeout(ctx, "/provider.v1.Provider/ListHosts")
+	defer cancel()
+	resp, err := c.client.ListHosts(ctx, &providerv1.ListHostsRequest{})
+	if err != nil {
+		return nil, errors.FromGRPCError(err)
+	}
+	return resp.Hosts, nil
+}
+
+// GetHostInfo refreshes a single host's inventory (ADR-0007 P1) — cheaper than a
+// full ListHosts poll. Non-clustered providers return a gRPC Unimplemented error.
+func (c *Client) GetHostInfo(ctx context.Context, hostID string) (*providerv1.HostInfo, error) {
+	ctx, cancel := c.withTimeout(ctx, "/provider.v1.Provider/GetHostInfo")
+	defer cancel()
+	resp, err := c.client.GetHostInfo(ctx, &providerv1.GetHostInfoRequest{HostId: hostID})
+	return resp, errors.FromGRPCError(err)
+}
+
 // TaskStatus checks the status of an async task.
 func (c *Client) TaskStatus(ctx context.Context, req *providerv1.TaskStatusRequest) (*providerv1.TaskStatusResponse, error) {
 	ctx, cancel := c.withTimeout(ctx, "/provider.v1.Provider/TaskStatus")

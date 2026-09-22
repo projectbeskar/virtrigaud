@@ -75,6 +75,33 @@ func TestBuilder_DiskMigrationDefaultsFalse(t *testing.T) {
 	}
 }
 
+// TestBuilder_ClusteringDefaultsFalse verifies supports_clustering defaults to
+// false when the provider does not opt in — honesty-first (ADR-0007 P1, D7). A
+// provider that does not front a projected host set must not be over-reported.
+func TestBuilder_ClusteringDefaultsFalse(t *testing.T) {
+	m := NewBuilder().Core().Build()
+	resp, err := m.GetCapabilities(context.Background(), &providerv1.GetCapabilitiesRequest{})
+	if err != nil {
+		t.Fatalf("GetCapabilities: %v", err)
+	}
+	if resp.SupportsClustering {
+		t.Error("SupportsClustering should default to false when Clustering() is not called")
+	}
+}
+
+// TestBuilder_Clustering verifies the Clustering() builder method surfaces
+// supports_clustering on the gRPC GetCapabilitiesResponse (ADR-0007 P1).
+func TestBuilder_Clustering(t *testing.T) {
+	m := NewBuilder().Core().Clustering().Build()
+	resp, err := m.GetCapabilities(context.Background(), &providerv1.GetCapabilitiesRequest{})
+	if err != nil {
+		t.Fatalf("GetCapabilities: %v", err)
+	}
+	if !resp.SupportsClustering {
+		t.Error("SupportsClustering should be true after Clustering()")
+	}
+}
+
 // TestBuilder_StorageBackends verifies the ADR-0006 backend/transfer-mode
 // builder methods surface on the gRPC GetCapabilitiesResponse so providers can
 // advertise their honest staging-backend support (ADR-0006 Slice 0).

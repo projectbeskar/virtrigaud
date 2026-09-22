@@ -5,6 +5,29 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-22 08:11] - ListHosts/GetHostInfo RPCs + host inventory contract (ADR-0007 P1)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `proto/provider/v1/provider.proto`: host-inventory gRPC contract — `ListHosts`/`GetHostInfo` RPCs, the `ListHostsRequest`/`ListHostsResponse`/`GetHostInfoRequest`/`HostInfo` messages (`HostInfo` fields 1–11), the `HostHealth` enum, and `supports_clustering` (field **17**) on `GetCapabilitiesResponse`. Regenerated `proto/rpc/provider/v1/provider.pb.go` + `provider_grpc.pb.go` (buf; idempotent).
+- `internal/providers/contracts/hosts.go`: manager-side `HostInfo` + `HostHealth` contract types. `provider.go`: `ListHosts`/`GetHostInfo` added to the `Provider` interface. `capabilities.go`: `SupportsClustering` added to `Capabilities`.
+- `internal/transport/grpc/client.go`: manager gRPC client `ListHosts`/`GetHostInfo` (proto→contract mapping incl. the `HostHealth` enum) and the `SupportsClustering` capability mapping.
+- `sdk/provider/client/client.go`: SDK client `ListHosts`/`GetHostInfo`. `sdk/provider/capabilities/capabilities.go`: `CapabilityClustering` + `Clustering()` builder + response wiring.
+- `internal/providers/{libvirt,vsphere,proxmox,mock}/hosts.go`: `codes.Unimplemented` stubs for both RPCs via `errors.NewUnimplemented`; every provider still advertises `supports_clustering = false` (honesty-first, ADR-0007 D7). libvirt's in-process `*Provider` also gains the contract methods; its real N-host implementation is a later PR.
+- Tests: per-provider `hosts_test.go` (each returns Unimplemented and reports `supports_clustering=false`), a manager-client round-trip mapping test plus an end-to-end Unimplemented path through the real mock provider (`client_hosts_test.go`), and SDK `Clustering()` builder tests. `docs/clustered-provider-inventory.md`: documents the new RPCs/capability as contract-only stubs.
+
+### Why
+Contract-first step of ADR-0007 P1's host-inventory slice (D1, brain-in-operator): land the load-bearing gRPC shapes and capability flag that the clustered libvirt provider and the future inventory-sync controller/scheduler will consume, so later PRs implement real behavior against a stable, all-providers wire contract. The change is additive — existing single-host providers simply return Unimplemented, with no proto package bump (ADR-0007 D9).
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+### Note
+Additive API / gRPC-contract addition (no major proto bump, wire-compatible). The manager and provider images share the regenerated `provider.v1` bindings and should be rebuilt together on the next release, but no coordinated rollout is required: every provider returns Unimplemented for the new RPCs and advertises `supports_clustering = false`.
+
 ## [2026-09-22 07:13] - Commit and accept ADR-0007 and ADR-0008
 **Author:** @wrkode (William Rizzo)
 

@@ -59,6 +59,12 @@ type Capabilities struct {
 	// SupportedTransferModes lists the disk-transfer modes the provider supports
 	// ("relay", "direct"). Empty means relay-only (ADR-0006 Slice 0).
 	SupportedTransferModes []string
+	// SupportsClustering reports whether the provider fronts multiple hosts and
+	// implements host inventory (ListHosts/GetHostInfo) plus host-targeted
+	// placement (ADR-0007 P1, D7). False for single-host and thin-client
+	// providers. The remaining clustering capabilities (live/block migration,
+	// host evacuation, storage modes) are added by the migration slice.
+	SupportsClustering bool
 }
 
 // CapabilityReporter is an optional capability of a Provider: it reports the

@@ -286,6 +286,53 @@ message NetworkInfo {
   string ip_address = 3;  // IP address if static
 }
 
+// --- Host inventory (ADR-0007 P1, D1/D3) ------------------------------------
+// Host inventory lets a clustered ("brain-in-operator") provider report the
+// hosts it fronts so the operator can schedule VMs across them. Single-host and
+// thin-client providers do not implement these RPCs: they return
+// codes.Unimplemented and advertise supports_clustering = false (D7,
+// honesty-first). No VM or disk bytes traverse these calls — they return host
+// inventory metadata only.
+
+// List every host a clustered provider fronts
+message ListHostsRequest {}
+
+message ListHostsResponse {
+  repeated HostInfo hosts = 1;
+}
+
+// HostInfo describes one hypervisor host in a clustered provider's inventory.
+// The shape is hypervisor-AGNOSTIC; the SOURCE of each value is per-hypervisor
+// (e.g. libvirt reads `virsh nodeinfo` / `pool-info` / `domcapabilities`). See
+// ADR-0007 for the full agnostic-vs-per-hypervisor breakdown.
+message HostInfo {
+  string id = 1;                       // Operator-assigned host id (== Host CR name). AGNOSTIC.
+  string address = 2;                  // SSH endpoint / agent address. AGNOSTIC.
+  int32 allocatable_cpu = 3;           // Allocatable vCPUs. AGNOSTIC shape; per-HV source.
+  int64 allocatable_mem_mib = 4;       // Allocatable memory in MiB. AGNOSTIC shape; per-HV source.
+  int64 allocatable_storage = 5;       // Allocatable storage in bytes. Per-HV (per-pool vs host-fs).
+  HostHealth health = 6;               // Health probe result. AGNOSTIC enum; per-HV probe.
+  map<string, string> labels = 7;      // Scheduling constraints (storage-pool/network visibility, zone/rack). AGNOSTIC.
+  string cpu_model = 8;                // Baseline CPU model. Per-HV interpretation.
+  repeated string cpu_features = 9;    // CPU feature flags. Per-HV.
+  repeated string machine_types = 10;  // Supported machine types. Per-HV.
+  string emulator_version = 11;        // Emulator/hypervisor version. Per-HV.
+}
+
+// HostHealth is the AGNOSTIC health enum for a host; the probe that produces it
+// is per-hypervisor (e.g. libvirtd reachability).
+enum HostHealth {
+  HOST_HEALTH_UNSPECIFIED = 0;
+  HOST_HEALTH_READY = 1;
+  HOST_HEALTH_NOT_READY = 2;
+}
+
+// Refresh a single host's inventory — cheaper than a full ListHosts poll when
+// reconciling one Host CR. Returns a HostInfo.
+message GetHostInfoRequest {
+  string host_id = 1;
+}
+
 // Capability check - what features does this provider support
 message GetCapabilitiesRequest {}
 
@@ -306,6 +353,7 @@ message GetCapabilitiesResponse {
   repeated string supported_export_backends = 14; // Export staging backends: "pvc"|"nfs"|"s3" (ADR-0006; empty == pvc-only)
   repeated string supported_import_backends = 15; // Import staging backends: "pvc"|"nfs"|"s3" (ADR-0006; empty == pvc-only)
   repeated string supported_transfer_modes = 16;  // Transfer modes: "relay"|"direct" (ADR-0006; empty == relay-only)
+  bool supports_clustering = 17;                   // Provider fronts multiple hosts and implements host inventory (ListHosts/GetHostInfo) + host-targeted placement (ADR-0007 P1, D7). The remaining clustering flags (live/block migration, host evacuation, storage modes) are added by the migration slice.
 }
 
 // Provider service definition
@@ -359,4 +407,11 @@ service Provider {
   
   // List all VMs managed by this provider
   rpc ListVMs(ListVMsRequest) returns (ListVMsResponse);
+
+  // Host inventory (ADR-0007 P1). Clustered providers report the hosts they
+  // front so the operator can schedule across them; single-host and thin-client
+  // providers return codes.Unimplemented and advertise supports_clustering =
+  // false. GetHostInfo is the cheaper single-host refresh.
+  rpc ListHosts(ListHostsRequest) returns (ListHostsResponse);
+  rpc GetHostInfo(GetHostInfoRequest) returns (HostInfo);
 }
