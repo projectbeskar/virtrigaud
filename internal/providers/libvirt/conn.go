@@ -56,6 +56,15 @@ type providerBackend interface {
 	// constructor to project N. The Server obtains its per-host handle here
 	// instead of reaching into an unexported *Provider field.
 	conn(ctx context.Context) (libvirtConn, error)
+
+	// clustered reports whether the provider is running in CLUSTERED topology
+	// (ADR-0007 D3) — fronting N host-keyed connections from a mounted inventory
+	// — versus single-host mode. The Server uses it to gate the host-inventory
+	// surface: GetCapabilities advertises supports_clustering only when true, and
+	// ListHosts/GetHostInfo are real only then (single-host stays Unimplemented,
+	// D9). It is the *Provider's clusterReg != nil discriminator, exposed through
+	// the seam so the Server never type-asserts the concrete type.
+	clustered() bool
 }
 
 // libvirtConn is the libvirt-specific view of one host's connection that the

@@ -7,12 +7,15 @@
 > operator side of the projected-Secret pipeline (rendering host **metadata** into
 > a Provider-owned Secret mounted into the provider pod), **per-host credential
 > inlining** into that Secret (the SSH private key + known_hosts resolved from each
-> Host's / the Provider's `credentialSecretRef`), and the **libvirt provider-side
+> Host's / the Provider's `credentialSecretRef`), the **libvirt provider-side
 > consumption** of that file — parsing it into N host-keyed connections and
-> hot-reloading them on change. Still to come: the RPC consumers that DRIVE those
-> connections (real `ListHosts`/`GetHostInfo`, host-targeted `Create`/`Migrate`),
-> the `topology: cluster` validating webhook, the scheduler, and migration (later
-> P1/P2 slices).
+> hot-reloading them on change — and the **libvirt `ListHosts`/`GetHostInfo`
+> implementation**: the clustered libvirt provider now *answers* those RPCs with
+> live per-host facts (`virsh nodeinfo` / `capabilities` / `domcapabilities` /
+> `pool-info`) and advertises `supports_clustering = true`. Still to come: the
+> inventory-sync controller that *calls* those RPCs to populate `Host.status`,
+> host-targeted `Create`/`Migrate` (via `target_host_id`), the `topology: cluster`
+> validating webhook, the scheduler, and migration (later P1/P2 slices).
 
 VirtRigaud is adding a new *class* of provider — a **clustered / orchestrator**
 provider — that makes VirtRigaud itself the cluster manager for hypervisors that
@@ -98,15 +101,63 @@ The wire contract the inventory-sync controller will call is now defined in
 | `message HostInfo` (fields 1–11) + `enum HostHealth` | Per-host inventory: id, address, allocatable CPU/mem/storage, health, labels, CPU model/features, machine types, emulator version. Mirrors `Host.status`. |
 | `bool supports_clustering` on `GetCapabilitiesResponse` (field 17) | A provider advertises here that it fronts a host set and implements the two RPCs above. |
 
-**These RPCs are contract-only today.** Every production provider (vSphere,
-libvirt, Proxmox) and the mock provider returns `codes.Unimplemented` for
-`ListHosts`/`GetHostInfo` and advertises `supports_clustering = false` —
-honesty-first (ADR-0007 D7). libvirt is the first hypervisor slated to implement
-them for real (N host connections keyed by `host_id`, reading `virsh nodeinfo` /
-`pool-info` / `domcapabilities`); that lands in a later ADR-0007 P1 PR alongside
-the projected-Secret and the inventory-sync controller. The manager-side gRPC
-client and the provider SDK already map the new messages, so the real
-implementation only has to fill in the host queries.
+**libvirt now implements these RPCs for real in clustered topology.** A libvirt
+provider running with `topology: cluster` answers `ListHosts`/`GetHostInfo` with
+live per-host facts and advertises `supports_clustering = true`. vSphere,
+Proxmox, and the mock provider — and a **single-host** libvirt provider — still
+return `codes.Unimplemented` and advertise `supports_clustering = false`
+(honesty-first, ADR-0007 D7/D9): these are clustered-only RPCs.
+
+### What `ListHosts` reports per host (libvirt)
+
+For each host the registry fronts, the clustered libvirt provider borrows a
+short-lived connection lease and runs a small, read-only `virsh` query set —
+each `HostInfo` field is fed by exactly one command:
+
+| `HostInfo` field | Source (libvirt) |
+|------------------|------------------|
+| `id`, `address`, `labels` | The parsed host inventory (no query). `address` is the host's endpoint; `labels` are its placement facts. **Never** the connection secrets. |
+| `allocatable_cpu` | `virsh nodeinfo` → `CPU(s)` (logical CPU count). |
+| `allocatable_mem_mib` | `virsh nodeinfo` → `Memory size` (KiB, converted to MiB). |
+| `cpu_model`, `cpu_features` | `virsh capabilities` → `<host><cpu><model>` and the `<feature>` flags (parsed via typed `libvirtxml.Caps`). |
+| `machine_types` | `virsh domcapabilities` → the default `<machine>` (typed `libvirtxml.DomainCaps`). See the note below. |
+| `emulator_version` | `virsh domcapabilities` → `<path>` (the emulator binary path). See the note below. |
+| `allocatable_storage` | `virsh pool-list --all` + `virsh pool-info --bytes` on each **active** pool, summing `Available`. Best-effort. |
+| `health` | `nodeinfo` reachability: `Ready` when the connection and `nodeinfo` succeed, `NotReady` otherwise. |
+
+**`allocatable` = host TOTAL, not free-after-overcommit.** `allocatable_cpu` and
+`allocatable_mem_mib` are the host's **raw schedulable capacity** (total logical
+CPUs, total memory). This layer does **not** apply `HostPool` overcommit ratios
+and does **not** subtract already-bound VMs — the operator-side scheduler does
+that later, on top of these totals (ADR-0007). The field name follows the wire
+contract; read it as "capacity the scheduler starts from".
+
+**Health does not fail the whole call.** One unreachable host is reported
+`NotReady` (with the id/address/labels the registry still knows) while its
+siblings render normally — a single down host never aborts `ListHosts`. Only a
+non-clustered provider errors (with `Unimplemented`).
+
+**Best-effort fields.** `nodeinfo` is the one *core* query (it gates health); if
+it fails the host is `NotReady` and the richer queries are skipped. `capabilities`,
+`domcapabilities`, and the storage pools are **best-effort**: a failure there
+leaves that field empty/`0` and is logged, never flipping health. Storage is
+whole-host today because the inventory file carries no per-pool configuration yet.
+
+**Two documented judgment calls (deviations from a naive reading):**
+
+- `machine_types` is the host's **default** machine type only — `virsh
+  domcapabilities` reports a single `<machine>` for the default emulator/arch, not
+  the full enumeration. A complete list (from `virsh capabilities` `<guest>`
+  arches) is a follow-up.
+- `emulator_version` carries the emulator **binary path** (e.g.
+  `/usr/bin/qemu-system-x86_64`), because `domcapabilities` exposes no numeric QEMU
+  version. The path is the emulator *identity* the ADR-0007 migration pre-flight's
+  "same emulator" check compares; a true version string (via `virsh version`) is a
+  follow-up.
+
+The lease is **always released** on every path (success, query error, even if the
+host is removed mid-collection), so gathering inventory never severs the
+graceful-drain guarantee the registry provides.
 
 ## The `topology` discriminator and the projected-Secret pipeline
 
@@ -272,13 +323,16 @@ insecure escape hatch is set, exactly as the single-host path does.
 
 ### What is deliberately NOT wired yet
 
-This slice **builds and hot-reloads** the N connections; it does not yet DRIVE them
-from any RPC. Rendered separately, under their own reviews:
+The libvirt provider now **answers** `ListHosts`/`GetHostInfo`, but nothing yet
+**calls** them or acts on placement. Rendered separately, under their own reviews:
 
-- **No RPC consumers.** The real `ListHosts`/`GetHostInfo` implementation and
-  host-targeted `Create`/`Migrate` (via `target_host_id`) land in later PRs. In
-  this slice the connections exist and reconcile, but no RPC handler routes to them
-  yet (mirroring how #315's mounted Secret was, at first, unread).
+- **No inventory-sync controller.** No operator controller calls `ListHosts`/
+  `GetHostInfo` yet, so `Host.status` is not populated from live facts — that
+  controller is the next PR. The provider *answers* the RPCs; the brain does not
+  *ask* yet.
+- **No host-targeted placement.** Host-targeted `Create`/`Migrate` (via
+  `target_host_id`), the scheduler, and `VMHostMigration` land in later PRs; the
+  connections exist and reconcile but no create/migrate routes to a chosen host.
 - **No webhook.** The `topology: cluster` validating webhook (ADR-0007 D2) is a
   later PR.
 

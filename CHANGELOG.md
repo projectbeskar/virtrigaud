@@ -5,6 +5,34 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-22 16:00] - Libvirt implements ListHosts/GetHostInfo against the N-host registry (ADR-0007 P1)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/providers/libvirt/hostinfo.go`: the libvirt host-inventory data plane. `collectOneHost` borrows a short-lived connection lease per host (`ConnFor` + a deferred `Close` on **every** path — success, query error, panic — so gathering inventory never severs the registry's graceful-drain) and `collectHostInfo` assembles a `contracts.HostInfo` from a small read-only `virsh` query set. Each field is fed by one command: `nodeinfo` → `allocatable_cpu`/`allocatable_mem_mib` (KiB→MiB) **and** the health gate; `capabilities` → `cpu_model`/`cpu_features` (typed `libvirtxml.Caps`); `domcapabilities` → `machine_types`/`emulator_version` (typed `libvirtxml.DomainCaps`); `pool-list --all` + `pool-info --bytes` → summed `allocatable_storage`. `nodeinfo` is the sole *core* query (its failure → `HOST_HEALTH_NOT_READY`); `capabilities`/`domcapabilities`/pools are best-effort (a failure leaves the field empty/0, never flips health). All XML is parsed via typed `libvirtxml`, never ad-hoc regex.
+- `internal/providers/libvirt/hostconn/cluster.go`: `ClusterRegistry.HostMeta(id)` — a read-only accessor returning a routable host's endpoint (address) and a defensive **copy** of its placement labels without dialing. It deliberately never exposes `hostsecret.Host.Credentials` (ADR-0007 Security) and reports `ok=false` for an unknown or draining host.
+- Tests: parse-function fixtures from real `virsh nodeinfo`/`capabilities`/`domcapabilities`/`pool-info` output (KiB→MiB, exact `CPU(s)` label match, wrong-unit rejection, odd/empty pool-info); `collectHostInfo` full render, `nodeinfo`-error → `NotReady` (with the richer queries proven skipped), best-effort degradation; `ListHosts` over a real `ClusterRegistry` + fake `Dialer` (a down sibling renders `NotReady` while the healthy host renders fully); **lease-always-released** (a query-error path still lets a subsequent `Evict` close the connection inline — a leaked lease would keep it open); `GetHostInfo` single-host refresh + unknown-id → `NotFound`; single-host → `Unimplemented`; `HostMeta` (copy semantics, no dial, draining excluded). `go test -race ./internal/providers/libvirt/...` clean.
+
+### Changed
+- `internal/providers/libvirt/hosts.go`: the gRPC `*Server.ListHosts`/`*Server.GetHostInfo` now delegate to the backend `*Provider` and map `contracts.HostInfo` ↔ the wire `HostInfo`/`HostHealth` (the inverse of the transport client's `hostInfoFromProto`). The backend `*Provider.ListHosts`/`GetHostInfo` are real in **clustered** mode (iterate `registry.Hosts()`, collect per host) and return `codes.Unimplemented` in single-host mode (D9). Unknown `host_id` → `codes.NotFound`; a known-but-unreachable host → a `HostInfo` with `NotReady` (not an error), so one down host never aborts `ListHosts`.
+- `internal/providers/libvirt/server.go`: `GetCapabilities` now reports `supports_clustering = true` only when the backend is actually in clustered topology (`s.provider != nil && s.provider.clustered()`); single-host / uninitialized stays `false` (honesty-first, D7).
+- `internal/providers/libvirt/conn.go`, `provider.go`: `providerBackend` gains `clustered()` (satisfied by `*Provider`, returning `clusterReg != nil`) so the Server gates the inventory surface through the seam without a concrete type assertion.
+- `docs/clustered-provider-inventory.md`: the per-host `virsh`-command → `HostInfo`-field table, the **"allocatable = host total, scheduler applies overcommit later"** semantics, health mapping, the two documented judgment calls (machine-types = default only; emulator_version = emulator path), and the lease-always-released guarantee.
+
+### Why
+ADR-0007 P1: #314 added the `ListHosts`/`GetHostInfo` contract (stubbed) and #315–#317 gave the clustered libvirt provider an N-host connection registry with a graceful-drain lease API. This PR makes the libvirt provider *answer* those RPCs with live per-host facts so the (next-PR) inventory-sync controller can populate `Host.status`. `allocatable_*` are raw host totals — overcommit and bound-VM subtraction are the operator-side scheduler's job later.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+### Security
+- **Single-host is untouched (D9):** the inventory RPCs stay `Unimplemented` and `supports_clustering = false` unless a mounted host-inventory file selected clustered topology; no single-host code path changed.
+- **No credentials exposed:** `HostMeta` returns only endpoint + labels (never `Credentials`); the RPC surfaces host capacity/health metadata only, and every log line carries host ids + coarse reasons, never key/known_hosts bytes.
+- **No new RBAC / no Kubernetes API access (#297):** host facts come from the provider's own `virsh` connections; the ServiceAccount is untouched.
+
 ## [2026-09-22 14:00] - Libvirt provider consumes the mounted host-inventory + N-host connection registry with hot-reload (ADR-0007 P1)
 **Author:** @wrkode (William Rizzo)
 

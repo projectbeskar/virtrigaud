@@ -521,6 +521,64 @@ func TestClusterRegistry_NilDialerRejected(t *testing.T) {
 	}
 }
 
+// TestClusterRegistry_HostMeta covers the non-secret metadata accessor the
+// ADR-0007 P1 host-inventory RPCs read: it returns a routable host's endpoint
+// and a COPY of its labels without dialing, never exposes credentials, and
+// reports ok=false for an unknown or draining host.
+func TestClusterRegistry_HostMeta(t *testing.T) {
+	d := newMockDialer()
+	h := hostsecret.Host{
+		ID:       "host-a",
+		Endpoint: "qemu+ssh://virt@host-a/system",
+		Labels:   map[string]string{"zone": "rack-1"},
+		Credentials: hostsecret.Credentials{
+			SSHPrivateKey: []byte("SECRET-KEY"),
+			KnownHosts:    []byte("KH"),
+		},
+	}
+	r := mustCluster(t, d, inv(h))
+
+	addr, labels, ok := r.HostMeta("host-a")
+	if !ok {
+		t.Fatal("HostMeta(host-a) ok=false, want true")
+	}
+	if addr != "qemu+ssh://virt@host-a/system" {
+		t.Fatalf("HostMeta address = %q, want the host-a endpoint", addr)
+	}
+	if labels["zone"] != "rack-1" {
+		t.Fatalf("HostMeta labels = %v, want zone=rack-1", labels)
+	}
+	// HostMeta must not dial (metadata comes from the parsed inventory).
+	if len(d.calls) != 0 {
+		t.Fatalf("HostMeta dialed %d hosts, want 0", len(d.calls))
+	}
+	// The returned labels map is a defensive copy: mutating it must not affect a
+	// subsequent read.
+	labels["zone"] = "tampered"
+	if _, again, _ := r.HostMeta("host-a"); again["zone"] != "rack-1" {
+		t.Fatalf("HostMeta returned a shared labels map (mutation leaked): %v", again)
+	}
+
+	// Unknown host → ok=false.
+	if _, _, ok := r.HostMeta("nope"); ok {
+		t.Fatal("HostMeta(nope) ok=true, want false for an unknown host")
+	}
+
+	// A draining host is excluded: pin a lease so removal drains rather than
+	// closes, reconcile it away, and confirm HostMeta no longer reports it.
+	lease, err := r.ConnFor(context.Background(), "host-a")
+	if err != nil {
+		t.Fatalf("ConnFor(host-a): %v", err)
+	}
+	if err := r.Reconcile(inv()); err != nil {
+		t.Fatalf("Reconcile(empty): %v", err)
+	}
+	if _, _, ok := r.HostMeta("host-a"); ok {
+		t.Fatal("HostMeta(host-a) ok=true while draining, want false")
+	}
+	_ = lease.Close()
+}
+
 // TestClusterRegistry_ConcurrentConnForAndReconcile is the -race soak: many
 // goroutines borrow/return connections while others hot-reload the host set.
 // It must be race-free and must never sever a lease held across a reload (each
