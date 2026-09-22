@@ -42,6 +42,7 @@ For full documentation see [https://projectbeskar.github.io/virtrigaud](https://
 
 | File | Description |
 |------|-------------|
+| [provider-libvirt-clustered.yaml](provider-libvirt-clustered.yaml) | A `topology: cluster` libvirt `Provider` — the operator renders its `Host` CRs into a `<provider>-hosts` Secret mounted at `/etc/virtrigaud/hosts/` (ADR-0007 D3). Credentials/consumption are follow-ups. |
 | [hostpool-clustered.yaml](hostpool-clustered.yaml) | `HostPool` (Spread) + two `Host`s — the clustered-libvirt inventory foundation. Additive; single-host providers unchanged. See [docs/clustered-provider-inventory.md](../docs/clustered-provider-inventory.md). |
 
 ## Provider-Specific Examples

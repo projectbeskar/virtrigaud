@@ -30,8 +30,10 @@ rules:
   resources:
   - secrets
   verbs:
+  - create
   - get
   - list
+  - update
   - watch
 - apiGroups:
   - apps
@@ -44,6 +46,18 @@ rules:
   - list
   - patch
   - update
+  - watch
+- apiGroups:
+  - infra.virtrigaud.io
+  resources:
+  - hostpools
+  - hosts
+  - vmimages
+  - vmnetworkattachments
+  - vmsets
+  verbs:
+  - get
+  - list
   - watch
 - apiGroups:
   - infra.virtrigaud.io
@@ -104,14 +118,4 @@ rules:
   - list
   - patch
   - update
-  - watch
-- apiGroups:
-  - infra.virtrigaud.io
-  resources:
-  - vmimages
-  - vmnetworkattachments
-  - vmsets
-  verbs:
-  - get
-  - list
   - watch
