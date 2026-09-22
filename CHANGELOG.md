@@ -5,6 +5,26 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-22 02:45] - Host and HostPool CRDs (ADR-0007 P1)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `api/infra.virtrigaud.io/v1beta1/host_types.go`: new **`Host`** kind (shortName `hvh`) — admin-authored desired inventory for one bare hypervisor host (`providerRef`, `poolRef`, `endpoint`, optional `credentialSecretRef`, placement `labels`, and a defaulted `schedulable` bool with **no** `omitempty`), plus operator-synced `HostStatus` (health, allocatable CPU/mem/storage, CPU model/features, machine types, emulator version, bound-VM count, heartbeat, observedGeneration, conditions) and the `HostHealth` enum (`Ready`/`NotReady`/`Unknown`).
+- `api/infra.virtrigaud.io/v1beta1/hostpool_types.go`: new **`HostPool`** kind (shortName `hp`) — cluster policy (`providerRef`, `Strategy` `Spread`/`BinPack`, `Overcommit`, `StoragePools`, `Networks`, `Migration`) plus aggregate `HostPoolStatus`. Introduces helper types `OvercommitRatios`, `StoragePoolRef`, `PoolNetworkRef`, `PoolMigrationPolicy`, and the pool-strategy / migration-storage-mode constant vocabulary.
+- `api/infra.virtrigaud.io/v1beta1/host_types_test.go`, `hostpool_types_test.go`: defaulted-bool footgun guards (`schedulable`, `defaultLive`), enum-vocabulary + JSON round-trip + DeepCopy independence tests, and assertions against the generated CRD schema (defaults + enums + shortNames).
+- `config/crd/bases/infra.virtrigaud.io_hosts.yaml`, `config/crd/bases/infra.virtrigaud.io_hostpools.yaml`: generated CRDs (also synced into the gitignored `charts/virtrigaud/crds/`). `config/crd/kustomization.yaml` and `api/.../zz_generated.deepcopy.go` regenerated; manager RBAC unchanged (no new rbac markers).
+- `examples/hostpool-clustered.yaml`: realistic sample — a `HostPool` (Spread) with two `Host`s carrying placement labels (`storage.virtrigaud.io/pool-nfs01`, `net.virtrigaud.io/br-vlan100`).
+- `docs/clustered-provider-inventory.md`: concept doc for the clustered-provider inventory model; linked from `docs/README.md` and `examples/README.md`.
+
+### Why
+First slice of ADR-0007 P1: the durable, operator-owned inventory foundation (the "brain" of the clustered libvirt provider). This PR is CRDs only — the inventory-sync controller, the filter+score scheduler, `target_host_id` on create, and live migration land in later ADR-0007 slices. Every addition is additive and v1beta1-safe; single-host providers and their VMs are byte-for-byte unchanged (ADR-0007 D9).
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-09-22 00:52] - Build provider images on PRs (Dockerfile gate)
 **Author:** @wrkode (William Rizzo)
 
