@@ -398,6 +398,15 @@ func (p *Provider) conn(ctx context.Context) (libvirtConn, error) {
 // Server holds (server.go), so no concrete type assertion is needed there.
 var _ providerBackend = (*Provider)(nil)
 
+// clustered reports whether the provider runs in CLUSTERED topology (ADR-0007
+// D3): a non-nil clusterReg means it fronts N host-keyed connections projected
+// from the mounted inventory. Single-host mode (clusterReg nil) reports false,
+// which keeps GetCapabilities.supports_clustering false and the host-inventory
+// RPCs Unimplemented there (D7/D9).
+func (p *Provider) clustered() bool {
+	return p.clusterReg != nil
+}
+
 // Validate ensures the provider connection is healthy using virsh
 func (p *Provider) Validate(ctx context.Context) error {
 	if p.virshProvider == nil {

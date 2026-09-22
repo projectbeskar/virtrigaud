@@ -362,6 +362,38 @@ func (r *ClusterRegistry) Hosts() []HostID {
 	return ids
 }
 
+// HostMeta returns the NON-SECRET inventory metadata the registry holds for a
+// routable host: its endpoint (address) and a copy of its placement labels. It
+// is the read-only accessor the host-inventory RPCs (ADR-0007 P1 ListHosts/
+// GetHostInfo) use to fill HostInfo.address / HostInfo.labels without dialing —
+// the endpoint and labels come from the parsed inventory (hostsecret.Host), not
+// from a live query.
+//
+// It deliberately never exposes hostsecret.Host.Credentials: a clustered
+// provider must not surface connection secrets through an inventory RPC
+// (ADR-0007 Security). The returned labels map is a defensive copy the caller
+// may retain or mutate without racing Reconcile, which refreshes the live
+// spec (labels included) under the same mu on a label-only change.
+//
+// ok is false for an unknown or draining host (mirroring Hosts(), which also
+// excludes draining hosts): a host being removed takes no new work and reports
+// no fresh inventory.
+func (r *ClusterRegistry) HostMeta(id HostID) (address string, labels map[string]string, ok bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e, present := r.live[id]
+	if !present || e.draining {
+		return "", nil, false
+	}
+	if len(e.spec.Labels) > 0 {
+		labels = make(map[string]string, len(e.spec.Labels))
+		for k, v := range e.spec.Labels {
+			labels[k] = v
+		}
+	}
+	return e.spec.Endpoint, labels, true
+}
+
 // Evict graceful-drains the connection for id, if present: it stops routing new
 // work to id immediately and closes the underlying connection once it is idle
 // (never severing an in-flight lease). Unlike the single-host registry's

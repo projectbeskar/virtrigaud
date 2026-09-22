@@ -556,6 +556,13 @@ func (s *Server) GetCapabilities(ctx context.Context, req *providerv1.GetCapabil
 		SupportedExportBackends: migration.PVCS3AndNFSExportBackends(),
 		SupportedImportBackends: migration.PVCS3AndNFSImportBackends(),
 		SupportedTransferModes:  migration.RelayOnlyTransferModes(),
+		// ADR-0007 P1 / D7 (honesty-first): advertise clustering only when the
+		// backend is actually in CLUSTERED topology, i.e. it fronts N host-keyed
+		// connections and answers ListHosts/GetHostInfo for real. Single-host mode
+		// (and an uninitialized server) reports false, keeping the host-inventory
+		// surface Unimplemented there (D9). This flips true only now that the real
+		// libvirt host-inventory implementation ships.
+		SupportsClustering: s.provider != nil && s.provider.clustered(),
 	}, nil
 }
 
