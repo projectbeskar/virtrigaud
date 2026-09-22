@@ -135,9 +135,11 @@ func TestClient_HostInventory_UnimplementedThroughMockProvider(t *testing.T) {
 
 	_, err := cli.ListHosts(context.Background())
 	require.Error(t, err, "mock provider must report ListHosts Unimplemented")
+	assert.True(t, contracts.IsNotSupported(err), "gRPC Unimplemented must map to a typed NotSupported error")
 
 	_, err = cli.GetHostInfo(context.Background(), "host-1")
 	require.Error(t, err, "mock provider must report GetHostInfo Unimplemented")
+	assert.True(t, contracts.IsNotSupported(err), "gRPC Unimplemented must map to a typed NotSupported error")
 
 	// And the mock honestly advertises it does not cluster.
 	caps, err := cli.GetCapabilities(context.Background())

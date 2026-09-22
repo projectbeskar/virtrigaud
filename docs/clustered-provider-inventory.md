@@ -321,15 +321,90 @@ material. ADR-0004 is preserved per host and **not weakened** — a host with em
 `knownHosts` hard-fails verification at connect time unless the audit-flagged
 insecure escape hatch is set, exactly as the single-host path does.
 
+## Host inventory-sync controller (operator side)
+
+The **`Host` controller** (`internal/controller/host_controller.go`) is the
+operator half of ADR-0007 D1's "brain in the operator": it turns each `Host` CR's
+admin-authored desired inventory into **observed state** by asking the clustered
+provider what the host can do right now, and writing that into `Host.status` (D3).
+It is a **read-only, status-only** sync — it never mutates a `Host` spec and holds
+**no finalizer** (there is no external resource to clean up here).
+
+### The reconcile loop
+
+Per `Host`, one reconcile:
+
+1. **Resolve the `Provider`** named by `spec.providerRef` (namespace defaults to
+   the Host's). Missing → `health=Unknown`, `Ready=False` (`ProviderUnavailable`),
+   short-backoff requeue. Never a hard error.
+2. **Require a clustered provider.** If the Provider is not `topology: cluster`
+   (D9), short-circuit *before* any RPC — a single-host provider cannot answer the
+   inventory RPC — with `health=Unknown`, `Ready=False` (`ProviderNotClustered`).
+3. **Obtain the provider client** through the same manager-side resolver the
+   VirtualMachine controller uses (no new provider path). A not-ready runtime
+   (no endpoint / phase ≠ Running) surfaces here → `ProviderUnavailable`, backoff.
+4. **Call `GetHostInfo(host.Name)`** — the *cheap single-host refresh*, not a full
+   `ListHosts` poll. The host id is the `Host` CR name.
+5. **Map the result into `Host.status`** and stamp `lastHeartbeatTime`.
+
+`GetHostInfo` outcomes map to health + the `Ready` condition:
+
+| Outcome | `status.health` | `Ready` condition (reason) |
+|---------|-----------------|----------------------------|
+| host `Ready` | `Ready` | `True` (`HostReady`) |
+| host `NotReady` | `NotReady` | `False` (`HostNotReady`) |
+| health unspecified | `Unknown` | `Unknown` (`HostHealthUnknown`) |
+| `Unimplemented` (provider not clustered) | `Unknown` | `False` (`ProviderNotClustered`) |
+| host id not in inventory (`NotFound`) | `Unknown` | `False` (`HostNotFound`) |
+| transient / unreachable | `Unknown` | `False` (`ProviderUnavailable`) |
+
+A bad or unreachable provider is **always** recorded on status and requeued —
+never a crash-loop.
+
+### Heartbeat cadence
+
+- **60 s** steady-state requeue after a successful sync (and for config-level
+  states that will not self-heal faster, e.g. a non-clustered reference), keeping
+  `status.lastHeartbeatTime` live so a stale Host is visible.
+- **15 s** shorter backoff after a transient failure, so a Host recovers promptly
+  once its provider returns.
+
+These are `RequeueAfter` intervals (independent of the Host watch), so the
+heartbeat runs even though the controller ignores its own status writes (it
+watches on generation change, avoiding a self-trigger loop). They reflect the real
+per-host probe cost, not artificial tight loops.
+
+### What `Host.status` now carries
+
+`health`, `allocatableCPU`, `allocatableMemoryMiB`, `allocatableStorageBytes`,
+`cpuModel`, `cpuFeatures`, `machineTypes`, `emulatorVersion`, `lastHeartbeatTime`,
+`observedGeneration`, and a `Ready` condition (which carries its own
+`observedGeneration`). `boundVMs` is **deliberately left `0`** in this slice: it
+is derived from `VirtualMachine.status.placement.host`, which does not exist yet
+(a later ADR-0007 slice owns it).
+
+So `kubectl get hosts` shows a live **Health** column (alongside Pool /
+Schedulable / Age), and `kubectl describe host` / `-o yaml` shows the synced
+capacity, CPU, and machine-type facts:
+
+```
+$ kubectl get hosts
+NAME          HEALTH     POOL      SCHEDULABLE   AGE
+host-alpha    Ready      pool-a    true          5m
+host-bravo    NotReady   pool-a    true          5m
+```
+
+Security: `Host.status` carries capacity/health only, **never** connection secrets
+(ADR-0007 Security), and the controller writes **only** the status subresource
+under a least-privilege `hosts/status` grant (no `hosts` spec write, no
+finalizers).
+
 ### What is deliberately NOT wired yet
 
-The libvirt provider now **answers** `ListHosts`/`GetHostInfo`, but nothing yet
-**calls** them or acts on placement. Rendered separately, under their own reviews:
+The operator now **calls** `GetHostInfo` to sync `Host.status` (see *Host
+inventory-sync controller* above); the remaining pieces are still rendered
+separately, under their own reviews:
 
-- **No inventory-sync controller.** No operator controller calls `ListHosts`/
-  `GetHostInfo` yet, so `Host.status` is not populated from live facts — that
-  controller is the next PR. The provider *answers* the RPCs; the brain does not
-  *ask* yet.
 - **No host-targeted placement.** Host-targeted `Create`/`Migrate` (via
   `target_host_id`), the scheduler, and `VMHostMigration` land in later PRs; the
   connections exist and reconcile but no create/migrate routes to a chosen host.

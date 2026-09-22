@@ -34,10 +34,11 @@ import (
 )
 
 // stubProvider implements contracts.Provider for unit tests.
-// Only ReconfigureFn and IsTaskCompleteFn are configurable; all other methods are no-ops.
+// Only ReconfigureFn, IsTaskCompleteFn and GetHostInfoFn are configurable; all other methods are no-ops.
 type stubProvider struct {
 	ReconfigureFn    func(ctx context.Context, id string, desired contracts.CreateRequest) (string, error)
 	IsTaskCompleteFn func(ctx context.Context, taskRef string) (bool, error)
+	GetHostInfoFn    func(ctx context.Context, hostID string) (contracts.HostInfo, error)
 }
 
 func (s *stubProvider) Validate(_ context.Context) error { return nil }
@@ -88,7 +89,10 @@ func (s *stubProvider) ListVMs(_ context.Context) ([]contracts.VMInfo, error) { 
 func (s *stubProvider) ListHosts(_ context.Context) ([]contracts.HostInfo, error) {
 	return nil, nil
 }
-func (s *stubProvider) GetHostInfo(_ context.Context, _ string) (contracts.HostInfo, error) {
+func (s *stubProvider) GetHostInfo(ctx context.Context, hostID string) (contracts.HostInfo, error) {
+	if s.GetHostInfoFn != nil {
+		return s.GetHostInfoFn(ctx, hostID)
+	}
 	return contracts.HostInfo{}, nil
 }
 
