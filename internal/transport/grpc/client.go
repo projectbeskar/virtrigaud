@@ -1136,6 +1136,13 @@ func (c *Client) mapGRPCError(operation string, err error) error {
 		return contracts.NewInvalidSpecError(fmt.Sprintf("%s: %s", operation, st.Message()), err)
 	case codes.Unavailable, codes.DeadlineExceeded:
 		return contracts.NewRetryableError(fmt.Sprintf("%s: %s", operation, st.Message()), err)
+	case codes.Unimplemented:
+		// A provider that does not implement this RPC (e.g. a non-clustered
+		// provider answering the ADR-0007 GetHostInfo/ListHosts inventory RPCs).
+		// Surface it as a typed NotSupported error so callers can branch on
+		// contracts.IsNotSupported instead of string-matching, and so it is
+		// classified non-retryable (a missing RPC will not appear on retry).
+		return contracts.NewNotSupportedError(fmt.Sprintf("%s: %s", operation, st.Message()))
 	default:
 		return fmt.Errorf("%s failed: %s", operation, st.Message())
 	}

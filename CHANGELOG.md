@@ -5,6 +5,34 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-22 18:00] - Host inventory-sync controller (GetHostInfo → Host.status) (ADR-0007 P1)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/controller/host_controller.go`: the **`HostReconciler`** — the operator side of ADR-0007 D1/D3 inventory sync. Per `Host`: resolve `spec.providerRef` (namespace defaults to the Host's), require a clustered Provider (`topology: cluster`, short-circuiting *before* the RPC for a single-host reference), obtain the provider client through the **same manager-side resolver the VirtualMachine controller uses** (no new provider path), call the **cheap single-host `GetHostInfo(host.Name)`** (not a full `ListHosts` poll), and map the returned `contracts.HostInfo` into `Host.status` (`health`, `allocatableCPU`, `allocatableMemoryMiB`, `allocatableStorageBytes`, `cpuModel`, `cpuFeatures`, `machineTypes`, `emulatorVersion`). Stamps `lastHeartbeatTime` on a successful sync, always sets `observedGeneration`, and sets a `Ready` condition (with its own `ObservedGeneration`) from the mapped health. **Status-only** (`Status().Update`, spec never mutated), **no finalizer** (read-only observed-state sync), and it **never crash-loops** on a bad/unreachable provider — every provider/RPC failure is recorded on status and requeued. Heartbeat requeue **60 s**; transient-error backoff **15 s** (named consts). `boundVMs` is deliberately left `0` (derived from the not-yet-existing `VirtualMachine.status.placement.host`).
+- `internal/controller/host_controller_test.go`: fake-provider tests (the VM-controller `stubResolver`/`stubProvider` seam) — healthy provider populates capacity/CPU/machine-types + `lastHeartbeatTime` + `observedGeneration` + `Ready=True`; `NotReady` health maps through; transient error → `Unknown`/`Ready=False`/`ProviderUnavailable`/backoff/no-heartbeat/no-hard-error; `Unimplemented` (typed `NotSupported`) → `ProviderNotClustered`; single-topology reference short-circuits before the RPC; missing Provider → `ProviderUnavailable`; status-only + idempotent re-reconcile; deleted-Host no-op.
+- `internal/providers/contracts/errors.go`: `IsNotSupported(err)` — mirrors `IsNotFound`, so a controller can distinguish "provider does not implement this RPC" from a transient failure without string-matching.
+
+### Changed
+- `cmd/manager/main.go`: register `HostReconciler` with the shared remote resolver.
+- `internal/transport/grpc/client.go`: `mapGRPCError` now maps `codes.Unimplemented` → a typed `contracts.NewNotSupportedError` (previously an opaque `fmt.Errorf`). The `GetHostInfo`/`ListHosts` contract documents "non-clustered providers return Unimplemented"; this makes that observable to callers as `contracts.IsNotSupported` and keeps it correctly classified non-retryable. No existing caller relied on the opaque form.
+- `internal/controller/virtualmachine_controller_test.go`: the shared `stubProvider` gains a scriptable `GetHostInfoFn` (same pattern as `ReconfigureFn`/`IsTaskCompleteFn`).
+- `config/rbac/role.yaml` + `charts/virtrigaud/templates/manager-rbac.yaml`: least-privilege `hosts/status` `get;update;patch` (the manager already held `hosts`/`providers` `get;list;watch`). **No `hosts/finalizers` grant** — this controller adds no finalizer.
+- `docs/clustered-provider-inventory.md`: new "Host inventory-sync controller (operator side)" section — the reconcile loop, the health/condition-reason mapping table, the 60 s/15 s heartbeat cadence, what `Host.status` now carries, and the `kubectl get hosts` health column; the "NOT wired yet" list drops the inventory-sync bullet.
+
+### Why
+ADR-0007 P1 D3: `Host.status` is "operator-synced observed state from `ListHosts`/`GetHostInfo`". #318 made the libvirt provider *answer* `GetHostInfo`; this PR makes the operator *ask* and write the live facts, so `kubectl get hosts` shows real health/capacity — completing P1's inventory half. Scheduler, `target_host_id`, placement binding, `HostPool` aggregation, and the `topology: cluster` webhook remain later slices.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+### Security
+- **Status-only, least-privilege:** the controller writes only the `hosts/status` subresource and never the `Host` spec; it holds no finalizer and no secret/API grant beyond the existing manager role. `Host.status` carries capacity/health only — never connection secrets (ADR-0007 Security).
+- **No crash-loop on a hostile/broken provider:** a missing, non-clustered, not-ready, or unreachable Provider (and an `Unimplemented`/`NotFound` RPC) is recorded on status and requeued, never a hard reconcile error.
+
 ## [2026-09-22 16:00] - Libvirt implements ListHosts/GetHostInfo against the N-host registry (ADR-0007 P1)
 **Author:** @wrkode (William Rizzo)
 

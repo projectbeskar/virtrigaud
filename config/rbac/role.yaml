@@ -62,6 +62,21 @@ rules:
 - apiGroups:
   - infra.virtrigaud.io
   resources:
+  - hosts/status
+  - providers/status
+  - virtualmachines/status
+  - vmclones/status
+  - vmimages/status
+  - vmmigrations/status
+  - vmsets/status
+  - vmsnapshots/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - infra.virtrigaud.io
+  resources:
   - providers
   - virtualmachines
   - vmmigrations
@@ -83,20 +98,6 @@ rules:
   - vmmigrations/finalizers
   - vmsnapshots/finalizers
   verbs:
-  - update
-- apiGroups:
-  - infra.virtrigaud.io
-  resources:
-  - providers/status
-  - virtualmachines/status
-  - vmclones/status
-  - vmimages/status
-  - vmmigrations/status
-  - vmsets/status
-  - vmsnapshots/status
-  verbs:
-  - get
-  - patch
   - update
 - apiGroups:
   - infra.virtrigaud.io

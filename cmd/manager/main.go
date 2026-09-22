@@ -394,6 +394,19 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "VMSet")
 		os.Exit(1)
 	}
+
+	// Register Host controller (ADR-0007 P1 inventory sync): reconciles Host CRs
+	// by calling the clustered provider's GetHostInfo and writing live
+	// capacity/health into Host.status. Status-only, read-only; reuses the shared
+	// remote resolver.
+	if err = (&controller.HostReconciler{
+		Client:         mgr.GetClient(),
+		Scheme:         mgr.GetScheme(),
+		RemoteResolver: remoteResolver,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "Host")
+		os.Exit(1)
+	}
 	//+kubebuilder:scaffold:builder
 
 	// Register cert watchers with the manager so they run as Runnables

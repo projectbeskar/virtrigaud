@@ -88,6 +88,17 @@ func IsNotFound(err error) bool {
 	return errors.As(err, &pe) && pe.Type == ErrorTypeNotFound
 }
 
+// IsNotSupported reports whether err is, or wraps, a provider NotSupported
+// error. The transport client maps a gRPC codes.Unimplemented into a
+// *ProviderError of this type (see mapGRPCError), so a controller can tell a
+// provider that does not implement an RPC (e.g. a non-clustered provider asked
+// for GetHostInfo, ADR-0007 P1) apart from a transient failure — and surface a
+// config-level condition rather than retrying on a tight loop forever.
+func IsNotSupported(err error) bool {
+	var pe *ProviderError
+	return errors.As(err, &pe) && pe.Type == ErrorTypeNotSupported
+}
+
 // NewNotFoundError creates a not found error
 func NewNotFoundError(message string, cause error) *ProviderError {
 	return &ProviderError{

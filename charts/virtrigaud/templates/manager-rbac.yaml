@@ -121,10 +121,11 @@ rules:
   - patch
   - update
 # Host and HostPool are the clustered-provider inventory (ADR-0007 P1). The
-# provider_controller READS them (get;list;watch) to render a clustered
-# Provider's host set into its projected host-inventory Secret, and watches them
-# to re-render on change. It never writes Hosts/HostPools: the admin authors
-# Hosts, and the inventory-sync controller writes Host status in a later slice.
+# provider_controller and host_controller READ them (get;list;watch): the
+# provider_controller renders a clustered Provider's host set into its projected
+# host-inventory Secret; the inventory-sync host_controller reconciles each Host
+# by calling the provider's GetHostInfo. Neither writes the Host/HostPool spec
+# (the admin authors them) — only Host STATUS is written (see hosts/status below).
 - apiGroups:
   - infra.virtrigaud.io
   resources:
@@ -134,6 +135,18 @@ rules:
   - get
   - list
   - watch
+# hosts/status: the inventory-sync host_controller writes live capacity/health
+# into Host.status (ADR-0007 P1 D3). Status subresource only — never the spec,
+# and no hosts/finalizers grant (this is read-only observed-state sync, no
+# finalizer).
+- apiGroups:
+  - infra.virtrigaud.io
+  resources:
+  - hosts/status
+  verbs:
+  - get
+  - patch
+  - update
 # Secrets: the manager READS provider credential and TLS Secrets (cloud-init /
 # credential / TLS Secret resolution) and, for clustered providers (ADR-0007
 # D3), CREATES/UPDATES the single host-inventory Secret it owns per Provider
@@ -368,10 +381,11 @@ rules:
   - patch
   - update
 # Host and HostPool are the clustered-provider inventory (ADR-0007 P1). The
-# provider_controller READS them (get;list;watch) to render a clustered
-# Provider's host set into its projected host-inventory Secret, and watches them
-# to re-render on change. It never writes Hosts/HostPools: the admin authors
-# Hosts, and the inventory-sync controller writes Host status in a later slice.
+# provider_controller and host_controller READ them (get;list;watch): the
+# provider_controller renders a clustered Provider's host set into its projected
+# host-inventory Secret; the inventory-sync host_controller reconciles each Host
+# by calling the provider's GetHostInfo. Neither writes the Host/HostPool spec
+# (the admin authors them) — only Host STATUS is written (see hosts/status below).
 - apiGroups:
   - infra.virtrigaud.io
   resources:
@@ -381,6 +395,18 @@ rules:
   - get
   - list
   - watch
+# hosts/status: the inventory-sync host_controller writes live capacity/health
+# into Host.status (ADR-0007 P1 D3). Status subresource only — never the spec,
+# and no hosts/finalizers grant (this is read-only observed-state sync, no
+# finalizer).
+- apiGroups:
+  - infra.virtrigaud.io
+  resources:
+  - hosts/status
+  verbs:
+  - get
+  - patch
+  - update
 # Secrets: the manager READS provider credential and TLS Secrets (cloud-init /
 # credential / TLS Secret resolution) and, for clustered providers (ADR-0007
 # D3), CREATES/UPDATES the single host-inventory Secret it owns per Provider
