@@ -5,11 +5,14 @@
 > inventory CRDs (`Host`/`HostPool`), the `ListHosts`/`GetHostInfo` gRPC contract
 > (stubbed in every provider), the `Provider.spec.topology` discriminator, the
 > operator side of the projected-Secret pipeline (rendering host **metadata** into
-> a Provider-owned Secret mounted into the provider pod), and **per-host credential
+> a Provider-owned Secret mounted into the provider pod), **per-host credential
 > inlining** into that Secret (the SSH private key + known_hosts resolved from each
-> Host's / the Provider's `credentialSecretRef`). Still to come: the provider-side
-> file consumption / hot-reload, the `topology: cluster` validating webhook, the
-> scheduler, and migration (later P1/P2 slices).
+> Host's / the Provider's `credentialSecretRef`), and the **libvirt provider-side
+> consumption** of that file — parsing it into N host-keyed connections and
+> hot-reloading them on change. Still to come: the RPC consumers that DRIVE those
+> connections (real `ListHosts`/`GetHostInfo`, host-targeted `Create`/`Migrate`),
+> the `topology: cluster` validating webhook, the scheduler, and migration (later
+> P1/P2 slices).
 
 VirtRigaud is adding a new *class* of provider — a **clustered / orchestrator**
 provider — that makes VirtRigaud itself the cluster manager for hypervisors that
@@ -212,14 +215,70 @@ render time — the provider keeps enforcing its ADR-0004 host-key policy (hard-
 unless the audit-flagged insecure escape hatch is set) at connect time, so that
 one security decision stays in a single place.
 
+### How the libvirt provider consumes the inventory (ADR-0007 D3)
+
+The libvirt provider reads the mounted file — never the Kubernetes API (#297) —
+and turns it into N host-keyed connections it hot-reloads as the file changes.
+
+**Mode detection.** At startup the provider checks for the inventory file at
+`/etc/virtrigaud/hosts/hosts.json` (overridable via `VIRTRIGAUD_LIBVIRT_HOSTS_FILE`
+for tests):
+
+- **Present** → **clustered mode**: build one lazily-dialed connection per host,
+  keyed by `host.id`, from the file's endpoints + inlined credential material.
+- **Absent** → **single-host mode**: exactly today's behavior from
+  `PROVIDER_ENDPOINT` + the credential mount — **byte-for-byte unchanged**
+  (ADR-0007 D9). No inventory, no watcher, no new code path.
+
+An empty (zero-host) or malformed file never crashes the provider: a zero-host
+inventory is a valid "fronts no hosts right now" state (empty registry), and a
+malformed/unreadable file at startup is logged and treated as an empty host set
+that the watcher reconciles once the file becomes valid — a clustered provider is
+never brought down by one bad render (fail-safe, not fail-closed).
+
+**Lazy-open.** A host in the inventory is **registered but not dialed**; the SSH
+connection opens on first use of that host, not at load or reload time. Adding ten
+hosts to the file costs zero connections until work is actually routed to one.
+
+**Hot-reload — watching the directory, not the file.** A Kubernetes Secret update
+lands as an **atomic `..data` symlink swap**: the kubelet writes the new content
+into a fresh timestamped directory and renames the `..data` symlink to point at
+it, so the visible file's inode is swapped out from under any watch registered on
+the file itself — an `fsnotify` watch on the file inode goes deaf after the first
+update. The provider therefore watches the **parent directory** and re-reads the
+canonical path on any event (plus a low-frequency backstop re-read in case an
+event is ever missed). On each successful re-read it reconciles the connection
+set:
+
+- **host-added** → registered lazily (dialed on first use);
+- **host-removed** → **graceful-drain**: it stops taking new work immediately, and
+  its live connection is closed only once it is **idle** — a reload **never severs
+  an in-flight operation**;
+- **host-changed** (endpoint or credential material differs) → drain the old
+  connection (again, only once idle) and reopen lazily; a **label-only** change is
+  not a connection change and does not drain.
+
+A malformed or unreadable file on reload is logged and **ignored** — the last-good
+host set is kept, so a bad write never drains every host.
+
+**Credential sourcing — the same code path, per host.** Each clustered host feeds
+its own inlined `sshPrivateKey` and `knownHosts` bytes into the exact single-host
+SSH transport and ADR-0004 host-key verification: the private key is parsed
+in-memory, and the `known_hosts` bytes are materialised to a private per-host file
+so the identical `knownhosts` verification runs against **that host's** trust
+material. ADR-0004 is preserved per host and **not weakened** — a host with empty
+`knownHosts` hard-fails verification at connect time unless the audit-flagged
+insecure escape hatch is set, exactly as the single-host path does.
+
 ### What is deliberately NOT wired yet
 
-This slice delivers credential **delivery** into the Secret. Rendered separately,
-under their own reviews:
+This slice **builds and hot-reloads** the N connections; it does not yet DRIVE them
+from any RPC. Rendered separately, under their own reviews:
 
-- **No provider consumption.** The provider mounts the Secret but does **not** read
-  it yet; the file-watch / hot-reload (lazy-open on host-add, graceful-drain on
-  host-remove) and the N-host connection map land in a later PR.
+- **No RPC consumers.** The real `ListHosts`/`GetHostInfo` implementation and
+  host-targeted `Create`/`Migrate` (via `target_host_id`) land in later PRs. In
+  this slice the connections exist and reconcile, but no RPC handler routes to them
+  yet (mirroring how #315's mounted Secret was, at first, unread).
 - **No webhook.** The `topology: cluster` validating webhook (ADR-0007 D2) is a
   later PR.
 

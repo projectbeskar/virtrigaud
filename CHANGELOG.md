@@ -5,6 +5,37 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-22 14:00] - Libvirt provider consumes the mounted host-inventory + N-host connection registry with hot-reload (ADR-0007 P1)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/providers/libvirt/hostconn/cluster.go`: `ClusterRegistry` — the N-host `hostconn.Registry` for a clustered libvirt provider. Projects one connection per host from a parsed `hostsecret.Inventory` keyed by `HostID`, with **lazy-open** (a host is registered but dialed only on first `ConnFor`), **graceful-drain** (a removed/changed host stops taking new work immediately and its connection is closed only once idle — a reload NEVER severs an in-flight operation, enforced by per-host lease refcounting), and `Reconcile(add/remove/change)`. Injectable `Dialer` so the registry/reload is unit-tested without a live libvirtd.
+- `internal/providers/libvirt/hostconn/watch.go`: `Watcher` + `LoadInventory`. Watches the **mount directory** (not the file inode) so it catches the atomic `..data` symlink swap a Kubernetes Secret update lands as — an inode watch goes deaf after the first update — plus a backstop re-read; re-reads + version-gates the file and reconciles. Clean shutdown (stop channel + `WaitGroup`, drained on `Close`).
+- `internal/providers/libvirt/cluster_dialer.go`: mode detection (presence of `/etc/virtrigaud/hosts/hosts.json`, overridable via `VIRTRIGAUD_LIBVIRT_HOSTS_FILE`), the production `Dialer` that builds one per-host `*virshConn` from an inventory entry, and the per-host `known_hosts` materialisation (inlined bytes → a private file under the writable `/tmp`, removed on drain).
+- Tests: fixture parse → N keyed hosts + right material to the (mock) dialer; lazy-open; graceful-drain non-severing (in-flight held across remove/change is not closed underneath); drain-then-reopen; malformed/empty/duplicate/empty-id handled without panic; the atomic `..data`-swap caught via the event path with the backstop poll disabled; per-host `known_hosts` verify (present for its host, absent for another — ADR-0004 not weakened); single-host parity. `go test -race ./internal/providers/libvirt/...` clean.
+
+### Changed
+- `internal/providers/libvirt/sshhostkey.go`: `hostKeyPolicy` gains an optional `knownHostsPath` (with a `knownHostsFile()` accessor). Every host-key decision routes through it; an EMPTY override (single-host) falls back to the package-wide `KnownHostsFile` — **byte-for-byte unchanged**. A clustered host sets it to its own materialised `known_hosts`, so each host verifies against its OWN trust material through the exact same `knownhosts.New` path (no forked host-key logic).
+- `internal/providers/libvirt/provider.go`: `New()` mode-detects at startup — a mounted inventory file enters clustered mode (`newClusteredProvider`); its absence keeps the single-host path unchanged. Adds `Provider.Close()` (stops the watcher, then drains the registry). Clustered startup is fail-**safe**: a malformed/unreadable file starts an empty registry the watcher reconciles later — a clustered provider is never crashed by one bad render.
+- `internal/providers/libvirt/conn.go`: `virshConn` gains an optional `cleanup` hook (removes a clustered host's `known_hosts` temp file on `Close`); `newVirshConn` (single-host) is unchanged.
+- `cmd/provider-libvirt/main.go`: `defer providerImpl.Close()` for graceful shutdown (stops the hot-reload watcher / drains the registry after the gRPC server drains in-flight RPCs).
+- `docs/clustered-provider-inventory.md`: the provider-consumption section — mode detection, the directory-watch rationale, lazy-open / graceful-drain, the per-host credential sourcing, and the single-host no-op.
+
+### Why
+ADR-0007 D3: a thin, API-less clustered provider (post-#297) is TOLD which hosts it fronts through a mounted Secret and must consume it from disk — never the Kubernetes API. #315/#316 shipped the operator render + inlined credentials; this PR is the provider side that reads that file into N host-keyed connections and hot-reloads them (lazy-open on host-add, graceful-drain on host-remove) so a reload never severs an in-flight operation. The N connections are BUILT and hot-reloaded here but not yet DRIVEN by any RPC handler — the real `ListHosts`/`GetHostInfo` and host-targeted `Create`/`Migrate` are later PRs.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+### Security
+- **Single-host is byte-for-byte unchanged** and its ADR-0004 host-key posture is untouched: the credential-sourcing refactor is additive with a zero-value fallback to the existing `KnownHostsFile`, verified by the existing SSH/host-key tests passing unmodified.
+- **ADR-0004 preserved per host, never weakened**: each clustered host verifies against its OWN inlined `known_hosts` via the same `knownhosts` logic; a host with empty `known_hosts` hard-fails at connect time unless the audit-flagged insecure escape hatch is set. `known_hosts` (public host keys, not secret) is materialised 0600 under the writable `/tmp` (the pod root FS is read-only) and removed on drain.
+- **No credential material is logged**: reload/registry log lines and errors carry host ids + coarse reasons only, never key/known_hosts bytes.
+- **No Kubernetes API access added** (#297): the provider reads only the mounted file; the ServiceAccount is untouched (no RBAC, no projected token).
+
 ## [2026-09-22 12:00] - Inline per-host credentials into the clustered host-inventory Secret (ADR-0007 P1)
 **Author:** @wrkode (William Rizzo)
 

@@ -107,6 +107,14 @@ type libvirtConn interface {
 type virshConn struct {
 	id    hostconn.HostID
 	virsh *VirshProvider
+
+	// cleanup is an optional teardown hook run by Close AFTER the VirshProvider
+	// is cleaned up. It is nil for the single-host path (newVirshConn); a
+	// clustered host (newClusteredVirshConn) sets it to remove that host's
+	// materialised known_hosts temp file, so a drained/removed host leaves no
+	// file behind. Keeping it nil for single-host means Close is byte-for-byte
+	// unchanged there.
+	cleanup func()
 }
 
 // Compile-time proof that *virshConn satisfies both the transport-neutral seam
@@ -119,6 +127,13 @@ var (
 // newVirshConn wraps a VirshProvider as the per-host connection for id.
 func newVirshConn(id hostconn.HostID, vp *VirshProvider) *virshConn {
 	return &virshConn{id: id, virsh: vp}
+}
+
+// newClusteredVirshConn wraps a per-host VirshProvider (ADR-0007 D3) for id,
+// with a cleanup hook Close runs after teardown — used to remove the host's
+// materialised known_hosts temp file when the connection is drained/closed.
+func newClusteredVirshConn(id hostconn.HostID, vp *VirshProvider, cleanup func()) *virshConn {
+	return &virshConn{id: id, virsh: vp, cleanup: cleanup}
 }
 
 // HostID returns the id of the host this connection targets.
@@ -200,8 +215,16 @@ func (c *virshConn) StreamIn(ctx context.Context, r io.Reader, argv ...string) e
 
 // Close releases the connection: ADR-0008 PR 3 closes the persistent
 // in-process SSH client, if one was dialed (sshclient.go); PR 4 adds the
-// go-libvirt handle alongside it.
-func (c *virshConn) Close() error { return c.virsh.Cleanup() }
+// go-libvirt handle alongside it. It then runs the optional cleanup hook (a
+// clustered host's known_hosts temp-file removal); single-host has none, so its
+// Close is unchanged.
+func (c *virshConn) Close() error {
+	err := c.virsh.Cleanup()
+	if c.cleanup != nil {
+		c.cleanup()
+	}
+	return err
+}
 
 // getDomainState delegates to the wrapped VirshProvider (domstate).
 func (c *virshConn) getDomainState(ctx context.Context, domain string) (string, error) {
