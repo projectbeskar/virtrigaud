@@ -120,16 +120,37 @@ rules:
   - get
   - patch
   - update
-# Secrets hold provider credentials and TLS material. The manager only READS
-# them (cloud-init / credential / TLS Secret resolution); it never creates,
-# mutates, or deletes Secrets. Narrowed from full CRUD per issue #152.
+# Host and HostPool are the clustered-provider inventory (ADR-0007 P1). The
+# provider_controller READS them (get;list;watch) to render a clustered
+# Provider's host set into its projected host-inventory Secret, and watches them
+# to re-render on change. It never writes Hosts/HostPools: the admin authors
+# Hosts, and the inventory-sync controller writes Host status in a later slice.
+- apiGroups:
+  - infra.virtrigaud.io
+  resources:
+  - hosts
+  - hostpools
+  verbs:
+  - get
+  - list
+  - watch
+# Secrets: the manager READS provider credential and TLS Secrets (cloud-init /
+# credential / TLS Secret resolution) and, for clustered providers (ADR-0007
+# D3), CREATES/UPDATES the single host-inventory Secret it owns per Provider
+# (<provider>-hosts) — the only Secret it writes. It never deletes Secrets: that
+# Secret is owner-referenced to its Provider and reclaimed by garbage collection.
+# RBAC cannot scope create to one name, so create;update is namespace/cluster-
+# wide; only the trusted manager holds it (provider pods have NO secrets RBAC —
+# see the dedicated per-provider ServiceAccount below).
 - apiGroups:
   - ""
   resources:
   - secrets
   verbs:
+  - create
   - get
   - list
+  - update
   - watch
 # Services for remote provider runtimes (provider_controller reconciles them).
 - apiGroups:
@@ -346,16 +367,37 @@ rules:
   - get
   - patch
   - update
-# Secrets hold provider credentials and TLS material. The manager only READS
-# them (cloud-init / credential / TLS Secret resolution); it never creates,
-# mutates, or deletes Secrets. Narrowed from full CRUD per issue #152.
+# Host and HostPool are the clustered-provider inventory (ADR-0007 P1). The
+# provider_controller READS them (get;list;watch) to render a clustered
+# Provider's host set into its projected host-inventory Secret, and watches them
+# to re-render on change. It never writes Hosts/HostPools: the admin authors
+# Hosts, and the inventory-sync controller writes Host status in a later slice.
+- apiGroups:
+  - infra.virtrigaud.io
+  resources:
+  - hosts
+  - hostpools
+  verbs:
+  - get
+  - list
+  - watch
+# Secrets: the manager READS provider credential and TLS Secrets (cloud-init /
+# credential / TLS Secret resolution) and, for clustered providers (ADR-0007
+# D3), CREATES/UPDATES the single host-inventory Secret it owns per Provider
+# (<provider>-hosts) — the only Secret it writes. It never deletes Secrets: that
+# Secret is owner-referenced to its Provider and reclaimed by garbage collection.
+# RBAC cannot scope create to one name, so create;update is namespace/cluster-
+# wide; only the trusted manager holds it (provider pods have NO secrets RBAC —
+# see the dedicated per-provider ServiceAccount below).
 - apiGroups:
   - ""
   resources:
   - secrets
   verbs:
+  - create
   - get
   - list
+  - update
   - watch
 # Services for remote provider runtimes (provider_controller reconciles them).
 - apiGroups:

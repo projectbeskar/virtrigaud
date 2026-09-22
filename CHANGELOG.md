@@ -5,6 +5,29 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-22 10:30] - Clustered host-inventory Secret render + topology discriminator (ADR-0007 P1)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `api/infra.virtrigaud.io/v1beta1/provider_types.go`: `Provider.spec.topology` — additive string enum (`single` default | `cluster`), the ADR-0007 D9 deployment-topology discriminator, plus `ProviderTopologySingle`/`ProviderTopologyCluster` constants. Regenerated CRDs, deepcopy, and manager RBAC (`config/rbac/role.yaml`); mirrored the RBAC into `charts/virtrigaud/templates/manager-rbac.yaml`.
+- `internal/clustered/hostsecret/`: the versioned host-inventory schema (`Inventory`/`Host`/`Credentials`) with deterministic, id-sorted `Marshal`/`Unmarshal` and the shared `SchemaVersion`/`SecretDataKey` (`hosts.json`)/`MountPath` (`/etc/virtrigaud/hosts`) constants — the contract the clustered provider will later read from a mounted file, never the API (#297).
+- `internal/controller/provider_hostinventory.go`: the operator side of the projected-Secret pipeline (ADR-0007 D3). For a `topology: cluster` Provider it renders the `Host` CRs whose `spec.providerRef` names it into a Provider-owned Secret `<provider>-hosts` (idempotent via `CreateOrUpdate`), and watches `Host`/`HostPool` (mapped to their Provider via `spec.providerRef`) so an inventory change re-renders promptly.
+- `internal/controller/provider_controller.go`: mounts that Secret read-only at `/etc/virtrigaud/hosts/` for cluster providers (mirroring the credentials mount), wires the render into `reconcileRemoteRuntime` (before the Deployment) and the two watches into `SetupWithManager`. Least-privilege RBAC markers: `hosts`/`hostpools` get;list;watch and `secrets` create;update (get;list;watch already held; **no** delete — the owner-referenced Secret is reclaimed by GC).
+- Tests: `hostsecret` marshal/ordering/round-trip/empty/credentials-empty; controller cluster-render (owner ref + mount + only-this-provider hosts), single-topology no-op, idempotent re-render, `Host` add/remove, and `Host`/`HostPool`→Provider watch mapping.
+- Docs/examples: `docs/clustered-provider-inventory.md` (the topology field + the projected-Secret mechanism, with credential inlining and provider consumption flagged as follow-ups) and `examples/provider-libvirt-clustered.yaml`.
+
+### Why
+ADR-0007 P1 D3: a thin, API-less clustered provider (post-#297) must be *told* which hosts it fronts without ever reading the Kubernetes API. This lands the safe, structural half — rendering host **metadata** (id/endpoint/labels) into a mounted Secret — so the credential-resolution, provider-side file consumption, and validating-webhook PRs build on a stable schema and mount. Single-topology providers are byte-for-byte unchanged (D9).
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+### Security
+- Renders host metadata only: the `credentials` sub-document is **defined but left empty**, and the render path never reads or logs credential material. The rendered object is a **Secret** (never a ConfigMap), owned by the Provider, in the provider namespace. Provider pods gain no API access and no projected token — the #297 no-API-access invariant holds (the provider will consume the mounted file in a later PR). The one new manager grant is `secrets` create;update (no delete); credential inlining is a separate, security-reviewed PR.
+
 ## [2026-09-22 08:11] - ListHosts/GetHostInfo RPCs + host inventory contract (ADR-0007 P1)
 **Author:** @wrkode (William Rizzo)
 

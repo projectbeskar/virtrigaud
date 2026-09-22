@@ -1,0 +1,46 @@
+# Clustered libvirt Provider (ADR-0007 P1) — spec.topology: cluster
+#
+# This is the CLUSTERED counterpart to provider-libvirt.yaml: instead of one
+# gRPC process bound to one host, a clustered provider fronts N bare hosts that
+# the admin registers as Host CRs under a HostPool (see hostpool-clustered.yaml,
+# which references this Provider as "libvirt-cluster").
+#
+# What spec.topology: cluster turns on TODAY (this slice): the Provider
+# controller gathers the Host CRs whose spec.providerRef names this Provider,
+# renders their metadata (id/endpoint/labels) into a versioned-schema, Provider-
+# owned Secret named "<provider>-hosts" (here: libvirt-cluster-hosts), and mounts
+# it read-only into the provider pod at /etc/virtrigaud/hosts (ADR-0007 D3).
+#
+# NOT yet wired (later, separately-reviewed ADR-0007 P1 PRs): the Secret carries
+# NO credential material yet (the credentials field is rendered empty); the
+# provider does NOT read the mounted file yet (file-watch/hot-reload + the N-host
+# connection map come later); and the validating webhook that restricts
+# topology: cluster to libvirt is a later PR. Single-topology providers
+# (topology: single, the default) are byte-for-byte unaffected (ADR-0007 D9).
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: Provider
+metadata:
+  name: libvirt-cluster
+  namespace: virtrigaud-system
+spec:
+  type: libvirt
+  # The discriminator: cluster puts VirtRigaud in charge of a host set. Default
+  # is single (today's one-process-one-host behavior).
+  topology: cluster
+  # A cluster provider does not bind to a single host endpoint; the per-host
+  # endpoints live on the Host CRs. This endpoint is the provider's own gRPC
+  # address contract and is otherwise unused by the clustered host path.
+  endpoint: qemu+ssh://virt@placeholder/system
+  credentialSecretRef:
+    name: libvirt-cluster-creds
+  runtime:
+    mode: Remote
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-libvirt:latest"
+    service:
+      port: 9443
+      # TLS is on-by-default (v0.3.7+); provision a Secret with tls.crt/tls.key/
+      # ca.crt, or set enabled: false to opt into plaintext for a lab.
+      tls:
+        enabled: true
+        secretRef:
+          name: libvirt-cluster-tls

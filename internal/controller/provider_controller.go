@@ -39,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
+	"github.com/projectbeskar/virtrigaud/internal/clustered/hostsecret"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
 	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
@@ -56,6 +57,7 @@ const (
 	errReasonServiceReconcile        = "service-reconcile-failed"
 	errReasonServiceAccountReconcile = "serviceaccount-reconcile-failed"
 	errReasonDeploymentReconcile     = "deployment-reconcile-failed"
+	errReasonHostInventoryReconcile  = "hostinventory-reconcile-failed"
 	errReasonCleanupFailed           = "cleanup-failed"
 	errReasonTLSNotConfigured        = "tls-not-configured"
 )
@@ -440,6 +442,19 @@ func (r *ProviderReconciler) reconcileRemoteRuntime(ctx context.Context, provide
 		provider.Status.Runtime.Phase = infravirtrigaudiov1beta1.ProviderRuntimePhaseFailed
 		provider.Status.Runtime.Message = err.Error()
 		metrics.RecordError(errReasonServiceAccountReconcile, metrics.ComponentManager)
+		return ctrl.Result{RequeueAfter: time.Minute}, err
+	}
+
+	// Render the clustered host-inventory Secret (ADR-0007 D3) BEFORE the
+	// Deployment, so a topology=cluster provider's pod can mount it on first
+	// start. For topology=single (the default) this is a no-op that issues no
+	// API calls — the single-host path stays byte-for-byte unchanged (D9).
+	if err := r.reconcileHostInventorySecret(ctx, provider); err != nil {
+		logger.Error(err, "Failed to reconcile host-inventory secret")
+		k8s.SetCondition(&provider.Status.Conditions, "ProviderRuntimeReady", metav1.ConditionFalse, "HostInventoryError", fmt.Sprintf("Failed to render host inventory: %v", err))
+		provider.Status.Runtime.Phase = infravirtrigaudiov1beta1.ProviderRuntimePhaseFailed
+		provider.Status.Runtime.Message = err.Error()
+		metrics.RecordError(errReasonHostInventoryReconcile, metrics.ComponentManager)
 		return ctrl.Result{RequeueAfter: time.Minute}, err
 	}
 
@@ -983,6 +998,19 @@ func (r *ProviderReconciler) buildProviderContainer(provider *infravirtrigaudiov
 		ReadOnly:  true,
 	})
 
+	// Mount the clustered host-inventory Secret (ADR-0007 D3) read-only for a
+	// topology=cluster provider, mirroring the credentials mount above. The
+	// provider does NOT read it yet — provider-side file-watch/hot-reload lands
+	// in a later PR; mounting an as-yet-unread volume is harmless. For
+	// topology=single nothing is mounted and the pod spec is unchanged (D9).
+	if isClusterTopology(provider) {
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      hostInventoryVolumeName,
+			MountPath: hostsecret.MountPath,
+			ReadOnly:  true,
+		})
+	}
+
 	// Mount TLS certificates if enabled. Mount name matches the
 	// Volume produced in buildPodVolumes; mount path is the canonical
 	// location consumed by the PR-2 provider-side wiring.
@@ -1116,6 +1144,21 @@ func (r *ProviderReconciler) buildPodVolumes(provider *infravirtrigaudiov1beta1.
 			},
 		},
 	})
+
+	// Add the clustered host-inventory volume (ADR-0007 D3) for a
+	// topology=cluster provider, backed by the Provider-owned Secret rendered by
+	// reconcileHostInventorySecret. For topology=single no volume is added and
+	// the pod spec is unchanged (D9).
+	if isClusterTopology(provider) {
+		volumes = append(volumes, corev1.Volume{
+			Name: hostInventoryVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: r.getHostInventorySecretName(provider),
+				},
+			},
+		})
+	}
 
 	// Add TLS volume if enabled.
 	//
@@ -1400,6 +1443,18 @@ func (r *ProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			&corev1.PersistentVolumeClaim{},
 			handler.EnqueueRequestsFromMapFunc(r.providersForMigrationPVC),
+		).
+		// Re-render a clustered Provider's host-inventory Secret when one of its
+		// Host or HostPool CRs changes (ADR-0007 D3), mapping each back to its
+		// owning Provider via spec.providerRef. Single-topology Providers own no
+		// Hosts/HostPools, so these watches never enqueue work for them.
+		Watches(
+			&infravirtrigaudiov1beta1.Host{},
+			handler.EnqueueRequestsFromMapFunc(r.providersForHost),
+		).
+		Watches(
+			&infravirtrigaudiov1beta1.HostPool{},
+			handler.EnqueueRequestsFromMapFunc(r.providersForHostPool),
 		).
 		WithOptions(controller.Options{
 			MaxConcurrentReconciles: 5, // Process up to 5 providers in parallel

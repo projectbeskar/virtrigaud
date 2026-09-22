@@ -38,6 +38,18 @@ const (
 	ProviderTypeProxmox ProviderType = "proxmox"
 )
 
+// Provider deployment topologies (ProviderSpec.Topology, ADR-0007 D9). A string
+// enum, not a bool, so a future third topology mode is a purely additive enum
+// value (settled 2026-09-21).
+const (
+	// ProviderTopologySingle is one gRPC process bound to one host — today's
+	// behavior, byte-for-byte unchanged. It is the default.
+	ProviderTopologySingle = "single"
+	// ProviderTopologyCluster fronts N bare hosts registered as Host CRs under a
+	// HostPool; the operator owns inventory/placement/migration (ADR-0007 D1/D3).
+	ProviderTopologyCluster = "cluster"
+)
+
 // ProviderRuntimeMode specifies how the provider is executed
 // +kubebuilder:validation:Enum=Remote
 type ProviderRuntimeMode string
@@ -219,6 +231,26 @@ const (
 type ProviderSpec struct {
 	// Type specifies the provider type
 	Type ProviderType `json:"type"`
+
+	// Topology selects the provider's deployment topology (ADR-0007 D9). It is a
+	// string enum, not a bool, so a future third topology mode is a purely
+	// additive enum value (settled 2026-09-21):
+	//   - "single" (default): one gRPC process bound to one host. This is today's
+	//     behavior and stays byte-for-byte unchanged — no scheduler, no host
+	//     inventory, no projected host Secret.
+	//   - "cluster": the provider fronts N bare hosts registered as Host CRs under
+	//     a HostPool. The operator owns inventory/placement/migration and renders
+	//     the pool's Host CRs into a versioned-schema Secret mounted into the
+	//     provider pod (ADR-0007 D1/D3); the provider reads that mounted file,
+	//     never the Kubernetes API (the #297 no-API-access invariant).
+	// Only meaningful for hypervisors with no native cluster manager (libvirt
+	// first); a validating webhook (a later ADR-0007 P1 PR) rejects "cluster" on
+	// type: vsphere|proxmox (ADR-0007 D2). Defaulting "" to "single" keeps every
+	// existing single-host Provider byte-for-byte unchanged.
+	// +optional
+	// +kubebuilder:default=single
+	// +kubebuilder:validation:Enum=single;cluster
+	Topology string `json:"topology,omitempty"`
 
 	// Endpoint is the provider endpoint URI
 	// Supports multiple protocols: HTTP(S), TCP, gRPC for general providers
