@@ -17,10 +17,13 @@ limitations under the License.
 package controller
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -30,12 +33,40 @@ import (
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/clustered/hostsecret"
+	"github.com/projectbeskar/virtrigaud/internal/k8s"
 )
 
 // hostInventoryVolumeName is the Pod volume name for the clustered
 // host-inventory Secret. Referenced by both the Volume (buildPodVolumes) and the
 // VolumeMount (buildProviderContainer) — the two must match.
 const hostInventoryVolumeName = "host-inventory"
+
+// Credential-Secret data keys the render loop extracts per host and inlines into
+// the host-inventory Secret. They MIRROR the keys the libvirt provider reads
+// today from its mounted credential Secret (internal/providers/libvirt:
+// /etc/virtrigaud/credentials/<key>), so the clustered provider (a later PR)
+// consumes the inlined material through the same code path as single-host
+// credentials. "ssh-privatekey" follows the kubernetes.io/ssh-auth convention.
+const (
+	credentialSecretKeySSHPrivateKey = "ssh-privatekey"
+	credentialSecretKeyKnownHosts    = "known_hosts"
+)
+
+// Condition/event vocabulary for per-host credential resolution surfaced on the
+// Provider. The messages carry a host id and a coarse reason ONLY — never a
+// credential value (ADR-0007 Security; #297).
+const (
+	// conditionHostCredentialsReady is True when every fronted Host's credentials
+	// resolved and were inlined, False when one or more hosts were skipped for
+	// unresolved/malformed credentials (the rendered inventory still carries the
+	// hosts that did resolve).
+	conditionHostCredentialsReady = "HostCredentialsReady"
+	reasonCredentialsResolved     = "CredentialsResolved"
+	reasonCredentialsUnresolved   = "CredentialsUnresolved"
+	// eventReasonCredentialsUnresolved is the Warning event reason emitted when a
+	// host is skipped for unresolved credentials.
+	eventReasonCredentialsUnresolved = "HostCredentialsUnresolved"
+)
 
 // RBAC for the clustered host-inventory pipeline (ADR-0007 D3). Least-privilege:
 //   - Host/HostPool: get;list;watch only — the controller reads the admin's
@@ -94,10 +125,17 @@ func hostBelongsToProvider(host *infravirtrigaudiov1beta1.Host, provider *infrav
 // owner-referenced Secret to be garbage-collected on Provider deletion; it
 // carries only host metadata (never credentials), so it is harmless meanwhile.
 //
-// SECURITY: this renders host METADATA only (id/endpoint/labels). The
-// credentials sub-document is left empty (hostsecret.Credentials); credential
-// resolution is a separate, security-reviewed PR. Host connection material is
-// never read or logged here — the log line records the host COUNT only.
+// SECURITY: this renders host metadata (id/endpoint/labels) AND inlines each
+// host's SSH connection material (private key + known_hosts) into the Secret so
+// a thin, API-less provider can connect using only the mounted file (#297). The
+// material is read from the referenced credential Secret and copied verbatim
+// into the (Opaque, Provider-owned) inventory Secret; it is NEVER logged, put in
+// Status, or put in an event — the log line records the host COUNT only, and the
+// credential condition/event names host ids and coarse reasons only. A host
+// whose credentials cannot be resolved (Secret missing, or missing the SSH
+// private key) is SKIPPED from the render — never rendered half-usable and never
+// failing the whole reconcile — and surfaced via a non-secret condition/event so
+// siblings still render (fail-safe, never fail-open).
 func (r *ProviderReconciler) reconcileHostInventorySecret(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) error {
 	if !isClusterTopology(provider) {
 		return nil
@@ -113,16 +151,25 @@ func (r *ProviderReconciler) reconcileHostInventorySecret(ctx context.Context, p
 	}
 
 	inv := hostsecret.Inventory{SchemaVersion: hostsecret.SchemaVersion}
+	var skipped []skippedHost
 	for i := range hostList.Items {
 		h := &hostList.Items[i]
 		if !hostBelongsToProvider(h, provider) {
 			continue
 		}
+		creds, skipReason := r.resolveHostCredentials(ctx, provider, h)
+		if skipReason != "" {
+			// Fail-safe: drop this one host from the inventory and record a
+			// non-secret reason. Do NOT fail the reconcile — the other hosts
+			// still render, and a Host/Secret edit re-triggers a re-render.
+			skipped = append(skipped, skippedHost{id: h.Name, reason: skipReason})
+			continue
+		}
 		inv.Hosts = append(inv.Hosts, hostsecret.Host{
-			ID:       h.Name,
-			Endpoint: h.Spec.Endpoint,
-			Labels:   h.Spec.Labels,
-			// Credentials intentionally left empty in this PR (see doc comment).
+			ID:          h.Name,
+			Endpoint:    h.Spec.Endpoint,
+			Labels:      h.Spec.Labels,
+			Credentials: creds,
 		})
 	}
 
@@ -162,7 +209,118 @@ func (r *ProviderReconciler) reconcileHostInventorySecret(ctx context.Context, p
 		logger.Info("Reconciled clustered host-inventory Secret",
 			"operation", op, "secret", secret.Name, "hosts", len(inv.Hosts))
 	}
+	// Surface credential-resolution health on the Provider (condition + event +
+	// log). This mutates provider.Status.Conditions, which the Provider Reconcile
+	// persists after reconcileRemoteRuntime returns.
+	r.surfaceHostCredentialStatus(ctx, provider, len(inv.Hosts), skipped)
 	return nil
+}
+
+// skippedHost records a host dropped from the rendered inventory because its
+// credentials could not be resolved, plus the coarse, NON-SECRET reason (a host
+// id and a short phrase — never a credential value).
+type skippedHost struct {
+	id     string
+	reason string
+}
+
+// resolveHostCredentials resolves and inlines one Host's SSH connection material
+// for the rendered inventory. It reads the referenced credential Secret (the
+// Host's own spec.credentialSecretRef when set, otherwise the Provider's default
+// spec.credentialSecretRef) and extracts the same keys the libvirt provider
+// consumes today (credentialSecretKeySSHPrivateKey, credentialSecretKeyKnownHosts).
+//
+// On success it returns the populated Credentials and an empty reason. When the
+// material cannot be resolved it returns the zero Credentials and a coarse,
+// NON-SECRET reason (Secret missing/unreadable, or no SSH private key present);
+// the caller SKIPS that host rather than rendering it half-usable or failing the
+// whole reconcile. It never logs or returns any credential value — the returned
+// reason is safe to place in a condition/event.
+func (r *ProviderReconciler) resolveHostCredentials(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider, host *infravirtrigaudiov1beta1.Host) (hostsecret.Credentials, string) {
+	key := hostCredentialSecretKey(host, provider)
+	if key.Name == "" {
+		return hostsecret.Credentials{}, "no credential secret reference on host or Provider"
+	}
+
+	secret := &corev1.Secret{}
+	if err := r.Get(ctx, key, secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			return hostsecret.Credentials{}, fmt.Sprintf("credential secret %s/%s not found", key.Namespace, key.Name)
+		}
+		// A non-NotFound error (e.g. forbidden, transient) is API metadata only —
+		// it never carries Secret data — so it is safe to surface coarsely.
+		return hostsecret.Credentials{}, fmt.Sprintf("credential secret %s/%s unreadable: %v", key.Namespace, key.Name, err)
+	}
+
+	// The SSH private key is the mandatory auth material: a Secret without it is
+	// unusable for the key-based SSH the clustered model standardizes on. Presence
+	// is judged after trimming surrounding whitespace, but the value is inlined
+	// VERBATIM (untrimmed) so it round-trips byte-for-byte.
+	privateKey := secret.Data[credentialSecretKeySSHPrivateKey]
+	if len(bytes.TrimSpace(privateKey)) == 0 {
+		return hostsecret.Credentials{}, fmt.Sprintf("credential secret %s/%s has no %q", key.Namespace, key.Name, credentialSecretKeySSHPrivateKey)
+	}
+	creds := hostsecret.Credentials{SSHPrivateKey: privateKey}
+
+	// known_hosts is inlined when present; when absent it is omitted and the
+	// provider enforces its ADR-0004 host-key policy at connect time. Copied
+	// verbatim (untrimmed) for a byte-for-byte round-trip.
+	if kh := secret.Data[credentialSecretKeyKnownHosts]; len(bytes.TrimSpace(kh)) > 0 {
+		creds.KnownHosts = kh
+	}
+	return creds, ""
+}
+
+// hostCredentialSecretKey resolves which credential Secret a host's material
+// comes from: the host's own spec.credentialSecretRef when set, otherwise the
+// Provider's spec.credentialSecretRef (the default). The ref namespace defaults
+// to the referring object's own namespace when unset, matching ObjectRef
+// resolution elsewhere (the Provider default resolves in the Provider's
+// namespace, where its credential mount already lives).
+func hostCredentialSecretKey(host *infravirtrigaudiov1beta1.Host, provider *infravirtrigaudiov1beta1.Provider) types.NamespacedName {
+	if ref := host.Spec.CredentialSecretRef; ref != nil {
+		ns := ref.Namespace
+		if ns == "" {
+			ns = host.Namespace
+		}
+		return types.NamespacedName{Namespace: ns, Name: ref.Name}
+	}
+	ref := provider.Spec.CredentialSecretRef
+	ns := ref.Namespace
+	if ns == "" {
+		ns = provider.Namespace
+	}
+	return types.NamespacedName{Namespace: ns, Name: ref.Name}
+}
+
+// surfaceHostCredentialStatus records per-host credential-resolution health on
+// the Provider: a HostCredentialsReady condition (True when all fronted hosts
+// resolved, False naming the skipped ones), a Warning event when hosts were
+// skipped, and a structured log line. Every message names host ids and coarse
+// reasons ONLY — never a credential value (ADR-0007 Security).
+func (r *ProviderReconciler) surfaceHostCredentialStatus(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider, rendered int, skipped []skippedHost) {
+	if len(skipped) == 0 {
+		k8s.SetCondition(&provider.Status.Conditions, conditionHostCredentialsReady, metav1.ConditionTrue,
+			reasonCredentialsResolved, fmt.Sprintf("resolved credentials for all %d host(s)", rendered))
+		return
+	}
+
+	parts := make([]string, 0, len(skipped))
+	for _, s := range skipped {
+		parts = append(parts, fmt.Sprintf("%s (%s)", s.id, s.reason))
+	}
+	detail := strings.Join(parts, "; ")
+	msg := fmt.Sprintf("skipped %d host(s) with unresolved credentials: %s; %d host(s) rendered",
+		len(skipped), detail, rendered)
+
+	k8s.SetCondition(&provider.Status.Conditions, conditionHostCredentialsReady, metav1.ConditionFalse,
+		reasonCredentialsUnresolved, msg)
+	if r.Recorder != nil {
+		r.Recorder.Event(provider, corev1.EventTypeWarning, eventReasonCredentialsUnresolved, msg)
+	}
+	// Structured WARN-level signal; host ids + coarse reasons only.
+	log.FromContext(ctx).Info("clustered host-inventory: skipped hosts with unresolved credentials",
+		"provider", provider.Name, "skipped", len(skipped), "rendered", rendered, "detail", detail)
 }
 
 // providersForHost maps a Host event to a reconcile request for the Provider it

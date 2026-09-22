@@ -69,8 +69,8 @@ type Inventory struct {
 }
 
 // Host is one host a clustered provider fronts. It carries connection metadata
-// (id, endpoint, labels) plus a defined-but-empty Credentials sub-document (see
-// Credentials).
+// (id, endpoint, labels) plus the per-host connection Credentials the provider
+// uses to reach it (see Credentials).
 type Host struct {
 	// ID is the stable host identifier — the Host CR name. It is the key the
 	// provider uses to open and address a per-host connection, and the sort key
@@ -85,38 +85,59 @@ type Host struct {
 	// zone/rack), copied from Host.spec.labels. Omitted when empty.
 	Labels map[string]string `json:"labels,omitempty"`
 
-	// Credentials is the per-host connection material. It is DEFINED here so the
-	// Secret schema is stable across the projected-Secret slice, but the Provider
-	// controller does NOT populate it in the first (structural) PR — see
-	// Credentials. It is always present in the JSON (an empty document renders as
-	// {}), never omitted, so consumers can rely on the key existing.
+	// Credentials is the per-host connection material a clustered provider reads
+	// to open a connection to this host. It is always present in the JSON (a host
+	// with no resolvable credentials is never rendered — see the controller's
+	// credential resolution — so a rendered host always carries usable material,
+	// but an unpopulated Credentials still renders as {} for schema stability).
 	Credentials Credentials `json:"credentials"`
 }
 
 // Credentials is the per-host connection material a clustered provider needs to
-// open a connection to the host (e.g. an SSH private key + known_hosts entry,
-// or a future agent token).
+// open a connection to the host. Today this is the SSH material the libvirt
+// provider already consumes for a single host (ADR-0004 / ADR-0008): an SSH
+// private key plus the host's known_hosts entry. The field set intentionally
+// MIRRORS the keys of the libvirt credential Secret so the clustered provider (a
+// later PR) can consume the inlined material through the SAME code path it uses
+// today for single-host credentials, reading it from the mounted inventory file
+// instead of the per-provider credential mount — never the Kubernetes API (#297).
 //
-// SECURITY: this struct is DEFINED so the host-inventory schema is stable, but
-// its fields are left UNPOPULATED in the first, structural projected-Secret PR.
-// Resolving each Host's (or the Provider's) credentialSecretRef and inlining the
-// material into this document is a separate, security-reviewed PR (ADR-0007 P1).
-// Until then every rendered host carries an empty Credentials ({}), and the
-// render path never reads or logs any credential value. The concrete field shape
-// below is provisional and owned by the credential-resolution PR; because the
-// document is versioned (SchemaVersion) and consumed only from a mounted file by
-// our own provider, that PR may extend or reshape it additively (or bump the
-// version) without a wire-contract break.
+// SECURITY: the values here are secret material. They live ONLY inside the
+// Opaque, Provider-owned inventory Secret (the same protection boundary as the
+// source credential Secret). This is a deliberate credential DUPLICATION
+// (source Secret → rendered inventory Secret): the #297 no-API-access invariant
+// requires the provider to read connection material from a file, so the operator
+// copies it there once. The render path MUST NOT log any value in this struct.
+//
+// The material is carried as raw bytes ([]byte, base64 in JSON) copied verbatim
+// from the source Secret's data map — no string round-trip, no trimming — so a
+// PEM key or a known_hosts line survives byte-for-byte with no encoding
+// corruption. Username is NOT carried here: the SSH user is part of the endpoint
+// URI (qemu+ssh://user@host/system), which the in-process SSH client reads
+// directly. Password auth is deliberately NOT inlined: the clustered model
+// standardizes on key-based SSH with known_hosts verification (ADR-0004), and
+// ADR-0008 D8 already leans to removing SSH password auth.
+//
+// The document is versioned (SchemaVersion): populating these already-declared
+// fields is additive, so SchemaVersion stays 1.
 type Credentials struct {
-	// SSHPrivateKeyRef names the key, within the host's mounted credential
-	// material, that holds the SSH private key. Reserved for the
-	// credential-resolution PR; always empty today.
-	SSHPrivateKeyRef string `json:"sshPrivateKeyRef,omitempty"`
+	// SSHPrivateKey is the SSH private key material used to authenticate to the
+	// host. It mirrors the "ssh-privatekey" key of the libvirt credential Secret
+	// (read today at /etc/virtrigaud/credentials/ssh-privatekey; the key name
+	// follows the kubernetes.io/ssh-auth convention). Raw PEM/OpenSSH bytes,
+	// verbatim from the source Secret. Omitted only for an unpopulated
+	// Credentials ({}); a rendered host always carries it.
+	SSHPrivateKey []byte `json:"sshPrivateKey,omitempty"`
 
-	// KnownHostsRef names the key holding the host's known_hosts entry, pinning
-	// the host key for strict host-key verification (ADR-0004). Reserved for the
-	// credential-resolution PR; always empty today.
-	KnownHostsRef string `json:"knownHostsRef,omitempty"`
+	// KnownHosts is the host's known_hosts entry, pinning the host key for strict
+	// SSH host-key verification (ADR-0004 — no TOFU). It mirrors the "known_hosts"
+	// key of the libvirt credential Secret (read today at
+	// /etc/virtrigaud/credentials/known_hosts). Raw bytes, verbatim from the
+	// source Secret. Omitted when the source Secret carries no known_hosts entry;
+	// the provider still enforces its ADR-0004 host-key policy at connect time
+	// (hard-fail unless the audit-flagged insecure escape hatch is set), so the
+	// operator does not second-guess that policy here.
+	KnownHosts []byte `json:"knownHosts,omitempty"`
 }
 
 // Marshal serializes inv into the bytes stored under SecretDataKey. It is

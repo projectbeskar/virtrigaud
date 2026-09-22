@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -147,6 +148,13 @@ type ProviderReconciler struct {
 	// that do not exercise capability reporting; reconcileReportedCapabilities
 	// is nil-safe and treats a nil resolver as "capabilities unavailable".
 	RemoteResolver *remote.Resolver
+
+	// Recorder emits Events on the Provider — currently a Warning when a
+	// clustered Host is skipped from the host-inventory render because its
+	// credentials could not be resolved (ADR-0007 D3). May be nil in tests;
+	// surfaceHostCredentialStatus is nil-safe and falls back to the persisted
+	// condition alone.
+	Recorder record.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=providers,verbs=get;list;watch;create;update;patch;delete
