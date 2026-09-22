@@ -477,6 +477,38 @@ jobs:
           docker buildx imagetools inspect \
             "${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/${{ matrix.component }}:${{ steps.meta.outputs.version }}"
 
+  # PR gate: build every component image for amd64 WITHOUT pushing, so a broken
+  # Dockerfile or build context is caught on the PR instead of only on the
+  # push-to-main build (build-images) — which is how #306's dropped runtime FROM
+  # slipped through and broke main's image build until #309. Single native arch,
+  # no QEMU, no registry writes: validates the Dockerfile cheaply. arm64 stays
+  # covered by the push build.
+  build-images-pr:
+    name: Build Container Images (PR, no push)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    needs: [test, lint]
+    if: github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [manager, provider-libvirt, provider-vsphere, provider-proxmox]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5  # v4.1.0
+
+      - name: Build image (amd64, no push)
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf  # v7.2.0
+        with:
+          context: .
+          file: ${{ matrix.component == 'manager' && './build/Dockerfile.manager' || format('./cmd/{0}/Dockerfile', matrix.component) }}
+          platforms: linux/amd64
+          push: false
+          load: false
+
   helm:
     name: Validate Helm Charts
     runs-on: ubuntu-22.04
@@ -683,7 +715,7 @@ jobs:
   ci:
     name: CI Summary
     runs-on: ubuntu-22.04
-    needs: [test, lint, security, govulncheck, generate, build, build-tools, helm, conformance, integration, catalog-validation, api-conversion-tests]
+    needs: [test, lint, security, govulncheck, generate, build, build-tools, build-images-pr, helm, conformance, integration, catalog-validation, api-conversion-tests]
     if: always()
     steps:
       - name: Check CI Results
@@ -696,6 +728,7 @@ jobs:
           echo "- Generate: ${{ needs.generate.result }}"
           echo "- Build: ${{ needs.build.result }}"
           echo "- Build Tools: ${{ needs.build-tools.result }}"
+          echo "- Build Images (PR): ${{ needs.build-images-pr.result }}"
           echo "- Helm: ${{ needs.helm.result }}"
           echo "- Conformance: ${{ needs.conformance.result }}"
           echo "- Integration: ${{ needs.integration.result }}"
@@ -710,6 +743,7 @@ jobs:
              [[ "${{ needs.generate.result }}" != "success" ]] || \
              [[ "${{ needs.build.result }}" != "success" ]] || \
              [[ "${{ needs.build-tools.result }}" != "success" ]] || \
+             ([[ "${{ needs.build-images-pr.result }}" != "success" ]] && [[ "${{ needs.build-images-pr.result }}" != "skipped" ]]) || \
              [[ "${{ needs.helm.result }}" != "success" ]] || \
              [[ "${{ needs.conformance.result }}" != "success" ]] || \
              ([[ "${{ needs.catalog-validation.result }}" != "success" ]] && [[ "${{ needs.catalog-validation.result }}" != "skipped" ]]) || \

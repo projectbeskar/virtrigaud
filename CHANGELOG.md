@@ -5,6 +5,21 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-22 00:52] - Build provider images on PRs (Dockerfile gate)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `.github/workflows/ci.yml`: new `build-images-pr` job builds all four component images (`manager`, `provider-libvirt`, `provider-vsphere`, `provider-proxmox`) for `linux/amd64` with `push: false` on every pull request, wired into the `ci` summary gate so a broken Dockerfile blocks merge. It is skipped on push, where the existing multi-arch `build-images`/`merge-images` jobs still publish.
+
+### Why
+The container image build ran only on push to `main`, so `make build` (Go binary only) was the sole PR gate and never exercised the Dockerfiles or build context. #306's dropped runtime `FROM` passed PR CI and broke `main`'s image build twice (#307, #308) until #309 repaired it. Building images on PRs closes that coverage hole.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [x] CI only — adds four native amd64 image builds per PR (no push, no QEMU, no arm64); arm64 remains covered by the push build.
+- [ ] Documentation only
+
 ## [2026-09-21 22:49] - Shadow-compare the libvirt list family (ADR-0008 PR 4c)
 **Author:** @wrkode (William Rizzo)
 
