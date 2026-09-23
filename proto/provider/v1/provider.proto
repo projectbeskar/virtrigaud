@@ -34,11 +34,22 @@ message CreateRequest {
 
   // JSON-encoded provider-agnostic specifications
   string class_json = 3;     // VMClass
-  string image_json = 4;     // VMImage  
+  string image_json = 4;     // VMImage
   string networks_json = 5;  // []NetworkAttachment
   string disks_json = 6;     // []DiskSpec
   string placement_json = 7; // Placement
   repeated string tags = 8;  // Tags
+
+  // target_host_id names the specific host a clustered ("brain-in-operator")
+  // provider must create this VM on (ADR-0007 P1, D4). It is the operator
+  // scheduler's binding on the wire — an EXPLICIT field, deliberately NOT buried
+  // in placement_json (which stays for external-orchestrator hints such as
+  // vSphere cluster/datastore/folder). AGNOSTIC. Additive and backward-compatible:
+  // single-host and thin-client providers ignore it, and never receive it; a
+  // clustered provider REQUIRES it and rejects an empty value rather than
+  // silently defaulting to some host (honesty-first, D9). The operator sets it
+  // only when creating a VM whose Provider has topology: cluster.
+  string target_host_id = 10;
 }
 
 message CreateResponse {

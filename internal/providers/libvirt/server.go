@@ -221,6 +221,10 @@ func (s *Server) parseCreateRequest(req *providerv1.CreateRequest) (contracts.Cr
 	createReq := contracts.CreateRequest{
 		Name: req.Name,
 		Tags: req.Tags,
+		// TargetHostID is the clustered create binding (ADR-0007 P1, D4). It is
+		// empty for single-host callers; the clustered Create path requires it and
+		// routes the create onto that host's connection (provider_virsh.go).
+		TargetHostID: req.TargetHostId,
 	}
 
 	// Parse UserData if provided

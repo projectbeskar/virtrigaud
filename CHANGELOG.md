@@ -5,6 +5,32 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-23 09:15] - Placement binding contract + libvirt create-on-host (ADR-0007 P1 D3/D4)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `proto/provider/v1/provider.proto`: **`CreateRequest.target_host_id` (field 10)** — the operator scheduler's host binding on the wire (ADR-0007 D4). An **explicit** field, deliberately not folded into `placement_json` (which stays for external-orchestrator hints); `target_host_id` is the clustered path's "create this VM on host X" instruction. Additive and backward-compatible: single-host and thin-client providers ignore it and never receive it. Regenerated bindings via `make proto` (buf, pinned `protoc-gen-go` v1.34.2); the large `provider.pb.go` diff is the deterministic `rawDesc` byte re-wrap from inserting field 10, and regeneration is idempotent.
+- `api/infra.virtrigaud.io/v1beta1/virtualmachine_types.go`: **`VirtualMachineStatus.placement` (`*PlacementStatus`)** — the durable placement binding (ADR-0007 D3): `host` (the bound Host, the source of truth), `pool`, `lastScheduledTime`, `reason` (scheduler decision trace). Additive/optional; regenerated deepcopy + CRD (`config/crd/bases`, Helm chart CRDs). **Nothing writes it this slice** — the binding controller PR does, and only after the provider confirms (honesty-first).
+- `internal/providers/libvirt/provider_virsh.go`: **clustered create-on-host.** In `topology: cluster`, `Create` routes onto `target_host_id`: it borrows that host's connection **lease** from the N-host registry (`ConnFor`, the same non-severing lease `GetHostInfo` uses) and **always releases it** (defer `Close`, error path included), running the unchanged create pipeline over that host's libvirtd. An **empty** `target_host_id` in clustered mode is a **typed `InvalidSpec` error**, never a silent default-host create (D9 honesty-first). Adds `createVM` (shared core), `createClustered`, `createOnLeasedHost`, and `virshConnFrom` (lease→`*virshConn` narrowing).
+- `internal/providers/libvirt/hostconn/cluster.go`: **`leasedConn.Unwrap()`** — returns the shared underlying `Conn` so a lease holder can reach a richer, driver-specific view of its own connection (the create path narrows to `*virshConn`) without the lease re-exporting every driver method; valid only while the lease is held.
+- Tests: `api/.../virtualmachine_placement_test.go` (`PlacementStatus` JSON round-trip, omit-when-nil, deepcopy independence, generated-CRD schema presence); `internal/providers/libvirt/create_cluster_test.go` (clustered `Create` routes to the target host and releases the lease on **both** success and error paths — proven via the real `ClusterRegistry` + `Evict`; empty `target_host_id` → typed error with no dial; `virshConnFrom` lease-unwrap; **single-host `Create` ignores `target_host_id`**); `internal/transport/grpc/client_create_targethost_test.go` (manager→proto mapping, empty stays empty, not leaked into `placement_json`). `go test -race ./internal/providers/libvirt/...` clean.
+
+### Changed
+- `internal/providers/contracts/provider.go`: `CreateRequest` gains `TargetHostID string` (the manager-side counterpart to the wire field).
+- `internal/transport/grpc/client.go`: `convertCreateRequest` threads `TargetHostID` → `target_host_id` (manager→proto).
+- `internal/providers/libvirt/server.go`: `parseCreateRequest` maps proto `target_host_id` → the contract field.
+- `internal/providers/libvirt/provider_virsh.go` + `clone.go`: the create core (`createVMWithCloudInit`, `generateDomainXMLWithStorage`, `detectDomainType`, `createDomainDefinition`, `defineDomain`) now takes an explicit `*VirshProvider`, so the same pipeline runs against either the single host or the leased target host; single-host and clone call sites pass `p.virshProvider` (behavior unchanged). Adds the `createOnHostFn` struct-field test seam (mirroring `describeNativeFn`/`listNativeFn`).
+- `docs/clustered-provider-inventory.md`: new **Placement binding** section (the `target_host_id` create path — clustered honors, single-host unchanged, empty→typed error — and the `status.placement` binding written by the operator only after confirm, in the next PR); updated the "not wired yet" blurbs to reflect the contract + provider half now existing.
+
+### Why
+Binding PR 1 of the ADR-0007 P1 placement slice: the **contract + provider half**. #321 shipped the pure `internal/scheduler.Schedule` function; this makes the contract its decision travels through *exist* — `target_host_id` on the wire, `status.placement` on the VM — and makes the libvirt provider honor `target_host_id` (create-on-a-named-host). The VM controller does **not** call the scheduler, set `target_host_id`, or write `status.placement` here — that is the binding controller PR (PR 2). Additive and backward-compatible; single-host is untouched; the connection lease is never severed.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-09-23 07:45] - Pure filter+score placement scheduler (ADR-0007 P1 D4)
 **Author:** @wrkode (William Rizzo)
 

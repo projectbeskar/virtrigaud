@@ -490,6 +490,21 @@ var errLeaseReleased = errors.New("hostconn: connection lease already released")
 // HostID returns the underlying connection's host id.
 func (l *leasedConn) HostID() HostID { return l.conn.HostID() }
 
+// Unwrap returns the shared underlying connection this lease borrows. It lets a
+// caller that holds a lease reach a richer, driver-specific view of its OWN
+// Conn — e.g. the libvirt provider narrowing to its *virshConn to run a
+// create-on-host over the chosen connection (ADR-0007 P1) — without the lease
+// having to re-export every driver method.
+//
+// It is valid ONLY while the lease is held (before Close): the returned Conn is
+// the shared handle the registry may drain and close once the lease is
+// released, so a caller must not retain it past Close, exactly as a Conn must
+// not be cached across calls (hostconn.Conn doc). Unwrap deliberately does not
+// consult released — it is an escape hatch for use under an active lease, and
+// the release guard stays on the delegating methods (Virsh/RunHost/…) that a
+// post-Close caller would otherwise reach.
+func (l *leasedConn) Unwrap() Conn { return l.conn }
+
 // Virsh delegates to the underlying connection (refused after release).
 func (l *leasedConn) Virsh(ctx context.Context, args ...string) (*Result, error) {
 	if l.released.Load() {

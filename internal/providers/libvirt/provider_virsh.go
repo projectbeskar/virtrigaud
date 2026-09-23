@@ -29,21 +29,46 @@ import (
 
 	"github.com/projectbeskar/virtrigaud/internal/diskutil"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
+	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt/hostconn"
 	"github.com/projectbeskar/virtrigaud/internal/storage"
 )
 
 // Clean provider implementation using only virsh
 
-// Create creates a new VM using virsh with full cloud-init support
+// Create creates a new VM using virsh with full cloud-init support.
+//
+// Topology dispatch (ADR-0007 D9): a single-host provider creates on its one
+// host exactly as before — target_host_id is ignored and this path is
+// byte-for-byte unchanged. A CLUSTERED provider (topology: cluster) instead
+// routes the create onto the host the operator's scheduler bound this VM to,
+// named by req.TargetHostID (see createClustered).
 func (p *Provider) Create(ctx context.Context, req contracts.CreateRequest) (contracts.CreateResponse, error) {
 	log.Printf("INFO Creating VM with cloud-init support: %s", req.Name)
+
+	if p.clustered() {
+		return p.createClustered(ctx, req)
+	}
 
 	if p.virshProvider == nil {
 		return contracts.CreateResponse{}, contracts.NewRetryableError("virsh provider not initialized", nil)
 	}
+	return p.createVM(ctx, p.virshProvider, req)
+}
 
-	// Check if domain already exists
-	domains, err := p.virshProvider.listDomains(ctx)
+// createVM runs the create pipeline against a single host's VirshProvider vp: an
+// idempotent pre-check (a domain of the same name already on that host is a
+// success no-op) followed by the full cloud-init + storage create. It is the
+// shared core of both the single-host path (vp == p.virshProvider) and the
+// clustered create-on-host path (vp == the leased target host's provider), so a
+// clustered create is byte-for-byte the single-host create — only the host the
+// commands run against differs (ADR-0007 D9).
+func (p *Provider) createVM(ctx context.Context, vp *VirshProvider, req contracts.CreateRequest) (contracts.CreateResponse, error) {
+	if vp == nil {
+		return contracts.CreateResponse{}, contracts.NewRetryableError("virsh provider not initialized", nil)
+	}
+
+	// Check if domain already exists on this host
+	domains, err := vp.listDomains(ctx)
 	if err != nil {
 		return contracts.CreateResponse{}, contracts.NewRetryableError("failed to list existing domains", err)
 	}
@@ -58,7 +83,7 @@ func (p *Provider) Create(ctx context.Context, req contracts.CreateRequest) (con
 	}
 
 	// Create VM with cloud-init support
-	vmID, err := p.createVMWithCloudInit(ctx, req)
+	vmID, err := p.createVMWithCloudInit(ctx, vp, req)
 	if err != nil {
 		return contracts.CreateResponse{}, contracts.NewRetryableError("failed to create VM", err)
 	}
@@ -69,13 +94,99 @@ func (p *Provider) Create(ctx context.Context, req contracts.CreateRequest) (con
 	}, nil
 }
 
-// createVMWithCloudInit creates a VM with comprehensive cloud-init support and storage management
-func (p *Provider) createVMWithCloudInit(ctx context.Context, req contracts.CreateRequest) (string, error) {
+// createClustered routes a create onto the specific host the operator's
+// scheduler bound this VM to (ADR-0007 P1, D4); req.TargetHostID names it.
+//
+//   - An EMPTY target_host_id is a clean typed error, never a silent
+//     default-host create: a clustered provider has no single default host, and
+//     the operator must schedule the VM (binding PR 2) before Create
+//     (honesty-first, D9).
+//   - Otherwise it borrows that host's connection LEASE from the N-host registry
+//     (ConnFor) and ALWAYS releases it (defer Close). The lease is non-severing:
+//     a concurrent host-remove drains gracefully behind the held lease and its
+//     underlying connection is closed only once idle — the same lease discipline
+//     GetHostInfo's collectOneHost uses (#318). The create then runs on that
+//     host's libvirtd through the leased connection's VirshProvider.
+func (p *Provider) createClustered(ctx context.Context, req contracts.CreateRequest) (contracts.CreateResponse, error) {
+	hostID := strings.TrimSpace(req.TargetHostID)
+	if hostID == "" {
+		return contracts.CreateResponse{}, contracts.NewInvalidSpecError(
+			"clustered libvirt provider requires target_host_id: the operator must schedule the VM to a host before Create (ADR-0007 P1)", nil)
+	}
+
+	lease, err := p.clusterReg.ConnFor(ctx, hostconn.HostID(hostID))
+	if err != nil {
+		// Unknown host, a host being drained, or a failed lazy dial. Retryable:
+		// the mounted inventory may still be reconciling, or the host may recover.
+		return contracts.CreateResponse{}, contracts.NewRetryableError(
+			fmt.Sprintf("connect to target host %q", hostID), err)
+	}
+	// Release the lease on every exit path (success, create error, or panic).
+	// Close releases the per-borrow lease; it does NOT close the shared
+	// underlying connection, so a drain that removed this host mid-create
+	// completes cleanly the moment we return (ADR-0007 D3 non-severing).
+	defer func() { _ = lease.Close() }()
+
+	fn := p.createOnHostFn
+	if fn == nil {
+		fn = p.createOnLeasedHost
+	}
+	return fn(ctx, lease, req)
+}
+
+// createOnLeasedHost runs the create pipeline over an already-leased host
+// connection — the production createOnHostFn. It narrows the lease to the
+// host's *virshConn to reach that host's VirshProvider, then runs the same
+// createVM core the single-host path uses, so a clustered create is byte-for-
+// byte the single-host create aimed at the chosen libvirtd (ADR-0007 D9).
+//
+// It is reached through the p.createOnHostFn seam so clustered-routing tests can
+// inject a recorder (asserting host selection and lease release) without a live
+// libvirtd, mirroring the describeNativeFn/listNativeFn test seams.
+func (p *Provider) createOnLeasedHost(ctx context.Context, lease hostconn.Conn, req contracts.CreateRequest) (contracts.CreateResponse, error) {
+	vc, err := virshConnFrom(lease)
+	if err != nil {
+		return contracts.CreateResponse{}, contracts.NewRetryableError("resolve target host connection", err)
+	}
+	return p.createVM(ctx, vc.virsh, req)
+}
+
+// virshConnFrom narrows a hostconn.Conn — possibly a registry lease wrapping the
+// real connection — to the underlying *virshConn, so the clustered create path
+// can reach the target host's VirshProvider. A ClusterRegistry hands out a lease
+// that Unwraps to the *virshConn; a bare *virshConn is returned as-is. It errors
+// (rather than nil-derefs) if the connection is not virsh-backed.
+func virshConnFrom(c hostconn.Conn) (*virshConn, error) {
+	// Bounded unwrap: a lease wraps the conn exactly once today, but tolerate a
+	// small chain rather than assume a single layer.
+	for i := 0; i < 8; i++ {
+		if vc, ok := c.(*virshConn); ok {
+			return vc, nil
+		}
+		u, ok := c.(interface{ Unwrap() hostconn.Conn })
+		if !ok {
+			break
+		}
+		next := u.Unwrap()
+		if next == nil || next == c {
+			break
+		}
+		c = next
+	}
+	return nil, fmt.Errorf("target host connection is not virsh-backed (%T)", c)
+}
+
+// createVMWithCloudInit creates a VM with comprehensive cloud-init support and
+// storage management on the host backed by vp. vp is p.virshProvider in
+// single-host mode and the leased target host's provider in clustered mode
+// (ADR-0007 P1), so the whole pipeline — storage, cloud-init, domain define —
+// runs against the intended libvirtd.
+func (p *Provider) createVMWithCloudInit(ctx context.Context, vp *VirshProvider, req contracts.CreateRequest) (string, error) {
 	log.Printf("INFO Creating VM with enhanced cloud-init configuration and storage: %s", req.Name)
 
 	// Initialize providers
-	cloudInitProvider := NewCloudInitProvider(p.virshProvider)
-	storageProvider := NewStorageProvider(p.virshProvider)
+	cloudInitProvider := NewCloudInitProvider(vp)
+	storageProvider := NewStorageProvider(vp)
 
 	// Ensure default storage pool exists and is active
 	if err := storageProvider.EnsureDefaultStoragePool(ctx); err != nil {
@@ -188,18 +299,18 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, req contracts.Crea
 	}
 
 	// Generate domain XML with proper disk and cloud-init ISO
-	domainXML, err := p.generateDomainXMLWithStorage(ctx, req, diskPath, cloudInitISOPath)
+	domainXML, err := p.generateDomainXMLWithStorage(ctx, vp, req, diskPath, cloudInitISOPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to generate domain XML: %w", err)
 	}
 
 	// Create domain definition file
-	if err := p.createDomainDefinition(ctx, req.Name, domainXML); err != nil {
+	if err := p.createDomainDefinition(ctx, vp, req.Name, domainXML); err != nil {
 		return "", fmt.Errorf("failed to create domain definition: %w", err)
 	}
 
 	// Define the domain in libvirt
-	if err := p.defineDomain(ctx, req.Name); err != nil {
+	if err := p.defineDomain(ctx, vp, req.Name); err != nil {
 		return "", fmt.Errorf("failed to define domain: %w", err)
 	}
 
@@ -1185,7 +1296,7 @@ func (p *Provider) generateNetworkInterfacesXML(networks []contracts.NetworkAtta
 }
 
 // generateDomainXMLWithStorage creates libvirt domain XML with proper storage configuration
-func (p *Provider) generateDomainXMLWithStorage(ctx context.Context, req contracts.CreateRequest, diskPath, cloudInitISOPath string) (string, error) {
+func (p *Provider) generateDomainXMLWithStorage(ctx context.Context, vp *VirshProvider, req contracts.CreateRequest, diskPath, cloudInitISOPath string) (string, error) {
 	// Extract specifications from request
 	cpuCount := int32(1)    // default
 	memoryMB := int64(1024) // default 1GB
@@ -1315,7 +1426,7 @@ func (p *Provider) generateDomainXMLWithStorage(ctx context.Context, req contrac
 	// available, otherwise TCG software emulation. Hard-coding either value is
 	// wrong — 'qemu' cripples guests on KVM hosts (~100% CPU, glacial boot),
 	// while 'kvm' fails to start on hosts without /dev/kvm.
-	domainType := p.detectDomainType(ctx)
+	domainType := p.detectDomainType(ctx, vp)
 
 	domainXML := fmt.Sprintf(`<domain type='%s'>
   <name>%s</name>
@@ -1416,15 +1527,15 @@ func (p *Provider) generateDomainXMLWithStorage(ctx context.Context, req contrac
 // host, including when the probe itself fails — whereas a kvm domain fails to
 // start without /dev/kvm. The probe runs over the same ssh/local path as the
 // provider's other host-side checks (cf. the `test -f <image>` existence probe).
-func (p *Provider) detectDomainType(ctx context.Context) string {
+func (p *Provider) detectDomainType(ctx context.Context, vp *VirshProvider) string {
 	// Happy path: one round-trip. `test -r` covers both "exists" and "readable".
-	if _, err := p.virshProvider.runVirshCommand(ctx, "!", "test", "-r", "/dev/kvm"); err == nil {
+	if _, err := vp.runVirshCommand(ctx, "!", "test", "-r", "/dev/kvm"); err == nil {
 		return domainTypeFromProbe(true, false)
 	}
 	// Not readable — second probe (only on the failure path) tells the operator
 	// whether /dev/kvm is simply absent (expected on a TCG-only host) or present
 	// but unopenable (a host-side permission/cgroup misconfiguration to fix).
-	_, existsErr := p.virshProvider.runVirshCommand(ctx, "!", "test", "-e", "/dev/kvm")
+	_, existsErr := vp.runVirshCommand(ctx, "!", "test", "-e", "/dev/kvm")
 	return domainTypeFromProbe(false, existsErr == nil)
 }
 
@@ -1453,8 +1564,9 @@ func (p *Provider) generateUUID() string {
 	return fmt.Sprintf("550e8400-e29b-41d4-a716-%012d", time.Now().UnixNano()%1000000000000)
 }
 
-// createDomainDefinition writes the domain XML to a temporary file on the remote server
-func (p *Provider) createDomainDefinition(ctx context.Context, domainName, domainXML string) error {
+// createDomainDefinition writes the domain XML to a temporary file on the host
+// backed by vp (the single host, or the leased target host in clustered mode).
+func (p *Provider) createDomainDefinition(ctx context.Context, vp *VirshProvider, domainName, domainXML string) error {
 	// Create temporary file path on remote server
 	remotePath := fmt.Sprintf("/tmp/%s-domain.xml", domainName)
 
@@ -1462,7 +1574,7 @@ func (p *Provider) createDomainDefinition(ctx context.Context, domainName, domai
 	heredocMarker := "EOF_DOMAIN_" + fmt.Sprintf("%d", time.Now().UnixNano())
 	command := fmt.Sprintf("cat > '%s' << '%s'\n%s\n%s", remotePath, heredocMarker, domainXML, heredocMarker)
 
-	result, err := p.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", command)
+	result, err := vp.runVirshCommand(ctx, "!", "bash", "-c", command)
 	if err != nil {
 		return fmt.Errorf("failed to create domain definition file: %w, output: %s", err, result.Stderr)
 	}
@@ -1471,18 +1583,19 @@ func (p *Provider) createDomainDefinition(ctx context.Context, domainName, domai
 	return nil
 }
 
-// defineDomain defines the domain in libvirt using the XML file
-func (p *Provider) defineDomain(ctx context.Context, domainName string) error {
+// defineDomain defines the domain in libvirt using the XML file on the host
+// backed by vp (the single host, or the leased target host in clustered mode).
+func (p *Provider) defineDomain(ctx context.Context, vp *VirshProvider, domainName string) error {
 	// Define domain from XML file
 	remotePath := fmt.Sprintf("/tmp/%s-domain.xml", domainName)
 
-	result, err := p.virshProvider.runRemoteVirshCommand(ctx, "define", remotePath)
+	result, err := vp.runRemoteVirshCommand(ctx, "define", remotePath)
 	if err != nil {
 		return fmt.Errorf("failed to define domain: %w, output: %s", err, result.Stderr)
 	}
 
 	// Clean up temporary XML file
-	_, cleanupErr := p.virshProvider.runVirshCommand(ctx, "!", "rm", "-f", remotePath)
+	_, cleanupErr := vp.runVirshCommand(ctx, "!", "rm", "-f", remotePath)
 	if cleanupErr != nil {
 		log.Printf("WARN Failed to cleanup domain XML file: %v", cleanupErr)
 	}
