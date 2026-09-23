@@ -54,6 +54,7 @@ rules:
   - hosts
   - vmimages
   - vmnetworkattachments
+  - vmplacementpolicies
   - vmsets
   verbs:
   - get

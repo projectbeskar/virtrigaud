@@ -5,6 +5,28 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-23 10:45] - VM controller wiring: schedule + bind clustered VMs at create (ADR-0007 P1 D3/D4)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/controller/virtualmachine_controller.go`: **binding controller (PR 2)** — the operator half of ADR-0007 P1. On the create path for a `topology: cluster` Provider, the VirtualMachine controller now resolves the scheduler inputs, calls `internal/scheduler.Schedule` (#321), threads the chosen host to the wire as `CreateRequest.TargetHostID` (#322), and writes `status.placement` **only after** `Create` confirms (honesty-first, D3). New `resolveClusterPlacement` (resolve the single pool / candidate hosts / optional `VMPlacementPolicy` / pool-placed VMs → `Schedule`) and `requiredNetworksForScheduling` (D6 network-visibility mapping) helpers, plus a `clusterPlacement` binding carrier. Single-host / thin-client providers skip all of it: no scheduling, empty `TargetHostID`, no `status.placement` write — byte-for-byte the existing path.
+- `internal/k8s/conditions.go`: placement condition reasons `NoHostPool`, `MultipleHostPools`, `PlacementPolicyNotFound`, `Unschedulable`, `PlacementError` — surfaced on the VM's `Provisioning=False` condition so an operator can tell a misconfiguration (no/multiple pools, dangling policy) from a genuine capacity shortfall.
+- Tests: `internal/controller/virtualmachine_controller_placement_test.go` — table-driven controller tests over the existing fake-client + recording-provider harness: single-host parity (no scheduling, `TargetHostID==""`, `status.placement` stays nil); clustered happy path (schedules → sets `TargetHostID` → writes `status.placement` after Create); **honesty-first** (Create error → `status.placement` NOT written); no/multiple HostPool and dangling policy (typed condition, Create NOT called); unschedulable (`ErrNoFeasibleHost` → `Unschedulable`, Create NOT called); D4 idempotent re-selection (a still-feasible bound host is re-chosen over the tie-break default); and the pure `requiredNetworksForScheduling` mapping. `go test -race ./internal/controller/... ./internal/scheduler/...` clean.
+
+### Changed
+- `internal/controller/virtualmachine_controller.go`: `createVM` now takes the Provider **CR** (`*v1beta1.Provider`) instead of just its name, so it reads `spec.topology` without a re-Get; the two callers pass the CR they already hold. RBAC markers added for `hostpools`, `hosts`, `vmplacementpolicies` (**get;list;watch**, read-only). Placement-blocked VMs requeue on an unhurried 30s cadence (the VM controller does not watch Host/HostPool/policy, so a RequeueAfter is the retry path) — never a tight loop.
+- `config/rbac/role.yaml` + `charts/virtrigaud/templates/manager-rbac.yaml`: regenerated / synced to grant the VM controller read-only `vmplacementpolicies` (`hostpools`/`hosts` were already granted by the inventory controllers). No writes, no wildcards, no cluster-admin.
+- `docs/clustered-provider-inventory.md`: flipped the "not wired yet" placement/binding sections to describe the controller now scheduling + binding; kept the **v1 one-HostPool-per-clustered-provider** limitation and the **deferred `RequiredStoragePools`/`RequiredMachineType`** wiring honest (empty = no constraint; a `// TODO(ADR-0007 D6)` records why an invented mapping would be a bug).
+
+### Why
+Binding PR 2 of the ADR-0007 P1 placement slice: the **operator half**. #321 shipped the pure scheduler and #322 shipped the contract + libvirt create-on-host; this wires them into the VirtualMachine controller so a clustered VM is actually placed and bound. Honesty-first ordering (schedule → `Create` → then write `status.placement`) means a failed `Create` never records a host the provider has not accepted. Scope boundary: the `topology: cluster` validating webhook, multi-pool scheduling, and rescheduling/migration are later slices.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-09-23 09:15] - Placement binding contract + libvirt create-on-host (ADR-0007 P1 D3/D4)
 **Author:** @wrkode (William Rizzo)
 
