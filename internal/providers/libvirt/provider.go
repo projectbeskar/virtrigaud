@@ -409,6 +409,21 @@ func (p *Provider) clustered() bool {
 
 // Validate ensures the provider connection is healthy using virsh
 func (p *Provider) Validate(ctx context.Context) error {
+	// CLUSTERED mode (ADR-0007 D3): there is no single PROVIDER_ENDPOINT to probe
+	// — the provider fronts N hosts addressed by id, each dialed lazily from the
+	// mounted inventory. The single-host `virsh -c <endpoint> list` below would
+	// run with an EMPTY endpoint here (`virsh -c "" list`), fail "cannot connect
+	// to the hypervisor", and falsely mark the whole provider not-ready before the
+	// manager ever calls GetHostInfo. Mirror #317's "legacy single-host dispatch
+	// is inert in clustered mode": validate the CLUSTERED setup (registry
+	// initialized with at least one host loaded from the inventory) and return
+	// success. Per-host reachability is reported through ListHosts/GetHostInfo —
+	// which mark an unreachable host NotReady without failing the whole provider —
+	// not this global readiness probe.
+	if p.clustered() {
+		return p.validateClustered()
+	}
+
 	if p.virshProvider == nil {
 		return contracts.NewRetryableError("virsh provider not initialized", nil)
 	}
@@ -429,6 +444,31 @@ func (p *Provider) Validate(ctx context.Context) error {
 	}
 
 	log.Printf("INFO Connection validation successful - found %d domains", domainCount)
+	return nil
+}
+
+// validateClustered is the CLUSTERED-mode (ADR-0007 D3) readiness check Validate
+// uses in place of the single-host `virsh list` probe. It confirms the N-host
+// connection registry is initialized and fronts at least one host projected from
+// the mounted inventory; it deliberately does NOT dial any host or run virsh (a
+// clustered provider has no single endpoint, and per-host reachability is
+// reported through ListHosts/GetHostInfo, which mark an unreachable host
+// NotReady without failing the whole provider).
+//
+// A registry that is not yet initialized, or that currently fronts zero hosts
+// (e.g. a malformed inventory the watcher has not reconciled yet), is reported as
+// a RETRYABLE not-ready so the manager re-checks once the inventory is valid —
+// never a hard failure that would take a clustered provider down over one bad
+// render (D9 fail-safe).
+func (p *Provider) validateClustered() error {
+	if p.clusterReg == nil {
+		return contracts.NewRetryableError("clustered libvirt provider registry not initialized", nil)
+	}
+	hosts := p.clusterReg.Hosts()
+	if len(hosts) == 0 {
+		return contracts.NewRetryableError("clustered libvirt provider fronts no hosts yet (mounted inventory empty or not yet reconciled)", nil)
+	}
+	log.Printf("INFO Clustered connection validation successful - registry fronts %d host(s)", len(hosts))
 	return nil
 }
 
