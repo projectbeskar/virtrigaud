@@ -10,9 +10,9 @@ webhooks:
     service:
       name: webhook-service
       namespace: system
-      path: /validate-infra-virtrigaud-io-v1beta1-virtualmachine
+      path: /validate-infra-virtrigaud-io-v1beta1-provider
   failurePolicy: Fail
-  name: vvirtualmachine.kb.io
+  name: vprovider.kb.io
   rules:
   - apiGroups:
     - infra.virtrigaud.io
@@ -22,5 +22,5 @@ webhooks:
     - CREATE
     - UPDATE
     resources:
-    - virtualmachines
+    - providers
   sideEffects: None

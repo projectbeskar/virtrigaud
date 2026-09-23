@@ -19,8 +19,11 @@
 > **VirtualMachine-controller wiring** that *calls* that scheduler on the clustered
 > create path: it binds a VM to a `HostPool` host, sends the choice as
 > `target_host_id`, and records `status.placement` **after** the provider confirms
-> the VM (honesty-first). Still to come: the `topology: cluster` validating webhook
-> and host→host migration (later P1/P2 slices).
+> the VM (honesty-first), and — closing out P1's admission guards — the
+> **`vprovider.kb.io` validating webhook** that enforces the topology×type rule at
+> admission (ADR-0007 D2): `topology: cluster` is accepted only on `type: libvirt`
+> and rejected on every other type. Still to come: host→host migration (later
+> P1/P2 slices).
 
 VirtRigaud is adding a new *class* of provider — a **clustered / orchestrator**
 provider — that makes VirtRigaud itself the cluster manager for hypervisors that
@@ -176,9 +179,31 @@ A `Provider` selects its deployment topology with `spec.topology` (ADR-0007 D9):
 It is a **string enum, not a bool** (settled 2026-09-21), so a future third
 topology mode is a purely additive enum value. Defaulting `""` → `single` keeps
 every existing single-host `Provider` unchanged. `topology: cluster` is only
-meaningful for hypervisors with no native cluster manager (libvirt first); a
-validating webhook that rejects it on `type: vsphere|proxmox` (ADR-0007 D2) is a
-later PR.
+meaningful for hypervisors with no native cluster manager (libvirt first).
+
+**This is now enforced at admission (ADR-0007 D2).** The `vprovider.kb.io`
+validating webhook (`api/infra.virtrigaud.io/v1beta1/provider_webhook.go`) rejects
+`spec.topology: cluster` on any provider type **except** the allow-listed ones.
+The allow-list is **`libvirt` only** today; `cloudhypervisor` joins it when that
+type is added (ADR-0007 P4). `topology: single` and the empty/unset value (which
+the apiserver defaults to `single`, D9) are accepted for **all** types, so today's
+providers are byte-for-byte unaffected. A rejected write returns a field-scoped
+`spec.topology` invalid error that names the offending type and the allowed
+type(s), so an operator can self-correct. The webhook guards both `create` and
+`update` — including a patch that flips an existing `vsphere`/`proxmox` provider to
+`cluster`.
+
+> **Operational note — the webhook needs serving certs.** It is **off by
+> default**. The manager registers it only when started with `--webhook-cert-path`
+> (i.e. when webhook serving certs are mounted); with no certs it skips
+> registration and the manager starts exactly as before — so single-host installs
+> are wholly unaffected. To enable it via Helm, set `webhooks.enabled: true`
+> **and** a working `webhooks.certificates.source` (`self-signed` / `cert-manager`
+> / `manual`) in `charts/virtrigaud/values.yaml`; enabling the master switch
+> without a cert source would leave the `ValidatingWebhookConfiguration` rejecting
+> `Provider` writes under `failurePolicy: Fail`. `failurePolicy: Fail` is
+> deliberate: `Provider` CRs are user-created (not manager-created), so a
+> fail-closed policy cannot deadlock the manager's own startup.
 
 ### How a clustered provider learns its hosts (ADR-0007 D3)
 
@@ -441,8 +466,10 @@ separately, under their own reviews:
   `VirtualMachine.status.placement` **after** `Create` confirms (see *Placement
   binding* below). Still out of scope here: **rescheduling** an already-created VM
   and **`Migrate` / `VMHostMigration`**, which land in later PRs.
-- **No webhook.** The `topology: cluster` validating webhook (ADR-0007 D2) is the
-  next PR.
+- **Admission webhook — shipped.** The `vprovider.kb.io` validating webhook
+  (ADR-0007 D2) now rejects `spec.topology: cluster` at admission on every type
+  except the allow-listed `libvirt` (see *The `topology` discriminator* above,
+  including the serving-cert requirement).
 
 Security posture: the rendered object is an `Opaque` `Secret` (so connection
 material stays out of namespace-readable config), owned by the Provider and GC'd
@@ -632,7 +659,7 @@ feature.
 - **No rescheduling or migration yet.** Placement binding at **create** is now
   wired end-to-end: the VirtualMachine controller schedules a clustered VM onto a
   `HostPool` host, sends `target_host_id`, and writes `status.placement` after the
-  provider confirms. What is still **not** wired is moving an *already-created* VM
-  — rescheduling a bound VM to a different host, and host→host `Migrate` /
-  `VMHostMigration` — plus the `topology: cluster` validating webhook. Those land
-  in later ADR-0007 slices.
+  provider confirms, and the `vprovider.kb.io` validating webhook now enforces the
+  topology×type rule at admission (ADR-0007 D2). What is still **not** wired is
+  moving an *already-created* VM — rescheduling a bound VM to a different host, and
+  host→host `Migrate` / `VMHostMigration`. Those land in later ADR-0007 slices.
