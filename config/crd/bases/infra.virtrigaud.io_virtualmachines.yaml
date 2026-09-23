@@ -740,6 +740,34 @@ spec:
                 - Deleting
                 - Failed
                 type: string
+              placement:
+                description: |-
+                  Placement records where a clustered ("brain-in-operator") provider's
+                  scheduler bound this VM (ADR-0007 P1, D3). It is the durable source of
+                  truth for which host runs the VM. It is written by the operator ONLY after
+                  the provider confirms the VM is on that host (create success / migration
+                  done) — never speculatively (honesty-first). Empty for VMs on single-host
+                  or thin-client providers, which have no operator-owned placement decision.
+                properties:
+                  host:
+                    description: |-
+                      Host is the Host (CR name) this VM is bound to run on — the durable
+                      placement source of truth (D3). Written only after the provider confirms.
+                    type: string
+                  lastScheduledTime:
+                    description: LastScheduledTime is when the scheduler last (re)bound
+                      this VM to Host.
+                    format: date-time
+                    type: string
+                  pool:
+                    description: Pool is the HostPool the VM was scheduled into.
+                    type: string
+                  reason:
+                    description: |-
+                      Reason records why this host was chosen — the scheduler's decision trace
+                      (e.g. the winning score or the constraint that narrowed the candidates).
+                    type: string
+                type: object
               powerState:
                 description: PowerState reflects the current power state
                 enum:

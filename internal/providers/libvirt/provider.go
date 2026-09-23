@@ -98,6 +98,14 @@ type Provider struct {
 	// results/errors/panics without a live libvirtd.
 	listNativeFn func(ctx context.Context) ([]contracts.VMInfo, error)
 
+	// createOnHostFn runs the clustered create pipeline over a single leased host
+	// connection (ADR-0007 P1). nil means "use the default",
+	// (*Provider).createOnLeasedHost (narrow the lease to its *virshConn, then run
+	// the shared createVM core). It is a struct field, mirroring describeNativeFn/
+	// listNativeFn, so clustered-routing tests can inject a recorder that asserts
+	// host selection and lease release without a live libvirtd.
+	createOnHostFn func(ctx context.Context, lease hostconn.Conn, req contracts.CreateRequest) (contracts.CreateResponse, error)
+
 	// shadowWG tracks in-flight detached shadow goroutines so tests (and a future
 	// graceful shutdown) can drain them; each is independently time-bounded.
 	shadowWG sync.WaitGroup

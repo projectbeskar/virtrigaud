@@ -433,9 +433,12 @@ separately, under their own reviews:
 
 - **The scheduler is not wired.** The pure filter+score scheduler
   (`internal/scheduler`, see *Placement scheduler* below) chooses a host, but
-  nothing calls it yet: host-targeted `Create`/`Migrate` (via `target_host_id`),
-  the `status.placement.host` binding, and `VMHostMigration` land in later PRs, so
-  no create/migrate routes to a chosen host.
+  nothing calls it yet. The **binding contract** it will emit through now exists —
+  `target_host_id` on `Create` and `VirtualMachine.status.placement` — and the
+  libvirt provider already honors `target_host_id` (see *Placement binding*
+  below); what is still missing is the operator calling `Schedule`, setting
+  `target_host_id`, and writing `status.placement` (the binding controller PR).
+  `Migrate` / `VMHostMigration` land in later PRs.
 - **No webhook.** The `topology: cluster` validating webhook (ADR-0007 D2) is a
   later PR.
 
@@ -525,12 +528,81 @@ A malformed input the admin must fix — an unparseable overcommit ratio, a malf
 affinity label selector — is returned as an ordinary error (distinct from a no-fit),
 never a panic.
 
-### Not wired yet — the binding slice follows
+### Not wired yet — the operator still does not call `Schedule`
 
-This slice is the **pure function and its tests only**. Nothing calls `Schedule`
-yet: consuming its decision on VM creation means adding `target_host_id` to the
-`Create` / `Clone` RPCs and writing `VirtualMachine.status.placement.host` (the
-binding), which is the **next** ADR-0007 P1 slice.
+The scheduler stays the **pure function and its tests only**; nothing in the
+operator calls it yet. What *did* land alongside it is the **binding contract**
+its decision will travel through — `target_host_id` on the create RPC and
+`VirtualMachine.status.placement` on the VM — and the libvirt provider already
+honors `target_host_id` (see *Placement binding* below). What remains for the
+**binding controller PR** is the operator half: the VirtualMachine controller
+calling `Schedule` at create-if-unbound, sending the chosen host as
+`target_host_id`, and writing `status.placement` **after** the provider confirms.
+
+## Placement binding: `target_host_id` on the wire + `status.placement` on the VM
+
+The scheduler decides; the **binding** is how that decision reaches the provider
+and how it is durably recorded. It has two halves — a **contract half** (shipped
+in this slice: the wire field, the status field, and the libvirt provider honoring
+the wire field) and an **operator half** (the binding controller PR that follows).
+
+### The wire: `CreateRequest.target_host_id` (contract half — shipped)
+
+Host-targeted placement is an **explicit** field on the create RPC —
+`CreateRequest.target_host_id` (field 10) — deliberately **not** folded into
+`placement_json`. `placement_json` stays for the external-orchestrator hints a
+thin-client provider (vSphere/Proxmox) forwards to vCenter/pve; `target_host_id`
+is the operator scheduler's instruction to a clustered provider, so the two never
+overload one field (ADR-0007 D4). It is **additive and backward-compatible**:
+existing single-host and thin-client providers ignore it (and, in single-host
+topology, never receive it).
+
+- **libvirt, `topology: cluster`** — `Create` routes onto the named host: it
+  borrows that host's connection from the N-host registry (`ConnFor`, the same
+  per-borrow **lease** `GetHostInfo` uses), runs the existing create pipeline
+  (storage → cloud-init → `virsh define`) over **that** host's libvirtd, and
+  **always releases the lease** — on the error path too — so a concurrent
+  host-remove drains gracefully rather than severing the create (D3
+  non-severing). An **empty** `target_host_id` in clustered mode is a **typed
+  error**, never a silent default-host create: the operator must schedule the VM
+  first (honesty-first, D9).
+- **libvirt, `topology: single`** — `target_host_id` is **ignored**; the
+  single-host create path is byte-for-byte unchanged.
+- **vSphere / Proxmox / mock** — thin-client and single-host providers ignore the
+  new field; it simply compiles through their unchanged `Create`.
+
+### The record: `VirtualMachine.status.placement` (contract half — shipped, unused this slice)
+
+`status.placement` is the **durable source of truth** for where a VM runs
+(ADR-0007 D3):
+
+```go
+type PlacementStatus struct {
+    Host              string       // the bound Host (CR name) — the durable truth
+    Pool              string       // the HostPool it was scheduled into
+    LastScheduledTime *metav1.Time // when the scheduler last (re)bound it
+    Reason            string       // the scheduler's decision trace
+}
+```
+
+The field is **additive** — a VM with no operator-owned placement (every
+single-host / thin-client VM, and every clustered VM before its first confirmed
+create) omits it entirely, so existing VM status is unchanged. **Honesty-first
+(D3): the operator writes it ONLY after the provider confirms** the VM is on that
+host (create success, later a migration reporting `done`) — never speculatively —
+so `status.placement.host` never claims a host the provider has not accepted the
+VM on. **Nothing writes it in this slice**; the binding controller PR does.
+
+### What the binding controller PR (next) adds
+
+The **operator half** is deliberately out of this slice: the VirtualMachine
+controller does **not** yet call `Schedule`, set `target_host_id`, or write
+`status.placement` — there are no controller changes here at all. The next PR
+wires them end-to-end: at create-if-unbound for a `topology: cluster` provider the
+candidates are the hosts of the provider's `HostPool` (**v1 assumes one HostPool
+per clustered provider**; multi-pool selection is a later follow-up), fed to
+`Schedule`; the chosen host goes out as `target_host_id`; and `status.placement`
+is written **after** `Create` confirms (D3 honesty-first).
 
 ## What "clustered" does not mean (yet)
 
@@ -538,7 +610,10 @@ binding), which is the **next** ADR-0007 P1 slice.
   operator-initiated evacuation, but does **not** auto-restart VMs elsewhere.
   Without fencing/STONITH that would risk split-brain disk corruption; automatic
   HA is a deferred future ADR (ADR-0007 D8/P5).
-- **No placement binding or migration yet.** The inventory CRDs, the inventory-sync
-  controller, and the pure filter+score scheduler are in place, but the scheduler is
-  **not wired**: `target_host_id` on create and the `status.placement.host` binding,
-  then live migration, land in later ADR-0007 slices.
+- **No placement binding written yet.** The inventory CRDs, the inventory-sync
+  controller, the pure filter+score scheduler, and now the **binding contract**
+  (`target_host_id` on create + `status.placement`, with the libvirt provider
+  honoring `target_host_id`) are all in place — but the scheduler is still **not
+  wired**: the operator does not yet call `Schedule`, set `target_host_id`, or
+  write `status.placement`. That binding controller, then live migration, land in
+  later ADR-0007 slices.

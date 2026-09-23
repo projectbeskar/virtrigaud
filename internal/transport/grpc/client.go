@@ -1103,6 +1103,11 @@ func (c *Client) convertCreateRequest(req contracts.CreateRequest) (*providerv1.
 		}
 	}
 
+	// target_host_id is the clustered create binding (ADR-0007 P1, D4): an
+	// explicit wire field, not folded into placement_json. Empty for single-host
+	// providers, which ignore it; set by the operator only for topology: cluster.
+	grpcReq.TargetHostId = req.TargetHostID
+
 	return grpcReq, nil
 }
 

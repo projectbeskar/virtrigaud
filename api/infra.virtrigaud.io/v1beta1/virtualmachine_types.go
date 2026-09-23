@@ -279,6 +279,40 @@ type VirtualMachineStatus struct {
 	// Message provides additional details about the current state
 	// +optional
 	Message string `json:"message,omitempty"`
+
+	// Placement records where a clustered ("brain-in-operator") provider's
+	// scheduler bound this VM (ADR-0007 P1, D3). It is the durable source of
+	// truth for which host runs the VM. It is written by the operator ONLY after
+	// the provider confirms the VM is on that host (create success / migration
+	// done) — never speculatively (honesty-first). Empty for VMs on single-host
+	// or thin-client providers, which have no operator-owned placement decision.
+	// +optional
+	Placement *PlacementStatus `json:"placement,omitempty"`
+}
+
+// PlacementStatus is the operator scheduler's binding for a VM on a clustered
+// provider (ADR-0007 P1, D3/D4): the durable record of which HostPool host runs
+// the VM, plus the decision trace. It is written only after the provider
+// confirms placement (create success / migration done), so it never claims a
+// host the provider has not accepted the VM on.
+type PlacementStatus struct {
+	// Host is the Host (CR name) this VM is bound to run on — the durable
+	// placement source of truth (D3). Written only after the provider confirms.
+	// +optional
+	Host string `json:"host,omitempty"`
+
+	// Pool is the HostPool the VM was scheduled into.
+	// +optional
+	Pool string `json:"pool,omitempty"`
+
+	// LastScheduledTime is when the scheduler last (re)bound this VM to Host.
+	// +optional
+	LastScheduledTime *metav1.Time `json:"lastScheduledTime,omitempty"`
+
+	// Reason records why this host was chosen — the scheduler's decision trace
+	// (e.g. the winning score or the constraint that narrowed the candidates).
+	// +optional
+	Reason string `json:"reason,omitempty"`
 }
 
 // VirtualMachinePhase represents the phase of a VM

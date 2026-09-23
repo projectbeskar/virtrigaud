@@ -54,6 +54,14 @@ type CreateRequest struct {
 	Placement *Placement
 	// Tags are applied to the VM
 	Tags []string
+	// TargetHostID names the specific host a clustered ("brain-in-operator")
+	// provider must create this VM on (ADR-0007 P1, D4). It is the operator
+	// scheduler's binding, threaded to the wire as CreateRequest.target_host_id —
+	// deliberately separate from Placement (external-orchestrator hints). It is
+	// empty for single-host and thin-client providers, which ignore it; the
+	// operator populates it only for a Provider with topology: cluster, and a
+	// clustered provider rejects an empty value rather than defaulting to a host.
+	TargetHostID string
 }
 
 // CreateResponse contains the result of a create operation
