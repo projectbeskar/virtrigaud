@@ -5,6 +5,25 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-23 07:45] - Pure filter+score placement scheduler (ADR-0007 P1 D4)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/scheduler/`: the **pure `Schedule(Request) (Result, error)` placement scheduler** (ADR-0007 D4) — the operator-side "brain owns the decision" that chooses one `Host` for a VM. No Kubernetes client, no I/O, no clock, no package state: the caller passes the resolved resource request, the optional `VMPlacementPolicy`, the `HostPool` policy (strategy + overcommit), the pool's `Host`s with live `status`, the VM's current binding, and the already-placed VM set. **Filter** (hard): `status.health==Ready` **and** `spec.schedulable==true`; capacity fit on `allocatableCPU`/`allocatableMemoryMiB` **after** the pool's overcommit ratios; `VMPlacementPolicy.Hard` host allow/deny lists and node-selector against `Host.spec.labels`; D6 storage/network visibility (`storage.virtrigaud.io/pool-<name>` / `net.virtrigaud.io/<name>` labels); `ResourceConstraints.RequiredFeatures` against `status.cpuFeatures`; caller-resolved machine type against `status.machineTypes`; `Min*PerHost` floors; strict host (anti-)affinity; and required VM (anti-)affinity (metav1 label-selector + `MatchExpressions`) against the placed set. **Score**: `HostPool.Strategy` **Spread** (most free capacity / fewest bound VMs) vs **BinPack** (tightest host that still fits), with soft constraints and preferred (anti-)affinity as a preference that ranks above raw packing, and a deterministic **host-id** tie-break. **Idempotent** per D4: a bound VM re-selects its current host unless that host is drained (cordoned/NotReady). No-fit is a typed `*NoFeasibleHostError` (matches `ErrNoFeasibleHost`) with a per-host, per-category breakdown; malformed overcommit/selector inputs are ordinary errors, never a panic.
+- `internal/scheduler/{scheduler,evalcontext,filter,affinity,score,errors}_test.go`: a thorough table-driven suite at **100% statement coverage** — basic fit/no-fit; capacity boundary with/without overcommit; Spread vs BinPack (and their tie-breaks); hard node-selector; required CPU feature; machine type; `Min*PerHost` floors; D6 storage/network visibility; required VM anti-affinity exclusion and required/preferred VM affinity; soft-constraint and preferred host/VM (anti-)affinity scoring; idempotent re-select and drain-triggered re-placement (cordoned/NotReady); empty candidate set; deterministic tie-break across shuffled/ repeated inputs; nil-allocatable honesty; and the `In`/`NotIn`/`Exists`/`DoesNotExist` selector vocabulary.
+
+### Changed
+- `docs/clustered-provider-inventory.md`: added a **Placement scheduler (operator side)** section documenting the `Schedule` signature, the filter list and score model, idempotency and the host-id tie-break, and a table of how each `VMPlacementPolicy` construct maps to a filter or a score (and which vSphere/Proxmox/telemetry/security constructs are **deliberately deferred**, not faked); updated the status blurbs to reflect the scheduler now exists as a pure function but is **not yet wired**.
+
+### Why
+ADR-0007 D4 calls for the placement decision to live in the operator as a small, pure, re-runnable `schedule(vm, hosts, policy) → host_id` function so it is unit-testable without a cluster and idempotent on re-run — and `VMPlacementPolicy` finally has candidate hosts to act on. Shipping the algorithm and its tests as a standalone, deterministic, well-covered slice keeps the load-bearing scheduling logic reviewable in isolation before the (separate) binding slice wires it into VM creation via `target_host_id` and `status.placement.host`.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-09-22 19:30] - Clustered-aware Validate + inlined SSH-key parse regression suite (ADR-0007 P1)
 **Author:** @wrkode (William Rizzo)
 
