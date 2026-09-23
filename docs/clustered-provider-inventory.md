@@ -193,17 +193,80 @@ type(s), so an operator can self-correct. The webhook guards both `create` and
 `update` — including a patch that flips an existing `vsphere`/`proxmox` provider to
 `cluster`.
 
-> **Operational note — the webhook needs serving certs.** It is **off by
-> default**. The manager registers it only when started with `--webhook-cert-path`
-> (i.e. when webhook serving certs are mounted); with no certs it skips
-> registration and the manager starts exactly as before — so single-host installs
-> are wholly unaffected. To enable it via Helm, set `webhooks.enabled: true`
-> **and** a working `webhooks.certificates.source` (`self-signed` / `cert-manager`
-> / `manual`) in `charts/virtrigaud/values.yaml`; enabling the master switch
-> without a cert source would leave the `ValidatingWebhookConfiguration` rejecting
-> `Provider` writes under `failurePolicy: Fail`. `failurePolicy: Fail` is
-> deliberate: `Provider` CRs are user-created (not manager-created), so a
-> fail-closed policy cannot deadlock the manager's own startup.
+#### Enabling the webhook via Helm
+
+The webhook is **off by default** (`webhooks.enabled: false`); default installs are
+byte-for-byte unaffected and render **zero** webhook resources. The manager
+registers the webhook only when started with `--webhook-cert-path` (i.e. when
+serving certs are mounted); with no certs it skips registration and starts exactly
+as before — so single-host installs stay unaffected even with the chart's webhook
+templates present.
+
+To turn it on, enable the master switch and pick a certificate source:
+
+```bash
+# Self-signed (default source) — zero extra setup; the chart generates the cert.
+helm upgrade --install virtrigaud oci://.../virtrigaud \
+  --set webhooks.enabled=true
+```
+
+With `webhooks.enabled=true` the chart renders (for the default `self-signed`
+source): a `kubernetes.io/tls` **Secret** (`virtrigaud-webhook-certs`), the webhook
+**Service** (`<release>-webhook`), and the **`ValidatingWebhookConfiguration`**
+(`vprovider.kb.io` only — there are no mutating or conversion webhooks). The
+manager Deployment gains the `--webhook-cert-path` flag, the cert volume mount, and
+the `9443` container port.
+
+**The self-signed default is now coherent.** The chart generates the CA + serving
+cert **once** and reuses the **same** CA for both the serving Secret's `ca.crt` and
+the `ValidatingWebhookConfiguration` `caBundle`, and the serving cert's SANs cover
+the webhook Service DNS (`<svc>.<ns>.svc` and `<svc>.<ns>.svc.cluster.local`). So
+the API server trusts the webhook's TLS out of the box. **Upgrade behaviour:** on
+`helm upgrade` the chart reuses the existing serving Secret (via `lookup`) instead
+of rotating it, so an in-place upgrade does not open a `failurePolicy: Fail`
+admission gap. (A first install, or `helm template` with no cluster, generates a
+fresh coherent cert.)
+
+Certificate `source` options (`webhooks.certificates.source`):
+
+| Source | What you provide | What the chart renders |
+|---|---|---|
+| `self-signed` (default) | nothing | CA + serving-cert Secret + coherent `caBundle` |
+| `cert-manager` | cert-manager installed + an `Issuer`/`ClusterIssuer` (named in `webhooks.certificates.certManager`) | a cert-manager **`Certificate`** (its `secretName` == the mounted serving Secret) and `cert-manager.io/inject-ca-from` pointing at that Certificate; cert-manager injects the `caBundle` |
+| `manual` | the serving Secret (`secretName`) out-of-band **and** the matching CA in `webhooks.certificates.caBundle` (base64 PEM) | just the `caBundle` you supplied |
+
+> `failurePolicy: Fail` is deliberate and safe here: `Provider` CRs are
+> **user-created** (never manager-created), so a fail-closed policy cannot deadlock
+> the manager's own startup. The only failure mode to avoid — a rendered webhook
+> whose `caBundle` does not match the serving cert — is exactly what the coherence
+> fix and the `hack/verify-webhook-render.sh` CI guard prevent.
+
+#### Production / GitOps / banking notes (from the security review)
+
+- **GitOps / Argo CD → use `cert-manager`.** The self-signed default persists its
+  cert across upgrades via Helm `lookup`, which only works under `helm
+  install/upgrade` with an identity that can read Secrets in the release namespace.
+  Under `helm template` render-then-apply (Argo CD, `helm template | kubectl
+  apply`) `lookup` is always empty, so **every sync regenerates** the CA + serving
+  cert + `caBundle` — churning the Secret and briefly reopening a `failurePolicy:
+  Fail` admission gap while the manager reloads the projected cert. `cert-manager`
+  keeps `caBundle`↔cert coherence server-side (cainjector), independent of render
+  idempotency, and never writes the private key into Helm release history — so it
+  is the recommended posture for production and banking.
+- **Renames need a Secret delete.** The self-signed reuse-on-upgrade path keeps the
+  cert's original SANs. If you change `nameOverride`/`fullnameOverride`/`secretName`
+  (or switch `certificates.source`) on an existing release, delete the serving
+  Secret first so the chart mints a fresh, correctly-SAN'd cert; otherwise the API
+  server dials the new Service DNS against a stale-SAN cert and admission fails.
+- **Run the manager HA when webhooks are on.** With `failurePolicy: Fail` the
+  manager sits on the Provider-admission path, so a single replica is a single point
+  of failure for admission during node loss/eviction. Set `manager.replicaCount: 2`
+  plus a PodDisruptionBudget and anti-affinity (the webhook server is not
+  leader-gated, so every replica serves it — 2+ gives real webhook HA).
+- **Misconfigurations fail fast.** The chart `fail`s the render on an unknown
+  `certificates.source` or `source: manual` with an empty `caBundle`, so a one-line
+  values typo is caught at `helm template` / CI time rather than bricking admission
+  in the cluster.
 
 ### How a clustered provider learns its hosts (ADR-0007 D3)
 

@@ -114,29 +114,6 @@ pod-security.kubernetes.io/warn: privileged
 {{- end }}
 
 {{/*
-Generate certificates for webhook
-*/}}
-{{- define "virtrigaud.webhookCerts" -}}
-{{- if eq .Values.webhooks.certificates.source "self-signed" }}
-{{- $ca := genCA "virtrigaud-ca" 3650 }}
-{{- $cert := genSignedCert (include "virtrigaud.fullname" .) nil (list (printf "%s-webhook.%s.svc" (include "virtrigaud.fullname" .) .Release.Namespace) (printf "%s-webhook.%s.svc.cluster.local" (include "virtrigaud.fullname" .) .Release.Namespace)) 3650 $ca }}
-tls.crt: {{ $cert.Cert | b64enc }}
-tls.key: {{ $cert.Key | b64enc }}
-ca.crt: {{ $ca.Cert | b64enc }}
-{{- end }}
-{{- end }}
-
-{{/*
-Generate CA certificate for webhook validation
-*/}}
-{{- define "virtrigaud.webhookCaCert" -}}
-{{- if eq .Values.webhooks.certificates.source "self-signed" }}
-{{- $ca := genCA "virtrigaud-ca" 3650 }}
-{{- $ca.Cert | b64enc }}
-{{- end }}
-{{- end }}
-
-{{/*
 Generate certificates for provider gRPC
 */}}
 {{- define "virtrigaud.providerCerts" -}}

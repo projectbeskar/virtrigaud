@@ -39,8 +39,12 @@ spec:
         - --health-probe-bind-address=0.0.0.0:8081
         - --leader-elect
         {{- if .Values.webhooks.enabled }}
-        - --webhook-port=9443
-        - --webhook-cert-dir=/tmp/k8s-webhook-server/serving-certs
+        # Webhook serving certs are mounted at this path; the manager's certwatcher
+        # loads tls.crt/tls.key from here and serves on controller-runtime's default
+        # port 9443 (matches the containerPort + Service targetPort). Setting
+        # --webhook-cert-path also gates registration of the Provider validating
+        # webhook in main.go, so admission only activates when certs are present.
+        - --webhook-cert-path=/tmp/k8s-webhook-server/serving-certs
         {{- end }}
         env:
         {{- range .Values.manager.env }}

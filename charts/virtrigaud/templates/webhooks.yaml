@@ -1,22 +1,110 @@
 {{- if .Values.webhooks.enabled }}
+{{- /*
+  Webhook serving certificate + CA coherence (the load-bearing invariant).
+
+  The API server verifies the webhook's serving cert against the caBundle we put
+  on the ValidatingWebhookConfiguration. That caBundle MUST be the exact CA that
+  signed the serving cert mounted into the manager pod, or every Provider
+  CREATE/UPDATE is rejected under failurePolicy: Fail.
+
+  Helm helpers are NOT memoized: calling a gen* helper twice yields two different
+  CAs. So we generate the CA + serving cert ONCE here, as file-scoped variables,
+  and reuse the same $caBundle for BOTH the serving Secret's ca.crt AND the
+  ValidatingWebhookConfiguration caBundle below.
+
+  Persistence across upgrades: we `lookup` the existing serving Secret and reuse
+  its tls.crt/tls.key/ca.crt when present, so `helm upgrade` does NOT silently
+  rotate the cert and open a Fail-policy admission gap. `lookup` returns empty
+  under `helm template` (no cluster) and on first install, so we fall back to a
+  generate-once path. Non-self-signed sources supply their own material.
+*/}}
+{{- /* Fail-fast guards: a mistyped source or a manual source with no caBundle
+       would otherwise render a valid-looking manifest that bricks Provider
+       admission under failurePolicy: Fail. Catch it at render, not in prod. */}}
+{{- $validSources := list "self-signed" "cert-manager" "manual" }}
+{{- if not (has .Values.webhooks.certificates.source $validSources) }}
+{{- fail (printf "webhooks.certificates.source must be one of %v, got %q" $validSources .Values.webhooks.certificates.source) }}
+{{- end }}
+{{- if and (eq .Values.webhooks.certificates.source "manual") (not .Values.webhooks.certificates.caBundle) }}
+{{- fail "webhooks.certificates.source=manual requires webhooks.certificates.caBundle (base64-encoded CA PEM) so the ValidatingWebhookConfiguration trusts your serving cert" }}
+{{- end }}
+{{- $svcName := include "virtrigaud.webhookServiceName" . }}
+{{- $secretName := .Values.webhooks.certificates.secretName }}
+{{- $certManagerCertName := printf "%s-webhook-cert" (include "virtrigaud.fullname" .) }}
+{{- $altNames := list (printf "%s.%s.svc" $svcName .Release.Namespace) (printf "%s.%s.svc.cluster.local" $svcName .Release.Namespace) }}
+{{- /* $tlsCrt/$tlsKey carry base64 serving material; $caBundle the base64 CA. Populated per source below. */}}
+{{- $tlsCrt := "" }}
+{{- $tlsKey := "" }}
+{{- $caBundle := "" }}
+{{- if eq .Values.webhooks.certificates.source "self-signed" }}
+{{-   $existing := lookup "v1" "Secret" .Release.Namespace $secretName }}
+{{-   $existingData := dict }}
+{{-   if and $existing $existing.data }}
+{{-     $existingData = $existing.data }}
+{{-   end }}
+{{-   if and (hasKey $existingData "tls.crt") (hasKey $existingData "tls.key") (hasKey $existingData "ca.crt") }}
+{{-     $tlsCrt = index $existingData "tls.crt" }}
+{{-     $tlsKey = index $existingData "tls.key" }}
+{{-     $caBundle = index $existingData "ca.crt" }}
+{{-   else }}
+{{-     $ca := genCA "virtrigaud-webhook-ca" 3650 }}
+{{-     $cert := genSignedCert $svcName nil $altNames 3650 $ca }}
+{{-     $tlsCrt = $cert.Cert | b64enc }}
+{{-     $tlsKey = $cert.Key | b64enc }}
+{{-     $caBundle = $ca.Cert | b64enc }}
+{{-   end }}
+{{- else if eq .Values.webhooks.certificates.source "manual" }}
+{{- /* manual: user provisions the serving Secret out-of-band; caBundle comes from values. */}}
+{{-   $caBundle = .Values.webhooks.certificates.caBundle }}
+{{- end }}
+{{- /* cert-manager: no caBundle here — the cert-manager.io/inject-ca-from
+       annotation on the ValidatingWebhookConfiguration injects it from the
+       Certificate we render below. */}}
 {{- if eq .Values.webhooks.certificates.source "self-signed" }}
 apiVersion: v1
 kind: Secret
 metadata:
-  name: {{ .Values.webhooks.certificates.secretName }}
+  name: {{ $secretName }}
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "virtrigaud.labels" . | nindent 4 }}
     app.kubernetes.io/component: webhook
 type: kubernetes.io/tls
 data:
-  {{- include "virtrigaud.webhookCerts" . | nindent 2 }}
+  tls.crt: {{ $tlsCrt }}
+  tls.key: {{ $tlsKey }}
+  ca.crt: {{ $caBundle }}
+---
+{{- end }}
+{{- if eq .Values.webhooks.certificates.source "cert-manager" }}
+{{- /* cert-manager path. Requires cert-manager installed and a user-provided
+       Issuer/ClusterIssuer named in webhooks.certificates.certManager. The chart
+       renders the Certificate (whose secretName matches the manager's mounted
+       serving Secret) but NOT the Issuer — the trust anchor is deployment-specific
+       and must be supplied by the operator. */}}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $certManagerCertName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "virtrigaud.labels" . | nindent 4 }}
+    app.kubernetes.io/component: webhook
+spec:
+  secretName: {{ $secretName }}
+  dnsNames:
+    {{- range $altNames }}
+    - {{ . }}
+    {{- end }}
+  issuerRef:
+    name: {{ .Values.webhooks.certificates.certManager.issuer }}
+    kind: {{ .Values.webhooks.certificates.certManager.issuerKind }}
 ---
 {{- end }}
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "virtrigaud.webhookServiceName" . }}
+  name: {{ $svcName }}
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "virtrigaud.labels" . | nindent 4 }}
@@ -45,26 +133,29 @@ metadata:
     app.kubernetes.io/component: webhook
   {{- if eq .Values.webhooks.certificates.source "cert-manager" }}
   annotations:
-    cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/{{ .Values.webhooks.certificates.secretName }}
+    cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/{{ $certManagerCertName }}
   {{- end }}
 # This validating-webhook list is hand-maintained and MUST stay in sync with
 # config/webhook/manifests.yaml (generated by `make manifests` from the
-# +kubebuilder:webhook markers). The only backed validating webhook today is
-# vprovider.kb.io — the ADR-0007 D2 topology x type guard implemented in
-# api/infra.virtrigaud.io/v1beta1/provider_webhook.go. Enabling this webhook
-# requires webhook serving certs on the manager (see .Values.webhooks.certificates
-# and the manager --webhook-cert-path wiring); without them the manager skips
-# registration and this config would reject Provider writes under failurePolicy=Fail.
+# +kubebuilder:webhook markers). The only backed admission webhook today is the
+# validating vprovider.kb.io — the ADR-0007 D2 topology x type guard implemented
+# in api/infra.virtrigaud.io/v1beta1/provider_webhook.go. There are NO mutating
+# or conversion webhooks backed by Go in this repo, so this file renders ONLY the
+# validating configuration (plus its Service + serving cert). Enabling this
+# webhook requires webhook serving certs on the manager (the chart mounts them and
+# wires --webhook-cert-path only when webhooks.enabled=true); without them the
+# manager skips registration and this config would reject Provider writes under
+# failurePolicy=Fail.
 webhooks:
 - admissionReviewVersions:
   - v1
   clientConfig:
     service:
-      name: {{ include "virtrigaud.webhookServiceName" . }}
+      name: {{ $svcName }}
       namespace: {{ .Release.Namespace }}
       path: /validate-infra-virtrigaud-io-v1beta1-provider
-    {{- if eq .Values.webhooks.certificates.source "self-signed" }}
-    caBundle: {{ include "virtrigaud.webhookCaCert" . }}
+    {{- if $caBundle }}
+    caBundle: {{ $caBundle }}
     {{- end }}
   failurePolicy: {{ .Values.webhooks.validating.failurePolicy }}
   name: vprovider.kb.io
@@ -79,93 +170,5 @@ webhooks:
     resources:
     - providers
   sideEffects: None
----
-{{- end }}
-{{- if .Values.webhooks.mutating.enabled }}
-{{- if .Capabilities.APIVersions.Has "admissionregistration.k8s.io/v1" }}
-apiVersion: admissionregistration.k8s.io/v1
-{{- else }}
-apiVersion: admissionregistration.k8s.io/v1beta1
-{{- end }}
-kind: MutatingAdmissionWebhookConfiguration
-metadata:
-  name: {{ include "virtrigaud.fullname" . }}-mutating
-  labels:
-    {{- include "virtrigaud.labels" . | nindent 4 }}
-    app.kubernetes.io/component: webhook
-  {{- if eq .Values.webhooks.certificates.source "cert-manager" }}
-  annotations:
-    cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/{{ .Values.webhooks.certificates.secretName }}
-  {{- end }}
-webhooks:
-- admissionReviewVersions:
-  - v1
-  - v1beta1
-  clientConfig:
-    service:
-      name: {{ include "virtrigaud.webhookServiceName" . }}
-      namespace: {{ .Release.Namespace }}
-      path: /mutate-infra-virtrigaud-io-v1beta1-virtualmachine
-    {{- if eq .Values.webhooks.certificates.source "self-signed" }}
-    caBundle: {{ include "virtrigaud.webhookCaCert" . }}
-    {{- end }}
-  failurePolicy: {{ .Values.webhooks.mutating.failurePolicy }}
-  name: mvirtualmachine.kb.io
-  rules:
-  - apiGroups:
-    - infra.virtrigaud.io
-    apiVersions:
-    - v1beta1
-    - v1beta1
-    operations:
-    - CREATE
-    - UPDATE
-    resources:
-    - virtualmachines
-  sideEffects: None
-- admissionReviewVersions:
-  - v1
-  - v1beta1
-  clientConfig:
-    service:
-      name: {{ include "virtrigaud.webhookServiceName" . }}
-      namespace: {{ .Release.Namespace }}
-      path: /mutate-infra-virtrigaud-io-v1beta1-vmset
-    {{- if eq .Values.webhooks.certificates.source "self-signed" }}
-    caBundle: {{ include "virtrigaud.webhookCaCert" . }}
-    {{- end }}
-  failurePolicy: {{ .Values.webhooks.mutating.failurePolicy }}
-  name: mvmset.kb.io
-  rules:
-  - apiGroups:
-    - infra.virtrigaud.io
-    apiVersions:
-    - v1beta1
-    - v1beta1
-    operations:
-    - CREATE
-    - UPDATE
-    resources:
-    - vmsets
-  sideEffects: None
----
-{{- end }}
-{{- if .Values.webhooks.conversion.enabled }}
-{{- $ca := genCA "virtrigaud-conversion-ca" 3650 }}
-{{- $cert := genSignedCert (include "virtrigaud.webhookServiceName" .) nil (list (printf "%s.%s.svc" (include "virtrigaud.webhookServiceName" .) .Release.Namespace) (printf "%s.%s.svc.cluster.local" (include "virtrigaud.webhookServiceName" .) .Release.Namespace)) 3650 $ca }}
-apiVersion: v1
-kind: Secret
-metadata:
-  name: {{ include "virtrigaud.fullname" . }}-conversion-certs
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "virtrigaud.labels" . | nindent 4 }}
-    app.kubernetes.io/component: webhook
-type: kubernetes.io/tls
-data:
-  tls.crt: {{ $cert.Cert | b64enc }}
-  tls.key: {{ $cert.Key | b64enc }}
-  ca.crt: {{ $ca.Cert | b64enc }}
----
 {{- end }}
 {{- end }}
