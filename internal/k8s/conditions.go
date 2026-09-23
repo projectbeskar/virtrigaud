@@ -56,6 +56,36 @@ const (
 	ReasonTaskInProgress = "TaskInProgress"
 )
 
+// Placement / scheduling condition reasons (ADR-0007 P1, D4). Surfaced on a
+// VirtualMachine's Provisioning=False condition when the operator scheduler
+// cannot bind the VM to a host on a clustered ("brain-in-operator") provider.
+// Each names WHY placement could not proceed, so an operator can tell a
+// misconfiguration (no/multiple pools, dangling policy) apart from a genuine
+// capacity shortfall (no feasible host).
+const (
+	// ReasonNoHostPool indicates the clustered Provider has no HostPool in the
+	// VM's namespace, so there is no candidate set to schedule into.
+	ReasonNoHostPool = "NoHostPool"
+	// ReasonMultipleHostPools indicates the clustered Provider has more than one
+	// HostPool in the VM's namespace; v1 supports exactly one pool per clustered
+	// provider (multi-pool selection is deferred), so the operator refuses to
+	// pick one silently.
+	ReasonMultipleHostPools = "MultipleHostPools"
+	// ReasonPlacementPolicyNotFound indicates the VM's spec.placementRef points at
+	// a VMPlacementPolicy that does not exist, so the scheduler inputs cannot be
+	// resolved.
+	ReasonPlacementPolicyNotFound = "PlacementPolicyNotFound"
+	// ReasonUnschedulable indicates the scheduler found no feasible host for the
+	// VM among the pool's candidates (capacity, visibility, or affinity filters
+	// eliminated all of them). The condition message carries the per-host
+	// breakdown.
+	ReasonUnschedulable = "Unschedulable"
+	// ReasonPlacementError indicates the scheduler rejected a malformed input the
+	// admin must fix (an unparseable overcommit ratio or affinity selector) —
+	// distinct from an ordinary no-fit.
+	ReasonPlacementError = "PlacementError"
+)
+
 // SetCondition sets a condition on the given list of conditions
 func SetCondition(conditions *[]metav1.Condition, conditionType string, status metav1.ConditionStatus, reason, message string) {
 	newCondition := metav1.Condition{

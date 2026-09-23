@@ -135,6 +135,17 @@ rules:
   - get
   - list
   - watch
+# VMPlacementPolicy is the scheduler's input language (ADR-0007 P1 D4). The
+# virtualmachine_controller READS it (get;list;watch) when scheduling a VM onto a
+# clustered provider's HostPool; it never writes it (the admin authors the policy).
+- apiGroups:
+  - infra.virtrigaud.io
+  resources:
+  - vmplacementpolicies
+  verbs:
+  - get
+  - list
+  - watch
 # hosts/status: the inventory-sync host_controller writes live capacity/health
 # into Host.status (ADR-0007 P1 D3). Status subresource only — never the spec,
 # and no hosts/finalizers grant (this is read-only observed-state sync, no
@@ -391,6 +402,17 @@ rules:
   resources:
   - hosts
   - hostpools
+  verbs:
+  - get
+  - list
+  - watch
+# VMPlacementPolicy is the scheduler's input language (ADR-0007 P1 D4). The
+# virtualmachine_controller READS it (get;list;watch) when scheduling a VM onto a
+# clustered provider's HostPool; it never writes it (the admin authors the policy).
+- apiGroups:
+  - infra.virtrigaud.io
+  resources:
+  - vmplacementpolicies
   verbs:
   - get
   - list
