@@ -12,10 +12,13 @@
 > hot-reloading them on change — and the **libvirt `ListHosts`/`GetHostInfo`
 > implementation**: the clustered libvirt provider now *answers* those RPCs with
 > live per-host facts (`virsh nodeinfo` / `capabilities` / `domcapabilities` /
-> `pool-info`) and advertises `supports_clustering = true`. Still to come: the
-> inventory-sync controller that *calls* those RPCs to populate `Host.status`,
-> host-targeted `Create`/`Migrate` (via `target_host_id`), the `topology: cluster`
-> validating webhook, the scheduler, and migration (later P1/P2 slices).
+> `pool-info`) and advertises `supports_clustering = true`, the operator-side
+> **inventory-sync controller** that *calls* those RPCs to populate `Host.status`,
+> and the **pure filter+score placement scheduler** (`internal/scheduler`) that
+> chooses a host from that inventory. Still to come: **wiring** the scheduler into
+> VM creation — host-targeted `Create`/`Migrate` (via `target_host_id`) and the
+> `status.placement.host` binding — plus the `topology: cluster` validating webhook
+> and migration (later P1/P2 slices).
 
 VirtRigaud is adding a new *class* of provider — a **clustered / orchestrator**
 provider — that makes VirtRigaud itself the cluster manager for hypervisors that
@@ -428,9 +431,11 @@ The operator now **calls** `GetHostInfo` to sync `Host.status` (see *Host
 inventory-sync controller* above); the remaining pieces are still rendered
 separately, under their own reviews:
 
-- **No host-targeted placement.** Host-targeted `Create`/`Migrate` (via
-  `target_host_id`), the scheduler, and `VMHostMigration` land in later PRs; the
-  connections exist and reconcile but no create/migrate routes to a chosen host.
+- **The scheduler is not wired.** The pure filter+score scheduler
+  (`internal/scheduler`, see *Placement scheduler* below) chooses a host, but
+  nothing calls it yet: host-targeted `Create`/`Migrate` (via `target_host_id`),
+  the `status.placement.host` binding, and `VMHostMigration` land in later PRs, so
+  no create/migrate routes to a chosen host.
 - **No webhook.** The `topology: cluster` validating webhook (ADR-0007 D2) is a
   later PR.
 
@@ -445,12 +450,95 @@ material from a file, so the operator copies it there once. Both Secrets share t
 same protection boundary (`Opaque`, owner-referenced, namespace-scoped), and the
 render path never logs, stores in Status, or events any credential value.
 
+## Placement scheduler (operator side)
+
+The **placement scheduler** (`internal/scheduler`) is the operator-side "brain owns
+the decision" from ADR-0007 D1/D4: given a VM's resource request, its optional
+`VMPlacementPolicy`, the `HostPool` policy, and the pool's `Host`s (with the live
+`status` the inventory-sync controller populates), it chooses **one host**. It is a
+**pure function** — no Kubernetes client, no I/O, no clock, no package state — so it
+is unit-testable without a cluster and deterministic on re-run:
+
+```go
+func Schedule(req scheduler.Request) (scheduler.Result, error)
+```
+
+`Result` carries the chosen `HostID` and a human-readable `Reason` (a decision
+trace destined for `status.placement.reason`); a no-fit is a typed
+`*NoFeasibleHostError` (matching `ErrNoFeasibleHost` via `errors.Is`) that lists,
+per host, which filter eliminated it — so "unschedulable" is always explainable.
+
+### Filter, then score
+
+**Filter** reduces the candidates to the feasible set — every check is a HARD
+constraint that must hold:
+
+| Filter | Rule |
+|--------|------|
+| Health + cordon | `status.health == Ready` **and** `spec.schedulable == true` (a drained or NotReady host is never a target). |
+| Capacity fit | `allocatableCPU` and `allocatableMemoryMiB` ≥ the request **after** the pool's overcommit ratios. |
+| Hard host list | `VMPlacementPolicy.Hard.Hosts` allow-list / `Hard.ExcludedHosts` deny-list (a host id is its `Host` CR name). |
+| Hard node-selector | `Hard.NodeSelector` matched against `Host.spec.labels`. |
+| Storage/network visibility (D6) | the VM's required pools/networks as a `Host.spec.labels` requirement: `storage.virtrigaud.io/pool-<name>` / `net.virtrigaud.io/<name>` == `"true"`. |
+| Required CPU features | `ResourceConstraints.RequiredFeatures` ⊆ `status.cpuFeatures`. |
+| Required machine type | the caller-resolved machine type ∈ `status.machineTypes`. |
+| Minimum-per-host resources | `ResourceConstraints.Min{CPU,Memory,DiskSpace}PerHost` floors against the host's raw allocatable. |
+| Strict host (anti-)affinity | `HostAffinity` / `HostAntiAffinity` with `scope: strict` (the anti-affinity per-host VM cap defaults to 1 when `maxVMsPerHost` is unset). |
+| Required VM (anti-)affinity | `VMAffinity` / `VMAntiAffinity` `requiredDuringScheduling` evaluated against the already-placed VMs. |
+
+**Score** ranks the survivors and picks the best, deterministically:
+
+1. **Soft preferences** (the primary axis): `Soft.*` constraints, `PreferredFeatures`, and **preferred** host/VM (anti-)affinity apply as a bonus/penalty that ranks a preferred host above raw packing.
+2. **Strategy** (`HostPool.spec.strategy`): **Spread** favors the most free capacity, then the fewest bound VMs; **BinPack** favors the tightest host that still fits.
+3. **Host id** ascending — the final tie-break, so the same inputs always yield the same host regardless of candidate order.
+
+Overcommit ratios and bound-VM counts feed both the capacity fit and the score:
+`allocatable` (the host TOTAL the inventory layer reports) is multiplied by the
+pool's overcommit ratio to get the bookable capacity, and bound-VM counts come from
+the already-placed set the caller supplies (the operator owns the binding, D1).
+This slice deliberately does **not** subtract per-VM reservations from `allocatable`
+— where and how running-VM reservations yield true free capacity is ADR-0007 **open
+question 5** — so the bound-VM count is the load-aware secondary signal, and a
+provider that reports live (already-net) `allocatable` makes the fit exact.
+
+### Idempotent on re-run
+
+When the VM is already bound (its current `status.placement.host`) and that host
+still passes every filter, the scheduler **re-selects it without scoring** — a
+re-reconcile never churns a healthy placement, even if another host now scores
+better. The one exception is a **drained** host: a bound host that is now cordoned
+(`schedulable=false`) or `NotReady` fails the filter and the VM is re-placed
+elsewhere, which is exactly what an operator-initiated host drain needs.
+
+### How each `VMPlacementPolicy` construct maps (and what is deferred)
+
+The scheduler **reuses `VMPlacementPolicy`** as its input language (ADR-0007 D4). It
+honors the constructs that map cleanly onto the flat `Host` + labels model and
+**documents** — rather than silently ignoring — the ones that do not (it invents no
+new API):
+
+- **Honored as hard filters:** `Hard.Hosts` / `Hard.ExcludedHosts` / `Hard.NodeSelector`; `ResourceConstraints.RequiredFeatures` and `Min*PerHost`; strict `HostAffinity` / `HostAntiAffinity`; required `VMAffinity` / `VMAntiAffinity`.
+- **Honored as soft scores:** `Soft.Hosts` / `ExcludedHosts` / `NodeSelector`; `ResourceConstraints.PreferredFeatures`; preferred `HostAffinity` / `HostAntiAffinity` and preferred `VMAffinity` / `VMAntiAffinity` (each term's `weight`).
+- **Deferred (documented, not faked):** the vSphere/Proxmox external-orchestrator vocabulary carried in `placement_json` — `Hard.Clusters` / `Datastores` / `Folders` / `ResourcePools` / `Networks` / `Zones` / `Regions` / `Tolerations` and the cluster/datastore/zone/application (anti-)affinity rules (the flat P1 host model has no such topology; a rack/zone label goes through `NodeSelector`); `ResourceConstraints.Max*Utilization` (no live-utilization telemetry in `Host.status` yet); and all of `SecurityConstraints` (secure-boot / TPM / encryption / NUMA / isolation / trust are not reported by `Host.status` — label the hosts and use `NodeSelector`). VM affinity `TopologyKey` / `Namespaces` / `NamespaceSelector` are treated as host-level co-location; the caller supplies the already-placed VM set it wants considered. A rule's `scope` is treated as a HARD filter **only** when it is explicitly `strict`; any other value (including the empty default) is a soft preference, so a mis-set scope can never accidentally make every host infeasible.
+
+A malformed input the admin must fix — an unparseable overcommit ratio, a malformed
+affinity label selector — is returned as an ordinary error (distinct from a no-fit),
+never a panic.
+
+### Not wired yet — the binding slice follows
+
+This slice is the **pure function and its tests only**. Nothing calls `Schedule`
+yet: consuming its decision on VM creation means adding `target_host_id` to the
+`Create` / `Clone` RPCs and writing `VirtualMachine.status.placement.host` (the
+binding), which is the **next** ADR-0007 P1 slice.
+
 ## What "clustered" does not mean (yet)
 
 - **No automatic HA / failover.** v1 detects and surfaces host-down and supports
   operator-initiated evacuation, but does **not** auto-restart VMs elsewhere.
   Without fencing/STONITH that would risk split-brain disk corruption; automatic
   HA is a deferred future ADR (ADR-0007 D8/P5).
-- **No scheduler or migration in this slice.** This PR ships the `Host` and
-  `HostPool` CRDs only. The inventory-sync controller, the filter+score scheduler,
-  `target_host_id` on create, and live migration land in later ADR-0007 slices.
+- **No placement binding or migration yet.** The inventory CRDs, the inventory-sync
+  controller, and the pure filter+score scheduler are in place, but the scheduler is
+  **not wired**: `target_host_id` on create and the `status.placement.host` binding,
+  then live migration, land in later ADR-0007 slices.
