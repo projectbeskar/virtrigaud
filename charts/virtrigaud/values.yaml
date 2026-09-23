@@ -248,20 +248,36 @@ security:
       issuerKind: ClusterIssuer
 
 # Webhook configuration
+#
+# Master switch `enabled` is OFF by default. Turning it ON renders the webhook
+# Service + the ValidatingWebhookConfiguration (and, if selected, the cert
+# Secret) AND requires the manager to be started with webhook serving certs
+# (see the `certificates` block below and the manager `--webhook-cert-path`
+# wiring in manager-deployment.yaml). Without certs the manager does not register
+# its webhooks, so leaving this on without a working cert source would make the
+# rendered ValidatingWebhookConfiguration reject Provider writes under
+# failurePolicy=Fail. Enable this only once a cert source is configured.
+#
+# The ONLY admission webhook backed by manager Go code today is the validating
+# `vprovider.kb.io` webhook — the ADR-0007 D2 guard that rejects
+# spec.topology=cluster on provider types with a native cluster manager (only
+# libvirt is allow-listed). The mutating and conversion stanzas below are
+# scaffolding with no backing handler yet; keep this master switch off unless you
+# have wired certs and understand that surface.
 webhooks:
-  # Enable admission webhooks
+  # Enable admission webhooks (master switch — see the note above; requires certs)
   enabled: false
-  
+
   # Conversion webhook for CRD versioning
   conversion:
     enabled: true
-    
-  # Validating webhook
+
+  # Validating webhook — vprovider.kb.io (ADR-0007 D2 topology x type guard)
   validating:
     enabled: true
     failurePolicy: Fail
-    
-  # Mutating webhook  
+
+  # Mutating webhook
   mutating:
     enabled: true
     failurePolicy: Fail

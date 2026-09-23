@@ -409,6 +409,25 @@ func main() {
 	}
 	//+kubebuilder:scaffold:builder
 
+	// Register the Provider validating webhook (ADR-0007 D2): reject
+	// spec.topology=cluster on provider types that have a native cluster
+	// manager (only libvirt is allow-listed today). Gated on
+	// --webhook-cert-path: registering a webhook makes controller-runtime start
+	// the webhook server, which fails to load serving certs (and crash-loops the
+	// manager) when none are mounted. The chart mounts webhook certs and wires
+	// this flag only when webhooks are enabled, so with webhooks disabled the
+	// webhook is skipped and the manager starts exactly as before. When the flag
+	// is set, the webhook server serves with the operator-provided cert
+	// (GetCertificate wired above), so the default cert-dir path is never hit.
+	if len(webhookCertPath) > 0 {
+		if err := infrav1beta1.SetupProviderWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "Provider")
+			os.Exit(1)
+		}
+	} else {
+		setupLog.Info("Webhooks disabled (no --webhook-cert-path set); skipping Provider validating webhook registration")
+	}
+
 	// Register cert watchers with the manager so they run as Runnables
 	// alongside the controllers (H1 PR-1 / #114). nil-guarded so default
 	// deployments (no cert paths set) have zero overhead.
