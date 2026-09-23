@@ -493,6 +493,10 @@ helm-lint: gen-helm-crds ## Lint Helm chart with generated CRDs
 	@helm lint charts/virtrigaud
 	@echo "✅ Helm chart lint passed"
 
+.PHONY: verify-webhook-render
+verify-webhook-render: ## Render the chart with webhooks.enabled=true and assert valid, coherent manifests (CA/caBundle, flags, kinds, SANs)
+	@./hack/verify-webhook-render.sh
+
 ifndef ignore-not-found
   ignore-not-found = false
 endif

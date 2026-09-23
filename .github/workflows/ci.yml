@@ -548,6 +548,16 @@ jobs:
           echo "Checking for basic Kubernetes resource structure..."
           grep -E "(apiVersion|kind|metadata)" /tmp/rendered.yaml > /dev/null && echo "✅ Basic Kubernetes structure found" || echo "⚠️  No Kubernetes resources found"
 
+      - name: Validate webhooks-enabled render (CA coherence, flags, kinds, SANs)
+        run: |
+          # Renders the chart with webhooks.enabled=true and asserts the manifests
+          # are valid AND internally coherent (the caBundle equals the CA that
+          # signed the serving cert, the manager is wired with --webhook-cert-path
+          # and no undefined flags, only ValidatingWebhookConfiguration is rendered,
+          # and the serving cert SANs cover the webhook Service DNS). This is the
+          # regression guard for the fix/webhook-chart-enablement bug class.
+          ./hack/verify-webhook-render.sh
+
   conformance:
     name: Conformance Tests
     runs-on: ubuntu-22.04
