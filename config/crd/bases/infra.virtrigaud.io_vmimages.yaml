@@ -441,8 +441,18 @@ spec:
                         - ovf
                         type: string
                       path:
-                        description: Path specifies the path to the image file on
-                          the host
+                        description: |-
+                          Path is the absolute path of an existing base image file on the libvirt
+                          host. The provider copies it into the VM's own disk; it is never attached
+                          in place. For security the provider resolves the path on the host
+                          (following symlinks) and accepts it only if the result is a regular file
+                          directly inside one of the provider's allowed image directories
+                          (VIRTRIGAUD_LIBVIRT_IMAGE_DIRS, default /var/lib/libvirt/images), is not
+                          a disk of any existing VM, does not use a VirtRigaud-reserved name
+                          (*-disk.qcow2, *-migrated.qcow2, dotfiles), and has no backing file or
+                          external data file.
+                        maxLength: 4096
+                        pattern: ^(/+([^/.\x00-\x1f\x7f-\x9f-][^/\x00-\x1f\x7f-\x9f]*|\.([^/.\x00-\x1f\x7f-\x9f][^/\x00-\x1f\x7f-\x9f]*)?|\.\.[^/\x00-\x1f\x7f-\x9f]+))+$
                         type: string
                       storagePool:
                         description: StoragePool specifies the libvirt storage pool

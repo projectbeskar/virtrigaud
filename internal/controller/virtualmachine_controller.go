@@ -121,6 +121,35 @@ const forceDeleteAnnotation = "virtrigaud.io/force-delete"
 // failing (finalizer retained until it succeeds or force-delete is set).
 const vmDeleteRetryInterval = 15 * time.Second
 
+// providerErrorRetryInterval is the requeue cadence after a provider Create /
+// image-prepare failure that may be transient (host unreachable, task error).
+const providerErrorRetryInterval = 5 * time.Second
+
+// providerFailureOutcome classifies a provider Create / image-prepare error into
+// the VM condition reason and requeue cadence: a non-retryable InvalidSpec
+// rejection (e.g. a libvirt image path outside the allowed image directories)
+// surfaces as ValidationError on the vmCreateInvalidSpecRetryInterval recheck,
+// which also picks up a corrected VMImage (the VM controller does not watch
+// VMImage); anything else stays a ProviderError retried on the normal cadence.
+func providerFailureOutcome(err error) (reason string, requeueAfter time.Duration) {
+	if contracts.IsInvalidSpec(err) {
+		return k8s.ReasonValidationError, vmCreateInvalidSpecRetryInterval
+	}
+	return k8s.ReasonProviderError, providerErrorRetryInterval
+}
+
+// providerErrorMessage renders err for a status condition. For a categorized
+// provider error it uses the message alone, dropping the "(caused by: rpc
+// error: ...)" suffix that repeats the same text; anything else renders as-is.
+// Provider messages carry only request-derived values (never credentials).
+func providerErrorMessage(err error) string {
+	var pe *contracts.ProviderError
+	if stderrors.As(err, &pe) && pe.Message != "" {
+		return pe.Message
+	}
+	return err.Error()
+}
+
 // hasForceDeleteAnnotation reports whether the VM carries the force-delete
 // escape-hatch annotation set to "true".
 func hasForceDeleteAnnotation(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
@@ -147,6 +176,7 @@ type VirtualMachineReconciler struct {
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=vmimages,verbs=get;list;watch
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=vmimages/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=vmnetworkattachments,verbs=get;list;watch
+// +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=vmmigrations,verbs=get;list;watch
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=hostpools,verbs=get;list;watch
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=hosts,verbs=get;list;watch
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=vmplacementpolicies,verbs=get;list;watch
@@ -286,13 +316,14 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 			r.updateStatus(ctx, vm)
 			return imageEnsureResultToReconcile(), nil
 		}
-		logger.Error(err, "Failed to ensure image on provider - will retry in 5s",
-			"image", imageRefName, "provider", provider.Name)
-		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError,
-			fmt.Sprintf("Image prepare failed: %v", err))
+		reason, requeueAfter := providerFailureOutcome(err)
+		logger.Error(err, "Failed to ensure image on provider - will retry",
+			"image", imageRefName, "provider", provider.Name, "retryIn", requeueAfter)
+		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, reason,
+			fmt.Sprintf("Image prepare failed: %s", providerErrorMessage(err)))
 		metrics.RecordError(errReasonImagePrepare, metrics.ComponentManager)
 		r.updateStatus(ctx, vm)
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		return ctrl.Result{RequeueAfter: requeueAfter}, nil
 	} else if requeue {
 		// A prepare is in flight; surface a provisioning condition and requeue to
 		// poll it. We do NOT create the VM until the image is Ready on the provider.
@@ -671,9 +702,11 @@ func (r *VirtualMachineReconciler) createVM(
 			return res, nil
 		}
 		logger.Error(err, "Failed to create VM")
-		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Failed to create VM: %v", err))
+		reason, requeueAfter := providerFailureOutcome(err)
+		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, reason,
+			fmt.Sprintf("Failed to create VM: %s", providerErrorMessage(err)))
 		r.updateStatus(ctx, vm)
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		return ctrl.Result{RequeueAfter: requeueAfter}, nil
 	}
 
 	// Update status
@@ -1027,6 +1060,47 @@ func (r *VirtualMachineReconciler) adjustPowerState(
 	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 }
 
+// isOwnMigrationDisk reports whether diskPath is verifiably the landing disk a
+// VMMigration imported FOR THIS VM, which is the only case in which the
+// provider may attach a disk in place (contracts.VMImage.ImportedDisk).
+//
+// vm.spec.importedDisk (path and migrationRef) is tenant-writable and VM names
+// repeat across namespaces, so the spec alone proves nothing. The decision
+// rests on the referenced VMMigration, looked up in the VM's OWN namespace:
+// its spec must target this VM (name, and namespace — Target.Namespace or the
+// migration's own), and its status — which tenants cannot write — must record
+// diskPath as the imported disk (status.diskInfo.targetPath). A missing ref, a
+// migration that does not exist, or any mismatch yields false: the provider
+// then treats the path as a base image (confined, then copied or rejected).
+// Only an API error other than NotFound is returned, so a transient failure
+// retries instead of silently downgrading an honest migration.
+func (r *VirtualMachineReconciler) isOwnMigrationDisk(
+	ctx context.Context,
+	vm *infravirtrigaudiov1beta1.VirtualMachine,
+	diskPath string,
+) (bool, error) {
+	disk := vm.Spec.ImportedDisk
+	if disk == nil || disk.MigrationRef == nil || disk.MigrationRef.Name == "" || diskPath == "" {
+		return false, nil
+	}
+	migration := &infravirtrigaudiov1beta1.VMMigration{}
+	key := types.NamespacedName{Name: disk.MigrationRef.Name, Namespace: vm.Namespace}
+	if err := r.Get(ctx, key, migration); err != nil {
+		if errors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("get VMMigration %s referenced by importedDisk: %w", key, err)
+	}
+	targetNamespace := migration.Spec.Target.Namespace
+	if targetNamespace == "" {
+		targetNamespace = migration.Namespace
+	}
+	di := migration.Status.DiskInfo
+	return migration.Spec.Target.Name == vm.Name &&
+		targetNamespace == vm.Namespace &&
+		di != nil && di.TargetPath != "" && di.TargetPath == diskPath, nil
+}
+
 // buildCreateRequest builds a provider create request from VM spec.
 // It resolves cloud-init user data and metadata from both inline content and Secret references.
 func (r *VirtualMachineReconciler) buildCreateRequest(
@@ -1176,10 +1250,20 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 				"path", diskPath)
 		}
 
+		// spec.importedDisk is tenant-writable and VM names repeat across
+		// namespaces, so only a disk VERIFIED as this VM's own migration landing
+		// disk may be attached in place (ImportedDisk). Anything else is treated
+		// as a base image by the provider: confined, then copied or rejected.
+		ownImport, err := r.isOwnMigrationDisk(ctx, vm, diskPath)
+		if err != nil {
+			return contracts.CreateRequest{}, err
+		}
+
 		image = contracts.VMImage{
 			Path:         diskPath,
 			Format:       format,
 			ChecksumType: "sha256",
+			ImportedDisk: ownImport,
 		}
 
 		log.Info("Built image reference from imported disk",

@@ -130,6 +130,10 @@ metadata:
   namespace: default
 spec:
   libvirt:
+    # Must resolve (on the host) to a regular file directly inside an allowed
+    # image directory — VIRTRIGAUD_LIBVIRT_IMAGE_DIRS on the provider, default
+    # /var/lib/libvirt/images — and not be any VM's disk. See
+    # docs/image-preparation.md ("libvirt image paths").
     path: "/var/lib/libvirt/images/ubuntu-22.04-cloudimg.qcow2"
     format: qcow2
   prepare:

@@ -1101,7 +1101,7 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 		SourceURL:          sourceURL,
 		StorageHint:        "", // Let provider choose
 		Format:             importFormat,
-		TargetName:         fmt.Sprintf("%s-migrated", migration.Spec.Target.Name),
+		TargetName:         migration.Spec.Target.Name + contracts.ImportedDiskNameSuffix,
 		VerifyChecksum:     migration.Spec.Options == nil || migration.Spec.Options.VerifyChecksums,
 		ExpectedChecksum:   "",
 		Credentials:        creds,

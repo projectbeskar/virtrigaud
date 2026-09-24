@@ -282,13 +282,14 @@ func (s *StorageProvider) DownloadCloudImage(ctx context.Context, imageURL, volu
 		return nil, fmt.Errorf("failed to download image: %w, output: %s", err, result.Stderr)
 	}
 
-	// Get image info (plain argv: tempImage is derived from volumeName and must
-	// never be interpolated into a bash -c script).
-	infoResult, err := s.virshProvider.runVirshCommand(ctx, "!", "qemu-img", "info", tempImage)
+	// SECURITY: the downloaded file is untrusted. Refuse it if its header
+	// references any other host file (qcow2 backing / data file, VMDK extent):
+	// qemu-img convert would read that file and flatten it into the VM disk.
+	// Convert with the probed format so qemu-img does not re-probe.
+	srcFormat, err := inspectHostImage(ctx, s.virshProvider, downloadedImageSubject, tempImage)
 	if err != nil {
-		log.Printf("WARN Failed to get image info: %v", err)
-	} else {
-		log.Printf("DEBUG Image info: %s", infoResult.Stdout)
+		_, _ = s.virshProvider.runVirshCommand(ctx, "!", "rm", "-f", tempImage)
+		return nil, fmt.Errorf("inspect downloaded image: %w", err)
 	}
 
 	// Create target volume path
@@ -299,7 +300,7 @@ func (s *StorageProvider) DownloadCloudImage(ctx context.Context, imageURL, volu
 		log.Printf("INFO Converting and resizing image to %dGB", sizeGB)
 
 		// First convert the image
-		result, err = s.virshProvider.runVirshCommand(ctx, "!", "qemu-img", "convert", "-f", "qcow2", "-O", "qcow2", tempImage, targetPath)
+		result, err = s.virshProvider.runVirshCommand(ctx, "!", "qemu-img", "convert", "-f", srcFormat, "-O", "qcow2", tempImage, targetPath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert image: %w, output: %s", err, result.Stderr)
 		}
@@ -313,7 +314,7 @@ func (s *StorageProvider) DownloadCloudImage(ctx context.Context, imageURL, volu
 	} else {
 		// Just convert to target location
 		log.Printf("INFO Converting image to qcow2 format")
-		result, err = s.virshProvider.runVirshCommand(ctx, "!", "qemu-img", "convert", "-f", "qcow2", "-O", "qcow2", tempImage, targetPath)
+		result, err = s.virshProvider.runVirshCommand(ctx, "!", "qemu-img", "convert", "-f", srcFormat, "-O", "qcow2", tempImage, targetPath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert image: %w, output: %s", err, result.Stderr)
 		}
@@ -527,7 +528,15 @@ func (s *StorageProvider) GetPredefinedTemplates() []*ImageTemplate {
 	}
 }
 
-// CreateVolumeFromImageFile creates a volume by copying from an existing image file
+// CreateVolumeFromImageFile creates a volume from an image file that
+// VirtRigaud itself placed on the host (ImportDisk's landed/copied disk). A
+// qcow2 already in the pool directory is attached in place (the migration
+// landing disk); anything else is converted into <pool>/<volumeName>.qcow2.
+//
+// SECURITY: sourceImagePath is trusted here. It must never carry a
+// user-supplied path — Create routes VMImage / importedDisk paths through the
+// image-path confinement (imagepath.go) and then adoptVolumeInPlace or
+// CopyImageToVolume instead.
 func (s *StorageProvider) CreateVolumeFromImageFile(ctx context.Context, sourceImagePath, volumeName, poolName string, sizeGB int) (*StorageVolume, error) {
 	log.Printf("INFO Creating volume %s from image file %s", volumeName, sourceImagePath)
 
@@ -542,9 +551,6 @@ func (s *StorageProvider) CreateVolumeFromImageFile(ctx context.Context, sourceI
 		return nil, fmt.Errorf("failed to get pool info: %w", err)
 	}
 
-	// Create target volume path
-	targetPath := filepath.Join(poolInfo.Path, fmt.Sprintf("%s.qcow2", volumeName))
-
 	// Check if source image exists on remote host
 	// Use test command directly instead of bash -c for simplicity
 	_, err = s.virshProvider.runVirshCommand(ctx, "!", "test", "-f", sourceImagePath)
@@ -555,64 +561,104 @@ func (s *StorageProvider) CreateVolumeFromImageFile(ctx context.Context, sourceI
 
 	log.Printf("INFO Source image verified: %s", sourceImagePath)
 
+	// SECURITY: the imported bytes come from elsewhere (a migration's staged
+	// export). Read the header as qcow2 — exactly how both the convert below
+	// and a later in-place attach read it — and refuse a backing file, external
+	// data file or foreign extent, which would otherwise be flattened into (or
+	// opened live by) <vm>-migrated.qcow2.
+	if _, err := inspectHostImageAs(ctx, s.virshProvider, importedImageSubject, sourceImagePath, "qcow2"); err != nil {
+		return nil, fmt.Errorf("inspect imported disk: %w", err)
+	}
+
 	// IMPORTANT: Check if source is already in the pool directory and has the correct format
 	// This happens with imported disks from migrations - they're already in place
-	sourceDir := filepath.Dir(sourceImagePath)
-	sourceBase := filepath.Base(sourceImagePath)
-	poolPath := poolInfo.Path
-
-	if sourceDir == poolPath && strings.HasSuffix(sourceImagePath, ".qcow2") {
-		log.Printf("INFO Source image is already in pool directory with correct format: %s", sourceImagePath)
-		log.Printf("INFO Using existing disk directly without copying (typical for imported/migrated disks)")
-
-		// Ensure proper ownership and permissions
-		if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chown", "libvirt-qemu:kvm", sourceImagePath); err != nil {
-			log.Printf("WARN Failed to set ownership on existing disk: %v", err)
-		}
-		if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chmod", "777", sourceImagePath); err != nil {
-			log.Printf("WARN Failed to set permissions on existing disk: %v", err)
-		}
-
-		// Refresh pool to recognize the volume
-		if _, err := s.virshProvider.runVirshCommand(ctx, "pool-refresh", poolName); err != nil {
-			log.Printf("WARN Failed to refresh storage pool: %v", err)
-		}
-
-		// Get volume size
-		var capacityStr string
-		infoResult, err := s.virshProvider.runVirshCommand(ctx, "!", "qemu-img", "info", "--output=json", sourceImagePath)
-		if err == nil {
-			var diskInfo map[string]interface{}
-			if err := json.Unmarshal([]byte(infoResult.Stdout), &diskInfo); err == nil {
-				if virtualSize, ok := diskInfo["virtual-size"].(float64); ok {
-					// Convert bytes to human-readable format (e.g., "3.2 GiB")
-					capacityBytes := int64(virtualSize)
-					capacityGiB := float64(capacityBytes) / (1024 * 1024 * 1024)
-					capacityStr = fmt.Sprintf("%.2f GiB", capacityGiB)
-				}
-			}
-		}
-
-		// Extract volume name from source path (remove .qcow2 extension)
-		volName := strings.TrimSuffix(sourceBase, ".qcow2")
-
-		return &StorageVolume{
-			Name:     volName,
-			Pool:     poolName,
-			Path:     sourceImagePath,
-			Capacity: capacityStr,
-			Format:   "qcow2",
-		}, nil
+	if filepath.Dir(sourceImagePath) == poolInfo.Path && strings.HasSuffix(sourceImagePath, qcow2Ext) {
+		return s.adoptVolumeInPlace(ctx, sourceImagePath, poolName)
 	}
 
 	// Source is not in pool directory or wrong format - need to copy/convert
-	log.Printf("INFO Source is external or wrong format - copying and converting: %s -> %s", sourceImagePath, targetPath)
+	targetPath := filepath.Join(poolInfo.Path, volumeName+qcow2Ext)
+	return s.convertImageToVolume(ctx, sourceImagePath, "qcow2", targetPath, volumeName, poolName, sizeGB)
+}
+
+// CopyImageToVolume converts a CONFINED image (see imagepath.go: canonical path,
+// allowed directory, not in use, self-contained header) into a fresh qcow2
+// volume <pool>/<volumeName>.qcow2 for a VM. srcFormat is the format qemu-img
+// probed during confinement and is passed as `-f` so the source is not
+// re-probed. The source is never attached in place.
+func (s *StorageProvider) CopyImageToVolume(ctx context.Context, srcPath, srcFormat, volumeName, poolName string, sizeGB int) (*StorageVolume, error) {
+	if err := s.ensurePoolActive(ctx, poolName); err != nil {
+		return nil, fmt.Errorf("failed to ensure pool is active: %w", err)
+	}
+	poolInfo, err := s.GetPoolInfo(ctx, poolName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get pool info: %w", err)
+	}
+	if poolInfo.Path == "" {
+		return nil, fmt.Errorf("storage pool %q has no filesystem path; cannot place disk", poolName)
+	}
+	targetPath := filepath.Join(poolInfo.Path, volumeName+qcow2Ext)
+	return s.convertImageToVolume(ctx, srcPath, srcFormat, targetPath, volumeName, poolName, sizeGB)
+}
+
+// adoptVolumeInPlace uses an existing qcow2 file in the pool directory as a VM
+// disk without copying it (a migration's imported disk). The caller is
+// responsible for having established that path is that VM's own disk.
+func (s *StorageProvider) adoptVolumeInPlace(ctx context.Context, path, poolName string) (*StorageVolume, error) {
+	log.Printf("INFO Source image is already in pool directory with correct format: %s", path)
+	log.Printf("INFO Using existing disk directly without copying (typical for imported/migrated disks)")
+
+	// Ensure proper ownership and permissions
+	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chown", "libvirt-qemu:kvm", path); err != nil {
+		log.Printf("WARN Failed to set ownership on existing disk: %v", err)
+	}
+	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chmod", "777", path); err != nil {
+		log.Printf("WARN Failed to set permissions on existing disk: %v", err)
+	}
+
+	// Refresh pool to recognize the volume
+	if _, err := s.virshProvider.runVirshCommand(ctx, "pool-refresh", poolName); err != nil {
+		log.Printf("WARN Failed to refresh storage pool: %v", err)
+	}
+
+	// Get volume size
+	var capacityStr string
+	infoResult, err := s.virshProvider.runVirshCommand(ctx, "!", "qemu-img", "info", "--output=json", path)
+	if err == nil {
+		var diskInfo map[string]interface{}
+		if err := json.Unmarshal([]byte(infoResult.Stdout), &diskInfo); err == nil {
+			if virtualSize, ok := diskInfo["virtual-size"].(float64); ok {
+				// Convert bytes to human-readable format (e.g., "3.2 GiB")
+				capacityBytes := int64(virtualSize)
+				capacityGiB := float64(capacityBytes) / (1024 * 1024 * 1024)
+				capacityStr = fmt.Sprintf("%.2f GiB", capacityGiB)
+			}
+		}
+	}
+
+	return &StorageVolume{
+		Name:     strings.TrimSuffix(filepath.Base(path), qcow2Ext),
+		Pool:     poolName,
+		Path:     path,
+		Capacity: capacityStr,
+		Format:   "qcow2",
+	}, nil
+}
+
+// convertImageToVolume converts srcPath (format srcFormat) into a standalone
+// qcow2 at targetPath, grows it to sizeGB when set, and makes it usable by QEMU.
+func (s *StorageProvider) convertImageToVolume(ctx context.Context, srcPath, srcFormat, targetPath, volumeName, poolName string, sizeGB int) (*StorageVolume, error) {
+	log.Printf("INFO Source is external or wrong format - copying and converting: %s -> %s", srcPath, targetPath)
 
 	// Convert the source image to the target location
 	result, err := s.virshProvider.runVirshCommand(ctx, "!", "qemu-img", "convert",
-		"-f", "qcow2", "-O", "qcow2", sourceImagePath, targetPath)
+		"-f", srcFormat, "-O", "qcow2", srcPath, targetPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to convert image: %w, output: %s", err, result.Stderr)
+		stderr := ""
+		if result != nil {
+			stderr = result.Stderr
+		}
+		return nil, fmt.Errorf("failed to convert image: %w, output: %s", err, stderr)
 	}
 
 	// Resize the disk if a specific size is requested
@@ -643,21 +689,18 @@ func (s *StorageProvider) CreateVolumeFromImageFile(ctx context.Context, sourceI
 	}
 
 	// Refresh storage pool to recognize new volume
-	if _, err := s.virshProvider.runVirshCommand(ctx, "pool-refresh", "default"); err != nil {
+	if _, err := s.virshProvider.runVirshCommand(ctx, "pool-refresh", poolName); err != nil {
 		log.Printf("WARN Failed to refresh storage pool: %v", err)
 	}
 
 	log.Printf("INFO Successfully created volume from image file: %s", volumeName)
 
-	// Get volume information
-	volume := &StorageVolume{
+	return &StorageVolume{
 		Name:   volumeName,
 		Pool:   poolName,
 		Path:   targetPath,
 		Format: "qcow2",
-	}
-
-	return volume, nil
+	}, nil
 }
 
 // CreateVolumeFromTemplate downloads and prepares a volume from a predefined template

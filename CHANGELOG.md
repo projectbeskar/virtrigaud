@@ -5,6 +5,97 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-24 09:14] - Confine libvirt image paths to allowed image directories
+**Author:** @wrkode (William Rizzo)
+
+### Security
+- `internal/providers/libvirt/imagepath.go` (new), `provider_virsh.go`, `image.go`: every host image path the libvirt provider uses is now **confined on the host that uses it**. This covers `VMImage.spec.source.libvirt.path`, `VirtualMachine.spec.importedDisk.path`, the prepared path from `VMImage.status`, and any path-shaped image spec. Before, whoever could create a VMImage or a VirtualMachine could boot a VM from any file the SSH user could read and then read it from inside the guest: `/etc/shadow`, a host block device, or another VM's disk. Worse, a qcow2 in the pool directory was **attached in place**, which gave read/write access to another tenant's live disk, and deleting the attacker's VM then deleted that disk. The checks, in order:
+  1. Lexical check: absolute path, no `..` segment, no segment starting with `-`, no control characters.
+  2. `realpath -e --` on the host. Only the canonical path is used afterwards.
+  3. The file must sit directly inside an allowed image directory. The directories are canonicalized on the host, and system directories are refused.
+  4. The name must not be a VirtRigaud artifact: `*-disk.qcow2`, `*-migrated.qcow2`, cloud-init seeds, staging files, or dotfiles.
+  5. The file must be regular and non-empty.
+  6. The file must not be a disk, backing file or shared directory of **any** domain on the host. Each disk's backing chain is read with `qemu-img info -U --backing-chain`, because `dumpxml` omits `<backingStore>` for shut-off domains. A broken chain is walked one level at a time. The check fails closed if a definition, a volume path or a chain cannot be read. A domain undefined mid-check is skipped.
+  7. `qemu-img info` must show no backing file, no external data file and no foreign VMDK extent.
+- `internal/providers/libvirt/imagepath.go`: when a host-side check itself fails, the caller gets a generic retryable error. The underlying detail, which names every domain's disks, the allowed directories and other domains' UUIDs, goes to the provider log only, so it never reaches a tenant's VM condition.
+- `internal/providers/libvirt/storage.go`, `image.go`: images downloaded from a URL (Create's `DownloadCloudImage` and `ImagePrepare`) get the same header check before `qemu-img convert`. A crafted qcow2 whose backing file is `/etc/shadow` would otherwise be flattened into the VM disk. The convert step now uses the probed format (`-f`).
+- `internal/providers/libvirt/storage.go`, `nfs.go`, `s3import.go`: every migration `ImportDisk` landing path gets the header check before it converts or attaches in place. This covers the PVC/local copy, NFS and S3. The check reads the image in the format the convert forces, so a staged object's backing file cannot be flattened into `<vm>-migrated.qcow2`.
+- `internal/providers/libvirt/provider_virsh.go`, `storage.go`: a base image is always **copied** into the VM's own `<vm>-disk.qcow2`. A disk is attached in place only when it is this VM's own migration landing disk (`<vm>-migrated.qcow2` directly in the `default` pool directory, unused by any domain).
+- `internal/controller/virtualmachine_controller.go`: the manager marks an image as that landing disk only when `spec.importedDisk.migrationRef` meets all of these conditions:
+  - it names a `VMMigration` in the VM's **own** namespace;
+  - that migration targets this VM (name and namespace);
+  - its `status.diskInfo.targetPath` equals the disk path.
+
+  `spec.importedDisk` is tenant-writable and VM names repeat across namespaces, so the spec alone proves nothing. Any other imported disk is treated as a base image.
+- `internal/providers/libvirt/image.go`: ImagePrepare's "already prepared" short-circuit now refuses a prepared file that some VM uses as its disk (`InvalidArgument`). Earlier releases attached such files in place.
+- `api/infra.virtrigaud.io/v1beta1/vmimage_types.go`: defense in depth on the released v1beta1 field `spec.source.libvirt.path`: `maxLength: 4096` and an admission pattern, exported as `LibvirtImagePathPattern`. The pattern requires an absolute path with no `..` segment, no segment starting with `-`, and no control characters. Spaces, dotted directories (`~/.local/share/libvirt/images`) and non-ASCII names are still accepted.
+
+### Added
+- `VIRTRIGAUD_LIBVIRT_IMAGE_DIRS` (provider pod env, set via `Provider.spec.runtime.env`): a comma- or colon-separated list of allowed image directories. The default is `/var/lib/libvirt/images`. A malformed or system-directory value stops the provider at startup.
+- `internal/providers/contracts/types.go`: `VMImage.ImportedDisk`, carried in `image_json` so no proto change is needed, and `ImportedDiskNameSuffix` (`-migrated`), now shared with the migration controller. `errors.go`: `IsInvalidSpec`.
+- Tests:
+  - `imagepath_test.go`: validator, directory-config and header tables. Confinement runs against a fake host (real symlinks and coreutils; fake virsh, qemu-img and sudo) and covers: an allowed image, a symlink escape, `..`, `/etc/shadow`, `/dev/sda`, another VM's disk (by name, in use, as a backing file or as a volume), a leading `-`, a relative path, and a nonexistent file.
+  - `imagepath_test.go` also covers: no existence oracle, fail-closed behaviour, imported-disk adoption, a loopback-SSH injection check, clustered target-host routing, Create, ImagePrepare and download rejection, gRPC `InvalidArgument`, and real `qemu-img` output.
+  - `imagepath_test.go` also covers: shut-off backing chains (including a broken chain and a data file), a volume that cannot be resolved (fails closed), a domain undefined mid-check (skipped), generic host-failure messages, the import header check, and a legacy in-use prepared image.
+  - `vmimage_types_test.go`: CRD pattern accept and reject.
+  - Controller tests for the new conditions and for trusting an imported disk:
+    - a matching migration is trusted;
+    - a missing ref, a migration in another namespace, a mismatched path or name, a missing disk record, or a missing migration is not.
+
+### Changed
+- `internal/controller/virtualmachine_controller.go`, `virtualmachine_image_prepare.go`: when the provider rejects a spec with `InvalidArgument` (mapped to InvalidSpec), the VM gets reason `ValidationError` and is rechecked every 30 seconds instead of retried every 5 seconds (the same cadence as other invalid-spec Create rejections). An ImagePrepare rejection is also written to `VMImage.status.providerStatus[<provider>].message`. While the image is not Ready on any provider, it also sets `phase: Failed` and `Ready=False`, reason `InvalidSource`. Condition messages drop the duplicated `rpc error` tail.
+- `internal/providers/libvirt/clone.go`, `disk_expand.go`: use the shared `<vm>-disk` naming helper.
+- `docs/image-preparation.md`, `examples/libvirt-complete-example.yaml`, `examples/libvirt-advanced-example.yaml`: document the path rules and `VIRTRIGAUD_LIBVIRT_IMAGE_DIRS`.
+- `config/crd/bases/infra.virtrigaud.io_vmimages.yaml`: regenerated.
+
+### Why
+A security review found that `VMImage.spec.source.libvirt.path` was passed to the hypervisor unvalidated. Any tenant able to create a VMImage could read arbitrary host files or another tenant's VM disk from inside their own VM. The fix confines paths on the host, where symlinks are resolved, and the CRD pattern is a second layer.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+> **Existing setups may need configuration.** With the default, only images placed
+> directly in `/var/lib/libvirt/images` keep working. Set `VIRTRIGAUD_LIBVIRT_IMAGE_DIRS`
+> (via `Provider.spec.runtime.env`) if your images live elsewhere, in a subdirectory,
+> under a session-mode (`~/.local/share/libvirt/images`) directory, or in a non-default
+> pool used for `ImagePrepare` via `source.libvirt.storagePool`. Setting the variable
+> replaces the default.
+>
+> Base images whose names end in `-disk`, `-disk.qcow2` or `-migrated.qcow2` must be
+> renamed. VMImages with such names can no longer be prepared. Images that have a
+> backing file or an external data file, or that are split VMDKs (monolithicFlat), must
+> first be flattened, e.g. with `qemu-img convert -O qcow2`.
+>
+> VMs are now created from a **copy** of a path or prepared image. Before, a qcow2 in the
+> pool directory became the VM's disk, which could be shared with other VMs and was deleted
+> with the VM. Expect extra disk usage and create time.
+>
+> Any image that an earlier release attached in place is still that VM's disk, so it is
+> now refused as a base image and as a prepared template. Re-running ImagePrepare does
+> not help. **Create a VMImage under a new name** to prepare a fresh copy.
+>
+> **WARNING, legacy shared disks:** VMs created by an earlier release from the same image
+> may **share one disk file**. Deleting any one of them deletes that shared file for all
+> of them. Before deleting such a VM, run `virsh domblklist --details <domain>` for each
+> domain on the host and look for duplicate sources.
+>
+> Migrations are unaffected when the migration controller creates the target VM. A
+> hand-written `spec.importedDisk` is no longer attached in place: it is copied, or refused
+> if it uses a reserved name, unless it references its own-namespace `VMMigration` as
+> described above.
+>
+> **Known limitation:** a `VMMigration` whose `spec.target.namespace` differs from its
+> own namespace cannot be verified from the target VM's namespace. Its target VM's
+> create is therefore refused, because `<vm>-migrated.qcow2` is a reserved base-image
+> name. Run such migrations with the target in the migration's own namespace until
+> verified cross-namespace targets are supported.
+>
+> Apply the regenerated CRD (`kubectl apply -f config/crd/bases`). Existing VMImages
+> with a relative or `..` path are refused on the next update and by the provider.
+
 ## [2026-09-24 08:59] - libvirt Create no longer binds to a same-named domain it does not own
 **Author:** @wrkode (William Rizzo)
 

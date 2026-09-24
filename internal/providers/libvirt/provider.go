@@ -112,6 +112,39 @@ type Provider struct {
 
 	// logger is the provider's structured logger (defaults to slog.Default()).
 	logger *slog.Logger
+
+	// imageDirs are the allowed image directories (VIRTRIGAUD_LIBVIRT_IMAGE_DIRS,
+	// validated at construction). Empty means "not loaded": imagePolicy then
+	// reads the environment on use, so struct-literal providers (tests) still
+	// get the default policy rather than an unchecked one.
+	imageDirs []string
+}
+
+// imagePolicy returns the provider's image-path confinement policy (see
+// imagepath.go). An unset configuration yields the DefaultImageDir policy; it
+// never returns a policy that skips the checks.
+func (p *Provider) imagePolicy() (imagePathPolicy, error) {
+	if len(p.imageDirs) > 0 {
+		return imagePathPolicy{dirs: p.imageDirs}, nil
+	}
+	dirs, err := imageDirsFromEnv()
+	if err != nil {
+		return imagePathPolicy{}, contracts.NewRetryableError("load image directory policy", err)
+	}
+	return imagePathPolicy{dirs: dirs}, nil
+}
+
+// loadImageDirs validates and records the allowed image directories from the
+// environment. Constructors call it so a malformed VIRTRIGAUD_LIBVIRT_IMAGE_DIRS
+// fails provider start-up (fail closed) instead of surfacing per request.
+func (p *Provider) loadImageDirs() error {
+	dirs, err := imageDirsFromEnv()
+	if err != nil {
+		return err
+	}
+	p.imageDirs = dirs
+	slog.Info("libvirt image path confinement configured", "allowed_image_dirs", dirs)
+	return nil
 }
 
 // ProviderConfig represents the configuration for the provider
@@ -192,6 +225,9 @@ func New() (*Provider, error) {
 			Username: config.Username,
 			Password: config.Password,
 		},
+	}
+	if err := p.loadImageDirs(); err != nil {
+		return nil, err
 	}
 
 	// Try to establish libvirt connection
@@ -289,6 +325,12 @@ func newClusteredProvider(hostsFile string) (*Provider, error) {
 		// accidental legacy call returns a clean error rather than a nil-deref.
 		virshProvider: NewVirshProvider(&ProviderConfig{Spec: ProviderSpec{}}),
 	}
+	// Operator configuration (not inventory), so fail closed on a malformed
+	// value. The one policy is enforced on every host against that host's
+	// filesystem (the confinement runs over the leased target-host connection).
+	if err := p.loadImageDirs(); err != nil {
+		return nil, err
+	}
 	p.initShadow(logger)
 
 	// Start the file-watch / hot-reload. A watcher-setup failure is non-fatal:
@@ -353,6 +395,9 @@ func NewProvider(ctx context.Context, k8sClient client.Client, provider *v1beta1
 		k8sClient:     k8sClient,
 		virshProvider: virshProvider,
 		credentials:   &Credentials{},
+	}
+	if err := p.loadImageDirs(); err != nil {
+		return nil, contracts.NewInvalidSpecError("load image directory policy", err)
 	}
 
 	// Build the per-host connection seam (ADR-0008 PR 2), keyed off the

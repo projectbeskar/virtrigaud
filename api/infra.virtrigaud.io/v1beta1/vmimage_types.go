@@ -117,10 +117,43 @@ type ContentLibraryRef struct {
 	Version string `json:"version,omitempty"`
 }
 
+// LibvirtImagePathPattern is the admission-time shape of
+// LibvirtImageSource.Path. It is the SINGLE regular expression shared by the
+// CRD schema (the +kubebuilder:validation:Pattern marker on
+// LibvirtImageSource.Path, which must be kept byte-identical —
+// TestLibvirtImagePathCRDPatternMatchesGo enforces that) and the libvirt
+// provider's pre-resolve validation (internal/providers/libvirt/imagepath.go).
+//
+// It admits an absolute path made of one or more non-empty segments, where no
+// segment is "..", no segment starts with "-", and no character is a slash
+// inside a segment or a C0/DEL/C1 control character. Spaces, dots in names
+// (".local"), and non-ASCII letters remain legal.
+//
+// The pattern is defense in depth only. The authoritative control is the
+// provider's host-side confinement: the path is canonicalized ON THE HYPERVISOR
+// HOST (so symlinks cannot escape) and must then be a regular file directly
+// inside an allowed image directory that is not a disk of any VM (security: a
+// tenant-controlled path must never let a VM read an arbitrary host file or
+// another VM's disk).
+const LibvirtImagePathPattern = `^(/+([^/.\x00-\x1f\x7f-\x9f-][^/\x00-\x1f\x7f-\x9f]*|\.([^/.\x00-\x1f\x7f-\x9f][^/\x00-\x1f\x7f-\x9f]*)?|\.\.[^/\x00-\x1f\x7f-\x9f]+))+$`
+
+// LibvirtImagePathMaxLength bounds LibvirtImageSource.Path (Linux PATH_MAX).
+const LibvirtImagePathMaxLength = 4096
+
 // LibvirtImageSource defines Libvirt-specific image configuration
 type LibvirtImageSource struct {
-	// Path specifies the path to the image file on the host
+	// Path is the absolute path of an existing base image file on the libvirt
+	// host. The provider copies it into the VM's own disk; it is never attached
+	// in place. For security the provider resolves the path on the host
+	// (following symlinks) and accepts it only if the result is a regular file
+	// directly inside one of the provider's allowed image directories
+	// (VIRTRIGAUD_LIBVIRT_IMAGE_DIRS, default /var/lib/libvirt/images), is not
+	// a disk of any existing VM, does not use a VirtRigaud-reserved name
+	// (*-disk.qcow2, *-migrated.qcow2, dotfiles), and has no backing file or
+	// external data file.
 	// +optional
+	// +kubebuilder:validation:MaxLength=4096
+	// +kubebuilder:validation:Pattern=`^(/+([^/.\x00-\x1f\x7f-\x9f-][^/\x00-\x1f\x7f-\x9f]*|\.([^/.\x00-\x1f\x7f-\x9f][^/\x00-\x1f\x7f-\x9f]*)?|\.\.[^/\x00-\x1f\x7f-\x9f]+))+$`
 	Path string `json:"path,omitempty"`
 
 	// URL provides a URL to download the image

@@ -214,7 +214,7 @@ func (p *Provider) growDiskOnline(ctx context.Context, id string, desiredDiskGB 
 	// uses the existing best-effort volume convention; if it fails we still try
 	// blockresize, but log the volume failure. ResizeVolume is grow-only-safe
 	// for files (qemu-img/vol-resize grows the file).
-	if verr := sp.ResizeVolume(ctx, clonePoolName, fmt.Sprintf("%s-disk", id), desiredDiskGB); verr != nil {
+	if verr := sp.ResizeVolume(ctx, clonePoolName, vmDiskVolumeName(id), desiredDiskGB); verr != nil {
 		log.Printf("WARN Backing volume resize for domain %s did not apply (continuing to blockresize): %v", id, verr)
 	}
 

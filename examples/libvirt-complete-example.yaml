@@ -55,6 +55,14 @@ spec:
     image: "ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.2.3"
     service:
       port: 9090
+    # Directories a VMImage `source.libvirt.path` may point into (image files
+    # must sit DIRECTLY in one of them; the path is resolved on the host, so
+    # symlinks cannot escape). Comma- or colon-separated; the default when unset
+    # is /var/lib/libvirt/images. List the pool directory ImagePrepare writes
+    # into too if you use URL-sourced images. See docs/image-preparation.md.
+    # env:
+    #   - name: VIRTRIGAUD_LIBVIRT_IMAGE_DIRS
+    #     value: "/var/lib/libvirt/images,/srv/golden-images"
 
 ---
 # Define a VM class for KVM
@@ -84,6 +92,12 @@ metadata:
 spec:
   source:
     libvirt:
+      # Absolute path of a base image on the libvirt host. It must resolve to a
+      # regular, self-contained image file directly inside an allowed image
+      # directory (VIRTRIGAUD_LIBVIRT_IMAGE_DIRS on the provider, default
+      # /var/lib/libvirt/images), must not be a disk of any existing VM, and
+      # must not use a VirtRigaud-reserved name (*-disk.qcow2,
+      # *-migrated.qcow2, dotfiles). It is copied into each VM's own disk.
       path: "/var/lib/libvirt/images/ubuntu-20.04-cloudimg.qcow2"
       format: qcow2
       # Alternative: download from URL

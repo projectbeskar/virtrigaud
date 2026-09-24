@@ -92,6 +92,11 @@ func (p *Provider) createVM(ctx context.Context, vp *VirshProvider, req contract
 	// Create VM with cloud-init support
 	vmID, err := p.createVMWithCloudInit(ctx, vp, req)
 	if err != nil {
+		if isInvalidArgument(err) {
+			// A rejected request (e.g. a confined image path) is not retryable:
+			// return it as-is so it reaches the manager as InvalidArgument.
+			return contracts.CreateResponse{}, fmt.Errorf("failed to create VM: %w", err)
+		}
 		return contracts.CreateResponse{}, contracts.NewRetryableError("failed to create VM", err)
 	}
 
@@ -201,7 +206,7 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, vp *VirshProvider,
 	}
 
 	// Create disk image from template or create empty disk
-	diskVolumeName := fmt.Sprintf("%s-disk", req.Name)
+	diskVolumeName := vmDiskVolumeName(req.Name)
 	var diskPath string
 
 	// Get disk size from VMClass (default to 20GB if not specified)
@@ -210,20 +215,22 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, vp *VirshProvider,
 
 	// Check if VMImage is specified in the request
 	if imageSpec := p.extractImageSpec(req); imageSpec != "" {
-		log.Printf("INFO Creating disk from image: %s", imageSpec)
+		log.Printf("INFO Creating disk from image: %q", imageSpec)
 
 		var volume *StorageVolume
 		var err error
 
 		// Determine how to handle the image based on its type
-		if strings.HasPrefix(imageSpec, "http://") || strings.HasPrefix(imageSpec, "https://") {
+		if req.Image.Path == "" && (strings.HasPrefix(imageSpec, "http://") || strings.HasPrefix(imageSpec, "https://")) {
 			// Handle URL - download the image
 			log.Printf("INFO Downloading cloud image from URL: %s", imageSpec)
-			volume, err = storageProvider.DownloadCloudImage(ctx, imageSpec, diskVolumeName, "default", diskSizeGB)
-		} else if strings.HasPrefix(imageSpec, "/") {
-			// Handle absolute path - copy from existing image file
-			log.Printf("INFO Creating disk from local template file: %s", imageSpec)
-			volume, err = storageProvider.CreateVolumeFromImageFile(ctx, imageSpec, diskVolumeName, "default", diskSizeGB)
+			volume, err = storageProvider.DownloadCloudImage(ctx, imageSpec, diskVolumeName, defaultStoragePool, diskSizeGB)
+		} else if req.Image.Path != "" || strings.HasPrefix(imageSpec, "/") {
+			// A host path — from VMImage.spec.source.libvirt.path, a prepared
+			// image, spec.importedDisk.path, or anything else shaped like a
+			// path. It is user-controlled, so it is confined on THIS host (vp:
+			// the leased target host in clustered mode) before any use.
+			volume, err = p.createDiskFromHostImage(ctx, vp, storageProvider, req, imageSpec, diskVolumeName, diskSizeGB)
 		} else {
 			// Handle template name - look up in predefined templates
 			log.Printf("INFO Creating disk from predefined template: %s", imageSpec)
@@ -324,6 +331,47 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, vp *VirshProvider,
 
 	log.Printf("INFO Successfully created VM with storage and cloud-init: %s", req.Name)
 	return req.Name, nil
+}
+
+// createDiskFromHostImage builds the VM's primary disk from a host path image
+// (imagePath: VMImage.spec.source.libvirt.path, a prepared image, or
+// VirtualMachine.spec.importedDisk.path). The path is user-controlled, so it is
+// first confined ON THE HOST behind vp — the host the VM is being created on
+// (see imagepath.go) — and only the resulting canonical path is used:
+//
+//   - a base image is COPIED (qemu-img convert, with the probed source format)
+//     into the VM's own <vm>-disk.qcow2; it is never attached in place, so two
+//     VMs never share one disk and deleting a VM never deletes the image;
+//   - only this VM's own imported migration disk (<vm>-migrated.qcow2 in the
+//     pool directory, unused by any domain) is attached in place.
+//
+// A rejected path returns an InvalidArgument error (non-retryable).
+func (p *Provider) createDiskFromHostImage(ctx context.Context, vp *VirshProvider, sp *StorageProvider,
+	req contracts.CreateRequest, imagePath, volumeName string, sizeGB int) (*StorageVolume, error) {
+	policy, err := p.imagePolicy()
+	if err != nil {
+		return nil, err
+	}
+
+	confReq := imagePathRequest{Path: imagePath, ImportedDisk: req.Image.ImportedDisk, VMName: req.Name}
+	if req.Image.ImportedDisk {
+		poolInfo, err := sp.GetPoolInfo(ctx, defaultStoragePool)
+		if err != nil {
+			return nil, fmt.Errorf("get storage pool %q info: %w", defaultStoragePool, err)
+		}
+		confReq.PoolDir = poolInfo.Path
+	}
+
+	img, err := policy.confine(ctx, vp, confReq)
+	if err != nil {
+		return nil, err
+	}
+	if img.AdoptInPlace {
+		log.Printf("INFO Attaching imported disk %q in place for VM %s", img.Path, req.Name)
+		return sp.adoptVolumeInPlace(ctx, img.Path, defaultStoragePool)
+	}
+	log.Printf("INFO Copying base image %q (%s) into the disk of VM %s", img.Path, img.Format, req.Name)
+	return sp.CopyImageToVolume(ctx, img.Path, img.Format, volumeName, defaultStoragePool, sizeGB)
 }
 
 // Delete removes a VM using virsh and cleans up all associated resources
@@ -777,7 +825,7 @@ func (p *Provider) Reconfigure(ctx context.Context, id string, desired contracts
 			} else {
 				// Offline: resize the backing volume so the larger size applies
 				// on next boot. Find the VM's disk volume by the pool convention.
-				volumeName := fmt.Sprintf("%s-disk", id)
+				volumeName := vmDiskVolumeName(id)
 				log.Printf("INFO Attempting offline disk resize for VM %s to %dGB", id, desiredDiskGB)
 				err = storageProvider.ResizeVolume(ctx, "default", volumeName, desiredDiskGB)
 				if err != nil {
@@ -1166,19 +1214,19 @@ func (p *Provider) GetGuestInfo(ctx context.Context, id string) (*GuestAgentInfo
 func (p *Provider) extractImageSpec(req contracts.CreateRequest) string {
 	// Priority 1: Use explicit path from VMImage (for local template images)
 	if req.Image.Path != "" {
-		log.Printf("INFO Using image path from VMImage: %s", req.Image.Path)
+		log.Printf("INFO Using image path from VMImage: %q", req.Image.Path)
 		return req.Image.Path
 	}
 
 	// Priority 2: Use URL from VMImage (for remote images)
 	if req.Image.URL != "" {
-		log.Printf("INFO Using image URL from VMImage: %s", req.Image.URL)
+		log.Printf("INFO Using image URL from VMImage: %q", req.Image.URL)
 		return req.Image.URL
 	}
 
 	// Priority 3: Use template name if provided
 	if req.Image.TemplateName != "" {
-		log.Printf("INFO Using template name from VMImage: %s", req.Image.TemplateName)
+		log.Printf("INFO Using template name from VMImage: %q", req.Image.TemplateName)
 		return req.Image.TemplateName
 	}
 
