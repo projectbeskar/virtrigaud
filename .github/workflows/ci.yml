@@ -279,6 +279,18 @@ jobs:
           # Check for other generated file changes
           git diff --exit-code || (echo "Generated files are out of sync. Please run 'make generate && make manifests && make proto' and commit the changes." && exit 1)
 
+      - name: Verify Helm chart CRDs are in sync
+        run: |
+          # charts/virtrigaud/crds/ is gitignored and generated at package time
+          # (release.yml runs 'make gen-helm-crds' before 'helm package'), so a
+          # plain 'git diff' CANNOT detect chart-CRD drift. Instead regenerate both
+          # CRD trees from the Go types (the single source of truth) and assert the
+          # chart CRDs are byte-identical to config/crd/bases/ and cover the full
+          # set. This trips if 'make gen-helm-crds' is broken or drops a CRD — e.g.
+          # a new type is added to the API but the chart generator never emits it,
+          # which is exactly how Host/HostPool went missing from the chart.
+          make verify-helm-crds
+
   build:
     name: Build
     runs-on: ubuntu-22.04

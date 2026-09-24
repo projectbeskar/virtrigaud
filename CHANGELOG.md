@@ -5,6 +5,31 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-24 01:14] - Guard Helm chart CRDs against drift (missing Host/HostPool, pruned topology)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `.github/workflows/ci.yml`: **the CI *Verify Generated Files* job now guards the Helm chart CRDs.** `charts/virtrigaud/crds/*.yaml` is gitignored and generated at package time (commit `53198c2`), so the pre-existing `git diff --exit-code` check is **blind** to chart-CRD drift — gitignored files never appear in `git diff`. A new step runs `make verify-helm-crds`, which regenerates both CRD trees from the Go types and asserts `charts/virtrigaud/crds/` is byte-identical to `config/crd/bases/` and covers the full set. This is the regression guard that was missing when Host/HostPool CRDs (#312) and `Provider.spec.topology` (#315) were added to the API but the chart generator's output was never re-verified. Confirmed it **trips** on a dropped/mismatched CRD and passes when in sync.
+
+### Added
+- `Makefile`: `verify-helm-crds` target (regenerates both trees and diffs `config/crd/bases/` vs `charts/virtrigaud/crds/`, excluding `.gitkeep`; fails on any divergence, missing, or extra CRD) — used by CI and runnable locally.
+- `Makefile`: `helm-template` target (depends on `gen-helm-crds`) so a local render never uses a stale/empty `crds/`, matching the existing `helm-lint`/`helm-package` targets.
+
+### Changed
+- `CONTRIBUTING.md`: documented the CRD-delivery model honestly — chart CRDs are gitignored and generated at package time (`release.yml` runs `make gen-helm-crds` before `helm package`); the local-checkout footgun (installing/upgrading from `charts/virtrigaud` without `make gen-helm-crds` ships empty/stale CRDs, and the `crd-upgrade-job` hook's server-side apply then prunes live CRD fields); the new CI guard; and that CRD *upgrades* on an existing release need a fresh chart release or `kubectl apply -f config/crd/bases`.
+- `charts/virtrigaud/README.md`: added the same footgun warnings to "Installation from Local Chart" and the CRD-upgrade section (the hook applies the CRDs baked in at package time, so a stale package prunes fields), and pointed the manual-apply path at the committed `config/crd/bases/` instead of the gitignored `charts/virtrigaud/crds/`.
+
+### Why
+On the lab, enabling the chart pruned `spec.topology` from the live Providers CRD and never created Host/HostPool, breaking ADR-0007 clustered providers. Root cause is not committed-CRD staleness (the chart CRDs are deliberately generated-not-committed) but the absence of any CI check that `make gen-helm-crds` still produces the complete, current schema — combined with a `crd-upgrade-job` pre-upgrade hook that server-side-applies whatever CRDs a package was built with. This adds the missing drift guard and documents the delivery model + footgun so fresh installs/packages are correct and future API changes can't silently ship incomplete chart CRDs. Erick's generate-at-package-time model (`53198c2`) is preserved; no chart CRDs are committed.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+No runtime, API, CRD-schema, or chart-artifact behavior change — this is a CI regression guard + two Make targets + contributor/chart docs. A chart packaged by `release.yml` was already correct (it runs `gen-helm-crds`); existing installs already broken by a stale chart recover with `kubectl apply -f config/crd/bases` or a fresh chart release (unchanged by this PR).
+
 ## [2026-09-23 12:41] - Make the Provider validating webhook deployable via Helm (webhooks.enabled=true)
 **Author:** @wrkode (William Rizzo)
 
