@@ -459,11 +459,21 @@ func buildNativeList(lv *golibvirt.Libvirt) ([]contracts.VMInfo, error) {
 // tests swap that field to script native results, errors, and panics without a
 // live libvirtd.
 func (p *Provider) describeNative(ctx context.Context, c libvirtConn, id string) (contracts.DescribeResponse, error) {
-	if c == nil {
+	lc := c
+	if !p.clustered() {
+		// Single-host: resolve the one connection through the registry exactly as
+		// before routing existed. It wraps the same VirshProvider the virsh read
+		// ran on, and keeps the ADR-0008 D5 soak path byte-for-byte unchanged.
+		var err error
+		if lc, err = p.conn(ctx); err != nil {
+			return contracts.DescribeResponse{}, err
+		}
+	}
+	if lc == nil {
 		return contracts.DescribeResponse{}, contracts.NewRetryableError("no host connection for the native describe", nil)
 	}
 	var resp contracts.DescribeResponse
-	err := c.callLibvirt(ctx, func(lv *golibvirt.Libvirt) error {
+	err := lc.callLibvirt(ctx, func(lv *golibvirt.Libvirt) error {
 		var bErr error
 		resp, bErr = buildNativeDescribe(lv, id)
 		return bErr

@@ -501,6 +501,17 @@ func TestSingleHost_DescribeAndDelete_UnchangedOnVirshProvider(t *testing.T) {
 	}
 }
 
+// TestSingleHost_NativeDescribeStillResolvesThroughRegistry pins that the
+// single-host shadow read keeps resolving its connection through the registry,
+// exactly as before routing (the D5 soak path): with no registry configured it
+// fails the same way it always did, instead of using the connection it is handed.
+func TestSingleHost_NativeDescribeStillResolvesThroughRegistry(t *testing.T) {
+	p := &Provider{virshProvider: localHostVP("single")}
+	_, err := p.describeNative(context.Background(), p.singleHostConn(), "web")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "libvirt provider not initialized")
+}
+
 // TestSingleHost_DeleteAbsentStillCleansOrphans pins that the single-host
 // absent-domain path keeps its name-based orphan cleanup (the clustered path
 // deliberately does not).
