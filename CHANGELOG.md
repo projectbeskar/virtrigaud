@@ -5,6 +5,58 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-24 17:20] - Clustered providers route Power and Reconfigure to the VM's host (ADR-0007 Addendum A, slice 2)
+**Author:** @wrkode (William Rizzo)
+
+> `topology: cluster` stays **experimental**. A clustered VM can now also be powered and reconfigured on its host. Snapshots, clones and disk export are still refused (slice 3). Single-host and thin-client providers are unchanged.
+
+### Added
+- `proto/provider/v1/provider.proto` (+ regenerated `proto/rpc/provider/v1/provider.pb.go`): additive `PowerRequest.owner` (5) and `ReconfigureRequest.owner` (4), the `ObjectIdentity` from #333. Single-host and thin-client providers ignore them. `HardwareUpgradeRequest` keeps only its `target_host_id` wire field.
+- `internal/transport/grpc/client.go`: sends `VMRef.Owner` on Power and Reconfigure, **only together with** `target_host_id` (same rule as Describe and Delete).
+- `api/infra.virtrigaud.io/v1beta1/virtualmachine_types.go`: optional `status.placement.excludedHosts`: a set of at most 16 Host names, each at most 253 characters (CRD regenerated; chart CRDs are generated on demand).
+- `internal/scheduler`: `Request.ExcludedHosts` rejects the listed hosts before any other filter (the `RejectionExcludedForVM` category), even the current binding. `AllExcluded(err)` recognises a no-fit where every candidate was excluded.
+- `internal/k8s/conditions.go`: `Placed` reasons `HostExcluded` and `AllHostsExcluded`.
+- Tests:
+  - routed Power (every op, and the graceful-shutdown fallback) and Reconfigure (offline CPU/memory/disk, online CPU/memory, online disk grow with the guest-agent filesystem grow) run on the leased host, with no call reaching the placeholder;
+  - lease release;
+  - owner mismatch, unstamped, no owner, unreadable stamp and absent all answer `NotFound` with only the read-only ownership check run;
+  - a domain replaced after the check is not acted on; an owned domain without a UUID is not acted on;
+  - empty host is `InvalidArgument`, unknown host is the host-scoped `Unavailable`, a malformed op or desired state is `InvalidArgument`;
+  - the placeholder test drives every per-VM RPC again; clustered capabilities;
+  - a host-scoped `Unavailable` or `NotFound` on Power/Reconfigure never counts toward the circuit breaker;
+  - operator: owner carried, `HostUnavailable` backs off to 30 s, `NotFound` is A4, single-host errors unchanged;
+  - the conflict flow: host excluded and pending host released, re-schedule picks another host, all excluded gives `AllHostsExcluded` with no `Create` and a 2 m re-check, exclusions cleared on bind, finalizer after a conflict makes no provider call, cap and dedupe, the cap pinned to the CRD `maxItems`.
+
+### Changed
+- `internal/providers/libvirt/provider_virsh.go`, `disk_expand.go`: the Power and Reconfigure cores take the connection (`runPowerOp` / `reconfigureOn`), shared by single-host (`p.virshProvider`) and clustered (the leased host). Everything they reach runs on that connection: `syncPersistentXML`, `setvcpus`/`setmem`, the volume resize, `blockresize`, and the guest agent for the in-guest filesystem grow (built from the leased host's VirshProvider, never `p.virshProvider`).
+- `internal/providers/libvirt/provider_virsh.go`: single-host Power and Reconfigure keep their exact virsh/host command sequence and errors. 20 scenarios (every power op and failure fallback, every reconfigure branch) are pinned by `testdata/single_host_power_reconfigure.golden.json`, captured on `main` (5c4a335) before the refactor and re-verified there. `vm.HostID` and `vm.Owner` are still ignored on single-host.
+- `internal/providers/libvirt/server.go`: on a clustered provider, Power and Reconfigure are served instead of returning `Unimplemented`, and their errors are mapped by `routedRPCError`. `GetCapabilities` now advertises online reconfigure and online disk expansion. Snapshots, clones, disk export/import and image import stay hidden.
+- `internal/controller/virtualmachine_controller.go`, `virtualmachine_clustered.go`: when a clustered Power or Reconfigure fails:
+  - a host-scoped `Unavailable` sets `Ready=False/HostUnavailable` (30 s re-check);
+  - `NotFound` is A4: `Ready=False/VMMissingOnHost`, never re-created, 2 m re-check;
+  - the slice 1 rule that re-checked an `Unimplemented` clustered Power/Reconfigure every 2 minutes is removed;
+  - new metric reasons `provider-power` and `provider-reconfigure`.
+- `docs/clustered-provider-inventory.md`: what is routed now, the owner-checked Power/Reconfigure, the conflict/exclusion rule and how to clear `excludedHosts`. `docs/adr/0007-clustered-orchestrator-provider.md`: A2 amendment.
+
+### Fixed
+- `internal/controller/virtualmachine_clustered.go` (tracked from the slice 1 security review): after a clustered `Create` failed with a name conflict (`AlreadyExists`) on its pending host, `pendingHost` stayed set and pinned the VM to that host forever; only an administrator could release it. A conflict proves this VM created nothing there, so now the operator:
+  - clears `pendingHost` and excludes the host, in one checked status write;
+  - sets `Placed=False/HostExcluded` and re-schedules onto another host.
+
+  When every candidate is excluded, the VM shows `Placed=False/AllHostsExcluded`, no `Create` is sent, and it is re-checked every 2 minutes (no hot loop). An unreachable pending host is still never re-scheduled.
+
+### Security
+- `internal/providers/libvirt/provider_virsh.go` (`ownedDomainTarget`, `powerClustered`, `reconfigureClustered`): a routed Power or Reconfigure is **owner-checked** against the #333 domain stamp **before** anything is changed. A missing, unreadable, ambiguous or foreign stamp, or a request without an owner, is answered `NotFound`, and the domain is never started, stopped, rebooted, resized or touched through its guest agent. Every command then addresses the checked domain **by its UUID** rather than its name, so a domain replaced after the check is never acted on. Messages never name the other owner. An unsupported power op is refused before any host is leased.
+
+### Why
+Slice 1 made a clustered VM describable and deletable on its host but left Power and Reconfigure refused. Without them, a clustered VM could not reach or keep its desired power state or resources. This slice routes both through the same owner-checked, lease-scoped path, without changing single-host behavior, which the ADR-0008 D5 soak depends on. It also closes the pending-host pinning gap the slice 1 security review tracked.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-09-24 15:48] - Clustered providers route Describe and Delete to the VM's host (ADR-0007 Addendum A, slice 1)
 **Author:** @wrkode (William Rizzo)
 
