@@ -477,6 +477,53 @@ func TestListVMs_ReportsOwnerStamp(t *testing.T) {
 		"one list plus one dumpxml per domain, as before: no extra virsh call")
 }
 
+// TestListVMs_OwnerStampParityVirshVsNative pins that the go-libvirt list
+// projection (nativeListVMInfo, what buildNativeList emits) carries the same
+// owner stamp as virsh's ListVMs for the same domain definitions — so adoption
+// keeps skipping live-owned domains when the list family flips to native
+// (ADR-0008 PR 5) — and that the key does not create a shadow divergence.
+func TestListVMs_OwnerStampParityVirshVsNative(t *testing.T) {
+	c := newCreateHost(t)
+	hostDir := filepath.Join(c.root, "h1")
+	stamp := func(uid string) string {
+		return `<virtrigaud:owner xmlns:virtrigaud="` + ownerMetadataNamespaceURI + `" uid="` + uid + `" namespace="n" name="x"/>`
+	}
+	twoStamps := "<domain type='kvm'>\n  <name>two.stamps</name>\n  <uuid>33333333-2222-4333-8444-555555555555</uuid>\n" +
+		"  <metadata>" + stamp("u1") + stamp("u2") + "</metadata>\n  <memory unit='KiB'>2097152</memory>\n</domain>\n"
+	defs := map[string]string{
+		"team-a.web": stampedDomainXML("team-a.web", ownerTeamA),
+		"web":        unstampedDomainXML("web"),
+		"two.stamps": twoStamps,
+	}
+	for name, xml := range defs {
+		require.NoError(t, os.WriteFile(filepath.Join(hostDir, "dom-"+name+".xml"), []byte(xml), 0o600))
+		f, err := os.OpenFile(filepath.Join(hostDir, "names"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+		require.NoError(t, err)
+		_, err = f.WriteString(name + "\n")
+		require.NoError(t, err)
+		require.NoError(t, f.Close())
+	}
+
+	virsh, err := c.p.ListVMs(context.Background())
+	require.NoError(t, err)
+	require.Len(t, virsh, len(defs))
+
+	native := make([]contracts.VMInfo, 0, len(virsh))
+	for _, v := range virsh {
+		d, err := parseDomainLibvirtxml(defs[v.Name])
+		require.NoError(t, err)
+		native = append(native, nativeListVMInfo(d, defs[v.Name], v.PowerState))
+	}
+
+	want := map[string]string{"team-a.web": ownerTeamA.UID, "web": "", "two.stamps": "u1,u2"}
+	for i := range virsh {
+		name := virsh[i].Name
+		assert.Equal(t, want[name], virsh[i].ProviderRaw[contracts.VMInfoOwnerUIDKey], "virsh %s", name)
+		assert.Equal(t, want[name], native[i].ProviderRaw[contracts.VMInfoOwnerUIDKey], "native %s", name)
+	}
+	assert.Empty(t, compareList(virsh, native), "the owner stamp never meters a shadow divergence")
+}
+
 // TestClustered_Delete_PendingCreateFindsNamespacedDomain: the operator's
 // finalizer cleans up a clustered create still in flight (no status.id) with an
 // owner-checked Delete addressed by the BARE VM name. Create named the domain
