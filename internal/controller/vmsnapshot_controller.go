@@ -379,6 +379,17 @@ func (r *VMSnapshotReconciler) checkSnapshotCreation(ctx context.Context, snapsh
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
+	// The task belongs to the Provider the VM is bound through; never poll it
+	// on another one.
+	if err := checkVMProvider(vm, provider); err != nil {
+		logger.Info("VM is not bound through the Provider its spec.providerRef names; not polling the snapshot task", "error", err.Error())
+		k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionCreating,
+			metav1.ConditionTrue, vmRefErrorReason(err), err.Error())
+		// Status update errors are intentionally ignored to avoid blocking reconciliation
+		_ = r.updateStatus(ctx, snapshot)
+		return ctrl.Result{RequeueAfter: providerRefMismatchRetryInterval}, nil
+	}
+
 	// Get provider instance
 	providerInstance, err := r.getProviderInstance(ctx, provider)
 	if err != nil {
@@ -681,9 +692,9 @@ func (r *VMSnapshotReconciler) getProviderInstance(ctx context.Context, provider
 // snapshot stays in the initial phase, so the create is retried unchanged once
 // the VM is bound; no provider call is made.
 func (r *VMSnapshotReconciler) waitForVMBinding(ctx context.Context, snapshot *infrav1beta1.VMSnapshot, cause error) ctrl.Result {
-	logging.FromContext(ctx).Info("VM has no host binding; waiting before snapshotting", "error", cause.Error())
+	logging.FromContext(ctx).Info("No provider call can be made for the VM; waiting before snapshotting", "error", cause.Error())
 	snapshot.Status.Phase = ""
-	snapshot.Status.Message = "Waiting for the VM's host binding"
+	snapshot.Status.Message = vmRefWaitMessage(cause)
 	k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionCreating,
 		metav1.ConditionTrue, vmRefErrorReason(cause), cause.Error())
 	// Status update errors are intentionally ignored to avoid blocking reconciliation

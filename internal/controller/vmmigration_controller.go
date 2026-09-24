@@ -2108,7 +2108,16 @@ func (r *VMMigrationReconciler) getSourceProvider(ctx context.Context, migration
 	if err != nil {
 		return nil, err
 	}
-	return r.getProvider(ctx, sourceProviderRef, migration.Namespace)
+	provider, err := r.getProvider(ctx, sourceProviderRef, migration.Namespace)
+	if err != nil {
+		return nil, err
+	}
+	if vmIsBound(sourceVM) {
+		if err := checkVMProvider(sourceVM, provider); err != nil {
+			return nil, err
+		}
+	}
+	return provider, nil
 }
 
 // migrationSourceProviderRef returns the Provider a migration exports its
@@ -2120,11 +2129,20 @@ func (r *VMMigrationReconciler) getSourceProvider(ctx context.Context, migration
 // Provider. Any other Provider would be asked to snapshot and export the source
 // VM's provider ID on a hypervisor the VM does not run on — i.e. whatever
 // unrelated VM, possibly another tenant's, has that ID there — so a mismatch is
-// refused rather than honoured.
+// refused rather than honoured. For the same reason a source VM whose
+// spec.providerRef no longer names the Provider it is bound through
+// (status.boundProvider) is refused: the export goes only through the bound
+// Provider (vmRefFor re-checks the Provider object's UID before every per-VM
+// call).
 func migrationSourceProviderRef(migration *infrav1beta1.VMMigration, sourceVM *infrav1beta1.VirtualMachine) (infrav1beta1.ObjectRef, error) {
 	vmProvider := sourceVM.Spec.ProviderRef
 	if vmProvider.Namespace == "" {
 		vmProvider.Namespace = sourceVM.Namespace
+	}
+	if vmIsBound(sourceVM) {
+		if err := checkBoundProvider(sourceVM, types.NamespacedName{Namespace: vmProvider.Namespace, Name: vmProvider.Name}, ""); err != nil {
+			return infrav1beta1.ObjectRef{}, err
+		}
 	}
 	if migration.Spec.Source.ProviderRef == nil {
 		return vmProvider, nil
@@ -3079,12 +3097,14 @@ func cleanupAllowed(m *infrav1beta1.VMMigration) bool {
 	return m.Spec.Options == nil || m.Spec.Options.CleanupPolicy != infrav1beta1.CleanupPolicyNever
 }
 
-// waitForSourceBinding records that the migration is waiting for its clustered
-// source VM's host binding (ADR-0007 Addendum A, A1) and requeues. No per-VM
-// provider call is made for an unbound VM, and the phase is not advanced.
+// waitForSourceBinding records that the migration is waiting because no per-VM
+// call can be made for its source VM (cause is the vmRefFor failure): a
+// clustered source with no host binding (ADR-0007 Addendum A, A1), or a source
+// whose spec.providerRef no longer names the Provider it is bound through. It
+// requeues without advancing the phase.
 func (r *VMMigrationReconciler) waitForSourceBinding(ctx context.Context, migration *infrav1beta1.VMMigration, cause error) (ctrl.Result, error) {
-	logging.FromContext(ctx).Info("Source VM has no host binding; waiting", "error", cause.Error())
-	migration.Status.Message = fmt.Sprintf("Waiting for the source VM's host binding: %v", cause)
+	logging.FromContext(ctx).Info("No provider call can be made for the source VM; waiting", "error", cause.Error())
+	migration.Status.Message = fmt.Sprintf("%s: %v", vmRefWaitMessage(cause), cause)
 	if err := r.updateStatus(ctx, migration); err != nil {
 		return ctrl.Result{}, err
 	}

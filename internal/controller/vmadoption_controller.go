@@ -338,12 +338,16 @@ func unmanagedProviderVMs(provider *infravirtrigaudiov1beta1.Provider, allVMs []
 		if vm.UID != "" {
 			liveUIDs[string(vm.UID)] = true
 		}
-		// Check if VM is managed by this provider
+		// Check if VM is managed by this provider: its spec.providerRef names
+		// it, or it is bound through it (status.boundProvider) — a VM whose
+		// reference no longer matches its binding still owns its hypervisor VM.
 		providerNamespace := vm.Namespace
 		if vm.Spec.ProviderRef.Namespace != "" {
 			providerNamespace = vm.Spec.ProviderRef.Namespace
 		}
-		if vm.Spec.ProviderRef.Name == provider.Name && providerNamespace == provider.Namespace {
+		boundHere := vm.Status.BoundProvider != nil &&
+			vm.Status.BoundProvider.Name == provider.Name && vm.Status.BoundProvider.Namespace == provider.Namespace
+		if (vm.Spec.ProviderRef.Name == provider.Name && providerNamespace == provider.Namespace) || boundHere {
 			// Use status.ID if available, otherwise use name
 			vmID := vm.Status.ID
 			if vmID == "" {
@@ -394,9 +398,19 @@ func (r *VMAdoptionReconciler) adoptVM(ctx context.Context, provider *infravirtr
 		// VM CR exists - check if it's an adopted VM that needs Status.ID fixed
 		if existingVM.Labels != nil && existingVM.Labels[AdoptedLabel] == AdoptedLabelValue {
 			if existingVM.Status.ID == "" {
+				// The id is this Provider's: bind it only to a VM whose
+				// spec.providerRef resolves to this Provider. Anyone who can
+				// create VirtualMachines here could otherwise have a VM that
+				// references another Provider bound to this hypervisor's id.
+				if key := vmProviderKey(existingVM); key != client.ObjectKeyFromObject(provider) {
+					logger.Info("Not binding an adopted VirtualMachine that references another Provider",
+						"vm_name", vmName, "vm_provider", key.String())
+					return nil
+				}
 				// This is an adopted VM created before the status fix - update status now
 				logger.Info("Fixing Status.ID for existing adopted VM", "vm_name", vmName, "vm_id", vmInfo.ID)
 				existingVM.Status.ID = vmInfo.ID
+				recordBoundProvider(existingVM, provider)
 				existingVM.Status.PowerState = infravirtrigaudiov1beta1.PowerState(vmInfo.PowerState)
 				existingVM.Status.IPs = vmInfo.IPs
 				existingVM.Status.Provider = vmInfo.ProviderRaw
@@ -487,6 +501,7 @@ func (r *VMAdoptionReconciler) adoptVM(ctx context.Context, provider *infravirtr
 	// This is critical for adopted VMs: Status.ID must be set so VirtualMachine controller
 	// knows the VM already exists and skips creation
 	vm.Status.ID = vmInfo.ID
+	recordBoundProvider(vm, provider)
 	vm.Status.PowerState = infravirtrigaudiov1beta1.PowerState(vmInfo.PowerState)
 	vm.Status.IPs = vmInfo.IPs
 	vm.Status.Provider = vmInfo.ProviderRaw
