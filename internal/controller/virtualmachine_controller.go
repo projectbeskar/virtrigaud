@@ -741,6 +741,15 @@ func (r *VirtualMachineReconciler) createVM(
 	req, err := r.buildCreateRequest(ctx, vm, providerCR.Name, vmClass, vmImage, networks)
 	if err != nil {
 		logger.Error(err, "Failed to build create request")
+		if contracts.IsInvalidSpec(err) {
+			// A VMClass value out of range (e.g. memory at or above its
+			// maximum) only changes with an edit: surface it as a validation
+			// error and re-check on the slower spec cadence.
+			k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonValidationError,
+				fmt.Sprintf("Failed to build create request: %s", providerErrorMessage(err)))
+			r.updateStatus(ctx, vm)
+			return ctrl.Result{RequeueAfter: vmCreateInvalidSpecRetryInterval}, nil
+		}
 		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Failed to build create request: %v", err))
 		r.updateStatus(ctx, vm)
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
@@ -1258,19 +1267,29 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 			"hasProxmoxSource", vmImage.Spec.Source.Proxmox != nil)
 	}
 
-	// Convert VMClass
+	// Convert VMClass. Memory and the default disk size are range-checked
+	// before the int32 conversion: an out-of-range value is an InvalidSpec
+	// error, never a wrapped-around size.
+	memoryMiB, err := vmClassQuantityUnits("memory", vmClass.Spec.Memory, bytesPerMiB, maxVMClassMemoryBytes)
+	if err != nil {
+		return contracts.CreateRequest{}, err
+	}
 	class := contracts.VMClass{
 		CPU:              vmClass.Spec.CPU,
-		MemoryMiB:        int32(vmClass.Spec.Memory.Value() / (1024 * 1024)), // Convert bytes to MiB
+		MemoryMiB:        memoryMiB, // bytes to MiB
 		Firmware:         string(vmClass.Spec.Firmware),
 		GuestToolsPolicy: string(vmClass.Spec.GuestToolsPolicy),
 		ExtraConfig:      vmClass.Spec.ExtraConfig,
 	}
 
 	if vmClass.Spec.DiskDefaults != nil {
+		sizeGiB, err := vmClassQuantityUnits("diskDefaults.size", vmClass.Spec.DiskDefaults.Size, bytesPerGiB, maxVMClassDiskBytes)
+		if err != nil {
+			return contracts.CreateRequest{}, err
+		}
 		class.DiskDefaults = &contracts.DiskDefaults{
 			Type:    string(vmClass.Spec.DiskDefaults.Type),
-			SizeGiB: int32(vmClass.Spec.DiskDefaults.Size.Value() / (1024 * 1024 * 1024)), // Convert bytes to GiB
+			SizeGiB: sizeGiB, // bytes to GiB
 		}
 	}
 

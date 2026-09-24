@@ -28,7 +28,19 @@ type VMClassSpec struct {
 	// +kubebuilder:validation:Maximum=128
 	CPU int32 `json:"cpu"`
 
-	// Memory specifies memory allocation using Kubernetes resource quantities
+	// Memory specifies memory allocation using Kubernetes resource quantities.
+	// It must be non-negative and below 100Ti: every value below 90Ti written
+	// in bytes, k/Ki, M/Mi, G/Gi or T/Ti is accepted, and nothing at or above
+	// 100Ti is. That is more than three times the largest VM any supported
+	// hypervisor runs (24 TB on vSphere 8), and keeps the MiB value the provider
+	// contract carries far inside its int32 range. The rules bound the number
+	// of integer digits per unit suffix with core CEL only (no quantity
+	// library, which Kubernetes < 1.29 lacks), so they are enforced on every
+	// supported Kubernetes version.
+	// +kubebuilder:validation:XValidation:rule="type(self) == int ? (self >= 0 && self < 100000000000000) : self.matches('^[+]?[0-9.]*(k|Ki|Mi?|Gi?|Ti?|[mun]|[eE]([+]?0*(1[0-3]|[0-9])|-[0-9]+))?$')",message="memory must be a non-negative quantity below 100Ti"
+	// +kubebuilder:validation:XValidation:rule="type(self) == int || ((self.matches('[a-zA-Z]') || !self.matches('^[+]?0*[1-9][0-9]{14}')) && (!self.matches('(k|Ki)$') || !self.matches('^[+]?0*[1-9][0-9]{11}')) && (!self.matches('Mi?$') || !self.matches('^[+]?0*[1-9][0-9]{8}')))",message="memory must be a non-negative quantity below 100Ti"
+	// +kubebuilder:validation:XValidation:rule="type(self) == int || ((!self.matches('Gi?$') || !self.matches('^[+]?0*[1-9][0-9]{5}')) && (!self.matches('Ti?$') || !self.matches('^[+]?0*[1-9][0-9]{2}')) && (!self.matches('[mun]$') || !self.matches('^[+]?0*[1-9][0-9]{17}')))",message="memory must be a non-negative quantity below 100Ti"
+	// +kubebuilder:validation:XValidation:rule="type(self) == int || ((!self.matches('[eE][+]?0*[0-9]$') || !self.matches('^[+]?0*[1-9][0-9]{5}')) && (!self.matches('[eE][+]?0*1[0-3]$') || !self.matches('^[+]?0*[1-9][0-9]')) && (!self.matches('[eE]-') || !self.matches('^[+]?0*[1-9][0-9]{14}')))",message="memory must be a non-negative quantity below 100Ti"
 	Memory resource.Quantity `json:"memory"`
 
 	// Firmware specifies the firmware type
@@ -207,9 +219,20 @@ type DiskDefaults struct {
 	// +kubebuilder:default="thin"
 	Type DiskType `json:"type,omitempty"`
 
-	// Size specifies the default root disk size
+	// Size specifies the default root disk size. It must be non-negative and
+	// below 1Pi: every value below 900Ti written in bytes, k/Ki, M/Mi, G/Gi or
+	// T/Ti is accepted, and nothing at or above 1Pi is. That is more than ten
+	// times the largest single virtual disk vSphere supports (62 TB), and keeps
+	// the GiB value the provider contract carries far inside its int32 range.
+	// The rules bound the number of integer digits per unit suffix with core
+	// CEL only (no quantity library, which Kubernetes < 1.29 lacks), so they are
+	// enforced on every supported Kubernetes version.
 	// +optional
 	// +kubebuilder:default="40Gi"
+	// +kubebuilder:validation:XValidation:rule="type(self) == int ? (self >= 0 && self < 1000000000000000) : self.matches('^[+]?[0-9.]*(k|Ki|Mi?|Gi?|Ti?|[mun]|[eE]([+]?0*(1[0-4]|[0-9])|-[0-9]+))?$')",message="diskDefaults.size must be a non-negative quantity below 1Pi"
+	// +kubebuilder:validation:XValidation:rule="type(self) == int || ((self.matches('[a-zA-Z]') || !self.matches('^[+]?0*[1-9][0-9]{15}')) && (!self.matches('(k|Ki)$') || !self.matches('^[+]?0*[1-9][0-9]{12}')) && (!self.matches('Mi?$') || !self.matches('^[+]?0*[1-9][0-9]{9}')))",message="diskDefaults.size must be a non-negative quantity below 1Pi"
+	// +kubebuilder:validation:XValidation:rule="type(self) == int || ((!self.matches('Gi?$') || !self.matches('^[+]?0*[1-9][0-9]{6}')) && (!self.matches('Ti?$') || !self.matches('^[+]?0*[1-9][0-9]{3}')) && (!self.matches('[mun]$') || !self.matches('^[+]?0*[1-9][0-9]{18}')))",message="diskDefaults.size must be a non-negative quantity below 1Pi"
+	// +kubebuilder:validation:XValidation:rule="type(self) == int || ((!self.matches('[eE][+]?0*[0-9]$') || !self.matches('^[+]?0*[1-9][0-9]{6}')) && (!self.matches('[eE][+]?0*1[0-4]$') || !self.matches('^[+]?0*[1-9][0-9]')) && (!self.matches('[eE]-') || !self.matches('^[+]?0*[1-9][0-9]{15}')))",message="diskDefaults.size must be a non-negative quantity below 1Pi"
 	Size resource.Quantity `json:"size,omitempty"`
 
 	// IOPS specifies the default IOPS limit
