@@ -273,7 +273,8 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, vp *VirshProvider,
 			}
 		}()
 	} else {
-		// Generate default cloud-init for Ubuntu images
+		// No user-data supplied: apply the minimal, credential-free default
+		// (hostname + qemu-guest-agent only; see generateDefaultCloudInit).
 		log.Printf("INFO Generating default cloud-init configuration for VM: %s", req.Name)
 
 		defaultCloudInit := p.generateDefaultCloudInit(req.Name)
@@ -1209,29 +1210,26 @@ func (p *Provider) extractDiskSize(req contracts.CreateRequest) int {
 	return 20
 }
 
-// generateDefaultCloudInit generates a default cloud-init configuration
+// generateDefaultCloudInit generates the cloud-init user-data applied when a
+// VirtualMachine supplies none. It deliberately provisions NO login user, SSH
+// key, password, or sudo grant: access to the guest is the VM owner's decision
+// and must come from their own spec.userData. It only sets the hostname and
+// installs + starts qemu-guest-agent, which IP discovery and in-guest
+// operations (e.g. online filesystem growth) rely on.
+//
+// vmName is a Kubernetes object name (DNS-1123), so it cannot break out of the
+// YAML scalar it is interpolated into.
 func (p *Provider) generateDefaultCloudInit(vmName string) string {
 	return fmt.Sprintf(`#cloud-config
 hostname: %s
-users:
-  - name: ubuntu
-    sudo: ALL=(ALL) NOPASSWD:ALL
-    shell: /bin/bash
-    ssh_authorized_keys:
-      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIN7lHIuo2QJBkdVDL79bl+tEmJh3pBz7rHImwvNMjenK
-      
+
 packages:
   - qemu-guest-agent
-  - htop
-  - stress
-  
+
 runcmd:
   - systemctl enable qemu-guest-agent
   - systemctl start qemu-guest-agent
-  - echo "VM %s ready" > /tmp/vm-ready
-  
-final_message: "VM %s is ready!"
-`, vmName, vmName, vmName)
+`, vmName)
 }
 
 // generateNetworkInterfacesXML creates network interface XML from network attachments
