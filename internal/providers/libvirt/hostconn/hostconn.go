@@ -89,11 +89,15 @@ type Conn interface {
 
 	// Virsh runs a virsh control command against the host (control-plane exec).
 	// ADR-0008 PR 4 routes this through go-libvirt; today it is virsh over SSH.
+	// args is a real argv: implementations must deliver each element to virsh
+	// verbatim (shell-quoting it on a shell transport), never shell-interpreted.
 	Virsh(ctx context.Context, args ...string) (*Result, error)
 
 	// RunHost runs a command directly on the host (shell exec): the permanent
 	// SSH tenants — qemu-img, scp, sudo, bash, genisoimage, and friends — that a
-	// libvirt RPC client structurally cannot replace (ADR-0008 Fact 1).
+	// libvirt RPC client structurally cannot replace (ADR-0008 Fact 1). argv is
+	// a real argv with the same no-shell-interpretation contract as Virsh;
+	// callers pass raw values, never pre-quoted ones.
 	RunHost(ctx context.Context, argv ...string) (*Result, error)
 
 	// Stream runs a host command and returns its stdout as a stream: the

@@ -18,7 +18,6 @@ package libvirt
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"testing"
 
@@ -122,12 +121,14 @@ func TestHostExportStagePath_SanitizedNameStaysContained(t *testing.T) {
 		"stage file must stay directly inside the source dir; got %q", stage)
 }
 
-// TestStreamCmdQuotesPath verifies the stream command shell-quotes the host temp
-// path so a path with spaces (or shell metacharacters) is read from exactly the
-// intended file under the remote shell. The stream uses `cat <quoted>`.
+// TestStreamCmdQuotesPath verifies the export stream (conn.Stream(ctx, "cat",
+// hostTmp)) reaches the remote shell with the host temp path shell-quoted, so a
+// path with spaces (or shell metacharacters) is read from exactly the intended
+// file. Stream flattens its argv with shellJoin.
 func TestStreamCmdQuotesPath(t *testing.T) {
 	hostTmp := "/var/lib/libvirt/images/.virtrigaud-export-my vm-1.qcow2"
-	streamCmd := fmt.Sprintf("cat %s", shellQuote(hostTmp))
+	streamCmd, err := shellJoin([]string{"cat", hostTmp})
+	require.NoError(t, err)
 
 	assert.Equal(t, "cat '/var/lib/libvirt/images/.virtrigaud-export-my vm-1.qcow2'", streamCmd,
 		"the cat source must be single-quoted so spaces don't split the path")

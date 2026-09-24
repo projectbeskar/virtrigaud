@@ -511,9 +511,22 @@ func TestRemoteVirshConnectURI(t *testing.T) {
 		{"non-root system in libvirt group", "qemu+ssh://libvirtuser@host/system", "qemu:///system"},
 		{"strips query", "qemu+ssh://host/system?keyfile=%2Fk&no_tty=1&sshauth=privkey", "qemu:///system"},
 		{"local uri", "qemu:///system", "qemu:///system"},
-		{"other driver", "test+ssh://host/default", "test:///default"},
+		{"other driver, system path", "lxc+ssh://host/system", "lxc:///system"},
+		{"trailing slash tolerated", "qemu+ssh://host/system/", "qemu:///system"},
 		{"no path -> empty (legacy fallback)", "qemu+ssh://host", ""},
 		{"empty path -> empty", "qemu+ssh://host/", ""},
+		// SECURITY: only the system/session instances are forwarded to the
+		// remote shell; anything else falls back to "" (omit -c).
+		{"non-instance path -> empty", "test+ssh://host/default", ""},
+		{"semicolon injection -> empty", "qemu+ssh://virt@victim/system;id", ""},
+		{"command substitution -> empty", "qemu+ssh://virt@victim/system$(id)", ""},
+		{"backticks -> empty", "qemu+ssh://virt@victim/system`id`", ""},
+		{"percent-encoded space -> empty", "qemu+ssh://virt@victim/system%20-c%20id", ""},
+		{"newline -> empty", "qemu+ssh://virt@victim/system%0Aid", ""},
+		{"path traversal -> empty", "qemu+ssh://virt@victim/system/../x", ""},
+		{"non-identifier driver -> empty", "qe.mu-x+ssh://virt@victim/system", ""},
+		// url.Parse canonicalizes the scheme to lower case, so this is benign.
+		{"uppercase scheme is canonicalized", "QEMU+SSH://virt@victim/system", "qemu:///system"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -626,8 +639,13 @@ func TestVirshConn_StreamIn_WiresThroughToRunSSHStdin(t *testing.T) {
 	conn := newVirshConn("host-a", v)
 	t.Cleanup(func() { _ = conn.Close() })
 
-	dst := filepath.Join(t.TempDir(), "staged.bin")
-	err := conn.StreamIn(context.Background(), strings.NewReader("hello via seam\n"), "cat", ">", shellQuote(dst))
+	// StreamIn is argv-safe: a redirect must come from the fixed sh -c script
+	// in writeStdinToFileArgv, never from a ">" argv element (which is now a
+	// literal argument to cat). A path with spaces and quotes proves the
+	// destination is passed through verbatim.
+	dst := filepath.Join(t.TempDir(), "staged dir 'x'", "staged.bin")
+	require.NoError(t, os.MkdirAll(filepath.Dir(dst), 0o700))
+	err := conn.StreamIn(context.Background(), strings.NewReader("hello via seam\n"), writeStdinToFileArgv(dst)...)
 	require.NoError(t, err)
 
 	got, err := os.ReadFile(dst)

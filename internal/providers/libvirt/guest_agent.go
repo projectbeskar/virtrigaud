@@ -23,6 +23,7 @@ import (
 	"log"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // GuestAgentInfo represents information gathered from QEMU Guest Agent
@@ -48,9 +49,6 @@ type GuestAgentInfo struct {
 
 	// Guest Time Information
 	GuestTime time.Time `json:"guest_time"`
-
-	// Guest Users
-	Users []GuestUser `json:"users"`
 }
 
 // GuestNetworkInterface represents a network interface inside the guest
@@ -79,13 +77,6 @@ type GuestFilesystem struct {
 	FreeBytes  uint64 `json:"free_bytes"`
 }
 
-// GuestUser represents a logged-in user inside the guest
-type GuestUser struct {
-	User      string    `json:"user"`
-	Domain    string    `json:"domain,omitempty"`
-	LoginTime time.Time `json:"login_time"`
-}
-
 // GuestAgentProvider manages QEMU Guest Agent communication
 type GuestAgentProvider struct {
 	virshProvider *VirshProvider
@@ -98,9 +89,87 @@ func NewGuestAgentProvider(virshProvider *VirshProvider) *GuestAgentProvider {
 	}
 }
 
-// GetGuestInfo retrieves comprehensive guest information via QEMU Guest Agent
+// QEMU guest-agent commands this provider issues (the "execute" field).
+const (
+	qgaGuestPing          = "guest-ping"
+	qgaGetOSInfo          = "guest-get-osinfo"
+	qgaNetworkInterfaces  = "guest-network-get-interfaces"
+	qgaGetFSInfo          = "guest-get-fsinfo"
+	qgaGetTime            = "guest-get-time"
+	qgaExec               = "guest-exec"
+	qgaExecStatus         = "guest-exec-status"
+	qgaSetTime            = "guest-set-time"
+	guestExecShell        = "/bin/sh"
+	guestExecShellCommand = "-c"
+)
+
+// Bounds on guest-agent traffic. The guest agent is controlled by whoever runs
+// the guest, so a stalling or verbose agent must not be able to hold the
+// provider's per-host exec slots or bloat VirtualMachine status.
+const (
+	// guestAgentCommandTimeoutSeconds is passed to every `virsh
+	// qemu-agent-command --timeout`, bounding how long libvirtd waits for one
+	// agent reply.
+	guestAgentCommandTimeoutSeconds = "3"
+	// guestInfoBudget bounds the whole GetGuestInfo enrichment on top of the
+	// per-command timeout: once it is spent, remaining queries are skipped.
+	guestInfoBudget = 8 * time.Second
+	// maxGuestInterfaces and maxGuestFilesystems cap how many guest-reported
+	// entries are kept; each one becomes several ProviderRaw/status keys.
+	maxGuestInterfaces  = 16
+	maxGuestFilesystems = 16
+	// maxGuestIPsPerInterface caps the addresses kept per guest interface.
+	maxGuestIPsPerInterface = 16
+	// maxGuestNameLen truncates guest-reported names (interface names, mount
+	// points) that are embedded in ProviderRaw keys.
+	maxGuestNameLen = 64
+)
+
+// guestAgentRequest is the JSON body of one `virsh qemu-agent-command` call.
+type guestAgentRequest struct {
+	Execute   string               `json:"execute"`
+	Arguments *guestAgentArguments `json:"arguments,omitempty"`
+}
+
+// guestAgentArguments carries the arguments of guest-exec / guest-exec-status.
+// Unused fields are omitted, so each request serializes to exactly the QMP
+// shape the former hand-formatted JSON produced.
+type guestAgentArguments struct {
+	Path          string   `json:"path,omitempty"`
+	Arg           []string `json:"arg,omitempty"`
+	CaptureOutput bool     `json:"capture-output,omitempty"`
+	PID           int      `json:"pid,omitempty"`
+}
+
+// agentCommand runs one QEMU guest-agent command against domainName via
+// `virsh qemu-agent-command <domain> <json>`.
+//
+// It replaces the former `bash -c "virsh qemu-agent-command <domain>
+// \"$(cat <<'EOF' … EOF)\""` construction, which (a) interpolated the domain
+// name and, for guest-exec, the guest command text into a bash script on the
+// hypervisor host, and (b) over SSH was flattened unquoted so the remote shell
+// ran `bash -c virsh` with no arguments — i.e. the guest-agent paths silently
+// never worked there. The JSON is now built with encoding/json and handed to
+// virsh as ONE argv element (the transport shell-quotes it), so neither the
+// domain name nor any guest command can reach a shell on the host.
+func (g *GuestAgentProvider) agentCommand(ctx context.Context, domainName string, req guestAgentRequest) (*VirshResult, error) {
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("encode guest-agent %s request: %w", req.Execute, err)
+	}
+	return g.virshProvider.runVirshCommand(ctx, "qemu-agent-command",
+		"--timeout", guestAgentCommandTimeoutSeconds, domainName, string(payload))
+}
+
+// GetGuestInfo retrieves guest information via the QEMU Guest Agent. The whole
+// enrichment is bounded by guestInfoBudget (each call additionally by
+// guestAgentCommandTimeoutSeconds), and the result is capped by
+// boundGuestInfo, because the agent's answers are guest-controlled.
 func (g *GuestAgentProvider) GetGuestInfo(ctx context.Context, domainName string) (*GuestAgentInfo, error) {
 	log.Printf("INFO Gathering guest information via QEMU Guest Agent for domain: %s", domainName)
+
+	ctx, cancel := context.WithTimeout(ctx, guestInfoBudget)
+	defer cancel()
 
 	info := &GuestAgentInfo{
 		AgentStatus: "unknown",
@@ -115,40 +184,72 @@ func (g *GuestAgentProvider) GetGuestInfo(ctx context.Context, domainName string
 
 	info.AgentStatus = "available"
 
-	// Gather OS information
-	if err := g.getGuestOSInfo(ctx, domainName, info); err != nil {
-		log.Printf("WARN Failed to get guest OS info: %v", err)
+	// Logged-in guest users (guest-get-users) are deliberately not collected:
+	// they would surface personal data in VirtualMachine status.
+	queries := []struct {
+		what string
+		run  func(context.Context, string, *GuestAgentInfo) error
+	}{
+		{"OS info", g.getGuestOSInfo},
+		{"network info", g.getGuestNetworkInfo},
+		{"filesystem info", g.getGuestFilesystemInfo},
+		{"time", g.getGuestTime},
+	}
+	for _, q := range queries {
+		if ctx.Err() != nil {
+			log.Printf("WARN Guest agent budget exhausted for domain %s; skipping remaining queries", domainName)
+			break
+		}
+		if err := q.run(ctx, domainName, info); err != nil {
+			log.Printf("WARN Failed to get guest %s: %v", q.what, err)
+		}
 	}
 
-	// Gather network information
-	if err := g.getGuestNetworkInfo(ctx, domainName, info); err != nil {
-		log.Printf("WARN Failed to get guest network info: %v", err)
-	}
-
-	// Gather filesystem information
-	if err := g.getGuestFilesystemInfo(ctx, domainName, info); err != nil {
-		log.Printf("WARN Failed to get guest filesystem info: %v", err)
-	}
-
-	// Get guest time
-	if err := g.getGuestTime(ctx, domainName, info); err != nil {
-		log.Printf("WARN Failed to get guest time: %v", err)
-	}
-
-	// Get logged-in users
-	if err := g.getGuestUsers(ctx, domainName, info); err != nil {
-		log.Printf("WARN Failed to get guest users: %v", err)
-	}
-
-	log.Printf("INFO Successfully gathered guest information for domain: %s", domainName)
+	boundGuestInfo(info)
+	log.Printf("INFO Gathered guest information for domain: %s", domainName)
 	return info, nil
+}
+
+// boundGuestInfo caps the guest-reported collections in info (interfaces,
+// filesystems, addresses per interface) and truncates guest-chosen names that
+// end up in ProviderRaw keys, so a hostile or misbehaving agent cannot bloat
+// VirtualMachine status.
+func boundGuestInfo(info *GuestAgentInfo) {
+	if len(info.NetworkInterfaces) > maxGuestInterfaces {
+		info.NetworkInterfaces = info.NetworkInterfaces[:maxGuestInterfaces]
+	}
+	for i := range info.NetworkInterfaces {
+		iface := &info.NetworkInterfaces[i]
+		iface.Name = truncateGuestName(iface.Name)
+		if len(iface.IPAddresses) > maxGuestIPsPerInterface {
+			iface.IPAddresses = iface.IPAddresses[:maxGuestIPsPerInterface]
+		}
+	}
+	if len(info.Filesystems) > maxGuestFilesystems {
+		info.Filesystems = info.Filesystems[:maxGuestFilesystems]
+	}
+	for i := range info.Filesystems {
+		info.Filesystems[i].Mountpoint = truncateGuestName(info.Filesystems[i].Mountpoint)
+	}
+}
+
+// truncateGuestName shortens s to at most maxGuestNameLen bytes without
+// splitting a UTF-8 sequence.
+func truncateGuestName(s string) string {
+	if len(s) <= maxGuestNameLen {
+		return s
+	}
+	cut := maxGuestNameLen
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
 
 // isGuestAgentAvailable checks if QEMU Guest Agent is available and responsive
 func (g *GuestAgentProvider) isGuestAgentAvailable(ctx context.Context, domainName string) bool {
-	// Try to ping the guest agent using heredoc to avoid JSON escaping issues
-	heredocCmd := fmt.Sprintf("virsh qemu-agent-command %s \"$(cat <<'EOF'\n{\"execute\":\"guest-ping\"}\nEOF\n)\"", domainName)
-	result, err := g.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", heredocCmd)
+	// Ping the guest agent.
+	result, err := g.agentCommand(ctx, domainName, guestAgentRequest{Execute: qgaGuestPing})
 	if err != nil {
 		log.Printf("DEBUG Guest agent ping failed for %s: %v", domainName, err)
 		return false
@@ -167,8 +268,7 @@ func (g *GuestAgentProvider) isGuestAgentAvailable(ctx context.Context, domainNa
 // getGuestOSInfo retrieves operating system information from the guest
 func (g *GuestAgentProvider) getGuestOSInfo(ctx context.Context, domainName string, info *GuestAgentInfo) error {
 	// Get OS info using guest-get-osinfo command
-	heredocCmd := fmt.Sprintf("virsh qemu-agent-command %s \"$(cat <<'EOF'\n{\"execute\":\"guest-get-osinfo\"}\nEOF\n)\"", domainName)
-	result, err := g.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", heredocCmd)
+	result, err := g.agentCommand(ctx, domainName, guestAgentRequest{Execute: qgaGetOSInfo})
 	if err != nil {
 		return fmt.Errorf("failed to get OS info: %w", err)
 	}
@@ -206,8 +306,7 @@ func (g *GuestAgentProvider) getGuestOSInfo(ctx context.Context, domainName stri
 // getGuestNetworkInfo retrieves network interface information from the guest
 func (g *GuestAgentProvider) getGuestNetworkInfo(ctx context.Context, domainName string, info *GuestAgentInfo) error {
 	// Get network interfaces using guest-network-get-interfaces command
-	heredocCmd := fmt.Sprintf("virsh qemu-agent-command %s \"$(cat <<'EOF'\n{\"execute\":\"guest-network-get-interfaces\"}\nEOF\n)\"", domainName)
-	result, err := g.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", heredocCmd)
+	result, err := g.agentCommand(ctx, domainName, guestAgentRequest{Execute: qgaNetworkInterfaces})
 	if err != nil {
 		return fmt.Errorf("failed to get network info: %w", err)
 	}
@@ -263,8 +362,7 @@ func (g *GuestAgentProvider) getGuestNetworkInfo(ctx context.Context, domainName
 // getGuestFilesystemInfo retrieves filesystem information from the guest
 func (g *GuestAgentProvider) getGuestFilesystemInfo(ctx context.Context, domainName string, info *GuestAgentInfo) error {
 	// Get filesystem info using guest-get-fsinfo command
-	heredocCmd := fmt.Sprintf("virsh qemu-agent-command %s \"$(cat <<'EOF'\n{\"execute\":\"guest-get-fsinfo\"}\nEOF\n)\"", domainName)
-	result, err := g.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", heredocCmd)
+	result, err := g.agentCommand(ctx, domainName, guestAgentRequest{Execute: qgaGetFSInfo})
 	if err != nil {
 		return fmt.Errorf("failed to get filesystem info: %w", err)
 	}
@@ -305,8 +403,7 @@ func (g *GuestAgentProvider) getGuestFilesystemInfo(ctx context.Context, domainN
 // getGuestTime retrieves the current time from inside the guest
 func (g *GuestAgentProvider) getGuestTime(ctx context.Context, domainName string, info *GuestAgentInfo) error {
 	// Get guest time using guest-get-time command
-	heredocCmd := fmt.Sprintf("virsh qemu-agent-command %s \"$(cat <<'EOF'\n{\"execute\":\"guest-get-time\"}\nEOF\n)\"", domainName)
-	result, err := g.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", heredocCmd)
+	result, err := g.agentCommand(ctx, domainName, guestAgentRequest{Execute: qgaGetTime})
 	if err != nil {
 		return fmt.Errorf("failed to get guest time: %w", err)
 	}
@@ -327,43 +424,6 @@ func (g *GuestAgentProvider) getGuestTime(ctx context.Context, domainName string
 	return nil
 }
 
-// getGuestUsers retrieves information about logged-in users from the guest
-func (g *GuestAgentProvider) getGuestUsers(ctx context.Context, domainName string, info *GuestAgentInfo) error {
-	// Get user info using guest-get-users command
-	heredocCmd := fmt.Sprintf("virsh qemu-agent-command %s \"$(cat <<'EOF'\n{\"execute\":\"guest-get-users\"}\nEOF\n)\"", domainName)
-	result, err := g.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", heredocCmd)
-	if err != nil {
-		return fmt.Errorf("failed to get guest users: %w", err)
-	}
-
-	// Parse the JSON response
-	var response struct {
-		Return []struct {
-			User      string  `json:"user"`
-			Domain    string  `json:"domain"`
-			LoginTime float64 `json:"login-time"`
-		} `json:"return"`
-	}
-
-	if err := json.Unmarshal([]byte(result.Stdout), &response); err != nil {
-		return fmt.Errorf("failed to parse guest users response: %w", err)
-	}
-
-	// Convert to our structure
-	for _, user := range response.Return {
-		guestUser := GuestUser{
-			User:      user.User,
-			Domain:    user.Domain,
-			LoginTime: time.Unix(int64(user.LoginTime), 0),
-		}
-
-		info.Users = append(info.Users, guestUser)
-	}
-
-	log.Printf("DEBUG Retrieved %d logged-in users", len(info.Users))
-	return nil
-}
-
 // ExecuteGuestCommand executes a command inside the guest via guest agent
 func (g *GuestAgentProvider) ExecuteGuestCommand(ctx context.Context, domainName, command string) (string, error) {
 	log.Printf("INFO Executing guest command in domain %s: %s", domainName, command)
@@ -373,11 +433,17 @@ func (g *GuestAgentProvider) ExecuteGuestCommand(ctx context.Context, domainName
 		return "", fmt.Errorf("guest agent not available for domain: %s", domainName)
 	}
 
-	// Execute command using guest-exec with heredoc to avoid quote issues
-	escapedCommand := strings.ReplaceAll(command, `"`, `\"`)
-	heredocCmd := fmt.Sprintf("virsh qemu-agent-command %s \"$(cat <<'EOF'\n{\"execute\":\"guest-exec\",\"arguments\":{\"path\":\"/bin/sh\",\"arg\":[\"-c\",\"%s\"],\"capture-output\":true}}\nEOF\n)\"", domainName, escapedCommand)
-
-	result, err := g.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", heredocCmd)
+	// Execute the command in the guest via guest-exec (/bin/sh -c <command>).
+	// encoding/json escapes the command correctly; it is never shell-evaluated
+	// on the hypervisor host, only by /bin/sh inside the guest.
+	result, err := g.agentCommand(ctx, domainName, guestAgentRequest{
+		Execute: qgaExec,
+		Arguments: &guestAgentArguments{
+			Path:          guestExecShell,
+			Arg:           []string{guestExecShellCommand, command},
+			CaptureOutput: true,
+		},
+	})
 	if err != nil {
 		return "", fmt.Errorf("failed to execute guest command: %w", err)
 	}
@@ -394,7 +460,10 @@ func (g *GuestAgentProvider) ExecuteGuestCommand(ctx context.Context, domainName
 	}
 
 	// Get the command status and output
-	statusCmd := fmt.Sprintf("virsh qemu-agent-command %s \"$(cat <<'EOF'\n{\"execute\":\"guest-exec-status\",\"arguments\":{\"pid\":%d}}\nEOF\n)\"", domainName, execResponse.Return.PID)
+	statusReq := guestAgentRequest{
+		Execute:   qgaExecStatus,
+		Arguments: &guestAgentArguments{PID: execResponse.Return.PID},
+	}
 
 	// Wait for command completion (with timeout)
 	timeout := time.After(30 * time.Second)
@@ -406,7 +475,7 @@ func (g *GuestAgentProvider) ExecuteGuestCommand(ctx context.Context, domainName
 		case <-timeout:
 			return "", fmt.Errorf("command execution timeout")
 		case <-ticker.C:
-			statusResult, err := g.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", statusCmd)
+			statusResult, err := g.agentCommand(ctx, domainName, statusReq)
 			if err != nil {
 				continue
 			}
@@ -447,8 +516,7 @@ func (g *GuestAgentProvider) SetGuestTime(ctx context.Context, domainName string
 	}
 
 	// Set guest time using guest-set-time command (sync with host)
-	heredocCmd := fmt.Sprintf("virsh qemu-agent-command %s \"$(cat <<'EOF'\n{\"execute\":\"guest-set-time\"}\nEOF\n)\"", domainName)
-	result, err := g.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", heredocCmd)
+	result, err := g.agentCommand(ctx, domainName, guestAgentRequest{Execute: qgaSetTime})
 	if err != nil {
 		return fmt.Errorf("failed to set guest time: %w", err)
 	}

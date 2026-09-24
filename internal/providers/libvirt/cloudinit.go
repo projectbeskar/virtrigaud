@@ -23,7 +23,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 )
 
 // CloudInitConfig represents cloud-init configuration for libvirt VMs
@@ -88,15 +87,13 @@ func (c *CloudInitProvider) PrepareCloudInit(ctx context.Context, config CloudIn
 	return isoPath, nil
 }
 
-// writeRemoteFile writes content to a file on the remote libvirt host
+// writeRemoteFile writes content to a file on the remote libvirt host. The
+// content (cloud-init user-data may carry secrets) travels over the SSH
+// session's stdin — never inside the command line, never through a heredoc a
+// crafted line could terminate — and the file is created private to the SSH
+// user (VirshProvider.writeRemoteFile).
 func (c *CloudInitProvider) writeRemoteFile(ctx context.Context, remotePath, content string) error {
-	// Use cat with heredoc to write content to remote file (handles multiline content)
-	// This approach avoids shell escaping issues with printf
-	heredocMarker := "EOF_CLOUDINIT_" + fmt.Sprintf("%d", time.Now().UnixNano())
-	command := fmt.Sprintf("cat > '%s' << '%s'\n%s\n%s", remotePath, heredocMarker, content, heredocMarker)
-
-	_, err := c.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", command)
-	if err != nil {
+	if err := c.virshProvider.writeRemoteFile(ctx, remotePath, []byte(content)); err != nil {
 		return fmt.Errorf("failed to write remote file %s: %w", remotePath, err)
 	}
 

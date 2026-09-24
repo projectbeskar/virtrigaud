@@ -143,15 +143,18 @@ func TestHostStagePath_SanitizedNameStaysContained(t *testing.T) {
 		"stage file must stay directly inside the pool dir; got %q", stage)
 }
 
-// TestStageCmdQuotesPath verifies the staging command shell-quotes the host temp
-// path so a path with spaces (or shell metacharacters) is written to exactly the
-// intended file under the remote shell. The stage uses `cat > <quoted>`.
+// TestStageCmdQuotesPath verifies the staging command writes to exactly the
+// intended file: the redirect lives in a fixed `sh -c` script and the path is
+// its positional "$1", shell-quoted on the command line — never interpolated
+// into the script text, so a path with spaces or metacharacters cannot inject.
 func TestStageCmdQuotesPath(t *testing.T) {
 	stagePath := "/var/lib/libvirt/images/.virtrigaud-import-my disk-1.vmdk"
-	stageCmd := fmt.Sprintf("cat > %s", shellQuote(stagePath))
+	stageCmd, err := shellJoin(writeStdinToFileArgv(stagePath))
+	require.NoError(t, err)
 
-	assert.Equal(t, "cat > '/var/lib/libvirt/images/.virtrigaud-import-my disk-1.vmdk'", stageCmd,
-		"the stage redirect target must be single-quoted so spaces don't split the path")
+	assert.Equal(t,
+		`sh -c 'cat > "$1"' sh '/var/lib/libvirt/images/.virtrigaud-import-my disk-1.vmdk'`,
+		stageCmd, "the stage target must be a quoted positional parameter, not script text")
 }
 
 // TestQemuImgStderr verifies the qemu-img stderr is surfaced (so the real cause

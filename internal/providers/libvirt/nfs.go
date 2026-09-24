@@ -70,8 +70,10 @@ func (s *Server) exportDiskToNFS(ctx context.Context, req *providerv1.ExportDisk
 	// Flatten + write straight to the NFS export. -U reads a possibly-running
 	// source (crash-consistent; a consistent copy still needs power-off/snapshot
 	// first). qemu-img's libnfs driver performs the NFS write — no pod buffering.
+	// RunHost is argv-safe (the transport shell-quotes every element), so the
+	// values are passed raw — pre-quoting them would now double-quote.
 	if res, err := conn.RunHost(ctx, "qemu-img", "convert", "-U", "-f", "qcow2", "-O", "qcow2",
-		shellQuote(srcPath), shellQuote(nfsURL)); err != nil {
+		srcPath, nfsURL); err != nil {
 		return nil, fmt.Errorf("host-side qemu-img convert to nfs failed: %w%s", err, qemuImgStderr(res))
 	}
 
@@ -134,13 +136,14 @@ func (s *Server) importDiskFromNFS(ctx context.Context, req *providerv1.ImportDi
 		poolName, volumeName, nfsURL, targetPath)
 
 	// Read the staged qcow2 straight from NFS and write the pool volume.
+	// Raw values: RunHost shell-quotes every argv element itself.
 	if res, err := conn.RunHost(ctx, "qemu-img", "convert", "-f", "qcow2", "-O", "qcow2",
-		shellQuote(nfsURL), shellQuote(targetPath)); err != nil {
+		nfsURL, targetPath); err != nil {
 		return nil, fmt.Errorf("host-side qemu-img convert from nfs failed: %w%s", err, qemuImgStderr(res))
 	}
 
 	// Validate the converted qcow2 (ADR-0006 D5 structural integrity for NFS).
-	if res, err := conn.RunHost(ctx, "qemu-img", "check", shellQuote(targetPath)); err != nil {
+	if res, err := conn.RunHost(ctx, "qemu-img", "check", targetPath); err != nil {
 		return nil, fmt.Errorf("qemu-img check failed on imported qcow2 %s: %w%s", targetPath, err, qemuImgStderr(res))
 	}
 

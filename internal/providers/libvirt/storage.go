@@ -23,7 +23,6 @@ import (
 	"log"
 	"path/filepath"
 	"strings"
-	"time"
 )
 
 // StorageProvider manages libvirt storage operations
@@ -136,12 +135,10 @@ func (s *StorageProvider) createDefaultStoragePool(ctx context.Context) error {
   </target>
 </pool>`, poolPath)
 
-	// Write pool XML to temporary file
+	// Write pool XML to a temporary file on the host (content over stdin — no
+	// heredoc, no shell interpolation; see writeRemoteFile).
 	poolFile := "/tmp/default-pool.xml"
-	heredocMarker := "EOF_POOL_" + fmt.Sprintf("%d", time.Now().UnixNano())
-	command := fmt.Sprintf("cat > '%s' << '%s'\n%s\n%s", poolFile, heredocMarker, poolXML, heredocMarker)
-
-	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", command); err != nil {
+	if err := s.virshProvider.writeRemoteFile(ctx, poolFile, []byte(poolXML)); err != nil {
 		return fmt.Errorf("failed to write pool XML: %w", err)
 	}
 
@@ -285,9 +282,9 @@ func (s *StorageProvider) DownloadCloudImage(ctx context.Context, imageURL, volu
 		return nil, fmt.Errorf("failed to download image: %w, output: %s", err, result.Stderr)
 	}
 
-	// Get image info
-	imageInfoCmd := fmt.Sprintf("qemu-img info '%s'", tempImage)
-	infoResult, err := s.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", imageInfoCmd)
+	// Get image info (plain argv: tempImage is derived from volumeName and must
+	// never be interpolated into a bash -c script).
+	infoResult, err := s.virshProvider.runVirshCommand(ctx, "!", "qemu-img", "info", tempImage)
 	if err != nil {
 		log.Printf("WARN Failed to get image info: %v", err)
 	} else {
