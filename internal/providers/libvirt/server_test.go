@@ -231,6 +231,10 @@ type fakeDiskProvider struct {
 	diskErr     error
 }
 
+// clustered reports single-host topology: this fake stands in for a single-host
+// backend (the Server gates clustered-only routing on it).
+func (f *fakeDiskProvider) clustered() bool { return false }
+
 func (f *fakeDiskProvider) ExportDisk(_ context.Context, req contracts.ExportDiskRequest) (contracts.ExportDiskResponse, error) {
 	f.gotExport = req
 	return f.exportResp, f.exportErr

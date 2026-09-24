@@ -450,19 +450,20 @@ func buildNativeList(lv *golibvirt.Libvirt) ([]contracts.VMInfo, error) {
 	return vms, nil
 }
 
-// describeNative is the production native Describe: it resolves the host
-// connection through the seam and runs buildNativeDescribe under the go-libvirt
-// connection watchdog (callLibvirt), so a hung RPC is bounded by ctx and evicts
-// the connection instead of blocking forever (ADR-0008 Fact 5). It is the default
-// value of Provider.describeNativeFn; unit tests swap that field to script native
-// results, errors, and panics without a live libvirtd.
-func (p *Provider) describeNative(ctx context.Context, id string) (contracts.DescribeResponse, error) {
-	lc, err := p.conn(ctx)
-	if err != nil {
-		return contracts.DescribeResponse{}, err
+// describeNative is the production native Describe: it runs buildNativeDescribe
+// on connection c — the SAME connection the virsh read it shadows ran on
+// (ADR-0007 Addendum A: the single-host connection, or the routed host's lease)
+// — under the go-libvirt connection watchdog (callLibvirt), so a hung RPC is
+// bounded by ctx and evicts the connection instead of blocking forever
+// (ADR-0008 Fact 5). It is the default value of Provider.describeNativeFn; unit
+// tests swap that field to script native results, errors, and panics without a
+// live libvirtd.
+func (p *Provider) describeNative(ctx context.Context, c libvirtConn, id string) (contracts.DescribeResponse, error) {
+	if c == nil {
+		return contracts.DescribeResponse{}, contracts.NewRetryableError("no host connection for the native describe", nil)
 	}
 	var resp contracts.DescribeResponse
-	err = lc.callLibvirt(ctx, func(lv *golibvirt.Libvirt) error {
+	err := c.callLibvirt(ctx, func(lv *golibvirt.Libvirt) error {
 		var bErr error
 		resp, bErr = buildNativeDescribe(lv, id)
 		return bErr
@@ -536,15 +537,25 @@ func (p *Provider) runDetachedShadow(family nativeFamily, fn func(ctx context.Co
 // panic-recovered goroutine so it can never delay or fail the caller, which has
 // already received virsh's answer. The ctx argument is intentionally not forwarded —
 // see runDetachedShadow.
-func (p *Provider) maybeShadowDescribe(ctx context.Context, id string, virshResp contracts.DescribeResponse) {
+//
+// c is the connection the virsh read ran on. The shadow read uses that same
+// connection (ADR-0007 Addendum A, A5): on a routed call it retains the host
+// lease for the lifetime of the detached goroutine, so the native read neither
+// lands on another host nor runs on a lease that was already returned.
+func (p *Provider) maybeShadowDescribe(ctx context.Context, c libvirtConn, id string, virshResp contracts.DescribeResponse) {
 	if p.nativeCfg.effectiveMode(familyDescribe) != modeShadow {
 		return
 	}
 	if !p.shadowSampler.sample() {
 		return
 	}
+	release := func() {}
+	if c != nil {
+		release = retainConn(c)
+	}
 	p.runDetachedShadow(familyDescribe, func(sctx context.Context) {
-		p.runShadowDescribe(sctx, id, virshResp)
+		defer release()
+		p.runShadowDescribe(sctx, c, id, virshResp)
 	})
 }
 
@@ -555,8 +566,8 @@ func (p *Provider) maybeShadowDescribe(ctx context.Context, id string, virshResp
 // directly (Provider.describeNativeFn scripted) to assert the metering and the
 // error isolation without a live libvirtd; maybeShadowDescribe wraps it with the
 // goroutine, timeout, and panic recovery.
-func (p *Provider) runShadowDescribe(ctx context.Context, id string, virshResp contracts.DescribeResponse) {
-	nativeResp, err := p.describeNativeFn(ctx, id)
+func (p *Provider) runShadowDescribe(ctx context.Context, c libvirtConn, id string, virshResp contracts.DescribeResponse) {
+	nativeResp, err := p.describeNativeFn(ctx, c, id)
 	if err != nil {
 		obsmetrics.RecordShadowCompare(string(familyDescribe), obsmetrics.ShadowResultError)
 		p.shadowLogger().Warn("shadow-compare Describe: go-libvirt path failed; metered, not propagated (caller got virsh's answer)",

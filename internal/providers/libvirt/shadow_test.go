@@ -202,9 +202,11 @@ func mapsEqual(a, b map[string]string) bool {
 func newShadowTestProvider(fn func(ctx context.Context, id string) (contracts.DescribeResponse, error)) *Provider {
 	cfg, _ := parseNativeConfig("shadow:describe")
 	return &Provider{
-		nativeCfg:        cfg,
-		shadowSampler:    &sampler{n: 1},
-		describeNativeFn: fn,
+		nativeCfg:     cfg,
+		shadowSampler: &sampler{n: 1},
+		describeNativeFn: func(ctx context.Context, _ libvirtConn, id string) (contracts.DescribeResponse, error) {
+			return fn(ctx, id)
+		},
 	}
 }
 
@@ -217,7 +219,7 @@ func TestRunShadowDescribeMeters(t *testing.T) {
 		p := newShadowTestProvider(func(context.Context, string) (contracts.DescribeResponse, error) { return native, nil })
 
 		before := shadowCounter(t, "virtrigaud_libvirt_shadow_compare_total", map[string]string{"family": "describe", "result": obsmetrics.ShadowResultEqual})
-		p.runShadowDescribe(context.Background(), "vm", virsh)
+		p.runShadowDescribe(context.Background(), nil, "vm", virsh)
 		after := shadowCounter(t, "virtrigaud_libvirt_shadow_compare_total", map[string]string{"family": "describe", "result": obsmetrics.ShadowResultEqual})
 		assert.Equal(t, before+1, after)
 	})
@@ -231,7 +233,7 @@ func TestRunShadowDescribeMeters(t *testing.T) {
 		psBefore := shadowCounter(t, "virtrigaud_libvirt_shadow_divergence_total", map[string]string{"family": "describe", "field": "power_state"})
 		vcpuBefore := shadowCounter(t, "virtrigaud_libvirt_shadow_divergence_total", map[string]string{"family": "describe", "field": "vcpu"})
 
-		p.runShadowDescribe(context.Background(), "vm", virsh)
+		p.runShadowDescribe(context.Background(), nil, "vm", virsh)
 
 		assert.Equal(t, divBefore+1, shadowCounter(t, "virtrigaud_libvirt_shadow_compare_total", map[string]string{"family": "describe", "result": obsmetrics.ShadowResultDivergent}))
 		assert.Equal(t, psBefore+1, shadowCounter(t, "virtrigaud_libvirt_shadow_divergence_total", map[string]string{"family": "describe", "field": "power_state"}))
@@ -246,7 +248,7 @@ func TestRunShadowDescribeMeters(t *testing.T) {
 
 		before := shadowCounter(t, "virtrigaud_libvirt_shadow_compare_total", map[string]string{"family": "describe", "result": obsmetrics.ShadowResultError})
 		// Must not panic or block; returns nothing.
-		p.runShadowDescribe(context.Background(), "vm", virsh)
+		p.runShadowDescribe(context.Background(), nil, "vm", virsh)
 		after := shadowCounter(t, "virtrigaud_libvirt_shadow_compare_total", map[string]string{"family": "describe", "result": obsmetrics.ShadowResultError})
 		assert.Equal(t, before+1, after)
 	})
@@ -264,7 +266,7 @@ func TestMaybeShadowDescribePanicIsolation(t *testing.T) {
 
 	// The caller returns normally (no panic escapes maybeShadowDescribe).
 	assert.NotPanics(t, func() {
-		p.maybeShadowDescribe(context.Background(), "vm", virshResp("On", map[string]string{"UUID": "abc"}))
+		p.maybeShadowDescribe(context.Background(), nil, "vm", virshResp("On", map[string]string{"UUID": "abc"}))
 		p.shadowWG.Wait()
 	})
 
@@ -280,13 +282,13 @@ func TestMaybeShadowDescribeOffIsNoOp(t *testing.T) {
 	p := &Provider{
 		nativeCfg:     cfg,
 		shadowSampler: &sampler{n: 1},
-		describeNativeFn: func(context.Context, string) (contracts.DescribeResponse, error) {
+		describeNativeFn: func(context.Context, libvirtConn, string) (contracts.DescribeResponse, error) {
 			called = true
 			return contracts.DescribeResponse{}, nil
 		},
 	}
 
-	p.maybeShadowDescribe(context.Background(), "vm", virshResp("On", nil))
+	p.maybeShadowDescribe(context.Background(), nil, "vm", virshResp("On", nil))
 	p.shadowWG.Wait()
 	assert.False(t, called, "shadow must not run when the family is off")
 }
@@ -299,14 +301,14 @@ func TestMaybeShadowDescribeSamplingSkips(t *testing.T) {
 	p := &Provider{
 		nativeCfg:     cfg,
 		shadowSampler: &sampler{n: 2},
-		describeNativeFn: func(context.Context, string) (contracts.DescribeResponse, error) {
+		describeNativeFn: func(context.Context, libvirtConn, string) (contracts.DescribeResponse, error) {
 			calls.Add(1)
 			return nativeResp("On", map[string]string{}), nil
 		},
 	}
 
 	for i := 0; i < 4; i++ {
-		p.maybeShadowDescribe(context.Background(), "vm", virshResp("On", nil))
+		p.maybeShadowDescribe(context.Background(), nil, "vm", virshResp("On", nil))
 	}
 	p.shadowWG.Wait()
 	assert.Equal(t, int64(2), calls.Load(), "n=2 shadows 2 of 4 calls")

@@ -87,10 +87,11 @@ type Provider struct {
 	// (VIRTRIGAUD_LIBVIRT_SHADOW_TIMEOUT; default: shadowDescribeDefaultTimeout).
 	shadowTimeoutValue time.Duration
 
-	// describeNativeFn produces the go-libvirt shadow DescribeResponse. It defaults
-	// to (*Provider).describeNative (the real go-libvirt path) and is a struct field
-	// so unit tests can script native results/errors/panics without a live libvirtd.
-	describeNativeFn func(ctx context.Context, id string) (contracts.DescribeResponse, error)
+	// describeNativeFn produces the go-libvirt shadow DescribeResponse on the
+	// connection the virsh read ran on. It defaults to (*Provider).describeNative
+	// (the real go-libvirt path) and is a struct field so unit tests can script
+	// native results/errors/panics without a live libvirtd.
+	describeNativeFn func(ctx context.Context, c libvirtConn, id string) (contracts.DescribeResponse, error)
 
 	// listNativeFn produces the go-libvirt shadow VMInfo list (ADR-0008 PR 4c). It
 	// defaults to (*Provider).listNative (the real go-libvirt path) and is a struct
@@ -319,11 +320,12 @@ func newClusteredProvider(hostsFile string) (*Provider, error) {
 		registry:    reg,
 		clusterReg:  reg,
 		hostID:      "", // clustered: connections are addressed by Host id, not one hostID
-		// virshProvider is a benign, uninitialized single-host handle. The legacy
-		// single-host RPC dispatch is not routed in clustered mode in this slice
-		// (no scheduler / target_host_id yet); keeping it non-nil means an
-		// accidental legacy call returns a clean error rather than a nil-deref.
-		virshProvider: NewVirshProvider(&ProviderConfig{Spec: ProviderSpec{}}),
+		// virshProvider is an ALWAYS-FAILING handle (ADR-0007 Addendum A, A1): a
+		// clustered provider has no single-host connection, so any call that was
+		// not routed to a Host through withHostConn fails cleanly here — it can
+		// never fall through to an empty-URI or local connection — and is counted
+		// (unroutableHits) so tests prove no per-VM RPC reaches it.
+		virshProvider: newUnroutableVirshProvider(),
 	}
 	// Operator configuration (not inventory), so fail closed on a malformed
 	// value. The one policy is enforced on every host against that host's

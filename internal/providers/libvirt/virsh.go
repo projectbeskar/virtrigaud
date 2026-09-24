@@ -30,6 +30,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -113,6 +114,44 @@ type VirshProvider struct {
 	// shadow-compare reads through it.
 	golibvirtMu sync.Mutex
 	golibvirt   *golibvirtHolder
+
+	// unroutable, when non-nil, makes this provider an always-failing handle
+	// (ADR-0007 Addendum A, A1): every entry point that would run a command,
+	// dial SSH, write a host file or open go-libvirt returns it instead of
+	// touching any host. A clustered provider holds exactly one such handle as
+	// its p.virshProvider, so a per-VM call that was not routed to a Host can
+	// never fall through to an unintended (empty-URI or local) connection. It is
+	// nil for every real host connection, where the check is a no-op.
+	unroutable error
+
+	// unroutableHits counts refused calls on an unroutable handle. A non-zero
+	// value is a routing bug; tests assert it stays zero.
+	unroutableHits atomic.Int64
+}
+
+// errUnroutableCall is the error an unroutable VirshProvider returns for every
+// call (see VirshProvider.unroutable).
+var errUnroutableCall = errors.New("clustered libvirt provider: call was not routed to a host " +
+	"(a clustered provider has no single-host connection; per-VM calls must name their host)")
+
+// newUnroutableVirshProvider returns the always-failing VirshProvider a
+// clustered provider holds in place of a single-host connection (ADR-0007
+// Addendum A, A1).
+func newUnroutableVirshProvider() *VirshProvider {
+	vp := NewVirshProvider(&ProviderConfig{Spec: ProviderSpec{}})
+	vp.unroutable = errUnroutableCall
+	return vp
+}
+
+// refuseIfUnroutable returns the unroutable error (and counts the attempt) when
+// v is the always-failing clustered placeholder, and nil for a real connection.
+func (v *VirshProvider) refuseIfUnroutable() error {
+	if v.unroutable == nil {
+		return nil
+	}
+	v.unroutableHits.Add(1)
+	log.Printf("ERROR %v", v.unroutable)
+	return v.unroutable
 }
 
 // VirshDomain represents a VM domain from virsh list output
@@ -687,6 +726,9 @@ func retryOnTransientSSH(ctx context.Context, attempt func() (*VirshResult, erro
 // description, image URL, disk path, endpoint-derived URI) is ever
 // interpreted by the remote shell.
 func (v *VirshProvider) runVirshCommandOnce(ctx context.Context, args ...string) (*VirshResult, error) {
+	if err := v.refuseIfUnroutable(); err != nil {
+		return nil, err
+	}
 	direct := len(args) > 0 && args[0] == "!"
 	if direct && len(args) == 1 {
 		return nil, fmt.Errorf("no command specified after '!' prefix")

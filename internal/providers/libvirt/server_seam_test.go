@@ -127,6 +127,10 @@ type fakeSeamProvider struct {
 	prepErr   error
 }
 
+// clustered reports single-host topology: this fake stands in for a single-host
+// backend (the Server gates clustered-only routing on it).
+func (f *fakeSeamProvider) clustered() bool { return false }
+
 func (f *fakeSeamProvider) conn(_ context.Context) (libvirtConn, error) {
 	return f.hostConn, f.connErr
 }

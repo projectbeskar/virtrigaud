@@ -132,6 +132,9 @@ func (v *VirshProvider) dialSSH(ctx context.Context) (*ssh.Client, error) {
 // the entire point of this PR, replacing a fork+handshake per virsh/shell
 // command with one connection multiplexing many sessions.
 func (v *VirshProvider) ensureSSHClient(ctx context.Context) (*ssh.Client, error) {
+	if err := v.refuseIfUnroutable(); err != nil {
+		return nil, err
+	}
 	v.sshMu.Lock()
 	defer v.sshMu.Unlock()
 	if v.sshClient != nil {
