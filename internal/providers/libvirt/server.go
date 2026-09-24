@@ -134,9 +134,15 @@ func (s *Server) Create(ctx context.Context, req *providerv1.CreateRequest) (*pr
 // operator can report the pending host as unavailable instead of re-scheduling
 // (ADR-0007 Addendum A, A2). Only the clustered routing produces that class.
 //
+// Any other failure of a clustered create on its target host (hostOpError) is
+// host-scoped too: a host that could not be reached is HOST_UNAVAILABLE, and
+// anything else keeps the historical code and message plus a
+// VM_OPERATION_FAILED ErrorInfo, so neither counts toward the manager's
+// per-Provider circuit breaker (ADR-0007 Addendum A, slice 2; hostOpRPCError).
+//
 // Only the categorized message crosses the wire (it is written to be safe for
-// the requesting VirtualMachine's status). Every other error keeps the historical
-// wrapped form.
+// the requesting VirtualMachine's status). Every other error — every
+// single-host error among them — keeps the historical wrapped form.
 func createRPCError(err error) error {
 	var pe *contracts.ProviderError
 	if stderrors.As(err, &pe) {
@@ -148,6 +154,10 @@ func createRPCError(err error) error {
 		case contracts.ErrorTypeHostUnavailable:
 			return hostUnavailableStatus(pe)
 		}
+	}
+	var ho *hostOpError
+	if stderrors.As(err, &ho) {
+		return hostOpRPCError("create VM", ho, err)
 	}
 	return fmt.Errorf("failed to create VM: %w", err)
 }

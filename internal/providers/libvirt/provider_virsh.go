@@ -147,7 +147,12 @@ func (p *Provider) createClustered(ctx context.Context, req contracts.CreateRequ
 	if fn == nil {
 		fn = p.createOnLeasedHost
 	}
-	return fn(ctx, lease, req)
+	resp, err := fn(ctx, lease, req)
+	if err != nil {
+		// Scoped to this host / this VM, not the provider (createRPCError).
+		return resp, &hostOpError{host: hostconn.HostID(hostID), err: err}
+	}
+	return resp, nil
 }
 
 // createOnLeasedHost runs the create pipeline over an already-leased host

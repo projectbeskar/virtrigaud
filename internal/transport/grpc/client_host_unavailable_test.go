@@ -152,6 +152,61 @@ func TestCircuitBreaker_RoutedPowerAndReconfigureHostErrorsDoNotTrip(t *testing.
 	}
 }
 
+// vmOperationFailedErr builds the status a clustered provider returns for a
+// per-VM operation that reached its host and failed there.
+func vmOperationFailedErr(t *testing.T, domain string) error {
+	t.Helper()
+	st, err := status.New(codes.Unknown, "failed to reconfigure VM: Retryable: online disk grow failed (caused by: blockresize ...)").
+		WithDetails(&errdetails.ErrorInfo{Reason: contracts.VMOperationFailedReason, Domain: domain})
+	require.NoError(t, err)
+	return st.Err()
+}
+
+func TestIsInfraFailure_VMOperationFailedIsNotInfra(t *testing.T) {
+	assert.False(t, isInfraFailure(vmOperationFailedErr(t, contracts.ErrorInfoDomain)),
+		"one VM's failed operation says nothing about the provider's health")
+	assert.True(t, isInfraFailure(vmOperationFailedErr(t, "example.com")), "only VirtRigaud's error domain is exempt")
+	assert.True(t, isInfraFailure(status.Error(codes.Unknown, "failed to reconfigure VM: boom")),
+		"a plain Unknown (no detail: a single-host provider, or a provider-level failure) still counts")
+}
+
+// TestCircuitBreaker_RepeatedVMOperationFailuresDoNotTrip is the slice 2
+// review's scenario: one tenant's VM whose Reconfigure keeps failing on its
+// host (retried every few seconds) must not open the breaker for every VM of
+// the Provider — while the same failures WITHOUT the detail still do.
+func TestCircuitBreaker_RepeatedVMOperationFailuresDoNotTrip(t *testing.T) {
+	vm := contracts.VMRef{ID: "web", HostID: "host-a", Owner: contracts.ObjectIdentity{UID: "uid-web"}}
+	newCB := func(name string, err error) (*routedOpErrServer, *Client, *resilience.CircuitBreaker) {
+		srv := &routedOpErrServer{err: err}
+		dialer, cleanup := startBufconnServer(t, srv)
+		t.Cleanup(cleanup)
+		cli, cb := newTestClientWithCB(t, dialer, name, name+"-provider", &resilience.Config{
+			FailureThreshold: 2,
+			ResetTimeout:     30 * time.Second,
+			HalfOpenMaxCalls: 1,
+		})
+		return srv, cli, cb
+	}
+
+	srv, cli, cb := newCB("adr7-vmop", vmOperationFailedErr(t, contracts.ErrorInfoDomain))
+	for i := 0; i < 5; i++ {
+		_, err := cli.Reconfigure(context.Background(), vm, contracts.CreateRequest{Name: "web"})
+		require.Error(t, err)
+		_, err = cli.Power(context.Background(), vm, contracts.PowerOpOn)
+		require.Error(t, err)
+	}
+	assert.EqualValues(t, 10, srv.calls.Load(), "every call reached the provider (breaker never opened)")
+	assert.Equal(t, resilience.StateClosed, cb.GetState())
+
+	plainSrv, plainCli, plainCB := newCB("adr7-plain", status.Error(codes.Unknown, "provider internal failure"))
+	for i := 0; i < 3; i++ {
+		_, err := plainCli.Power(context.Background(), vm, contracts.PowerOpOn)
+		require.Error(t, err)
+	}
+	assert.Equal(t, resilience.StateOpen, plainCB.GetState(), "a plain Unknown still opens the breaker")
+	assert.EqualValues(t, 2, plainSrv.calls.Load())
+}
+
 func TestCircuitBreaker_ProviderUnavailableStillTrips(t *testing.T) {
 	srv := &describeErrServer{err: status.Error(codes.Unavailable, "provider pod is down")}
 	dialer, cleanup := startBufconnServer(t, srv)

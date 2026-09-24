@@ -63,7 +63,9 @@ const opsDiskPath = "/var/lib/libvirt/images/" + opsDomainName + "-disk.qcow2"
 // host, a file named fail-<subcommand> makes that subcommand fail, "state"
 // holds the domstate answer (default "shut off"), "disktype" / "disksource"
 // override the primary disk `domblklist --details` reports (default: a file
-// disk at $FAKE_DISK_PATH), and dom-<name>.xml marks a
+// disk at $FAKE_DISK_PATH), "dead" makes every call die without an exit status
+// (the host dropped the connection), "nolibvirtd" makes every call fail as
+// virsh does when the host's libvirtd is down, and dom-<name>.xml marks a
 // domain (by name or UUID) as present; a domain command on anything else fails
 // like libvirt's "failed to get domain".
 const opsFakeVirsh = `#!/bin/sh
@@ -73,6 +75,8 @@ printf '%s %s\n' "$host" "$*" >> "$FAKE_VIRSH_DIR/calls.log"
 d="$FAKE_VIRSH_DIR/$host"
 fail() { if [ -f "$d/fail-$1" ]; then echo "error: scripted failure of $1" >&2; exit 1; fi; }
 nodom() { echo "error: failed to get domain '$1'" >&2; exit 1; }
+if [ -f "$d/dead" ]; then kill -9 $$; fi
+if [ -f "$d/nolibvirtd" ]; then echo "error: failed to connect to the hypervisor" >&2; exit 1; fi
 case "$1" in
   list) cat "$d/list.txt" ;;
   dumpxml) if [ -f "$d/dom-$2.xml" ]; then cat "$d/dom-$2.xml"; else nodom "$2"; fi ;;
