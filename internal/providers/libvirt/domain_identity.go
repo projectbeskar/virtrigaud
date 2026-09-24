@@ -317,6 +317,36 @@ func bindExistingDomain(ctx context.Context, vp *VirshProvider, req contracts.Cr
 			"remove it, or rename the VirtualMachine", domainName), nil)
 }
 
+// bindOwnedLegacyDomain decides a namespaced create when a domain with the
+// request's LEGACY (bare) name, legacyName (legacyCreateDomainName), exists on
+// vp's host. It binds that domain — the VM ID is legacyName — ONLY when its
+// owner stamp records req.Owner's UID: this VirtualMachine created it before
+// domains were namespaced and the manager lost the status.id write, so
+// creating "<namespace>.<name>" would leave a second domain (and its disk and
+// seed) behind. bound is true then.
+//
+// A bare-named domain with a missing, foreign or unreadable stamp is someone
+// else's legacy domain (e.g. another namespace's pre-upgrade "web"): it is not
+// a conflict for the namespaced create, which proceeds (bound false, nil
+// error). Only a failure to read the domain is an error (retryable), because
+// proceeding then could leave this VM's own legacy domain behind.
+func bindOwnedLegacyDomain(ctx context.Context, vp *VirshProvider, req contracts.CreateRequest, legacyName, state string) (contracts.CreateResponse, bool, error) {
+	res, err := vp.runVirshCommand(ctx, "dumpxml", legacyName)
+	if err != nil {
+		return contracts.CreateResponse{}, false, contracts.NewRetryableError(
+			fmt.Sprintf("read owner metadata of existing domain %q", legacyName), err)
+	}
+	recorded, perr := domainOwners(res.Stdout)
+	if perr == nil && requesterOwnsDomain(req.Owner, recorded) {
+		log.Printf("INFO Domain %s (legacy, un-namespaced name; state: %s) is owned by this VirtualMachine (uid %s); "+
+			"binding to it instead of creating a namespaced domain", legacyName, state, req.Owner.UID)
+		return contracts.CreateResponse{ID: legacyName}, true, nil
+	}
+	log.Printf("INFO Domain %s (legacy, un-namespaced name) exists but is not owned by VirtualMachine %s/%s (uid %s); "+
+		"creating its namespaced domain", legacyName, req.Owner.Namespace, req.Owner.Name, req.Owner.UID)
+	return contracts.CreateResponse{}, false, nil
+}
+
 // stripOwnerMetadata removes every VirtRigaud owner stamp from a domain
 // document by splicing out exactly the bytes each stamp occupies, leaving the
 // rest of the document byte-identical. The clone path uses it so a cloned

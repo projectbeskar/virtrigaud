@@ -464,13 +464,15 @@ func TestCreate_ExistingDomain_Ownership(t *testing.T) {
 
 // TestCreate_SameNameInAnotherNamespaceIsNoCollision proves the squatting is
 // gone: tenant A's "web" (namespaced, or a legacy bare "web") never blocks
-// tenant B's "web" — B's create does not even look at A's domain and runs the
-// create pipeline (which here stops at the fake's first mutating command, a
+// tenant B's "web". B's create never reads A's namespaced domain; it reads the
+// legacy "web" stamp only to rule out that it is B's OWN pre-upgrade domain
+// (TestCreate_LegacyOwnedDomainIsBound), finds A's UID, and runs the create
+// pipeline (which here stops at the fake's first mutating command, a
 // retryable error, never a Conflict).
 func TestCreate_SameNameInAnotherNamespaceIsNoCollision(t *testing.T) {
 	logPath := installOwnershipFakeVirsh(t, map[string]string{
 		"team-a.web": stampedDomainXML("team-a.web", ownerTeamA),
-		"web":        stampedDomainXML("web", ownerTeamA), // a legacy-named domain
+		"web":        stampedDomainXML("web", ownerTeamA), // team-a's pre-upgrade, legacy-named domain
 	})
 	p := &Provider{virshProvider: localTestVirshProvider()}
 
@@ -480,10 +482,100 @@ func TestCreate_SameNameInAnotherNamespaceIsNoCollision(t *testing.T) {
 	assert.Equal(t, contracts.ErrorTypeRetryable, pe.Type, "another namespace's same-named VM is not a conflict")
 
 	calls := virshLog(t, logPath)
-	require.Greater(t, len(calls), 1, "the create pipeline must run past the existence check")
-	assert.Equal(t, "list --all", calls[0])
-	for _, c := range calls {
-		assert.False(t, strings.HasPrefix(c, "dumpxml"), "no other domain's owner stamp is read: %q", c)
+	require.Greater(t, len(calls), 2, "the create pipeline must run past the existence checks")
+	assert.Equal(t, []string{"list --all", "dumpxml web"}, calls[:2])
+	assert.NotContains(t, calls, "dumpxml team-a.web", "another namespace's domain is never read")
+}
+
+// TestCreate_LegacyOwnedDomainIsBound covers a create retried across the
+// upgrade to namespaced names: before the upgrade it defined the bare-named
+// domain "web" (stamped with this VM's UID) and the manager lost the status.id
+// write. The retry binds "web" instead of creating "team-a.web" next to it; a
+// bare-named domain that is not this VM's never causes a Conflict.
+func TestCreate_LegacyOwnedDomainIsBound(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("own legacy domain is bound, nothing is created", func(t *testing.T) {
+		logPath := installOwnershipFakeVirsh(t, map[string]string{"web": stampedDomainXML("web", ownerTeamA)})
+		p := &Provider{virshProvider: localTestVirshProvider()}
+
+		resp, err := p.Create(ctx, contracts.CreateRequest{Name: "web", Owner: ownerTeamA})
+		require.NoError(t, err)
+		assert.Equal(t, "web", resp.ID, "status.id becomes the legacy domain name")
+		assert.Equal(t, []string{"list --all", "dumpxml web"}, virshLog(t, logPath), "no second domain is created")
+	})
+
+	t.Run("own namespaced domain wins over a legacy one", func(t *testing.T) {
+		logPath := installOwnershipFakeVirsh(t, map[string]string{
+			"team-a.web": stampedDomainXML("team-a.web", ownerTeamA),
+			"web":        stampedDomainXML("web", ownerTeamA),
+		})
+		p := &Provider{virshProvider: localTestVirshProvider()}
+
+		resp, err := p.Create(ctx, contracts.CreateRequest{Name: "web", Owner: ownerTeamA})
+		require.NoError(t, err)
+		assert.Equal(t, "team-a.web", resp.ID)
+		assert.Equal(t, []string{"list --all", "dumpxml team-a.web"}, virshLog(t, logPath))
+	})
+
+	for name, xml := range map[string]string{
+		"foreign stamp":  stampedDomainXML("web", ownerTeamB),
+		"no stamp":       unstampedDomainXML("web"),
+		"previous UID":   stampedDomainXML("web", staleTeamAWeb),
+		"unreadable XML": "<domain><name>web",
+	} {
+		t.Run("legacy domain with "+name+" does not block the namespaced create", func(t *testing.T) {
+			logPath := installOwnershipFakeVirsh(t, map[string]string{"web": xml})
+			p := &Provider{virshProvider: localTestVirshProvider()}
+
+			resp, err := p.Create(ctx, contracts.CreateRequest{Name: "web", Owner: ownerTeamA})
+			var pe *contracts.ProviderError
+			require.ErrorAs(t, err, &pe)
+			assert.Equal(t, contracts.ErrorTypeRetryable, pe.Type, "the namespaced create proceeds (the fake stops it later)")
+			assert.Empty(t, resp.ID)
+			calls := virshLog(t, logPath)
+			require.Greater(t, len(calls), 2)
+			assert.Equal(t, []string{"list --all", "dumpxml web"}, calls[:2])
+		})
+	}
+
+	t.Run("an unreadable legacy domain is retryable, never a second domain", func(t *testing.T) {
+		logPath := installOwnershipFakeVirsh(t, map[string]string{"web": ""})
+		require.NoError(t, os.Remove(filepath.Join(os.Getenv("FAKE_VIRSH_DIR"), "dom-web.xml")))
+		p := &Provider{virshProvider: localTestVirshProvider()}
+
+		_, err := p.Create(ctx, contracts.CreateRequest{Name: "web", Owner: ownerTeamA})
+		var pe *contracts.ProviderError
+		require.ErrorAs(t, err, &pe)
+		assert.Equal(t, contracts.ErrorTypeRetryable, pe.Type)
+		assert.Equal(t, []string{"list --all", "dumpxml web"}, virshLog(t, logPath), "nothing is created")
+	})
+
+	t.Run("a request without a UID cannot claim a legacy domain", func(t *testing.T) {
+		logPath := installOwnershipFakeVirsh(t, map[string]string{"web": stampedDomainXML("web", ownerTeamA)})
+		p := &Provider{virshProvider: localTestVirshProvider()}
+
+		_, err := p.Create(ctx, contracts.CreateRequest{Name: "web", Owner: contracts.ObjectIdentity{Namespace: "team-a", Name: "web"}})
+		require.Error(t, err)
+		assert.NotContains(t, virshLog(t, logPath), "dumpxml web")
+	})
+}
+
+func TestLegacyCreateDomainName(t *testing.T) {
+	got, ok := legacyCreateDomainName(contracts.CreateRequest{Name: "web", Owner: ownerTeamA}, "team-a.web")
+	assert.True(t, ok)
+	assert.Equal(t, "web", got)
+
+	for _, req := range []contracts.CreateRequest{
+		{Name: "web"}, // no owner: already the legacy name
+		{Name: "web", Owner: contracts.ObjectIdentity{Namespace: "team-a", Name: "web"}},                     // no UID
+		{Name: "12", Owner: contracts.ObjectIdentity{UID: "u", Namespace: "team-a", Name: "12"}},             // virsh ID
+		{Name: "web.prod", Owner: contracts.ObjectIdentity{UID: "u", Namespace: "team-a", Name: "web.prod"}}, // never a legacy name
+	} {
+		domain, err := createDomainName(req)
+		require.NoError(t, err)
+		_, ok := legacyCreateDomainName(req, domain)
+		assert.False(t, ok, "%+v", req)
 	}
 }
 

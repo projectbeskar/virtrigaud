@@ -193,6 +193,26 @@ func createDomainName(req contracts.CreateRequest) (string, error) {
 	return domainNameFor(req.Owner, req.Name)
 }
 
+// legacyCreateDomainName returns the bare name a create of req would have used
+// before domains were namespaced — req.Name — when a create that derives
+// domainName must also look for it: the request names its VirtualMachine (a
+// naming identity), carries the UID that alone can prove the old domain is
+// this VM's, and the bare name differs from domainName and is a usable legacy
+// name (validLegacyName, not a virsh ID/UUID). ok is false otherwise.
+//
+// It covers a create that defined the bare-named domain before the upgrade and
+// whose status.id write the manager lost: the retry must bind that domain,
+// not create "<namespace>.<name>" next to it (createVM, bindOwnedLegacyDomain).
+func legacyCreateDomainName(req contracts.CreateRequest, domainName string) (string, bool) {
+	if !hasNamingIdentity(req.Owner) || req.Owner.IsZero() || req.Name == domainName {
+		return "", false
+	}
+	if validLegacyName(req.Name) != nil || ambiguousDomainNameError(req.Name) != nil {
+		return "", false
+	}
+	return req.Name, true
+}
+
 // cloneDomainName is the domain name a Clone request makes for its target:
 // domainNameFor over req.TargetVM (the VirtualMachine the clone will be bound
 // to), falling back to req.TargetName for an older manager. As for Create, a

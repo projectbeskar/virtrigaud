@@ -74,6 +74,10 @@ func (p *Provider) Create(ctx context.Context, req contracts.CreateRequest) (con
 // req.Owner's UID — so the retry after a lost status write finds the same
 // namespaced domain — and a non-retryable Conflict otherwise), followed by the
 // full cloud-init + storage create, which stamps req.Owner onto the new domain.
+// A domain with the request's legacy bare name that carries req.Owner's UID
+// (created before domains were namespaced, status.id write lost) is bound
+// instead of creating a second, namespaced one (bindOwnedLegacyDomain); a
+// bare-named domain that is not this VM's never blocks the namespaced create.
 // It is the shared core of both the single-host path (vp == p.virshProvider)
 // and the clustered create-on-host path (vp == the leased target host's
 // provider), so a clustered create is byte-for-byte the single-host create —
@@ -94,9 +98,26 @@ func (p *Provider) createVM(ctx context.Context, vp *VirshProvider, req contract
 		return contracts.CreateResponse{}, contracts.NewRetryableError("failed to list existing domains", err)
 	}
 
+	legacyName, tryLegacy := legacyCreateDomainName(req, domainName)
+	legacyState, legacyFound := "", false
 	for _, domain := range domains {
 		if domain.Name == domainName {
 			return bindExistingDomain(ctx, vp, req, domainName, domain.State)
+		}
+		if tryLegacy && domain.Name == legacyName {
+			legacyState, legacyFound = domain.State, true
+		}
+	}
+
+	// A create retried across the upgrade to namespaced names: the bare-named
+	// domain it defined before is bound if (and only if) it is this VM's own.
+	if legacyFound {
+		resp, bound, err := bindOwnedLegacyDomain(ctx, vp, req, legacyName, legacyState)
+		if err != nil {
+			return contracts.CreateResponse{}, err
+		}
+		if bound {
+			return resp, nil
 		}
 	}
 
