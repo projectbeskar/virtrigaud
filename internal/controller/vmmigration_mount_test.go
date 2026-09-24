@@ -329,7 +329,12 @@ func TestHandleValidatingPhase_CrossNamespaceFailsFast(t *testing.T) {
 
 	srcVM := &infravirtrigaudiov1beta1.VirtualMachine{
 		ObjectMeta: metav1.ObjectMeta{Name: "src-vm", Namespace: "default"},
-		Status:     infravirtrigaudiov1beta1.VirtualMachineStatus{ID: "vm-1"},
+		// The source VM runs on a Provider in another namespace, and
+		// spec.source.providerRef names that same Provider.
+		Spec: infravirtrigaudiov1beta1.VirtualMachineSpec{
+			ProviderRef: infravirtrigaudiov1beta1.ObjectRef{Name: "src-prov", Namespace: "team-a"},
+		},
+		Status: infravirtrigaudiov1beta1.VirtualMachineStatus{ID: "vm-1"},
 	}
 	srcProv := readyProvider("team-a", "src-prov") // different namespace than the migration
 	tgtProv := readyProvider("default", "tgt-prov")

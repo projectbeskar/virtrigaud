@@ -33,6 +33,9 @@ spec:
 
   target:
     name: critical-app-vm-migrated
+    # Same namespace as the VMMigration. A different namespace needs the
+    # infra.virtrigaud.io/allowed-source-namespaces grant on that namespace
+    # (see docs/cross-namespace-targets.md).
     namespace: production
     providerRef:
       name: libvirt-host-prod

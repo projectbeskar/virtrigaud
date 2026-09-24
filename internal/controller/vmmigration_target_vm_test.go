@@ -47,7 +47,9 @@ func TestImportingPhase_ThreadsTargetVMIdentity(t *testing.T) {
 		wantNamespace   string
 	}{
 		{"target in the migration's namespace", "", "default"},
-		{"target in another namespace", "team-b", "team-b"},
+		// Another namespace is only reachable with its grant (see
+		// vmmigration_crossnamespace_test.go for the refusals).
+		{"target in another namespace that grants it", "team-b", "team-b"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			prov := &capturingMigrationProvider{importResp: contracts.ImportDiskResponse{
@@ -56,7 +58,8 @@ func TestImportingPhase_ThreadsTargetVMIdentity(t *testing.T) {
 			sourceVM, sourceProvider, targetProvider, migration := directionFixture(
 				infrav1beta1.ProviderTypeVSphere, infrav1beta1.ProviderTypeLibvirt)
 			migration.Spec.Target.Namespace = tc.targetNamespace
-			r, _ := directionReconciler(t, prov, sourceVM, sourceProvider, targetProvider, migration, s3CredsSecret())
+			r, _ := directionReconciler(t, prov, sourceVM, sourceProvider, targetProvider, migration, s3CredsSecret(),
+				grantNamespace("team-b", strPtr("default")))
 
 			_, err := r.handleImportingPhase(context.Background(), migration)
 			require.NoError(t, err)

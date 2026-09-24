@@ -390,8 +390,12 @@ func main() {
 	}
 
 	// Register VMMigration controller
+	// The uncached API reader re-checks the cross-namespace target grant
+	// right before each side effect in the target namespace (a cached read
+	// can lag a revocation).
 	vmmigrationReconciler := controller.NewVMMigrationReconciler(
 		mgr.GetClient(),
+		mgr.GetAPIReader(),
 		mgr.GetScheme(),
 		remoteResolver,
 		mgr.GetEventRecorderFor("vmmigration-controller"),
@@ -421,6 +425,7 @@ func main() {
 	// Register VMClone controller (MVP: vmRef source, same-provider, full/linked)
 	vmcloneReconciler := controller.NewVMCloneReconciler(
 		mgr.GetClient(),
+		mgr.GetAPIReader(),
 		mgr.GetScheme(),
 		remoteResolver,
 		mgr.GetEventRecorderFor("vmclone-controller"),

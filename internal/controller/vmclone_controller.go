@@ -22,14 +22,19 @@ import (
 	"fmt"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/obs/logging"
@@ -76,17 +81,28 @@ type VMCloneReconciler struct {
 	// VirtualMachine controller.
 	RemoteResolver ProviderResolver
 	Recorder       record.EventRecorder
+
+	// APIReader reads straight from the API server, bypassing the informer
+	// cache (the manager's GetAPIReader). The cross-namespace grant is re-read
+	// through it immediately before each side effect in the target namespace —
+	// the Clone RPC and the target VirtualMachine Create — so a revoked grant
+	// is honoured even while the cache still shows it. Nil falls back to
+	// Client, which only unit tests built as struct literals rely on.
+	APIReader client.Reader
 }
 
-// NewVMCloneReconciler creates a new VMClone reconciler.
+// NewVMCloneReconciler creates a new VMClone reconciler. apiReader must be an
+// uncached reader (mgr.GetAPIReader()); see VMCloneReconciler.APIReader.
 func NewVMCloneReconciler(
 	c client.Client,
+	apiReader client.Reader,
 	scheme *runtime.Scheme,
 	remoteResolver ProviderResolver,
 	recorder record.EventRecorder,
 ) *VMCloneReconciler {
 	return &VMCloneReconciler{
 		Client:         c,
+		APIReader:      apiReader,
 		Scheme:         scheme,
 		RemoteResolver: remoteResolver,
 		Recorder:       recorder,
@@ -101,6 +117,7 @@ func NewVMCloneReconciler(
 //+kubebuilder:rbac:groups=infra.virtrigaud.io,resources=vmclasses,verbs=get;list;watch
 //+kubebuilder:rbac:groups=infra.virtrigaud.io,resources=providers,verbs=get;list;watch
 //+kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+//+kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
 
 // Reconcile drives a VMClone through its phases: validate the source, resolve
 // the provider, pre-check linked-clone capability, clone (idempotently), poll
@@ -169,6 +186,16 @@ func (r *VMCloneReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 			"clone source type not yet supported; use source.vmRef"), nil
 	}
 
+	// Target namespace (defaults to the VMClone's). A different namespace must
+	// grant this one (AllowedSourceNamespacesAnnotation) before anything else
+	// happens: no provider call, and no read or write in the target namespace.
+	// It is checked on EVERY reconcile — clone start, task poll and bind all
+	// follow — so revoking the grant stops a clone that is already in flight.
+	targetNamespace := cloneTargetNamespace(clone)
+	if allowed, res, err := r.gateTargetNamespace(ctx, clone, targetNamespace); !allowed {
+		return res, err
+	}
+
 	// Resolve the source VirtualMachine CR (same namespace as the VMClone).
 	sourceVM := &infrav1beta1.VirtualMachine{}
 	sourceKey := client.ObjectKey{Namespace: clone.Namespace, Name: clone.Spec.Source.VMRef.Name}
@@ -210,12 +237,6 @@ func (r *VMCloneReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		logger.Error(err, "Failed to get provider instance", "provider", providerKey.Name)
 		return r.markPending(ctx, clone, infrav1beta1.VMCloneReasonProviderError,
 			fmt.Sprintf("failed to resolve provider %q: %v", providerKey.Name, err)), nil
-	}
-
-	// Determine target namespace (defaults to the VMClone namespace).
-	targetNamespace := clone.Spec.Target.Namespace
-	if targetNamespace == "" {
-		targetNamespace = clone.Namespace
 	}
 
 	linked := r.requestedCloneType(clone) == infrav1beta1.CloneTypeLinkedClone
@@ -305,6 +326,13 @@ func (r *VMCloneReconciler) startClone(
 		ClassJSON:     r.classJSON(ctx, clone),
 		PlacementJSON: r.placementJSON(ctx, clone),
 		CustomizeJSON: r.customizeJSON(ctx, clone),
+	}
+
+	// The Clone RPC creates a VM named for the target namespace. Re-read the
+	// grant from the API server (not the cache) right before it; nothing that
+	// does I/O runs between this check and the RPC.
+	if allowed, res, err := r.confirmTargetNamespaceLive(ctx, clone, targetNamespace); !allowed {
+		return res, err
 	}
 
 	now := metav1.Now()
@@ -412,12 +440,24 @@ func (r *VMCloneReconciler) bindTargetVM(
 			"clone completed but provider returned no target VM ID"), nil
 	}
 
+	// Re-check the cross-namespace grant right before the first read or write
+	// in the target namespace: a synchronous Clone RPC or a task poll ran since
+	// the check in Reconcile, and the grant may have been revoked meanwhile.
+	if allowed, res, err := r.gateTargetNamespace(ctx, clone, targetNamespace); !allowed {
+		return res, err
+	}
+
 	vmKey := client.ObjectKey{Namespace: targetNamespace, Name: clone.Spec.Target.Name}
 
 	// Ensure the target VM CR exists (idempotent across requeues).
 	targetVM := &infrav1beta1.VirtualMachine{}
 	switch err := r.Get(ctx, vmKey, targetVM); {
 	case errors.IsNotFound(err):
+		// Re-read the grant from the API server (not the cache) right before
+		// the Create in the target namespace.
+		if allowed, res, liveErr := r.confirmTargetNamespaceLive(ctx, clone, targetNamespace); !allowed {
+			return res, liveErr
+		}
 		targetVM = r.buildTargetVM(clone, sourceVM, targetNamespace)
 		if createErr := r.Create(ctx, targetVM); createErr != nil && !errors.IsAlreadyExists(createErr) {
 			logger.Error(createErr, "Failed to create target VM CR", "vm", vmKey.Name)
@@ -504,9 +544,24 @@ func (r *VMCloneReconciler) buildTargetVM(
 		annotations[k] = v
 	}
 
+	providerRef := sourceVM.Spec.ProviderRef
 	classRef := sourceVM.Spec.ClassRef
 	if clone.Spec.Target.ClassRef != nil && clone.Spec.Target.ClassRef.Name != "" {
 		classRef = infrav1beta1.ObjectRef{Name: clone.Spec.Target.ClassRef.Name}
+	}
+	if targetNamespace != clone.Namespace {
+		// A reference without a namespace resolves in the namespace of the VM
+		// that holds it. A target in another namespace would therefore resolve
+		// a same-named Provider (and class) THERE and bind the cloned VM's ID on
+		// the wrong hypervisor — possibly to an unrelated VM with that ID. Pin
+		// the namespace the clone itself resolved: the source VM's, which is
+		// the VMClone's (spec.source.vmRef is namespace-local).
+		if providerRef.Namespace == "" {
+			providerRef.Namespace = clone.Namespace
+		}
+		if classRef.Namespace == "" {
+			classRef.Namespace = clone.Namespace
+		}
 	}
 
 	targetVM := &infrav1beta1.VirtualMachine{
@@ -517,7 +572,7 @@ func (r *VMCloneReconciler) buildTargetVM(
 			Annotations: annotations,
 		},
 		Spec: infrav1beta1.VirtualMachineSpec{
-			ProviderRef: sourceVM.Spec.ProviderRef,
+			ProviderRef: providerRef,
 			ClassRef:    classRef,
 		},
 	}
@@ -632,6 +687,151 @@ func (r *VMCloneReconciler) markPending(ctx context.Context, clone *infrav1beta1
 	return ctrl.Result{RequeueAfter: 30 * time.Second}
 }
 
+// cloneTargetNamespace is the namespace the clone's target VirtualMachine is
+// created in: spec.target.namespace, or the VMClone's own namespace.
+func cloneTargetNamespace(clone *infrav1beta1.VMClone) string {
+	if clone.Spec.Target.Namespace != "" {
+		return clone.Spec.Target.Namespace
+	}
+	return clone.Namespace
+}
+
+// gateTargetNamespace enforces the cross-namespace target rule
+// (AllowedSourceNamespacesAnnotation). allowed=true means the clone may read,
+// create and bind in targetNamespace; any refusal left on the clone by an
+// earlier reconcile is then cleared. Otherwise the clone is marked refused and
+// (result, err) is what the caller returns: a slow recheck after a refusal
+// (the Namespace watch re-drives it on a grant), or the read error, so the
+// controller retries with backoff while failing closed.
+func (r *VMCloneReconciler) gateTargetNamespace(
+	ctx context.Context,
+	clone *infrav1beta1.VMClone,
+	targetNamespace string,
+) (allowed bool, result ctrl.Result, err error) {
+	allowed, err = targetNamespaceAllowed(ctx, r.Client, clone.Namespace, targetNamespace)
+	if err != nil {
+		logging.FromContext(ctx).Error(err, "Failed to check the target namespace grant; not proceeding")
+		return false, ctrl.Result{}, err
+	}
+	if !allowed {
+		return false, r.markTargetNamespaceNotAllowed(ctx, clone, targetNamespace), nil
+	}
+	if err := r.clearTargetNamespaceRefusal(ctx, clone); err != nil {
+		return false, ctrl.Result{}, err
+	}
+	return true, ctrl.Result{}, nil
+}
+
+// confirmTargetNamespaceLive re-checks the cross-namespace grant through the
+// uncached APIReader immediately before a side effect in the target namespace
+// (the Clone RPC, the target VirtualMachine Create). gateTargetNamespace reads
+// the informer cache, which can lag a revocation; this closes that window for
+// the calls that create something. The own namespace needs no read. A refusal
+// is recorded exactly like the cached one; a read error is returned so the
+// controller retries with backoff and nothing is issued.
+func (r *VMCloneReconciler) confirmTargetNamespaceLive(
+	ctx context.Context,
+	clone *infrav1beta1.VMClone,
+	targetNamespace string,
+) (allowed bool, result ctrl.Result, err error) {
+	allowed, err = targetNamespaceAllowed(ctx, r.liveReader(), clone.Namespace, targetNamespace)
+	if err != nil {
+		logging.FromContext(ctx).Error(err, "Failed to re-read the target namespace grant; not proceeding")
+		return false, ctrl.Result{}, err
+	}
+	if !allowed {
+		return false, r.markTargetNamespaceNotAllowed(ctx, clone, targetNamespace), nil
+	}
+	return true, ctrl.Result{}, nil
+}
+
+// liveReader is the uncached reader for grant re-checks: APIReader, or Client
+// when none was injected.
+func (r *VMCloneReconciler) liveReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
+}
+
+// markTargetNamespaceNotAllowed records that the clone's target namespace does
+// not grant the clone's namespace: Ready=False with reason
+// TargetNamespaceNotAllowed. It is NOT terminal — a clone that has issued
+// nothing yet waits in Pending, and one already in flight keeps its phase,
+// task and target ID so it resumes if the grant returns. Nothing already
+// created is touched. The Warning event is emitted only on the transition, and
+// the recheck is slow: only whoever can update the target Namespace can lift
+// the refusal.
+func (r *VMCloneReconciler) markTargetNamespaceNotAllowed(
+	ctx context.Context,
+	clone *infrav1beta1.VMClone,
+	targetNamespace string,
+) ctrl.Result {
+	msg := targetNamespaceNotAllowedMessage(clone.Namespace, targetNamespace)
+	prev := meta.FindStatusCondition(clone.Status.Conditions, infrav1beta1.VMCloneConditionReady)
+	transition := prev == nil || prev.Reason != ReasonTargetNamespaceNotAllowed || prev.Message != msg
+
+	if clone.Status.TaskRef == "" && clone.Status.TargetVMID == "" {
+		clone.Status.Phase = infrav1beta1.ClonePhasePending
+	}
+	clone.Status.Message = msg
+	clone.Status.ObservedGeneration = clone.Generation
+	meta.SetStatusCondition(&clone.Status.Conditions, metav1.Condition{
+		Type:               infrav1beta1.VMCloneConditionReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             ReasonTargetNamespaceNotAllowed,
+		Message:            msg,
+		ObservedGeneration: clone.Generation,
+	})
+	if transition {
+		logging.FromContext(ctx).Info("VMClone target namespace does not grant the clone's namespace; nothing is created there",
+			"targetNamespace", targetNamespace)
+		r.Recorder.Event(clone, corev1.EventTypeWarning, ReasonTargetNamespaceNotAllowed, msg)
+	}
+	_ = r.updateStatus(ctx, clone) //nolint:errcheck // status errors retried next reconcile
+	return ctrl.Result{RequeueAfter: crossNamespaceRecheckInterval}
+}
+
+// clearTargetNamespaceRefusal removes a TargetNamespaceNotAllowed Ready
+// condition once the grant is present (or the target was changed to the own
+// namespace), so the clone does not keep reporting a refusal while it
+// proceeds. It persists immediately; it is a no-op when there is nothing to
+// clear.
+func (r *VMCloneReconciler) clearTargetNamespaceRefusal(ctx context.Context, clone *infrav1beta1.VMClone) error {
+	ready := meta.FindStatusCondition(clone.Status.Conditions, infrav1beta1.VMCloneConditionReady)
+	if ready == nil || ready.Reason != ReasonTargetNamespaceNotAllowed {
+		return nil
+	}
+	meta.RemoveStatusCondition(&clone.Status.Conditions, infrav1beta1.VMCloneConditionReady)
+	clone.Status.Message = "Target namespace access granted; resuming"
+	clone.Status.ObservedGeneration = clone.Generation
+	r.Recorder.Event(clone, corev1.EventTypeNormal, "TargetNamespaceAllowed", clone.Status.Message)
+	return r.updateStatus(ctx, clone)
+}
+
+// clonesTargetingNamespace maps a Namespace whose grant annotation changed to
+// the VMClones in OTHER namespaces that target it and have not finished, so a
+// grant (or revocation) takes effect without waiting for the slow recheck.
+func (r *VMCloneReconciler) clonesTargetingNamespace(ctx context.Context, obj client.Object) []reconcile.Request {
+	clones := &infrav1beta1.VMCloneList{}
+	if err := r.List(ctx, clones); err != nil {
+		logging.FromContext(ctx).Error(err, "Failed to list VMClones for a namespace grant change", "namespace", obj.GetName())
+		return nil
+	}
+	var reqs []reconcile.Request
+	for i := range clones.Items {
+		c := &clones.Items[i]
+		if c.Namespace == obj.GetName() || cloneTargetNamespace(c) != obj.GetName() {
+			continue
+		}
+		if c.Status.Phase == infrav1beta1.ClonePhaseReady || c.Status.Phase == infrav1beta1.ClonePhaseFailed {
+			continue
+		}
+		reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(c)})
+	}
+	return reqs
+}
+
 // requestedCloneType returns the clone type from spec.options, defaulting to
 // FullClone when unset.
 func (r *VMCloneReconciler) requestedCloneType(clone *infrav1beta1.VMClone) infrav1beta1.CloneType {
@@ -702,9 +902,15 @@ func (r *VMCloneReconciler) updateStatus(ctx context.Context, clone *infrav1beta
 	return nil
 }
 
-// SetupWithManager sets up the controller with the Manager.
+// SetupWithManager sets up the controller with the Manager. Besides its own
+// VMClones it watches Namespaces, but only for changes to the cross-namespace
+// grant annotation, to re-drive clones whose target namespace just granted or
+// revoked access.
 func (r *VMCloneReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&infrav1beta1.VMClone{}).
+		Watches(&corev1.Namespace{},
+			handler.EnqueueRequestsFromMapFunc(r.clonesTargetingNamespace),
+			builder.WithPredicates(allowedSourceNamespacesChanged())).
 		Complete(r)
 }

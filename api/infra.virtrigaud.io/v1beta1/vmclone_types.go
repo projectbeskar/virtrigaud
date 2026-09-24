@@ -67,7 +67,16 @@ type VMCloneTarget struct {
 	// +kubebuilder:validation:MaxLength=253
 	Name string `json:"name"`
 
-	// Namespace is the namespace for the target VM (defaults to source namespace)
+	// Namespace is the namespace for the target VM (defaults to the VMClone's
+	// namespace, which is also the source VM's). A different namespace is
+	// allowed only when that Namespace object carries the annotation
+	// infra.virtrigaud.io/allowed-source-namespaces and its comma-separated
+	// value lists the VMClone's namespace (exact names, no wildcards).
+	// Whoever can update the target Namespace can grant this (normally a
+	// cluster administrator, since Namespaces are cluster-scoped). Without it
+	// the clone is refused (Ready=False, reason TargetNamespaceNotAllowed) and
+	// nothing is created in, read from or bound in the target namespace;
+	// granting the annotation or changing this field resumes it.
 	// +optional
 	// +kubebuilder:validation:Pattern="^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
 	// +kubebuilder:validation:MaxLength=63
