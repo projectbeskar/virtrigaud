@@ -32,13 +32,13 @@ import (
 
 // Domain identity and ownership.
 //
-// A libvirt domain is named after the bare VirtualMachine name — no namespace —
-// so on a host shared by several namespaces/tenants two VirtualMachines named
-// "web" map to the SAME domain name. Create used to treat "a domain of that name
-// already exists" as an idempotent success and return its name as the VM's ID,
-// silently binding tenant B's VirtualMachine to tenant A's domain (after which
-// B could power it off, reconfigure, snapshot, delete it, or run in-guest
-// commands through the guest agent).
+// A libvirt domain used to be named after the bare VirtualMachine name — no
+// namespace — so on a host shared by several namespaces/tenants two
+// VirtualMachines named "web" mapped to the SAME domain name. Create used to
+// treat "a domain of that name already exists" as an idempotent success and
+// return its name as the VM's ID, silently binding tenant B's VirtualMachine to
+// tenant A's domain (after which B could power it off, reconfigure, snapshot,
+// delete it, or run in-guest commands through the guest agent).
 //
 // Create now stamps the requesting VirtualMachine's identity (UID, namespace,
 // name) into the new domain's <metadata>, and binds to a pre-existing domain of
@@ -47,6 +47,12 @@ import (
 // UID, an unreadable stamp, or a requester with no UID) fails closed with a
 // non-retryable Conflict. A pre-existing domain is brought under management
 // through the adoption flow, never by a same-named create.
+//
+// New domains are also named "<namespace>.<name>" (domain_naming.go), so two
+// namespaces no longer share a name at all; the stamp remains the
+// authorization, for legacy (bare-named) domains and for the rare collision a
+// namespaced name can still meet (e.g. a legacy VM literally named
+// "<namespace>.<name>").
 
 const (
 	// ownerMetadataNamespaceURI is the XML namespace of VirtRigaud's owner stamp
@@ -221,6 +227,25 @@ func domainOwners(domainXML string) ([]contracts.ObjectIdentity, error) {
 	return owners, nil
 }
 
+// domainOwnerUIDs returns the non-empty owner UIDs stamped on a domain document,
+// comma-separated in document order, for VMInfo.ProviderRaw
+// (contracts.VMInfoOwnerUIDKey). An unstamped or unreadable document yields "".
+// It is informational (adoption uses it to skip domains live VirtualMachines
+// own); it never authorizes anything.
+func domainOwnerUIDs(domainXML string) string {
+	owners, err := domainOwners(domainXML)
+	if err != nil {
+		return ""
+	}
+	uids := make([]string, 0, len(owners))
+	for _, o := range owners {
+		if o.UID != "" {
+			uids = append(uids, o.UID)
+		}
+	}
+	return strings.Join(uids, ",")
+}
+
 // requesterOwnsDomain reports whether a create by requester may bind to an
 // existing domain whose stamped owners are recorded. It is the whole
 // authorization decision and fails closed:
@@ -240,55 +265,86 @@ func requesterOwnsDomain(requester contracts.ObjectIdentity, recorded []contract
 	return recorded[0].UID == requester.UID
 }
 
-// bindExistingDomain decides a create whose requested domain name already
-// exists on vp's host. It reads the domain's owner stamp and returns the
-// domain's name as the VM ID (idempotent success) ONLY when requesterOwnsDomain
-// says the stamp records req.Owner's UID — the case of a create retried after
-// the manager lost its Status.ID write. Otherwise it returns a non-retryable
-// Conflict and never binds.
+// bindExistingDomain decides a create whose domain — domainName, the name
+// createDomainName gave this request — already exists on vp's host. It reads
+// the domain's owner stamp and returns domainName as the VM ID (idempotent
+// success) ONLY when requesterOwnsDomain says the stamp records req.Owner's
+// UID — the case of a create retried after the manager lost its Status.ID
+// write, which derives the same (namespaced) name again. Otherwise it returns a
+// non-retryable Conflict and never binds.
 //
 // The error message is deliberately uniform and names only the requested
 // domain: it lands in the requesting VirtualMachine's status, so it must not
 // disclose which other namespace/VirtualMachine (if any) owns the domain. The
 // details go to the provider log for the operator.
 //
-// req.Name has already passed ambiguousDomainNameError, so `virsh dumpxml
-// <name>` cannot resolve to a different domain by ID or UUID.
-func bindExistingDomain(ctx context.Context, vp *VirshProvider, req contracts.CreateRequest, state string) (contracts.CreateResponse, error) {
-	res, err := vp.runVirshCommand(ctx, "dumpxml", req.Name)
+// domainName has already passed ambiguousDomainNameError (domainNameFor), so
+// `virsh dumpxml <name>` cannot resolve to a different domain by ID or UUID.
+func bindExistingDomain(ctx context.Context, vp *VirshProvider, req contracts.CreateRequest, domainName, state string) (contracts.CreateResponse, error) {
+	res, err := vp.runVirshCommand(ctx, "dumpxml", domainName)
 	if err != nil {
 		// Transient (connection) or the domain vanished since the list — both
 		// resolve on retry, which re-lists and re-decides.
 		return contracts.CreateResponse{}, contracts.NewRetryableError(
-			fmt.Sprintf("read owner metadata of existing domain %q", req.Name), err)
+			fmt.Sprintf("read owner metadata of existing domain %q", domainName), err)
 	}
 
 	recorded, perr := domainOwners(res.Stdout)
 	if perr == nil && requesterOwnsDomain(req.Owner, recorded) {
 		log.Printf("INFO Domain %s already exists (state: %s) and is owned by this VirtualMachine (uid %s); treating create as idempotent",
-			req.Name, state, req.Owner.UID)
-		return contracts.CreateResponse{ID: req.Name}, nil
+			domainName, state, req.Owner.UID)
+		return contracts.CreateResponse{ID: domainName}, nil
 	}
 
 	switch {
 	case perr != nil:
 		log.Printf("WARN Refusing to bind VirtualMachine %s/%s (uid %q) to existing domain %s: its owner metadata could not be read: %v",
-			req.Owner.Namespace, req.Owner.Name, req.Owner.UID, req.Name, perr)
+			req.Owner.Namespace, req.Owner.Name, req.Owner.UID, domainName, perr)
 	case req.Owner.IsZero():
 		log.Printf("WARN Refusing to bind existing domain %s: the create request carries no owner UID (manager older than the provider?), "+
-			"so ownership cannot be proven", req.Name)
+			"so ownership cannot be proven", domainName)
 	case len(recorded) == 0:
 		log.Printf("WARN Refusing to bind VirtualMachine %s/%s (uid %s) to existing domain %s: it has no VirtRigaud owner metadata "+
 			"(not created by VirtRigaud, or created before ownership stamping); adopt it instead",
-			req.Owner.Namespace, req.Owner.Name, req.Owner.UID, req.Name)
+			req.Owner.Namespace, req.Owner.Name, req.Owner.UID, domainName)
 	default:
 		log.Printf("WARN Refusing to bind VirtualMachine %s/%s (uid %s) to existing domain %s: it is owned by %v",
-			req.Owner.Namespace, req.Owner.Name, req.Owner.UID, req.Name, recorded)
+			req.Owner.Namespace, req.Owner.Name, req.Owner.UID, domainName, recorded)
 	}
 	return contracts.CreateResponse{}, contracts.NewConflictError(fmt.Sprintf(
 		"libvirt domain %q already exists on the host and is not owned by this VirtualMachine; "+
 			"refusing to bind to it. Bring the existing domain under management through the adoption flow, "+
-			"remove it, or rename the VirtualMachine", req.Name), nil)
+			"remove it, or rename the VirtualMachine", domainName), nil)
+}
+
+// bindOwnedLegacyDomain decides a namespaced create when a domain with the
+// request's LEGACY (bare) name, legacyName (legacyCreateDomainName), exists on
+// vp's host. It binds that domain — the VM ID is legacyName — ONLY when its
+// owner stamp records req.Owner's UID: this VirtualMachine created it before
+// domains were namespaced and the manager lost the status.id write, so
+// creating "<namespace>.<name>" would leave a second domain (and its disk and
+// seed) behind. bound is true then.
+//
+// A bare-named domain with a missing, foreign or unreadable stamp is someone
+// else's legacy domain (e.g. another namespace's pre-upgrade "web"): it is not
+// a conflict for the namespaced create, which proceeds (bound false, nil
+// error). Only a failure to read the domain is an error (retryable), because
+// proceeding then could leave this VM's own legacy domain behind.
+func bindOwnedLegacyDomain(ctx context.Context, vp *VirshProvider, req contracts.CreateRequest, legacyName, state string) (contracts.CreateResponse, bool, error) {
+	res, err := vp.runVirshCommand(ctx, "dumpxml", legacyName)
+	if err != nil {
+		return contracts.CreateResponse{}, false, contracts.NewRetryableError(
+			fmt.Sprintf("read owner metadata of existing domain %q", legacyName), err)
+	}
+	recorded, perr := domainOwners(res.Stdout)
+	if perr == nil && requesterOwnsDomain(req.Owner, recorded) {
+		log.Printf("INFO Domain %s (legacy, un-namespaced name; state: %s) is owned by this VirtualMachine (uid %s); "+
+			"binding to it instead of creating a namespaced domain", legacyName, state, req.Owner.UID)
+		return contracts.CreateResponse{ID: legacyName}, true, nil
+	}
+	log.Printf("INFO Domain %s (legacy, un-namespaced name) exists but is not owned by VirtualMachine %s/%s (uid %s); "+
+		"creating its namespaced domain", legacyName, req.Owner.Namespace, req.Owner.Name, req.Owner.UID)
+	return contracts.CreateResponse{}, false, nil
 }
 
 // stripOwnerMetadata removes every VirtRigaud owner stamp from a domain
@@ -373,13 +429,10 @@ func looksLikeUUID(name string) bool {
 // crypto/rand. Every new domain (create and clone) gets one, so a domain UUID is
 // neither predictable nor reused.
 //
-// It does NOT make two concurrent creates of the same name safe. libvirt does
-// refuse a define whose name exists under a different UUID, but the create
-// pipeline still stages per-name files (the domain XML, the disk, the
-// cloud-init ISO) at paths derived only from the name, so a racing create can
-// overwrite the other's files before either defines. That race is tracked
-// separately; ownership stamping only closes the sequential bind-to-existing
-// case.
+// It is not what keeps concurrent creates apart: libvirt does refuse a define
+// whose name exists under a different UUID, but the staged files are kept
+// apart by the namespaced domain name (domain_naming.go) and by per-create
+// staging paths (staging.go).
 func generateRandomUUID() (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {

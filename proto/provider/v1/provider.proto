@@ -290,6 +290,17 @@ message CloneRequest {
   // a clustered provider REQUIRES it and rejects an empty value with
   // InvalidArgument rather than defaulting to some host.
   string source_host_id = 7;
+
+  // target_vm names the Kubernetes VirtualMachine the clone will be bound to:
+  // its namespace (VMClone spec.target.namespace, defaulted to the VMClone's
+  // namespace) and its name (== target_name). uid is empty: the VirtualMachine
+  // does not exist yet when the clone is made. A provider whose VM names are
+  // host-global names the clone from it (the libvirt provider:
+  // "<namespace>.<name>", the same rule as Create) and returns that name as
+  // target_vm_id, which the operator records as the VM's status.id. Additive
+  // and backward-compatible: other providers ignore it, and an unset value
+  // keeps the legacy target_name naming.
+  ObjectIdentity target_vm = 8;
 }
 
 message CloneResponse {
@@ -394,6 +405,17 @@ message ImportDiskRequest {
   string backend_type = 8;     // Staging backend: "pvc" | "nfs" | "s3"; empty == legacy pvc (ADR-0006)
   string transfer_mode = 9;    // Transfer mode: "auto" | "relay" | "direct" (ADR-0006)
   string storage_options_json = 10; // JSON-encoded backend-specific options (ADR-0006; empty in Slice 0)
+
+  // target_vm names the Kubernetes VirtualMachine the disk is imported for (a
+  // VMMigration's target): its namespace and name; uid is empty, as the
+  // VirtualMachine does not exist yet. A provider that attaches an imported
+  // disk in place only when it carries the VM's own name derives the landing
+  // name from it with the same rule its Create uses (the libvirt provider:
+  // "<namespace>.<name>-migrated"), so the naming rule has one owner, the
+  // provider. The landing path is returned in path, which the operator hands
+  // back to the VM unchanged. Additive and backward-compatible: other providers
+  // ignore it, and an unset value keeps the legacy target_name naming.
+  ObjectIdentity target_vm = 11;
 }
 
 message ImportDiskResponse {
@@ -536,10 +558,13 @@ message GetCapabilitiesResponse {
 }
 
 // ObjectIdentity names a Kubernetes object on the wire (CreateRequest.owner,
-// DeleteRequest.owner, DescribeRequest.owner).
+// DeleteRequest.owner, DescribeRequest.owner, CloneRequest.target_vm,
+// ImportDiskRequest.target_vm).
 // uid is the authoritative identity (unique for the object's whole lifetime,
 // never reused after deletion); namespace and name are informational (audit,
-// operator diagnostics) and must never be used for authorization on their own.
+// operator diagnostics, and naming the hypervisor-side object — e.g. the
+// libvirt provider names a new domain "<namespace>.<name>") and must never be
+// used for authorization on their own.
 message ObjectIdentity {
   string uid = 1;
   string namespace = 2;

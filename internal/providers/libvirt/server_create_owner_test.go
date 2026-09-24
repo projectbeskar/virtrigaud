@@ -134,19 +134,26 @@ func TestCreate_OwnerRoundTripsManagerToProvider(t *testing.T) {
 }
 
 // TestCreate_EndToEnd_ForeignDomainRefusedOverTheWire runs the real *Provider
-// behind the real gRPC Server against a fake virsh: tenant B's create of "web"
-// on a host where tenant A owns "web" reaches the manager as a Conflict with no
-// ID, while tenant A's retried create binds idempotently.
+// behind the real gRPC Server against a fake virsh. Domains are namespaced
+// ("<namespace>.<name>"), so a foreign domain can only collide by carrying
+// exactly this VM's namespaced name — here a previous incarnation of team-a/web
+// (another UID): that create reaches the manager as a Conflict with no ID,
+// while the owner's retried create binds its own namespaced domain.
+//
+// Updated deliberately for namespaced naming: it used to show tenant B's "web"
+// refused because tenant A owned "web"; that is no longer a collision at all
+// (TestCreate_SameNameInAnotherNamespaceIsNoCollision).
 func TestCreate_EndToEnd_ForeignDomainRefusedOverTheWire(t *testing.T) {
-	installOwnershipFakeVirsh(t, map[string]string{"web": stampedDomainXML("web", ownerTeamA)})
+	installOwnershipFakeVirsh(t, map[string]string{"team-a.web": stampedDomainXML("team-a.web", staleTeamAWeb)})
 	c := startLibvirtGRPC(t, &Provider{virshProvider: localTestVirshProvider()})
 
-	resp, err := c.Create(context.Background(), contracts.CreateRequest{Name: "web", Owner: ownerTeamB})
+	resp, err := c.Create(context.Background(), contracts.CreateRequest{Name: "web", Owner: ownerTeamA})
 	require.Error(t, err)
 	assert.True(t, contracts.IsConflict(err), "got %v", err)
 	assert.Empty(t, resp.ID)
 
+	installOwnershipFakeVirsh(t, map[string]string{"team-a.web": stampedDomainXML("team-a.web", ownerTeamA)})
 	resp, err = c.Create(context.Background(), contracts.CreateRequest{Name: "web", Owner: ownerTeamA})
 	require.NoError(t, err)
-	assert.Equal(t, "web", resp.ID)
+	assert.Equal(t, "team-a.web", resp.ID, "the manager records the namespaced domain name as status.id")
 }

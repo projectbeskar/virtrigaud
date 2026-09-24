@@ -941,7 +941,10 @@ for a clustered provider.
 - **Deleting a VM whose create is in flight.** A VM with `pendingHost` set and no
   `status.id` gets an owner-checked `Delete` sent to the pending host, so a domain
   the create already made there does not leak — and one that is not the VM's own
-  (e.g. after an `AlreadyExists`) is never deleted. A VM whose only create was
+  (e.g. after an `AlreadyExists`) is never deleted. The `Delete` addresses the VM
+  by its bare name; the libvirt provider names a new domain `<namespace>.<name>`
+  (see [`libvirt-domain-ownership.md`](libvirt-domain-ownership.md#domain-names)),
+  so it also looks that domain up, under the same owner check. A VM whose only create was
   refused with a name conflict has no pending host left and is deleted without
   any provider call.
 - **Deleting an unbound clustered VM** retains the finalizer (`Placed=False`,

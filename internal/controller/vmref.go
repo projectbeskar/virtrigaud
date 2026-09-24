@@ -158,9 +158,11 @@ func vmRefFor(vm *infravirtrigaudiov1beta1.VirtualMachine, provider *infravirtri
 // pendingCreateRef builds the VMRef that addresses a clustered VM whose Create
 // is in flight: status.placement.pendingHost is set but the provider has not
 // confirmed the VM, so status.id is still empty (ADR-0007 Addendum A, A2). The
-// id is the name Create was sent with (the VirtualMachine name, which a
-// clustered libvirt provider uses as the domain name), and the owner is the
-// VM's identity. It is used for exactly two things, per A2: routing the Create
+// id is the name Create was sent with (the VirtualMachine name), and the owner
+// is the VM's identity. The operator does not know the provider's host-side
+// name for the VM (the libvirt provider names a new domain
+// "<namespace>.<name>"); a provider that derives one resolves the bare name
+// through the owner, under its owner check. It is used for exactly two things, per A2: routing the Create
 // retry, and the finalizer's owner-checked cleanup Delete. ok is false when no
 // create is pending.
 func pendingCreateRef(vm *infravirtrigaudiov1beta1.VirtualMachine) (contracts.VMRef, bool) {

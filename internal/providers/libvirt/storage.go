@@ -28,6 +28,10 @@ import (
 // StorageProvider manages libvirt storage operations
 type StorageProvider struct {
 	virshProvider *VirshProvider
+	// stagingDir is the host directory DownloadCloudImage stages a download
+	// in (defaultHostStagingDir unless the caller points it elsewhere; see
+	// staging.go).
+	stagingDir string
 }
 
 // StoragePool represents a libvirt storage pool
@@ -69,6 +73,7 @@ type ImageTemplate struct {
 func NewStorageProvider(virshProvider *VirshProvider) *StorageProvider {
 	return &StorageProvider{
 		virshProvider: virshProvider,
+		stagingDir:    defaultHostStagingDir,
 	}
 }
 
@@ -273,8 +278,16 @@ func (s *StorageProvider) DownloadCloudImage(ctx context.Context, imageURL, volu
 		return nil, fmt.Errorf("failed to get pool info: %w", err)
 	}
 
-	// Download image to temporary location
-	tempImage := filepath.Join("/tmp", fmt.Sprintf("%s-temp.img", volumeName))
+	// Download to a staging file made for this download alone (mktemp on the
+	// host: created exclusively, mode 0600, unpredictable name in the sticky
+	// staging directory, so nothing else can pre-create, predict or swap it
+	// between the header check and the convert), removed whatever the outcome.
+	tempImage, err := makeHostTemp(ctx, s.virshProvider,
+		filepath.Join(s.stagingDir, volumeName+"-temp.img."+mktempTemplateSuffix), false)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create download staging file: %w", err)
+	}
+	defer removeHostPath(ctx, s.virshProvider, tempImage, false)
 	log.Printf("INFO Downloading image to temporary location: %s", tempImage)
 
 	result, err := s.virshProvider.runVirshCommand(ctx, "!", "wget", "-O", tempImage, imageURL)
@@ -288,7 +301,6 @@ func (s *StorageProvider) DownloadCloudImage(ctx context.Context, imageURL, volu
 	// Convert with the probed format so qemu-img does not re-probe.
 	srcFormat, err := inspectHostImage(ctx, s.virshProvider, downloadedImageSubject, tempImage)
 	if err != nil {
-		_, _ = s.virshProvider.runVirshCommand(ctx, "!", "rm", "-f", tempImage)
 		return nil, fmt.Errorf("inspect downloaded image: %w", err)
 	}
 
@@ -319,9 +331,6 @@ func (s *StorageProvider) DownloadCloudImage(ctx context.Context, imageURL, volu
 			return nil, fmt.Errorf("failed to convert image: %w, output: %s", err, result.Stderr)
 		}
 	}
-
-	// Clean up temporary file
-	_, _ = s.virshProvider.runVirshCommand(ctx, "!", "rm", "-f", tempImage)
 
 	// Fix ownership and permissions for libvirt access
 	log.Printf("INFO Setting proper ownership and permissions for %s", targetPath)
@@ -594,8 +603,13 @@ func (s *StorageProvider) CreateVolumeFromImageFile(ctx context.Context, sourceI
 		return s.adoptVolumeInPlace(ctx, sourceImagePath, poolName)
 	}
 
-	// Source is not in pool directory or wrong format - need to copy/convert
+	// Source is not in pool directory or wrong format - need to copy/convert.
+	// Never over a disk another domain uses (e.g. a VM already running on the
+	// disk a second import of the same name would replace).
 	targetPath := filepath.Join(poolInfo.Path, volumeName+qcow2Ext)
+	if err := ensureDiskTargetFree(ctx, s.virshProvider, importedDiskSubject(volumeName), targetPath); err != nil {
+		return nil, err
+	}
 	return s.convertImageToVolume(ctx, sourceImagePath, "qcow2", targetPath, volumeName, poolName, sizeGB)
 }
 

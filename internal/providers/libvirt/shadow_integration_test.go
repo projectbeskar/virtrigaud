@@ -149,6 +149,7 @@ func TestBuildNativeList_TestDriver(t *testing.T) {
 	assert.NotEmpty(t, testVM.ProviderRaw["uuid"], "uuid parsed from XML")
 	assert.Greater(t, testVM.CPU, int32(0), "vcpu parsed from XML")
 	assert.Greater(t, testVM.MemoryMiB, int64(0), "memory parsed from XML (KiB->MiB guard applied)")
+	assert.NotContains(t, testVM.ProviderRaw, contracts.VMInfoOwnerUIDKey, "the built-in domain carries no VirtRigaud owner stamp")
 }
 
 // TestNativeVsVirshListParity_TestDriver is the list shadow comparison end-to-end

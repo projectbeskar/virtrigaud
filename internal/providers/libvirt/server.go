@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -375,6 +376,23 @@ func ownerFromProto(o *providerv1.ObjectIdentity) contracts.ObjectIdentity {
 	}
 }
 
+// importVolumeName is the volume name an ImportDisk request lands its disk
+// under (importedDiskVolumeName over the request's target_vm and target_name):
+// "<namespace>.<name>-migrated" for a request naming its target VirtualMachine,
+// the legacy target_name otherwise ("" lets the caller generate one). A request
+// whose target_name and target_vm disagree is InvalidArgument.
+func importVolumeName(req *providerv1.ImportDiskRequest) (string, error) {
+	name, err := importedDiskVolumeName(ownerFromProto(req.GetTargetVm()), req.GetTargetName())
+	if err != nil {
+		var pe *contracts.ProviderError
+		if stderrors.As(err, &pe) {
+			return "", status.Error(codes.InvalidArgument, pe.Message)
+		}
+		return "", err
+	}
+	return name, nil
+}
+
 // SnapshotCreate creates a VM snapshot
 func (s *Server) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotCreateRequest) (*providerv1.SnapshotCreateResponse, error) {
 	if s.clusteredProvider() {
@@ -594,6 +612,7 @@ func (s *Server) Clone(ctx context.Context, req *providerv1.CloneRequest) (*prov
 	resp, err := s.provider.Clone(ctx, contracts.CloneRequest{
 		Source:        contracts.VMRef{ID: req.SourceVmId, HostID: req.SourceHostId},
 		TargetName:    req.TargetName,
+		TargetVM:      ownerFromProto(req.GetTargetVm()),
 		Linked:        req.Linked,
 		ClassJSON:     req.ClassJson,
 		PlacementJSON: req.PlacementJson,
@@ -884,7 +903,10 @@ func (s *Server) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReque
 	}
 
 	// Generate target volume name from TargetName or source filename
-	volumeName := req.TargetName
+	volumeName, err := importVolumeName(req)
+	if err != nil {
+		return nil, err
+	}
 	if volumeName == "" {
 		// Extract filename without extension
 		parts := strings.Split(sourcePath, "/")
@@ -900,6 +922,12 @@ func (s *Server) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReque
 	// Copy disk file to remote libvirt host (if using SSH connection)
 	var finalSourcePath string
 	if strings.Contains(conn.uri(), "ssh://") {
+		// The copy lands directly at <DefaultImageDir>/<volume>.qcow2: never
+		// over a disk another domain uses.
+		if err := ensureDiskTargetFree(ctx, hostConnRunner{conn: conn}, importedDiskSubject(volumeName),
+			filepath.Join(DefaultImageDir, volumeName+qcow2Ext)); err != nil {
+			return nil, err
+		}
 		log.Printf("INFO Copying disk file to remote libvirt host...")
 		remotePath, err := conn.copyDiskToRemote(ctx, sourcePath, volumeName)
 		if err != nil {

@@ -59,8 +59,14 @@ var (
 )
 
 // Clone clones the source VM identified by req.Source into a new libvirt
-// domain named req.TargetName. It is the libvirt implementation of the
-// provider-contract Cloner capability (issues #153/#179).
+// domain. It is the libvirt implementation of the provider-contract Cloner
+// capability (issues #153/#179).
+//
+// The new domain is named by cloneDomainName — "<namespace>.<name>" of the
+// VirtualMachine the clone will be bound to (req.TargetVM), the same rule as
+// Create, or the bare req.TargetName for an older manager — and that name is
+// returned as TargetVmID, which the operator records as the VM's status.id.
+// Its disk is "<domain>-disk.qcow2".
 //
 // Two modes are supported, selected by req.Linked:
 //
@@ -92,9 +98,11 @@ func (p *Provider) Clone(ctx context.Context, req contracts.CloneRequest) (contr
 	if req.TargetName == "" {
 		return contracts.CloneResponse{}, contracts.NewInvalidSpecError("clone target name is required", nil)
 	}
-	// A target name virsh would resolve as a domain ID/UUID would make every
-	// later by-name operation on the clone address a different domain.
-	if err := ambiguousDomainNameError(req.TargetName); err != nil {
+	// Name the target domain. A (legacy) target name virsh would resolve as a
+	// domain ID/UUID would make every later by-name operation on the clone
+	// address a different domain, so domainNameFor rejects it.
+	domainName, err := cloneDomainName(req)
+	if err != nil {
 		return contracts.CloneResponse{}, err
 	}
 
@@ -118,9 +126,9 @@ func (p *Provider) Clone(ctx context.Context, req contracts.CloneRequest) (contr
 		return contracts.CloneResponse{}, contracts.NewRetryableError("failed to list domains", err)
 	}
 	for _, d := range domains {
-		if d.Name == req.TargetName {
+		if d.Name == domainName {
 			return contracts.CloneResponse{}, contracts.NewInvalidSpecError(
-				fmt.Sprintf("target VM %q already exists", req.TargetName), nil)
+				fmt.Sprintf("target VM %q already exists (libvirt domain %q)", req.TargetName, domainName), nil)
 		}
 	}
 
@@ -138,8 +146,12 @@ func (p *Provider) Clone(ctx context.Context, req contracts.CloneRequest) (contr
 	if err != nil {
 		return contracts.CloneResponse{}, fmt.Errorf("get pool %q info: %w", clonePoolName, err)
 	}
-	targetVolumeName := vmDiskVolumeName(req.TargetName)
+	targetVolumeName := vmDiskVolumeName(domainName)
 	targetDiskPath := filepath.Join(poolInfo.Path, fmt.Sprintf("%s.qcow2", targetVolumeName))
+	// Never let the overlay/copy replace a disk another domain uses.
+	if err := ensureDiskTargetFree(ctx, p.virshProvider, domainDiskSubject(domainName), targetDiskPath); err != nil {
+		return contracts.CloneResponse{}, err
+	}
 
 	if req.Linked {
 		if err := p.createLinkedOverlay(ctx, srcDiskPath, srcDiskFormat, targetDiskPath); err != nil {
@@ -158,7 +170,7 @@ func (p *Provider) Clone(ctx context.Context, req contracts.CloneRequest) (contr
 		return contracts.CloneResponse{}, contracts.NewRetryableError("failed to dump source domain XML", err)
 	}
 
-	targetXML, srcNvramPath, targetNvramPath, err := rewriteDomainXMLForClone(srcXML.Stdout, req.TargetName, srcDiskPath, targetDiskPath)
+	targetXML, srcNvramPath, targetNvramPath, err := rewriteDomainXMLForClone(srcXML.Stdout, domainName, srcDiskPath, targetDiskPath)
 	if err != nil {
 		return contracts.CloneResponse{}, contracts.NewInvalidSpecError("rewrite source domain XML for clone", err)
 	}
@@ -188,18 +200,15 @@ func (p *Provider) Clone(ctx context.Context, req contracts.CloneRequest) (contr
 
 	// Clone stays single-host in this slice (no CloneRequest.target_host_id yet,
 	// ADR-0007 P1): define on the provider's own host.
-	if err := p.createDomainDefinition(ctx, p.virshProvider, req.TargetName, targetXML); err != nil {
-		return contracts.CloneResponse{}, fmt.Errorf("create target domain definition: %w", err)
-	}
-	if err := p.defineDomain(ctx, p.virshProvider, req.TargetName); err != nil {
+	if err := p.defineDomainFromXML(ctx, p.virshProvider, domainName, targetXML); err != nil {
 		return contracts.CloneResponse{}, fmt.Errorf("define target domain: %w", err)
 	}
 
-	log.Printf("INFO Successfully cloned VM %s -> %s (linked=%t)", sourceID, req.TargetName, req.Linked)
+	log.Printf("INFO Successfully cloned VM %s -> %s (libvirt domain %s, linked=%t)", sourceID, req.TargetName, domainName, req.Linked)
 
 	// virsh define is synchronous; no TaskRef. The clone is left powered off.
 	return contracts.CloneResponse{
-		TargetVmID: req.TargetName,
+		TargetVmID: domainName,
 	}, nil
 }
 

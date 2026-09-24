@@ -361,7 +361,9 @@ data:
     **Solution**:
     ```bash
     # Check if VNC is listening
-    virsh dumpxml <vm-name> | grep graphics
+    # The libvirt domain name is the VM's status.id: <namespace>.<vm-name> for
+    # VMs created since namespaced domain names, the bare <vm-name> for older ones.
+    virsh dumpxml "$(kubectl get vm <vm-name> -n <namespace> -o jsonpath='{.status.id}')" | grep graphics
     
     # Check firewall
     sudo ufw allow 5900/tcp

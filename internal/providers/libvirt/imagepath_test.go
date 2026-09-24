@@ -943,27 +943,41 @@ func TestCreateDiskFromHostImage_CopiesBaseImage(t *testing.T) {
 	p := &Provider{virshProvider: vp, imageDirs: []string{h.images}}
 
 	vol, err := p.createDiskFromHostImage(context.Background(), vp, NewStorageProvider(vp),
-		contracts.CreateRequest{Name: "web", Image: contracts.VMImage{Path: img}}, img, vmDiskVolumeName("web"), 10)
+		contracts.CreateRequest{Name: "web", Owner: ownerTeamA, Image: contracts.VMImage{Path: img}},
+		"team-a.web", img, vmDiskVolumeName("team-a.web"), 10)
 	require.NoError(t, err)
-	assert.Equal(t, filepath.Join(h.images, "web-disk.qcow2"), vol.Path, "the VM gets its own disk")
+	assert.Equal(t, filepath.Join(h.images, "team-a.web-disk.qcow2"), vol.Path, "the VM gets its own disk, named after its domain")
 	assert.NotEqual(t, img, vol.Path)
 	assert.Contains(t, h.log("qemu-img"), "convert -f raw -O qcow2 "+img+" "+vol.Path)
 }
 
 // TestCreateDiskFromHostImage_AdoptsOwnImportedDisk proves the migration
-// landing disk is still attached in place (no copy).
+// landing disk is still attached in place (no copy): <domain>-migrated.qcow2,
+// where <domain> is the namespaced domain name for a request with an owner and
+// the bare VM name for an older manager's request.
 func TestCreateDiskFromHostImage_AdoptsOwnImportedDisk(t *testing.T) {
-	h := newFakeHost(t)
-	vp := h.host("h1")
-	own := h.file(h.images, "web-migrated.qcow2")
-	p := &Provider{virshProvider: vp, imageDirs: []string{h.images}}
+	for _, tc := range []struct {
+		name   string
+		owner  contracts.ObjectIdentity
+		domain string
+	}{
+		{"namespaced", ownerTeamA, "team-a.web"},
+		{"legacy (no owner)", contracts.ObjectIdentity{}, "web"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newFakeHost(t)
+			vp := h.host("h1")
+			own := h.file(h.images, tc.domain+"-migrated.qcow2")
+			p := &Provider{virshProvider: vp, imageDirs: []string{h.images}}
 
-	vol, err := p.createDiskFromHostImage(context.Background(), vp, NewStorageProvider(vp),
-		contracts.CreateRequest{Name: "web", Image: contracts.VMImage{Path: own, ImportedDisk: true}},
-		own, vmDiskVolumeName("web"), 10)
-	require.NoError(t, err)
-	assert.Equal(t, own, vol.Path)
-	assert.NotContains(t, h.log("qemu-img"), "convert")
+			vol, err := p.createDiskFromHostImage(context.Background(), vp, NewStorageProvider(vp),
+				contracts.CreateRequest{Name: "web", Owner: tc.owner, Image: contracts.VMImage{Path: own, ImportedDisk: true}},
+				tc.domain, own, vmDiskVolumeName(tc.domain), 10)
+			require.NoError(t, err)
+			assert.Equal(t, own, vol.Path)
+			assert.NotContains(t, h.log("qemu-img"), "convert")
+		})
+	}
 }
 
 // TestCreate_Clustered_ConfinesOnTargetHost proves the checks run against the
@@ -1067,16 +1081,24 @@ func TestDownloadCloudImage_RejectsBackingFile(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(h.root, "download.info.json"),
 		[]byte(`{"format":"vmdk","format-specific":{"type":"vmdk","data":{"extents":[{"filename":"/dev/sda"}]}}}`), 0o600))
 
-	// DownloadCloudImage stages in /tmp/<volume>-temp.img: use a unique volume
-	// name and remove the fake's sidecar afterwards.
+	// DownloadCloudImage stages in <staging>/<volume>-temp.img.<random>
+	// (mktemp); point the staging directory at a scratch directory.
 	volume := fmt.Sprintf("imagepath-test-%d-disk", time.Now().UnixNano())
-	staged := filepath.Join("/tmp", volume+"-temp.img")
-	t.Cleanup(func() { _ = os.Remove(staged); _ = os.Remove(staged + ".info.json") })
+	sp := NewStorageProvider(vp)
+	sp.stagingDir = t.TempDir()
 
-	_, err := NewStorageProvider(vp).DownloadCloudImage(context.Background(), "https://evil.example/x.vmdk", volume, "default", 10)
+	_, err := sp.DownloadCloudImage(context.Background(), "https://evil.example/x.vmdk", volume, "default", 10)
 	requireRejected(t, err, "extent")
 	assert.NotContains(t, err.Error(), "evil.example", "the URL is not echoed into the error")
 	assert.NotContains(t, h.log("qemu-img"), "convert")
+
+	// The download went to a per-download mktemp file, which is removed.
+	dl := strings.Fields(strings.TrimSpace(h.log("wget")))
+	require.GreaterOrEqual(t, len(dl), 2)
+	staged := dl[1] // wget -O <staged> <url>
+	assert.Equal(t, sp.stagingDir, filepath.Dir(staged))
+	assert.True(t, strings.HasPrefix(filepath.Base(staged), volume+"-temp.img."), "staged as %s", staged)
+	assert.Len(t, filepath.Base(staged), len(volume+"-temp.img.")+len(mktempTemplateSuffix))
 	_, statErr := os.Stat(staged)
 	assert.True(t, os.IsNotExist(statErr), "the rejected download is removed")
 }

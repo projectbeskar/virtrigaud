@@ -503,6 +503,7 @@ func (c *Client) Clone(ctx context.Context, req contracts.CloneRequest) (contrac
 		ClassJson:     req.ClassJSON,
 		PlacementJson: req.PlacementJSON,
 		CustomizeJson: req.CustomizeJSON,
+		TargetVm:      targetIdentityToProto(req.TargetVM),
 	})
 	if err != nil {
 		return contracts.CloneResponse{}, c.mapGRPCError("clone", err)
@@ -927,6 +928,7 @@ func (c *Client) ImportDisk(ctx context.Context, req contracts.ImportDiskRequest
 		BackendType:        req.BackendType,
 		TransferMode:       req.TransferMode,
 		StorageOptionsJson: req.StorageOptionsJSON,
+		TargetVm:           targetIdentityToProto(req.TargetVM),
 	}
 
 	resp, err := c.client.ImportDisk(ctx, grpcReq)
@@ -1215,6 +1217,22 @@ func isVMOperationFailedStatus(st *status.Status) bool {
 // sees a namespace/name without the UID that alone may authorize anything.
 func objectIdentityToProto(o contracts.ObjectIdentity) *providerv1.ObjectIdentity {
 	if o.IsZero() {
+		return nil
+	}
+	return &providerv1.ObjectIdentity{
+		Uid:       o.UID,
+		Namespace: o.Namespace,
+		Name:      o.Name,
+	}
+}
+
+// targetIdentityToProto converts the identity of a VirtualMachine that does
+// not exist yet (CloneRequest.target_vm, ImportDiskRequest.target_vm) to the
+// wire message. Unlike an owner it carries no UID; it is sent only when both
+// namespace and name are known (nil otherwise), so a provider never names a VM
+// from a partial identity.
+func targetIdentityToProto(o contracts.ObjectIdentity) *providerv1.ObjectIdentity {
+	if o.Namespace == "" || o.Name == "" {
 		return nil
 	}
 	return &providerv1.ObjectIdentity{

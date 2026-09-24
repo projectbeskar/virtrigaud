@@ -98,13 +98,21 @@ func (s *Server) importDiskFromS3(ctx context.Context, req *providerv1.ImportDis
 		return nil, fmt.Errorf("target pool %q has no resolvable host path", poolName)
 	}
 
-	volumeName := req.TargetName
+	volumeName, err := importVolumeName(req)
+	if err != nil {
+		return nil, err
+	}
 	if volumeName == "" {
 		volumeName = fmt.Sprintf("imported-disk-%d", time.Now().Unix())
 	}
 	volumeName = sanitizeVolumeName(volumeName)
 	poolPath := strings.TrimRight(poolInfo.Path, "/")
 	targetPath := fmt.Sprintf("%s/%s.qcow2", poolPath, volumeName)
+	// Never land over a disk another domain uses (e.g. a VM already running on
+	// the disk a second import of the same name would replace).
+	if err := ensureDiskTargetFree(ctx, hostConnRunner{conn: conn}, importedDiskSubject(volumeName), targetPath); err != nil {
+		return nil, err
+	}
 
 	// The staged S3 object is in the SOURCE provider's native flattened format,
 	// threaded by the controller as req.Format (vmdk from a vSphere source, qcow2

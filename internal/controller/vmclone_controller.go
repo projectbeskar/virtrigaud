@@ -292,9 +292,15 @@ func (r *VMCloneReconciler) startClone(
 			"provider does not support clone"), nil
 	}
 
+	// TargetVM names the VirtualMachine bindTargetVM will create for the clone.
+	// A provider whose VM names are host-global (libvirt) names the clone from
+	// it with its Create naming rule ("<namespace>.<name>") and returns that
+	// name as TargetVmID, which is recorded as the VM's status.id — the
+	// operator never re-derives it.
 	req := contracts.CloneRequest{
 		Source:        source,
 		TargetName:    clone.Spec.Target.Name,
+		TargetVM:      contracts.ObjectIdentity{Namespace: targetNamespace, Name: clone.Spec.Target.Name},
 		Linked:        linked,
 		ClassJSON:     r.classJSON(ctx, clone),
 		PlacementJSON: r.placementJSON(ctx, clone),

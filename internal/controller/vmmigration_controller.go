@@ -1130,11 +1130,23 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 	}
 
 	// Build import request. transfer_mode is resolved auto→relay (Slice 1).
+	//
+	// TargetVM names the VirtualMachine the Creating phase will make for this
+	// disk. A provider that attaches the landed disk in place only when it
+	// carries that VM's own host-side name (libvirt: "<namespace>.<name>-migrated")
+	// derives the landing name from it with its own Create naming rule, so the
+	// rule has a single owner — the provider. The operator never re-derives the
+	// name: it records the landing path ImportDisk returns (status.diskInfo.
+	// targetPath) and hands it to the target VM unchanged, which is also what
+	// isOwnMigrationDisk compares. TargetName keeps the legacy "<vm>-migrated"
+	// for providers (and older libvirt providers) that ignore TargetVM.
+	targetVM := migrationTargetVMKey(migration)
 	importReq := contracts.ImportDiskRequest{
 		SourceURL:          sourceURL,
 		StorageHint:        "", // Let provider choose
 		Format:             importFormat,
-		TargetName:         migration.Spec.Target.Name + contracts.ImportedDiskNameSuffix,
+		TargetName:         targetVM.Name + contracts.ImportedDiskNameSuffix,
+		TargetVM:           contracts.ObjectIdentity{Namespace: targetVM.Namespace, Name: targetVM.Name},
 		VerifyChecksum:     migration.Spec.Options == nil || migration.Spec.Options.VerifyChecksums,
 		ExpectedChecksum:   "",
 		Credentials:        creds,
@@ -1256,28 +1268,35 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 	return ctrl.Result{RequeueAfter: migrationImportSettleInterval}, nil
 }
 
+// migrationTargetVMKey is the namespace/name of the VirtualMachine a migration
+// creates on its target: spec.target.name (or "<source>-migrated" when unset)
+// in spec.target.namespace (or the migration's own namespace). The import
+// phase names the landed disk for this VM (ImportDiskRequest.TargetVM) and the
+// Creating phase creates exactly this VM, so the two always agree.
+func migrationTargetVMKey(migration *infrav1beta1.VMMigration) client.ObjectKey {
+	name := migration.Spec.Target.Name
+	if name == "" {
+		name = fmt.Sprintf("%s-migrated", migration.Spec.Source.VMRef.Name)
+	}
+	namespace := migration.Spec.Target.Namespace
+	if namespace == "" {
+		namespace = migration.Namespace
+	}
+	return client.ObjectKey{Namespace: namespace, Name: name}
+}
+
 // handleCreatingPhase creates the target VM
 func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migration *infrav1beta1.VMMigration) (ctrl.Result, error) {
 	logger := logging.FromContext(ctx)
 	logger.Info("Handling creating phase")
 
-	// Check if target VM already exists
-	targetVMName := migration.Spec.Target.Name
-	if targetVMName == "" {
-		targetVMName = fmt.Sprintf("%s-migrated", migration.Spec.Source.VMRef.Name)
-	}
-
-	targetNamespace := migration.Spec.Target.Namespace
-	if targetNamespace == "" {
-		targetNamespace = migration.Namespace
-	}
+	// Check if target VM already exists. The key is the same one the import
+	// phase named the landed disk for (migrationTargetVMKey).
+	vmKey := migrationTargetVMKey(migration)
+	targetVMName, targetNamespace := vmKey.Name, vmKey.Namespace
 
 	// Check if VM CR already exists
 	existingVM := &infrav1beta1.VirtualMachine{}
-	vmKey := client.ObjectKey{
-		Namespace: targetNamespace,
-		Name:      targetVMName,
-	}
 
 	err := r.Get(ctx, vmKey, existingVM)
 	if err == nil {
