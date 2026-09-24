@@ -247,9 +247,17 @@ type ProviderSpec struct {
 	// first); a validating webhook (a later ADR-0007 P1 PR) rejects "cluster" on
 	// type: vsphere|proxmox (ADR-0007 D2). Defaulting "" to "single" keeps every
 	// existing single-host Provider byte-for-byte unchanged.
+	//
+	// Topology is IMMUTABLE once set (ADR-0007 Addendum A): VMs record where they
+	// run (status.placement) under one topology, and every per-VM call is routed
+	// and owner-checked by it, so flipping it would send a placed VM's calls down
+	// the wrong path. To change it, create a new Provider. The apiserver compares
+	// the defaulted values, so an object created before this field existed (read
+	// back as "single") keeps accepting ordinary updates.
 	// +optional
 	// +kubebuilder:default=single
 	// +kubebuilder:validation:Enum=single;cluster
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.topology is immutable; create a new Provider to change it"
 	Topology string `json:"topology,omitempty"`
 
 	// Endpoint is the provider endpoint URI

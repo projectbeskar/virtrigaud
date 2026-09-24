@@ -83,16 +83,57 @@ func (v *ProviderCustomValidator) ValidateCreate(_ context.Context, obj runtime.
 	return nil, validateProviderTopology(provider)
 }
 
-// ValidateUpdate validates a Provider on update. Because the rule is evaluated
-// against the new object's (type, topology), this also rejects a patch that
-// flips an existing non-libvirt Provider to topology="cluster". It returns no
-// admission warnings.
-func (v *ProviderCustomValidator) ValidateUpdate(_ context.Context, _, newObj runtime.Object) (admission.Warnings, error) {
+// ValidateUpdate validates a Provider on update. It rejects any change of
+// spec.topology (it is immutable, ADR-0007 Addendum A — the CRD enforces the
+// same rule with a CEL transition rule), and re-checks the D2 topology×type
+// rule against the new object. It returns no admission warnings.
+func (v *ProviderCustomValidator) ValidateUpdate(_ context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
 	provider, ok := newObj.(*Provider)
 	if !ok {
 		return nil, fmt.Errorf("expected a Provider object but got %T", newObj)
 	}
+	old, ok := oldObj.(*Provider)
+	if !ok {
+		return nil, fmt.Errorf("expected a Provider object but got %T", oldObj)
+	}
+	if err := validateTopologyUnchanged(old, provider); err != nil {
+		return nil, err
+	}
 	return nil, validateProviderTopology(provider)
+}
+
+// effectiveTopology is the topology a Provider actually has: the empty string
+// (an object created before the field existed, or a client that omits it) is
+// the default, "single" (ADR-0007 D9).
+func effectiveTopology(p *Provider) string {
+	if p.Spec.Topology == "" {
+		return ProviderTopologySingle
+	}
+	return p.Spec.Topology
+}
+
+// validateTopologyUnchanged rejects an update that changes spec.topology
+// (ADR-0007 Addendum A). VMs record their placement under one topology and
+// every per-VM call is routed and owner-checked by it: flipping cluster→single
+// would send a placed VM's delete down the un-owner-checked single-host path
+// (where it could destroy another tenant's same-named VM), and single→cluster
+// would strand existing VMs without a host binding. "" and "single" are the
+// same topology, so an ordinary update of a Provider created before the field
+// existed is never rejected.
+func validateTopologyUnchanged(old, updated *Provider) error {
+	if effectiveTopology(old) == effectiveTopology(updated) {
+		return nil
+	}
+	fieldErr := field.Invalid(
+		field.NewPath("spec").Child("topology"),
+		updated.Spec.Topology,
+		fmt.Sprintf("spec.topology is immutable (was %q); create a new Provider to change it", effectiveTopology(old)),
+	)
+	return apierrors.NewInvalid(
+		GroupVersion.WithKind("Provider").GroupKind(),
+		updated.Name,
+		field.ErrorList{fieldErr},
+	)
 }
 
 // ValidateDelete is a no-op: deletion is always allowed. It returns no admission
