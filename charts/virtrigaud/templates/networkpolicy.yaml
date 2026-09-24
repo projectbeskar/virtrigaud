@@ -1,0 +1,169 @@
+{{- if .Values.security.networkPolicies.enabled }}
+{{- /*
+  NetworkPolicies for the manager and provider pods (opt-in; gated on
+  .Values.security.networkPolicies.enabled, default OFF — see the values.yaml
+  block for the default-off rationale and requirements).
+
+  These are networking.k8s.io/v1 objects and only take effect on a CNI that
+  ENFORCES NetworkPolicy. Once a pod is selected by a policy that lists a
+  policyType, all traffic of that direction that is not explicitly allowed is
+  denied — so the allow-lists below are exhaustive for each pod's real flows.
+
+  Selecting a pod for a direction is default-deny for that direction, so we only
+  add Egress to policyTypes when at least one egress rule is enabled; otherwise
+  turning every egress toggle off would silently black-hole all egress. Health
+  probes and (when enabled) webhook admission use an OPEN source `from` (no peer
+  restriction, port-scoped only): the kubelet and the API server originate from
+  host/node IPs that a pod/namespace selector cannot match, and narrowing them
+  would break readiness or, under failurePolicy=Fail, Provider admission.
+*/}}
+{{- $np := .Values.security.networkPolicies }}
+{{- $mgrEgress := or $np.egress.dns $np.egress.kubernetesAPI $np.egress.managerToProvider }}
+{{- $provEgress := or $np.egress.dns $np.egress.providerToHypervisor }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "virtrigaud.fullname" . }}-manager
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "virtrigaud.labels" . | nindent 4 }}
+    app.kubernetes.io/component: manager
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "virtrigaud.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: manager
+  policyTypes:
+    - Ingress
+    {{- if $mgrEgress }}
+    - Egress
+    {{- end }}
+  ingress:
+    # Health/readiness probes (TCP 8081) from the kubelet. The kubelet's source
+    # is the node IP (host network), not a pod, so `from` is left open and the
+    # rule is port-scoped. Always allowed — dropping it fails readiness.
+    - ports:
+        - protocol: TCP
+          port: 8081
+    {{- if $np.ingress.metrics }}
+    # Metrics scrape (TCP 8080) from the monitoring namespace(s). Mirrors
+    # config/network-policy/allow-metrics-traffic.yaml.
+    - from:
+        - namespaceSelector:
+            {{- toYaml $np.monitoringNamespaceSelector | nindent 12 }}
+      ports:
+        - protocol: TCP
+          port: 8080
+    {{- end }}
+    {{- if and $np.ingress.webhookIngress .Values.webhooks.enabled }}
+    # Webhook admission (TCP 9443). The API server initiates this and its source
+    # IP (control-plane node / LB) cannot be selected by pod/namespace, so
+    # `from` is intentionally open. Rendered only when webhooks are enabled.
+    - ports:
+        - protocol: TCP
+          port: 9443
+    {{- end }}
+  {{- if $mgrEgress }}
+  egress:
+    {{- if $np.egress.dns }}
+    # DNS to kube-dns / CoreDNS (set dnsEgressCIDRs for NodeLocal DNSCache).
+    {{- include "virtrigaud.dnsEgressRule" . | nindent 4 }}
+    {{- end }}
+    {{- if $np.egress.kubernetesAPI }}
+    # Kubernetes API server. Endpoint IPs are host/node IPs (not pods), so we
+    # allow by port; narrow to apiServerCIDRs when the control-plane network is
+    # known.
+    - ports:
+        {{- range $np.apiServerPorts }}
+        - protocol: TCP
+          port: {{ . }}
+        {{- end }}
+      {{- if $np.apiServerCIDRs }}
+      to:
+        {{- range $np.apiServerCIDRs }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
+      {{- end }}
+    {{- end }}
+    {{- if $np.egress.managerToProvider }}
+    # gRPC to provider pods (manager is the client). A bare podSelector is
+    # scoped to THIS namespace; set providerNamespaceSelector to also reach
+    # provider pods in other namespaces (you must then render an equivalent
+    # provider policy into each of those namespaces — NetworkPolicy is
+    # namespaced). NOTE: once providerNamespaceSelector is set the peer matches
+    # ONLY the namespaces it selects, so include the release namespace too.
+    - to:
+        - podSelector:
+            {{- toYaml $np.providerPodSelector | nindent 12 }}
+          {{- with $np.providerNamespaceSelector }}
+          namespaceSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ $np.providerGRPCPort }}
+    {{- end }}
+  {{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "virtrigaud.fullname" . }}-provider
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "virtrigaud.labels" . | nindent 4 }}
+    app.kubernetes.io/component: provider
+spec:
+  # Selects the CR-managed provider pods by default (override providerPodSelector
+  # for chart-templated providers). NetworkPolicy is namespaced: this only
+  # covers provider pods in the release namespace.
+  podSelector:
+    {{- toYaml $np.providerPodSelector | nindent 4 }}
+  policyTypes:
+    - Ingress
+    {{- if $provEgress }}
+    - Egress
+    {{- end }}
+  ingress:
+    # Health/readiness probes (TCP 8080) from the kubelet (open source, host
+    # network). CR-managed provider pods serve /healthz on 8080.
+    - ports:
+        - protocol: TCP
+          port: 8080
+    {{- if $np.ingress.managerToProvider }}
+    # gRPC from the manager pod (providerGRPCPort).
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "virtrigaud.selectorLabels" $ | nindent 14 }}
+              app.kubernetes.io/component: manager
+      ports:
+        - protocol: TCP
+          port: {{ $np.providerGRPCPort }}
+    {{- end }}
+  {{- if $provEgress }}
+  egress:
+    {{- if $np.egress.dns }}
+    # DNS to kube-dns / CoreDNS — resolve hypervisor + storage hostnames (set
+    # dnsEgressCIDRs for NodeLocal DNSCache).
+    {{- include "virtrigaud.dnsEgressRule" . | nindent 4 }}
+    {{- end }}
+    {{- if $np.egress.providerToHypervisor }}
+    # Hypervisor control/data planes + migration staging, OUTSIDE the cluster.
+    # Deployment-specific: narrow to hypervisorEgressCIDRs to lock this down.
+    - ports:
+        {{- range $np.hypervisorEgressPorts }}
+        - protocol: TCP
+          port: {{ . }}
+        {{- end }}
+      {{- if $np.hypervisorEgressCIDRs }}
+      to:
+        {{- range $np.hypervisorEgressCIDRs }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
+      {{- end }}
+    {{- end }}
+  {{- end }}
+{{- end }}

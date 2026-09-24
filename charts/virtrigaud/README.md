@@ -174,6 +174,89 @@ providers:
 
 See [values.yaml](values.yaml) for complete configuration options.
 
+### Network Policies
+
+The chart can render namespaced `NetworkPolicy` objects that isolate the manager
+and provider pods to only the flows they need. They are **opt-in and disabled by
+default** (`security.networkPolicies.enabled: false`).
+
+> **Why default-off?** Earlier chart versions declared `enabled: true` but no
+> template consumed the values, so the effective behavior was always "no
+> policies." Wiring real templates while keeping `true` would suddenly enforce
+> isolation on `helm upgrade` and could black-hole webhook admission,
+> manager↔provider gRPC, metrics scraping or DNS in clusters not designed for
+> it. Default-off makes enabling a deliberate, behavior-neutral, testable choice.
+
+**Requirements before enabling:**
+
+- A **CNI that enforces NetworkPolicy** (Calico, Cilium, Antrea, Weave, …). On a
+  CNI without enforcement these objects are inert.
+- **Deployment-specific tuning** — the defaults are sane but not universal.
+
+**What the policies allow** (when `enabled: true`):
+
+| Pod | Ingress | Egress |
+|-----|---------|--------|
+| **manager** | health probes (`:8081`, open source — kubelet); metrics (`:8080`, from `monitoringNamespaceSelector`); webhook (`:9443`, open source — API server, only when `webhooks.enabled`) | DNS (kube-dns); Kubernetes API (`apiServerPorts`); gRPC to providers (`providerGRPCPort`) |
+| **provider** | health/metrics (`:8080`, open source — kubelet); gRPC from manager (`providerGRPCPort`) | DNS (kube-dns); hypervisor + migration staging (`hypervisorEgressPorts`) |
+
+Ingress rules for the kubelet (health probes) and the API server (webhook
+admission) use an **open source** (`from` omitted, port-scoped only): those
+callers originate from host/node IPs that a pod/namespace selector cannot match.
+Narrowing them would break readiness or, under `webhooks.validating.failurePolicy:
+Fail`, brick `Provider` admission.
+
+**Tuning checklist** (all values-driven — no template edits needed):
+
+- **Metrics scrape:** label your monitoring namespace to match
+  `monitoringNamespaceSelector` (default `metrics: enabled`, mirroring the
+  kubebuilder scaffold). If Prometheus runs in the **same** namespace as the
+  manager, label that namespace too — a `namespaceSelector` does not implicitly
+  match the policy's own namespace.
+- **DNS:** defaults target CoreDNS (`k8s-app: kube-dns` in `kube-system`). On
+  clusters with **NodeLocal DNSCache**, pods resolve via a node-local
+  link-local IP a selector can't match — set `dnsEgressCIDRs` (e.g.
+  `169.254.20.10/32`) or DNS is black-holed.
+- **Providers in another namespace:** by default the manager→provider egress
+  peer is scoped to the release namespace. If provider pods run elsewhere, set
+  `providerNamespaceSelector` (include the release namespace too) **and** render
+  an equivalent provider policy into each provider namespace — `NetworkPolicy`
+  is namespaced.
+- **Chart-templated providers** (`providers.*.enabled: true`): those pods use
+  `app.kubernetes.io/component: provider-<hv>` and a gRPC probe on `9090` —
+  override `providerPodSelector` and `providerGRPCPort`, and widen the provider
+  health allow to the probe port.
+- **Lock down egress (recommended for regulated/banking):** pin
+  `apiServerCIDRs` to the control-plane network and `hypervisorEgressCIDRs` to
+  your hypervisor/storage networks. The latter is SSRF defense-in-depth behind
+  the application-layer allowlist (migration storage endpoints are user-supplied).
+- **Do not disable** `egress.dns` or `egress.kubernetesAPI` while other egress
+  rules stay on — that turns those into denied directions and **wedges the
+  manager** (no leader election, no reconcile). Likewise keep `ingress.webhookIngress`
+  on when `failurePolicy: Fail` webhooks are enabled.
+- **Provider metrics exposure:** provider `/metrics` shares the health port
+  (`:8080`), whose ingress is open-source, so provider telemetry is reachable
+  cluster-wide (telemetry only, no secrets) — a posture note for tight
+  environments.
+
+Enable and verify with a render before applying:
+
+```bash
+helm template virtrigaud charts/virtrigaud \
+  --set security.networkPolicies.enabled=true | grep -A2 'kind: NetworkPolicy'
+```
+
+### Transport TLS floor
+
+The manager pins an explicit **minimum of TLS 1.2** on its webhook and metrics
+servers (rather than relying on Go's implicit default), the broadly-compatible
+regulated floor — the Kubernetes API server and Prometheus both negotiate ≥ 1.2.
+The floor is active on the always-TLS **webhook** server; on the **metrics**
+server it applies when metrics are served over HTTPS (`--metrics-secure=true`;
+the default serves plaintext metrics). No cipher-suite list is pinned — Go's
+TLS 1.2+ defaults are AEAD-preferring and runtime-maintained, and over-specifying
+ciphers is a staleness hazard.
+
 ## GitOps Integration
 
 ### ArgoCD
