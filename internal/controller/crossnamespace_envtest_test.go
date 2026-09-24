@@ -165,11 +165,11 @@ var _ = Describe("Cross-namespace VMClone target (envtest)", func() {
 		})
 		Expect(err).NotTo(HaveOccurred())
 		cp := &clonerProvider{cloneResp: contracts.CloneResponse{TargetVmID: tgt.Name + ".web"}}
-		Expect(NewVMCloneReconciler(mgr.GetClient(), mgr.GetScheme(), &stubResolver{provider: cp},
+		Expect(NewVMCloneReconciler(mgr.GetClient(), mgr.GetAPIReader(), mgr.GetScheme(), &stubResolver{provider: cp},
 			record.NewFakeRecorder(100)).SetupWithManager(mgr)).To(Succeed())
 		// The migration controller registers the same kind of watch; it must
 		// build and start alongside. It never dials a provider here.
-		migrations := NewVMMigrationReconciler(mgr.GetClient(), mgr.GetScheme(), nil, record.NewFakeRecorder(100), false)
+		migrations := NewVMMigrationReconciler(mgr.GetClient(), mgr.GetAPIReader(), mgr.GetScheme(), nil, record.NewFakeRecorder(100), false)
 		migrations.providerInstanceFn = func(context.Context, *infravirtrigaudiov1beta1.Provider) (contracts.Provider, error) {
 			return nil, errors.New("no provider in this spec")
 		}

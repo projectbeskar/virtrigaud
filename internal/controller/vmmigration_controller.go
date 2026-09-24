@@ -77,6 +77,14 @@ type VMMigrationReconciler struct {
 	// byte-for-byte unchanged. See gateDiskExport / gateDiskImport.
 	EnforceCapabilities bool
 
+	// APIReader reads straight from the API server, bypassing the informer
+	// cache (the manager's GetAPIReader). The cross-namespace grant is re-read
+	// through it immediately before each side effect in the target namespace —
+	// the ImportDisk call and the target VirtualMachine Create — so a revoked
+	// grant is honoured even while the cache still shows it. Nil falls back to
+	// Client, which only unit tests built as struct literals rely on.
+	APIReader client.Reader
+
 	// StorageHostPolicy gates the network address of a migration staging backend
 	// (S3 endpoint / NFS server) against an SSRF allowlist at the Validating
 	// phase (ADR-0006 C3). When nil, a default policy is used that still denies
@@ -141,12 +149,16 @@ func (r *VMMigrationReconciler) longOpAlreadyStarted(migration *infrav1beta1.VMM
 
 // NewVMMigrationReconciler creates a new VMMigration reconciler.
 //
+// apiReader must be an uncached reader (mgr.GetAPIReader()); see
+// VMMigrationReconciler.APIReader.
+//
 // enforceCapabilities mirrors the manager's --enforce-provider-capabilities
 // flag (issue #176); when true, the migration export/import phases are gated
 // on the source/target providers' self-reported capabilities. Pass false to
 // preserve the pre-#176 behaviour exactly.
 func NewVMMigrationReconciler(
 	client client.Client,
+	apiReader client.Reader,
 	scheme *runtime.Scheme,
 	remoteResolver *remote.Resolver,
 	recorder record.EventRecorder,
@@ -154,6 +166,7 @@ func NewVMMigrationReconciler(
 ) *VMMigrationReconciler {
 	return &VMMigrationReconciler{
 		Client:              client,
+		APIReader:           apiReader,
 		Scheme:              scheme,
 		RemoteResolver:      remoteResolver,
 		Recorder:            recorder,
@@ -1182,6 +1195,13 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 		return res, nil
 	}
 
+	// ImportDisk lands a disk named for the target VM. Re-read the grant from
+	// the API server (not the cache) right before it, and before the in-memory
+	// guard is claimed so a refusal doesn't block a later import.
+	if allowed, res, err := r.confirmTargetNamespaceLive(ctx, migration); !allowed {
+		return res, err
+	}
+
 	// Claim the in-memory import guard for this object generation BEFORE
 	// issuing the RPC. ImportDisk writes the target qcow2; a duplicate driven
 	// by a stale cache would overwrite it. If another reconcile already claimed
@@ -1324,6 +1344,39 @@ func (r *VMMigrationReconciler) gateTargetNamespace(
 		return false, ctrl.Result{}, err
 	}
 	return true, ctrl.Result{}, nil
+}
+
+// confirmTargetNamespaceLive re-checks the cross-namespace grant through the
+// uncached APIReader immediately before a side effect in the target namespace
+// (the ImportDisk call, the target VirtualMachine Create). gateTargetNamespace
+// reads the informer cache, which can lag a revocation; this closes that window
+// for the calls that create something. The own namespace needs no read. A
+// refusal is recorded exactly like the cached one; a read error is returned so
+// the controller retries with backoff and nothing is issued.
+func (r *VMMigrationReconciler) confirmTargetNamespaceLive(
+	ctx context.Context,
+	migration *infrav1beta1.VMMigration,
+) (allowed bool, result ctrl.Result, err error) {
+	targetNamespace := migrationTargetVMKey(migration).Namespace
+	allowed, err = targetNamespaceAllowed(ctx, r.liveReader(), migration.Namespace, targetNamespace)
+	if err != nil {
+		logging.FromContext(ctx).Error(err, "Failed to re-read the target namespace grant; not proceeding")
+		return false, ctrl.Result{}, err
+	}
+	if !allowed {
+		result, err = r.markTargetNamespaceNotAllowed(ctx, migration, targetNamespace)
+		return false, result, err
+	}
+	return true, ctrl.Result{}, nil
+}
+
+// liveReader is the uncached reader for grant re-checks: APIReader, or Client
+// when none was injected.
+func (r *VMMigrationReconciler) liveReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
 }
 
 // markTargetNamespaceNotAllowed records that the migration's target namespace
@@ -1557,6 +1610,12 @@ func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migrati
 	// Set placement if provided
 	if migration.Spec.Target.PlacementRef != nil {
 		targetVM.Spec.PlacementRef = migration.Spec.Target.PlacementRef
+	}
+
+	// Re-read the grant from the API server (not the cache) right before the
+	// Create in the target namespace.
+	if allowed, res, err := r.confirmTargetNamespaceLive(ctx, migration); !allowed {
+		return res, err
 	}
 
 	// Create the VM resource

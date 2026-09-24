@@ -81,17 +81,28 @@ type VMCloneReconciler struct {
 	// VirtualMachine controller.
 	RemoteResolver ProviderResolver
 	Recorder       record.EventRecorder
+
+	// APIReader reads straight from the API server, bypassing the informer
+	// cache (the manager's GetAPIReader). The cross-namespace grant is re-read
+	// through it immediately before each side effect in the target namespace —
+	// the Clone RPC and the target VirtualMachine Create — so a revoked grant
+	// is honoured even while the cache still shows it. Nil falls back to
+	// Client, which only unit tests built as struct literals rely on.
+	APIReader client.Reader
 }
 
-// NewVMCloneReconciler creates a new VMClone reconciler.
+// NewVMCloneReconciler creates a new VMClone reconciler. apiReader must be an
+// uncached reader (mgr.GetAPIReader()); see VMCloneReconciler.APIReader.
 func NewVMCloneReconciler(
 	c client.Client,
+	apiReader client.Reader,
 	scheme *runtime.Scheme,
 	remoteResolver ProviderResolver,
 	recorder record.EventRecorder,
 ) *VMCloneReconciler {
 	return &VMCloneReconciler{
 		Client:         c,
+		APIReader:      apiReader,
 		Scheme:         scheme,
 		RemoteResolver: remoteResolver,
 		Recorder:       recorder,
@@ -317,6 +328,13 @@ func (r *VMCloneReconciler) startClone(
 		CustomizeJSON: r.customizeJSON(ctx, clone),
 	}
 
+	// The Clone RPC creates a VM named for the target namespace. Re-read the
+	// grant from the API server (not the cache) right before it; nothing that
+	// does I/O runs between this check and the RPC.
+	if allowed, res, err := r.confirmTargetNamespaceLive(ctx, clone, targetNamespace); !allowed {
+		return res, err
+	}
+
 	now := metav1.Now()
 	clone.Status.Phase = infrav1beta1.ClonePhaseCloning
 	clone.Status.StartTime = &now
@@ -435,6 +453,11 @@ func (r *VMCloneReconciler) bindTargetVM(
 	targetVM := &infrav1beta1.VirtualMachine{}
 	switch err := r.Get(ctx, vmKey, targetVM); {
 	case errors.IsNotFound(err):
+		// Re-read the grant from the API server (not the cache) right before
+		// the Create in the target namespace.
+		if allowed, res, liveErr := r.confirmTargetNamespaceLive(ctx, clone, targetNamespace); !allowed {
+			return res, liveErr
+		}
 		targetVM = r.buildTargetVM(clone, sourceVM, targetNamespace)
 		if createErr := r.Create(ctx, targetVM); createErr != nil && !errors.IsAlreadyExists(createErr) {
 			logger.Error(createErr, "Failed to create target VM CR", "vm", vmKey.Name)
@@ -697,6 +720,38 @@ func (r *VMCloneReconciler) gateTargetNamespace(
 		return false, ctrl.Result{}, err
 	}
 	return true, ctrl.Result{}, nil
+}
+
+// confirmTargetNamespaceLive re-checks the cross-namespace grant through the
+// uncached APIReader immediately before a side effect in the target namespace
+// (the Clone RPC, the target VirtualMachine Create). gateTargetNamespace reads
+// the informer cache, which can lag a revocation; this closes that window for
+// the calls that create something. The own namespace needs no read. A refusal
+// is recorded exactly like the cached one; a read error is returned so the
+// controller retries with backoff and nothing is issued.
+func (r *VMCloneReconciler) confirmTargetNamespaceLive(
+	ctx context.Context,
+	clone *infrav1beta1.VMClone,
+	targetNamespace string,
+) (allowed bool, result ctrl.Result, err error) {
+	allowed, err = targetNamespaceAllowed(ctx, r.liveReader(), clone.Namespace, targetNamespace)
+	if err != nil {
+		logging.FromContext(ctx).Error(err, "Failed to re-read the target namespace grant; not proceeding")
+		return false, ctrl.Result{}, err
+	}
+	if !allowed {
+		return false, r.markTargetNamespaceNotAllowed(ctx, clone, targetNamespace), nil
+	}
+	return true, ctrl.Result{}, nil
+}
+
+// liveReader is the uncached reader for grant re-checks: APIReader, or Client
+// when none was injected.
+func (r *VMCloneReconciler) liveReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
 }
 
 // markTargetNamespaceNotAllowed records that the clone's target namespace does
