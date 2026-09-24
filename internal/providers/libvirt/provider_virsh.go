@@ -19,6 +19,7 @@ package libvirt
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/url"
@@ -307,11 +308,14 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, vp *VirshProvider,
 	// The cloud-init seed is made for this create alone (a fresh mktemp
 	// directory, see staging.go). A defined domain keeps it — its CD-ROM
 	// references the ISO, and Delete removes the directory — so it is removed
-	// here only when the create fails after preparing it.
+	// here only when the create fails after preparing it AND the domain is
+	// known not to exist. If the define's outcome could not be established,
+	// the seed is kept: a leaked seed directory is recoverable, a domain whose
+	// CD-ROM points at a deleted ISO is not.
 	var cloudInitISOPath string
-	created := false
+	keepSeed := false
 	defer func() {
-		if !created && cloudInitISOPath != "" {
+		if !keepSeed && cloudInitISOPath != "" {
 			cloudInitProvider.CleanupCloudInit(ctx, cloudInitISOPath)
 		}
 	}()
@@ -373,9 +377,10 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, vp *VirshProvider,
 
 	// Stage the definition and define the domain in libvirt.
 	if err := p.defineDomainFromXML(ctx, vp, domainName, domainXML); err != nil {
+		keepSeed = errors.Is(err, errDefineOutcomeUnknown)
 		return "", err
 	}
-	created = true
+	keepSeed = true
 
 	log.Printf("INFO Successfully created VM with storage and cloud-init: %s (libvirt domain %s)", req.Name, domainName)
 	return domainName, nil

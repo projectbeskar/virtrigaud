@@ -18,6 +18,7 @@ package libvirt
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"path/filepath"
@@ -157,10 +158,78 @@ func (p *Provider) defineDomainFromXML(ctx context.Context, vp *VirshProvider, d
 		if result != nil {
 			stderr = result.Stderr
 		}
-		return fmt.Errorf("failed to define domain: %w, output: %s", err, stderr)
+		defineErr := fmt.Errorf("failed to define domain: %w, output: %s", err, stderr)
+		// `virsh define` may have succeeded on the host with only its reply
+		// lost (e.g. the SSH session dropped): check before reporting failure,
+		// so the caller does not remove files the new domain already uses.
+		switch verifyDefined(ctx, vp, domainName, domainXML) {
+		case defineVerified:
+			log.Printf("WARN virsh define of %s reported an error (%v), but the domain exists with the UUID this "+
+				"create generated; treating the define as successful", domainName, err)
+			return nil
+		case defineAbsent:
+			return defineErr
+		default:
+			return fmt.Errorf("%w: %w", errDefineOutcomeUnknown, defineErr)
+		}
 	}
 	log.Printf("INFO Successfully defined domain: %s", domainName)
 	return nil
+}
+
+// errDefineOutcomeUnknown marks a failed `virsh define` whose outcome could
+// not be established afterwards (verifyDefined): the domain may or may not
+// exist, so the caller must keep anything it may reference (the seed ISO).
+var errDefineOutcomeUnknown = errors.New("could not establish whether the domain was defined")
+
+// defineOutcome is what verifyDefined established about a failed define.
+type defineOutcome int
+
+const (
+	// defineUnknown: the check itself failed; the domain may exist.
+	defineUnknown defineOutcome = iota
+	// defineVerified: a domain of that name exists with the generated UUID —
+	// the define succeeded and only its reply was lost.
+	defineVerified
+	// defineAbsent: no domain of that name exists, or one exists with another
+	// UUID (so it is not the one this create generated).
+	defineAbsent
+)
+
+// virshNoDomainMarkers are the virsh error texts for a domain that does not
+// exist (`error: failed to get domain 'x'`, libvirt's VIR_ERR_NO_DOMAIN
+// message).
+var virshNoDomainMarkers = []string{"failed to get domain", "Domain not found"}
+
+// verifyDefined runs `virsh domuuid <domainName>` after a define reported an
+// error and compares the answer with the UUID in domainXML (the fresh random
+// UUID the create generated). domainName has passed the naming rule, so virsh
+// cannot resolve it as an ID or UUID.
+func verifyDefined(ctx context.Context, vp *VirshProvider, domainName, domainXML string) defineOutcome {
+	d, err := parseDomainLibvirtxml(domainXML)
+	want := ""
+	if err == nil {
+		want = strings.TrimSpace(d.UUID)
+	}
+	if want == "" {
+		return defineUnknown
+	}
+	res, err := vp.runVirshCommand(ctx, "domuuid", domainName)
+	if err != nil {
+		if res != nil {
+			for _, m := range virshNoDomainMarkers {
+				if strings.Contains(res.Stderr, m) {
+					return defineAbsent
+				}
+			}
+		}
+		log.Printf("WARN Could not check whether domain %s was defined: %v", domainName, err)
+		return defineUnknown
+	}
+	if strings.EqualFold(strings.TrimSpace(res.Stdout), want) {
+		return defineVerified
+	}
+	return defineAbsent
 }
 
 // ensureDiskTargetFree refuses to let VirtRigaud write a disk file over target

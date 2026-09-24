@@ -73,7 +73,12 @@ case "$1" in
     echo "$uuid" >> "$d/uuids"
     cp "$2" "$d/defined-from"
     echo "$2" > "$d/defined-path"
+    if [ -f "$d/define-reply-lost" ]; then echo "error: Disconnected from the hypervisor due to end of file" >&2; exit 1; fi
     echo "Domain '$name' defined from $2" ;;
+  domuuid)
+    if [ -f "$d/fail-domuuid" ]; then echo "error: failed to connect to the hypervisor" >&2; exit 1; fi
+    if [ -f "$d/dom-$2.xml" ]; then sed -n 's:.*<uuid>\(.*\)</uuid>.*:\1:p' "$d/dom-$2.xml" | head -n 1; exit 0; fi
+    echo "error: failed to get domain '$2'" >&2; exit 1 ;;
   pool-list) printf ' Name      State    Autostart\n-------------------------------\n default   active   yes\n\n' ;;
   pool-info) printf 'Name:           default\nState:          running\n' ;;
   pool-dumpxml) printf "<pool type='dir'><name>default</name><target><path>%s</path></target></pool>\n<!-- /var/lib/libvirt/images -->\n" "$(cat "$d/pooldir")" ;;
@@ -268,6 +273,81 @@ func TestCreate_StagingIsPerCreateAndCleanedOnFailure(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "team-a.web", resp.ID)
 	assert.NotEqual(t, filepath.Dir(firstSeed), filepath.Dir(lastGenisoOutput(t, c)), "every create gets its own seed directory")
+}
+
+// TestCreate_DefineReplyLost: `virsh define` succeeded on the host but its
+// reply was lost. The create checks `virsh domuuid` against the UUID it
+// generated and treats the define as done, so the seed ISO the new domain's
+// CD-ROM references is kept (a retry then binds the owned domain). When the
+// outcome cannot be established the seed is kept too; only a domain that is
+// verifiably absent gets its seed removed.
+func TestCreate_DefineReplyLost(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("define succeeded, reply lost: success, seed kept", func(t *testing.T) {
+		c := newCreateHost(t)
+		base := c.file(c.images, "ubuntu.qcow2")
+		require.NoError(t, os.WriteFile(filepath.Join(c.root, "h1", "define-reply-lost"), nil, 0o600))
+
+		resp, err := c.p.Create(ctx, c.createReq(ownerTeamA, base))
+		require.NoError(t, err)
+		assert.Equal(t, "team-a.web", resp.ID)
+		refs, err := parseDomainPathRefs(c.domainXML("team-a.web"))
+		require.NoError(t, err)
+		require.Len(t, refs.disks, 2)
+		assert.FileExists(t, refs.disks[1], "the seed ISO the domain references is kept")
+		assert.Contains(t, c.log("virsh"), "\tdomuuid team-a.web")
+
+		// The retry binds the owned domain whose seed is still there.
+		resp, err = c.p.Create(ctx, c.createReq(ownerTeamA, base))
+		require.NoError(t, err)
+		assert.Equal(t, "team-a.web", resp.ID)
+		assert.FileExists(t, refs.disks[1])
+	})
+
+	t.Run("define failed and the check failed: error, seed kept", func(t *testing.T) {
+		c := newCreateHost(t)
+		base := c.file(c.images, "ubuntu.qcow2")
+		require.NoError(t, os.WriteFile(filepath.Join(c.root, "h1", "fail-define"), nil, 0o600))
+		require.NoError(t, os.WriteFile(filepath.Join(c.root, "h1", "fail-domuuid"), nil, 0o600))
+
+		_, err := c.p.Create(ctx, c.createReq(ownerTeamA, base))
+		require.Error(t, err)
+		assert.ErrorIs(t, err, errDefineOutcomeUnknown)
+		entries := c.stagingEntries()
+		require.Len(t, entries, 1, "only the seed directory is kept; the staged XML is removed")
+		assert.True(t, strings.HasPrefix(entries[0], cloudInitSeedDirPrefix))
+	})
+
+	t.Run("define failed and the domain is absent: error, seed removed", func(t *testing.T) {
+		c := newCreateHost(t)
+		base := c.file(c.images, "ubuntu.qcow2")
+		require.NoError(t, os.WriteFile(filepath.Join(c.root, "h1", "fail-define"), nil, 0o600))
+
+		_, err := c.p.Create(ctx, c.createReq(ownerTeamA, base))
+		require.Error(t, err)
+		assert.NotErrorIs(t, err, errDefineOutcomeUnknown)
+		assert.Empty(t, c.stagingEntries())
+	})
+}
+
+func TestVerifyDefined(t *testing.T) {
+	c := newCreateHost(t)
+	hostDir := filepath.Join(c.root, "h1")
+	mine := stampedDomainXML("team-a.web", ownerTeamA) // UUID 11111111-2222-4333-8444-555555555555
+
+	assert.Equal(t, defineAbsent, verifyDefined(context.Background(), c.vp, "team-a.web", mine), "no such domain")
+
+	require.NoError(t, os.WriteFile(filepath.Join(hostDir, "dom-team-a.web.xml"), []byte(mine), 0o600))
+	assert.Equal(t, defineVerified, verifyDefined(context.Background(), c.vp, "team-a.web", mine))
+
+	other := strings.Replace(mine, "11111111-2222-4333-8444-555555555555", "22222222-2222-4333-8444-555555555555", 1)
+	assert.Equal(t, defineAbsent, verifyDefined(context.Background(), c.vp, "team-a.web", other),
+		"a same-named domain with another UUID is not the one this create defined")
+
+	require.NoError(t, os.WriteFile(filepath.Join(hostDir, "fail-domuuid"), nil, 0o600))
+	assert.Equal(t, defineUnknown, verifyDefined(context.Background(), c.vp, "team-a.web", mine))
+	assert.Equal(t, defineUnknown, verifyDefined(context.Background(), c.vp, "team-a.web", "<domain/>"), "no UUID to compare")
 }
 
 // lastGenisoOutput returns the -output path of the last genisoimage call.
