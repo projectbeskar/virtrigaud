@@ -66,6 +66,12 @@ const (
 	// name already taken by a domain this VirtualMachine does not own. A rising
 	// count is a tenant-collision (or probing) signal worth alerting on.
 	errReasonProviderCreateRejected = "provider-create-rejected"
+
+	// errReasonProviderPower and errReasonProviderReconfigure count a
+	// clustered VM's Power / Reconfigure that found its bound host unavailable
+	// or the VM missing on it (ADR-0007 Addendum A, slice 2).
+	errReasonProviderPower       = "provider-power"
+	errReasonProviderReconfigure = "provider-reconfigure"
 )
 
 // vmCreateConflictRetryInterval is the requeue cadence after the provider
@@ -126,14 +132,17 @@ const (
 	// reports it missing (A4). It is never re-created; the re-check only notices
 	// an administrator restoring the domain.
 	vmMissingOnHostRetryInterval = 2 * time.Minute
-	// routedOpNotSupportedRetryInterval re-checks a clustered VM whose provider
-	// does not route an operation (Power / Reconfigure) yet, so the unsupported
-	// call is not hammered every few seconds.
-	routedOpNotSupportedRetryInterval = 2 * time.Minute
-	// boundHostUnavailableRetryInterval re-describes a clustered VM whose bound
-	// host is unknown, draining or unreachable (a host-scoped Unavailable). A
-	// dead host must not turn every VM on it into a 5s poll.
+	// boundHostUnavailableRetryInterval re-checks a clustered VM whose bound
+	// host is unknown, draining or unreachable (a host-scoped Unavailable on
+	// Describe, Power or Reconfigure). A dead host must not turn every VM on it
+	// into a 5s poll.
 	boundHostUnavailableRetryInterval = 30 * time.Second
+	// createConflictRescheduleInterval re-schedules a clustered VM whose Create
+	// was refused on its pending host with a name conflict (the host is then
+	// excluded for this VM). Each conflict removes one candidate host, so the
+	// retries are bounded by the pool size; when every candidate is excluded the
+	// VM waits on vmCreateConflictRetryInterval instead.
+	createConflictRescheduleInterval = 5 * time.Second
 )
 
 // forceDeleteAnnotation, when set to "true" on a VirtualMachine, lets the
@@ -455,11 +464,8 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	// VM exists, check current state
 	desc, err := providerInstance.Describe(ctx, ref)
 	if err != nil {
-		if ref.Routed() && contracts.IsNotFound(err) {
-			return r.handleMissingOnBoundHost(ctx, vm, ref)
-		}
-		if ref.Routed() && contracts.IsHostUnavailable(err) {
-			return r.handleBoundHostUnavailable(ctx, vm, ref, err)
+		if res, handled := r.handleRoutedOpError(ctx, vm, ref, err, errReasonProviderDescribe); handled {
+			return res, nil
 		}
 		logger.Error(err, "Failed to describe VM")
 		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Failed to describe VM: %v", err))
@@ -473,7 +479,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 			// ADR-0007 Addendum A, A4: a clustered VM is NEVER re-created — not on
 			// the bound host, not elsewhere. Without fencing, a restart could leave
 			// two running copies of one disk (D8).
-			return r.handleMissingOnBoundHost(ctx, vm, ref)
+			return r.handleMissingOnBoundHost(ctx, vm, ref, errReasonProviderDescribe)
 		}
 		logger.Info("VM no longer exists, recreating")
 		vm.Status.ID = ""
@@ -1019,9 +1025,13 @@ func (r *VirtualMachineReconciler) resolveClusterPlacement(
 
 	// CurrentBinding drives the scheduler's D4 idempotent re-selection: a VM
 	// already bound to a still-feasible host re-selects it without churn.
+	// ExcludedHosts are the hosts where a Create of this VM was refused with a
+	// name conflict (ADR-0007 Addendum A, A2 amendment); they are never chosen.
 	currentBinding := ""
+	var excludedHosts []string
 	if vm.Status.Placement != nil {
 		currentBinding = vm.Status.Placement.Host
+		excludedHosts = vm.Status.Placement.ExcludedHosts
 	}
 
 	// (e) Schedule. Resources reuse the CPU/memory buildCreateRequest already
@@ -1038,6 +1048,7 @@ func (r *VirtualMachineReconciler) resolveClusterPlacement(
 		Candidates:       candidates,
 		CurrentBinding:   currentBinding,
 		PlacedVMs:        placedVMs,
+		ExcludedHosts:    excludedHosts,
 		RequiredNetworks: requiredNetworksForScheduling(networks),
 		// TODO(ADR-0007 D6): wire RequiredStoragePools and RequiredMachineType once
 		// there is an unambiguous mapping. A VM's disks carry no storage-pool name
@@ -1047,6 +1058,21 @@ func (r *VirtualMachineReconciler) resolveClusterPlacement(
 		// which is the honest, correct behavior until those inputs exist.
 	})
 	if err != nil {
+		if scheduler.AllExcluded(err) {
+			// Every candidate is a host where a Create of this VM was refused with
+			// a name conflict. Nothing the operator can do on its own will change
+			// that, so report it on Placed and re-check slowly — no hot loop.
+			msg := fmt.Sprintf("every candidate host in pool %q is excluded for this VM (a create there was refused: "+
+				"a same-named domain this VirtualMachine does not own exists on it): %s. Resolve the name conflicts "+
+				"(or rename the VirtualMachine) and clear status.placement.excludedHosts",
+				pool.Name, strings.Join(excludedHosts, ", "))
+			logger.Info("Cannot schedule VM: " + msg)
+			setPlacedCondition(vm, metav1.ConditionFalse, k8s.ReasonAllHostsExcluded, msg)
+			k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonUnschedulable, msg)
+			metrics.RecordError(errReasonPlacement, metrics.ComponentManager)
+			r.updateStatus(ctx, vm)
+			return nil, ctrl.Result{RequeueAfter: vmCreateConflictRetryInterval}, nil
+		}
 		if stderrors.Is(err, scheduler.ErrNoFeasibleHost) {
 			// Capacity/visibility/affinity eliminated every host. The error's
 			// message carries the per-host breakdown; surface it and requeue.
@@ -1134,10 +1160,16 @@ func (r *VirtualMachineReconciler) adjustPowerState(
 
 	taskRef, err := provider.Power(ctx, ref, powerOp)
 	if err != nil {
+		// A clustered VM's host-scoped unavailability or not-found (including a
+		// domain whose owner stamp is not this VM's) is handled like the same
+		// answer to Describe (ADR-0007 Addendum A, slice 2).
+		if res, handled := r.handleRoutedOpError(ctx, vm, ref, err, errReasonProviderPower); handled {
+			return res, nil
+		}
 		logger.Error(err, "Failed to adjust power state")
 		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Failed to adjust power state: %v", err))
 		r.updateStatus(ctx, vm)
-		return ctrl.Result{RequeueAfter: routedOpRetryAfter(ref, err)}, nil
+		return ctrl.Result{RequeueAfter: providerErrorRetryInterval}, nil
 	}
 
 	if taskRef != "" {
@@ -1707,10 +1739,16 @@ func (r *VirtualMachineReconciler) reconfigureVM(
 	// Call provider reconfigure
 	taskRef, err := provider.Reconfigure(ctx, ref, req)
 	if err != nil {
+		// As for Power: a clustered VM's host-scoped unavailability or
+		// not-found is a host-level fact, not a reconfigure failure to retry
+		// every few seconds (ADR-0007 Addendum A, slice 2).
+		if res, handled := r.handleRoutedOpError(ctx, vm, ref, err, errReasonProviderReconfigure); handled {
+			return res, nil
+		}
 		logger.Error(err, "Failed to reconfigure VM")
 		k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Failed to reconfigure VM: %v", err))
 		r.updateStatus(ctx, vm)
-		return ctrl.Result{RequeueAfter: routedOpRetryAfter(ref, err)}, nil
+		return ctrl.Result{RequeueAfter: providerErrorRetryInterval}, nil
 	}
 
 	// Update status with reconfiguration info

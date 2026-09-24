@@ -19,7 +19,8 @@ package controller
 import (
 	"context"
 	"fmt"
-	"time"
+	"slices"
+	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -111,6 +112,9 @@ func promotePendingHost(vm *infravirtrigaudiov1beta1.VirtualMachine, host string
 	}
 	pl.Host = host
 	pl.PendingHost = ""
+	// The exclusions only steer scheduling of an unbound VM (A2 amendment); a
+	// bound VM is never re-scheduled by Create, so they are dropped here.
+	pl.ExcludedHosts = nil
 	if pl.LastScheduledTime == nil {
 		now := metav1.Now()
 		pl.LastScheduledTime = &now
@@ -119,10 +123,15 @@ func promotePendingHost(vm *infravirtrigaudiov1beta1.VirtualMachine, host string
 }
 
 // handleClusteredCreateError handles a failed Create of a clustered VM aimed at
-// its pending host. pendingHost is always KEPT: the create may have partly
-// happened there, so a retry must go to the same host and the finalizer can
-// still clean it up (A2).
+// its pending host. pendingHost is KEPT for every failure but one: the create
+// may have partly happened there, so a retry must go to the same host and the
+// finalizer can still clean it up (A2).
 //
+//   - A name conflict (Conflict / ALREADY_EXISTS) is the exception: the
+//     provider found a same-named domain this VM does not own on the host
+//     BEFORE creating anything, which proves this VM created nothing there.
+//     The host is excluded and the VM re-scheduled (handleClusteredCreateConflict,
+//     the A2 amendment).
 //   - A host-scoped unavailability (the pending host is unknown, draining or
 //     unreachable) sets Placed=False/HostUnavailable. The VM is never
 //     re-scheduled automatically, because a domain may already exist on that
@@ -139,6 +148,10 @@ func (r *VirtualMachineReconciler) handleClusteredCreateError(
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	msg := providerErrorMessage(err)
+
+	if contracts.IsConflict(err) {
+		return r.handleClusteredCreateConflict(ctx, vm, host, msg)
+	}
 
 	if contracts.IsHostUnavailable(err) {
 		logger.Info("Pending host is unreachable; retrying the create on the same host (never re-scheduled)",
@@ -165,17 +178,106 @@ func (r *VirtualMachineReconciler) handleClusteredCreateError(
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 
+// maxExcludedHosts caps status.placement.excludedHosts. It must equal the
+// field's +kubebuilder:validation:MaxItems (virtualmachine_types.go); a test
+// pins the two together.
+const maxExcludedHosts = 16
+
+// excludeHost adds host to pl.ExcludedHosts (ADR-0007 Addendum A, A2
+// amendment). An empty or already-listed host is a no-op; when the list would
+// exceed maxExcludedHosts the oldest entries are dropped, so it stays bounded.
+func excludeHost(pl *infravirtrigaudiov1beta1.PlacementStatus, host string) {
+	host = strings.TrimSpace(host)
+	if host == "" || slices.Contains(pl.ExcludedHosts, host) {
+		return
+	}
+	pl.ExcludedHosts = append(pl.ExcludedHosts, host)
+	if n := len(pl.ExcludedHosts); n > maxExcludedHosts {
+		pl.ExcludedHosts = append([]string(nil), pl.ExcludedHosts[n-maxExcludedHosts:]...)
+	}
+}
+
+// handleClusteredCreateConflict is the ADR-0007 Addendum A, A2 amendment
+// (slice 2): the Create aimed at the pending host was refused with a name
+// conflict (Conflict / ALREADY_EXISTS) — a domain of the same name that this
+// VM does not own already exists there. The provider checks that BEFORE it
+// creates anything, so the refusal proves this VM created nothing on the host.
+// Keeping pendingHost would pin the VM to that host forever (only an
+// administrator could release it); instead:
+//
+//   - the host is added to status.placement.excludedHosts (bounded; cleared
+//     when the VM is bound), which the scheduler honours;
+//   - pendingHost is cleared, so the next reconcile schedules afresh;
+//   - Placed=False/HostExcluded, and Ready / Provisioning = False /
+//     ProviderConflict with the provider's (non-secret) message.
+//
+// The record is a checked status update, like recordPendingHost. If it does
+// not land, nothing is lost: pendingHost is still set, so the next reconcile
+// retries the Create on the same host, gets the same conflict and records it
+// again. The finalizer does not need the host either: an owner-checked delete
+// there would find nothing of this VM's.
+//
+// If every candidate host ends up excluded, resolveClusterPlacement reports
+// Placed=False/AllHostsExcluded and re-checks slowly; each conflict removes
+// one candidate, so the re-scheduling is bounded by the pool size.
+func (r *VirtualMachineReconciler) handleClusteredCreateConflict(
+	ctx context.Context,
+	vm *infravirtrigaudiov1beta1.VirtualMachine,
+	host string,
+	providerMsg string,
+) (ctrl.Result, error) {
+	pl := vm.Status.Placement
+	if pl == nil {
+		pl = &infravirtrigaudiov1beta1.PlacementStatus{}
+		vm.Status.Placement = pl
+	}
+	excludeHost(pl, host)
+	pl.PendingHost = ""
+
+	setPlacedCondition(vm, metav1.ConditionFalse, k8s.ReasonHostExcluded, fmt.Sprintf(
+		"create on host %s was refused because a same-named domain this VirtualMachine does not own exists there, "+
+			"so nothing was created on it; the host is excluded for this VM and it will be re-scheduled onto another host", host))
+	msg := fmt.Sprintf("Provider rejected VM create on host %s (host excluded; re-scheduling): %s", host, providerMsg)
+	for _, condType := range []string{k8s.ConditionReady, k8s.ConditionProvisioning} {
+		meta.SetStatusCondition(&vm.Status.Conditions, metav1.Condition{
+			Type:               condType,
+			Status:             metav1.ConditionFalse,
+			Reason:             k8s.ReasonProviderConflict,
+			Message:            msg,
+			ObservedGeneration: vm.Generation,
+		})
+	}
+	metrics.RecordError(errReasonProviderCreateRejected, metrics.ComponentManager)
+	log.FromContext(ctx).Info("Create refused with a name conflict on the pending host; excluding the host and re-scheduling",
+		"host", host, "excludedHosts", pl.ExcludedHosts)
+
+	if err := r.Status().Update(ctx, vm); err != nil {
+		if apierrors.IsConflict(err) {
+			log.FromContext(ctx).Info("Excluded-host write lost a resourceVersion race; requeueing (the create is retried on the same host)",
+				"host", host)
+			return ctrl.Result{Requeue: true}, nil
+		}
+		metrics.RecordError(errReasonPlacement, metrics.ComponentManager)
+		return ctrl.Result{}, fmt.Errorf("record excluded host %s for VirtualMachine %s/%s: %w", host, vm.Namespace, vm.Name, err)
+	}
+	return ctrl.Result{RequeueAfter: createConflictRescheduleInterval}, nil
+}
+
 // handleMissingOnBoundHost is ADR-0007 Addendum A, A4: the bound host reports
 // that a clustered VM does not exist (Describe exists=false, or the provider's
-// not-found). The VM is NOT re-created — neither on the bound host nor
-// elsewhere — because without fencing that risks two running copies of one disk
-// (D8). The controller records Ready=False/VMMissingOnHost and only re-checks
-// slowly, so an administrator restoring the domain is noticed. Status.ID and the
-// binding are left untouched.
+// not-found on Describe, Power or Reconfigure — which a clustered provider
+// also answers for a domain whose owner stamp is not this VM's). The VM is NOT
+// re-created — neither on the bound host nor elsewhere — because without
+// fencing that risks two running copies of one disk (D8). The controller
+// records Ready=False/VMMissingOnHost and only re-checks slowly, so an
+// administrator restoring the domain is noticed. Status.ID and the binding are
+// left untouched. errReason is the metrics reason of the call that found it
+// missing.
 func (r *VirtualMachineReconciler) handleMissingOnBoundHost(
 	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
 	ref contracts.VMRef,
+	errReason string,
 ) (ctrl.Result, error) {
 	msg := fmt.Sprintf("hypervisor VM %q is not present on its bound host %s; it is not re-created automatically "+
 		"(no failover without fencing). Restore it on that host, or delete and re-create the VirtualMachine",
@@ -188,7 +290,7 @@ func (r *VirtualMachineReconciler) handleMissingOnBoundHost(
 		Message:            msg,
 		ObservedGeneration: vm.Generation,
 	})
-	metrics.RecordError(errReasonProviderDescribe, metrics.ComponentManager)
+	metrics.RecordError(errReason, metrics.ComponentManager)
 	r.updateStatus(ctx, vm)
 	return ctrl.Result{RequeueAfter: vmMissingOnHostRetryInterval}, nil
 }
@@ -233,13 +335,15 @@ func markNotRoutable(vm *infravirtrigaudiov1beta1.VirtualMachine, err error) boo
 
 // handleBoundHostUnavailable records that a clustered VM's bound host is
 // unknown, draining or unreachable (a host-scoped Unavailable from the
-// provider) and re-describes it on boundHostUnavailableRetryInterval. The
-// binding is kept; nothing is re-scheduled (D8).
+// provider on Describe, Power or Reconfigure) and re-checks it on
+// boundHostUnavailableRetryInterval. The binding is kept; nothing is
+// re-scheduled (D8). errReason is the metrics reason of the failed call.
 func (r *VirtualMachineReconciler) handleBoundHostUnavailable(
 	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
 	ref contracts.VMRef,
 	err error,
+	errReason string,
 ) (ctrl.Result, error) {
 	log.FromContext(ctx).Info("Bound host is unavailable; re-checking later", "host", ref.HostID, "error", err.Error())
 	meta.SetStatusCondition(&vm.Status.Conditions, metav1.Condition{
@@ -249,9 +353,43 @@ func (r *VirtualMachineReconciler) handleBoundHostUnavailable(
 		Message:            fmt.Sprintf("bound host %s is unavailable: %s", ref.HostID, providerErrorMessage(err)),
 		ObservedGeneration: vm.Generation,
 	})
-	metrics.RecordError(errReasonProviderDescribe, metrics.ComponentManager)
+	metrics.RecordError(errReason, metrics.ComponentManager)
 	r.updateStatus(ctx, vm)
 	return ctrl.Result{RequeueAfter: boundHostUnavailableRetryInterval}, nil
+}
+
+// handleRoutedOpError handles a failed Power or Reconfigure of a CLUSTERED VM
+// (ADR-0007 Addendum A, slice 2) and reports whether it did. Both are routed
+// to the VM's bound host and owner-checked there, so two failures are
+// host-level facts, handled exactly like the same answer to Describe:
+//
+//   - a host-scoped Unavailable (the bound host is unknown, draining or
+//     unreachable): Ready=False/HostUnavailable, re-checked every
+//     boundHostUnavailableRetryInterval rather than the 5s cadence;
+//   - NotFound (the domain is gone, or its owner stamp is not this VM's): A4 —
+//     Ready=False/VMMissingOnHost, never re-created, re-checked slowly.
+//
+// Every other error, and every error of a single-host call (ref not routed),
+// is left to the caller's historical handling (handled == false).
+func (r *VirtualMachineReconciler) handleRoutedOpError(
+	ctx context.Context,
+	vm *infravirtrigaudiov1beta1.VirtualMachine,
+	ref contracts.VMRef,
+	err error,
+	errReason string,
+) (ctrl.Result, bool) {
+	if !ref.Routed() {
+		return ctrl.Result{}, false
+	}
+	switch {
+	case contracts.IsHostUnavailable(err):
+		res, _ := r.handleBoundHostUnavailable(ctx, vm, ref, err, errReason)
+		return res, true
+	case contracts.IsNotFound(err):
+		res, _ := r.handleMissingOnBoundHost(ctx, vm, ref, errReason)
+		return res, true
+	}
+	return ctrl.Result{}, false
 }
 
 // deletionTarget decides which hypervisor VM the finalizer must delete for vm
@@ -307,16 +445,4 @@ func (r *VirtualMachineReconciler) deletionTarget(
 	metrics.RecordError(errReasonProviderDelete, metrics.ComponentManager)
 	r.updateStatus(ctx, vm)
 	return contracts.VMRef{}, false, ctrl.Result{RequeueAfter: vmDeleteRetryInterval}
-}
-
-// routedOpRetryAfter is the requeue after a failed Power / Reconfigure. A
-// clustered provider answers an operation it does not route yet with
-// Unimplemented (contracts NotSupported); that is re-checked slowly instead of
-// every few seconds. Every other case — and every single-host / thin-client
-// call — keeps the historical 5s cadence.
-func routedOpRetryAfter(ref contracts.VMRef, err error) time.Duration {
-	if ref.Routed() && contracts.IsNotSupported(err) {
-		return routedOpNotSupportedRetryInterval
-	}
-	return providerErrorRetryInterval
 }

@@ -95,6 +95,63 @@ func TestCircuitBreaker_HostUnavailableDoesNotTrip(t *testing.T) {
 	assert.Zero(t, cb.GetFailures(), "host-scoped unavailability never counts toward the breaker")
 }
 
+// routedOpErrServer answers every Power and Reconfigure with err and counts the
+// calls (ADR-0007 Addendum A, slice 2: both are routed and owner-checked).
+type routedOpErrServer struct {
+	providerv1.UnimplementedProviderServer
+	err   error
+	calls atomic.Int32
+}
+
+func (s *routedOpErrServer) Power(context.Context, *providerv1.PowerRequest) (*providerv1.TaskResponse, error) {
+	s.calls.Add(1)
+	return nil, s.err
+}
+
+func (s *routedOpErrServer) Reconfigure(context.Context, *providerv1.ReconfigureRequest) (*providerv1.TaskResponse, error) {
+	s.calls.Add(1)
+	return nil, s.err
+}
+
+// TestCircuitBreaker_RoutedPowerAndReconfigureHostErrorsDoNotTrip: a routed
+// Power or Reconfigure answered with a host-scoped Unavailable, or with
+// NotFound (a domain this VM does not own), maps to its typed class and never
+// counts toward the per-Provider breaker — one bad host or one foreign domain
+// cannot fast-fail the Provider's other VMs.
+func TestCircuitBreaker_RoutedPowerAndReconfigureHostErrorsDoNotTrip(t *testing.T) {
+	cases := map[string]struct {
+		err   error
+		class func(error) bool
+	}{
+		"host unavailable": {hostUnavailableErr(t, contracts.HostUnavailableReason, contracts.HostUnavailableErrorDomain), contracts.IsHostUnavailable},
+		"not owned":        {status.Error(codes.NotFound, `libvirt domain "web" on host host-a is not owned by this VirtualMachine`), contracts.IsNotFound},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			srv := &routedOpErrServer{err: tc.err}
+			dialer, cleanup := startBufconnServer(t, srv)
+			defer cleanup()
+			cli, cb := newTestClientWithCB(t, dialer, "adr7-ops", "adr7-ops-provider", &resilience.Config{
+				FailureThreshold: 2,
+				ResetTimeout:     30 * time.Second,
+				HalfOpenMaxCalls: 1,
+			})
+			vm := contracts.VMRef{ID: "web", HostID: "host-a", Owner: contracts.ObjectIdentity{UID: "uid-web"}}
+			for i := 0; i < 3; i++ {
+				_, err := cli.Power(context.Background(), vm, contracts.PowerOpOn)
+				require.Error(t, err)
+				assert.True(t, tc.class(err), "power mapped to its class: %v", err)
+				_, err = cli.Reconfigure(context.Background(), vm, contracts.CreateRequest{Name: "web"})
+				require.Error(t, err)
+				assert.True(t, tc.class(err), "reconfigure mapped to its class: %v", err)
+			}
+			assert.EqualValues(t, 6, srv.calls.Load(), "every call reached the provider (breaker never opened)")
+			assert.Equal(t, resilience.StateClosed, cb.GetState())
+			assert.Zero(t, cb.GetFailures())
+		})
+	}
+}
+
 func TestCircuitBreaker_ProviderUnavailableStillTrips(t *testing.T) {
 	srv := &describeErrServer{err: status.Error(codes.Unavailable, "provider pod is down")}
 	dialer, cleanup := startBufconnServer(t, srv)

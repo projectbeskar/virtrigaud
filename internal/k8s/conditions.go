@@ -100,7 +100,8 @@ const (
 const ConditionPlaced = "Placed"
 
 // Placed condition reasons (ADR-0007 Addendum A, A2). The vocabulary is fixed by
-// the ADR: exactly these four.
+// the ADR: these four, plus the two the A2 amendment (slice 2) adds for a Create
+// refused with a name conflict (ReasonHostExcluded, ReasonAllHostsExcluded).
 const (
 	// ReasonBound is Placed=True: the provider confirmed the VM on the host named
 	// by status.placement.host, and every per-VM call is routed there.
@@ -118,6 +119,17 @@ const (
 	// host binding (e.g. its status was lost in a backup restore). No per-VM call
 	// is sent — the provider is never allowed to pick a host.
 	ReasonUnbound = "Unbound"
+	// ReasonHostExcluded is Placed=False: the Create on the pending host was
+	// refused with a name conflict (a same-named domain this VM does not own is
+	// there, so this VM created nothing on it). The host was added to
+	// status.placement.excludedHosts, pendingHost was cleared, and the VM is
+	// re-scheduled onto another host.
+	ReasonHostExcluded = "HostExcluded"
+	// ReasonAllHostsExcluded is Placed=False: every candidate host of the pool
+	// is in status.placement.excludedHosts. The VM stays unplaced and is only
+	// re-checked slowly until an administrator resolves the name conflicts (or
+	// renames the VM) and clears the list.
+	ReasonAllHostsExcluded = "AllHostsExcluded"
 )
 
 // ReasonPlacementTopologyMismatch indicates that a VirtualMachine records a

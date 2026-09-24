@@ -57,6 +57,14 @@ type routingProvider struct {
 
 	powerRefs []contracts.VMRef
 	powerErr  error
+
+	reconfigureRefs []contracts.VMRef
+	reconfigureErr  error
+}
+
+func (p *routingProvider) Reconfigure(_ context.Context, vm contracts.VMRef, _ contracts.CreateRequest) (string, error) {
+	p.reconfigureRefs = append(p.reconfigureRefs, vm)
+	return "", p.reconfigureErr
 }
 
 func (p *routingProvider) Create(_ context.Context, req contracts.CreateRequest) (contracts.CreateResponse, error) {
@@ -440,18 +448,20 @@ func TestReconcileVM_Clustered_DescribeRoutedAndPlacedBound(t *testing.T) {
 	assert.Equal(t, k8s.ReasonBound, placed.Reason)
 }
 
-// TestReconcileVM_Clustered_RoutedOpNotSupportedBacksOff proves a per-VM call a
-// clustered provider does not route yet (Unimplemented -> NotSupported) is
-// re-checked slowly, not every 5s.
-func TestReconcileVM_Clustered_RoutedOpNotSupportedBacksOff(t *testing.T) {
+// TestReconcileVM_Clustered_PowerNotSupportedIsNoLongerSpecial pins that slice
+// 2 removed the slice-1 2m re-check of an Unimplemented clustered Power: Power
+// is routed now, so a NotSupported answer takes the ordinary provider-error
+// path (Ready=False/ProviderError, the historical cadence).
+func TestReconcileVM_Clustered_PowerNotSupportedIsNoLongerSpecial(t *testing.T) {
 	prov := &routingProvider{
 		describeResp: contracts.DescribeResponse{Exists: true, PowerState: "Off"},
-		powerErr:     contracts.NewNotSupportedError("power: not yet routed on a clustered provider"),
+		powerErr:     contracts.NewNotSupportedError("power: not supported"),
 	}
 	r := clusteredFixture(t, prov, boundClusterVM("slow"))
 	res, err := r.reconcileVM(context.Background(), getVM(t, r, "slow"))
 	require.NoError(t, err)
-	assert.Equal(t, routedOpNotSupportedRetryInterval, res.RequeueAfter)
+	assert.Equal(t, providerErrorRetryInterval, res.RequeueAfter)
+	assert.Equal(t, k8s.ReasonProviderError, readyReason(getVM(t, r, "slow")))
 }
 
 // TestReconcileVM_Clustered_NotFoundIsNeverRecreated is A4: a clustered VM its
@@ -536,7 +546,7 @@ func TestHandleDeletion_SingleHost_DeleteCarriesNoHost(t *testing.T) {
 // guard against an accidental tight loop constant regression.
 func TestClusteredRequeueCadencesAreNotTight(t *testing.T) {
 	for _, d := range []time.Duration{placementUnboundRetryInterval, pendingHostUnavailableRetryInterval,
-		vmMissingOnHostRetryInterval, routedOpNotSupportedRetryInterval} {
+		vmMissingOnHostRetryInterval, boundHostUnavailableRetryInterval, vmCreateConflictRetryInterval} {
 		assert.GreaterOrEqual(t, d, 30*time.Second)
 	}
 }
