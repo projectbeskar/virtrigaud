@@ -1,10 +1,13 @@
 # VM ownership: how `Create` treats an existing VM
 
-A hypervisor VM created by VirtRigaud is named after the `VirtualMachine`
-object, without its namespace. So when several namespaces (tenants) share a
-Provider, two `VirtualMachine`s called `web` ask for the same hypervisor name.
-A VM with that name may also already exist for reasons unrelated to
-VirtRigaud.
+A vSphere VM created by VirtRigaud is named after the `VirtualMachine` object,
+without its namespace. So when several namespaces (tenants) share a Provider,
+two `VirtualMachine`s called `web` ask for the same hypervisor name. A VM with
+that name may also already exist for reasons unrelated to VirtRigaud. (The
+libvirt provider now names a new domain `<namespace>.<name>`, so two namespaces
+no longer share a name there; the rule below still applies to libvirt, for
+legacy bare-named domains and for the rare remaining collision. See
+[`libvirt-domain-ownership.md`](libvirt-domain-ownership.md#domain-names).)
 
 The **libvirt** and **vSphere** providers follow one rule:
 

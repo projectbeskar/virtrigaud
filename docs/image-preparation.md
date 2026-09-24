@@ -101,15 +101,20 @@ will use it (in clustered mode, the VM's scheduled target host) before touching 
    and no VMDK extent outside the file; accepted formats are qcow2, raw, vmdk, vpc, vhdx
    and vdi. Downloaded (`url`) images get the same header check before conversion.
 
-A base image is always **copied** into the VM's own `<vm>-disk.qcow2`; it is never
+A base image is always **copied** into the VM's own `<domain>-disk.qcow2` (for a new VM
+the domain is `<namespace>.<name>`, see
+[`libvirt-domain-ownership.md`](libvirt-domain-ownership.md#domain-names)); it is never
 attached in place, so VMs never share a disk and deleting a VM never deletes the image.
+The copy never replaces a file at that path that another domain uses.
 The only disk attached in place is a migration's landing disk, and only when the manager
 can prove it: `spec.importedDisk.migrationRef` must name a `VMMigration` in the VM's own
 namespace that targets this VM (name and namespace) and whose `status.diskInfo.targetPath`
 equals the disk path. The provider additionally requires the file to be
-`<vm name>-migrated.qcow2` directly in the `default` pool directory and unused by any
-domain. Any other `spec.importedDisk` is treated as a base image (confined, then copied or
-refused). Migrated disks landed by ImportDisk get the same header check before conversion.
+`<domain>-migrated.qcow2` — the name the migration import derived for this VM with the
+same naming rule, e.g. `team-a.web-migrated.qcow2` — directly in the `default` pool
+directory and unused by any domain. Any other `spec.importedDisk` is treated as a base
+image (confined, then copied or refused). Migrated disks landed by ImportDisk get the
+same header check before conversion.
 
 > **Upgrade warning — legacy shared disks.** Before this change a path or prepared image
 > in the pool directory was attached in place, so several VMs created from the same image

@@ -70,6 +70,11 @@ spec:
 # VirtualMachine's own UID, and otherwise fails the create with a
 # Ready=False / ProviderConflict condition. See docs/libvirt-domain-ownership.md
 # and docs/vm-ownership.md.
+#
+# VirtualMachines created by VirtRigaud get libvirt domains named
+# "<namespace>.<name>" (e.g. "team-a.app-web"); the filter below matches domain
+# names, so it does not match those. Adoption also never adopts a domain whose
+# VirtRigaud owner stamp names a VirtualMachine that still exists.
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: Provider
 metadata:
