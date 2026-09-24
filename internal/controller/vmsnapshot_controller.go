@@ -249,6 +249,15 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
+	// Address the VM (ADR-0007 Addendum A, A1) before resolving a client for
+	// the Provider: a clustered VM with no confirmed host binding — or a VM
+	// whose spec.providerRef no longer names the Provider it is bound through —
+	// is never sent a per-VM call: wait.
+	ref, err := vmRefFor(vm, provider)
+	if err != nil {
+		return r.waitForVMBinding(ctx, snapshot, err), nil
+	}
+
 	// Get provider instance
 	providerInstance, err := r.getProviderInstance(ctx, provider)
 	if err != nil {
@@ -259,13 +268,6 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 		// Status update errors are intentionally ignored to avoid blocking reconciliation
 		_ = r.updateStatus(ctx, snapshot)
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-	}
-
-	// Address the VM (ADR-0007 Addendum A, A1). A clustered VM with no
-	// confirmed host binding is never sent a per-VM call: wait for the binding.
-	ref, err := vmRefFor(vm, provider)
-	if err != nil {
-		return r.waitForVMBinding(ctx, snapshot, err), nil
 	}
 
 	// Build snapshot create request
