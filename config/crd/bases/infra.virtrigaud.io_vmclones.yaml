@@ -685,8 +685,17 @@ spec:
                     pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                     type: string
                   namespace:
-                    description: Namespace is the namespace for the target VM (defaults
-                      to source namespace)
+                    description: |-
+                      Namespace is the namespace for the target VM (defaults to the VMClone's
+                      namespace, which is also the source VM's). A different namespace is
+                      allowed only when that Namespace object carries the annotation
+                      infra.virtrigaud.io/allowed-source-namespaces and its comma-separated
+                      value lists the VMClone's namespace (exact names, no wildcards).
+                      Namespaces are cluster-scoped, so the annotation is a cluster
+                      administrator's grant. Without it the clone is refused (Ready=False,
+                      reason TargetNamespaceNotAllowed) and nothing is created in, read from or
+                      bound in the target namespace; granting the annotation or changing this
+                      field resumes it.
                     maxLength: 63
                     pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                     type: string

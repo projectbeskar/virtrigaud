@@ -47,7 +47,12 @@ type MigrationSource struct {
 	// VMRef references the source virtual machine
 	VMRef LocalObjectReference `json:"vmRef"`
 
-	// ProviderRef explicitly specifies the source provider (optional, auto-detected from VM)
+	// ProviderRef optionally names the source provider. It must be the Provider
+	// the source VM runs on (the VM's spec.providerRef, with an empty namespace
+	// meaning the VM's namespace); a migration naming any other Provider fails,
+	// because that Provider would export an unrelated VM that happens to share
+	// the source VM's provider ID. Leave it empty to use the source VM's
+	// Provider.
 	// +optional
 	ProviderRef *ObjectRef `json:"providerRef,omitempty"`
 
@@ -82,7 +87,17 @@ type MigrationTarget struct {
 	// +kubebuilder:validation:MaxLength=253
 	Name string `json:"name"`
 
-	// Namespace is the namespace for the target VM (defaults to source namespace)
+	// Namespace is the namespace for the target VM (defaults to the
+	// VMMigration's namespace, which is also the source VM's). A different
+	// namespace is allowed only when that Namespace object carries the
+	// annotation infra.virtrigaud.io/allowed-source-namespaces and its
+	// comma-separated value lists the VMMigration's namespace (exact names, no
+	// wildcards). Namespaces are cluster-scoped, so the annotation is a cluster
+	// administrator's grant. Without it the migration is held before any side
+	// effect (Ready=False, reason TargetNamespaceNotAllowed); the grant is
+	// re-checked before the disk import, the target VM creation and the
+	// cleanup, so revoking it stops a migration in flight. Granting the
+	// annotation or changing this field resumes it.
 	// +optional
 	// +kubebuilder:validation:Pattern="^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
 	// +kubebuilder:validation:MaxLength=63
