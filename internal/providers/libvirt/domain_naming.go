@@ -159,3 +159,21 @@ func createDomainName(req contracts.CreateRequest) (string, error) {
 	}
 	return domainNameFor(req.Owner, req.Name)
 }
+
+// pendingCreateDomainName returns the domain name Create gives the VM owner
+// identifies, when a per-VM request addresses that VM by its bare name id —
+// which is how the operator addresses a clustered VM whose create is still in
+// flight (no status.id yet; the finalizer's cleanup Delete). ok is false when
+// the request carries no naming identity, id is not the owner's name, or the
+// name is already the domain name, so callers try it only as a second,
+// owner-checked lookup.
+func pendingCreateDomainName(id string, owner contracts.ObjectIdentity) (string, bool) {
+	if !hasNamingIdentity(owner) || owner.Name != id {
+		return "", false
+	}
+	name, err := domainNameFor(owner, id)
+	if err != nil || name == id {
+		return "", false
+	}
+	return name, true
+}

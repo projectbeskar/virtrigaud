@@ -23,6 +23,7 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -44,14 +45,17 @@ import (
 // routes the create onto the host the operator's scheduler bound this VM to,
 // named by req.TargetHostID (see createClustered).
 //
-// On both paths a name virsh would resolve as a domain ID or UUID is rejected
-// up front (InvalidSpec), before any host is touched (ambiguousDomainNameError).
+// On both paths the new domain is named by createDomainName —
+// "<namespace>.<name>" for a request carrying its owner, the bare name for an
+// older manager's (domain_naming.go) — and a name that cannot be used (a
+// non-DNS identity, or a legacy name virsh would resolve as a domain ID or
+// UUID) is rejected up front (InvalidSpec), before any host is touched.
 func (p *Provider) Create(ctx context.Context, req contracts.CreateRequest) (contracts.CreateResponse, error) {
-	log.Printf("INFO Creating VM with cloud-init support: %s", req.Name)
-
-	if err := ambiguousDomainNameError(req.Name); err != nil {
+	domainName, err := createDomainName(req)
+	if err != nil {
 		return contracts.CreateResponse{}, err
 	}
+	log.Printf("INFO Creating VM with cloud-init support: %s (libvirt domain %s)", req.Name, domainName)
 
 	if p.clustered() {
 		return p.createClustered(ctx, req)
@@ -63,19 +67,25 @@ func (p *Provider) Create(ctx context.Context, req contracts.CreateRequest) (con
 	return p.createVM(ctx, p.virshProvider, req)
 }
 
-// createVM runs the create pipeline against a single host's VirshProvider vp: an
-// ownership-checked pre-check for a domain of the same name already on that host
+// createVM runs the create pipeline against a single host's VirshProvider vp. It
+// names the domain with createDomainName (domain_naming.go), then runs an
+// ownership-checked pre-check for a domain of THAT name already on the host
 // (bindExistingDomain: an idempotent success ONLY if that domain is stamped with
-// req.Owner's UID, a non-retryable Conflict otherwise) followed by the full
-// cloud-init + storage create, which stamps req.Owner onto the new domain. It is
-// the shared core of both the single-host path (vp == p.virshProvider) and the
-// clustered create-on-host path (vp == the leased target host's provider), so a
-// clustered create is byte-for-byte the single-host create — only the host the
-// commands run against differs (ADR-0007 D9) — and the ownership rule applies
-// to both.
+// req.Owner's UID — so the retry after a lost status write finds the same
+// namespaced domain — and a non-retryable Conflict otherwise), followed by the
+// full cloud-init + storage create, which stamps req.Owner onto the new domain.
+// It is the shared core of both the single-host path (vp == p.virshProvider)
+// and the clustered create-on-host path (vp == the leased target host's
+// provider), so a clustered create is byte-for-byte the single-host create —
+// only the host the commands run against differs (ADR-0007 D9) — and the naming
+// and ownership rules apply to both.
 func (p *Provider) createVM(ctx context.Context, vp *VirshProvider, req contracts.CreateRequest) (contracts.CreateResponse, error) {
 	if vp == nil {
 		return contracts.CreateResponse{}, contracts.NewRetryableError("virsh provider not initialized", nil)
+	}
+	domainName, err := createDomainName(req)
+	if err != nil {
+		return contracts.CreateResponse{}, err
 	}
 
 	// Check if domain already exists on this host
@@ -85,17 +95,19 @@ func (p *Provider) createVM(ctx context.Context, vp *VirshProvider, req contract
 	}
 
 	for _, domain := range domains {
-		if domain.Name == req.Name {
-			return bindExistingDomain(ctx, vp, req, domain.State)
+		if domain.Name == domainName {
+			return bindExistingDomain(ctx, vp, req, domainName, domain.State)
 		}
 	}
 
 	// Create VM with cloud-init support
-	vmID, err := p.createVMWithCloudInit(ctx, vp, req)
+	vmID, err := p.createVMWithCloudInit(ctx, vp, req, domainName)
 	if err != nil {
-		if isInvalidArgument(err) {
-			// A rejected request (e.g. a confined image path) is not retryable:
-			// return it as-is so it reaches the manager as InvalidArgument.
+		if isInvalidArgument(err) || contracts.IsConflict(err) {
+			// A rejected request (e.g. a confined image path) or a name
+			// conflict on the host (the VM's disk path is another domain's
+			// disk) is not retryable: return it as-is so it reaches the manager
+			// as InvalidArgument / AlreadyExists.
 			return contracts.CreateResponse{}, fmt.Errorf("failed to create VM: %w", err)
 		}
 		return contracts.CreateResponse{}, contracts.NewRetryableError("failed to create VM", err)
@@ -197,16 +209,22 @@ func virshConnFrom(c hostconn.Conn) (*virshConn, error) {
 	return nil, fmt.Errorf("target host connection is not virsh-backed (%T)", c)
 }
 
-// createVMWithCloudInit creates a VM with comprehensive cloud-init support and
-// storage management on the host backed by vp. vp is p.virshProvider in
-// single-host mode and the leased target host's provider in clustered mode
-// (ADR-0007 P1), so the whole pipeline — storage, cloud-init, domain define —
-// runs against the intended libvirtd.
-func (p *Provider) createVMWithCloudInit(ctx context.Context, vp *VirshProvider, req contracts.CreateRequest) (string, error) {
-	log.Printf("INFO Creating VM with enhanced cloud-init configuration and storage: %s", req.Name)
+// createVMWithCloudInit creates the libvirt domain domainName (createDomainName)
+// with comprehensive cloud-init support and storage management on the host
+// backed by vp. vp is p.virshProvider in single-host mode and the leased target
+// host's provider in clustered mode (ADR-0007 P1), so the whole pipeline —
+// storage, cloud-init, domain define — runs against the intended libvirtd.
+//
+// Every host-side name it derives — the "<domain>-disk" volume, the imported
+// disk it may attach in place, the cloud-init seed, the staged domain XML and
+// the domain's <name> — comes from domainName; req.Name only supplies the
+// guest's default hostname.
+func (p *Provider) createVMWithCloudInit(ctx context.Context, vp *VirshProvider, req contracts.CreateRequest, domainName string) (string, error) {
+	log.Printf("INFO Creating VM with enhanced cloud-init configuration and storage: %s (libvirt domain %s)", req.Name, domainName)
 
 	// Initialize providers
 	cloudInitProvider := NewCloudInitProvider(vp)
+	cloudInitProvider.stagingDir = p.stagingDir()
 	storageProvider := NewStorageProvider(vp)
 
 	// Ensure default storage pool exists and is active
@@ -215,7 +233,7 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, vp *VirshProvider,
 	}
 
 	// Create disk image from template or create empty disk
-	diskVolumeName := vmDiskVolumeName(req.Name)
+	diskVolumeName := vmDiskVolumeName(domainName)
 	var diskPath string
 
 	// Get disk size from VMClass (default to 20GB if not specified)
@@ -233,17 +251,21 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, vp *VirshProvider,
 		if req.Image.Path == "" && (strings.HasPrefix(imageSpec, "http://") || strings.HasPrefix(imageSpec, "https://")) {
 			// Handle URL - download the image
 			log.Printf("INFO Downloading cloud image from URL: %s", imageSpec)
-			volume, err = storageProvider.DownloadCloudImage(ctx, imageSpec, diskVolumeName, defaultStoragePool, diskSizeGB)
+			if err = ensureDiskVolumeFree(ctx, vp, storageProvider, domainName, diskVolumeName); err == nil {
+				volume, err = storageProvider.DownloadCloudImage(ctx, imageSpec, diskVolumeName, defaultStoragePool, diskSizeGB)
+			}
 		} else if req.Image.Path != "" || strings.HasPrefix(imageSpec, "/") {
 			// A host path — from VMImage.spec.source.libvirt.path, a prepared
 			// image, spec.importedDisk.path, or anything else shaped like a
 			// path. It is user-controlled, so it is confined on THIS host (vp:
 			// the leased target host in clustered mode) before any use.
-			volume, err = p.createDiskFromHostImage(ctx, vp, storageProvider, req, imageSpec, diskVolumeName, diskSizeGB)
+			volume, err = p.createDiskFromHostImage(ctx, vp, storageProvider, req, domainName, imageSpec, diskVolumeName, diskSizeGB)
 		} else {
 			// Handle template name - look up in predefined templates
 			log.Printf("INFO Creating disk from predefined template: %s", imageSpec)
-			volume, err = storageProvider.CreateVolumeFromTemplate(ctx, imageSpec, diskVolumeName, "default", diskSizeGB)
+			if err = ensureDiskVolumeFree(ctx, vp, storageProvider, domainName, diskVolumeName); err == nil {
+				volume, err = storageProvider.CreateVolumeFromTemplate(ctx, imageSpec, diskVolumeName, defaultStoragePool, diskSizeGB)
+			}
 		}
 
 		if err != nil {
@@ -251,17 +273,29 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, vp *VirshProvider,
 		}
 		diskPath = volume.Path
 	} else {
-		// Create empty disk volume
+		// Create empty disk volume. vol-create-as refuses an existing volume
+		// name, so this never replaces a file.
 		log.Printf("INFO Creating empty disk volume: %s", diskVolumeName)
-		volume, err := storageProvider.CreateVolume(ctx, "default", diskVolumeName, "qcow2", diskSizeGB)
+		volume, err := storageProvider.CreateVolume(ctx, defaultStoragePool, diskVolumeName, "qcow2", diskSizeGB)
 		if err != nil {
 			return "", fmt.Errorf("failed to create disk volume: %w", err)
 		}
 		diskPath = volume.Path
 	}
 
-	// Prepare cloud-init if provided
+	// The cloud-init seed is made for this create alone (a fresh mktemp
+	// directory, see staging.go). A defined domain keeps it — its CD-ROM
+	// references the ISO, and Delete removes the directory — so it is removed
+	// here only when the create fails after preparing it.
 	var cloudInitISOPath string
+	created := false
+	defer func() {
+		if !created && cloudInitISOPath != "" {
+			cloudInitProvider.CleanupCloudInit(ctx, cloudInitISOPath)
+		}
+	}()
+
+	// Prepare cloud-init if provided
 	if req.UserData != nil && req.UserData.CloudInitData != "" {
 		log.Printf("INFO Preparing cloud-init configuration for VM: %s", req.Name)
 
@@ -276,10 +310,11 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, vp *VirshProvider,
 			return "", fmt.Errorf("invalid cloud-init data: %w", err)
 		}
 
-		// Prepare cloud-init configuration
+		// Prepare cloud-init configuration. The instance ID is the domain name,
+		// unique on the host; the hostname stays the VM name.
 		cloudInitConfig := CloudInitConfig{
 			UserData:   req.UserData.CloudInitData,
-			InstanceID: req.Name,
+			InstanceID: domainName,
 			Hostname:   hostname,
 		}
 
@@ -288,13 +323,6 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, vp *VirshProvider,
 		if err != nil {
 			return "", fmt.Errorf("failed to prepare cloud-init: %w", err)
 		}
-
-		// Cleanup cloud-init files when done (defer)
-		defer func() {
-			if cleanupErr := cloudInitProvider.CleanupCloudInit(req.Name); cleanupErr != nil {
-				log.Printf("WARN Failed to cleanup cloud-init files: %v", cleanupErr)
-			}
-		}()
 	} else {
 		// No user-data supplied: apply the minimal, credential-free default
 		// (hostname + qemu-guest-agent only; see generateDefaultCloudInit).
@@ -303,66 +331,75 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, vp *VirshProvider,
 		defaultCloudInit := p.generateDefaultCloudInit(req.Name)
 		cloudInitConfig := CloudInitConfig{
 			UserData:   defaultCloudInit,
-			InstanceID: req.Name,
+			InstanceID: domainName,
 			Hostname:   req.Name,
 		}
 
-		var err error
-		cloudInitISOPath, err = cloudInitProvider.PrepareCloudInit(ctx, cloudInitConfig)
+		isoPath, err := cloudInitProvider.PrepareCloudInit(ctx, cloudInitConfig)
 		if err != nil {
 			log.Printf("WARN Failed to prepare default cloud-init: %v", err)
 			// Continue without cloud-init
 		} else {
-			// Cleanup cloud-init files when done (defer)
-			defer func() {
-				if cleanupErr := cloudInitProvider.CleanupCloudInit(req.Name); cleanupErr != nil {
-					log.Printf("WARN Failed to cleanup cloud-init files: %v", cleanupErr)
-				}
-			}()
+			cloudInitISOPath = isoPath
 		}
 	}
 
 	// Generate domain XML with proper disk and cloud-init ISO
-	domainXML, err := p.generateDomainXMLWithStorage(ctx, vp, req, diskPath, cloudInitISOPath)
+	domainXML, err := p.generateDomainXMLWithStorage(ctx, vp, req, domainName, diskPath, cloudInitISOPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to generate domain XML: %w", err)
 	}
 
-	// Create domain definition file
-	if err := p.createDomainDefinition(ctx, vp, req.Name, domainXML); err != nil {
-		return "", fmt.Errorf("failed to create domain definition: %w", err)
+	// Stage the definition and define the domain in libvirt.
+	if err := p.defineDomainFromXML(ctx, vp, domainName, domainXML); err != nil {
+		return "", err
 	}
+	created = true
 
-	// Define the domain in libvirt
-	if err := p.defineDomain(ctx, vp, req.Name); err != nil {
-		return "", fmt.Errorf("failed to define domain: %w", err)
-	}
-
-	log.Printf("INFO Successfully created VM with storage and cloud-init: %s", req.Name)
-	return req.Name, nil
+	log.Printf("INFO Successfully created VM with storage and cloud-init: %s (libvirt domain %s)", req.Name, domainName)
+	return domainName, nil
 }
 
-// createDiskFromHostImage builds the VM's primary disk from a host path image
-// (imagePath: VMImage.spec.source.libvirt.path, a prepared image, or
-// VirtualMachine.spec.importedDisk.path). The path is user-controlled, so it is
-// first confined ON THE HOST behind vp — the host the VM is being created on
-// (see imagepath.go) — and only the resulting canonical path is used:
+// ensureDiskVolumeFree applies ensureDiskTargetFree to the VM's own disk file,
+// <default pool directory>/<volumeName>.qcow2, on vp's host, before a
+// qemu-img convert writes it. A pool without a path is left to the copy
+// itself, which refuses it.
+func ensureDiskVolumeFree(ctx context.Context, vp *VirshProvider, sp *StorageProvider, domainName, volumeName string) error {
+	pool, err := sp.GetPoolInfo(ctx, defaultStoragePool)
+	if err != nil {
+		return fmt.Errorf("get storage pool %q info: %w", defaultStoragePool, err)
+	}
+	if pool.Path == "" {
+		return nil
+	}
+	return ensureDiskTargetFree(ctx, vp, domainName, filepath.Join(pool.Path, volumeName+qcow2Ext))
+}
+
+// createDiskFromHostImage builds the primary disk of the domain domainName
+// from a host path image (imagePath: VMImage.spec.source.libvirt.path, a
+// prepared image, or VirtualMachine.spec.importedDisk.path). The path is
+// user-controlled, so it is first confined ON THE HOST behind vp — the host
+// the VM is being created on (see imagepath.go) — and only the resulting
+// canonical path is used:
 //
 //   - a base image is COPIED (qemu-img convert, with the probed source format)
-//     into the VM's own <vm>-disk.qcow2; it is never attached in place, so two
-//     VMs never share one disk and deleting a VM never deletes the image;
-//   - only this VM's own imported migration disk (<vm>-migrated.qcow2 in the
-//     pool directory, unused by any domain) is attached in place.
+//     into the VM's own <domain>-disk.qcow2 — never over another domain's disk
+//     (ensureDiskVolumeFree); it is never attached in place, so two VMs never
+//     share one disk and deleting a VM never deletes the image;
+//   - only this VM's own imported migration disk (<domain>-migrated.qcow2 in
+//     the pool directory, unused by any domain) is attached in place. <domain>
+//     is domainName — the same naming rule the migration import used to name
+//     the file it landed for this VM (importedDiskVolumeName).
 //
 // A rejected path returns an InvalidArgument error (non-retryable).
 func (p *Provider) createDiskFromHostImage(ctx context.Context, vp *VirshProvider, sp *StorageProvider,
-	req contracts.CreateRequest, imagePath, volumeName string, sizeGB int) (*StorageVolume, error) {
+	req contracts.CreateRequest, domainName, imagePath, volumeName string, sizeGB int) (*StorageVolume, error) {
 	policy, err := p.imagePolicy()
 	if err != nil {
 		return nil, err
 	}
 
-	confReq := imagePathRequest{Path: imagePath, ImportedDisk: req.Image.ImportedDisk, VMName: req.Name}
+	confReq := imagePathRequest{Path: imagePath, ImportedDisk: req.Image.ImportedDisk, VMName: domainName}
 	if req.Image.ImportedDisk {
 		poolInfo, err := sp.GetPoolInfo(ctx, defaultStoragePool)
 		if err != nil {
@@ -376,10 +413,13 @@ func (p *Provider) createDiskFromHostImage(ctx context.Context, vp *VirshProvide
 		return nil, err
 	}
 	if img.AdoptInPlace {
-		log.Printf("INFO Attaching imported disk %q in place for VM %s", img.Path, req.Name)
+		log.Printf("INFO Attaching imported disk %q in place for VM %s (libvirt domain %s)", img.Path, req.Name, domainName)
 		return sp.adoptVolumeInPlace(ctx, img.Path, defaultStoragePool)
 	}
-	log.Printf("INFO Copying base image %q (%s) into the disk of VM %s", img.Path, img.Format, req.Name)
+	if err := ensureDiskVolumeFree(ctx, vp, sp, domainName, volumeName); err != nil {
+		return nil, err
+	}
+	log.Printf("INFO Copying base image %q (%s) into the disk of VM %s (libvirt domain %s)", img.Path, img.Format, req.Name, domainName)
 	return sp.CopyImageToVolume(ctx, img.Path, img.Format, volumeName, defaultStoragePool, sizeGB)
 }
 
@@ -466,6 +506,16 @@ func (p *Provider) deleteClustered(ctx context.Context, c libvirtConn, id string
 	host := c.HostID()
 
 	d, err := ownedDomainTarget(ctx, vp, host, id, owner, "delete")
+	if contracts.IsNotFound(err) {
+		// The finalizer's cleanup of a create still in flight (no status.id
+		// yet) addresses the VM by its bare name, but Create named the domain
+		// "<namespace>.<name>" (domain_naming.go), which only this provider
+		// knows how to derive. Look that domain up too — under the same owner
+		// check, so it is torn down only when it is this VM's.
+		if alt, ok := pendingCreateDomainName(id, owner); ok {
+			d, err = ownedDomainTarget(ctx, vp, host, alt, owner, "delete")
+		}
+	}
 	if err != nil {
 		if contracts.IsNotFound(err) {
 			log.Printf("INFO Domain %s is not deletable by this VirtualMachine on host %s (absent or not owned); nothing was deleted "+
@@ -1692,9 +1742,10 @@ runcmd:
 // follows it, for the create-path domain XML.
 //
 // diskPath and cloudInitISOPath are host file paths computed by this
-// provider (a storage-pool directory joined with a name derived from
-// req.Name), not raw user input — but req.Name only carries a Kubernetes
-// object-name pattern, not an XML-safety one, so both are escaped anyway
+// provider (a storage-pool or staging directory joined with a name derived
+// from the domain name), not raw user input — but the domain name only
+// carries a Kubernetes object-name pattern, not an XML-safety one, so both
+// are escaped anyway
 // (issue #260 defense in depth) rather than trusting the path-construction
 // call chain to never change.
 func buildDiskDevicesXML(diskPath, cloudInitISOPath string) string {
@@ -1789,8 +1840,10 @@ func (p *Provider) generateNetworkInterfacesXML(networks []contracts.NetworkAtta
 	return interfacesXML
 }
 
-// generateDomainXMLWithStorage creates libvirt domain XML with proper storage configuration
-func (p *Provider) generateDomainXMLWithStorage(ctx context.Context, vp *VirshProvider, req contracts.CreateRequest, diskPath, cloudInitISOPath string) (string, error) {
+// generateDomainXMLWithStorage creates libvirt domain XML with proper storage
+// configuration. domainName is the domain's <name> (createDomainName); req
+// supplies the VM's resources, networks and owner stamp.
+func (p *Provider) generateDomainXMLWithStorage(ctx context.Context, vp *VirshProvider, req contracts.CreateRequest, domainName, diskPath, cloudInitISOPath string) (string, error) {
 	// Extract specifications from request
 	cpuCount := int32(1)    // default
 	memoryMB := int64(1024) // default 1GB
@@ -1843,7 +1896,7 @@ func (p *Provider) generateDomainXMLWithStorage(ctx context.Context, vp *VirshPr
 	ownerMetadataXML := renderOwnerMetadataXML(req.Owner)
 
 	// Build disk devices XML. diskPath/cloudInitISOPath are provider-computed
-	// host file paths (pool directory + a name derived from req.Name), but are
+	// host file paths (pool directory + a name derived from domainName), but are
 	// escaped anyway (see buildDiskDevicesXML) as defense in depth.
 	devicesDiskXML := buildDiskDevicesXML(diskPath, cloudInitISOPath)
 
@@ -1996,10 +2049,11 @@ func (p *Provider) generateDomainXMLWithStorage(ctx context.Context, vp *VirshPr
   </devices>
 </domain>`,
 		domainType,
-		// req.Name only carries a Kubernetes object-name validation pattern
-		// (DNS-1123-ish), not an XML-safety one — escape it into the <name>
-		// element as defense in depth (issue #260).
-		xmlEscape(req.Name),
+		// domainName is derived from DNS-1123 names (or, for an older
+		// manager, the bare VM name), which carry no XML-safety guarantee of
+		// their own — escape it into the <name> element as defense in depth
+		// (issue #260).
+		xmlEscape(domainName),
 		uuid,
 		ownerMetadataXML, // "" or a full "  <metadata>...</metadata>\n" block; values escaped
 		cpuMem.Memory,
@@ -2049,43 +2103,6 @@ func domainTypeFromProbe(readable, exists bool) string {
 		log.Printf("INFO Host has no /dev/kvm; using domain type 'qemu' (software emulation)")
 	}
 	return "qemu"
-}
-
-// createDomainDefinition writes the domain XML to a temporary file on the host
-// backed by vp (the single host, or the leased target host in clustered mode).
-func (p *Provider) createDomainDefinition(ctx context.Context, vp *VirshProvider, domainName, domainXML string) error {
-	// Create temporary file path on remote server
-	remotePath := fmt.Sprintf("/tmp/%s-domain.xml", domainName)
-
-	// Write the domain XML over stdin (no heredoc, no shell interpolation of the
-	// path or of any user-derived value inside the XML; see writeRemoteFile).
-	if err := vp.writeRemoteFile(ctx, remotePath, []byte(domainXML)); err != nil {
-		return fmt.Errorf("failed to create domain definition file: %w", err)
-	}
-
-	log.Printf("INFO Created domain definition file: %s", remotePath)
-	return nil
-}
-
-// defineDomain defines the domain in libvirt using the XML file on the host
-// backed by vp (the single host, or the leased target host in clustered mode).
-func (p *Provider) defineDomain(ctx context.Context, vp *VirshProvider, domainName string) error {
-	// Define domain from XML file
-	remotePath := fmt.Sprintf("/tmp/%s-domain.xml", domainName)
-
-	result, err := vp.runRemoteVirshCommand(ctx, "define", remotePath)
-	if err != nil {
-		return fmt.Errorf("failed to define domain: %w, output: %s", err, result.Stderr)
-	}
-
-	// Clean up temporary XML file
-	_, cleanupErr := vp.runVirshCommand(ctx, "!", "rm", "-f", remotePath)
-	if cleanupErr != nil {
-		log.Printf("WARN Failed to cleanup domain XML file: %v", cleanupErr)
-	}
-
-	log.Printf("INFO Successfully defined domain: %s", domainName)
-	return nil
 }
 
 // SnapshotCreate creates a VM snapshot using virsh

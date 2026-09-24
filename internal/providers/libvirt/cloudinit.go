@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"os"
 	"path/filepath"
 	"strings"
 )
@@ -36,28 +35,46 @@ type CloudInitConfig struct {
 // CloudInitProvider manages cloud-init ISO creation and attachment for libvirt
 type CloudInitProvider struct {
 	virshProvider *VirshProvider
-	tempDir       string // Directory for storing cloud-init files
+	// stagingDir is the host directory each create's seed directory is made
+	// in (defaultHostStagingDir unless the caller points it elsewhere).
+	stagingDir string
 }
 
 // NewCloudInitProvider creates a new cloud-init provider for libvirt
 func NewCloudInitProvider(virshProvider *VirshProvider) *CloudInitProvider {
 	return &CloudInitProvider{
 		virshProvider: virshProvider,
-		tempDir:       "/tmp/virtrigaud-cloudinit", // Writable temp directory
+		stagingDir:    defaultHostStagingDir,
 	}
 }
 
-// PrepareCloudInit creates cloud-init configuration remotely and returns the ISO path
+// PrepareCloudInit builds the NoCloud seed ISO for one create on the libvirt
+// host and returns the ISO's path.
+//
+// The seed lives in a directory made for this create alone:
+// <staging>/virtrigaud-cloudinit-<instance ID>.<random>, created by `mktemp -d`
+// (exclusively, mode 0700), so a concurrent create — of any VM — can never
+// overwrite this VM's user-data (which may carry secrets), and nothing else on
+// the host can pre-create or predict it. user-data and meta-data are written
+// private to the SSH user; once the ISO is built the directory is opened to
+// traverse-only (cloudInitSeedDirMode) so the qemu process can open the ISO by
+// its exact path without anyone being able to list the directory. Any failure
+// removes the directory again.
 func (c *CloudInitProvider) PrepareCloudInit(ctx context.Context, config CloudInitConfig) (string, error) {
 	log.Printf("INFO Preparing cloud-init configuration for instance: %s", config.InstanceID)
 
-	// Work remotely on the libvirt host to avoid read-only filesystem issues
-	remoteDir := fmt.Sprintf("/tmp/virtrigaud-cloudinit/%s", config.InstanceID)
-
-	// Create remote directory
-	if _, err := c.virshProvider.runVirshCommand(ctx, "!", "mkdir", "-p", remoteDir); err != nil {
+	// Work remotely on the libvirt host to avoid read-only filesystem issues.
+	remoteDir, err := makeHostTemp(ctx, c.virshProvider,
+		filepath.Join(c.stagingDir, cloudInitSeedDirPrefix+config.InstanceID+"."+mktempTemplateSuffix), true)
+	if err != nil {
 		return "", fmt.Errorf("failed to create remote cloud-init directory: %w", err)
 	}
+	prepared := false
+	defer func() {
+		if !prepared {
+			removeHostPath(ctx, c.virshProvider, remoteDir, true)
+		}
+	}()
 
 	// Generate metadata if not provided
 	if config.MetaData == "" {
@@ -83,6 +100,13 @@ func (c *CloudInitProvider) PrepareCloudInit(ctx context.Context, config CloudIn
 		return "", fmt.Errorf("failed to create remote cloud-init ISO: %w", err)
 	}
 
+	// The domain's qemu process runs as another user: let it reach the ISO by
+	// its exact path, without being able to list the directory.
+	if _, err := c.virshProvider.runVirshCommand(ctx, "!", "chmod", cloudInitSeedDirMode, remoteDir); err != nil {
+		return "", fmt.Errorf("failed to set cloud-init directory permissions: %w", err)
+	}
+
+	prepared = true
 	log.Printf("INFO Successfully created remote cloud-init ISO: %s", isoPath)
 	return isoPath, nil
 }
@@ -239,16 +263,23 @@ func (c *CloudInitProvider) ExtractHostnameFromCloudInit(cloudInitData string) s
 	return ""
 }
 
-// CleanupCloudInit removes temporary cloud-init files for an instance
-func (c *CloudInitProvider) CleanupCloudInit(instanceID string) error {
-	instanceDir := filepath.Join(c.tempDir, instanceID)
-	if err := os.RemoveAll(instanceDir); err != nil {
-		log.Printf("WARN Failed to cleanup cloud-init files for %s: %v", instanceID, err)
-		return err
+// CleanupCloudInit removes, on the libvirt host, the seed directory
+// PrepareCloudInit made for isoPath — used when the create that prepared it
+// fails. It is best-effort (failures are logged) and refuses any path that is
+// not a seed directory directly inside the staging directory, so it can never
+// remove anything else.
+//
+// (It replaces a cleanup that ran os.RemoveAll on the PROVIDER's filesystem:
+// a no-op for an SSH host, and on a local connection it deleted the ISO a
+// just-defined domain still referenced.)
+func (c *CloudInitProvider) CleanupCloudInit(ctx context.Context, isoPath string) {
+	dir := filepath.Dir(isoPath)
+	if filepath.Dir(dir) != filepath.Clean(c.stagingDir) || !strings.HasPrefix(filepath.Base(dir), cloudInitSeedDirPrefix) {
+		log.Printf("WARN Not removing %s: it is not a cloud-init seed directory", dir)
+		return
 	}
-
-	log.Printf("INFO Cleaned up cloud-init files for instance: %s", instanceID)
-	return nil
+	removeHostPath(ctx, c.virshProvider, dir, true)
+	log.Printf("INFO Cleaned up cloud-init seed directory: %s", dir)
 }
 
 // ValidateCloudInitData validates the provided cloud-init YAML

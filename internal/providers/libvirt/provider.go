@@ -119,6 +119,11 @@ type Provider struct {
 	// reads the environment on use, so struct-literal providers (tests) still
 	// get the default policy rather than an unchecked one.
 	imageDirs []string
+
+	// hostStagingDir is the host directory per-create staging files (domain
+	// XML, cloud-init seeds) are made in. Empty means defaultHostStagingDir;
+	// tests point it at a scratch directory (see staging.go).
+	hostStagingDir string
 }
 
 // imagePolicy returns the provider's image-path confinement policy (see

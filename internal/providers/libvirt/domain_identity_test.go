@@ -267,9 +267,9 @@ func TestGenerateDomainXMLWithStorage_StampsOwnerWithRandomUUID(t *testing.T) {
 	hostile := contracts.ObjectIdentity{UID: ownerTeamA.UID, Namespace: `team-a'"<>&`, Name: "web"}
 	req := contracts.CreateRequest{Name: "web", Owner: hostile}
 
-	x1, err := p.generateDomainXMLWithStorage(ctx, vp, req, "/var/lib/libvirt/images/web-disk.qcow2.qcow2", "")
+	x1, err := p.generateDomainXMLWithStorage(ctx, vp, req, "team-a.web", "/var/lib/libvirt/images/team-a.web-disk.qcow2", "")
 	require.NoError(t, err)
-	x2, err := p.generateDomainXMLWithStorage(ctx, vp, req, "/var/lib/libvirt/images/web-disk.qcow2.qcow2", "")
+	x2, err := p.generateDomainXMLWithStorage(ctx, vp, req, "team-a.web", "/var/lib/libvirt/images/team-a.web-disk.qcow2", "")
 	require.NoError(t, err)
 
 	owners, err := domainOwners(x1)
@@ -280,13 +280,14 @@ func TestGenerateDomainXMLWithStorage_StampsOwnerWithRandomUUID(t *testing.T) {
 	require.NoError(t, err, "the generated domain XML must stay well-formed")
 	d2, err := parseDomainLibvirtxml(x2)
 	require.NoError(t, err)
+	assert.Equal(t, "team-a.web", d1.Name, "the domain <name> is the namespaced domain name, not the bare VM name")
 	assert.Regexp(t, uuidV4RE, d1.UUID, "domain UUID must be RFC 4122 v4")
 	assert.Regexp(t, uuidV4RE, d2.UUID)
 	assert.NotEqual(t, d1.UUID, d2.UUID, "domain UUIDs must not repeat across creates")
 	assert.NotContains(t, x1, "550e8400-e29b-41d4-a716-", "the old predictable UUID prefix must be gone")
 
 	// No owner -> no <metadata> at all (and still a valid document).
-	x3, err := p.generateDomainXMLWithStorage(ctx, vp, contracts.CreateRequest{Name: "web"}, "/d.qcow2", "")
+	x3, err := p.generateDomainXMLWithStorage(ctx, vp, contracts.CreateRequest{Name: "web"}, "web", "/d.qcow2", "")
 	require.NoError(t, err)
 	assert.NotContains(t, x3, "<metadata>")
 	_, err = parseDomainLibvirtxml(x3)
@@ -356,8 +357,8 @@ func virshLog(t *testing.T, logPath string) []string {
 
 // requireConflictNoBind asserts err is the non-retryable Conflict, names only
 // the requested domain (never the other owner), and that nothing but the
-// read-only list/dumpxml ran.
-func requireConflictNoBind(t *testing.T, resp contracts.CreateResponse, err error, logPath string) {
+// read-only list/dumpxml of that domain ran.
+func requireConflictNoBind(t *testing.T, resp contracts.CreateResponse, err error, logPath, domain string, other contracts.ObjectIdentity) {
 	t.Helper()
 	require.Error(t, err)
 	assert.Empty(t, resp.ID, "a refused create must not return an ID to bind")
@@ -365,64 +366,90 @@ func requireConflictNoBind(t *testing.T, resp contracts.CreateResponse, err erro
 	require.ErrorAs(t, err, &pe)
 	assert.Equal(t, contracts.ErrorTypeConflict, pe.Type)
 	assert.False(t, pe.IsRetryable(), "an ownership conflict is not resolved by retrying")
-	assert.Contains(t, pe.Message, `libvirt domain "web" already exists`)
+	assert.Contains(t, pe.Message, fmt.Sprintf("libvirt domain %q already exists", domain))
 	assert.Contains(t, pe.Message, "adoption flow")
-	for _, leak := range []string{ownerTeamA.UID, ownerTeamA.Namespace} {
-		assert.NotContains(t, pe.Message, leak, "the status-bound message must not disclose the other owner")
+	if other.UID != "" {
+		assert.NotContains(t, pe.Message, other.UID, "the status-bound message must not disclose the other owner")
 	}
-	assert.Equal(t, []string{"list --all", "dumpxml web"}, virshLog(t, logPath),
+	assert.Equal(t, []string{"list --all", "dumpxml " + domain}, virshLog(t, logPath),
 		"only read-only queries may run before refusing")
 }
 
+// staleTeamAWeb is a previous incarnation of team-a/web: same namespace and
+// name (so the same domain name), a different UID — e.g. a VirtualMachine that
+// was deleted without its domain and then re-created.
+var staleTeamAWeb = contracts.ObjectIdentity{UID: "5e1f0c3a-9b8d-4e7f-a6c5-4b3a2d1e0f9a", Namespace: "team-a", Name: "web"}
+
+// TestCreate_ExistingDomain_Ownership pins the #333 bind rule on NAMESPACED
+// domain names: a domain named "<namespace>.<name>" that already exists is
+// bound only when its stamp records the requester's UID.
+//
+// Updated deliberately for namespaced naming: before, tenant B's "web"
+// collided with tenant A's "web" (one domain name for both). Now a same-named
+// domain can only be this VM's own namespaced domain (the retry case), a
+// previous incarnation of it, or a foreign/legacy domain that happens to have
+// that exact name — the cases below.
 func TestCreate_ExistingDomain_Ownership(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("owned by the requester is an idempotent success", func(t *testing.T) {
-		logPath := installOwnershipFakeVirsh(t, map[string]string{"web": stampedDomainXML("web", ownerTeamA)})
+		logPath := installOwnershipFakeVirsh(t, map[string]string{"team-a.web": stampedDomainXML("team-a.web", ownerTeamA)})
 		p := &Provider{virshProvider: localTestVirshProvider()}
 
 		resp, err := p.Create(ctx, contracts.CreateRequest{Name: "web", Owner: ownerTeamA})
 		require.NoError(t, err)
-		assert.Equal(t, "web", resp.ID)
-		assert.Equal(t, []string{"list --all", "dumpxml web"}, virshLog(t, logPath))
+		assert.Equal(t, "team-a.web", resp.ID, "the retried create binds the SAME namespaced domain")
+		assert.Equal(t, []string{"list --all", "dumpxml team-a.web"}, virshLog(t, logPath))
 	})
 
-	t.Run("owned by another tenant is refused", func(t *testing.T) {
-		logPath := installOwnershipFakeVirsh(t, map[string]string{"web": stampedDomainXML("web", ownerTeamA)})
+	t.Run("owned by another UID (a previous incarnation) is refused", func(t *testing.T) {
+		logPath := installOwnershipFakeVirsh(t, map[string]string{"team-a.web": stampedDomainXML("team-a.web", staleTeamAWeb)})
 		p := &Provider{virshProvider: localTestVirshProvider()}
 
-		resp, err := p.Create(ctx, contracts.CreateRequest{Name: "web", Owner: ownerTeamB})
-		requireConflictNoBind(t, resp, err, logPath)
+		resp, err := p.Create(ctx, contracts.CreateRequest{Name: "web", Owner: ownerTeamA})
+		requireConflictNoBind(t, resp, err, logPath, "team-a.web", staleTeamAWeb)
 	})
 
 	t.Run("no owner metadata is refused", func(t *testing.T) {
-		logPath := installOwnershipFakeVirsh(t, map[string]string{"web": unstampedDomainXML("web")})
+		logPath := installOwnershipFakeVirsh(t, map[string]string{"team-b.web": unstampedDomainXML("team-b.web")})
 		p := &Provider{virshProvider: localTestVirshProvider()}
 
 		resp, err := p.Create(ctx, contracts.CreateRequest{Name: "web", Owner: ownerTeamB})
-		requireConflictNoBind(t, resp, err, logPath)
+		requireConflictNoBind(t, resp, err, logPath, "team-b.web", contracts.ObjectIdentity{})
 	})
 
-	t.Run("request without owner (old manager) is refused", func(t *testing.T) {
+	t.Run("a legacy VM literally named <namespace>.<name> is refused", func(t *testing.T) {
+		// A VirtualMachine named "team-a.web" created with the legacy (bare)
+		// naming in ANOTHER namespace owns domain "team-a.web".
+		legacy := contracts.ObjectIdentity{UID: "7a6b5c4d-3e2f-4a1b-8c9d-0e1f2a3b4c5d", Namespace: "team-z", Name: "team-a.web"}
+		logPath := installOwnershipFakeVirsh(t, map[string]string{"team-a.web": stampedDomainXML("team-a.web", legacy)})
+		p := &Provider{virshProvider: localTestVirshProvider()}
+
+		resp, err := p.Create(ctx, contracts.CreateRequest{Name: "web", Owner: ownerTeamA})
+		requireConflictNoBind(t, resp, err, logPath, "team-a.web", legacy)
+		assert.NotContains(t, err.Error(), legacy.Namespace)
+	})
+
+	t.Run("request without owner (old manager) keeps the legacy name and is refused", func(t *testing.T) {
 		logPath := installOwnershipFakeVirsh(t, map[string]string{"web": stampedDomainXML("web", ownerTeamA)})
 		p := &Provider{virshProvider: localTestVirshProvider()}
 
 		resp, err := p.Create(ctx, contracts.CreateRequest{Name: "web"})
-		requireConflictNoBind(t, resp, err, logPath)
+		requireConflictNoBind(t, resp, err, logPath, "web", ownerTeamA)
 	})
 
 	t.Run("unparseable domain XML is refused", func(t *testing.T) {
-		logPath := installOwnershipFakeVirsh(t, map[string]string{"web": "<domain><name>web"})
+		logPath := installOwnershipFakeVirsh(t, map[string]string{"team-a.web": "<domain><name>team-a.web"})
 		p := &Provider{virshProvider: localTestVirshProvider()}
 
 		resp, err := p.Create(ctx, contracts.CreateRequest{Name: "web", Owner: ownerTeamA})
-		requireConflictNoBind(t, resp, err, logPath)
+		requireConflictNoBind(t, resp, err, logPath, "team-a.web", contracts.ObjectIdentity{})
 	})
 
 	t.Run("dumpxml failure is retryable, not a bind", func(t *testing.T) {
 		// Listed but not dumpable (e.g. it vanished between list and dumpxml).
-		logPath := installOwnershipFakeVirsh(t, map[string]string{"web": ""})
-		require.NoError(t, os.Remove(filepath.Join(os.Getenv("FAKE_VIRSH_DIR"), "dom-web.xml")))
+		logPath := installOwnershipFakeVirsh(t, map[string]string{"team-a.web": ""})
+		require.NoError(t, os.Remove(filepath.Join(os.Getenv("FAKE_VIRSH_DIR"), "dom-team-a.web.xml")))
 		p := &Provider{virshProvider: localTestVirshProvider()}
 
 		resp, err := p.Create(ctx, contracts.CreateRequest{Name: "web", Owner: ownerTeamA})
@@ -431,8 +458,33 @@ func TestCreate_ExistingDomain_Ownership(t *testing.T) {
 		var pe *contracts.ProviderError
 		require.ErrorAs(t, err, &pe)
 		assert.Equal(t, contracts.ErrorTypeRetryable, pe.Type)
-		assert.Equal(t, []string{"list --all", "dumpxml web"}, virshLog(t, logPath))
+		assert.Equal(t, []string{"list --all", "dumpxml team-a.web"}, virshLog(t, logPath))
 	})
+}
+
+// TestCreate_SameNameInAnotherNamespaceIsNoCollision proves the squatting is
+// gone: tenant A's "web" (namespaced, or a legacy bare "web") never blocks
+// tenant B's "web" — B's create does not even look at A's domain and runs the
+// create pipeline (which here stops at the fake's first mutating command, a
+// retryable error, never a Conflict).
+func TestCreate_SameNameInAnotherNamespaceIsNoCollision(t *testing.T) {
+	logPath := installOwnershipFakeVirsh(t, map[string]string{
+		"team-a.web": stampedDomainXML("team-a.web", ownerTeamA),
+		"web":        stampedDomainXML("web", ownerTeamA), // a legacy-named domain
+	})
+	p := &Provider{virshProvider: localTestVirshProvider()}
+
+	_, err := p.Create(context.Background(), contracts.CreateRequest{Name: "web", Owner: ownerTeamB})
+	var pe *contracts.ProviderError
+	require.ErrorAs(t, err, &pe)
+	assert.Equal(t, contracts.ErrorTypeRetryable, pe.Type, "another namespace's same-named VM is not a conflict")
+
+	calls := virshLog(t, logPath)
+	require.Greater(t, len(calls), 1, "the create pipeline must run past the existence check")
+	assert.Equal(t, "list --all", calls[0])
+	for _, c := range calls {
+		assert.False(t, strings.HasPrefix(c, "dumpxml"), "no other domain's owner stamp is read: %q", c)
+	}
 }
 
 // TestCreate_AbsentDomainProceedsToCreate proves the ownership check does not
@@ -455,21 +507,39 @@ func TestCreate_AbsentDomainProceedsToCreate(t *testing.T) {
 			require.Greater(t, len(calls), 1, "the create pipeline must run past the existence check")
 			assert.Equal(t, "list --all", calls[0])
 			assert.NotContains(t, calls, "dumpxml web", "no ownership lookup when nothing of that name exists")
+			assert.NotContains(t, calls, "dumpxml team-a.web")
 		})
 	}
 }
 
+// TestCreate_AmbiguousNameRejectedBeforeTouchingHost: a legacy (owner-less)
+// name virsh would resolve as a domain ID or UUID is rejected before any host
+// is touched, and so is a request whose owner does not name the VM. With an
+// owner, the same VM name is namespaced ("team-a.12"), which is never
+// ambiguous, so it proceeds to the create pipeline.
 func TestCreate_AmbiguousNameRejectedBeforeTouchingHost(t *testing.T) {
 	for _, name := range []string{"12", "1b4e28ba-2fa1-11d2-883f-0016d3cca427"} {
 		t.Run(name, func(t *testing.T) {
 			logPath := installOwnershipFakeVirsh(t, map[string]string{"web": stampedDomainXML("web", ownerTeamA)})
 			p := &Provider{virshProvider: localTestVirshProvider()}
 
-			_, err := p.Create(context.Background(), contracts.CreateRequest{Name: name, Owner: ownerTeamA})
+			for _, req := range []contracts.CreateRequest{
+				{Name: name},                    // legacy: the bare name is the domain name
+				{Name: name, Owner: ownerTeamA}, // owner names "web", not this VM
+			} {
+				_, err := p.Create(context.Background(), req)
+				var pe *contracts.ProviderError
+				require.ErrorAs(t, err, &pe)
+				assert.Equal(t, contracts.ErrorTypeInvalidSpec, pe.Type)
+			}
+			assert.Empty(t, virshLog(t, logPath), "no virsh command may run for an unusable name")
+
+			owner := contracts.ObjectIdentity{UID: ownerTeamA.UID, Namespace: "team-a", Name: name}
+			_, err := p.Create(context.Background(), contracts.CreateRequest{Name: name, Owner: owner})
 			var pe *contracts.ProviderError
 			require.ErrorAs(t, err, &pe)
-			assert.Equal(t, contracts.ErrorTypeInvalidSpec, pe.Type)
-			assert.Empty(t, virshLog(t, logPath), "no virsh command may run for an ambiguous name")
+			assert.Equal(t, contracts.ErrorTypeRetryable, pe.Type, "a namespaced %q is a valid domain name", "team-a."+name)
+			assert.Equal(t, "list --all", virshLog(t, logPath)[0])
 		})
 	}
 }
@@ -477,21 +547,29 @@ func TestCreate_AmbiguousNameRejectedBeforeTouchingHost(t *testing.T) {
 // TestCreate_Clustered_OwnershipAppliesOnTargetHost drives the PRODUCTION
 // clustered path (createClustered -> createOnLeasedHost -> createVM, no
 // createOnHostFn seam) against a leased host whose virsh is the fake, proving
-// the ownership rule is enforced on the scheduled host too.
+// the naming and ownership rules are enforced on the scheduled host too.
 func TestCreate_Clustered_OwnershipAppliesOnTargetHost(t *testing.T) {
-	logPath := installOwnershipFakeVirsh(t, map[string]string{"web": stampedDomainXML("web", ownerTeamA)})
-	vc := newClusteredVirshConn("host-a", localTestVirshProvider(), nil)
-	inv := hostsecret.Inventory{
-		SchemaVersion: hostsecret.SchemaVersion,
-		Hosts:         []hostsecret.Host{{ID: "host-a", Endpoint: "qemu+ssh://virt@host-a/system"}},
+	newHost := func(domains map[string]string) (*Provider, string) {
+		logPath := installOwnershipFakeVirsh(t, domains)
+		vc := newClusteredVirshConn("host-a", localTestVirshProvider(), nil)
+		inv := hostsecret.Inventory{
+			SchemaVersion: hostsecret.SchemaVersion,
+			Hosts:         []hostsecret.Host{{ID: "host-a", Endpoint: "qemu+ssh://virt@host-a/system"}},
+		}
+		p, _ := newClusteredProviderForTest(t, inv, func(_ context.Context, _ hostsecret.Host) (hostconn.Conn, error) { return vc, nil })
+		require.Nil(t, p.createOnHostFn, "must exercise the production create-on-host path")
+		return p, logPath
 	}
-	p, _ := newClusteredProviderForTest(t, inv, func(_ context.Context, _ hostsecret.Host) (hostconn.Conn, error) { return vc, nil })
-	require.Nil(t, p.createOnHostFn, "must exercise the production create-on-host path")
 
-	resp, err := p.Create(context.Background(), contracts.CreateRequest{Name: "web", TargetHostID: "host-a", Owner: ownerTeamB})
-	requireConflictNoBind(t, resp, err, logPath)
+	p, logPath := newHost(map[string]string{"team-a.web": stampedDomainXML("team-a.web", staleTeamAWeb)})
+	resp, err := p.Create(context.Background(), contracts.CreateRequest{Name: "web", TargetHostID: "host-a", Owner: ownerTeamA})
+	requireConflictNoBind(t, resp, err, logPath, "team-a.web", staleTeamAWeb)
 
+	p, _ = newHost(map[string]string{"team-a.web": stampedDomainXML("team-a.web", ownerTeamA)})
 	resp, err = p.Create(context.Background(), contracts.CreateRequest{Name: "web", TargetHostID: "host-a", Owner: ownerTeamA})
 	require.NoError(t, err, "the owner's retried create on the same host is idempotent")
-	assert.Equal(t, "web", resp.ID)
+	assert.Equal(t, "team-a.web", resp.ID)
+
+	_, err = p.Create(context.Background(), contracts.CreateRequest{Name: "web", TargetHostID: "host-a", Owner: ownerTeamB})
+	assert.False(t, contracts.IsConflict(err), "team-b/web does not collide with team-a/web on the target host: %v", err)
 }

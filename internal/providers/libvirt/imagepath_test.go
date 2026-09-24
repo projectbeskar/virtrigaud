@@ -943,27 +943,41 @@ func TestCreateDiskFromHostImage_CopiesBaseImage(t *testing.T) {
 	p := &Provider{virshProvider: vp, imageDirs: []string{h.images}}
 
 	vol, err := p.createDiskFromHostImage(context.Background(), vp, NewStorageProvider(vp),
-		contracts.CreateRequest{Name: "web", Image: contracts.VMImage{Path: img}}, img, vmDiskVolumeName("web"), 10)
+		contracts.CreateRequest{Name: "web", Owner: ownerTeamA, Image: contracts.VMImage{Path: img}},
+		"team-a.web", img, vmDiskVolumeName("team-a.web"), 10)
 	require.NoError(t, err)
-	assert.Equal(t, filepath.Join(h.images, "web-disk.qcow2"), vol.Path, "the VM gets its own disk")
+	assert.Equal(t, filepath.Join(h.images, "team-a.web-disk.qcow2"), vol.Path, "the VM gets its own disk, named after its domain")
 	assert.NotEqual(t, img, vol.Path)
 	assert.Contains(t, h.log("qemu-img"), "convert -f raw -O qcow2 "+img+" "+vol.Path)
 }
 
 // TestCreateDiskFromHostImage_AdoptsOwnImportedDisk proves the migration
-// landing disk is still attached in place (no copy).
+// landing disk is still attached in place (no copy): <domain>-migrated.qcow2,
+// where <domain> is the namespaced domain name for a request with an owner and
+// the bare VM name for an older manager's request.
 func TestCreateDiskFromHostImage_AdoptsOwnImportedDisk(t *testing.T) {
-	h := newFakeHost(t)
-	vp := h.host("h1")
-	own := h.file(h.images, "web-migrated.qcow2")
-	p := &Provider{virshProvider: vp, imageDirs: []string{h.images}}
+	for _, tc := range []struct {
+		name   string
+		owner  contracts.ObjectIdentity
+		domain string
+	}{
+		{"namespaced", ownerTeamA, "team-a.web"},
+		{"legacy (no owner)", contracts.ObjectIdentity{}, "web"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newFakeHost(t)
+			vp := h.host("h1")
+			own := h.file(h.images, tc.domain+"-migrated.qcow2")
+			p := &Provider{virshProvider: vp, imageDirs: []string{h.images}}
 
-	vol, err := p.createDiskFromHostImage(context.Background(), vp, NewStorageProvider(vp),
-		contracts.CreateRequest{Name: "web", Image: contracts.VMImage{Path: own, ImportedDisk: true}},
-		own, vmDiskVolumeName("web"), 10)
-	require.NoError(t, err)
-	assert.Equal(t, own, vol.Path)
-	assert.NotContains(t, h.log("qemu-img"), "convert")
+			vol, err := p.createDiskFromHostImage(context.Background(), vp, NewStorageProvider(vp),
+				contracts.CreateRequest{Name: "web", Owner: tc.owner, Image: contracts.VMImage{Path: own, ImportedDisk: true}},
+				tc.domain, own, vmDiskVolumeName(tc.domain), 10)
+			require.NoError(t, err)
+			assert.Equal(t, own, vol.Path)
+			assert.NotContains(t, h.log("qemu-img"), "convert")
+		})
+	}
 }
 
 // TestCreate_Clustered_ConfinesOnTargetHost proves the checks run against the

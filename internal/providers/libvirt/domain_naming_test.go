@@ -19,6 +19,7 @@ package libvirt
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -117,12 +118,17 @@ func TestDomainNameFor_LengthBoundary(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEqual(t, got, otherNS)
 
-	// Every suffix VirtRigaud appends still fits a 255-byte file name.
-	for _, suffix := range []string{
-		vmDiskVolumeSuffix + qcow2Ext, contracts.ImportedDiskNameSuffix + qcow2Ext,
-		vmDiskVolumeSuffix + "-temp.img", "-domain.xml.XXXXXXXXXX", ".XXXXXXXXXX",
+	// Every host file name VirtRigaud derives from a domain name still fits the
+	// 255-byte file-name limit.
+	for _, fileName := range []string{
+		got + vmDiskVolumeSuffix + qcow2Ext,                                              // <domain>-disk.qcow2
+		importedVolumeFileName(got),                                                      // <domain>-migrated.qcow2
+		got + vmDiskVolumeSuffix + "-temp.img",                                           // DownloadCloudImage staging
+		got + domainXMLStagingInfix + mktempTemplateSuffix,                               // staged domain XML
+		cloudInitSeedDirPrefix + got + "." + mktempTemplateSuffix,                        // cloud-init seed directory
+		filepath.Base(hostStagePath("/p", got+contracts.ImportedDiskNameSuffix, "vmdk")), // s3 import staging
 	} {
-		assert.LessOrEqual(t, len(got+suffix), 255, "suffix %q", suffix)
+		assert.LessOrEqual(t, len(fileName), 255, "file name %q", fileName)
 	}
 }
 

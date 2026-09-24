@@ -188,10 +188,7 @@ func (p *Provider) Clone(ctx context.Context, req contracts.CloneRequest) (contr
 
 	// Clone stays single-host in this slice (no CloneRequest.target_host_id yet,
 	// ADR-0007 P1): define on the provider's own host.
-	if err := p.createDomainDefinition(ctx, p.virshProvider, req.TargetName, targetXML); err != nil {
-		return contracts.CloneResponse{}, fmt.Errorf("create target domain definition: %w", err)
-	}
-	if err := p.defineDomain(ctx, p.virshProvider, req.TargetName); err != nil {
+	if err := p.defineDomainFromXML(ctx, p.virshProvider, req.TargetName, targetXML); err != nil {
 		return contracts.CloneResponse{}, fmt.Errorf("define target domain: %w", err)
 	}
 
