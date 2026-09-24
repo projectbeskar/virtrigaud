@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -73,6 +74,7 @@ func setPlacedCondition(vm *infravirtrigaudiov1beta1.VirtualMachine, status meta
 func (r *VirtualMachineReconciler) recordPendingHost(
 	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
+	providerCR *infravirtrigaudiov1beta1.Provider,
 	p *clusterPlacement,
 ) (ctrl.Result, bool, error) {
 	pl := vm.Status.Placement
@@ -80,6 +82,9 @@ func (r *VirtualMachineReconciler) recordPendingHost(
 		pl = &infravirtrigaudiov1beta1.PlacementStatus{}
 		vm.Status.Placement = pl
 	}
+	// A pending host binds the VM (spec.providerRef locks with it): record the
+	// Provider it is bound through in the same checked write.
+	recordBoundProvider(vm, providerCR)
 	now := metav1.Now()
 	pl.PendingHost = p.hostID
 	pl.Pool = p.poolName
@@ -316,24 +321,42 @@ func (r *VirtualMachineReconciler) handleMissingOnBoundHost(
 // requeues without calling the provider (ADR-0007 Addendum A): an unbound
 // clustered VM gets Placed=False/Unbound; a VM whose recorded clustered
 // placement no longer matches its Provider's topology gets
-// Ready=False/PlacementTopologyMismatch. Any other error is returned as-is.
+// Ready=False/PlacementTopologyMismatch; a VM whose spec.providerRef no longer
+// resolves to the Provider it is bound through gets
+// Ready=False/ProviderRefMismatch (plus a warning event) and is re-checked
+// slowly. Any other error is returned as-is.
 func (r *VirtualMachineReconciler) handleNotRoutable(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, err error) (ctrl.Result, error) {
 	if !markNotRoutable(vm, err) {
 		return ctrl.Result{}, err
 	}
 	log.FromContext(ctx).Info("Not calling the provider for this VM", "reason", err.Error())
-	metrics.RecordError(errReasonPlacement, metrics.ComponentManager)
 	r.updateStatus(ctx, vm)
-	if isPlacementTopologyMismatch(err) {
+	switch {
+	case isProviderRefMismatch(err):
+		metrics.RecordError(errReasonProviderRefMismatch, metrics.ComponentManager)
+		r.recordEvent(vm, corev1.EventTypeWarning, k8s.ReasonProviderRefMismatch, err.Error())
+		return ctrl.Result{RequeueAfter: providerRefMismatchRetryInterval}, nil
+	case isPlacementTopologyMismatch(err):
+		metrics.RecordError(errReasonPlacement, metrics.ComponentManager)
 		return ctrl.Result{RequeueAfter: placementConfigRetryInterval}, nil
 	}
+	metrics.RecordError(errReasonPlacement, metrics.ComponentManager)
 	return ctrl.Result{RequeueAfter: placementUnboundRetryInterval}, nil
 }
 
 // markNotRoutable sets the condition for a vmRefFor failure and reports
-// whether err was one (unbound, or a placement/topology mismatch).
+// whether err was one (unbound, a placement/topology mismatch, or a provider
+// reference mismatch).
 func markNotRoutable(vm *infravirtrigaudiov1beta1.VirtualMachine, err error) bool {
 	switch {
+	case isProviderRefMismatch(err):
+		meta.SetStatusCondition(&vm.Status.Conditions, metav1.Condition{
+			Type:               k8s.ConditionReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             k8s.ReasonProviderRefMismatch,
+			Message:            err.Error(),
+			ObservedGeneration: vm.Generation,
+		})
 	case isVMUnbound(err):
 		setPlacedCondition(vm, metav1.ConditionFalse, k8s.ReasonUnbound, err.Error())
 	case isPlacementTopologyMismatch(err):
@@ -439,10 +462,11 @@ func (r *VirtualMachineReconciler) handleRoutedOpError(
 //     already made there does not leak. The provider destroys it only if its
 //     owner stamp is this VM's; anything else is reported not-found untouched.
 //
-// A VM for which no delete can be routed — a clustered VM with no binding, or
-// one whose recorded placement no longer matches its Provider's topology — is
-// never sent a Delete: the finalizer is retained with the matching condition,
-// unless the force-delete escape hatch is set.
+// A VM for which no delete can be routed — a clustered VM with no binding, one
+// whose recorded placement no longer matches its Provider's topology, or one
+// bound through another Provider object (status.boundProvider) — is never sent
+// a Delete: the finalizer is retained with the matching condition, unless the
+// force-delete escape hatch is set (retainForUnroutableDelete).
 func (r *VirtualMachineReconciler) deletionTarget(
 	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
@@ -455,7 +479,10 @@ func (r *VirtualMachineReconciler) deletionTarget(
 		err error
 	)
 	if vm.Status.ID == "" {
-		if err = placementTopologyError(vm, provider); err == nil {
+		if err = checkVMProvider(vm, provider); err == nil {
+			err = placementTopologyError(vm, provider)
+		}
+		if err == nil {
 			ref, _ = pendingCreateRef(vm)
 			logger.Info("VM has a create in flight; sending an owner-checked delete to its pending host",
 				"id", ref.ID, "host", ref.HostID)
@@ -467,15 +494,41 @@ func (r *VirtualMachineReconciler) deletionTarget(
 		return ref, true, ctrl.Result{}
 	}
 
+	if res, retain := r.retainForUnroutableDelete(ctx, vm, err); retain {
+		return contracts.VMRef{}, false, res
+	}
+	return contracts.VMRef{}, true, ctrl.Result{}
+}
+
+// retainForUnroutableDelete decides the finalizer of a VM being deleted whose
+// provider Delete cannot be routed (err is the vmRefFor / provider-binding
+// failure). By default the finalizer is retained (retain == true, with the
+// matching condition set and the result to return): the hypervisor VM must not
+// be silently orphaned, nor deleted through the wrong Provider. With the
+// force-delete escape hatch set it returns retain == false and the caller
+// removes the finalizer WITHOUT any provider call (the hypervisor VM may be
+// left behind), exactly as for any other undeletable VM.
+func (r *VirtualMachineReconciler) retainForUnroutableDelete(
+	ctx context.Context,
+	vm *infravirtrigaudiov1beta1.VirtualMachine,
+	err error,
+) (ctrl.Result, bool) {
+	logger := log.FromContext(ctx)
 	if hasForceDeleteAnnotation(vm) {
 		logger.Error(err, "Cannot route the provider delete but force-delete annotation is set; removing finalizer (the provider VM may be orphaned)",
 			"id", vm.Status.ID, "annotation", forceDeleteAnnotation)
 		metrics.RecordError(errReasonProviderDelete, metrics.ComponentManager)
-		return contracts.VMRef{}, true, ctrl.Result{}
+		return ctrl.Result{}, false
 	}
 	logger.Info("Cannot route the provider delete; retaining finalizer", "id", vm.Status.ID, "reason", err.Error())
 	markNotRoutable(vm, err)
 	metrics.RecordError(errReasonProviderDelete, metrics.ComponentManager)
 	r.updateStatus(ctx, vm)
-	return contracts.VMRef{}, false, ctrl.Result{RequeueAfter: vmDeleteRetryInterval}
+	if isProviderRefMismatch(err) {
+		r.recordEvent(vm, corev1.EventTypeWarning, k8s.ReasonProviderRefMismatch, fmt.Sprintf(
+			"not deleting the hypervisor VM through a Provider it is not bound to: %v. Set %s=true to detach it, or %s=true to drop the finalizer",
+			err, infravirtrigaudiov1beta1.VirtualMachineOrphanOnDeleteAnnotation, forceDeleteAnnotation))
+		return ctrl.Result{RequeueAfter: providerRefMismatchRetryInterval}, true
+	}
+	return ctrl.Result{RequeueAfter: vmDeleteRetryInterval}, true
 }

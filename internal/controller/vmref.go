@@ -103,10 +103,23 @@ func isPlacementTopologyMismatch(err error) bool {
 // vmRefErrorReason is the condition reason for a vmRefFor failure recorded on
 // a VMSnapshot / VMClone / VMMigration.
 func vmRefErrorReason(err error) string {
-	if isPlacementTopologyMismatch(err) {
+	switch {
+	case isProviderRefMismatch(err):
+		return k8s.ReasonProviderRefMismatch
+	case isPlacementTopologyMismatch(err):
 		return k8s.ReasonPlacementTopologyMismatch
 	}
 	return reasonVMUnbound
+}
+
+// vmRefWaitMessage is the short status message a VMSnapshot / VMClone /
+// VMMigration records while a vmRefFor failure keeps it from calling the
+// provider for the VM it acts on; the condition carries err in full.
+func vmRefWaitMessage(err error) string {
+	if isProviderRefMismatch(err) {
+		return "The VM's spec.providerRef does not match the Provider it is bound through; no provider call is made"
+	}
+	return "Waiting for the VM's host binding"
 }
 
 // placementTopologyError returns a *PlacementTopologyMismatchError when vm
@@ -132,6 +145,10 @@ func placementTopologyError(vm *infravirtrigaudiov1beta1.VirtualMachine, provide
 // (source), VMMigration (source) controllers all go through it, so the routing
 // rule lives in exactly one place:
 //
+//   - any topology: a VM bound through another Provider object
+//     (status.boundProvider: namespace, name and, when recorded, UID) fails
+//     CLOSED with a *ProviderRefMismatchError (no ref) — its status.id is
+//     meaningful only on the Provider that assigned it.
 //   - single-host / thin-client Provider (topology single, the default): the
 //     ref carries status.id only — no host, no owner — byte-for-byte today's
 //     call (D9). A VM that nevertheless records a clustered placement fails
@@ -142,6 +159,9 @@ func placementTopologyError(vm *infravirtrigaudiov1beta1.VirtualMachine, provide
 //     *UnboundVMError and no ref: a clustered VM is never sent a per-VM call
 //     without a host, because only the operator knows where a VM runs (D1).
 func vmRefFor(vm *infravirtrigaudiov1beta1.VirtualMachine, provider *infravirtrigaudiov1beta1.Provider) (contracts.VMRef, error) {
+	if err := checkVMProvider(vm, provider); err != nil {
+		return contracts.VMRef{}, err
+	}
 	if provider == nil || !isClusterTopology(provider) {
 		if err := placementTopologyError(vm, provider); err != nil {
 			return contracts.VMRef{}, err

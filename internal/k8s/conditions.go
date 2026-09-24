@@ -141,6 +141,16 @@ const (
 // edited before that rule existed.
 const ReasonPlacementTopologyMismatch = "PlacementTopologyMismatch"
 
+// ReasonProviderRefMismatch indicates that a bound VirtualMachine's
+// spec.providerRef no longer resolves to the Provider it is bound through
+// (status.boundProvider: namespace, name and, when recorded, UID). Its
+// status.id is meaningful only on that Provider's hypervisor — on another one
+// it may name an unrelated VM — so no provider call is made for it, and its
+// finalizer does not delete through the mismatched Provider. spec.providerRef
+// is immutable once bound, so this only affects objects edited before that
+// rule existed, or a Provider deleted and re-created under the same name.
+const ReasonProviderRefMismatch = "ProviderRefMismatch"
+
 // ReasonVMMissingOnHost indicates that a clustered VM's bound host reports the
 // hypervisor VM does not exist (ADR-0007 Addendum A, A4). The operator does NOT
 // re-create it — neither on the bound host nor elsewhere — because without
