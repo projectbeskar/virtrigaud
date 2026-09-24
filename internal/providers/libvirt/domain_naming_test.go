@@ -92,12 +92,13 @@ func TestDomainNameFor_LengthBoundary(t *testing.T) {
 	assert.Equal(t, ns+"."+fits, got)
 	assert.Len(t, got, maxDomainNameBytes)
 
-	// One byte more is shortened: prefix + "-" + 8 hex digits of sha256("<ns>/<name>").
+	// One byte more is shortened: prefix + "_" + 16 hex digits of sha256("<ns>/<name>").
 	over := fits + "x"
 	got, err = domainNameFor(namingID(ns, over), "")
 	require.NoError(t, err)
 	sum := sha256.Sum256([]byte(ns + "/" + over))
-	wantSuffix := "-" + hex.EncodeToString(sum[:])[:domainNameHashHexLen]
+	wantSuffix := "_" + hex.EncodeToString(sum[:])[:16]
+	assert.Len(t, wantSuffix, 17)
 	assert.True(t, strings.HasSuffix(got, wantSuffix), "got %q", got)
 	assert.True(t, strings.HasPrefix(got, ns+"."), "a shortened name keeps its whole namespace")
 	assert.Len(t, got, maxDomainNameBytes)
@@ -132,13 +133,57 @@ func TestDomainNameFor_LengthBoundary(t *testing.T) {
 	}
 }
 
+// TestDomainNameFor_ShortenedNameCannotBeClaimed: the '_' before the hash is
+// not DNS-1123, so no VirtualMachine (in the same namespace or any other) can
+// be named so that its domain name equals another VM's shortened name — the
+// attempt is rejected — and no untruncated name ever contains '_'.
+func TestDomainNameFor_ShortenedNameCannotBeClaimed(t *testing.T) {
+	long := strings.Repeat("w", 250)
+	shortened, err := domainNameFor(namingID("team-a", long), long)
+	require.NoError(t, err)
+	require.Contains(t, shortened, domainNameHashSeparator)
+
+	squat := strings.TrimPrefix(shortened, "team-a.")
+	_, err = domainNameFor(namingID("team-a", squat), squat)
+	requireInvalidSpec(t, err)
+	_, err = domainNameFor(contracts.ObjectIdentity{}, shortened)
+	requireInvalidSpec(t, err)
+
+	fits, err := domainNameFor(namingID("team-a", "web"), "web")
+	require.NoError(t, err)
+	assert.NotContains(t, fits, domainNameHashSeparator)
+}
+
+// TestDomainNameFor_LegacyFallbackValidation: an owner-less (legacy) name must
+// be a DNS-1123 subdomain without '.', so an older manager or a direct gRPC
+// caller can never create or squat a namespaced-form name.
+func TestDomainNameFor_LegacyFallbackValidation(t *testing.T) {
+	for _, ok := range []string{"web", "web-01", "a", strings.Repeat("a", 253)} {
+		got, err := domainNameFor(contracts.ObjectIdentity{}, ok)
+		require.NoError(t, err, "%q", ok)
+		assert.Equal(t, ok, got)
+	}
+	for _, bad := range []string{
+		"team-a.web", // the namespaced form
+		"web.prod",   // dotted names need a manager that sends the owner
+		"", "Web", "-web", "web_x", "../etc", "web/x", "we b", strings.Repeat("a", 254),
+	} {
+		_, err := domainNameFor(contracts.ObjectIdentity{}, bad)
+		requireInvalidSpec(t, err)
+	}
+	// With a naming identity a dotted VM name is fine.
+	got, err := domainNameFor(namingID("team-a", "web.prod"), "web.prod")
+	require.NoError(t, err)
+	assert.Equal(t, "team-a.web.prod", got)
+}
+
 func TestDomainNameFor_TruncationNeverEndsASegment(t *testing.T) {
 	// A name whose truncation point lands inside a run of '-' (valid in a
 	// DNS-1123 subdomain) is trimmed back to an alphanumeric before the hash.
 	name := "a" + strings.Repeat("-", 240) + "b"
 	got, err := domainNameFor(namingID("team-a", name), "")
 	require.NoError(t, err)
-	assert.True(t, strings.HasPrefix(got, "team-a.a-"), "got %q", got)
+	assert.True(t, strings.HasPrefix(got, "team-a.a"+domainNameHashSeparator), "got %q", got)
 	assert.NotContains(t, got, "--", "the trailing '-' run is trimmed before the hash suffix")
 	assert.NoError(t, ambiguousDomainNameError(got))
 }

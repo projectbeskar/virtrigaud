@@ -68,11 +68,18 @@ const (
 	// (boundDomainName).
 	maxDomainNameBytes = 200
 
-	// domainNameHashHexLen is how many hex digits of sha256("<namespace>/<name>")
-	// a shortened domain name ends with, after a '-'. The hash keeps two long
-	// names that share a prefix distinct and makes the shortened name stable
-	// across retries.
-	domainNameHashHexLen = 8
+	// domainNameHashHexLen is how many hex digits (64 bits) of
+	// sha256("<namespace>/<name>") a shortened domain name ends with, after
+	// domainNameHashSeparator. The hash keeps two long names that share a
+	// prefix distinct and makes the shortened name stable across retries.
+	domainNameHashHexLen = 16
+
+	// domainNameHashSeparator precedes the hash of a shortened domain name. It
+	// is '_', which no Kubernetes name (DNS-1123) and no validated legacy name
+	// can contain, so a shortened name can never equal the untruncated
+	// "<namespace>.<name>" of another VirtualMachine: no tenant can pick a VM
+	// name that lands on another VM's shortened domain name.
+	domainNameHashSeparator = "_"
 
 	// domainNameHashInputSeparator joins namespace and name in the hash input.
 	// '/' is valid in neither, so distinct identities never hash the same input.
@@ -80,7 +87,7 @@ const (
 
 	// domainNameTruncationTrim are the characters trimmed from the end of a
 	// truncated prefix before the hash suffix is appended, so a shortened name
-	// never ends a segment with '.' or '-' (".-1a2b3c4d").
+	// never ends a segment with '.' or '-' (".-_1a2b...").
 	domainNameTruncationTrim = ".-"
 )
 
@@ -101,15 +108,23 @@ func hasNamingIdentity(id contracts.ObjectIdentity) bool {
 //     as InvalidSpec: the name reaches host file paths and virsh arguments, so
 //     it must never carry a '/', a leading '-' or a character outside the DNS
 //     alphabet.
-//   - without one (an older manager that sends no owner): fallback, the bare
-//     name the request carries — the legacy naming.
+//   - without one (an older manager that sends no owner, or a direct gRPC
+//     caller): fallback, the bare name the request carries — the legacy
+//     naming. It must be a DNS-1123 subdomain WITHOUT a '.' (validLegacyName),
+//     so an owner-less request can never create, or squat, a name of the
+//     namespaced form "<namespace>.<name>". A dotted VirtualMachine name
+//     therefore needs a manager that sends the owner (#333 or later).
 //
 // Either way, a name virsh would resolve as a domain ID or UUID is rejected as
 // InvalidSpec (ambiguousDomainNameError). Only the legacy fallback can hit
 // that: a namespaced name always contains '.', which neither form contains.
 func domainNameFor(owner contracts.ObjectIdentity, fallback string) (string, error) {
 	name := fallback
-	if hasNamingIdentity(owner) {
+	if !hasNamingIdentity(owner) {
+		if err := validLegacyName(fallback); err != nil {
+			return "", err
+		}
+	} else {
 		if errs := validation.IsDNS1123Label(owner.Namespace); len(errs) > 0 {
 			return "", contracts.NewInvalidSpecError(fmt.Sprintf(
 				"namespace %q cannot name a libvirt domain: %s", owner.Namespace, strings.Join(errs, "; ")), nil)
@@ -126,9 +141,27 @@ func domainNameFor(owner contracts.ObjectIdentity, fallback string) (string, err
 	return name, nil
 }
 
+// validLegacyName returns an InvalidSpec error unless name can be used as a
+// legacy (owner-less) domain name: a DNS-1123 subdomain — what Kubernetes
+// admits as a VirtualMachine name — without any '.'. The '.' is reserved for
+// the namespaced form, so a request without an owner can never produce (and so
+// squat) "<namespace>.<name>".
+func validLegacyName(name string) error {
+	if errs := validation.IsDNS1123Subdomain(name); len(errs) > 0 {
+		return contracts.NewInvalidSpecError(fmt.Sprintf(
+			"name %q cannot name a libvirt domain: %s", name, strings.Join(errs, "; ")), nil)
+	}
+	if strings.Contains(name, domainNameSeparator) {
+		return contracts.NewInvalidSpecError(fmt.Sprintf(
+			"name %q cannot name a libvirt domain without its namespace: a name containing %q needs a "+
+				"manager that sends the VirtualMachine's owner (#333 or later)", name, domainNameSeparator), nil)
+	}
+	return nil
+}
+
 // boundDomainName returns "<namespace>.<name>", or — when that is longer than
-// maxDomainNameBytes — its first bytes followed by "-" and the first
-// domainNameHashHexLen hex digits of sha256("<namespace>/<name>"), exactly
+// maxDomainNameBytes — its first bytes followed by domainNameHashSeparator and
+// the first domainNameHashHexLen hex digits of sha256("<namespace>/<name>"),
 // maxDomainNameBytes long at most. The result is deterministic (a retried
 // create finds the domain it made) and keeps two long names that share a
 // prefix distinct. The namespace (at most 63 bytes) is always kept whole, so a
@@ -142,7 +175,7 @@ func boundDomainName(namespace, name string) string {
 		return full
 	}
 	sum := sha256.Sum256([]byte(namespace + domainNameHashInputSeparator + name))
-	suffix := "-" + hex.EncodeToString(sum[:])[:domainNameHashHexLen]
+	suffix := domainNameHashSeparator + hex.EncodeToString(sum[:])[:domainNameHashHexLen]
 	prefix := strings.TrimRight(full[:maxDomainNameBytes-len(suffix)], domainNameTruncationTrim)
 	return prefix + suffix
 }
