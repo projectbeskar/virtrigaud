@@ -111,6 +111,16 @@ message PowerRequest {
   // InvalidArgument rather than defaulting to some host (honesty-first, D9). The
   // provider never looks a VM's host up by itself (D1).
   string target_host_id = 4;
+
+  // owner identifies the Kubernetes object (the VirtualMachine) this power
+  // operation is performed for — the identity CreateRequest.owner stamps onto
+  // the VM (ADR-0007 Addendum A, slice 2). AGNOSTIC. Additive and
+  // backward-compatible: single-host and thin-client providers ignore it, and
+  // the operator sends it only with a target_host_id. A clustered provider
+  // powers a VM ONLY when its recorded owner uid equals this uid; a VM whose
+  // stamp is missing, unreadable or records a different owner is reported
+  // NOT_FOUND and is never started, stopped or rebooted.
+  ObjectIdentity owner = 5;
 }
 
 // Reconfigure virtual machine resources
@@ -127,6 +137,16 @@ message ReconfigureRequest {
   // InvalidArgument rather than defaulting to some host (honesty-first, D9). The
   // provider never looks a VM's host up by itself (D1).
   string target_host_id = 3;
+
+  // owner identifies the Kubernetes object (the VirtualMachine) this
+  // reconfigure is performed for — the identity CreateRequest.owner stamps onto
+  // the VM (ADR-0007 Addendum A, slice 2). AGNOSTIC. Additive and
+  // backward-compatible: single-host and thin-client providers ignore it, and
+  // the operator sends it only with a target_host_id. A clustered provider
+  // reconfigures a VM ONLY when its recorded owner uid equals this uid; a VM
+  // whose stamp is missing, unreadable or records a different owner is reported
+  // NOT_FOUND and none of its CPU, memory or disks is changed.
+  ObjectIdentity owner = 4;
 }
 
 // Upgrade VM hardware version
