@@ -295,7 +295,8 @@ func TestMigrationPhases_RefuseASourceBoundElsewhere(t *testing.T) {
 			migration.Status.Phase = phase
 			migration.Spec.Source.PowerOffBeforeMigration = true
 			migration.Spec.Source.CreateSnapshot = true
-			src := objs[0].(*infrav1beta1.VirtualMachine)
+			src, ok := objs[0].(*infrav1beta1.VirtualMachine)
+			require.True(t, ok, "xnsMigration returns the source VM first")
 			src.Spec.ProviderRef = infrav1beta1.ObjectRef{Name: "tgt-prov"} // re-pointed at another ready Provider
 			src.Status.BoundProvider = &infrav1beta1.BoundProviderRef{Namespace: xnsSource, Name: "src-prov"}
 			spy := &migrationSpy{}

@@ -87,13 +87,16 @@ var _ = Describe("VirtualMachine spec.providerRef immutability (CRD CEL rule)", 
 		versions, _, err := unstructured.NestedSlice(crd.Object, "spec", "versions")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(versions).NotTo(BeEmpty())
-		rules, found, err := unstructured.NestedSlice(versions[0].(map[string]any),
-			"schema", "openAPIV3Schema", "x-kubernetes-validations")
+		version, ok := versions[0].(map[string]any)
+		Expect(ok).To(BeTrue())
+		rules, found, err := unstructured.NestedSlice(version, "schema", "openAPIV3Schema", "x-kubernetes-validations")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(found).To(BeTrue(), "the root schema carries x-kubernetes-validations")
 		var messages []string
 		for _, r := range rules {
-			if m, ok := r.(map[string]any)["message"].(string); ok {
+			rule, ok := r.(map[string]any)
+			Expect(ok).To(BeTrue())
+			if m, ok := rule["message"].(string); ok {
 				messages = append(messages, m)
 			}
 		}
