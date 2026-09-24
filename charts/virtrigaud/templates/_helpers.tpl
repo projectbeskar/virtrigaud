@@ -196,6 +196,33 @@ Generate network policy peer selectors
 {{- end }}
 
 {{/*
+DNS egress rule shared by the manager and provider NetworkPolicies (single
+source of truth so the two copies can't diverge). Allows UDP+TCP 53 to
+kube-dns/CoreDNS via the configured namespace+pod selectors, plus any
+dnsEgressCIDRs as ipBlock peers (for NodeLocal DNSCache, whose node-local
+link-local resolver IP a selector cannot match). Call with the root context and
+the egress-list indentation of the call site, e.g.
+  {{ include "virtrigaud.dnsEgressRule" . | nindent 4 }}
+*/}}
+{{- define "virtrigaud.dnsEgressRule" -}}
+{{- $np := .Values.security.networkPolicies -}}
+- to:
+    - namespaceSelector:
+        {{- toYaml $np.dnsNamespaceSelector | nindent 8 }}
+      podSelector:
+        {{- toYaml $np.dnsPodSelector | nindent 8 }}
+    {{- range $np.dnsEgressCIDRs }}
+    - ipBlock:
+        cidr: {{ . }}
+    {{- end }}
+  ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+{{- end }}
+
+{{/*
 Manager service name
 */}}
 {{- define "virtrigaud.managerServiceName" -}}

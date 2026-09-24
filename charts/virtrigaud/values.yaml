@@ -212,22 +212,142 @@ security:
   # Pod Security Profile: strict, baseline, or privileged
   podSecurityProfile: strict
   
-  # Network policies
+  # Network policies (opt-in; default OFF).
+  #
+  # When enabled, the chart renders namespaced NetworkPolicy objects (see
+  # templates/networkpolicy.yaml) that isolate the manager and provider pods to
+  # only the flows they need. This block is DISABLED by default: until now it
+  # rendered nothing (no template consumed it), so the effective behavior has
+  # always been "no policies". Wiring real templates while keeping enabled:true
+  # would suddenly enforce isolation on `helm upgrade` and could black-hole
+  # webhook admission, manager<->provider gRPC, metrics scraping or DNS in
+  # clusters that were not designed for it. Keeping the default OFF makes
+  # enabling a deliberate, testable, behavior-neutral choice for existing
+  # installs.
+  #
+  # REQUIREMENTS when enabled:
+  #   - A CNI that actually ENFORCES NetworkPolicy (Calico, Cilium, Antrea,
+  #     Weave, ...). On a CNI without enforcement these objects are inert.
+  #   - Deployment-specific tuning: label your monitoring namespace to match
+  #     monitoringNamespaceSelector, confirm the kube-dns selectors, set the
+  #     provider gRPC port / pod selector for your deployment mode, and
+  #     (recommended) pin apiServerCIDRs and hypervisorEgressCIDRs.
+  #   - Providers running in a DIFFERENT namespace than the manager are NOT
+  #     covered by the provider policy rendered here (NetworkPolicy is
+  #     namespaced) — render an equivalent policy in that namespace.
   networkPolicies:
-    enabled: true
-    # Ingress rules
+    enabled: false
+
+    # Namespace(s) allowed to scrape the manager's /metrics (TCP 8080). Mirrors
+    # config/network-policy/allow-metrics-traffic.yaml: label your monitoring
+    # namespace `metrics: enabled`. NOTE: a namespaceSelector does NOT match the
+    # manager's own namespace unless that namespace also carries the label, so
+    # if Prometheus runs alongside the manager, label the release namespace too.
+    monitoringNamespaceSelector:
+      matchLabels:
+        metrics: enabled
+
+    # kube-dns / CoreDNS location for DNS egress (manager + providers). Defaults
+    # match a standard kubeadm/CoreDNS install in kube-system.
+    dnsNamespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: kube-system
+    dnsPodSelector:
+      matchLabels:
+        k8s-app: kube-dns
+    # Extra DNS egress destinations as CIDRs (rendered as ipBlock peers), in
+    # ADDITION to the selectors above. REQUIRED on clusters running NodeLocal
+    # DNSCache, where pods resolve via a node-local link-local IP (commonly
+    # 169.254.20.10/32) that a namespace/pod selector cannot match — without it,
+    # enabling policies black-holes ALL DNS. Empty by default (plain CoreDNS
+    # needs no CIDRs).
+    dnsEgressCIDRs: []
+
+    # Selector for the provider pods (manager->provider egress + provider
+    # ingress). Default matches the CR-managed provider pods the manager's
+    # ProviderController creates (the normal deployment mode). If you instead
+    # run the chart-templated provider Deployments (providers.*.enabled=true),
+    # they carry app.kubernetes.io/component: provider-<hv> and listen on 9090
+    # — override providerPodSelector and providerGRPCPort accordingly (and note
+    # their kubelet probes are gRPC probes on that port, so widen the provider
+    # health allow to match).
+    providerPodSelector:
+      matchLabels:
+        app.kubernetes.io/managed-by: virtrigaud
+        app.kubernetes.io/component: provider
+    # gRPC port the manager dials on provider pods. ProviderController default
+    # is 9443 (or Provider.spec.runtime.service.port); chart-templated
+    # providers use 9090.
+    providerGRPCPort: 9443
+    # Optional namespaceSelector for provider pods that run in a DIFFERENT
+    # namespace than the manager/release. Empty (default) scopes the
+    # manager->provider egress peer to the release namespace only — so with
+    # policies enabled, all provider pods MUST live in the release namespace or
+    # the manager can't reach them and VMs stop reconciling. When set, the peer
+    # matches ONLY the selected namespaces (include the release namespace too),
+    # and you must render an equivalent provider policy into each provider
+    # namespace (NetworkPolicy is namespaced).
+    providerNamespaceSelector: {}
+
+    # Kubernetes API server egress (manager only). The apiserver's endpoint IPs
+    # are host/node IPs, not pods, so they cannot be selected by pod/namespace —
+    # egress is allowed by port, optionally narrowed to CIDRs you control.
+    apiServerPorts:
+      - 443
+      - 6443
+    # Empty = allow apiServerPorts to ANY destination. Set to your control-plane
+    # CIDR(s) to narrow the blast radius.
+    apiServerCIDRs: []
+
+    # Provider external egress: hypervisor control/data planes (vCenter 443,
+    # Proxmox 8006, libvirt SSH 22, VNC consoles 5900-5901) and migration
+    # staging (S3/HTTPS 443, NFS 2049). These live OUTSIDE the cluster and are
+    # deployment-specific, so this is values-driven and permissive by default.
+    hypervisorEgressPorts:
+      - 22
+      - 443
+      - 2049
+      - 8006
+      - 5900
+      - 5901
+    # Empty = allow hypervisorEgressPorts to ANY destination. Set to your
+    # hypervisor/storage CIDR(s) to lock provider egress to known networks —
+    # RECOMMENDED for regulated/banking deployments as SSRF defense-in-depth
+    # (migration storage endpoints are user-supplied via VMMigration specs; the
+    # application-layer SSRF allowlist is the primary control, this is a second
+    # layer).
+    hypervisorEgressCIDRs: []
+
+    # Ingress rule toggles.
     ingress:
-      # Allow manager to provider communication
+      # Provider pods accept gRPC from the manager pod (providerGRPCPort). NOTE:
+      # provider pods also serve /metrics on their health port (8080), whose
+      # ingress rule is open-source (the kubelet probe source is unselectable),
+      # so provider metrics are reachable cluster-wide — telemetry only, but a
+      # posture note for tighter environments (see chart README).
       managerToProvider: true
-      # Allow external access to webhooks
+      # Manager accepts webhook admission on 9443. Source is left OPEN (the API
+      # server can't be pinned by selector); rendered only when
+      # webhooks.enabled=true. Do NOT disable with a failurePolicy=Fail webhook
+      # — it would brick Provider admission.
       webhookIngress: true
-    # Egress rules  
+      # Manager accepts /metrics scrapes from monitoringNamespaceSelector.
+      metrics: true
+    # Egress rule toggles.
     egress:
-      # Allow provider to hypervisor communication
+      # Manager dials provider pods over gRPC (providerGRPCPort).
+      managerToProvider: true
+      # Provider pods reach the hypervisor + migration staging endpoints.
       providerToHypervisor: true
-      # Allow DNS resolution
+      # Manager + providers resolve DNS via kube-dns. WARNING: turning this OFF
+      # while any other egress rule is ON makes DNS a denied direction — the
+      # manager/providers can no longer resolve the API server or hypervisors
+      # and everything wedges. Leave on unless a separate policy allows DNS.
       dns: true
-      # Allow access to Kubernetes API
+      # Manager reaches the Kubernetes API server. WARNING: turning this OFF
+      # while any other egress rule is ON WEDGES THE MANAGER — no leader
+      # election, no CR watches, no reconcile. Leave on unless a separate policy
+      # allows API-server egress.
       kubernetesAPI: true
 
   # TLS/mTLS configuration

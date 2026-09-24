@@ -76,6 +76,42 @@ func versionString() string {
 	return fmt.Sprintf("virtrigaud-manager %s", version.String())
 }
 
+// tlsVersionFloor is the minimum TLS protocol version VirtRigaud's manager
+// negotiates on its webhook and metrics servers. TLS 1.2 is the
+// broadly-compatible regulated floor: the Kubernetes API server (which drives
+// admission over the webhook) and Prometheus (which scrapes /metrics) both
+// negotiate TLS >= 1.2, so pinning 1.2 hardens the servers without locking out
+// any first-party client. We deliberately do NOT pin a cipher-suite list —
+// Go's TLS 1.2+ defaults are safe and over-specifying ciphers is a maintenance
+// hazard (stale suites outlive their security rationale).
+const tlsVersionFloor = tls.VersionTLS12
+
+// enforceTLSMinVersion is a tls.Config mutator that pins the minimum negotiated
+// TLS version to tlsVersionFloor. It is added to the shared tlsOpts slice that
+// BOTH the webhook server (webhookTLSOpts) and the metrics server
+// (metricsServerOptions.TLSOpts) derive from.
+//
+// Where the floor actually takes effect: the webhook server always serves TLS,
+// so the floor is active on it whenever webhooks are enabled. The metrics
+// server only applies TLSOpts when it serves over HTTPS — i.e. when
+// --metrics-secure=true — because controller-runtime builds a plaintext
+// listener otherwise; at the default (--metrics-secure=false) /metrics is plain
+// HTTP and this mutator is inert there until the secure-metrics flip. Seeding
+// tlsOpts (rather than only webhookTLSOpts) is deliberate forward-looking wiring
+// so the floor is already correct the moment metrics go secure.
+//
+// It sets ONLY MinVersion, so it composes cleanly with the other mutators
+// regardless of ordering: disableHTTP2 sets NextProtos and the certwatcher
+// callbacks set GetCertificate, so none of them clobber MinVersion and this one
+// clobbers neither of theirs.
+//
+// Factored out as a named package-level function (rather than an inline
+// closure) so cmd/manager/main_test.go can assert the floor without spawning
+// the manager.
+func enforceTLSMinVersion(c *tls.Config) {
+	c.MinVersion = tlsVersionFloor
+}
+
 // nolint:gocyclo
 func main() {
 	// Handle --version flag before any other flag parsing, mirroring
@@ -171,7 +207,16 @@ func main() {
 		c.NextProtos = []string{"http/1.1"}
 	}
 
-	tlsOpts := []func(*tls.Config){}
+	// Seed the shared tls.Config mutators with an explicit TLS floor. Both the
+	// webhook server (webhookTLSOpts) and the metrics server
+	// (metricsServerOptions.TLSOpts) derive from tlsOpts, making the minimum
+	// negotiated version an auditable, explicit choice (TLS 1.2, the regulated
+	// floor) rather than whatever Go's default happens to be. It is active on
+	// the always-TLS webhook server; on the metrics server it applies only when
+	// served over HTTPS (--metrics-secure=true) — see enforceTLSMinVersion. The
+	// mutator sets only MinVersion, so the http/2-disable hook (NextProtos) and
+	// the certwatcher GetCertificate hooks appended later never clobber it.
+	tlsOpts := []func(*tls.Config){enforceTLSMinVersion}
 	if !enableHTTP2 {
 		tlsOpts = append(tlsOpts, disableHTTP2)
 	}

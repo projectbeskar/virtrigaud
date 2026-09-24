@@ -5,8 +5,38 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2026-09-24 01:14] - Guard Helm chart CRDs against drift (missing Host/HostPool, pruned topology)
+## [2026-09-24 06:25] - Harden webhook/metrics TLS floor + wire NetworkPolicy templates
 **Author:** @wrkode (William Rizzo)
+
+### Security
+- `cmd/manager/main.go`: pin an explicit **TLS 1.2 floor** (`MinVersion`) on the manager's webhook and metrics servers. Previously `tlsOpts` only conditionally disabled HTTP/2 and never set a minimum, so both servers relied on Go's implicit default. A new named, testable mutator `enforceTLSMinVersion` is seeded as `tlsOpts[0]`, which both `webhookTLSOpts` and `metricsServerOptions.TLSOpts` derive from; it sets only `MinVersion`, so the HTTP/2-disable hook (`NextProtos`) and the certwatcher `GetCertificate` hooks never clobber it. Active on the always-TLS webhook server; on the metrics server it applies when metrics are served over HTTPS (`--metrics-secure=true`). No cipher-suite list is pinned (Go's TLS 1.2+ defaults are safe; over-specifying ciphers is a staleness hazard).
+- `charts/virtrigaud/templates/networkpolicy.yaml`: **new** — render `networking.k8s.io/v1` NetworkPolicies for the manager and provider pods from `security.networkPolicies` (previously the values block was declared but **no template consumed it**, so the chart promised isolation and delivered none). Default-deny-per-direction with explicit allows: manager ingress (health probes, metrics from the monitoring namespace, webhook `:9443` when webhooks are enabled) and egress (DNS, Kubernetes API, gRPC to providers); provider ingress (health/metrics `:8080`, gRPC from the manager) and egress (DNS, hypervisor + migration staging). Kubelet-probe and API-server-driven webhook ingress use an open source `from` (port-scoped) so `failurePolicy: Fail` admission and readiness are never locked out; `Egress` is added to `policyTypes` only when an egress rule is enabled, so disabling all egress toggles cannot silently deny-all.
+
+### Added
+- `cmd/manager/main_test.go`: `TestEnforceTLSMinVersion` — asserts the floor is `tls.VersionTLS12` and that the mutator composes with the sibling `NextProtos`/`GetCertificate` mutators without clobbering (either order).
+- `charts/virtrigaud/templates/_helpers.tpl`: `virtrigaud.dnsEgressRule` helper — single source of truth for the manager/provider DNS egress rule (kube-dns selectors plus optional `dnsEgressCIDRs` ipBlock peers for NodeLocal DNSCache).
+- `charts/virtrigaud/values.yaml`: values-driven `security.networkPolicies` knobs — `monitoringNamespaceSelector`, `dnsNamespaceSelector`/`dnsPodSelector`/`dnsEgressCIDRs`, `providerPodSelector`/`providerNamespaceSelector`/`providerGRPCPort`, `apiServerPorts`/`apiServerCIDRs`, `hypervisorEgressPorts`/`hypervisorEgressCIDRs`, and per-direction ingress/egress toggles.
+
+### Changed
+- `charts/virtrigaud/values.yaml`: **flip `security.networkPolicies.enabled` default `true` → `false`.** The block rendered nothing before, so the effective behavior was always "no policies"; wiring templates while keeping `true` would enforce isolation on `helm upgrade` and could black-hole webhook/gRPC/metrics/DNS traffic in clusters not designed for it. Default-off makes it opt-in and behavior-neutral for existing installs.
+- `charts/virtrigaud/README.md`: document the NetworkPolicies (what they allow, opt-in/default-off rationale, CNI-enforcement requirement, and the deployment-specific tuning checklist — monitoring/DNS/provider-namespace selectors, CIDR lock-down, and the wedge/lock-out warnings) and the explicit TLS 1.2 floor.
+
+### Why
+A security-architect follow-up from the #325 webhook review flagged two independent gaps: the admission-path webhook and metrics servers set no explicit TLS minimum (weak for the documented banking/regulated posture), and the chart's `security.networkPolicies` values were dead — promising network isolation but wired to nothing. The security-architect reviewed both designs: TLS 1.2 (not 1.3) is the correct broadly-compatible floor with Go's default ciphers, and the NetworkPolicy allow-set correctly permits webhook admission, manager↔provider gRPC, metrics, DNS, API-server, and hypervisor egress without lock-out — with the residual footguns (cross-namespace providers, NodeLocal DNSCache, partial-egress-disable) closed via values knobs and loud docs, and safely gated behind the default-off flag.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+> The TLS floor takes effect only after the manager is rolled out to the new
+> binary. The NetworkPolicy change is opt-in and **default-off**, so existing
+> installs see no behavior change on `helm upgrade` until an operator sets
+> `security.networkPolicies.enabled=true` (which requires a NetworkPolicy-enforcing
+> CNI and deployment-specific tuning — see the chart README).
+
+
 
 ### Fixed
 - `.github/workflows/ci.yml`: **the CI *Verify Generated Files* job now guards the Helm chart CRDs.** `charts/virtrigaud/crds/*.yaml` is gitignored and generated at package time (commit `53198c2`), so the pre-existing `git diff --exit-code` check is **blind** to chart-CRD drift — gitignored files never appear in `git diff`. A new step runs `make verify-helm-crds`, which regenerates both CRD trees from the Go types and asserts `charts/virtrigaud/crds/` is byte-identical to `config/crd/bases/` and covers the full set. This is the regression guard that was missing when Host/HostPool CRDs (#312) and `Provider.spec.topology` (#315) were added to the API but the chart generator's output was never re-verified. Confirmed it **trips** on a dropped/mismatched CRD and passes when in sync.
