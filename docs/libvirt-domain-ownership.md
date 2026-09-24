@@ -79,7 +79,7 @@ other domain is untouched. The VM shows:
 - A condition message that names only the requested domain. It never discloses
   which namespace or VM owns the domain, because that belongs to another tenant.
   The provider log records those details for operators.
-- A re-check every **2 minutes**, instead of the 5-second transient-error retry.
+- A re-check every **2 minutes** (every 30 seconds for an invalid-spec rejection such as an ambiguous name), instead of the 5-second transient-error retry.
 - The manager metric `virtrigaud_errors_total{reason="provider-create-rejected"}`.
   A rising count means tenants are colliding on names, or someone is probing
   for names.

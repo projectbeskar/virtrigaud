@@ -113,7 +113,7 @@ func TestCreateVM_ConflictSetsConditionAndBacksOff(t *testing.T) {
 	assert.Equal(t, string(vm.UID), cp.createReqs[0].Owner.UID, "the create must carry this VM's UID")
 
 	// No hot loop: the slow rejected-create cadence, not the 5s transient one.
-	assert.Equal(t, vmCreateRejectedRetryInterval, res.RequeueAfter)
+	assert.Equal(t, vmCreateConflictRetryInterval, res.RequeueAfter)
 	assert.GreaterOrEqual(t, res.RequeueAfter, time.Minute)
 
 	// Never bound: no Status.ID, so a later delete cannot reach provider.Delete.
@@ -144,7 +144,7 @@ func TestCreateVM_InvalidSpecSetsConditionAndBacksOff(t *testing.T) {
 
 	res, err := r.reconcileVM(context.Background(), vm)
 	require.NoError(t, err)
-	assert.Equal(t, vmCreateRejectedRetryInterval, res.RequeueAfter)
+	assert.Equal(t, vmCreateInvalidSpecRetryInterval, res.RequeueAfter)
 
 	persisted := &infravirtrigaudiov1beta1.VirtualMachine{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: ns, Name: vm.Name}, persisted))

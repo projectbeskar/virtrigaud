@@ -33,7 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - `internal/controller/virtualmachine_controller.go`:
   - `buildCreateRequest` sends `Owner` from `vm.UID`, `vm.Namespace` and `vm.Name`.
-  - A non-retryable Create rejection (`Conflict` or `InvalidSpec`) now sets `Ready=False` and `Provisioning=False` with reason `ProviderConflict` or `ValidationError`, the provider's message and `ObservedGeneration`. It requeues after **2 minutes** instead of 5 s, records `virtrigaud_errors_total{reason="provider-create-rejected"}`, and leaves `status.id` empty, so deleting the VM never calls `provider.Delete`.
+  - A non-retryable Create rejection (`Conflict` or `InvalidSpec`) now sets `Ready=False` and `Provisioning=False` with reason `ProviderConflict` or `ValidationError`, the provider's message and `ObservedGeneration`. It requeues after **2 minutes** for `Conflict` and **30 s** for `InvalidSpec` instead of 5 s, records `virtrigaud_errors_total{reason="provider-create-rejected"}`, and leaves `status.id` empty, so deleting the VM never calls `provider.Delete`.
   - Transient create errors keep the 5 s retry.
   - The adopted-VM double-create guard is unchanged.
 - `internal/transport/grpc/client.go`: `convertCreateRequest` sends `owner` when a UID is known. `mapGRPCError` maps `codes.AlreadyExists` to a typed, non-retryable `contracts.Conflict`.

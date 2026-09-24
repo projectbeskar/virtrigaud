@@ -68,14 +68,19 @@ const (
 	errReasonProviderCreateRejected = "provider-create-rejected"
 )
 
-// vmCreateRejectedRetryInterval is the requeue cadence after the provider
-// rejected Create with a non-retryable error (Conflict / InvalidSpec). Retrying
-// cannot fix such a create — an operator must adopt or remove the colliding
-// hypervisor VM, or rename/fix this VirtualMachine — so it re-checks slowly
-// instead of hammering the provider every few seconds. Still bounded, so a VM
-// whose collision an operator resolves out-of-band is created without a manual
-// nudge.
-const vmCreateRejectedRetryInterval = 2 * time.Minute
+// vmCreateConflictRetryInterval is the requeue cadence after the provider
+// refused Create with a Conflict (the provider-side name is taken by a VM this
+// VirtualMachine does not own). Retrying cannot fix it — an operator must adopt
+// or remove the colliding hypervisor VM, or rename this VirtualMachine — so it
+// re-checks slowly instead of hammering the provider. Still bounded, so a
+// collision resolved out-of-band is picked up without a manual nudge.
+const vmCreateConflictRetryInterval = 2 * time.Minute
+
+// vmCreateInvalidSpecRetryInterval is the requeue cadence after the provider
+// rejected Create as InvalidSpec. A spec edit re-triggers reconcile on its own;
+// the moderate cadence avoids a tight loop while staying tolerant of providers
+// that classify some transient failures as InvalidSpec.
+const vmCreateInvalidSpecRetryInterval = 30 * time.Second
 
 // Placement requeue cadences for the clustered-provider create path (ADR-0007 P1,
 // D4). The VirtualMachine controller does NOT watch Host / HostPool /
@@ -712,8 +717,9 @@ func (r *VirtualMachineReconciler) createVM(
 //
 // Both set Ready=False and Provisioning=False with a specific reason and the
 // provider's (non-secret) message, stamped with ObservedGeneration, and requeue
-// on the slow vmCreateRejectedRetryInterval instead of the 5s transient-error
-// cadence, so an unresolvable create does not hot-loop against the provider.
+// on a slower cadence than the 5s transient-error path
+// (vmCreateConflictRetryInterval / vmCreateInvalidSpecRetryInterval), so an
+// unresolvable create does not hot-loop against the provider.
 // Status.ID is left empty. Any other error returns handled=false and keeps the
 // existing transient-retry path.
 func (r *VirtualMachineReconciler) handleRejectedCreate(
@@ -721,12 +727,15 @@ func (r *VirtualMachineReconciler) handleRejectedCreate(
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
 	err error,
 ) (ctrl.Result, bool) {
-	var reason string
+	var (
+		reason     string
+		retryAfter time.Duration
+	)
 	switch {
 	case contracts.IsConflict(err):
-		reason = k8s.ReasonProviderConflict
+		reason, retryAfter = k8s.ReasonProviderConflict, vmCreateConflictRetryInterval
 	case contracts.IsInvalidSpec(err):
-		reason = k8s.ReasonValidationError
+		reason, retryAfter = k8s.ReasonValidationError, vmCreateInvalidSpecRetryInterval
 	default:
 		return ctrl.Result{}, false
 	}
@@ -738,10 +747,10 @@ func (r *VirtualMachineReconciler) handleRejectedCreate(
 	if stderrors.As(err, &pe) && pe.Message != "" {
 		msg = pe.Message
 	}
-	msg = fmt.Sprintf("Provider rejected VM create (non-retryable; re-checking every %s): %s", vmCreateRejectedRetryInterval, msg)
+	msg = fmt.Sprintf("Provider rejected VM create (non-retryable; re-checking every %s): %s", retryAfter, msg)
 
 	log.FromContext(ctx).Info("Provider rejected VM create with a non-retryable error; not binding and backing off",
-		"reason", reason, "retryAfter", vmCreateRejectedRetryInterval.String(), "error", err.Error())
+		"reason", reason, "retryAfter", retryAfter.String(), "error", err.Error())
 	metrics.RecordError(errReasonProviderCreateRejected, metrics.ComponentManager)
 
 	for _, condType := range []string{k8s.ConditionReady, k8s.ConditionProvisioning} {
@@ -754,7 +763,7 @@ func (r *VirtualMachineReconciler) handleRejectedCreate(
 		})
 	}
 	r.updateStatus(ctx, vm)
-	return ctrl.Result{RequeueAfter: vmCreateRejectedRetryInterval}, true
+	return ctrl.Result{RequeueAfter: retryAfter}, true
 }
 
 // resolveClusterPlacement schedules vm onto a host in providerCR's HostPool for a
