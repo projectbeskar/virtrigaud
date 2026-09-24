@@ -570,6 +570,16 @@ jobs:
           # regression guard for the fix/webhook-chart-enablement bug class.
           ./hack/verify-webhook-render.sh
 
+      - name: Validate NetworkPolicy render (opt-in, valid peers, --reuse-values safe)
+        run: |
+          # Asserts NetworkPolicies are opt-in, render only non-empty peers when
+          # enabled, and are never switched on by `helm upgrade --reuse-values`
+          # from v0.3.11 (which shipped security.networkPolicies.enabled: true).
+          # The check renders the current templates with v0.3.11's values.yaml,
+          # so fetch just that tag into the shallow checkout.
+          git fetch --no-tags --depth=1 origin +refs/tags/v0.3.11:refs/tags/v0.3.11
+          ./hack/verify-networkpolicy-render.sh
+
   conformance:
     name: Conformance Tests
     runs-on: ubuntu-22.04

@@ -63,6 +63,13 @@ helm install virtrigaud charts/virtrigaud \
 
 ## Upgrading
 
+> **Carrying custom values across chart versions:** prefer
+> `--reset-then-reuse-values` (Helm 3.14+) over `--reuse-values`.
+> `--reuse-values` replaces the new chart's defaults with the **old** chart's
+> defaults, so settings added in a newer chart are missing and old defaults
+> linger. `--reset-then-reuse-values` applies the new chart's defaults and then
+> your own values.
+
 ### Automatic CRD Upgrades (Default)
 
 By default, VirtRigaud automatically upgrades CRDs during `helm upgrade`:
@@ -178,7 +185,7 @@ See [values.yaml](values.yaml) for complete configuration options.
 
 The chart can render namespaced `NetworkPolicy` objects that isolate the manager
 and provider pods to only the flows they need. They are **opt-in and disabled by
-default** (`security.networkPolicies.enabled: false`).
+default** (`networkPolicy.enabled: false`).
 
 > **Why default-off?** Earlier chart versions declared `enabled: true` but no
 > template consumed the values, so the effective behavior was always "no
@@ -187,13 +194,23 @@ default** (`security.networkPolicies.enabled: false`).
 > manager↔provider gRPC, metrics scraping or DNS in clusters not designed for
 > it. Default-off makes enabling a deliberate, behavior-neutral, testable choice.
 
+> **Why a new top-level key?** The settings live under `networkPolicy`, not the
+> legacy `security.networkPolicies` block, which is now ignored. v0.3.11 shipped
+> `security.networkPolicies.enabled: true`, and `helm upgrade --reuse-values`
+> reuses the **old** chart's defaults, so gating on the legacy key would switch
+> policies on for every upgraded install and render them without the newer
+> settings. If you enable `networkPolicy` on a release upgraded with
+> `--reuse-values`, the chart fails with a message asking for
+> `--reset-then-reuse-values`, which takes the new chart's defaults and keeps
+> your own values.
+
 **Requirements before enabling:**
 
 - A **CNI that enforces NetworkPolicy** (Calico, Cilium, Antrea, Weave, …). On a
   CNI without enforcement these objects are inert.
 - **Deployment-specific tuning** — the defaults are sane but not universal.
 
-**What the policies allow** (when `enabled: true`):
+**What the policies allow** (when `networkPolicy.enabled: true`):
 
 | Pod | Ingress | Egress |
 |-----|---------|--------|
@@ -243,7 +260,7 @@ Enable and verify with a render before applying:
 
 ```bash
 helm template virtrigaud charts/virtrigaud \
-  --set security.networkPolicies.enabled=true | grep -A2 'kind: NetworkPolicy'
+  --set networkPolicy.enabled=true | grep -A2 'kind: NetworkPolicy'
 ```
 
 ### Transport TLS floor
