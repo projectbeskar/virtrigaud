@@ -59,18 +59,38 @@ make fmt
 
 ### 2. CRD Management
 
-**Important**: CRDs are generated from code (the source of truth) and are not duplicated in git.
+**Important**: CRDs are generated from the Go types in `api/infra.virtrigaud.io/v1beta1/*_types.go` (the single source of truth) and are not duplicated in git.
 
-- `config/crd/bases/` - CRDs for local development and releases (checked into git)
-- `charts/virtrigaud/crds/` - CRDs for Helm charts (generated during packaging, not checked into git)
+- `config/crd/bases/` - CRDs for local development and releases (**checked into git**)
+- `charts/virtrigaud/crds/` - CRDs for the Helm chart (**gitignored**, generated at package time)
 
 ```bash
-# After API changes, generate CRDs
-make gen-crds
-
-# For Helm chart development/packaging
-make gen-helm-crds
+# After ANY change to api/infra.virtrigaud.io/v1beta1/*_types.go:
+make gen-crds        # regenerates config/crd/bases/ (committed)
+make gen-helm-crds   # regenerates charts/virtrigaud/crds/ (gitignored)
 ```
+
+**Why the chart CRDs are gitignored (and what that means for you):** storing a second
+copy of every CRD in the chart caused constant drift, so they are generated on demand
+instead. The official chart is always correct because `release.yml` runs
+`make gen-helm-crds` immediately before `helm package`.
+
+> **Footgun — installing the chart from a checkout.** A fresh checkout has an *empty*
+> `charts/virtrigaud/crds/` (only `.gitkeep`). If you `helm install`/`helm upgrade`
+> straight from `charts/virtrigaud` without regenerating first, the chart ships **no**
+> (or stale) CRDs. Worse, on upgrade the `crd-upgrade-job` hook does
+> `kubectl apply --server-side --force-conflicts` of whatever CRDs were baked into the
+> package, so a **stale** set silently **prunes** fields from the live CRDs (this is how
+> `spec.topology` disappeared and Host/HostPool went missing on the lab). Always run
+> `make gen-helm-crds` first, or use `make helm-template` / `make helm-package` /
+> `make helm-lint`, which regenerate for you.
+
+**CI guard:** the *Verify Generated Files* job runs `make verify-helm-crds`, which
+regenerates both trees from the Go types and asserts `charts/virtrigaud/crds/` is
+byte-identical to `config/crd/bases/` (and covers the full set). A PR that adds/changes
+a CRD but breaks `gen-helm-crds` — or a type the chart generator no longer emits — fails
+CI. **Upgrading CRDs on an existing release** requires a fresh chart release, or
+`kubectl apply -f config/crd/bases` (the chart's native `crds/` dir is install-only).
 
 ### 3. Testing
 

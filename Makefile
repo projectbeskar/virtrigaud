@@ -81,6 +81,18 @@ gen-helm-crds: controller-gen ## Generate CRDs directly into Helm chart director
 	$(CONTROLLER_GEN) crd paths="./api/infra.virtrigaud.io/v1beta1" output:crd:artifacts:config=charts/virtrigaud/crds
 	@echo "✅ CRDs generated in charts/virtrigaud/crds/"
 
+.PHONY: verify-helm-crds
+verify-helm-crds: gen-crds gen-helm-crds ## Verify chart CRDs (gitignored, generated) match config/crd/bases exactly — CI drift guard
+	@echo "Verifying Helm chart CRDs are in sync with config/crd/bases..."
+	@diff -rq --exclude=.gitkeep config/crd/bases/ charts/virtrigaud/crds/ \
+		|| { echo "❌ Helm chart CRDs drifted from config/crd/bases/."; \
+		     echo "   charts/virtrigaud/crds/ is gitignored and generated from the Go types;"; \
+		     echo "   a divergence here means 'make gen-helm-crds' no longer produces the CRD"; \
+		     echo "   set the operator expects (e.g. a new CRD was added but the chart"; \
+		     echo "   generator does not emit it). Run 'make gen-crds gen-helm-crds' and fix."; \
+		     exit 1; }
+	@echo "✅ Helm chart CRDs match config/crd/bases/"
+
 # Alias for backwards compatibility
 .PHONY: manifests
 manifests: gen-crds
@@ -492,6 +504,10 @@ helm-lint: gen-helm-crds ## Lint Helm chart with generated CRDs
 	@echo "Linting Helm chart..."
 	@helm lint charts/virtrigaud
 	@echo "✅ Helm chart lint passed"
+
+.PHONY: helm-template
+helm-template: gen-helm-crds ## Render the Helm chart (regenerates chart CRDs first so crds/ is never stale)
+	@helm template virtrigaud charts/virtrigaud
 
 .PHONY: verify-webhook-render
 verify-webhook-render: ## Render the chart with webhooks.enabled=true and assert valid, coherent manifests (CA/caBundle, flags, kinds, SANs)

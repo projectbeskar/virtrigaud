@@ -46,8 +46,16 @@ helm install virtrigaud virtrigaud/virtrigaud \
 
 ### Installation from Local Chart
 
+> **Important:** the chart's `crds/` directory is generated on demand and is **not**
+> checked into git (a fresh checkout contains only `.gitkeep`). Before installing from a
+> local checkout you **must** generate the CRDs, or the chart ships no CRDs:
+>
+> ```bash
+> make gen-helm-crds
+> ```
+
 ```bash
-# From repository root
+# From repository root (run 'make gen-helm-crds' first — see note above)
 helm install virtrigaud charts/virtrigaud \
   -n virtrigaud-system \
   --create-namespace
@@ -66,9 +74,15 @@ helm upgrade virtrigaud virtrigaud/virtrigaud \
 
 **How it works:**
 - A Kubernetes Job runs before upgrade (Helm pre-upgrade hook)
-- The Job applies all CRDs using `kubectl apply --server-side`
-- CRDs are safely updated without data loss
+- The Job applies all CRDs using `kubectl apply --server-side --force-conflicts`
+- The CRDs it applies are the ones baked into the chart **at package time**
 - Job automatically cleans up after successful upgrade
+
+> **Caveat:** because the hook does a server-side apply of the packaged CRDs, upgrading
+> with a **stale** chart (one packaged before a newer CRD schema) will **overwrite** the
+> live CRDs and can **prune** fields that the stale schema does not know about. Always
+> upgrade with a chart built from a matching release. If you package the chart yourself,
+> run `make gen-helm-crds` (or `make helm-package`) first so the baked-in CRDs are current.
 
 **Benefits:**
 - ✅ No manual CRD management needed
@@ -86,11 +100,16 @@ helm upgrade virtrigaud virtrigaud/virtrigaud \
   --set crdUpgrade.enabled=false
 ```
 
-Then manually apply CRDs before upgrade:
+Then manually apply CRDs before upgrade. From a source checkout, apply the committed
+source-of-truth CRDs (these are always present and current):
 
 ```bash
-kubectl apply -f charts/virtrigaud/crds/
+kubectl apply -f config/crd/bases/
 ```
+
+> The chart's own `charts/virtrigaud/crds/` directory is generated on demand and is empty
+> in a fresh checkout — run `make gen-helm-crds` first if you want to apply from there
+> instead.
 
 ### Skip CRDs Entirely
 
