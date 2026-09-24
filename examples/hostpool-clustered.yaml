@@ -15,6 +15,21 @@
 # constraints (ADR-0007 D6): a VM is only placed/migrated onto a host that can
 # see its storage pool AND has its network. Here both hosts see pool "nfs01" and
 # bridge "br-vlan100", so shared-storage live migration between them is possible.
+#
+# SAME-NAMESPACE RULE (security): the HostPool, every Host, every per-host
+# credential Secret, and the clustered Provider MUST all live in ONE namespace
+# (here: virtrigaud-system). providerRef / poolRef / credentialSecretRef are
+# namespace-local references — they have no namespace field — and the operator
+# only ever reads Hosts and credential Secrets from the Provider's namespace. A
+# Host created in any other namespace is ignored by the Provider. VirtualMachines
+# may live elsewhere and reference the Provider cross-namespace; their placement
+# is resolved against the HostPool/Hosts in the Provider's namespace.
+#
+# Host.spec.endpoint is validated at admission: only
+#   qemu+ssh://[user@]host[:port]/system   (or /session)
+#   grpc://host:port                        (future host agent)
+# is accepted (host = DNS name, IPv4, or [IPv6]); no query string, other path,
+# or percent-encoding.
 ---
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: HostPool
@@ -22,7 +37,7 @@ metadata:
   name: pool-a
   namespace: virtrigaud-system
 spec:
-  # The clustered Provider that owns this pool.
+  # The clustered Provider that owns this pool — same namespace as this pool.
   providerRef:
     name: libvirt-cluster
   # Spread balances VMs across hosts; BinPack consolidates onto the fewest hosts.
@@ -79,7 +94,8 @@ spec:
     name: pool-a
   endpoint: qemu+ssh://virt@host-b/system
   # Optional per-host credential override (SSH key / known_hosts material).
-  # Defaults to the Provider's credentials when omitted.
+  # Defaults to the Provider's credentials when omitted. The Secret must be in
+  # this Host's (= the Provider's) namespace; it is never read from elsewhere.
   credentialSecretRef:
     name: host-b-creds
   labels:

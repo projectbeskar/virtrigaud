@@ -147,8 +147,8 @@ func (r *HostReconciler) syncHostStatus(ctx context.Context, host *infravirtriga
 	base := host.DeepCopy()
 	host.Status.ObservedGeneration = host.Generation
 
-	// 1. Resolve the Provider. Namespace defaults to the Host's namespace when the
-	//    ref omits one, matching the other controllers.
+	// 1. Resolve the Provider — always in the Host's own namespace (the
+	//    same-namespace model; providerRef is a LocalObjectReference).
 	provider, err := r.resolveProvider(ctx, host)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
@@ -316,14 +316,14 @@ func (r *HostReconciler) persist(ctx context.Context, host, base *infravirtrigau
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 
-// resolveProvider fetches the Provider referenced by the Host. The ref namespace
-// defaults to the Host's own namespace when unset. The error is wrapped with %w
-// so callers can still test apierrors.IsNotFound through the wrap.
+// resolveProvider fetches the Provider referenced by the Host. Under the
+// same-namespace model (security) Host.spec.providerRef is a
+// LocalObjectReference, so the Provider is ALWAYS looked up in the Host's own
+// namespace — a Host can never drive a GetHostInfo against another namespace's
+// Provider. The error is wrapped with %w so callers can still test
+// apierrors.IsNotFound through the wrap.
 func (r *HostReconciler) resolveProvider(ctx context.Context, host *infravirtrigaudiov1beta1.Host) (*infravirtrigaudiov1beta1.Provider, error) {
 	key := types.NamespacedName{Name: host.Spec.ProviderRef.Name, Namespace: host.Namespace}
-	if host.Spec.ProviderRef.Namespace != "" {
-		key.Namespace = host.Spec.ProviderRef.Namespace
-	}
 	provider := &infravirtrigaudiov1beta1.Provider{}
 	if err := r.Get(ctx, key, provider); err != nil {
 		return nil, fmt.Errorf("get Provider %s: %w", key.Name, err)

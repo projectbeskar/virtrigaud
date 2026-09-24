@@ -128,10 +128,22 @@ func (m *mockDialer) lastCallFor(id HostID) (hostsecret.Host, bool) {
 	return hostsecret.Host{}, false
 }
 
+// testEndpoint turns a short placeholder token ("ep-a") into a VALID host
+// endpoint (qemu+ssh://virt@ep-a/system), so the registry's admission check
+// (hostsecret.ValidateEndpoint) accepts it; a value that already carries a
+// scheme is returned unchanged, so a test can still pass a deliberately invalid
+// endpoint verbatim.
+func testEndpoint(endpoint string) string {
+	if strings.Contains(endpoint, "://") {
+		return endpoint
+	}
+	return "qemu+ssh://virt@" + endpoint + "/system"
+}
+
 func host(id, endpoint string, key, known []byte) hostsecret.Host {
 	return hostsecret.Host{
 		ID:       id,
-		Endpoint: endpoint,
+		Endpoint: testEndpoint(endpoint),
 		Credentials: hostsecret.Credentials{
 			SSHPrivateKey: key,
 			KnownHosts:    known,
@@ -385,7 +397,7 @@ func TestClusterRegistry_Reconcile_ChangeDrainsAndReopens(t *testing.T) {
 		t.Fatalf("host-a dial count = %d after reopen, want 2", d.dialCount("host-a"))
 	}
 	newCall, _ := d.lastCallFor("host-a")
-	if newCall.Endpoint != "ep-a-NEW" {
+	if newCall.Endpoint != testEndpoint("ep-a-NEW") {
 		t.Fatalf("reopened host-a endpoint = %q, want ep-a-NEW", newCall.Endpoint)
 	}
 
@@ -440,15 +452,92 @@ func TestClusterRegistry_EmptyAndMalformedInventory(t *testing.T) {
 		t.Fatalf("empty inventory -> Hosts() = %v, want empty", got)
 	}
 
-	// Empty-id and duplicate-id entries are skipped, not fatal.
+	// Empty-id, duplicated-id and invalid-endpoint entries are skipped, not
+	// fatal. A duplicated id is ambiguous, so NEITHER occurrence is routable
+	// (never "first wins" — that would make routing depend on document order).
 	r2 := mustCluster(t, d, inv(
 		host("", "ep", []byte("k"), nil),
 		host("dup", "ep1", []byte("k"), nil),
 		host("dup", "ep2", []byte("k"), nil),
+		host("bad", "qemu+ssh://virt@victim/system;id", []byte("k"), nil),
 		host("ok", "ep-ok", []byte("k"), nil),
 	))
-	if got := r2.Hosts(); !hostsEqual(got, "dup", "ok") {
-		t.Fatalf("Hosts() = %v, want [dup ok] (empty id skipped, first dup wins)", got)
+	if got := r2.Hosts(); !hostsEqual(got, "ok") {
+		t.Fatalf("Hosts() = %v, want [ok] (empty id, duplicated id and invalid endpoint all skipped)", got)
+	}
+	if d.dialCount("bad") != 0 || d.dialCount("dup") != 0 {
+		t.Fatal("a skipped inventory entry must never be dialed")
+	}
+}
+
+// TestClusterRegistry_RejectsInvalidEndpoints is the provider-side half of the
+// endpoint hardening: a hand-edited inventory Secret must not be able to bypass
+// the Host CRD's admission pattern. Every entry below would, before this check,
+// have reached the libvirt connection URI forwarded to the hypervisor host.
+func TestClusterRegistry_RejectsInvalidEndpoints(t *testing.T) {
+	bad := map[string]string{
+		"semicolon":            "qemu+ssh://virt@victim/system;id",
+		"command substitution": "qemu+ssh://virt@victim/system$(id)",
+		"backticks":            "qemu+ssh://virt@victim/system`id`",
+		"percent-encoded":      "qemu+ssh://virt@victim/system%20-c%20id",
+		"newline":              "qemu+ssh://virt@victim/system\nid",
+		"path traversal":       "qemu+ssh://virt@victim/system/../x",
+		"other path":           "qemu+ssh://virt@victim/default",
+		"empty":                "",
+	}
+	for name, endpoint := range bad {
+		t.Run(name, func(t *testing.T) {
+			d := newMockDialer()
+			r := mustCluster(t, d, hostsecret.Inventory{
+				SchemaVersion: hostsecret.SchemaVersion,
+				Hosts: []hostsecret.Host{
+					{ID: "bad", Endpoint: endpoint},
+					{ID: "good", Endpoint: "qemu+ssh://virt@good/system"},
+				},
+			})
+			if got := r.Hosts(); !hostsEqual(got, "good") {
+				t.Fatalf("Hosts() = %v, want [good] (invalid endpoint must be skipped, siblings kept)", got)
+			}
+			if _, err := r.ConnFor(context.Background(), "bad"); err == nil {
+				t.Fatal("ConnFor on a host with an invalid endpoint must fail")
+			}
+			if d.dialCount("bad") != 0 {
+				t.Fatal("a host with an invalid endpoint must never be dialed")
+			}
+		})
+	}
+}
+
+// TestClusterRegistry_DuplicateIDAppearingLaterDrainsHost proves the duplicate
+// rule on hot-reload: a host that was routable becomes unroutable (drained) the
+// moment a second entry with its id appears, regardless of entry order — and is
+// routable again once the ambiguity is removed.
+func TestClusterRegistry_DuplicateIDAppearingLaterDrainsHost(t *testing.T) {
+	for _, order := range []string{"original-first", "impostor-first"} {
+		t.Run(order, func(t *testing.T) {
+			d := newMockDialer()
+			orig := host("host-a", "ep-a", []byte("k"), []byte("kh"))
+			r := mustCluster(t, d, inv(orig))
+
+			impostor := host("host-a", "ep-evil", []byte("k2"), []byte("kh2"))
+			next := inv(orig, impostor)
+			if order == "impostor-first" {
+				next = inv(impostor, orig)
+			}
+			if err := r.Reconcile(next); err != nil {
+				t.Fatalf("Reconcile: %v", err)
+			}
+			if got := r.Hosts(); len(got) != 0 {
+				t.Fatalf("Hosts() = %v, want none (duplicated id must be unroutable)", got)
+			}
+
+			if err := r.Reconcile(inv(orig)); err != nil {
+				t.Fatalf("Reconcile: %v", err)
+			}
+			if got := r.Hosts(); !hostsEqual(got, "host-a") {
+				t.Fatalf("Hosts() = %v, want [host-a] once the duplicate is gone", got)
+			}
+		})
 	}
 }
 

@@ -354,6 +354,20 @@ Go types in `api/infra.virtrigaud.io/v1beta1/` are the source of truth; all of
 this regenerates via `make update-crds` — never hand-edit `config/crd/bases/` or
 `charts/virtrigaud/crds/`.
 
+> **Amendment (2026-09-24, security fix, pre-release):** the sketches below show
+> `Host.spec.providerRef`, `Host.spec.credentialSecretRef` and
+> `HostPool.spec.providerRef` as `ObjectRef` (with an optional namespace). As
+> implemented they are **`LocalObjectReference`** — the *same-namespace model*:
+> a clustered Provider, its Hosts, HostPools and their credential Secrets all
+> live in the Provider's namespace, and `Host.spec.endpoint` carries an
+> admission pattern (`qemu+ssh://[user@]host[:port]/system|session` or
+> `grpc://host:port`). A cross-namespace reference let any namespace enrol a
+> Host into another namespace's Provider (inheriting its SSH identity) and make
+> the manager copy a Secret out of an arbitrary namespace; an unvalidated
+> endpoint path reached the hypervisor host's shell. Both kinds were unreleased,
+> so this is not a released-API break. See `docs/clustered-provider-inventory.md`
+> (*Same-namespace model*, *Endpoint validation*).
+
 ### New kind: `Host`
 
 ```go

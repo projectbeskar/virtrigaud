@@ -256,6 +256,36 @@ func TestHostReconciler_ProviderMissing_Unavailable(t *testing.T) {
 	assert.Equal(t, reasonProviderUnavailable, ready.Reason)
 }
 
+// TestHostReconciler_ResolvesProviderInHostNamespaceOnly pins the same-namespace
+// model for the inventory-sync path: a Host in namespace "tenant" whose
+// providerRef names "prov-a" must NOT resolve the "prov-a" Provider that exists
+// only in "default". It is recorded as ProviderUnavailable and GetHostInfo is
+// never driven against the other namespace's provider.
+func TestHostReconciler_ResolvesProviderInHostNamespaceOnly(t *testing.T) {
+	s := coverageTestScheme(t)
+	prov := clusterProvider("prov-a") // namespace "default"
+	host := hostCR("host-alpha", "prov-a", nil)
+	host.Namespace = "tenant"
+
+	stub := &stubProvider{GetHostInfoFn: func(_ context.Context, _ string) (contracts.HostInfo, error) {
+		t.Fatalf("GetHostInfo must not be called against a Provider in another namespace")
+		return contracts.HostInfo{}, nil
+	}}
+	r := newHostReconciler(s, &stubResolver{provider: stub}, prov, host)
+
+	res, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: "tenant", Name: "host-alpha"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, hostSyncBackoffInterval, res.RequeueAfter)
+
+	got := &infravirtrigaudiov1beta1.Host{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "tenant", Name: "host-alpha"}, got))
+	ready := hostReadyCondition(t, got)
+	assert.Equal(t, metav1.ConditionFalse, ready.Status)
+	assert.Equal(t, reasonProviderUnavailable, ready.Reason)
+}
+
 // The sync is status-only (spec is never mutated) and idempotent: a second
 // reconcile leaves the durable fields stable and the spec byte-identical.
 func TestHostReconciler_StatusOnlyAndIdempotent(t *testing.T) {

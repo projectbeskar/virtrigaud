@@ -84,7 +84,7 @@ func hostPoolCR(name, ns, providerName string) *infravirtrigaudiov1beta1.HostPoo
 	return &infravirtrigaudiov1beta1.HostPool{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
 		Spec: infravirtrigaudiov1beta1.HostPoolSpec{
-			ProviderRef: infravirtrigaudiov1beta1.ObjectRef{Name: providerName},
+			ProviderRef: infravirtrigaudiov1beta1.LocalObjectReference{Name: providerName},
 			Strategy:    infravirtrigaudiov1beta1.PoolStrategySpread,
 		},
 	}
@@ -95,7 +95,7 @@ func readyHost(name, ns, poolName, providerName string) *infravirtrigaudiov1beta
 	return &infravirtrigaudiov1beta1.Host{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
 		Spec: infravirtrigaudiov1beta1.HostSpec{
-			ProviderRef: infravirtrigaudiov1beta1.ObjectRef{Name: providerName},
+			ProviderRef: infravirtrigaudiov1beta1.LocalObjectReference{Name: providerName},
 			PoolRef:     infravirtrigaudiov1beta1.LocalObjectReference{Name: poolName},
 			Schedulable: true,
 		},
@@ -201,6 +201,102 @@ func TestCreateVM_Clustered_HappyPath(t *testing.T) {
 	require.NotNil(t, vm.Status.Placement.LastScheduledTime)
 	assert.False(t, vm.Status.Placement.LastScheduledTime.IsZero())
 	assert.Equal(t, "vm-200", vm.Status.ID)
+}
+
+// ─── same-namespace model: pools/hosts live in the Provider's namespace ──────
+
+// TestCreateVM_Clustered_LooksUpPoolsAndHostsInProviderNamespace proves the
+// placement path resolves HostPools/Hosts in the resolved PROVIDER's namespace,
+// not the VM's: a VM in "tenant" referencing a clustered Provider in "infra"
+// schedules onto the "infra" pool's host. A decoy pool + host in the VM's own
+// namespace that merely name the same Provider must be ignored — otherwise a
+// tenant could steer placement for someone else's Provider (and, before this
+// fix, the "infra" pool was simply never found).
+func TestCreateVM_Clustered_LooksUpPoolsAndHostsInProviderNamespace(t *testing.T) {
+	const (
+		providerNS = "infra"
+		vmNS       = "tenant"
+	)
+	s := coverageTestScheme(t)
+	providerCR := clusteredProviderCR("prov-cluster", providerNS)
+	pool := hostPoolCR("pool-a", providerNS, providerCR.Name)
+	host := readyHost("host-real", providerNS, pool.Name, providerCR.Name)
+
+	// Decoys in the VM's namespace, same Provider NAME, same pool NAME.
+	decoyPool := hostPoolCR("pool-a", vmNS, providerCR.Name)
+	decoyHost := readyHost("host-decoy", vmNS, decoyPool.Name, providerCR.Name)
+
+	vm := clusterVM("vm-x", vmNS, providerCR.Name)
+	vm.Spec.ProviderRef.Namespace = providerNS
+	vmClass := smallVMClass(vmNS)
+	vmImage := minimalVMImage(vmNS)
+
+	prov := &recordingCreateProvider{resp: contracts.CreateResponse{ID: "vm-300"}}
+	r := newTestReconciler(s, &stubResolver{provider: prov}, vm, providerCR, pool, host,
+		decoyPool, decoyHost, vmClass, vmImage)
+
+	_, err := r.createVM(context.Background(), vm, prov, providerCR, vmClass, vmImage, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, prov.createCalls, "the Provider-namespace pool must be found and scheduled")
+	assert.Equal(t, "host-real", prov.lastReq.TargetHostID,
+		"placement must use the Provider-namespace host, never a same-named decoy in the VM's namespace")
+	require.NotNil(t, vm.Status.Placement)
+	assert.Equal(t, "host-real", vm.Status.Placement.Host)
+}
+
+// TestCreateVM_Clustered_NoPoolInProviderNamespace proves a pool that exists
+// ONLY in the VM's namespace (not the Provider's) is not used: the VM gets
+// NoHostPool and Create is never called.
+func TestCreateVM_Clustered_NoPoolInProviderNamespace(t *testing.T) {
+	const (
+		providerNS = "infra"
+		vmNS       = "tenant"
+	)
+	s := coverageTestScheme(t)
+	providerCR := clusteredProviderCR("prov-cluster", providerNS)
+	tenantPool := hostPoolCR("pool-a", vmNS, providerCR.Name)
+	tenantHost := readyHost("host-tenant", vmNS, tenantPool.Name, providerCR.Name)
+
+	vm := clusterVM("vm-y", vmNS, providerCR.Name)
+	vm.Spec.ProviderRef.Namespace = providerNS
+	vmClass := smallVMClass(vmNS)
+	vmImage := minimalVMImage(vmNS)
+
+	prov := &recordingCreateProvider{resp: contracts.CreateResponse{ID: "vm-301"}}
+	r := newTestReconciler(s, &stubResolver{provider: prov}, vm, providerCR, tenantPool, tenantHost, vmClass, vmImage)
+
+	res, err := r.createVM(context.Background(), vm, prov, providerCR, vmClass, vmImage, nil)
+	require.NoError(t, err)
+	assert.Equal(t, placementConfigRetryInterval, res.RequeueAfter)
+	assert.Equal(t, 0, prov.createCalls, "a pool outside the Provider's namespace must never be used")
+	assert.Equal(t, k8s.ReasonNoHostPool, provisioningReason(vm))
+}
+
+// TestCreateVM_Clustered_IgnoresPoolHostsOfOtherProvider proves a host that is
+// in the chosen pool but names a DIFFERENT Provider is not a candidate: it is
+// not in this Provider's rendered inventory, so binding it would send a
+// TargetHostID the provider cannot route.
+func TestCreateVM_Clustered_IgnoresPoolHostsOfOtherProvider(t *testing.T) {
+	const ns = "default"
+	s := coverageTestScheme(t)
+	providerCR := clusteredProviderCR("prov-cluster", ns)
+	pool := hostPoolCR("pool-a", ns, providerCR.Name)
+	foreign := readyHost("host-foreign", ns, pool.Name, "some-other-provider")
+	// Give the foreign host far more capacity so Spread would prefer it if it
+	// were (wrongly) a candidate.
+	foreign.Status.AllocatableCPU = i32p(256)
+	foreign.Status.AllocatableMemoryMiB = i64p(1 << 20)
+	own := readyHost("host-own", ns, pool.Name, providerCR.Name)
+
+	vm := clusterVM("vm-z", ns, providerCR.Name)
+	prov := &recordingCreateProvider{resp: contracts.CreateResponse{ID: "vm-302"}}
+	r := newTestReconciler(s, &stubResolver{provider: prov}, vm, providerCR, pool, foreign, own,
+		smallVMClass(ns), minimalVMImage(ns))
+
+	_, err := r.createVM(context.Background(), vm, prov, providerCR, smallVMClass(ns), minimalVMImage(ns), nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, prov.createCalls)
+	assert.Equal(t, "host-own", prov.lastReq.TargetHostID)
 }
 
 // ─── honesty-first: Create fails → no placement written ───────────────────────

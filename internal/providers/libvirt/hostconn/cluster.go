@@ -133,10 +133,10 @@ var errRegistryClosed = errors.New("hostconn: registry is closed")
 // does NOT dial: connections open on first ConnFor (ADR-0007 D3 lazy-open).
 // dial must be non-nil; logger may be nil (defaults to slog.Default()).
 //
-// A host with an empty id is skipped (an unaddressable connection is never
-// useful); a duplicate id keeps the first occurrence. Neither is fatal — a
-// malformed inventory yields a smaller registry, never a panic (ADR-0007 D9
-// fail-safe).
+// A host with an empty id or an invalid endpoint is skipped, and a duplicated
+// id makes EVERY entry with that id unroutable (see desiredHosts). None is
+// fatal — a malformed inventory yields a smaller registry, never a panic
+// (ADR-0007 D9 fail-safe).
 func NewClusterRegistry(inv hostsecret.Inventory, dial Dialer, logger *slog.Logger) (*ClusterRegistry, error) {
 	if dial == nil {
 		return nil, errors.New("hostconn: NewClusterRegistry requires a non-nil Dialer")
@@ -264,19 +264,7 @@ func (r *ClusterRegistry) release(e *clusterEntry) {
 // It never dials and never severs an in-flight operation. It is safe to call
 // concurrently with ConnFor. After Close it errors.
 func (r *ClusterRegistry) Reconcile(inv hostsecret.Inventory) error {
-	desired := make(map[HostID]hostsecret.Host, len(inv.Hosts))
-	for _, h := range inv.Hosts {
-		id := HostID(h.ID)
-		if id == "" {
-			r.logger.Warn("hostconn: skipping inventory host with empty id")
-			continue
-		}
-		if _, dup := desired[id]; dup {
-			r.logger.Warn("hostconn: skipping duplicate inventory host id", "host", string(id))
-			continue
-		}
-		desired[id] = h
-	}
+	desired := desiredHosts(inv, r.logger)
 
 	var toClose []Conn
 	r.mu.Lock()
@@ -318,6 +306,52 @@ func (r *ClusterRegistry) Reconcile(inv hostsecret.Inventory) error {
 		_ = c.Close()
 	}
 	return nil
+}
+
+// desiredHosts projects a parsed inventory into the routable host set, applying
+// the provider-side admission rules every entry must pass before it can ever be
+// dialed. It is the single consumption point for BOTH the startup load
+// (NewClusterRegistry) and the hot-reload (Watcher), so a hand-edited inventory
+// Secret cannot bypass the Host CRD's admission validation:
+//
+//   - empty id: skipped (an unaddressable connection is never useful).
+//   - invalid endpoint (hostsecret.ValidateEndpoint): skipped. The endpoint's
+//     path becomes the libvirt connection URI forwarded to the hypervisor
+//     host, so an endpoint outside the accepted shapes is never routable.
+//   - duplicate id: EVERY entry carrying that id is skipped. A duplicate is an
+//     ambiguous inventory (two endpoints/credential sets for one id); picking
+//     "the first" would make routing depend on document order, so neither is
+//     routable until the inventory is fixed.
+//
+// None of these is fatal — a malformed inventory yields a smaller registry,
+// never a panic (ADR-0007 D9 fail-safe). Log lines carry the host id and a
+// coarse reason only, never the endpoint or credential material.
+func desiredHosts(inv hostsecret.Inventory, logger *slog.Logger) map[HostID]hostsecret.Host {
+	counts := make(map[HostID]int, len(inv.Hosts))
+	for _, h := range inv.Hosts {
+		counts[HostID(h.ID)]++
+	}
+
+	desired := make(map[HostID]hostsecret.Host, len(inv.Hosts))
+	for _, h := range inv.Hosts {
+		id := HostID(h.ID)
+		switch {
+		case id == "":
+			logger.Warn("hostconn: skipping inventory host with empty id")
+			continue
+		case counts[id] > 1:
+			logger.Warn("hostconn: skipping duplicated inventory host id (ambiguous; no entry is routable)",
+				"host", string(id), "occurrences", counts[id])
+			continue
+		}
+		if err := hostsecret.ValidateEndpoint(h.Endpoint); err != nil {
+			logger.Warn("hostconn: skipping inventory host with invalid endpoint",
+				"host", string(id), "error", err.Error())
+			continue
+		}
+		desired[id] = h
+	}
+	return desired
 }
 
 // startDrainLocked begins draining e (must hold mu). An idle entry is closed

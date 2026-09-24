@@ -87,7 +87,7 @@ func hostCR(name, providerName string, labels map[string]string) *infravirtrigau
 	return &infravirtrigaudiov1beta1.Host{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
 		Spec: infravirtrigaudiov1beta1.HostSpec{
-			ProviderRef: infravirtrigaudiov1beta1.ObjectRef{Name: providerName},
+			ProviderRef: infravirtrigaudiov1beta1.LocalObjectReference{Name: providerName},
 			PoolRef:     infravirtrigaudiov1beta1.LocalObjectReference{Name: "pool-a"},
 			Endpoint:    "qemu+ssh://virt@" + name + "/system",
 			Labels:      labels,
@@ -129,13 +129,13 @@ func TestProvider_ClusterTopology_RendersHostInventorySecret(t *testing.T) {
 
 	// Two hosts that belong to this provider (given out of order to prove
 	// deterministic sorting), one that belongs to a DIFFERENT provider, and one
-	// whose providerRef targets a different namespace — the last two must be
-	// excluded from the render.
+	// that names this provider but lives in ANOTHER namespace — the last two
+	// must be excluded from the render.
 	hostB := hostCR("host-b", "libvirt-cluster", map[string]string{"net.virtrigaud.io/br-vlan100": "true"})
 	hostA := hostCR("host-a", "libvirt-cluster", map[string]string{"storage.virtrigaud.io/pool-nfs01": "true"})
 	otherProvider := hostCR("host-x", "some-other-provider", nil)
 	crossNS := hostCR("host-y", "libvirt-cluster", nil)
-	crossNS.Spec.ProviderRef.Namespace = "elsewhere" // resolves to ns "elsewhere" != provider ns
+	crossNS.Namespace = "elsewhere" // same provider NAME, different namespace
 
 	cli := fake.NewClientBuilder().
 		WithScheme(sch).
@@ -308,19 +308,19 @@ func renderedHostIDs(t *testing.T, cli client.Client) []string {
 }
 
 // TestProvidersForHost_MapsToProviderRef proves a Host event enqueues exactly
-// its owning Provider, resolving the ref namespace from the Host when unset and
-// honoring an explicit ref namespace when set.
+// its owning Provider, always in the Host's own namespace (same-namespace
+// model: providerRef is a LocalObjectReference).
 func TestProvidersForHost_MapsToProviderRef(t *testing.T) {
 	r := &ProviderReconciler{}
 
-	// Same-namespace ref: resolves to the Host's namespace.
 	got := r.providersForHost(context.Background(), hostCR("host-a", "libvirt-cluster", nil))
 	require.Len(t, got, 1)
 	assert.Equal(t, types.NamespacedName{Namespace: "default", Name: "libvirt-cluster"}, got[0].NamespacedName)
 
-	// Explicit cross-namespace ref: resolves to the ref's namespace.
+	// A Host in another namespace maps to the same-named Provider in ITS OWN
+	// namespace — never to the "default" Provider.
 	h := hostCR("host-a", "libvirt-cluster", nil)
-	h.Spec.ProviderRef.Namespace = "elsewhere"
+	h.Namespace = "elsewhere"
 	got = r.providersForHost(context.Background(), h)
 	require.Len(t, got, 1)
 	assert.Equal(t, types.NamespacedName{Namespace: "elsewhere", Name: "libvirt-cluster"}, got[0].NamespacedName)
@@ -336,7 +336,7 @@ func TestProvidersForHostPool_MapsToProviderRef(t *testing.T) {
 	pool := &infravirtrigaudiov1beta1.HostPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "pool-a", Namespace: "default"},
 		Spec: infravirtrigaudiov1beta1.HostPoolSpec{
-			ProviderRef: infravirtrigaudiov1beta1.ObjectRef{Name: "libvirt-cluster"},
+			ProviderRef: infravirtrigaudiov1beta1.LocalObjectReference{Name: "libvirt-cluster"},
 		},
 	}
 	got := r.providersForHostPool(context.Background(), pool)
@@ -384,7 +384,7 @@ func TestProvider_HostInventory_PerHostCredentialSecretRef(t *testing.T) {
 
 	// host-a overrides with its own secret; host-b falls back to the default.
 	hostA := hostCR("host-a", "libvirt-cluster", nil)
-	hostA.Spec.CredentialSecretRef = &infravirtrigaudiov1beta1.ObjectRef{Name: "host-a-creds"}
+	hostA.Spec.CredentialSecretRef = &infravirtrigaudiov1beta1.LocalObjectReference{Name: "host-a-creds"}
 	hostB := hostCR("host-b", "libvirt-cluster", nil)
 
 	cli := fake.NewClientBuilder().
@@ -427,7 +427,7 @@ func TestProvider_HostInventory_MissingCredentialSecret_SkipsHost(t *testing.T) 
 
 	hostA := hostCR("host-a", "libvirt-cluster", nil) // falls back to test-creds (present)
 	hostB := hostCR("host-b", "libvirt-cluster", nil)
-	hostB.Spec.CredentialSecretRef = &infravirtrigaudiov1beta1.ObjectRef{Name: "missing-creds"} // absent
+	hostB.Spec.CredentialSecretRef = &infravirtrigaudiov1beta1.LocalObjectReference{Name: "missing-creds"} // absent
 
 	cli := fake.NewClientBuilder().
 		WithScheme(sch).
@@ -471,7 +471,7 @@ func TestProvider_HostInventory_MalformedCredentialSecret_SkipsHost(t *testing.T
 
 	hostA := hostCR("host-a", "libvirt-cluster", nil) // test-creds (well-formed)
 	hostB := hostCR("host-b", "libvirt-cluster", nil)
-	hostB.Spec.CredentialSecretRef = &infravirtrigaudiov1beta1.ObjectRef{Name: "malformed-creds"}
+	hostB.Spec.CredentialSecretRef = &infravirtrigaudiov1beta1.LocalObjectReference{Name: "malformed-creds"}
 
 	// malformed-creds exists but carries only known_hosts (no ssh-privatekey) and
 	// a whitespace-only key must not count as present either.
@@ -508,7 +508,7 @@ func TestProvider_HostInventory_NoLeak(t *testing.T) {
 
 	hostA := hostCR("host-a", "libvirt-cluster", nil) // renders with real material
 	hostB := hostCR("host-b", "libvirt-cluster", nil)
-	hostB.Spec.CredentialSecretRef = &infravirtrigaudiov1beta1.ObjectRef{Name: "missing-creds"} // skipped
+	hostB.Spec.CredentialSecretRef = &infravirtrigaudiov1beta1.LocalObjectReference{Name: "missing-creds"} // skipped
 
 	cli := fake.NewClientBuilder().
 		WithScheme(sch).
