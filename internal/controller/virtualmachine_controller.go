@@ -121,6 +121,41 @@ const forceDeleteAnnotation = "virtrigaud.io/force-delete"
 // failing (finalizer retained until it succeeds or force-delete is set).
 const vmDeleteRetryInterval = 15 * time.Second
 
+// providerErrorRetryInterval is the requeue cadence after a provider Create /
+// image-prepare failure that may be transient (host unreachable, task error).
+const providerErrorRetryInterval = 5 * time.Second
+
+// invalidSpecRetryInterval is the requeue cadence after the provider rejected a
+// Create / image prepare as an invalid specification (a non-retryable
+// InvalidArgument — e.g. a libvirt image path outside the provider's allowed
+// image directories, or a disk another VM uses). Retrying unchanged cannot
+// succeed, and the VM controller does not watch VMImage, so this is a slow
+// recheck that picks up a corrected VMImage/VM without hot-looping the provider.
+const invalidSpecRetryInterval = 2 * time.Minute
+
+// providerFailureOutcome classifies a provider Create / image-prepare error into
+// the VM condition reason and requeue cadence: a non-retryable InvalidSpec
+// rejection surfaces as ValidationError with a slow recheck; anything else stays
+// a ProviderError retried on the normal cadence.
+func providerFailureOutcome(err error) (reason string, requeueAfter time.Duration) {
+	if contracts.IsInvalidSpec(err) {
+		return k8s.ReasonValidationError, invalidSpecRetryInterval
+	}
+	return k8s.ReasonProviderError, providerErrorRetryInterval
+}
+
+// providerErrorMessage renders err for a status condition. For a categorized
+// provider error it uses the message alone, dropping the "(caused by: rpc
+// error: ...)" suffix that repeats the same text; anything else renders as-is.
+// Provider messages carry only request-derived values (never credentials).
+func providerErrorMessage(err error) string {
+	var pe *contracts.ProviderError
+	if stderrors.As(err, &pe) && pe.Message != "" {
+		return pe.Message
+	}
+	return err.Error()
+}
+
 // hasForceDeleteAnnotation reports whether the VM carries the force-delete
 // escape-hatch annotation set to "true".
 func hasForceDeleteAnnotation(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
@@ -286,13 +321,14 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 			r.updateStatus(ctx, vm)
 			return imageEnsureResultToReconcile(), nil
 		}
-		logger.Error(err, "Failed to ensure image on provider - will retry in 5s",
-			"image", imageRefName, "provider", provider.Name)
-		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError,
-			fmt.Sprintf("Image prepare failed: %v", err))
+		reason, requeueAfter := providerFailureOutcome(err)
+		logger.Error(err, "Failed to ensure image on provider - will retry",
+			"image", imageRefName, "provider", provider.Name, "retryIn", requeueAfter)
+		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, reason,
+			fmt.Sprintf("Image prepare failed: %s", providerErrorMessage(err)))
 		metrics.RecordError(errReasonImagePrepare, metrics.ComponentManager)
 		r.updateStatus(ctx, vm)
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		return ctrl.Result{RequeueAfter: requeueAfter}, nil
 	} else if requeue {
 		// A prepare is in flight; surface a provisioning condition and requeue to
 		// poll it. We do NOT create the VM until the image is Ready on the provider.
@@ -671,9 +707,11 @@ func (r *VirtualMachineReconciler) createVM(
 			return res, nil
 		}
 		logger.Error(err, "Failed to create VM")
-		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Failed to create VM: %v", err))
+		reason, requeueAfter := providerFailureOutcome(err)
+		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, reason,
+			fmt.Sprintf("Failed to create VM: %s", providerErrorMessage(err)))
 		r.updateStatus(ctx, vm)
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		return ctrl.Result{RequeueAfter: requeueAfter}, nil
 	}
 
 	// Update status
@@ -1180,6 +1218,11 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 			Path:         diskPath,
 			Format:       format,
 			ChecksumType: "sha256",
+			// Tell the provider this path is a disk imported for THIS VM, not a
+			// base image: only then may it attach the disk in place (and only
+			// if it is this VM's own <vm>-migrated volume — the provider
+			// enforces that, since spec.importedDisk.path is user-writable).
+			ImportedDisk: true,
 		}
 
 		log.Info("Built image reference from imported disk",

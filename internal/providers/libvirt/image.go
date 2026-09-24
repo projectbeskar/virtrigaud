@@ -205,6 +205,15 @@ func (p *Provider) imagePrepare(ctx context.Context, imageJSON, targetName, stor
 		return "", "", contracts.NewInvalidSpecError("ImagePrepare target name is required", nil)
 	}
 
+	// The prepared template is <pool>/<targetName>.qcow2 and is later consumed
+	// by Create as a base image; a name that collides with VirtRigaud's own
+	// artifacts (<vm>-disk, <vm>-migrated) would alias a VM's disk (the
+	// "already exists" short-circuit below) and could never be consumed.
+	if targetName != filepath.Base(targetName) || reservedImageName(targetName+qcow2Ext) {
+		return "", "", newImageRejection(fmt.Sprintf("image target name %q", targetName),
+			"it collides with VirtRigaud-managed volume names (<vm>-disk, <vm>-migrated, dotfiles); rename the VMImage")
+	}
+
 	src := parseLibvirtImageSource(imageJSON)
 	if src.Path == "" && src.URL == "" {
 		return "", "", contracts.NewInvalidSpecError(
@@ -241,11 +250,20 @@ func (p *Provider) imagePrepare(ctx context.Context, imageJSON, targetName, stor
 
 	if src.Path != "" {
 		// Source already on the libvirt host: convert it into the pool as the
-		// named template. No download needed.
-		if err := p.verifyChecksum(ctx, src.Path, src.Checksum, src.ChecksumType); err != nil {
+		// named template. No download needed. The path is user-controlled, so
+		// confine it on the host first and use only the canonical result.
+		policy, err := p.imagePolicy()
+		if err != nil {
 			return "", "", err
 		}
-		if err := p.convertIntoPool(ctx, src.Path, targetPath); err != nil {
+		img, err := policy.confine(ctx, p.virshProvider, imagePathRequest{Path: src.Path})
+		if err != nil {
+			return "", "", err
+		}
+		if err := p.verifyChecksum(ctx, img.Path, src.Checksum, src.ChecksumType); err != nil {
+			return "", "", err
+		}
+		if err := p.convertIntoPool(ctx, img.Path, img.Format, targetPath); err != nil {
 			return "", "", err
 		}
 		p.finalizeClonedDisk(ctx, targetPath)
@@ -271,7 +289,15 @@ func (p *Provider) imagePrepare(ctx context.Context, imageJSON, targetName, stor
 	if err := p.verifyChecksum(ctx, tmpPath, src.Checksum, src.ChecksumType); err != nil {
 		return "", "", err
 	}
-	if err := p.convertIntoPool(ctx, tmpPath, targetPath); err != nil {
+	// SECURITY: the download is untrusted. Refuse it if its header references
+	// any other host file (qcow2 backing / data file, VMDK extent) — the
+	// convert below would read that file into the template — and convert with
+	// the probed format so qemu-img does not re-probe.
+	srcFormat, err := inspectHostImage(ctx, p.virshProvider, downloadedImageSubject, tmpPath)
+	if err != nil {
+		return "", "", err
+	}
+	if err := p.convertIntoPool(ctx, tmpPath, srcFormat, targetPath); err != nil {
 		return "", "", err
 	}
 	p.finalizeClonedDisk(ctx, targetPath)
@@ -310,13 +336,14 @@ func (p *Provider) downloadOnHost(ctx context.Context, url, dstPath string) erro
 }
 
 // convertIntoPool registers srcPath into the pool by converting it to a
-// standalone qcow2 at targetPath via qemu-img convert. The source format is
-// auto-probed (no -f), matching createFullCopy, so VMDK/raw/qcow2 sources all
-// work. On failure the partial target is removed so a retry starts clean.
-func (p *Provider) convertIntoPool(ctx context.Context, srcPath, targetPath string) error {
-	log.Printf("INFO ImagePrepare: converting %q -> %q (qcow2)", srcPath, targetPath)
+// standalone qcow2 at targetPath via qemu-img convert. srcFormat is the format
+// qemu-img probed when the source was inspected (inspectHostImage) and is
+// passed as -f, so VMDK/raw/qcow2 sources all work without a second probe. On
+// failure the partial target is removed so a retry starts clean.
+func (p *Provider) convertIntoPool(ctx context.Context, srcPath, srcFormat, targetPath string) error {
+	log.Printf("INFO ImagePrepare: converting %q (%s) -> %q (qcow2)", srcPath, srcFormat, targetPath)
 	res, err := p.virshProvider.runVirshCommand(ctx, "!",
-		"qemu-img", "convert", "-O", "qcow2", srcPath, targetPath)
+		"qemu-img", "convert", "-f", srcFormat, "-O", "qcow2", srcPath, targetPath)
 	if err != nil {
 		stderr := ""
 		if res != nil {

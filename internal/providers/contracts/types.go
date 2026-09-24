@@ -52,7 +52,24 @@ type VMImage struct {
 	Checksum string
 	// ChecksumType specifies algorithm
 	ChecksumType string
+	// ImportedDisk marks Path as a disk VirtRigaud imported for THIS VM
+	// (VirtualMachine.spec.importedDisk, e.g. the landing disk of a VMMigration)
+	// rather than a base image. A provider may then attach the disk in place
+	// instead of copying it — the libvirt provider does so only when the file is
+	// <pool dir>/<vm name>ImportedDiskNameSuffix.qcow2 and no VM uses it. A base
+	// image (false, the default) is always copied into the VM's own disk. It is
+	// carried inside the JSON-encoded image of the CreateRequest, so no wire
+	// (proto) change is needed and providers that ignore it are unaffected.
+	ImportedDisk bool
 }
+
+// ImportedDiskNameSuffix is appended to the target VM's name to form the volume
+// name of a disk imported for that VM by a VMMigration (the ImportDisk
+// TargetName, "<vm>-migrated"). It is the naming contract between the migration
+// controller, which picks the name, and providers, which use it to recognize a
+// disk that may be attached in place (see VMImage.ImportedDisk) and to refuse it
+// as a base image for any other VM.
+const ImportedDiskNameSuffix = "-migrated"
 
 // NetworkAttachment defines network configuration (provider-agnostic)
 type NetworkAttachment struct {

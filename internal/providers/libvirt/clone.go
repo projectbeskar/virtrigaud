@@ -137,7 +137,7 @@ func (p *Provider) Clone(ctx context.Context, req contracts.CloneRequest) (contr
 	if err != nil {
 		return contracts.CloneResponse{}, fmt.Errorf("get pool %q info: %w", clonePoolName, err)
 	}
-	targetVolumeName := fmt.Sprintf("%s-disk", req.TargetName)
+	targetVolumeName := vmDiskVolumeName(req.TargetName)
 	targetDiskPath := filepath.Join(poolInfo.Path, fmt.Sprintf("%s.qcow2", targetVolumeName))
 
 	if req.Linked {
@@ -221,7 +221,7 @@ func (p *Provider) resolvePrimaryDisk(ctx context.Context, sourceVMID string, sp
 	// Best-effort format lookup via the pool volume convention; default to
 	// qcow2 (the provider's standard) when unavailable.
 	format = "qcow2"
-	if vol, verr := sp.GetVolumeInfo(ctx, clonePoolName, fmt.Sprintf("%s-disk", sourceVMID)); verr == nil && vol.Format != "" {
+	if vol, verr := sp.GetVolumeInfo(ctx, clonePoolName, vmDiskVolumeName(sourceVMID)); verr == nil && vol.Format != "" {
 		format = vol.Format
 	}
 	return path, format, nil

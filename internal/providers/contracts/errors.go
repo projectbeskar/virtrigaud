@@ -112,7 +112,8 @@ func IsConflict(err error) bool {
 // IsInvalidSpec reports whether err is, or wraps, a provider InvalidSpec error.
 // The transport client maps a gRPC codes.InvalidArgument into a *ProviderError
 // of this type (see mapGRPCError). It is non-retryable: the same request will
-// be rejected again until the spec changes.
+// be rejected again until the spec changes (for example a libvirt image path
+// outside the provider's allowed image directories).
 func IsInvalidSpec(err error) bool {
 	var pe *ProviderError
 	return errors.As(err, &pe) && pe.Type == ErrorTypeInvalidSpec

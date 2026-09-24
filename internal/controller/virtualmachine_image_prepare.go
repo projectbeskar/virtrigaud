@@ -46,6 +46,9 @@ const (
 	imageReasonMissingOnProvider = "MissingOnProvider"
 	// imageReasonWaitingForImage marks Prepare.OnMissing=Wait holding create.
 	imageReasonWaitingForImage = "WaitingForImage"
+	// imageReasonInvalidSource marks a provider rejecting the image source as
+	// an invalid specification (e.g. a disallowed libvirt image path).
+	imageReasonInvalidSource = "InvalidSource"
 )
 
 // errImagePrepareHold is a sentinel returned by EnsureImageOnProvider when the
@@ -228,6 +231,15 @@ func (r *VirtualMachineReconciler) EnsureImageOnProvider(
 		StorageHint: "",
 	})
 	if perr != nil {
+		if contracts.IsInvalidSpec(perr) {
+			// The provider rejected the image source itself (e.g. a libvirt path
+			// outside its allowed image directories). Record that on the VMImage
+			// so its owner sees WHY, not just the VM; the caller backs off.
+			if werr := r.markImageSourceRejected(ctx, vmImage, provider.Name, perr); werr != nil {
+				logger.Error(werr, "Failed to record rejected image source on VMImage",
+					"provider", provider.Name, "image", vmImage.Name)
+			}
+		}
 		return false, fmt.Errorf("prepare image %s on provider %s: %w", vmImage.Name, provider.Name, perr)
 	}
 
@@ -426,6 +438,45 @@ func (r *VirtualMachineReconciler) markImagePrepared(
 			Status:             metav1.ConditionFalse,
 			Reason:             imageReasonPrepared,
 			Message:            "image import complete",
+			ObservedGeneration: img.Generation,
+		})
+	})
+}
+
+// markImageSourceRejected records that providerName rejected the image source as
+// an invalid specification (a non-retryable InvalidArgument from ImagePrepare,
+// such as a libvirt path outside the provider's allowed image directories). The
+// per-provider ProviderStatus entry carries the reason. The image-level
+// Phase/Ready condition flip to Failed/InvalidSource only while the image is not
+// available on ANY provider, so a rejection on one provider never masks the
+// image being Ready elsewhere (Ready is the OR across providers).
+func (r *VirtualMachineReconciler) markImageSourceRejected(
+	ctx context.Context,
+	vmImage *infravirtrigaudiov1beta1.VMImage,
+	providerName string,
+	cause error,
+) error {
+	msg := fmt.Sprintf("image source rejected by provider %q: %s", providerName, providerErrorMessage(cause))
+	return r.writeImageStatus(ctx, vmImage, func(img *infravirtrigaudiov1beta1.VMImage) {
+		if img.Status.ProviderStatus == nil {
+			img.Status.ProviderStatus = map[string]infravirtrigaudiov1beta1.ProviderImageStatus{}
+		}
+		now := metav1.Now()
+		ps := img.Status.ProviderStatus[providerName]
+		ps.Available = false
+		ps.Message = msg
+		ps.LastUpdated = &now
+		img.Status.ProviderStatus[providerName] = ps
+		if img.Status.Ready {
+			return
+		}
+		img.Status.Phase = infravirtrigaudiov1beta1.ImagePhaseFailed
+		img.Status.Message = msg
+		meta.SetStatusCondition(&img.Status.Conditions, metav1.Condition{
+			Type:               infravirtrigaudiov1beta1.VMImageConditionReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             imageReasonInvalidSource,
+			Message:            msg,
 			ObservedGeneration: img.Generation,
 		})
 	})
