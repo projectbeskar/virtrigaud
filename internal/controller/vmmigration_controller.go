@@ -34,9 +34,12 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/obs/logging"
@@ -168,6 +171,7 @@ func NewVMMigrationReconciler(
 //+kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 //+kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 //+kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
 
 // Reconcile is part of the main kubernetes reconciliation loop.
 //
@@ -328,6 +332,12 @@ func (r *VMMigrationReconciler) handleValidatingPhase(ctx context.Context, migra
 	logger := logging.FromContext(ctx)
 	logger.Info("Validating migration requirements")
 
+	// A target in another namespace must be granted before any side effect
+	// (source power-off, snapshot, staging PVC, export).
+	if allowed, res, err := r.gateTargetNamespace(ctx, migration); !allowed {
+		return res, err
+	}
+
 	// Validate source VM exists
 	sourceVM, err := r.getSourceVM(ctx, migration)
 	if err != nil {
@@ -345,13 +355,11 @@ func (r *VMMigrationReconciler) handleValidatingPhase(ctx context.Context, migra
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
-	// Validate source provider
-	var sourceProviderRef infrav1beta1.ObjectRef
-	if migration.Spec.Source.ProviderRef != nil {
-		sourceProviderRef = *migration.Spec.Source.ProviderRef
-	} else {
-		// Auto-detect from source VM
-		sourceProviderRef = sourceVM.Spec.ProviderRef
+	// Validate source provider: the one the source VM runs on. An explicit
+	// spec.source.providerRef naming any other Provider is refused.
+	sourceProviderRef, err := migrationSourceProviderRef(migration, sourceVM)
+	if err != nil {
+		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Invalid source provider: %v", err))
 	}
 	sourceProvider, err := r.getProvider(ctx, sourceProviderRef, migration.Namespace)
 	if err != nil {
@@ -644,11 +652,9 @@ func (r *VMMigrationReconciler) handleSnapshottingPhase(ctx context.Context, mig
 	}
 
 	// Get source provider
-	var sourceProviderRef infrav1beta1.ObjectRef
-	if migration.Spec.Source.ProviderRef != nil {
-		sourceProviderRef = *migration.Spec.Source.ProviderRef
-	} else {
-		sourceProviderRef = sourceVM.Spec.ProviderRef
+	sourceProviderRef, err := migrationSourceProviderRef(migration, sourceVM)
+	if err != nil {
+		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Invalid source provider: %v", err))
 	}
 	sourceProvider, err := r.getProvider(ctx, sourceProviderRef, migration.Namespace)
 	if err != nil {
@@ -749,11 +755,9 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 	}
 
 	// Get source provider
-	var sourceProviderRef infrav1beta1.ObjectRef
-	if migration.Spec.Source.ProviderRef != nil {
-		sourceProviderRef = *migration.Spec.Source.ProviderRef
-	} else {
-		sourceProviderRef = sourceVM.Spec.ProviderRef
+	sourceProviderRef, err := migrationSourceProviderRef(migration, sourceVM)
+	if err != nil {
+		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Invalid source provider: %v", err))
 	}
 	sourceProvider, err := r.getProvider(ctx, sourceProviderRef, migration.Namespace)
 	if err != nil {
@@ -1012,6 +1016,13 @@ func (r *VMMigrationReconciler) handleConvertingPhase(ctx context.Context, migra
 func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migration *infrav1beta1.VMMigration) (ctrl.Result, error) {
 	logger := logging.FromContext(ctx)
 	logger.Info("Handling importing phase")
+
+	// Re-check the target namespace grant: the import lands a disk named for
+	// the target VM (libvirt: "<target namespace>.<name>-migrated"), which that
+	// namespace's VM may later attach in place.
+	if allowed, res, err := r.gateTargetNamespace(ctx, migration); !allowed {
+		return res, err
+	}
 
 	// Get target provider
 	targetProvider, err := r.getProvider(ctx, migration.Spec.Target.ProviderRef, migration.Namespace)
@@ -1285,10 +1296,137 @@ func migrationTargetVMKey(migration *infrav1beta1.VMMigration) client.ObjectKey 
 	return client.ObjectKey{Namespace: namespace, Name: name}
 }
 
+// gateTargetNamespace enforces the cross-namespace target rule
+// (AllowedSourceNamespacesAnnotation) for the migration's target namespace.
+// allowed=true means the migration may read, create and write there (and land
+// a disk named for a VM there); a refusal left by an earlier reconcile is then
+// cleared. Otherwise the migration is marked refused and (result, err) is what
+// the phase handler returns: a slow recheck (the Namespace watch re-drives it
+// on a grant), or the read error so the controller retries with backoff while
+// failing closed. It is called at the start of every phase that touches the
+// target — Validating (before any side effect), Importing, Creating and
+// Validating-Target — so revoking the grant stops a migration in flight.
+func (r *VMMigrationReconciler) gateTargetNamespace(
+	ctx context.Context,
+	migration *infrav1beta1.VMMigration,
+) (allowed bool, result ctrl.Result, err error) {
+	targetNamespace := migrationTargetVMKey(migration).Namespace
+	allowed, err = targetNamespaceAllowed(ctx, r.Client, migration.Namespace, targetNamespace)
+	if err != nil {
+		logging.FromContext(ctx).Error(err, "Failed to check the target namespace grant; not proceeding")
+		return false, ctrl.Result{}, err
+	}
+	if !allowed {
+		result, err = r.markTargetNamespaceNotAllowed(ctx, migration, targetNamespace)
+		return false, result, err
+	}
+	if err := r.clearTargetNamespaceRefusal(ctx, migration); err != nil {
+		return false, ctrl.Result{}, err
+	}
+	return true, ctrl.Result{}, nil
+}
+
+// markTargetNamespaceNotAllowed records that the migration's target namespace
+// does not grant the migration's namespace: Ready=False (and, while still
+// validating, Validating=False) with reason TargetNamespaceNotAllowed. It is
+// NOT a failure: the phase, retry count and any staged/imported state are kept
+// so the migration resumes where it stopped once the grant is present, and
+// nothing already created is touched. The Warning event is emitted only on the
+// transition, and the recheck is slow: only an administrator can lift it.
+func (r *VMMigrationReconciler) markTargetNamespaceNotAllowed(
+	ctx context.Context,
+	migration *infrav1beta1.VMMigration,
+	targetNamespace string,
+) (ctrl.Result, error) {
+	msg := targetNamespaceNotAllowedMessage(migration.Namespace, targetNamespace)
+	prev := meta.FindStatusCondition(migration.Status.Conditions, infrav1beta1.VMMigrationConditionReady)
+	transition := prev == nil || prev.Reason != ReasonTargetNamespaceNotAllowed || prev.Message != msg
+
+	migration.Status.Message = msg
+	migration.Status.ObservedGeneration = migration.Generation
+	meta.SetStatusCondition(&migration.Status.Conditions, metav1.Condition{
+		Type:               infrav1beta1.VMMigrationConditionReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             ReasonTargetNamespaceNotAllowed,
+		Message:            msg,
+		ObservedGeneration: migration.Generation,
+	})
+	if migration.Status.Phase == infrav1beta1.MigrationPhaseValidating {
+		meta.SetStatusCondition(&migration.Status.Conditions, metav1.Condition{
+			Type:               infrav1beta1.VMMigrationConditionValidating,
+			Status:             metav1.ConditionFalse,
+			Reason:             ReasonTargetNamespaceNotAllowed,
+			Message:            msg,
+			ObservedGeneration: migration.Generation,
+		})
+	}
+	if transition {
+		logging.FromContext(ctx).Info("VMMigration target namespace does not grant the migration's namespace; nothing is created there",
+			"targetNamespace", targetNamespace, "phase", migration.Status.Phase)
+		r.Recorder.Event(migration, corev1.EventTypeWarning, ReasonTargetNamespaceNotAllowed, msg)
+	}
+	if err := r.updateStatus(ctx, migration); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: crossNamespaceRecheckInterval}, nil
+}
+
+// clearTargetNamespaceRefusal removes the TargetNamespaceNotAllowed Ready /
+// Validating conditions once the grant is present (or the target was changed
+// to the own namespace), so the migration does not keep reporting a refusal
+// while it proceeds; the phase handler sets its own conditions from there. It
+// persists immediately and is a no-op when there is nothing to clear.
+func (r *VMMigrationReconciler) clearTargetNamespaceRefusal(ctx context.Context, migration *infrav1beta1.VMMigration) error {
+	cleared := false
+	for _, condType := range []string{infrav1beta1.VMMigrationConditionReady, infrav1beta1.VMMigrationConditionValidating} {
+		if c := meta.FindStatusCondition(migration.Status.Conditions, condType); c != nil && c.Reason == ReasonTargetNamespaceNotAllowed {
+			meta.RemoveStatusCondition(&migration.Status.Conditions, condType)
+			cleared = true
+		}
+	}
+	if !cleared {
+		return nil
+	}
+	migration.Status.Message = "Target namespace access granted; resuming"
+	migration.Status.ObservedGeneration = migration.Generation
+	r.Recorder.Event(migration, corev1.EventTypeNormal, "TargetNamespaceAllowed", migration.Status.Message)
+	return r.updateStatus(ctx, migration)
+}
+
+// migrationsTargetingNamespace maps a Namespace whose grant annotation changed
+// to the VMMigrations in OTHER namespaces that target it and have not
+// completed, so a grant (or revocation) takes effect without waiting for the
+// slow recheck.
+func (r *VMMigrationReconciler) migrationsTargetingNamespace(ctx context.Context, obj client.Object) []reconcile.Request {
+	migrations := &infrav1beta1.VMMigrationList{}
+	if err := r.List(ctx, migrations); err != nil {
+		logging.FromContext(ctx).Error(err, "Failed to list VMMigrations for a namespace grant change", "namespace", obj.GetName())
+		return nil
+	}
+	var reqs []reconcile.Request
+	for i := range migrations.Items {
+		m := &migrations.Items[i]
+		if m.Namespace == obj.GetName() || migrationTargetVMKey(m).Namespace != obj.GetName() {
+			continue
+		}
+		if m.Status.Phase == infrav1beta1.MigrationPhaseReady {
+			continue
+		}
+		reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(m)})
+	}
+	return reqs
+}
+
 // handleCreatingPhase creates the target VM
 func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migration *infrav1beta1.VMMigration) (ctrl.Result, error) {
 	logger := logging.FromContext(ctx)
 	logger.Info("Handling creating phase")
+
+	// Re-check the target namespace grant before reading or creating the
+	// target VirtualMachine there.
+	if allowed, res, err := r.gateTargetNamespace(ctx, migration); !allowed {
+		return res, err
+	}
 
 	// Check if target VM already exists. The key is the same one the import
 	// phase named the landed disk for (migrationTargetVMKey).
@@ -1364,6 +1502,12 @@ func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migrati
 			ProviderRef: migration.Spec.Target.ProviderRef,
 		},
 	}
+	if targetNamespace != migration.Namespace && targetVM.Spec.ProviderRef.Namespace == "" {
+		// The disk was imported through the target Provider resolved in the
+		// MIGRATION's namespace (getProvider). A VM in another namespace would
+		// resolve an unqualified reference there instead — pin it.
+		targetVM.Spec.ProviderRef.Namespace = migration.Namespace
+	}
 
 	// Merge user-provided annotations
 	if migration.Spec.Target.Annotations != nil {
@@ -1438,23 +1582,16 @@ func (r *VMMigrationReconciler) handleValidatingTargetPhase(ctx context.Context,
 	logger := logging.FromContext(ctx)
 	logger.Info("Handling target validation phase")
 
-	// Get target VM name
-	targetVMName := migration.Spec.Target.Name
-	if targetVMName == "" {
-		targetVMName = fmt.Sprintf("%s-migrated", migration.Spec.Source.VMRef.Name)
-	}
-
-	targetNamespace := migration.Spec.Target.Namespace
-	if targetNamespace == "" {
-		targetNamespace = migration.Namespace
+	// Re-check the target namespace grant before reading the target VM and
+	// writing its completion annotations.
+	if allowed, res, err := r.gateTargetNamespace(ctx, migration); !allowed {
+		return res, err
 	}
 
 	// Get target VM
+	vmKey := migrationTargetVMKey(migration)
+	targetVMName, targetNamespace := vmKey.Name, vmKey.Namespace
 	targetVM := &infrav1beta1.VirtualMachine{}
-	vmKey := client.ObjectKey{
-		Namespace: targetNamespace,
-		Name:      targetVMName,
-	}
 
 	if err := r.Get(ctx, vmKey, targetVM); err != nil {
 		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to get target VM: %v", err))
@@ -1768,23 +1905,28 @@ func (r *VMMigrationReconciler) handleDeletion(ctx context.Context, migration *i
 	// IMPORTANT: Never delete VMs that have been marked as migration-completed
 	// This ensures that successfully migrated VMs persist independently of the migration resource
 	if migration.Status.Phase == infrav1beta1.MigrationPhaseFailed || migration.Status.Phase == infrav1beta1.MigrationPhaseCreating {
-		targetVMName := migration.Spec.Target.Name
-		if targetVMName == "" {
-			targetVMName = fmt.Sprintf("%s-migrated", migration.Spec.Source.VMRef.Name)
-		}
-		targetNamespace := migration.Spec.Target.Namespace
-		if targetNamespace == "" {
-			targetNamespace = migration.Namespace
+		vmKey := migrationTargetVMKey(migration)
+		targetVMName := vmKey.Name
+
+		// Deleting is a write in the target namespace too: only with the grant.
+		// Without it, a VM this migration created while it was granted is left
+		// for that namespace's owners, and nothing is read there.
+		targetAllowed, grantErr := targetNamespaceAllowed(ctx, r.Client, migration.Namespace, vmKey.Namespace)
+		if grantErr != nil {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("target VM cleanup: %w", grantErr))
+		} else if !targetAllowed {
+			logger.Info("Target namespace does not grant this migration's namespace; leaving any target VM there untouched",
+				"targetNamespace", vmKey.Namespace)
+			r.Recorder.Event(migration, corev1.EventTypeWarning, ReasonTargetNamespaceNotAllowed,
+				targetNamespaceNotAllowedMessage(migration.Namespace, vmKey.Namespace))
 		}
 
 		targetVM := &infrav1beta1.VirtualMachine{}
-		vmKey := client.ObjectKey{
-			Namespace: targetNamespace,
-			Name:      targetVMName,
-		}
 
 		// Check if target VM exists
-		if err := r.Get(ctx, vmKey, targetVM); err == nil {
+		if !targetAllowed {
+			logger.V(1).Info("Skipping target VM cleanup", "vm", targetVMName)
+		} else if err := r.Get(ctx, vmKey, targetVM); err == nil {
 			// Check if VM has migration-completed marker
 			if targetVM.Annotations != nil && targetVM.Annotations["virtrigaud.io/migration-completed"] == "true" {
 				logger.Info("Target VM has migration-completed marker, skipping deletion",
@@ -1895,20 +2037,50 @@ func (r *VMMigrationReconciler) getProvider(ctx context.Context, providerRef inf
 	return provider, nil
 }
 
-// getSourceProvider retrieves the source provider for a migration
+// getSourceProvider retrieves the source provider for a migration: the
+// Provider the source VM runs on (see migrationSourceProviderRef).
 func (r *VMMigrationReconciler) getSourceProvider(ctx context.Context, migration *infrav1beta1.VMMigration) (*infrav1beta1.Provider, error) {
-	var sourceProviderRef infrav1beta1.ObjectRef
-	if migration.Spec.Source.ProviderRef != nil {
-		sourceProviderRef = *migration.Spec.Source.ProviderRef
-	} else {
-		// Auto-detect from source VM
-		sourceVM, err := r.getSourceVM(ctx, migration)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get source VM: %w", err)
-		}
-		sourceProviderRef = sourceVM.Spec.ProviderRef
+	sourceVM, err := r.getSourceVM(ctx, migration)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get source VM: %w", err)
+	}
+	sourceProviderRef, err := migrationSourceProviderRef(migration, sourceVM)
+	if err != nil {
+		return nil, err
 	}
 	return r.getProvider(ctx, sourceProviderRef, migration.Namespace)
+}
+
+// migrationSourceProviderRef returns the Provider a migration exports its
+// source VM through: the source VM's own spec.providerRef, with its namespace
+// made explicit (an empty one means the VM's namespace, which is the
+// migration's — spec.source.vmRef is namespace-local).
+//
+// spec.source.providerRef is optional and, when set, must name that SAME
+// Provider. Any other Provider would be asked to snapshot and export the source
+// VM's provider ID on a hypervisor the VM does not run on — i.e. whatever
+// unrelated VM, possibly another tenant's, has that ID there — so a mismatch is
+// refused rather than honoured.
+func migrationSourceProviderRef(migration *infrav1beta1.VMMigration, sourceVM *infrav1beta1.VirtualMachine) (infrav1beta1.ObjectRef, error) {
+	vmProvider := sourceVM.Spec.ProviderRef
+	if vmProvider.Namespace == "" {
+		vmProvider.Namespace = sourceVM.Namespace
+	}
+	if migration.Spec.Source.ProviderRef == nil {
+		return vmProvider, nil
+	}
+	requested := *migration.Spec.Source.ProviderRef
+	if requested.Namespace == "" {
+		requested.Namespace = migration.Namespace
+	}
+	if requested.Name != vmProvider.Name || requested.Namespace != vmProvider.Namespace {
+		return infrav1beta1.ObjectRef{}, fmt.Errorf(
+			"spec.source.providerRef %s/%s is not the Provider the source VM %s runs on (%s/%s); "+
+				"a migration exports the source VM only through its own Provider — remove spec.source.providerRef or set it to %s/%s",
+			requested.Namespace, requested.Name, sourceVM.Name, vmProvider.Namespace, vmProvider.Name,
+			vmProvider.Namespace, vmProvider.Name)
+	}
+	return vmProvider, nil
 }
 
 // getTargetProvider retrieves the target provider for a migration
@@ -2870,11 +3042,9 @@ func (r *VMMigrationReconciler) deleteSourceSnapshot(ctx context.Context, migrat
 	}
 
 	// Get source provider
-	var sourceProviderRef infrav1beta1.ObjectRef
-	if migration.Spec.Source.ProviderRef != nil {
-		sourceProviderRef = *migration.Spec.Source.ProviderRef
-	} else {
-		sourceProviderRef = sourceVM.Spec.ProviderRef
+	sourceProviderRef, err := migrationSourceProviderRef(migration, sourceVM)
+	if err != nil {
+		return fmt.Errorf("resolve source provider: %w", err)
 	}
 
 	sourceProvider, err := r.getProvider(ctx, sourceProviderRef, migration.Namespace)
@@ -2963,10 +3133,16 @@ func (r *VMMigrationReconciler) deleteSourceVM(ctx context.Context, migration *i
 	return nil
 }
 
-// SetupWithManager sets up the controller with the Manager
+// SetupWithManager sets up the controller with the Manager. Besides its own
+// VMMigrations it watches Namespaces, but only for changes to the
+// cross-namespace grant annotation, to re-drive migrations whose target
+// namespace just granted or revoked access.
 func (r *VMMigrationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&infrav1beta1.VMMigration{}).
+		Watches(&corev1.Namespace{},
+			handler.EnqueueRequestsFromMapFunc(r.migrationsTargetingNamespace),
+			builder.WithPredicates(allowedSourceNamespacesChanged())).
 		WithOptions(controller.Options{
 			MaxConcurrentReconciles: 3, // Limit concurrent reconciliations to prevent API server overload
 		}).

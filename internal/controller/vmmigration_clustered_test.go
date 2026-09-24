@@ -54,7 +54,9 @@ func clusteredMigrationFixture(t *testing.T, srcClustered, tgtClustered bool, sr
 	}
 	srcVM := &infravirtrigaudiov1beta1.VirtualMachine{
 		ObjectMeta: metav1.ObjectMeta{Name: "src-vm", Namespace: "default"},
-		Status:     infravirtrigaudiov1beta1.VirtualMachineStatus{ID: "src-vm", Placement: srcPlacement},
+		// spec.source.providerRef must name the Provider the source VM runs on.
+		Spec:   infravirtrigaudiov1beta1.VirtualMachineSpec{ProviderRef: infravirtrigaudiov1beta1.ObjectRef{Name: "src-prov"}},
+		Status: infravirtrigaudiov1beta1.VirtualMachineStatus{ID: "src-vm", Placement: srcPlacement},
 	}
 	srcProv := readyProvider("default", "src-prov")
 	tgtProv := readyProvider("default", "tgt-prov")
