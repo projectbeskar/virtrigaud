@@ -7,7 +7,7 @@ The five cross-ADR blocking decisions are settled (see `0007-0008-blocking-decis
 and the folded D-sections below).
 
 **Implementation status (2026-09-24):** P1's inventory, placement and admission
-halves are merged (#312–#325, security-hardened by #330/#331): `Host`/`HostPool`,
+halves are merged (#312–#325; security-hardened by #330, #331, #333 and #334): `Host`/`HostPool`,
 `ListHosts`/`GetHostInfo` + inventory sync, the filter+score scheduler, and
 `target_host_id` + `status.placement.host` binding **at create**. **Not yet done:**
 routing every *post-create* per-VM RPC to the bound host. Today only `Create` is
@@ -858,8 +858,8 @@ must ship with routed `Describe`, and before the ADR-0008 PR 5 native switch.
 
 ### A5: rollout slices
 
-**Prerequisite:** the libvirt domain owner-metadata fix (the security fix for the
-released domain-name takeover) is merged.
+**Prerequisite (met):** the libvirt domain owner-metadata fix, #333, is merged.
+It is the security fix for the released domain-name takeover.
 
 | Slice | Scope |
 |---|---|
