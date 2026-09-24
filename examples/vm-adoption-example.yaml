@@ -10,6 +10,13 @@
 
 ---
 # Example 1: vSphere Provider with VM Adoption enabled
+#
+# Adoption is THE way to bring a pre-existing vSphere VM under management.
+# Creating a VirtualMachine whose name matches an existing VM does NOT bind to
+# it: the vSphere provider only binds a VM in the target folder whose
+# ExtraConfig owner stamp (virtrigaud.owner.uid) records that VirtualMachine's
+# own UID, and otherwise fails the create with a Ready=False / ProviderConflict
+# condition. See docs/vm-ownership.md.
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: Provider
 metadata:
@@ -61,7 +68,8 @@ spec:
 # Creating a VirtualMachine whose name matches an existing domain does NOT bind
 # to it: the libvirt provider only binds a domain stamped with that
 # VirtualMachine's own UID, and otherwise fails the create with a
-# Ready=False / ProviderConflict condition. See docs/libvirt-domain-ownership.md.
+# Ready=False / ProviderConflict condition. See docs/libvirt-domain-ownership.md
+# and docs/vm-ownership.md.
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: Provider
 metadata:

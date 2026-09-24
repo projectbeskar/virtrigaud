@@ -6,6 +6,10 @@ metadata:
 spec:
   source:
     vsphere:
+      # Must name a real vSphere template (config.template=true), matched exactly
+      # in the Provider's default datacenter, or give its inventory path
+      # (e.g. "/DC1/vm/templates/tmpl-ubuntu-22.04-cloudimg"). A regular VM is
+      # never cloned. See docs/vm-ownership.md.
       templateName: "tmpl-ubuntu-22.04-cloudimg"
   metadata:
     description: "Ubuntu 22.04 LTS cloud image"

@@ -234,6 +234,8 @@ Go 1.26+ is required for source builds.
 
    > The Proxmox provider reads credentials from files mounted at `/etc/virtrigaud/credentials/{token_id,token_secret,username,password}`. Do NOT use `envFrom: secretRef` for Proxmox credentials — that pattern is not implemented.
 
+   > **vSphere account privileges:** the vCenter account needs **Virtual machine > Change Configuration > Advanced configuration** (`VirtualMachine.Config.AdvancedConfig`) on the target VM folder and resource pool. Every create writes an ExtraConfig owner stamp, and a create fails without that privilege. `VMImage` `templateName` must name a real vSphere template; a regular VM is never cloned. See [`docs/vm-ownership.md`](docs/vm-ownership.md#required-vcenter-privileges).
+
 2. **Create a Provider CR**:
 
    ```yaml

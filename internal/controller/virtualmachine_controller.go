@@ -1475,7 +1475,7 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 		MetaData:  metaData,
 		Placement: placement,
 		Tags:      vm.Spec.Tags,
-		// Owner lets a provider that keys VMs by a tenant-shared name (libvirt)
+		// Owner lets a provider that keys VMs by a tenant-shared name (libvirt, vSphere)
 		// stamp the VM it creates and bind to an existing same-named VM ONLY when
 		// that VM records this VirtualMachine's UID — never another tenant's.
 		Owner: contracts.ObjectIdentity{

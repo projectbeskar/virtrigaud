@@ -5,6 +5,99 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-24 10:30] - vSphere Create no longer binds to a same-named VM it does not own, or clones a VM that is not a template
+**Author:** @wrkode (William Rizzo)
+
+> **Operator action required before rollout (vSphere)**
+> 1. **vCenter privilege.** The provider's vCenter account needs **Virtual machine > Change Configuration > Advanced configuration** (`VirtualMachine.Config.AdvancedConfig`) on the target VM folder and resource pool. Every `Create` and `Clone` now writes ExtraConfig (the owner stamp), and fails without this privilege.
+> 2. **`vm-<digits>` names are refused.** A VirtualMachine, `VMImage` (as the `ImagePrepare` target) or bare template name of the form `vm-` followed only by digits (for example `vm-42`) gets `ValidationError`. The same applies to names containing `/`, `\`, `%` or `:`. Rename it.
+> 3. **Templates must be real vSphere templates.** A `VMImage` `templateName`, or prepared name, that points at a regular VM (running or powered off) now gets `ValidationError` instead of being cloned. Convert the source to a template, or point the `VMImage` at one. If two templates share a name, reference the right one by inventory path. An absolute inventory path must be in the Provider's default datacenter.
+
+### Security
+- `internal/providers/vsphere/server.go`, new `vm_ownership.go`: **fail closed on an existing VM.** Before this change, `Create` searched the whole default datacenter for a VM with the requested name (`finder.VirtualMachine(name)`) and returned the first match's MOID as the new VirtualMachine's ID. A VirtualMachine named like any VM in the datacenter (another tenant's, or an unrelated production VM) was therefore bound to it, and deleting the VirtualMachine then powered off and destroyed that VM with its disks. The lookup error was also discarded, so "multiple found" or a transient failure fell through to create.
+  - `Create` now stamps the requester's identity into the new VM's ExtraConfig as `virtrigaud.owner.uid`, `virtrigaud.owner.namespace` and `virtrigaud.owner.name`. The keys are not `guestinfo.*`, so the guest can't read them. The stamp is written on every create path, in the same task: the template `CloneVM_Task` path and the imported-disk `CreateVM_Task` path. A request without an owner clears any stamp inherited from the template.
+  - The existing-VM check is scoped to the exact target folder: `spec.placement.folder`, else the Provider's default folder, else the datacenter VM folder. It lists that folder's direct VirtualMachine children and compares names exactly; it doesn't use a finder search. A same-named VM in any other folder is neither bound nor considered.
+  - `Create` binds to a VM in the target folder **only** if its stamp records the requester's UID and it isn't a template. Otherwise it returns `codes.AlreadyExists`, which the manager maps to a non-retryable `Conflict`. That covers a missing, different or unreadable stamp, a request without an owner, and more than one same-named VM. A transient lookup failure is returned as an error and never leads to a create or a bind.
+  - The `Conflict` message names only the requested VM, never the other owner or an inventory path.
+- `internal/providers/vsphere/vm_ownership.go`: **MOID-shaped names are rejected.** govmomi's `find.Finder` resolves a bare `vm-1234` as the managed object reference `vm-1234` (`object.ReferenceFromString`, govmomi v0.52.0 `find/finder.go`) before it tries it as a name, in any datacenter. A VirtualMachine named `vm-1234` therefore bound to whichever VM had that MOID, and MOIDs are sequential. `Create`, and the `Clone` target, now reject `vm-` followed only by digits, and names containing `/`, `\`, `%` or `:`, with `codes.InvalidArgument` before any vCenter call. VirtualMachine CRD validation doesn't change.
+- `internal/providers/vsphere/server.go` (`Clone`): a clone never binds to an existing VM; `CloneVM_Task` refuses a duplicate name in the folder. The clone spec now clears the owner stamp the clone would inherit from the source's ExtraConfig, so a clone never claims the source VirtualMachine's owner. `CloneRequest` carries no owner, so clones are left unstamped.
+- `internal/providers/vsphere/server.go` (`Describe`): returns `Exists=false` only for `ManagedObjectNotFound`. Before, it did so for **any** error, such as session loss, a network error or a vCenter restart. The manager answers `Exists=false` by clearing `status.id` and calling `Create` again. That turned a transient error into a re-create, which, before this change, rebound by name across the datacenter. After this change, it would have unbound every unstamped pre-upgrade VM. Other errors are now returned, so the manager retries and keeps the binding.
+- `internal/providers/vsphere/server.go`, `image.go`, new `template_source.go`: **only real templates are clone sources.** Before this change, a `VMImage` `templateName` was resolved with `finder.VirtualMachine(name)`, which matched **any** VM in the datacenter with that name, running or powered off. A MOID-shaped name matched any VM in any datacenter. A tenant could therefore point a `VMImage` at another tenant's VM, or a production VM, and full-clone it, which exposed its disks. `ImagePrepare`'s "already prepared" check (`findExistingByName`) had the same problem: it accepted any VM with the target name, and every VM created from that `VMImage` then cloned it.
+  - A template reference is validated before any vCenter call (`templateRefError`), and so is the `ImagePrepare` target name.
+  - A bare name follows the VM-name rules. An inventory path, which the API documents as an alternative, may contain `%` escapes. It must not contain `\` or `:` or an empty, `.` or `..` element, and its last element must not be MOID-shaped.
+  - Resolution no longer uses the finder. A bare name is compared exactly with the names of the VMs in the default datacenter's VM tree. An inventory path is resolved with `SearchIndex.FindByInventoryPath`, either absolute or relative to the datacenter VM folder.
+  - Only an object with `config.template=true` is a clone source or counts as prepared.
+    - Exactly one template: it is used, and same-named regular VMs are ignored, so they can't block a shared template name.
+    - Two or more templates: `InvalidArgument` ("ambiguous; use an inventory path").
+    - Only regular VMs: `InvalidArgument` ("does not name a vSphere template").
+    - None: the existing not-found behavior. `Create` retries; `ImagePrepare` imports the OVA for a target name, or returns `NotFound` for `templateName`.
+    - Transient lookup failure: the error is returned, and it no longer counts as "not found" in `ImagePrepare`, which could have started a duplicate import.
+  - `ImagePrepare` never treats a same-named regular VM as the prepared image, and never overwrites or adopts it. Messages name only the requested reference.
+  - An absolute template inventory path must be under the default datacenter's VM folder (`absoluteTemplatePathError`, an exact prefix match). Otherwise it gets `InvalidArgument` before the lookup. Before, `FindByInventoryPath` could reach a template in any datacenter the vCenter account can see.
+- `internal/providers/vsphere/ova_import.go` (new), `image.go`: **OVA imports never carry a forged owner stamp.** An OVF's `<vmw:ExtraConfig>` entries are mapped into the import spec. A tenant's OVA could set `virtrigaud.owner.uid` to a victim's UID, and during the import, or if `MarkAsTemplate` and the cleanup fail, the object is a regular VM named after the `VMImage`. `ImagePrepare` now imports through `importOVA`, which is govmomi's `importer.Import` with one addition: `stripReservedExtraConfig` removes every `virtrigaud.*` key (case-insensitive; vApp children are walked recursively) from the import spec **before** `ImportVApp`. The removal is logged on the provider side. Other OVF ExtraConfig keys are kept.
+- `internal/providers/vsphere/template_source.go`, `server.go`, `vm_ownership.go`: **no foreign identifiers in tenant-visible errors.** A vCenter failure while reading template candidates, running the existing-VM check, or reading an existing VM's owner stamp now returns a generic, retryable message ("a vCenter error occurred (details in the provider log)"). The details, such as other VMs' MOIDs or vCenter fault text, go to the provider log only. The not-found, not-a-template and ambiguous results stay distinguishable. That residual name-existence oracle is documented in `docs/vm-ownership.md`.
+
+### Added
+- `internal/providers/vsphere/vm_ownership_test.go`, using the govmomi `vcsim` simulator:
+  - The owner is stamped on the template-clone and imported-disk paths.
+  - A matching owner binds idempotently.
+  - A different owner, no owner, a recreated CR with the same name but a new UID, an unstamped pre-existing VM, and two same-named VMs in the folder are each refused with `AlreadyExists`. The refused creates don't modify the existing VM.
+  - A same-named VM in another folder neither blocks the create nor is bound.
+  - A template's stamp is never inherited, and `Clone` drops the source's stamp (with a control clone that does inherit it).
+  - An unsafe name is rejected before any lookup (the test provider has no finder). A regression test pins the govmomi MOID resolution.
+  - `Describe` separates not-found from transient errors.
+  - A manager-to-provider gRPC round trip checks the `Conflict` and `InvalidSpec` mapping.
+  - A test fixture restores vCenter's clone ExtraConfig behavior, which `vcsim` v0.52.0 drops: it applies the clone spec's ExtraConfig, and copies the source's.
+- `internal/providers/vsphere/template_source_test.go`, using `vcsim` unless noted:
+  - Templates are accepted by name, by absolute path, by relative path, and when nested in a folder.
+  - A running regular VM, a powered-off regular VM, and a regular VM given by path are each rejected as a clone source, and nothing is created.
+  - When a regular VM shares a template's name, the template is cloned; this is verified by vCPU count.
+  - Two same-named templates fail closed by name and succeed by path.
+  - A missing template keeps the retryable not-found path.
+  - Over gRPC, a regular VM as the clone source reaches the manager as `InvalidSpec`.
+  - `ImagePrepare` never counts a same-named regular VM as prepared, rejects a regular VM as `templateName`, and fails closed on an ambiguous target.
+  - Unsafe target and template names are rejected before any lookup; the provider's finder and client are unusable.
+  - Table tests cover `templateRefError` and `selectTemplate`.
+  - `image_test.go`: the verify-only test marks its source as a template first.
+  - A two-datacenter `vcsim` model: a template in DC1 is reachable with `FindByInventoryPath` but is refused by absolute path, a DC0 template resolves, and a bare DC1 name is not found. `absoluteTemplatePathError` has a table test covering prefix, case and name-prefix variants.
+  - A transient candidate-read failure (lost session) returns a generic error without the other VM's MOID or vCenter fault text.
+- `internal/providers/vsphere/ova_import_test.go`:
+  - A table test covers `stripReservedExtraConfig`, including case variants, vApp recursion and order preservation.
+  - A `vcsim` test uses a fixture that injects a forged `virtrigaud.owner.uid` into the `CreateImportSpec` result, emulating vCenter mapping OVF ExtraConfig. A control import with govmomi's stock importer keeps the forged stamp. `ImagePrepare` imports without it and keeps the unreserved keys.
+- `docs/vm-ownership.md`: new page covering both providers, with the vSphere details, including sections on clone sources and **required vCenter privileges**. It is linked from `docs/README.md` and `docs/libvirt-domain-ownership.md`.
+- `examples/vm-adoption-example.yaml` gains the equivalent vSphere adoption note.
+- The `VirtualMachine.Config.AdvancedConfig` requirement is documented where vSphere credentials are introduced: `README.md` (Quick Start secrets), `examples/provider-vsphere.yaml` and `examples/security/externalsecrets/vsphere-credentials.yaml`. The repo had no vCenter privilege list before this change.
+- `examples/vmimage-ubuntu.yaml` notes that `templateName` must name a real template.
+
+### Changed
+- `internal/providers/vsphere/server.go`:
+  - `Create` resolves the datacenter and target folder once and passes them to `createVirtualMachine`, so the VM is created in exactly the folder that was checked.
+  - Folder resolution for `Create` and `Clone` still falls back to the datacenter VM folder when the named folder doesn't exist or is ambiguous. A transient folder-lookup error now fails the RPC instead of silently falling back.
+  - The fallback now uses the datacenter's actual VM folder (`finder.DefaultFolder`) instead of the relative path `<datacenter>/vm`.
+- `internal/providers/contracts/provider.go`, `internal/transport/grpc/client.go`, `internal/controller/virtualmachine_controller.go`: comments now name vSphere as a consumer of `CreateRequest.Owner`. No behavior change.
+- `api/infra.virtrigaud.io/v1beta1/vmimage_types.go`: the `VSphereImageSource.TemplateName` description documents the resolution rules: a real template only, an exact name or an inventory path within the default datacenter's VM folder, ambiguity rejected, and `vm-<digits>` rejected. Description only; no schema or validation change. `config/crd/bases/infra.virtrigaud.io_vmimages.yaml` is regenerated.
+- `internal/providers/vsphere/image.go`: `findExistingByName` is replaced by `findPreparedTemplate`, and `imagePrepareVerifyTemplate` uses the same finder-free resolution (`lookupTemplate`).
+
+### Why
+The GA vSphere provider bound a VirtualMachine to any VM in the datacenter with the same name, and through the finder's MOID resolution to any VM by its MOID. Deleting the VirtualMachine then destroyed that VM and its disks. The provider also cloned any VM a `VMImage` named, so a tenant could copy another tenant's disks. The provider now binds a VM only when it can prove the requesting VirtualMachine created it, and clones only real vSphere templates. Adoption remains the explicit path for managing pre-existing VMs.
+
+### Impact
+- [x] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+> **Operator notes:**
+> - **Breaking (behavioral, not an API schema change):** operator action is required on upgrade; see "Operator action required" at the top of this entry.
+> - **vCenter privilege:** the account needs **Virtual machine > Change Configuration > Advanced configuration** (`VirtualMachine.Config.AdvancedConfig`) on the target VM folder and resource pool; creates fail without it. See `docs/vm-ownership.md#required-vcenter-privileges`.
+> - **`vm-<digits>` names are refused on vSphere** for VirtualMachines, `VMImage` prepare targets and bare template names, with `ValidationError`.
+> - **Templates must be real vSphere templates.** A `VMImage` pointing at a regular VM gets `ValidationError`. Convert it with `govc vm.markastemplate`, or point the `VMImage` at a template. Resolve an ambiguous template name with an inventory path.
+> - Pre-existing VMs without the owner stamp are never bound automatically. A VirtualMachine create that collides with one in the target folder now fails with `Ready=False`, reason `ProviderConflict`, and a message naming only the VM; the controller re-checks it every 2 minutes. To resolve it, adopt the VM (`virtrigaud.io/adopt-vms`), remove or rename it, or rename the VirtualMachine.
+> - VMs that are already bound (`status.id` set) are unaffected: every later operation uses the MOID and never calls `Create`. A VM whose MOID really disappears (for example, unregistered and registered again) goes through `Create` again. If it's unstamped (pre-upgrade), that create is refused; adopt it.
+> - **The protection needs the upgraded vSphere provider.** The manager and the provider can be rolled out in either order. An older provider ignores `owner` and still binds by name across the datacenter. A newer provider behind an older manager never binds an existing VM, but still creates new ones, which are left unstamped.
+> - Deployments that inject cloud-init through `guestinfo` already have `VirtualMachine.Config.AdvancedConfig`.
+> - One edge case: if the provider created a VM before the upgrade and the manager lost the `status.id` write for it, that VM's retried create is refused. Adopt the VM to recover.
+
 ## [2026-09-24 09:14] - Confine libvirt image paths to allowed image directories
 **Author:** @wrkode (William Rizzo)
 

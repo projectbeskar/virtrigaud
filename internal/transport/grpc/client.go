@@ -1109,7 +1109,7 @@ func (c *Client) convertCreateRequest(req contracts.CreateRequest) (*providerv1.
 	grpcReq.TargetHostId = req.TargetHostID
 
 	// owner is the requesting VirtualMachine's identity. A provider that keys VMs
-	// by a tenant-shared name (libvirt) stamps it on create and binds to an
+	// by a tenant-shared name (libvirt, vSphere) stamps it on create and binds to an
 	// existing same-named VM only when the recorded owner UID matches. Omitted
 	// (nil) when no UID is known, so an unset owner is unambiguous on the wire.
 	if !req.Owner.IsZero() {

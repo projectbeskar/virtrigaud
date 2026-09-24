@@ -35,7 +35,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/vmware/govmomi/find"
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/ovf/importer"
 	"github.com/vmware/govmomi/vapi/library"
@@ -196,15 +195,21 @@ func vsphereChecksumHasher(checksumType string) (h hash.Hash, ok bool) {
 // template named req.TargetName from the image source encoded in req.ImageJson,
 // honoring three source kinds in precedence order:
 //
-//  1. Idempotency gate: if a template/VM named TargetName already exists, it
-//     returns success without importing — a re-run is a cheap no-op.
+//  1. Idempotency gate: if a vSphere TEMPLATE named TargetName already exists,
+//     it returns success without importing — a re-run is a cheap no-op. A
+//     same-named object that is not a template, or more than one same-named
+//     template, fails with InvalidSpec instead (findPreparedTemplate).
 //  2. source.vsphere.templateName: verify-only. The named template must already
-//     exist; if found, success; if missing, a NotFound error. No download.
+//     exist and be marked as a template; if found, success; if missing, a
+//     NotFound error; a regular VM or an ambiguous name, InvalidSpec. No download.
 //  3. source.vsphere.contentLibrary: verify-only. The library item must exist;
 //     deploying it to a template is out of scope for this PR.
 //  4. source.vsphere.ovaURL: the real work. Download the OVA/OVF, optionally
 //     verify its checksum, import it into vCenter via an NFC lease, and mark the
 //     resulting VM as a template.
+//
+// TargetName and templateName are validated (unsafeNameReason/templateRefError)
+// before any vCenter call, and resolved without find.Finder (template_source.go).
 //
 // The import is driven synchronously, so the returned ImagePrepareResponse
 // carries an empty (nil) Task — consistent with the libvirt provider — which the
@@ -222,8 +227,19 @@ func (p *Provider) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepar
 	if targetName == "" {
 		return nil, errors.NewInvalidSpec("ImagePrepare target name is required")
 	}
+	// The target name is the name of the template an OVA import creates, and the
+	// name the idempotency gate looks up: it must be a plain, safe VM name. Both
+	// checks run before any vCenter call.
+	if reason := unsafeNameReason(targetName); reason != "" {
+		return nil, errors.NewInvalidSpec("ImagePrepare target name %q cannot be used as a vSphere template name: %s", targetName, reason)
+	}
 
 	src := parseVSphereImageSource(req.GetImageJson())
+	if src.TemplateName != "" {
+		if err := templateRefError(src.TemplateName); err != nil {
+			return nil, err
+		}
+	}
 
 	p.logger.Info("ImagePrepare: starting",
 		"target_name", targetName,
@@ -241,10 +257,17 @@ func (p *Provider) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepar
 	p.finder.SetDatacenter(datacenter)
 
 	// 1) Idempotency gate (load-bearing): a re-run must never re-import. If a
-	//    template/VM named targetName already exists, we are done — the prepared
-	//    image is that template, addressed by name.
-	if vm := p.findExistingByName(ctx, targetName); vm != nil {
-		p.logger.Info("ImagePrepare: target already exists; nothing to do",
+	//    TEMPLATE named targetName already exists, we are done — the prepared
+	//    image is that template, addressed by name. A same-named regular VM is
+	//    never treated as the prepared image (it would then be cloned by every VM
+	//    using this VMImage): the gate fails closed instead, as it does when the
+	//    name is ambiguous or the lookup fails.
+	vm, err := p.findPreparedTemplate(ctx, targetName)
+	if err != nil {
+		return nil, err
+	}
+	if vm != nil {
+		p.logger.Info("ImagePrepare: target template already exists; nothing to do",
 			"target_name", targetName, "vm", vm.Reference().Value)
 		return imagePrepareDone(targetName), nil
 	}
@@ -276,40 +299,39 @@ func imagePrepareDone(templateName string) *providerv1.ImagePrepareResponse {
 	return &providerv1.ImagePrepareResponse{PreparedImageId: templateName}
 }
 
-// findExistingByName returns a VirtualMachine matching name (a plain name or an
-// inventory path), or nil if none is found. It first tries the configured
-// DefaultFolder, then falls back to a global search, so an existing template is
-// detected regardless of where it lives. Any lookup error is treated as "not
-// found" so preparation proceeds rather than skipping work on a false negative.
+// findPreparedTemplate returns the vSphere template named name in the default
+// datacenter, or nil when no VM or template has that name (so the caller
+// imports). It uses the same exact, finder-free resolution as the Create clone
+// source (lookupTemplate) and fails closed:
 //
-// Both powered-off VMs and templates are returned by the finder; the caller only
-// cares that the name is taken, so no template/VM distinction is made here.
-func (p *Provider) findExistingByName(ctx context.Context, name string) *object.VirtualMachine {
-	// Scoped search within the default folder first (cheaper, avoids unrelated
-	// same-named VMs in other folders shadowing a real template).
-	if folder := strings.TrimSpace(p.config.DefaultFolder); folder != "" {
-		if vms, err := p.finder.VirtualMachineList(ctx, path.Join(folder, name)); err == nil && len(vms) > 0 {
-			return vms[0]
-		}
+//   - a same-named object that is NOT a template, or more than one same-named
+//     template, is a codes.InvalidArgument error — never "already prepared" and
+//     never overwritten or adopted by an import;
+//   - a vCenter lookup failure is returned (retryable) instead of being treated
+//     as "not found", which would start a duplicate import.
+func (p *Provider) findPreparedTemplate(ctx context.Context, name string) (*object.VirtualMachine, error) {
+	vm, found, err := p.lookupTemplate(ctx, name)
+	if err != nil {
+		return nil, fmt.Errorf("ImagePrepare: check for an existing template %q: %w", name, err)
 	}
-	// Global search by name.
-	if vm, err := p.finder.VirtualMachine(ctx, name); err == nil && vm != nil {
-		return vm
+	if !found {
+		return nil, nil
 	}
-	return nil
+	return vm, nil
 }
 
 // imagePrepareVerifyTemplate implements the templateName source: the named
 // template must already exist in vCenter. On success the prepared image is the
 // template itself, so no import is performed. A missing template yields an
-// honest NotFound rather than a fabricated success.
+// honest NotFound rather than a fabricated success; a same-named regular VM or
+// an ambiguous name yields InvalidSpec (lookupTemplate).
 func (p *Provider) imagePrepareVerifyTemplate(ctx context.Context, templateName string) (*providerv1.ImagePrepareResponse, error) {
-	vm, err := p.finder.VirtualMachine(ctx, templateName)
+	vm, found, err := p.lookupTemplate(ctx, templateName)
 	if err != nil {
-		if _, ok := err.(*find.NotFoundError); ok {
-			return nil, errors.NewNotFound("vSphere template", templateName)
-		}
 		return nil, fmt.Errorf("ImagePrepare: look up template %q: %w", templateName, err)
+	}
+	if !found {
+		return nil, errors.NewNotFound("vSphere template", templateName)
 	}
 	p.logger.Info("ImagePrepare: template exists; nothing to import",
 		"template_name", templateName, "vm", vm.Reference().Value)
@@ -433,7 +455,10 @@ func (p *Provider) imagePrepareImportOVA(ctx context.Context, src vsphereImageSo
 		"folder", placement.folder.Reference().Value,
 	)
 
-	moref, err := imp.Import(ctx, descriptorPath, opts)
+	// importOVA (ova_import.go) is importer.Import with the OVF's
+	// VirtRigaud-reserved ExtraConfig keys stripped from the import spec before
+	// ImportVApp, so a tenant's OVA can never carry a forged owner stamp.
+	moref, err := p.importOVA(ctx, imp, descriptorPath, opts)
 	if err != nil {
 		return nil, errors.NewInternal(fmt.Sprintf("ImagePrepare: import OVA %q as %q", src.OVAURL, targetName), err)
 	}

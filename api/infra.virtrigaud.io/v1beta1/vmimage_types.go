@@ -74,7 +74,15 @@ type ImageSource struct {
 //   - OVAURL: URL to download and import an OVA file
 type VSphereImageSource struct {
 	// TemplateName references an existing vSphere template by name.
-	// This can be a simple name (searched globally) or a full inventory path.
+	// This can be a simple name, matched exactly against the VMs in the
+	// Provider's default datacenter, or an inventory path within that
+	// datacenter's VM folder (absolute, e.g. "/DC1/vm/templates/ubuntu", or
+	// relative to the VM folder, e.g. "templates/ubuntu"; an absolute path in any
+	// other datacenter is rejected). It must name an object marked as a vSphere
+	// template: a regular VM (running or powered off) is never used as a clone
+	// source, a name matching more than one template is rejected (use an
+	// inventory path), and a name of the form "vm-" followed only by digits is
+	// rejected.
 	// +optional
 	// +kubebuilder:validation:MaxLength=255
 	TemplateName string `json:"templateName,omitempty"`

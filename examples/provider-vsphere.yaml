@@ -4,6 +4,13 @@
 # ⚠️  IMPORTANT: Requires Active vSphere Environment  
 # The vSphere provider needs access to vCenter Server or ESXi hosts.
 # See docs/providers/vsphere.md for setup instructions and configuration details.
+#
+# Required vCenter privilege: the account in credentialSecretRef needs
+# "Virtual machine > Change Configuration > Advanced configuration"
+# (VirtualMachine.Config.AdvancedConfig) on the target VM folder and resource
+# pool. Every create writes an ExtraConfig owner stamp and fails without it.
+# VMImage templateName must name a real vSphere template (not a regular VM).
+# See docs/vm-ownership.md.
 
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: Provider
