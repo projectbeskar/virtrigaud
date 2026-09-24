@@ -1364,10 +1364,9 @@ func (p *Provider) generateDomainXMLWithStorage(ctx context.Context, vp *VirshPr
 		tpmEnabled = req.Class.SecurityProfile.TPMEnabled
 	}
 
-	// A fresh, unpredictable RFC 4122 v4 UUID (crypto/rand) for the domain. It is
-	// also what makes a racing same-named create fail at define time rather than
-	// redefine the other domain: libvirt refuses a define whose name exists under
-	// a different UUID.
+	// A fresh, unpredictable RFC 4122 v4 UUID (crypto/rand) for the domain. This
+	// does not by itself make concurrent same-named creates safe; see
+	// generateRandomUUID.
 	uuid, err := generateRandomUUID()
 	if err != nil {
 		return "", fmt.Errorf("generate domain UUID: %w", err)

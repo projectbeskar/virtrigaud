@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `internal/providers/libvirt/provider_virsh.go`: the domain UUID generator was predictable: `550e8400-e29b-41d4-a716-` followed by the wall clock. It now uses `crypto/rand` RFC 4122 v4 UUIDs. Because libvirt refuses a same-named define under a different UUID, a racing duplicate create also fails at define time instead of redefining the domain.
 - `internal/providers/libvirt/clone.go`: a clone never binds to or redefines an existing target domain; this check already existed and is now documented. The source VM's owner stamp is spliced out of the cloned XML, so a clone never claims the source's owner.
 
+- `internal/providers/libvirt/domain_identity.go`: owner-stamp parsing fails closed on a repeated owner attribute and on a second root element. libvirt never emits either, but Go's XML decoder would otherwise resolve them (last attribute wins).
+
 ### Added
 - `proto/provider/v1/provider.proto`: additive `CreateRequest.owner` (field 11) and a new `ObjectIdentity {uid, namespace, name}` message. Bindings are regenerated in `proto/rpc/provider/v1/provider.pb.go`.
 - `internal/providers/contracts`: `CreateRequest.Owner`, the `ObjectIdentity` type with `IsZero`, and the helpers `IsConflict` and `IsInvalidSpec`.
@@ -52,7 +54,8 @@ A released libvirt provider silently bound a VirtualMachine to any existing doma
 > **Operator notes:**
 > - Pre-existing domains without owner metadata are never bound automatically. A VirtualMachine create that collides with one now fails with `Ready=False`, reason `ProviderConflict`, and a message naming the domain; the controller re-checks it every 2 minutes. To resolve it, adopt the domain (`virtrigaud.io/adopt-vms`), remove it, or rename the VirtualMachine.
 > - VMs that are already bound (`status.id` set) are unaffected, because every later operation uses `status.id` and never calls `Create`.
-> - The manager and the provider can be rolled out in either order. An older provider ignores `owner`. A newer provider behind an older manager never binds an existing domain, but still creates new ones.
+> - The manager and the provider can be rolled out in either order, but **the protection needs the upgraded libvirt provider**: an older provider ignores `owner` and still binds by name. A newer provider behind an older manager never binds an existing domain, but still creates new ones.
+> - **Known limitation, tracked separately:** two creates of the *same name* running at the same time still stage files at name-derived paths (domain XML, disk, cloud-init ISO), so they can overwrite each other before either defines. Ownership stamping closes the sequential bind-to-existing case, not this race.
 > - One edge case: if the provider created a domain before the upgrade and the manager lost the `status.id` write for it, that VM's retried create is refused. Adopt the domain to recover.
 
 ## [2026-09-24 07:58] - Clustered Host same-namespace model and endpoint validation

@@ -133,6 +133,18 @@ func TestScanOwnerElements(t *testing.T) {
 			assert.Error(t, err, "%q", doc)
 		}
 	})
+	t.Run("a repeated owner attribute is refused, not resolved last-wins", func(t *testing.T) {
+		doc := `<domain><metadata><v:owner xmlns:v="` + ownerMetadataNamespaceURI + `" uid="victim" uid="attacker"/></metadata></domain>`
+		_, err := domainOwners(doc)
+		assert.Error(t, err)
+		assert.False(t, requesterOwnsDomain(contracts.ObjectIdentity{UID: "attacker"}, nil))
+	})
+	t.Run("a second root element is refused", func(t *testing.T) {
+		stamp := `<v:owner xmlns:v="` + ownerMetadataNamespaceURI + `" uid="u1"/>`
+		doc := `<domain><name>web</name></domain><domain><metadata>` + stamp + `</metadata></domain>`
+		_, err := domainOwners(doc)
+		assert.Error(t, err)
+	})
 }
 
 func TestRequesterOwnsDomain(t *testing.T) {

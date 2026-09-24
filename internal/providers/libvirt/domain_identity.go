@@ -119,6 +119,7 @@ func scanOwnerElements(domainXML string) ([]ownerElement, error) {
 	var (
 		found      []ownerElement
 		depth      int
+		rootSeen   bool
 		inMetadata bool
 		// ownerDepth is the depth of the owner element currently being read
 		// (0 when not inside one) and ownerStart its opening byte offset.
@@ -140,13 +141,24 @@ func scanOwnerElements(domainXML string) ([]ownerElement, error) {
 		case xml.StartElement:
 			depth++
 			switch {
+			case depth == 1 && rootSeen:
+				// libvirt never emits two root elements; Go's decoder tolerates
+				// them, so refuse rather than read a stamp from a second root.
+				return nil, fmt.Errorf("parse domain XML: more than one root element")
 			case depth == 1 && t.Name.Local != domainXMLRootElement:
 				return nil, fmt.Errorf("parse domain XML: root element is <%s>, not <%s>", t.Name.Local, domainXMLRootElement)
 			case depth == 2 && t.Name.Space == "" && t.Name.Local == domainXMLMetadataElement:
 				inMetadata = true
 			case depth == 3 && inMetadata &&
 				t.Name.Space == ownerMetadataNamespaceURI && t.Name.Local == ownerMetadataElement:
-				ownerDepth, ownerStart, current = depth, offset, ownerFromAttrs(t.Attr)
+				id, aerr := ownerFromAttrs(t.Attr)
+				if aerr != nil {
+					return nil, aerr
+				}
+				ownerDepth, ownerStart, current = depth, offset, id
+			}
+			if depth == 1 {
+				rootSeen = true
 			}
 		case xml.EndElement:
 			if ownerDepth != 0 && depth == ownerDepth {
@@ -166,12 +178,22 @@ func scanOwnerElements(domainXML string) ([]ownerElement, error) {
 }
 
 // ownerFromAttrs reads the owner stamp's unqualified uid/namespace/name
-// attributes. Attributes in any namespace are ignored.
-func ownerFromAttrs(attrs []xml.Attr) contracts.ObjectIdentity {
+// attributes. Attributes in any namespace are ignored. A repeated attribute is
+// an error: XML forbids it and libvirt never emits it, but Go's decoder accepts
+// it (last one wins), so it is refused rather than silently resolved.
+func ownerFromAttrs(attrs []xml.Attr) (contracts.ObjectIdentity, error) {
 	var id contracts.ObjectIdentity
+	seen := make(map[string]bool, len(attrs))
 	for _, a := range attrs {
 		if a.Name.Space != "" {
 			continue
+		}
+		switch a.Name.Local {
+		case ownerAttrUID, ownerAttrNamespace, ownerAttrName:
+			if seen[a.Name.Local] {
+				return contracts.ObjectIdentity{}, fmt.Errorf("parse domain XML: owner stamp repeats attribute %q", a.Name.Local)
+			}
+			seen[a.Name.Local] = true
 		}
 		switch a.Name.Local {
 		case ownerAttrUID:
@@ -182,7 +204,7 @@ func ownerFromAttrs(attrs []xml.Attr) contracts.ObjectIdentity {
 			id.Name = a.Value
 		}
 	}
-	return id
+	return id, nil
 }
 
 // domainOwners returns the owner identities stamped on a domain document (see
@@ -349,10 +371,15 @@ func looksLikeUUID(name string) bool {
 
 // generateRandomUUID returns a random RFC 4122 version-4 UUID drawn from
 // crypto/rand. Every new domain (create and clone) gets one, so a domain UUID is
-// neither predictable nor ever reused: libvirt refuses to define a domain whose
-// name exists under a different UUID, so an unpredictable UUID also guarantees a
-// racing same-named create fails at define time instead of redefining (and
-// taking over) the existing domain.
+// neither predictable nor reused.
+//
+// It does NOT make two concurrent creates of the same name safe. libvirt does
+// refuse a define whose name exists under a different UUID, but the create
+// pipeline still stages per-name files (the domain XML, the disk, the
+// cloud-init ISO) at paths derived only from the name, so a racing create can
+// overwrite the other's files before either defines. That race is tracked
+// separately; ownership stamping only closes the sequential bind-to-existing
+// case.
 func generateRandomUUID() (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
