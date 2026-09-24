@@ -249,6 +249,21 @@ type(s), so an operator can self-correct. The webhook guards both `create` and
 `update` — including a patch that flips an existing `vsphere`/`proxmox` provider to
 `cluster`.
 
+**`spec.topology` is immutable (ADR-0007 Addendum A).** VMs record where they run
+(`status.placement`) under one topology, and every per-VM call is routed and
+owner-checked by it, so a flip would send a placed VM's calls down the wrong path
+(`cluster` → `single` would even route its delete to the un-owner-checked
+single-host path). The CRD rejects any change with a CEL transition rule
+(`self == oldSelf`), independent of whether the webhook is enabled, and the
+webhook's `update` check rejects it too. The apiserver compares the defaulted
+values, so a `Provider` created before the field existed (read back as `single`),
+or a client that omits the field on update, keeps working; only a real change is
+refused. To change topology, create a new `Provider`. If a VM nevertheless records
+a clustered placement while its Provider is not clustered (an object edited before
+this rule), the operator fails it closed: no provider call is made for it, it
+shows `Ready=False` (`PlacementTopologyMismatch`), and its finalizer is kept unless
+`virtrigaud.io/force-delete: "true"` is set.
+
 #### Enabling the webhook via Helm
 
 The webhook is **off by default** (`webhooks.enabled: false`); default installs are
@@ -520,9 +535,13 @@ is not deleted while any VirtualMachine of its Provider names it in
 call for that VM — and the VM's own finalizer cleanup — is routed to it. While a
 deletion is blocked the Host shows `Ready=False` (`HostInUse`) naming the VMs,
 and is re-checked every 30 s; the finalizer is released as soon as no VM uses the
-Host. The match follows the same-namespace model: a VM uses this Host only when
-its `spec.providerRef` resolves to the Host's Provider (in the Host's namespace),
-so a same-named Host of another Provider never blocks it.
+Host. The condition message gives the number of VMs and names at most 10 of them,
+so it stays well under the condition-message size limit and does not list every
+tenant's VMs on an admin object. The match follows the same-namespace model: a VM
+uses this Host only when its `spec.providerRef` resolves to the Host's Provider
+(in the Host's namespace), so a same-named Host of another Provider never blocks
+it. While a Host is being deleted the scheduler treats it as cordoned, so new VMs
+are never placed on it (they would keep re-arming the finalizer).
 
 ### The reconcile loop
 
@@ -591,7 +610,7 @@ host-bravo    NotReady   pool-a    true          5m
 
 Security: `Host.status` carries capacity/health only, **never** connection secrets
 (ADR-0007 Security). The controller writes the status subresource (`hosts/status`)
-and, for the in-use finalizer only, the Host object (`hosts` update/patch plus
+and, for the in-use finalizer only, the Host object (`hosts` update plus
 `hosts/finalizers`); it never changes a Host spec.
 
 ### What is still deferred to later slices
@@ -825,13 +844,14 @@ every per-VM call** and the provider never looks it up (A1, D1).
   `ReconfigureRequest`, `HardwareUpgradeRequest`, `DescribeRequest`, the three
   snapshot requests, `ExportDiskRequest`, `GetDiskInfoRequest`);
   `CloneRequest.source_host_id` routes a clone by its source VM; and
-  `DeleteRequest.owner` carries the requesting VirtualMachine's identity. All
+  `DescribeRequest.owner` / `DeleteRequest.owner` carry the requesting
+  VirtualMachine's identity. The owner is sent only together with a host. All
   additive: single-host and thin-client providers ignore them and are never sent
   them.
-- Manager-side, every per-VM method takes a `contracts.VMRef{ID, HostID}`, and
-  one helper builds it from a VirtualMachine and its Provider: for `topology:
-  cluster` the host is `status.placement.host`; for everything else it is empty
-  (unchanged calls). A clustered VM with **no** confirmed binding (for example
+- Manager-side, every per-VM method takes a `contracts.VMRef{ID, HostID, Owner}`,
+  and one helper builds it from a VirtualMachine and its Provider: for `topology:
+  cluster` the host is `status.placement.host` and the owner is the VM's
+  identity; for everything else both are empty (unchanged calls). A clustered VM with **no** confirmed binding (for example
   after a backup restore dropped its status) is **never sent a per-VM call**: the
   VM shows `Placed=False` (`Unbound`) and is re-checked every 30 s; snapshots,
   clones and migrations of it wait the same way.
@@ -841,16 +861,22 @@ every per-VM call** and the provider never looks it up (A1, D1).
 | RPC on a clustered provider | Slice 1 behaviour |
 |---|---|
 | `Create` | Routed to `target_host_id` (shipped in P1) |
-| `Describe` | **Routed** to `target_host_id`. A domain absent from the bound host is reported `exists=false` |
+| `Describe` | **Routed** to `target_host_id` and **owner-checked**: the domain's state is returned only if its owner stamp is the requester's UID. An absent domain, or one whose stamp is missing, unreadable or foreign, is reported `exists=false` and none of its state is read; a domain replaced between the check and the read (different UUID) is reported absent too |
 | `Delete` | **Routed** and **owner-checked**: destroyed only if its owner stamp is the requester's UID; a missing, unreadable or foreign stamp is answered `NotFound` and the domain is never touched |
 | `Power`, `Reconfigure` | `Unimplemented` until slice 2 |
 | snapshots, `Clone`, `ExportDisk`, `GetDiskInfo` | `Unimplemented` until slice 3 |
 | `ListVMs` | `Unimplemented` until slice 4 (it must run across all hosts) |
 | `ImagePrepare`, `ImportDisk` | `Unimplemented` (host-scoped, no target host yet) |
 
-An empty `target_host_id` is `InvalidArgument` (never a default host); an unknown,
-removed or draining host is a retryable `Unavailable`; a host that starts draining
-mid-call still completes that call. The Describe/Delete cores are shared with
+An empty `target_host_id` is `InvalidArgument` (never a default host). An unknown,
+removed, draining or unreachable host is a retryable **host-scoped** `Unavailable`:
+the status carries a `google.rpc.ErrorInfo` with reason `HOST_UNAVAILABLE`, which
+the manager maps to its own error class and keeps **out of the per-Provider
+circuit breaker** — one dead host must not fast-fail every VM on every other host
+of the Provider (a provider-level `Unavailable` still trips the breaker). A bound
+VM whose host is unavailable shows `Ready=False` (`HostUnavailable`) and is
+re-described every 30 s. A host that starts draining mid-call still completes that
+call. The Describe/Delete cores are shared with
 single-host mode — only the connection differs — and the ADR-0008 shadow read of
 a routed `Describe` runs on the same leased connection. The single-host
 connection handle a clustered provider used to carry is now an **always-failing
@@ -867,9 +893,10 @@ The operator therefore skips image preparation for a clustered provider.
 - **`Placed` condition** (one positive condition): `True`/`Bound` once the
   provider confirmed the VM on its host; `False` with `CreatePending`,
   `HostUnavailable` or `Unbound`. It is never set on single-host VMs.
-- **No re-creation (A4).** If the bound host reports a clustered VM missing, the
-  VM shows `Ready=False` (`VMMissingOnHost`) and is **not re-created**, on that host
-  or elsewhere — without fencing that could leave two running copies of one disk.
+- **No re-creation (A4).** If the bound host reports a clustered VM missing — or
+  the domain there is not this VM's (owner-checked Describe) — the VM shows
+  `Ready=False` (`VMMissingOnHost`) and is **not re-created**, on that host or
+  elsewhere — without fencing that could leave two running copies of one disk.
   It is re-described every 2 minutes, so a domain an administrator restores is
   picked up. (Single-host VMs keep the historical recreate behaviour.)
 - **Deleting a VM whose create is in flight.** A VM with `pendingHost` set and no
