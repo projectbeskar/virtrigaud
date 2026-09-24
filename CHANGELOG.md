@@ -43,7 +43,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - a missing ref, a migration in another namespace, a mismatched path or name, a missing disk record, or a missing migration is not.
 
 ### Changed
-- `internal/controller/virtualmachine_controller.go`, `virtualmachine_image_prepare.go`: when the provider rejects a spec with `InvalidArgument` (mapped to InvalidSpec), the VM gets reason `ValidationError` and is rechecked every 2 minutes instead of retried every 5 seconds. An ImagePrepare rejection is also written to `VMImage.status.providerStatus[<provider>].message`. While the image is not Ready on any provider, it also sets `phase: Failed` and `Ready=False`, reason `InvalidSource`. Condition messages drop the duplicated `rpc error` tail.
+- `internal/controller/virtualmachine_controller.go`, `virtualmachine_image_prepare.go`: when the provider rejects a spec with `InvalidArgument` (mapped to InvalidSpec), the VM gets reason `ValidationError` and is rechecked every 30 seconds instead of retried every 5 seconds (the same cadence as other invalid-spec Create rejections). An ImagePrepare rejection is also written to `VMImage.status.providerStatus[<provider>].message`. While the image is not Ready on any provider, it also sets `phase: Failed` and `Ready=False`, reason `InvalidSource`. Condition messages drop the duplicated `rpc error` tail.
 - `internal/providers/libvirt/clone.go`, `disk_expand.go`: use the shared `<vm>-disk` naming helper.
 - `docs/image-preparation.md`, `examples/libvirt-complete-example.yaml`, `examples/libvirt-advanced-example.yaml`: document the path rules and `VIRTRIGAUD_LIBVIRT_IMAGE_DIRS`.
 - `config/crd/bases/infra.virtrigaud.io_vmimages.yaml`: regenerated.

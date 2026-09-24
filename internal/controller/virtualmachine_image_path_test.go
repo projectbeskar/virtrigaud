@@ -48,11 +48,11 @@ func rejectedPathErr() error {
 func TestProviderFailureOutcome(t *testing.T) {
 	reason, after := providerFailureOutcome(rejectedPathErr())
 	assert.Equal(t, k8s.ReasonValidationError, reason)
-	assert.Equal(t, invalidSpecRetryInterval, after)
+	assert.Equal(t, vmCreateInvalidSpecRetryInterval, after)
 
 	reason, after = providerFailureOutcome(fmt.Errorf("prepare image x: %w", rejectedPathErr()))
 	assert.Equal(t, k8s.ReasonValidationError, reason, "wrapping must not hide the rejection")
-	assert.Equal(t, invalidSpecRetryInterval, after)
+	assert.Equal(t, vmCreateInvalidSpecRetryInterval, after)
 
 	for _, err := range []error{
 		errors.New("create failed: connection refused"),
@@ -89,7 +89,7 @@ func TestCreateVM_RejectedImagePathIsAValidationFailure(t *testing.T) {
 
 	res, err := r.createVM(context.Background(), vm, prov, providerCR, vmClass, vmImage, nil)
 	require.NoError(t, err, "a rejected spec is recorded on status, not returned as a reconcile error")
-	assert.Equal(t, invalidSpecRetryInterval, res.RequeueAfter)
+	assert.Equal(t, vmCreateInvalidSpecRetryInterval, res.RequeueAfter)
 	assert.Equal(t, k8s.ReasonValidationError, provisioningReason(vm))
 	c := k8s.GetCondition(vm.Status.Conditions, k8s.ConditionProvisioning)
 	require.NotNil(t, c)
@@ -246,6 +246,6 @@ func TestBuildCreateRequest_ImportedDiskFlag(t *testing.T) {
 // validation recheck must be much slower than the transient-failure retry, or
 // a rejected spec would hot-loop the provider.
 func TestRetryIntervalsOrdered(t *testing.T) {
-	assert.GreaterOrEqual(t, invalidSpecRetryInterval, time.Minute)
-	assert.Greater(t, invalidSpecRetryInterval, providerErrorRetryInterval)
+	assert.Greater(t, vmCreateInvalidSpecRetryInterval, providerErrorRetryInterval)
+	assert.GreaterOrEqual(t, vmCreateConflictRetryInterval, time.Minute)
 }

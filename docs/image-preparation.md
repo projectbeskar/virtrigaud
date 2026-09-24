@@ -120,7 +120,7 @@ refused). Migrated disks landed by ImportDisk get the same header check before c
 > disk); create a `VMImage` under a new name to prepare a fresh copy.
 
 A rejected path is a non-retryable `InvalidArgument`: the VM gets
-`Provisioning=False` with reason `ValidationError` (rechecked every 2 minutes rather than
+`Provisioning=False` with reason `ValidationError` (rechecked every 30 seconds rather than
 retried every 5 seconds), and an image rejected during preparation gets
 `status.providerStatus[<provider>].message` plus, while it is not Ready on any provider,
 `phase: Failed` and a `Ready=False` condition with reason `InvalidSource`. Messages never

@@ -125,21 +125,15 @@ const vmDeleteRetryInterval = 15 * time.Second
 // image-prepare failure that may be transient (host unreachable, task error).
 const providerErrorRetryInterval = 5 * time.Second
 
-// invalidSpecRetryInterval is the requeue cadence after the provider rejected a
-// Create / image prepare as an invalid specification (a non-retryable
-// InvalidArgument — e.g. a libvirt image path outside the provider's allowed
-// image directories, or a disk another VM uses). Retrying unchanged cannot
-// succeed, and the VM controller does not watch VMImage, so this is a slow
-// recheck that picks up a corrected VMImage/VM without hot-looping the provider.
-const invalidSpecRetryInterval = 2 * time.Minute
-
 // providerFailureOutcome classifies a provider Create / image-prepare error into
 // the VM condition reason and requeue cadence: a non-retryable InvalidSpec
-// rejection surfaces as ValidationError with a slow recheck; anything else stays
-// a ProviderError retried on the normal cadence.
+// rejection (e.g. a libvirt image path outside the allowed image directories)
+// surfaces as ValidationError on the vmCreateInvalidSpecRetryInterval recheck,
+// which also picks up a corrected VMImage (the VM controller does not watch
+// VMImage); anything else stays a ProviderError retried on the normal cadence.
 func providerFailureOutcome(err error) (reason string, requeueAfter time.Duration) {
 	if contracts.IsInvalidSpec(err) {
-		return k8s.ReasonValidationError, invalidSpecRetryInterval
+		return k8s.ReasonValidationError, vmCreateInvalidSpecRetryInterval
 	}
 	return k8s.ReasonProviderError, providerErrorRetryInterval
 }
