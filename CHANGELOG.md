@@ -5,6 +5,32 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-24 07:17] - Remove the hardcoded SSH key and sudo grant from libvirt default cloud-init
+**Author:** @wrkode (William Rizzo)
+
+### Security
+- `internal/providers/libvirt/provider_virsh.go`: the default cloud-init applied to a libvirt VM created **without** `spec.userData` no longer provisions any credentials. It previously created a `ubuntu` user with `sudo: ALL=(ALL) NOPASSWD:ALL` and a **fixed, hardcoded ed25519 public key** in `ssh_authorized_keys`, so whoever held the matching private key had passwordless root on every such VM in every deployment. The default now sets only the hostname and installs + starts `qemu-guest-agent` (kept because IP discovery and in-guest operations depend on it). The test-only `htop`/`stress` packages and the `/tmp/vm-ready` marker were dropped as well. Present since `777fb91` (first released in v0.2.0) through v0.3.11.
+
+### Added
+- `internal/providers/libvirt/default_cloudinit_test.go`: `TestGenerateDefaultCloudInit_ProvisionsNoCredentials` parses the default user-data and fails if it ever sets `users`/`ssh_authorized_keys`/`password`/`chpasswd`/`write_files`/`bootcmd`, or contains an SSH key or sudo grant; asserts hostname and `qemu-guest-agent` are kept. Verified to fail against the previous generator.
+
+### Why
+Guest access is the VM owner's decision and must come from their own `userData`; an operator must never ship a default that authorizes someone else's key with root. This was found in a full codebase security review and is a release blocker for the documented regulated-environment posture.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+> Rolling the libvirt provider image fixes **new** VMs only. Existing libvirt VMs
+> that were created without `spec.userData` still carry the old key and sudo
+> rule inside the guest. Operators should remove the key from
+> `/home/ubuntu/.ssh/authorized_keys` and delete the cloud-init sudoers drop-in
+> (typically `/etc/sudoers.d/90-cloud-init-users`) on those VMs. Anyone who
+> relied on the default `ubuntu` login must now supply their own user and key
+> via `spec.userData`.
+
 ## [2026-09-24 06:25] - Harden webhook/metrics TLS floor + wire NetworkPolicy templates
 **Author:** @wrkode (William Rizzo)
 
