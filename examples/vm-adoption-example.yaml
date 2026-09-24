@@ -113,3 +113,18 @@ spec:
     image: "ghcr.io/projectbeskar/virtrigaud/provider-proxmox:v0.3.6"
     service:
       port: 9443
+
+# ---------------------------------------------------------------------------
+# Detaching (un-adopting) a VM without deleting it
+#
+# To stop managing a VM but leave the hypervisor VM running, annotate its
+# VirtualMachine with virtrigaud.io/orphan-on-delete: "true" and delete it. The
+# finalizer is then removed WITHOUT any provider call (a Normal "Orphaned" event
+# records the id and Provider left behind):
+#
+#   kubectl annotate virtualmachine legacy-db -n default virtrigaud.io/orphan-on-delete=true
+#   kubectl delete virtualmachine legacy-db -n default
+#
+# Do NOT re-point spec.providerRef at a missing Provider to achieve this: once a
+# VM is bound (status.id set), spec.providerRef is immutable and the API server
+# rejects the change. See docs/vm-provider-binding.md.
