@@ -18,13 +18,17 @@ package controller
 
 import (
 	"context"
+	"errors"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/config"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
@@ -139,4 +143,100 @@ var _ = Describe("Cross-namespace VMClone target (envtest)", func() {
 		Expect(vm.Status.ID).To(Equal(tgt.Name + ".web"))
 		Expect(vm.Spec.ProviderRef).To(Equal(infravirtrigaudiov1beta1.ObjectRef{Name: "prov-1", Namespace: src.Name}))
 	})
+
+	// The refusal rechecks only every crossNamespaceRecheckInterval (minutes),
+	// so a clone that completes within this spec's timeout proves the
+	// SetupWithManager Namespace watch (predicate + mapping) re-drove it the
+	// moment the grant was added.
+	It("re-drives a refused clone through the Namespace watch when the grant is added", func() {
+		mgrCtx, stop := context.WithCancel(ctx)
+		DeferCleanup(stop)
+
+		src := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "xnsw-src-"}}
+		tgt := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "xnsw-tgt-"}}
+		Expect(k8sClient.Create(ctx, src)).To(Succeed())
+		Expect(k8sClient.Create(ctx, tgt)).To(Succeed())
+
+		mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+			Scheme:                 k8sClient.Scheme(),
+			Metrics:                metricsserver.Options{BindAddress: "0"},
+			HealthProbeBindAddress: "0",
+			Controller:             ctrlconfig.Controller{SkipNameValidation: &skipNameValidation},
+		})
+		Expect(err).NotTo(HaveOccurred())
+		cp := &clonerProvider{cloneResp: contracts.CloneResponse{TargetVmID: tgt.Name + ".web"}}
+		Expect(NewVMCloneReconciler(mgr.GetClient(), mgr.GetScheme(), &stubResolver{provider: cp},
+			record.NewFakeRecorder(100)).SetupWithManager(mgr)).To(Succeed())
+		// The migration controller registers the same kind of watch; it must
+		// build and start alongside. It never dials a provider here.
+		migrations := NewVMMigrationReconciler(mgr.GetClient(), mgr.GetScheme(), nil, record.NewFakeRecorder(100), false)
+		migrations.providerInstanceFn = func(context.Context, *infravirtrigaudiov1beta1.Provider) (contracts.Provider, error) {
+			return nil, errors.New("no provider in this spec")
+		}
+		Expect(migrations.SetupWithManager(mgr)).To(Succeed())
+		mgrDone := make(chan struct{})
+		go func() {
+			defer GinkgoRecover()
+			defer close(mgrDone)
+			Expect(mgr.Start(mgrCtx)).To(Succeed())
+		}()
+		DeferCleanup(func() { stop(); <-mgrDone })
+
+		prov := &infravirtrigaudiov1beta1.Provider{
+			ObjectMeta: metav1.ObjectMeta{Name: "prov-1", Namespace: src.Name},
+			Spec: infravirtrigaudiov1beta1.ProviderSpec{
+				Type:                infravirtrigaudiov1beta1.ProviderTypeLibvirt,
+				Endpoint:            "qemu+ssh://virt@kvm-01/system",
+				CredentialSecretRef: infravirtrigaudiov1beta1.ObjectRef{Name: "creds"},
+				Runtime: &infravirtrigaudiov1beta1.ProviderRuntimeSpec{
+					Mode:  infravirtrigaudiov1beta1.RuntimeModeRemote,
+					Image: "virtrigaud/provider-libvirt:test",
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, prov)).To(Succeed())
+		srcVM := &infravirtrigaudiov1beta1.VirtualMachine{
+			ObjectMeta: metav1.ObjectMeta{Name: "src-vm", Namespace: src.Name},
+			Spec: infravirtrigaudiov1beta1.VirtualMachineSpec{
+				ProviderRef: infravirtrigaudiov1beta1.ObjectRef{Name: "prov-1"},
+				ClassRef:    infravirtrigaudiov1beta1.ObjectRef{Name: "small"},
+			},
+		}
+		Expect(k8sClient.Create(ctx, srcVM)).To(Succeed())
+		srcVM.Status.ID = src.Name + ".src-vm"
+		Expect(k8sClient.Status().Update(ctx, srcVM)).To(Succeed())
+
+		clone := &infravirtrigaudiov1beta1.VMClone{
+			ObjectMeta: metav1.ObjectMeta{Name: "clone-w", Namespace: src.Name},
+			Spec: infravirtrigaudiov1beta1.VMCloneSpec{
+				Source: infravirtrigaudiov1beta1.CloneSource{VMRef: &infravirtrigaudiov1beta1.LocalObjectReference{Name: "src-vm"}},
+				Target: infravirtrigaudiov1beta1.VMCloneTarget{Name: "web", Namespace: tgt.Name},
+			},
+		}
+		Expect(k8sClient.Create(ctx, clone)).To(Succeed())
+
+		By("the running controller refuses the clone")
+		Eventually(func(g Gomega) {
+			got := &infravirtrigaudiov1beta1.VMClone{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(clone), got)).To(Succeed())
+			ready := readyCondition(got.Status.Conditions, infravirtrigaudiov1beta1.VMCloneConditionReady)
+			g.Expect(ready).NotTo(BeNil())
+			g.Expect(ready.Reason).To(Equal(ReasonTargetNamespaceNotAllowed))
+		}, "20s", "200ms").Should(Succeed())
+
+		By("granting the target namespace re-drives it without waiting for the recheck")
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(tgt), tgt)).To(Succeed())
+		tgt.Annotations = map[string]string{AllowedSourceNamespacesAnnotation: src.Name}
+		Expect(k8sClient.Update(ctx, tgt)).To(Succeed())
+		Eventually(func(g Gomega) {
+			got := &infravirtrigaudiov1beta1.VMClone{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(clone), got)).To(Succeed())
+			g.Expect(got.Status.Phase).To(Equal(infravirtrigaudiov1beta1.ClonePhaseReady))
+		}, "20s", "200ms").Should(Succeed())
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: tgt.Name, Name: "web"}, &infravirtrigaudiov1beta1.VirtualMachine{})).To(Succeed())
+	})
 })
+
+// skipNameValidation lets the watch spec start a manager whose controller
+// names may repeat across specs in this suite.
+var skipNameValidation = true
