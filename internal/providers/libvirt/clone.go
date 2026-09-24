@@ -354,8 +354,11 @@ func rewriteDomainXMLForClone(sourceXML, targetName, srcDiskPath, targetDiskPath
 
 	// Rewrite the domain name (first <name> element only — interface/source
 	// elements do not use <name>...</name> so a single replacement is safe).
+	// targetName is CR-derived (VMClone spec.target.name); it carries a
+	// Kubernetes object-name validation pattern but not an XML-safety one, so
+	// it is escaped as defense in depth (issue #260).
 	if reDomainName.MatchString(out) {
-		out = replaceFirst(reDomainName, out, fmt.Sprintf("<name>%s</name>", targetName))
+		out = replaceFirst(reDomainName, out, fmt.Sprintf("<name>%s</name>", xmlEscape(targetName)))
 	} else {
 		return "", "", "", fmt.Errorf("source domain XML has no <name> element")
 	}
@@ -433,8 +436,12 @@ func rewriteNVRAMPath(domainXML, targetName string) (out, srcPath, dstPath strin
 		return domainXML, srcPath, dstPath
 	}
 	// Splice the new path into the captured path span only, preserving any
-	// attributes on the opening <nvram ...> tag (e.g. template=).
-	out = domainXML[:m[2]] + dstPath + domainXML[m[3]:]
+	// attributes on the opening <nvram ...> tag (e.g. template=). dstPath
+	// embeds targetName (CR-derived; see rewriteDomainXMLForClone) so it is
+	// escaped before insertion as defense in depth (issue #260); the
+	// (unescaped) dstPath is still what the caller uses for the actual
+	// host-side varstore file copy.
+	out = domainXML[:m[2]] + xmlEscape(dstPath) + domainXML[m[3]:]
 	return out, srcPath, dstPath
 }
 

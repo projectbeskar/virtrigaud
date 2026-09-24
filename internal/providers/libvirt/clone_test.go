@@ -17,6 +17,7 @@ limitations under the License.
 package libvirt
 
 import (
+	"encoding/xml"
 	"regexp"
 	"strings"
 	"testing"
@@ -301,6 +302,61 @@ func TestRewriteNVRAMPath(t *testing.T) {
 		assert.Empty(t, src)
 		assert.Empty(t, dst)
 	})
+}
+
+// cloneNameDoc decodes just the <name> element, used by the adversarial
+// escaping tests below to prove the rewritten document stays well-formed and
+// the malicious target name round-trips intact.
+type cloneNameDoc struct {
+	XMLName xml.Name `xml:"domain"`
+	Name    string   `xml:"name"`
+}
+
+// TestRewriteDomainXMLForClone_TargetNameEscaped feeds an attribute/element
+// breakout payload as the clone target name and asserts the rewritten
+// document is still well-formed XML with no sibling element spliced in, and
+// that the malicious name round-trips intact through <name> (issue #260).
+// In production req.TargetName is pattern-validated by the VMCloneTarget CRD
+// field and could not carry these characters; this test exercises the
+// function directly as defense in depth, independent of that validation.
+func TestRewriteDomainXMLForClone_TargetNameEscaped(t *testing.T) {
+	const srcDisk = "/var/lib/libvirt/images/vm-source-disk.qcow2"
+	const tgtDisk = "/var/lib/libvirt/images/vm-target-disk.qcow2"
+	const injection = `x</name><disk type='block'><source dev='/dev/sda'/></disk><name>y`
+
+	out, _, _, err := rewriteDomainXMLForClone(sourceDomainXML, injection, srcDisk, tgtDisk)
+	require.NoError(t, err)
+
+	assert.NotContains(t, out, "<disk type='block'>", "no sibling <disk> element may be spliced in via the target name")
+
+	var parsed cloneNameDoc
+	require.NoError(t, xml.Unmarshal([]byte(out), &parsed), "rewritten domain XML must stay well-formed: %s", out)
+	assert.Equal(t, injection, parsed.Name, "the malicious name must round-trip intact, not execute as XML")
+}
+
+// TestRewriteNVRAMPath_TargetNameEscaped feeds an attribute/element breakout
+// payload as the target name into the nvram re-point and asserts the
+// rewritten document stays well-formed with the payload round-tripping
+// intact through the <nvram> element text, while the returned dst path (used
+// for the actual host-side varstore file copy, never re-parsed as XML) keeps
+// the raw, unescaped value (issue #260).
+func TestRewriteNVRAMPath_TargetNameEscaped(t *testing.T) {
+	const injection = `x</nvram><disk type='block'><source dev='/dev/sda'/></disk><nvram>y`
+	in := `<os><nvram>/var/lib/libvirt/qemu/nvram/vm-src_VARS.fd</nvram></os>`
+
+	out, src, dst := rewriteNVRAMPath(in, injection)
+
+	assert.Equal(t, "/var/lib/libvirt/qemu/nvram/vm-src_VARS.fd", src)
+	assert.Equal(t, "/var/lib/libvirt/qemu/nvram/"+injection+"_VARS.fd", dst,
+		"the returned dst path is used for the host-side file copy, not re-parsed as XML, so it stays unescaped")
+	assert.NotContains(t, out, "<disk type='block'>", "no sibling <disk> element may be spliced in via the target name")
+
+	var parsed struct {
+		XMLName xml.Name `xml:"os"`
+		Nvram   string   `xml:"nvram"`
+	}
+	require.NoError(t, xml.Unmarshal([]byte(out), &parsed), "rewritten fragment must stay well-formed: %s", out)
+	assert.Equal(t, "/var/lib/libvirt/qemu/nvram/"+injection+"_VARS.fd", parsed.Nvram)
 }
 
 // TestApplyClassOverrides_HotAddHeadroom verifies that a hot-add-capable class
