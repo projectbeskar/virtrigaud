@@ -373,15 +373,18 @@ func TestImagePrepare_TemplateName_VerifyOnly_NotFound(t *testing.T) {
 
 // TestImagePrepare_TemplateName_VerifyOnly_Exists verifies the templateName
 // branch succeeds without importing when the named template already exists. It
-// uses an existing vcsim VM (DC0_H0_VM0) as the "template".
+// marks an existing vcsim VM (DC0_H0_VM0) as a template first: only a real
+// vSphere template satisfies templateName (template_source.go).
 func TestImagePrepare_TemplateName_VerifyOnly_Exists(t *testing.T) {
 	p, cleanup := newImageTestProvider(t)
 	defer cleanup()
 
-	// Confirm the simulator VM exists, then ask ImagePrepare to verify it.
+	// Confirm the simulator VM exists, mark it as a template, then ask
+	// ImagePrepare to verify it.
 	const existing = "DC0_H0_VM0"
-	_, err := p.finder.VirtualMachine(context.Background(), existing)
+	vm, err := p.finder.VirtualMachine(context.Background(), existing)
 	require.NoError(t, err)
+	markAsTemplate(t, p, vm.Reference().Value)
 
 	resp, err := p.ImagePrepare(context.Background(), &providerv1.ImagePrepareRequest{
 		ImageJson:  `{"source":{"vsphere":{"templateName":"` + existing + `"}}}`,

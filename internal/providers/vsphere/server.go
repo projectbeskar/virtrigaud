@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/vmware/govmomi"
+	"github.com/vmware/govmomi/fault"
 	"github.com/vmware/govmomi/find"
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/property"
@@ -44,6 +45,7 @@ import (
 	"github.com/vmware/govmomi/vim25/types"
 
 	"github.com/projectbeskar/virtrigaud/internal/diskutil"
+	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/storage"
 	"github.com/projectbeskar/virtrigaud/internal/storage/migration"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
@@ -495,16 +497,31 @@ func (p *Provider) GetCapabilities(ctx context.Context, req *providerv1.GetCapab
 //
 // Two creation paths are supported:
 //   - Template clone: when req.ImageJson contains a TemplateName the VM is created by
-//     cloning an existing vSphere VM or template with CloneVM_Task.
+//     cloning an existing vSphere template with CloneVM_Task. The name (or inventory
+//     path) is resolved exactly and must name an object marked as a template; a
+//     regular VM is never cloned (see template_source.go).
 //   - Imported disk: when req.ImageJson contains a Path the VM is created from scratch
 //     (CreateVM_Task) with the pre-uploaded VMDK attached as a persistent disk.
 //
 // In both cases the VM is powered on immediately after creation. The returned
 // CreateResponse.Id contains the vSphere ManagedObjectReference value (e.g. "vm-42")
 // which is used as the stable VM identifier in all subsequent API calls.
+//
+// Ownership (see vm_ownership.go): the new VM's ExtraConfig is stamped with
+// req.Owner. If a VM with the requested name already exists in the target folder,
+// the create binds to it ONLY when its stamp records req.Owner's UID; otherwise it
+// fails with codes.AlreadyExists. A same-named VM in any other folder is neither
+// bound nor considered. A MOID-shaped or path-like name is rejected with
+// codes.InvalidArgument before any vCenter call.
 func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*providerv1.CreateResponse, error) {
 	if p.client == nil {
 		return nil, fmt.Errorf("vSphere client not configured")
+	}
+
+	// Reject names vCenter tooling would resolve as a reference or path before
+	// any lookup, so they can never address a different VM.
+	if err := invalidVMNameError(req.GetName()); err != nil {
+		return nil, err
 	}
 
 	p.logger.Debug("Create called",
@@ -522,6 +539,14 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 		return nil, fmt.Errorf("failed to parse create request: %w", err)
 	}
 
+	// A template reference is validated before any vCenter call too, so a
+	// MOID-shaped or otherwise unsafe name can never reach a lookup.
+	if vmSpec.DiskPath == "" && vmSpec.TemplateName != "" {
+		if err := templateRefError(vmSpec.TemplateName); err != nil {
+			return nil, err
+		}
+	}
+
 	p.logger.Debug("Parsed VMSpec",
 		"vm_name", vmSpec.Name,
 		"additional_disks_count", len(vmSpec.AdditionalDisks))
@@ -536,23 +561,46 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 		}
 	}
 
-	// Check if VM already exists
+	// Resolve the datacenter and the exact folder the VM will be created in. The
+	// existing-VM check below is scoped to that folder, so both must be resolved
+	// once and shared with createVirtualMachine.
 	datacenter, err := p.finder.DefaultDatacenter(ctx)
-	if err == nil {
-		p.finder.SetDatacenter(datacenter)
-		existingVM, _ := p.finder.VirtualMachine(ctx, vmSpec.Name)
-		if existingVM != nil {
-			p.logger.Warn("VM already exists, will attempt to use existing VM",
-				"vm_name", vmSpec.Name,
-				"vm_ref", existingVM.Reference().Value)
-			return &providerv1.CreateResponse{
-				Id: existingVM.Reference().Value,
-			}, nil
-		}
+	if err != nil {
+		return nil, fmt.Errorf("failed to find default datacenter: %w", err)
+	}
+	p.finder.SetDatacenter(datacenter)
+
+	folder, err := p.resolveVMFolder(ctx, vmSpec.Folder)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve target folder: %w", err)
+	}
+
+	// Check whether a VM of this name already exists in the target folder. Only
+	// a VM stamped with the requester's UID is bound (the retry-after-a-lost-
+	// status-write case); anything else fails closed (see vm_ownership.go).
+	existing, err := p.vmsNamedInFolder(ctx, folder, vmSpec.Name)
+	if err != nil {
+		// Transient: never fall through to create (or bind) on an unknown answer.
+		// The vCenter error can name other VMs in the folder (fault text, MOIDs),
+		// so it goes to the provider log and the caller gets a generic message.
+		p.logger.Error("Existing-VM check in the target folder failed",
+			"vm_name", vmSpec.Name, "folder", folder.Reference().Value, "error", err)
+		return nil, fmt.Errorf("check for an existing VM named %q in the target folder: "+
+			"a vCenter error occurred (details in the provider log); will retry", vmSpec.Name)
+	}
+	switch len(existing) {
+	case 0:
+		// Name is free in the target folder: create below.
+	case 1:
+		return p.bindExistingVM(ctx, existing[0], vmSpec.Name, vmSpec.Owner)
+	default:
+		p.logger.Warn("Refusing to bind: more than one VM with the requested name exists in the target folder",
+			"vm_name", vmSpec.Name, "folder", folder.Reference().Value, "count", len(existing))
+		return nil, vmConflictError(vmSpec.Name)
 	}
 
 	// Create the VM using govmomi
-	vmID, err := p.createVirtualMachine(ctx, vmSpec)
+	vmID, err := p.createVirtualMachine(ctx, vmSpec, datacenter, folder)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create virtual machine: %w", err)
 	}
@@ -1197,11 +1245,20 @@ func (p *Provider) Describe(ctx context.Context, req *providerv1.DescribeRequest
 	}, &vmMo)
 
 	if err != nil {
-		// VM might not exist or be accessible
+		// Only a definitive "no such managed object" means the VM is gone. The
+		// manager answers Exists=false by clearing Status.ID and calling Create
+		// again, so reporting a transient failure (session loss, network error,
+		// vCenter restart, permission change) as "gone" would unbind a healthy VM
+		// and re-run Create for it. Return the error instead; the manager retries
+		// and keeps the binding.
+		if fault.Is(err, &types.ManagedObjectNotFound{}) {
+			p.logger.Warn("VM not found", "vm_id", req.Id, "error", err)
+			return &providerv1.DescribeResponse{
+				Exists: false,
+			}, nil
+		}
 		p.logger.Warn("Failed to retrieve VM properties", "vm_id", req.Id, "error", err)
-		return &providerv1.DescribeResponse{
-			Exists: false,
-		}, nil
+		return nil, fmt.Errorf("failed to retrieve properties of VM %s: %w", req.Id, err)
 	}
 
 	// VM exists, gather comprehensive information
@@ -1814,9 +1871,20 @@ func (p *Provider) findSnapshotByID(snapshots []types.VirtualMachineSnapshotTree
 // back to the datacenter's default VM folder if the configured folder path is not found.
 // The cloned VM is left powered off. The returned CloneResponse.TargetVmId contains
 // the ManagedObjectReference value of the new VM.
+//
+// Ownership: Clone never binds to an existing VM — CloneVM_Task fails with
+// DuplicateName if the target name is taken in the folder. CloneRequest carries no
+// owner (the target VirtualMachine is created after the clone and seeded with the
+// returned ID), so the clone is left unstamped, and the owner stamp the clone would
+// otherwise inherit from the source VM's ExtraConfig is cleared. The target name is
+// validated like a Create name (invalidVMNameError).
 func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*providerv1.CloneResponse, error) {
 	if p.client == nil {
 		return nil, fmt.Errorf("vSphere client not configured")
+	}
+
+	if err := invalidVMNameError(req.GetTargetName()); err != nil {
+		return nil, err
 	}
 
 	p.logger.Info("Cloning virtual machine", "source_vm_id", req.SourceVmId, "target_name", req.TargetName, "linked", req.Linked)
@@ -1856,22 +1924,21 @@ func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*pr
 	}
 
 	// Determine which folder to use (provider default)
-	folderName := p.config.DefaultFolder
-	folder, err := p.finder.Folder(ctx, folderName)
+	folder, err := p.resolveVMFolder(ctx, "")
 	if err != nil {
-		// If folder doesn't exist, use the datacenter's default VM folder
-		p.logger.Warn("Failed to find folder, using datacenter default VM folder", "folder", folderName, "error", err)
-		folder, err = p.finder.Folder(ctx, datacenter.Name()+"/vm")
-		if err != nil {
-			return nil, fmt.Errorf("failed to find datacenter VM folder: %w", err)
-		}
+		return nil, fmt.Errorf("failed to resolve target folder: %w", err)
 	}
 
-	// Create the clone specification
+	// Create the clone specification. The config clears the owner stamp the
+	// clone would inherit from the source's ExtraConfig, so the clone never
+	// claims the SOURCE VirtualMachine's owner.
 	cloneSpec := &types.VirtualMachineCloneSpec{
 		Location: types.VirtualMachineRelocateSpec{
 			Datastore: types.NewReference(datastore.Reference()),
 			Pool:      types.NewReference(resourcePool.Reference()),
+		},
+		Config: &types.VirtualMachineConfigSpec{
+			ExtraConfig: ownerExtraConfig(contracts.ObjectIdentity{}),
 		},
 		PowerOn:  false, // Don't power on automatically
 		Template: false,
@@ -2003,6 +2070,11 @@ type VMSpec struct {
 	StoragePod string // Datastore Cluster override (empty = use provider default; ignored when Datastore is set)
 	Folder     string // Folder override (empty = use provider default)
 	Host       string // Host override (empty = use provider default)
+	// Owner is the requesting VirtualMachine (CreateRequest.owner). It is stamped
+	// into the new VM's ExtraConfig and is the only thing that authorizes binding
+	// a create to an existing same-named VM (see vm_ownership.go). Zero when the
+	// manager sent no owner.
+	Owner contracts.ObjectIdentity
 }
 
 // AdditionalDiskSpec defines an additional disk to attach to a VM
@@ -2044,7 +2116,8 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*VMSpec, e
 		"placementJsonLength", len(req.PlacementJson))
 
 	spec := &VMSpec{
-		Name: req.Name,
+		Name:  req.Name,
+		Owner: ownerFromCreateRequest(req),
 	}
 
 	// Parse VMClass from JSON (contracts.VMClass structure)
@@ -2272,18 +2345,23 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*VMSpec, e
 // Resource placement follows a priority chain for each dimension:
 //   - Cluster:   spec.Cluster → p.config.DefaultCluster
 //   - Datastore: spec.Datastore → StoragePod (spec.StoragePod or p.config.DefaultStoragePod) → p.config.DefaultDatastore
-//   - Folder:    spec.Folder   → p.config.DefaultFolder → datacenter default VM folder
+//   - Folder:    resolved by the caller (resolveVMFolder: spec.Folder → p.config.DefaultFolder
+//     → datacenter default VM folder) and passed in, so the VM is created in exactly
+//     the folder Create checked for an existing same-named VM.
 //
 // VM creation path:
 //   - If spec.DiskPath is set: CreateVM_Task with an attached existing VMDK and an LSI
 //     Logic SCSI controller added to DeviceChange.
-//   - Otherwise: CloneVM_Task from the template named spec.TemplateName.
+//   - Otherwise: CloneVM_Task from the template spec.TemplateName names, resolved by
+//     lookupTemplate (exact name or inventory path; only a real vSphere template).
 //
-// In both cases, cloud-init data (if provided) is embedded via addCloudInitToConfigSpec
-// before the task is submitted so that guestinfo properties are set at creation time.
-// After the task completes, the primary disk is optionally grown via resizeVMDisk and
-// the VM is powered on.
-func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (string, error) {
+// In both cases the owner stamp (ownerExtraConfig(spec.Owner)) and cloud-init data
+// (if provided, via addCloudInitToConfigSpec) are embedded in the config spec before
+// the task is submitted, so they are set at creation time; on the clone path an owner
+// stamp inherited from the template is overwritten or cleared. After the task
+// completes, the primary disk is optionally grown via resizeVMDisk and the VM is
+// powered on. datacenter must be the datacenter the finder is scoped to.
+func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec, datacenter *object.Datacenter, folder *object.Folder) (string, error) {
 	p.logger.Info("Creating virtual machine",
 		"name", spec.Name,
 		"cpu", spec.CPU,
@@ -2294,12 +2372,7 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 		"firmware", spec.Firmware,
 	)
 
-	// Set datacenter context for finder
-	datacenter, err := p.finder.DefaultDatacenter(ctx)
-	if err != nil {
-		return "", fmt.Errorf("failed to find default datacenter: %w", err)
-	}
-	p.finder.SetDatacenter(datacenter)
+	var err error
 
 	// Find the template VM (only if not using an imported disk)
 	var template *object.VirtualMachine
@@ -2307,9 +2380,16 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 		if spec.TemplateName == "" {
 			return "", fmt.Errorf("either templateName or diskPath must be specified")
 		}
-		template, err = p.finder.VirtualMachine(ctx, spec.TemplateName)
+		// Resolve the clone source WITHOUT the finder and accept only a real
+		// vSphere template (template_source.go): a regular VM — another
+		// tenant's included — is never cloned.
+		var found bool
+		template, found, err = p.lookupTemplate(ctx, spec.TemplateName)
 		if err != nil {
-			return "", fmt.Errorf("failed to find template VM '%s': %w", spec.TemplateName, err)
+			return "", fmt.Errorf("failed to resolve template %q: %w", spec.TemplateName, err)
+		}
+		if !found {
+			return "", fmt.Errorf("failed to find template VM %q: no vSphere template with that name was found", spec.TemplateName)
 		}
 	} else {
 		// Using imported disk - skip template lookup
@@ -2376,24 +2456,6 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 		}
 	}
 
-	// Determine which folder to use (spec override or provider default)
-	folderName := p.config.DefaultFolder
-	if spec.Folder != "" {
-		folderName = spec.Folder
-		p.logger.Info("Using placement override for folder", "folder", folderName)
-	}
-
-	// Find the folder
-	folder, err := p.finder.Folder(ctx, folderName)
-	if err != nil {
-		// If folder doesn't exist, use the datacenter's default VM folder
-		p.logger.Warn("Failed to find folder, using datacenter default VM folder", "folder", folderName, "error", err)
-		folder, err = p.finder.Folder(ctx, datacenter.Name()+"/vm")
-		if err != nil {
-			return "", fmt.Errorf("failed to find datacenter VM folder: %w", err)
-		}
-	}
-
 	// Find the network/portgroup
 	var network object.NetworkReference
 	if spec.NetworkName != "" {
@@ -2436,9 +2498,12 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec) (stri
 		p.logger.Info("Setting VM hardware version", "version", configSpec.Version, "vm_name", spec.Name)
 	}
 
-	// Configure performance and security features
-	var extraConfig []types.BaseOptionValue
+	// Stamp the requesting VirtualMachine's identity on the new VM (or, for a
+	// request without an owner, clear any stamp inherited from the template), so a
+	// later same-named create can prove — or disprove — that it owns this VM.
+	extraConfig := ownerExtraConfig(spec.Owner)
 
+	// Configure performance and security features.
 	// Enable nested virtualization if requested
 	if spec.NestedVirtualization {
 		p.logger.Info("Enabling nested virtualization", "vm_name", spec.Name)

@@ -1,5 +1,9 @@
 # libvirt domain ownership
 
+> The vSphere provider follows the same ownership rule. For the model that both
+> providers share and for the vSphere details, see
+> [`vm-ownership.md`](vm-ownership.md).
+
 The libvirt provider names each domain after the bare `VirtualMachine` name. The
 namespace is not part of the name. If several namespaces (tenants) share a
 libvirt host, two `VirtualMachine`s called `web` in different namespaces map to
