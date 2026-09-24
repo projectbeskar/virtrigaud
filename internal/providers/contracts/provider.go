@@ -223,6 +223,14 @@ type VMInfo struct {
 	ProviderRaw map[string]string
 }
 
+// VMInfoOwnerUIDKey is the VMInfo.ProviderRaw key under which a provider that
+// stamps the VMs it creates with their owner (#333; the libvirt provider)
+// reports the owner UID(s) recorded on a listed VM, comma-separated. The
+// adoption flow never adopts a VM stamped with the UID of a VirtualMachine that
+// still exists: that VM is already managed (possibly through another Provider
+// object or in another namespace).
+const VMInfoOwnerUIDKey = "owner_uid"
+
 // DiskInfo contains information about a VM disk
 type DiskInfo struct {
 	// ID is the disk identifier

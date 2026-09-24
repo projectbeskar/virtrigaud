@@ -296,33 +296,9 @@ func (r *VMAdoptionReconciler) discoverUnmanagedVMs(ctx context.Context, provide
 		return nil, fmt.Errorf("failed to list VirtualMachine CRs: %w", err)
 	}
 
-	// Build map of managed VM IDs (by provider)
-	managedVMIDs := make(map[string]bool)
-	for _, vm := range vmList.Items {
-		// Check if VM is managed by this provider
-		providerNamespace := vm.Namespace
-		if vm.Spec.ProviderRef.Namespace != "" {
-			providerNamespace = vm.Spec.ProviderRef.Namespace
-		}
-
-		if vm.Spec.ProviderRef.Name == provider.Name && providerNamespace == provider.Namespace {
-			// Use status.ID if available, otherwise use name
-			vmID := vm.Status.ID
-			if vmID == "" {
-				vmID = vm.Name
-			}
-			managedVMIDs[vmID] = true
-		}
-	}
-
 	// Filter out managed VMs and apply adoption filter
 	var unmanagedVMs []contracts.VMInfo
-	for _, vmInfo := range allVMs {
-		// Skip if already managed
-		if managedVMIDs[vmInfo.ID] {
-			continue
-		}
-
+	for _, vmInfo := range unmanagedProviderVMs(provider, allVMs, vmList.Items) {
 		// Apply adoption filter if specified
 		if filter != nil && !r.matchesFilter(vmInfo, filter) {
 			logger.V(1).Info("VM filtered out by adoption filter", "vm_id", vmInfo.ID, "vm_name", vmInfo.Name)
@@ -334,6 +310,68 @@ func (r *VMAdoptionReconciler) discoverUnmanagedVMs(ctx context.Context, provide
 
 	logger.Info("Found unmanaged VMs", "count", len(unmanagedVMs), "filtered", filter != nil)
 	return unmanagedVMs, nil
+}
+
+// unmanagedProviderVMs returns the VMs of allVMs (provider's ListVMs) that no
+// VirtualMachine manages. A listed VM is managed, and never adopted, when:
+//
+//   - its ID is the status.id of a VirtualMachine of this Provider — or that
+//     VirtualMachine's name while its status.id is not yet recorded (a legacy
+//     create names the hypervisor VM after the VirtualMachine); or
+//   - the provider reports it stamped (contracts.VMInfoOwnerUIDKey) with the
+//     UID of ANY VirtualMachine that still exists, in any namespace and under
+//     any Provider object. This covers what the ID match cannot: a VM whose
+//     create is in flight under a provider-chosen name (the libvirt provider
+//     names a new domain "<namespace>.<name>", which the operator does not
+//     derive), and a VM managed through another Provider object pointing at
+//     the same host.
+//
+// A VM stamped only with UIDs of VirtualMachines that no longer exist (left
+// behind by a deleted VirtualMachine) is unmanaged and may be adopted; the
+// adopted VirtualMachine is a new object, so the stale stamp never matches its
+// UID.
+func unmanagedProviderVMs(provider *infravirtrigaudiov1beta1.Provider, allVMs []contracts.VMInfo,
+	vms []infravirtrigaudiov1beta1.VirtualMachine) []contracts.VMInfo {
+	managedVMIDs := make(map[string]bool)
+	liveUIDs := make(map[string]bool, len(vms))
+	for _, vm := range vms {
+		if vm.UID != "" {
+			liveUIDs[string(vm.UID)] = true
+		}
+		// Check if VM is managed by this provider
+		providerNamespace := vm.Namespace
+		if vm.Spec.ProviderRef.Namespace != "" {
+			providerNamespace = vm.Spec.ProviderRef.Namespace
+		}
+		if vm.Spec.ProviderRef.Name == provider.Name && providerNamespace == provider.Namespace {
+			// Use status.ID if available, otherwise use name
+			vmID := vm.Status.ID
+			if vmID == "" {
+				vmID = vm.Name
+			}
+			managedVMIDs[vmID] = true
+		}
+	}
+
+	var unmanaged []contracts.VMInfo
+	for _, vmInfo := range allVMs {
+		if managedVMIDs[vmInfo.ID] || ownedByLiveVM(vmInfo, liveUIDs) {
+			continue
+		}
+		unmanaged = append(unmanaged, vmInfo)
+	}
+	return unmanaged
+}
+
+// ownedByLiveVM reports whether vmInfo carries an owner stamp
+// (contracts.VMInfoOwnerUIDKey) naming a UID in liveUIDs.
+func ownedByLiveVM(vmInfo contracts.VMInfo, liveUIDs map[string]bool) bool {
+	for _, uid := range strings.Split(vmInfo.ProviderRaw[contracts.VMInfoOwnerUIDKey], ",") {
+		if uid = strings.TrimSpace(uid); uid != "" && liveUIDs[uid] {
+			return true
+		}
+	}
+	return false
 }
 
 // adoptVM creates VirtualMachine CR for an existing VM

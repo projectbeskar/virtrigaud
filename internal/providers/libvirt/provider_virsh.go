@@ -2672,6 +2672,12 @@ func (p *Provider) ListVMs(ctx context.Context) ([]contracts.VMInfo, error) {
 		if dx.UUID != "" {
 			providerRaw["uuid"] = dx.UUID
 		}
+		// Report the VirtRigaud owner stamp(s) read from the same document, so
+		// adoption can skip a domain that a live VirtualMachine owns (no extra
+		// virsh call; the list shadow comparison does not look at this key).
+		if uids := domainOwnerUIDs(raw.Stdout); uids != "" {
+			providerRaw[contracts.VMInfoOwnerUIDKey] = uids
+		}
 
 		vmInfos = append(vmInfos, contracts.VMInfo{
 			ID:          domain.Name, // Use domain name as ID

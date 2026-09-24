@@ -227,6 +227,25 @@ func domainOwners(domainXML string) ([]contracts.ObjectIdentity, error) {
 	return owners, nil
 }
 
+// domainOwnerUIDs returns the non-empty owner UIDs stamped on a domain document,
+// comma-separated in document order, for VMInfo.ProviderRaw
+// (contracts.VMInfoOwnerUIDKey). An unstamped or unreadable document yields "".
+// It is informational (adoption uses it to skip domains live VirtualMachines
+// own); it never authorizes anything.
+func domainOwnerUIDs(domainXML string) string {
+	owners, err := domainOwners(domainXML)
+	if err != nil {
+		return ""
+	}
+	uids := make([]string, 0, len(owners))
+	for _, o := range owners {
+		if o.UID != "" {
+			uids = append(uids, o.UID)
+		}
+	}
+	return strings.Join(uids, ",")
+}
+
 // requesterOwnsDomain reports whether a create by requester may bind to an
 // existing domain whose stamped owners are recorded. It is the whole
 // authorization decision and fails closed:

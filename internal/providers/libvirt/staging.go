@@ -181,8 +181,12 @@ func (p *Provider) defineDomainFromXML(ctx context.Context, vp *VirshProvider, d
 // about to be written. The common case — no file there — costs one `test -e`;
 // the full in-use scan runs only when a file exists.
 func ensureDiskTargetFree(ctx context.Context, h hostCommandRunner, subject, target string) error {
-	if _, err := runHost(ctx, h, "test", "-e", target); err != nil {
-		return nil // absent (or unreadable, and then qemu-img cannot replace it either)
+	exists, err := hostPathExists(ctx, h, target)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
 	}
 	inUse, err := pathInUseOnHost(ctx, h, target)
 	if err != nil {
@@ -195,6 +199,26 @@ func ensureDiskTargetFree(ctx context.Context, h hostCommandRunner, subject, tar
 	}
 	log.Printf("INFO %s exists at %s but no domain uses it (left by an earlier failed attempt); overwriting it", subject, target)
 	return nil
+}
+
+// pathExistsScript is the fixed `sh -c` script behind hostPathExists. The path
+// is ALWAYS the positional parameter "$1", never interpolated into the text. It
+// exits 0 either way (so an absent file — the common case — is not logged as a
+// failed command) and prints pathExistsMarker when something exists at "$1".
+const pathExistsScript = `if [ -e "$1" ]; then echo ` + pathExistsMarker + `; fi`
+
+// pathExistsMarker is what pathExistsScript prints for an existing path.
+const pathExistsMarker = "present"
+
+// hostPathExists reports whether anything exists at path on the host behind h.
+// A failure to run the check is a retryable error: the caller must not assume
+// either answer.
+func hostPathExists(ctx context.Context, h hostCommandRunner, path string) (bool, error) {
+	res, err := runHost(ctx, h, "sh", "-c", pathExistsScript, "sh", path)
+	if err != nil {
+		return false, contracts.NewRetryableError(fmt.Sprintf("check whether %s exists on the host", path), err)
+	}
+	return strings.TrimSpace(res.Stdout) == pathExistsMarker, nil
 }
 
 // domainDiskSubject names a domain's primary disk file for ensureDiskTargetFree.

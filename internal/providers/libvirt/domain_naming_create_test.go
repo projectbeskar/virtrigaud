@@ -339,6 +339,40 @@ func TestCreate_LegacyManagerKeepsBareName(t *testing.T) {
 	assert.Equal(t, "web", d.Name)
 }
 
+// TestListVMs_ReportsOwnerStamp: ListVMs reports a created domain's owner UID
+// (read from the dumpxml it already fetches) so adoption can skip domains a
+// live VirtualMachine owns; an unstamped domain reports none.
+func TestListVMs_ReportsOwnerStamp(t *testing.T) {
+	c := newCreateHost(t)
+	// Definitions as libvirt normalizes them (KiB units), as ListVMs reads them.
+	hostDir := filepath.Join(c.root, "h1")
+	for name, xml := range map[string]string{
+		"team-a.web": stampedDomainXML("team-a.web", ownerTeamA),
+		"web":        unstampedDomainXML("web"), // legacy / never created by VirtRigaud
+	} {
+		require.NoError(t, os.WriteFile(filepath.Join(hostDir, "dom-"+name+".xml"), []byte(xml), 0o600))
+		f, err := os.OpenFile(filepath.Join(hostDir, "names"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+		require.NoError(t, err)
+		_, err = f.WriteString(name + "\n")
+		require.NoError(t, err)
+		require.NoError(t, f.Close())
+	}
+
+	before := strings.Count(c.log("virsh"), "\n")
+	vms, err := c.p.ListVMs(context.Background())
+	require.NoError(t, err)
+	byID := map[string]contracts.VMInfo{}
+	for _, v := range vms {
+		byID[v.ID] = v
+	}
+	require.Contains(t, byID, "team-a.web")
+	require.Contains(t, byID, "web")
+	assert.Equal(t, ownerTeamA.UID, byID["team-a.web"].ProviderRaw[contracts.VMInfoOwnerUIDKey])
+	assert.NotContains(t, byID["web"].ProviderRaw, contracts.VMInfoOwnerUIDKey)
+	assert.Equal(t, 1+len(vms), strings.Count(c.log("virsh"), "\n")-before,
+		"one list plus one dumpxml per domain, as before: no extra virsh call")
+}
+
 // TestClustered_Delete_PendingCreateFindsNamespacedDomain: the operator's
 // finalizer cleans up a clustered create still in flight (no status.id) with an
 // owner-checked Delete addressed by the BARE VM name. Create named the domain
