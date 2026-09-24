@@ -57,6 +57,10 @@ spec:
               HostPoolSpec is admin-authored cluster policy for a named group of Hosts under
               one clustered Provider (ADR-0007 D3): scheduling strategy, overcommit,
               storage/network references, and the default migration policy.
+
+              Same-namespace model (security): a HostPool lives in its clustered Provider's
+              namespace, alongside that Provider's Hosts, so ProviderRef is a
+              LocalObjectReference (see HostSpec).
             properties:
               migration:
                 description: Migration is the default migration policy for VMs in
@@ -141,18 +145,13 @@ spec:
                     type: string
                 type: object
               providerRef:
-                description: ProviderRef is the clustered Provider that owns this
-                  pool.
+                description: |-
+                  ProviderRef is the clustered Provider that owns this pool. It must be in
+                  the HostPool's own namespace (no cross-namespace pool injection).
                 properties:
                   name:
                     description: Name of the referenced object
                     maxLength: 253
-                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
-                    type: string
-                  namespace:
-                    description: Namespace of the referenced object (defaults to current
-                      namespace)
-                    maxLength: 63
                     pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                     type: string
                 required:

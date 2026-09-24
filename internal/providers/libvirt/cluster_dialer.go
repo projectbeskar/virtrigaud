@@ -52,6 +52,11 @@ const (
 	// These are public host keys (not secret), but each host's file is written
 	// 0600 and removed when its connection drains.
 	defaultClusterKnownHostsDir = "/tmp/virtrigaud-cluster-knownhosts"
+
+	// libvirtClusterEndpointScheme is the only Host endpoint scheme the libvirt
+	// provider can dial in clustered mode (grpc:// is admitted by the Host CRD
+	// for a future cloud-hypervisor host agent, not for libvirt).
+	libvirtClusterEndpointScheme = "qemu+ssh"
 )
 
 // hostsFilePath returns the mounted host-inventory file path, overridable via
@@ -117,12 +122,20 @@ func newClusterDialer(knownHostsDir string, logger *slog.Logger) hostconn.Dialer
 // The returned cleanup removes the materialised known_hosts file; it is run by
 // the connection's Close (drain/registry-close).
 func buildClusteredVirshProvider(h hostsecret.Host, knownHostsDir string, logger *slog.Logger) (*VirshProvider, func(), error) {
-	endpoint := strings.TrimSpace(h.Endpoint)
-	if endpoint == "" {
-		return nil, nil, fmt.Errorf("clustered host %q has an empty endpoint", h.ID)
+	// Defense in depth: the registry already refuses to route a host whose
+	// endpoint fails hostsecret.ValidateEndpoint (hostconn.desiredHosts), but
+	// the dialer is the last line before the endpoint becomes a live libvirt
+	// connection URI (whose path is forwarded to the host as `virsh -c`), so it
+	// re-checks rather than trusting its caller. The value is NOT trimmed: an
+	// endpoint with surrounding whitespace is malformed, not "almost valid".
+	endpoint := h.Endpoint
+	if err := hostsecret.ValidateEndpoint(endpoint); err != nil {
+		return nil, nil, fmt.Errorf("clustered host %q: %w", h.ID, err)
 	}
-	if _, err := url.Parse(endpoint); err != nil {
-		return nil, nil, fmt.Errorf("clustered host %q endpoint is not a valid URI: %w", h.ID, err)
+	// The libvirt provider speaks qemu+ssh only; grpc:// is reserved for a
+	// future cloud-hypervisor host agent and is not dialable here.
+	if u, err := url.Parse(endpoint); err != nil || u.Scheme != libvirtClusterEndpointScheme {
+		return nil, nil, fmt.Errorf("clustered host %q: endpoint scheme is not %s", h.ID, libvirtClusterEndpointScheme)
 	}
 
 	policy, cleanup, err := newHostKeyPolicyFromBytes(knownHostsDir, h.ID, h.Credentials.KnownHosts)

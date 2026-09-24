@@ -37,26 +37,65 @@ const (
 	HostHealthUnknown HostHealth = "Unknown"
 )
 
+// HostEndpointPattern is the exact set of connection URIs a Host.spec.endpoint
+// may carry. It is the SINGLE regular expression shared by the CRD admission
+// schema (the +kubebuilder:validation:Pattern marker on HostSpec.Endpoint, which
+// must be kept byte-identical — TestHostCRDSchemaEndpointPatternMatchesGo
+// enforces that) and the provider-side re-validation in
+// internal/clustered/hostsecret, which cannot import this package.
+//
+// Accepted shapes (anything else is rejected):
+//
+//	qemu+ssh://[user@]host[:port]/system
+//	qemu+ssh://[user@]host[:port]/session
+//	grpc://host:port                      (future cloud-hypervisor host agent)
+//
+// where user is [A-Za-z0-9._-]+ and host is a DNS name, an IPv4 address, or a
+// bracketed IPv6 address. Query strings, fragments, percent-encoding, and any
+// other path are rejected: the endpoint's path is forwarded to the hypervisor
+// host as a libvirt connection URI, so it must never carry shell metacharacters
+// (security: tenant-controlled command injection on the hypervisor host).
+const HostEndpointPattern = `^(qemu\+ssh://([A-Za-z0-9._-]+@)?([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*|\[[0-9A-Fa-f:.]+\])(:[0-9]{1,5})?/(system|session)|grpc://([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*|\[[0-9A-Fa-f:.]+\]):[0-9]{1,5})$`
+
 // HostSpec is admin-authored desired inventory: one bare hypervisor host that a
 // clustered Provider (spec.topology=cluster, ADR-0007) executes on. The admin
 // declares which hosts exist; the provider reports what they can do right now
 // (see HostStatus).
+//
+// Same-namespace model (security): a Host, its HostPool, its optional credential
+// Secret, and the clustered Provider it names all live in ONE namespace — the
+// Provider's. Every reference on this spec is therefore a LocalObjectReference
+// (no namespace field). A Host in another namespace can neither enrol itself
+// into a Provider's inventory nor point the operator at a credential Secret in
+// a namespace its author does not control: the inventory render lists Hosts and
+// resolves credential Secrets in the Provider's namespace only.
 type HostSpec struct {
-	// ProviderRef is the clustered Provider that executes on this host.
-	ProviderRef ObjectRef `json:"providerRef"`
+	// ProviderRef is the clustered Provider that executes on this host. It must
+	// be in the Host's own namespace: a Host can only be fronted by a Provider in
+	// the same namespace (no cross-namespace inventory injection).
+	ProviderRef LocalObjectReference `json:"providerRef"`
 
 	// PoolRef is the HostPool this host belongs to. Membership is declared by the
 	// host itself (Host.spec.poolRef -> HostPool), per ADR-0007 D3.
 	PoolRef LocalObjectReference `json:"poolRef"`
 
-	// Endpoint is the host connection URI (libvirt: qemu+ssh://user@host/system;
-	// a future cloud-hypervisor host-agent: grpc://host:port).
+	// Endpoint is the host connection URI. Only these shapes are accepted:
+	// qemu+ssh://[user@]host[:port]/system, qemu+ssh://[user@]host[:port]/session
+	// (libvirt), and grpc://host:port (a future cloud-hypervisor host agent). The
+	// host is a DNS name, an IPv4 address, or a bracketed IPv6 address. No query
+	// string, fragment, percent-encoding, or other path is allowed.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=512
+	// +kubebuilder:validation:Pattern=`^(qemu\+ssh://([A-Za-z0-9._-]+@)?([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*|\[[0-9A-Fa-f:.]+\])(:[0-9]{1,5})?/(system|session)|grpc://([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*|\[[0-9A-Fa-f:.]+\]):[0-9]{1,5})$`
 	Endpoint string `json:"endpoint"`
 
 	// CredentialSecretRef optionally overrides the Provider's credentials for
 	// this host (SSH key / known_hosts material). Defaults to the Provider's.
+	// The Secret must be in the Host's (= the Provider's) namespace: the operator
+	// never reads a credential Secret from another namespace on a Host's behalf,
+	// so a Host author cannot exfiltrate a Secret they cannot already read.
 	// +optional
-	CredentialSecretRef *ObjectRef `json:"credentialSecretRef,omitempty"`
+	CredentialSecretRef *LocalObjectReference `json:"credentialSecretRef,omitempty"`
 
 	// Labels are placement facts: storage-pool visibility, network/bridge
 	// visibility, zone/rack. They are consumed as hard scheduling constraints

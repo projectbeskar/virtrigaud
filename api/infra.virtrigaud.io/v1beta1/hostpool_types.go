@@ -129,9 +129,14 @@ type PoolMigrationPolicy struct {
 // HostPoolSpec is admin-authored cluster policy for a named group of Hosts under
 // one clustered Provider (ADR-0007 D3): scheduling strategy, overcommit,
 // storage/network references, and the default migration policy.
+//
+// Same-namespace model (security): a HostPool lives in its clustered Provider's
+// namespace, alongside that Provider's Hosts, so ProviderRef is a
+// LocalObjectReference (see HostSpec).
 type HostPoolSpec struct {
-	// ProviderRef is the clustered Provider that owns this pool.
-	ProviderRef ObjectRef `json:"providerRef"`
+	// ProviderRef is the clustered Provider that owns this pool. It must be in
+	// the HostPool's own namespace (no cross-namespace pool injection).
+	ProviderRef LocalObjectReference `json:"providerRef"`
 
 	// Strategy is the default scheduling strategy for VMs placed in this pool.
 	// Defaults to Spread.

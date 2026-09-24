@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -59,6 +60,9 @@ type apiSchemaNode struct {
 	Type       string                   `yaml:"type"`
 	Default    interface{}              `yaml:"default"`
 	Enum       []string                 `yaml:"enum"`
+	Pattern    string                   `yaml:"pattern"`
+	MinLength  *int64                   `yaml:"minLength"`
+	MaxLength  *int64                   `yaml:"maxLength"`
 	Properties map[string]apiSchemaNode `yaml:"properties"`
 }
 
@@ -124,7 +128,7 @@ func containsStr(haystack []string, needle string) bool {
 // cordoned host would silently un-cordon. The field must always serialize.
 func TestHostSpec_SchedulableFalseSurvivesMarshal(t *testing.T) {
 	b, err := json.Marshal(HostSpec{
-		ProviderRef: ObjectRef{Name: "p"},
+		ProviderRef: LocalObjectReference{Name: "p"},
 		PoolRef:     LocalObjectReference{Name: "pool"},
 		Endpoint:    "qemu+ssh://u@h/system",
 		Schedulable: false,
@@ -180,10 +184,10 @@ func TestHost_JSONRoundTrip(t *testing.T) {
 			Namespace: "cluster-a",
 		},
 		Spec: HostSpec{
-			ProviderRef:         ObjectRef{Name: "libvirt-cluster"},
+			ProviderRef:         LocalObjectReference{Name: "libvirt-cluster"},
 			PoolRef:             LocalObjectReference{Name: "pool-a"},
 			Endpoint:            "qemu+ssh://virt@host-a/system",
-			CredentialSecretRef: &ObjectRef{Name: "host-a-creds", Namespace: "cluster-a"},
+			CredentialSecretRef: &LocalObjectReference{Name: "host-a-creds"},
 			Labels: map[string]string{
 				"storage.virtrigaud.io/pool-nfs01": "true",
 				"net.virtrigaud.io/br-vlan100":     "true",
@@ -252,10 +256,10 @@ func TestHost_DeepCopy(t *testing.T) {
 	orig := &Host{
 		ObjectMeta: metav1.ObjectMeta{Name: "host-a"},
 		Spec: HostSpec{
-			ProviderRef:         ObjectRef{Name: "p"},
+			ProviderRef:         LocalObjectReference{Name: "p"},
 			PoolRef:             LocalObjectReference{Name: "pool"},
 			Endpoint:            "qemu+ssh://u@h/system",
-			CredentialSecretRef: &ObjectRef{Name: "creds"},
+			CredentialSecretRef: &LocalObjectReference{Name: "creds"},
 			Labels:              map[string]string{"k": "v"},
 			Schedulable:         true,
 		},
@@ -330,6 +334,116 @@ func TestHostCRDSchemaDefaults(t *testing.T) {
 	for _, want := range []string{"Ready", "NotReady", "Unknown"} {
 		if !containsStr(health.Enum, want) {
 			t.Errorf("status.health enum = %v, want to contain %q", health.Enum, want)
+		}
+	}
+}
+
+// --- Host same-namespace model + endpoint validation (security) -------------
+
+// TestHostCRDSchema_RefsAreNamespaceLocal pins the same-namespace model: the
+// generated Host and HostPool CRDs must NOT expose a namespace field on
+// providerRef / credentialSecretRef. A namespace field there is what let a Host
+// in any namespace enrol into another namespace's Provider inventory and point
+// the operator at a Secret in a namespace its author does not control.
+func TestHostCRDSchema_RefsAreNamespaceLocal(t *testing.T) {
+	hostSpec := loadCRD(t, "infra.virtrigaud.io_hosts.yaml").Spec.Versions[0].Schema.OpenAPIV3Schema.prop(t, "spec")
+	for _, ref := range []string{"providerRef", "credentialSecretRef", "poolRef"} {
+		if _, ok := hostSpec.prop(t, ref).Properties["namespace"]; ok {
+			t.Errorf("Host spec.%s exposes a namespace field; clustered refs must be namespace-local", ref)
+		}
+	}
+	poolSpec := loadCRD(t, "infra.virtrigaud.io_hostpools.yaml").Spec.Versions[0].Schema.OpenAPIV3Schema.prop(t, "spec")
+	if _, ok := poolSpec.prop(t, "providerRef").Properties["namespace"]; ok {
+		t.Error("HostPool spec.providerRef exposes a namespace field; clustered refs must be namespace-local")
+	}
+}
+
+// TestHostCRDSchemaEndpointPatternMatchesGo asserts the admission-time pattern
+// controller-gen emitted for spec.endpoint is byte-identical to the exported
+// HostEndpointPattern that the provider-side validation mirrors, and that the
+// field is non-empty and bounded. A drift between the two would let a value
+// admitted by the apiserver be rejected by the provider (or vice versa).
+func TestHostCRDSchemaEndpointPatternMatchesGo(t *testing.T) {
+	endpoint := loadCRD(t, "infra.virtrigaud.io_hosts.yaml").Spec.Versions[0].Schema.OpenAPIV3Schema.
+		prop(t, "spec").prop(t, "endpoint")
+	if endpoint.Pattern != HostEndpointPattern {
+		t.Fatalf("CRD spec.endpoint pattern drifted from HostEndpointPattern:\n crd: %s\n  go: %s",
+			endpoint.Pattern, HostEndpointPattern)
+	}
+	if endpoint.MinLength == nil || *endpoint.MinLength != 1 {
+		t.Errorf("spec.endpoint minLength = %v, want 1", endpoint.MinLength)
+	}
+	if endpoint.MaxLength == nil || *endpoint.MaxLength != 512 {
+		t.Errorf("spec.endpoint maxLength = %v, want 512", endpoint.MaxLength)
+	}
+}
+
+// TestHostEndpointPattern_AcceptReject exercises the CRD admission pattern (as
+// generated into config/crd/bases, compiled with Go's RE2 like the apiserver's
+// OpenAPI validator) against the accepted endpoint shapes and a catalogue of
+// shell-injection / path-smuggling payloads that must never be admitted.
+func TestHostEndpointPattern_AcceptReject(t *testing.T) {
+	endpoint := loadCRD(t, "infra.virtrigaud.io_hosts.yaml").Spec.Versions[0].Schema.OpenAPIV3Schema.
+		prop(t, "spec").prop(t, "endpoint")
+	re := regexp.MustCompile(endpoint.Pattern)
+
+	accept := []string{
+		"qemu+ssh://virt@host-a/system",
+		"qemu+ssh://host-a/system",
+		"qemu+ssh://virt@host-a.example.com/session",
+		"qemu+ssh://virt.user_1-x@host-a.example.com:2222/system",
+		"qemu+ssh://root@192.168.1.10/system",
+		"qemu+ssh://root@192.168.1.10:22/session",
+		"qemu+ssh://root@[2001:db8::1]/system",
+		"qemu+ssh://root@[2001:db8::1]:2222/system",
+		"qemu+ssh://[::ffff:10.0.0.1]/system",
+		"grpc://agent-a.example.com:9443",
+		"grpc://10.0.0.5:9443",
+		"grpc://[2001:db8::5]:9443",
+	}
+	reject := map[string]string{
+		"empty":                         "",
+		"semicolon command":             "qemu+ssh://virt@victim/system;id",
+		"command substitution":          "qemu+ssh://virt@victim/system$(id)",
+		"backticks":                     "qemu+ssh://virt@victim/system`id`",
+		"pipe":                          "qemu+ssh://virt@victim/system|id",
+		"ampersand":                     "qemu+ssh://virt@victim/system&id",
+		"newline":                       "qemu+ssh://virt@victim/system\nid",
+		"trailing newline":              "qemu+ssh://virt@victim/system\n",
+		"percent-encoded space":         "qemu+ssh://virt@victim/system%20-c%20id",
+		"space":                         "qemu+ssh://virt@victim/system id",
+		"path traversal":                "qemu+ssh://virt@victim/system/../x",
+		"other path":                    "qemu+ssh://virt@victim/embed",
+		"no path":                       "qemu+ssh://virt@victim",
+		"trailing slash":                "qemu+ssh://virt@victim/system/",
+		"query string":                  "qemu+ssh://virt@victim/system?keyfile=/etc/shadow",
+		"fragment":                      "qemu+ssh://virt@victim/system#x",
+		"shell in user":                 "qemu+ssh://v$(id)@victim/system",
+		"shell in host":                 "qemu+ssh://virt@vic;tim/system",
+		"password in userinfo":          "qemu+ssh://virt:pw@victim/system",
+		"unbracketed ipv6":              "qemu+ssh://2001:db8::1/system",
+		"ipv6 zone id":                  "qemu+ssh://[fe80::1%25eth0]/system",
+		"non-ssh libvirt transport":     "qemu+tcp://victim/system",
+		"plain qemu local":              "qemu:///system",
+		"grpc without port":             "grpc://agent-a",
+		"grpc with path":                "grpc://agent-a:9443/x",
+		"https":                         "https://victim/system",
+		"leading whitespace":            " qemu+ssh://virt@victim/system",
+		"host label starts with hyphen": "qemu+ssh://virt@-victim/system",
+		"host label ends with hyphen":   "qemu+ssh://virt@victim-/system",
+		"empty host":                    "qemu+ssh://virt@/system",
+		"port too long":                 "qemu+ssh://virt@victim:222222/system",
+		"uppercase scheme":              "QEMU+SSH://virt@victim/system",
+	}
+
+	for _, ep := range accept {
+		if !re.MatchString(ep) {
+			t.Errorf("endpoint %q must be ACCEPTED by the CRD pattern", ep)
+		}
+	}
+	for name, ep := range reject {
+		if re.MatchString(ep) {
+			t.Errorf("%s: endpoint %q must be REJECTED by the CRD pattern", name, ep)
 		}
 	}
 }

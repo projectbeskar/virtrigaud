@@ -1215,7 +1215,7 @@ func (in *HostSpec) DeepCopyInto(out *HostSpec) {
 	out.PoolRef = in.PoolRef
 	if in.CredentialSecretRef != nil {
 		in, out := &in.CredentialSecretRef, &out.CredentialSecretRef
-		*out = new(ObjectRef)
+		*out = new(LocalObjectReference)
 		**out = **in
 	}
 	if in.Labels != nil {

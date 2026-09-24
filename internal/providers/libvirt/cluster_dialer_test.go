@@ -190,6 +190,30 @@ func TestBuildClusteredVirshProvider(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// TestBuildClusteredVirshProvider_RejectsUnsafeEndpoints is the dialer's
+// defense-in-depth check: even if an entry reached it without passing the
+// registry's admission, an endpoint that could smuggle shell metacharacters into
+// the remote `virsh -c <uri>` — or one this provider cannot dial (grpc://) — is
+// refused before any connection state is built, and the error never echoes the
+// raw endpoint.
+func TestBuildClusteredVirshProvider_RejectsUnsafeEndpoints(t *testing.T) {
+	t.Setenv(EnvInsecureSkipHostKeyVerification, "")
+	dir := t.TempDir()
+	for _, ep := range []string{
+		"qemu+ssh://virt@victim/system;id",
+		"qemu+ssh://virt@victim/system$(touch /tmp/pwned)",
+		"qemu+ssh://virt@victim/system%20-c%20id",
+		"qemu+ssh://virt@victim/system/../x",
+		" qemu+ssh://virt@victim/system",
+		"grpc://agent-a:9443",
+	} {
+		vp, _, err := buildClusteredVirshProvider(chost("bad", ep, []byte("k"), nil), dir, nil)
+		require.Errorf(t, err, "endpoint %q must be rejected", ep)
+		assert.Nil(t, vp)
+		assert.NotContains(t, err.Error(), ep, "error must not echo the raw endpoint")
+	}
+}
+
 // TestClusterDialer_BuildsConnPerHost drives the production Dialer through a
 // ClusterRegistry: first ConnFor lazily builds a *virshConn carrying that host's
 // endpoint + credential material, and Close removes the host's known_hosts file.

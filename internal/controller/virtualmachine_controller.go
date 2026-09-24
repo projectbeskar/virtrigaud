@@ -703,29 +703,43 @@ func (r *VirtualMachineReconciler) resolveClusterPlacement(
 ) (*clusterPlacement, ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
+	// Clustered objects (HostPool, Host, their credential Secrets) live in the
+	// clustered Provider's namespace — the same-namespace model enforced by the
+	// Host/HostPool schema (LocalObjectReference providerRef). providerCR was
+	// resolved from vm.spec.providerRef (namespace defaulting to the VM's), so
+	// its namespace — NOT the VM's — is where the pool and hosts are looked up.
+	// Looking in the VM's namespace instead would (a) fail to find the pool for
+	// a VM that references a Provider in another namespace, and (b) let a
+	// tenant's own namespace-local HostPool/Hosts that merely share the
+	// Provider's NAME steer placement for someone else's Provider.
+	clusterNS := providerCR.Namespace
+
 	// (a) Resolve the provider's HostPool. v1 assumes EXACTLY ONE HostPool per
 	// clustered provider; zero or many is a misconfiguration the operator refuses
 	// to guess through (multi-pool selection is a deferred follow-up).
 	var poolList infravirtrigaudiov1beta1.HostPoolList
-	if err := r.List(ctx, &poolList, client.InNamespace(vm.Namespace)); err != nil {
-		return nil, ctrl.Result{}, fmt.Errorf("list HostPools in namespace %s: %w", vm.Namespace, err)
+	if err := r.List(ctx, &poolList, client.InNamespace(clusterNS)); err != nil {
+		return nil, ctrl.Result{}, fmt.Errorf("list HostPools in namespace %s: %w", clusterNS, err)
 	}
 	var pools []*infravirtrigaudiov1beta1.HostPool
 	for i := range poolList.Items {
-		if poolList.Items[i].Spec.ProviderRef.Name == providerCR.Name {
-			pools = append(pools, &poolList.Items[i])
+		p := &poolList.Items[i]
+		// Defense in depth: the List is namespace-scoped, but a pool belongs to
+		// this Provider only if it is in the Provider's namespace AND names it.
+		if p.Namespace == clusterNS && p.Spec.ProviderRef.Name == providerCR.Name {
+			pools = append(pools, p)
 		}
 	}
 	switch {
 	case len(pools) == 0:
-		msg := fmt.Sprintf("clustered provider %q has no HostPool in namespace %s", providerCR.Name, vm.Namespace)
+		msg := fmt.Sprintf("clustered provider %q has no HostPool in namespace %s", providerCR.Name, clusterNS)
 		logger.Info("Cannot schedule VM: " + msg)
 		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonNoHostPool, msg)
 		metrics.RecordError(errReasonPlacement, metrics.ComponentManager)
 		r.updateStatus(ctx, vm)
 		return nil, ctrl.Result{RequeueAfter: placementConfigRetryInterval}, nil
 	case len(pools) > 1:
-		msg := fmt.Sprintf("clustered provider %q has %d HostPools in namespace %s; v1 supports exactly one pool per clustered provider (multi-pool is deferred)", providerCR.Name, len(pools), vm.Namespace)
+		msg := fmt.Sprintf("clustered provider %q has %d HostPools in namespace %s; v1 supports exactly one pool per clustered provider (multi-pool is deferred)", providerCR.Name, len(pools), clusterNS)
 		logger.Info("Cannot schedule VM: " + msg)
 		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonMultipleHostPools, msg)
 		metrics.RecordError(errReasonPlacement, metrics.ComponentManager)
@@ -736,14 +750,19 @@ func (r *VirtualMachineReconciler) resolveClusterPlacement(
 
 	// (b) List the pool's candidate Hosts (with their live status). The scheduler
 	// filters/scores them; it does not fetch them.
+	// Hosts are looked up in the Provider's namespace, and a candidate must be
+	// in the chosen pool AND fronted by this Provider: only such a host is in
+	// the Provider's rendered inventory, so binding any other would send the
+	// provider a TargetHostID it cannot route.
 	var hostList infravirtrigaudiov1beta1.HostList
-	if err := r.List(ctx, &hostList, client.InNamespace(vm.Namespace)); err != nil {
-		return nil, ctrl.Result{}, fmt.Errorf("list Hosts in namespace %s: %w", vm.Namespace, err)
+	if err := r.List(ctx, &hostList, client.InNamespace(clusterNS)); err != nil {
+		return nil, ctrl.Result{}, fmt.Errorf("list Hosts in namespace %s: %w", clusterNS, err)
 	}
 	var candidates []infravirtrigaudiov1beta1.Host
 	for i := range hostList.Items {
-		if hostList.Items[i].Spec.PoolRef.Name == pool.Name {
-			candidates = append(candidates, hostList.Items[i])
+		h := &hostList.Items[i]
+		if h.Namespace == clusterNS && h.Spec.PoolRef.Name == pool.Name && h.Spec.ProviderRef.Name == providerCR.Name {
+			candidates = append(candidates, *h)
 		}
 	}
 

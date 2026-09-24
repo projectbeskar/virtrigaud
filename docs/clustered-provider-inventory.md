@@ -45,7 +45,7 @@ rationale, and phasing.
 
 | Field | Purpose |
 |-------|---------|
-| `spec.providerRef` | The clustered `Provider` that owns this pool. |
+| `spec.providerRef` | The clustered `Provider` that owns this pool. A **namespace-local** reference (`name` only): the pool must be in the Provider's namespace. |
 | `spec.strategy` | Default scheduling strategy: `Spread` (default) or `BinPack`. |
 | `spec.overcommit` | CPU/memory overcommit ratios (decimal strings, e.g. `"4.0"`). |
 | `spec.storagePools[]` | Named shared/local storage pools available in the pool. |
@@ -67,10 +67,10 @@ right now*.
 
 | `spec` field | Purpose |
 |-------|---------|
-| `providerRef` | The clustered `Provider` that executes on this host. |
+| `providerRef` | The clustered `Provider` that executes on this host. **Namespace-local** (`name` only): the Host must be in the Provider's namespace. |
 | `poolRef` | The `HostPool` this host joins (membership is declared by the host, ADR-0007 D3). |
-| `endpoint` | Connection URI (libvirt: `qemu+ssh://user@host/system`). |
-| `credentialSecretRef` | Optional per-host credential override; defaults to the Provider's. |
+| `endpoint` | Connection URI, validated at admission (see below). Only `qemu+ssh://[user@]host[:port]/system`, `qemu+ssh://[user@]host[:port]/session`, or (future host agent) `grpc://host:port`. |
+| `credentialSecretRef` | Optional per-host credential override; defaults to the Provider's. **Namespace-local**: the Secret must be in the Host's (= the Provider's) namespace. |
 | `labels` | Placement facts consumed as **hard scheduling constraints** (ADR-0007 D6): storage-pool visibility, network/bridge visibility, zone/rack. |
 | `schedulable` | Defaults `true`; set `false` to cordon (no new placement, existing VMs stay). |
 
@@ -79,6 +79,54 @@ right now*.
 model/features, machine types, emulator version, bound-VM count, and last
 heartbeat. It carries capacity and health only — **never connection secrets**
 (ADR-0007 Security).
+
+### Same-namespace model (security)
+
+A `HostPool`, its `Host`s, every credential `Secret` they use, and the clustered
+`Provider` they name **all live in one namespace — the Provider's**. The
+references on `Host` / `HostPool` (`providerRef`, `poolRef`,
+`credentialSecretRef`) are namespace-local and have no `namespace` field, and the
+operator enforces the same rule on its side:
+
+- the inventory render lists `Host`s with `client.InNamespace(<provider ns>)`,
+  so a `Host` created in any other namespace is ignored — it can neither enrol
+  into another team's Provider nor inherit that Provider's SSH identity;
+- every credential `Secret` is read from the Provider's namespace only. A
+  clustered Provider whose own `spec.credentialSecretRef.namespace` names a
+  **different** namespace does not get that Secret read: hosts that would fall
+  back to it are skipped and `HostCredentialsReady=False` with reason
+  `CredentialRefNamespaceRejected` (the manager's cluster-wide Secret access is
+  never used to copy SSH material out of a namespace);
+- the `Host` inventory-sync controller resolves `spec.providerRef` in the Host's
+  own namespace, and the VirtualMachine controller looks up `HostPool`s / `Host`s
+  in the **resolved Provider's namespace** (a VM may live elsewhere and reference
+  the Provider cross-namespace; its placement still uses the Provider's pool).
+
+Why: the inventory Secret carries each host's SSH private key, and the host
+endpoint is ultimately handed to the hypervisor host. Letting a namespace-scoped
+author steer either across namespaces turned "can create a `Host`" into "can read
+another namespace's Secrets" and "can run commands on another team's hypervisor".
+
+### Endpoint validation (security)
+
+`Host.spec.endpoint` is validated by the CRD schema (`minLength: 1`,
+`maxLength: 512`, and a pattern) and **re-validated by the provider** for every
+entry it loads from the mounted inventory, so a hand-edited inventory Secret
+cannot bypass admission. Accepted:
+
+```
+qemu+ssh://[user@]host[:port]/system
+qemu+ssh://[user@]host[:port]/session
+grpc://host:port                          # reserved for a future host agent
+```
+
+`user` is `[A-Za-z0-9._-]+`; `host` is a DNS name, an IPv4 address, or a
+bracketed IPv6 address (`[2001:db8::1]`). Query strings, fragments,
+percent-encoding, and any other path are rejected. The libvirt provider
+additionally shell-quotes every argument it sends to the host over SSH and only
+ever forwards `system` / `session` as the remote `virsh -c` instance, so even a
+released single-host `Provider` endpoint with an unusual path cannot inject a
+command.
 
 ### Placement labels are load-bearing
 
@@ -274,13 +322,17 @@ A thin, API-less provider (post-#297) must **not** read the Kubernetes API. So t
 operator tells it which hosts it fronts through a **single projected Secret**, not
 an API query:
 
-1. The **Provider controller** gathers the `Host` CRs whose `spec.providerRef`
-   names a `topology: cluster` Provider and renders their metadata into a
+1. The **Provider controller** gathers the `Host` CRs **in the Provider's
+   namespace** whose `spec.providerRef` names a `topology: cluster` Provider and
+   renders them — metadata **and inlined SSH credentials** — into a
    **versioned-schema document**.
 2. That document is written to a **Secret** (never a ConfigMap) named
    **`<provider>-hosts`**, **owner-referenced** to the Provider, in the provider's
    namespace. Re-renders are deterministic (hosts sorted by id), so an unchanged
-   inventory produces no Secret write.
+   inventory produces no Secret write. Host ids are unique by construction (one
+   namespace); a duplicated id is never resolved by "first wins" — every entry
+   carrying it is skipped (operator side, Warning event
+   `HostInventoryEntrySkipped`) and treated as unroutable (provider side).
 3. The Secret is **mounted read-only** into the provider pod at
    **`/etc/virtrigaud/hosts/`** (key `hosts.json`), mirroring the existing
    credential mount. The provider will **read that file — never the API**,
@@ -327,10 +379,13 @@ For every fronted `Host`, the Provider controller resolves one credential Secret
 and inlines its SSH material into that host's `credentials`:
 
 1. **Per-host override first.** If `Host.spec.credentialSecretRef` is set, that
-   Secret is used (its namespace defaults to the Host's namespace).
+   Secret is used — always from the Provider's namespace (the ref has no
+   namespace field).
 2. **Provider default otherwise.** Otherwise the Provider's own
-   `spec.credentialSecretRef` is used (in the Provider's namespace — the same
-   Secret the single-host credential mount uses).
+   `spec.credentialSecretRef` is used, in the Provider's namespace (the same
+   Secret the single-host credential mount uses). If that ref names a
+   **different** namespace, it is **not read**: the host is skipped with reason
+   `CredentialRefNamespaceRejected` (see *Same-namespace model* above).
 
 The controller extracts the libvirt credential-Secret keys `ssh-privatekey`
 (mandatory) and `known_hosts` (optional) and copies the raw bytes verbatim into
@@ -346,10 +401,17 @@ If a host's credential Secret is **missing**, **unreadable**, or **has no
 continues with the rest, then surfaces the skip:
 
 - a `HostCredentialsReady` **condition** on the Provider goes `False`
-  (reason `CredentialsUnresolved`), listing the skipped **host ids** and a coarse
+  (reason `CredentialsUnresolved`, or `CredentialRefNamespaceRejected` when a
+  host was skipped because its credential reference points outside the
+  Provider's namespace), listing the skipped **host ids** and a coarse
   **reason** (e.g. `credential secret default/foo not found`);
 - a **Warning event** (`HostCredentialsUnresolved`) is emitted on the Provider;
 - a structured **log** line records the same.
+
+A host whose `endpoint` fails re-validation or whose id is duplicated is skipped
+the same way, but surfaced with a separate Warning event
+(`HostInventoryEntrySkipped`) and log line rather than the credential condition
+— the endpoint value itself is never echoed.
 
 None of these ever carry a credential value — only host ids and coarse reasons.
 This is deliberately **fail-safe, never fail-open**: an unresolvable host is
@@ -450,8 +512,8 @@ It is a **read-only, status-only** sync — it never mutates a `Host` spec and h
 
 Per `Host`, one reconcile:
 
-1. **Resolve the `Provider`** named by `spec.providerRef` (namespace defaults to
-   the Host's). Missing → `health=Unknown`, `Ready=False` (`ProviderUnavailable`),
+1. **Resolve the `Provider`** named by `spec.providerRef` — always in the Host's
+   own namespace. Missing → `health=Unknown`, `Ready=False` (`ProviderUnavailable`),
    short-backoff requeue. Never a hard error.
 2. **Require a clustered provider.** If the Provider is not `topology: cluster`
    (D9), short-circuit *before* any RPC — a single-host provider cannot answer the
@@ -690,7 +752,8 @@ VM on. The VirtualMachine controller writes it after a confirmed clustered creat
 
 The **operator half** now lands: on the create path for a `topology: cluster`
 provider, the VirtualMachine controller resolves the candidates as the hosts of
-the provider's `HostPool` (**v1 assumes exactly one HostPool per clustered
+the provider's `HostPool` — looked up in the **Provider's namespace** (not the
+VM's), and only hosts that are in that pool **and** name that Provider — (**v1 assumes exactly one HostPool per clustered
 provider** — zero or many is a typed configuration error surfaced on the VM's
 `Provisioning=False` condition, never a silent guess; multi-pool selection is a
 later follow-up), feeds them to `Schedule`, sends the chosen host as

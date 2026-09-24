@@ -61,21 +61,26 @@ spec:
               clustered Provider (spec.topology=cluster, ADR-0007) executes on. The admin
               declares which hosts exist; the provider reports what they can do right now
               (see HostStatus).
+
+              Same-namespace model (security): a Host, its HostPool, its optional credential
+              Secret, and the clustered Provider it names all live in ONE namespace — the
+              Provider's. Every reference on this spec is therefore a LocalObjectReference
+              (no namespace field). A Host in another namespace can neither enrol itself
+              into a Provider's inventory nor point the operator at a credential Secret in
+              a namespace its author does not control: the inventory render lists Hosts and
+              resolves credential Secrets in the Provider's namespace only.
             properties:
               credentialSecretRef:
                 description: |-
                   CredentialSecretRef optionally overrides the Provider's credentials for
                   this host (SSH key / known_hosts material). Defaults to the Provider's.
+                  The Secret must be in the Host's (= the Provider's) namespace: the operator
+                  never reads a credential Secret from another namespace on a Host's behalf,
+                  so a Host author cannot exfiltrate a Secret they cannot already read.
                 properties:
                   name:
                     description: Name of the referenced object
                     maxLength: 253
-                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
-                    type: string
-                  namespace:
-                    description: Namespace of the referenced object (defaults to current
-                      namespace)
-                    maxLength: 63
                     pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                     type: string
                 required:
@@ -83,8 +88,14 @@ spec:
                 type: object
               endpoint:
                 description: |-
-                  Endpoint is the host connection URI (libvirt: qemu+ssh://user@host/system;
-                  a future cloud-hypervisor host-agent: grpc://host:port).
+                  Endpoint is the host connection URI. Only these shapes are accepted:
+                  qemu+ssh://[user@]host[:port]/system, qemu+ssh://[user@]host[:port]/session
+                  (libvirt), and grpc://host:port (a future cloud-hypervisor host agent). The
+                  host is a DNS name, an IPv4 address, or a bracketed IPv6 address. No query
+                  string, fragment, percent-encoding, or other path is allowed.
+                maxLength: 512
+                minLength: 1
+                pattern: ^(qemu\+ssh://([A-Za-z0-9._-]+@)?([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*|\[[0-9A-Fa-f:.]+\])(:[0-9]{1,5})?/(system|session)|grpc://([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*|\[[0-9A-Fa-f:.]+\]):[0-9]{1,5})$
                 type: string
               labels:
                 additionalProperties:
@@ -109,18 +120,14 @@ spec:
                 - name
                 type: object
               providerRef:
-                description: ProviderRef is the clustered Provider that executes on
-                  this host.
+                description: |-
+                  ProviderRef is the clustered Provider that executes on this host. It must
+                  be in the Host's own namespace: a Host can only be fronted by a Provider in
+                  the same namespace (no cross-namespace inventory injection).
                 properties:
                   name:
                     description: Name of the referenced object
                     maxLength: 253
-                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
-                    type: string
-                  namespace:
-                    description: Namespace of the referenced object (defaults to current
-                      namespace)
-                    maxLength: 63
                     pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                     type: string
                 required:

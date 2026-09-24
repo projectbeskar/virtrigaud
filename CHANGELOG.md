@@ -5,6 +5,49 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-24 07:58] - Clustered Host same-namespace model and endpoint validation
+**Author:** @wrkode (William Rizzo)
+
+### Security
+- `api/infra.virtrigaud.io/v1beta1/host_types.go`, `hostpool_types.go`: **same-namespace model.** `Host.spec.providerRef` and `HostPool.spec.providerRef` become `LocalObjectReference`, and `Host.spec.credentialSecretRef` becomes `*LocalObjectReference`. Before, a Host in any namespace could name another namespace's clustered Provider, which enrolled it in that Provider's inventory and gave it that Provider's SSH key. It could also point the manager at a credential Secret in any namespace. `Host.spec.endpoint` gains `minLength: 1`, `maxLength: 512` and a pattern that accepts only `qemu+ssh://[user@]host[:port]/system|session` or `grpc://host:port` (host = DNS name, IPv4 or `[IPv6]`); the pattern is exported as `HostEndpointPattern`. **Both kinds are unreleased (added after v0.3.11), so this does not break a released API.**
+- `internal/controller/provider_hostinventory.go`:
+  - The inventory render lists Hosts with `client.InNamespace(provider.Namespace)`, and resolves every credential Secret in the Provider's namespace only.
+  - If a clustered Provider's own `spec.credentialSecretRef.namespace` names another namespace, that Secret is **not read**. Hosts that would fall back to it are skipped with `HostCredentialsReady=False`, reason `CredentialRefNamespaceRejected`.
+  - Hosts whose endpoint fails re-validation, or whose id is duplicated, are skipped with a Warning event `HostInventoryEntrySkipped`; the endpoint is never echoed. Hosts are processed in stable id order.
+- `internal/clustered/hostsecret/hostsecret.go`: new `ValidateEndpoint` / `EndpointPattern`, pinned to the API pattern by a test. `Marshal` sorts stably and rejects duplicate host ids (`ErrDuplicateHostID`).
+- `internal/providers/libvirt/hostconn/cluster.go`, `cluster_dialer.go`: the provider re-validates every inventory entry's endpoint before routing or dialing it, so a hand-edited inventory Secret cannot bypass admission. A duplicated host id makes **every** entry with that id unroutable, instead of the first one winning. The dialer also requires the `qemu+ssh` scheme.
+
+### Changed
+- `internal/controller/virtualmachine_controller.go`: clustered placement looks up HostPools and Hosts in the **resolved Provider's namespace** (not the VM's), and only considers hosts that are in the pool **and** name the Provider.
+- `internal/controller/host_controller.go`: resolves `spec.providerRef` in the Host's own namespace only.
+- `config/crd/bases/infra.virtrigaud.io_hosts.yaml`, `infra.virtrigaud.io_hostpools.yaml`, `zz_generated.deepcopy.go`: regenerated.
+- `examples/hostpool-clustered.yaml`, `examples/provider-libvirt-clustered.yaml`, `docs/clustered-provider-inventory.md`, `docs/adr/0007-clustered-orchestrator-provider.md`:
+  - Document the same-namespace rule and endpoint validation.
+  - Correct the claim that the inventory Secret carries no credentials; it inlines each host's SSH key and known_hosts.
+  - Add an ADR-0007 amendment note.
+
+### Added
+- Tests:
+  - `host_types_test.go`: CRD schema/pattern accept and reject table, and namespace-local ref checks.
+  - `hostsecret/validate_test.go`: `ValidateEndpoint` and duplicate-id tests.
+  - `provider_hostinventory_security_test.go`: render and credential namespace isolation, the foreign Provider credential ref, and invalid-endpoint and deterministic duplicate-id tests, using a Secret-read spy.
+  - Host-controller and VM-placement namespace tests.
+  - Registry and dialer endpoint-rejection tests.
+
+### Why
+A security review found a tenant-to-hypervisor chain. Any namespace could enrol a Host into another namespace's clustered Provider and inherit its SSH key, using an endpoint containing shell metacharacters. The review also found a cross-namespace Secret exfiltration path through the inventory render. This change enforces a same-namespace model in both the schema and the controller, and validates endpoints at admission and again in the provider. Shell quoting of the remote command line is a separate change.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+> Existing Host/HostPool objects that set a `namespace` in `providerRef` or
+> `credentialSecretRef` must drop it and live in the Provider's namespace.
+> Apply the regenerated CRDs (`kubectl apply -f config/crd/bases`) before
+> rolling the manager.
+
 ## [2026-09-24 07:57] - Shell-quote every libvirt command sent to the hypervisor over SSH
 **Author:** @wrkode (William Rizzo)
 

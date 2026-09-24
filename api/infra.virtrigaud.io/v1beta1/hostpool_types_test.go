@@ -91,7 +91,7 @@ func TestHostPool_JSONRoundTrip(t *testing.T) {
 			Namespace: "cluster-a",
 		},
 		Spec: HostPoolSpec{
-			ProviderRef:  ObjectRef{Name: "libvirt-cluster"},
+			ProviderRef:  LocalObjectReference{Name: "libvirt-cluster"},
 			Strategy:     PoolStrategySpread,
 			Overcommit:   &OvercommitRatios{CPU: "4.0", Memory: "1.0"},
 			StoragePools: []StoragePoolRef{{Name: "nfs01"}, {Name: "local-ssd"}},
@@ -156,7 +156,7 @@ func TestHostPool_DeepCopy(t *testing.T) {
 	orig := &HostPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "pool-a"},
 		Spec: HostPoolSpec{
-			ProviderRef:  ObjectRef{Name: "p"},
+			ProviderRef:  LocalObjectReference{Name: "p"},
 			Strategy:     PoolStrategyBinPack,
 			Overcommit:   &OvercommitRatios{CPU: "4.0"},
 			StoragePools: []StoragePoolRef{{Name: "nfs01"}},

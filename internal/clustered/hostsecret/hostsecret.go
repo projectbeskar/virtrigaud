@@ -30,8 +30,57 @@ package hostsecret
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
+	"regexp"
 	"sort"
 )
+
+// ErrDuplicateHostID is returned (wrapped) by Marshal when two hosts in an
+// inventory share an ID. Host IDs are the per-namespace Host CR names, so a
+// duplicate means an inventory was assembled from more than one namespace or
+// hand-edited — never something to resolve by "keep the first".
+var ErrDuplicateHostID = errors.New("hostsecret: duplicate host id")
+
+// ErrInvalidEndpoint is returned (wrapped) by ValidateEndpoint for an endpoint
+// outside the accepted shapes (see EndpointPattern).
+var ErrInvalidEndpoint = errors.New("hostsecret: invalid host endpoint")
+
+// EndpointPattern is the provider-side copy of the Host.spec.endpoint CRD
+// admission pattern (api/infra.virtrigaud.io/v1beta1.HostEndpointPattern). It is
+// duplicated rather than imported because this package is deliberately
+// stdlib-only; TestEndpointPatternMatchesAPI pins the two byte-for-byte.
+//
+// Accepted: qemu+ssh://[user@]host[:port]/(system|session) and grpc://host:port,
+// host = DNS name | IPv4 | [IPv6]. The provider re-validates every inventory
+// entry against it before use, so a hand-edited inventory Secret cannot bypass
+// the CRD admission check and smuggle shell metacharacters into the libvirt
+// connection URI forwarded to the hypervisor host.
+const EndpointPattern = `^(qemu\+ssh://([A-Za-z0-9._-]+@)?([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*|\[[0-9A-Fa-f:.]+\])(:[0-9]{1,5})?/(system|session)|grpc://([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*|\[[0-9A-Fa-f:.]+\]):[0-9]{1,5})$`
+
+// maxEndpointLength mirrors the CRD's maxLength on Host.spec.endpoint.
+const maxEndpointLength = 512
+
+// endpointRE is EndpointPattern compiled once. regexp.MustCompile on a
+// package-level constant is a load-time programming-error guard (a malformed
+// constant fails every test), not a runtime panic path.
+var endpointRE = regexp.MustCompile(EndpointPattern)
+
+// ValidateEndpoint reports whether endpoint is an accepted host connection URI
+// (see EndpointPattern). The returned error never echoes the endpoint value: it
+// names only the coarse rule that failed, so it is safe to log or surface in a
+// condition even if a malformed inventory carried something unexpected there.
+func ValidateEndpoint(endpoint string) error {
+	switch {
+	case endpoint == "":
+		return fmt.Errorf("%w: empty", ErrInvalidEndpoint)
+	case len(endpoint) > maxEndpointLength:
+		return fmt.Errorf("%w: longer than %d bytes", ErrInvalidEndpoint, maxEndpointLength)
+	case !endpointRE.MatchString(endpoint):
+		return fmt.Errorf("%w: must be qemu+ssh://[user@]host[:port]/system|session or grpc://host:port", ErrInvalidEndpoint)
+	}
+	return nil
+}
 
 const (
 	// SchemaVersion is the current host-inventory schema version. It is written
@@ -72,13 +121,16 @@ type Inventory struct {
 // (id, endpoint, labels) plus the per-host connection Credentials the provider
 // uses to reach it (see Credentials).
 type Host struct {
-	// ID is the stable host identifier — the Host CR name. It is the key the
+	// ID is the stable host identifier — the Host CR name. Hosts are rendered
+	// only from the Provider's own namespace, so IDs are unique by construction;
+	// Marshal rejects a duplicate rather than picking one. It is the key the
 	// provider uses to open and address a per-host connection, and the sort key
 	// for deterministic rendering.
 	ID string `json:"id"`
 
 	// Endpoint is the host connection URI (libvirt: qemu+ssh://user@host/system;
-	// a future agent host: grpc://host:port). Copied from Host.spec.endpoint.
+	// a future agent host: grpc://host:port). Copied from Host.spec.endpoint and
+	// re-validated by the provider with ValidateEndpoint before use.
 	Endpoint string `json:"endpoint"`
 
 	// Labels are the host's placement facts (storage-pool/network visibility,
@@ -147,12 +199,26 @@ type Credentials struct {
 //   - a nil/empty host slice is rendered as [] (never JSON null);
 //   - encoding/json emits map keys (labels) in sorted order.
 //
+// Host IDs must be unique: a duplicate ID is an ambiguous inventory (which
+// endpoint/credentials does the provider route that id to?), so Marshal refuses
+// it with ErrDuplicateHostID rather than emitting a document whose meaning
+// depends on sort order. Callers de-duplicate first (the Provider controller
+// skips every host sharing a duplicated id and surfaces why).
+//
 // Marshal does not mutate inv.
 func Marshal(inv Inventory) ([]byte, error) {
-	// Sort a copy so the caller's slice is never reordered.
+	// Sort a copy so the caller's slice is never reordered. SliceStable keeps
+	// the output a pure function of the input even if two entries compare
+	// equal (they cannot below — duplicates are rejected — but the order must
+	// never depend on the sort algorithm).
 	hosts := make([]Host, len(inv.Hosts))
 	copy(hosts, inv.Hosts)
-	sort.Slice(hosts, func(i, j int) bool { return hosts[i].ID < hosts[j].ID })
+	sort.SliceStable(hosts, func(i, j int) bool { return hosts[i].ID < hosts[j].ID })
+	for i := 1; i < len(hosts); i++ {
+		if hosts[i].ID == hosts[i-1].ID {
+			return nil, fmt.Errorf("%w: %q", ErrDuplicateHostID, hosts[i].ID)
+		}
+	}
 
 	// make() above returns a non-nil slice even when len==0, so an empty
 	// inventory marshals to "hosts": [] rather than "hosts": null.
