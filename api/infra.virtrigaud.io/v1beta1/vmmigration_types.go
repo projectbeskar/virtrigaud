@@ -92,11 +92,13 @@ type MigrationTarget struct {
 	// namespace is allowed only when that Namespace object carries the
 	// annotation infra.virtrigaud.io/allowed-source-namespaces and its
 	// comma-separated value lists the VMMigration's namespace (exact names, no
-	// wildcards). Namespaces are cluster-scoped, so the annotation is a cluster
-	// administrator's grant. Without it the migration is held before any side
-	// effect (Ready=False, reason TargetNamespaceNotAllowed); the grant is
-	// re-checked before the disk import, the target VM creation and the
-	// cleanup, so revoking it stops a migration in flight. Granting the
+	// wildcards). Whoever can update the target Namespace can grant this
+	// (normally a cluster administrator, since Namespaces are cluster-scoped).
+	// A granted migration's disk is not attached in place: the target VM
+	// treats it as a base image. Without the grant the migration is held
+	// before any side effect (Ready=False, reason TargetNamespaceNotAllowed);
+	// the grant is re-checked before the disk import, the target VM creation
+	// and the cleanup, so revoking it stops a migration in flight. Granting the
 	// annotation or changing this field resumes it.
 	// +optional
 	// +kubebuilder:validation:Pattern="^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"

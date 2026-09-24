@@ -72,11 +72,11 @@ type VMCloneTarget struct {
 	// allowed only when that Namespace object carries the annotation
 	// infra.virtrigaud.io/allowed-source-namespaces and its comma-separated
 	// value lists the VMClone's namespace (exact names, no wildcards).
-	// Namespaces are cluster-scoped, so the annotation is a cluster
-	// administrator's grant. Without it the clone is refused (Ready=False,
-	// reason TargetNamespaceNotAllowed) and nothing is created in, read from or
-	// bound in the target namespace; granting the annotation or changing this
-	// field resumes it.
+	// Whoever can update the target Namespace can grant this (normally a
+	// cluster administrator, since Namespaces are cluster-scoped). Without it
+	// the clone is refused (Ready=False, reason TargetNamespaceNotAllowed) and
+	// nothing is created in, read from or bound in the target namespace;
+	// granting the annotation or changing this field resumes it.
 	// +optional
 	// +kubebuilder:validation:Pattern="^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
 	// +kubebuilder:validation:MaxLength=63

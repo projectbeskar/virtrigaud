@@ -760,7 +760,8 @@ func (r *VMCloneReconciler) liveReader() client.Reader {
 // nothing yet waits in Pending, and one already in flight keeps its phase,
 // task and target ID so it resumes if the grant returns. Nothing already
 // created is touched. The Warning event is emitted only on the transition, and
-// the recheck is slow: only an administrator can lift the refusal.
+// the recheck is slow: only whoever can update the target Namespace can lift
+// the refusal.
 func (r *VMCloneReconciler) markTargetNamespaceNotAllowed(
 	ctx context.Context,
 	clone *infrav1beta1.VMClone,

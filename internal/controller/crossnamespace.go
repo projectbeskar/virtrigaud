@@ -45,9 +45,12 @@ const (
 	// a VMClone or VMMigration in ANOTHER namespace create a VirtualMachine in
 	// the annotated namespace. Its value is a comma-separated list of exact
 	// namespace names; spaces around an entry are ignored and there are no
-	// wildcards. Namespaces are cluster-scoped, so setting it is a cluster
-	// administrator's grant: a tenant who can only write objects inside its own
-	// namespace cannot grant itself access to another one.
+	// wildcards. Whoever can update the target Namespace can grant: Namespaces
+	// are cluster-scoped, so a tenant who can only write objects inside its own
+	// namespace cannot grant itself access to another one — but self-service
+	// platforms may let namespace owners annotate their own Namespace. Grants
+	// match namespace NAMES, so a namespace deleted and recreated under the same
+	// name keeps every grant that lists it.
 	AllowedSourceNamespacesAnnotation = "infra.virtrigaud.io/allowed-source-namespaces"
 
 	// ReasonTargetNamespaceNotAllowed is the condition reason a VMClone or
@@ -60,8 +63,9 @@ const (
 	// crossNamespaceRecheckInterval is how often a refused VMClone or
 	// VMMigration re-checks its target namespace's grant. It is a safety net:
 	// the Namespace watch re-drives a refused object as soon as the annotation
-	// changes, so the interval is deliberately slow — only an administrator can
-	// lift the refusal, and a fast requeue would just hot-loop.
+	// changes, so the interval is deliberately slow — only whoever can update
+	// the target Namespace can lift the refusal, and a fast requeue would just
+	// hot-loop.
 	crossNamespaceRecheckInterval = 5 * time.Minute
 )
 
@@ -113,8 +117,8 @@ func namespaceGrantsSource(ns *corev1.Namespace, sourceNamespace string) bool {
 // annotation that would grant access.
 func targetNamespaceNotAllowedMessage(sourceNamespace, targetNamespace string) string {
 	return fmt.Sprintf("namespace %q may not create VirtualMachines in namespace %q: "+
-		"a cluster administrator must add %q to the %s annotation of namespace %q",
-		sourceNamespace, targetNamespace, sourceNamespace, AllowedSourceNamespacesAnnotation, targetNamespace)
+		"someone who can update namespace %q must add %q to its %s annotation",
+		sourceNamespace, targetNamespace, targetNamespace, sourceNamespace, AllowedSourceNamespacesAnnotation)
 }
 
 // allowedSourceNamespacesChanged is the predicate for the Namespace watch the

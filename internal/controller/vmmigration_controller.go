@@ -1385,7 +1385,8 @@ func (r *VMMigrationReconciler) liveReader() client.Reader {
 // NOT a failure: the phase, retry count and any staged/imported state are kept
 // so the migration resumes where it stopped once the grant is present, and
 // nothing already created is touched. The Warning event is emitted only on the
-// transition, and the recheck is slow: only an administrator can lift it.
+// transition, and the recheck is slow: only whoever can update the target
+// Namespace can lift it.
 func (r *VMMigrationReconciler) markTargetNamespaceNotAllowed(
 	ctx context.Context,
 	migration *infrav1beta1.VMMigration,

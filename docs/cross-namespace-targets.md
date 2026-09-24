@@ -38,10 +38,23 @@ disk in place.
   The value is a comma-separated list of exact namespace names. Spaces around
   an entry are ignored. Nothing else is interpreted: `*`, `team-*`, a prefix
   such as `team`, and a different case all fail to match.
-- **The grant is an administrator's decision.** `Namespace` is cluster-scoped.
-  A tenant who can only write objects inside their own namespace can't
-  annotate another namespace, and so can't grant themselves access. Keep
-  `update`/`patch` on `namespaces` limited to cluster administrators.
+- **Whoever can update the target `Namespace` can grant.** `Namespace` is
+  cluster-scoped, so on a plain cluster that's a cluster administrator: a
+  tenant who can only write objects inside their own namespace can't annotate
+  another namespace, and so can't grant themselves access. Keep
+  `update`/`patch` on `namespaces` limited to the people who should decide.
+- **Self-service platforms can change who that is.** Tools like Capsule, HNC
+  and Rancher projects may let a namespace owner update their own `Namespace`,
+  including its annotations. There, a tenant can open its own namespace to
+  other namespaces. Where that matters, block or restrict
+  `infra.virtrigaud.io/allowed-source-namespaces` with a tenant policy, for
+  example a Kyverno or Gatekeeper rule that only lets platform administrators
+  set it.
+- **Grants match namespace names, not identities.** If a namespace listed in a
+  grant is deleted and a new namespace is later created with the same name,
+  the new namespace inherits the grant. Remove a deleted namespace's name from
+  every `allowed-source-namespaces` value, and review the grants before you
+  reuse a namespace name.
 
 ## When a target is refused
 
@@ -65,13 +78,15 @@ tenant whether the namespace exists.
 
 Either of these lets the object continue from where it stopped:
 
-- An administrator adds the grant. The manager watches that annotation on
-  `Namespace` objects and re-runs the affected objects right away.
+- Someone who can update the target `Namespace` adds the grant. The manager
+  watches that annotation on `Namespace` objects and re-runs the affected
+  objects right away.
 - The owner changes `spec.target.namespace` to the object's own namespace, or
   empties it.
 
 A refused object is also re-checked every 5 minutes. The manager doesn't retry
-it faster, because only an administrator can lift the refusal.
+it faster, because only someone who can update the target `Namespace` can lift
+the refusal.
 
 ## Revoking a grant
 
@@ -82,6 +97,13 @@ namespace, not only when the object is first reconciled:
 |---|---|
 | `VMClone` | every reconcile: the provider `Clone` call, the task poll and the check for an existing VM; again right before the target VM is created and bound |
 | `VMMigration` | `Validating` (before the source is powered off or snapshotted, and before the staging PVC or the export); `Importing` (before `ImportDisk` lands the disk); `Creating` (before the target VM is read or created); `Validating-Target` (before the target VM is annotated); deletion (before the finalizer removes a partly created target VM) |
+
+These checks read the manager's cache, which can briefly lag a change. So the
+steps that create something in the target namespace re-read the grant straight
+from the API server just before they run: the provider `Clone` call, the
+migration's `ImportDisk` call, and the `Create` of the target VM for a clone or
+a migration. If the API server shows the grant revoked, the step isn't taken,
+even if the cache still shows the grant.
 
 If a grant is removed while a clone or migration is running, the next of these
 steps is refused and the object waits as described above. Nothing that already
@@ -108,6 +130,19 @@ namespace would resolve in the target namespace instead:
 For a target in the object's own namespace, these references stay as they
 were.
 
+### A granted migration's disk is not attached in place
+
+A migration's landing disk is attached in place only when the manager can
+prove it belongs to that VM: the VM's `spec.importedDisk.migrationRef` has to
+name a `VMMigration` in the **VM's own namespace**. A migration into another
+namespace lives in the source namespace, so the lookup finds nothing, and the
+target VM's imported disk is handled as a base image. On libvirt it's confined,
+then copied into the VM's own disk or refused. It's never attached in place,
+so this fails closed. For a granted cross-namespace migration, expect the disk
+to be copied, or the target VM's create to be refused. A migration into its
+own namespace is unaffected. See
+[`image-preparation.md`](image-preparation.md) for the base-image rules.
+
 ## Source references
 
 Every source reference is local to the object's namespace.
@@ -128,7 +163,8 @@ the migration uses the source VM's Provider, as before.
 ## RBAC
 
 The manager's role gains read-only access to `namespaces`
-(`get`, `list`, `watch`) so it can read and watch the grant. This applies to
+(`get`, `list`, `watch`) so it can read and watch the grant, and re-read it
+from the API server before a create step. This applies to
 the kubebuilder markers, `config/rbac/role.yaml`, and both chart RBAC templates
 (`rbac.scope: cluster` and `namespace`). The manager never writes `Namespace`
 objects.
@@ -137,9 +173,9 @@ objects.
 
 - **Breaking for cross-namespace targets.** A `VMClone` or `VMMigration` whose
   `spec.target.namespace` names another namespace used to work with no grant.
-  After the upgrade, it waits with `TargetNamespaceNotAllowed` until an
-  administrator annotates the target namespace. This includes objects that
-  are in flight during the upgrade. Before upgrading, list the objects
+  After the upgrade, it waits with `TargetNamespaceNotAllowed` until someone
+  who can update the target `Namespace` annotates it. This includes objects
+  that are in flight during the upgrade. Before upgrading, list the objects
   affected:
 
   ```sh
