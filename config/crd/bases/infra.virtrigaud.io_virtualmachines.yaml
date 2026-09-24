@@ -749,6 +749,23 @@ spec:
                   done) — never speculatively (honesty-first). Empty for VMs on single-host
                   or thin-client providers, which have no operator-owned placement decision.
                 properties:
+                  excludedHosts:
+                    description: |-
+                      ExcludedHosts are Hosts (CR names) the scheduler must not choose for this
+                      VM (ADR-0007 Addendum A, A2 amendment). A Host is added when a Create on
+                      it was refused with a name conflict (ALREADY_EXISTS: a same-named domain
+                      this VM does not own is there), which proves this VM created nothing on
+                      it; its pendingHost is then cleared and the VM is re-scheduled onto
+                      another Host. The list is bounded (the oldest entry is dropped when it is
+                      full) and is cleared when the VM is bound. If every candidate Host is
+                      excluded the VM stays unplaced (Placed=False/AllHostsExcluded) until an
+                      administrator resolves the name conflicts and clears this list.
+                    items:
+                      maxLength: 253
+                      type: string
+                    maxItems: 16
+                    type: array
+                    x-kubernetes-list-type: set
                   host:
                     description: |-
                       Host is the Host (CR name) this VM is bound to run on — the durable

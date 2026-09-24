@@ -155,6 +155,14 @@ type Request struct {
 	// and namespace-scoped.
 	PlacedVMs []PlacedVM
 
+	// ExcludedHosts are hosts (Host CR names) the caller has ruled out for THIS
+	// VM, whatever their fit — e.g. a host where a Create of the VM was refused
+	// with a name conflict (ADR-0007 Addendum A, A2 amendment;
+	// VirtualMachine.status.placement.excludedHosts). They are rejected first,
+	// with the RejectionExcludedForVM category, so a caller can tell "every
+	// candidate is excluded" apart from any other no-fit.
+	ExcludedHosts []string
+
 	// RequiredStoragePools are the storage pools the VM's disks need (resolved by
 	// the caller). Each becomes a required Host.spec.labels visibility check
 	// (LabelStoragePoolPrefix + name), ADR-0007 D6.

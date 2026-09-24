@@ -95,6 +95,24 @@ func (e *NoFeasibleHostError) Is(target error) bool {
 	return target == ErrNoFeasibleHost
 }
 
+// AllExcluded reports whether err is a no-fit in which EVERY candidate host was
+// rejected because the caller excluded it (Request.ExcludedHosts,
+// RejectionExcludedForVM). It is false for an empty pool, for any other error,
+// and when at least one candidate was rejected for another reason (capacity,
+// health, policy, ...) — that is an ordinary no-fit which may clear by itself.
+func AllExcluded(err error) bool {
+	var nf *NoFeasibleHostError
+	if !errors.As(err, &nf) || nf.Candidates == 0 || len(nf.Rejections) != nf.Candidates {
+		return false
+	}
+	for _, r := range nf.Rejections {
+		if r.Reason != RejectionExcludedForVM {
+			return false
+		}
+	}
+	return true
+}
+
 // newNoFeasibleHostError builds the typed error from the collected rejections,
 // sorting them by host id so the error is deterministic regardless of candidate
 // input order.
