@@ -65,9 +65,10 @@ type CreateRequest struct {
 	// Owner identifies the Kubernetes object (the VirtualMachine) this create is
 	// performed for, threaded to the wire as CreateRequest.owner. A provider that
 	// keys hypervisor VMs by a name that is not unique across tenants (libvirt:
-	// the bare VirtualMachine name, stamped in the domain <metadata>; vSphere: the
-	// bare name within the target folder, stamped in the VM's ExtraConfig — see
-	// docs/vm-ownership.md) stamps it onto the VM it creates and binds to
+	// the domain name — "<namespace>.<name>" for a new domain, derived from this
+	// Owner, the bare name for a legacy one — stamped in the domain <metadata>;
+	// vSphere: the bare name within the target folder, stamped in the VM's
+	// ExtraConfig — see docs/vm-ownership.md) stamps it onto the VM it creates and binds to
 	// an already-existing VM of the requested name ONLY when that VM carries this
 	// Owner.UID — otherwise it fails closed with a Conflict error instead of
 	// silently binding to another tenant's VM. The zero value (e.g. from an older
@@ -83,9 +84,11 @@ type ObjectIdentity struct {
 	// UID is the object's Kubernetes UID — unique for its whole lifetime and
 	// never reused, so it is the only field that may be used for authorization.
 	UID string
-	// Namespace is the object's namespace (informational: audit, diagnostics).
+	// Namespace is the object's namespace (informational: audit, diagnostics,
+	// and naming the hypervisor-side object — never authorization).
 	Namespace string
-	// Name is the object's name (informational: audit, diagnostics).
+	// Name is the object's name (informational: audit, diagnostics, and
+	// naming the hypervisor-side object — never authorization).
 	Name string
 }
 

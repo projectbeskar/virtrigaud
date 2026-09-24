@@ -594,8 +594,13 @@ func (s *StorageProvider) CreateVolumeFromImageFile(ctx context.Context, sourceI
 		return s.adoptVolumeInPlace(ctx, sourceImagePath, poolName)
 	}
 
-	// Source is not in pool directory or wrong format - need to copy/convert
+	// Source is not in pool directory or wrong format - need to copy/convert.
+	// Never over a disk another domain uses (e.g. a VM already running on the
+	// disk a second import of the same name would replace).
 	targetPath := filepath.Join(poolInfo.Path, volumeName+qcow2Ext)
+	if err := ensureDiskTargetFree(ctx, s.virshProvider, importedDiskSubject(volumeName), targetPath); err != nil {
+		return nil, err
+	}
 	return s.convertImageToVolume(ctx, sourceImagePath, "qcow2", targetPath, volumeName, poolName, sizeGB)
 }
 

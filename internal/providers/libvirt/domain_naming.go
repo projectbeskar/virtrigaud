@@ -160,6 +160,44 @@ func createDomainName(req contracts.CreateRequest) (string, error) {
 	return domainNameFor(req.Owner, req.Name)
 }
 
+// cloneDomainName is the domain name a Clone request makes for its target:
+// domainNameFor over req.TargetVM (the VirtualMachine the clone will be bound
+// to), falling back to req.TargetName for an older manager. As for Create, a
+// naming identity must name req.TargetName.
+func cloneDomainName(req contracts.CloneRequest) (string, error) {
+	if hasNamingIdentity(req.TargetVM) && req.TargetVM.Name != req.TargetName {
+		return "", contracts.NewInvalidSpecError(fmt.Sprintf(
+			"clone target name %q does not match its target VM name %q", req.TargetName, req.TargetVM.Name), nil)
+	}
+	return domainNameFor(req.TargetVM, req.TargetName)
+}
+
+// importedDiskVolumeName is the volume name a migration import lands its disk
+// under: "<domain>-migrated", where <domain> is domainNameFor(targetVM) — the
+// name the target VM's Create will give its domain, and therefore the only
+// imported disk that Create attaches in place (imagepath.go:
+// importedVolumeFileName(<domain>)). The provider owns this rule; the operator
+// never re-derives the name, it hands the returned landing path back to the VM.
+//
+// Without a naming identity (an older manager) it is targetName, the legacy
+// "<vm>-migrated" the manager chose, which may be empty (the caller then picks
+// a generated name). With one, a non-empty targetName must be the same VM's
+// legacy name ("<targetVM.Name>-migrated"), or the request is refused.
+func importedDiskVolumeName(targetVM contracts.ObjectIdentity, targetName string) (string, error) {
+	if !hasNamingIdentity(targetVM) {
+		return targetName, nil
+	}
+	if targetName != "" && targetName != targetVM.Name+contracts.ImportedDiskNameSuffix {
+		return "", contracts.NewInvalidSpecError(fmt.Sprintf(
+			"import target name %q does not match its target VM name %q", targetName, targetVM.Name), nil)
+	}
+	domain, err := domainNameFor(targetVM, "")
+	if err != nil {
+		return "", err
+	}
+	return domain + contracts.ImportedDiskNameSuffix, nil
+}
+
 // pendingCreateDomainName returns the domain name Create gives the VM owner
 // identifies, when a per-VM request addresses that VM by its bare name id —
 // which is how the operator addresses a clustered VM whose create is still in

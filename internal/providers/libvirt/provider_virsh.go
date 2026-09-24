@@ -372,7 +372,7 @@ func ensureDiskVolumeFree(ctx context.Context, vp *VirshProvider, sp *StoragePro
 	if pool.Path == "" {
 		return nil
 	}
-	return ensureDiskTargetFree(ctx, vp, domainName, filepath.Join(pool.Path, volumeName+qcow2Ext))
+	return ensureDiskTargetFree(ctx, vp, domainDiskSubject(domainName), filepath.Join(pool.Path, volumeName+qcow2Ext))
 }
 
 // createDiskFromHostImage builds the primary disk of the domain domainName
@@ -2508,8 +2508,13 @@ func (p *Provider) ImportDisk(ctx context.Context, req contracts.ImportDiskReque
 		return contracts.ImportDiskResponse{}, fmt.Errorf("unsupported import format: %s (libvirt supports qcow2, raw)", targetFormat)
 	}
 
-	// Generate disk ID
-	diskId := req.TargetName
+	// Generate disk ID: the same landing name as the gRPC import paths
+	// (importedDiskVolumeName: "<namespace>.<name>-migrated" for a request that
+	// names its target VM).
+	diskId, err := importedDiskVolumeName(req.TargetVM, req.TargetName)
+	if err != nil {
+		return contracts.ImportDiskResponse{}, err
+	}
 	if diskId == "" {
 		diskId = fmt.Sprintf("imported-disk-%d", time.Now().Unix())
 	}

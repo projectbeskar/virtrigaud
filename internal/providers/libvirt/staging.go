@@ -163,20 +163,24 @@ func (p *Provider) defineDomainFromXML(ctx context.Context, vp *VirshProvider, d
 	return nil
 }
 
-// ensureDiskTargetFree refuses to let a create overwrite the file at target —
-// the VM's own disk path, <pool>/<domain>-disk.qcow2 — when that file is a
-// disk (or backing file) of ANY domain defined on the host behind h.
+// ensureDiskTargetFree refuses to let VirtRigaud write a disk file over target
+// — a VM's own disk path (<pool>/<domain>-disk.qcow2, Create and Clone) or a
+// migration's landing disk (<pool>/<domain>-migrated.qcow2, ImportDisk) —
+// when that file is a disk (or backing file) of ANY domain defined on the
+// host behind h. subject names the file for the error message, which reaches
+// the requester's status and so never names the other domain.
 //
-// With namespaced domain names the file of another VM can only sit at this
+// With namespaced domain names the file of another VM can only sit at such a
 // path in corner cases (a legacy VM literally named "<namespace>.<name>", a
-// hand-made domain, or a linked clone backed by it), but `qemu-img convert`
-// would silently replace a live disk, so it is checked. A file at target that
-// no domain uses is overwritten: it can only be left over from an earlier,
-// failed create of a VM with this very domain name (same namespace and name —
-// the same VM retried, or a deleted one it replaces), which is exactly the
-// file this create is about to write. The common case — no file there — costs
-// one `test -e`; the full in-use scan runs only when a file exists.
-func ensureDiskTargetFree(ctx context.Context, h hostCommandRunner, domainName, target string) error {
+// hand-made domain, a linked clone backed by it, or a VM already running on a
+// disk a second migration would re-import), but `qemu-img convert` would
+// silently replace a live disk, so it is checked. A file at target that no
+// domain uses is overwritten: it can only be left over from an earlier,
+// failed attempt for this very domain name (same namespace and name — the
+// same VM retried, or a deleted one it replaces), which is exactly the file
+// about to be written. The common case — no file there — costs one `test -e`;
+// the full in-use scan runs only when a file exists.
+func ensureDiskTargetFree(ctx context.Context, h hostCommandRunner, subject, target string) error {
 	if _, err := runHost(ctx, h, "test", "-e", target); err != nil {
 		return nil // absent (or unreadable, and then qemu-img cannot replace it either)
 	}
@@ -185,12 +189,20 @@ func ensureDiskTargetFree(ctx context.Context, h hostCommandRunner, domainName, 
 		return err
 	}
 	if inUse {
-		log.Printf("WARN Refusing to create libvirt domain %s: its disk path %s is in use by another domain on the host", domainName, target)
+		log.Printf("WARN Refusing to write %s: %s is in use by another domain on the host", subject, target)
 		return contracts.NewConflictError(fmt.Sprintf(
-			"the disk file of libvirt domain %q already exists on the host and is in use by another domain; "+
-				"refusing to overwrite it", domainName), nil)
+			"%s already exists on the host and is in use by another domain; refusing to overwrite it", subject), nil)
 	}
-	log.Printf("INFO Disk file %s of domain %s exists but no domain uses it (left by an earlier failed create); overwriting it",
-		target, domainName)
+	log.Printf("INFO %s exists at %s but no domain uses it (left by an earlier failed attempt); overwriting it", subject, target)
 	return nil
+}
+
+// domainDiskSubject names a domain's primary disk file for ensureDiskTargetFree.
+func domainDiskSubject(domainName string) string {
+	return fmt.Sprintf("the disk file of libvirt domain %q", domainName)
+}
+
+// importedDiskSubject names a migration's landing disk for ensureDiskTargetFree.
+func importedDiskSubject(volumeName string) string {
+	return fmt.Sprintf("imported disk %q", volumeName)
 }

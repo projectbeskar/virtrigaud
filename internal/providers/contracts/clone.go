@@ -28,6 +28,13 @@ type CloneRequest struct {
 	Source VMRef
 	// TargetName is the desired name of the cloned VM.
 	TargetName string
+	// TargetVM identifies the VirtualMachine the clone will be bound to: its
+	// namespace and name (== TargetName); no UID, as it does not exist yet. A
+	// provider whose VM names are host-global names the clone from it (libvirt:
+	// "<namespace>.<name>", the same rule as Create) and returns that name as
+	// TargetVmID. Providers that do not need it ignore it; left empty, the
+	// legacy TargetName naming applies.
+	TargetVM ObjectIdentity
 	// Linked requests a copy-on-write linked clone when true. Best-effort:
 	// providers that cannot honor it fall back to a full clone unless the
 	// caller has already gated on SupportsLinkedClones.

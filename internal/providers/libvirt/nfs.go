@@ -124,13 +124,21 @@ func (s *Server) importDiskFromNFS(ctx context.Context, req *providerv1.ImportDi
 		return nil, fmt.Errorf("target pool %q has no resolvable host path", poolName)
 	}
 
-	volumeName := req.TargetName
+	volumeName, err := importVolumeName(req)
+	if err != nil {
+		return nil, err
+	}
 	if volumeName == "" {
 		volumeName = fmt.Sprintf("imported-disk-%d", time.Now().Unix())
 	}
 	volumeName = sanitizeVolumeName(volumeName)
 	poolPath := strings.TrimRight(poolInfo.Path, "/")
 	targetPath := fmt.Sprintf("%s/%s.qcow2", poolPath, volumeName)
+	// Never land over a disk another domain uses (e.g. a VM already running on
+	// the disk a second import of the same name would replace).
+	if err := ensureDiskTargetFree(ctx, hostConnRunner{conn: conn}, importedDiskSubject(volumeName), targetPath); err != nil {
+		return nil, err
+	}
 
 	log.Printf("INFO Importing disk from NFS to libvirt host: backend=nfs pool=%s volume=%s src=%s target=%s",
 		poolName, volumeName, nfsURL, targetPath)

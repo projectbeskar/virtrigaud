@@ -193,6 +193,8 @@ func TestVMClone_HappyPath(t *testing.T) {
 	assert.Equal(t, "vm-source-123", cp.lastClone.Source.ID)
 	assert.Empty(t, cp.lastClone.Source.HostID, "a single-host source is never sent a host")
 	assert.Equal(t, "clone-target", cp.lastClone.TargetName)
+	assert.Equal(t, contracts.ObjectIdentity{Namespace: ns, Name: "clone-target"}, cp.lastClone.TargetVM,
+		"the provider is told which VirtualMachine the clone is for (namespace + name, no UID yet)")
 	assert.False(t, cp.lastClone.Linked)
 
 	// Target VM CR exists, has Status.ID seeded, adopted label, provenance.

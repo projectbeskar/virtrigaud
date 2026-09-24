@@ -68,7 +68,9 @@ type VMImage struct {
 // TargetName, "<vm>-migrated"). It is the naming contract between the migration
 // controller, which picks the name, and providers, which use it to recognize a
 // disk that may be attached in place (see VMImage.ImportedDisk) and to refuse it
-// as a base image for any other VM.
+// as a base image for any other VM. A provider that names VMs by more than the
+// VM name (libvirt: "<namespace>.<name>") appends it to THAT name instead,
+// derived from ImportDiskRequest.TargetVM.
 const ImportedDiskNameSuffix = "-migrated"
 
 // NetworkAttachment defines network configuration (provider-agnostic)
@@ -256,6 +258,14 @@ type ImportDiskRequest struct {
 	// StorageOptionsJSON carries backend-specific options as JSON (ADR-0006
 	// Slice 0: always empty).
 	StorageOptionsJSON string
+	// TargetVM identifies the VirtualMachine the disk is imported for (a
+	// VMMigration's target): namespace and name; no UID, as it does not exist
+	// yet. A provider that attaches an imported disk in place only when it
+	// carries the VM's own name derives the landing name from it with its
+	// Create naming rule (libvirt: "<namespace>.<name>" + ImportedDiskNameSuffix)
+	// and returns the landing path in ImportDiskResponse.Path. Providers that do
+	// not need it ignore it; left empty, the legacy TargetName naming applies.
+	TargetVM ObjectIdentity
 }
 
 // ImportDiskResponse contains the result of a disk import operation
