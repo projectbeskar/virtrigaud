@@ -149,6 +149,32 @@ A released libvirt provider silently bound a VirtualMachine to any existing doma
 > - **Known limitation, tracked separately:** two creates of the *same name* running at the same time still stage files at name-derived paths (domain XML, disk, cloud-init ISO), so they can overwrite each other before either defines. Ownership stamping closes the sequential bind-to-existing case, not this race.
 > - One edge case: if the provider created a domain before the upgrade and the manager lost the `status.id` write for it, that VM's retried create is refused. Adopt the domain to recover.
 
+## [2026-09-24 08:43] - ADR-0007 Addendum A: post-create lifecycle routing contract
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `docs/adr/0007-clustered-orchestrator-provider.md`: **Addendum A** defines how a clustered provider routes every post-create per-VM call to the VM's bound host. Staff-architect reviewed it against the code.
+  - **A1:** the operator passes `status.placement.host` as an additive `target_host_id` on every per-VM request, built into a typed `contracts.VMRef{ID, HostID}`. `CloneRequest` gains `source_host_id`, and clustered image-prepare is reported unsupported until it is host-scoped. The provider leases the host through one `withHostConn` helper on `libvirtConn`, and never looks a VM's host up by itself.
+  - **A2:** a new unconfirmed `status.placement.pendingHost` is persisted with a checked update before `Create` and reused on retry. Deleting a VM while its create is pending sends an owner-checked `Delete`. A Host in-use finalizer prevents deleting a Host that VMs still name.
+  - **A3:** `ListVMs` runs across all hosts, with per-host deadlines, a `host_id` on each result, and a list of unreachable hosts.
+  - **A4:** no automatic re-creation or failover for clustered VMs (D8). This must ship before the ADR-0008 native switch.
+  - **A5:** a six-slice rollout, with the owner-metadata fix as a prerequisite and `Describe` first. `topology: cluster` stays experimental until slice 5.
+  - **A6:** an open question on bindings lost in a backup restore.
+
+### Changed
+- `docs/adr/0007-clustered-orchestrator-provider.md`: implementation status updated to 2026-09-24. Inventory, placement and admission are merged, but post-create routing is not, so `topology: cluster` is experimental. The follow-ups list now includes Addendum A.
+- `docs/clustered-provider-inventory.md`: replaced the misleading "wired end-to-end" wording. Only `Create` is host-aware today, so a clustered VM cannot yet be managed after it is created.
+- `docs/adr/0007-0008-blocking-decisions.md`: the header no longer calls ADR-0007/0008 `Proposed` drafts; both are accepted.
+
+### Why
+A codebase review found that clustered VMs could be created but not managed afterwards, because post-create RPCs never reached the bound host. It also found that a lost status write after `Create` could produce a duplicate domain on a second host. This records the routing contract before the implementation slices begin.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
 ## [2026-09-24 07:58] - Clustered Host same-namespace model and endpoint validation
 **Author:** @wrkode (William Rizzo)
 

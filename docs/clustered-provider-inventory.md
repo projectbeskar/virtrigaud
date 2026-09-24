@@ -788,10 +788,16 @@ feature.
   operator-initiated evacuation, but does **not** auto-restart VMs elsewhere.
   Without fencing/STONITH that would risk split-brain disk corruption; automatic
   HA is a deferred future ADR (ADR-0007 D8/P5).
-- **No rescheduling or migration yet.** Placement binding at **create** is now
-  wired end-to-end: the VirtualMachine controller schedules a clustered VM onto a
+- **Experimental: only `Create` is host-aware so far.** Placement binding at
+  **create** is wired: the VirtualMachine controller schedules a clustered VM onto a
   `HostPool` host, sends `target_host_id`, and writes `status.placement` after the
-  provider confirms, and the `vprovider.kb.io` validating webhook now enforces the
-  topology×type rule at admission (ADR-0007 D2). What is still **not** wired is
-  moving an *already-created* VM — rescheduling a bound VM to a different host, and
-  host→host `Migrate` / `VMHostMigration`. Those land in later ADR-0007 slices.
+  provider confirms. The `vprovider.kb.io` validating webhook enforces the
+  topology×type rule at admission (ADR-0007 D2). **Post-create operations are not
+  routed yet:** `Describe`, `Power`, `Reconfigure`, snapshots, `Clone` and `Delete`
+  do not reach the bound host, so a clustered VM cannot be managed after it is
+  created. The routing contract is ADR-0007 **Addendum A**, delivered in slices.
+  Until slice 5 validates a real clustered VM end to end, do not run workloads on
+  `topology: cluster`.
+- **No rescheduling or migration yet.** Moving an *already-created* VM is not wired:
+  neither rescheduling a bound VM to a different host, nor host→host `Migrate` /
+  `VMHostMigration`. These land in later ADR-0007 phases.

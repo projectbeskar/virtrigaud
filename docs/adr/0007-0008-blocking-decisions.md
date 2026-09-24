@@ -1,7 +1,8 @@
 # Blocking Decisions — ADR-0007 & ADR-0008
 
-> **Purpose.** ADR-0007 (clustered provider) and ADR-0008 (pure-Go libvirt driver) are
-> `Proposed` drafts. Five of their open questions **block the earliest implementation work**
+> **Purpose.** ADR-0007 (clustered provider) and ADR-0008 (pure-Go libvirt driver) were
+> `Proposed` drafts when this worksheet was written. Both have since been accepted
+> (2026-09-22). Five of their open questions **blocked the earliest implementation work**
 > because they fix CRD/proto shape or rollout mechanics. This worksheet isolates those five so
 > they can be decided first. Every other "Open implementation question" in the two ADRs can wait
 > until its phase arrives.
