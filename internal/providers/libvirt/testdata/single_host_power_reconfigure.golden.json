@@ -1,0 +1,242 @@
+{
+  "power-invalid-op": {
+    "calls": null,
+    "err": "InvalidSpec: unsupported power operation: Hibernate"
+  },
+  "power-off": {
+    "calls": [
+      "single destroy vrcallseq-web"
+    ],
+    "err": ""
+  },
+  "power-off-fails": {
+    "calls": [
+      "single destroy vrcallseq-web"
+    ],
+    "err": "Retryable: failed to perform power operation Off (caused by: failed to stop domain vrcallseq-web: virsh command 'virsh -c qemu:///single destroy vrcallseq-web' failed (exit code 1): stderr=error: scripted failure of destroy\n, stdout=)"
+  },
+  "power-on": {
+    "calls": [
+      "single start vrcallseq-web",
+      "single dumpxml vrcallseq-web",
+      "local define /tmp/vrcallseq-web-sync.xml",
+      "local rm -f /tmp/vrcallseq-web-sync.xml"
+    ],
+    "err": ""
+  },
+  "power-on-define-fails": {
+    "calls": [
+      "single start vrcallseq-web",
+      "single dumpxml vrcallseq-web",
+      "local define /tmp/vrcallseq-web-sync.xml"
+    ],
+    "err": ""
+  },
+  "power-on-start-fails": {
+    "calls": [
+      "single start vrcallseq-web"
+    ],
+    "err": "Retryable: failed to perform power operation On (caused by: failed to start domain vrcallseq-web: virsh command 'virsh -c qemu:///single start vrcallseq-web' failed (exit code 1): stderr=error: scripted failure of start\n, stdout=)"
+  },
+  "power-reboot": {
+    "calls": [
+      "single destroy vrcallseq-web",
+      "single start vrcallseq-web",
+      "single dumpxml vrcallseq-web",
+      "local define /tmp/vrcallseq-web-sync.xml",
+      "local rm -f /tmp/vrcallseq-web-sync.xml"
+    ],
+    "err": ""
+  },
+  "power-reboot-stop-fails": {
+    "calls": [
+      "single destroy vrcallseq-web",
+      "single start vrcallseq-web",
+      "single dumpxml vrcallseq-web",
+      "local define /tmp/vrcallseq-web-sync.xml",
+      "local rm -f /tmp/vrcallseq-web-sync.xml"
+    ],
+    "err": ""
+  },
+  "power-shutdown-graceful": {
+    "calls": [
+      "single shutdown vrcallseq-web"
+    ],
+    "err": ""
+  },
+  "power-shutdown-graceful-fallback": {
+    "calls": [
+      "single shutdown vrcallseq-web",
+      "single destroy vrcallseq-web"
+    ],
+    "err": ""
+  },
+  "reconfigure-domstate-fails": {
+    "calls": [
+      "single domstate vrcallseq-web"
+    ],
+    "err": "Retryable: failed to get domain state (caused by: failed to get domain state: virsh command 'virsh -c qemu:///single domstate vrcallseq-web' failed (exit code 1): stderr=error: scripted failure of domstate\n, stdout=)"
+  },
+  "reconfigure-no-change": {
+    "calls": [
+      "single domstate vrcallseq-web",
+      "single dominfo vrcallseq-web",
+      "single dommemstat vrcallseq-web",
+      "single cpu-stats vrcallseq-web",
+      "single domiflist vrcallseq-web",
+      "single domblklist vrcallseq-web",
+      "single domblkstat vrcallseq-web vda",
+      "single guestinfo vrcallseq-web --os",
+      "single guestinfo vrcallseq-web --hostname"
+    ],
+    "err": ""
+  },
+  "reconfigure-offline-cpu-mem-disk": {
+    "calls": [
+      "single domstate vrcallseq-web",
+      "single dominfo vrcallseq-web",
+      "single dommemstat vrcallseq-web",
+      "single cpu-stats vrcallseq-web",
+      "single domiflist vrcallseq-web",
+      "single domblklist vrcallseq-web",
+      "single domblkstat vrcallseq-web vda",
+      "single guestinfo vrcallseq-web --os",
+      "single guestinfo vrcallseq-web --hostname",
+      "single setvcpus vrcallseq-web 4 --config",
+      "single setmem vrcallseq-web 4194304K --config",
+      "single setmaxmem vrcallseq-web 4194304K --config",
+      "single vol-resize vrcallseq-web-disk 20G --pool default"
+    ],
+    "err": ""
+  },
+  "reconfigure-offline-failures": {
+    "calls": [
+      "single domstate vrcallseq-web",
+      "single dominfo vrcallseq-web",
+      "single dommemstat vrcallseq-web",
+      "single cpu-stats vrcallseq-web",
+      "single domiflist vrcallseq-web",
+      "single domblklist vrcallseq-web",
+      "single domblkstat vrcallseq-web vda",
+      "single guestinfo vrcallseq-web --os",
+      "single guestinfo vrcallseq-web --hostname",
+      "single setvcpus vrcallseq-web 4 --config",
+      "single setmem vrcallseq-web 4194304K --config",
+      "single vol-resize vrcallseq-web-disk 20G --pool default"
+    ],
+    "err": ""
+  },
+  "reconfigure-online-beyond-headroom": {
+    "calls": [
+      "single domstate vrcallseq-web",
+      "single dominfo vrcallseq-web",
+      "single dommemstat vrcallseq-web",
+      "single cpu-stats vrcallseq-web",
+      "single domiflist vrcallseq-web",
+      "single domblklist vrcallseq-web",
+      "single domblkstat vrcallseq-web vda",
+      "single guestinfo vrcallseq-web --os",
+      "single guestinfo vrcallseq-web --hostname",
+      "single setvcpus vrcallseq-web 64 --live",
+      "single setmem vrcallseq-web 67108864K --live"
+    ],
+    "err": ""
+  },
+  "reconfigure-online-blockresize-fails": {
+    "calls": [
+      "single domstate vrcallseq-web",
+      "single dominfo vrcallseq-web",
+      "single dommemstat vrcallseq-web",
+      "single cpu-stats vrcallseq-web",
+      "single domiflist vrcallseq-web",
+      "single domblklist vrcallseq-web",
+      "single domblkstat vrcallseq-web vda",
+      "single guestinfo vrcallseq-web --os",
+      "single guestinfo vrcallseq-web --hostname",
+      "single domblklist vrcallseq-web",
+      "single domblkinfo vrcallseq-web vda",
+      "single vol-resize vrcallseq-web-disk 20G --pool default",
+      "single blockresize vrcallseq-web vda 20G"
+    ],
+    "err": "Retryable: online disk grow failed (caused by: blockresize domain vrcallseq-web target vda to 20GB: virsh command 'virsh -c qemu:///single blockresize vrcallseq-web vda 20G' failed (exit code 1): stderr=error: scripted failure of blockresize\n, stdout=)"
+  },
+  "reconfigure-online-cpu-mem": {
+    "calls": [
+      "single domstate vrcallseq-web",
+      "single dominfo vrcallseq-web",
+      "single dommemstat vrcallseq-web",
+      "single cpu-stats vrcallseq-web",
+      "single domiflist vrcallseq-web",
+      "single domblklist vrcallseq-web",
+      "single domblkstat vrcallseq-web vda",
+      "single guestinfo vrcallseq-web --os",
+      "single guestinfo vrcallseq-web --hostname",
+      "single setvcpus vrcallseq-web 4 --live",
+      "single setmem vrcallseq-web 4194304K --live"
+    ],
+    "err": ""
+  },
+  "reconfigure-online-disk-already-large": {
+    "calls": [
+      "single domstate vrcallseq-web",
+      "single dominfo vrcallseq-web",
+      "single dommemstat vrcallseq-web",
+      "single cpu-stats vrcallseq-web",
+      "single domiflist vrcallseq-web",
+      "single domblklist vrcallseq-web",
+      "single domblkstat vrcallseq-web vda",
+      "single guestinfo vrcallseq-web --os",
+      "single guestinfo vrcallseq-web --hostname",
+      "single domblklist vrcallseq-web",
+      "single domblkinfo vrcallseq-web vda"
+    ],
+    "err": ""
+  },
+  "reconfigure-online-disk-grow-guest-agent": {
+    "calls": [
+      "single domstate vrcallseq-web",
+      "single dominfo vrcallseq-web",
+      "single dommemstat vrcallseq-web",
+      "single cpu-stats vrcallseq-web",
+      "single domiflist vrcallseq-web",
+      "single domblklist vrcallseq-web",
+      "single domblkstat vrcallseq-web vda",
+      "single guestinfo vrcallseq-web --os",
+      "single guestinfo vrcallseq-web --hostname",
+      "single domblklist vrcallseq-web",
+      "single domblkinfo vrcallseq-web vda",
+      "single vol-resize vrcallseq-web-disk 20G --pool default",
+      "single blockresize vrcallseq-web vda 20G",
+      "single qemu-agent-command --timeout 3 vrcallseq-web {\"execute\":\"guest-ping\"}",
+      "single qemu-agent-command --timeout 3 vrcallseq-web {\"execute\":\"guest-ping\"}",
+      "single qemu-agent-command --timeout 3 vrcallseq-web {\"execute\":\"guest-exec\",\"arguments\":{\"path\":\"/bin/sh\",\"arg\":[\"-c\",\"growpart /dev/vda 1\"],\"capture-output\":true}}",
+      "single qemu-agent-command --timeout 3 vrcallseq-web {\"execute\":\"guest-exec-status\",\"arguments\":{\"pid\":7}}",
+      "single qemu-agent-command --timeout 3 vrcallseq-web {\"execute\":\"guest-ping\"}",
+      "single qemu-agent-command --timeout 3 vrcallseq-web {\"execute\":\"guest-exec\",\"arguments\":{\"path\":\"/bin/sh\",\"arg\":[\"-c\",\"resize2fs /dev/vda1\"],\"capture-output\":true}}",
+      "single qemu-agent-command --timeout 3 vrcallseq-web {\"execute\":\"guest-exec-status\",\"arguments\":{\"pid\":7}}",
+      "single qemu-agent-command --timeout 3 vrcallseq-web {\"execute\":\"guest-ping\"}",
+      "single qemu-agent-command --timeout 3 vrcallseq-web {\"execute\":\"guest-exec\",\"arguments\":{\"path\":\"/bin/sh\",\"arg\":[\"-c\",\"xfs_growfs /\"],\"capture-output\":true}}",
+      "single qemu-agent-command --timeout 3 vrcallseq-web {\"execute\":\"guest-exec-status\",\"arguments\":{\"pid\":7}}"
+    ],
+    "err": ""
+  },
+  "reconfigure-online-disk-grow-no-agent": {
+    "calls": [
+      "single domstate vrcallseq-web",
+      "single dominfo vrcallseq-web",
+      "single dommemstat vrcallseq-web",
+      "single cpu-stats vrcallseq-web",
+      "single domiflist vrcallseq-web",
+      "single domblklist vrcallseq-web",
+      "single domblkstat vrcallseq-web vda",
+      "single guestinfo vrcallseq-web --os",
+      "single guestinfo vrcallseq-web --hostname",
+      "single domblklist vrcallseq-web",
+      "single domblkinfo vrcallseq-web vda",
+      "single vol-resize vrcallseq-web-disk 20G --pool default",
+      "single blockresize vrcallseq-web vda 20G",
+      "single qemu-agent-command --timeout 3 vrcallseq-web {\"execute\":\"guest-ping\"}"
+    ],
+    "err": ""
+  }
+}

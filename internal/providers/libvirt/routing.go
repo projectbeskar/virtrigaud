@@ -43,15 +43,16 @@ import (
 //     read and the shadow read all hit that one host,
 //  3. release the lease.
 //
-// Slice 1 routes Describe and Delete. The other per-VM RPCs are refused with an
-// honest Unimplemented until their slice lands (see notRoutedYet), and the
-// clustered GetCapabilities hides them.
+// Slice 1 routes Describe and Delete; slice 2 routes Power and Reconfigure.
+// Every routed call except Create checks the domain's owner stamp before it
+// reads or changes anything. The other per-VM RPCs are refused with an honest
+// Unimplemented until their slice lands (see notRoutedYet), and the clustered
+// GetCapabilities hides them.
 
 // The ADR-0007 delivery step (Addendum A, A5 slice, or main-ADR phase) that
 // routes each RPC a clustered provider refuses today. They only appear in the
 // refusal message.
 const (
-	sliceRoutedPowerReconfigure  = "Addendum A slice 2"
 	sliceRoutedSnapshotCloneDisk = "Addendum A slice 3"
 	sliceRoutedListVMs           = "Addendum A slice 4"
 	// sliceRoutedImport: import is not per-VM; routing it into a clustered
@@ -208,11 +209,12 @@ func hostUnavailableStatus(pe *contracts.ProviderError) error {
 }
 
 // routedRPCError converts an error from a ROUTED call on a clustered provider
-// to its gRPC status: InvalidSpec -> InvalidArgument (no target host),
-// HostUnavailable -> Unavailable with a HOST_UNAVAILABLE ErrorInfo
-// (unknown/unreachable host, retryable, host-scoped), NotFound -> NotFound
-// (e.g. a delete of a domain this VM does not own, reported as absent and never
-// destroyed). Anything else keeps the historical wrapped form. Only the
+// to its gRPC status: InvalidSpec -> InvalidArgument (no target host, or an
+// unsupported power operation), HostUnavailable -> Unavailable with a
+// HOST_UNAVAILABLE ErrorInfo (unknown/unreachable host, retryable,
+// host-scoped), NotFound -> NotFound (a delete, power operation or reconfigure
+// of a domain this VM does not own, reported as absent and never touched).
+// Anything else keeps the historical wrapped form. Only the
 // categorized message crosses the wire. It is never used on the single-host
 // path, whose wire errors are unchanged.
 func routedRPCError(op string, err error) error {

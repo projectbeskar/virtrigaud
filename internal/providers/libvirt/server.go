@@ -59,7 +59,8 @@ func NewServer(provider providerBackend) *Server {
 
 // clusteredProvider reports whether the backend runs in CLUSTERED topology
 // (ADR-0007 D3). Per-VM RPCs then need a routed host (ADR-0007 Addendum A):
-// Describe and Delete are routed; the rest are refused until their slice lands.
+// Describe, Delete, Power and Reconfigure are routed; the rest are refused
+// until their slice lands.
 func (s *Server) clusteredProvider() bool {
 	return s.provider != nil && s.provider.clustered()
 }
@@ -171,11 +172,11 @@ func (s *Server) Delete(ctx context.Context, req *providerv1.DeleteRequest) (*pr
 	return result, nil
 }
 
-// Power performs power operations on a virtual machine
+// Power performs power operations on a virtual machine. On a clustered
+// provider the operation is routed to target_host_id and owner-checked
+// (ADR-0007 Addendum A, slice 2); a domain this VM does not own is answered
+// NotFound and left untouched.
 func (s *Server) Power(ctx context.Context, req *providerv1.PowerRequest) (*providerv1.TaskResponse, error) {
-	if s.clusteredProvider() {
-		return nil, notRoutedYet("Power", sliceRoutedPowerReconfigure)
-	}
 	var powerOp contracts.PowerOp
 	switch req.Op {
 	case providerv1.PowerOp_POWER_OP_ON:
@@ -187,11 +188,17 @@ func (s *Server) Power(ctx context.Context, req *providerv1.PowerRequest) (*prov
 	case providerv1.PowerOp_POWER_OP_SHUTDOWN_GRACEFUL:
 		powerOp = contracts.PowerOpShutdownGraceful
 	default:
+		if s.clusteredProvider() {
+			return nil, status.Errorf(codes.InvalidArgument, "unsupported power operation: %v", req.Op)
+		}
 		return nil, fmt.Errorf("unsupported power operation: %v", req.Op)
 	}
 
-	taskRef, err := s.provider.Power(ctx, contracts.VMRef{ID: req.Id, HostID: req.TargetHostId}, powerOp)
+	taskRef, err := s.provider.Power(ctx, contracts.VMRef{ID: req.Id, HostID: req.TargetHostId, Owner: ownerFromProto(req.GetOwner())}, powerOp)
 	if err != nil {
+		if s.clusteredProvider() {
+			return nil, routedRPCError("perform power operation", err)
+		}
 		return nil, fmt.Errorf("failed to perform power operation: %w", err)
 	}
 
@@ -203,19 +210,25 @@ func (s *Server) Power(ctx context.Context, req *providerv1.PowerRequest) (*prov
 	return result, nil
 }
 
-// Reconfigure reconfigures a virtual machine
+// Reconfigure reconfigures a virtual machine. On a clustered provider the
+// reconfigure is routed to target_host_id and owner-checked (ADR-0007 Addendum
+// A, slice 2); a domain this VM does not own is answered NotFound and none of
+// its CPU, memory or disks is changed.
 func (s *Server) Reconfigure(ctx context.Context, req *providerv1.ReconfigureRequest) (*providerv1.TaskResponse, error) {
-	if s.clusteredProvider() {
-		return nil, notRoutedYet("Reconfigure", sliceRoutedPowerReconfigure)
-	}
 	// Parse the desired configuration
 	var createReq contracts.CreateRequest
 	if err := json.Unmarshal([]byte(req.DesiredJson), &createReq); err != nil {
+		if s.clusteredProvider() {
+			return nil, status.Errorf(codes.InvalidArgument, "failed to parse desired configuration: %v", err)
+		}
 		return nil, fmt.Errorf("failed to parse desired configuration: %w", err)
 	}
 
-	taskRef, err := s.provider.Reconfigure(ctx, contracts.VMRef{ID: req.Id, HostID: req.TargetHostId}, createReq)
+	taskRef, err := s.provider.Reconfigure(ctx, contracts.VMRef{ID: req.Id, HostID: req.TargetHostId, Owner: ownerFromProto(req.GetOwner())}, createReq)
 	if err != nil {
+		if s.clusteredProvider() {
+			return nil, routedRPCError("reconfigure VM", err)
+		}
 		return nil, fmt.Errorf("failed to reconfigure VM: %w", err)
 	}
 
@@ -337,10 +350,10 @@ func (s *Server) parseCreateRequest(req *providerv1.CreateRequest) (contracts.Cr
 	return createReq, nil
 }
 
-// ownerFromProto converts the wire ObjectIdentity (CreateRequest.owner,
-// DeleteRequest.owner) to the provider-contract form. A nil identity (an older
-// manager that sends none) yields the zero ObjectIdentity, which never
-// authorizes anything.
+// ownerFromProto converts the wire ObjectIdentity (CreateRequest.owner and the
+// owner of the routed Describe, Delete, Power and Reconfigure requests) to the
+// provider-contract form. A nil identity (an older manager that sends none)
+// yields the zero ObjectIdentity, which never authorizes anything.
 func ownerFromProto(o *providerv1.ObjectIdentity) contracts.ObjectIdentity {
 	if o == nil {
 		return contracts.ObjectIdentity{}
@@ -677,18 +690,21 @@ func (s *Server) GetCapabilities(ctx context.Context, req *providerv1.GetCapabil
 
 // clusteredCapabilities is the GetCapabilities answer of a CLUSTERED provider
 // (ADR-0007 Addendum A, A1 + D7). Only what is routed to a host is advertised:
-// Create (target_host_id) and the routed Describe/Delete need no flag;
-// supports_clustering is true. Every per-VM capability whose RPC is refused
-// until its slice lands — online reconfigure / disk expansion (slice 2),
-// snapshots, linked clones, disk export (slice 3) — is hidden, as are disk
-// import (no target host until P3) and image import (host-scoped, no
-// target_host_id yet). The format / backend / transfer lists are left empty with
-// their capability off.
+// Create (target_host_id) and the routed Describe/Delete/Power need no flag;
+// the routed Reconfigure (slice 2) runs the same core as single-host, so its
+// online CPU/memory reconfigure and online disk expansion are advertised as on
+// a single-host provider; supports_clustering is true. Every per-VM capability
+// whose RPC is still refused until its slice lands — snapshots, linked clones,
+// disk export (slice 3) — is hidden, as are disk import (no target host until
+// P3) and image import (host-scoped, no target_host_id yet). The format /
+// backend / transfer lists are left empty with their capability off.
 func clusteredCapabilities() *providerv1.GetCapabilitiesResponse {
 	return &providerv1.GetCapabilitiesResponse{
-		SupportedDiskTypes:    []string{"qcow2", "raw", "vmdk"},
-		SupportedNetworkTypes: []string{"virtio", "e1000", "rtl8139"},
-		SupportsClustering:    true,
+		SupportsReconfigureOnline:   true, // routed + owner-checked since Addendum A slice 2; same setvcpus/setmem --live core as single-host (#203)
+		SupportsDiskExpansionOnline: true, // routed + owner-checked since Addendum A slice 2; blockresize + guest-agent FS grow on the bound host (#201)
+		SupportedDiskTypes:          []string{"qcow2", "raw", "vmdk"},
+		SupportedNetworkTypes:       []string{"virtio", "e1000", "rtl8139"},
+		SupportsClustering:          true,
 	}
 }
 

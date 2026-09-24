@@ -23,6 +23,7 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -738,68 +739,190 @@ func (p *Provider) cleanupOrphanedResources(ctx context.Context, vp *VirshProvid
 	}
 }
 
-// Power controls VM power state using virsh
+// domainTarget addresses the one domain a Power or Reconfigure core acts on
+// (ADR-0007 Addendum A, slice 2).
+//
+// On a single-host provider both fields are the domain name the operator sent,
+// so every command is byte-for-byte the historical one (byName). On a clustered
+// provider handle is the UUID of the domain whose owner stamp was just checked
+// (ownedDomainTarget): every virsh command then acts on exactly that domain,
+// and if it were replaced by a same-named domain between the check and the
+// action, the UUID would no longer resolve and the command would fail instead
+// of acting on another tenant's VM.
+type domainTarget struct {
+	// handle is what every virsh command addresses the domain by: its name
+	// (single-host) or its owner-checked UUID (clustered).
+	handle string
+	// name is the domain name. It keys name-derived resources (the
+	// "<name>-disk" volume) and log lines.
+	name string
+}
+
+// byName is the single-host target: the domain addressed by its name, exactly
+// as before routing.
+func byName(id string) domainTarget { return domainTarget{handle: id, name: id} }
+
+// canonicalUUIDRE matches the canonical dashed UUID form `virsh dumpxml`
+// prints. ownedDomainTarget refuses to address a domain by anything else.
+var canonicalUUIDRE = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// ownedDomainTarget is the ownership gate of a routed, MUTATING per-VM call
+// (Power, Reconfigure) on a clustered host (ADR-0007 Addendum A, slice 2). It
+// checks the owner stamp of domain id against owner (checkDomainOwner, which
+// fails closed) BEFORE anything is changed, and returns the domain addressed by
+// the UUID read together with that stamp.
+//
+//   - absent, or a stamp that is missing, unreadable, ambiguous or records
+//     another owner (or a request without an owner): a NotFound error, and the
+//     domain is never touched. The message never names the other owner.
+//   - owned, but with no canonical UUID in its definition: a retryable error —
+//     the domain cannot be pinned, so nothing is done.
+//
+// op names the call for the refusal message and the operator log.
+func ownedDomainTarget(ctx context.Context, vp *VirshProvider, host hostconn.HostID, id string, owner contracts.ObjectIdentity, op string) (domainTarget, error) {
+	own, err := checkDomainOwner(ctx, vp, host, id, owner, op)
+	if err != nil {
+		return domainTarget{}, err
+	}
+	switch {
+	case !own.present:
+		return domainTarget{}, contracts.NewNotFoundError(fmt.Sprintf("libvirt domain %q not found on host %s", id, host), nil)
+	case !own.owned:
+		// Uniform message: it reaches the requesting VM's status, so it must not
+		// disclose which other VirtualMachine (if any) owns the domain.
+		return domainTarget{}, contracts.NewNotFoundError(fmt.Sprintf(
+			"libvirt domain %q on host %s is not owned by this VirtualMachine; %s was not performed", id, host, op), nil)
+	case !canonicalUUIDRE.MatchString(own.uuid):
+		return domainTarget{}, contracts.NewRetryableError(
+			fmt.Sprintf("cannot verify the identity of domain %q on host %s (no UUID in its definition)", id, host), nil)
+	}
+	return domainTarget{handle: own.uuid, name: id}, nil
+}
+
+// unsupportedPowerOpError is the InvalidSpec answer to a power operation the
+// provider does not implement.
+func unsupportedPowerOpError(op contracts.PowerOp) error {
+	return contracts.NewInvalidSpecError(fmt.Sprintf("unsupported power operation: %s", op), nil)
+}
+
+// knownPowerOp reports whether runPowerOp implements op.
+func knownPowerOp(op contracts.PowerOp) bool {
+	switch op {
+	case contracts.PowerOpOn, contracts.PowerOpOff, contracts.PowerOpReboot, contracts.PowerOpShutdownGraceful:
+		return true
+	}
+	return false
+}
+
+// Power controls VM power state using virsh.
+//
+// Topology dispatch (ADR-0007 Addendum A, slice 2):
+//
+//   - single-host: the operation runs on p.virshProvider exactly as before —
+//     vm.HostID and vm.Owner are ignored;
+//   - clustered: an unknown op is refused before any host is touched; otherwise
+//     the call is routed to vm.HostID (withHostConn) and is OWNER-CHECKED
+//     against vm.Owner before the domain is started, stopped or rebooted
+//     (powerClustered).
 func (p *Provider) Power(ctx context.Context, vm contracts.VMRef, op contracts.PowerOp) (taskRef string, err error) {
 	id := vm.ID
 	log.Printf("INFO Power operation %s on VM: %s", op, id)
 
+	if p.clustered() {
+		if !knownPowerOp(op) {
+			return "", unsupportedPowerOpError(op)
+		}
+		return "", p.withHostConn(ctx, vm.HostID, func(c libvirtConn) error {
+			return p.powerClustered(ctx, c, id, vm.Owner, op)
+		})
+	}
+
 	if p.virshProvider == nil {
 		return "", contracts.NewRetryableError("virsh provider not initialized", nil)
 	}
+	return "", p.runPowerOp(ctx, p.singleHostConn(), byName(id), op)
+}
+
+// powerClustered is the routed, OWNER-CHECKED Power of a clustered VM on its
+// bound host's leased connection c: the operation runs only on a domain whose
+// owner stamp records owner's UID, addressed by its UUID (ownedDomainTarget).
+func (p *Provider) powerClustered(ctx context.Context, c libvirtConn, id string, owner contracts.ObjectIdentity, op contracts.PowerOp) error {
+	vp, err := virshOf(c)
+	if err != nil {
+		return err
+	}
+	d, err := ownedDomainTarget(ctx, vp, c.HostID(), id, owner, fmt.Sprintf("power operation %s", op))
+	if err != nil {
+		return err
+	}
+	return p.runPowerOp(ctx, c, d, op)
+}
+
+// runPowerOp is the Power core, run on connection c — p.virshProvider's
+// connection in single-host mode, the leased host connection in clustered
+// mode — against domain d. The virsh/host command sequence is the historical
+// one, unchanged.
+func (p *Provider) runPowerOp(ctx context.Context, c libvirtConn, d domainTarget, op contracts.PowerOp) error {
+	vp, err := virshOf(c)
+	if err != nil {
+		return err
+	}
+	id := d.handle
 
 	switch op {
 	case contracts.PowerOpOn:
-		err = p.virshProvider.startDomain(ctx, id)
+		err = vp.startDomain(ctx, id)
 		// After starting, sync the persistent XML to match the running state
 		// This prevents "pending changes" in Cockpit by ensuring the persistent
 		// definition matches what libvirt expanded (e.g., CPU features)
 		if err == nil {
-			if syncErr := p.syncPersistentXML(ctx, id); syncErr != nil {
+			if syncErr := syncPersistentXML(ctx, vp, id); syncErr != nil {
 				log.Printf("WARN Failed to sync persistent XML for %s: %v", id, syncErr)
 				// Don't fail the power on operation for this
 			}
 		}
 	case contracts.PowerOpOff:
-		err = p.virshProvider.stopDomain(ctx, id)
+		err = vp.stopDomain(ctx, id)
 	case contracts.PowerOpReboot:
 		// Restart by stopping then starting
-		if stopErr := p.virshProvider.stopDomain(ctx, id); stopErr != nil {
+		if stopErr := vp.stopDomain(ctx, id); stopErr != nil {
 			log.Printf("WARN Failed to stop domain for reboot: %v", stopErr)
 		}
-		err = p.virshProvider.startDomain(ctx, id)
+		err = vp.startDomain(ctx, id)
 		// Sync persistent XML after reboot as well
 		if err == nil {
-			if syncErr := p.syncPersistentXML(ctx, id); syncErr != nil {
+			if syncErr := syncPersistentXML(ctx, vp, id); syncErr != nil {
 				log.Printf("WARN Failed to sync persistent XML for %s: %v", id, syncErr)
 			}
 		}
 	case contracts.PowerOpShutdownGraceful:
 		// Graceful shutdown for libvirt - attempt guest shutdown, fallback to force stop
-		err = p.virshProvider.shutdownDomain(ctx, id)
+		err = vp.shutdownDomain(ctx, id)
 		if err != nil {
 			log.Printf("WARN Graceful shutdown failed for %s, falling back to force stop: %v", id, err)
-			err = p.virshProvider.stopDomain(ctx, id)
+			err = vp.stopDomain(ctx, id)
 		}
 	default:
-		return "", contracts.NewInvalidSpecError(fmt.Sprintf("unsupported power operation: %s", op), nil)
+		return unsupportedPowerOpError(op)
 	}
 
 	if err != nil {
-		return "", contracts.NewRetryableError(fmt.Sprintf("failed to perform power operation %s", op), err)
+		return contracts.NewRetryableError(fmt.Sprintf("failed to perform power operation %s", op), err)
 	}
 
-	log.Printf("INFO Successfully performed power operation %s on %s", op, id)
-	return "", nil
+	log.Printf("INFO Successfully performed power operation %s on %s", op, d.name)
+	return nil
 }
 
-// syncPersistentXML updates the persistent domain definition to match the running state
-// This prevents "pending changes" in management tools like Cockpit by ensuring the
-// persistent XML matches what libvirt expanded (e.g., host-model CPU to specific features)
-func (p *Provider) syncPersistentXML(ctx context.Context, domainName string) error {
+// syncPersistentXML updates the persistent definition of domainName on vp's
+// host to match its running state. This prevents "pending changes" in
+// management tools like Cockpit by ensuring the persistent XML matches what
+// libvirt expanded (e.g., host-model CPU to specific features).
+func syncPersistentXML(ctx context.Context, vp *VirshProvider, domainName string) error {
 	log.Printf("INFO Syncing persistent XML definition for domain: %s", domainName)
 
 	// Get the running domain XML (this includes expanded CPU features, etc.)
-	result, err := p.virshProvider.runVirshCommand(ctx, "dumpxml", domainName)
+	result, err := vp.runVirshCommand(ctx, "dumpxml", domainName)
 	if err != nil {
 		return fmt.Errorf("failed to dump running XML: %w", err)
 	}
@@ -807,18 +930,18 @@ func (p *Provider) syncPersistentXML(ctx context.Context, domainName string) err
 	// Write the running XML to a temporary file (content over stdin, path as a
 	// positional parameter — no heredoc, no shell interpolation).
 	remotePath := fmt.Sprintf("/tmp/%s-sync.xml", domainName)
-	if err := p.virshProvider.writeRemoteFile(ctx, remotePath, []byte(result.Stdout)); err != nil {
+	if err := vp.writeRemoteFile(ctx, remotePath, []byte(result.Stdout)); err != nil {
 		return fmt.Errorf("failed to write sync XML file: %w", err)
 	}
 
 	// Define the domain again with the running XML (this updates the persistent definition)
-	_, err = p.virshProvider.runRemoteVirshCommand(ctx, "define", remotePath)
+	_, err = vp.runRemoteVirshCommand(ctx, "define", remotePath)
 	if err != nil {
 		return fmt.Errorf("failed to redefine domain: %w", err)
 	}
 
 	// Clean up temporary file
-	_, cleanupErr := p.virshProvider.runVirshCommand(ctx, "!", "rm", "-f", remotePath)
+	_, cleanupErr := vp.runVirshCommand(ctx, "!", "rm", "-f", remotePath)
 	if cleanupErr != nil {
 		log.Printf("WARN Failed to cleanup sync XML file: %v", cleanupErr)
 	}
@@ -827,31 +950,75 @@ func (p *Provider) syncPersistentXML(ctx context.Context, domainName string) err
 	return nil
 }
 
-// Reconfigure updates VM configuration using virsh
+// Reconfigure updates VM configuration using virsh.
+//
+// Topology dispatch (ADR-0007 Addendum A, slice 2): a single-host provider
+// reconfigures on p.virshProvider exactly as before (vm.HostID and vm.Owner are
+// ignored); a clustered one leases vm.HostID's connection, checks the domain's
+// owner stamp against vm.Owner, and runs the same core there on the checked
+// domain — including the online disk grow and its in-guest filesystem grow,
+// whose guest-agent commands go to that host (reconfigureClustered).
 func (p *Provider) Reconfigure(ctx context.Context, vm contracts.VMRef, desired contracts.CreateRequest) (taskRef string, err error) {
 	id := vm.ID
 	log.Printf("INFO Reconfiguring VM: %s", id)
 
+	if p.clustered() {
+		return "", p.withHostConn(ctx, vm.HostID, func(c libvirtConn) error {
+			return p.reconfigureClustered(ctx, c, id, vm.Owner, desired)
+		})
+	}
+
 	if p.virshProvider == nil {
 		return "", contracts.NewRetryableError("virsh provider not initialized", nil)
 	}
+	return "", p.reconfigureOn(ctx, p.singleHostConn(), byName(id), desired)
+}
+
+// reconfigureClustered is the routed, OWNER-CHECKED Reconfigure of a clustered
+// VM on its bound host's leased connection c: nothing about a domain is read or
+// changed unless its owner stamp records owner's UID, and every command then
+// addresses it by its UUID (ownedDomainTarget).
+func (p *Provider) reconfigureClustered(ctx context.Context, c libvirtConn, id string, owner contracts.ObjectIdentity, desired contracts.CreateRequest) error {
+	vp, err := virshOf(c)
+	if err != nil {
+		return err
+	}
+	d, err := ownedDomainTarget(ctx, vp, c.HostID(), id, owner, "reconfigure")
+	if err != nil {
+		return err
+	}
+	return p.reconfigureOn(ctx, c, d, desired)
+}
+
+// reconfigureOn is the Reconfigure core, run on connection c — p.virshProvider's
+// connection in single-host mode, the leased host connection in clustered
+// mode — against domain d. Every helper it reaches (the online CPU/memory
+// change, the offline and online disk resize, the guest agent that grows the
+// in-guest filesystem) runs on that same connection. The virsh/host command
+// sequence is the historical one, unchanged.
+func (p *Provider) reconfigureOn(ctx context.Context, c libvirtConn, d domainTarget, desired contracts.CreateRequest) error {
+	vp, err := virshOf(c)
+	if err != nil {
+		return err
+	}
+	id := d.name
 
 	hasChanges := false
 	requiresRestart := false
 
 	// Get current domain state
-	domainState, err := p.virshProvider.getDomainState(ctx, id)
+	domainState, err := vp.getDomainState(ctx, d.handle)
 	if err != nil {
-		return "", contracts.NewRetryableError("failed to get domain state", err)
+		return contracts.NewRetryableError("failed to get domain state", err)
 	}
 
 	isRunning := domainState == "running"
 	log.Printf("INFO Domain %s current state: %s", id, domainState)
 
 	// Get current domain info for comparison
-	currentInfo, err := p.virshProvider.getDomainInfo(ctx, id)
+	currentInfo, err := vp.getDomainInfo(ctx, d.handle)
 	if err != nil {
-		return "", contracts.NewRetryableError("failed to get current domain info", err)
+		return contracts.NewRetryableError("failed to get current domain info", err)
 	}
 
 	// Handle CPU changes
@@ -862,7 +1029,7 @@ func (p *Provider) Reconfigure(ctx context.Context, vm contracts.VMRef, desired 
 
 			if isRunning {
 				// Try online CPU change with --live flag
-				_, err = p.virshProvider.runVirshCommand(ctx, "setvcpus", id,
+				_, err = vp.runVirshCommand(ctx, "setvcpus", d.handle,
 					fmt.Sprintf("%d", desired.Class.CPU), "--live")
 				if err != nil {
 					// A `setvcpus --live` failure here means the desired vCPU
@@ -879,7 +1046,7 @@ func (p *Provider) Reconfigure(ctx context.Context, vm contracts.VMRef, desired 
 				}
 			} else {
 				// Domain is off, change config
-				_, err = p.virshProvider.runVirshCommand(ctx, "setvcpus", id,
+				_, err = vp.runVirshCommand(ctx, "setvcpus", d.handle,
 					fmt.Sprintf("%d", desired.Class.CPU), "--config")
 				if err != nil {
 					log.Printf("WARN Failed to set CPUs in config: %v", err)
@@ -901,7 +1068,7 @@ func (p *Provider) Reconfigure(ctx context.Context, vm contracts.VMRef, desired 
 
 			if isRunning {
 				// Try online memory change with --live flag
-				_, err = p.virshProvider.runVirshCommand(ctx, "setmem", id,
+				_, err = vp.runVirshCommand(ctx, "setmem", d.handle,
 					fmt.Sprintf("%dK", desiredMemoryKB), "--live")
 				if err != nil {
 					// `setmem --live` inflates the balloon up to the <memory>
@@ -919,14 +1086,14 @@ func (p *Provider) Reconfigure(ctx context.Context, vm contracts.VMRef, desired 
 				}
 			} else {
 				// Domain is off, change config
-				_, err = p.virshProvider.runVirshCommand(ctx, "setmem", id,
+				_, err = vp.runVirshCommand(ctx, "setmem", d.handle,
 					fmt.Sprintf("%dK", desiredMemoryKB), "--config")
 				if err != nil {
 					log.Printf("WARN Failed to set memory in config: %v", err)
 					requiresRestart = true
 				} else {
 					// Also update max memory
-					_, _ = p.virshProvider.runVirshCommand(ctx, "setmaxmem", id,
+					_, _ = vp.runVirshCommand(ctx, "setmaxmem", d.handle,
 						fmt.Sprintf("%dK", desiredMemoryKB), "--config")
 					hasChanges = true
 				}
@@ -948,7 +1115,7 @@ func (p *Provider) Reconfigure(ctx context.Context, vm contracts.VMRef, desired 
 	// Offline (domain stopped): resize the backing volume so the larger size
 	// applies on next boot.
 	if len(desired.Disks) > 0 || (desired.Class.DiskDefaults != nil && desired.Class.DiskDefaults.SizeGiB > 0) {
-		storageProvider := NewStorageProvider(p.virshProvider)
+		storageProvider := NewStorageProvider(vp)
 
 		// Get desired disk size
 		var desiredDiskGB int
@@ -960,12 +1127,12 @@ func (p *Provider) Reconfigure(ctx context.Context, vm contracts.VMRef, desired 
 			if isRunning {
 				// Online live grow (grow-only + idempotent guards inside).
 				log.Printf("INFO Attempting online disk grow for running VM %s to %dGB", id, desiredDiskGB)
-				grew, gerr := p.growDiskOnline(ctx, id, desiredDiskGB, storageProvider)
+				grew, gerr := growDiskOnline(ctx, vp, d, desiredDiskGB, storageProvider)
 				if gerr != nil {
 					// The live block-device resize failing IS fatal to the disk
 					// step: the guest would not see the requested capacity.
 					log.Printf("WARN Online disk grow failed for VM %s: %v", id, gerr)
-					return "", contracts.NewRetryableError("online disk grow failed", gerr)
+					return contracts.NewRetryableError("online disk grow failed", gerr)
 				}
 				if grew {
 					hasChanges = true
@@ -990,7 +1157,7 @@ func (p *Provider) Reconfigure(ctx context.Context, vm contracts.VMRef, desired 
 	// Log reconfiguration results
 	if !hasChanges && !requiresRestart {
 		log.Printf("INFO No configuration changes needed for domain: %s", id)
-		return "", nil
+		return nil
 	}
 
 	if requiresRestart {
@@ -999,7 +1166,7 @@ func (p *Provider) Reconfigure(ctx context.Context, vm contracts.VMRef, desired 
 	}
 
 	log.Printf("INFO Successfully reconfigured domain: %s", id)
-	return "", nil
+	return nil
 }
 
 // getVNCPort extracts the VNC port from domain XML on vp's host

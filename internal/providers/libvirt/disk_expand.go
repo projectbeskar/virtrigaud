@@ -177,9 +177,14 @@ func fsGrowCommands(target string) []string {
 // Step 5 never fails the operation. It returns true when the live block device
 // was actually grown (so the caller can record a change), false when the
 // request was a no-op.
-func (p *Provider) growDiskOnline(ctx context.Context, id string, desiredDiskGB int, sp *StorageProvider) (grew bool, err error) {
+//
+// Every step runs on vp — the host the Reconfigure was routed to (ADR-0007
+// Addendum A, slice 2) — and addresses the domain by d.handle; only the
+// backing volume is found by d.name (the "<name>-disk" pool convention).
+func growDiskOnline(ctx context.Context, vp *VirshProvider, d domainTarget, desiredDiskGB int, sp *StorageProvider) (grew bool, err error) {
+	id := d.name
 	// Resolve the primary disk target from the live domain topology.
-	blkResult, err := p.virshProvider.runVirshCommand(ctx, "domblklist", id)
+	blkResult, err := vp.runVirshCommand(ctx, "domblklist", d.handle)
 	if err != nil {
 		return false, fmt.Errorf("list block devices for domain %s: %w", id, err)
 	}
@@ -189,7 +194,7 @@ func (p *Provider) growDiskOnline(ctx context.Context, id string, desiredDiskGB 
 	}
 
 	// Read the current virtual capacity (bytes) for the grow-only guard.
-	infoResult, err := p.virshProvider.runVirshCommand(ctx, "domblkinfo", id, target)
+	infoResult, err := vp.runVirshCommand(ctx, "domblkinfo", d.handle, target)
 	if err != nil {
 		return false, fmt.Errorf("read block info for domain %s target %s: %w", id, target, err)
 	}
@@ -219,7 +224,7 @@ func (p *Provider) growDiskOnline(ctx context.Context, id string, desiredDiskGB 
 	}
 
 	// Grow the live block device so QEMU exposes the new size to the guest.
-	if _, rerr := p.virshProvider.runVirshCommand(ctx, "blockresize", id, target, blockresizeSizeArg(desiredDiskGB)); rerr != nil {
+	if _, rerr := vp.runVirshCommand(ctx, "blockresize", d.handle, target, blockresizeSizeArg(desiredDiskGB)); rerr != nil {
 		return false, fmt.Errorf("blockresize domain %s target %s to %dGB: %w", id, target, desiredDiskGB, rerr)
 	}
 	log.Printf("INFO Successfully grew live block device for domain %s target %s to %dGB", id, target, desiredDiskGB)
@@ -227,7 +232,7 @@ func (p *Provider) growDiskOnline(ctx context.Context, id string, desiredDiskGB 
 	// Best-effort in-guest filesystem grow. Non-fatal: the block device is
 	// already larger, and cloud-init / a user can finish the FS grow. Gated on
 	// guest-agent availability (#201).
-	p.growGuestFilesystemBestEffort(ctx, id, target)
+	growGuestFilesystemBestEffort(ctx, vp, d, target)
 
 	return true, nil
 }
@@ -238,16 +243,21 @@ func (p *Provider) growDiskOnline(ctx context.Context, id string, desiredDiskGB 
 // so it never fails the surrounding Reconfigure. This is the documented #201
 // caveat — without the guest agent (or for exotic partition layouts) the
 // operator must finish the FS grow via cloud-init or manually.
-func (p *Provider) growGuestFilesystemBestEffort(ctx context.Context, id, target string) {
-	ga := NewGuestAgentProvider(p.virshProvider)
-	if !ga.isGuestAgentAvailable(ctx, id) {
+//
+// The guest agent is reached through vp, the host the Reconfigure was routed
+// to — never the provider's single-host handle — and the domain is addressed
+// by d.handle (its owner-checked UUID on a clustered provider).
+func growGuestFilesystemBestEffort(ctx context.Context, vp *VirshProvider, d domainTarget, target string) {
+	id := d.name
+	ga := NewGuestAgentProvider(vp)
+	if !ga.isGuestAgentAvailable(ctx, d.handle) {
 		log.Printf("WARN In-guest filesystem grow skipped for domain %s: guest agent unavailable; "+
 			"block device is grown but the guest filesystem must be extended via cloud-init or manually (#201)", id)
 		return
 	}
 
 	for _, cmd := range fsGrowCommands(target) {
-		out, err := ga.ExecuteGuestCommand(ctx, id, cmd)
+		out, err := ga.ExecuteGuestCommand(ctx, d.handle, cmd)
 		if err != nil {
 			log.Printf("WARN In-guest filesystem grow step %q failed for domain %s (non-fatal): %v", cmd, id, err)
 			continue
