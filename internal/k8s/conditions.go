@@ -121,7 +121,8 @@ const (
 	ReasonUnbound = "Unbound"
 	// ReasonHostExcluded is Placed=False: the Create on the pending host was
 	// refused with a name conflict (a same-named domain this VM does not own is
-	// there, so this VM created nothing on it). The host was added to
+	// there, so this VM has no domain on it and the attempt created nothing).
+	// The host was added to
 	// status.placement.excludedHosts, pendingHost was cleared, and the VM is
 	// re-scheduled onto another host.
 	ReasonHostExcluded = "HostExcluded"

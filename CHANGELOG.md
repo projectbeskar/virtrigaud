@@ -5,10 +5,12 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2026-09-24 17:20] - Clustered providers route Power and Reconfigure to the VM's host (ADR-0007 Addendum A, slice 2)
+## [2026-09-24 17:59] - Clustered providers route Power and Reconfigure to the VM's host (ADR-0007 Addendum A, slice 2)
 **Author:** @wrkode (William Rizzo)
 
 > `topology: cluster` stays **experimental**. A clustered VM can now also be powered and reconfigured on its host. Snapshots, clones and disk export are still refused (slice 3). Single-host and thin-client providers are unchanged.
+>
+> **VMClass now bounds `spec.memory` (below 100Ti) and `spec.diskDefaults.size` (below 1Pi)** at the API server. Both limits are far above any hypervisor VirtRigaud supports, so no plausible existing VMClass is affected. An out-of-range VMClass already stored is refused by the operator with `Provisioning=False/ValidationError` instead of being sent to a provider as a wrapped-around size.
 
 ### Added
 - `proto/provider/v1/provider.proto` (+ regenerated `proto/rpc/provider/v1/provider.pb.go`): additive `PowerRequest.owner` (5) and `ReconfigureRequest.owner` (4), the `ObjectIdentity` from #333. Single-host and thin-client providers ignore them. `HardwareUpgradeRequest` keeps only its `target_host_id` wire field.
@@ -16,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `api/infra.virtrigaud.io/v1beta1/virtualmachine_types.go`: optional `status.placement.excludedHosts`: a set of at most 16 Host names, each at most 253 characters (CRD regenerated; chart CRDs are generated on demand).
 - `internal/scheduler`: `Request.ExcludedHosts` rejects the listed hosts before any other filter (the `RejectionExcludedForVM` category), even the current binding. `AllExcluded(err)` recognises a no-fit where every candidate was excluded.
 - `internal/k8s/conditions.go`: `Placed` reasons `HostExcluded` and `AllHostsExcluded`.
+- `internal/providers/contracts/errors.go`: `VMOperationFailedReason = "VM_OPERATION_FAILED"` and `ErrorInfoDomain`. `HostUnavailableErrorDomain` is kept as an alias.
+- `internal/providers/libvirt/storage.go`: `ResizeVolumeByPath`, which runs `vol-resize --vol <path> --capacity <n>G` and refuses a non-absolute path.
+- `api/infra.virtrigaud.io/v1beta1/vmclass_types.go` (+ regenerated `config/crd/bases/infra.virtrigaud.io_vmclasses.yaml`): core-CEL maxima on `spec.memory` (below 100Ti; every value below 90Ti in bytes, k/Ki, M/Mi, G/Gi or T/Ti is accepted) and `spec.diskDefaults.size` (below 1Pi; every value below 900Ti is accepted). Negative values and the P/E suffixes are rejected. The rules avoid the `quantity()` library, which Kubernetes before 1.29 lacks, and each stays within the per-rule CEL cost budget.
 - Tests:
   - routed Power (every op, and the graceful-shutdown fallback) and Reconfigure (offline CPU/memory/disk, online CPU/memory, online disk grow with the guest-agent filesystem grow) run on the leased host, with no call reaching the placeholder;
   - lease release;
@@ -25,31 +30,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - the placeholder test drives every per-VM RPC again; clustered capabilities;
   - a host-scoped `Unavailable` or `NotFound` on Power/Reconfigure never counts toward the circuit breaker;
   - operator: owner carried, `HostUnavailable` backs off to 30 s, `NotFound` is A4, single-host errors unchanged;
-  - the conflict flow: host excluded and pending host released, re-schedule picks another host, all excluded gives `AllHostsExcluded` with no `Create` and a 2 m re-check, a conflict on a full list backs off 2 m, exclusions cleared on bind, finalizer after a conflict makes no provider call, cap and dedupe, the cap pinned to the CRD `maxItems`.
+  - the conflict flow: host excluded and pending host released, re-schedule picks another host, all excluded gives `AllHostsExcluded` with no `Create` and a 2 m re-check, a conflict on a full list backs off 2 m, exclusions cleared on bind, finalizer after a conflict makes no provider call, cap and dedupe, the cap pinned to the CRD `maxItems`;
+  - clustered Delete tears down the checked UUID; an owned domain with no UUID is not deleted;
+  - clustered Reconfigure resizes the domain's own disk by path: offline, online block device, online file (`blockresize` only), and a network disk (not resized). Also a `domblklist --details` parser table;
+  - wire classification:
+    - a host that died after first use, or whose libvirtd is down, is `HOST_UNAVAILABLE` on Describe, Power, Reconfigure and Delete;
+    - a rejected Power, Reconfigure or Create keeps its historical message and carries `VM_OPERATION_FAILED`;
+    - single-host errors carry no detail;
+    - repeated `VM_OPERATION_FAILED` never opens the breaker, while a plain `Unknown` still does;
+  - a routed Describe, Power or Reconfigure answered `NotSupported` backs off 2 m; single-host keeps 5 s;
+  - VMClass bounds in envtest (apiserver 1.34, also run on 1.32): plausible values in every notation are accepted; for every unit suffix the boundary values are pinned; negative values and P/E suffixes are rejected. Conversion bounds, including the 2Pi memory that used to wrap int32, and no provider call for an out-of-range VMClass.
 
 ### Changed
 - `internal/providers/libvirt/provider_virsh.go`, `disk_expand.go`: the Power and Reconfigure cores take the connection (`runPowerOp` / `reconfigureOn`), shared by single-host (`p.virshProvider`) and clustered (the leased host). Everything they reach runs on that connection: `syncPersistentXML`, `setvcpus`/`setmem`, the volume resize, `blockresize`, and the guest agent for the in-guest filesystem grow (built from the leased host's VirshProvider, never `p.virshProvider`).
 - `internal/providers/libvirt/provider_virsh.go`: single-host Power and Reconfigure keep their exact virsh/host command sequence and errors. 20 scenarios (every power op and failure fallback, every reconfigure branch) are pinned by `testdata/single_host_power_reconfigure.golden.json`, captured on `main` (5c4a335) before the refactor and re-verified there. `vm.HostID` and `vm.Owner` are still ignored on single-host.
 - `internal/providers/libvirt/server.go`: on a clustered provider, Power and Reconfigure are served instead of returning `Unimplemented`, and their errors are mapped by `routedRPCError`. `GetCapabilities` now advertises online reconfigure and online disk expansion. Snapshots, clones, disk export/import and image import stay hidden.
+- `internal/providers/libvirt/provider_virsh.go`, `disk_expand.go`: the clustered Reconfigure resizes the checked domain's **own** primary disk, read with `domblklist <uuid> --details` and addressed by its path, instead of `vol-resize <name>-disk --pool default`:
+  - offline: `vol-resize` by path;
+  - online, block-device disk: resized by path before `blockresize`;
+  - online, file-backed disk: grown by `blockresize` alone, which persists the new size (resizing a qcow2 under a running QEMU is unsafe);
+  - a disk with no host path is not resized.
+
+  Single-host keeps the historical by-name resize. Note: that single-host resize usually misses (image-created VMs use `<name>-disk.qcow2`), so the single-host offline disk resize silently does nothing; this is tracked separately so the single-host command sequence stays unchanged here.
+- `internal/providers/libvirt/routing.go`, `server.go` (clustered only): a routed call's failure on its leased host is classified:
+  - a host that could not be reached is the host-scoped `Unavailable` (`HOST_UNAVAILABLE`). This covers no exit status (SSH dial, handshake or session failure, a connection dropped mid-command, including on a connection dialed earlier) and virsh unable to reach libvirtd;
+  - any other failure keeps its historical code and message and gains a `VM_OPERATION_FAILED` `ErrorInfo`;
+  - a provider-level `Unavailable` is a plain `Unavailable`.
+
+  Clustered Create failures on the target host are classified the same way. Single-host wire errors are unchanged.
+- `internal/transport/grpc/client.go`: `isInfraFailure` ignores `VM_OPERATION_FAILED` (VirtRigaud's error domain only), as it ignores `HOST_UNAVAILABLE`.
 - `internal/controller/virtualmachine_controller.go`, `virtualmachine_clustered.go`: when a clustered Power or Reconfigure fails:
   - a host-scoped `Unavailable` sets `Ready=False/HostUnavailable` (30 s re-check);
   - `NotFound` is A4: `Ready=False/VMMissingOnHost`, never re-created, 2 m re-check;
-  - the slice 1 rule that re-checked an `Unimplemented` clustered Power/Reconfigure every 2 minutes is removed;
+  - one generic rule re-checks any routed Describe, Power or Reconfigure answered `Unimplemented` every 2 minutes (version skew with an older clustered provider image); everything else keeps 5 s;
   - new metric reasons `provider-power` and `provider-reconfigure`.
-- `docs/clustered-provider-inventory.md`: what is routed now, the owner-checked Power/Reconfigure, the conflict/exclusion rule and how to clear `excludedHosts`. `docs/adr/0007-clustered-orchestrator-provider.md`: A2 amendment.
+- `docs/clustered-provider-inventory.md`: what is routed now, the owner-checked and UUID-addressed Power/Reconfigure/Delete, the disk-by-path resize, the error classification, the conflict/exclusion rule and how to clear `excludedHosts`. `docs/adr/0007-clustered-orchestrator-provider.md`: A2 amendment.
 
 ### Fixed
-- `internal/controller/virtualmachine_clustered.go` (tracked from the slice 1 security review): after a clustered `Create` failed with a name conflict (`AlreadyExists`) on its pending host, `pendingHost` stayed set and pinned the VM to that host forever; only an administrator could release it. A conflict proves this VM created nothing there, so now the operator:
+- `internal/controller/virtualmachine_clustered.go` (tracked from the slice 1 security review): after a clustered `Create` failed with a name conflict (`AlreadyExists`) on its pending host, `pendingHost` stayed set and pinned the VM to that host forever; only an administrator could release it. A conflict proves this VM has no domain there and that the attempt created nothing. An earlier attempt that failed part-way may have left a `<name>-disk` volume or cloud-init files, which the owner-checked finalizer could never remove either. So now the operator:
   - clears `pendingHost` and excludes the host, in one checked status write;
   - sets `Placed=False/HostExcluded` and re-schedules onto another host.
 
   When every candidate is excluded, the VM shows `Placed=False/AllHostsExcluded`, no `Create` is sent, and it is re-checked every 2 minutes (no hot loop). A conflict that overflows the 16-entry list drops the oldest entry and also waits 2 minutes. An unreachable pending host is still never re-scheduled.
+- `internal/controller/virtualmachine_controller.go`, `vmclass_quantity.go`: `buildCreateRequest` converted VMClass memory and disk size with `int32(bytes / MiB)` and `int32(bytes / GiB)`, which wrapped a large quantity (2Pi of memory became a negative size). Both values are now range-checked first against the same maxima as the CRD. A negative or out-of-range value is an InvalidSpec error, reported as `Provisioning=False/ValidationError` on the 30 s spec cadence, and no provider call is made.
 
 ### Security
+- `internal/providers/libvirt/routing.go`, `internal/transport/grpc/client.go`: a clustered provider's per-VM failures no longer count toward the per-Provider circuit breaker. That covers a host-scoped `HOST_UNAVAILABLE` (now also for a host that died after first use) and a per-VM `VM_OPERATION_FAILED`. Before this change one tenant could open the breaker for every host and tenant of the Provider, for example with a VMClass whose disk grow fails on every 5 s retry. A provider-level failure still counts.
+- `internal/providers/libvirt/provider_virsh.go` (`deleteClustered`): the clustered Delete tears down the checked domain **by its UUID**, like Power and Reconfigure, closing the window between the ownership check and the destroy. An owned domain without a canonical UUID is left alone (retryable).
+- `internal/providers/libvirt/provider_virsh.go`, `disk_expand.go`: the clustered Reconfigure can no longer resize a volume that merely matches the `<name>-disk` naming convention and may belong to another domain. It resizes only the checked domain's own disk.
+- `api/infra.virtrigaud.io/v1beta1/vmclass_types.go`, `internal/controller/vmclass_quantity.go`: VMClass memory and disk size are bounded at the API server and range-checked by the operator (see Fixed).
 - `internal/providers/libvirt/provider_virsh.go` (`ownedDomainTarget`, `powerClustered`, `reconfigureClustered`): a routed Power or Reconfigure is **owner-checked** against the #333 domain stamp **before** anything is changed. A missing, unreadable, ambiguous or foreign stamp, or a request without an owner, is answered `NotFound`, and the domain is never started, stopped, rebooted, resized or touched through its guest agent. Every command then addresses the checked domain **by its UUID** rather than its name, so a domain replaced after the check is never acted on. Messages never name the other owner. An unsupported power op is refused before any host is leased.
 
 ### Why
-Slice 1 made a clustered VM describable and deletable on its host but left Power and Reconfigure refused. Without them, a clustered VM could not reach or keep its desired power state or resources. This slice routes both through the same owner-checked, lease-scoped path, without changing single-host behavior, which the ADR-0008 D5 soak depends on. It also closes the pending-host pinning gap the slice 1 security review tracked.
+Slice 1 made a clustered VM describable and deletable on its host but left Power and Reconfigure refused. Without them, a clustered VM could not reach or keep its desired power state or resources. This slice routes both through the same owner-checked, lease-scoped path, without changing single-host behavior, which the ADR-0008 D5 soak depends on. It also closes the pending-host pinning gap the slice 1 security review tracked, and applies the slice 2 security review:
+- a tenant-triggerable circuit-breaker trip;
+- UUID-pinned Delete;
+- disk resize by the checked domain's own path;
+- a slow re-check under version skew;
+- unbounded VMClass sizes that could wrap int32.
 
 ### Impact
 - [ ] Breaking change

@@ -865,9 +865,9 @@ every per-VM call** and the provider never looks it up (A1, D1). Slice 1 routed
 |---|---|
 | `Create` | Routed to `target_host_id` (shipped in P1) |
 | `Describe` | **Routed** to `target_host_id` and **owner-checked** (slice 1): the domain's state is returned only if its owner stamp is the requester's UID. An absent domain, or one whose stamp is missing, unreadable or foreign, is reported `exists=false` and none of its state is read; a domain replaced between the check and the read (different UUID) is reported absent too |
-| `Delete` | **Routed** and **owner-checked** (slice 1): destroyed only if its owner stamp is the requester's UID; a missing, unreadable or foreign stamp is answered `NotFound` and the domain is never touched |
+| `Delete` | **Routed** and **owner-checked** (slice 1): destroyed only if its owner stamp is the requester's UID; a missing, unreadable or foreign stamp is answered `NotFound` and the domain is never touched. Since slice 2 the teardown addresses the checked domain **by its UUID**, like `Power` and `Reconfigure` |
 | `Power` (on, off, reboot, graceful shutdown) | **Routed** and **owner-checked** (slice 2): nothing happens unless the owner stamp is the requester's UID (otherwise `NotFound`, domain untouched); the operation then addresses the checked domain **by its UUID**, so a domain replaced after the check is not acted on. The post-start persistent-XML sync runs on the same host |
-| `Reconfigure` (offline and online CPU/memory, disk grow) | **Routed** and **owner-checked** (slice 2), addressed by UUID like `Power`. Every step runs on the bound host: `setvcpus`/`setmem`, the volume resize, `blockresize`, and the best-effort in-guest filesystem grow through that host's guest agent |
+| `Reconfigure` (offline and online CPU/memory, disk grow) | **Routed** and **owner-checked** (slice 2), addressed by UUID like `Power`. Every step runs on the bound host: `setvcpus`/`setmem`, the disk resize, `blockresize`, and the best-effort in-guest filesystem grow through that host's guest agent. The disk that is resized is the checked domain's **own** primary disk, read with `domblklist --details` and resized by its path — never a volume found by name. Offline, it is resized with `vol-resize`; online, a block-device disk is resized before `blockresize`, while a file-backed disk is grown by `blockresize` alone (resizing a qcow2 under a running QEMU would be unsafe) |
 | `HardwareUpgrade` | `Unimplemented` (libvirt has no hardware versions; the request carries `target_host_id` for a future provider) |
 | snapshots, `Clone`, `ExportDisk`, `GetDiskInfo` | `Unimplemented` until slice 3 |
 | `ListVMs` | `Unimplemented` until slice 4 (it must run across all hosts) |
@@ -878,7 +878,17 @@ removed, draining or unreachable host is a retryable **host-scoped** `Unavailabl
 the status carries a `google.rpc.ErrorInfo` with reason `HOST_UNAVAILABLE`, which
 the manager maps to its own error class and keeps **out of the per-Provider
 circuit breaker** — one dead host must not fast-fail every VM on every other host
-of the Provider (a provider-level `Unavailable` still trips the breaker). A bound
+of the Provider (a provider-level `Unavailable` still trips the breaker). This
+includes a host that dies **after** its connection was first used — the
+registry reuses a dialed connection without probing it — because a call that
+never gets an exit status back from the host (SSH dial, handshake or session
+failure, a connection dropped mid-command), or a virsh that cannot reach the
+host's libvirtd, is classified as host-scoped. Any other failure of a routed
+call on its host (the host answered, but the operation on that one VM failed —
+for example a disk grow the host cannot satisfy) keeps its historical code and
+message and carries an `ErrorInfo` with reason `VM_OPERATION_FAILED`, which the
+manager also keeps out of the breaker: one tenant's failing VM, retried every
+few seconds, cannot open it for every VM of the Provider. A bound
 VM whose host is unavailable — on `Describe`, `Power` or `Reconfigure` — shows
 `Ready=False` (`HostUnavailable`) and is re-checked every 30 s. A host that
 starts draining mid-call still completes that call. The Describe, Delete, Power
@@ -913,7 +923,11 @@ for a clustered provider.
   An unreachable pending host still pins the VM (a domain may already exist
   there). But when the provider answers `AlreadyExists` — a same-named domain
   that this VM does not own is on the pending host — it has checked that
-  *before* creating anything, so this VM created nothing there. The operator
+  *before* creating anything, so this VM has no domain there and that attempt
+  created nothing. (An earlier attempt that failed part-way, before the domain
+  was defined, may have left a `<name>-disk` volume or cloud-init files behind;
+  the finalizer's owner-checked delete could not remove those either, so an
+  administrator has to clean them up.) The operator
   then clears `status.placement.pendingHost`, adds the host to
   `status.placement.excludedHosts`, sets `Placed=False` (`HostExcluded`) and
   schedules the VM again; the scheduler never picks an excluded host. The list
@@ -936,9 +950,10 @@ for a clustered provider.
   may then be left behind).
 - **`Power` and `Reconfigure` failures (slice 2).** A host-scoped unavailability
   is `Ready=False` (`HostUnavailable`, 30 s re-check) and a not-found is A4, as
-  above. Any other failure is reported as before (`ProviderError`, retried after
-  5 s). The slice 1 rule that re-checked a refused `Power`/`Reconfigure` every 2
-  minutes is gone, since both are routed now.
+  above. A routed call — `Describe`, `Power` or `Reconfigure` — that the
+  provider answers `Unimplemented` (for example an older clustered provider
+  image that does not route it yet) is re-checked every 2 minutes. Any other
+  failure is reported as before (`ProviderError`, retried after 5 s).
 - **Adoption** is refused on a clustered provider until slice 4
   (`Provider.status.adoption.message` says why), and a **VMMigration into** a
   clustered provider fails validation until P3.

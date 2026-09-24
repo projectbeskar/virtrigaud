@@ -130,9 +130,9 @@ func promotePendingHost(vm *infravirtrigaudiov1beta1.VirtualMachine, host string
 //
 //   - A name conflict (Conflict / ALREADY_EXISTS) is the exception: the
 //     provider found a same-named domain this VM does not own on the host
-//     BEFORE creating anything, which proves this VM created nothing there.
-//     The host is excluded and the VM re-scheduled (handleClusteredCreateConflict,
-//     the A2 amendment).
+//     BEFORE creating anything, so this VM has no domain there and the
+//     attempt created nothing. The host is excluded and the VM re-scheduled
+//     (handleClusteredCreateConflict, the A2 amendment).
 //   - A host-scoped unavailability (the pending host is unknown, draining or
 //     unreachable) sets Placed=False/HostUnavailable. The VM is never
 //     re-scheduled automatically, because a domain may already exist on that
@@ -205,9 +205,15 @@ func excludeHost(pl *infravirtrigaudiov1beta1.PlacementStatus, host string) (dro
 // (slice 2): the Create aimed at the pending host was refused with a name
 // conflict (Conflict / ALREADY_EXISTS) — a domain of the same name that this
 // VM does not own already exists there. The provider checks that BEFORE it
-// creates anything, so the refusal proves this VM created nothing on the host.
-// Keeping pendingHost would pin the VM to that host forever (only an
-// administrator could release it); instead:
+// creates anything, so the refusal proves that this VM has no domain on the
+// host and that THIS attempt created nothing there. It does not prove the host
+// is clean of this VM: an earlier attempt that failed part-way (before the
+// domain was defined) may have left a "<name>-disk" volume or cloud-init files
+// behind. Those were never reachable by the finalizer either — its
+// owner-checked Delete acts only on a domain this VM owns and never cleans up
+// by name on a clustered host — so releasing the host loses no cleanup; they
+// remain for an administrator to remove. Keeping pendingHost would pin the VM
+// to that host forever (only an administrator could release it); instead:
 //
 //   - the host is added to status.placement.excludedHosts (bounded; cleared
 //     when the VM is bound), which the scheduler honours;
@@ -218,8 +224,8 @@ func excludeHost(pl *infravirtrigaudiov1beta1.PlacementStatus, host string) (dro
 // The record is a checked status update, like recordPendingHost. If it does
 // not land, nothing is lost: pendingHost is still set, so the next reconcile
 // retries the Create on the same host, gets the same conflict and records it
-// again. The finalizer does not need the host either: an owner-checked delete
-// there would find nothing of this VM's.
+// again. The finalizer does not need the host either: its owner-checked delete
+// there would find no domain of this VM's.
 //
 // If every candidate host ends up excluded, resolveClusterPlacement reports
 // Placed=False/AllHostsExcluded and re-checks slowly; each conflict removes
@@ -247,7 +253,7 @@ func (r *VirtualMachineReconciler) handleClusteredCreateConflict(
 
 	setPlacedCondition(vm, metav1.ConditionFalse, k8s.ReasonHostExcluded, fmt.Sprintf(
 		"create on host %s was refused because a same-named domain this VirtualMachine does not own exists there, "+
-			"so nothing was created on it; the host is excluded for this VM and it will be re-scheduled onto another host", host))
+			"so this attempt created nothing on it; the host is excluded for this VM and it will be re-scheduled onto another host", host))
 	msg := fmt.Sprintf("Provider rejected VM create on host %s (host excluded; re-scheduling): %s", host, providerMsg)
 	for _, condType := range []string{k8s.ConditionReady, k8s.ConditionProvisioning} {
 		meta.SetStatusCondition(&vm.Status.Conditions, metav1.Condition{

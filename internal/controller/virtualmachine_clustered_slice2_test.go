@@ -198,8 +198,9 @@ type ctrlResult struct {
 
 // TestCreateVM_Clustered_ConflictExcludesHostAndReschedules is the tracked fix
 // from the slice 1 security review: a Create refused with a name conflict on
-// the pending host clears pendingHost (it proves this VM created nothing
-// there), excludes the host durably, and the next reconcile schedules the VM
+// the pending host clears pendingHost (it proves this VM has no domain there
+// and that the attempt created nothing), excludes the host durably, and the
+// next reconcile schedules the VM
 // onto another host; binding it clears the exclusions.
 func TestCreateVM_Clustered_ConflictExcludesHostAndReschedules(t *testing.T) {
 	vm := clusterVM("web", clusteredNS, "prov-cluster")

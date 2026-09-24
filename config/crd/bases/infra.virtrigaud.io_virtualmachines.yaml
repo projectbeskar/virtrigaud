@@ -754,10 +754,13 @@ spec:
                       ExcludedHosts are Hosts (CR names) the scheduler must not choose for this
                       VM (ADR-0007 Addendum A, A2 amendment). A Host is added when a Create on
                       it was refused with a name conflict (ALREADY_EXISTS: a same-named domain
-                      this VM does not own is there), which proves this VM created nothing on
-                      it; its pendingHost is then cleared and the VM is re-scheduled onto
-                      another Host. The list is bounded (the oldest entry is dropped when it is
-                      full) and is cleared when the VM is bound. If every candidate Host is
+                      this VM does not own is there), which proves this VM has no domain on it
+                      and that this attempt created nothing there (an earlier failed attempt
+                      may have left disk or cloud-init files, which no owner-checked cleanup
+                      could remove either); its pendingHost is then cleared and the VM is
+                      re-scheduled onto another Host. The list is bounded (the oldest entry is
+                      dropped when it is full) and is cleared when the VM is bound. If every
+                      candidate Host is
                       excluded the VM stays unplaced (Placed=False/AllHostsExcluded) until an
                       administrator resolves the name conflicts and clears this list.
                     items:

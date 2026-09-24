@@ -824,10 +824,17 @@ sets `Placed=False/HostUnavailable` and waits for the host to return or for an
 administrator to clear `pendingHost` (D8, report-only).
 
 > **Amendment (2026-09-24, slice 2): a name conflict releases the pending host.**
-> `AlreadyExists` on the pending host is the one `Create` failure that proves this
-> VM created nothing there. The provider checks for a same-named domain it does
-> not own *before* creating anything. Keeping `pendingHost` would pin the VM to
-> that host until an administrator stepped in. So on `AlreadyExists` the operator:
+> `AlreadyExists` on the pending host is the one `Create` failure that proves
+> this VM has no domain there. The provider checks for a same-named domain it
+> does not own *before* creating anything, so this attempt created nothing
+> either. It does **not** prove that the host holds nothing of this VM's: an
+> earlier attempt that failed part-way, before the domain was defined, may have
+> left a `<name>-disk` volume or cloud-init files behind. The finalizer could
+> never remove those either, because its owner-checked `Delete` acts only on a
+> domain this VM owns and a clustered host is never cleaned up by name. So
+> releasing the host loses no cleanup, and such leftovers stay for an
+> administrator. Keeping `pendingHost` would pin the VM to that host until an
+> administrator stepped in. So on `AlreadyExists` the operator:
 >
 > - clears `pendingHost` and adds the host to the additive
 >   `status.placement.excludedHosts`, in one checked `Status().Update`. If the
@@ -844,7 +851,7 @@ administrator to clear `pendingHost` (D8, report-only).
 > `Placed=False/AllHostsExcluded` and sends no `Create`. It re-checks every 2
 > minutes (no hot loop) until an administrator resolves the collisions and
 > clears the list. The finalizer loses nothing: an owner-checked `Delete` on
-> that host would find nothing of this VM's.
+> that host would find no domain of this VM's.
 >
 > An *unreachable* pending host is unchanged: still never re-scheduled.
 
