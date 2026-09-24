@@ -182,19 +182,19 @@ func TestClient_VMOperations_RecordOnSuccess(t *testing.T) {
 			return e
 		}},
 		{"Delete", metrics.OpDelete, func() error {
-			_, e := cli.Delete(ctx, "vm-1")
+			_, e := cli.Delete(ctx, contracts.VMRef{ID: "vm-1"})
 			return e
 		}},
 		{"Power", metrics.OpPower, func() error {
-			_, e := cli.Power(ctx, "vm-1", contracts.PowerOpOn)
+			_, e := cli.Power(ctx, contracts.VMRef{ID: "vm-1"}, contracts.PowerOpOn)
 			return e
 		}},
 		{"Describe", metrics.OpDescribe, func() error {
-			_, e := cli.Describe(ctx, "vm-1")
+			_, e := cli.Describe(ctx, contracts.VMRef{ID: "vm-1"})
 			return e
 		}},
 		{"Reconfigure", metrics.OpReconfigure, func() error {
-			_, e := cli.Reconfigure(ctx, "vm-1", contracts.CreateRequest{Name: "vm-1"})
+			_, e := cli.Reconfigure(ctx, contracts.VMRef{ID: "vm-1"}, contracts.CreateRequest{Name: "vm-1"})
 			return e
 		}},
 	}
@@ -238,19 +238,19 @@ func TestClient_VMOperations_RecordOnError(t *testing.T) {
 			return e
 		}},
 		{"Delete", metrics.OpDelete, func() error {
-			_, e := cli.Delete(ctx, "vm-1")
+			_, e := cli.Delete(ctx, contracts.VMRef{ID: "vm-1"})
 			return e
 		}},
 		{"Power", metrics.OpPower, func() error {
-			_, e := cli.Power(ctx, "vm-1", contracts.PowerOpOn)
+			_, e := cli.Power(ctx, contracts.VMRef{ID: "vm-1"}, contracts.PowerOpOn)
 			return e
 		}},
 		{"Describe", metrics.OpDescribe, func() error {
-			_, e := cli.Describe(ctx, "vm-1")
+			_, e := cli.Describe(ctx, contracts.VMRef{ID: "vm-1"})
 			return e
 		}},
 		{"Reconfigure", metrics.OpReconfigure, func() error {
-			_, e := cli.Reconfigure(ctx, "vm-1", contracts.CreateRequest{Name: "vm-1"})
+			_, e := cli.Reconfigure(ctx, contracts.VMRef{ID: "vm-1"}, contracts.CreateRequest{Name: "vm-1"})
 			return e
 		}},
 	}

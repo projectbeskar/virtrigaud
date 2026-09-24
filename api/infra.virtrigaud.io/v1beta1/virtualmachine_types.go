@@ -292,14 +292,29 @@ type VirtualMachineStatus struct {
 
 // PlacementStatus is the operator scheduler's binding for a VM on a clustered
 // provider (ADR-0007 P1, D3/D4): the durable record of which HostPool host runs
-// the VM, plus the decision trace. It is written only after the provider
+// the VM, plus the decision trace. Host is written only after the provider
 // confirms placement (create success / migration done), so it never claims a
-// host the provider has not accepted the VM on.
+// host the provider has not accepted the VM on; PendingHost records, separately,
+// the host an unconfirmed Create is aimed at (ADR-0007 Addendum A, A2).
 type PlacementStatus struct {
 	// Host is the Host (CR name) this VM is bound to run on — the durable
 	// placement source of truth (D3). Written only after the provider confirms.
+	// Every per-VM provider call for the VM is routed to this host.
 	// +optional
 	Host string `json:"host,omitempty"`
+
+	// PendingHost is the Host (CR name) an in-flight, not yet confirmed Create is
+	// aimed at (ADR-0007 Addendum A, A2). The operator writes it, with Pool,
+	// through a resourceVersion-checked status update BEFORE calling Create, so
+	// a retry after a lost write or a Create that ran past its deadline lands on
+	// the SAME host instead of being scheduled onto another one (which could
+	// leave a second domain of the same name behind). When Create succeeds it is
+	// moved into Host and cleared. It is used only to route the Create retry and
+	// the finalizer's owner-checked cleanup; it is never a binding. An
+	// administrator may clear it to release a VM whose pending host is gone for
+	// good (the operator never re-schedules such a VM on its own).
+	// +optional
+	PendingHost string `json:"pendingHost,omitempty"`
 
 	// Pool is the HostPool the VM was scheduled into.
 	// +optional

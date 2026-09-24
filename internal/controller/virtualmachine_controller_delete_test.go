@@ -41,7 +41,7 @@ type deleteStubProvider struct {
 	calls atomic.Int32
 }
 
-func (p *deleteStubProvider) Delete(_ context.Context, _ string) (string, error) {
+func (p *deleteStubProvider) Delete(_ context.Context, _ contracts.VMRef) (string, error) {
 	p.calls.Add(1)
 	return "", p.err
 }

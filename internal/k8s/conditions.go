@@ -92,6 +92,49 @@ const (
 	ReasonPlacementError = "PlacementError"
 )
 
+// ConditionPlaced is the single positive placement condition of a VirtualMachine
+// on a clustered ("brain-in-operator") provider (ADR-0007 Addendum A, A2). True
+// means the VM has a confirmed host binding (status.placement.host); False
+// carries WHY per-VM calls cannot (yet) be routed to a host. It is never set on
+// a VM of a single-host or thin-client provider (D9).
+const ConditionPlaced = "Placed"
+
+// Placed condition reasons (ADR-0007 Addendum A, A2). The vocabulary is fixed by
+// the ADR: exactly these four.
+const (
+	// ReasonBound is Placed=True: the provider confirmed the VM on the host named
+	// by status.placement.host, and every per-VM call is routed there.
+	ReasonBound = "Bound"
+	// ReasonCreatePending is Placed=False: the operator recorded the attempted
+	// host in status.placement.pendingHost and the provider has not yet confirmed
+	// the Create there. A retry reuses the same host; the scheduler is not re-run.
+	ReasonCreatePending = "CreatePending"
+	// ReasonHostUnavailable is Placed=False: the pending host is unreachable (the
+	// provider keeps answering Create with Unavailable). The VM is NEVER
+	// re-scheduled automatically, because a domain may already exist there; it
+	// waits for the host to return or for an administrator to clear pendingHost.
+	ReasonHostUnavailable = "HostUnavailable"
+	// ReasonUnbound is Placed=False: the VM has a provider id but no confirmed
+	// host binding (e.g. its status was lost in a backup restore). No per-VM call
+	// is sent — the provider is never allowed to pick a host.
+	ReasonUnbound = "Unbound"
+)
+
+// ReasonPlacementTopologyMismatch indicates that a VirtualMachine records a
+// clustered placement (status.placement.host / .pendingHost) but its Provider
+// is not topology: cluster (ADR-0007 Addendum A). No provider call is made for
+// it: the single-host path neither routes to the recorded host nor checks
+// ownership. Provider topology is immutable, so this only affects objects
+// edited before that rule existed.
+const ReasonPlacementTopologyMismatch = "PlacementTopologyMismatch"
+
+// ReasonVMMissingOnHost indicates that a clustered VM's bound host reports the
+// hypervisor VM does not exist (ADR-0007 Addendum A, A4). The operator does NOT
+// re-create it — neither on the bound host nor elsewhere — because without
+// fencing that risks two running copies of one disk (D8). An administrator must
+// restore the VM, or delete and re-create the VirtualMachine.
+const ReasonVMMissingOnHost = "VMMissingOnHost"
+
 // SetCondition sets a condition on the given list of conditions
 func SetCondition(conditions *[]metav1.Condition, conditionType string, status metav1.ConditionStatus, reason, message string) {
 	newCondition := metav1.Condition{

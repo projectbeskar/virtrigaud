@@ -126,22 +126,28 @@ type Provider interface {
 	// Returns TaskRef if the operation is asynchronous
 	Create(ctx context.Context, req CreateRequest) (CreateResponse, error)
 
-	// Delete removes a VM (idempotent, succeeds even if VM doesn't exist)
-	// Returns TaskRef if the operation is asynchronous
-	Delete(ctx context.Context, id string) (taskRef string, err error)
+	// Delete removes the VM vm addresses (idempotent, succeeds even if the VM
+	// doesn't exist). On a clustered provider vm.Owner is checked (ADR-0007
+	// Addendum A, A2): the VM is destroyed only when its recorded owner UID
+	// equals vm.Owner.UID, and anything else is reported as not-found without
+	// touching it; single-host and thin-client providers ignore the owner.
+	// Returns TaskRef if the operation is asynchronous.
+	Delete(ctx context.Context, vm VMRef) (taskRef string, err error)
 
-	// Power performs a power operation on the VM
+	// Power performs a power operation on the VM vm addresses.
 	// Returns TaskRef if the operation is asynchronous
-	Power(ctx context.Context, id string, op PowerOp) (taskRef string, err error)
+	Power(ctx context.Context, vm VMRef, op PowerOp) (taskRef string, err error)
 
-	// Reconfigure modifies VM resources (CPU/RAM/Disks)
-	// May be no-op for unsupported fields
+	// Reconfigure modifies the resources (CPU/RAM/Disks) of the VM vm
+	// addresses. May be no-op for unsupported fields.
 	// Returns TaskRef if the operation is asynchronous
-	Reconfigure(ctx context.Context, id string, desired CreateRequest) (taskRef string, err error)
+	Reconfigure(ctx context.Context, vm VMRef, desired CreateRequest) (taskRef string, err error)
 
-	// Describe returns the current state of the VM
+	// Describe returns the current state of the VM vm addresses. On a clustered
+	// provider a VM whose owner stamp does not record vm.Owner.UID is reported
+	// as not existing, and none of its state is returned.
 	// Should be cheap and resilient to call frequently
-	Describe(ctx context.Context, id string) (DescribeResponse, error)
+	Describe(ctx context.Context, vm VMRef) (DescribeResponse, error)
 
 	// IsTaskComplete checks if an async task is complete
 	IsTaskComplete(ctx context.Context, taskRef string) (done bool, err error)
@@ -152,11 +158,11 @@ type Provider interface {
 	// SnapshotCreate creates a VM snapshot
 	SnapshotCreate(ctx context.Context, req SnapshotCreateRequest) (SnapshotCreateResponse, error)
 
-	// SnapshotDelete deletes a VM snapshot
-	SnapshotDelete(ctx context.Context, vmId string, snapshotId string) (taskRef string, err error)
+	// SnapshotDelete deletes snapshot snapshotID of the VM vm addresses.
+	SnapshotDelete(ctx context.Context, vm VMRef, snapshotID string) (taskRef string, err error)
 
-	// SnapshotRevert reverts a VM to a snapshot
-	SnapshotRevert(ctx context.Context, vmId string, snapshotId string) (taskRef string, err error)
+	// SnapshotRevert reverts the VM vm addresses to snapshot snapshotID.
+	SnapshotRevert(ctx context.Context, vm VMRef, snapshotID string) (taskRef string, err error)
 
 	// ExportDisk exports a VM disk for migration
 	// Returns export identifier and optional task reference for async operations

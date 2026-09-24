@@ -22,8 +22,10 @@ import "context"
 // new one. It is the manager-side, transport-agnostic mirror of the
 // provider.v1 CloneRequest message (issue #179).
 type CloneRequest struct {
-	// SourceVmID is the provider-specific identifier of the VM to clone from.
-	SourceVmID string
+	// Source addresses the VM to clone from: its provider-specific identifier
+	// and, for a clustered provider, the host it is bound to — threaded to the
+	// wire as source_vm_id / source_host_id (ADR-0007 Addendum A, A1).
+	Source VMRef
 	// TargetName is the desired name of the cloned VM.
 	TargetName string
 	// Linked requests a copy-on-write linked clone when true. Best-effort:
@@ -56,7 +58,7 @@ type CloneResponse struct {
 // support cloning are unaffected (issue #179). This mirrors the
 // CapabilityReporter pattern.
 type Cloner interface {
-	// Clone clones SourceVmID into a new VM named TargetName. Returns the new
+	// Clone clones Source into a new VM named TargetName. Returns the new
 	// VM's provider identifier and, when the operation is asynchronous, a
 	// TaskRef the caller can poll via IsTaskComplete.
 	Clone(ctx context.Context, req CloneRequest) (CloneResponse, error)

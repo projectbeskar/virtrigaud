@@ -80,7 +80,7 @@ func (s *Server) exportDiskToS3(ctx context.Context, req *providerv1.ExportDiskR
 	// Resolve the source disk path on the host via GetDiskInfo (e.g. for
 	// demo-ubuntu-libvirt vda=/var/lib/libvirt/images/ubuntu-libvirt-demo.qcow2).
 	diskInfo, err := s.provider.GetDiskInfo(ctx, contracts.GetDiskInfoRequest{
-		VmId:       req.VmId,
+		VM:         contracts.VMRef{ID: req.VmId, HostID: req.TargetHostId},
 		DiskId:     req.DiskId,
 		SnapshotId: req.SnapshotId,
 	})

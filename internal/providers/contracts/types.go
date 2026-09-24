@@ -170,8 +170,9 @@ type TaskStatus struct {
 
 // SnapshotCreateRequest defines snapshot creation request
 type SnapshotCreateRequest struct {
-	// VmId is the VM identifier
-	VmId string
+	// VM addresses the VM to snapshot: its identifier and, for a clustered
+	// provider, the host it is bound to (ADR-0007 Addendum A, A1).
+	VM VMRef
 	// NameHint provides a name suggestion for the snapshot
 	NameHint string
 	// Description provides context for the snapshot
@@ -192,8 +193,9 @@ type SnapshotCreateResponse struct {
 
 // ExportDiskRequest defines a disk export request for migration
 type ExportDiskRequest struct {
-	// VmId is the VM identifier
-	VmId string
+	// VM addresses the VM whose disk is exported: its identifier and, for a
+	// clustered provider, the host it is bound to (ADR-0007 Addendum A, A1).
+	VM VMRef
 	// DiskId identifies which disk to export (empty = primary disk)
 	DiskId string
 	// SnapshotId specifies a snapshot to export from (optional)
@@ -272,8 +274,9 @@ type ImportDiskResponse struct {
 
 // GetDiskInfoRequest defines a request for disk information
 type GetDiskInfoRequest struct {
-	// VmId is the VM identifier
-	VmId string
+	// VM addresses the VM whose disk is described: its identifier and, for a
+	// clustered provider, the host it is bound to (ADR-0007 Addendum A, A1).
+	VM VMRef
 	// DiskId identifies which disk (empty = primary disk)
 	DiskId string
 	// SnapshotId gets info for a specific snapshot (optional)

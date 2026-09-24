@@ -231,6 +231,10 @@ type fakeDiskProvider struct {
 	diskErr     error
 }
 
+// clustered reports single-host topology: this fake stands in for a single-host
+// backend (the Server gates clustered-only routing on it).
+func (f *fakeDiskProvider) clustered() bool { return false }
+
 func (f *fakeDiskProvider) ExportDisk(_ context.Context, req contracts.ExportDiskRequest) (contracts.ExportDiskResponse, error) {
 	f.gotExport = req
 	return f.exportResp, f.exportErr
@@ -268,7 +272,7 @@ func TestServer_ExportDisk_DelegatesAndConverts(t *testing.T) {
 	require.NotNil(t, resp)
 
 	// Request fields converted correctly.
-	assert.Equal(t, "vm-1", fake.gotExport.VmId)
+	assert.Equal(t, "vm-1", fake.gotExport.VM.ID)
 	assert.Equal(t, "disk-0", fake.gotExport.DiskId)
 	assert.Equal(t, "snap-1", fake.gotExport.SnapshotId)
 	assert.Equal(t, "pvc://mig/out.qcow2", fake.gotExport.DestinationURL)
@@ -321,7 +325,7 @@ func TestServer_GetDiskInfo_DelegatesAndConverts(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 
-	assert.Equal(t, "vm-1", fake.gotDiskInfo.VmId)
+	assert.Equal(t, "vm-1", fake.gotDiskInfo.VM.ID)
 	assert.Equal(t, "disk-0", fake.gotDiskInfo.DiskId)
 
 	assert.Equal(t, "vm-1-disk", resp.DiskId)

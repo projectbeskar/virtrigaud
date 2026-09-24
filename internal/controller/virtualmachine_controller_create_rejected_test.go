@@ -58,8 +58,8 @@ func (p *rejectingCreateProvider) Create(_ context.Context, req contracts.Create
 	return contracts.CreateResponse{ID: req.Name}, nil
 }
 
-func (p *rejectingCreateProvider) Delete(_ context.Context, id string) (string, error) {
-	p.deleteIDs = append(p.deleteIDs, id)
+func (p *rejectingCreateProvider) Delete(_ context.Context, vm contracts.VMRef) (string, error) {
+	p.deleteIDs = append(p.deleteIDs, vm.ID)
 	return "", nil
 }
 

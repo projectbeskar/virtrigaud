@@ -753,11 +753,25 @@ spec:
                     description: |-
                       Host is the Host (CR name) this VM is bound to run on — the durable
                       placement source of truth (D3). Written only after the provider confirms.
+                      Every per-VM provider call for the VM is routed to this host.
                     type: string
                   lastScheduledTime:
                     description: LastScheduledTime is when the scheduler last (re)bound
                       this VM to Host.
                     format: date-time
+                    type: string
+                  pendingHost:
+                    description: |-
+                      PendingHost is the Host (CR name) an in-flight, not yet confirmed Create is
+                      aimed at (ADR-0007 Addendum A, A2). The operator writes it, with Pool,
+                      through a resourceVersion-checked status update BEFORE calling Create, so
+                      a retry after a lost write or a Create that ran past its deadline lands on
+                      the SAME host instead of being scheduled onto another one (which could
+                      leave a second domain of the same name behind). When Create succeeds it is
+                      moved into Host and cleared. It is used only to route the Create retry and
+                      the finalizer's owner-checked cleanup; it is never a binding. An
+                      administrator may clear it to release a VM whose pending host is gone for
+                      good (the operator never re-schedules such a VM on its own).
                     type: string
                   pool:
                     description: Pool is the HostPool the VM was scheduled into.

@@ -261,8 +261,15 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
+	// Address the VM (ADR-0007 Addendum A, A1). A clustered VM with no
+	// confirmed host binding is never sent a per-VM call: wait for the binding.
+	ref, err := vmRefFor(vm, provider)
+	if err != nil {
+		return r.waitForVMBinding(ctx, snapshot, err), nil
+	}
+
 	// Build snapshot create request
-	req := r.buildSnapshotCreateRequest(snapshot, vm)
+	req := r.buildSnapshotCreateRequest(snapshot, ref)
 
 	// Capability gate (issue #176). When enforcement is enabled and the
 	// provider reports capabilities, refuse a snapshot the provider declares
@@ -533,16 +540,25 @@ func (r *VMSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *inf
 			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
 
-		// Delete the snapshot via provider
-		logger.Info("Calling provider to delete snapshot", "snapshot_id", snapshot.Status.SnapshotID, "vm_id", vm.Status.ID)
-		_, err = providerInstance.SnapshotDelete(ctx, vm.Status.ID, snapshot.Status.SnapshotID)
-		if err != nil {
-			logger.Error(err, "Failed to delete snapshot via provider")
-			// Log the error but continue with finalizer removal
-			// The snapshot may already be deleted or the VM may be gone
-			r.Recorder.Event(snapshot, "Warning", "SnapshotDeleteFailed", fmt.Sprintf("Failed to delete snapshot: %v", err))
+		// Address the VM (ADR-0007 Addendum A, A1). A clustered VM with no
+		// confirmed host binding is never sent a per-VM call; like any other
+		// provider-side failure here, that is reported and the finalizer is
+		// still removed (the snapshot delete is best-effort).
+		ref, refErr := vmRefFor(vm, provider)
+		if refErr != nil {
+			logger.Info("Not deleting the provider snapshot: the VM has no host binding", "error", refErr.Error())
+			r.Recorder.Event(snapshot, "Warning", "SnapshotDeleteFailed", fmt.Sprintf("Failed to delete snapshot: %v", refErr))
 		} else {
-			logger.Info("Snapshot deleted successfully via provider")
+			// Delete the snapshot via provider
+			logger.Info("Calling provider to delete snapshot", "snapshot_id", snapshot.Status.SnapshotID, "vm_id", vm.Status.ID)
+			if _, err := providerInstance.SnapshotDelete(ctx, ref, snapshot.Status.SnapshotID); err != nil {
+				logger.Error(err, "Failed to delete snapshot via provider")
+				// Log the error but continue with finalizer removal
+				// The snapshot may already be deleted or the VM may be gone
+				r.Recorder.Event(snapshot, "Warning", "SnapshotDeleteFailed", fmt.Sprintf("Failed to delete snapshot: %v", err))
+			} else {
+				logger.Info("Snapshot deleted successfully via provider")
+			}
 		}
 	}
 
@@ -660,10 +676,26 @@ func (r *VMSnapshotReconciler) getProviderInstance(ctx context.Context, provider
 	return r.RemoteResolver.GetProvider(ctx, provider)
 }
 
-// buildSnapshotCreateRequest builds a snapshot create request from the snapshot spec
-func (r *VMSnapshotReconciler) buildSnapshotCreateRequest(snapshot *infrav1beta1.VMSnapshot, vm *infrav1beta1.VirtualMachine) contracts.SnapshotCreateRequest {
+// waitForVMBinding records that a snapshot of a clustered VM with no confirmed
+// host binding is waiting for it (ADR-0007 Addendum A, A1) and requeues. The
+// snapshot stays in the initial phase, so the create is retried unchanged once
+// the VM is bound; no provider call is made.
+func (r *VMSnapshotReconciler) waitForVMBinding(ctx context.Context, snapshot *infrav1beta1.VMSnapshot, cause error) ctrl.Result {
+	logging.FromContext(ctx).Info("VM has no host binding; waiting before snapshotting", "error", cause.Error())
+	snapshot.Status.Phase = ""
+	snapshot.Status.Message = "Waiting for the VM's host binding"
+	k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionCreating,
+		metav1.ConditionTrue, vmRefErrorReason(cause), cause.Error())
+	// Status update errors are intentionally ignored to avoid blocking reconciliation
+	_ = r.updateStatus(ctx, snapshot)
+	return ctrl.Result{RequeueAfter: 30 * time.Second}
+}
+
+// buildSnapshotCreateRequest builds a snapshot create request from the snapshot
+// spec for the VM vm addresses (see vmRefFor).
+func (r *VMSnapshotReconciler) buildSnapshotCreateRequest(snapshot *infrav1beta1.VMSnapshot, vm contracts.VMRef) contracts.SnapshotCreateRequest {
 	req := contracts.SnapshotCreateRequest{
-		VmId: vm.Status.ID,
+		VM: vm,
 	}
 
 	// Set snapshot configuration if provided

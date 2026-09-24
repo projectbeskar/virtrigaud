@@ -20,6 +20,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// HostInUseFinalizer is the finalizer the Host controller keeps on every Host
+// (ADR-0007 Addendum A, A1). It is removed only once no VirtualMachine of the
+// Host's Provider names the Host in status.placement.host or
+// status.placement.pendingHost, so a Host that per-VM calls (and VM finalizer
+// cleanup) still route to cannot vanish from the provider's inventory.
+const HostInUseFinalizer = "host.infra.virtrigaud.io/in-use"
+
 // HostHealth is the live health of a Host, observed by the operator's inventory
 // sync from the clustered provider (ListHosts/GetHostInfo, ADR-0007 D1/D3).
 // +kubebuilder:validation:Enum=Ready;NotReady;Unknown

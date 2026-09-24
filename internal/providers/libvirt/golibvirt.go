@@ -810,6 +810,9 @@ func (h *golibvirtHolder) close() {
 // is the hostconn.Conn seam method that reaches here; VirshProvider.Cleanup
 // closes the holder this creates.
 func (v *VirshProvider) Libvirt(ctx context.Context) (*golibvirt.Libvirt, error) {
+	if err := v.refuseIfUnroutable(); err != nil {
+		return nil, err
+	}
 	v.golibvirtMu.Lock()
 	if v.golibvirt == nil {
 		v.golibvirt = newGolibvirtHolder(v)
@@ -833,6 +836,9 @@ func (v *VirshProvider) Libvirt(ctx context.Context) (*golibvirt.Libvirt, error)
 // calls either keeps go-libvirt fully dormant. ADR-0008 PR 4b's shadow-compare
 // Describe is the first caller.
 func (v *VirshProvider) callLibvirt(ctx context.Context, fn func(*golibvirt.Libvirt) error) error {
+	if err := v.refuseIfUnroutable(); err != nil {
+		return err
+	}
 	v.golibvirtMu.Lock()
 	if v.golibvirt == nil {
 		v.golibvirt = newGolibvirtHolder(v)

@@ -137,14 +137,28 @@ func TestProviderCustomValidator_ValidateUpdate(t *testing.T) {
 
 		// A cluster libvirt provider may be updated while staying clustered.
 		{"cluster -> cluster on libvirt is allowed", ProviderTypeLibvirt, ProviderTypeLibvirt, ProviderTopologyCluster, ProviderTopologyCluster, false},
-		{"single -> cluster on libvirt is allowed", ProviderTypeLibvirt, ProviderTypeLibvirt, ProviderTopologySingle, ProviderTopologyCluster, false},
+		{"single -> single on libvirt is allowed", ProviderTypeLibvirt, ProviderTypeLibvirt, ProviderTopologySingle, ProviderTopologySingle, false},
+
+		// Topology is immutable (ADR-0007 Addendum A): VMs are placed and their
+		// per-VM calls routed/owner-checked under one topology, so any flip is
+		// rejected — including the former "self-heal" cluster -> single on a
+		// non-libvirt type (such an object must be recreated).
+		{"single -> cluster on libvirt is rejected (immutable)", ProviderTypeLibvirt, ProviderTypeLibvirt, ProviderTopologySingle, ProviderTopologyCluster, true},
+		{"cluster -> single on libvirt is rejected (immutable)", ProviderTypeLibvirt, ProviderTypeLibvirt, ProviderTopologyCluster, ProviderTopologySingle, true},
+		{"cluster -> single on vsphere is rejected (immutable)", ProviderTypeVSphere, ProviderTypeVSphere, ProviderTopologyCluster, ProviderTopologySingle, true},
+
+		// "" is the defaulted "single": a Provider created before the field
+		// existed (or a client that omits it) keeps accepting ordinary updates,
+		// but "" <-> cluster is still a flip.
+		{"unset -> single is allowed", ProviderTypeLibvirt, ProviderTypeLibvirt, "", ProviderTopologySingle, false},
+		{"single -> unset is allowed", ProviderTypeLibvirt, ProviderTypeLibvirt, ProviderTopologySingle, "", false},
+		{"unset -> unset is allowed", ProviderTypeVSphere, ProviderTypeVSphere, "", "", false},
+		{"unset -> cluster is rejected (immutable)", ProviderTypeLibvirt, ProviderTypeLibvirt, "", ProviderTopologyCluster, true},
+		{"cluster -> unset is rejected (immutable)", ProviderTypeLibvirt, ProviderTypeLibvirt, ProviderTopologyCluster, "", true},
 
 		// Flipping the type out of libvirt while remaining cluster is rejected
-		// (the rule is evaluated on the new object's type+topology).
+		// (the D2 rule is evaluated on the new object's type+topology).
 		{"type libvirt -> vsphere while cluster is rejected", ProviderTypeLibvirt, ProviderTypeVSphere, ProviderTopologyCluster, ProviderTopologyCluster, true},
-
-		// Leaving cluster on a non-libvirt provider is allowed (self-heal path).
-		{"cluster -> single on vsphere is allowed", ProviderTypeVSphere, ProviderTypeVSphere, ProviderTopologyCluster, ProviderTopologySingle, false},
 	}
 
 	for _, tc := range tests {

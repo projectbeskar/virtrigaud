@@ -57,6 +57,13 @@ func NewServer(provider providerBackend) *Server {
 	}
 }
 
+// clusteredProvider reports whether the backend runs in CLUSTERED topology
+// (ADR-0007 D3). Per-VM RPCs then need a routed host (ADR-0007 Addendum A):
+// Describe and Delete are routed; the rest are refused until their slice lands.
+func (s *Server) clusteredProvider() bool {
+	return s.provider != nil && s.provider.clustered()
+}
+
 // Validate validates the provider configuration
 func (s *Server) Validate(ctx context.Context, req *providerv1.ValidateRequest) (*providerv1.ValidateResponse, error) {
 	// If no provider is configured yet, return a basic healthy response
@@ -120,6 +127,12 @@ func (s *Server) Create(ctx context.Context, req *providerv1.CreateRequest) (*pr
 //   - InvalidSpec -> codes.InvalidArgument: the request can never succeed as-is
 //     (e.g. a name virsh would resolve as a domain ID/UUID).
 //
+// A clustered create whose target host is unknown or unreachable is
+// HostUnavailable -> codes.Unavailable with a HOST_UNAVAILABLE ErrorInfo
+// (retryable, and not counted by the manager's circuit breaker), so the
+// operator can report the pending host as unavailable instead of re-scheduling
+// (ADR-0007 Addendum A, A2). Only the clustered routing produces that class.
+//
 // Only the categorized message crosses the wire (it is written to be safe for
 // the requesting VirtualMachine's status). Every other error keeps the historical
 // wrapped form.
@@ -131,15 +144,22 @@ func createRPCError(err error) error {
 			return status.Error(codes.AlreadyExists, pe.Message)
 		case contracts.ErrorTypeInvalidSpec:
 			return status.Error(codes.InvalidArgument, pe.Message)
+		case contracts.ErrorTypeHostUnavailable:
+			return hostUnavailableStatus(pe)
 		}
 	}
 	return fmt.Errorf("failed to create VM: %w", err)
 }
 
-// Delete deletes a virtual machine
+// Delete deletes a virtual machine. On a clustered provider the delete is
+// routed to target_host_id and owner-checked (ADR-0007 Addendum A); a domain
+// this VM does not own is answered NotFound and left untouched.
 func (s *Server) Delete(ctx context.Context, req *providerv1.DeleteRequest) (*providerv1.TaskResponse, error) {
-	taskRef, err := s.provider.Delete(ctx, req.Id)
+	taskRef, err := s.provider.Delete(ctx, contracts.VMRef{ID: req.Id, HostID: req.TargetHostId, Owner: ownerFromProto(req.GetOwner())})
 	if err != nil {
+		if s.clusteredProvider() {
+			return nil, routedRPCError("delete VM", err)
+		}
 		return nil, fmt.Errorf("failed to delete VM: %w", err)
 	}
 
@@ -153,6 +173,9 @@ func (s *Server) Delete(ctx context.Context, req *providerv1.DeleteRequest) (*pr
 
 // Power performs power operations on a virtual machine
 func (s *Server) Power(ctx context.Context, req *providerv1.PowerRequest) (*providerv1.TaskResponse, error) {
+	if s.clusteredProvider() {
+		return nil, notRoutedYet("Power", sliceRoutedPowerReconfigure)
+	}
 	var powerOp contracts.PowerOp
 	switch req.Op {
 	case providerv1.PowerOp_POWER_OP_ON:
@@ -167,7 +190,7 @@ func (s *Server) Power(ctx context.Context, req *providerv1.PowerRequest) (*prov
 		return nil, fmt.Errorf("unsupported power operation: %v", req.Op)
 	}
 
-	taskRef, err := s.provider.Power(ctx, req.Id, powerOp)
+	taskRef, err := s.provider.Power(ctx, contracts.VMRef{ID: req.Id, HostID: req.TargetHostId}, powerOp)
 	if err != nil {
 		return nil, fmt.Errorf("failed to perform power operation: %w", err)
 	}
@@ -182,13 +205,16 @@ func (s *Server) Power(ctx context.Context, req *providerv1.PowerRequest) (*prov
 
 // Reconfigure reconfigures a virtual machine
 func (s *Server) Reconfigure(ctx context.Context, req *providerv1.ReconfigureRequest) (*providerv1.TaskResponse, error) {
+	if s.clusteredProvider() {
+		return nil, notRoutedYet("Reconfigure", sliceRoutedPowerReconfigure)
+	}
 	// Parse the desired configuration
 	var createReq contracts.CreateRequest
 	if err := json.Unmarshal([]byte(req.DesiredJson), &createReq); err != nil {
 		return nil, fmt.Errorf("failed to parse desired configuration: %w", err)
 	}
 
-	taskRef, err := s.provider.Reconfigure(ctx, req.Id, createReq)
+	taskRef, err := s.provider.Reconfigure(ctx, contracts.VMRef{ID: req.Id, HostID: req.TargetHostId}, createReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to reconfigure VM: %w", err)
 	}
@@ -207,8 +233,11 @@ func (s *Server) Describe(ctx context.Context, req *providerv1.DescribeRequest) 
 		return nil, fmt.Errorf("provider not initialized")
 	}
 
-	resp, err := s.provider.Describe(ctx, req.Id)
+	resp, err := s.provider.Describe(ctx, contracts.VMRef{ID: req.Id, HostID: req.TargetHostId, Owner: ownerFromProto(req.GetOwner())})
 	if err != nil {
+		if s.clusteredProvider() {
+			return nil, routedRPCError("describe VM", err)
+		}
 		return nil, fmt.Errorf("failed to describe VM: %w", err)
 	}
 
@@ -261,13 +290,7 @@ func (s *Server) parseCreateRequest(req *providerv1.CreateRequest) (contracts.Cr
 	// on create, and the ONLY thing that authorizes treating an existing domain of
 	// the same name as this VM's (see bindExistingDomain). Absent from an older
 	// manager, in which case an existing domain is never bound.
-	if o := req.GetOwner(); o != nil {
-		createReq.Owner = contracts.ObjectIdentity{
-			UID:       o.GetUid(),
-			Namespace: o.GetNamespace(),
-			Name:      o.GetName(),
-		}
-	}
+	createReq.Owner = ownerFromProto(req.GetOwner())
 
 	// Parse UserData if provided
 	if len(req.UserData) > 0 {
@@ -314,8 +337,26 @@ func (s *Server) parseCreateRequest(req *providerv1.CreateRequest) (contracts.Cr
 	return createReq, nil
 }
 
+// ownerFromProto converts the wire ObjectIdentity (CreateRequest.owner,
+// DeleteRequest.owner) to the provider-contract form. A nil identity (an older
+// manager that sends none) yields the zero ObjectIdentity, which never
+// authorizes anything.
+func ownerFromProto(o *providerv1.ObjectIdentity) contracts.ObjectIdentity {
+	if o == nil {
+		return contracts.ObjectIdentity{}
+	}
+	return contracts.ObjectIdentity{
+		UID:       o.GetUid(),
+		Namespace: o.GetNamespace(),
+		Name:      o.GetName(),
+	}
+}
+
 // SnapshotCreate creates a VM snapshot
 func (s *Server) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotCreateRequest) (*providerv1.SnapshotCreateResponse, error) {
+	if s.clusteredProvider() {
+		return nil, notRoutedYet("SnapshotCreate", sliceRoutedSnapshotCloneDisk)
+	}
 	log.Printf("INFO Creating snapshot for VM: %s", req.VmId)
 
 	// Obtain the per-host connection through the seam (ADR-0008 PR 2) instead of
@@ -409,6 +450,9 @@ func buildSnapshotCreateArgs(vmID, name, description string, includeMemory, runn
 
 // SnapshotDelete deletes a VM snapshot
 func (s *Server) SnapshotDelete(ctx context.Context, req *providerv1.SnapshotDeleteRequest) (*providerv1.TaskResponse, error) {
+	if s.clusteredProvider() {
+		return nil, notRoutedYet("SnapshotDelete", sliceRoutedSnapshotCloneDisk)
+	}
 	log.Printf("INFO Deleting snapshot %s from VM: %s", req.SnapshotId, req.VmId)
 
 	// Obtain the per-host connection through the seam (ADR-0008 PR 2).
@@ -454,6 +498,9 @@ func (s *Server) SnapshotDelete(ctx context.Context, req *providerv1.SnapshotDel
 
 // SnapshotRevert reverts a VM to a snapshot
 func (s *Server) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotRevertRequest) (*providerv1.TaskResponse, error) {
+	if s.clusteredProvider() {
+		return nil, notRoutedYet("SnapshotRevert", sliceRoutedSnapshotCloneDisk)
+	}
 	log.Printf("INFO Reverting VM %s to snapshot: %s", req.VmId, req.SnapshotId)
 
 	// Obtain the per-host connection through the seam (ADR-0008 PR 2).
@@ -517,9 +564,12 @@ func (s *Server) Clone(ctx context.Context, req *providerv1.CloneRequest) (*prov
 	if s.provider == nil {
 		return nil, fmt.Errorf("libvirt provider not initialized")
 	}
+	if s.clusteredProvider() {
+		return nil, notRoutedYet("Clone", sliceRoutedSnapshotCloneDisk)
+	}
 
 	resp, err := s.provider.Clone(ctx, contracts.CloneRequest{
-		SourceVmID:    req.SourceVmId,
+		Source:        contracts.VMRef{ID: req.SourceVmId, HostID: req.SourceHostId},
 		TargetName:    req.TargetName,
 		Linked:        req.Linked,
 		ClassJSON:     req.ClassJson,
@@ -563,6 +613,13 @@ func (s *Server) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepareR
 	if s.provider == nil {
 		return nil, fmt.Errorf("libvirt provider not initialized")
 	}
+	if s.clusteredProvider() {
+		// Host-scoped, with no target_host_id yet: a clustered provider reports
+		// supports_image_import=false and refuses here (ADR-0007 Addendum A, A1).
+		return nil, status.Error(codes.Unimplemented,
+			"ImagePrepare is host-scoped and not routed to a host on a clustered libvirt provider yet "+
+				"(supports_image_import=false; ADR-0007 Addendum A)")
+	}
 
 	preparedID, preparedPath, err := s.provider.imagePrepare(ctx, req.ImageJson, req.TargetName, req.StorageHint)
 	if err != nil {
@@ -577,8 +634,14 @@ func (s *Server) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepareR
 	}, nil
 }
 
-// GetCapabilities returns the capabilities of the Libvirt provider
+// GetCapabilities returns the capabilities of the Libvirt provider. A
+// clustered provider hides every per-VM capability whose RPC is not routed to a
+// host yet, and reports supports_image_import=false (ADR-0007 Addendum A, D7
+// honesty-first); see clusteredCapabilities.
 func (s *Server) GetCapabilities(ctx context.Context, req *providerv1.GetCapabilitiesRequest) (*providerv1.GetCapabilitiesResponse, error) {
+	if s.clusteredProvider() {
+		return clusteredCapabilities(), nil
+	}
 	return &providerv1.GetCapabilitiesResponse{
 		SupportsReconfigureOnline:   true, // Online CPU/mem reconfigure via `setvcpus/setmem --live` for VMs created with CPU/MemoryHotAddEnabled (headroom provisioned at create); grows up to the ~4× ceiling, beyond which a power-cycle is required (#203)
 		SupportsDiskExpansionOnline: true, // Online grow via `virsh blockresize` + best-effort in-guest FS grow (resize2fs/xfs_growfs) when the guest agent is present; grow-only (#201)
@@ -612,11 +675,31 @@ func (s *Server) GetCapabilities(ctx context.Context, req *providerv1.GetCapabil
 	}, nil
 }
 
+// clusteredCapabilities is the GetCapabilities answer of a CLUSTERED provider
+// (ADR-0007 Addendum A, A1 + D7). Only what is routed to a host is advertised:
+// Create (target_host_id) and the routed Describe/Delete need no flag;
+// supports_clustering is true. Every per-VM capability whose RPC is refused
+// until its slice lands — online reconfigure / disk expansion (slice 2),
+// snapshots, linked clones, disk export (slice 3) — is hidden, as are disk
+// import (no target host until P3) and image import (host-scoped, no
+// target_host_id yet). The format / backend / transfer lists are left empty with
+// their capability off.
+func clusteredCapabilities() *providerv1.GetCapabilitiesResponse {
+	return &providerv1.GetCapabilitiesResponse{
+		SupportedDiskTypes:    []string{"qcow2", "raw", "vmdk"},
+		SupportedNetworkTypes: []string{"virtio", "e1000", "rtl8139"},
+		SupportsClustering:    true,
+	}
+}
+
 // ExportDisk exports a VM disk for migration. It delegates to the libvirt
 // Provider implementation (provider_virsh.go), translating between the gRPC and
 // provider-contract types. Previously this RPC was unreachable over gRPC and
 // returned Unimplemented despite a working implementation (issue #177).
 func (s *Server) ExportDisk(ctx context.Context, req *providerv1.ExportDiskRequest) (*providerv1.ExportDiskResponse, error) {
+	if s.clusteredProvider() {
+		return nil, notRoutedYet("ExportDisk", sliceRoutedSnapshotCloneDisk)
+	}
 	// ADR-0006: libvirt is a SOURCE for the S3 relay export (Slice 2, the reverse
 	// of Slice 1's vSphere→S3→libvirt). Accept pvc and s3; reject nfs/unknown
 	// honestly. Only the relay transfer mode is implemented; an explicit "direct"
@@ -650,7 +733,7 @@ func (s *Server) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReque
 	}
 
 	resp, err := s.provider.ExportDisk(ctx, contracts.ExportDiskRequest{
-		VmId:           req.VmId,
+		VM:             contracts.VMRef{ID: req.VmId, HostID: req.TargetHostId},
 		DiskId:         req.DiskId,
 		SnapshotId:     req.SnapshotId,
 		DestinationURL: req.DestinationUrl,
@@ -682,9 +765,12 @@ func (s *Server) GetDiskInfo(ctx context.Context, req *providerv1.GetDiskInfoReq
 	if s.provider == nil {
 		return nil, fmt.Errorf("provider not initialized")
 	}
+	if s.clusteredProvider() {
+		return nil, notRoutedYet("GetDiskInfo", sliceRoutedSnapshotCloneDisk)
+	}
 
 	resp, err := s.provider.GetDiskInfo(ctx, contracts.GetDiskInfoRequest{
-		VmId:       req.VmId,
+		VM:         contracts.VMRef{ID: req.VmId, HostID: req.TargetHostId},
 		DiskId:     req.DiskId,
 		SnapshotId: req.SnapshotId,
 	})
@@ -707,6 +793,9 @@ func (s *Server) GetDiskInfo(ctx context.Context, req *providerv1.GetDiskInfoReq
 
 // ImportDisk imports a disk from an external source (for VM migration)
 func (s *Server) ImportDisk(ctx context.Context, req *providerv1.ImportDiskRequest) (*providerv1.ImportDiskResponse, error) {
+	if s.clusteredProvider() {
+		return nil, notRoutedYet("ImportDisk", sliceRoutedImport)
+	}
 	// ADR-0006: libvirt is a TARGET for the S3 relay import (Slice 1). Accept pvc
 	// and s3; reject nfs/unknown honestly. Only the relay transfer mode is
 	// implemented; an explicit "direct" fails loudly.
@@ -875,6 +964,10 @@ func (s *Server) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReque
 func (s *Server) ListVMs(ctx context.Context, req *providerv1.ListVMsRequest) (*providerv1.ListVMsResponse, error) {
 	if s.provider == nil {
 		return nil, fmt.Errorf("provider not initialized")
+	}
+	if s.clusteredProvider() {
+		// Not per-VM: a clustered ListVMs runs across every host (A3).
+		return nil, notRoutedYet("ListVMs", sliceRoutedListVMs)
 	}
 
 	vmInfos, err := s.provider.ListVMs(ctx)

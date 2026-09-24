@@ -167,7 +167,7 @@ func TestGateSnapshotCreate(t *testing.T) {
 			}
 
 			req := contracts.SnapshotCreateRequest{
-				VmId:          "vm-1",
+				VM:            contracts.VMRef{ID: "vm-1"},
 				IncludeMemory: tc.includeMemory,
 			}
 

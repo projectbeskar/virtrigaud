@@ -22,8 +22,16 @@
 > the VM (honesty-first), and — closing out P1's admission guards — the
 > **`vprovider.kb.io` validating webhook** that enforces the topology×type rule at
 > admission (ADR-0007 D2): `topology: cluster` is accepted only on `type: libvirt`
-> and rejected on every other type. Still to come: host→host migration (later
-> P1/P2 slices).
+> and rejected on every other type. **ADR-0007 Addendum A, slice 1** adds
+> post-create routing: every per-VM call carries the VM's host, `Describe` and
+> `Delete` are routed to the bound host (the delete owner-checked), the create
+> records its target host in `status.placement.pendingHost` before calling the
+> provider, and a `Host` cannot be deleted while a VM uses it — see
+> [Post-create routing](#post-create-routing-adr-0007-addendum-a-slice-1).
+> `topology: cluster` stays **experimental** until Addendum A slice 5. Still to
+> come: routed `Power`/`Reconfigure` (slice 2), snapshots / clone / disk export
+> (slice 3), cross-host `ListVMs` + adoption (slice 4), host→host migration
+> (P2).
 
 VirtRigaud is adding a new *class* of provider — a **clustered / orchestrator**
 provider — that makes VirtRigaud itself the cluster manager for hypervisors that
@@ -240,6 +248,21 @@ providers are byte-for-byte unaffected. A rejected write returns a field-scoped
 type(s), so an operator can self-correct. The webhook guards both `create` and
 `update` — including a patch that flips an existing `vsphere`/`proxmox` provider to
 `cluster`.
+
+**`spec.topology` is immutable (ADR-0007 Addendum A).** VMs record where they run
+(`status.placement`) under one topology, and every per-VM call is routed and
+owner-checked by it, so a flip would send a placed VM's calls down the wrong path
+(`cluster` → `single` would even route its delete to the un-owner-checked
+single-host path). The CRD rejects any change with a CEL transition rule
+(`self == oldSelf`), independent of whether the webhook is enabled, and the
+webhook's `update` check rejects it too. The apiserver compares the defaulted
+values, so a `Provider` created before the field existed (read back as `single`),
+or a client that omits the field on update, keeps working; only a real change is
+refused. To change topology, create a new `Provider`. If a VM nevertheless records
+a clustered placement while its Provider is not clustered (an object edited before
+this rule), the operator fails it closed: no provider call is made for it, it
+shows `Ready=False` (`PlacementTopologyMismatch`), and its finalizer is kept unless
+`virtrigaud.io/force-delete: "true"` is set.
 
 #### Enabling the webhook via Helm
 
@@ -505,8 +528,20 @@ The **`Host` controller** (`internal/controller/host_controller.go`) is the
 operator half of ADR-0007 D1's "brain in the operator": it turns each `Host` CR's
 admin-authored desired inventory into **observed state** by asking the clustered
 provider what the host can do right now, and writing that into `Host.status` (D3).
-It is a **read-only, status-only** sync — it never mutates a `Host` spec and holds
-**no finalizer** (there is no external resource to clean up here).
+It never mutates a `Host` spec. Its one metadata write is the **in-use
+finalizer** `host.infra.virtrigaud.io/in-use` (ADR-0007 Addendum A, A1): a `Host`
+is not deleted while any VirtualMachine of its Provider names it in
+`status.placement.host` or `status.placement.pendingHost`, because every per-VM
+call for that VM — and the VM's own finalizer cleanup — is routed to it. While a
+deletion is blocked the Host shows `Ready=False` (`HostInUse`) naming the VMs,
+and is re-checked every 30 s; the finalizer is released as soon as no VM uses the
+Host. The condition message gives the number of VMs and names at most 10 of them,
+so it stays well under the condition-message size limit and does not list every
+tenant's VMs on an admin object. The match follows the same-namespace model: a VM
+uses this Host only when its `spec.providerRef` resolves to the Host's Provider
+(in the Host's namespace), so a same-named Host of another Provider never blocks
+it. While a Host is being deleted the scheduler treats it as cordoned, so new VMs
+are never placed on it (they would keep re-arming the finalizer).
 
 ### The reconcile loop
 
@@ -574,9 +609,9 @@ host-bravo    NotReady   pool-a    true          5m
 ```
 
 Security: `Host.status` carries capacity/health only, **never** connection secrets
-(ADR-0007 Security), and the controller writes **only** the status subresource
-under a least-privilege `hosts/status` grant (no `hosts` spec write, no
-finalizers).
+(ADR-0007 Security). The controller writes the status subresource (`hosts/status`)
+and, for the in-use finalizer only, the Host object (`hosts` update plus
+`hosts/finalizers`); it never changes a Host spec.
 
 ### What is still deferred to later slices
 
@@ -740,6 +775,7 @@ requesting VirtualMachine's UID) applies on the chosen host too; see
 ```go
 type PlacementStatus struct {
     Host              string       // the bound Host (CR name) — the durable truth
+    PendingHost       string       // the Host an unconfirmed Create is aimed at (Addendum A, A2)
     Pool              string       // the HostPool it was scheduled into
     LastScheduledTime *metav1.Time // when the scheduler last (re)bound it
     Reason            string       // the scheduler's decision trace
@@ -763,11 +799,26 @@ VM's), and only hosts that are in that pool **and** name that Provider — (**v1
 provider** — zero or many is a typed configuration error surfaced on the VM's
 `Provisioning=False` condition, never a silent guess; multi-pool selection is a
 later follow-up), feeds them to `Schedule`, sends the chosen host as
-`target_host_id`, and writes `status.placement` **after** `Create` confirms (D3
-honesty-first — a failed `Create` leaves `status.placement` unwritten). The
+`target_host_id`, and writes `status.placement.host` **after** `Create` confirms
+(D3 honesty-first — a failed `Create` never writes the binding). The
 scheduler's idempotent re-selection (D4) is fed for free by passing the VM's
 current `status.placement.host` as the binding, so a re-reconcile of a still-feasible
 VM re-selects the same host without churn.
+
+**The attempted host is recorded first (Addendum A, A2).** Before `Create` is
+sent, the chosen host is written to `status.placement.pendingHost` (with the pool
+and the decision trace) through a **resourceVersion-checked** status update. If
+that write loses a race, the reconcile requeues **without** creating and without
+re-applying its scheduler choice; the next reconcile re-reads the VM. Once the
+write is durable, `Create` goes to `pendingHost`; on success the host moves into
+`status.placement.host` and `pendingHost` is cleared. A retry — after a lost
+status write, or a `Create` that ran past its deadline after `virsh define` —
+**reuses `pendingHost` as-is** and never re-runs the scheduler, so it lands on the
+same host, where the domain-ownership check makes it an idempotent success. If
+the pending host is unreachable (`Create` keeps answering `Unavailable`), the VM
+shows `Placed=False` (`HostUnavailable`) and is **never re-scheduled
+automatically** (a domain may already exist there); it waits for the host, or for
+an administrator to clear `status.placement.pendingHost`.
 
 **Scheduler inputs wired vs deferred.** The VM's CPU/memory request (from the
 `VMClass`, reusing what the create request already resolved) and its **required
@@ -782,22 +833,99 @@ an empty required-set as "no constraint", which is the honest, correct behavior
 until those inputs exist. Inventing either mapping would be a scheduling bug, not a
 feature.
 
+## Post-create routing (ADR-0007 Addendum A, slice 1)
+
+Only the operator knows where a VM runs, so **the operator names the host on
+every per-VM call** and the provider never looks it up (A1, D1).
+
+### On the wire and in the manager
+
+- Every per-VM request carries `target_host_id` (`DeleteRequest`, `PowerRequest`,
+  `ReconfigureRequest`, `HardwareUpgradeRequest`, `DescribeRequest`, the three
+  snapshot requests, `ExportDiskRequest`, `GetDiskInfoRequest`);
+  `CloneRequest.source_host_id` routes a clone by its source VM; and
+  `DescribeRequest.owner` / `DeleteRequest.owner` carry the requesting
+  VirtualMachine's identity. The owner is sent only together with a host. All
+  additive: single-host and thin-client providers ignore them and are never sent
+  them.
+- Manager-side, every per-VM method takes a `contracts.VMRef{ID, HostID, Owner}`,
+  and one helper builds it from a VirtualMachine and its Provider: for `topology:
+  cluster` the host is `status.placement.host` and the owner is the VM's
+  identity; for everything else both are empty (unchanged calls). A clustered VM with **no** confirmed binding (for example
+  after a backup restore dropped its status) is **never sent a per-VM call**: the
+  VM shows `Placed=False` (`Unbound`) and is re-checked every 30 s; snapshots,
+  clones and migrations of it wait the same way.
+
+### What the libvirt provider routes today
+
+| RPC on a clustered provider | Slice 1 behaviour |
+|---|---|
+| `Create` | Routed to `target_host_id` (shipped in P1) |
+| `Describe` | **Routed** to `target_host_id` and **owner-checked**: the domain's state is returned only if its owner stamp is the requester's UID. An absent domain, or one whose stamp is missing, unreadable or foreign, is reported `exists=false` and none of its state is read; a domain replaced between the check and the read (different UUID) is reported absent too |
+| `Delete` | **Routed** and **owner-checked**: destroyed only if its owner stamp is the requester's UID; a missing, unreadable or foreign stamp is answered `NotFound` and the domain is never touched |
+| `Power`, `Reconfigure` | `Unimplemented` until slice 2 |
+| snapshots, `Clone`, `ExportDisk`, `GetDiskInfo` | `Unimplemented` until slice 3 |
+| `ListVMs` | `Unimplemented` until slice 4 (it must run across all hosts) |
+| `ImagePrepare`, `ImportDisk` | `Unimplemented` (host-scoped, no target host yet) |
+
+An empty `target_host_id` is `InvalidArgument` (never a default host). An unknown,
+removed, draining or unreachable host is a retryable **host-scoped** `Unavailable`:
+the status carries a `google.rpc.ErrorInfo` with reason `HOST_UNAVAILABLE`, which
+the manager maps to its own error class and keeps **out of the per-Provider
+circuit breaker** — one dead host must not fast-fail every VM on every other host
+of the Provider (a provider-level `Unavailable` still trips the breaker). A bound
+VM whose host is unavailable shows `Ready=False` (`HostUnavailable`) and is
+re-described every 30 s. A host that starts draining mid-call still completes that
+call. The Describe/Delete cores are shared with
+single-host mode — only the connection differs — and the ADR-0008 shadow read of
+a routed `Describe` runs on the same leased connection. The single-host
+connection handle a clustered provider used to carry is now an **always-failing
+placeholder**: any call not routed to a host fails instead of reaching some
+unintended connection.
+
+Clustered `GetCapabilities` is honest about this (D7): it advertises
+`supports_clustering` but hides online reconfigure / disk expansion, snapshots,
+linked clones, disk export and import, and reports `supports_image_import=false`.
+The operator therefore skips image preparation for a clustered provider.
+
+### Lifecycle rules in the operator
+
+- **`Placed` condition** (one positive condition): `True`/`Bound` once the
+  provider confirmed the VM on its host; `False` with `CreatePending`,
+  `HostUnavailable` or `Unbound`. It is never set on single-host VMs.
+- **No re-creation (A4).** If the bound host reports a clustered VM missing — or
+  the domain there is not this VM's (owner-checked Describe) — the VM shows
+  `Ready=False` (`VMMissingOnHost`) and is **not re-created**, on that host or
+  elsewhere — without fencing that could leave two running copies of one disk.
+  It is re-described every 2 minutes, so a domain an administrator restores is
+  picked up. (Single-host VMs keep the historical recreate behaviour.)
+- **Deleting a VM whose create is in flight.** A VM with `pendingHost` set and no
+  `status.id` gets an owner-checked `Delete` sent to the pending host, so a domain
+  the create already made there does not leak — and one that is not the VM's own
+  (e.g. after an `AlreadyExists`) is never deleted.
+- **Deleting an unbound clustered VM** retains the finalizer (`Placed=False`,
+  `Unbound`): the operator cannot know which host to clean up. The existing
+  `virtrigaud.io/force-delete: "true"` annotation releases it (the hypervisor VM
+  may then be left behind).
+- **Operations refused until their slice** (`Power`, `Reconfigure`) surface on
+  the VM's conditions and are re-checked every 2 minutes, not every few seconds.
+- **Adoption** is refused on a clustered provider until slice 4
+  (`Provider.status.adoption.message` says why), and a **VMMigration into** a
+  clustered provider fails validation until P3.
+
 ## What "clustered" does not mean (yet)
 
 - **No automatic HA / failover.** v1 detects and surfaces host-down and supports
   operator-initiated evacuation, but does **not** auto-restart VMs elsewhere.
   Without fencing/STONITH that would risk split-brain disk corruption; automatic
   HA is a deferred future ADR (ADR-0007 D8/P5).
-- **Experimental: only `Create` is host-aware so far.** Placement binding at
-  **create** is wired: the VirtualMachine controller schedules a clustered VM onto a
-  `HostPool` host, sends `target_host_id`, and writes `status.placement` after the
-  provider confirms. The `vprovider.kb.io` validating webhook enforces the
-  topology×type rule at admission (ADR-0007 D2). **Post-create operations are not
-  routed yet:** `Describe`, `Power`, `Reconfigure`, snapshots, `Clone` and `Delete`
-  do not reach the bound host, so a clustered VM cannot be managed after it is
-  created. The routing contract is ADR-0007 **Addendum A**, delivered in slices.
-  Until slice 5 validates a real clustered VM end to end, do not run workloads on
-  `topology: cluster`.
+- **Experimental: only `Create`, `Describe` and `Delete` are host-aware so far.**
+  A clustered VM can be scheduled, created, described and deleted on its host
+  (ADR-0007 Addendum A slice 1), but not yet powered on or off, reconfigured,
+  snapshotted, cloned or exported — those RPCs are refused until slices 2 and 3.
+  The `vprovider.kb.io` validating webhook enforces the topology×type rule at
+  admission (ADR-0007 D2). Until Addendum A slice 5 validates a real clustered VM
+  end to end, do not run workloads on `topology: cluster`.
 - **No rescheduling or migration yet.** Moving an *already-created* VM is not wired:
   neither rescheduling a bound VM to a different host, nor host→host `Migrate` /
   `VMHostMigration`. These land in later ADR-0007 phases.

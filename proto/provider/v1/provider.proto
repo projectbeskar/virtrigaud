@@ -72,6 +72,28 @@ message CreateResponse {
 // Delete a virtual machine
 message DeleteRequest {
   string id = 1;
+
+  // target_host_id names the host a clustered ("brain-in-operator") provider
+  // must run this delete on (ADR-0007 Addendum A, A1): the operator's confirmed
+  // binding (VirtualMachine status.placement.host), threaded on the wire exactly
+  // like CreateRequest.target_host_id. AGNOSTIC. Additive and backward-compatible:
+  // single-host and thin-client providers ignore it, and the operator never sends
+  // it to them; a clustered provider REQUIRES it and rejects an empty value with
+  // InvalidArgument rather than defaulting to some host (honesty-first, D9). The
+  // provider never looks a VM's host up by itself (D1).
+  string target_host_id = 2;
+
+  // owner identifies the Kubernetes object (the VirtualMachine) this delete is
+  // performed for: the same identity CreateRequest.owner stamps onto the VM it
+  // creates (ADR-0007 Addendum A, A2). AGNOSTIC. Additive and backward-compatible:
+  // single-host and thin-client providers ignore it (their Delete behavior is
+  // unchanged, so a legacy unstamped VM stays deletable). A clustered provider
+  // deletes a VM ONLY when its recorded owner uid equals this uid; a VM whose
+  // stamp is missing or records a different owner is reported NOT_FOUND and is
+  // NEVER destroyed, so a cleanup (e.g. a finalizer after an ALREADY_EXISTS
+  // create) can never remove another tenant's VM. The operator sets it, from
+  // vm.UID/namespace/name, on every delete that carries a target_host_id.
+  ObjectIdentity owner = 3;
 }
 
 // Power control operations
@@ -79,18 +101,50 @@ message PowerRequest {
   string id = 1;
   PowerOp op = 2;
   int32 graceful_timeout_seconds = 3;  // Timeout for graceful operations (shutdown/reboot)
+
+  // target_host_id names the host a clustered ("brain-in-operator") provider
+  // must run this power operation on (ADR-0007 Addendum A, A1): the operator's confirmed
+  // binding (VirtualMachine status.placement.host), threaded on the wire exactly
+  // like CreateRequest.target_host_id. AGNOSTIC. Additive and backward-compatible:
+  // single-host and thin-client providers ignore it, and the operator never sends
+  // it to them; a clustered provider REQUIRES it and rejects an empty value with
+  // InvalidArgument rather than defaulting to some host (honesty-first, D9). The
+  // provider never looks a VM's host up by itself (D1).
+  string target_host_id = 4;
 }
 
 // Reconfigure virtual machine resources
 message ReconfigureRequest {
   string id = 1;
   string desired_json = 2; // JSON-encoded desired state
+
+  // target_host_id names the host a clustered ("brain-in-operator") provider
+  // must run this reconfigure on (ADR-0007 Addendum A, A1): the operator's confirmed
+  // binding (VirtualMachine status.placement.host), threaded on the wire exactly
+  // like CreateRequest.target_host_id. AGNOSTIC. Additive and backward-compatible:
+  // single-host and thin-client providers ignore it, and the operator never sends
+  // it to them; a clustered provider REQUIRES it and rejects an empty value with
+  // InvalidArgument rather than defaulting to some host (honesty-first, D9). The
+  // provider never looks a VM's host up by itself (D1).
+  string target_host_id = 3;
 }
 
 // Upgrade VM hardware version
 message HardwareUpgradeRequest {
   string id = 1;
   int32 target_version = 2; // Target hardware version (e.g., 21)
+
+  // target_host_id names the host a clustered ("brain-in-operator") provider
+  // must run this hardware upgrade on (ADR-0007 Addendum A, A1): the operator's confirmed
+  // binding (VirtualMachine status.placement.host), threaded on the wire exactly
+  // like CreateRequest.target_host_id. AGNOSTIC. Additive and backward-compatible:
+  // single-host and thin-client providers ignore it, and the operator never sends
+  // it to them; a clustered provider REQUIRES it and rejects an empty value with
+  // InvalidArgument rather than defaulting to some host (honesty-first, D9). The
+  // provider never looks a VM's host up by itself (D1).
+  // HardwareUpgrade has no manager-side caller today; the field is reserved on
+  // the wire so a later slice can route it without another proto change.
+  string target_host_id = 3;
 }
 
 // Generic task response for async operations
@@ -101,6 +155,26 @@ message TaskResponse {
 // Describe virtual machine current state
 message DescribeRequest {
   string id = 1;
+
+  // target_host_id names the host a clustered ("brain-in-operator") provider
+  // must run this describe on (ADR-0007 Addendum A, A1): the operator's confirmed
+  // binding (VirtualMachine status.placement.host), threaded on the wire exactly
+  // like CreateRequest.target_host_id. AGNOSTIC. Additive and backward-compatible:
+  // single-host and thin-client providers ignore it, and the operator never sends
+  // it to them; a clustered provider REQUIRES it and rejects an empty value with
+  // InvalidArgument rather than defaulting to some host (honesty-first, D9). The
+  // provider never looks a VM's host up by itself (D1).
+  string target_host_id = 2;
+
+  // owner identifies the Kubernetes object (the VirtualMachine) this describe
+  // is performed for — the identity CreateRequest.owner stamps onto the VM
+  // (ADR-0007 Addendum A). AGNOSTIC. Additive and backward-compatible:
+  // single-host and thin-client providers ignore it, and the operator sends it
+  // only with a target_host_id. A clustered provider reports a VM whose stamp
+  // is missing or records a different owner as exists=false and returns none of
+  // its state, so a VirtualMachine can never read another tenant's VM that took
+  // over the name on its host (the operator then applies its no-recreate rule).
+  ObjectIdentity owner = 3;
 }
 
 message DescribeResponse {
@@ -127,6 +201,16 @@ message SnapshotCreateRequest {
   string name_hint = 2;
   bool include_memory = 3; // Include memory state if supported
   string description = 4;
+
+  // target_host_id names the host a clustered ("brain-in-operator") provider
+  // must run this snapshot create on (ADR-0007 Addendum A, A1): the operator's confirmed
+  // binding (VirtualMachine status.placement.host), threaded on the wire exactly
+  // like CreateRequest.target_host_id. AGNOSTIC. Additive and backward-compatible:
+  // single-host and thin-client providers ignore it, and the operator never sends
+  // it to them; a clustered provider REQUIRES it and rejects an empty value with
+  // InvalidArgument rather than defaulting to some host (honesty-first, D9). The
+  // provider never looks a VM's host up by itself (D1).
+  string target_host_id = 5;
 }
 
 message SnapshotCreateResponse {
@@ -137,11 +221,31 @@ message SnapshotCreateResponse {
 message SnapshotDeleteRequest {
   string vm_id = 1;
   string snapshot_id = 2;
+
+  // target_host_id names the host a clustered ("brain-in-operator") provider
+  // must run this snapshot delete on (ADR-0007 Addendum A, A1): the operator's confirmed
+  // binding (VirtualMachine status.placement.host), threaded on the wire exactly
+  // like CreateRequest.target_host_id. AGNOSTIC. Additive and backward-compatible:
+  // single-host and thin-client providers ignore it, and the operator never sends
+  // it to them; a clustered provider REQUIRES it and rejects an empty value with
+  // InvalidArgument rather than defaulting to some host (honesty-first, D9). The
+  // provider never looks a VM's host up by itself (D1).
+  string target_host_id = 3;
 }
 
 message SnapshotRevertRequest {
   string vm_id = 1;
   string snapshot_id = 2;
+
+  // target_host_id names the host a clustered ("brain-in-operator") provider
+  // must run this snapshot revert on (ADR-0007 Addendum A, A1): the operator's confirmed
+  // binding (VirtualMachine status.placement.host), threaded on the wire exactly
+  // like CreateRequest.target_host_id. AGNOSTIC. Additive and backward-compatible:
+  // single-host and thin-client providers ignore it, and the operator never sends
+  // it to them; a clustered provider REQUIRES it and rejects an empty value with
+  // InvalidArgument rather than defaulting to some host (honesty-first, D9). The
+  // provider never looks a VM's host up by itself (D1).
+  string target_host_id = 3;
 }
 
 // Clone operations
@@ -154,6 +258,18 @@ message CloneRequest {
   string class_json = 4;     // VMClass overrides
   string placement_json = 5; // Placement hints
   string customize_json = 6; // Customization spec
+
+  // source_host_id names the host the SOURCE VM runs on for a clustered
+  // ("brain-in-operator") provider (ADR-0007 Addendum A, A1): the source VM's
+  // confirmed binding (status.placement.host). It is the routing field for the
+  // clone. It is deliberately NOT target_host_id, which keeps the meaning the
+  // main ADR gives it: the host where the clone lands. In v1 a clustered provider
+  // requires the two to be equal (disks are host-local and a linked clone depends
+  // on its source disk). AGNOSTIC. Additive and backward-compatible: single-host
+  // and thin-client providers ignore it, and the operator never sends it to them;
+  // a clustered provider REQUIRES it and rejects an empty value with
+  // InvalidArgument rather than defaulting to some host.
+  string source_host_id = 7;
 }
 
 message CloneResponse {
@@ -224,6 +340,16 @@ message ExportDiskRequest {
   string backend_type = 8;     // Staging backend: "pvc" | "nfs" | "s3"; empty == legacy pvc (ADR-0006)
   string transfer_mode = 9;    // Transfer mode: "auto" | "relay" | "direct" (ADR-0006)
   string storage_options_json = 10; // JSON-encoded backend-specific options (ADR-0006; empty in Slice 0)
+
+  // target_host_id names the host a clustered ("brain-in-operator") provider
+  // must run this disk export on (ADR-0007 Addendum A, A1): the operator's confirmed
+  // binding (VirtualMachine status.placement.host), threaded on the wire exactly
+  // like CreateRequest.target_host_id. AGNOSTIC. Additive and backward-compatible:
+  // single-host and thin-client providers ignore it, and the operator never sends
+  // it to them; a clustered provider REQUIRES it and rejects an empty value with
+  // InvalidArgument rather than defaulting to some host (honesty-first, D9). The
+  // provider never looks a VM's host up by itself (D1).
+  string target_host_id = 11;
 }
 
 message ExportDiskResponse {
@@ -263,6 +389,16 @@ message GetDiskInfoRequest {
   string vm_id = 1;            // VM identifier
   string disk_id = 2;          // Disk identifier (optional, defaults to primary disk)
   string snapshot_id = 3;      // Get info for specific snapshot (optional)
+
+  // target_host_id names the host a clustered ("brain-in-operator") provider
+  // must run this disk-info read on (ADR-0007 Addendum A, A1): the operator's confirmed
+  // binding (VirtualMachine status.placement.host), threaded on the wire exactly
+  // like CreateRequest.target_host_id. AGNOSTIC. Additive and backward-compatible:
+  // single-host and thin-client providers ignore it, and the operator never sends
+  // it to them; a clustered provider REQUIRES it and rejects an empty value with
+  // InvalidArgument rather than defaulting to some host (honesty-first, D9). The
+  // provider never looks a VM's host up by itself (D1).
+  string target_host_id = 4;
 }
 
 message GetDiskInfoResponse {
@@ -379,7 +515,8 @@ message GetCapabilitiesResponse {
   bool supports_clustering = 17;                   // Provider fronts multiple hosts and implements host inventory (ListHosts/GetHostInfo) + host-targeted placement (ADR-0007 P1, D7). The remaining clustering flags (live/block migration, host evacuation, storage modes) are added by the migration slice.
 }
 
-// ObjectIdentity names a Kubernetes object on the wire (CreateRequest.owner).
+// ObjectIdentity names a Kubernetes object on the wire (CreateRequest.owner,
+// DeleteRequest.owner, DescribeRequest.owner).
 // uid is the authoritative identity (unique for the object's whole lifetime,
 // never reused after deletion); namespace and name are informational (audit,
 // operator diagnostics) and must never be used for authorization on their own.

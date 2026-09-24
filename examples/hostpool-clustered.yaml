@@ -25,6 +25,12 @@
 # may live elsewhere and reference the Provider cross-namespace; their placement
 # is resolved against the HostPool/Hosts in the Provider's namespace.
 #
+# IN-USE PROTECTION (ADR-0007 Addendum A): the operator keeps the finalizer
+# host.infra.virtrigaud.io/in-use on every Host. Deleting a Host that a
+# VirtualMachine is bound to (status.placement.host) or has a create pending on
+# (status.placement.pendingHost) is held (Ready=False, reason HostInUse) until
+# those VMs are deleted — their per-VM calls and cleanup are routed to it.
+#
 # Host.spec.endpoint is validated at admission: only
 #   qemu+ssh://[user@]host[:port]/system   (or /session)
 #   grpc://host:port                        (future host agent)

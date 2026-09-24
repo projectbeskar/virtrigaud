@@ -128,9 +128,12 @@ func (p *Provider) createClustered(ctx context.Context, req contracts.CreateRequ
 
 	lease, err := p.clusterReg.ConnFor(ctx, hostconn.HostID(hostID))
 	if err != nil {
-		// Unknown host, a host being drained, or a failed lazy dial. Retryable:
-		// the mounted inventory may still be reconciling, or the host may recover.
-		return contracts.CreateResponse{}, contracts.NewRetryableError(
+		// Unknown host, a host being drained, or a failed lazy dial. A retryable,
+		// HOST-scoped unavailability (ADR-0007 Addendum A, A1): the mounted
+		// inventory may still be reconciling, or the host may recover. The
+		// operator keeps the VM on this pending host rather than re-scheduling
+		// it (A2), and the manager's circuit breaker does not count it.
+		return contracts.CreateResponse{}, contracts.NewHostUnavailableError(
 			fmt.Sprintf("connect to target host %q", hostID), err)
 	}
 	// Release the lease on every exit path (success, create error, or panic).
@@ -374,16 +377,45 @@ func (p *Provider) createDiskFromHostImage(ctx context.Context, vp *VirshProvide
 	return sp.CopyImageToVolume(ctx, img.Path, img.Format, volumeName, defaultStoragePool, sizeGB)
 }
 
-// Delete removes a VM using virsh and cleans up all associated resources
-func (p *Provider) Delete(ctx context.Context, id string) (taskRef string, err error) {
+// Delete removes a VM using virsh and cleans up all associated resources.
+//
+// Topology dispatch (ADR-0007 Addendum A, A1/A2):
+//
+//   - single-host: the delete runs on p.virshProvider exactly as before —
+//     vm.HostID and vm.Owner are ignored, so a legacy unstamped domain stays
+//     deletable;
+//   - clustered: the delete is routed to vm.HostID (withHostConn) and is
+//     OWNER-CHECKED against vm.Owner: a domain whose owner stamp is missing or
+//     records another owner is reported not-found and never destroyed
+//     (deleteClustered).
+func (p *Provider) Delete(ctx context.Context, vm contracts.VMRef) (taskRef string, err error) {
+	id := vm.ID
 	log.Printf("INFO Deleting VM and all associated resources: %s", id)
+
+	if p.clustered() {
+		return "", p.withHostConn(ctx, vm.HostID, func(c libvirtConn) error {
+			return p.deleteClustered(ctx, c, id, vm.Owner)
+		})
+	}
 
 	if p.virshProvider == nil {
 		return "", contracts.NewRetryableError("virsh provider not initialized", nil)
 	}
+	return p.deleteOn(ctx, p.singleHostConn(), id)
+}
+
+// deleteOn is the single-host delete core, run on connection c: a domain that
+// does not exist is treated as deleted after a best-effort cleanup of files
+// named after it; an existing one is torn down by deleteExistingDomain. The
+// virsh/host command sequence is the historical one, unchanged.
+func (p *Provider) deleteOn(ctx context.Context, c libvirtConn, id string) (string, error) {
+	vp, err := virshOf(c)
+	if err != nil {
+		return "", err
+	}
 
 	// Check if domain exists
-	domains, err := p.virshProvider.listDomains(ctx)
+	domains, err := vp.listDomains(ctx)
 	if err != nil {
 		return "", contracts.NewRetryableError("failed to list domains", err)
 	}
@@ -399,33 +431,140 @@ func (p *Provider) Delete(ctx context.Context, id string) (taskRef string, err e
 	if !domainExists {
 		log.Printf("INFO Domain %s does not exist, cleaning up any remaining resources", id)
 		// Even if domain doesn't exist, try to clean up orphaned resources
-		p.cleanupOrphanedResources(ctx, id)
+		p.cleanupOrphanedResources(ctx, vp, id)
 		return "", nil
 	}
 
+	return p.deleteExistingDomain(ctx, vp, id)
+}
+
+// deleteClustered is the OWNER-CHECKED delete core of a clustered provider
+// (ADR-0007 Addendum A, A2), run on the leased connection of the VM's host.
+// It destroys the domain only when its VirtRigaud owner stamp (#333) records
+// owner's UID. A domain that is absent, unstamped, unreadable or stamped with
+// another owner is reported as a NotFound error — the manager treats it as
+// already gone — and is NEVER touched, so a cleanup (e.g. the finalizer after
+// an ALREADY_EXISTS create on a pending host) can never delete another
+// tenant's domain. For the same reason no name-pattern orphan cleanup runs:
+// files named after an absent domain cannot be proven to be this VM's.
+func (p *Provider) deleteClustered(ctx context.Context, c libvirtConn, id string, owner contracts.ObjectIdentity) error {
+	vp, err := virshOf(c)
+	if err != nil {
+		return err
+	}
+	host := c.HostID()
+
+	own, err := checkDomainOwner(ctx, vp, host, id, owner, "delete")
+	if err != nil {
+		return err
+	}
+	switch {
+	case !own.present:
+		log.Printf("INFO Domain %s does not exist on host %s; nothing to delete (no name-based orphan cleanup on a clustered host)", id, host)
+		return contracts.NewNotFoundError(fmt.Sprintf("libvirt domain %q not found on host %s", id, host), nil)
+	case !own.owned:
+		// Uniform message: it reaches the requesting VM's logs/status, so it
+		// must not disclose which other VirtualMachine (if any) owns the domain.
+		return contracts.NewNotFoundError(fmt.Sprintf(
+			"libvirt domain %q on host %s is not owned by this VirtualMachine; it was not deleted", id, host), nil)
+	}
+
+	_, err = p.deleteExistingDomain(ctx, vp, id)
+	return err
+}
+
+// domainOwnership is what checkDomainOwner found about a domain on one host.
+type domainOwnership struct {
+	// present reports whether a domain of the requested name exists on the host.
+	present bool
+	// owned reports whether its VirtRigaud owner stamp (#333) records the
+	// requester's UID (requesterOwnsDomain). Always false when !present.
+	owned bool
+	// uuid is the owned domain's libvirt UUID, read from the same document as
+	// the stamp, so a later read can prove it still addresses THAT domain.
+	uuid string
+}
+
+// checkDomainOwner is the ownership gate of every routed per-VM call on a
+// clustered host (ADR-0007 Addendum A): it lists the host's domains and, when
+// id exists, reads its owner stamp and decides with requesterOwnsDomain — which
+// fails closed on a missing, unreadable, ambiguous or foreign stamp, and on a
+// requester without a UID. Only read-only virsh queries run. A read failure is
+// a retryable error, never a decision. op names the call for the operator log;
+// the refusal itself is the caller's, with a message that never names the
+// other owner.
+func checkDomainOwner(ctx context.Context, vp *VirshProvider, host hostconn.HostID, id string, owner contracts.ObjectIdentity, op string) (domainOwnership, error) {
+	domains, err := vp.listDomains(ctx)
+	if err != nil {
+		return domainOwnership{}, contracts.NewRetryableError("failed to list domains", err)
+	}
+	found := false
+	for _, d := range domains {
+		if d.Name == id {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return domainOwnership{}, nil
+	}
+
+	res, err := vp.runVirshCommand(ctx, "dumpxml", id)
+	if err != nil {
+		return domainOwnership{}, contracts.NewRetryableError(fmt.Sprintf("read owner metadata of domain %q", id), err)
+	}
+	recorded, perr := domainOwners(res.Stdout)
+	if perr == nil && requesterOwnsDomain(owner, recorded) {
+		own := domainOwnership{present: true, owned: true}
+		if d, derr := parseDomainLibvirtxml(res.Stdout); derr == nil {
+			own.uuid = strings.TrimSpace(d.UUID)
+		}
+		return own, nil
+	}
+
+	switch {
+	case perr != nil:
+		log.Printf("WARN Refusing %s of domain %s on host %s: its owner metadata could not be read: %v", op, id, host, perr)
+	case owner.IsZero():
+		log.Printf("WARN Refusing %s of domain %s on host %s: the request carries no owner UID", op, id, host)
+	case len(recorded) == 0:
+		log.Printf("WARN Refusing %s of domain %s on host %s for %s/%s (uid %s): it has no VirtRigaud owner metadata",
+			op, id, host, owner.Namespace, owner.Name, owner.UID)
+	default:
+		log.Printf("WARN Refusing %s of domain %s on host %s for %s/%s (uid %s): it is owned by %v",
+			op, id, host, owner.Namespace, owner.Name, owner.UID, recorded)
+	}
+	return domainOwnership{present: true}, nil
+}
+
+// deleteExistingDomain tears down an existing domain on vp's host: it records
+// the domain's disks and cloud-init ISO, force-stops and undefines it, then
+// removes those files. Shared by the single-host and the owner-checked
+// clustered delete.
+func (p *Provider) deleteExistingDomain(ctx context.Context, vp *VirshProvider, id string) (string, error) {
 	// Get disk paths before deleting the domain
-	diskPaths, err := p.getDomainDiskPaths(ctx, id)
+	diskPaths, err := domainDiskPaths(ctx, vp, id)
 	if err != nil {
 		log.Printf("WARN Failed to get disk paths for %s: %v", id, err)
 		// Continue with deletion even if we can't get disk paths
 	}
 
 	// Get cloud-init ISO path before deleting the domain
-	cloudInitISOPath, err := p.getCloudInitISOPath(ctx, id)
+	cloudInitISOPath, err := getCloudInitISOPath(ctx, vp, id)
 	if err != nil {
 		log.Printf("WARN Failed to get cloud-init ISO path for %s: %v", id, err)
 		// Continue with deletion
 	}
 
 	// Stop the domain if running
-	if err := p.virshProvider.destroyDomain(ctx, id); err != nil {
+	if err := vp.destroyDomain(ctx, id); err != nil {
 		log.Printf("WARN Failed to destroy domain %s: %v", id, err)
 		// Continue with undefine even if destroy fails
 	}
 
 	// Remove the domain definition (this should also remove storage if --remove-all-storage is used)
 	// However, we'll explicitly delete disks to ensure cleanup
-	if err := p.virshProvider.undefineDomain(ctx, id); err != nil {
+	if err := vp.undefineDomain(ctx, id); err != nil {
 		return "", contracts.NewRetryableError("failed to undefine domain", err)
 	}
 
@@ -433,7 +572,7 @@ func (p *Provider) Delete(ctx context.Context, id string) (taskRef string, err e
 	if len(diskPaths) > 0 {
 		log.Printf("INFO Deleting %d disk(s) for VM %s", len(diskPaths), id)
 		for _, diskPath := range diskPaths {
-			if err := p.deleteDiskFile(ctx, diskPath); err != nil {
+			if err := deleteDiskFile(ctx, vp, diskPath); err != nil {
 				log.Printf("WARN Failed to delete disk %s: %v", diskPath, err)
 				// Continue with other deletions
 			} else {
@@ -444,7 +583,7 @@ func (p *Provider) Delete(ctx context.Context, id string) (taskRef string, err e
 
 	// Delete cloud-init ISO
 	if cloudInitISOPath != "" {
-		if err := p.deleteCloudInitResources(ctx, id, cloudInitISOPath); err != nil {
+		if err := deleteCloudInitResources(ctx, vp, id, cloudInitISOPath); err != nil {
 			log.Printf("WARN Failed to delete cloud-init resources: %v", err)
 			// Continue - not a critical error
 		} else {
@@ -456,10 +595,16 @@ func (p *Provider) Delete(ctx context.Context, id string) (taskRef string, err e
 	return "", nil
 }
 
-// getDomainDiskPaths retrieves all disk paths for a domain
+// getDomainDiskPaths retrieves all disk paths for a domain on the provider's
+// single-host connection.
 func (p *Provider) getDomainDiskPaths(ctx context.Context, domainName string) ([]string, error) {
+	return domainDiskPaths(ctx, p.virshProvider, domainName)
+}
+
+// domainDiskPaths retrieves all disk paths for a domain on vp's host.
+func domainDiskPaths(ctx context.Context, vp *VirshProvider, domainName string) ([]string, error) {
 	// Get domain XML to extract disk paths
-	result, err := p.virshProvider.runVirshCommand(ctx, "dumpxml", domainName)
+	result, err := vp.runVirshCommand(ctx, "dumpxml", domainName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to dump domain XML: %w", err)
 	}
@@ -494,10 +639,10 @@ func (p *Provider) getDomainDiskPaths(ctx context.Context, domainName string) ([
 	return diskPaths, nil
 }
 
-// getCloudInitISOPath retrieves the cloud-init ISO path for a domain
-func (p *Provider) getCloudInitISOPath(ctx context.Context, domainName string) (string, error) {
+// getCloudInitISOPath retrieves the cloud-init ISO path for a domain on vp's host.
+func getCloudInitISOPath(ctx context.Context, vp *VirshProvider, domainName string) (string, error) {
 	// Get domain XML
-	result, err := p.virshProvider.runVirshCommand(ctx, "dumpxml", domainName)
+	result, err := vp.runVirshCommand(ctx, "dumpxml", domainName)
 	if err != nil {
 		return "", fmt.Errorf("failed to dump domain XML: %w", err)
 	}
@@ -529,12 +674,12 @@ func (p *Provider) getCloudInitISOPath(ctx context.Context, domainName string) (
 	return "", nil
 }
 
-// deleteDiskFile deletes a disk file from the libvirt host
-func (p *Provider) deleteDiskFile(ctx context.Context, diskPath string) error {
+// deleteDiskFile deletes a disk file from vp's libvirt host
+func deleteDiskFile(ctx context.Context, vp *VirshProvider, diskPath string) error {
 	log.Printf("INFO Deleting disk file: %s", diskPath)
 
 	// Use rm to delete the disk file
-	_, err := p.virshProvider.runVirshCommand(ctx, "!", "sudo", "rm", "-f", diskPath)
+	_, err := vp.runVirshCommand(ctx, "!", "sudo", "rm", "-f", diskPath)
 	if err != nil {
 		return fmt.Errorf("failed to delete disk file %s: %w", diskPath, err)
 	}
@@ -542,8 +687,8 @@ func (p *Provider) deleteDiskFile(ctx context.Context, diskPath string) error {
 	return nil
 }
 
-// deleteCloudInitResources deletes cloud-init ISO and associated files
-func (p *Provider) deleteCloudInitResources(ctx context.Context, domainName, isoPath string) error {
+// deleteCloudInitResources deletes cloud-init ISO and associated files on vp's host
+func deleteCloudInitResources(ctx context.Context, vp *VirshProvider, domainName, isoPath string) error {
 	log.Printf("INFO Deleting cloud-init resources for: %s", domainName)
 
 	// Delete the cloud-init directory which contains ISO, user-data, and meta-data
@@ -554,7 +699,7 @@ func (p *Provider) deleteCloudInitResources(ctx context.Context, domainName, iso
 		cloudInitDir = isoPath[:lastSlash]
 	}
 
-	_, err := p.virshProvider.runVirshCommand(ctx, "!", "rm", "-rf", cloudInitDir)
+	_, err := vp.runVirshCommand(ctx, "!", "rm", "-rf", cloudInitDir)
 	if err != nil {
 		return fmt.Errorf("failed to delete cloud-init directory %s: %w", cloudInitDir, err)
 	}
@@ -562,8 +707,9 @@ func (p *Provider) deleteCloudInitResources(ctx context.Context, domainName, iso
 	return nil
 }
 
-// cleanupOrphanedResources attempts to clean up any resources that might be left behind
-func (p *Provider) cleanupOrphanedResources(ctx context.Context, domainName string) {
+// cleanupOrphanedResources attempts to clean up any resources that might be
+// left behind on vp's host (single-host delete only).
+func (p *Provider) cleanupOrphanedResources(ctx context.Context, vp *VirshProvider, domainName string) {
 	log.Printf("INFO Cleaning up orphaned resources for: %s", domainName)
 
 	// Try to delete disk files with common naming patterns
@@ -574,7 +720,7 @@ func (p *Provider) cleanupOrphanedResources(ctx context.Context, domainName stri
 	}
 
 	for _, diskPath := range diskPatterns {
-		_, err := p.virshProvider.runVirshCommand(ctx, "!", "sudo", "rm", "-f", diskPath)
+		_, err := vp.runVirshCommand(ctx, "!", "sudo", "rm", "-f", diskPath)
 		if err != nil {
 			log.Printf("DEBUG Could not delete potential orphaned disk %s: %v", diskPath, err)
 		} else {
@@ -584,7 +730,7 @@ func (p *Provider) cleanupOrphanedResources(ctx context.Context, domainName stri
 
 	// Try to delete cloud-init directory
 	cloudInitDir := fmt.Sprintf("/tmp/virtrigaud-cloudinit/%s", domainName)
-	_, err := p.virshProvider.runVirshCommand(ctx, "!", "rm", "-rf", cloudInitDir)
+	_, err := vp.runVirshCommand(ctx, "!", "rm", "-rf", cloudInitDir)
 	if err != nil {
 		log.Printf("DEBUG Could not delete cloud-init directory %s: %v", cloudInitDir, err)
 	} else {
@@ -593,7 +739,8 @@ func (p *Provider) cleanupOrphanedResources(ctx context.Context, domainName stri
 }
 
 // Power controls VM power state using virsh
-func (p *Provider) Power(ctx context.Context, id string, op contracts.PowerOp) (taskRef string, err error) {
+func (p *Provider) Power(ctx context.Context, vm contracts.VMRef, op contracts.PowerOp) (taskRef string, err error) {
+	id := vm.ID
 	log.Printf("INFO Power operation %s on VM: %s", op, id)
 
 	if p.virshProvider == nil {
@@ -681,7 +828,8 @@ func (p *Provider) syncPersistentXML(ctx context.Context, domainName string) err
 }
 
 // Reconfigure updates VM configuration using virsh
-func (p *Provider) Reconfigure(ctx context.Context, id string, desired contracts.CreateRequest) (taskRef string, err error) {
+func (p *Provider) Reconfigure(ctx context.Context, vm contracts.VMRef, desired contracts.CreateRequest) (taskRef string, err error) {
+	id := vm.ID
 	log.Printf("INFO Reconfiguring VM: %s", id)
 
 	if p.virshProvider == nil {
@@ -854,10 +1002,10 @@ func (p *Provider) Reconfigure(ctx context.Context, id string, desired contracts
 	return "", nil
 }
 
-// getVNCPort extracts the VNC port from domain XML
-func (p *Provider) getVNCPort(ctx context.Context, domainName string) (int, error) {
+// getVNCPort extracts the VNC port from domain XML on vp's host
+func (p *Provider) getVNCPort(ctx context.Context, vp *VirshProvider, domainName string) (int, error) {
 	// Get domain XML
-	result, err := p.virshProvider.runVirshCommand(ctx, "dumpxml", domainName)
+	result, err := vp.runVirshCommand(ctx, "dumpxml", domainName)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get domain XML: %w", err)
 	}
@@ -926,21 +1074,96 @@ func (p *Provider) extractMemoryKB(domainInfo map[string]string) (int64, error) 
 }
 
 // Describe returns comprehensive VM information using virsh (enhanced monitoring like vSphere)
-func (p *Provider) Describe(ctx context.Context, id string) (contracts.DescribeResponse, error) {
+//
+// Topology dispatch (ADR-0007 Addendum A, A1): a single-host provider describes
+// on p.virshProvider exactly as before (vm.HostID and vm.Owner are ignored); a
+// clustered one leases vm.HostID's connection, checks the domain's owner stamp
+// against vm.Owner, and runs the same core there, so the virsh read and the
+// shadow read share that lease (describeClustered).
+func (p *Provider) Describe(ctx context.Context, vm contracts.VMRef) (contracts.DescribeResponse, error) {
+	id := vm.ID
 	log.Printf("INFO Describing VM with comprehensive monitoring: %s", id)
+
+	if p.clustered() {
+		var resp contracts.DescribeResponse
+		err := p.withHostConn(ctx, vm.HostID, func(c libvirtConn) error {
+			var derr error
+			resp, derr = p.describeClustered(ctx, c, id, vm.Owner)
+			return derr
+		})
+		return resp, err
+	}
 
 	if p.virshProvider == nil {
 		return contracts.DescribeResponse{}, contracts.NewRetryableError("virsh provider not initialized", nil)
 	}
+	return p.describeOn(ctx, p.singleHostConn(), id)
+}
+
+// describeClustered is the routed, OWNER-CHECKED Describe of a clustered VM on
+// its bound host's leased connection c (ADR-0007 Addendum A).
+//
+// Before any state is read it checks the domain's owner stamp against owner
+// (checkDomainOwner). A domain that is absent, or whose stamp is missing,
+// unreadable or records another owner, is reported as exists=false and none of
+// its state is returned — so if a VirtualMachine's domain vanished and another
+// tenant's same-named VM was later created on the host, the first
+// VirtualMachine never sees the second one's IPs, power state or console. The
+// operator then applies A4 (never re-create a clustered VM).
+//
+// After the shared core ran, the domain UUID it read is compared with the one
+// read alongside the stamp, so a domain replaced between the two reads is
+// reported as absent too. The single-host Describe keeps its historical
+// behavior (no owner check, error on an absent domain).
+func (p *Provider) describeClustered(ctx context.Context, c libvirtConn, id string, owner contracts.ObjectIdentity) (contracts.DescribeResponse, error) {
+	vp, err := virshOf(c)
+	if err != nil {
+		return contracts.DescribeResponse{}, err
+	}
+	host := c.HostID()
+
+	own, err := checkDomainOwner(ctx, vp, host, id, owner, "describe")
+	if err != nil {
+		return contracts.DescribeResponse{}, err
+	}
+	if !own.present || !own.owned {
+		log.Printf("INFO Domain %s is not present on host %s for this VirtualMachine; reporting exists=false", id, host)
+		return contracts.DescribeResponse{Exists: false}, nil
+	}
+	if own.uuid == "" {
+		return contracts.DescribeResponse{}, contracts.NewRetryableError(
+			fmt.Sprintf("cannot verify the identity of domain %q on host %s (no UUID in its definition)", id, host), nil)
+	}
+
+	resp, err := p.describeOn(ctx, c, id)
+	if err != nil {
+		return contracts.DescribeResponse{}, err
+	}
+	if !strings.EqualFold(strings.TrimSpace(resp.ProviderRaw["UUID"]), own.uuid) {
+		log.Printf("WARN Domain %s on host %s changed identity during describe; reporting exists=false", id, host)
+		return contracts.DescribeResponse{Exists: false}, nil
+	}
+	return resp, nil
+}
+
+// describeOn is the Describe core, run on connection c — p.virshProvider's
+// connection in single-host mode, the leased host connection in clustered
+// mode. The virsh command sequence is the historical one, unchanged; the
+// ADR-0008 shadow read (when enabled) is dispatched on the same connection.
+func (p *Provider) describeOn(ctx context.Context, c libvirtConn, id string) (contracts.DescribeResponse, error) {
+	vp, err := virshOf(c)
+	if err != nil {
+		return contracts.DescribeResponse{}, err
+	}
 
 	// Get comprehensive domain information (now includes enhanced monitoring)
-	domainInfo, err := p.virshProvider.getDomainInfo(ctx, id)
+	domainInfo, err := vp.getDomainInfo(ctx, id)
 	if err != nil {
 		return contracts.DescribeResponse{}, contracts.NewRetryableError("failed to get domain info", err)
 	}
 
 	// Initialize guest agent provider for enhanced guest information
-	guestAgent := NewGuestAgentProvider(p.virshProvider)
+	guestAgent := NewGuestAgentProvider(vp)
 
 	// Extract power state (libvirt uses different names than vSphere)
 	powerState := p.mapLibvirtPowerState(domainInfo["State"])
@@ -1066,13 +1289,13 @@ func (p *Provider) Describe(ctx context.Context, id string) (contracts.DescribeR
 	consoleURL := ""
 	if powerState == "On" {
 		// Try to get VNC display information
-		vncPort, err := p.getVNCPort(ctx, id)
+		vncPort, err := p.getVNCPort(ctx, vp, id)
 		if err == nil && vncPort > 0 {
 			// Build VNC URL
 			// Extract host from libvirt URI
 			host := "localhost" // Default to localhost
-			if p.virshProvider != nil && p.virshProvider.uri != "" {
-				if parsedURI, err := url.Parse(p.virshProvider.uri); err == nil && parsedURI.Host != "" {
+			if vp.uri != "" {
+				if parsedURI, err := url.Parse(vp.uri); err == nil && parsedURI.Host != "" {
 					host = parsedURI.Host
 					// Remove port from host if present
 					if colonIdx := strings.Index(host, ":"); colonIdx != -1 {
@@ -1102,7 +1325,7 @@ func (p *Provider) Describe(ctx context.Context, id string) (contracts.DescribeR
 	// detached, time-bounded, panic-isolated goroutine) and NEVER alters what is
 	// returned here — reads do not flip to native until PR 5. No-op when shadow is
 	// off (the default), so pure virsh is unchanged.
-	p.maybeShadowDescribe(ctx, id, response)
+	p.maybeShadowDescribe(ctx, c, id, response)
 
 	return response, nil
 }
@@ -1673,7 +1896,8 @@ func (p *Provider) defineDomain(ctx context.Context, vp *VirshProvider, domainNa
 
 // SnapshotCreate creates a VM snapshot using virsh
 func (p *Provider) SnapshotCreate(ctx context.Context, req contracts.SnapshotCreateRequest) (contracts.SnapshotCreateResponse, error) {
-	log.Printf("INFO Creating snapshot for VM: %s", req.VmId)
+	vmID := req.VM.ID
+	log.Printf("INFO Creating snapshot for VM: %s", vmID)
 
 	if p.virshProvider == nil {
 		return contracts.SnapshotCreateResponse{}, contracts.NewRetryableError("virsh provider not initialized", nil)
@@ -1695,17 +1919,17 @@ func (p *Provider) SnapshotCreate(ctx context.Context, req contracts.SnapshotCre
 	}
 
 	// Check if domain exists and get its state
-	domainState, err := p.virshProvider.getDomainState(ctx, req.VmId)
+	domainState, err := p.virshProvider.getDomainState(ctx, vmID)
 	if err != nil {
 		return contracts.SnapshotCreateResponse{}, contracts.NewRetryableError("failed to get domain state", err)
 	}
 
-	log.Printf("INFO Domain %s is in state: %s", req.VmId, domainState)
+	log.Printf("INFO Domain %s is in state: %s", vmID, domainState)
 
 	// Build virsh snapshot-create-as command
 	args := []string{
 		"snapshot-create-as",
-		req.VmId,
+		vmID,
 		snapshotName,
 		"--description", description,
 		"--atomic", // Ensure atomic operation
@@ -1738,7 +1962,8 @@ func (p *Provider) SnapshotCreate(ctx context.Context, req contracts.SnapshotCre
 }
 
 // SnapshotDelete deletes a VM snapshot using virsh
-func (p *Provider) SnapshotDelete(ctx context.Context, vmId string, snapshotId string) (taskRef string, err error) {
+func (p *Provider) SnapshotDelete(ctx context.Context, vm contracts.VMRef, snapshotId string) (taskRef string, err error) {
+	vmId := vm.ID
 	log.Printf("INFO Deleting snapshot %s from VM: %s", snapshotId, vmId)
 
 	if p.virshProvider == nil {
@@ -1775,7 +2000,8 @@ func (p *Provider) SnapshotDelete(ctx context.Context, vmId string, snapshotId s
 }
 
 // SnapshotRevert reverts a VM to a snapshot using virsh
-func (p *Provider) SnapshotRevert(ctx context.Context, vmId string, snapshotId string) (taskRef string, err error) {
+func (p *Provider) SnapshotRevert(ctx context.Context, vm contracts.VMRef, snapshotId string) (taskRef string, err error) {
+	vmId := vm.ID
 	log.Printf("INFO Reverting VM %s to snapshot: %s", vmId, snapshotId)
 
 	if p.virshProvider == nil {
@@ -1836,7 +2062,7 @@ func (p *Provider) TaskStatus(ctx context.Context, taskRef string) (contracts.Ta
 
 // GetDiskInfo retrieves detailed information about a VM's disk
 func (p *Provider) GetDiskInfo(ctx context.Context, req contracts.GetDiskInfoRequest) (contracts.GetDiskInfoResponse, error) {
-	log.Printf("INFO Getting disk info for VM: %s", req.VmId)
+	log.Printf("INFO Getting disk info for VM: %s", req.VM.ID)
 
 	if p.virshProvider == nil {
 		return contracts.GetDiskInfoResponse{}, contracts.NewRetryableError("virsh provider not initialized", nil)
@@ -1849,7 +2075,7 @@ func (p *Provider) GetDiskInfo(ctx context.Context, req contracts.GetDiskInfoReq
 	// guess — that guess only holds for VirtRigaud-created volumes and fails for
 	// adopted/externally-created VMs (Bug G; same class as the clone #207 fix).
 	// resolvePrimaryDisk also skips cloud-init/CDROM devices.
-	diskPath, format, err := p.resolvePrimaryDisk(ctx, req.VmId, storageProvider)
+	diskPath, format, err := p.resolvePrimaryDisk(ctx, req.VM.ID, storageProvider)
 	if err != nil {
 		return contracts.GetDiskInfoResponse{}, fmt.Errorf("failed to resolve primary disk: %w", err)
 	}
@@ -1881,7 +2107,7 @@ func (p *Provider) GetDiskInfo(ctx context.Context, req contracts.GetDiskInfoReq
 	}
 
 	// Get snapshots for this domain
-	snapshots, err := p.virshProvider.listSnapshots(ctx, req.VmId)
+	snapshots, err := p.virshProvider.listSnapshots(ctx, req.VM.ID)
 	if err != nil {
 		log.Printf("WARN Failed to list snapshots: %v", err)
 		snapshots = []string{}
@@ -1909,7 +2135,7 @@ func (p *Provider) GetDiskInfo(ctx context.Context, req contracts.GetDiskInfoReq
 
 // ExportDisk exports a VM disk for migration
 func (p *Provider) ExportDisk(ctx context.Context, req contracts.ExportDiskRequest) (contracts.ExportDiskResponse, error) {
-	log.Printf("INFO Exporting disk for VM: %s to %s", req.VmId, req.DestinationURL)
+	log.Printf("INFO Exporting disk for VM: %s to %s", req.VM.ID, req.DestinationURL)
 
 	if p.virshProvider == nil {
 		return contracts.ExportDiskResponse{}, contracts.NewRetryableError("virsh provider not initialized", nil)
@@ -1917,7 +2143,7 @@ func (p *Provider) ExportDisk(ctx context.Context, req contracts.ExportDiskReque
 
 	// Get disk information first
 	diskInfo, err := p.GetDiskInfo(ctx, contracts.GetDiskInfoRequest{
-		VmId:       req.VmId,
+		VM:         req.VM,
 		DiskId:     req.DiskId,
 		SnapshotId: req.SnapshotId,
 	})
@@ -1934,7 +2160,7 @@ func (p *Provider) ExportDisk(ctx context.Context, req contracts.ExportDiskReque
 		return contracts.ExportDiskResponse{}, fmt.Errorf("unsupported export format: %s (libvirt supports qcow2, raw)", targetFormat)
 	}
 
-	exportId := fmt.Sprintf("export-%s-%d", req.VmId, time.Now().Unix())
+	exportId := fmt.Sprintf("export-%s-%d", req.VM.ID, time.Now().Unix())
 	diskPath := diskInfo.Path
 
 	// If snapshot is specified, use snapshot path

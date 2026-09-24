@@ -110,6 +110,32 @@ type clusterPlacement struct {
 	reason   string
 }
 
+// Clustered-VM lifecycle cadences (ADR-0007 Addendum A). Each is deliberately
+// unhurried: the state it waits on changes on the order of minutes and needs a
+// host to come back or an administrator to act, so a tight loop would only load
+// the provider (no reconcile storms).
+const (
+	// placementUnboundRetryInterval re-checks a clustered VM that has a provider
+	// id but no confirmed host binding (Placed=False/Unbound). No per-VM call is
+	// sent while it waits.
+	placementUnboundRetryInterval = 30 * time.Second
+	// pendingHostUnavailableRetryInterval re-tries a Create whose pending host is
+	// unreachable (Placed=False/HostUnavailable). The VM is never re-scheduled.
+	pendingHostUnavailableRetryInterval = 30 * time.Second
+	// vmMissingOnHostRetryInterval re-describes a clustered VM whose bound host
+	// reports it missing (A4). It is never re-created; the re-check only notices
+	// an administrator restoring the domain.
+	vmMissingOnHostRetryInterval = 2 * time.Minute
+	// routedOpNotSupportedRetryInterval re-checks a clustered VM whose provider
+	// does not route an operation (Power / Reconfigure) yet, so the unsupported
+	// call is not hammered every few seconds.
+	routedOpNotSupportedRetryInterval = 2 * time.Minute
+	// boundHostUnavailableRetryInterval re-describes a clustered VM whose bound
+	// host is unknown, draining or unreachable (a host-scoped Unavailable). A
+	// dead host must not turn every VM on it into a 5s poll.
+	boundHostUnavailableRetryInterval = 30 * time.Second
+)
+
 // forceDeleteAnnotation, when set to "true" on a VirtualMachine, lets the
 // finalizer be removed even if the provider Delete keeps failing. It is the
 // operator escape hatch for a permanently-unreachable provider; by default a
@@ -279,6 +305,13 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	}
 	logger.V(1).Info("Dependencies resolved successfully")
 
+	// A VM that records a clustered placement on a Provider that is not (or no
+	// longer) clustered is failed CLOSED before any provider call — image
+	// prepare, create or describe (ADR-0007 Addendum A).
+	if err := placementTopologyError(vm, provider); err != nil {
+		return r.handleNotRoutable(ctx, vm, err)
+	}
+
 	// Get provider instance (remote or in-process)
 	logger.V(1).Info("Getting provider instance", "provider", provider.Name, "runtime_phase", provider.Status.Runtime.Phase, "endpoint", provider.Status.Runtime.Endpoint)
 	providerInstance, err := r.getProviderInstance(ctx, provider)
@@ -406,9 +439,28 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		return r.createVM(ctx, vm, providerInstance, provider, vmClass, vmImage, networks)
 	}
 
-	// VM exists, check current state
-	desc, err := providerInstance.Describe(ctx, vm.Status.ID)
+	// Address the VM for every per-VM call below (ADR-0007 Addendum A, A1). A
+	// single-host / thin-client provider gets the bare id, exactly as before; a
+	// clustered VM gets its confirmed host, and one with no binding is never sent
+	// a per-VM call — the provider must never pick a host.
+	ref, err := vmRefFor(vm, provider)
 	if err != nil {
+		return r.handleNotRoutable(ctx, vm, err)
+	}
+	if ref.Routed() {
+		setPlacedCondition(vm, metav1.ConditionTrue, k8s.ReasonBound,
+			fmt.Sprintf("VM is bound to host %s", ref.HostID))
+	}
+
+	// VM exists, check current state
+	desc, err := providerInstance.Describe(ctx, ref)
+	if err != nil {
+		if ref.Routed() && contracts.IsNotFound(err) {
+			return r.handleMissingOnBoundHost(ctx, vm, ref)
+		}
+		if ref.Routed() && contracts.IsHostUnavailable(err) {
+			return r.handleBoundHostUnavailable(ctx, vm, ref, err)
+		}
 		logger.Error(err, "Failed to describe VM")
 		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Failed to describe VM: %v", err))
 		metrics.RecordError(errReasonProviderDescribe, metrics.ComponentManager)
@@ -417,6 +469,12 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	}
 
 	if !desc.Exists {
+		if ref.Routed() {
+			// ADR-0007 Addendum A, A4: a clustered VM is NEVER re-created — not on
+			// the bound host, not elsewhere. Without fencing, a restart could leave
+			// two running copies of one disk (D8).
+			return r.handleMissingOnBoundHost(ctx, vm, ref)
+		}
 		logger.Info("VM no longer exists, recreating")
 		vm.Status.ID = ""
 		return r.createVM(ctx, vm, providerInstance, provider, vmClass, vmImage, networks)
@@ -444,7 +502,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 
 	if desc.PowerState != string(desiredPowerState) {
 		logger.Info("Power state mismatch, adjusting", "current", desc.PowerState, "desired", desiredPowerState)
-		return r.adjustPowerState(ctx, vm, providerInstance, string(desiredPowerState))
+		return r.adjustPowerState(ctx, vm, providerInstance, ref, string(desiredPowerState))
 	}
 
 	// Check if VMClass resources have changed and need reconfiguration
@@ -454,7 +512,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 			"desiredCPU", vmClass.Spec.CPU,
 			"currentMemoryMiB", r.getCurrentMemoryMiB(vm),
 			"desiredMemoryMiB", vmClass.Spec.Memory.Value()/(1024*1024))
-		return r.reconfigureVM(ctx, vm, providerInstance, provider.Name, vmClass, vmImage, networks)
+		return r.reconfigureVM(ctx, vm, providerInstance, ref, provider.Name, vmClass, vmImage, networks)
 	}
 
 	// VM is ready
@@ -475,8 +533,9 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 		return ctrl.Result{}, nil
 	}
 
-	// Get provider if we have a provider ref and VM ID
-	if vm.Status.ID != "" && vm.Spec.ProviderRef.Name != "" {
+	// Get provider if we have a provider ref and either a VM ID or a clustered
+	// create in flight (status.placement.pendingHost, ADR-0007 Addendum A, A2).
+	if (vm.Status.ID != "" || pendingHost(vm) != "") && vm.Spec.ProviderRef.Name != "" {
 		provider := &infravirtrigaudiov1beta1.Provider{}
 		providerKey := types.NamespacedName{
 			Name:      vm.Spec.ProviderRef.Name,
@@ -493,15 +552,22 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 			}
 			// Provider not found, continue with cleanup
-		} else {
+		} else if ref, ok, res := r.deletionTarget(ctx, vm, provider); !ok {
+			// deletionTarget decided (an unbound clustered VM without the
+			// force-delete escape hatch): retain the finalizer.
+			return res, nil
+		} else if ref.ID != "" {
 			// Delete VM from provider
 			providerInstance, err := r.getProviderInstance(ctx, provider)
 			if err != nil {
 				logger.Error(err, "Failed to get provider instance for deletion")
 				metrics.RecordError(errReasonProviderResolve, metrics.ComponentManager)
 			} else {
-				logger.Info("Deleting VM from provider", "id", vm.Status.ID)
-				taskRef, err := providerInstance.Delete(ctx, vm.Status.ID)
+				logger.Info("Deleting VM from provider", "id", ref.ID, "host", ref.HostID)
+				// A routed (clustered) ref carries the VM's owner: the provider
+				// destroys the VM only when its owner stamp matches (A2). A
+				// single-host ref is the bare id, unchanged.
+				taskRef, err := providerInstance.Delete(ctx, ref)
 				switch {
 				case err == nil:
 					if taskRef != "" {
@@ -510,13 +576,15 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 					}
 				case contracts.IsNotFound(err):
 					// The hypervisor VM is already gone — nothing to orphan, so
-					// proceed to finalizer removal (idempotent delete).
-					logger.Info("VM already absent from provider; proceeding with cleanup", "id", vm.Status.ID)
+					// proceed to finalizer removal (idempotent delete). A clustered
+					// provider also answers not-found for a domain this VM does not
+					// own, which it never destroys.
+					logger.Info("VM already absent from provider; proceeding with cleanup", "id", ref.ID)
 				case hasForceDeleteAnnotation(vm):
 					// Operator opted out of the safety gate: drop the finalizer even
 					// though the provider VM may be left behind. Logged loudly.
 					logger.Error(err, "Provider VM delete failed but force-delete annotation is set; removing finalizer (the provider VM may be orphaned)",
-						"id", vm.Status.ID, "annotation", forceDeleteAnnotation)
+						"id", ref.ID, "annotation", forceDeleteAnnotation)
 					metrics.RecordError(errReasonProviderDelete, metrics.ComponentManager)
 				default:
 					// Real failure (e.g. PVE "VM is running - destroy failed"). Do
@@ -524,7 +592,7 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 					// Retain it and requeue so the delete is retried; an operator can
 					// set the force-delete annotation to break out if needed.
 					logger.Error(err, "Failed to delete VM from provider; retaining finalizer and retrying",
-						"id", vm.Status.ID)
+						"id", ref.ID)
 					metrics.RecordError(errReasonProviderDelete, metrics.ComponentManager)
 					return ctrl.Result{RequeueAfter: vmDeleteRetryInterval}, nil
 				}
@@ -667,30 +735,48 @@ func (r *VirtualMachineReconciler) createVM(
 	}
 
 	// ADR-0007 P1 (D4): a clustered provider's VMs are scheduled onto a specific
-	// host by the operator BEFORE Create. Resolve the binding and set
+	// host by the operator BEFORE Create. Resolve the host and set
 	// req.TargetHostID here; a single-host / thin-client provider skips this
 	// entirely (topology defaults to single), leaving TargetHostID empty and
 	// status.placement untouched — today's path, unchanged.
-	var placement *clusterPlacement
-	if providerCR.Spec.Topology == infravirtrigaudiov1beta1.ProviderTopologyCluster {
-		p, res, perr := r.resolveClusterPlacement(ctx, vm, providerCR, req, networks)
-		if perr != nil {
-			// An unexpected infrastructure error (e.g. a List failed). Bubble it so
-			// the reconcile records an error outcome and backs off; do NOT create.
-			return ctrl.Result{}, perr
+	clustered := isClusterTopology(providerCR)
+	if clustered {
+		host := pendingHost(vm)
+		if host == "" {
+			p, res, perr := r.resolveClusterPlacement(ctx, vm, providerCR, req, networks)
+			if perr != nil {
+				// An unexpected infrastructure error (e.g. a List failed). Bubble it
+				// so the reconcile records an error outcome and backs off; do NOT
+				// create.
+				return ctrl.Result{}, perr
+			}
+			if p == nil {
+				// Not schedulable or misconfigured: resolveClusterPlacement has
+				// already set the Provisioning=False condition and persisted
+				// status. Requeue WITHOUT creating — never bind a host the
+				// scheduler did not choose.
+				return res, nil
+			}
+			// ADR-0007 Addendum A, A2: durably record the attempted host BEFORE
+			// Create, so a retry after a lost status write (or a Create that ran
+			// past its deadline) lands on this same host instead of a second one.
+			if res, recorded, rerr := r.recordPendingHost(ctx, vm, p); !recorded {
+				return res, rerr
+			}
+			host = p.hostID
+		} else {
+			// A create is already in flight on host: reuse it as-is. The
+			// scheduler is NOT re-run for such a VM (A2).
+			logger.Info("Retrying clustered create on its pending host (not re-scheduling)", "host", host)
 		}
-		if p == nil {
-			// Not schedulable or misconfigured: resolveClusterPlacement has already
-			// set the Provisioning=False condition and persisted status. Requeue
-			// WITHOUT creating — never bind a host the scheduler did not choose.
-			return res, nil
-		}
-		placement = p
-		req.TargetHostID = p.hostID
+		req.TargetHostID = host
 	}
 
 	// Create VM
 	resp, err := provider.Create(ctx, req)
+	if err != nil && clustered {
+		return r.handleClusteredCreateError(ctx, vm, req.TargetHostID, err)
+	}
 	if err != nil {
 		// Honesty-first (ADR-0007 D3): Create failed, so we do NOT write
 		// status.placement — it stays whatever it was (unset on a first attempt),
@@ -715,16 +801,11 @@ func (r *VirtualMachineReconciler) createVM(
 	r.updateCurrentResources(vm, vmClass)
 
 	// Record the placement binding now that the provider has confirmed the VM is
-	// on the chosen host (ADR-0007 D3, honesty-first). Set only on the clustered
-	// path; single-host VMs leave status.placement nil.
-	if placement != nil {
-		now := metav1.Now()
-		vm.Status.Placement = &infravirtrigaudiov1beta1.PlacementStatus{
-			Host:              placement.hostID,
-			Pool:              placement.poolName,
-			LastScheduledTime: &now,
-			Reason:            placement.reason,
-		}
+	// on the chosen host (ADR-0007 D3, honesty-first): promote pendingHost into
+	// host and clear pendingHost (A2). Set only on the clustered path;
+	// single-host VMs leave status.placement nil.
+	if clustered {
+		promotePendingHost(vm, req.TargetHostID)
 	}
 
 	if resp.TaskRef != "" {
@@ -882,7 +963,14 @@ func (r *VirtualMachineReconciler) resolveClusterPlacement(
 	for i := range hostList.Items {
 		h := &hostList.Items[i]
 		if h.Namespace == clusterNS && h.Spec.PoolRef.Name == pool.Name && h.Spec.ProviderRef.Name == providerCR.Name {
-			candidates = append(candidates, *h)
+			c := *h
+			if !c.DeletionTimestamp.IsZero() {
+				// A Host being deleted is treated as cordoned: new VMs must not be
+				// placed on it, or they would keep re-arming its in-use finalizer
+				// and block the deletion indefinitely (ADR-0007 Addendum A, A1).
+				c.Spec.Schedulable = false
+			}
+			candidates = append(candidates, c)
 		}
 	}
 
@@ -1021,11 +1109,12 @@ func requiredNetworksForScheduling(networks []*infravirtrigaudiov1beta1.VMNetwor
 	return out
 }
 
-// adjustPowerState adjusts the VM power state
+// adjustPowerState adjusts the power state of the VM ref addresses.
 func (r *VirtualMachineReconciler) adjustPowerState(
 	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
 	provider contracts.Provider,
+	ref contracts.VMRef,
 	desiredState string,
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -1043,12 +1132,12 @@ func (r *VirtualMachineReconciler) adjustPowerState(
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
-	taskRef, err := provider.Power(ctx, vm.Status.ID, powerOp)
+	taskRef, err := provider.Power(ctx, ref, powerOp)
 	if err != nil {
 		logger.Error(err, "Failed to adjust power state")
 		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Failed to adjust power state: %v", err))
 		r.updateStatus(ctx, vm)
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		return ctrl.Result{RequeueAfter: routedOpRetryAfter(ref, err)}, nil
 	}
 
 	if taskRef != "" {
@@ -1600,6 +1689,7 @@ func (r *VirtualMachineReconciler) reconfigureVM(
 	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
 	provider contracts.Provider,
+	ref contracts.VMRef,
 	providerName string,
 	vmClass *infravirtrigaudiov1beta1.VMClass,
 	vmImage *infravirtrigaudiov1beta1.VMImage,
@@ -1615,12 +1705,12 @@ func (r *VirtualMachineReconciler) reconfigureVM(
 	}
 
 	// Call provider reconfigure
-	taskRef, err := provider.Reconfigure(ctx, vm.Status.ID, req)
+	taskRef, err := provider.Reconfigure(ctx, ref, req)
 	if err != nil {
 		logger.Error(err, "Failed to reconfigure VM")
 		k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Failed to reconfigure VM: %v", err))
 		r.updateStatus(ctx, vm)
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		return ctrl.Result{RequeueAfter: routedOpRetryAfter(ref, err)}, nil
 	}
 
 	// Update status with reconfiguration info

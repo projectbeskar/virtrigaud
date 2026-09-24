@@ -48,6 +48,9 @@ const localPrivateFileMode = 0o600
 // local (non-SSH) connection the "host" is this process's filesystem, so the
 // file is written directly (mode localPrivateFileMode).
 func (v *VirshProvider) writeRemoteFile(ctx context.Context, path string, content []byte) error {
+	if err := v.refuseIfUnroutable(); err != nil {
+		return err
+	}
 	if !v.isSSHTransport() {
 		if err := os.WriteFile(path, content, localPrivateFileMode); err != nil {
 			return fmt.Errorf("write local file %s: %w", path, err)

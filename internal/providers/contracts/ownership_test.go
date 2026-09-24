@@ -49,3 +49,33 @@ func TestIsConflictAndIsInvalidSpec(t *testing.T) {
 		}
 	}
 }
+
+func TestIsRetryable(t *testing.T) {
+	for _, err := range []error{
+		NewRetryableError("unavailable", nil),
+		fmt.Errorf("wrapped: %w", NewUnavailableError("host down", nil)),
+		NewTimeoutError("deadline", nil),
+	} {
+		if !IsRetryable(err) {
+			t.Errorf("%v must be retryable", err)
+		}
+	}
+	for _, err := range []error{nil, errors.New("plain"), NewConflictError("taken", nil),
+		NewInvalidSpecError("bad", nil), NewNotFoundError("gone", nil), NewNotSupportedError("no")} {
+		if IsRetryable(err) {
+			t.Errorf("%v must not be retryable", err)
+		}
+	}
+}
+
+func TestVMRefRouted(t *testing.T) {
+	if (VMRef{ID: "vm"}).Routed() {
+		t.Error("a ref without a host is not routed")
+	}
+	if (VMRef{ID: "vm", HostID: "  "}).Routed() {
+		t.Error("a whitespace host is not a binding")
+	}
+	if !(VMRef{ID: "vm", HostID: "host-a"}).Routed() {
+		t.Error("a ref with a host is routed")
+	}
+}

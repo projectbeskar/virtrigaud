@@ -19,6 +19,8 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -53,7 +55,15 @@ const (
 	// (provider missing/not-ready/unreachable, or a GetHostInfo error), so a Host
 	// recovers promptly once its provider comes back without a full heartbeat wait.
 	hostSyncBackoffInterval = 15 * time.Second
+	// hostInUseRetryInterval re-checks a Host whose deletion is blocked by the
+	// in-use finalizer. VirtualMachine changes do not trigger a Host reconcile,
+	// so this is how the Host notices its last VM went away.
+	hostInUseRetryInterval = 30 * time.Second
 )
+
+// hostInUseListedVMs caps how many VirtualMachine names the HostInUse condition
+// message lists (the count is always given in full).
+const hostInUseListedVMs = 10
 
 // Condition reasons surfaced on Host.status.conditions[Ready] (ADR-0007 D3). The
 // health enum carries the fine-grained observed state; the Ready condition and
@@ -78,6 +88,10 @@ const (
 	// reasonHostNotFound is Ready=False: the Provider is clustered and reachable but
 	// does not know this host id (e.g. it was dropped from the rendered inventory).
 	reasonHostNotFound = "HostNotFound"
+	// reasonHostInUse is Ready=False on a Host being deleted: VirtualMachines
+	// are still bound to it (or have a create pending on it), so the in-use
+	// finalizer holds the deletion (ADR-0007 Addendum A, A1).
+	reasonHostInUse = "HostInUse"
 )
 
 // Reason labels for metrics.RecordError from the Host reconciler. Kept small and
@@ -87,23 +101,28 @@ const (
 	errReasonHostProviderResolve = "host-provider-resolve"
 	errReasonHostGetInfo         = "host-get-info"
 	errReasonHostStatusUpdate    = "host-status-update"
+	errReasonHostFinalizer       = "host-finalizer"
 )
 
 // HostReconciler reconciles a Host object into live inventory facts (ADR-0007 P1,
 // D1/D3). It is the operator side of the "brain in the operator" split: it calls
 // the clustered Provider's GetHostInfo and writes the observed capacity/health
-// into Host.status. It is a read-only, status-only sync — it never mutates a Host
-// spec and never adds a finalizer (there are no external resources to clean up
-// here; the Host spec is admin-authored desired inventory).
+// into Host.status. It never mutates a Host spec (the admin authors it). Its one
+// metadata write is the in-use finalizer (ADR-0007 Addendum A, A1): a Host cannot
+// be deleted while any VirtualMachine names it in status.placement.host or
+// status.placement.pendingHost, because every per-VM call for that VM — and its
+// own finalizer cleanup — is routed to the Host.
 type HostReconciler struct {
 	client.Client
 	Scheme         *runtime.Scheme
 	RemoteResolver ProviderResolver
 }
 
-// +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=hosts,verbs=get;list;watch
+// +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=hosts,verbs=get;list;watch;update
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=hosts/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=hosts/finalizers,verbs=update
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=providers,verbs=get;list;watch
+// +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=virtualmachines,verbs=get;list;watch
 
 // Reconcile syncs one Host's observed inventory into its status.
 //
@@ -126,15 +145,103 @@ func (r *HostReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resul
 	host := &infravirtrigaudiov1beta1.Host{}
 	if err := r.Get(ctx, req.NamespacedName, host); err != nil {
 		if apierrors.IsNotFound(err) {
-			// Host deleted. Nothing to clean up: this controller owns no external
-			// resources and holds no finalizer (observed-state sync only).
+			// Host gone (its in-use finalizer was already released).
 			return ctrl.Result{}, nil
 		}
 		metrics.RecordError(errReasonHostGet, metrics.ComponentManager)
 		return ctrl.Result{}, fmt.Errorf("get Host %s: %w", req.NamespacedName, err)
 	}
 
+	if k8s.IsBeingDeleted(host) {
+		return r.handleHostDeletion(ctx, host)
+	}
+
+	// Hold every live Host with the in-use finalizer (ADR-0007 Addendum A, A1).
+	if !k8s.HasFinalizer(host, infravirtrigaudiov1beta1.HostInUseFinalizer) {
+		if err := k8s.AddFinalizer(ctx, r.Client, host, infravirtrigaudiov1beta1.HostInUseFinalizer); err != nil {
+			metrics.RecordError(errReasonHostFinalizer, metrics.ComponentManager)
+			return ctrl.Result{}, fmt.Errorf("add in-use finalizer to Host %s: %w", req.NamespacedName, err)
+		}
+	}
+
 	return r.syncHostStatus(ctx, host)
+}
+
+// handleHostDeletion releases the in-use finalizer of a Host being deleted only
+// once no VirtualMachine is bound to it or has a create pending on it
+// (ADR-0007 Addendum A, A1). While any does, it records Ready=False/HostInUse
+// naming them and re-checks on hostInUseRetryInterval; it never touches the VMs.
+func (r *HostReconciler) handleHostDeletion(ctx context.Context, host *infravirtrigaudiov1beta1.Host) (ctrl.Result, error) {
+	if !k8s.HasFinalizer(host, infravirtrigaudiov1beta1.HostInUseFinalizer) {
+		return ctrl.Result{}, nil
+	}
+
+	users, err := r.vmsUsingHost(ctx, host)
+	if err != nil {
+		metrics.RecordError(errReasonHostFinalizer, metrics.ComponentManager)
+		return ctrl.Result{}, err
+	}
+	if len(users) > 0 {
+		base := host.DeepCopy()
+		setHostReady(host, metav1.ConditionFalse, reasonHostInUse, hostInUseMessage(users))
+		log.FromContext(ctx).Info("Host deletion blocked: still in use", "host", host.Name, "vmCount", len(users))
+		return r.persist(ctx, host, base, hostInUseRetryInterval)
+	}
+
+	if err := k8s.RemoveFinalizer(ctx, r.Client, host, infravirtrigaudiov1beta1.HostInUseFinalizer); err != nil {
+		metrics.RecordError(errReasonHostFinalizer, metrics.ComponentManager)
+		return ctrl.Result{}, fmt.Errorf("remove in-use finalizer from Host %s: %w", host.Name, err)
+	}
+	return ctrl.Result{}, nil
+}
+
+// hostInUseMessage renders the HostInUse condition message: the number of
+// VirtualMachines holding the Host and at most hostInUseListedVMs of their
+// names. The list is bounded so the message stays far below the 32768-byte
+// condition-message limit (an unbounded list could wedge every status write)
+// and so an admin-facing object does not enumerate every tenant's VM names.
+func hostInUseMessage(users []string) string {
+	listed := users
+	if len(listed) > hostInUseListedVMs {
+		listed = listed[:hostInUseListedVMs]
+	}
+	more := ""
+	if n := len(users) - len(listed); n > 0 {
+		more = fmt.Sprintf(" and %d more", n)
+	}
+	return fmt.Sprintf("Host is being deleted but %d VirtualMachine(s) are bound to it or have a create pending on it "+
+		"(%s%s); it is kept until they are deleted or moved", len(users), strings.Join(listed, ", "), more)
+}
+
+// vmsUsingHost returns "<namespace>/<name>" of every VirtualMachine that names
+// host in status.placement.host or status.placement.pendingHost through the
+// Host's own Provider. Under the same-namespace model (#330) a Host belongs to
+// the Provider named by its providerRef in the Host's namespace; a VM routes to
+// it only when its spec.providerRef resolves to that same Provider (namespace
+// defaulting to the VM's own). VMs may live in other namespaces than their
+// Provider, so all VirtualMachines are listed; a same-named Host of another
+// Provider is never confused with this one.
+func (r *HostReconciler) vmsUsingHost(ctx context.Context, host *infravirtrigaudiov1beta1.Host) ([]string, error) {
+	var vms infravirtrigaudiov1beta1.VirtualMachineList
+	if err := r.List(ctx, &vms); err != nil {
+		return nil, fmt.Errorf("list VirtualMachines for Host %s/%s: %w", host.Namespace, host.Name, err)
+	}
+	var users []string
+	for i := range vms.Items {
+		vm := &vms.Items[i]
+		providerNS := vm.Spec.ProviderRef.Namespace
+		if providerNS == "" {
+			providerNS = vm.Namespace
+		}
+		if providerNS != host.Namespace || vm.Spec.ProviderRef.Name != host.Spec.ProviderRef.Name {
+			continue
+		}
+		if boundHost(vm) == host.Name || pendingHost(vm) == host.Name {
+			users = append(users, vm.Namespace+"/"+vm.Name)
+		}
+	}
+	sort.Strings(users)
+	return users, nil
 }
 
 // syncHostStatus runs the inventory sync for one Host and persists status. It
