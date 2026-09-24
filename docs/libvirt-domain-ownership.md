@@ -37,10 +37,12 @@ different disks and seeds, and never block each other.
 
 - **Length.** `<namespace>.<name>` is at most 200 bytes. A longer one (a
   namespace can have 63 bytes and a name 253) keeps its first bytes, including
-  the whole namespace, and ends with `-` and the first 8 hex digits of
+  the whole namespace, and ends with `_` and the first 16 hex digits of
   `sha256("<namespace>/<name>")`. The shortened name is stable across retries
-  and distinct for two long names that share a prefix. The bound keeps every
-  file name above within the 255-byte file-name limit.
+  and distinct for two long names that share a prefix. `_` can't appear in a
+  Kubernetes name, so no `VirtualMachine` can be named to land on another VM's
+  shortened name. The bound keeps every file name above within the 255-byte
+  file-name limit.
 - **One rule.** The provider derives every one of these names with a single
   function (`domainNameFor`). `Create` (single-host and clustered) names the
   domain from `CreateRequest.owner`. `Clone` names it from
@@ -52,10 +54,18 @@ different disks and seeds, and never block each other.
   file the import lands is exactly the file the VM's `Create` attaches in place.
 - **Existing VMs keep their names.** Every operation after `Create` addresses
   the domain by `status.id`, so a VM created before this change (domain `web`)
-  keeps working unchanged and is never renamed.
+  keeps working unchanged and is never renamed. A VM whose create defined the
+  bare-named domain before the upgrade but whose `status.id` was never recorded
+  binds that domain on its retry — only if the domain's owner stamp records the
+  VM's UID — instead of creating `<namespace>.<name>` next to it. A bare-named
+  domain that is not the VM's (another namespace's, or unstamped) never blocks
+  the namespaced create.
 - **Older managers.** A request without an owner or target VM (a manager older
-  than the provider) keeps the legacy bare name, and all the rules below still
-  apply to it.
+  than the provider, or a direct gRPC caller) keeps the legacy bare name, and all
+  the rules below still apply to it. A legacy name must be a DNS-1123 subdomain
+  **without** a `.`, so such a request can never create (or squat) a name of the
+  namespaced form. A `VirtualMachine` whose name contains a `.` therefore needs
+  a manager that sends the owner (#333 or later).
 
 External tooling that assumed "domain name == `VirtualMachine` name" (for
 example `virsh` scripts, monitoring labels, backup jobs) must read the VM's
@@ -112,7 +122,8 @@ that `VirtualMachine` created the domain.**
    name (a request from an older manager) can be ambiguous; the provider rejects
    it at `Create` and `Clone` time with `InvalidSpec` (`codes.InvalidArgument`)
    and runs no virsh command. It also rejects a namespace or name that is not a
-   DNS-1123 label or subdomain, and a request whose owner does not name the VM.
+   DNS-1123 label or subdomain, a legacy name that contains a `.`, and a request
+   whose owner does not name the VM.
    `VirtualMachine` CRD validation doesn't change, because other providers share
    it.
 5. **Domain UUIDs are unpredictable.** New domains get an RFC 4122 v4 UUID from
@@ -153,11 +164,24 @@ the seed ISO). Each create gets its own:
   share one.
 - `user-data` and `meta-data` stay private to the SSH user. Once the ISO is
   built, the seed directory is set to `0711`, so the qemu process can open the
-  ISO by its exact path but nobody can list the directory.
+  ISO by its exact path but nobody can list the directory. **The ISO itself is
+  not private:** it is created with the SSH user's umask (typically `0644`), and
+  its path is visible in the domain XML and in qemu's command line, so a local
+  user of the hypervisor host who learns the path can read the user-data it
+  carries. Building it with umask `077` (and relying on libvirt's
+  `dynamic_ownership` to hand it to qemu) is tracked; it needs lab verification
+  first.
+- A URL image is downloaded to a per-download `mktemp` file in the same staging
+  directory (`<domain>-disk-temp.img.<random>`), which is removed after the
+  convert, so nothing can swap it between the header check and the convert.
 - The staged domain XML is removed after `virsh define`, whether it succeeds or
-  not. The seed directory is removed if the create fails. A created domain keeps
-  its seed (its CD-ROM references the ISO), and `Delete` removes it. Domains
-  created before this change keep their seed under
+  not. The seed directory is removed if the create fails and the domain is known
+  not to exist. When `virsh define` reports an error, the provider checks
+  `virsh domuuid` against the UUID it generated: if the domain exists with that
+  UUID (the define succeeded and only its reply was lost), the create succeeds;
+  if the check itself fails, the seed is kept, because the domain may reference
+  it. A created domain keeps its seed (its CD-ROM references the ISO), and
+  `Delete` removes it. Domains created before this change keep their seed under
   `/tmp/virtrigaud-cloudinit/<name>/`, which `Delete` still finds from the domain
   XML.
 
@@ -216,13 +240,32 @@ To resolve a refused create, do one of the following:
 - Domains that existed before this change carry no owner stamp. A create that
   collides with one of them now fails with `ProviderConflict`. Pre-existing
   domains are never bound automatically.
-- One edge case: the provider created a domain before the upgrade, and the
-  manager lost the `status.id` write for it. After the upgrade, that VM's
-  retried create is refused. Adopt the domain to recover.
-- The manager and the provider can be upgraded in either order. An older
-  provider ignores `owner` and `target_vm` and keeps the old (bare) names. A
-  newer provider behind an older manager keeps the bare names too, and never
-  binds an existing domain. A migration whose import ran on one version and
-  whose create runs on another may find the landing disk under the other
-  naming; the create then refuses the disk (`ValidationError`). Re-run the
-  migration after both components are upgraded.
+- A create whose domain was defined before the upgrade and whose `status.id`
+  write was lost binds that bare-named domain on the retry when it carries the
+  VM's owner stamp (a provider with #333). A domain created **before** #333 has
+  no stamp, so it can't be proven to be the VM's: the retry creates
+  `<namespace>.<name>` and the unstamped bare-named domain is left behind. Adopt
+  it or remove it.
+- **Upgrade the manager first, then the libvirt provider.** A new manager with
+  an older provider is fully compatible: the older provider ignores
+  `target_vm` and keeps bare names for `Create`, `Clone` and the migration
+  landing disk alike. The reverse is not: a manager from before this change
+  that already sends `CreateRequest.owner` (#333 or later) makes a new provider
+  name the domain `<namespace>.<name>`, but it sends no `target_vm` on
+  `ImportDisk`, so the migration disk lands under the legacy name and the
+  target VM's `Create` refuses it (`ValidationError`). Every libvirt-target
+  migration fails while the provider is ahead of the manager, and clones get
+  bare names in that window. (A manager older than #333 sends no owner at all,
+  so a new provider keeps bare names everywhere for it.)
+- Don't upgrade the provider while a libvirt-target `VMMigration` is between its
+  import and its create: its landing disk is under the old name, and the create
+  refuses it. Re-run the migration after the upgrade.
+- **Remove leftover seed directories.** Before this change, a failed create over
+  SSH never removed its seed directory `/tmp/virtrigaud-cloudinit/<name>/`
+  (the cleanup ran in the provider pod, not on the host), so user-data
+  (possibly with secrets) can be left in plaintext on the host. Remove every
+  directory under `/tmp/virtrigaud-cloudinit/` that no domain references
+  (compare with `virsh domblklist --details <domain>` for each domain). A
+  directory a domain still references holds that VM's seed ISO; don't remove
+  it, but you can delete the `user-data` and `meta-data` files next to the ISO,
+  since the ISO carries their content.
