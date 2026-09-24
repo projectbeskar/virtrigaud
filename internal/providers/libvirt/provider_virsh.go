@@ -448,6 +448,11 @@ func (p *Provider) deleteOn(ctx context.Context, c libvirtConn, id string) (stri
 // an ALREADY_EXISTS create on a pending host) can never delete another
 // tenant's domain. For the same reason no name-pattern orphan cleanup runs:
 // files named after an absent domain cannot be proven to be this VM's.
+//
+// Like Power and Reconfigure (slice 2), the teardown addresses the checked
+// domain by its UUID (ownedDomainTarget), so a domain replaced between the
+// ownership check and the destroy/undefine is never torn down; an owned domain
+// without a canonical UUID is a retryable error and is left alone.
 func (p *Provider) deleteClustered(ctx context.Context, c libvirtConn, id string, owner contracts.ObjectIdentity) error {
 	vp, err := virshOf(c)
 	if err != nil {
@@ -455,22 +460,16 @@ func (p *Provider) deleteClustered(ctx context.Context, c libvirtConn, id string
 	}
 	host := c.HostID()
 
-	own, err := checkDomainOwner(ctx, vp, host, id, owner, "delete")
+	d, err := ownedDomainTarget(ctx, vp, host, id, owner, "delete")
 	if err != nil {
+		if contracts.IsNotFound(err) {
+			log.Printf("INFO Domain %s is not deletable by this VirtualMachine on host %s (absent or not owned); nothing was deleted "+
+				"(no name-based orphan cleanup on a clustered host)", id, host)
+		}
 		return err
 	}
-	switch {
-	case !own.present:
-		log.Printf("INFO Domain %s does not exist on host %s; nothing to delete (no name-based orphan cleanup on a clustered host)", id, host)
-		return contracts.NewNotFoundError(fmt.Sprintf("libvirt domain %q not found on host %s", id, host), nil)
-	case !own.owned:
-		// Uniform message: it reaches the requesting VM's logs/status, so it
-		// must not disclose which other VirtualMachine (if any) owns the domain.
-		return contracts.NewNotFoundError(fmt.Sprintf(
-			"libvirt domain %q on host %s is not owned by this VirtualMachine; it was not deleted", id, host), nil)
-	}
 
-	_, err = p.deleteExistingDomain(ctx, vp, id)
+	_, err = p.deleteExistingDomain(ctx, vp, d.handle)
 	return err
 }
 

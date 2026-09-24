@@ -254,7 +254,7 @@ func TestClustered_PowerAndReconfigure_OwnerChecked(t *testing.T) {
 }
 
 // TestClustered_PowerAndReconfigure_ActOnlyOnTheCheckedDomain closes the
-// window between the ownership check and the change: the change addresses the
+// window between the ownership check and the change (Delete included): the change addresses the
 // checked domain's UUID, never its name, so a domain that is no longer the one
 // whose stamp was checked is not acted on — the command fails instead.
 func TestClustered_PowerAndReconfigure_ActOnlyOnTheCheckedDomain(t *testing.T) {
@@ -267,10 +267,13 @@ func TestClustered_PowerAndReconfigure_ActOnlyOnTheCheckedDomain(t *testing.T) {
 	require.Error(t, err)
 	_, err = p.Reconfigure(context.Background(), webOnHostB, reconfigureTo(4, 4096, 20))
 	require.Error(t, err)
+	_, err = p.Delete(context.Background(), webOnHostB)
+	require.Error(t, err, "the undefine of a domain that is no longer the checked one fails")
 
 	calls := fx.calls()
 	assert.Contains(t, calls, "host-b start "+routingDomainUUID, "the start addressed the checked UUID")
 	assert.Contains(t, calls, "host-b domstate "+routingDomainUUID, "the reconfigure read addressed the checked UUID")
+	assert.Contains(t, calls, "host-b undefine "+routingDomainUUID, "the delete addressed the checked UUID")
 	for _, c := range calls {
 		f := strings.Fields(c)
 		if len(f) >= 3 && slices.Contains(mutatingVerbs, f[1]) {
@@ -284,7 +287,7 @@ func TestClustered_PowerAndReconfigure_ActOnlyOnTheCheckedDomain(t *testing.T) {
 	}
 }
 
-// TestClustered_PowerAndReconfigure_NoUUIDIsNotActedOn: an owned domain whose
+// TestClustered_PowerAndReconfigure_NoUUIDIsNotActedOn: an owned domain (also for Delete) whose
 // definition carries no UUID cannot be pinned, so nothing is changed and the
 // error is retryable (not NotFound — the VM may well exist).
 func TestClustered_PowerAndReconfigure_NoUUIDIsNotActedOn(t *testing.T) {
@@ -295,7 +298,8 @@ func TestClustered_PowerAndReconfigure_NoUUIDIsNotActedOn(t *testing.T) {
 
 	_, perr := p.Power(context.Background(), webOnHostB, contracts.PowerOpOn)
 	_, rerr := p.Reconfigure(context.Background(), webOnHostB, reconfigureTo(4, 0, 0))
-	for name, err := range map[string]error{"Power": perr, "Reconfigure": rerr} {
+	_, derr := p.Delete(context.Background(), webOnHostB)
+	for name, err := range map[string]error{"Power": perr, "Reconfigure": rerr, "Delete": derr} {
 		require.Error(t, err, name)
 		assert.False(t, contracts.IsNotFound(err), name)
 		assert.True(t, contracts.IsRetryable(err), "%s: %v", name, err)

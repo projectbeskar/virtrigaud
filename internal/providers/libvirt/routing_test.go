@@ -382,16 +382,23 @@ func TestClustered_Delete_OwnerChecked(t *testing.T) {
 			if tc.domainXML != "" {
 				domains["web"] = tc.domainXML
 			}
-			fx := newRoutingFixture(t, map[string]map[string]string{"host-a": domains, "host-b": {}})
+			fx := newOpsFixture(t, map[string]map[string]string{"host-a": domains, "host-b": {}})
 			p, _, _ := routedCluster(t)
 
 			_, err := p.Delete(context.Background(), contracts.VMRef{ID: "web", HostID: "host-a", Owner: tc.owner})
 			calls := fx.calls()
 			if tc.destroyed {
 				require.NoError(t, err)
-				assert.Contains(t, calls, "host-a destroy web")
-				assert.Contains(t, calls, "host-a undefine web")
-				assert.Contains(t, calls, "local sudo rm -f "+routingDiskPath)
+				// Slice 2: the teardown addresses the checked domain by UUID.
+				assert.Equal(t, []string{
+					"host-a list --all",
+					"host-a dumpxml web",
+					"host-a dumpxml " + routingDomainUUID,
+					"host-a dumpxml " + routingDomainUUID,
+					"host-a destroy " + routingDomainUUID,
+					"host-a undefine " + routingDomainUUID,
+					"local sudo rm -f " + routingDiskPath,
+				}, calls)
 				return
 			}
 			require.Error(t, err)
