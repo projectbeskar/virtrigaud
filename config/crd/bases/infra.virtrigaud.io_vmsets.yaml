@@ -621,8 +621,15 @@ spec:
                         - OffGraceful
                         type: string
                       providerRef:
-                        description: ProviderRef references the Provider that manages
-                          this VM
+                        description: |-
+                          ProviderRef references the Provider that manages this VM. On a
+                          VirtualMachine it is immutable once the VM is bound to a hypervisor VM
+                          (status.id or status.placement.pendingHost is set): every per-VM call
+                          addresses the VM by its provider id, which is meaningful only on the
+                          Provider that assigned it. Before binding (e.g. to fix a typo after a
+                          failed create) it may still be changed. An unset namespace means the VM's
+                          own; changing it from unset to an explicit namespace also counts as a
+                          change.
                         properties:
                           name:
                             description: Name of the referenced object
