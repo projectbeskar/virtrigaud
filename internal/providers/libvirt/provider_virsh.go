@@ -128,11 +128,12 @@ func (p *Provider) createClustered(ctx context.Context, req contracts.CreateRequ
 
 	lease, err := p.clusterReg.ConnFor(ctx, hostconn.HostID(hostID))
 	if err != nil {
-		// Unknown host, a host being drained, or a failed lazy dial. Retryable
-		// Unavailable (ADR-0007 Addendum A, A1): the mounted inventory may still
-		// be reconciling, or the host may recover. The operator keeps the VM on
-		// this pending host rather than re-scheduling it (A2).
-		return contracts.CreateResponse{}, contracts.NewUnavailableError(
+		// Unknown host, a host being drained, or a failed lazy dial. A retryable,
+		// HOST-scoped unavailability (ADR-0007 Addendum A, A1): the mounted
+		// inventory may still be reconciling, or the host may recover. The
+		// operator keeps the VM on this pending host rather than re-scheduling
+		// it (A2), and the manager's circuit breaker does not count it.
+		return contracts.CreateResponse{}, contracts.NewHostUnavailableError(
 			fmt.Sprintf("connect to target host %q", hostID), err)
 	}
 	// Release the lease on every exit path (success, create error, or panic).
@@ -380,18 +381,20 @@ func (p *Provider) createDiskFromHostImage(ctx context.Context, vp *VirshProvide
 //
 // Topology dispatch (ADR-0007 Addendum A, A1/A2):
 //
-//   - single-host: the delete runs on p.virshProvider exactly as before — vm.HostID
-//     and owner are ignored, so a legacy unstamped domain stays deletable;
+//   - single-host: the delete runs on p.virshProvider exactly as before —
+//     vm.HostID and vm.Owner are ignored, so a legacy unstamped domain stays
+//     deletable;
 //   - clustered: the delete is routed to vm.HostID (withHostConn) and is
-//     OWNER-CHECKED: a domain whose owner stamp is missing or records another
-//     owner is reported not-found and never destroyed (deleteClustered).
-func (p *Provider) Delete(ctx context.Context, vm contracts.VMRef, owner contracts.ObjectIdentity) (taskRef string, err error) {
+//     OWNER-CHECKED against vm.Owner: a domain whose owner stamp is missing or
+//     records another owner is reported not-found and never destroyed
+//     (deleteClustered).
+func (p *Provider) Delete(ctx context.Context, vm contracts.VMRef) (taskRef string, err error) {
 	id := vm.ID
 	log.Printf("INFO Deleting VM and all associated resources: %s", id)
 
 	if p.clustered() {
 		return "", p.withHostConn(ctx, vm.HostID, func(c libvirtConn) error {
-			return p.deleteClustered(ctx, c, id, owner)
+			return p.deleteClustered(ctx, c, id, vm.Owner)
 		})
 	}
 
@@ -451,9 +454,49 @@ func (p *Provider) deleteClustered(ctx context.Context, c libvirtConn, id string
 	}
 	host := c.HostID()
 
+	own, err := checkDomainOwner(ctx, vp, host, id, owner, "delete")
+	if err != nil {
+		return err
+	}
+	switch {
+	case !own.present:
+		log.Printf("INFO Domain %s does not exist on host %s; nothing to delete (no name-based orphan cleanup on a clustered host)", id, host)
+		return contracts.NewNotFoundError(fmt.Sprintf("libvirt domain %q not found on host %s", id, host), nil)
+	case !own.owned:
+		// Uniform message: it reaches the requesting VM's logs/status, so it
+		// must not disclose which other VirtualMachine (if any) owns the domain.
+		return contracts.NewNotFoundError(fmt.Sprintf(
+			"libvirt domain %q on host %s is not owned by this VirtualMachine; it was not deleted", id, host), nil)
+	}
+
+	_, err = p.deleteExistingDomain(ctx, vp, id)
+	return err
+}
+
+// domainOwnership is what checkDomainOwner found about a domain on one host.
+type domainOwnership struct {
+	// present reports whether a domain of the requested name exists on the host.
+	present bool
+	// owned reports whether its VirtRigaud owner stamp (#333) records the
+	// requester's UID (requesterOwnsDomain). Always false when !present.
+	owned bool
+	// uuid is the owned domain's libvirt UUID, read from the same document as
+	// the stamp, so a later read can prove it still addresses THAT domain.
+	uuid string
+}
+
+// checkDomainOwner is the ownership gate of every routed per-VM call on a
+// clustered host (ADR-0007 Addendum A): it lists the host's domains and, when
+// id exists, reads its owner stamp and decides with requesterOwnsDomain — which
+// fails closed on a missing, unreadable, ambiguous or foreign stamp, and on a
+// requester without a UID. Only read-only virsh queries run. A read failure is
+// a retryable error, never a decision. op names the call for the operator log;
+// the refusal itself is the caller's, with a message that never names the
+// other owner.
+func checkDomainOwner(ctx context.Context, vp *VirshProvider, host hostconn.HostID, id string, owner contracts.ObjectIdentity, op string) (domainOwnership, error) {
 	domains, err := vp.listDomains(ctx)
 	if err != nil {
-		return contracts.NewRetryableError("failed to list domains", err)
+		return domainOwnership{}, contracts.NewRetryableError("failed to list domains", err)
 	}
 	found := false
 	for _, d := range domains {
@@ -463,36 +506,35 @@ func (p *Provider) deleteClustered(ctx context.Context, c libvirtConn, id string
 		}
 	}
 	if !found {
-		log.Printf("INFO Domain %s does not exist on host %s; nothing to delete (no name-based orphan cleanup on a clustered host)", id, host)
-		return contracts.NewNotFoundError(fmt.Sprintf("libvirt domain %q not found on host %s", id, host), nil)
+		return domainOwnership{}, nil
 	}
 
 	res, err := vp.runVirshCommand(ctx, "dumpxml", id)
 	if err != nil {
-		return contracts.NewRetryableError(fmt.Sprintf("read owner metadata of domain %q", id), err)
+		return domainOwnership{}, contracts.NewRetryableError(fmt.Sprintf("read owner metadata of domain %q", id), err)
 	}
 	recorded, perr := domainOwners(res.Stdout)
-	if perr != nil || !requesterOwnsDomain(owner, recorded) {
-		switch {
-		case perr != nil:
-			log.Printf("WARN Not deleting domain %s on host %s: its owner metadata could not be read: %v", id, host, perr)
-		case owner.IsZero():
-			log.Printf("WARN Not deleting domain %s on host %s: the delete request carries no owner UID", id, host)
-		case len(recorded) == 0:
-			log.Printf("WARN Not deleting domain %s on host %s for %s/%s (uid %s): it has no VirtRigaud owner metadata",
-				id, host, owner.Namespace, owner.Name, owner.UID)
-		default:
-			log.Printf("WARN Not deleting domain %s on host %s for %s/%s (uid %s): it is owned by %v",
-				id, host, owner.Namespace, owner.Name, owner.UID, recorded)
+	if perr == nil && requesterOwnsDomain(owner, recorded) {
+		own := domainOwnership{present: true, owned: true}
+		if d, derr := parseDomainLibvirtxml(res.Stdout); derr == nil {
+			own.uuid = strings.TrimSpace(d.UUID)
 		}
-		// Uniform message: it reaches the requesting VM's logs/status, so it
-		// must not disclose which other VirtualMachine (if any) owns the domain.
-		return contracts.NewNotFoundError(fmt.Sprintf(
-			"libvirt domain %q on host %s is not owned by this VirtualMachine; it was not deleted", id, host), nil)
+		return own, nil
 	}
 
-	_, err = p.deleteExistingDomain(ctx, vp, id)
-	return err
+	switch {
+	case perr != nil:
+		log.Printf("WARN Refusing %s of domain %s on host %s: its owner metadata could not be read: %v", op, id, host, perr)
+	case owner.IsZero():
+		log.Printf("WARN Refusing %s of domain %s on host %s: the request carries no owner UID", op, id, host)
+	case len(recorded) == 0:
+		log.Printf("WARN Refusing %s of domain %s on host %s for %s/%s (uid %s): it has no VirtRigaud owner metadata",
+			op, id, host, owner.Namespace, owner.Name, owner.UID)
+	default:
+		log.Printf("WARN Refusing %s of domain %s on host %s for %s/%s (uid %s): it is owned by %v",
+			op, id, host, owner.Namespace, owner.Name, owner.UID, recorded)
+	}
+	return domainOwnership{present: true}, nil
 }
 
 // deleteExistingDomain tears down an existing domain on vp's host: it records
@@ -1034,9 +1076,10 @@ func (p *Provider) extractMemoryKB(domainInfo map[string]string) (int64, error) 
 // Describe returns comprehensive VM information using virsh (enhanced monitoring like vSphere)
 //
 // Topology dispatch (ADR-0007 Addendum A, A1): a single-host provider describes
-// on p.virshProvider exactly as before (vm.HostID is ignored); a clustered one
-// leases vm.HostID's connection and runs the same core there, so the virsh read
-// and the shadow read share that lease (describeClustered).
+// on p.virshProvider exactly as before (vm.HostID and vm.Owner are ignored); a
+// clustered one leases vm.HostID's connection, checks the domain's owner stamp
+// against vm.Owner, and runs the same core there, so the virsh read and the
+// shadow read share that lease (describeClustered).
 func (p *Provider) Describe(ctx context.Context, vm contracts.VMRef) (contracts.DescribeResponse, error) {
 	id := vm.ID
 	log.Printf("INFO Describing VM with comprehensive monitoring: %s", id)
@@ -1045,7 +1088,7 @@ func (p *Provider) Describe(ctx context.Context, vm contracts.VMRef) (contracts.
 		var resp contracts.DescribeResponse
 		err := p.withHostConn(ctx, vm.HostID, func(c libvirtConn) error {
 			var derr error
-			resp, derr = p.describeClustered(ctx, c, id)
+			resp, derr = p.describeClustered(ctx, c, id, vm.Owner)
 			return derr
 		})
 		return resp, err
@@ -1057,32 +1100,50 @@ func (p *Provider) Describe(ctx context.Context, vm contracts.VMRef) (contracts.
 	return p.describeOn(ctx, p.singleHostConn(), id)
 }
 
-// describeClustered is the routed Describe of a clustered VM on its bound
-// host's leased connection c. It runs the shared core; when that fails it
-// checks whether the domain exists on the host at all, and reports an absent
-// domain honestly as exists=false instead of an opaque read error, so the
-// operator can apply A4 (never re-create a clustered VM). The single-host
-// Describe keeps its historical error-on-absent behavior.
-func (p *Provider) describeClustered(ctx context.Context, c libvirtConn, id string) (contracts.DescribeResponse, error) {
+// describeClustered is the routed, OWNER-CHECKED Describe of a clustered VM on
+// its bound host's leased connection c (ADR-0007 Addendum A).
+//
+// Before any state is read it checks the domain's owner stamp against owner
+// (checkDomainOwner). A domain that is absent, or whose stamp is missing,
+// unreadable or records another owner, is reported as exists=false and none of
+// its state is returned — so if a VirtualMachine's domain vanished and another
+// tenant's same-named VM was later created on the host, the first
+// VirtualMachine never sees the second one's IPs, power state or console. The
+// operator then applies A4 (never re-create a clustered VM).
+//
+// After the shared core ran, the domain UUID it read is compared with the one
+// read alongside the stamp, so a domain replaced between the two reads is
+// reported as absent too. The single-host Describe keeps its historical
+// behavior (no owner check, error on an absent domain).
+func (p *Provider) describeClustered(ctx context.Context, c libvirtConn, id string, owner contracts.ObjectIdentity) (contracts.DescribeResponse, error) {
+	vp, err := virshOf(c)
+	if err != nil {
+		return contracts.DescribeResponse{}, err
+	}
+	host := c.HostID()
+
+	own, err := checkDomainOwner(ctx, vp, host, id, owner, "describe")
+	if err != nil {
+		return contracts.DescribeResponse{}, err
+	}
+	if !own.present || !own.owned {
+		log.Printf("INFO Domain %s is not present on host %s for this VirtualMachine; reporting exists=false", id, host)
+		return contracts.DescribeResponse{Exists: false}, nil
+	}
+	if own.uuid == "" {
+		return contracts.DescribeResponse{}, contracts.NewRetryableError(
+			fmt.Sprintf("cannot verify the identity of domain %q on host %s (no UUID in its definition)", id, host), nil)
+	}
+
 	resp, err := p.describeOn(ctx, c, id)
-	if err == nil {
-		return resp, nil
+	if err != nil {
+		return contracts.DescribeResponse{}, err
 	}
-	vp, verr := virshOf(c)
-	if verr != nil {
-		return resp, err
+	if !strings.EqualFold(strings.TrimSpace(resp.ProviderRaw["UUID"]), own.uuid) {
+		log.Printf("WARN Domain %s on host %s changed identity during describe; reporting exists=false", id, host)
+		return contracts.DescribeResponse{Exists: false}, nil
 	}
-	domains, lerr := vp.listDomains(ctx)
-	if lerr != nil {
-		return resp, err
-	}
-	for _, d := range domains {
-		if d.Name == id {
-			return resp, err
-		}
-	}
-	log.Printf("INFO Domain %s is not present on host %s", id, c.HostID())
-	return contracts.DescribeResponse{Exists: false}, nil
+	return resp, nil
 }
 
 // describeOn is the Describe core, run on connection c — p.virshProvider's

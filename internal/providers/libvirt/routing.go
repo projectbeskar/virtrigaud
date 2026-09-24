@@ -24,6 +24,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -69,8 +70,11 @@ const emptyTargetHostMessage = "clustered libvirt provider requires target_host_
 //   - An empty (or whitespace) hostID is an InvalidSpec error — a clustered
 //     provider never defaults to a host.
 //   - An unknown, removed or draining host, or a failed lazy dial, is a
-//     retryable Unavailable error. A host that starts draining while fn runs is
-//     NOT cut off: the held lease keeps its connection open (D3 graceful drain).
+//     retryable HOST-scoped unavailability (contracts.ErrorTypeHostUnavailable,
+//     on the wire codes.Unavailable + a HOST_UNAVAILABLE ErrorInfo), which the
+//     manager keeps out of its per-Provider circuit breaker. A host that starts
+//     draining while fn runs is NOT cut off: the held lease keeps its connection
+//     open (D3 graceful drain).
 //
 // fn receives a libvirtConn that is valid only until withHostConn returns,
 // unless fn retains it (see hostLease.retain) for work that outlives the call —
@@ -86,12 +90,12 @@ func (p *Provider) withHostConn(ctx context.Context, hostID string, fn func(libv
 	}
 	lease, err := p.clusterReg.ConnFor(ctx, hostconn.HostID(id))
 	if err != nil {
-		return contracts.NewUnavailableError(fmt.Sprintf("connect to host %q", id), err)
+		return contracts.NewHostUnavailableError(fmt.Sprintf("connect to host %q", id), err)
 	}
 	vc, err := virshConnFrom(lease)
 	if err != nil {
 		_ = lease.Close()
-		return contracts.NewUnavailableError(fmt.Sprintf("resolve connection of host %q", id), err)
+		return contracts.NewHostUnavailableError(fmt.Sprintf("resolve connection of host %q", id), err)
 	}
 	h := newHostLease(vc, lease)
 	defer h.release()
@@ -185,12 +189,31 @@ func notRoutedYet(rpc, routedIn string) error {
 			"topology: cluster is experimental", rpc, routedIn)
 }
 
+// hostUnavailableStatus renders a host-scoped unavailability as
+// codes.Unavailable carrying a google.rpc.ErrorInfo{Reason: HOST_UNAVAILABLE},
+// which the manager maps to contracts.ErrorTypeHostUnavailable and keeps out of
+// its circuit breaker. The message names the host only (never credentials).
+func hostUnavailableStatus(pe *contracts.ProviderError) error {
+	st := status.New(codes.Unavailable, pe.Error())
+	withInfo, err := st.WithDetails(&errdetails.ErrorInfo{
+		Reason: contracts.HostUnavailableReason,
+		Domain: contracts.HostUnavailableErrorDomain,
+	})
+	if err != nil {
+		// Unreachable in practice (ErrorInfo always marshals); a plain
+		// Unavailable is still a correct, if breaker-counted, answer.
+		return st.Err()
+	}
+	return withInfo.Err()
+}
+
 // routedRPCError converts an error from a ROUTED call on a clustered provider
 // to its gRPC status: InvalidSpec -> InvalidArgument (no target host),
-// Unavailable -> Unavailable (unknown/unreachable host, retryable), NotFound ->
-// NotFound (e.g. a delete of a domain this VM does not own, reported as absent
-// and never destroyed). Anything else keeps the historical wrapped form. Only
-// the categorized message crosses the wire. It is never used on the single-host
+// HostUnavailable -> Unavailable with a HOST_UNAVAILABLE ErrorInfo
+// (unknown/unreachable host, retryable, host-scoped), NotFound -> NotFound
+// (e.g. a delete of a domain this VM does not own, reported as absent and never
+// destroyed). Anything else keeps the historical wrapped form. Only the
+// categorized message crosses the wire. It is never used on the single-host
 // path, whose wire errors are unchanged.
 func routedRPCError(op string, err error) error {
 	var pe *contracts.ProviderError
@@ -198,8 +221,8 @@ func routedRPCError(op string, err error) error {
 		switch pe.Type {
 		case contracts.ErrorTypeInvalidSpec:
 			return status.Error(codes.InvalidArgument, pe.Message)
-		case contracts.ErrorTypeUnavailable:
-			return status.Error(codes.Unavailable, pe.Error())
+		case contracts.ErrorTypeHostUnavailable:
+			return hostUnavailableStatus(pe)
 		case contracts.ErrorTypeNotFound:
 			return status.Error(codes.NotFound, pe.Message)
 		}

@@ -104,12 +104,11 @@ func (s *routingRecorderServer) GetDiskInfo(_ context.Context, r *providerv1.Get
 	return &providerv1.GetDiskInfoResponse{}, nil
 }
 
-// driveEveryPerVMCall issues every per-VM contracts call once for vm, with owner
-// on Delete.
-func driveEveryPerVMCall(t *testing.T, cli *Client, vm contracts.VMRef, owner contracts.ObjectIdentity) {
+// driveEveryPerVMCall issues every per-VM contracts call once for vm.
+func driveEveryPerVMCall(t *testing.T, cli *Client, vm contracts.VMRef) {
 	t.Helper()
 	ctx := context.Background()
-	_, err := cli.Delete(ctx, vm, owner)
+	_, err := cli.Delete(ctx, vm)
 	require.NoError(t, err)
 	_, err = cli.Power(ctx, vm, contracts.PowerOpOn)
 	require.NoError(t, err)
@@ -177,38 +176,62 @@ func recordedDelete(t *testing.T, srv *routingRecorderServer) *providerv1.Delete
 	return del
 }
 
+// recordedDescribe returns the DescribeRequest the server received.
+func recordedDescribe(t *testing.T, srv *routingRecorderServer) *providerv1.DescribeRequest {
+	t.Helper()
+	d, ok := srv.got("Describe").(*providerv1.DescribeRequest)
+	require.True(t, ok, "Describe never reached the server")
+	return d
+}
+
 // TestClient_PerVMCalls_ThreadHostAndOwner is the transport round trip for a
 // clustered VM: every per-VM request carries the host (source_host_id for a
-// clone source), and Delete carries the owner.
+// clone source), and Describe and Delete carry the owner the provider checks
+// against the VM's owner stamp.
 func TestClient_PerVMCalls_ThreadHostAndOwner(t *testing.T) {
 	srv := &routingRecorderServer{}
 	cli := newTestClientForVMOps(t, srv, "libvirt", "routing")
 	owner := contracts.ObjectIdentity{UID: "uid-1", Namespace: "team-a", Name: "web"}
 
-	driveEveryPerVMCall(t, cli, contracts.VMRef{ID: "web", HostID: "host-a"}, owner)
+	driveEveryPerVMCall(t, cli, contracts.VMRef{ID: "web", HostID: "host-a", Owner: owner})
 
 	for name, idHost := range wireRouting(t, srv) {
 		assert.Equal(t, [2]string{"web", "host-a"}, idHost, "%s must carry the VM id and its host", name)
 	}
-	del := recordedDelete(t, srv)
-	require.NotNil(t, del.Owner, "Delete must carry the owner")
-	assert.Equal(t, "uid-1", del.Owner.Uid)
-	assert.Equal(t, "team-a", del.Owner.Namespace)
-	assert.Equal(t, "web", del.Owner.Name)
+	for name, got := range map[string]*providerv1.ObjectIdentity{
+		"Delete":   recordedDelete(t, srv).Owner,
+		"Describe": recordedDescribe(t, srv).Owner,
+	} {
+		require.NotNil(t, got, "%s must carry the owner", name)
+		assert.Equal(t, "uid-1", got.Uid, name)
+		assert.Equal(t, "team-a", got.Namespace, name)
+		assert.Equal(t, "web", got.Name, name)
+	}
 }
 
 // TestClient_PerVMCalls_SingleHostSendsNoHost proves D9 on the wire: a
 // single-host VMRef (empty HostID) puts nothing in target_host_id /
-// source_host_id, and a Delete without an owner UID sends no owner at all.
+// source_host_id, and no owner is sent — even if one were set — so single-host
+// requests are exactly what they were before routing.
 func TestClient_PerVMCalls_SingleHostSendsNoHost(t *testing.T) {
 	srv := &routingRecorderServer{}
 	cli := newTestClientForVMOps(t, srv, "libvirt", "single")
 
-	driveEveryPerVMCall(t, cli, contracts.VMRef{ID: "legacy"}, contracts.ObjectIdentity{Namespace: "ns", Name: "legacy"})
+	driveEveryPerVMCall(t, cli, contracts.VMRef{ID: "legacy", Owner: contracts.ObjectIdentity{UID: "uid-x", Namespace: "ns", Name: "legacy"}})
 
 	for name, idHost := range wireRouting(t, srv) {
 		assert.Equal(t, [2]string{"legacy", ""}, idHost, "%s must carry no host for a single-host VM", name)
 	}
-	assert.Nil(t, recordedDelete(t, srv).Owner,
-		"an owner without a UID is never sent (it could authorize nothing)")
+	assert.Nil(t, recordedDelete(t, srv).Owner, "a single-host Delete carries no owner")
+	assert.Nil(t, recordedDescribe(t, srv).Owner, "a single-host Describe carries no owner")
+}
+
+// TestClient_RoutedOwnerWithoutUIDIsNotSent pins that an owner with no UID is
+// never put on the wire, even on a routed call: it could authorize nothing.
+func TestClient_RoutedOwnerWithoutUIDIsNotSent(t *testing.T) {
+	srv := &routingRecorderServer{}
+	cli := newTestClientForVMOps(t, srv, "libvirt", "routing-nouid")
+	driveEveryPerVMCall(t, cli, contracts.VMRef{ID: "web", HostID: "host-a", Owner: contracts.ObjectIdentity{Namespace: "ns", Name: "web"}})
+	assert.Nil(t, recordedDelete(t, srv).Owner)
+	assert.Nil(t, recordedDescribe(t, srv).Owner)
 }

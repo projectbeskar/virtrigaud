@@ -123,12 +123,14 @@ func promotePendingHost(vm *infravirtrigaudiov1beta1.VirtualMachine, host string
 // happened there, so a retry must go to the same host and the finalizer can
 // still clean it up (A2).
 //
-//   - An Unavailable-class error (the pending host is unreachable) sets
-//     Placed=False/HostUnavailable. The VM is never re-scheduled automatically,
-//     because a domain may already exist on that host; it waits for the host or
-//     for an administrator to clear pendingHost (D8, report-only).
-//   - Anything else sets Placed=False/CreatePending and then takes the
-//     unchanged rejected / transient create handling.
+//   - A host-scoped unavailability (the pending host is unknown, draining or
+//     unreachable) sets Placed=False/HostUnavailable. The VM is never
+//     re-scheduled automatically, because a domain may already exist on that
+//     host; it waits for the host or for an administrator to clear pendingHost
+//     (D8, report-only).
+//   - Anything else — including a provider-level Unavailable — sets
+//     Placed=False/CreatePending and then takes the unchanged rejected /
+//     transient create handling.
 func (r *VirtualMachineReconciler) handleClusteredCreateError(
 	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
@@ -138,7 +140,7 @@ func (r *VirtualMachineReconciler) handleClusteredCreateError(
 	logger := log.FromContext(ctx)
 	msg := providerErrorMessage(err)
 
-	if contracts.IsRetryable(err) {
+	if contracts.IsHostUnavailable(err) {
 		logger.Info("Pending host is unreachable; retrying the create on the same host (never re-scheduled)",
 			"host", host, "error", err.Error())
 		setPlacedCondition(vm, metav1.ConditionFalse, k8s.ReasonHostUnavailable, fmt.Sprintf(
@@ -191,6 +193,67 @@ func (r *VirtualMachineReconciler) handleMissingOnBoundHost(
 	return ctrl.Result{RequeueAfter: vmMissingOnHostRetryInterval}, nil
 }
 
+// handleNotRoutable records why no per-VM call can be routed for vm and
+// requeues without calling the provider (ADR-0007 Addendum A): an unbound
+// clustered VM gets Placed=False/Unbound; a VM whose recorded clustered
+// placement no longer matches its Provider's topology gets
+// Ready=False/PlacementTopologyMismatch. Any other error is returned as-is.
+func (r *VirtualMachineReconciler) handleNotRoutable(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, err error) (ctrl.Result, error) {
+	if !markNotRoutable(vm, err) {
+		return ctrl.Result{}, err
+	}
+	log.FromContext(ctx).Info("Not calling the provider for this VM", "reason", err.Error())
+	metrics.RecordError(errReasonPlacement, metrics.ComponentManager)
+	r.updateStatus(ctx, vm)
+	if isPlacementTopologyMismatch(err) {
+		return ctrl.Result{RequeueAfter: placementConfigRetryInterval}, nil
+	}
+	return ctrl.Result{RequeueAfter: placementUnboundRetryInterval}, nil
+}
+
+// markNotRoutable sets the condition for a vmRefFor failure and reports
+// whether err was one (unbound, or a placement/topology mismatch).
+func markNotRoutable(vm *infravirtrigaudiov1beta1.VirtualMachine, err error) bool {
+	switch {
+	case isVMUnbound(err):
+		setPlacedCondition(vm, metav1.ConditionFalse, k8s.ReasonUnbound, err.Error())
+	case isPlacementTopologyMismatch(err):
+		meta.SetStatusCondition(&vm.Status.Conditions, metav1.Condition{
+			Type:               k8s.ConditionReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             k8s.ReasonPlacementTopologyMismatch,
+			Message:            err.Error(),
+			ObservedGeneration: vm.Generation,
+		})
+	default:
+		return false
+	}
+	return true
+}
+
+// handleBoundHostUnavailable records that a clustered VM's bound host is
+// unknown, draining or unreachable (a host-scoped Unavailable from the
+// provider) and re-describes it on boundHostUnavailableRetryInterval. The
+// binding is kept; nothing is re-scheduled (D8).
+func (r *VirtualMachineReconciler) handleBoundHostUnavailable(
+	ctx context.Context,
+	vm *infravirtrigaudiov1beta1.VirtualMachine,
+	ref contracts.VMRef,
+	err error,
+) (ctrl.Result, error) {
+	log.FromContext(ctx).Info("Bound host is unavailable; re-checking later", "host", ref.HostID, "error", err.Error())
+	meta.SetStatusCondition(&vm.Status.Conditions, metav1.Condition{
+		Type:               k8s.ConditionReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             k8s.ReasonHostUnavailable,
+		Message:            fmt.Sprintf("bound host %s is unavailable: %s", ref.HostID, providerErrorMessage(err)),
+		ObservedGeneration: vm.Generation,
+	})
+	metrics.RecordError(errReasonProviderDescribe, metrics.ComponentManager)
+	r.updateStatus(ctx, vm)
+	return ctrl.Result{RequeueAfter: boundHostUnavailableRetryInterval}, nil
+}
+
 // deletionTarget decides which hypervisor VM the finalizer must delete for vm
 // on provider (ADR-0007 Addendum A, A1/A2). It returns ok == false with the
 // result to return when the finalizer must be retained without calling the
@@ -198,41 +261,49 @@ func (r *VirtualMachineReconciler) handleMissingOnBoundHost(
 // means "nothing to delete on the provider").
 //
 //   - Status.ID set: the ref comes from vmRefFor — the bare id for a single-host
-//     provider (unchanged), the bound host for a clustered one. A clustered VM
-//     with no binding is never sent a Delete: the finalizer is retained with
-//     Placed=False/Unbound, unless the force-delete escape hatch is set.
+//     provider (unchanged), the bound host and the VM's owner for a clustered
+//     one.
 //   - Status.ID empty but pendingHost set (a clustered create in flight): an
 //     owner-checked Delete is sent to the pending host, so a domain the create
 //     already made there does not leak. The provider destroys it only if its
 //     owner stamp is this VM's; anything else is reported not-found untouched.
+//
+// A VM for which no delete can be routed — a clustered VM with no binding, or
+// one whose recorded placement no longer matches its Provider's topology — is
+// never sent a Delete: the finalizer is retained with the matching condition,
+// unless the force-delete escape hatch is set.
 func (r *VirtualMachineReconciler) deletionTarget(
 	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
 	provider *infravirtrigaudiov1beta1.Provider,
 ) (contracts.VMRef, bool, ctrl.Result) {
 	logger := log.FromContext(ctx)
-	if vm.Status.ID == "" {
-		if !isClusterTopology(provider) {
-			return contracts.VMRef{}, true, ctrl.Result{}
-		}
-		ref, _ := pendingCreateRef(vm)
-		logger.Info("VM has a create in flight; sending an owner-checked delete to its pending host",
-			"id", ref.ID, "host", ref.HostID)
-		return ref, true, ctrl.Result{}
-	}
 
-	ref, err := vmRefFor(vm, provider)
+	var (
+		ref contracts.VMRef
+		err error
+	)
+	if vm.Status.ID == "" {
+		if err = placementTopologyError(vm, provider); err == nil {
+			ref, _ = pendingCreateRef(vm)
+			logger.Info("VM has a create in flight; sending an owner-checked delete to its pending host",
+				"id", ref.ID, "host", ref.HostID)
+		}
+	} else {
+		ref, err = vmRefFor(vm, provider)
+	}
 	if err == nil {
 		return ref, true, ctrl.Result{}
 	}
+
 	if hasForceDeleteAnnotation(vm) {
-		logger.Error(err, "Cannot route the provider delete (no host binding) but force-delete annotation is set; removing finalizer (the provider VM may be orphaned)",
+		logger.Error(err, "Cannot route the provider delete but force-delete annotation is set; removing finalizer (the provider VM may be orphaned)",
 			"id", vm.Status.ID, "annotation", forceDeleteAnnotation)
 		metrics.RecordError(errReasonProviderDelete, metrics.ComponentManager)
 		return contracts.VMRef{}, true, ctrl.Result{}
 	}
-	logger.Info("Cannot route the provider delete (no host binding); retaining finalizer", "id", vm.Status.ID)
-	setPlacedCondition(vm, metav1.ConditionFalse, k8s.ReasonUnbound, err.Error())
+	logger.Info("Cannot route the provider delete; retaining finalizer", "id", vm.Status.ID, "reason", err.Error())
+	markNotRoutable(vm, err)
 	metrics.RecordError(errReasonProviderDelete, metrics.ComponentManager)
 	r.updateStatus(ctx, vm)
 	return contracts.VMRef{}, false, ctrl.Result{RequeueAfter: vmDeleteRetryInterval}

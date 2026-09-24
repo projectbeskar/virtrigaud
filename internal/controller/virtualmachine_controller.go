@@ -130,6 +130,10 @@ const (
 	// does not route an operation (Power / Reconfigure) yet, so the unsupported
 	// call is not hammered every few seconds.
 	routedOpNotSupportedRetryInterval = 2 * time.Minute
+	// boundHostUnavailableRetryInterval re-describes a clustered VM whose bound
+	// host is unknown, draining or unreachable (a host-scoped Unavailable). A
+	// dead host must not turn every VM on it into a 5s poll.
+	boundHostUnavailableRetryInterval = 30 * time.Second
 )
 
 // forceDeleteAnnotation, when set to "true" on a VirtualMachine, lets the
@@ -301,6 +305,13 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	}
 	logger.V(1).Info("Dependencies resolved successfully")
 
+	// A VM that records a clustered placement on a Provider that is not (or no
+	// longer) clustered is failed CLOSED before any provider call — image
+	// prepare, create or describe (ADR-0007 Addendum A).
+	if err := placementTopologyError(vm, provider); err != nil {
+		return r.handleNotRoutable(ctx, vm, err)
+	}
+
 	// Get provider instance (remote or in-process)
 	logger.V(1).Info("Getting provider instance", "provider", provider.Name, "runtime_phase", provider.Status.Runtime.Phase, "endpoint", provider.Status.Runtime.Endpoint)
 	providerInstance, err := r.getProviderInstance(ctx, provider)
@@ -434,14 +445,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	// a per-VM call — the provider must never pick a host.
 	ref, err := vmRefFor(vm, provider)
 	if err != nil {
-		if isVMUnbound(err) {
-			logger.Info("Clustered VM has no confirmed host binding; not calling the provider", "id", vm.Status.ID)
-			setPlacedCondition(vm, metav1.ConditionFalse, k8s.ReasonUnbound, err.Error())
-			metrics.RecordError(errReasonPlacement, metrics.ComponentManager)
-			r.updateStatus(ctx, vm)
-			return ctrl.Result{RequeueAfter: placementUnboundRetryInterval}, nil
-		}
-		return ctrl.Result{}, err
+		return r.handleNotRoutable(ctx, vm, err)
 	}
 	if ref.Routed() {
 		setPlacedCondition(vm, metav1.ConditionTrue, k8s.ReasonBound,
@@ -453,6 +457,9 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	if err != nil {
 		if ref.Routed() && contracts.IsNotFound(err) {
 			return r.handleMissingOnBoundHost(ctx, vm, ref)
+		}
+		if ref.Routed() && contracts.IsHostUnavailable(err) {
+			return r.handleBoundHostUnavailable(ctx, vm, ref, err)
 		}
 		logger.Error(err, "Failed to describe VM")
 		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Failed to describe VM: %v", err))
@@ -557,10 +564,10 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 				metrics.RecordError(errReasonProviderResolve, metrics.ComponentManager)
 			} else {
 				logger.Info("Deleting VM from provider", "id", ref.ID, "host", ref.HostID)
-				// The owner rides every delete: a clustered provider destroys the
-				// VM only when its owner stamp matches (A2); single-host and
-				// thin-client providers ignore it.
-				taskRef, err := providerInstance.Delete(ctx, ref, vmOwnerIdentity(vm))
+				// A routed (clustered) ref carries the VM's owner: the provider
+				// destroys the VM only when its owner stamp matches (A2). A
+				// single-host ref is the bare id, unchanged.
+				taskRef, err := providerInstance.Delete(ctx, ref)
 				switch {
 				case err == nil:
 					if taskRef != "" {
@@ -956,7 +963,14 @@ func (r *VirtualMachineReconciler) resolveClusterPlacement(
 	for i := range hostList.Items {
 		h := &hostList.Items[i]
 		if h.Namespace == clusterNS && h.Spec.PoolRef.Name == pool.Name && h.Spec.ProviderRef.Name == providerCR.Name {
-			candidates = append(candidates, *h)
+			c := *h
+			if !c.DeletionTimestamp.IsZero() {
+				// A Host being deleted is treated as cordoned: new VMs must not be
+				// placed on it, or they would keep re-arming its in-use finalizer
+				// and block the deletion indefinitely (ADR-0007 Addendum A, A1).
+				c.Spec.Schedulable = false
+			}
+			candidates = append(candidates, c)
 		}
 	}
 

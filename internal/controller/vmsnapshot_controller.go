@@ -685,7 +685,7 @@ func (r *VMSnapshotReconciler) waitForVMBinding(ctx context.Context, snapshot *i
 	snapshot.Status.Phase = ""
 	snapshot.Status.Message = "Waiting for the VM's host binding"
 	k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionCreating,
-		metav1.ConditionTrue, reasonVMUnbound, cause.Error())
+		metav1.ConditionTrue, vmRefErrorReason(cause), cause.Error())
 	// Status update errors are intentionally ignored to avoid blocking reconciliation
 	_ = r.updateStatus(ctx, snapshot)
 	return ctrl.Result{RequeueAfter: 30 * time.Second}

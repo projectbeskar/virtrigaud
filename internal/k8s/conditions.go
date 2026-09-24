@@ -120,6 +120,14 @@ const (
 	ReasonUnbound = "Unbound"
 )
 
+// ReasonPlacementTopologyMismatch indicates that a VirtualMachine records a
+// clustered placement (status.placement.host / .pendingHost) but its Provider
+// is not topology: cluster (ADR-0007 Addendum A). No provider call is made for
+// it: the single-host path neither routes to the recorded host nor checks
+// ownership. Provider topology is immutable, so this only affects objects
+// edited before that rule existed.
+const ReasonPlacementTopologyMismatch = "PlacementTopologyMismatch"
+
 // ReasonVMMissingOnHost indicates that a clustered VM's bound host reports the
 // hypervisor VM does not exist (ADR-0007 Addendum A, A4). The operator does NOT
 // re-create it — neither on the bound host nor elsewhere — because without

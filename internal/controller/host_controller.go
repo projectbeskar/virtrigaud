@@ -61,6 +61,10 @@ const (
 	hostInUseRetryInterval = 30 * time.Second
 )
 
+// hostInUseListedVMs caps how many VirtualMachine names the HostInUse condition
+// message lists (the count is always given in full).
+const hostInUseListedVMs = 10
+
 // Condition reasons surfaced on Host.status.conditions[Ready] (ADR-0007 D3). The
 // health enum carries the fine-grained observed state; the Ready condition and
 // these reasons carry the WHY, in a small, operator-facing taxonomy.
@@ -114,7 +118,7 @@ type HostReconciler struct {
 	RemoteResolver ProviderResolver
 }
 
-// +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=hosts,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=hosts,verbs=get;list;watch;update
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=hosts/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=hosts/finalizers,verbs=update
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=providers,verbs=get;list;watch
@@ -179,10 +183,8 @@ func (r *HostReconciler) handleHostDeletion(ctx context.Context, host *infravirt
 	}
 	if len(users) > 0 {
 		base := host.DeepCopy()
-		setHostReady(host, metav1.ConditionFalse, reasonHostInUse, fmt.Sprintf(
-			"Host is being deleted but %d VirtualMachine(s) are bound to it or have a create pending on it (%s); "+
-				"it is kept until they are deleted or moved", len(users), strings.Join(users, ", ")))
-		log.FromContext(ctx).Info("Host deletion blocked: still in use", "host", host.Name, "vms", users)
+		setHostReady(host, metav1.ConditionFalse, reasonHostInUse, hostInUseMessage(users))
+		log.FromContext(ctx).Info("Host deletion blocked: still in use", "host", host.Name, "vmCount", len(users))
 		return r.persist(ctx, host, base, hostInUseRetryInterval)
 	}
 
@@ -191,6 +193,24 @@ func (r *HostReconciler) handleHostDeletion(ctx context.Context, host *infravirt
 		return ctrl.Result{}, fmt.Errorf("remove in-use finalizer from Host %s: %w", host.Name, err)
 	}
 	return ctrl.Result{}, nil
+}
+
+// hostInUseMessage renders the HostInUse condition message: the number of
+// VirtualMachines holding the Host and at most hostInUseListedVMs of their
+// names. The list is bounded so the message stays far below the 32768-byte
+// condition-message limit (an unbounded list could wedge every status write)
+// and so an admin-facing object does not enumerate every tenant's VM names.
+func hostInUseMessage(users []string) string {
+	listed := users
+	if len(listed) > hostInUseListedVMs {
+		listed = listed[:hostInUseListedVMs]
+	}
+	more := ""
+	if n := len(users) - len(listed); n > 0 {
+		more = fmt.Sprintf(" and %d more", n)
+	}
+	return fmt.Sprintf("Host is being deleted but %d VirtualMachine(s) are bound to it or have a create pending on it "+
+		"(%s%s); it is kept until they are deleted or moved", len(users), strings.Join(listed, ", "), more)
 }
 
 // vmsUsingHost returns "<namespace>/<name>" of every VirtualMachine that names

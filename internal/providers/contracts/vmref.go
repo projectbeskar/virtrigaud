@@ -34,6 +34,14 @@ type VMRef struct {
 	// wire as target_host_id (source_host_id for a clone source), and a
 	// clustered provider rejects an empty value instead of defaulting to a host.
 	HostID string
+	// Owner is the identity of the VirtualMachine the call is made for — the
+	// identity Create stamps onto the hypervisor VM (#333). The operator fills it
+	// with HostID on a clustered provider, and the transport sends it only with a
+	// host (DescribeRequest.owner, DeleteRequest.owner; later slices reuse it for
+	// the other per-VM requests). A clustered provider acts on, or reports, a VM
+	// only when its owner stamp records Owner.UID, so a VirtualMachine can never
+	// read or destroy another tenant's VM that took over the name on its host.
+	Owner ObjectIdentity
 }
 
 // Routed reports whether the reference carries a host binding, i.e. whether it

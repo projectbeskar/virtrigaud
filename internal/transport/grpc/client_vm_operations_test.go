@@ -182,7 +182,7 @@ func TestClient_VMOperations_RecordOnSuccess(t *testing.T) {
 			return e
 		}},
 		{"Delete", metrics.OpDelete, func() error {
-			_, e := cli.Delete(ctx, contracts.VMRef{ID: "vm-1"}, contracts.ObjectIdentity{})
+			_, e := cli.Delete(ctx, contracts.VMRef{ID: "vm-1"})
 			return e
 		}},
 		{"Power", metrics.OpPower, func() error {
@@ -238,7 +238,7 @@ func TestClient_VMOperations_RecordOnError(t *testing.T) {
 			return e
 		}},
 		{"Delete", metrics.OpDelete, func() error {
-			_, e := cli.Delete(ctx, contracts.VMRef{ID: "vm-1"}, contracts.ObjectIdentity{})
+			_, e := cli.Delete(ctx, contracts.VMRef{ID: "vm-1"})
 			return e
 		}},
 		{"Power", metrics.OpPower, func() error {

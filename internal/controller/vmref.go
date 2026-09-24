@@ -30,6 +30,10 @@ import (
 // caller that only needs to branch uses isVMUnbound.
 var errVMUnbound = errors.New("virtual machine has no confirmed host binding")
 
+// errPlacementTopologyMismatch is the sentinel every
+// PlacementTopologyMismatchError matches (errors.Is).
+var errPlacementTopologyMismatch = errors.New("virtual machine placement does not match its provider's topology")
+
 // reasonVMUnbound is the condition reason the VMSnapshot, VMClone and
 // VMMigration controllers record on their OWN object while the clustered VM
 // they act on has no confirmed host binding. It is the Placed condition's
@@ -57,8 +61,70 @@ func (e *UnboundVMError) Error() string {
 // Is makes errors.Is(err, errVMUnbound) true for every UnboundVMError.
 func (e *UnboundVMError) Is(target error) bool { return target == errVMUnbound }
 
+// PlacementTopologyMismatchError reports that a VirtualMachine records a
+// clustered placement (status.placement.host or .pendingHost) but its Provider
+// is not topology: cluster. That only happens if the Provider's topology was
+// changed after the VM was placed (it is immutable since ADR-0007 Addendum A,
+// but objects edited before that may exist). The VM is failed CLOSED: no
+// per-VM call is sent, because the single-host path neither routes to the
+// recorded host nor checks ownership — it could act on, or destroy, another
+// tenant's same-named VM.
+type PlacementTopologyMismatchError struct {
+	// Namespace and Name identify the VirtualMachine.
+	Namespace, Name string
+	// Provider is the (non-clustered) Provider the VM references.
+	Provider string
+	// Host is the recorded host (bound or pending).
+	Host string
+}
+
+// Error implements error.
+func (e *PlacementTopologyMismatchError) Error() string {
+	return fmt.Sprintf("VirtualMachine %s/%s records a placement on host %q but provider %q is not topology: cluster; "+
+		"no provider call is made (the provider's topology must not change after VMs are placed)",
+		e.Namespace, e.Name, e.Host, e.Provider)
+}
+
+// Is makes errors.Is(err, errPlacementTopologyMismatch) true for every
+// PlacementTopologyMismatchError.
+func (e *PlacementTopologyMismatchError) Is(target error) bool {
+	return target == errPlacementTopologyMismatch
+}
+
 // isVMUnbound reports whether err is, or wraps, an UnboundVMError.
 func isVMUnbound(err error) bool { return errors.Is(err, errVMUnbound) }
+
+// isPlacementTopologyMismatch reports whether err is, or wraps, a
+// PlacementTopologyMismatchError.
+func isPlacementTopologyMismatch(err error) bool {
+	return errors.Is(err, errPlacementTopologyMismatch)
+}
+
+// vmRefErrorReason is the condition reason for a vmRefFor failure recorded on
+// a VMSnapshot / VMClone / VMMigration.
+func vmRefErrorReason(err error) string {
+	if isPlacementTopologyMismatch(err) {
+		return k8s.ReasonPlacementTopologyMismatch
+	}
+	return reasonVMUnbound
+}
+
+// placementTopologyError returns a *PlacementTopologyMismatchError when vm
+// records a clustered placement but provider is not clustered, and nil
+// otherwise.
+func placementTopologyError(vm *infravirtrigaudiov1beta1.VirtualMachine, provider *infravirtrigaudiov1beta1.Provider) error {
+	if provider == nil || isClusterTopology(provider) {
+		return nil
+	}
+	host := boundHost(vm)
+	if host == "" {
+		host = pendingHost(vm)
+	}
+	if host == "" {
+		return nil
+	}
+	return &PlacementTopologyMismatchError{Namespace: vm.Namespace, Name: vm.Name, Provider: provider.Name, Host: host}
+}
 
 // vmRefFor is THE one helper that builds the contracts.VMRef for a per-VM
 // provider call on vm (ADR-0007 Addendum A, A1). provider is the Provider vm
@@ -67,43 +133,47 @@ func isVMUnbound(err error) bool { return errors.Is(err, errVMUnbound) }
 // rule lives in exactly one place:
 //
 //   - single-host / thin-client Provider (topology single, the default): the
-//     ref carries status.id only and HostID stays empty — byte-for-byte today's
-//     call (D9);
+//     ref carries status.id only — no host, no owner — byte-for-byte today's
+//     call (D9). A VM that nevertheless records a clustered placement fails
+//     CLOSED with a *PlacementTopologyMismatchError (no ref).
 //   - clustered Provider (topology cluster): HostID is the confirmed binding,
-//     status.placement.host. An empty binding returns an *UnboundVMError and no
-//     ref: a clustered VM is never sent a per-VM call without a host, because
-//     only the operator knows where a VM runs (D1).
+//     status.placement.host, and Owner is the VM's identity, which the provider
+//     checks against the VM's owner stamp. An empty binding returns an
+//     *UnboundVMError and no ref: a clustered VM is never sent a per-VM call
+//     without a host, because only the operator knows where a VM runs (D1).
 func vmRefFor(vm *infravirtrigaudiov1beta1.VirtualMachine, provider *infravirtrigaudiov1beta1.Provider) (contracts.VMRef, error) {
-	ref := contracts.VMRef{ID: vm.Status.ID}
 	if provider == nil || !isClusterTopology(provider) {
-		return ref, nil
+		if err := placementTopologyError(vm, provider); err != nil {
+			return contracts.VMRef{}, err
+		}
+		return contracts.VMRef{ID: vm.Status.ID}, nil
 	}
 	host := boundHost(vm)
 	if host == "" {
 		return contracts.VMRef{}, &UnboundVMError{Namespace: vm.Namespace, Name: vm.Name, Provider: provider.Name}
 	}
-	ref.HostID = host
-	return ref, nil
+	return contracts.VMRef{ID: vm.Status.ID, HostID: host, Owner: vmOwnerIdentity(vm)}, nil
 }
 
 // pendingCreateRef builds the VMRef that addresses a clustered VM whose Create
 // is in flight: status.placement.pendingHost is set but the provider has not
 // confirmed the VM, so status.id is still empty (ADR-0007 Addendum A, A2). The
 // id is the name Create was sent with (the VirtualMachine name, which a
-// clustered libvirt provider uses as the domain name). It is used for exactly
-// two things, per A2: routing the Create retry, and the finalizer's
-// owner-checked cleanup Delete. ok is false when no create is pending.
+// clustered libvirt provider uses as the domain name), and the owner is the
+// VM's identity. It is used for exactly two things, per A2: routing the Create
+// retry, and the finalizer's owner-checked cleanup Delete. ok is false when no
+// create is pending.
 func pendingCreateRef(vm *infravirtrigaudiov1beta1.VirtualMachine) (contracts.VMRef, bool) {
 	host := pendingHost(vm)
 	if host == "" {
 		return contracts.VMRef{}, false
 	}
-	return contracts.VMRef{ID: vm.Name, HostID: host}, true
+	return contracts.VMRef{ID: vm.Name, HostID: host, Owner: vmOwnerIdentity(vm)}, true
 }
 
 // vmOwnerIdentity is the requesting VirtualMachine's identity as it is stamped
-// onto (and checked against) the hypervisor VM: Create stamps it (#333) and an
-// owner-checked Delete requires it (A2).
+// onto (and checked against) the hypervisor VM: Create stamps it (#333) and the
+// routed Describe / owner-checked Delete require it (A2).
 func vmOwnerIdentity(vm *infravirtrigaudiov1beta1.VirtualMachine) contracts.ObjectIdentity {
 	return contracts.ObjectIdentity{UID: string(vm.UID), Namespace: vm.Namespace, Name: vm.Name}
 }

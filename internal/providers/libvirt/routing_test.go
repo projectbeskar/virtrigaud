@@ -30,6 +30,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -99,7 +100,9 @@ case "$1" in
     if [ -f "$f" ]; then cat "$f"; else echo "error: failed to get domain '$2'" >&2; exit 1; fi ;;
   dominfo)
     if [ -f "$d/dom-$2.xml" ]; then
-      printf 'Id:             -\nName:           %s\nState:          shut off\nCPU(s):         1\nMax memory:     1048576 KiB\n' "$2"
+      uuid=11111111-2222-4333-8444-555555555555
+      if [ -f "$d/uuid-$2" ]; then uuid=$(cat "$d/uuid-$2"); fi
+      printf 'Id:             -\nName:           %s\nUUID:           %s\nState:          shut off\nCPU(s):         1\nMax memory:     1048576 KiB\n' "$2" "$uuid"
     else echo "error: failed to get domain '$2'" >&2; exit 1; fi ;;
   destroy|undefine) exit 0 ;;
   *) echo "fake virsh: unsupported: $*" >&2; exit 1 ;;
@@ -208,7 +211,7 @@ func TestClustered_EveryPerVMRPC_NeverReachesPlaceholder(t *testing.T) {
 	ctx := context.Background()
 	owner := &providerv1.ObjectIdentity{Uid: ownerTeamA.UID, Namespace: ownerTeamA.Namespace, Name: ownerTeamA.Name}
 
-	d, err := s.Describe(ctx, &providerv1.DescribeRequest{Id: "web", TargetHostId: "host-a"})
+	d, err := s.Describe(ctx, &providerv1.DescribeRequest{Id: "web", TargetHostId: "host-a", Owner: owner})
 	require.NoError(t, err)
 	assert.True(t, d.Exists)
 
@@ -293,7 +296,7 @@ func TestClustered_Describe_RoutedToLeasedHostAndReleasesLease(t *testing.T) {
 	})
 	p, reg, closes := routedCluster(t)
 
-	resp, err := p.Describe(context.Background(), contracts.VMRef{ID: "db", HostID: "host-b"})
+	resp, err := p.Describe(context.Background(), contracts.VMRef{ID: "db", HostID: "host-b", Owner: ownerTeamA})
 	require.NoError(t, err)
 	assert.True(t, resp.Exists)
 	assert.Equal(t, "db", resp.ProviderRaw["Name"])
@@ -312,7 +315,7 @@ func TestClustered_Describe_RoutedToLeasedHostAndReleasesLease(t *testing.T) {
 func TestClustered_Describe_AbsentDomainIsExistsFalse(t *testing.T) {
 	newRoutingFixture(t, map[string]map[string]string{"host-a": {}, "host-b": {}})
 	p, _, _ := routedCluster(t)
-	resp, err := p.Describe(context.Background(), contracts.VMRef{ID: "gone", HostID: "host-a"})
+	resp, err := p.Describe(context.Background(), contracts.VMRef{ID: "gone", HostID: "host-a", Owner: ownerTeamA})
 	require.NoError(t, err)
 	assert.False(t, resp.Exists)
 }
@@ -330,14 +333,18 @@ func TestClustered_RoutingErrors(t *testing.T) {
 		assert.Equal(t, codes.InvalidArgument, status.Code(err))
 	}
 
-	_, err := s.Describe(ctx, &providerv1.DescribeRequest{Id: "web", TargetHostId: "host-zzz"})
-	assert.Equal(t, codes.Unavailable, status.Code(err), "an unknown host is a retryable Unavailable")
-	_, err = s.Delete(ctx, &providerv1.DeleteRequest{Id: "web", TargetHostId: "host-zzz"})
-	assert.Equal(t, codes.Unavailable, status.Code(err))
-
-	// Create shares the class: an unknown target host is Unavailable (A2).
-	_, err = s.Create(ctx, &providerv1.CreateRequest{Name: "web", TargetHostId: "host-zzz"})
-	assert.Equal(t, codes.Unavailable, status.Code(err))
+	// An unknown host is a retryable, HOST-scoped Unavailable: codes.Unavailable
+	// carrying the HOST_UNAVAILABLE ErrorInfo the manager keeps out of its
+	// circuit breaker. Create shares the class (A2).
+	_, derr := s.Describe(ctx, &providerv1.DescribeRequest{Id: "web", TargetHostId: "host-zzz"})
+	_, xerr := s.Delete(ctx, &providerv1.DeleteRequest{Id: "web", TargetHostId: "host-zzz"})
+	_, cerr := s.Create(ctx, &providerv1.CreateRequest{Name: "web", TargetHostId: "host-zzz"})
+	for name, err := range map[string]error{"Describe": derr, "Delete": xerr, "Create": cerr} {
+		st, ok := status.FromError(err)
+		require.True(t, ok, name)
+		assert.Equal(t, codes.Unavailable, st.Code(), name)
+		require.True(t, hasHostUnavailableInfo(st), "%s must mark the unavailability as host-scoped", name)
+	}
 
 	assert.Zero(t, p.virshProvider.unroutableHits.Load())
 }
@@ -368,7 +375,7 @@ func TestClustered_Delete_OwnerChecked(t *testing.T) {
 			fx := newRoutingFixture(t, map[string]map[string]string{"host-a": domains, "host-b": {}})
 			p, _, _ := routedCluster(t)
 
-			_, err := p.Delete(context.Background(), contracts.VMRef{ID: "web", HostID: "host-a"}, tc.owner)
+			_, err := p.Delete(context.Background(), contracts.VMRef{ID: "web", HostID: "host-a", Owner: tc.owner})
 			calls := fx.calls()
 			if tc.destroyed {
 				require.NoError(t, err)
@@ -389,6 +396,78 @@ func TestClustered_Delete_OwnerChecked(t *testing.T) {
 			}
 		})
 	}
+}
+
+// hasHostUnavailableInfo reports whether st carries the HOST_UNAVAILABLE
+// ErrorInfo.
+func hasHostUnavailableInfo(st *status.Status) bool {
+	for _, d := range st.Details() {
+		if info, ok := d.(*errdetails.ErrorInfo); ok &&
+			info.GetReason() == contracts.HostUnavailableReason && info.GetDomain() == contracts.HostUnavailableErrorDomain {
+			return true
+		}
+	}
+	return false
+}
+
+// TestClustered_Describe_OwnerChecked is the Describe side of the ownership
+// rule: a routed Describe returns a domain's state only when its owner stamp is
+// the requester's. A foreign, unstamped or unreadable stamp — or a request
+// without an owner — is exists=false, and the domain's state is never read
+// (no dominfo), so a VirtualMachine can never see another tenant's VM that took
+// over the name on its host.
+func TestClustered_Describe_OwnerChecked(t *testing.T) {
+	cases := []struct {
+		name   string
+		xml    string
+		owner  contracts.ObjectIdentity
+		exists bool
+	}{
+		{"owned by the requester", routingDomainXML("web", ownerTeamA), ownerTeamA, true},
+		{"owned by another tenant", routingDomainXML("web", ownerTeamA), ownerTeamB, false},
+		{"unstamped", routingDomainXML("web", contracts.ObjectIdentity{}), ownerTeamA, false},
+		{"request without owner", routingDomainXML("web", ownerTeamA), contracts.ObjectIdentity{}, false},
+		{"unreadable stamp", "<domain><name>web", ownerTeamA, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newRoutingFixture(t, map[string]map[string]string{"host-a": {"web": tc.xml}, "host-b": {}})
+			p, _, _ := routedCluster(t)
+			resp, err := NewServer(p).Describe(context.Background(), &providerv1.DescribeRequest{
+				Id: "web", TargetHostId: "host-a", Owner: ownerFromIdentity(tc.owner),
+			})
+			require.NoError(t, err)
+			assert.Equal(t, tc.exists, resp.Exists)
+			if !tc.exists {
+				assert.Empty(t, resp.PowerState, "no state of a domain this VM does not own")
+				assert.Empty(t, resp.Ips)
+				assert.Empty(t, resp.ConsoleUrl)
+				assert.NotContains(t, fx.calls(), "host-a dominfo web", "a foreign domain is never read")
+			}
+		})
+	}
+}
+
+// TestClustered_Describe_DomainReplacedDuringReadIsAbsent closes the window
+// between the ownership check and the state read: if the domain read by
+// dominfo is not the one whose stamp was checked (different UUID), the answer
+// is exists=false.
+func TestClustered_Describe_DomainReplacedDuringReadIsAbsent(t *testing.T) {
+	fx := newRoutingFixture(t, map[string]map[string]string{"host-a": {"web": routingDomainXML("web", ownerTeamA)}, "host-b": {}})
+	require.NoError(t, os.WriteFile(filepath.Join(fx.dir, "host-a", "uuid-web"), []byte("99999999-8888-4777-8666-555555555555"), 0o600))
+	p, _, _ := routedCluster(t)
+	resp, err := p.Describe(context.Background(), contracts.VMRef{ID: "web", HostID: "host-a", Owner: ownerTeamA})
+	require.NoError(t, err)
+	assert.False(t, resp.Exists)
+	assert.Empty(t, resp.ProviderRaw)
+}
+
+// ownerFromIdentity is the wire form of an identity (nil when it has no UID).
+func ownerFromIdentity(o contracts.ObjectIdentity) *providerv1.ObjectIdentity {
+	if o.IsZero() {
+		return nil
+	}
+	return &providerv1.ObjectIdentity{Uid: o.UID, Namespace: o.Namespace, Name: o.Name}
 }
 
 // TestClustered_Server_DeleteForeignIsNotFound checks the wire code the manager
@@ -426,7 +505,7 @@ func TestClustered_ShadowDescribeHoldsTheSameLease(t *testing.T) {
 		return contracts.DescribeResponse{Exists: true}, nil
 	}
 
-	_, err := p.Describe(context.Background(), contracts.VMRef{ID: "web", HostID: "host-a"})
+	_, err := p.Describe(context.Background(), contracts.VMRef{ID: "web", HostID: "host-a", Owner: ownerTeamA})
 	require.NoError(t, err)
 
 	reg.Evict("host-a") // drain while the shadow still holds the lease
@@ -487,7 +566,7 @@ func TestSingleHost_DescribeAndDelete_UnchangedOnVirshProvider(t *testing.T) {
 			require.NotEmpty(t, describeCalls)
 			assert.Equal(t, "single dominfo web", describeCalls[0], "Describe starts with the historical dominfo")
 
-			_, err = p.Delete(context.Background(), contracts.VMRef{ID: "web", HostID: hostID}, ownerTeamB)
+			_, err = p.Delete(context.Background(), contracts.VMRef{ID: "web", HostID: hostID, Owner: ownerTeamB})
 			require.NoError(t, err, "single-host delete ignores the owner")
 			assert.Equal(t, []string{
 				"single list --all",
@@ -518,7 +597,7 @@ func TestSingleHost_NativeDescribeStillResolvesThroughRegistry(t *testing.T) {
 func TestSingleHost_DeleteAbsentStillCleansOrphans(t *testing.T) {
 	fx := newRoutingFixture(t, map[string]map[string]string{"single": {}})
 	p := &Provider{virshProvider: localHostVP("single")}
-	_, err := p.Delete(context.Background(), contracts.VMRef{ID: "web"}, contracts.ObjectIdentity{})
+	_, err := p.Delete(context.Background(), contracts.VMRef{ID: "web"})
 	require.NoError(t, err)
 	calls := fx.calls()
 	assert.Equal(t, "single list --all", calls[0])

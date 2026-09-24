@@ -127,12 +127,12 @@ type Provider interface {
 	Create(ctx context.Context, req CreateRequest) (CreateResponse, error)
 
 	// Delete removes the VM vm addresses (idempotent, succeeds even if the VM
-	// doesn't exist). owner is the requesting VirtualMachine's identity
-	// (ADR-0007 Addendum A, A2): a clustered provider destroys a VM only when
-	// its recorded owner UID equals owner.UID and reports anything else as
-	// not-found without touching it; single-host and thin-client providers
-	// ignore it. Returns TaskRef if the operation is asynchronous.
-	Delete(ctx context.Context, vm VMRef, owner ObjectIdentity) (taskRef string, err error)
+	// doesn't exist). On a clustered provider vm.Owner is checked (ADR-0007
+	// Addendum A, A2): the VM is destroyed only when its recorded owner UID
+	// equals vm.Owner.UID, and anything else is reported as not-found without
+	// touching it; single-host and thin-client providers ignore the owner.
+	// Returns TaskRef if the operation is asynchronous.
+	Delete(ctx context.Context, vm VMRef) (taskRef string, err error)
 
 	// Power performs a power operation on the VM vm addresses.
 	// Returns TaskRef if the operation is asynchronous
@@ -143,7 +143,9 @@ type Provider interface {
 	// Returns TaskRef if the operation is asynchronous
 	Reconfigure(ctx context.Context, vm VMRef, desired CreateRequest) (taskRef string, err error)
 
-	// Describe returns the current state of the VM vm addresses.
+	// Describe returns the current state of the VM vm addresses. On a clustered
+	// provider a VM whose owner stamp does not record vm.Owner.UID is reported
+	// as not existing, and none of its state is returned.
 	// Should be cheap and resilient to call frequently
 	Describe(ctx context.Context, vm VMRef) (DescribeResponse, error)
 

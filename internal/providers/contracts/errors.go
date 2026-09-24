@@ -45,7 +45,24 @@ const (
 	ErrorTypeQuotaExceeded ErrorType = "QuotaExceeded"
 	// ErrorTypeConflict indicates resource conflict
 	ErrorTypeConflict ErrorType = "Conflict"
+	// ErrorTypeHostUnavailable indicates that ONE host of a clustered provider
+	// is unknown, being drained, or unreachable (ADR-0007 Addendum A, A1). It is
+	// retryable, and it is deliberately distinct from ErrorTypeUnavailable: the
+	// provider itself is healthy, so it must not count toward the per-Provider
+	// circuit breaker (one dead host must not fast-fail every VM on every other
+	// host of the provider).
+	ErrorTypeHostUnavailable ErrorType = "HostUnavailable"
 )
+
+// HostUnavailableReason is the google.rpc.ErrorInfo reason a clustered
+// provider attaches to a codes.Unavailable status when the unavailability is
+// scoped to one host (ADR-0007 Addendum A). The manager maps such a status to
+// ErrorTypeHostUnavailable and keeps it out of its circuit breaker.
+const HostUnavailableReason = "HOST_UNAVAILABLE"
+
+// HostUnavailableErrorDomain is the google.rpc.ErrorInfo domain of
+// HostUnavailableReason.
+const HostUnavailableErrorDomain = "provider.virtrigaud.io"
 
 // ProviderError represents a categorized error from a provider
 type ProviderError struct {
@@ -76,7 +93,7 @@ func (e *ProviderError) Unwrap() error {
 func (e *ProviderError) IsRetryable() bool {
 	return e.Retryable || e.Type == ErrorTypeRetryable ||
 		e.Type == ErrorTypeUnavailable || e.Type == ErrorTypeTimeout ||
-		e.Type == ErrorTypeRateLimit
+		e.Type == ErrorTypeRateLimit || e.Type == ErrorTypeHostUnavailable
 }
 
 // IsNotFound reports whether err is, or wraps, a provider NotFound error. The
@@ -129,6 +146,24 @@ func IsInvalidSpec(err error) bool {
 func IsRetryable(err error) bool {
 	var pe *ProviderError
 	return errors.As(err, &pe) && pe.IsRetryable()
+}
+
+// IsHostUnavailable reports whether err is, or wraps, a host-scoped
+// unavailability of a clustered provider (ErrorTypeHostUnavailable).
+func IsHostUnavailable(err error) bool {
+	var pe *ProviderError
+	return errors.As(err, &pe) && pe.Type == ErrorTypeHostUnavailable
+}
+
+// NewHostUnavailableError creates a retryable error scoped to one host of a
+// clustered provider (see ErrorTypeHostUnavailable).
+func NewHostUnavailableError(message string, cause error) *ProviderError {
+	return &ProviderError{
+		Type:      ErrorTypeHostUnavailable,
+		Message:   message,
+		Cause:     cause,
+		Retryable: true,
+	}
 }
 
 // NewNotFoundError creates a not found error

@@ -91,8 +91,8 @@ message DeleteRequest {
   // deletes a VM ONLY when its recorded owner uid equals this uid; a VM whose
   // stamp is missing or records a different owner is reported NOT_FOUND and is
   // NEVER destroyed, so a cleanup (e.g. a finalizer after an ALREADY_EXISTS
-  // create) can never remove another tenant's VM. The operator sets it on every
-  // delete from vm.UID/namespace/name.
+  // create) can never remove another tenant's VM. The operator sets it, from
+  // vm.UID/namespace/name, on every delete that carries a target_host_id.
   ObjectIdentity owner = 3;
 }
 
@@ -165,6 +165,16 @@ message DescribeRequest {
   // InvalidArgument rather than defaulting to some host (honesty-first, D9). The
   // provider never looks a VM's host up by itself (D1).
   string target_host_id = 2;
+
+  // owner identifies the Kubernetes object (the VirtualMachine) this describe
+  // is performed for — the identity CreateRequest.owner stamps onto the VM
+  // (ADR-0007 Addendum A). AGNOSTIC. Additive and backward-compatible:
+  // single-host and thin-client providers ignore it, and the operator sends it
+  // only with a target_host_id. A clustered provider reports a VM whose stamp
+  // is missing or records a different owner as exists=false and returns none of
+  // its state, so a VirtualMachine can never read another tenant's VM that took
+  // over the name on its host (the operator then applies its no-recreate rule).
+  ObjectIdentity owner = 3;
 }
 
 message DescribeResponse {
@@ -506,7 +516,7 @@ message GetCapabilitiesResponse {
 }
 
 // ObjectIdentity names a Kubernetes object on the wire (CreateRequest.owner,
-// DeleteRequest.owner).
+// DeleteRequest.owner, DescribeRequest.owner).
 // uid is the authoritative identity (unique for the object's whole lifetime,
 // never reused after deletion); namespace and name are informational (audit,
 // operator diagnostics) and must never be used for authorization on their own.

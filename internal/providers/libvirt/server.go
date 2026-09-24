@@ -128,9 +128,10 @@ func (s *Server) Create(ctx context.Context, req *providerv1.CreateRequest) (*pr
 //     (e.g. a name virsh would resolve as a domain ID/UUID).
 //
 // A clustered create whose target host is unknown or unreachable is
-// Unavailable -> codes.Unavailable (retryable), so the operator can report the
-// pending host as unavailable instead of re-scheduling (ADR-0007 Addendum A,
-// A2). Only the clustered routing produces that class.
+// HostUnavailable -> codes.Unavailable with a HOST_UNAVAILABLE ErrorInfo
+// (retryable, and not counted by the manager's circuit breaker), so the
+// operator can report the pending host as unavailable instead of re-scheduling
+// (ADR-0007 Addendum A, A2). Only the clustered routing produces that class.
 //
 // Only the categorized message crosses the wire (it is written to be safe for
 // the requesting VirtualMachine's status). Every other error keeps the historical
@@ -143,8 +144,8 @@ func createRPCError(err error) error {
 			return status.Error(codes.AlreadyExists, pe.Message)
 		case contracts.ErrorTypeInvalidSpec:
 			return status.Error(codes.InvalidArgument, pe.Message)
-		case contracts.ErrorTypeUnavailable:
-			return status.Error(codes.Unavailable, pe.Error())
+		case contracts.ErrorTypeHostUnavailable:
+			return hostUnavailableStatus(pe)
 		}
 	}
 	return fmt.Errorf("failed to create VM: %w", err)
@@ -154,7 +155,7 @@ func createRPCError(err error) error {
 // routed to target_host_id and owner-checked (ADR-0007 Addendum A); a domain
 // this VM does not own is answered NotFound and left untouched.
 func (s *Server) Delete(ctx context.Context, req *providerv1.DeleteRequest) (*providerv1.TaskResponse, error) {
-	taskRef, err := s.provider.Delete(ctx, contracts.VMRef{ID: req.Id, HostID: req.TargetHostId}, ownerFromProto(req.GetOwner()))
+	taskRef, err := s.provider.Delete(ctx, contracts.VMRef{ID: req.Id, HostID: req.TargetHostId, Owner: ownerFromProto(req.GetOwner())})
 	if err != nil {
 		if s.clusteredProvider() {
 			return nil, routedRPCError("delete VM", err)
@@ -232,7 +233,7 @@ func (s *Server) Describe(ctx context.Context, req *providerv1.DescribeRequest) 
 		return nil, fmt.Errorf("provider not initialized")
 	}
 
-	resp, err := s.provider.Describe(ctx, contracts.VMRef{ID: req.Id, HostID: req.TargetHostId})
+	resp, err := s.provider.Describe(ctx, contracts.VMRef{ID: req.Id, HostID: req.TargetHostId, Owner: ownerFromProto(req.GetOwner())})
 	if err != nil {
 		if s.clusteredProvider() {
 			return nil, routedRPCError("describe VM", err)

@@ -398,7 +398,7 @@ func (r *VMMigrationReconciler) handleValidatingPhase(ctx context.Context, migra
 	// no binding is never sent a per-VM call (A1): wait for it.
 	if _, err := vmRefFor(sourceVM, sourceProvider); err != nil {
 		k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionValidating,
-			metav1.ConditionFalse, reasonVMUnbound, err.Error())
+			metav1.ConditionFalse, vmRefErrorReason(err), err.Error())
 		return r.waitForSourceBinding(ctx, migration, err)
 	}
 

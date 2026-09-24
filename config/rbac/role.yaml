@@ -63,11 +63,9 @@ rules:
   - infra.virtrigaud.io
   resources:
   - hosts
-  - vmclones
   verbs:
   - get
   - list
-  - patch
   - update
   - watch
 - apiGroups:
@@ -117,6 +115,16 @@ rules:
   - vmclasses
   verbs:
   - create
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - infra.virtrigaud.io
+  resources:
+  - vmclones
+  verbs:
   - get
   - list
   - patch

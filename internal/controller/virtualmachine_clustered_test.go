@@ -72,9 +72,9 @@ func (p *routingProvider) Describe(_ context.Context, vm contracts.VMRef) (contr
 	return p.describeResp, p.describeErr
 }
 
-func (p *routingProvider) Delete(_ context.Context, vm contracts.VMRef, owner contracts.ObjectIdentity) (string, error) {
+func (p *routingProvider) Delete(_ context.Context, vm contracts.VMRef) (string, error) {
 	p.deleteRefs = append(p.deleteRefs, vm)
-	p.deleteOwners = append(p.deleteOwners, owner)
+	p.deleteOwners = append(p.deleteOwners, vm.Owner)
 	return "", p.deleteErr
 }
 
@@ -117,13 +117,15 @@ func placedCondition(vm *infravirtrigaudiov1beta1.VirtualMachine) *metav1.Condit
 
 func TestVMRefFor(t *testing.T) {
 	bound := clusterVM("vm", clusteredNS, "prov-cluster")
+	bound.UID = "uid-vm"
 	bound.Status.ID = "vm"
 	bound.Status.Placement = &infravirtrigaudiov1beta1.PlacementStatus{Host: "host-a", PendingHost: "ignored"}
+	boundOwner := contracts.ObjectIdentity{UID: "uid-vm", Namespace: clusteredNS, Name: "vm"}
 
-	t.Run("cluster, bound: host is the confirmed binding", func(t *testing.T) {
+	t.Run("cluster, bound: host is the confirmed binding, owner is the VM", func(t *testing.T) {
 		ref, err := vmRefFor(bound, clusteredProviderCR("prov-cluster", clusteredNS))
 		require.NoError(t, err)
-		assert.Equal(t, contracts.VMRef{ID: "vm", HostID: "host-a"}, ref)
+		assert.Equal(t, contracts.VMRef{ID: "vm", HostID: "host-a", Owner: boundOwner}, ref)
 	})
 
 	t.Run("cluster, unbound: typed Unbound error, no ref", func(t *testing.T) {
@@ -142,21 +144,41 @@ func TestVMRefFor(t *testing.T) {
 		assert.True(t, isVMUnbound(err))
 	})
 
-	t.Run("single-host: bare id, empty host, whatever status says", func(t *testing.T) {
-		ref, err := vmRefFor(bound, singleProviderCR("prov-single", clusteredNS))
+	t.Run("single-host: bare id, no host, no owner", func(t *testing.T) {
+		plain := bound.DeepCopy()
+		plain.Status.Placement = nil
+		ref, err := vmRefFor(plain, singleProviderCR("prov-single", clusteredNS))
 		require.NoError(t, err)
 		assert.Equal(t, contracts.VMRef{ID: "vm"}, ref)
 		assert.False(t, ref.Routed())
 	})
 
+	t.Run("single-host with a recorded clustered placement fails closed", func(t *testing.T) {
+		for name, pl := range map[string]*infravirtrigaudiov1beta1.PlacementStatus{
+			"bound":   {Host: "host-a"},
+			"pending": {PendingHost: "host-b"},
+		} {
+			vm := bound.DeepCopy()
+			vm.Status.Placement = pl
+			ref, err := vmRefFor(vm, singleProviderCR("prov-single", clusteredNS))
+			require.Error(t, err, name)
+			assert.True(t, isPlacementTopologyMismatch(err), name)
+			assert.False(t, isVMUnbound(err), name)
+			assert.Equal(t, contracts.VMRef{}, ref, "%s: no ref, so no provider call", name)
+			assert.Equal(t, k8s.ReasonPlacementTopologyMismatch, vmRefErrorReason(err))
+		}
+	})
+
 	t.Run("pendingCreateRef routes the create name to the pending host", func(t *testing.T) {
 		vm := clusterVM("web", clusteredNS, "prov-cluster")
+		vm.UID = "uid-web"
 		_, ok := pendingCreateRef(vm)
 		assert.False(t, ok)
 		vm.Status.Placement = &infravirtrigaudiov1beta1.PlacementStatus{PendingHost: "host-b"}
 		ref, ok := pendingCreateRef(vm)
 		require.True(t, ok)
-		assert.Equal(t, contracts.VMRef{ID: "web", HostID: "host-b"}, ref)
+		assert.Equal(t, contracts.VMRef{ID: "web", HostID: "host-b",
+			Owner: contracts.ObjectIdentity{UID: "uid-web", Namespace: clusteredNS, Name: "web"}}, ref)
 	})
 }
 
@@ -247,14 +269,14 @@ func TestCreateVM_Clustered_RetryReusesPendingHost(t *testing.T) {
 	assert.Equal(t, "host-beta", getVM(t, r, "vm-retry").Status.Placement.Host)
 }
 
-// TestCreateVM_Clustered_UnreachablePendingHost proves an Unavailable-class
-// Create error keeps the VM pinned to its pending host (never re-scheduled) and
-// reports Placed=False/HostUnavailable.
+// TestCreateVM_Clustered_UnreachablePendingHost proves a host-scoped
+// unavailability on Create keeps the VM pinned to its pending host (never
+// re-scheduled) and reports Placed=False/HostUnavailable.
 func TestCreateVM_Clustered_UnreachablePendingHost(t *testing.T) {
 	ctx := context.Background()
 	vm := clusterVM("vm-unreach", clusteredNS, "prov-cluster")
 	prov := &routingProvider{onCreate: func(contracts.CreateRequest) (contracts.CreateResponse, error) {
-		return contracts.CreateResponse{}, contracts.NewRetryableError("create: connect to target host \"host-alpha\"", nil)
+		return contracts.CreateResponse{}, contracts.NewHostUnavailableError("create: connect to target host \"host-alpha\"", nil)
 	}}
 	r := clusteredFixture(t, prov, vm)
 
@@ -276,6 +298,25 @@ func TestCreateVM_Clustered_UnreachablePendingHost(t *testing.T) {
 	require.NotNil(t, placed)
 	assert.Equal(t, metav1.ConditionFalse, placed.Status)
 	assert.Equal(t, k8s.ReasonHostUnavailable, placed.Reason)
+}
+
+// TestCreateVM_Clustered_ProviderUnavailableIsNotHostUnavailable pins that a
+// provider-level transient failure (not host-scoped) is not reported as the
+// pending host being unavailable: it stays CreatePending on the normal cadence,
+// still pinned to the same host.
+func TestCreateVM_Clustered_ProviderUnavailableIsNotHostUnavailable(t *testing.T) {
+	vm := clusterVM("vm-provdown", clusteredNS, "prov-cluster")
+	prov := &routingProvider{onCreate: func(contracts.CreateRequest) (contracts.CreateResponse, error) {
+		return contracts.CreateResponse{}, contracts.NewRetryableError("create: provider pod unavailable", nil)
+	}}
+	r := clusteredFixture(t, prov, vm)
+	res, err := r.createVM(context.Background(), getVM(t, r, "vm-provdown"), prov, clusteredProviderCR("prov-cluster", clusteredNS),
+		smallVMClass(clusteredNS), minimalVMImage(clusteredNS), nil)
+	require.NoError(t, err)
+	assert.Equal(t, providerErrorRetryInterval, res.RequeueAfter)
+	after := getVM(t, r, "vm-provdown")
+	assert.Equal(t, "host-alpha", after.Status.Placement.PendingHost)
+	assert.Equal(t, k8s.ReasonCreatePending, placedCondition(after).Reason)
 }
 
 // ─── finalizer ────────────────────────────────────────────────────────────────
@@ -308,7 +349,8 @@ func TestHandleDeletion_Clustered_PendingHostOwnerCheckedDelete(t *testing.T) {
 			require.NoError(t, err)
 
 			require.Len(t, prov.deleteRefs, 1)
-			assert.Equal(t, contracts.VMRef{ID: "web", HostID: "host-alpha"}, prov.deleteRefs[0])
+			assert.Equal(t, "web", prov.deleteRefs[0].ID)
+			assert.Equal(t, "host-alpha", prov.deleteRefs[0].HostID)
 			assert.Equal(t, contracts.ObjectIdentity{UID: "uid-web", Namespace: clusteredNS, Name: "web"}, prov.deleteOwners[0],
 				"the delete carries the owner the provider checks the stamp against")
 			getErr := r.Get(ctx, types.NamespacedName{Namespace: clusteredNS, Name: "web"}, &infravirtrigaudiov1beta1.VirtualMachine{})
@@ -332,8 +374,8 @@ func TestHandleDeletion_Clustered_BoundDeleteIsRoutedWithOwner(t *testing.T) {
 	res, err := r.handleDeletion(ctx, deletingClusterVM(t, r, "db"))
 	require.NoError(t, err)
 	require.Len(t, prov.deleteRefs, 1)
-	assert.Equal(t, contracts.VMRef{ID: "db", HostID: "host-alpha"}, prov.deleteRefs[0])
-	assert.Equal(t, "uid-db", prov.deleteOwners[0].UID)
+	assert.Equal(t, contracts.VMRef{ID: "db", HostID: "host-alpha",
+		Owner: contracts.ObjectIdentity{UID: "uid-db", Namespace: clusteredNS, Name: "db"}}, prov.deleteRefs[0])
 	assert.Equal(t, vmDeleteRetryInterval, res.RequeueAfter, "a failed delete retains the finalizer, unchanged")
 }
 
@@ -390,8 +432,8 @@ func TestReconcileVM_Clustered_DescribeRoutedAndPlacedBound(t *testing.T) {
 
 	_, err := r.reconcileVM(context.Background(), getVM(t, r, "app"))
 	require.NoError(t, err)
-	want := contracts.VMRef{ID: "app", HostID: "host-alpha"}
-	assert.Equal(t, []contracts.VMRef{want}, prov.describeRefs)
+	want := contracts.VMRef{ID: "app", HostID: "host-alpha", Owner: contracts.ObjectIdentity{Namespace: clusteredNS, Name: "app"}}
+	assert.Equal(t, []contracts.VMRef{want}, prov.describeRefs, "Describe carries the host and the owner the provider checks")
 	assert.Equal(t, []contracts.VMRef{want}, prov.powerRefs, "power (desired On) is routed to the bound host too")
 	placed := placedCondition(getVM(t, r, "app"))
 	require.NotNil(t, placed)

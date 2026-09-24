@@ -58,8 +58,8 @@ func TestVMClone_Clustered_SourceRoutedAndTargetBoundInSameWrite(t *testing.T) {
 	reconcileTwice(t, r, client.ObjectKeyFromObject(clone))
 
 	require.Equal(t, 1, cp.cloneCnt)
-	assert.Equal(t, contracts.VMRef{ID: "src-c", HostID: "host-alpha"}, cp.lastClone.Source,
-		"the clone is routed to the source VM's bound host")
+	assert.Equal(t, "src-c", cp.lastClone.Source.ID)
+	assert.Equal(t, "host-alpha", cp.lastClone.Source.HostID, "the clone is routed to the source VM's bound host")
 
 	target := &infrav1beta1.VirtualMachine{}
 	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "clone-c-target"}, target))

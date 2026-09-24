@@ -265,7 +265,7 @@ func (r *VMCloneReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	sourceRef, err := vmRefFor(sourceVM, provider)
 	if err != nil {
 		logger.Info("Source VM has no host binding; waiting before cloning", "vm", sourceKey.Name, "error", err.Error())
-		return r.markPending(ctx, clone, reasonVMUnbound, err.Error()), nil
+		return r.markPending(ctx, clone, vmRefErrorReason(err), err.Error()), nil
 	}
 
 	// Issue the clone.

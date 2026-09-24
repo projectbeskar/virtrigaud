@@ -45,7 +45,7 @@ func (s *stubProvider) Validate(_ context.Context) error { return nil }
 func (s *stubProvider) Create(_ context.Context, _ contracts.CreateRequest) (contracts.CreateResponse, error) {
 	return contracts.CreateResponse{}, nil
 }
-func (s *stubProvider) Delete(_ context.Context, _ contracts.VMRef, _ contracts.ObjectIdentity) (string, error) {
+func (s *stubProvider) Delete(_ context.Context, _ contracts.VMRef) (string, error) {
 	return "", nil
 }
 func (s *stubProvider) Power(_ context.Context, _ contracts.VMRef, _ contracts.PowerOp) (string, error) {

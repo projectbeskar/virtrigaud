@@ -27,6 +27,7 @@ import (
 	"sync"
 	"time"
 
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -305,6 +306,13 @@ func isInfraFailure(err error) bool {
 	if err == nil {
 		return false
 	}
+	// A clustered provider's host-scoped Unavailable (one host unknown, draining
+	// or unreachable) says nothing about the provider's health: counting it
+	// would let one dead host trip the breaker and fast-fail every VM on every
+	// other host of the Provider (ADR-0007 Addendum A).
+	if st, ok := status.FromError(err); ok && isHostUnavailableStatus(st) {
+		return false
+	}
 	switch status.Code(err) {
 	case codes.Unavailable,
 		codes.DeadlineExceeded,
@@ -567,14 +575,14 @@ func (c *Client) Create(ctx context.Context, req contracts.CreateRequest) (resul
 	return result, nil
 }
 
-// Delete implements contracts.Provider. It threads vm.HostID to the wire as
-// target_host_id and the requesting VirtualMachine's identity as owner
-// (ADR-0007 Addendum A, A1/A2); both are ignored by single-host and thin-client
-// providers.
+// Delete implements contracts.Provider. For a routed VM (clustered provider)
+// it threads vm.HostID to the wire as target_host_id and vm.Owner as owner
+// (ADR-0007 Addendum A, A1/A2); a single-host request carries neither, exactly
+// as before.
 //
 // Records virtrigaud_vm_operations_total{operation="Delete",...} via
 // deferred recordVMOp using the named retErr return value (G7.1 / #124).
-func (c *Client) Delete(ctx context.Context, vm contracts.VMRef, owner contracts.ObjectIdentity) (taskRef string, retErr error) {
+func (c *Client) Delete(ctx context.Context, vm contracts.VMRef) (taskRef string, retErr error) {
 	defer c.recordVMOp(metrics.OpDelete, &retErr)
 
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
@@ -583,7 +591,7 @@ func (c *Client) Delete(ctx context.Context, vm contracts.VMRef, owner contracts
 	resp, err := c.client.Delete(ctx, &providerv1.DeleteRequest{
 		Id:           vm.ID,
 		TargetHostId: vm.HostID,
-		Owner:        objectIdentityToProto(owner),
+		Owner:        routedOwner(vm),
 	})
 	if err != nil {
 		return "", c.mapGRPCError("delete", err)
@@ -679,7 +687,11 @@ func (c *Client) Describe(ctx context.Context, vm contracts.VMRef) (result contr
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	resp, err := c.client.Describe(ctx, &providerv1.DescribeRequest{Id: vm.ID, TargetHostId: vm.HostID})
+	resp, err := c.client.Describe(ctx, &providerv1.DescribeRequest{
+		Id:           vm.ID,
+		TargetHostId: vm.HostID,
+		Owner:        routedOwner(vm),
+	})
 	if err != nil {
 		return contracts.DescribeResponse{}, c.mapGRPCError("describe", err)
 	}
@@ -1132,6 +1144,34 @@ func (c *Client) convertCreateRequest(req contracts.CreateRequest) (*providerv1.
 	return grpcReq, nil
 }
 
+// routedOwner is the owner a per-VM request carries on the wire: vm.Owner for a
+// routed (clustered) VM, which the provider checks against the VM's owner
+// stamp, and nothing for a single-host VM, whose requests are unchanged.
+func routedOwner(vm contracts.VMRef) *providerv1.ObjectIdentity {
+	if !vm.Routed() {
+		return nil
+	}
+	return objectIdentityToProto(vm.Owner)
+}
+
+// isHostUnavailableStatus reports whether a gRPC status is a clustered
+// provider's HOST-scoped unavailability (ADR-0007 Addendum A): codes.Unavailable
+// carrying a google.rpc.ErrorInfo with contracts.HostUnavailableReason. The
+// provider itself answered, so it is healthy.
+func isHostUnavailableStatus(st *status.Status) bool {
+	if st == nil || st.Code() != codes.Unavailable {
+		return false
+	}
+	for _, d := range st.Details() {
+		if info, ok := d.(*errdetails.ErrorInfo); ok &&
+			info.GetReason() == contracts.HostUnavailableReason &&
+			info.GetDomain() == contracts.HostUnavailableErrorDomain {
+			return true
+		}
+	}
+	return false
+}
+
 // objectIdentityToProto converts a manager-side ObjectIdentity to the wire
 // message (CreateRequest.owner / DeleteRequest.owner). It returns nil when no
 // UID is known, so an unset owner is unambiguous on the wire: a provider never
@@ -1183,6 +1223,9 @@ func (c *Client) mapGRPCError(operation string, err error) error {
 		// instead of retrying on a tight loop (contracts.IsConflict).
 		return contracts.NewConflictError(fmt.Sprintf("%s: %s", operation, st.Message()), err)
 	case codes.Unavailable, codes.DeadlineExceeded:
+		if isHostUnavailableStatus(st) {
+			return contracts.NewHostUnavailableError(fmt.Sprintf("%s: %s", operation, st.Message()), err)
+		}
 		return contracts.NewRetryableError(fmt.Sprintf("%s: %s", operation, st.Message()), err)
 	case codes.Unimplemented:
 		// A provider that does not implement this RPC (e.g. a non-clustered

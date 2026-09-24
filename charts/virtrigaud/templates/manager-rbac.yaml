@@ -135,11 +135,11 @@ rules:
   - get
   - list
   - watch
-# hosts: read, plus update/patch for exactly one purpose — the host_controller
-# adds and removes its in-use finalizer (host.infra.virtrigaud.io/in-use,
-# ADR-0007 Addendum A A1), so a Host cannot be deleted while any VirtualMachine
-# is bound to it or has a create pending on it. The controller never changes a
-# Host spec. hosts/finalizers is granted for clusters that enforce
+# hosts: read, plus update for exactly one purpose — the host_controller adds
+# and removes its in-use finalizer (host.infra.virtrigaud.io/in-use, ADR-0007
+# Addendum A A1), so a Host cannot be deleted while any VirtualMachine is bound
+# to it or has a create pending on it. The controller never changes a Host
+# spec. hosts/finalizers is granted for clusters that enforce
 # OwnerReferencesPermissionEnforcement.
 - apiGroups:
   - infra.virtrigaud.io
@@ -148,7 +148,6 @@ rules:
   verbs:
   - get
   - list
-  - patch
   - update
   - watch
 - apiGroups:
@@ -426,11 +425,11 @@ rules:
   - get
   - list
   - watch
-# hosts: read, plus update/patch for exactly one purpose — the host_controller
-# adds and removes its in-use finalizer (host.infra.virtrigaud.io/in-use,
-# ADR-0007 Addendum A A1), so a Host cannot be deleted while any VirtualMachine
-# is bound to it or has a create pending on it. The controller never changes a
-# Host spec. hosts/finalizers is granted for clusters that enforce
+# hosts: read, plus update for exactly one purpose — the host_controller adds
+# and removes its in-use finalizer (host.infra.virtrigaud.io/in-use, ADR-0007
+# Addendum A A1), so a Host cannot be deleted while any VirtualMachine is bound
+# to it or has a create pending on it. The controller never changes a Host
+# spec. hosts/finalizers is granted for clusters that enforce
 # OwnerReferencesPermissionEnforcement.
 - apiGroups:
   - infra.virtrigaud.io
@@ -439,7 +438,6 @@ rules:
   verbs:
   - get
   - list
-  - patch
   - update
   - watch
 - apiGroups:
