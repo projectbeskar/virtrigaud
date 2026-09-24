@@ -129,7 +129,9 @@ func (s *Server) importDiskFromS3(ctx context.Context, req *providerv1.ImportDis
 	// S3 download (DownloadStream, SHA256 verified in-stream) to conn.StreamIn's
 	// blocking call so the disk is never buffered whole in the pod.
 	pr, pw := io.Pipe()
-	stageCmd := fmt.Sprintf("cat > %s", shellQuote(stagePath))
+	// The redirect lives in a fixed `sh -c` script; stagePath is its positional
+	// "$1", never interpolated into shell text (writeStdinToFileArgv).
+	stageArgv := writeStdinToFileArgv(stagePath)
 
 	type dlResult struct {
 		resp storage.DownloadResponse
@@ -148,7 +150,7 @@ func (s *Server) importDiskFromS3(ctx context.Context, req *providerv1.ImportDis
 		dlCh <- dlResult{resp: resp, err: derr}
 	}()
 
-	stageErr := conn.StreamIn(ctx, pr, stageCmd)
+	stageErr := conn.StreamIn(ctx, pr, stageArgv...)
 	// If the SSH/cat side exited (especially on error) the download goroutine may
 	// still be blocked writing into the pipe. Unblock it with a closed-read-end
 	// error so it returns promptly instead of leaking; the DownloadStream error
@@ -182,8 +184,10 @@ func (s *Server) importDiskFromS3(ctx context.Context, req *providerv1.ImportDis
 	// qemu-img reads the staged file (seekable regular file) and writes the
 	// target qcow2. On failure, surface qemu-img's stderr directly so the real
 	// cause is visible (no io.Pipe "closed pipe" masking).
+	// Raw values: RunHost shell-quotes every argv element itself (this also
+	// covers stagedFormat, which was previously interpolated unquoted).
 	if res, err := conn.RunHost(ctx, "qemu-img", "convert", "-f", stagedFormat, "-O", "qcow2",
-		shellQuote(stagePath), shellQuote(targetPath)); err != nil {
+		stagePath, targetPath); err != nil {
 		return nil, fmt.Errorf("host-side qemu-img convert (%s→qcow2) failed: %w%s", stagedFormat, err, qemuImgStderr(res))
 	}
 
@@ -191,7 +195,7 @@ func (s *Server) importDiskFromS3(ctx context.Context, req *providerv1.ImportDis
 
 	// --- VALIDATE (ADR D5 part 2) ---
 	// qemu-img check on the converted qcow2. Surface its stderr on failure too.
-	if res, err := conn.RunHost(ctx, "qemu-img", "check", shellQuote(targetPath)); err != nil {
+	if res, err := conn.RunHost(ctx, "qemu-img", "check", targetPath); err != nil {
 		return nil, fmt.Errorf("qemu-img check failed on converted qcow2 %s: %w%s", targetPath, err, qemuImgStderr(res))
 	}
 
@@ -210,12 +214,6 @@ func (s *Server) importDiskFromS3(ctx context.Context, req *providerv1.ImportDis
 		ActualSizeBytes: dl.resp.BytesTransferred,
 		Checksum:        dl.resp.Checksum, // SHA256 of the transferred (pre-conversion) object
 	}, nil
-}
-
-// shellQuote single-quotes a path for safe interpolation into a remote shell
-// command, escaping embedded single quotes.
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // hostStagePath returns the path of the transient host-side staging file for an

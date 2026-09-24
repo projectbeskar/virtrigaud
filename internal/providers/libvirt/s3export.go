@@ -118,8 +118,10 @@ func (s *Server) exportDiskToS3(ctx context.Context, req *providerv1.ExportDiskR
 	// not yet honored, or createSnapshot=false) can be read — this is a
 	// crash-consistent copy; a consistent copy still requires the source to be
 	// powered off or snapshotted first.
+	// RunHost is argv-safe (every element is shell-quoted by the transport), so
+	// the paths are passed raw — pre-quoting them would now double-quote.
 	if res, err := conn.RunHost(ctx, "qemu-img", "convert", "-U", "-f", "qcow2", "-O", "qcow2",
-		shellQuote(srcPath), shellQuote(hostTmp)); err != nil {
+		srcPath, hostTmp); err != nil {
 		return nil, fmt.Errorf("host-side qemu-img flatten (qcow2→standalone qcow2) failed: %w%s", err, qemuImgStderr(res))
 	}
 
@@ -143,8 +145,7 @@ func (s *Server) exportDiskToS3(ctx context.Context, req *providerv1.ExportDiskR
 	// reading before EOF (e.g. an S3-side failure): Stream's reader is backed
 	// by an io.Pipe, so Close unblocks the host-side copy goroutine with
 	// io.ErrClosedPipe instead of leaving it blocked forever.
-	streamCmd := fmt.Sprintf("cat %s", shellQuote(hostTmp))
-	rc, err := conn.Stream(ctx, streamCmd)
+	rc, err := conn.Stream(ctx, "cat", hostTmp)
 	if err != nil {
 		return nil, fmt.Errorf("failed to start host-side stream (cat %s): %w", hostTmp, err)
 	}

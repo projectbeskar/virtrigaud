@@ -23,7 +23,6 @@ import (
 	"log"
 	"net/url"
 	"os"
-	"strings"
 
 	golibvirt "github.com/digitalocean/go-libvirt"
 
@@ -159,7 +158,9 @@ func (c *virshConn) Virsh(ctx context.Context, args ...string) (*hostconn.Result
 // RunHost runs a command directly on the host (shell exec: qemu-img, scp, sudo,
 // bash, genisoimage, ...). These are permanent SSH tenants — a libvirt RPC
 // client structurally cannot replace them (ADR-0008 Fact 1). It maps onto the
-// existing "!"-escape of runVirshCommand, so behaviour is unchanged.
+// "!"-escape of runVirshCommand. argv is a real argv: every element is
+// shell-quoted on the SSH transport, so callers pass raw values (never
+// pre-quoted ones) and cannot rely on shell syntax.
 func (c *virshConn) RunHost(ctx context.Context, argv ...string) (*hostconn.Result, error) {
 	r, err := c.virsh.runVirshCommand(ctx, append([]string{"!"}, argv...)...)
 	return toResult(r), err
@@ -173,18 +174,25 @@ func (c *virshConn) RunHost(ctx context.Context, argv ...string) (*hostconn.Resu
 //
 // ADR-0008 PR 3: runSSHStdout now rides the persistent in-process SSH client
 // (sshclient.go) instead of forking ssh/sshpass per call; this method's
-// signature, contract, and callers are unchanged — exportDiskToS3 (ADR-0006's
-// S3 export path) is the primary consumer.
+// signature and contract are unchanged — exportDiskToS3 (ADR-0006's S3 export
+// path) is the primary consumer.
+//
+// argv is a real argv: every element is shell-quoted (shellJoin) before it
+// reaches the remote shell, so no element is ever interpreted as shell syntax.
 func (c *virshConn) Stream(ctx context.Context, argv ...string) (io.ReadCloser, error) {
 	if len(argv) == 0 {
 		return nil, fmt.Errorf("hostconn: Stream requires a command")
+	}
+	remoteCmd, err := shellJoin(argv)
+	if err != nil {
+		return nil, fmt.Errorf("hostconn: Stream: %w", err)
 	}
 	pr, pw := io.Pipe()
 	go func() {
 		// runSSHStdout streams the remote stdout into pw and returns when the
 		// command exits; propagate its error (a nil error closes the reader with
 		// io.EOF).
-		err := runSSHStdout(ctx, c.virsh, pw, strings.Join(argv, " "))
+		err := runSSHStdout(ctx, c.virsh, pw, remoteCmd)
 		_ = pw.CloseWithError(err)
 	}()
 	return pr, nil
@@ -215,11 +223,18 @@ func (c *virshConn) callLibvirt(ctx context.Context, fn func(*golibvirt.Libvirt)
 // (`cat > stagePath`) and by copyDiskToRemote (`cat > remotePath`, the scp
 // replacement). It reuses the runSSHStdin helper, which holds a streamSem
 // (not execSem) slot for its duration, matching Stream/RunHost.
+//
+// argv is a real argv (every element shell-quoted by shellJoin). To write stdin
+// to a file, pass writeStdinToFileArgv(path) rather than a `cat > path` string.
 func (c *virshConn) StreamIn(ctx context.Context, r io.Reader, argv ...string) error {
 	if len(argv) == 0 {
 		return fmt.Errorf("hostconn: StreamIn requires a command")
 	}
-	return runSSHStdin(ctx, c.virsh, r, strings.Join(argv, " "))
+	remoteCmd, err := shellJoin(argv)
+	if err != nil {
+		return fmt.Errorf("hostconn: StreamIn: %w", err)
+	}
+	return runSSHStdin(ctx, c.virsh, r, remoteCmd)
 }
 
 // Close releases the connection: ADR-0008 PR 3 closes the persistent
@@ -319,11 +334,14 @@ func (v *VirshProvider) copyDiskToRemote(ctx context.Context, localPath, volumeN
 	}
 	defer func() { _ = f.Close() }()
 
-	// remotePath is caller-derived (volumeName) and now lands inside a shell
-	// command line (`cat > path`) rather than scp's non-shell destination
-	// argument, so it must be shell-quoted here — a necessary adaptation to
-	// the transport shape change, not a behavior change to the copy itself.
-	remoteCmd := fmt.Sprintf("cat > %s", shellQuote(remotePath))
+	// remotePath is caller-derived (volumeName), so it is never interpolated
+	// into shell text: the redirect lives in a fixed `sh -c` script and the
+	// path is passed as its positional parameter "$1" (writeStdinToFileArgv),
+	// with the whole argv shell-quoted by shellJoin.
+	remoteCmd, err := shellJoin(writeStdinToFileArgv(remotePath))
+	if err != nil {
+		return "", fmt.Errorf("build remote copy command: %w", err)
+	}
 	if err := runSSHStdin(ctx, v, f, remoteCmd); err != nil {
 		return "", fmt.Errorf("disk copy to remote host failed: %w", err)
 	}

@@ -602,13 +602,10 @@ func (p *Provider) syncPersistentXML(ctx context.Context, domainName string) err
 		return fmt.Errorf("failed to dump running XML: %w", err)
 	}
 
-	// Write the running XML to a temporary file
+	// Write the running XML to a temporary file (content over stdin, path as a
+	// positional parameter — no heredoc, no shell interpolation).
 	remotePath := fmt.Sprintf("/tmp/%s-sync.xml", domainName)
-	heredocMarker := "EOF_SYNC_" + fmt.Sprintf("%d", time.Now().UnixNano())
-	command := fmt.Sprintf("cat > '%s' << '%s'\n%s\n%s", remotePath, heredocMarker, result.Stdout, heredocMarker)
-
-	_, err = p.virshProvider.runVirshCommand(ctx, "!", "bash", "-c", command)
-	if err != nil {
+	if err := p.virshProvider.writeRemoteFile(ctx, remotePath, []byte(result.Stdout)); err != nil {
 		return fmt.Errorf("failed to write sync XML file: %w", err)
 	}
 
@@ -1597,13 +1594,10 @@ func (p *Provider) createDomainDefinition(ctx context.Context, vp *VirshProvider
 	// Create temporary file path on remote server
 	remotePath := fmt.Sprintf("/tmp/%s-domain.xml", domainName)
 
-	// Write domain XML to remote file using heredoc (similar to cloud-init approach)
-	heredocMarker := "EOF_DOMAIN_" + fmt.Sprintf("%d", time.Now().UnixNano())
-	command := fmt.Sprintf("cat > '%s' << '%s'\n%s\n%s", remotePath, heredocMarker, domainXML, heredocMarker)
-
-	result, err := vp.runVirshCommand(ctx, "!", "bash", "-c", command)
-	if err != nil {
-		return fmt.Errorf("failed to create domain definition file: %w, output: %s", err, result.Stderr)
+	// Write the domain XML over stdin (no heredoc, no shell interpolation of the
+	// path or of any user-derived value inside the XML; see writeRemoteFile).
+	if err := vp.writeRemoteFile(ctx, remotePath, []byte(domainXML)); err != nil {
+		return fmt.Errorf("failed to create domain definition file: %w", err)
 	}
 
 	log.Printf("INFO Created domain definition file: %s", remotePath)

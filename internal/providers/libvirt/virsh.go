@@ -26,6 +26,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -364,8 +365,17 @@ func (v *VirshProvider) setupConnection() error {
 // remote-side virsh must target that exact driver+path via -c. Without it the
 // command falls back to the ssh user's default (qemu:///system for root,
 // qemu:///session for non-root), which silently splits reads and writes across
-// two libvirtd instances. Returns "" when no driver/path can be derived, in which
-// case the caller omits -c and keeps the legacy (remote-default) behaviour.
+// two libvirtd instances.
+//
+// SECURITY: the derived URI is sent to the remote host's shell, and its path
+// comes from a Provider endpoint or a Host endpoint — i.e. user input. Only the
+// two libvirt instance paths are accepted ("system" / "session", surrounding
+// slashes ignored) and the driver must be a plain lowercase identifier; any
+// other path (e.g. "/system;id", "/system%20-c%20id", "/system/../x") yields ""
+// — the caller then omits -c and keeps the legacy (remote-default) behaviour
+// rather than forwarding an attacker-shaped URI. The command line is ALSO
+// shell-quoted (shellJoin), so this is defense in depth, not the only barrier.
+// Returns "" when no driver/path can be derived.
 func remoteVirshConnectURI(rawURI string) string {
 	parsed, err := url.Parse(rawURI)
 	if err != nil {
@@ -375,18 +385,68 @@ func remoteVirshConnectURI(rawURI string) string {
 	if i := strings.IndexByte(driver, '+'); i >= 0 {
 		driver = driver[:i] // qemu+ssh -> qemu
 	}
-	path := strings.Trim(parsed.Path, "/") // /system -> system
-	if driver == "" || path == "" {
+	if !libvirtDriverRE.MatchString(driver) {
 		return ""
 	}
-	return fmt.Sprintf("%s:///%s", driver, path)
+	switch path := strings.Trim(parsed.Path, "/"); path { // /system -> system
+	case libvirtInstanceSystem, libvirtInstanceSession:
+		return fmt.Sprintf("%s:///%s", driver, path)
+	default:
+		return ""
+	}
+}
+
+// libvirt connection-URI instance paths remoteVirshConnectURI accepts.
+const (
+	libvirtInstanceSystem  = "system"
+	libvirtInstanceSession = "session"
+)
+
+// libvirtDriverRE matches a libvirt driver name (qemu, lxc, xen, ch, test, ...):
+// a lowercase identifier, never anything a shell could interpret.
+var libvirtDriverRE = regexp.MustCompile(`^[a-z][a-z0-9]*$`)
+
+// isSSHTransport reports whether this provider reaches its libvirt host over
+// SSH (qemu+ssh://...), as opposed to a genuinely local connection.
+func (v *VirshProvider) isSSHTransport() bool {
+	return strings.Contains(v.uri, "ssh://")
+}
+
+// remoteCommandLine builds the exact command line sent to the remote host's
+// shell for one runVirshCommand call over SSH. It is a pure function (no I/O)
+// so the quoting contract is unit-testable:
+//
+//   - args[0] == "!": the rest is a host command argv (the host-shell escape
+//     behind hostconn.Conn.RunHost), flattened with shellJoin.
+//   - otherwise: a virsh control command, `virsh [-c <driver:///system|session>]
+//     <args...>`, flattened with shellJoin.
+//
+// EVERY element is quoted, so a value can never be interpreted by the remote
+// shell (see shellquote.go). A caller that needs shell syntax must pass an
+// explicit {"sh", "-c", <fixed script>, "sh", <values>...} argv.
+func remoteCommandLine(connURI string, args []string) (string, error) {
+	if len(args) > 0 && args[0] == "!" {
+		direct := args[1:]
+		if len(direct) == 0 {
+			return "", fmt.Errorf("no command specified after '!' prefix")
+		}
+		return shellJoin(direct)
+	}
+	argv := make([]string, 0, len(args)+3)
+	argv = append(argv, "virsh")
+	if uri := remoteVirshConnectURI(connURI); uri != "" {
+		argv = append(argv, "-c", uri)
+	}
+	argv = append(argv, args...)
+	return shellJoin(argv)
 }
 
 // runRemoteVirshCommand runs `virsh <args>` ON the remote hypervisor host over SSH
 // (used for subcommands that must read a host-local file the provider wrote there,
 // e.g. define / pool-define). It pins -c to the connection URI's driver+path so the
 // command targets the same libvirtd as the rest of the provider whether the ssh
-// user is root (qemu:///system) or non-root (qemu:///session).
+// user is root (qemu:///system) or non-root (qemu:///session). Every argument is
+// shell-quoted on the way to the host (remoteCommandLine).
 func (v *VirshProvider) runRemoteVirshCommand(ctx context.Context, args ...string) (*VirshResult, error) {
 	cmd := []string{"!", "virsh"}
 	if uri := remoteVirshConnectURI(v.uri); uri != "" {
@@ -620,33 +680,32 @@ func retryOnTransientSSH(ctx context.Context, attempt func() (*VirshResult, erro
 // changes. A genuinely local (non-ssh) connection — e.g. qemu:///system, no
 // host to dial — is unaffected and still execs the local virsh/command
 // binary, now via -c instead of the (removed) LIBVIRT_DEFAULT_URI env var.
+//
+// SECURITY: over SSH, every argument is shell-quoted (remoteCommandLine /
+// shellJoin), so both shapes have exactly the argv semantics of the local
+// exec.Command path — no caller-supplied value (domain name, snapshot
+// description, image URL, disk path, endpoint-derived URI) is ever
+// interpreted by the remote shell.
 func (v *VirshProvider) runVirshCommandOnce(ctx context.Context, args ...string) (*VirshResult, error) {
-	isSSH := strings.Contains(v.uri, "ssh://")
-
-	// Special handling for direct commands (prefixed with "!")
-	if len(args) > 0 && args[0] == "!" {
-		directArgs := args[1:] // Remove the "!" prefix
-		if len(directArgs) == 0 {
-			return nil, fmt.Errorf("no command specified after '!' prefix")
-		}
-		if isSSH {
-			return v.runOverSSH(ctx, strings.Join(directArgs, " "))
-		}
-		return v.runLocal(ctx, directArgs)
+	direct := len(args) > 0 && args[0] == "!"
+	if direct && len(args) == 1 {
+		return nil, fmt.Errorf("no command specified after '!' prefix")
 	}
 
-	// Standard virsh command execution.
-	if isSSH {
+	if v.isSSHTransport() {
 		// Pin the remote virsh to the connection URI's libvirtd (root ->
 		// system, non-root -> session) instead of letting it pick the ssh
 		// user's default — see remoteVirshConnectURI's doc for why this
 		// matters now that there is no LIBVIRT_DEFAULT_URI env var on the
 		// remote side to imply it.
-		virshArgs := args
-		if uri := remoteVirshConnectURI(v.uri); uri != "" {
-			virshArgs = append([]string{"-c", uri}, args...)
+		remoteCmd, err := remoteCommandLine(v.uri, args)
+		if err != nil {
+			return nil, fmt.Errorf("build remote command: %w", err)
 		}
-		return v.runOverSSH(ctx, "virsh "+strings.Join(virshArgs, " "))
+		return v.runOverSSH(ctx, remoteCmd)
+	}
+	if direct {
+		return v.runLocal(ctx, args[1:])
 	}
 	return v.runLocal(ctx, append([]string{"virsh", "-c", v.uri}, args...))
 }
