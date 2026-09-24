@@ -153,12 +153,13 @@ A released libvirt provider silently bound a VirtualMachine to any existing doma
 **Author:** @wrkode (William Rizzo)
 
 ### Added
-- `docs/adr/0007-clustered-orchestrator-provider.md`: **Addendum A** defines how a clustered provider routes every post-create per-VM RPC to the VM's bound host:
-  - **A1:** the operator carries `status.placement.host` as an additive `target_host_id` on every per-VM request. The provider leases that host through one `withHostConn` helper and never discovers hosts itself.
-  - **A2:** a new unconfirmed `status.placement.pendingHost` is persisted before `Create` and reused on retry, so a lost status write can no longer create a second domain on another host.
-  - **A3:** `ListVMs` fans out across hosts, with per-host deadlines and a `host_id` on each result.
-  - **A4:** no automatic re-creation or failover for clustered VMs, per D8.
-  - **A5:** a six-slice rollout; `topology: cluster` stays experimental until slice 5.
+- `docs/adr/0007-clustered-orchestrator-provider.md`: **Addendum A** defines how a clustered provider routes every post-create per-VM call to the VM's bound host. Staff-architect reviewed it against the code.
+  - **A1:** the operator passes `status.placement.host` as an additive `target_host_id` on every per-VM request, built into a typed `contracts.VMRef{ID, HostID}`. `CloneRequest` gains `source_host_id`, and clustered image-prepare is reported unsupported until it is host-scoped. The provider leases the host through one `withHostConn` helper on `libvirtConn`, and never looks a VM's host up by itself.
+  - **A2:** a new unconfirmed `status.placement.pendingHost` is persisted with a checked update before `Create` and reused on retry. Deleting a VM while its create is pending sends an owner-checked `Delete`. A Host in-use finalizer prevents deleting a Host that VMs still name.
+  - **A3:** `ListVMs` runs across all hosts, with per-host deadlines, a `host_id` on each result, and a list of unreachable hosts.
+  - **A4:** no automatic re-creation or failover for clustered VMs (D8). This must ship before the ADR-0008 native switch.
+  - **A5:** a six-slice rollout, with the owner-metadata fix as a prerequisite and `Describe` first. `topology: cluster` stays experimental until slice 5.
+  - **A6:** an open question on bindings lost in a backup restore.
 
 ### Changed
 - `docs/adr/0007-clustered-orchestrator-provider.md`: implementation status updated to 2026-09-24. Inventory, placement and admission are merged, but post-create routing is not, so `topology: cluster` is experimental. The follow-ups list now includes Addendum A.
