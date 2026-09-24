@@ -134,12 +134,17 @@ type Provider interface {
 	// Returns TaskRef if the operation is asynchronous.
 	Delete(ctx context.Context, vm VMRef) (taskRef string, err error)
 
-	// Power performs a power operation on the VM vm addresses.
+	// Power performs a power operation on the VM vm addresses. On a clustered
+	// provider vm.Owner is checked (ADR-0007 Addendum A, slice 2): a VM whose
+	// recorded owner UID is not vm.Owner.UID is reported as not-found and is
+	// never powered; single-host and thin-client providers ignore the owner.
 	// Returns TaskRef if the operation is asynchronous
 	Power(ctx context.Context, vm VMRef, op PowerOp) (taskRef string, err error)
 
 	// Reconfigure modifies the resources (CPU/RAM/Disks) of the VM vm
-	// addresses. May be no-op for unsupported fields.
+	// addresses. May be no-op for unsupported fields. On a clustered provider
+	// vm.Owner is checked exactly as for Power: a VM this VirtualMachine does
+	// not own is reported as not-found and left unchanged.
 	// Returns TaskRef if the operation is asynchronous
 	Reconfigure(ctx context.Context, vm VMRef, desired CreateRequest) (taskRef string, err error)
 

@@ -823,8 +823,41 @@ re-scheduled automatically, because a domain may already exist there. The operat
 sets `Placed=False/HostUnavailable` and waits for the host to return or for an
 administrator to clear `pendingHost` (D8, report-only).
 
+> **Amendment (2026-09-24, slice 2): a name conflict releases the pending host.**
+> `AlreadyExists` on the pending host is the one `Create` failure that proves
+> this VM has no domain there. The provider checks for a same-named domain it
+> does not own *before* creating anything, so this attempt created nothing
+> either. It does **not** prove that the host holds nothing of this VM's: an
+> earlier attempt that failed part-way, before the domain was defined, may have
+> left a `<name>-disk` volume or cloud-init files behind. The finalizer could
+> never remove those either, because its owner-checked `Delete` acts only on a
+> domain this VM owns and a clustered host is never cleaned up by name. So
+> releasing the host loses no cleanup, and such leftovers stay for an
+> administrator. Keeping `pendingHost` would pin the VM to that host until an
+> administrator stepped in. So on `AlreadyExists` the operator:
+>
+> - clears `pendingHost` and adds the host to the additive
+>   `status.placement.excludedHosts`, in one checked `Status().Update`. If the
+>   write is lost, the retry goes to the same host and conflicts again, so
+>   nothing is lost.
+> - sets `Placed=False/HostExcluded` and re-schedules.
+>
+> The scheduler input (`Request.ExcludedHosts`) filters excluded hosts before
+> any other check, even when the host is the current binding. The list holds
+> at most 16 hosts, drops its oldest entry when full, and is cleared when the
+> VM is bound. A conflict that has to drop an entry makes the next attempt wait
+> 2 minutes, so a pool with more conflicting hosts than the cap cannot become a
+> fast create loop. When every candidate is excluded, the operator sets
+> `Placed=False/AllHostsExcluded` and sends no `Create`. It re-checks every 2
+> minutes (no hot loop) until an administrator resolves the collisions and
+> clears the list. The finalizer loses nothing: an owner-checked `Delete` on
+> that host would find no domain of this VM's.
+>
+> An *unreachable* pending host is unchanged: still never re-scheduled.
+
 **Condition vocabulary.** There is one positive condition, `Placed`, with reasons
-`Bound`, `CreatePending`, `HostUnavailable` and `Unbound`.
+`Bound`, `CreatePending`, `HostUnavailable` and `Unbound`, plus `HostExcluded`
+and `AllHostsExcluded` from the slice 2 amendment above.
 
 ### A3: `ListVMs` runs across all hosts on a clustered provider
 

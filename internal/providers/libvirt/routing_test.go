@@ -18,6 +18,7 @@ package libvirt
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -198,11 +199,13 @@ func TestNewClusteredProvider_PlaceholderAlwaysFails(t *testing.T) {
 
 // TestClustered_EveryPerVMRPC_NeverReachesPlaceholder drives EVERY per-VM RPC
 // (and the host-scoped / list RPCs) through the gRPC Server of a clustered
-// provider and proves none of them reaches the single-host placeholder: Describe
-// and Delete are routed to their host, everything else is an honest
+// provider and proves none of them reaches the single-host placeholder:
+// Describe, Delete (slice 1), Power in every op and Reconfigure in every branch
+// (slice 2) are routed to their host; everything else is an honest
 // Unimplemented until its slice lands.
 func TestClustered_EveryPerVMRPC_NeverReachesPlaceholder(t *testing.T) {
-	fx := newRoutingFixture(t, map[string]map[string]string{
+	t.Cleanup(func() { _ = os.Remove("/tmp/" + routingDomainUUID + "-sync.xml") })
+	fx := newOpsFixture(t, map[string]map[string]string{
 		"host-a": {"web": routingDomainXML("web", ownerTeamA)},
 		"host-b": {},
 	})
@@ -215,18 +218,25 @@ func TestClustered_EveryPerVMRPC_NeverReachesPlaceholder(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, d.Exists)
 
+	for _, op := range []providerv1.PowerOp{providerv1.PowerOp_POWER_OP_ON, providerv1.PowerOp_POWER_OP_OFF,
+		providerv1.PowerOp_POWER_OP_REBOOT, providerv1.PowerOp_POWER_OP_SHUTDOWN_GRACEFUL} {
+		_, err = s.Power(ctx, &providerv1.PowerRequest{Id: "web", Op: op, TargetHostId: "host-a", Owner: owner})
+		require.NoError(t, err, op.String())
+	}
+	for _, running := range []bool{false, true} {
+		if running {
+			fx.script("host-a", "state", "running\n")
+		}
+		desired, merr := json.Marshal(reconfigureTo(4, 4096, 20))
+		require.NoError(t, merr)
+		_, err = s.Reconfigure(ctx, &providerv1.ReconfigureRequest{Id: "web", DesiredJson: string(desired), TargetHostId: "host-a", Owner: owner})
+		require.NoError(t, err, "reconfigure (running=%v)", running)
+	}
+
 	_, err = s.Delete(ctx, &providerv1.DeleteRequest{Id: "web", TargetHostId: "host-a", Owner: owner})
 	require.NoError(t, err)
 
 	unimplemented := map[string]func() error{
-		"Power": func() error {
-			_, e := s.Power(ctx, &providerv1.PowerRequest{Id: "web", Op: providerv1.PowerOp_POWER_OP_ON, TargetHostId: "host-a"})
-			return e
-		},
-		"Reconfigure": func() error {
-			_, e := s.Reconfigure(ctx, &providerv1.ReconfigureRequest{Id: "web", DesiredJson: "{}", TargetHostId: "host-a"})
-			return e
-		},
 		"HardwareUpgrade": func() error {
 			_, e := s.HardwareUpgrade(ctx, &providerv1.HardwareUpgradeRequest{Id: "web", TargetHostId: "host-a"})
 			return e
@@ -372,16 +382,23 @@ func TestClustered_Delete_OwnerChecked(t *testing.T) {
 			if tc.domainXML != "" {
 				domains["web"] = tc.domainXML
 			}
-			fx := newRoutingFixture(t, map[string]map[string]string{"host-a": domains, "host-b": {}})
+			fx := newOpsFixture(t, map[string]map[string]string{"host-a": domains, "host-b": {}})
 			p, _, _ := routedCluster(t)
 
 			_, err := p.Delete(context.Background(), contracts.VMRef{ID: "web", HostID: "host-a", Owner: tc.owner})
 			calls := fx.calls()
 			if tc.destroyed {
 				require.NoError(t, err)
-				assert.Contains(t, calls, "host-a destroy web")
-				assert.Contains(t, calls, "host-a undefine web")
-				assert.Contains(t, calls, "local sudo rm -f "+routingDiskPath)
+				// Slice 2: the teardown addresses the checked domain by UUID.
+				assert.Equal(t, []string{
+					"host-a list --all",
+					"host-a dumpxml web",
+					"host-a dumpxml " + routingDomainUUID,
+					"host-a dumpxml " + routingDomainUUID,
+					"host-a destroy " + routingDomainUUID,
+					"host-a undefine " + routingDomainUUID,
+					"local sudo rm -f " + routingDiskPath,
+				}, calls)
 				return
 			}
 			require.Error(t, err)
@@ -526,15 +543,24 @@ func TestClustered_GetCapabilities_HidesUnroutedPerVMCapabilities(t *testing.T) 
 	require.NoError(t, err)
 	assert.True(t, caps.SupportsClustering)
 	assert.False(t, caps.SupportsImageImport, "image prepare is host-scoped and not routed")
+
+	// Routed since slice 2: Reconfigure runs the single-host core on the bound
+	// host, so its online capabilities are advertised as on a single-host
+	// provider.
+	single, err := NewServer(&Provider{virshProvider: localHostVP("single")}).GetCapabilities(context.Background(), &providerv1.GetCapabilitiesRequest{})
+	require.NoError(t, err)
+	assert.True(t, caps.SupportsReconfigureOnline)
+	assert.True(t, caps.SupportsDiskExpansionOnline)
+	assert.Equal(t, single.SupportsReconfigureOnline, caps.SupportsReconfigureOnline)
+	assert.Equal(t, single.SupportsDiskExpansionOnline, caps.SupportsDiskExpansionOnline)
+
 	for name, v := range map[string]bool{
-		"reconfigure online":    caps.SupportsReconfigureOnline,
-		"disk expansion online": caps.SupportsDiskExpansionOnline,
-		"snapshots":             caps.SupportsSnapshots,
-		"memory snapshots":      caps.SupportsMemorySnapshots,
-		"linked clones":         caps.SupportsLinkedClones,
-		"disk export":           caps.SupportsDiskExport,
-		"disk import":           caps.SupportsDiskImport,
-		"export compression":    caps.SupportsExportCompression,
+		"snapshots":          caps.SupportsSnapshots,
+		"memory snapshots":   caps.SupportsMemorySnapshots,
+		"linked clones":      caps.SupportsLinkedClones,
+		"disk export":        caps.SupportsDiskExport,
+		"disk import":        caps.SupportsDiskImport,
+		"export compression": caps.SupportsExportCompression,
 	} {
 		assert.False(t, v, "%s must be hidden until its slice routes it", name)
 	}

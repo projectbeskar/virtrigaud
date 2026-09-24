@@ -42,6 +42,12 @@ const (
 	rejReqVMAntiAffinity = "host runs a strict anti-affine VM"
 )
 
+// RejectionExcludedForVM is the rejection category of a host the caller listed
+// in Request.ExcludedHosts. It is exported (unlike the other categories) so a
+// caller can recognise a no-fit in which every candidate was excluded
+// (AllExcluded).
+const RejectionExcludedForVM = "host excluded for this VM"
+
 // defaultMaxVMsPerHost is the per-host VM cap applied when HostAntiAffinity is
 // enabled but MaxVMsPerHost is unset: "prevent VMs from being placed on the same
 // host" read literally is one VM per host.
@@ -56,6 +62,13 @@ const defaultMaxVMsPerHost = 1
 // visibility/features, then capacity, then affinity), so the reported reason is
 // the most basic thing wrong with the host.
 func (ec *evalContext) filterHost(h *v1beta1.Host) (reason, detail string, err error) {
+	// 0. Hosts the caller excluded for this VM (Request.ExcludedHosts), checked
+	//    first so an excluded host is always reported as excluded — which is
+	//    what lets AllExcluded recognise "every candidate is excluded".
+	if containsString(ec.req.ExcludedHosts, h.Name) {
+		return RejectionExcludedForVM, "", nil
+	}
+
 	// 1. Health + cordon (ADR-0007 D4/D8). A drained (cordoned) or NotReady host is
 	//    never a placement target; this is also what makes idempotency re-place a
 	//    bound VM off a now-cordoned host.

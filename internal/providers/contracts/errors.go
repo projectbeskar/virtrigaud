@@ -60,9 +60,26 @@ const (
 // ErrorTypeHostUnavailable and keeps it out of its circuit breaker.
 const HostUnavailableReason = "HOST_UNAVAILABLE"
 
+// ErrorInfoDomain is the google.rpc.ErrorInfo domain of every reason a
+// VirtRigaud provider attaches to a gRPC status (HostUnavailableReason,
+// VMOperationFailedReason).
+const ErrorInfoDomain = "provider.virtrigaud.io"
+
 // HostUnavailableErrorDomain is the google.rpc.ErrorInfo domain of
 // HostUnavailableReason.
-const HostUnavailableErrorDomain = "provider.virtrigaud.io"
+const HostUnavailableErrorDomain = ErrorInfoDomain
+
+// VMOperationFailedReason is the google.rpc.ErrorInfo reason a clustered
+// provider attaches to a failed per-VM call that REACHED the VM's host and
+// failed there — the host answered, but the operation on that one VM did not
+// succeed (e.g. a blockresize beyond what the host can give, or a domain that
+// refuses to start). The provider is healthy, and such a failure can be
+// triggered repeatedly by one tenant's spec, so the manager keeps it out of its
+// per-Provider circuit breaker (ADR-0007 Addendum A, slice 2): otherwise one
+// tenant's failing VM could open the breaker for every VM, on every host, of
+// every tenant of the Provider. The status keeps its historical code and
+// message; only this detail is added.
+const VMOperationFailedReason = "VM_OPERATION_FAILED"
 
 // ProviderError represents a categorized error from a provider
 type ProviderError struct {

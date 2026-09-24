@@ -302,6 +302,11 @@ func providerCircuitBreakerInterceptor(cb *resilience.CircuitBreaker) grpc.Unary
 //
 // The classification is opinionated; rationale is documented in the G6
 // PR (#111) and CHANGELOG entry.
+//
+// Two clustered-provider statuses (ADR-0007 Addendum A) never count, whatever
+// their code, because the provider answered and is healthy: a host-scoped
+// Unavailable (HOST_UNAVAILABLE) and a per-VM operation that failed on its
+// host (VM_OPERATION_FAILED).
 func isInfraFailure(err error) bool {
 	if err == nil {
 		return false
@@ -311,6 +316,14 @@ func isInfraFailure(err error) bool {
 	// would let one dead host trip the breaker and fast-fail every VM on every
 	// other host of the Provider (ADR-0007 Addendum A).
 	if st, ok := status.FromError(err); ok && isHostUnavailableStatus(st) {
+		return false
+	}
+	// Nor does a per-VM operation that reached its host and failed there
+	// (VM_OPERATION_FAILED): the provider answered, and one tenant's failing VM
+	// (e.g. a disk grow the host cannot satisfy, retried every few seconds)
+	// must not open the breaker for every VM of the Provider (ADR-0007
+	// Addendum A, slice 2). A plain Unknown / Internal still counts.
+	if st, ok := status.FromError(err); ok && isVMOperationFailedStatus(st) {
 		return false
 	}
 	switch status.Code(err) {
@@ -605,7 +618,9 @@ func (c *Client) Delete(ctx context.Context, vm contracts.VMRef) (taskRef string
 	return "", nil
 }
 
-// Power implements contracts.Provider.
+// Power implements contracts.Provider. For a routed VM (clustered provider)
+// it threads vm.HostID to the wire as target_host_id and vm.Owner as owner
+// (ADR-0007 Addendum A, slice 2); a single-host request carries neither.
 //
 // Records virtrigaud_vm_operations_total{operation="Power",...} via
 // deferred recordVMOp using the named retErr return value (G7.1 / #124).
@@ -624,6 +639,7 @@ func (c *Client) Power(ctx context.Context, vm contracts.VMRef, op contracts.Pow
 		Id:           vm.ID,
 		Op:           grpcOp,
 		TargetHostId: vm.HostID,
+		Owner:        routedOwner(vm),
 	}
 
 	// Set default graceful timeout for graceful shutdown operations
@@ -644,7 +660,9 @@ func (c *Client) Power(ctx context.Context, vm contracts.VMRef, op contracts.Pow
 	return "", nil
 }
 
-// Reconfigure implements contracts.Provider.
+// Reconfigure implements contracts.Provider. For a routed VM (clustered
+// provider) it threads vm.HostID to the wire as target_host_id and vm.Owner as
+// owner (ADR-0007 Addendum A, slice 2); a single-host request carries neither.
 //
 // Records virtrigaud_vm_operations_total{operation="Reconfigure",...}
 // via deferred recordVMOp using the named retErr return value (G7.1 /
@@ -664,6 +682,7 @@ func (c *Client) Reconfigure(ctx context.Context, vm contracts.VMRef, desired co
 		Id:           vm.ID,
 		DesiredJson:  string(desiredJSON),
 		TargetHostId: vm.HostID,
+		Owner:        routedOwner(vm),
 	})
 	if err != nil {
 		return "", c.mapGRPCError("reconfigure", err)
@@ -1166,6 +1185,24 @@ func isHostUnavailableStatus(st *status.Status) bool {
 		if info, ok := d.(*errdetails.ErrorInfo); ok &&
 			info.GetReason() == contracts.HostUnavailableReason &&
 			info.GetDomain() == contracts.HostUnavailableErrorDomain {
+			return true
+		}
+	}
+	return false
+}
+
+// isVMOperationFailedStatus reports whether a gRPC status carries a
+// google.rpc.ErrorInfo with contracts.VMOperationFailedReason in VirtRigaud's
+// domain: a clustered provider's per-VM operation that reached its host and
+// failed there (ADR-0007 Addendum A, slice 2). The provider itself is healthy.
+func isVMOperationFailedStatus(st *status.Status) bool {
+	if st == nil || st.Code() == codes.OK {
+		return false
+	}
+	for _, d := range st.Details() {
+		if info, ok := d.(*errdetails.ErrorInfo); ok &&
+			info.GetReason() == contracts.VMOperationFailedReason &&
+			info.GetDomain() == contracts.ErrorInfoDomain {
 			return true
 		}
 	}
