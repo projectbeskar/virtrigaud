@@ -220,6 +220,7 @@ type LibvirtNetworkConfig struct {
 	// NetworkName specifies the Libvirt network name
 	// +optional
 	// +kubebuilder:validation:MaxLength=255
+	// +kubebuilder:validation:Pattern="^[^<>&'\"/\\x00-\\x1f]+$"
 	NetworkName string `json:"networkName,omitempty"`
 
 	// Bridge specifies the bridge configuration
@@ -245,6 +246,7 @@ type LibvirtNetworkConfig struct {
 type BridgeConfig struct {
 	// Name is the bridge name
 	// +kubebuilder:validation:MaxLength=15
+	// +kubebuilder:validation:Pattern="^[^<>&'\"/\\x00-\\x1f]+$"
 	Name string `json:"name"`
 
 	// STP enables Spanning Tree Protocol

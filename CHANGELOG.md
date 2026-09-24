@@ -5,6 +5,36 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-24 07:27] - Escape user-derived values in generated libvirt domain XML
+**Author:** @wrkode (William Rizzo)
+
+### Security
+- `internal/providers/libvirt/xmlsafety.go`: **new** — `xmlEscape(s string) string`, the single choke point every XML-generating call site in this package now funnels a CR-derived value through before interpolating it into `fmt.Sprintf`-built domain/pool XML. Backed by `encoding/xml.EscapeText`, so it escapes `& < > ' "` (plus raw control characters and invalid UTF-8) rather than a hand-rolled replacer that could drift from the XML spec.
+- `internal/providers/libvirt/provider_virsh.go`: `generateNetworkInterfacesXML` now escapes `net.Bridge`, `net.NetworkName`, `net.Model`, and `net.MacAddress` before they land in `<source bridge='%s'/>`, `<source network='%s'/>`, `<model type='%s'/>`, and `<mac address='%s'/>`. The disk/cloud-init block was extracted into a new `buildDiskDevicesXML(diskPath, cloudInitISOPath string) string` helper (same output, now unit-testable without a live libvirt host) which escapes both paths, and the domain `<name>` element now escapes `req.Name`.
+- `internal/providers/libvirt/clone.go`: `rewriteDomainXMLForClone` escapes `targetName` before it lands in `<name>%s</name>`; `rewriteNVRAMPath` escapes the re-pointed varstore path (which embeds `targetName`) before splicing it into the `<nvram>...</nvram>` element text. The unescaped path is still what drives the actual host-side varstore file copy.
+- `api/infra.virtrigaud.io/v1beta1/vmnetworkattachment_types.go`: added `+kubebuilder:validation:Pattern="^[^<>&'\"/\x00-\x1f]+$"` to `LibvirtNetworkConfig.NetworkName` and `BridgeConfig.Name` — defense in depth at admission time, rejecting XML metacharacters, `/`, and control characters while remaining permissive of any legitimate libvirt network or Linux bridge name. `config/crd/bases/infra.virtrigaud.io_vmnetworkattachments.yaml` regenerated via `make manifests generate`; `charts/virtrigaud/crds` (gitignored) verified in sync via `make gen-helm-crds verify-helm-crds` but not committed.
+
+### Added
+- `internal/providers/libvirt/xmlsafety_test.go`: unit tests for `xmlEscape` — a no-op on benign input (proving the fix is behavior-preserving) and, for adversarial input, no raw `& < > ' "` survive and the escaped text round-trips exactly through `encoding/xml` as both element content and a single-quoted attribute value.
+- `internal/providers/libvirt/provider_virsh_xml_test.go`: golden tests pinning byte-identical output for `generateNetworkInterfacesXML` (no networks, bridge, managed network, user network, multi-NIC) and `buildDiskDevicesXML` (disk-only, disk+cloud-init); adversarial tests feeding attribute-breakout payloads (e.g. `x'/><disk type='block'><source dev='/dev/sda'/></disk><x a='`) through every CR-derived field, asserting the generated document stays well-formed XML with exactly the expected `<interface>`/`<disk>` element count (no sibling element injected) and the payload round-trips intact.
+- `internal/providers/libvirt/clone_test.go`: `TestRewriteDomainXMLForClone_TargetNameEscaped` and `TestRewriteNVRAMPath_TargetNameEscaped` cover the same breakout class for the clone path's `<name>` and `<nvram>` rewrites.
+
+### Why
+Issue #260: the libvirt provider built domain XML with raw `fmt.Sprintf`, and the CRD fields feeding it (`LibvirtNetworkConfig.NetworkName`, `BridgeConfig.Name`) carried no pattern ruling out XML metacharacters. A value containing a bare `'` broke `virsh define` (a define-time DoS); a value containing `'/><disk type='block'><source dev='/dev/sda'/></disk><x a='` spliced a sibling `<disk>` element pointing at a host block device into the domain, letting a tenant read hypervisor-local storage from inside their own VM. Any principal with RBAC to create a `VMNetworkAttachment` or `VirtualMachine` could reach it. Fixed at the single point every generator funnels through, plus a conservative CRD pattern as defense in depth. Scoped to XML generation only — values that also flow into `virsh`/shell command lines (e.g. `domainName` in the `bash -c "cat > ... << 'EOF'"` heredocs in `provider_virsh.go`/`storage.go`/`guest_agent.go`) are a separate shell-quoting concern owned by a follow-up to `virsh.go`, not addressed here.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+> The new CRD pattern only rejects `< > & ' " /` and raw control characters in
+> `VMNetworkAttachment` libvirt `networkName`/bridge `name` fields; no
+> legitimate libvirt network or Linux bridge name uses those characters, so
+> this is not expected to reject any existing resource. The CRD schema change
+> reaches a cluster with the next chart release, or via
+> `kubectl apply -f config/crd/bases` on an existing install.
+
 ## [2026-09-24 07:17] - Remove the hardcoded SSH key and sudo grant from libvirt default cloud-init
 **Author:** @wrkode (William Rizzo)
 

@@ -226,6 +226,7 @@ spec:
                           name:
                             description: Name is the bridge name
                             maxLength: 15
+                            pattern: ^[^<>&'"/\x00-\x1f]+$
                             type: string
                           stp:
                             default: false
@@ -293,6 +294,7 @@ spec:
                       networkName:
                         description: NetworkName specifies the Libvirt network name
                         maxLength: 255
+                        pattern: ^[^<>&'"/\x00-\x1f]+$
                         type: string
                     type: object
                   mtu:

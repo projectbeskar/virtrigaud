@@ -1232,7 +1232,48 @@ runcmd:
 `, vmName)
 }
 
-// generateNetworkInterfacesXML creates network interface XML from network attachments
+// buildDiskDevicesXML renders the primary disk `<disk>` element and, when
+// cloudInitISOPath is non-empty, the cloud-init CD-ROM `<disk>` element that
+// follows it, for the create-path domain XML.
+//
+// diskPath and cloudInitISOPath are host file paths computed by this
+// provider (a storage-pool directory joined with a name derived from
+// req.Name), not raw user input — but req.Name only carries a Kubernetes
+// object-name pattern, not an XML-safety one, so both are escaped anyway
+// (issue #260 defense in depth) rather than trusting the path-construction
+// call chain to never change.
+func buildDiskDevicesXML(diskPath, cloudInitISOPath string) string {
+	diskDevicesXML := fmt.Sprintf(`    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2'/>
+      <source file='%s'/>
+      <target dev='vda' bus='virtio'/>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x07' function='0x0'/>
+    </disk>`, xmlEscape(diskPath))
+
+	// Add cloud-init ISO if available
+	if cloudInitISOPath != "" {
+		diskDevicesXML += fmt.Sprintf(`
+    <disk type='file' device='cdrom'>
+      <driver name='qemu' type='raw'/>
+      <source file='%s'/>
+      <target dev='hda' bus='ide'/>
+      <readonly/>
+      <address type='drive' controller='0' bus='0' target='0' unit='0'/>
+    </disk>`, xmlEscape(cloudInitISOPath))
+	}
+
+	return diskDevicesXML
+}
+
+// generateNetworkInterfacesXML creates network interface XML from network
+// attachments.
+//
+// net.Bridge, net.NetworkName, net.Model, and net.MacAddress are CR-derived
+// (VMNetworkAttachment / VirtualMachine spec fields) and, at the time of
+// issue #260, were not all pattern-validated against XML metacharacters at
+// admission time — so every one is passed through xmlEscape before
+// interpolation. pciSlot is computed from the loop index (numeric, safe);
+// model falls back to the "virtio" constant when net.Model is empty.
 func (p *Provider) generateNetworkInterfacesXML(networks []contracts.NetworkAttachment) string {
 	if len(networks) == 0 {
 		// Default to user network if no networks specified
@@ -1247,7 +1288,7 @@ func (p *Provider) generateNetworkInterfacesXML(networks []contracts.NetworkAtta
 		// Determine network model (default to virtio)
 		model := "virtio"
 		if net.Model != "" {
-			model = net.Model
+			model = xmlEscape(net.Model)
 		}
 
 		// Determine PCI slot (start at 0x03, increment for each interface)
@@ -1256,7 +1297,7 @@ func (p *Provider) generateNetworkInterfacesXML(networks []contracts.NetworkAtta
 		// Generate MAC address if specified
 		macXML := ""
 		if net.MacAddress != "" {
-			macXML = fmt.Sprintf("\n      <mac address='%s'/>", net.MacAddress)
+			macXML = fmt.Sprintf("\n      <mac address='%s'/>", xmlEscape(net.MacAddress))
 		}
 
 		var interfaceXML string
@@ -1268,14 +1309,14 @@ func (p *Provider) generateNetworkInterfacesXML(networks []contracts.NetworkAtta
       <source bridge='%s'/>
       <model type='%s'/>
       <address type='pci' domain='0x0000' bus='0x00' slot='%s' function='0x0'/>
-    </interface>`, macXML, net.Bridge, model, pciSlot)
+    </interface>`, macXML, xmlEscape(net.Bridge), model, pciSlot)
 		} else if net.NetworkName != "" {
 			// Libvirt managed network
 			interfaceXML = fmt.Sprintf(`    <interface type='network'>%s
       <source network='%s'/>
       <model type='%s'/>
       <address type='pci' domain='0x0000' bus='0x00' slot='%s' function='0x0'/>
-    </interface>`, macXML, net.NetworkName, model, pciSlot)
+    </interface>`, macXML, xmlEscape(net.NetworkName), model, pciSlot)
 		} else {
 			// Default to user network (NAT)
 			interfaceXML = fmt.Sprintf(`    <interface type='user'>%s
@@ -1336,25 +1377,10 @@ func (p *Provider) generateDomainXMLWithStorage(ctx context.Context, vp *VirshPr
 	// Generate UUID for the domain
 	uuid := p.generateUUID()
 
-	// Build disk devices XML
-	diskDevicesXML := fmt.Sprintf(`    <disk type='file' device='disk'>
-      <driver name='qemu' type='qcow2'/>
-      <source file='%s'/>
-      <target dev='vda' bus='virtio'/>
-      <address type='pci' domain='0x0000' bus='0x00' slot='0x07' function='0x0'/>
-    </disk>`, diskPath)
-
-	// Add cloud-init ISO if available
-	if cloudInitISOPath != "" {
-		diskDevicesXML += fmt.Sprintf(`
-    <disk type='file' device='cdrom'>
-      <driver name='qemu' type='raw'/>
-      <source file='%s'/>
-      <target dev='hda' bus='ide'/>
-      <readonly/>
-      <address type='drive' controller='0' bus='0' target='0' unit='0'/>
-    </disk>`, cloudInitISOPath)
-	}
+	// Build disk devices XML. diskPath/cloudInitISOPath are provider-computed
+	// host file paths (pool directory + a name derived from req.Name), but are
+	// escaped anyway (see buildDiskDevicesXML) as defense in depth.
+	devicesDiskXML := buildDiskDevicesXML(diskPath, cloudInitISOPath)
 
 	// Build features XML based on configuration
 	featuresXML := `    <acpi/>
@@ -1402,7 +1428,7 @@ func (p *Provider) generateDomainXMLWithStorage(ctx context.Context, vp *VirshPr
 	// binary lives elsewhere (e.g. RHEL/CentOS at /usr/libexec/qemu-kvm). The
 	// provider talks to a possibly-remote libvirtd over SSH, so letting the
 	// remote daemon resolve its own emulator is both simpler and more correct.
-	devicesXML := diskDevicesXML
+	devicesXML := devicesDiskXML
 
 	if tpmEnabled {
 		devicesXML += `
@@ -1505,7 +1531,10 @@ func (p *Provider) generateDomainXMLWithStorage(ctx context.Context, vp *VirshPr
   </devices>
 </domain>`,
 		domainType,
-		req.Name,
+		// req.Name only carries a Kubernetes object-name validation pattern
+		// (DNS-1123-ish), not an XML-safety one — escape it into the <name>
+		// element as defense in depth (issue #260).
+		xmlEscape(req.Name),
 		uuid,
 		cpuMem.Memory,
 		cpuMem.CurrentMemory,
