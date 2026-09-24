@@ -5,6 +5,40 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-24 23:56] - Security: VirtualMachine spec.providerRef is immutable once the VM is bound; the operator refuses a VM whose reference no longer names its bound Provider
+**Author:** @wrkode (William Rizzo)
+
+> **Operator note (breaking).** Once a `VirtualMachine` is bound (`status.id` or `status.placement.pendingHost` set), the API server rejects any change to `spec.providerRef` (name or namespace; unset to an explicit namespace also counts) with `422 Invalid`. Unbound VMs stay editable. Tooling that edits `spec.providerRef` after creation must stop, or delete and re-create the VM. **The documented un-adopt workaround (point `spec.providerRef` at a missing Provider, then delete the VM) no longer works:** annotate the VM `virtrigaud.io/orphan-on-delete=true` and delete it instead; the finalizer is removed without any provider call and the hypervisor VM is left running. The admission rule ships in the `VirtualMachine` CRD, so the chart's CRD upgrade must apply; the operator-side check works either way.
+>
+> **Trust on first reconcile.** A VM bound before this version gets `status.boundProvider` recorded on its first reconcile after the upgrade, from its current `spec.providerRef`. A reference re-pointed before the upgrade is therefore accepted. In multi-tenant clusters, check bound VMs before upgrading (query in `docs/vm-provider-binding.md`). A `Provider` deleted and re-created under the same name (new UID) makes its VMs report `ProviderRefMismatch` until an administrator clears `status.boundProvider` through the status subresource.
+
+### Security
+- `api/infra.virtrigaud.io/v1beta1/virtualmachine_types.go` (CRD CEL transition rule on the root): `spec.providerRef` can no longer be changed after the VM is bound. Before, a tenant could re-point its own VM at another Provider, and the manager then described, powered, reconfigured, snapshotted, exported (bypassing the #340 source-provider check, which trusted the VM's current reference) or, on deletion, destroyed whatever VM held that `status.id` on the other hypervisor. Proxmox VMIDs, vSphere MOIDs and libvirt names repeat across hypervisors, and the owner stamps (#333/#335) only protect `Create` and clustered libvirt paths. The rule reads the stored status, so a main-resource update cannot unlock it by clearing `status.id` in its body, and a status update cannot change the spec. It needs no webhook. Whole-object comparison of `providerRef` keeps the rule within the apiserver's static CEL cost budget (a per-field comparison through conditionals exceeded it by more than 100x).
+- `internal/controller/vmboundprovider.go`, `vmref.go`, `virtualmachine_controller.go`, `virtualmachine_clustered.go`: defense in depth. While a VM is bound, the operator makes no provider call for it, resolves no provider client, and its finalizer deletes through no Provider, unless `spec.providerRef` resolves to the recorded `status.boundProvider` (namespace, name and, when recorded, UID). A mismatch sets `Ready=False` / `ProviderRefMismatch` (with `ObservedGeneration`), a Warning event and `virtrigaud_errors_total{reason="provider-ref-mismatch"}`, and re-checks every 2 minutes. `vmRefFor`, which every per-VM call goes through, enforces it for the VM, VMSnapshot, VMClone (source) and VMMigration (source) controllers. A mismatched VM being deleted keeps its finalizer until `virtrigaud.io/orphan-on-delete` or `virtrigaud.io/force-delete` is set; neither calls a provider.
+- `internal/controller/vmclone_controller.go`: the clone refuses a source not bound through its Provider (before the clone, the task poll and the bind), and never binds its cloned id to a target VirtualMachine that references another Provider (for example one created under the target name while the clone ran).
+- `internal/controller/vmadoption_controller.go`: adoption no longer sets `status.id` on a pre-existing `virtrigaud.io/adopted` VM whose `spec.providerRef` names another Provider, and counts a VM bound through the Provider as managed even if its reference no longer matches (no second adoption).
+- `internal/controller/vmmigration_controller.go` (`migrationSourceProviderRef`, `getSourceProvider`): the export goes only through the source VM's bound Provider; a source re-pointed elsewhere fails the migration with a message naming the bound Provider, and a re-created Provider object is refused before any per-VM call.
+- `internal/controller/vmsnapshot_controller.go`: the snapshot create addresses the VM before resolving a provider client, and the task poll refuses a VM bound elsewhere.
+
+### Added
+- `api/infra.virtrigaud.io/v1beta1/virtualmachine_types.go`: `status.boundProvider` (`BoundProviderRef{namespace, name, uid}`, additive, operator-written) and the `VirtualMachineOrphanOnDeleteAnnotation` constant (`virtrigaud.io/orphan-on-delete`). CRDs regenerated.
+- `internal/controller/virtualmachine_controller.go`: orphan-on-delete. Deleting a VM annotated `virtrigaud.io/orphan-on-delete: "true"` removes the finalizer without resolving or calling any Provider, logs it and records a Normal `Orphaned` event naming the id and Provider left behind. This is the supported way to un-adopt / detach a VM. `force-delete` semantics are unchanged.
+- `status.boundProvider` is written in the same status write as the binding at every bind path: VM create (with `status.id`), clustered create in flight (with `status.placement.pendingHost`, before `Create`), VMClone target bind and adoption. VMs bound before this version are backfilled from their current `spec.providerRef` on the first reconcile.
+- `internal/k8s/conditions.go`: `ReasonProviderRefMismatch`. `cmd/manager/main.go`: the VirtualMachine reconciler gets an event recorder.
+- Tests: envtest specs against a real apiserver (`virtualmachine_providerref_immutable_test.go`: the rule is installed, so its cost is within budget; changes rejected once `status.id` or `pendingHost` is set, including by merge patch, namespace edits and a request body with a cleared status; allowed before binding, for unchanged references and for other spec, metadata and status updates). Controller tests (`virtualmachine_boundprovider_test.go`, `boundprovider_consumers_test.go`): recording at every bind path, backfill, refusal with no provider resolution or call for a re-pointed, re-namespaced, missing or re-created Provider, finalizer retention on mismatch, orphan-on-delete (single-host, clustered, pre-upgrade VM) and the unchanged delete without it, clone/adoption/migration/snapshot enforcement, and the migration export going through the bound Provider. A mutation check (disabling the binding check) fails the enforcement tests.
+
+### Changed
+- Docs: new `docs/vm-provider-binding.md`; `docs/README.md`; `examples/vm-adoption-example.yaml` (detaching a VM).
+
+### Why
+A mutable `spec.providerRef` let a tenant aim the operator's by-id operations, with another Provider's credentials, at another hypervisor's VM that shares the id, up to destroying it on delete. That is cross-tenant privilege escalation in the regulated multi-tenant deployments VirtRigaud targets. Admission-time immutability closes it without webhooks; the recorded binding keeps the operator safe even where the CRD rule is missing or bypassed.
+
+### Impact
+- [x] Breaking change — `spec.providerRef` of a bound VirtualMachine can no longer be changed, and the re-point-and-delete un-adopt workaround is replaced by the `virtrigaud.io/orphan-on-delete` annotation.
+- [x] Requires cluster rollout (CRD and manager image)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-09-24 22:16] - Security: cross-namespace VMClone/VMMigration targets need a grant on the target namespace; a migration exports only through the source VM's own Provider
 **Author:** @wrkode (William Rizzo)
 
