@@ -59,7 +59,7 @@ type countingSnapshotProvider struct {
 }
 
 // SnapshotDelete records the call and returns the configured task ref.
-func (p *countingSnapshotProvider) SnapshotDelete(_ context.Context, _, _ string) (string, error) {
+func (p *countingSnapshotProvider) SnapshotDelete(_ context.Context, _ contracts.VMRef, _ string) (string, error) {
 	p.snapshotDeleteCalls.Add(1)
 	return p.snapshotTaskRef, nil
 }

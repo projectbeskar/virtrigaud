@@ -52,7 +52,7 @@ func (s *Server) exportDiskToNFS(ctx context.Context, req *providerv1.ExportDisk
 
 	// Resolve the source disk path on the host.
 	diskInfo, err := s.provider.GetDiskInfo(ctx, contracts.GetDiskInfoRequest{
-		VmId:       req.VmId,
+		VM:         contracts.VMRef{ID: req.VmId, HostID: req.TargetHostId},
 		DiskId:     req.DiskId,
 		SnapshotId: req.SnapshotId,
 	})

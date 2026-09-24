@@ -385,6 +385,23 @@ func (r *VMMigrationReconciler) handleValidatingPhase(ctx context.Context, migra
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
+	// A clustered ("brain-in-operator") TARGET is rejected until ImportDisk can
+	// be routed to a host (ADR-0007 Addendum A, A1: until P3). Importing into it
+	// today would reach no host — fail fast with an honest message instead.
+	if isClusterTopology(targetProvider) {
+		return r.transitionToFailed(ctx, migration, fmt.Sprintf(
+			"target provider %s/%s has topology: cluster; migrating into a clustered provider is not supported yet "+
+				"(disk import is not routed to a host until ADR-0007 P3)", targetProvider.Namespace, targetProvider.Name))
+	}
+
+	// A clustered SOURCE VM is addressed by its confirmed host binding. One with
+	// no binding is never sent a per-VM call (A1): wait for it.
+	if _, err := vmRefFor(sourceVM, sourceProvider); err != nil {
+		k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionValidating,
+			metav1.ConditionFalse, reasonVMUnbound, err.Error())
+		return r.waitForSourceBinding(ctx, migration, err)
+	}
+
 	// Gate the requested storage backend and transfer mode against what both
 	// providers honestly report (ADR-0006 Slice 0). Only the pvc backend has
 	// transfer logic today; nfs/s3 — and any backend/mode the source's export
@@ -565,7 +582,13 @@ func (r *VMMigrationReconciler) ensureSourcePoweredOff(ctx context.Context, migr
 		return false, ctrl.Result{}, fmt.Errorf("get source provider instance: %w", err)
 	}
 
-	desc, err := providerInstance.Describe(ctx, sourceVM.Status.ID)
+	ref, err := vmRefFor(sourceVM, sourceProvider)
+	if err != nil {
+		res, werr := r.waitForSourceBinding(ctx, migration, err)
+		return false, res, werr
+	}
+
+	desc, err := providerInstance.Describe(ctx, ref)
 	if err != nil {
 		return false, ctrl.Result{}, fmt.Errorf("describe source VM: %w", err)
 	}
@@ -578,7 +601,7 @@ func (r *VMMigrationReconciler) ensureSourcePoweredOff(ctx context.Context, migr
 	// not spammed with redundant power-off tasks; otherwise just keep polling.
 	if desc.PowerState == string(contracts.PowerStateOn) {
 		logger.Info("Powering off source VM before migration", "vm", sourceVM.Name, "id", sourceVM.Status.ID)
-		if _, err := providerInstance.Power(ctx, sourceVM.Status.ID, contracts.PowerOpOff); err != nil {
+		if _, err := providerInstance.Power(ctx, ref, contracts.PowerOpOff); err != nil {
 			return false, ctrl.Result{}, fmt.Errorf("power off source VM: %w", err)
 		}
 		r.Recorder.Event(migration, "Normal", "SourcePowerOff", "Powering off source VM before migration")
@@ -659,10 +682,15 @@ func (r *VMMigrationReconciler) handleSnapshottingPhase(ctx context.Context, mig
 		return ctrl.Result{Requeue: true}, nil
 	}
 
+	sourceRef, err := vmRefFor(sourceVM, sourceProvider)
+	if err != nil {
+		return r.waitForSourceBinding(ctx, migration, err)
+	}
+
 	// Create snapshot
 	snapshotName := fmt.Sprintf("%s-migration-%s", migration.Spec.Source.VMRef.Name, migration.UID[:8])
 	snapshotReq := contracts.SnapshotCreateRequest{
-		VmId:          sourceVM.Status.ID,
+		VM:            sourceRef,
 		NameHint:      snapshotName,
 		Description:   fmt.Sprintf("Migration snapshot for %s", migration.Name),
 		IncludeMemory: false, // Disk-only snapshot for migration
@@ -805,6 +833,11 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 		return ctrl.Result{}, nil
 	}
 
+	sourceRef, err := vmRefFor(sourceVM, sourceProvider)
+	if err != nil {
+		return r.waitForSourceBinding(ctx, migration, err)
+	}
+
 	// Generate destination URL for export
 	destinationURL, err := r.generateStorageURL(ctx, migration, "export")
 	if err != nil {
@@ -833,7 +866,7 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 	// (default pvc); transfer_mode is resolved auto→relay (Slice 1 implements
 	// only relay). storage_options_json carries the non-secret s3 options.
 	exportReq := contracts.ExportDiskRequest{
-		VmId:               sourceVM.Status.ID,
+		VM:                 sourceRef,
 		DiskId:             "", // Empty means export primary disk
 		SnapshotId:         migration.Status.SnapshotID,
 		DestinationURL:     destinationURL,
@@ -2795,6 +2828,18 @@ func cleanupAllowed(m *infrav1beta1.VMMigration) bool {
 	return m.Spec.Options == nil || m.Spec.Options.CleanupPolicy != infrav1beta1.CleanupPolicyNever
 }
 
+// waitForSourceBinding records that the migration is waiting for its clustered
+// source VM's host binding (ADR-0007 Addendum A, A1) and requeues. No per-VM
+// provider call is made for an unbound VM, and the phase is not advanced.
+func (r *VMMigrationReconciler) waitForSourceBinding(ctx context.Context, migration *infrav1beta1.VMMigration, cause error) (ctrl.Result, error) {
+	logging.FromContext(ctx).Info("Source VM has no host binding; waiting", "error", cause.Error())
+	migration.Status.Message = fmt.Sprintf("Waiting for the source VM's host binding: %v", cause)
+	if err := r.updateStatus(ctx, migration); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+}
+
 // deleteSourceSnapshot deletes the migration-created snapshot
 func (r *VMMigrationReconciler) deleteSourceSnapshot(ctx context.Context, migration *infrav1beta1.VMMigration) error {
 	logger := logging.FromContext(ctx)
@@ -2824,9 +2869,14 @@ func (r *VMMigrationReconciler) deleteSourceSnapshot(ctx context.Context, migrat
 		return fmt.Errorf("failed to get provider instance: %w", err)
 	}
 
+	sourceRef, err := vmRefFor(sourceVM, sourceProvider)
+	if err != nil {
+		return fmt.Errorf("address source VM for snapshot delete: %w", err)
+	}
+
 	// Delete snapshot
 	logger.Info("Deleting source snapshot", "snapshot_id", migration.Status.SnapshotID)
-	taskRef, err := providerInstance.SnapshotDelete(ctx, sourceVM.Status.ID, migration.Status.SnapshotID)
+	taskRef, err := providerInstance.SnapshotDelete(ctx, sourceRef, migration.Status.SnapshotID)
 	if err != nil {
 		return fmt.Errorf("failed to delete snapshot: %w", err)
 	}

@@ -45,17 +45,19 @@ func (s *stubProvider) Validate(_ context.Context) error { return nil }
 func (s *stubProvider) Create(_ context.Context, _ contracts.CreateRequest) (contracts.CreateResponse, error) {
 	return contracts.CreateResponse{}, nil
 }
-func (s *stubProvider) Delete(_ context.Context, _ string) (string, error) { return "", nil }
-func (s *stubProvider) Power(_ context.Context, _ string, _ contracts.PowerOp) (string, error) {
+func (s *stubProvider) Delete(_ context.Context, _ contracts.VMRef, _ contracts.ObjectIdentity) (string, error) {
 	return "", nil
 }
-func (s *stubProvider) Reconfigure(ctx context.Context, id string, desired contracts.CreateRequest) (string, error) {
+func (s *stubProvider) Power(_ context.Context, _ contracts.VMRef, _ contracts.PowerOp) (string, error) {
+	return "", nil
+}
+func (s *stubProvider) Reconfigure(ctx context.Context, vm contracts.VMRef, desired contracts.CreateRequest) (string, error) {
 	if s.ReconfigureFn != nil {
-		return s.ReconfigureFn(ctx, id, desired)
+		return s.ReconfigureFn(ctx, vm.ID, desired)
 	}
 	return "", nil
 }
-func (s *stubProvider) Describe(_ context.Context, _ string) (contracts.DescribeResponse, error) {
+func (s *stubProvider) Describe(_ context.Context, _ contracts.VMRef) (contracts.DescribeResponse, error) {
 	return contracts.DescribeResponse{}, nil
 }
 func (s *stubProvider) IsTaskComplete(ctx context.Context, taskRef string) (bool, error) {
@@ -70,10 +72,10 @@ func (s *stubProvider) TaskStatus(_ context.Context, _ string) (contracts.TaskSt
 func (s *stubProvider) SnapshotCreate(_ context.Context, _ contracts.SnapshotCreateRequest) (contracts.SnapshotCreateResponse, error) {
 	return contracts.SnapshotCreateResponse{}, nil
 }
-func (s *stubProvider) SnapshotDelete(_ context.Context, _, _ string) (string, error) {
+func (s *stubProvider) SnapshotDelete(_ context.Context, _ contracts.VMRef, _ string) (string, error) {
 	return "", nil
 }
-func (s *stubProvider) SnapshotRevert(_ context.Context, _, _ string) (string, error) {
+func (s *stubProvider) SnapshotRevert(_ context.Context, _ contracts.VMRef, _ string) (string, error) {
 	return "", nil
 }
 func (s *stubProvider) ExportDisk(_ context.Context, _ contracts.ExportDiskRequest) (contracts.ExportDiskResponse, error) {
@@ -350,7 +352,7 @@ var _ = Describe("VirtualMachine Controller", func() {
 					},
 				}
 
-				result, err := reconciler.reconfigureVM(ctx, vm, provider, "", vmClass, nil, nil)
+				result, err := reconciler.reconfigureVM(ctx, vm, provider, contracts.VMRef{ID: vm.Status.ID}, "", vmClass, nil, nil)
 
 				Expect(err).NotTo(HaveOccurred())
 				Expect(result.RequeueAfter).To(Equal(5 * time.Second))
@@ -372,7 +374,7 @@ var _ = Describe("VirtualMachine Controller", func() {
 					},
 				}
 
-				result, err := reconciler.reconfigureVM(ctx, vm, provider, "", vmClass, nil, nil)
+				result, err := reconciler.reconfigureVM(ctx, vm, provider, contracts.VMRef{ID: vm.Status.ID}, "", vmClass, nil, nil)
 
 				Expect(err).NotTo(HaveOccurred())
 				Expect(result.RequeueAfter).To(Equal(5 * time.Second))
@@ -388,7 +390,7 @@ var _ = Describe("VirtualMachine Controller", func() {
 					},
 				}
 
-				result, err := reconciler.reconfigureVM(ctx, vm, provider, "", vmClass, nil, nil)
+				result, err := reconciler.reconfigureVM(ctx, vm, provider, contracts.VMRef{ID: vm.Status.ID}, "", vmClass, nil, nil)
 
 				Expect(err).NotTo(HaveOccurred())
 				Expect(result.RequeueAfter).To(Equal(5 * time.Second))

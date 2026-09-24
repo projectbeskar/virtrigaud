@@ -91,9 +91,9 @@ type fakeDescribeProvider struct {
 	DescribeFn func(ctx context.Context, id string) (contracts.DescribeResponse, error)
 }
 
-func (f *fakeDescribeProvider) Describe(ctx context.Context, id string) (contracts.DescribeResponse, error) {
+func (f *fakeDescribeProvider) Describe(ctx context.Context, vm contracts.VMRef) (contracts.DescribeResponse, error) {
 	if f.DescribeFn != nil {
-		return f.DescribeFn(ctx, id)
+		return f.DescribeFn(ctx, vm.ID)
 	}
 	return contracts.DescribeResponse{}, nil
 }

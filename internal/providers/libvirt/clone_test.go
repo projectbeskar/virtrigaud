@@ -449,7 +449,7 @@ func TestReplaceFirst(t *testing.T) {
 // virsh is not wired, without panicking. The happy path requires a live host.
 func TestClone_NilProvider(t *testing.T) {
 	p := &Provider{}
-	_, err := p.Clone(t.Context(), contracts.CloneRequest{SourceVmID: "s", TargetName: "t"})
+	_, err := p.Clone(t.Context(), contracts.CloneRequest{Source: contracts.VMRef{ID: "s"}, TargetName: "t"})
 	require.Error(t, err)
 	assert.Contains(t, strings.ToLower(err.Error()), "not initialized")
 }
@@ -466,7 +466,7 @@ func TestClone_RequiredFields(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "source VM ID is required")
 
-	_, err = p.Clone(t.Context(), contracts.CloneRequest{SourceVmID: "s"})
+	_, err = p.Clone(t.Context(), contracts.CloneRequest{Source: contracts.VMRef{ID: "s"}})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "target name is required")
 }

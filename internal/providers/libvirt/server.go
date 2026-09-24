@@ -138,7 +138,7 @@ func createRPCError(err error) error {
 
 // Delete deletes a virtual machine
 func (s *Server) Delete(ctx context.Context, req *providerv1.DeleteRequest) (*providerv1.TaskResponse, error) {
-	taskRef, err := s.provider.Delete(ctx, req.Id)
+	taskRef, err := s.provider.Delete(ctx, contracts.VMRef{ID: req.Id, HostID: req.TargetHostId}, ownerFromProto(req.GetOwner()))
 	if err != nil {
 		return nil, fmt.Errorf("failed to delete VM: %w", err)
 	}
@@ -167,7 +167,7 @@ func (s *Server) Power(ctx context.Context, req *providerv1.PowerRequest) (*prov
 		return nil, fmt.Errorf("unsupported power operation: %v", req.Op)
 	}
 
-	taskRef, err := s.provider.Power(ctx, req.Id, powerOp)
+	taskRef, err := s.provider.Power(ctx, contracts.VMRef{ID: req.Id, HostID: req.TargetHostId}, powerOp)
 	if err != nil {
 		return nil, fmt.Errorf("failed to perform power operation: %w", err)
 	}
@@ -188,7 +188,7 @@ func (s *Server) Reconfigure(ctx context.Context, req *providerv1.ReconfigureReq
 		return nil, fmt.Errorf("failed to parse desired configuration: %w", err)
 	}
 
-	taskRef, err := s.provider.Reconfigure(ctx, req.Id, createReq)
+	taskRef, err := s.provider.Reconfigure(ctx, contracts.VMRef{ID: req.Id, HostID: req.TargetHostId}, createReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to reconfigure VM: %w", err)
 	}
@@ -207,7 +207,7 @@ func (s *Server) Describe(ctx context.Context, req *providerv1.DescribeRequest) 
 		return nil, fmt.Errorf("provider not initialized")
 	}
 
-	resp, err := s.provider.Describe(ctx, req.Id)
+	resp, err := s.provider.Describe(ctx, contracts.VMRef{ID: req.Id, HostID: req.TargetHostId})
 	if err != nil {
 		return nil, fmt.Errorf("failed to describe VM: %w", err)
 	}
@@ -261,13 +261,7 @@ func (s *Server) parseCreateRequest(req *providerv1.CreateRequest) (contracts.Cr
 	// on create, and the ONLY thing that authorizes treating an existing domain of
 	// the same name as this VM's (see bindExistingDomain). Absent from an older
 	// manager, in which case an existing domain is never bound.
-	if o := req.GetOwner(); o != nil {
-		createReq.Owner = contracts.ObjectIdentity{
-			UID:       o.GetUid(),
-			Namespace: o.GetNamespace(),
-			Name:      o.GetName(),
-		}
-	}
+	createReq.Owner = ownerFromProto(req.GetOwner())
 
 	// Parse UserData if provided
 	if len(req.UserData) > 0 {
@@ -312,6 +306,21 @@ func (s *Server) parseCreateRequest(req *providerv1.CreateRequest) (contracts.Cr
 	}
 
 	return createReq, nil
+}
+
+// ownerFromProto converts the wire ObjectIdentity (CreateRequest.owner,
+// DeleteRequest.owner) to the provider-contract form. A nil identity (an older
+// manager that sends none) yields the zero ObjectIdentity, which never
+// authorizes anything.
+func ownerFromProto(o *providerv1.ObjectIdentity) contracts.ObjectIdentity {
+	if o == nil {
+		return contracts.ObjectIdentity{}
+	}
+	return contracts.ObjectIdentity{
+		UID:       o.GetUid(),
+		Namespace: o.GetNamespace(),
+		Name:      o.GetName(),
+	}
 }
 
 // SnapshotCreate creates a VM snapshot
@@ -519,7 +528,7 @@ func (s *Server) Clone(ctx context.Context, req *providerv1.CloneRequest) (*prov
 	}
 
 	resp, err := s.provider.Clone(ctx, contracts.CloneRequest{
-		SourceVmID:    req.SourceVmId,
+		Source:        contracts.VMRef{ID: req.SourceVmId, HostID: req.SourceHostId},
 		TargetName:    req.TargetName,
 		Linked:        req.Linked,
 		ClassJSON:     req.ClassJson,
@@ -650,7 +659,7 @@ func (s *Server) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReque
 	}
 
 	resp, err := s.provider.ExportDisk(ctx, contracts.ExportDiskRequest{
-		VmId:           req.VmId,
+		VM:             contracts.VMRef{ID: req.VmId, HostID: req.TargetHostId},
 		DiskId:         req.DiskId,
 		SnapshotId:     req.SnapshotId,
 		DestinationURL: req.DestinationUrl,
@@ -684,7 +693,7 @@ func (s *Server) GetDiskInfo(ctx context.Context, req *providerv1.GetDiskInfoReq
 	}
 
 	resp, err := s.provider.GetDiskInfo(ctx, contracts.GetDiskInfoRequest{
-		VmId:       req.VmId,
+		VM:         contracts.VMRef{ID: req.VmId, HostID: req.TargetHostId},
 		DiskId:     req.DiskId,
 		SnapshotId: req.SnapshotId,
 	})

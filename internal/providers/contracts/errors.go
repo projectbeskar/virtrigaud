@@ -119,6 +119,18 @@ func IsInvalidSpec(err error) bool {
 	return errors.As(err, &pe) && pe.Type == ErrorTypeInvalidSpec
 }
 
+// IsRetryable reports whether err is, or wraps, a provider error of a
+// transient class (see ProviderError.IsRetryable). The transport client maps a
+// gRPC Unavailable or DeadlineExceeded — including a circuit-breaker
+// fast-fail — into such an error (see mapGRPCError), so a controller can tell
+// "the provider or the host it routes to is unreachable right now" apart from
+// a request the provider rejected. A plain (uncategorized) error is not
+// retryable by this definition.
+func IsRetryable(err error) bool {
+	var pe *ProviderError
+	return errors.As(err, &pe) && pe.IsRetryable()
+}
+
 // NewNotFoundError creates a not found error
 func NewNotFoundError(message string, cause error) *ProviderError {
 	return &ProviderError{

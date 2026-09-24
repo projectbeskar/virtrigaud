@@ -248,7 +248,7 @@ func TestServer_Clone_ThroughSeam(t *testing.T) {
 	assert.Equal(t, "task-1", resp.Task.Id)
 
 	// Request mapping preserved through the interface.
-	assert.Equal(t, "vm-src", fp.cloneReq.SourceVmID)
+	assert.Equal(t, "vm-src", fp.cloneReq.Source.ID)
 	assert.Equal(t, "vm-clone", fp.cloneReq.TargetName)
 	assert.True(t, fp.cloneReq.Linked)
 }

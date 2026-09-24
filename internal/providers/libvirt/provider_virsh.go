@@ -375,7 +375,8 @@ func (p *Provider) createDiskFromHostImage(ctx context.Context, vp *VirshProvide
 }
 
 // Delete removes a VM using virsh and cleans up all associated resources
-func (p *Provider) Delete(ctx context.Context, id string) (taskRef string, err error) {
+func (p *Provider) Delete(ctx context.Context, vm contracts.VMRef, owner contracts.ObjectIdentity) (taskRef string, err error) {
+	id := vm.ID
 	log.Printf("INFO Deleting VM and all associated resources: %s", id)
 
 	if p.virshProvider == nil {
@@ -593,7 +594,8 @@ func (p *Provider) cleanupOrphanedResources(ctx context.Context, domainName stri
 }
 
 // Power controls VM power state using virsh
-func (p *Provider) Power(ctx context.Context, id string, op contracts.PowerOp) (taskRef string, err error) {
+func (p *Provider) Power(ctx context.Context, vm contracts.VMRef, op contracts.PowerOp) (taskRef string, err error) {
+	id := vm.ID
 	log.Printf("INFO Power operation %s on VM: %s", op, id)
 
 	if p.virshProvider == nil {
@@ -681,7 +683,8 @@ func (p *Provider) syncPersistentXML(ctx context.Context, domainName string) err
 }
 
 // Reconfigure updates VM configuration using virsh
-func (p *Provider) Reconfigure(ctx context.Context, id string, desired contracts.CreateRequest) (taskRef string, err error) {
+func (p *Provider) Reconfigure(ctx context.Context, vm contracts.VMRef, desired contracts.CreateRequest) (taskRef string, err error) {
+	id := vm.ID
 	log.Printf("INFO Reconfiguring VM: %s", id)
 
 	if p.virshProvider == nil {
@@ -926,7 +929,8 @@ func (p *Provider) extractMemoryKB(domainInfo map[string]string) (int64, error) 
 }
 
 // Describe returns comprehensive VM information using virsh (enhanced monitoring like vSphere)
-func (p *Provider) Describe(ctx context.Context, id string) (contracts.DescribeResponse, error) {
+func (p *Provider) Describe(ctx context.Context, vm contracts.VMRef) (contracts.DescribeResponse, error) {
+	id := vm.ID
 	log.Printf("INFO Describing VM with comprehensive monitoring: %s", id)
 
 	if p.virshProvider == nil {
@@ -1673,7 +1677,8 @@ func (p *Provider) defineDomain(ctx context.Context, vp *VirshProvider, domainNa
 
 // SnapshotCreate creates a VM snapshot using virsh
 func (p *Provider) SnapshotCreate(ctx context.Context, req contracts.SnapshotCreateRequest) (contracts.SnapshotCreateResponse, error) {
-	log.Printf("INFO Creating snapshot for VM: %s", req.VmId)
+	vmID := req.VM.ID
+	log.Printf("INFO Creating snapshot for VM: %s", vmID)
 
 	if p.virshProvider == nil {
 		return contracts.SnapshotCreateResponse{}, contracts.NewRetryableError("virsh provider not initialized", nil)
@@ -1695,17 +1700,17 @@ func (p *Provider) SnapshotCreate(ctx context.Context, req contracts.SnapshotCre
 	}
 
 	// Check if domain exists and get its state
-	domainState, err := p.virshProvider.getDomainState(ctx, req.VmId)
+	domainState, err := p.virshProvider.getDomainState(ctx, vmID)
 	if err != nil {
 		return contracts.SnapshotCreateResponse{}, contracts.NewRetryableError("failed to get domain state", err)
 	}
 
-	log.Printf("INFO Domain %s is in state: %s", req.VmId, domainState)
+	log.Printf("INFO Domain %s is in state: %s", vmID, domainState)
 
 	// Build virsh snapshot-create-as command
 	args := []string{
 		"snapshot-create-as",
-		req.VmId,
+		vmID,
 		snapshotName,
 		"--description", description,
 		"--atomic", // Ensure atomic operation
@@ -1738,7 +1743,8 @@ func (p *Provider) SnapshotCreate(ctx context.Context, req contracts.SnapshotCre
 }
 
 // SnapshotDelete deletes a VM snapshot using virsh
-func (p *Provider) SnapshotDelete(ctx context.Context, vmId string, snapshotId string) (taskRef string, err error) {
+func (p *Provider) SnapshotDelete(ctx context.Context, vm contracts.VMRef, snapshotId string) (taskRef string, err error) {
+	vmId := vm.ID
 	log.Printf("INFO Deleting snapshot %s from VM: %s", snapshotId, vmId)
 
 	if p.virshProvider == nil {
@@ -1775,7 +1781,8 @@ func (p *Provider) SnapshotDelete(ctx context.Context, vmId string, snapshotId s
 }
 
 // SnapshotRevert reverts a VM to a snapshot using virsh
-func (p *Provider) SnapshotRevert(ctx context.Context, vmId string, snapshotId string) (taskRef string, err error) {
+func (p *Provider) SnapshotRevert(ctx context.Context, vm contracts.VMRef, snapshotId string) (taskRef string, err error) {
+	vmId := vm.ID
 	log.Printf("INFO Reverting VM %s to snapshot: %s", vmId, snapshotId)
 
 	if p.virshProvider == nil {
@@ -1836,7 +1843,7 @@ func (p *Provider) TaskStatus(ctx context.Context, taskRef string) (contracts.Ta
 
 // GetDiskInfo retrieves detailed information about a VM's disk
 func (p *Provider) GetDiskInfo(ctx context.Context, req contracts.GetDiskInfoRequest) (contracts.GetDiskInfoResponse, error) {
-	log.Printf("INFO Getting disk info for VM: %s", req.VmId)
+	log.Printf("INFO Getting disk info for VM: %s", req.VM.ID)
 
 	if p.virshProvider == nil {
 		return contracts.GetDiskInfoResponse{}, contracts.NewRetryableError("virsh provider not initialized", nil)
@@ -1849,7 +1856,7 @@ func (p *Provider) GetDiskInfo(ctx context.Context, req contracts.GetDiskInfoReq
 	// guess — that guess only holds for VirtRigaud-created volumes and fails for
 	// adopted/externally-created VMs (Bug G; same class as the clone #207 fix).
 	// resolvePrimaryDisk also skips cloud-init/CDROM devices.
-	diskPath, format, err := p.resolvePrimaryDisk(ctx, req.VmId, storageProvider)
+	diskPath, format, err := p.resolvePrimaryDisk(ctx, req.VM.ID, storageProvider)
 	if err != nil {
 		return contracts.GetDiskInfoResponse{}, fmt.Errorf("failed to resolve primary disk: %w", err)
 	}
@@ -1881,7 +1888,7 @@ func (p *Provider) GetDiskInfo(ctx context.Context, req contracts.GetDiskInfoReq
 	}
 
 	// Get snapshots for this domain
-	snapshots, err := p.virshProvider.listSnapshots(ctx, req.VmId)
+	snapshots, err := p.virshProvider.listSnapshots(ctx, req.VM.ID)
 	if err != nil {
 		log.Printf("WARN Failed to list snapshots: %v", err)
 		snapshots = []string{}
@@ -1909,7 +1916,7 @@ func (p *Provider) GetDiskInfo(ctx context.Context, req contracts.GetDiskInfoReq
 
 // ExportDisk exports a VM disk for migration
 func (p *Provider) ExportDisk(ctx context.Context, req contracts.ExportDiskRequest) (contracts.ExportDiskResponse, error) {
-	log.Printf("INFO Exporting disk for VM: %s to %s", req.VmId, req.DestinationURL)
+	log.Printf("INFO Exporting disk for VM: %s to %s", req.VM.ID, req.DestinationURL)
 
 	if p.virshProvider == nil {
 		return contracts.ExportDiskResponse{}, contracts.NewRetryableError("virsh provider not initialized", nil)
@@ -1917,7 +1924,7 @@ func (p *Provider) ExportDisk(ctx context.Context, req contracts.ExportDiskReque
 
 	// Get disk information first
 	diskInfo, err := p.GetDiskInfo(ctx, contracts.GetDiskInfoRequest{
-		VmId:       req.VmId,
+		VM:         req.VM,
 		DiskId:     req.DiskId,
 		SnapshotId: req.SnapshotId,
 	})
@@ -1934,7 +1941,7 @@ func (p *Provider) ExportDisk(ctx context.Context, req contracts.ExportDiskReque
 		return contracts.ExportDiskResponse{}, fmt.Errorf("unsupported export format: %s (libvirt supports qcow2, raw)", targetFormat)
 	}
 
-	exportId := fmt.Sprintf("export-%s-%d", req.VmId, time.Now().Unix())
+	exportId := fmt.Sprintf("export-%s-%d", req.VM.ID, time.Now().Unix())
 	diskPath := diskInfo.Path
 
 	// If snapshot is specified, use snapshot path

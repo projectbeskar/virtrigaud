@@ -259,18 +259,28 @@ func (r *VMCloneReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
+	// Address the source VM (ADR-0007 Addendum A, A1): on a clustered provider
+	// the clone is routed to the source's bound host. A clustered source with no
+	// confirmed binding is never sent a per-VM call — wait for it.
+	sourceRef, err := vmRefFor(sourceVM, provider)
+	if err != nil {
+		logger.Info("Source VM has no host binding; waiting before cloning", "vm", sourceKey.Name, "error", err.Error())
+		return r.markPending(ctx, clone, reasonVMUnbound, err.Error()), nil
+	}
+
 	// Issue the clone.
-	return r.startClone(ctx, clone, sourceVM, provider, providerInstance, targetNamespace, linked)
+	return r.startClone(ctx, clone, sourceRef, providerInstance, targetNamespace, sourceVM, linked)
 }
 
-// startClone issues the Clone RPC and records the resulting task / target ID.
+// startClone issues the Clone RPC for the source VM source addresses and
+// records the resulting task / target ID.
 func (r *VMCloneReconciler) startClone(
 	ctx context.Context,
 	clone *infrav1beta1.VMClone,
-	sourceVM *infrav1beta1.VirtualMachine,
-	provider *infrav1beta1.Provider,
+	source contracts.VMRef,
 	providerInstance contracts.Provider,
 	targetNamespace string,
+	sourceVM *infrav1beta1.VirtualMachine,
 	linked bool,
 ) (ctrl.Result, error) {
 	logger := logging.FromContext(ctx)
@@ -283,7 +293,7 @@ func (r *VMCloneReconciler) startClone(
 	}
 
 	req := contracts.CloneRequest{
-		SourceVmID:    sourceVM.Status.ID,
+		Source:        source,
 		TargetName:    clone.Spec.Target.Name,
 		Linked:        linked,
 		ClassJSON:     r.classJSON(ctx, clone),
@@ -419,15 +429,25 @@ func (r *VMCloneReconciler) bindTargetVM(
 	// Create) so the VirtualMachine controller adopts the already-cloned VM
 	// rather than creating a second one. Re-Get + retry on conflict because the
 	// VirtualMachine controller writes this same object concurrently.
+	//
+	// On a clustered provider the clone lands on the source's host (v1 requires
+	// source and landing host to be equal: disks are host-local), so the target's
+	// binding (status.placement.host) is written in the SAME write as Status.ID
+	// (ADR-0007 Addendum A, A1) — the target is never observable with an id but
+	// no host. A single-host source has no binding, so nothing is written.
+	landing := clonedPlacement(sourceVM)
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		latest := &infrav1beta1.VirtualMachine{}
 		if getErr := r.Get(ctx, vmKey, latest); getErr != nil {
 			return getErr
 		}
-		if latest.Status.ID == targetVMID {
+		if latest.Status.ID == targetVMID && (landing == nil || boundHost(latest) == landing.Host) {
 			return nil
 		}
 		latest.Status.ID = targetVMID
+		if landing != nil {
+			latest.Status.Placement = landing.DeepCopy()
+		}
 		return r.Status().Update(ctx, latest)
 	}); err != nil {
 		logger.Error(err, "Failed to seed Status.ID on target VM CR; will retry", "vm", vmKey.Name)
@@ -436,6 +456,23 @@ func (r *VMCloneReconciler) bindTargetVM(
 
 	logger.Info("Target VM bound to cloned VM", "vm", vmKey.Name, "vm_id", targetVMID)
 	return r.finalizeReady(ctx, clone, targetVM)
+}
+
+// clonedPlacement returns the binding a clone of sourceVM lands with: the
+// source's confirmed host and pool on a clustered provider (ADR-0007 Addendum
+// A, A1), or nil for a source without a binding (single-host / thin-client).
+func clonedPlacement(sourceVM *infrav1beta1.VirtualMachine) *infrav1beta1.PlacementStatus {
+	host := boundHost(sourceVM)
+	if host == "" {
+		return nil
+	}
+	now := metav1.Now()
+	return &infrav1beta1.PlacementStatus{
+		Host:              host,
+		Pool:              sourceVM.Status.Placement.Pool,
+		LastScheduledTime: &now,
+		Reason:            fmt.Sprintf("cloned from %s on its host", sourceVM.Name),
+	}
 }
 
 // buildTargetVM constructs the target VirtualMachine CR for a clone: it carries

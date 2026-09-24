@@ -475,7 +475,8 @@ func (c *Client) Clone(ctx context.Context, req contracts.CloneRequest) (contrac
 	defer cancel()
 
 	resp, err := c.client.Clone(ctx, &providerv1.CloneRequest{
-		SourceVmId:    req.SourceVmID,
+		SourceVmId:    req.Source.ID,
+		SourceHostId:  req.Source.HostID,
 		TargetName:    req.TargetName,
 		Linked:        req.Linked,
 		ClassJson:     req.ClassJSON,
@@ -566,17 +567,24 @@ func (c *Client) Create(ctx context.Context, req contracts.CreateRequest) (resul
 	return result, nil
 }
 
-// Delete implements contracts.Provider.
+// Delete implements contracts.Provider. It threads vm.HostID to the wire as
+// target_host_id and the requesting VirtualMachine's identity as owner
+// (ADR-0007 Addendum A, A1/A2); both are ignored by single-host and thin-client
+// providers.
 //
 // Records virtrigaud_vm_operations_total{operation="Delete",...} via
 // deferred recordVMOp using the named retErr return value (G7.1 / #124).
-func (c *Client) Delete(ctx context.Context, id string) (taskRef string, retErr error) {
+func (c *Client) Delete(ctx context.Context, vm contracts.VMRef, owner contracts.ObjectIdentity) (taskRef string, retErr error) {
 	defer c.recordVMOp(metrics.OpDelete, &retErr)
 
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
-	resp, err := c.client.Delete(ctx, &providerv1.DeleteRequest{Id: id})
+	resp, err := c.client.Delete(ctx, &providerv1.DeleteRequest{
+		Id:           vm.ID,
+		TargetHostId: vm.HostID,
+		Owner:        objectIdentityToProto(owner),
+	})
 	if err != nil {
 		return "", c.mapGRPCError("delete", err)
 	}
@@ -593,7 +601,7 @@ func (c *Client) Delete(ctx context.Context, id string) (taskRef string, retErr 
 //
 // Records virtrigaud_vm_operations_total{operation="Power",...} via
 // deferred recordVMOp using the named retErr return value (G7.1 / #124).
-func (c *Client) Power(ctx context.Context, id string, op contracts.PowerOp) (taskRef string, retErr error) {
+func (c *Client) Power(ctx context.Context, vm contracts.VMRef, op contracts.PowerOp) (taskRef string, retErr error) {
 	defer c.recordVMOp(metrics.OpPower, &retErr)
 
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
@@ -605,8 +613,9 @@ func (c *Client) Power(ctx context.Context, id string, op contracts.PowerOp) (ta
 	}
 
 	powerReq := &providerv1.PowerRequest{
-		Id: id,
-		Op: grpcOp,
+		Id:           vm.ID,
+		Op:           grpcOp,
+		TargetHostId: vm.HostID,
 	}
 
 	// Set default graceful timeout for graceful shutdown operations
@@ -632,7 +641,7 @@ func (c *Client) Power(ctx context.Context, id string, op contracts.PowerOp) (ta
 // Records virtrigaud_vm_operations_total{operation="Reconfigure",...}
 // via deferred recordVMOp using the named retErr return value (G7.1 /
 // #124).
-func (c *Client) Reconfigure(ctx context.Context, id string, desired contracts.CreateRequest) (taskRef string, retErr error) {
+func (c *Client) Reconfigure(ctx context.Context, vm contracts.VMRef, desired contracts.CreateRequest) (taskRef string, retErr error) {
 	defer c.recordVMOp(metrics.OpReconfigure, &retErr)
 
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
@@ -644,8 +653,9 @@ func (c *Client) Reconfigure(ctx context.Context, id string, desired contracts.C
 	}
 
 	resp, err := c.client.Reconfigure(ctx, &providerv1.ReconfigureRequest{
-		Id:          id,
-		DesiredJson: string(desiredJSON),
+		Id:           vm.ID,
+		DesiredJson:  string(desiredJSON),
+		TargetHostId: vm.HostID,
 	})
 	if err != nil {
 		return "", c.mapGRPCError("reconfigure", err)
@@ -663,13 +673,13 @@ func (c *Client) Reconfigure(ctx context.Context, id string, desired contracts.C
 //
 // Records virtrigaud_vm_operations_total{operation="Describe",...} via
 // deferred recordVMOp using the named retErr return value (G7.1 / #124).
-func (c *Client) Describe(ctx context.Context, id string) (result contracts.DescribeResponse, retErr error) {
+func (c *Client) Describe(ctx context.Context, vm contracts.VMRef) (result contracts.DescribeResponse, retErr error) {
 	defer c.recordVMOp(metrics.OpDescribe, &retErr)
 
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	resp, err := c.client.Describe(ctx, &providerv1.DescribeRequest{Id: id})
+	resp, err := c.client.Describe(ctx, &providerv1.DescribeRequest{Id: vm.ID, TargetHostId: vm.HostID})
 	if err != nil {
 		return contracts.DescribeResponse{}, c.mapGRPCError("describe", err)
 	}
@@ -757,10 +767,11 @@ func (c *Client) SnapshotCreate(ctx context.Context, req contracts.SnapshotCreat
 	defer cancel()
 
 	grpcReq := &providerv1.SnapshotCreateRequest{
-		VmId:          req.VmId,
+		VmId:          req.VM.ID,
 		NameHint:      req.NameHint,
 		Description:   req.Description,
 		IncludeMemory: req.IncludeMemory,
+		TargetHostId:  req.VM.HostID,
 		// Note: Quiesce not in proto yet, would need to add to provider.proto
 	}
 
@@ -784,13 +795,14 @@ func (c *Client) SnapshotCreate(ctx context.Context, req contracts.SnapshotCreat
 }
 
 // SnapshotDelete deletes a VM snapshot
-func (c *Client) SnapshotDelete(ctx context.Context, vmId string, snapshotId string) (taskRef string, err error) {
+func (c *Client) SnapshotDelete(ctx context.Context, vm contracts.VMRef, snapshotID string) (taskRef string, err error) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
 	grpcReq := &providerv1.SnapshotDeleteRequest{
-		VmId:       vmId,
-		SnapshotId: snapshotId,
+		VmId:         vm.ID,
+		SnapshotId:   snapshotID,
+		TargetHostId: vm.HostID,
 	}
 
 	resp, err := c.client.SnapshotDelete(ctx, grpcReq)
@@ -807,13 +819,14 @@ func (c *Client) SnapshotDelete(ctx context.Context, vmId string, snapshotId str
 }
 
 // SnapshotRevert reverts a VM to a snapshot
-func (c *Client) SnapshotRevert(ctx context.Context, vmId string, snapshotId string) (taskRef string, err error) {
+func (c *Client) SnapshotRevert(ctx context.Context, vm contracts.VMRef, snapshotID string) (taskRef string, err error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
 	grpcReq := &providerv1.SnapshotRevertRequest{
-		VmId:       vmId,
-		SnapshotId: snapshotId,
+		VmId:         vm.ID,
+		SnapshotId:   snapshotID,
+		TargetHostId: vm.HostID,
 	}
 
 	resp, err := c.client.SnapshotRevert(ctx, grpcReq)
@@ -835,7 +848,8 @@ func (c *Client) ExportDisk(ctx context.Context, req contracts.ExportDiskRequest
 	defer cancel()
 
 	grpcReq := &providerv1.ExportDiskRequest{
-		VmId:               req.VmId,
+		VmId:               req.VM.ID,
+		TargetHostId:       req.VM.HostID,
 		DiskId:             req.DiskId,
 		SnapshotId:         req.SnapshotId,
 		DestinationUrl:     req.DestinationURL,
@@ -910,9 +924,10 @@ func (c *Client) GetDiskInfo(ctx context.Context, req contracts.GetDiskInfoReque
 	defer cancel()
 
 	grpcReq := &providerv1.GetDiskInfoRequest{
-		VmId:       req.VmId,
-		DiskId:     req.DiskId,
-		SnapshotId: req.SnapshotId,
+		VmId:         req.VM.ID,
+		DiskId:       req.DiskId,
+		SnapshotId:   req.SnapshotId,
+		TargetHostId: req.VM.HostID,
 	}
 
 	resp, err := c.client.GetDiskInfo(ctx, grpcReq)
@@ -1112,15 +1127,24 @@ func (c *Client) convertCreateRequest(req contracts.CreateRequest) (*providerv1.
 	// by a tenant-shared name (libvirt, vSphere) stamps it on create and binds to an
 	// existing same-named VM only when the recorded owner UID matches. Omitted
 	// (nil) when no UID is known, so an unset owner is unambiguous on the wire.
-	if !req.Owner.IsZero() {
-		grpcReq.Owner = &providerv1.ObjectIdentity{
-			Uid:       req.Owner.UID,
-			Namespace: req.Owner.Namespace,
-			Name:      req.Owner.Name,
-		}
-	}
+	grpcReq.Owner = objectIdentityToProto(req.Owner)
 
 	return grpcReq, nil
+}
+
+// objectIdentityToProto converts a manager-side ObjectIdentity to the wire
+// message (CreateRequest.owner / DeleteRequest.owner). It returns nil when no
+// UID is known, so an unset owner is unambiguous on the wire: a provider never
+// sees a namespace/name without the UID that alone may authorize anything.
+func objectIdentityToProto(o contracts.ObjectIdentity) *providerv1.ObjectIdentity {
+	if o.IsZero() {
+		return nil
+	}
+	return &providerv1.ObjectIdentity{
+		Uid:       o.UID,
+		Namespace: o.Namespace,
+		Name:      o.Name,
+	}
 }
 
 // convertPowerOp converts contracts.PowerOp to gRPC format

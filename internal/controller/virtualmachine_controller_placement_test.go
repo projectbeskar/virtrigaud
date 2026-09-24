@@ -302,8 +302,10 @@ func TestCreateVM_Clustered_IgnoresPoolHostsOfOtherProvider(t *testing.T) {
 // ─── honesty-first: Create fails → no placement written ───────────────────────
 
 // TestCreateVM_Clustered_HonestyFirst_CreateErrorLeavesPlacementUnset proves
-// ADR-0007 D3: when Create fails, status.placement is NOT written (it must never
-// claim a host the provider has not accepted the VM on).
+// ADR-0007 D3: when Create fails, the binding (status.placement.host) is NOT
+// written — it must never claim a host the provider has not accepted the VM on.
+// Since Addendum A (A2) the attempted host IS recorded separately, as the
+// unconfirmed status.placement.pendingHost, so the retry lands on the same host.
 func TestCreateVM_Clustered_HonestyFirst_CreateErrorLeavesPlacementUnset(t *testing.T) {
 	const ns = "default"
 	s := coverageTestScheme(t)
@@ -323,9 +325,15 @@ func TestCreateVM_Clustered_HonestyFirst_CreateErrorLeavesPlacementUnset(t *test
 
 	require.Equal(t, 1, prov.createCalls, "scheduling succeeded, so Create must have been attempted")
 	assert.Equal(t, "host-alpha", prov.lastReq.TargetHostID, "the VM was scheduled before Create was attempted")
-	assert.Nil(t, vm.Status.Placement, "honesty-first: a failed Create must leave placement unwritten")
+	require.NotNil(t, vm.Status.Placement)
+	assert.Empty(t, vm.Status.Placement.Host, "honesty-first: a failed Create must leave the binding unwritten")
+	assert.Equal(t, "host-alpha", vm.Status.Placement.PendingHost, "A2: the attempted host stays recorded for the retry")
 	assert.Empty(t, vm.Status.ID, "no VM id on a failed create")
 	assert.Equal(t, k8s.ReasonProviderError, provisioningReason(vm))
+	placed := k8s.GetCondition(vm.Status.Conditions, k8s.ConditionPlaced)
+	require.NotNil(t, placed)
+	assert.Equal(t, metav1.ConditionFalse, placed.Status)
+	assert.Equal(t, k8s.ReasonCreatePending, placed.Reason)
 }
 
 // ─── not-schedulable / misconfigured: Create must NOT be called ───────────────

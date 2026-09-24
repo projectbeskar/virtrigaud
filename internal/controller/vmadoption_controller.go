@@ -53,6 +53,12 @@ const (
 	errReasonInvalidFilter  = "adoption-invalid-filter"
 )
 
+// clusteredAdoptionUnsupportedMessage is recorded on Provider.status.adoption
+// for a clustered provider: adoption there needs the cross-host ListVMs with a
+// per-VM host id (ADR-0007 Addendum A, A3/slice 4), so it is refused until then.
+const clusteredAdoptionUnsupportedMessage = "Adoption is not supported on a clustered (topology: cluster) provider yet: " +
+	"an adopted VM needs its host binding, which requires the cross-host VM listing (ADR-0007 Addendum A, slice 4)"
+
 const (
 	// AdoptionAnnotation is the annotation that triggers VM adoption
 	AdoptionAnnotation = "virtrigaud.io/adopt-vms"
@@ -174,6 +180,20 @@ func (r *VMAdoptionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			logger.Error(err, "Failed to update adoption status")
 		}
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	// A clustered ("brain-in-operator") provider is not adopted from yet. An
+	// adopted VM must carry its host binding (status.placement.host) or every
+	// per-VM call for it is refused as unbound (ADR-0007 Addendum A, A1), and the
+	// binding comes from VMInfo.host_id, which only the cross-host ListVMs (A3,
+	// slice 4) reports. Refuse honestly instead of creating unroutable VMs.
+	if isClusterTopology(&provider) {
+		logger.Info("Adoption is not supported on a clustered provider yet; not adopting", "provider", provider.Name)
+		provider.Status.Adoption.Message = clusteredAdoptionUnsupportedMessage
+		if err := r.Status().Update(ctx, &provider); err != nil {
+			logger.Error(err, "Failed to update adoption status")
+		}
+		return ctrl.Result{RequeueAfter: 1 * time.Hour}, nil
 	}
 
 	// Parse filter annotation if present

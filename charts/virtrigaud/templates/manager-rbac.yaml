@@ -125,16 +125,38 @@ rules:
 # provider_controller renders a clustered Provider's host set into its projected
 # host-inventory Secret; the inventory-sync host_controller reconciles each Host
 # by calling the provider's GetHostInfo. Neither writes the Host/HostPool spec
-# (the admin authors them) — only Host STATUS is written (see hosts/status below).
+# (the admin authors them) — Host STATUS is written (see hosts/status below),
+# and the host_controller's in-use finalizer is the one metadata write (below).
 - apiGroups:
   - infra.virtrigaud.io
   resources:
-  - hosts
   - hostpools
   verbs:
   - get
   - list
   - watch
+# hosts: read, plus update/patch for exactly one purpose — the host_controller
+# adds and removes its in-use finalizer (host.infra.virtrigaud.io/in-use,
+# ADR-0007 Addendum A A1), so a Host cannot be deleted while any VirtualMachine
+# is bound to it or has a create pending on it. The controller never changes a
+# Host spec. hosts/finalizers is granted for clusters that enforce
+# OwnerReferencesPermissionEnforcement.
+- apiGroups:
+  - infra.virtrigaud.io
+  resources:
+  - hosts
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - infra.virtrigaud.io
+  resources:
+  - hosts/finalizers
+  verbs:
+  - update
 # VMPlacementPolicy is the scheduler's input language (ADR-0007 P1 D4). The
 # virtualmachine_controller READS it (get;list;watch) when scheduling a VM onto a
 # clustered provider's HostPool; it never writes it (the admin authors the policy).
@@ -147,9 +169,7 @@ rules:
   - list
   - watch
 # hosts/status: the inventory-sync host_controller writes live capacity/health
-# into Host.status (ADR-0007 P1 D3). Status subresource only — never the spec,
-# and no hosts/finalizers grant (this is read-only observed-state sync, no
-# finalizer).
+# into Host.status (ADR-0007 P1 D3). Status subresource only — never the spec.
 - apiGroups:
   - infra.virtrigaud.io
   resources:
@@ -396,16 +416,38 @@ rules:
 # provider_controller renders a clustered Provider's host set into its projected
 # host-inventory Secret; the inventory-sync host_controller reconciles each Host
 # by calling the provider's GetHostInfo. Neither writes the Host/HostPool spec
-# (the admin authors them) — only Host STATUS is written (see hosts/status below).
+# (the admin authors them) — Host STATUS is written (see hosts/status below),
+# and the host_controller's in-use finalizer is the one metadata write (below).
 - apiGroups:
   - infra.virtrigaud.io
   resources:
-  - hosts
   - hostpools
   verbs:
   - get
   - list
   - watch
+# hosts: read, plus update/patch for exactly one purpose — the host_controller
+# adds and removes its in-use finalizer (host.infra.virtrigaud.io/in-use,
+# ADR-0007 Addendum A A1), so a Host cannot be deleted while any VirtualMachine
+# is bound to it or has a create pending on it. The controller never changes a
+# Host spec. hosts/finalizers is granted for clusters that enforce
+# OwnerReferencesPermissionEnforcement.
+- apiGroups:
+  - infra.virtrigaud.io
+  resources:
+  - hosts
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - infra.virtrigaud.io
+  resources:
+  - hosts/finalizers
+  verbs:
+  - update
 # VMPlacementPolicy is the scheduler's input language (ADR-0007 P1 D4). The
 # virtualmachine_controller READS it (get;list;watch) when scheduling a VM onto a
 # clustered provider's HostPool; it never writes it (the admin authors the policy).
@@ -418,9 +460,7 @@ rules:
   - list
   - watch
 # hosts/status: the inventory-sync host_controller writes live capacity/health
-# into Host.status (ADR-0007 P1 D3). Status subresource only — never the spec,
-# and no hosts/finalizers grant (this is read-only observed-state sync, no
-# finalizer).
+# into Host.status (ADR-0007 P1 D3). Status subresource only — never the spec.
 - apiGroups:
   - infra.virtrigaud.io
   resources:

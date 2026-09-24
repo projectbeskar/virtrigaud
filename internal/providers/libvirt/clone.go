@@ -58,7 +58,7 @@ var (
 	reNVRAM = regexp.MustCompile(`(?s)<nvram[^>]*>\s*(.*?)\s*</nvram>`)
 )
 
-// Clone clones the source VM identified by req.SourceVmID into a new libvirt
+// Clone clones the source VM identified by req.Source into a new libvirt
 // domain named req.TargetName. It is the libvirt implementation of the
 // provider-contract Cloner capability (issues #153/#179).
 //
@@ -80,12 +80,13 @@ var (
 // clone is left powered off; the manager controls power separately, matching
 // Create's behavior.
 func (p *Provider) Clone(ctx context.Context, req contracts.CloneRequest) (contracts.CloneResponse, error) {
-	log.Printf("INFO Cloning VM %s -> %s (linked=%t)", req.SourceVmID, req.TargetName, req.Linked)
+	sourceID := req.Source.ID
+	log.Printf("INFO Cloning VM %s -> %s (linked=%t)", sourceID, req.TargetName, req.Linked)
 
 	if p.virshProvider == nil {
 		return contracts.CloneResponse{}, contracts.NewRetryableError("virsh provider not initialized", nil)
 	}
-	if req.SourceVmID == "" {
+	if sourceID == "" {
 		return contracts.CloneResponse{}, contracts.NewInvalidSpecError("clone source VM ID is required", nil)
 	}
 	if req.TargetName == "" {
@@ -102,9 +103,9 @@ func (p *Provider) Clone(ctx context.Context, req contracts.CloneRequest) (contr
 	// 1. Resolve the source domain and reject if it does not exist. domstate
 	//    accepts either a domain name or a UUID, matching how libvirt identifies
 	//    a VM (Status.ID is the domain name for this provider).
-	if _, err := p.virshProvider.getDomainState(ctx, req.SourceVmID); err != nil {
+	if _, err := p.virshProvider.getDomainState(ctx, sourceID); err != nil {
 		return contracts.CloneResponse{}, contracts.NewNotFoundError(
-			fmt.Sprintf("source VM %q not found", req.SourceVmID), err)
+			fmt.Sprintf("source VM %q not found", sourceID), err)
 	}
 
 	// Reject a target-name collision up front rather than failing mid-define:
@@ -124,7 +125,7 @@ func (p *Provider) Clone(ctx context.Context, req contracts.CloneRequest) (contr
 	}
 
 	// 2. Resolve the source's primary disk path + format.
-	srcDiskPath, srcDiskFormat, err := p.resolvePrimaryDisk(ctx, req.SourceVmID, storageProvider)
+	srcDiskPath, srcDiskFormat, err := p.resolvePrimaryDisk(ctx, sourceID, storageProvider)
 	if err != nil {
 		return contracts.CloneResponse{}, err
 	}
@@ -152,7 +153,7 @@ func (p *Provider) Clone(ctx context.Context, req contracts.CloneRequest) (contr
 
 	// 4. Define the target domain by cloning the source XML and rewriting the
 	//    identity (name/uuid/mac) and the primary disk source path.
-	srcXML, err := p.virshProvider.runVirshCommand(ctx, "dumpxml", req.SourceVmID)
+	srcXML, err := p.virshProvider.runVirshCommand(ctx, "dumpxml", sourceID)
 	if err != nil {
 		return contracts.CloneResponse{}, contracts.NewRetryableError("failed to dump source domain XML", err)
 	}
@@ -194,7 +195,7 @@ func (p *Provider) Clone(ctx context.Context, req contracts.CloneRequest) (contr
 		return contracts.CloneResponse{}, fmt.Errorf("define target domain: %w", err)
 	}
 
-	log.Printf("INFO Successfully cloned VM %s -> %s (linked=%t)", req.SourceVmID, req.TargetName, req.Linked)
+	log.Printf("INFO Successfully cloned VM %s -> %s (linked=%t)", sourceID, req.TargetName, req.Linked)
 
 	// virsh define is synchronous; no TaskRef. The clone is left powered off.
 	return contracts.CloneResponse{

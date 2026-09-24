@@ -40,7 +40,7 @@ type powerSpyProvider struct {
 	powerOps   []contracts.PowerOp
 }
 
-func (p *powerSpyProvider) Describe(_ context.Context, _ string) (contracts.DescribeResponse, error) {
+func (p *powerSpyProvider) Describe(_ context.Context, _ contracts.VMRef) (contracts.DescribeResponse, error) {
 	state := string(contracts.PowerStateOn)
 	if p.poweredOff.Load() {
 		state = string(contracts.PowerStateOff)
@@ -48,7 +48,7 @@ func (p *powerSpyProvider) Describe(_ context.Context, _ string) (contracts.Desc
 	return contracts.DescribeResponse{Exists: true, PowerState: state}, nil
 }
 
-func (p *powerSpyProvider) Power(_ context.Context, _ string, op contracts.PowerOp) (string, error) {
+func (p *powerSpyProvider) Power(_ context.Context, _ contracts.VMRef, op contracts.PowerOp) (string, error) {
 	p.mu.Lock()
 	p.powerOps = append(p.powerOps, op)
 	p.mu.Unlock()

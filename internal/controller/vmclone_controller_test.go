@@ -190,7 +190,8 @@ func TestVMClone_HappyPath(t *testing.T) {
 	// The Clone RPC was called with the source VM's provider ID + target name.
 	require.Equal(t, 1, cp.cloneCnt)
 	require.NotNil(t, cp.lastClone)
-	assert.Equal(t, "vm-source-123", cp.lastClone.SourceVmID)
+	assert.Equal(t, "vm-source-123", cp.lastClone.Source.ID)
+	assert.Empty(t, cp.lastClone.Source.HostID, "a single-host source is never sent a host")
 	assert.Equal(t, "clone-target", cp.lastClone.TargetName)
 	assert.False(t, cp.lastClone.Linked)
 

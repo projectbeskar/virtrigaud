@@ -51,7 +51,6 @@ rules:
   - infra.virtrigaud.io
   resources:
   - hostpools
-  - hosts
   - vmimages
   - vmnetworkattachments
   - vmplacementpolicies
@@ -60,6 +59,28 @@ rules:
   - get
   - list
   - watch
+- apiGroups:
+  - infra.virtrigaud.io
+  resources:
+  - hosts
+  - vmclones
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - infra.virtrigaud.io
+  resources:
+  - hosts/finalizers
+  - providers/finalizers
+  - virtualmachines/finalizers
+  - vmclones/finalizers
+  - vmmigrations/finalizers
+  - vmsnapshots/finalizers
+  verbs:
+  - update
 - apiGroups:
   - infra.virtrigaud.io
   resources:
@@ -93,29 +114,9 @@ rules:
 - apiGroups:
   - infra.virtrigaud.io
   resources:
-  - providers/finalizers
-  - virtualmachines/finalizers
-  - vmclones/finalizers
-  - vmmigrations/finalizers
-  - vmsnapshots/finalizers
-  verbs:
-  - update
-- apiGroups:
-  - infra.virtrigaud.io
-  resources:
   - vmclasses
   verbs:
   - create
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - infra.virtrigaud.io
-  resources:
-  - vmclones
-  verbs:
   - get
   - list
   - patch
