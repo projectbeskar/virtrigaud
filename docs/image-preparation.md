@@ -92,16 +92,32 @@ will use it (in clustered mode, the VM's scheduled target host) before touching 
    dotfiles are refused.
 5. **Regular, non-empty file** — never a device, directory, FIFO or socket.
 6. **Not in use**: the file must not be a disk, backing file, or shared directory of
-   **any** domain defined on the host (VirtRigaud-managed or not).
+   **any** domain defined on the host (VirtRigaud-managed or not). Each disk's backing
+   chain is read from the images themselves (`qemu-img info -U --backing-chain`), so the
+   base images of shut-off VMs count too. If the check cannot complete (a domain
+   definition, a volume path or a backing chain cannot be read), the create fails
+   closed with a generic, retryable error; the detail is only in the provider log.
 7. **Self-contained**: `qemu-img info` must show no backing file, no external data file,
    and no VMDK extent outside the file; accepted formats are qcow2, raw, vmdk, vpc, vhdx
    and vdi. Downloaded (`url`) images get the same header check before conversion.
 
 A base image is always **copied** into the VM's own `<vm>-disk.qcow2`; it is never
 attached in place, so VMs never share a disk and deleting a VM never deletes the image.
-The only disk attached in place is a migration's landing disk: `spec.importedDisk` whose
-path resolves to `<vm name>-migrated.qcow2` directly in the `default` pool directory and
-is not used by any domain.
+The only disk attached in place is a migration's landing disk, and only when the manager
+can prove it: `spec.importedDisk.migrationRef` must name a `VMMigration` in the VM's own
+namespace that targets this VM (name and namespace) and whose `status.diskInfo.targetPath`
+equals the disk path. The provider additionally requires the file to be
+`<vm name>-migrated.qcow2` directly in the `default` pool directory and unused by any
+domain. Any other `spec.importedDisk` is treated as a base image (confined, then copied or
+refused). Migrated disks landed by ImportDisk get the same header check before conversion.
+
+> **Upgrade warning — legacy shared disks.** Before this change a path or prepared image
+> in the pool directory was attached in place, so several VMs created from the same image
+> may **share one disk file**, and deleting any of them deletes that file for all of
+> them. Before deleting a VM created by an earlier release, compare
+> `virsh domblklist --details <domain>` across domains and look for duplicate sources.
+> A prepared image that was attached this way is refused as a template (it is a live VM
+> disk); create a `VMImage` under a new name to prepare a fresh copy.
 
 A rejected path is a non-retryable `InvalidArgument`: the VM gets
 `Provisioning=False` with reason `ValidationError` (rechecked every 2 minutes rather than

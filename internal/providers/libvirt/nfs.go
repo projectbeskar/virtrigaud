@@ -135,6 +135,13 @@ func (s *Server) importDiskFromNFS(ctx context.Context, req *providerv1.ImportDi
 	log.Printf("INFO Importing disk from NFS to libvirt host: backend=nfs pool=%s volume=%s src=%s target=%s",
 		poolName, volumeName, nfsURL, targetPath)
 
+	// SECURITY: refuse a staged object whose qcow2 header references another
+	// file (backing file, data file): the convert would flatten that host file
+	// into <vm>-migrated.qcow2. Read it as qcow2, as the convert does.
+	if _, err := inspectHostImageAs(ctx, hostConnRunner{conn: conn}, importedImageSubject, nfsURL, "qcow2"); err != nil {
+		return nil, fmt.Errorf("inspect staged nfs object: %w", err)
+	}
+
 	// Read the staged qcow2 straight from NFS and write the pool volume.
 	// Raw values: RunHost shell-quotes every argv element itself.
 	if res, err := conn.RunHost(ctx, "qemu-img", "convert", "-f", "qcow2", "-O", "qcow2",

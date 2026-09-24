@@ -561,6 +561,15 @@ func (s *StorageProvider) CreateVolumeFromImageFile(ctx context.Context, sourceI
 
 	log.Printf("INFO Source image verified: %s", sourceImagePath)
 
+	// SECURITY: the imported bytes come from elsewhere (a migration's staged
+	// export). Read the header as qcow2 — exactly how both the convert below
+	// and a later in-place attach read it — and refuse a backing file, external
+	// data file or foreign extent, which would otherwise be flattened into (or
+	// opened live by) <vm>-migrated.qcow2.
+	if _, err := inspectHostImageAs(ctx, s.virshProvider, importedImageSubject, sourceImagePath, "qcow2"); err != nil {
+		return nil, fmt.Errorf("inspect imported disk: %w", err)
+	}
+
 	// IMPORTANT: Check if source is already in the pool directory and has the correct format
 	// This happens with imported disks from migrations - they're already in place
 	if filepath.Dir(sourceImagePath) == poolInfo.Path && strings.HasSuffix(sourceImagePath, qcow2Ext) {

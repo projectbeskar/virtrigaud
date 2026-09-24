@@ -159,26 +159,75 @@ func TestEnsureImageOnProvider_RejectionDoesNotMaskReadyElsewhere(t *testing.T) 
 	assert.Contains(t, got.Status.ProviderStatus[provider.Name].Message, "rejected")
 }
 
-// TestBuildCreateRequest_ImportedDiskFlag proves only spec.importedDisk marks
-// the image as an imported disk (the provider's only attach-in-place case);
-// a VMImage libvirt path never does.
+// importedDiskPath is the landing disk of the VMMigration fixtures below.
+const importedDiskPath = "/var/lib/libvirt/images/web-migrated.qcow2"
+
+// landingMigration returns a VMMigration in ns whose spec targets VM "web" and
+// whose (tenant-unwritable) status records importedDiskPath as the imported disk.
+func landingMigration(name, ns string) *infravirtrigaudiov1beta1.VMMigration {
+	return &infravirtrigaudiov1beta1.VMMigration{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec: infravirtrigaudiov1beta1.VMMigrationSpec{
+			Target: infravirtrigaudiov1beta1.MigrationTarget{Name: "web"},
+		},
+		Status: infravirtrigaudiov1beta1.VMMigrationStatus{
+			ImportID: "web" + contracts.ImportedDiskNameSuffix,
+			DiskInfo: &infravirtrigaudiov1beta1.MigrationDiskInfo{TargetPath: importedDiskPath},
+		},
+	}
+}
+
+// TestBuildCreateRequest_ImportedDiskFlag proves ImportedDisk (the provider's
+// only attach-in-place case) is set ONLY for a disk a VMMigration in the VM's
+// own namespace verifiably imported for this VM — spec.importedDisk alone,
+// which any tenant can write, is not enough.
 func TestBuildCreateRequest_ImportedDiskFlag(t *testing.T) {
-	s := coverageTestScheme(t)
-	r := newTestReconciler(s, nil)
 	vmClass := &infravirtrigaudiov1beta1.VMClass{
 		Spec: infravirtrigaudiov1beta1.VMClassSpec{CPU: 1, Memory: resource.MustParse("1Gi")},
 	}
-
-	imported := baseVM("default")
-	imported.Name = "web"
-	imported.Spec.ImportedDisk = &infravirtrigaudiov1beta1.ImportedDiskRef{
-		DiskID: "web" + contracts.ImportedDiskNameSuffix,
-		Path:   "/var/lib/libvirt/images/web-migrated.qcow2",
+	vmFor := func(name, ns, migration, path string) *infravirtrigaudiov1beta1.VirtualMachine {
+		vm := baseVM(ns)
+		vm.Name = name
+		vm.Spec.ImportedDisk = &infravirtrigaudiov1beta1.ImportedDiskRef{
+			DiskID: "web" + contracts.ImportedDiskNameSuffix,
+			Path:   path,
+			Source: "migration",
+		}
+		if migration != "" {
+			vm.Spec.ImportedDisk.MigrationRef = &infravirtrigaudiov1beta1.LocalObjectReference{Name: migration}
+		}
+		return vm
 	}
-	req, err := r.buildCreateRequest(context.Background(), imported, "", vmClass, nil, nil)
-	require.NoError(t, err)
-	assert.True(t, req.Image.ImportedDisk)
-	assert.Equal(t, "/var/lib/libvirt/images/web-migrated.qcow2", req.Image.Path)
+	crossNS := landingMigration("m-cross", "ns-a")
+	crossNS.Spec.Target.Namespace = "ns-b" // targets ns-b/web, but lives in ns-a
+	otherTargetNS := landingMigration("m-other-target", "ns-b")
+	otherTargetNS.Spec.Target.Namespace = "ns-c"
+	noDiskInfo := landingMigration("m-no-diskinfo", "ns-a")
+	noDiskInfo.Status.DiskInfo = nil
+
+	cases := map[string]struct {
+		vm   *infravirtrigaudiov1beta1.VirtualMachine
+		want bool
+	}{
+		"own migration, same namespace, matching path and name": {vmFor("web", "ns-a", "m1", importedDiskPath), true},
+		"migrationRef missing":                           {vmFor("web", "ns-a", "", importedDiskPath), false},
+		"migration only exists in another namespace":     {vmFor("web", "ns-b", "m1", importedDiskPath), false},
+		"migration in another namespace targets this VM": {vmFor("web", "ns-b", "m-cross", importedDiskPath), false},
+		"migration targets another namespace":            {vmFor("web", "ns-b", "m-other-target", importedDiskPath), false},
+		"mismatched path":                                {vmFor("web", "ns-a", "m1", "/var/lib/libvirt/images/victim-disk.qcow2"), false},
+		"mismatched VM name":                             {vmFor("attacker", "ns-a", "m1", importedDiskPath), false},
+		"migration has no recorded disk":                 {vmFor("web", "ns-a", "m-no-diskinfo", importedDiskPath), false},
+		"migration does not exist":                       {vmFor("web", "ns-a", "nope", importedDiskPath), false},
+	}
+	s := coverageTestScheme(t)
+	r := newTestReconciler(s, nil,
+		landingMigration("m1", "ns-a"), crossNS, otherTargetNS, noDiskInfo, landingMigration("m1-b", "ns-b"))
+	for name, tc := range cases {
+		req, err := r.buildCreateRequest(context.Background(), tc.vm, "", vmClass, nil, nil)
+		require.NoError(t, err, name)
+		assert.Equal(t, tc.want, req.Image.ImportedDisk, name)
+		assert.Equal(t, tc.vm.Spec.ImportedDisk.Path, req.Image.Path, name)
+	}
 
 	fromImage := baseVM("default")
 	fromImage.Spec.ImageRef = &infravirtrigaudiov1beta1.ObjectRef{Name: "img"}
@@ -188,7 +237,7 @@ func TestBuildCreateRequest_ImportedDiskFlag(t *testing.T) {
 			Libvirt: &infravirtrigaudiov1beta1.LibvirtImageSource{Path: "/var/lib/libvirt/images/web-migrated.qcow2"},
 		}},
 	}
-	req, err = r.buildCreateRequest(context.Background(), fromImage, "", vmClass, vmImage, nil)
+	req, err := r.buildCreateRequest(context.Background(), fromImage, "", vmClass, vmImage, nil)
 	require.NoError(t, err)
 	assert.False(t, req.Image.ImportedDisk, "a VMImage path is a base image, never an imported disk")
 }

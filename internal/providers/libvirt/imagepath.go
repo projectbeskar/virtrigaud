@@ -35,6 +35,7 @@ import (
 
 	v1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
+	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt/hostconn"
 	sdkerrors "github.com/projectbeskar/virtrigaud/sdk/provider/errors"
 )
 
@@ -65,7 +66,9 @@ import (
 //     staging/temporary files, or cloud-init seeds.
 //  5. It must be a regular, non-empty file (not a device, FIFO, directory).
 //  6. It must not be a disk (or backing file, or shared directory) of ANY domain
-//     defined on the host — VirtRigaud's or anyone else's (shared hosts).
+//     defined on the host — VirtRigaud's or anyone else's (shared hosts). Each
+//     disk's backing chain is read with `qemu-img info -U`, because dumpxml
+//     omits <backingStore> for shut-off domains.
 //  7. Its header must not reference other files: no qcow2 backing file or
 //     external data file, no VMDK extent outside itself. `qemu-img convert`
 //     would otherwise read (and flatten) those files, re-opening the escape.
@@ -78,7 +81,9 @@ import (
 //
 // Rejections are sdk InvalidSpec errors (gRPC InvalidArgument, non-retryable),
 // so the manager records a ValidationError condition and backs off instead of
-// hot-retrying. Messages carry the caller's own path only — never the
+// hot-retrying. Host-side failures of the checks themselves are a generic
+// retryable error; their detail (command lines naming other domains' disks and
+// the allowed directories) is logged provider-side only (hostCheckFailed). Messages carry the caller's own path only — never the
 // canonical target of a symlink, the allowed directories, or another VM's name
 // — and host-side "does not exist" is reported only for paths inside an
 // allowed directory, so the check is not an existence oracle for arbitrary host
@@ -220,6 +225,10 @@ func imagePathSubject(path string) string {
 // downloadedImageSubject names a host-side download in a rejection message.
 // The URL is deliberately not echoed (it may embed credentials).
 const downloadedImageSubject = "downloaded image"
+
+// importedImageSubject names a migration import's staged disk in a rejection
+// message (the source URL is not echoed).
+const importedImageSubject = "imported disk"
 
 // newImagePathError is newImageRejection for a caller-supplied image path.
 func newImagePathError(path, reason string) error {
@@ -375,14 +384,35 @@ func canonicalizeOnHost(ctx context.Context, h hostCommandRunner, paths []string
 	}
 	res, err := runHost(ctx, h, append([]string{"realpath", "-m", "-z", "--"}, paths...)...)
 	if err != nil {
-		return nil, contracts.NewRetryableError("canonicalize paths on the libvirt host", err)
+		return nil, hostCheckFailed("canonicalize paths", err)
 	}
 	out := splitNULList(res.Stdout)
 	if len(out) != len(paths) {
-		return nil, contracts.NewRetryableError(
-			fmt.Sprintf("canonicalize paths on the libvirt host: got %d results for %d paths", len(out), len(paths)), nil)
+		return nil, hostCheckFailed("canonicalize paths",
+			fmt.Errorf("got %d results for %d paths", len(out), len(paths)))
 	}
 	return out, nil
+}
+
+// inUseRejectionReason explains why a path that some domain uses is refused,
+// with the one remedy that applies to an image an earlier release attached in
+// place: prepare it again under a new VMImage name.
+const inUseRejectionReason = "it is a disk (or backing file) of an existing VM on the host and cannot be used as " +
+	"an image; if it is a prepared image that an earlier release attached in place as a VM disk, create a " +
+	"VMImage with a new name to prepare a fresh copy"
+
+// hostCheckFailedMessage is the ONLY text a failed host-side check exposes to
+// the caller. The underlying error carries the full host command line — every
+// domain's disk paths, the allowed directories, other domains' UUIDs — and
+// would otherwise travel through gRPC into a tenant-visible VM condition.
+const hostCheckFailedMessage = "could not verify the image on the libvirt host " +
+	"(transient host error; details are in the provider log)"
+
+// hostCheckFailed logs a host-side check failure in full, provider-side only,
+// and returns a generic retryable error that carries none of it.
+func hostCheckFailed(what string, err error) error {
+	log.Printf("ERROR libvirt image confinement: %s: %v", what, err)
+	return contracts.NewRetryableError(hostCheckFailedMessage, nil)
 }
 
 // confine applies the full image-path confinement (see the file comment) to req
@@ -432,7 +462,7 @@ func (pol imagePathPolicy) confine(ctx context.Context, h hostCommandRunner, req
 	res, err := runHost(ctx, h, "realpath", "-e", "-z", "--", req.Path)
 	if err != nil {
 		if res == nil || res.ExitCode != realpathMissingExitCode {
-			return confinedImage{}, contracts.NewRetryableError("resolve image path on the libvirt host", err)
+			return confinedImage{}, hostCheckFailed("resolve image path", err)
 		}
 		lexParent := filepath.Dir(filepath.Clean(req.Path))
 		if allowed[lexParent] || containsString(pol.dirs, lexParent) || (poolDir != "" && lexParent == poolDir) {
@@ -442,7 +472,7 @@ func (pol imagePathPolicy) confine(ctx context.Context, h hostCommandRunner, req
 	}
 	resolved := splitNULList(res.Stdout)
 	if len(resolved) != 1 {
-		return confinedImage{}, contracts.NewRetryableError("resolve image path on the libvirt host: unexpected realpath output", nil)
+		return confinedImage{}, hostCheckFailed("resolve image path", errors.New("unexpected realpath output"))
 	}
 	canonical := resolved[0]
 	if validateImagePathSyntax(canonical) != nil {
@@ -476,8 +506,7 @@ func (pol imagePathPolicy) confine(ctx context.Context, h hostCommandRunner, req
 	}
 	if inUse.contains(canonical) {
 		log.Printf("WARN rejected libvirt image path %q: it is in use by a domain on the host", req.Path)
-		return confinedImage{}, newImagePathError(req.Path,
-			"it is a disk (or backing file) of an existing VM on the host and cannot be used as an image")
+		return confinedImage{}, newImagePathError(req.Path, inUseRejectionReason)
 	}
 	format, err := inspectHostImage(ctx, h, imagePathSubject(req.Path), canonical)
 	if err != nil {
@@ -502,7 +531,7 @@ func containsString(list []string, s string) bool {
 func checkRegularFile(ctx context.Context, h hostCommandRunner, displayPath, canonical string) error {
 	res, err := runHost(ctx, h, "stat", "-c", "%F", "--", canonical)
 	if err != nil {
-		return contracts.NewRetryableError("stat image on the libvirt host", err)
+		return hostCheckFailed("stat image", err)
 	}
 	if kind := strings.TrimSpace(res.Stdout); kind != statRegularFile {
 		return newImagePathError(displayPath, fmt.Sprintf("it is not a non-empty regular file (found: %s)", kind))
@@ -511,8 +540,9 @@ func checkRegularFile(ctx context.Context, h hostCommandRunner, displayPath, can
 }
 
 // qemuImgInfo is the subset of `qemu-img info --output=json` checkImageHeader
-// needs to find references to other files.
+// and the backing-chain walk need to find references to other files.
 type qemuImgInfo struct {
+	Filename            string `json:"filename"`
 	Format              string `json:"format"`
 	BackingFilename     string `json:"backing-filename"`
 	FullBackingFilename string `json:"full-backing-filename"`
@@ -526,21 +556,54 @@ type qemuImgInfo struct {
 	} `json:"format-specific"`
 }
 
+// referencedFiles returns every host file this image consists of or points at:
+// itself, its backing file, a qcow2 external data file, and VMDK extents.
+func (i qemuImgInfo) referencedFiles() []string {
+	refs := make([]string, 0, 4)
+	for _, f := range []string{i.Filename, i.FullBackingFilename, i.BackingFilename} {
+		if strings.HasPrefix(f, "/") {
+			refs = append(refs, f)
+		}
+	}
+	if i.FormatSpecific != nil {
+		if strings.HasPrefix(i.FormatSpecific.Data.DataFile, "/") {
+			refs = append(refs, i.FormatSpecific.Data.DataFile)
+		}
+		for _, e := range i.FormatSpecific.Data.Extents {
+			if strings.HasPrefix(e.Filename, "/") {
+				refs = append(refs, e.Filename)
+			}
+		}
+	}
+	return refs
+}
+
 // inspectHostImage runs `qemu-img info --output=json` on path (canonical, or a
 // VirtRigaud-chosen staging file) on the host and applies checkImageHeader. It
 // returns the probed format. subject names the image in rejection messages
-// (imagePathSubject or downloadedImageSubject).
+// (imagePathSubject, downloadedImageSubject or importedImageSubject).
 func inspectHostImage(ctx context.Context, h hostCommandRunner, subject, path string) (string, error) {
-	res, err := runHost(ctx, h, "qemu-img", "info", "--output=json", "--", path)
+	return inspectHostImageAs(ctx, h, subject, path, "")
+}
+
+// inspectHostImageAs is inspectHostImage with the format pinned (`qemu-img info
+// -f format`) — for callers whose convert forces a source format, so the
+// header is read exactly as the convert will read it. An empty format probes.
+func inspectHostImageAs(ctx context.Context, h hostCommandRunner, subject, path, format string) (string, error) {
+	argv := []string{"qemu-img", "info", "--output=json"}
+	if format != "" {
+		argv = append(argv, "-f", format)
+	}
+	res, err := runHost(ctx, h, append(argv, "--", path)...)
 	if err != nil {
 		if res != nil && res.ExitCode == qemuImgFailureExitCode {
 			return "", newImageRejection(subject, "qemu-img cannot read it as a disk image")
 		}
-		return "", contracts.NewRetryableError("inspect image on the libvirt host", err)
+		return "", hostCheckFailed("inspect image", err)
 	}
 	var info qemuImgInfo
 	if err := json.Unmarshal([]byte(res.Stdout), &info); err != nil {
-		return "", contracts.NewRetryableError("parse qemu-img info output", err)
+		return "", hostCheckFailed("parse qemu-img info output", err)
 	}
 	if reason := checkImageHeader(info, path); reason != "" {
 		return "", newImageRejection(subject, reason)
@@ -600,6 +663,7 @@ func (s inUseSet) contains(canonical string) bool {
 type domainPathRefs struct {
 	files   []string
 	dirs    []string
+	disks   []string    // file/dev sources inside <disk> (subject to the backing-chain walk)
 	volumes [][2]string // {pool, volume} of type='volume' disks
 }
 
@@ -609,12 +673,15 @@ var pathTextElements = map[string]bool{"nvram": true, "kernel": true, "initrd": 
 // parseDomainPathRefs extracts every host path a domain XML references:
 // <source file|dev|path=...> anywhere (disks, backing stores, char devices),
 // <source dir=...> (filesystem passthrough), <source pool= volume=> (volume
-// disks, resolved later), and the text of firmware/kernel elements. Over-
-// inclusion is harmless: it can only make the in-use check stricter.
+// disks, resolved later), and the text of firmware/kernel elements. Sources
+// inside a <disk> are additionally returned as disks, whose backing chains the
+// caller walks (never char devices or sockets, which qemu-img must not open).
+// Over-inclusion is harmless: it can only make the in-use check stricter.
 func parseDomainPathRefs(domainXML string) (domainPathRefs, error) {
 	var refs domainPathRefs
 	dec := xml.NewDecoder(strings.NewReader(domainXML))
 	capture := false
+	diskDepth := 0
 	for {
 		tok, err := dec.Token()
 		if errors.Is(err, io.EOF) {
@@ -626,6 +693,9 @@ func parseDomainPathRefs(domainXML string) (domainPathRefs, error) {
 		switch t := tok.(type) {
 		case xml.StartElement:
 			capture = pathTextElements[t.Name.Local]
+			if t.Name.Local == "disk" {
+				diskDepth++
+			}
 			if t.Name.Local != "source" {
 				continue
 			}
@@ -635,6 +705,9 @@ func parseDomainPathRefs(domainXML string) (domainPathRefs, error) {
 				case "file", "dev", "path":
 					if a.Value != "" {
 						refs.files = append(refs.files, a.Value)
+						if diskDepth > 0 && a.Name.Local != "path" {
+							refs.disks = append(refs.disks, a.Value)
+						}
 					}
 				case "dir":
 					if a.Value != "" {
@@ -657,52 +730,162 @@ func parseDomainPathRefs(domainXML string) (domainPathRefs, error) {
 			}
 		case xml.EndElement:
 			capture = false
+			if t.Name.Local == "disk" && diskDepth > 0 {
+				diskDepth--
+			}
 		}
 	}
 }
 
-// diskSourcesInUse collects, on the host behind h, every path referenced by any
-// defined domain (running or not), canonicalized. It fails closed: if the
-// domain list or any definition cannot be read, the caller gets a retryable
-// error rather than an incomplete set.
-func diskSourcesInUse(ctx context.Context, h hostCommandRunner) (inUseSet, error) {
+// listDomainUUIDs returns the UUIDs of every domain defined on the host
+// (running or not). Any unexpected output fails the check.
+func listDomainUUIDs(ctx context.Context, h hostCommandRunner) ([]string, error) {
 	res, err := h.runVirshCommand(ctx, "list", "--all", "--uuid")
 	if err != nil {
-		return inUseSet{}, contracts.NewRetryableError("list domains to check image usage", err)
+		return nil, hostCheckFailed("list domains", err)
 	}
-	var files, dirs []string
+	var uuids []string
 	for _, line := range strings.Split(res.Stdout, "\n") {
 		uuid := strings.TrimSpace(line)
 		if uuid == "" {
 			continue
 		}
 		if !domainUUIDRE.MatchString(uuid) {
-			return inUseSet{}, contracts.NewRetryableError(
-				fmt.Sprintf("list domains to check image usage: unexpected output line %q", uuid), nil)
+			return nil, hostCheckFailed("list domains", fmt.Errorf("unexpected output line %q", uuid))
 		}
+		uuids = append(uuids, uuid)
+	}
+	return uuids, nil
+}
+
+// maxBackingChainDepth bounds the one-level-at-a-time backing-chain walk.
+const maxBackingChainDepth = 16
+
+// qemuImgMissingFile is the qemu-img error text for a file that does not exist.
+const qemuImgMissingFile = "No such file or directory"
+
+// backingChainFiles returns every host file in disk's image chain: the disk,
+// each backing file, qcow2 data files and VMDK extents. It is needed because
+// `virsh dumpxml` omits <backingStore> for a shut-off domain, so a stopped VM's
+// base images would otherwise look unused. It reads with `qemu-img info -U`
+// (force-share: a read-only inspection that must work on running VMs' images;
+// conversions never use -U).
+//
+// It asks for the whole chain at once (--backing-chain). If some link cannot
+// be opened — typically a deleted file — it walks the chain one level at a
+// time instead, so every image that still exists is recorded. A disk that does
+// not exist contributes nothing; any other failure fails the check (closed).
+func backingChainFiles(ctx context.Context, h hostCommandRunner, disk string) ([]string, error) {
+	res, err := runHost(ctx, h, "qemu-img", "info", "-U", "--backing-chain", "--output=json", "--", disk)
+	if err == nil {
+		var chain []qemuImgInfo
+		if jerr := json.Unmarshal([]byte(res.Stdout), &chain); jerr != nil {
+			return nil, hostCheckFailed("parse backing chain", jerr)
+		}
+		var refs []string
+		for _, link := range chain {
+			refs = append(refs, link.referencedFiles()...)
+		}
+		return refs, nil
+	}
+	if res == nil || res.ExitCode != qemuImgFailureExitCode {
+		return nil, hostCheckFailed("read backing chain", err)
+	}
+
+	var refs []string
+	cur := disk
+	for depth := 0; depth < maxBackingChainDepth && cur != ""; depth++ {
+		lres, lerr := runHost(ctx, h, "qemu-img", "info", "-U", "--output=json", "--", cur)
+		if lerr != nil {
+			if lres != nil && lres.ExitCode == qemuImgFailureExitCode && strings.Contains(lres.Stderr, qemuImgMissingFile) {
+				return refs, nil // the chain ends at a file that no longer exists
+			}
+			return nil, hostCheckFailed("read backing chain", lerr)
+		}
+		var info qemuImgInfo
+		if jerr := json.Unmarshal([]byte(lres.Stdout), &info); jerr != nil {
+			return nil, hostCheckFailed("parse backing chain", jerr)
+		}
+		refs = append(refs, cur)
+		refs = append(refs, info.referencedFiles()...)
+		next := info.FullBackingFilename
+		if !strings.HasPrefix(next, "/") {
+			break // no backing file, or a protocol/json: backing (recorded, not walkable)
+		}
+		cur = next
+	}
+	return refs, nil
+}
+
+// domainGone reports whether uuid is no longer defined on the host — i.e. it
+// was undefined between the list and the dumpxml, which is not a failure.
+func domainGone(ctx context.Context, h hostCommandRunner, uuid string) (bool, error) {
+	uuids, err := listDomainUUIDs(ctx, h)
+	if err != nil {
+		return false, err
+	}
+	return !containsString(uuids, uuid), nil
+}
+
+// diskSourcesInUse collects, on the host behind h, every path referenced by any
+// defined domain (running or not) — including each disk's full backing chain —
+// canonicalized. It fails closed: if a definition that still exists, a volume
+// path, or a backing chain cannot be read, the caller gets a (generic)
+// retryable error rather than an incomplete set. A domain undefined between the
+// list and the dumpxml is skipped.
+func diskSourcesInUse(ctx context.Context, h hostCommandRunner) (inUseSet, error) {
+	uuids, err := listDomainUUIDs(ctx, h)
+	if err != nil {
+		return inUseSet{}, err
+	}
+	var files, dirs, disks []string
+	for _, uuid := range uuids {
 		xmlRes, err := h.runVirshCommand(ctx, "dumpxml", uuid)
 		if err != nil {
-			return inUseSet{}, contracts.NewRetryableError(
-				fmt.Sprintf("read definition of domain %s to check image usage", uuid), err)
+			gone, gerr := domainGone(ctx, h, uuid)
+			if gerr != nil {
+				return inUseSet{}, gerr
+			}
+			if gone {
+				log.Printf("INFO domain %s was undefined during the image in-use check; skipping it", uuid)
+				continue
+			}
+			return inUseSet{}, hostCheckFailed(fmt.Sprintf("read definition of domain %s", uuid), err)
 		}
 		refs, err := parseDomainPathRefs(xmlRes.Stdout)
 		if err != nil {
-			return inUseSet{}, contracts.NewRetryableError(
-				fmt.Sprintf("read definition of domain %s to check image usage", uuid), err)
+			return inUseSet{}, hostCheckFailed(fmt.Sprintf("parse definition of domain %s", uuid), err)
 		}
 		files = append(files, refs.files...)
 		dirs = append(dirs, refs.dirs...)
+		disks = append(disks, refs.disks...)
 		for _, pv := range refs.volumes {
 			volRes, verr := h.runVirshCommand(ctx, "vol-path", "--pool", pv[0], "--vol", pv[1])
 			if verr != nil {
-				// An unresolvable volume (inactive pool) has no reachable path.
-				log.Printf("WARN cannot resolve volume %q in pool %q of domain %s: %v", pv[1], pv[0], uuid, verr)
-				continue
+				return inUseSet{}, hostCheckFailed(
+					fmt.Sprintf("resolve volume %q in pool %q of domain %s", pv[1], pv[0], uuid), verr)
 			}
-			if p := strings.TrimSpace(volRes.Stdout); p != "" {
-				files = append(files, p)
+			p := strings.TrimSpace(volRes.Stdout)
+			if p == "" {
+				return inUseSet{}, hostCheckFailed(
+					fmt.Sprintf("resolve volume %q in pool %q of domain %s", pv[1], pv[0], uuid), errors.New("empty path"))
 			}
+			files = append(files, p)
+			disks = append(disks, p)
 		}
+	}
+
+	walked := make(map[string]bool, len(disks))
+	for _, d := range disks {
+		if walked[d] {
+			continue
+		}
+		walked[d] = true
+		chain, err := backingChainFiles(ctx, h, d)
+		if err != nil {
+			return inUseSet{}, err
+		}
+		files = append(files, chain...)
 	}
 
 	all := append(append([]string(nil), files...), dirs...)
@@ -719,4 +902,40 @@ func diskSourcesInUse(ctx context.Context, h hostCommandRunner) (inUseSet, error
 		set.dirs = append(set.dirs, canon[len(files)+i])
 	}
 	return set, nil
+}
+
+// pathInUseOnHost reports whether path (canonicalized on the host) is a disk,
+// backing file or shared directory of any domain on the host behind h.
+func pathInUseOnHost(ctx context.Context, h hostCommandRunner, path string) (bool, error) {
+	canon, err := canonicalizeOnHost(ctx, h, []string{path})
+	if err != nil {
+		return false, err
+	}
+	inUse, err := diskSourcesInUse(ctx, h)
+	if err != nil {
+		return false, err
+	}
+	return inUse.contains(canon[0]), nil
+}
+
+// hostConnRunner adapts a hostconn.Conn (the import RPCs' connection seam) to
+// hostCommandRunner, so those paths can reuse the header check.
+type hostConnRunner struct {
+	conn hostconn.Conn
+}
+
+// runVirshCommand implements hostCommandRunner over the Conn's RunHost ("!"
+// host commands) and Virsh (control commands).
+func (r hostConnRunner) runVirshCommand(ctx context.Context, args ...string) (*VirshResult, error) {
+	var res *hostconn.Result
+	var err error
+	if len(args) > 0 && args[0] == "!" {
+		res, err = r.conn.RunHost(ctx, args[1:]...)
+	} else {
+		res, err = r.conn.Virsh(ctx, args...)
+	}
+	if res == nil {
+		return nil, err
+	}
+	return &VirshResult{Command: res.Command, ExitCode: res.ExitCode, Stdout: res.Stdout, Stderr: res.Stderr, Duration: res.Duration}, err
 }

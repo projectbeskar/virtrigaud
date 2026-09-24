@@ -180,6 +180,14 @@ func (s *Server) importDiskFromS3(ctx context.Context, req *providerv1.ImportDis
 	log.Printf("INFO S3 object staged on host: bytes=%d sha256-verified=%t",
 		dl.resp.BytesTransferred, req.ExpectedChecksum != "")
 
+	// SECURITY: refuse a staged object whose header references another host
+	// file (qcow2 backing / data file, VMDK extent): the convert would flatten
+	// that file into <vm>-migrated.qcow2. Read it in the format the convert
+	// forces, so the check sees exactly what the convert will open.
+	if _, err := inspectHostImageAs(ctx, hostConnRunner{conn: conn}, importedImageSubject, stagePath, stagedFormat); err != nil {
+		return nil, fmt.Errorf("inspect staged s3 object: %w", err)
+	}
+
 	// --- CONVERT (ADR D4) ---
 	// qemu-img reads the staged file (seekable regular file) and writes the
 	// target qcow2. On failure, surface qemu-img's stderr directly so the real

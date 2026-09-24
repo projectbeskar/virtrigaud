@@ -240,6 +240,20 @@ func (p *Provider) imagePrepare(ctx context.Context, imageJSON, targetName, stor
 	// already prepared and we return its location without re-downloading/
 	// converting.
 	if p.targetImageExists(ctx, targetPath) {
+		// An earlier release attached a prepared image IN PLACE as the disk of
+		// the first VM created from it, so the "template" may now be a live VM
+		// disk. Returning it again would hand every new VM that disk (which
+		// Create now refuses) — say so, with the one fix that works.
+		inUse, err := pathInUseOnHost(ctx, p.virshProvider, targetPath)
+		if err != nil {
+			return "", "", err
+		}
+		if inUse {
+			log.Printf("WARN ImagePrepare: prepared image %q is in use as a VM disk (legacy in-place attach)", targetPath)
+			return "", "", newImageRejection(fmt.Sprintf("prepared image %q", targetName),
+				"the prepared image file is in use as a VM disk (legacy in-place attach by an earlier release); "+
+					"create a VMImage with a new name to re-prepare the image")
+		}
 		log.Printf("INFO ImagePrepare: target image %q already exists in pool %q; nothing to do",
 			targetPath, poolName)
 		return targetName, targetPath, nil

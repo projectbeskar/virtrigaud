@@ -315,7 +315,16 @@ d="$FAKE_HOST_DIR/$host"
 printf '%s\t%s\n' "$host" "$*" >> "$FAKE_HOST_DIR/virsh.log"
 case "$1" in
   list)
-    if [ "$3" = "--uuid" ]; then cat "$d/uuids" 2>/dev/null; exit 0; fi
+    if [ "$3" = "--uuid" ]; then
+      # UUIDs listed in "vanishing" are gone from every listing after the first.
+      if [ -f "$d/vanishing" ] && [ -f "$d/listed-once" ]; then
+        grep -v -F -f "$d/vanishing" "$d/uuids" || true
+      else
+        cat "$d/uuids" 2>/dev/null
+      fi
+      touch "$d/listed-once" 2>/dev/null
+      exit 0
+    fi
     printf ' Id   Name   State\n---------------------\n\n' ;;
   dumpxml) exec cat "$d/dom-$2.xml" ;;
   pool-list) printf ' Name      State    Autostart\n-------------------------------\n default   active   yes\n\n' ;;
@@ -327,14 +336,27 @@ esac
 `
 
 // fakeQemuImgScript answers `info` from a <file>.info.json sidecar (default: a
-// plain qcow2) and makes `convert` write its target, logging every call.
+// plain qcow2) and `info --backing-chain` from <file>.chain.json (default: the
+// file alone; <file>.chainfail simulates a broken link), fails like qemu-img
+// for a missing file, and makes `convert` write its target. Every call is
+// logged.
 const fakeQemuImgScript = `#!/bin/sh
 printf '%s\n' "$*" >> "$FAKE_HOST_DIR/qemu-img.log"
 last=""
-for a in "$@"; do last="$a"; done
+chain=""
+for a in "$@"; do last="$a"; if [ "$a" = "--backing-chain" ]; then chain=1; fi; done
+missing() { echo "qemu-img: Could not open '$last': Could not open '$last': No such file or directory" >&2; exit 1; }
 case "$1" in
   info)
-    if [ -f "$last.info.json" ]; then cat "$last.info.json"; else printf '{"format":"qcow2","filename":"%s"}\n' "$last"; fi ;;
+    if [ -n "$chain" ]; then
+      if [ -f "$last.chainfail" ]; then echo "qemu-img: Could not open backing file: No such file or directory" >&2; exit 1; fi
+      if [ -f "$last.chain.json" ]; then cat "$last.chain.json"; exit 0; fi
+      [ -e "$last" ] || missing
+      printf '[{"format":"qcow2","filename":"%s"}]\n' "$last"; exit 0
+    fi
+    if [ -f "$last.info.json" ]; then cat "$last.info.json"; exit 0; fi
+    [ -e "$last" ] || missing
+    printf '{"format":"qcow2","filename":"%s"}\n' "$last" ;;
   convert) printf 'converted\n' > "$last" ;;
   *) exit 0 ;;
 esac
@@ -708,11 +730,151 @@ func TestConfine_FailsClosed(t *testing.T) {
 	h.domain("h1", uuidA, "") // listed, but dumpxml fails
 
 	_, err := imagePathPolicy{dirs: []string{h.images}}.confine(context.Background(), vp, imagePathRequest{Path: img})
+	requireGenericHostFailure(t, err, h)
+}
+
+// requireGenericHostFailure asserts err is the generic, retryable host-check
+// failure and discloses nothing about the host: no domain UUIDs, no allowed or
+// other directories, no command line.
+func requireGenericHostFailure(t *testing.T, err error, h *fakeHost) {
+	t.Helper()
 	require.Error(t, err)
 	assert.False(t, isInvalidArgument(err), "a host read failure is not the caller's fault")
 	var pe *contracts.ProviderError
 	require.ErrorAs(t, err, &pe)
 	assert.True(t, pe.IsRetryable())
+	assert.Contains(t, err.Error(), hostCheckFailedMessage)
+	for _, leak := range []string{uuidA, uuidB, h.images, h.base, "virsh", "dumpxml", "vol-path", "qemu-img"} {
+		assert.NotContains(t, err.Error(), leak, "host detail must stay in the provider log")
+	}
+}
+
+// TestConfine_UnresolvableVolumeFailsClosed proves a volume disk whose path
+// cannot be resolved blocks the check instead of being skipped.
+func TestConfine_UnresolvableVolumeFailsClosed(t *testing.T) {
+	h := newFakeHost(t)
+	vp := h.host("h1")
+	img := h.file(h.images, "ubuntu.qcow2")
+	h.domain("h1", uuidA, `<domain><devices><disk type='volume' device='disk'>`+
+		`<source pool='inactive' volume='data.qcow2'/></disk></devices></domain>`) // no vol-path fixture
+
+	_, err := imagePathPolicy{dirs: []string{h.images}}.confine(context.Background(), vp, imagePathRequest{Path: img})
+	requireGenericHostFailure(t, err, h)
+}
+
+// TestConfine_DomainUndefinedDuringCheckIsSkipped proves a domain that vanishes
+// between the list and its dumpxml does not fail the create.
+func TestConfine_DomainUndefinedDuringCheckIsSkipped(t *testing.T) {
+	h := newFakeHost(t)
+	vp := h.host("h1")
+	img := h.file(h.images, "ubuntu.qcow2")
+	h.domain("h1", uuidA, "") // listed first, then gone; dumpxml fails
+	require.NoError(t, os.WriteFile(filepath.Join(h.root, "h1", "vanishing"), []byte(uuidA+"\n"), 0o600))
+
+	got, err := imagePathPolicy{dirs: []string{h.images}}.confine(context.Background(), vp, imagePathRequest{Path: img})
+	require.NoError(t, err)
+	assert.Equal(t, img, got.Path)
+}
+
+// TestConfine_ShutOffDomainBackingChainIsInUse proves the base images of a
+// STOPPED domain count as in use although its dumpxml carries no
+// <backingStore>: the chain is read from the images themselves (qemu-img -U).
+func TestConfine_ShutOffDomainBackingChainIsInUse(t *testing.T) {
+	h := newFakeHost(t)
+	vp := h.host("h1")
+	overlay := h.file(h.images, "vm1-overlay.qcow2")
+	base := h.file(h.images, "golden-base.qcow2")
+	require.NoError(t, os.WriteFile(overlay+".chain.json", []byte(`[
+	  {"filename":"`+overlay+`","format":"qcow2","backing-filename":"golden-base.qcow2","full-backing-filename":"`+base+`"},
+	  {"filename":"`+base+`","format":"qcow2"}]`), 0o600))
+
+	// A broken chain (a deleted link) is walked one level at a time.
+	overlay2 := h.file(h.images, "vm2-overlay.qcow2")
+	mid := h.file(h.images, "golden-mid.qcow2")
+	require.NoError(t, os.WriteFile(overlay2+".chainfail", nil, 0o600))
+	h.info(overlay2, `{"filename":"`+overlay2+`","format":"qcow2","full-backing-filename":"`+mid+`"}`)
+	h.info(mid, `{"filename":"`+mid+`","format":"qcow2","full-backing-filename":"`+filepath.Join(h.images, "deleted.qcow2")+`"}`)
+
+	// A data file of a stopped VM's disk is in use too.
+	withData := h.file(h.images, "vm3.qcow2")
+	dataFile := h.file(h.images, "vm3-data.raw")
+	require.NoError(t, os.WriteFile(withData+".chain.json", []byte(`[{"filename":"`+withData+`","format":"qcow2",`+
+		`"format-specific":{"type":"qcow2","data":{"data-file":"`+dataFile+`"}}}]`), 0o600))
+
+	h.domain("h1", uuidA, diskDomainXML(overlay, overlay2)) // shut off: no <backingStore>
+	h.domain("h1", uuidB, diskDomainXML(withData))
+
+	pol := imagePathPolicy{dirs: []string{h.images}}
+	for _, p := range []string{base, mid, dataFile} {
+		_, err := pol.confine(context.Background(), vp, imagePathRequest{Path: p})
+		requireRejected(t, err, "existing VM")
+	}
+	assert.Contains(t, h.log("qemu-img"), "info -U --backing-chain --output=json -- "+overlay)
+
+	// Unrelated images stay usable.
+	free := h.file(h.images, "ubuntu.qcow2")
+	_, err := pol.confine(context.Background(), vp, imagePathRequest{Path: free})
+	require.NoError(t, err)
+}
+
+// TestHostConnRunner_ImportHeaderCheck proves the import paths' adapter carries
+// the header check over a hostconn.Conn: a staged object with a backing file is
+// refused before any convert.
+func TestHostConnRunner_ImportHeaderCheck(t *testing.T) {
+	conn := &fakeSeamConn{runHostOut: `{"format":"qcow2","backing-filename":"/etc/shadow"}`}
+	_, err := inspectHostImageAs(context.Background(), hostConnRunner{conn: conn}, importedImageSubject,
+		"/var/lib/libvirt/images/.virtrigaud-import-x.vmdk", "qcow2")
+	requireRejected(t, err, "backing file")
+
+	conn = &fakeSeamConn{runHostOut: `{"format":"qcow2"}`}
+	format, err := inspectHostImageAs(context.Background(), hostConnRunner{conn: conn}, importedImageSubject,
+		"/var/lib/libvirt/images/.virtrigaud-import-x.qcow2", "qcow2")
+	require.NoError(t, err)
+	assert.Equal(t, "qcow2", format)
+}
+
+// TestCreateVolumeFromImageFile_RejectsCraftedImport proves ImportDisk's
+// landing step refuses an imported disk whose header points at a host file,
+// on both its convert and its attach-in-place branch.
+func TestCreateVolumeFromImageFile_RejectsCraftedImport(t *testing.T) {
+	h := newFakeHost(t)
+	vp := h.host("h1")
+	inPool := h.file(h.images, "web-migrated.qcow2") // attach-in-place branch
+	h.info(inPool, `{"format":"qcow2","backing-filename":"/etc/shadow","backing-filename-format":"raw"}`)
+	external := h.file(h.outside, "staged.qcow2") // convert branch
+	h.info(external, `{"format":"qcow2","format-specific":{"type":"qcow2","data":{"data-file":"/dev/sda"}}}`)
+
+	sp := NewStorageProvider(vp)
+	_, err := sp.CreateVolumeFromImageFile(context.Background(), inPool, "web-migrated", "default", 0)
+	requireRejected(t, err, "backing file")
+	_, err = sp.CreateVolumeFromImageFile(context.Background(), external, "web-migrated", "default", 0)
+	requireRejected(t, err, "external data file")
+	assert.NotContains(t, h.log("qemu-img"), "convert")
+	assert.Contains(t, h.log("qemu-img"), "info --output=json -f qcow2 -- "+inPool)
+}
+
+// TestImagePrepare_ExistingTargetInUseIsRejected covers the upgrade story: an
+// earlier release attached a prepared image in place as the first VM's disk,
+// so the "already prepared" short-circuit must not hand it out again.
+func TestImagePrepare_ExistingTargetInUseIsRejected(t *testing.T) {
+	h := newFakeHost(t)
+	vp := h.host("h1")
+	p := &Provider{virshProvider: vp, imageDirs: []string{h.images}}
+	legacy := h.file(h.images, "ubuntu.qcow2")
+	h.domain("h1", uuidA, diskDomainXML(legacy))
+
+	_, _, err := p.imagePrepare(context.Background(), `{"source":{"libvirt":{"url":"https://x/y.qcow2"}}}`, "ubuntu", "")
+	requireRejected(t, err, "legacy in-place attach")
+	assert.Contains(t, err.Error(), "create a VMImage with a new name")
+	assert.NotContains(t, err.Error(), h.images, "the host path is not disclosed")
+
+	// Not in use: the idempotent no-op still returns the prepared location.
+	h.file(h.images, "debian.qcow2")
+	id, path, err := p.imagePrepare(context.Background(), `{"source":{"libvirt":{"url":"https://x/y.qcow2"}}}`, "debian", "")
+	require.NoError(t, err)
+	assert.Equal(t, "debian", id)
+	assert.Equal(t, filepath.Join(h.images, "debian.qcow2"), path)
+	assert.Empty(t, h.log("curl"), "an existing, unused target is not re-downloaded")
 }
 
 // TestConfine_OverSSH_HostilePathIsInert drives the confinement through the
