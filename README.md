@@ -335,6 +335,15 @@ spec:
 > for host-resident libvirt disks. See [`examples/migration/`](examples/migration/)
 > for per-direction examples.
 
+> **Cross-namespace targets need an admin grant.** A `VMMigration` or `VMClone`
+> creates its VM in its own namespace unless `spec.target.namespace` names
+> another one. Another namespace is used only if it carries
+> `infra.virtrigaud.io/allowed-source-namespaces` listing the source namespace.
+> Without that annotation the object waits with `Ready=False` /
+> `TargetNamespaceNotAllowed` and creates nothing there. A migration's
+> `spec.source.providerRef`, if set, must name the source VM's own Provider.
+> See [`docs/cross-namespace-targets.md`](docs/cross-namespace-targets.md).
+
 For full migration documentation including provider restart behaviour, see the [Migration Guide](https://projectbeskar.github.io/virtrigaud/operations/vm-migration/).
 
 ## Observability

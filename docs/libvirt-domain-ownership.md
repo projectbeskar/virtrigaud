@@ -142,6 +142,15 @@ that `VirtualMachine` created the domain.**
    refused with `Conflict` and the file is untouched. A file no domain uses can
    only be left over from an earlier failed attempt for this very domain name
    (same namespace and name), so it is overwritten.
+8. **Only a granted namespace can have names derived from it.** A `VMClone`
+   or `VMMigration` names its clone or landing disk for its target namespace.
+   The manager sends that namespace only when it is the object's own namespace
+   or the target namespace lists the object's namespace in its
+   `infra.virtrigaud.io/allowed-source-namespaces` annotation. Otherwise a
+   tenant in `team-a` could make a migration land
+   `team-b.<name>-migrated.qcow2`. Without the grant, no `Clone` or
+   `ImportDisk` is sent. See
+   [`cross-namespace-targets.md`](cross-namespace-targets.md).
 
 The ownership and naming rules apply to both single-host providers and clustered
 providers (ADR-0007 `topology: cluster`). Both paths share the same create core.

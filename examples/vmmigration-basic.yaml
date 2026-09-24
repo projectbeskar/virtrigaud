@@ -21,6 +21,14 @@ spec:
   # Target configuration
   target:
     name: my-target-vm
+    # Optional: namespace for the migrated VM. Defaults to this VMMigration's
+    # namespace. Another namespace works only if a cluster admin has annotated
+    # THAT namespace with
+    #   infra.virtrigaud.io/allowed-source-namespaces: default
+    # otherwise the migration waits (Ready=False, reason
+    # TargetNamespaceNotAllowed) before touching anything.
+    # See docs/cross-namespace-targets.md.
+    # namespace: team-b
     providerRef:
       name: target-provider
       namespace: virtrigaud-system

@@ -31,6 +31,15 @@ spec:
   # Target: the VirtualMachine CR the controller will create.
   target:
     name: my-cloned-vm
+    # Optional: namespace for the produced VM. Defaults to this VMClone's
+    # namespace. Another namespace works only if a cluster admin has granted
+    # it by annotating THAT namespace, e.g.:
+    #   kubectl annotate namespace team-b \
+    #     infra.virtrigaud.io/allowed-source-namespaces=default
+    # Without the grant the clone waits with Ready=False
+    # (reason TargetNamespaceNotAllowed) and creates nothing there.
+    # See docs/cross-namespace-targets.md.
+    # namespace: team-b
     # Optional: override the VMClass for the clone. Defaults to the source
     # VM's class when omitted.
     classRef:
