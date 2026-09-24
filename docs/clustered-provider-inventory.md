@@ -917,8 +917,9 @@ for a clustered provider.
   then clears `status.placement.pendingHost`, adds the host to
   `status.placement.excludedHosts`, sets `Placed=False` (`HostExcluded`) and
   schedules the VM again; the scheduler never picks an excluded host. The list
-  holds at most 16 hosts (the oldest is dropped) and is cleared when the VM is
-  bound. If **every** candidate host is excluded, the VM shows `Placed=False`
+  holds at most 16 hosts (the oldest is dropped, and the next attempt then
+  waits 2 minutes) and is cleared when the VM is bound. If **every** candidate
+  host is excluded, the VM shows `Placed=False`
   (`AllHostsExcluded`), no create is sent, and it is re-checked every 2
   minutes: resolve the name conflicts (or rename the VirtualMachine), then clear
   the list, for example with

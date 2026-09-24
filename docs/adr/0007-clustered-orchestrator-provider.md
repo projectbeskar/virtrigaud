@@ -838,7 +838,9 @@ administrator to clear `pendingHost` (D8, report-only).
 > The scheduler input (`Request.ExcludedHosts`) filters excluded hosts before
 > any other check, even when the host is the current binding. The list holds
 > at most 16 hosts, drops its oldest entry when full, and is cleared when the
-> VM is bound. When every candidate is excluded, the operator sets
+> VM is bound. A conflict that has to drop an entry makes the next attempt wait
+> 2 minutes, so a pool with more conflicting hosts than the cap cannot become a
+> fast create loop. When every candidate is excluded, the operator sets
 > `Placed=False/AllHostsExcluded` and sends no `Create`. It re-checks every 2
 > minutes (no hot loop) until an administrator resolves the collisions and
 > clears the list. The finalizer loses nothing: an owner-checked `Delete` on

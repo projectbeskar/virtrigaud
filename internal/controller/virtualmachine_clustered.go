@@ -186,15 +186,18 @@ const maxExcludedHosts = 16
 // excludeHost adds host to pl.ExcludedHosts (ADR-0007 Addendum A, A2
 // amendment). An empty or already-listed host is a no-op; when the list would
 // exceed maxExcludedHosts the oldest entries are dropped, so it stays bounded.
-func excludeHost(pl *infravirtrigaudiov1beta1.PlacementStatus, host string) {
+// It reports whether an entry was dropped.
+func excludeHost(pl *infravirtrigaudiov1beta1.PlacementStatus, host string) (dropped bool) {
 	host = strings.TrimSpace(host)
 	if host == "" || slices.Contains(pl.ExcludedHosts, host) {
-		return
+		return false
 	}
 	pl.ExcludedHosts = append(pl.ExcludedHosts, host)
 	if n := len(pl.ExcludedHosts); n > maxExcludedHosts {
 		pl.ExcludedHosts = append([]string(nil), pl.ExcludedHosts[n-maxExcludedHosts:]...)
+		return true
 	}
+	return false
 }
 
 // handleClusteredCreateConflict is the ADR-0007 Addendum A, A2 amendment
@@ -219,7 +222,11 @@ func excludeHost(pl *infravirtrigaudiov1beta1.PlacementStatus, host string) {
 //
 // If every candidate host ends up excluded, resolveClusterPlacement reports
 // Placed=False/AllHostsExcluded and re-checks slowly; each conflict removes
-// one candidate, so the re-scheduling is bounded by the pool size.
+// one candidate, so the prompt re-scheduling is bounded by the pool size. Once
+// the list is full and a conflict had to drop its oldest entry (a pool with
+// more conflicting hosts than the cap), the next attempt waits the slow
+// vmCreateConflictRetryInterval instead, so even that case cannot turn into a
+// fast create loop.
 func (r *VirtualMachineReconciler) handleClusteredCreateConflict(
 	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
@@ -231,7 +238,10 @@ func (r *VirtualMachineReconciler) handleClusteredCreateConflict(
 		pl = &infravirtrigaudiov1beta1.PlacementStatus{}
 		vm.Status.Placement = pl
 	}
-	excludeHost(pl, host)
+	retryAfter := createConflictRescheduleInterval
+	if excludeHost(pl, host) {
+		retryAfter = vmCreateConflictRetryInterval
+	}
 	pl.PendingHost = ""
 
 	setPlacedCondition(vm, metav1.ConditionFalse, k8s.ReasonHostExcluded, fmt.Sprintf(
@@ -260,7 +270,7 @@ func (r *VirtualMachineReconciler) handleClusteredCreateConflict(
 		metrics.RecordError(errReasonPlacement, metrics.ComponentManager)
 		return ctrl.Result{}, fmt.Errorf("record excluded host %s for VirtualMachine %s/%s: %w", host, vm.Namespace, vm.Name, err)
 	}
-	return ctrl.Result{RequeueAfter: createConflictRescheduleInterval}, nil
+	return ctrl.Result{RequeueAfter: retryAfter}, nil
 }
 
 // handleMissingOnBoundHost is ADR-0007 Addendum A, A4: the bound host reports

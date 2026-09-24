@@ -25,7 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - the placeholder test drives every per-VM RPC again; clustered capabilities;
   - a host-scoped `Unavailable` or `NotFound` on Power/Reconfigure never counts toward the circuit breaker;
   - operator: owner carried, `HostUnavailable` backs off to 30 s, `NotFound` is A4, single-host errors unchanged;
-  - the conflict flow: host excluded and pending host released, re-schedule picks another host, all excluded gives `AllHostsExcluded` with no `Create` and a 2 m re-check, exclusions cleared on bind, finalizer after a conflict makes no provider call, cap and dedupe, the cap pinned to the CRD `maxItems`.
+  - the conflict flow: host excluded and pending host released, re-schedule picks another host, all excluded gives `AllHostsExcluded` with no `Create` and a 2 m re-check, a conflict on a full list backs off 2 m, exclusions cleared on bind, finalizer after a conflict makes no provider call, cap and dedupe, the cap pinned to the CRD `maxItems`.
 
 ### Changed
 - `internal/providers/libvirt/provider_virsh.go`, `disk_expand.go`: the Power and Reconfigure cores take the connection (`runPowerOp` / `reconfigureOn`), shared by single-host (`p.virshProvider`) and clustered (the leased host). Everything they reach runs on that connection: `syncPersistentXML`, `setvcpus`/`setmem`, the volume resize, `blockresize`, and the guest agent for the in-guest filesystem grow (built from the leased host's VirshProvider, never `p.virshProvider`).
@@ -43,7 +43,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - clears `pendingHost` and excludes the host, in one checked status write;
   - sets `Placed=False/HostExcluded` and re-schedules onto another host.
 
-  When every candidate is excluded, the VM shows `Placed=False/AllHostsExcluded`, no `Create` is sent, and it is re-checked every 2 minutes (no hot loop). An unreachable pending host is still never re-scheduled.
+  When every candidate is excluded, the VM shows `Placed=False/AllHostsExcluded`, no `Create` is sent, and it is re-checked every 2 minutes (no hot loop). A conflict that overflows the 16-entry list drops the oldest entry and also waits 2 minutes. An unreachable pending host is still never re-scheduled.
 
 ### Security
 - `internal/providers/libvirt/provider_virsh.go` (`ownedDomainTarget`, `powerClustered`, `reconfigureClustered`): a routed Power or Reconfigure is **owner-checked** against the #333 domain stamp **before** anything is changed. A missing, unreadable, ambiguous or foreign stamp, or a request without an owner, is answered `NotFound`, and the domain is never started, stopped, rebooted, resized or touched through its guest agent. Every command then addresses the checked domain **by its UUID** rather than its name, so a domain replaced after the check is never acted on. Messages never name the other owner. An unsupported power op is refused before any host is leased.

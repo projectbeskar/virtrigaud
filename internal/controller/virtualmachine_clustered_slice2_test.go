@@ -322,17 +322,43 @@ func TestHandleDeletion_Clustered_AfterConflictNeverCallsProvider(t *testing.T) 
 
 func TestExcludeHost_DedupesTrimsAndStaysBounded(t *testing.T) {
 	pl := &infravirtrigaudiov1beta1.PlacementStatus{}
-	excludeHost(pl, " host-a ")
-	excludeHost(pl, "host-a")
-	excludeHost(pl, "")
+	assert.False(t, excludeHost(pl, " host-a "))
+	assert.False(t, excludeHost(pl, "host-a"))
+	assert.False(t, excludeHost(pl, ""))
 	assert.Equal(t, []string{"host-a"}, pl.ExcludedHosts)
 
+	dropped := 0
 	for i := 0; i < maxExcludedHosts+5; i++ {
-		excludeHost(pl, "h-"+strconv.Itoa(i))
+		if excludeHost(pl, "h-"+strconv.Itoa(i)) {
+			dropped++
+		}
 	}
 	require.Len(t, pl.ExcludedHosts, maxExcludedHosts)
+	assert.Equal(t, 6, dropped, "every addition past the cap reports a dropped entry")
 	assert.Equal(t, "h-"+strconv.Itoa(maxExcludedHosts+4), pl.ExcludedHosts[maxExcludedHosts-1], "the newest is kept")
 	assert.NotContains(t, pl.ExcludedHosts, "host-a", "the oldest is dropped")
+}
+
+// TestCreateVM_Clustered_ConflictWithAFullListBacksOff: when the exclusion
+// list is already full, a further conflict drops the oldest entry and the VM
+// waits the slow conflict cadence — a pool with more conflicting hosts than
+// the cap cannot become a fast create loop.
+func TestCreateVM_Clustered_ConflictWithAFullListBacksOff(t *testing.T) {
+	full := make([]string, 0, maxExcludedHosts)
+	for i := 0; i < maxExcludedHosts; i++ {
+		full = append(full, "host-old-"+strconv.Itoa(i))
+	}
+	vm := clusterVM("web", clusteredNS, "prov-cluster")
+	vm.Status.Placement = &infravirtrigaudiov1beta1.PlacementStatus{PendingHost: "host-alpha", ExcludedHosts: full}
+	prov := &routingProvider{onCreate: conflictOn("host-alpha")}
+	r := clusteredFixture(t, prov, vm)
+
+	res := createClustered(t, r, prov, "web")
+	assert.Equal(t, ctrlResult{after: vmCreateConflictRetryInterval.String()}, res)
+	after := getVM(t, r, "web").Status.Placement
+	require.Len(t, after.ExcludedHosts, maxExcludedHosts)
+	assert.Equal(t, "host-alpha", after.ExcludedHosts[maxExcludedHosts-1])
+	assert.NotContains(t, after.ExcludedHosts, "host-old-0")
 }
 
 // TestExcludedHostsCapMatchesCRD pins maxExcludedHosts to the CRD's maxItems,
