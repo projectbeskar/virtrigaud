@@ -311,8 +311,9 @@ func TestGuestAgentCommand_SSH_ArgvIsInjectionSafe(t *testing.T) {
 	require.NoError(t, err)
 
 	argv := splitNUL(res.Stdout)
-	require.Len(t, argv, 5, "virsh -c <uri> qemu-agent-command <domain> <json>: got %q", argv)
-	assert.Equal(t, []string{"-c", "qemu:///system", "qemu-agent-command", domain}, argv[:4])
+	require.Len(t, argv, 7, "virsh -c <uri> qemu-agent-command --timeout <s> <domain> <json>: got %q", argv)
+	assert.Equal(t, []string{"-c", "qemu:///system", "qemu-agent-command",
+		"--timeout", guestAgentCommandTimeoutSeconds, domain}, argv[:6])
 
 	var req struct {
 		Execute   string `json:"execute"`
@@ -322,7 +323,7 @@ func TestGuestAgentCommand_SSH_ArgvIsInjectionSafe(t *testing.T) {
 			CaptureOutput bool     `json:"capture-output"`
 		} `json:"arguments"`
 	}
-	require.NoError(t, json.Unmarshal([]byte(argv[4]), &req))
+	require.NoError(t, json.Unmarshal([]byte(argv[6]), &req))
 	assert.Equal(t, qgaExec, req.Execute)
 	assert.Equal(t, guestExecShell, req.Arguments.Path)
 	assert.Equal(t, []string{"-c", guestCmd}, req.Arguments.Arg)

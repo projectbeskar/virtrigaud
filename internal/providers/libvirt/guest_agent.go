@@ -23,6 +23,7 @@ import (
 	"log"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // GuestAgentInfo represents information gathered from QEMU Guest Agent
@@ -48,9 +49,6 @@ type GuestAgentInfo struct {
 
 	// Guest Time Information
 	GuestTime time.Time `json:"guest_time"`
-
-	// Guest Users
-	Users []GuestUser `json:"users"`
 }
 
 // GuestNetworkInterface represents a network interface inside the guest
@@ -79,13 +77,6 @@ type GuestFilesystem struct {
 	FreeBytes  uint64 `json:"free_bytes"`
 }
 
-// GuestUser represents a logged-in user inside the guest
-type GuestUser struct {
-	User      string    `json:"user"`
-	Domain    string    `json:"domain,omitempty"`
-	LoginTime time.Time `json:"login_time"`
-}
-
 // GuestAgentProvider manages QEMU Guest Agent communication
 type GuestAgentProvider struct {
 	virshProvider *VirshProvider
@@ -105,12 +96,33 @@ const (
 	qgaNetworkInterfaces  = "guest-network-get-interfaces"
 	qgaGetFSInfo          = "guest-get-fsinfo"
 	qgaGetTime            = "guest-get-time"
-	qgaGetUsers           = "guest-get-users"
 	qgaExec               = "guest-exec"
 	qgaExecStatus         = "guest-exec-status"
 	qgaSetTime            = "guest-set-time"
 	guestExecShell        = "/bin/sh"
 	guestExecShellCommand = "-c"
+)
+
+// Bounds on guest-agent traffic. The guest agent is controlled by whoever runs
+// the guest, so a stalling or verbose agent must not be able to hold the
+// provider's per-host exec slots or bloat VirtualMachine status.
+const (
+	// guestAgentCommandTimeoutSeconds is passed to every `virsh
+	// qemu-agent-command --timeout`, bounding how long libvirtd waits for one
+	// agent reply.
+	guestAgentCommandTimeoutSeconds = "3"
+	// guestInfoBudget bounds the whole GetGuestInfo enrichment on top of the
+	// per-command timeout: once it is spent, remaining queries are skipped.
+	guestInfoBudget = 8 * time.Second
+	// maxGuestInterfaces and maxGuestFilesystems cap how many guest-reported
+	// entries are kept; each one becomes several ProviderRaw/status keys.
+	maxGuestInterfaces  = 16
+	maxGuestFilesystems = 16
+	// maxGuestIPsPerInterface caps the addresses kept per guest interface.
+	maxGuestIPsPerInterface = 16
+	// maxGuestNameLen truncates guest-reported names (interface names, mount
+	// points) that are embedded in ProviderRaw keys.
+	maxGuestNameLen = 64
 )
 
 // guestAgentRequest is the JSON body of one `virsh qemu-agent-command` call.
@@ -145,12 +157,19 @@ func (g *GuestAgentProvider) agentCommand(ctx context.Context, domainName string
 	if err != nil {
 		return nil, fmt.Errorf("encode guest-agent %s request: %w", req.Execute, err)
 	}
-	return g.virshProvider.runVirshCommand(ctx, "qemu-agent-command", domainName, string(payload))
+	return g.virshProvider.runVirshCommand(ctx, "qemu-agent-command",
+		"--timeout", guestAgentCommandTimeoutSeconds, domainName, string(payload))
 }
 
-// GetGuestInfo retrieves comprehensive guest information via QEMU Guest Agent
+// GetGuestInfo retrieves guest information via the QEMU Guest Agent. The whole
+// enrichment is bounded by guestInfoBudget (each call additionally by
+// guestAgentCommandTimeoutSeconds), and the result is capped by
+// boundGuestInfo, because the agent's answers are guest-controlled.
 func (g *GuestAgentProvider) GetGuestInfo(ctx context.Context, domainName string) (*GuestAgentInfo, error) {
 	log.Printf("INFO Gathering guest information via QEMU Guest Agent for domain: %s", domainName)
+
+	ctx, cancel := context.WithTimeout(ctx, guestInfoBudget)
+	defer cancel()
 
 	info := &GuestAgentInfo{
 		AgentStatus: "unknown",
@@ -165,33 +184,66 @@ func (g *GuestAgentProvider) GetGuestInfo(ctx context.Context, domainName string
 
 	info.AgentStatus = "available"
 
-	// Gather OS information
-	if err := g.getGuestOSInfo(ctx, domainName, info); err != nil {
-		log.Printf("WARN Failed to get guest OS info: %v", err)
+	// Logged-in guest users (guest-get-users) are deliberately not collected:
+	// they would surface personal data in VirtualMachine status.
+	queries := []struct {
+		what string
+		run  func(context.Context, string, *GuestAgentInfo) error
+	}{
+		{"OS info", g.getGuestOSInfo},
+		{"network info", g.getGuestNetworkInfo},
+		{"filesystem info", g.getGuestFilesystemInfo},
+		{"time", g.getGuestTime},
+	}
+	for _, q := range queries {
+		if ctx.Err() != nil {
+			log.Printf("WARN Guest agent budget exhausted for domain %s; skipping remaining queries", domainName)
+			break
+		}
+		if err := q.run(ctx, domainName, info); err != nil {
+			log.Printf("WARN Failed to get guest %s: %v", q.what, err)
+		}
 	}
 
-	// Gather network information
-	if err := g.getGuestNetworkInfo(ctx, domainName, info); err != nil {
-		log.Printf("WARN Failed to get guest network info: %v", err)
-	}
-
-	// Gather filesystem information
-	if err := g.getGuestFilesystemInfo(ctx, domainName, info); err != nil {
-		log.Printf("WARN Failed to get guest filesystem info: %v", err)
-	}
-
-	// Get guest time
-	if err := g.getGuestTime(ctx, domainName, info); err != nil {
-		log.Printf("WARN Failed to get guest time: %v", err)
-	}
-
-	// Get logged-in users
-	if err := g.getGuestUsers(ctx, domainName, info); err != nil {
-		log.Printf("WARN Failed to get guest users: %v", err)
-	}
-
-	log.Printf("INFO Successfully gathered guest information for domain: %s", domainName)
+	boundGuestInfo(info)
+	log.Printf("INFO Gathered guest information for domain: %s", domainName)
 	return info, nil
+}
+
+// boundGuestInfo caps the guest-reported collections in info (interfaces,
+// filesystems, addresses per interface) and truncates guest-chosen names that
+// end up in ProviderRaw keys, so a hostile or misbehaving agent cannot bloat
+// VirtualMachine status.
+func boundGuestInfo(info *GuestAgentInfo) {
+	if len(info.NetworkInterfaces) > maxGuestInterfaces {
+		info.NetworkInterfaces = info.NetworkInterfaces[:maxGuestInterfaces]
+	}
+	for i := range info.NetworkInterfaces {
+		iface := &info.NetworkInterfaces[i]
+		iface.Name = truncateGuestName(iface.Name)
+		if len(iface.IPAddresses) > maxGuestIPsPerInterface {
+			iface.IPAddresses = iface.IPAddresses[:maxGuestIPsPerInterface]
+		}
+	}
+	if len(info.Filesystems) > maxGuestFilesystems {
+		info.Filesystems = info.Filesystems[:maxGuestFilesystems]
+	}
+	for i := range info.Filesystems {
+		info.Filesystems[i].Mountpoint = truncateGuestName(info.Filesystems[i].Mountpoint)
+	}
+}
+
+// truncateGuestName shortens s to at most maxGuestNameLen bytes without
+// splitting a UTF-8 sequence.
+func truncateGuestName(s string) string {
+	if len(s) <= maxGuestNameLen {
+		return s
+	}
+	cut := maxGuestNameLen
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
 
 // isGuestAgentAvailable checks if QEMU Guest Agent is available and responsive
@@ -369,42 +421,6 @@ func (g *GuestAgentProvider) getGuestTime(ctx context.Context, domainName string
 	info.GuestTime = time.Unix(0, response.Return)
 
 	log.Printf("DEBUG Retrieved guest time: %v", info.GuestTime)
-	return nil
-}
-
-// getGuestUsers retrieves information about logged-in users from the guest
-func (g *GuestAgentProvider) getGuestUsers(ctx context.Context, domainName string, info *GuestAgentInfo) error {
-	// Get user info using guest-get-users command
-	result, err := g.agentCommand(ctx, domainName, guestAgentRequest{Execute: qgaGetUsers})
-	if err != nil {
-		return fmt.Errorf("failed to get guest users: %w", err)
-	}
-
-	// Parse the JSON response
-	var response struct {
-		Return []struct {
-			User      string  `json:"user"`
-			Domain    string  `json:"domain"`
-			LoginTime float64 `json:"login-time"`
-		} `json:"return"`
-	}
-
-	if err := json.Unmarshal([]byte(result.Stdout), &response); err != nil {
-		return fmt.Errorf("failed to parse guest users response: %w", err)
-	}
-
-	// Convert to our structure
-	for _, user := range response.Return {
-		guestUser := GuestUser{
-			User:      user.User,
-			Domain:    user.Domain,
-			LoginTime: time.Unix(int64(user.LoginTime), 0),
-		}
-
-		info.Users = append(info.Users, guestUser)
-	}
-
-	log.Printf("DEBUG Retrieved %d logged-in users", len(info.Users))
 	return nil
 }
 

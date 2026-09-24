@@ -990,20 +990,6 @@ func (p *Provider) Describe(ctx context.Context, id string) (contracts.DescribeR
 				domainInfo["guest_time_sync"] = "available"
 			}
 
-			// Guest Users Information
-			if len(guestInfo.Users) > 0 {
-				var users []string
-				for _, user := range guestInfo.Users {
-					if user.Domain != "" {
-						users = append(users, fmt.Sprintf("%s@%s", user.User, user.Domain))
-					} else {
-						users = append(users, user.User)
-					}
-				}
-				domainInfo["guest_users"] = strings.Join(users, ",")
-				domainInfo["guest_user_count"] = fmt.Sprintf("%d", len(guestInfo.Users))
-			}
-
 			log.Printf("INFO Enhanced guest information collected via QEMU Guest Agent for domain: %s", id)
 		} else {
 			log.Printf("DEBUG QEMU Guest Agent not available for domain %s: %v", id, err)

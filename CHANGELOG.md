@@ -5,6 +5,37 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-24 07:57] - Shell-quote every libvirt command sent to the hypervisor over SSH
+**Author:** @wrkode (William Rizzo)
+
+### Security
+- `internal/providers/libvirt/virsh.go`, `conn.go`, `hostconn/hostconn.go`, new `shellquote.go`: every argument sent to the hypervisor host over SSH is now **shell-quoted** (`shellJoin`). This covers virsh control commands, the `!` host-command escape (`RunHost`), `runRemoteVirshCommand`, `Stream` and `StreamIn`. Before, arguments were joined with spaces into the remote shell's command line, so a snapshot description, image URL, domain name, disk path, or a Provider/Host endpoint path (`qemu+ssh://u@h/system;<cmd>`) could run commands on the host as the provider's SSH user. `remoteVirshConnectURI` now forwards only the `system` / `session` instances, and otherwise omits `-c` (the existing fallback). Arguments containing a NUL byte are rejected.
+- `internal/providers/libvirt/remotefile.go` (new), `provider_virsh.go`, `storage.go`, `cloudinit.go`: domain XML, storage-pool XML and cloud-init user-data/meta-data are written with `writeRemoteFile`. The content goes over SSH stdin, the path is passed as `"$1"` to a fixed `sh -c` script, and new files are created with `umask 077`. This replaces `bash -c` heredocs, whose delimiter a crafted line could terminate and whose content (including cloud-init secrets) was embedded in the logged command string.
+- `internal/providers/libvirt/guest_agent.go`: guest-agent calls use `virsh qemu-agent-command --timeout 3 <domain> <json>`, with the JSON built by `encoding/json`, replacing `bash -c` scripts that interpolated the domain name and guest-exec command text on the host. Because guest-agent answers are guest-controlled, `GetGuestInfo` is bounded in two ways:
+  - **Time:** 8 s for the whole lookup plus 3 s per call; once the budget is spent, the remaining queries are skipped.
+  - **Size:** `boundGuestInfo` keeps at most 16 interfaces, 16 filesystems and 16 addresses per interface, and truncates names to 64 bytes.
+  - **Privacy:** logged-in guest users (`guest-get-users`) are no longer collected, so `guest_users` / `guest_user_count` leave `ProviderRaw`.
+
+### Changed
+- `internal/providers/libvirt/nfs.go`, `s3export.go`, `s3import.go`, `conn.go`: callers pass raw values to the now argv-safe `RunHost` / `Stream` / `StreamIn` (pre-quoting removed; `cat > path` replaced by `writeStdinToFileArgv`); `storage.go` runs `qemu-img info` as plain argv instead of `bash -c`.
+- **Behavior note:** over SSH, the guest-agent paths (`GetGuestInfo` enrichment in Describe, `SyncGuestTime`, and the best-effort in-guest filesystem grow after an online disk expand, #201) never worked. The unquoted `bash -c virsh ...` line ran `virsh` with no arguments. They now run as designed, within the bounds above. The ADR-0008 describe shadow-compare is unaffected, since it excludes guest-agent-derived fields.
+
+### Added
+- `internal/providers/libvirt/shellquote_test.go`: quoting round-trips through a real `/bin/sh`, a pure `remoteCommandLine` table, and end-to-end injection tests through the real SSH client and a loopback sshd (virsh args, `!` commands, `runRemoteVirshCommand`, hostile endpoint path, `writeRemoteFile`, guest-agent argv).
+- `internal/providers/libvirt/guest_agent_bounds_test.go`: caps on guest-reported interfaces, filesystems, addresses and names; normal answers pass through unchanged; truncation keeps valid UTF-8.
+
+### Why
+A security review found that any value reaching the libvirt provider's remote command line was interpreted by the hypervisor host's shell. This removes shell interpretation from every SSH command. It also bounds the guest-agent traffic that the fix revives, so a hostile guest agent cannot hold the host's exec slots or bloat VM status.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+> The SSH user's login shell on the hypervisor must be POSIX-compatible (sh,
+> bash, dash, zsh, ash). The quoting relies on POSIX single-quote semantics.
+
 ## [2026-09-24 07:27] - Escape user-derived values in generated libvirt domain XML
 **Author:** @wrkode (William Rizzo)
 
