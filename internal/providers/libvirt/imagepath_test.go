@@ -1081,16 +1081,24 @@ func TestDownloadCloudImage_RejectsBackingFile(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(h.root, "download.info.json"),
 		[]byte(`{"format":"vmdk","format-specific":{"type":"vmdk","data":{"extents":[{"filename":"/dev/sda"}]}}}`), 0o600))
 
-	// DownloadCloudImage stages in /tmp/<volume>-temp.img: use a unique volume
-	// name and remove the fake's sidecar afterwards.
+	// DownloadCloudImage stages in <staging>/<volume>-temp.img.<random>
+	// (mktemp); point the staging directory at a scratch directory.
 	volume := fmt.Sprintf("imagepath-test-%d-disk", time.Now().UnixNano())
-	staged := filepath.Join("/tmp", volume+"-temp.img")
-	t.Cleanup(func() { _ = os.Remove(staged); _ = os.Remove(staged + ".info.json") })
+	sp := NewStorageProvider(vp)
+	sp.stagingDir = t.TempDir()
 
-	_, err := NewStorageProvider(vp).DownloadCloudImage(context.Background(), "https://evil.example/x.vmdk", volume, "default", 10)
+	_, err := sp.DownloadCloudImage(context.Background(), "https://evil.example/x.vmdk", volume, "default", 10)
 	requireRejected(t, err, "extent")
 	assert.NotContains(t, err.Error(), "evil.example", "the URL is not echoed into the error")
 	assert.NotContains(t, h.log("qemu-img"), "convert")
+
+	// The download went to a per-download mktemp file, which is removed.
+	dl := strings.Fields(strings.TrimSpace(h.log("wget")))
+	require.GreaterOrEqual(t, len(dl), 2)
+	staged := dl[1] // wget -O <staged> <url>
+	assert.Equal(t, sp.stagingDir, filepath.Dir(staged))
+	assert.True(t, strings.HasPrefix(filepath.Base(staged), volume+"-temp.img."), "staged as %s", staged)
+	assert.Len(t, filepath.Base(staged), len(volume+"-temp.img.")+len(mktempTemplateSuffix))
 	_, statErr := os.Stat(staged)
 	assert.True(t, os.IsNotExist(statErr), "the rejected download is removed")
 }

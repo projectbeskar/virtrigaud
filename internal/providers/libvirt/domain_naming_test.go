@@ -124,7 +124,7 @@ func TestDomainNameFor_LengthBoundary(t *testing.T) {
 	for _, fileName := range []string{
 		got + vmDiskVolumeSuffix + qcow2Ext,                                              // <domain>-disk.qcow2
 		importedVolumeFileName(got),                                                      // <domain>-migrated.qcow2
-		got + vmDiskVolumeSuffix + "-temp.img",                                           // DownloadCloudImage staging
+		got + vmDiskVolumeSuffix + "-temp.img." + mktempTemplateSuffix,                   // DownloadCloudImage staging
 		got + domainXMLStagingInfix + mktempTemplateSuffix,                               // staged domain XML
 		cloudInitSeedDirPrefix + got + "." + mktempTemplateSuffix,                        // cloud-init seed directory
 		filepath.Base(hostStagePath("/p", got+contracts.ImportedDiskNameSuffix, "vmdk")), // s3 import staging

@@ -248,6 +248,7 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, vp *VirshProvider,
 	cloudInitProvider := NewCloudInitProvider(vp)
 	cloudInitProvider.stagingDir = p.stagingDir()
 	storageProvider := NewStorageProvider(vp)
+	storageProvider.stagingDir = p.stagingDir()
 
 	// Ensure default storage pool exists and is active
 	if err := storageProvider.EnsureDefaultStoragePool(ctx); err != nil {

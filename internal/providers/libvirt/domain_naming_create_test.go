@@ -275,6 +275,30 @@ func TestCreate_StagingIsPerCreateAndCleanedOnFailure(t *testing.T) {
 	assert.NotEqual(t, filepath.Dir(firstSeed), filepath.Dir(lastGenisoOutput(t, c)), "every create gets its own seed directory")
 }
 
+// TestCreate_URLImageStagesPerDownload: a URL image is downloaded to a
+// per-download mktemp file in the staging directory (never a predictable
+// /tmp/<volume>-temp.img) and the file is removed after the convert.
+func TestCreate_URLImageStagesPerDownload(t *testing.T) {
+	c := newCreateHost(t)
+	req := c.createReq(ownerTeamA, "")
+	req.Image = contracts.VMImage{URL: "https://images.example/ubuntu.qcow2"}
+
+	resp, err := c.p.Create(context.Background(), req)
+	require.NoError(t, err)
+	assert.Equal(t, "team-a.web", resp.ID)
+
+	dl := strings.Fields(strings.TrimSpace(c.log("wget")))
+	require.GreaterOrEqual(t, len(dl), 2)
+	staged := dl[1] // wget -O <staged> <url>
+	assert.Equal(t, c.staging, filepath.Dir(staged))
+	assert.True(t, strings.HasPrefix(filepath.Base(staged), "team-a.web-disk-temp.img."), "staged as %s", staged)
+	assert.NoFileExists(t, staged, "the download is removed after the convert")
+	assert.FileExists(t, filepath.Join(c.images, "team-a.web-disk.qcow2"))
+	for _, e := range c.stagingEntries() {
+		assert.True(t, strings.HasPrefix(e, cloudInitSeedDirPrefix), "unexpected staging leftover %q", e)
+	}
+}
+
 // TestCreate_DefineReplyLost: `virsh define` succeeded on the host but its
 // reply was lost. The create checks `virsh domuuid` against the UUID it
 // generated and treats the define as done, so the seed ISO the new domain's
