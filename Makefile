@@ -513,6 +513,10 @@ helm-template: gen-helm-crds ## Render the Helm chart (regenerates chart CRDs fi
 verify-webhook-render: ## Render the chart with webhooks.enabled=true and assert valid, coherent manifests (CA/caBundle, flags, kinds, SANs)
 	@./hack/verify-webhook-render.sh
 
+.PHONY: verify-networkpolicy-render
+verify-networkpolicy-render: ## Render the chart's NetworkPolicies: opt-in, valid peers, and never enabled by --reuse-values from v0.3.11
+	@./hack/verify-networkpolicy-render.sh
+
 ifndef ignore-not-found
   ignore-not-found = false
 endif

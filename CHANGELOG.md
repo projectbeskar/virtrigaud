@@ -5,6 +5,41 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-24 12:08] - Chart: NetworkPolicies are never enabled by `helm upgrade --reuse-values`
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `charts/virtrigaud/templates/networkpolicy.yaml`, `_helpers.tpl`, `values.yaml`: the NetworkPolicy switch and settings moved from `security.networkPolicies` to a new top-level **`networkPolicy`** block (`enabled: false` by default). The legacy `security.networkPolicies` block is now ignored.
+  - **The bug:** v0.3.11 shipped `security.networkPolicies.enabled: true`, a setting nothing consumed at the time. `helm upgrade --reuse-values` reuses the **old** chart's defaults. So every install upgraded that way reached the templates from #327 with `enabled: true` and none of the newer settings (DNS/provider selectors, ports). The manager policy then rendered an empty egress peer (`spec.egress[0].to[0]: Required value: must specify a peer`) and the upgrade failed. Where the render did succeed, NetworkPolicies were switched on without the operator asking. That contradicts #327's "default-off for existing installs".
+  - **Found on the lab**, where a `--reuse-values` upgrade failed with exactly this error.
+- `charts/virtrigaud/templates/networkpolicy.yaml`: when `networkPolicy.enabled=true` but a required setting is missing (the `--reuse-values` case), the render fails with a message naming the missing key and the `--reset-then-reuse-values` remedy, instead of producing invalid objects.
+
+### Added
+- `hack/verify-networkpolicy-render.sh`, `make verify-networkpolicy-render`, and a CI step in *Validate Helm Charts*. The check renders only and asserts four things:
+  1. Default values render no NetworkPolicy.
+  2. `networkPolicy.enabled=true`, with and without webhooks, renders the manager and provider policies with only non-empty peers.
+  3. `--reuse-values` from v0.3.11 renders **no** NetworkPolicy. This is emulated by rendering the current templates with v0.3.11's `values.yaml` as the chart defaults.
+  4. Enabling policies on top of v0.3.11 defaults fails with the remedy message.
+
+### Changed
+- `charts/virtrigaud/README.md`:
+  - Documents the new `networkPolicy` key and why it moved.
+  - Adds an upgrade note: prefer `--reset-then-reuse-values` over `--reuse-values` when carrying custom values across chart versions.
+
+### Why
+A lab upgrade surfaced that the NetworkPolicy templates from #327 break `--reuse-values` upgrades from v0.3.11. Such an upgrade either fails outright, or silently enforces isolation that operators never asked for, which can black-hole webhook admission, gRPC or DNS. Gating on a key that no released chart ever set makes the feature truly opt-in for upgraded installs.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [x] Config change only
+- [ ] Documentation only
+
+> No release shipped the working `security.networkPolicies` templates; #327 is
+> unreleased. So the key move affects only installs built from `main` since #327
+> that set `security.networkPolicies.enabled=true`. They must set
+> `networkPolicy.enabled=true` instead.
+
 ## [2026-09-24 10:30] - vSphere Create no longer binds to a same-named VM it does not own, or clones a VM that is not a template
 **Author:** @wrkode (William Rizzo)
 

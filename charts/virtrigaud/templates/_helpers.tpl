@@ -205,7 +205,7 @@ the egress-list indentation of the call site, e.g.
   {{ include "virtrigaud.dnsEgressRule" . | nindent 4 }}
 */}}
 {{- define "virtrigaud.dnsEgressRule" -}}
-{{- $np := .Values.security.networkPolicies -}}
+{{- $np := .Values.networkPolicy -}}
 - to:
     - namespaceSelector:
         {{- toYaml $np.dnsNamespaceSelector | nindent 8 }}
