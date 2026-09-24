@@ -184,10 +184,38 @@ func recordedDescribe(t *testing.T, srv *routingRecorderServer) *providerv1.Desc
 	return d
 }
 
+// recordedPower returns the PowerRequest the server received.
+func recordedPower(t *testing.T, srv *routingRecorderServer) *providerv1.PowerRequest {
+	t.Helper()
+	p, ok := srv.got("Power").(*providerv1.PowerRequest)
+	require.True(t, ok, "Power never reached the server")
+	return p
+}
+
+// recordedReconfigure returns the ReconfigureRequest the server received.
+func recordedReconfigure(t *testing.T, srv *routingRecorderServer) *providerv1.ReconfigureRequest {
+	t.Helper()
+	r, ok := srv.got("Reconfigure").(*providerv1.ReconfigureRequest)
+	require.True(t, ok, "Reconfigure never reached the server")
+	return r
+}
+
+// routedOwners returns the owner every owner-carrying per-VM request arrived
+// with (Describe and Delete from slice 1; Power and Reconfigure from slice 2).
+func routedOwners(t *testing.T, srv *routingRecorderServer) map[string]*providerv1.ObjectIdentity {
+	t.Helper()
+	return map[string]*providerv1.ObjectIdentity{
+		"Delete":      recordedDelete(t, srv).Owner,
+		"Describe":    recordedDescribe(t, srv).Owner,
+		"Power":       recordedPower(t, srv).Owner,
+		"Reconfigure": recordedReconfigure(t, srv).Owner,
+	}
+}
+
 // TestClient_PerVMCalls_ThreadHostAndOwner is the transport round trip for a
 // clustered VM: every per-VM request carries the host (source_host_id for a
-// clone source), and Describe and Delete carry the owner the provider checks
-// against the VM's owner stamp.
+// clone source), and Describe, Delete, Power and Reconfigure carry the owner
+// the provider checks against the VM's owner stamp.
 func TestClient_PerVMCalls_ThreadHostAndOwner(t *testing.T) {
 	srv := &routingRecorderServer{}
 	cli := newTestClientForVMOps(t, srv, "libvirt", "routing")
@@ -198,10 +226,7 @@ func TestClient_PerVMCalls_ThreadHostAndOwner(t *testing.T) {
 	for name, idHost := range wireRouting(t, srv) {
 		assert.Equal(t, [2]string{"web", "host-a"}, idHost, "%s must carry the VM id and its host", name)
 	}
-	for name, got := range map[string]*providerv1.ObjectIdentity{
-		"Delete":   recordedDelete(t, srv).Owner,
-		"Describe": recordedDescribe(t, srv).Owner,
-	} {
+	for name, got := range routedOwners(t, srv) {
 		require.NotNil(t, got, "%s must carry the owner", name)
 		assert.Equal(t, "uid-1", got.Uid, name)
 		assert.Equal(t, "team-a", got.Namespace, name)
@@ -222,8 +247,9 @@ func TestClient_PerVMCalls_SingleHostSendsNoHost(t *testing.T) {
 	for name, idHost := range wireRouting(t, srv) {
 		assert.Equal(t, [2]string{"legacy", ""}, idHost, "%s must carry no host for a single-host VM", name)
 	}
-	assert.Nil(t, recordedDelete(t, srv).Owner, "a single-host Delete carries no owner")
-	assert.Nil(t, recordedDescribe(t, srv).Owner, "a single-host Describe carries no owner")
+	for name, got := range routedOwners(t, srv) {
+		assert.Nil(t, got, "a single-host %s carries no owner", name)
+	}
 }
 
 // TestClient_RoutedOwnerWithoutUIDIsNotSent pins that an owner with no UID is
@@ -232,6 +258,7 @@ func TestClient_RoutedOwnerWithoutUIDIsNotSent(t *testing.T) {
 	srv := &routingRecorderServer{}
 	cli := newTestClientForVMOps(t, srv, "libvirt", "routing-nouid")
 	driveEveryPerVMCall(t, cli, contracts.VMRef{ID: "web", HostID: "host-a", Owner: contracts.ObjectIdentity{Namespace: "ns", Name: "web"}})
-	assert.Nil(t, recordedDelete(t, srv).Owner)
-	assert.Nil(t, recordedDescribe(t, srv).Owner)
+	for name, got := range routedOwners(t, srv) {
+		assert.Nil(t, got, "%s: an owner without a UID is never sent", name)
+	}
 }

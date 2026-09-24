@@ -605,7 +605,9 @@ func (c *Client) Delete(ctx context.Context, vm contracts.VMRef) (taskRef string
 	return "", nil
 }
 
-// Power implements contracts.Provider.
+// Power implements contracts.Provider. For a routed VM (clustered provider)
+// it threads vm.HostID to the wire as target_host_id and vm.Owner as owner
+// (ADR-0007 Addendum A, slice 2); a single-host request carries neither.
 //
 // Records virtrigaud_vm_operations_total{operation="Power",...} via
 // deferred recordVMOp using the named retErr return value (G7.1 / #124).
@@ -624,6 +626,7 @@ func (c *Client) Power(ctx context.Context, vm contracts.VMRef, op contracts.Pow
 		Id:           vm.ID,
 		Op:           grpcOp,
 		TargetHostId: vm.HostID,
+		Owner:        routedOwner(vm),
 	}
 
 	// Set default graceful timeout for graceful shutdown operations
@@ -644,7 +647,9 @@ func (c *Client) Power(ctx context.Context, vm contracts.VMRef, op contracts.Pow
 	return "", nil
 }
 
-// Reconfigure implements contracts.Provider.
+// Reconfigure implements contracts.Provider. For a routed VM (clustered
+// provider) it threads vm.HostID to the wire as target_host_id and vm.Owner as
+// owner (ADR-0007 Addendum A, slice 2); a single-host request carries neither.
 //
 // Records virtrigaud_vm_operations_total{operation="Reconfigure",...}
 // via deferred recordVMOp using the named retErr return value (G7.1 /
@@ -664,6 +669,7 @@ func (c *Client) Reconfigure(ctx context.Context, vm contracts.VMRef, desired co
 		Id:           vm.ID,
 		DesiredJson:  string(desiredJSON),
 		TargetHostId: vm.HostID,
+		Owner:        routedOwner(vm),
 	})
 	if err != nil {
 		return "", c.mapGRPCError("reconfigure", err)

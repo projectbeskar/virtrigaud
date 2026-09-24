@@ -37,10 +37,12 @@ type VMRef struct {
 	// Owner is the identity of the VirtualMachine the call is made for — the
 	// identity Create stamps onto the hypervisor VM (#333). The operator fills it
 	// with HostID on a clustered provider, and the transport sends it only with a
-	// host (DescribeRequest.owner, DeleteRequest.owner; later slices reuse it for
-	// the other per-VM requests). A clustered provider acts on, or reports, a VM
-	// only when its owner stamp records Owner.UID, so a VirtualMachine can never
-	// read or destroy another tenant's VM that took over the name on its host.
+	// host (DescribeRequest.owner, DeleteRequest.owner, PowerRequest.owner,
+	// ReconfigureRequest.owner; later slices reuse it for the other per-VM
+	// requests). A clustered provider acts on, or reports, a VM only when its
+	// owner stamp records Owner.UID, so a VirtualMachine can never read, power,
+	// reconfigure or destroy another tenant's VM that took over the name on its
+	// host.
 	Owner ObjectIdentity
 }
 
