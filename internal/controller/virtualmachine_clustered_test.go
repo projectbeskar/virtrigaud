@@ -448,20 +448,51 @@ func TestReconcileVM_Clustered_DescribeRoutedAndPlacedBound(t *testing.T) {
 	assert.Equal(t, k8s.ReasonBound, placed.Reason)
 }
 
-// TestReconcileVM_Clustered_PowerNotSupportedIsNoLongerSpecial pins that slice
-// 2 removed the slice-1 2m re-check of an Unimplemented clustered Power: Power
-// is routed now, so a NotSupported answer takes the ordinary provider-error
-// path (Ready=False/ProviderError, the historical cadence).
-func TestReconcileVM_Clustered_PowerNotSupportedIsNoLongerSpecial(t *testing.T) {
+// TestReconcileVM_Clustered_RoutedCallNotSupportedBacksOff pins the generic
+// rule for routed calls (version skew: an older clustered provider image that
+// does not route an RPC yet answers Unimplemented): Describe, Power and
+// Reconfigure answered NotSupported are re-checked every 2 minutes, not every
+// 5 seconds, with the ordinary ProviderError condition.
+func TestReconcileVM_Clustered_RoutedCallNotSupportedBacksOff(t *testing.T) {
+	notSupported := contracts.NewNotSupportedError("not yet routed on a clustered provider")
+	cases := map[string]*routingProvider{
+		"describe": {describeErr: notSupported},
+		"power": {
+			describeResp: contracts.DescribeResponse{Exists: true, PowerState: "Off"},
+			powerErr:     notSupported,
+		},
+		"reconfigure": {
+			describeResp:   contracts.DescribeResponse{Exists: true, PowerState: "On"},
+			reconfigureErr: notSupported,
+		},
+	}
+	for name, prov := range cases {
+		t.Run(name, func(t *testing.T) {
+			vm := boundClusterVM("slow")
+			cpu, mem := int32(1), int64(4096)
+			vm.Status.CurrentResources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: &cpu, MemoryMiB: &mem}
+			r := clusteredFixture(t, prov, vm)
+			res, err := r.reconcileVM(context.Background(), getVM(t, r, "slow"))
+			require.NoError(t, err)
+			assert.Equal(t, routedOpNotSupportedRetryInterval, res.RequeueAfter)
+		})
+	}
+}
+
+// TestReconcileVM_SingleHost_NotSupportedKeepsHistoricalCadence: the backoff
+// is for routed calls only.
+func TestReconcileVM_SingleHost_NotSupportedKeepsHistoricalCadence(t *testing.T) {
+	vm := clusterVM("legacy", clusteredNS, "prov-single")
+	vm.Status.ID = "legacy"
 	prov := &routingProvider{
 		describeResp: contracts.DescribeResponse{Exists: true, PowerState: "Off"},
 		powerErr:     contracts.NewNotSupportedError("power: not supported"),
 	}
-	r := clusteredFixture(t, prov, boundClusterVM("slow"))
-	res, err := r.reconcileVM(context.Background(), getVM(t, r, "slow"))
+	r := newTestReconciler(coverageTestScheme(t), &stubResolver{provider: prov}, vm,
+		withRuntime(singleProviderCR("prov-single", clusteredNS)), smallVMClass(clusteredNS), minimalVMImage(clusteredNS))
+	res, err := r.reconcileVM(context.Background(), getVM(t, r, "legacy"))
 	require.NoError(t, err)
 	assert.Equal(t, providerErrorRetryInterval, res.RequeueAfter)
-	assert.Equal(t, k8s.ReasonProviderError, readyReason(getVM(t, r, "slow")))
 }
 
 // TestReconcileVM_Clustered_NotFoundIsNeverRecreated is A4: a clustered VM its
@@ -546,7 +577,8 @@ func TestHandleDeletion_SingleHost_DeleteCarriesNoHost(t *testing.T) {
 // guard against an accidental tight loop constant regression.
 func TestClusteredRequeueCadencesAreNotTight(t *testing.T) {
 	for _, d := range []time.Duration{placementUnboundRetryInterval, pendingHostUnavailableRetryInterval,
-		vmMissingOnHostRetryInterval, boundHostUnavailableRetryInterval, vmCreateConflictRetryInterval} {
+		vmMissingOnHostRetryInterval, boundHostUnavailableRetryInterval, vmCreateConflictRetryInterval,
+		routedOpNotSupportedRetryInterval} {
 		assert.GreaterOrEqual(t, d, 30*time.Second)
 	}
 }

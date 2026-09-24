@@ -132,6 +132,12 @@ const (
 	// reports it missing (A4). It is never re-created; the re-check only notices
 	// an administrator restoring the domain.
 	vmMissingOnHostRetryInterval = 2 * time.Minute
+	// routedOpNotSupportedRetryInterval re-checks a clustered VM whose provider
+	// answers a routed per-VM call (Describe, Power, Reconfigure) with
+	// Unimplemented — e.g. a manager on this version talking to an older
+	// clustered provider image that does not route the RPC yet — so the
+	// unsupported call is not hammered every few seconds (routedCallRetryAfter).
+	routedOpNotSupportedRetryInterval = 2 * time.Minute
 	// boundHostUnavailableRetryInterval re-checks a clustered VM whose bound
 	// host is unknown, draining or unreachable (a host-scoped Unavailable on
 	// Describe, Power or Reconfigure). A dead host must not turn every VM on it
@@ -471,7 +477,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Failed to describe VM: %v", err))
 		metrics.RecordError(errReasonProviderDescribe, metrics.ComponentManager)
 		r.updateStatus(ctx, vm)
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		return ctrl.Result{RequeueAfter: routedCallRetryAfter(ref, err)}, nil
 	}
 
 	if !desc.Exists {
@@ -1169,7 +1175,7 @@ func (r *VirtualMachineReconciler) adjustPowerState(
 		logger.Error(err, "Failed to adjust power state")
 		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Failed to adjust power state: %v", err))
 		r.updateStatus(ctx, vm)
-		return ctrl.Result{RequeueAfter: providerErrorRetryInterval}, nil
+		return ctrl.Result{RequeueAfter: routedCallRetryAfter(ref, err)}, nil
 	}
 
 	if taskRef != "" {
@@ -1748,7 +1754,7 @@ func (r *VirtualMachineReconciler) reconfigureVM(
 		logger.Error(err, "Failed to reconfigure VM")
 		k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Failed to reconfigure VM: %v", err))
 		r.updateStatus(ctx, vm)
-		return ctrl.Result{RequeueAfter: providerErrorRetryInterval}, nil
+		return ctrl.Result{RequeueAfter: routedCallRetryAfter(ref, err)}, nil
 	}
 
 	// Update status with reconfiguration info

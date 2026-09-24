@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -366,6 +367,22 @@ func (r *VirtualMachineReconciler) handleBoundHostUnavailable(
 	metrics.RecordError(errReason, metrics.ComponentManager)
 	r.updateStatus(ctx, vm)
 	return ctrl.Result{RequeueAfter: boundHostUnavailableRetryInterval}, nil
+}
+
+// routedCallRetryAfter is the requeue after a failed per-VM provider call of
+// the VM controller (Describe, Power, Reconfigure) that handleRoutedOpError
+// did not take. It is one rule for every routed call, not a per-operation one:
+// a routed (clustered) call the provider answers with Unimplemented
+// (contracts NotSupported) is re-checked every
+// routedOpNotSupportedRetryInterval rather than every few seconds, so a
+// manager talking to an older clustered provider image that does not route
+// that RPC yet (version skew) does not hammer it. Everything else — and every
+// single-host / thin-client call — keeps the historical 5s cadence.
+func routedCallRetryAfter(ref contracts.VMRef, err error) time.Duration {
+	if ref.Routed() && contracts.IsNotSupported(err) {
+		return routedOpNotSupportedRetryInterval
+	}
+	return providerErrorRetryInterval
 }
 
 // handleRoutedOpError handles a failed Power or Reconfigure of a CLUSTERED VM
