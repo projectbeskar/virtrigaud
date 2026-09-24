@@ -91,6 +91,11 @@ func (p *Provider) Clone(ctx context.Context, req contracts.CloneRequest) (contr
 	if req.TargetName == "" {
 		return contracts.CloneResponse{}, contracts.NewInvalidSpecError("clone target name is required", nil)
 	}
+	// A target name virsh would resolve as a domain ID/UUID would make every
+	// later by-name operation on the clone address a different domain.
+	if err := ambiguousDomainNameError(req.TargetName); err != nil {
+		return contracts.CloneResponse{}, err
+	}
 
 	storageProvider := NewStorageProvider(p.virshProvider)
 
@@ -102,7 +107,11 @@ func (p *Provider) Clone(ctx context.Context, req contracts.CloneRequest) (contr
 			fmt.Sprintf("source VM %q not found", req.SourceVmID), err)
 	}
 
-	// Reject a target-name collision up front rather than failing mid-define.
+	// Reject a target-name collision up front rather than failing mid-define:
+	// a clone NEVER binds to, or redefines, an existing domain of the target
+	// name, whoever owns it. (Should one appear between this check and the
+	// define, the define itself fails: the clone carries a fresh random UUID and
+	// libvirt refuses a same-named define under a different UUID.)
 	domains, err := p.virshProvider.listDomains(ctx)
 	if err != nil {
 		return contracts.CloneResponse{}, contracts.NewRetryableError("failed to list domains", err)
@@ -407,6 +416,15 @@ func rewriteDomainXMLForClone(sourceXML, targetName, srcDiskPath, targetDiskPath
 	// source has no <nvram>: this is a no-op and both nvram paths stay empty.
 	out, srcNvramPath, targetNvramPath = rewriteNVRAMPath(out, targetName)
 
+	// Drop the SOURCE VirtualMachine's owner stamp: the clone is a different
+	// domain, bound to a VirtualMachine the clone controller creates afterwards,
+	// and must not claim the source's owner. The stamp's bytes are spliced out
+	// verbatim; the rest of the document is untouched.
+	out, err = stripOwnerMetadata(out)
+	if err != nil {
+		return "", "", "", fmt.Errorf("strip source owner metadata: %w", err)
+	}
+
 	return out, srcNvramPath, targetNvramPath, nil
 }
 
@@ -535,19 +553,6 @@ func replaceFirst(re *regexp.Regexp, s, repl string) string {
 		return s
 	}
 	return s[:loc[0]] + repl + s[loc[1]:]
-}
-
-// generateRandomUUID returns a random RFC-4122 v4 UUID string. Used to give the
-// cloned domain a fresh identity (libvirt rejects a duplicate UUID on define).
-func generateRandomUUID() (string, error) {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", err
-	}
-	// Set version (4) and variant (10xx) bits.
-	b[6] = (b[6] & 0x0f) | 0x40
-	b[8] = (b[8] & 0x3f) | 0x80
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
 }
 
 // generateRandomMAC returns a random locally-administered, unicast MAC address

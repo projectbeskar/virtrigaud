@@ -42,8 +42,15 @@ import (
 // byte-for-byte unchanged. A CLUSTERED provider (topology: cluster) instead
 // routes the create onto the host the operator's scheduler bound this VM to,
 // named by req.TargetHostID (see createClustered).
+//
+// On both paths a name virsh would resolve as a domain ID or UUID is rejected
+// up front (InvalidSpec), before any host is touched (ambiguousDomainNameError).
 func (p *Provider) Create(ctx context.Context, req contracts.CreateRequest) (contracts.CreateResponse, error) {
 	log.Printf("INFO Creating VM with cloud-init support: %s", req.Name)
+
+	if err := ambiguousDomainNameError(req.Name); err != nil {
+		return contracts.CreateResponse{}, err
+	}
 
 	if p.clustered() {
 		return p.createClustered(ctx, req)
@@ -56,12 +63,15 @@ func (p *Provider) Create(ctx context.Context, req contracts.CreateRequest) (con
 }
 
 // createVM runs the create pipeline against a single host's VirshProvider vp: an
-// idempotent pre-check (a domain of the same name already on that host is a
-// success no-op) followed by the full cloud-init + storage create. It is the
-// shared core of both the single-host path (vp == p.virshProvider) and the
+// ownership-checked pre-check for a domain of the same name already on that host
+// (bindExistingDomain: an idempotent success ONLY if that domain is stamped with
+// req.Owner's UID, a non-retryable Conflict otherwise) followed by the full
+// cloud-init + storage create, which stamps req.Owner onto the new domain. It is
+// the shared core of both the single-host path (vp == p.virshProvider) and the
 // clustered create-on-host path (vp == the leased target host's provider), so a
 // clustered create is byte-for-byte the single-host create — only the host the
-// commands run against differs (ADR-0007 D9).
+// commands run against differs (ADR-0007 D9) — and the ownership rule applies
+// to both.
 func (p *Provider) createVM(ctx context.Context, vp *VirshProvider, req contracts.CreateRequest) (contracts.CreateResponse, error) {
 	if vp == nil {
 		return contracts.CreateResponse{}, contracts.NewRetryableError("virsh provider not initialized", nil)
@@ -75,10 +85,7 @@ func (p *Provider) createVM(ctx context.Context, vp *VirshProvider, req contract
 
 	for _, domain := range domains {
 		if domain.Name == req.Name {
-			log.Printf("INFO Domain %s already exists with state: %s", req.Name, domain.State)
-			return contracts.CreateResponse{
-				ID: req.Name,
-			}, nil
+			return bindExistingDomain(ctx, vp, req, domain.State)
 		}
 	}
 
@@ -1357,8 +1364,19 @@ func (p *Provider) generateDomainXMLWithStorage(ctx context.Context, vp *VirshPr
 		tpmEnabled = req.Class.SecurityProfile.TPMEnabled
 	}
 
-	// Generate UUID for the domain
-	uuid := p.generateUUID()
+	// A fresh, unpredictable RFC 4122 v4 UUID (crypto/rand) for the domain. It is
+	// also what makes a racing same-named create fail at define time rather than
+	// redefine the other domain: libvirt refuses a define whose name exists under
+	// a different UUID.
+	uuid, err := generateRandomUUID()
+	if err != nil {
+		return "", fmt.Errorf("generate domain UUID: %w", err)
+	}
+
+	// Stamp the requesting VirtualMachine's identity into <metadata> so a later
+	// same-named create can prove ownership (bindExistingDomain). Empty when the
+	// request carries no owner UID.
+	ownerMetadataXML := renderOwnerMetadataXML(req.Owner)
 
 	// Build disk devices XML. diskPath/cloudInitISOPath are provider-computed
 	// host file paths (pool directory + a name derived from req.Name), but are
@@ -1438,7 +1456,7 @@ func (p *Provider) generateDomainXMLWithStorage(ctx context.Context, vp *VirshPr
 	domainXML := fmt.Sprintf(`<domain type='%s'>
   <name>%s</name>
   <uuid>%s</uuid>
-  %s
+%s  %s
   %s
   %s
   <os>
@@ -1519,6 +1537,7 @@ func (p *Provider) generateDomainXMLWithStorage(ctx context.Context, vp *VirshPr
 		// element as defense in depth (issue #260).
 		xmlEscape(req.Name),
 		uuid,
+		ownerMetadataXML, // "" or a full "  <metadata>...</metadata>\n" block; values escaped
 		cpuMem.Memory,
 		cpuMem.CurrentMemory,
 		cpuMem.VCPU,
@@ -1566,12 +1585,6 @@ func domainTypeFromProbe(readable, exists bool) string {
 		log.Printf("INFO Host has no /dev/kvm; using domain type 'qemu' (software emulation)")
 	}
 	return "qemu"
-}
-
-// generateUUID creates a simple UUID for the domain
-func (p *Provider) generateUUID() string {
-	// Simple UUID generation for demo - in production, use proper UUID library
-	return fmt.Sprintf("550e8400-e29b-41d4-a716-%012d", time.Now().UnixNano()%1000000000000)
 }
 
 // createDomainDefinition writes the domain XML to a temporary file on the host

@@ -726,6 +726,12 @@ topology, never receive it).
 - **vSphere / Proxmox / mock** — thin-client and single-host providers ignore the
   new field; it simply compiles through their unchanged `Create`.
 
+The clustered create runs the same create core as the single-host path, so the
+libvirt domain-ownership rule (`CreateRequest.owner`, field 11 — an existing
+same-named domain on the target host is bound only if it is stamped with the
+requesting VirtualMachine's UID) applies on the chosen host too; see
+[`libvirt-domain-ownership.md`](libvirt-domain-ownership.md).
+
 ### The record: `VirtualMachine.status.placement` (now written by the binding controller)
 
 `status.placement` is the **durable source of truth** for where a VM runs

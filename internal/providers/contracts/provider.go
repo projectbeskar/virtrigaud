@@ -62,6 +62,35 @@ type CreateRequest struct {
 	// operator populates it only for a Provider with topology: cluster, and a
 	// clustered provider rejects an empty value rather than defaulting to a host.
 	TargetHostID string
+	// Owner identifies the Kubernetes object (the VirtualMachine) this create is
+	// performed for, threaded to the wire as CreateRequest.owner. A provider that
+	// keys hypervisor VMs by a name that is not unique across tenants (libvirt:
+	// the bare VirtualMachine name) stamps it onto the VM it creates and binds to
+	// an already-existing VM of the requested name ONLY when that VM carries this
+	// Owner.UID — otherwise it fails closed with a Conflict error instead of
+	// silently binding to another tenant's VM. The zero value (e.g. from an older
+	// manager) never authorizes a bind. Providers that do not key by a shared
+	// name ignore it.
+	Owner ObjectIdentity
+}
+
+// ObjectIdentity names a Kubernetes object: the authoritative UID plus the
+// informational namespace and name. It is the manager-side mirror of the
+// provider.v1 ObjectIdentity message.
+type ObjectIdentity struct {
+	// UID is the object's Kubernetes UID — unique for its whole lifetime and
+	// never reused, so it is the only field that may be used for authorization.
+	UID string
+	// Namespace is the object's namespace (informational: audit, diagnostics).
+	Namespace string
+	// Name is the object's name (informational: audit, diagnostics).
+	Name string
+}
+
+// IsZero reports whether the identity carries no UID, i.e. no owner is known.
+// Only the UID is considered: a namespace/name without a UID proves nothing.
+func (o ObjectIdentity) IsZero() bool {
+	return o.UID == ""
 }
 
 // CreateResponse contains the result of a create operation

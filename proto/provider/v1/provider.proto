@@ -50,6 +50,18 @@ message CreateRequest {
   // silently defaulting to some host (honesty-first, D9). The operator sets it
   // only when creating a VM whose Provider has topology: cluster.
   string target_host_id = 10;
+
+  // owner identifies the Kubernetes object (the VirtualMachine) this create is
+  // performed for. A provider that keys hypervisor VMs by a name that is NOT
+  // unique across tenants (libvirt: the bare VirtualMachine name, no namespace)
+  // stamps it onto the VM it creates and, when a VM of the requested name
+  // already exists, treats the create as an idempotent success ONLY if that VM
+  // carries this owner's uid — otherwise it fails closed with ALREADY_EXISTS
+  // rather than silently binding to another tenant's VM. AGNOSTIC. Additive and
+  // backward-compatible: providers that do not key by a shared name ignore it;
+  // an unset owner (an older manager) never authorizes binding to an existing
+  // VM. The operator sets it on every create from vm.UID/namespace/name.
+  ObjectIdentity owner = 11;
 }
 
 message CreateResponse {
@@ -365,6 +377,16 @@ message GetCapabilitiesResponse {
   repeated string supported_import_backends = 15; // Import staging backends: "pvc"|"nfs"|"s3" (ADR-0006; empty == pvc-only)
   repeated string supported_transfer_modes = 16;  // Transfer modes: "relay"|"direct" (ADR-0006; empty == relay-only)
   bool supports_clustering = 17;                   // Provider fronts multiple hosts and implements host inventory (ListHosts/GetHostInfo) + host-targeted placement (ADR-0007 P1, D7). The remaining clustering flags (live/block migration, host evacuation, storage modes) are added by the migration slice.
+}
+
+// ObjectIdentity names a Kubernetes object on the wire (CreateRequest.owner).
+// uid is the authoritative identity (unique for the object's whole lifetime,
+// never reused after deletion); namespace and name are informational (audit,
+// operator diagnostics) and must never be used for authorization on their own.
+message ObjectIdentity {
+  string uid = 1;
+  string namespace = 2;
+  string name = 3;
 }
 
 // Provider service definition

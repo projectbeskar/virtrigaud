@@ -54,6 +54,12 @@ const (
 	ReasonWaitingForDependencies = "WaitingForDependencies"
 	// ReasonTaskInProgress indicates async task in progress
 	ReasonTaskInProgress = "TaskInProgress"
+	// ReasonProviderConflict indicates the provider refused to create the
+	// resource because one with the same provider-side identity (e.g. a libvirt
+	// domain name) already exists and is NOT owned by this object. It is never
+	// resolved by retrying: an operator must adopt the existing resource through
+	// the adoption flow, remove it, or rename this object.
+	ReasonProviderConflict = "ProviderConflict"
 )
 
 // Placement / scheduling condition reasons (ADR-0007 P1, D4). Surfaced on a

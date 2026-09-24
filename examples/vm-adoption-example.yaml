@@ -56,6 +56,12 @@ spec:
 
 ---
 # Example 3: Libvirt Provider with VM Adoption enabled
+#
+# Adoption is THE way to bring a pre-existing libvirt domain under management.
+# Creating a VirtualMachine whose name matches an existing domain does NOT bind
+# to it: the libvirt provider only binds a domain stamped with that
+# VirtualMachine's own UID, and otherwise fails the create with a
+# Ready=False / ProviderConflict condition. See docs/libvirt-domain-ownership.md.
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: Provider
 metadata:

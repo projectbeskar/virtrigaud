@@ -10,5 +10,6 @@ This directory holds in-tree references that are most useful alongside the sourc
 | [`docs/adr/`](adr/) | Architecture Decision Records — design decisions that are binding on the codebase |
 | [`docs/image-preparation.md`](image-preparation.md) | Image-preparation lifecycle: how `VMImage` prepare-on-create works and the `VMImage.status` fields it surfaces |
 | [`docs/clustered-provider-inventory.md`](clustered-provider-inventory.md) | Clustered-provider inventory model: the `Host` and `HostPool` CRDs (ADR-0007 P1, additive; single-host providers unchanged) |
+| [`docs/libvirt-domain-ownership.md`](libvirt-domain-ownership.md) | libvirt domain ownership: the `CreateRequest.owner` stamp, fail-closed binding of pre-existing domains, the `ProviderConflict` condition, and upgrade notes |
 
 For user guides, operator documentation, provider capabilities, and the API reference, see the website.
