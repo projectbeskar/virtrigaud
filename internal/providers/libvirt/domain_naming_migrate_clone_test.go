@@ -154,6 +154,12 @@ func TestImportedDiskVolumeName(t *testing.T) {
 
 	_, err = importedDiskVolumeName(ownerTeamA, "db-migrated")
 	requireInvalidSpec(t, err)
+
+	// The #334 reserved-name rule is suffix-based, so it covers the namespaced
+	// artifacts too; a dotted base image name is still an ordinary image.
+	assert.True(t, reservedImageName(importedVolumeFileName("team-a.web")))
+	assert.True(t, reservedImageName(vmDiskVolumeName("team-a.web")+qcow2Ext))
+	assert.False(t, reservedImageName("team-a.ubuntu-24.04.qcow2"))
 }
 
 // TestClone_TargetIsNamespaced clones team-a/web into team-b/web-clone: the new
