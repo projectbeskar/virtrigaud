@@ -85,6 +85,74 @@ func parseDomblklistPrimaryTarget(domblklistStdout string) (string, error) {
 	return "", fmt.Errorf("no primary disk target found in domblklist output")
 }
 
+// Disk source types `virsh domblklist --details` reports whose source is a
+// host path a volume can be resized by.
+const (
+	diskSourceTypeFile  = "file"
+	diskSourceTypeBlock = "block"
+)
+
+// primaryDisk is the primary (boot) disk of a domain as `virsh domblklist
+// --details` reports it: its source type (file / block), target device (vda)
+// and source path on the host.
+type primaryDisk struct {
+	sourceType string
+	target     string
+	path       string
+}
+
+// parseDomblklistDetailsPrimary extracts the primary disk from `virsh
+// domblklist --details <dom>` output:
+//
+//	Type   Device   Target   Source
+//	------------------------------------------------------------
+//	file   disk     vda      /var/lib/libvirt/images/web-disk.qcow2
+//	file   cdrom    hda      /var/lib/libvirt/images/web-cidata.iso
+//
+// The first device=disk row with a real source that is not a cloud-init ISO
+// wins (the same heuristic as parseDomblklistPrimaryTarget). Only a file or
+// block source with an absolute path is returned: a network disk (rbd, iscsi,
+// ...) has no host path to resize, and anything that is not an absolute path is
+// refused rather than handed to virsh.
+func parseDomblklistDetailsPrimary(stdout string) (primaryDisk, error) {
+	lines := strings.Split(strings.TrimSpace(stdout), "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if i == 0 || trimmed == "" || strings.HasPrefix(trimmed, "-") {
+			continue
+		}
+		fields := strings.Fields(trimmed)
+		if len(fields) < 4 || fields[1] != "disk" {
+			continue
+		}
+		source := strings.Join(fields[3:], " ")
+		if source == "-" || strings.HasSuffix(source, "-cidata.iso") || strings.HasSuffix(source, "cloud-init.iso") {
+			continue
+		}
+		disk := primaryDisk{sourceType: fields[0], target: fields[2], path: source}
+		if disk.sourceType != diskSourceTypeFile && disk.sourceType != diskSourceTypeBlock {
+			return primaryDisk{}, fmt.Errorf("primary disk %s has source type %q, which has no host path to resize", disk.target, disk.sourceType)
+		}
+		if !strings.HasPrefix(disk.path, "/") {
+			return primaryDisk{}, fmt.Errorf("primary disk %s has a source that is not an absolute path", disk.target)
+		}
+		return disk, nil
+	}
+	return primaryDisk{}, fmt.Errorf("no primary disk found in domblklist --details output")
+}
+
+// domainPrimaryDisk reads the primary disk of the domain addressed by handle on
+// vp's host (`virsh domblklist <handle> --details`). The clustered Reconfigure
+// uses it so a resize acts on the owner-checked domain's own disk, never on a
+// volume found by a naming convention (ADR-0007 Addendum A, slice 2).
+func domainPrimaryDisk(ctx context.Context, vp *VirshProvider, handle string) (primaryDisk, error) {
+	res, err := vp.runVirshCommand(ctx, "domblklist", handle, "--details")
+	if err != nil {
+		return primaryDisk{}, fmt.Errorf("list block devices of domain %s: %w", handle, err)
+	}
+	return parseDomblklistDetailsPrimary(res.Stdout)
+}
+
 // parseDomblkinfoCapacity extracts the "Capacity:" value (in bytes) from
 // `virsh domblkinfo <dom> <target>` output. domblkinfo reports:
 //
@@ -179,18 +247,36 @@ func fsGrowCommands(target string) []string {
 // request was a no-op.
 //
 // Every step runs on vp — the host the Reconfigure was routed to (ADR-0007
-// Addendum A, slice 2) — and addresses the domain by d.handle; only the
-// backing volume is found by d.name (the "<name>-disk" pool convention).
+// Addendum A, slice 2) — and addresses the domain by d.handle.
+//
+// Step 3 differs by path. Single-host (historical, unchanged) resizes the
+// volume named "<name>-disk" in the default pool. A clustered target
+// (d.diskByPath) never looks a volume up by name: it reads the owner-checked
+// domain's own primary disk (domblklist --details) and, for a block-device
+// disk (e.g. an LVM volume, which blockresize cannot grow by itself), resizes
+// that device by its path. A file-backed disk is left to blockresize, which
+// grows the image itself and persists the new size; resizing a qcow2 file
+// underneath the running QEMU would be unsafe.
 func growDiskOnline(ctx context.Context, vp *VirshProvider, d domainTarget, desiredDiskGB int, sp *StorageProvider) (grew bool, err error) {
 	id := d.name
 	// Resolve the primary disk target from the live domain topology.
-	blkResult, err := vp.runVirshCommand(ctx, "domblklist", d.handle)
-	if err != nil {
-		return false, fmt.Errorf("list block devices for domain %s: %w", id, err)
-	}
-	target, err := parseDomblklistPrimaryTarget(blkResult.Stdout)
-	if err != nil {
-		return false, fmt.Errorf("resolve primary disk target for domain %s: %w", id, err)
+	var target string
+	var disk primaryDisk
+	if d.diskByPath {
+		disk, err = domainPrimaryDisk(ctx, vp, d.handle)
+		if err != nil {
+			return false, fmt.Errorf("resolve primary disk of domain %s: %w", id, err)
+		}
+		target = disk.target
+	} else {
+		blkResult, lerr := vp.runVirshCommand(ctx, "domblklist", d.handle)
+		if lerr != nil {
+			return false, fmt.Errorf("list block devices for domain %s: %w", id, lerr)
+		}
+		target, err = parseDomblklistPrimaryTarget(blkResult.Stdout)
+		if err != nil {
+			return false, fmt.Errorf("resolve primary disk target for domain %s: %w", id, err)
+		}
 	}
 
 	// Read the current virtual capacity (bytes) for the grow-only guard.
@@ -214,13 +300,22 @@ func growDiskOnline(ctx context.Context, vp *VirshProvider, d domainTarget, desi
 	log.Printf("INFO Growing disk for running domain %s target %s: %d bytes -> %d bytes (%dGB)",
 		id, target, currentBytes, desiredBytes, desiredDiskGB)
 
-	// Persist the larger size to the backing volume first so the size survives a
-	// reboot and the qcow2 file is large enough for blockresize to expose. This
-	// uses the existing best-effort volume convention; if it fails we still try
-	// blockresize, but log the volume failure. ResizeVolume is grow-only-safe
-	// for files (qemu-img/vol-resize grows the file).
-	if verr := sp.ResizeVolume(ctx, clonePoolName, vmDiskVolumeName(id), desiredDiskGB); verr != nil {
-		log.Printf("WARN Backing volume resize for domain %s did not apply (continuing to blockresize): %v", id, verr)
+	// Grow the backing storage first where blockresize cannot. Single-host keeps
+	// the historical best-effort volume convention ("<name>-disk" in the default
+	// pool; if it fails we still try blockresize, but log the volume failure).
+	// A clustered target resizes only a block-device disk, by its own path; see
+	// the function comment.
+	switch {
+	case !d.diskByPath:
+		if verr := sp.ResizeVolume(ctx, clonePoolName, vmDiskVolumeName(id), desiredDiskGB); verr != nil {
+			log.Printf("WARN Backing volume resize for domain %s did not apply (continuing to blockresize): %v", id, verr)
+		}
+	case disk.sourceType == diskSourceTypeBlock:
+		if verr := sp.ResizeVolumeByPath(ctx, disk.path, desiredDiskGB); verr != nil {
+			log.Printf("WARN Block device resize for domain %s did not apply (continuing to blockresize): %v", id, verr)
+		}
+	default:
+		log.Printf("INFO Domain %s target %s is file-backed; blockresize grows the image and persists its size", id, target)
 	}
 
 	// Grow the live block device so QEMU exposes the new size to the guest.

@@ -486,6 +486,24 @@ func (s *StorageProvider) ResizeVolume(ctx context.Context, poolName, volumeName
 	return nil
 }
 
+// ResizeVolumeByPath grows the storage volume whose path on the host is path —
+// a disk a domain actually uses, as `virsh domblklist --details` reports it —
+// to newSizeGB (`virsh vol-resize --vol <path> --capacity <n>G`). libvirt finds
+// the volume in whichever active pool holds that path. The volume and capacity
+// are passed as named options so that no value can be read as another option.
+// It never shrinks (vol-resize refuses a shrink without --shrink).
+func (s *StorageProvider) ResizeVolumeByPath(ctx context.Context, path string, newSizeGB int) error {
+	if !strings.HasPrefix(path, "/") {
+		return fmt.Errorf("resize volume: %q is not an absolute path", path)
+	}
+	log.Printf("INFO Resizing volume %s to %dGB", path, newSizeGB)
+	if _, err := s.virshProvider.runVirshCommand(ctx, "vol-resize", "--vol", path, "--capacity", fmt.Sprintf("%dG", newSizeGB)); err != nil {
+		return fmt.Errorf("resize volume %s: %w", path, err)
+	}
+	log.Printf("INFO Successfully resized volume: %s", path)
+	return nil
+}
+
 // GetPredefinedTemplates returns a list of commonly used cloud images
 func (s *StorageProvider) GetPredefinedTemplates() []*ImageTemplate {
 	return []*ImageTemplate{

@@ -154,20 +154,33 @@ func TestClustered_Reconfigure_RoutedToLeasedHostOnTheCheckedDomain(t *testing.T
 			`host-b qemu-agent-command --timeout 3 ` + uuid + ` {"execute":"guest-exec-status","arguments":{"pid":7}}`,
 		}
 	}
+	details := "host-b domblklist " + uuid + " --details"
+	pingOnly := `host-b qemu-agent-command --timeout 3 ` + uuid + ` {"execute":"guest-ping"}`
 	cases := []struct {
 		name    string
 		running bool
+		script  map[string]string // per-host fake behavior files
 		desired contracts.CreateRequest
 		want    []string
 	}{
 		{
+			// The offline resize acts on the checked domain's own primary disk,
+			// by its path — never on a "<name>-disk" volume found by name.
 			name: "offline CPU, memory and disk", desired: reconfigureTo(4, 4096, 20),
 			want: []string{
 				"host-b setvcpus " + uuid + " 4 --config",
 				"host-b setmem " + uuid + " 4194304K --config",
 				"host-b setmaxmem " + uuid + " 4194304K --config",
-				"host-b vol-resize web-disk 20G --pool default",
+				details,
+				"host-b vol-resize --vol " + opsDiskPath + " --capacity 20G",
 			},
+		},
+		{
+			// A network disk has no host path to resize: nothing is resized, and
+			// the offline resize stays non-fatal as before.
+			name: "offline disk on a network source is not resized", desired: reconfigureTo(0, 0, 20),
+			script: map[string]string{"disktype": "network", "disksource": "pool/web"},
+			want:   []string{details},
 		},
 		{
 			name: "online CPU and memory", running: true, desired: reconfigureTo(4, 4096, 0),
@@ -177,14 +190,29 @@ func TestClustered_Reconfigure_RoutedToLeasedHostOnTheCheckedDomain(t *testing.T
 			},
 		},
 		{
+			// A file-backed disk is grown by blockresize alone (no resize of the
+			// image underneath the running QEMU); the filesystem grow runs
+			// through the leased host's guest agent.
 			name: "online disk grow with the in-guest filesystem grow on the leased host", running: true, desired: reconfigureTo(0, 0, 20),
 			want: append(append(append([]string{
-				"host-b domblklist " + uuid,
+				details,
 				"host-b domblkinfo " + uuid + " vda",
-				"host-b vol-resize web-disk 20G --pool default",
 				"host-b blockresize " + uuid + " vda 20G",
-				`host-b qemu-agent-command --timeout 3 ` + uuid + ` {"execute":"guest-ping"}`,
+				pingOnly,
 			}, agent("growpart /dev/vda 1")...), agent("resize2fs /dev/vda1")...), agent("xfs_growfs /")...),
+		},
+		{
+			// A block-device disk (e.g. an LVM volume) is grown by its own path
+			// first, since blockresize cannot grow the device itself.
+			name: "online disk grow of a block device", running: true, desired: reconfigureTo(0, 0, 20),
+			script: map[string]string{"disktype": "block", "disksource": "/dev/vg0/web", "fail-qemu-agent-command": ""},
+			want: []string{
+				details,
+				"host-b domblkinfo " + uuid + " vda",
+				"host-b vol-resize --vol /dev/vg0/web --capacity 20G",
+				"host-b blockresize " + uuid + " vda 20G",
+				pingOnly,
+			},
 		},
 	}
 	for _, tc := range cases {
@@ -192,6 +220,9 @@ func TestClustered_Reconfigure_RoutedToLeasedHostOnTheCheckedDomain(t *testing.T
 			fx, p := clusteredOpsFixture(t)
 			if tc.running {
 				fx.script("host-b", "state", "running\n")
+			}
+			for name, content := range tc.script {
+				fx.script("host-b", name, content)
 			}
 			_, err := p.Reconfigure(context.Background(), webOnHostB, tc.desired)
 			require.NoError(t, err)

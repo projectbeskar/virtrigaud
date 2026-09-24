@@ -61,7 +61,9 @@ const opsDiskPath = "/var/lib/libvirt/images/" + opsDomainName + "-disk.qcow2"
 // tag is the URI path, "local" without -c), logs every call as
 // "<host> <args>", and answers the subcommands Power and Reconfigure use. Per
 // host, a file named fail-<subcommand> makes that subcommand fail, "state"
-// holds the domstate answer (default "shut off"), and dom-<name>.xml marks a
+// holds the domstate answer (default "shut off"), "disktype" / "disksource"
+// override the primary disk `domblklist --details` reports (default: a file
+// disk at $FAKE_DISK_PATH), and dom-<name>.xml marks a
 // domain (by name or UUID) as present; a domain command on anything else fails
 // like libvirt's "failed to get domain".
 const opsFakeVirsh = `#!/bin/sh
@@ -89,7 +91,13 @@ case "$1" in
   vol-resize|define) fail "$1"; exit 0 ;;
   domblklist)
     fail domblklist
-    printf ' Target   Source\n------------------------------------------------\n vda      %s\n' "$FAKE_DISK_PATH" ;;
+    case "$*" in
+      *--details*)
+        t=file; if [ -f "$d/disktype" ]; then t=$(cat "$d/disktype"); fi
+        src="$FAKE_DISK_PATH"; if [ -f "$d/disksource" ]; then src=$(cat "$d/disksource"); fi
+        printf ' Type   Device   Target   Source\n------------------------------------------------\n %s   disk     vda      %s\n file   cdrom    hda      /var/lib/libvirt/images/web-cidata.iso\n' "$t" "$src" ;;
+      *) printf ' Target   Source\n------------------------------------------------\n vda      %s\n' "$FAKE_DISK_PATH" ;;
+    esac ;;
   domblkinfo)
     fail domblkinfo
     printf 'Capacity:       10737418240\nAllocation:     1073741824\nPhysical:       1073741824\n' ;;

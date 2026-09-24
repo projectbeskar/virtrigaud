@@ -752,9 +752,14 @@ type domainTarget struct {
 	// handle is what every virsh command addresses the domain by: its name
 	// (single-host) or its owner-checked UUID (clustered).
 	handle string
-	// name is the domain name. It keys name-derived resources (the
-	// "<name>-disk" volume) and log lines.
+	// name is the domain name. It keys log lines and, on a single-host
+	// provider only, the name-derived "<name>-disk" volume Reconfigure resizes.
 	name string
+	// diskByPath makes Reconfigure resize the domain's own primary disk, read
+	// from the domain (domblklist --details) and addressed by its path, instead
+	// of the "<name>-disk" volume found by name. Set for the owner-checked
+	// clustered target; false on single-host, whose resize is unchanged.
+	diskByPath bool
 }
 
 // byName is the single-host target: the domain addressed by its name, exactly
@@ -795,7 +800,7 @@ func ownedDomainTarget(ctx context.Context, vp *VirshProvider, host hostconn.Hos
 		return domainTarget{}, contracts.NewRetryableError(
 			fmt.Sprintf("cannot verify the identity of domain %q on host %s (no UUID in its definition)", id, host), nil)
 	}
-	return domainTarget{handle: own.uuid, name: id}, nil
+	return domainTarget{handle: own.uuid, name: id, diskByPath: true}, nil
 }
 
 // unsupportedPowerOpError is the InvalidSpec answer to a power operation the
@@ -1138,10 +1143,15 @@ func (p *Provider) reconfigureOn(ctx context.Context, c libvirtConn, d domainTar
 				}
 			} else {
 				// Offline: resize the backing volume so the larger size applies
-				// on next boot. Find the VM's disk volume by the pool convention.
-				volumeName := vmDiskVolumeName(id)
+				// on next boot. Single-host finds the VM's disk volume by the pool
+				// convention (historical). A clustered target resizes the
+				// owner-checked domain's own primary disk, by its path.
 				log.Printf("INFO Attempting offline disk resize for VM %s to %dGB", id, desiredDiskGB)
-				err = storageProvider.ResizeVolume(ctx, "default", volumeName, desiredDiskGB)
+				if d.diskByPath {
+					err = resizePrimaryDiskOffline(ctx, vp, d, storageProvider, desiredDiskGB)
+				} else {
+					err = storageProvider.ResizeVolume(ctx, "default", vmDiskVolumeName(id), desiredDiskGB)
+				}
 				if err != nil {
 					log.Printf("WARN Offline disk resize failed: %v", err)
 					// Offline resize failure is not fatal, just log it.
@@ -1166,6 +1176,19 @@ func (p *Provider) reconfigureOn(ctx context.Context, c libvirtConn, d domainTar
 
 	log.Printf("INFO Successfully reconfigured domain: %s", id)
 	return nil
+}
+
+// resizePrimaryDiskOffline grows the primary disk of the stopped domain d (the
+// clustered, owner-checked target) to desiredDiskGB: the disk is read from the
+// domain itself (domblklist --details) and resized by its path, so the resize
+// can only ever act on this domain's own disk — never on a volume that merely
+// matches a naming convention.
+func resizePrimaryDiskOffline(ctx context.Context, vp *VirshProvider, d domainTarget, sp *StorageProvider, desiredDiskGB int) error {
+	disk, err := domainPrimaryDisk(ctx, vp, d.handle)
+	if err != nil {
+		return fmt.Errorf("resolve primary disk of domain %s: %w", d.name, err)
+	}
+	return sp.ResizeVolumeByPath(ctx, disk.path, desiredDiskGB)
 }
 
 // getVNCPort extracts the VNC port from domain XML on vp's host
