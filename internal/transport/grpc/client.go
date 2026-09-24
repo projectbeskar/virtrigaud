@@ -1108,6 +1108,18 @@ func (c *Client) convertCreateRequest(req contracts.CreateRequest) (*providerv1.
 	// providers, which ignore it; set by the operator only for topology: cluster.
 	grpcReq.TargetHostId = req.TargetHostID
 
+	// owner is the requesting VirtualMachine's identity. A provider that keys VMs
+	// by a tenant-shared name (libvirt) stamps it on create and binds to an
+	// existing same-named VM only when the recorded owner UID matches. Omitted
+	// (nil) when no UID is known, so an unset owner is unambiguous on the wire.
+	if !req.Owner.IsZero() {
+		grpcReq.Owner = &providerv1.ObjectIdentity{
+			Uid:       req.Owner.UID,
+			Namespace: req.Owner.Namespace,
+			Name:      req.Owner.Name,
+		}
+	}
+
 	return grpcReq, nil
 }
 
@@ -1139,6 +1151,13 @@ func (c *Client) mapGRPCError(operation string, err error) error {
 		return contracts.NewNotFoundError(fmt.Sprintf("%s: %s", operation, st.Message()), err)
 	case codes.InvalidArgument:
 		return contracts.NewInvalidSpecError(fmt.Sprintf("%s: %s", operation, st.Message()), err)
+	case codes.AlreadyExists:
+		// The provider refused because the target already exists and is not
+		// ours to bind — e.g. a libvirt Create whose domain name is taken by a
+		// domain not owned by the requesting VirtualMachine. Typed Conflict
+		// (non-retryable) so the controller surfaces a condition and backs off
+		// instead of retrying on a tight loop (contracts.IsConflict).
+		return contracts.NewConflictError(fmt.Sprintf("%s: %s", operation, st.Message()), err)
 	case codes.Unavailable, codes.DeadlineExceeded:
 		return contracts.NewRetryableError(fmt.Sprintf("%s: %s", operation, st.Message()), err)
 	case codes.Unimplemented:

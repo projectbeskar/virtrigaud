@@ -19,12 +19,16 @@ package libvirt
 import (
 	"context"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"log"
 	"os"
 	"regexp"
 	"strings"
 	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/storage/migration"
@@ -92,7 +96,7 @@ func (s *Server) Create(ctx context.Context, req *providerv1.CreateRequest) (*pr
 
 	resp, err := s.provider.Create(ctx, createReq)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create VM: %w", err)
+		return nil, createRPCError(err)
 	}
 
 	result := &providerv1.CreateResponse{
@@ -104,6 +108,32 @@ func (s *Server) Create(ctx context.Context, req *providerv1.CreateRequest) (*pr
 	}
 
 	return result, nil
+}
+
+// createRPCError converts a Create failure into the error returned on the wire.
+// The two NON-retryable classes carry a real gRPC status so the manager can tell
+// them apart from a transient failure (and so they do not count as infra errors
+// toward its circuit breaker):
+//
+//   - Conflict -> codes.AlreadyExists: the domain name is taken by a domain this
+//     VirtualMachine does not own; the provider refused to bind to it.
+//   - InvalidSpec -> codes.InvalidArgument: the request can never succeed as-is
+//     (e.g. a name virsh would resolve as a domain ID/UUID).
+//
+// Only the categorized message crosses the wire (it is written to be safe for
+// the requesting VirtualMachine's status). Every other error keeps the historical
+// wrapped form.
+func createRPCError(err error) error {
+	var pe *contracts.ProviderError
+	if stderrors.As(err, &pe) {
+		switch pe.Type {
+		case contracts.ErrorTypeConflict:
+			return status.Error(codes.AlreadyExists, pe.Message)
+		case contracts.ErrorTypeInvalidSpec:
+			return status.Error(codes.InvalidArgument, pe.Message)
+		}
+	}
+	return fmt.Errorf("failed to create VM: %w", err)
 }
 
 // Delete deletes a virtual machine
@@ -225,6 +255,18 @@ func (s *Server) parseCreateRequest(req *providerv1.CreateRequest) (contracts.Cr
 		// empty for single-host callers; the clustered Create path requires it and
 		// routes the create onto that host's connection (provider_virsh.go).
 		TargetHostID: req.TargetHostId,
+	}
+
+	// Owner is the requesting VirtualMachine's identity: stamped onto the domain
+	// on create, and the ONLY thing that authorizes treating an existing domain of
+	// the same name as this VM's (see bindExistingDomain). Absent from an older
+	// manager, in which case an existing domain is never bound.
+	if o := req.GetOwner(); o != nil {
+		createReq.Owner = contracts.ObjectIdentity{
+			UID:       o.GetUid(),
+			Namespace: o.GetNamespace(),
+			Name:      o.GetName(),
+		}
 	}
 
 	// Parse UserData if provided

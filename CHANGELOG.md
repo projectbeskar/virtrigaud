@@ -5,6 +5,59 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-24 08:59] - libvirt Create no longer binds to a same-named domain it does not own
+**Author:** @wrkode (William Rizzo)
+
+### Security
+- `internal/providers/libvirt/provider_virsh.go`, new `domain_identity.go`: **fail closed on an existing domain.** A libvirt domain is named after the bare VirtualMachine name, with no namespace. If a domain with that name already existed, `Create` returned it as the VM's ID. On a host shared by several namespaces, tenant B's VirtualMachine `web` therefore bound to tenant A's domain `web`, and B could then power it off, reconfigure, snapshot or delete it, or run in-guest commands through the guest agent.
+  - `Create` now stamps the requester's identity into the new domain's `<metadata>`, as `<virtrigaud:owner xmlns:virtrigaud="https://virtrigaud.io/xmlns/libvirt/owner/v1" uid namespace name/>`, with every value XML-escaped.
+  - It binds to an existing same-named domain **only** if that stamp records the requester's UID, which is the retry-after-a-lost-status-write case. A missing, different, unreadable or ambiguous stamp, or a request without an owner UID, gets a non-retryable `Conflict`.
+  - The `Conflict` message names only the requested domain, never the other owner.
+  - The rule is enforced in the shared `createVM` core, so it covers both the single-host path and the ADR-0007 clustered path.
+- `internal/providers/libvirt/domain_identity.go`, `provider_virsh.go`, `clone.go`: `Create` and `Clone` **reject ambiguous names** with `InvalidSpec` and run no virsh command. An all-digit or UUID-shaped name is ambiguous because virsh resolves a lookup argument as a domain ID or UUID before trying it as a name, so a VM named `12` or `1b4e28ba-…` would operate on a different domain. VirtualMachine CRD validation is unchanged, because other providers share it.
+- `internal/providers/libvirt/provider_virsh.go`: the domain UUID generator was predictable: `550e8400-e29b-41d4-a716-` followed by the wall clock. It now uses `crypto/rand` RFC 4122 v4 UUIDs. Because libvirt refuses a same-named define under a different UUID, a racing duplicate create also fails at define time instead of redefining the domain.
+- `internal/providers/libvirt/clone.go`: a clone never binds to or redefines an existing target domain; this check already existed and is now documented. The source VM's owner stamp is spliced out of the cloned XML, so a clone never claims the source's owner.
+
+- `internal/providers/libvirt/domain_identity.go`: owner-stamp parsing fails closed on a repeated owner attribute and on a second root element. libvirt never emits either, but Go's XML decoder would otherwise resolve them (last attribute wins).
+
+### Added
+- `proto/provider/v1/provider.proto`: additive `CreateRequest.owner` (field 11) and a new `ObjectIdentity {uid, namespace, name}` message. Bindings are regenerated in `proto/rpc/provider/v1/provider.pb.go`.
+- `internal/providers/contracts`: `CreateRequest.Owner`, the `ObjectIdentity` type with `IsZero`, and the helpers `IsConflict` and `IsInvalidSpec`.
+- `internal/k8s/conditions.go`: new `ReasonProviderConflict` condition reason.
+- `docs/libvirt-domain-ownership.md`: new page, linked from `docs/README.md` and `docs/clustered-provider-inventory.md`. Also a note in `examples/vm-adoption-example.yaml` that adoption is the way to manage a pre-existing domain.
+- Tests:
+  - `domain_identity_test.go`: stamping, escaping, the round-trip through libvirtxml, parsing by namespace URI, the ownership decision table, byte-exact stamp stripping, ambiguous-name tables, v4 non-repeating create UUIDs.
+  - `domain_identity_test.go`, using a fake virsh on PATH: Create against existing domains that are owned, foreign, unstamped, ownerless or unparseable. For each, it asserts that only `list` and `dumpxml` run. Also covers absent domains, and the clustered path through the production `createOnLeasedHost`.
+  - `server_create_owner_test.go`: a manager-to-libvirt-server gRPC round trip over loopback, including the real `*Provider`.
+  - `client_create_owner_test.go`: transport mapping.
+  - `virtualmachine_controller_create_rejected_test.go`: the condition and backoff, the deletion path, and the adopted-VM guard.
+
+### Changed
+- `internal/controller/virtualmachine_controller.go`:
+  - `buildCreateRequest` sends `Owner` from `vm.UID`, `vm.Namespace` and `vm.Name`.
+  - A non-retryable Create rejection (`Conflict` or `InvalidSpec`) now sets `Ready=False` and `Provisioning=False` with reason `ProviderConflict` or `ValidationError`, the provider's message and `ObservedGeneration`. It requeues after **2 minutes** for `Conflict` and **30 s** for `InvalidSpec` instead of 5 s, records `virtrigaud_errors_total{reason="provider-create-rejected"}`, and leaves `status.id` empty, so deleting the VM never calls `provider.Delete`.
+  - Transient create errors keep the 5 s retry.
+  - The adopted-VM double-create guard is unchanged.
+- `internal/transport/grpc/client.go`: `convertCreateRequest` sends `owner` when a UID is known. `mapGRPCError` maps `codes.AlreadyExists` to a typed, non-retryable `contracts.Conflict`.
+- `internal/providers/libvirt/server.go`: `parseCreateRequest` reads `owner`. Create errors of type `Conflict` and `InvalidSpec` go on the wire as `codes.AlreadyExists` and `codes.InvalidArgument` (message only), and are therefore no longer `Unknown`. Other errors keep their existing form.
+- vSphere, Proxmox and mock providers ignore the new field.
+
+### Why
+A released libvirt provider silently bound a VirtualMachine to any existing domain of the same name, including another tenant's. That gave the new VirtualMachine full lifecycle control of the domain and in-guest exec on it. The provider now binds a domain only when it can prove the requesting VirtualMachine created it. Adoption remains the explicit path for managing pre-existing domains.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+> **Operator notes:**
+> - Pre-existing domains without owner metadata are never bound automatically. A VirtualMachine create that collides with one now fails with `Ready=False`, reason `ProviderConflict`, and a message naming the domain; the controller re-checks it every 2 minutes. To resolve it, adopt the domain (`virtrigaud.io/adopt-vms`), remove it, or rename the VirtualMachine.
+> - VMs that are already bound (`status.id` set) are unaffected, because every later operation uses `status.id` and never calls `Create`.
+> - The manager and the provider can be rolled out in either order, but **the protection needs the upgraded libvirt provider**: an older provider ignores `owner` and still binds by name. A newer provider behind an older manager never binds an existing domain, but still creates new ones.
+> - **Known limitation, tracked separately:** two creates of the *same name* running at the same time still stage files at name-derived paths (domain XML, disk, cloud-init ISO), so they can overwrite each other before either defines. Ownership stamping closes the sequential bind-to-existing case, not this race.
+> - One edge case: if the provider created a domain before the upgrade and the manager lost the `status.id` write for it, that VM's retried create is refused. Adopt the domain to recover.
+
 ## [2026-09-24 07:58] - Clustered Host same-namespace model and endpoint validation
 **Author:** @wrkode (William Rizzo)
 

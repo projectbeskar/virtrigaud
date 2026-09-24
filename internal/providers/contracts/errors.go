@@ -99,6 +99,25 @@ func IsNotSupported(err error) bool {
 	return errors.As(err, &pe) && pe.Type == ErrorTypeNotSupported
 }
 
+// IsConflict reports whether err is, or wraps, a provider Conflict error. The
+// transport client maps a gRPC codes.AlreadyExists into a *ProviderError of this
+// type (see mapGRPCError) — e.g. a libvirt Create whose requested domain name is
+// already taken by a domain NOT owned by the requesting VirtualMachine. It is
+// non-retryable: retrying cannot resolve the conflict without operator action.
+func IsConflict(err error) bool {
+	var pe *ProviderError
+	return errors.As(err, &pe) && pe.Type == ErrorTypeConflict
+}
+
+// IsInvalidSpec reports whether err is, or wraps, a provider InvalidSpec error.
+// The transport client maps a gRPC codes.InvalidArgument into a *ProviderError
+// of this type (see mapGRPCError). It is non-retryable: the same request will
+// be rejected again until the spec changes.
+func IsInvalidSpec(err error) bool {
+	var pe *ProviderError
+	return errors.As(err, &pe) && pe.Type == ErrorTypeInvalidSpec
+}
+
 // NewNotFoundError creates a not found error
 func NewNotFoundError(message string, cause error) *ProviderError {
 	return &ProviderError{

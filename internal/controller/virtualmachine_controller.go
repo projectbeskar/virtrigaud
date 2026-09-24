@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -60,7 +61,26 @@ const (
 	errReasonProviderDelete   = "provider-delete"
 	errReasonImagePrepare     = "image-prepare"
 	errReasonPlacement        = "placement"
+	// errReasonProviderCreateRejected counts provider Create calls refused with
+	// a NON-retryable error (Conflict / InvalidSpec) — notably a libvirt domain
+	// name already taken by a domain this VirtualMachine does not own. A rising
+	// count is a tenant-collision (or probing) signal worth alerting on.
+	errReasonProviderCreateRejected = "provider-create-rejected"
 )
+
+// vmCreateConflictRetryInterval is the requeue cadence after the provider
+// refused Create with a Conflict (the provider-side name is taken by a VM this
+// VirtualMachine does not own). Retrying cannot fix it — an operator must adopt
+// or remove the colliding hypervisor VM, or rename this VirtualMachine — so it
+// re-checks slowly instead of hammering the provider. Still bounded, so a
+// collision resolved out-of-band is picked up without a manual nudge.
+const vmCreateConflictRetryInterval = 2 * time.Minute
+
+// vmCreateInvalidSpecRetryInterval is the requeue cadence after the provider
+// rejected Create as InvalidSpec. A spec edit re-triggers reconcile on its own;
+// the moderate cadence avoids a tight loop while staying tolerant of providers
+// that classify some transient failures as InvalidSpec.
+const vmCreateInvalidSpecRetryInterval = 30 * time.Second
 
 // Placement requeue cadences for the clustered-provider create path (ADR-0007 P1,
 // D4). The VirtualMachine controller does NOT watch Host / HostPool /
@@ -643,7 +663,13 @@ func (r *VirtualMachineReconciler) createVM(
 	if err != nil {
 		// Honesty-first (ADR-0007 D3): Create failed, so we do NOT write
 		// status.placement — it stays whatever it was (unset on a first attempt),
-		// never claiming a host the provider has not accepted the VM on.
+		// never claiming a host the provider has not accepted the VM on. Nor do
+		// we write Status.ID: a VM whose create was refused is bound to nothing,
+		// so deleting it never reaches provider.Delete (handleDeletion gates on
+		// Status.ID) and cannot touch the colliding hypervisor VM.
+		if res, handled := r.handleRejectedCreate(ctx, vm, err); handled {
+			return res, nil
+		}
 		logger.Error(err, "Failed to create VM")
 		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Failed to create VM: %v", err))
 		r.updateStatus(ctx, vm)
@@ -677,6 +703,67 @@ func (r *VirtualMachineReconciler) createVM(
 
 	r.updateStatus(ctx, vm)
 	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+}
+
+// handleRejectedCreate handles a provider Create that failed with a
+// NON-retryable error and reports whether it did. Two classes qualify:
+//
+//   - Conflict (gRPC AlreadyExists): the provider-side name is already taken by
+//     a VM this VirtualMachine does not own — e.g. a libvirt domain of the same
+//     name created by another namespace/tenant, or never created by VirtRigaud.
+//     The provider deliberately refused to bind to it.
+//   - InvalidSpec (gRPC InvalidArgument): the request can never succeed as-is —
+//     e.g. a VirtualMachine name libvirt would resolve as a domain ID or UUID.
+//
+// Both set Ready=False and Provisioning=False with a specific reason and the
+// provider's (non-secret) message, stamped with ObservedGeneration, and requeue
+// on a slower cadence than the 5s transient-error path
+// (vmCreateConflictRetryInterval / vmCreateInvalidSpecRetryInterval), so an
+// unresolvable create does not hot-loop against the provider.
+// Status.ID is left empty. Any other error returns handled=false and keeps the
+// existing transient-retry path.
+func (r *VirtualMachineReconciler) handleRejectedCreate(
+	ctx context.Context,
+	vm *infravirtrigaudiov1beta1.VirtualMachine,
+	err error,
+) (ctrl.Result, bool) {
+	var (
+		reason     string
+		retryAfter time.Duration
+	)
+	switch {
+	case contracts.IsConflict(err):
+		reason, retryAfter = k8s.ReasonProviderConflict, vmCreateConflictRetryInterval
+	case contracts.IsInvalidSpec(err):
+		reason, retryAfter = k8s.ReasonValidationError, vmCreateInvalidSpecRetryInterval
+	default:
+		return ctrl.Result{}, false
+	}
+
+	// Surface the provider's categorized message, not err.Error(): the latter
+	// also embeds the raw gRPC status chain, which is noise in a condition.
+	msg := err.Error()
+	var pe *contracts.ProviderError
+	if stderrors.As(err, &pe) && pe.Message != "" {
+		msg = pe.Message
+	}
+	msg = fmt.Sprintf("Provider rejected VM create (non-retryable; re-checking every %s): %s", retryAfter, msg)
+
+	log.FromContext(ctx).Info("Provider rejected VM create with a non-retryable error; not binding and backing off",
+		"reason", reason, "retryAfter", retryAfter.String(), "error", err.Error())
+	metrics.RecordError(errReasonProviderCreateRejected, metrics.ComponentManager)
+
+	for _, condType := range []string{k8s.ConditionReady, k8s.ConditionProvisioning} {
+		meta.SetStatusCondition(&vm.Status.Conditions, metav1.Condition{
+			Type:               condType,
+			Status:             metav1.ConditionFalse,
+			Reason:             reason,
+			Message:            msg,
+			ObservedGeneration: vm.Generation,
+		})
+	}
+	r.updateStatus(ctx, vm)
+	return ctrl.Result{RequeueAfter: retryAfter}, true
 }
 
 // resolveClusterPlacement schedules vm onto a host in providerCR's HostPool for a
@@ -1304,6 +1391,14 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 		MetaData:  metaData,
 		Placement: placement,
 		Tags:      vm.Spec.Tags,
+		// Owner lets a provider that keys VMs by a tenant-shared name (libvirt)
+		// stamp the VM it creates and bind to an existing same-named VM ONLY when
+		// that VM records this VirtualMachine's UID — never another tenant's.
+		Owner: contracts.ObjectIdentity{
+			UID:       string(vm.UID),
+			Namespace: vm.Namespace,
+			Name:      vm.Name,
+		},
 	}, nil
 }
 
