@@ -73,7 +73,7 @@ const (
 	// material out of a namespace they cannot read. It takes precedence over
 	// reasonCredentialsUnresolved because it is a policy decision, not a
 	// transient absence.
-	reasonCredentialRefNamespaceRejected = "CredentialRefNamespaceRejected"
+	reasonCredentialRefNamespaceRejected = "CredentialRefNamespaceRejected" // #nosec G101 -- a status condition reason name, not a credential
 	// eventReasonCredentialsUnresolved is the Warning event reason emitted when a
 	// host is skipped for unresolved or rejected credentials.
 	eventReasonCredentialsUnresolved = "HostCredentialsUnresolved"
