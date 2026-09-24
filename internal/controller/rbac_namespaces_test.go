@@ -84,9 +84,10 @@ func chartRuleVerbs(t *testing.T, template, resource string) [][]string {
 				section = "verbs"
 			case strings.HasPrefix(line, "  - "):
 				item := strings.TrimPrefix(line, "  - ")
-				if section == "resources" {
+				switch section {
+				case "resources":
 					resources = append(resources, item)
-				} else if section == "verbs" {
+				case "verbs":
 					verbs = append(verbs, item)
 				}
 			case !strings.HasPrefix(line, "  "):
