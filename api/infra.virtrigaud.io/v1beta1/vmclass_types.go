@@ -74,6 +74,25 @@ type VMClassSpec struct {
 	// SecurityProfile defines security-related settings
 	// +optional
 	SecurityProfile *SecurityProfile `json:"securityProfile,omitempty"`
+
+	// ConsumerNamespaceSelector selects the namespaces, other than this
+	// VMClass's own, that may use it: VirtualMachines there may name it in
+	// spec.classRef. A reference from the VMClass's own namespace is always
+	// allowed.
+	//
+	//   - unset (the default): only its own namespace may use it.
+	//   - {} (an empty selector): every namespace may use it.
+	//   - matchLabels / matchExpressions: the namespaces whose labels match. The
+	//     kubernetes.io/metadata.name label names a namespace explicitly.
+	//
+	// A reference from a namespace it does not select is refused with
+	// Ready=False, reason ConsumerNotAllowed, and no provider call is made for
+	// it. The selector is matched against Namespace labels, so whoever can label
+	// a namespace can widen what that namespace may use (see
+	// docs/cross-namespace-references.md). The selector is operator-side policy:
+	// it is never sent to a provider.
+	// +optional
+	ConsumerNamespaceSelector *metav1.LabelSelector `json:"consumerNamespaceSelector,omitempty"`
 }
 
 // FirmwareType represents the firmware type for VMs
