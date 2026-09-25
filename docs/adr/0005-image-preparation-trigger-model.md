@@ -33,7 +33,7 @@ document says `ProviderStatus[provider.Name]` or `PrepareTaskRef`, read
 `ProviderStatus["<namespace>/<name>"]` and its `taskRef`. See
 [`docs/image-preparation.md`](../image-preparation.md#prepare-state-is-per-provider).
 
-**Amendment (ADR-0009, Proposed)**: [ADR-0009](./0009-prepared-image-artifact-identity.md)
+**Amendment (ADR-0009, Accepted)**: [ADR-0009](./0009-prepared-image-artifact-identity.md)
 amends decisions 2 and 6.
 - **Decision 2:** import-style prepares also require the provider's
   `supportsImageArtifactIdentity` capability. A provider that can import but lacks
