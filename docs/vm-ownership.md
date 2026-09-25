@@ -107,7 +107,10 @@ A new VM gets three ExtraConfig (advanced configuration) keys:
   - `CreateVM_Task` with an imported disk (the migration import path).
 - A clone copies the source's ExtraConfig. When a create carries no owner (a
   manager older than the provider), the keys are set to `""`, which removes
-  them. The new VM therefore never inherits a stamp from its template.
+  them. The new VM therefore never inherits a stamp from its template. The
+  prepared-image stamp a template carries (`virtrigaud.image.*`, ADR-0009; see
+  [image preparation](image-preparation.md#vsphere-identity-safe-prepared-templates))
+  is cleared the same way on every create: a VM is never an image artifact.
 - Writing ExtraConfig needs the vCenter privilege
   **Virtual machine > Change Configuration > Advanced configuration**
   (`VirtualMachine.Config.AdvancedConfig`). Cloud-init injection through
@@ -215,22 +218,31 @@ Now a template reference is resolved as follows:
   template with a given name exists in the datacenter, but not what it is or who
   owns it.
 
-`ImagePrepare`'s target name is the `VMImage` name. It is also the name of the
-template an OVA import creates, so it follows the VM-name rules.
+The `ImagePrepare` column describes a request from a manager older than
+ADR-0009 (deprecated legacy mode, this release only), whose target name is the
+`VMImage` name. That name is also the name of the template an OVA import
+creates, so it follows the VM-name rules. A request from a current manager
+carries the `VMImage` identity instead: the template is named after it, looked
+up only in the Provider's import folder and reused only when its image stamp
+matches. See
+[vSphere: identity-safe prepared templates](image-preparation.md#vsphere-identity-safe-prepared-templates).
 
-**OVA imports never carry an owner stamp.** An OVF can include arbitrary
+**OVA imports never carry a stamp from the OVF.** An OVF can include arbitrary
 `<vmw:ExtraConfig>` entries, and vCenter maps them into the import spec. A
 tenant's OVA could therefore set `virtrigaud.owner.uid` to another
-`VirtualMachine`'s UID. For as long as the import runs, or if `MarkAsTemplate`
-and the cleanup both fail, the imported object is a regular VM with the
-`VMImage`'s name, so a create with that name in the same folder would accept it
-as its own. To prevent this, `ImagePrepare` removes every `virtrigaud.*`
-ExtraConfig key from the import spec before `ImportVApp`, and logs the removal
-on the provider side. Other OVF ExtraConfig keys are imported unchanged.
+`VirtualMachine`'s UID, or `virtrigaud.image.uid` to another `VMImage`'s. For
+as long as the import runs, or if `MarkAsTemplate` and the cleanup both fail,
+the imported object is a regular VM, so a create with that name in the same
+folder would accept it as its own. To prevent this, `ImagePrepare` removes every
+`virtrigaud.*` ExtraConfig key from the import spec before `ImportVApp`, and
+logs the removal on the provider side. The real image stamp is added after the
+removal. Other OVF ExtraConfig keys are imported unchanged.
 
-Known limitation: every tenant of a Provider shares one template name space.
-Another tenant's `VMImage` can therefore reference a template that was imported
-through your `VMImage` (tracked separately).
+Known limitation: a **reference** (`templateName`, including an inventory path)
+reaches any template the Provider's vCenter account can read, including a
+template prepared for another tenant's `VMImage`. Prepared templates are no
+longer shared by name between images, but refusing references to another
+image's stamped template is ADR-0009 Slice 7.
 
 ### Clones
 
@@ -238,8 +250,9 @@ The `Clone` RPC never binds to an existing VM. If the target name is taken in
 the folder, `CloneVM_Task` fails with `DuplicateName`. `CloneRequest` carries no
 owner, because the target `VirtualMachine` is created after the clone and given
 the returned ID directly. The clone is therefore left **unstamped**, and the
-owner stamp it would inherit from the source VM is cleared. A clone never claims
-the source `VirtualMachine`'s owner.
+owner stamp it would inherit from the source VM is cleared, as is any
+prepared-image stamp (`virtrigaud.image.*`). A clone never claims the source
+`VirtualMachine`'s owner, and is never an image artifact.
 
 ### `Describe` no longer reports a transient error as "gone"
 
@@ -264,6 +277,11 @@ requirement to the account in the Provider's credential Secret:
 Without this privilege, creates fail with a vCenter permission error. They
 don't create an unstamped VM. Deployments that already inject cloud-init
 through `guestinfo` have this privilege.
+
+Identity-safe image preparation (ADR-0009) adds no privilege: its image stamp
+is an ExtraConfig entry of the import spec (this same privilege, on the import
+folder), and importing an OVA, marking it as a template and destroying the
+provider's own unfinished import were already part of `ImagePrepare`.
 
 ### Upgrade notes (vSphere)
 
