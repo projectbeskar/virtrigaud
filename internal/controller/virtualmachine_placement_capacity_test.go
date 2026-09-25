@@ -796,3 +796,15 @@ func TestHostReconciler_PublishesCommittedCapacity(t *testing.T) {
 	_, ok = gaugeValue(t, "virtrigaud_host_committed_cpu", labels)
 	assert.False(t, ok, "the series goes with the Host")
 }
+
+// TestPlacementProviderKey (L9): one helper keys every placement lookup.
+func TestPlacementProviderKey(t *testing.T) {
+	vm := capVM("x")
+	assert.Equal(t, types.NamespacedName{Namespace: capNS, Name: "prov-cluster"}, placementProviderKey(vm), "spec.providerRef, namespace defaulted")
+
+	vm.Status.BoundProvider = &infravirtrigaudiov1beta1.BoundProviderRef{Name: "bound"}
+	assert.Equal(t, types.NamespacedName{Namespace: capNS, Name: "bound"}, placementProviderKey(vm), "an empty boundProvider namespace is the VM's own")
+
+	vm.Status.BoundProvider = &infravirtrigaudiov1beta1.BoundProviderRef{Namespace: "infra", Name: "bound"}
+	assert.Equal(t, types.NamespacedName{Namespace: "infra", Name: "bound"}, placementProviderKey(vm), "the bound Provider wins over spec.providerRef")
+}

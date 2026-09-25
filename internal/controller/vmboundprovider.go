@@ -159,6 +159,24 @@ func boundProviderKey(vm *infravirtrigaudiov1beta1.VirtualMachine) (types.Namesp
 	return key, true
 }
 
+// placementProviderKey is THE Provider key a VM's clustered placement belongs
+// to, and the only one the placement code uses (committed capacity, the Host
+// in-use finalizer, the committed gauges): the Provider it is bound through
+// (status.boundProvider, an empty namespace meaning the VM's own) when
+// recorded, otherwise the one its spec.providerRef names (namespace defaulting
+// to the VM's). Its domain and disks live on that Provider's hosts. A VM counts
+// against Provider P only when this key is P.
+//
+// status.boundProvider and status.placement are trusted inputs here, so tenants
+// must never be granted write on virtualmachines/status (only the operator
+// writes them).
+func placementProviderKey(vm *infravirtrigaudiov1beta1.VirtualMachine) types.NamespacedName {
+	if key, ok := boundProviderKey(vm); ok && key.Name != "" {
+		return key
+	}
+	return vmProviderKey(vm)
+}
+
 // checkBoundProvider returns a *ProviderRefMismatchError when vm records a
 // bound Provider (status.boundProvider) whose namespace/name is not key. A VM
 // with no record returns nil: it is either unbound (nothing to protect) or

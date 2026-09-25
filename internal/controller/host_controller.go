@@ -243,23 +243,20 @@ func hostInUseMessage(users []string) string {
 // host in status.placement.host or status.placement.pendingHost through the
 // Host's own Provider. Under the same-namespace model (#330) a Host belongs to
 // the Provider named by its providerRef in the Host's namespace; a VM routes to
-// it only when its spec.providerRef resolves to that same Provider (namespace
-// defaulting to the VM's own). VMs may live in other namespaces than their
-// Provider, so all VirtualMachines are listed; a same-named Host of another
-// Provider is never confused with this one.
+// it only when its placement Provider (placementProviderKey: the Provider it is
+// bound through, else its spec.providerRef) is that same Provider. VMs may live
+// in other namespaces than their Provider, so all VirtualMachines are listed; a
+// same-named Host of another Provider is never confused with this one.
 func (r *HostReconciler) vmsUsingHost(ctx context.Context, host *infravirtrigaudiov1beta1.Host) ([]string, error) {
 	var vms infravirtrigaudiov1beta1.VirtualMachineList
 	if err := r.List(ctx, &vms); err != nil {
 		return nil, fmt.Errorf("list VirtualMachines for Host %s/%s: %w", host.Namespace, host.Name, err)
 	}
+	provider := hostProviderKey(host)
 	var users []string
 	for i := range vms.Items {
 		vm := &vms.Items[i]
-		providerNS := vm.Spec.ProviderRef.Namespace
-		if providerNS == "" {
-			providerNS = vm.Namespace
-		}
-		if providerNS != host.Namespace || vm.Spec.ProviderRef.Name != host.Spec.ProviderRef.Name {
+		if placementProviderKey(vm) != provider {
 			continue
 		}
 		if boundHost(vm) == host.Name || pendingHost(vm) == host.Name {

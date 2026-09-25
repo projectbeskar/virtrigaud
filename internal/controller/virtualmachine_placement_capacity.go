@@ -91,17 +91,6 @@ func vmSchedulingUID(vm *infravirtrigaudiov1beta1.VirtualMachine) string {
 	return vm.Namespace + "/" + vm.Name
 }
 
-// placementProviderKey is the Provider a VM's placement belongs to: the one it
-// is bound through (status.boundProvider) when recorded, otherwise the one its
-// spec.providerRef names (namespace defaulting to the VM's). Its domain and
-// disks live on that Provider's hosts.
-func placementProviderKey(vm *infravirtrigaudiov1beta1.VirtualMachine) types.NamespacedName {
-	if b := vm.Status.BoundProvider; b != nil && b.Name != "" {
-		return types.NamespacedName{Namespace: b.Namespace, Name: b.Name}
-	}
-	return vmProviderKey(vm)
-}
-
 // placementHosts returns the hosts vm holds resources on: its confirmed
 // binding and its pending host, the same host listed once.
 func placementHosts(vm *infravirtrigaudiov1beta1.VirtualMachine) []string {
