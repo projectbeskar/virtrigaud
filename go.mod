@@ -42,7 +42,11 @@ require (
 	sigs.k8s.io/controller-runtime v0.20.4
 )
 
-require google.golang.org/protobuf v1.36.11
+require (
+	golang.org/x/sync v0.22.0
+	google.golang.org/protobuf v1.36.11
+	sigs.k8s.io/yaml v1.4.0
+)
 
 require (
 	cel.dev/expr v0.25.2 // indirect
@@ -106,7 +110,6 @@ require (
 	golang.org/x/exp v0.0.0-20240719175910-8a7402abbf56 // indirect
 	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
-	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/term v0.45.0 // indirect
 	golang.org/x/time v0.7.0 // indirect
@@ -124,5 +127,4 @@ require (
 	sigs.k8s.io/apiserver-network-proxy/konnectivity-client v0.31.0 // indirect
 	sigs.k8s.io/json v0.0.0-20241010143419-9aa6b5e7a4b3 // indirect
 	sigs.k8s.io/structured-merge-diff/v4 v4.4.2 // indirect
-	sigs.k8s.io/yaml v1.4.0 // indirect
 )

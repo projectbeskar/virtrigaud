@@ -99,6 +99,8 @@ const (
 	// VMImage CRD.
 	crdFeatureImageProviderUID = "status.providerStatus[].providerUID"
 	crdFeatureImageTaskRef     = "status.providerStatus[].taskRef"
+	// crdMissingPrefix prefixes the name of a checked CRD that does not exist.
+	crdMissingPrefix = "the CustomResourceDefinition "
 )
 
 // ErrVMCRDSecurityFeaturesMissing is returned (wrapped) by the readiness check
@@ -323,7 +325,7 @@ func (c *VMCRDFeatureChecker) read(ctx context.Context) (string, []string, error
 		err := c.Reader.Get(ctx, types.NamespacedName{Name: check.name}, crd)
 		switch {
 		case apierrors.IsNotFound(err):
-			missing = append(missing, "the CustomResourceDefinition "+check.name)
+			missing = append(missing, crdMissingPrefix+check.name)
 			continue
 		case apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err):
 			if unreadable == nil {
@@ -349,6 +351,26 @@ func (c *VMCRDFeatureChecker) read(ctx context.Context) (string, []string, error
 		return metrics.CRDFeaturesUnknown, nil, unreadable
 	}
 	return metrics.CRDFeaturesVerified, nil, nil
+}
+
+// VMImagePrepareStateMissing implements VMImageCRDFeatureReporter: it is true
+// while the checker's (cached) result is missing and names the VMImage CRD's
+// per-Provider prepare-state fields, or the VMImage CRD itself. An unknown
+// state (the CRD cannot be read) is not missing.
+func (c *VMCRDFeatureChecker) VMImagePrepareStateMissing(ctx context.Context) bool {
+	state, missing := c.Evaluate(ctx)
+	if state != metrics.CRDFeaturesMissing {
+		return false
+	}
+	for _, m := range missing {
+		switch m {
+		case VMImageCRDName + ": " + crdFeatureImageProviderUID,
+			VMImageCRDName + ": " + crdFeatureImageTaskRef,
+			crdMissingPrefix + VMImageCRDName:
+			return true
+		}
+	}
+	return false
 }
 
 // ReadyzCheck is a healthz.Checker for the manager's readiness endpoint. It
