@@ -2,11 +2,10 @@
 
 ## Status
 
-**Accepted (2026-09-25).** Slices 1, 2, 3 and 5 implemented (Slice 1: proto, contracts,
-CRD status and the mock provider, #346; Slice 2: the manager, #347; Slice 3: vSphere,
-its vCenter `DuplicateName` behaviour verified on vCenter 8.0.2 (see D6); Slice 5: the
-Proxmox guard, D10);
-Slices 4 (libvirt) and 9 (docs) are pending. **Release blocker** for the release
+**Accepted (2026-09-25).** Slices 1–5 implemented (Slice 1: proto, contracts, CRD status
+and the mock provider, #346; Slice 2: the manager, #347; Slice 3: vSphere, its vCenter
+`DuplicateName` behaviour verified on vCenter 8.0.2 (see D6); Slice 4: libvirt, #349;
+Slice 5: the Proxmox guard, #348, D10); Slice 9 (docs) is pending. **Release blocker** for the release
 that ships cross-namespace `VMImage` sharing
 ([#343](https://github.com/projectbeskar/virtrigaud/pull/343),
 `spec.consumerNamespaceSelector`). The slices that must land before that release are
