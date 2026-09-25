@@ -36,6 +36,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/vmware/govmomi/find"
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/ovf/importer"
 	"github.com/vmware/govmomi/vapi/library"
@@ -540,7 +541,7 @@ func (p *Provider) resolveImagePlacement(ctx context.Context, storageHint string
 	}
 	p.finder.SetDatacenter(datacenter)
 
-	resourcePool, datastore, err := p.resolveImageComputeAndStorage(ctx, storageHint)
+	resourcePool, datastore, err := p.resolveImageComputeAndStorage(ctx, p.finder, storageHint)
 	if err != nil {
 		return nil, err
 	}
@@ -560,16 +561,16 @@ func (p *Provider) resolveImagePlacement(ctx context.Context, storageHint string
 }
 
 // resolveImageComputeAndStorage resolves the resource pool and datastore an
-// OVA import uses (the finder must be scoped to the datacenter):
+// OVA import uses, through finder (which must be scoped to the datacenter):
 //
 //   - ResourcePool: DefaultCluster's root resource pool (or the finder default
 //     pool when DefaultCluster is empty).
 //   - Datastore:    storageHint → DefaultDatastore → a datastore from
 //     DefaultStoragePod (datastore cluster).
-func (p *Provider) resolveImageComputeAndStorage(ctx context.Context, storageHint string) (*object.ResourcePool, *object.Datastore, error) {
+func (p *Provider) resolveImageComputeAndStorage(ctx context.Context, finder *find.Finder, storageHint string) (*object.ResourcePool, *object.Datastore, error) {
 	var resourcePool *object.ResourcePool
 	if cluster := strings.TrimSpace(p.config.DefaultCluster); cluster != "" {
-		cc, err := p.finder.ClusterComputeResource(ctx, cluster)
+		cc, err := finder.ClusterComputeResource(ctx, cluster)
 		if err != nil {
 			return nil, nil, fmt.Errorf("ImagePrepare: find cluster %q: %w", cluster, err)
 		}
@@ -579,34 +580,34 @@ func (p *Provider) resolveImageComputeAndStorage(ctx context.Context, storageHin
 		}
 	} else {
 		var err error
-		resourcePool, err = p.finder.ResourcePoolOrDefault(ctx, "")
+		resourcePool, err = finder.ResourcePoolOrDefault(ctx, "")
 		if err != nil {
 			return nil, nil, fmt.Errorf("ImagePrepare: resolve default resource pool: %w", err)
 		}
 	}
 
 	// Datastore: storageHint, then DefaultDatastore, then DefaultStoragePod.
-	datastore, err := p.resolveImageDatastore(ctx, storageHint)
+	datastore, err := p.resolveImageDatastore(ctx, finder, storageHint)
 	if err != nil {
 		return nil, nil, err
 	}
 	return resourcePool, datastore, nil
 }
 
-// resolveImageDatastore picks the datastore for an OVA import: the request's
-// storage hint wins, then the provider DefaultDatastore, then a datastore chosen
-// from the DefaultStoragePod (datastore cluster) by free space. An empty result
-// with no candidates is an InvalidSpec.
-func (p *Provider) resolveImageDatastore(ctx context.Context, storageHint string) (*object.Datastore, error) {
+// resolveImageDatastore picks the datastore for an OVA import, through finder:
+// the request's storage hint wins, then the provider DefaultDatastore, then a
+// datastore chosen from the DefaultStoragePod (datastore cluster) by free
+// space. An empty result with no candidates is an InvalidSpec.
+func (p *Provider) resolveImageDatastore(ctx context.Context, finder *find.Finder, storageHint string) (*object.Datastore, error) {
 	if hint := strings.TrimSpace(storageHint); hint != "" {
-		ds, err := p.finder.Datastore(ctx, hint)
+		ds, err := finder.Datastore(ctx, hint)
 		if err != nil {
 			return nil, fmt.Errorf("ImagePrepare: find datastore from storage hint %q: %w", hint, err)
 		}
 		return ds, nil
 	}
 	if ds := strings.TrimSpace(p.config.DefaultDatastore); ds != "" {
-		found, err := p.finder.Datastore(ctx, ds)
+		found, err := finder.Datastore(ctx, ds)
 		if err != nil {
 			return nil, fmt.Errorf("ImagePrepare: find default datastore %q: %w", ds, err)
 		}

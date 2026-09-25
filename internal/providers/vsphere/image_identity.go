@@ -165,12 +165,15 @@ func (p *Provider) imagePrepareIdentity(ctx context.Context, req *providerv1.Ima
 	}
 	bound := artifactStalenessBound(req.GetImageJson())
 
-	datacenter, err := p.finder.DefaultDatacenter(ctx)
+	// A finder of this call's own: the shared p.finder is re-scoped by every
+	// RPC (SetDatacenter), which concurrent prepares must not race on.
+	finder := find.NewFinder(p.client.Client, true)
+	datacenter, err := finder.DefaultDatacenter(ctx)
 	if err != nil {
 		return nil, p.artifactRetryError(ctx, name, "resolve the default datacenter", err)
 	}
-	p.finder.SetDatacenter(datacenter)
-	folder, err := p.resolveArtifactFolder(ctx, name)
+	finder.SetDatacenter(datacenter)
+	folder, err := p.resolveArtifactFolder(ctx, finder, name)
 	if err != nil {
 		return nil, err
 	}
@@ -213,7 +216,7 @@ func (p *Provider) imagePrepareIdentity(ctx context.Context, req *providerv1.Ima
 				return nil, err
 			}
 		case imageartifact.OutcomeImport:
-			resp, err := p.importArtifact(ctx, loc, id, src, req.GetStorageHint(), &staged)
+			resp, err := p.importArtifact(ctx, finder, loc, id, src, req.GetStorageHint(), &staged)
 			if stderrors.Is(err, errArtifactNameTaken) {
 				continue
 			}
@@ -236,9 +239,10 @@ func (p *Provider) imagePrepareIdentity(ctx context.Context, req *providerv1.Ima
 // or a vCenter error — is a retryable error, so every retry resolves the same
 // location: an artifact that lands in an unintended folder would be shared
 // with whoever can read that folder. (That is stricter than resolveVMFolder
-// and the legacy resolveImageFolder.)
-func (p *Provider) resolveArtifactFolder(ctx context.Context, artifact string) (*object.Folder, error) {
-	vmFolder, err := p.finder.DefaultFolder(ctx)
+// and the legacy resolveImageFolder.) finder must be scoped to the default
+// datacenter.
+func (p *Provider) resolveArtifactFolder(ctx context.Context, finder *find.Finder, artifact string) (*object.Folder, error) {
+	vmFolder, err := finder.DefaultFolder(ctx)
 	if err != nil {
 		return nil, p.artifactRetryError(ctx, artifact, "resolve the datacenter VM folder", err)
 	}
@@ -247,7 +251,7 @@ func (p *Provider) resolveArtifactFolder(ctx context.Context, artifact string) (
 		return vmFolder, nil
 	}
 
-	folder, err := p.finder.Folder(ctx, folderName)
+	folder, err := finder.Folder(ctx, folderName)
 	if err != nil {
 		reason := "a vCenter error occurred (details in the provider log)"
 		var notFound *find.NotFoundError
@@ -387,9 +391,9 @@ func (p *Provider) stageOVA(ctx context.Context, src vsphereImageSource) (*stage
 // another prepare's object with a lower MOID won the convergence and this
 // call destroyed its own. On any other failure after the entity was created,
 // it destroys that entity (only the one this call created) so a retry starts
-// clean.
-func (p *Provider) importArtifact(ctx context.Context, loc artifactLocation, id imageartifact.Request, src vsphereImageSource, storageHint string, staged **stagedOVA) (*providerv1.ImagePrepareResponse, error) {
-	pool, datastore, err := p.resolveImageComputeAndStorage(ctx, storageHint)
+// clean. finder must be scoped to the default datacenter.
+func (p *Provider) importArtifact(ctx context.Context, finder *find.Finder, loc artifactLocation, id imageartifact.Request, src vsphereImageSource, storageHint string, staged **stagedOVA) (*providerv1.ImagePrepareResponse, error) {
+	pool, datastore, err := p.resolveImageComputeAndStorage(ctx, finder, storageHint)
 	if err != nil {
 		return nil, err
 	}
@@ -406,7 +410,7 @@ func (p *Provider) importArtifact(ctx context.Context, loc artifactLocation, id 
 		Log:          p.ovaImportLog,
 		Sinker:       progress.NewProgressLogger(p.ovaImportLog, "ImagePrepare upload"),
 		Client:       p.client.Client,
-		Finder:       p.finder,
+		Finder:       finder,
 		Datastore:    datastore,
 		ResourcePool: pool,
 		Folder:       loc.folder,
