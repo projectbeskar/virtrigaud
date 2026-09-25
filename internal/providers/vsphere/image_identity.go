@@ -32,6 +32,7 @@ import (
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/ovf/importer"
 	"github.com/vmware/govmomi/property"
+	"github.com/vmware/govmomi/vim25/methods"
 	"github.com/vmware/govmomi/vim25/mo"
 	"github.com/vmware/govmomi/vim25/progress"
 	"github.com/vmware/govmomi/vim25/soap"
@@ -538,6 +539,11 @@ func (p *Provider) importArtifact(ctx context.Context, finder *find.Finder, loc 
 			return nil, err
 		case isProviderError(err, codes.InvalidArgument):
 			return nil, err
+		case ref != nil:
+			// The lease was ready: the upload (or the lease completion)
+			// failed, and a network error there is usually the upload
+			// stream, not vCenter.
+			return nil, p.uploadFailure(ctx, loc.name, err)
 		}
 		return nil, p.importFailure(ctx, loc.name, "import the OVA", err)
 	}
@@ -795,6 +801,37 @@ func (p *Provider) importFailure(ctx context.Context, artifact, step string, err
 		return p.artifactRetryError(ctx, artifact, step, err)
 	}
 	return p.imageSourceError(ctx, "vCenter could not import the image", err, "artifact", artifact, "step", step)
+}
+
+// vCenterAliveTimeout bounds the liveness check uploadFailure makes.
+const vCenterAliveTimeout = 10 * time.Second
+
+// uploadFailure classifies a failure after the import lease became ready —
+// the NFC upload of the image's disks, or the lease completion. A network
+// error there (which isVCenterUnreachable would count) is usually the upload
+// stream to the ESXi host: an image-sized transfer the image's content and
+// size drive. It counts toward the manager's circuit breaker only when a cheap
+// vCenter call (CurrentTime) also fails; otherwise it is an image-source
+// error. Anything else is classified by importFailure.
+func (p *Provider) uploadFailure(ctx context.Context, artifact string, err error) error {
+	const step = "upload the image to vCenter"
+	if !isVCenterUnreachable(err) {
+		return p.importFailure(ctx, artifact, step, err)
+	}
+	if p.vCenterResponds(ctx) {
+		return p.imageSourceError(ctx, "the image upload to vCenter failed while vCenter itself responds", err,
+			"artifact", artifact, "step", step)
+	}
+	return p.artifactRetryError(ctx, artifact, step, err)
+}
+
+// vCenterResponds reports whether vCenter answers a CurrentTime call within
+// vCenterAliveTimeout.
+func (p *Provider) vCenterResponds(ctx context.Context) bool {
+	cctx, cancel := context.WithTimeout(ctx, vCenterAliveTimeout)
+	defer cancel()
+	_, err := methods.GetCurrentTime(cctx, p.client.Client)
+	return err == nil
 }
 
 // isProviderError reports whether err carries a gRPC status with code.
