@@ -30,7 +30,7 @@ spec:
   
   diskDefaults:
     type: thin
-    sizeGiB: 50  # 50GB disk (was being ignored before fix)
+    size: 50Gi  # 50GB disk (was being ignored before fix)
 
 ---
 # VMClass with 100GB disk
@@ -50,7 +50,7 @@ spec:
   
   diskDefaults:
     type: thick
-    sizeGiB: 100  # 100GB disk (was being ignored before fix)
+    size: 100Gi  # 100GB disk (was being ignored before fix)
 
 ---
 # VMClass with small 30GB disk
@@ -70,7 +70,7 @@ spec:
   
   diskDefaults:
     type: thin
-    sizeGiB: 30  # 30GB disk (was being ignored before fix)
+    size: 30Gi  # 30GB disk (was being ignored before fix)
 
 ---
 # Test VM with 50GB disk (vSphere)
@@ -80,7 +80,7 @@ metadata:
   name: test-vsphere-50gb
   namespace: default
 spec:
-  powerState: On
+  powerState: "On"
   
   providerRef:
     name: vsphere-provider
@@ -102,7 +102,7 @@ metadata:
   name: test-vsphere-100gb
   namespace: default
 spec:
-  powerState: On
+  powerState: "On"
   
   providerRef:
     name: vsphere-provider
@@ -124,7 +124,7 @@ metadata:
   name: test-libvirt-30gb
   namespace: default
 spec:
-  powerState: On
+  powerState: "On"
   
   providerRef:
     name: libvirt-provider
@@ -146,7 +146,7 @@ metadata:
   name: test-libvirt-50gb
   namespace: default
 spec:
-  powerState: On
+  powerState: "On"
   
   providerRef:
     name: libvirt-provider
@@ -168,7 +168,7 @@ metadata:
   name: test-proxmox-100gb
   namespace: default
 spec:
-  powerState: On
+  powerState: "On"
   
   providerRef:
     name: proxmox-provider

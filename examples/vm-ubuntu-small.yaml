@@ -17,10 +17,10 @@ spec:
     - name: app-net
       networkRef:
         name: app-network
-      ipAddress: ""  # Empty for DHCP
+      # ipAddress omitted for DHCP
   disks:
     - name: data-disk
-      sizeGiB: 50  # v0.2.1: Uses sizeGiB instead of size
+      sizeGiB: 50
       type: thin
   
   # v0.2.1: Enhanced lifecycle management
@@ -51,7 +51,7 @@ spec:
             shell: /bin/bash
             ssh_authorized_keys:
               - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC... # Add your SSH key here
-  powerState: On
+  powerState: "On"
   tags:
     - environment:demo
     - application:web

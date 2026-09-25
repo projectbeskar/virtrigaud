@@ -60,12 +60,16 @@ spec:
   runtime:
     mode: Remote
     image: ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.2.3
-    version: v0.2.0
     replicas: 2
-    
+
     service:
       port: 9443
-    
+      # TLS configuration for secure communication
+      tls:
+        enabled: true
+        secretRef:
+          name: libvirt-provider-tls
+
     resources:
       requests:
         cpu: "100m"
@@ -98,12 +102,6 @@ spec:
       valueFrom:
         fieldRef:
           fieldPath: metadata.name
-    
-    # TLS configuration for secure communication
-    tls:
-      enabled: true
-      secretRef:
-        name: libvirt-provider-tls
 
 ---
 # VM Class for remote provider
@@ -116,8 +114,9 @@ spec:
   cpu: 2
   memory: "2Gi"
   firmware: BIOS
+  # Disk format (qcow2) is set on the VMImage source below, not here:
+  # diskDefaults.type is a provisioning mode (thin/thick/...), not a format.
   diskDefaults:
-    type: qcow2
     size: "20Gi"
   guestToolsPolicy: install
 
@@ -129,15 +128,16 @@ metadata:
   name: ubuntu-22-libvirt
   namespace: default
 spec:
-  libvirt:
-    # Must resolve (on the host) to a regular file directly inside an allowed
-    # image directory — VIRTRIGAUD_LIBVIRT_IMAGE_DIRS on the provider, default
-    # /var/lib/libvirt/images — and not be any VM's disk. See
-    # docs/image-preparation.md ("libvirt image paths").
-    path: "/var/lib/libvirt/images/ubuntu-22.04-cloudimg.qcow2"
-    format: qcow2
+  source:
+    libvirt:
+      # Must resolve (on the host) to a regular file directly inside an allowed
+      # image directory — VIRTRIGAUD_LIBVIRT_IMAGE_DIRS on the provider, default
+      # /var/lib/libvirt/images — and not be any VM's disk. See
+      # docs/image-preparation.md ("libvirt image paths").
+      path: "/var/lib/libvirt/images/ubuntu-22.04-cloudimg.qcow2"
+      format: qcow2
   prepare:
-    importIfMissing: false
+    onMissing: Fail  # The image must already exist at the path above
 
 ---
 # VM Network for remote provider
@@ -147,10 +147,12 @@ metadata:
   name: libvirt-default
   namespace: default
 spec:
-  libvirt:
-    networkName: "default"
-    model: virtio
-  ipPolicy: dhcp
+  network:
+    libvirt:
+      networkName: "default"
+      model: virtio
+  ipAllocation:
+    type: DHCP
 
 ---
 # Virtual Machine using remote Libvirt provider
@@ -171,8 +173,10 @@ spec:
     name: ubuntu-22-libvirt
   networks:
   - name: libvirt-default
-  
-  powerState: On
+    networkRef:
+      name: libvirt-default
+
+  powerState: "On"
   
   userData:
     cloudInit:

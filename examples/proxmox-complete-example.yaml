@@ -50,30 +50,28 @@ metadata:
   name: small
   namespace: virtrigaud-system
 spec:
-  cpus: 2
+  cpu: 2
   memory: "4Gi"
-  disks:
-    - name: root
-      size: "40Gi"
-      storageClass: "local-lvm"  # Proxmox storage pool
+  diskDefaults:
+    size: "40Gi"
+    storageClass: "local-lvm"  # Proxmox storage pool
 
 ---
 # Medium VM class for production workloads
+#
+# A VMClass only sets root-disk defaults (spec.diskDefaults); additional
+# disks are attached per VM (see the db-server-01 data disk below).
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMClass
 metadata:
   name: medium
   namespace: virtrigaud-system
 spec:
-  cpus: 4
+  cpu: 4
   memory: "8Gi"
-  disks:
-    - name: root
-      size: "80Gi"
-      storageClass: "ssd-storage"
-    - name: data
-      size: "100Gi"
-      storageClass: "nvme-storage"
+  diskDefaults:
+    size: "80Gi"
+    storageClass: "ssd-storage"
 
 ---
 # Ubuntu 22.04 VM image/template
@@ -83,8 +81,11 @@ metadata:
   name: ubuntu-22
   namespace: virtrigaud-system
 spec:
-  source: "ubuntu-22-template"  # Existing template in Proxmox VE
-  description: "Ubuntu 22.04 LTS Cloud Image"
+  source:
+    proxmox:
+      templateName: "ubuntu-22-template"  # Existing template in Proxmox VE
+  metadata:
+    description: "Ubuntu 22.04 LTS Cloud Image"
 
 ---
 # CentOS Stream 9 image from an existing Proxmox template.
@@ -104,6 +105,8 @@ spec:
   source:
     proxmox:
       templateID: 9001
+  metadata:
+    description: "CentOS Stream 9 Cloud Image"
 
 ---
 # Basic network configuration
@@ -113,35 +116,60 @@ metadata:
   name: lan-network
   namespace: virtrigaud-system
 spec:
-  networkRef:
-    name: "lan"  # Maps to vmbr0 bridge
+  network:
+    proxmox:
+      bridge: "vmbr0"
 
 ---
 # Multi-NIC network configuration with VLANs
+#
+# A VMNetworkAttachment describes one network. For several NICs, create one
+# attachment per bridge/VLAN and list each in the VirtualMachine's
+# spec.networks (see web-server-01). A fixed MAC address is per interface, so
+# it is set there too (spec.networks[].macAddress).
+
+# Primary LAN interface with static IP (vmbr0)
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMNetworkAttachment
 metadata:
-  name: multi-nic-network
+  name: multi-nic-lan
   namespace: virtrigaud-system
 spec:
-  networks:
-    # Primary LAN interface with static IP
-    - name: "lan"
+  network:
+    proxmox:
       bridge: "vmbr0"
-      staticIP:
-        address: "192.168.1.100/24"
-        gateway: "192.168.1.1"
-        dns: ["8.8.8.8", "1.1.1.1"]
-    
-    # DMZ interface with VLAN
-    - name: "dmz"
+  ipAllocation:
+    type: Static
+    staticConfig:
+      address: "192.168.1.100/24"
+      gateway: "192.168.1.1"
+    dnsConfig:
+      servers: ["8.8.8.8", "1.1.1.1"]
+
+---
+# DMZ interface on a VLAN (vmbr1)
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMNetworkAttachment
+metadata:
+  name: multi-nic-dmz
+  namespace: virtrigaud-system
+spec:
+  network:
+    proxmox:
       bridge: "vmbr1"
-      vlan: 100
-    
-    # Management interface
-    - name: "mgmt"
+      vlanTag: 100
+
+---
+# Management interface (vmbr2); MAC address is set per-VM, see web-server-01
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMNetworkAttachment
+metadata:
+  name: multi-nic-mgmt
+  namespace: virtrigaud-system
+spec:
+  network:
+    proxmox:
       bridge: "vmbr2"
-      mac: "02:00:00:aa:bb:cc"
 
 ---
 # Simple development VM
@@ -157,9 +185,11 @@ spec:
     name: small
   imageRef:
     name: ubuntu-22
-  networkAttachmentRef:
-    name: lan-network
-  powerState: On
+  networks:
+    - name: lan
+      networkRef:
+        name: lan-network
+  powerState: "On"
   userData:
     cloudInit:
       inline: |
@@ -196,9 +226,18 @@ spec:
     name: medium
   imageRef:
     name: ubuntu-22
-  networkAttachmentRef:
-    name: multi-nic-network
-  powerState: On
+  networks:
+    - name: lan
+      networkRef:
+        name: multi-nic-lan
+    - name: dmz
+      networkRef:
+        name: multi-nic-dmz
+    - name: mgmt
+      networkRef:
+        name: multi-nic-mgmt
+      macAddress: "02:00:00:aa:bb:cc"
+  powerState: "On"
   userData:
     cloudInit:
       inline: |
@@ -229,8 +268,9 @@ metadata:
 spec:
   vmRef:
     name: web-server-01
-  description: "Baseline snapshot after initial setup"
-  includeMemory: false  # Faster crash-consistent snapshot
+  snapshotConfig:
+    description: "Baseline snapshot after initial setup"
+    includeMemory: false  # Faster crash-consistent snapshot
 
 ---
 # Database server with high-performance storage
@@ -249,9 +289,15 @@ spec:
     name: medium
   imageRef:
     name: ubuntu-22
-  networkAttachmentRef:
-    name: lan-network
-  powerState: On
+  networks:
+    - name: lan
+      networkRef:
+        name: lan-network
+  disks:
+    - name: data
+      sizeGiB: 100
+      storageClass: "nvme-storage"  # High-performance pool for database storage
+  powerState: "On"
   userData:
     cloudInit:
       inline: |
@@ -282,8 +328,9 @@ metadata:
 spec:
   vmRef:
     name: db-server-01
-  description: "Before database maintenance window"
-  includeMemory: true  # Include memory for consistent state
+  snapshotConfig:
+    description: "Before database maintenance window"
+    includeMemory: true  # Include memory for consistent state
 
 ---
 # Test VM with CentOS Stream 9 (cloned from template 9001)
@@ -301,9 +348,11 @@ spec:
     name: small
   imageRef:
     name: centos-stream-9  # Full clone of the existing template (no import)
-  networkAttachmentRef:
-    name: lan-network
-  powerState: On
+  networks:
+    - name: lan
+      networkRef:
+        name: lan-network
+  powerState: "On"
   userData:
     cloudInit:
       inline: |

@@ -115,11 +115,7 @@ spec:
     vsphere:
       templateName: "ubuntu-22.04-server-template"
   prepare:
-    onMissing: Download
-    customization:
-      timezone: "UTC"
-      network:
-        dns: ["8.8.8.8", "8.8.4.4"]
+    onMissing: Import
 
 ---
 # Network configuration
@@ -129,10 +125,14 @@ metadata:
   name: v021-production-vlan
   namespace: default
 spec:
-  vsphere:
-    portGroup: "Production VLAN 100"
-    vlanId: 100
-    dhcp: true
+  network:
+    vsphere:
+      portgroup: "Production VLAN 100"
+      vlan:
+        type: vlan
+        vlanID: 100
+  ipAllocation:
+    type: DHCP
 
 ---
 # Virtual Machine showcasing all v0.2.1 features

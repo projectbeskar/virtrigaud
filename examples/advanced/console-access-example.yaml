@@ -25,7 +25,6 @@ spec:
     service:
       port: 9090
   defaults:
-    datacenter: "Production"
     datastore: "datastore1"
     cluster: "cluster1"
 
@@ -47,7 +46,6 @@ spec:
     service:
       port: 9090
   defaults:
-    storagePool: "default"
     network: "default"
 
 ---
@@ -58,7 +56,7 @@ metadata:
   name: console-demo
   namespace: default
 spec:
-  cpus: 2
+  cpu: 2
   memory: "4Gi"
   diskDefaults:
     type: thin
@@ -100,9 +98,11 @@ metadata:
 spec:
   providerRef:
     name: vsphere-prod
-  vmClassRef: console-demo
-  vmImageRef: ubuntu-vsphere
-  
+  classRef:
+    name: console-demo
+  imageRef:
+    name: ubuntu-vsphere
+
   powerState: "On"
   
   userData:
@@ -139,9 +139,11 @@ metadata:
 spec:
   providerRef:
     name: libvirt-local
-  vmClassRef: console-demo
-  vmImageRef: ubuntu-libvirt
-  
+  classRef:
+    name: console-demo
+  imageRef:
+    name: ubuntu-libvirt
+
   powerState: "On"
   
   userData:

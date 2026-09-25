@@ -32,7 +32,7 @@ spec:
   
   diskDefaults:
     type: thin
-    sizeGiB: 100
+    size: 100Gi
   
   guestToolsPolicy: install
 
@@ -59,7 +59,7 @@ spec:
   
   diskDefaults:
     type: thick
-    sizeGiB: 50
+    size: 50Gi
 
 ---
 # Example: vSphere VMClass with Legacy Hardware Version 13 (ESXi 6.5)
@@ -83,7 +83,7 @@ spec:
   
   diskDefaults:
     type: thin
-    sizeGiB: 40
+    size: 40Gi
 
 ---
 # Virtual Machine using modern hardware version
@@ -93,7 +93,7 @@ metadata:
   name: modern-vm-hw21
   namespace: default
 spec:
-  powerState: On
+  powerState: "On"
   
   providerRef:
     name: vsphere-provider
@@ -118,7 +118,7 @@ metadata:
   name: legacy-vm-hw13
   namespace: default
 spec:
-  powerState: On
+  powerState: "On"
   
   providerRef:
     name: vsphere-provider
@@ -158,7 +158,7 @@ spec:
     # Additional ESXi 8.0 optimizations could go here
   diskDefaults:
     type: thin
-    sizeGiB: 200
+    size: 200Gi
 
 ---
 # For ESXi 7.0 clusters (stable production)
@@ -179,7 +179,7 @@ spec:
     vsphere.hardwareVersion: "17"  # ESXi 7.0
   diskDefaults:
     type: thick
-    sizeGiB: 100
+    size: 100Gi
 
 ---
 # For ESXi 6.5 clusters (legacy support)
@@ -200,4 +200,4 @@ spec:
     vsphere.hardwareVersion: "13"  # ESXi 6.5
   diskDefaults:
     type: thin
-    sizeGiB: 80
+    size: 80Gi

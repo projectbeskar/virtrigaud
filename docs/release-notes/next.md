@@ -92,6 +92,9 @@ providers), and rollback caveats in
   with a readable `/dev/kvm`, instead of falling back to software emulation.
 - Chart: `networkPolicy` (previously `security.networkPolicies`) is never
   silently enabled by `helm upgrade --reuse-values`.
+- Examples: every manifest under `examples/` applies against the current CRDs
+  again (quoted `powerState` values, fields updated to the v1beta1 API), and
+  CI now dry-runs them all.
 
 ## Upgrade
 

@@ -28,8 +28,10 @@ spec:
   soft:
     folders: ["/Production/WebServers"]
   antiAffinity:
-    hostAntiAffinity: true  # Don't place multiple VMs on same host
-    datastoreAntiAffinity: false
+    hostAntiAffinity:
+      enabled: true  # Don't place multiple VMs on same host
+    datastoreAntiAffinity:
+      enabled: false
 
 ---
 # VM Image with preparation settings
@@ -104,8 +106,8 @@ spec:
   # Resource overrides (will be changed later for reconfiguration demo)
   resources:
     cpu: 2
-    memory: "4Gi"
-  
+    memoryMiB: 4096  # 4Gi
+
   disks:
     - name: "data"
       sizeGiB: 50
@@ -161,11 +163,12 @@ metadata:
 spec:
   vmRef:
     name: web-server-01
-  nameHint: "pre-upgrade-snapshot"
-  memory: true  # Include memory state (Libvirt/Proxmox only; see comment above)
-  description: "Snapshot before CPU/memory upgrade"
+  snapshotConfig:
+    name: "pre-upgrade-snapshot"
+    includeMemory: true  # Include memory state (Libvirt/Proxmox only; see comment above)
+    description: "Snapshot before CPU/memory upgrade"
   retentionPolicy:
-    maxAge: "7d"  # Keep for 7 days
+    maxAge: "168h"  # Keep for 7 days
     deleteOnVMDelete: true
 
 ---
@@ -176,16 +179,18 @@ metadata:
   name: web-server-01-test-clone
   namespace: default
 spec:
-  sourceRef:
-    name: web-server-01
+  source:
+    vmRef:
+      name: web-server-01
   target:
     name: web-server-01-test
     classRef:
       name: web-server-small
     placementRef:
       name: production-policy
-  linked: true  # Use linked clone for faster creation
-  powerOn: true
+  options:
+    type: LinkedClone  # Use linked clone for faster creation
+    powerOn: true
   customization:
     hostname: web-server-01-test
     networks:
@@ -218,11 +223,8 @@ spec:
       app: web-server-set
       environment: production
   template:
-    metadata:
-      labels:
-        app: web-server-set
-        environment: production
-        tier: frontend
+    # spec.template.metadata has no schema in the current CRD, so labels set
+    # here would be pruned on apply; they are omitted until it does.
     spec:
       providerRef:
         name: vsphere-prod
@@ -235,8 +237,8 @@ spec:
       
       resources:
         cpu: 2
-        memory: "4Gi"
-      
+        memoryMiB: 4096  # 4Gi
+
       disks:
         - name: "data"
           sizeGiB: 30

@@ -1,11 +1,20 @@
 # vSphere VM Cloning Example
-# Demonstrates full and linked clone capabilities in v0.2.3+
 #
-# Features:
-# - Full clone for production workloads
-# - Linked clone for development/testing
-# - Automatic snapshot creation for linked clones
-# - Clone from existing VMs or templates
+# NOTE: VirtualMachine has no cloneType field -- there is no full/linked
+# knob on the VM spec. Every VM created below with an imageRef pointing at a
+# vSphere template is created by cloning that template under the hood; the
+# choice of full vs. linked disk provisioning is not exposed there.
+#
+# Explicit clone-type control (FullClone/LinkedClone) exists only on the
+# separate VMClone resource, and even there only for cloning an EXISTING
+# VirtualMachine (source.vmRef) -- cloning directly from a template or
+# VMImage is declared in the VMClone schema but not yet implemented (see
+# examples/vmclone-basic.yaml for the current MVP scope). LinkedClone
+# additionally requires the provider to report that capability.
+#
+# Features demonstrated:
+# - Creating multiple VMs from the same vSphere template image
+# - Cloning an existing VM into a new one via VMClone (Example 4)
 
 ---
 # Provider configuration
@@ -25,7 +34,6 @@ spec:
     service:
       port: 9090
   defaults:
-    datacenter: "Production"
     datastore: "datastore1"
     cluster: "cluster1"
     folder: "virtrigaud-vms"
@@ -38,7 +46,7 @@ metadata:
   name: web-server
   namespace: default
 spec:
-  cpus: 4
+  cpu: 4
   memory: "8Gi"
   diskDefaults:
     type: thin
@@ -55,7 +63,6 @@ spec:
   source:
     vsphere:
       templateName: "ubuntu-22.04-server-template"
-      datacenter: "Production"
 
 ---
 # VMNetworkAttachment
@@ -65,10 +72,9 @@ metadata:
   name: production-network
   namespace: default
 spec:
-  config:
+  network:
     vsphere:
-      portGroup: "VM Network"
-      distributed: false
+      portgroup: "VM Network"
 
 ---
 # Example 1: Full Clone for Production
@@ -84,23 +90,24 @@ metadata:
 spec:
   providerRef:
     name: vsphere-prod
-  vmClassRef: web-server
-  vmImageRef: ubuntu-22-template
-  networkAttachments:
-    - attachmentRef: production-network
-  
-  # Full clone configuration
-  cloneType: full
-  
+  classRef:
+    name: web-server
+  imageRef:
+    name: ubuntu-22-template
+  networks:
+    - name: production-network
+      networkRef:
+        name: production-network
+
   powerState: "On"
-  
+
   # Cloud-init configuration
   userData:
     cloudInit:
       inline: |
         #cloud-config
         hostname: web-prod-01
-        
+
         users:
           - name: ubuntu
             sudo: ALL=(ALL) NOPASSWD:ALL
@@ -108,48 +115,49 @@ spec:
             shell: /bin/bash
             ssh_authorized_keys:
               - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC...
-        
+
         packages:
           - nginx
           - docker.io
           - open-vm-tools
-        
+
         runcmd:
           - systemctl enable nginx
           - systemctl start nginx
           - echo "Production Web Server" > /var/www/html/index.html
 
 ---
-# Example 2: Linked Clone for Development
-# Creates space-efficient copy using snapshots
-# Use for: Development, testing, short-lived environments
+# Example 2: "Development" copy of the same template
+# See the header note: there is no linked-clone option here, this is the
+# same full clone-from-template as Example 1, just with different
+# customization. For real linked clones, use VMClone against an existing VM.
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: VirtualMachine
 metadata:
   name: web-dev-01
   namespace: default
   annotations:
-    description: "Development web server - linked clone"
+    description: "Development web server"
 spec:
   providerRef:
     name: vsphere-prod
-  vmClassRef: web-server
-  vmImageRef: ubuntu-22-template
-  networkAttachments:
-    - attachmentRef: production-network
-  
-  # Linked clone configuration
-  # Provider will automatically create snapshot if none exists
-  cloneType: linked
-  
+  classRef:
+    name: web-server
+  imageRef:
+    name: ubuntu-22-template
+  networks:
+    - name: production-network
+      networkRef:
+        name: production-network
+
   powerState: "On"
-  
+
   userData:
     cloudInit:
       inline: |
         #cloud-config
         hostname: web-dev-01
-        
+
         users:
           - name: developer
             sudo: ALL=(ALL) NOPASSWD:ALL
@@ -157,13 +165,13 @@ spec:
             shell: /bin/bash
             ssh_authorized_keys:
               - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC...
-        
+
         packages:
           - nginx
           - nodejs
           - npm
           - open-vm-tools
-        
+
         runcmd:
           - systemctl enable nginx
           - systemctl start nginx
@@ -171,7 +179,7 @@ spec:
 
 ---
 # Example 3: Rapid Test Environment Provisioning
-# Create multiple linked clones for parallel testing
+# Create multiple VMs from the same template for parallel testing
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: VirtualMachine
 metadata:
@@ -183,14 +191,17 @@ metadata:
 spec:
   providerRef:
     name: vsphere-prod
-  vmClassRef: web-server
-  vmImageRef: ubuntu-22-template
-  networkAttachments:
-    - attachmentRef: production-network
-  
-  cloneType: linked
+  classRef:
+    name: web-server
+  imageRef:
+    name: ubuntu-22-template
+  networks:
+    - name: production-network
+      networkRef:
+        name: production-network
+
   powerState: "On"
-  
+
   userData:
     cloudInit:
       inline: |
@@ -213,14 +224,17 @@ metadata:
 spec:
   providerRef:
     name: vsphere-prod
-  vmClassRef: web-server
-  vmImageRef: ubuntu-22-template
-  networkAttachments:
-    - attachmentRef: production-network
-  
-  cloneType: linked
+  classRef:
+    name: web-server
+  imageRef:
+    name: ubuntu-22-template
+  networks:
+    - name: production-network
+      networkRef:
+        name: production-network
+
   powerState: "On"
-  
+
   userData:
     cloudInit:
       inline: |
@@ -232,28 +246,33 @@ spec:
             shell: /bin/bash
 
 ---
-# Example 4: Clone from Existing VM (not template)
-# Clone a running or stopped VM
+# Example 4: Clone an Existing VM (not a template)
+# This is the only case that is a real "clone" in the VMClone sense: it
+# clones the already-provisioned web-prod-01 VirtualMachine (Example 1)
+# rather than the shared template image. See examples/vmclone-basic.yaml
+# for the full MVP scope and limitations.
 apiVersion: infra.virtrigaud.io/v1beta1
-kind: VirtualMachine
+kind: VMClone
 metadata:
   name: web-prod-backup
   namespace: default
   annotations:
     description: "Backup of production server"
 spec:
-  providerRef:
-    name: vsphere-prod
-  vmClassRef: web-server
-  
-  # Reference an existing VM as the source
-  vmImageRef: web-prod-01
-  
-  # Full clone to create independent backup
-  cloneType: full
-  
-  # Start powered off
-  powerState: "Off"
+  # Reference an existing, already-provisioned VirtualMachine as the source
+  source:
+    vmRef:
+      name: web-prod-01
+
+  target:
+    name: web-prod-backup
+    classRef:
+      name: web-server
+
+  # Full clone for an independent backup, left powered off
+  options:
+    type: FullClone
+    powerOn: false
 
 ---
 # Usage Instructions:
@@ -261,44 +280,48 @@ spec:
 # 1. Deploy the resources:
 #    kubectl apply -f vsphere-clone-example.yaml
 #
-# 2. Monitor clone operations:
+# 2. Monitor VM creation (Examples 1-3, created directly from the template):
 #    kubectl get vm -w
 #    kubectl describe vm web-prod-01
 #
-# 3. Check clone status:
+# 3. Check VM status:
 #    kubectl get vm web-prod-01 -o jsonpath='{.status.phase}'
 #
-# 4. View VM details after cloning:
+# 4. View VM details:
 #    kubectl get vm web-dev-01 -o yaml
 #
-# 5. Verify linked clone space savings in vSphere:
-#    - Check VM disk usage in vCenter
-#    - Linked clones share base disk with parent
+# 5. Monitor the VMClone (Example 4) and the VM it produces:
+#    kubectl get vmclone web-prod-backup -w
+#    kubectl get vm web-prod-backup -o yaml
 #
-# Performance Comparison:
+# Clone Types (VMClone resource only -- see examples/vmclone-basic.yaml):
 #
-# Full Clone:
+# FullClone (default):
 # - Creation time: 5-15 minutes (depends on disk size)
 # - Storage: Full disk space allocated
 # - Independence: Completely independent from source
-# - Best for: Production, long-lived VMs
+# - Best for: Production, long-lived VMs, backups
 #
-# Linked Clone:
+# LinkedClone:
 # - Creation time: 1-3 minutes (much faster)
 # - Storage: Only delta changes stored
-# - Independence: Requires parent VM/snapshot
-# - Best for: Development, testing, short-lived VMs
+# - Independence: Requires the parent VM to remain available
+# - Requires the provider to report linked-clone support; on an unsupported
+#   provider the VMClone fails with Phase=Failed
 #
 # Troubleshooting:
 #
-# If clone fails:
+# If a VM or VMClone fails:
 # 1. Check provider logs: kubectl logs deployment/virtrigaud-provider-vsphere
-# 2. Verify source template exists: Check vCenter
+# 2. Verify the source template/VM exists: Check vCenter
 # 3. Ensure sufficient storage: Check datastore capacity
-# 4. For linked clones: Verify snapshot can be created on source
+# 4. For VMClone: kubectl describe vmclone <name> for Phase/Message
 #
-# Clone Limitations:
-# - Linked clones require source VM/template to remain available
-# - Cannot delete source VM/template while linked clones exist
-# - Full clones require sufficient storage on target datastore
-
+# Limitations:
+# - VirtualMachine has no per-VM clone-type field; VMs created from a
+#   template image are always independent clones under the hood.
+# - VMClone currently only clones an existing VM (source.vmRef); cloning
+#   directly from a template or VMImage is declared in the schema but not
+#   yet implemented.
+# - LinkedClone via VMClone requires the source VM to remain available and
+#   the provider to support it.
