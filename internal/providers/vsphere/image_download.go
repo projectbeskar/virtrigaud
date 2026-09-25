@@ -17,7 +17,6 @@ limitations under the License.
 package vsphere
 
 import (
-	"bytes"
 	"context"
 	stderrors "errors"
 	"fmt"
@@ -217,9 +216,14 @@ var platformEndpoints = []net.IP{
 	net.ParseIP("168.63.129.16"),   // Azure WireServer
 }
 
-// nat64WellKnownPrefix is 64:ff9b::/96 (RFC 6052), whose last 32 bits are an
-// IPv4 address that a NAT64 gateway connects to.
-var nat64WellKnownPrefix = net.ParseIP("64:ff9b::").To16()[:12]
+// ipv4EmbeddingPrefixes are the IPv6 /96 prefixes whose last 32 bits are an
+// IPv4 address the connection effectively reaches: the NAT64 well-known prefix
+// 64:ff9b::/96 (RFC 6052), which a NAT64 gateway translates, and the
+// deprecated IPv4-compatible ::/96.
+var ipv4EmbeddingPrefixes = []*net.IPNet{
+	{IP: net.ParseIP("64:ff9b::"), Mask: net.CIDRMask(96, 128)},
+	{IP: net.IPv6zero, Mask: net.CIDRMask(96, 128)},
+}
 
 // embeddedIPv4 returns the IPv4 address an IPv6 address carries in its last 32
 // bits when it is in the NAT64 well-known prefix (64:ff9b::/96) or is an
@@ -232,9 +236,10 @@ func embeddedIPv4(ip net.IP) net.IP {
 	if ip16 == nil {
 		return nil
 	}
-	var zero [12]byte
-	if bytes.Equal(ip16[:12], nat64WellKnownPrefix) || bytes.Equal(ip16[:12], zero[:]) {
-		return net.IPv4(ip16[12], ip16[13], ip16[14], ip16[15])
+	for _, prefix := range ipv4EmbeddingPrefixes {
+		if prefix.Contains(ip16) {
+			return net.IPv4(ip16[12], ip16[13], ip16[14], ip16[15])
+		}
 	}
 	return nil
 }
