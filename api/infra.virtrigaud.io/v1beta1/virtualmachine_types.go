@@ -714,6 +714,17 @@ const (
 // change. (A per-field comparison through conditional expressions exceeds the
 // apiserver's static CEL cost budget; whole-object equality does not.)
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || ((!has(oldSelf.status.id) || size(oldSelf.status.id) == 0) && (!has(oldSelf.status.placement) || !has(oldSelf.status.placement.pendingHost) || size(oldSelf.status.placement.pendingHost) == 0)) || (has(self.spec) && has(oldSelf.spec) && self.spec.providerRef == oldSelf.spec.providerRef)",message="spec.providerRef is immutable once the VirtualMachine is bound (status.id or status.placement.pendingHost is set); to stop managing the VM without destroying it, annotate it virtrigaud.io/orphan-on-delete=true and delete it",fieldPath=".spec.providerRef"
+//
+// spec.classRef and spec.resources are locked while a clustered create is
+// pending: status.placement.pendingHost set and status.id still empty in the
+// STORED object (ADR-0007 Addendum A, scheduler-accuracy amendment). The
+// scheduler admitted the VM at that size and every other schedule counts the
+// pending VM at it, so its owner must not grow it before the create lands.
+// Once the VM is created, its size is counted from status.currentResources and
+// a resize-up is admitted against the host's capacity instead. A transition
+// rule on the root, like the providerRef rule above; both are compared as
+// whole objects.
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.placement) || !has(oldSelf.status.placement.pendingHost) || size(oldSelf.status.placement.pendingHost) == 0 || (has(oldSelf.status.id) && size(oldSelf.status.id) > 0) || (has(self.spec) && has(oldSelf.spec) && self.spec.classRef == oldSelf.spec.classRef && has(self.spec.resources) == has(oldSelf.spec.resources) && (!has(self.spec.resources) || self.spec.resources == oldSelf.spec.resources))",message="spec.classRef and spec.resources are immutable while a clustered create is pending (status.placement.pendingHost is set and status.id is empty): the VM was scheduled at this size; change them once the VM is created",fieldPath=".spec"
 type VirtualMachine struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

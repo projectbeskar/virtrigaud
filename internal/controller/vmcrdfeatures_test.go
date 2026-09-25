@@ -124,11 +124,31 @@ func TestMissingVMCRDFeatures(t *testing.T) {
 
 	missing, err = missingVMCRDFeatures(olderVMCRD(t, false, true))
 	require.NoError(t, err)
-	assert.Equal(t, []string{crdFeatureProviderRefCEL}, missing)
+	assert.Equal(t, []string{crdFeatureProviderRefCEL, crdFeaturePendingSizeCEL}, missing)
 
 	missing, err = missingVMCRDFeatures(olderVMCRD(t, true, true))
 	require.NoError(t, err)
-	assert.Len(t, missing, 2)
+	assert.Len(t, missing, 3)
+
+	// A CRD from before the scheduler-accuracy amendment: the providerRef rule
+	// only.
+	crd := generatedVMCRD(t)
+	root := v1beta1Schema(t, crd)
+	rules, ok := root["x-kubernetes-validations"].([]any)
+	require.True(t, ok)
+	var kept []any
+	for _, r := range rules {
+		rule, ok := r.(map[string]any)
+		require.True(t, ok)
+		if text, _ := rule["rule"].(string); !strings.Contains(text, pendingSizeImmutabilityRuleFragment) {
+			kept = append(kept, r)
+		}
+	}
+	require.Len(t, kept, len(rules)-1, "the generated CRD carries the pending-size rule")
+	root["x-kubernetes-validations"] = kept
+	missing, err = missingVMCRDFeatures(crd)
+	require.NoError(t, err)
+	assert.Equal(t, []string{crdFeaturePendingSizeCEL}, missing)
 }
 
 func TestMissingConsumerSelector(t *testing.T) {
