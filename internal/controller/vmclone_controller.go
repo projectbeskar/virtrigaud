@@ -1096,26 +1096,14 @@ func (r *VMCloneReconciler) clearConsumerRefusal(ctx context.Context, clone *inf
 	return r.updateStatus(ctx, clone)
 }
 
-// clonesRefusedAsConsumers maps a consumer-grant change to the unfinished
-// VMClones refused with ConsumerNotAllowed. The namespace is not used to
-// filter: a clone's refusal may concern its target namespace, not its own.
-func (r *VMCloneReconciler) clonesRefusedAsConsumers(ctx context.Context, _ string, _ client.Object) []reconcile.Request {
-	clones := &infrav1beta1.VMCloneList{}
-	if err := r.List(ctx, clones); err != nil {
-		logging.FromContext(ctx).Error(err, "Failed to list VMClones for a consumer grant change")
-		return nil
-	}
-	var reqs []reconcile.Request
-	for i := range clones.Items {
-		c := &clones.Items[i]
-		if c.Status.Phase == infrav1beta1.ClonePhaseReady || c.Status.Phase == infrav1beta1.ClonePhaseFailed {
-			continue
-		}
-		if consumerRefused(c.Status.Conditions) {
-			reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(c)})
-		}
-	}
-	return reqs
+// clonesForGrantChange returns the unfinished VMClones refused with
+// ConsumerNotAllowed that a consumer-grant change may lift (consumerGrantIndex:
+// the object named in the refusal, or the clone's own or target namespace).
+func (r *VMCloneReconciler) clonesForGrantChange(ctx context.Context, indexValue string) []reconcile.Request {
+	return requestsForGrantChange(ctx, r.Client, &infrav1beta1.VMCloneList{}, indexValue, func(obj client.Object) bool {
+		c, ok := obj.(*infrav1beta1.VMClone)
+		return !ok || c.Status.Phase == infrav1beta1.ClonePhaseReady || c.Status.Phase == infrav1beta1.ClonePhaseFailed
+	})
 }
 
 // SetupWithManager sets up the controller with the Manager. Besides its own
@@ -1125,11 +1113,14 @@ func (r *VMCloneReconciler) clonesRefusedAsConsumers(ctx context.Context, _ stri
 // spec.consumerNamespaceSelector of Providers, VMClasses and VMImages) to
 // re-drive clones refused with ConsumerNotAllowed.
 func (r *VMCloneReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if err := indexConsumerGrants(mgr, &infrav1beta1.VMClone{}, cloneConsumerGrantIndexValues); err != nil {
+		return err
+	}
 	b := ctrl.NewControllerManagedBy(mgr).
 		For(&infrav1beta1.VMClone{}).
 		Watches(&corev1.Namespace{},
 			handler.EnqueueRequestsFromMapFunc(r.clonesTargetingNamespace),
 			builder.WithPredicates(allowedSourceNamespacesChanged()))
-	return withConsumerGrantWatches(b, r.clonesRefusedAsConsumers).
+	return withConsumerGrantWatches(b, r.clonesForGrantChange).
 		Complete(r)
 }

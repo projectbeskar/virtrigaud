@@ -254,26 +254,6 @@ func TestVMMigrationConsumer_CreateNotIssuedForUngrantedClass(t *testing.T) {
 	assertNothingInNamespace(t, r.Client, xnsTarget)
 }
 
-func TestVMMigrationConsumer_RefusedMigrationsMapping(t *testing.T) {
-	mk := func(name string, phase infrav1beta1.MigrationPhase, refused bool) *infrav1beta1.VMMigration {
-		m, _ := xnsMigration(xnsTarget)
-		m.Name = name
-		m.Status.Phase = phase
-		if refused {
-			m.Status.Conditions = []metav1.Condition{{Type: infrav1beta1.VMMigrationConditionReady, Status: metav1.ConditionFalse, Reason: k8s.ReasonConsumerNotAllowed}}
-		}
-		return m
-	}
-	r, _ := countedMigrationReconciler(t, &migrationSpy{},
-		mk("refused", infrav1beta1.MigrationPhaseImporting, true),
-		mk("running", infrav1beta1.MigrationPhaseImporting, false),
-		mk("done", infrav1beta1.MigrationPhaseReady, true))
-
-	reqs := r.migrationsRefusedAsConsumers(context.Background(), "", nil)
-	require.Len(t, reqs, 1)
-	assert.Equal(t, "refused", reqs[0].Name)
-}
-
 // xnsSourceMigration is xnsMigration("") whose source VM runs on a Provider in
 // cgOwnerNS (src-prov there, with sel).
 func xnsSourceMigration(t *testing.T, phase infrav1beta1.MigrationPhase, sel *metav1.LabelSelector) (*infrav1beta1.VMMigration, []client.Object) {

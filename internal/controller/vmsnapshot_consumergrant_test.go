@@ -145,19 +145,3 @@ func TestVMSnapshot_DeleteNeverUsesUngrantedProvider(t *testing.T) {
 	assert.Contains(t, events, "SnapshotDeleteFailed")
 	assert.Contains(t, events, consumerNamespaceSelectorField)
 }
-
-func TestVMSnapshot_RefusedAsConsumersMapping(t *testing.T) {
-	refused := &infrav1beta1.VMSnapshot{
-		ObjectMeta: metav1.ObjectMeta{Name: "refused", Namespace: bpNS},
-		Status: infrav1beta1.VMSnapshotStatus{Conditions: []metav1.Condition{
-			{Type: infrav1beta1.VMSnapshotConditionReady, Status: metav1.ConditionFalse, Reason: k8s.ReasonConsumerNotAllowed},
-		}},
-	}
-	other := &infrav1beta1.VMSnapshot{ObjectMeta: metav1.ObjectMeta{Name: "other", Namespace: bpNS}}
-	r, _ := newSnapConsumerReconciler(t, refused, other)
-
-	reqs := r.snapshotsRefusedAsConsumers(context.Background(), "", nil)
-	require.Len(t, reqs, 1)
-	assert.Equal(t, "refused", reqs[0].Name)
-	assert.Empty(t, r.snapshotsRefusedAsConsumers(context.Background(), "team-b", nil))
-}

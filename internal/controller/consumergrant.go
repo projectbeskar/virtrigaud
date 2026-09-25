@@ -115,7 +115,7 @@ type ConsumerNotAllowedError struct {
 
 // Error implements error.
 func (e *ConsumerNotAllowedError) Error() string {
-	return fmt.Sprintf("%s %s/%s may not be used from this namespace: a reference from another namespace is allowed "+
+	return fmt.Sprintf("%s %s/%s"+consumerNotAllowedPhrase+"a reference from another namespace is allowed "+
 		"only when the %s's %s selects the referencing namespace; no provider call is made",
 		e.Kind, e.Namespace, e.Name, e.Kind, consumerNamespaceSelectorField)
 }
@@ -274,14 +274,7 @@ func objectRefKey(ref infravirtrigaudiov1beta1.ObjectRef, defaultNamespace strin
 // clone, migration or adoption from producing a VM the VirtualMachine
 // controller would refuse to manage.
 func checkVMConsumerRefs(ctx context.Context, c client.Reader, vm *infravirtrigaudiov1beta1.VirtualMachine) error {
-	classKey, hasClass := vmClassKey(vm)
-	imageKey, hasImage := vmImageKey(vm)
-	refs := []consumerRef{
-		{obj: &infravirtrigaudiov1beta1.Provider{}, key: vmProviderKey(vm), set: vm.Spec.ProviderRef.Name != ""},
-		{obj: &infravirtrigaudiov1beta1.VMClass{}, key: classKey, set: hasClass},
-		{obj: &infravirtrigaudiov1beta1.VMImage{}, key: imageKey, set: hasImage},
-	}
-	for _, ref := range refs {
+	for _, ref := range vmConsumerRefs(vm) {
 		if !ref.set || ref.key.Namespace == vm.Namespace {
 			continue
 		}
@@ -293,12 +286,24 @@ func checkVMConsumerRefs(ctx context.Context, c client.Reader, vm *infravirtriga
 }
 
 // consumerRef is one Provider / VMClass / VMImage reference of a
-// VirtualMachine: an empty object of the referenced kind, the key it resolves
-// to, and whether the reference is set at all.
+// VirtualMachine: the referenced kind, an empty object of that kind, the key
+// it resolves to, and whether the reference is set at all.
 type consumerRef struct {
-	obj client.Object
-	key types.NamespacedName
-	set bool
+	kind string
+	obj  client.Object
+	key  types.NamespacedName
+	set  bool
+}
+
+// vmConsumerRefs returns vm's Provider, VMClass and VMImage references.
+func vmConsumerRefs(vm *infravirtrigaudiov1beta1.VirtualMachine) []consumerRef {
+	classKey, hasClass := vmClassKey(vm)
+	imageKey, hasImage := vmImageKey(vm)
+	return []consumerRef{
+		{kind: consumerKindProvider, obj: &infravirtrigaudiov1beta1.Provider{}, key: vmProviderKey(vm), set: vm.Spec.ProviderRef.Name != ""},
+		{kind: consumerKindVMClass, obj: &infravirtrigaudiov1beta1.VMClass{}, key: classKey, set: hasClass},
+		{kind: consumerKindVMImage, obj: &infravirtrigaudiov1beta1.VMImage{}, key: imageKey, set: hasImage},
+	}
 }
 
 // getVMProvider reads the Provider vm's spec.providerRef names and checks that
@@ -372,17 +377,19 @@ func consumerSelectorChanged() predicate.Predicate {
 // soon as a grant may have changed, so a grant takes effect within seconds
 // instead of at the next consumerNotAllowedRetryInterval recheck: a
 // Namespace's labels, and a Provider's, VMClass's or VMImage's
-// spec.consumerNamespaceSelector. remap returns the objects to re-drive. For a
-// Namespace label change, namespace is that Namespace and changed is nil; for a
-// selector change, namespace is "" (a consumer in any namespace may be
-// affected) and changed is the Provider, VMClass or VMImage whose selector
-// changed.
-func withConsumerGrantWatches(b *builder.Builder, remap func(ctx context.Context, namespace string, changed client.Object) []reconcile.Request) *builder.Builder {
+// spec.consumerNamespaceSelector. forIndex returns the objects indexed under a
+// consumerGrantIndex value (see consumergrant_index.go): the Namespace's
+// consumerNamespaceIndexValue, or the changed object's consumerRefIndexValue.
+func withConsumerGrantWatches(b *builder.Builder, forIndex func(ctx context.Context, indexValue string) []reconcile.Request) *builder.Builder {
 	onNamespace := handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
-		return remap(ctx, obj.GetName(), nil)
+		return forIndex(ctx, consumerNamespaceIndexValue(obj.GetName()))
 	})
 	onSelector := handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
-		return remap(ctx, "", obj)
+		value, ok := changedObjectIndexValue(obj)
+		if !ok {
+			return nil
+		}
+		return forIndex(ctx, value)
 	})
 	return b.
 		Watches(&corev1.Namespace{}, onNamespace, builder.WithPredicates(namespaceLabelsChanged())).
@@ -391,35 +398,13 @@ func withConsumerGrantWatches(b *builder.Builder, remap func(ctx context.Context
 		Watches(&infravirtrigaudiov1beta1.VMImage{}, onSelector, builder.WithPredicates(consumerSelectorChanged()))
 }
 
-// vmReferencesFromAnotherNamespace reports whether vm references obj (a
-// Provider, VMClass or VMImage) and obj is outside vm's namespace.
-func vmReferencesFromAnotherNamespace(vm *infravirtrigaudiov1beta1.VirtualMachine, obj client.Object) bool {
-	if obj.GetNamespace() == vm.Namespace {
-		return false
-	}
-	target := client.ObjectKeyFromObject(obj)
-	switch obj.(type) {
-	case *infravirtrigaudiov1beta1.Provider:
-		return vm.Spec.ProviderRef.Name != "" && vmProviderKey(vm) == target
-	case *infravirtrigaudiov1beta1.VMClass:
-		key, ok := vmClassKey(vm)
-		return ok && key == target
-	case *infravirtrigaudiov1beta1.VMImage:
-		key, ok := vmImageKey(vm)
-		return ok && key == target
-	}
-	return false
-}
-
 // vmHasCrossNamespaceRef reports whether vm references a Provider, VMClass or
 // VMImage outside its own namespace.
 func vmHasCrossNamespaceRef(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
-	if vm.Spec.ProviderRef.Name != "" && vmProviderKey(vm).Namespace != vm.Namespace {
-		return true
+	for _, ref := range vmConsumerRefs(vm) {
+		if ref.set && ref.key.Namespace != vm.Namespace {
+			return true
+		}
 	}
-	if key, ok := vmClassKey(vm); ok && key.Namespace != vm.Namespace {
-		return true
-	}
-	key, ok := vmImageKey(vm)
-	return ok && key.Namespace != vm.Namespace
+	return false
 }

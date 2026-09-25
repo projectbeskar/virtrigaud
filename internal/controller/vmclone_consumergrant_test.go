@@ -172,23 +172,3 @@ func TestVMCloneConsumer_ClassJSONNeverCarriesTheSelector(t *testing.T) {
 	assert.Contains(t, data, `"cpu"`)
 	assert.NotContains(t, data, "consumerNamespaceSelector")
 }
-
-func TestVMCloneConsumer_RefusedClonesMapping(t *testing.T) {
-	mk := func(name string, phase infrav1beta1.ClonePhase, refused bool) *infrav1beta1.VMClone {
-		c := xnsClone(xnsTarget)
-		c.Name, c.UID = name, ""
-		c.Status.Phase = phase
-		if refused {
-			c.Status.Conditions = []metav1.Condition{{Type: infrav1beta1.VMCloneConditionReady, Status: metav1.ConditionFalse, Reason: k8s.ReasonConsumerNotAllowed}}
-		}
-		return c
-	}
-	refused := mk("refused", infrav1beta1.ClonePhasePending, true)
-	r, _ := newXNSCloneReconciler(t, &clonerProvider{}, refused,
-		mk("running", infrav1beta1.ClonePhaseCloning, false),
-		mk("done", infrav1beta1.ClonePhaseReady, true))
-
-	reqs := r.clonesRefusedAsConsumers(context.Background(), "", nil)
-	require.Len(t, reqs, 1)
-	assert.Equal(t, "refused", reqs[0].Name)
-}

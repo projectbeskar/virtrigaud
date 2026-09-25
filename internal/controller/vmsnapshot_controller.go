@@ -760,34 +760,22 @@ func (r *VMSnapshotReconciler) refuseSnapshotConsumer(ctx context.Context, snaps
 	return ctrl.Result{RequeueAfter: consumerNotAllowedRetryInterval}
 }
 
-// snapshotsRefusedAsConsumers maps a consumer-grant change to the VMSnapshots
-// refused with ConsumerNotAllowed (in namespace, or everywhere when namespace
-// is ""), so a grant takes effect without waiting for the slow recheck.
-func (r *VMSnapshotReconciler) snapshotsRefusedAsConsumers(ctx context.Context, namespace string, _ client.Object) []reconcile.Request {
-	snapshots := &infrav1beta1.VMSnapshotList{}
-	var opts []client.ListOption
-	if namespace != "" {
-		opts = append(opts, client.InNamespace(namespace))
-	}
-	if err := r.List(ctx, snapshots, opts...); err != nil {
-		logging.FromContext(ctx).Error(err, "Failed to list VMSnapshots for a consumer grant change", "namespace", namespace)
-		return nil
-	}
-	var reqs []reconcile.Request
-	for i := range snapshots.Items {
-		if consumerRefused(snapshots.Items[i].Status.Conditions) {
-			reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&snapshots.Items[i])})
-		}
-	}
-	return reqs
+// snapshotsForGrantChange returns the VMSnapshots refused with
+// ConsumerNotAllowed that a consumer-grant change may lift (consumerGrantIndex),
+// so a grant takes effect without waiting for the slow recheck.
+func (r *VMSnapshotReconciler) snapshotsForGrantChange(ctx context.Context, indexValue string) []reconcile.Request {
+	return requestsForGrantChange(ctx, r.Client, &infrav1beta1.VMSnapshotList{}, indexValue, nil)
 }
 
 // SetupWithManager sets up the controller with the Manager. Besides its own
 // VMSnapshots it watches consumer-grant changes (Namespace labels, Provider
 // selectors) to re-drive snapshots refused with ConsumerNotAllowed.
 func (r *VMSnapshotReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if err := indexConsumerGrants(mgr, &infrav1beta1.VMSnapshot{}, snapshotConsumerGrantIndexValues); err != nil {
+		return err
+	}
 	b := ctrl.NewControllerManagedBy(mgr).
 		For(&infrav1beta1.VMSnapshot{})
-	return withConsumerGrantWatches(b, r.snapshotsRefusedAsConsumers).
+	return withConsumerGrantWatches(b, r.snapshotsForGrantChange).
 		Complete(r)
 }

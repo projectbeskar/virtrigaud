@@ -2435,26 +2435,15 @@ func (r *VMMigrationReconciler) clearConsumerRefusal(ctx context.Context, migrat
 	return r.updateStatus(ctx, migration)
 }
 
-// migrationsRefusedAsConsumers maps a consumer-grant change to the unfinished
-// VMMigrations refused with ConsumerNotAllowed. The namespace is not used to
-// filter: a migration's refusal may concern its target namespace.
-func (r *VMMigrationReconciler) migrationsRefusedAsConsumers(ctx context.Context, _ string, _ client.Object) []reconcile.Request {
-	migrations := &infrav1beta1.VMMigrationList{}
-	if err := r.List(ctx, migrations); err != nil {
-		logging.FromContext(ctx).Error(err, "Failed to list VMMigrations for a consumer grant change")
-		return nil
-	}
-	var reqs []reconcile.Request
-	for i := range migrations.Items {
-		m := &migrations.Items[i]
-		if m.Status.Phase == infrav1beta1.MigrationPhaseReady || m.Status.Phase == infrav1beta1.MigrationPhaseFailed {
-			continue
-		}
-		if consumerRefused(m.Status.Conditions) {
-			reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(m)})
-		}
-	}
-	return reqs
+// migrationsForGrantChange returns the unfinished VMMigrations refused with
+// ConsumerNotAllowed that a consumer-grant change may lift
+// (consumerGrantIndex: the object named in the refusal, or the migration's own
+// or target namespace).
+func (r *VMMigrationReconciler) migrationsForGrantChange(ctx context.Context, indexValue string) []reconcile.Request {
+	return requestsForGrantChange(ctx, r.Client, &infrav1beta1.VMMigrationList{}, indexValue, func(obj client.Object) bool {
+		m, ok := obj.(*infrav1beta1.VMMigration)
+		return !ok || m.Status.Phase == infrav1beta1.MigrationPhaseReady || m.Status.Phase == infrav1beta1.MigrationPhaseFailed
+	})
 }
 
 // isProviderReady checks if a provider is ready
@@ -3507,12 +3496,15 @@ func (r *VMMigrationReconciler) deleteSourceVM(ctx context.Context, migration *i
 // VMClasses and VMImages) to re-drive migrations refused with
 // ConsumerNotAllowed.
 func (r *VMMigrationReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if err := indexConsumerGrants(mgr, &infrav1beta1.VMMigration{}, migrationConsumerGrantIndexValues); err != nil {
+		return err
+	}
 	b := ctrl.NewControllerManagedBy(mgr).
 		For(&infrav1beta1.VMMigration{}).
 		Watches(&corev1.Namespace{},
 			handler.EnqueueRequestsFromMapFunc(r.migrationsTargetingNamespace),
 			builder.WithPredicates(allowedSourceNamespacesChanged()))
-	return withConsumerGrantWatches(b, r.migrationsRefusedAsConsumers).
+	return withConsumerGrantWatches(b, r.migrationsForGrantChange).
 		WithOptions(controller.Options{
 			MaxConcurrentReconciles: 3, // Limit concurrent reconciliations to prevent API server overload
 		}).

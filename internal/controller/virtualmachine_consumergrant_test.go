@@ -32,7 +32,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/event"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
@@ -579,39 +578,6 @@ func TestEnsureImageOnProvider_NeverSendsTheSelector(t *testing.T) {
 }
 
 // ─── watches ─────────────────────────────────────────────────────────────────
-
-func TestVMsAffectedByGrantChange(t *testing.T) {
-	refused := cgVM(cgOwnerNS, "")
-	refused.Name = "refused"
-	refused.Status.Conditions = []metav1.Condition{{Type: k8s.ConditionReady, Status: metav1.ConditionFalse, Reason: k8s.ReasonConsumerNotAllowed}}
-	cross := cgVM("", cgOwnerNS)
-	cross.Name = "cross"
-	local := cgVM("", "")
-	local.Name = "local"
-	elsewhere := cgVM(cgOwnerNS, "")
-	elsewhere.Name = "elsewhere"
-	elsewhere.Namespace = "team-b"
-	r, _, _ := bpReconciler(t, &routingProvider{}, refused, cross, local, elsewhere)
-
-	names := func(reqs []reconcile.Request) []string {
-		var out []string
-		for _, q := range reqs {
-			out = append(out, q.String())
-		}
-		return out
-	}
-	assert.ElementsMatch(t, []string{bpNS + "/refused", bpNS + "/cross"}, names(r.vmsAffectedByGrantChange(context.Background(), bpNS, nil)),
-		"a Namespace label change re-drives that namespace's refused and cross-namespace VMs only")
-	assert.ElementsMatch(t, []string{bpNS + "/refused", "team-b/elsewhere"},
-		names(r.vmsAffectedByGrantChange(context.Background(), "", grantedProvider(cgOwnerNS, "shared", nil))),
-		"a Provider selector change re-drives the VMs in other namespaces that reference it, in every namespace")
-	assert.ElementsMatch(t, []string{bpNS + "/cross"},
-		names(r.vmsAffectedByGrantChange(context.Background(), "", grantedClass(cgOwnerNS, "shared", nil))),
-		"a VMClass selector change re-drives only the VMs that reference that class")
-	assert.Empty(t, names(r.vmsAffectedByGrantChange(context.Background(), "", grantedProvider(bpNS, "shared", nil))),
-		"a same-namespace reference is never affected by a selector")
-	assert.Empty(t, names(r.vmsAffectedByGrantChange(context.Background(), "", grantedImage(cgOwnerNS, "other", nil))))
-}
 
 func TestConsumerGrantPredicates(t *testing.T) {
 	nsPred := namespaceLabelsChanged()

@@ -2129,36 +2129,13 @@ func vmIsAdopted(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
 	return vm.Labels[AdoptedLabel] == AdoptedLabelValue
 }
 
-// vmsAffectedByGrantChange maps a consumer-grant change to the VMs to
-// re-drive, so a grant — and a revocation — takes effect promptly:
-//
-//   - a Namespace's labels changed (namespace set, changed nil): the VMs in it
-//     that are refused with ConsumerNotAllowed or reference a Provider, VMClass
-//     or VMImage in another namespace;
-//   - a Provider's, VMClass's or VMImage's selector changed (changed set): the
-//     VMs in other namespaces that reference it.
-func (r *VirtualMachineReconciler) vmsAffectedByGrantChange(ctx context.Context, namespace string, changed client.Object) []reconcile.Request {
-	vms := &infravirtrigaudiov1beta1.VirtualMachineList{}
-	var opts []client.ListOption
-	if namespace != "" {
-		opts = append(opts, client.InNamespace(namespace))
-	}
-	if err := r.List(ctx, vms, opts...); err != nil {
-		log.FromContext(ctx).Error(err, "Failed to list VirtualMachines for a consumer grant change", "namespace", namespace)
-		return nil
-	}
-	var reqs []reconcile.Request
-	for i := range vms.Items {
-		vm := &vms.Items[i]
-		affected := consumerRefused(vm.Status.Conditions) || vmHasCrossNamespaceRef(vm)
-		if changed != nil {
-			affected = vmReferencesFromAnotherNamespace(vm, changed)
-		}
-		if affected {
-			reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(vm)})
-		}
-	}
-	return reqs
+// vmsForGrantChange returns the VirtualMachines a consumer-grant change may
+// affect (consumerGrantIndex): for a Namespace label change, the VMs there that
+// reference another namespace's objects or are refused; for a selector change,
+// the VMs that reference that object from another namespace — so a grant, and
+// a revocation, takes effect promptly.
+func (r *VirtualMachineReconciler) vmsForGrantChange(ctx context.Context, indexValue string) []reconcile.Request {
+	return requestsForGrantChange(ctx, r.Client, &infravirtrigaudiov1beta1.VirtualMachineList{}, indexValue, nil)
 }
 
 // SetupWithManager sets up the controller with the Manager. Besides its own
@@ -2167,9 +2144,12 @@ func (r *VirtualMachineReconciler) vmsAffectedByGrantChange(ctx context.Context,
 // cross-namespace grant (or revocation) takes effect without waiting for the
 // slow recheck.
 func (r *VirtualMachineReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if err := indexConsumerGrants(mgr, &infravirtrigaudiov1beta1.VirtualMachine{}, vmConsumerGrantIndexValues); err != nil {
+		return err
+	}
 	b := ctrl.NewControllerManagedBy(mgr).
 		For(&infravirtrigaudiov1beta1.VirtualMachine{})
-	return withConsumerGrantWatches(b, r.vmsAffectedByGrantChange).
+	return withConsumerGrantWatches(b, r.vmsForGrantChange).
 		WithEventFilter(predicate.Funcs{
 			UpdateFunc: func(e event.UpdateEvent) bool {
 				// Only reconcile if spec changed (ignore status-only updates)
