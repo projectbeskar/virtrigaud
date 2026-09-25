@@ -149,6 +149,13 @@ func TestMissingVMCRDFeatures(t *testing.T) {
 	missing, err = missingVMCRDFeatures(crd)
 	require.NoError(t, err)
 	assert.Equal(t, []string{crdFeaturePendingSizeCEL}, missing)
+
+	// A CRD without status.placement.pendingResources (review N3).
+	crd = generatedVMCRD(t)
+	unstructured.RemoveNestedField(v1beta1Schema(t, crd), "properties", "status", "properties", "placement", "properties", "pendingResources")
+	missing, err = missingVMCRDFeatures(crd)
+	require.NoError(t, err)
+	assert.Equal(t, []string{crdFeaturePendingResources}, missing)
 }
 
 func TestMissingConsumerSelector(t *testing.T) {

@@ -246,6 +246,12 @@ func withMinimum(r scheduler.ResourceRequest) scheduler.ResourceRequest {
 // usable class, or an out-of-range override the Create will refuse), it counts
 // at requestedFootprint instead, the conservative reading.
 func pendingFootprint(vm *infravirtrigaudiov1beta1.VirtualMachine, class *infravirtrigaudiov1beta1.VMClass) scheduler.ResourceRequest {
+	// The size it was admitted at, recorded with its pending host (review
+	// N3): its VMClass's content may have changed since, but a retry that
+	// has grown is not sent (refuseGrownPendingCreate).
+	if pl := vm.Status.Placement; pl != nil && pl.PendingResources != nil {
+		return withMinimum(scheduler.ResourceRequest{CPU: pl.PendingResources.CPU, MemoryMiB: pl.PendingResources.MemoryMiB})
+	}
 	if class != nil {
 		if cpu, mem, err := effectiveResources(vm, class); err == nil {
 			return withMinimum(scheduler.ResourceRequest{CPU: cpu, MemoryMiB: int64(mem)})

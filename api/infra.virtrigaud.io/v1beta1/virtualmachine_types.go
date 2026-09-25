@@ -384,6 +384,16 @@ type PlacementStatus struct {
 	// +kubebuilder:validation:items:MaxLength=253
 	ExcludedHosts []string `json:"excludedHosts,omitempty"`
 
+	// PendingResources is the size the scheduler admitted a pending Create at
+	// (ADR-0007 Addendum A, scheduler-accuracy amendment). The operator writes
+	// it with PendingHost, in the same checked status update, and clears it when
+	// the VM is bound or the pending host is released. While a create is
+	// pending, the VM counts at this size against its host's capacity, and a
+	// retry of the Create whose size has grown beyond it (its VMClass was
+	// changed in the meantime) is not sent.
+	// +optional
+	PendingResources *PlacementResources `json:"pendingResources,omitempty"`
+
 	// Pool is the HostPool the VM was scheduled into.
 	// +optional
 	Pool string `json:"pool,omitempty"`
@@ -396,6 +406,18 @@ type PlacementStatus struct {
 	// (e.g. the winning score or the constraint that narrowed the candidates).
 	// +optional
 	Reason string `json:"reason,omitempty"`
+}
+
+// PlacementResources is a CPU/memory size recorded by the clustered scheduler
+// (status.placement.pendingResources).
+type PlacementResources struct {
+	// CPU is the number of vCPUs.
+	// +kubebuilder:validation:Minimum=0
+	CPU int32 `json:"cpu"`
+
+	// MemoryMiB is the memory in MiB.
+	// +kubebuilder:validation:Minimum=0
+	MemoryMiB int64 `json:"memoryMiB"`
 }
 
 // VirtualMachinePhase represents the phase of a VM

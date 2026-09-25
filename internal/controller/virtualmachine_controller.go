@@ -120,6 +120,9 @@ type clusterPlacement struct {
 	hostID   string
 	poolName string
 	reason   string
+	// resources is the size the scheduler admitted the VM at, recorded as
+	// status.placement.pendingResources with the pending host.
+	resources scheduler.ResourceRequest
 }
 
 // Clustered-VM lifecycle cadences (ADR-0007 Addendum A). Each is deliberately
@@ -1055,7 +1058,13 @@ func (r *VirtualMachineReconciler) createVM(
 			host = p.hostID
 		} else {
 			// A create is already in flight on host: reuse it as-is. The
-			// scheduler is NOT re-run for such a VM (A2).
+			// scheduler is NOT re-run for such a VM (A2). The CRD freezes the
+			// VM's classRef and resources while it is pending, but not the
+			// VMClass's content: a retry that has grown beyond the size it was
+			// admitted at is not sent (review N3).
+			if res, grown := r.refuseGrownPendingCreate(ctx, vm, host, req); grown {
+				return res, nil
+			}
 			logger.Info("Retrying clustered create on its pending host (not re-scheduling)", "host", host)
 		}
 		req.TargetHostID = host
@@ -1397,7 +1406,7 @@ func (r *VirtualMachineReconciler) resolveClusterPlacement(
 	r.unschedulable.reset(vmSchedulingUID(vm))
 	logger.Info("Scheduled VM onto clustered host",
 		"vm", vm.Name, "pool", pool.Name, "host", result.HostID, "reason", result.Reason)
-	return &clusterPlacement{hostID: result.HostID, poolName: pool.Name, reason: result.Reason}, ctrl.Result{}, nil
+	return &clusterPlacement{hostID: result.HostID, poolName: pool.Name, reason: result.Reason, resources: schedReq.Resources}, ctrl.Result{}, nil
 }
 
 // requiredNetworksForScheduling derives the ADR-0007 D6 network-visibility

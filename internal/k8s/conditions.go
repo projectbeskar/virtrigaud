@@ -104,6 +104,12 @@ const (
 	// detach VMs: an orphaned VM would keep running on its host outside the
 	// committed-capacity accounting. The finalizer is kept.
 	ReasonOrphanOnDeleteNotAllowed = "OrphanOnDeleteNotAllowed"
+	// ReasonPendingSizeGrew is Placed=False (and Provisioning=False) on a
+	// clustered VM whose pending Create would now ask for more than the size
+	// it was admitted at (status.placement.pendingResources), because its
+	// VMClass grew in the meantime. The Create is not sent and the pending
+	// host is kept; restoring the size lets it continue.
+	ReasonPendingSizeGrew = "PendingSizeGrew"
 )
 
 // ConditionPlaced is the single positive placement condition of a VirtualMachine

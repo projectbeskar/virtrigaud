@@ -88,6 +88,8 @@ func (r *VirtualMachineReconciler) recordPendingHost(
 	recordBoundProvider(vm, providerCR)
 	now := metav1.Now()
 	pl.PendingHost = p.hostID
+	// The admitted size, in the same checked write (review N3).
+	pl.PendingResources = &infravirtrigaudiov1beta1.PlacementResources{CPU: p.resources.CPU, MemoryMiB: p.resources.MemoryMiB}
 	pl.Pool = p.poolName
 	pl.LastScheduledTime = &now
 	pl.Reason = p.reason
@@ -126,6 +128,47 @@ func pendingHostWriteRejected(err error) bool {
 		apierrors.IsForbidden(err) || apierrors.IsNotFound(err)
 }
 
+// refuseGrownPendingCreate stops the retry of a pending clustered Create whose
+// size has grown beyond the size it was admitted at
+// (status.placement.pendingResources, review N3). The CRD freezes the VM's
+// spec.classRef and spec.resources while it is pending, but the VMClass's own
+// content can still change, and req was rebuilt from it. It reports whether it
+// refused.
+//
+// The Create is not sent, and the pending host is KEPT rather than released
+// for re-scheduling: the first attempt may already have left a domain there
+// (A2), so moving the VM elsewhere could leave two. The VM gets
+// Placed=False and Provisioning=False with reason PendingSizeGrew and is
+// re-checked every placementConfigRetryInterval; restoring the VMClass lets
+// the retry continue, and deleting the VM cleans up the pending host as
+// usual. A VM with no recorded size (written by an older manager) is not
+// checked; a smaller size is allowed.
+func (r *VirtualMachineReconciler) refuseGrownPendingCreate(
+	ctx context.Context,
+	vm *infravirtrigaudiov1beta1.VirtualMachine,
+	host string,
+	req contracts.CreateRequest,
+) (ctrl.Result, bool) {
+	pl := vm.Status.Placement
+	if pl == nil || pl.PendingResources == nil {
+		return ctrl.Result{}, false
+	}
+	admitted := pl.PendingResources
+	cpu, mem := req.Class.CPU, int64(req.Class.MemoryMiB)
+	if cpu <= admitted.CPU && mem <= admitted.MemoryMiB {
+		return ctrl.Result{}, false
+	}
+	msg := fmt.Sprintf("the create pending on host %s was admitted at %d vCPU and %d MiB, but its VMClass now asks for %d vCPU and %d MiB; "+
+		"it is not sent until the VMClass is restored (or the VirtualMachine deleted)", host, admitted.CPU, admitted.MemoryMiB, cpu, mem)
+	log.FromContext(ctx).Info("Not retrying a pending clustered create that has grown since it was admitted", "host", host,
+		"admittedCPU", admitted.CPU, "admittedMemoryMiB", admitted.MemoryMiB, "cpu", cpu, "memoryMiB", mem)
+	setPlacedCondition(vm, metav1.ConditionFalse, k8s.ReasonPendingSizeGrew, msg)
+	k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonPendingSizeGrew, msg)
+	metrics.RecordError(errReasonPlacement, metrics.ComponentManager)
+	r.updatePlacementStatus(ctx, vm)
+	return ctrl.Result{RequeueAfter: placementConfigRetryInterval}, true
+}
+
 // promotePendingHost records the confirmed binding after the provider accepted
 // the Create on host (ADR-0007 D3 / Addendum A, A2): host becomes
 // status.placement.host and pendingHost is cleared, so from now on every
@@ -139,6 +182,7 @@ func promotePendingHost(vm *infravirtrigaudiov1beta1.VirtualMachine, host string
 	}
 	pl.Host = host
 	pl.PendingHost = ""
+	pl.PendingResources = nil
 	// The exclusions only steer scheduling of an unbound VM (A2 amendment); a
 	// bound VM is never re-scheduled by Create, so they are dropped here.
 	pl.ExcludedHosts = nil
@@ -276,6 +320,7 @@ func (r *VirtualMachineReconciler) handleClusteredCreateConflict(
 		retryAfter = vmCreateConflictRetryInterval
 	}
 	pl.PendingHost = ""
+	pl.PendingResources = nil
 	// The VM holds nothing on the host any more; a leftover assumption of it
 	// there must not keep counting.
 	r.forgetPlacement(vm)
