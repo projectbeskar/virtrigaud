@@ -746,6 +746,24 @@ func (p *Provider) completeTaskAfterDelay(taskID string, delay time.Duration) {
 	p.mu.Unlock()
 }
 
+// FinishTask marks the asynchronous task taskID done now — failed with errMsg
+// when it is non-empty — as if its operation had just finished, and reports
+// whether the task exists. It exists for tests and demos that drive an
+// asynchronous operation (for example an image import, WithImagePrepareDelay)
+// to completion deterministically instead of waiting for its delay.
+func (p *Provider) FinishTask(taskID, errMsg string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	task, exists := p.tasks[taskID]
+	if !exists {
+		return false
+	}
+	task.Done = true
+	task.Error = errMsg
+	task.Completed = time.Now()
+	return true
+}
+
 // shouldFail checks if the provider should fail for the given operation.
 func (p *Provider) shouldFail(operation string) bool {
 	if p.failureMode == "" {

@@ -112,10 +112,30 @@ func storedStamp(t *testing.T, p *Provider, name string) *imageartifact.Stamp {
 
 // finishTask marks the task done, failed when errMsg is set.
 func finishTask(p *Provider, taskID, errMsg string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.tasks[taskID].Done = true
-	p.tasks[taskID].Error = errMsg
+	p.FinishTask(taskID, errMsg)
+}
+
+// TestMockFinishTask verifies the exported task-completion hook: TaskStatus
+// reports the task done (and failed with the given message), and an unknown
+// task is reported as such.
+func TestMockFinishTask(t *testing.T) {
+	p, _ := newImageProvider(t, time.Hour)
+	resp, err := p.ImagePrepare(context.Background(), identityReq("team-a", "ubuntu", imgUID, digestA, provUID))
+	require.NoError(t, err)
+	task := resp.GetTask()
+	require.NotNil(t, task)
+
+	st, err := p.TaskStatus(context.Background(), &providerv1.TaskStatusRequest{Task: task})
+	require.NoError(t, err)
+	assert.False(t, st.GetDone())
+
+	require.True(t, p.FinishTask(task.GetId(), "download failed"))
+	st, err = p.TaskStatus(context.Background(), &providerv1.TaskStatusRequest{Task: task})
+	require.NoError(t, err)
+	assert.True(t, st.GetDone())
+	assert.Equal(t, "download failed", st.GetError())
+
+	assert.False(t, p.FinishTask("no-such-task", ""))
 }
 
 // legacyCount reads the legacy-request counter for the mock.
