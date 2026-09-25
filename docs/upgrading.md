@@ -63,8 +63,11 @@ See [`docs/clustered-provider-inventory.md`](clustered-provider-inventory.md) an
    - **Why this matters more than usual this release:** the new manager reads the
      installed `VirtualMachine`, `Provider`, `VMClass` and `VMImage` CRDs at startup
      and on every readiness probe. If the `VirtualMachine` CRD is missing
-     `status.boundProvider` or the `spec.providerRef` immutability rule (#341), or
-     the other three lack `spec.consumerNamespaceSelector`, the manager **fails
+     `status.boundProvider` or the `spec.providerRef` immutability rule (#341), if
+     the other three lack `spec.consumerNamespaceSelector`, or if the `VMImage` CRD
+     lacks `status.providerStatus[].providerUID`, `taskRef` or `sourceDigest` or the
+     `Provider` CRD lacks `status.reportedCapabilities.supportsImageArtifactIdentity`
+     (ADR-0009), the manager **fails
      readiness** (it does not crash, and it does not stop managing existing VMs —
      but `helm upgrade --wait` will time out, and a rolling update will not proceed
      past the old pod).

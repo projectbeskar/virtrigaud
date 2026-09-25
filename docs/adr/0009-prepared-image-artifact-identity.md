@@ -266,6 +266,15 @@ source_digest = "sha256:" + hex(sha256(canonicalJSON({"v": 1, "source": vmImage.
   - The transport-only fields of `source.http`: `timeout`, `headers` and
     `authentication`. They change how bytes are fetched, not which bytes are expected.
     Rotating an inline token in a header must not orphan multi-GB artifacts.
+  - *Refinement (Slice 1):* the references `registry.pullSecretRef` (a credential)
+    and `vsphere.providerRef` (which Provider imports: routing and credentials), and
+    the `user:password@` part of every URL (`http.url`, `libvirt.url`,
+    `vsphere.ovaURL`). All three only affect how the source is fetched, and hashing a
+    credential would put guessable material into the stamp on the hypervisor. Query
+    strings are kept, because a query can select content; rotating a presigned or
+    token-bearing query therefore causes one re-import (use `http.authentication`
+    instead). A reflection test pins every `ImageSource` field as covered or
+    excluded.
   - `spec.metadata`, `spec.distribution` and `spec.consumerNamespaceSelector`. They do
     not change artifact content, and editing a selector must not re-import.
   - `spec.prepare`, for now. No provider reads it today.
@@ -932,6 +941,9 @@ review's recommendation. Q4, Q5 and Q6 are still open.
   - **include** the location fields (`storagePool`, `storage`, `node`);
   - **exclude** the transport-only `source.http` fields `timeout`, `headers` and
     `authentication`. Rotating an inline token must not orphan multi-GB artifacts.
+  - *Refinement (Slice 1), applying the same "location yes, transport no" rule:* also
+    exclude `registry.pullSecretRef`, `vsphere.providerRef` and URL userinfo
+    (`user:password@`). See D2.
 
 ---
 

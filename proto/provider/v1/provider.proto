@@ -309,10 +309,56 @@ message CloneResponse {
 }
 
 // Image preparation operations
+//
+// Prepared-image artifact identity (ADR-0009). A manager that knows the
+// VMImage's identity sets image, source_digest and provider, and sends an EMPTY
+// target_name. The provider derives the hypervisor-side artifact name from
+// image.uid and source_digest (ADR-0009 D1; the naming rule belongs to the
+// provider), stamps every artifact it prepares with that identity (D3), and
+// reuses an existing artifact only when its stamp carries the same image.uid
+// and source_digest; anything else at the derived name is refused with
+// AlreadyExists and is never overwritten or adopted (D4).
+//
+// A request with no image is a request from an older manager. It must carry
+// target_name and is served in deprecated legacy mode (bare-name naming and
+// reuse by name, no artifact echo) for one release only; the provider logs a
+// warning and increments
+// virtrigaud_provider_image_prepare_legacy_requests_total{provider_type}. The
+// next release refuses it with FailedPrecondition. A request with neither
+// image nor target_name, or with an image that has no uid, is InvalidArgument.
+//
+// A provider advertises that it implements this contract with
+// GetCapabilitiesResponse.supports_image_artifact_identity. Every provider
+// that predates it rejects an empty target_name, so a new manager whose request
+// reaches an old provider is refused rather than served under a bare name.
 message ImagePrepareRequest {
   string image_json = 1; // JSON-encoded VMImage spec
-  string target_name = 2; // Target template/image name
+  // target_name is the bare template/image name of a legacy (identity-less)
+  // request. EMPTY when image is set: the provider derives the name (ADR-0009
+  // D1, D7), and an identity request with a target_name is InvalidArgument.
+  string target_name = 2;
   string storage_hint = 3; // Storage location hint (datastore, pool, etc.)
+
+  // image names the VMImage being prepared. uid is authoritative: it is part of
+  // the artifact's derived name and of its stamp, and reuse requires a stamp
+  // with the same uid (ADR-0009 D1, D4). namespace and name are informational:
+  // they form the readable prefix of the artifact name and are recorded in the
+  // stamp for audit, but never authorize a reuse. Additive and
+  // backward-compatible: an older provider ignores it (and then rejects the
+  // empty target_name).
+  ObjectIdentity image = 4;
+
+  // source_digest is "sha256:" followed by 64 lowercase hex digits: the
+  // manager's digest of the VMImage's canonical spec.source (ADR-0009 D2). The
+  // provider checks only its syntax and uses it verbatim, in the derived name
+  // and in the stamp; a changed spec.source therefore gets a new artifact.
+  // Required when image is set.
+  string source_digest = 5;
+
+  // provider names the Provider object the prepare runs through. Informational
+  // only: it is recorded in the stamp as preparedBy and is never part of the
+  // reuse rule (ADR-0009 D3, D5).
+  ObjectIdentity provider = 6;
 }
 
 // ImagePrepareResponse reports where the provider placed the prepared image so
@@ -340,6 +386,31 @@ message ImagePrepareResponse {
   // that address prepared images by id/name only (vSphere, Proxmox). Known at
   // trigger time even for async prepares.
   string prepared_image_path = 3;
+
+  // artifact is the provenance stamp of the artifact the provider verified
+  // (reused) or wrote (prepared) for an identity request (ADR-0009 D3, D7).
+  // Unset from an older provider and in deprecated legacy mode. The manager
+  // records a prepare only when artifact is set and its image.uid and
+  // source_digest equal the request's. Additive and backward-compatible: an
+  // older manager ignores it.
+  PreparedArtifact artifact = 4;
+}
+
+// PreparedArtifact echoes the provenance stamp of a prepared-image artifact
+// (ADR-0009 D3, D7). Only image.uid and source_digest are authoritative.
+message PreparedArtifact {
+  // name is the hypervisor-side artifact name the provider derived (ADR-0009
+  // D1): "<namespace>.<name>" (shortened to the hypervisor's budget), a
+  // separator, and 16 hex digits of a hash over the image uid and source
+  // digest.
+  string name = 1;
+  // image is the VMImage identity recorded in the stamp.
+  ObjectIdentity image = 2;
+  // source_digest is the source digest recorded in the stamp.
+  string source_digest = 3;
+  // reused is true when an existing artifact with a matching stamp was reused,
+  // false when this call (or the task it returned) prepared it.
+  bool reused = 4;
 }
 
 // Disk export/import host-vs-pod execution contract (ADR-0006).
@@ -555,11 +626,20 @@ message GetCapabilitiesResponse {
   repeated string supported_import_backends = 15; // Import staging backends: "pvc"|"nfs"|"s3" (ADR-0006; empty == pvc-only)
   repeated string supported_transfer_modes = 16;  // Transfer modes: "relay"|"direct" (ADR-0006; empty == relay-only)
   bool supports_clustering = 17;                   // Provider fronts multiple hosts and implements host inventory (ListHosts/GetHostInfo) + host-targeted placement (ADR-0007 P1, D7). The remaining clustering flags (live/block migration, host evacuation, storage modes) are added by the migration slice.
+  // supports_image_artifact_identity reports that ImagePrepare implements the
+  // prepared-image artifact identity contract (ADR-0009 D7): it accepts
+  // ImagePrepareRequest.image/source_digest/provider with an empty
+  // target_name, names and stamps artifacts from that identity, never reuses an
+  // artifact by bare name, and echoes the stamp in
+  // ImagePrepareResponse.artifact. A manager holds import-style prepares
+  // through a provider that supports image import but does not advertise this.
+  bool supports_image_artifact_identity = 18;
 }
 
 // ObjectIdentity names a Kubernetes object on the wire (CreateRequest.owner,
 // DeleteRequest.owner, DescribeRequest.owner, CloneRequest.target_vm,
-// ImportDiskRequest.target_vm).
+// ImportDiskRequest.target_vm, ImagePrepareRequest.image and .provider,
+// PreparedArtifact.image).
 // uid is the authoritative identity (unique for the object's whole lifetime,
 // never reused after deletion); namespace and name are informational (audit,
 // operator diagnostics, and naming the hypervisor-side object — e.g. the

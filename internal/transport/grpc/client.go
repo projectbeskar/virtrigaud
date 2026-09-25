@@ -480,6 +480,8 @@ func (c *Client) GetCapabilities(ctx context.Context) (contracts.Capabilities, e
 		SupportedImportBackends:     resp.SupportedImportBackends,
 		SupportedTransferModes:      resp.SupportedTransferModes,
 		SupportsClustering:          resp.SupportsClustering,
+		// ADR-0009 D7: false from a provider that predates the field.
+		SupportsImageArtifactIdentity: resp.GetSupportsImageArtifactIdentity(),
 	}, nil
 }
 
@@ -522,13 +524,19 @@ func (c *Client) Clone(ctx context.Context, req contracts.CloneRequest) (contrac
 }
 
 // PrepareImage implements contracts.ImagePreparer (#154): it prepares/imports a
-// VM image into the provider as a template/image named req.TargetName.
+// VM image into the provider — under the artifact name the provider derives
+// from req.Image and req.SourceDigest (ADR-0009), or, for a legacy request,
+// under req.TargetName.
 //
 // Image preparation can be a long-running provider operation (download + convert
 // + register), so it uses the same generous timeout as Create/Clone. When the
 // provider reports a TaskRef the caller polls it via IsTaskComplete; an empty
 // TaskRef means the operation completed synchronously.
 func (c *Client) PrepareImage(ctx context.Context, req contracts.ImagePrepareRequest) (contracts.ImagePrepareResponse, error) {
+	if err := validateImagePrepareIdentity(req); err != nil {
+		return contracts.ImagePrepareResponse{}, err
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
@@ -536,6 +544,11 @@ func (c *Client) PrepareImage(ctx context.Context, req contracts.ImagePrepareReq
 		ImageJson:   req.ImageJSON,
 		TargetName:  req.TargetName,
 		StorageHint: req.StorageHint,
+		// ADR-0009 D7: validateImagePrepareIdentity guarantees every identity
+		// sent here carries its UID.
+		Image:        objectIdentityToProto(req.Image),
+		SourceDigest: req.SourceDigest,
+		Provider:     objectIdentityToProto(req.Provider),
 	})
 	if err != nil {
 		return contracts.ImagePrepareResponse{}, c.mapGRPCError("image prepare", err)
@@ -548,6 +561,7 @@ func (c *Client) PrepareImage(ctx context.Context, req contracts.ImagePrepareReq
 	result := contracts.ImagePrepareResponse{
 		PreparedImageID:   resp.GetPreparedImageId(),
 		PreparedImagePath: resp.GetPreparedImagePath(),
+		Artifact:          preparedArtifactFromProto(resp.GetArtifact()),
 	}
 	if resp.Task != nil {
 		result.TaskRef = resp.Task.Id
@@ -1239,6 +1253,59 @@ func targetIdentityToProto(o contracts.ObjectIdentity) *providerv1.ObjectIdentit
 		Uid:       o.UID,
 		Namespace: o.Namespace,
 		Name:      o.Name,
+	}
+}
+
+// validateImagePrepareIdentity refuses, before anything is sent, an
+// ImagePrepareRequest whose ADR-0009 identity is incomplete: a source digest,
+// an image namespace/name or a Provider identity without the image's UID, a
+// Provider identity without its own UID, or an image UID together with a
+// target name. Converted naively, such a request would lose its partial
+// identity on the wire (objectIdentityToProto sends no UID-less identity) and
+// be served as a legacy bare-name request instead of failing. The error is
+// InvalidSpec (non-retryable): it is a manager bug, not a transient state.
+func validateImagePrepareIdentity(req contracts.ImagePrepareRequest) error {
+	hasProvider := req.Provider != (contracts.ObjectIdentity{})
+	switch {
+	case req.Image.IsZero() && (req.SourceDigest != "" || req.Image.Namespace != "" || req.Image.Name != "" || hasProvider):
+		return contracts.NewInvalidSpecError(
+			"image prepare: the request carries part of an image identity but no image UID; refusing to send it", nil)
+	case hasProvider && req.Provider.IsZero():
+		return contracts.NewInvalidSpecError(
+			"image prepare: the request's Provider identity has no UID; refusing to send it", nil)
+	case !req.Image.IsZero() && req.TargetName != "":
+		return contracts.NewInvalidSpecError(
+			"image prepare: an identity request must not carry a target name; the provider derives it", nil)
+	}
+	return nil
+}
+
+// objectIdentityFromProto converts a wire ObjectIdentity to the manager-side
+// type; nil converts to the zero value.
+func objectIdentityFromProto(o *providerv1.ObjectIdentity) contracts.ObjectIdentity {
+	if o == nil {
+		return contracts.ObjectIdentity{}
+	}
+	return contracts.ObjectIdentity{
+		UID:       o.GetUid(),
+		Namespace: o.GetNamespace(),
+		Name:      o.GetName(),
+	}
+}
+
+// preparedArtifactFromProto converts the ImagePrepareResponse.artifact stamp
+// echo (ADR-0009 D7) to the manager-side type. An unset artifact (an older
+// provider, or deprecated legacy mode) converts to nil, which
+// contracts.ImagePrepareResponse.ConfirmsIdentity never accepts.
+func preparedArtifactFromProto(a *providerv1.PreparedArtifact) *contracts.PreparedArtifact {
+	if a == nil {
+		return nil
+	}
+	return &contracts.PreparedArtifact{
+		Name:         a.GetName(),
+		Image:        objectIdentityFromProto(a.GetImage()),
+		SourceDigest: a.GetSourceDigest(),
+		Reused:       a.GetReused(),
 	}
 }
 

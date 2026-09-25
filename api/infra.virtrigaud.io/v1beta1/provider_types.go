@@ -486,6 +486,14 @@ type ReportedCapabilities struct {
 	// that predates ADR-0006 (ADR-0006 Slice 0).
 	// +optional
 	SupportedTransferModes []string `json:"supportedTransferModes,omitempty"`
+	// SupportsImageArtifactIdentity reports that the provider's image prepare
+	// names, stamps and verifies each prepared-image artifact by the VMImage's
+	// UID and source digest, and never reuses an artifact by bare name
+	// (ADR-0009). Import-style images are not prepared through a provider that
+	// supports image import but does not report this: VM creates wait until
+	// the provider is upgraded.
+	// +optional
+	SupportsImageArtifactIdentity bool `json:"supportsImageArtifactIdentity,omitempty"`
 }
 
 // ProviderAdoptionStatus tracks VM adoption progress

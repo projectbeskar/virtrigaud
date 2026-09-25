@@ -185,6 +185,65 @@ func TestMissingVMImageCRDFeatures(t *testing.T) {
 	assert.Contains(t, readyzErr(c).Error(), crdFeatureImageProviderUID)
 }
 
+// TestMissingVMImageCRDFeatures_SourceDigest pins ADR-0009 D8: a VMImage CRD
+// without status.providerStatus[].sourceDigest (the #344 CRD) is reported
+// missing and fails readiness.
+func TestMissingVMImageCRDFeatures_SourceDigest(t *testing.T) {
+	missing, err := missingVMImageCRDFeatures(olderVMImageCRD(t, "sourceDigest"))
+	require.NoError(t, err)
+	assert.Equal(t, []string{crdFeatureImageSourceDigest}, missing)
+
+	c := NewVMCRDFeatureChecker(&stubCRDReader{
+		crd:    generatedVMCRD(t),
+		others: map[string]*unstructured.Unstructured{VMImageCRDName: olderVMImageCRD(t, "sourceDigest")},
+		t:      t,
+	})
+	state, missing := c.Evaluate(context.Background())
+	assert.Equal(t, metrics.CRDFeaturesMissing, state)
+	assert.Equal(t, []string{VMImageCRDName + ": " + crdFeatureImageSourceDigest}, missing)
+	require.Error(t, readyzErr(c))
+	assert.Contains(t, readyzErr(c).Error(), crdFeatureImageSourceDigest)
+}
+
+// olderProviderCRD returns the generated Provider CRD without
+// status.reportedCapabilities.supportsImageArtifactIdentity.
+func olderProviderCRD(t *testing.T) *unstructured.Unstructured {
+	t.Helper()
+	crd := generatedCRD(t, ProviderCRDName)
+	unstructured.RemoveNestedField(v1beta1Schema(t, crd), "properties", "status", "properties",
+		"reportedCapabilities", "properties", "supportsImageArtifactIdentity")
+	return crd
+}
+
+// TestMissingProviderCRDFeatures pins ADR-0009 D8 on the Provider CRD: it needs
+// spec.consumerNamespaceSelector and
+// status.reportedCapabilities.supportsImageArtifactIdentity, and an older CRD
+// without the capability field fails readiness.
+func TestMissingProviderCRDFeatures(t *testing.T) {
+	missing, err := missingProviderCRDFeatures(generatedCRD(t, ProviderCRDName))
+	require.NoError(t, err)
+	assert.Empty(t, missing, "the generated Provider CRD has every feature")
+
+	missing, err = missingProviderCRDFeatures(olderProviderCRD(t))
+	require.NoError(t, err)
+	assert.Equal(t, []string{crdFeatureProviderImageArtifactIdentity}, missing)
+
+	missing, err = missingProviderCRDFeatures(olderConsumerCRD(t, ProviderCRDName))
+	require.NoError(t, err)
+	assert.Equal(t, []string{crdFeatureConsumerSelector}, missing)
+
+	c := NewVMCRDFeatureChecker(&stubCRDReader{
+		crd:    generatedVMCRD(t),
+		others: map[string]*unstructured.Unstructured{ProviderCRDName: olderProviderCRD(t)},
+		t:      t,
+	})
+	state, missing := c.Evaluate(context.Background())
+	assert.Equal(t, metrics.CRDFeaturesMissing, state)
+	assert.Equal(t, []string{ProviderCRDName + ": " + crdFeatureProviderImageArtifactIdentity}, missing)
+	require.Error(t, readyzErr(c))
+	assert.Contains(t, readyzErr(c).Error(), crdFeatureProviderImageArtifactIdentity)
+}
+
 // stubCRDReader answers Get for the VirtualMachine CRD with crd or err, and
 // for the Provider, VMClass and VMImage CRDs with others[name] (the generated
 // CRD when unset) or otherErr.

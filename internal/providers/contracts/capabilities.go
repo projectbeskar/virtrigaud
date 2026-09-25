@@ -65,6 +65,14 @@ type Capabilities struct {
 	// providers. The remaining clustering capabilities (live/block migration,
 	// host evacuation, storage modes) are added by the migration slice.
 	SupportsClustering bool
+	// SupportsImageArtifactIdentity reports that the provider's image prepare
+	// implements the prepared-image artifact identity contract (ADR-0009 D7):
+	// it names and stamps artifacts from the request's VMImage identity and
+	// source digest, reuses an artifact only on a matching stamp, and echoes
+	// the stamp (ImagePrepareResponse.Artifact). The manager holds
+	// import-style prepares through an import-capable provider that does not
+	// report it, and sends no RPC.
+	SupportsImageArtifactIdentity bool
 }
 
 // CapabilityReporter is an optional capability of a Provider: it reports the
