@@ -22,6 +22,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -117,6 +118,12 @@ type HostReconciler struct {
 	client.Client
 	Scheme         *runtime.Scheme
 	RemoteResolver ProviderResolver
+
+	// publishedProvider maps a Host (namespace/name) to the Provider label its
+	// committed-capacity gauges were last published under, so a changed
+	// spec.providerRef, or the Host's deletion, drops the stale series. The
+	// zero value is ready to use.
+	publishedProvider sync.Map
 }
 
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=hosts,verbs=get;list;watch;update
@@ -148,6 +155,7 @@ func (r *HostReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resul
 	if err := r.Get(ctx, req.NamespacedName, host); err != nil {
 		if apierrors.IsNotFound(err) {
 			// Host gone (its in-use finalizer was already released).
+			r.forgetCommitted(req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
 		metrics.RecordError(errReasonHostGet, metrics.ComponentManager)
@@ -189,7 +197,24 @@ func (r *HostReconciler) publishCommitted(ctx context.Context, host *infravirtri
 			"host", host.Name, "error", err.Error())
 		return
 	}
+	// A Host whose spec.providerRef changed would otherwise leave its series
+	// under the old Provider label forever.
+	if old, loaded := r.publishedProvider.Swap(client.ObjectKeyFromObject(host), provider.String()); loaded && old != provider.String() {
+		if oldProvider, ok := old.(string); ok {
+			metrics.DeleteHostCommitted(oldProvider, host.Name)
+		}
+	}
 	metrics.SetHostCommitted(provider.String(), host.Name, cpu, mem)
+}
+
+// forgetCommitted removes the committed-capacity series published for the Host
+// key, under whichever Provider it was last published.
+func (r *HostReconciler) forgetCommitted(key types.NamespacedName) {
+	if old, loaded := r.publishedProvider.LoadAndDelete(key); loaded {
+		if oldProvider, ok := old.(string); ok {
+			metrics.DeleteHostCommitted(oldProvider, key.Name)
+		}
+	}
 }
 
 // handleHostDeletion releases the in-use finalizer of a Host being deleted only
@@ -218,6 +243,7 @@ func (r *HostReconciler) handleHostDeletion(ctx context.Context, host *infravirt
 		return ctrl.Result{}, fmt.Errorf("remove in-use finalizer from Host %s: %w", host.Name, err)
 	}
 	// Nothing is bound or pending on it any more: drop its series.
+	r.forgetCommitted(client.ObjectKeyFromObject(host))
 	metrics.DeleteHostCommitted(hostProviderKey(host).String(), host.Name)
 	return ctrl.Result{}, nil
 }

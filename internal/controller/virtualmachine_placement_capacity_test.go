@@ -904,6 +904,38 @@ func TestHostReconciler_PublishesCommittedCapacity(t *testing.T) {
 	assert.False(t, ok, "the series goes with the Host")
 }
 
+// TestHostReconciler_ProviderRefChangeDropsTheStaleSeries (review nit): a Host
+// re-pointed at another Provider stops publishing under the old label.
+func TestHostReconciler_ProviderRefChangeDropsTheStaleSeries(t *testing.T) {
+	ctx := context.Background()
+	stub := &stubProvider{GetHostInfoFn: func(_ context.Context, id string) (contracts.HostInfo, error) {
+		return healthyHostInfo(id), nil
+	}}
+	r := newHostReconciler(coverageTestScheme(t), &stubResolver{provider: stub},
+		clusterProvider("prov-old"), clusterProvider("prov-new"), hostCR("host-moving", "prov-old", nil))
+	_, err := r.Reconcile(ctx, hostReq("host-moving"))
+	require.NoError(t, err)
+	oldLabels := map[string]string{"provider": "default/prov-old", "host": "host-moving"}
+	_, ok := gaugeValue(t, "virtrigaud_host_committed_cpu", oldLabels)
+	require.True(t, ok)
+
+	host := getHost(t, r.Client, "host-moving")
+	host.Spec.ProviderRef.Name = "prov-new"
+	require.NoError(t, r.Update(ctx, host))
+	_, err = r.Reconcile(ctx, hostReq("host-moving"))
+	require.NoError(t, err)
+	_, ok = gaugeValue(t, "virtrigaud_host_committed_cpu", oldLabels)
+	assert.False(t, ok, "the old Provider's series is gone")
+	_, ok = gaugeValue(t, "virtrigaud_host_committed_cpu", map[string]string{"provider": "default/prov-new", "host": "host-moving"})
+	assert.True(t, ok)
+
+	// A Host that disappears without passing through the finalizer path
+	// (already released) drops its series too.
+	r.forgetCommitted(types.NamespacedName{Namespace: "default", Name: "host-moving"})
+	_, ok = gaugeValue(t, "virtrigaud_host_committed_cpu", map[string]string{"provider": "default/prov-new", "host": "host-moving"})
+	assert.False(t, ok)
+}
+
 // TestPlacementProviderKey (L9): one helper keys every placement lookup.
 func TestPlacementProviderKey(t *testing.T) {
 	vm := capVM("x")
