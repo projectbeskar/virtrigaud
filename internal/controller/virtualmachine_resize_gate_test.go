@@ -20,6 +20,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -218,4 +219,52 @@ func TestResizeAssumptionSettles(t *testing.T) {
 	create := assume.Assumption{UID: "u", HostID: "host-alpha"}
 	assert.True(t, snap(recordedVM{hosts: on}).settled(create), "a create settles on its record")
 	assert.False(t, snap(recordedVM{hosts: []string{"host-beta"}}).settled(create), "not on a record elsewhere")
+}
+
+// panickingListClient panics on every VirtualMachine List: a stand-in for a
+// bug anywhere under the Provider's assume lock.
+type panickingListClient struct{ client.Client }
+
+func (c panickingListClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if _, ok := list.(*infravirtrigaudiov1beta1.VirtualMachineList); ok {
+		panic("boom under the assume lock")
+	}
+	return c.Client.List(ctx, list, opts...)
+}
+
+// TestAssumeLockIsReleasedOnPanic (review N2): controller-runtime recovers a
+// panicking reconcile, so a panic inside the create or resize critical section
+// must not leave the Provider's lock held.
+func TestAssumeLockIsReleasedOnPanic(t *testing.T) {
+	recovered := func(fn func()) (p any) {
+		defer func() { p = recover() }()
+		fn()
+		return nil
+	}
+	lockIsFree := func(t *testing.T, r *VirtualMachineReconciler) {
+		t.Helper()
+		unlock, ok := r.placementAssumptions().LockWithin(context.Background(), capNS+"/prov-cluster", 100*time.Millisecond)
+		require.True(t, ok, "the Provider's lock was left held by the panic")
+		unlock()
+	}
+
+	t.Run("create", func(t *testing.T) {
+		vm := capVM("new")
+		r := newTestReconciler(coverageTestScheme(t), &stubResolver{provider: &concurrentCreateProvider{}},
+			append(capBase(), capHost("host-alpha", 8), vm)...)
+		r.Client = panickingListClient{Client: r.Client}
+		require.NotNil(t, recovered(func() { _, _ = resolve(t, r, vm) }))
+		lockIsFree(t, r)
+	})
+
+	t.Run("resize", func(t *testing.T) {
+		vm := wantsCPU(sized("app", 2), 4)
+		r := resizeFixture(t, runningRoutingProvider(), vm)
+		r.Client = panickingListClient{Client: r.Client}
+		require.NotNil(t, recovered(func() {
+			_, _, _ = r.admitClusteredResize(context.Background(), getVM(t, r, "app"),
+				withRuntime(clusteredProviderCR("prov-cluster", capNS)), smallVMClass(capNS), "host-alpha")
+		}))
+		lockIsFree(t, r)
+	})
 }

@@ -1332,14 +1332,11 @@ func (r *VirtualMachineReconciler) resolveClusterPlacement(
 	// within placementLockWait requeues shortly instead of parking its worker.
 	providerNN := types.NamespacedName{Namespace: providerCR.Namespace, Name: providerCR.Name}
 	providerKey := providerNN.String()
-	assumptions := r.placementAssumptions()
-	unlock, locked := assumptions.LockWithin(ctx, providerKey, placementLockWait)
+	result, locked, err := r.scheduleUnderLock(ctx, r.placementAssumptions(), providerKey, providerNN, vm, &schedReq)
 	if !locked {
 		logger.V(1).Info("Provider's placement lock is busy; requeueing", "provider", providerKey)
 		return nil, ctrl.Result{RequeueAfter: placementLockBusyRetry()}, nil
 	}
-	result, err := r.scheduleAndAssume(ctx, assumptions, providerKey, providerNN, vm, &schedReq)
-	unlock()
 	var infraErr *placementInfraError
 	if stderrors.As(err, &infraErr) {
 		return nil, ctrl.Result{}, infraErr.err

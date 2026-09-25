@@ -131,29 +131,15 @@ func (r *VirtualMachineReconciler) admitClusteredResize(
 	}
 
 	providerNN := types.NamespacedName{Namespace: providerCR.Namespace, Name: providerCR.Name}
-	providerKey := providerNN.String()
-	assumptions := r.placementAssumptions()
-	unlock, locked := assumptions.LockWithin(ctx, providerKey, placementLockWait)
+	resize := scheduler.ResizeRequest{Host: *host, Pool: poolSpec, VMUID: uid, Current: current, Desired: desired}
+	locked, checkErr := r.checkResizeUnderLock(ctx, r.placementAssumptions(), providerNN, vm, resize)
 	if !locked {
-		logger.V(1).Info("Provider's placement lock is busy; requeueing the resize", "provider", providerKey)
+		logger.V(1).Info("Provider's placement lock is busy; requeueing the resize", "provider", providerNN.String())
 		return ctrl.Result{RequeueAfter: placementLockBusyRetry()}, false, nil
 	}
-	placed, err := r.placedWithAssumptions(ctx, assumptions, providerKey, providerNN, vm)
-	var checkErr error
-	if err == nil {
-		checkErr = scheduler.CheckResize(scheduler.ResizeRequest{
-			Host: *host, Pool: poolSpec, VMUID: uid, Current: current, Desired: desired, PlacedVMs: placed,
-		})
-		if checkErr == nil {
-			assumptions.Assume(providerKey, assume.Assumption{
-				UID: uid, Namespace: vm.Namespace, Name: vm.Name, HostID: hostID,
-				Labels: vm.Labels, Resources: desired, Resize: true,
-			})
-		}
-	}
-	unlock()
-	if err != nil {
-		return ctrl.Result{}, false, err
+	var infraErr *placementInfraError
+	if stderrors.As(checkErr, &infraErr) {
+		return ctrl.Result{}, false, infraErr.err
 	}
 
 	var tooBig *scheduler.ResizeDoesNotFitError
@@ -177,6 +163,40 @@ func (r *VirtualMachineReconciler) admitClusteredResize(
 		msg := fmt.Sprintf("resize cannot be checked against its host %s: %v", hostID, checkErr)
 		return r.refuseResize(ctx, vm, k8s.ReasonPlacementError, msg, placementConfigRetryInterval), false, nil
 	}
+}
+
+// checkResizeUnderLock is the part of admitClusteredResize that runs under the
+// Provider's assume lock: read what is committed, check the resize, and on a
+// fit assume the VM at its new size. It returns locked == false, doing nothing,
+// when the lock is not free within placementLockWait. err is a failed cache
+// read (a *placementInfraError) or scheduler.CheckResize's verdict. The lock is
+// released by a deferred call, so a panic inside cannot leave it held.
+func (r *VirtualMachineReconciler) checkResizeUnderLock(
+	ctx context.Context,
+	assumptions *assume.Cache,
+	provider types.NamespacedName,
+	vm *infravirtrigaudiov1beta1.VirtualMachine,
+	resize scheduler.ResizeRequest,
+) (locked bool, err error) {
+	providerKey := provider.String()
+	unlock, locked := assumptions.LockWithin(ctx, providerKey, placementLockWait)
+	if !locked {
+		return false, nil
+	}
+	defer unlock()
+	placed, err := r.placedWithAssumptions(ctx, assumptions, providerKey, provider, vm)
+	if err != nil {
+		return true, &placementInfraError{err: err}
+	}
+	resize.PlacedVMs = placed
+	if err := scheduler.CheckResize(resize); err != nil {
+		return true, err
+	}
+	assumptions.Assume(providerKey, assume.Assumption{
+		UID: resize.VMUID, Namespace: vm.Namespace, Name: vm.Name, HostID: resize.Host.Name,
+		Labels: vm.Labels, Resources: resize.Desired, Resize: true,
+	})
+	return true, nil
 }
 
 // refuseResize records a refused resize on vm, persists the status (bounded,

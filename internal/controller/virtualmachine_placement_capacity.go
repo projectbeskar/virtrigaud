@@ -100,6 +100,27 @@ func (e *placementInfraError) Error() string { return e.err.Error() }
 // Unwrap returns the underlying error.
 func (e *placementInfraError) Unwrap() error { return e.err }
 
+// scheduleUnderLock runs scheduleAndAssume with the Provider's assume lock
+// held. It returns locked == false, doing nothing, when the lock is not free
+// within placementLockWait. The lock is released by a deferred call, so a
+// panic inside (which controller-runtime recovers) cannot leave it held.
+func (r *VirtualMachineReconciler) scheduleUnderLock(
+	ctx context.Context,
+	assumptions *assume.Cache,
+	providerKey string,
+	provider types.NamespacedName,
+	vm *infravirtrigaudiov1beta1.VirtualMachine,
+	req *scheduler.Request,
+) (result scheduler.Result, locked bool, err error) {
+	unlock, locked := assumptions.LockWithin(ctx, providerKey, placementLockWait)
+	if !locked {
+		return scheduler.Result{}, false, nil
+	}
+	defer unlock()
+	result, err = r.scheduleAndAssume(ctx, assumptions, providerKey, provider, vm, req)
+	return result, true, err
+}
+
 // scheduleAndAssume is the part of a clustered create that runs under the
 // Provider's assume lock: read what is committed (informer cache plus live
 // assumptions), schedule, and on success assume the pick so the next schedule
