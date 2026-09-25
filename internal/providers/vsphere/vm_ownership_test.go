@@ -164,6 +164,8 @@ func newOwnershipSim(t *testing.T) (*Provider, *simulator.Model) {
 		finder: finder,
 		config: cfg,
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		// The tests' image servers listen on 127.0.0.1.
+		allowLoopbackImageSources: true,
 	}
 	// The clone source must be a real vSphere template (template_source.go).
 	markAsTemplate(t, p, seededVMID(t, p, simTemplate))

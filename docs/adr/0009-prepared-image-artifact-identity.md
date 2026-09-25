@@ -2,9 +2,10 @@
 
 ## Status
 
-**Accepted (2026-09-25).** Slices 1, 2 and 5 implemented (Slice 1: proto, contracts,
-CRD status and the mock provider, #346; Slice 2: the manager, #347; Slice 5: the
-Proxmox guard, D10); Slices 3–4 (vSphere, libvirt) and 9 (docs) are pending. **Release blocker** for the release
+**Accepted (2026-09-25).** Slices 1–5 implemented (Slice 1: proto, contracts, CRD status
+and the mock provider, #346; Slice 2: the manager, #347; Slice 3: vSphere, its vCenter
+`DuplicateName` behaviour verified on vCenter 8.0.2 (see D6); Slice 4: libvirt, #349;
+Slice 5: the Proxmox guard, #348, D10); Slice 9 (docs) is pending. **Release blocker** for the release
 that ships cross-namespace `VMImage` sharing
 ([#343](https://github.com/projectbeskar/virtrigaud/pull/343),
 `spec.consumerNamespaceSelector`). The slices that must land before that release are
@@ -370,7 +371,14 @@ knob yet. It applies to temp files and incomplete artifacts alike.
   The same rule covers a sidecar that has no artifact.
 - **vSphere** ages the object by the stamp's `preparedAt`. Cleanup **also** requires
   that the entity has no running task in its `recentTask` and no active
-  `HttpNfcLease`. Age alone never licenses a destroy.
+  `HttpNfcLease`. Age alone never licenses a destroy. *Implementation (Slice 3,
+  verified on vCenter 8.0.2):* an active import lease shows as
+  `ResourcePool.ImportVAppLRO` in state `running` in the entity's `recentTask` — that
+  is the signal used; a queued or running task, or one whose state cannot be read,
+  counts as live. An active lease does **not** put `Destroy_Task` in the entity's
+  `disabledMethod` (it disables `PowerOffVM_Task`, `MarkAsVirtualMachine`,
+  `ResetVM_Task` and others); a disabled `Destroy_Task` is still treated as live, as a
+  defensive extra.
 
 The Conflict message is uniform and names only the requester's own artifact, following
 #335's `vmConflictError`: *"a prepared-image artifact named X exists at this Provider's
@@ -504,6 +512,28 @@ See Alternative 5.
     object (the moref it created) and reuses the survivor after the D4 probe.
   - `cleanupPartialImport` (`image.go:720`) keeps destroying **only** the moref this
     call created.
+  - **Verified on vCenter 8.0.2 (build 23504390, 2026-09-25):**
+    1. `DuplicateName` **is** enforced within one folder, and it is reported
+       **asynchronously, through the `HttpNfcLease`** (`lease.Wait` fails with
+       `DuplicateName`, "The name 'X' already exists."), not synchronously by
+       `ImportVApp` — for a completed VM, a template, an entity still held by an active
+       lease, and 4 concurrent imports of one name (exactly one created its entity; 3
+       got `DuplicateName` at the lease). The lease path is the primary one; a
+       synchronous `DuplicateName` is handled the same way. vcsim does not model it
+       (pinned by a test); the tests emulate both paths.
+    2. While a lease is active (ready, not completed) the entity is a powered-off
+       non-template that already carries the stamp, its `recentTask` holds
+       `ResourcePool.ImportVAppLRO` in state `running`, and `Destroy_Task` is **not**
+       disabled — see D4.
+    3. `HttpNfcLease.Abort` **deletes** the partially imported entity. The provider
+       sends the abort on a context detached from the request's, and a cleanup that
+       then finds its own entity gone treats that as success.
+    4. MOIDs increase strictly with creation order. Since vCenter serializes same-name
+       imports with `DuplicateName`, the lowest-MOID convergence is a fallback real
+       vCenter should never need; it stays, for other versions and for simulators.
+  - A `DuplicateName` whose holder the folder probe cannot see (a vApp or folder with the
+    name, or a VM whose name differs only in case: vCenter compares case-insensitively,
+    the probe byte for byte) is a Conflict, never an import loop.
 - **Proxmox (Slice 6):**
   - Slice 6 must first verify two things on the lab PVE: that `content=import` needs
     PVE 8.2 or later, and how `download-url` behaves when the target file already
@@ -911,13 +941,13 @@ a prepare (`imageSourceNeedsPrepare`).
 |---|---|
 | One tenant's prepared content served to another tenant's image (A) | **Closed.** Names differ (D1), and reuse needs a matching UID and digest (D4) |
 | One tenant's image content exposed through the other tenant's same-named image (B) | **Closed for prepares. By-reference access is unchanged.** Artifact names are not secrets (D1.4). A `templateName`/`path` reference to another image's artifact is still governed by the credentials-reach rule until Slice 7 |
-| An object at the name placed ahead of time, or left over from before this ADR (G) | **Fail-closed Conflict.** Placing an object ahead of time needs write access to the hypervisor **and** knowledge of a UID that does not exist yet, so it is a denial of service at worst, never a binding |
+| An object at the name placed ahead of time, or left over from before this ADR (G) | **Fail-closed Conflict — for objects without a matching stamp.** A leftover or a name planted *before the VMImage exists* cannot carry its UID and is refused. **It is not "denial of service at worst" once the VMImage exists:** its UID is readable by anyone who can read the VMImage, and prepare is lazy (first VM create), so a principal with write access to the location can plant a *complete, matching* artifact first and it is **reused**. On vSphere that needs, in the import folder: create/register, move or rename a VM, `VirtualMachine.Config.AdvancedConfig` (to write the stamp) and `VirtualMachine.Provisioning.MarkAsTemplate`; folder permissions propagate to child objects, and the import folder is `spec.defaults.folder`, the folder the Provider's VMs are created in too, so rights delegated to VM owners on that folder reach it. The same principal can also get the provider to destroy a powered-off VM they stamp as an abandoned import and move in. This is the trust boundary below: **nobody but the Provider's hypervisor account may create, move, rename, reconfigure (AdvancedConfig) or mark as template VMs in the import location.** Use a dedicated import folder with a restrictive ACL (a separate `defaults.imageFolder` is a tracked follow-up) |
 | An OVF that ships a forged stamp | **Closed.** `virtrigaud.image.*` sits under the reserved prefix that `stripReservedExtraConfig` removes before import, and the real stamp is added afterwards (D3) |
 | libvirt probe errors that overwrite or delete, and races on shared temp files (D) | **Closed** (D4, D6), in legacy mode too |
 | The bare-name path, shipped once more as deprecated legacy mode (D7, Q3) | **Open for one release, and only through an older manager.** A manager that has been upgraded never sends an identity-less request. Every legacy request is logged and counted on the provider (`virtrigaud_provider_image_prepare_legacy_requests_total`). Legacy mode cannot reach new-scheme artifacts. Release N+1 refuses such requests with `FailedPrecondition` (Slice 10). Operators should alert on the counter and must not run an older manager against a Provider shared across tenants |
 | Secrets in stamps | None. Stamps hold a digest only, never URLs, headers, or secret references (D2) |
 | Information disclosure in errors | Uniform messages. Owner details go only to the provider log (D11) |
-| A principal with direct write access to the location who forges a stamp or swaps content | **Not addressed. This is the trust boundary.** The mitigation is scoping hypervisor accounts (the existing guidance in `docs/cross-namespace-references.md`). Slice 7 adds a check at create time |
+| A principal with direct write access to the location who forges a stamp, plants a matching artifact (G) or swaps content | **Not addressed. This is the trust boundary.** The mitigation is keeping the location writable by the Provider's account only (vSphere: a dedicated import folder whose ACL grants create/move/rename, `VirtualMachine.Config.AdvancedConfig` and `MarkAsTemplate` to that account alone, remembering that folder permissions propagate) and scoping hypervisor accounts (the existing guidance in `docs/cross-namespace-references.md`). Slice 7 adds a check at create time |
 | Forged `VMImage.status` | The manager is the only writer (ADR-0005 D3). The image owner can only affect its own consumers, who already trust that owner's content. Do not grant tenants `vmimages/status` |
 | Reference-style sources reaching any template the account can read | Unchanged by design ("sharing a Provider shares everything its credentials reach"). Slice 7 refuses references to *stamped* artifacts of other images |
 
@@ -1092,5 +1122,5 @@ review's recommendation. Q4, Q5 and Q6 are still open.
   legacy mode, and the legacy counter increments. New-scheme artifacts are untouched
   and are reused on roll-forward.
 - **Lab validation on all three hypervisors** by the maintainer, before Accepted
-  becomes Implemented. vCenter `DuplicateName` gates the Slice 3 merge. The PVE
-  checks belong to Slice 6.
+  becomes Implemented. vCenter `DuplicateName` gated the Slice 3 merge; it was verified
+  on vCenter 8.0.2 on 2026-09-25 (D6). The PVE checks belong to Slice 6.

@@ -31,6 +31,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
 
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
@@ -301,6 +302,8 @@ func newImageTestProvider(t *testing.T) (*Provider, func()) {
 		finder: finder,
 		config: cfg,
 		logger: slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		// The tests' image servers listen on 127.0.0.1.
+		allowLoopbackImageSources: true,
 	}
 	cleanup := func() {
 		_ = client.Logout(context.Background())
@@ -412,19 +415,21 @@ func TestImagePrepare_NoSource(t *testing.T) {
 	assert.Contains(t, err.Error(), "templateName, contentLibrary, or ovaURL")
 }
 
-// TestImagePrepare_MissingTargetName verifies the target-name guard fires before
-// any vCenter interaction.
+// TestImagePrepare_MissingTargetName verifies a request with neither an image
+// identity nor a usable target name is refused (InvalidSpec) before any
+// vCenter interaction (ADR-0009 D7: imageartifact.ParseRequest).
 func TestImagePrepare_MissingTargetName(t *testing.T) {
 	p, cleanup := newImageTestProvider(t)
 	defer cleanup()
 
-	resp, err := p.ImagePrepare(context.Background(), &providerv1.ImagePrepareRequest{
-		ImageJson:  `{"source":{"vsphere":{"ovaURL":"https://x/y.ova"}}}`,
-		TargetName: "  ",
-	})
-	require.Error(t, err)
-	assert.Nil(t, resp)
-	assert.Contains(t, err.Error(), "target name is required")
+	for _, target := range []string{"", "  "} {
+		resp, err := p.ImagePrepare(context.Background(), &providerv1.ImagePrepareRequest{
+			ImageJson:  `{"source":{"vsphere":{"ovaURL":"https://x/y.ova"}}}`,
+			TargetName: target,
+		})
+		requireCode(t, err, codes.InvalidArgument)
+		assert.Nil(t, resp)
+	}
 }
 
 // TestFindOVADescriptorName_SkipsAppleDouble verifies the OVA descriptor resolver

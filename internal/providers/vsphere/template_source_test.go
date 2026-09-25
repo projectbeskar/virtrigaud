@@ -281,20 +281,27 @@ func TestCreate_TemplateSource_OverTheWire(t *testing.T) {
 // the idempotency gate, distinguishing "refused" from "tried to import".
 const unreachableOVA = `{"source":{"vsphere":{"ovaURL":"http://127.0.0.1:1/never.ova"}}}`
 
+// TestImagePrepare_OnlyTemplatesCountAsPrepared covers the LEGACY
+// (identity-less, ADR-0009 D7) bare-name gate, whose target names are VMImage
+// names (DNS-1123), so the seeded vcsim VMs are cloned under such names first.
 func TestImagePrepare_OnlyTemplatesCountAsPrepared(t *testing.T) {
 	p, _ := newOwnershipSim(t)
 	ctx := context.Background()
+	seed := seededVMID(t, p, simTemplate)
+	cloneVMInto(t, p, seed, defaultVMFolder(t, p), "legacy-vm")
+	markAsTemplate(t, p, cloneVMInto(t, p, seed, defaultVMFolder(t, p), "legacy-tmpl"))
 
 	t.Run("a same-named regular VM is not the prepared image", func(t *testing.T) {
-		resp, err := p.ImagePrepare(ctx, &providerv1.ImagePrepareRequest{ImageJson: unreachableOVA, TargetName: simUnstamped})
+		resp, err := p.ImagePrepare(ctx, &providerv1.ImagePrepareRequest{ImageJson: unreachableOVA, TargetName: "legacy-vm"})
 		requireCode(t, err, codes.InvalidArgument)
 		assert.Nil(t, resp)
 	})
 
 	t.Run("an existing template is the prepared image", func(t *testing.T) {
-		resp, err := p.ImagePrepare(ctx, &providerv1.ImagePrepareRequest{ImageJson: unreachableOVA, TargetName: simTemplate})
+		resp, err := p.ImagePrepare(ctx, &providerv1.ImagePrepareRequest{ImageJson: unreachableOVA, TargetName: "legacy-tmpl"})
 		require.NoError(t, err)
-		assert.Equal(t, simTemplate, resp.GetPreparedImageId())
+		assert.Equal(t, "legacy-tmpl", resp.GetPreparedImageId())
+		assert.Nil(t, resp.GetArtifact(), "a legacy response carries no artifact echo")
 	})
 
 	t.Run("templateName source naming a regular VM is refused", func(t *testing.T) {
@@ -307,7 +314,6 @@ func TestImagePrepare_OnlyTemplatesCountAsPrepared(t *testing.T) {
 	})
 
 	t.Run("ambiguous target template fails closed", func(t *testing.T) {
-		seed := seededVMID(t, p, simTemplate)
 		markAsTemplate(t, p, cloneVMInto(t, p, seed, defaultVMFolder(t, p), "img-dup"))
 		markAsTemplate(t, p, cloneVMInto(t, p, seed, subFolder(t, p, "img-other"), "img-dup"))
 

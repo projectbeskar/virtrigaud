@@ -206,14 +206,15 @@ Artifacts are now identified by the `VMImage`'s **UID** and a **digest of its
   `created`, `reused`, `in_progress` and `conflict` (the confirmation of a Provider's own
   completed asynchronous import is not counted again). Alert on a rising `conflict`.
 
-**Provider support.** The mock, the libvirt provider and the Proxmox provider report
-`supportsImageArtifactIdentity`. libvirt names, stamps and publishes its prepared images by
-identity (single-host providers; see
-[libvirt prepared images](#libvirt-prepared-images-sourcelibvirturl)). Proxmox reports it
-because it prepares nothing by name: in this release it refuses every URL import with
+**Provider support.** The mock, the vSphere provider, the libvirt provider and the Proxmox
+provider report `supportsImageArtifactIdentity`. vSphere names, stamps and verifies its
+prepared templates by identity (see
+[vSphere: identity-safe prepared templates](#vsphere-identity-safe-prepared-templates)).
+libvirt names, stamps and publishes its prepared images by identity (single-host providers;
+see [libvirt prepared images](#libvirt-prepared-images-sourcelibvirturl)). Proxmox reports
+it because it prepares nothing by name: in this release it refuses every URL import with
 `InvalidSpec`, so such an image gets reason `InvalidSource` rather than a hold (see
-[Proxmox image sources](#proxmox-image-sources)). vSphere reports it once its ADR-0009 slice
-lands; ADR-0009 makes that slice part of the same release. Until a provider reports it, import-style images (`ovaURL`, a
+[Proxmox image sources](#proxmox-image-sources)). Until a provider reports it, import-style images (`ovaURL`, a
 libvirt `url`, an `http` source) are held on it with `ProviderLacksArtifactIdentity`;
 reference-style images and VMs that exist are unaffected. A VM re-created because it
 vanished from its hypervisor counts as a create and is held too.
@@ -226,8 +227,13 @@ bare name) is left untouched on the hypervisor.
 **Multi-tenant setups.** Providers that resolve to the same image location (the same
 vSphere import folder, libvirt pool directory, or Proxmox storage) share one artifact per
 image and source; each re-checks the stamp through its own credentials before reusing it.
-The trust boundary is write access to that location, so give each tenant's Provider its own
-import location and scope its hypervisor account to it.
+The trust boundary is write access to that location: a principal who can write there can
+change an artifact's content, and — because a `VMImage`'s UID is readable by anyone who can
+read the `VMImage`, and an image is prepared only at the first VM create — can plant a
+matching artifact before the first prepare, which is then reused. **Only the Provider's own
+hypervisor account may write the image location.** Give each tenant's Provider its own
+import location, scope its hypervisor account to it, and grant nobody else write access to
+it (see the vSphere section for the exact vCenter rights).
 
 The source digest follows ADR-0009's Q7 rule, "location yes, transport no". It covers
 every `spec.source` field that says what the image is or where it is placed: URLs and
@@ -346,6 +352,177 @@ image prepare without identity from an older manager ...") and increments
 `virtrigaud_provider_image_prepare_legacy_requests_total{provider_type="proxmox"}`. The
 Proxmox provider serves that counter at `/metrics` on its health port (as the libvirt
 provider does). A non-zero value means a manager must be upgraded.
+
+## vSphere: identity-safe prepared templates
+
+> Design record: [ADR-0009](adr/0009-prepared-image-artifact-identity.md), Slice 3. The
+> vSphere provider advertises `supportsImageArtifactIdentity`.
+
+When the manager sends the `VMImage` identity (its UID, namespace and name) and the
+digest of its `spec.source`, the vSphere provider prepares a `source.vsphere.ovaURL`
+image as follows. Only an `ovaURL` is ever prepared: `templateName` and `contentLibrary`
+reference existing objects and are used by reference. A source that sets `ovaURL`
+together with `templateName` or `contentLibrary`, an `ovaURL` that is not `http(s)`, or an
+`ovaURL` naming a bare `.ovf` (it cannot carry its disks: publish an `.ova`) gets
+`InvalidSpec`.
+
+**The package is read from the download only.** Every `<References><File ovf:href>` of the
+OVF must be a plain file name (no path separator, no `.`/`..`, no URL scheme, no glob
+character, at most 255 bytes) and a member at the root of the OVA; otherwise the image gets
+`InvalidSpec` before vCenter sees the descriptor. The provider never opens a file on its own
+filesystem named by an OVF. (Before this, a bare `.ovf` whose references named, for example,
+the provider's mounted vCenter credentials made the provider upload that file into the
+template. This applies to requests from an older manager too: a bare `.ovf` that references
+any file is refused; one that references none still imports.)
+
+**The download is restricted.** The provider refuses sources at, or redirecting to,
+loopback, link-local (including `169.254.169.254` cloud metadata), unspecified and
+multicast addresses — checked on every connection, after DNS — follows at most 3 redirects,
+bounds the connect, TLS-handshake and response-header waits, and downloads at most
+`VIRTRIGAUD_VSPHERE_IMAGE_MAX_DOWNLOAD_GIB` GiB (default 256, 1–16384; an invalid value logs
+a warning and keeps the default). Set it on the provider pod through the Provider's
+`spec.runtime.env`. Private (RFC 1918) addresses stay allowed. With an HTTP(S) proxy
+configured for the provider, the proxy resolves named targets: restrict its egress too.
+**Keep credentials and tokens out of `ovaURL`.** A vSphere OVA source has no separate
+credential field, so host images where the provider can fetch them without a secret in the
+URL; a presigned query is hashed into the source digest (a rotation re-imports), and the
+provider shows a URL only as scheme, host and last path segment, never its user-info, the
+rest of its path, or its query.
+
+**Name.** The template is named `<namespace>.<name>_<16 hex>`, at most 80 characters; the
+`<namespace>.<name>` part is cut when it is too long. The hex part is a hash of the
+`VMImage` UID and the source digest, so a re-created `VMImage` or a changed `spec.source`
+gets a new template instead of an old one. The name always contains `_`, which no
+Kubernetes name can, so it never equals a bare `VMImage` name or a VM name.
+Example: `team-a/ubuntu-22.04` → `team-a.ubuntu-22.04_3c9e1f0a7b2d4e61`.
+
+**Location: the import folder.** The template is looked up, created and reused only in
+the Provider's import folder: `spec.defaults.folder`, or the datacenter's VM folder when
+that is empty. A configured folder that does not resolve (missing, ambiguous, outside the
+default datacenter's VM folder, or a vCenter error) fails the prepare, which the manager
+retries: the provider never falls back to another folder, so every retry uses the same
+location. A same-named template in any other folder is neither reused nor a conflict.
+`prepared_image_id` (and so
+`status.providerStatus[...].id`) is the template's **absolute inventory path**, for
+example `/DC0/vm/images/team-a.ubuntu-22.04_3c9e1f0a7b2d4e61`, and `Create` clones exactly
+that template, never a same-named one elsewhere.
+
+**Multi-tenant setups: give each tenant's Provider its own import folder**
+(`spec.defaults.folder`) and scope that Provider's vCenter account to it. Providers that
+resolve to the same folder share one template per image and source; that is intended for
+Providers trusted with each other's images.
+
+**Trust assumption: nobody but the Provider's vCenter account may create, move, rename,
+reconfigure (`VirtualMachine.Config.AdvancedConfig`) or mark as template
+(`VirtualMachine.Provisioning.MarkAsTemplate`) VMs in the import folder.** The stamp proves
+provenance only against principals who cannot do that. A `VMImage`'s UID is readable by
+anyone who can read the `VMImage`, and an image is prepared only at its first VM create, so
+a principal holding those rights in the folder can plant a *complete, matching* template
+first — and it is **reused**. The same principal can make the provider destroy a powered-off
+VM they stamp as this image's abandoned import and move into the folder. vCenter folder
+permissions propagate to child objects, and the import folder is `spec.defaults.folder`,
+the folder the Provider's VMs are created in as well, so rights delegated to VM owners on
+that folder (or a parent) reach the import folder too. Use a **dedicated import folder**
+with a restrictive ACL: the Provider's account alone holds those rights on it, and no
+propagating grant from a parent folder gives them to anyone else. (A separate
+`defaults.imageFolder`, so VMs and templates need not share a folder, is a tracked
+follow-up.)
+
+**Stamp.** The template carries its provenance in ExtraConfig, written into the import
+spec before `ImportVApp`, so the object carries it from the moment it exists:
+
+| Key | Value |
+|---|---|
+| `virtrigaud.image.stampversion` | `1` |
+| `virtrigaud.image.uid` | The `VMImage` UID. Authoritative. |
+| `virtrigaud.image.sourcedigest` | `sha256:<64 hex>`, the source digest. Authoritative. |
+| `virtrigaud.image.namespace`, `virtrigaud.image.name` | The `VMImage` namespace and name. Informational. |
+| `virtrigaud.image.preparedby` | The Provider, as `<namespace>/<name>/<uid>`. Informational. |
+| `virtrigaud.image.preparedat` | When the import started (RFC 3339). Used to age an unfinished import. |
+
+The stamp holds no URL, header or secret. An OVF cannot forge it: every `virtrigaud.*`
+ExtraConfig key an OVF carries is removed from the import spec first, and the real stamp is
+added afterwards. `govc vm.info -e <template> | grep virtrigaud.image` shows it. A VM
+created or cloned from a prepared template never carries the image stamp: `Create` and
+`Clone` clear `virtrigaud.image.*` on the new VM.
+
+**What an existing object at the name means.** The provider reuses an object only when it
+is a template **and** its stamp carries the request's `VMImage` UID and source digest:
+
+| Found at the name, in the import folder | Result |
+|---|---|
+| Nothing | Import: download, verify the checksum if the image pins one, `ImportVApp`, then mark as template |
+| A template whose stamp matches | Reused (`artifact.reused=true`), no download |
+| A matching **unfinished** import (not a template yet) that is live | In progress ("still being prepared"; see [In progress](#prepared-image-artifact-identity)) |
+| A matching unfinished import that is **abandoned** | Removed, then imported again |
+| Anything else: no stamp, an unreadable stamp, another UID or digest, a powered-on VM | `Conflict`, never used, replaced or deleted. The `VMImage` owner sees a uniform message; who owns the object is logged by the provider only |
+| The lookup fails | Retryable error, never treated as "absent" |
+
+An unfinished import counts as **live** while any of these holds: a task on it is queued
+or running, or its state cannot be read (an import in flight shows as
+`ResourcePool.ImportVAppLRO`, running, in the object's recent tasks); vCenter blocks its
+`Destroy_Task` (a defensive extra — an import lease does not do that); or its
+`preparedat` is younger than `max(2 × spec.prepare.timeout, 2h)` (a timeout above one year
+counts as one year). Only a powered-off, non-template object of this same image that is
+none of these is removed; its age alone never is.
+
+**Concurrent prepares.** vCenter keeps VM names unique within a folder: a second import of
+the same name fails with `DuplicateName`, reported through the import's NFC lease; the
+provider then looks again and reuses, waits for, or refuses what is there. If the name is
+held by something the provider does not look at — a vApp or folder with that name, or a VM
+whose name differs only in case — the prepare is a `Conflict` at once. If two objects with
+the name exist anyway (a vCenter or simulator without that uniqueness), the one with the
+lowest managed object ID survives: every other prepare destroys only the object it created.
+A template is handed out only while the name addresses it alone.
+
+**Verified on vCenter 8.0.2 (2026-09-25):** `DuplicateName` is enforced within one folder
+and arrives through the lease (`lease.Wait`), not from `ImportVApp` itself — for a
+completed VM, a template, an entity still held by an active lease, and 4 concurrent imports
+of one name (exactly one created its entity). While a lease is active the entity already
+carries the stamp, is a powered-off non-template, and has `ResourcePool.ImportVAppLRO`
+running in its recent tasks; `Destroy_Task` is not disabled. Aborting the lease deletes the
+partial entity (the provider aborts on a context detached from the request, so a manager
+timeout still cleans up). MOIDs increase with creation order, so the lowest-MOID
+convergence is a fallback real vCenter should not need.
+
+**An OVF must describe exactly one VM.** A vApp (`VirtualSystemCollection`) gets
+`InvalidSpec`.
+
+**Failures.** The import is synchronous. The provider tells the manager which failures
+cannot heal on their own, so the manager holds the image instead of retrying:
+
+| Failure | Result |
+|---|---|
+| The source answers a 4xx other than 408/429, is at (or redirects to) a refused address or scheme, redirects more than 3 times, or is larger than the download limit; checksum mismatch; unreadable archive; no or invalid OVF descriptor; a file reference outside the package; an OVF vCenter's parser rejects; a multi-VM OVF; a non-`http(s)` URL; a bare `.ovf` | `InvalidSpec` (`InvalidSource`; not retried until the source changes) |
+| This image's template is still being imported by another request, or concurrent prepares are still settling on one template | In progress (retried every 30 seconds; not counted toward the Provider's circuit breaker) |
+| The configured import folder is missing, ambiguous or outside the datacenter's VM folder | `FailedPrecondition`: retried, not counted toward the circuit breaker, so a wrong `defaults.folder` does not stop the Provider's other operations. Fix the Provider |
+| The source answers 5xx, 408 or 429, is unreachable or breaks off; the download cannot be staged; vCenter refuses to create, upload or convert what the OVF describes | Retryable, tagged `IMAGE_SOURCE_UNAVAILABLE`: the image's own problem, so it is **not** counted toward the Provider's circuit breaker — one tenant's failing image cannot stop the Provider for every tenant. A partial import this call created is destroyed |
+| vCenter itself is unreachable, the session expired, or the provider lacks rights | Retryable (`Unavailable`), counted toward the circuit breaker |
+
+Messages are fixed text: HTTP status codes (beyond "an HTTP client error"), transport
+errors, archive and XML parser output, vCenter fault text and the computed checksum go to
+the provider log only, so a `VMImage`'s status tells nothing about what an arbitrary URL
+serves.
+
+**Requests from an older manager (deprecated).** A manager older than ADR-0009 sends a bare
+target name and no identity. For this release only, the provider serves it the pre-ADR way
+(a template named after the `VMImage`, reused by name anywhere in the datacenter, no
+stamp), logs `deprecated: image prepare without identity from an older manager; upgrade
+the manager; refused from the next release` at `WARN`, and increments
+`virtrigaud_provider_image_prepare_legacy_requests_total{provider_type="vsphere"}`, which
+the vSphere provider serves at `/metrics` on its health port. Alert on that counter. The
+next release refuses such requests. Legacy templates and identity
+templates never share a name, so neither mode can touch the other's templates.
+
+**Legacy templates are left alone.** Templates prepared before this change (named after
+the `VMImage`, without `virtrigaud.image.uid`) are never reused, renamed or deleted; the
+first create after the upgrade imports the image once more under the new name. To find
+them: templates in the import folder without a `virtrigaud.image.uid` ExtraConfig key.
+
+No new vCenter privilege is needed: importing, marking as template and destroying the
+provider's own partial import were already part of the OVA prepare, and the stamp is an
+ExtraConfig write (`VirtualMachine.Config.AdvancedConfig`, already required by
+[VM ownership](vm-ownership.md#required-vcenter-privileges)).
 
 ## libvirt image paths (`source.libvirt.path`)
 
