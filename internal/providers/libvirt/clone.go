@@ -153,18 +153,10 @@ func (p *Provider) Clone(ctx context.Context, req contracts.CloneRequest) (contr
 		return contracts.CloneResponse{}, err
 	}
 
-	if req.Linked {
-		if err := p.createLinkedOverlay(ctx, srcDiskPath, srcDiskFormat, targetDiskPath); err != nil {
-			return contracts.CloneResponse{}, err
-		}
-	} else {
-		if err := p.createFullCopy(ctx, srcDiskPath, targetDiskPath); err != nil {
-			return contracts.CloneResponse{}, err
-		}
-	}
-
-	// 4. Define the target domain by cloning the source XML and rewriting the
-	//    identity (name/uuid/mac) and the primary disk source path.
+	// 4. Build the target definition by cloning the source XML and rewriting
+	//    the identity (name/uuid/mac) and the primary disk source path — before
+	//    any file is written, so a refused UEFI varstore path (below) leaves
+	//    nothing behind.
 	srcXML, err := p.virshProvider.runVirshCommand(ctx, "dumpxml", sourceID)
 	if err != nil {
 		return contracts.CloneResponse{}, contracts.NewRetryableError("failed to dump source domain XML", err)
@@ -173,6 +165,23 @@ func (p *Provider) Clone(ctx context.Context, req contracts.CloneRequest) (contr
 	targetXML, srcNvramPath, targetNvramPath, err := rewriteDomainXMLForClone(srcXML.Stdout, domainName, srcDiskPath, targetDiskPath)
 	if err != nil {
 		return contracts.CloneResponse{}, contracts.NewInvalidSpecError("rewrite source domain XML for clone", err)
+	}
+	// Never write the clone's varstore through a symlink or over another
+	// domain's varstore.
+	if srcNvramPath != "" && targetNvramPath != "" {
+		if err := ensureNVRAMTargetFree(ctx, p.virshProvider, domainName, targetNvramPath); err != nil {
+			return contracts.CloneResponse{}, err
+		}
+	}
+
+	if req.Linked {
+		if err := p.createLinkedOverlay(ctx, srcDiskPath, srcDiskFormat, targetDiskPath); err != nil {
+			return contracts.CloneResponse{}, err
+		}
+	} else {
+		if err := p.createFullCopy(ctx, srcDiskPath, targetDiskPath); err != nil {
+			return contracts.CloneResponse{}, err
+		}
 	}
 
 	// For a UEFI source the domain XML carries a per-VM <nvram> varstore that was
@@ -295,16 +304,24 @@ func (p *Provider) createFullCopy(ctx context.Context, srcDiskPath, targetDiskPa
 	return nil
 }
 
+// clonedDiskMode is the mode of a clone's disk: read-write for its owner, the
+// qemu user (libvirt-qemu), and its group, kvm — never for anyone else on a
+// shared host. The provider's SSH user reads VM disks (the disk in-use checks,
+// GetDiskInfo, s3/nfs exports, a clone of the clone) through membership of
+// that group, or as root.
+const clonedDiskMode = "0660"
+
 // finalizeClonedDisk fixes ownership/permissions/SELinux on a freshly created
 // clone disk so libvirt-qemu can open it, and refreshes the pool so the new
 // volume is visible to subsequent lookups. It mirrors StorageProvider.Create-
-// Volume's handling. Every step is best-effort: the host may not use these
+// Volume's handling, except that the disk is not world-writable
+// (clonedDiskMode). Every step is best-effort: the host may not use these
 // mechanisms (e.g. no SELinux), so failures are logged, not fatal.
 func (p *Provider) finalizeClonedDisk(ctx context.Context, targetDiskPath string) {
 	if _, e := p.virshProvider.runVirshCommand(ctx, "!", "sudo", "chown", "libvirt-qemu:kvm", targetDiskPath); e != nil {
 		log.Printf("WARN Failed to set clone disk ownership: %v", e)
 	}
-	if _, e := p.virshProvider.runVirshCommand(ctx, "!", "sudo", "chmod", "777", targetDiskPath); e != nil {
+	if _, e := p.virshProvider.runVirshCommand(ctx, "!", "sudo", "chmod", clonedDiskMode, targetDiskPath); e != nil {
 		log.Printf("WARN Failed to set clone disk permissions: %v", e)
 	}
 	if _, e := p.virshProvider.runVirshCommand(ctx, "!", "sudo", "restorecon", targetDiskPath); e != nil {
@@ -323,26 +340,89 @@ func (p *Provider) finalizeClonedDisk(ctx context.Context, targetDiskPath string
 // The copy runs host-side via the "!" direct-exec convention, mirroring the
 // disk copy. The nvram directory (typically /var/lib/libvirt/qemu/nvram) is
 // root-owned, so sudo is used as elsewhere in this provider. The varstore is a
-// small fixed-size firmware-variable image; "cp -f --" overwrites any stale
-// target and stops option parsing at the paths. Failure is non-fatal but logged
-// loudly: the clone may fail to boot UEFI correctly because its <nvram> now
-// points at a path that was never populated.
+// small fixed-size firmware-variable image. It is copied with `dd` opening
+// both files with O_NOFOLLOW (iflag/oflag=nofollow): running as root, a symlink
+// at either path makes the copy fail instead of being followed to another file
+// (ensureNVRAMTargetFree has refused a symlinked or in-use target before any
+// file of the clone was written; this closes the race after that check). The
+// copy is then made private to the qemu user (0600). Failure is non-fatal but
+// logged loudly: the clone may fail to boot UEFI correctly because its <nvram>
+// now points at a path that was never populated.
 func (p *Provider) copyClonedNVRAM(ctx context.Context, srcNvramPath, targetNvramPath string) {
 	log.Printf("INFO Copying UEFI varstore %s -> %s for clone", srcNvramPath, targetNvramPath)
-	if res, err := p.virshProvider.runVirshCommand(ctx, "!", "sudo", "cp", "-f", "--", srcNvramPath, targetNvramPath); err != nil {
+	if res, err := runHost(ctx, p.virshProvider, "sudo", "dd", "if="+srcNvramPath, "of="+targetNvramPath,
+		"iflag=nofollow", "oflag=nofollow", "status=none"); err != nil {
+		stderr := ""
+		if res != nil {
+			stderr = res.Stderr
+		}
 		log.Printf("WARN Failed to copy UEFI varstore %s -> %s for clone: %v (output: %s). "+
 			"The clone's <nvram> points at an unpopulated path and may fail to boot UEFI/Secure Boot correctly.",
-			srcNvramPath, targetNvramPath, err, res.Stderr)
+			srcNvramPath, targetNvramPath, err, stderr)
 		return
 	}
-	// Fix ownership/SELinux so libvirt-qemu can open the varstore, mirroring the
-	// clone-disk finalization. Best-effort: hosts vary in their mechanisms.
+	// Fix ownership/mode/SELinux so libvirt-qemu (only) can open the varstore,
+	// mirroring the clone-disk finalization. Best-effort: hosts vary in their
+	// mechanisms.
 	if _, e := p.virshProvider.runVirshCommand(ctx, "!", "sudo", "chown", "libvirt-qemu:kvm", targetNvramPath); e != nil {
 		log.Printf("WARN Failed to set clone varstore ownership: %v", e)
+	}
+	if _, e := p.virshProvider.runVirshCommand(ctx, "!", "sudo", "chmod", clonedNVRAMMode, targetNvramPath); e != nil {
+		log.Printf("WARN Failed to set clone varstore permissions: %v", e)
 	}
 	if _, e := p.virshProvider.runVirshCommand(ctx, "!", "sudo", "restorecon", targetNvramPath); e != nil {
 		log.Printf("WARN Failed to restore clone varstore SELinux context: %v", e)
 	}
+}
+
+// clonedNVRAMMode is the mode of a clone's UEFI varstore: private to its
+// owner, the qemu user — the mode libvirt gives the varstores it creates.
+const clonedNVRAMMode = "0600"
+
+// nvramTargetScript is the fixed `sh -c` script behind ensureNVRAMTargetFree.
+// The path is ALWAYS the positional parameter "$1", never interpolated into
+// the text. It prints nvramTargetSymlink for a symbolic link (dangling or not),
+// pathExistsMarker for anything else that exists, and nothing for a free path.
+const nvramTargetScript = `if [ -L "$1" ]; then echo ` + nvramTargetSymlink +
+	`; elif [ -e "$1" ]; then echo ` + pathExistsMarker + `; fi`
+
+// nvramTargetSymlink is what nvramTargetScript prints for a symbolic link.
+const nvramTargetSymlink = "symlink"
+
+// ensureNVRAMTargetFree refuses to let a clone of domainName write its UEFI
+// varstore to target — as root — when target is a symbolic link (the copy
+// would write through it to another file) or the varstore (or any other file)
+// of ANY domain defined on the host behind h (the clone would share, and
+// overwrite, another VM's firmware variables). It mirrors ensureDiskTargetFree:
+// a regular file no domain uses is left over from an earlier, failed clone to
+// the same name and is overwritten. The refusal is a Conflict whose message
+// names only the clone's own domain.
+func ensureNVRAMTargetFree(ctx context.Context, h hostCommandRunner, domainName, target string) error {
+	res, err := runHost(ctx, h, "sh", "-c", nvramTargetScript, "sh", target)
+	if err != nil {
+		log.Printf("ERROR Could not check the UEFI varstore path %s for clone %s: %v", target, domainName, err)
+		return contracts.NewRetryableError(fmt.Sprintf(
+			"could not check the UEFI varstore path of libvirt domain %q on the host (details are in the provider log)", domainName), nil)
+	}
+	switch strings.TrimSpace(res.Stdout) {
+	case nvramTargetSymlink:
+		log.Printf("WARN Refusing to write the UEFI varstore of clone %s: %s is a symbolic link", domainName, target)
+		return contracts.NewConflictError(fmt.Sprintf(
+			"the UEFI varstore path of libvirt domain %q is a symbolic link on the host; refusing to write through it", domainName), nil)
+	case pathExistsMarker:
+		inUse, err := pathInUseOnHost(ctx, h, target)
+		if err != nil {
+			return err
+		}
+		if inUse {
+			log.Printf("WARN Refusing to write the UEFI varstore of clone %s: %s is in use by another domain", domainName, target)
+			return contracts.NewConflictError(fmt.Sprintf(
+				"the UEFI varstore path of libvirt domain %q is in use by another domain on the host; refusing to overwrite it", domainName), nil)
+		}
+		log.Printf("INFO UEFI varstore %s of clone %s exists but no domain uses it (left by an earlier failed clone); overwriting it",
+			target, domainName)
+	}
+	return nil
 }
 
 // rewriteDomainXMLForClone produces a new domain XML from the source domain XML
