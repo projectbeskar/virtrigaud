@@ -114,6 +114,12 @@ func TestDecide(t *testing.T) {
 		"incomplete, untrusted stamp, not live":  {Observation{Exists: true, Stamp: &untrusted}, OutcomeConflict},
 		"complete, matching stamp, live ignored": {Observation{Exists: true, Complete: true, Live: true, Stamp: &match}, OutcomeReuse},
 		"incomplete, another digest, live":       {Observation{Exists: true, Live: true, Stamp: &otherDigest}, OutcomeConflict},
+		// Inconsistent observations fail closed: a stamp (e.g. an orphaned
+		// sidecar), completeness or liveness is never "nothing at the name".
+		"not exists, but a foreign stamp":  {Observation{Stamp: &otherUID}, OutcomeConflict},
+		"not exists, but a matching stamp": {Observation{Stamp: &match}, OutcomeConflict},
+		"not exists, but complete":         {Observation{Complete: true}, OutcomeConflict},
+		"not exists, but live":             {Observation{Live: true}, OutcomeConflict},
 	} {
 		t.Run(name, func(t *testing.T) {
 			assert.Equal(t, tc.want, Decide(tc.obs, req))

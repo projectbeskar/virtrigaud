@@ -125,7 +125,11 @@ func (s Stamp) PreparedArtifact(name string, reused bool) *providerv1.PreparedAr
 // (ADR-0009 D4). A failed probe is not an observation: it is a retryable
 // error, never "absent".
 type Observation struct {
-	// Exists is true when an object occupies the name.
+	// Exists is true when anything occupies the name: the artifact, OR any
+	// part of it such as a stamp without its artifact (a libvirt sidecar whose
+	// file is missing). A provider must never report Exists=false together
+	// with a stamp, Complete or Live; Decide treats that inconsistent
+	// observation as a Conflict.
 	Exists bool
 	// Complete is true when the object is a finished artifact (vSphere: a
 	// template; libvirt: the file and its sidecar with matching inode and
@@ -180,9 +184,15 @@ func (o Outcome) String() string {
 // Decide is the ADR-0009 D4 reuse rule for an identity request req: an object
 // at the derived name is reused only when it is complete and its stamp
 // Matches; an incomplete matching object is in progress while live and
-// abandoned otherwise; every other object is a Conflict.
+// abandoned otherwise; every other object is a Conflict. The name is free
+// (Import) only when nothing at all was observed: an observation that claims
+// the name is free but carries a stamp, or claims Complete or Live, is
+// inconsistent and fails closed as a Conflict, so an orphaned stamp (e.g. a
+// foreign libvirt sidecar) is never treated as free space.
 func Decide(obs Observation, req Request) Outcome {
 	switch {
+	case !obs.Exists && (obs.Stamp != nil || obs.Complete || obs.Live):
+		return OutcomeConflict
 	case !obs.Exists:
 		return OutcomeImport
 	case obs.Stamp == nil || !obs.Stamp.Matches(req):
