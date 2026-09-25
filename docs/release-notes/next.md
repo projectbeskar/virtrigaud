@@ -96,6 +96,13 @@ providers), and rollback caveats in
   `virtrigaud_host_committed_cpu` and `virtrigaud_host_committed_memory_mib`.
   There is no per-tenant quota on a shared clustered Provider yet
   (→ [`docs/clustered-provider-inventory.md`](docs/clustered-provider-inventory.md#committed-capacity)).
+- On a clustered Provider, shrinking a **running** VM waits until the VM is
+  powered off (`Reconfiguring=False/ShrinkPendingPowerOff`): a live shrink
+  only deflates the balloon, which the guest can take back. VirtRigaud never
+  powers the VM off for it; set `spec.powerState: Off` and back to `On`. A VM
+  whose VMClass enables memory hot-add counts at its balloon ceiling (4× its
+  memory), and a pending create whose VMClass has grown since it was scheduled
+  is not retried (`PendingSizeGrew`).
 
 ### Fixes
 

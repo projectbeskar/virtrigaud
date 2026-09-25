@@ -719,10 +719,22 @@ free = allocatable × overcommit ratio − committed
     applied), or at its VMClass size when nothing is recorded; editing its
     `spec.resources` or `spec.classRef` changes nothing until a resize is
     admitted (below);
-  - a VM whose create is pending counts at the size its Create sends: its
-    VMClass with any `spec.resources` override applied. While the create is pending, the CRD rejects any
-    change to `spec.classRef` and `spec.resources`, so this is the size it was
-    scheduled at;
+  - a VM whose create is pending counts at the size it was scheduled at: its
+    VMClass with any `spec.resources` override applied, recorded in
+    `status.placement.pendingResources`. While the create is pending, the CRD
+    rejects any change to `spec.classRef` and `spec.resources`. If the VMClass
+    itself is edited so that the retried Create would be larger (or would gain
+    memory hot-add), the retry is not sent: the VM gets `Placed=False` and
+    `Provisioning=False` with reason `PendingSizeGrew` and keeps its pending
+    host until the VMClass is restored or the VM is deleted;
+  - a VM whose VMClass enables **memory hot-add** counts at its memory
+    *ceiling*: 4× its memory, the balloon maximum the libvirt provider gives
+    it, which the guest can use at any time. The ceiling is recorded when the
+    VM is scheduled (`status.placement.memoryCeilingMiB`, `0` for none), so
+    turning hot-add off in the VMClass later does not lower it, and it is not
+    lowered after a resize either. CPU hot-add is not counted at its ceiling,
+    because extra vCPUs stay offline until a resize (which is checked) brings
+    them online;
   - a VMClass in another namespace that the VM's namespace may not use
     (no consumer grant) sizes nothing;
   - every VM counts at least 1 vCPU and 128 MiB.
@@ -739,8 +751,10 @@ free = allocatable × overcommit ratio − committed
 **Resizing a VM up is checked too.** When the size a clustered VM asks for
 (its VMClass, or its `spec.resources` override) grows its CPU or memory, the
 controller checks, under the same per-Provider lock, that the growth fits in
-its host's free capacity, not counting the VM's own current size. If it fits,
-the resize is sent and counted at its new size straight away. If it does not,
+its host's free capacity, not counting the VM's own current size. A memory
+grow that stays within a hot-add VM's ceiling is already counted and is not
+checked. If it fits, the resize is sent and counted at its new size straight
+away. If it does not,
 nothing is sent, the VM keeps running at its current size, and it gets
 `Reconfiguring=False` with reason `InsufficientHostCapacity`, for example:
 
@@ -750,10 +764,25 @@ resizing to 8 vCPU and 8192 MiB exceeds the free capacity of its host kvm-01; th
 ```
 
 The resize is retried after 30 s, 1 min, then every 2 min. Only the resources
-that grow are checked, so a shrink is never refused. The host's health and
-cordon do not matter, because a resize does not move the VM. A VM whose host is
-not registered as a `Host` cannot be resized up. Single-host Providers are not
-affected.
+that grow are checked. The host's health and cordon do not matter, because a
+resize does not move the VM. A VM whose host is not registered as a `Host`, or
+whose `HostPool` is missing or belongs to another Provider, cannot be resized
+up. Single-host Providers are not affected.
+
+**Shrinking a running VM waits for it to be powered off.** A shrink is never
+refused, but on a clustered Provider it is applied only while the VM is off. A
+running guest can take back memory that was removed live (the balloon), and a
+live vCPU removal that fails is not reported as a failure, so recording the
+smaller size early could let another VM be placed on capacity this one still
+uses. While the VM runs, nothing is sent, the VM keeps counting at its current
+size, and it gets `Reconfiguring=False` with reason `ShrinkPendingPowerOff`.
+Power it off (`spec.powerState: Off`, or shut it down from inside the guest)
+and the shrink is applied and recorded; set `spec.powerState: On` again to
+restart it. If the VM is found off while its spec still says `On`, the shrink
+is applied first and the VM is powered on in the next reconcile. VirtRigaud
+never powers a VM off by itself to apply a shrink. A change that shrinks one
+resource and grows another waits as a whole. Single-host Providers still shrink
+a running VM live, as before.
 
 **Detaching (orphan-on-delete) needs the Provider's permission.** A VM detached
 with `virtrigaud.io/orphan-on-delete` keeps running but stops counting. So a VM
@@ -783,7 +812,9 @@ recorded (an in-process *assume* cache). Then it schedules, records its own
 pick and releases the lock before it writes `pendingHost`. Two VMs never book
 the same capacity, and two VMs with mutual hard anti-affinity never land on the
 same host. A picked placement stops being tracked once the cache shows its
-`pendingHost` or `host`, and at the latest after 2 minutes. The manager runs
+`pendingHost` or `host`, and at the latest after 2 minutes (an admitted resize:
+once `status.currentResources` records it, at the latest after 5.5 minutes,
+the longest a `Reconfigure` call and its status write may take). The manager runs
 under leader election, so one in-process cache is authoritative.
 
 **When nothing fits**, the VM gets `Placed=False` and `Provisioning=False`, both

@@ -956,15 +956,39 @@ follows; A2's `pendingHost` is its prerequisite.
 >   fields counts once. The VM being scheduled never counts against itself.
 > - Another VM's *footprint* is its **admitted** size, never a size its owner
 >   merely asks for: `status.currentResources` when recorded (only the operator
->   writes status); for a VM whose create is still pending, its effective size
->   (its VMClass with any `spec.resources` override applied — what its Create
->   sends); otherwise its VMClass size. A
+>   writes status); for a VM whose create is still pending, the effective size
+>   it was scheduled at (its VMClass with any `spec.resources` override
+>   applied — what its Create sends), recorded in
+>   `status.placement.pendingResources`; otherwise its VMClass size. A
 >   created VM's `spec.resources` and `spec.classRef` are ignored, so editing
 >   them costs a tenant nothing and blocks nobody. A VMClass the VM's namespace
 >   may not use (no consumer grant) sizes nothing. Every VM counts at least
 >   1 vCPU and 128 MiB. While a create is pending, a CRD rule makes
->   `spec.classRef` and `spec.resources` immutable, so the pending VM keeps the
->   size it was admitted at; the manager's readiness check requires that rule.
+>   `spec.classRef` and `spec.resources` immutable. The rule freezes the
+>   references, not the VMClass they point to, so a retried `Create` whose
+>   effective size exceeds `pendingResources`, or that would gain a memory
+>   hot-add ceiling it was not admitted with (below), is not sent: the VM gets
+>   `Placed=False/PendingSizeGrew` and `Provisioning=False/PendingSizeGrew`,
+>   keeps its `pendingHost` (a domain may already exist there, A2) and counts
+>   at its admitted size until the VMClass is restored or the VM is deleted.
+>   The manager's readiness check requires the rule, `pendingResources` and
+>   `memoryCeilingMiB`.
+> - A VM whose VMClass enables **memory hot-add** counts at its memory
+>   *ceiling*, not its current memory. The libvirt provider creates it with a
+>   balloon maximum (`<memory>`) of 4× its memory, at least its memory + 1 MiB
+>   and without a cap (`contracts.HotplugCeilingMemoryMiB`, which the provider
+>   and the scheduler share), and the guest can deflate its balloon up to that
+>   at any time, so counting less could over-book the host. The ceiling is
+>   recorded when the VM is scheduled, in `status.placement.memoryCeilingMiB`
+>   (`0` means none), and counts from then on whatever the VMClass later says.
+>   It is not lowered after a resize: the provider does not verify that it
+>   lowered `<memory>` offline, so after a shrink the VM may be over-counted,
+>   never under-counted. A VM without the record (scheduled by an older
+>   manager, or a clone) falls back to its VMClass's current flag. A memory
+>   grow within the ceiling commits nothing new and is admitted without a
+>   capacity check. CPU hot-add is **not** counted at its ceiling: vCPUs above
+>   the current count are offline until a resize brings them online, and that
+>   resize is checked.
 > - `status.boundProvider` and `status.placement` are trusted inputs to this
 >   accounting: tenants must never be granted write on
 >   `virtualmachines/status`.
@@ -984,12 +1008,14 @@ follows; A2's `pendingHost` is its prerequisite.
 >    after about a second, with jitter, instead of parking its worker),
 > 2. reads the committed placements from the informer cache, adds the live
 >    assumptions, runs `Schedule` and records the pick as an assumption, and
-> 3. releases the lock. Only then does it write anything: the `Placed`
->    condition of a VM that did not fit (a status write bounded to 30 s), or
->    `pendingHost` (A2's checked update, bounded to one minute).
+> 3. releases the lock (deferred, so a panic releases it too). Only then does
+>    it write anything: the `Placed` condition of a VM that did not fit (a
+>    status write bounded to 30 s), or `pendingHost` (A2's checked update,
+>    bounded to one minute).
 >
 > The lock covers informer-cache reads and in-memory work only, never an API
-> call, so a slow API server cannot park other reconciles behind it.
+> call, so a slow API server cannot park other reconciles behind it; each read
+> under it is bounded by the same 5 s.
 > Concurrent reconciles of one Provider therefore see each other's picks, as
 > committed capacity and as placed VMs for affinity and anti-affinity.
 > Reconciles of different Providers never wait on each other. An assumption
@@ -1004,22 +1030,42 @@ follows; A2's `pendingHost` is its prerequisite.
 >   After an ambiguous failure (a timeout, a 5xx, a broken connection) the
 >   write may have landed, so the assumption stays until the record shows up
 >   or the TTL passes.
-> - its TTL passes: twice the one-minute bound of the `pendingHost` write. This
->   is only a safety net for a reconcile that died between the two.
+> - its TTL passes: for a create, twice the one-minute bound of the
+>   `pendingHost` write; for an admitted resize, the 5-minute deadline of the
+>   `Reconfigure` call plus the 30 s bound of the status write that records
+>   it, so it cannot lapse while the call it admitted still runs. The TTL is
+>   only a safety net for a reconcile that died in between.
 >
 > **Resizes are admitted too** (a decision of this review round). A
 > `Reconfigure` that grows the CPU or memory of a VM on a clustered Provider is
 > checked, under the same lock, against the free capacity of the VM's host,
 > the VM's own current footprint excluded. Only the growing resources are
-> checked; a shrink is always allowed, and host health and cordon do not
-> matter (a resize does not move the VM). If it does not fit, no provider call
-> is made, the VM keeps its size, gets `Reconfiguring=False/
-> InsufficientHostCapacity` (a number-free message) and is retried with the
-> same backoff; a host that is not registered fails closed. An admitted resize
-> is assumed at its new size until `status.currentResources` records it (the
+> checked, and host health and cordon do not matter (a resize does not move
+> the VM). If it does not fit, no provider call is made, the VM keeps its
+> size, gets `Reconfiguring=False/InsufficientHostCapacity` (the message holds
+> the VM's own sizes only, no committed or free figure) and is retried with the
+> same backoff. A host that is not registered, or whose HostPool is missing or
+> belongs to another Provider, fails closed. An admitted resize is assumed at
+> its new size until `status.currentResources` records it (the
 > assumption is kept alive while a reconfigure task runs), and the scheduler
 > counts each VM once per host at the larger of its listed sizes, so a
 > concurrent create or resize sees it before it is applied.
+>
+> A **shrink** is never refused on capacity, but on a clustered Provider it is
+> applied only while the VM is powered off. Live, libvirt's `setmem --live`
+> moves only the balloon, which the guest can re-inflate up to `<memory>`, and
+> a failed live `setvcpus` is reported as success with a restart required.
+> Recording the smaller size would let the scheduler give the difference to
+> another VM while this one can still use it. So while the VM runs no
+> `Reconfigure` is sent: the VM keeps counting at its current size, gets
+> `Reconfiguring=False/ShrinkPendingPowerOff`, and is checked again with the
+> same backoff. When it is next observed powered off (`spec.powerState: Off`,
+> or a shutdown from inside the guest), the shrink is applied before any power
+> change and only then recorded in `status.currentResources`; the next
+> reconcile powers the VM on again if its spec asks. VirtRigaud never powers a
+> VM off to apply a shrink. A change that shrinks any resource waits as a
+> whole, including the resources it grows. Single-host Providers are
+> unchanged: a shrink is sent live, as before.
 >
 > The cache is in process, which is correct because only the elected leader
 > runs reconcilers. A new leader starts with an empty cache but waits for its
@@ -1080,7 +1126,18 @@ follows; A2's `pendingHost` is its prerequisite.
 >
 > - A clone lands on its source host (A1) without being scheduled or checked
 >   against capacity. It counts from the moment `bindTargetVM` writes its
->   `placement.host`.
+>   `placement.host`, and at its VMClass size: the clustered clone bind
+>   (`bindTargetVM` / `clonedPlacement`) records no `currentResources` or
+>   memory ceiling yet. The ADR-0007 Slice 3 branch adds the clone fit check
+>   and records `currentResources` at bind.
+> - The libvirt provider's `Reconfigure` reports success for a change it did
+>   not apply (a failed `setvcpus` or `setmem`, live or offline, sets
+>   `requiresRestart` and returns no error), so the operator records a size the
+>   domain does not have. For an unapplied grow that over-counts, which is
+>   safe; an unapplied shrink under-counts. The clustered shrink deferral above
+>   keeps shrinks off the live path, where they fail, but an offline failure
+>   would still be recorded. The provider fix affects single-host Providers
+>   too and is tracked separately.
 >
 > Single-host and thin-client Providers never schedule, so none of this reaches
 > them (D9).
@@ -1433,4 +1490,10 @@ honest.
   host's capacity, but nothing limits how much of a shared Provider one
   consumer namespace may take (v0.4.0 has no per-tenant quota).
 - Capacity check for a clone, which lands on its source host without being
-  scheduled (A5, *Still not covered*).
+  scheduled, and `currentResources` recorded at the clustered clone bind
+  (`bindTargetVM` / `clonedPlacement`), which today writes `placement.host`
+  only (A5, *Still not covered*). Planned on the ADR-0007 Slice 3 branch.
+- The libvirt provider's `Reconfigure` must return an error when a requested
+  change was not applied (today a failed `setvcpus` or `setmem`, live or
+  offline, returns success with `requiresRestart`). This affects single-host
+  Providers too, so it is tracked separately from ADR-0007.
