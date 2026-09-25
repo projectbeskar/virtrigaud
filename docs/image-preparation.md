@@ -370,8 +370,9 @@ Example: `team-a/ubuntu-22.04` → `team-a.ubuntu-22.04_3c9e1f0a7b2d4e61`.
 **Location: the import folder.** The template is looked up, created and reused only in
 the Provider's import folder: `spec.defaults.folder`, or the datacenter's VM folder when
 that is empty. A configured folder that does not resolve (missing, ambiguous, outside the
-default datacenter's VM folder, or a vCenter error) is a retryable error: the provider
-never falls back to another folder, so every retry uses the same location. A same-named
+default datacenter's VM folder, or a vCenter error) fails the prepare, which the manager
+retries: the provider never falls back to another folder, so every retry uses the same
+location. A same-named
 template in any other folder is neither reused nor a conflict. `prepared_image_id` (and so
 `status.providerStatus[...].id`) is the template's **absolute inventory path**, for
 example `/DC0/vm/images/team-a.ubuntu-22.04_3c9e1f0a7b2d4e61`, and `Create` clones exactly
@@ -408,7 +409,7 @@ is a template **and** its stamp carries the request's `VMImage` UID and source d
 |---|---|
 | Nothing | Import: download, verify the checksum if the image pins one, `ImportVApp`, then mark as template |
 | A template whose stamp matches | Reused (`artifact.reused=true`), no download |
-| A matching **unfinished** import (not a template yet) that is live | Retryable `Unavailable` ("still being prepared") |
+| A matching **unfinished** import (not a template yet) that is live | In progress ("still being prepared"; see [In progress](#prepared-image-artifact-identity)) |
 | A matching unfinished import that is **abandoned** | Removed, then imported again |
 | Anything else: no stamp, an unreadable stamp, another UID or digest, a powered-on VM | `Conflict`, never used, replaced or deleted. The `VMImage` owner sees a uniform message; who owns the object is logged by the provider only |
 | The lookup fails | Retryable error, never treated as "absent" |
@@ -435,8 +436,10 @@ cannot heal on their own, so the manager holds the image instead of retrying:
 
 | Failure | Result |
 |---|---|
-| The source answers 4xx other than 408/429 (for example 404, 410, 403), checksum mismatch, unreadable archive, no or invalid OVF descriptor, an OVF vCenter's parser rejects, a multi-VM OVF, a non-`http(s)` URL | `InvalidSpec` (not retried; fix the `VMImage` source) |
-| The source answers 5xx, 408 or 429, or breaks off; vCenter unreachable or the session expired; the import folder does not resolve; the import, upload or template conversion fails midway | Retryable (`Unavailable`). A partial import this call created is destroyed |
+| The source answers 4xx other than 408/429 (for example 404, 410, 403), checksum mismatch, unreadable archive, no or invalid OVF descriptor, an OVF vCenter's parser rejects, a multi-VM OVF, a non-`http(s)` URL | `InvalidSpec` (`InvalidSource`; not retried until the source changes) |
+| This image's template is still being imported by another request, or concurrent prepares are still settling on one template | In progress (retried every 30 seconds; not counted toward the Provider's circuit breaker) |
+| The configured import folder is missing, ambiguous or outside the datacenter's VM folder | `FailedPrecondition`: retried, not counted toward the circuit breaker, so a wrong `defaults.folder` does not stop the Provider's other operations. Fix the Provider |
+| The source answers 5xx, 408 or 429, or breaks off; vCenter unreachable or the session expired; the import, upload or template conversion fails midway | Retryable (`Unavailable`). A partial import this call created is destroyed |
 
 Messages and provider logs show the OVA URL without user-info, query or fragment.
 
@@ -445,8 +448,9 @@ target name and no identity. For this release only, the provider serves it the p
 (a template named after the `VMImage`, reused by name anywhere in the datacenter, no
 stamp), logs `deprecated: image prepare without identity from an older manager; upgrade
 the manager; refused from the next release` at `WARN`, and increments
-`virtrigaud_provider_image_prepare_legacy_requests_total{provider_type="vsphere"}`. Alert
-on that counter. The next release refuses such requests. Legacy templates and identity
+`virtrigaud_provider_image_prepare_legacy_requests_total{provider_type="vsphere"}`, which
+the vSphere provider serves at `/metrics` on its health port. Alert on that counter. The
+next release refuses such requests. Legacy templates and identity
 templates never share a name, so neither mode can touch the other's templates.
 
 **Legacy templates are left alone.** Templates prepared before this change (named after

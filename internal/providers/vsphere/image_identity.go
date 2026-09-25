@@ -62,14 +62,25 @@ import (
 //   - addressed by its absolute inventory path in prepared_image_id, which
 //     Create resolves exactly (D5).
 //
-// Error classification for the synchronous import: a source that can never
-// import (InvalidSpec, codes.InvalidArgument — the manager holds) is an
-// unusable source kind or URL, a 4xx from the source other than 408/429, a
-// checksum mismatch, an unreadable archive or OVF, an OVF vCenter's parser
-// rejects, or an OVF that is not exactly one VM. A Conflict is
-// codes.AlreadyExists. Everything else — vCenter unreachable, an expired
-// session, a 5xx from the source, an unresolvable import folder, an import or
-// upload that fails midway — is retryable (codes.Unavailable).
+// Error classification for the synchronous import:
+//
+//   - a source that can never import (InvalidSpec, codes.InvalidArgument — the
+//     manager holds the image): an unusable source kind or URL, a 4xx from
+//     the source other than 408/429, a checksum mismatch, an unreadable
+//     archive or OVF, an OVF vCenter's parser rejects, or an OVF that is not
+//     exactly one VM;
+//   - an object at the name that is not this image's: codes.AlreadyExists
+//     (Conflict);
+//   - this image's artifact still being prepared, or the name still changing
+//     under concurrent prepares: imageartifact.InProgressError
+//     (codes.Unavailable with the IMAGE_ARTIFACT_IN_PROGRESS reason, kept out
+//     of the manager's circuit breaker);
+//   - a configured import folder that is missing, ambiguous or outside the
+//     datacenter's VM folder: codes.FailedPrecondition (retried by the
+//     manager, not counted toward its circuit breaker);
+//   - everything else — vCenter unreachable, an expired session, a 5xx from
+//     the source, an import or upload that fails midway — is retryable
+//     (codes.Unavailable).
 
 const (
 	// maxArtifactProbeRounds bounds how often one identity prepare probes the
@@ -228,19 +239,28 @@ func (p *Provider) imagePrepareIdentity(ctx context.Context, req *providerv1.Ima
 	}
 	p.logger.WarnContext(ctx, "ImagePrepare: the artifact name did not settle; giving up for now",
 		"artifact", name, "rounds", maxArtifactProbeRounds)
-	return nil, status.Errorf(codes.Unavailable,
-		"ImagePrepare: the prepared-image artifact %q is changing concurrently; will retry", name)
+	// Other prepares are changing what is at the name: the same situation as
+	// an in-progress artifact, and like it no sign of an unhealthy provider.
+	return nil, imageartifact.InProgressError(name)
 }
 
 // resolveArtifactFolder resolves the import folder of an identity prepare
 // (ADR-0009 D5). It falls back to the datacenter's VM folder ONLY when the
 // Provider's DefaultFolder is empty. A configured folder that does not
-// resolve — missing, ambiguous, outside the default datacenter's VM folder,
-// or a vCenter error — is a retryable error, so every retry resolves the same
-// location: an artifact that lands in an unintended folder would be shared
-// with whoever can read that folder. (That is stricter than resolveVMFolder
-// and the legacy resolveImageFolder.) finder must be scoped to the default
-// datacenter.
+// resolve is an error the manager retries, so every retry resolves the same
+// location — an artifact that lands in an unintended folder would be shared
+// with whoever can read that folder (stricter than resolveVMFolder and the
+// legacy resolveImageFolder):
+//
+//   - a vCenter failure is codes.Unavailable (artifactRetryError);
+//   - a folder that is missing, ambiguous or outside the default datacenter's
+//     VM folder is codes.FailedPrecondition (importFolderError): a
+//     configuration problem, retried by the manager like any provider error
+//     but — unlike Unavailable — not counted toward the Provider's circuit
+//     breaker, so a wrong defaults.folder cannot stop the Provider's other
+//     RPCs.
+//
+// finder must be scoped to the default datacenter.
 func (p *Provider) resolveArtifactFolder(ctx context.Context, finder *find.Finder, artifact string) (*object.Folder, error) {
 	vmFolder, err := finder.DefaultFolder(ctx)
 	if err != nil {
@@ -253,32 +273,42 @@ func (p *Provider) resolveArtifactFolder(ctx context.Context, finder *find.Finde
 
 	folder, err := finder.Folder(ctx, folderName)
 	if err != nil {
-		reason := "a vCenter error occurred (details in the provider log)"
-		var notFound *find.NotFoundError
-		var multiple *find.MultipleFoundError
-		switch {
-		case stderrors.As(err, &notFound):
-			reason = "it does not exist"
-		case stderrors.As(err, &multiple):
-			reason = "it names more than one folder"
+		if reason := importFolderLookupReason(err); reason != "" {
+			return nil, p.importFolderError(ctx, folderName, reason, err)
 		}
-		p.logger.ErrorContext(ctx, "ImagePrepare: the Provider's default folder does not resolve; not falling back",
-			"folder", folderName, "error", err)
-		return nil, importFolderError(folderName, reason)
+		return nil, p.artifactRetryError(ctx, artifact, "resolve the Provider's default folder", err)
 	}
 	under := strings.TrimSuffix(vmFolder.InventoryPath, inventoryPathSeparator) + inventoryPathSeparator
 	if folder.InventoryPath != vmFolder.InventoryPath && !strings.HasPrefix(folder.InventoryPath, under) {
-		p.logger.ErrorContext(ctx, "ImagePrepare: the Provider's default folder is not under the default datacenter's VM folder",
-			"folder", folderName, "resolved", folder.InventoryPath, "vm_folder", vmFolder.InventoryPath)
-		return nil, importFolderError(folderName, "it is not under the default datacenter's VM folder")
+		return nil, p.importFolderError(ctx, folderName, "it is not under the default datacenter's VM folder",
+			fmt.Errorf("resolved to %s, the VM folder is %s", folder.InventoryPath, vmFolder.InventoryPath))
 	}
 	return folder, nil
 }
 
-// importFolderError is the retryable error for a configured import folder
-// that cannot be used (ADR-0009 D5).
-func importFolderError(folder, reason string) error {
-	return status.Errorf(codes.Unavailable,
+// importFolderLookupReason returns why the finder error err, from looking up
+// the configured import folder, is a configuration problem: the folder does
+// not exist, or the name matches more than one folder (both definitive). It
+// returns "" for any other error, a vCenter failure.
+func importFolderLookupReason(err error) string {
+	var notFound *find.NotFoundError
+	var multiple *find.MultipleFoundError
+	switch {
+	case stderrors.As(err, &notFound):
+		return "it does not exist"
+	case stderrors.As(err, &multiple):
+		return "it names more than one folder"
+	}
+	return ""
+}
+
+// importFolderError logs why the configured import folder cannot be used and
+// returns the codes.FailedPrecondition error for it (ADR-0009 D5; see
+// resolveArtifactFolder).
+func (p *Provider) importFolderError(ctx context.Context, folder, reason string, detail error) error {
+	p.logger.ErrorContext(ctx, "ImagePrepare: the Provider's default folder cannot be used as the import folder; not falling back",
+		"folder", folder, "reason", reason, "error", detail)
+	return status.Errorf(codes.FailedPrecondition,
 		"ImagePrepare: the Provider's default folder %q cannot be used as the image import folder: %s; "+
 			"prepared images are never imported into a fallback folder; fix the Provider's defaults.folder "+
 			"or the vCenter inventory (will retry)", folder, reason)

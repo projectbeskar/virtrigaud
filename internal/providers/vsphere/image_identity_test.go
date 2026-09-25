@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -31,6 +32,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/vmware/govmomi/find"
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/ovf/importer"
 	"github.com/vmware/govmomi/property"
@@ -573,11 +575,24 @@ func TestIdentityPrepare_ImportFolderResolution(t *testing.T) {
 				tc.setup(t, p)
 			}
 			_, err := p.ImagePrepare(context.Background(), identityReq(t, minimalOVAURL(t), testImageUID, testDigestA))
-			requireCode(t, err, codes.Unavailable)
+			// A configuration problem: retried by the manager, but not an
+			// Unavailable that would count toward its circuit breaker.
+			requireCode(t, err, codes.FailedPrecondition)
 			assert.Contains(t, err.Error(), tc.reason)
 			requireNoVMNamed(t, p, artifactNameFor(t, testImageUID, testDigestA))
 		})
 	}
+}
+
+// TestImportFolderLookupReason: only a definitive "missing" or "ambiguous"
+// finder answer is a configuration problem (FailedPrecondition); any other
+// lookup error is a vCenter failure (Unavailable). Neither ever falls back.
+func TestImportFolderLookupReason(t *testing.T) {
+	assert.Equal(t, "it does not exist", importFolderLookupReason(&find.NotFoundError{}))
+	assert.Equal(t, "it does not exist", importFolderLookupReason(fmt.Errorf("x: %w", &find.NotFoundError{})))
+	assert.Equal(t, "it names more than one folder", importFolderLookupReason(&find.MultipleFoundError{}))
+	assert.Empty(t, importFolderLookupReason(soap.WrapVimFault(&types.NotAuthenticated{})))
+	assert.Empty(t, importFolderLookupReason(fmt.Errorf("connection reset by peer")))
 }
 
 // --- OVF shape and failure classification -------------------------------------------
@@ -1039,4 +1054,20 @@ func TestIdentityPrepare_OverTheWire(t *testing.T) {
 
 	_, err = c.PrepareImage(ctx, req(neverOVA, testImageUID, testDigestB))
 	assert.True(t, contracts.IsRetryable(err), "got %v", err)
+	assert.False(t, contracts.IsInProgress(err), "an unreachable source is not an import in progress")
+
+	// Another request's unfinished import of this image: typed InProgress,
+	// which the manager keeps out of its circuit breaker.
+	plantVM(t, p, defaultVMFolder(t, p), artifactNameFor(t, testImageUID, testDigestB),
+		stampConfig(testImageUID, testDigestB, time.Now()), false)
+	_, err = c.PrepareImage(ctx, req(neverOVA, testImageUID, testDigestB))
+	assert.True(t, contracts.IsInProgress(err), "got %v", err)
+
+	// A configured import folder that does not exist: neither a spec problem
+	// of the image nor a conflict, retried by the manager.
+	p.config.DefaultFolder = "no-such-folder"
+	_, err = c.PrepareImage(ctx, req(neverOVA, testOtherUID, testDigestB))
+	require.Error(t, err)
+	assert.False(t, contracts.IsInvalidSpec(err) || contracts.IsConflict(err) || contracts.IsInProgress(err), "got %v", err)
+	assert.Contains(t, err.Error(), "no-such-folder")
 }
