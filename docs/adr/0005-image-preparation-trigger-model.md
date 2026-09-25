@@ -33,6 +33,16 @@ document says `ProviderStatus[provider.Name]` or `PrepareTaskRef`, read
 `ProviderStatus["<namespace>/<name>"]` and its `taskRef`. See
 [`docs/image-preparation.md`](../image-preparation.md#prepare-state-is-per-provider).
 
+**Amendment (ADR-0009, Proposed)**: [ADR-0009](./0009-prepared-image-artifact-identity.md)
+amends decisions 2 and 6.
+- **Decision 2:** import-style prepares also require the provider's
+  `supportsImageArtifactIdentity` capability. A provider that can import but lacks
+  that capability is held instead of called. A provider that cannot import still falls
+  through unchanged.
+- **Decision 6:** `TargetName` is no longer the bare `VMImage` name. The request
+  carries the image identity and a source digest, and the provider derives and stamps
+  the artifact name.
+
 **Author**: William Rizzo ([@wrkode](https://github.com/wrkode))
 
 **Related issues**:

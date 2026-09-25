@@ -14,8 +14,14 @@ listed under *Implementation slices*.
 
 **Related**:
 - [ADR-0005](./0005-image-preparation-trigger-model.md): the lazy, VM-create-driven
-  image-prepare trigger. This ADR leaves the trigger model alone and changes **what a
-  provider names, stamps, and accepts as "already prepared"**.
+  image-prepare trigger. This ADR **amends ADR-0005 decisions 2 and 6**:
+  - Decision 2 (the capability gate) gains a second capability. An import-capable
+    provider without identity support is **held** (D7).
+  - Decision 6 (the request shape) replaces "`TargetName` is the `VMImage` name" with
+    the image identity plus the source digest (D1, D2, D7).
+
+  ADR-0009 also changes **what a provider names, stamps, and accepts as "already
+  prepared"**. ADR-0005 carries a pointer to this amendment.
 - [#154](https://github.com/projectbeskar/virtrigaud/issues/154) /
   [#214](https://github.com/projectbeskar/virtrigaud/issues/214): `ImagePrepare` and
   "Create consumes the prepared location".
@@ -23,8 +29,8 @@ listed under *Implementation slices*.
   `Provider`/`VMClass`/`VMImage` references need a grant. Sharing a `VMImage` or a
   `Provider` is now a supported, documented setup, and that makes the defect below
   reachable across tenants by design.
-- The per-Provider prepare-state PR, in flight on branch
-  `fix/vmimage-prepare-status-by-provider-identity`. It re-keys
+- [#344](https://github.com/projectbeskar/virtrigaud/pull/344): per-Provider prepare
+  state, in flight on branch `fix/vmimage-prepare-status-by-provider-identity`. It re-keys
   `VMImage.status.providerStatus` by `<providerNamespace>/<providerName>`, records
   `providerUID` and a per-entry `taskRef`, and prepares only for VMs that have not
   been created yet. It fixes the **operator-side records**. Its own docs list the
@@ -106,6 +112,14 @@ reference.
   partial file and treats it as prepared.
 - The download temp file is `.virtrigaud-imageprepare-<targetName>.download` (`:297`).
   Two concurrent prepares of the same name share it.
+- For a source that sets both `path` and `url`, the two sides disagree. The manager
+  treats it as an import, because the URL wins (`imageSourceNeedsPrepare`,
+  `virtualmachine_image_prepare.go:365`). The provider converts the **path** instead
+  (`image.go:265`). Once artifacts carry stamps, that would make a stamped copy of any
+  file in the allowed image directories.
+- `finalizeClonedDisk` (`clone.go:303-312`) runs `chown libvirt-qemu:kvm` and
+  `chmod 777` on the prepared image (`image.go:283`, `:317`). That leaves the image,
+  which every VM is later copied from, writable by any user on the host.
 
 **Proxmox** (`internal/providers/proxmox/image.go`, `pveapi/client.go`):
 - The URL-import gate (`imagePrepareImport`, `:334-346`) calls `findTemplateByName`
@@ -128,10 +142,10 @@ reference.
 | C | Two unrelated `ubuntu` VMImages in two namespaces, with two Providers whose accounts reach the same folder, pool, or node. No sharing is involved. | The two images collide. Whichever prepares first wins. |
 | D | Two concurrent libvirt prepares of the same name (two Providers, one host). | They race on one download file and on one convert target. |
 | E | A VMImage is deleted and re-created under the same name with a different source. | The old artifact is reused silently. |
-| F | A VMImage's `spec.source` changes. | Nothing re-prepares. VMs keep using the old artifact. The in-flight PR does not change this. |
+| F | A VMImage's `spec.source` changes. | Nothing re-prepares. VMs keep using the old artifact. #344 does not change this. |
 | G | A same-named artifact already exists: legacy, manual, or placed out of band. | Adopted without question. libvirt may overwrite it on a probe error. |
 
-The in-flight per-Provider PR stops the operator from **trusting another Provider's
+#344 stops the operator from **trusting another Provider's
 record**. It cannot stop a provider from **finding another tenant's artifact under the
 same bare name**. #343 makes A and B reachable by design. C, D, E and G happen without
 any sharing at all.
@@ -189,10 +203,10 @@ Properties the rule guarantees:
    collide with it. This is #339's `_` argument, applied to images.
 4. **Names cannot be predicted in advance.** An attacker who can pick a namespace or
    a VMImage name still cannot produce another image's name. The hash covers a UID
-   that the API server assigns at creation, so a name can neither be planted before
-   the VMImage exists nor reproduced from a guess. It also means a tenant cannot guess
-   another image's prepared artifact name and reference it by `templateName` (see
-   *Security*).
+   that the API server assigns at creation, so a name cannot be planted before the
+   VMImage exists. **This is not an access control:** UIDs and artifact names are
+   visible to anyone who can read the owner's VMImage or the hypervisor. By-reference
+   access stays under the credentials-reach rule until Slice 7.
 5. **Every name has the same shape.** Unlike #339, there is no separate "untruncated"
    form. Every artifact name ends in `SEP` plus 16 hex digits, so there is no
    regular-versus-truncated injectivity case to reason about. The namespace (a DNS
@@ -202,12 +216,25 @@ Properties the rule guarantees:
    …). The prefix starts with a namespace, which begins with an alphanumeric character,
    so the file is never a dotfile.
 
+**Two namespaces can never collide.** The namespace is always whole and always
+followed by `.`, a character a namespace cannot contain. Within one namespace, names
+differ only through `h16`. Safety depends on neither of these facts: it rests on the
+stamp check (D4).
+
 Example: VMImage `team-a/ubuntu-22.04` → vSphere template
 `team-a.ubuntu-22.04_3c9e1f0a7b2d4e61`, libvirt file
 `team-a.ubuntu-22.04_3c9e1f0a7b2d4e61.qcow2`, Proxmox template name
 `team-a.ubuntu-22.04-3c9e1f0a7b2d4e61`.
 
-`target_name` stays on the wire. A new provider uses it only in legacy mode (D7).
+**In identity mode, a libvirt source with both `path` and `url` is `InvalidSpec`.**
+Today the manager treats that combination as an import from the URL, while the provider
+converts the path (`image.go:265`). An identity-mode prepare would therefore stamp a
+copy of any file in the allowed image directories as that image's artifact. An
+identity-mode import takes exactly one input: a `url` (libvirt), an `ovaURL` (vSphere),
+or an `http.url` (Proxmox). A libvirt `path` alone stays a reference-style source and
+is never prepared (`imageSourceNeedsPrepare`).
+
+When `image` is set, the new manager sends an **empty** `target_name` (D7).
 
 ### D2: The source digest is computed by the manager over `spec.source` only, and only its hash reaches the hypervisor
 
@@ -216,16 +243,25 @@ source_digest = "sha256:" + hex(sha256(canonicalJSON({"v": 1, "source": vmImage.
 ```
 
 - **Canonical form:** Go `encoding/json` of the typed `v1beta1.ImageSource` inside the
-  versioned envelope. Struct field order is fixed and map keys (HTTP `headers`) are
-  sorted, so the output is deterministic. Bumping `"v"` renames every artifact.
-  That is a deliberate migration, never an accident. A golden-vector test pins it.
-- **What it covers:** the whole of `spec.source`. That includes every content-defining
-  field (URL/path, expected checksum and algorithm, format), and it also includes
-  location fields (`storagePool`, `storage`, `node`). Over-including only ever costs a
-  re-import. Under-including would reuse wrong content. `spec.prepare`,
-  `spec.metadata`, `spec.distribution` and `spec.consumerNamespaceSelector` are
-  excluded: they do not change artifact content, and a selector edit must not
-  re-import.
+  versioned envelope, with the excluded fields below cleared first. Struct field order
+  is fixed and map keys are sorted, so the output is deterministic. Bumping `"v"`
+  renames every artifact. That is a deliberate migration, never an accident. A
+  golden-vector test pins it.
+- **What it covers:** `spec.source`, meaning every field that defines content
+  (URL/path, expected checksum and algorithm, format) and also the location fields
+  (`storagePool`, `storage`, `node`). Including an extra field only ever costs a
+  re-import. Leaving out a field that matters would reuse the wrong content.
+- **What it excludes:**
+  - The transport-only fields of `source.http`: `timeout`, `headers` and
+    `authentication`. They change how bytes are fetched, not which bytes are expected.
+    Rotating an inline token in a header must not orphan multi-GB artifacts.
+  - `spec.metadata`, `spec.distribution` and `spec.consumerNamespaceSelector`. They do
+    not change artifact content, and editing a selector must not re-import.
+  - `spec.prepare`, for now. No provider reads it today.
+- **Any `spec.prepare` field a provider starts honouring must join the digest in the
+  same change.** For example: `storage.*`, `preferredFormat`, `validateChecksum`,
+  `optimization`. Such fields change the artifact, and leaving them out would reuse an
+  artifact built under the old options.
 - **Why the manager computes it:** it has the typed spec, the rule is
   hypervisor-agnostic, and it lives in one place. The provider checks the syntax
   (`sha256:` plus 64 lowercase hex) and uses it verbatim. The manager is the trust root
@@ -397,7 +433,7 @@ See Alternative 5.
     re-list and **converge on the lowest VMID**. The loser deletes only the template it
     just created (it has no clones yet).
 
-The manager-side single-flight from the in-flight PR removes duplicate work within one
+The manager-side single-flight from #344 removes duplicate work within one
 manager for one `(image, Provider)`. The provider-side rules above handle the rest:
 several Providers, several provider pods, and crashes.
 
@@ -441,7 +477,7 @@ create time is Slice 7.
 | Manager | Provider | Behaviour |
 |---|---|---|
 | New | New | Identity-safe (D1-D6) |
-| **New** | **Old** (the normal window: providers roll last, see `docs/upgrading.md`) | **Fails closed.** Import-style prepares need `Provider.status.reportedCapabilities.supportsImageArtifactIdentity`. Without it, no RPC is sent. The VMImage entry and the VM get `Ready=False` with reason `ProviderLacksArtifactIdentity` ("upgrade the provider image"). A response with no `artifact`, or one whose `image.uid`/`source_digest` differ from the request, is **not recorded** (defence against a stale capability, for example a provider image that was rolled back). VMs that already exist are unaffected, because prepare runs only before a create (in-flight PR) |
+| **New** | **Old** (the normal window: providers roll last, see `docs/upgrading.md`) | **Fails closed.** Import-style prepares need `Provider.status.reportedCapabilities.supportsImageArtifactIdentity`. Without it, no RPC is sent. The VMImage entry and the VM get `Ready=False` with reason `ProviderLacksArtifactIdentity` ("upgrade the provider image"). A response with no `artifact`, or one whose `image.uid`/`source_digest` differ from the request, is **not recorded** (defence against a stale capability, for example a provider image that was rolled back). VMs that already exist are unaffected, because prepare runs only before a create (#344) |
 | Old | New | The request carries no `image.uid`, so the provider runs **legacy mode**: the bare `target_name` and the pre-ADR reuse behaviour, with a `WARN` log and the metric `outcome="legacy"`. Legacy mode cannot touch new-scheme artifacts, because the names are disjoint (D1.3). Removal is Q3 |
 | Old | Old | Unchanged (the known limitation) |
 
@@ -454,10 +490,10 @@ succeeded is never, on its own, proof that the artifact exists.
 
 - `ProviderImageStatus.sourceDigest` records the digest the entry was prepared for. It
   is written from the `artifact` echo.
-- `ProviderStatus` entries also require the in-flight PR's `providerUID`. A VM is
+- `ProviderStatus` entries also require #344's `providerUID`. A VM is
   created from an entry only when **all** of these hold:
   - the entry is `available`;
-  - its `providerUID` matches the Provider's current UID (in-flight PR);
+  - its `providerUID` matches the Provider's current UID (#344);
   - its `sourceDigest` equals the digest of the **current** `spec.source`.
 - Any other entry makes the controller issue `ImagePrepare` again before the create.
   This covers:
@@ -467,7 +503,7 @@ succeeded is never, on its own, proof that the artifact exists.
 - `Provider.status.reportedCapabilities.supportsImageArtifactIdentity` is surfaced
   from `GetCapabilities` (#176 machinery).
 - The manager's CRD readiness check (`internal/controller/vmcrdfeatures.go`) requires
-  both new fields, just as the in-flight PR requires `providerUID`/`taskRef`. An older
+  both new fields, just as #344 requires `providerUID`/`taskRef`. An older
   CRD would prune them, and then nothing would ever be trusted. The release already
   requires applying CRDs first.
 - `spec.prepare.force` stays unimplemented. If it is ever implemented it must produce a
@@ -486,7 +522,7 @@ succeeded is never, on its own, proof that the artifact exists.
   - vSphere full clone: default `DiskMoveType`, `server.go:2470`;
   - libvirt copy: `CopyImageToVolume`, `provider_virsh.go:450`;
   - Proxmox: `full=1`, `server.go:252`.
-  Running VMs never prepare (in-flight PR).
+  Running VMs never prepare (#344).
 - **Existing VMImages:**
   - After the upgrade, the first create for a given `(image, location)` finds an entry
     with no `sourceDigest` (D8). That triggers **one** re-prepare under the new name,
@@ -522,7 +558,7 @@ a prepare (`imageSourceNeedsPrepare`).
   - `ArtifactConflict` (D4). A long requeue of 5 minutes, because an operator has to
     act.
   - `ProviderLacksArtifactIdentity` (D7).
-- **The VM** reports `Ready=False` / `WaitingForDependencies`, as in the in-flight PR's
+- **The VM** reports `Ready=False` / `WaitingForDependencies`, as in #344's
   holds.
 - **New counter:** `virtrigaud_image_prepare_artifact_total{provider_type, outcome}`,
   with `outcome` one of `created`, `reused`, `in_progress`, `conflict`,
@@ -694,7 +730,7 @@ slice.
   `max(2 × spec.prepare.timeout, 2h)`, with a 1h floor for temp-file sweeps. Is that
   acceptable, or should it be a provider env knob?
 - **Q5: if the release date cannot absorb Slices 1-5.** The fallback is to ship the
-  in-flight PR's "known limitation" text plus a manager-side refusal of import-style
+  #344's "known limitation" text plus a manager-side refusal of import-style
   prepares through any Provider whose `consumerNamespaceSelector` is set. That covers
   scenarios A and B through a *shared Provider* only, not C, D, E or G. Recommendation:
   do not ship on the fallback.
@@ -710,7 +746,7 @@ slice.
 |---|---|---|
 | 0 | This ADR (Proposed → Accepted) | yes |
 | 1 | **Proto, contracts and mock.** D7 fields and `PreparedArtifact`; `contracts.ImagePrepareRequest`/`Response`; manager gRPC client mapping; capability plumbing into `Provider.status.reportedCapabilities`; the mock implements D1-D4 in memory; SDK types if they are exposed. Run `proto-update` and `crd-update` | **yes** |
-| 2 | **Manager.** D2 digest; send `image`/`source_digest`/`provider`; capability gate and echo check; `sourceDigest` status field and readiness check (D8); Conflict and lack-of-identity holds with reasons, events and metric (D11); the async confirm call. **Lands after the in-flight per-Provider PR**, whose keying, `providerUID` and create-only prepare it extends | **yes** |
+| 2 | **Manager.** D2 digest; send `image`/`source_digest`/`provider`; capability gate and echo check; `sourceDigest` status field and readiness check (D8); Conflict and lack-of-identity holds with reasons, events and metric (D11); the async confirm call. **Lands after #344**, whose keying, `providerUID` and create-only prepare it extends | **yes** |
 | 3 | **vSphere.** D1 naming; stamp in the import spec; folder-scoped probe; deterministic folder resolution; `DuplicateName` handling; absolute inventory path as `prepared_image_id`; D4 rule including in-progress and abandoned cases; Create and Clone clear `virtrigaud.image.*`; legacy mode | **yes** |
 | 4 | **libvirt.** D1 naming; sidecar; `mktemp` staging; `ln` publishing; a probe that fails closed (replaces `targetImageExists`); convert never touches the final name; temp sweep; legacy mode; capability | **yes** |
 | 5 | **Proxmox guard** (D10): remove the bare-name gate, `source.http` import fails with `InvalidSpec`, no identity capability | **yes** |
