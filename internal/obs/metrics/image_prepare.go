@@ -38,3 +38,45 @@ var imagePrepareLegacyRequestsTotal = registerer.NewCounterVec(
 func RecordImagePrepareLegacyRequest(providerType string) {
 	imagePrepareLegacyRequestsTotal.WithLabelValues(providerType).Inc()
 }
+
+// Outcomes of virtrigaud_image_prepare_artifact_total (ADR-0009 D11): what an
+// identity ImagePrepare call found or did at the artifact name the provider
+// derived, as the manager observes it.
+const (
+	// ImageArtifactOutcomeCreated: the provider started or completed a new
+	// import (the stamp echo says the artifact was not reused).
+	ImageArtifactOutcomeCreated = "created"
+	// ImageArtifactOutcomeReused: an existing artifact with a matching stamp
+	// was reused.
+	ImageArtifactOutcomeReused = "reused"
+	// ImageArtifactOutcomeInProgress: the artifact is still being prepared for
+	// the requesting VMImage by another request (a retryable answer).
+	ImageArtifactOutcomeInProgress = "in_progress"
+	// ImageArtifactOutcomeConflict: an artifact at the derived name was not
+	// prepared for the requesting VMImage; the provider refused to use or
+	// replace it.
+	ImageArtifactOutcomeConflict = "conflict"
+	// ImageArtifactOutcomeAbandonedCleanup: the provider removed an abandoned
+	// artifact of the requesting VMImage before importing it again. Reserved:
+	// the ImagePrepare response does not report it, so the manager never
+	// records it (a re-import after a cleanup is counted as created).
+	ImageArtifactOutcomeAbandonedCleanup = "abandoned_cleanup"
+)
+
+// imagePrepareArtifactTotal counts the outcome of the identity ImagePrepare
+// calls the MANAGER issues (ADR-0009 D11), by provider type. A rising
+// "conflict" count means an artifact that was not prepared for the requesting
+// VMImage sits at its derived name, and an operator must act.
+var imagePrepareArtifactTotal = registerer.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "virtrigaud_image_prepare_artifact_total",
+		Help: "Total identity ImagePrepare outcomes observed by the manager (created, reused, in_progress, conflict), by provider type (ADR-0009).",
+	},
+	[]string{"provider_type", "outcome"},
+)
+
+// RecordImagePrepareArtifactOutcome counts one identity ImagePrepare outcome
+// (an ImageArtifactOutcome* value) through a Provider of providerType.
+func RecordImagePrepareArtifactOutcome(providerType, outcome string) {
+	imagePrepareArtifactTotal.WithLabelValues(providerType, outcome).Inc()
+}
