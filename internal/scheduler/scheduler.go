@@ -132,9 +132,11 @@ type PlacedVM struct {
 	// Name is the VM's name (for the decision trace only).
 	Name string
 	// UID is the VM's stable identity (the caller uses the Kubernetes UID). The
-	// scheduler counts each (UID, HostID) pair once, so a VM listed both from
-	// its durable record and from an in-flight assumption, or with the same
-	// host in placement.host and placement.pendingHost, is not counted twice.
+	// scheduler counts each (UID, HostID) pair once, at the larger of the
+	// listed sizes per resource, so a VM listed both from its durable record
+	// and from an in-flight assumption (a create, or an admitted resize not yet
+	// applied), or with the same host in placement.host and
+	// placement.pendingHost, is not counted twice.
 	// It also ignores every entry whose UID equals Request.VMUID, so a VM never
 	// competes with itself. An empty UID is never de-duplicated.
 	UID string

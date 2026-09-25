@@ -131,6 +131,29 @@ func TestAssumptionExpiresAfterTTL(t *testing.T) {
 	assert.Len(t, c.List("p1", nil), 1)
 }
 
+func TestTouchRestartsTheTTLAndAssumeCopiesLabels(t *testing.T) {
+	clk := newClock()
+	c := New(2*time.Minute, clk.now)
+	labels := map[string]string{"app": "db"}
+	a := assumption("a", "h1")
+	a.Labels = labels
+	a.Resize = true
+	c.Assume("p1", a)
+	labels["app"] = "mutated"
+
+	clk.advance(90 * time.Second)
+	c.Touch("a")
+	c.Touch("no-such-vm")
+	clk.advance(90 * time.Second)
+	got := c.List("p1", nil)
+	require.Len(t, got, 1, "touched 90s ago: still live")
+	assert.True(t, got[0].Resize)
+	assert.Equal(t, "db", got[0].Labels["app"], "Assume keeps its own copy of the labels")
+
+	clk.advance(2 * time.Minute)
+	assert.Empty(t, c.List("p1", nil))
+}
+
 func TestLockIsPerProvider(t *testing.T) {
 	c := New(time.Minute, nil)
 	unlock1 := c.Lock("p1")

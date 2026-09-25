@@ -519,6 +519,11 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 
 		if !done {
 			logger.Info("Reconfigure task still in progress", "taskRef", vm.Status.ReconfigureTaskRef)
+			// An admitted clustered resize stays assumed until the task ends
+			// and status.currentResources records the new size.
+			if c := r.placements.Load(); c != nil {
+				c.Touch(vmSchedulingUID(vm))
+			}
 			k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonTaskInProgress, "Reconfiguration in progress")
 			r.updateStatus(ctx, vm)
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
@@ -673,6 +678,15 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 			"desiredCPU", desiredCPU,
 			"currentMemoryMiB", r.getCurrentMemoryMiB(vm),
 			"desiredMemoryMiB", desiredMemoryMiB)
+		// A clustered VM's resize-up is admitted against its host's free
+		// capacity first (ADR-0007 Addendum A, scheduler-accuracy amendment);
+		// a shrink, and every single-host / thin-client VM, goes straight on.
+		if ref.Routed() {
+			res, admitted, err := r.admitClusteredResize(ctx, vm, provider, vmClass, ref.HostID)
+			if err != nil || !admitted {
+				return res, err
+			}
+		}
 		return r.reconfigureVM(ctx, vm, providerInstance, ref, provider, vmClass, vmImage, networks)
 	}
 

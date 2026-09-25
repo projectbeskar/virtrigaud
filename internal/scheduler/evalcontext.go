@@ -77,36 +77,7 @@ func newEvalContext(req Request) (*evalContext, error) {
 		return nil, err
 	}
 
-	placedByHost := make(map[string][]PlacedVM, len(req.PlacedVMs))
-	committedByHost := make(map[string]committed, len(req.PlacedVMs))
-	seen := make(map[placedKey]struct{}, len(req.PlacedVMs))
-	for _, p := range req.PlacedVMs {
-		if p.HostID == "" {
-			continue
-		}
-		if p.UID != "" {
-			// The VM being scheduled never competes with itself (its own
-			// binding, pending host or an earlier assumption of its own).
-			if p.UID == req.VMUID {
-				continue
-			}
-			// A VM listed twice for one host (its durable record and an
-			// assumption not yet cleared, or host == pendingHost) counts once.
-			k := placedKey{uid: p.UID, host: p.HostID}
-			if _, dup := seen[k]; dup {
-				continue
-			}
-			seen[k] = struct{}{}
-		}
-		c := committedByHost[p.HostID]
-		c.cpu += nonNegative(int64(p.Resources.CPU))
-		c.memMiB += nonNegative(p.Resources.MemoryMiB)
-		committedByHost[p.HostID] = c
-		if !p.CapacityOnly {
-			placedByHost[p.HostID] = append(placedByHost[p.HostID], p)
-		}
-	}
-
+	placedByHost, committedByHost := indexPlaced(req.PlacedVMs, req.VMUID)
 	ec := &evalContext{
 		req:             req,
 		cpuRatio:        cpuRatio,
@@ -122,6 +93,46 @@ func newEvalContext(req Request) (*evalContext, error) {
 		ec.resources = req.Policy.Spec.ResourceConstraints
 	}
 	return ec, nil
+}
+
+// indexPlaced merges placed into one entry per (UID, host) — keeping, per
+// resource, the LARGER size, so a VM listed both from its durable record and
+// from an assumption (a create not yet visible, or an admitted resize not yet
+// applied) counts once and at its larger size — and indexes the result by host:
+// the affinity-visible entries and the committed sum. Entries of self (a
+// non-empty UID equal to it) are skipped: a VM never competes with itself.
+// Entries with an empty UID are kept as they are, never merged.
+func indexPlaced(placed []PlacedVM, self string) (map[string][]PlacedVM, map[string]committed) {
+	merged := make([]PlacedVM, 0, len(placed))
+	at := make(map[placedKey]int, len(placed))
+	for _, p := range placed {
+		if p.HostID == "" || (p.UID != "" && p.UID == self) {
+			continue
+		}
+		if p.UID != "" {
+			k := placedKey{uid: p.UID, host: p.HostID}
+			if i, dup := at[k]; dup {
+				merged[i].Resources.CPU = max(merged[i].Resources.CPU, p.Resources.CPU)
+				merged[i].Resources.MemoryMiB = max(merged[i].Resources.MemoryMiB, p.Resources.MemoryMiB)
+				continue
+			}
+			at[k] = len(merged)
+		}
+		merged = append(merged, p)
+	}
+
+	placedByHost := make(map[string][]PlacedVM, len(merged))
+	committedByHost := make(map[string]committed, len(merged))
+	for _, p := range merged {
+		c := committedByHost[p.HostID]
+		c.cpu += nonNegative(int64(p.Resources.CPU))
+		c.memMiB += nonNegative(p.Resources.MemoryMiB)
+		committedByHost[p.HostID] = c
+		if !p.CapacityOnly {
+			placedByHost[p.HostID] = append(placedByHost[p.HostID], p)
+		}
+	}
+	return placedByHost, committedByHost
 }
 
 // effectiveCapacity returns the host's schedulable CPU and memory AFTER the pool's

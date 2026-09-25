@@ -92,6 +92,12 @@ const (
 	// admin must fix (an unparseable overcommit ratio or affinity selector) —
 	// distinct from an ordinary no-fit.
 	ReasonPlacementError = "PlacementError"
+	// ReasonInsufficientHostCapacity is Reconfiguring=False on a VM of a
+	// clustered Provider: a resize-up exceeds the free capacity of the VM's
+	// host (ADR-0007 Addendum A, scheduler-accuracy amendment). The VM keeps
+	// its current size and the resize is retried with a backoff; a shrink is
+	// never refused.
+	ReasonInsufficientHostCapacity = "InsufficientHostCapacity"
 )
 
 // ConditionPlaced is the single positive placement condition of a VirtualMachine

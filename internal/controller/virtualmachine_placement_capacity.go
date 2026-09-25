@@ -19,7 +19,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"maps"
 	"math/rand/v2"
 	"slices"
 	"sync"
@@ -127,7 +126,7 @@ func (r *VirtualMachineReconciler) scheduleAndAssume(
 		Namespace: vm.Namespace,
 		Name:      vm.Name,
 		HostID:    result.HostID,
-		Labels:    maps.Clone(vm.Labels),
+		Labels:    vm.Labels, // Assume keeps its own copy
 		Resources: req.Resources,
 	})
 	return result, nil
@@ -273,9 +272,37 @@ type committedSnapshot struct {
 	// per (VM, host), the scheduled VM excluded.
 	placed []scheduler.PlacedVM
 	// recorded maps the scheduling UID of every VirtualMachine of the Provider
-	// (the scheduled one included) to the hosts its durable record names
-	// (placement.host / placement.pendingHost; empty when it names none).
-	recorded map[string][]string
+	// (the scheduled one included) to what its durable record says; it settles
+	// assumptions (settled).
+	recorded map[string]recordedVM
+}
+
+// recordedVM is what a VM's durable record says, as far as assumptions care.
+type recordedVM struct {
+	// hosts are the hosts its placement names (host / pendingHost).
+	hosts []string
+	// size is its recorded size (status.currentResources) and hasSize whether
+	// both resources are recorded.
+	size    scheduler.ResourceRequest
+	hasSize bool
+}
+
+// settled reports whether assumption a is superseded by this snapshot: its VM
+// is gone (or no longer holds a placement on this Provider); for a create, the
+// VM's record names the assumed host; for an admitted resize, the VM left the
+// host or its recorded size reached the admitted one. A record naming another
+// host does not settle a create's assumption (e.g. a pendingHost the VM has
+// since released).
+func (s committedSnapshot) settled(a assume.Assumption) bool {
+	rec, present := s.recorded[a.UID]
+	if !present {
+		return true
+	}
+	if a.Resize {
+		return !slices.Contains(rec.hosts, a.HostID) ||
+			(rec.hasSize && rec.size.CPU >= a.Resources.CPU && rec.size.MemoryMiB >= a.Resources.MemoryMiB)
+	}
+	return slices.Contains(rec.hosts, a.HostID)
 }
 
 // committedPlacements lists every VirtualMachine, in every namespace, whose
@@ -301,7 +328,7 @@ func (r *VirtualMachineReconciler) committedPlacements(
 	if err != nil {
 		return committedSnapshot{}, err
 	}
-	snap := committedSnapshot{recorded: map[string][]string{}}
+	snap := committedSnapshot{recorded: map[string]recordedVM{}}
 	selfUID := vmSchedulingUID(self)
 	classes := classMemo{}
 	for i := range vms {
@@ -315,7 +342,7 @@ func (r *VirtualMachineReconciler) committedPlacements(
 		}
 		uid := vmSchedulingUID(other)
 		hosts := placementHosts(other)
-		snap.recorded[uid] = hosts
+		snap.recorded[uid] = recordVM(other, hosts)
 		if len(hosts) == 0 || uid == selfUID {
 			continue
 		}
@@ -441,17 +468,33 @@ func (r *VirtualMachineReconciler) placementRequest(
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
 	req *scheduler.Request,
 ) error {
-	snap, err := r.committedPlacements(ctx, provider, vm)
+	placed, err := r.placedWithAssumptions(ctx, cache, providerKey, provider, vm)
 	if err != nil {
 		return err
 	}
-	assumed := cache.List(providerKey, func(a assume.Assumption) bool {
-		hosts, present := snap.recorded[a.UID]
-		return !present || slices.Contains(hosts, a.HostID)
-	})
-	req.PlacedVMs = snap.placed
-	for _, a := range assumed {
-		req.PlacedVMs = append(req.PlacedVMs, scheduler.PlacedVM{
+	req.PlacedVMs = placed
+	req.VMUID = vmSchedulingUID(vm)
+	return nil
+}
+
+// placedWithAssumptions returns what is committed on provider's hosts, as seen
+// from vm: the placements in the informer snapshot plus the live assumptions
+// (create and resize), after settling those the snapshot supersedes
+// (committedSnapshot.settled). Call it with provider's assume lock held.
+func (r *VirtualMachineReconciler) placedWithAssumptions(
+	ctx context.Context,
+	cache *assume.Cache,
+	providerKey string,
+	provider types.NamespacedName,
+	vm *infravirtrigaudiov1beta1.VirtualMachine,
+) ([]scheduler.PlacedVM, error) {
+	snap, err := r.committedPlacements(ctx, provider, vm)
+	if err != nil {
+		return nil, err
+	}
+	placed := snap.placed
+	for _, a := range cache.List(providerKey, snap.settled) {
+		placed = append(placed, scheduler.PlacedVM{
 			Name:         a.Name,
 			UID:          a.UID,
 			HostID:       a.HostID,
@@ -460,8 +503,18 @@ func (r *VirtualMachineReconciler) placementRequest(
 			CapacityOnly: a.Namespace != vm.Namespace,
 		})
 	}
-	req.VMUID = vmSchedulingUID(vm)
-	return nil
+	return placed, nil
+}
+
+// recordVM is what vm's durable record says for settling assumptions: the
+// hosts its placement names and its recorded size.
+func recordVM(vm *infravirtrigaudiov1beta1.VirtualMachine, hosts []string) recordedVM {
+	rec := recordedVM{hosts: hosts}
+	if cur := vm.Status.CurrentResources; cur != nil && cur.CPU != nil && cur.MemoryMiB != nil {
+		rec.size = scheduler.ResourceRequest{CPU: *cur.CPU, MemoryMiB: *cur.MemoryMiB}
+		rec.hasSize = true
+	}
+	return rec
 }
 
 // unschedulableBackoff paces the re-scheduling of VMs no host can take: the

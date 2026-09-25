@@ -58,6 +58,7 @@ package assume
 
 import (
 	"context"
+	"maps"
 	"sync"
 	"time"
 
@@ -80,6 +81,11 @@ type Assumption struct {
 	Labels map[string]string
 	// Resources is what the VM will hold on HostID.
 	Resources scheduler.ResourceRequest
+	// Resize marks an admitted resize of a VM already on HostID (its record
+	// names the host from the start); Resources is its new size. The
+	// controller settles it once the VM's recorded size reaches Resources, not
+	// when its record names the host.
+	Resize bool
 }
 
 // entry is an Assumption with its Provider and expiry.
@@ -174,7 +180,19 @@ func (c *Cache) LockWithin(ctx context.Context, provider string, wait time.Durat
 func (c *Cache) Assume(provider string, a Assumption) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	a.Labels = maps.Clone(a.Labels) // the caller's map may be shared with the informer cache
 	c.entries[a.UID] = &entry{Assumption: a, provider: provider, expires: c.now().Add(c.ttl)}
+}
+
+// Touch restarts the TTL of the VM's assumption, if any: a caller whose
+// operation is still in flight (an asynchronous resize task) keeps it alive
+// without changing it.
+func (c *Cache) Touch(uid string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if e, ok := c.entries[uid]; ok {
+		e.expires = c.now().Add(c.ttl)
+	}
 }
 
 // Forget drops the VM's assumption, if any, whatever its Provider.
