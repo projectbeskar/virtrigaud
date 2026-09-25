@@ -78,7 +78,19 @@ type sourceDigestEnvelope struct {
 //   - source.http.authentication: the credential references of the download;
 //   - source.registry.pullSecretRef: the credential reference of the pull;
 //   - source.vsphere.providerRef: which Provider imports the image (routing
-//     and credentials).
+//     and credentials);
+//   - the userinfo ("user:password@") of every URL field — source.http.url,
+//     source.libvirt.url and source.vsphere.ovaURL: it is a credential, so
+//     hashing it would orphan artifacts on every rotation and put a hash of
+//     guessable credential material into stamps on the hypervisor. It must be
+//     percent-encoded per RFC 3986 to be recognized ('/', '?' and '#' end the
+//     authority).
+//
+// A URL's scheme, host, path, query and fragment are kept: a query string may
+// select the content. A presigned or token-bearing query string is therefore
+// part of the digest: rotating it gets a new artifact (one re-import). Put
+// credentials in source.http.authentication (a Secret reference) or in
+// headers instead of the URL.
 //
 // Nothing outside spec.source is covered:
 // not spec.metadata, spec.distribution or spec.consumerNamespaceSelector, and
@@ -115,6 +127,7 @@ func canonicalSource(src infravirtrigaudiov1beta1.ImageSource) ([]byte, error) {
 	// SourceDigest for the list and the reasons.
 	source := src.DeepCopy()
 	if source.HTTP != nil {
+		source.HTTP.URL = stripURLUserinfo(source.HTTP.URL)
 		source.HTTP.Timeout = nil
 		source.HTTP.Headers = nil
 		source.HTTP.Authentication = nil
@@ -123,13 +136,40 @@ func canonicalSource(src infravirtrigaudiov1beta1.ImageSource) ([]byte, error) {
 		source.Registry.PullSecretRef = nil
 	}
 	if source.VSphere != nil {
+		source.VSphere.OVAURL = stripURLUserinfo(source.VSphere.OVAURL)
 		source.VSphere.ProviderRef = nil
+	}
+	if source.Libvirt != nil {
+		source.Libvirt.URL = stripURLUserinfo(source.Libvirt.URL)
 	}
 	typed, err := json.Marshal(sourceDigestEnvelope{Version: SourceDigestVersion, Source: *source})
 	if err != nil {
 		return nil, fmt.Errorf("encode VMImage spec.source for its digest: %w", err)
 	}
 	return canonicalJSON(typed)
+}
+
+// stripURLUserinfo returns raw without the userinfo of its authority: for
+// "scheme://user:password@host/path?query#fragment" it returns
+// "scheme://host/path?query#fragment". The authority is what follows "://"
+// up to the first '/', '?' or '#', and the userinfo is everything in it up to
+// its LAST '@' (as net/url splits it). A string without "://" or without an
+// '@' in its authority is returned unchanged. It never fails, so an
+// unparseable URL still has a digest.
+func stripURLUserinfo(raw string) string {
+	scheme, rest, ok := strings.Cut(raw, "://")
+	if !ok {
+		return raw
+	}
+	authority, tail := rest, ""
+	if end := strings.IndexAny(rest, "/?#"); end >= 0 {
+		authority, tail = rest[:end], rest[end:]
+	}
+	at := strings.LastIndex(authority, "@")
+	if at < 0 {
+		return raw
+	}
+	return scheme + "://" + authority[at+1:] + tail
 }
 
 // canonicalJSON re-encodes the JSON document raw with the keys of every

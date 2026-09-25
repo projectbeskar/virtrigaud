@@ -19,6 +19,7 @@ package imageartifact
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -72,6 +73,16 @@ func goldenRegistrySource() infravirtrigaudiov1beta1.ImageSource {
 		Image:         "registry.example.com/images/ubuntu:22.04",
 		PullSecretRef: &infravirtrigaudiov1beta1.LocalObjectReference{Name: "pull-a"},
 		Format:        infravirtrigaudiov1beta1.ImageFormatQCOW2,
+	}}
+}
+
+// goldenHTTPUserinfoSource is the source of the fifth golden vector: an HTTP
+// URL with userinfo (excluded) and a query string and fragment (kept).
+func goldenHTTPUserinfoSource() infravirtrigaudiov1beta1.ImageSource {
+	return infravirtrigaudiov1beta1.ImageSource{HTTP: &infravirtrigaudiov1beta1.HTTPImageSource{
+		URL:          "https://reader:s3cr%40t@images.example.com/disk.qcow2?variant=minimal#part",
+		Checksum:     "c0ffee",
+		ChecksumType: infravirtrigaudiov1beta1.ChecksumTypeSHA256,
 	}}
 }
 
@@ -131,6 +142,12 @@ func TestSourceDigestGolden(t *testing.T) {
 			src:           goldenRegistrySource(),
 			wantCanonical: `{"source":{"registry":{"format":"qcow2","image":"registry.example.com/images/ubuntu:22.04"}},"v":1}`,
 			wantDigest:    "sha256:8f3e042400bee4a5b656cd08f558a12438e5fbbf3c89d5ab685b97b29512c30d",
+		},
+		"http URL with userinfo (userinfo excluded, query and fragment kept)": {
+			src: goldenHTTPUserinfoSource(),
+			wantCanonical: `{"source":{"http":{"checksum":"c0ffee","checksumType":"sha256",` +
+				`"url":"https://images.example.com/disk.qcow2?variant=minimal#part"}},"v":1}`,
+			wantDigest: "sha256:0af7362be25d9a3b095b8ad2e181373382c41fd427752a3e338982d55fa76147",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -211,6 +228,78 @@ func TestSourceDigestExcludesRoutingAndCredentialRefs(t *testing.T) {
 			tc.mutate(&src)
 			assert.Equal(t, before, mustDigest(t, src))
 		})
+	}
+}
+
+// TestSourceDigestExcludesURLUserinfo verifies the userinfo of every URL
+// field (http.url, libvirt.url, vsphere.ovaURL) never changes the digest —
+// adding, rotating or removing a password is not a new source — while the
+// host, path and query still do, and the input keeps its URL.
+func TestSourceDigestExcludesURLUserinfo(t *testing.T) {
+	withURL := map[string]func(string) infravirtrigaudiov1beta1.ImageSource{
+		"http.url": func(u string) infravirtrigaudiov1beta1.ImageSource {
+			return infravirtrigaudiov1beta1.ImageSource{HTTP: &infravirtrigaudiov1beta1.HTTPImageSource{URL: u}}
+		},
+		"libvirt.url": func(u string) infravirtrigaudiov1beta1.ImageSource {
+			return infravirtrigaudiov1beta1.ImageSource{Libvirt: &infravirtrigaudiov1beta1.LibvirtImageSource{URL: u}}
+		},
+		"vsphere.ovaURL": func(u string) infravirtrigaudiov1beta1.ImageSource {
+			return infravirtrigaudiov1beta1.ImageSource{VSphere: &infravirtrigaudiov1beta1.VSphereImageSource{OVAURL: u}}
+		},
+	}
+	const plain = "https://images.example.com/a/disk.ova?sig=1"
+	for field, build := range withURL {
+		t.Run(field, func(t *testing.T) {
+			base := mustDigest(t, build(plain))
+			for _, u := range []string{
+				"https://user@images.example.com/a/disk.ova?sig=1",
+				"https://user:pw1@images.example.com/a/disk.ova?sig=1",
+				"https://user:pw2@images.example.com/a/disk.ova?sig=1",
+				"https://other:p%40ss%3Aword@images.example.com/a/disk.ova?sig=1",
+				"https://user:p@ss@images.example.com/a/disk.ova?sig=1", // unescaped '@': the last one ends userinfo
+			} {
+				src := build(u)
+				assert.Equal(t, base, mustDigest(t, src), u)
+				assert.Equal(t, build(u), src, "SourceDigest must not modify its input")
+			}
+			for _, u := range []string{
+				"https://user:pw1@mirror.example.com/a/disk.ova?sig=1",
+				"https://user:pw1@images.example.com/b/disk.ova?sig=1",
+				"https://user:pw1@images.example.com/a/disk.ova?sig=2",
+			} {
+				assert.NotEqual(t, base, mustDigest(t, build(u)), u)
+			}
+		})
+	}
+}
+
+// TestStripURLUserinfo pins the userinfo stripping, and matches net/url on
+// well-formed URLs.
+func TestStripURLUserinfo(t *testing.T) {
+	for in, want := range map[string]string{
+		"https://images.example.com/x":                   "https://images.example.com/x",
+		"https://u:p@images.example.com/x":               "https://images.example.com/x",
+		"https://u@images.example.com":                   "https://images.example.com",
+		"https://u:p@images.example.com:8443/x?q=1#f":    "https://images.example.com:8443/x?q=1#f",
+		"ftp://anonymous:me%40x@ftp.example.com/i.qcow2": "ftp://ftp.example.com/i.qcow2",
+		"https://u:p@@host/x":                            "https://host/x",
+		"https://host/path@not-userinfo":                 "https://host/path@not-userinfo",
+		"https://host?q=a@b":                             "https://host?q=a@b",
+		"https://host#frag@x":                            "https://host#frag@x",
+		"not a url @ all":                                "not a url @ all",
+		"":                                               "",
+	} {
+		assert.Equal(t, want, stripURLUserinfo(in), in)
+	}
+	for _, in := range []string{
+		"https://u:p@images.example.com:8443/x?q=1#f",
+		"ftp://anonymous:me%40x@ftp.example.com/i.qcow2",
+		"https://images.example.com/x",
+	} {
+		u, err := url.Parse(in)
+		require.NoError(t, err)
+		u.User = nil
+		assert.Equal(t, u.String(), stripURLUserinfo(in), in)
 	}
 }
 

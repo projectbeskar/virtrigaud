@@ -135,9 +135,15 @@ paths, the expected checksum and algorithm, formats, and the location fields (li
 `storagePool`, Proxmox `storage` and `node`). It excludes the fields that only change how
 the bytes are fetched, or by whom: `http.timeout`, `http.headers`,
 `http.authentication`, `registry.pullSecretRef` (a credential reference) and
-`vsphere.providerRef` (which Provider imports the image). Changing an excluded field
+`vsphere.providerRef` (which Provider imports the image), and the `user:password@` part
+of every URL (`http.url`, `libvirt.url`, `vsphere.ovaURL`). Changing an excluded field
 never causes a re-import. `spec.metadata`, `spec.distribution`, `spec.prepare` and
 `spec.consumerNamespaceSelector` are outside the digest.
+
+A URL's query string is part of the digest, because it may select the content. A
+presigned or token-bearing query string therefore gets a new artifact (one re-import)
+each time it is rotated. Keep credentials out of URLs: use `http.authentication` (a Secret
+reference) instead.
 
 ## `spec.prepare.onMissing`
 
