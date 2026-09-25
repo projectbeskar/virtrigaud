@@ -259,6 +259,32 @@ ADR-0009 closes cross-tenant prepared-image poisoning and disclosure: artifacts 
 ### Why
 Users copy these examples first. Ten of them failed on `kubectl apply` because of a YAML 1.1 quirk, and many more had silently drifted from the API, so users either hit errors or got objects missing the settings the example promised. The envtest check keeps them in sync with the CRDs from now on.
 
+## [2026-09-25 07:10] - Fix VMSnapshot reported Ready without any snapshot being taken after a provider lookup failure
+**Author:** @wrkode (William Rizzo)
+
+> **Operator note.** Managers before this fix could mark a `VMSnapshot` `Ready` (`Ready=True`, `SnapshotReady` event) without ever calling the provider, if the VM's `Provider` could not be found or no client could be resolved for it when the snapshot was first reconciled. Such snapshots do not exist on the hypervisor. They have `status.phase: Ready` but no `status.creationTime` (and normally no `status.snapshotID`); list them with `kubectl get vmsnapshots -A -o json | jq -r '.items[] | select(.status.phase=="Ready" and .status.creationTime==null) | "\(.metadata.namespace)/\(.metadata.name)"'`, then delete and re-create them. This fix does not rewrite them.
+
+### Added
+- `internal/controller/vmsnapshot_controller.go`: unexported `providerInstanceFn` test hook on `VMSnapshotReconciler`, the same pattern as `VMMigrationReconciler` (production leaves it nil).
+- `internal/controller/vmsnapshot_create_phase_test.go`: regression tests through the full `Reconcile`. A missing Provider and then an unresolvable provider client each survive repeated reconciles in the initial phase, never `Ready`, with no `SnapshotCreate` and no `SnapshotReady` event. Once the provider can be reached the create is issued exactly once, and only then is the snapshot `Ready`. The binding refusal and capability gate never report `Ready` either. A legacy "Creating, nothing recorded" snapshot is retried rather than reported `Ready`, and a recorded synchronous create is still `Ready`. A `Ready` snapshot with `maxAge` retention and no creation time does not panic and is not expired.
+
+### Changed
+- `docs/upgrading.md`: post-upgrade checklist item with a query that lists `VMSnapshot`s marked `Ready` without a create (no `status.creationTime`). `docs/release-notes/next.md`: Fixes entry.
+
+### Fixed
+- `internal/controller/vmsnapshot_controller.go`: `createSnapshot` set `Phase=Creating` (and `Creating=True`) before resolving the provider, and the provider-lookup and provider-client error paths persisted it with no `TaskRef`. The next reconcile's task poll read "Creating, no task" as a finished synchronous create and marked the snapshot `Ready`, though no `SnapshotCreate` RPC was ever issued. The phase now moves to `Creating` only right before the RPC, and is persisted only with the RPC's outcome (a task to poll, `Ready`, or `Failed`). A provider lookup or client failure (`retrySnapshotCreate`) leaves the snapshot in the initial phase with `Ready=False` / `ProviderError`, so the create is retried unchanged. The other pre-RPC exits were already safe and are unchanged: a `ConsumerNotAllowed` refusal and an unresolved VM binding (`vmRefFor`) keep the initial phase, and the capability gate marks the snapshot `Failed`.
+- `internal/controller/vmsnapshot_controller.go`: defense in depth in `checkSnapshotCreation`. A snapshot in `Creating` with no task, snapshot id or creation time has no create result recorded. It is now returned to the initial phase (so the create is issued) instead of being reported `Ready`. `Creating` with no task but a recorded snapshot id or creation time is still treated as a finished synchronous create.
+- `internal/controller/vmsnapshot_controller.go`: `handleRetention` dereferenced `status.creationTime` without a nil check. A snapshot wrongly marked `Ready` by the bug above has none, so with `spec.retentionPolicy.maxAge` set every reconcile hit a nil-pointer panic. It is now skipped by retention (never expired automatically), leaving it for the operator.
+
+### Why
+A `VMSnapshot` reported `Ready` must correspond to a snapshot that exists on the hypervisor. A backup or pre-change restore point that only exists in Kubernetes status is a silent data-protection failure, which is unacceptable for the regulated deployments VirtRigaud targets.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (manager image only; no CRD or RBAC change)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-09-25 02:55] - Security: VMImage prepare state is per Provider identity (namespace/name + UID), with per-Provider prepare tasks
 **Author:** @wrkode (William Rizzo)
 

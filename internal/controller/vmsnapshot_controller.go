@@ -56,6 +56,12 @@ const errReasonGetSnapshot = "get-snapshot"
 // contracts.CapabilityReporter.
 const snapshotReasonUnsupportedByProvider = "UnsupportedByProvider"
 
+// snapshotCreateNotIssuedMessage is the status message and Creating condition
+// message of a snapshot found in the Creating phase with no SnapshotCreate
+// result recorded (no task, snapshot id or creation time), which is returned
+// to the initial phase so its create is issued.
+const snapshotCreateNotIssuedMessage = "Snapshot create was not issued to the provider; retrying"
+
 // VMSnapshotReconciler reconciles a VMSnapshot object
 type VMSnapshotReconciler struct {
 	client.Client
@@ -70,6 +76,12 @@ type VMSnapshotReconciler struct {
 	// default) the create path is byte-for-byte unchanged. See the gate in
 	// createSnapshot.
 	EnforceCapabilities bool
+
+	// providerInstanceFn, when non-nil, overrides provider-instance resolution.
+	// Production leaves it nil and resolves a real gRPC client via
+	// RemoteResolver; tests inject a fake provider here to exercise the create
+	// path without standing up a gRPC server.
+	providerInstanceFn func(ctx context.Context, provider *infrav1beta1.Provider) (contracts.Provider, error)
 }
 
 // NewVMSnapshotReconciler creates a new VMSnapshot reconciler.
@@ -229,30 +241,24 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 
 	logger.Info("Creating VM snapshot")
 
+	// Every failure before the SnapshotCreate RPC below (provider lookup,
+	// binding, provider client) leaves the snapshot in the initial phase, so
+	// the create is retried unchanged; the capability gate fails it. The
+	// Creating phase is persisted only with the RPC's outcome:
+	// checkSnapshotCreation reads Creating with no task as a finished
+	// synchronous create.
+
 	// Get the provider for this VM. A Provider in another namespace must
 	// select this one (spec.consumerNamespaceSelector); the refusal is
-	// recorded before the phase moves, so the create is retried unchanged once
-	// the grant exists.
+	// recorded without moving the phase, so the create is retried unchanged
+	// once the grant exists.
 	provider, err := getVMProvider(ctx, r.Client, vm)
 	if isConsumerNotAllowed(err) {
 		return r.refuseSnapshotConsumer(ctx, snapshot, err), nil
 	}
-
-	// Update phase to creating
-	snapshot.Status.Phase = infrav1beta1.SnapshotPhaseCreating
-	snapshot.Status.Message = "Creating snapshot"
-	k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionCreating,
-		metav1.ConditionTrue, infrav1beta1.VMSnapshotReasonCreating,
-		"Snapshot creation initiated")
-
 	if err != nil {
 		logger.Error(err, "Failed to get provider", "provider", vm.Spec.ProviderRef.Name)
-		k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionReady,
-			metav1.ConditionFalse, infrav1beta1.VMSnapshotReasonProviderError,
-			fmt.Sprintf("Failed to get provider: %v", err))
-		// Status update errors are intentionally ignored to avoid blocking reconciliation
-		_ = r.updateStatus(ctx, snapshot)
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		return r.retrySnapshotCreate(ctx, snapshot, fmt.Sprintf("Failed to get provider: %v", err)), nil
 	}
 
 	// Address the VM (ADR-0007 Addendum A, A1) before resolving a client for
@@ -268,12 +274,7 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 	providerInstance, err := r.getProviderInstance(ctx, provider)
 	if err != nil {
 		logger.Error(err, "Failed to get provider instance")
-		k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionReady,
-			metav1.ConditionFalse, infrav1beta1.VMSnapshotReasonProviderError,
-			fmt.Sprintf("Failed to get provider instance: %v", err))
-		// Status update errors are intentionally ignored to avoid blocking reconciliation
-		_ = r.updateStatus(ctx, snapshot)
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		return r.retrySnapshotCreate(ctx, snapshot, fmt.Sprintf("Failed to get provider instance: %v", err)), nil
 	}
 
 	// Build snapshot create request
@@ -287,6 +288,15 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 	if blocked, res := r.gateSnapshotCreate(ctx, snapshot, providerInstance, req); blocked {
 		return res, nil
 	}
+
+	// The create is issued now: only from here on is the snapshot Creating.
+	// The phase is persisted below together with the RPC's outcome (a task to
+	// poll, Ready, or Failed), never on its own.
+	snapshot.Status.Phase = infrav1beta1.SnapshotPhaseCreating
+	snapshot.Status.Message = "Creating snapshot"
+	k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionCreating,
+		metav1.ConditionTrue, infrav1beta1.VMSnapshotReasonCreating,
+		"Snapshot creation initiated")
 
 	// Call provider to create snapshot
 	resp, err := providerInstance.SnapshotCreate(ctx, req)
@@ -349,6 +359,22 @@ func (r *VMSnapshotReconciler) checkSnapshotCreation(ctx context.Context, snapsh
 	logger := logging.FromContext(ctx)
 
 	logger.Info("Checking snapshot creation progress", "task_ref", snapshot.Status.TaskRef)
+
+	// Creating with no task, no snapshot id and no creation time records no
+	// SnapshotCreate result at all: the phase was persisted before any RPC
+	// was issued (older managers did so when the provider could not be
+	// resolved). Never report that as Ready: return the snapshot to the
+	// initial phase so the create is issued.
+	if snapshot.Status.TaskRef == "" && snapshot.Status.SnapshotID == "" && snapshot.Status.CreationTime == nil {
+		logger.Info("Snapshot is Creating but no create was recorded; retrying the create")
+		snapshot.Status.Phase = ""
+		snapshot.Status.Message = snapshotCreateNotIssuedMessage
+		k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionCreating,
+			metav1.ConditionTrue, infrav1beta1.VMSnapshotReasonCreating, snapshotCreateNotIssuedMessage)
+		// Status update errors are intentionally ignored to avoid blocking reconciliation
+		_ = r.updateStatus(ctx, snapshot)
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
 
 	// For vSphere and other synchronous providers, if there's no task ref,
 	// the snapshot is already complete
@@ -456,8 +482,11 @@ func (r *VMSnapshotReconciler) checkSnapshotCreation(ctx context.Context, snapsh
 func (r *VMSnapshotReconciler) handleRetention(ctx context.Context, snapshot *infrav1beta1.VMSnapshot) (ctrl.Result, error) {
 	logger := logging.FromContext(ctx)
 
-	// Check retention policy
-	if snapshot.Spec.RetentionPolicy != nil && snapshot.Spec.RetentionPolicy.MaxAge != nil {
+	// Check retention policy. A snapshot with no creation time has no age: an
+	// older manager could mark one Ready without any create (see
+	// checkSnapshotCreation); it is left for the operator, never expired.
+	if snapshot.Spec.RetentionPolicy != nil && snapshot.Spec.RetentionPolicy.MaxAge != nil &&
+		snapshot.Status.CreationTime != nil {
 		maxAge := snapshot.Spec.RetentionPolicy.MaxAge.Duration
 		if time.Since(snapshot.Status.CreationTime.Time) > maxAge {
 			logger.Info("Snapshot has exceeded retention period, deleting")
@@ -678,6 +707,11 @@ func (r *VMSnapshotReconciler) blockSnapshot(ctx context.Context, snapshot *infr
 
 // getProviderInstance resolves a provider to a remote implementation
 func (r *VMSnapshotReconciler) getProviderInstance(ctx context.Context, provider *infrav1beta1.Provider) (contracts.Provider, error) {
+	// Test hook: allow injecting a fake provider without dialing gRPC.
+	if r.providerInstanceFn != nil {
+		return r.providerInstanceFn(ctx, provider)
+	}
+
 	// All providers are now remote
 	if r.RemoteResolver == nil {
 		return nil, fmt.Errorf("no remote resolver available")
@@ -696,6 +730,20 @@ func (r *VMSnapshotReconciler) waitForVMBinding(ctx context.Context, snapshot *i
 	snapshot.Status.Message = vmRefWaitMessage(cause)
 	k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionCreating,
 		metav1.ConditionTrue, vmRefErrorReason(cause), cause.Error())
+	// Status update errors are intentionally ignored to avoid blocking reconciliation
+	_ = r.updateStatus(ctx, snapshot)
+	return ctrl.Result{RequeueAfter: 30 * time.Second}
+}
+
+// retrySnapshotCreate records that the snapshot create could not be issued
+// because the VM's Provider could not be read or resolved to a client
+// (Ready=False, reason ProviderError, with message) and requeues. The snapshot stays in the
+// initial phase, so the create is retried unchanged; no provider call was made.
+func (r *VMSnapshotReconciler) retrySnapshotCreate(ctx context.Context, snapshot *infrav1beta1.VMSnapshot, message string) ctrl.Result {
+	snapshot.Status.Phase = ""
+	snapshot.Status.Message = message
+	k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionReady,
+		metav1.ConditionFalse, infrav1beta1.VMSnapshotReasonProviderError, message)
 	// Status update errors are intentionally ignored to avoid blocking reconciliation
 	_ = r.updateStatus(ctx, snapshot)
 	return ctrl.Result{RequeueAfter: 30 * time.Second}

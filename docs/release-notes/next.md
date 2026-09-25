@@ -95,6 +95,12 @@ providers), and rollback caveats in
 - Examples: every manifest under `examples/` applies against the current CRDs
   again (quoted `powerState` values, fields updated to the v1beta1 API), and
   CI now dry-runs them all.
+- A `VMSnapshot` whose `Provider` could not be resolved on its first attempt is
+  no longer marked `Ready` without a snapshot being taken. It stays pending and
+  retries until the provider is reachable. Snapshots already affected are `Ready`
+  with no `status.creationTime`; the
+  [upgrade guide](docs/upgrading.md#post-upgrade-verification-checklist) has a
+  query to list them.
 
 ## Upgrade
 
