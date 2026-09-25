@@ -796,3 +796,55 @@ func TestParseArtifactProbe(t *testing.T) {
 	assert.Nil(t, obs.Stamp, "an untrusted sidecar carries no stamp")
 	assert.Error(t, pr.docErr)
 }
+
+// TestImagePrepare_OverTheWire runs the real *Provider behind the real gRPC
+// Server and the MANAGER's transport client: the identity echo confirms the
+// request (contracts.ImagePrepareResponse.ConfirmsIdentity), a Conflict comes
+// back typed and non-retryable, a permanent source failure as InvalidSpec (so
+// the manager records it on the VMImage and holds), and an in-progress
+// artifact as retryable.
+func TestImagePrepare_OverTheWire(t *testing.T) {
+	h := newPrepareHost(t)
+	c := startLibvirtGRPC(t, h.p)
+	req := contracts.ImagePrepareRequest{
+		ImageJSON:    urlImageJSON(testImageURL),
+		Image:        contracts.ObjectIdentity{UID: testImageUID, Namespace: "team-a", Name: "ubuntu-22.04"},
+		SourceDigest: testDigest,
+		Provider:     contracts.ObjectIdentity{UID: testProviderUID, Namespace: "team-a", Name: "libvirt"},
+	}
+
+	resp, err := c.PrepareImage(context.Background(), req)
+	require.NoError(t, err)
+	assert.True(t, resp.ConfirmsIdentity(req), "the echo confirms the request: %+v", resp.Artifact)
+	assert.Empty(t, resp.TaskRef)
+	assert.False(t, resp.Artifact.Reused)
+
+	// Another image whose derived name is occupied by a foreign artifact.
+	other := req
+	other.Image.UID = testOtherImageUID
+	name := artifactNameFor(t, testOtherImageUID, testDigest)
+	plantFile(t, filepath.Join(h.images, name+qcow2Ext), "planted")
+	_, err = c.PrepareImage(context.Background(), other)
+	assert.True(t, contracts.IsConflict(err), "got %v", err)
+
+	// A source that answers 404: InvalidSpec, never retried hot.
+	failDownload("404 22")(t, h)
+	missing := req
+	missing.SourceDigest = testOtherDigest
+	_, err = c.PrepareImage(context.Background(), missing)
+	assert.True(t, contracts.IsInvalidSpec(err), "got %v", err)
+	assert.NotContains(t, err.Error(), "supersecret")
+
+	// A matching stamp whose artifact is not linked yet: retryable.
+	inflight := req
+	inflight.Image.UID = "11111111-2222-4333-8444-555555555555"
+	inflightName, nerr := imageartifact.ArtifactName(imageartifact.NameRuleLibvirt, inflight.Image, testDigest)
+	require.NoError(t, nerr)
+	doc := testSidecar(testImageUID, testDigest, 7, 9)
+	doc.Image.UID = inflight.Image.UID
+	data, eerr := encodeImageSidecar(doc)
+	require.NoError(t, eerr)
+	plantSidecar(t, filepath.Join(h.images, imageSidecarName(inflightName)), data, time.Now())
+	_, err = c.PrepareImage(context.Background(), inflight)
+	assert.True(t, contracts.IsRetryable(err), "got %v", err)
+}
