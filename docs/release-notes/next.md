@@ -14,6 +14,7 @@ Read the upgrade guide before upgrading:
 
 ## Breaking changes
 
+- **A `Provider`, `VMClass` or `VMImage` in another namespace can only be used if its new `spec.consumerNamespaceSelector` selects the referencing namespace** (unset = own namespace only, `{}` = all namespaces). Set it on shared objects **before upgrading**; otherwise VMs using them fail closed with `ConsumerNotAllowed`. → [Upgrade guide](docs/upgrading.md#breaking-changes)
 - **`VirtualMachine.spec.providerRef` is now immutable once a VM is bound.** The
   old "re-point to a missing Provider, then delete" un-adopt workaround no longer
   works — use the new `virtrigaud.io/orphan-on-delete: "true"` annotation instead.

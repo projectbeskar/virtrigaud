@@ -19,6 +19,7 @@ is the index and the sequencing, not a duplicate of that detail.
 
 | Change | Who is affected | Action required |
 |---|---|---|
+| **Cross-namespace `Provider` / `VMClass` / `VMImage` references need a grant** ([`docs/cross-namespace-references.md`](cross-namespace-references.md)) | Anyone whose VirtualMachines (or VMClone/VMMigration targets) reference a Provider, VMClass or VMImage in **another** namespace — e.g. a shared Provider in `virtrigaud-system`. Such VMs **fail closed** after upgrade (`Ready=False`, reason `ConsumerNotAllowed`, no provider calls) until access is granted. | **Before upgrading**, set `spec.consumerNamespaceSelector` on every shared Provider, VMClass and VMImage (`{}` = shared with all namespaces; or a label selector on the consumer namespaces). Deleting a VM whose Provider is refused needs `virtrigaud.io/orphan-on-delete: "true"` or `force-delete`. See the upgrade notes in the linked doc for queries that list what needs a selector. |
 | **`VirtualMachine.spec.providerRef` is immutable once bound** ([#341](https://github.com/projectbeskar/virtrigaud/pull/341), [`docs/vm-provider-binding.md`](vm-provider-binding.md)) | Anyone whose tooling edits `providerRef` after creation, and anyone using the old "re-point to a missing Provider, then delete" un-adopt trick | Detach with `virtrigaud.io/orphan-on-delete: "true"` instead. Upgrade CRDs with or before the manager — the manager refuses readiness on an old CRD. |
 | **Cross-namespace VMClone/VMMigration targets need a grant** ([#340](https://github.com/projectbeskar/virtrigaud/pull/340), [`docs/cross-namespace-targets.md`](cross-namespace-targets.md)) | Anyone whose `spec.target.namespace` differs from the object's own namespace | Annotate the target namespace: `kubectl annotate namespace <target> infra.virtrigaud.io/allowed-source-namespaces=<source-ns>[,<source-ns2>...]`. Do this **before** upgrading if you have objects in flight — see the query in the linked doc. |
 | **vSphere Create/Clone fail closed on VM ownership** ([#335](https://github.com/projectbeskar/virtrigaud/pull/335), [`docs/vm-ownership.md`](vm-ownership.md)) | All vSphere users | Grant the vCenter account **Virtual machine > Change Configuration > Advanced configuration** (`VirtualMachine.Config.AdvancedConfig`). Rename any VirtualMachine, VMImage prepare target, or bare template name matching `vm-<digits>`. Make sure every `VMImage.templateName` names a real vSphere template, not a regular VM. |
@@ -47,6 +48,11 @@ See [`docs/clustered-provider-inventory.md`](clustered-provider-inventory.md) an
 
 ## Required upgrade order
 
+0. **Grant cross-namespace consumers first.** If any VirtualMachine, VMClone or
+   VMMigration references a `Provider`, `VMClass` or `VMImage` in another namespace,
+   set `spec.consumerNamespaceSelector` on those objects **before** upgrading, or the
+   affected VMs stop being managed (`ConsumerNotAllowed`) until you do. See
+   [`docs/cross-namespace-references.md`](cross-namespace-references.md#upgrade-notes).
 1. **CRDs first.**
    - Helm (default): the chart's pre-upgrade hook applies the CRDs baked into the
      chart with `kubectl apply --server-side --force-conflicts` before the manager
