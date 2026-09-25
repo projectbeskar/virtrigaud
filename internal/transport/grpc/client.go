@@ -306,7 +306,9 @@ func providerCircuitBreakerInterceptor(cb *resilience.CircuitBreaker) grpc.Unary
 // Two clustered-provider statuses (ADR-0007 Addendum A) never count, whatever
 // their code, because the provider answered and is healthy: a host-scoped
 // Unavailable (HOST_UNAVAILABLE) and a per-VM operation that failed on its
-// host (VM_OPERATION_FAILED).
+// host (VM_OPERATION_FAILED). Nor does an ImagePrepare answered with
+// IMAGE_ARTIFACT_IN_PROGRESS (ADR-0009 D4): the artifact is being prepared by
+// another request.
 func isInfraFailure(err error) bool {
 	if err == nil {
 		return false
@@ -324,6 +326,13 @@ func isInfraFailure(err error) bool {
 	// must not open the breaker for every VM of the Provider (ADR-0007
 	// Addendum A, slice 2). A plain Unknown / Internal still counts.
 	if st, ok := status.FromError(err); ok && isVMOperationFailedStatus(st) {
+		return false
+	}
+	// Nor does an ImagePrepare whose artifact another request is still
+	// preparing (IMAGE_ARTIFACT_IN_PROGRESS, ADR-0009 D4): the provider
+	// answered, and a long import through one Provider must not open the
+	// breaker of every Provider that shares its image location and polls it.
+	if st, ok := status.FromError(err); ok && isImageArtifactInProgressStatus(st) {
 		return false
 	}
 	switch status.Code(err) {
@@ -1225,6 +1234,25 @@ func isVMOperationFailedStatus(st *status.Status) bool {
 	return false
 }
 
+// isImageArtifactInProgressStatus reports whether a gRPC status is an
+// ImagePrepare's "the artifact is still being prepared for this VMImage by
+// another request" (ADR-0009 D4): codes.Unavailable carrying a
+// google.rpc.ErrorInfo with contracts.ImageArtifactInProgressReason in
+// VirtRigaud's domain. The provider answered, so it is healthy.
+func isImageArtifactInProgressStatus(st *status.Status) bool {
+	if st == nil || st.Code() != codes.Unavailable {
+		return false
+	}
+	for _, d := range st.Details() {
+		if info, ok := d.(*errdetails.ErrorInfo); ok &&
+			info.GetReason() == contracts.ImageArtifactInProgressReason &&
+			info.GetDomain() == contracts.ErrorInfoDomain {
+			return true
+		}
+	}
+	return false
+}
+
 // objectIdentityToProto converts a manager-side ObjectIdentity to the wire
 // message (CreateRequest.owner / DeleteRequest.owner). It returns nil when no
 // UID is known, so an unset owner is unambiguous on the wire: a provider never
@@ -1347,6 +1375,9 @@ func (c *Client) mapGRPCError(operation string, err error) error {
 	case codes.Unavailable, codes.DeadlineExceeded:
 		if isHostUnavailableStatus(st) {
 			return contracts.NewHostUnavailableError(fmt.Sprintf("%s: %s", operation, st.Message()), err)
+		}
+		if isImageArtifactInProgressStatus(st) {
+			return contracts.NewInProgressError(fmt.Sprintf("%s: %s", operation, st.Message()), err)
 		}
 		return contracts.NewRetryableError(fmt.Sprintf("%s: %s", operation, st.Message()), err)
 	case codes.Unimplemented:
