@@ -96,6 +96,18 @@ const VMOperationFailedReason = "VM_OPERATION_FAILED"
 // open the breaker of another Provider that shares its image location.
 const ImageArtifactInProgressReason = "IMAGE_ARTIFACT_IN_PROGRESS"
 
+// ImageSourceUnavailableReason is the google.rpc.ErrorInfo reason (in
+// ErrorInfoDomain) a provider attaches to the codes.Unavailable status of an
+// ImagePrepare that failed because of the image's source or content — the
+// source server failed, refused or broke off the download, the download could
+// not be staged, or the hypervisor refused to import this image's content —
+// and not because the provider or its hypervisor endpoint is unreachable
+// (imageartifact.SourceUnavailableError). It stays retryable, but the manager
+// keeps it out of its per-Provider circuit breaker on ImagePrepare: one
+// tenant's bad VMImage, retried, must not open the breaker for every tenant of
+// the Provider.
+const ImageSourceUnavailableReason = "IMAGE_SOURCE_UNAVAILABLE"
+
 // ProviderError represents a categorized error from a provider
 type ProviderError struct {
 	// Type categorizes the error

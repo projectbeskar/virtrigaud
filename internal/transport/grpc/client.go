@@ -307,8 +307,8 @@ func providerCircuitBreakerInterceptor(cb *resilience.CircuitBreaker) grpc.Unary
 // their code, because the provider answered and is healthy: a host-scoped
 // Unavailable (HOST_UNAVAILABLE) and a per-VM operation that failed on its
 // host (VM_OPERATION_FAILED). An ImagePrepare answered with
-// IMAGE_ARTIFACT_IN_PROGRESS is excluded by countsTowardBreaker, which knows
-// the method.
+// IMAGE_ARTIFACT_IN_PROGRESS or IMAGE_SOURCE_UNAVAILABLE is excluded by
+// countsTowardBreaker, which knows the method.
 func isInfraFailure(err error) bool {
 	if err == nil {
 		return false
@@ -342,16 +342,19 @@ func isInfraFailure(err error) bool {
 // countsTowardBreaker reports whether err, returned by the RPC fullMethod,
 // counts toward the per-Provider circuit breaker: an infra failure
 // (isInfraFailure), except an ImagePrepare answered with
-// IMAGE_ARTIFACT_IN_PROGRESS (ADR-0009 D4). The provider answered, and a long
-// import through one Provider must not open the breaker of every Provider that
-// shares its image location. The reason is honoured on ImagePrepare only: on
-// any other RPC it is not a VirtRigaud answer, and the Unavailable counts.
+// IMAGE_ARTIFACT_IN_PROGRESS (ADR-0009 D4) or IMAGE_SOURCE_UNAVAILABLE. In both
+// cases the provider answered: a long import through one Provider must not open
+// the breaker of every Provider that shares its image location, and one
+// tenant's failing image source (retried) must not open it for every tenant of
+// the Provider. The reasons are honoured on ImagePrepare only: on any other RPC
+// they are not a VirtRigaud answer, and the Unavailable counts.
 func countsTowardBreaker(fullMethod string, err error) bool {
 	if !isInfraFailure(err) {
 		return false
 	}
 	if fullMethod == providerv1.Provider_ImagePrepare_FullMethodName {
-		if st, ok := status.FromError(err); ok && isImageArtifactInProgressStatus(st) {
+		if st, ok := status.FromError(err); ok &&
+			(isImageArtifactInProgressStatus(st) || isImageSourceUnavailableStatus(st)) {
 			return false
 		}
 	}
@@ -1263,6 +1266,25 @@ func isImageArtifactInProgressStatus(st *status.Status) bool {
 	for _, d := range st.Details() {
 		if info, ok := d.(*errdetails.ErrorInfo); ok &&
 			info.GetReason() == contracts.ImageArtifactInProgressReason &&
+			info.GetDomain() == contracts.ErrorInfoDomain {
+			return true
+		}
+	}
+	return false
+}
+
+// isImageSourceUnavailableStatus reports whether a gRPC status is a
+// codes.Unavailable answer to ImagePrepare carrying a google.rpc.ErrorInfo with
+// contracts.ImageSourceUnavailableReason in VirtRigaud's domain: the image's
+// source or content failed, not the provider. The provider answered, so it is
+// healthy.
+func isImageSourceUnavailableStatus(st *status.Status) bool {
+	if st == nil || st.Code() != codes.Unavailable {
+		return false
+	}
+	for _, d := range st.Details() {
+		if info, ok := d.(*errdetails.ErrorInfo); ok &&
+			info.GetReason() == contracts.ImageSourceUnavailableReason &&
 			info.GetDomain() == contracts.ErrorInfoDomain {
 			return true
 		}

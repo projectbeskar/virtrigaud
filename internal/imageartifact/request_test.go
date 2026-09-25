@@ -154,6 +154,25 @@ func TestConflictAndInProgressErrors(t *testing.T) {
 	assert.Equal(t, []string{contracts.ImageArtifactInProgressReason}, reasons)
 }
 
+// TestSourceUnavailableError verifies the image-source failure is a retryable
+// Unavailable with exactly the given message and the IMAGE_SOURCE_UNAVAILABLE
+// reason, which keeps it out of the manager's circuit breaker.
+func TestSourceUnavailableError(t *testing.T) {
+	const msg = "ImagePrepare: the image source is unavailable (details in the provider log); will retry"
+	err := SourceUnavailableError(msg)
+	st, ok := status.FromError(err)
+	require.True(t, ok)
+	assert.Equal(t, codes.Unavailable, st.Code())
+	assert.Equal(t, msg, st.Message())
+	var reasons []string
+	for _, d := range st.Details() {
+		if info, isInfo := d.(*errdetails.ErrorInfo); isInfo && info.GetDomain() == contracts.ErrorInfoDomain {
+			reasons = append(reasons, info.GetReason())
+		}
+	}
+	assert.Equal(t, []string{contracts.ImageSourceUnavailableReason}, reasons)
+}
+
 // legacyCounter returns virtrigaud_provider_image_prepare_legacy_requests_total
 // for providerType (0 before the first increment).
 func legacyCounter(t *testing.T, providerType string) float64 {

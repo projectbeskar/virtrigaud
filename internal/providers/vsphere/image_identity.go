@@ -20,6 +20,7 @@ import (
 	"context"
 	stderrors "errors"
 	"fmt"
+	"net"
 	"net/url"
 	"path"
 	"slices"
@@ -33,6 +34,7 @@ import (
 	"github.com/vmware/govmomi/property"
 	"github.com/vmware/govmomi/vim25/mo"
 	"github.com/vmware/govmomi/vim25/progress"
+	"github.com/vmware/govmomi/vim25/soap"
 	"github.com/vmware/govmomi/vim25/types"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -78,9 +80,15 @@ import (
 //   - a configured import folder that is missing, ambiguous or outside the
 //     datacenter's VM folder: codes.FailedPrecondition (retried by the
 //     manager, not counted toward its circuit breaker);
-//   - everything else — vCenter unreachable, an expired session, a 5xx from
-//     the source, an import or upload that fails midway — is retryable
-//     (codes.Unavailable).
+//   - a failure of this image's source or content — the source server failing,
+//     refusing or breaking off the download, a download that cannot be staged,
+//     vCenter refusing to create, upload or convert what the OVF describes —
+//     is retryable but tagged IMAGE_SOURCE_UNAVAILABLE
+//     (imageartifact.SourceUnavailableError): the manager keeps it out of its
+//     circuit breaker, so one tenant's bad image cannot stop the Provider;
+//   - vCenter itself unreachable, an expired session, missing rights
+//     (isVCenterUnreachable) is a generic retryable codes.Unavailable that
+//     counts toward the breaker.
 
 const (
 	// maxArtifactProbeRounds bounds how often one identity prepare probes the
@@ -410,13 +418,13 @@ func (p *Provider) stageOVA(ctx context.Context, src vsphereImageSource) (*stage
 	if src.Checksum != "" {
 		if err := verifyFileChecksum(localPath, src.Checksum, src.ChecksumType); err != nil {
 			cleanup()
-			return nil, err
+			return nil, p.stagedFileError(ctx, err)
 		}
 	}
 	archive, descriptor, err := p.newOVAArchive(localPath, src.OVAURL)
 	if err != nil {
 		cleanup()
-		return nil, err
+		return nil, p.stagedFileError(ctx, err)
 	}
 	return &stagedOVA{cleanup: cleanup, archive: archive, descriptor: descriptor}, nil
 }
@@ -431,7 +439,10 @@ func (p *Provider) stageOVA(ctx context.Context, src vsphereImageSource) (*stage
 func (p *Provider) importArtifact(ctx context.Context, finder *find.Finder, loc artifactLocation, id imageartifact.Request, src vsphereImageSource, storageHint string, staged **stagedOVA) (*providerv1.ImagePrepareResponse, error) {
 	pool, datastore, err := p.resolveImageComputeAndStorage(ctx, finder, storageHint)
 	if err != nil {
-		return nil, err
+		if isProviderError(err, codes.InvalidArgument) {
+			return nil, err // no datastore configured at all
+		}
+		return nil, p.artifactRetryError(ctx, loc.name, "resolve the import resource pool and datastore", err)
 	}
 	if *staged == nil {
 		s, err := p.stageOVA(ctx, src)
@@ -472,7 +483,7 @@ func (p *Provider) importArtifact(ctx context.Context, finder *find.Finder, loc 
 		case isProviderError(err, codes.InvalidArgument):
 			return nil, err
 		}
-		return nil, p.artifactRetryError(ctx, loc.name, "import the OVA", err)
+		return nil, p.importFailure(ctx, loc.name, "import the OVA", err)
 	}
 	own := *ref
 	vm := object.NewVirtualMachine(p.client.Client, own)
@@ -498,7 +509,7 @@ func (p *Provider) importArtifact(ctx context.Context, finder *find.Finder, loc 
 	// Promote to a template only now: an unfinished artifact is never complete.
 	if err := vm.MarkAsTemplate(ctx); err != nil {
 		p.destroyOwnImport(ctx, own, loc.name)
-		return nil, p.artifactRetryError(ctx, loc.name, "mark the imported artifact as a template", err)
+		return nil, p.importFailure(ctx, loc.name, "mark the imported artifact as a template", err)
 	}
 
 	// The template is complete. It is handed out only while the name addresses
@@ -652,6 +663,57 @@ func (p *Provider) artifactRetryError(ctx context.Context, artifact, step string
 	return status.Errorf(codes.Unavailable,
 		"ImagePrepare: %s for the prepared-image artifact %q failed: a vCenter error occurred "+
 			"(details in the provider log); will retry", step, artifact)
+}
+
+// stagedFileError passes a classified error (a gRPC status) through, and turns
+// a raw failure to read back the staged download (a local I/O error) into the
+// image-source error: it concerns this image's download only.
+func (p *Provider) stagedFileError(ctx context.Context, err error) error {
+	if _, ok := status.FromError(err); ok {
+		return err
+	}
+	return p.imageSourceError(ctx, "the downloaded image could not be read back on the provider", err)
+}
+
+// isVCenterUnreachable reports whether err, from a vCenter or ESXi call of an
+// import, means the endpoint itself failed — its session, its connectivity or
+// the provider's rights — rather than this image's content: a
+// NotAuthenticated, InvalidLogin, NoPermission, HostCommunication or
+// HostNotConnected fault, an untrusted certificate, or a transport-level error
+// (a *url.Error or net.Error, a context deadline or cancellation).
+func isVCenterUnreachable(err error) bool {
+	if err == nil {
+		return false
+	}
+	for _, f := range []types.BaseMethodFault{
+		&types.NotAuthenticated{}, &types.InvalidLogin{}, &types.NoPermission{},
+		&types.HostCommunication{}, &types.HostNotConnected{},
+	} {
+		if fault.Is(err, f) {
+			return true
+		}
+	}
+	if soap.IsCertificateUntrusted(err) {
+		return true
+	}
+	var urlErr *url.Error
+	var netErr net.Error
+	return stderrors.As(err, &urlErr) || stderrors.As(err, &netErr) ||
+		stderrors.Is(err, context.DeadlineExceeded) || stderrors.Is(err, context.Canceled)
+}
+
+// importFailure classifies a failed import step of this call's own object: a
+// vCenter/ESXi endpoint failure (isVCenterUnreachable) is a generic retryable
+// vCenter error that counts toward the manager's circuit breaker
+// (artifactRetryError); anything else — vCenter refusing to create, upload or
+// convert what this image's OVF describes — is an image-source error the
+// manager retries without counting it (imageSourceError), so one tenant's
+// crafted OVA cannot open the breaker for every tenant of the Provider.
+func (p *Provider) importFailure(ctx context.Context, artifact, step string, err error) error {
+	if isVCenterUnreachable(err) {
+		return p.artifactRetryError(ctx, artifact, step, err)
+	}
+	return p.imageSourceError(ctx, "vCenter could not import the image", err, "artifact", artifact, "step", step)
 }
 
 // isProviderError reports whether err carries a gRPC status with code.

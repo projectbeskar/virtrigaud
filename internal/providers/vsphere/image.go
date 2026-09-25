@@ -44,6 +44,7 @@ import (
 	"github.com/vmware/govmomi/vim25/progress"
 	"github.com/vmware/govmomi/vim25/types"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/projectbeskar/virtrigaud/internal/imageartifact"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
@@ -707,21 +708,34 @@ func (t *sourceReadTracker) Read(b []byte) (int, error) {
 	return n, err
 }
 
+// imageSourceError logs detail provider-side and returns the retryable error of
+// an image-source failure (imageartifact.SourceUnavailableError): message is
+// fixed text, the only part that reaches the VMImage's status. The manager
+// retries it without counting it toward the Provider's circuit breaker, so one
+// tenant's failing image source cannot stop the Provider for everyone.
+func (p *Provider) imageSourceError(ctx context.Context, message string, detail error, attrs ...any) error {
+	p.logger.WarnContext(ctx, "ImagePrepare: "+message, append(attrs, "error", detail)...)
+	return imageartifact.SourceUnavailableError("ImagePrepare: " + message + " (details in the provider log); will retry")
+}
+
 // downloadOVA streams the OVA/OVF at ovaURL to a temp file on the provider pod's
 // filesystem and returns the local path plus a cleanup func that removes it. The
 // cleanup is always safe to call (it tolerates an already-removed file).
 //
 // Failures are classified so the manager holds on a source that can never be
-// downloaded instead of retrying it forever:
+// downloaded instead of retrying it forever, and so a failing source never
+// counts against the Provider's health:
 //
 //   - permanent, InvalidSpec: a URL that cannot form a request, or a 4xx
 //     other than 408/429 (isPermanentHTTPStatus);
-//   - transient, Unavailable: a transport error, a 5xx/408/429, or the source
-//     breaking off mid-download;
-//   - a failure to write the local staging file is a provider-side error
-//     (retryable).
+//   - the source's fault, retryable and tagged IMAGE_SOURCE_UNAVAILABLE
+//     (imageSourceError, kept out of the manager's circuit breaker): a
+//     transport error, a 5xx/408/429, the source breaking off mid-download, or
+//     a download that cannot be staged on the provider;
+//   - no staging file at all is a provider-side error (retryable).
 //
-// Messages carry the URL only in redacted form (redactURL).
+// Returned messages are fixed text; the URL (redacted, redactURL) and the
+// transport details go to the provider log only.
 func (p *Provider) downloadOVA(ctx context.Context, ovaURL string) (localPath string, cleanup func(), err error) {
 	noop := func() {}
 	shownURL := redactURL(ovaURL)
@@ -735,7 +749,9 @@ func (p *Provider) downloadOVA(ctx context.Context, ovaURL string) (localPath st
 
 	tmp, err := os.CreateTemp("", "virtrigaud-ova-*"+ext)
 	if err != nil {
-		return "", noop, fmt.Errorf("ImagePrepare: create temp file for OVA: %w", err)
+		p.logger.ErrorContext(ctx, "ImagePrepare: cannot create a staging file for the download", "error", err)
+		return "", noop, status.Error(codes.Unavailable, "ImagePrepare: the provider could not create a staging file "+
+			"(details in the provider log); will retry")
 	}
 	localPath = tmp.Name()
 	cleanup = func() {
@@ -748,12 +764,13 @@ func (p *Provider) downloadOVA(ctx context.Context, ovaURL string) (localPath st
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ovaURL, nil)
 	if err != nil {
 		cleanup()
-		return "", noop, errors.NewInvalidSpec("ImagePrepare: invalid OVA URL %q: %v", shownURL, unwrapURLError(err))
+		p.logger.WarnContext(ctx, "ImagePrepare: the OVA URL cannot form a request", "url", shownURL, "error", unwrapURLError(err))
+		return "", noop, errors.NewInvalidSpec("ImagePrepare: the image source URL is not valid")
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		cleanup()
-		return "", noop, errors.NewUnavailable(fmt.Sprintf("OVA download from %s", shownURL), unwrapURLError(err))
+		return "", noop, p.imageSourceError(ctx, "the image source could not be reached", unwrapURLError(err), "url", shownURL)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -762,21 +779,21 @@ func (p *Provider) downloadOVA(ctx context.Context, ovaURL string) (localPath st
 			return "", noop, errors.NewInvalidSpec(
 				"ImagePrepare: the OVA source %s answered HTTP %d; fix the image source URL", shownURL, resp.StatusCode)
 		}
-		return "", noop, errors.NewUnavailable("OVA download",
-			fmt.Errorf("unexpected HTTP status %d downloading %s", resp.StatusCode, shownURL))
+		return "", noop, p.imageSourceError(ctx, "the image source is unavailable",
+			fmt.Errorf("HTTP status %d", resp.StatusCode), "url", shownURL)
 	}
 
 	body := &sourceReadTracker{r: resp.Body}
 	if _, err := io.Copy(tmp, body); err != nil {
 		cleanup()
 		if body.err != nil {
-			return "", noop, errors.NewUnavailable(fmt.Sprintf("OVA download from %s", shownURL), unwrapURLError(body.err))
+			return "", noop, p.imageSourceError(ctx, "the image source broke off the download", unwrapURLError(body.err), "url", shownURL)
 		}
-		return "", noop, fmt.Errorf("ImagePrepare: write OVA to temp file: %w", err)
+		return "", noop, p.imageSourceError(ctx, "the downloaded image could not be staged on the provider", err)
 	}
 	if err := tmp.Sync(); err != nil {
 		cleanup()
-		return "", noop, fmt.Errorf("ImagePrepare: flush OVA temp file: %w", err)
+		return "", noop, p.imageSourceError(ctx, "the downloaded image could not be staged on the provider", err)
 	}
 
 	p.logger.Info("ImagePrepare: downloaded OVA", "url", shownURL, "path", localPath)

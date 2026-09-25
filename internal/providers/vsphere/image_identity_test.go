@@ -25,6 +25,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -37,11 +38,13 @@ import (
 	"github.com/vmware/govmomi/ovf/importer"
 	"github.com/vmware/govmomi/property"
 	"github.com/vmware/govmomi/simulator"
+	"github.com/vmware/govmomi/task"
 	"github.com/vmware/govmomi/vim25"
 	"github.com/vmware/govmomi/vim25/methods"
 	"github.com/vmware/govmomi/vim25/mo"
 	"github.com/vmware/govmomi/vim25/soap"
 	"github.com/vmware/govmomi/vim25/types"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -673,6 +676,8 @@ func TestIdentityPrepare_FailureClassification(t *testing.T) {
 		t.Run("transient: "+name, func(t *testing.T) {
 			_, err := p.ImagePrepare(context.Background(), identityReq(t, u, testImageUID, testDigestA))
 			requireCode(t, err, codes.Unavailable)
+			assert.Equal(t, []string{contracts.ImageSourceUnavailableReason}, errorReasons(err),
+				"the source's fault: retried, but kept out of the manager's circuit breaker")
 		})
 	}
 	t.Run("permanent: checksum mismatch", func(t *testing.T) {
@@ -702,7 +707,75 @@ func TestIdentityPrepare_FailureClassification(t *testing.T) {
 		_, err := p.ImagePrepare(context.Background(), identityReq(t, minimalOVAURL(t), testImageUID, testDigestA))
 		requireCode(t, err, codes.Unavailable)
 		assert.Contains(t, err.Error(), "details in the provider log")
+		assert.Empty(t, errorReasons(err), "vCenter itself failing counts toward the circuit breaker")
 	})
+
+	t.Run("an import vCenter refuses for the image's content is the source's fault", func(t *testing.T) {
+		p, _, _ := newIdentitySim(t, "")
+		p.client.RoundTripper = &failImportVApp{RoundTripper: p.client.RoundTripper,
+			fault: &types.VmConfigFault{}}
+		_, err := p.ImagePrepare(context.Background(), identityReq(t, minimalOVAURL(t), testImageUID, testDigestA))
+		requireCode(t, err, codes.Unavailable)
+		assert.Equal(t, []string{contracts.ImageSourceUnavailableReason}, errorReasons(err))
+		assert.NotContains(t, err.Error(), "VmConfigFault", "vCenter fault text stays in the provider log")
+	})
+
+	t.Run("an import that loses the vCenter session is vCenter's fault", func(t *testing.T) {
+		p, _, _ := newIdentitySim(t, "")
+		p.client.RoundTripper = &failImportVApp{RoundTripper: p.client.RoundTripper,
+			fault: &types.NotAuthenticated{}}
+		_, err := p.ImagePrepare(context.Background(), identityReq(t, minimalOVAURL(t), testImageUID, testDigestA))
+		requireCode(t, err, codes.Unavailable)
+		assert.Empty(t, errorReasons(err))
+	})
+}
+
+// failImportVApp answers every ImportVApp with fault, as vCenter would.
+type failImportVApp struct {
+	soap.RoundTripper
+	fault types.BaseMethodFault
+}
+
+func (r *failImportVApp) RoundTrip(ctx context.Context, req, res soap.HasFault) error {
+	if _, ok := req.(*methods.ImportVAppBody); ok {
+		return soap.WrapVimFault(r.fault)
+	}
+	return r.RoundTripper.RoundTrip(ctx, req, res)
+}
+
+// errorReasons returns the google.rpc.ErrorInfo reasons (VirtRigaud's domain)
+// a gRPC status error carries.
+func errorReasons(err error) []string {
+	st, ok := status.FromError(err)
+	if !ok {
+		return nil
+	}
+	var reasons []string
+	for _, d := range st.Details() {
+		if info, isInfo := d.(*errdetails.ErrorInfo); isInfo && info.GetDomain() == contracts.ErrorInfoDomain {
+			reasons = append(reasons, info.GetReason())
+		}
+	}
+	return reasons
+}
+
+func TestIsVCenterUnreachable(t *testing.T) {
+	for name, err := range map[string]error{
+		"session expired":  soap.WrapVimFault(&types.NotAuthenticated{}),
+		"no rights":        fmt.Errorf("ImportVApp: %w", soap.WrapVimFault(&types.NoPermission{})),
+		"host unreachable": &task.Error{LocalizedMethodFault: &types.LocalizedMethodFault{Fault: &types.HostCommunication{}}},
+		"transport":        &url.Error{Op: "Post", URL: "https://vc/sdk", Err: fmt.Errorf("connection refused")},
+		"deadline":         fmt.Errorf("wait: %w", context.DeadlineExceeded),
+	} {
+		assert.True(t, isVCenterUnreachable(err), name)
+	}
+	for name, err := range map[string]error{
+		"config fault in the lease": &task.Error{LocalizedMethodFault: &types.LocalizedMethodFault{Fault: &types.VmConfigFault{}}},
+		"NFC upload refused":        fmt.Errorf("upload disk1.vmdk: %w", fmt.Errorf("400 Bad Request")),
+		"nil":                       nil,
+	} {
+		assert.False(t, isVCenterUnreachable(err), name)
+	}
 }
 
 // tarOVAMember packs one member name with content.

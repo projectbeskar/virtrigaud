@@ -184,6 +184,30 @@ func InProgressError(name string) error {
 	return withInfo.Err()
 }
 
+// SourceUnavailableError returns the retryable codes.Unavailable error of an
+// ImagePrepare that failed because of the image's source or content, not
+// because the provider or its hypervisor endpoint is unreachable: the source
+// server failed, refused or broke off the download, the download could not be
+// staged, or the hypervisor refused to import this image's content. It carries
+// a google.rpc.ErrorInfo with contracts.ImageSourceUnavailableReason, so the
+// manager retries it but keeps it out of its per-Provider circuit breaker: one
+// tenant's failing image must not stop the Provider for every tenant. message
+// must be fixed provider text — it reaches the VMImage's status — with the
+// details in the provider log.
+func SourceUnavailableError(message string) error {
+	st := status.New(codes.Unavailable, message)
+	withInfo, err := st.WithDetails(&errdetails.ErrorInfo{
+		Reason: contracts.ImageSourceUnavailableReason,
+		Domain: contracts.ErrorInfoDomain,
+	})
+	if err != nil {
+		// Unreachable in practice (ErrorInfo always marshals); a plain
+		// Unavailable is still a correct, if breaker-counted, answer.
+		return st.Err()
+	}
+	return withInfo.Err()
+}
+
 // LegacyRequestWarning is the warning logged for every legacy (identity-less)
 // ImagePrepare request (ADR-0009 D7).
 const LegacyRequestWarning = "deprecated: image prepare without identity from an older manager; " +
