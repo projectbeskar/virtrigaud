@@ -49,9 +49,12 @@ undefined or snapshotted, and no file is removed.
   To remove the `VirtualMachine` without deleting the hypervisor VM, set
   `virtrigaud.io/orphan-on-delete: "true"`; `virtrigaud.io/force-delete: "true"`
   also removes the finalizer (the domain is left on the host in both cases).
-- **Snapshots**: the `VMSnapshot` shows the refusal in its status (create), or in
-  a `SnapshotDeleteFailed` event (delete — the `VMSnapshot` is still removed,
-  and the libvirt snapshot is left on the host).
+- **Snapshots**: a refused create shows in the `VMSnapshot`'s status. A refused
+  delete keeps the `VMSnapshot` and its finalizer — the snapshot is still on the
+  host — with `Ready=False` and `Deleting=False`, reason `DeleteBlocked`, and a
+  `Warning` event `DeleteBlocked`; it is re-checked every minute and completes
+  once the clones are gone. `virtrigaud.io/force-delete: "true"` on the
+  `VMSnapshot` removes it anyway, leaving the snapshot on the host.
 - **Migration**: a `VMMigration` of the source VM fails at its snapshot step
   (`Failed to create snapshot: …`).
 
