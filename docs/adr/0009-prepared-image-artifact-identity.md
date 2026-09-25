@@ -284,8 +284,8 @@ name. The stamp holds no secrets and no URLs.
 | Provider | Where the stamp lives | Written when | Tamper surface |
 |---|---|---|---|
 | **vSphere** | ExtraConfig keys `virtrigaud.image.{stampversion,uid,namespace,name,sourcedigest,preparedby,preparedat}`, inside the reserved `virtrigaud.` prefix (`ova_import.go:34`) | In the import spec's `ConfigSpec.ExtraConfig`, **after** `stripReservedExtraConfig` (`ova_import.go:55`) and **before** `ImportVApp`, so the entity carries the stamp from the moment it exists and an OVF can never supply one | Needs `VirtualMachine.Config.AdvancedConfig`, which #335 already requires. A template cannot be reconfigured without first being converted back to a VM (`MarkAsVirtualMachine`), so the stamp is effectively frozen once the template is marked |
-| **libvirt** | A dot-sidecar next to the artifact: `.<artifact-base>.virtrigaud-image.json` (JSON, at most 4 KiB) | Published **before** the artifact (D6), so an artifact present implies a sidecar present | The same host principals that can write the artifact file. A dotfile is refused as a base image by `reservedImageName` (`imagepath.go:341`), and staging files already rely on the same "dotfiles are not pool volumes" behaviour (`image.go:292-296`) |
-| **Proxmox** | The template VM's `description` (a `virtrigaud-image v1 …` block) plus tags `virtrigaud-image` and `vr-img-<h16>` | Set on the VM-create call that builds the template, before it is converted with `/template` | `VM.Config.Options`. The tags let the lookup use `/cluster/resources` with no per-VM config reads |
+| **libvirt** | A dot-sidecar next to the artifact: `.<artifact-base>.virtrigaud-image.json` (JSON, at most 4 KiB). It also records the artifact's `inode` and `size`, and both must match the artifact file (D4) | Published **before** the artifact (D6), so an artifact present implies a sidecar present | The same host principals that can write the pool directory. The artifact itself is read-only, mode `0444` (D6). A dotfile is refused as a base image by `reservedImageName` (`imagepath.go:341`), and staging files already rely on the same "dotfiles are not pool volumes" behaviour (`image.go:292-296`) |
+| **Proxmox** (Slice 6) | The template VM's `description` (a `virtrigaud-image v1 … vmid=<n>` block) plus tags `virtrigaud-image` and `vr-img-<h16>`. The stamp's `vmid` **must equal the object's own VMID** | Set on the VM-create call that builds the template, before it is converted with `/template` | Weak on its own. Any holder of `VM.Config.Options` on the VM can write the tags and description. The tag lookup runs across the whole cluster. Clones copy tags. `/cluster/nextid` recycles VMIDs. Hence the Slice 6 rules in D5 |
 | **mock** | In memory | On import | n/a |
 
 **Clones must not carry an image stamp.** vSphere clones copy ExtraConfig, and PVE
@@ -316,8 +316,11 @@ same as having no stamp.
 An existing object at the derived name (vSphere, libvirt), or carrying the `vr-img-<h16>`
 tag (Proxmox), is **reused** only when all of the following hold:
 
-1. **It is complete.** vSphere: `config.template == true`. libvirt: the artifact file and
-   the sidecar both exist. Proxmox: `template == 1`.
+1. **It is complete.**
+   - vSphere: `config.template == true`.
+   - libvirt: the artifact file and the sidecar both exist, and the artifact's inode
+     and size equal those recorded in the sidecar.
+   - Proxmox: `template == 1`, and the stamp's `vmid` equals the object's VMID.
 2. **Its stamp parses** (D3).
 3. **`stamp.image.uid == request.image.uid`.**
 4. **`stamp.sourceDigest == request.source_digest`.**
@@ -331,10 +334,21 @@ must be refused.
 |---|---|
 | Nothing at the name | Import (D6) |
 | Complete, and the stamp matches | **Reuse.** Return the location and `reused=true` |
-| Incomplete, the stamp matches, and the object is younger than the staleness bound | In progress: a retryable `Unavailable`. The manager requeues |
-| Incomplete, the stamp matches, and the object is older than the staleness bound | Abandoned by a crashed prepare of **this same image**. The provider may remove **only** that object (vSphere: a powered-off non-template in the import folder; libvirt: own-pattern temp files), then import again |
+| Incomplete, the stamp matches, and the object is live | In progress: a retryable `Unavailable`. The manager requeues |
+| Incomplete, the stamp matches, and the object is **not** live | Abandoned by a crashed prepare of **this same image**. The provider may remove **only** that object (vSphere: the powered-off non-template in the import folder; libvirt: the matching sidecar that has no artifact, and own-pattern temp files), then import again |
 | Anything else: no stamp, an untrusted stamp, another UID, another digest, or (vSphere) a non-template with no matching stamp | **Conflict** (`codes.AlreadyExists` → `contracts` `Conflict`, `internal/transport/grpc/client.go:1273`). Never overwrite, delete, re-stamp, or adopt |
 | The probe itself fails (a vCenter error, an SSH/`stat` error, a PVE API error) | A retryable error. **Never** treated as "absent" (this fixes `targetImageExists`, `image.go:326`) |
+
+**Liveness and the staleness bound.** There is one bound,
+`max(2 × spec.prepare.timeout, 2h)`. It is the requester's value and there is no env
+knob yet. It applies to temp files and incomplete artifacts alike.
+
+- **libvirt** ages files by **mtime**. Active writes (`curl`, `qemu-img convert`) keep
+  a temp file's mtime current, so a file older than the bound is not being written.
+  The same rule covers a sidecar that has no artifact.
+- **vSphere** ages the object by the stamp's `preparedAt`. Cleanup **also** requires
+  that the entity has no running task in its `recentTask` and no active
+  `HttpNfcLease`. Age alone never licenses a destroy.
 
 The Conflict message is uniform and names only the requester's own artifact, following
 #335's `vmConflictError`: *"a prepared-image artifact named X exists at this Provider's
@@ -370,22 +384,41 @@ See Alternative 5.
   for an artifact is **write access to its location**. A principal who can write there
   can replace the content of any artifact, a per-Provider one included. So per-Provider
   artifacts would add storage and import time without adding protection. They would
-  also force a full re-import every time a Provider is re-created (a new UID).
-  Alternative 4 records the opt-in variant.
+  also force a full re-import every time a Provider is re-created (a new UID). Every
+  Provider re-checks the stamp through its **own** credentials before reusing an
+  artifact. There is no per-Provider opt-in (Alternative 4, Q2).
+- **The multi-tenant default is one import location per tenant Provider.** Give each
+  tenant's Provider its own vSphere import folder (`DefaultFolder`), its own libvirt
+  pool, or its own Proxmox storage and PVE pool. Scope that Provider's hypervisor
+  account to its location. Sharing a location is for Providers that are trusted with
+  each other's artifacts. The docs (Slice 9) state this.
 - **vSphere lookups are scoped to the import folder.** They no longer search the whole
   datacenter. The probe uses `vmsNamedInFolder` (`vm_ownership.go:290`, the #335
   Create-ownership lookup) on the resolved import folder. vCenter keeps VM names unique
   within a folder, which is exactly the uniqueness scope the probe needs, and it gives
   an atomic create-if-absent (D6).
-  - `resolveImageFolder` falls back to the datacenter VM folder only on a definite
-    `NotFound`/`MultipleFound`, as `resolveVMFolder` (`vm_ownership.go:254`) already
-    does, so every retry resolves the same location.
+  - `resolveImageFolder` falls back to the datacenter VM folder **only when
+    `DefaultFolder` is empty**. A configured folder that does not resolve (missing,
+    ambiguous, or a vCenter error) is a retryable error, so every retry resolves the
+    same location. That is stricter than `resolveVMFolder` (`vm_ownership.go:254`):
+    an artifact that lands in an unintended folder would be shared with whoever can
+    read that folder.
+  - A multi-VM OVF (one that yields a `VirtualAppImportSpec`) is `InvalidSpec`. An
+    artifact is a single template VM.
   - `prepared_image_id` becomes the template's **absolute inventory path**.
     `lookupTemplate` resolves that path exactly (`FindByInventoryPath`) and
     `absoluteTemplatePathError` accepts it, so `Create` clones the verified template
     and not whatever same-named template exists elsewhere in the datacenter.
-- **Proxmox `prepared_image_id` is the VMID**, the only template reference `Create`
-  accepts (`server.go:240`).
+- **Proxmox (Slice 6):**
+  - `prepared_image_id` is the VMID, the only template reference `Create` accepts
+    (`server.go:240`).
+  - Because a PVE stamp is weak (D3), lookups and imports are **limited to one PVE
+    pool** (`/pools`), whose ACL grants VM rights only to the provider's API token.
+    Tagged objects outside that pool are ignored.
+  - Slice 6 also includes the **create-time stamp check** (Slice 7's check, brought
+    forward for Proxmox). Before cloning, `Create` re-reads the template's stamp and
+    requires UID, digest and `vmid` to match. That catches a template edited, re-tagged
+    or recycled (a reused VMID) between prepare and create.
 - **Gotcha:** two Providers that share a location but have different permissions (for
   example, B cannot read A's datastore) will reuse an artifact that B's `Create` then
   cannot clone. That fails honestly at create time. Operators should give Providers
@@ -405,24 +438,54 @@ See Alternative 5.
     and `.virtrigaud-imageprepare-XXXXXXXXXX.partial` for the `qemu-img convert` output.
     Both names are dotfiles with reserved suffixes. They live on the pool's filesystem
     (not `/tmp`, see `image.go:292-296`) and are independent of the artifact name.
-  - Publishing runs `ln -- <sidecar.tmp> <sidecar>`, then `ln -- <artifact.tmp>
-    <artifact>`, then `rm` of the temp names. `link(2)` fails with `EEXIST` rather than
-    replacing an existing file. It is also the classic NFS-safe create-exclusive
-    primitive. On an `EEXIST` after a retransmitted NFS `LINK`, check `st_nlink` on the
-    temp file. On any `EEXIST`, re-run the D4 probe: a matching stamp means reuse and
-    delete our own temp files; anything else is a Conflict.
+  - **Finalize the `.partial` before publishing it:**
+    1. `chmod 0444` it.
+    2. `restorecon` it, for the SELinux label.
+    3. `sync -- <partial>`, so a crash never publishes unflushed data.
+    4. `stat` it to get the inode and size the sidecar records.
+
+    There is **no `chown`**. With `fs.protected_hardlinks=1`, the provider's SSH user
+    cannot hard-link a file it does not own and cannot write, so a `chown` to
+    `libvirt-qemu` would break the `ln` below. The artifact only ever needs to be read,
+    by `qemu-img convert` in `CopyImageToVolume`.
+  - **`finalizeClonedDisk` is never applied to a prepared artifact.** Its
+    `chown libvirt-qemu:kvm` and `chmod 777` (`clone.go:303-312`) are what leave
+    today's prepared image writable by any host user. The copies each VM gets from the
+    artifact are finalized as they are today.
+  - **Publishing** is `ln -- <sidecar.tmp> <sidecar>`, then `ln -- <partial>
+    <artifact>`, then `rm` of the temp names.
+    - `link(2)` fails with `EEXIST` instead of replacing an existing file. It is also
+      the classic NFS-safe exclusive-create primitive. On an NFS `EEXIST` that may come
+      from a retransmitted `LINK`, check `st_nlink` on the temp file.
+    - **Only the call that created the sidecar links the artifact.** A call whose
+      sidecar `ln` returns `EEXIST` re-runs the D4 probe:
+      - a matching sidecar with no artifact yet means in progress (retryable), or
+        abandoned once it is no longer live;
+      - a complete match means reuse, and the call deletes its own temp files;
+      - anything else is a Conflict.
+    - **If the artifact `ln` returns `EEXIST` after our sidecar was published,**
+      something else occupies the artifact name. Unlink **our** sidecar first, so it
+      never stamps someone else's file, then return a Conflict.
   - A filesystem without hard links fails the prepare with an explicit error.
   - The provider never writes, `rm`s or `convert`s onto the final name.
-  - Leftover own-pattern temp files older than the staleness bound are swept.
+  - Leftover own-pattern temp files that are not live (D4) are swept.
 - **vSphere:**
   - The OVA download already uses `os.CreateTemp` inside the pod (`image.go:610`).
     Keep it.
   - The atomic create is vCenter's per-folder name uniqueness: `ImportVApp` into a
     folder that already holds the name fails with `DuplicateName`. On `DuplicateName`,
-    re-run the D4 probe. Slice 3 confirms this behaviour on vcsim and in the lab.
+    re-run the D4 probe.
+  - **This is load-bearing, so Slice 3 cannot merge until it is verified** on vcsim
+    and in the lab. The convergence fallback is specified now and implemented anyway:
+    after the import, re-list the folder. If more than one object has the name, every
+    call whose own object is **not** the one with the lowest MOID destroys **its own**
+    object (the moref it created) and reuses the survivor after the D4 probe.
   - `cleanupPartialImport` (`image.go:720`) keeps destroying **only** the moref this
     call created.
-- **Proxmox:**
+- **Proxmox (Slice 6):**
+  - Slice 6 must first verify two things on the lab PVE: that `content=import` needs
+    PVE 8.2 or later, and how `download-url` behaves when the target file already
+    exists.
   - The `download-url` filename is random for each prepare,
     `vr-prep-<16 random hex>.<format>`, and it is deleted once the disk has been
     imported into the template VM. This removes the `<targetName>.<format>` collision
@@ -576,10 +639,10 @@ a prepare (`imageSourceNeedsPrepare`).
 |---|---|---|---|
 | Artifact | Template VM | `<pool>/<name>.qcow2` | Template VM |
 | Name | `<ns>.<name>`(cut)`_<h16>`, at most 80 | same, at most 200 plus `.qcow2` | `<ns>.<name>`(cut)`-<h16>`, at most 80 (cosmetic) |
-| Identity key used for lookup | Exact name in the import folder | Exact path in the pool | Tag `vr-img-<h16>`, then the stamp |
-| Stamp | ExtraConfig `virtrigaud.image.*` in the import spec | `.<name>.virtrigaud-image.json` | `description` block plus tags |
-| Complete when | `config.template` | File and sidecar both exist | `template=1` |
-| Atomic create | Folder name uniqueness (`DuplicateName`) | `ln` / `link(2)` `EEXIST` | Converge on the lowest VMID |
+| Identity key used for lookup | Exact name in the import folder | Exact path in the pool | Tag `vr-img-<h16>` inside the provider's PVE pool, then the stamp |
+| Stamp | ExtraConfig `virtrigaud.image.*` in the import spec | `.<name>.virtrigaud-image.json`, which also records the artifact's inode and size | `description` block with `vmid=<n>`, plus tags |
+| Complete when | `config.template` | File and sidecar both exist, and inode and size match | `template=1` and the stamp's `vmid` equals the object's VMID |
+| Atomic create | Folder name uniqueness (`DuplicateName`), with the lowest-MOID fallback | `ln` / `link(2)` `EEXIST`; only the call that created the sidecar links the artifact | Converge on the lowest VMID |
 | `prepared_image_id` / `_path` | Absolute inventory path / empty | Base name / absolute path | VMID / empty |
 | Staging | `os.CreateTemp` in the pod | `mktemp` dotfiles in the pool | Random `download-url` filename |
 | Clones must clear the stamp | Yes (hygiene) | n/a (a copy has no sidecar) | **Yes (required)** |
@@ -590,8 +653,8 @@ a prepare (`imageSourceNeedsPrepare`).
 | Hypervisor | Call | Example |
 |---|---|---|
 | vSphere | `OvfManager.CreateImportSpec` → append the stamp to `VirtualMachineImportSpec.ConfigSpec.ExtraConfig` → `ResourcePool.ImportVApp(spec, folder)` → `MarkAsTemplate` | `{Key: "virtrigaud.image.uid", Value: "5f0c…"}`, `{Key: "virtrigaud.image.sourcedigest", Value: "sha256:9b1e…"}` |
-| libvirt | `mktemp -p <pool> .virtrigaud-imageprepare-XXXXXXXXXX.partial` → `qemu-img convert -f <fmt> -O qcow2 <dl> <partial>` → `ln -- <sidecar.tmp> <sidecar>` → `ln -- <partial> <artifact>` → `rm -f -- <temps>` | sidecar: `{"stampVersion":1,"image":{"uid":"5f0c…","namespace":"team-a","name":"ubuntu-22.04"},"sourceDigest":"sha256:9b1e…","preparedBy":{"namespace":"team-a","name":"libvirt","uid":"…"},"preparedAt":"2026-09-25T10:00:00Z"}` |
-| Proxmox | `POST /nodes/{n}/storage/{s}/download-url` (`content=import`, `filename=vr-prep-<rand>.qcow2`, `checksum`, `checksum-algorithm`) → `GET /cluster/nextid` → `POST /nodes/{n}/qemu` (`vmid`, `name`, `description`, `tags`, `scsi0=<s>:0,import-from=<s>:import/vr-prep-<rand>.qcow2`) → `POST /nodes/{n}/qemu/{vmid}/template` → `DELETE` the staging volume | `tags=virtrigaud-image;vr-img-3c9e1f0a7b2d4e61` |
+| libvirt | `mktemp -p <pool> .virtrigaud-imageprepare-XXXXXXXXXX.partial` → `qemu-img convert -f <fmt> -O qcow2 <dl> <partial>` → `chmod 0444 -- <partial>` → `restorecon -- <partial>` → `sync -- <partial>` → `stat -c '%i %s' -- <partial>` → `ln -- <sidecar.tmp> <sidecar>` → `ln -- <partial> <artifact>` (on `EEXIST`: `rm -f -- <sidecar>`, then Conflict) → `rm -f -- <temps>` | sidecar: `{"stampVersion":1,"image":{"uid":"5f0c…","namespace":"team-a","name":"ubuntu-22.04"},"sourceDigest":"sha256:9b1e…","preparedBy":{"namespace":"team-a","name":"libvirt","uid":"…"},"preparedAt":"2026-09-25T10:00:00Z","artifact":{"inode":1835021,"size":2361393152}}` |
+| Proxmox | `POST /nodes/{n}/storage/{s}/download-url` (`content=import`, `filename=vr-prep-<rand>.qcow2`, `checksum`, `checksum-algorithm`) → `GET /cluster/nextid` → `POST /nodes/{n}/qemu` (`vmid`, `name`, `pool`, `description` (with `vmid=<n>`), `tags`, `scsi0=<s>:0,import-from=<s>:import/vr-prep-<rand>.qcow2`) → `POST /nodes/{n}/qemu/{vmid}/template` → `DELETE` the staging volume | `tags=virtrigaud-image;vr-img-3c9e1f0a7b2d4e61` |
 
 ---
 
