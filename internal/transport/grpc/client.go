@@ -725,7 +725,7 @@ func (c *Client) Power(ctx context.Context, vm contracts.VMRef, op contracts.Pow
 func (c *Client) Reconfigure(ctx context.Context, vm contracts.VMRef, desired contracts.CreateRequest) (taskRef string, retErr error) {
 	defer c.recordVMOp(metrics.OpReconfigure, &retErr)
 
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, contracts.ReconfigureCallTimeout)
 	defer cancel()
 
 	desiredJSON, err := json.Marshal(desired)

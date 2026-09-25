@@ -192,10 +192,10 @@ func (r *VirtualMachineReconciler) checkResizeUnderLock(
 	if err := scheduler.CheckResize(resize); err != nil {
 		return true, err
 	}
-	assumptions.Assume(providerKey, assume.Assumption{
+	assumptions.AssumeFor(providerKey, assume.Assumption{
 		UID: resize.VMUID, Namespace: vm.Namespace, Name: vm.Name, HostID: resize.Host.Name,
 		Labels: vm.Labels, Resources: resize.Desired, Resize: true,
-	})
+	}, resizeAssumeTTL)
 	return true, nil
 }
 

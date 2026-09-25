@@ -31,6 +31,7 @@ import (
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
+	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/scheduler"
 	"github.com/projectbeskar/virtrigaud/internal/scheduler/assume"
 )
@@ -52,6 +53,12 @@ const (
 	// normal path the assumption ends earlier (the record appears in the
 	// cache, or the write fails and the assumption is forgotten).
 	placementAssumeTTL = 2 * pendingHostWriteTimeout
+	// resizeAssumeTTL is how long an admitted resize's assumption lives at
+	// most (review N4): the Reconfigure call it covers may run for its full
+	// deadline, and the status write recording the new size comes after it.
+	// Like placementAssumeTTL it is a safety net; the assumption normally ends
+	// when status.currentResources records the new size.
+	resizeAssumeTTL = contracts.ReconfigureCallTimeout + placementStatusWriteTimeout
 	// placementUnschedulableMaxRetryInterval caps the backoff of a VM that no
 	// host can take. It starts at placementUnschedulableRetryInterval and
 	// doubles with each consecutive no-fit. The VM controller does not watch

@@ -221,6 +221,28 @@ func TestResizeAssumptionSettles(t *testing.T) {
 	assert.False(t, snap(recordedVM{hosts: []string{"host-beta"}}).settled(create), "not on a record elsewhere")
 }
 
+// TestResizeAssumptionOutlivesTheReconfigureCall (review N4): an admitted
+// resize stays assumed for the Reconfigure deadline plus the status-write
+// bound, not only the create path's shorter TTL.
+func TestResizeAssumptionOutlivesTheReconfigureCall(t *testing.T) {
+	require.GreaterOrEqual(t, resizeAssumeTTL, contracts.ReconfigureCallTimeout+placementStatusWriteTimeout)
+	require.Greater(t, resizeAssumeTTL, placementAssumeTTL)
+
+	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
+	vm := wantsCPU(sized("app", 2), 4)
+	r := resizeFixture(t, runningRoutingProvider(), vm)
+	r.clock = func() time.Time { return now }
+	_, admitted, err := r.admitClusteredResize(context.Background(), getVM(t, r, "app"),
+		withRuntime(clusteredProviderCR("prov-cluster", capNS)), smallVMClass(capNS), "host-alpha")
+	require.NoError(t, err)
+	require.True(t, admitted)
+
+	now = now.Add(placementAssumeTTL + time.Minute)
+	assert.Equal(t, []string{"uid-app"}, assumedUIDs(r), "still assumed after the create TTL")
+	now = now.Add(resizeAssumeTTL)
+	assert.Empty(t, assumedUIDs(r), "gone after its own TTL")
+}
+
 // panickingListClient panics on every VirtualMachine List: a stand-in for a
 // bug anywhere under the Provider's assume lock.
 type panickingListClient struct{ client.Client }
