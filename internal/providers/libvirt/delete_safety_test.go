@@ -214,6 +214,19 @@ func TestDelete_SingleHost_LinkedClone(t *testing.T) {
 	}
 }
 
+// TestDomainDiskPaths_RunningLinkedClone pins the disk list every other reader
+// shares (clone source resolution, disk info and its allow-list): a running
+// linked clone's disks are its own overlay only, never the source disk its
+// <backingStore> names.
+func TestDomainDiskPaths_RunningLinkedClone(t *testing.T) {
+	c := newCreateHost(t)
+	src, clone := c.linkedPair(true)
+	c.liveBackingStore("h1", "team-b.copy", clone, src)
+	disks, err := domainDiskPaths(context.Background(), c.vp, "team-b.copy")
+	require.NoError(t, err)
+	assert.Equal(t, []string{clone}, disks)
+}
+
 func TestDelete_SingleHost_FullCloneIsIndependent(t *testing.T) {
 	for _, first := range []string{"team-a.web", "team-b.copy"} {
 		t.Run("delete "+first+" first", func(t *testing.T) {
