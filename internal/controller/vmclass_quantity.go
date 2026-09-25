@@ -21,6 +21,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/resource"
 
+	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 )
 
@@ -38,6 +39,17 @@ const (
 	// maxVMClassDiskBytes is the exclusive VMClass diskDefaults.size maximum
 	// (1Pi), matching the CRD's validation rules on it.
 	maxVMClassDiskBytes = int64(1) << 50
+	// maxVMClassCPU is the CRD maximum for both VMClass.Spec.CPU and
+	// VirtualMachineResources.CPU (vmclass_types.go / virtualmachine_types.go
+	// both cap at 128 vCPUs via kubebuilder Maximum). The operator enforces it
+	// again in effectiveResources, for a spec.resources override stored before
+	// that CRD validation existed.
+	maxVMClassCPU = int32(128)
+	// minVMClassCPU is the CRD minimum for both fields (kubebuilder Minimum=1).
+	minVMClassCPU = int32(1)
+	// minVMResourceOverrideMemoryMiB is the CRD minimum for
+	// VirtualMachineResources.MemoryMiB (kubebuilder Minimum=128).
+	minVMResourceOverrideMemoryMiB = int64(128)
 )
 
 // vmClassQuantityUnits converts a VMClass quantity into whole units of
@@ -55,4 +67,60 @@ func vmClassQuantityUnits(field string, q resource.Quantity, unitBytes, maxBytes
 			field, q.String(), resource.NewQuantity(maxBytes, resource.BinarySI).String()), nil)
 	}
 	return int32(q.Value() / unitBytes), nil // #nosec G115 -- bounded above: maxBytes/unitBytes < MaxInt32
+}
+
+// effectiveResources computes the CPU and memory (MiB) a VirtualMachine
+// actually asks a provider for: the VMClass values with any spec.resources
+// override applied, field by field. It is the single place that computes
+// this — used to build a Create/Reconfigure request, to decide in
+// needsReconfigure whether one is needed, and to record what a confirmed
+// Create/Reconfigure applied in status.currentResources — so a
+// spec.resources override can no longer be compared against and recorded in
+// status.currentResources (needsReconfigure, updateCurrentResources) while
+// never actually being sent to the provider (buildCreateRequest), which is
+// what let a VM report a size it never had.
+//
+// An override is validated against the same bounds a VMClass value is
+// validated against: vmClassQuantityUnits for memory (so it can never
+// overflow the int32 the wire contract carries), and [minVMClassCPU,
+// maxVMClassCPU] for CPU — matching the CRD's own kubebuilder bounds on both
+// VMClass and VirtualMachineResources, enforced again here for an object
+// stored before that CRD validation existed. An out-of-bounds override
+// returns an InvalidSpec error naming the field: never a clamped, wrapped, or
+// silently-ignored value, and never a provider call.
+func effectiveResources(
+	vm *infravirtrigaudiov1beta1.VirtualMachine,
+	vmClass *infravirtrigaudiov1beta1.VMClass,
+) (cpu int32, memoryMiB int32, err error) {
+	cpu = vmClass.Spec.CPU
+	memoryMiB, err = vmClassQuantityUnits("memory", vmClass.Spec.Memory, bytesPerMiB, maxVMClassMemoryBytes)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	res := vm.Spec.Resources
+	if res == nil {
+		return cpu, memoryMiB, nil
+	}
+
+	if res.CPU != nil {
+		overrideCPU := *res.CPU
+		if overrideCPU < minVMClassCPU || overrideCPU > maxVMClassCPU {
+			return 0, 0, contracts.NewInvalidSpecError(
+				fmt.Sprintf("spec.resources.cpu %d is out of range [%d, %d]", overrideCPU, minVMClassCPU, maxVMClassCPU), nil)
+		}
+		cpu = overrideCPU
+	}
+
+	if res.MemoryMiB != nil {
+		overrideMiB := *res.MemoryMiB
+		maxMemoryMiB := maxVMClassMemoryBytes / bytesPerMiB
+		if overrideMiB < minVMResourceOverrideMemoryMiB || overrideMiB >= maxMemoryMiB {
+			return 0, 0, contracts.NewInvalidSpecError(
+				fmt.Sprintf("spec.resources.memoryMiB %d is not in range [%d, %d)", overrideMiB, minVMResourceOverrideMemoryMiB, maxMemoryMiB), nil)
+		}
+		memoryMiB = int32(overrideMiB) // #nosec G115 -- bounded above by maxMemoryMiB, itself far below MaxInt32
+	}
+
+	return cpu, memoryMiB, nil
 }

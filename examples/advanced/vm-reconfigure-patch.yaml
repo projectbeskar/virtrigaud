@@ -49,12 +49,20 @@ spec:
       sizeGiB: 20
       type: "thin"
 
-# The controller will detect these changes and:
-# 1. Try online reconfiguration if supported by the provider
-# 2. If online reconfiguration fails, orchestrate a graceful power cycle:
-#    a. Set condition ReconfigurePendingPowerCycle=True
-#    b. Power off the VM
-#    c. Apply the reconfiguration
-#    d. Power on the VM
-#    e. Update status.lastReconfigureTime
-# 3. Emit events and update conditions throughout the process
+# The controller detects any change between the VM's effective resources
+# (this VMClass with spec.resources applied on top, field by field — an
+# override outside the VMClass's own CPU/memory bounds is refused with
+# Reconfiguring=False/ValidationError and never sent to the provider) and
+# status.currentResources, then sends ONE Reconfigure request per provider
+# reconcile:
+# 1. The provider applies what it can online (see the Libvirt note above;
+#    vSphere and Proxmox apply CPU/memory online when the guest OS and
+#    hypervisor allow it).
+# 2. Anything that cannot be applied online is written to the VM's offline
+#    configuration instead and takes effect on its next power cycle — the
+#    controller does NOT power the VM off and back on for you. The provider
+#    logs a WARN when this happens; check it (or the guest's actual CPU/
+#    memory) if you need the new size to take effect immediately.
+# 3. status.currentResources, status.lastReconfigureTime and the
+#    Reconfiguring condition are updated once the provider confirms the
+#    request — never before, and never to a size that was not actually sent.
