@@ -46,6 +46,8 @@ func TestImagePrepareResponse_ConfirmsIdentity(t *testing.T) {
 		"another uid":    {req, echo("uid-2", digest), false},
 		"another digest": {req, echo("uid-1", otherDigest), false},
 		"empty echo":     {req, echo("", ""), false},
+		"matching uid and digest but no artifact name": {req, ImagePrepareResponse{Artifact: &PreparedArtifact{
+			Image: ObjectIdentity{UID: "uid-1"}, SourceDigest: digest}}, false},
 		"request without identity (legacy) confirms nothing": {
 			ImagePrepareRequest{TargetName: "ubuntu"}, echo("", ""), false},
 		"request without digest confirms nothing": {

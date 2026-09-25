@@ -80,6 +80,12 @@ type ImagePrepareResponse struct {
 // PreparedArtifact is the manager-side mirror of the provider.v1
 // PreparedArtifact message: the stamp of a prepared-image artifact (ADR-0009
 // D3). Only Image.UID and SourceDigest are authoritative.
+//
+// Everything in it comes from the hypervisor (the stamp the provider read or
+// wrote), and anyone with write access to the image location can shape it:
+// Image.Namespace and Image.Name in particular are untrusted. Never copy them
+// into conditions, events or log messages as if they were facts; name the
+// request's own VMImage instead (ADR-0009 D11).
 type PreparedArtifact struct {
 	// Name is the hypervisor-side artifact name the provider derived (D1).
 	Name string
@@ -93,13 +99,18 @@ type PreparedArtifact struct {
 }
 
 // ConfirmsIdentity reports whether r proves that the provider prepared (or
-// verified) the artifact for req's identity: r carries an Artifact whose
-// Image.UID and SourceDigest are non-empty and equal req's (ADR-0009 D7). A
-// response that does not confirm the identity — no Artifact (an older
-// provider, or legacy mode), or another UID or digest — must not be recorded
-// as prepared. Namespace, Name and Reused are never consulted.
+// verified) the artifact for req's identity: r carries an Artifact with a
+// non-empty Name whose Image.UID and SourceDigest are non-empty and equal
+// req's (ADR-0009 D7). A response that does not confirm the identity — no
+// Artifact (an older provider, or legacy mode), no artifact name, or another
+// UID or digest — must not be recorded as prepared. The echoed namespace and
+// name and Reused are never consulted (see PreparedArtifact).
+//
+// Artifact.Name is not compared with PreparedImageID: they differ by design on
+// vSphere (the id is the template's absolute inventory path) and Proxmox (the
+// id is the VMID); only libvirt uses the artifact name as the id.
 func (r ImagePrepareResponse) ConfirmsIdentity(req ImagePrepareRequest) bool {
-	if r.Artifact == nil || req.Image.IsZero() || req.SourceDigest == "" {
+	if r.Artifact == nil || r.Artifact.Name == "" || req.Image.IsZero() || req.SourceDigest == "" {
 		return false
 	}
 	return r.Artifact.Image.UID == req.Image.UID && r.Artifact.SourceDigest == req.SourceDigest
