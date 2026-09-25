@@ -279,8 +279,10 @@ func (r *VirtualMachineReconciler) EnsureImageOnProvider(
 	//     owns the old and the new Provider;
 	//   - an entry with no UID cannot be tied to any Provider object, so it is
 	//     never trusted: the create is held with reason ProviderUIDMissing,
-	//     telling the image's owner to record the Provider's UID (or to switch to
-	//     Import). Only creates wait on this: a VM that exists never prepares
+	//     telling the image's owner to switch spec.prepare.onMissing to Import
+	//     so this controller re-validates it through the Provider. It never asks
+	//     anyone to write VMImage status: this controller is its single writer
+	//     (ADR-0005). Only creates wait on this: a VM that exists never prepares
 	//     its image.
 	stale := found && !recordedThrough
 	if stale && entry.Available && imageMissingAction(vmImage) != infravirtrigaudiov1beta1.ImageMissingActionImport {
@@ -289,8 +291,8 @@ func (r *VirtualMachineReconciler) EnsureImageOnProvider(
 				"provider", key, "image", vmImage.Name, "onMissing", string(imageMissingAction(vmImage)))
 			return false, r.holdImage(ctx, vmImage, imageMissingAction(vmImage), imageReasonProviderUIDMissing, fmt.Sprintf(
 				"status.providerStatus[%q] is available but records no providerUID, so it cannot be tied to that Provider "+
-					"and is not used; set its providerUID to the Provider's UID, or set spec.prepare.onMissing to Import "+
-					"to re-validate it through the Provider", key))
+					"and is not used; set spec.prepare.onMissing to Import so the controller re-validates it through "+
+					"the Provider", key))
 		}
 		logger.Info("WARNING: accepting prepare state recorded through a previous object of this Provider; "+
 			"Prepare.OnMissing forbids the prepare that would re-validate it",

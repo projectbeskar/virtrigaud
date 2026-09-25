@@ -94,10 +94,12 @@ another namespace with a Provider of its own namespace, so a bare-name entry is 
 guaranteed to come from the VMImage's own namespace. That is why a migrated entry is
 re-validated rather than trusted. Until a `VMImage` is migrated, its bare-name entries are
 simply ignored. If the migration drops every available entry, `status.ready` becomes
-`false` with reason `PrepareStateDropped` until the next prepare. An out-of-band preparer
-(used with `onMissing: Wait`) must now write `providerStatus["<namespace>/<name>"]` with
-`available: true` and `providerUID` set to the Provider's UID; an entry without it holds
-creates (reason `ProviderUIDMissing`).
+`false` with reason `PrepareStateDropped` until the next prepare. An entry without
+`providerUID` (for example one written by an older manager) is never trusted: under
+`onMissing: Fail` or `Wait` it holds creates (reason `ProviderUIDMissing`) until the image's
+owner switches `onMissing` to `Import`, so the controller re-validates it through the
+Provider. `VMImage.status` has a single writer, the VirtualMachine controller (ADR-0005): do
+not write it by hand, and do not grant `vmimages/status` to anyone else.
 
 The VMImage CRD must be upgraded before the manager (as for the other CRD changes of this
 release): an older CRD prunes `providerUID` and `taskRef`, so no prepared image would be

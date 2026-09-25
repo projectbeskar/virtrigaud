@@ -230,7 +230,10 @@ func TestReconcileVM_WaitWithoutProviderUIDHoldsTheCreate(t *testing.T) {
 			cond := meta.FindStatusCondition(got.Status.Conditions, infrav1beta1.VMImageConditionReady)
 			require.NotNil(t, cond)
 			assert.Equal(t, imageReasonProviderUIDMissing, cond.Reason)
-			assert.Contains(t, cond.Message, "set its providerUID")
+			assert.Contains(t, cond.Message, "set spec.prepare.onMissing to Import")
+			// VMImage status has a single writer (ADR-0005): the hold must
+			// never ask anyone to write providerUID by hand.
+			assert.NotContains(t, cond.Message, "set its providerUID")
 			assert.Empty(t, got.Status.ProviderStatus[bpNS+"/shared"].ProviderUID, "nothing is adopted")
 		})
 	}
