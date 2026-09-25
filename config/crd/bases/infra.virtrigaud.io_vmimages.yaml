@@ -848,9 +848,12 @@ spec:
                         (an entry from an earlier release) is re-validated: the idempotent
                         prepare is issued again through the current Provider, which confirms (or
                         re-creates) the prepared image, and its UID is recorded. When
-                        spec.prepare.onMissing forbids preparing (Fail, Wait), such an entry
-                        that is available is accepted as is, with a warning, and the current
-                        UID recorded.
+                        spec.prepare.onMissing forbids preparing (Fail, Wait), an available
+                        entry recorded through a previous object of the same Provider is
+                        accepted as is, with a warning, and the current UID recorded; an entry
+                        with no UID is never used and VM creates wait (reason
+                        ProviderUIDMissing) until this field is set. The prepare runs only
+                        before a VM is created, never for a VM that exists.
                       type: string
                     size:
                       anyOf:
