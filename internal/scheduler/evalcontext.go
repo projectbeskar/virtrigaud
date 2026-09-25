@@ -37,9 +37,15 @@ type evalContext struct {
 	cpuRatio float64
 	memRatio float64
 
-	// placedByHost maps a host id to the VMs already placed on it (from
-	// Request.PlacedVMs), used for VM (anti-)affinity and bound-VM counts.
+	// placedByHost maps a host id to the VMs placed on it that are in the
+	// scheduled VM's affinity scope (Request.PlacedVMs not marked CapacityOnly),
+	// used for VM (anti-)affinity and bound-VM counts.
 	placedByHost map[string][]PlacedVM
+
+	// committedByHost maps a host id to the resources every PlacedVM on it
+	// holds (bound, pending or assumed; any namespace), each (UID, host) pair
+	// counted once. It is subtracted from the host's effective capacity.
+	committedByHost map[string]committed
 
 	// Policy sub-structs, nil when the policy (or that section) is absent.
 	hard         *v1beta1.PlacementConstraints
@@ -47,6 +53,18 @@ type evalContext struct {
 	affinity     *v1beta1.AffinityRules
 	antiAffinity *v1beta1.AntiAffinityRules
 	resources    *v1beta1.ResourceConstraints
+}
+
+// committed is the CPU (vCPUs) and memory (MiB) summed over the VMs on one host.
+type committed struct {
+	cpu    int64
+	memMiB int64
+}
+
+// placedKey identifies one PlacedVM entry for de-duplication: a VM counts once
+// per host.
+type placedKey struct {
+	uid, host string
 }
 
 // newEvalContext parses the request into an evalContext, returning an error for a
@@ -60,18 +78,41 @@ func newEvalContext(req Request) (*evalContext, error) {
 	}
 
 	placedByHost := make(map[string][]PlacedVM, len(req.PlacedVMs))
+	committedByHost := make(map[string]committed, len(req.PlacedVMs))
+	seen := make(map[placedKey]struct{}, len(req.PlacedVMs))
 	for _, p := range req.PlacedVMs {
 		if p.HostID == "" {
 			continue
 		}
-		placedByHost[p.HostID] = append(placedByHost[p.HostID], p)
+		if p.UID != "" {
+			// The VM being scheduled never competes with itself (its own
+			// binding, pending host or an earlier assumption of its own).
+			if p.UID == req.VMUID {
+				continue
+			}
+			// A VM listed twice for one host (its durable record and an
+			// assumption not yet cleared, or host == pendingHost) counts once.
+			k := placedKey{uid: p.UID, host: p.HostID}
+			if _, dup := seen[k]; dup {
+				continue
+			}
+			seen[k] = struct{}{}
+		}
+		c := committedByHost[p.HostID]
+		c.cpu += nonNegative(int64(p.Resources.CPU))
+		c.memMiB += nonNegative(p.Resources.MemoryMiB)
+		committedByHost[p.HostID] = c
+		if !p.CapacityOnly {
+			placedByHost[p.HostID] = append(placedByHost[p.HostID], p)
+		}
 	}
 
 	ec := &evalContext{
-		req:          req,
-		cpuRatio:     cpuRatio,
-		memRatio:     memRatio,
-		placedByHost: placedByHost,
+		req:             req,
+		cpuRatio:        cpuRatio,
+		memRatio:        memRatio,
+		placedByHost:    placedByHost,
+		committedByHost: committedByHost,
 	}
 	if req.Policy != nil {
 		ec.hard = req.Policy.Spec.Hard
@@ -84,18 +125,38 @@ func newEvalContext(req Request) (*evalContext, error) {
 }
 
 // effectiveCapacity returns the host's schedulable CPU and memory AFTER the pool's
-// overcommit ratios — the capacity the VM fit-check and the strategy score both
-// use. A nil allocatable field reads as 0, so an un-synced host fails fit for any
-// positive request (honesty-first: unknown capacity is not bookable).
+// overcommit ratios, before anything committed is subtracted. Host.status
+// allocatableCPU / allocatableMemoryMiB are host TOTALS (libvirt: virsh
+// nodeinfo), so this is the total the pool lets VMs book. A nil allocatable
+// field reads as 0, so an un-synced host fails fit for any positive request
+// (honesty-first: unknown capacity is not bookable).
 func (ec *evalContext) effectiveCapacity(h *v1beta1.Host) (cpu int64, memMiB int64) {
 	cpu = int64(float64(int32Deref(h.Status.AllocatableCPU)) * ec.cpuRatio)
 	memMiB = int64(float64(int64Deref(h.Status.AllocatableMemoryMiB)) * ec.memRatio)
 	return cpu, memMiB
 }
 
-// boundCount is the number of VMs already placed on the host, computed from the
-// authoritative Request.PlacedVMs set (the operator owns the binding, ADR-0007 D1).
-// It drives the spread/binpack tie-break and the host-anti-affinity VM cap.
+// committedOn returns the resources already committed to the host by bound,
+// pending and assumed VMs (Request.PlacedVMs, the scheduled VM excluded).
+func (ec *evalContext) committedOn(hostID string) committed {
+	return ec.committedByHost[hostID]
+}
+
+// freeCapacity returns the host's effective capacity minus what is committed to
+// it: the capacity the fit check and the strategy score use. The overcommit
+// ratio scales the capacity only, never the committed sum. The result is
+// negative when more is committed than the pool now allows (e.g. a lowered
+// overcommit ratio); such a host fits nothing.
+func (ec *evalContext) freeCapacity(h *v1beta1.Host) (cpu int64, memMiB int64) {
+	effCPU, effMem := ec.effectiveCapacity(h)
+	c := ec.committedOn(h.Name)
+	return effCPU - c.cpu, effMem - c.memMiB
+}
+
+// boundCount is the number of VMs in the scheduled VM's affinity scope placed
+// on the host (bound, pending or assumed), computed from the authoritative
+// Request.PlacedVMs set (the operator owns the binding, ADR-0007 D1). It drives
+// the spread/binpack tie-break and the host-anti-affinity VM cap.
 func (ec *evalContext) boundCount(hostID string) int {
 	return len(ec.placedByHost[hostID])
 }
@@ -149,6 +210,15 @@ func int32Deref(p *int32) int64 {
 		return 0
 	}
 	return int64(*p)
+}
+
+// nonNegative returns v, or 0 when v is negative (a malformed demand never
+// frees capacity).
+func nonNegative(v int64) int64 {
+	if v < 0 {
+		return 0
+	}
+	return v
 }
 
 // int64Deref returns the pointed-to int64, or 0 for a nil pointer.

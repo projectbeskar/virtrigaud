@@ -62,7 +62,9 @@ func (ec *evalContext) pickBest(feasible []*v1beta1.Host) (Result, error) {
 		if err != nil {
 			return Result{}, err
 		}
-		cpu, mem := ec.effectiveCapacity(h)
+		// Free = effective capacity minus committed: Spread picks the host with
+		// the most left, BinPack the one with the least that still fits.
+		cpu, mem := ec.freeCapacity(h)
 		s := &hostScore{
 			host:       h,
 			preference: pref,
