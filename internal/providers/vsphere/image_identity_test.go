@@ -219,8 +219,9 @@ func stampOf(t *testing.T, p *Provider, ref types.ManagedObjectReference) (*imag
 // exists reports whether ref still exists.
 func exists(t *testing.T, p *Provider, ref types.ManagedObjectReference) bool {
 	t.Helper()
-	var vm mo.VirtualMachine
-	err := property.DefaultCollector(p.client.Client).RetrieveOne(context.Background(), ref, []string{propName}, &vm)
+	var content []types.ObjectContent
+	err := property.DefaultCollector(p.client.Client).Retrieve(context.Background(),
+		[]types.ManagedObjectReference{ref}, []string{propName}, &content)
 	return err == nil
 }
 
@@ -255,48 +256,126 @@ func minimalOVAURL(t *testing.T) string {
 	return ovaURL
 }
 
+// duplicateNameMode selects how importFixture emulates vCenter's per-folder
+// name uniqueness.
+type duplicateNameMode int
+
+const (
+	// noDuplicateName leaves vcsim's behaviour (no uniqueness for ImportVApp).
+	noDuplicateName duplicateNameMode = iota
+	// duplicateNameViaLease reports DuplicateName through the HttpNfcLease's
+	// error, as vCenter 8.0.2 does (verified in the lab, 2026-09-25):
+	// ImportVApp returns a lease, and lease.Wait fails.
+	duplicateNameViaLease
+	// duplicateNameSync fails ImportVApp itself with a DuplicateName SOAP
+	// fault (handled too, in case another vCenter version does).
+	duplicateNameSync
+)
+
 // importFixture wraps the vim25 round-tripper around ImportVApp:
 //   - beforeImport runs once, right before the first ImportVApp reaches vcsim
 //     (a concurrent prepare creating its object first, with a lower MOID);
 //   - duplicateName emulates vCenter's per-folder name uniqueness, which vcsim
 //     does not model for ImportVApp (TestVcsimImportVAppAllowsDuplicateNames):
-//     an ImportVApp whose entity name is taken in the target folder fails with
-//     a DuplicateName fault;
+//     an ImportVApp whose entity name is taken in the target folder (by any
+//     child, case-insensitively) fails with DuplicateName, through the lease
+//     or synchronously;
+//   - afterDuplicate runs after each emulated DuplicateName;
 //   - afterComplete runs once, after the first successful HttpNfcLeaseComplete
 //     (a concurrent prepare creating its object after ours, higher MOID).
 type importFixture struct {
 	soap.RoundTripper
-	c             *vim25.Client
-	duplicateName bool
-	beforeImport  func(folder types.ManagedObjectReference, name string)
-	afterComplete func()
-	beforeOnce    sync.Once
-	afterOnce     sync.Once
+	c              *vim25.Client
+	duplicateName  duplicateNameMode
+	beforeImport   func(folder types.ManagedObjectReference, name string)
+	afterDuplicate func()
+	afterComplete  func()
+	beforeOnce     sync.Once
+	afterOnce      sync.Once
+
+	mu          sync.Mutex
+	pendingDup  *types.DuplicateName // lease mode: the fault the next lease error becomes
+	importVApps int
 }
 
 func (f *importFixture) RoundTrip(ctx context.Context, req, res soap.HasFault) error {
 	if r, ok := req.(*methods.ImportVAppBody); ok && r.Req != nil && r.Req.Folder != nil {
+		f.mu.Lock()
+		f.importVApps++
+		f.mu.Unlock()
 		if spec, ok := r.Req.Spec.(*types.VirtualMachineImportSpec); ok {
 			name := spec.ConfigSpec.Name
 			if f.beforeImport != nil {
 				f.beforeOnce.Do(func() { f.beforeImport(*r.Req.Folder, name) })
 			}
-			if f.duplicateName {
-				if taken, err := f.childNamed(ctx, *r.Req.Folder, name); err != nil {
+			if f.duplicateName != noDuplicateName {
+				taken, err := f.childNamed(ctx, *r.Req.Folder, name)
+				if err != nil {
 					return err
-				} else if taken != nil {
-					fault := &soap.Fault{Code: "ServerFaultCode", String: "The name '" + name + "' already exists."}
-					fault.Detail.Fault = &types.DuplicateName{Name: name, Object: *taken}
-					return soap.WrapSoapFault(fault)
+				}
+				if taken != nil {
+					dup := &types.DuplicateName{Name: name, Object: *taken}
+					if f.afterDuplicate != nil {
+						defer f.afterDuplicate()
+					}
+					if f.duplicateName == duplicateNameSync {
+						fault := &soap.Fault{Code: "ServerFaultCode", String: "The name '" + name + "' already exists."}
+						fault.Detail.Fault = dup
+						return soap.WrapSoapFault(fault)
+					}
+					// Lease mode: let vcsim fail the entity creation (an
+					// empty name is an InvalidVmConfig), and turn the lease's
+					// error into the DuplicateName vCenter reports.
+					f.mu.Lock()
+					f.pendingDup = dup
+					f.mu.Unlock()
+					spec.ConfigSpec.Name = ""
 				}
 			}
 		}
 	}
 	err := f.RoundTripper.RoundTrip(ctx, req, res)
+	if body, ok := res.(*methods.WaitForUpdatesExBody); ok && err == nil && body.Res != nil && body.Res.Returnval != nil {
+		f.rewriteLeaseError(body.Res.Returnval)
+	}
 	if _, ok := req.(*methods.HttpNfcLeaseCompleteBody); ok && err == nil && f.afterComplete != nil {
 		f.afterOnce.Do(f.afterComplete)
 	}
 	return err
+}
+
+// rewriteLeaseError replaces a pending lease error with the DuplicateName.
+func (f *importFixture) rewriteLeaseError(set *types.UpdateSet) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.pendingDup == nil {
+		return
+	}
+	for i := range set.FilterSet {
+		for j := range set.FilterSet[i].ObjectSet {
+			obj := &set.FilterSet[i].ObjectSet[j]
+			if obj.Obj.Type != "HttpNfcLease" {
+				continue
+			}
+			for k := range obj.ChangeSet {
+				if obj.ChangeSet[k].Name == "error" && obj.ChangeSet[k].Val != nil {
+					obj.ChangeSet[k].Val = types.LocalizedMethodFault{
+						Fault:            f.pendingDup,
+						LocalizedMessage: "The name '" + f.pendingDup.Name + "' already exists.",
+					}
+					f.pendingDup = nil
+					return
+				}
+			}
+		}
+	}
+}
+
+// imports is how many ImportVApp calls reached the fixture.
+func (f *importFixture) imports() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.importVApps
 }
 
 func (f *importFixture) childNamed(ctx context.Context, folder types.ManagedObjectReference, name string) (*types.ManagedObjectReference, error) {
@@ -304,17 +383,20 @@ func (f *importFixture) childNamed(ctx context.Context, folder types.ManagedObje
 	if err := property.DefaultCollector(f.c).RetrieveOne(ctx, folder, []string{"childEntity"}, &fo); err != nil {
 		return nil, err
 	}
+	// Like vCenter: any child entity (VM, vApp, folder) holds its name, and
+	// names compare case-insensitively.
 	for _, child := range fo.ChildEntity {
-		if child.Type != virtualMachineMoType {
-			continue
-		}
-		var vm mo.VirtualMachine
-		if err := property.DefaultCollector(f.c).RetrieveOne(ctx, child, []string{propName}, &vm); err != nil {
+		var content []types.ObjectContent
+		if err := property.DefaultCollector(f.c).Retrieve(ctx, []types.ManagedObjectReference{child}, []string{propName}, &content); err != nil {
 			return nil, err
 		}
-		if vm.Name == name {
-			c := child
-			return &c, nil
+		for _, oc := range content {
+			for _, prop := range oc.PropSet {
+				if s, ok := prop.Val.(string); ok && prop.Name == propName && strings.EqualFold(s, name) {
+					c := child
+					return &c, nil
+				}
+			}
 		}
 	}
 	return nil, nil
@@ -878,32 +960,94 @@ func TestIdentityPrepare_DuplicateNameReprobes(t *testing.T) {
 			extra: func() []types.BaseOptionValue { return stampConfig(testOtherUID, testDigestA, time.Now()) }, template: true, wantCode: codes.AlreadyExists,
 		},
 	} {
+		for modeName, mode := range map[string]duplicateNameMode{
+			"through the lease (vCenter 8.0.2)": duplicateNameViaLease,
+			"from ImportVApp":                   duplicateNameSync,
+		} {
+			t.Run(name+", "+modeName, func(t *testing.T) {
+				p, _, logs := newIdentitySim(t, "")
+				folder := defaultVMFolder(t, p)
+				artifact := artifactNameFor(t, testImageUID, testDigestA)
+				var planted types.ManagedObjectReference
+				installImportFixture(p, &importFixture{
+					duplicateName: mode,
+					// Another prepare wins the race between our probe and our import.
+					beforeImport: func(_ types.ManagedObjectReference, n string) {
+						planted = plantVM(t, p, folder, n, tc.extra(), tc.template)
+					},
+				})
+
+				resp, err := p.ImagePrepare(context.Background(), identityReq(t, minimalOVAURL(t), testImageUID, testDigestA))
+				if tc.wantCode == codes.OK {
+					require.NoError(t, err)
+					assert.True(t, resp.GetArtifact().GetReused())
+					assert.Equal(t, "/DC0/vm/"+artifact, resp.GetPreparedImageId())
+				} else {
+					requireCode(t, err, tc.wantCode)
+				}
+				assert.Equal(t, []types.ManagedObjectReference{planted}, objectsNamed(t, p, folder, artifact),
+					"exactly the winner's object remains")
+				assert.Contains(t, logs.String(), "DuplicateName")
+			})
+		}
+	}
+}
+
+// TestIdentityPrepare_DuplicateNameHeldOutOfSight: vCenter refuses the name
+// for an object the folder probe cannot see (a folder or vApp with the name, or
+// a VM whose name differs only in case). The prepare is a Conflict at once — it
+// does not import, and re-download, again and again — and the holder is left
+// alone. A holder that disappears meanwhile (a concurrent prepare destroying
+// its own) is not a conflict: the import is retried.
+func TestIdentityPrepare_DuplicateNameHeldOutOfSight(t *testing.T) {
+	artifact := artifactNameFor(t, testImageUID, testDigestA)
+	for name, plant := range map[string]func(t *testing.T, p *Provider) types.ManagedObjectReference{
+		"a folder with the name": func(t *testing.T, p *Provider) types.ManagedObjectReference {
+			return subFolder(t, p, artifact).Reference()
+		},
+		"a VM whose name differs in case": func(t *testing.T, p *Provider) types.ManagedObjectReference {
+			return plantVM(t, p, defaultVMFolder(t, p), strings.ToUpper(artifact),
+				stampConfig(testImageUID, testDigestA, time.Now()), true)
+		},
+	} {
 		t.Run(name, func(t *testing.T) {
 			p, _, logs := newIdentitySim(t, "")
-			folder := defaultVMFolder(t, p)
-			artifact := artifactNameFor(t, testImageUID, testDigestA)
-			var planted types.ManagedObjectReference
-			installImportFixture(p, &importFixture{
-				duplicateName: true,
-				// Another prepare wins the race between our probe and our import.
-				beforeImport: func(_ types.ManagedObjectReference, n string) {
-					planted = plantVM(t, p, folder, n, tc.extra(), tc.template)
-				},
-			})
+			holder := plant(t, p)
+			fx := &importFixture{duplicateName: duplicateNameViaLease}
+			installImportFixture(p, fx)
+			u, hits := countingServer(t, ".ova", tarOVA(t, minimalDisklessOVF))
 
-			resp, err := p.ImagePrepare(context.Background(), identityReq(t, minimalOVAURL(t), testImageUID, testDigestA))
-			if tc.wantCode == codes.OK {
-				require.NoError(t, err)
-				assert.True(t, resp.GetArtifact().GetReused())
-				assert.Equal(t, "/DC0/vm/"+artifact, resp.GetPreparedImageId())
-			} else {
-				requireCode(t, err, tc.wantCode)
-			}
-			assert.Equal(t, []types.ManagedObjectReference{planted}, objectsNamed(t, p, folder, artifact),
-				"exactly the winner's object remains")
-			assert.Contains(t, logs.String(), "DuplicateName")
+			_, err := p.ImagePrepare(context.Background(), identityReq(t, u, testImageUID, testDigestA))
+			requireCode(t, err, codes.AlreadyExists)
+			assert.Equal(t, int32(1), hits.Load(), "downloaded once")
+			assert.Equal(t, 1, fx.imports(), "imported once: no loop")
+			assert.True(t, exists(t, p, holder), "the holder is left alone")
+			assert.Contains(t, logs.String(), "held by an object that is not a VM with exactly that name")
+			assert.Empty(t, objectsNamed(t, p, defaultVMFolder(t, p), artifact))
 		})
 	}
+
+	t.Run("a holder that vanished is retried, not a conflict", func(t *testing.T) {
+		p, _, _ := newIdentitySim(t, "")
+		folder := defaultVMFolder(t, p)
+		var peer types.ManagedObjectReference
+		fx := &importFixture{duplicateName: duplicateNameViaLease}
+		fx.beforeImport = func(_ types.ManagedObjectReference, n string) {
+			peer = plantVM(t, p, folder, n, stampConfig(testImageUID, testDigestA, time.Now()), false)
+		}
+		// The peer converges and destroys its own object right after our
+		// DuplicateName, before we probe again.
+		fx.afterDuplicate = func() { require.NoError(t, p.destroyVM(context.Background(), peer)) }
+		installImportFixture(p, fx)
+
+		resp, err := p.ImagePrepare(context.Background(), identityReq(t, minimalOVAURL(t), testImageUID, testDigestA))
+		require.NoError(t, err)
+		assert.False(t, resp.GetArtifact().GetReused())
+		assert.Equal(t, 2, fx.imports())
+		refs := objectsNamed(t, p, folder, artifact)
+		require.Len(t, refs, 1)
+		assert.NotEqual(t, peer, refs[0])
+	})
 }
 
 func TestIdentityPrepare_LowestMOIDConvergence(t *testing.T) {

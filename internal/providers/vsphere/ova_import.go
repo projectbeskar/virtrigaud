@@ -88,6 +88,33 @@ func stripReservedExtraConfig(spec types.BaseImportSpec) []string {
 // atomic create-if-absent of ADR-0009 D6.
 var errArtifactNameTaken = stderrors.New("an object with the artifact name already exists in the import folder")
 
+// nameTakenError is the errArtifactNameTaken of a DuplicateName fault: holder
+// is the object vCenter says holds the name (DuplicateName.object; zero when
+// the fault does not say).
+type nameTakenError struct {
+	holder types.ManagedObjectReference
+}
+
+// Error implements error.
+func (e *nameTakenError) Error() string { return errArtifactNameTaken.Error() }
+
+// Unwrap returns errArtifactNameTaken.
+func (e *nameTakenError) Unwrap() error { return errArtifactNameTaken }
+
+// newNameTakenError returns the nameTakenError of the DuplicateName fault in
+// err.
+func newNameTakenError(err error) *nameTakenError {
+	taken := &nameTakenError{}
+	fault.In(err, func(f types.BaseMethodFault, _ string, _ []types.LocalizableMessage) bool {
+		if d, ok := f.(*types.DuplicateName); ok {
+			taken.holder = d.Object
+			return true
+		}
+		return false
+	})
+	return taken
+}
+
 // isDuplicateNameFault reports whether err carries a vSphere DuplicateName
 // fault, whether it came synchronously from ImportVApp (a SOAP fault) or
 // through the HttpNfcLease's error (a task error).
@@ -257,7 +284,7 @@ func (p *Provider) importOVA(ctx context.Context, imp *importer.Importer, fpath 
 	lease, err := imp.ResourcePool.ImportVApp(ctx, spec.ImportSpec, imp.Folder, imp.Host)
 	if err != nil {
 		if identity && isDuplicateNameFault(err) {
-			return nil, fmt.Errorf("ImportVApp %q: %w", name, errArtifactNameTaken)
+			return nil, fmt.Errorf("ImportVApp %q: %w", name, newNameTakenError(err))
 		}
 		return nil, fmt.Errorf("ImportVApp: %w", err)
 	}
@@ -265,7 +292,7 @@ func (p *Provider) importOVA(ctx context.Context, imp *importer.Importer, fpath 
 	if err != nil {
 		_ = lease.Abort(ctx, nil)
 		if identity && isDuplicateNameFault(err) {
-			return nil, fmt.Errorf("NFC lease for %q: %w", name, errArtifactNameTaken)
+			return nil, fmt.Errorf("NFC lease for %q: %w", name, newNameTakenError(err))
 		}
 		return nil, fmt.Errorf("wait for NFC lease: %w", err)
 	}

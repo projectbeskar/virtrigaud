@@ -212,10 +212,21 @@ func (p *Provider) imagePrepareIdentity(ctx context.Context, req *providerv1.Ima
 	var staged *stagedOVA
 	defer func() { staged.close() }()
 
+	// taken is vCenter's last DuplicateName for the name, if any.
+	var taken *nameTakenError
 	for round := 0; round < maxArtifactProbeRounds; round++ {
 		objs, err := p.probeArtifact(ctx, loc, id)
 		if err != nil {
 			return nil, p.artifactRetryError(ctx, name, "look up the artifact in the import folder", err)
+		}
+		if taken != nil {
+			if conflict, err := p.nameHeldOutOfSight(ctx, loc, taken, objs); err != nil || conflict {
+				if err != nil {
+					return nil, err
+				}
+				return nil, imageartifact.ConflictError(name)
+			}
+			taken = nil
 		}
 		d := decideArtifact(objs, id, time.Now(), bound)
 		if len(d.cleanup) > 0 {
@@ -242,8 +253,11 @@ func (p *Provider) imagePrepareIdentity(ctx context.Context, req *providerv1.Ima
 			}
 		case imageartifact.OutcomeImport:
 			resp, err := p.importArtifact(ctx, finder, loc, id, src, req.GetStorageHint(), &staged)
+			if stderrors.As(err, &taken) {
+				continue // DuplicateName: probe again, then check who holds the name
+			}
 			if stderrors.Is(err, errArtifactNameTaken) {
-				continue
+				continue // lost the convergence: probe again
 			}
 			return resp, err
 		default:
@@ -256,6 +270,45 @@ func (p *Provider) imagePrepareIdentity(ctx context.Context, req *providerv1.Ima
 	// Other prepares are changing what is at the name: the same situation as
 	// an in-progress artifact, and like it no sign of an unhealthy provider.
 	return nil, imageartifact.InProgressError(name)
+}
+
+// nameHeldOutOfSight reports whether the name vCenter just refused with
+// DuplicateName (taken) is held by an object the probe cannot see — a vApp or
+// folder with the name, or a VM whose name differs only in case (vCenter
+// compares names case-insensitively; the probe compares VM names byte for
+// byte). Importing again would only meet DuplicateName again (re-downloading
+// each time), and the holder is not this image's artifact: the caller returns
+// a Conflict. objs is the fresh probe. It is false when the holder is among
+// objs (the normal decision applies) or no longer exists (a concurrent
+// prepare destroyed its own object: import again); a holder the fault does
+// not name counts as unseen when the probe sees nothing at the name.
+func (p *Provider) nameHeldOutOfSight(ctx context.Context, loc artifactLocation, taken *nameTakenError, objs []artifactObject) (bool, error) {
+	if taken.holder.Value == "" {
+		if len(objs) > 0 {
+			return false, nil
+		}
+		p.logger.WarnContext(ctx, "ImagePrepare: vCenter reports the artifact name as taken, but no VM with that name is in the import folder",
+			"artifact", loc.name, "folder", loc.folder.InventoryPath)
+		return true, nil
+	}
+	for _, o := range objs {
+		if o.ref == taken.holder {
+			return false, nil
+		}
+	}
+	var content []types.ObjectContent
+	err := property.DefaultCollector(p.client.Client).Retrieve(ctx, []types.ManagedObjectReference{taken.holder}, []string{propName}, &content)
+	switch {
+	case err == nil:
+	case fault.Is(err, &types.ManagedObjectNotFound{}):
+		return false, nil
+	default:
+		return false, p.artifactRetryError(ctx, loc.name, "read the object holding the artifact name", err)
+	}
+	p.logger.WarnContext(ctx, "ImagePrepare: the artifact name is held by an object that is not a VM with exactly that name "+
+		"(a vApp, a folder, or a name differing in case); refusing it",
+		"artifact", loc.name, "folder", loc.folder.InventoryPath, "holder", taken.holder.Type+":"+taken.holder.Value)
+	return true, nil
 }
 
 // resolveArtifactFolder resolves the import folder of an identity prepare
