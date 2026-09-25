@@ -28,6 +28,7 @@ import (
 
 	golibvirt "github.com/digitalocean/go-libvirt"
 
+	"github.com/projectbeskar/virtrigaud/internal/imageartifact"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt/hostconn"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
@@ -140,8 +141,8 @@ func (f *fakeSeamProvider) Clone(_ context.Context, req contracts.CloneRequest) 
 	return f.cloneResp, f.cloneErr
 }
 
-func (f *fakeSeamProvider) imagePrepare(_ context.Context, _, _, _ string) (string, string, error) {
-	return f.prepID, f.prepPath, f.prepErr
+func (f *fakeSeamProvider) imagePrepare(_ context.Context, _ imageartifact.Request, _, _ string) (imagePrepareResult, error) {
+	return imagePrepareResult{ID: f.prepID, Path: f.prepPath}, f.prepErr
 }
 
 // firstVirshCall returns the args of the first virsh command the conn saw.

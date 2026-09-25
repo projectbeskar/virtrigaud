@@ -158,17 +158,6 @@ func TestResolveTargetPool(t *testing.T) {
 	}
 }
 
-// TestTargetImagePath verifies the target file is <poolPath>/<targetName>.qcow2.
-func TestTargetImagePath(t *testing.T) {
-	assert.Equal(t,
-		"/var/lib/libvirt/images/fedora-tmpl.qcow2",
-		targetImagePath("/var/lib/libvirt/images", "fedora-tmpl"))
-	// Trailing slash on the pool path is normalized by filepath.Join.
-	assert.Equal(t,
-		"/pool/jammy.qcow2",
-		targetImagePath("/pool/", "jammy"))
-}
-
 // TestChecksumTool verifies algorithm-to-binary mapping, the sha256 default, and
 // rejection of an unknown algorithm.
 func TestChecksumTool(t *testing.T) {
@@ -199,8 +188,7 @@ func TestChecksumTool(t *testing.T) {
 // interaction when the inner virsh provider is missing.
 func TestImagePrepare_NilVirshProvider(t *testing.T) {
 	p := &Provider{}
-	_, _, err := p.imagePrepare(context.Background(),
-		`{"source":{"libvirt":{"url":"https://x/y.qcow2"}}}`, "tmpl", "")
+	_, _, err := prepareLegacyImage(p, `{"source":{"libvirt":{"url":"https://x/y.qcow2"}}}`, "tmpl", "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not initialized")
 }
@@ -212,8 +200,7 @@ func TestImagePrepare_MissingTargetName(t *testing.T) {
 	// sufficient because the target-name check short-circuits before any command
 	// runs.
 	p := &Provider{virshProvider: &VirshProvider{}}
-	_, _, err := p.imagePrepare(context.Background(),
-		`{"source":{"libvirt":{"url":"https://x/y.qcow2"}}}`, "  ", "")
+	_, _, err := prepareLegacyImage(p, `{"source":{"libvirt":{"url":"https://x/y.qcow2"}}}`, "  ", "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "target name is required")
 }
@@ -222,12 +209,12 @@ func TestImagePrepare_MissingTargetName(t *testing.T) {
 // neither a path nor a url. This fires before any host interaction.
 func TestImagePrepare_NoSource(t *testing.T) {
 	p := &Provider{virshProvider: &VirshProvider{}}
-	_, _, err := p.imagePrepare(context.Background(), `{"source":{"libvirt":{}}}`, "tmpl", "")
+	_, _, err := prepareLegacyImage(p, `{"source":{"libvirt":{}}}`, "tmpl", "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "path or url")
 
 	// Empty image JSON is likewise rejected (no fabricated success).
-	_, _, err = p.imagePrepare(context.Background(), "", "tmpl", "")
+	_, _, err = prepareLegacyImage(p, "", "tmpl", "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "path or url")
 }

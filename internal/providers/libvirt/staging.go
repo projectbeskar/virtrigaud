@@ -97,12 +97,25 @@ func (p *Provider) stagingDir() string {
 // only that suffix replaced, so nothing else the host prints is ever used as
 // a path.
 func makeHostTemp(ctx context.Context, h hostCommandRunner, template string, dir bool) (string, error) {
-	if !strings.HasPrefix(template, "/") || !strings.HasSuffix(template, mktempTemplateSuffix) {
-		return "", fmt.Errorf("invalid staging template %q", template)
+	return makeHostTempSuffix(ctx, h, template, "", dir)
+}
+
+// makeHostTempSuffix is makeHostTemp for a name that ends in suffix after the
+// random part (`mktemp --suffix=<suffix> <template>`, GNU coreutils), e.g.
+// ".partial": the returned path is the template with only its
+// mktempTemplateSuffix replaced, followed by suffix. suffix must be empty or a
+// plain file-name tail (no '/', no control characters).
+func makeHostTempSuffix(ctx context.Context, h hostCommandRunner, template, suffix string, dir bool) (string, error) {
+	if !strings.HasPrefix(template, "/") || !strings.HasSuffix(template, mktempTemplateSuffix) ||
+		strings.ContainsRune(suffix, '/') || strings.ContainsFunc(suffix, isControlRune) {
+		return "", fmt.Errorf("invalid staging template %q (suffix %q)", template, suffix)
 	}
 	argv := []string{"mktemp"}
 	if dir {
 		argv = append(argv, "-d")
+	}
+	if suffix != "" {
+		argv = append(argv, "--suffix="+suffix)
 	}
 	res, err := runHost(ctx, h, append(argv, template)...)
 	if err != nil {
@@ -110,7 +123,8 @@ func makeHostTemp(ctx context.Context, h hostCommandRunner, template string, dir
 	}
 	path := strings.TrimSpace(res.Stdout)
 	prefix := strings.TrimSuffix(template, mktempTemplateSuffix)
-	if !strings.HasPrefix(path, prefix) || len(path) != len(template) || strings.ContainsAny(path[len(prefix):], "/\n\x00") {
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) || len(path) != len(template)+len(suffix) ||
+		strings.ContainsAny(path[len(prefix):len(path)-len(suffix)], "/\n\x00") {
 		return "", fmt.Errorf("create staging path on host: unexpected mktemp output %q", path)
 	}
 	return path, nil

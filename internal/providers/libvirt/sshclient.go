@@ -227,6 +227,12 @@ func (v *VirshProvider) dialTunnel(ctx context.Context, network, addr string) (n
 // the exact same *VirshResult/*VirshError shape runLocal (and, before this PR,
 // exec.Cmd) produced.
 func (v *VirshProvider) runOverSSH(ctx context.Context, remoteCmd string) (*VirshResult, error) {
+	return v.runOverSSHStdin(ctx, remoteCmd, nil)
+}
+
+// runOverSSHStdin is runOverSSH with stdin (nil: none) wired to the remote
+// command's standard input.
+func (v *VirshProvider) runOverSSHStdin(ctx context.Context, remoteCmd string, stdin io.Reader) (*VirshResult, error) {
 	release, err := v.acquireExecSlot(ctx)
 	if err != nil {
 		return nil, err
@@ -240,6 +246,9 @@ func (v *VirshProvider) runOverSSH(ctx context.Context, remoteCmd string) (*Virs
 	runErr := v.withSession(ctx, func(sess *ssh.Session) error {
 		sess.Stdout = &stdout
 		sess.Stderr = &stderr
+		if stdin != nil {
+			sess.Stdin = stdin
+		}
 		errCh := make(chan error, 1)
 		go func() { errCh <- sess.Run(remoteCmd) }()
 		select {

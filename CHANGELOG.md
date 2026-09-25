@@ -5,6 +5,105 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-25 19:25] - ADR-0009 Slice 4: libvirt prepared images named, stamped and published by identity; permanent prepare failures are InvalidSpec
+**Author:** @wrkode (William Rizzo)
+
+> **Operator note.** The libvirt provider now advertises `supportsImageArtifactIdentity`. This applies to single-host providers only; a clustered provider still does not serve `ImagePrepare`. The manager (Slice 2) sends identities, so a URL-sourced libvirt `VMImage` is now prepared as `<pool dir>/<namespace>.<name>_<16 hex>.qcow2`, with a stamp `.<same>.virtrigaud-image.json` beside it. The first create of each image after the upgrade re-imports it once. Bare-name files from earlier releases are left alone as orphans.
+>
+> - **Ownership and mode:** prepared images are now read-only (0444) and owned by the provider's SSH user. They are no longer chowned to `libvirt-qemu` or made `777`; per-VM copies are unchanged. A stamp or artifact that the SSH user does not own, or that group or others can write, is a Conflict. Providers that share a pool directory must therefore use the same SSH user.
+> - **Pool requirements:** the pool must be on a filesystem with hard links, and its directory must be in `VIRTRIGAUD_LIBVIRT_IMAGE_DIRS` (default `/var/lib/libvirt/images`). Otherwise the prepare fails with `InvalidSpec`. This also applies to requests from an older manager.
+> - **Download limits:** downloads are capped by `spec.prepare.timeout` and by the new provider env `VIRTRIGAUD_LIBVIRT_IMAGE_MAX_DOWNLOAD_GIB` (default 256).
+> - **SELinux:** on SELinux hosts, `restorecon` runs through `sudo -n`, so it needs passwordless sudo.
+> - **Older managers:** requests from an older manager carry no identity. For this release only they are served in deprecated legacy mode, and counted in `virtrigaud_provider_image_prepare_legacy_requests_total{provider_type="libvirt"}`. Alert when that counter is non-zero.
+
+### Added
+- `internal/providers/libvirt/image_publish.go` (new): identity-mode `ImagePrepare` (ADR-0009 D1, D3, D4, D6).
+  - **Naming:** the artifact name is `imageartifact.ArtifactName` (libvirt rule: 200 bytes, `_`), re-checked against the #334 reserved names.
+  - **Probe:** one `sh -c` probe with positional arguments reads the artifact and its sidecar. It records type, inode, size, mtime, mode, and whether the SSH user owns each file; it never follows a symlink. A failed probe is retryable, never "absent".
+  - **Reuse:** the observation feeds `imageartifact.Decide`. An artifact is reused only if both files are regular, owned by the SSH user, and not writable by group or others, the trusted stamp matches the UID and digest, and the stamp records the artifact's inode and size.
+  - **In progress and abandoned:** a matching stamp with no artifact is in progress (`Unavailable`) until `max(2 × spec.prepare.timeout, 2h)`, measured by host mtime. After that it is abandoned: only that stamp is removed, and only if its inode and mtime are unchanged.
+  - **Conflict:** everything else is a Conflict (`AlreadyExists`, uniform message; the owner goes to the provider log only). This includes an orphaned or untrusted sidecar, a symlink, a foreign-owned or writable file, and an inode or size mismatch.
+  - **Publishing:** only `ln -T` is used, and a symlink at the destination never counts as ours. The stamp is linked first, and only the prepare that created it links the artifact.
+  - **Artifact name taken:** an `EEXIST` on the artifact link makes the prepare withdraw its own sidecar (after an `-ef` check), then return Conflict.
+  - **Lost link answer:** a transport error on the artifact link is checked first. If the artifact is our staged file, the link succeeded on the host and the prepare succeeds.
+  - **Other rules:** an NFS-retransmitted `LINK` counts as created. A filesystem without hard links is `InvalidSpec`. Stale `.virtrigaud-imageprepare-*` staging files are swept.
+- `internal/providers/libvirt/image_sidecar.go` (new): the sidecar stamp. It holds the `imageartifact.Stamp` plus `artifact.{inode,size}`, at most 4 KiB. Parsing is strict and fails closed. Each of these makes the stamp untrusted:
+  - size over 4 KiB, invalid UTF-8, a key repeated (case-insensitively), `null`, unknown fields, wrong types, or trailing data;
+  - an unknown version, or a malformed digest or UID;
+  - a namespace or name that is not a Kubernetes name, since they are echoed and logged;
+  - a `preparedAt` that is not RFC 3339, or a missing inode or size.
+- `internal/providers/libvirt/hoststdin.go` (new): `VirshProvider.runHostStdin` runs a host command with content on stdin, over SSH or locally. `runOverSSH`/`runLocal` gain stdin-capable variants.
+- `internal/providers/libvirt/staging.go`: `makeHostTempSuffix` (`mktemp --suffix=`), with the output validated like `makeHostTemp`.
+- `internal/providers/libvirt/server.go`: `GetCapabilities` advertises `supports_image_artifact_identity` on a single-host provider. `clusteredCapabilities` still hides it and image import.
+- Tests (`image_prepare_test.go`, `image_prepare_cases_test.go`, `image_prepare_review_test.go`, `image_sidecar_test.go`) run on the #334 fake host, where `sh`, `mktemp`, `ln`, `chmod`, `stat`, `sync`, `find` and `sha256sum` run for real. They cover:
+  - a fresh prepare, reuse, and Conflict shapes (including a foreign-writable file, a directory, or a symlink raced in at the artifact name);
+  - in progress, abandoned, and the sweep;
+  - `EEXIST` on the sidecar and on the artifact, and a lost link answer;
+  - six concurrent prepares (exactly one artifact link);
+  - the single-input rule, and the failure classification (permanent vs transient, with no URL, exit code, HTTP status or computed checksum in tenant text);
+  - the pool-lookup classification, restorecon only with SELinux, and legacy mode (bare name, counter, WARN, a symlink counts as present);
+  - the real `curl` reading its config from stdin against a local server: a URL with `[1-100]{a,b,c}` sends exactly one request (it fans out to 300 without `globoff`), and `--max-filesize` refuses an oversized source;
+  - the Slice 2 manager request shape (identity + digest + Provider, empty target name, spec without selector) over the manager's gRPC client: the identity path with a confirmed echo, and an identity-less request takes legacy mode.
+
+  The single-host golden (`testdata/single_host_power_reconfigure.golden.json`) is unchanged.
+
+### Changed
+- `internal/providers/libvirt/image.go`: `ImagePrepare` is split into identity mode and deprecated legacy mode (`imageartifact.ParseRequest`).
+  - **Single input:** in identity mode the only input is `source.libvirt.url`. `path`+`url`, or `path` alone, is `InvalidSpec` before any host command.
+  - **Pool resolution:** both modes resolve the pool with `pool-dumpxml` and require its canonical directory to be an allowed image directory. Only libvirt's "Storage pool not found" is permanent; virsh's generic "failed to get pool" (for example after a libvirtd restart) stays retryable.
+  - **Private staging:** each prepare uses its own `mktemp` dotfiles (`.download`, `.partial`, `.stamp.partial`, mode 0600). They replace the shared `.virtrigaud-imageprepare-<target>.download`.
+  - **Finalize and publish:** the converted image is finalized with `chmod 0444`, then `sudo -n restorecon` (only when `selinuxenabled` reports SELinux on), then `sync`. It is published with `ln -T`. Nothing is downloaded, converted, written or removed at the final name, and `finalizeClonedDisk` (`chown` + `chmod 777`) is no longer applied to a prepared image.
+  - **Download:** `curl -q -K -` reads the URL from stdin, never from argv, logs, the host's process list or a file at rest. It also ignores `~/.curlrc`.
+    - Globbing is off (`globoff`).
+    - Protocols are limited to `http`/`https`/`ftp`, redirects included.
+    - `--connect-timeout 30`, `--max-time` = `spec.prepare.timeout`, `--max-filesize` = `VIRTRIGAUD_LIBVIRT_IMAGE_MAX_DOWNLOAD_GIB` (new provider env, default 256 GiB).
+    - The `%{http_code}` write-out must be exactly one transfer, or the prepare is `InvalidSpec` (fail closed).
+  - **Logs:** logs carry the URL without user-info or query.
+  - **Legacy mode:** it keeps bare names, reuse by name (including the in-use check) and path precedence, with the fixes above. A symlink at the bare name counts as present. `targetImageExists` is gone; it treated any probe error as "absent" and let convert overwrite and `rm -f` the final name.
+- `internal/providers/libvirt/server.go`: `ImagePrepare` parses the request (malformed requests are `InvalidArgument`) and signals every legacy request with a WARN log and the counter. In identity mode it returns the `PreparedArtifact` echo. Failures are mapped by `imagePrepareRPCError`:
+  - `InvalidSpec` becomes `InvalidArgument`, and Conflict becomes `AlreadyExists`;
+  - errors that already carry a gRPC status keep it;
+  - transport and host failures keep the historical retryable form.
+- `internal/providers/libvirt/conn.go`: `providerBackend.imagePrepare` takes the parsed `imageartifact.Request` and returns `imagePrepareResult`.
+- `docs/image-preparation.md`: new section "libvirt prepared images", covering:
+  - name and stamp, including the ownership and mode rule;
+  - the reuse/Conflict table and the publish protocol;
+  - the download limits, the source rules, and which failures are retried;
+  - deprecated legacy mode, stating that same-named `VMImage`s of different namespaces share one bare-name file there.
+
+  The "Provider support" and allowed-directory notes are updated.
+- `docs/upgrading.md`: a breaking-change row for libvirt prepared images, the `VIRTRIGAUD_LIBVIRT_IMAGE_MAX_DOWNLOAD_GIB` configuration entry, and the old-manager-against-new-libvirt-provider rollback note.
+
+### Fixed
+- `internal/providers/libvirt/image.go`, `server.go`: a synchronous prepare that fails permanently now returns `InvalidArgument`, so the manager records `InvalidSource` and holds instead of retrying every 5s. Before, contracts `InvalidSpec` errors crossed the wire as `Unknown`. Permanent failures are:
+  - HTTP 4xx other than 408/425/429;
+  - more than one transfer;
+  - curl exits 1/3/9/60/63/67/78;
+  - a checksum mismatch or unknown algorithm;
+  - an unreadable, unsupported or file-referencing image;
+  - a #334 confinement rejection;
+  - a missing, unusable or disallowed pool.
+
+  Everything else stays retryable: HTTP 5xx/408/425/429, DNS/connect/timeout/transfer errors, and SSH or host failures. Tenant-visible text carries no source URL, curl exit code, HTTP status or computed checksum.
+
+### Security
+- `internal/providers/libvirt/image.go`: a URL containing curl glob syntax (`[1-N]`, `{a,b}`), which passes the CRD pattern, can no longer make one prepare fan out into many requests from the hypervisor host to a tenant-chosen host. Before, the concatenated write-out (`404404404`) also made such a 4xx look transient, so the fan-out repeated forever.
+
+### Why
+This is ADR-0009 Slice 4, a release blocker for cross-namespace `VMImage` sharing (#343). libvirt prepared images had several defects:
+- they were named by the bare `VMImage` name and accepted as prepared whenever a file of that name existed;
+- a probe error counted as "absent", so convert overwrote and `rm -f` deleted the final name;
+- concurrent prepares shared one download file and saw each other's partial converts;
+- the prepared image was left `chmod 777`.
+
+Identity names, stamps checked fail-closed, and `ln` publishing close scenarios A-G for libvirt. A security review then hardened the download against URL globbing, oversized sources and credential exposure, and the stamp check against files other principals can rewrite.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (provider image; prepared images become 0444 and owned by the SSH user; prepares into a pool outside the allowed image directories are refused; Providers sharing a pool must use one SSH user)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-09-25 18:45] - ADR-0009 Slice 5: Proxmox guard — URL image import fails closed
 **Author:** @wrkode (William Rizzo)
 
