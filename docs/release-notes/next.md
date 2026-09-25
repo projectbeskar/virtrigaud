@@ -64,6 +64,13 @@ providers), and rollback caveats in
   same-host cross-namespace name-squatting and disk-overwrite race.
 - Cross-namespace `VMClone`/`VMMigration` targets, and a migration's source
   Provider, are now scoped to what the requester actually owns.
+- `VMImage` prepare state is recorded per Provider identity
+  (`status.providerStatus["<namespace>/<name>"]`, with the Provider's UID and
+  its own prepare task), so a shared `VMImage` prepared through one namespace's
+  Provider never lets a same-named Provider in another namespace skip its own
+  prepare or create from the other's template, and a prepare task is only ever
+  polled through the Provider that started it. Existing state is migrated on
+  first use (→ [`docs/image-preparation.md`](docs/image-preparation.md#prepare-state-is-per-provider)).
 - The manager's webhook and metrics servers pin an explicit TLS 1.2 floor.
 - Optional, opt-in `NetworkPolicy` templates for the manager and provider pods
   (`networkPolicy.enabled`, default off).
