@@ -314,9 +314,18 @@ func hostOpRPCError(op string, ho *hostOpError, err error) error {
 //     host registry is not initialized) -> a plain Unavailable, which the
 //     breaker DOES count; anything else keeps the historical wrapped form.
 //
+// A refusal by the disk dependency guard (diskDependentsError: another domain
+// on the host uses this VM's disk, e.g. its linked clone) is FailedPrecondition
+// with the VM_DISK_IN_USE and VM_OPERATION_FAILED ErrorInfos: a per-VM answer
+// that the manager maps to a Conflict and never counts toward its breaker.
+//
 // Only the categorized message crosses the wire. It is never used on the
 // single-host path, whose wire errors are unchanged.
 func routedRPCError(op string, err error) error {
+	var de *diskDependentsError
+	if stderrors.As(err, &de) {
+		return diskInUseStatus(fmt.Sprintf("failed to %s: %v", op, de), true).Err()
+	}
 	var pe *contracts.ProviderError
 	if stderrors.As(err, &pe) {
 		switch pe.Type {

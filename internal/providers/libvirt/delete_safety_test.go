@@ -27,8 +27,10 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/status"
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
+	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
 // These tests pin the delete-safety fix: Delete removes only a domain's OWN
@@ -324,6 +326,33 @@ func clusteredLinkedPair(t *testing.T, running bool) (*createHost, *Provider, st
 		require.NoError(t, f.Close())
 	}
 	return c, p, src, clone
+}
+
+// TestServer_Delete_DependentsRefusalWireForm pins the wire form of a refused
+// delete: FailedPrecondition + VM_DISK_IN_USE on a single-host provider (the
+// historical "failed to delete VM" prefix kept), and additionally
+// VM_OPERATION_FAILED on the routed clustered path — neither counts toward the
+// manager's circuit breaker, which maps both to a Conflict.
+func TestServer_Delete_DependentsRefusalWireForm(t *testing.T) {
+	t.Run("single-host", func(t *testing.T) {
+		c := newCreateHost(t)
+		c.linkedPair(true)
+		_, err := NewServer(c.p).Delete(context.Background(), &providerv1.DeleteRequest{Id: "team-a.web"})
+		requireDiskInUseStatus(t, err, false)
+		assert.Contains(t, status.Convert(err).Message(), "failed to delete VM: delete of libvirt domain \"team-a.web\" refused")
+		c.requireUntouched("h1", "team-a.web")
+	})
+	t.Run("clustered", func(t *testing.T) {
+		c, p, _, _ := clusteredLinkedPair(t, true)
+		_, err := NewServer(p).Delete(context.Background(), &providerv1.DeleteRequest{
+			Id: "team-a.web", TargetHostId: "host-a",
+			Owner: &providerv1.ObjectIdentity{Uid: ownerTeamA.UID, Namespace: ownerTeamA.Namespace, Name: ownerTeamA.Name},
+		})
+		requireDiskInUseStatus(t, err, true)
+		assert.Contains(t, status.Convert(err).Message(), "failed to delete VM: delete of libvirt domain \"team-a.web\" refused")
+		assert.NotContains(t, status.Convert(err).Message(), c.images)
+		c.requireUntouched("host-a", "team-a.web")
+	})
 }
 
 func TestDelete_Clustered_LinkedClone(t *testing.T) {
