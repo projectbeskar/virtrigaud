@@ -259,6 +259,12 @@ ADR-0009 closes cross-tenant prepared-image poisoning and disclosure: artifacts 
 ### Why
 Users copy these examples first. Ten of them failed on `kubectl apply` because of a YAML 1.1 quirk, and many more had silently drifted from the API, so users either hit errors or got objects missing the settings the example promised. The envtest check keeps them in sync with the CRDs from now on.
 
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-09-25 07:10] - Fix VMSnapshot reported Ready without any snapshot being taken after a provider lookup failure
 **Author:** @wrkode (William Rizzo)
 
