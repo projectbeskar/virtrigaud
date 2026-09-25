@@ -863,14 +863,14 @@ func TestImagePrepare_ExistingTargetInUseIsRejected(t *testing.T) {
 	legacy := h.file(h.images, "ubuntu.qcow2")
 	h.domain("h1", uuidA, diskDomainXML(legacy))
 
-	_, _, err := p.imagePrepare(context.Background(), `{"source":{"libvirt":{"url":"https://x/y.qcow2"}}}`, "ubuntu", "")
+	_, _, err := prepareLegacyImage(p, `{"source":{"libvirt":{"url":"https://x/y.qcow2"}}}`, "ubuntu", "")
 	requireRejected(t, err, "legacy in-place attach")
 	assert.Contains(t, err.Error(), "create a VMImage with a new name")
 	assert.NotContains(t, err.Error(), h.images, "the host path is not disclosed")
 
 	// Not in use: the idempotent no-op still returns the prepared location.
 	h.file(h.images, "debian.qcow2")
-	id, path, err := p.imagePrepare(context.Background(), `{"source":{"libvirt":{"url":"https://x/y.qcow2"}}}`, "debian", "")
+	id, path, err := prepareLegacyImage(p, `{"source":{"libvirt":{"url":"https://x/y.qcow2"}}}`, "debian", "")
 	require.NoError(t, err)
 	assert.Equal(t, "debian", id)
 	assert.Equal(t, filepath.Join(h.images, "debian.qcow2"), path)
@@ -1023,7 +1023,7 @@ func TestImagePrepare_ConfinesSourcePath(t *testing.T) {
 		`{"source":{"libvirt":{"path":"/etc/shadow","url":"https://x/y.qcow2","checksum":"abc"}}}`,
 		`{"Path":"/dev/sda"}`,
 	} {
-		_, _, err := p.imagePrepare(context.Background(), js, "ubuntu", "")
+		_, _, err := prepareLegacyImage(p, js, "ubuntu", "")
 		requireRejected(t, err, "allowed image directory")
 	}
 	assert.NotContains(t, h.log("qemu-img"), "convert")
@@ -1031,7 +1031,7 @@ func TestImagePrepare_ConfinesSourcePath(t *testing.T) {
 	// An allowed source is prepared (converted with the probed format).
 	src := h.file(h.images, "upstream.img")
 	h.info(src, `{"format":"raw"}`)
-	id, path, err := p.imagePrepare(context.Background(), `{"source":{"libvirt":{"path":"`+src+`"}}}`, "ubuntu", "")
+	id, path, err := prepareLegacyImage(p, `{"source":{"libvirt":{"path":"`+src+`"}}}`, "ubuntu", "")
 	require.NoError(t, err)
 	assert.Equal(t, "ubuntu", id)
 	assert.Equal(t, filepath.Join(h.images, "ubuntu.qcow2"), path)
@@ -1050,7 +1050,7 @@ func TestImagePrepare_ConfinesSourcePath(t *testing.T) {
 func TestImagePrepare_RejectsReservedTargetName(t *testing.T) {
 	p := &Provider{virshProvider: &VirshProvider{}}
 	for _, name := range []string{"victim-disk", "victim-migrated", ".hidden"} {
-		_, _, err := p.imagePrepare(context.Background(), `{"source":{"libvirt":{"url":"https://x/y.qcow2"}}}`, name, "")
+		_, _, err := prepareLegacyImage(p, `{"source":{"libvirt":{"url":"https://x/y.qcow2"}}}`, name, "")
 		requireRejected(t, err, "collides")
 	}
 }
@@ -1065,12 +1065,11 @@ func TestImagePrepare_RejectsDownloadWithBackingFile(t *testing.T) {
 		[]byte(`{"format":"qcow2","backing-filename":"/etc/shadow","backing-filename-format":"raw"}`), 0o600))
 	p := &Provider{virshProvider: vp, imageDirs: []string{h.images}}
 
-	_, _, err := p.imagePrepare(context.Background(), `{"source":{"libvirt":{"url":"https://evil.example/x.qcow2"}}}`, "evil", "")
+	_, _, err := prepareLegacyImage(p, `{"source":{"libvirt":{"url":"https://evil.example/x.qcow2"}}}`, "evil", "")
 	requireRejected(t, err, "backing file")
 	assert.NotContains(t, err.Error(), "evil.example", "the URL is not echoed into the error")
 	assert.NotContains(t, h.log("qemu-img"), "convert")
-	_, statErr := os.Stat(filepath.Join(h.images, ".virtrigaud-imageprepare-evil.download"))
-	assert.True(t, os.IsNotExist(statErr), "the rejected download is removed")
+	assertNoStagingFiles(t, h.images)
 }
 
 // TestDownloadCloudImage_RejectsBackingFile is the same guard on Create's URL

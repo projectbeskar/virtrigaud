@@ -31,6 +31,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/projectbeskar/virtrigaud/internal/imageartifact"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/storage/migration"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
@@ -632,25 +633,31 @@ func (s *Server) Clone(ctx context.Context, req *providerv1.CloneRequest) (*prov
 	return result, nil
 }
 
-// ImagePrepare prepares/imports a VM image into a libvirt storage pool, making it
-// available as a named template (<target_name>.qcow2) for subsequent VM creation
-// (issue #154).
+// ImagePrepare prepares/imports a VM image into a libvirt storage pool
+// (issue #154; ADR-0009 prepared-image artifact identity, Slice 4).
 //
-// The request carries a JSON-encoded VMImage spec (req.ImageJson) describing the
-// source, a target template name, and an optional storage hint. The source may be
-// a path already present on the libvirt host or a URL to download on the host. The
-// image is converted into the resolved pool as a standalone qcow2; an existing
-// target is treated as an idempotent no-op (see Provider.imagePrepare).
+// The request is decoded by imageartifact.ParseRequest (a malformed request is
+// InvalidArgument) and served in one of two modes (see image.go):
 //
-// libvirt/qemu-img are synchronous, so this returns an ImagePrepareResponse with
-// an empty Task (no TaskRef); the controller treats an empty TaskRef as
-// "completed synchronously". The response also carries the prepared image's
-// location — prepared_image_id is the target name and prepared_image_path is the
-// absolute pool path (<poolPath>/<target>.qcow2) — so the manager can create VMs
-// from the prepared template instead of re-resolving the source (issue #154,
-// PR-6 / #214).
+//   - identity mode (image + source_digest, empty target_name): the artifact
+//     is named from the image identity and source digest, stamped, reused only
+//     on a matching stamp, and published atomically (image_publish.go). The
+//     response echoes the stamp in ImagePrepareResponse.artifact;
+//   - deprecated legacy mode (a bare target_name from a manager older than
+//     ADR-0009, this release only): the pre-ADR bare-name artifact with the
+//     ADR-0009 provider-internal fixes and no artifact echo. Every such request
+//     emits the deprecation signal (a WARN log and
+//     virtrigaud_provider_image_prepare_legacy_requests_total{provider_type}).
+//
+// libvirt/qemu-img are synchronous, so the response carries no task; the
+// controller treats that as "completed synchronously". prepared_image_id is the
+// artifact base name and prepared_image_path its absolute pool path, so the
+// manager creates VMs from the prepared image instead of re-resolving the
+// source (issue #154, PR-6 / #214). Errors are classified by
+// imagePrepareRPCError.
 func (s *Server) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepareRequest) (*providerv1.ImagePrepareResponse, error) {
-	log.Printf("INFO ImagePrepare: target=%q storageHint=%q", req.TargetName, req.StorageHint)
+	log.Printf("INFO ImagePrepare: target=%q image=%s/%s uid=%q storageHint=%q", req.GetTargetName(),
+		req.GetImage().GetNamespace(), req.GetImage().GetName(), req.GetImage().GetUid(), req.GetStorageHint())
 
 	if s.provider == nil {
 		return nil, fmt.Errorf("libvirt provider not initialized")
@@ -663,17 +670,57 @@ func (s *Server) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepareR
 				"(supports_image_import=false; ADR-0007 Addendum A)")
 	}
 
-	preparedID, preparedPath, err := s.provider.imagePrepare(ctx, req.ImageJson, req.TargetName, req.StorageHint)
+	parsed, err := imageartifact.ParseRequest(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to prepare image: %w", err)
+		return nil, err
+	}
+	if parsed.Mode == imageartifact.ModeLegacy {
+		imageartifact.SignalLegacyRequest(ctx, nil, libvirtProviderType, parsed.LegacyTargetName)
+	}
+
+	res, err := s.provider.imagePrepare(ctx, parsed, req.GetImageJson(), req.GetStorageHint())
+	if err != nil {
+		return nil, imagePrepareRPCError(err)
 	}
 
 	// Synchronous: no task reference. An empty Task signals "completed". The
-	// id/path tell the manager where the prepared template landed.
-	return &providerv1.ImagePrepareResponse{
-		PreparedImageId:   preparedID,
-		PreparedImagePath: preparedPath,
-	}, nil
+	// id/path tell the manager where the prepared image landed; in identity
+	// mode the artifact echo reports the stamp the provider verified or wrote.
+	resp := &providerv1.ImagePrepareResponse{
+		PreparedImageId:   res.ID,
+		PreparedImagePath: res.Path,
+	}
+	if parsed.Mode == imageartifact.ModeIdentity && res.Stamp != nil {
+		resp.Artifact = res.Stamp.PreparedArtifact(res.ID, res.Reused)
+	}
+	return resp, nil
+}
+
+// imagePrepareRPCError converts an ImagePrepare failure into the error returned
+// on the wire, so the manager can tell a request that can never succeed from a
+// transient failure (see the classification in image.go):
+//
+//   - InvalidSpec -> codes.InvalidArgument: the manager records the rejection
+//     on the VMImage and holds instead of retrying every few seconds (a source
+//     404, a checksum mismatch, an unreadable or unsafe image, a confinement
+//     rejection, a pool that cannot hold the image);
+//   - Conflict -> codes.AlreadyExists (ADR-0009 D4);
+//   - an error that already carries a gRPC status keeps it (the sdk
+//     InvalidSpec of the #334 confinement, imageartifact's Conflict and
+//     in-progress Unavailable);
+//   - anything else — the SSH transport or the host failing — keeps the
+//     historical wrapped form, which the manager retries.
+func imagePrepareRPCError(err error) error {
+	var pe *contracts.ProviderError
+	if stderrors.As(err, &pe) {
+		switch pe.Type {
+		case contracts.ErrorTypeInvalidSpec:
+			return status.Error(codes.InvalidArgument, "failed to prepare image: "+pe.Message)
+		case contracts.ErrorTypeConflict:
+			return status.Error(codes.AlreadyExists, "failed to prepare image: "+pe.Message)
+		}
+	}
+	return fmt.Errorf("failed to prepare image: %w", err)
 }
 
 // GetCapabilities returns the capabilities of the Libvirt provider. A
@@ -691,13 +738,18 @@ func (s *Server) GetCapabilities(ctx context.Context, req *providerv1.GetCapabil
 		SupportsMemorySnapshots:     true, // Full system checkpoints incl. RAM via `snapshot-create-as` without --disk-only; requires the VM running (#202)
 		SupportsLinkedClones:        true, // Clone RPC implemented: qcow2 overlay (linked) + vol-clone (full) (issue #153)
 		SupportsImageImport:         true, // ImagePrepare RPC implemented: import/convert image into a storage pool (issue #154)
-		SupportedDiskTypes:          []string{"qcow2", "raw", "vmdk"},
-		SupportedNetworkTypes:       []string{"virtio", "e1000", "rtl8139"},
-		SupportsDiskExport:          true, // ExportDisk wired to virsh impl (issue #177)
-		SupportsDiskImport:          true, // ImportDisk wired (pvc:///file:// sources)
-		SupportedExportFormats:      []string{"qcow2", "raw"},
-		SupportedImportFormats:      []string{"qcow2", "raw", "vmdk"},
-		SupportsExportCompression:   true, // ExportDisk honors req.Compress via qemu-img -c for qcow2 (#199); default (Compress=false) is uncompressed for speed
+		// ADR-0009 Slice 4: prepared images are named from the VMImage identity
+		// and source digest, stamped (sidecar), reused only on a matching stamp
+		// and published with link(2) — never reused by a bare name. Hidden on a
+		// clustered provider, which does not serve ImagePrepare yet.
+		SupportsImageArtifactIdentity: true,
+		SupportedDiskTypes:            []string{"qcow2", "raw", "vmdk"},
+		SupportedNetworkTypes:         []string{"virtio", "e1000", "rtl8139"},
+		SupportsDiskExport:            true, // ExportDisk wired to virsh impl (issue #177)
+		SupportsDiskImport:            true, // ImportDisk wired (pvc:///file:// sources)
+		SupportedExportFormats:        []string{"qcow2", "raw"},
+		SupportedImportFormats:        []string{"qcow2", "raw", "vmdk"},
+		SupportsExportCompression:     true, // ExportDisk honors req.Compress via qemu-img -c for qcow2 (#199); default (Compress=false) is uncompressed for speed
 		// ADR-0006: libvirt is the TARGET of the vSphere → S3 → libvirt relay
 		// (Slice 1) AND, as of Slice 2, the SOURCE of the libvirt → S3 → vSphere
 		// reverse relay. It therefore both IMPORTS (download + host-side

@@ -26,6 +26,7 @@ import (
 
 	golibvirt "github.com/digitalocean/go-libvirt"
 
+	"github.com/projectbeskar/virtrigaud/internal/imageartifact"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt/hostconn"
 )
@@ -47,8 +48,9 @@ type providerBackend interface {
 	Clone(ctx context.Context, req contracts.CloneRequest) (contracts.CloneResponse, error)
 
 	// imagePrepare imports/prepares a VM image into a storage pool (RPC
-	// ImagePrepare). It is defined on *Provider (image.go).
-	imagePrepare(ctx context.Context, imageJSON, targetName, storageHint string) (preparedID, preparedPath string, err error)
+	// ImagePrepare) for the parsed request req (ADR-0009: identity or
+	// deprecated legacy mode). It is defined on *Provider (image.go).
+	imagePrepare(ctx context.Context, req imageartifact.Request, imageJSON, storageHint string) (imagePrepareResult, error)
 
 	// conn returns the connection for the provider's host. Today there is exactly
 	// one host (from PROVIDER_ENDPOINT); ADR-0007 P1 changes only the provider's
