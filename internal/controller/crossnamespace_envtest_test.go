@@ -23,6 +23,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -52,6 +53,9 @@ var _ = Describe("Cross-namespace VMClone target (envtest)", func() {
 			_ = k8sClient.Delete(ctx, tgt)
 		})
 
+		// The target VM references the clone's Provider and VMClass from the
+		// target namespace, so both must select it (consumerNamespaceSelector,
+		// by the namespace's automatic name label).
 		prov := &infravirtrigaudiov1beta1.Provider{
 			ObjectMeta: metav1.ObjectMeta{Name: "prov-1", Namespace: src.Name},
 			Spec: infravirtrigaudiov1beta1.ProviderSpec{
@@ -62,9 +66,11 @@ var _ = Describe("Cross-namespace VMClone target (envtest)", func() {
 					Mode:  infravirtrigaudiov1beta1.RuntimeModeRemote,
 					Image: "virtrigaud/provider-libvirt:test",
 				},
+				ConsumerNamespaceSelector: selectNamespace(tgt.Name),
 			},
 		}
 		Expect(k8sClient.Create(ctx, prov)).To(Succeed())
+		Expect(k8sClient.Create(ctx, envtestClass(src.Name, "small", selectNamespace(tgt.Name)))).To(Succeed())
 
 		srcVM := &infravirtrigaudiov1beta1.VirtualMachine{
 			ObjectMeta: metav1.ObjectMeta{Name: "src-vm", Namespace: src.Name},
@@ -182,6 +188,9 @@ var _ = Describe("Cross-namespace VMClone target (envtest)", func() {
 		}()
 		DeferCleanup(func() { stop(); <-mgrDone })
 
+		// The target VM references the clone's Provider and VMClass from the
+		// target namespace, so both must select it (consumerNamespaceSelector,
+		// by the namespace's automatic name label).
 		prov := &infravirtrigaudiov1beta1.Provider{
 			ObjectMeta: metav1.ObjectMeta{Name: "prov-1", Namespace: src.Name},
 			Spec: infravirtrigaudiov1beta1.ProviderSpec{
@@ -192,9 +201,11 @@ var _ = Describe("Cross-namespace VMClone target (envtest)", func() {
 					Mode:  infravirtrigaudiov1beta1.RuntimeModeRemote,
 					Image: "virtrigaud/provider-libvirt:test",
 				},
+				ConsumerNamespaceSelector: selectNamespace(tgt.Name),
 			},
 		}
 		Expect(k8sClient.Create(ctx, prov)).To(Succeed())
+		Expect(k8sClient.Create(ctx, envtestClass(src.Name, "small", selectNamespace(tgt.Name)))).To(Succeed())
 		srcVM := &infravirtrigaudiov1beta1.VirtualMachine{
 			ObjectMeta: metav1.ObjectMeta{Name: "src-vm", Namespace: src.Name},
 			Spec: infravirtrigaudiov1beta1.VirtualMachineSpec{
@@ -240,3 +251,23 @@ var _ = Describe("Cross-namespace VMClone target (envtest)", func() {
 // skipNameValidation lets the watch spec start a manager whose controller
 // names may repeat across specs in this suite.
 var skipNameValidation = true
+
+// selectNamespace is a consumerNamespaceSelector naming exactly one namespace
+// by the kubernetes.io/metadata.name label the apiserver sets on every
+// Namespace.
+func selectNamespace(name string) *metav1.LabelSelector {
+	return &metav1.LabelSelector{MatchLabels: map[string]string{corev1.LabelMetadataName: name}}
+}
+
+// envtestClass is a valid VMClass (the CRD's CEL rules apply) with the given
+// consumer selector.
+func envtestClass(ns, name string, sel *metav1.LabelSelector) *infravirtrigaudiov1beta1.VMClass {
+	return &infravirtrigaudiov1beta1.VMClass{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec: infravirtrigaudiov1beta1.VMClassSpec{
+			CPU:                       2,
+			Memory:                    resource.MustParse("2Gi"),
+			ConsumerNamespaceSelector: sel,
+		},
+	}
+}

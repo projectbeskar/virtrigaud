@@ -41,17 +41,19 @@ import (
 // the side-effecting calls runs: the Clone RPC, the ImportDisk call, and the
 // target VirtualMachine Create for a clone bind and for a migration.
 
-// liveNamespaceReader is an uncached-reader stand-in holding ns, counting the
-// Namespace reads made through it. err, when set, fails every read.
+// liveNamespaceReader is an uncached-reader stand-in holding ns (and any extra
+// objects, e.g. the Provider and VMClass a cross-namespace target pins, whose
+// consumer grants are also re-read live), counting the Namespace reads made
+// through it. err, when set, fails every read.
 type liveNamespaceReader struct {
 	client.Client
 	reads int
 }
 
-func newLiveReader(t *testing.T, ns *corev1.Namespace, err error) *liveNamespaceReader {
+func newLiveReader(t *testing.T, ns *corev1.Namespace, err error, extra ...client.Object) *liveNamespaceReader {
 	t.Helper()
 	lr := &liveNamespaceReader{}
-	b := fake.NewClientBuilder().WithScheme(crossNSTestScheme(t))
+	b := fake.NewClientBuilder().WithScheme(xnsCloneScheme(t)).WithObjects(extra...)
 	if ns != nil {
 		b = b.WithObjects(ns)
 	}
@@ -121,7 +123,7 @@ func TestLiveGrant_CloneProceedsWhenBothAgree(t *testing.T) {
 	clone := xnsClone(xnsTarget)
 	cp := &clonerProvider{cloneResp: contracts.CloneResponse{TargetVmID: "vm-clone-1"}}
 	r, _ := newXNSCloneReconciler(t, cp, clone, grantNamespace(xnsTarget, strPtr(xnsSource)))
-	live := newLiveReader(t, grantNamespace(xnsTarget, strPtr(xnsSource)), nil)
+	live := newLiveReader(t, grantNamespace(xnsTarget, strPtr(xnsSource)), nil, xnsSharedProvider(), xnsSharedClass())
 	r.APIReader = live
 
 	reconcileClone(t, r, clone, 4)

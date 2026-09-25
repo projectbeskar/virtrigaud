@@ -88,13 +88,32 @@ func xnsClone(targetNamespace string) *infrav1beta1.VMClone {
 	}
 }
 
+// xnsSharedProvider and xnsSharedClass are the source VM's Provider and
+// VMClass in team-a, shared with every namespace
+// (spec.consumerNamespaceSelector: {}), so a granted cross-namespace target —
+// which references them from team-b — may use them.
+func xnsSharedProvider() *infrav1beta1.Provider {
+	p := runningProvider(xnsSource, "prov-1")
+	p.Spec.ConsumerNamespaceSelector = &metav1.LabelSelector{}
+	return p
+}
+
+func xnsSharedClass() *infrav1beta1.VMClass {
+	c := smallVMClass(xnsSource)
+	c.Name = "src-class"
+	c.Spec.ConsumerNamespaceSelector = &metav1.LabelSelector{}
+	return c
+}
+
 // newXNSCloneReconciler builds a clone reconciler over a fake client holding
-// the source VM + provider in team-a, the clone, and extra objects.
+// the source VM + (shared) provider and class in team-a, the clone, and extra
+// objects.
 func newXNSCloneReconciler(t *testing.T, cp contracts.Provider, clone *infrav1beta1.VMClone, extra ...client.Object) (*VMCloneReconciler, *record.FakeRecorder) {
 	t.Helper()
 	s := xnsCloneScheme(t)
 	objs := append([]client.Object{
-		runningProvider(xnsSource, "prov-1"),
+		xnsSharedProvider(),
+		xnsSharedClass(),
 		sourceVMWithID(xnsSource, "src-vm", "prov-1", "vm-source-123"),
 		clone,
 	}, extra...)
@@ -269,7 +288,9 @@ func TestVMCloneXNS_ClassOverridePinnedCrossNamespace(t *testing.T) {
 	clone := xnsClone(xnsTarget)
 	clone.Spec.Target.ClassRef = &infrav1beta1.LocalObjectReference{Name: "big"}
 	cp := &clonerProvider{cloneResp: contracts.CloneResponse{TargetVmID: "vm-clone-1"}}
-	r, _ := newXNSCloneReconciler(t, cp, clone, grantNamespace(xnsTarget, strPtr(xnsSource)))
+	big := xnsSharedClass()
+	big.Name = "big"
+	r, _ := newXNSCloneReconciler(t, cp, clone, grantNamespace(xnsTarget, strPtr(xnsSource)), big)
 
 	reconcileClone(t, r, clone, 4)
 
