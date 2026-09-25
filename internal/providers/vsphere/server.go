@@ -467,8 +467,12 @@ func (p *Provider) GetCapabilities(ctx context.Context, req *providerv1.GetCapab
 		SupportsMemorySnapshots:     true, // vSphere captures RAM-inclusive snapshots via CreateSnapshot(memory=true); requires the VM to be powered on
 		SupportsLinkedClones:        true,
 		SupportsImageImport:         true, // ImagePrepare imports an OVA/OVF URL into vCenter as a template (#154)
-		SupportedDiskTypes:          []string{"thin", "thick", "eager-zeroed"},
-		SupportedNetworkTypes:       []string{"standard", "distributed"},
+		// ADR-0009: ImagePrepare names, stamps and verifies prepared templates by
+		// the VMImage identity and source digest, and never reuses one by bare
+		// name for an identity request (image_identity.go).
+		SupportsImageArtifactIdentity: true,
+		SupportedDiskTypes:            []string{"thin", "thick", "eager-zeroed"},
+		SupportedNetworkTypes:         []string{"standard", "distributed"},
 		// Disk migration: ExportDisk and ImportDisk are implemented (issue #178).
 		// Previously these were left at the zero value, understating real support
 		// and (once capability gating is enabled, #176) wrongly blocking migration.
@@ -1931,14 +1935,15 @@ func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*pr
 
 	// Create the clone specification. The config clears the owner stamp the
 	// clone would inherit from the source's ExtraConfig, so the clone never
-	// claims the SOURCE VirtualMachine's owner.
+	// claims the SOURCE VirtualMachine's owner, and any prepared-image stamp
+	// (ADR-0009 D3): a clone is never an image artifact.
 	cloneSpec := &types.VirtualMachineCloneSpec{
 		Location: types.VirtualMachineRelocateSpec{
 			Datastore: types.NewReference(datastore.Reference()),
 			Pool:      types.NewReference(resourcePool.Reference()),
 		},
 		Config: &types.VirtualMachineConfigSpec{
-			ExtraConfig: ownerExtraConfig(contracts.ObjectIdentity{}),
+			ExtraConfig: append(ownerExtraConfig(contracts.ObjectIdentity{}), clearedImageStampExtraConfig()...),
 		},
 		PowerOn:  false, // Don't power on automatically
 		Template: false,
@@ -2500,8 +2505,10 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec, datac
 
 	// Stamp the requesting VirtualMachine's identity on the new VM (or, for a
 	// request without an owner, clear any stamp inherited from the template), so a
-	// later same-named create can prove — or disprove — that it owns this VM.
-	extraConfig := ownerExtraConfig(spec.Owner)
+	// later same-named create can prove — or disprove — that it owns this VM. A
+	// VM is never a prepared-image artifact: the image stamp a prepared template
+	// carries is cleared too (ADR-0009 D3).
+	extraConfig := append(ownerExtraConfig(spec.Owner), clearedImageStampExtraConfig()...)
 
 	// Configure performance and security features.
 	// Enable nested virtualization if requested

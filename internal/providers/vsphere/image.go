@@ -25,6 +25,7 @@ import (
 	"crypto/sha512"
 	"encoding/hex"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"hash"
 	"io"
@@ -42,11 +43,16 @@ import (
 	"github.com/vmware/govmomi/vim25/progress"
 	"github.com/vmware/govmomi/vim25/types"
 
+	"github.com/projectbeskar/virtrigaud/internal/imageartifact"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/errors"
 )
 
 const (
+	// vsphereProviderType is the provider_type label of this provider's
+	// metrics (e.g. the ADR-0009 legacy-request counter).
+	vsphereProviderType = "vsphere"
+
 	// vsphereDefaultChecksumType is the checksum algorithm assumed when an OVA
 	// source requests verification (non-empty checksum) but omits the algorithm.
 	// It matches the v1beta1 VSphereImageSource kubebuilder default.
@@ -191,42 +197,69 @@ func vsphereChecksumHasher(checksumType string) (h hash.Hash, ok bool) {
 	}
 }
 
-// ImagePrepare implements the ProviderServer interface. It prepares a vSphere
-// template named req.TargetName from the image source encoded in req.ImageJson,
-// honoring three source kinds in precedence order:
+// ImagePrepare implements the ProviderServer interface (ADR-0009 D7). The
+// request is decoded by imageartifact.ParseRequest, before any vCenter call:
 //
-//  1. Idempotency gate: if a vSphere TEMPLATE named TargetName already exists,
-//     it returns success without importing — a re-run is a cheap no-op. A
-//     same-named object that is not a template, or more than one same-named
-//     template, fails with InvalidSpec instead (findPreparedTemplate).
+//   - An identity request (image + source_digest, empty target_name; every
+//     manager since ADR-0009) is served by imagePrepareIdentity: an ovaURL is
+//     imported as a template named after the image identity, stamped with it,
+//     into the Provider's import folder, and an existing template there is
+//     reused only when its stamp matches (image_identity.go).
+//   - A legacy request (no identity, a bare target_name; a manager older than
+//     ADR-0009) is served by imagePrepareLegacy, the pre-ADR bare-name path,
+//     for this release only, and emits the deprecation signal (a WARN log and
+//     virtrigaud_provider_image_prepare_legacy_requests_total).
+//   - Anything else is InvalidSpec.
+//
+// The import is driven synchronously, so the response carries no Task, which
+// the controller treats as "completed synchronously". prepared_image_path is
+// always empty: vSphere has no on-disk path the manager consumes.
+func (p *Provider) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepareRequest) (*providerv1.ImagePrepareResponse, error) {
+	parsed, err := imageartifact.ParseRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	if parsed.Mode == imageartifact.ModeLegacy {
+		imageartifact.SignalLegacyRequest(ctx, p.logger, vsphereProviderType, parsed.LegacyTargetName)
+	}
+	if p.client == nil || p.finder == nil {
+		return nil, errors.NewUnavailable("vSphere", fmt.Errorf("provider client not initialized"))
+	}
+	if parsed.Mode == imageartifact.ModeLegacy {
+		return p.imagePrepareLegacy(ctx, req, parsed.LegacyTargetName)
+	}
+	return p.imagePrepareIdentity(ctx, req, parsed)
+}
+
+// imagePrepareLegacy serves a legacy (identity-less) request from a manager
+// older than ADR-0009 with the pre-ADR behaviour, unchanged, for this release
+// only (ADR-0009 D7, Q3): it prepares a vSphere template named targetName from
+// the image source encoded in req.ImageJson, honoring three source kinds in
+// precedence order:
+//
+//  1. Idempotency gate: if a vSphere TEMPLATE named targetName already exists
+//     anywhere in the default datacenter, it returns success without importing
+//     — a re-run is a cheap no-op. A same-named object that is not a template,
+//     or more than one same-named template, fails with InvalidSpec instead
+//     (findPreparedTemplate).
 //  2. source.vsphere.templateName: verify-only. The named template must already
 //     exist and be marked as a template; if found, success; if missing, a
 //     NotFound error; a regular VM or an ambiguous name, InvalidSpec. No download.
 //  3. source.vsphere.contentLibrary: verify-only. The library item must exist;
-//     deploying it to a template is out of scope for this PR.
-//  4. source.vsphere.ovaURL: the real work. Download the OVA/OVF, optionally
-//     verify its checksum, import it into vCenter via an NFC lease, and mark the
-//     resulting VM as a template.
+//     deploying it to a template is out of scope.
+//  4. source.vsphere.ovaURL: download the OVA/OVF, optionally verify its
+//     checksum, import it into vCenter via an NFC lease (unstamped), and mark
+//     the resulting VM as a template.
 //
-// TargetName and templateName are validated (unsafeNameReason/templateRefError)
+// The response's prepared_image_id is the bare template name, and it carries no
+// artifact echo: that is the shape an older manager expects. A bare name is a
+// DNS-1123 subdomain and so never contains '_', which every identity artifact
+// name does (ADR-0009 D1.3): this path can never see or reuse a stamped
+// artifact.
+//
+// targetName and templateName are validated (unsafeNameReason/templateRefError)
 // before any vCenter call, and resolved without find.Finder (template_source.go).
-//
-// The import is driven synchronously, so the returned ImagePrepareResponse
-// carries an empty (nil) Task — consistent with the libvirt provider — which the
-// controller treats as "completed synchronously". The response's
-// prepared_image_id is the template name vCenter addresses the prepared template
-// by (prepared_image_path is empty: vSphere has no on-disk path the manager
-// consumes). Very large OVAs may eventually warrant an async TaskRef the
-// controller polls (a future enhancement; the gRPC client timeout is tracked
-// separately in PR-4 of #154).
-func (p *Provider) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepareRequest) (*providerv1.ImagePrepareResponse, error) {
-	if p.client == nil || p.finder == nil {
-		return nil, errors.NewUnavailable("vSphere", fmt.Errorf("provider client not initialized"))
-	}
-	targetName := strings.TrimSpace(req.GetTargetName())
-	if targetName == "" {
-		return nil, errors.NewInvalidSpec("ImagePrepare target name is required")
-	}
+func (p *Provider) imagePrepareLegacy(ctx context.Context, req *providerv1.ImagePrepareRequest, targetName string) (*providerv1.ImagePrepareResponse, error) {
 	// The target name is the name of the template an OVA import creates, and the
 	// name the idempotency gate looks up: it must be a plain, safe VM name. Both
 	// checks run before any vCenter call.
@@ -449,7 +482,7 @@ func (p *Provider) imagePrepareImportOVA(ctx context.Context, src vsphereImageSo
 
 	p.logger.Info("ImagePrepare: importing OVA into vCenter",
 		"target_name", targetName,
-		"ova_url", src.OVAURL,
+		"ova_url", redactURL(src.OVAURL),
 		"datastore", placement.datastore.Name(),
 		"resource_pool", placement.resourcePool.Reference().Value,
 		"folder", placement.folder.Reference().Value,
@@ -457,10 +490,11 @@ func (p *Provider) imagePrepareImportOVA(ctx context.Context, src vsphereImageSo
 
 	// importOVA (ova_import.go) is importer.Import with the OVF's
 	// VirtRigaud-reserved ExtraConfig keys stripped from the import spec before
-	// ImportVApp, so a tenant's OVA can never carry a forged owner stamp.
-	moref, err := p.importOVA(ctx, imp, descriptorPath, opts)
+	// ImportVApp, so a tenant's OVA can never carry a forged owner stamp. A
+	// legacy import is unstamped (nil stamp).
+	moref, err := p.importOVA(ctx, imp, descriptorPath, opts, nil)
 	if err != nil {
-		return nil, errors.NewInternal(fmt.Sprintf("ImagePrepare: import OVA %q as %q", src.OVAURL, targetName), err)
+		return nil, errors.NewInternal(fmt.Sprintf("ImagePrepare: import OVA %q as %q", redactURL(src.OVAURL), targetName), err)
 	}
 
 	vm := object.NewVirtualMachine(p.client.Client, *moref)
@@ -506,26 +540,7 @@ func (p *Provider) resolveImagePlacement(ctx context.Context, storageHint string
 	}
 	p.finder.SetDatacenter(datacenter)
 
-	// Resource pool from the default cluster (or the finder default pool).
-	var resourcePool *object.ResourcePool
-	if cluster := strings.TrimSpace(p.config.DefaultCluster); cluster != "" {
-		cc, err := p.finder.ClusterComputeResource(ctx, cluster)
-		if err != nil {
-			return nil, fmt.Errorf("ImagePrepare: find cluster %q: %w", cluster, err)
-		}
-		resourcePool, err = cc.ResourcePool(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("ImagePrepare: resource pool of cluster %q: %w", cluster, err)
-		}
-	} else {
-		resourcePool, err = p.finder.ResourcePoolOrDefault(ctx, "")
-		if err != nil {
-			return nil, fmt.Errorf("ImagePrepare: resolve default resource pool: %w", err)
-		}
-	}
-
-	// Datastore: storageHint, then DefaultDatastore, then DefaultStoragePod.
-	datastore, err := p.resolveImageDatastore(ctx, storageHint)
+	resourcePool, datastore, err := p.resolveImageComputeAndStorage(ctx, storageHint)
 	if err != nil {
 		return nil, err
 	}
@@ -542,6 +557,40 @@ func (p *Provider) resolveImagePlacement(ctx context.Context, storageHint string
 		datastore:    datastore,
 		folder:       folder,
 	}, nil
+}
+
+// resolveImageComputeAndStorage resolves the resource pool and datastore an
+// OVA import uses (the finder must be scoped to the datacenter):
+//
+//   - ResourcePool: DefaultCluster's root resource pool (or the finder default
+//     pool when DefaultCluster is empty).
+//   - Datastore:    storageHint → DefaultDatastore → a datastore from
+//     DefaultStoragePod (datastore cluster).
+func (p *Provider) resolveImageComputeAndStorage(ctx context.Context, storageHint string) (*object.ResourcePool, *object.Datastore, error) {
+	var resourcePool *object.ResourcePool
+	if cluster := strings.TrimSpace(p.config.DefaultCluster); cluster != "" {
+		cc, err := p.finder.ClusterComputeResource(ctx, cluster)
+		if err != nil {
+			return nil, nil, fmt.Errorf("ImagePrepare: find cluster %q: %w", cluster, err)
+		}
+		resourcePool, err = cc.ResourcePool(ctx)
+		if err != nil {
+			return nil, nil, fmt.Errorf("ImagePrepare: resource pool of cluster %q: %w", cluster, err)
+		}
+	} else {
+		var err error
+		resourcePool, err = p.finder.ResourcePoolOrDefault(ctx, "")
+		if err != nil {
+			return nil, nil, fmt.Errorf("ImagePrepare: resolve default resource pool: %w", err)
+		}
+	}
+
+	// Datastore: storageHint, then DefaultDatastore, then DefaultStoragePod.
+	datastore, err := p.resolveImageDatastore(ctx, storageHint)
+	if err != nil {
+		return nil, nil, err
+	}
+	return resourcePool, datastore, nil
 }
 
 // resolveImageDatastore picks the datastore for an OVA import: the request's
@@ -575,8 +624,11 @@ func (p *Provider) resolveImageDatastore(ctx context.Context, storageHint string
 			"defaultDatastore / defaultStoragePod)")
 }
 
-// resolveImageFolder resolves the folder an imported template lands in:
-// DefaultFolder, falling back to the datacenter's default VM folder.
+// resolveImageFolder resolves the folder a LEGACY import lands in:
+// DefaultFolder, falling back to the datacenter's default VM folder on any
+// finder error. This is the pre-ADR-0009 behaviour, kept for legacy mode only
+// (where the bare-name gate searches the whole datacenter anyway); an identity
+// prepare uses the strict resolveArtifactFolder instead (ADR-0009 D5).
 func (p *Provider) resolveImageFolder(ctx context.Context, datacenter *object.Datacenter) (*object.Folder, error) {
 	folderName := strings.TrimSpace(p.config.DefaultFolder)
 	if folderName != "" {
@@ -593,14 +645,79 @@ func (p *Provider) resolveImageFolder(ctx context.Context, datacenter *object.Da
 	return folder, nil
 }
 
+// redactURL returns raw with its user-info, query and fragment removed, for
+// logs and error messages: an OVA URL may carry credentials ("user:pass@") or
+// a presigned token in its query, which must never reach a log or a status
+// (ADR-0009 D2). A URL that does not parse is replaced by a placeholder.
+func redactURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "<unparseable URL>"
+	}
+	redacted := url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path}
+	out := redacted.String()
+	if u.RawQuery != "" || u.Fragment != "" {
+		out += "?<redacted>"
+	}
+	return out
+}
+
+// urlPathExt returns the lowercase extension of the path of raw, ignoring any
+// query or fragment ("https://h/x.ovf?sig=…" is ".ovf"), or "" when raw does
+// not parse.
+func urlPathExt(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(path.Ext(u.Path))
+}
+
+// isPermanentHTTPStatus reports whether an HTTP status from the OVA source
+// means the source itself is wrong and a retry cannot help: any 4xx except
+// 408 Request Timeout and 429 Too Many Requests (e.g. 404, 410, 401, 403 —
+// an expired presigned URL, a wrong path). 5xx, 408 and 429 are transient.
+func isPermanentHTTPStatus(code int) bool {
+	return code >= 400 && code < 500 && code != http.StatusRequestTimeout && code != http.StatusTooManyRequests
+}
+
+// sourceReadTracker wraps the download body and records a read error, so a
+// failed copy can be attributed to the source (transient) or to the local
+// staging file (a provider-side failure).
+type sourceReadTracker struct {
+	r   io.Reader
+	err error
+}
+
+// Read implements io.Reader.
+func (t *sourceReadTracker) Read(b []byte) (int, error) {
+	n, err := t.r.Read(b)
+	if err != nil && err != io.EOF {
+		t.err = err
+	}
+	return n, err
+}
+
 // downloadOVA streams the OVA/OVF at ovaURL to a temp file on the provider pod's
 // filesystem and returns the local path plus a cleanup func that removes it. The
-// cleanup is always safe to call (it tolerates an already-removed file). A
-// non-2xx response or transport error is reported as Unavailable (retryable).
+// cleanup is always safe to call (it tolerates an already-removed file).
+//
+// Failures are classified so the manager holds on a source that can never be
+// downloaded instead of retrying it forever:
+//
+//   - permanent, InvalidSpec: a URL that cannot form a request, or a 4xx
+//     other than 408/429 (isPermanentHTTPStatus);
+//   - transient, Unavailable: a transport error, a 5xx/408/429, or the source
+//     breaking off mid-download;
+//   - a failure to write the local staging file is a provider-side error
+//     (retryable).
+//
+// Messages carry the URL only in redacted form (redactURL).
 func (p *Provider) downloadOVA(ctx context.Context, ovaURL string) (localPath string, cleanup func(), err error) {
 	noop := func() {}
+	shownURL := redactURL(ovaURL)
 
-	ext := strings.ToLower(filepath.Ext(ovaURL))
+	ext := urlPathExt(ovaURL)
 	if ext != ".ova" && ext != ".ovf" {
 		// Default to .ova so the archive selection has a deterministic shape; the
 		// importer ultimately parses the descriptor regardless of extension.
@@ -622,22 +739,30 @@ func (p *Provider) downloadOVA(ctx context.Context, ovaURL string) (localPath st
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ovaURL, nil)
 	if err != nil {
 		cleanup()
-		return "", noop, errors.NewInvalidSpec("ImagePrepare: invalid OVA URL %q: %v", ovaURL, err)
+		return "", noop, errors.NewInvalidSpec("ImagePrepare: invalid OVA URL %q: %v", shownURL, unwrapURLError(err))
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		cleanup()
-		return "", noop, errors.NewUnavailable("OVA download", err)
+		return "", noop, errors.NewUnavailable(fmt.Sprintf("OVA download from %s", shownURL), unwrapURLError(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		cleanup()
+		if isPermanentHTTPStatus(resp.StatusCode) {
+			return "", noop, errors.NewInvalidSpec(
+				"ImagePrepare: the OVA source %s answered HTTP %d; fix the image source URL", shownURL, resp.StatusCode)
+		}
 		return "", noop, errors.NewUnavailable("OVA download",
-			fmt.Errorf("unexpected HTTP status %d downloading %q", resp.StatusCode, ovaURL))
+			fmt.Errorf("unexpected HTTP status %d downloading %s", resp.StatusCode, shownURL))
 	}
 
-	if _, err := io.Copy(tmp, resp.Body); err != nil {
+	body := &sourceReadTracker{r: resp.Body}
+	if _, err := io.Copy(tmp, body); err != nil {
 		cleanup()
+		if body.err != nil {
+			return "", noop, errors.NewUnavailable(fmt.Sprintf("OVA download from %s", shownURL), unwrapURLError(body.err))
+		}
 		return "", noop, fmt.Errorf("ImagePrepare: write OVA to temp file: %w", err)
 	}
 	if err := tmp.Sync(); err != nil {
@@ -645,8 +770,18 @@ func (p *Provider) downloadOVA(ctx context.Context, ovaURL string) (localPath st
 		return "", noop, fmt.Errorf("ImagePrepare: flush OVA temp file: %w", err)
 	}
 
-	p.logger.Info("ImagePrepare: downloaded OVA", "url", ovaURL, "path", localPath)
+	p.logger.Info("ImagePrepare: downloaded OVA", "url", shownURL, "path", localPath)
 	return localPath, cleanup, nil
+}
+
+// unwrapURLError returns the cause of a *url.Error (whose message repeats the
+// full URL, query included), or err itself.
+func unwrapURLError(err error) error {
+	var uerr *url.Error
+	if stderrors.As(err, &uerr) && uerr.Err != nil {
+		return uerr.Err
+	}
+	return err
 }
 
 // newOVAArchive returns the importer.Archive and the descriptor path to pass to
@@ -658,7 +793,7 @@ func (p *Provider) downloadOVA(ctx context.Context, ovaURL string) (localPath st
 // real descriptor by macOS tar.
 func (p *Provider) newOVAArchive(localPath, ovaURL string) (importer.Archive, string, error) {
 	opener := importer.Opener{Client: p.client.Client}
-	if strings.EqualFold(filepath.Ext(ovaURL), ".ovf") {
+	if urlPathExt(ovaURL) == ".ovf" {
 		return &importer.FileArchive{Path: localPath, Opener: opener}, localPath, nil
 	}
 	descriptor, err := findOVADescriptorName(localPath)
@@ -690,7 +825,10 @@ func findOVADescriptorName(ovaPath string) (string, error) {
 			break
 		}
 		if err != nil {
-			return "", fmt.Errorf("read OVA tar to locate descriptor: %w", err)
+			// The file is the complete body the source served (a truncated
+			// download fails in downloadOVA), so an unreadable archive is a
+			// property of the source: permanent.
+			return "", errors.NewInvalidSpec("ImagePrepare: the downloaded OVA is not a readable tar archive: %v", err)
 		}
 		if strings.Contains(h.Name, "__MACOSX/") {
 			continue
