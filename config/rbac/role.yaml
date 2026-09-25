@@ -46,7 +46,10 @@ rules:
 - apiGroups:
   - apiextensions.k8s.io
   resourceNames:
+  - providers.infra.virtrigaud.io
   - virtualmachines.infra.virtrigaud.io
+  - vmclasses.infra.virtrigaud.io
+  - vmimages.infra.virtrigaud.io
   resources:
   - customresourcedefinitions
   verbs:
