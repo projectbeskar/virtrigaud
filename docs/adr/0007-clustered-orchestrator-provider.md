@@ -998,11 +998,14 @@ follows; A2's `pendingHost` is its prerequisite.
 >
 > **Reporting.** When no host fits, the VM gets `Placed=False/Unschedulable` (a
 > Placed reason this amendment adds) and `Provisioning=False/Unschedulable`. The
-> message holds the per-category tally. When capacity was short it adds, per
-> resource, the numbers of the host with the most free capacity:
-> *insufficient CPU on N of M candidate host(s): requested R vCPU, at most F
-> free (committed C of E after overcommit)*. The message does not grow with the
-> number of hosts or VMs, and it names no host and no other VM. The retry backs
+> message holds the per-category tally. When capacity was short it adds the
+> VM's own request only: *requested R vCPU and M MiB, which exceeds the free
+> capacity of every candidate host*. It carries no committed, capacity or free
+> figure. Those figures are derived from other tenants' VMs, and the VM's owner
+> can read the message; the same goes for the success trace in
+> `status.placement.reason`. The per-host arithmetic goes to the manager log at
+> V(1) and to the gauges below. The message does not grow with the number of
+> hosts or VMs, and it names no host and no other VM. The retry backs
 > off per VM, from 30 s doubling to 2 min. The VM controller does not watch
 > Hosts or other VMs, so 2 min is the longest a VM waits to notice freed
 > capacity.

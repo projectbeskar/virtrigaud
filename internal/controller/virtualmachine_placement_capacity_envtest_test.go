@@ -154,7 +154,7 @@ var _ = Describe("Clustered scheduling against committed capacity (envtest)", fu
 					continue
 				}
 				if c := meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionPlaced); c != nil && c.Reason == k8s.ReasonUnschedulable {
-					g.Expect(c.Message).To(ContainSubstring("insufficient CPU on 1 of 1 candidate host(s): requested 2 vCPU, at most 0 free"))
+					g.Expect(c.Message).To(ContainSubstring("requested 2 vCPU and 2048 MiB, which exceeds the free capacity of every candidate host"))
 					unschedulable++
 				}
 			}

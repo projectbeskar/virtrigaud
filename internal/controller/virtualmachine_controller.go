@@ -1347,14 +1347,23 @@ func (r *VirtualMachineReconciler) resolveClusterPlacement(
 		if stderrors.Is(err, scheduler.ErrNoFeasibleHost) {
 			// Capacity/visibility/affinity eliminated every host. The error's
 			// message carries the per-category tally and, when capacity was
-			// short, the arithmetic of the least committed host — numbers
-			// only, never another VM's name, and bounded in size. Surface it on
-			// Placed and Provisioning and back off (it may clear when capacity
-			// frees up or a cordoned host returns).
+			// short, the VM's own request — no committed, capacity or free
+			// figure (derived from other tenants' VMs, review M3), no other
+			// VM's name, bounded in size. Surface it on Placed and
+			// Provisioning and back off (it may clear when capacity frees up or
+			// a cordoned host returns). The per-host arithmetic goes to the
+			// manager log only, at V(1).
 			msg := fmt.Sprintf("no feasible host in pool %q: %v", pool.Name, err)
 			retryAfter := r.unschedulable.next(vmSchedulingUID(vm), r.now())
 			logger.Info("Cannot schedule VM: "+msg, "retryAfter", retryAfter.String(),
 				"insufficientCapacity", scheduler.InsufficientCapacity(err))
+			var nf *scheduler.NoFeasibleHostError
+			if stderrors.As(err, &nf) {
+				if detail := nf.CapacityDetail(); len(detail) > 0 {
+					logger.V(1).Info("Committed-capacity arithmetic of the hosts rejected for capacity (administrator detail)",
+						"pool", pool.Name, "hosts", detail)
+				}
+			}
 			setPlacedCondition(vm, metav1.ConditionFalse, k8s.ReasonUnschedulable, msg)
 			k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonUnschedulable, msg)
 			metrics.RecordError(errReasonPlacement, metrics.ComponentManager)

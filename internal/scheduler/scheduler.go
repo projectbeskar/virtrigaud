@@ -265,7 +265,9 @@ func Schedule(req Request) (Result, error) {
 	}
 
 	if len(feasible) == 0 {
-		return Result{}, newNoFeasibleHostError(len(req.Candidates), rejections)
+		nf := newNoFeasibleHostError(len(req.Candidates), rejections)
+		nf.Request = req.Resources
+		return Result{}, nf
 	}
 
 	// IDEMPOTENCY (D4): a VM already bound re-selects its current host when that

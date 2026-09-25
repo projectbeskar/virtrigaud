@@ -405,7 +405,7 @@ func TestClusteredCapacity_CommittedSources(t *testing.T) {
 			placed := placedCondition(vm)
 			require.NotNil(t, placed)
 			assert.Equal(t, k8s.ReasonUnschedulable, placed.Reason)
-			assert.Contains(t, placed.Message, "insufficient CPU on 1 of 1 candidate host(s): requested 2 vCPU")
+			assert.Contains(t, placed.Message, "requested 2 vCPU and 4096 MiB, which exceeds the free capacity of every candidate host")
 			assert.Equal(t, k8s.ReasonUnschedulable, provisioningReason(vm))
 		})
 	}
@@ -446,7 +446,8 @@ func TestClusteredCapacity_UnschedulableMessageIsBoundedAndNamesNoOtherVM(t *tes
 	assert.Less(t, len(msg), 512, msg)
 	assert.NotContains(t, msg, "tenant-secret")
 	assert.NotContains(t, msg, "tenant-b")
-	assert.Contains(t, msg, "insufficient CPU on 30 of 30 candidate host(s): requested 2 vCPU, at most 0 free (committed 2 of 2 after overcommit)")
+	assert.Contains(t, msg, "requested 2 vCPU and 4096 MiB, which exceeds the free capacity of every candidate host")
+	assert.NotContains(t, msg, "committed")
 }
 
 // TestClusteredCapacity_UnschedulableBacksOff: consecutive no-fits wait longer,
@@ -562,7 +563,7 @@ func TestClusteredCapacity_ConcurrentCreatesNeverOverbook(t *testing.T) {
 			case placedCondition(vm) != nil && placedCondition(vm).Reason == k8s.ReasonUnschedulable:
 				unschedulable++
 				assert.Contains(t, placedCondition(vm).Message,
-					fmt.Sprintf("insufficient CPU on 1 of 1 candidate host(s): requested 2 vCPU, at most 0 free (committed %d of %d after overcommit)", 2*k, 2*k))
+					"requested 2 vCPU and 4096 MiB, which exceeds the free capacity of every candidate host")
 			}
 		}
 		assert.Equal(t, k, placed)

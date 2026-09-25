@@ -56,7 +56,6 @@ func TestCommitted_HostFillsUp(t *testing.T) {
 	res, err := Schedule(req)
 	require.NoError(t, err)
 	assert.Equal(t, "host-a", res.HostID)
-	assert.Contains(t, res.Reason, "freeCPU=2", "the trace reports what is left, not the raw total")
 
 	// 4 x 2 vCPU committed: the host is full.
 	req.PlacedVMs = append(req.PlacedVMs, holding("d", "host-a", 2, 2048))
@@ -66,8 +65,9 @@ func TestCommitted_HostFillsUp(t *testing.T) {
 	assert.Equal(t, rejInsufficientCPU, nf.Rejections[0].Reason)
 	require.NotNil(t, nf.Rejections[0].Shortfall)
 	assert.Equal(t, CapacityShortfall{Requested: 2, Capacity: 8, Committed: 8}, *nf.Rejections[0].Shortfall)
-	assert.Contains(t, err.Error(),
-		"insufficient CPU on 1 of 1 candidate host(s): requested 2 vCPU, at most 0 free (committed 8 of 8 after overcommit)")
+	assert.Contains(t, err.Error(), "requested 2 vCPU and 2048 MiB, which exceeds the free capacity of every candidate host")
+	assert.Equal(t, []string{"host-a: " + rejInsufficientCPU + ": requested 2, free 0 (committed 8 of 8)"}, nf.CapacityDetail(),
+		"the arithmetic is kept for the manager log")
 	assert.True(t, InsufficientCapacity(err))
 }
 
@@ -77,8 +77,32 @@ func TestCommitted_MemoryFillsUp(t *testing.T) {
 	_, err := Schedule(req)
 	nf := requireNoFit(t, err)
 	assert.Equal(t, rejInsufficientMem, nf.Rejections[0].Reason)
-	assert.Contains(t, err.Error(),
-		"insufficient memory on 1 of 1 candidate host(s): requested 2048 MiB, at most 1024 free (committed 7168 of 8192 after overcommit)")
+	assert.Equal(t, CapacityShortfall{Requested: 2048, Capacity: 8192, Committed: 7168}, *nf.Rejections[0].Shortfall)
+	assert.Contains(t, err.Error(), "requested 2 vCPU and 2048 MiB, which exceeds the free capacity of every candidate host")
+}
+
+// TestCommitted_TenantVisibleTextCarriesNoCommittedFigures (review M3): the
+// success trace (status.placement.reason) and the no-fit message (the Placed
+// condition) carry no committed, capacity or free figure — those are derived
+// from other tenants' VMs.
+func TestCommitted_TenantVisibleTextCarriesNoCommittedFigures(t *testing.T) {
+	// 13 vCPU committed of 16 leaves 3 free: none of 13, 16 or 3 may appear.
+	req := baseReq(newHost("host-a", 16, 65536))
+	req.PlacedVMs = []PlacedVM{holding("a", "host-a", 13, 0)}
+	res, err := Schedule(req)
+	require.NoError(t, err)
+	for _, figure := range []string{"13", "16", "3", "free"} {
+		assert.NotContains(t, res.Reason, figure, "success trace: %q", res.Reason)
+	}
+
+	req.Resources.CPU = 4
+	_, err = Schedule(req)
+	_ = requireNoFit(t, err)
+	msg := err.Error()
+	for _, figure := range []string{"13", "16", "committed", "at most"} {
+		assert.NotContains(t, msg, figure, "no-fit message: %q", msg)
+	}
+	assert.Contains(t, msg, "requested 4 vCPU and 2048 MiB")
 }
 
 func TestCommitted_VMIsExcludedFromItsOwnSum(t *testing.T) {
@@ -167,7 +191,7 @@ func TestCommitted_OverCommittedHostFitsNothing(t *testing.T) {
 	_, err := Schedule(req)
 	nf := requireNoFit(t, err)
 	assert.Equal(t, int64(-1), nf.Rejections[0].Shortfall.Free())
-	assert.Contains(t, err.Error(), "at most 0 free (committed 3 of 2 after overcommit)")
+	assert.Equal(t, "requested 1, free 0 (committed 3 of 2)", nf.Rejections[0].Shortfall.String())
 }
 
 func TestCommitted_SpreadAndBinPackRankByFreeCapacity(t *testing.T) {
@@ -210,7 +234,10 @@ func TestCommitted_CapacityOnlyCountsForCapacityButNotAffinity(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "host-a", res.HostID, "a CapacityOnly VM never matches an anti-affinity selector")
 	assert.Contains(t, res.Reason, "boundVMs=0", "nor is it counted as a bound VM")
-	assert.Contains(t, res.Reason, "freeCPU=2", "but it does hold capacity")
+	req.Resources.CPU = 3
+	_, err = Schedule(req)
+	_ = requireNoFit(t, err) // but it does hold capacity: 2 of 4 committed, 3 does not fit
+	req.Resources.CPU = 2
 
 	// The same VM in scope trips the rule.
 	foreign.CapacityOnly = false
@@ -250,18 +277,22 @@ func TestCommitted_NoFitMessageIsBoundedAndNamesNoVMOrHost(t *testing.T) {
 	assert.Less(t, len(msg), 400, "bounded message: %q", msg)
 	assert.NotContains(t, msg, "tenant-secret-vm")
 	assert.NotContains(t, msg, "host-0")
-	assert.Contains(t, msg, "insufficient CPU on 200 of 200 candidate host(s): requested 2 vCPU, at most 0 free (committed 20 of 20 after overcommit)")
+	assert.Contains(t, msg, "requested 2 vCPU and 2048 MiB, which exceeds the free capacity of every candidate host")
 }
 
-func TestCommitted_CapacitySummaryPicksTheHostWithMostFree(t *testing.T) {
+func TestCommitted_CapacitySummaryCountsTheCapacityRejections(t *testing.T) {
 	req := baseReq(newHost("host-a", 8, 65536), newHost("host-b", 8, 65536), newHost("host-c", 1, 65536, hHealth(v1beta1.HostHealthNotReady)))
 	req.Resources.CPU = 4
 	req.PlacedVMs = []PlacedVM{holding("a", "host-a", 7, 0), holding("b", "host-b", 5, 0)}
 	_, err := Schedule(req)
-	_ = requireNoFit(t, err)
+	nf := requireNoFit(t, err)
 	msg := err.Error()
-	assert.True(t, strings.Contains(msg, "insufficient CPU on 2 of 3 candidate host(s): requested 4 vCPU, at most 3 free (committed 5 of 8 after overcommit)"), msg)
+	assert.True(t, strings.Contains(msg, "requested 4 vCPU and 2048 MiB, which exceeds the free capacity of 2 of 3 candidate host(s)"), msg)
 	assert.Contains(t, msg, rejNotReady+": 1")
+	assert.Equal(t, []string{
+		"host-a: " + rejInsufficientCPU + ": requested 4, free 1 (committed 7 of 8)",
+		"host-b: " + rejInsufficientCPU + ": requested 4, free 3 (committed 5 of 8)",
+	}, nf.CapacityDetail())
 }
 
 func TestInsufficientCapacity(t *testing.T) {

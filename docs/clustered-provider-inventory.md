@@ -739,13 +739,16 @@ with reason `Unschedulable`, and a message such as:
 
 ```
 no feasible host in pool "pool-a": no feasible host: 0 of 3 candidate host(s) passed the filters
-[insufficient CPU capacity: 3]; insufficient CPU on 3 of 3 candidate host(s): requested 4 vCPU,
-at most 2 free (committed 14 of 16 after overcommit)
+[insufficient CPU capacity: 3]; requested 4 vCPU and 4096 MiB, which exceeds the free capacity
+of every candidate host
 ```
 
-The numbers are those of the host with the most free capacity of that
-resource. The message never names a host or another VM, and its size does not
-grow with the pool. The VM is retried after 30 s, then 1 min, then every 2 min,
+The message states only the VM's own request. It never shows how much is
+committed or free on a host, because those figures come from other tenants'
+VMs; neither does the success trace in `status.placement.reason`.
+Administrators find the per-host arithmetic in the manager log (verbosity 1)
+and in the gauges below. The message never names a host or another VM, and its
+size does not grow with the pool. The VM is retried after 30 s, then 1 min, then every 2 min,
 until capacity frees up. The controller does not watch Hosts or other VMs, so a
 freed host is noticed within 2 minutes.
 

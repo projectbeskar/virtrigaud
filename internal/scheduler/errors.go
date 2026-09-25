@@ -83,7 +83,12 @@ func (s CapacityShortfall) String() string {
 type NoFeasibleHostError struct {
 	// Candidates is the number of hosts the scheduler was given.
 	Candidates int
+	// Request is the VM's own resource demand (Request.Resources).
+	Request ResourceRequest
 	// Rejections is the per-host breakdown, sorted by host id for determinism.
+	// A capacity rejection's Detail and Shortfall carry committed-capacity
+	// arithmetic derived from OTHER tenants' VMs: they are for the manager
+	// log (CapacityDetail), never for the VM's status.
 	Rejections []HostRejection
 }
 
@@ -101,10 +106,11 @@ func (e *NoFeasibleHostError) Tally() map[string]int {
 // Error renders a deterministic, secret-free summary: the count that passed (zero,
 // by definition) out of the candidates, plus the per-category tally sorted by
 // category name so the same inputs always produce the same message. When hosts
-// were rejected for capacity, one clause per resource adds the arithmetic of the
-// host with the most free capacity of that resource (CapacitySummary). The
-// message is bounded — its size does not grow with the number of hosts or VMs —
-// and names no host and no VM, so it can be shown to the VM's owner.
+// were rejected for capacity, CapacitySummary adds the VM's own request and
+// that it exceeds their free capacity. The message is bounded — its size does
+// not grow with the number of hosts or VMs — names no host and no VM, and
+// carries no committed, capacity or free figure (those are derived from other
+// tenants' VMs), so it can be shown to the VM's owner.
 func (e *NoFeasibleHostError) Error() string {
 	if e.Candidates == 0 {
 		return "no feasible host: pool has no candidate hosts"
@@ -127,46 +133,50 @@ func (e *NoFeasibleHostError) Error() string {
 	return msg
 }
 
-// capacityResources are the capacity rejection categories CapacitySummary
-// reports, in order, with the noun and unit each is rendered with.
-var capacityResources = []struct {
-	reason, noun, unit string
-}{
-	{reason: rejInsufficientCPU, noun: "CPU", unit: "vCPU"},
-	{reason: rejInsufficientMem, noun: "memory", unit: "MiB"},
+// capacityRejected returns how many hosts were rejected for insufficient CPU or
+// memory.
+func (e *NoFeasibleHostError) capacityRejected() int {
+	n := 0
+	for _, r := range e.Rejections {
+		if r.Reason == rejInsufficientCPU || r.Reason == rejInsufficientMem {
+			n++
+		}
+	}
+	return n
 }
 
-// CapacitySummary renders, for each resource that eliminated at least one host
-// on capacity, how many hosts it eliminated and the arithmetic of the one with
-// the most free capacity of it, e.g. "insufficient CPU on 3 of 3 candidate
-// host(s): requested 4 vCPU, at most 2 free (committed 14 of 16 after
-// overcommit)". It is "" when no host was rejected for capacity. Hosts are
-// scanned in host-id order, so ties resolve deterministically.
+// CapacitySummary is the tenant-safe capacity clause of Error: the VM's own
+// request and that it exceeds the free capacity of every candidate host, or of
+// the N of M hosts rejected for capacity when other hosts fell to other
+// filters, e.g. "requested 4 vCPU and 4096 MiB, which exceeds the free
+// capacity of every candidate host". It never carries a committed, capacity or
+// free figure. It is "" when no host was rejected for capacity.
 func (e *NoFeasibleHostError) CapacitySummary() string {
-	var clauses []string
-	for _, res := range capacityResources {
-		var (
-			hosts int
-			best  *CapacityShortfall
-		)
-		for i := range e.Rejections {
-			r := &e.Rejections[i]
-			if r.Reason != res.reason || r.Shortfall == nil {
-				continue
-			}
-			hosts++
-			if best == nil || r.Shortfall.Free() > best.Free() {
-				best = r.Shortfall
-			}
-		}
-		if best == nil {
-			continue
-		}
-		clauses = append(clauses, fmt.Sprintf(
-			"insufficient %s on %d of %d candidate host(s): requested %d %s, at most %d free (committed %d of %d after overcommit)",
-			res.noun, hosts, e.Candidates, best.Requested, res.unit, max(best.Free(), 0), best.Committed, best.Capacity))
+	n := e.capacityRejected()
+	if n == 0 {
+		return ""
 	}
-	return strings.Join(clauses, "; ")
+	which := "every candidate host"
+	if n < e.Candidates {
+		which = fmt.Sprintf("%d of %d candidate host(s)", n, e.Candidates)
+	}
+	return fmt.Sprintf("requested %d vCPU and %d MiB, which exceeds the free capacity of %s",
+		e.Request.CPU, e.Request.MemoryMiB, which)
+}
+
+// CapacityDetail renders the per-host arithmetic of the capacity rejections,
+// e.g. "host-a: insufficient CPU capacity: requested 4, free 2 (committed 14 of
+// 16)", in host-id order. It is derived from other tenants' VMs: log it for
+// administrators (the manager log at V(1)); never put it on a tenant-visible
+// status.
+func (e *NoFeasibleHostError) CapacityDetail() []string {
+	var out []string
+	for _, r := range e.Rejections {
+		if r.Shortfall != nil {
+			out = append(out, fmt.Sprintf("%s: %s: %s", r.HostID, r.Reason, r.Shortfall))
+		}
+	}
+	return out
 }
 
 // InsufficientCapacity reports whether err is a no-fit in which at least one

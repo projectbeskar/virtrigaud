@@ -77,11 +77,14 @@ func (ec *evalContext) pickBest(feasible []*v1beta1.Host) (Result, error) {
 		}
 	}
 
+	// The trace lands on the tenant-visible status.placement.reason, so it
+	// carries no free-capacity figure (derived from other tenants' VMs, review
+	// M3). boundVMs counts the VM's own-namespace VMs only.
 	return Result{
 		HostID: best.host.Name,
 		Reason: fmt.Sprintf(
-			"selected host %q via %s strategy (freeCPU=%d, freeMemMiB=%d, boundVMs=%d, preferenceScore=%d) from %d feasible of %d candidate host(s)%s",
-			best.host.Name, strategyName(binPack), best.freeCPU, best.freeMem, best.boundVMs,
+			"selected host %q via %s strategy (boundVMs=%d, preferenceScore=%d) from %d feasible of %d candidate host(s)%s",
+			best.host.Name, strategyName(binPack), best.boundVMs,
 			best.preference, len(feasible), len(ec.req.Candidates), ec.policySuffix()),
 	}, nil
 }
