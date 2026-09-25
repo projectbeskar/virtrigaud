@@ -4,6 +4,14 @@ A Kubernetes operator for managing virtual machines across multiple hypervisors.
 
 **Version**: v0.3.11 — [CHANGELOG](CHANGELOG.md) | [Documentation](https://projectbeskar.github.io/virtrigaud)
 
+> **Upgrading from v0.3.11?** `main` has accumulated a number of security fixes
+> since that release, several of which are breaking or change default
+> behavior (vSphere/libvirt VM-ownership checks, libvirt default cloud-init no
+> longer provisioning SSH credentials, cross-namespace clone/migration targets
+> needing a grant, `VirtualMachine.spec.providerRef` becoming immutable once
+> bound). Read **[Upgrading from v0.3.11](docs/upgrading.md)** before you
+> upgrade.
+
 ## Overview
 
 VirtRigaud is a Kubernetes operator that enables declarative management of virtual machines across different hypervisor platforms. It provides a unified API for provisioning and managing VMs on vSphere, Libvirt/KVM, and Proxmox VE through a remote gRPC provider architecture.
@@ -101,6 +109,19 @@ The following issues were open in v0.3.6 and resolved in v0.3.7; they are closed
 
 Verify these controls are correctly configured before relying on them in regulated environments. For full security guidance, see the [Security Operations Guide](https://projectbeskar.github.io/virtrigaud/operations/security/).
 
+### Since v0.3.11 (on `main`, not yet released)
+
+A full codebase security review closed several cross-tenant and
+privilege-escalation issues: vSphere and libvirt `Create`/`Clone` no longer
+bind to or clone a VM/domain/template they don't own; every libvirt command
+sent over SSH is shell-quoted (closing a command-injection path) and every
+value in generated domain XML is escaped (closing an XML-injection path);
+cross-namespace `VMClone`/`VMMigration` targets require an explicit grant;
+`VirtualMachine.spec.providerRef` is immutable once a VM is bound; and libvirt
+VMs created without `spec.userData` no longer get a default SSH key or sudo
+grant. Several of these are breaking — see
+**[Upgrading from v0.3.11](docs/upgrading.md)**.
+
 ## CRDs (10 total, all v1beta1)
 
 | CRD | Short name | Controller | Description |
@@ -194,6 +215,11 @@ Per the [canonical capabilities matrix](https://projectbeskar.github.io/virtriga
      -n virtrigaud-system
    ```
 
+   If you carry custom values across chart versions, prefer
+   `--reset-then-reuse-values` (Helm 3.14+) over `--reuse-values` — see
+   [Upgrading from v0.3.11](docs/upgrading.md) for why, and for the breaking
+   changes in the next release.
+
 ### Development Installation
 
 ```bash
@@ -275,6 +301,12 @@ Go 1.26+ is required for source builds.
    ```
 
    When you apply a Provider CR, the controller creates a dedicated Deployment and Service for the provider pod in the same namespace. Each Provider CR has isolated credentials.
+
+   > **libvirt: `spec.userData` is required for SSH access.** A `VirtualMachine`
+   > created without `spec.userData` gets a minimal default cloud-init that only
+   > sets the hostname and starts `qemu-guest-agent` — it does **not** create a
+   > user, an SSH key, or a sudo grant. Supply your own `spec.userData` if you
+   > need to log in.
 
 3. **Deploy a VM**:
 

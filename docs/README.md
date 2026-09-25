@@ -7,6 +7,8 @@ This directory holds in-tree references that are most useful alongside the sourc
 
 | Path | Contents |
 |------|----------|
+| [`docs/upgrading.md`](upgrading.md) | Upgrade guide from v0.3.11: breaking changes, required upgrade order (CRDs → manager → providers), new required privileges/config, non-breaking-but-visible behavior changes, a post-upgrade verification checklist, and rollback caveats |
+| [`docs/release-notes/next.md`](release-notes/next.md) | Draft release notes for the release that follows v0.3.11, meant to be pasted into the GitHub release body; superseded once that release is published |
 | [`docs/adr/`](adr/) | Architecture Decision Records — design decisions that are binding on the codebase |
 | [`docs/image-preparation.md`](image-preparation.md) | Image-preparation lifecycle: how `VMImage` prepare-on-create works and the `VMImage.status` fields it surfaces |
 | [`docs/clustered-provider-inventory.md`](clustered-provider-inventory.md) | Clustered-provider inventory model: the `Host` and `HostPool` CRDs (ADR-0007 P1, additive; single-host providers unchanged) |

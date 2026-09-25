@@ -63,6 +63,14 @@ helm install virtrigaud charts/virtrigaud \
 
 ## Upgrading
 
+> **Upgrading from v0.3.11?** Read
+> [`docs/upgrading.md`](../../docs/upgrading.md) first. That release window
+> includes several breaking security fixes (vSphere/libvirt VM-ownership
+> checks, a new required vCenter privilege, libvirt default cloud-init no
+> longer provisioning credentials, cross-namespace clone/migration targets
+> needing a grant, and `VirtualMachine.spec.providerRef` becoming immutable
+> once bound) with a required CRD → manager → provider upgrade order.
+
 > **Carrying custom values across chart versions:** prefer
 > `--reset-then-reuse-values` (Helm 3.14+) over `--reuse-values`.
 > `--reuse-values` replaces the new chart's defaults with the **old** chart's
