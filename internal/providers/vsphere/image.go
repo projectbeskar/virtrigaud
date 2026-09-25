@@ -17,7 +17,6 @@ limitations under the License.
 package vsphere
 
 import (
-	"archive/tar"
 	"context"
 	"crypto/md5"  // #nosec G501 -- md5 is an explicitly supported OVA checksum algorithm, not used for security
 	"crypto/sha1" // #nosec G505 -- sha1 is an explicitly supported OVA checksum algorithm, not used for security
@@ -830,9 +829,16 @@ func (p *Provider) downloadOVA(ctx context.Context, ovaURL string) (localPath st
 	}
 
 	limit := p.imageDownloadLimit()
+	tooLarge := func(size int64) error { return p.imageTooLargeError(ctx, shownURL, size, limit) }
+	if ext == ovfDescriptorExt {
+		// A bare .ovf is the descriptor itself: never download more of it
+		// than a descriptor may be (maxOVFDescriptorBytes).
+		limit = min(limit, maxOVFDescriptorBytes)
+		tooLarge = func(int64) error { return descriptorTooLargeError() }
+	}
 	if resp.ContentLength > limit {
 		cleanup()
-		return "", noop, p.imageTooLargeError(ctx, shownURL, resp.ContentLength, limit)
+		return "", noop, tooLarge(resp.ContentLength)
 	}
 	body := &sourceReadTracker{r: io.LimitReader(resp.Body, limit+1)}
 	written, err := io.Copy(tmp, body)
@@ -845,7 +851,7 @@ func (p *Provider) downloadOVA(ctx context.Context, ovaURL string) (localPath st
 	}
 	if written > limit {
 		cleanup()
-		return "", noop, p.imageTooLargeError(ctx, shownURL, written, limit)
+		return "", noop, tooLarge(written)
 	}
 	if err := tmp.Sync(); err != nil {
 		cleanup()
@@ -878,23 +884,25 @@ func unwrapURLError(err error) error {
 //   - A bare .ovf is the descriptor alone. It cannot carry the files it
 //     references, so importOVA refuses one that references any file.
 func (p *Provider) newOVAArchive(localPath, ovaURL string) (*ovfPackage, string, error) {
+	var (
+		pkg *ovfPackage
+		err error
+	)
 	if urlPathExt(ovaURL) == ovfDescriptorExt {
-		pkg := newBareOVFPackage(localPath)
-		return pkg, pkg.descriptor, nil
+		pkg, err = newBareOVFPackage(localPath)
+	} else {
+		pkg, err = newTarPackage(localPath)
 	}
-	descriptor, err := findOVADescriptorName(localPath)
 	if err != nil {
 		if stderrors.Is(err, errUnreadableOVA) {
+			// The parser's text stays out of the message.
 			p.logger.Warn("ImagePrepare: the downloaded OVA is not a readable tar archive", "error", err)
 			return nil, "", errors.NewInvalidSpec("ImagePrepare: the downloaded OVA is not a readable tar archive")
 		}
 		return nil, "", err
 	}
-	return newTarPackage(localPath, descriptor), descriptor, nil
+	return pkg, pkg.descriptor, nil
 }
-
-// errUnreadableOVA marks a staged OVA that is not a readable tar archive.
-var errUnreadableOVA = stderrors.New("the downloaded OVA is not a readable tar archive")
 
 // findOVADescriptorName returns the member name of the OVF descriptor inside an
 // OVA tar: the first package member (ovaMemberName: a regular file at the
@@ -903,30 +911,11 @@ var errUnreadableOVA = stderrors.New("the downloaded OVA is not a readable tar a
 // anything under a directory (__MACOSX/) are skipped, so a binary sidecar is
 // never parsed as the descriptor.
 func findOVADescriptorName(ovaPath string) (string, error) {
-	f, err := os.Open(filepath.Clean(ovaPath))
+	pkg, err := newTarPackage(ovaPath)
 	if err != nil {
-		return "", fmt.Errorf("open OVA to locate descriptor: %w", err)
+		return "", err
 	}
-	defer func() { _ = f.Close() }()
-
-	tr := tar.NewReader(f)
-	for {
-		h, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			// The file is the complete body the source served (a truncated
-			// download fails in downloadOVA), so an unreadable archive is a
-			// property of the source: permanent. The parser's text stays out
-			// of the message (newOVAArchive logs it).
-			return "", fmt.Errorf("%w: %v", errUnreadableOVA, err)
-		}
-		if name := ovaMemberName(h); strings.EqualFold(path.Ext(name), ovfDescriptorExt) {
-			return name, nil
-		}
-	}
-	return "", errors.NewInvalidSpec("OVA contains no .ovf descriptor (after skipping macOS sidecar files)")
+	return pkg.descriptor, nil
 }
 
 // ovaImportLog adapts govmomi's progress.LogFunc to the provider's structured

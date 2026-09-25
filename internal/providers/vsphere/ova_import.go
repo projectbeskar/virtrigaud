@@ -350,13 +350,13 @@ func (p *Provider) admitOVFFileRefs(pkg *ovfPackage, env *ovf.Envelope) error {
 			"references", logSafeHrefs(env), "error", err)
 		return err
 	}
+	// One pass over the tar locates every referenced member.
+	if err := pkg.index(hrefs); err != nil {
+		p.logger.Warn("ImagePrepare: the OVA could not be read while locating its file references", "error", err)
+		return errors.NewInvalidSpec("ImagePrepare: the downloaded OVA is not a readable tar archive")
+	}
 	for _, href := range hrefs {
-		present, err := pkg.contains(href)
-		if err != nil {
-			p.logger.Warn("ImagePrepare: the OVA could not be read while checking its file references", "error", err)
-			return errors.NewInvalidSpec("ImagePrepare: the downloaded OVA is not a readable tar archive")
-		}
-		if present {
+		if pkg.contains(href) {
 			continue
 		}
 		p.logger.Warn("ImagePrepare: refusing an OVF that references a file its package does not contain",
