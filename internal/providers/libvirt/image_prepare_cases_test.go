@@ -632,7 +632,7 @@ func TestImagePrepareLegacy_ProbeErrorIsRetryable(t *testing.T) {
 	h := newPrepareHost(t)
 	artifact := filepath.Join(h.images, "ubuntu.qcow2")
 	plantFile(t, artifact, "prepared earlier")
-	host := &hookedHost{VirshProvider: h.vp, before: failWhen(func(a []string) bool { return scriptCall(a, pathExistsScript) })}
+	host := &hookedHost{VirshProvider: h.vp, before: failWhen(func(a []string) bool { return scriptCall(a, pathPresentScript) })}
 
 	_, err := h.preparer(host).prepare(context.Background(),
 		imageartifact.Request{Mode: imageartifact.ModeLegacy, LegacyTargetName: "ubuntu"}, urlImageJSON(testImageURL), "", h.policy)
@@ -641,7 +641,7 @@ func TestImagePrepareLegacy_ProbeErrorIsRetryable(t *testing.T) {
 	assert.Empty(t, h.log("curl"))
 	assert.NotContains(t, h.log("qemu-img"), "convert")
 	for _, call := range host.hostCalls() {
-		if scriptCall(call, pathExistsScript) {
+		if scriptCall(call, pathPresentScript) {
 			continue // the failed probe itself
 		}
 		assert.NotContains(t, call, artifact, "nothing runs on the final name after a failed probe: %v", call)
@@ -738,9 +738,10 @@ func TestRedactURL(t *testing.T) {
 	assert.Equal(t, "<unparseable URL>", redactURL("http://[::1"))
 }
 
-// TestCurlURLConfig proves the URL is quoted for curl's config syntax.
+// TestCurlURLConfig proves the URL is quoted for curl's config syntax and URL
+// globbing is off.
 func TestCurlURLConfig(t *testing.T) {
-	assert.Equal(t, "url = \"https://h/a\\\"b\\\\c\"\n", string(curlURLConfig(`https://h/a"b\c`)))
+	assert.Equal(t, "globoff\nurl = \"https://h/a\\\"b\\\\c\"\n", string(curlURLConfig(`https://h/a"b\c`)))
 }
 
 // TestMakeHostTempSuffix proves the suffix form of the staging helper creates
@@ -780,16 +781,22 @@ func TestParseArtifactProbe(t *testing.T) {
 	assert.Error(t, err, "truncated output is an error, never absent")
 	_, err = parseArtifactProbe("x\nabsent\nabsent\n")
 	assert.Error(t, err)
-	_, err = parseArtifactProbe("1\nregular file|a|1|1\nabsent\n")
+	_, err = parseArtifactProbe("1\nregular file|a|1|1|444|1\nabsent\n")
 	assert.Error(t, err)
-	_, err = parseArtifactProbe("1\nabsent\nregular file|1|2|3\n")
+	_, err = parseArtifactProbe("1\nregular file|1|1|1|444\nabsent\n")
+	assert.Error(t, err, "the owner flag is required")
+	_, err = parseArtifactProbe("1\nregular file|1|1|1|9z9|1\nabsent\n")
+	assert.Error(t, err)
+	_, err = parseArtifactProbe("1\nregular file|1|1|1|444|x\nabsent\n")
+	assert.Error(t, err)
+	_, err = parseArtifactProbe("1\nabsent\nregular file|1|2|3|444|1\n")
 	assert.Error(t, err, "a regular sidecar without its content marker is an error")
 
 	pr, err := parseArtifactProbe("100\nabsent\nabsent\n")
 	require.NoError(t, err)
 	assert.False(t, pr.observation(time.Hour).Exists)
 
-	pr, err = parseArtifactProbe("100\nabsent\nregular file|5|10|40\nreadable\nnot json")
+	pr, err = parseArtifactProbe("100\nabsent\nregular file|5|10|40|444|1\nreadable\nnot json")
 	require.NoError(t, err)
 	obs := pr.observation(time.Hour)
 	assert.True(t, obs.Exists)

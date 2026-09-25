@@ -23,7 +23,10 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 	"unicode/utf8"
+
+	"k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/projectbeskar/virtrigaud/internal/imageartifact"
 )
@@ -43,8 +46,11 @@ import (
 // invalid UTF-8 or JSON, a repeated key (compared case-insensitively, since
 // encoding/json matches keys that way), a null anywhere, an unknown field,
 // a value of the wrong type, trailing data, an unknown stamp version, an
-// implausible image UID, a malformed source digest, or a missing artifact
-// inode/size all make the stamp UNTRUSTED — exactly like having no stamp.
+// implausible image or preparedBy UID, a namespace or name that is not a
+// Kubernetes name, a preparedAt that is not RFC 3339, a malformed source
+// digest, or a missing artifact inode/size all make the stamp UNTRUSTED —
+// exactly like having no stamp. (Whether the sidecar FILE can be trusted —
+// owner and mode — is the probe's part, see image_publish.go.)
 
 const (
 	// imageSidecarSuffix ends every sidecar file name:
@@ -87,16 +93,67 @@ type imageSidecar struct {
 }
 
 // validate returns an error unless s can be trusted: a valid stamp
-// (imageartifact.Stamp.Validate) and a plausible artifact inode and size.
+// (imageartifact.Stamp.Validate), well-formed informational fields, and a
+// plausible artifact inode and size. The image namespace and name are echoed
+// to the manager and, like preparedBy, written to the provider log, so they
+// must be Kubernetes names (no newline or other log-forging content), not
+// arbitrary strings.
 func (s imageSidecar) validate() error {
 	if err := s.Validate(); err != nil { // the embedded imageartifact.Stamp
 		return err
+	}
+	if err := validateStampName("image", s.Image); err != nil {
+		return err
+	}
+	// preparedBy is empty when the request named no Provider; otherwise all
+	// three fields are well-formed.
+	if s.PreparedBy != (imageartifact.StampIdentity{}) {
+		if !isStampUID(s.PreparedBy.UID) {
+			return errors.New("sidecar preparedBy has an implausible uid")
+		}
+		if err := validateStampName("preparedBy", s.PreparedBy); err != nil {
+			return err
+		}
+	}
+	if _, err := time.Parse(time.RFC3339, s.PreparedAt); err != nil {
+		return errors.New("sidecar preparedAt is not an RFC 3339 time")
 	}
 	if s.Artifact.Inode == 0 {
 		return errors.New("sidecar records no artifact inode")
 	}
 	if s.Artifact.Size <= 0 {
 		return errors.New("sidecar records no artifact size")
+	}
+	return nil
+}
+
+// maxStampUIDBytes bounds a UID recorded in a stamp (a Kubernetes UID is a
+// 36-byte UUID; imageartifact applies the same bound to the image UID).
+const maxStampUIDBytes = 128
+
+// isStampUID reports whether uid is a plausible Kubernetes UID: non-empty, at
+// most maxStampUIDBytes, ASCII letters, digits and '-' only.
+func isStampUID(uid string) bool {
+	if uid == "" || len(uid) > maxStampUIDBytes {
+		return false
+	}
+	for i := 0; i < len(uid); i++ {
+		c := uid[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && c != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+// validateStampName requires a stamp identity's namespace to be a DNS-1123
+// label and its name a DNS-1123 subdomain (what every Kubernetes object has).
+func validateStampName(field string, id imageartifact.StampIdentity) error {
+	if len(validation.IsDNS1123Label(id.Namespace)) > 0 {
+		return fmt.Errorf("sidecar %s namespace is not a Kubernetes namespace name", field)
+	}
+	if len(validation.IsDNS1123Subdomain(id.Name)) > 0 {
+		return fmt.Errorf("sidecar %s name is not a Kubernetes object name", field)
 	}
 	return nil
 }

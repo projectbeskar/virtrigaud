@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"log/slog"
 	"net/url"
@@ -757,6 +758,12 @@ func (v *VirshProvider) runVirshCommandOnce(ctx context.Context, args ...string)
 // — so it is unaffected by ADR-0008 PR 3's SSH transport change. The result
 // and error shape matches runOverSSH exactly.
 func (v *VirshProvider) runLocal(ctx context.Context, argv []string) (*VirshResult, error) {
+	return v.runLocalStdin(ctx, argv, nil)
+}
+
+// runLocalStdin is runLocal with stdin (nil: none) as the subprocess's
+// standard input.
+func (v *VirshProvider) runLocalStdin(ctx context.Context, argv []string, stdin io.Reader) (*VirshResult, error) {
 	// Bound concurrent subprocess forks so a reconcile burst cannot exhaust the
 	// host fork limit (cannot fork child process). Held only across the fork.
 	release, err := v.acquireExecSlot(ctx)
@@ -768,6 +775,9 @@ func (v *VirshProvider) runLocal(ctx context.Context, argv []string) (*VirshResu
 	start := time.Now()
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Env = v.env
+	if stdin != nil {
+		cmd.Stdin = stdin
+	}
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

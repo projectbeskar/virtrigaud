@@ -42,6 +42,11 @@ import (
 //
 //   - complete: the artifact is a regular file, the sidecar is a trusted stamp,
 //     and the stamp's recorded inode and size equal the artifact's;
+//   - a file (artifact or sidecar) counts only when it is owned by the
+//     provider's SSH user and writable by neither group nor others (what this
+//     provider publishes: 0444, never chowned). Anything else could be
+//     rewritten by another principal after its stamp was checked, so the stamp
+//     is untrusted;
 //   - a trusted stamp with NO artifact: a publish between its two links, live
 //     while the sidecar's mtime is younger than the staleness bound, abandoned
 //     after it;
@@ -59,24 +64,29 @@ import (
 // Publish (D6). The download and conversion run in private staging files
 // (image.go). Then:
 //
-//  1. the converted image is finalized read-only (0444, restorecon, sync; no
-//     chown) and stat'ed: its inode and size go into the stamp;
-//  2. the stamp is written to a private staging file, made read-only, synced;
-//  3. `ln <stamp staging> <sidecar>`: link(2) never replaces a file, so
+//  1. the converted image is finalized read-only (0444, restorecon when SELinux
+//     is enabled, sync; no chown) and stat'ed: its inode and size go into the
+//     stamp;
+//  2. the stamp is written (over stdin) to a private staging file, made
+//     read-only, synced;
+//  3. `ln -T <stamp staging> <sidecar>`: link(2) never replaces a file, so
 //     exactly one concurrent prepare CREATES the sidecar. A prepare whose link
 //     finds the name taken re-runs the probe (reuse, in progress, abandoned,
 //     or Conflict) and never links the artifact;
-//  4. only the sidecar's creator runs `ln <converted> <artifact>`. If the
+//  4. only the sidecar's creator runs `ln -T <converted> <artifact>`. If the
 //     artifact name is taken (EEXIST), something this prepare did not publish
 //     sits there: the prepare first unlinks ITS OWN sidecar (only if the
 //     sidecar is still a link to its staging file), so the stamp never names
 //     another file, then returns a Conflict. Any other failure also withdraws
-//     the sidecar and is retryable;
+//     the sidecar and is retryable — unless the artifact is this prepare's
+//     file after all (the link succeeded on the host and only its answer was
+//     lost), which is a success;
 //  5. the staging names are removed; the artifact and the sidecar keep their
 //     own links.
 //
 // A link that fails with EEXIST but whose destination is the very file being
-// linked (an NFS retransmission of a LINK that succeeded) counts as created.
+// linked (an NFS retransmission of a LINK that succeeded) counts as created; a
+// symlink at the destination never does.
 // A filesystem that cannot hold hard links fails the prepare with an explicit
 // InvalidSpec.
 
@@ -174,8 +184,10 @@ func (ip *imagePreparer) conflict(art imageArtifact, req imageartifact.Request, 
 		owner = "no stamp"
 	}
 	log.Printf("WARN ImagePrepare: refusing prepared-image artifact %q: not prepared for VMImage uid=%s digest=%s "+
-		"(artifact exists=%t regular=%t inode=%d size=%d; %s)", art.path, req.Image.UID, req.SourceDigest,
-		pr.artifact.exists, pr.artifact.regular, pr.artifact.inode, pr.artifact.size, owner)
+		"(artifact exists=%t regular=%t inode=%d size=%d perm=%o owned=%t; sidecar exists=%t perm=%o owned=%t; %s)",
+		art.path, req.Image.UID, req.SourceDigest,
+		pr.artifact.exists, pr.artifact.regular, pr.artifact.inode, pr.artifact.size, pr.artifact.perm, pr.artifact.owned,
+		pr.sidecar.exists, pr.sidecar.perm, pr.sidecar.owned, owner)
 	return imageartifact.ConflictError(art.name)
 }
 
@@ -195,6 +207,21 @@ type hostFileStat struct {
 	inode   uint64
 	size    int64
 	mtime   int64
+	// perm is the permission bits (stat %a).
+	perm uint32
+	// owned is true when the provider's SSH user owns the file ([ -O ], never
+	// for a symlink).
+	owned bool
+}
+
+// groupOtherWrite are the permission bits that let a principal other than the
+// owner rewrite a file.
+const groupOtherWrite = 0o022
+
+// trustable reports whether f is a regular file this provider could have
+// published: owned by its SSH user and writable by neither group nor others.
+func (f hostFileStat) trustable() bool {
+	return f.exists && f.regular && f.owned && f.perm&groupOtherWrite == 0
 }
 
 // artifactProbe is one probe of an artifact's two names.
@@ -215,7 +242,7 @@ type artifactProbe struct {
 // a trusted stamp with no artifact at all, is ever passed on.
 func (pr artifactProbe) observation(staleness time.Duration) imageartifact.Observation {
 	obs := imageartifact.Observation{Exists: pr.artifact.exists || pr.sidecar.exists}
-	if pr.doc == nil {
+	if pr.doc == nil || !pr.sidecar.trustable() {
 		return obs
 	}
 	switch {
@@ -223,7 +250,7 @@ func (pr artifactProbe) observation(staleness time.Duration) imageartifact.Obser
 		stamp := pr.doc.Stamp
 		obs.Stamp = &stamp
 		obs.Live = pr.sidecarAge() < staleness
-	case pr.artifact.regular && pr.doc.Artifact.Inode == pr.artifact.inode && pr.doc.Artifact.Size == pr.artifact.size:
+	case pr.artifact.trustable() && pr.doc.Artifact.Inode == pr.artifact.inode && pr.doc.Artifact.Size == pr.artifact.size:
 		stamp := pr.doc.Stamp
 		obs.Stamp = &stamp
 		obs.Complete = true
@@ -237,14 +264,20 @@ func (pr artifactProbe) sidecarAge() time.Duration {
 }
 
 // imageArtifactProbeScript prints, for artifact "$1" and sidecar "$2": the
-// host clock; for each name either "absent" or "<type>|<inode>|<size>|<mtime>"
-// (stat without following a symlink); and, when the sidecar is a regular file,
-// "readable" plus at most maxImageSidecarBytes+1 bytes of it, or "unreadable".
-// Any failure exits 3, which the caller reports as a retryable error.
+// host clock; for each name either "absent" or
+// "<type>|<inode>|<size>|<mtime>|<perm>|<owned>" (stat without following a
+// symlink; owned is 1 when the SSH user owns a non-symlink); and, when the
+// sidecar is a regular file, "readable" plus at most maxImageSidecarBytes+1
+// bytes of it, or "unreadable". Any failure exits 3, which the caller reports
+// as a retryable error.
 const imageArtifactProbeScript = `LC_ALL=C; export LC_ALL
 date +%s || exit 3
 for f in "$1" "$2"; do
-  if [ -e "$f" ] || [ -L "$f" ]; then stat -c '%F|%i|%s|%Y' -- "$f" || exit 3; else echo absent; fi
+  if [ -e "$f" ] || [ -L "$f" ]; then
+    st=$(stat -c '%F|%i|%s|%Y|%a' -- "$f") || exit 3
+    o=0; if [ ! -L "$f" ] && [ -O "$f" ]; then o=1; fi
+    echo "$st|$o"
+  else echo absent; fi
 done
 if [ -f "$2" ] && [ ! -L "$2" ]; then
   if [ -r "$2" ]; then echo readable; head -c 4097 -- "$2" || exit 3; else echo unreadable; fi
@@ -318,13 +351,20 @@ func parseArtifactProbe(out string) (artifactProbe, error) {
 }
 
 // parseHostFileStat parses one probe line: "absent" or
-// "<type>|<inode>|<size>|<mtime>".
+// "<type>|<inode>|<size>|<mtime>|<perm>|<owned>".
 func parseHostFileStat(line string) (hostFileStat, error) {
 	if line == probeAbsent {
 		return hostFileStat{}, nil
 	}
 	fields := strings.Split(line, "|")
-	if len(fields) != 4 {
+	if len(fields) != 6 {
+		return hostFileStat{}, fmt.Errorf("unexpected stat line %q", line)
+	}
+	perm, err := strconv.ParseUint(fields[4], 8, 32)
+	if err != nil {
+		return hostFileStat{}, fmt.Errorf("unexpected stat line %q: %w", line, err)
+	}
+	if fields[5] != "0" && fields[5] != "1" {
 		return hostFileStat{}, fmt.Errorf("unexpected stat line %q", line)
 	}
 	inode, err := strconv.ParseUint(fields[1], 10, 64)
@@ -345,6 +385,8 @@ func parseHostFileStat(line string) (hostFileStat, error) {
 		inode:   inode,
 		size:    size,
 		mtime:   mtime,
+		perm:    uint32(perm),
+		owned:   fields[5] == "1",
 	}, nil
 }
 
@@ -387,6 +429,10 @@ func (ip *imagePreparer) sweepStaging(ctx context.Context, job prepareJob) {
 	}
 }
 
+// writeStampScript writes stdin to "$1" (a staging file this prepare created),
+// makes it read-only and flushes it.
+const writeStampScript = `cat > "$1" && chmod ` + preparedImageMode + ` -- "$1" && sync -- "$1"`
+
 // stageSidecar writes the sidecar document data to a new private staging file
 // in dir (content on stdin, never a command line), makes it read-only and
 // syncs it.
@@ -401,11 +447,8 @@ func (ip *imagePreparer) stageSidecar(ctx context.Context, dir string, data []by
 		return "", contracts.NewRetryableError("staging the prepared-image stamp failed on the libvirt host "+
 			"(details are in the provider log)", nil)
 	}
-	if err := ip.host.writeRemoteFile(ctx, tmp, data); err != nil {
+	if _, err := ip.host.runHostStdin(ctx, data, "sh", "-c", writeStampScript, "sh", tmp); err != nil {
 		return fail("write", err)
-	}
-	if _, err := runHost(ctx, ip.host, "sh", "-c", `chmod `+preparedImageMode+` -- "$1" && sync -- "$1"`, "sh", tmp); err != nil {
-		return fail("finalize", err)
 	}
 	return tmp, nil
 }
@@ -481,9 +524,16 @@ func (ip *imagePreparer) publishArtifact(ctx context.Context, art imageArtifact,
 		return imagePrepareResult{ID: art.name, Path: art.path, Stamp: &stamp}, nil
 	}
 
-	// Our sidecar is published but the artifact is not: withdraw the sidecar
-	// FIRST, so it never stamps a file this prepare did not publish.
-	ip.withdrawSidecar(ctx, stampTmp, art.sidecar)
+	// Our sidecar is published but the artifact link did not report success:
+	// unless the artifact is our file after all (the link succeeded on the host
+	// and only its answer was lost), withdraw the sidecar FIRST, so it never
+	// stamps a file this prepare did not publish.
+	if ip.withdrawSidecar(ctx, stampTmp, art.sidecar, staged.path, art.path) {
+		log.Printf("INFO ImagePrepare: the link of %q succeeded on the host although its answer was lost; "+
+			"published prepared-image artifact (inode %d, %d bytes)", art.path, staged.inode, staged.size)
+		ip.refreshPool(ctx, job.loc.pool)
+		return imagePrepareResult{ID: art.name, Path: art.path, Stamp: &stamp}, nil
+	}
 	switch {
 	case err != nil:
 		return imagePrepareResult{}, err
@@ -496,20 +546,28 @@ func (ip *imagePreparer) publishArtifact(ctx context.Context, art imageArtifact,
 	}
 }
 
-// withdrawSidecarScript removes the sidecar "$2" only while it is still a link
-// to this prepare's stamp staging file "$1".
-const withdrawSidecarScript = `if [ "$1" -ef "$2" ]; then rm -f -- "$2" || exit 3; fi`
+// withdrawSidecarScript prints "published" when the artifact "$4" is this
+// prepare's staged file "$3" (not a symlink), and otherwise removes the
+// sidecar "$2" only while it is still a link to this prepare's stamp staging
+// file "$1" (not a symlink).
+const withdrawSidecarScript = `if [ ! -L "$4" ] && [ "$3" -ef "$4" ]; then echo published; exit 0; fi
+if [ ! -L "$2" ] && [ "$1" -ef "$2" ]; then rm -f -- "$2" || exit 3; fi`
 
-// withdrawSidecar unlinks this prepare's published sidecar, best-effort and
-// even after the request was cancelled. If it fails, the stamp stays without
-// an artifact and is aged out as abandoned (ADR-0009 D4).
-func (ip *imagePreparer) withdrawSidecar(ctx context.Context, stampTmp, sidecar string) {
+// withdrawSidecar unlinks this prepare's published sidecar after the artifact
+// link failed, best-effort and even after the request was cancelled — unless
+// the artifact turns out to be this prepare's staged file (the link succeeded
+// on the host), which it reports as true. If the command fails, the stamp
+// stays without an artifact and is aged out as abandoned (ADR-0009 D4).
+func (ip *imagePreparer) withdrawSidecar(ctx context.Context, stampTmp, sidecar, staged, artifact string) bool {
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), stagingCleanupTimeout)
 	defer cancel()
-	if _, err := runHost(cctx, ip.host, "sh", "-c", withdrawSidecarScript, "sh", stampTmp, sidecar); err != nil {
+	res, err := runHost(cctx, ip.host, "sh", "-c", withdrawSidecarScript, "sh", stampTmp, sidecar, staged, artifact)
+	if err != nil {
 		log.Printf("ERROR ImagePrepare: failed to withdraw this prepare's stamp %q; it will be aged out as abandoned: %v",
 			sidecar, err)
+		return false
 	}
+	return strings.TrimSpace(res.Stdout) == "published"
 }
 
 // linkOutcome is what linkNoClobber did.
@@ -525,14 +583,15 @@ const (
 	linkUnsupported
 )
 
-// linkNoClobberScript hard-links "$1" to "$2" without ever replacing "$2"
-// (link(2) fails with EEXIST instead) and prints linked, exists or
-// unsupported. A failed link whose destination is the source file itself
+// linkNoClobberScript hard-links "$1" to exactly the name "$2" (-T: never
+// into "$2" when it is a directory) without ever replacing "$2" (link(2)
+// fails with EEXIST instead) and prints linked, exists or unsupported. A
+// failed link whose destination is the source file itself and not a symlink
 // (-ef: an NFS retransmission of a LINK that succeeded) counts as linked. Any
 // other failure prints ln's message and exits 3.
 const linkNoClobberScript = `LC_ALL=C; export LC_ALL
-if err=$(ln -- "$1" "$2" 2>&1); then echo linked; exit 0; fi
-if [ "$1" -ef "$2" ]; then echo linked; exit 0; fi
+if err=$(ln -T -- "$1" "$2" 2>&1); then echo linked; exit 0; fi
+if [ ! -L "$2" ] && [ "$1" -ef "$2" ]; then echo linked; exit 0; fi
 if [ -e "$2" ] || [ -L "$2" ]; then echo exists; exit 0; fi
 case "$err" in
   *"Operation not permitted"*|*"Operation not supported"*) echo unsupported; printf '%s\n' "$err" >&2; exit 0 ;;

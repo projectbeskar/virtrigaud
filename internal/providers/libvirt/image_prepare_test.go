@@ -48,10 +48,11 @@ import (
 // can be told to fail; sudo only logs (nothing privileged ever runs).
 // ---------------------------------------------------------------------------
 
-// prepareCurlScript stands in for curl -K <config> -o <dst>: it logs its argv,
-// the config's content and mode, and the destination's mode, then writes the
-// payload ($FAKE_HOST_DIR/payload, default "payload\n") or fails as
-// $FAKE_HOST_DIR/download.fail says ("<http code> <exit code>").
+// prepareCurlScript stands in for curl -q -K - ... -o <dst>: it logs its
+// argv, the config it reads from stdin (-K -) and the destination's mode, then
+// writes the payload ($FAKE_HOST_DIR/payload, default "payload\n") and the
+// write-out ($FAKE_HOST_DIR/download.writeout, default "200"), or fails as
+// $FAKE_HOST_DIR/download.fail says ("<write-out> <exit code>").
 const prepareCurlScript = `#!/bin/sh
 printf '%s\n' "$*" >> "$FAKE_HOST_DIR/curl.log"
 dst=""; cfg=""; prev=""
@@ -60,7 +61,7 @@ for a in "$@"; do
   if [ "$prev" = "-K" ]; then cfg="$a"; fi
   prev="$a"
 done
-if [ -n "$cfg" ]; then cat -- "$cfg" >> "$FAKE_HOST_DIR/curlrc.log"; stat -c '%a' -- "$cfg" >> "$FAKE_HOST_DIR/curlrc.modes"; fi
+if [ "$cfg" = "-" ]; then cat >> "$FAKE_HOST_DIR/curlrc.log"; elif [ -n "$cfg" ]; then echo "config not on stdin" >&2; exit 2; fi
 if [ -n "$dst" ]; then stat -c '%a' -- "$dst" >> "$FAKE_HOST_DIR/download.modes"; fi
 if [ -f "$FAKE_HOST_DIR/download.fail" ]; then
   read -r code rc < "$FAKE_HOST_DIR/download.fail"
@@ -70,7 +71,13 @@ if [ -f "$FAKE_HOST_DIR/download.fail" ]; then
 fi
 if [ -f "$FAKE_HOST_DIR/payload" ]; then cat -- "$FAKE_HOST_DIR/payload" > "$dst"; else printf 'payload\n' > "$dst"; fi
 if [ -f "$FAKE_HOST_DIR/download.info.json" ]; then cp "$FAKE_HOST_DIR/download.info.json" "$dst.info.json"; fi
-printf '200'
+if [ -f "$FAKE_HOST_DIR/download.writeout" ]; then cat -- "$FAKE_HOST_DIR/download.writeout"; else printf '200'; fi
+`
+
+// prepareSELinuxEnabledScript stands in for selinuxenabled: SELinux is on
+// unless $FAKE_HOST_DIR/selinux.disabled exists.
+const prepareSELinuxEnabledScript = `#!/bin/sh
+[ ! -f "$FAKE_HOST_DIR/selinux.disabled" ]
 `
 
 // prepareHost is a fake host set up for ImagePrepare.
@@ -97,10 +104,14 @@ func newPrepareHost(t *testing.T) *prepareHost {
 		"if [ \"$1\" = info ] && [ -f \"$FAKE_HOST_DIR/info.fail\" ]; then echo \"qemu-img: Could not open: Image is not in qcow2 format\" >&2; exit 1; fi\ncase \"$1\" in\n", 1)
 	virsh := strings.Replace(fakeVirshScript, "case \"$1\" in\n",
 		"if [ \"$1\" = pool-dumpxml ] && [ -f \"$FAKE_HOST_DIR/pool.missing\" ]; then echo \"error: failed to get pool '$3'\" >&2; "+
-			"echo \"error: Storage pool not found: no storage pool with matching name '$3'\" >&2; exit 1; fi\ncase \"$1\" in\n", 1)
+			"echo \"error: Storage pool not found: no storage pool with matching name '$3'\" >&2; exit 1; fi\n"+
+			"if [ \"$1\" = pool-dumpxml ] && [ -f \"$FAKE_HOST_DIR/pool.recvfail\" ]; then echo \"error: failed to get pool '$3'\" >&2; "+
+			"echo \"error: Cannot recv data: Connection reset by peer\" >&2; exit 1; fi\ncase \"$1\" in\n", 1)
 
 	bin := t.TempDir()
-	for name, script := range map[string]string{"curl": prepareCurlScript, "qemu-img": qemuImg, "virsh": virsh} {
+	for name, script := range map[string]string{
+		"curl": prepareCurlScript, "qemu-img": qemuImg, "virsh": virsh, "selinuxenabled": prepareSELinuxEnabledScript,
+	} {
 		require.NoError(t, os.WriteFile(filepath.Join(bin, name), []byte(script), 0o700)) //nolint:gosec // test fixture must be executable
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -158,6 +169,23 @@ func (h *hookedHost) runVirshCommand(ctx context.Context, args ...string) (*Virs
 		}
 	}
 	return h.VirshProvider.runVirshCommand(ctx, args...)
+}
+
+// runHostStdin records the host command (as "!" + argv, like runVirshCommand
+// sees it), gives the hook a chance to act or answer, and otherwise runs it on
+// the fake host with stdin.
+func (h *hookedHost) runHostStdin(ctx context.Context, stdin []byte, argv ...string) (*VirshResult, error) {
+	args := append([]string{"!"}, argv...)
+	h.mu.Lock()
+	h.calls = append(h.calls, args)
+	hook := h.before
+	h.mu.Unlock()
+	if hook != nil {
+		if a := hook(args); a != nil {
+			return a.res, a.err
+		}
+	}
+	return h.VirshProvider.runHostStdin(ctx, stdin, argv...)
 }
 
 // linkCall reports whether args is the publish link script and returns its
@@ -374,23 +402,29 @@ func TestImagePrepareIdentity_FreshPrepare(t *testing.T) {
 
 	// Staging: private (0600) mktemp files in the pool directory, all removed.
 	assertNoStagingFiles(t, h.images)
-	for _, modes := range []string{"curlrc.modes", "download.modes", "convert.modes"} {
+	for _, modes := range []string{"download.modes", "convert.modes"} {
 		assert.Equal(t, "600\n", h.fixture(modes), "%s: a staging file is private to the SSH user", modes)
 	}
 
-	// The URL reaches curl only through the private config file.
+	// The URL reaches curl only on stdin (-K -), never on a command line or in
+	// a file; the SSH user's ~/.curlrc is ignored (-q first); globbing is off
+	// (one transfer); protocols, connect time, total time (the 30m default
+	// spec.prepare.timeout) and size (256 GiB default) are bounded.
 	curlArgs := h.log("curl")
 	assert.NotContains(t, curlArgs, "images.example.com", "the URL is never on a command line")
+	assert.True(t, strings.HasPrefix(curlArgs, "-q -K - --globoff "), "curl argv: %s", curlArgs)
 	assert.Contains(t, curlArgs, "--proto =http,https,ftp --proto-redir =http,https,ftp")
+	assert.Contains(t, curlArgs, "--connect-timeout 30 --max-time 1800 --max-filesize 274877906944")
 	assert.Contains(t, curlArgs, "-o "+filepath.Join(h.images, imagePrepareStagingPrefix))
-	assert.Equal(t, `url = "`+testImageURL+`"`+"\n", h.fixture("curlrc.log"))
+	assert.Equal(t, "globoff\n"+`url = "`+testImageURL+`"`+"\n", h.fixture("curlrc.log"))
 	assert.NotContains(t, logs.String(), "supersecret", "the query (a presigned token) is never logged")
 	assert.Contains(t, logs.String(), testImageURLLog)
 
-	// Finalized with restorecon, never chowned or made writable
-	// (finalizeClonedDisk is not applied to a prepared image).
+	// Finalized with restorecon (SELinux enabled, non-interactive sudo), never
+	// chowned or made writable (finalizeClonedDisk is not applied to a
+	// prepared image).
 	sudo := h.log("sudo")
-	assert.Contains(t, sudo, "restorecon -- "+filepath.Join(h.images, imagePrepareStagingPrefix))
+	assert.Contains(t, sudo, "-n restorecon -- "+filepath.Join(h.images, imagePrepareStagingPrefix))
 	assert.NotContains(t, sudo, "chown")
 	assert.NotContains(t, sudo, "777")
 	assert.Contains(t, h.log("virsh"), "pool-refresh --pool default")

@@ -24,6 +24,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -212,16 +213,21 @@ func checksumTool(checksumType string) (tool string, ok bool) {
 //     (#334, EnvImageDirs) — a VM could not be created from an image anywhere
 //     else — and the artifact name is never a #334 reserved name;
 //   - a failed probe of the final name is a retryable error, never "absent";
-//   - staging is private to one prepare: the download, the curl config that
-//     carries the URL, the qemu-img convert output and the stamp are created
-//     by mktemp (O_EXCL, mode 0600, an unpredictable name) as dotfiles with
-//     reserved suffixes in the pool directory, and removed afterwards;
-//     stale ones (older than the staleness bound) are swept;
+//   - staging is private to one prepare: the download, the qemu-img convert
+//     output and the stamp are created by mktemp (O_EXCL, mode 0600, an
+//     unpredictable name) as dotfiles with reserved suffixes in the pool
+//     directory, and removed afterwards; stale ones (older than the staleness
+//     bound) are swept. The source URL is handed to curl on stdin (`curl -q
+//     -K -`), so it never appears on a command line, in a log, in the host's
+//     process list or in a file at rest;
+//   - the download is exactly one transfer (curl URL globbing off), limited to
+//     http/https/ftp (redirects included), bounded in connect time, total time
+//     (spec.prepare.timeout) and size (EnvImageMaxDownloadGiB);
 //   - nothing is ever downloaded, converted, written or removed at the final
-//     name: the converted image is finalized READ-ONLY (chmod 0444, restorecon,
-//     sync; no chown, so the provider still owns it and fs.protected_hardlinks
-//     lets it link the file) and published with `ln`, which never replaces an
-//     existing file. finalizeClonedDisk (chown + chmod 777) is never applied to
+//     name: the converted image is finalized READ-ONLY (chmod 0444, restorecon
+//     when SELinux is enabled, sync; no chown, so the provider still owns it and
+//     fs.protected_hardlinks lets it link the file) and published with `ln -T`,
+//     which never replaces an existing file. finalizeClonedDisk (chown + chmod 777) is never applied to
 //     a prepared image — only to the per-VM copies Create makes from it.
 //
 // Failure classification (the manager holds on InvalidSpec, retries the rest):
@@ -230,10 +236,11 @@ func checksumTool(checksumType string) (tool string, ok bool) {
 //     source (path+url or no url in identity mode, a reserved target name, a
 //     URL that is not http/https/ftp), a pool that does not exist, has no
 //     directory, is outside the allowed image directories or cannot hold hard
-//     links; a source URL answering HTTP 4xx (except 408/425/429) or failing
-//     with a curl error that retrying cannot fix (unsupported protocol,
-//     malformed URL, access/login denied, remote file not found, TLS
-//     certificate not verifiable); a checksum mismatch or unsupported checksum
+//     links; a source URL answering HTTP 4xx (except 408/425/429), resolving to
+//     more than one transfer, larger than the download limit, or failing with a
+//     curl error that retrying cannot fix (unsupported protocol, malformed URL,
+//     access/login denied, remote file not found, TLS certificate not
+//     verifiable); a checksum mismatch or unsupported checksum
 //     type; an image qemu-img cannot read or whose header references other
 //     files; a host path rejected by the #334 confinement.
 //   - CONFLICT (AlreadyExists): an artifact at the derived name that was not
@@ -243,8 +250,11 @@ func checksumTool(checksumType string) (tool string, ok bool) {
 //   - TRANSIENT (retryable): the SSH transport or the host failing (a probe,
 //     mktemp, chmod/sync, convert, link or checksum command that could not
 //     run), HTTP 5xx/408/425/429, DNS/connect/timeout/TLS-handshake/transfer
-//     errors of the download. Error text never carries the source URL (it may
-//     embed credentials); details are in the provider log, URL redacted.
+//     errors of the download, a storage pool lookup that failed for any reason
+//     other than "Storage pool not found". Error text never carries the source
+//     URL (it may embed credentials), a curl exit code, an HTTP status or a
+//     checksum the host computed (no reachability oracle for a tenant-chosen
+//     URL); details are in the provider log, URL redacted.
 
 const (
 	// libvirtProviderType is this provider's provider_type metric label.
@@ -272,9 +282,6 @@ const (
 	convertStagingSuffix = ".partial"
 	// stampStagingSuffix ends the staged sidecar stamp.
 	stampStagingSuffix = ".stamp.partial"
-	// curlConfigStagingSuffix ends the staged curl config file that carries
-	// the source URL, so the URL never appears on a command line.
-	curlConfigStagingSuffix = ".curlrc"
 
 	// preparedImageMode is the mode of a published prepared image and of its
 	// sidecar: read-only for everyone, the provider's SSH user still owning it.
@@ -283,6 +290,18 @@ const (
 	// curlAllowedProtocols restricts the download, and every redirect it
 	// follows, to the protocols the CRD admits for source.libvirt.url.
 	curlAllowedProtocols = "=http,https,ftp"
+	// curlConnectTimeoutSeconds bounds connection setup of the download.
+	curlConnectTimeoutSeconds = "30"
+
+	// EnvImageMaxDownloadGiB names the provider-pod environment variable that
+	// bounds the size of an image download, in GiB (curl --max-filesize). A
+	// larger source is refused as InvalidSpec. Unset, blank or invalid selects
+	// DefaultImageMaxDownloadGiB.
+	EnvImageMaxDownloadGiB = "VIRTRIGAUD_LIBVIRT_IMAGE_MAX_DOWNLOAD_GIB"
+	// DefaultImageMaxDownloadGiB is the default download size limit.
+	DefaultImageMaxDownloadGiB = 256
+	// maxImageMaxDownloadGiB bounds EnvImageMaxDownloadGiB (16 TiB).
+	maxImageMaxDownloadGiB = 16 * 1024
 )
 
 // imagePrepareResult is where an ImagePrepare left the prepared image.
@@ -299,12 +318,12 @@ type imagePrepareResult struct {
 	Reused bool
 }
 
-// imageHost is the host a prepare runs on: host commands, plus writing a small
-// file whose content travels on stdin, never on a command line.
-// *VirshProvider implements it.
+// imageHost is the host a prepare runs on: host commands, plus host commands
+// fed content on stdin (runHostStdin), for what must never be on a command
+// line. *VirshProvider implements it.
 type imageHost interface {
 	hostCommandRunner
-	writeRemoteFile(ctx context.Context, path string, content []byte) error
+	runHostStdin(ctx context.Context, stdin []byte, argv ...string) (*VirshResult, error)
 }
 
 // imagePreparer runs one ImagePrepare against one host.
@@ -326,11 +345,12 @@ type prepareLocation struct {
 	dir string
 }
 
-// prepareJob is a validated prepare: its source, its location and the
-// staleness bound of the requesting VMImage.
+// prepareJob is a validated prepare: its source, its location, and the
+// prepare timeout and staleness bound of the requesting VMImage.
 type prepareJob struct {
 	src       libvirtImageSource
 	loc       prepareLocation
+	timeout   time.Duration
 	staleness time.Duration
 }
 
@@ -394,7 +414,8 @@ func (ip *imagePreparer) prepare(ctx context.Context, req imageartifact.Request,
 	if err != nil {
 		return imagePrepareResult{}, err
 	}
-	job := prepareJob{src: src, loc: loc, staleness: imagePrepareStaleness(imageJSON)}
+	timeout := imagePrepareTimeout(imageJSON)
+	job := prepareJob{src: src, loc: loc, timeout: timeout, staleness: stalenessFor(timeout)}
 	if req.Mode == imageartifact.ModeIdentity {
 		return ip.prepareIdentity(ctx, req, job)
 	}
@@ -481,24 +502,51 @@ type rawVMImagePrepareSpec struct {
 	} `json:"prepare"`
 }
 
-// imagePrepareStaleness is ADR-0009 D4's single staleness bound,
-// max(2 × spec.prepare.timeout, 2h), from the requester's serialized spec (the
-// CRD default timeout when it carries none or an unusable one). A staging file
-// or a stamp without its artifact whose mtime is older than the bound is no
-// longer being written: it is abandoned.
-func imagePrepareStaleness(imageJSON string) time.Duration {
-	timeout := defaultImagePrepareTimeout
+// imagePrepareTimeout is the requester's spec.prepare.timeout from its
+// serialized spec, clamped to maxImagePrepareTimeout (the CRD default when it
+// carries none or an unusable one). It bounds the download (curl --max-time).
+func imagePrepareTimeout(imageJSON string) time.Duration {
 	var spec rawVMImagePrepareSpec
 	if err := json.Unmarshal([]byte(imageJSON), &spec); err == nil &&
 		spec.Prepare != nil && spec.Prepare.Timeout != nil && spec.Prepare.Timeout.Duration > 0 {
-		timeout = min(spec.Prepare.Timeout.Duration, maxImagePrepareTimeout)
+		return min(spec.Prepare.Timeout.Duration, maxImagePrepareTimeout)
 	}
+	return defaultImagePrepareTimeout
+}
+
+// stalenessFor is ADR-0009 D4's single staleness bound for a prepare timeout,
+// max(2 × timeout, 2h). A staging file or a stamp without its artifact whose
+// mtime is older than the bound is no longer being written: it is abandoned.
+func stalenessFor(timeout time.Duration) time.Duration {
 	return max(2*timeout, minImagePrepareStaleness)
 }
 
-// poolNotFoundMarkers are the virsh error texts for a storage pool that does
-// not exist.
-var poolNotFoundMarkers = []string{"Storage pool not found", "failed to get pool"}
+// imagePrepareStaleness is stalenessFor(imagePrepareTimeout(imageJSON)).
+func imagePrepareStaleness(imageJSON string) time.Duration {
+	return stalenessFor(imagePrepareTimeout(imageJSON))
+}
+
+// imageMaxDownloadBytes is the download size limit (EnvImageMaxDownloadGiB).
+func imageMaxDownloadBytes() int64 {
+	gib := int64(DefaultImageMaxDownloadGiB)
+	if raw := strings.TrimSpace(os.Getenv(EnvImageMaxDownloadGiB)); raw != "" {
+		v, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || v < 1 || v > maxImageMaxDownloadGiB {
+			log.Printf("WARN ImagePrepare: ignoring invalid %s=%q (want 1..%d); using %d GiB",
+				EnvImageMaxDownloadGiB, raw, maxImageMaxDownloadGiB, DefaultImageMaxDownloadGiB)
+		} else {
+			gib = v
+		}
+	}
+	return gib << 30
+}
+
+// poolNotFoundMarker is libvirt's error text for a storage pool that does not
+// exist (VIR_ERR_NO_STORAGE_POOL). It is the ONLY pool lookup failure treated
+// as permanent: virsh prints "failed to get pool '<name>'" for every lookup
+// failure, a libvirtd restart or a lost connection included, and those must
+// stay retryable.
+const poolNotFoundMarker = "Storage pool not found"
 
 // maxPoolNameBytes bounds a storage pool name taken from the request.
 const maxPoolNameBytes = 255
@@ -523,13 +571,9 @@ func (ip *imagePreparer) resolveLocation(ctx context.Context, pool string) (prep
 	}
 	res, err := ip.host.runVirshCommand(ctx, "pool-dumpxml", "--pool", pool)
 	if err != nil {
-		if res != nil {
-			for _, m := range poolNotFoundMarkers {
-				if strings.Contains(res.Stderr, m) {
-					return prepareLocation{}, contracts.NewInvalidSpecError(
-						fmt.Sprintf("storage pool %q does not exist on the libvirt host", pool), nil)
-				}
-			}
+		if res != nil && res.ExitCode > 0 && strings.Contains(res.Stderr, poolNotFoundMarker) {
+			return prepareLocation{}, contracts.NewInvalidSpecError(
+				fmt.Sprintf("storage pool %q does not exist on the libvirt host", pool), nil)
 		}
 		return prepareLocation{}, hostCheckFailed(fmt.Sprintf("read storage pool %q", pool), err)
 	}
@@ -573,7 +617,7 @@ func (ip *imagePreparer) prepareLegacy(ctx context.Context, target string, job p
 	artifact := filepath.Join(job.loc.dir, target+qcow2Ext)
 	result := imagePrepareResult{ID: target, Path: artifact}
 
-	exists, err := hostPathExists(ctx, ip.host, artifact)
+	exists, err := hostPathPresent(ctx, ip.host, artifact)
 	if err != nil {
 		return imagePrepareResult{}, err
 	}
@@ -652,7 +696,7 @@ func (ip *imagePreparer) stageSource(ctx context.Context, job prepareJob) (stage
 // image), and converts it into a finalized staging image. The download is
 // removed whatever the outcome.
 func (ip *imagePreparer) stageFromURL(ctx context.Context, job prepareJob) (stagedImage, error) {
-	dl, err := ip.download(ctx, job.loc.dir, job.src.URL)
+	dl, err := ip.download(ctx, job.loc.dir, job.src.URL, job.timeout)
 	if err != nil {
 		return stagedImage{}, err
 	}
@@ -680,45 +724,89 @@ func (ip *imagePreparer) stagingTemp(ctx context.Context, dir, suffix string) (s
 	return path, nil
 }
 
-// curlURLConfig renders the curl config file that carries rawURL (already
-// validated: no control characters), quoted per curl's config syntax.
+// pathPresentScript prints pathExistsMarker when anything — a dangling symlink
+// included — occupies "$1" (hostPathExists' [ -e ] follows symlinks).
+const pathPresentScript = `if [ -e "$1" ] || [ -L "$1" ]; then echo ` + pathExistsMarker + `; fi`
+
+// hostPathPresent reports whether anything, a symlink included, occupies path
+// on the host behind h. A failure to run the check is a retryable error: the
+// caller must not assume either answer.
+func hostPathPresent(ctx context.Context, h hostCommandRunner, path string) (bool, error) {
+	res, err := runHost(ctx, h, "sh", "-c", pathPresentScript, "sh", path)
+	if err != nil {
+		return false, contracts.NewRetryableError(fmt.Sprintf("check whether %s exists on the host", path), err)
+	}
+	return strings.TrimSpace(res.Stdout) == pathExistsMarker, nil
+}
+
+// curlURLConfig renders the curl config (read by `curl -K -` from stdin) that
+// carries rawURL (already validated: no control characters), quoted per
+// curl's config syntax, with URL globbing off: `[1-9]` or `{a,b}` in a URL
+// would otherwise make one prepare fan out into many requests from the
+// hypervisor host.
 func curlURLConfig(rawURL string) []byte {
 	escaped := strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(rawURL)
-	return []byte(`url = "` + escaped + "\"\n")
+	return []byte("globoff\nurl = \"" + escaped + "\"\n")
 }
 
 // download fetches rawURL into a new private staging file in dir on the host
 // and returns its path; on failure nothing is left behind. The URL reaches
-// curl through a private config file (-K), never the command line, so it is
-// neither logged nor visible in the host's process list; protocols (redirects
-// included) are limited to http, https and ftp.
-func (ip *imagePreparer) download(ctx context.Context, dir, rawURL string) (string, error) {
+// curl on stdin (-K -), never on the command line or in a file, so it is
+// neither logged nor visible in the host's process list nor left at rest;
+// -q keeps the SSH user's ~/.curlrc out. The transfer is a single one (URL
+// globbing off), limited to http, https and ftp (redirects included), and
+// bounded in connect time, total time (spec.prepare.timeout) and size.
+func (ip *imagePreparer) download(ctx context.Context, dir, rawURL string, timeout time.Duration) (string, error) {
 	dl, err := ip.stagingTemp(ctx, dir, downloadStagingSuffix)
 	if err != nil {
 		return "", err
 	}
-	cfg, err := ip.stagingTemp(ctx, dir, curlConfigStagingSuffix)
-	if err != nil {
-		removeHostPath(ctx, ip.host, dl, false)
-		return "", err
-	}
-	defer removeHostPath(ctx, ip.host, cfg, false)
-	if err := ip.host.writeRemoteFile(ctx, cfg, curlURLConfig(rawURL)); err != nil {
-		removeHostPath(ctx, ip.host, dl, false)
-		log.Printf("ERROR ImagePrepare: write the download configuration on the libvirt host: %v", err)
-		return "", contracts.NewRetryableError("could not stage the image download on the libvirt host "+
-			"(details are in the provider log)", nil)
-	}
 
 	log.Printf("INFO ImagePrepare: downloading %s to %s on the libvirt host", redactURL(rawURL), dl)
-	res, err := runHost(ctx, ip.host, "curl", "-fsSL",
+	res, err := ip.host.runHostStdin(ctx, curlURLConfig(rawURL), "curl", "-q", "-K", "-", "--globoff", "-fsSL",
 		"--proto", curlAllowedProtocols, "--proto-redir", curlAllowedProtocols,
-		"-w", "%{http_code}", "-K", cfg, "-o", dl)
+		"--connect-timeout", curlConnectTimeoutSeconds,
+		"--max-time", strconv.FormatInt(int64(timeout/time.Second), 10),
+		"--max-filesize", strconv.FormatInt(imageMaxDownloadBytes(), 10),
+		"-w", "%{http_code}", "-o", dl)
 	if err != nil {
 		removeHostPath(ctx, ip.host, dl, false)
 		return "", classifyDownloadFailure(rawURL, res)
 	}
+	if _, single := parseCurlHTTPCode(res.Stdout); !single {
+		removeHostPath(ctx, ip.host, dl, false)
+		log.Printf("WARN ImagePrepare: download of %s did not report exactly one transfer (write-out %q); refusing it",
+			redactURL(rawURL), res.Stdout)
+		return "", contracts.NewInvalidSpecError(errNotOneTransfer, nil)
+	}
 	return dl, nil
+}
+
+// errNotOneTransfer is the requester-facing error of a URL that resolved to
+// other than exactly one transfer.
+const errNotOneTransfer = "the image source URL must name exactly one file"
+
+// curlHTTPCodeLen is the length of one %{http_code} write-out.
+const curlHTTPCodeLen = 3
+
+// parseCurlHTTPCode parses curl's %{http_code} write-out of ONE transfer: ""
+// (no transfer reached a server) or exactly three digits. Anything else — the
+// codes of several transfers run together, or garbage — is not a single
+// transfer (single=false), which the caller treats as permanent (fail closed:
+// never retry a fan-out).
+func parseCurlHTTPCode(stdout string) (code int, single bool) {
+	out := strings.TrimSpace(stdout)
+	if out == "" {
+		return 0, true
+	}
+	if len(out) != curlHTTPCodeLen {
+		return 0, false
+	}
+	n, err := strconv.Atoi(out)
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
 }
 
 // curl exit codes classifyDownloadFailure distinguishes.
@@ -733,37 +821,44 @@ var permanentCurlExits = map[int]string{
 	3:  "the URL is malformed",
 	9:  "access to the remote file was denied",
 	60: "the server's TLS certificate could not be verified by the libvirt host",
+	63: "the image is larger than this provider's download limit",
 	67: "the login was denied",
 	78: "the remote file does not exist",
 }
 
+// downloadRetryMessage is the ONLY text a transient download failure exposes
+// to the requester: no curl exit code and no HTTP status, so a tenant-chosen
+// URL cannot be used to probe what the hypervisor host can reach.
+const downloadRetryMessage = "the image download failed on the libvirt host and will be retried " +
+	"(details are in the provider log)"
+
 // classifyDownloadFailure turns a failed download (res may be nil) into the
 // requester-facing error: InvalidSpec when retrying cannot help (an HTTP 4xx
-// other than 408/425/429, or a permanentCurlExits code), retryable otherwise
-// (the transport or the host failed, HTTP 5xx, DNS/connect/timeout/transfer
-// errors). The URL never appears in the error; the log carries it redacted.
+// other than 408/425/429, a permanentCurlExits code, or a write-out that is
+// not exactly one transfer), retryable otherwise (the transport or the host
+// failed, HTTP 5xx, DNS/connect/timeout/transfer errors). The URL, the exit
+// code and the HTTP status never appear in the retryable error; the log
+// carries them, the URL redacted.
 func classifyDownloadFailure(rawURL string, res *VirshResult) error {
 	if res == nil || res.ExitCode < 0 {
 		log.Printf("WARN ImagePrepare: download of %s: the libvirt host could not be reached", redactURL(rawURL))
-		return contracts.NewRetryableError("the image download could not run on the libvirt host "+
-			"(transient; details are in the provider log)", nil)
+		return contracts.NewRetryableError(downloadRetryMessage, nil)
 	}
-	httpStatus, _ := strconv.Atoi(strings.TrimSpace(res.Stdout))
-	log.Printf("WARN ImagePrepare: download of %s failed on the libvirt host (curl exit %d, HTTP %d): %s",
-		redactURL(rawURL), res.ExitCode, httpStatus, strings.TrimSpace(res.Stderr))
+	httpStatus, single := parseCurlHTTPCode(res.Stdout)
+	log.Printf("WARN ImagePrepare: download of %s failed on the libvirt host (curl exit %d, write-out %q): %s",
+		redactURL(rawURL), res.ExitCode, strings.TrimSpace(res.Stdout), strings.TrimSpace(res.Stderr))
+	if !single {
+		return contracts.NewInvalidSpecError(errNotOneTransfer, nil)
+	}
 	if res.ExitCode == curlExitHTTPError && httpStatus >= 400 && httpStatus < 500 &&
 		httpStatus != http.StatusRequestTimeout && httpStatus != http.StatusTooEarly && httpStatus != http.StatusTooManyRequests {
-		return contracts.NewInvalidSpecError(fmt.Sprintf("the image source URL answered HTTP %d", httpStatus), nil)
+		return contracts.NewInvalidSpecError("the image source URL answered with an HTTP client error "+
+			"(the file does not exist or may not be downloaded)", nil)
 	}
 	if reason, ok := permanentCurlExits[res.ExitCode]; ok {
 		return contracts.NewInvalidSpecError("the image source URL cannot be downloaded: "+reason, nil)
 	}
-	detail := fmt.Sprintf("curl exit code %d", res.ExitCode)
-	if httpStatus > 0 {
-		detail += fmt.Sprintf(", HTTP %d", httpStatus)
-	}
-	return contracts.NewRetryableError(fmt.Sprintf("the image download failed on the libvirt host (%s); "+
-		"it will be retried", detail), nil)
+	return contracts.NewRetryableError(downloadRetryMessage, nil)
 }
 
 // convertToStaged converts src (probed format srcFormat, passed as -f so
@@ -802,12 +897,17 @@ func (ip *imagePreparer) convertToStaged(ctx context.Context, dir, src, srcForma
 	return staged, nil
 }
 
+// restoreconScript restores the SELinux label of "$1" when SELinux is enabled
+// on the host (selinuxenabled), through non-interactive sudo; on a host
+// without SELinux it does nothing.
+const restoreconScript = `if command -v selinuxenabled >/dev/null 2>&1 && selinuxenabled; then sudo -n restorecon -- "$1"; fi`
+
 // syncStatScript flushes "$1" to stable storage and prints its inode and size.
 const syncStatScript = `sync -- "$1" && stat -c '%i|%s' -- "$1"`
 
 // finalizeStaged makes a converted staging file publishable (ADR-0009 D6):
-// read-only (chmod 0444), SELinux-labelled (restorecon, best-effort: not every
-// host uses SELinux), flushed (sync, so a crash never publishes unwritten
+// read-only (chmod 0444), SELinux-labelled (restorecon when SELinux is
+// enabled, best-effort), flushed (sync, so a crash never publishes unwritten
 // data), and stat'ed for the inode and size the stamp records. It is NEVER
 // chowned: with fs.protected_hardlinks=1 the provider could no longer link a
 // file it does not own, and the image only ever needs to be read (Create
@@ -821,7 +921,7 @@ func (ip *imagePreparer) finalizeStaged(ctx context.Context, path string) (stage
 	if _, err := runHost(ctx, ip.host, "chmod", preparedImageMode, "--", path); err != nil {
 		return failed("chmod", err)
 	}
-	if _, err := runHost(ctx, ip.host, "sudo", "restorecon", "--", path); err != nil {
+	if _, err := runHost(ctx, ip.host, "sh", "-c", restoreconScript, "sh", path); err != nil {
 		log.Printf("WARN ImagePrepare: failed to restore the SELinux context of %q: %v", path, err)
 	}
 	res, err := runHost(ctx, ip.host, "sh", "-c", syncStatScript, "sh", path)
@@ -884,8 +984,10 @@ func (ip *imagePreparer) verifyChecksum(ctx context.Context, path, expected, che
 	}
 	got := fields[0]
 	if !strings.EqualFold(got, strings.TrimSpace(expected)) {
+		// The computed hash goes to the provider log only.
+		log.Printf("WARN ImagePrepare: checksum mismatch for %q: expected %s, got %s", path, expected, got)
 		return contracts.NewInvalidSpecError(
-			fmt.Sprintf("checksum mismatch for the image source: expected %s, got %s", expected, got), nil)
+			"the image source does not match its checksum (source.libvirt.checksum)", nil)
 	}
 	log.Printf("INFO ImagePrepare: checksum OK for %q", path)
 	return nil
