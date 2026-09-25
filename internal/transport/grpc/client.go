@@ -257,7 +257,7 @@ func providerCircuitBreakerInterceptor(cb *resilience.CircuitBreaker) grpc.Unary
 			invokerErr = invoker(ctx, fullMethod, req, reply, cc, opts...)
 			// Only infra failures count toward the breaker's threshold.
 			// Business errors are returned out-of-band via invokerErr.
-			if isInfraFailure(invokerErr) {
+			if countsTowardBreaker(fullMethod, invokerErr) {
 				return invokerErr
 			}
 			return nil
@@ -306,9 +306,9 @@ func providerCircuitBreakerInterceptor(cb *resilience.CircuitBreaker) grpc.Unary
 // Two clustered-provider statuses (ADR-0007 Addendum A) never count, whatever
 // their code, because the provider answered and is healthy: a host-scoped
 // Unavailable (HOST_UNAVAILABLE) and a per-VM operation that failed on its
-// host (VM_OPERATION_FAILED). Nor does an ImagePrepare answered with
-// IMAGE_ARTIFACT_IN_PROGRESS (ADR-0009 D4): the artifact is being prepared by
-// another request.
+// host (VM_OPERATION_FAILED). An ImagePrepare answered with
+// IMAGE_ARTIFACT_IN_PROGRESS is excluded by countsTowardBreaker, which knows
+// the method.
 func isInfraFailure(err error) bool {
 	if err == nil {
 		return false
@@ -328,13 +328,6 @@ func isInfraFailure(err error) bool {
 	if st, ok := status.FromError(err); ok && isVMOperationFailedStatus(st) {
 		return false
 	}
-	// Nor does an ImagePrepare whose artifact another request is still
-	// preparing (IMAGE_ARTIFACT_IN_PROGRESS, ADR-0009 D4): the provider
-	// answered, and a long import through one Provider must not open the
-	// breaker of every Provider that shares its image location and polls it.
-	if st, ok := status.FromError(err); ok && isImageArtifactInProgressStatus(st) {
-		return false
-	}
 	switch status.Code(err) {
 	case codes.Unavailable,
 		codes.DeadlineExceeded,
@@ -344,6 +337,25 @@ func isInfraFailure(err error) bool {
 	default:
 		return false
 	}
+}
+
+// countsTowardBreaker reports whether err, returned by the RPC fullMethod,
+// counts toward the per-Provider circuit breaker: an infra failure
+// (isInfraFailure), except an ImagePrepare answered with
+// IMAGE_ARTIFACT_IN_PROGRESS (ADR-0009 D4). The provider answered, and a long
+// import through one Provider must not open the breaker of every Provider that
+// shares its image location. The reason is honoured on ImagePrepare only: on
+// any other RPC it is not a VirtRigaud answer, and the Unavailable counts.
+func countsTowardBreaker(fullMethod string, err error) bool {
+	if !isInfraFailure(err) {
+		return false
+	}
+	if fullMethod == providerv1.Provider_ImagePrepare_FullMethodName {
+		if st, ok := status.FromError(err); ok && isImageArtifactInProgressStatus(st) {
+			return false
+		}
+	}
+	return true
 }
 
 // recordVMOp records a virtrigaud_vm_operations_total sample for the
@@ -560,6 +572,11 @@ func (c *Client) PrepareImage(ctx context.Context, req contracts.ImagePrepareReq
 		Provider:     objectIdentityToProto(req.Provider),
 	})
 	if err != nil {
+		// The ADR-0009 D4 "still being prepared" answer is recognized on this
+		// RPC only (countsTowardBreaker keeps it out of the breaker).
+		if st, ok := status.FromError(err); ok && isImageArtifactInProgressStatus(st) {
+			return contracts.ImagePrepareResponse{}, contracts.NewInProgressError("image prepare: "+st.Message(), err)
+		}
 		return contracts.ImagePrepareResponse{}, c.mapGRPCError("image prepare", err)
 	}
 
@@ -1375,9 +1392,6 @@ func (c *Client) mapGRPCError(operation string, err error) error {
 	case codes.Unavailable, codes.DeadlineExceeded:
 		if isHostUnavailableStatus(st) {
 			return contracts.NewHostUnavailableError(fmt.Sprintf("%s: %s", operation, st.Message()), err)
-		}
-		if isImageArtifactInProgressStatus(st) {
-			return contracts.NewInProgressError(fmt.Sprintf("%s: %s", operation, st.Message()), err)
 		}
 		return contracts.NewRetryableError(fmt.Sprintf("%s: %s", operation, st.Message()), err)
 	case codes.Unimplemented:

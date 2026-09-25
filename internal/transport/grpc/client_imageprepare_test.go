@@ -267,11 +267,22 @@ func TestClient_PrepareImage_ConflictMapped(t *testing.T) {
 // (imageartifact.InProgressError, ADR-0009 D4) reaches the manager as a typed,
 // retryable InProgress error, and does not count toward the circuit breaker:
 // a long import through one Provider must not open the breaker of another
-// that shares its image location. A plain Unavailable still counts.
+// that shares its image location. A plain Unavailable still counts, and the
+// reason is honoured on ImagePrepare only.
 func TestClient_PrepareImage_InProgressIsTypedAndNotAnInfraFailure(t *testing.T) {
 	inProgress := imageartifact.InProgressError("team-a.ubuntu_3c9e1f0a7b2d4e61")
-	assert.False(t, isInfraFailure(inProgress), "in progress says nothing about the provider's health")
-	assert.True(t, isInfraFailure(status.Error(codes.Unavailable, "provider down")))
+	prepare := providerv1.Provider_ImagePrepare_FullMethodName
+	assert.False(t, countsTowardBreaker(prepare, inProgress), "in progress says nothing about the provider's health")
+	assert.True(t, countsTowardBreaker(prepare, status.Error(codes.Unavailable, "provider down")))
+	assert.True(t, countsTowardBreaker(providerv1.Provider_Create_FullMethodName, inProgress),
+		"on any other RPC the reason is not a VirtRigaud answer: the Unavailable counts")
+	assert.True(t, countsTowardBreaker(providerv1.Provider_TaskStatus_FullMethodName, inProgress))
+
+	// The typed mapping is ImagePrepare's too: another RPC maps the same
+	// status to a plain retryable error.
+	other := (&Client{}).mapGRPCError("create", inProgress)
+	assert.False(t, contracts.IsInProgress(other), "%v", other)
+	assert.True(t, contracts.IsRetryable(other))
 
 	dialer, cleanup := startBufconnServer(t, &imagePrepareFakeServer{
 		fn: func(_ context.Context, _ *providerv1.ImagePrepareRequest) (*providerv1.ImagePrepareResponse, error) {
