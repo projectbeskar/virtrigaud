@@ -16,7 +16,7 @@ metadata:
   namespace: default
 spec:
   # Use graceful shutdown power state
-  powerState: OffGraceful
+  powerState: "OffGraceful"
   
   providerRef:
     name: vsphere-provider
@@ -59,7 +59,7 @@ metadata:
   namespace: default
 spec:
   # Regular hard shutdown
-  powerState: Off
+  powerState: "Off"
   
   providerRef:
     name: vsphere-provider

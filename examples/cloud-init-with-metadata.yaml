@@ -45,35 +45,35 @@ spec:
   # MetaData contains the cloud-init metadata
   # This is sent to guestinfo.metadata in vSphere
   metaData:
-    inline: |
-      # Cloud-init metadata in YAML format
-      instance-id: vm-with-custom-metadata-001
-      local-hostname: app-server-01
-      
-      # Network configuration (optional)
-      network:
-        version: 2
-        ethernets:
-          eth0:
-            dhcp4: true
-            dhcp6: false
-      
-      # Custom metadata fields
-      public-keys:
-        - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQ... key1@example.com
-        - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQ... key2@example.com
-      
-      # Additional custom metadata
-      region: us-west-2
-      availability-zone: us-west-2a
-      project: web-application
-      environment: production
-  
+    cloudInit:
+      inline: |
+        # Cloud-init metadata in YAML format
+        instance-id: vm-with-custom-metadata-001
+        local-hostname: app-server-01
+
+        # Network configuration (optional)
+        network:
+          version: 2
+          ethernets:
+            eth0:
+              dhcp4: true
+              dhcp6: false
+
+        # Custom metadata fields
+        public-keys:
+          - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQ... key1@example.com
+          - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQ... key2@example.com
+
+        # Additional custom metadata
+        region: us-west-2
+        availability-zone: us-west-2a
+        project: web-application
+        environment: production
+
   networks:
     - name: primary
-      ipPolicy: dhcp
-  
-  powerState: On
+
+  powerState: "On"
 
 ---
 # Example: VirtualMachine with MetaData from Secret
@@ -114,17 +114,17 @@ spec:
           - systemctl enable nginx
           - systemctl start nginx
   
-  # MetaData from Kubernetes Secret
+  # MetaData from Kubernetes Secret. The secret's data must use one of the
+  # accepted keys: metadata, meta-data, meta_data.
   metaData:
-    secretRef:
-      name: vm-metadata-secret
-      key: metadata
-  
+    cloudInit:
+      secretRef:
+        name: vm-metadata-secret
+
   networks:
     - name: web-tier
-      ipPolicy: dhcp
-  
-  powerState: On
+
+  powerState: "On"
 
 ---
 # Example: VirtualMachine with default metadata (no metaData specified)
@@ -157,6 +157,5 @@ spec:
   
   networks:
     - name: default
-      ipPolicy: dhcp
-  
-  powerState: On
+
+  powerState: "On"

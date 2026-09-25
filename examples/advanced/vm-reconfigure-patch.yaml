@@ -16,19 +16,29 @@
 #   vSphere and Proxmox support online reconfigure and disk expansion unconditionally.
 
 ---
-# Patch to upgrade web-server-01 resources
+# Upgrade web-server-01 resources.
 # Apply with: kubectl patch vm web-server-01 --patch-file vm-reconfigure-patch.yaml --type merge
+# A merge patch only needs spec.resources; providerRef, classRef and imageRef
+# (unchanged from vm-reconfigure-and-snapshot.yaml) keep this file a complete,
+# valid VirtualMachine as well.
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: VirtualMachine
 metadata:
   name: web-server-01
   namespace: default
 spec:
+  providerRef:
+    name: vsphere-prod
+  classRef:
+    name: web-server-small
+  imageRef:
+    name: ubuntu-22-server
+
   # Increase CPU and memory
   resources:
-    cpu: 4        # Upgrade from 2 to 4 CPUs
-    memory: "8Gi"  # Upgrade from 4GB to 8GB
-  
+    cpu: 4            # Upgrade from 2 to 4 CPUs
+    memoryMiB: 8192    # Upgrade from 4096 MiB (4Gi) to 8192 MiB (8Gi)
+
   # Expand the data disk
   disks:
     - name: "data"

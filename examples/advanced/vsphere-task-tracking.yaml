@@ -26,7 +26,6 @@ spec:
     service:
       port: 9090
   defaults:
-    datacenter: "Production"
     datastore: "datastore1"
     cluster: "cluster1"
 
@@ -38,14 +37,11 @@ metadata:
   name: large-vm
   namespace: default
 spec:
-  cpus: 16
+  cpu: 16
   memory: "64Gi"
   diskDefaults:
     type: thin
     size: "500Gi"  # Larger disk for longer provisioning time
-  disks:
-    - name: data
-      sizeGiB: 1000  # Additional large disk
 
 ---
 # VMImage
@@ -58,7 +54,6 @@ spec:
   source:
     vsphere:
       templateName: "rhel-8.8-template"
-      datacenter: "Production"
 
 ---
 # VMNetworkAttachment
@@ -68,10 +63,9 @@ metadata:
   name: prod-network
   namespace: default
 spec:
-  config:
+  network:
     vsphere:
-      portGroup: "Production Network"
-      distributed: true
+      portgroup: "Production Network"
 
 ---
 # Example 1: Create VM with task tracking
@@ -86,28 +80,32 @@ metadata:
 spec:
   providerRef:
     name: vsphere-prod
-  vmClassRef: large-vm
-  vmImageRef: rhel-8-template
-  networkAttachments:
-    - attachmentRef: prod-network
-  
+  classRef:
+    name: large-vm
+  imageRef:
+    name: rhel-8-template
+  networks:
+    - name: prod-network
+      networkRef:
+        name: prod-network
+
   powerState: "On"
-  
+
   placement:
     datastore: "datastore1"
     cluster: "cluster1"
     resourcePool: "Production"
-  
+
   userData:
     cloudInit:
       inline: |
         #cloud-config
         hostname: database-server
-        
+
         packages:
           - postgresql-server
           - postgresql-contrib
-        
+
         runcmd:
           - postgresql-setup --initdb
           - systemctl enable postgresql
@@ -124,14 +122,18 @@ metadata:
 spec:
   providerRef:
     name: vsphere-prod
-  
+
   # Start with smaller resources
-  vmClassRef: large-vm  # Will be updated to trigger reconfiguration
-  
-  vmImageRef: rhel-8-template
-  networkAttachments:
-    - attachmentRef: prod-network
-  
+  classRef:
+    name: large-vm  # Will be updated to trigger reconfiguration
+
+  imageRef:
+    name: rhel-8-template
+  networks:
+    - name: prod-network
+      networkRef:
+        name: prod-network
+
   powerState: "On"
 
 ---
@@ -149,23 +151,23 @@ metadata:
 data:
   monitoring.sh: |
     #!/bin/bash
-    
+
     # Watch VM creation progress
     echo "=== Watching VM Status ==="
     kubectl get vm database-server -w
-    
+
     # View detailed VM status
     echo "=== VM Status Details ==="
     kubectl get vm database-server -o yaml
-    
+
     # Check VM events for task updates
     echo "=== VM Events ==="
     kubectl get events --field-selector involvedObject.name=database-server
-    
+
     # Monitor provider logs for task tracking details
     echo "=== Provider Task Logs ==="
     kubectl logs -f deployment/virtrigaud-provider-vsphere | grep -i task
-    
+
     # Example output:
     # time="2024-01-15T10:30:00Z" level=info msg="Task created" taskID="task-123" operation="CreateVM"
     # time="2024-01-15T10:30:05Z" level=info msg="Task running" taskID="task-123" progress=25
@@ -183,123 +185,123 @@ metadata:
 data:
   scenarios.md: |
     # vSphere Task Tracking Scenarios
-    
+
     ## Operations with Automatic Task Tracking
-    
+
     All async vSphere operations are automatically tracked:
-    
+
     ### 1. VM Creation
     - Template cloning
     - Disk provisioning
     - Network configuration
     - Power on operation
-    
+
     **Typical Duration**: 5-15 minutes
     **Progress Tracking**: Yes, with percentage completion
-    
+
     ### 2. VM Reconfiguration
     - CPU hot-add
     - Memory hot-add
     - Disk expansion
     - Network adapter changes
-    
+
     **Typical Duration**: 1-5 minutes
     **Progress Tracking**: Yes
-    
+
     ### 3. VM Cloning
     - Full clone operations
     - Linked clone operations
     - Snapshot creation for linked clones
-    
+
     **Typical Duration**: 3-10 minutes (full), 1-3 minutes (linked)
     **Progress Tracking**: Yes
-    
+
     ### 4. VM Deletion
     - Power off (if powered on)
     - Resource cleanup
     - Disk deletion
-    
+
     **Typical Duration**: 2-5 minutes
     **Progress Tracking**: Yes
-    
+
     ### 5. Snapshot Operations
     - Snapshot creation
     - Snapshot deletion
     - Snapshot revert
-    
+
     **Typical Duration**: 1-10 minutes (depends on VM size)
     **Progress Tracking**: Yes
-    
+
     ## Task States
-    
+
     TaskStatus RPC reports these states:
-    
+
     - **queued**: Task accepted by vCenter, waiting to run
     - **running**: Task actively executing (includes progress %)
     - **success**: Task completed successfully
     - **error**: Task failed (includes error message)
-    
+
     ## Monitoring Best Practices
-    
+
     ### 1. Watch VM Status
     ```bash
     kubectl get vm <vm-name> -w
     ```
-    
+
     ### 2. Check Events
     ```bash
     kubectl describe vm <vm-name>
     ```
-    
+
     ### 3. Provider Logs (Detailed)
     ```bash
     kubectl logs -f deployment/virtrigaud-provider-vsphere
     ```
-    
+
     ### 4. vCenter Task Console
     - Login to vCenter web client
     - Navigate to Tasks & Events
     - Filter by VirtRigaud operations
-    
+
     ## Task Failure Handling
-    
+
     When tasks fail, TaskStatus provides:
     - Error message from vSphere
     - Task ID for vCenter lookup
     - Timestamp of failure
     - VM status updated to Error phase
-    
+
     Example error scenarios:
-    
+
     ### Insufficient Resources
     ```
     Error: Insufficient disk space on datastore 'datastore1'
     Task: task-456
     VM: database-server
     ```
-    
+
     ### Network Configuration Error
     ```
     Error: Port group 'Production Network' not found
     Task: task-789
     VM: app-server
     ```
-    
+
     ### Permission Error
     ```
     Error: User does not have permission to create VM
     Task: task-012
     VM: test-server
     ```
-    
+
     ## Performance Insights
-    
+
     Task tracking provides insights into:
     - Operation duration
     - Bottlenecks (storage, network, compute)
     - vCenter performance
     - Resource contention
-    
+
     Use this data to:
     - Optimize VM placement
     - Identify slow datastores
@@ -319,10 +321,14 @@ metadata:
 spec:
   providerRef:
     name: vsphere-prod
-  vmClassRef: large-vm
-  vmImageRef: rhel-8-template
-  networkAttachments:
-    - attachmentRef: prod-network
+  classRef:
+    name: large-vm
+  imageRef:
+    name: rhel-8-template
+  networks:
+    - name: prod-network
+      networkRef:
+        name: prod-network
   powerState: "On"
 
 ---
@@ -336,10 +342,14 @@ metadata:
 spec:
   providerRef:
     name: vsphere-prod
-  vmClassRef: large-vm
-  vmImageRef: rhel-8-template
-  networkAttachments:
-    - attachmentRef: prod-network
+  classRef:
+    name: large-vm
+  imageRef:
+    name: rhel-8-template
+  networks:
+    - name: prod-network
+      networkRef:
+        name: prod-network
   powerState: "On"
 
 ---
@@ -353,10 +363,14 @@ metadata:
 spec:
   providerRef:
     name: vsphere-prod
-  vmClassRef: large-vm
-  vmImageRef: rhel-8-template
-  networkAttachments:
-    - attachmentRef: prod-network
+  classRef:
+    name: large-vm
+  imageRef:
+    name: rhel-8-template
+  networks:
+    - name: prod-network
+      networkRef:
+        name: prod-network
   powerState: "On"
 
 ---
@@ -377,7 +391,7 @@ spec:
 #    - Filter by Recent Tasks
 #
 # 5. Trigger reconfiguration to see task tracking:
-#    kubectl patch vm app-server --type='merge' -p='{"spec":{"vmClassRef":"larger-vm-class"}}'
+#    kubectl patch vm app-server --type='merge' -p='{"spec":{"classRef":{"name":"larger-vm-class"}}}'
 #
 # Benefits of Task Tracking:
 #
@@ -398,4 +412,3 @@ spec:
 # 7. Process repeats until task completes
 #
 # No manual intervention required - all automatic!
-

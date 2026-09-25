@@ -127,6 +127,17 @@ examples/
 └── security/                    # NetworkPolicy, RBAC, ExternalSecrets
 ```
 
+## Validation
+
+`make test` checks every `infra.virtrigaud.io` object in this directory
+(`internal/controller/examples_envtest_test.go`): it decodes each file the way
+`kubectl` does, runs a strict server-side dry-run against the CRDs in
+`config/crd/bases/`, and decodes the result into the Go types. A file that does
+not parse, an unknown field, a wrong type or an invalid enum value fails CI.
+
+Quote `powerState` values (`"On"`, `"Off"`, `"OffGraceful"`): YAML 1.1, which
+`kubectl` uses, reads bare `On` and `Off` as booleans.
+
 ## Version compatibility
 
 These examples target **v0.3.6**. For earlier versions, check git history.

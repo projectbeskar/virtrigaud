@@ -14,11 +14,12 @@ metadata:
 spec:
   vmRef:
     name: web-server-01
-  nameHint: "maintenance-backup"
-  memory: true  # Include memory for faster rollback
-  description: "Backup before scheduled maintenance window"
+  snapshotConfig:
+    name: "maintenance-backup"
+    includeMemory: true  # Include memory for faster rollback
+    description: "Backup before scheduled maintenance window"
   retentionPolicy:
-    maxAge: "30d"  # Keep for 30 days
+    maxAge: "720h"  # Keep for 30 days
     deleteOnVMDelete: true
 
 ---
@@ -31,11 +32,12 @@ metadata:
 spec:
   vmRef:
     name: web-server-01
-  nameHint: "pre-system-update"
-  memory: false  # Disk-only snapshot for storage efficiency
-  description: "Snapshot before system package updates"
+  snapshotConfig:
+    name: "pre-system-update"
+    includeMemory: false  # Disk-only snapshot for storage efficiency
+    description: "Snapshot before system package updates"
   retentionPolicy:
-    maxAge: "7d"
+    maxAge: "168h"
     deleteOnVMDelete: true
 
 ---
@@ -51,11 +53,15 @@ metadata:
 spec:
   vmRef:
     name: web-server-01
-  nameHint: "weekly-backup-$(date +%Y%m%d)"
-  memory: false  # Disk-only for long-term storage
-  description: "Automated weekly backup snapshot"
+  snapshotConfig:
+    # spec.snapshotConfig.name only accepts a literal string (no shell
+    # expansion); a real CronJob must render a fresh name per run (e.g. with
+    # envsubst) before kubectl apply, rather than embedding it in this field.
+    name: "weekly-backup"
+    includeMemory: false  # Disk-only for long-term storage
+    description: "Automated weekly backup snapshot"
   retentionPolicy:
-    maxAge: "90d"  # Keep weekly backups for 3 months
+    maxAge: "2160h"  # Keep weekly backups for 3 months
     deleteOnVMDelete: false  # Keep backups even if VM is deleted
 
 ---

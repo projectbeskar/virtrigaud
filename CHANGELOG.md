@@ -210,6 +210,22 @@ ADR-0009 closes cross-tenant prepared-image poisoning and disclosure: artifacts 
 - [ ] Config change only
 - [ ] Documentation only
 
+## [2026-09-25 07:17] - Examples: every example applies cleanly against the current CRDs; CI now dry-runs them all
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `examples/`: 10 files set `powerState: On` / `Off` / `OffGraceful` unquoted. YAML 1.1 (kubectl, client-go) reads bare `On`/`Off` as booleans, so the API server rejected them (`spec.powerState in body must be of type string: "boolean"`). All values are now quoted; `test/performance/proxmox-loadtest.yaml` had the same bug in its VM template.
+- `examples/security/externalsecrets/vsphere-credentials.yaml` did not parse (nested double quotes in a template string).
+- 19 example files had drifted from the v1beta1 API: 35 objects were rejected outright and 37 more carried fields the API server drops with only a warning. Fixed against the Go types, keeping each example's intent: `vmClassRef`/`vmImageRef` → `classRef`/`imageRef` objects, VMClass `cpus` → `cpu`, `diskDefaults.sizeGiB` → `diskDefaults.size`, VMImage and VMNetworkAttachment provider blocks under `spec.source` / `spec.network`, `ipPolicy` → `ipAllocation.type`, VMSnapshot `nameHint`/`memory`/`description` → `spec.snapshotConfig`, VMClone `sourceRef`/`linked`/`powerOn` → `source.vmRef` / `options`, VMPlacementPolicy anti-affinity rules as objects, `resources.memory` → `resources.memoryMiB`, the required Provider `spec.runtime`, `metaData` under `cloudInit`, and no `ipAddress: ""` for DHCP. Snapshot retention `maxAge: "30d"` (which the schema accepts but `metav1.Duration` cannot parse, so it would break decoding in the controller's cache) is now in hours. The proxmox multi-NIC attachment became one VMNetworkAttachment per NIC, and `examples/advanced/vsphere-clone-example.yaml` no longer claims a per-VM `cloneType`: its "clone an existing VM" case is now a real `VMClone`.
+- Fields with no API equivalent were removed (with the prose that claimed them): vSphere `datacenter` on Provider defaults, VMImage sources and VM placement; libvirt `defaults.storagePool`; VMNetworkAttachment vSphere `distributed: true|false`; VMImage `prepare.customization`; VMClass extra `disks` lists (the proxmox database VM now attaches its data disk per VM); VMSet `spec.template.metadata.labels` (that part of the VMSet CRD has no schema, so the labels were pruned).
+
+### Added
+- `internal/controller/examples_envtest_test.go`: an envtest spec that decodes every YAML document under `examples/` like kubectl does, runs a strict (`fieldValidation=Strict`) server-side dry-run of every `infra.virtrigaud.io` object against `config/crd/bases/`, and decodes the server's answer into the Go type. A file that does not parse, an unknown field, a wrong type, an invalid enum value or an unparseable duration now fails `make test`.
+- `examples/README.md`: a Validation section describing the check and the quoting rule.
+
+### Why
+Users copy these examples first. Ten of them failed on `kubectl apply` because of a YAML 1.1 quirk, and many more had silently drifted from the API, so users either hit errors or got objects missing the settings the example promised. The envtest check keeps them in sync with the CRDs from now on.
+
 ## [2026-09-25 02:55] - Security: VMImage prepare state is per Provider identity (namespace/name + UID), with per-Provider prepare tasks
 **Author:** @wrkode (William Rizzo)
 

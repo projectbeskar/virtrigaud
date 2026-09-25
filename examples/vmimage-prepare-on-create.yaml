@@ -63,9 +63,8 @@ spec:
   imageRef:
     name: ubuntu-jammy-cloud
   networks:
-    - name: default
-      ipAddress: ""  # DHCP
-  powerState: On
+    - name: default  # omit ipAddress for DHCP
+  powerState: "On"
   userData:
     cloudInit:
       inline: |

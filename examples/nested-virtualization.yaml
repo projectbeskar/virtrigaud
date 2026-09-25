@@ -238,10 +238,9 @@ spec:
   # Network configuration
   networks:
     - name: default-network
-      ipPolicy: dhcp
-  
+
   # Power on the VM
-  powerState: On
+  powerState: "On"
   
   # Tags for organization
   tags:
@@ -297,7 +296,7 @@ spec:
           - virt-host-validate qemu
           - echo "Test environment ready for nested virtualization"
   
-  powerState: On
+  powerState: "On"
   
   tags:
     - testing
@@ -320,13 +319,18 @@ spec:
     vsphere:
       portgroup: "Nested-Lab-PG"
       vlan:
-        vlanId: 100
-  
-  ipPolicy: dhcp
-  
+        vlanID: 100
+
+  ipAllocation:
+    type: DHCP
+
   # Optional: Static IP configuration
-  # staticIP: "192.168.100.10"
-  # gateway: "192.168.100.1"
-  # dns:
-  #   - "8.8.8.8"
-  #   - "8.8.4.4"
+  # ipAllocation:
+  #   type: Static
+  #   staticConfig:
+  #     address: "192.168.100.10/24"
+  #     gateway: "192.168.100.1"
+  #   dnsConfig:
+  #     servers:
+  #       - "8.8.8.8"
+  #       - "8.8.4.4"

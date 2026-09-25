@@ -7,6 +7,5 @@ spec:
   network:
     vsphere:
       portgroup: "PG-App"
-      distributed: true
   ipAllocation:
     type: DHCP

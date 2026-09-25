@@ -11,6 +11,11 @@ spec:
   endpoint: https://vcenter.dc1.example.com
   credentialSecretRef:
     name: vsphere-creds
+  runtime:
+    mode: Remote
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.2.3"
+    service:
+      port: 9090
   defaults:
     datastore: ssd-datastore
     cluster: prod-cluster
@@ -28,6 +33,11 @@ spec:
   endpoint: qemu+tcp://edge-kvm.example.com/system
   credentialSecretRef:
     name: libvirt-creds
+  runtime:
+    mode: Remote
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.2.3"
+    service:
+      port: 9090
   defaults:
     cluster: edge
 
@@ -100,7 +110,7 @@ spec:
     name: ubuntu-multi
   networks:
     - name: production-network
-  powerState: On
+  powerState: "On"
   userData:
     cloudInit:
       inline: |
@@ -132,7 +142,7 @@ spec:
     name: ubuntu-multi
   networks:
     - name: production-network
-  powerState: On
+  powerState: "On"
   userData:
     cloudInit:
       inline: |
@@ -171,7 +181,7 @@ spec:
     - name: api-data
       sizeGiB: 200
       type: thick
-  powerState: On
+  powerState: "On"
   userData:
     cloudInit:
       inline: |

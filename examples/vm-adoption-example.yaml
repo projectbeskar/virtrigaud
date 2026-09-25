@@ -35,7 +35,6 @@ spec:
     service:
       port: 9443
   defaults:
-    datacenter: Production
     datastore: datastore1
     cluster: cluster1
 
