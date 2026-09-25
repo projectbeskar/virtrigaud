@@ -5,6 +5,102 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-25 23:03] - ADR-0007 scheduler accuracy: committed capacity, an assume cache and a resize gate for clustered placement
+**Author:** @wrkode (William Rizzo)
+
+> **Operator note (clustered providers only).** The clustered scheduler now subtracts what each host already holds: every VM bound to it, pending on it, or being deleted from it, in any namespace, at its admitted size. A pool that used to accept any number of VMs on one host now refuses the ones that do not fit. Those VMs report `Placed=False/Unschedulable` with their own request only (for example `requested 4 vCPU and 4096 MiB, which exceeds the free capacity of every candidate host`), and are retried after 30 s, 1 min, then every 2 min.
+>
+> - **Resizes:** a resize-up is sent only if it fits on the VM's host. Otherwise the VM keeps its size and gets `Reconfiguring=False/InsufficientHostCapacity`.
+> - **Pending VMs:** `spec.classRef` and `spec.resources` of a VM whose create is pending are immutable (CRD rule; upgrade the CRDs first).
+> - **Orphan-on-delete:** a consumer in another namespace can orphan-on-delete a clustered VM only if the Provider carries `infra.virtrigaud.io/allow-consumer-orphan-on-delete: "true"`.
+> - **Gauges:** `virtrigaud_host_committed_cpu`/`_memory_mib` are administrator-sensitive. Restrict `/metrics` with the chart's NetworkPolicy or `--metrics-secure`.
+> - **No per-tenant quota:** a shared clustered Provider has none yet.
+> - **Not counted:** domains VirtRigaud does not manage. Keep room for them with an overcommit ratio below 1 or by cordoning.
+>
+> Single-host and thin-client Providers are unaffected.
+
+### Added
+- `internal/scheduler/assume/assume.go` (new): an in-process assume cache (kube-scheduler's *assume* step).
+  - A per-Provider lock (a semaphore with a bounded wait, `LockWithin`) covers reading what is committed, `Schedule` and the assumption. It never covers an API call.
+  - An assumption ends when the informer cache shows the VM's record: on the assumed host for a create, at the admitted size for a resize. It also ends when the VM is gone, on `Forget`, or after its TTL. `Touch` keeps a resize alive while its task runs, and `Assume` copies the labels.
+  - Correct in process because only the elected leader runs reconcilers.
+- `internal/scheduler/resize.go` (new): `CheckResize` admits a resize against the host's free capacity. It checks only the growing resources and excludes the VM's own entries. `ResizeDoesNotFitError` carries a tenant-safe message plus the arithmetic for the log.
+- `internal/controller/virtualmachine_placement_capacity.go` (new): committed-capacity accounting.
+  - `committedPlacements` lists the Provider's VirtualMachines in every namespace through a field index (`placement_index.go`). A VM being deleted counts until the VirtualMachine finalizer is gone; after that, even with a foreign finalizer, it no longer counts.
+  - Another VM counts at its admitted size (`admittedFootprint`):
+    - `status.currentResources` when recorded;
+    - its requested size while its create is pending;
+    - otherwise its VMClass size, read only if its namespace may use the class;
+    - at least 1 vCPU / 128 MiB.
+  - The scheduled VM itself counts at `requestedFootprint`.
+  - `scheduleAndAssume` / `placedWithAssumptions`: schedule under the lock and settle the assumptions the snapshot supersedes.
+  - `updatePlacementStatus`: status writes bounded to 30 s, made after the lock is released.
+  - `unschedulableBackoff`: the per-VM retry backoff, 30 s doubling to 2 min.
+  - `committedOnHost` gives one host's sum to the Host controller.
+- `internal/controller/virtualmachine_resize_gate.go` (new): `admitClusteredResize` admits a clustered resize-up under the Provider's lock before `Reconfigure` is sent.
+  - A refusal sets `Reconfiguring=False/InsufficientHostCapacity`, leaves the VM at its size and retries with the backoff.
+  - An unregistered host fails closed.
+  - A shrink always passes.
+- `internal/controller/virtualmachine_clustered_orphan.go` (new): `orphanRefusal` holds the orphan-on-delete of a bound consumer VM of a clustered Provider in another namespace unless the Provider allows it. The VM gets `Ready=False/OrphanOnDeleteNotAllowed` and a Warning event, and the finalizer is kept.
+- `api/infra.virtrigaud.io/v1beta1/virtualmachine_types.go`: a root CEL rule makes `spec.classRef` and `spec.resources` immutable while `status.placement.pendingHost` is set and `status.id` is empty (no new field). `VMCRDFeatureChecker` requires the rule for readiness.
+- `api/infra.virtrigaud.io/v1beta1/provider_types.go`: `ProviderAllowConsumerOrphanOnDeleteAnnotation`, the Provider annotation constant (no CRD field).
+- `internal/k8s/conditions.go`: reasons `InsufficientHostCapacity` and `OrphanOnDeleteNotAllowed`. `Unschedulable` is documented as a `Placed` reason too.
+- `internal/obs/metrics/host_committed.go` (new): gauges `virtrigaud_host_committed_cpu` and `virtrigaud_host_committed_memory_mib`, labelled `provider` (namespace/name) and `host`.
+- `internal/controller/host_controller.go`: publishes the gauges on each Host sync. It removes them when the Host is deleted or its `spec.providerRef` changes. The controller declares its read of VMClasses; the generated role is unchanged.
+- Tests:
+  - `internal/scheduler/committed_test.go` and `resize_test.go`: the host fills up, and each VM is excluded from its own sum. One VM on one host counts once, at its larger size. Overcommit scales capacity, not the committed sum. Tenant-visible text carries no committed figure. The resize checks cover fit, shrink, a growing resource only, and the VM's own entries.
+  - `internal/scheduler/assume/assume_test.go`:
+    - 20 concurrent schedules against a host that fits 7 give exactly 7 (25 rounds).
+    - Mutual hard anti-affinity never co-locates (100 rounds).
+    - Also covered: TTL, settle, `Touch`, and per-Provider and bounded-wait locks.
+  - `internal/controller/virtualmachine_placement_capacity_test.go`:
+    - What counts as committed, at admitted sizes. A tenant's spec edit and an ungranted class count nothing.
+    - 20 concurrent creates through lagging reads against a host that fits 5 give exactly 5. A control without the shared cache overbooks.
+    - Anti-affinity holds.
+    - A blocked status write stalls no other VM of the same Provider, no other Provider and no single-host create. Holding the lock across the write fails this test.
+    - A busy lock requeues.
+    - Assumptions: settling, TTL, and failed or ambiguous `pendingHost` writes.
+    - The field index, the gauges, and a single-host Provider never creating the cache.
+  - `internal/controller/virtualmachine_resize_gate_test.go`: a resize that fits is applied. A resize that does not fit is refused with the condition and no provider call. A shrink passes, even on an over-committed host. An unknown host fails closed. A concurrent create and resize-up on a nearly full host give exactly one placement (30 rounds). Single-host is unchanged.
+  - `internal/controller/virtualmachine_clustered_orphan_test.go`: a clustered consumer is refused; the allowed cases pass.
+  - `internal/controller/virtualmachine_pending_size_immutable_test.go` (envtest): the CEL rule, including the status subresource path.
+  - `internal/controller/virtualmachine_placement_capacity_envtest_test.go`: a running controller creates 8 VMs at once against a host that fits 3. Exactly 3 hold the host (the spec failed 3 of 3 runs without the assume step). The field index is registered once per manager.
+
+### Changed
+- `internal/scheduler/scheduler.go`, `evalcontext.go`, `filter.go`, `score.go`, `errors.go`:
+  - `PlacedVM` carries `UID`, `Resources` and `CapacityOnly`; `Request` gains `VMUID`.
+  - Fit and score use *free = allocatable × overcommit ratio − committed*. Entries are merged per (UID, host) at the larger size, and the scheduled VM's own entries are skipped.
+  - The no-fit message and the success trace (`status.placement.reason`) carry no committed, capacity or free figure. `CapacityDetail` keeps the per-host arithmetic for the manager log.
+- `internal/controller/virtualmachine_controller.go`:
+  - `resolveClusterPlacement` schedules against committed capacity plus assumptions under the Provider's lock. It releases the lock before any status write, and requeues with jitter if the lock is busy.
+  - A no-fit sets `Placed=False/Unschedulable` too and backs off.
+  - A clustered resize-up goes through the gate, and `handleDeletion` forgets the VM's assumption.
+  - orphan-on-delete checks `orphanRefusal`.
+- `internal/controller/virtualmachine_clustered.go`: the `pendingHost` write is bounded to 1 min, and the assumption TTL is twice that. The assumption is released only when the API server refused the write outright; an ambiguous failure keeps it. A name-conflict release forgets it.
+- `internal/controller/vmboundprovider.go`: `placementProviderKey` is the one Provider key for every placement lookup. The Host in-use check uses it too, and ignores a deleting VM whose finalizer is gone.
+- `docs/adr/0007-clustered-orchestrator-provider.md`: dated *scheduler accuracy* amendment in Addendum A, A5.
+  - It covers what `allocatable` means, the admitted-size accounting, the assume cache and exactly what its lock covers, the resize gate, number-free reporting, administrator-sensitive gauges, the orphan-on-delete restriction, the no-quota note and trusted status.
+  - A5's "Tracked separately" paragraph points at it, and open question 5 is resolved.
+  - New follow-ups: a per-consumer quota ADR, and a clone capacity check.
+- `docs/clustered-provider-inventory.md`: *Committed capacity* section (resize gate, orphan permission, no quota, gauges). `docs/vm-provider-binding.md`: orphan-on-delete on clustered Providers. `docs/upgrading.md`: rows for the capacity and resize gate, the frozen pending size, and the orphan restriction. `docs/release-notes/next.md`: a bullet.
+
+### Why
+ADR-0007 Addendum A5 required these two gaps to close before the clustered scheduler's placements can be relied on for v0.4.0. The fit check ignored everything already on a host, so one host could be given unlimited VMs. Concurrent reconciles reading the same informer snapshot could also overbook a host or put two hard anti-affine VMs on it.
+
+The security review of the first round led to more changes:
+- the lock no longer covers an API write;
+- tenants can no longer inflate committed capacity by editing specs;
+- no committed figure leaks to tenants;
+- orphan-on-delete no longer hides a running VM from the accounting.
+
+William chose to gate clustered resize-ups the same way.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-09-25 22:10] - Fix: VirtualMachine spec.resources CPU/memory override was never sent to the provider
 **Author:** @wrkode (William Rizzo)
 
@@ -54,53 +150,6 @@ The Slice 3 security re-review found that a tenant-supplied OVA could still exha
 ### Impact
 - [ ] Breaking change (operators who relied on `HTTP_PROXY`/`HTTPS_PROXY` for vSphere image downloads must set `VIRTRIGAUD_VSPHERE_IMAGE_PROXY`)
 - [x] Requires cluster rollout (manager, vSphere and libvirt provider images)
-- [ ] Config change only
-- [ ] Documentation only
-
-## [2026-09-25 20:29] - ADR-0007 scheduler accuracy: committed capacity and an assume cache for clustered placement
-**Author:** @wrkode (William Rizzo)
-
-> **Operator note (clustered providers only).** The clustered scheduler now subtracts what each host already holds: every VM bound to it, pending on it, or being deleted from it, in any namespace. A pool that used to accept any number of VMs on one host now refuses the ones that do not fit. Those VMs report `Placed=False/Unschedulable` with the numbers, for example `insufficient CPU on 3 of 3 candidate host(s): requested 4 vCPU, at most 2 free (committed 14 of 16 after overcommit)`, and are retried after 30 s, 1 min, then every 2 min. Domains VirtRigaud does not manage are not counted; keep room for them with an overcommit ratio below 1 or by cordoning. Single-host and thin-client Providers are unaffected.
-
-### Added
-- `internal/scheduler/assume/assume.go` (new): an in-process assume cache (kube-scheduler's *assume* step).
-  - A per-Provider lock serialises read-committed, `Schedule` and assume; the API write happens after the lock is released.
-  - An assumption ends when the informer cache shows the VM's record on the assumed host, when the VM is gone, on `Forget`, or after its TTL.
-  - Correct in process because only the elected leader runs reconcilers.
-- `internal/controller/virtualmachine_placement_capacity.go` (new): committed-capacity accounting for the clustered create path.
-  - `committedPlacements` lists every VirtualMachine of the Provider (`status.boundProvider`, else `spec.providerRef`), in every namespace, whose `placement.host` or `.pendingHost` names a host. VMs being deleted count until their finalizer is gone.
-  - `footprint` sizes a VM as the largest of its VMClass size, `spec.resources` override and `status.currentResources`.
-  - `placementRequest` merges the live assumptions and settles the confirmed ones.
-  - `unschedulableBackoff` is the per-VM retry backoff (30 s doubling to 2 min).
-  - `committedOnHost` gives one host's sum to the Host controller.
-- `internal/obs/metrics/host_committed.go` (new): gauges `virtrigaud_host_committed_cpu` and `virtrigaud_host_committed_memory_mib`, labelled `provider` (namespace/name) and `host`.
-- `internal/controller/host_controller.go`: publishes the gauges on each Host sync and removes them with the Host. The controller declares its read of VMClasses; the generated role is unchanged.
-- `internal/scheduler/errors.go`: `CapacityShortfall` on capacity rejections, `NoFeasibleHostError.CapacitySummary`, and `InsufficientCapacity`.
-- Tests:
-  - `internal/scheduler/committed_test.go`: the host fills up; the VM is excluded from its own sum; pending and assumed entries count; one VM on one host counts once; overcommit scales capacity, not the committed sum; the message is bounded and names no VM or host.
-  - `internal/scheduler/assume/assume_test.go`: 20 concurrent schedules against a host that fits 7 give exactly 7 (25 rounds); mutual hard anti-affinity never co-locates (100 rounds); TTL; settle; per-Provider locks.
-  - `internal/controller/virtualmachine_placement_capacity_test.go`: a table of what counts as committed; 20 concurrent `createVM` calls through a client whose reads lag its writes give exactly 5 creates on a host that fits 5 (a control without a shared cache overbooks); anti-affinity (30 rounds); settle on confirmation, a stale record on another host, TTL, failed write, VM deletion; backoff; the gauges; a single-host Provider never creates the cache.
-  - `internal/controller/virtualmachine_placement_capacity_envtest_test.go`: a running controller creates 8 VMs at once against a host that fits 3. Exactly 3 hold it and 5 are `Unschedulable`. With the assume step disabled, the spec failed in 3 of 3 runs.
-
-### Changed
-- `internal/scheduler/scheduler.go`, `evalcontext.go`, `filter.go`, `score.go`: `PlacedVM` carries `UID`, `Resources` and `CapacityOnly`; `Request` gains `VMUID`.
-  - Fit and score use *free = allocatable × overcommit ratio − committed*. Each (UID, host) pair counts once, and the scheduled VM's own entries are skipped.
-  - `CapacityOnly` entries hold capacity but never join affinity matching or the bound-VM count.
-- `internal/controller/virtualmachine_controller.go` (`resolveClusterPlacement`): reads committed placements and assumptions, schedules and assumes, all under the Provider's lock. It no longer uses the namespace-only, confirmed-binding-only placed set for capacity.
-  - The request is the VM's footprint, not only the VMClass size.
-  - A no-fit sets `Placed=False/Unschedulable` as well as `Provisioning=False/Unschedulable` and backs off per VM.
-  - `createVM` forgets the assumption when the `pendingHost` write fails; `handleDeletion` forgets it and the backoff.
-- `internal/controller/virtualmachine_clustered.go`: the `pendingHost` write is bounded to 1 min (the assumption TTL is twice that), and a name-conflict release forgets the assumption.
-- `internal/k8s/conditions.go`: `Unschedulable` is documented as a `Placed` reason too.
-- `docs/adr/0007-clustered-orchestrator-provider.md`: dated *scheduler accuracy* amendment in Addendum A, A5 (what `allocatable` means, the accounting model, the assume cache, reporting, metrics, what is still not covered). A5's "Tracked separately" paragraph now points at it; open question 5 is resolved.
-- `docs/clustered-provider-inventory.md`: new *Committed capacity* section. `docs/release-notes/next.md`: a bullet.
-
-### Why
-ADR-0007 Addendum A5 required these two gaps to close before the clustered scheduler's placements can be relied on for v0.4.0. The fit check ignored everything already on a host, so one host could be given unlimited VMs. Concurrent reconciles reading the same informer snapshot could also overbook a host or put two hard anti-affine VMs on it.
-
-### Impact
-- [ ] Breaking change
-- [x] Requires cluster rollout
 - [ ] Config change only
 - [ ] Documentation only
 
