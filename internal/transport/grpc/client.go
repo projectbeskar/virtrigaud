@@ -348,11 +348,22 @@ func isInfraFailure(err error) bool {
 // tenant's failing image source (retried) must not open it for every tenant of
 // the Provider. The reasons are honoured on ImagePrepare only: on any other RPC
 // they are not a VirtRigaud answer, and the Unavailable counts.
+//
+// Nor does an ImagePrepare that the manager itself gave up on count
+// (DeadlineExceeded, from PrepareImage's own timeout, or Canceled): an import
+// that outlasts that timeout — a large legitimate OVA, or a source that
+// drip-feeds its bytes — says nothing about the provider's health, and would
+// otherwise open the breaker for every tenant of the Provider on every retry.
+// On every other RPC a DeadlineExceeded still counts.
 func countsTowardBreaker(fullMethod string, err error) bool {
 	if !isInfraFailure(err) {
 		return false
 	}
 	if fullMethod == providerv1.Provider_ImagePrepare_FullMethodName {
+		switch status.Code(err) {
+		case codes.DeadlineExceeded, codes.Canceled:
+			return false
+		}
 		if st, ok := status.FromError(err); ok &&
 			(isImageArtifactInProgressStatus(st) || isImageSourceUnavailableStatus(st)) {
 			return false

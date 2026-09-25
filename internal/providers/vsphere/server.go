@@ -70,6 +70,10 @@ type Provider struct {
 	// allowLoopbackImageSources lets an image download reach loopback
 	// addresses. Tests only: their image servers listen on 127.0.0.1.
 	allowLoopbackImageSources bool
+	// downloadStallWindow and downloadMinBytesPerWindow tune the download
+	// throughput watchdog (0 = the defaults; tests only).
+	downloadStallWindow       time.Duration
+	downloadMinBytesPerWindow int64
 }
 
 // Config holds the vSphere provider configuration

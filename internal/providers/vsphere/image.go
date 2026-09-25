@@ -35,6 +35,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/vmware/govmomi/find"
 	"github.com/vmware/govmomi/object"
@@ -43,10 +44,12 @@ import (
 	"github.com/vmware/govmomi/vapi/rest"
 	"github.com/vmware/govmomi/vim25/progress"
 	"github.com/vmware/govmomi/vim25/types"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	"github.com/projectbeskar/virtrigaud/internal/imageartifact"
+	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/errors"
 )
@@ -228,10 +231,65 @@ func (p *Provider) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepar
 	if p.client == nil || p.finder == nil {
 		return nil, errors.NewUnavailable("vSphere", fmt.Errorf("provider client not initialized"))
 	}
+
+	// Finish (or give up) before the manager does, so it gets an answer it
+	// can classify instead of its own DeadlineExceeded.
+	opCtx, cancel := importDeadline(ctx)
+	defer cancel()
+	var resp *providerv1.ImagePrepareResponse
 	if parsed.Mode == imageartifact.ModeLegacy {
-		return p.imagePrepareLegacy(ctx, req, parsed.LegacyTargetName)
+		resp, err = p.imagePrepareLegacy(opCtx, req, parsed.LegacyTargetName)
+	} else {
+		resp, err = p.imagePrepareIdentity(opCtx, req, parsed)
 	}
-	return p.imagePrepareIdentity(ctx, req, parsed)
+	if err != nil && opCtx.Err() != nil && ctx.Err() == nil && !isDefinitiveAnswer(err) {
+		// Our own deadline tripped: the image did not download and import in
+		// the time the manager allows. That is the image's problem (too
+		// large, or a slow source), not the provider's.
+		return nil, p.imageSourceError(ctx, "the image could not be downloaded and imported before the manager's deadline",
+			err, "margin", importDeadlineMargin.String())
+	}
+	return resp, err
+}
+
+// importDeadlineMargin is how long before the request's deadline an image
+// prepare gives up, so its answer reaches the manager before the manager's
+// own timeout does.
+const importDeadlineMargin = 15 * time.Second
+
+// importDeadline derives the context an image prepare runs on: ctx with a
+// deadline importDeadlineMargin before ctx's own, when ctx has one.
+func importDeadline(ctx context.Context) (context.Context, context.CancelFunc) {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return context.WithCancel(ctx)
+	}
+	return context.WithDeadline(ctx, deadline.Add(-importDeadlineMargin))
+}
+
+// isDefinitiveAnswer reports whether err is an answer that no deadline could
+// have caused, which the deadline message must not replace: InvalidSpec
+// (InvalidArgument), a Conflict (AlreadyExists), a misconfigured import folder
+// (FailedPrecondition), NotFound, or an in-progress answer. Anything else —
+// including an image-source failure, which is what a cut-off download looks
+// like — is reported as the deadline it was.
+func isDefinitiveAnswer(err error) bool {
+	st, ok := status.FromError(err)
+	if !ok {
+		return false
+	}
+	switch st.Code() {
+	case codes.InvalidArgument, codes.AlreadyExists, codes.FailedPrecondition, codes.NotFound:
+		return true
+	case codes.Unavailable:
+		for _, d := range st.Details() {
+			if info, isInfo := d.(*errdetails.ErrorInfo); isInfo && info.GetDomain() == contracts.ErrorInfoDomain &&
+				info.GetReason() == contracts.ImageArtifactInProgressReason {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // imagePrepareLegacy serves a legacy (identity-less) request from a manager
@@ -789,7 +847,11 @@ func (p *Provider) downloadOVA(ctx context.Context, ovaURL string) (localPath st
 		}
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ovaURL, nil)
+	// The download runs on its own context, which the throughput watchdog
+	// cancels (with errImageSourceTooSlow) when the source stalls.
+	dctx, cancelDownload := context.WithCancelCause(ctx)
+	defer cancelDownload(nil)
+	req, err := http.NewRequestWithContext(dctx, http.MethodGet, ovaURL, nil)
 	if err != nil {
 		cleanup()
 		p.logger.WarnContext(ctx, "ImagePrepare: the OVA URL cannot form a request", "url", shownURL, "error", unwrapURLError(err))
@@ -840,10 +902,18 @@ func (p *Provider) downloadOVA(ctx context.Context, ovaURL string) (localPath st
 		cleanup()
 		return "", noop, tooLarge(resp.ContentLength)
 	}
-	body := &sourceReadTracker{r: io.LimitReader(resp.Body, limit+1)}
+	counted := &atomicCountingReader{r: resp.Body}
+	body := &sourceReadTracker{r: io.LimitReader(counted, limit+1)}
+	stopWatchdog := p.watchDownloadThroughput(dctx, cancelDownload, &counted.n)
 	written, err := io.Copy(tmp, body)
+	stopWatchdog()
 	if err != nil {
 		cleanup()
+		if stderrors.Is(context.Cause(dctx), errImageSourceTooSlow) {
+			window, minBytes := p.downloadWatchdog()
+			return "", noop, p.imageSourceError(ctx, "the image source is too slow", errImageSourceTooSlow,
+				"url", shownURL, "window", window.String(), "min_bytes", minBytes, "read_bytes", counted.n.Load())
+		}
 		if body.err != nil {
 			return "", noop, p.imageSourceError(ctx, "the image source broke off the download", unwrapURLError(body.err), "url", shownURL)
 		}

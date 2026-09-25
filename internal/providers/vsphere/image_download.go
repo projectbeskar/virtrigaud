@@ -17,14 +17,17 @@ limitations under the License.
 package vsphere
 
 import (
+	"context"
 	stderrors "errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -45,7 +48,10 @@ import (
 //   - bounds the TCP connect, TLS handshake and response-header waits (the
 //     body itself may take long: images are large);
 //   - reads at most the provider's download limit
-//     (VIRTRIGAUD_VSPHERE_IMAGE_MAX_DOWNLOAD_GIB).
+//     (VIRTRIGAUD_VSPHERE_IMAGE_MAX_DOWNLOAD_GIB);
+//   - abandons a body that moves less than minDownloadBytesPerWindow in any
+//     imageDownloadStallWindow (the throughput watchdog), and the whole
+//     prepare gives up importDeadlineMargin before the manager's deadline.
 //
 // With an HTTP(S) proxy configured (HTTP_PROXY/HTTPS_PROXY), the provider
 // connects to the proxy, which resolves a named target itself: restrict the
@@ -83,6 +89,79 @@ const (
 	localhostName   = "localhost"
 	localhostSuffix = ".localhost"
 )
+
+// Download throughput watchdog defaults: a download that moves less than
+// minDownloadBytesPerWindow in any imageDownloadStallWindow is abandoned. A
+// source that sends its headers promptly and then drip-feeds its body would
+// otherwise hold the prepare (and the provider's staging space) until the
+// manager's deadline, on every retry.
+const (
+	imageDownloadStallWindow  = 60 * time.Second
+	minDownloadBytesPerWindow = 64 << 10
+)
+
+// errImageSourceTooSlow is the cause the throughput watchdog cancels a
+// download with.
+var errImageSourceTooSlow = stderrors.New("the image source sent too little data in the watchdog window")
+
+// atomicCountingReader counts the bytes read through it, for a concurrent
+// watchdog.
+type atomicCountingReader struct {
+	r io.Reader
+	n atomic.Int64
+}
+
+// Read implements io.Reader.
+func (c *atomicCountingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n.Add(int64(n))
+	return n, err
+}
+
+// downloadWatchdog returns the provider's throughput watchdog window and the
+// minimum bytes per window (the defaults for a Provider built without them).
+func (p *Provider) downloadWatchdog() (time.Duration, int64) {
+	window, minBytes := p.downloadStallWindow, p.downloadMinBytesPerWindow
+	if window <= 0 {
+		window = imageDownloadStallWindow
+	}
+	if minBytes <= 0 {
+		minBytes = minDownloadBytesPerWindow
+	}
+	return window, minBytes
+}
+
+// watchDownloadThroughput starts the throughput watchdog of a download whose
+// body bytes are counted in read: every window, if fewer than the minimum
+// bytes arrived since the last check, it cancels ctx with
+// errImageSourceTooSlow (which also unblocks a Read waiting on a silent
+// source). It stops when stop is called or ctx is done; call stop exactly
+// once.
+func (p *Provider) watchDownloadThroughput(ctx context.Context, cancel context.CancelCauseFunc, read *atomic.Int64) (stop func()) {
+	window, minBytes := p.downloadWatchdog()
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(window)
+		defer ticker.Stop()
+		last := read.Load()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				n := read.Load()
+				if n-last < minBytes {
+					cancel(errImageSourceTooSlow)
+					return
+				}
+				last = n
+			}
+		}
+	}()
+	return func() { close(done) }
+}
 
 // errForbiddenImageSource marks an image source address the provider refuses
 // to connect to (loopback, link-local, unspecified, multicast).

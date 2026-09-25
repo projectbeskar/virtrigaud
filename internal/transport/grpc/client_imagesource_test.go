@@ -86,3 +86,62 @@ func TestClient_PrepareImage_SourceUnavailableDoesNotTripBreaker(t *testing.T) {
 	}
 	assert.Equal(t, resilience.StateOpen, cb.GetState())
 }
+
+// slowServer answers ImagePrepare and Validate only when the caller gives up.
+type slowServer struct {
+	imagePrepareFakeServer
+	validates atomic.Int32
+}
+
+func (s *slowServer) Validate(ctx context.Context, _ *providerv1.ValidateRequest) (*providerv1.ValidateResponse, error) {
+	s.validates.Add(1)
+	<-ctx.Done()
+	return nil, status.FromContextError(ctx.Err()).Err()
+}
+
+// TestClient_PrepareImage_OwnDeadlineDoesNotTripBreaker (review R2): an
+// ImagePrepare that the manager gives up on — its own timeout, e.g. a large
+// OVA or a source drip-feeding its bytes — ends in DeadlineExceeded, which
+// must not count toward the per-Provider breaker however often it repeats. A
+// DeadlineExceeded on any other RPC still counts.
+func TestClient_PrepareImage_OwnDeadlineDoesNotTripBreaker(t *testing.T) {
+	prepare := providerv1.Provider_ImagePrepare_FullMethodName
+	assert.False(t, countsTowardBreaker(prepare, status.Error(codes.DeadlineExceeded, "context deadline exceeded")))
+	assert.False(t, countsTowardBreaker(prepare, status.Error(codes.Canceled, "context canceled")))
+	assert.True(t, countsTowardBreaker(providerv1.Provider_Validate_FullMethodName,
+		status.Error(codes.DeadlineExceeded, "context deadline exceeded")))
+
+	var prepares atomic.Int32
+	srv := &slowServer{imagePrepareFakeServer: imagePrepareFakeServer{
+		fn: func(ctx context.Context, _ *providerv1.ImagePrepareRequest) (*providerv1.ImagePrepareResponse, error) {
+			prepares.Add(1)
+			<-ctx.Done()
+			return nil, status.FromContextError(ctx.Err()).Err()
+		},
+	}}
+	dialer, cleanup := startBufconnServer(t, srv)
+	defer cleanup()
+	cli, cb := newTestClientWithCB(t, dialer, "imgdeadline", "imgdeadline-provider", &resilience.Config{
+		FailureThreshold: 2,
+		ResetTimeout:     30 * time.Second,
+		HalfOpenMaxCalls: 1,
+	})
+	req := contracts.ImagePrepareRequest{Image: contracts.ObjectIdentity{UID: "img-uid"}, SourceDigest: testImageDigest}
+	for i := 0; i < 5; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		_, err := cli.PrepareImage(ctx, req)
+		cancel()
+		require.Error(t, err)
+	}
+	assert.Equal(t, int32(5), prepares.Load(), "every ImagePrepare reached the provider")
+	assert.Equal(t, resilience.StateClosed, cb.GetState(), "the manager's own ImagePrepare deadline never opens the breaker")
+
+	// Control: another RPC timing out still counts.
+	for i := 0; i < 2; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		_ = cli.Validate(ctx)
+		cancel()
+	}
+	assert.Equal(t, int32(2), srv.validates.Load())
+	assert.Equal(t, resilience.StateOpen, cb.GetState())
+}
