@@ -369,20 +369,37 @@ together with `templateName` or `contentLibrary`, an `ovaURL` that is not `http(
 **The package is read from the download only.** Every `<References><File ovf:href>` of the
 OVF must be a plain file name (no path separator, no `.`/`..`, no URL scheme, no glob
 character, at most 255 bytes) and a member at the root of the OVA; otherwise the image gets
-`InvalidSpec` before vCenter sees the descriptor. The provider never opens a file on its own
-filesystem named by an OVF. (Before this, a bare `.ovf` whose references named, for example,
+`InvalidSpec` before vCenter sees the descriptor. The descriptor may be at most 16 MiB (a
+larger one is refused from its tar header, before it is read) and may reference at most 256
+files. The provider never opens a file on its own filesystem named by an OVF. (Before this, a bare `.ovf` whose references named, for example,
 the provider's mounted vCenter credentials made the provider upload that file into the
 template. This applies to requests from an older manager too: a bare `.ovf` that references
 any file is refused; one that references none still imports.)
 
 **The download is restricted.** The provider refuses sources at, or redirecting to,
 loopback, link-local (including `169.254.169.254` cloud metadata), unspecified and
-multicast addresses — checked on every connection, after DNS — follows at most 3 redirects,
-bounds the connect, TLS-handshake and response-header waits, and downloads at most
-`VIRTRIGAUD_VSPHERE_IMAGE_MAX_DOWNLOAD_GIB` GiB (default 256, 1–16384; an invalid value logs
-a warning and keeps the default). Set it on the provider pod through the Provider's
-`spec.runtime.env`. Private (RFC 1918) addresses stay allowed. With an HTTP(S) proxy
-configured for the provider, the proxy resolves named targets: restrict its egress too.
+multicast addresses, the cloud platform endpoints `fd00:ec2::254` (AWS metadata over IPv6),
+`100.100.100.200` (Alibaba Cloud metadata) and `168.63.129.16` (Azure WireServer), and IPv6
+addresses that embed a refused IPv4 address (NAT64 `64:ff9b::/96`, IPv4-compatible
+`::/96`) — checked on every connection, after DNS. It follows at most 3 redirects and never
+from `https` down to `http`, bounds the connect, TLS-handshake and response-header waits,
+and downloads at most `VIRTRIGAUD_VSPHERE_IMAGE_MAX_DOWNLOAD_GIB` GiB (default 256,
+1–16384; an invalid value logs a warning and keeps the default). Set it on the provider pod
+through the Provider's `spec.runtime.env`. Private (RFC 1918) addresses stay allowed.
+
+**The download must keep moving.** A body that delivers less than 64 KiB in any 60 seconds
+is abandoned, and the whole prepare gives up 15 seconds before the manager's deadline for
+the call. Both are `IMAGE_SOURCE_UNAVAILABLE` (retried, not counted toward the circuit
+breaker); a slow but steady source still completes. The manager does not count its own
+deadline or cancellation of an `ImagePrepare` toward the breaker either.
+
+**Proxies.** Image downloads connect directly: the provider pod's `HTTP_PROXY` /
+`HTTPS_PROXY` (which the vCenter connection honours) are ignored for them, because a proxy
+resolves the target itself and the address checks would see only the proxy. To download
+through a proxy, set `VIRTRIGAUD_VSPHERE_IMAGE_PROXY` (an `http://` or `https://` URL with a
+host; anything else logs a warning and downloads connect directly) on the provider pod. The
+proxy's own address must pass the checks above (so not loopback or link-local), and named
+targets are then resolved by the proxy: restrict the proxy's egress to your image servers.
 **Keep credentials and tokens out of `ovaURL`.** A vSphere OVA source has no separate
 credential field, so host images where the provider can fetch them without a secret in the
 URL; a presigned query is hashed into the source digest (a rotation re-imports), and the
@@ -493,11 +510,11 @@ cannot heal on their own, so the manager holds the image instead of retrying:
 
 | Failure | Result |
 |---|---|
-| The source answers a 4xx other than 408/429, is at (or redirects to) a refused address or scheme, redirects more than 3 times, or is larger than the download limit; checksum mismatch; unreadable archive; no or invalid OVF descriptor; a file reference outside the package; an OVF vCenter's parser rejects; a multi-VM OVF; a non-`http(s)` URL; a bare `.ovf` | `InvalidSpec` (`InvalidSource`; not retried until the source changes) |
+| The source answers a 4xx other than 408/429, is at (or redirects to) a refused address or scheme, redirects more than 3 times or from `https` to `http`, or is larger than the download limit; checksum mismatch; unreadable archive; no or invalid OVF descriptor, a descriptor larger than 16 MiB or referencing more than 256 files; a file reference outside the package; an OVF vCenter's parser rejects; a multi-VM OVF; a non-`http(s)` URL; a bare `.ovf` | `InvalidSpec` (`InvalidSource`; not retried until the source changes) |
 | This image's template is still being imported by another request, or concurrent prepares are still settling on one template | In progress (retried every 30 seconds; not counted toward the Provider's circuit breaker) |
 | The configured import folder is missing, ambiguous or outside the datacenter's VM folder | `FailedPrecondition`: retried, not counted toward the circuit breaker, so a wrong `defaults.folder` does not stop the Provider's other operations. Fix the Provider |
-| The source answers 5xx, 408 or 429, is unreachable or breaks off; the download cannot be staged; vCenter refuses to create, upload or convert what the OVF describes | Retryable, tagged `IMAGE_SOURCE_UNAVAILABLE`: the image's own problem, so it is **not** counted toward the Provider's circuit breaker — one tenant's failing image cannot stop the Provider for every tenant. A partial import this call created is destroyed |
-| vCenter itself is unreachable, the session expired, or the provider lacks rights | Retryable (`Unavailable`), counted toward the circuit breaker |
+| The source answers 5xx, 408 or 429, is unreachable, breaks off or is too slow (the throughput watchdog), or the prepare runs into the manager's deadline; the download cannot be staged; vCenter refuses to create, upload or convert what the OVF describes; an upload to vCenter's NFC endpoint fails on the network while vCenter itself still answers | Retryable, tagged `IMAGE_SOURCE_UNAVAILABLE`: the image's own problem, so it is **not** counted toward the Provider's circuit breaker — one tenant's failing image cannot stop the Provider for every tenant. A partial import this call created is destroyed |
+| vCenter itself is unreachable (including an NFC upload failure after which vCenter does not answer a `CurrentTime` call within 10 seconds either), the session expired, or the provider lacks rights | Retryable (`Unavailable`), counted toward the circuit breaker |
 
 Messages are fixed text: HTTP status codes (beyond "an HTTP client error"), transport
 errors, archive and XML parser output, vCenter fault text and the computed checksum go to
@@ -733,6 +750,13 @@ A prepare runs synchronously. The provider reports failures that retrying cannot
 | A checksum mismatch or an unsupported `checksumType` | The SSH transport or the host failing (a probe, `mktemp`, `chmod`/`sync`, `qemu-img convert`, `ln`, a checksum command that could not run) |
 | An image `qemu-img` cannot read, an unsupported format, or a header that references other files | A matching stamp still being published (`Unavailable`) |
 | A malformed request or source (see above), a pool that does not exist (libvirt's "Storage pool not found"), has no directory, is outside the allowed image directories or cannot hold hard links | Any other storage pool lookup failure (for example a libvirtd restart) |
+
+Retried download failures that the **source** caused — HTTP 5xx, 408, 425, 429, and DNS,
+connect, timeout, TLS-handshake, send/receive or truncated-body errors — are tagged
+`IMAGE_SOURCE_UNAVAILABLE`, as on vSphere: the manager retries them but does not count them
+toward the Provider's circuit breaker, so one tenant's failing image server cannot stop the
+Provider for every tenant. The SSH transport or the host failing (including curl missing or
+a write error in the pool directory) still counts.
 
 Error messages never contain the source URL (it may embed credentials or a presigned
 token), and they do not say which HTTP status or curl error a download ended with, nor

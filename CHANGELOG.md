@@ -5,6 +5,39 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-25 20:55] - Image prepare DoS hardening: bounded OVF descriptors, deadline and throughput watchdog, SSRF deny-list gaps, libvirt IMAGE_SOURCE_UNAVAILABLE
+**Author:** @wrkode (William Rizzo)
+
+> **Operator note.** vSphere image downloads now **ignore `HTTP_PROXY`/`HTTPS_PROXY`** (the vCenter connection still honours them). If your image servers are reachable only through a proxy, set the new `VIRTRIGAUD_VSPHERE_IMAGE_PROXY` (an `http://` or `https://` URL) through the Provider's `spec.runtime.env` before rolling the provider, and restrict that proxy's egress. OVF descriptors are capped at 16 MiB and 256 file references; a download moving less than 64 KiB in 60 seconds is abandoned; both are retried or refused without tripping the Provider's circuit breaker.
+
+### Security
+- `internal/providers/vsphere/ova_archive.go`, `ova_import.go`, `image.go`: **an oversized OVF descriptor could exhaust the provider's memory** (govmomi `ReadOvf` reads it whole). A descriptor larger than 16 MiB (`maxOVFDescriptorBytes`) is refused as `InvalidSpec` from its tar header, before any of it is read (a bare `.ovf` download is capped at the same size), and a descriptor with more than 256 `<File>` references (`maxOVFFileRefs`) is refused before `CreateImportSpec`. The OVA's members are indexed once (`newTarPackage`, `index`) instead of rescanned per reference, and `Open` seeks to the indexed offset.
+- `internal/transport/grpc/client.go`: **the manager counted its own deadline on `ImagePrepare` toward the circuit breaker**, so one slow image source could open the breaker for every tenant of a Provider. `countsTowardBreaker` no longer counts `DeadlineExceeded` or `Canceled` on `ImagePrepare` (every other RPC unchanged).
+- `internal/providers/vsphere/image.go`, `image_download.go`: the vSphere `ImagePrepare` gives up 15 seconds before the manager's deadline (`importDeadline`) and a download that moves less than 64 KiB in any 60 seconds is abandoned (`watchDownloadThroughput`); both answer `IMAGE_SOURCE_UNAVAILABLE` (retried, not counted). Definitive answers (InvalidSpec, Conflict, FailedPrecondition, NotFound, in progress) are kept as they are.
+- `internal/providers/vsphere/image_download.go`: **SSRF deny-list gaps.** Also refused on every connection after DNS: `fd00:ec2::254` (AWS metadata over IPv6), `100.100.100.200` (Alibaba Cloud metadata), `168.63.129.16` (Azure WireServer), and IPv6 addresses whose embedded IPv4 address is refused (NAT64 `64:ff9b::/96`, IPv4-compatible `::/96`). Image downloads no longer honour `HTTP_PROXY`/`HTTPS_PROXY` — a proxy resolves the target itself, which bypassed the address checks — unless `VIRTRIGAUD_VSPHERE_IMAGE_PROXY` names one explicitly (`imageProxyFromEnv`; an invalid value logs a warning and downloads connect directly). A redirect from `https` to `http` is refused (`InvalidSpec`).
+- `internal/providers/libvirt/image.go`, `server.go`: **one tenant's failing image source could open the libvirt Provider's breaker.** Retried download failures the source caused (HTTP 5xx/408/425/429; curl exits 6, 7, 8, 16, 18, 28, 35, 47, 52, 55, 56, 92, 95) are sent as `imageartifact.SourceUnavailableError` (`Unavailable` + `IMAGE_SOURCE_UNAVAILABLE`) with the historical text instead of a plain error. The SSH transport or the host failing still counts; permanent failures are still `InvalidSpec`. Only `ImagePrepare` changes.
+
+### Fixed
+- `internal/providers/vsphere/image_identity.go`: a network error during the NFC upload counts toward the breaker only when vCenter also fails to answer a `CurrentTime` call within 10 seconds (`uploadFailure`); otherwise it is `IMAGE_SOURCE_UNAVAILABLE`.
+- `internal/providers/vsphere/image_identity.go`: `destroyVMIfPresent`, the artifact observation, the name-holder probe and the task probe took any `ManagedObjectNotFound` as "the object is gone"; `isNotFound(err, ref)` now matches only a fault naming that object.
+- `docs/adr/0009-prepared-image-artifact-identity.md`: the "Not addressed" threat row says Slice 7's create-time check compares the stamp only and cannot catch a planted artifact whose stamp matches.
+
+### Added
+- Tests: descriptor refused from its header over vcsim and in the archive reader, reference cap, one index pass; own-deadline ImagePrepare over bufconn leaves the breaker closed (a plain `Unavailable` still trips it); the provider deadline, the throughput watchdog (a slow drip is cut off, a source above the floor completes) and which answers the deadline may replace; new deny-list entries, NAT64/IPv4-compatible embedding, proxy opt-in and `HTTP(S)_PROXY` ignored, no scheme downgrade; NFC upload failure with vCenter answering vs down; `isNotFound` on another object; libvirt source failures tagged (per HTTP status and curl exit), host/transport failures still counted, permanent ones still `InvalidSpec`, through `imagePrepareRPCError` and the RPC.
+
+### Changed
+- `docs/image-preparation.md` (vSphere: descriptor and reference caps, deny list, no downgrade, "must keep moving", proxies, failure table; libvirt: source failures tagged), `docs/upgrading.md` (rows for the deny list and downgrade, the proxy opt-in, the descriptor and reference caps, the watchdog and deadline, libvirt tagging; the `VIRTRIGAUD_VSPHERE_IMAGE_PROXY` env var; the old "restrict the proxy's egress" advice replaced).
+- `CHANGELOG.md`: the 2026-09-25 07:17 examples entry gets its missing `### Impact` section.
+
+### Why
+The Slice 3 security re-review found that a tenant-supplied OVA could still exhaust provider memory with a huge descriptor, that a slow image source could run an `ImagePrepare` past the manager's deadline and open the Provider-wide breaker, that the SSRF deny list missed some cloud platform endpoints and NAT64 forms and was bypassed entirely by a configured proxy, and that libvirt did not yet use the `IMAGE_SOURCE_UNAVAILABLE` reason vSphere introduced.
+
+### Impact
+- [ ] Breaking change (operators who relied on `HTTP_PROXY`/`HTTPS_PROXY` for vSphere image downloads must set `VIRTRIGAUD_VSPHERE_IMAGE_PROXY`)
+- [x] Requires cluster rollout (manager, vSphere and libvirt provider images)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-09-25 20:15] - ADR-0009 Slice 3: identity-safe image preparation on vSphere; OVF local-file read, download SSRF and breaker fixes
 **Author:** @wrkode (William Rizzo)
 
