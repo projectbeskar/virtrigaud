@@ -67,7 +67,10 @@ func (p *preparingRoutingProvider) PrepareImage(_ context.Context, req contracts
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.prepareReqs = append(p.prepareReqs, req)
-	return p.prepareResp, p.prepareErr
+	if p.prepareErr != nil {
+		return contracts.ImagePrepareResponse{}, p.prepareErr
+	}
+	return echoIdentity(req, p.prepareResp), nil
 }
 
 func (p *preparingRoutingProvider) prepares() int {
@@ -82,7 +85,10 @@ var _ contracts.ImagePreparer = (*preparingRoutingProvider)(nil)
 func coProvider() *infrav1beta1.Provider {
 	p := withRuntime(singleProviderCR("shared", bpNS))
 	p.UID = types.UID("uid-" + bpNS + "-shared")
-	p.Status.ReportedCapabilities = &infrav1beta1.ReportedCapabilities{SupportsImageImport: true}
+	p.Status.ReportedCapabilities = &infrav1beta1.ReportedCapabilities{
+		SupportsImageImport:           true,
+		SupportsImageArtifactIdentity: true,
+	}
 	return p
 }
 
@@ -286,6 +292,10 @@ func TestVMCRDFeatureChecker_VMImagePrepareStateMissing(t *testing.T) {
 			others: map[string]*unstructured.Unstructured{VMImageCRDName: olderVMImageCRD(t, "providerUID")}}, true},
 		"VMImage CRD without taskRef": {&stubCRDReader{crd: generatedVMCRD(t), t: t,
 			others: map[string]*unstructured.Unstructured{VMImageCRDName: olderVMImageCRD(t, "taskRef")}}, true},
+		"VMImage CRD without sourceDigest (ADR-0009)": {&stubCRDReader{crd: generatedVMCRD(t), t: t,
+			others: map[string]*unstructured.Unstructured{VMImageCRDName: olderVMImageCRD(t, "sourceDigest")}}, true},
+		"Provider CRD without supportsImageArtifactIdentity (ADR-0009)": {&stubCRDReader{crd: generatedVMCRD(t), t: t,
+			others: map[string]*unstructured.Unstructured{ProviderCRDName: olderProviderCRD(t)}}, true},
 		"only another CRD is outdated": {&stubCRDReader{crd: generatedVMCRD(t), t: t,
 			others: map[string]*unstructured.Unstructured{ProviderCRDName: olderConsumerCRD(t, ProviderCRDName)}}, false},
 		"CRDs cannot be read (unknown)": {&stubCRDReader{crd: generatedVMCRD(t), t: t,
@@ -308,11 +318,11 @@ type blockingPreparer struct {
 	resp    contracts.ImagePrepareResponse
 }
 
-func (b *blockingPreparer) PrepareImage(_ context.Context, _ contracts.ImagePrepareRequest) (contracts.ImagePrepareResponse, error) {
+func (b *blockingPreparer) PrepareImage(_ context.Context, req contracts.ImagePrepareRequest) (contracts.ImagePrepareResponse, error) {
 	b.calls.Add(1)
 	b.once.Do(func() { close(b.started) })
 	<-b.release
-	return b.resp, nil
+	return echoIdentity(req, b.resp), nil
 }
 
 // arrivalReporter is a VMImageCRDFeatureReporter (CRD current) that marks
@@ -410,7 +420,7 @@ func TestWriteImageStatus_ContendedWritersAllLand(t *testing.T) {
 			start.Wait()
 			p := identityProvider(fmt.Sprintf("team-%02d", i), idProviderName)
 			_, errs[i] = r.markImagePrepared(context.Background(), getImage(t, r, img), p,
-				&preparedLocation{id: fmt.Sprintf("tmpl-%02d", i)}, "")
+				preparedLocation{id: fmt.Sprintf("tmpl-%02d", i), sourceDigest: digestOf(t, img)}, "")
 		}(i)
 	}
 	start.Done()
@@ -469,8 +479,9 @@ func TestMarkImagePrepared_DoesNotClearANewerTask(t *testing.T) {
 	}
 	r, _ := newIdentityReconciler(t, img, provA)
 	current := getImage(t, r, img)
+	loc := preparedLocation{id: "tmpl-a", sourceDigest: digestOf(t, img)}
 
-	applied, err := r.markImagePrepared(ctx, current, provA, nil, "task-old")
+	applied, err := r.markImagePrepared(ctx, current, provA, loc, "task-old")
 	require.NoError(t, err)
 	assert.False(t, applied)
 	got := getImage(t, r, img)
@@ -478,12 +489,13 @@ func TestMarkImagePrepared_DoesNotClearANewerTask(t *testing.T) {
 	assert.False(t, got.Status.ProviderStatus[key].Available)
 	assert.Equal(t, current.ResourceVersion, got.ResourceVersion, "nothing is written")
 
-	applied, err = r.markImagePrepared(ctx, current, provA, nil, "task-new")
+	applied, err = r.markImagePrepared(ctx, current, provA, loc, "task-new")
 	require.NoError(t, err)
 	assert.True(t, applied)
 	got = getImage(t, r, img)
 	assert.True(t, got.Status.ProviderStatus[key].Available)
 	assert.Empty(t, got.Status.ProviderStatus[key].TaskRef)
+	assert.Equal(t, loc.sourceDigest, got.Status.ProviderStatus[key].SourceDigest)
 }
 
 // forbiddenCRDRead is the error an RBAC-restricted CRD read returns.

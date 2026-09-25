@@ -256,18 +256,22 @@ migrated to the `VMImage`'s own namespace only when a Provider of that name
 exists there, and re-validated; otherwise it is dropped. It never satisfies a
 Provider in another namespace.
 
-**Known limitation: prepared artifacts on the hypervisor are not per tenant.**
-This separates the operator's records, not the hypervisor. A prepared template
-or image file is named after the `VMImage` (the bare name), and each provider's
-prepare accepts an existing artifact of that name as already prepared, without
-checking who created it or from what. Two Providers whose accounts reach the
-same inventory (the same vCenter datacenter, Proxmox node, or libvirt pool
-directory) therefore share one artifact, whichever prepared it first: a tenant
-allowed to use a shared `Provider` can pre-create, or later change, the template
-another tenant's VMs are created from. This needs a design change (tracked
-separately). Until then, as with a shared `Provider`, give separate tenants
-separate hypervisor accounts scoped to what each may see, and don't share a
-`Provider` between tenants that must not influence each other's images.
+**Prepared artifacts on the hypervisor.** This separates the operator's
+records. On the hypervisor, a prepared template or image file is identified by
+the `VMImage`'s UID and a digest of its `spec.source`
+([ADR-0009](adr/0009-prepared-image-artifact-identity.md)): the manager sends
+that identity with every image prepare, the provider names and stamps the
+artifact with it and reuses an existing one only on a matching stamp, and a
+provider that imports images without supporting this is not used for import-style
+images at all (creates are held with `ProviderLacksArtifactIdentity`). See
+[Prepared-image artifact identity](image-preparation.md#prepared-image-artifact-identity).
+Providers that resolve to the same image location (vSphere import folder,
+libvirt pool directory, Proxmox storage) still share one artifact per image and
+source, and whoever can write that location can change its content: give each
+tenant's `Provider` its own import location and hypervisor account scoped to
+it, and don't share a location between tenants that must not influence each
+other's images. Reference-style sources (`templateName`, a libvirt `path`, a
+Proxmox template) still name whatever the Provider's credentials reach.
 
 ## What is never sent to a provider
 

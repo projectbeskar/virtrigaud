@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 
@@ -37,6 +38,12 @@ import (
 // configurable response/error, and lets a test override IsTaskComplete. It
 // embeds stubProvider (defined in virtualmachine_controller_test.go) so it
 // satisfies the full contracts.Provider interface with no extra boilerplate.
+//
+// Like an ADR-0009 provider, it echoes the request's identity as the
+// artifact stamp (echoIdentity) unless prepareResp carries its own Artifact
+// or noEcho is set (a provider older than ADR-0009). After the first call it
+// answers with confirmResp when that is set: the reuse a real provider
+// answers once an asynchronous import has completed.
 type preparerProvider struct {
 	stubProvider
 
@@ -44,7 +51,9 @@ type preparerProvider struct {
 	prepareCalls     int
 	lastPrepareReq   contracts.ImagePrepareRequest
 	prepareResp      contracts.ImagePrepareResponse
+	confirmResp      *contracts.ImagePrepareResponse
 	prepareErr       error
+	noEcho           bool
 	isTaskCompleteFn func(ctx context.Context, ref string) (bool, error)
 }
 
@@ -54,7 +63,62 @@ func (p *preparerProvider) PrepareImage(_ context.Context, req contracts.ImagePr
 	defer p.mu.Unlock()
 	p.prepareCalls++
 	p.lastPrepareReq = req
-	return p.prepareResp, p.prepareErr
+	resp := p.prepareResp
+	if p.confirmResp != nil && p.prepareCalls > 1 {
+		resp = *p.confirmResp
+	}
+	if p.prepareErr != nil {
+		return contracts.ImagePrepareResponse{}, p.prepareErr
+	}
+	if !p.noEcho {
+		resp = echoIdentity(req, resp)
+	}
+	return resp, nil
+}
+
+// testArtifactName is the artifact name echoIdentity reports when the
+// response names no prepared image.
+const testArtifactName = "test-artifact"
+
+// echoIdentity returns resp with the artifact stamp echo an ADR-0009 provider
+// sends for req (its image identity and source digest) when resp carries no
+// Artifact, or one without an image UID (a template: its Reused is kept). An
+// Artifact with an image UID is returned as is (a test's foreign echo), and
+// so is everything when req carries no identity.
+func echoIdentity(req contracts.ImagePrepareRequest, resp contracts.ImagePrepareResponse) contracts.ImagePrepareResponse {
+	if req.Image.IsZero() || (resp.Artifact != nil && resp.Artifact.Image.UID != "") {
+		return resp
+	}
+	name := resp.PreparedImageID
+	if name == "" {
+		name = testArtifactName
+	}
+	reused := resp.Artifact != nil && resp.Artifact.Reused
+	resp.Artifact = &contracts.PreparedArtifact{Name: name, Image: req.Image, SourceDigest: req.SourceDigest, Reused: reused}
+	return resp
+}
+
+// reusedResponse is the answer of an ADR-0009 provider that reuses the
+// complete artifact id — as it answers the call that confirms a completed
+// asynchronous import (echoIdentity adds the identity to the stamp).
+func reusedResponse(id string) *contracts.ImagePrepareResponse {
+	return &contracts.ImagePrepareResponse{
+		PreparedImageID: id,
+		Artifact:        &contracts.PreparedArtifact{Reused: true},
+	}
+}
+
+// digestOf returns the source digest of img's current spec.source.
+func digestOf(t *testing.T, img *infrav1beta1.VMImage) string {
+	t.Helper()
+	d, err := imageSourceDigest(img)
+	require.NoError(t, err)
+	return d
+}
+
+// testImageUID is the UID the test helpers give the VMImage ns/name.
+func testImageUID(ns, name string) types.UID {
+	return types.UID("uid-img-" + ns + "-" + name)
 }
 
 // IsTaskComplete overrides stubProvider's (which always returns true) when a
@@ -79,12 +143,16 @@ var (
 )
 
 // importCapableProvider returns a Provider CR in "default" that advertises
-// SupportsImageImport, with a UID derived from its name.
+// SupportsImageImport and SupportsImageArtifactIdentity (ADR-0009), with a UID
+// derived from its name.
 func importCapableProvider(name string) *infrav1beta1.Provider {
 	return &infrav1beta1.Provider{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", UID: types.UID("uid-default-" + name)},
 		Status: infrav1beta1.ProviderStatus{
-			ReportedCapabilities: &infrav1beta1.ReportedCapabilities{SupportsImageImport: true},
+			ReportedCapabilities: &infrav1beta1.ReportedCapabilities{
+				SupportsImageImport:           true,
+				SupportsImageArtifactIdentity: true,
+			},
 		},
 	}
 }
@@ -93,7 +161,7 @@ func importCapableProvider(name string) *infrav1beta1.Provider {
 // OnMissing action ("" leaves Prepare unset → defaults to Import).
 func imageWithSource(name string, onMissing infrav1beta1.ImageMissingAction) *infrav1beta1.VMImage {
 	img := &infrav1beta1.VMImage{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", UID: testImageUID("default", name)},
 		Spec: infrav1beta1.VMImageSpec{
 			Source: infrav1beta1.ImageSource{
 				Libvirt: &infrav1beta1.LibvirtImageSource{
@@ -160,8 +228,13 @@ func TestEnsureImageOnProvider_SyncPrepare(t *testing.T) {
 	assert.False(t, requeue, "synchronous prepare must let create proceed immediately")
 	assert.Equal(t, 1, inst.calls())
 
-	// The provider received the JSON-encoded spec and the image name as target.
-	assert.Equal(t, "ubuntu", inst.lastPrepareReq.TargetName)
+	// The provider received the JSON-encoded spec, the image identity and the
+	// source digest, and an EMPTY target name (ADR-0009 D7).
+	assert.Empty(t, inst.lastPrepareReq.TargetName)
+	assert.Equal(t, contracts.ObjectIdentity{UID: string(img.UID), Namespace: "default", Name: "ubuntu"}, inst.lastPrepareReq.Image)
+	assert.Equal(t, digestOf(t, img), inst.lastPrepareReq.SourceDigest)
+	assert.Equal(t, contracts.ObjectIdentity{UID: string(provider.UID), Namespace: "default", Name: "libvirt-1"},
+		inst.lastPrepareReq.Provider)
 	assert.Contains(t, inst.lastPrepareReq.ImageJSON, `"source"`)
 	assert.Empty(t, inst.lastPrepareReq.StorageHint)
 
@@ -175,6 +248,8 @@ func TestEnsureImageOnProvider_SyncPrepare(t *testing.T) {
 	// consume it instead of re-resolving the source.
 	assert.Equal(t, "ubuntu", persisted.Status.ProviderStatus[key].ID)
 	assert.Equal(t, "/var/lib/libvirt/images/ubuntu.qcow2", persisted.Status.ProviderStatus[key].Path)
+	assert.Equal(t, digestOf(t, img), persisted.Status.ProviderStatus[key].SourceDigest,
+		"the digest the stamp echo confirmed is recorded (ADR-0009 D8)")
 	assert.Equal(t, []string{key}, persisted.Status.AvailableOn)
 	assert.True(t, persisted.Status.Ready)
 	assert.Equal(t, infrav1beta1.ImagePhaseReady, persisted.Status.Phase)
@@ -182,9 +257,9 @@ func TestEnsureImageOnProvider_SyncPrepare(t *testing.T) {
 	assert.Empty(t, persisted.Status.PrepareTaskRef, "the deprecated image-wide task ref is never written")
 }
 
-// (b) Asynchronous prepare: TaskRef set → PrepareTaskRef + Phase=Importing +
-// requeue; then on a second call with IsTaskComplete=true → stamped + create
-// proceeds.
+// (b) Asynchronous prepare: TaskRef set → the entry's task + Phase=Importing +
+// requeue; then once IsTaskComplete=true → the artifact is confirmed by a
+// second (idempotent) prepare call (ADR-0009 D7) → stamped + create proceeds.
 func TestEnsureImageOnProvider_AsyncPrepareThenComplete(t *testing.T) {
 	img := imageWithSource("ubuntu", "")
 	r, _ := newEnsureReconciler(t, img)
@@ -199,6 +274,7 @@ func TestEnsureImageOnProvider_AsyncPrepareThenComplete(t *testing.T) {
 			TaskRef:         "task-abc",
 			PreparedImageID: "ubuntu",
 		},
+		confirmResp:      reusedResponse("ubuntu"),
 		isTaskCompleteFn: func(_ context.Context, _ string) (bool, error) { return taskDone, nil },
 	}
 
@@ -227,17 +303,19 @@ func TestEnsureImageOnProvider_AsyncPrepareThenComplete(t *testing.T) {
 	assert.True(t, requeue)
 	assert.Equal(t, 1, inst.calls(), "must NOT re-trigger prepare while polling")
 
-	// Task completes → stamped, create proceeds, still no new PrepareImage.
+	// Task completes → one confirming PrepareImage, whose echo is recorded;
+	// create proceeds.
 	taskDone = true
 	persisted = reloadImage(t, r, img.Name)
 	requeue, err = r.EnsureImageOnProvider(context.Background(), vm, persisted, provider, inst)
 	require.NoError(t, err)
 	assert.False(t, requeue)
-	assert.Equal(t, 1, inst.calls())
+	assert.Equal(t, 2, inst.calls(), "the end of the task is confirmed by a second prepare call")
 
 	final := reloadImage(t, r, img.Name)
 	assert.True(t, final.Status.ProviderStatus[key].Available)
-	// The trigger-time prepared id is preserved through task completion (#214).
+	assert.Equal(t, digestOf(t, img), final.Status.ProviderStatus[key].SourceDigest)
+	// The prepared id is the one the confirming call reported (#214).
 	assert.Equal(t, "ubuntu", final.Status.ProviderStatus[key].ID)
 	assert.Contains(t, final.Status.AvailableOn, key)
 	assert.Empty(t, final.Status.ProviderStatus[key].TaskRef)
@@ -251,7 +329,7 @@ func TestEnsureImageOnProvider_IdempotentAlreadyAvailable(t *testing.T) {
 	img := imageWithSource("ubuntu", "")
 	provider := importCapableProvider("libvirt-1")
 	img.Status.ProviderStatus = map[string]infrav1beta1.ProviderImageStatus{
-		imageProviderKey(provider): {Available: true, ProviderUID: string(provider.UID)},
+		imageProviderKey(provider): {Available: true, ProviderUID: string(provider.UID), SourceDigest: digestOf(t, img)},
 	}
 	img.Status.AvailableOn = []string{imageProviderKey(provider)}
 	img.Status.Ready = true
@@ -426,15 +504,21 @@ func TestEnsureImageOnProvider_PrepareError(t *testing.T) {
 
 // imageWithProviderStatus builds a VMImage with the given source kind and a
 // ProviderStatus[key] entry carrying the prepared location, for exercising
-// overrideImageWithPreparedLocation (#214).
+// overrideImageWithPreparedLocation (#214). An entry without a SourceDigest
+// gets the digest of source: it was prepared for the current spec.source
+// (ADR-0009 D8).
 func imageWithProviderStatus(source infrav1beta1.ImageSource, key string, ps infrav1beta1.ProviderImageStatus) *infrav1beta1.VMImage {
-	return &infrav1beta1.VMImage{
-		ObjectMeta: metav1.ObjectMeta{Name: "img", Namespace: "default"},
+	img := &infrav1beta1.VMImage{
+		ObjectMeta: metav1.ObjectMeta{Name: "img", Namespace: "default", UID: testImageUID("default", "img")},
 		Spec:       infrav1beta1.VMImageSpec{Source: source},
-		Status: infrav1beta1.VMImageStatus{
-			ProviderStatus: map[string]infrav1beta1.ProviderImageStatus{key: ps},
-		},
 	}
+	if ps.SourceDigest == "" {
+		if d, err := imageSourceDigest(img); err == nil {
+			ps.SourceDigest = d
+		}
+	}
+	img.Status.ProviderStatus = map[string]infrav1beta1.ProviderImageStatus{key: ps}
+	return img
 }
 
 // TestOverrideImageWithPreparedLocation_Consume covers the create-time consume
@@ -535,11 +619,64 @@ func TestOverrideImageWithPreparedLocation_Consume(t *testing.T) {
 	})
 }
 
+// TestOverrideImageWithPreparedLocation_RequiresTheCurrentSourceDigest pins
+// ADR-0009 D8 at create time: this Provider's own available entry, recorded
+// through its current object, is consumed only when it was prepared for the
+// CURRENT spec.source — for every source kind. An entry with no digest
+// (recorded by an earlier release) or another digest is ignored, and the
+// source is used as written.
+func TestOverrideImageWithPreparedLocation_RequiresTheCurrentSourceDigest(t *testing.T) {
+	provider := importCapableProvider("prov-1")
+	key := imageProviderKey(provider)
+	uid := string(provider.UID)
+	templateID := 9000
+	otherDigest := "sha256:" + strings.Repeat("1", 64)
+	for name, source := range map[string]infrav1beta1.ImageSource{
+		"libvirt url":        {Libvirt: &infrav1beta1.LibvirtImageSource{URL: "https://x/y.qcow2"}},
+		"libvirt path":       {Libvirt: &infrav1beta1.LibvirtImageSource{Path: "/pool/base.qcow2"}},
+		"vsphere ova":        {VSphere: &infrav1beta1.VSphereImageSource{OVAURL: "https://x/y.ova"}},
+		"vsphere template":   {VSphere: &infrav1beta1.VSphereImageSource{TemplateName: "golden"}},
+		"proxmox template":   {Proxmox: &infrav1beta1.ProxmoxImageSource{TemplateID: &templateID}},
+		"http (no override)": {HTTP: &infrav1beta1.HTTPImageSource{URL: "https://x/y.qcow2"}},
+	} {
+		for variant, digest := range map[string]string{"no digest": "", "another digest": otherDigest} {
+			t.Run(name+", "+variant, func(t *testing.T) {
+				img := imageWithProviderStatus(source, key, infrav1beta1.ProviderImageStatus{
+					Available: true, ProviderUID: uid, ID: "prepared-tmpl", Path: "/pool/prepared.qcow2", SourceDigest: otherDigest,
+				})
+				entry := img.Status.ProviderStatus[key]
+				entry.SourceDigest = digest
+				img.Status.ProviderStatus[key] = entry
+				image := contracts.VMImage{URL: "as-written"}
+				overrode, reason := overrideImageWithPreparedLocation(&image, img, provider)
+				assert.False(t, overrode, "an entry not prepared for the current spec.source is never consumed")
+				assert.Contains(t, reason, "digest")
+				assert.Equal(t, contracts.VMImage{URL: "as-written"}, image)
+			})
+		}
+	}
+
+	t.Run("a VMImage switched from ovaURL to templateName does not keep cloning the OVA's artifact", func(t *testing.T) {
+		img := imageWithProviderStatus(infrav1beta1.ImageSource{VSphere: &infrav1beta1.VSphereImageSource{OVAURL: "https://x/y.ova"}},
+			key, infrav1beta1.ProviderImageStatus{Available: true, ProviderUID: uid, ID: "team-a.img_0123456789abcdef"})
+		image := contracts.VMImage{}
+		overrode, _ := overrideImageWithPreparedLocation(&image, img, provider)
+		require.True(t, overrode, "prepared for the OVA: consumed while the source is the OVA")
+		assert.Equal(t, "team-a.img_0123456789abcdef", image.TemplateName)
+
+		img.Spec.Source = infrav1beta1.ImageSource{VSphere: &infrav1beta1.VSphereImageSource{TemplateName: "golden"}}
+		image = contracts.VMImage{TemplateName: "golden"}
+		overrode, reason := overrideImageWithPreparedLocation(&image, img, provider)
+		assert.False(t, overrode, reason)
+		assert.Equal(t, "golden", image.TemplateName, "the reference is used as written")
+	})
+}
+
 // imageWithLibvirtPath returns a VMImage whose libvirt source is a concrete
 // pool-file PATH (already present on the host), with the given OnMissing action.
 func imageWithLibvirtPath(name string, onMissing infrav1beta1.ImageMissingAction) *infrav1beta1.VMImage {
 	img := &infrav1beta1.VMImage{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", UID: testImageUID("default", name)},
 		Spec: infrav1beta1.VMImageSpec{
 			Source: infrav1beta1.ImageSource{
 				Libvirt: &infrav1beta1.LibvirtImageSource{

@@ -26,6 +26,7 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -141,6 +142,16 @@ func TestConflictAndInProgressErrors(t *testing.T) {
 	err = InProgressError("team-a.ubuntu_f06d2f97535bae75")
 	assert.Equal(t, codes.Unavailable, status.Code(err))
 	assert.Contains(t, err.Error(), "team-a.ubuntu_f06d2f97535bae75")
+	// The ErrorInfo tells the manager it is not an unreachable provider.
+	st, ok := status.FromError(err)
+	require.True(t, ok)
+	var reasons []string
+	for _, d := range st.Details() {
+		if info, isInfo := d.(*errdetails.ErrorInfo); isInfo && info.GetDomain() == contracts.ErrorInfoDomain {
+			reasons = append(reasons, info.GetReason())
+		}
+	}
+	assert.Equal(t, []string{contracts.ImageArtifactInProgressReason}, reasons)
 }
 
 // legacyCounter returns virtrigaud_provider_image_prepare_legacy_requests_total

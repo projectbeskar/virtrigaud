@@ -43,3 +43,26 @@ func TestIsInvalidSpec(t *testing.T) {
 		}
 	}
 }
+
+// TestIsInProgress pins the ADR-0009 D4 "still being prepared" class: typed,
+// retryable, and distinct from a plain retryable error.
+func TestIsInProgress(t *testing.T) {
+	cases := map[string]struct {
+		err  error
+		want bool
+	}{
+		"nil":         {nil, false},
+		"plain error": {errors.New("boom"), false},
+		"in progress": {NewInProgressError("still importing", nil), true},
+		"wrapped":     {fmt.Errorf("prepare: %w", NewInProgressError("still importing", nil)), true},
+		"retryable":   {NewRetryableError("transient", nil), false},
+	}
+	for name, tc := range cases {
+		if got := IsInProgress(tc.err); got != tc.want {
+			t.Errorf("%s: IsInProgress() = %v, want %v", name, got, tc.want)
+		}
+	}
+	if !IsRetryable(NewInProgressError("still importing", nil)) {
+		t.Error("an InProgress error must be retryable")
+	}
+}

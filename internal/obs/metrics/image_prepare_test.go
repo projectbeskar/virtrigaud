@@ -38,3 +38,18 @@ func TestRecordImagePrepareLegacyRequest(t *testing.T) {
 	assert.Equal(t, beforeLibvirt+2, counterValue(t, name, libvirt))
 	assert.Equal(t, beforeVSphere, counterValue(t, name, vsphere), "other provider types are not counted")
 }
+
+// TestRecordImagePrepareArtifactOutcome verifies the ADR-0009 D11 manager
+// counter is served under its documented name and labels.
+func TestRecordImagePrepareArtifactOutcome(t *testing.T) {
+	const name = "virtrigaud_image_prepare_artifact_total"
+	conflict := map[string]string{"provider_type": "vsphere", "outcome": ImageArtifactOutcomeConflict}
+	reused := map[string]string{"provider_type": "vsphere", "outcome": ImageArtifactOutcomeReused}
+	beforeConflict := counterValue(t, name, conflict)
+	beforeReused := counterValue(t, name, reused)
+
+	RecordImagePrepareArtifactOutcome("vsphere", ImageArtifactOutcomeConflict)
+
+	assert.Equal(t, beforeConflict+1, counterValue(t, name, conflict))
+	assert.Equal(t, beforeReused, counterValue(t, name, reused), "other outcomes are not counted")
+}

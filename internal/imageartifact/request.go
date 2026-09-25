@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -164,10 +165,23 @@ func ConflictError(name string) error {
 
 // InProgressError returns the retryable codes.Unavailable error for an
 // artifact that is still being prepared for the requesting VMImage (ADR-0009
-// D4, OutcomeInProgress).
+// D4, OutcomeInProgress). It carries a google.rpc.ErrorInfo with
+// contracts.ImageArtifactInProgressReason, so the manager tells it apart from
+// an unreachable provider: it maps it to contracts.ErrorTypeInProgress and
+// keeps it out of its circuit breaker.
 func InProgressError(name string) error {
-	return status.Errorf(codes.Unavailable,
+	st := status.Newf(codes.Unavailable,
 		"the prepared-image artifact %q is still being prepared for this VMImage; retry later", name)
+	withInfo, err := st.WithDetails(&errdetails.ErrorInfo{
+		Reason: contracts.ImageArtifactInProgressReason,
+		Domain: contracts.ErrorInfoDomain,
+	})
+	if err != nil {
+		// Unreachable in practice (ErrorInfo always marshals); a plain
+		// Unavailable is still a correct, if breaker-counted, answer.
+		return st.Err()
+	}
+	return withInfo.Err()
 }
 
 // LegacyRequestWarning is the warning logged for every legacy (identity-less)

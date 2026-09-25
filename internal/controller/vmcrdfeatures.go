@@ -392,9 +392,11 @@ func (c *VMCRDFeatureChecker) read(ctx context.Context) (string, []string, error
 }
 
 // VMImagePrepareStateMissing implements VMImageCRDFeatureReporter: it is true
-// while the checker's (cached) result is missing and names the VMImage CRD's
-// per-Provider prepare-state fields, or the VMImage CRD itself. An unknown
-// state (the CRD cannot be read) is not missing.
+// while the checker's (cached) result is missing and names a field image
+// preparation records or reads — the VMImage CRD's per-Provider prepare state
+// (providerUID, taskRef, sourceDigest) or the Provider CRD's
+// supportsImageArtifactIdentity (ADR-0009 D8) — or either CRD itself. An
+// unknown state (a CRD cannot be read) is not missing.
 func (c *VMCRDFeatureChecker) VMImagePrepareStateMissing(ctx context.Context) bool {
 	state, missing := c.Evaluate(ctx)
 	if state != metrics.CRDFeaturesMissing {
@@ -404,7 +406,10 @@ func (c *VMCRDFeatureChecker) VMImagePrepareStateMissing(ctx context.Context) bo
 		switch m {
 		case VMImageCRDName + ": " + crdFeatureImageProviderUID,
 			VMImageCRDName + ": " + crdFeatureImageTaskRef,
-			crdMissingPrefix + VMImageCRDName:
+			VMImageCRDName + ": " + crdFeatureImageSourceDigest,
+			ProviderCRDName + ": " + crdFeatureProviderImageArtifactIdentity,
+			crdMissingPrefix + VMImageCRDName,
+			crdMissingPrefix + ProviderCRDName:
 			return true
 		}
 	}

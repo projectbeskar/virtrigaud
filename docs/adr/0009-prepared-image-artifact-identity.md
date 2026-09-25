@@ -2,8 +2,10 @@
 
 ## Status
 
-**Proposed (2026-09-25).** Not implemented. **Release blocker** for the release that
-ships cross-namespace `VMImage` sharing
+**Accepted (2026-09-25).** Slices 1–2 implemented (Slice 1: proto, contracts, CRD
+status and the mock provider, #346; Slice 2: the manager); Slices 3–5 (vSphere,
+libvirt, Proxmox guard) and 9 (docs) are pending. **Release blocker** for the release
+that ships cross-namespace `VMImage` sharing
 ([#343](https://github.com/projectbeskar/virtrigaud/pull/343),
 `spec.consumerNamespaceSelector`). The slices that must land before that release are
 listed under *Implementation slices*.
@@ -17,7 +19,7 @@ in this revision.
   release, then refused.
 - Q4, Q5 and Q6 are still open.
 
-The status stays Proposed until this ADR merges.
+Accepted via #345.
 
 **Author**: William Rizzo ([@wrkode](https://github.com/wrkode))
 
@@ -618,6 +620,19 @@ asynchronous prepare (Proxmox) completes, the manager sends `ImagePrepare` again
 second call is idempotent, and its `artifact` echo is what gets recorded. A task that
 succeeded is never, on its own, proof that the artifact exists.
 
+*Refinement (Slice 2):* a task that ends **in failure** is recorded on the Provider's
+entry (reason `ImportFailed`, the provider's detail sanitized) and the prepare is sent
+again only after a growing, bounded backoff: one minute, doubling, at most 30 minutes,
+counted once per failed task. The next prepare finds the artifact abandoned (D4) and the
+provider imports it again, so a source that always fails is not downloaded again on
+every task end, and the entry never keeps a failed task forever. The backoff count is in
+the manager's memory; the entry's `lastUpdated` keeps the first wait across a restart.
+An answer that does not confirm the identity is likewise a hold (reason
+`ArtifactNotConfirmed`, 30 seconds doubling to 5 minutes, shared by every VM of the image
+and Provider). While a task is in flight its entry records the `sourceDigest` of the
+request that started it, so a task started for an earlier `spec.source` is discarded,
+never confirmed.
+
 ### D8: Status records which source an entry was prepared for (additive CRD status)
 
 - `ProviderImageStatus.sourceDigest` records the digest the entry was prepared for. It
@@ -731,6 +746,24 @@ a prepare (`imageSourceNeedsPrepare`).
   state changes.
 - **Messages** never name another namespace, VMImage, or stamp owner. Those details go
   only to the provider log, following #335.
+- *Refinement (Slice 2):*
+  - The D4 "in progress" answer carries a `google.rpc.ErrorInfo`
+    (`IMAGE_ARTIFACT_IN_PROGRESS`, domain `provider.virtrigaud.io`). On `ImagePrepare`
+    only, the manager maps it to a typed, retryable `InProgress` error, holds the create
+    (30-second requeue) and keeps it out of the per-Provider circuit breaker, so a long
+    import through one Provider cannot open the breaker of another Provider that shares
+    its location. The first such answer records on the entry when the wait began; once
+    the wait exceeds the D4 bound `max(2 × spec.prepare.timeout, 2h)`, the entry says so,
+    the image gets reason `ArtifactPrepareStalled` (while it is available on no
+    provider), and one `Warning` event `ImageArtifactPrepareStalled` is recorded.
+  - Provider error text copied into `VMImage` status, events and VM conditions is
+    appended to a manager-authored message, with URL userinfo removed, control
+    characters replaced and a 256-byte cap.
+  - The manager cannot observe `abandoned_cleanup`: the response does not say that a
+    cleanup preceded the import, which is counted as `created`. The label value is
+    reserved.
+  - The confirmation call of a Provider's own completed asynchronous import is not
+    counted as `reused` (its import was counted as `created`).
 
 ---
 

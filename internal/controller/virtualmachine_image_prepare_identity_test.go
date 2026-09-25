@@ -70,7 +70,7 @@ func identityProvider(ns, name string) *infrav1beta1.Provider {
 // with every namespace, with the given OnMissing action.
 func sharedOVAImage(ns, name string, onMissing infrav1beta1.ImageMissingAction) *infrav1beta1.VMImage {
 	img := &infrav1beta1.VMImage{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, UID: testImageUID(ns, name)},
 		Spec: infrav1beta1.VMImageSpec{
 			Source: infrav1beta1.ImageSource{
 				VSphere: &infrav1beta1.VSphereImageSource{OVAURL: "https://images.example.com/ubuntu.ova"},
@@ -226,10 +226,12 @@ func TestEnsureImageOnProvider_PrepareTasksArePolledPerProvider(t *testing.T) {
 	pollA, pollB := newPollRecorder(), newPollRecorder()
 	instA := &preparerProvider{
 		prepareResp:      contracts.ImagePrepareResponse{TaskRef: "task-a", PreparedImageID: "ubuntu-on-a"},
+		confirmResp:      reusedResponse("ubuntu-on-a"),
 		isTaskCompleteFn: pollA.isTaskComplete,
 	}
 	instB := &preparerProvider{
 		prepareResp:      contracts.ImagePrepareResponse{TaskRef: "task-b", PreparedImageID: "ubuntu-on-b"},
+		confirmResp:      reusedResponse("ubuntu-on-b"),
 		isTaskCompleteFn: pollB.isTaskComplete,
 	}
 	vmA, vmB := vmUsing(provA, img), vmUsing(provB, img)
@@ -285,8 +287,9 @@ func TestEnsureImageOnProvider_PrepareTasksArePolledPerProvider(t *testing.T) {
 	for _, ref := range pollB.refs() {
 		assert.Equal(t, "task-b", ref, "team-b's Provider is only ever asked about team-b's task")
 	}
-	assert.Equal(t, 1, instA.calls())
-	assert.Equal(t, 1, instB.calls())
+	// One prepare each, and one call each confirming the completed task.
+	assert.Equal(t, 2, instA.calls())
+	assert.Equal(t, 2, instB.calls())
 }
 
 func TestHasLegacyImagePrepareState(t *testing.T) {
@@ -477,7 +480,8 @@ func TestEnsureImageOnProvider_RecreatedProvider(t *testing.T) {
 	// same key, new UID.
 	recreated := identityProvider(idTeamA, idProviderName)
 	key := imageProviderKey(recreated)
-	oldEntry := infrav1beta1.ProviderImageStatus{Available: true, ProviderUID: "uid-before", ID: "tmpl-old"}
+	oldEntry := infrav1beta1.ProviderImageStatus{Available: true, ProviderUID: "uid-before", ID: "tmpl-old",
+		SourceDigest: digestOf(t, sharedOVAImage(idImageNS, "ubuntu", ""))}
 
 	t.Run("onMissing Import re-validates through the new Provider object", func(t *testing.T) {
 		img := sharedOVAImage(idImageNS, "ubuntu", "")
@@ -545,6 +549,22 @@ func TestEnsureImageOnProvider_RecreatedProvider(t *testing.T) {
 			require.Len(t, rec.Events, 1)
 			ev := <-rec.Events
 			assert.True(t, strings.HasPrefix(ev, "Warning "+eventReasonImagePrepareStateAccepted), ev)
+		})
+
+		t.Run("onMissing "+string(onMissing)+" does not accept an entry prepared for another spec.source", func(t *testing.T) {
+			img := sharedOVAImage(idImageNS, "ubuntu", onMissing)
+			stale := oldEntry
+			stale.SourceDigest = "sha256:" + strings.Repeat("2", 64)
+			img.Status.ProviderStatus = map[string]infrav1beta1.ProviderImageStatus{key: stale}
+			r, rec := newIdentityReconciler(t, img, recreated)
+			inst := &preparerProvider{}
+
+			_, err := r.EnsureImageOnProvider(ctx, vmUsing(recreated, img), getImage(t, r, img), recreated, inst)
+			require.ErrorIs(t, err, errImagePrepareHold)
+			assert.Contains(t, err.Error(), "earlier one")
+			assert.Zero(t, inst.calls())
+			assert.Empty(t, rec.Events, "nothing is accepted")
+			assert.Equal(t, "uid-before", getImage(t, r, img).Status.ProviderStatus[key].ProviderUID)
 		})
 	}
 

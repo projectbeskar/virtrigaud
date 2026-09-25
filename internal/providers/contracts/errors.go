@@ -52,6 +52,12 @@ const (
 	// circuit breaker (one dead host must not fast-fail every VM on every other
 	// host of the provider).
 	ErrorTypeHostUnavailable ErrorType = "HostUnavailable"
+	// ErrorTypeInProgress indicates that what the request asks for is still
+	// being produced by an earlier request — a prepared-image artifact still
+	// being imported for the same VMImage (ADR-0009 D4). It is retryable, and
+	// like ErrorTypeHostUnavailable it says nothing about the provider's
+	// health: the provider answered.
+	ErrorTypeInProgress ErrorType = "InProgress"
 )
 
 // HostUnavailableReason is the google.rpc.ErrorInfo reason a clustered
@@ -62,7 +68,7 @@ const HostUnavailableReason = "HOST_UNAVAILABLE"
 
 // ErrorInfoDomain is the google.rpc.ErrorInfo domain of every reason a
 // VirtRigaud provider attaches to a gRPC status (HostUnavailableReason,
-// VMOperationFailedReason).
+// VMOperationFailedReason, ImageArtifactInProgressReason).
 const ErrorInfoDomain = "provider.virtrigaud.io"
 
 // HostUnavailableErrorDomain is the google.rpc.ErrorInfo domain of
@@ -80,6 +86,15 @@ const HostUnavailableErrorDomain = ErrorInfoDomain
 // every tenant of the Provider. The status keeps its historical code and
 // message; only this detail is added.
 const VMOperationFailedReason = "VM_OPERATION_FAILED"
+
+// ImageArtifactInProgressReason is the google.rpc.ErrorInfo reason (in
+// ErrorInfoDomain) a provider attaches to the codes.Unavailable status of an
+// ImagePrepare whose artifact is still being prepared for the same VMImage by
+// another request (ADR-0009 D4, imageartifact.InProgressError). The manager
+// maps such a status to ErrorTypeInProgress and keeps it out of its
+// per-Provider circuit breaker: a long import through one Provider must not
+// open the breaker of another Provider that shares its image location.
+const ImageArtifactInProgressReason = "IMAGE_ARTIFACT_IN_PROGRESS"
 
 // ProviderError represents a categorized error from a provider
 type ProviderError struct {
@@ -110,7 +125,8 @@ func (e *ProviderError) Unwrap() error {
 func (e *ProviderError) IsRetryable() bool {
 	return e.Retryable || e.Type == ErrorTypeRetryable ||
 		e.Type == ErrorTypeUnavailable || e.Type == ErrorTypeTimeout ||
-		e.Type == ErrorTypeRateLimit || e.Type == ErrorTypeHostUnavailable
+		e.Type == ErrorTypeRateLimit || e.Type == ErrorTypeHostUnavailable ||
+		e.Type == ErrorTypeInProgress
 }
 
 // IsNotFound reports whether err is, or wraps, a provider NotFound error. The
@@ -170,6 +186,24 @@ func IsRetryable(err error) bool {
 func IsHostUnavailable(err error) bool {
 	var pe *ProviderError
 	return errors.As(err, &pe) && pe.Type == ErrorTypeHostUnavailable
+}
+
+// IsInProgress reports whether err is, or wraps, an ErrorTypeInProgress error:
+// what the request asks for is still being produced by an earlier request.
+func IsInProgress(err error) bool {
+	var pe *ProviderError
+	return errors.As(err, &pe) && pe.Type == ErrorTypeInProgress
+}
+
+// NewInProgressError creates a retryable error for a request whose target is
+// still being produced by an earlier request (see ErrorTypeInProgress).
+func NewInProgressError(message string, cause error) *ProviderError {
+	return &ProviderError{
+		Type:      ErrorTypeInProgress,
+		Message:   message,
+		Cause:     cause,
+		Retryable: true,
+	}
 }
 
 // NewHostUnavailableError creates a retryable error scoped to one host of a

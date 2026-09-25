@@ -19,12 +19,15 @@ storage pool, a datastore) — before a VM can be created from it. VirtRigaud do
    advertises it via `Provider.status.reportedCapabilities.supportsImageImport` (see
    [capability negotiation, #176](https://github.com/projectbeskar/virtrigaud/issues/176)).
    If the provider does not advertise image import, the VM is created by reference exactly
-   as before — preparation is skipped, not failed.
+   as before — preparation is skipped, not failed. A provider that imports images but does
+   not also advertise `supportsImageArtifactIdentity` is **held** instead: nothing is sent
+   to it (see [Prepared-image artifact identity](#prepared-image-artifact-identity)).
 4. The prepare may be **synchronous** (the provider imports during the call) or
    **asynchronous** (the provider returns a task ref the controller polls). Either way the
    VM is **not** created until the image is `Ready` on that provider.
 5. Once prepared, the result is recorded on the `VMImage` status and subsequent VMs
-   referencing the same image on the same provider skip straight to create (idempotent).
+   referencing the same image on the same provider skip straight to create (idempotent),
+   as long as `spec.source` has not changed since.
 
 The image is prepared **only right before a create**: for a VM that has not been created
 yet, and before re-creating a VM that no longer exists on its hypervisor. A VM that exists
@@ -33,9 +36,10 @@ refuses, a template deleted out of band, `onMissing: Fail`/`Wait` — stops its 
 power or reconfigure (no provider's `Reconfigure` reads the image). A clustered create
 already in flight is re-sent as it was, without a new prepare.
 
-Concurrent reconciles that prepare the same `VMImage` through the same Provider share
-**one** `ImagePrepare` call within the manager, and a reconcile that finds a prepare
-already recorded for that Provider (available, or with a task in flight) issues none.
+Concurrent reconciles that prepare the same `VMImage` (for the same `spec.source`) through
+the same Provider share **one** `ImagePrepare` call within the manager, and a reconcile
+that finds a prepare already recorded for that Provider and source (available, or with a
+task in flight) issues none.
 
 The VirtualMachine controller is the **single writer** of the prepare-related `VMImage`
 status fields; writes are conflict-safe (`RetryOnConflict`) so multiple VMs preparing the
@@ -73,10 +77,11 @@ old and the new Provider).
 band without one) is never trusted: it cannot be tied to any Provider object. With
 `onMissing: Import` it is re-validated by the prepare, as above. With `Fail` or `Wait` the
 create is held: the `VMImage` gets `Ready=False` with reason `ProviderUIDMissing`, and the
-VM `Ready=False` / `WaitingForDependencies`, until the image's owner sets the entry's
-`providerUID` to the Provider's UID (`kubectl get provider <name> -n <namespace> -o
-jsonpath='{.metadata.uid}'`) or switches the image to `onMissing: Import`. VMs that already
-exist are not affected (they never prepare).
+VM `Ready=False` / `WaitingForDependencies`, until the image's owner switches the image to
+`onMissing: Import`, so that the controller re-validates the entry through the Provider.
+Never write the entry by hand: the VirtualMachine controller is the single writer of
+`VMImage.status` (ADR-0005). VMs that already exist are not affected (they never prepare);
+a VM re-created because it no longer exists on its hypervisor is a create, and is held too.
 
 **Upgrading from a release that keyed entries by the bare Provider name.** On the first
 prepare of each `VMImage` — that is, the first VM **create** that uses it after the
@@ -101,33 +106,124 @@ owner switches `onMissing` to `Import`, so the controller re-validates it throug
 Provider. `VMImage.status` has a single writer, the VirtualMachine controller (ADR-0005): do
 not write it by hand, and do not grant `vmimages/status` to anyone else.
 
-The VMImage CRD must be upgraded before the manager (as for the other CRD changes of this
-release): an older CRD prunes `providerUID` and `taskRef`, so no prepared image would be
-trusted and no asynchronous prepare tracked. Until the CRD has both fields, the manager's
+The VMImage and Provider CRDs must be upgraded before the manager (as for the other CRD
+changes of this release): an older VMImage CRD prunes `providerUID`, `taskRef` and
+`sourceDigest`, so no prepared image would be trusted and no asynchronous prepare tracked,
+and an older Provider CRD prunes `supportsImageArtifactIdentity`, so every Provider would
+look like one without artifact identity. Until the CRDs have these fields, the manager's
 readiness check fails and every VM create that needs an image prepare is held without any
 provider call (`Ready=False` / `WaitingForDependencies`, "upgrade the CRDs"); VMs that
 exist, and images whose source is already present on the provider, are not affected.
 
-**Known limitation — prepared artifacts on the hypervisor are not per tenant.** The
-per-Provider state above separates the operator's records only. On the hypervisor a
-prepared image is named after the `VMImage` (the bare name), and every provider's prepare
-accepts an existing template or file of that name as "already prepared" without checking
-who created it or from what source. So Providers whose accounts reach the same inventory
-(the same vCenter datacenter, Proxmox node or libvirt pool directory) share one artifact:
-a tenant allowed to use a shared Provider can pre-create, or later modify, the artifact
-another tenant's VMs are created from, and two different `VMImage`s with the same name in
-different namespaces collide. Until this is addressed, give tenants separate hypervisor
-accounts scoped to what each may see, and do not share a Provider between tenants that must
-not influence each other's images.
+## Prepared-image artifact identity
 
-The fix is designed in [ADR-0009](adr/0009-prepared-image-artifact-identity.md) and lands
-in slices. The first slice adds the contract only: `ImagePrepare` can carry the
-`VMImage`'s identity and a digest of its `spec.source`, a provider that names, stamps and
-verifies artifacts by that identity advertises
-`Provider.status.reportedCapabilities.supportsImageArtifactIdentity`, and
-`status.providerStatus[].sourceDigest` records which source an entry was prepared for. Of
-the providers, only the mock implements it so far; the manager does not send the identity
-yet, so the limitation above still applies.
+> Design record: [ADR-0009](adr/0009-prepared-image-artifact-identity.md).
+
+A prepared image is an artifact on the hypervisor — a vSphere template, a libvirt pool
+file, a Proxmox template. It used to be named after the `VMImage` alone, and every
+provider accepted an existing artifact of that name as "already prepared", so two
+`VMImage`s with the same name in different namespaces collided, and a tenant allowed to use
+a shared Provider could pre-create the artifact another tenant's VMs are cloned from.
+Artifacts are now identified by the `VMImage`'s **UID** and a **digest of its
+`spec.source`**:
+
+- **The manager sends the identity.** Every `ImagePrepare` carries the `VMImage`'s
+  namespace, name and UID, the source digest (below) and the Provider's identity, and an
+  **empty** target name. The provider derives the artifact name from the identity (for
+  example `team-a.ubuntu-22.04_3c9e1f0a7b2d4e61`), stamps the artifact with it, and reuses
+  an existing artifact only when its stamp carries the same UID and digest. A provider
+  older than ADR-0009 refuses an empty target name, so it can never import under a bare
+  name for this manager.
+- **The gate, in order.** (1) A provider that does not import images at all (for example a
+  clustered libvirt Provider) is skipped as before: the VM is created by reference. (2) A
+  provider that imports images but does not report
+  `status.reportedCapabilities.supportsImageArtifactIdentity` is **held**: nothing is sent,
+  the `VMImage` entry and — while the image is available on no provider — the image get
+  `Ready=False` with reason `ProviderLacksArtifactIdentity`, and the VM
+  `Ready=False` / `WaitingForDependencies`. The create is retried every 30 seconds and
+  resumes once the Provider reports the capability (upgrade the provider image). (3)
+  Otherwise the prepare is sent. Images whose source is already present on the provider
+  (`templateName`, a libvirt `path`, …) never need a prepare and are never held.
+- **The answer must confirm the identity.** A prepare is recorded only when the provider's
+  answer echoes the artifact's stamp with the requested UID and digest. Anything else — no
+  echo (an older provider, or one whose reported capability is stale), or an echo for
+  another image or source — is not recorded: the entry and — while the image is available
+  on no provider — the image get reason `ArtifactNotConfirmed` (nothing of the answer is
+  shown), the create is held, and the prepare is sent again after 30 seconds, doubling to
+  at most 5 minutes, however many VMs use the image.
+- **Asynchronous prepares are confirmed when they end.** When the task of an asynchronous
+  prepare completes, the manager sends the prepare again (it is idempotent) and records
+  only that answer's confirmed echo; the end of a task is never proof that the artifact
+  exists.
+- **A failed asynchronous import backs off.** When the task fails, the entry records why
+  (reason `ImportFailed`, the provider's detail sanitized) and the create is held. The
+  prepare is sent again after one minute, doubling with each consecutive failure to at most
+  30 minutes; the provider then finds the failed artifact abandoned and imports it again.
+  A source that always fails (a 404, a checksum mismatch) is therefore re-downloaded at
+  most once per window. Fix the source (a new `spec.source` starts afresh) or wait.
+- **`status.providerStatus[].sourceDigest`** records the digest of the `spec.source` an
+  entry was prepared for. A VM is created from an entry only when it is available, was
+  recorded through the Provider's current UID, **and** its `sourceDigest` equals the digest
+  of the current `spec.source` — for every source kind. So a changed `spec.source`, a
+  `VMImage` switched from `ovaURL` to `templateName`, or an entry written by an earlier
+  release (no digest) is never consumed: with `onMissing: Import` the image is prepared
+  again for the current source before the create (a new artifact; the old one is left in
+  place), and a reference-style source is used as written. VMs that already exist are not
+  affected — except a VM that no longer exists on its hypervisor: re-creating it is a
+  create, so its image is prepared (or held) first, like a new VM's.
+- **`onMissing: Fail` or `Wait` and an entry without a digest.** Such an entry cannot be
+  matched to `spec.source`, and these settings forbid the prepare that would re-validate
+  it: creates are held with reason `SourceDigestMissing` until the image's owner switches
+  `onMissing` to `Import`. An entry prepared for another source is simply "not prepared"
+  (`MissingOnProvider` / `WaitingForImage`). Never write `VMImage.status` by hand.
+- **Conflict.** When an artifact already exists at the derived name but its stamp does not
+  match (it was placed out of band, edited, or — with probability 2^-64 — collides), the
+  provider refuses to use or replace it. The entry and — while the image is available on
+  no provider — the image get reason `ArtifactConflict` (phase `Failed`), the `VMImage`
+  gets one `Warning` event `ImageArtifactConflict` when the state changes, the VM is held
+  (`WaitingForDependencies`) and retried every 5 minutes. VirtRigaud never adopts,
+  overwrites or deletes that artifact: an operator must investigate and remove it. The
+  message names only the requesting image's own artifact; who else prepared it is in the
+  provider's log only.
+- **In progress.** When the artifact is still being imported for the same `VMImage` by
+  another request (for example through another Provider that shares the image location),
+  the create waits and is retried every 30 seconds; the entry records when the wait began.
+  This answer does not count toward the Provider's circuit breaker. If the wait lasts
+  longer than `max(2 × spec.prepare.timeout, 2h)` — the bound after which a provider
+  treats an unfinished artifact as abandoned and imports it again — the entry says the
+  other prepare may be stuck, the image gets reason `ArtifactPrepareStalled` (while it is
+  available on no provider), and the `VMImage` gets one `Warning` event
+  `ImageArtifactPrepareStalled`.
+- **Provider messages.** The provider's detail in these messages (a rejected source, a
+  conflict, a failed import) follows a message of the manager's own, with URL userinfo
+  removed, control characters replaced and a 256-byte cap: a shared `VMImage`'s status and
+  events are read in other namespaces too.
+- **A re-created `VMImage`** (deleted and created again under the same name) has a new
+  UID, so it gets a new artifact and never inherits its predecessor's. A reconcile that
+  read the deleted object never records anything on its successor.
+- **Metric.** The manager counts every identity prepare outcome in
+  `virtrigaud_image_prepare_artifact_total{provider_type, outcome}` with `outcome` one of
+  `created`, `reused`, `in_progress` and `conflict` (the confirmation of a Provider's own
+  completed asynchronous import is not counted again). Alert on a rising `conflict`.
+
+**Provider support.** Of the providers, only the mock reports
+`supportsImageArtifactIdentity` so far. vSphere, libvirt and Proxmox report it once their
+ADR-0009 slices land; ADR-0009 makes those slices part of the same release. Until
+a provider reports it, import-style images (`ovaURL`, a libvirt `url`, an `http` source)
+are held on it with `ProviderLacksArtifactIdentity`; reference-style images and VMs that
+exist are unaffected. A VM re-created because it vanished from its hypervisor counts as a
+create and is held too.
+
+**After the upgrade**, the first create for each image and image location finds an entry
+without a `sourceDigest` and prepares the image once more, under its new name — one
+re-import per image and location. The artifact prepared by an earlier release (under the
+bare name) is left untouched on the hypervisor.
+
+**Multi-tenant setups.** Providers that resolve to the same image location (the same
+vSphere import folder, libvirt pool directory, or Proxmox storage) share one artifact per
+image and source; each re-checks the stamp through its own credentials before reusing it.
+The trust boundary is write access to that location, so give each tenant's Provider its own
+import location and scope its hypervisor account to it.
 
 The source digest follows ADR-0009's Q7 rule, "location yes, transport no". It covers
 every `spec.source` field that says what the image is or where it is placed: URLs and
@@ -156,6 +252,10 @@ provider:
 | `Fail` | Do **not** prepare; record `Ready=False` / `Phase=Failed` on the `VMImage` and hold the VM (it will not be created until the image is prepared out of band). |
 | `Wait` | Do **not** prepare; record `Ready=False` / `Phase=Pending` and hold, waiting for an out-of-band preparer. |
 
+Under `Fail` and `Wait`, only an entry prepared for the current `spec.source` counts as
+prepared, and one recorded without a `sourceDigest` holds creates with reason
+`SourceDigestMissing` (see [Prepared-image artifact identity](#prepared-image-artifact-identity)).
+
 ## `VMImage.status` fields you will see
 
 ```bash
@@ -165,13 +265,18 @@ kubectl get vmimage <name> -o yaml | yq '.status'
 
 | Field | Meaning |
 |-------|---------|
-| `status.phase` | `Importing` while a prepare is in flight, `Ready` once prepared, `Failed`/`Pending` for `onMissing: Fail`/`Wait` holds. |
+| `status.phase` | `Importing` while a prepare is in flight, `Ready` once prepared, `Failed`/`Pending` for `onMissing: Fail`/`Wait` holds, `Failed` for an artifact conflict, a rejected source, a failed import or an unconfirmed answer, `Pending` while a Provider lacks artifact identity or a stalled wait, `Importing` while waiting for an artifact another request prepares. |
 | `status.ready` | `true` once the image is available on **at least one** provider (the OR across providers). A prepare in flight on one provider does not clear it while the image is available on another. |
 | `status.availableOn` | The providers the image is prepared on, as `<namespace>/<name>` (the `Providers` print column). |
-| `status.providerStatus["<namespace>/<name>"]` | Per-provider truth, keyed by the Provider's identity: `available`, `providerUID` (the Provider object it was recorded through), `taskRef` (an in-flight async prepare on that Provider), `sourceDigest` (the digest of the `spec.source` the entry was prepared for, `sha256:<64 hex>`; ADR-0009, not written yet), plus the provider-specific `id`/`path`/`message`/`lastUpdated`. See [Prepare state is per Provider](#prepare-state-is-per-provider). |
+| `status.providerStatus["<namespace>/<name>"]` | Per-provider truth, keyed by the Provider's identity: `available`, `providerUID` (the Provider object it was recorded through), `taskRef` (an in-flight async prepare on that Provider), `sourceDigest` (the digest of the `spec.source` the entry was prepared for — or its in-flight task prepares — `sha256:<64 hex>`, as confirmed by the provider's artifact stamp; an entry is used only while it equals the current digest), plus the provider-specific `id`/`path`/`message`/`lastUpdated`. See [Prepare state is per Provider](#prepare-state-is-per-provider) and [Prepared-image artifact identity](#prepared-image-artifact-identity). |
 | `status.prepareTaskRef` | Deprecated and no longer written; a value left by an earlier release is cleared. |
 | `status.lastPrepareTime` | When the last prepare was triggered/completed. |
-| `status.conditions` | `Ready` and `Importing` conditions with reasons (`Importing`, `Prepared`, `MissingOnProvider`, `WaitingForImage`, `InvalidSource`, `PrepareStateDropped`, `ProviderUIDMissing`). |
+| `status.conditions` | `Ready` and `Importing` conditions with reasons (`Importing`, `Prepared`, `MissingOnProvider`, `WaitingForImage`, `InvalidSource`, `PrepareStateDropped`, `ProviderUIDMissing`, `SourceDigestMissing`, `ProviderLacksArtifactIdentity`, `ArtifactConflict`, `ArtifactNotConfirmed`, `ImportFailed`, `ArtifactPrepareStalled`). |
+
+`status.ready` and `status.availableOn` record where the image was prepared; after a
+`spec.source` change they keep listing the Providers it was prepared on for the previous
+source until the next create re-prepares it there, and a VM is never created from such an
+entry.
 
 Status never contains secrets — only provider ids/paths/messages.
 

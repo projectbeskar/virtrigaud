@@ -38,6 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
+	"github.com/projectbeskar/virtrigaud/internal/imageartifact"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
 	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
@@ -68,6 +69,32 @@ const (
 	// Prepare.OnMissing (Fail, Wait) forbids the prepare that would re-validate
 	// it.
 	imageReasonProviderUIDMissing = "ProviderUIDMissing"
+	// imageReasonSourceDigestMissing marks a VM create held because the
+	// Provider's entry is available but records no sourceDigest (it was
+	// prepared by an earlier release), and Prepare.OnMissing (Fail, Wait)
+	// forbids the prepare that would re-validate it (ADR-0009 D8).
+	imageReasonSourceDigestMissing = "SourceDigestMissing"
+	// imageReasonProviderLacksArtifactIdentity marks a VM create held because
+	// the Provider supports image import but does not report prepared-image
+	// artifact identity; no prepare is sent to it (ADR-0009 D7).
+	imageReasonProviderLacksArtifactIdentity = "ProviderLacksArtifactIdentity"
+	// imageReasonArtifactConflict marks a VM create held because the provider
+	// found an artifact at the name derived for this VMImage and its source
+	// that was not prepared for this VMImage, and refused to use or replace it
+	// (ADR-0009 D4).
+	imageReasonArtifactConflict = "ArtifactConflict"
+	// imageReasonArtifactNotConfirmed marks a VM create held because the
+	// provider answered a prepare without confirming the requested identity
+	// (ADR-0009 D7); the prepare is sent again after a growing backoff.
+	imageReasonArtifactNotConfirmed = "ArtifactNotConfirmed"
+	// imageReasonImportFailed marks a VM create held because an asynchronous
+	// import ended in failure; the prepare is sent again after a growing
+	// backoff.
+	imageReasonImportFailed = "ImportFailed"
+	// imageReasonArtifactPrepareStalled marks a VM create that has waited
+	// longer than the ADR-0009 abandonment bound for an artifact another
+	// request is preparing.
+	imageReasonArtifactPrepareStalled = "ArtifactPrepareStalled"
 )
 
 // eventReasonImagePrepareStateAccepted is the Warning event recorded on a VM
@@ -79,6 +106,31 @@ const (
 // current UID recorded.
 const eventReasonImagePrepareStateAccepted = "ImagePrepareStateAccepted"
 
+// eventReasonImageArtifactConflict is the Warning event recorded on a VMImage
+// when a Provider's entry changes to the ArtifactConflict hold (ADR-0009 D11):
+// once per change of state, not on every retry.
+const eventReasonImageArtifactConflict = "ImageArtifactConflict"
+
+// eventReasonImageArtifactPrepareStalled is the Warning event recorded on a
+// VMImage when a Provider's wait for an artifact another request is preparing
+// exceeds the ADR-0009 abandonment bound: once per change of state.
+const eventReasonImageArtifactPrepareStalled = "ImageArtifactPrepareStalled"
+
+// imageArtifactStallFloor is the minimum of the ADR-0009 D4 staleness bound,
+// max(2 × spec.prepare.timeout, 2h).
+const imageArtifactStallFloor = 2 * time.Hour
+
+// imageArtifactStallBound returns the ADR-0009 D4 staleness bound of
+// vmImage: max(2 × spec.prepare.timeout, 2h). A wait for an artifact another
+// request is preparing that lasts longer is reported as stalled.
+func imageArtifactStallBound(vmImage *infravirtrigaudiov1beta1.VMImage) time.Duration {
+	bound := imageArtifactStallFloor
+	if p := vmImage.Spec.Prepare; p != nil && p.Timeout != nil && 2*p.Timeout.Duration > bound {
+		bound = 2 * p.Timeout.Duration
+	}
+	return bound
+}
+
 // errImagePrepareHold is a sentinel returned by EnsureImageOnProvider when the
 // image is not (yet) prepared and the VM must NOT proceed to create — for
 // example when Prepare.OnMissing is Fail or Wait. reconcileVM translates it into
@@ -88,23 +140,81 @@ const eventReasonImagePrepareStateAccepted = "ImagePrepareStateAccepted"
 var errImagePrepareHold = errors.New("image prepare: holding VM create")
 
 // errImageCRDOutdated is the hold (errors.Is errImagePrepareHold) returned while
-// the installed VMImage CRD cannot record per-Provider prepare state
+// the installed CRDs cannot record or read per-Provider prepare state
 // (VMImageCRDFeatureReporter). No provider is called and the VMImage status is
 // not written.
-var errImageCRDOutdated = fmt.Errorf("%w: the installed VMImage CRD lacks status.providerStatus[].providerUID and taskRef; "+
-	"upgrade the CRDs", errImagePrepareHold)
+var errImageCRDOutdated = fmt.Errorf("%w: the installed CRDs lack VMImage status.providerStatus[].providerUID, taskRef "+
+	"or sourceDigest, or Provider status.reportedCapabilities.supportsImageArtifactIdentity; upgrade the CRDs", errImagePrepareHold)
+
+// errImageArtifactNotConfirmed is returned (wrapped) when a provider answered
+// an image prepare without confirming the requested identity (ADR-0009 D7):
+// no artifact stamp in the answer (a provider older than ADR-0009, one whose
+// reported capability is stale, or deprecated legacy mode), or one for another
+// VMImage UID or source digest. Such an answer is never recorded, so no VM is
+// created from it.
+var errImageArtifactNotConfirmed = errors.New("the provider did not confirm the prepared image's identity " +
+	"(no artifact stamp for this VMImage and its spec.source); the answer is not used")
 
 // imageCRDOutdatedRequeueAfter re-checks a create held on errImageCRDOutdated.
 // The CRD changes only with an upgrade, and the feature checker re-reads it
 // once a minute.
 const imageCRDOutdatedRequeueAfter = 30 * time.Second
 
-// VMImageCRDFeatureReporter reports whether the installed VMImage CRD lacks the
-// per-Provider prepare-state fields (status.providerStatus[].providerUID and
-// taskRef). *VMCRDFeatureChecker implements it.
+// imageArtifactIdentityHoldRequeueAfter re-checks a create held because its
+// Provider does not report artifact identity. It clears only when the
+// provider is upgraded and its Provider reports the capability.
+const imageArtifactIdentityHoldRequeueAfter = 30 * time.Second
+
+// imageArtifactConflictRequeueAfter re-tries a create held on an artifact
+// conflict. Only an operator can clear it (ADR-0009 D11).
+const imageArtifactConflictRequeueAfter = 5 * time.Minute
+
+// imageArtifactInProgressRequeueAfter re-tries a create whose artifact is
+// still being prepared by another request: every retry is a prepare call
+// (the provider probes its image location), so it is slower than the poll of
+// a task this Provider owns.
+const imageArtifactInProgressRequeueAfter = 30 * time.Second
+
+// imageHoldError is a hold (errors.Is(err, errImagePrepareHold)) that carries
+// the interval after which the held create is retried.
+type imageHoldError struct {
+	// msg says why the create is held; it is shown on the VM.
+	msg string
+	// requeueAfter is when to retry; 0 uses imagePrepareRequeueAfter.
+	requeueAfter time.Duration
+	// cause, when set, is what the hold is about (errors.Is/As reach it).
+	cause error
+}
+
+// Error implements error.
+func (e *imageHoldError) Error() string { return errImagePrepareHold.Error() + ": " + e.msg }
+
+// Is makes errors.Is(err, errImagePrepareHold) true.
+func (e *imageHoldError) Is(target error) bool { return target == errImagePrepareHold }
+
+// Unwrap returns the cause of the hold.
+func (e *imageHoldError) Unwrap() error { return e.cause }
+
+// imageHoldRequeueAfter returns when to retry a create held on err (a hold).
+func imageHoldRequeueAfter(err error) time.Duration {
+	var hold *imageHoldError
+	switch {
+	case errors.As(err, &hold) && hold.requeueAfter > 0:
+		return hold.requeueAfter
+	case errors.Is(err, errImageCRDOutdated):
+		return imageCRDOutdatedRequeueAfter
+	}
+	return imagePrepareRequeueAfter
+}
+
+// VMImageCRDFeatureReporter reports whether the installed CRDs lack a field
+// image preparation records or reads: VMImage
+// status.providerStatus[].providerUID, taskRef or sourceDigest, or Provider
+// status.reportedCapabilities.supportsImageArtifactIdentity.
+// *VMCRDFeatureChecker implements it.
 type VMImageCRDFeatureReporter interface {
-	// VMImagePrepareStateMissing is true only when the CRD verifiably lacks
-	// them (not when it cannot be read).
+	// VMImagePrepareStateMissing is true only when a CRD verifiably lacks
+	// one of them (not when it cannot be read).
 	VMImagePrepareStateMissing(ctx context.Context) bool
 }
 
@@ -145,8 +255,69 @@ func imageEntryRecordedThrough(ps infravirtrigaudiov1beta1.ProviderImageStatus, 
 	return ps.ProviderUID != "" && ps.ProviderUID == string(provider.UID)
 }
 
+// imageSourceDigest returns the ADR-0009 D2 digest of vmImage's current
+// spec.source (imageartifact.SourceDigest): the identity of the content an
+// entry must have been prepared for to be used.
+func imageSourceDigest(vmImage *infravirtrigaudiov1beta1.VMImage) (string, error) {
+	digest, err := imageartifact.SourceDigest(vmImage.Spec.Source)
+	if err != nil {
+		return "", fmt.Errorf("compute the source digest of VMImage %s/%s: %w", vmImage.Namespace, vmImage.Name, err)
+	}
+	return digest, nil
+}
+
+// imageEntryForSource reports whether the providerStatus entry ps was
+// prepared for the spec.source whose digest is digest (ADR-0009 D8). An entry
+// without a sourceDigest (recorded by an earlier release) is for no source: it
+// is never used, and is prepared again (or held) before a create.
+func imageEntryForSource(ps infravirtrigaudiov1beta1.ProviderImageStatus, digest string) bool {
+	return ps.SourceDigest != "" && ps.SourceDigest == digest
+}
+
+// imagePrepareRequest returns the ADR-0009 D7 identity request that prepares
+// vmImage's current spec.source (whose digest is digest) through provider.
+//
+// TargetName is left EMPTY: the provider derives the artifact name from the
+// identity, and a provider older than ADR-0009 (one whose reported capability
+// is stale) refuses an empty target name instead of importing under a bare
+// name. ImageJSON is the JSON-encoded spec — what the provider-side parsers
+// consume ({"source":{...},"prepare":{...}}) — without
+// spec.consumerNamespaceSelector, which is operator-side policy (which
+// namespaces may use the image), not image data. An empty StorageHint lets
+// the provider pick its default storage.
+//
+// A VMImage without a UID (never the case for an object read from the API
+// server) cannot be prepared: its UID is what the artifact is named and
+// stamped by.
+func imagePrepareRequest(vmImage *infravirtrigaudiov1beta1.VMImage, provider *infravirtrigaudiov1beta1.Provider, digest string) (contracts.ImagePrepareRequest, error) {
+	if vmImage.UID == "" {
+		return contracts.ImagePrepareRequest{}, fmt.Errorf("VMImage %s/%s has no UID; refusing to prepare it without an identity",
+			vmImage.Namespace, vmImage.Name)
+	}
+	imageSpec := vmImage.Spec
+	imageSpec.ConsumerNamespaceSelector = nil
+	imageJSON, err := json.Marshal(imageSpec)
+	if err != nil {
+		return contracts.ImagePrepareRequest{}, fmt.Errorf("marshal VMImage %s/%s spec for prepare: %w", vmImage.Namespace, vmImage.Name, err)
+	}
+	req := contracts.ImagePrepareRequest{
+		ImageJSON:    string(imageJSON),
+		TargetName:   "",
+		StorageHint:  "",
+		Image:        contracts.ObjectIdentity{UID: string(vmImage.UID), Namespace: vmImage.Namespace, Name: vmImage.Name},
+		SourceDigest: digest,
+	}
+	// The Provider identity is informational (the stamp's preparedBy); it is
+	// sent only with its UID, as the transport requires.
+	if provider.UID != "" {
+		req.Provider = contracts.ObjectIdentity{UID: string(provider.UID), Namespace: provider.Namespace, Name: provider.Name}
+	}
+	return req, nil
+}
+
 // EnsureImageOnProvider drives lazy, VM-create-driven image preparation for the
-// image referenced by vm against provider (issue #154, PR-5).
+// image referenced by vm against provider (issue #154, PR-5; ADR-0005 as
+// amended by ADR-0009).
 //
 // It is the single writer of the prepare-related fields of the VMImage status
 // (ProviderStatus[<provider namespace>/<provider name>], Phase, Ready,
@@ -160,14 +331,28 @@ func imageEntryRecordedThrough(ps infravirtrigaudiov1beta1.ProviderImageStatus, 
 //
 // Prepare state is per Provider IDENTITY (imageProviderKey): the VM consults
 // only the entry of the Provider it uses, trusts it only when it was recorded
-// through that Provider object (imageEntryRecordedThrough), and polls only the
-// prepare task recorded in that entry, through that Provider.
+// through that Provider object (imageEntryRecordedThrough) FOR THE CURRENT
+// spec.source (imageEntryForSource, ADR-0009 D8), and polls only the prepare
+// task recorded in that entry, through that Provider.
+//
+// The ADR-0009 D7 gate, in order:
+//  1. the provider instance is not an ImagePreparer, or the Provider does not
+//     advertise SupportsImageImport: fall through unchanged to the
+//     by-reference create (ADR-0005 decision 2);
+//  2. it supports import but does not advertise SupportsImageArtifactIdentity:
+//     hold (ProviderLacksArtifactIdentity), and send nothing;
+//  3. otherwise prepare with the image identity, the source digest and an
+//     EMPTY target name, and record the answer only when its artifact stamp
+//     echo confirms that identity (contracts.ImagePrepareResponse.ConfirmsIdentity).
 //
 // Return contract, consumed by reconcileVM:
 //   - (false, nil):              nothing to do or already prepared — proceed to create.
 //   - (true,  nil):              a prepare is in flight — requeue, do NOT create yet.
-//   - (false, errImagePrepareHold): OnMissing forbids preparing (Fail/Wait) — a
-//     condition is recorded on the VMImage; requeue without creating.
+//   - (false, errImagePrepareHold): the image may not be prepared now (OnMissing
+//     Fail/Wait, a Provider without artifact identity, an artifact conflict, an
+//     artifact another request is preparing, a failed import or an unconfirmed
+//     answer backing off, an outdated CRD) — requeue without creating
+//     (imageHoldRequeueAfter).
 //   - (false, err):              a real error (provider/transport/status) — surface it.
 //
 // The first return value (requeue) is only meaningful when err is nil.
@@ -198,7 +383,7 @@ func (r *VirtualMachineReconciler) EnsureImageOnProvider(
 		}
 	}
 
-	// Capability gate — no regression for non-preparing providers. We require
+	// Gate step 1 — no regression for non-preparing providers. We require
 	// BOTH: the provider instance must implement the optional ImagePreparer
 	// capability AND the Provider CR must advertise SupportsImageImport (surfaced
 	// from the GetCapabilities RPC by issue #176). If either is absent we fall
@@ -227,11 +412,18 @@ func (r *VirtualMachineReconciler) EnsureImageOnProvider(
 	key := imageProviderKey(provider)
 	entry, found := vmImage.Status.ProviderStatus[key]
 	recordedThrough := found && imageEntryRecordedThrough(entry, provider)
+	digest, err := imageSourceDigest(vmImage)
+	if err != nil {
+		return false, err
+	}
+	forSource := found && imageEntryForSource(entry, digest)
 
-	// Idempotency — already prepared through this Provider object. The
-	// provider's own PrepareImage is also idempotent, but short-circuiting here
-	// avoids an RPC and a status write on the steady-state reconcile.
-	if recordedThrough && entry.Available {
+	// Idempotency — already prepared through this Provider object, for the
+	// current spec.source. The provider's own PrepareImage is also idempotent,
+	// but short-circuiting here avoids an RPC and a status write on the
+	// steady-state reconcile. An entry prepared for another spec.source (or for
+	// none: recorded by an earlier release) never satisfies it (ADR-0009 D8).
+	if recordedThrough && entry.Available && forSource {
 		logger.V(1).Info("Image already prepared on provider; proceeding to create",
 			"provider", key, "image", vmImage.Name)
 		return false, nil
@@ -243,8 +435,9 @@ func (r *VirtualMachineReconciler) EnsureImageOnProvider(
 	// or convert, so it is "available" by construction. Proceed straight to create
 	// using the source as-is, even when Prepare.OnMissing=Fail, rather than holding
 	// the VM for a prepare that need not (and will not) happen (issue #227). The
-	// by-reference create path already consumes these directly — see
-	// overrideImageWithPreparedLocation's fallback — and a wrong path/template
+	// by-reference create path already consumes these directly — an entry left
+	// from an earlier import-style source does not match this source's digest, so
+	// overrideImageWithPreparedLocation ignores it — and a wrong path/template
 	// still fails honestly at create time, which is where a missing backing
 	// artifact belongs.
 	if !imageSourceNeedsPrepare(vmImage) {
@@ -254,89 +447,56 @@ func (r *VirtualMachineReconciler) EnsureImageOnProvider(
 	}
 
 	// Every step below reads or writes the per-Provider prepare state. An
-	// installed VMImage CRD older than the manager prunes providerUID and
-	// taskRef, so no entry would ever be trusted and every asynchronous prepare
-	// would be issued again on each reconcile. Hold (no provider call, no status
-	// write) until the CRD is upgraded; the CRD feature checker also fails the
-	// manager's readiness meanwhile.
+	// installed VMImage CRD older than the manager prunes providerUID, taskRef
+	// and sourceDigest, so no entry would ever be trusted and every
+	// asynchronous prepare would be issued again on each reconcile; a Provider
+	// CRD without supportsImageArtifactIdentity would make every Provider look
+	// like one without artifact identity. Hold (no provider call, no status
+	// write) until the CRDs are upgraded; the CRD feature checker also fails
+	// the manager's readiness meanwhile.
 	if r.ImageCRDFeatures != nil && r.ImageCRDFeatures.VMImagePrepareStateMissing(ctx) {
-		logger.Info("Holding image prepare: the installed VMImage CRD lacks status.providerStatus[].providerUID/taskRef; upgrade the CRDs",
+		logger.Info("Holding image prepare: the installed CRDs lack the per-Provider prepare state fields; upgrade the CRDs",
 			"provider", key, "image", vmImage.Name)
 		return false, errImageCRDOutdated
 	}
 
-	// An entry for this identity that was NOT recorded through this Provider
-	// object: the Provider was deleted and re-created under the same namespace
-	// and name (a different UID), or the entry records no UID (migrated from an
-	// earlier release, or written out of band without one). What it says was
-	// prepared is not assumed. Under OnMissing=Import the prepare below
-	// re-validates it: PrepareImage is idempotent on every provider, so it
-	// confirms the artifact through THIS Provider (or re-creates it) and
-	// records its UID. OnMissing Fail and Wait forbid that prepare:
-	//   - an entry recorded through a previous object of this Provider (a
-	//     non-empty, different UID) is accepted with a warning and the current
-	//     UID recorded — as for a VM's bound Provider (#341), the same namespace
-	//     owns the old and the new Provider;
-	//   - an entry with no UID cannot be tied to any Provider object, so it is
-	//     never trusted: the create is held with reason ProviderUIDMissing,
-	//     telling the image's owner to switch spec.prepare.onMissing to Import
-	//     so this controller re-validates it through the Provider. It never asks
-	//     anyone to write VMImage status: this controller is its single writer
-	//     (ADR-0005). Only creates wait on this: a VM that exists never prepares
-	//     its image.
-	stale := found && !recordedThrough
-	if stale && entry.Available && imageMissingAction(vmImage) != infravirtrigaudiov1beta1.ImageMissingActionImport {
-		if entry.ProviderUID == "" {
-			logger.Info("Holding VM create: prepare state without a Provider UID, and Prepare.OnMissing forbids re-validating it",
-				"provider", key, "image", vmImage.Name, "onMissing", string(imageMissingAction(vmImage)))
-			return false, r.holdImage(ctx, vmImage, imageMissingAction(vmImage), imageReasonProviderUIDMissing, fmt.Sprintf(
-				"status.providerStatus[%q] is available but records no providerUID, so it cannot be tied to that Provider "+
-					"and is not used; set spec.prepare.onMissing to Import so the controller re-validates it through "+
-					"the Provider", key))
-		}
-		logger.Info("WARNING: accepting prepare state recorded through a previous object of this Provider; "+
-			"Prepare.OnMissing forbids the prepare that would re-validate it",
-			"provider", key, "image", vmImage.Name, "recordedUID", entry.ProviderUID, "providerUID", string(provider.UID),
-			"onMissing", string(imageMissingAction(vmImage)))
-		r.recordEvent(vm, corev1.EventTypeWarning, eventReasonImagePrepareStateAccepted, fmt.Sprintf(
-			"VMImage %s/%s: accepted prepare state for Provider %s recorded through a previous object of it (uid %s, now %s); "+
-				"spec.prepare.onMissing=%s forbids re-validating it",
-			vmImage.Namespace, vmImage.Name, key, entry.ProviderUID, provider.UID, imageMissingAction(vmImage)))
-		if werr := r.acceptImageEntry(ctx, vmImage, provider); werr != nil {
-			return false, werr
-		}
-		return false, nil
+	// Honor OnMissing. Fail and Wait never prepare: they use an entry that is
+	// already there, or hold.
+	if action := imageMissingAction(vmImage); action != infravirtrigaudiov1beta1.ImageMissingActionImport {
+		return false, r.ensureImageWithoutPrepare(ctx, vm, vmImage, provider, action, digest)
 	}
 
-	// Honor OnMissing. Default (and explicit Import) prepares. Fail records a
-	// terminal-ish condition and holds; Wait holds pending an out-of-band
-	// preparer without erroring. Both return errImagePrepareHold so reconcileVM
-	// requeues instead of creating.
-	switch action := imageMissingAction(vmImage); action {
-	case infravirtrigaudiov1beta1.ImageMissingActionFail:
-		logger.Info("VMImage Prepare.OnMissing=Fail and image not prepared on provider; not preparing",
+	// Gate step 2 (ADR-0009 D7): a provider that imports images but does not
+	// name, stamp and verify its artifacts by the VMImage's identity could
+	// hand this VMImage an artifact another VMImage (another tenant's, even)
+	// prepared under the same bare name. Nothing is sent to it: the create is
+	// held until the provider is upgraded.
+	if !providerAdvertisesImageArtifactIdentity(provider) {
+		logger.Info("Holding image prepare: the Provider supports image import but not prepared-image artifact identity; upgrade the provider",
 			"provider", key, "image", vmImage.Name)
-		return false, r.holdImage(ctx, vmImage, action, imageReasonMissingOnProvider,
-			fmt.Sprintf("image not available on provider %q and Prepare.OnMissing=Fail", key))
-	case infravirtrigaudiov1beta1.ImageMissingActionWait:
-		logger.Info("VMImage Prepare.OnMissing=Wait and image not prepared on provider; waiting (not preparing)",
-			"provider", key, "image", vmImage.Name)
-		return false, r.holdImage(ctx, vmImage, action, imageReasonWaitingForImage,
-			fmt.Sprintf("image not available on provider %q; waiting (Prepare.OnMissing=Wait)", key))
+		return false, r.holdProviderLacksArtifactIdentity(ctx, vmImage, provider)
 	}
 
 	// Poll this Provider's own outstanding prepare task, through this Provider.
 	// A task recorded through another Provider object is never polled: a task
 	// ID means nothing to a different provider backend, and its completion
-	// proves nothing about this one. The prepare is issued again instead.
+	// proves nothing about this one. Nor is a task started for an earlier
+	// spec.source: it prepares other content. The prepare is issued again
+	// instead.
+	backoffKey := imagePrepareBackoffKey(vmImage, provider, digest)
+	completedTask := ""
 	if found && entry.TaskRef != "" {
-		if !recordedThrough {
+		switch {
+		case !recordedThrough:
 			logger.Info("Discarding an image prepare task recorded through another Provider object; preparing again",
 				"provider", key, "image", vmImage.Name, "taskRef", entry.TaskRef,
 				"recordedUID", entry.ProviderUID, "providerUID", string(provider.UID))
-		} else {
+		case !forSource:
+			logger.Info("Discarding an image prepare task started for an earlier spec.source; preparing the current one",
+				"provider", key, "image", vmImage.Name, "taskRef", entry.TaskRef)
+		default:
 			done, terr := providerInstance.IsTaskComplete(ctx, entry.TaskRef)
-			if terr != nil {
+			if terr != nil && !done {
 				return false, fmt.Errorf("check image prepare task %s on provider %s: %w", entry.TaskRef, key, terr)
 			}
 			if !done {
@@ -347,43 +507,42 @@ func (r *VirtualMachineReconciler) EnsureImageOnProvider(
 				}
 				return true, nil
 			}
-			// Task completed — flip Available=true and let create proceed. The
-			// prepared location (id/path) was already stamped at trigger time,
-			// so a nil location preserves it. If a newer prepare replaced this
-			// task meanwhile, nothing is recorded: requeue to poll that one.
-			logger.Info("Image prepare task completed",
-				"provider", key, "image", vmImage.Name, "taskRef", entry.TaskRef)
-			applied, werr := r.markImagePrepared(ctx, vmImage, provider, nil, entry.TaskRef)
-			if werr != nil {
-				return false, werr
+			if terr != nil {
+				// The import failed: record why, and send the prepare again
+				// only after a growing backoff — a source that always fails
+				// must not be downloaded again on every task end.
+				return false, r.recordImageImportFailed(ctx, vmImage, provider, entry.TaskRef, backoffKey, digest, terr)
 			}
-			return !applied, nil
+			// The task completed. Its end does not prove the artifact
+			// (ADR-0009 D7): the prepare is sent again — it is idempotent —
+			// and only its confirmed stamp echo is recorded.
+			logger.Info("Image prepare task completed; confirming the prepared artifact",
+				"provider", key, "image", vmImage.Name, "taskRef", entry.TaskRef)
+			completedTask = entry.TaskRef
 		}
 	}
-	if stale && entry.Available {
-		logger.Info("Re-validating prepare state that was not recorded through this Provider object",
-			"provider", key, "image", vmImage.Name, "recordedUID", entry.ProviderUID, "providerUID", string(provider.UID))
+	// After a failed import or an unconfirmed answer, the prepare waits for
+	// its backoff. The confirmation of a completed task does not: it only
+	// reads what the task produced.
+	if completedTask == "" {
+		if hold := r.imagePrepareBackoffHold(vmImage, provider, entry, found, digest, backoffKey); hold != nil {
+			logger.V(1).Info("Image prepare backing off after a failure", "provider", key, "image", vmImage.Name,
+				"reason", hold.Error())
+			return false, hold
+		}
+	}
+	if found && entry.Available && (!recordedThrough || !forSource) {
+		logger.Info("Re-validating prepare state that was not recorded through this Provider object for the current spec.source",
+			"provider", key, "image", vmImage.Name, "recordedUID", entry.ProviderUID, "providerUID", string(provider.UID),
+			"digestRecorded", entry.SourceDigest != "")
 	}
 
-	// Trigger a prepare. ImageJSON is the JSON-encoded VMImage spec — exactly
-	// what the provider-side parsers consume ({"source":{...},"prepare":{...}}).
-	// TargetName is the VMImage name; an empty StorageHint lets the provider pick
-	// its default storage (datastore / pool / Proxmox storage).
-	//
-	// spec.consumerNamespaceSelector is operator-side policy (which namespaces
-	// may use the image), not image data: it is never sent to a provider.
-	imageSpec := vmImage.Spec
-	imageSpec.ConsumerNamespaceSelector = nil
-	imageJSON, jerr := json.Marshal(imageSpec)
-	if jerr != nil {
-		return false, fmt.Errorf("marshal VMImage %s spec for prepare: %w", vmImage.Name, jerr)
+	// Gate step 3: prepare with the identity.
+	req, err := imagePrepareRequest(vmImage, provider, digest)
+	if err != nil {
+		return false, err
 	}
-
-	res, perr := r.prepareImageOnce(ctx, ip, vmImage, provider, contracts.ImagePrepareRequest{
-		ImageJSON:   string(imageJSON),
-		TargetName:  vmImage.Name,
-		StorageHint: "",
-	})
+	res, perr := r.prepareImageOnce(ctx, ip, vmImage, provider, req, completedTask)
 	if perr != nil {
 		return false, perr
 	}
@@ -394,27 +553,143 @@ func (r *VirtualMachineReconciler) EnsureImageOnProvider(
 	return res.inFlight, nil
 }
 
-// issueImagePrepare sends req through ip and records the outcome in
-// provider's ProviderStatus entry: a rejected source (InvalidSpec), an
-// asynchronous prepare's task (inFlight=true) or a completed prepare's
-// location. It runs inside prepareImageOnce, so concurrent reconciles of one
-// (image, Provider object) issue ONE call and ONE status write between them.
+// ensureImageWithoutPrepare handles a VM create when Prepare.OnMissing
+// (action: Fail or Wait) forbids the prepare. It returns nil when the create
+// may proceed from provider's entry, and otherwise a hold (errImagePrepareHold)
+// recorded on the VMImage.
+//
+// An available entry for provider that is not usable as is:
+//   - records no providerUID: it cannot be tied to any Provider object, so it
+//     is never trusted (reason ProviderUIDMissing);
+//   - records no sourceDigest (prepared by an earlier release): it cannot be
+//     matched to spec.source, so it is never used (reason SourceDigestMissing,
+//     ADR-0009 D8);
+//   - records another sourceDigest: the image is not prepared for the current
+//     spec.source, which is the normal Fail/Wait case;
+//   - was prepared for the current spec.source through a previous object of
+//     this Provider (another, non-empty UID): it is accepted with a warning
+//     event and the current UID recorded — as for a VM's bound Provider
+//     (#341), the same namespace owns the old and the new Provider.
+//
+// Each hold message tells the image's owner to set spec.prepare.onMissing to
+// Import, so this controller re-validates the entry through the Provider. None
+// ever asks anyone to write VMImage status: this controller is its single
+// writer (ADR-0005). Only creates wait on this: a VM that exists never
+// prepares its image.
+func (r *VirtualMachineReconciler) ensureImageWithoutPrepare(
+	ctx context.Context,
+	vm *infravirtrigaudiov1beta1.VirtualMachine,
+	vmImage *infravirtrigaudiov1beta1.VMImage,
+	provider *infravirtrigaudiov1beta1.Provider,
+	action infravirtrigaudiov1beta1.ImageMissingAction,
+	digest string,
+) error {
+	logger := log.FromContext(ctx)
+	key := imageProviderKey(provider)
+	entry, found := vmImage.Status.ProviderStatus[key]
+	otherSource := ""
+	if found && entry.Available {
+		switch {
+		case entry.ProviderUID == "":
+			logger.Info("Holding VM create: prepare state without a Provider UID, and Prepare.OnMissing forbids re-validating it",
+				"provider", key, "image", vmImage.Name, "onMissing", string(action))
+			return r.holdImage(ctx, vmImage, action, imageReasonProviderUIDMissing, fmt.Sprintf(
+				"status.providerStatus[%q] is available but records no providerUID, so it cannot be tied to that Provider "+
+					"and is not used; set spec.prepare.onMissing to Import so the controller re-validates it through "+
+					"the Provider", key))
+		case entry.SourceDigest == "":
+			logger.Info("Holding VM create: prepare state without a source digest, and Prepare.OnMissing forbids re-validating it",
+				"provider", key, "image", vmImage.Name, "onMissing", string(action))
+			return r.holdImage(ctx, vmImage, action, imageReasonSourceDigestMissing, fmt.Sprintf(
+				"status.providerStatus[%q] is available but records no sourceDigest (it was prepared by an earlier "+
+					"release), so it cannot be matched to spec.source and is not used; set spec.prepare.onMissing to "+
+					"Import so the controller re-validates it through the Provider", key))
+		case entry.SourceDigest != digest:
+			otherSource = " for the current spec.source (it was prepared for an earlier one)"
+		case !imageEntryRecordedThrough(entry, provider):
+			logger.Info("WARNING: accepting prepare state recorded through a previous object of this Provider; "+
+				"Prepare.OnMissing forbids the prepare that would re-validate it",
+				"provider", key, "image", vmImage.Name, "recordedUID", entry.ProviderUID, "providerUID", string(provider.UID),
+				"onMissing", string(action))
+			r.recordEvent(vm, corev1.EventTypeWarning, eventReasonImagePrepareStateAccepted, fmt.Sprintf(
+				"VMImage %s/%s: accepted prepare state for Provider %s recorded through a previous object of it (uid %s, now %s); "+
+					"spec.prepare.onMissing=%s forbids re-validating it",
+				vmImage.Namespace, vmImage.Name, key, entry.ProviderUID, provider.UID, action))
+			return r.acceptImageEntry(ctx, vmImage, provider)
+		}
+	}
+
+	// Fail records a terminal-ish condition and holds; Wait holds pending an
+	// out-of-band preparer without erroring. Both return errImagePrepareHold so
+	// reconcileVM requeues instead of creating.
+	if action == infravirtrigaudiov1beta1.ImageMissingActionFail {
+		logger.Info("VMImage Prepare.OnMissing=Fail and image not prepared on provider; not preparing",
+			"provider", key, "image", vmImage.Name)
+		return r.holdImage(ctx, vmImage, action, imageReasonMissingOnProvider,
+			fmt.Sprintf("image not available on provider %q%s and Prepare.OnMissing=Fail", key, otherSource))
+	}
+	logger.Info("VMImage Prepare.OnMissing=Wait and image not prepared on provider; waiting (not preparing)",
+		"provider", key, "image", vmImage.Name)
+	return r.holdImage(ctx, vmImage, action, imageReasonWaitingForImage,
+		fmt.Sprintf("image not available on provider %q%s; waiting (Prepare.OnMissing=Wait)", key, otherSource))
+}
+
+// issueImagePrepare sends req (an ADR-0009 identity request) through ip and
+// records the outcome in provider's ProviderStatus entry. It runs inside
+// prepareImageOnce, so concurrent reconciles of one (image, Provider object,
+// source) issue ONE call and ONE status write between them.
+//
+// Outcomes:
+//   - an answer whose stamp echo confirms req's identity: an asynchronous
+//     prepare's task is recorded with the digest (inFlight=true), a completed
+//     prepare's location and digest are recorded as available;
+//   - an answer that does not confirm it: nothing is recorded, and an error
+//     wrapping errImageArtifactNotConfirmed is returned;
+//   - Conflict (a foreign or unproven artifact at the derived name): the
+//     ArtifactConflict hold is recorded, with an event on the VMImage when the
+//     entry changes to it;
+//   - InProgress (another request is preparing the artifact): a hold, nothing
+//     recorded;
+//   - InvalidSpec (the provider rejected the source): recorded on the VMImage.
+//
+// completedTask is the task whose end this call confirms ("" for a fresh
+// prepare): an outcome is recorded only while the entry still records it, so
+// a newer prepare is never overwritten by the confirmation of an older one;
+// inFlight is then true, to poll whatever is recorded.
+//
+// Every outcome is counted in virtrigaud_image_prepare_artifact_total, except
+// the reuse that confirms this Provider's own completed task (its import was
+// counted when it started).
 func (r *VirtualMachineReconciler) issueImagePrepare(
 	ctx context.Context,
 	ip contracts.ImagePreparer,
 	vmImage *infravirtrigaudiov1beta1.VMImage,
 	provider *infravirtrigaudiov1beta1.Provider,
 	req contracts.ImagePrepareRequest,
+	completedTask string,
 ) (inFlight bool, err error) {
 	logger := log.FromContext(ctx)
 	key := imageProviderKey(provider)
-	logger.Info("Triggering image prepare on provider", "provider", key, "image", vmImage.Name)
+	providerType := string(provider.Spec.Type)
+	logger.Info("Triggering image prepare on provider", "provider", key, "image", vmImage.Name,
+		"imageUID", req.Image.UID, "sourceDigest", req.SourceDigest, "confirmingTask", completedTask)
 	resp, perr := ip.PrepareImage(ctx, req)
 	if perr != nil {
-		if contracts.IsInvalidSpec(perr) {
+		switch {
+		case contracts.IsConflict(perr):
+			metrics.RecordImagePrepareArtifactOutcome(providerType, metrics.ImageArtifactOutcomeConflict)
+			return false, r.holdArtifactConflict(ctx, vmImage, provider, perr)
+		case contracts.IsInProgress(perr):
+			metrics.RecordImagePrepareArtifactOutcome(providerType, metrics.ImageArtifactOutcomeInProgress)
+			logger.Info("The prepared image is still being prepared by another request; waiting",
+				"provider", key, "image", vmImage.Name, "detail", sanitizeProviderDetail(perr))
+			return false, r.holdArtifactInProgress(ctx, vmImage, provider)
+		case contracts.IsInvalidSpec(perr):
 			// The provider rejected the image source itself (e.g. a libvirt path
-			// outside its allowed image directories). Record that on the VMImage
-			// so its owner sees WHY, not just the VM; the caller backs off.
+			// outside its allowed image directories), or — a provider older than
+			// ADR-0009 whose reported capability is stale — the empty target
+			// name. Record that on the VMImage so its owner sees WHY, not just
+			// the VM; the caller backs off.
 			if werr := r.markImageSourceRejected(ctx, vmImage, provider, perr); werr != nil {
 				logger.Error(werr, "Failed to record rejected image source on VMImage",
 					"provider", key, "image", vmImage.Name)
@@ -423,30 +698,55 @@ func (r *VirtualMachineReconciler) issueImagePrepare(
 		return false, fmt.Errorf("prepare image %s on provider %s: %w", vmImage.Name, key, perr)
 	}
 
+	// ADR-0009 D7: record nothing the provider did not prove. Only the UID and
+	// digest of the echo are compared; its namespace and name come from the
+	// hypervisor and are never logged or shown.
+	backoffKey := imagePrepareBackoffKey(vmImage, provider, req.SourceDigest)
+	if !resp.ConfirmsIdentity(req) {
+		logger.Error(errImageArtifactNotConfirmed, "Not recording an image prepare answer that does not confirm the requested identity",
+			"provider", key, "image", vmImage.Name, "hasArtifact", resp.Artifact != nil,
+			"uidMatches", resp.Artifact != nil && resp.Artifact.Image.UID == req.Image.UID,
+			"digestMatches", resp.Artifact != nil && resp.Artifact.SourceDigest == req.SourceDigest)
+		return false, r.holdArtifactNotConfirmed(ctx, vmImage, provider, backoffKey)
+	}
+	r.prepareBackoff.clear(backoffKey, backoffNotConfirmed)
+	switch {
+	case !resp.Artifact.Reused:
+		metrics.RecordImagePrepareArtifactOutcome(providerType, metrics.ImageArtifactOutcomeCreated)
+	case completedTask == "":
+		metrics.RecordImagePrepareArtifactOutcome(providerType, metrics.ImageArtifactOutcomeReused)
+	}
+	prepared := preparedLocation{id: resp.PreparedImageID, path: resp.PreparedImagePath, sourceDigest: resp.Artifact.SourceDigest}
+
 	if resp.TaskRef != "" {
-		// Asynchronous prepare — persist the task ref IN THIS PROVIDER'S ENTRY
-		// and requeue to poll it through this Provider. The prepared location
-		// (id/path) is already known at trigger time (issue #154 PR-6 / #214),
-		// so it is stamped now even though Available stays false until the task
-		// completes. This lets the eventual create consume the prepared template
-		// without re-discovering its location.
-		if werr := r.writeImageStatus(ctx, vmImage, func(img *infravirtrigaudiov1beta1.VMImage) {
+		// Asynchronous prepare — persist the task ref and the digest it
+		// prepares IN THIS PROVIDER'S ENTRY and requeue to poll it through this
+		// Provider. The prepared location (id/path) is already known at
+		// trigger time (issue #154 PR-6 / #214), so it is stamped now even
+		// though Available stays false until the task ends and a second call
+		// confirms the artifact.
+		if werr := r.writeImageStatusE(ctx, vmImage, func(img *infravirtrigaudiov1beta1.VMImage) error {
+			if cur := img.Status.ProviderStatus[key]; completedTask != "" && cur.TaskRef != completedTask {
+				return errSkipImageStatusWrite // a newer prepare replaced the task being confirmed
+			}
 			if img.Status.ProviderStatus == nil {
 				img.Status.ProviderStatus = map[string]infravirtrigaudiov1beta1.ProviderImageStatus{}
 			}
 			now := metav1.Now()
 			ps := img.Status.ProviderStatus[key]
-			ps.Available = false // not ready until the task completes
+			ps.Available = false // not ready until the task completes and is confirmed
 			ps.ProviderUID = string(provider.UID)
 			ps.TaskRef = resp.TaskRef
-			ps.ID = resp.PreparedImageID
-			ps.Path = resp.PreparedImagePath
+			ps.SourceDigest = prepared.sourceDigest
+			ps.ID = prepared.id
+			ps.Path = prepared.path
 			ps.LastUpdated = &now
 			ps.Message = "image import in progress"
 			img.Status.ProviderStatus[key] = ps
 			img.Status.AvailableOn = removeString(img.Status.AvailableOn, key)
 			img.Status.LastPrepareTime = &now
 			markImageImporting(img, fmt.Sprintf("importing image into provider %q", key))
+			return nil
 		}); werr != nil {
 			return false, werr
 		}
@@ -456,18 +756,294 @@ func (r *VirtualMachineReconciler) issueImagePrepare(
 		return true, nil
 	}
 
-	// Synchronous prepare (e.g. libvirt/vSphere import-on-call) — stamp
-	// completion immediately, recording the prepared location, and let create
+	// Synchronous prepare (e.g. libvirt/vSphere import-on-call), or the
+	// confirmation of a completed asynchronous one — stamp completion
+	// immediately, recording the prepared location and digest, and let create
 	// proceed.
-	logger.Info("Image prepared synchronously on provider",
-		"provider", key, "image", vmImage.Name,
+	logger.Info("Image prepared on provider",
+		"provider", key, "image", vmImage.Name, "reused", resp.Artifact.Reused,
 		"preparedID", resp.PreparedImageID, "preparedPath", resp.PreparedImagePath)
-	if _, werr := r.markImagePrepared(ctx, vmImage, provider, &preparedLocation{
-		id: resp.PreparedImageID, path: resp.PreparedImagePath,
-	}, ""); werr != nil {
+	applied, werr := r.markImagePrepared(ctx, vmImage, provider, prepared, completedTask)
+	if werr != nil {
 		return false, werr
 	}
-	return false, nil
+	r.prepareBackoff.clear(backoffKey)
+	return !applied, nil
+}
+
+// recordImageImportFailed records that failedTask, provider's asynchronous
+// import of vmImage's current source (digest), ended in failure (cause): the
+// entry keeps no task, records the failure (sanitized) and — as the record
+// of a failed import for this source — the source digest, while it is not
+// available; the image-level condition gets reason ImportFailed while the
+// image is available on no provider. The failure is counted once per task in
+// prepareBackoff, and the hold returned retries when its backoff ends
+// (importFailedBackoff: one minute, doubling, at most 30 minutes). The
+// entry's lastUpdated keeps the first wait after a manager restart
+// (imagePrepareBackoffHold).
+func (r *VirtualMachineReconciler) recordImageImportFailed(
+	ctx context.Context,
+	vmImage *infravirtrigaudiov1beta1.VMImage,
+	provider *infravirtrigaudiov1beta1.Provider,
+	failedTask, backoffKey, digest string,
+	cause error,
+) error {
+	key := imageProviderKey(provider)
+	now := r.now()
+	msg := fmt.Sprintf("the image import on provider %q failed (provider detail: %s)", key, sanitizeProviderDetail(cause))
+	failures, notBefore := r.prepareBackoff.fail(backoffImportFailed, backoffKey, failedTask, msg, importFailedBackoff, now)
+	log.FromContext(ctx).Info("Image prepare task failed; the prepare is sent again after a backoff",
+		"provider", key, "image", vmImage.Name, "taskRef", failedTask, "failures", failures,
+		"retryAt", notBefore, "detail", sanitizeProviderDetail(cause))
+	if err := r.writeImageStatusE(ctx, vmImage, func(img *infravirtrigaudiov1beta1.VMImage) error {
+		ps := img.Status.ProviderStatus[key]
+		if ps.TaskRef != failedTask {
+			return errSkipImageStatusWrite // recorded by a concurrent reconcile, or replaced by a newer prepare
+		}
+		stamp := metav1.NewTime(now)
+		ps.Available = false
+		ps.ProviderUID = string(provider.UID)
+		ps.TaskRef = ""
+		ps.SourceDigest = digest
+		ps.Message = msg
+		ps.LastUpdated = &stamp
+		img.Status.ProviderStatus[key] = ps
+		img.Status.AvailableOn = removeString(img.Status.AvailableOn, key)
+		if !imagePrepareInFlight(img) {
+			meta.SetStatusCondition(&img.Status.Conditions, metav1.Condition{
+				Type:               infravirtrigaudiov1beta1.VMImageConditionImporting,
+				Status:             metav1.ConditionFalse,
+				Reason:             imageReasonImportFailed,
+				Message:            msg,
+				ObservedGeneration: img.Generation,
+			})
+		}
+		if imageAvailableOnAnyProvider(img) {
+			return nil
+		}
+		img.Status.Ready = false
+		img.Status.Phase = infravirtrigaudiov1beta1.ImagePhaseFailed
+		img.Status.Message = msg
+		meta.SetStatusCondition(&img.Status.Conditions, metav1.Condition{
+			Type:               infravirtrigaudiov1beta1.VMImageConditionReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             imageReasonImportFailed,
+			Message:            msg,
+			ObservedGeneration: img.Generation,
+		})
+		return nil
+	}); err != nil {
+		return err
+	}
+	wait := notBefore.Sub(now)
+	return &imageHoldError{
+		msg:          fmt.Sprintf("%s; prepared again in %s (failure %d)", msg, wait.Round(time.Second), failures),
+		requeueAfter: wait,
+	}
+}
+
+// imagePrepareBackoffHold returns the hold of a prepare that must still wait
+// after a failure (nil when it may be sent): an unconfirmed answer or a failed
+// import counted in prepareBackoff, or — after a manager restart, which loses
+// that count — a failed import for the current source recorded on the entry
+// (not available, no task, sourceDigest set: recordImageImportFailed), which
+// waits importFailedBackoff.Base from its lastUpdated.
+func (r *VirtualMachineReconciler) imagePrepareBackoffHold(
+	vmImage *infravirtrigaudiov1beta1.VMImage,
+	provider *infravirtrigaudiov1beta1.Provider,
+	entry infravirtrigaudiov1beta1.ProviderImageStatus,
+	found bool,
+	digest, backoffKey string,
+) error {
+	now := r.now()
+	remaining, msg := r.prepareBackoff.wait(backoffKey, now)
+	if found && imageEntryRecordedThrough(entry, provider) && !entry.Available && entry.TaskRef == "" &&
+		imageEntryForSource(entry, digest) && entry.LastUpdated != nil {
+		if d := entry.LastUpdated.Add(importFailedBackoff.Base).Sub(now); d > remaining {
+			remaining, msg = d, entry.Message
+		}
+	}
+	if remaining <= 0 {
+		return nil
+	}
+	return &imageHoldError{
+		msg:          fmt.Sprintf("%s; prepared again in %s", msg, remaining.Round(time.Second)),
+		requeueAfter: remaining,
+	}
+}
+
+// holdArtifactNotConfirmed records that provider answered a prepare of
+// vmImage without confirming the requested identity (ADR-0009 D7): nothing
+// of the answer is recorded or shown; the entry and — while the image is
+// available on no provider — the image get reason ArtifactNotConfirmed. The
+// failure is counted in prepareBackoff, and the hold returned (errors.Is
+// errImageArtifactNotConfirmed) retries when its backoff ends
+// (notConfirmedBackoff: 30 seconds, doubling, at most 5 minutes); until then
+// no reconcile sends the prepare.
+func (r *VirtualMachineReconciler) holdArtifactNotConfirmed(
+	ctx context.Context,
+	vmImage *infravirtrigaudiov1beta1.VMImage,
+	provider *infravirtrigaudiov1beta1.Provider,
+	backoffKey string,
+) error {
+	key := imageProviderKey(provider)
+	now := r.now()
+	msg := fmt.Sprintf("provider %q answered the image prepare without confirming this VMImage's artifact identity "+
+		"(ADR-0009), so the answer is not used; the provider may be older than the capability it reports", key)
+	failures, notBefore := r.prepareBackoff.fail(backoffNotConfirmed, backoffKey, "", msg, notConfirmedBackoff, now)
+	if _, err := r.markImageEntryHeld(ctx, vmImage, provider, imageReasonArtifactNotConfirmed,
+		infravirtrigaudiov1beta1.ImagePhaseFailed, msg); err != nil {
+		return err
+	}
+	wait := notBefore.Sub(now)
+	return &imageHoldError{
+		msg:          fmt.Sprintf("%s; asked again in %s (failure %d)", msg, wait.Round(time.Second), failures),
+		requeueAfter: wait,
+		cause:        errImageArtifactNotConfirmed,
+	}
+}
+
+// holdArtifactInProgress records that provider answered a prepare of vmImage
+// with "the artifact is still being prepared for this VMImage by another
+// request" (ADR-0009 D4). The first such answer records the wait on the entry
+// (its lastUpdated is when the wait began) and marks the image importing;
+// later ones write nothing until the wait exceeds imageArtifactStallBound
+// (max(2 × spec.prepare.timeout, 2h), the bound after which the provider
+// treats an incomplete artifact as abandoned). The entry then says the other
+// prepare may be stuck, the image-level condition gets reason
+// ArtifactPrepareStalled while the image is available on no provider, and a
+// Warning event ImageArtifactPrepareStalled is recorded on the VMImage once.
+// It returns the hold, retried after imageArtifactInProgressRequeueAfter.
+func (r *VirtualMachineReconciler) holdArtifactInProgress(
+	ctx context.Context,
+	vmImage *infravirtrigaudiov1beta1.VMImage,
+	provider *infravirtrigaudiov1beta1.Provider,
+) error {
+	key := imageProviderKey(provider)
+	uid := string(provider.UID)
+	now := r.now()
+	bound := imageArtifactStallBound(vmImage)
+	waitingMsg := fmt.Sprintf("the image is being prepared at the image location of provider %q by another request; "+
+		"waiting for it", key)
+	stalledMsg := fmt.Sprintf("the image has been being prepared at the image location of provider %q by another "+
+		"request for more than %s; that prepare may be stuck or abandoned (the provider imports again once it is "+
+		"abandoned)", key, bound)
+	stalled, becameStalled := false, false
+	if err := r.writeImageStatusE(ctx, vmImage, func(img *infravirtrigaudiov1beta1.VMImage) error {
+		stalled, becameStalled = false, false
+		ps, found := img.Status.ProviderStatus[key]
+		waiting := found && !ps.Available && ps.TaskRef == "" && ps.ProviderUID == uid && ps.LastUpdated != nil &&
+			(ps.Message == waitingMsg || ps.Message == stalledMsg)
+		if !waiting {
+			if img.Status.ProviderStatus == nil {
+				img.Status.ProviderStatus = map[string]infravirtrigaudiov1beta1.ProviderImageStatus{}
+			}
+			stamp := metav1.NewTime(now)
+			ps.Available = false
+			ps.ProviderUID = uid
+			ps.TaskRef = ""
+			ps.SourceDigest = ""
+			ps.Message = waitingMsg
+			ps.LastUpdated = &stamp
+			img.Status.ProviderStatus[key] = ps
+			img.Status.AvailableOn = removeString(img.Status.AvailableOn, key)
+			markImageImporting(img, waitingMsg)
+			return nil
+		}
+		if now.Sub(ps.LastUpdated.Time) < bound {
+			return errSkipImageStatusWrite
+		}
+		stalled = true
+		if ps.Message == stalledMsg {
+			return errSkipImageStatusWrite
+		}
+		becameStalled = true
+		ps.Message = stalledMsg // lastUpdated keeps when the wait began
+		img.Status.ProviderStatus[key] = ps
+		if imageAvailableOnAnyProvider(img) {
+			return nil
+		}
+		img.Status.Ready = false
+		img.Status.Phase = infravirtrigaudiov1beta1.ImagePhasePending
+		img.Status.Message = stalledMsg
+		meta.SetStatusCondition(&img.Status.Conditions, metav1.Condition{
+			Type:               infravirtrigaudiov1beta1.VMImageConditionReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             imageReasonArtifactPrepareStalled,
+			Message:            stalledMsg,
+			ObservedGeneration: img.Generation,
+		})
+		return nil
+	}); err != nil {
+		return err
+	}
+	if becameStalled && r.Recorder != nil {
+		r.Recorder.Event(vmImage, corev1.EventTypeWarning, eventReasonImageArtifactPrepareStalled, stalledMsg)
+	}
+	msg := waitingMsg
+	if stalled {
+		msg = stalledMsg
+	}
+	return &imageHoldError{msg: msg, requeueAfter: imageArtifactInProgressRequeueAfter}
+}
+
+// holdArtifactConflict records that the provider refused the artifact at the
+// name derived for this VMImage and its spec.source because it was not
+// prepared for this VMImage (ADR-0009 D4; cause is the provider's Conflict).
+// The entry and — while the image is available on no provider — the image
+// get reason ArtifactConflict; a Warning event is recorded on the VMImage
+// when the entry changes to that state. It returns the hold, retried after
+// imageArtifactConflictRequeueAfter: an operator must act.
+//
+// The message is the manager's own, naming only this Provider, followed by
+// the provider's (uniform) refusal, sanitized and length-capped
+// (sanitizeProviderDetail): it names only the requester's artifact, so an
+// operator can find it, and who else prepared it is in the provider's log
+// only (ADR-0009 D11). The event lands in the VMImage's namespace, which may
+// not be the requester's.
+func (r *VirtualMachineReconciler) holdArtifactConflict(
+	ctx context.Context,
+	vmImage *infravirtrigaudiov1beta1.VMImage,
+	provider *infravirtrigaudiov1beta1.Provider,
+	cause error,
+) error {
+	key := imageProviderKey(provider)
+	msg := fmt.Sprintf("provider %q refuses to use or replace an existing artifact at the name derived for this VMImage "+
+		"and its spec.source, because it was not prepared for this VMImage; VirtRigaud never adopts, overwrites "+
+		"or deletes it: an operator must investigate and remove it (provider detail: %s)", key, sanitizeProviderDetail(cause))
+	log.FromContext(ctx).Error(cause, "Holding VM create: prepared-image artifact conflict",
+		"provider", key, "image", vmImage.Name)
+	changed, err := r.markImageEntryHeld(ctx, vmImage, provider, imageReasonArtifactConflict,
+		infravirtrigaudiov1beta1.ImagePhaseFailed, msg)
+	if err != nil {
+		return err
+	}
+	if changed && r.Recorder != nil {
+		r.Recorder.Event(vmImage, corev1.EventTypeWarning, eventReasonImageArtifactConflict, msg)
+	}
+	return &imageHoldError{msg: msg, requeueAfter: imageArtifactConflictRequeueAfter}
+}
+
+// holdProviderLacksArtifactIdentity records that provider supports image
+// import but does not report prepared-image artifact identity, so nothing is
+// sent to it (ADR-0009 D7, gate step 2): the entry and — while the image is
+// available on no provider — the image get reason
+// ProviderLacksArtifactIdentity. It returns the hold, retried after
+// imageArtifactIdentityHoldRequeueAfter.
+func (r *VirtualMachineReconciler) holdProviderLacksArtifactIdentity(
+	ctx context.Context,
+	vmImage *infravirtrigaudiov1beta1.VMImage,
+	provider *infravirtrigaudiov1beta1.Provider,
+) error {
+	key := imageProviderKey(provider)
+	msg := fmt.Sprintf("provider %q supports image import but does not report prepared-image artifact identity "+
+		"(status.reportedCapabilities.supportsImageArtifactIdentity), so this import-style image is not prepared "+
+		"through it; upgrade the provider to a release that supports it (ADR-0009)", key)
+	if _, err := r.markImageEntryHeld(ctx, vmImage, provider, imageReasonProviderLacksArtifactIdentity,
+		infravirtrigaudiov1beta1.ImagePhasePending, msg); err != nil {
+		return err
+	}
+	return &imageHoldError{msg: msg, requeueAfter: imageArtifactIdentityHoldRequeueAfter}
 }
 
 // holdImage records on the VMImage that a VM create is held on a Provider for
@@ -510,9 +1086,8 @@ func (r *VirtualMachineReconciler) holdImage(
 // stops describe, power or reconfigure of a running VM.
 //
 // done is false when the create may proceed. Otherwise res and err are what
-// reconcileVM returns: a refused consumer, a hold (Prepare.OnMissing Fail or
-// Wait, a missing Provider UID, or a VMImage CRD that cannot record
-// per-Provider prepare state), a prepare in flight, or a prepare error.
+// reconcileVM returns: a refused consumer, a hold (see EnsureImageOnProvider),
+// a prepare in flight, or a prepare error.
 func (r *VirtualMachineReconciler) prepareImageForCreate(
 	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
@@ -541,25 +1116,22 @@ func (r *VirtualMachineReconciler) prepareImageForCreate(
 		return true, res, err
 	case errors.Is(perr, errImagePrepareHold):
 		// The prepare may not run now (see errImagePrepareHold); the reason is
-		// recorded on the VMImage (except for an outdated CRD, which is not
-		// written to). Reflect it on the VM and requeue without treating it as
-		// a reconcile error.
+		// recorded on the VMImage (except for an outdated CRD or an artifact
+		// another request is preparing, which are not written to). Reflect it
+		// on the VM and requeue without treating it as a reconcile error.
 		logger.Info("Holding VM create: referenced image is not prepared and may not be prepared now",
 			"image", vmImage.Name, "provider", provider.Name, "reason", perr.Error())
 		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonWaitingForDependencies,
 			fmt.Sprintf("Image %s not prepared on provider %s: %s", vmImage.Name, provider.Name,
 				strings.TrimPrefix(perr.Error(), errImagePrepareHold.Error()+": ")))
 		r.updateStatus(ctx, vm)
-		if errors.Is(perr, errImageCRDOutdated) {
-			return true, ctrl.Result{RequeueAfter: imageCRDOutdatedRequeueAfter}, nil
-		}
-		return true, imageEnsureResultToReconcile(), nil
+		return true, ctrl.Result{RequeueAfter: imageHoldRequeueAfter(perr)}, nil
 	default:
 		reason, requeueAfter := providerFailureOutcome(perr)
 		logger.Error(perr, "Failed to ensure image on provider - will retry",
 			"image", vmImage.Name, "provider", provider.Name, "retryIn", requeueAfter)
 		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, reason,
-			fmt.Sprintf("Image prepare failed: %s", providerErrorMessage(perr)))
+			fmt.Sprintf("Image prepare failed: %s", sanitizeProviderDetail(perr)))
 		metrics.RecordError(errReasonImagePrepare, metrics.ComponentManager)
 		r.updateStatus(ctx, vm)
 		return true, ctrl.Result{RequeueAfter: requeueAfter}, nil
@@ -578,44 +1150,51 @@ type imagePrepareResult struct {
 	status *infravirtrigaudiov1beta1.VMImageStatus
 }
 
-// imagePrepareFlightKey identifies one prepare of vmImage (at its current
-// generation) through one Provider object, for prepareImageOnce.
-func imagePrepareFlightKey(vmImage *infravirtrigaudiov1beta1.VMImage, provider *infravirtrigaudiov1beta1.Provider) string {
-	return fmt.Sprintf("%s/%s@%d|%s|%s", vmImage.Namespace, vmImage.Name, vmImage.Generation,
-		imageProviderKey(provider), provider.UID)
+// imagePrepareFlightKey identifies one prepare of vmImage (this object, at its
+// current generation) for the spec.source whose digest is digest, through one
+// Provider object, for prepareImageOnce.
+func imagePrepareFlightKey(vmImage *infravirtrigaudiov1beta1.VMImage, provider *infravirtrigaudiov1beta1.Provider, digest string) string {
+	return fmt.Sprintf("%s/%s@%s#%d|%s|%s|%s", vmImage.Namespace, vmImage.Name, vmImage.UID, vmImage.Generation,
+		imageProviderKey(provider), provider.UID, digest)
 }
 
 // prepareImageOnce prepares vmImage through provider, de-duplicated within
 // this manager: concurrent reconciles (of different VMs) preparing the same
-// VMImage through the same Provider object share ONE PrepareImage call AND the
-// one status write that records its outcome (issueImagePrepare), so a
-// multi-GB import is never started twice in parallel and the reconciles do
-// not race each other to write the same outcome. The call first re-reads the
-// VMImage and issues nothing when a prepare through this Provider object is
-// already recorded (available, or with a task in flight); since the outcome
-// is recorded before the flight ends, a reconcile arriving after it finds it
-// there. A read error does not block the (idempotent) prepare.
+// VMImage for the same spec.source through the same Provider object share ONE
+// PrepareImage call AND the one status write that records its outcome
+// (issueImagePrepare), so a multi-GB import is never started twice in
+// parallel and the reconciles do not race each other to write the same
+// outcome. The call first re-reads the VMImage and issues nothing when a
+// prepare through this Provider object for req's source digest is already
+// recorded (available, or with a task in flight other than completedTask, the
+// task this call confirms); since the outcome is recorded before the flight
+// ends, a reconcile arriving after it finds it there. A read error does not
+// block the (idempotent) prepare; a VMImage that was deleted and re-created
+// meanwhile is not prepared for its predecessor.
 func (r *VirtualMachineReconciler) prepareImageOnce(
 	ctx context.Context,
 	ip contracts.ImagePreparer,
 	vmImage *infravirtrigaudiov1beta1.VMImage,
 	provider *infravirtrigaudiov1beta1.Provider,
 	req contracts.ImagePrepareRequest,
+	completedTask string,
 ) (imagePrepareResult, error) {
 	logger := log.FromContext(ctx)
 	key := imageProviderKey(provider)
-	v, err, shared := r.imagePrepares.Do(imagePrepareFlightKey(vmImage, provider), func() (any, error) {
+	v, err, shared := r.imagePrepares.Do(imagePrepareFlightKey(vmImage, provider, req.SourceDigest), func() (any, error) {
 		fresh := &infravirtrigaudiov1beta1.VMImage{}
 		if gerr := r.Get(ctx, client.ObjectKeyFromObject(vmImage), fresh); gerr != nil {
 			logger.V(1).Info("Could not re-read the VMImage before preparing it; preparing anyway (idempotent)",
 				"image", vmImage.Name, "error", gerr.Error())
+		} else if err := checkSameImageObject(vmImage, fresh); err != nil {
+			return nil, err
 		} else if ps, ok := fresh.Status.ProviderStatus[key]; ok && imageEntryRecordedThrough(ps, provider) &&
-			(ps.Available || ps.TaskRef != "") {
+			imageEntryForSource(ps, req.SourceDigest) && (ps.Available || (ps.TaskRef != "" && ps.TaskRef != completedTask)) {
 			logger.V(1).Info("Image prepare already recorded for this Provider by a concurrent reconcile",
 				"provider", key, "image", vmImage.Name, "available", ps.Available, "taskRef", ps.TaskRef)
 			return imagePrepareResult{inFlight: !ps.Available, status: &fresh.Status}, nil
 		}
-		inFlight, perr := r.issueImagePrepare(ctx, ip, vmImage, provider, req)
+		inFlight, perr := r.issueImagePrepare(ctx, ip, vmImage, provider, req, completedTask)
 		if perr != nil {
 			return nil, perr
 		}
@@ -634,6 +1213,19 @@ func (r *VirtualMachineReconciler) prepareImageOnce(
 	return res, nil
 }
 
+// checkSameImageObject returns an error when latest, a fresh read of vmImage,
+// is another object: vmImage was deleted and re-created under the same name
+// (a new UID). Prepare state decided for the previous object must never be
+// recorded on — or consumed from — its successor, whose artifacts carry its
+// own UID (ADR-0009 D1). A vmImage without a UID is not checked.
+func checkSameImageObject(vmImage, latest *infravirtrigaudiov1beta1.VMImage) error {
+	if vmImage.UID == "" || latest.UID == vmImage.UID {
+		return nil
+	}
+	return fmt.Errorf("VMImage %s/%s was deleted and re-created (uid %s, now %s); not acting on its predecessor's prepare state",
+		vmImage.Namespace, vmImage.Name, vmImage.UID, latest.UID)
+}
+
 // providerAdvertisesImageImport reports whether the Provider CR advertises the
 // SupportsImageImport capability via its self-reported capabilities
 // (Status.ReportedCapabilities, surfaced from GetCapabilities by issue #176). A
@@ -644,6 +1236,16 @@ func (r *VirtualMachineReconciler) prepareImageOnce(
 func providerAdvertisesImageImport(provider *infravirtrigaudiov1beta1.Provider) bool {
 	caps := provider.Status.ReportedCapabilities
 	return caps != nil && caps.SupportsImageImport
+}
+
+// providerAdvertisesImageArtifactIdentity reports whether the Provider CR
+// advertises SupportsImageArtifactIdentity (ADR-0009 D7): its image prepare
+// names, stamps and verifies each artifact by the VMImage's UID and source
+// digest, and never reuses one by bare name. A nil ReportedCapabilities reads
+// as false, which holds import-style prepares — fail closed.
+func providerAdvertisesImageArtifactIdentity(provider *infravirtrigaudiov1beta1.Provider) bool {
+	caps := provider.Status.ReportedCapabilities
+	return caps != nil && caps.SupportsImageArtifactIdentity
 }
 
 // imageMissingAction returns the effective Prepare.OnMissing action for the
@@ -762,34 +1364,38 @@ func (r *VirtualMachineReconciler) markImagePreparing(
 }
 
 // preparedLocation is where a provider placed a prepared image
-// (ImagePrepareResponse.PreparedImageID / PreparedImagePath).
+// (ImagePrepareResponse.PreparedImageID / PreparedImagePath) and the source
+// digest its confirmed stamp echo carries (ADR-0009 D8).
 type preparedLocation struct {
-	id   string
-	path string
+	id           string
+	path         string
+	sourceDigest string
 }
 
 // markImagePrepared stamps a completed prepare on provider: it records the
-// provider's ProviderStatus entry (keyed by imageProviderKey) as available and
-// recorded through provider's current UID, clears the entry's task ref, adds
-// the key to AvailableOn (deduped), and sets Ready/Phase=Ready. Ready is the OR
-// across providers — any provider having the image Available makes the image
-// Ready — while ProviderStatus/AvailableOn carry the per-provider truth.
+// provider's ProviderStatus entry (keyed by imageProviderKey) as available,
+// recorded through provider's current UID, for loc.sourceDigest, clears the
+// entry's task ref, adds the key to AvailableOn (deduped), and sets
+// Ready/Phase=Ready. Ready is the OR across providers — any provider having
+// the image Available makes the image Ready — while ProviderStatus/AvailableOn
+// carry the per-provider truth.
 //
-// loc is the prepared location returned by PrepareImage, recorded as is so
-// create can consume it instead of re-resolving the source (issue #154 PR-6 /
-// #214). A nil loc keeps the location already recorded — the async trigger
-// stamps it, so the task-completion poll path passes nil.
+// loc is the prepared location and digest of an answer that confirmed the
+// requested identity (ADR-0009 D7), recorded as is so create can consume the
+// location instead of re-resolving the source (issue #154 PR-6 / #214), and
+// only for the spec.source it was prepared for (D8).
 //
 // completedTask, when set, is the task whose completion is being recorded:
 // if the entry meanwhile records a different task (a newer prepare replaced
 // it), nothing is written and applied is false, so the newer task is not
-// cleared and is polled on its own. If another reconcile polling the same task
-// already recorded its completion, nothing is written and applied is true.
+// cleared and is polled on its own. If another reconcile confirming the same
+// task already recorded its completion, nothing is written and applied is
+// true.
 func (r *VirtualMachineReconciler) markImagePrepared(
 	ctx context.Context,
 	vmImage *infravirtrigaudiov1beta1.VMImage,
 	provider *infravirtrigaudiov1beta1.Provider,
-	loc *preparedLocation,
+	loc preparedLocation,
 	completedTask string,
 ) (applied bool, err error) {
 	key := imageProviderKey(provider)
@@ -797,8 +1403,9 @@ func (r *VirtualMachineReconciler) markImagePrepared(
 		applied = false
 		if cur := img.Status.ProviderStatus[key]; completedTask != "" && cur.TaskRef != completedTask {
 			// A newer prepare replaced the task (not applied), or a concurrent
-			// reconcile polling the same task already recorded its completion.
-			applied = cur.Available && cur.TaskRef == "" && cur.ProviderUID == string(provider.UID)
+			// reconcile confirming the same task already recorded its completion.
+			applied = cur.Available && cur.TaskRef == "" && cur.ProviderUID == string(provider.UID) &&
+				imageEntryForSource(cur, loc.sourceDigest)
 			return errSkipImageStatusWrite
 		}
 		applied = true
@@ -810,12 +1417,11 @@ func (r *VirtualMachineReconciler) markImagePrepared(
 		ps.Available = true
 		ps.ProviderUID = string(provider.UID)
 		ps.TaskRef = ""
+		ps.SourceDigest = loc.sourceDigest
+		ps.ID = loc.id
+		ps.Path = loc.path
 		ps.LastUpdated = &now
 		ps.Message = "image prepared"
-		if loc != nil {
-			ps.ID = loc.id
-			ps.Path = loc.path
-		}
 		img.Status.ProviderStatus[key] = ps
 
 		img.Status.AvailableOn = appendDedup(img.Status.AvailableOn, key)
@@ -871,11 +1477,12 @@ func (r *VirtualMachineReconciler) acceptImageEntry(
 
 // markImageSourceRejected records that provider rejected the image source as
 // an invalid specification (a non-retryable InvalidArgument from ImagePrepare,
-// such as a libvirt path outside the provider's allowed image directories). The
-// provider's ProviderStatus entry carries the reason. The image-level
-// Phase/Ready condition flip to Failed/InvalidSource only while the image is not
-// available on ANY provider, so a rejection on one provider never masks the
-// image being Ready elsewhere (Ready is the OR across providers).
+// such as a libvirt path outside the provider's allowed image directories):
+// the entry and — while the image is available on no provider — the image get
+// reason InvalidSource (markImageEntryHeld). The provider's reason follows the
+// manager's message, sanitized and length-capped (sanitizeProviderDetail): the
+// owner needs it to fix the source, and a shared VMImage's status is read in
+// other namespaces too.
 func (r *VirtualMachineReconciler) markImageSourceRejected(
 	ctx context.Context,
 	vmImage *infravirtrigaudiov1beta1.VMImage,
@@ -883,34 +1490,68 @@ func (r *VirtualMachineReconciler) markImageSourceRejected(
 	cause error,
 ) error {
 	key := imageProviderKey(provider)
-	msg := fmt.Sprintf("image source rejected by provider %q: %s", key, providerErrorMessage(cause))
-	return r.writeImageStatus(ctx, vmImage, func(img *infravirtrigaudiov1beta1.VMImage) {
-		if img.Status.ProviderStatus == nil {
-			img.Status.ProviderStatus = map[string]infravirtrigaudiov1beta1.ProviderImageStatus{}
+	msg := fmt.Sprintf("image source rejected by provider %q: %s", key, sanitizeProviderDetail(cause))
+	_, err := r.markImageEntryHeld(ctx, vmImage, provider, imageReasonInvalidSource, infravirtrigaudiov1beta1.ImagePhaseFailed, msg)
+	return err
+}
+
+// markImageEntryHeld records that no VM can be created from provider's entry
+// for reason (with msg): the entry is not available, is recorded through
+// provider's current UID, has no task and no source digest (it records no
+// prepared artifact), and carries msg; the key leaves AvailableOn. The
+// image-level Phase, Ready, Message and Ready condition (reason) change only
+// while the image is available on no provider, so a problem on one Provider
+// never masks the image being Ready on another (Ready is the OR across
+// providers).
+//
+// changed reports whether the entry changed (it was not already held with
+// msg), for callers that signal only a change of state. An unchanged entry is
+// not rewritten, so a hold retried on every requeue does not write the
+// VMImage each time.
+func (r *VirtualMachineReconciler) markImageEntryHeld(
+	ctx context.Context,
+	vmImage *infravirtrigaudiov1beta1.VMImage,
+	provider *infravirtrigaudiov1beta1.Provider,
+	reason string,
+	phase infravirtrigaudiov1beta1.ImagePhase,
+	msg string,
+) (changed bool, err error) {
+	key := imageProviderKey(provider)
+	uid := string(provider.UID)
+	err = r.writeImageStatusE(ctx, vmImage, func(img *infravirtrigaudiov1beta1.VMImage) error {
+		ps, found := img.Status.ProviderStatus[key]
+		changed = !found || ps.Available || ps.ProviderUID != uid || ps.TaskRef != "" || ps.SourceDigest != "" ||
+			ps.Message != msg
+		if changed {
+			if img.Status.ProviderStatus == nil {
+				img.Status.ProviderStatus = map[string]infravirtrigaudiov1beta1.ProviderImageStatus{}
+			}
+			now := metav1.Now()
+			ps.Available = false
+			ps.ProviderUID = uid
+			ps.TaskRef = ""
+			ps.SourceDigest = ""
+			ps.Message = msg
+			ps.LastUpdated = &now
+			img.Status.ProviderStatus[key] = ps
 		}
-		now := metav1.Now()
-		ps := img.Status.ProviderStatus[key]
-		ps.Available = false
-		ps.ProviderUID = string(provider.UID)
-		ps.TaskRef = ""
-		ps.Message = msg
-		ps.LastUpdated = &now
-		img.Status.ProviderStatus[key] = ps
 		img.Status.AvailableOn = removeString(img.Status.AvailableOn, key)
 		if imageAvailableOnAnyProvider(img) {
-			return
+			return nil
 		}
 		img.Status.Ready = false
-		img.Status.Phase = infravirtrigaudiov1beta1.ImagePhaseFailed
+		img.Status.Phase = phase
 		img.Status.Message = msg
 		meta.SetStatusCondition(&img.Status.Conditions, metav1.Condition{
 			Type:               infravirtrigaudiov1beta1.VMImageConditionReady,
 			Status:             metav1.ConditionFalse,
-			Reason:             imageReasonInvalidSource,
+			Reason:             reason,
 			Message:            msg,
 			ObservedGeneration: img.Generation,
 		})
+		return nil
 	})
+	return changed, err
 }
 
 // hasLegacyImagePrepareState reports whether status carries prepare state
@@ -1117,7 +1758,10 @@ var errSkipImageStatusWrite = errors.New("VMImage status needs no change")
 // except errSkipImageStatusWrite (see there). Each attempt reads the VMImage
 // into a fresh object and re-applies mutate to it, so nothing a failed attempt
 // changed carries over and no concurrent update is lost; a mutate that changes
-// nothing writes nothing. Conflicts are retried with imageStatusRetry.
+// nothing writes nothing. Conflicts are retried with imageStatusRetry. Nothing
+// is written when the VMImage was deleted and re-created since vmImage was read
+// (checkSameImageObject): what the caller decided was decided for another
+// object.
 func (r *VirtualMachineReconciler) writeImageStatusE(
 	ctx context.Context,
 	vmImage *infravirtrigaudiov1beta1.VMImage,
@@ -1129,6 +1773,9 @@ func (r *VirtualMachineReconciler) writeImageStatusE(
 		latest = &infravirtrigaudiov1beta1.VMImage{}
 		if getErr := r.Get(ctx, key, latest); getErr != nil {
 			return getErr
+		}
+		if sameErr := checkSameImageObject(vmImage, latest); sameErr != nil {
+			return sameErr
 		}
 		before := latest.Status.DeepCopy()
 		if mutateErr := mutate(latest); mutateErr != nil {

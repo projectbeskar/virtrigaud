@@ -49,7 +49,10 @@ var _ = Describe("VMImage prepare state by Provider identity (envtest)", func() 
 		p := envtestProvider(ns, name, nil)
 		Expect(k8sClient.Create(ctx, p)).To(Succeed())
 		Expect(p.UID).NotTo(BeEmpty())
-		p.Status.ReportedCapabilities = &infravirtrigaudiov1beta1.ReportedCapabilities{SupportsImageImport: true}
+		p.Status.ReportedCapabilities = &infravirtrigaudiov1beta1.ReportedCapabilities{
+			SupportsImageImport:           true,
+			SupportsImageArtifactIdentity: true,
+		}
 		return p
 	}
 	sharedImage := func(ns, name string) *infravirtrigaudiov1beta1.VMImage {

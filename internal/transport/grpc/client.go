@@ -257,7 +257,7 @@ func providerCircuitBreakerInterceptor(cb *resilience.CircuitBreaker) grpc.Unary
 			invokerErr = invoker(ctx, fullMethod, req, reply, cc, opts...)
 			// Only infra failures count toward the breaker's threshold.
 			// Business errors are returned out-of-band via invokerErr.
-			if isInfraFailure(invokerErr) {
+			if countsTowardBreaker(fullMethod, invokerErr) {
 				return invokerErr
 			}
 			return nil
@@ -306,7 +306,9 @@ func providerCircuitBreakerInterceptor(cb *resilience.CircuitBreaker) grpc.Unary
 // Two clustered-provider statuses (ADR-0007 Addendum A) never count, whatever
 // their code, because the provider answered and is healthy: a host-scoped
 // Unavailable (HOST_UNAVAILABLE) and a per-VM operation that failed on its
-// host (VM_OPERATION_FAILED).
+// host (VM_OPERATION_FAILED). An ImagePrepare answered with
+// IMAGE_ARTIFACT_IN_PROGRESS is excluded by countsTowardBreaker, which knows
+// the method.
 func isInfraFailure(err error) bool {
 	if err == nil {
 		return false
@@ -335,6 +337,25 @@ func isInfraFailure(err error) bool {
 	default:
 		return false
 	}
+}
+
+// countsTowardBreaker reports whether err, returned by the RPC fullMethod,
+// counts toward the per-Provider circuit breaker: an infra failure
+// (isInfraFailure), except an ImagePrepare answered with
+// IMAGE_ARTIFACT_IN_PROGRESS (ADR-0009 D4). The provider answered, and a long
+// import through one Provider must not open the breaker of every Provider that
+// shares its image location. The reason is honoured on ImagePrepare only: on
+// any other RPC it is not a VirtRigaud answer, and the Unavailable counts.
+func countsTowardBreaker(fullMethod string, err error) bool {
+	if !isInfraFailure(err) {
+		return false
+	}
+	if fullMethod == providerv1.Provider_ImagePrepare_FullMethodName {
+		if st, ok := status.FromError(err); ok && isImageArtifactInProgressStatus(st) {
+			return false
+		}
+	}
+	return true
 }
 
 // recordVMOp records a virtrigaud_vm_operations_total sample for the
@@ -551,6 +572,11 @@ func (c *Client) PrepareImage(ctx context.Context, req contracts.ImagePrepareReq
 		Provider:     objectIdentityToProto(req.Provider),
 	})
 	if err != nil {
+		// The ADR-0009 D4 "still being prepared" answer is recognized on this
+		// RPC only (countsTowardBreaker keeps it out of the breaker).
+		if st, ok := status.FromError(err); ok && isImageArtifactInProgressStatus(st) {
+			return contracts.ImagePrepareResponse{}, contracts.NewInProgressError("image prepare: "+st.Message(), err)
+		}
 		return contracts.ImagePrepareResponse{}, c.mapGRPCError("image prepare", err)
 	}
 
@@ -1218,6 +1244,25 @@ func isVMOperationFailedStatus(st *status.Status) bool {
 	for _, d := range st.Details() {
 		if info, ok := d.(*errdetails.ErrorInfo); ok &&
 			info.GetReason() == contracts.VMOperationFailedReason &&
+			info.GetDomain() == contracts.ErrorInfoDomain {
+			return true
+		}
+	}
+	return false
+}
+
+// isImageArtifactInProgressStatus reports whether a gRPC status is an
+// ImagePrepare's "the artifact is still being prepared for this VMImage by
+// another request" (ADR-0009 D4): codes.Unavailable carrying a
+// google.rpc.ErrorInfo with contracts.ImageArtifactInProgressReason in
+// VirtRigaud's domain. The provider answered, so it is healthy.
+func isImageArtifactInProgressStatus(st *status.Status) bool {
+	if st == nil || st.Code() != codes.Unavailable {
+		return false
+	}
+	for _, d := range st.Details() {
+		if info, ok := d.(*errdetails.ErrorInfo); ok &&
+			info.GetReason() == contracts.ImageArtifactInProgressReason &&
 			info.GetDomain() == contracts.ErrorInfoDomain {
 			return true
 		}
