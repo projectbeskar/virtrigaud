@@ -224,6 +224,19 @@ kubectl delete virtualmachine <vm> -n <ns>
 - Whoever can annotate and delete a `VirtualMachine` can detach it. Restricting
   the annotation to administrators is a tracked follow-up; until then, use a
   policy engine (Kyverno, Gatekeeper) if tenants must not detach their VMs.
+- **Clustered `Provider`s (`topology: cluster`): consumers need the Provider's
+  permission.** A detached VM keeps running on its host, but it no longer counts
+  toward that host's committed capacity, so the scheduler would place other VMs
+  into capacity it still uses. So a VM in **another namespace** than its
+  clustered `Provider` is detached only when the `Provider`'s administrator has
+  set `infra.virtrigaud.io/allow-consumer-orphan-on-delete: "true"` on the
+  `Provider` (only the value `"true"` counts). Otherwise the deletion is held:
+  the finalizer stays, the VM gets `Ready=False` with reason
+  `OrphanOnDeleteNotAllowed` and a `Warning` event, and it is re-checked every
+  2 minutes. Ask the administrator to allow it, or remove the orphan annotation
+  to delete the VM (and its hypervisor VM) normally. A VM in the `Provider`'s
+  own namespace, a VM that is not bound yet, and every VM of a single-host
+  `Provider` are detached as before.
 
 This replaces the previous workaround — pointing `spec.providerRef` at a
 `Provider` that doesn't exist and then deleting the `VirtualMachine` — which the

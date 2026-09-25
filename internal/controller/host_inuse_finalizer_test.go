@@ -117,3 +117,72 @@ func TestHostReconciler_InUseIgnoresOtherProvidersAndNamespaces(t *testing.T) {
 	getErr := r.Get(ctx, types.NamespacedName{Namespace: "default", Name: "host-alpha"}, &infravirtrigaudiov1beta1.Host{})
 	assert.True(t, apierrors.IsNotFound(getErr), "no VM of THIS Host uses it, so deletion proceeds")
 }
+
+// TestHostReconciler_InUseKeysOnThePlacementProvider (L9): the in-use check
+// uses placementProviderKey — the Provider a VM is bound through (an empty
+// boundProvider namespace meaning the VM's own), else its spec.providerRef.
+func TestHostReconciler_InUseKeysOnThePlacementProvider(t *testing.T) {
+	bound := func(vm *infravirtrigaudiov1beta1.VirtualMachine, ns, name string) *infravirtrigaudiov1beta1.VirtualMachine {
+		vm.Status.BoundProvider = &infravirtrigaudiov1beta1.BoundProviderRef{Namespace: ns, Name: name}
+		return vm
+	}
+	cases := []struct {
+		name   string
+		vm     *infravirtrigaudiov1beta1.VirtualMachine
+		blocks bool
+	}{
+		{
+			name:   "bound through this Provider, spec re-pointed elsewhere",
+			vm:     bound(vmPlacedOn("default", "repointed", "prov-b", "", infravirtrigaudiov1beta1.PlacementStatus{Host: "host-alpha"}), "default", "prov-a"),
+			blocks: true,
+		},
+		{
+			name:   "bound through this Provider with an empty boundProvider namespace",
+			vm:     bound(vmPlacedOn("default", "nsless", "prov-a", "", infravirtrigaudiov1beta1.PlacementStatus{Host: "host-alpha"}), "", "prov-a"),
+			blocks: true,
+		},
+		{
+			name:   "spec names this Provider but bound through another",
+			vm:     bound(vmPlacedOn("default", "elsewhere", "prov-a", "", infravirtrigaudiov1beta1.PlacementStatus{Host: "host-alpha"}), "default", "prov-b"),
+			blocks: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			host := hostCR("host-alpha", "prov-a", nil)
+			host.Finalizers = []string{infravirtrigaudiov1beta1.HostInUseFinalizer}
+			r := newHostReconciler(coverageTestScheme(t), &stubResolver{provider: healthyHostStub()},
+				clusterProvider("prov-a"), host, tc.vm)
+			require.NoError(t, r.Delete(ctx, getHost(t, r.Client, "host-alpha")))
+			_, err := r.Reconcile(ctx, hostReq("host-alpha"))
+			require.NoError(t, err)
+			getErr := r.Get(ctx, types.NamespacedName{Namespace: "default", Name: "host-alpha"}, &infravirtrigaudiov1beta1.Host{})
+			assert.Equal(t, !tc.blocks, apierrors.IsNotFound(getErr))
+		})
+	}
+}
+
+// TestHostReconciler_ForeignFinalizerDoesNotBlockDecommissioning (L5): a VM
+// being deleted whose VirtualMachine finalizer is gone — only another
+// controller's finalizer keeps the object — no longer holds the Host.
+func TestHostReconciler_ForeignFinalizerDoesNotBlockDecommissioning(t *testing.T) {
+	ctx := context.Background()
+	host := hostCR("host-alpha", "prov-a", nil)
+	host.Finalizers = []string{infravirtrigaudiov1beta1.HostInUseFinalizer}
+	vm := vmPlacedOn("default", "leaving", "prov-a", "", infravirtrigaudiov1beta1.PlacementStatus{Host: "host-alpha"})
+	vm.Finalizers = []string{"example.com/someone-else"}
+	r := newHostReconciler(coverageTestScheme(t), &stubResolver{provider: healthyHostStub()},
+		clusterProvider("prov-a"), host, vm)
+	require.NoError(t, r.Delete(ctx, vm)) // kept by the foreign finalizer, with a deletionTimestamp
+
+	cpu, _, err := committedOnHost(ctx, r.Client, types.NamespacedName{Namespace: "default", Name: "prov-a"}, "host-alpha")
+	require.NoError(t, err)
+	assert.Zero(t, cpu, "it commits nothing")
+
+	require.NoError(t, r.Delete(ctx, getHost(t, r.Client, "host-alpha")))
+	_, err = r.Reconcile(ctx, hostReq("host-alpha"))
+	require.NoError(t, err)
+	getErr := r.Get(ctx, types.NamespacedName{Namespace: "default", Name: "host-alpha"}, &infravirtrigaudiov1beta1.Host{})
+	assert.True(t, apierrors.IsNotFound(getErr), "and does not block the Host's deletion")
+}

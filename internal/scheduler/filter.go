@@ -129,12 +129,16 @@ func (ec *evalContext) filterHost(h *v1beta1.Host) (reason, detail string, err e
 		return r, d, nil
 	}
 
-	// 10. Capacity fit after overcommit (ADR-0007 D4).
-	effCPU, effMem := ec.effectiveCapacity(h)
-	if effCPU < int64(ec.req.Resources.CPU) {
+	// 10. Capacity fit (ADR-0007 D4): the request must fit in what is FREE —
+	//     the host's capacity after overcommit, minus what bound, pending and
+	//     assumed VMs already hold there (ADR-0007 Addendum A, scheduler
+	//     accuracy amendment). The arithmetic is recorded by the caller
+	//     (capacityShortfall) for the no-fit message.
+	freeCPU, freeMem := ec.freeCapacity(h)
+	if freeCPU < int64(ec.req.Resources.CPU) {
 		return rejInsufficientCPU, "", nil
 	}
-	if effMem < ec.req.Resources.MemoryMiB {
+	if freeMem < ec.req.Resources.MemoryMiB {
 		return rejInsufficientMem, "", nil
 	}
 
@@ -145,6 +149,21 @@ func (ec *evalContext) filterHost(h *v1beta1.Host) (reason, detail string, err e
 
 	// 13-14. Required VM (anti-)affinity against the already-placed set.
 	return ec.filterVMAffinity(h)
+}
+
+// capacityShortfall returns the arithmetic behind a capacity rejection of h
+// (reason rejInsufficientCPU or rejInsufficientMem), or nil for any other
+// reason.
+func (ec *evalContext) capacityShortfall(h *v1beta1.Host, reason string) *CapacityShortfall {
+	effCPU, effMem := ec.effectiveCapacity(h)
+	c := ec.committedOn(h.Name)
+	switch reason {
+	case rejInsufficientCPU:
+		return &CapacityShortfall{Requested: int64(ec.req.Resources.CPU), Capacity: effCPU, Committed: c.cpu}
+	case rejInsufficientMem:
+		return &CapacityShortfall{Requested: ec.req.Resources.MemoryMiB, Capacity: effMem, Committed: c.memMiB}
+	}
+	return nil
 }
 
 // filterMinResources enforces the ResourceConstraints.Min*PerHost floors against

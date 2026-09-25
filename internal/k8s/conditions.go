@@ -83,13 +83,27 @@ const (
 	ReasonPlacementPolicyNotFound = "PlacementPolicyNotFound"
 	// ReasonUnschedulable indicates the scheduler found no feasible host for the
 	// VM among the pool's candidates (capacity, visibility, or affinity filters
-	// eliminated all of them). The condition message carries the per-host
-	// breakdown.
+	// eliminated all of them). The condition message carries the per-category
+	// tally and, when capacity was short, the committed-capacity arithmetic
+	// (numbers only, no host or VM names). It is set on Provisioning=False and,
+	// since the ADR-0007 scheduler-accuracy amendment, also on Placed=False.
 	ReasonUnschedulable = "Unschedulable"
 	// ReasonPlacementError indicates the scheduler rejected a malformed input the
 	// admin must fix (an unparseable overcommit ratio or affinity selector) —
 	// distinct from an ordinary no-fit.
 	ReasonPlacementError = "PlacementError"
+	// ReasonInsufficientHostCapacity is Reconfiguring=False on a VM of a
+	// clustered Provider: a resize-up exceeds the free capacity of the VM's
+	// host (ADR-0007 Addendum A, scheduler-accuracy amendment). The VM keeps
+	// its current size and the resize is retried with a backoff; a shrink is
+	// never refused.
+	ReasonInsufficientHostCapacity = "InsufficientHostCapacity"
+	// ReasonOrphanOnDeleteNotAllowed is Ready=False on a VirtualMachine being
+	// deleted with virtrigaud.io/orphan-on-delete=true whose clustered
+	// Provider is in another namespace and has not allowed consumers to
+	// detach VMs: an orphaned VM would keep running on its host outside the
+	// committed-capacity accounting. The finalizer is kept.
+	ReasonOrphanOnDeleteNotAllowed = "OrphanOnDeleteNotAllowed"
 )
 
 // ConditionPlaced is the single positive placement condition of a VirtualMachine
@@ -101,7 +115,9 @@ const ConditionPlaced = "Placed"
 
 // Placed condition reasons (ADR-0007 Addendum A, A2). The vocabulary is fixed by
 // the ADR: these four, plus the two the A2 amendment (slice 2) adds for a Create
-// refused with a name conflict (ReasonHostExcluded, ReasonAllHostsExcluded).
+// refused with a name conflict (ReasonHostExcluded, ReasonAllHostsExcluded),
+// plus ReasonUnschedulable (declared with the scheduling reasons above) from the
+// scheduler-accuracy amendment in A5.
 const (
 	// ReasonBound is Placed=True: the provider confirmed the VM on the host named
 	// by status.placement.host, and every per-VM call is routed there.

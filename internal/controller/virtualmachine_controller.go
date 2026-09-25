@@ -21,6 +21,7 @@ import (
 	stderrors "errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/singleflight"
@@ -44,6 +45,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/scheduler"
+	"github.com/projectbeskar/virtrigaud/internal/scheduler/assume"
 )
 
 // Reason labels used in metrics.RecordError calls for the VirtualMachine
@@ -235,6 +237,15 @@ type VirtualMachineReconciler struct {
 	// prepareBackoff paces the prepares sent again after a failed import or
 	// an unconfirmed answer (EnsureImageOnProvider).
 	prepareBackoff imagePrepareBackoff
+	// placements is the assume cache of clustered placements chosen but not
+	// yet visible in the informer cache (ADR-0007 Addendum A,
+	// scheduler-accuracy amendment). It is created on first use
+	// (placementAssumptions), so a manager with only single-host Providers
+	// never has one. In-process state is correct: only the elected leader
+	// runs this reconciler.
+	placements atomic.Pointer[assume.Cache]
+	// unschedulable paces the re-scheduling of clustered VMs no host can take.
+	unschedulable unschedulableBackoff
 	// clock returns the current time for the image-prepare backoff and stall
 	// bounds; nil uses time.Now. Tests set it.
 	clock func() time.Time
@@ -508,6 +519,11 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 
 		if !done {
 			logger.Info("Reconfigure task still in progress", "taskRef", vm.Status.ReconfigureTaskRef)
+			// An admitted clustered resize stays assumed until the task ends
+			// and status.currentResources records the new size.
+			if c := r.placements.Load(); c != nil {
+				c.Touch(vmSchedulingUID(vm))
+			}
 			k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonTaskInProgress, "Reconfiguration in progress")
 			r.updateStatus(ctx, vm)
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
@@ -662,6 +678,15 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 			"desiredCPU", desiredCPU,
 			"currentMemoryMiB", r.getCurrentMemoryMiB(vm),
 			"desiredMemoryMiB", desiredMemoryMiB)
+		// A clustered VM's resize-up is admitted against its host's free
+		// capacity first (ADR-0007 Addendum A, scheduler-accuracy amendment);
+		// a shrink, and every single-host / thin-client VM, goes straight on.
+		if ref.Routed() {
+			res, admitted, err := r.admitClusteredResize(ctx, vm, provider, vmClass, ref.HostID)
+			if err != nil || !admitted {
+				return res, err
+			}
+		}
 		return r.reconfigureVM(ctx, vm, providerInstance, ref, provider, vmClass, vmImage, networks)
 	}
 
@@ -683,9 +708,20 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 		return ctrl.Result{}, nil
 	}
 
+	// A VM being deleted is never scheduled again: drop any in-flight
+	// assumption and backoff record it has. Its durable placement record keeps
+	// counting as committed until the finalizer is gone.
+	r.forgetPlacement(vm)
+
 	// Orphan-on-delete: detach the hypervisor VM instead of destroying it. No
-	// provider is resolved or called; the finalizer is simply removed.
+	// provider is called; the finalizer is simply removed — unless the VM is a
+	// consumer of a clustered Provider that has not allowed it
+	// (orphanRefusal): an orphaned clustered VM keeps running on its host but
+	// leaves the committed-capacity accounting.
 	if hasOrphanOnDeleteAnnotation(vm) {
+		if res, refused, err := r.orphanRefusal(ctx, vm); refused || err != nil {
+			return res, err
+		}
 		return r.orphanOnDelete(ctx, vm)
 	}
 
@@ -797,10 +833,7 @@ func (r *VirtualMachineReconciler) removeFinalizer(ctx context.Context, vm *infr
 // untouched and no longer managed. This is the supported way to un-adopt /
 // detach a VM. It is logged and recorded as an event on the VM.
 func (r *VirtualMachineReconciler) orphanOnDelete(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine) (ctrl.Result, error) {
-	provider := vmProviderKey(vm)
-	if b := vm.Status.BoundProvider; b != nil {
-		provider = types.NamespacedName{Namespace: b.Namespace, Name: b.Name}
-	}
+	provider := placementProviderKey(vm)
 	msg := fmt.Sprintf("%s=true: detaching without deleting the hypervisor VM (id %q, provider %s); it is left in place and no longer managed",
 		infravirtrigaudiov1beta1.VirtualMachineOrphanOnDeleteAnnotation, vm.Status.ID, provider)
 	log.FromContext(ctx).Info("Orphan-on-delete: removing the finalizer without a provider Delete",
@@ -1014,6 +1047,8 @@ func (r *VirtualMachineReconciler) createVM(
 			// ADR-0007 Addendum A, A2: durably record the attempted host BEFORE
 			// Create, so a retry after a lost status write (or a Create that ran
 			// past its deadline) lands on this same host instead of a second one.
+			// recordPendingHost releases the assumption resolveClusterPlacement
+			// made only when the write provably did not land.
 			if res, recorded, rerr := r.recordPendingHost(ctx, vm, providerCR, p); !recorded {
 				return res, rerr
 			}
@@ -1150,7 +1185,10 @@ func (r *VirtualMachineReconciler) handleRejectedCreate(
 //     err); the caller bubbles it.
 //
 // It never mutates any Host / HostPool / VMPlacementPolicy (read-only inputs) and
-// never writes status.placement (that is the caller's post-Create job).
+// never writes status.placement (that is the caller's job: pendingHost before
+// Create, host after it). On success it records an assumption of the pick in
+// the reconciler's assume cache, which the caller must forget if the
+// pendingHost write fails (ADR-0007 Addendum A, scheduler-accuracy amendment).
 func (r *VirtualMachineReconciler) resolveClusterPlacement(
 	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
@@ -1193,14 +1231,14 @@ func (r *VirtualMachineReconciler) resolveClusterPlacement(
 		logger.Info("Cannot schedule VM: " + msg)
 		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonNoHostPool, msg)
 		metrics.RecordError(errReasonPlacement, metrics.ComponentManager)
-		r.updateStatus(ctx, vm)
+		r.updatePlacementStatus(ctx, vm)
 		return nil, ctrl.Result{RequeueAfter: placementConfigRetryInterval}, nil
 	case len(pools) > 1:
 		msg := fmt.Sprintf("clustered provider %q has %d HostPools in namespace %s; v1 supports exactly one pool per clustered provider (multi-pool is deferred)", providerCR.Name, len(pools), clusterNS)
 		logger.Info("Cannot schedule VM: " + msg)
 		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonMultipleHostPools, msg)
 		metrics.RecordError(errReasonPlacement, metrics.ComponentManager)
-		r.updateStatus(ctx, vm)
+		r.updatePlacementStatus(ctx, vm)
 		return nil, ctrl.Result{RequeueAfter: placementConfigRetryInterval}, nil
 	}
 	pool := pools[0]
@@ -1242,35 +1280,11 @@ func (r *VirtualMachineReconciler) resolveClusterPlacement(
 				logger.Info("Cannot schedule VM: " + msg)
 				k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonPlacementPolicyNotFound, msg)
 				metrics.RecordError(errReasonPlacement, metrics.ComponentManager)
-				r.updateStatus(ctx, vm)
+				r.updatePlacementStatus(ctx, vm)
 				return nil, ctrl.Result{RequeueAfter: placementConfigRetryInterval}, nil
 			}
 			return nil, ctrl.Result{}, fmt.Errorf("get VMPlacementPolicy %s: %w", vm.Spec.PlacementRef.Name, err)
 		}
-	}
-
-	// (d) Build the pool's already-placed VM set (name -> host + labels) for VM
-	// (anti-)affinity and per-host bound counts, EXCLUDING this VM. A VM counts
-	// only once it carries a confirmed binding into this same pool.
-	var vmList infravirtrigaudiov1beta1.VirtualMachineList
-	if err := r.List(ctx, &vmList, client.InNamespace(vm.Namespace)); err != nil {
-		return nil, ctrl.Result{}, fmt.Errorf("list VirtualMachines in namespace %s: %w", vm.Namespace, err)
-	}
-	var placedVMs []scheduler.PlacedVM
-	for i := range vmList.Items {
-		other := &vmList.Items[i]
-		if other.Name == vm.Name {
-			continue
-		}
-		pl := other.Status.Placement
-		if pl == nil || pl.Pool != pool.Name || pl.Host == "" {
-			continue
-		}
-		placedVMs = append(placedVMs, scheduler.PlacedVM{
-			Name:   other.Name,
-			HostID: pl.Host,
-			Labels: other.Labels,
-		})
 	}
 
 	// CurrentBinding drives the scheduler's D4 idempotent re-selection: a VM
@@ -1284,20 +1298,19 @@ func (r *VirtualMachineReconciler) resolveClusterPlacement(
 		excludedHosts = vm.Status.Placement.ExcludedHosts
 	}
 
-	// (e) Schedule. Resources reuse the CPU/memory buildCreateRequest already
-	// resolved (no duplicate parse). RequiredNetworks are the VM's resolved
-	// network identities as D6 host-visibility constraints. RequiredStoragePools
-	// and RequiredMachineType are deliberately left empty — see the TODO below.
-	result, err := scheduler.Schedule(scheduler.Request{
-		Resources: scheduler.ResourceRequest{
-			CPU:       req.Class.CPU,
-			MemoryMiB: int64(req.Class.MemoryMiB),
-		},
+	// (d) Resources: the effective size buildCreateRequest already resolved
+	// (effectiveResources: the VMClass with any spec.resources override
+	// applied, no duplicate parse) — what Create sends, and the size this VM
+	// counts at while its create is pending (pendingFootprint), when the CRD
+	// keeps both immutable. RequiredNetworks are the VM's resolved network
+	// identities as D6 host-visibility constraints. RequiredStoragePools and
+	// RequiredMachineType are deliberately left empty — see the TODO below.
+	schedReq := scheduler.Request{
+		Resources:        withMinimum(scheduler.ResourceRequest{CPU: req.Class.CPU, MemoryMiB: int64(req.Class.MemoryMiB)}),
 		Policy:           policy,
 		Pool:             pool.Spec,
 		Candidates:       candidates,
 		CurrentBinding:   currentBinding,
-		PlacedVMs:        placedVMs,
 		ExcludedHosts:    excludedHosts,
 		RequiredNetworks: requiredNetworksForScheduling(networks),
 		// TODO(ADR-0007 D6): wire RequiredStoragePools and RequiredMachineType once
@@ -1306,7 +1319,31 @@ func (r *VirtualMachineReconciler) resolveClusterPlacement(
 		// VMClass carries no machine type (only Firmware), so inventing either
 		// mapping would be a bug. The scheduler treats empty as "no constraint",
 		// which is the honest, correct behavior until those inputs exist.
-	})
+	}
+
+	// (e) Read what is committed, schedule and assume — under the Provider's
+	// assume lock (ADR-0007 Addendum A, scheduler-accuracy amendment).
+	// Committed = every VM of this Provider, in any namespace, bound or pending
+	// on a host, plus the placements other reconciles have chosen but whose
+	// pendingHost write the informer cache does not show yet. The lock covers
+	// informer-cache reads and in-memory work only, never an API call: it is
+	// released right after Schedule (and Assume), before any status write here
+	// and before the caller's pendingHost write. A reconcile that cannot get it
+	// within placementLockWait requeues shortly instead of parking its worker.
+	providerNN := types.NamespacedName{Namespace: providerCR.Namespace, Name: providerCR.Name}
+	providerKey := providerNN.String()
+	assumptions := r.placementAssumptions()
+	unlock, locked := assumptions.LockWithin(ctx, providerKey, placementLockWait)
+	if !locked {
+		logger.V(1).Info("Provider's placement lock is busy; requeueing", "provider", providerKey)
+		return nil, ctrl.Result{RequeueAfter: placementLockBusyRetry()}, nil
+	}
+	result, err := r.scheduleAndAssume(ctx, assumptions, providerKey, providerNN, vm, &schedReq)
+	unlock()
+	var infraErr *placementInfraError
+	if stderrors.As(err, &infraErr) {
+		return nil, ctrl.Result{}, infraErr.err
+	}
 	if err != nil {
 		if scheduler.AllExcluded(err) {
 			// Every candidate is a host where a Create of this VM was refused with
@@ -1320,18 +1357,34 @@ func (r *VirtualMachineReconciler) resolveClusterPlacement(
 			setPlacedCondition(vm, metav1.ConditionFalse, k8s.ReasonAllHostsExcluded, msg)
 			k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonUnschedulable, msg)
 			metrics.RecordError(errReasonPlacement, metrics.ComponentManager)
-			r.updateStatus(ctx, vm)
+			r.updatePlacementStatus(ctx, vm)
 			return nil, ctrl.Result{RequeueAfter: vmCreateConflictRetryInterval}, nil
 		}
 		if stderrors.Is(err, scheduler.ErrNoFeasibleHost) {
 			// Capacity/visibility/affinity eliminated every host. The error's
-			// message carries the per-host breakdown; surface it and requeue.
+			// message carries the per-category tally and, when capacity was
+			// short, the VM's own request — no committed, capacity or free
+			// figure (derived from other tenants' VMs, review M3), no other
+			// VM's name, bounded in size. Surface it on Placed and
+			// Provisioning and back off (it may clear when capacity frees up or
+			// a cordoned host returns). The per-host arithmetic goes to the
+			// manager log only, at V(1).
 			msg := fmt.Sprintf("no feasible host in pool %q: %v", pool.Name, err)
-			logger.Info("Cannot schedule VM: " + msg)
+			retryAfter := r.unschedulable.next(vmSchedulingUID(vm), r.now())
+			logger.Info("Cannot schedule VM: "+msg, "retryAfter", retryAfter.String(),
+				"insufficientCapacity", scheduler.InsufficientCapacity(err))
+			var nf *scheduler.NoFeasibleHostError
+			if stderrors.As(err, &nf) {
+				if detail := nf.CapacityDetail(); len(detail) > 0 {
+					logger.V(1).Info("Committed-capacity arithmetic of the hosts rejected for capacity (administrator detail)",
+						"pool", pool.Name, "hosts", detail)
+				}
+			}
+			setPlacedCondition(vm, metav1.ConditionFalse, k8s.ReasonUnschedulable, msg)
 			k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonUnschedulable, msg)
 			metrics.RecordError(errReasonPlacement, metrics.ComponentManager)
-			r.updateStatus(ctx, vm)
-			return nil, ctrl.Result{RequeueAfter: placementUnschedulableRetryInterval}, nil
+			r.updatePlacementStatus(ctx, vm)
+			return nil, ctrl.Result{RequeueAfter: retryAfter}, nil
 		}
 		// Malformed input the admin must fix (bad overcommit ratio / affinity
 		// selector). Requeueing will not help until the policy/pool is corrected,
@@ -1340,10 +1393,11 @@ func (r *VirtualMachineReconciler) resolveClusterPlacement(
 		logger.Error(err, "Placement error scheduling VM", "pool", pool.Name)
 		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonPlacementError, msg)
 		metrics.RecordError(errReasonPlacement, metrics.ComponentManager)
-		r.updateStatus(ctx, vm)
+		r.updatePlacementStatus(ctx, vm)
 		return nil, ctrl.Result{RequeueAfter: placementConfigRetryInterval}, nil
 	}
 
+	r.unschedulable.reset(vmSchedulingUID(vm))
 	logger.Info("Scheduled VM onto clustered host",
 		"vm", vm.Name, "pool", pool.Name, "host", result.HostID, "reason", result.Reason)
 	return &clusterPlacement{hostID: result.HostID, poolName: pool.Name, reason: result.Reason}, ctrl.Result{}, nil
@@ -2215,6 +2269,9 @@ func (r *VirtualMachineReconciler) vmsForGrantChange(ctx context.Context, indexV
 // slow recheck.
 func (r *VirtualMachineReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err := indexConsumerGrants(mgr, &infravirtrigaudiov1beta1.VirtualMachine{}, vmConsumerGrantIndexValues); err != nil {
+		return err
+	}
+	if err := indexPlacementProvider(mgr); err != nil {
 		return err
 	}
 	b := ctrl.NewControllerManagedBy(mgr).

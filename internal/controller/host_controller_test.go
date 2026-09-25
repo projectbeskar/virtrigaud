@@ -43,6 +43,7 @@ func newHostReconciler(s *runtime.Scheme, resolver ProviderResolver, objs ...cli
 	fc := fake.NewClientBuilder().
 		WithScheme(s).
 		WithObjects(objs...).
+		WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).
 		WithStatusSubresource(&infravirtrigaudiov1beta1.Host{}).
 		Build()
 	return &HostReconciler{Client: fc, Scheme: s, RemoteResolver: resolver}

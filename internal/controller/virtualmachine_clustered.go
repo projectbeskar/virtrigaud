@@ -94,7 +94,19 @@ func (r *VirtualMachineReconciler) recordPendingHost(
 	setPlacedCondition(vm, metav1.ConditionFalse, k8s.ReasonCreatePending,
 		fmt.Sprintf("create pending on host %s (pool %s)", p.hostID, p.poolName))
 
-	if err := r.Status().Update(ctx, vm); err != nil {
+	// Bounded, so the assumption covering this write (placementAssumeTTL, twice
+	// this bound) always outlives it.
+	writeCtx, cancel := context.WithTimeout(ctx, pendingHostWriteTimeout)
+	defer cancel()
+	if err := r.Status().Update(writeCtx, vm); err != nil {
+		// Release the scheduler's assumption only when the write provably did
+		// not land (review L6). After an ambiguous failure — a timeout, a 5xx,
+		// a broken connection — the pendingHost may be stored after all, so
+		// the assumption keeps counting until the informer shows the record
+		// (which settles it) or its TTL passes.
+		if pendingHostWriteRejected(err) {
+			r.placementAssumptions().Forget(vmSchedulingUID(vm))
+		}
 		if apierrors.IsConflict(err) {
 			log.FromContext(ctx).Info("Pending-host write lost a resourceVersion race; requeueing without creating (scheduler choice not re-applied)",
 				"host", p.hostID)
@@ -104,6 +116,14 @@ func (r *VirtualMachineReconciler) recordPendingHost(
 		return ctrl.Result{}, false, fmt.Errorf("record pending host %s for VirtualMachine %s/%s: %w", p.hostID, vm.Namespace, vm.Name, err)
 	}
 	return ctrl.Result{}, true, nil
+}
+
+// pendingHostWriteRejected reports whether a failed status write was refused
+// by the API server outright, so it certainly did not change the stored
+// object: a conflict, an invalid or bad request, forbidden, or not found.
+func pendingHostWriteRejected(err error) bool {
+	return apierrors.IsConflict(err) || apierrors.IsInvalid(err) || apierrors.IsBadRequest(err) ||
+		apierrors.IsForbidden(err) || apierrors.IsNotFound(err)
 }
 
 // promotePendingHost records the confirmed binding after the provider accepted
@@ -256,6 +276,9 @@ func (r *VirtualMachineReconciler) handleClusteredCreateConflict(
 		retryAfter = vmCreateConflictRetryInterval
 	}
 	pl.PendingHost = ""
+	// The VM holds nothing on the host any more; a leftover assumption of it
+	// there must not keep counting.
+	r.forgetPlacement(vm)
 
 	setPlacedCondition(vm, metav1.ConditionFalse, k8s.ReasonHostExcluded, fmt.Sprintf(
 		"create on host %s was refused because a same-named domain this VirtualMachine does not own exists there, "+

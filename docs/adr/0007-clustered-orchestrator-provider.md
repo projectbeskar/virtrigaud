@@ -857,7 +857,8 @@ administrator to clear `pendingHost` (D8, report-only).
 
 **Condition vocabulary.** There is one positive condition, `Placed`, with reasons
 `Bound`, `CreatePending`, `HostUnavailable` and `Unbound`, plus `HostExcluded`
-and `AllHostsExcluded` from the slice 2 amendment above.
+and `AllHostsExcluded` from the slice 2 amendment above, and `Unschedulable`
+from the scheduler-accuracy amendment in A5.
 
 ### A3: `ListVMs` runs across all hosts on a clustered provider
 
@@ -916,14 +917,165 @@ per-VM capability until the slice that routes it has landed.
 `topology: cluster` stays **experimental** in docs and release notes until slice 5
 passes.
 
-**Tracked separately; not part of this addendum.** Two scheduler-accuracy gaps
-must close before the scheduler's placements can be relied on:
-- **Committed capacity:** VMs bound to a host, or pending on it, are never
-  subtracted from that host's allocatable capacity.
-- **Reservations:** there is no reservation between `Schedule` and binding.
+**Scheduler accuracy (closed by the amendment below).** Two scheduler-accuracy
+gaps had to close before the scheduler's placements could be relied on:
+committed capacity (VMs bound to a host, or pending on it, were never subtracted
+from its capacity) and reservations (nothing held a host between `Schedule` and
+the binding). Both are closed by the *scheduler accuracy* amendment that
+follows; A2's `pendingHost` is its prerequisite.
 
-Counting `pendingHost` (A2) as committed capacity closes most of the second gap,
-so A2 is its prerequisite.
+> **Amendment (2026-09-25, scheduler accuracy): committed capacity and
+> assumptions.** This closes the two gaps above and resolves open
+> implementation question 5.
+>
+> **What `allocatable` means.** `Host.status.allocatableCPU` and
+> `allocatableMemoryMiB` are host **totals**. The libvirt provider fills them
+> from `virsh nodeinfo` (`CPU(s)` and `Memory size`,
+> `internal/providers/libvirt/hostinfo.go`), with no reserve and nothing
+> subtracted for running domains, so they do not move when a VM starts or
+> stops. `allocatableStorageBytes` is different: it is live free space (the
+> `Available` bytes of the active pools), and the scheduler uses it only for
+> the `MinDiskSpacePerHost` floor, never for fit.
+>
+> **Accounting model: capacity-based.** Because allocatable is a total, the
+> operator subtracts what it has committed, and nothing is counted twice:
+>
+> - *free = allocatable × the pool's overcommit ratio − committed.* The ratio
+>   scales the capacity, never the committed sum. A ratio lowered below what is
+>   already committed leaves *free* negative: the host takes no new VM, and no
+>   VM is moved.
+> - *committed(host)* is the sum of the footprints of every VirtualMachine whose
+>   placement belongs to the Provider and whose `status.placement.host` or
+>   `.pendingHost` names the host. One helper computes the placement Provider
+>   everywhere: `status.boundProvider` (an empty namespace meaning the VM's
+>   own), else `spec.providerRef`. VMs in every namespace count, found through a
+>   cache field index on that key. A VM being deleted counts until the
+>   VirtualMachine finalizer is gone, because its domain and disks are still on
+>   the host; once only another controller's finalizer keeps it, it counts no
+>   more (nor does it block a Host's deletion). A VM that names the host in both
+>   fields counts once. The VM being scheduled never counts against itself.
+> - Another VM's *footprint* is its **admitted** size, never a size its owner
+>   merely asks for: `status.currentResources` when recorded (only the operator
+>   writes status); for a VM whose create is still pending, its effective size
+>   (its VMClass with any `spec.resources` override applied — what its Create
+>   sends); otherwise its VMClass size. A
+>   created VM's `spec.resources` and `spec.classRef` are ignored, so editing
+>   them costs a tenant nothing and blocks nobody. A VMClass the VM's namespace
+>   may not use (no consumer grant) sizes nothing. Every VM counts at least
+>   1 vCPU and 128 MiB. While a create is pending, a CRD rule makes
+>   `spec.classRef` and `spec.resources` immutable, so the pending VM keeps the
+>   size it was admitted at; the manager's readiness check requires that rule.
+> - `status.boundProvider` and `status.placement` are trusted inputs to this
+>   accounting: tenants must never be granted write on
+>   `virtualmachines/status`.
+> - Other namespaces' VMs count toward capacity only. VM (anti-)affinity and the
+>   host-anti-affinity VM cap stay scoped to the VM's own namespace, as before.
+> - Not modelled: domains on a host that VirtRigaud does not manage, and the
+>   hypervisor's own use. An administrator keeps room for them with an overcommit
+>   ratio below 1 (for example memory `"0.9"`) or by cordoning the host.
+> - Rejected alternative: subtracting live free memory. It moves with guest
+>   activity and ballooning, it would count running VMs twice, and it cannot see
+>   a VM that is pending but not started yet.
+>
+> **Reservations: an in-process assume cache** (`internal/scheduler/assume`),
+> kube-scheduler's *assume* step. For each clustered create, the VM controller
+>
+> 1. takes the Provider's lock, waiting at most 5 s (otherwise it requeues
+>    after about a second, with jitter, instead of parking its worker),
+> 2. reads the committed placements from the informer cache, adds the live
+>    assumptions, runs `Schedule` and records the pick as an assumption, and
+> 3. releases the lock. Only then does it write anything: the `Placed`
+>    condition of a VM that did not fit (a status write bounded to 30 s), or
+>    `pendingHost` (A2's checked update, bounded to one minute).
+>
+> The lock covers informer-cache reads and in-memory work only, never an API
+> call, so a slow API server cannot park other reconciles behind it.
+> Concurrent reconciles of one Provider therefore see each other's picks, as
+> committed capacity and as placed VMs for affinity and anti-affinity.
+> Reconciles of different Providers never wait on each other. An assumption
+> ends when:
+>
+> - the informer cache shows the VM's record on the assumed host, or no longer
+>   has the VM. From then on the record counts. A record on another host (for
+>   example a `pendingHost` the VM has since released) does not end it.
+> - the API server refused the `pendingHost` write outright (conflict,
+>   invalid, bad request, forbidden, not found), a name conflict releases the
+>   host (the A2 amendment), or the VM is deleted. The controller forgets it.
+>   After an ambiguous failure (a timeout, a 5xx, a broken connection) the
+>   write may have landed, so the assumption stays until the record shows up
+>   or the TTL passes.
+> - its TTL passes: twice the one-minute bound of the `pendingHost` write. This
+>   is only a safety net for a reconcile that died between the two.
+>
+> **Resizes are admitted too** (a decision of this review round). A
+> `Reconfigure` that grows the CPU or memory of a VM on a clustered Provider is
+> checked, under the same lock, against the free capacity of the VM's host,
+> the VM's own current footprint excluded. Only the growing resources are
+> checked; a shrink is always allowed, and host health and cordon do not
+> matter (a resize does not move the VM). If it does not fit, no provider call
+> is made, the VM keeps its size, gets `Reconfiguring=False/
+> InsufficientHostCapacity` (a number-free message) and is retried with the
+> same backoff; a host that is not registered fails closed. An admitted resize
+> is assumed at its new size until `status.currentResources` records it (the
+> assumption is kept alive while a reconfigure task runs), and the scheduler
+> counts each VM once per host at the larger of its listed sizes, so a
+> concurrent create or resize sees it before it is applied.
+>
+> The cache is in process, which is correct because only the elected leader
+> runs reconcilers. A new leader starts with an empty cache but waits for its
+> informer cache to sync, and every placement the old leader made durable is in
+> that cache. `pendingHost` is written before `Create`, so no VM is ever created
+> on a host that only an assumption held.
+>
+> **Reporting.** When no host fits, the VM gets `Placed=False/Unschedulable` (a
+> Placed reason this amendment adds) and `Provisioning=False/Unschedulable`. The
+> message holds the per-category tally. When capacity was short it adds the
+> VM's own request only: *requested R vCPU and M MiB, which exceeds the free
+> capacity of every candidate host*. It carries no committed, capacity or free
+> figure. Those figures are derived from other tenants' VMs, and the VM's owner
+> can read the message; the same goes for the success trace in
+> `status.placement.reason`. The per-host arithmetic goes to the manager log at
+> V(1) and to the gauges below. The message does not grow with the number of
+> hosts or VMs, and it names no host and no other VM. The retry backs
+> off per VM, from 30 s doubling to 2 min. The VM controller does not watch
+> Hosts or other VMs, so 2 min is the longest a VM waits to notice freed
+> capacity.
+>
+> **Metrics.** `virtrigaud_host_committed_cpu` and
+> `virtrigaud_host_committed_memory_mib`, labelled by provider
+> (`namespace/name`) and host only. The Host controller refreshes them on each
+> sync and deletes them with the Host, or when its `spec.providerRef` changes.
+> They are **administrator-sensitive**: they show how full each host is, across
+> tenants. The manager serves `/metrics` over plain HTTP when
+> `--metrics-secure=false`, the chart's current default, so restrict it with
+> the chart's NetworkPolicy (`networkPolicy.enabled`, which admits `/metrics`
+> scrapes only from `networkPolicy.monitoringNamespaceSelector`) or enable
+> `--metrics-secure`.
+>
+> **Orphan-on-delete on a clustered Provider.** A VM detached with
+> `virtrigaud.io/orphan-on-delete` keeps running on its host but leaves the
+> accounting. So a VM in another namespace than its clustered Provider is
+> detached only when the Provider carries
+> `infra.virtrigaud.io/allow-consumer-orphan-on-delete: "true"` (set by its
+> administrator). Otherwise the finalizer is kept, the VM gets
+> `Ready=False/OrphanOnDeleteNotAllowed`, and removing the annotation deletes it
+> normally.
+>
+> **No per-tenant quota.** v0.4.0 has none on a shared clustered Provider:
+> any namespace the Provider's `spec.consumerNamespaceSelector` admits can fill
+> its hosts, first come first served, up to their capacity. Administrators who
+> share a clustered Provider limit consumers with Kubernetes `ResourceQuota` on
+> `virtualmachines` counts, or with separate Providers and HostPools.
+> *Follow-up:* an ADR for a per-consumer quota on clustered Providers.
+>
+> **Still not covered:**
+>
+> - A clone lands on its source host (A1) without being scheduled or checked
+>   against capacity. It counts from the moment `bindTargetVM` writes its
+>   `placement.host`.
+>
+> Single-host and thin-client Providers never schedule, so none of this reaches
+> them (D9).
 
 ### A6: open question
 
@@ -1202,9 +1354,10 @@ honest.
 4. **Host membership: `Host.spec.poolRef` (explicit) vs `HostPool` label
    selector.** Recommended explicit `poolRef`; selector is more k8s-idiomatic but
    fuzzier for an inventory-of-record.
-5. **Overcommit + allocatable computation** — where the ratio applies (provider
-   report vs operator compute) and how running-VM reservations are subtracted to
-   yield true allocatable.
+5. **Overcommit + allocatable computation. ✅ Resolved 2026-09-25 (see the
+   *scheduler accuracy* amendment in Addendum A, A5).** The provider reports
+   host totals; the operator applies the pool ratio to them and subtracts the
+   footprints of the VMs bound to, pending on, or assumed on each host.
 6. **Migration data-NIC selection** — how `--migrateuri tcp://<host-mignic>` is
    modeled (per-host label? `HostPool` migration-network ref?) so the RAM stream
    can be steered onto a dedicated NIC.
@@ -1267,3 +1420,9 @@ honest.
   - Operator: `contracts.VMRef`; `status.placement.pendingHost`; the Host in-use
     finalizer; the `Placed` condition.
   - Provider: the `withHostConn` helper.
+- **New ADR: per-consumer quota on a shared clustered Provider.** The
+  scheduler-accuracy amendment (A5) counts every consumer's VMs against a
+  host's capacity, but nothing limits how much of a shared Provider one
+  consumer namespace may take (v0.4.0 has no per-tenant quota).
+- Capacity check for a clone, which lands on its source host without being
+  scheduled (A5, *Still not covered*).

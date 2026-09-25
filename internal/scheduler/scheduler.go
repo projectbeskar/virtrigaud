@@ -39,14 +39,16 @@ limitations under the License.
 // and score.go for the exact predicates and ordering.
 //
 //   - Filter (hard, all must hold): host is Ready and schedulable (not cordoned);
-//     capacity fits after the pool's overcommit ratios; the VMPlacementPolicy hard
+//     the request fits in the host's FREE capacity (its allocatable total times
+//     the pool's overcommit ratio, minus the resources already committed to it
+//     by bound, pending and assumed VMs in Request.PlacedVMs); the VMPlacementPolicy hard
 //     constraints (host allow/deny list, node-selector against Host.spec.labels,
 //     required CPU features, minimum per-host resources); D6 storage/network
 //     visibility (the VM's required pool/network as a Host.spec.labels
 //     requirement); the required machine type; strict host (anti-)affinity; and
 //     required VM (anti-)affinity evaluated against the already-placed VMs.
 //   - Score (soft, ranks the survivors): the pool Strategy (Spread favors the most
-//     free capacity / fewest bound VMs; BinPack favors the tightest host that
+//     free (uncommitted) capacity / fewest bound VMs; BinPack favors the tightest host that
 //     still fits), with soft VMPlacementPolicy constraints and preferred
 //     (anti-)affinity applied as a preference bonus/penalty that ranks above the
 //     raw strategy score. Ties break by ascending host id, so the same inputs
@@ -63,9 +65,10 @@ limitations under the License.
 //
 // # Scope
 //
-// This is the pure function and its tests only. Wiring it into the VM controller,
-// the target_host_id gRPC field, and writing status.placement are later ADR-0007
-// slices. VMPlacementPolicy constructs that do not map onto the flat Host+labels
+// This package is the pure function and its tests only. The VirtualMachine
+// controller resolves its inputs — including the committed placements it reads
+// from the informer cache plus the in-flight ones held by the assume cache
+// (package assume) — and records the result. VMPlacementPolicy constructs that do not map onto the flat Host+labels
 // model (vSphere/Proxmox datastore/cluster/folder vocabulary, live-utilization
 // caps, secure-boot/TPM security constraints) are honored where they map and
 // documented where they are deferred; this package invents no new API.
@@ -112,19 +115,45 @@ type ResourceRequest struct {
 	MemoryMiB int64
 }
 
-// PlacedVM is one already-placed VM and where it runs, used to evaluate VM
-// affinity/anti-affinity (Request.PlacedVMs) and per-host bound-VM counts. The
-// caller supplies the pool's placement set, already namespace-scoped; the
-// scheduler matches the policy's VM (anti-)affinity label selectors against each
-// PlacedVM's Labels and counts placements per host for the spread/binpack
-// tie-break and the host-anti-affinity cap.
+// PlacedVM is one VM that holds, or is about to hold, resources on a host: a VM
+// bound there (status.placement.host), one whose Create is in flight there
+// (status.placement.pendingHost), or one the caller has just scheduled there and
+// whose record may not be visible yet (an assumption; ADR-0007 Addendum A,
+// scheduler-accuracy amendment).
+//
+// Every PlacedVM counts toward its host's COMMITTED capacity: the scheduler sums
+// Resources per host and subtracts the sum from the host's effective capacity
+// before the fit check and the strategy score. A PlacedVM that is not
+// CapacityOnly is also matched by the policy's VM (anti-)affinity label
+// selectors and counted for the spread/binpack tie-break and the
+// host-anti-affinity VM cap; the caller decides that scope (today: the
+// scheduled VM's own namespace).
 type PlacedVM struct {
 	// Name is the VM's name (for the decision trace only).
 	Name string
-	// HostID is the host this VM is bound to (a Host CR name).
+	// UID is the VM's stable identity (the caller uses the Kubernetes UID). The
+	// scheduler counts each (UID, HostID) pair once, at the larger of the
+	// listed sizes per resource, so a VM listed both from its durable record
+	// and from an in-flight assumption (a create, or an admitted resize not yet
+	// applied), or with the same host in placement.host and
+	// placement.pendingHost, is not counted twice.
+	// It also ignores every entry whose UID equals Request.VMUID, so a VM never
+	// competes with itself. An empty UID is never de-duplicated.
+	UID string
+	// HostID is the host this VM is bound to, pending on, or assumed on (a Host
+	// CR name). An entry with an empty HostID is ignored.
 	HostID string
 	// Labels are the VM's labels, matched by (anti-)affinity selectors.
 	Labels map[string]string
+	// Resources is the CPU/memory the VM holds on HostID. It is summed into the
+	// host's committed capacity. The pool's overcommit ratios apply to the
+	// host's capacity, never to this sum.
+	Resources ResourceRequest
+	// CapacityOnly marks a VM outside the scheduled VM's affinity scope (for
+	// example another namespace's VM on the same Provider): it counts toward
+	// committed capacity but is never matched by (anti-)affinity selectors nor
+	// counted as a bound VM.
+	CapacityOnly bool
 }
 
 // Request is the pure, self-contained input to Schedule. It carries no Kubernetes
@@ -150,10 +179,18 @@ type Request struct {
 	// idempotent re-selection in D4.
 	CurrentBinding string
 
-	// PlacedVMs is the pool's already-placed VM set (name -> host + labels), used
-	// for VM (anti-)affinity matching and per-host bound-VM counts. Caller-supplied
-	// and namespace-scoped.
+	// PlacedVMs is every VM that holds or is about to hold resources on a
+	// candidate: bound, pending and assumed VMs of the same Provider, in any
+	// namespace. Each counts toward its host's committed capacity; those not
+	// marked CapacityOnly also drive VM (anti-)affinity matching and per-host
+	// bound-VM counts. Caller-supplied.
 	PlacedVMs []PlacedVM
+
+	// VMUID identifies the VM being scheduled (its Kubernetes UID). PlacedVMs
+	// entries with this UID are ignored: the VM's own binding, pending host or
+	// earlier assumption never counts against its own placement. Empty means
+	// there is no self entry to skip.
+	VMUID string
 
 	// ExcludedHosts are hosts (Host CR names) the caller has ruled out for THIS
 	// VM, whatever their fit — e.g. a host where a Create of the VM was refused
@@ -221,11 +258,18 @@ func Schedule(req Request) (Result, error) {
 			feasible = append(feasible, h)
 			continue
 		}
-		rejections = append(rejections, HostRejection{HostID: h.Name, Reason: reason, Detail: detail})
+		rej := HostRejection{HostID: h.Name, Reason: reason, Detail: detail}
+		if sf := ec.capacityShortfall(h, reason); sf != nil {
+			rej.Shortfall = sf
+			rej.Detail = sf.String()
+		}
+		rejections = append(rejections, rej)
 	}
 
 	if len(feasible) == 0 {
-		return Result{}, newNoFeasibleHostError(len(req.Candidates), rejections)
+		nf := newNoFeasibleHostError(len(req.Candidates), rejections)
+		nf.Request = req.Resources
+		return Result{}, nf
 	}
 
 	// IDEMPOTENCY (D4): a VM already bound re-selects its current host when that

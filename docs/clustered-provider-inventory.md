@@ -195,8 +195,9 @@ each `HostInfo` field is fed by exactly one command:
 `allocatable_mem_mib` are the host's **raw schedulable capacity** (total logical
 CPUs, total memory). This layer does **not** apply `HostPool` overcommit ratios
 and does **not** subtract already-bound VMs — the operator-side scheduler does
-that later, on top of these totals (ADR-0007). The field name follows the wire
-contract; read it as "capacity the scheduler starts from".
+that, on top of these totals (see *Committed capacity* under *Placement
+scheduler* below). The field name follows the wire contract; read it as
+"capacity the scheduler starts from".
 
 **Health does not fail the whole call.** One unreachable host is reported
 `NotReady` (with the id/address/labels the registry still knows) while its
@@ -670,7 +671,7 @@ constraint that must hold:
 | Filter | Rule |
 |--------|------|
 | Health + cordon | `status.health == Ready` **and** `spec.schedulable == true` (a drained or NotReady host is never a target). |
-| Capacity fit | `allocatableCPU` and `allocatableMemoryMiB` ≥ the request **after** the pool's overcommit ratios. |
+| Capacity fit | the request fits in what is **free**: `allocatableCPU` / `allocatableMemoryMiB` times the pool's overcommit ratio, **minus** what the VMs bound to, pending on or assumed on the host already hold (see *Committed capacity* below). |
 | Hard host list | `VMPlacementPolicy.Hard.Hosts` allow-list / `Hard.ExcludedHosts` deny-list (a host id is its `Host` CR name). |
 | Hard node-selector | `Hard.NodeSelector` matched against `Host.spec.labels`. |
 | Storage/network visibility (D6) | the VM's required pools/networks as a `Host.spec.labels` requirement: `storage.virtrigaud.io/pool-<name>` / `net.virtrigaud.io/<name>` == `"true"`. |
@@ -683,17 +684,140 @@ constraint that must hold:
 **Score** ranks the survivors and picks the best, deterministically:
 
 1. **Soft preferences** (the primary axis): `Soft.*` constraints, `PreferredFeatures`, and **preferred** host/VM (anti-)affinity apply as a bonus/penalty that ranks a preferred host above raw packing.
-2. **Strategy** (`HostPool.spec.strategy`): **Spread** favors the most free capacity, then the fewest bound VMs; **BinPack** favors the tightest host that still fits.
+2. **Strategy** (`HostPool.spec.strategy`): **Spread** favors the most free (uncommitted) capacity, then the fewest bound VMs; **BinPack** favors the tightest host that still fits.
 3. **Host id** ascending — the final tie-break, so the same inputs always yield the same host regardless of candidate order.
 
-Overcommit ratios and bound-VM counts feed both the capacity fit and the score:
-`allocatable` (the host TOTAL the inventory layer reports) is multiplied by the
-pool's overcommit ratio to get the bookable capacity, and bound-VM counts come from
-the already-placed set the caller supplies (the operator owns the binding, D1).
-This slice deliberately does **not** subtract per-VM reservations from `allocatable`
-— where and how running-VM reservations yield true free capacity is ADR-0007 **open
-question 5** — so the bound-VM count is the load-aware secondary signal, and a
-provider that reports live (already-net) `allocatable` makes the fit exact.
+### Committed capacity
+
+A host's free capacity is what the pool lets VMs book, minus what VMs already
+hold there (ADR-0007 Addendum A, *scheduler accuracy* amendment):
+
+```
+free = allocatable × overcommit ratio − committed
+```
+
+- **`allocatable`** is the host total the inventory layer reports (see above).
+  It does not change when VMs start or stop, so subtracting the operator's own
+  VMs counts nothing twice.
+- **The overcommit ratio** scales the capacity, never the committed sum. With
+  4 physical vCPUs and `cpu: "2.0"`, 8 vCPUs are bookable. If you lower a ratio
+  below what is already committed, the host takes no new VM until enough VMs
+  leave; no VM is moved.
+- **`committed`** is the sum of the footprints of every VirtualMachine of this
+  Provider whose `status.placement.host` or `status.placement.pendingHost` names
+  the host. A VM belongs to the Provider it is bound through
+  (`status.boundProvider`), else to the one its `spec.providerRef` names.
+  - VMs in **every namespace** count, not only the new VM's.
+  - A VM being **deleted** counts until its VirtualMachine finalizer is gone.
+    Once only another controller's finalizer keeps it, it no longer counts, and
+    it no longer blocks the Host's deletion.
+  - A VM whose Create is still **pending** there counts.
+  - A VM naming the host in both fields counts once.
+- **Another VM's footprint is its admitted size**, never what its owner merely
+  asks for:
+  - a created VM counts at `status.currentResources` (the size the provider
+    applied), or at its VMClass size when nothing is recorded; editing its
+    `spec.resources` or `spec.classRef` changes nothing until a resize is
+    admitted (below);
+  - a VM whose create is pending counts at the size its Create sends: its
+    VMClass with any `spec.resources` override applied. While the create is pending, the CRD rejects any
+    change to `spec.classRef` and `spec.resources`, so this is the size it was
+    scheduled at;
+  - a VMClass in another namespace that the VM's namespace may not use
+    (no consumer grant) sizes nothing;
+  - every VM counts at least 1 vCPU and 128 MiB.
+- **Not counted**: domains on the host that VirtRigaud does not manage, and the
+  hypervisor's own use. To keep room for them, set a ratio below 1 (for example
+  `memory: "0.9"`) or cordon the host.
+- **Affinity is unchanged.** VM (anti-)affinity and the host-anti-affinity VM
+  cap still consider only VMs in the new VM's own namespace. Other namespaces'
+  VMs take up capacity; their labels are never matched.
+- **Trusted status.** The accounting trusts `status.boundProvider` and
+  `status.placement`, which only the operator writes. Never grant tenants
+  write access to `virtualmachines/status`.
+
+**Resizing a VM up is checked too.** When the size a clustered VM asks for
+(its VMClass, or its `spec.resources` override) grows its CPU or memory, the
+controller checks, under the same per-Provider lock, that the growth fits in
+its host's free capacity, not counting the VM's own current size. If it fits,
+the resize is sent and counted at its new size straight away. If it does not,
+nothing is sent, the VM keeps running at its current size, and it gets
+`Reconfiguring=False` with reason `InsufficientHostCapacity`, for example:
+
+```
+resizing to 8 vCPU and 8192 MiB exceeds the free capacity of its host kvm-01; the VM keeps
+4 vCPU and 8192 MiB and the resize is retried (next check in 30s)
+```
+
+The resize is retried after 30 s, 1 min, then every 2 min. Only the resources
+that grow are checked, so a shrink is never refused. The host's health and
+cordon do not matter, because a resize does not move the VM. A VM whose host is
+not registered as a `Host` cannot be resized up. Single-host Providers are not
+affected.
+
+**Detaching (orphan-on-delete) needs the Provider's permission.** A VM detached
+with `virtrigaud.io/orphan-on-delete` keeps running but stops counting. So a VM
+in another namespace than its clustered Provider is detached only when the
+Provider carries `infra.virtrigaud.io/allow-consumer-orphan-on-delete: "true"`.
+Otherwise its deletion is held with `Ready=False/OrphanOnDeleteNotAllowed`
+until the administrator allows it or the annotation is removed (see
+[`vm-provider-binding.md`](vm-provider-binding.md)).
+
+**No per-tenant quota.** Nothing limits how much of a shared clustered Provider
+one consumer namespace may take: hosts fill first come, first served. If you
+share a Provider across tenants, limit each tenant's VM count with a Kubernetes
+`ResourceQuota` (for example `count/virtualmachines.infra.virtrigaud.io`), or
+give tenants separate Providers and HostPools. A per-consumer quota is a
+planned follow-up.
+
+**Many VMs created at once.** The VM controller reconciles several VMs in
+parallel, and its cache may not show another reconcile's `pendingHost` write
+yet. So each clustered create takes a per-Provider lock and reads what is
+committed. It adds the placements other reconciles have picked but not yet
+recorded (an in-process *assume* cache). Then it schedules, records its own
+pick and releases the lock before it writes `pendingHost`. Two VMs never book
+the same capacity, and two VMs with mutual hard anti-affinity never land on the
+same host. A picked placement stops being tracked once the cache shows its
+`pendingHost` or `host`, and at the latest after 2 minutes. The manager runs
+under leader election, so one in-process cache is authoritative.
+
+**When nothing fits**, the VM gets `Placed=False` and `Provisioning=False`, both
+with reason `Unschedulable`, and a message such as:
+
+```
+no feasible host in pool "pool-a": no feasible host: 0 of 3 candidate host(s) passed the filters
+[insufficient CPU capacity: 3]; requested 4 vCPU and 4096 MiB, which exceeds the free capacity
+of every candidate host
+```
+
+The message states only the VM's own request. It never shows how much is
+committed or free on a host, because those figures come from other tenants'
+VMs; neither does the success trace in `status.placement.reason`.
+Administrators find the per-host arithmetic in the manager log (verbosity 1)
+and in the gauges below. The message never names a host or another VM, and its
+size does not grow with the pool. The VM is retried after 30 s, then 1 min, then every 2 min,
+until capacity frees up. The controller does not watch Hosts or other VMs, so a
+freed host is noticed within 2 minutes.
+
+**Metrics.** `virtrigaud_host_committed_cpu` and
+`virtrigaud_host_committed_memory_mib` give each Host's committed sum, labelled
+`provider` (`namespace/name`) and `host`. The Host controller refreshes them
+about once a minute and removes them when the Host is deleted or moved to
+another Provider. Compare them with `Host.status.allocatableCPU` /
+`allocatableMemoryMiB` times the pool ratio to see how full a host is.
+
+These gauges are **for administrators**: they show how full each host is,
+across tenants. The manager serves `/metrics` over plain HTTP when
+`--metrics-secure=false` (the chart's current default). Enable the chart's
+NetworkPolicy (`networkPolicy.enabled`, which admits scrapes only from
+`networkPolicy.monitoringNamespaceSelector`) or run the manager with
+`--metrics-secure`.
+
+The capacity check holds the Provider's lock only while it reads the informer
+cache and schedules. Every API write (a condition, `pendingHost`) happens
+after the lock is released, each with a time limit, so a slow API server does
+not stall other VMs. A VM that cannot get the lock within 5 seconds is retried
+about a second later.
 
 ### Idempotent on re-run
 

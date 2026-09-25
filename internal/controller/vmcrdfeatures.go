@@ -85,6 +85,13 @@ const (
 // XValidation marker on VirtualMachine in virtualmachine_types.go).
 const providerRefImmutabilityRuleFragment = "self.spec.providerRef == oldSelf.spec.providerRef"
 
+// pendingSizeImmutabilityRuleFragment identifies the rule that freezes
+// spec.classRef and spec.resources while a clustered create is pending (ADR-0007
+// Addendum A, scheduler-accuracy amendment). The committed-capacity accounting
+// counts a pending VM at that size, so without the rule its owner could grow it
+// after it was admitted.
+const pendingSizeImmutabilityRuleFragment = "self.spec.classRef == oldSelf.spec.classRef"
+
 // errReasonCRDFeaturesMissing is the metrics reason recorded on each check that
 // finds the installed VirtualMachine CRD without the provider-binding features.
 const errReasonCRDFeaturesMissing = "vm-crd-security-features-missing"
@@ -100,6 +107,9 @@ const crdCheckTimeout = 10 * time.Second
 const (
 	crdFeatureBoundProvider  = "status.boundProvider"
 	crdFeatureProviderRefCEL = "the spec.providerRef immutability rule (x-kubernetes-validations)"
+	// crdFeaturePendingSizeCEL is the rule freezing a pending clustered VM's
+	// size.
+	crdFeaturePendingSizeCEL = "the spec.classRef/spec.resources immutability rule while a clustered create is pending (x-kubernetes-validations)"
 	// crdFeatureConsumerSelector is checked on the Provider, VMClass and
 	// VMImage CRDs.
 	crdFeatureConsumerSelector = consumerNamespaceSelectorField
@@ -241,20 +251,24 @@ func missingVMCRDFeatures(crd *unstructured.Unstructured) ([]string, error) {
 	if _, found, _ := unstructured.NestedMap(schemaRoot, "properties", "status", "properties", "boundProvider"); !found {
 		missing = append(missing, crdFeatureBoundProvider)
 	}
-	hasRule := false
 	rules, _, _ := unstructured.NestedSlice(schemaRoot, "x-kubernetes-validations")
-	for _, r := range rules {
-		rule, ok := r.(map[string]any)
-		if !ok {
-			continue
+	hasRule := func(fragment string) bool {
+		for _, r := range rules {
+			rule, ok := r.(map[string]any)
+			if !ok {
+				continue
+			}
+			if text, _ := rule["rule"].(string); strings.Contains(text, fragment) {
+				return true
+			}
 		}
-		if text, _ := rule["rule"].(string); strings.Contains(text, providerRefImmutabilityRuleFragment) {
-			hasRule = true
-			break
-		}
+		return false
 	}
-	if !hasRule {
+	if !hasRule(providerRefImmutabilityRuleFragment) {
 		missing = append(missing, crdFeatureProviderRefCEL)
+	}
+	if !hasRule(pendingSizeImmutabilityRuleFragment) {
+		missing = append(missing, crdFeaturePendingSizeCEL)
 	}
 	return missing, nil
 }
@@ -332,7 +346,7 @@ func (c *VMCRDFeatureChecker) Evaluate(ctx context.Context) (string, []string) {
 		case metrics.CRDFeaturesVerified:
 			logger.Info("The installed CRDs have the security features this manager relies on")
 		case metrics.CRDFeaturesMissing:
-			logger.Error(ErrVMCRDSecurityFeaturesMissing, "Upgrade the CRDs: without the VirtualMachine provider-binding features a bound VM's spec.providerRef can still be changed and status.boundProvider is pruned; without spec.consumerNamespaceSelector no cross-namespace grant can be set and every cross-namespace reference is refused; without VMImage status.providerStatus[].providerUID and taskRef no prepared image is trusted and no asynchronous prepare is tracked; without VMImage status.providerStatus[].sourceDigest and Provider status.reportedCapabilities.supportsImageArtifactIdentity no prepared image can be matched to its source and import-style prepares are held. Readiness fails until the CRDs are upgraded",
+			logger.Error(ErrVMCRDSecurityFeaturesMissing, "Upgrade the CRDs: without the VirtualMachine provider-binding features a bound VM's spec.providerRef can still be changed and status.boundProvider is pruned; without the pending-size rule a clustered VM can be grown after it was scheduled; without spec.consumerNamespaceSelector no cross-namespace grant can be set and every cross-namespace reference is refused; without VMImage status.providerStatus[].providerUID and taskRef no prepared image is trusted and no asynchronous prepare is tracked; without VMImage status.providerStatus[].sourceDigest and Provider status.reportedCapabilities.supportsImageArtifactIdentity no prepared image can be matched to its source and import-style prepares are held. Readiness fails until the CRDs are upgraded",
 				"missing", missing)
 		case metrics.CRDFeaturesUnknown:
 			logger.Info("WARNING: cannot verify the CRDs' security features (a CRD cannot be read); make sure the CRDs are upgraded with the manager",

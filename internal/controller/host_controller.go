@@ -19,8 +19,10 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -116,6 +118,12 @@ type HostReconciler struct {
 	client.Client
 	Scheme         *runtime.Scheme
 	RemoteResolver ProviderResolver
+
+	// publishedProvider maps a Host (namespace/name) to the Provider label its
+	// committed-capacity gauges were last published under, so a changed
+	// spec.providerRef, or the Host's deletion, drops the stale series. The
+	// zero value is ready to use.
+	publishedProvider sync.Map
 }
 
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=hosts,verbs=get;list;watch;update
@@ -123,6 +131,7 @@ type HostReconciler struct {
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=hosts/finalizers,verbs=update
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=providers,verbs=get;list;watch
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=virtualmachines,verbs=get;list;watch
+// +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=vmclasses,verbs=get;list;watch
 
 // Reconcile syncs one Host's observed inventory into its status.
 //
@@ -146,6 +155,7 @@ func (r *HostReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resul
 	if err := r.Get(ctx, req.NamespacedName, host); err != nil {
 		if apierrors.IsNotFound(err) {
 			// Host gone (its in-use finalizer was already released).
+			r.forgetCommitted(req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
 		metrics.RecordError(errReasonHostGet, metrics.ComponentManager)
@@ -164,7 +174,47 @@ func (r *HostReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resul
 		}
 	}
 
+	r.publishCommitted(ctx, host)
 	return r.syncHostStatus(ctx, host)
+}
+
+// hostProviderKey is the Provider a Host belongs to: the one its providerRef
+// names, in the Host's own namespace (the same-namespace model).
+func hostProviderKey(host *infravirtrigaudiov1beta1.Host) types.NamespacedName {
+	return types.NamespacedName{Namespace: host.Namespace, Name: host.Spec.ProviderRef.Name}
+}
+
+// publishCommitted refreshes the Host's committed-capacity gauges
+// (virtrigaud_host_committed_cpu / _memory_mib) from the VirtualMachines bound
+// to or pending on it — the scheduler's accounting (ADR-0007 Addendum A,
+// scheduler-accuracy amendment). Best effort: a failure is logged and the
+// gauges keep their last value; it never fails the reconcile.
+func (r *HostReconciler) publishCommitted(ctx context.Context, host *infravirtrigaudiov1beta1.Host) {
+	provider := hostProviderKey(host)
+	cpu, mem, err := committedOnHost(ctx, r.Client, provider, host.Name)
+	if err != nil {
+		log.FromContext(ctx).V(1).Info("Could not compute the Host's committed capacity; keeping the last published value",
+			"host", host.Name, "error", err.Error())
+		return
+	}
+	// A Host whose spec.providerRef changed would otherwise leave its series
+	// under the old Provider label forever.
+	if old, loaded := r.publishedProvider.Swap(client.ObjectKeyFromObject(host), provider.String()); loaded && old != provider.String() {
+		if oldProvider, ok := old.(string); ok {
+			metrics.DeleteHostCommitted(oldProvider, host.Name)
+		}
+	}
+	metrics.SetHostCommitted(provider.String(), host.Name, cpu, mem)
+}
+
+// forgetCommitted removes the committed-capacity series published for the Host
+// key, under whichever Provider it was last published.
+func (r *HostReconciler) forgetCommitted(key types.NamespacedName) {
+	if old, loaded := r.publishedProvider.LoadAndDelete(key); loaded {
+		if oldProvider, ok := old.(string); ok {
+			metrics.DeleteHostCommitted(oldProvider, key.Name)
+		}
+	}
 }
 
 // handleHostDeletion releases the in-use finalizer of a Host being deleted only
@@ -192,6 +242,9 @@ func (r *HostReconciler) handleHostDeletion(ctx context.Context, host *infravirt
 		metrics.RecordError(errReasonHostFinalizer, metrics.ComponentManager)
 		return ctrl.Result{}, fmt.Errorf("remove in-use finalizer from Host %s: %w", host.Name, err)
 	}
+	// Nothing is bound or pending on it any more: drop its series.
+	r.forgetCommitted(client.ObjectKeyFromObject(host))
+	metrics.DeleteHostCommitted(hostProviderKey(host).String(), host.Name)
 	return ctrl.Result{}, nil
 }
 
@@ -217,26 +270,25 @@ func hostInUseMessage(users []string) string {
 // host in status.placement.host or status.placement.pendingHost through the
 // Host's own Provider. Under the same-namespace model (#330) a Host belongs to
 // the Provider named by its providerRef in the Host's namespace; a VM routes to
-// it only when its spec.providerRef resolves to that same Provider (namespace
-// defaulting to the VM's own). VMs may live in other namespaces than their
-// Provider, so all VirtualMachines are listed; a same-named Host of another
-// Provider is never confused with this one.
+// it only when its placement Provider (placementProviderKey: the Provider it is
+// bound through, else its spec.providerRef) is that same Provider. VMs may live
+// in other namespaces than their Provider, so all VirtualMachines are listed; a
+// same-named Host of another Provider is never confused with this one.
 func (r *HostReconciler) vmsUsingHost(ctx context.Context, host *infravirtrigaudiov1beta1.Host) ([]string, error) {
-	var vms infravirtrigaudiov1beta1.VirtualMachineList
-	if err := r.List(ctx, &vms); err != nil {
+	provider := hostProviderKey(host)
+	vms, err := listProviderVMs(ctx, r.Client, provider)
+	if err != nil {
 		return nil, fmt.Errorf("list VirtualMachines for Host %s/%s: %w", host.Namespace, host.Name, err)
 	}
 	var users []string
-	for i := range vms.Items {
-		vm := &vms.Items[i]
-		providerNS := vm.Spec.ProviderRef.Namespace
-		if providerNS == "" {
-			providerNS = vm.Namespace
-		}
-		if providerNS != host.Namespace || vm.Spec.ProviderRef.Name != host.Spec.ProviderRef.Name {
+	for i := range vms {
+		vm := &vms[i]
+		if placementProviderKey(vm) != provider {
 			continue
 		}
-		if boundHost(vm) == host.Name || pendingHost(vm) == host.Name {
+		// placementHosts is empty for a VM being deleted whose finalizer is
+		// gone: another controller's finalizer must not block decommissioning.
+		if slices.Contains(placementHosts(vm), host.Name) {
 			users = append(users, vm.Namespace+"/"+vm.Name)
 		}
 	}
@@ -452,6 +504,9 @@ func (r *HostReconciler) getProviderInstance(ctx context.Context, provider *infr
 // self-trigger loop) and sustains the inventory heartbeat via RequeueAfter, which
 // is independent of the event predicate.
 func (r *HostReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if err := indexPlacementProvider(mgr); err != nil {
+		return err
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&infravirtrigaudiov1beta1.Host{}).
 		WithEventFilter(predicate.GenerationChangedPredicate{}).

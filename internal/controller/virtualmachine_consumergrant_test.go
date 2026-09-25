@@ -426,6 +426,7 @@ func TestReconcileVM_UnchangedRefusalIsNotRewritten(t *testing.T) {
 	var statusWrites atomic.Int32
 	c := fake.NewClientBuilder().WithScheme(coverageTestScheme(t)).
 		WithObjects(append(cgObjects(bpNS, nil, nil), grantedProvider(cgOwnerNS, "shared", nil), vm)...).
+		WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).
 		WithStatusSubresource(&infravirtrigaudiov1beta1.VirtualMachine{}).
 		WithInterceptorFuncs(interceptor.Funcs{SubResourceUpdate: func(ctx context.Context, cl client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
 			statusWrites.Add(1)
