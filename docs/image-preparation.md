@@ -206,12 +206,14 @@ Artifacts are now identified by the `VMImage`'s **UID** and a **digest of its
   `created`, `reused`, `in_progress` and `conflict` (the confirmation of a Provider's own
   completed asynchronous import is not counted again). Alert on a rising `conflict`.
 
-**Provider support.** The mock and the Proxmox provider report
-`supportsImageArtifactIdentity`. Proxmox reports it because it prepares nothing by name: in
-this release it refuses every URL import with `InvalidSpec`, so such an image gets reason
-`InvalidSource` rather than a hold (see [Proxmox image sources](#proxmox-image-sources)).
-vSphere and libvirt report it once their ADR-0009 slices land; ADR-0009 makes those slices
-part of the same release. Until a provider reports it, import-style images (`ovaURL`, a
+**Provider support.** The mock, the libvirt provider and the Proxmox provider report
+`supportsImageArtifactIdentity`. libvirt names, stamps and publishes its prepared images by
+identity (single-host providers; see
+[libvirt prepared images](#libvirt-prepared-images-sourcelibvirturl)). Proxmox reports it
+because it prepares nothing by name: in this release it refuses every URL import with
+`InvalidSpec`, so such an image gets reason `InvalidSource` rather than a hold (see
+[Proxmox image sources](#proxmox-image-sources)). vSphere reports it once its ADR-0009 slice
+lands; ADR-0009 makes that slice part of the same release. Until a provider reports it, import-style images (`ovaURL`, a
 libvirt `url`, an `http` source) are held on it with `ProviderLacksArtifactIdentity`;
 reference-style images and VMs that exist are unaffected. A VM re-created because it
 vanished from its hypervisor counts as a create and is held too.
@@ -423,7 +425,140 @@ spec:
 
 Setting the variable **replaces** the default. If you use URL-sourced (prepared) images,
 keep the directory of the pool `ImagePrepare` writes into (normally
-`/var/lib/libvirt/images`) in the list. On multi-tenant hosts prefer a dedicated
+`/var/lib/libvirt/images`) in the list: `ImagePrepare` refuses a pool whose directory is not
+an allowed image directory (`InvalidSpec`), because no VM could be created from an image
+prepared there. On multi-tenant hosts prefer a dedicated
 directory that only administrators write to; every image in an allowed directory is
 usable by anyone who can create a `VMImage` for that provider. Session-mode (`/session`)
 providers, and images kept in subdirectories, need explicit configuration.
+
+## libvirt prepared images (`source.libvirt.url`)
+
+A libvirt `VMImage` with `source.libvirt.url` is **prepared**: the provider downloads the
+image on the hypervisor host, checks it, converts it to qcow2 and publishes it in the storage
+pool (`source.libvirt.storagePool`, default `default`), and every VM created from it gets its
+own copy. This section describes the ADR-0009 behaviour of the libvirt provider (Slice 4),
+which advertises `supportsImageArtifactIdentity`. A clustered libvirt provider (ADR-0007)
+does not prepare images yet (`ImagePrepare` is `Unimplemented`, both capabilities off).
+
+### Name and stamp
+
+The prepared image of `VMImage` `<namespace>/<name>` (UID `u`), prepared from a
+`spec.source` whose digest is `d`, is
+
+```text
+<pool dir>/<namespace>.<name>_<h16>.qcow2              the artifact (mode 0444)
+<pool dir>/.<namespace>.<name>_<h16>.virtrigaud-image.json   its stamp (mode 0444)
+```
+
+where `h16` is the first 16 hex digits of `sha256("v1/" + u + "/" + d)` and
+`<namespace>.<name>` is cut so the base name is at most 200 bytes. Example:
+`team-a.ubuntu-22.04_3c9e1f0a7b2d4e61.qcow2`. The name contains `_`, which no Kubernetes
+name can, so it never equals a pre-ADR bare name (`ubuntu-22.04.qcow2`) or a VM disk, and it
+is never a #334 reserved name. A re-created `VMImage` (new UID) or a changed `spec.source`
+(new digest) gets a new artifact; the old one is left in place.
+
+The stamp is a small JSON file (at most 4 KiB) holding the image UID, namespace and name, the
+source digest, the Provider that prepared it, the time, and the artifact file's **inode and
+size**. It never holds the URL, a header or a secret:
+
+```json
+{"stampVersion":1,"image":{"uid":"5f0c…","namespace":"team-a","name":"ubuntu-22.04"},
+ "sourceDigest":"sha256:9b1e…","preparedBy":{"uid":"…","namespace":"team-a","name":"libvirt"},
+ "preparedAt":"2026-09-25T10:00:00Z","artifact":{"inode":1835021,"size":2361393152}}
+```
+
+A stamp that is oversized, not JSON, repeats a key, contains a `null`, an unknown field, a
+wrong type, an unknown `stampVersion` or a malformed digest is **untrusted** — treated
+exactly like no stamp.
+
+### Reuse, and what is refused
+
+Before downloading, the provider reads the artifact and its stamp (never following a
+symlink):
+
+| Found at the name | Result |
+|---|---|
+| Nothing | Download, convert and publish (below) |
+| The artifact and a trusted stamp for this image's UID and digest, recording the artifact's inode and size | **Reused**; nothing is downloaded |
+| A stamp for this image and digest, no artifact, last written less than the staleness bound ago | **In progress** (another prepare is publishing): retryable `Unavailable` |
+| The same, older than the staleness bound | **Abandoned** by a crashed prepare of this image: that stamp alone is removed (only if unchanged since it was read), then the image is prepared again |
+| Anything else: an artifact without a stamp, an untrusted stamp, another UID or digest, an inode or size that does not match, a symlink or directory | **Conflict** (`AlreadyExists`, ADR-0009 D4): nothing is overwritten, deleted, re-stamped or adopted; an operator has to act |
+| The check itself fails (SSH, `stat`) | Retryable error — never taken as "nothing there" |
+
+The Conflict message names only the requester's own artifact; who else the stamp names is
+written to the provider log only. The **staleness bound** is
+`max(2 × spec.prepare.timeout, 2h)` (the timeout defaults to 30m), judged by file mtime on the
+host's clock.
+
+### How an image is published
+
+1. Every prepare works in its **own** staging files in the pool directory, created by
+   `mktemp` (exclusive, unpredictable name, mode `0600`):
+   `.virtrigaud-imageprepare-XXXXXXXXXX.download` (the download), `….curlrc` (the curl
+   configuration that carries the URL, so the URL never appears on a command line, in a log
+   or in the host's process list), `….partial` (the `qemu-img convert` output) and
+   `….stamp.partial` (the stamp). They are dotfiles with reserved suffixes, so a pool refresh
+   does not list them and they can never be used as a base image. They are removed when the
+   prepare ends; files of a crashed prepare that have not been written for the staleness
+   bound are swept by the next prepare in that pool.
+2. The download is limited to `http`, `https` and `ftp` (redirects included), its checksum is
+   verified when `checksum` is set, and its header must not reference other files.
+3. The converted image is **finalized read-only**: `chmod 0444`, `restorecon` (best-effort,
+   through `sudo`), `sync`. It is **not** chowned — it stays owned by the provider's SSH user,
+   which is what lets that user hard-link it with `fs.protected_hardlinks=1`, and it only ever
+   needs to be read (each VM gets a copy that is chowned and relabelled as before).
+4. The stamp is linked into place with `ln` (never replacing a file). Of several concurrent
+   prepares of the same image, exactly one creates the stamp; the others re-read the name and
+   reuse, wait or refuse as in the table above.
+5. Only the prepare that created the stamp links the artifact, again with `ln`. If the
+   artifact name is taken at that moment, the prepare first removes **its own** stamp (so it
+   never stamps a file it did not publish) and returns a Conflict.
+
+Nothing is ever downloaded, converted, written or removed at the final name. The pool
+directory must be on a filesystem that supports hard links (ext4, xfs, NFS, …); on one that
+does not, the prepare fails with an explicit `InvalidSpec`. The provider's SSH user must be
+able to create files in the pool directory, as before.
+
+### Rules for the source
+
+- An import takes **exactly one input**, `source.libvirt.url`. A source that also sets
+  `source.libvirt.path` is refused (`InvalidSpec`): converting the path would make a stamped
+  copy of any file in the allowed image directories. A `source.libvirt.path` alone is a
+  reference to an existing image and is used as written (confined, then copied), never
+  prepared.
+- The storage pool must exist on the host and its directory must be an allowed image
+  directory (see above).
+
+### Which failures are retried
+
+A prepare runs synchronously. The provider reports failures that retrying cannot fix as
+`InvalidSpec` (gRPC `InvalidArgument`): the manager records them on the `VMImage`
+(`InvalidSource`) and holds instead of retrying every few seconds.
+
+| Permanent (`InvalidSpec`) | Retried |
+|---|---|
+| The URL answers HTTP 4xx (except 408, 425, 429); curl reports an unsupported or disallowed protocol, a malformed URL, access or login denied, a missing remote file, or a TLS certificate the host cannot verify | HTTP 5xx, 408, 425, 429; DNS, connect, timeout, TLS-handshake and transfer errors |
+| A checksum mismatch or an unsupported `checksumType` | The SSH transport or the host failing (a probe, `mktemp`, `chmod`/`sync`, `qemu-img convert`, `ln`, a checksum command that could not run) |
+| An image `qemu-img` cannot read, an unsupported format, or a header that references other files | A matching stamp still being published (`Unavailable`) |
+| A malformed request or source (see above), a pool that does not exist, has no directory, is outside the allowed image directories or cannot hold hard links | |
+
+Error messages never contain the source URL (it may embed credentials or a presigned
+token); the provider log records it with the user-info and query removed.
+
+### Deprecated: requests from an older manager
+
+A manager older than ADR-0009 sends a bare `target_name` and no identity. For **this release
+only**, the libvirt provider serves such a request the pre-ADR way — the artifact is
+`<pool dir>/<VMImage name>.qcow2`, an existing file of that name is reused by name, no stamp
+is written or echoed — but with the fixes above (retryable probe, private staging, read-only
+image published with `ln`, never chowned). It can never reach an ADR-0009 artifact (the names
+are disjoint). Every such request logs
+`WARN deprecated: image prepare without identity from an older manager; upgrade the manager; refused from the next release`
+and increments `virtrigaud_provider_image_prepare_legacy_requests_total{provider_type="libvirt"}`.
+Alert when that counter is non-zero, and do not run an older manager against a Provider
+shared across tenants. The next release refuses these requests with `FailedPrecondition`.
+
+Bare-name files prepared by earlier releases are never deleted, renamed, re-stamped or
+adopted; after the upgrade, the first create for each image prepares a new artifact and the
+old file becomes an orphan (a `<name>.qcow2` without a stamp).
