@@ -351,6 +351,9 @@ func (r *VirtualMachineReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
+	// The status as read, so a refusal that changes nothing is not re-written.
+	persisted := vm.Status.DeepCopy()
+
 	// Update observed generation
 	vm.Status.ObservedGeneration = vm.Generation
 
@@ -371,14 +374,15 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		imageRefName = fmt.Sprintf("imported:%s", vm.Spec.ImportedDisk.DiskID)
 	}
 	logger.V(1).Info("Resolving VM dependencies", "provider", vm.Spec.ProviderRef.Name, "class", vm.Spec.ClassRef.Name, "image", imageRefName)
-	provider, vmClass, vmImage, networks, err := r.getDependencies(ctx, vm)
+	deps, err := r.getDependencies(ctx, vm)
 	if err != nil {
-		// A Provider, VMClass or VMImage in another namespace that does not
-		// select this one (spec.consumerNamespaceSelector) is refused before any
-		// provider is resolved or called — also for a VM that is already bound
-		// (fail closed after an upgrade that introduced the grant).
+		// A Provider in another namespace that does not select this one
+		// (spec.consumerNamespaceSelector) is refused before any provider is
+		// resolved or called — also for a VM that is already bound (fail closed
+		// after an upgrade that introduced the grant). So are the VMClass and
+		// VMImage of a VM that is not bound yet.
 		if isConsumerNotAllowed(err) {
-			return r.handleNotRoutable(ctx, vm, err)
+			return r.refuseConsumer(ctx, vm, persisted, err)
 		}
 		// Check if Provider is missing - log at INFO level and skip reconciliation
 		// Check both wrapped errors and error message for "not found"
@@ -397,6 +401,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 	logger.V(1).Info("Dependencies resolved successfully")
+	provider, vmClass, vmImage, networks := deps.provider, deps.class, deps.image, deps.networks
 
 	// Bind the VM to the Provider it resolved to, or refuse it. A VM bound
 	// before status.boundProvider existed is backfilled from its current
@@ -445,7 +450,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	// returns (false, nil) and we fall through to the unchanged create path.
 	if requeue, err := r.EnsureImageOnProvider(ctx, vm, vmImage, provider, providerInstance); err != nil {
 		if isConsumerNotAllowed(err) {
-			return r.handleNotRoutable(ctx, vm, err)
+			return r.refuseConsumer(ctx, vm, persisted, err)
 		}
 		if stderrors.Is(err, errImagePrepareHold) {
 			// OnMissing forbids preparing (Fail/Wait); the condition is recorded
@@ -517,7 +522,12 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 		}
 
-		// Reconfigure task completed, update current resources and clear task ref
+		// Reconfigure task completed, update current resources and clear task ref.
+		// That reads the class: a class the VM's namespace may no longer use
+		// keeps the task recorded until access is restored.
+		if deps.classRefusal != nil {
+			return r.refuseConsumer(ctx, vm, persisted, deps.classRefusal)
+		}
 		logger.Info("Reconfigure task completed", "taskRef", vm.Status.ReconfigureTaskRef)
 		r.updateCurrentResources(vm, vmClass)
 		vm.Status.ReconfigureTaskRef = ""
@@ -543,6 +553,11 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 				k8s.ReasonWaitingForDependencies, "Waiting for adoption/clone controller to set Status.ID")
 			r.updateStatus(ctx, vm)
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		}
+		// A create uses the class and the image (a clustered create in flight
+		// is bound, so its refusals were deferred to here).
+		if err := deps.createRefusal(); err != nil {
+			return r.refuseConsumer(ctx, vm, persisted, err)
 		}
 		logger.Info("Creating VM")
 		return r.createVM(ctx, vm, providerInstance, provider, vmClass, vmImage, networks)
@@ -581,6 +596,11 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 			// two running copies of one disk (D8).
 			return r.handleMissingOnBoundHost(ctx, vm, ref, errReasonProviderDescribe)
 		}
+		// Re-creating uses the class and the image again: both must still be
+		// usable from the VM's namespace.
+		if err := deps.createRefusal(); err != nil {
+			return r.refuseConsumer(ctx, vm, persisted, err)
+		}
 		logger.Info("VM no longer exists, recreating")
 		vm.Status.ID = ""
 		return r.createVM(ctx, vm, providerInstance, provider, vmClass, vmImage, networks)
@@ -609,6 +629,14 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	if desc.PowerState != string(desiredPowerState) {
 		logger.Info("Power state mismatch, adjusting", "current", desc.PowerState, "desired", desiredPowerState)
 		return r.adjustPowerState(ctx, vm, providerInstance, ref, string(desiredPowerState))
+	}
+
+	// Reconciling the VM to its class reads the class: a class the VM's
+	// namespace may no longer use is refused here (describe and power above
+	// are unaffected). A revoked image never stops a bound VM; it is simply not
+	// sent with a reconfigure (vmImage is nil).
+	if deps.classRefusal != nil {
+		return r.refuseConsumer(ctx, vm, persisted, deps.classRefusal)
 	}
 
 	// Check if VMClass resources have changed and need reconfiguration
@@ -661,29 +689,27 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 			return r.removeFinalizer(ctx, vm)
 		}
 
+		// A Provider in another namespace that does not select this one — or
+		// that does not exist, which is refused the same way — is never used to
+		// delete the hypervisor VM, and, as for a provider reference mismatch,
+		// the refusal does not release the finalizer: removing the CR takes
+		// orphan-on-delete or force-delete (or the grant). A Provider in the
+		// VM's own namespace that is gone releases it, as before.
 		provider := &infravirtrigaudiov1beta1.Provider{}
-		if err := r.Get(ctx, providerKey, provider); err != nil {
-			if !errors.IsNotFound(err) {
+		if err := getForConsumer(ctx, r.Client, providerKey, provider, vm.Namespace); err != nil {
+			switch {
+			case isConsumerNotAllowed(err):
+				if res, retain := r.retainForUnroutableDelete(ctx, vm, err); retain {
+					return res, nil
+				}
+				// force-delete: the finalizer is removed below without any provider call.
+			case errors.IsNotFound(err):
+				// Provider not found, continue with cleanup
+			default:
 				logger.Error(err, "Failed to get provider for deletion")
 				metrics.RecordError(errReasonDepsError, metrics.ComponentManager)
 				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 			}
-			// Provider not found, continue with cleanup
-		} else if err := checkConsumer(ctx, r.Client, provider, vm.Namespace); err != nil {
-			// A Provider in another namespace that does not select this one is
-			// never used to delete the hypervisor VM — and, as for a provider
-			// reference mismatch, the refusal does not release the finalizer:
-			// removing the CR takes orphan-on-delete or force-delete (or the
-			// grant).
-			if !isConsumerNotAllowed(err) {
-				logger.Error(err, "Failed to check the provider's consumer grant for deletion")
-				metrics.RecordError(errReasonDepsError, metrics.ComponentManager)
-				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
-			}
-			if res, retain := r.retainForUnroutableDelete(ctx, vm, err); retain {
-				return res, nil
-			}
-			// force-delete: the finalizer is removed below without any provider call.
 		} else if ref, ok, res := r.deletionTarget(ctx, vm, provider); !ok {
 			// deletionTarget decided (an unbound clustered VM, or one bound
 			// through another Provider object, without the force-delete escape
@@ -767,33 +793,67 @@ func (r *VirtualMachineReconciler) orphanOnDelete(ctx context.Context, vm *infra
 	return r.removeFinalizer(ctx, vm)
 }
 
+// vmDependencies are the objects a VirtualMachine references, resolved for
+// one reconcile.
+type vmDependencies struct {
+	provider *infravirtrigaudiov1beta1.Provider
+	class    *infravirtrigaudiov1beta1.VMClass
+	image    *infravirtrigaudiov1beta1.VMImage
+	networks []*infravirtrigaudiov1beta1.VMNetworkAttachment
+
+	// classRefusal and imageRefusal hold, for a BOUND VM, the
+	// *ConsumerNotAllowedError of a VMClass / VMImage in another namespace
+	// that does not (or no longer) select the VM's; class / image is then nil.
+	// Their grant is enforced where their content is used — the class at a
+	// reconfigure, both at a (re-)create — so revoking a share does not stop
+	// describe and power of a VM created from it. See getDependencies.
+	classRefusal, imageRefusal error
+}
+
+// createRefusal is the refusal that keeps deps from being used to create (or
+// re-create) the VM: the class's, then the image's; nil when both may be used.
+func (d vmDependencies) createRefusal() error {
+	if d.classRefusal != nil {
+		return d.classRefusal
+	}
+	return d.imageRefusal
+}
+
 // getDependencies fetches all required dependencies for the VM.
 //
 // The Provider, VMClass and VMImage may be in another namespace only when that
 // object's spec.consumerNamespaceSelector selects the VM's namespace
-// (getForConsumer): otherwise a *ConsumerNotAllowedError is returned — also
-// for a cross-namespace object that does not exist — and the caller makes no
-// provider call. Networks are always in the VM's own namespace.
-func (r *VirtualMachineReconciler) getDependencies(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine) (
-	*infravirtrigaudiov1beta1.Provider,
-	*infravirtrigaudiov1beta1.VMClass,
-	*infravirtrigaudiov1beta1.VMImage,
-	[]*infravirtrigaudiov1beta1.VMNetworkAttachment,
-	error,
-) {
+// (getForConsumer); a cross-namespace object that does not exist is refused
+// the same way. When to refuse:
+//
+//   - the Provider: always — every provider call goes through it, so an
+//     ungranted Provider returns a *ConsumerNotAllowedError and the caller
+//     makes no provider call, bound VM or not;
+//   - the VMClass and VMImage of an UNBOUND VM: here, before anything is
+//     created from them;
+//   - the VMClass and VMImage of a BOUND VM: only where their content is used
+//     (vmDependencies.classRefusal / imageRefusal). The VM exists already, so
+//     describing and powering it uses neither.
+//
+// Networks are always in the VM's own namespace.
+func (r *VirtualMachineReconciler) getDependencies(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine) (vmDependencies, error) {
+	var deps vmDependencies
+	bound := vmIsBound(vm)
+
 	// Get Provider
 	provider := &infravirtrigaudiov1beta1.Provider{}
 	providerKey := vmProviderKey(vm)
 	if err := getForConsumer(ctx, r.Client, providerKey, provider, vm.Namespace); err != nil {
 		if isConsumerNotAllowed(err) {
-			return nil, nil, nil, nil, err
+			return deps, err
 		}
 		if errors.IsNotFound(err) {
 			// Provider doesn't exist yet - preserve the NotFound error for proper handling upstream
-			return nil, nil, nil, nil, fmt.Errorf("provider %s not found (namespace: %s): %w", vm.Spec.ProviderRef.Name, providerKey.Namespace, err)
+			return deps, fmt.Errorf("provider %s not found (namespace: %s): %w", vm.Spec.ProviderRef.Name, providerKey.Namespace, err)
 		}
-		return nil, nil, nil, nil, fmt.Errorf("failed to get provider %s: %w", vm.Spec.ProviderRef.Name, err)
+		return deps, fmt.Errorf("failed to get provider %s: %w", vm.Spec.ProviderRef.Name, err)
 	}
+	deps.provider = provider
 
 	// Get VMClass
 	vmClass := &infravirtrigaudiov1beta1.VMClass{}
@@ -802,26 +862,35 @@ func (r *VirtualMachineReconciler) getDependencies(ctx context.Context, vm *infr
 		classKey = key
 	}
 	if err := getForConsumer(ctx, r.Client, classKey, vmClass, vm.Namespace); err != nil {
-		if isConsumerNotAllowed(err) {
-			return nil, nil, nil, nil, err
+		switch {
+		case isConsumerNotAllowed(err) && bound:
+			deps.classRefusal, vmClass = err, nil
+		case isConsumerNotAllowed(err):
+			return deps, err
+		default:
+			return deps, fmt.Errorf("failed to get vmclass %s: %w", vm.Spec.ClassRef.Name, err)
 		}
-		return nil, nil, nil, nil, fmt.Errorf("failed to get vmclass %s: %w", vm.Spec.ClassRef.Name, err)
 	}
+	deps.class = vmClass
 
 	// Get VMImage (only if ImageRef is specified, not ImportedDisk)
-	var vmImage *infravirtrigaudiov1beta1.VMImage
 	if imageKey, ok := vmImageKey(vm); ok {
-		vmImage = &infravirtrigaudiov1beta1.VMImage{}
+		vmImage := &infravirtrigaudiov1beta1.VMImage{}
 		if err := getForConsumer(ctx, r.Client, imageKey, vmImage, vm.Namespace); err != nil {
-			if isConsumerNotAllowed(err) {
-				return nil, nil, nil, nil, err
+			switch {
+			case isConsumerNotAllowed(err) && bound:
+				deps.imageRefusal, vmImage = err, nil
+			case isConsumerNotAllowed(err):
+				return deps, err
+			default:
+				return deps, fmt.Errorf("failed to get vmimage %s: %w", vm.Spec.ImageRef.Name, err)
 			}
-			return nil, nil, nil, nil, fmt.Errorf("failed to get vmimage %s: %w", vm.Spec.ImageRef.Name, err)
 		}
+		deps.image = vmImage
 	} else if vm.Spec.ImageRef != nil {
 		// An image reference with an empty name names nothing: report it the
 		// way the lookup always has.
-		return nil, nil, nil, nil, fmt.Errorf("failed to get vmimage %q: empty name", vm.Spec.ImageRef.Name)
+		return deps, fmt.Errorf("failed to get vmimage %q: empty name", vm.Spec.ImageRef.Name)
 	}
 
 	// Get VMNetworkAttachments (only for networks that have networkRef specified)
@@ -834,7 +903,7 @@ func (r *VirtualMachineReconciler) getDependencies(ctx context.Context, vm *infr
 				Namespace: vm.Namespace,
 			}
 			if err := r.Get(ctx, netKey, network); err != nil {
-				return nil, nil, nil, nil, fmt.Errorf("failed to get vmnetworkattachment %s: %w", netRef.NetworkRef.Name, err)
+				return deps, fmt.Errorf("failed to get vmnetworkattachment %s: %w", netRef.NetworkRef.Name, err)
 			}
 			networks = append(networks, network)
 		} else {
@@ -843,7 +912,8 @@ func (r *VirtualMachineReconciler) getDependencies(ctx context.Context, vm *infr
 		}
 	}
 
-	return provider, vmClass, vmImage, networks, nil
+	deps.networks = networks
+	return deps, nil
 }
 
 // createVM creates a new VM using the provider.

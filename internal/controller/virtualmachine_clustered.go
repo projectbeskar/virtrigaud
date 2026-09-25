@@ -24,6 +24,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -324,13 +325,9 @@ func (r *VirtualMachineReconciler) handleMissingOnBoundHost(
 // Ready=False/PlacementTopologyMismatch; a VM whose spec.providerRef no longer
 // resolves to the Provider it is bound through gets
 // Ready=False/ProviderRefMismatch (plus a warning event) and is re-checked
-// slowly; a VM that references a Provider, VMClass or VMImage in another
-// namespace that does not select its own gets Ready=False/ConsumerNotAllowed
-// (plus a warning event on the transition) and is re-checked slowly — the
-// grant watches re-drive it as soon as access is granted. Any other error is
-// returned as-is.
+// slowly. Any other error is returned as-is. (A cross-namespace consumer
+// refusal goes through refuseConsumer.)
 func (r *VirtualMachineReconciler) handleNotRoutable(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, err error) (ctrl.Result, error) {
-	newRefusal := consumerRefusalIsNew(vm.Status.Conditions, err)
 	if !markNotRoutable(vm, err) {
 		return ctrl.Result{}, err
 	}
@@ -341,18 +338,39 @@ func (r *VirtualMachineReconciler) handleNotRoutable(ctx context.Context, vm *in
 		metrics.RecordError(errReasonProviderRefMismatch, metrics.ComponentManager)
 		r.recordEvent(vm, corev1.EventTypeWarning, k8s.ReasonProviderRefMismatch, err.Error())
 		return ctrl.Result{RequeueAfter: providerRefMismatchRetryInterval}, nil
-	case isConsumerNotAllowed(err):
-		metrics.RecordError(errReasonConsumerNotAllowed, metrics.ComponentManager)
-		if newRefusal {
-			r.recordEvent(vm, corev1.EventTypeWarning, k8s.ReasonConsumerNotAllowed, err.Error())
-		}
-		return ctrl.Result{RequeueAfter: consumerNotAllowedRetryInterval}, nil
 	case isPlacementTopologyMismatch(err):
 		metrics.RecordError(errReasonPlacement, metrics.ComponentManager)
 		return ctrl.Result{RequeueAfter: placementConfigRetryInterval}, nil
 	}
 	metrics.RecordError(errReasonPlacement, metrics.ComponentManager)
 	return ctrl.Result{RequeueAfter: placementUnboundRetryInterval}, nil
+}
+
+// refuseConsumer records that vm references a Provider, VMClass or VMImage in
+// another namespace that does not select its own (cause, a
+// *ConsumerNotAllowedError) and makes no provider call:
+// Ready=False/ConsumerNotAllowed with ObservedGeneration, a Warning event on
+// the transition only, and a slow recheck — the grant watches re-drive it as
+// soon as access is granted. persisted is the status as read at the start of
+// the reconcile: when nothing changed (a recheck of the same refusal) the
+// status is not written again, so refused VMs cost no API writes.
+func (r *VirtualMachineReconciler) refuseConsumer(
+	ctx context.Context,
+	vm *infravirtrigaudiov1beta1.VirtualMachine,
+	persisted *infravirtrigaudiov1beta1.VirtualMachineStatus,
+	cause error,
+) (ctrl.Result, error) {
+	newRefusal := consumerRefusalIsNew(vm.Status.Conditions, cause)
+	markNotRoutable(vm, cause)
+	metrics.RecordError(errReasonConsumerNotAllowed, metrics.ComponentManager)
+	if newRefusal {
+		log.FromContext(ctx).Info("Not calling the provider for this VM", "reason", cause.Error())
+		r.recordEvent(vm, corev1.EventTypeWarning, k8s.ReasonConsumerNotAllowed, cause.Error())
+	}
+	if persisted == nil || !equality.Semantic.DeepEqual(persisted, &vm.Status) {
+		r.updateStatus(ctx, vm)
+	}
+	return ctrl.Result{RequeueAfter: consumerNotAllowedRetryInterval}, nil
 }
 
 // markNotRoutable sets the condition for a vmRefFor failure and reports

@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -28,6 +29,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -301,19 +304,159 @@ func TestReconcileVM_BoundVMWithoutGrantFailsClosed(t *testing.T) {
 	}
 }
 
-func TestReconcileVM_BoundVMWithUngrantedClassFailsClosed(t *testing.T) {
+// cgBoundVMWithOwnProvider is a VM bound through its own namespace's Provider,
+// whose class (and, when image is true, image) is infra/shared.
+func cgBoundVMWithOwnProvider(image bool) *infravirtrigaudiov1beta1.VirtualMachine {
 	vm := cgBoundVM()
 	vm.Spec.ProviderRef.Namespace = ""
 	vm.Status.BoundProvider.Namespace = bpNS
 	vm.Spec.ClassRef.Namespace = cgOwnerNS
-	rp := &routingProvider{describeResp: contracts.DescribeResponse{Exists: true, PowerState: "On"}}
-	r, res, _ := bpReconciler(t, rp, append(append(cgObjects(bpNS, nil, nil), grantedClass(cgOwnerNS, "shared", nil)), vm)...)
+	if image {
+		vm.Spec.ClassRef.Namespace = ""
+		vm.Spec.ImportedDisk = nil
+		vm.Spec.ImageRef = &infravirtrigaudiov1beta1.ObjectRef{Name: "golden", Namespace: cgOwnerNS}
+	}
+	return vm
+}
 
-	_, err := r.reconcileVM(context.Background(), getBPVM(t, r, vm.Name))
+func TestReconcileVM_BoundVMWithRevokedClass(t *testing.T) {
+	t.Run("describe runs, the class is not applied, Ready=False/ConsumerNotAllowed", func(t *testing.T) {
+		vm := cgBoundVMWithOwnProvider(false)
+		rp := &routingProvider{describeResp: contracts.DescribeResponse{Exists: true, PowerState: "On"}}
+		r, _, _ := bpReconciler(t, rp, append(append(cgObjects(bpNS, nil, nil), grantedClass(cgOwnerNS, "shared", nil)), vm)...)
+
+		result, err := r.reconcileVM(context.Background(), getBPVM(t, r, vm.Name))
+		require.NoError(t, err)
+		assert.Equal(t, consumerNotAllowedRetryInterval, result.RequeueAfter)
+		require.Len(t, rp.describeRefs, 1, "the VM exists already: describing it uses no class content")
+		assert.Empty(t, rp.reconfigureRefs, "reconfiguring to a class the namespace may not use is refused")
+		assert.Empty(t, rp.createReqs)
+		assert.Empty(t, rp.deleteRefs)
+		requireConsumerNotAllowed(t, getBPVM(t, r, vm.Name), consumerKindVMClass)
+	})
+	t.Run("power is still reconciled", func(t *testing.T) {
+		vm := cgBoundVMWithOwnProvider(false)
+		vm.Spec.PowerState = infravirtrigaudiov1beta1.PowerStateOff
+		rp := &routingProvider{describeResp: contracts.DescribeResponse{Exists: true, PowerState: "On"}}
+		r, _, _ := bpReconciler(t, rp, append(append(cgObjects(bpNS, nil, nil), grantedClass(cgOwnerNS, "shared", nil)), vm)...)
+
+		_, err := r.reconcileVM(context.Background(), getBPVM(t, r, vm.Name))
+		require.NoError(t, err)
+		require.Len(t, rp.powerRefs, 1, "revoking a class share does not stop power operations")
+	})
+	t.Run("a missing VM is not re-created from it", func(t *testing.T) {
+		vm := cgBoundVMWithOwnProvider(false)
+		rp := &routingProvider{describeResp: contracts.DescribeResponse{Exists: false}}
+		r, _, _ := bpReconciler(t, rp, append(append(cgObjects(bpNS, nil, nil), grantedClass(cgOwnerNS, "shared", nil)), vm)...)
+
+		_, err := r.reconcileVM(context.Background(), getBPVM(t, r, vm.Name))
+		require.NoError(t, err)
+		assert.Empty(t, rp.createReqs, "a re-create uses the class")
+		after := getBPVM(t, r, vm.Name)
+		requireConsumerNotAllowed(t, after, consumerKindVMClass)
+		assert.Equal(t, "vm-100", after.Status.ID, "the binding is kept")
+	})
+	t.Run("a completed reconfigure task is not applied from it", func(t *testing.T) {
+		vm := cgBoundVMWithOwnProvider(false)
+		vm.Status.ReconfigureTaskRef = "task-1"
+		rp := &routingProvider{describeResp: contracts.DescribeResponse{Exists: true, PowerState: "On"}}
+		r, _, _ := bpReconciler(t, rp, append(append(cgObjects(bpNS, nil, nil), grantedClass(cgOwnerNS, "shared", nil)), vm)...)
+
+		_, err := r.reconcileVM(context.Background(), getBPVM(t, r, vm.Name))
+		require.NoError(t, err)
+		after := getBPVM(t, r, vm.Name)
+		requireConsumerNotAllowed(t, after, consumerKindVMClass)
+		assert.Equal(t, "task-1", after.Status.ReconfigureTaskRef, "kept until access is restored")
+	})
+}
+
+func TestReconcileVM_BoundVMWithRevokedImageKeepsWorking(t *testing.T) {
+	img := imageWithSource("golden", "")
+	img.Namespace = cgOwnerNS // no selector: not shared with team-a
+	t.Run("describe and Ready are unaffected", func(t *testing.T) {
+		vm := cgBoundVMWithOwnProvider(true)
+		rp := &routingProvider{describeResp: contracts.DescribeResponse{Exists: true, PowerState: "On"}}
+		r, _, _ := bpReconciler(t, rp, append(cgObjects(bpNS, nil, nil), img.DeepCopy(), vm)...)
+
+		_, err := r.reconcileVM(context.Background(), getBPVM(t, r, vm.Name))
+		require.NoError(t, err)
+		require.Len(t, rp.describeRefs, 1)
+		c := meta.FindStatusCondition(getBPVM(t, r, vm.Name).Status.Conditions, k8s.ConditionReady)
+		require.NotNil(t, c)
+		assert.Equal(t, metav1.ConditionTrue, c.Status, "revoking an image share does not stop a VM created from it")
+	})
+	t.Run("a missing VM is not re-created from it", func(t *testing.T) {
+		vm := cgBoundVMWithOwnProvider(true)
+		rp := &routingProvider{describeResp: contracts.DescribeResponse{Exists: false}}
+		r, _, _ := bpReconciler(t, rp, append(cgObjects(bpNS, nil, nil), img.DeepCopy(), vm)...)
+
+		_, err := r.reconcileVM(context.Background(), getBPVM(t, r, vm.Name))
+		require.NoError(t, err)
+		assert.Empty(t, rp.createReqs)
+		requireConsumerNotAllowed(t, getBPVM(t, r, vm.Name), consumerKindVMImage)
+	})
+	t.Run("a pending clustered create is not issued from it", func(t *testing.T) {
+		vm := cgBoundVMWithOwnProvider(true)
+		vm.Status.ID = ""
+		vm.Status.Placement = &infravirtrigaudiov1beta1.PlacementStatus{PendingHost: "host-alpha"}
+		rp := &routingProvider{}
+		clustered := withRuntime(clusteredProviderCR("shared", bpNS))
+		r, _, _ := bpReconciler(t, rp, labeledNamespace(bpNS, nil), clustered, grantedClass(bpNS, "shared", nil), img.DeepCopy(), vm)
+
+		_, err := r.reconcileVM(context.Background(), getBPVM(t, r, vm.Name))
+		require.NoError(t, err)
+		assert.Empty(t, rp.createReqs)
+		requireConsumerNotAllowed(t, getBPVM(t, r, vm.Name), consumerKindVMImage)
+	})
+	t.Run("the image is not sent with a reconfigure", func(t *testing.T) {
+		vm := cgBoundVMWithOwnProvider(true)
+		r, _, _ := bpReconciler(t, &routingProvider{}, append(cgObjects(bpNS, nil, nil), img.DeepCopy(), vm)...)
+		deps, err := r.getDependencies(context.Background(), getBPVM(t, r, vm.Name))
+		require.NoError(t, err)
+		assert.Nil(t, deps.image)
+		var cna *ConsumerNotAllowedError
+		require.ErrorAs(t, deps.imageRefusal, &cna)
+		assert.Equal(t, consumerKindVMImage, cna.Kind)
+		assert.NoError(t, deps.classRefusal)
+	})
+}
+
+func TestReconcileVM_UnchangedRefusalIsNotRewritten(t *testing.T) {
+	ctx := context.Background()
+	vm := cgVM(cgOwnerNS, "")
+	var statusWrites atomic.Int32
+	c := fake.NewClientBuilder().WithScheme(coverageTestScheme(t)).
+		WithObjects(append(cgObjects(bpNS, nil, nil), grantedProvider(cgOwnerNS, "shared", nil), vm)...).
+		WithStatusSubresource(&infravirtrigaudiov1beta1.VirtualMachine{}).
+		WithInterceptorFuncs(interceptor.Funcs{SubResourceUpdate: func(ctx context.Context, cl client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			statusWrites.Add(1)
+			return cl.SubResource(sub).Update(ctx, obj, opts...)
+		}}).Build()
+	r := &VirtualMachineReconciler{Client: c, Scheme: c.Scheme(), RemoteResolver: &countingResolver{provider: &routingProvider{}}}
+
+	_, err := r.reconcileVM(ctx, getBPVM(t, r, vm.Name))
 	require.NoError(t, err)
+	require.EqualValues(t, 1, statusWrites.Load(), "the refusal is recorded once")
+	for i := 0; i < 3; i++ {
+		_, err = r.reconcileVM(ctx, getBPVM(t, r, vm.Name))
+		require.NoError(t, err)
+	}
+	assert.EqualValues(t, 1, statusWrites.Load(), "a recheck of the same refusal writes nothing")
+}
+
+func TestHandleDeletion_MissingCrossNamespaceProviderIsRefusedLikeAnUngrantedOne(t *testing.T) {
+	vm := cgBoundVM()
+	vm.Spec.ProviderRef.Name = "gone"
+	vm.Status.BoundProvider.Name = "gone"
+	rp := &routingProvider{}
+	r, res, _ := bpReconciler(t, rp, append(cgObjects(bpNS, nil, nil), vm)...)
+
+	gone, requeue := deleteBP(t, r, vm.Name)
+	assert.False(t, gone, "a missing cross-namespace Provider keeps the finalizer, like an ungranted one")
+	assert.True(t, requeue)
 	assert.Zero(t, res.calls.Load())
 	noProviderCalls(t, rp)
-	requireConsumerNotAllowed(t, getBPVM(t, r, vm.Name), consumerKindVMClass)
+	requireConsumerNotAllowed(t, getBPVM(t, r, vm.Name), consumerKindProvider)
 }
 
 func TestReconcileVM_BoundVMWithGrantKeepsWorking(t *testing.T) {
