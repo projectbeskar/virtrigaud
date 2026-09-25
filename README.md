@@ -157,7 +157,7 @@ Per the [canonical capabilities matrix](https://projectbeskar.github.io/virtriga
 | **Task Tracking** | ✅ | N/A | ✅ | Async operation monitoring |
 | **Console URLs** | ✅ | ✅ | ⚠️ | Proxmox console URL: planned |
 | **Guest Agent** | ✅ | ✅ | ✅ | IP detection and guest info |
-| **Image Import** | ✅ | ✅ | ✅ | Libvirt: import into storage pool ([#154]). vSphere: OVA/content library. |
+| **Image Import** | ✅ | ✅ | ⚠️ | Libvirt: import into storage pool ([#154]). vSphere: OVA/content library. Proxmox: URL import (`source.http`) is refused with `InvalidSpec` in this release (ADR-0009 D10); prepare a template on PVE and reference it by `source.proxmox.templateID`. |
 | **Multi-NIC** | ✅ | ✅ | ✅ | Multiple network interfaces |
 | **Circuit Breaker** | ✅ | ✅ | ✅ | One CB per Provider CR (v0.3.6) |
 | **Cross-Provider Migration** | ✅ | ✅ | ✅ | **S3 + NFS** staging backends, both directions, all pairs (ADR-0006, [#236]). vSphere stages pod-side; libvirt host-side; Proxmox node-side over SSH (NFS via kernel mount). PVC is compat-only. |

@@ -206,13 +206,15 @@ Artifacts are now identified by the `VMImage`'s **UID** and a **digest of its
   `created`, `reused`, `in_progress` and `conflict` (the confirmation of a Provider's own
   completed asynchronous import is not counted again). Alert on a rising `conflict`.
 
-**Provider support.** Of the providers, only the mock reports
-`supportsImageArtifactIdentity` so far. vSphere, libvirt and Proxmox report it once their
-ADR-0009 slices land; ADR-0009 makes those slices part of the same release. Until
-a provider reports it, import-style images (`ovaURL`, a libvirt `url`, an `http` source)
-are held on it with `ProviderLacksArtifactIdentity`; reference-style images and VMs that
-exist are unaffected. A VM re-created because it vanished from its hypervisor counts as a
-create and is held too.
+**Provider support.** The mock and the Proxmox provider report
+`supportsImageArtifactIdentity`. Proxmox reports it because it prepares nothing by name: in
+this release it refuses every URL import with `InvalidSpec`, so such an image gets reason
+`InvalidSource` rather than a hold (see [Proxmox image sources](#proxmox-image-sources)).
+vSphere and libvirt report it once their ADR-0009 slices land; ADR-0009 makes those slices
+part of the same release. Until a provider reports it, import-style images (`ovaURL`, a
+libvirt `url`, an `http` source) are held on it with `ProviderLacksArtifactIdentity`;
+reference-style images and VMs that exist are unaffected. A VM re-created because it
+vanished from its hypervisor counts as a create and is held too.
 
 **After the upgrade**, the first create for each image and image location finds an entry
 without a `sourceDigest` and prepares the image once more, under its new name — one
@@ -293,6 +295,55 @@ target provider, `Create` falls back to the original by-reference source resolut
 unchanged (no regression). The `ImagePrepare` RPC change is wire-compatible (the `task` ref
 stays at proto field 1), so manager and providers must roll together but no CRD spec field
 changed. See ADR-0005 "Out of scope" for the original PR-6 framing.
+
+## Proxmox image sources
+
+**Proxmox URL image import is not supported in this release.** Use a template that already
+exists on Proxmox VE and reference it by VMID:
+
+```yaml
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMImage
+metadata:
+  name: ubuntu-22
+spec:
+  source:
+    proxmox:
+      templateID: 9000   # an existing PVE template (template=1)
+```
+
+| Source | Behaviour |
+|--------|-----------|
+| `source.proxmox.templateID` | Unchanged. Nothing is prepared: the VM is cloned from that template (a full clone). |
+| `source.proxmox.templateName` | Unchanged. `Create` clones only by VMID, so a name that is not a number fails at create time: use `templateID`. |
+| `source.http.url` | **Refused.** `ImagePrepare` returns `InvalidSpec` ("Proxmox URL image import (source.http) is not supported in this release ..."), with or without an identity, before any PVE call. While the image is not Ready on another Provider, the `VMImage` gets `phase: Failed` and `Ready=False` with reason `InvalidSource`, and the VM is not created. |
+
+Why: the earlier URL import only downloaded the image file into a PVE storage, named after
+the `VMImage`. It never turned it into a template VM, and `Create` needs a template VMID, so
+no VM could ever be created from it. It also reported any existing template with the same
+name, whoever created it, as "already prepared" (the cross-tenant defect
+[ADR-0009](adr/0009-prepared-image-artifact-identity.md) closes). Rather than keep a path
+that pretends to work, the provider fails closed (ADR-0009 D10). ADR-0009 Slice 6 adds a
+real import: a stamped template VM in the provider's own PVE pool, found only by its tag and
+stamp and never by name.
+
+To prepare an image yourself: import the cloud image into a VM disk on the node (for example
+`qm importdisk`), convert the VM to a template (`qm template <vmid>`), and put that VMID in
+`source.proxmox.templateID`. Give each tenant its own templates, or a PVE pool that only
+its Provider's account can read, because a reference-style source reaches every template the
+Provider's account can read.
+
+The Proxmox provider advertises `supportsImageArtifactIdentity`: it never reuses a prepared
+image by bare name, because it prepares none. Without that capability a new manager would
+hold `source.http` VMImages on Proxmox with a misleading "upgrade the provider image"
+reason instead of reporting `InvalidSource`.
+
+**A manager older than this release** still sends Proxmox URL imports without an identity.
+They get the same `InvalidSpec`. Each such request is also logged at `WARN` ("deprecated:
+image prepare without identity from an older manager ...") and increments
+`virtrigaud_provider_image_prepare_legacy_requests_total{provider_type="proxmox"}`. The
+Proxmox provider serves that counter at `/metrics` on its health port (as the libvirt
+provider does). A non-zero value means a manager must be upgraded.
 
 ## libvirt image paths (`source.libvirt.path`)
 
