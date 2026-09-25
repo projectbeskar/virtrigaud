@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"fmt"
@@ -503,6 +504,17 @@ func main() {
 	}
 	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up ready check")
+		os.Exit(1)
+	}
+
+	// The VirtualMachine provider-binding protection needs the upgraded CRD
+	// (status.boundProvider and the spec.providerRef immutability rule). Check
+	// it once now (logged and exported as a metric) and on every readiness
+	// probe: readiness fails while the installed CRD verifiably lacks them.
+	vmCRDCheck := controller.NewVMCRDFeatureChecker(mgr.GetAPIReader())
+	vmCRDCheck.Evaluate(ctrl.LoggerInto(context.Background(), setupLog))
+	if err := mgr.AddReadyzCheck("vm-crd-security-features", vmCRDCheck.ReadyzCheck); err != nil {
+		setupLog.Error(err, "unable to set up the VirtualMachine CRD ready check")
 		os.Exit(1)
 	}
 

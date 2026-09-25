@@ -30,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
+	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 )
 
 // providerRefImmutableMessage is the fixed part of the CRD rule's message.
@@ -101,6 +102,13 @@ var _ = Describe("VirtualMachine spec.providerRef immutability (CRD CEL rule)", 
 			}
 		}
 		Expect(messages).To(ContainElement(ContainSubstring(providerRefImmutableMessage)))
+	})
+
+	It("is reported verified by the manager's CRD feature check (readiness)", func() {
+		c := NewVMCRDFeatureChecker(k8sClient)
+		state, missing := c.Evaluate(ctx)
+		Expect(state).To(Equal(metrics.CRDFeaturesVerified))
+		Expect(missing).To(BeEmpty())
 	})
 
 	It("allows changing providerRef while the VM is unbound (no status at all)", func() {
