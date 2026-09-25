@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -26,13 +27,16 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
@@ -735,6 +739,52 @@ func TestClusteredCapacity_FailedPendingHostWriteForgetsTheAssumption(t *testing
 
 // TestClusteredCapacity_DeletionForgetsTheAssumption: deleting a VM drops its
 // assumption.
+// TestClusteredCapacity_AmbiguousPendingHostWriteKeepsTheAssumption (review
+// L6): only a write the API server refused outright releases the assumption;
+// after a timeout, a 5xx or a broken connection the pendingHost may be stored
+// after all, so the assumption keeps counting.
+func TestClusteredCapacity_AmbiguousPendingHostWriteKeepsTheAssumption(t *testing.T) {
+	gr := schema.GroupResource{Group: "infra.virtrigaud.io", Resource: "virtualmachines"}
+	cases := []struct {
+		name string
+		err  error
+		kept bool
+	}{
+		{name: "timeout", err: apierrors.NewTimeoutError("slow", 1), kept: true},
+		{name: "internal error", err: apierrors.NewInternalError(stderrors.New("etcd")), kept: true},
+		{name: "transport", err: stderrors.New("connection reset by peer"), kept: true},
+		{name: "conflict", err: apierrors.NewConflict(gr, "vm", stderrors.New("rv")), kept: false},
+		{name: "invalid", err: apierrors.NewInvalid(schema.GroupKind{Group: gr.Group, Kind: "VirtualMachine"}, "vm", nil), kept: false},
+		{name: "bad request", err: apierrors.NewBadRequest("no"), kept: false},
+		{name: "forbidden", err: apierrors.NewForbidden(gr, "vm", stderrors.New("rbac")), kept: false},
+		{name: "not found", err: apierrors.NewNotFound(gr, "vm"), kept: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := coverageTestScheme(t)
+			objs := append(capBase(), capHost("host-alpha", 4), capVM("vm"))
+			fc := fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).
+				WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).
+				WithStatusSubresource(&infravirtrigaudiov1beta1.VirtualMachine{}).
+				WithInterceptorFuncs(interceptor.Funcs{
+					SubResourceUpdate: func(context.Context, client.Client, string, client.Object, ...client.SubResourceUpdateOption) error {
+						return tc.err
+					},
+				}).Build()
+			r := &VirtualMachineReconciler{Client: fc, Scheme: s}
+			prov := &concurrentCreateProvider{}
+			_, _ = r.createVM(context.Background(), readVM(t, fc, "vm"), prov, clusteredProviderCR("prov-cluster", capNS),
+				smallVMClass(capNS), minimalVMImage(capNS), nil)
+			assert.Empty(t, prov.created(), "no Create without a recorded pending host")
+			if tc.kept {
+				assert.Equal(t, []string{"uid-vm"}, assumedUIDs(r))
+			} else {
+				assert.Empty(t, assumedUIDs(r))
+			}
+		})
+	}
+}
+
 func TestClusteredCapacity_DeletionForgetsTheAssumption(t *testing.T) {
 	vm := capVM("gone")
 	vm.Finalizers = []string{infravirtrigaudiov1beta1.VirtualMachineFinalizer}

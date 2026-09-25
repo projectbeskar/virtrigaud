@@ -1047,11 +1047,9 @@ func (r *VirtualMachineReconciler) createVM(
 			// ADR-0007 Addendum A, A2: durably record the attempted host BEFORE
 			// Create, so a retry after a lost status write (or a Create that ran
 			// past its deadline) lands on this same host instead of a second one.
+			// recordPendingHost releases the assumption resolveClusterPlacement
+			// made only when the write provably did not land.
 			if res, recorded, rerr := r.recordPendingHost(ctx, vm, providerCR, p); !recorded {
-				// Nothing durable holds the host for this VM: release the
-				// assumption resolveClusterPlacement made, so it does not
-				// block capacity until its TTL.
-				r.placementAssumptions().Forget(vmSchedulingUID(vm))
 				return res, rerr
 			}
 			host = p.hostID
