@@ -5,6 +5,25 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-25 22:10] - Fix: VirtualMachine spec.resources CPU/memory override was never sent to the provider
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/controller/virtualmachine_controller.go`: `buildCreateRequest` sent only the VMClass's own CPU/memory to the provider on Create and Reconfigure; a VirtualMachine's `spec.resources.cpu`/`memoryMiB` override was silently dropped from the actual request, even though `needsReconfigure` and `updateCurrentResources` already compared and recorded it against it — so `status.currentResources` could report a size the VM never actually had. All three now go through one new helper, `effectiveResources` (`internal/controller/vmclass_quantity.go`): the VMClass's CPU/memory with any `spec.resources` override applied, field by field, bounds-checked the same way a VMClass value already is (non-negative, below the VMClass CRD maximum — catching an object stored before that validation existed). An out-of-bounds override now surfaces as `Reconfiguring=False/ValidationError` before any provider call, never a wrapped or silently-ignored value.
+- `internal/controller/virtualmachine_controller.go`: `reconfigureVM`'s own `buildCreateRequest` failure now sets the same `ValidationError` condition instead of returning a bare error, matching `createVM`'s existing handling.
+- `internal/controller/vm_resources_override_test.go` (new): `effectiveResources` bounds table; Create and Reconfigure honoring an override on both single-host and clustered (`topology: cluster`) providers; an override removed reverting the VM to the VMClass size; an invalid override refused with a condition and no provider call; `status.currentResources` recording only what a confirmed Create/Reconfigure actually sent — and never advancing on a failed call.
+- `docs/upgrading.md`: new Breaking changes row — a running VM with `spec.resources` set may be resized on the first reconcile after upgrade, now that the override is actually applied; includes a `jq` query to find affected VMs beforehand.
+- `examples/advanced/vm-reconfigure-patch.yaml`: corrected the trailing comment block, which described a `ReconfigurePendingPowerCycle` condition and an automatic power-off/reconfigure/power-on orchestration that do not exist anywhere in the controller; documents the real behavior instead (the provider applies online where it can, otherwise writes the offline configuration and logs a WARN — the controller never power-cycles the VM for you).
+
+### Why
+`status.currentResources` is meant to be the honest record of what a provider actually applied — other in-flight work (the ADR-0007 clustered-provider capacity accounting) depends on that meaning exactly that. Before this fix it was already drifting from what was sent, in the one case an operator was most likely to notice: a VM-level resource override whose declared, "applied" status never matched the VM's real size.
+
+### Impact
+- [x] Breaking change (a running VM with `spec.resources` set converges to its declared size on the first post-upgrade reconcile, following the existing online/offline reconfigure rules — see `docs/upgrading.md`)
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-09-25 20:55] - Image prepare DoS hardening: bounded OVF descriptors, deadline and throughput watchdog, SSRF deny-list gaps, libvirt IMAGE_SOURCE_UNAVAILABLE
 **Author:** @wrkode (William Rizzo)
 
