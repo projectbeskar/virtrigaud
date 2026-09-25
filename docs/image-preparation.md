@@ -227,8 +227,13 @@ bare name) is left untouched on the hypervisor.
 **Multi-tenant setups.** Providers that resolve to the same image location (the same
 vSphere import folder, libvirt pool directory, or Proxmox storage) share one artifact per
 image and source; each re-checks the stamp through its own credentials before reusing it.
-The trust boundary is write access to that location, so give each tenant's Provider its own
-import location and scope its hypervisor account to it.
+The trust boundary is write access to that location: a principal who can write there can
+change an artifact's content, and — because a `VMImage`'s UID is readable by anyone who can
+read the `VMImage`, and an image is prepared only at the first VM create — can plant a
+matching artifact before the first prepare, which is then reused. **Only the Provider's own
+hypervisor account may write the image location.** Give each tenant's Provider its own
+import location, scope its hypervisor account to it, and grant nobody else write access to
+it (see the vSphere section for the exact vCenter rights).
 
 The source digest follows ADR-0009's Q7 rule, "location yes, transport no". It covers
 every `spec.source` field that says what the image is or where it is placed: URLs and
@@ -381,8 +386,23 @@ that template, never a same-named one elsewhere.
 **Multi-tenant setups: give each tenant's Provider its own import folder**
 (`spec.defaults.folder`) and scope that Provider's vCenter account to it. Providers that
 resolve to the same folder share one template per image and source; that is intended for
-Providers trusted with each other's images. The trust boundary is write access to the
-folder: a principal that can reconfigure the template can change its content.
+Providers trusted with each other's images.
+
+**Trust assumption: nobody but the Provider's vCenter account may create, move, rename,
+reconfigure (`VirtualMachine.Config.AdvancedConfig`) or mark as template
+(`VirtualMachine.Provisioning.MarkAsTemplate`) VMs in the import folder.** The stamp proves
+provenance only against principals who cannot do that. A `VMImage`'s UID is readable by
+anyone who can read the `VMImage`, and an image is prepared only at its first VM create, so
+a principal holding those rights in the folder can plant a *complete, matching* template
+first — and it is **reused**. The same principal can make the provider destroy a powered-off
+VM they stamp as this image's abandoned import and move into the folder. vCenter folder
+permissions propagate to child objects, and the import folder is `spec.defaults.folder`,
+the folder the Provider's VMs are created in as well, so rights delegated to VM owners on
+that folder (or a parent) reach the import folder too. Use a **dedicated import folder**
+with a restrictive ACL: the Provider's account alone holds those rights on it, and no
+propagating grant from a parent folder gives them to anyone else. (A separate
+`defaults.imageFolder`, so VMs and templates need not share a folder, is a tracked
+follow-up.)
 
 **Stamp.** The template carries its provenance in ExtraConfig, written into the import
 spec before `ImportVApp`, so the object carries it from the moment it exists:
