@@ -57,6 +57,53 @@ The Slice 3 security re-review found that a tenant-supplied OVA could still exha
 - [ ] Config change only
 - [ ] Documentation only
 
+## [2026-09-25 20:29] - ADR-0007 scheduler accuracy: committed capacity and an assume cache for clustered placement
+**Author:** @wrkode (William Rizzo)
+
+> **Operator note (clustered providers only).** The clustered scheduler now subtracts what each host already holds: every VM bound to it, pending on it, or being deleted from it, in any namespace. A pool that used to accept any number of VMs on one host now refuses the ones that do not fit. Those VMs report `Placed=False/Unschedulable` with the numbers, for example `insufficient CPU on 3 of 3 candidate host(s): requested 4 vCPU, at most 2 free (committed 14 of 16 after overcommit)`, and are retried after 30 s, 1 min, then every 2 min. Domains VirtRigaud does not manage are not counted; keep room for them with an overcommit ratio below 1 or by cordoning. Single-host and thin-client Providers are unaffected.
+
+### Added
+- `internal/scheduler/assume/assume.go` (new): an in-process assume cache (kube-scheduler's *assume* step).
+  - A per-Provider lock serialises read-committed, `Schedule` and assume; the API write happens after the lock is released.
+  - An assumption ends when the informer cache shows the VM's record on the assumed host, when the VM is gone, on `Forget`, or after its TTL.
+  - Correct in process because only the elected leader runs reconcilers.
+- `internal/controller/virtualmachine_placement_capacity.go` (new): committed-capacity accounting for the clustered create path.
+  - `committedPlacements` lists every VirtualMachine of the Provider (`status.boundProvider`, else `spec.providerRef`), in every namespace, whose `placement.host` or `.pendingHost` names a host. VMs being deleted count until their finalizer is gone.
+  - `footprint` sizes a VM as the largest of its VMClass size, `spec.resources` override and `status.currentResources`.
+  - `placementRequest` merges the live assumptions and settles the confirmed ones.
+  - `unschedulableBackoff` is the per-VM retry backoff (30 s doubling to 2 min).
+  - `committedOnHost` gives one host's sum to the Host controller.
+- `internal/obs/metrics/host_committed.go` (new): gauges `virtrigaud_host_committed_cpu` and `virtrigaud_host_committed_memory_mib`, labelled `provider` (namespace/name) and `host`.
+- `internal/controller/host_controller.go`: publishes the gauges on each Host sync and removes them with the Host. The controller declares its read of VMClasses; the generated role is unchanged.
+- `internal/scheduler/errors.go`: `CapacityShortfall` on capacity rejections, `NoFeasibleHostError.CapacitySummary`, and `InsufficientCapacity`.
+- Tests:
+  - `internal/scheduler/committed_test.go`: the host fills up; the VM is excluded from its own sum; pending and assumed entries count; one VM on one host counts once; overcommit scales capacity, not the committed sum; the message is bounded and names no VM or host.
+  - `internal/scheduler/assume/assume_test.go`: 20 concurrent schedules against a host that fits 7 give exactly 7 (25 rounds); mutual hard anti-affinity never co-locates (100 rounds); TTL; settle; per-Provider locks.
+  - `internal/controller/virtualmachine_placement_capacity_test.go`: a table of what counts as committed; 20 concurrent `createVM` calls through a client whose reads lag its writes give exactly 5 creates on a host that fits 5 (a control without a shared cache overbooks); anti-affinity (30 rounds); settle on confirmation, a stale record on another host, TTL, failed write, VM deletion; backoff; the gauges; a single-host Provider never creates the cache.
+  - `internal/controller/virtualmachine_placement_capacity_envtest_test.go`: a running controller creates 8 VMs at once against a host that fits 3. Exactly 3 hold it and 5 are `Unschedulable`. With the assume step disabled, the spec failed in 3 of 3 runs.
+
+### Changed
+- `internal/scheduler/scheduler.go`, `evalcontext.go`, `filter.go`, `score.go`: `PlacedVM` carries `UID`, `Resources` and `CapacityOnly`; `Request` gains `VMUID`.
+  - Fit and score use *free = allocatable × overcommit ratio − committed*. Each (UID, host) pair counts once, and the scheduled VM's own entries are skipped.
+  - `CapacityOnly` entries hold capacity but never join affinity matching or the bound-VM count.
+- `internal/controller/virtualmachine_controller.go` (`resolveClusterPlacement`): reads committed placements and assumptions, schedules and assumes, all under the Provider's lock. It no longer uses the namespace-only, confirmed-binding-only placed set for capacity.
+  - The request is the VM's footprint, not only the VMClass size.
+  - A no-fit sets `Placed=False/Unschedulable` as well as `Provisioning=False/Unschedulable` and backs off per VM.
+  - `createVM` forgets the assumption when the `pendingHost` write fails; `handleDeletion` forgets it and the backoff.
+- `internal/controller/virtualmachine_clustered.go`: the `pendingHost` write is bounded to 1 min (the assumption TTL is twice that), and a name-conflict release forgets the assumption.
+- `internal/k8s/conditions.go`: `Unschedulable` is documented as a `Placed` reason too.
+- `docs/adr/0007-clustered-orchestrator-provider.md`: dated *scheduler accuracy* amendment in Addendum A, A5 (what `allocatable` means, the accounting model, the assume cache, reporting, metrics, what is still not covered). A5's "Tracked separately" paragraph now points at it; open question 5 is resolved.
+- `docs/clustered-provider-inventory.md`: new *Committed capacity* section. `docs/release-notes/next.md`: a bullet.
+
+### Why
+ADR-0007 Addendum A5 required these two gaps to close before the clustered scheduler's placements can be relied on for v0.4.0. The fit check ignored everything already on a host, so one host could be given unlimited VMs. Concurrent reconciles reading the same informer snapshot could also overbook a host or put two hard anti-affine VMs on it.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-09-25 20:15] - ADR-0009 Slice 3: identity-safe image preparation on vSphere; OVF local-file read, download SSRF and breaker fixes
 **Author:** @wrkode (William Rizzo)
 
