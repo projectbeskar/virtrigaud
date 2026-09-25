@@ -43,6 +43,7 @@ import (
 	"github.com/vmware/govmomi/vapi/rest"
 	"github.com/vmware/govmomi/vim25/progress"
 	"github.com/vmware/govmomi/vim25/types"
+	"google.golang.org/grpc/codes"
 
 	"github.com/projectbeskar/virtrigaud/internal/imageartifact"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
@@ -495,6 +496,13 @@ func (p *Provider) imagePrepareImportOVA(ctx context.Context, src vsphereImageSo
 	// legacy import is unstamped (nil stamp).
 	moref, err := p.importOVA(ctx, imp, descriptorPath, opts, nil)
 	if err != nil {
+		var pe *errors.ProviderError
+		if stderrors.As(err, &pe) && pe.Code == codes.InvalidArgument {
+			// A refused package (a file reference outside the package, a bare
+			// .ovf with file references): nothing was imported, and a retry
+			// would be refused again.
+			return nil, err
+		}
 		return nil, errors.NewInternal(fmt.Sprintf("ImagePrepare: import OVA %q as %q", redactURL(src.OVAURL), targetName), err)
 	}
 
@@ -785,33 +793,35 @@ func unwrapURLError(err error) error {
 	return err
 }
 
-// newOVAArchive returns the importer.Archive and the descriptor path to pass to
-// importer.Import for the staged file. A bare .ovf is a plain file with sibling
-// disks (FileArchive, descriptor is the file itself). An .ova is a tar of the
-// descriptor + disks (TapeArchive); the descriptor's EXACT entry name is resolved
-// up front (skipping macOS AppleDouble sidecars) rather than relying on a "*.ovf"
-// glob, which would otherwise match a "._foo.ovf" metadata file packed before the
-// real descriptor by macOS tar.
-func (p *Provider) newOVAArchive(localPath, ovaURL string) (importer.Archive, string, error) {
-	opener := importer.Opener{Client: p.client.Client}
-	if urlPathExt(ovaURL) == ".ovf" {
-		return &importer.FileArchive{Path: localPath, Opener: opener}, localPath, nil
+// newOVAArchive returns the OVF package (ova_archive.go) and the descriptor
+// name to pass to importOVA for the staged download. The package serves only
+// the descriptor and, once importOVA has validated them, the files the OVF
+// references, by exact member name from the staged download: no file on the
+// provider's filesystem named by the OVF is ever opened.
+//
+//   - An .ova is a tar of the descriptor and its files. The descriptor is the
+//     first root-level .ovf member that is not a macOS AppleDouble sidecar
+//     (findOVADescriptorName).
+//   - A bare .ovf is the descriptor alone. It cannot carry the files it
+//     references, so importOVA refuses one that references any file.
+func (p *Provider) newOVAArchive(localPath, ovaURL string) (*ovfPackage, string, error) {
+	if urlPathExt(ovaURL) == ovfDescriptorExt {
+		pkg := newBareOVFPackage(localPath)
+		return pkg, pkg.descriptor, nil
 	}
 	descriptor, err := findOVADescriptorName(localPath)
 	if err != nil {
 		return nil, "", err
 	}
-	return &importer.TapeArchive{Path: localPath, Opener: opener}, descriptor, nil
+	return newTarPackage(localPath, descriptor), descriptor, nil
 }
 
-// findOVADescriptorName returns the exact base name of the OVF descriptor inside
-// an OVA tar. It skips macOS AppleDouble sidecar files (a leading "._" on the base
-// name) and __MACOSX/ directory entries, which OVAs repackaged on macOS include
-// and which precede the real descriptor in tar order. govmomi's TapeArchive
-// matches the descriptor by glob, so without this filter a "._foo.ovf" sidecar (a
-// small binary AppleDouble blob) is parsed as the descriptor and fails with an
-// XML null-byte error. Returning the exact name also makes the subsequent disk
-// uploads resolve their hrefs exactly, never matching a "._disk.vmdk" sidecar.
+// findOVADescriptorName returns the member name of the OVF descriptor inside an
+// OVA tar: the first package member (ovaMemberName: a regular file at the
+// root, a leading "./" ignored) whose name ends in .ovf. macOS AppleDouble
+// sidecars ("._foo.ovf", packed before the real descriptor by macOS tar) and
+// anything under a directory (__MACOSX/) are skipped, so a binary sidecar is
+// never parsed as the descriptor.
 func findOVADescriptorName(ovaPath string) (string, error) {
 	f, err := os.Open(filepath.Clean(ovaPath))
 	if err != nil {
@@ -831,15 +841,8 @@ func findOVADescriptorName(ovaPath string) (string, error) {
 			// property of the source: permanent.
 			return "", errors.NewInvalidSpec("ImagePrepare: the downloaded OVA is not a readable tar archive: %v", err)
 		}
-		if strings.Contains(h.Name, "__MACOSX/") {
-			continue
-		}
-		base := path.Base(h.Name)
-		if strings.HasPrefix(base, "._") {
-			continue // macOS AppleDouble sidecar
-		}
-		if strings.EqualFold(filepath.Ext(base), ".ovf") {
-			return base, nil
+		if name := ovaMemberName(h); strings.EqualFold(path.Ext(name), ovfDescriptorExt) {
+			return name, nil
 		}
 	}
 	return "", errors.NewInvalidSpec("OVA contains no .ovf descriptor (after skipping macOS sidecar files)")

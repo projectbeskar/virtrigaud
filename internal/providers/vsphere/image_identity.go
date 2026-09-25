@@ -154,6 +154,12 @@ func identitySourceError(src vsphereImageSource) error {
 	if err != nil || (u.Scheme != ovaURLSchemeHTTP && u.Scheme != ovaURLSchemeHTTPS) || u.Host == "" {
 		return errors.NewInvalidSpec("ImagePrepare: ovaURL %q is not an http(s) URL", redactURL(src.OVAURL))
 	}
+	if urlPathExt(src.OVAURL) == ovfDescriptorExt {
+		// A bare .ovf has no container for the disks it references, and its
+		// references were resolved on the provider's filesystem.
+		return errors.NewInvalidSpec("ImagePrepare: ovaURL names a bare .ovf, which cannot carry its disks; " +
+			"publish the image as an .ova")
+	}
 	return nil
 }
 

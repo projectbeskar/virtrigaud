@@ -125,6 +125,11 @@ func isOVFContentFault(err error) bool {
 // (v0.52.0) does — CreateImportSpec, ImportVApp, NFC upload, lease completion —
 // with these additions:
 //
+//   - The package is read ONLY through an ovfPackage (ova_archive.go), and
+//     every file the OVF references is validated (validateOVFFileRefs: a plain
+//     file name) and must be a member of the package, in both modes, before
+//     the descriptor reaches vCenter. Nothing on the provider's filesystem
+//     named by the OVF is ever opened or uploaded. A refusal is InvalidSpec.
 //   - stripReservedExtraConfig runs on the import spec BEFORE ImportVApp, so the
 //     created entity never carries a reserved key it did not get from
 //     VirtRigaud, not even for the duration of the upload. The removal is
@@ -152,6 +157,13 @@ func isOVFContentFault(err error) bool {
 func (p *Provider) importOVA(ctx context.Context, imp *importer.Importer, fpath string, opts importer.Options, stamp *imageartifact.Stamp) (*types.ManagedObjectReference, error) {
 	identity := stamp != nil
 
+	pkg, ok := imp.Archive.(*ovfPackage)
+	if !ok {
+		// Fail closed: any other importer.Archive may open files named by
+		// the OVF on the provider's filesystem.
+		return nil, fmt.Errorf("refusing to import: the OVF package is not read through the restricted package reader")
+	}
+
 	descriptor, err := importer.ReadOvf(fpath, imp.Archive)
 	if err != nil {
 		if identity {
@@ -165,6 +177,9 @@ func (p *Provider) importOVA(ctx context.Context, imp *importer.Importer, fpath 
 			return nil, errors.NewInvalidSpec("ImagePrepare: the source is not a valid OVF descriptor: %v", err)
 		}
 		return nil, fmt.Errorf("parse OVF descriptor: %w", err)
+	}
+	if err := p.admitOVFFileRefs(pkg, envelope); err != nil {
+		return nil, err
 	}
 	if identity && (envelope.VirtualSystemCollection != nil || envelope.VirtualSystem == nil) {
 		return nil, multiVMOVFError()
@@ -258,6 +273,60 @@ func (p *Provider) importOVA(ctx context.Context, imp *importer.Importer, fpath 
 		return &entity, fmt.Errorf("complete NFC lease: %w", err)
 	}
 	return &entity, nil
+}
+
+// admitOVFFileRefs validates every file the OVF envelope references and
+// permits exactly those names on pkg, in legacy and identity mode alike: each
+// href must be a plain file name (validateOVFFileRefs) and a member of the
+// package. A bare .ovf has no members besides itself, so it may reference no
+// file. A refusal is InvalidSpec; the offending reference goes to the provider
+// log only.
+func (p *Provider) admitOVFFileRefs(pkg *ovfPackage, env *ovf.Envelope) error {
+	hrefs, err := validateOVFFileRefs(env)
+	if err != nil {
+		p.logger.Warn("ImagePrepare: refusing an OVF whose file reference is not a plain file name inside the package",
+			"references", logSafeHrefs(env), "error", err)
+		return err
+	}
+	for _, href := range hrefs {
+		present, err := pkg.contains(href)
+		if err != nil {
+			p.logger.Warn("ImagePrepare: the OVA could not be read while checking its file references", "error", err)
+			return errors.NewInvalidSpec("ImagePrepare: the downloaded OVA is not a readable tar archive")
+		}
+		if present {
+			continue
+		}
+		p.logger.Warn("ImagePrepare: refusing an OVF that references a file its package does not contain",
+			"reference", truncateForLog(href), "bare_ovf", pkg.bare)
+		if pkg.bare {
+			return errors.NewInvalidSpec("ImagePrepare: a bare .ovf cannot carry the files it references; " +
+				"publish the image as an .ova")
+		}
+		return errors.NewInvalidSpec("ImagePrepare: the OVF references a file the OVA does not contain")
+	}
+	pkg.permit(hrefs)
+	return nil
+}
+
+// maxLoggedHrefBytes bounds each OVF file reference written to the log.
+const maxLoggedHrefBytes = 256
+
+// truncateForLog cuts s to maxLoggedHrefBytes bytes for the provider log.
+func truncateForLog(s string) string {
+	if len(s) > maxLoggedHrefBytes {
+		return s[:maxLoggedHrefBytes] + "…"
+	}
+	return s
+}
+
+// logSafeHrefs returns the envelope's file references, each cut for the log.
+func logSafeHrefs(env *ovf.Envelope) []string {
+	out := make([]string, 0, len(env.References))
+	for _, f := range env.References {
+		out = append(out, truncateForLog(f.Href))
+	}
+	return out
 }
 
 // multiVMOVFError is the InvalidSpec for an OVF that is not exactly one
