@@ -71,6 +71,12 @@ providers), and rollback caveats in
   prepare or create from the other's template, and a prepare task is only ever
   polled through the Provider that started it. Existing state is migrated on
   first use (→ [`docs/image-preparation.md`](docs/image-preparation.md#prepare-state-is-per-provider)).
+- libvirt: **deleting a running linked clone no longer deletes its source VM's
+  disk.** Delete removes only the VM's own disk files inside the storage pool,
+  and a source VM whose disk a linked clone still uses can no longer be deleted,
+  reverted or snapshotted until the clone is gone (`DeleteBlocked`). Clone disks
+  are no longer world-writable, and a UEFI clone's varstore is never copied
+  through a symlink (→ [`docs/libvirt-clones.md`](docs/libvirt-clones.md)).
 - The manager's webhook and metrics servers pin an explicit TLS 1.2 floor.
 - Optional, opt-in `NetworkPolicy` templates for the manager and provider pods
   (`networkPolicy.enabled`, default off).

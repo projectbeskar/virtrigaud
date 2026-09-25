@@ -40,6 +40,38 @@ Security re-review of #355 (N1–N6): a live shrink only deflates the balloon, s
 - [ ] Config change only
 - [ ] Documentation only
 
+## [2026-09-25 23:41] - libvirt: deleting a running linked clone deleted its source VM's disk; linked-clone dependency guard
+**Author:** @wrkode (William Rizzo)
+
+> **Operator note.** A libvirt source VM whose disk a linked clone still uses can no longer be deleted, reverted or snapshotted until the clone is gone: delete the clones first. The provider's SSH user must be able to read every VM disk on the host (`root`, or a member of `kvm`). See `docs/libvirt-clones.md`.
+
+### Security
+- `internal/providers/libvirt/provider_virsh.go`, `domain_disks.go` (new): **pre-existing data-loss bug (released, single-host; also reached by the clustered Delete): deleting a running linked clone ran `sudo rm` on its SOURCE VM's disk.** `domainDiskPaths` scanned `virsh dumpxml` line by line and returned every `<source file=…>`, including the `<backingStore>` libvirt lists for a running disk — for a linked clone, the source's disk. The definition is now read with `encoding/xml` (`parseDomainDisks`) and only top-level `<disk type='file' device='disk'>` sources count (`diskFiles`); backing stores, block-job mirrors, cdrom/floppy media and seeds never do. `domainDiskPaths` (clone source, disk info) uses the same list.
+- `internal/providers/libvirt/provider_virsh.go`: Delete reads the definition once (`planDomainDeletion`) and removes only the domain's own disk files that lie directly inside the default pool directory or an allowed image directory (`deletableDiskFiles`, canonicalized on the host; anything else is left in place and logged) plus its own cloud-init seed directory, found structurally (per-create or legacy per-name, `cloudInitSeedDir`) and kept while another domain references it. Before destroy/undefine it refuses, leaving the domain intact, while another domain uses one of those files as a disk or backing file anywhere in its chain; the single-host orphan cleanup removes a name-pattern disk only when it exists, is inside those directories and no domain uses it. `rm` now ends its options with `--`.
+- `internal/providers/libvirt/disk_dependents.go` (new), `imagepath.go`: dependency guard. `domainRefsOnHost` splits `diskSourcesInUse`'s host scan per domain (same commands; every disk chain read once), `diskDependents` counts the OTHER domains using a file, and `refuseIfDiskHasDependents` (any host runner, domain name or UUID) refuses with `diskDependentsError`: gRPC `FailedPrecondition` + `ErrorInfo` `VM_DISK_IN_USE`, naming only the requester's domain and the number of dependents. A check that cannot run fails closed (retryable, details in the provider log).
+- `internal/providers/libvirt/server.go`, `provider_virsh.go`: SnapshotCreate (every kind), SnapshotRevert and SnapshotDelete run the guard before the snapshot command: a revert rewrites, an external snapshot delete commits into, and an internal/memory snapshot writes into the file a linked clone reads; a disk-only snapshot would hide the dependency behind a new overlay.
+- `internal/providers/libvirt/clone.go`: a clone's disk is `chmod 0660` (`libvirt-qemu:kvm`) instead of world-writable `777`. Clone builds the target definition before writing any file and refuses (`Conflict`) a UEFI varstore target that is a symlink or used by any domain (`ensureNVRAMTargetFree`); the varstore is copied with `sudo dd iflag=nofollow oflag=nofollow` instead of `sudo cp -f` (which followed symlinks as root), then `chmod 0600`.
+
+### Added
+- `internal/providers/contracts/errors.go`: `VMDiskInUseReason` (`VM_DISK_IN_USE`).
+- `internal/providers/libvirt/routing.go`: a routed (clustered) refusal is `FailedPrecondition` with `VM_DISK_IN_USE` and `VM_OPERATION_FAILED` — a per-VM failure, never counted toward the Provider circuit breaker.
+- `internal/transport/grpc/client.go`: `mapGRPCError` maps `FailedPrecondition` + `VM_DISK_IN_USE` (only) to a `Conflict`.
+- `internal/controller/virtualmachine_controller.go`, `internal/k8s/conditions.go`: a Delete refused with a `Conflict` keeps the finalizer, sets `Ready=False` with the new reason `DeleteBlocked` (how many domains depend on the disk, and the way out), records a `Warning` event and re-checks every minute; `force-delete` still wins.
+- Tests: structural parsing of the review's live linked-clone XML; the per-domain scan and dependency count (running and shut-off clones, shared disks, symlinks, fail-closed); single-host and clustered Delete of a source (refused, nothing touched) and of its clone (overlay only) and the source afterwards; full clones independent; nothing outside the pool removed; orphan cleanup keeps a surviving clone's backing file; snapshot create/revert/delete refused on the source and allowed on the clone and after it is gone; the wire form (single-host and routed); the manager mapping and breaker; the `DeleteBlocked` condition; clone disk `0660`; varstore copy with `nofollow`, symlinked (dangling or not) and in-use targets refused before any file is written. Test fixtures answer `list --uuid`/`pool-dumpxml`/`qemu-img`, and the fake host records `undefine` and linked-clone overlays.
+
+### Changed
+- `internal/providers/libvirt/routing_test.go`: the pinned single-host and clustered Delete call sequences now include the guard's reads (`pool-dumpxml default`, `list --all --uuid`) before destroy/undefine, one `dumpxml` instead of two, and `rm -f --`; an absent domain's orphan disks are removed only when they exist. The single-host Power/Reconfigure golden file is unchanged.
+- `docs/libvirt-clones.md` (new), `docs/README.md`, `docs/upgrading.md` (new behavior row, SSH-user requirement, the #334 row's shared-disk warning), `docs/release-notes/next.md`.
+
+### Why
+A security review found that deleting a running linked clone deleted its source VM's disk, and that nothing stopped an operation on the source (delete, snapshot revert/delete) from destroying a linked clone's data. The same review flagged the world-writable clone disk and the root `cp` of the UEFI varstore that followed symlinks.
+
+### Impact
+- [ ] Breaking change (no API change; a source VM with linked clones is now refused delete/snapshot operations until its clones are deleted)
+- [x] Requires cluster rollout (manager and libvirt provider images)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-09-25 23:03] - ADR-0007 scheduler accuracy: committed capacity, an assume cache and a resize gate for clustered placement
 **Author:** @wrkode (William Rizzo)
 
