@@ -705,12 +705,20 @@ func (s *Server) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepareR
 //     404, a checksum mismatch, an unreadable or unsafe image, a confinement
 //     rejection, a pool that cannot hold the image);
 //   - Conflict -> codes.AlreadyExists (ADR-0009 D4);
+//   - a download failure the image source caused (imageSourceFailure) ->
+//     imageartifact.SourceUnavailableError: codes.Unavailable with an
+//     IMAGE_SOURCE_UNAVAILABLE ErrorInfo, retried by the manager but kept out
+//     of its circuit breaker;
 //   - an error that already carries a gRPC status keeps it (the sdk
 //     InvalidSpec of the #334 confinement, imageartifact's Conflict and
 //     in-progress Unavailable);
 //   - anything else — the SSH transport or the host failing — keeps the
 //     historical wrapped form, which the manager retries.
 func imagePrepareRPCError(err error) error {
+	var src *imageSourceFailure
+	if stderrors.As(err, &src) {
+		return imageartifact.SourceUnavailableError("failed to prepare image: " + src.pe.Message)
+	}
 	var pe *contracts.ProviderError
 	if stderrors.As(err, &pe) {
 		switch pe.Type {
