@@ -834,74 +834,135 @@ func domainGone(ctx context.Context, h hostCommandRunner, uuid string) (bool, er
 // retryable error rather than an incomplete set. A domain undefined between the
 // list and the dumpxml is skipped.
 func diskSourcesInUse(ctx context.Context, h hostCommandRunner) (inUseSet, error) {
-	uuids, err := listDomainUUIDs(ctx, h)
+	doms, err := domainRefsOnHost(ctx, h, "")
 	if err != nil {
 		return inUseSet{}, err
 	}
-	var files, dirs, disks []string
+	set := inUseSet{files: map[string]bool{}}
+	for _, d := range doms {
+		for f := range d.refs.files {
+			set.files[f] = true
+		}
+		set.dirs = append(set.dirs, d.refs.dirs...)
+	}
+	return set, nil
+}
+
+// hostDomainRefs is what one domain defined on a host references: every path of
+// its definition (disks and their full backing chains, other file-backed
+// devices, firmware/kernel files, shared directories), raw and canonical.
+type hostDomainRefs struct {
+	// uuid is the domain's UUID as `virsh list --uuid` printed it.
+	uuid string
+	// refs are the domain's references (see inUseSet).
+	refs inUseSet
+}
+
+// domainRefsOnHost reads, on the host behind h, the references of every defined
+// domain (running or not) except skipUUID (never read when non-empty), one
+// entry per domain. It is diskSourcesInUse's scan, kept per domain so a caller
+// can tell which OTHER domains use a file (diskDependents), with the same
+// fail-closed rules: an unreadable definition that still exists, volume path
+// or backing chain is a (generic) retryable error, and a domain undefined
+// between the list and its dumpxml is skipped. Each disk's chain is read once,
+// however many domains reference it, and every path is canonicalized in one
+// call.
+func domainRefsOnHost(ctx context.Context, h hostCommandRunner, skipUUID string) ([]hostDomainRefs, error) {
+	uuids, err := listDomainUUIDs(ctx, h)
+	if err != nil {
+		return nil, err
+	}
+	type rawRefs struct {
+		uuid               string
+		files, dirs, disks []string
+	}
+	var doms []rawRefs
 	for _, uuid := range uuids {
+		if skipUUID != "" && strings.EqualFold(uuid, skipUUID) {
+			continue
+		}
 		xmlRes, err := h.runVirshCommand(ctx, "dumpxml", uuid)
 		if err != nil {
 			gone, gerr := domainGone(ctx, h, uuid)
 			if gerr != nil {
-				return inUseSet{}, gerr
+				return nil, gerr
 			}
 			if gone {
-				log.Printf("INFO domain %s was undefined during the image in-use check; skipping it", uuid)
+				log.Printf("INFO domain %s was undefined during the disk in-use check; skipping it", uuid)
 				continue
 			}
-			return inUseSet{}, hostCheckFailed(fmt.Sprintf("read definition of domain %s", uuid), err)
+			return nil, hostCheckFailed(fmt.Sprintf("read definition of domain %s", uuid), err)
 		}
 		refs, err := parseDomainPathRefs(xmlRes.Stdout)
 		if err != nil {
-			return inUseSet{}, hostCheckFailed(fmt.Sprintf("parse definition of domain %s", uuid), err)
+			return nil, hostCheckFailed(fmt.Sprintf("parse definition of domain %s", uuid), err)
 		}
-		files = append(files, refs.files...)
-		dirs = append(dirs, refs.dirs...)
-		disks = append(disks, refs.disks...)
+		d := rawRefs{uuid: uuid, files: refs.files, dirs: refs.dirs, disks: refs.disks}
 		for _, pv := range refs.volumes {
 			volRes, verr := h.runVirshCommand(ctx, "vol-path", "--pool", pv[0], "--vol", pv[1])
 			if verr != nil {
-				return inUseSet{}, hostCheckFailed(
+				return nil, hostCheckFailed(
 					fmt.Sprintf("resolve volume %q in pool %q of domain %s", pv[1], pv[0], uuid), verr)
 			}
 			p := strings.TrimSpace(volRes.Stdout)
 			if p == "" {
-				return inUseSet{}, hostCheckFailed(
+				return nil, hostCheckFailed(
 					fmt.Sprintf("resolve volume %q in pool %q of domain %s", pv[1], pv[0], uuid), errors.New("empty path"))
 			}
-			files = append(files, p)
-			disks = append(disks, p)
+			d.files = append(d.files, p)
+			d.disks = append(d.disks, p)
+		}
+		doms = append(doms, d)
+	}
+
+	chains := map[string][]string{}
+	for _, d := range doms {
+		for _, disk := range d.disks {
+			if _, walked := chains[disk]; walked {
+				continue
+			}
+			chain, err := backingChainFiles(ctx, h, disk)
+			if err != nil {
+				return nil, err
+			}
+			chains[disk] = chain
 		}
 	}
 
-	walked := make(map[string]bool, len(disks))
-	for _, d := range disks {
-		if walked[d] {
-			continue
+	// One canonicalization for every domain: its files and chains, then its
+	// shared directories, in domain order.
+	var all []string
+	type span struct{ files, dirs [2]int }
+	spans := make([]span, len(doms))
+	for i, d := range doms {
+		start := len(all)
+		all = append(all, d.files...)
+		for _, disk := range d.disks {
+			all = append(all, chains[disk]...)
 		}
-		walked[d] = true
-		chain, err := backingChainFiles(ctx, h, d)
-		if err != nil {
-			return inUseSet{}, err
-		}
-		files = append(files, chain...)
+		spans[i].files = [2]int{start, len(all)}
 	}
-
-	all := append(append([]string(nil), files...), dirs...)
+	for i, d := range doms {
+		start := len(all)
+		all = append(all, d.dirs...)
+		spans[i].dirs = [2]int{start, len(all)}
+	}
 	canon, err := canonicalizeOnHost(ctx, h, all)
 	if err != nil {
-		return inUseSet{}, err
+		return nil, err
 	}
-	set := inUseSet{files: make(map[string]bool, len(files))}
-	for i := range files {
-		set.files[files[i]] = true
-		set.files[canon[i]] = true
+
+	out := make([]hostDomainRefs, len(doms))
+	for i, d := range doms {
+		set := inUseSet{files: map[string]bool{}}
+		for j := spans[i].files[0]; j < spans[i].files[1]; j++ {
+			set.files[all[j]] = true
+			set.files[canon[j]] = true
+		}
+		set.dirs = append(set.dirs, canon[spans[i].dirs[0]:spans[i].dirs[1]]...)
+		out[i] = hostDomainRefs{uuid: d.uuid, refs: set}
 	}
-	for i := range dirs {
-		set.dirs = append(set.dirs, canon[len(files)+i])
-	}
-	return set, nil
+	return out, nil
 }
 
 // pathInUseOnHost reports whether path (canonicalized on the host) is a disk,

@@ -108,6 +108,17 @@ const ImageArtifactInProgressReason = "IMAGE_ARTIFACT_IN_PROGRESS"
 // the Provider.
 const ImageSourceUnavailableReason = "IMAGE_SOURCE_UNAVAILABLE"
 
+// VMDiskInUseReason is the google.rpc.ErrorInfo reason (in ErrorInfoDomain) a
+// provider attaches to the codes.FailedPrecondition status of a per-VM
+// operation it refused because another VM on the same host depends on this
+// VM's disk — typically a linked clone whose backing file it is. Deleting the
+// VM, reverting it to a snapshot, or creating or deleting one of its snapshots
+// would remove or rewrite that file underneath the other VM. The refusal is not
+// retryable as such (it holds until the dependent VMs are gone); the manager
+// maps it to ErrorTypeConflict, and FailedPrecondition keeps it out of the
+// per-Provider circuit breaker.
+const VMDiskInUseReason = "VM_DISK_IN_USE"
+
 // ProviderError represents a categorized error from a provider
 type ProviderError struct {
 	// Type categorizes the error
