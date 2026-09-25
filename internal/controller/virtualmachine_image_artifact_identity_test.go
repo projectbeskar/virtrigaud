@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -934,6 +935,55 @@ func TestEnsureImageOnProvider_UnconfirmedAnswerBacksOff(t *testing.T) {
 	assert.False(t, requeue)
 	wait, _ := r.prepareBackoff.wait(imagePrepareBackoffKey(img, provider, digestOf(t, img)), clock.now())
 	assert.Zero(t, wait)
+}
+
+func TestEnsureImageOnProvider_ConcurrentObserversOfAFailedTaskRecordItOnce(t *testing.T) {
+	img := sharedOVAImage(idImageNS, "ubuntu", "")
+	provA := identityProvider(idTeamA, idProviderName)
+	key := imageProviderKey(provA)
+	img.Status.ProviderStatus = map[string]infrav1beta1.ProviderImageStatus{
+		key: {ProviderUID: string(provA.UID), TaskRef: "task-1", SourceDigest: digestOf(t, img)},
+	}
+	var committed atomic.Int32
+	r, _ := newIdentityReconcilerWithFuncs(t, interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			err := c.SubResource(sub).Update(ctx, obj, opts...)
+			if _, ok := obj.(*infrav1beta1.VMImage); ok && err == nil {
+				committed.Add(1)
+			}
+			return err
+		},
+	}, img, provA)
+	clock := newTestClock()
+	r.clock = clock.now
+	inst := &preparerProvider{isTaskCompleteFn: func(context.Context, string) (bool, error) {
+		return true, errors.New("task failed: checksum mismatch")
+	}}
+	stale := getImage(t, r, img)
+
+	const reconciles = 8
+	var start, wg sync.WaitGroup
+	start.Add(1)
+	errs := make([]error, reconciles)
+	for i := 0; i < reconciles; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			start.Wait()
+			_, errs[i] = r.EnsureImageOnProvider(context.Background(), vmUsing(provA, img), stale.DeepCopy(), provA, inst)
+		}(i)
+	}
+	start.Done()
+	wg.Wait()
+
+	for i, err := range errs {
+		require.ErrorIs(t, err, errImagePrepareHold, "reconcile %d", i)
+	}
+	assert.Zero(t, inst.calls(), "no prepare is sent at once")
+	assert.EqualValues(t, 1, committed.Load(), "the failure is recorded once")
+	wait, _ := r.prepareBackoff.wait(imagePrepareBackoffKey(img, provA, digestOf(t, img)), clock.now())
+	assert.Equal(t, importFailedBackoff.Base, wait, "the failed task is counted once")
+	assert.Contains(t, getImage(t, r, img).Status.ProviderStatus[key].Message, "checksum mismatch")
 }
 
 func TestImagePrepareBackoffPolicy(t *testing.T) {
