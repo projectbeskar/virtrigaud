@@ -162,6 +162,9 @@ func TestArtifactStalenessBound(t *testing.T) {
 		`{"prepare":{"timeout":"6h"}}`:      12 * time.Hour,
 		`{"prepare":{"timeout":"-5m"}}`:     2 * time.Hour,
 		`{"prepare":{"timeout":"garbage"}}`: 2 * time.Hour,
+		// N4: a huge timeout is capped (1 year), never ignored.
+		`{"prepare":{"timeout":"87600h"}}`: 2 * maxPrepareTimeout,
+		`{"prepare":{"timeout":"8760h"}}`:  2 * maxPrepareTimeout,
 	} {
 		assert.Equal(t, want, artifactStalenessBound(in), "image JSON %s", in)
 	}
@@ -198,6 +201,10 @@ func TestDecideArtifact(t *testing.T) {
 	poweredOn.poweredOff = false
 	untrusted := obj("vm-10", true, nil)
 	untrusted.stampErr = fmt.Errorf("repeated key")
+	staleOther := &imageartifact.Stamp{}
+	*staleOther = *stampAt(testDigestA, stale)
+	staleOther.Image.UID = testOtherUID
+	staleOtherDigest := stampAt(testDigestB, stale)
 
 	single := map[string]struct {
 		o    artifactObject
@@ -216,6 +223,10 @@ func TestDecideArtifact(t *testing.T) {
 		"unfinished, stale but Destroy disabled": {held, imageartifact.OutcomeInProgress},
 		"unfinished, stale, powered on":          {poweredOn, imageartifact.OutcomeConflict},
 		"unfinished, stale, idle":                {obj("vm-10", false, stampAt(testDigestA, stale)), imageartifact.OutcomeAbandoned},
+		// N1: age never licenses destroying another image's or source's object.
+		"stale idle powered-off VM of another image":  {obj("vm-10", false, staleOther), imageartifact.OutcomeConflict},
+		"stale idle powered-off VM of another source": {obj("vm-10", false, staleOtherDigest), imageartifact.OutcomeConflict},
+		"VM of another source":                        {obj("vm-10", false, otherDigest), imageartifact.OutcomeConflict},
 	}
 	for name, tc := range single {
 		t.Run(name, func(t *testing.T) {
@@ -288,6 +299,35 @@ func TestIsOVFContentFault(t *testing.T) {
 	assert.False(t, isOVFContentFault(soap.WrapVimFault(&types.NotAuthenticated{})))
 	assert.False(t, isOVFContentFault(fmt.Errorf("connection reset")))
 	assert.False(t, isOVFContentFault(nil))
+
+	// Parse and validation faults are the OVF's: permanent.
+	for name, f := range map[string]types.BaseMethodFault{
+		"XML format":            &types.OvfXmlFormat{},
+		"missing element":       &types.OvfMissingElement{},
+		"invalid value":         &types.OvfInvalidValueFormatMalformed{},
+		"wrong namespace":       &types.OvfWrongNamespace{},
+		"unsupported type":      &types.OvfUnsupportedType{},
+		"unsupported element":   &types.OvfUnsupportedElement{},
+		"hardware check":        &types.OvfHardwareCheck{},
+		"disk provisioning":     &types.OvfUnsupportedDiskProvisioning{},
+		"no supported hardware": &types.OvfNoSupportedHardwareFamily{},
+	} {
+		assert.True(t, isOVFContentFault(soap.WrapVimFault(f)), name)
+		assert.True(t, isOVFContentFault(&task.Error{LocalizedMethodFault: &types.LocalizedMethodFault{Fault: f}}), name+" (import spec error)")
+	}
+	// vCenter-side OVF failures may pass: retryable (N3).
+	for name, f := range map[string]types.BaseMethodFault{
+		"internal error":                  &types.OvfInternalError{},
+		"unknown device":                  &types.OvfUnknownDevice{},
+		"unknown entity":                  &types.OvfUnknownEntity{},
+		"disk mapping not found":          &types.OvfDiskMappingNotFound{},
+		"consumer communication error":    &types.OvfConsumerCommunicationError{},
+		"consumer fault":                  &types.OvfConsumerFault{},
+		"generic import failure":          &types.OvfImportFailed{},
+		"base OvfFault (unknown subtype)": &types.OvfFault{},
+	} {
+		assert.False(t, isOVFContentFault(soap.WrapVimFault(f)), name)
+	}
 }
 
 func TestRedactURL(t *testing.T) {
@@ -296,6 +336,9 @@ func TestRedactURL(t *testing.T) {
 		"https://user:s3cret@images.example.com/u.ova":            "https://images.example.com/u.ova",
 		"https://images.example.com/u.ova?X-Amz-Signature=abc123": "https://images.example.com/u.ova?<redacted>",
 		"https://images.example.com/u.ova#frag":                   "https://images.example.com/u.ova?<redacted>",
+		"https://images.example.com/t0ken-in-path/sub/u.ova":      "https://images.example.com/…/u.ova",
+		"https://images.example.com/":                             "https://images.example.com",
+		"https://images.example.com":                              "https://images.example.com",
 		"://bad":                                                  "<unparseable URL>",
 	} {
 		assert.Equal(t, want, redactURL(in), "input %q", in)

@@ -21,8 +21,10 @@ import (
 	stderrors "errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/vmware/govmomi/fault"
+	"github.com/vmware/govmomi/nfc"
 	"github.com/vmware/govmomi/ovf"
 	"github.com/vmware/govmomi/ovf/importer"
 	"github.com/vmware/govmomi/task"
@@ -85,7 +87,11 @@ func stripReservedExtraConfig(spec types.BaseImportSpec) []string {
 // the import because an object with the entity name already exists in the
 // target folder (DuplicateName). An identity prepare then re-runs the ADR-0009
 // D4 probe instead of failing: vCenter's per-folder name uniqueness is the
-// atomic create-if-absent of ADR-0009 D6.
+// atomic create-if-absent of ADR-0009 D6. Verified on vCenter 8.0.2: the fault
+// arrives asynchronously, as the HttpNfcLease's error (lease.Wait), not from
+// ImportVApp itself — for a completed VM, a template, an entity still held by
+// an active lease, and concurrent imports of one name alike. A synchronous
+// DuplicateName from ImportVApp is handled the same way.
 var errArtifactNameTaken = stderrors.New("an object with the artifact name already exists in the import folder")
 
 // nameTakenError is the errArtifactNameTaken of a DuplicateName fault: holder
@@ -290,7 +296,7 @@ func (p *Provider) importOVA(ctx context.Context, imp *importer.Importer, fpath 
 	}
 	info, err := lease.Wait(ctx, spec.FileItem)
 	if err != nil {
-		_ = lease.Abort(ctx, nil)
+		p.abortLease(ctx, lease, nil)
 		if identity && isDuplicateNameFault(err) {
 			return nil, fmt.Errorf("NFC lease for %q: %w", name, newNameTakenError(err))
 		}
@@ -303,14 +309,32 @@ func (p *Provider) importOVA(ctx context.Context, imp *importer.Importer, fpath 
 	entity := info.Entity
 	for _, item := range info.Items {
 		if err := imp.Upload(ctx, lease, item); err != nil {
-			_ = lease.Abort(ctx, &types.LocalizedMethodFault{Fault: &types.FileFault{File: item.Path}})
+			p.abortLease(ctx, lease, &types.LocalizedMethodFault{Fault: &types.FileFault{File: item.Path}})
 			return &entity, fmt.Errorf("upload %s: %w", item.Path, err)
 		}
 	}
 	if err := lease.Complete(ctx); err != nil {
+		p.abortLease(ctx, lease, nil)
 		return &entity, fmt.Errorf("complete NFC lease: %w", err)
 	}
 	return &entity, nil
+}
+
+// leaseAbortTimeout bounds an HttpNfcLease abort sent on a detached context.
+const leaseAbortTimeout = 30 * time.Second
+
+// abortLease aborts lease on a context detached from the request's, bounded by
+// leaseAbortTimeout, so the abort is sent even when the request was cancelled
+// (the manager's call timed out). vCenter (8.0.2, verified) deletes the entity
+// an aborted import lease created; without the abort the lease would keep the
+// entity until it times out. A failure is logged: the entity then carries this
+// image's stamp and ages into an abandoned object a later prepare removes.
+func (p *Provider) abortLease(ctx context.Context, lease *nfc.Lease, f *types.LocalizedMethodFault) {
+	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), leaseAbortTimeout)
+	defer cancel()
+	if err := lease.Abort(actx, f); err != nil {
+		p.logger.Warn("ImagePrepare: could not abort the NFC import lease", "lease", lease.Reference().Value, "error", err)
+	}
 }
 
 // admitOVFFileRefs validates every file the OVF envelope references and

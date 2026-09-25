@@ -67,9 +67,14 @@ const (
 	minArtifactStalenessBound = 2 * time.Hour
 
 	// destroyTaskMethod is the vSphere method name of Destroy_Task, as listed
-	// in a managed entity's disabledMethod while vCenter blocks it (e.g. while
-	// an HttpNfcLease holds the entity).
+	// in a managed entity's disabledMethod whenever vCenter blocks it. (An
+	// active import lease does NOT disable it on vCenter 8.0.2 — verified; see
+	// artifactObject.observation.)
 	destroyTaskMethod = "Destroy_Task"
+
+	// maxPrepareTimeout caps spec.prepare.timeout for the staleness bound, so
+	// an absurd value neither overflows nor shrinks the bound.
+	maxPrepareTimeout = 24 * 365 * time.Hour
 )
 
 // imageStampKeys are every ExtraConfig key of the image stamp, in the order
@@ -212,9 +217,12 @@ func artifactStalenessBound(imageJSON string) time.Duration {
 		return bound
 	}
 	timeout, err := time.ParseDuration(spec.Prepare.Timeout)
-	if err != nil || timeout <= 0 || timeout > 24*365*time.Hour {
+	if err != nil || timeout <= 0 {
 		return bound
 	}
+	// A huge timeout is capped, never ignored: ignoring it would shrink the
+	// bound to the floor and let a slow import be removed as abandoned.
+	timeout = min(timeout, maxPrepareTimeout)
 	if twice := 2 * timeout; twice > bound {
 		bound = twice
 	}
@@ -224,7 +232,9 @@ func artifactStalenessBound(imageJSON string) time.Duration {
 // moidLess orders managed object IDs the way the lowest-MOID convergence
 // (ADR-0009 D6) needs every concurrent prepare to agree on: by length, then
 // lexicographically. For vCenter's "vm-<n>" IDs (no leading zeros) that is
-// numeric order, so "vm-99" sorts before "vm-100".
+// numeric order, so "vm-99" sorts before "vm-100"; vCenter assigns them in
+// creation order (verified on vCenter 8.0.2), so the lowest MOID is the first
+// object created.
 func moidLess(a, b string) bool {
 	if len(a) != len(b) {
 		return len(a) < len(b)
@@ -248,10 +258,15 @@ type artifactObject struct {
 	// stampErr is why the stamp is untrusted (provider log only).
 	stampErr error
 	// activeTask is true when a task in the object's recentTask is queued or
-	// running. Only read for an incomplete object with a matching stamp.
+	// running, or cannot be read (fail closed). Only read for an incomplete
+	// object with a matching stamp. This is the signal that an import is in
+	// flight: on vCenter 8.0.2 (verified) the entity of an active import lease
+	// has ResourcePool.ImportVAppLRO running in its recentTask.
 	activeTask bool
 	// destroyDisabled is true when vCenter lists Destroy_Task in the object's
-	// disabledMethod, as it does while an HttpNfcLease holds the entity.
+	// disabledMethod. A defensive extra signal only: an active import lease
+	// does NOT disable Destroy_Task on vCenter 8.0.2 (verified; it disables
+	// PowerOffVM_Task, MarkAsVirtualMachine, ResetVM_Task and others).
 	destroyDisabled bool
 }
 
@@ -266,8 +281,11 @@ func (o artifactObject) needsLiveness(req imageartifact.Request) bool {
 // incomplete object is live while any of these holds — only when none does
 // may it be removed as abandoned; age alone never licenses a destroy:
 //
-//   - a task in its recentTask is queued or running;
-//   - vCenter disables Destroy_Task on it (an active HttpNfcLease holds it);
+//   - a task in its recentTask is queued or running, or cannot be read — an
+//     import in flight shows here (ResourcePool.ImportVAppLRO, running, on
+//     vCenter 8.0.2);
+//   - vCenter disables Destroy_Task on it (a defensive extra: an import lease
+//     does not do that on vCenter 8.0.2);
 //   - its stamp's preparedAt is younger than bound (or in the future).
 func (o artifactObject) observation(now time.Time, bound time.Duration) imageartifact.Observation {
 	obs := imageartifact.Observation{Exists: true, Complete: o.template, Stamp: o.stamp}

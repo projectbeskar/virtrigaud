@@ -512,6 +512,10 @@ func TestIdentityPrepare_ConflictLeavesTheObjectUntouched(t *testing.T) {
 		"unstamped VM":                       {nil, false},
 		"unfinished VM of another VMImage":   {stampConfig(testOtherUID, testDigestA, now), false},
 		"unfinished VM with untrusted stamp": {untrusted, false},
+		// N1: stale, idle and powered off — would be "abandoned" if it were
+		// this image's — yet another image's or source's: never destroyed.
+		"stale unfinished VM of another VMImage":       {stampConfig(testOtherUID, testDigestA, now.Add(-3*time.Hour)), false},
+		"stale unfinished VM of another source digest": {stampConfig(testImageUID, testDigestB, now.Add(-3*time.Hour)), false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			p, _, logs := newIdentitySim(t, "")
@@ -552,10 +556,21 @@ func TestIdentityPrepare_UnfinishedArtifact(t *testing.T) {
 			require.True(t, ok)
 			reg.WithLock(model.Service.Context, vm, func() { vm.RecentTask = append(vm.RecentTask, tk.Self) })
 		},
-		"stale, but vCenter blocks its Destroy (an NFC lease holds it)": func(t *testing.T, _ *Provider, model *simulator.Model, ref types.ManagedObjectReference) {
+		"stale, but vCenter blocks its Destroy (defensive extra signal)": func(t *testing.T, _ *Provider, model *simulator.Model, ref types.ManagedObjectReference) {
 			vm, ok := model.Map().Get(ref).(*simulator.VirtualMachine)
 			require.True(t, ok)
 			model.Map().WithLock(model.Service.Context, vm, func() { vm.DisabledMethod = []string{destroyTaskMethod} })
+		},
+		"stale, and the state of its task cannot be read (fail closed)": func(t *testing.T, p *Provider, model *simulator.Model, ref types.ManagedObjectReference) {
+			reg := model.Map()
+			tk := &simulator.Task{}
+			tk.Info.State = types.TaskInfoStateRunning
+			tk.Info.Entity = &ref
+			reg.Put(tk)
+			vm, ok := reg.Get(ref).(*simulator.VirtualMachine)
+			require.True(t, ok)
+			reg.WithLock(model.Service.Context, vm, func() { vm.RecentTask = append(vm.RecentTask, tk.Self) })
+			p.client.RoundTripper = &failTaskReads{RoundTripper: p.client.RoundTripper}
 		},
 	}
 	for name, setup := range inProgress {
@@ -825,6 +840,37 @@ func TestIdentityPrepare_FailureClassification(t *testing.T) {
 		requireCode(t, err, codes.Unavailable)
 		assert.Empty(t, errorReasons(err))
 	})
+}
+
+// failTaskReads fails every property read of a Task with a transient fault.
+type failTaskReads struct{ soap.RoundTripper }
+
+func (r *failTaskReads) RoundTrip(ctx context.Context, req, res soap.HasFault) error {
+	if b, ok := req.(*methods.RetrievePropertiesBody); ok && b.Req != nil {
+		for _, spec := range b.Req.SpecSet {
+			for _, o := range spec.ObjectSet {
+				if o.Obj.Type == "Task" {
+					return soap.WrapVimFault(&types.HostCommunication{})
+				}
+			}
+		}
+	}
+	return r.RoundTripper.RoundTrip(ctx, req, res)
+}
+
+// TestDestroyOwnImport_AlreadyDeletedIsSuccess: vCenter deletes the entity of
+// an aborted import lease (verified on vCenter 8.0.2), so this call's cleanup
+// finds it gone — that is success, not a failure to log or retry.
+func TestDestroyOwnImport_AlreadyDeletedIsSuccess(t *testing.T) {
+	p, _, logs := newIdentitySim(t, "")
+	gone := vmRef("vm-987654")
+	p.destroyOwnImport(context.Background(), gone, "team-a.ubuntu_0000000000000000")
+	assert.Contains(t, logs.String(), "already gone")
+	assert.NotContains(t, logs.String(), "could not destroy")
+	require.NoError(t, p.destroyVM(context.Background(), gone))
+	present, err := p.destroyVMIfPresent(context.Background(), gone)
+	require.NoError(t, err)
+	assert.False(t, present)
 }
 
 // failImportVApp answers every ImportVApp with fault, as vCenter would.

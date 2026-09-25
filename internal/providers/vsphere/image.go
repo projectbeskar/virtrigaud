@@ -656,17 +656,25 @@ func (p *Provider) resolveImageFolder(ctx context.Context, datacenter *object.Da
 	return folder, nil
 }
 
-// redactURL returns raw with its user-info, query and fragment removed, for
-// logs and error messages: an OVA URL may carry credentials ("user:pass@") or
-// a presigned token in its query, which must never reach a log or a status
-// (ADR-0009 D2). A URL that does not parse is replaced by a placeholder.
+// redactURL returns raw reduced to its scheme, host and last path segment,
+// for logs and error messages: an OVA URL may carry credentials
+// ("user:pass@"), a presigned token in its query, or a token in its path, none
+// of which may reach a log or a status (ADR-0009 D2). A removed path prefix is
+// shown as "…", a removed query or fragment as "?<redacted>". A URL that does
+// not parse is replaced by a placeholder.
 func redactURL(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return "<unparseable URL>"
 	}
-	redacted := url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path}
-	out := redacted.String()
+	shown := url.URL{Scheme: u.Scheme, Host: u.Host}
+	out := shown.String()
+	trimmed := strings.Trim(u.Path, "/")
+	if i := strings.LastIndex(trimmed, "/"); i >= 0 {
+		out += "/…/" + trimmed[i+1:]
+	} else if trimmed != "" {
+		out += "/" + trimmed
+	}
 	if u.RawQuery != "" || u.Fragment != "" {
 		out += "?<redacted>"
 	}

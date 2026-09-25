@@ -406,9 +406,10 @@ func (p *Provider) probeArtifact(ctx context.Context, loc artifactLocation, id i
 // observeArtifactObject reads what ADR-0009 D4 decides on for the object ref:
 // whether it is a template, its stamp, its power state, and — for an
 // unfinished object whose stamp matches id, where liveness matters — whether a
-// task on it is queued or running and whether vCenter blocks its Destroy_Task
-// (as it does while an HttpNfcLease holds it). found is false when the object
-// no longer exists.
+// task on it is queued or running (an import in flight: on vCenter 8.0.2 its
+// recentTask holds ResourcePool.ImportVAppLRO, running, for the whole lease)
+// and whether vCenter blocks its Destroy_Task (a defensive extra). found is
+// false when the object no longer exists.
 func (p *Provider) observeArtifactObject(ctx context.Context, ref types.ManagedObjectReference, id imageartifact.Request) (o artifactObject, found bool, err error) {
 	var vm mo.VirtualMachine
 	err = property.DefaultCollector(p.client.Client).RetrieveOne(ctx, ref, []string{
@@ -434,16 +435,16 @@ func (p *Provider) observeArtifactObject(ctx context.Context, ref types.ManagedO
 		o.stampErr = stderrors.New("the object has no readable config")
 	}
 	if o.needsLiveness(id) {
-		if o.activeTask, err = p.anyTaskActive(ctx, vm.RecentTask); err != nil {
-			return artifactObject{}, false, err
-		}
+		o.activeTask = p.anyTaskActive(ctx, vm.RecentTask)
 	}
 	return o, true, nil
 }
 
-// anyTaskActive reports whether any of tasks is queued or running. A task
-// that no longer exists is not active.
-func (p *Provider) anyTaskActive(ctx context.Context, tasks []types.ManagedObjectReference) (bool, error) {
+// anyTaskActive reports whether any of tasks is queued or running. It fails
+// closed: a task whose state cannot be read counts as active (so an unfinished
+// object is never removed on an unknown answer); only a task that no longer
+// exists is known not to be.
+func (p *Provider) anyTaskActive(ctx context.Context, tasks []types.ManagedObjectReference) bool {
 	pc := property.DefaultCollector(p.client.Client)
 	for _, ref := range tasks {
 		var t mo.Task
@@ -451,13 +452,15 @@ func (p *Provider) anyTaskActive(ctx context.Context, tasks []types.ManagedObjec
 			if fault.Is(err, &types.ManagedObjectNotFound{}) {
 				continue
 			}
-			return false, fmt.Errorf("read state of task %s: %w", ref.Value, err)
+			p.logger.WarnContext(ctx, "ImagePrepare: cannot read the state of a task on an unfinished artifact; treating it as running",
+				"task", ref.Value, "error", err)
+			return true
 		}
 		if t.Info.State == types.TaskInfoStateQueued || t.Info.State == types.TaskInfoStateRunning {
-			return true, nil
+			return true
 		}
 	}
-	return false, nil
+	return false
 }
 
 // stageOVA downloads the OVA of src, verifies its checksum when the source
@@ -542,9 +545,12 @@ func (p *Provider) importArtifact(ctx context.Context, finder *find.Finder, loc 
 	vm := object.NewVirtualMachine(p.client.Client, own)
 
 	// Convergence (ADR-0009 D6): if another prepare created an object with the
-	// same name concurrently (a vCenter that did not enforce DuplicateName),
-	// the object with the lowest MOID survives and every other prepare destroys
-	// its own, then reuses the survivor after the D4 probe.
+	// same name concurrently, the object with the lowest MOID survives and
+	// every other prepare destroys its own, then reuses the survivor after the
+	// D4 probe. A fallback only: vCenter 8.0.2 serializes same-name imports
+	// with DuplicateName (verified: of 4 concurrent imports of one name,
+	// exactly one created its entity), so this should never trigger there; it
+	// guards a vCenter, or a simulator, that does not.
 	lost, err := p.lostConvergence(ctx, loc, own)
 	if err != nil {
 		p.destroyOwnImport(ctx, own, loc.name)
@@ -624,32 +630,54 @@ func (p *Provider) removeAbandonedArtifact(ctx context.Context, loc artifactLoca
 	return nil
 }
 
-// destroyVM destroys the VM ref and waits for the task.
+// destroyVM destroys the VM ref and waits for the task. A VM that no longer
+// exists (ManagedObjectNotFound — vCenter's "has already been deleted or has
+// not been completely created") is already gone: that is success.
 func (p *Provider) destroyVM(ctx context.Context, ref types.ManagedObjectReference) error {
+	_, err := p.destroyVMIfPresent(ctx, ref)
+	return err
+}
+
+// destroyVMIfPresent is destroyVM that also reports whether the VM was still
+// there to destroy (false: it was already gone).
+func (p *Provider) destroyVMIfPresent(ctx context.Context, ref types.ManagedObjectReference) (bool, error) {
 	t, err := object.NewVirtualMachine(p.client.Client, ref).Destroy(ctx)
 	if err != nil {
-		return fmt.Errorf("start destroy of %s: %w", ref.Value, err)
+		if fault.Is(err, &types.ManagedObjectNotFound{}) {
+			return false, nil
+		}
+		return false, fmt.Errorf("start destroy of %s: %w", ref.Value, err)
 	}
 	if err := t.Wait(ctx); err != nil {
-		return fmt.Errorf("destroy %s: %w", ref.Value, err)
+		if fault.Is(err, &types.ManagedObjectNotFound{}) {
+			return false, nil
+		}
+		return false, fmt.Errorf("destroy %s: %w", ref.Value, err)
 	}
-	return nil
+	return true, nil
 }
 
 // destroyOwnImport best-effort destroys ref, an object THIS call created and
 // could not finish, on a context detached from the request's (a cancelled
-// request still cleans up), bounded by artifactCleanupTimeout. A failure is
+// request still cleans up), bounded by artifactCleanupTimeout. After an aborted
+// lease the object is usually gone already — vCenter deletes the entity of an
+// aborted import (verified on vCenter 8.0.2) — which is success. A failure is
 // logged: the object then carries this image's stamp and ages into an
 // abandoned object a later prepare removes (ADR-0009 D4).
 func (p *Provider) destroyOwnImport(ctx context.Context, ref types.ManagedObjectReference, artifact string) {
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), artifactCleanupTimeout)
 	defer cancel()
-	if err := p.destroyVM(cctx, ref); err != nil {
+	present, err := p.destroyVMIfPresent(cctx, ref)
+	switch {
+	case err != nil:
 		p.logger.WarnContext(ctx, "ImagePrepare: could not destroy this call's unfinished import; a later prepare removes it once abandoned",
 			"artifact", artifact, "vm", ref.Value, "error", err)
-		return
+	case !present:
+		p.logger.InfoContext(ctx, "ImagePrepare: this call's unfinished import is already gone (the aborted lease removed it)",
+			"artifact", artifact, "vm", ref.Value)
+	default:
+		p.logger.InfoContext(ctx, "ImagePrepare: destroyed this call's unfinished import", "artifact", artifact, "vm", ref.Value)
 	}
-	p.logger.InfoContext(ctx, "ImagePrepare: destroyed this call's unfinished import", "artifact", artifact, "vm", ref.Value)
 }
 
 // artifactResponse builds the response for the artifact ref carrying stamp:
