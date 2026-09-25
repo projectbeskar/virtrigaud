@@ -377,6 +377,16 @@ spec:
 > `spec.source.providerRef`, if set, must name the source VM's own Provider.
 > See [`docs/cross-namespace-targets.md`](docs/cross-namespace-targets.md).
 
+> **Cross-namespace `Provider`, `VMClass` and `VMImage` references need a
+> grant on the referenced object.** A `VirtualMachine` (and the clones,
+> migrations and snapshots that act on it) may use one in another namespace
+> only if its `spec.consumerNamespaceSelector` selects the referencing
+> namespace; unset means its own namespace only, `{}` means every namespace.
+> Otherwise the object waits with `Ready=False` / `ConsumerNotAllowed` and no
+> provider call is made. **Breaking on upgrade:** set the selector on shared
+> objects first. See
+> [`docs/cross-namespace-references.md`](docs/cross-namespace-references.md).
+
 For full migration documentation including provider restart behaviour, see the [Migration Guide](https://projectbeskar.github.io/virtrigaud/operations/vm-migration/).
 
 ## Observability

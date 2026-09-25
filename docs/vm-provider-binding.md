@@ -143,6 +143,17 @@ is tracked as a follow-up ADR. Until then, treat the right to delete and create
   `spec.providerRef` names the adopting `Provider`, and never adopts a
   hypervisor VM a `VirtualMachine` is bound to through that `Provider`.
 
+### A `Provider` in another namespace
+
+A `spec.providerRef` that names another namespace is used only if that
+`Provider`'s `spec.consumerNamespaceSelector` selects the VM's namespace (the
+same applies to `spec.classRef` and `spec.imageRef`). Otherwise the VM reports
+`Ready=False` / `ConsumerNotAllowed` and no provider call is made — for a bound
+VM too. Like a `ProviderRefMismatch`, deleting such a VM keeps the finalizer
+until access is restored or the VM carries `virtrigaud.io/orphan-on-delete` or
+`virtrigaud.io/force-delete`. See
+[`cross-namespace-references.md`](cross-namespace-references.md).
+
 ## 3. The manager checks the installed CRD
 
 Both controls live in the `VirtualMachine` CRD, which is upgraded separately
@@ -213,7 +224,9 @@ CRD rule now rejects for a bound VM.
 
 `virtrigaud.io/force-delete: "true"` is unchanged. It releases the finalizer
 when the provider `Delete` keeps failing, or when no delete can be routed (an
-unbound clustered VM, a placement/topology mismatch, a `ProviderRefMismatch`).
+unbound clustered VM, a placement/topology mismatch, a `ProviderRefMismatch`,
+a cross-namespace `Provider` the VM's namespace may not use
+(`ConsumerNotAllowed`)).
 It is an escape hatch; to detach a VM on purpose, use `orphan-on-delete`.
 
 ## Upgrade notes

@@ -259,8 +259,11 @@ rules:
   - watch
 # Namespaces, read-only: the VMClone and VMMigration controllers read a
 # cross-namespace target's Namespace for the
-# infra.virtrigaud.io/allowed-source-namespaces grant (and watch it so a grant
-# or revocation takes effect promptly). The manager never writes Namespaces.
+# infra.virtrigaud.io/allowed-source-namespaces grant, and every controller
+# that resolves a Provider, VMClass or VMImage in another namespace matches its
+# spec.consumerNamespaceSelector against the referencing Namespace's labels
+# (both are watched so a grant or revocation takes effect promptly). The
+# manager never writes Namespaces.
 - apiGroups:
   - ""
   resources:
@@ -575,8 +578,11 @@ rules:
   - watch
 # Namespaces, read-only: the VMClone and VMMigration controllers read a
 # cross-namespace target's Namespace for the
-# infra.virtrigaud.io/allowed-source-namespaces grant (and watch it so a grant
-# or revocation takes effect promptly). The manager never writes Namespaces.
+# infra.virtrigaud.io/allowed-source-namespaces grant, and every controller
+# that resolves a Provider, VMClass or VMImage in another namespace matches its
+# spec.consumerNamespaceSelector against the referencing Namespace's labels
+# (both are watched so a grant or revocation takes effect promptly). The
+# manager never writes Namespaces.
 - apiGroups:
   - ""
   resources:

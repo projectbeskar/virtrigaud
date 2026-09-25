@@ -1,3 +1,14 @@
+# Cross-namespace references: the VirtualMachines below live in `default` and
+# reference a Provider, VMClass and VMImage in `virtrigaud-system`. Each of
+# those objects must share itself with `default` via
+# spec.consumerNamespaceSelector, or the VMs report Ready=False /
+# ConsumerNotAllowed and nothing is created. On each of them (none is defined
+# here), add for example:
+#   consumerNamespaceSelector:
+#     matchLabels:
+#       kubernetes.io/metadata.name: default
+# See docs/cross-namespace-references.md.
+
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: VirtualMachine
 metadata:

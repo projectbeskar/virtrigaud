@@ -36,6 +36,7 @@ For full documentation see [https://projectbeskar.github.io/virtrigaud](https://
 |------|-------------|
 | [provider-vsphere.yaml](provider-vsphere.yaml) | vSphere provider configuration |
 | [provider-libvirt.yaml](provider-libvirt.yaml) | Libvirt/KVM provider configuration |
+| [shared-provider-consumer-namespaces.yaml](shared-provider-consumer-namespaces.yaml) | A Provider, VMClass and VMImage shared with other namespaces via `spec.consumerNamespaceSelector`, and a tenant VM using them (see `docs/cross-namespace-references.md`) |
 | [vm-adoption-example.yaml](vm-adoption-example.yaml) | Provider CRs with VMAdoption annotation |
 
 ## Clustered Provider Examples (ADR-0007 P1)
