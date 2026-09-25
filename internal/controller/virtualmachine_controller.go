@@ -229,6 +229,46 @@ func (r *VirtualMachineReconciler) recordEvent(vm *infravirtrigaudiov1beta1.Virt
 	}
 }
 
+// reconcileBoundProvider reconciles a bound VM's status.boundProvider with the
+// Provider its spec.providerRef resolved to (in memory; the caller's status
+// write persists it):
+//
+//   - no record (bound before the field existed): record provider — trust on
+//     first reconcile — with a Normal BoundProviderRecorded event;
+//   - a different namespace/name: a *ProviderRefMismatchError (no provider
+//     call may be made for the VM);
+//   - the same namespace/name but a new UID (the Provider was deleted and
+//     re-created): accepted, with a Warning BoundProviderRecreated event, and
+//     the new UID recorded for audit.
+func (r *VirtualMachineReconciler) reconcileBoundProvider(
+	ctx context.Context,
+	vm *infravirtrigaudiov1beta1.VirtualMachine,
+	provider *infravirtrigaudiov1beta1.Provider,
+) error {
+	logger := log.FromContext(ctx)
+	providerKey := types.NamespacedName{Namespace: provider.Namespace, Name: provider.Name}
+	switch {
+	case vm.Status.BoundProvider == nil:
+		logger.Info("Recording the Provider this pre-existing bound VM is bound through (backfill from spec.providerRef)",
+			"provider", providerKey.String(), "id", vm.Status.ID)
+		recordBoundProvider(vm, provider)
+		r.recordEvent(vm, corev1.EventTypeNormal, eventReasonBoundProviderRecorded, fmt.Sprintf(
+			"recorded Provider %s (uid %s) as the Provider this VM is bound through, from its current spec.providerRef",
+			providerKey, provider.UID))
+	case checkVMProvider(vm, provider) != nil:
+		return checkVMProvider(vm, provider)
+	case boundProviderRecreated(vm, provider):
+		oldUID := vm.Status.BoundProvider.UID
+		logger.Info("The Provider this VM is bound through was re-created under the same name; accepting it and recording its new UID",
+			"provider", providerKey.String(), "oldUID", oldUID, "newUID", string(provider.UID))
+		r.recordEvent(vm, corev1.EventTypeWarning, eventReasonBoundProviderRecreated, fmt.Sprintf(
+			"Provider %s this VM is bound through was deleted and re-created (uid %s -> %s); operating through the new object, "+
+				"which is trusted to front the same hypervisor", providerKey, oldUID, provider.UID))
+		vm.Status.BoundProvider.UID = string(provider.UID)
+	}
+	return nil
+}
+
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=virtualmachines,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=virtualmachines/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=virtualmachines/finalizers,verbs=update
@@ -314,10 +354,9 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 
 	// A bound VM whose spec.providerRef no longer names the Provider it is
 	// bound through is refused before anything is resolved: its status.id is
-	// meaningful only on that Provider (the object is re-checked with its UID
-	// once the Provider is fetched below).
+	// meaningful only on that Provider.
 	if vmIsBound(vm) {
-		if err := checkBoundProvider(vm, vmProviderKey(vm), ""); err != nil {
+		if err := checkBoundProvider(vm, vmProviderKey(vm)); err != nil {
 			return r.handleNotRoutable(ctx, vm, err)
 		}
 	}
@@ -350,17 +389,15 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	}
 	logger.V(1).Info("Dependencies resolved successfully")
 
-	// Bind the VM to the Provider object it resolved to, or refuse it. A VM
-	// bound before status.boundProvider existed is backfilled from its current
+	// Bind the VM to the Provider it resolved to, or refuse it. A VM bound
+	// before status.boundProvider existed is backfilled from its current
 	// spec.providerRef (trust on first reconcile; the reference is immutable
-	// once bound, so only a re-point made before the upgrade is trusted), and
-	// persisted with the status write that ends this reconcile.
+	// once bound, so only a re-point made before the upgrade is trusted). A
+	// Provider re-created under the same namespace and name is accepted, with a
+	// Warning event, and its new UID recorded. Both records are persisted with
+	// the status write that ends this reconcile.
 	if vmIsBound(vm) {
-		if vm.Status.BoundProvider == nil {
-			logger.Info("Recording the Provider this pre-existing bound VM is bound through (backfill from spec.providerRef)",
-				"provider", provider.Namespace+"/"+provider.Name, "id", vm.Status.ID)
-			recordBoundProvider(vm, provider)
-		} else if err := checkVMProvider(vm, provider); err != nil {
+		if err := r.reconcileBoundProvider(ctx, vm, provider); err != nil {
 			return r.handleNotRoutable(ctx, vm, err)
 		}
 	}
@@ -605,7 +642,7 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 		// through is never deleted through the mismatched one (and, unlike a
 		// Provider that is gone, the mismatch does not release the finalizer):
 		// removing the CR takes orphan-on-delete or force-delete.
-		if err := checkBoundProvider(vm, providerKey, ""); err != nil {
+		if err := checkBoundProvider(vm, providerKey); err != nil {
 			if res, retain := r.retainForUnroutableDelete(ctx, vm, err); retain {
 				return res, nil
 			}

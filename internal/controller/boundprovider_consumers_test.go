@@ -266,21 +266,36 @@ func TestMigrationExport_RefusesASourceNotBoundThroughItsProvider(t *testing.T) 
 		assert.Contains(t, migration.Status.Message, "is bound through Provider default/source-provider")
 	})
 
-	t.Run("the bound Provider was deleted and re-created", func(t *testing.T) {
+	t.Run("re-namespaced to a same-named Provider", func(t *testing.T) {
 		ctx := context.Background()
 		sourceVM, sourceProvider, migration := raceMigrationFixture()
-		sourceProvider.UID = "uid-recreated"
-		sourceVM.Status.BoundProvider = &infrav1beta1.BoundProviderRef{Namespace: "default", Name: "source-provider", UID: "uid-src"}
-		r, spies, _ := providerRecordingReconciler(t, sourceVM, sourceProvider, migration)
+		sourceVM.Spec.ProviderRef = infrav1beta1.ObjectRef{Name: "source-provider", Namespace: "infra"}
+		sourceVM.Status.BoundProvider = &infrav1beta1.BoundProviderRef{Namespace: "default", Name: "source-provider"}
+		elsewhere := &infrav1beta1.Provider{ObjectMeta: metav1.ObjectMeta{Name: "source-provider", Namespace: "infra"}}
+		r, spies, resolved := providerRecordingReconciler(t, sourceVM, sourceProvider, elsewhere, migration)
 
-		res, err := r.handleExportingPhase(ctx, migration)
+		_, err := r.handleExportingPhase(ctx, migration)
 		require.NoError(t, err)
 
-		assert.Zero(t, totalExports(spies), "no ExportDisk through a re-created Provider object")
-		assert.Equal(t, infrav1beta1.MigrationPhaseExporting, migration.Status.Phase, "the phase does not advance")
-		assert.Greater(t, res.RequeueAfter, time.Duration(0))
-		assert.Contains(t, migration.Status.Message, "does not match the Provider it is bound through")
+		assert.Zero(t, totalExports(spies))
+		assert.Empty(t, resolved())
+		assert.Equal(t, infrav1beta1.MigrationPhaseFailed, migration.Status.Phase)
 	})
+}
+
+func TestMigrationExport_RecreatedBoundProviderIsAccepted(t *testing.T) {
+	// The Provider object was re-created under the same namespace and name: the
+	// export proceeds through it (only the namespace/name is enforced).
+	ctx := context.Background()
+	sourceVM, sourceProvider, migration := raceMigrationFixture()
+	sourceProvider.UID = "uid-recreated"
+	sourceVM.Status.BoundProvider = &infrav1beta1.BoundProviderRef{Namespace: "default", Name: "source-provider", UID: "uid-src"}
+	r, spies, _ := providerRecordingReconciler(t, sourceVM, sourceProvider, migration)
+
+	_, err := r.handleExportingPhase(ctx, migration)
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, totalExports(spies))
+	assert.Equal(t, infrav1beta1.MigrationPhaseImporting, migration.Status.Phase)
 }
 
 func TestMigrationPhases_RefuseASourceBoundElsewhere(t *testing.T) {

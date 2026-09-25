@@ -2108,16 +2108,7 @@ func (r *VMMigrationReconciler) getSourceProvider(ctx context.Context, migration
 	if err != nil {
 		return nil, err
 	}
-	provider, err := r.getProvider(ctx, sourceProviderRef, migration.Namespace)
-	if err != nil {
-		return nil, err
-	}
-	if vmIsBound(sourceVM) {
-		if err := checkVMProvider(sourceVM, provider); err != nil {
-			return nil, err
-		}
-	}
-	return provider, nil
+	return r.getProvider(ctx, sourceProviderRef, migration.Namespace)
 }
 
 // migrationSourceProviderRef returns the Provider a migration exports its
@@ -2132,15 +2123,14 @@ func (r *VMMigrationReconciler) getSourceProvider(ctx context.Context, migration
 // refused rather than honoured. For the same reason a source VM whose
 // spec.providerRef no longer names the Provider it is bound through
 // (status.boundProvider) is refused: the export goes only through the bound
-// Provider (vmRefFor re-checks the Provider object's UID before every per-VM
-// call).
+// Provider.
 func migrationSourceProviderRef(migration *infrav1beta1.VMMigration, sourceVM *infrav1beta1.VirtualMachine) (infrav1beta1.ObjectRef, error) {
 	vmProvider := sourceVM.Spec.ProviderRef
 	if vmProvider.Namespace == "" {
 		vmProvider.Namespace = sourceVM.Namespace
 	}
 	if vmIsBound(sourceVM) {
-		if err := checkBoundProvider(sourceVM, types.NamespacedName{Namespace: vmProvider.Namespace, Name: vmProvider.Name}, ""); err != nil {
+		if err := checkBoundProvider(sourceVM, types.NamespacedName{Namespace: vmProvider.Namespace, Name: vmProvider.Name}); err != nil {
 			return infrav1beta1.ObjectRef{}, err
 		}
 	}

@@ -222,7 +222,7 @@ func (r *VMCloneReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	// through it (status.boundProvider): its status.id — cloned here, and the
 	// clone task and bind that follow — is meaningful only on that Provider.
 	providerKey := vmProviderKey(sourceVM)
-	if err := checkBoundProvider(sourceVM, providerKey, ""); err != nil {
+	if err := checkBoundProvider(sourceVM, providerKey); err != nil {
 		logger.Info("Source VM is not bound through the Provider its spec.providerRef names; not cloning", "vm", sourceKey.Name, "error", err.Error())
 		return r.markPending(ctx, clone, vmRefErrorReason(err), err.Error()), nil
 	}
@@ -231,10 +231,6 @@ func (r *VMCloneReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		logger.Error(err, "Failed to get provider", "provider", providerKey.Name)
 		return r.markPending(ctx, clone, infrav1beta1.VMCloneReasonProviderError,
 			fmt.Sprintf("provider %q not found", providerKey.Name)), nil
-	}
-	if err := checkVMProvider(sourceVM, provider); err != nil {
-		logger.Info("Source VM is not bound through this Provider object; not cloning", "vm", sourceKey.Name, "error", err.Error())
-		return r.markPending(ctx, clone, vmRefErrorReason(err), err.Error()), nil
 	}
 
 	providerInstance, err := r.getProviderInstance(ctx, provider)

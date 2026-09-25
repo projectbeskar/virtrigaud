@@ -35,7 +35,14 @@ import (
 // immutable once the VM is bound; as defense in depth the operator records the
 // Provider it bound the VM through (status.boundProvider) in the same status
 // write that binds it, and refuses every per-VM provider call — and the
-// finalizer's Delete — while spec.providerRef resolves to any other Provider.
+// finalizer's Delete — while spec.providerRef names any other Provider
+// (namespace and name).
+//
+// The Provider object's UID is recorded for audit only. A Provider deleted and
+// re-created under the same namespace and name is accepted in its place: the
+// VirtualMachine controller emits a Warning event (BoundProviderRecreated) and
+// records the new UID. Proving that the re-created object still fronts the same
+// hypervisor needs a hypervisor identity, which is a separate design.
 //
 // Bind paths (each records the Provider): VirtualMachine create
 // (createVM, and recordPendingHost for a clustered create in flight), VMClone
@@ -49,18 +56,31 @@ import (
 var errProviderRefMismatch = errors.New("virtual machine's spec.providerRef does not match the provider it is bound through")
 
 // errReasonProviderRefMismatch is the metrics reason recorded when a bound VM's
-// spec.providerRef no longer resolves to its bound Provider.
+// spec.providerRef no longer names its bound Provider.
 const errReasonProviderRefMismatch = "provider-ref-mismatch"
+
+// Event reasons of the provider binding, recorded on the VirtualMachine.
+const (
+	// eventReasonBoundProviderRecorded: a VM bound before status.boundProvider
+	// existed had it recorded from its current spec.providerRef (backfill). It
+	// recurs on every reconcile if the record cannot be persisted (an installed
+	// CRD without the field prunes it).
+	eventReasonBoundProviderRecorded = "BoundProviderRecorded"
+	// eventReasonBoundProviderRecreated: the Provider the VM is bound through
+	// was deleted and re-created under the same namespace and name (new UID).
+	// The VM keeps operating through it and the new UID is recorded.
+	eventReasonBoundProviderRecreated = "BoundProviderRecreated"
+)
 
 // providerRefMismatchRetryInterval re-checks a VM refused for a provider
 // reference mismatch. Only an administrator can resolve it (spec.providerRef
-// is immutable once bound; status.boundProvider is written through the status
-// subresource, whose updates do not trigger a reconcile), so it re-checks
-// slowly instead of hammering anything.
+// is immutable once bound, so this state needs an object edited before that
+// rule or a status write), so it re-checks slowly instead of hammering
+// anything.
 const providerRefMismatchRetryInterval = 2 * time.Minute
 
 // ProviderRefMismatchError reports that a bound VirtualMachine's
-// spec.providerRef resolves to a Provider other than the one recorded in
+// spec.providerRef names a Provider other than the one recorded in
 // status.boundProvider. No provider call may be made for the VM through the
 // mismatched Provider: its status.id is meaningful only on the bound one.
 type ProviderRefMismatchError struct {
@@ -68,22 +88,13 @@ type ProviderRefMismatchError struct {
 	Namespace, Name string
 	// Bound is the Provider the VM is bound through.
 	Bound infravirtrigaudiov1beta1.BoundProviderRef
-	// Current is the Provider spec.providerRef resolves to now.
+	// Current is the Provider spec.providerRef names now.
 	Current types.NamespacedName
-	// CurrentUID is the UID of the Provider object spec.providerRef resolves
-	// to, when it was compared ("" when only the reference was checked).
-	CurrentUID types.UID
 }
 
 // Error implements error.
 func (e *ProviderRefMismatchError) Error() string {
-	if e.Bound.Namespace == e.Current.Namespace && e.Bound.Name == e.Current.Name {
-		return fmt.Sprintf("VirtualMachine %s/%s is bound through Provider %s/%s (uid %s), but that Provider now has uid %s "+
-			"(it was deleted and re-created); no provider call is made. If the re-created Provider manages the same "+
-			"hypervisor, an administrator may clear status.boundProvider to re-accept it",
-			e.Namespace, e.Name, e.Bound.Namespace, e.Bound.Name, e.Bound.UID, e.CurrentUID)
-	}
-	return fmt.Sprintf("VirtualMachine %s/%s is bound through Provider %s/%s, but spec.providerRef now resolves to %s/%s; "+
+	return fmt.Sprintf("VirtualMachine %s/%s is bound through Provider %s/%s, but spec.providerRef now names %s/%s; "+
 		"its provider id is meaningful only on the bound Provider, so no provider call is made "+
 		"(to detach the VM without deleting the hypervisor VM, set the %s=true annotation and delete it)",
 		e.Namespace, e.Name, e.Bound.Namespace, e.Bound.Name, e.Current.Namespace, e.Current.Name,
@@ -132,28 +143,35 @@ func recordBoundProvider(vm *infravirtrigaudiov1beta1.VirtualMachine, provider *
 	vm.Status.BoundProvider = boundProviderRefFor(provider)
 }
 
-// checkBoundProvider returns a *ProviderRefMismatchError when vm records a
-// bound Provider (status.boundProvider) that is not key or — when both UIDs are
-// known — not the object with uid. A VM with no record returns nil: it is
-// either unbound (nothing to protect) or bound before the record existed, and
-// the VirtualMachine controller backfills it on its next reconcile. Pass an
-// empty uid to compare the reference only (before the Provider is fetched).
-func checkBoundProvider(vm *infravirtrigaudiov1beta1.VirtualMachine, key types.NamespacedName, uid types.UID) error {
+// boundProviderKey returns the namespace/name recorded in vm's
+// status.boundProvider (an empty namespace means the VM's own) and whether a
+// record exists.
+func boundProviderKey(vm *infravirtrigaudiov1beta1.VirtualMachine) (types.NamespacedName, bool) {
 	bound := vm.Status.BoundProvider
 	if bound == nil {
+		return types.NamespacedName{}, false
+	}
+	key := types.NamespacedName{Namespace: bound.Namespace, Name: bound.Name}
+	if key.Namespace == "" {
+		key.Namespace = vm.Namespace
+	}
+	return key, true
+}
+
+// checkBoundProvider returns a *ProviderRefMismatchError when vm records a
+// bound Provider (status.boundProvider) whose namespace/name is not key. A VM
+// with no record returns nil: it is either unbound (nothing to protect) or
+// bound before the record existed, and the VirtualMachine controller backfills
+// it on its next reconcile. The Provider object's UID is not compared (see
+// boundProviderRecreated).
+func checkBoundProvider(vm *infravirtrigaudiov1beta1.VirtualMachine, key types.NamespacedName) error {
+	bound, ok := boundProviderKey(vm)
+	if !ok || bound == key {
 		return nil
 	}
-	boundNS := bound.Namespace
-	if boundNS == "" {
-		boundNS = vm.Namespace
-	}
-	if boundNS == key.Namespace && bound.Name == key.Name &&
-		(bound.UID == "" || uid == "" || types.UID(bound.UID) == uid) {
-		return nil
-	}
-	b := *bound
-	b.Namespace = boundNS
-	return &ProviderRefMismatchError{Namespace: vm.Namespace, Name: vm.Name, Bound: b, Current: key, CurrentUID: uid}
+	b := *vm.Status.BoundProvider
+	b.Namespace = bound.Namespace
+	return &ProviderRefMismatchError{Namespace: vm.Namespace, Name: vm.Name, Bound: b, Current: key}
 }
 
 // checkVMProvider is checkBoundProvider for a fetched Provider object: the
@@ -162,7 +180,17 @@ func checkVMProvider(vm *infravirtrigaudiov1beta1.VirtualMachine, provider *infr
 	if provider == nil {
 		return nil
 	}
-	return checkBoundProvider(vm, types.NamespacedName{Namespace: provider.Namespace, Name: provider.Name}, provider.UID)
+	return checkBoundProvider(vm, types.NamespacedName{Namespace: provider.Namespace, Name: provider.Name})
+}
+
+// boundProviderRecreated reports whether provider is the Provider vm is bound
+// through (same namespace and name) but a different object: both UIDs are known
+// and differ, i.e. it was deleted and re-created. That is accepted (audited
+// with an event), not refused.
+func boundProviderRecreated(vm *infravirtrigaudiov1beta1.VirtualMachine, provider *infravirtrigaudiov1beta1.Provider) bool {
+	bound := vm.Status.BoundProvider
+	return bound != nil && checkVMProvider(vm, provider) == nil &&
+		bound.UID != "" && provider.UID != "" && types.UID(bound.UID) != provider.UID
 }
 
 // hasOrphanOnDeleteAnnotation reports whether vm carries the orphan-on-delete

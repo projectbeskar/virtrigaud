@@ -145,10 +145,10 @@ func placementTopologyError(vm *infravirtrigaudiov1beta1.VirtualMachine, provide
 // (source), VMMigration (source) controllers all go through it, so the routing
 // rule lives in exactly one place:
 //
-//   - any topology: a VM bound through another Provider object
-//     (status.boundProvider: namespace, name and, when recorded, UID) fails
-//     CLOSED with a *ProviderRefMismatchError (no ref) — its status.id is
-//     meaningful only on the Provider that assigned it.
+//   - any topology: a VM bound through another Provider
+//     (status.boundProvider namespace/name) fails CLOSED with a
+//     *ProviderRefMismatchError (no ref) — its status.id is meaningful only on
+//     the Provider that assigned it.
 //   - single-host / thin-client Provider (topology single, the default): the
 //     ref carries status.id only — no host, no owner — byte-for-byte today's
 //     call (D9). A VM that nevertheless records a clustered placement fails

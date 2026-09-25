@@ -122,21 +122,17 @@ func TestCheckBoundProvider(t *testing.T) {
 	cases := map[string]struct {
 		bound    *infravirtrigaudiov1beta1.BoundProviderRef
 		key      types.NamespacedName
-		uid      types.UID
 		mismatch bool
 	}{
-		"no record (pre-upgrade or unbound) is not checked": {nil, key("other", "x"), "u", false},
-		"same provider and uid":                             {bp(bpNS, "p", "u1"), key(bpNS, "p"), "u1", false},
-		"same provider, reference-only check":               {bp(bpNS, "p", "u1"), key(bpNS, "p"), "", false},
-		"same provider, uid not recorded":                   {bp(bpNS, "p", ""), key(bpNS, "p"), "u2", false},
-		"empty recorded namespace means the VM's":           {bp("", "p", "u1"), key(bpNS, "p"), "u1", false},
-		"another name":                      {bp(bpNS, "p", "u1"), key(bpNS, "q"), "", true},
-		"same name in another namespace":    {bp(bpNS, "p", "u1"), key("infra", "p"), "u1", true},
-		"re-created Provider (uid changed)": {bp(bpNS, "p", "u1"), key(bpNS, "p"), "u2", true},
+		"no record (pre-upgrade or unbound) is not checked": {nil, key("other", "x"), false},
+		"same provider": {bp(bpNS, "p", "u1"), key(bpNS, "p"), false},
+		"empty recorded namespace means the VM's": {bp("", "p", "u1"), key(bpNS, "p"), false},
+		"another name":                   {bp(bpNS, "p", "u1"), key(bpNS, "q"), true},
+		"same name in another namespace": {bp(bpNS, "p", "u1"), key("infra", "p"), true},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			err := checkBoundProvider(vm(tc.bound), tc.key, tc.uid)
+			err := checkBoundProvider(vm(tc.bound), tc.key)
 			if !tc.mismatch {
 				require.NoError(t, err)
 				return
@@ -148,6 +144,22 @@ func TestCheckBoundProvider(t *testing.T) {
 			assert.False(t, isPlacementTopologyMismatch(err))
 		})
 	}
+}
+
+func TestBoundProviderRecreated(t *testing.T) {
+	vm := func(uid string) *infravirtrigaudiov1beta1.VirtualMachine {
+		return &infravirtrigaudiov1beta1.VirtualMachine{
+			ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: bpNS},
+			Status: infravirtrigaudiov1beta1.VirtualMachineStatus{ID: "vm-1",
+				BoundProvider: &infravirtrigaudiov1beta1.BoundProviderRef{Namespace: bpNS, Name: "p", UID: uid}},
+		}
+	}
+	assert.True(t, boundProviderRecreated(vm("u1"), providerCRWithUID(bpNS, "p", "u2")), "same name, new object")
+	assert.False(t, boundProviderRecreated(vm("u1"), providerCRWithUID(bpNS, "p", "u1")), "the same object")
+	assert.False(t, boundProviderRecreated(vm(""), providerCRWithUID(bpNS, "p", "u2")), "no recorded UID")
+	assert.False(t, boundProviderRecreated(vm("u1"), providerCRWithUID(bpNS, "p", "")), "no known UID")
+	assert.False(t, boundProviderRecreated(vm("u1"), providerCRWithUID(bpNS, "q", "u2")), "another Provider is a mismatch, not a re-creation")
+	assert.NoError(t, checkVMProvider(vm("u1"), providerCRWithUID(bpNS, "p", "u2")), "a re-created Provider is not refused")
 }
 
 func TestVMRefFor_RefusesMismatchedBoundProvider(t *testing.T) {
@@ -165,10 +177,9 @@ func TestVMRefFor_RefusesMismatchedBoundProvider(t *testing.T) {
 	assert.True(t, isProviderRefMismatch(err), "vmRefFor never addresses the VM through another Provider")
 
 	recreated := providerCRWithUID(bpNS, "prov-a", "uid-a2")
-	_, err = vmRefFor(vm, recreated)
-	require.Error(t, err)
-	assert.True(t, isProviderRefMismatch(err))
-	assert.Contains(t, err.Error(), "deleted and re-created")
+	ref, err = vmRefFor(vm, recreated)
+	require.NoError(t, err, "a Provider re-created under the same namespace/name is accepted")
+	assert.Equal(t, contracts.VMRef{ID: "vm-100"}, ref)
 
 	clustered := withRuntime(clusteredProviderCR("prov-c", bpNS))
 	cvm := boundVM("cweb", infravirtrigaudiov1beta1.ObjectRef{Name: "prov-c"},
@@ -226,7 +237,7 @@ func TestReconcileVM_BackfillsBoundProviderForPreUpgradeVM(t *testing.T) {
 	vm := boundVM("legacy", infravirtrigaudiov1beta1.ObjectRef{Name: "prov-a"}, nil)
 	vm.Spec.PowerState = infravirtrigaudiov1beta1.PowerStateOn
 	rp := &routingProvider{describeResp: contracts.DescribeResponse{Exists: true, PowerState: "On"}}
-	r, res, _ := bpReconciler(t, rp, prov, class, vm)
+	r, res, rec := bpReconciler(t, rp, prov, class, vm)
 
 	_, err := r.reconcileVM(context.Background(), getBPVM(t, r, "legacy"))
 	require.NoError(t, err)
@@ -237,6 +248,43 @@ func TestReconcileVM_BackfillsBoundProviderForPreUpgradeVM(t *testing.T) {
 	require.Len(t, rp.describeRefs, 1, "the backfilled VM is reconciled normally")
 	assert.Equal(t, "vm-100", rp.describeRefs[0].ID)
 	assert.EqualValues(t, 1, res.calls.Load())
+	events := drainEvents(rec)
+	require.Len(t, events, 1, "every backfill is recorded as an event")
+	assert.Contains(t, events[0], "Normal "+eventReasonBoundProviderRecorded)
+	assert.Contains(t, events[0], bpNS+"/prov-a")
+}
+
+func TestReconcileVM_RecreatedBoundProvider_KeepsWorking(t *testing.T) {
+	// The Provider the VM is bound through was deleted and re-created under the
+	// same namespace and name: the VM keeps operating, a Warning event records
+	// it, and the new UID is recorded.
+	prov := providerCRWithUID(bpNS, "prov-a", "uid-a-recreated")
+	_, class := providerAndClass(bpNS)
+	vm := boundVM("web", infravirtrigaudiov1beta1.ObjectRef{Name: "prov-a"},
+		&infravirtrigaudiov1beta1.BoundProviderRef{Namespace: bpNS, Name: "prov-a", UID: "uid-a"})
+	rp := &routingProvider{describeResp: contracts.DescribeResponse{Exists: true, PowerState: "On"}}
+	r, res, rec := bpReconciler(t, rp, prov, class, vm)
+
+	_, err := r.reconcileVM(context.Background(), getBPVM(t, r, "web"))
+	require.NoError(t, err)
+
+	require.Len(t, rp.describeRefs, 1, "the VM keeps working through the re-created Provider")
+	assert.EqualValues(t, 1, res.calls.Load())
+	after := getBPVM(t, r, "web")
+	assert.Equal(t, &infravirtrigaudiov1beta1.BoundProviderRef{Namespace: bpNS, Name: "prov-a", UID: "uid-a-recreated"},
+		after.Status.BoundProvider, "the new UID is recorded for audit")
+	c := meta.FindStatusCondition(after.Status.Conditions, k8s.ConditionReady)
+	require.NotNil(t, c)
+	assert.NotEqual(t, k8s.ReasonProviderRefMismatch, c.Reason)
+	events := drainEvents(rec)
+	require.Len(t, events, 1)
+	assert.Contains(t, events[0], "Warning "+eventReasonBoundProviderRecreated)
+	assert.Contains(t, events[0], "uid-a -> uid-a-recreated")
+
+	// Next reconcile: the new UID is the record, no further event.
+	_, err = r.reconcileVM(context.Background(), getBPVM(t, r, "web"))
+	require.NoError(t, err)
+	assert.Empty(t, drainEvents(rec))
 }
 
 // ─── enforcement ──────────────────────────────────────────────────────────────
@@ -258,10 +306,6 @@ func TestReconcileVM_ProviderRefMismatch_NoProviderCalls(t *testing.T) {
 		"same name in another namespace": {
 			ref:  infravirtrigaudiov1beta1.ObjectRef{Name: "prov-a", Namespace: "infra"},
 			objs: []client.Object{providerCRWithUID(bpNS, "prov-a", "uid-a"), providerCRWithUID("infra", "prov-a", "uid-infra")},
-		},
-		"Provider deleted and re-created under the same name": {
-			ref:  infravirtrigaudiov1beta1.ObjectRef{Name: "prov-a"},
-			objs: []client.Object{providerCRWithUID(bpNS, "prov-a", "uid-a-recreated")},
 		},
 	}
 	for name, tc := range cases {
@@ -358,9 +402,9 @@ func TestHandleDeletion_ProviderRefMismatch(t *testing.T) {
 			ref:  infravirtrigaudiov1beta1.ObjectRef{Name: "does-not-exist"},
 			objs: []client.Object{providerCRWithUID(bpNS, "prov-a", "uid-a")},
 		},
-		"Provider re-created under the same name": {
-			ref:  infravirtrigaudiov1beta1.ObjectRef{Name: "prov-a"},
-			objs: []client.Object{providerCRWithUID(bpNS, "prov-a", "uid-a-recreated")},
+		"re-namespaced to a same-named Provider": {
+			ref:  infravirtrigaudiov1beta1.ObjectRef{Name: "prov-a", Namespace: "infra"},
+			objs: []client.Object{providerCRWithUID(bpNS, "prov-a", "uid-a"), providerCRWithUID("infra", "prov-a", "uid-infra")},
 		},
 	}
 	for name, sc := range scenarios {
@@ -406,9 +450,24 @@ func TestHandleDeletion_ProviderRefMismatch(t *testing.T) {
 	}
 }
 
-func TestHandleDeletion_Clustered_PendingCreateOnRecreatedProviderIsNotDeleted(t *testing.T) {
+func TestHandleDeletion_RecreatedBoundProvider_DeletesThroughIt(t *testing.T) {
+	// A Provider re-created under the same namespace and name is accepted: the
+	// finalizer deletes the hypervisor VM through it.
+	vm := boundVM("web", infravirtrigaudiov1beta1.ObjectRef{Name: "prov-a"},
+		&infravirtrigaudiov1beta1.BoundProviderRef{Namespace: bpNS, Name: "prov-a", UID: "uid-a"})
+	rp := &routingProvider{}
+	r, _, _ := bpReconciler(t, rp, providerCRWithUID(bpNS, "prov-a", "uid-a-recreated"), vm)
+
+	gone, _ := deleteBP(t, r, "web")
+	assert.True(t, gone)
+	require.Len(t, rp.deleteRefs, 1)
+	assert.Equal(t, "vm-100", rp.deleteRefs[0].ID)
+}
+
+func TestHandleDeletion_Clustered_PendingCreateOnRecreatedProviderIsCleanedUp(t *testing.T) {
 	// A clustered create in flight (pendingHost, no id) whose Provider object
-	// was re-created: the owner-checked cleanup Delete is not sent through it.
+	// was re-created under the same name: the owner-checked cleanup Delete is
+	// still sent to the pending host.
 	vm := clusterVM("vm-pend", clusteredNS, "prov-cluster")
 	vm.Finalizers = []string{infravirtrigaudiov1beta1.VirtualMachineFinalizer}
 	vm.Status.Placement = &infravirtrigaudiov1beta1.PlacementStatus{PendingHost: "host-alpha"}
@@ -423,7 +482,22 @@ func TestHandleDeletion_Clustered_PendingCreateOnRecreatedProviderIsNotDeleted(t
 	marked := markForDeletion(t, r, getVM(t, r, "vm-pend"))
 	_, err := r.handleDeletion(context.Background(), marked)
 	require.NoError(t, err)
-	assert.Empty(t, prov.deleteRefs, "no cleanup Delete through a re-created Provider")
+	require.Len(t, prov.deleteRefs, 1, "the owner-checked cleanup Delete is sent")
+	assert.Equal(t, "host-alpha", prov.deleteRefs[0].HostID)
+}
+
+func TestHandleDeletion_Clustered_PendingCreateBoundElsewhereIsNotDeleted(t *testing.T) {
+	vm := clusterVM("vm-pend", clusteredNS, "prov-cluster")
+	vm.Finalizers = []string{infravirtrigaudiov1beta1.VirtualMachineFinalizer}
+	vm.Status.Placement = &infravirtrigaudiov1beta1.PlacementStatus{PendingHost: "host-alpha"}
+	vm.Status.BoundProvider = &infravirtrigaudiov1beta1.BoundProviderRef{Namespace: clusteredNS, Name: "prov-other"}
+	prov := &routingProvider{}
+	r := clusteredFixture(t, prov, vm)
+
+	marked := markForDeletion(t, r, getVM(t, r, "vm-pend"))
+	_, err := r.handleDeletion(context.Background(), marked)
+	require.NoError(t, err)
+	assert.Empty(t, prov.deleteRefs, "no cleanup Delete through a Provider the VM is not bound to")
 	assert.Contains(t, getVM(t, r, "vm-pend").Finalizers, infravirtrigaudiov1beta1.VirtualMachineFinalizer)
 }
 
