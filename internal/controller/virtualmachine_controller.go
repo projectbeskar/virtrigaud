@@ -232,6 +232,20 @@ type VirtualMachineReconciler struct {
 	// imagePrepares de-duplicates concurrent image prepares of one VMImage
 	// through one Provider object within this manager (prepareImageOnce).
 	imagePrepares singleflight.Group
+	// prepareBackoff paces the prepares sent again after a failed import or
+	// an unconfirmed answer (EnsureImageOnProvider).
+	prepareBackoff imagePrepareBackoff
+	// clock returns the current time for the image-prepare backoff and stall
+	// bounds; nil uses time.Now. Tests set it.
+	clock func() time.Time
+}
+
+// now returns the reconciler's current time (clock, or time.Now).
+func (r *VirtualMachineReconciler) now() time.Time {
+	if r.clock != nil {
+		return r.clock()
+	}
+	return time.Now()
 }
 
 // recordEvent emits an event on vm when a Recorder is configured.

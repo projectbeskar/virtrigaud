@@ -332,15 +332,23 @@ func TestEnsureImageOnProvider_AnswerMustConfirmTheIdentity(t *testing.T) {
 					tc.artifact.SourceDigest = digestOf(t, img)
 				}
 				inst := &preparerProvider{prepareResp: resp, noEcho: tc.noEcho}
-				before := reloadImage(t, r, img.Name)
 
 				requeue, err := r.EnsureImageOnProvider(ctx, vmForImage(provider.Name, img.Name), img, provider, inst)
 				require.ErrorIs(t, err, errImageArtifactNotConfirmed)
+				require.ErrorIs(t, err, errImagePrepareHold, "a hold with a backoff, not a 5-second provider error")
+				assert.Equal(t, notConfirmedBackoff.Base, imageHoldRequeueAfter(err))
 				assert.False(t, requeue)
 				assert.Equal(t, 1, inst.calls())
 				after := reloadImage(t, r, img.Name)
-				assert.Equal(t, before.ResourceVersion, after.ResourceVersion, "an unconfirmed answer is never recorded")
-				assert.Empty(t, after.Status.ProviderStatus)
+				ps := after.Status.ProviderStatus[imageProviderKey(provider)]
+				assert.False(t, ps.Available, "an unconfirmed answer is never recorded as prepared")
+				assert.Empty(t, ps.SourceDigest)
+				assert.Empty(t, ps.ID, "nothing of the answer is recorded")
+				assert.Empty(t, ps.TaskRef)
+				assert.NotContains(t, ps.Message, "uid-someone-else", "no echoed data is shown")
+				cond := meta.FindStatusCondition(after.Status.Conditions, infrav1beta1.VMImageConditionReady)
+				require.NotNil(t, cond)
+				assert.Equal(t, imageReasonArtifactNotConfirmed, cond.Reason)
 				assert.Equal(t, "https://images.example.com/jammy.qcow2",
 					createImageName(t, r, vmForImage(provider.Name, img.Name), provider, after).URL,
 					"the create uses the source as written")
@@ -573,21 +581,83 @@ func TestEnsureImageOnProvider_ArtifactConflictDoesNotMaskReadyElsewhere(t *test
 	assert.Contains(t, got.Status.ProviderStatus[imageProviderKey(provider)].Message, "not prepared for this VMImage")
 }
 
-func TestEnsureImageOnProvider_ArtifactInProgressWaits(t *testing.T) {
+// testClock is a settable clock for the reconciler's backoff and stall
+// bounds.
+type testClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func newTestClock() *testClock { return &testClock{t: time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)} }
+
+func (c *testClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *testClock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = c.t.Add(d)
+}
+
+func TestEnsureImageOnProvider_ArtifactInProgressWaitsThenReportsAStall(t *testing.T) {
+	ctx := context.Background()
 	const providerType = "artifact-inprogress-test"
 	img := imageWithSource("ubuntu", "")
+	img.Spec.Prepare = &infrav1beta1.ImagePrepare{Timeout: &metav1.Duration{Duration: 90 * time.Minute}}
 	r, _ := newEnsureReconciler(t, img)
+	clock := newTestClock()
+	r.clock = clock.now
+	rec := &objectRecorder{}
+	r.Recorder = rec
 	provider := typedProvider("libvirt-1", providerType, true, true)
+	key := imageProviderKey(provider)
 	inst := &preparerProvider{prepareErr: contracts.NewInProgressError("image prepare: still being prepared", nil)}
 	before := artifactOutcome(t, providerType, metrics.ImageArtifactOutcomeInProgress)
-	imgBefore := reloadImage(t, r, img.Name)
+	vm := vmForImage(provider.Name, img.Name)
+	ensure := func() error {
+		t.Helper()
+		requeue, err := r.EnsureImageOnProvider(ctx, vm, reloadImage(t, r, img.Name), provider, inst)
+		require.ErrorIs(t, err, errImagePrepareHold)
+		assert.False(t, requeue)
+		assert.Equal(t, imageArtifactInProgressRequeueAfter, imageHoldRequeueAfter(err))
+		return err
+	}
 
-	requeue, err := r.EnsureImageOnProvider(context.Background(), vmForImage(provider.Name, img.Name), img, provider, inst)
-	require.ErrorIs(t, err, errImagePrepareHold)
-	assert.False(t, requeue)
-	assert.Equal(t, imageArtifactInProgressRequeueAfter, imageHoldRequeueAfter(err))
+	// The first answer records when the wait began; the image is importing.
+	ensure()
 	assert.Equal(t, before+1, artifactOutcome(t, providerType, metrics.ImageArtifactOutcomeInProgress))
-	assert.Equal(t, imgBefore.ResourceVersion, reloadImage(t, r, img.Name).ResourceVersion, "nothing is recorded")
+	got := reloadImage(t, r, img.Name)
+	ps := got.Status.ProviderStatus[key]
+	assert.False(t, ps.Available)
+	assert.Contains(t, ps.Message, "by another request")
+	require.NotNil(t, ps.LastUpdated)
+	began := ps.LastUpdated.Time
+	assert.Equal(t, infrav1beta1.ImagePhaseImporting, got.Status.Phase)
+
+	// Waiting within the bound writes nothing.
+	clock.advance(2 * time.Hour)
+	ensure()
+	assert.Equal(t, got.ResourceVersion, reloadImage(t, r, img.Name).ResourceVersion)
+
+	// Beyond max(2 × 90m, 2h) = 3h the wait is reported as stalled, once.
+	clock.advance(time.Hour + time.Second)
+	err := ensure()
+	assert.Contains(t, err.Error(), "stuck or abandoned")
+	got = reloadImage(t, r, img.Name)
+	ps = got.Status.ProviderStatus[key]
+	assert.Contains(t, ps.Message, "more than 3h0m0s")
+	assert.True(t, ps.LastUpdated.Time.Equal(began), "lastUpdated keeps when the wait began")
+	cond := meta.FindStatusCondition(got.Status.Conditions, infrav1beta1.VMImageConditionReady)
+	require.NotNil(t, cond)
+	assert.Equal(t, imageReasonArtifactPrepareStalled, cond.Reason)
+	clock.advance(time.Hour)
+	ensure()
+	assert.Equal(t, got.ResourceVersion, reloadImage(t, r, img.Name).ResourceVersion)
+	require.Len(t, rec.withReason(eventReasonImageArtifactPrepareStalled), 1, "one event per change of state")
+	assert.Equal(t, 4, inst.calls(), "each retry asks the provider")
 }
 
 // ─── against the mock provider over gRPC ─────────────────────────────────────
@@ -701,25 +771,6 @@ func TestEnsureImageOnProvider_MockProvider_AsyncPrepareIsConfirmed(t *testing.T
 			"the confirmation of our own import is not counted as a reuse")
 	})
 
-	t.Run("a failed task is asked again: the provider imports it again", func(t *testing.T) {
-		img := sharedOVAImage(idImageNS, "noble", "")
-		r, _ := newIdentityReconciler(t, img, provider)
-		vm := vmUsing(provider, img)
-
-		_, err := r.EnsureImageOnProvider(ctx, vm, getImage(t, r, img), provider, cli)
-		require.NoError(t, err)
-		task := getImage(t, r, img).Status.ProviderStatus[key].TaskRef
-		require.True(t, mockProv.FinishTask(task, "download failed"))
-
-		requeue, err := r.EnsureImageOnProvider(ctx, vm, getImage(t, r, img), provider, cli)
-		require.NoError(t, err)
-		assert.True(t, requeue, "a new import is in flight")
-		ps := getImage(t, r, img).Status.ProviderStatus[key]
-		assert.False(t, ps.Available)
-		assert.NotEmpty(t, ps.TaskRef)
-		assert.NotEqual(t, task, ps.TaskRef)
-	})
-
 	t.Run("another Provider at the same location waits for the import in progress", func(t *testing.T) {
 		img := sharedOVAImage(idImageNS, "jammy", "")
 		other := typedProvider("mock", providerType, true, true)
@@ -735,9 +786,179 @@ func TestEnsureImageOnProvider_MockProvider_AsyncPrepareIsConfirmed(t *testing.T
 		require.ErrorIs(t, err, errImagePrepareHold, "the provider's IMAGE_ARTIFACT_IN_PROGRESS is a hold, not a failure")
 		assert.Equal(t, imageArtifactInProgressRequeueAfter, imageHoldRequeueAfter(err))
 		assert.Equal(t, inProgress+1, artifactOutcome(t, providerType, metrics.ImageArtifactOutcomeInProgress))
-		_, recorded := getImage(t, r, img).Status.ProviderStatus[imageProviderKey(other)]
-		assert.False(t, recorded)
+		waiting := getImage(t, r, img).Status.ProviderStatus[imageProviderKey(other)]
+		assert.False(t, waiting.Available)
+		assert.Empty(t, waiting.SourceDigest, "nothing is recorded as prepared")
+		assert.Contains(t, waiting.Message, "by another request")
 	})
+}
+
+// countingPreparer is the manager's client to a mock provider, counting the
+// PrepareImage calls it sends.
+type countingPreparer struct {
+	*transportgrpc.Client
+	prepares atomic.Int32
+}
+
+// PrepareImage counts the call and forwards it.
+func (c *countingPreparer) PrepareImage(ctx context.Context, req contracts.ImagePrepareRequest) (contracts.ImagePrepareResponse, error) {
+	c.prepares.Add(1)
+	return c.Client.PrepareImage(ctx, req)
+}
+
+func TestEnsureImageOnProvider_MockProvider_AlwaysFailingImportBacksOff(t *testing.T) {
+	ctx := context.Background()
+	mockProv, cli := startMockImageProvider(t, time.Hour)
+	inst := &countingPreparer{Client: cli}
+	provider := typedProvider("mock", "artifact-mock-failing", true, true)
+	provider.Namespace, provider.UID = idTeamA, "uid-team-a-mock-failing"
+	key := imageProviderKey(provider)
+	img := sharedOVAImage(idImageNS, "broken", "")
+	r, _ := newIdentityReconciler(t, img, provider)
+	clock := newTestClock()
+	r.clock = clock.now
+	vm := vmUsing(provider, img)
+	failTask := func() {
+		t.Helper()
+		task := getImage(t, r, img).Status.ProviderStatus[key].TaskRef
+		require.NotEmpty(t, task)
+		require.True(t, mockProv.FinishTask(task, "download failed: HTTP 404 from https://user:s3cret@images.example.com/broken.ova"))
+	}
+	holds := func(r *VirtualMachineReconciler, prepares int32) error {
+		t.Helper()
+		requeue, err := r.EnsureImageOnProvider(ctx, vm, getImage(t, r, img), provider, inst)
+		require.ErrorIs(t, err, errImagePrepareHold)
+		assert.False(t, requeue)
+		assert.Equal(t, prepares, inst.prepares.Load(), "no prepare is sent while backing off")
+		return err
+	}
+	sends := func(prepares int32) {
+		t.Helper()
+		requeue, err := r.EnsureImageOnProvider(ctx, vm, getImage(t, r, img), provider, inst)
+		require.NoError(t, err)
+		assert.True(t, requeue, "a new import is in flight")
+		assert.Equal(t, prepares, inst.prepares.Load())
+	}
+
+	sends(1)
+	failTask()
+
+	// The failure is surfaced, sanitized, and nothing is sent at once.
+	err := holds(r, 1)
+	assert.Equal(t, importFailedBackoff.Base, imageHoldRequeueAfter(err))
+	assert.Contains(t, err.Error(), "HTTP 404")
+	assert.NotContains(t, err.Error(), "s3cret")
+	got := getImage(t, r, img)
+	ps := got.Status.ProviderStatus[key]
+	assert.False(t, ps.Available)
+	assert.Empty(t, ps.TaskRef)
+	assert.Equal(t, digestOf(t, img), ps.SourceDigest, "the failed import's source")
+	assert.Contains(t, ps.Message, "failed")
+	assert.NotContains(t, ps.Message, "s3cret")
+	cond := meta.FindStatusCondition(got.Status.Conditions, infrav1beta1.VMImageConditionReady)
+	require.NotNil(t, cond)
+	assert.Equal(t, imageReasonImportFailed, cond.Reason)
+
+	// At most one prepare per backoff window: 1 minute, then 2.
+	for _, step := range []time.Duration{10 * time.Second, 30 * time.Second, 19 * time.Second} {
+		clock.advance(step)
+		holds(r, 1)
+	}
+	clock.advance(2 * time.Second)
+	sends(2)
+	failTask()
+	err = holds(r, 2)
+	assert.Equal(t, 2*importFailedBackoff.Base, imageHoldRequeueAfter(err), "the wait doubles")
+	clock.advance(61 * time.Second)
+	holds(r, 2)
+	clock.advance(60 * time.Second)
+	sends(3)
+
+	// A manager restart loses the count, not the first wait: the entry's
+	// record of the failed import still holds for importFailedBackoff.Base.
+	failTask()
+	holds(r, 3)
+	restarted := &VirtualMachineReconciler{Client: r.Client, Scheme: r.Scheme, clock: clock.now}
+	clock.advance(30 * time.Second)
+	holds(restarted, 3)
+	clock.advance(31 * time.Second)
+	requeue, err := restarted.EnsureImageOnProvider(ctx, vm, getImage(t, r, img), provider, inst)
+	require.NoError(t, err)
+	assert.True(t, requeue)
+	assert.EqualValues(t, 4, inst.prepares.Load())
+}
+
+func TestEnsureImageOnProvider_UnconfirmedAnswerBacksOff(t *testing.T) {
+	ctx := context.Background()
+	img := imageWithSource("ubuntu", "")
+	r, _ := newEnsureReconciler(t, img)
+	clock := newTestClock()
+	r.clock = clock.now
+	provider := importCapableProvider("libvirt-1")
+	inst := &preparerProvider{prepareResp: contracts.ImagePrepareResponse{PreparedImageID: "ubuntu"}, noEcho: true}
+	// Two VMs reconciling the same image: the backoff is per image, Provider
+	// and source, not per VM.
+	vms := []*infrav1beta1.VirtualMachine{vmForImage(provider.Name, img.Name), vmForImage(provider.Name, img.Name)}
+	vms[1].Name = "vm-2"
+	ensure := func(vm *infrav1beta1.VirtualMachine) error {
+		t.Helper()
+		_, err := r.EnsureImageOnProvider(ctx, vm, reloadImage(t, r, img.Name), provider, inst)
+		require.ErrorIs(t, err, errImagePrepareHold)
+		return err
+	}
+
+	err := ensure(vms[0])
+	require.ErrorIs(t, err, errImageArtifactNotConfirmed)
+	assert.Equal(t, 30*time.Second, imageHoldRequeueAfter(err))
+	assert.Equal(t, 1, inst.calls())
+	ensure(vms[1])
+	assert.Equal(t, 1, inst.calls(), "another VM does not ask again within the window")
+
+	clock.advance(31 * time.Second)
+	err = ensure(vms[1])
+	assert.Equal(t, 2, inst.calls())
+	assert.Equal(t, time.Minute, imageHoldRequeueAfter(err), "the wait doubles")
+	for i := 0; i < 6; i++ {
+		clock.advance(5 * time.Minute)
+		err = ensure(vms[0])
+	}
+	assert.Equal(t, 5*time.Minute, imageHoldRequeueAfter(err), "bounded at 5 minutes")
+
+	// A confirmed answer ends the backoff.
+	inst.mu.Lock()
+	inst.noEcho = false
+	inst.mu.Unlock()
+	clock.advance(5 * time.Minute)
+	requeue, err := r.EnsureImageOnProvider(ctx, vms[0], reloadImage(t, r, img.Name), provider, inst)
+	require.NoError(t, err)
+	assert.False(t, requeue)
+	wait, _ := r.prepareBackoff.wait(imagePrepareBackoffKey(img, provider, digestOf(t, img)), clock.now())
+	assert.Zero(t, wait)
+}
+
+func TestImagePrepareBackoffPolicy(t *testing.T) {
+	p := imagePrepareBackoffPolicy{Base: time.Minute, Max: 30 * time.Minute}
+	for failures, want := range map[int]time.Duration{
+		1: time.Minute, 2: 2 * time.Minute, 3: 4 * time.Minute, 5: 16 * time.Minute, 6: 30 * time.Minute, 60: 30 * time.Minute,
+	} {
+		assert.Equal(t, want, p.delay(failures), "failures=%d", failures)
+	}
+
+	var b imagePrepareBackoff
+	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
+	n, _ := b.fail(backoffImportFailed, "k", "task-1", "m", p, now)
+	assert.Equal(t, 1, n)
+	n, _ = b.fail(backoffImportFailed, "k", "task-1", "m", p, now)
+	assert.Equal(t, 1, n, "the same failed task is counted once")
+	n, notBefore := b.fail(backoffImportFailed, "k", "task-2", "m", p, now)
+	assert.Equal(t, 2, n)
+	assert.Equal(t, now.Add(2*time.Minute), notBefore)
+	later := notBefore.Add(imagePrepareBackoffForget + time.Second)
+	n, _ = b.fail(backoffImportFailed, "k", "task-3", "m", p, later)
+	assert.Equal(t, 1, n, "an old failure no longer lengthens the wait")
+	b.clear("k")
+	wait, _ := b.wait("k", later)
+	assert.Zero(t, wait)
 }
 
 // ─── #344 invariants under the confirm call ──────────────────────────────────

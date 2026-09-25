@@ -83,6 +83,18 @@ const (
 	// that was not prepared for this VMImage, and refused to use or replace it
 	// (ADR-0009 D4).
 	imageReasonArtifactConflict = "ArtifactConflict"
+	// imageReasonArtifactNotConfirmed marks a VM create held because the
+	// provider answered a prepare without confirming the requested identity
+	// (ADR-0009 D7); the prepare is sent again after a growing backoff.
+	imageReasonArtifactNotConfirmed = "ArtifactNotConfirmed"
+	// imageReasonImportFailed marks a VM create held because an asynchronous
+	// import ended in failure; the prepare is sent again after a growing
+	// backoff.
+	imageReasonImportFailed = "ImportFailed"
+	// imageReasonArtifactPrepareStalled marks a VM create that has waited
+	// longer than the ADR-0009 abandonment bound for an artifact another
+	// request is preparing.
+	imageReasonArtifactPrepareStalled = "ArtifactPrepareStalled"
 )
 
 // eventReasonImagePrepareStateAccepted is the Warning event recorded on a VM
@@ -98,6 +110,26 @@ const eventReasonImagePrepareStateAccepted = "ImagePrepareStateAccepted"
 // when a Provider's entry changes to the ArtifactConflict hold (ADR-0009 D11):
 // once per change of state, not on every retry.
 const eventReasonImageArtifactConflict = "ImageArtifactConflict"
+
+// eventReasonImageArtifactPrepareStalled is the Warning event recorded on a
+// VMImage when a Provider's wait for an artifact another request is preparing
+// exceeds the ADR-0009 abandonment bound: once per change of state.
+const eventReasonImageArtifactPrepareStalled = "ImageArtifactPrepareStalled"
+
+// imageArtifactStallFloor is the minimum of the ADR-0009 D4 staleness bound,
+// max(2 × spec.prepare.timeout, 2h).
+const imageArtifactStallFloor = 2 * time.Hour
+
+// imageArtifactStallBound returns the ADR-0009 D4 staleness bound of
+// vmImage: max(2 × spec.prepare.timeout, 2h). A wait for an artifact another
+// request is preparing that lasts longer is reported as stalled.
+func imageArtifactStallBound(vmImage *infravirtrigaudiov1beta1.VMImage) time.Duration {
+	bound := imageArtifactStallFloor
+	if p := vmImage.Spec.Prepare; p != nil && p.Timeout != nil && 2*p.Timeout.Duration > bound {
+		bound = 2 * p.Timeout.Duration
+	}
+	return bound
+}
 
 // errImagePrepareHold is a sentinel returned by EnsureImageOnProvider when the
 // image is not (yet) prepared and the VM must NOT proceed to create — for
@@ -150,6 +182,8 @@ type imageHoldError struct {
 	msg string
 	// requeueAfter is when to retry; 0 uses imagePrepareRequeueAfter.
 	requeueAfter time.Duration
+	// cause, when set, is what the hold is about (errors.Is/As reach it).
+	cause error
 }
 
 // Error implements error.
@@ -157,6 +191,9 @@ func (e *imageHoldError) Error() string { return errImagePrepareHold.Error() + "
 
 // Is makes errors.Is(err, errImagePrepareHold) true.
 func (e *imageHoldError) Is(target error) bool { return target == errImagePrepareHold }
+
+// Unwrap returns the cause of the hold.
+func (e *imageHoldError) Unwrap() error { return e.cause }
 
 // imageHoldRequeueAfter returns when to retry a create held on err (a hold).
 func imageHoldRequeueAfter(err error) time.Duration {
@@ -313,8 +350,9 @@ func imagePrepareRequest(vmImage *infravirtrigaudiov1beta1.VMImage, provider *in
 //   - (true,  nil):              a prepare is in flight — requeue, do NOT create yet.
 //   - (false, errImagePrepareHold): the image may not be prepared now (OnMissing
 //     Fail/Wait, a Provider without artifact identity, an artifact conflict, an
-//     artifact another request is preparing, an outdated CRD) — requeue without
-//     creating (imageHoldRequeueAfter).
+//     artifact another request is preparing, a failed import or an unconfirmed
+//     answer backing off, an outdated CRD) — requeue without creating
+//     (imageHoldRequeueAfter).
 //   - (false, err):              a real error (provider/transport/status) — surface it.
 //
 // The first return value (requeue) is only meaningful when err is nil.
@@ -445,6 +483,7 @@ func (r *VirtualMachineReconciler) EnsureImageOnProvider(
 	// proves nothing about this one. Nor is a task started for an earlier
 	// spec.source: it prepares other content. The prepare is issued again
 	// instead.
+	backoffKey := imagePrepareBackoffKey(vmImage, provider, digest)
 	completedTask := ""
 	if found && entry.TaskRef != "" {
 		switch {
@@ -468,19 +507,28 @@ func (r *VirtualMachineReconciler) EnsureImageOnProvider(
 				}
 				return true, nil
 			}
-			// The task ended (a failed task ends too). Its end does not prove
-			// the artifact (ADR-0009 D7): the prepare is sent again — it is
-			// idempotent — and only its confirmed stamp echo is recorded. A
-			// failed import is found abandoned and imported again by the
-			// provider.
 			if terr != nil {
-				logger.Info("Image prepare task failed; asking the provider again",
-					"provider", key, "image", vmImage.Name, "taskRef", entry.TaskRef, "error", terr.Error())
-			} else {
-				logger.Info("Image prepare task completed; confirming the prepared artifact",
-					"provider", key, "image", vmImage.Name, "taskRef", entry.TaskRef)
+				// The import failed: record why, and send the prepare again
+				// only after a growing backoff — a source that always fails
+				// must not be downloaded again on every task end.
+				return false, r.recordImageImportFailed(ctx, vmImage, provider, entry.TaskRef, backoffKey, digest, terr)
 			}
+			// The task completed. Its end does not prove the artifact
+			// (ADR-0009 D7): the prepare is sent again — it is idempotent —
+			// and only its confirmed stamp echo is recorded.
+			logger.Info("Image prepare task completed; confirming the prepared artifact",
+				"provider", key, "image", vmImage.Name, "taskRef", entry.TaskRef)
 			completedTask = entry.TaskRef
+		}
+	}
+	// After a failed import or an unconfirmed answer, the prepare waits for
+	// its backoff. The confirmation of a completed task does not: it only
+	// reads what the task produced.
+	if completedTask == "" {
+		if hold := r.imagePrepareBackoffHold(vmImage, provider, entry, found, digest, backoffKey); hold != nil {
+			logger.V(1).Info("Image prepare backing off after a failure", "provider", key, "image", vmImage.Name,
+				"reason", hold.Error())
+			return false, hold
 		}
 	}
 	if found && entry.Available && (!recordedThrough || !forSource) {
@@ -634,12 +682,8 @@ func (r *VirtualMachineReconciler) issueImagePrepare(
 		case contracts.IsInProgress(perr):
 			metrics.RecordImagePrepareArtifactOutcome(providerType, metrics.ImageArtifactOutcomeInProgress)
 			logger.Info("The prepared image is still being prepared by another request; waiting",
-				"provider", key, "image", vmImage.Name, "detail", providerErrorMessage(perr))
-			return false, &imageHoldError{
-				msg: fmt.Sprintf("the image is still being prepared at the image location of provider %q by another "+
-					"request; waiting for it", key),
-				requeueAfter: imageArtifactInProgressRequeueAfter,
-			}
+				"provider", key, "image", vmImage.Name, "detail", sanitizeProviderDetail(perr))
+			return false, r.holdArtifactInProgress(ctx, vmImage, provider)
 		case contracts.IsInvalidSpec(perr):
 			// The provider rejected the image source itself (e.g. a libvirt path
 			// outside its allowed image directories), or — a provider older than
@@ -657,13 +701,15 @@ func (r *VirtualMachineReconciler) issueImagePrepare(
 	// ADR-0009 D7: record nothing the provider did not prove. Only the UID and
 	// digest of the echo are compared; its namespace and name come from the
 	// hypervisor and are never logged or shown.
+	backoffKey := imagePrepareBackoffKey(vmImage, provider, req.SourceDigest)
 	if !resp.ConfirmsIdentity(req) {
 		logger.Error(errImageArtifactNotConfirmed, "Not recording an image prepare answer that does not confirm the requested identity",
 			"provider", key, "image", vmImage.Name, "hasArtifact", resp.Artifact != nil,
 			"uidMatches", resp.Artifact != nil && resp.Artifact.Image.UID == req.Image.UID,
 			"digestMatches", resp.Artifact != nil && resp.Artifact.SourceDigest == req.SourceDigest)
-		return false, fmt.Errorf("prepare image %s on provider %s: %w", vmImage.Name, key, errImageArtifactNotConfirmed)
+		return false, r.holdArtifactNotConfirmed(ctx, vmImage, provider, backoffKey)
 	}
+	r.prepareBackoff.clear(backoffKey, backoffNotConfirmed)
 	switch {
 	case !resp.Artifact.Reused:
 		metrics.RecordImagePrepareArtifactOutcome(providerType, metrics.ImageArtifactOutcomeCreated)
@@ -721,7 +767,224 @@ func (r *VirtualMachineReconciler) issueImagePrepare(
 	if werr != nil {
 		return false, werr
 	}
+	r.prepareBackoff.clear(backoffKey)
 	return !applied, nil
+}
+
+// recordImageImportFailed records that failedTask, provider's asynchronous
+// import of vmImage's current source (digest), ended in failure (cause): the
+// entry keeps no task, records the failure (sanitized) and — as the record
+// of a failed import for this source — the source digest, while it is not
+// available; the image-level condition gets reason ImportFailed while the
+// image is available on no provider. The failure is counted once per task in
+// prepareBackoff, and the hold returned retries when its backoff ends
+// (importFailedBackoff: one minute, doubling, at most 30 minutes). The
+// entry's lastUpdated keeps the first wait after a manager restart
+// (imagePrepareBackoffHold).
+func (r *VirtualMachineReconciler) recordImageImportFailed(
+	ctx context.Context,
+	vmImage *infravirtrigaudiov1beta1.VMImage,
+	provider *infravirtrigaudiov1beta1.Provider,
+	failedTask, backoffKey, digest string,
+	cause error,
+) error {
+	key := imageProviderKey(provider)
+	now := r.now()
+	msg := fmt.Sprintf("the image import on provider %q failed (provider detail: %s)", key, sanitizeProviderDetail(cause))
+	failures, notBefore := r.prepareBackoff.fail(backoffImportFailed, backoffKey, failedTask, msg, importFailedBackoff, now)
+	log.FromContext(ctx).Info("Image prepare task failed; the prepare is sent again after a backoff",
+		"provider", key, "image", vmImage.Name, "taskRef", failedTask, "failures", failures,
+		"retryAt", notBefore, "detail", sanitizeProviderDetail(cause))
+	if err := r.writeImageStatusE(ctx, vmImage, func(img *infravirtrigaudiov1beta1.VMImage) error {
+		ps := img.Status.ProviderStatus[key]
+		if ps.TaskRef != failedTask {
+			return errSkipImageStatusWrite // recorded by a concurrent reconcile, or replaced by a newer prepare
+		}
+		stamp := metav1.NewTime(now)
+		ps.Available = false
+		ps.ProviderUID = string(provider.UID)
+		ps.TaskRef = ""
+		ps.SourceDigest = digest
+		ps.Message = msg
+		ps.LastUpdated = &stamp
+		img.Status.ProviderStatus[key] = ps
+		img.Status.AvailableOn = removeString(img.Status.AvailableOn, key)
+		if !imagePrepareInFlight(img) {
+			meta.SetStatusCondition(&img.Status.Conditions, metav1.Condition{
+				Type:               infravirtrigaudiov1beta1.VMImageConditionImporting,
+				Status:             metav1.ConditionFalse,
+				Reason:             imageReasonImportFailed,
+				Message:            msg,
+				ObservedGeneration: img.Generation,
+			})
+		}
+		if imageAvailableOnAnyProvider(img) {
+			return nil
+		}
+		img.Status.Ready = false
+		img.Status.Phase = infravirtrigaudiov1beta1.ImagePhaseFailed
+		img.Status.Message = msg
+		meta.SetStatusCondition(&img.Status.Conditions, metav1.Condition{
+			Type:               infravirtrigaudiov1beta1.VMImageConditionReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             imageReasonImportFailed,
+			Message:            msg,
+			ObservedGeneration: img.Generation,
+		})
+		return nil
+	}); err != nil {
+		return err
+	}
+	wait := notBefore.Sub(now)
+	return &imageHoldError{
+		msg:          fmt.Sprintf("%s; prepared again in %s (failure %d)", msg, wait.Round(time.Second), failures),
+		requeueAfter: wait,
+	}
+}
+
+// imagePrepareBackoffHold returns the hold of a prepare that must still wait
+// after a failure (nil when it may be sent): an unconfirmed answer or a failed
+// import counted in prepareBackoff, or — after a manager restart, which loses
+// that count — a failed import for the current source recorded on the entry
+// (not available, no task, sourceDigest set: recordImageImportFailed), which
+// waits importFailedBackoff.Base from its lastUpdated.
+func (r *VirtualMachineReconciler) imagePrepareBackoffHold(
+	vmImage *infravirtrigaudiov1beta1.VMImage,
+	provider *infravirtrigaudiov1beta1.Provider,
+	entry infravirtrigaudiov1beta1.ProviderImageStatus,
+	found bool,
+	digest, backoffKey string,
+) error {
+	now := r.now()
+	remaining, msg := r.prepareBackoff.wait(backoffKey, now)
+	if found && imageEntryRecordedThrough(entry, provider) && !entry.Available && entry.TaskRef == "" &&
+		imageEntryForSource(entry, digest) && entry.LastUpdated != nil {
+		if d := entry.LastUpdated.Add(importFailedBackoff.Base).Sub(now); d > remaining {
+			remaining, msg = d, entry.Message
+		}
+	}
+	if remaining <= 0 {
+		return nil
+	}
+	return &imageHoldError{
+		msg:          fmt.Sprintf("%s; prepared again in %s", msg, remaining.Round(time.Second)),
+		requeueAfter: remaining,
+	}
+}
+
+// holdArtifactNotConfirmed records that provider answered a prepare of
+// vmImage without confirming the requested identity (ADR-0009 D7): nothing
+// of the answer is recorded or shown; the entry and — while the image is
+// available on no provider — the image get reason ArtifactNotConfirmed. The
+// failure is counted in prepareBackoff, and the hold returned (errors.Is
+// errImageArtifactNotConfirmed) retries when its backoff ends
+// (notConfirmedBackoff: 30 seconds, doubling, at most 5 minutes); until then
+// no reconcile sends the prepare.
+func (r *VirtualMachineReconciler) holdArtifactNotConfirmed(
+	ctx context.Context,
+	vmImage *infravirtrigaudiov1beta1.VMImage,
+	provider *infravirtrigaudiov1beta1.Provider,
+	backoffKey string,
+) error {
+	key := imageProviderKey(provider)
+	now := r.now()
+	msg := fmt.Sprintf("provider %q answered the image prepare without confirming this VMImage's artifact identity "+
+		"(ADR-0009), so the answer is not used; the provider may be older than the capability it reports", key)
+	failures, notBefore := r.prepareBackoff.fail(backoffNotConfirmed, backoffKey, "", msg, notConfirmedBackoff, now)
+	if _, err := r.markImageEntryHeld(ctx, vmImage, provider, imageReasonArtifactNotConfirmed,
+		infravirtrigaudiov1beta1.ImagePhaseFailed, msg); err != nil {
+		return err
+	}
+	wait := notBefore.Sub(now)
+	return &imageHoldError{
+		msg:          fmt.Sprintf("%s; asked again in %s (failure %d)", msg, wait.Round(time.Second), failures),
+		requeueAfter: wait,
+		cause:        errImageArtifactNotConfirmed,
+	}
+}
+
+// holdArtifactInProgress records that provider answered a prepare of vmImage
+// with "the artifact is still being prepared for this VMImage by another
+// request" (ADR-0009 D4). The first such answer records the wait on the entry
+// (its lastUpdated is when the wait began) and marks the image importing;
+// later ones write nothing until the wait exceeds imageArtifactStallBound
+// (max(2 × spec.prepare.timeout, 2h), the bound after which the provider
+// treats an incomplete artifact as abandoned). The entry then says the other
+// prepare may be stuck, the image-level condition gets reason
+// ArtifactPrepareStalled while the image is available on no provider, and a
+// Warning event ImageArtifactPrepareStalled is recorded on the VMImage once.
+// It returns the hold, retried after imageArtifactInProgressRequeueAfter.
+func (r *VirtualMachineReconciler) holdArtifactInProgress(
+	ctx context.Context,
+	vmImage *infravirtrigaudiov1beta1.VMImage,
+	provider *infravirtrigaudiov1beta1.Provider,
+) error {
+	key := imageProviderKey(provider)
+	uid := string(provider.UID)
+	now := r.now()
+	bound := imageArtifactStallBound(vmImage)
+	waitingMsg := fmt.Sprintf("the image is being prepared at the image location of provider %q by another request; "+
+		"waiting for it", key)
+	stalledMsg := fmt.Sprintf("the image has been being prepared at the image location of provider %q by another "+
+		"request for more than %s; that prepare may be stuck or abandoned (the provider imports again once it is "+
+		"abandoned)", key, bound)
+	stalled, becameStalled := false, false
+	if err := r.writeImageStatusE(ctx, vmImage, func(img *infravirtrigaudiov1beta1.VMImage) error {
+		stalled, becameStalled = false, false
+		ps, found := img.Status.ProviderStatus[key]
+		waiting := found && !ps.Available && ps.TaskRef == "" && ps.ProviderUID == uid && ps.LastUpdated != nil &&
+			(ps.Message == waitingMsg || ps.Message == stalledMsg)
+		if !waiting {
+			if img.Status.ProviderStatus == nil {
+				img.Status.ProviderStatus = map[string]infravirtrigaudiov1beta1.ProviderImageStatus{}
+			}
+			stamp := metav1.NewTime(now)
+			ps.Available = false
+			ps.ProviderUID = uid
+			ps.TaskRef = ""
+			ps.SourceDigest = ""
+			ps.Message = waitingMsg
+			ps.LastUpdated = &stamp
+			img.Status.ProviderStatus[key] = ps
+			img.Status.AvailableOn = removeString(img.Status.AvailableOn, key)
+			markImageImporting(img, waitingMsg)
+			return nil
+		}
+		if now.Sub(ps.LastUpdated.Time) < bound {
+			return errSkipImageStatusWrite
+		}
+		stalled = true
+		if ps.Message == stalledMsg {
+			return errSkipImageStatusWrite
+		}
+		becameStalled = true
+		ps.Message = stalledMsg // lastUpdated keeps when the wait began
+		img.Status.ProviderStatus[key] = ps
+		if imageAvailableOnAnyProvider(img) {
+			return nil
+		}
+		img.Status.Ready = false
+		img.Status.Phase = infravirtrigaudiov1beta1.ImagePhasePending
+		img.Status.Message = stalledMsg
+		meta.SetStatusCondition(&img.Status.Conditions, metav1.Condition{
+			Type:               infravirtrigaudiov1beta1.VMImageConditionReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             imageReasonArtifactPrepareStalled,
+			Message:            stalledMsg,
+			ObservedGeneration: img.Generation,
+		})
+		return nil
+	}); err != nil {
+		return err
+	}
+	if becameStalled && r.Recorder != nil {
+		r.Recorder.Event(vmImage, corev1.EventTypeWarning, eventReasonImageArtifactPrepareStalled, stalledMsg)
+	}
+	msg := waitingMsg
+	if stalled {
+		msg = stalledMsg
+	}
+	return &imageHoldError{msg: msg, requeueAfter: imageArtifactInProgressRequeueAfter}
 }
 
 // holdArtifactConflict records that the provider refused the artifact at the
