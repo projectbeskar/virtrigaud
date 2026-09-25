@@ -5,6 +5,35 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-25 18:45] - ADR-0009 Slice 5: Proxmox guard — URL image import fails closed
+**Author:** @wrkode (William Rizzo)
+
+> **Operator note.** Proxmox URL image import (`VMImage` `source.http`) is **not supported in this release**. It never worked: it downloaded the file but never created a template VM that `Create` could clone. It is now refused with `InvalidSpec` (the `VMImage` shows `Ready=False` / `InvalidSource` instead of the Slice 2 `ProviderLacksArtifactIdentity` hold; VMs that already exist are unaffected). Prepare the template on Proxmox VE and reference it with `source.proxmox.templateID`. Real URL import is ADR-0009 Slice 6. `source.proxmox.templateID`/`templateName` behave as before. The Proxmox provider now serves `/metrics` on its health port. Alert on `virtrigaud_provider_image_prepare_legacy_requests_total{provider_type="proxmox"}` > 0: it means a manager older than this release is still sending requests.
+
+### Security
+- `internal/providers/proxmox/image.go`: removed the bare-name gate. A URL import whose `target_name` matched any existing template, whoever created it and from whatever source, was reported as "already prepared". `ImagePrepare` now answers every URL import (`source.http.url`, or the flat `contracts.VMImage` URL) with `InvalidSpec` before any PVE call, with or without an image identity (ADR-0009 D10). The message names no URL, storage or node, and fits the manager's 256-byte provider-detail cap. The import URL is no longer logged, since its query string may carry a token. `findTemplateByName` is documented as serving only the explicit `source.proxmox.templateName` reference, never an artifact lookup.
+
+### Changed
+- `internal/providers/proxmox/image.go`: every request is validated first with `imageartifact.ParseRequest`, so a malformed request is `InvalidArgument` before any PVE call. A legacy (identity-less) request emits the ADR-0009 D7 deprecation signal (WARN log and `virtrigaud_provider_image_prepare_legacy_requests_total{provider_type="proxmox"}`) and is then served like an identity request: Proxmox has no working bare-name path to keep. Reference-style sources are verified as before in both modes, with no artifact echo because nothing was prepared or stamped. The PVE client check now runs only on that path, so a URL import is refused (permanent) rather than `Unavailable` (retried) when the client is not configured.
+- `internal/providers/proxmox/capabilities.go`: advertises `image_artifact_identity` (the provider never reuses a prepared artifact by bare name). Without it the Slice 2 manager holds such VMImages with a false "upgrade the provider image" reason (`ProviderLacksArtifactIdentity`). `image_import` stays advertised, so the honest `InvalidSpec` reaches the VMImage instead of the unprepared source going straight to `Create`.
+- `cmd/provider-proxmox/main.go`: serves the provider's Prometheus registry at `/metrics` on the health port, as libvirt does, so the legacy counter can be scraped.
+- Docs: `docs/image-preparation.md` (new "Proxmox image sources" section; "Provider support" now lists Proxmox), `docs/upgrading.md` (visible-change row, checklist query for URL-sourced VMImages, rollback caveat), `README.md` (Proxmox Image Import is ⚠️), `examples/proxmox-complete-example.yaml` (the URL-imported image becomes a `templateID` reference, with the `qm` steps).
+
+### Removed
+- `internal/providers/proxmox/image.go`: `imagePrepareImport`, `resolveImageStorage` and the default storage/format constants. `internal/providers/proxmox/pveapi/client.go`: `Client.PrepareImage`, the `download-url` call that saved the file as `<target_name>.<format>`. Slice 6 replaces them with a stamped template-VM import.
+
+### Tests
+- `internal/providers/proxmox/image_guard_test.go` (pvefake): URL imports are refused in identity and legacy mode with no PVE request at all. The legacy counter and the WARN line change only for legacy requests. A same-named seeded template is never adopted or even looked up. The refusal does not depend on the PVE client. Reference-style `templateID`/`templateName` (rich and flat shapes, reference wins over `http`) succeed unchanged in both modes, with no writes and no artifact echo, and give NotFound/InvalidSpec as before. Fourteen malformed requests are rejected per `ParseRequest` with no PVE call and no legacy signal. Registry, DataVolume and empty sources are `InvalidSpec`. The capability is advertised with `image_import`. `pvefake` records every request (`Requests`, `MutatingRequests`). The obsolete URL-import, storage-precedence and name-idempotency tests are removed.
+
+### Why
+The Proxmox URL import never produced a usable template, and its name gate let one tenant's same-named template satisfy another tenant's prepare. ADR-0009 D10 makes it fail closed in this release rather than pretend. It also advertises the identity capability honestly, so the Slice 2 manager surfaces `InvalidSource` instead of a misleading hold. Slice 6 builds the real import.
+
+### Impact
+- [ ] Breaking change (the URL import never produced a usable template; it now fails visibly)
+- [x] Requires cluster rollout (Proxmox provider image)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-09-25 13:40] - ADR-0009 Slice 2: the manager prepares images by artifact identity (gate, echo check, source digest, holds)
 **Author:** @wrkode (William Rizzo)
 
