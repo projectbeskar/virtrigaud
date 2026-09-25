@@ -89,7 +89,7 @@ type imageSidecar struct {
 // validate returns an error unless s can be trusted: a valid stamp
 // (imageartifact.Stamp.Validate) and a plausible artifact inode and size.
 func (s imageSidecar) validate() error {
-	if err := s.Stamp.Validate(); err != nil {
+	if err := s.Validate(); err != nil { // the embedded imageartifact.Stamp
 		return err
 	}
 	if s.Artifact.Inode == 0 {
