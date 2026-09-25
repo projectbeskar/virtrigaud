@@ -197,7 +197,7 @@ func (r *VirtualMachineReconciler) committedPlacements(
 		if len(hosts) == 0 || uid == selfUID {
 			continue
 		}
-		class, err := r.classForSizing(ctx, other, classes)
+		class, err := classForSizing(ctx, r.Client, other, classes)
 		if err != nil {
 			return committedSnapshot{}, err
 		}
@@ -216,10 +216,11 @@ func (r *VirtualMachineReconciler) committedPlacements(
 	return snap, nil
 }
 
-// classForSizing returns vm's VMClass for sizing, memoised in seen; nil when
-// the VM names none or it does not exist.
-func (r *VirtualMachineReconciler) classForSizing(
+// classForSizing returns vm's VMClass for sizing, read through reader and
+// memoised in seen; nil when the VM names none or it does not exist.
+func classForSizing(
 	ctx context.Context,
+	reader client.Reader,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
 	seen map[types.NamespacedName]*infravirtrigaudiov1beta1.VMClass,
 ) (*infravirtrigaudiov1beta1.VMClass, error) {
@@ -231,7 +232,7 @@ func (r *VirtualMachineReconciler) classForSizing(
 		return c, nil
 	}
 	class := &infravirtrigaudiov1beta1.VMClass{}
-	if err := r.Get(ctx, key, class); err != nil {
+	if err := reader.Get(ctx, key, class); err != nil {
 		if !apierrors.IsNotFound(err) {
 			return nil, fmt.Errorf("get VMClass %s to size VirtualMachine %s/%s: %w", key, vm.Namespace, vm.Name, err)
 		}
@@ -241,6 +242,36 @@ func (r *VirtualMachineReconciler) classForSizing(
 	}
 	seen[key] = class
 	return class, nil
+}
+
+// committedOnHost sums the footprint of every VirtualMachine whose placement
+// belongs to provider and names host (bound or pending; being deleted
+// included) — the same accounting the scheduler uses, for one host.
+func committedOnHost(
+	ctx context.Context,
+	reader client.Reader,
+	provider types.NamespacedName,
+	host string,
+) (cpu, memMiB int64, err error) {
+	var vms infravirtrigaudiov1beta1.VirtualMachineList
+	if err := reader.List(ctx, &vms); err != nil {
+		return 0, 0, fmt.Errorf("list VirtualMachines for Host %s/%s: %w", provider.Namespace, host, err)
+	}
+	classes := map[types.NamespacedName]*infravirtrigaudiov1beta1.VMClass{}
+	for i := range vms.Items {
+		vm := &vms.Items[i]
+		if placementProviderKey(vm) != provider || !slices.Contains(placementHosts(vm), host) {
+			continue
+		}
+		class, err := classForSizing(ctx, reader, vm, classes)
+		if err != nil {
+			return 0, 0, err
+		}
+		fp := classFootprint(vm, class)
+		cpu += max(int64(fp.CPU), 0)
+		memMiB += max(fp.MemoryMiB, 0)
+	}
+	return cpu, memMiB, nil
 }
 
 // placementRequest completes req with what is committed on provider's hosts:

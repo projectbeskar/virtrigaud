@@ -123,6 +123,7 @@ type HostReconciler struct {
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=hosts/finalizers,verbs=update
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=providers,verbs=get;list;watch
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=virtualmachines,verbs=get;list;watch
+// +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=vmclasses,verbs=get;list;watch
 
 // Reconcile syncs one Host's observed inventory into its status.
 //
@@ -164,7 +165,30 @@ func (r *HostReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resul
 		}
 	}
 
+	r.publishCommitted(ctx, host)
 	return r.syncHostStatus(ctx, host)
+}
+
+// hostProviderKey is the Provider a Host belongs to: the one its providerRef
+// names, in the Host's own namespace (the same-namespace model).
+func hostProviderKey(host *infravirtrigaudiov1beta1.Host) types.NamespacedName {
+	return types.NamespacedName{Namespace: host.Namespace, Name: host.Spec.ProviderRef.Name}
+}
+
+// publishCommitted refreshes the Host's committed-capacity gauges
+// (virtrigaud_host_committed_cpu / _memory_mib) from the VirtualMachines bound
+// to or pending on it — the scheduler's accounting (ADR-0007 Addendum A,
+// scheduler-accuracy amendment). Best effort: a failure is logged and the
+// gauges keep their last value; it never fails the reconcile.
+func (r *HostReconciler) publishCommitted(ctx context.Context, host *infravirtrigaudiov1beta1.Host) {
+	provider := hostProviderKey(host)
+	cpu, mem, err := committedOnHost(ctx, r.Client, provider, host.Name)
+	if err != nil {
+		log.FromContext(ctx).V(1).Info("Could not compute the Host's committed capacity; keeping the last published value",
+			"host", host.Name, "error", err.Error())
+		return
+	}
+	metrics.SetHostCommitted(provider.String(), host.Name, cpu, mem)
 }
 
 // handleHostDeletion releases the in-use finalizer of a Host being deleted only
@@ -192,6 +216,8 @@ func (r *HostReconciler) handleHostDeletion(ctx context.Context, host *infravirt
 		metrics.RecordError(errReasonHostFinalizer, metrics.ComponentManager)
 		return ctrl.Result{}, fmt.Errorf("remove in-use finalizer from Host %s: %w", host.Name, err)
 	}
+	// Nothing is bound or pending on it any more: drop its series.
+	metrics.DeleteHostCommitted(hostProviderKey(host).String(), host.Name)
 	return ctrl.Result{}, nil
 }
 

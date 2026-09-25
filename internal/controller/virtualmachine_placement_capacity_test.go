@@ -36,6 +36,7 @@ import (
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
+	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/scheduler"
 	"github.com/projectbeskar/virtrigaud/internal/scheduler/assume"
@@ -727,4 +728,68 @@ func TestSingleHost_NeverSchedulesOrAssumes(t *testing.T) {
 	for _, c := range vm.Status.Conditions {
 		assert.False(t, strings.Contains(c.Message, "feasible host"), c.Message)
 	}
+}
+
+// ─── committed-capacity gauges (Host controller) ─────────────────────────────
+
+// gaugeValue returns the value of the gauge series name{labels}, and whether it
+// exists.
+func gaugeValue(t *testing.T, name string, labels map[string]string) (float64, bool) {
+	t.Helper()
+	families, err := metrics.GetRegistry().Gather()
+	require.NoError(t, err)
+	for _, f := range families {
+		if f.GetName() != name {
+			continue
+		}
+		for _, m := range f.GetMetric() {
+			if labelsMatch(m.GetLabel(), labels) && len(m.GetLabel()) == len(labels) {
+				return m.GetGauge().GetValue(), true
+			}
+		}
+	}
+	return 0, false
+}
+
+// TestHostReconciler_PublishesCommittedCapacity: the Host controller publishes
+// the scheduler's committed sum for its host, and drops the series with the
+// Host.
+func TestHostReconciler_PublishesCommittedCapacity(t *testing.T) {
+	ctx := context.Background()
+	s := coverageTestScheme(t)
+	prov := clusterProvider("prov-gauge")
+	host := hostCR("host-gauge", "prov-gauge", nil)
+	vm := func(name, bound, pending string) *infravirtrigaudiov1beta1.VirtualMachine {
+		return withPlacement(clusterVM(name, "default", "prov-gauge"), bound, pending)
+	}
+	foreign := vm("foreign", "host-gauge", "")
+	foreign.Spec.ProviderRef.Name = "another-provider"
+	stub := &stubProvider{GetHostInfoFn: func(_ context.Context, id string) (contracts.HostInfo, error) {
+		return healthyHostInfo(id), nil
+	}}
+	r := newHostReconciler(s, &stubResolver{provider: stub}, prov, host, smallVMClass("default"),
+		vm("bound-1", "host-gauge", ""), vm("bound-2", "host-gauge", ""), vm("pending", "", "host-gauge"),
+		vm("elsewhere", "host-other", ""), foreign)
+
+	_, err := r.Reconcile(ctx, hostReq("host-gauge"))
+	require.NoError(t, err)
+	labels := map[string]string{"provider": "default/prov-gauge", "host": "host-gauge"}
+	cpu, ok := gaugeValue(t, "virtrigaud_host_committed_cpu", labels)
+	require.True(t, ok)
+	assert.Equal(t, 6.0, cpu, "two bound and one pending 2 vCPU VM")
+	mem, ok := gaugeValue(t, "virtrigaud_host_committed_memory_mib", labels)
+	require.True(t, ok)
+	assert.Equal(t, 3*4096.0, mem)
+
+	// Deleting the Host (nothing bound any more) removes its series.
+	for _, name := range []string{"bound-1", "bound-2", "pending"} {
+		stored := &infravirtrigaudiov1beta1.VirtualMachine{}
+		require.NoError(t, r.Get(ctx, types.NamespacedName{Namespace: "default", Name: name}, stored))
+		require.NoError(t, r.Delete(ctx, stored))
+	}
+	require.NoError(t, r.Delete(ctx, getHost(t, r.Client, "host-gauge")))
+	_, err = r.Reconcile(ctx, hostReq("host-gauge"))
+	require.NoError(t, err)
+	_, ok = gaugeValue(t, "virtrigaud_host_committed_cpu", labels)
+	assert.False(t, ok, "the series goes with the Host")
 }
