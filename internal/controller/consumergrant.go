@@ -361,21 +361,43 @@ func consumerSelectorChanged() predicate.Predicate {
 // soon as a grant may have changed, so a grant takes effect within seconds
 // instead of at the next consumerNotAllowedRetryInterval recheck: a
 // Namespace's labels, and a Provider's, VMClass's or VMImage's
-// spec.consumerNamespaceSelector. remap returns the objects to re-drive;
-// namespace is the Namespace whose labels changed, or "" when a selector
-// changed (a consumer in any namespace may be affected).
-func withConsumerGrantWatches(b *builder.Builder, remap func(ctx context.Context, namespace string) []reconcile.Request) *builder.Builder {
+// spec.consumerNamespaceSelector. remap returns the objects to re-drive. For a
+// Namespace label change, namespace is that Namespace and changed is nil; for a
+// selector change, namespace is "" (a consumer in any namespace may be
+// affected) and changed is the Provider, VMClass or VMImage whose selector
+// changed.
+func withConsumerGrantWatches(b *builder.Builder, remap func(ctx context.Context, namespace string, changed client.Object) []reconcile.Request) *builder.Builder {
 	onNamespace := handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
-		return remap(ctx, obj.GetName())
+		return remap(ctx, obj.GetName(), nil)
 	})
-	onSelector := handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, _ client.Object) []reconcile.Request {
-		return remap(ctx, "")
+	onSelector := handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+		return remap(ctx, "", obj)
 	})
 	return b.
 		Watches(&corev1.Namespace{}, onNamespace, builder.WithPredicates(namespaceLabelsChanged())).
 		Watches(&infravirtrigaudiov1beta1.Provider{}, onSelector, builder.WithPredicates(consumerSelectorChanged())).
 		Watches(&infravirtrigaudiov1beta1.VMClass{}, onSelector, builder.WithPredicates(consumerSelectorChanged())).
 		Watches(&infravirtrigaudiov1beta1.VMImage{}, onSelector, builder.WithPredicates(consumerSelectorChanged()))
+}
+
+// vmReferencesFromAnotherNamespace reports whether vm references obj (a
+// Provider, VMClass or VMImage) and obj is outside vm's namespace.
+func vmReferencesFromAnotherNamespace(vm *infravirtrigaudiov1beta1.VirtualMachine, obj client.Object) bool {
+	if obj.GetNamespace() == vm.Namespace {
+		return false
+	}
+	target := client.ObjectKeyFromObject(obj)
+	switch obj.(type) {
+	case *infravirtrigaudiov1beta1.Provider:
+		return vm.Spec.ProviderRef.Name != "" && vmProviderKey(vm) == target
+	case *infravirtrigaudiov1beta1.VMClass:
+		key, ok := vmClassKey(vm)
+		return ok && key == target
+	case *infravirtrigaudiov1beta1.VMImage:
+		key, ok := vmImageKey(vm)
+		return ok && key == target
+	}
+	return false
 }
 
 // vmHasCrossNamespaceRef reports whether vm references a Provider, VMClass or

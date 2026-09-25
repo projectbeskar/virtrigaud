@@ -2377,7 +2377,7 @@ func (r *VMMigrationReconciler) clearConsumerRefusal(ctx context.Context, migrat
 // migrationsRefusedAsConsumers maps a consumer-grant change to the unfinished
 // VMMigrations refused with ConsumerNotAllowed. The namespace is not used to
 // filter: a migration's refusal may concern its target namespace.
-func (r *VMMigrationReconciler) migrationsRefusedAsConsumers(ctx context.Context, _ string) []reconcile.Request {
+func (r *VMMigrationReconciler) migrationsRefusedAsConsumers(ctx context.Context, _ string, _ client.Object) []reconcile.Request {
 	migrations := &infrav1beta1.VMMigrationList{}
 	if err := r.List(ctx, migrations); err != nil {
 		logging.FromContext(ctx).Error(err, "Failed to list VMMigrations for a consumer grant change")

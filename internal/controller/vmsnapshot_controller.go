@@ -757,7 +757,7 @@ func (r *VMSnapshotReconciler) refuseSnapshotConsumer(ctx context.Context, snaps
 // snapshotsRefusedAsConsumers maps a consumer-grant change to the VMSnapshots
 // refused with ConsumerNotAllowed (in namespace, or everywhere when namespace
 // is ""), so a grant takes effect without waiting for the slow recheck.
-func (r *VMSnapshotReconciler) snapshotsRefusedAsConsumers(ctx context.Context, namespace string) []reconcile.Request {
+func (r *VMSnapshotReconciler) snapshotsRefusedAsConsumers(ctx context.Context, namespace string, _ client.Object) []reconcile.Request {
 	snapshots := &infrav1beta1.VMSnapshotList{}
 	var opts []client.ListOption
 	if namespace != "" {

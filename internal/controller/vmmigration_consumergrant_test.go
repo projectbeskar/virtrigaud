@@ -269,7 +269,7 @@ func TestVMMigrationConsumer_RefusedMigrationsMapping(t *testing.T) {
 		mk("running", infrav1beta1.MigrationPhaseImporting, false),
 		mk("done", infrav1beta1.MigrationPhaseReady, true))
 
-	reqs := r.migrationsRefusedAsConsumers(context.Background(), "")
+	reqs := r.migrationsRefusedAsConsumers(context.Background(), "", nil)
 	require.Len(t, reqs, 1)
 	assert.Equal(t, "refused", reqs[0].Name)
 }

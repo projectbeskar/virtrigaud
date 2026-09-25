@@ -2060,11 +2060,14 @@ func vmIsAdopted(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
 }
 
 // vmsAffectedByGrantChange maps a consumer-grant change to the VMs to
-// re-drive: every VM refused with ConsumerNotAllowed, and every VM that
-// references a Provider, VMClass or VMImage in another namespace (so a
-// revocation also takes effect promptly), in namespace — or in every namespace
-// when namespace is "" (a referenced object's selector changed).
-func (r *VirtualMachineReconciler) vmsAffectedByGrantChange(ctx context.Context, namespace string) []reconcile.Request {
+// re-drive, so a grant — and a revocation — takes effect promptly:
+//
+//   - a Namespace's labels changed (namespace set, changed nil): the VMs in it
+//     that are refused with ConsumerNotAllowed or reference a Provider, VMClass
+//     or VMImage in another namespace;
+//   - a Provider's, VMClass's or VMImage's selector changed (changed set): the
+//     VMs in other namespaces that reference it.
+func (r *VirtualMachineReconciler) vmsAffectedByGrantChange(ctx context.Context, namespace string, changed client.Object) []reconcile.Request {
 	vms := &infravirtrigaudiov1beta1.VirtualMachineList{}
 	var opts []client.ListOption
 	if namespace != "" {
@@ -2077,7 +2080,11 @@ func (r *VirtualMachineReconciler) vmsAffectedByGrantChange(ctx context.Context,
 	var reqs []reconcile.Request
 	for i := range vms.Items {
 		vm := &vms.Items[i]
-		if consumerRefused(vm.Status.Conditions) || vmHasCrossNamespaceRef(vm) {
+		affected := consumerRefused(vm.Status.Conditions) || vmHasCrossNamespaceRef(vm)
+		if changed != nil {
+			affected = vmReferencesFromAnotherNamespace(vm, changed)
+		}
+		if affected {
 			reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(vm)})
 		}
 	}

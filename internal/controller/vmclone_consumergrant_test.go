@@ -188,7 +188,7 @@ func TestVMCloneConsumer_RefusedClonesMapping(t *testing.T) {
 		mk("running", infrav1beta1.ClonePhaseCloning, false),
 		mk("done", infrav1beta1.ClonePhaseReady, true))
 
-	reqs := r.clonesRefusedAsConsumers(context.Background(), "")
+	reqs := r.clonesRefusedAsConsumers(context.Background(), "", nil)
 	require.Len(t, reqs, 1)
 	assert.Equal(t, "refused", reqs[0].Name)
 }

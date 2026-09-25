@@ -1093,7 +1093,7 @@ func (r *VMCloneReconciler) clearConsumerRefusal(ctx context.Context, clone *inf
 // clonesRefusedAsConsumers maps a consumer-grant change to the unfinished
 // VMClones refused with ConsumerNotAllowed. The namespace is not used to
 // filter: a clone's refusal may concern its target namespace, not its own.
-func (r *VMCloneReconciler) clonesRefusedAsConsumers(ctx context.Context, _ string) []reconcile.Request {
+func (r *VMCloneReconciler) clonesRefusedAsConsumers(ctx context.Context, _ string, _ client.Object) []reconcile.Request {
 	clones := &infrav1beta1.VMCloneList{}
 	if err := r.List(ctx, clones); err != nil {
 		logging.FromContext(ctx).Error(err, "Failed to list VMClones for a consumer grant change")

@@ -167,9 +167,9 @@ isn't bound yet (`spec.providerRef` is immutable once bound, see
 Removing a namespace from a selector takes effect on the next check. A bound VM
 then fails closed: it keeps its `status.id` and its hypervisor VM, but the
 manager stops describing, powering and reconfiguring it until access is
-restored. Nothing is deleted or unbound. `VirtualMachine`s that reference an
-object in another namespace are re-run when a namespace's labels or an object's
-selector change, so a revocation is noticed within seconds.
+restored. Nothing is deleted or unbound. A `VirtualMachine` is re-run when the
+selector of an object it references from another namespace changes, or when its
+namespace's labels change, so a revocation is noticed within seconds.
 
 ## Deleting a VM whose `Provider` is refused
 

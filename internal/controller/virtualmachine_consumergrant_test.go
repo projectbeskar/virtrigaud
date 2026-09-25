@@ -457,10 +457,17 @@ func TestVMsAffectedByGrantChange(t *testing.T) {
 		}
 		return out
 	}
-	assert.ElementsMatch(t, []string{bpNS + "/refused", bpNS + "/cross"}, names(r.vmsAffectedByGrantChange(context.Background(), bpNS)),
+	assert.ElementsMatch(t, []string{bpNS + "/refused", bpNS + "/cross"}, names(r.vmsAffectedByGrantChange(context.Background(), bpNS, nil)),
 		"a Namespace label change re-drives that namespace's refused and cross-namespace VMs only")
-	assert.ElementsMatch(t, []string{bpNS + "/refused", bpNS + "/cross", "team-b/elsewhere"}, names(r.vmsAffectedByGrantChange(context.Background(), "")),
-		"a selector change re-drives them in every namespace")
+	assert.ElementsMatch(t, []string{bpNS + "/refused", "team-b/elsewhere"},
+		names(r.vmsAffectedByGrantChange(context.Background(), "", grantedProvider(cgOwnerNS, "shared", nil))),
+		"a Provider selector change re-drives the VMs in other namespaces that reference it, in every namespace")
+	assert.ElementsMatch(t, []string{bpNS + "/cross"},
+		names(r.vmsAffectedByGrantChange(context.Background(), "", grantedClass(cgOwnerNS, "shared", nil))),
+		"a VMClass selector change re-drives only the VMs that reference that class")
+	assert.Empty(t, names(r.vmsAffectedByGrantChange(context.Background(), "", grantedProvider(bpNS, "shared", nil))),
+		"a same-namespace reference is never affected by a selector")
+	assert.Empty(t, names(r.vmsAffectedByGrantChange(context.Background(), "", grantedImage(cgOwnerNS, "other", nil))))
 }
 
 func TestConsumerGrantPredicates(t *testing.T) {
