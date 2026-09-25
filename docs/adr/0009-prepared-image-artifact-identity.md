@@ -9,8 +9,15 @@ ships cross-namespace `VMImage` sharing
 listed under *Implementation slices*.
 
 **Review:** staff-architect, 2026-09-25: *accept with changes*. The changes are applied
-in this revision. The open questions carry the recommended answers and still need the
-maintainer's decision.
+in this revision.
+
+**Maintainer decisions (2026-09-25):**
+- Q1, Q2 and Q7 are decided as recommended.
+- Q3 is decided differently from the recommendation: legacy mode is kept for one
+  release, then refused.
+- Q4, Q5 and Q6 are still open.
+
+The status stays Proposed until this ADR merges.
 
 **Author**: William Rizzo ([@wrkode](https://github.com/wrkode))
 
@@ -561,8 +568,41 @@ create time is Slice 7.
 | New | New | Identity-safe (D1-D6) |
 | **New** | **Old** (the normal window: providers roll last, see `docs/upgrading.md`) | **Fails closed** at gate step 2. VMs that already exist are unaffected, because prepare runs only before a create (#344) |
 | New | Old, with a **stale** capability in status (for example a provider image that was rolled back) | The old provider receives an empty `target_name`. All three providers reject that today: vSphere (`image.go:227-229`), libvirt (`image.go:204-206`), and the Proxmox URL import (`image.go:262-265`). So it **refuses instead of importing under a bare name**. Any response with no `artifact`, or with an `image.uid`/`source_digest` that differs from the request, is **not recorded** |
-| Old | New | The request carries no `image.uid`. The provider **refuses it with `FailedPrecondition`** ("the manager is too old for identity-safe image preparation; upgrade the manager"). There is no legacy mode: the vulnerable bare-name path is deleted (Q3). Providers roll last, and rolling the manager back already loses #340/#341/#343 |
+| Old | New | The request has no `image.uid` and a non-empty `target_name`. **In this release only**, the provider serves it in **deprecated legacy mode** (below) and emits the deprecation signal. **From release N+1** it refuses such a request with `FailedPrecondition`: "the manager is too old for identity-safe image preparation; upgrade the manager" (Q3, Slice 10) |
 | Old | Old | Unchanged (the known limitation) |
+
+A request that has neither `image.uid` nor a `target_name` stays `InvalidSpec`, as it
+is today.
+
+**Deprecated legacy mode (this release only, Q3).** A new provider serves a request
+from an older manager with **today's bare-name naming and reuse-by-name**:
+
+- The response has the shape that manager expects: `prepared_image_id` is the bare
+  name, and there is no `artifact`.
+- This is the known limitation shipping once more. It can only be reached from a
+  manager older than this release.
+- Legacy mode cannot touch new-scheme artifacts, because the names are disjoint
+  (D1.3).
+- Legacy mode still gets the provider-internal fixes that do not change the response:
+  - libvirt: a probe error is retryable and never counts as "absent" (D4); staging is
+    private (`mktemp`); nothing is converted onto the final name or removed from it;
+    publishing uses `ln`; the artifact is `0444` with no chown and no
+    `finalizeClonedDisk` (D6).
+  - vSphere: the pre-ADR code path, unchanged.
+  - Proxmox: there is no working bare-name path to keep. A legacy `source.http` request
+    gets the same `InvalidSpec` as an identity request (D10).
+
+**The deprecation signal** covers every legacy request, Proxmox included:
+
+- a provider-side `WARN` log: "deprecated: image prepare without identity from an older
+  manager; upgrade the manager; refused from the next release";
+- the provider counter
+  `virtrigaud_provider_image_prepare_legacy_requests_total{provider_type}`, next to the
+  existing `virtrigaud_provider_*` metrics (`internal/obs/metrics/metrics.go`).
+
+There is no response flag. Only older managers take this path, and they cannot read a
+new field. A new manager never triggers legacy mode, because it always sends an
+identity. The upgrade docs tell operators to alert when the counter is non-zero.
 
 **The end of an async task does not prove the artifact.** When the `taskRef` of an
 asynchronous prepare (Proxmox) completes, the manager sends `ImagePrepare` again. That
@@ -653,8 +693,9 @@ release-blocking slice therefore:
   advertise it, the manager would hold such VMImages with a false "upgrade the provider
   image" reason. Advertising it lets the honest `InvalidSpec` reach the VMImage
   (`InvalidSource`) instead. It also means Slice 5 depends on Slice 1.
-- refuses identity-less requests with `FailedPrecondition`, like the other providers
-  (D7).
+- answers identity-less (legacy) `source.http` requests with the same `InvalidSpec`, and
+  logs and counts them as legacy (D7). Proxmox has no working bare-name path to keep.
+  From release N+1 it refuses them with `FailedPrecondition`, like the other providers.
 
 The complete Proxmox design (D1/D3/D5/D6 above) is Slice 6. The reference-style paths
 (`templateID`/`templateName`) are unchanged, because the controller never sends them to
@@ -669,9 +710,14 @@ a prepare (`imageSourceNeedsPrepare`).
   - `SourceDigestMissing` (D8).
 - **The VM** reports `Ready=False` / `WaitingForDependencies`, as in #344's
   holds.
-- **New counter:** `virtrigaud_image_prepare_artifact_total{provider_type, outcome}`,
-  with `outcome` one of `created`, `reused`, `in_progress`, `conflict`,
-  `abandoned_cleanup`, `refused_identityless`.
+- **New counters:**
+  - manager: `virtrigaud_image_prepare_artifact_total{provider_type, outcome}`, with
+    `outcome` one of `created`, `reused`, `in_progress`, `conflict`,
+    `abandoned_cleanup`;
+  - provider, this release only:
+    `virtrigaud_provider_image_prepare_legacy_requests_total{provider_type}`, the
+    deprecation signal for legacy mode (D7). It is removed together with legacy mode in
+    Slice 10.
 - **Events:** `Warning ImageArtifactConflict` on the VMImage, emitted only when the
   state changes.
 - **Messages** never name another namespace, VMImage, or stamp owner. Those details go
@@ -769,8 +815,11 @@ a prepare (`imageSourceNeedsPrepare`).
 - **Names are less readable.** The `_<h16>` suffix is always present, and on vSphere
   the image name may be cut. The stamp and the VMImage status hold the full identity.
 - **Old providers fail closed for new creates from import-style images** until they
-  are upgraded (D7). **New providers refuse old managers** (`FailedPrecondition`).
-  Both are deliberate, and the upgrade docs cover them.
+  are upgraded (D7). This is deliberate, and the upgrade docs cover it.
+- **The bare-name path ships once more.** For one release, new providers serve older
+  managers in deprecated legacy mode (D7), so the known limitation stays reachable
+  through a manager that has not been upgraded. It is flagged by the provider-side log
+  and metric, and removed in release N+1 (Slice 10).
 - **A restore mints new UIDs.** A Velero or DR restore re-creates `VMImage`s with new
   UIDs, which means one re-import per image and location. The old artifacts become
   orphans (Q1).
@@ -795,10 +844,16 @@ a prepare (`imageSourceNeedsPrepare`).
    remove orphaned legacy artifacts with the Slice 9 checklist.
 5. **Rollback:**
    - Rolling the manager back to an older release makes it send identity-less requests.
-     A new provider refuses them (`FailedPrecondition`), so new creates from
-     import-style images fail until the manager is rolled forward again. A manager
-     rollback already gives up #340, #341 and #343. New-scheme artifacts remain and are
-     reused on roll-forward.
+     **In this release**, a new provider serves them in deprecated legacy mode, with
+     bare names (D7). New creates keep working, but the known limitation is back while
+     the manager is rolled back. The legacy log and
+     `virtrigaud_provider_image_prepare_legacy_requests_total` flag it. A manager
+     rollback already gives up #340, #341 and #343.
+   - **From release N+1**, a new provider refuses identity-less requests with
+     `FailedPrecondition`, so new creates from import-style images fail until the
+     manager is rolled forward again.
+   - Either way, new-scheme artifacts remain and are reused on roll-forward. Legacy mode
+     cannot touch them (D1.3).
    - Rolling a provider back makes the new manager hold (no capability). If the Provider
      status still shows the capability, the old provider rejects the empty
      `target_name` (D7). Either way this fails closed.
@@ -816,7 +871,8 @@ a prepare (`imageSourceNeedsPrepare`).
 | One tenant's image content exposed through the other tenant's same-named image (B) | **Closed for prepares. By-reference access is unchanged.** Artifact names are not secrets (D1.4). A `templateName`/`path` reference to another image's artifact is still governed by the credentials-reach rule until Slice 7 |
 | An object at the name placed ahead of time, or left over from before this ADR (G) | **Fail-closed Conflict.** Placing an object ahead of time needs write access to the hypervisor **and** knowledge of a UID that does not exist yet, so it is a denial of service at worst, never a binding |
 | An OVF that ships a forged stamp | **Closed.** `virtrigaud.image.*` sits under the reserved prefix that `stripReservedExtraConfig` removes before import, and the real stamp is added afterwards (D3) |
-| libvirt probe errors that overwrite or delete, and races on shared temp files (D) | **Closed** (D4, D6) |
+| libvirt probe errors that overwrite or delete, and races on shared temp files (D) | **Closed** (D4, D6), in legacy mode too |
+| The bare-name path, shipped once more as deprecated legacy mode (D7, Q3) | **Open for one release, and only through an older manager.** A manager that has been upgraded never sends an identity-less request. Every legacy request is logged and counted on the provider (`virtrigaud_provider_image_prepare_legacy_requests_total`). Legacy mode cannot reach new-scheme artifacts. Release N+1 refuses such requests with `FailedPrecondition` (Slice 10). Operators should alert on the counter and must not run an older manager against a Provider shared across tenants |
 | Secrets in stamps | None. Stamps hold a digest only, never URLs, headers, or secret references (D2) |
 | Information disclosure in errors | Uniform messages. Owner details go only to the provider log (D11) |
 | A principal with direct write access to the location who forges a stamp or swaps content | **Not addressed. This is the trust boundary.** The mitigation is scoping hypervisor accounts (the existing guidance in `docs/cross-namespace-references.md`). Slice 7 adds a check at create time |
@@ -833,25 +889,33 @@ slice.
 
 ## Open questions (maintainer decides)
 
-- **Q1: UID in the name.** *Recommended (pending maintainer decision):* **yes**, through
-  `h16`.
+Q1, Q2, Q3 and Q7 were decided by the maintainer on 2026-09-25. Q3 differs from the
+review's recommendation. Q4, Q5 and Q6 are still open.
+
+- **Q1: UID in the name.** *Decided (2026-09-25):* **yes**, through `h16`.
   - A re-created VMImage gets a fresh artifact instead of a Conflict dead end, and a
     name cannot be planted before the VMImage exists.
   - The cost is one re-import and one orphan per re-creation. A Velero or DR restore
     mints new UIDs, which means one re-import per image; the docs say so.
   - The alternative is Alternative 3.
-- **Q2: sharing across Providers at one location.** *Recommended (pending maintainer
-  decision):* **share the artifact, with no per-Provider opt-in.**
+- **Q2: sharing across Providers at one location.** *Decided (2026-09-25):* **share one
+  artifact per image, source and location, with no per-Provider opt-in.**
   - Each Provider re-checks the stamp through its own credentials before reusing it.
   - Per-Provider names give no protection against anyone who can write the location.
   - The docs name **one import folder, pool or storage per tenant Provider** as the
     multi-tenant default (D5).
-- **Q3: requests that carry no identity.** *Recommended (pending maintainer decision):*
-  **refuse them now, with `FailedPrecondition`.**
-  - Providers roll last, so the only way to hit this is a manager rollback, and a
-    manager rollback already loses #340, #341 and #343.
-  - Refusing deletes the vulnerable bare-name path instead of keeping it for a release
-    (D7).
+- **Q3: requests that carry no identity.** *Decided (2026-09-25):* **keep a legacy
+  fallback for one release, then refuse.**
+  - In this release, a new provider serves an identity-less request (from an older
+    manager) with today's bare-name behaviour, as **deprecated legacy mode**. Each
+    request raises a provider-side `WARN` log and increments
+    `virtrigaud_provider_image_prepare_legacy_requests_total` (D7).
+  - Release N+1 refuses such requests with `FailedPrecondition` (Slice 10).
+  - The review had recommended refusing now. The maintainer chose a one-release grace
+    period for managers that are not upgraded.
+  - The other skew direction is unchanged and still fails closed: a new manager sends
+    an empty `target_name`, which an old provider, or one with a stale capability,
+    rejects.
 - **Q4: the staleness bound.** *Recommended (pending maintainer decision):*
   `max(2 × spec.prepare.timeout, 2h)` everywhere, together with the liveness checks in
   D4 (libvirt mtime; vSphere no running task or NFC lease). There is no 1h floor and no
@@ -864,7 +928,7 @@ slice.
 - **Q6: content hash for libvirt artifacts** (Alternative 9). *Recommended (pending
   maintainer decision):* **no.** Whoever can rewrite the file can rewrite the sidecar.
   The inode and size check (D3/D4) already catches a swapped file at no cost.
-- **Q7: the scope of the digest** (D2). *Recommended (pending maintainer decision):*
+- **Q7: the scope of the digest** (D2). *Decided (2026-09-25):*
   - **include** the location fields (`storagePool`, `storage`, `node`);
   - **exclude** the transport-only `source.http` fields `timeout`, `headers` and
     `authentication`. Rotating an inline token must not orphan multi-GB artifacts.
@@ -878,13 +942,14 @@ slice.
 | 0 | This ADR (Proposed → Accepted) | yes |
 | 1 | **Proto, contracts and mock.** D7 fields and `PreparedArtifact`; `contracts.ImagePrepareRequest`/`Response`; manager gRPC client mapping; capability plumbing into `Provider.status.reportedCapabilities`; `ProviderImageStatus.sourceDigest`; the mock implements D1-D4 in memory; SDK types if they are exposed. Run `proto-update` and `crd-update`. **Lands after #344**, because both edit `ProviderImageStatus` | **yes** |
 | 2 | **Manager.** D2 digest; the D7 gate order (fall through, then hold, then call) with an empty `target_name`; echo check; D8 digest match in `overrideImageWithPreparedLocation` and in #344's short-circuit for every source kind; the `SourceDigestMissing` hold under `Fail`/`Wait`; readiness check; Conflict and lack-of-identity holds with reasons, events and metric (D11); the async confirm call. Builds on #344's keying, `providerUID` and create-only prepare | **yes** |
-| 3 | **vSphere.** D1 naming; stamp in the import spec; folder-scoped probe; folder resolution falls back only when `DefaultFolder` is empty; multi-VM OVF is `InvalidSpec`; `DuplicateName` handling **plus** the lowest-MOID convergence fallback; absolute inventory path as `prepared_image_id`; D4 rule including the liveness checks (no running task or NFC lease); Create and Clone clear `virtrigaud.image.*`; identity-less requests refused with `FailedPrecondition`. **The merge is gated on verifying on vcsim and in the lab that `ImportVApp` returns `DuplicateName`** | **yes** |
-| 4 | **libvirt.** D1 naming; `path`+`url` is `InvalidSpec`; sidecar with inode and size; `mktemp` staging; artifact finalized `0444` (chmod, restorecon, sync; no chown; never `finalizeClonedDisk`); `ln` publishing where only the sidecar's creator links the artifact and an artifact `EEXIST` unlinks our sidecar; a probe that fails closed (replaces `targetImageExists`); convert never touches the final name; mtime-based sweep; identity-less requests refused; capability | **yes** |
-| 5 | **Proxmox guard** (D10): remove the bare-name gate; `source.http` import fails with `InvalidSpec`; **advertise** the identity capability; identity-less requests refused. **Depends on Slice 1** (the capability field) | **yes** |
-| 9 | **Docs:** `docs/image-preparation.md`, `docs/cross-namespace-references.md` (replace "known limitation"; one import location per tenant Provider as the multi-tenant default), `docs/upgrading.md` (skew window, `FailedPrecondition` on manager rollback, orphan checklist, a restore means a re-import), release notes, `examples/`; CHANGELOG with each slice | **yes** (ships with 2-5) |
+| 3 | **vSphere.** D1 naming; stamp in the import spec; folder-scoped probe; folder resolution falls back only when `DefaultFolder` is empty; multi-VM OVF is `InvalidSpec`; `DuplicateName` handling **plus** the lowest-MOID convergence fallback; absolute inventory path as `prepared_image_id`; D4 rule including the liveness checks (no running task or NFC lease); Create and Clone clear `virtrigaud.image.*`; deprecated legacy mode for identity-less requests: the pre-ADR path plus the `WARN` log and the legacy counter (D7). **The merge is gated on verifying on vcsim and in the lab that `ImportVApp` returns `DuplicateName`** | **yes** |
+| 4 | **libvirt.** D1 naming; `path`+`url` is `InvalidSpec`; sidecar with inode and size; `mktemp` staging; artifact finalized `0444` (chmod, restorecon, sync; no chown; never `finalizeClonedDisk`); `ln` publishing where only the sidecar's creator links the artifact and an artifact `EEXIST` unlinks our sidecar; a probe that fails closed (replaces `targetImageExists`); convert never touches the final name; mtime-based sweep; deprecated legacy mode for identity-less requests (bare name, with the D4/D6 provider-internal fixes, `WARN` log and legacy counter); capability | **yes** |
+| 5 | **Proxmox guard** (D10): remove the bare-name gate; `source.http` import fails with `InvalidSpec`; **advertise** the identity capability; identity-less `source.http` requests get the same `InvalidSpec` and are logged and counted as legacy. **Depends on Slice 1** (the capability field) | **yes** |
+| 9 | **Docs:** `docs/image-preparation.md`, `docs/cross-namespace-references.md` (replace "known limitation"; one import location per tenant Provider as the multi-tenant default), `docs/upgrading.md` (skew window, legacy mode on manager rollback, the legacy counter to alert on, and refusal from release N+1, orphan checklist, a restore means a re-import), release notes, `examples/`; CHANGELOG with each slice | **yes** (ships with 2-5) |
 | 6 | **Proxmox, full design:** first verify the PVE 8.2 `content=import` requirement and the `download-url` overwrite behaviour on the lab PVE. Then: a template VM from `download-url` plus `import-from`, inside a provider-only PVE pool; description (with `vmid=<n>`) and tag stamp; VMID as id; server-side checksum; converge on lowest VMID; clones clear the stamp; **the create-time stamp check for Proxmox** | no |
 | 7 | **Verification at create time:** an additive `CreateRequest.image` identity plus the expected digest; the provider re-checks the stamp of the artifact it clones or copies; references to *stamped* artifacts of **other** images are refused | no |
 | 8 | **Artifact GC:** a separate ADR, covering a VMImage finalizer, reference counting for linked clones, and orphan reporting | no |
+| 10 | **Remove the legacy fallback in release N+1:** every provider refuses identity-less requests with `FailedPrecondition`; delete the bare-name code paths and the legacy counter; flip the legacy tests to expect the refusal; update the upgrade docs | no (blocks release N+1) |
 
 **Tests, per slice:**
 
@@ -916,7 +981,10 @@ slice.
   - two concurrent prepares produce one template;
   - a clone of a prepared template carries no `virtrigaud.image.*`;
   - `Create` resolves the absolute path when a same-named template exists in another
-    folder.
+    folder;
+  - an identity-less request (non-empty `target_name`, no `image`) takes the pre-ADR
+    bare-name path, returns the bare name as `prepared_image_id`, and emits the
+    deprecation signal (a `WARN` log, and the legacy counter increments).
 - **libvirt (host-command fakes):**
   - a `stat` error is retryable and no convert or `rm` is issued on the final name;
   - an artifact with no sidecar is a Conflict;
@@ -930,16 +998,27 @@ slice.
     is never called on it;
   - `path`+`url` in identity mode is `InvalidSpec`;
   - concurrent prepares get separate `mktemp` names;
-  - an identity-less request is refused with `FailedPrecondition`.
-- **Proxmox (pvefake):** `source.http` gives `InvalidSpec`, and no `download-url` call
-  is made; the identity capability is advertised.
+  - an identity-less request takes the legacy path:
+    - it uses the bare name `<pool>/<target_name>.qcow2`;
+    - it emits the deprecation signal (a `WARN` log, and the legacy counter
+      increments);
+    - it still keeps the D4/D6 fixes: a probe error is retryable, and there is no
+      convert or `rm` on the final name;
+    - it cannot see or reuse a new-scheme artifact.
+- **Proxmox (pvefake):**
+  - `source.http` gives `InvalidSpec`, and no `download-url` call is made, with or
+    without an identity;
+  - an identity-less request is counted as legacy;
+  - the identity capability is advertised.
 - **Conformance** (`test/conformance`): the identity cases for **every** provider,
   mock included:
   - two images with the same name in two namespaces get distinct artifacts;
   - a foreign or unstamped artifact at the derived name is a Conflict with no import;
   - a matching artifact is reused;
-  - an empty `target_name` with no `image` is refused;
-  - an identity-less request is refused.
+  - an empty `target_name` with no `image` is refused (`InvalidSpec`);
+  - an identity-less request with a `target_name` takes the legacy path and
+    increments `virtrigaud_provider_image_prepare_legacy_requests_total` in this
+    release. Slice 10 flips this case to expect `FailedPrecondition`.
 - **Controller:**
   - gate order: no `SupportsImageImport` falls through unchanged; import support with
     no identity capability holds with no RPC;
@@ -963,6 +1042,10 @@ slice.
   - legacy artifacts are untouched;
   - running VMs are untouched;
   - the `Fail`/`Wait` hold appears until `onMissing` is switched to `Import`.
+
+  Add a **manager-rollback leg**: an old manager against new providers is served in
+  legacy mode, and the legacy counter increments. New-scheme artifacts are untouched
+  and are reused on roll-forward.
 - **Lab validation on all three hypervisors** by the maintainer, before Accepted
   becomes Implemented. vCenter `DuplicateName` gates the Slice 3 merge. The PVE
   checks belong to Slice 6.
