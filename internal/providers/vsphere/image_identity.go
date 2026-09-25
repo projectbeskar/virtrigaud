@@ -32,6 +32,7 @@ import (
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/ovf/importer"
 	"github.com/vmware/govmomi/property"
+	"github.com/vmware/govmomi/vim25/methods"
 	"github.com/vmware/govmomi/vim25/mo"
 	"github.com/vmware/govmomi/vim25/progress"
 	"github.com/vmware/govmomi/vim25/soap"
@@ -300,7 +301,7 @@ func (p *Provider) nameHeldOutOfSight(ctx context.Context, loc artifactLocation,
 	err := property.DefaultCollector(p.client.Client).Retrieve(ctx, []types.ManagedObjectReference{taken.holder}, []string{propName}, &content)
 	switch {
 	case err == nil:
-	case fault.Is(err, &types.ManagedObjectNotFound{}):
+	case isNotFound(err, taken.holder):
 		return false, nil
 	default:
 		return false, p.artifactRetryError(ctx, loc.name, "read the object holding the artifact name", err)
@@ -416,7 +417,7 @@ func (p *Provider) observeArtifactObject(ctx context.Context, ref types.ManagedO
 		propConfigTemplate, propConfigExtraConfig, propRuntimePowerState, propRecentTask, propDisabledMethod,
 	}, &vm)
 	if err != nil {
-		if fault.Is(err, &types.ManagedObjectNotFound{}) {
+		if isNotFound(err, ref) {
 			return artifactObject{}, false, nil
 		}
 		return artifactObject{}, false, fmt.Errorf("read %s: %w", ref.Value, err)
@@ -449,7 +450,7 @@ func (p *Provider) anyTaskActive(ctx context.Context, tasks []types.ManagedObjec
 	for _, ref := range tasks {
 		var t mo.Task
 		if err := pc.RetrieveOne(ctx, ref, []string{propInfoState}, &t); err != nil {
-			if fault.Is(err, &types.ManagedObjectNotFound{}) {
+			if isNotFound(err, ref) {
 				continue
 			}
 			p.logger.WarnContext(ctx, "ImagePrepare: cannot read the state of a task on an unfinished artifact; treating it as running",
@@ -538,6 +539,11 @@ func (p *Provider) importArtifact(ctx context.Context, finder *find.Finder, loc 
 			return nil, err
 		case isProviderError(err, codes.InvalidArgument):
 			return nil, err
+		case ref != nil:
+			// The lease was ready: the upload (or the lease completion)
+			// failed, and a network error there is usually the upload
+			// stream, not vCenter.
+			return nil, p.uploadFailure(ctx, loc.name, err)
 		}
 		return nil, p.importFailure(ctx, loc.name, "import the OVA", err)
 	}
@@ -630,9 +636,26 @@ func (p *Provider) removeAbandonedArtifact(ctx context.Context, loc artifactLoca
 	return nil
 }
 
+// isNotFound reports whether err is a ManagedObjectNotFound for ref itself.
+// A not-found for any other object (the destroy task, a parent) proves nothing
+// about ref and is not taken as "gone".
+func isNotFound(err error, ref types.ManagedObjectReference) bool {
+	if err == nil {
+		return false // fault.In panics on a nil error
+	}
+	found := false
+	fault.In(err, func(f types.BaseMethodFault, _ string, _ []types.LocalizableMessage) bool {
+		if nf, ok := f.(*types.ManagedObjectNotFound); ok && nf.Obj == ref {
+			found = true
+		}
+		return found
+	})
+	return found
+}
+
 // destroyVM destroys the VM ref and waits for the task. A VM that no longer
-// exists (ManagedObjectNotFound — vCenter's "has already been deleted or has
-// not been completely created") is already gone: that is success.
+// exists (ManagedObjectNotFound for ref — vCenter's "has already been deleted
+// or has not been completely created") is already gone: that is success.
 func (p *Provider) destroyVM(ctx context.Context, ref types.ManagedObjectReference) error {
 	_, err := p.destroyVMIfPresent(ctx, ref)
 	return err
@@ -643,13 +666,13 @@ func (p *Provider) destroyVM(ctx context.Context, ref types.ManagedObjectReferen
 func (p *Provider) destroyVMIfPresent(ctx context.Context, ref types.ManagedObjectReference) (bool, error) {
 	t, err := object.NewVirtualMachine(p.client.Client, ref).Destroy(ctx)
 	if err != nil {
-		if fault.Is(err, &types.ManagedObjectNotFound{}) {
+		if isNotFound(err, ref) {
 			return false, nil
 		}
 		return false, fmt.Errorf("start destroy of %s: %w", ref.Value, err)
 	}
 	if err := t.Wait(ctx); err != nil {
-		if fault.Is(err, &types.ManagedObjectNotFound{}) {
+		if isNotFound(err, ref) {
 			return false, nil
 		}
 		return false, fmt.Errorf("destroy %s: %w", ref.Value, err)
@@ -795,6 +818,37 @@ func (p *Provider) importFailure(ctx context.Context, artifact, step string, err
 		return p.artifactRetryError(ctx, artifact, step, err)
 	}
 	return p.imageSourceError(ctx, "vCenter could not import the image", err, "artifact", artifact, "step", step)
+}
+
+// vCenterAliveTimeout bounds the liveness check uploadFailure makes.
+const vCenterAliveTimeout = 10 * time.Second
+
+// uploadFailure classifies a failure after the import lease became ready —
+// the NFC upload of the image's disks, or the lease completion. A network
+// error there (which isVCenterUnreachable would count) is usually the upload
+// stream to the ESXi host: an image-sized transfer the image's content and
+// size drive. It counts toward the manager's circuit breaker only when a cheap
+// vCenter call (CurrentTime) also fails; otherwise it is an image-source
+// error. Anything else is classified by importFailure.
+func (p *Provider) uploadFailure(ctx context.Context, artifact string, err error) error {
+	const step = "upload the image to vCenter"
+	if !isVCenterUnreachable(err) {
+		return p.importFailure(ctx, artifact, step, err)
+	}
+	if p.vCenterResponds(ctx) {
+		return p.imageSourceError(ctx, "the image upload to vCenter failed while vCenter itself responds", err,
+			"artifact", artifact, "step", step)
+	}
+	return p.artifactRetryError(ctx, artifact, step, err)
+}
+
+// vCenterResponds reports whether vCenter answers a CurrentTime call within
+// vCenterAliveTimeout.
+func (p *Provider) vCenterResponds(ctx context.Context) bool {
+	cctx, cancel := context.WithTimeout(ctx, vCenterAliveTimeout)
+	defer cancel()
+	_, err := methods.GetCurrentTime(cctx, p.client.Client)
+	return err == nil
 }
 
 // isProviderError reports whether err carries a gRPC status with code.

@@ -22,6 +22,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -108,35 +109,102 @@ func TestOVFPackage_ServesOnlyPermittedExactMembers(t *testing.T) {
 	descriptor, err := findOVADescriptorName(path)
 	require.NoError(t, err)
 	assert.Equal(t, "x.ovf", descriptor, "a leading ./ is ignored; the AppleDouble sidecar is skipped")
-	pkg := newTarPackage(path, descriptor)
+	pkg, err := newTarPackage(path)
+	require.NoError(t, err)
 
 	got, err := readMember(t, pkg, "x.ovf")
 	require.NoError(t, err)
 	assert.Equal(t, "<Envelope/>", got)
 
 	_, err = readMember(t, pkg, "disk1.vmdk")
-	require.ErrorIs(t, err, os.ErrNotExist, "a member is served only once permitted")
+	require.ErrorIs(t, err, os.ErrNotExist, "a member is served only once located and permitted")
 
+	unsafe := []string{"*", "*.vmdk", "disk?.vmdk", "disk2.vmdk", "sub/disk2.vmdk", sentinel, "../" + filepath.Base(sentinel)}
+	require.NoError(t, pkg.index(append([]string{"disk1.vmdk"}, unsafe...)))
 	pkg.permit([]string{"disk1.vmdk"})
 	got, err = readMember(t, pkg, "disk1.vmdk")
 	require.NoError(t, err)
 	assert.Equal(t, "DISK", got)
 
-	for _, name := range []string{"*", "*.vmdk", "disk?.vmdk", "disk2.vmdk", "sub/disk2.vmdk", sentinel, "../" + filepath.Base(sentinel)} {
+	for _, name := range unsafe {
 		pkg.permit([]string{name}) // even if something permitted it
 		got, err := readMember(t, pkg, name)
 		assert.ErrorIs(t, err, os.ErrNotExist, "%q", name)
 		assert.NotEqual(t, "SENTINEL", got)
 	}
 
-	present, err := pkg.contains("disk1.vmdk")
-	require.NoError(t, err)
-	assert.True(t, present)
+	assert.True(t, pkg.contains("disk1.vmdk"))
 	for _, name := range []string{"disk2.vmdk", "*", sentinel} {
-		present, err := pkg.contains(name)
-		require.NoError(t, err)
-		assert.False(t, present, "%q", name)
+		assert.False(t, pkg.contains(name), "%q", name)
 	}
+}
+
+// TestOVFPackage_IndexesTheTarOnce: the members an OVF references are located
+// in one pass over the tar, however many references there are (review R1:
+// one pass per reference let a large OVA with many references burn I/O), and
+// each member is then read at its offset.
+func TestOVFPackage_IndexesTheTarOnce(t *testing.T) {
+	members := [][2]string{{"x.ovf", "<Envelope/>"}}
+	var names []string
+	for i := 0; i < maxOVFFileRefs; i++ {
+		name := "disk" + strconv.Itoa(i) + ".vmdk"
+		members = append(members, [2]string{name, "content-" + strconv.Itoa(i)})
+		names = append(names, name)
+	}
+	pkg, err := newTarPackage(writeTar(t, members))
+	require.NoError(t, err)
+	require.Equal(t, 1, pkg.scans)
+
+	require.NoError(t, pkg.index(names))
+	assert.Equal(t, 2, pkg.scans, "one pass for the descriptor, one for all %d references", len(names))
+	pkg.permit(names)
+	for i, name := range names {
+		assert.True(t, pkg.contains(name))
+		got, err := readMember(t, pkg, name)
+		require.NoError(t, err)
+		assert.Equal(t, "content-"+strconv.Itoa(i), got)
+	}
+	assert.Equal(t, 2, pkg.scans, "reading members does not rescan")
+
+	require.NoError(t, pkg.index(names))
+	assert.Equal(t, 2, pkg.scans, "located members are not looked for again")
+}
+
+// TestOVFPackage_DescriptorSizeCap: a descriptor larger than
+// maxOVFDescriptorBytes is refused from its tar header (or, for a bare .ovf,
+// its file size), before it is read — govmomi reads the whole descriptor into
+// memory, and the provider pod is shared by every tenant (review R1).
+func TestOVFPackage_DescriptorSizeCap(t *testing.T) {
+	huge := "<Envelope><!--" + strings.Repeat(" ", maxOVFDescriptorBytes) + "--></Envelope>"
+
+	_, err := newTarPackage(writeTar(t, [][2]string{{"huge.ovf", huge}}))
+	requireCode(t, err, codes.InvalidArgument)
+	assert.Contains(t, err.Error(), "larger than 16 MiB")
+
+	staged := filepath.Join(t.TempDir(), "virtrigaud-ova-1.ovf")
+	require.NoError(t, os.WriteFile(staged, []byte(huge), 0o600))
+	_, err = newBareOVFPackage(staged)
+	requireCode(t, err, codes.InvalidArgument)
+
+	fits := "<Envelope><!--" + strings.Repeat(" ", maxOVFDescriptorBytes-64) + "--></Envelope>"
+	_, err = newTarPackage(writeTar(t, [][2]string{{"fits.ovf", fits}}))
+	assert.NoError(t, err)
+}
+
+// TestValidateOVFFileRefs_Cap: an OVF may reference at most maxOVFFileRefs
+// files (review R1).
+func TestValidateOVFFileRefs_Cap(t *testing.T) {
+	env := &ovf.Envelope{}
+	for i := 0; i < maxOVFFileRefs; i++ {
+		env.References = append(env.References, ovf.File{Href: "disk" + strconv.Itoa(i) + ".vmdk"})
+	}
+	_, err := validateOVFFileRefs(env)
+	require.NoError(t, err)
+
+	env.References = append(env.References, ovf.File{Href: "one-too-many.vmdk"})
+	_, err = validateOVFFileRefs(env)
+	requireCode(t, err, codes.InvalidArgument)
+	assert.Contains(t, err.Error(), "at most 256")
 }
 
 func TestOVFPackage_BareOVFServesOnlyItself(t *testing.T) {
@@ -146,17 +214,17 @@ func TestOVFPackage_BareOVFServesOnlyItself(t *testing.T) {
 	sibling := filepath.Join(dir, "disk1.vmdk")
 	require.NoError(t, os.WriteFile(sibling, []byte("SENTINEL"), 0o600))
 
-	pkg := newBareOVFPackage(staged)
+	pkg, err := newBareOVFPackage(staged)
+	require.NoError(t, err)
 	got, err := readMember(t, pkg, pkg.descriptor)
 	require.NoError(t, err)
 	assert.Equal(t, "<Envelope/>", got)
 
+	require.NoError(t, pkg.index([]string{"disk1.vmdk", sibling}))
 	pkg.permit([]string{"disk1.vmdk", sibling})
 	for _, name := range []string{"disk1.vmdk", sibling} {
 		_, err := readMember(t, pkg, name)
 		assert.ErrorIs(t, err, os.ErrNotExist, "a bare .ovf never reaches its directory (%q)", name)
-		present, err := pkg.contains(name)
-		require.NoError(t, err)
-		assert.False(t, present)
+		assert.False(t, pkg.contains(name))
 	}
 }

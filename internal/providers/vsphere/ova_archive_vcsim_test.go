@@ -283,6 +283,36 @@ func TestBareOVF(t *testing.T) {
 	})
 }
 
+// TestOversizedDescriptorIsRefusedBeforeItIsRead (review R1): a descriptor
+// above maxOVFDescriptorBytes — the reviewer's was 128 MiB of whitespace in an
+// XML comment, peaking near 2 GiB of heap — never reaches govmomi's ReadAll or
+// vCenter, in either mode; a bare .ovf is not even downloaded past the cap.
+func TestOversizedDescriptorIsRefusedBeforeItIsRead(t *testing.T) {
+	huge := "<Envelope><!--" + strings.Repeat(" ", maxOVFDescriptorBytes) + "--></Envelope>"
+
+	t.Run("OVA, identity mode", func(t *testing.T) {
+		p, _, _ := newIdentitySim(t, "")
+		calls, _ := instrument(p)
+		ova := tarOVAMembers(t, [][2]string{{"descriptor.ovf", huge}})
+		_, err := p.ImagePrepare(context.Background(), identityReq(t, serveBody(t, http.StatusOK, ova), testImageUID, testDigestA))
+		requireCode(t, err, codes.InvalidArgument)
+		assert.Contains(t, err.Error(), "descriptor is larger than 16 MiB")
+		assert.Zero(t, calls.createImportSpec.Load())
+	})
+
+	t.Run("bare .ovf, legacy mode", func(t *testing.T) {
+		p, _, _ := newIdentitySim(t, "")
+		calls, _ := instrument(p)
+		u, _ := countingServer(t, ".ovf", []byte(huge))
+		_, err := p.ImagePrepare(context.Background(), &providerv1.ImagePrepareRequest{
+			ImageJson: ovaImageJSON(t, u, nil), TargetName: "legacy-img",
+		})
+		requireCode(t, err, codes.InvalidArgument)
+		assert.Contains(t, err.Error(), "descriptor is larger than 16 MiB")
+		assert.Zero(t, calls.createImportSpec.Load())
+	})
+}
+
 func TestOVAWithMemberFilesStillImports(t *testing.T) {
 	const iso = "ISO-CONTENT-from-the-package"
 	desc := fmt.Sprintf(isoOVFTemplate, "seed.iso", len(iso))

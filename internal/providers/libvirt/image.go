@@ -251,10 +251,16 @@ func checksumTool(checksumType string) (tool string, ok bool) {
 //     mktemp, chmod/sync, convert, link or checksum command that could not
 //     run), HTTP 5xx/408/425/429, DNS/connect/timeout/TLS-handshake/transfer
 //     errors of the download, a storage pool lookup that failed for any reason
-//     other than "Storage pool not found". Error text never carries the source
-//     URL (it may embed credentials), a curl exit code, an HTTP status or a
-//     checksum the host computed (no reachability oracle for a tenant-chosen
-//     URL); details are in the provider log, URL redacted.
+//     other than "Storage pool not found". Of these, the download failures the
+//     image source caused (sourceCurlExits: HTTP 5xx/408/425/429, DNS, connect,
+//     timeout, TLS-handshake, send/receive, truncated body) go on the wire as
+//     imageartifact.SourceUnavailableError (IMAGE_SOURCE_UNAVAILABLE), which
+//     the manager retries without counting toward the Provider's circuit
+//     breaker; the host or the transport failing still counts. Error text
+//     never carries the source URL (it may embed credentials), a curl exit
+//     code, an HTTP status or a checksum the host computed (no reachability
+//     oracle for a tenant-chosen URL); details are in the provider log, URL
+//     redacted.
 
 const (
 	// libvirtProviderType is this provider's provider_type metric label.
@@ -826,6 +832,54 @@ var permanentCurlExits = map[int]string{
 	78: "the remote file does not exist",
 }
 
+// sourceCurlExits are the curl exit codes of a retryable download failure that
+// the image source caused: its name did not resolve, it could not be reached,
+// it timed out, broke off or truncated the transfer, or (exit 22, see
+// isSourceFailure) answered 5xx/408/425/429. Any other retryable failure —
+// curl missing, a write error in the pool directory, out of memory, the SSH
+// transport — is the libvirt host's.
+var sourceCurlExits = map[int]bool{
+	6:  true, // the host name did not resolve
+	7:  true, // the connection failed
+	8:  true, // a weird server reply (FTP)
+	16: true, // an HTTP/2 framing error
+	18: true, // a partial file: the body ended early
+	28: true, // timed out (--connect-timeout or --max-time)
+	35: true, // the TLS handshake failed
+	47: true, // too many redirects
+	52: true, // an empty reply
+	55: true, // sending failed
+	56: true, // receiving failed
+	92: true, // an HTTP/2 stream error
+	95: true, // an HTTP/3 error
+}
+
+// isSourceFailure reports whether a retryable curl failure (exit code, HTTP
+// status of its one transfer) was the image source's (sourceCurlExits, or an
+// HTTP 5xx/408/425/429 answer).
+func isSourceFailure(exitCode, httpStatus int) bool {
+	if exitCode == curlExitHTTPError {
+		return httpStatus >= http.StatusInternalServerError || httpStatus == http.StatusRequestTimeout ||
+			httpStatus == http.StatusTooEarly || httpStatus == http.StatusTooManyRequests
+	}
+	return sourceCurlExits[exitCode]
+}
+
+// imageSourceFailure marks a retryable ImagePrepare failure the image source
+// caused, not the libvirt host or the SSH transport. It wraps (and reads as)
+// the retryable ProviderError, so nothing else changes in the provider;
+// imagePrepareRPCError sends it as imageartifact.SourceUnavailableError, which
+// the manager retries without counting toward the Provider's circuit breaker:
+// one tenant's failing image source must not stop the Provider for every
+// tenant.
+type imageSourceFailure struct{ pe *contracts.ProviderError }
+
+// Error returns the wrapped ProviderError's text.
+func (e *imageSourceFailure) Error() string { return e.pe.Error() }
+
+// Unwrap returns the wrapped ProviderError.
+func (e *imageSourceFailure) Unwrap() error { return e.pe }
+
 // downloadRetryMessage is the ONLY text a transient download failure exposes
 // to the requester: no curl exit code and no HTTP status, so a tenant-chosen
 // URL cannot be used to probe what the hypervisor host can reach.
@@ -836,8 +890,9 @@ const downloadRetryMessage = "the image download failed on the libvirt host and 
 // requester-facing error: InvalidSpec when retrying cannot help (an HTTP 4xx
 // other than 408/425/429, a permanentCurlExits code, or a write-out that is
 // not exactly one transfer), retryable otherwise (the transport or the host
-// failed, HTTP 5xx, DNS/connect/timeout/transfer errors). The URL, the exit
-// code and the HTTP status never appear in the retryable error; the log
+// failed, HTTP 5xx, DNS/connect/timeout/transfer errors) — an
+// imageSourceFailure when the source caused it (isSourceFailure). The URL, the
+// exit code and the HTTP status never appear in the retryable error; the log
 // carries them, the URL redacted.
 func classifyDownloadFailure(rawURL string, res *VirshResult) error {
 	if res == nil || res.ExitCode < 0 {
@@ -857,6 +912,9 @@ func classifyDownloadFailure(rawURL string, res *VirshResult) error {
 	}
 	if reason, ok := permanentCurlExits[res.ExitCode]; ok {
 		return contracts.NewInvalidSpecError("the image source URL cannot be downloaded: "+reason, nil)
+	}
+	if isSourceFailure(res.ExitCode, httpStatus) {
+		return &imageSourceFailure{pe: contracts.NewRetryableError(downloadRetryMessage, nil)}
 	}
 	return contracts.NewRetryableError(downloadRetryMessage, nil)
 }

@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -47,10 +48,24 @@ import (
 // exact name, from the staged download — never a file named by the OVF. A
 // bare .ovf (a descriptor with no container for its files) can import only a
 // package that references no file.
+//
+// The package is also bounded, because the provider is shared by every tenant
+// of its Provider: govmomi reads the whole descriptor into memory (and vCenter
+// receives it as one string), so a descriptor larger than maxOVFDescriptorBytes
+// is refused from its tar header before a byte of it is read; an OVF may
+// reference at most maxOVFFileRefs files; and the members those references
+// name are located in one pass over the tar, not one pass per reference.
 
 const (
 	// maxOVFHrefBytes bounds the length of an OVF file reference.
 	maxOVFHrefBytes = 255
+	// maxOVFDescriptorBytes bounds the OVF descriptor. Real descriptors are a
+	// few hundred KiB; govmomi's importer reads the whole descriptor into
+	// memory (several times over while parsing it), so an unbounded one could
+	// exhaust the memory of the provider pod every tenant shares.
+	maxOVFDescriptorBytes = 16 << 20
+	// maxOVFFileRefs bounds how many files an OVF may reference.
+	maxOVFFileRefs = 256
 	// ovfHrefForbiddenChars are characters an OVF file reference must not
 	// contain: path separators ('/', '\'), the URL-scheme / drive separator
 	// (':') and the glob metacharacters path.Match interprets ('*', '?', '[').
@@ -63,7 +78,13 @@ const (
 	appleDoublePrefix = "._"
 	// ovfDescriptorExt is the extension of an OVF descriptor.
 	ovfDescriptorExt = ".ovf"
+	// gnuSparsePAXPrefix starts the PAX records of a GNU sparse file, whose
+	// stored bytes are not its contents: such an entry is never a member.
+	gnuSparsePAXPrefix = "GNU.sparse."
 )
+
+// errUnreadableOVA marks a staged OVA that is not a readable tar archive.
+var errUnreadableOVA = stderrors.New("the downloaded OVA is not a readable tar archive")
 
 // ovfHrefError returns why href cannot name a file of an OVF package, or ""
 // when it can: a non-empty, plain file name of at most maxOVFHrefBytes bytes —
@@ -89,11 +110,16 @@ func ovfHrefError(href string) string {
 }
 
 // validateOVFFileRefs returns the ovf:href of every <References><File> of env
-// after checking each with ovfHrefError, or an InvalidSpec error for the first
-// that fails. It runs before the descriptor reaches vCenter, so a package that
-// names a file outside itself is never imported. The message quotes no href:
-// the details are the caller's to log.
+// after checking each with ovfHrefError, or an InvalidSpec error: for more than
+// maxOVFFileRefs references, or for the first reference that fails. It runs
+// before the descriptor reaches vCenter, so a package that names a file
+// outside itself is never imported. The message quotes no href: the details
+// are the caller's to log.
 func validateOVFFileRefs(env *ovf.Envelope) ([]string, error) {
+	if len(env.References) > maxOVFFileRefs {
+		return nil, errors.NewInvalidSpec(
+			"ImagePrepare: the OVF references %d files; at most %d are allowed", len(env.References), maxOVFFileRefs)
+	}
 	hrefs := make([]string, 0, len(env.References))
 	for i, f := range env.References {
 		if reason := ovfHrefError(f.Href); reason != "" {
@@ -105,11 +131,28 @@ func validateOVFFileRefs(env *ovf.Envelope) ([]string, error) {
 	return hrefs, nil
 }
 
+// descriptorTooLargeError is the InvalidSpec of an OVF descriptor larger than
+// maxOVFDescriptorBytes.
+func descriptorTooLargeError() error {
+	return errors.NewInvalidSpec("ImagePrepare: the OVF descriptor is larger than %d MiB",
+		maxOVFDescriptorBytes>>20)
+}
+
+// ovaMemberLoc is where a package member's bytes lie in the staged download.
+type ovaMemberLoc struct {
+	// offset is the member's first byte.
+	offset int64
+	// size is the member's length in bytes.
+	size int64
+}
+
 // ovfPackage is the importer.Archive an OVA or OVF import reads the package
 // through. It serves only members named in its allow list — the descriptor,
-// then the validated file references (permit) — by exact name, from the staged
-// download at path, which the provider created itself. It never opens a file
-// named by the OVF, never matches a pattern, and has no remote access.
+// then the validated file references (index, permit) — by exact name, from
+// the staged download at path, which the provider created itself. It never
+// opens a file named by the OVF, never matches a pattern, and has no remote
+// access. Members are located once (newTarPackage, index) and then read at
+// their offset.
 type ovfPackage struct {
 	// path is the staged download (the OVA tar, or the bare .ovf itself).
 	path string
@@ -117,41 +160,151 @@ type ovfPackage struct {
 	bare bool
 	// descriptor is the descriptor's member name.
 	descriptor string
+	// members are the located members: the descriptor, then the names index
+	// found.
+	members map[string]ovaMemberLoc
 	// allowed are the member names Open serves.
 	allowed map[string]bool
+	// scans counts the passes over the tar (tests).
+	scans int
 }
 
-// newTarPackage returns the package of the OVA tar at path, whose descriptor
-// is the member descriptor (findOVADescriptorName).
-func newTarPackage(path, descriptor string) *ovfPackage {
-	return &ovfPackage{path: path, descriptor: descriptor, allowed: map[string]bool{descriptor: true}}
+// newTarPackage returns the package of the OVA tar staged at staged. Its
+// descriptor is the first package member (ovaMemberName) whose name ends in
+// .ovf; one larger than maxOVFDescriptorBytes is refused (InvalidSpec) from
+// its tar header, before it is read. A tar that cannot be read wraps
+// errUnreadableOVA.
+func newTarPackage(staged string) (*ovfPackage, error) {
+	pkg := &ovfPackage{path: staged, members: map[string]ovaMemberLoc{}, allowed: map[string]bool{}}
+	err := pkg.scan(func(name string, loc ovaMemberLoc) bool {
+		if !strings.EqualFold(path.Ext(name), ovfDescriptorExt) {
+			return false
+		}
+		pkg.descriptor = name
+		pkg.members[name] = loc
+		return true
+	})
+	if err != nil {
+		return nil, err
+	}
+	if pkg.descriptor == "" {
+		return nil, errors.NewInvalidSpec("OVA contains no .ovf descriptor (after skipping macOS sidecar files)")
+	}
+	if pkg.members[pkg.descriptor].size > maxOVFDescriptorBytes {
+		return nil, descriptorTooLargeError()
+	}
+	pkg.allowed[pkg.descriptor] = true
+	return pkg, nil
 }
 
 // newBareOVFPackage returns the package of the bare .ovf descriptor staged at
-// path. It serves the descriptor only: a bare .ovf cannot carry its files.
-func newBareOVFPackage(path string) *ovfPackage {
-	name := filepath.Base(path)
-	return &ovfPackage{path: path, bare: true, descriptor: name, allowed: map[string]bool{name: true}}
+// staged. It serves the descriptor only: a bare .ovf cannot carry its files. A
+// descriptor larger than maxOVFDescriptorBytes is refused (InvalidSpec).
+func newBareOVFPackage(staged string) (*ovfPackage, error) {
+	st, err := os.Stat(filepath.Clean(staged))
+	if err != nil {
+		return nil, fmt.Errorf("stat staged OVF: %w", err)
+	}
+	if st.Size() > maxOVFDescriptorBytes {
+		return nil, descriptorTooLargeError()
+	}
+	name := filepath.Base(staged)
+	return &ovfPackage{
+		path:       staged,
+		bare:       true,
+		descriptor: name,
+		members:    map[string]ovaMemberLoc{name: {offset: 0, size: st.Size()}},
+		allowed:    map[string]bool{name: true},
+	}, nil
 }
 
-// contains reports whether the package has a member named exactly name. A
-// bare .ovf contains nothing but its descriptor.
-func (a *ovfPackage) contains(name string) (bool, error) {
-	if a.bare {
-		return name == a.descriptor, nil
-	}
+// scan passes over the tar once and calls visit with every package member
+// (ovaMemberName, not a sparse file) and where its bytes lie, until visit
+// returns true. A tar read error wraps errUnreadableOVA.
+func (a *ovfPackage) scan(visit func(name string, loc ovaMemberLoc) bool) error {
+	a.scans++
 	f, err := os.Open(filepath.Clean(a.path))
 	if err != nil {
-		return false, fmt.Errorf("open staged OVA: %w", err)
+		return fmt.Errorf("open staged OVA: %w", err)
 	}
 	defer func() { _ = f.Close() }()
-	if _, err := seekOVAMember(tar.NewReader(f), name); err != nil {
-		if stderrors.Is(err, os.ErrNotExist) {
-			return false, nil
+	cr := &countingReader{r: f}
+	tr := tar.NewReader(cr)
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			return nil
 		}
-		return false, err
+		if err != nil {
+			// The file is the complete body the source served (a truncated
+			// download fails in downloadOVA), so an unreadable archive is a
+			// property of the source.
+			return fmt.Errorf("%w: %v", errUnreadableOVA, err)
+		}
+		name := ovaMemberName(h)
+		if name == "" || isSparse(h) {
+			continue
+		}
+		// After Next the underlying reader stands at the entry's first data
+		// byte: archive/tar reads headers block by block and never ahead.
+		if visit(name, ovaMemberLoc{offset: cr.n, size: h.Size}) {
+			return nil
+		}
 	}
-	return true, nil
+}
+
+// isSparse reports whether the tar entry h is a PAX sparse file.
+func isSparse(h *tar.Header) bool {
+	for k := range h.PAXRecords {
+		if strings.HasPrefix(k, gnuSparsePAXPrefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// countingReader counts the bytes read through it.
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+// Read implements io.Reader.
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
+}
+
+// index locates the members named in names in one pass over the tar (the
+// first of equal names wins). A bare .ovf has no members to locate.
+func (a *ovfPackage) index(names []string) error {
+	if a.bare {
+		return nil
+	}
+	wanted := make(map[string]bool, len(names))
+	for _, n := range names {
+		if _, ok := a.members[n]; !ok {
+			wanted[n] = true
+		}
+	}
+	if len(wanted) == 0 {
+		return nil
+	}
+	return a.scan(func(name string, loc ovaMemberLoc) bool {
+		if wanted[name] {
+			a.members[name] = loc
+			delete(wanted, name)
+		}
+		return len(wanted) == 0
+	})
+}
+
+// contains reports whether the package has a located member named exactly
+// name (after index). A bare .ovf contains nothing but its descriptor.
+func (a *ovfPackage) contains(name string) bool {
+	_, ok := a.members[name]
+	return ok
 }
 
 // permit adds names (validated file references) to the members Open serves.
@@ -162,37 +315,24 @@ func (a *ovfPackage) permit(names []string) {
 }
 
 // Open implements importer.Archive. It returns the member named exactly name
-// when name is allowed, and os.ErrNotExist otherwise.
+// when name is allowed and located, and os.ErrNotExist otherwise.
 func (a *ovfPackage) Open(name string) (io.ReadCloser, int64, error) {
-	if !a.allowed[name] {
+	loc, located := a.members[name]
+	if !a.allowed[name] || !located {
 		return nil, 0, fmt.Errorf("OVF package member %q is not permitted: %w", name, os.ErrNotExist)
 	}
 	f, err := os.Open(filepath.Clean(a.path))
 	if err != nil {
 		return nil, 0, fmt.Errorf("open staged OVF package: %w", err)
 	}
-	if a.bare {
-		if name != a.descriptor {
-			_ = f.Close()
-			return nil, 0, os.ErrNotExist
-		}
-		st, err := f.Stat()
-		if err != nil {
-			_ = f.Close()
-			return nil, 0, fmt.Errorf("stat staged OVF: %w", err)
-		}
-		return f, st.Size(), nil
-	}
-	tr := tar.NewReader(f)
-	size, err := seekOVAMember(tr, name)
-	if err != nil {
+	if _, err := f.Seek(loc.offset, io.SeekStart); err != nil {
 		_ = f.Close()
-		return nil, 0, err
+		return nil, 0, fmt.Errorf("seek to OVF package member %q: %w", name, err)
 	}
-	return &ovaMember{Reader: tr, f: f}, size, nil
+	return &ovaMember{Reader: io.LimitReader(f, loc.size), f: f}, loc.size, nil
 }
 
-// ovaMember is an open OVA member: reads come from the tar stream, Close
+// ovaMember is an open package member: reads are limited to the member, Close
 // closes the staged file.
 type ovaMember struct {
 	io.Reader
@@ -215,22 +355,4 @@ func ovaMemberName(h *tar.Header) string {
 		return ""
 	}
 	return name
-}
-
-// seekOVAMember advances tr to the member named exactly name and returns its
-// size, or os.ErrNotExist when there is none. A tar read error is returned
-// wrapped.
-func seekOVAMember(tr *tar.Reader, name string) (int64, error) {
-	for {
-		h, err := tr.Next()
-		if err == io.EOF {
-			return 0, os.ErrNotExist
-		}
-		if err != nil {
-			return 0, fmt.Errorf("read OVA tar: %w", err)
-		}
-		if ovaMemberName(h) == name {
-			return h.Size, nil
-		}
-	}
 }

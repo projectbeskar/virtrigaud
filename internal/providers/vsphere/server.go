@@ -70,6 +70,13 @@ type Provider struct {
 	// allowLoopbackImageSources lets an image download reach loopback
 	// addresses. Tests only: their image servers listen on 127.0.0.1.
 	allowLoopbackImageSources bool
+	// imageProxy is the proxy image downloads go through
+	// (VIRTRIGAUD_VSPHERE_IMAGE_PROXY); nil connects directly.
+	imageProxy *url.URL
+	// downloadStallWindow and downloadMinBytesPerWindow tune the download
+	// throughput watchdog (0 = the defaults; tests only).
+	downloadStallWindow       time.Duration
+	downloadMinBytesPerWindow int64
 }
 
 // Config holds the vSphere provider configuration
@@ -97,6 +104,8 @@ type Config struct {
 //   - VIRTRIGAUD_VSPHERE_IMAGE_MAX_DOWNLOAD_GIB: the largest image ImagePrepare
 //     downloads, in GiB (default 256, 1..16384; an invalid value logs a warning
 //     and keeps the default)
+//   - VIRTRIGAUD_VSPHERE_IMAGE_PROXY: an http(s) proxy URL image downloads go
+//     through (default: none; HTTP_PROXY/HTTPS_PROXY are not used for them)
 //
 // Credentials (username and password) are read from files mounted at CredentialsPath
 // by the provider controller. If credentials or endpoint are missing the govmomi
@@ -132,6 +141,7 @@ func New() *Provider {
 		finder:                finder,
 		logger:                slog.Default(),
 		maxImageDownloadBytes: maxImageDownloadBytesFromEnv(os.Getenv, slog.Default()),
+		imageProxy:            imageProxyFromEnv(os.Getenv, slog.Default()),
 	}
 }
 

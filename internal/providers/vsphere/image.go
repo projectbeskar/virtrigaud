@@ -17,7 +17,6 @@ limitations under the License.
 package vsphere
 
 import (
-	"archive/tar"
 	"context"
 	"crypto/md5"  // #nosec G501 -- md5 is an explicitly supported OVA checksum algorithm, not used for security
 	"crypto/sha1" // #nosec G505 -- sha1 is an explicitly supported OVA checksum algorithm, not used for security
@@ -36,6 +35,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/vmware/govmomi/find"
 	"github.com/vmware/govmomi/object"
@@ -44,10 +44,12 @@ import (
 	"github.com/vmware/govmomi/vapi/rest"
 	"github.com/vmware/govmomi/vim25/progress"
 	"github.com/vmware/govmomi/vim25/types"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	"github.com/projectbeskar/virtrigaud/internal/imageartifact"
+	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/errors"
 )
@@ -229,10 +231,65 @@ func (p *Provider) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepar
 	if p.client == nil || p.finder == nil {
 		return nil, errors.NewUnavailable("vSphere", fmt.Errorf("provider client not initialized"))
 	}
+
+	// Finish (or give up) before the manager does, so it gets an answer it
+	// can classify instead of its own DeadlineExceeded.
+	opCtx, cancel := importDeadline(ctx)
+	defer cancel()
+	var resp *providerv1.ImagePrepareResponse
 	if parsed.Mode == imageartifact.ModeLegacy {
-		return p.imagePrepareLegacy(ctx, req, parsed.LegacyTargetName)
+		resp, err = p.imagePrepareLegacy(opCtx, req, parsed.LegacyTargetName)
+	} else {
+		resp, err = p.imagePrepareIdentity(opCtx, req, parsed)
 	}
-	return p.imagePrepareIdentity(ctx, req, parsed)
+	if err != nil && opCtx.Err() != nil && ctx.Err() == nil && !isDefinitiveAnswer(err) {
+		// Our own deadline tripped: the image did not download and import in
+		// the time the manager allows. That is the image's problem (too
+		// large, or a slow source), not the provider's.
+		return nil, p.imageSourceError(ctx, "the image could not be downloaded and imported before the manager's deadline",
+			err, "margin", importDeadlineMargin.String())
+	}
+	return resp, err
+}
+
+// importDeadlineMargin is how long before the request's deadline an image
+// prepare gives up, so its answer reaches the manager before the manager's
+// own timeout does.
+const importDeadlineMargin = 15 * time.Second
+
+// importDeadline derives the context an image prepare runs on: ctx with a
+// deadline importDeadlineMargin before ctx's own, when ctx has one.
+func importDeadline(ctx context.Context) (context.Context, context.CancelFunc) {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return context.WithCancel(ctx)
+	}
+	return context.WithDeadline(ctx, deadline.Add(-importDeadlineMargin))
+}
+
+// isDefinitiveAnswer reports whether err is an answer that no deadline could
+// have caused, which the deadline message must not replace: InvalidSpec
+// (InvalidArgument), a Conflict (AlreadyExists), a misconfigured import folder
+// (FailedPrecondition), NotFound, or an in-progress answer. Anything else —
+// including an image-source failure, which is what a cut-off download looks
+// like — is reported as the deadline it was.
+func isDefinitiveAnswer(err error) bool {
+	st, ok := status.FromError(err)
+	if !ok {
+		return false
+	}
+	switch st.Code() {
+	case codes.InvalidArgument, codes.AlreadyExists, codes.FailedPrecondition, codes.NotFound:
+		return true
+	case codes.Unavailable:
+		for _, d := range st.Details() {
+			if info, isInfo := d.(*errdetails.ErrorInfo); isInfo && info.GetDomain() == contracts.ErrorInfoDomain &&
+				info.GetReason() == contracts.ImageArtifactInProgressReason {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // imagePrepareLegacy serves a legacy (identity-less) request from a manager
@@ -790,7 +847,11 @@ func (p *Provider) downloadOVA(ctx context.Context, ovaURL string) (localPath st
 		}
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ovaURL, nil)
+	// The download runs on its own context, which the throughput watchdog
+	// cancels (with errImageSourceTooSlow) when the source stalls.
+	dctx, cancelDownload := context.WithCancelCause(ctx)
+	defer cancelDownload(nil)
+	req, err := http.NewRequestWithContext(dctx, http.MethodGet, ovaURL, nil)
 	if err != nil {
 		cleanup()
 		p.logger.WarnContext(ctx, "ImagePrepare: the OVA URL cannot form a request", "url", shownURL, "error", unwrapURLError(err))
@@ -800,7 +861,7 @@ func (p *Provider) downloadOVA(ctx context.Context, ovaURL string) (localPath st
 		cleanup()
 		return "", noop, p.forbiddenSourceError(ctx, shownURL, err)
 	}
-	client := imageDownloadClient(p.allowLoopbackImageSources)
+	client := imageDownloadClient(p.allowLoopbackImageSources, p.imageProxy)
 	defer client.CloseIdleConnections()
 	resp, err := client.Do(req)
 	if err != nil {
@@ -830,14 +891,29 @@ func (p *Provider) downloadOVA(ctx context.Context, ovaURL string) (localPath st
 	}
 
 	limit := p.imageDownloadLimit()
+	tooLarge := func(size int64) error { return p.imageTooLargeError(ctx, shownURL, size, limit) }
+	if ext == ovfDescriptorExt {
+		// A bare .ovf is the descriptor itself: never download more of it
+		// than a descriptor may be (maxOVFDescriptorBytes).
+		limit = min(limit, maxOVFDescriptorBytes)
+		tooLarge = func(int64) error { return descriptorTooLargeError() }
+	}
 	if resp.ContentLength > limit {
 		cleanup()
-		return "", noop, p.imageTooLargeError(ctx, shownURL, resp.ContentLength, limit)
+		return "", noop, tooLarge(resp.ContentLength)
 	}
-	body := &sourceReadTracker{r: io.LimitReader(resp.Body, limit+1)}
+	counted := &atomicCountingReader{r: resp.Body}
+	body := &sourceReadTracker{r: io.LimitReader(counted, limit+1)}
+	stopWatchdog := p.watchDownloadThroughput(dctx, cancelDownload, &counted.n)
 	written, err := io.Copy(tmp, body)
+	stopWatchdog()
 	if err != nil {
 		cleanup()
+		if stderrors.Is(context.Cause(dctx), errImageSourceTooSlow) {
+			window, minBytes := p.downloadWatchdog()
+			return "", noop, p.imageSourceError(ctx, "the image source is too slow", errImageSourceTooSlow,
+				"url", shownURL, "window", window.String(), "min_bytes", minBytes, "read_bytes", counted.n.Load())
+		}
 		if body.err != nil {
 			return "", noop, p.imageSourceError(ctx, "the image source broke off the download", unwrapURLError(body.err), "url", shownURL)
 		}
@@ -845,7 +921,7 @@ func (p *Provider) downloadOVA(ctx context.Context, ovaURL string) (localPath st
 	}
 	if written > limit {
 		cleanup()
-		return "", noop, p.imageTooLargeError(ctx, shownURL, written, limit)
+		return "", noop, tooLarge(written)
 	}
 	if err := tmp.Sync(); err != nil {
 		cleanup()
@@ -878,23 +954,25 @@ func unwrapURLError(err error) error {
 //   - A bare .ovf is the descriptor alone. It cannot carry the files it
 //     references, so importOVA refuses one that references any file.
 func (p *Provider) newOVAArchive(localPath, ovaURL string) (*ovfPackage, string, error) {
+	var (
+		pkg *ovfPackage
+		err error
+	)
 	if urlPathExt(ovaURL) == ovfDescriptorExt {
-		pkg := newBareOVFPackage(localPath)
-		return pkg, pkg.descriptor, nil
+		pkg, err = newBareOVFPackage(localPath)
+	} else {
+		pkg, err = newTarPackage(localPath)
 	}
-	descriptor, err := findOVADescriptorName(localPath)
 	if err != nil {
 		if stderrors.Is(err, errUnreadableOVA) {
+			// The parser's text stays out of the message.
 			p.logger.Warn("ImagePrepare: the downloaded OVA is not a readable tar archive", "error", err)
 			return nil, "", errors.NewInvalidSpec("ImagePrepare: the downloaded OVA is not a readable tar archive")
 		}
 		return nil, "", err
 	}
-	return newTarPackage(localPath, descriptor), descriptor, nil
+	return pkg, pkg.descriptor, nil
 }
-
-// errUnreadableOVA marks a staged OVA that is not a readable tar archive.
-var errUnreadableOVA = stderrors.New("the downloaded OVA is not a readable tar archive")
 
 // findOVADescriptorName returns the member name of the OVF descriptor inside an
 // OVA tar: the first package member (ovaMemberName: a regular file at the
@@ -903,30 +981,11 @@ var errUnreadableOVA = stderrors.New("the downloaded OVA is not a readable tar a
 // anything under a directory (__MACOSX/) are skipped, so a binary sidecar is
 // never parsed as the descriptor.
 func findOVADescriptorName(ovaPath string) (string, error) {
-	f, err := os.Open(filepath.Clean(ovaPath))
+	pkg, err := newTarPackage(ovaPath)
 	if err != nil {
-		return "", fmt.Errorf("open OVA to locate descriptor: %w", err)
+		return "", err
 	}
-	defer func() { _ = f.Close() }()
-
-	tr := tar.NewReader(f)
-	for {
-		h, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			// The file is the complete body the source served (a truncated
-			// download fails in downloadOVA), so an unreadable archive is a
-			// property of the source: permanent. The parser's text stays out
-			// of the message (newOVAArchive logs it).
-			return "", fmt.Errorf("%w: %v", errUnreadableOVA, err)
-		}
-		if name := ovaMemberName(h); strings.EqualFold(path.Ext(name), ovfDescriptorExt) {
-			return name, nil
-		}
-	}
-	return "", errors.NewInvalidSpec("OVA contains no .ovf descriptor (after skipping macOS sidecar files)")
+	return pkg.descriptor, nil
 }
 
 // ovaImportLog adapts govmomi's progress.LogFunc to the provider's structured
