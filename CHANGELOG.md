@@ -21,6 +21,35 @@ Every provider names a prepared template or image file after the bare `VMImage` 
 - [ ] Config change only
 - [x] Documentation only
 
+## [2026-09-25 11:21] - ADR-0009 Slice 1: prepared-image artifact identity contract (proto, contracts, CRD status, mock provider)
+**Author:** @wrkode (William Rizzo)
+
+> **Operator note.** Contract only: the manager does not send an image identity yet (Slice 2), and vSphere, libvirt and Proxmox do not advertise the new capability yet (Slices 3-5), so image preparation behaves as before and the ADR-0009 known limitation still applies. The manager's readiness check now also requires VMImage `status.providerStatus[].sourceDigest` and Provider `status.reportedCapabilities.supportsImageArtifactIdentity`: apply the CRDs before the manager, as for every recent release.
+
+### Added
+- `proto/provider/v1/provider.proto` (additive, no package bump): `ImagePrepareRequest.image` (4, `ObjectIdentity`), `.source_digest` (5), `.provider` (6); `ImagePrepareResponse.artifact` (4) and the new `PreparedArtifact` message (`name`, `image`, `source_digest`, `reused`); `GetCapabilitiesResponse.supports_image_artifact_identity` (18). Bindings regenerated.
+- `internal/providers/contracts/image.go`, `capabilities.go`: `ImagePrepareRequest.Image`/`SourceDigest`/`Provider`, `ImagePrepareResponse.Artifact`, `PreparedArtifact`, `ImagePrepareResponse.ConfirmsIdentity` (the D7 echo check: UID and digest must both match), `Capabilities.SupportsImageArtifactIdentity`.
+- `internal/transport/grpc/client.go`: maps the new request fields (an identity without a UID is never sent), the artifact echo and the capability.
+- `internal/imageartifact/` (new): `SourceDigest` (D2: `sha256:` over a versioned, key-sorted canonical JSON of `spec.source` with `http.timeout`/`headers`/`authentication` cleared; golden-vector pinned), `ValidateSourceDigest`, `ArtifactName` (D1: `<ns>.<name>` cut to the budget + separator + 16 hex of `sha256("v1/"+uid+"/"+digest)`; vSphere 80/`_`, libvirt 200/`_`, Proxmox 80/`-`), `Stamp` and `Decide` (D3/D4 fail-closed reuse table), `ParseRequest` (D7 identity vs. deprecated legacy mode, strict validation), `ConflictError`/`InProgressError`, and `SignalLegacyRequest` (WARN log + counter).
+- `internal/obs/metrics/image_prepare.go`: provider counter `virtrigaud_provider_image_prepare_legacy_requests_total{provider_type}` (deprecation signal for identity-less requests from older managers; removed with legacy mode in Slice 10).
+- `api/infra.virtrigaud.io/v1beta1`: `ProviderImageStatus.SourceDigest` (`sourceDigest`, pattern `^sha256:[0-9a-f]{64}$`) and `ReportedCapabilities.SupportsImageArtifactIdentity`; CRDs regenerated. `internal/controller/provider_controller.go` surfaces the capability on Provider status.
+- `sdk/provider/capabilities`: `CapabilityImageArtifactIdentity` and `Builder.ImageArtifactIdentity()`.
+- `internal/providers/mock`: implements the contract in memory: derived names, stamps written at import, reuse only on a matching stamp, `Unavailable` while its own import runs, re-import of an abandoned (failed) import, `AlreadyExists` for any other artifact at the derived name (never touched), and deprecated legacy mode (bare name, reuse by name, no echo, deprecation signal). Advertises the capability. New options `WithImagePrepareDelay` (0 = synchronous) and `WithLogger`, and `PlantImageArtifact` for tests; generated IDs are now unique per process.
+- Tests: golden digest and name vectors, digest inclusion/exclusion/ordering/versioning, name properties per hypervisor (budget, charset, suffix, never a Kubernetes/domain/legacy/MOID/#334-reserved name, no collisions), D4 decision table, request parsing, transport round-trips, mock semantics (with `-race`), an end-to-end identity prepare over gRPC against the mock, and CRD readiness for the new fields.
+
+### Changed
+- `internal/controller/vmcrdfeatures.go`, `internal/obs/metrics/metrics.go`: the CRD readiness check also requires VMImage `status.providerStatus[].sourceDigest` and Provider `status.reportedCapabilities.supportsImageArtifactIdentity` (ADR-0009 D8).
+- Docs: `docs/image-preparation.md` (the new contract and status field; the limitation stands until the later slices), `docs/upgrading.md` (readiness fields).
+
+### Why
+ADR-0009 closes cross-tenant prepared-image poisoning and disclosure: artifacts are named and stamped by VMImage UID and source digest and reused only on a matching stamp. This slice lands the wire and API contract and a reference implementation in the mock that the manager (Slice 2) and the real providers (Slices 3-5) build on.
+
+### Impact
+- [ ] Breaking change (additive proto and CRD fields)
+- [x] Requires cluster rollout (CRDs before the manager; readiness checks the new fields)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-09-25 02:55] - Security: VMImage prepare state is per Provider identity (namespace/name + UID), with per-Provider prepare tasks
 **Author:** @wrkode (William Rizzo)
 

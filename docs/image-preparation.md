@@ -116,9 +116,18 @@ who created it or from what source. So Providers whose accounts reach the same i
 (the same vCenter datacenter, Proxmox node or libvirt pool directory) share one artifact:
 a tenant allowed to use a shared Provider can pre-create, or later modify, the artifact
 another tenant's VMs are created from, and two different `VMImage`s with the same name in
-different namespaces collide. Until this is addressed (it needs a design record), give
-tenants separate hypervisor accounts scoped to what each may see, and do not share a
-Provider between tenants that must not influence each other's images.
+different namespaces collide. Until this is addressed, give tenants separate hypervisor
+accounts scoped to what each may see, and do not share a Provider between tenants that must
+not influence each other's images.
+
+The fix is designed in [ADR-0009](adr/0009-prepared-image-artifact-identity.md) and lands
+in slices. The first slice adds the contract only: `ImagePrepare` can carry the
+`VMImage`'s identity and a digest of its `spec.source`, a provider that names, stamps and
+verifies artifacts by that identity advertises
+`Provider.status.reportedCapabilities.supportsImageArtifactIdentity`, and
+`status.providerStatus[].sourceDigest` records which source an entry was prepared for. Of
+the providers, only the mock implements it so far; the manager does not send the identity
+yet, so the limitation above still applies.
 
 ## `spec.prepare.onMissing`
 
@@ -143,7 +152,7 @@ kubectl get vmimage <name> -o yaml | yq '.status'
 | `status.phase` | `Importing` while a prepare is in flight, `Ready` once prepared, `Failed`/`Pending` for `onMissing: Fail`/`Wait` holds. |
 | `status.ready` | `true` once the image is available on **at least one** provider (the OR across providers). A prepare in flight on one provider does not clear it while the image is available on another. |
 | `status.availableOn` | The providers the image is prepared on, as `<namespace>/<name>` (the `Providers` print column). |
-| `status.providerStatus["<namespace>/<name>"]` | Per-provider truth, keyed by the Provider's identity: `available`, `providerUID` (the Provider object it was recorded through), `taskRef` (an in-flight async prepare on that Provider), plus the provider-specific `id`/`path`/`message`/`lastUpdated`. See [Prepare state is per Provider](#prepare-state-is-per-provider). |
+| `status.providerStatus["<namespace>/<name>"]` | Per-provider truth, keyed by the Provider's identity: `available`, `providerUID` (the Provider object it was recorded through), `taskRef` (an in-flight async prepare on that Provider), `sourceDigest` (the digest of the `spec.source` the entry was prepared for, `sha256:<64 hex>`; ADR-0009, not written yet), plus the provider-specific `id`/`path`/`message`/`lastUpdated`. See [Prepare state is per Provider](#prepare-state-is-per-provider). |
 | `status.prepareTaskRef` | Deprecated and no longer written; a value left by an earlier release is cleared. |
 | `status.lastPrepareTime` | When the last prepare was triggered/completed. |
 | `status.conditions` | `Ready` and `Importing` conditions with reasons (`Importing`, `Prepared`, `MissingOnProvider`, `WaitingForImage`, `InvalidSource`, `PrepareStateDropped`, `ProviderUIDMissing`). |
