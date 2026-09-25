@@ -151,10 +151,10 @@ func TestReconcileVM_BoundVMNeverPreparesItsImage(t *testing.T) {
 	}{
 		"a legacy entry whose source the provider now refuses (libvirt image in use as a VM disk)": {legacyImage(""), inUse},
 		"an unverified migrated entry the provider now refuses":                                    {unverified(""), inUse},
-		"onMissing Fail, legacy entry that the migration would drop":                                {legacyImage(infrav1beta1.ImageMissingActionFail), nil},
-		"onMissing Wait, legacy entry that the migration would drop":                                {legacyImage(infrav1beta1.ImageMissingActionWait), nil},
-		"onMissing Wait, entry without a Provider UID":                                              {unverified(infrav1beta1.ImageMissingActionWait), nil},
-		"no entry at all, template deleted out of band (a prepare would import)":                    {sharedOVAImage(idImageNS, "ubuntu", ""), nil},
+		"onMissing Fail, legacy entry that the migration would drop":                               {legacyImage(infrav1beta1.ImageMissingActionFail), nil},
+		"onMissing Wait, legacy entry that the migration would drop":                               {legacyImage(infrav1beta1.ImageMissingActionWait), nil},
+		"onMissing Wait, entry without a Provider UID":                                             {unverified(infrav1beta1.ImageMissingActionWait), nil},
+		"no entry at all, template deleted out of band (a prepare would import)":                   {sharedOVAImage(idImageNS, "ubuntu", ""), nil},
 	} {
 		t.Run(name, func(t *testing.T) {
 			prov := &preparingRoutingProvider{prepareErr: tc.prepareErr}
