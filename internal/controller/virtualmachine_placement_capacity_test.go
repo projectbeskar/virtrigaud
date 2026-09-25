@@ -884,3 +884,120 @@ func TestListProviderVMs(t *testing.T) {
 	assert.Equal(t, []string{"infra/p"}, placementProviderIndexValue(clusterVM("x", "infra", "p")))
 	assert.Nil(t, placementProviderIndexValue(&infravirtrigaudiov1beta1.Host{}))
 }
+
+// ─── the assume lock never covers an API call (review M1) ────────────────────
+
+// blockingStatusClient blocks every status write of the VM named blockName
+// until release is closed (or the write's context ends).
+type blockingStatusClient struct {
+	client.Client
+	blockName string
+	entered   chan struct{}
+	release   chan struct{}
+	once      sync.Once
+}
+
+func (c *blockingStatusClient) Status() client.SubResourceWriter {
+	return &blockingStatusWriter{SubResourceWriter: c.Client.Status(), c: c}
+}
+
+type blockingStatusWriter struct {
+	client.SubResourceWriter
+	c *blockingStatusClient
+}
+
+func (w *blockingStatusWriter) Update(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+	if obj.GetName() == w.c.blockName {
+		w.c.once.Do(func() { close(w.c.entered) })
+		select {
+		case <-w.c.release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return w.SubResourceWriter.Update(ctx, obj, opts...)
+}
+
+// within fails the test if fn does not return within d.
+func within(t *testing.T, d time.Duration, what string, fn func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fn()
+	}()
+	select {
+	case <-done:
+	case <-time.After(d):
+		t.Fatalf("%s did not finish within %s: it is waiting on a blocked status write", what, d)
+	}
+}
+
+// TestClusteredCapacity_BlockedStatusWriteStallsNobody: an Unschedulable VM
+// whose status write hangs (a slow API server) does not hold its Provider's
+// assume lock, so another VM of the same Provider, a VM of another Provider and
+// a single-host VM all proceed.
+func TestClusteredCapacity_BlockedStatusWriteStallsNobody(t *testing.T) {
+	ctx := context.Background()
+	single := singleProviderCR("prov-single", capNS)
+	objs := append(capBase(),
+		capHost("host-alpha", 2), withPlacement(capVM("blocker"), "host-alpha", ""), capVM("a1"), capVM("a2"),
+		clusteredProviderCR("prov-b", capNS), hostPoolCR("pool-b", capNS, "prov-b"), readyHost("host-b", capNS, "pool-b", "prov-b"),
+		clusterVM("b1", capNS, "prov-b"),
+		single, clusterVM("s1", capNS, single.Name))
+	r := newTestReconciler(coverageTestScheme(t), &stubResolver{provider: &concurrentCreateProvider{}}, objs...)
+	blocking := &blockingStatusClient{Client: r.Client, blockName: "a1", entered: make(chan struct{}), release: make(chan struct{})}
+	r.Client = blocking
+
+	a1Done := make(chan struct{})
+	go func() {
+		defer close(a1Done)
+		_, _ = resolve(t, r, readVM(t, r, "a1")) // Unschedulable: its status write blocks
+	}()
+	select {
+	case <-blocking.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("a1 never reached its status write")
+	}
+
+	within(t, 10*time.Second, "another VM of the same Provider", func() {
+		host, res := resolve(t, r, readVM(t, r, "a2"))
+		assert.Empty(t, host)
+		assert.Equal(t, placementUnschedulableRetryInterval, res.RequeueAfter)
+	})
+	within(t, 10*time.Second, "a VM of another Provider", func() {
+		p, _, err := r.resolveClusterPlacement(ctx, readVM(t, r, "b1"), clusteredProviderCR("prov-b", capNS), capCreateReq(), nil)
+		require.NoError(t, err)
+		require.NotNil(t, p)
+		assert.Equal(t, "host-b", p.hostID)
+	})
+	within(t, 10*time.Second, "a single-host VM's create", func() {
+		prov := &concurrentCreateProvider{}
+		_, err := r.createVM(ctx, readVM(t, r, "s1"), prov, single, smallVMClass(capNS), minimalVMImage(capNS), nil)
+		require.NoError(t, err)
+		assert.Equal(t, []string{""}, prov.created())
+	})
+
+	close(blocking.release)
+	<-a1Done
+}
+
+// TestClusteredCapacity_BusyLockRequeues: a reconcile that cannot get its
+// Provider's assume lock in time requeues shortly, with jitter, and places
+// nothing.
+func TestClusteredCapacity_BusyLockRequeues(t *testing.T) {
+	vm := capVM("waiting")
+	objs := append(capBase(), capHost("host-alpha", 4), vm)
+	r := newTestReconciler(coverageTestScheme(t), &stubResolver{provider: &concurrentCreateProvider{}}, objs...)
+	unlock := r.placementAssumptions().Lock(capNS + "/prov-cluster")
+	defer unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	p, res, err := r.resolveClusterPlacement(ctx, vm, clusteredProviderCR("prov-cluster", capNS), capCreateReq(), nil)
+	require.NoError(t, err)
+	assert.Nil(t, p)
+	assert.GreaterOrEqual(t, res.RequeueAfter, placementLockBusyRetryBase)
+	assert.Less(t, res.RequeueAfter, placementLockBusyRetryBase+time.Second)
+	assert.Zero(t, r.placementAssumptions().Len())
+}

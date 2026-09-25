@@ -19,6 +19,8 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
+	"math/rand/v2"
 	"slices"
 	"sync"
 	"time"
@@ -60,7 +62,76 @@ const (
 	// placementUnschedulableForget is how long after its last no-fit a VM's
 	// backoff record is kept.
 	placementUnschedulableForget = time.Hour
+	// placementLockWait bounds how long a reconcile waits for its Provider's
+	// assume lock. The lock covers informer-cache reads and in-memory work
+	// only (milliseconds), so this is only reached when something is badly
+	// wrong; the reconcile then requeues instead of parking its worker.
+	placementLockWait = 5 * time.Second
+	// placementLockBusyRetryBase is the requeue after placementLockWait ran out;
+	// up to one second of jitter is added so the waiters spread out.
+	placementLockBusyRetryBase = time.Second
+	// placementStatusWriteTimeout bounds each status write of the placement
+	// path (made after the assume lock is released), so a slow API server
+	// cannot hold a worker indefinitely.
+	placementStatusWriteTimeout = 30 * time.Second
 )
+
+// placementLockBusyRetry is the jittered requeue of a reconcile that could not
+// get its Provider's assume lock within placementLockWait.
+func placementLockBusyRetry() time.Duration {
+	return placementLockBusyRetryBase + rand.N(time.Second) // #nosec G404 -- jitter, not a secret
+}
+
+// updatePlacementStatus is updateStatus bounded by placementStatusWriteTimeout.
+// It is only ever called with no assume lock held.
+func (r *VirtualMachineReconciler) updatePlacementStatus(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine) {
+	writeCtx, cancel := context.WithTimeout(ctx, placementStatusWriteTimeout)
+	defer cancel()
+	r.updateStatus(writeCtx, vm)
+}
+
+// placementInfraError wraps an infrastructure failure (a cache read failed)
+// met while scheduling, as opposed to a scheduler verdict: the reconcile
+// returns it as an error (backoff) instead of reporting it on the VM.
+type placementInfraError struct{ err error }
+
+// Error implements error.
+func (e *placementInfraError) Error() string { return e.err.Error() }
+
+// Unwrap returns the underlying error.
+func (e *placementInfraError) Unwrap() error { return e.err }
+
+// scheduleAndAssume is the part of a clustered create that runs under the
+// Provider's assume lock: read what is committed (informer cache plus live
+// assumptions), schedule, and on success assume the pick so the next schedule
+// of this Provider counts it even though the pendingHost write has not landed
+// yet. It makes no API call. A cache failure is a *placementInfraError; any
+// other error is the scheduler's verdict.
+func (r *VirtualMachineReconciler) scheduleAndAssume(
+	ctx context.Context,
+	assumptions *assume.Cache,
+	providerKey string,
+	provider types.NamespacedName,
+	vm *infravirtrigaudiov1beta1.VirtualMachine,
+	req *scheduler.Request,
+) (scheduler.Result, error) {
+	if err := r.placementRequest(ctx, assumptions, providerKey, provider, vm, req); err != nil {
+		return scheduler.Result{}, &placementInfraError{err: err}
+	}
+	result, err := scheduler.Schedule(*req)
+	if err != nil {
+		return result, err
+	}
+	assumptions.Assume(providerKey, assume.Assumption{
+		UID:       vmSchedulingUID(vm),
+		Namespace: vm.Namespace,
+		Name:      vm.Name,
+		HostID:    result.HostID,
+		Labels:    maps.Clone(vm.Labels),
+		Resources: req.Resources,
+	})
+	return result, nil
+}
 
 // placementAssumptions returns the reconciler's assume cache, creating it on
 // first use: a manager whose Providers are all single-host never creates it.

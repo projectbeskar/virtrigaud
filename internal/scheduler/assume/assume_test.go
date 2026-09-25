@@ -17,6 +17,7 @@ limitations under the License.
 package assume
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"sync"
@@ -140,6 +141,31 @@ func TestLockIsPerProvider(t *testing.T) {
 	unlock1()
 	// And p1's lock is reusable once released.
 	c.Lock("p1")()
+}
+
+// TestLockWithinGivesUp (review M1): a waiter gives up after its bound or when
+// its context ends, instead of parking forever behind a held lock.
+func TestLockWithinGivesUp(t *testing.T) {
+	c := New(time.Minute, nil)
+	unlock, ok := c.LockWithin(context.Background(), "p1", time.Second)
+	require.True(t, ok, "a free lock is taken at once")
+
+	_, ok = c.LockWithin(context.Background(), "p1", 10*time.Millisecond)
+	assert.False(t, ok, "a held lock is not taken within the bound")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, ok = c.LockWithin(ctx, "p1", time.Hour)
+	assert.False(t, ok, "a cancelled context gives up")
+
+	other, ok := c.LockWithin(context.Background(), "p2", 10*time.Millisecond)
+	require.True(t, ok, "another Provider's lock is independent")
+	other()
+
+	unlock()
+	again, ok := c.LockWithin(context.Background(), "p1", 10*time.Millisecond)
+	require.True(t, ok, "free again once released")
+	again()
 }
 
 // scheduleConcurrently runs one goroutine per VM, each doing what the

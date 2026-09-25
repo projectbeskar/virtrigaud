@@ -1216,14 +1216,14 @@ func (r *VirtualMachineReconciler) resolveClusterPlacement(
 		logger.Info("Cannot schedule VM: " + msg)
 		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonNoHostPool, msg)
 		metrics.RecordError(errReasonPlacement, metrics.ComponentManager)
-		r.updateStatus(ctx, vm)
+		r.updatePlacementStatus(ctx, vm)
 		return nil, ctrl.Result{RequeueAfter: placementConfigRetryInterval}, nil
 	case len(pools) > 1:
 		msg := fmt.Sprintf("clustered provider %q has %d HostPools in namespace %s; v1 supports exactly one pool per clustered provider (multi-pool is deferred)", providerCR.Name, len(pools), clusterNS)
 		logger.Info("Cannot schedule VM: " + msg)
 		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonMultipleHostPools, msg)
 		metrics.RecordError(errReasonPlacement, metrics.ComponentManager)
-		r.updateStatus(ctx, vm)
+		r.updatePlacementStatus(ctx, vm)
 		return nil, ctrl.Result{RequeueAfter: placementConfigRetryInterval}, nil
 	}
 	pool := pools[0]
@@ -1265,7 +1265,7 @@ func (r *VirtualMachineReconciler) resolveClusterPlacement(
 				logger.Info("Cannot schedule VM: " + msg)
 				k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonPlacementPolicyNotFound, msg)
 				metrics.RecordError(errReasonPlacement, metrics.ComponentManager)
-				r.updateStatus(ctx, vm)
+				r.updatePlacementStatus(ctx, vm)
 				return nil, ctrl.Result{RequeueAfter: placementConfigRetryInterval}, nil
 			}
 			return nil, ctrl.Result{}, fmt.Errorf("get VMPlacementPolicy %s: %w", vm.Spec.PlacementRef.Name, err)
@@ -1305,22 +1305,29 @@ func (r *VirtualMachineReconciler) resolveClusterPlacement(
 		// which is the honest, correct behavior until those inputs exist.
 	}
 
-	// (e) Read what is committed, schedule and assume — all under the
-	// Provider's assume lock (ADR-0007 Addendum A, scheduler-accuracy
-	// amendment). Committed = every VM of this Provider, in any namespace,
-	// bound or pending on a host, plus the placements other reconciles have
-	// chosen but whose pendingHost write the informer cache does not show yet.
-	// The lock is released on return, before the caller writes pendingHost, so
-	// only the in-memory part is serialised.
+	// (e) Read what is committed, schedule and assume — under the Provider's
+	// assume lock (ADR-0007 Addendum A, scheduler-accuracy amendment).
+	// Committed = every VM of this Provider, in any namespace, bound or pending
+	// on a host, plus the placements other reconciles have chosen but whose
+	// pendingHost write the informer cache does not show yet. The lock covers
+	// informer-cache reads and in-memory work only, never an API call: it is
+	// released right after Schedule (and Assume), before any status write here
+	// and before the caller's pendingHost write. A reconcile that cannot get it
+	// within placementLockWait requeues shortly instead of parking its worker.
 	providerNN := types.NamespacedName{Namespace: providerCR.Namespace, Name: providerCR.Name}
 	providerKey := providerNN.String()
 	assumptions := r.placementAssumptions()
-	unlock := assumptions.Lock(providerKey)
-	defer unlock()
-	if err := r.placementRequest(ctx, assumptions, providerKey, providerNN, vm, &schedReq); err != nil {
-		return nil, ctrl.Result{}, err
+	unlock, locked := assumptions.LockWithin(ctx, providerKey, placementLockWait)
+	if !locked {
+		logger.V(1).Info("Provider's placement lock is busy; requeueing", "provider", providerKey)
+		return nil, ctrl.Result{RequeueAfter: placementLockBusyRetry()}, nil
 	}
-	result, err := scheduler.Schedule(schedReq)
+	result, err := r.scheduleAndAssume(ctx, assumptions, providerKey, providerNN, vm, &schedReq)
+	unlock()
+	var infraErr *placementInfraError
+	if stderrors.As(err, &infraErr) {
+		return nil, ctrl.Result{}, infraErr.err
+	}
 	if err != nil {
 		if scheduler.AllExcluded(err) {
 			// Every candidate is a host where a Create of this VM was refused with
@@ -1334,7 +1341,7 @@ func (r *VirtualMachineReconciler) resolveClusterPlacement(
 			setPlacedCondition(vm, metav1.ConditionFalse, k8s.ReasonAllHostsExcluded, msg)
 			k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonUnschedulable, msg)
 			metrics.RecordError(errReasonPlacement, metrics.ComponentManager)
-			r.updateStatus(ctx, vm)
+			r.updatePlacementStatus(ctx, vm)
 			return nil, ctrl.Result{RequeueAfter: vmCreateConflictRetryInterval}, nil
 		}
 		if stderrors.Is(err, scheduler.ErrNoFeasibleHost) {
@@ -1351,7 +1358,7 @@ func (r *VirtualMachineReconciler) resolveClusterPlacement(
 			setPlacedCondition(vm, metav1.ConditionFalse, k8s.ReasonUnschedulable, msg)
 			k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonUnschedulable, msg)
 			metrics.RecordError(errReasonPlacement, metrics.ComponentManager)
-			r.updateStatus(ctx, vm)
+			r.updatePlacementStatus(ctx, vm)
 			return nil, ctrl.Result{RequeueAfter: retryAfter}, nil
 		}
 		// Malformed input the admin must fix (bad overcommit ratio / affinity
@@ -1361,24 +1368,11 @@ func (r *VirtualMachineReconciler) resolveClusterPlacement(
 		logger.Error(err, "Placement error scheduling VM", "pool", pool.Name)
 		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonPlacementError, msg)
 		metrics.RecordError(errReasonPlacement, metrics.ComponentManager)
-		r.updateStatus(ctx, vm)
+		r.updatePlacementStatus(ctx, vm)
 		return nil, ctrl.Result{RequeueAfter: placementConfigRetryInterval}, nil
 	}
 
-	// Assume the pick before the lock is released, so the next schedule for
-	// this Provider counts it even though the pendingHost write has not landed
-	// (or reached the informer cache) yet. createVM forgets it if that write
-	// fails.
-	assumptions.Assume(providerKey, assume.Assumption{
-		UID:       vmSchedulingUID(vm),
-		Namespace: vm.Namespace,
-		Name:      vm.Name,
-		HostID:    result.HostID,
-		Labels:    vm.Labels,
-		Resources: schedReq.Resources,
-	})
 	r.unschedulable.reset(vmSchedulingUID(vm))
-
 	logger.Info("Scheduled VM onto clustered host",
 		"vm", vm.Name, "pool", pool.Name, "host", result.HostID, "reason", result.Reason)
 	return &clusterPlacement{hostID: result.HostID, poolName: pool.Name, reason: result.Reason}, ctrl.Result{}, nil

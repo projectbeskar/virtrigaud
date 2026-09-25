@@ -57,6 +57,7 @@ limitations under the License.
 package assume
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -100,7 +101,10 @@ type Cache struct {
 	// being acquired, so the two cannot deadlock.
 	mu      sync.Mutex
 	entries map[string]*entry
-	locks   map[string]*sync.Mutex
+	// locks holds one semaphore (capacity 1) per Provider: sending takes the
+	// lock, receiving releases it. A channel, not a sync.Mutex, so a waiter
+	// can give up (LockWithin).
+	locks map[string]chan struct{}
 }
 
 // New returns an empty Cache whose assumptions expire ttl after they are made.
@@ -113,26 +117,56 @@ func New(ttl time.Duration, now func() time.Time) *Cache {
 		ttl:     ttl,
 		now:     now,
 		entries: map[string]*entry{},
-		locks:   map[string]*sync.Mutex{},
+		locks:   map[string]chan struct{}{},
 	}
 }
 
-// Lock acquires provider's schedule lock and returns the function that
-// releases it. Hold it from reading the committed placements (List) to
-// recording the pick (Assume), and release it before any API write, so
-// concurrent reconciles of one Provider see each other's picks while the
-// writes themselves stay parallel. Reconciles of different Providers never
-// wait on each other.
-func (c *Cache) Lock(provider string) (unlock func()) {
+// semaphore returns provider's lock, creating it on first use.
+func (c *Cache) semaphore(provider string) chan struct{} {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	l, ok := c.locks[provider]
 	if !ok {
-		l = &sync.Mutex{}
+		l = make(chan struct{}, 1)
 		c.locks[provider] = l
 	}
-	c.mu.Unlock()
-	l.Lock()
-	return l.Unlock
+	return l
+}
+
+// Lock acquires provider's schedule lock, waiting as long as it takes, and
+// returns the function that releases it. Hold it from reading the committed
+// placements (List) to recording the pick (Assume) — in-memory work and
+// informer-cache reads only — and release it before any API write, so
+// concurrent reconciles of one Provider see each other's picks while no
+// reconcile ever waits on another one's API call. Reconciles of different
+// Providers never wait on each other. Controllers use LockWithin.
+func (c *Cache) Lock(provider string) (unlock func()) {
+	l := c.semaphore(provider)
+	l <- struct{}{}
+	return func() { <-l }
+}
+
+// LockWithin is Lock with a bounded wait: it gives up, returning ok == false
+// and no unlock function, when the lock is not free within wait or ctx ends
+// first. A reconcile that gets false requeues instead of parking its worker,
+// so a busy Provider can never capture the controller's workers.
+func (c *Cache) LockWithin(ctx context.Context, provider string, wait time.Duration) (unlock func(), ok bool) {
+	l := c.semaphore(provider)
+	select {
+	case l <- struct{}{}:
+		return func() { <-l }, true
+	default:
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case l <- struct{}{}:
+		return func() { <-l }, true
+	case <-timer.C:
+		return nil, false
+	case <-ctx.Done():
+		return nil, false
+	}
 }
 
 // Assume records a on provider, replacing any earlier assumption of the same

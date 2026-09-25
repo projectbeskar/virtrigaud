@@ -967,16 +967,20 @@ follows; A2's `pendingHost` is its prerequisite.
 > **Reservations: an in-process assume cache** (`internal/scheduler/assume`),
 > kube-scheduler's *assume* step. For each clustered create, the VM controller
 >
-> 1. takes the Provider's lock,
+> 1. takes the Provider's lock, waiting at most 5 s (otherwise it requeues
+>    after about a second, with jitter, instead of parking its worker),
 > 2. reads the committed placements from the informer cache, adds the live
 >    assumptions, runs `Schedule` and records the pick as an assumption, and
-> 3. releases the lock. Only then does it write `pendingHost` (A2's checked
->    update, now bounded to one minute).
+> 3. releases the lock. Only then does it write anything: the `Placed`
+>    condition of a VM that did not fit (a status write bounded to 30 s), or
+>    `pendingHost` (A2's checked update, bounded to one minute).
 >
+> The lock covers informer-cache reads and in-memory work only, never an API
+> call, so a slow API server cannot park other reconciles behind it.
 > Concurrent reconciles of one Provider therefore see each other's picks, as
-> committed capacity and as placed VMs for affinity and anti-affinity. The API
-> writes stay parallel, and reconciles of different Providers never wait on each
-> other. An assumption ends when:
+> committed capacity and as placed VMs for affinity and anti-affinity.
+> Reconciles of different Providers never wait on each other. An assumption
+> ends when:
 >
 > - the informer cache shows the VM's record on the assumed host, or no longer
 >   has the VM. From then on the record counts. A record on another host (for
