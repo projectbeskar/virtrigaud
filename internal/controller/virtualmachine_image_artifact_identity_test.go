@@ -390,7 +390,7 @@ func TestEnsureImageOnProvider_EntryForAnotherSourceIsPreparedAgain(t *testing.T
 	ctx := context.Background()
 	otherDigest := "sha256:" + strings.Repeat("4", 64)
 	for name, digest := range map[string]string{
-		"a changed spec.source (another digest)": otherDigest,
+		"a changed spec.source (another digest)":       otherDigest,
 		"an entry from an earlier release (no digest)": "",
 	} {
 		t.Run(name, func(t *testing.T) {

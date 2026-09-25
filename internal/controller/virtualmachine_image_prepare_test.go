@@ -632,11 +632,11 @@ func TestOverrideImageWithPreparedLocation_RequiresTheCurrentSourceDigest(t *tes
 	templateID := 9000
 	otherDigest := "sha256:" + strings.Repeat("1", 64)
 	for name, source := range map[string]infrav1beta1.ImageSource{
-		"libvirt url":       {Libvirt: &infrav1beta1.LibvirtImageSource{URL: "https://x/y.qcow2"}},
-		"libvirt path":      {Libvirt: &infrav1beta1.LibvirtImageSource{Path: "/pool/base.qcow2"}},
-		"vsphere ova":       {VSphere: &infrav1beta1.VSphereImageSource{OVAURL: "https://x/y.ova"}},
-		"vsphere template":  {VSphere: &infrav1beta1.VSphereImageSource{TemplateName: "golden"}},
-		"proxmox template":  {Proxmox: &infrav1beta1.ProxmoxImageSource{TemplateID: &templateID}},
+		"libvirt url":        {Libvirt: &infrav1beta1.LibvirtImageSource{URL: "https://x/y.qcow2"}},
+		"libvirt path":       {Libvirt: &infrav1beta1.LibvirtImageSource{Path: "/pool/base.qcow2"}},
+		"vsphere ova":        {VSphere: &infrav1beta1.VSphereImageSource{OVAURL: "https://x/y.ova"}},
+		"vsphere template":   {VSphere: &infrav1beta1.VSphereImageSource{TemplateName: "golden"}},
+		"proxmox template":   {Proxmox: &infrav1beta1.ProxmoxImageSource{TemplateID: &templateID}},
 		"http (no override)": {HTTP: &infrav1beta1.HTTPImageSource{URL: "https://x/y.qcow2"}},
 	} {
 		for variant, digest := range map[string]string{"no digest": "", "another digest": otherDigest} {
