@@ -717,7 +717,9 @@ func (s *Server) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepareR
 func imagePrepareRPCError(err error) error {
 	var src *imageSourceFailure
 	if stderrors.As(err, &src) {
-		return imageartifact.SourceUnavailableError("failed to prepare image: " + src.pe.Message)
+		// The text is the historical wire text, byte for byte (only the code
+		// and the ErrorInfo change).
+		return imageartifact.SourceUnavailableError("failed to prepare image: " + src.pe.Error())
 	}
 	var pe *contracts.ProviderError
 	if stderrors.As(err, &pe) {

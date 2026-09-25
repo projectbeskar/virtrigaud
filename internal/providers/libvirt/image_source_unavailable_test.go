@@ -35,7 +35,9 @@ import (
 // breaker), with the historical text; a failure of the libvirt host or the SSH
 // transport still counts, and a permanent one is still InvalidSpec.
 func TestImagePrepare_SourceFailuresAreSourceUnavailable(t *testing.T) {
-	const wantMessage = "failed to prepare image: " + downloadRetryMessage
+	// The historical wire text: fmt.Errorf("failed to prepare image: %w") over
+	// the retryable ProviderError.
+	wantMessage := "failed to prepare image: " + contracts.NewRetryableError(downloadRetryMessage, nil).Error()
 	type outcome int
 	const (
 		sourceUnavailable outcome = iota
