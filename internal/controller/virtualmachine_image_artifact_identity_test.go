@@ -135,9 +135,21 @@ func startMockImageProvider(t *testing.T, delay time.Duration) (*mock.Provider, 
 	t.Helper()
 	t.Setenv("MOCK_FAILURE_MODE", "")
 	t.Setenv("MOCK_SLOW_MODE", "")
+	prov, cli, stop, err := serveMockImageProvider(delay)
+	require.NoError(t, err)
+	t.Cleanup(stop)
+	return prov, cli
+}
+
+// serveMockImageProvider serves a mock provider whose imports take delay on
+// a loopback gRPC server and returns it, a manager-side client connected to
+// it, and the function that stops both.
+func serveMockImageProvider(delay time.Duration) (*mock.Provider, *transportgrpc.Client, func(), error) {
 	prov := mock.NewProvider(mock.WithImagePrepareDelay(delay), mock.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("listen: %w", err)
+	}
 	srv := grpc.NewServer()
 	providerv1.RegisterProviderServer(srv, prov)
 	served := make(chan struct{})
@@ -145,14 +157,19 @@ func startMockImageProvider(t *testing.T, delay time.Duration) (*mock.Provider, 
 		defer close(served)
 		_ = srv.Serve(lis)
 	}()
-	t.Cleanup(func() {
+	stopServer := func() {
 		srv.Stop()
 		<-served
-	})
+	}
 	cli, err := transportgrpc.NewClient(context.Background(), lis.Addr().String(), "mock", "mock", nil, nil)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = cli.Close() })
-	return prov, cli
+	if err != nil {
+		stopServer()
+		return nil, nil, nil, fmt.Errorf("connect to the mock provider: %w", err)
+	}
+	return prov, cli, func() {
+		_ = cli.Close()
+		stopServer()
+	}, nil
 }
 
 // mockArtifactName is the artifact name the mock derives for img's current
