@@ -154,13 +154,14 @@ var (
 	// vmCRDSecurityFeatures reports whether the installed CRDs carry the
 	// security features the manager relies on: the VirtualMachine CRD's
 	// provider binding (status.boundProvider and the spec.providerRef
-	// immutability rule) and spec.consumerNamespaceSelector in the Provider,
-	// VMClass and VMImage CRDs. One series per state; the current state's
-	// series is 1, the others 0.
+	// immutability rule), spec.consumerNamespaceSelector in the Provider,
+	// VMClass and VMImage CRDs, and the VMImage CRD's per-Provider prepare
+	// state (status.providerStatus[].providerUID and taskRef). One series per
+	// state; the current state's series is 1, the others 0.
 	vmCRDSecurityFeatures = registerer.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "virtrigaud_manager_vm_crd_security_features",
-			Help: "Whether the installed CRDs have the security features the manager relies on (VirtualMachine status.boundProvider and spec.providerRef immutability rule; spec.consumerNamespaceSelector on Provider, VMClass and VMImage): 1 for the current state (verified|missing|unknown), 0 otherwise.",
+			Help: "Whether the installed CRDs have the security features the manager relies on (VirtualMachine status.boundProvider and spec.providerRef immutability rule; spec.consumerNamespaceSelector on Provider, VMClass and VMImage; VMImage status.providerStatus[].providerUID and taskRef): 1 for the current state (verified|missing|unknown), 0 otherwise.",
 		},
 		[]string{"state"},
 	)

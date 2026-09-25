@@ -26,9 +26,99 @@ storage pool, a datastore) — before a VM can be created from it. VirtRigaud do
 5. Once prepared, the result is recorded on the `VMImage` status and subsequent VMs
    referencing the same image on the same provider skip straight to create (idempotent).
 
+The image is prepared **only right before a create**: for a VM that has not been created
+yet, and before re-creating a VM that no longer exists on its hypervisor. A VM that exists
+never sends an image prepare, so nothing about its image — a source the provider now
+refuses, a template deleted out of band, `onMissing: Fail`/`Wait` — stops its describe,
+power or reconfigure (no provider's `Reconfigure` reads the image). A clustered create
+already in flight is re-sent as it was, without a new prepare.
+
+Concurrent reconciles that prepare the same `VMImage` through the same Provider share
+**one** `ImagePrepare` call within the manager, and a reconcile that finds a prepare
+already recorded for that Provider (available, or with a task in flight) issues none.
+
 The VirtualMachine controller is the **single writer** of the prepare-related `VMImage`
 status fields; writes are conflict-safe (`RetryOnConflict`) so multiple VMs preparing the
 same image on different providers never clobber each other.
+
+## Prepare state is per Provider
+
+A `VMImage` can be shared with other namespaces
+([`cross-namespace-references.md`](cross-namespace-references.md)), and two namespaces can
+each have a `Provider` with the same name — possibly fronting different hypervisors with
+different credentials. Prepare state is therefore recorded per **Provider identity**:
+
+- `status.providerStatus` is keyed by the Provider's `<namespace>/<name>` (for example
+  `team-a/vsphere`), and `status.availableOn` lists the same keys. A VM consults **only**
+  the entry of the Provider it uses: `team-b/vsphere` having prepared the image never lets
+  a VM on `team-a/vsphere` skip its own prepare or be created from `team-b`'s template.
+- Each entry records `providerUID`, the UID of the Provider object it was recorded
+  through, and is trusted only while that is the Provider's current UID.
+- Each entry carries its own `taskRef` for an asynchronous prepare, polled only through
+  that Provider. The image-wide `status.prepareTaskRef` is no longer written.
+
+**A re-created Provider** (deleted and created again under the same namespace and name, so
+a new UID) is accepted, as for a VM's bound Provider
+([`vm-provider-binding.md`](vm-provider-binding.md)), but what its predecessor prepared is
+not assumed. With `onMissing: Import` (the default) the prepare is issued again through the
+new Provider object: `ImagePrepare` is idempotent on every provider, so an existing
+prepared image is confirmed (and its location re-recorded) without a new import, and a
+missing one is imported again. A prepare task recorded through the old object is never
+polled. With `onMissing: Fail` or `Wait`, which forbid a prepare, an available entry
+recorded through the previous Provider object is accepted as is: the new UID is recorded
+and the VM gets a `Warning` event `ImagePrepareStateAccepted` (the same namespace owns the
+old and the new Provider).
+
+**An entry with no `providerUID`** (migrated from an earlier release, or written out of
+band without one) is never trusted: it cannot be tied to any Provider object. With
+`onMissing: Import` it is re-validated by the prepare, as above. With `Fail` or `Wait` the
+create is held: the `VMImage` gets `Ready=False` with reason `ProviderUIDMissing`, and the
+VM `Ready=False` / `WaitingForDependencies`, until the image's owner sets the entry's
+`providerUID` to the Provider's UID (`kubectl get provider <name> -n <namespace> -o
+jsonpath='{.metadata.uid}'`) or switches the image to `onMissing: Import`. VMs that already
+exist are not affected (they never prepare).
+
+**Upgrading from a release that keyed entries by the bare Provider name.** On the first
+prepare of each `VMImage` — that is, the first VM **create** that uses it after the
+upgrade — the controller migrates that state in one status write:
+
+| Earlier state | After migration |
+|---------------|-----------------|
+| `providerStatus[<name>]`, and a Provider `<name>` exists in the **VMImage's own** namespace | moved to `providerStatus[<vmimage-namespace>/<name>]` with no `providerUID`, so it is re-validated (the idempotent prepare is issued once through that Provider) before a VM is created from it; under `onMissing: Fail`/`Wait` see "An entry with no `providerUID`" above |
+| `providerStatus[<name>]`, and no Provider `<name>` in the VMImage's namespace | dropped; it never satisfies a same-named Provider in another namespace, and that Provider prepares the image itself on first use |
+| `availableOn` element `<name>` | rewritten like its entry, kept only while that entry is available |
+| `prepareTaskRef` | cleared and never polled — it cannot be attributed to a Provider; the prepare is issued again |
+
+Before cross-namespace sharing required a grant, a VM could reference a `VMImage` in
+another namespace with a Provider of its own namespace, so a bare-name entry is not
+guaranteed to come from the VMImage's own namespace. That is why a migrated entry is
+re-validated rather than trusted. Until a `VMImage` is migrated, its bare-name entries are
+simply ignored. If the migration drops every available entry, `status.ready` becomes
+`false` with reason `PrepareStateDropped` until the next prepare. An entry without
+`providerUID` (for example one written by an older manager) is never trusted: under
+`onMissing: Fail` or `Wait` it holds creates (reason `ProviderUIDMissing`) until the image's
+owner switches `onMissing` to `Import`, so the controller re-validates it through the
+Provider. `VMImage.status` has a single writer, the VirtualMachine controller (ADR-0005): do
+not write it by hand, and do not grant `vmimages/status` to anyone else.
+
+The VMImage CRD must be upgraded before the manager (as for the other CRD changes of this
+release): an older CRD prunes `providerUID` and `taskRef`, so no prepared image would be
+trusted and no asynchronous prepare tracked. Until the CRD has both fields, the manager's
+readiness check fails and every VM create that needs an image prepare is held without any
+provider call (`Ready=False` / `WaitingForDependencies`, "upgrade the CRDs"); VMs that
+exist, and images whose source is already present on the provider, are not affected.
+
+**Known limitation — prepared artifacts on the hypervisor are not per tenant.** The
+per-Provider state above separates the operator's records only. On the hypervisor a
+prepared image is named after the `VMImage` (the bare name), and every provider's prepare
+accepts an existing template or file of that name as "already prepared" without checking
+who created it or from what source. So Providers whose accounts reach the same inventory
+(the same vCenter datacenter, Proxmox node or libvirt pool directory) share one artifact:
+a tenant allowed to use a shared Provider can pre-create, or later modify, the artifact
+another tenant's VMs are created from, and two different `VMImage`s with the same name in
+different namespaces collide. Until this is addressed (it needs a design record), give
+tenants separate hypervisor accounts scoped to what each may see, and do not share a
+Provider between tenants that must not influence each other's images.
 
 ## `spec.prepare.onMissing`
 
@@ -51,12 +141,12 @@ kubectl get vmimage <name> -o yaml | yq '.status'
 | Field | Meaning |
 |-------|---------|
 | `status.phase` | `Importing` while a prepare is in flight, `Ready` once prepared, `Failed`/`Pending` for `onMissing: Fail`/`Wait` holds. |
-| `status.ready` | `true` once the image is available on **at least one** provider (the OR across providers). |
-| `status.availableOn` | The list of providers the image is prepared on (the `Providers` print column). |
-| `status.providerStatus[<provider>]` | Per-provider truth: `available`, plus the provider-specific `id`/`path`/`message`/`lastUpdated`. |
-| `status.prepareTaskRef` | The in-flight async prepare task ref, if any; cleared on completion. |
+| `status.ready` | `true` once the image is available on **at least one** provider (the OR across providers). A prepare in flight on one provider does not clear it while the image is available on another. |
+| `status.availableOn` | The providers the image is prepared on, as `<namespace>/<name>` (the `Providers` print column). |
+| `status.providerStatus["<namespace>/<name>"]` | Per-provider truth, keyed by the Provider's identity: `available`, `providerUID` (the Provider object it was recorded through), `taskRef` (an in-flight async prepare on that Provider), plus the provider-specific `id`/`path`/`message`/`lastUpdated`. See [Prepare state is per Provider](#prepare-state-is-per-provider). |
+| `status.prepareTaskRef` | Deprecated and no longer written; a value left by an earlier release is cleared. |
 | `status.lastPrepareTime` | When the last prepare was triggered/completed. |
-| `status.conditions` | `Ready` and `Importing` conditions with reasons (`Importing`, `Prepared`, `MissingOnProvider`, `WaitingForImage`, `InvalidSource`). |
+| `status.conditions` | `Ready` and `Importing` conditions with reasons (`Importing`, `Prepared`, `MissingOnProvider`, `WaitingForImage`, `InvalidSource`, `PrepareStateDropped`, `ProviderUIDMissing`). |
 
 Status never contains secrets — only provider ids/paths/messages.
 
@@ -65,7 +155,7 @@ Status never contains secrets — only provider ids/paths/messages.
 PR-5 wired preparation to **run** through CRs and reflect it in status (`Importing` →
 `Ready`). **PR-6 (#214) closes the loop**: the provider now returns *where* it placed the
 prepared image (`prepared_image_id` / `prepared_image_path`), the controller stamps that
-onto `status.providerStatus[provider].{id,path}`, and `Create` **consumes** it — cloning the
+onto `status.providerStatus["<namespace>/<name>"].{id,path}`, and `Create` **consumes** it — cloning the
 prepared template (vSphere/Proxmox) or copying the local prepared pool file into the VM's own
 disk (libvirt) instead of re-resolving (and re-downloading) the original source. A second VM from the same prepared
 image therefore skips the re-download. When an image is not yet prepared/available on the
@@ -127,7 +217,7 @@ same header check before conversion.
 A rejected path is a non-retryable `InvalidArgument`: the VM gets
 `Provisioning=False` with reason `ValidationError` (rechecked every 30 seconds rather than
 retried every 5 seconds), and an image rejected during preparation gets
-`status.providerStatus[<provider>].message` plus, while it is not Ready on any provider,
+`status.providerStatus["<namespace>/<name>"].message` plus, while it is not Ready on any provider,
 `phase: Failed` and a `Ready=False` condition with reason `InvalidSource`. Messages never
 reveal the target of a symlink, the allowed directories, or other VMs; "does not exist" is
 only reported for paths inside an allowed directory.

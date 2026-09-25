@@ -338,11 +338,17 @@ func main() {
 	// Create remote provider resolver (all providers are now remote)
 	remoteResolver := remote.NewResolver(mgr.GetClient(), cbRegistry)
 
+	// The CRD security-feature checker (see below) also gates image prepare:
+	// while the installed VMImage CRD verifiably cannot record per-Provider
+	// prepare state, VM creates that need a prepare are held.
+	vmCRDCheck := controller.NewVMCRDFeatureChecker(mgr.GetAPIReader())
+
 	if err = (&controller.VirtualMachineReconciler{
-		Client:         mgr.GetClient(),
-		Scheme:         mgr.GetScheme(),
-		RemoteResolver: remoteResolver,
-		Recorder:       mgr.GetEventRecorderFor("virtualmachine-controller"),
+		Client:           mgr.GetClient(),
+		Scheme:           mgr.GetScheme(),
+		RemoteResolver:   remoteResolver,
+		Recorder:         mgr.GetEventRecorderFor("virtualmachine-controller"),
+		ImageCRDFeatures: vmCRDCheck,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "VirtualMachine")
 		os.Exit(1)
@@ -510,11 +516,11 @@ func main() {
 	// The VirtualMachine provider-binding protection needs the upgraded
 	// VirtualMachine CRD (status.boundProvider and the spec.providerRef
 	// immutability rule), and the cross-namespace consumer grant needs
-	// spec.consumerNamespaceSelector in the Provider, VMClass and VMImage CRDs.
-	// Check them once now (logged and exported as a metric) and on every
-	// readiness probe: readiness fails while an installed CRD verifiably lacks
-	// its features.
-	vmCRDCheck := controller.NewVMCRDFeatureChecker(mgr.GetAPIReader())
+	// spec.consumerNamespaceSelector in the Provider, VMClass and VMImage CRDs,
+	// and per-Provider image prepare state needs the VMImage CRD's
+	// status.providerStatus[].providerUID and taskRef. Check them once now
+	// (logged and exported as a metric) and on every readiness probe:
+	// readiness fails while an installed CRD verifiably lacks its features.
 	vmCRDCheck.Evaluate(ctrl.LoggerInto(context.Background(), setupLog))
 	if err := mgr.AddReadyzCheck("vm-crd-security-features", vmCRDCheck.ReadyzCheck); err != nil {
 		setupLog.Error(err, "unable to set up the CRD security-features ready check")

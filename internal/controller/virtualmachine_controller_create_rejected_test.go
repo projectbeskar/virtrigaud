@@ -88,7 +88,7 @@ func TestBuildCreateRequest_ThreadsOwnerIdentity(t *testing.T) {
 	vm := creatableVM("team-a")
 	_, class := providerAndClass("team-a")
 
-	req, err := r.buildCreateRequest(context.Background(), vm, "", class, nil, nil)
+	req, err := r.buildCreateRequest(context.Background(), vm, nil, class, nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, contracts.ObjectIdentity{
 		UID:       "6f1c2d6e-0a57-4d0e-9d4b-6f3bb1f1a001",

@@ -51,6 +51,13 @@ import (
 // CRDs. With an older CRD the API server rejects or prunes the field, so no
 // grant can be set and every cross-namespace reference is refused: safe, but a
 // silent outage for shared objects. The checker verifies those CRDs too.
+//
+// VMImage prepare state is per Provider identity (virtualmachine_image_prepare.go):
+// each status.providerStatus entry records the UID of the Provider it was
+// recorded through and its own prepare task. With an older VMImage CRD the API
+// server prunes both on every write, so no entry is ever trusted (every
+// reconcile re-issues the prepare) and no asynchronous prepare task is ever
+// polled. The checker verifies the VMImage CRD has both fields.
 
 // Names of the CustomResourceDefinitions whose security features the manager
 // verifies.
@@ -88,12 +95,19 @@ const (
 	// crdFeatureConsumerSelector is checked on the Provider, VMClass and
 	// VMImage CRDs.
 	crdFeatureConsumerSelector = consumerNamespaceSelectorField
+	// crdFeatureImageProviderUID and crdFeatureImageTaskRef are checked on the
+	// VMImage CRD.
+	crdFeatureImageProviderUID = "status.providerStatus[].providerUID"
+	crdFeatureImageTaskRef     = "status.providerStatus[].taskRef"
+	// crdMissingPrefix prefixes the name of a checked CRD that does not exist.
+	crdMissingPrefix = "the CustomResourceDefinition "
 )
 
 // ErrVMCRDSecurityFeaturesMissing is returned (wrapped) by the readiness check
 // while an installed CRD verifiably lacks a security feature: the
-// VirtualMachine provider binding, or the consumer grant's selector on the
-// Provider, VMClass or VMImage CRD.
+// VirtualMachine provider binding, the consumer grant's selector on the
+// Provider, VMClass or VMImage CRD, or the per-Provider prepare state
+// (status.providerStatus[].providerUID and taskRef) of the VMImage CRD.
 var ErrVMCRDSecurityFeaturesMissing = errors.New("the installed CRDs are missing security features this manager requires")
 
 // securityCRDs are the CRDs the checker reads, each with the function that
@@ -105,7 +119,7 @@ var securityCRDs = []struct {
 	{VirtualMachineCRDName, missingVMCRDFeatures},
 	{ProviderCRDName, missingConsumerSelector},
 	{VMClassCRDName, missingConsumerSelector},
-	{VMImageCRDName, missingConsumerSelector},
+	{VMImageCRDName, missingVMImageCRDFeatures},
 }
 
 // crdGVK is the CustomResourceDefinition kind, read as unstructured so the
@@ -154,6 +168,30 @@ func missingConsumerSelector(crd *unstructured.Unstructured) ([]string, error) {
 	return nil, nil
 }
 
+// missingVMImageCRDFeatures returns the features the VMImage CRD crd lacks in
+// its v1beta1 schema: spec.consumerNamespaceSelector, and the providerUID and
+// taskRef of a status.providerStatus entry (nil when it has them all).
+func missingVMImageCRDFeatures(crd *unstructured.Unstructured) ([]string, error) {
+	missing, err := missingConsumerSelector(crd)
+	if err != nil {
+		return nil, err
+	}
+	schemaRoot, err := v1beta1SchemaRoot(crd)
+	if err != nil {
+		return nil, err
+	}
+	entry := []string{"properties", "status", "properties", "providerStatus", "additionalProperties", "properties"}
+	for _, f := range []struct{ field, feature string }{
+		{"providerUID", crdFeatureImageProviderUID},
+		{"taskRef", crdFeatureImageTaskRef},
+	} {
+		if _, found, _ := unstructured.NestedMap(schemaRoot, append(entry, f.field)...); !found {
+			missing = append(missing, f.feature)
+		}
+	}
+	return missing, nil
+}
+
 // missingVMCRDFeatures returns the provider-binding features the
 // VirtualMachine CRD crd lacks in its v1beta1 schema (nil when it has them all).
 func missingVMCRDFeatures(crd *unstructured.Unstructured) ([]string, error) {
@@ -187,9 +225,10 @@ func missingVMCRDFeatures(crd *unstructured.Unstructured) ([]string, error) {
 // VMCRDFeatureChecker verifies that the installed CRDs carry the security
 // features this manager relies on: the VirtualMachine CRD's provider-binding
 // features (status.boundProvider and the spec.providerRef immutability rule),
-// and spec.consumerNamespaceSelector in the Provider, VMClass and VMImage CRDs
-// (the cross-namespace consumer grant). It is used once at startup and as a
-// readiness check.
+// spec.consumerNamespaceSelector in the Provider, VMClass and VMImage CRDs (the
+// cross-namespace consumer grant), and the VMImage CRD's per-Provider prepare
+// state (status.providerStatus[].providerUID and taskRef). It is used once at
+// startup and as a readiness check.
 //
 // States (published on virtrigaud_manager_vm_crd_security_features):
 //   - verified: every CRD has its features; ready.
@@ -255,7 +294,7 @@ func (c *VMCRDFeatureChecker) Evaluate(ctx context.Context) (string, []string) {
 		case metrics.CRDFeaturesVerified:
 			logger.Info("The installed CRDs have the security features this manager relies on")
 		case metrics.CRDFeaturesMissing:
-			logger.Error(ErrVMCRDSecurityFeaturesMissing, "Upgrade the CRDs: without the VirtualMachine provider-binding features a bound VM's spec.providerRef can still be changed and status.boundProvider is pruned; without spec.consumerNamespaceSelector no cross-namespace grant can be set and every cross-namespace reference is refused. Readiness fails until the CRDs are upgraded",
+			logger.Error(ErrVMCRDSecurityFeaturesMissing, "Upgrade the CRDs: without the VirtualMachine provider-binding features a bound VM's spec.providerRef can still be changed and status.boundProvider is pruned; without spec.consumerNamespaceSelector no cross-namespace grant can be set and every cross-namespace reference is refused; without VMImage status.providerStatus[].providerUID and taskRef no prepared image is trusted and no asynchronous prepare is tracked. Readiness fails until the CRDs are upgraded",
 				"missing", missing)
 		case metrics.CRDFeaturesUnknown:
 			logger.Info("WARNING: cannot verify the CRDs' security features (a CRD cannot be read); make sure the CRDs are upgraded with the manager",
@@ -286,7 +325,7 @@ func (c *VMCRDFeatureChecker) read(ctx context.Context) (string, []string, error
 		err := c.Reader.Get(ctx, types.NamespacedName{Name: check.name}, crd)
 		switch {
 		case apierrors.IsNotFound(err):
-			missing = append(missing, "the CustomResourceDefinition "+check.name)
+			missing = append(missing, crdMissingPrefix+check.name)
 			continue
 		case apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err):
 			if unreadable == nil {
@@ -312,6 +351,26 @@ func (c *VMCRDFeatureChecker) read(ctx context.Context) (string, []string, error
 		return metrics.CRDFeaturesUnknown, nil, unreadable
 	}
 	return metrics.CRDFeaturesVerified, nil, nil
+}
+
+// VMImagePrepareStateMissing implements VMImageCRDFeatureReporter: it is true
+// while the checker's (cached) result is missing and names the VMImage CRD's
+// per-Provider prepare-state fields, or the VMImage CRD itself. An unknown
+// state (the CRD cannot be read) is not missing.
+func (c *VMCRDFeatureChecker) VMImagePrepareStateMissing(ctx context.Context) bool {
+	state, missing := c.Evaluate(ctx)
+	if state != metrics.CRDFeaturesMissing {
+		return false
+	}
+	for _, m := range missing {
+		switch m {
+		case VMImageCRDName + ": " + crdFeatureImageProviderUID,
+			VMImageCRDName + ": " + crdFeatureImageTaskRef,
+			crdMissingPrefix + VMImageCRDName:
+			return true
+		}
+	}
+	return false
 }
 
 // ReadyzCheck is a healthz.Checker for the manager's readiness endpoint. It

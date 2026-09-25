@@ -122,7 +122,7 @@ func TestEnsureImageOnProvider_RejectedSourceRecordedOnImage(t *testing.T) {
 
 	got := reloadImage(t, r, img.Name)
 	assert.Equal(t, infravirtrigaudiov1beta1.ImagePhaseFailed, got.Status.Phase)
-	ps := got.Status.ProviderStatus[provider.Name]
+	ps := got.Status.ProviderStatus[imageProviderKey(provider)]
 	assert.False(t, ps.Available)
 	assert.Contains(t, ps.Message, "rejected")
 	cond := meta.FindStatusCondition(got.Status.Conditions, infravirtrigaudiov1beta1.VMImageConditionReady)
@@ -141,9 +141,9 @@ func TestEnsureImageOnProvider_RejectionDoesNotMaskReadyElsewhere(t *testing.T) 
 		Ready: true,
 		Phase: infravirtrigaudiov1beta1.ImagePhaseReady,
 		ProviderStatus: map[string]infravirtrigaudiov1beta1.ProviderImageStatus{
-			"libvirt-0": {Available: true, Path: "/var/lib/libvirt/images/ubuntu.qcow2"},
+			"default/libvirt-0": {Available: true, ProviderUID: "uid-default-libvirt-0", Path: "/var/lib/libvirt/images/ubuntu.qcow2"},
 		},
-		AvailableOn: []string{"libvirt-0"},
+		AvailableOn: []string{"default/libvirt-0"},
 	}
 	r, _ := newEnsureReconciler(t, img)
 	provider := importCapableProvider("libvirt-1")
@@ -155,8 +155,8 @@ func TestEnsureImageOnProvider_RejectionDoesNotMaskReadyElsewhere(t *testing.T) 
 	got := reloadImage(t, r, img.Name)
 	assert.True(t, got.Status.Ready)
 	assert.Equal(t, infravirtrigaudiov1beta1.ImagePhaseReady, got.Status.Phase)
-	assert.True(t, got.Status.ProviderStatus["libvirt-0"].Available)
-	assert.Contains(t, got.Status.ProviderStatus[provider.Name].Message, "rejected")
+	assert.True(t, got.Status.ProviderStatus["default/libvirt-0"].Available)
+	assert.Contains(t, got.Status.ProviderStatus[imageProviderKey(provider)].Message, "rejected")
 }
 
 // importedDiskPath is the landing disk of the VMMigration fixtures below.
@@ -223,7 +223,7 @@ func TestBuildCreateRequest_ImportedDiskFlag(t *testing.T) {
 	r := newTestReconciler(s, nil,
 		landingMigration("m1", "ns-a"), crossNS, otherTargetNS, noDiskInfo, landingMigration("m1-b", "ns-b"))
 	for name, tc := range cases {
-		req, err := r.buildCreateRequest(context.Background(), tc.vm, "", vmClass, nil, nil)
+		req, err := r.buildCreateRequest(context.Background(), tc.vm, nil, vmClass, nil, nil)
 		require.NoError(t, err, name)
 		assert.Equal(t, tc.want, req.Image.ImportedDisk, name)
 		assert.Equal(t, tc.vm.Spec.ImportedDisk.Path, req.Image.Path, name)
@@ -237,7 +237,7 @@ func TestBuildCreateRequest_ImportedDiskFlag(t *testing.T) {
 			Libvirt: &infravirtrigaudiov1beta1.LibvirtImageSource{Path: "/var/lib/libvirt/images/web-migrated.qcow2"},
 		}},
 	}
-	req, err := r.buildCreateRequest(context.Background(), fromImage, "", vmClass, vmImage, nil)
+	req, err := r.buildCreateRequest(context.Background(), fromImage, nil, vmClass, vmImage, nil)
 	require.NoError(t, err)
 	assert.False(t, req.Image.ImportedDisk, "a VMImage path is a base image, never an imported disk")
 }

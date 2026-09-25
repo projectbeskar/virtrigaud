@@ -8,7 +8,7 @@
 #
 # Watch the prepare happen on the VMImage status:
 #   kubectl get vmimage ubuntu-jammy-cloud -o jsonpath='{.status.phase}'      # Importing -> Ready
-#   kubectl get vmimage ubuntu-jammy-cloud -o jsonpath='{.status.availableOn}'  # [libvirt-1]
+#   kubectl get vmimage ubuntu-jammy-cloud -o jsonpath='{.status.availableOn}'  # ["default/libvirt-1"]
 #   kubectl get vmimage ubuntu-jammy-cloud -o wide
 #
 # Replace the placeholders below (providerRef/classRef names, the image URL and

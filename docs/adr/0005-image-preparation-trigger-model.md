@@ -20,6 +20,19 @@ at field 1, mirroring `CloneResponse`) — the controller stamps it onto
 `status.providerStatus[provider].{id,path}`, and `Create` overrides the image source with
 it. The *Out of scope* text below is retained as the historical PR-5 framing.
 
+**Amendment (per-Provider identity)**: once `VMImage`s could be shared across namespaces
+(`spec.consumerNamespaceSelector`), keying `ProviderStatus` by the bare `provider.Name`
+and tracking one image-wide `PrepareTaskRef` let a same-named Provider in another
+namespace consume (or complete) another's prepare. `ProviderStatus` is now keyed by the
+Provider's `<namespace>/<name>`, each entry records the `providerUID` it was recorded
+through and its own `taskRef`, a VM trusts only its own Provider's entry recorded through
+that Provider's current UID, and `PrepareTaskRef` is deprecated (no longer written).
+Bare-name entries are migrated on first use. Decisions 1-5 below are unchanged: the
+VirtualMachine controller is still the single writer, under `RetryOnConflict`; where this
+document says `ProviderStatus[provider.Name]` or `PrepareTaskRef`, read
+`ProviderStatus["<namespace>/<name>"]` and its `taskRef`. See
+[`docs/image-preparation.md`](../image-preparation.md#prepare-state-is-per-provider).
+
 **Author**: William Rizzo ([@wrkode](https://github.com/wrkode))
 
 **Related issues**:

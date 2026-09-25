@@ -620,7 +620,9 @@ type VMImageStatus struct {
 	// +optional
 	Message string `json:"message,omitempty"`
 
-	// AvailableOn lists the providers where the image is available
+	// AvailableOn lists the Providers the image is available on, each as
+	// "<namespace>/<name>" (the ProviderStatus keys whose entry is available).
+	// It is informational: creating a VM consults ProviderStatus only.
 	// +optional
 	AvailableOn []string `json:"availableOn,omitempty"`
 
@@ -636,7 +638,12 @@ type VMImageStatus struct {
 	// +optional
 	LastPrepareTime *metav1.Time `json:"lastPrepareTime,omitempty"`
 
-	// PrepareTaskRef tracks any ongoing image preparation operations
+	// PrepareTaskRef is deprecated and no longer written. An in-flight
+	// prepare task is recorded per Provider, in
+	// ProviderStatus["<namespace>/<name>"].taskRef, and polled only through
+	// that Provider. A value left by an earlier release cannot be attributed
+	// to a Provider: the controller clears it without polling it and issues
+	// the prepare again (it is idempotent on every provider).
 	// +optional
 	PrepareTaskRef string `json:"prepareTaskRef,omitempty"`
 
@@ -656,7 +663,18 @@ type VMImageStatus struct {
 	// +optional
 	Format ImageFormat `json:"format,omitempty"`
 
-	// ProviderStatus contains provider-specific status information
+	// ProviderStatus is the per-Provider prepare state, keyed by the
+	// Provider's identity "<namespace>/<name>" (for example "team-a/vsphere"),
+	// so two Providers with the same name in different namespaces never share
+	// an entry. A VirtualMachine consults only the entry of the Provider it
+	// uses, and trusts it only when the entry's providerUID is that Provider's
+	// current UID.
+	//
+	// Entries written by an earlier release are keyed by the bare Provider
+	// name. On the first prepare reconcile such an entry is re-keyed to
+	// "<this VMImage's namespace>/<name>" when that Provider exists, and is
+	// dropped otherwise. A re-keyed entry has no providerUID, so it is
+	// re-validated through its Provider before a VM is created from it.
 	// +optional
 	ProviderStatus map[string]ProviderImageStatus `json:"providerStatus,omitempty"`
 }
@@ -711,10 +729,34 @@ type ImageImportProgress struct {
 	StartTime *metav1.Time `json:"startTime,omitempty"`
 }
 
-// ProviderImageStatus contains provider-specific image status
+// ProviderImageStatus is the prepare state of an image on one Provider (an
+// entry of VMImageStatus.ProviderStatus).
 type ProviderImageStatus struct {
 	// Available indicates if the image is available on this provider
 	Available bool `json:"available"`
+
+	// ProviderUID is the UID of the Provider object this entry was recorded
+	// through. A VirtualMachine uses the entry only when it equals its
+	// Provider's current UID. An entry with another UID (the Provider was
+	// deleted and re-created under the same namespace and name) or with none
+	// (an entry from an earlier release) is re-validated: the idempotent
+	// prepare is issued again through the current Provider, which confirms (or
+	// re-creates) the prepared image, and its UID is recorded. When
+	// spec.prepare.onMissing forbids preparing (Fail, Wait), an available
+	// entry recorded through a previous object of the same Provider is
+	// accepted as is, with a warning, and the current UID recorded; an entry
+	// with no UID is never used and VM creates wait (reason
+	// ProviderUIDMissing) until this field is set. The prepare runs only
+	// before a VM is created, never for a VM that exists.
+	// +optional
+	ProviderUID string `json:"providerUID,omitempty"`
+
+	// TaskRef is the provider task of an in-flight asynchronous prepare on
+	// this Provider. It is polled only through this Provider, and only while
+	// ProviderUID is the Provider's current UID; it is cleared when the
+	// prepare completes.
+	// +optional
+	TaskRef string `json:"taskRef,omitempty"`
 
 	// ID is the provider-specific image identifier
 	// +optional

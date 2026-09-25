@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/sync/singleflight"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -221,6 +222,16 @@ type VirtualMachineReconciler struct {
 	// orphan-on-delete detach, a provider reference mismatch). Optional: nil
 	// disables events.
 	Recorder record.EventRecorder
+	// ImageCRDFeatures reports whether the installed VMImage CRD can record
+	// per-Provider image prepare state; while it verifiably cannot, VM creates
+	// that need an image prepare are held without calling the provider (see
+	// EnsureImageOnProvider). *VMCRDFeatureChecker implements it. Optional:
+	// nil skips the check.
+	ImageCRDFeatures VMImageCRDFeatureReporter
+
+	// imagePrepares de-duplicates concurrent image prepares of one VMImage
+	// through one Provider object within this manager (prepareImageOnce).
+	imagePrepares singleflight.Group
 }
 
 // recordEvent emits an event on vm when a Recorder is configured.
@@ -442,45 +453,11 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	// storm on the libvirt host (#288). The image-prepare / create RPCs below are
 	// themselves the liveness test: a dead provider fails them and the reconcile
 	// requeues.
-
-	// Ensure the referenced image is prepared on this provider before creating
-	// the VM (lazy, VM-create-driven prepare — issue #154). This is a no-op for
-	// providers that do not advertise/implement image import, for ImportedDisk
-	// VMs, and for images already prepared on this provider; in those cases it
-	// returns (false, nil) and we fall through to the unchanged create path.
-	if requeue, err := r.EnsureImageOnProvider(ctx, vm, vmImage, provider, providerInstance); err != nil {
-		if isConsumerNotAllowed(err) {
-			return r.refuseConsumer(ctx, vm, persisted, err)
-		}
-		if stderrors.Is(err, errImagePrepareHold) {
-			// OnMissing forbids preparing (Fail/Wait); the condition is recorded
-			// on the VMImage. Reflect a waiting condition on the VM and requeue
-			// without treating it as a reconcile error.
-			logger.Info("Holding VM create: referenced image is not prepared and may not be imported",
-				"image", vmImage.Name, "provider", provider.Name)
-			k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonWaitingForDependencies,
-				fmt.Sprintf("Image %s not prepared on provider %s", vmImage.Name, provider.Name))
-			r.updateStatus(ctx, vm)
-			return imageEnsureResultToReconcile(), nil
-		}
-		reason, requeueAfter := providerFailureOutcome(err)
-		logger.Error(err, "Failed to ensure image on provider - will retry",
-			"image", imageRefName, "provider", provider.Name, "retryIn", requeueAfter)
-		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, reason,
-			fmt.Sprintf("Image prepare failed: %s", providerErrorMessage(err)))
-		metrics.RecordError(errReasonImagePrepare, metrics.ComponentManager)
-		r.updateStatus(ctx, vm)
-		return ctrl.Result{RequeueAfter: requeueAfter}, nil
-	} else if requeue {
-		// A prepare is in flight; surface a provisioning condition and requeue to
-		// poll it. We do NOT create the VM until the image is Ready on the provider.
-		logger.Info("Waiting for image prepare to complete before creating VM",
-			"image", vmImage.Name, "provider", provider.Name)
-		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonTaskInProgress,
-			fmt.Sprintf("Preparing image %s on provider %s", vmImage.Name, provider.Name))
-		r.updateStatus(ctx, vm)
-		return imageEnsureResultToReconcile(), nil
-	}
+	//
+	// The referenced image is prepared on the provider only right before a
+	// create (prepareImageForCreate, below): a VM that exists already never
+	// sends an image prepare, so nothing about its image can stop describe,
+	// power or reconfigure (no provider's Reconfigure reads the image).
 
 	// Check if we have an active task
 	if vm.Status.LastTaskRef != "" {
@@ -559,6 +536,14 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		if err := deps.createRefusal(); err != nil {
 			return r.refuseConsumer(ctx, vm, persisted, err)
 		}
+		// Prepare the image first — unless a clustered create is already in
+		// flight (status.placement.pendingHost): that create is re-sent as it
+		// was, and its image was prepared before the first attempt.
+		if pendingHost(vm) == "" {
+			if done, res, err := r.prepareImageForCreate(ctx, vm, persisted, vmImage, provider, providerInstance); done {
+				return res, err
+			}
+		}
 		logger.Info("Creating VM")
 		return r.createVM(ctx, vm, providerInstance, provider, vmClass, vmImage, networks)
 	}
@@ -603,6 +588,11 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		}
 		logger.Info("VM no longer exists, recreating")
 		vm.Status.ID = ""
+		// A re-create is a create: the image is prepared (or re-validated)
+		// first, exactly as for a new VM.
+		if done, res, err := r.prepareImageForCreate(ctx, vm, persisted, vmImage, provider, providerInstance); done {
+			return res, err
+		}
 		return r.createVM(ctx, vm, providerInstance, provider, vmClass, vmImage, networks)
 	}
 
@@ -646,7 +636,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 			"desiredCPU", vmClass.Spec.CPU,
 			"currentMemoryMiB", r.getCurrentMemoryMiB(vm),
 			"desiredMemoryMiB", vmClass.Spec.Memory.Value()/(1024*1024))
-		return r.reconfigureVM(ctx, vm, providerInstance, ref, provider.Name, vmClass, vmImage, networks)
+		return r.reconfigureVM(ctx, vm, providerInstance, ref, provider, vmClass, vmImage, networks)
 	}
 
 	// VM is ready
@@ -955,7 +945,7 @@ func (r *VirtualMachineReconciler) createVM(
 	}
 
 	// Build create request
-	req, err := r.buildCreateRequest(ctx, vm, providerCR.Name, vmClass, vmImage, networks)
+	req, err := r.buildCreateRequest(ctx, vm, providerCR, vmClass, vmImage, networks)
 	if err != nil {
 		logger.Error(err, "Failed to build create request")
 		if contracts.IsInvalidSpec(err) {
@@ -1458,10 +1448,13 @@ func (r *VirtualMachineReconciler) isOwnMigrationDisk(
 
 // buildCreateRequest builds a provider create request from VM spec.
 // It resolves cloud-init user data and metadata from both inline content and Secret references.
+// providerCR is the Provider the request is for: an image prepared through it
+// is consumed at its prepared location (overrideImageWithPreparedLocation). A
+// nil providerCR keeps the image's original source.
 func (r *VirtualMachineReconciler) buildCreateRequest(
 	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
-	providerName string,
+	providerCR *infravirtrigaudiov1beta1.Provider,
 	vmClass *infravirtrigaudiov1beta1.VMClass,
 	vmImage *infravirtrigaudiov1beta1.VMImage,
 	networks []*infravirtrigaudiov1beta1.VMNetworkAttachment,
@@ -1702,12 +1695,12 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 		// re-resolving (and re-downloading) the original source. Falls through to
 		// the by-reference source resolved above when the image is not prepared, so
 		// there is no regression for unprepared images or non-importing providers.
-		if overrode, detail := overrideImageWithPreparedLocation(&image, vmImage, providerName); overrode {
+		if overrode, detail := overrideImageWithPreparedLocation(&image, vmImage, providerCR); overrode {
 			log.Info("Consuming prepared image at create (skipping source re-resolution)",
-				"vm", vm.Name, "image", vmImage.Name, "provider", providerName, "override", detail)
+				"vm", vm.Name, "image", vmImage.Name, "provider", client.ObjectKeyFromObject(providerCR).String(), "override", detail)
 		} else {
 			log.V(1).Info("Image not prepared on provider; using original source",
-				"vm", vm.Name, "image", vmImage.Name, "provider", providerName, "reason", detail)
+				"vm", vm.Name, "image", vmImage.Name, "reason", detail)
 		}
 	}
 
@@ -1852,17 +1845,25 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 }
 
 // overrideImageWithPreparedLocation rewrites the create-time image source to the
-// prepared location recorded on vmImage.status for providerName, closing the
+// prepared location recorded on vmImage.status for providerCR, closing the
 // image-prepare loop (issue #154, PR-6 / #214). The provider prepared the image
 // (downloaded/converted/imported it into a template or pool) and reported WHERE
 // it landed; this makes Create consume that prepared location instead of
 // re-resolving — and possibly re-downloading — the original source.
 //
+// Only providerCR's own entry is consulted — the one keyed by its identity
+// "<namespace>/<name>" (imageProviderKey) — and only when it was recorded
+// through providerCR's current object (imageEntryRecordedThrough). An entry of
+// a same-named Provider in another namespace, a bare-name entry from an earlier
+// release, or an entry recorded through a since re-created Provider is never
+// used here: a VM must not be created from an artifact its Provider did not
+// prepare or confirm.
+//
 // It returns (true, detail) when an override was applied, or (false, reason) when
-// the original source is kept (image not prepared / not Available on this
-// provider, or no usable prepared location recorded). The fallback path is the
-// unchanged by-reference behavior, so unprepared images and non-importing
-// providers see no regression.
+// the original source is kept (no Provider, image not prepared / not Available on
+// this provider or not recorded through it, or no usable prepared location
+// recorded). The fallback path is the unchanged by-reference behavior, so
+// unprepared images and non-importing providers see no regression.
 //
 // The override is dispatched by the VMImage source kind:
 //   - libvirt: set image.Path to the prepared pool file and clear image.URL, so
@@ -1874,11 +1875,17 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 func overrideImageWithPreparedLocation(
 	image *contracts.VMImage,
 	vmImage *infravirtrigaudiov1beta1.VMImage,
-	providerName string,
+	providerCR *infravirtrigaudiov1beta1.Provider,
 ) (overrode bool, detail string) {
-	ps, found := vmImage.Status.ProviderStatus[providerName]
+	if providerCR == nil {
+		return false, "no provider"
+	}
+	ps, found := vmImage.Status.ProviderStatus[imageProviderKey(providerCR)]
 	if !found || !ps.Available {
 		return false, "not prepared/available on provider"
+	}
+	if !imageEntryRecordedThrough(ps, providerCR) {
+		return false, "prepare state not recorded through this Provider object"
 	}
 
 	switch {
@@ -1966,7 +1973,7 @@ func (r *VirtualMachineReconciler) reconfigureVM(
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
 	provider contracts.Provider,
 	ref contracts.VMRef,
-	providerName string,
+	providerCR *infravirtrigaudiov1beta1.Provider,
 	vmClass *infravirtrigaudiov1beta1.VMClass,
 	vmImage *infravirtrigaudiov1beta1.VMImage,
 	networks []*infravirtrigaudiov1beta1.VMNetworkAttachment,
@@ -1974,7 +1981,7 @@ func (r *VirtualMachineReconciler) reconfigureVM(
 	logger := log.FromContext(ctx)
 
 	// Build the desired configuration
-	req, err := r.buildCreateRequest(ctx, vm, providerName, vmClass, vmImage, networks)
+	req, err := r.buildCreateRequest(ctx, vm, providerCR, vmClass, vmImage, networks)
 	if err != nil {
 		logger.Error(err, "Failed to build create request")
 		return ctrl.Result{}, err

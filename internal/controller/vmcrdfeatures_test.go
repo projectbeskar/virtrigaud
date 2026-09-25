@@ -143,6 +143,48 @@ func TestMissingConsumerSelector(t *testing.T) {
 	}
 }
 
+// olderVMImageCRD returns the generated VMImage CRD without the named fields
+// of a status.providerStatus entry.
+func olderVMImageCRD(t *testing.T, fields ...string) *unstructured.Unstructured {
+	t.Helper()
+	crd := generatedCRD(t, VMImageCRDName)
+	for _, f := range fields {
+		unstructured.RemoveNestedField(v1beta1Schema(t, crd),
+			"properties", "status", "properties", "providerStatus", "additionalProperties", "properties", f)
+	}
+	return crd
+}
+
+func TestMissingVMImageCRDFeatures(t *testing.T) {
+	missing, err := missingVMImageCRDFeatures(generatedCRD(t, VMImageCRDName))
+	require.NoError(t, err)
+	assert.Empty(t, missing, "the generated VMImage CRD has every feature")
+
+	missing, err = missingVMImageCRDFeatures(olderVMImageCRD(t, "providerUID", "taskRef"))
+	require.NoError(t, err)
+	assert.Equal(t, []string{crdFeatureImageProviderUID, crdFeatureImageTaskRef}, missing)
+
+	missing, err = missingVMImageCRDFeatures(olderVMImageCRD(t, "taskRef"))
+	require.NoError(t, err)
+	assert.Equal(t, []string{crdFeatureImageTaskRef}, missing)
+
+	missing, err = missingVMImageCRDFeatures(olderConsumerCRD(t, VMImageCRDName))
+	require.NoError(t, err)
+	assert.Equal(t, []string{crdFeatureConsumerSelector}, missing)
+
+	// A VMImage CRD without the prepare-state fields fails readiness.
+	c := NewVMCRDFeatureChecker(&stubCRDReader{
+		crd:    generatedVMCRD(t),
+		others: map[string]*unstructured.Unstructured{VMImageCRDName: olderVMImageCRD(t, "providerUID")},
+		t:      t,
+	})
+	state, missing := c.Evaluate(context.Background())
+	assert.Equal(t, metrics.CRDFeaturesMissing, state)
+	assert.Equal(t, []string{VMImageCRDName + ": " + crdFeatureImageProviderUID}, missing)
+	require.Error(t, readyzErr(c))
+	assert.Contains(t, readyzErr(c).Error(), crdFeatureImageProviderUID)
+}
+
 // stubCRDReader answers Get for the VirtualMachine CRD with crd or err, and
 // for the Provider, VMClass and VMImage CRDs with others[name] (the generated
 // CRD when unset) or otherErr.

@@ -352,7 +352,7 @@ var _ = Describe("VirtualMachine Controller", func() {
 					},
 				}
 
-				result, err := reconciler.reconfigureVM(ctx, vm, provider, contracts.VMRef{ID: vm.Status.ID}, "", vmClass, nil, nil)
+				result, err := reconciler.reconfigureVM(ctx, vm, provider, contracts.VMRef{ID: vm.Status.ID}, nil, vmClass, nil, nil)
 
 				Expect(err).NotTo(HaveOccurred())
 				Expect(result.RequeueAfter).To(Equal(5 * time.Second))
@@ -374,7 +374,7 @@ var _ = Describe("VirtualMachine Controller", func() {
 					},
 				}
 
-				result, err := reconciler.reconfigureVM(ctx, vm, provider, contracts.VMRef{ID: vm.Status.ID}, "", vmClass, nil, nil)
+				result, err := reconciler.reconfigureVM(ctx, vm, provider, contracts.VMRef{ID: vm.Status.ID}, nil, vmClass, nil, nil)
 
 				Expect(err).NotTo(HaveOccurred())
 				Expect(result.RequeueAfter).To(Equal(5 * time.Second))
@@ -390,7 +390,7 @@ var _ = Describe("VirtualMachine Controller", func() {
 					},
 				}
 
-				result, err := reconciler.reconfigureVM(ctx, vm, provider, contracts.VMRef{ID: vm.Status.ID}, "", vmClass, nil, nil)
+				result, err := reconciler.reconfigureVM(ctx, vm, provider, contracts.VMRef{ID: vm.Status.ID}, nil, vmClass, nil, nil)
 
 				Expect(err).NotTo(HaveOccurred())
 				Expect(result.RequeueAfter).To(Equal(5 * time.Second))

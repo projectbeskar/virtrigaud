@@ -232,6 +232,43 @@ like one that doesn't select the namespace (the finalizer is kept), so the
 outcome never reveals whether it exists. If a `Provider` in the VM's own
 namespace no longer exists, the finalizer is removed as before.
 
+## Shared `VMImage`s: prepare state is per Provider
+
+A shared `VMImage` is prepared separately on each `Provider` that uses it
+([`image-preparation.md`](image-preparation.md#prepare-state-is-per-provider)).
+Its `status.providerStatus` is keyed by the Provider's `<namespace>/<name>`, and
+each entry records the UID of the Provider object it was recorded through and
+its own prepare task. So when `team-a` and `team-b` each have a Provider named
+`vsphere` and both use `virtrigaud-system/ubuntu`:
+
+- `team-b` preparing first records `team-b/vsphere` only. A VM on
+  `team-a/vsphere` still prepares through its own Provider and is created from
+  what that Provider reported, never from `team-b`'s entry.
+- Each prepare task is polled only through the Provider that started it, so a
+  task on one Provider can never mark the image ready on another.
+- A Provider deleted and re-created under the same name re-validates what its
+  predecessor prepared before a VM is created from it.
+- The image is prepared only before a VM is created (or re-created). Running
+  VMs never prepare, so a change to a shared image's state never stops them.
+
+Prepare state an earlier release recorded under a bare Provider name is
+migrated to the `VMImage`'s own namespace only when a Provider of that name
+exists there, and re-validated; otherwise it is dropped. It never satisfies a
+Provider in another namespace.
+
+**Known limitation: prepared artifacts on the hypervisor are not per tenant.**
+This separates the operator's records, not the hypervisor. A prepared template
+or image file is named after the `VMImage` (the bare name), and each provider's
+prepare accepts an existing artifact of that name as already prepared, without
+checking who created it or from what. Two Providers whose accounts reach the
+same inventory (the same vCenter datacenter, Proxmox node, or libvirt pool
+directory) therefore share one artifact, whichever prepared it first: a tenant
+allowed to use a shared `Provider` can pre-create, or later change, the template
+another tenant's VMs are created from. This needs a design change (tracked
+separately). Until then, as with a shared `Provider`, give separate tenants
+separate hypervisor accounts scoped to what each may see, and don't share a
+`Provider` between tenants that must not influence each other's images.
+
 ## What is never sent to a provider
 
 The selector is operator-side policy. The manager strips
@@ -253,8 +290,11 @@ doesn't exist: the API server rejects it (strict field validation) or prunes it,
 so no grant can be set and every cross-namespace reference is refused. The
 manager's existing CRD check (see
 [`vm-provider-binding.md`](vm-provider-binding.md#3-the-manager-checks-the-installed-crd))
-therefore also requires `spec.consumerNamespaceSelector` in those three CRDs:
-while one lacks it, the state is `missing` and readiness fails. The state is on
+therefore also requires `spec.consumerNamespaceSelector` in those three CRDs,
+and `status.providerStatus[].providerUID` and `taskRef` in the `VMImage` CRD
+(an older one prunes them, so no prepared image is trusted and no asynchronous
+prepare is tracked): while one lacks a field, the state is `missing` and
+readiness fails. The state is on
 `virtrigaud_manager_vm_crd_security_features`.
 
 ## RBAC
@@ -297,6 +337,13 @@ while one lacks it, the state is `missing` and readiness fails. The state is on
   target-namespace annotation.
 - **The manager's readiness also checks the three CRDs** for the field, and
   needs `get` on them (see [RBAC](#rbac)).
+- **`VMImage` prepare state is re-keyed.** `status.providerStatus` and
+  `status.availableOn` use `<namespace>/<name>` instead of the bare Provider
+  name, and `status.prepareTaskRef` is no longer written. Existing state is
+  migrated on the first VM create that uses each image, which re-issues the
+  idempotent prepare once per image and Provider; running VMs are not affected
+  (see [Shared `VMImage`s](#shared-vmimages-prepare-state-is-per-provider)).
+  Update scripts that read these fields.
 
 List what needs a selector (run it before step 3):
 

@@ -122,14 +122,14 @@ func TestBuildCreateRequest_NamespacedLandingDiskIsOwn(t *testing.T) {
 	}
 	r := newTestReconciler(coverageTestScheme(t), nil, migration)
 
-	req, err := r.buildCreateRequest(context.Background(), vmFor("default"), "", vmClass, nil, nil)
+	req, err := r.buildCreateRequest(context.Background(), vmFor("default"), nil, vmClass, nil, nil)
 	require.NoError(t, err)
 	assert.True(t, req.Image.ImportedDisk)
 	assert.Equal(t, namespacedLandingPath, req.Image.Path)
 	assert.Equal(t, contracts.ObjectIdentity{UID: req.Owner.UID, Namespace: "default", Name: "target-vm"}, req.Owner,
 		"the provider names the domain (and the file it adopts) from this owner")
 
-	req, err = r.buildCreateRequest(context.Background(), vmFor("other"), "", vmClass, nil, nil)
+	req, err = r.buildCreateRequest(context.Background(), vmFor("other"), nil, vmClass, nil, nil)
 	require.NoError(t, err)
 	assert.False(t, req.Image.ImportedDisk, "the migration lives in another namespace")
 }
