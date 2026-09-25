@@ -25,7 +25,9 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/projectbeskar/virtrigaud/internal/imageartifact"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
+	"github.com/projectbeskar/virtrigaud/internal/providers/mock"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
@@ -219,6 +221,55 @@ func TestClient_PrepareImage_ConflictMapped(t *testing.T) {
 			assert.Equal(t, tc.wantRetryable, contracts.IsRetryable(err))
 		})
 	}
+}
+
+// TestClient_PrepareImage_AgainstMockProvider runs the ADR-0009 contract end to
+// end over gRPC against the mock provider: an identity prepare is confirmed by
+// its echo, a re-prepare reuses the artifact, a foreign artifact at the derived
+// name is a typed Conflict, and a legacy request gets no echo.
+func TestClient_PrepareImage_AgainstMockProvider(t *testing.T) {
+	prov := mock.NewProvider(mock.WithImagePrepareDelay(0))
+	dialer, cleanup := startBufconnServer(t, prov)
+	defer cleanup()
+	cli := newTestClient(t, dialer, "mock")
+
+	caps, err := cli.GetCapabilities(context.Background())
+	require.NoError(t, err)
+	assert.True(t, caps.SupportsImageImport)
+	assert.True(t, caps.SupportsImageArtifactIdentity)
+
+	req := contracts.ImagePrepareRequest{
+		ImageJSON:    `{"source":{"http":{"url":"https://images.example.com/disk.qcow2"}}}`,
+		Image:        contracts.ObjectIdentity{UID: "5f0c6a7e-2d0b-4a8e-9a53-0f1e2d3c4b5a", Namespace: "team-a", Name: "ubuntu"},
+		SourceDigest: testImageDigest,
+		Provider:     contracts.ObjectIdentity{UID: "8c1e2f3a-4b5c-4d6e-8f7a-9b0c1d2e3f4a", Namespace: "team-a", Name: "mock"},
+	}
+	first, err := cli.PrepareImage(context.Background(), req)
+	require.NoError(t, err)
+	require.True(t, first.ConfirmsIdentity(req))
+	assert.False(t, first.Artifact.Reused)
+	assert.Equal(t, first.Artifact.Name, first.PreparedImageID)
+
+	again, err := cli.PrepareImage(context.Background(), req)
+	require.NoError(t, err)
+	require.True(t, again.ConfirmsIdentity(req))
+	assert.True(t, again.Artifact.Reused)
+
+	// Another VMImage whose derived name is occupied by an unstamped artifact.
+	other := req
+	other.Image.UID = "0d4e7c1a-9f3b-4c2d-8e5a-6b7c8d9e0f1a"
+	name, err := imageartifact.ArtifactName(imageartifact.NameRuleLibvirt, other.Image, other.SourceDigest)
+	require.NoError(t, err)
+	prov.PlantImageArtifact(name, nil)
+	_, err = cli.PrepareImage(context.Background(), other)
+	require.Error(t, err)
+	assert.True(t, contracts.IsConflict(err), "a stamp mismatch is a non-retryable Conflict: %v", err)
+
+	legacy, err := cli.PrepareImage(context.Background(), contracts.ImagePrepareRequest{TargetName: "ubuntu"})
+	require.NoError(t, err)
+	assert.Nil(t, legacy.Artifact)
+	assert.Equal(t, "ubuntu", legacy.PreparedImageID)
+	assert.False(t, legacy.ConfirmsIdentity(req))
 }
 
 // TestClient_PrepareImage_ErrorMapped verifies a provider error is mapped through
