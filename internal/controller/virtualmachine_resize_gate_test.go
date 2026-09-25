@@ -243,6 +243,69 @@ func TestResizeAssumptionOutlivesTheReconfigureCall(t *testing.T) {
 	assert.Empty(t, assumedUIDs(r), "gone after its own TTL")
 }
 
+// TestResizeGate_UnusablePoolFailsClosed (review N6): a host whose HostPool is
+// missing or belongs to another Provider has no known overcommit ratio, so a
+// resize-up on it is refused instead of assuming 1.0.
+func TestResizeGate_UnusablePoolFailsClosed(t *testing.T) {
+	for name, pool := range map[string]*infravirtrigaudiov1beta1.HostPool{
+		"missing": nil,
+		"foreign": hostPoolCR("pool-a", capNS, "another-provider"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			prov := runningRoutingProvider()
+			objs := []client.Object{withRuntime(clusteredProviderCR("prov-cluster", capNS)), capHost("host-alpha", 64),
+				smallVMClass(capNS), minimalVMImage(capNS), wantsCPU(sized("app", 2), 4)}
+			if pool != nil {
+				objs = append(objs, pool)
+			}
+			r := newTestReconciler(coverageTestScheme(t), &stubResolver{provider: prov}, objs...)
+			res, err := r.reconcileVM(context.Background(), getVM(t, r, "app"))
+			require.NoError(t, err)
+			assert.Empty(t, prov.reconfigureRefs, "no provider call")
+			assert.Equal(t, placementConfigRetryInterval, res.RequeueAfter)
+			c := reconfiguringCondition(getVM(t, r, "app"))
+			require.NotNil(t, c)
+			assert.Equal(t, k8s.ReasonPlacementError, c.Reason)
+			assert.Contains(t, c.Message, "does not exist or belongs to another Provider")
+		})
+	}
+}
+
+// deadlineRecordingClient records whether each VirtualMachine List carried a
+// deadline no later than bound from its start.
+type deadlineRecordingClient struct {
+	client.Client
+	mu      sync.Mutex
+	bounded []bool
+}
+
+func (c *deadlineRecordingClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if _, ok := list.(*infravirtrigaudiov1beta1.VirtualMachineList); ok {
+		d, has := ctx.Deadline()
+		c.mu.Lock()
+		c.bounded = append(c.bounded, has && time.Until(d) <= placementLockWait)
+		c.mu.Unlock()
+	}
+	return c.Client.List(ctx, list, opts...)
+}
+
+// TestReadsUnderTheLockAreBounded (review N6): every cache read made while a
+// Provider's assume lock is held carries a deadline of at most
+// placementLockWait, in the create and the resize path.
+func TestReadsUnderTheLockAreBounded(t *testing.T) {
+	vm := wantsCPU(sized("app", 2), 4)
+	r := resizeFixture(t, runningRoutingProvider(), vm, capVM("new"))
+	rec := &deadlineRecordingClient{Client: r.Client}
+	r.Client = rec
+
+	_, _ = resolve(t, r, readVM(t, r, "new"))
+	_, _, err := r.admitClusteredResize(context.Background(), readVM(t, r, "app"),
+		withRuntime(clusteredProviderCR("prov-cluster", capNS)), smallVMClass(capNS), "host-alpha")
+	require.NoError(t, err)
+	require.Len(t, rec.bounded, 2)
+	assert.Equal(t, []bool{true, true}, rec.bounded)
+}
+
 // panickingListClient panics on every VirtualMachine List: a stand-in for a
 // bug anywhere under the Provider's assume lock.
 type panickingListClient struct{ client.Client }

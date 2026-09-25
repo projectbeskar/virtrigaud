@@ -761,7 +761,12 @@ in another namespace than its clustered Provider is detached only when the
 Provider carries `infra.virtrigaud.io/allow-consumer-orphan-on-delete: "true"`.
 Otherwise its deletion is held with `Ready=False/OrphanOnDeleteNotAllowed`
 until the administrator allows it or the annotation is removed (see
-[`vm-provider-binding.md`](vm-provider-binding.md)).
+[`vm-provider-binding.md`](vm-provider-binding.md)). The same caution applies
+to `virtrigaud.io/force-delete`: if it releases a VM whose provider `Delete`
+failed (for example the host was unreachable), the domain may keep running
+outside the accounting. That cannot be done on purpose, since the `Delete`
+has to fail, but after a force-delete check the host and cordon it, or lower
+its overcommit ratio, until the leftover domain is gone.
 
 **No per-tenant quota.** Nothing limits how much of a shared clustered Provider
 one consumer namespace may take: hosts fill first come, first served. If you

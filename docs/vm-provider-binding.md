@@ -248,6 +248,10 @@ unbound clustered VM, a placement/topology mismatch, a `ProviderRefMismatch`,
 a cross-namespace `Provider` the VM's namespace may not use
 (`ConsumerNotAllowed`)).
 It is an escape hatch; to detach a VM on purpose, use `orphan-on-delete`.
+On a clustered `Provider`, a force-delete that releases a VM whose `Delete`
+failed can leave its domain running on the host outside the committed-capacity
+accounting; check the host (and cordon it or lower its overcommit ratio) until
+the leftover domain is removed. A tenant cannot trigger this on purpose.
 
 ## Upgrade notes
 

@@ -124,8 +124,18 @@ func (r *VirtualMachineReconciler) scheduleUnderLock(
 		return scheduler.Result{}, false, nil
 	}
 	defer unlock()
-	result, err = r.scheduleAndAssume(ctx, assumptions, providerKey, provider, vm, req)
+	lockCtx, cancel := lockBoundContext(ctx)
+	defer cancel()
+	result, err = r.scheduleAndAssume(lockCtx, assumptions, providerKey, provider, vm, req)
 	return result, true, err
+}
+
+// lockBoundContext bounds the work done while holding a Provider's assume lock
+// to placementLockWait (review N6): the cache reads under the lock return
+// promptly even if an informer is still being started lazily, so no other
+// reconcile waits longer than its own lock wait.
+func lockBoundContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, placementLockWait)
 }
 
 // scheduleAndAssume is the part of a clustered create that runs under the

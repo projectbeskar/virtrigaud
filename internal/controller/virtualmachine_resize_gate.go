@@ -118,17 +118,21 @@ func (r *VirtualMachineReconciler) admitClusteredResize(
 			"the VM keeps %d vCPU and %d MiB", desired.CPU, desired.MemoryMiB, hostID, current.CPU, current.MemoryMiB)
 		return r.refuseResize(ctx, vm, k8s.ReasonInsufficientHostCapacity, msg, r.unschedulable.next(uid, r.now())), false, nil
 	}
-	var poolSpec infravirtrigaudiov1beta1.HostPoolSpec
+	// The pool's overcommit ratios scale the host's capacity. A pool that is
+	// missing, or belongs to another Provider, leaves the capacity unknown:
+	// fail closed (review N6) rather than guess a ratio.
 	pool := &infravirtrigaudiov1beta1.HostPool{}
 	switch err := r.Get(ctx, types.NamespacedName{Namespace: providerCR.Namespace, Name: host.Spec.PoolRef.Name}, pool); {
 	case err == nil && pool.Spec.ProviderRef.Name == providerCR.Name:
-		poolSpec = pool.Spec
 	case err == nil, apierrors.IsNotFound(err):
-		// No pool of this Provider: no overcommit (ratio 1.0), the
-		// conservative reading.
+		msg := fmt.Sprintf("resize to %d vCPU and %d MiB is not applied: the HostPool %q of its host %s does not exist or belongs to another Provider, "+
+			"so its capacity is unknown; the VM keeps %d vCPU and %d MiB", desired.CPU, desired.MemoryMiB, host.Spec.PoolRef.Name, hostID,
+			current.CPU, current.MemoryMiB)
+		return r.refuseResize(ctx, vm, k8s.ReasonPlacementError, msg, placementConfigRetryInterval), false, nil
 	default:
 		return ctrl.Result{}, false, fmt.Errorf("get HostPool %s/%s to admit a resize: %w", providerCR.Namespace, host.Spec.PoolRef.Name, err)
 	}
+	poolSpec := pool.Spec
 
 	providerNN := types.NamespacedName{Namespace: providerCR.Namespace, Name: providerCR.Name}
 	resize := scheduler.ResizeRequest{Host: *host, Pool: poolSpec, VMUID: uid, Current: current, Desired: desired}
@@ -184,7 +188,9 @@ func (r *VirtualMachineReconciler) checkResizeUnderLock(
 		return false, nil
 	}
 	defer unlock()
-	placed, err := r.placedWithAssumptions(ctx, assumptions, providerKey, provider, vm)
+	lockCtx, cancel := lockBoundContext(ctx)
+	defer cancel()
+	placed, err := r.placedWithAssumptions(lockCtx, assumptions, providerKey, provider, vm)
 	if err != nil {
 		return true, &placementInfraError{err: err}
 	}

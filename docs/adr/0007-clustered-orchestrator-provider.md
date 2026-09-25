@@ -1061,6 +1061,14 @@ follows; A2's `pendingHost` is its prerequisite.
 > `Ready=False/OrphanOnDeleteNotAllowed`, and removing the annotation deletes it
 > normally.
 >
+> `virtrigaud.io/force-delete` has the same effect in one case: when the
+> provider `Delete` fails (for example the host is unreachable) and the
+> annotation releases the finalizer, the domain may keep running on its host
+> outside the accounting. A tenant cannot bring that about on purpose — the
+> `Delete` has to fail — but an administrator who force-deletes a clustered VM
+> should check the host and cordon it, or lower its overcommit ratio, until the
+> leftover domain is removed.
+>
 > **No per-tenant quota.** v0.4.0 has none on a shared clustered Provider:
 > any namespace the Provider's `spec.consumerNamespaceSelector` admits can fill
 > its hosts, first come first served, up to their capacity. Administrators who
