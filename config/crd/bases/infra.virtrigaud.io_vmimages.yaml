@@ -809,14 +809,12 @@ spec:
                 type: string
               prepareTaskRef:
                 description: |-
-                  PrepareTaskRef is no longer written. An in-flight prepare task is
-                  recorded per Provider, in ProviderStatus["<namespace>/<name>"].taskRef,
-                  and polled only through that Provider. A value left by an earlier
-                  release cannot be attributed to a Provider: it is cleared and never
-                  polled, and the prepare is issued again (it is idempotent on every
-                  provider).
-
-                  Deprecated: use ProviderStatus[...].TaskRef.
+                  PrepareTaskRef is deprecated and no longer written. An in-flight
+                  prepare task is recorded per Provider, in
+                  ProviderStatus["<namespace>/<name>"].taskRef, and polled only through
+                  that Provider. A value left by an earlier release cannot be attributed
+                  to a Provider: the controller clears it without polling it and issues
+                  the prepare again (it is idempotent on every provider).
                 type: string
               providerStatus:
                 additionalProperties:
