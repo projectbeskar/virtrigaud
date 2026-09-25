@@ -98,6 +98,12 @@ const (
 	// its current size and the resize is retried with a backoff; a shrink is
 	// never refused.
 	ReasonInsufficientHostCapacity = "InsufficientHostCapacity"
+	// ReasonOrphanOnDeleteNotAllowed is Ready=False on a VirtualMachine being
+	// deleted with virtrigaud.io/orphan-on-delete=true whose clustered
+	// Provider is in another namespace and has not allowed consumers to
+	// detach VMs: an orphaned VM would keep running on its host outside the
+	// committed-capacity accounting. The finalizer is kept.
+	ReasonOrphanOnDeleteNotAllowed = "OrphanOnDeleteNotAllowed"
 )
 
 // ConditionPlaced is the single positive placement condition of a VirtualMachine

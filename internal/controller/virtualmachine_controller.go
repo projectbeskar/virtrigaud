@@ -714,8 +714,14 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 	r.forgetPlacement(vm)
 
 	// Orphan-on-delete: detach the hypervisor VM instead of destroying it. No
-	// provider is resolved or called; the finalizer is simply removed.
+	// provider is called; the finalizer is simply removed — unless the VM is a
+	// consumer of a clustered Provider that has not allowed it
+	// (orphanRefusal): an orphaned clustered VM keeps running on its host but
+	// leaves the committed-capacity accounting.
 	if hasOrphanOnDeleteAnnotation(vm) {
+		if res, refused, err := r.orphanRefusal(ctx, vm); refused || err != nil {
+			return res, err
+		}
 		return r.orphanOnDelete(ctx, vm)
 	}
 
@@ -827,10 +833,7 @@ func (r *VirtualMachineReconciler) removeFinalizer(ctx context.Context, vm *infr
 // untouched and no longer managed. This is the supported way to un-adopt /
 // detach a VM. It is logged and recorded as an event on the VM.
 func (r *VirtualMachineReconciler) orphanOnDelete(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine) (ctrl.Result, error) {
-	provider := vmProviderKey(vm)
-	if b := vm.Status.BoundProvider; b != nil {
-		provider = types.NamespacedName{Namespace: b.Namespace, Name: b.Name}
-	}
+	provider := placementProviderKey(vm)
 	msg := fmt.Sprintf("%s=true: detaching without deleting the hypervisor VM (id %q, provider %s); it is left in place and no longer managed",
 		infravirtrigaudiov1beta1.VirtualMachineOrphanOnDeleteAnnotation, vm.Status.ID, provider)
 	log.FromContext(ctx).Info("Orphan-on-delete: removing the finalizer without a provider Delete",

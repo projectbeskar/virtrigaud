@@ -50,6 +50,16 @@ const (
 	ProviderTopologyCluster = "cluster"
 )
 
+// ProviderAllowConsumerOrphanOnDeleteAnnotation, set to "true" on a clustered
+// Provider by its administrator, lets VirtualMachines in OTHER namespaces
+// (consumers granted through spec.consumerNamespaceSelector) be detached with
+// virtrigaud.io/orphan-on-delete. Without it, only VMs in the Provider's own
+// namespace may be orphaned on a clustered Provider: an orphaned VM keeps
+// running on its host but leaves the committed-capacity accounting (ADR-0007
+// Addendum A, scheduler-accuracy amendment), so a consumer could otherwise
+// occupy capacity nobody sees. Single-host Providers ignore it.
+const ProviderAllowConsumerOrphanOnDeleteAnnotation = "infra.virtrigaud.io/allow-consumer-orphan-on-delete"
+
 // ProviderRuntimeMode specifies how the provider is executed
 // +kubebuilder:validation:Enum=Remote
 type ProviderRuntimeMode string
