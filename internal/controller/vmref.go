@@ -106,6 +106,8 @@ func vmRefErrorReason(err error) string {
 	switch {
 	case isProviderRefMismatch(err):
 		return k8s.ReasonProviderRefMismatch
+	case isConsumerNotAllowed(err):
+		return k8s.ReasonConsumerNotAllowed
 	case isPlacementTopologyMismatch(err):
 		return k8s.ReasonPlacementTopologyMismatch
 	}
@@ -118,6 +120,9 @@ func vmRefErrorReason(err error) string {
 func vmRefWaitMessage(err error) string {
 	if isProviderRefMismatch(err) {
 		return "The VM's spec.providerRef does not match the Provider it is bound through; no provider call is made"
+	}
+	if isConsumerNotAllowed(err) {
+		return "A Provider, VMClass or VMImage in another namespace does not allow references from this namespace; no provider call is made"
 	}
 	return "Waiting for the VM's host binding"
 }

@@ -104,6 +104,9 @@ func xnsMigration(targetNamespace string) (*infrav1beta1.VMMigration, []client.O
 	srcProv.Spec.Type = infrav1beta1.ProviderTypeVSphere
 	tgtProv := readyProvider(xnsSource, "tgt-prov")
 	tgtProv.Spec.Type = infrav1beta1.ProviderTypeLibvirt
+	// The target VM references the target Provider and class from the target
+	// namespace, so both are shared (spec.consumerNamespaceSelector: {}).
+	tgtProv.Spec.ConsumerNamespaceSelector = &metav1.LabelSelector{}
 	migration := &infrav1beta1.VMMigration{
 		ObjectMeta: metav1.ObjectMeta{Name: "mig", Namespace: xnsSource, UID: "uid-xns-1", Generation: 1},
 		Spec: infrav1beta1.VMMigrationSpec{
@@ -117,7 +120,7 @@ func xnsMigration(targetNamespace string) (*infrav1beta1.VMMigration, []client.O
 			},
 		},
 	}
-	return migration, []client.Object{srcVM, srcProv, tgtProv}
+	return migration, []client.Object{srcVM, srcProv, tgtProv, grantedClass(xnsSource, "cls", &metav1.LabelSelector{})}
 }
 
 func newXNSMigrationReconciler(t *testing.T, scheme *runtime.Scheme, prov contracts.Provider, objs ...client.Object) (*VMMigrationReconciler, *record.FakeRecorder) {
@@ -329,7 +332,8 @@ func TestVMMigrationXNS_CreatingRefusedWithoutGrant(t *testing.T) {
 	ctx := context.Background()
 	sourceVM, sourceProvider, targetProvider, migration := creatingFixture(xnsTarget)
 	ns := grantNamespace(xnsTarget, nil)
-	r, _ := directionReconciler(t, &capturingMigrationProvider{}, sourceVM, sourceProvider, targetProvider, migration, ns)
+	r, _ := directionReconciler(t, &capturingMigrationProvider{}, sourceVM, sourceProvider, targetProvider, migration, ns,
+		grantedClass("default", "cls", &metav1.LabelSelector{}))
 
 	res, err := r.handleCreatingPhase(ctx, migration)
 	require.NoError(t, err)

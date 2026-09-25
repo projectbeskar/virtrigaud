@@ -31,6 +31,14 @@ spec:
     # TargetNamespaceNotAllowed) before touching anything.
     # See docs/cross-namespace-targets.md.
     # namespace: team-b
+    # A target Provider in another namespace must share itself with this
+    # VMMigration's namespace (and, for a target in another namespace, with
+    # that one too) via spec.consumerNamespaceSelector, e.g.
+    #   consumerNamespaceSelector:
+    #     matchLabels:
+    #       kubernetes.io/metadata.name: default
+    # Otherwise the migration waits (Ready=False, reason ConsumerNotAllowed).
+    # See docs/cross-namespace-references.md.
     providerRef:
       name: target-provider
       namespace: virtrigaud-system

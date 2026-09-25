@@ -14,6 +14,7 @@ Read the upgrade guide before upgrading:
 
 ## Breaking changes
 
+- **A `Provider`, `VMClass` or `VMImage` in another namespace can only be used if its new `spec.consumerNamespaceSelector` selects the referencing namespace** (unset = own namespace only, `{}` = all namespaces). Set it on shared objects **after applying the new CRDs and before rolling the manager** (the field does not exist until the CRDs are upgraded); otherwise VMs using them fail closed with `ConsumerNotAllowed`. The manager's readiness now also checks that the Provider, VMClass and VMImage CRDs have the field. → [Upgrade guide](docs/upgrading.md#breaking-changes)
 - **`VirtualMachine.spec.providerRef` is now immutable once a VM is bound.** The
   old "re-point to a missing Provider, then delete" un-adopt workaround no longer
   works — use the new `virtrigaud.io/orphan-on-delete: "true"` annotation instead.

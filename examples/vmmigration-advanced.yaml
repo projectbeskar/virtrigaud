@@ -37,6 +37,10 @@ spec:
     # infra.virtrigaud.io/allowed-source-namespaces grant on that namespace
     # (see docs/cross-namespace-targets.md).
     namespace: production
+    # This Provider lives in `infrastructure`: its
+    # spec.consumerNamespaceSelector must select `production` (the migration's
+    # and the target VM's namespace), or the migration waits with
+    # Ready=False / ConsumerNotAllowed. See docs/cross-namespace-references.md.
     providerRef:
       name: libvirt-host-prod
       namespace: infrastructure

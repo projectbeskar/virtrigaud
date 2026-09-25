@@ -1,4 +1,15 @@
 ---
+# Cross-namespace references: the VirtualMachines below live in `default` and
+# reference a Provider, VMClass and VMImage in `virtrigaud-system`. Each of
+# those objects must share itself with `default` via
+# spec.consumerNamespaceSelector (the VMClasses in this file do), or the VMs
+# report Ready=False / ConsumerNotAllowed and nothing is created. For the
+# Provider and VMImage (not defined here), add for example:
+#   consumerNamespaceSelector:
+#     matchLabels:
+#       kubernetes.io/metadata.name: default
+# See docs/cross-namespace-references.md.
+
 # Example: vSphere VMClass with Hardware Version 21 (ESXi 8.0)
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMClass
@@ -6,6 +17,10 @@ metadata:
   name: vsphere-hw21-class
   namespace: virtrigaud-system
 spec:
+  # Referenced by VirtualMachines in `default`: share it with that namespace.
+  consumerNamespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: default
   cpu: 4
   memory: 8Gi
   firmware: UEFI
@@ -29,6 +44,10 @@ metadata:
   name: vsphere-hw17-class
   namespace: virtrigaud-system
 spec:
+  # Referenced by VirtualMachines in `default`: share it with that namespace.
+  consumerNamespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: default
   cpu: 2
   memory: 4Gi
   firmware: BIOS
@@ -50,6 +69,10 @@ metadata:
   name: vsphere-legacy-class
   namespace: virtrigaud-system
 spec:
+  # Referenced by VirtualMachines in `default`: share it with that namespace.
+  consumerNamespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: default
   cpu: 2
   memory: 2Gi
   firmware: BIOS
@@ -123,6 +146,10 @@ metadata:
   name: esxi8-optimized
   namespace: virtrigaud-system
 spec:
+  # Referenced by VirtualMachines in `default`: share it with that namespace.
+  consumerNamespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: default
   cpu: 8
   memory: 32Gi
   firmware: UEFI
@@ -141,6 +168,10 @@ metadata:
   name: esxi7-production
   namespace: virtrigaud-system
 spec:
+  # Referenced by VirtualMachines in `default`: share it with that namespace.
+  consumerNamespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: default
   cpu: 4
   memory: 16Gi
   firmware: UEFI
@@ -158,6 +189,10 @@ metadata:
   name: esxi65-legacy
   namespace: virtrigaud-system
 spec:
+  # Referenced by VirtualMachines in `default`: share it with that namespace.
+  consumerNamespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: default
   cpu: 2
   memory: 8Gi
   firmware: BIOS

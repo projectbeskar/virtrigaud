@@ -507,14 +507,17 @@ func main() {
 		os.Exit(1)
 	}
 
-	// The VirtualMachine provider-binding protection needs the upgraded CRD
-	// (status.boundProvider and the spec.providerRef immutability rule). Check
-	// it once now (logged and exported as a metric) and on every readiness
-	// probe: readiness fails while the installed CRD verifiably lacks them.
+	// The VirtualMachine provider-binding protection needs the upgraded
+	// VirtualMachine CRD (status.boundProvider and the spec.providerRef
+	// immutability rule), and the cross-namespace consumer grant needs
+	// spec.consumerNamespaceSelector in the Provider, VMClass and VMImage CRDs.
+	// Check them once now (logged and exported as a metric) and on every
+	// readiness probe: readiness fails while an installed CRD verifiably lacks
+	// its features.
 	vmCRDCheck := controller.NewVMCRDFeatureChecker(mgr.GetAPIReader())
 	vmCRDCheck.Evaluate(ctrl.LoggerInto(context.Background(), setupLog))
 	if err := mgr.AddReadyzCheck("vm-crd-security-features", vmCRDCheck.ReadyzCheck); err != nil {
-		setupLog.Error(err, "unable to set up the VirtualMachine CRD ready check")
+		setupLog.Error(err, "unable to set up the CRD security-features ready check")
 		os.Exit(1)
 	}
 

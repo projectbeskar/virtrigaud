@@ -354,7 +354,8 @@ func TestGetDependencies_NilNetworkRef_AppendsNil(t *testing.T) {
 		{Name: "eth0", NetworkRef: nil},
 	}
 
-	_, _, _, networks, err := r.getDependencies(context.Background(), vm)
+	deps, err := r.getDependencies(context.Background(), vm)
+	networks := deps.networks
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -381,7 +382,8 @@ func TestGetDependencies_NilNetworkRef_MultipleNetworks(t *testing.T) {
 		{Name: "eth1", NetworkRef: &infravirtrigaudiov1beta1.ObjectRef{Name: "net1"}},
 	}
 
-	_, _, _, networks, err := r.getDependencies(context.Background(), vm)
+	deps, err := r.getDependencies(context.Background(), vm)
+	networks := deps.networks
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -409,7 +411,8 @@ func TestGetDependencies_NetworkRefFound(t *testing.T) {
 		{Name: "eth0", NetworkRef: &infravirtrigaudiov1beta1.ObjectRef{Name: "net1"}},
 	}
 
-	_, _, _, networks, err := r.getDependencies(context.Background(), vm)
+	deps, err := r.getDependencies(context.Background(), vm)
+	networks := deps.networks
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -431,7 +434,7 @@ func TestGetDependencies_NetworkRefNotFound_ReturnsError(t *testing.T) {
 		{Name: "eth0", NetworkRef: &infravirtrigaudiov1beta1.ObjectRef{Name: "missing-net"}},
 	}
 
-	_, _, _, _, err := r.getDependencies(context.Background(), vm)
+	_, err := r.getDependencies(context.Background(), vm)
 
 	if err == nil {
 		t.Fatal("expected error for missing VMNetworkAttachment, got nil")

@@ -151,35 +151,37 @@ var (
 		[]string{"provider_type", "provider"},
 	)
 
-	// vmCRDSecurityFeatures reports whether the installed VirtualMachine CRD
-	// carries the provider-binding security features the manager relies on
-	// (status.boundProvider and the spec.providerRef immutability rule). One
-	// series per state; the current state's series is 1, the others 0.
+	// vmCRDSecurityFeatures reports whether the installed CRDs carry the
+	// security features the manager relies on: the VirtualMachine CRD's
+	// provider binding (status.boundProvider and the spec.providerRef
+	// immutability rule) and spec.consumerNamespaceSelector in the Provider,
+	// VMClass and VMImage CRDs. One series per state; the current state's
+	// series is 1, the others 0.
 	vmCRDSecurityFeatures = registerer.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "virtrigaud_manager_vm_crd_security_features",
-			Help: "Whether the installed VirtualMachine CRD has status.boundProvider and the spec.providerRef immutability rule: 1 for the current state (verified|missing|unknown), 0 otherwise.",
+			Help: "Whether the installed CRDs have the security features the manager relies on (VirtualMachine status.boundProvider and spec.providerRef immutability rule; spec.consumerNamespaceSelector on Provider, VMClass and VMImage): 1 for the current state (verified|missing|unknown), 0 otherwise.",
 		},
 		[]string{"state"},
 	)
 )
 
-// VirtualMachine CRD security-feature states (the "state" label of
+// CRD security-feature states (the "state" label of
 // virtrigaud_manager_vm_crd_security_features).
 const (
-	// CRDFeaturesVerified means the installed CRD has every required feature.
+	// CRDFeaturesVerified means the installed CRDs have every required feature.
 	CRDFeaturesVerified = "verified"
-	// CRDFeaturesMissing means the installed CRD lacks at least one feature
+	// CRDFeaturesMissing means an installed CRD lacks at least one feature
 	// (it is older than the manager).
 	CRDFeaturesMissing = "missing"
-	// CRDFeaturesUnknown means the CRD could not be read (e.g. RBAC forbids
-	// it), so the features could not be verified.
+	// CRDFeaturesUnknown means a CRD could not be read (e.g. RBAC forbids it),
+	// so the features could not be verified.
 	CRDFeaturesUnknown = "unknown"
 )
 
-// SetVMCRDSecurityFeatures publishes the VirtualMachine CRD security-feature
-// state on virtrigaud_manager_vm_crd_security_features: state's series is set
-// to 1 and the other known states' series to 0. state should be one of the
+// SetVMCRDSecurityFeatures publishes the CRD security-feature state on
+// virtrigaud_manager_vm_crd_security_features: state's series is set to 1 and
+// the other known states' series to 0. state should be one of the
 // CRDFeatures* constants.
 func SetVMCRDSecurityFeatures(state string) {
 	for _, s := range []string{CRDFeaturesVerified, CRDFeaturesMissing, CRDFeaturesUnknown} {

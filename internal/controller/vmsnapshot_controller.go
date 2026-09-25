@@ -21,14 +21,19 @@ import (
 	"fmt"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
+	conditions "github.com/projectbeskar/virtrigaud/internal/k8s"
 	"github.com/projectbeskar/virtrigaud/internal/obs/logging"
 	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
@@ -96,6 +101,8 @@ func NewVMSnapshotReconciler(
 //+kubebuilder:rbac:groups=infra.virtrigaud.io,resources=vmsnapshots/finalizers,verbs=update
 //+kubebuilder:rbac:groups=infra.virtrigaud.io,resources=virtualmachines,verbs=get;list;watch
 //+kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+//+kubebuilder:rbac:groups=infra.virtrigaud.io,resources=providers;vmclasses;vmimages,verbs=get;list;watch
+//+kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
 
 // Reconcile is part of the main kubernetes reconciliation loop.
 //
@@ -222,6 +229,15 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 
 	logger.Info("Creating VM snapshot")
 
+	// Get the provider for this VM. A Provider in another namespace must
+	// select this one (spec.consumerNamespaceSelector); the refusal is
+	// recorded before the phase moves, so the create is retried unchanged once
+	// the grant exists.
+	provider, err := getVMProvider(ctx, r.Client, vm)
+	if isConsumerNotAllowed(err) {
+		return r.refuseSnapshotConsumer(ctx, snapshot, err), nil
+	}
+
 	// Update phase to creating
 	snapshot.Status.Phase = infrav1beta1.SnapshotPhaseCreating
 	snapshot.Status.Message = "Creating snapshot"
@@ -229,17 +245,7 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 		metav1.ConditionTrue, infrav1beta1.VMSnapshotReasonCreating,
 		"Snapshot creation initiated")
 
-	// Get the provider for this VM
-	provider := &infrav1beta1.Provider{}
-	providerKey := client.ObjectKey{
-		Name:      vm.Spec.ProviderRef.Name,
-		Namespace: vm.Namespace,
-	}
-	if vm.Spec.ProviderRef.Namespace != "" {
-		providerKey.Namespace = vm.Spec.ProviderRef.Namespace
-	}
-
-	if err := r.Get(ctx, providerKey, provider); err != nil {
+	if err != nil {
 		logger.Error(err, "Failed to get provider", "provider", vm.Spec.ProviderRef.Name)
 		k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionReady,
 			metav1.ConditionFalse, infrav1beta1.VMSnapshotReasonProviderError,
@@ -366,17 +372,13 @@ func (r *VMSnapshotReconciler) checkSnapshotCreation(ctx context.Context, snapsh
 		return ctrl.Result{}, nil
 	}
 
-	// Get the provider to check task status
-	provider := &infrav1beta1.Provider{}
-	providerKey := client.ObjectKey{
-		Name:      vm.Spec.ProviderRef.Name,
-		Namespace: vm.Namespace,
+	// Get the provider to check task status (it must still be usable from
+	// this namespace: spec.consumerNamespaceSelector).
+	provider, err := getVMProvider(ctx, r.Client, vm)
+	if isConsumerNotAllowed(err) {
+		return r.refuseSnapshotConsumer(ctx, snapshot, err), nil
 	}
-	if vm.Spec.ProviderRef.Namespace != "" {
-		providerKey.Namespace = vm.Spec.ProviderRef.Namespace
-	}
-
-	if err := r.Get(ctx, providerKey, provider); err != nil {
+	if err != nil {
 		logger.Error(err, "Failed to get provider")
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
@@ -531,37 +533,31 @@ func (r *VMSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *inf
 
 	// Only call provider if VM still exists and we have a snapshot ID
 	if !vmNotFound && snapshot.Status.SnapshotID != "" && vm.Status.ID != "" {
-		// Get the provider
-		provider := &infrav1beta1.Provider{}
-		providerKey := client.ObjectKey{
-			Name:      vm.Spec.ProviderRef.Name,
-			Namespace: vm.Namespace,
-		}
-		if vm.Spec.ProviderRef.Namespace != "" {
-			providerKey.Namespace = vm.Spec.ProviderRef.Namespace
-		}
-
-		if err := r.Get(ctx, providerKey, provider); err != nil {
+		// Get the provider. A Provider in another namespace that does not select
+		// this one (spec.consumerNamespaceSelector) is never used.
+		provider, err := getVMProvider(ctx, r.Client, vm)
+		if err != nil && !isConsumerNotAllowed(err) {
 			logger.Error(err, "Failed to get provider", "provider", vm.Spec.ProviderRef.Name)
 			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
 
-		// Get provider instance
-		providerInstance, err := r.getProviderInstance(ctx, provider)
-		if err != nil {
-			logger.Error(err, "Failed to get provider instance")
-			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		// Address the VM (ADR-0007 Addendum A, A1) before resolving a client for
+		// the Provider. An ungranted cross-namespace Provider, a clustered VM
+		// with no confirmed host binding, or a VM whose spec.providerRef no
+		// longer names the Provider it is bound through, is never sent a per-VM
+		// call; like any other provider-side failure here, that is reported and
+		// the finalizer is still removed (the snapshot delete is best-effort).
+		refErr := err
+		var ref contracts.VMRef
+		if refErr == nil {
+			ref, refErr = vmRefFor(vm, provider)
 		}
-
-		// Address the VM (ADR-0007 Addendum A, A1). A clustered VM with no
-		// confirmed host binding, or a VM whose spec.providerRef no longer names
-		// the Provider it is bound through, is never sent a per-VM call; like
-		// any other provider-side failure here, that is reported and the
-		// finalizer is still removed (the snapshot delete is best-effort).
-		ref, refErr := vmRefFor(vm, provider)
 		if refErr != nil {
 			logger.Info("Not deleting the provider snapshot: no provider call can be made for the VM", "reason", vmRefErrorReason(refErr), "error", refErr.Error())
 			r.Recorder.Event(snapshot, "Warning", "SnapshotDeleteFailed", fmt.Sprintf("Failed to delete snapshot: %v", refErr))
+		} else if providerInstance, err := r.getProviderInstance(ctx, provider); err != nil {
+			logger.Error(err, "Failed to get provider instance")
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		} else {
 			// Delete the snapshot via provider
 			logger.Info("Calling provider to delete snapshot", "snapshot_id", snapshot.Status.SnapshotID, "vm_id", vm.Status.ID)
@@ -732,9 +728,54 @@ func (r *VMSnapshotReconciler) buildSnapshotCreateRequest(snapshot *infrav1beta1
 	return req
 }
 
-// SetupWithManager sets up the controller with the Manager
+// refuseSnapshotConsumer records that the snapshot's VM references a
+// Provider in another namespace that does not select this one
+// (spec.consumerNamespaceSelector): Ready=False with reason ConsumerNotAllowed
+// and a Warning event on the transition. The phase is left alone (a snapshot
+// not yet started stays in the initial phase, so its create is retried
+// unchanged once access is granted) and no provider is resolved or called. The
+// recheck is slow; the grant watches re-drive it promptly.
+func (r *VMSnapshotReconciler) refuseSnapshotConsumer(ctx context.Context, snapshot *infrav1beta1.VMSnapshot, cause error) ctrl.Result {
+	cause = consumerRefusalCause(cause)
+	before := snapshot.Status.DeepCopy()
+	if consumerRefusalIsNew(snapshot.Status.Conditions, cause) {
+		logging.FromContext(ctx).Info("The VM's Provider may not be used from this namespace; not calling the provider", "error", cause.Error())
+		r.Recorder.Event(snapshot, corev1.EventTypeWarning, conditions.ReasonConsumerNotAllowed, cause.Error())
+	}
+	snapshot.Status.Message = cause.Error()
+	snapshot.Status.ObservedGeneration = snapshot.Generation
+	meta.SetStatusCondition(&snapshot.Status.Conditions, metav1.Condition{
+		Type:               infrav1beta1.VMSnapshotConditionReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             conditions.ReasonConsumerNotAllowed,
+		Message:            cause.Error(),
+		ObservedGeneration: snapshot.Generation,
+	})
+	metrics.RecordError(errReasonConsumerNotAllowed, metrics.ComponentManager)
+	// A recheck of the same refusal changes nothing: don't write it again.
+	// Status update errors are intentionally ignored to avoid blocking reconciliation.
+	if !equality.Semantic.DeepEqual(before, &snapshot.Status) {
+		_ = r.updateStatus(ctx, snapshot)
+	}
+	return ctrl.Result{RequeueAfter: consumerNotAllowedRetryInterval}
+}
+
+// snapshotsForGrantChange returns the VMSnapshots refused with
+// ConsumerNotAllowed that a consumer-grant change may lift (consumerGrantIndex),
+// so a grant takes effect without waiting for the slow recheck.
+func (r *VMSnapshotReconciler) snapshotsForGrantChange(ctx context.Context, indexValue string) []reconcile.Request {
+	return requestsForGrantChange(ctx, r.Client, &infrav1beta1.VMSnapshotList{}, indexValue, nil)
+}
+
+// SetupWithManager sets up the controller with the Manager. Besides its own
+// VMSnapshots it watches consumer-grant changes (Namespace labels, Provider
+// selectors) to re-drive snapshots refused with ConsumerNotAllowed.
 func (r *VMSnapshotReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
-		For(&infrav1beta1.VMSnapshot{}).
+	if err := indexConsumerGrants(mgr, &infrav1beta1.VMSnapshot{}, snapshotConsumerGrantIndexValues); err != nil {
+		return err
+	}
+	b := ctrl.NewControllerManagedBy(mgr).
+		For(&infrav1beta1.VMSnapshot{})
+	return withConsumerGrantWatches(b, r.snapshotsForGrantChange).
 		Complete(r)
 }

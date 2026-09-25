@@ -24,6 +24,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -324,7 +325,8 @@ func (r *VirtualMachineReconciler) handleMissingOnBoundHost(
 // Ready=False/PlacementTopologyMismatch; a VM whose spec.providerRef no longer
 // resolves to the Provider it is bound through gets
 // Ready=False/ProviderRefMismatch (plus a warning event) and is re-checked
-// slowly. Any other error is returned as-is.
+// slowly. Any other error is returned as-is. (A cross-namespace consumer
+// refusal goes through refuseConsumer.)
 func (r *VirtualMachineReconciler) handleNotRoutable(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, err error) (ctrl.Result, error) {
 	if !markNotRoutable(vm, err) {
 		return ctrl.Result{}, err
@@ -344,9 +346,36 @@ func (r *VirtualMachineReconciler) handleNotRoutable(ctx context.Context, vm *in
 	return ctrl.Result{RequeueAfter: placementUnboundRetryInterval}, nil
 }
 
+// refuseConsumer records that vm references a Provider, VMClass or VMImage in
+// another namespace that does not select its own (cause, a
+// *ConsumerNotAllowedError) and makes no provider call:
+// Ready=False/ConsumerNotAllowed with ObservedGeneration, a Warning event on
+// the transition only, and a slow recheck — the grant watches re-drive it as
+// soon as access is granted. persisted is the status as read at the start of
+// the reconcile: when nothing changed (a recheck of the same refusal) the
+// status is not written again, so refused VMs cost no API writes.
+func (r *VirtualMachineReconciler) refuseConsumer(
+	ctx context.Context,
+	vm *infravirtrigaudiov1beta1.VirtualMachine,
+	persisted *infravirtrigaudiov1beta1.VirtualMachineStatus,
+	cause error,
+) (ctrl.Result, error) {
+	newRefusal := consumerRefusalIsNew(vm.Status.Conditions, cause)
+	markNotRoutable(vm, cause)
+	metrics.RecordError(errReasonConsumerNotAllowed, metrics.ComponentManager)
+	if newRefusal {
+		log.FromContext(ctx).Info("Not calling the provider for this VM", "reason", cause.Error())
+		r.recordEvent(vm, corev1.EventTypeWarning, k8s.ReasonConsumerNotAllowed, cause.Error())
+	}
+	if persisted == nil || !equality.Semantic.DeepEqual(persisted, &vm.Status) {
+		r.updateStatus(ctx, vm)
+	}
+	return ctrl.Result{RequeueAfter: consumerNotAllowedRetryInterval}, nil
+}
+
 // markNotRoutable sets the condition for a vmRefFor failure and reports
-// whether err was one (unbound, a placement/topology mismatch, or a provider
-// reference mismatch).
+// whether err was one (unbound, a placement/topology mismatch, a provider
+// reference mismatch, or an ungranted cross-namespace reference).
 func markNotRoutable(vm *infravirtrigaudiov1beta1.VirtualMachine, err error) bool {
 	switch {
 	case isProviderRefMismatch(err):
@@ -354,6 +383,14 @@ func markNotRoutable(vm *infravirtrigaudiov1beta1.VirtualMachine, err error) boo
 			Type:               k8s.ConditionReady,
 			Status:             metav1.ConditionFalse,
 			Reason:             k8s.ReasonProviderRefMismatch,
+			Message:            err.Error(),
+			ObservedGeneration: vm.Generation,
+		})
+	case isConsumerNotAllowed(err):
+		meta.SetStatusCondition(&vm.Status.Conditions, metav1.Condition{
+			Type:               k8s.ConditionReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             k8s.ReasonConsumerNotAllowed,
 			Message:            err.Error(),
 			ObservedGeneration: vm.Generation,
 		})
@@ -529,6 +566,12 @@ func (r *VirtualMachineReconciler) retainForUnroutableDelete(
 			"not deleting the hypervisor VM through a Provider it is not bound to: %v. Set %s=true to detach it, or %s=true to drop the finalizer",
 			err, infravirtrigaudiov1beta1.VirtualMachineOrphanOnDeleteAnnotation, forceDeleteAnnotation))
 		return ctrl.Result{RequeueAfter: providerRefMismatchRetryInterval}, true
+	}
+	if isConsumerNotAllowed(err) {
+		r.recordEvent(vm, corev1.EventTypeWarning, k8s.ReasonConsumerNotAllowed, fmt.Sprintf(
+			"not deleting the hypervisor VM through a Provider this namespace may not use: %v. Set %s=true to detach it, or %s=true to drop the finalizer",
+			err, infravirtrigaudiov1beta1.VirtualMachineOrphanOnDeleteAnnotation, forceDeleteAnnotation))
+		return ctrl.Result{RequeueAfter: consumerNotAllowedRetryInterval}, true
 	}
 	return ctrl.Result{RequeueAfter: vmDeleteRetryInterval}, true
 }

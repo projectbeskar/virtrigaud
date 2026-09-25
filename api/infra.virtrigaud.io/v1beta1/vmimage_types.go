@@ -37,6 +37,26 @@ type VMImageSpec struct {
 	// Distribution contains OS distribution information
 	// +optional
 	Distribution *OSDistribution `json:"distribution,omitempty"`
+
+	// ConsumerNamespaceSelector selects the namespaces, other than this
+	// VMImage's own, that may use it: VirtualMachines there may name it in
+	// spec.imageRef (which prepares it on, and creates VMs from it through,
+	// their Provider). A reference from the VMImage's own namespace is always
+	// allowed.
+	//
+	//   - unset (the default): only its own namespace may use it.
+	//   - {} (an empty selector): every namespace may use it.
+	//   - matchLabels / matchExpressions: the namespaces whose labels match. The
+	//     kubernetes.io/metadata.name label names a namespace explicitly.
+	//
+	// A reference from a namespace it does not select is refused with
+	// Ready=False, reason ConsumerNotAllowed, and no provider call is made for
+	// it. The selector is matched against Namespace labels, so whoever can label
+	// a namespace can widen what that namespace may use (see
+	// docs/cross-namespace-references.md). The selector is operator-side policy:
+	// it is never sent to a provider.
+	// +optional
+	ConsumerNamespaceSelector *metav1.LabelSelector `json:"consumerNamespaceSelector,omitempty"`
 }
 
 // ImageSource defines the source of the VM image

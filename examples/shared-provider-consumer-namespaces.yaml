@@ -1,0 +1,110 @@
+# Sharing a Provider, VMClass and VMImage with other namespaces
+#
+# A VirtualMachine may reference a Provider, VMClass or VMImage in ANOTHER
+# namespace only if that object's spec.consumerNamespaceSelector selects the
+# VM's namespace. Unset (the default) means "own namespace only"; {} means
+# "every namespace". Each object grants for itself: sharing the Provider does
+# not share its classes or images.
+#
+# Without the grant the VM reports Ready=False / ConsumerNotAllowed and no
+# provider call is made for it. See docs/cross-namespace-references.md.
+#
+# Whoever can label a Namespace can make it match a label selector. The
+# kubernetes.io/metadata.name label (set by the API server) is the safe way to
+# name namespaces explicitly.
+#
+# Sharing a Provider shares everything its credentials can reach: a namespace
+# allowed to use it can write its own VMImage naming any template or image file
+# the Provider's account can read. Share Providers only with namespaces trusted
+# with that, and scope the hypervisor account accordingly.
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vsphere-creds
+  namespace: virtrigaud-system
+type: Opaque
+stringData:
+  username: "administrator@vsphere.local"
+  password: "your-password-here"
+
+---
+# A platform-owned Provider shared with two tenant namespaces, by name.
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: Provider
+metadata:
+  name: vsphere-shared
+  namespace: virtrigaud-system
+spec:
+  type: vsphere
+  endpoint: https://vcenter.example.com/sdk
+  credentialSecretRef:
+    name: vsphere-creds
+  runtime:
+    mode: Remote
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.2.3"
+    service:
+      port: 9090
+  consumerNamespaceSelector:
+    matchExpressions:
+      - key: kubernetes.io/metadata.name
+        operator: In
+        values: ["team-a", "team-b"]
+
+---
+# A VM size every namespace may use.
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMClass
+metadata:
+  name: shared-small
+  namespace: virtrigaud-system
+spec:
+  cpu: 2
+  memory: "4Gi"
+  consumerNamespaceSelector: {}
+
+---
+# A golden image shared with namespaces labelled virtrigaud.io/tenant=gold.
+# Only a cluster administrator should be able to set that label (restrict it
+# with a policy engine on self-service platforms).
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMImage
+metadata:
+  name: ubuntu-22-golden
+  namespace: virtrigaud-system
+spec:
+  source:
+    vsphere:
+      templateName: "ubuntu-22.04-cloudimg"
+  prepare:
+    onMissing: Fail
+  consumerNamespaceSelector:
+    matchLabels:
+      virtrigaud.io/tenant: gold
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: team-a
+  labels:
+    virtrigaud.io/tenant: gold
+
+---
+# A tenant VM using all three shared objects from team-a.
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: web-01
+  namespace: team-a
+spec:
+  providerRef:
+    name: vsphere-shared
+    namespace: virtrigaud-system
+  classRef:
+    name: shared-small
+    namespace: virtrigaud-system
+  imageRef:
+    name: ubuntu-22-golden
+    namespace: virtrigaud-system
+  powerState: "On"

@@ -57,6 +57,69 @@ spec:
           spec:
             description: VMImageSpec defines the desired state of VMImage
             properties:
+              consumerNamespaceSelector:
+                description: |-
+                  ConsumerNamespaceSelector selects the namespaces, other than this
+                  VMImage's own, that may use it: VirtualMachines there may name it in
+                  spec.imageRef (which prepares it on, and creates VMs from it through,
+                  their Provider). A reference from the VMImage's own namespace is always
+                  allowed.
+
+                    - unset (the default): only its own namespace may use it.
+                    - {} (an empty selector): every namespace may use it.
+                    - matchLabels / matchExpressions: the namespaces whose labels match. The
+                      kubernetes.io/metadata.name label names a namespace explicitly.
+
+                  A reference from a namespace it does not select is refused with
+                  Ready=False, reason ConsumerNotAllowed, and no provider call is made for
+                  it. The selector is matched against Namespace labels, so whoever can label
+                  a namespace can widen what that namespace may use (see
+                  docs/cross-namespace-references.md). The selector is operator-side policy:
+                  it is never sent to a provider.
+                properties:
+                  matchExpressions:
+                    description: matchExpressions is a list of label selector requirements.
+                      The requirements are ANDed.
+                    items:
+                      description: |-
+                        A label selector requirement is a selector that contains values, a key, and an operator that
+                        relates the key and values.
+                      properties:
+                        key:
+                          description: key is the label key that the selector applies
+                            to.
+                          type: string
+                        operator:
+                          description: |-
+                            operator represents a key's relationship to a set of values.
+                            Valid operators are In, NotIn, Exists and DoesNotExist.
+                          type: string
+                        values:
+                          description: |-
+                            values is an array of string values. If the operator is In or NotIn,
+                            the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                            the values array must be empty. This array is replaced during a strategic
+                            merge patch.
+                          items:
+                            type: string
+                          type: array
+                          x-kubernetes-list-type: atomic
+                      required:
+                      - key
+                      - operator
+                      type: object
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  matchLabels:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                      map is equivalent to an element of matchExpressions, whose key field is "key", the
+                      operator is "In", and the values array contains only "value". The requirements are ANDed.
+                    type: object
+                type: object
+                x-kubernetes-map-type: atomic
               distribution:
                 description: Distribution contains OS distribution information
                 properties:

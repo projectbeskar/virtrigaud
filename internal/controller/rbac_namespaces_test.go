@@ -41,7 +41,7 @@ const namespacesRBACMarker = `//+kubebuilder:rbac:groups="",resources=namespaces
 var readOnlyVerbs = []string{"get", "list", "watch"}
 
 func TestRBAC_NamespaceMarkersPresent(t *testing.T) {
-	for _, f := range []string{"vmclone_controller.go", "vmmigration_controller.go"} {
+	for _, f := range []string{"vmclone_controller.go", "vmmigration_controller.go", "virtualmachine_controller.go", "vmsnapshot_controller.go"} {
 		src, err := os.ReadFile(f)
 		require.NoError(t, err)
 		assert.Contains(t, string(src), namespacesRBACMarker, f)

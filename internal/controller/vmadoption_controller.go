@@ -407,6 +407,18 @@ func (r *VMAdoptionReconciler) adoptVM(ctx context.Context, provider *infravirtr
 						"vm_name", vmName, "vm_provider", key.String())
 					return nil
 				}
+				// Nor to a VM whose VMClass or VMImage is in another namespace
+				// that does not select this one (spec.consumerNamespaceSelector):
+				// the VirtualMachine controller would refuse to manage it, and
+				// its deletion would still destroy the adopted hypervisor VM.
+				if err := checkVMConsumerRefs(ctx, r.Client, existingVM); err != nil {
+					if isConsumerNotAllowed(err) {
+						logger.Info("Not binding an adopted VirtualMachine that references an ungranted cross-namespace object",
+							"vm_name", vmName, "reason", err.Error())
+						return nil
+					}
+					return fmt.Errorf("check consumer grants of adopted VM %s: %w", vmName, err)
+				}
 				// This is an adopted VM created before the status fix - update status now
 				logger.Info("Fixing Status.ID for existing adopted VM", "vm_name", vmName, "vm_id", vmInfo.ID)
 				existingVM.Status.ID = vmInfo.ID

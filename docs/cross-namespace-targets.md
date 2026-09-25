@@ -130,6 +130,14 @@ namespace would resolve in the target namespace instead:
 For a target in the object's own namespace, these references stay as they
 were.
 
+**The pinned `Provider` and `VMClass` must also share themselves with the
+target namespace.** They live in the source namespace, so the target VM
+references them from another namespace, which needs their
+`spec.consumerNamespaceSelector` to select the target namespace. The clone or
+migration checks this before its provider call and before it creates the target
+VM, and waits with `Ready=False` / `ConsumerNotAllowed` otherwise. See
+[`cross-namespace-references.md`](cross-namespace-references.md).
+
 ### A granted migration's disk is not attached in place
 
 A migration's landing disk is attached in place only when the manager can
@@ -192,3 +200,6 @@ objects.
   Provider.
 - The same-namespace behavior is unchanged, and so is every object that
   doesn't set these fields.
+- **A later release also requires the consumer grant** on the `Provider` and
+  `VMClass` a cross-namespace target references. See the upgrade notes in
+  [`cross-namespace-references.md`](cross-namespace-references.md#upgrade-notes).

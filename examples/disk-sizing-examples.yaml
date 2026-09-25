@@ -1,4 +1,15 @@
 ---
+# Cross-namespace references: the VirtualMachines below live in `default` and
+# reference a Provider, VMClass and VMImage in `virtrigaud-system`. Each of
+# those objects must share itself with `default` via
+# spec.consumerNamespaceSelector (the VMClasses in this file do), or the VMs
+# report Ready=False / ConsumerNotAllowed and nothing is created. For the
+# Provider and VMImage (not defined here), add for example:
+#   consumerNamespaceSelector:
+#     matchLabels:
+#       kubernetes.io/metadata.name: default
+# See docs/cross-namespace-references.md.
+
 # Example: Testing disk size configuration across providers
 # This example demonstrates different disk sizes to verify the fix
 
@@ -9,6 +20,10 @@ metadata:
   name: large-disk-class
   namespace: virtrigaud-system
 spec:
+  # Referenced by VirtualMachines in `default`: share it with that namespace.
+  consumerNamespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: default
   cpu: 2
   memory: 4Gi
   firmware: BIOS
@@ -25,6 +40,10 @@ metadata:
   name: xlarge-disk-class
   namespace: virtrigaud-system
 spec:
+  # Referenced by VirtualMachines in `default`: share it with that namespace.
+  consumerNamespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: default
   cpu: 4
   memory: 8Gi
   firmware: UEFI
@@ -41,6 +60,10 @@ metadata:
   name: small-disk-class
   namespace: virtrigaud-system
 spec:
+  # Referenced by VirtualMachines in `default`: share it with that namespace.
+  consumerNamespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: default
   cpu: 1
   memory: 2Gi
   firmware: BIOS

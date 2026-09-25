@@ -24,6 +24,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -38,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
+	conditions "github.com/projectbeskar/virtrigaud/internal/k8s"
 	"github.com/projectbeskar/virtrigaud/internal/obs/logging"
 	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
@@ -237,6 +239,18 @@ func (r *VMCloneReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		logger.Info("Source VM is not bound through the Provider its spec.providerRef names; not cloning", "vm", sourceKey.Name, "error", err.Error())
 		return r.markPending(ctx, clone, vmRefErrorReason(err), err.Error()), nil
 	}
+
+	// Every cross-namespace Provider / VMClass the clone uses or pins onto its
+	// target must select the namespace that uses it
+	// (spec.consumerNamespaceSelector): the source VM's Provider for this
+	// namespace, and the target VM's references for the target namespace. A
+	// refusal makes no provider call and creates nothing. It is checked on
+	// EVERY reconcile (clone start, task poll and bind all follow), so a
+	// revoked grant stops a clone in flight.
+	if allowed, res, err := r.gateConsumers(ctx, r.Client, clone, sourceVM, targetNamespace); !allowed {
+		return res, err
+	}
+
 	provider := &infrav1beta1.Provider{}
 	if err := r.Get(ctx, providerKey, provider); err != nil {
 		logger.Error(err, "Failed to get provider", "provider", providerKey.Name)
@@ -342,9 +356,14 @@ func (r *VMCloneReconciler) startClone(
 	}
 
 	// The Clone RPC creates a VM named for the target namespace. Re-read the
-	// grant from the API server (not the cache) right before it; nothing that
-	// does I/O runs between this check and the RPC.
+	// grants from the API server (not the cache) right before it — the target
+	// namespace's, and the consumer grants of the Provider and VMClass the
+	// clone uses and pins; nothing that does I/O runs between these checks and
+	// the RPC.
 	if allowed, res, err := r.confirmTargetNamespaceLive(ctx, clone, targetNamespace); !allowed {
+		return res, err
+	}
+	if allowed, res, err := r.gateConsumers(ctx, r.liveReader(), clone, sourceVM, targetNamespace); !allowed {
 		return res, err
 	}
 
@@ -474,9 +493,12 @@ func (r *VMCloneReconciler) bindTargetVM(
 	targetVM := &infrav1beta1.VirtualMachine{}
 	switch err := r.Get(ctx, vmKey, targetVM); {
 	case errors.IsNotFound(err):
-		// Re-read the grant from the API server (not the cache) right before
+		// Re-read the grants from the API server (not the cache) right before
 		// the Create in the target namespace.
 		if allowed, res, liveErr := r.confirmTargetNamespaceLive(ctx, clone, targetNamespace); !allowed {
+			return res, liveErr
+		}
+		if allowed, res, liveErr := r.gateConsumers(ctx, r.liveReader(), clone, sourceVM, targetNamespace); !allowed {
 			return res, liveErr
 		}
 		targetVM = r.buildTargetVM(clone, sourceVM, targetNamespace)
@@ -927,7 +949,11 @@ func (r *VMCloneReconciler) classJSON(ctx context.Context, clone *infrav1beta1.V
 	if err := r.Get(ctx, key, vmClass); err != nil {
 		return ""
 	}
-	data, err := json.Marshal(vmClass.Spec)
+	// spec.consumerNamespaceSelector is operator-side policy, not class data:
+	// it is never sent to a provider.
+	spec := vmClass.Spec
+	spec.ConsumerNamespaceSelector = nil
+	data, err := json.Marshal(spec)
 	if err != nil {
 		return ""
 	}
@@ -977,15 +1003,124 @@ func (r *VMCloneReconciler) updateStatus(ctx context.Context, clone *infrav1beta
 	return nil
 }
 
+// gateConsumers enforces spec.consumerNamespaceSelector for everything the
+// clone uses from another namespace, reading through reader (the cache, or the
+// live APIReader right before a side effect):
+//
+//   - the source VM's Provider, used from this namespace (the Clone RPC, the
+//     task poll and the bind all go through it);
+//   - the references buildTargetVM pins onto the target VirtualMachine — its
+//     Provider and VMClass — used from the target namespace, so a clone never
+//     produces a VirtualMachine that the VirtualMachine controller would
+//     refuse to manage.
+//
+// allowed=true means every grant holds; any ConsumerNotAllowed refusal left by
+// an earlier reconcile is then cleared. Otherwise the clone is marked refused
+// and (result, err) is what the caller returns: a slow recheck (the grant
+// watches re-drive it), or the read error so the controller retries with
+// backoff while failing closed.
+func (r *VMCloneReconciler) gateConsumers(
+	ctx context.Context,
+	reader client.Reader,
+	clone *infrav1beta1.VMClone,
+	sourceVM *infrav1beta1.VirtualMachine,
+	targetNamespace string,
+) (allowed bool, result ctrl.Result, err error) {
+	// The own namespace's Provider needs no grant (and a missing one is
+	// reported by the caller's lookup).
+	if key := vmProviderKey(sourceVM); key.Namespace != clone.Namespace {
+		err = getForConsumer(ctx, reader, key, &infrav1beta1.Provider{}, clone.Namespace)
+	}
+	if err == nil {
+		err = checkVMConsumerRefs(ctx, reader, r.buildTargetVM(clone, sourceVM, targetNamespace))
+	}
+	switch {
+	case isConsumerNotAllowed(err):
+		return false, r.markConsumerNotAllowed(ctx, clone, err), nil
+	case err != nil:
+		logging.FromContext(ctx).Error(err, "Failed to check the consumer grants; not proceeding")
+		return false, ctrl.Result{}, err
+	}
+	if err := r.clearConsumerRefusal(ctx, clone); err != nil {
+		return false, ctrl.Result{}, err
+	}
+	return true, ctrl.Result{}, nil
+}
+
+// markConsumerNotAllowed records that the clone uses (or would pin onto its
+// target) a Provider or VMClass in another namespace that does not select the
+// namespace using it: Ready=False with reason ConsumerNotAllowed. Like the
+// target-namespace refusal it is NOT terminal — a clone that has issued
+// nothing yet waits in Pending, one in flight keeps its phase, task and target
+// ID — and nothing already created is touched. The Warning event is emitted on
+// the transition only, and the recheck is slow.
+func (r *VMCloneReconciler) markConsumerNotAllowed(ctx context.Context, clone *infrav1beta1.VMClone, cause error) ctrl.Result {
+	cause = consumerRefusalCause(cause)
+	before := clone.Status.DeepCopy()
+	if consumerRefusalIsNew(clone.Status.Conditions, cause) {
+		logging.FromContext(ctx).Info("VMClone uses a Provider or VMClass its namespace may not use; not cloning", "error", cause.Error())
+		r.Recorder.Event(clone, corev1.EventTypeWarning, conditions.ReasonConsumerNotAllowed, cause.Error())
+	}
+	if clone.Status.TaskRef == "" && clone.Status.TargetVMID == "" {
+		clone.Status.Phase = infrav1beta1.ClonePhasePending
+	}
+	clone.Status.Message = cause.Error()
+	clone.Status.ObservedGeneration = clone.Generation
+	meta.SetStatusCondition(&clone.Status.Conditions, metav1.Condition{
+		Type:               infrav1beta1.VMCloneConditionReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             conditions.ReasonConsumerNotAllowed,
+		Message:            cause.Error(),
+		ObservedGeneration: clone.Generation,
+	})
+	metrics.RecordError(errReasonConsumerNotAllowed, metrics.ComponentManager)
+	// A recheck of the same refusal changes nothing: don't write it again.
+	if !equality.Semantic.DeepEqual(before, &clone.Status) {
+		_ = r.updateStatus(ctx, clone) //nolint:errcheck // status errors retried next reconcile
+	}
+	return ctrl.Result{RequeueAfter: consumerNotAllowedRetryInterval}
+}
+
+// clearConsumerRefusal removes a ConsumerNotAllowed Ready condition once every
+// grant holds, so the clone does not keep reporting a refusal while it
+// proceeds. It persists immediately and is a no-op when there is nothing to
+// clear.
+func (r *VMCloneReconciler) clearConsumerRefusal(ctx context.Context, clone *infrav1beta1.VMClone) error {
+	if !consumerRefused(clone.Status.Conditions) {
+		return nil
+	}
+	meta.RemoveStatusCondition(&clone.Status.Conditions, infrav1beta1.VMCloneConditionReady)
+	clone.Status.Message = "Cross-namespace access granted; resuming"
+	clone.Status.ObservedGeneration = clone.Generation
+	r.Recorder.Event(clone, corev1.EventTypeNormal, "ConsumerAllowed", clone.Status.Message)
+	return r.updateStatus(ctx, clone)
+}
+
+// clonesForGrantChange returns the unfinished VMClones refused with
+// ConsumerNotAllowed that a consumer-grant change may lift (consumerGrantIndex:
+// the object named in the refusal, or the clone's own or target namespace).
+func (r *VMCloneReconciler) clonesForGrantChange(ctx context.Context, indexValue string) []reconcile.Request {
+	return requestsForGrantChange(ctx, r.Client, &infrav1beta1.VMCloneList{}, indexValue, func(obj client.Object) bool {
+		c, ok := obj.(*infrav1beta1.VMClone)
+		return !ok || c.Status.Phase == infrav1beta1.ClonePhaseReady || c.Status.Phase == infrav1beta1.ClonePhaseFailed
+	})
+}
+
 // SetupWithManager sets up the controller with the Manager. Besides its own
 // VMClones it watches Namespaces, but only for changes to the cross-namespace
 // grant annotation, to re-drive clones whose target namespace just granted or
-// revoked access.
+// revoked access; and consumer-grant changes (Namespace labels, the
+// spec.consumerNamespaceSelector of Providers, VMClasses and VMImages) to
+// re-drive clones refused with ConsumerNotAllowed.
 func (r *VMCloneReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+	if err := indexConsumerGrants(mgr, &infrav1beta1.VMClone{}, cloneConsumerGrantIndexValues); err != nil {
+		return err
+	}
+	b := ctrl.NewControllerManagedBy(mgr).
 		For(&infrav1beta1.VMClone{}).
 		Watches(&corev1.Namespace{},
 			handler.EnqueueRequestsFromMapFunc(r.clonesTargetingNamespace),
-			builder.WithPredicates(allowedSourceNamespacesChanged())).
+			builder.WithPredicates(allowedSourceNamespacesChanged()))
+	return withConsumerGrantWatches(b, r.clonesForGrantChange).
 		Complete(r)
 }

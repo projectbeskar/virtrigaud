@@ -337,6 +337,9 @@ func TestHandleValidatingPhase_CrossNamespaceFailsFast(t *testing.T) {
 		Status: infravirtrigaudiov1beta1.VirtualMachineStatus{ID: "vm-1"},
 	}
 	srcProv := readyProvider("team-a", "src-prov") // different namespace than the migration
+	// Shared with the migration's namespace, so the PVC topology check (not
+	// the consumer grant) is what refuses it.
+	srcProv.Spec.ConsumerNamespaceSelector = &metav1.LabelSelector{}
 	tgtProv := readyProvider("default", "tgt-prov")
 
 	c := fake.NewClientBuilder().WithScheme(scheme).

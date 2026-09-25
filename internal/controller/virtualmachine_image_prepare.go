@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
@@ -98,6 +99,18 @@ func (r *VirtualMachineReconciler) EnsureImageOnProvider(
 	// their own disk and never reference a VMImage; a nil vmImage means the same.
 	if vm.Spec.ImageRef == nil || vmImage == nil {
 		return false, nil
+	}
+
+	// The image and the provider must both be usable from the VM's namespace
+	// (spec.consumerNamespaceSelector). reconcileVM resolved them through
+	// getDependencies, which already refuses an ungranted cross-namespace
+	// reference; re-checking here guarantees that no prepare RPC is sent and no
+	// VMImage status is written for a pair the VM may not use, whoever calls
+	// this. A refusal is returned as a *ConsumerNotAllowedError.
+	for _, obj := range []client.Object{vmImage, provider} {
+		if err := checkConsumer(ctx, r.Client, obj, vm.Namespace); err != nil {
+			return false, err
+		}
 	}
 
 	// Capability gate — no regression for non-preparing providers. We require
@@ -218,7 +231,12 @@ func (r *VirtualMachineReconciler) EnsureImageOnProvider(
 	// what the provider-side parsers consume ({"source":{...},"prepare":{...}}).
 	// TargetName is the VMImage name; an empty StorageHint lets the provider pick
 	// its default storage (datastore / pool / Proxmox storage).
-	imageJSON, jerr := json.Marshal(vmImage.Spec)
+	//
+	// spec.consumerNamespaceSelector is operator-side policy (which namespaces
+	// may use the image), not image data: it is never sent to a provider.
+	imageSpec := vmImage.Spec
+	imageSpec.ConsumerNamespaceSelector = nil
+	imageJSON, jerr := json.Marshal(imageSpec)
 	if jerr != nil {
 		return false, fmt.Errorf("marshal VMImage %s spec for prepare: %w", vmImage.Name, jerr)
 	}

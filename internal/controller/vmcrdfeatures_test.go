@@ -41,19 +41,39 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 )
 
-// These tests pin the VirtualMachine CRD feature check: the generated CRD has
-// both provider-binding features, an older CRD (without either) is reported
-// missing and fails readiness, an unreadable CRD is unknown and does not, and
-// the manager is granted get on exactly that one CRD.
+// These tests pin the CRD security-feature check: the generated
+// VirtualMachine CRD has both provider-binding features and the generated
+// Provider, VMClass and VMImage CRDs have spec.consumerNamespaceSelector; an
+// older CRD (without any of them) is reported missing and fails readiness, an
+// unreadable CRD is unknown and does not, and the manager is granted get on
+// exactly those four CRDs.
 
-// generatedVMCRD loads the generated VirtualMachine CRD from config/crd/bases.
-func generatedVMCRD(t *testing.T) *unstructured.Unstructured {
+// generatedCRD loads a generated CRD (by its metadata.name) from
+// config/crd/bases.
+func generatedCRD(t *testing.T, name string) *unstructured.Unstructured {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("..", "..", "config", "crd", "bases", "infra.virtrigaud.io_virtualmachines.yaml"))
+	plural, group, ok := strings.Cut(name, ".")
+	require.True(t, ok, name)
+	raw, err := os.ReadFile(filepath.Join("..", "..", "config", "crd", "bases", group+"_"+plural+".yaml"))
 	require.NoError(t, err)
 	obj := map[string]any{}
 	require.NoError(t, yaml.Unmarshal(raw, &obj))
 	return &unstructured.Unstructured{Object: obj}
+}
+
+// generatedVMCRD loads the generated VirtualMachine CRD from config/crd/bases.
+func generatedVMCRD(t *testing.T) *unstructured.Unstructured {
+	t.Helper()
+	return generatedCRD(t, VirtualMachineCRDName)
+}
+
+// olderConsumerCRD returns the generated CRD name without
+// spec.consumerNamespaceSelector.
+func olderConsumerCRD(t *testing.T, name string) *unstructured.Unstructured {
+	t.Helper()
+	crd := generatedCRD(t, name)
+	unstructured.RemoveNestedField(v1beta1Schema(t, crd), "properties", "spec", "properties", "consumerNamespaceSelector")
+	return crd
 }
 
 // v1beta1Schema returns the v1beta1 openAPIV3Schema map of crd, in place (the
@@ -111,27 +131,56 @@ func TestMissingVMCRDFeatures(t *testing.T) {
 	assert.Len(t, missing, 2)
 }
 
-// stubCRDReader answers Get for the VirtualMachine CRD with crd or err.
+func TestMissingConsumerSelector(t *testing.T) {
+	for _, name := range []string{ProviderCRDName, VMClassCRDName, VMImageCRDName} {
+		missing, err := missingConsumerSelector(generatedCRD(t, name))
+		require.NoError(t, err)
+		assert.Empty(t, missing, "the generated %s CRD has spec.consumerNamespaceSelector", name)
+
+		missing, err = missingConsumerSelector(olderConsumerCRD(t, name))
+		require.NoError(t, err)
+		assert.Equal(t, []string{crdFeatureConsumerSelector}, missing, name)
+	}
+}
+
+// stubCRDReader answers Get for the VirtualMachine CRD with crd or err, and
+// for the Provider, VMClass and VMImage CRDs with others[name] (the generated
+// CRD when unset) or otherErr.
 type stubCRDReader struct {
 	client.Reader
-	crd   *unstructured.Unstructured
-	err   error
-	calls int
+	crd      *unstructured.Unstructured
+	err      error
+	others   map[string]*unstructured.Unstructured
+	otherErr error
+	calls    int
+	t        *testing.T
 }
 
 func (s *stubCRDReader) Get(_ context.Context, key client.ObjectKey, obj client.Object, _ ...client.GetOption) error {
 	s.calls++
-	if key.Name != VirtualMachineCRDName {
+	var crd *unstructured.Unstructured
+	switch key.Name {
+	case VirtualMachineCRDName:
+		if s.err != nil {
+			return s.err
+		}
+		crd = s.crd
+	case ProviderCRDName, VMClassCRDName, VMImageCRDName:
+		if s.otherErr != nil {
+			return s.otherErr
+		}
+		crd = s.others[key.Name]
+		if crd == nil {
+			crd = generatedCRD(s.t, key.Name)
+		}
+	default:
 		return errors.New("unexpected key " + key.String())
-	}
-	if s.err != nil {
-		return s.err
 	}
 	u, ok := obj.(*unstructured.Unstructured)
 	if !ok {
 		return errors.New("expected unstructured")
 	}
-	u.Object = s.crd.DeepCopy().Object
+	u.Object = crd.DeepCopy().Object
 	return nil
 }
 
@@ -152,9 +201,20 @@ func TestVMCRDFeatureChecker_States(t *testing.T) {
 		"CRD absent":                 {&stubCRDReader{err: apierrors.NewNotFound(crdGR, VirtualMachineCRDName)}, metrics.CRDFeaturesMissing, false},
 		"forbidden (namespace RBAC)": {&stubCRDReader{err: apierrors.NewForbidden(crdGR, VirtualMachineCRDName, errors.New("no"))}, metrics.CRDFeaturesUnknown, true},
 		"transient on first read":    {&stubCRDReader{err: errors.New("connection refused")}, metrics.CRDFeaturesUnknown, true},
+		"older Provider CRD": {&stubCRDReader{crd: generatedVMCRD(t),
+			others: map[string]*unstructured.Unstructured{ProviderCRDName: olderConsumerCRD(t, ProviderCRDName)}}, metrics.CRDFeaturesMissing, false},
+		"older VMClass CRD": {&stubCRDReader{crd: generatedVMCRD(t),
+			others: map[string]*unstructured.Unstructured{VMClassCRDName: olderConsumerCRD(t, VMClassCRDName)}}, metrics.CRDFeaturesMissing, false},
+		"older VMImage CRD": {&stubCRDReader{crd: generatedVMCRD(t),
+			others: map[string]*unstructured.Unstructured{VMImageCRDName: olderConsumerCRD(t, VMImageCRDName)}}, metrics.CRDFeaturesMissing, false},
+		"consumer CRDs forbidden only": {&stubCRDReader{crd: generatedVMCRD(t),
+			otherErr: apierrors.NewForbidden(crdGR, ProviderCRDName, errors.New("no"))}, metrics.CRDFeaturesUnknown, true},
+		"missing wins over forbidden": {&stubCRDReader{crd: olderVMCRD(t, true, false),
+			otherErr: apierrors.NewForbidden(crdGR, ProviderCRDName, errors.New("no"))}, metrics.CRDFeaturesMissing, false},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
+			tc.reader.t = t
 			c := NewVMCRDFeatureChecker(tc.reader)
 			state, _ := c.Evaluate(context.Background())
 			assert.Equal(t, tc.wantState, state)
@@ -167,23 +227,32 @@ func TestVMCRDFeatureChecker_States(t *testing.T) {
 			assert.ErrorIs(t, err, ErrVMCRDSecurityFeaturesMissing)
 		})
 	}
+
+	t.Run("the missing consumer selector is named with its CRD", func(t *testing.T) {
+		c := NewVMCRDFeatureChecker(&stubCRDReader{t: t, crd: generatedVMCRD(t),
+			others: map[string]*unstructured.Unstructured{VMImageCRDName: olderConsumerCRD(t, VMImageCRDName)}})
+		_, missing := c.Evaluate(context.Background())
+		assert.Equal(t, []string{VMImageCRDName + ": " + crdFeatureConsumerSelector}, missing)
+		assert.Contains(t, readyzErr(c).Error(), VMImageCRDName)
+	})
 }
 
 func TestVMCRDFeatureChecker_CachesAndKeepsStateOnTransientErrors(t *testing.T) {
 	now := time.Unix(1_000, 0)
-	reader := &stubCRDReader{crd: olderVMCRD(t, true, false)}
+	reader := &stubCRDReader{t: t, crd: olderVMCRD(t, true, false)}
 	c := NewVMCRDFeatureChecker(reader)
 	c.now = func() time.Time { return now }
+	perCheck := len(securityCRDs)
 
 	require.Error(t, readyzErr(c))
 	require.Error(t, readyzErr(c))
-	assert.Equal(t, 1, reader.calls, "the result is reused within the interval")
+	assert.Equal(t, perCheck, reader.calls, "the result is reused within the interval")
 
 	// A transient read error keeps the previous (missing) state.
 	reader.err = errors.New("etcd timeout")
 	now = now.Add(2 * time.Minute)
 	require.Error(t, readyzErr(c))
-	assert.Equal(t, 2, reader.calls)
+	assert.Equal(t, perCheck+1, reader.calls, "the check stops at the first transient error")
 
 	// Once the CRD is upgraded, readiness recovers at the next check.
 	reader.err = nil
@@ -194,7 +263,8 @@ func TestVMCRDFeatureChecker_CachesAndKeepsStateOnTransientErrors(t *testing.T) 
 	assert.Equal(t, metrics.CRDFeaturesVerified, state)
 }
 
-func TestRBAC_VMCRDReadIsGetOnOneCRD(t *testing.T) {
+func TestRBAC_CRDReadIsGetOnTheFourCheckedCRDs(t *testing.T) {
+	checked := []string{VirtualMachineCRDName, ProviderCRDName, VMClassCRDName, VMImageCRDName}
 	raw, err := os.ReadFile(filepath.Join("..", "..", "config", "rbac", "role.yaml"))
 	require.NoError(t, err)
 	role := &rbacv1.ClusterRole{}
@@ -207,7 +277,7 @@ func TestRBAC_VMCRDReadIsGetOnOneCRD(t *testing.T) {
 	}
 	require.Len(t, rules, 1)
 	assert.Equal(t, []string{"get"}, rules[0].Verbs)
-	assert.Equal(t, []string{VirtualMachineCRDName}, rules[0].ResourceNames)
+	assert.ElementsMatch(t, checked, rules[0].ResourceNames)
 
 	chart, err := os.ReadFile(filepath.Join("..", "..", "charts", "virtrigaud", "templates", "manager-rbac.yaml"))
 	require.NoError(t, err)
@@ -219,6 +289,9 @@ func TestRBAC_VMCRDReadIsGetOnOneCRD(t *testing.T) {
 	clusterVerbs := chartRuleVerbs(t, tpl[clusterIdx:roleIdx], "customresourcedefinitions")
 	require.Len(t, clusterVerbs, 1, "the ClusterRole grants the CRD read")
 	assert.Equal(t, []string{"get"}, clusterVerbs[0])
+	for _, name := range checked {
+		assert.Contains(t, tpl[clusterIdx:roleIdx], "\n  - "+name+"\n", "the ClusterRole names %s", name)
+	}
 	assert.Contains(t, tpl[clusterIdx:roleIdx], "  resourceNames:\n  - "+VirtualMachineCRDName)
 	assert.Empty(t, chartRuleVerbs(t, tpl[roleIdx:], "customresourcedefinitions"),
 		"a namespaced Role cannot grant a cluster-scoped resource")

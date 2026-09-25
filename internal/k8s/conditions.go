@@ -151,6 +151,14 @@ const ReasonPlacementTopologyMismatch = "PlacementTopologyMismatch"
 // rule existed, or a Provider deleted and re-created under the same name.
 const ReasonProviderRefMismatch = "ProviderRefMismatch"
 
+// ReasonConsumerNotAllowed indicates that an object references a Provider,
+// VMClass or VMImage in ANOTHER namespace whose spec.consumerNamespaceSelector
+// is unset or does not select the referencing namespace. No provider call is
+// made through, or for, the reference while it holds; it is lifted by whoever
+// can set the referenced object's selector (or label the referencing
+// namespace so an existing selector matches it).
+const ReasonConsumerNotAllowed = "ConsumerNotAllowed"
+
 // ReasonVMMissingOnHost indicates that a clustered VM's bound host reports the
 // hypervisor VM does not exist (ADR-0007 Addendum A, A4). The operator does NOT
 // re-create it — neither on the bound host nor elsewhere — because without
