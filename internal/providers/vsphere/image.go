@@ -861,7 +861,7 @@ func (p *Provider) downloadOVA(ctx context.Context, ovaURL string) (localPath st
 		cleanup()
 		return "", noop, p.forbiddenSourceError(ctx, shownURL, err)
 	}
-	client := imageDownloadClient(p.allowLoopbackImageSources)
+	client := imageDownloadClient(p.allowLoopbackImageSources, p.imageProxy)
 	defer client.CloseIdleConnections()
 	resp, err := client.Do(req)
 	if err != nil {
