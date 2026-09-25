@@ -129,6 +129,16 @@ verifies artifacts by that identity advertises
 the providers, only the mock implements it so far; the manager does not send the identity
 yet, so the limitation above still applies.
 
+The source digest follows ADR-0009's Q7 rule, "location yes, transport no". It covers
+every `spec.source` field that says what the image is or where it is placed: URLs and
+paths, the expected checksum and algorithm, formats, and the location fields (libvirt
+`storagePool`, Proxmox `storage` and `node`). It excludes the fields that only change how
+the bytes are fetched, or by whom: `http.timeout`, `http.headers`,
+`http.authentication`, `registry.pullSecretRef` (a credential reference) and
+`vsphere.providerRef` (which Provider imports the image). Changing an excluded field
+never causes a re-import. `spec.metadata`, `spec.distribution`, `spec.prepare` and
+`spec.consumerNamespaceSelector` are outside the digest.
+
 ## `spec.prepare.onMissing`
 
 `VMImageSpec.prepare.onMissing` gates the behaviour when the image is not yet prepared on a
