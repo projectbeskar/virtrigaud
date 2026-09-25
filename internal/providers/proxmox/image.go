@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	v1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
+	"github.com/projectbeskar/virtrigaud/internal/imageartifact"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/providers/proxmox/pveapi"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
@@ -30,20 +31,26 @@ import (
 )
 
 const (
-	// defaultProxmoxStorage is the Proxmox storage used for image preparation when
-	// the caller supplies neither a storage hint nor a source-level storage. It is
-	// the last-resort fallback; local-lvm is the default file/block storage present
-	// on a stock single-node PVE install.
-	defaultProxmoxStorage = "local-lvm"
-
-	// defaultProxmoxImageFormat is the disk format assumed for an imported image
-	// when the source omits one. It matches the v1beta1 ProxmoxImageSource
-	// kubebuilder default.
-	defaultProxmoxImageFormat = "qcow2"
+	// proxmoxProviderType is the provider_type label of this provider's metrics
+	// (the ADR-0009 D7 legacy-request counter).
+	proxmoxProviderType = "proxmox"
 
 	// proxmoxTemplateFlag is the value PVE sets on the `template` field of a VM
 	// that has been converted to a template.
 	proxmoxTemplateFlag = 1
+
+	// urlImportUnsupportedMessage is the InvalidSpec message of every Proxmox URL
+	// image import (ADR-0009 D10), with or without an image identity. It reaches
+	// the VMImage status (reason InvalidSource), so it names no URL, storage,
+	// node or other object: only what the image's owner can do instead.
+	urlImportUnsupportedMessage = "Proxmox URL image import (source.http) is not supported in this release: " +
+		"it does not yet produce a usable template (ADR-0009 Slice 6). Create the template on " +
+		"Proxmox VE and reference it with source.proxmox.templateID"
+
+	// emptySourceMessage is the InvalidSpec message of a request whose image
+	// JSON carries no Proxmox source this provider can serve.
+	emptySourceMessage = "ImagePrepare requires a Proxmox image source that references an existing template " +
+		"(source.proxmox.templateID or source.proxmox.templateName)"
 )
 
 // proxmoxImageSource is the normalized, provider-internal view of a VMImage's
@@ -54,8 +61,9 @@ const (
 //
 //   - A reference to an EXISTING template (TemplateID or TemplateName set): the
 //     template is verified to exist; nothing is imported.
-//   - An IMPORT request (URL set): a disk image is downloaded into the target
-//     storage and a template named after the request's TargetName is prepared.
+//   - An IMPORT request (URL set, no template reference): refused with
+//     InvalidSpec in this release (ADR-0009 D10), because the import never
+//     produced a usable template. ADR-0009 Slice 6 implements it.
 //
 // All fields are optional; the caller enforces that at least one usable source is
 // present and applies the documented precedence.
@@ -66,18 +74,19 @@ type proxmoxImageSource struct {
 	// TemplateName references an existing Proxmox template by name. When set an
 	// existing template is referenced and no import is performed.
 	TemplateName string
-	// URL is an HTTP(S) location of a disk image to import (source.http.url). It is
-	// the only source that performs a real import.
+	// URL is an HTTP(S) location of a disk image to import (source.http.url).
+	// Without a template reference it makes the request an import, which is
+	// refused in this release (ADR-0009 D10). It is never logged: a URL may
+	// carry a token in its query string.
 	URL string
-	// Storage is the source-preferred Proxmox storage to import into; overridden by
-	// the request's StorageHint when that is set, and falls back to
-	// defaultProxmoxStorage.
+	// Storage is the source-preferred Proxmox storage to import into. Parsed for
+	// the ADR-0009 Slice 6 import; not used until then.
 	Storage string
 	// Node is the source-preferred Proxmox node the template lives on / is imported
 	// to; falls back to the client's FindNode default.
 	Node string
-	// Format is the disk format of the imported image (raw/qcow2/vmdk); defaults to
-	// defaultProxmoxImageFormat when unset.
+	// Format is the disk format of the imported image (raw/qcow2/vmdk). Parsed
+	// for the ADR-0009 Slice 6 import; not used until then.
 	Format string
 }
 
@@ -173,21 +182,6 @@ func parseProxmoxImageSource(imageJSON string) proxmoxImageSource {
 	return src
 }
 
-// resolveImageStorage selects the Proxmox storage to import into, in priority
-// order: the request StorageHint, then source.proxmox.storage, then the provider
-// default. This mirrors the libvirt/vSphere hint-or-default behavior while
-// additionally honoring the image's own storage preference.
-func resolveImageStorage(storageHint, sourceStorage string) string {
-	switch {
-	case strings.TrimSpace(storageHint) != "":
-		return strings.TrimSpace(storageHint)
-	case strings.TrimSpace(sourceStorage) != "":
-		return strings.TrimSpace(sourceStorage)
-	default:
-		return defaultProxmoxStorage
-	}
-}
-
 // resolveImageNode selects the Proxmox node, preferring the source-supplied node
 // and falling back to the client's FindNode default. A FindNode failure is only
 // surfaced when no source node was given, so an explicit node short-circuits node
@@ -203,67 +197,86 @@ func (p *Provider) resolveImageNode(ctx context.Context, sourceNode string) (str
 	return node, nil
 }
 
-// ImagePrepare implements the ProviderServer interface. It prepares a Proxmox
-// template named req.TargetName from the image source encoded in req.ImageJson,
-// honoring the source kinds in precedence order:
+// ImagePrepare implements the ProviderServer interface (ADR-0009 D7, D10).
 //
-//  1. source.proxmox.{templateID,templateName}: verify-only. The referenced
-//     template must already exist on the node; if found, success; if missing, an
-//     honest NotFound error. No import.
-//  2. source.http.url: the real import. Requires a non-empty TargetName.
-//     Idempotency-gated: if a template named TargetName already exists, it is a
-//     no-op success; otherwise the image is downloaded into the resolved storage
-//     and prepared as the named template.
+// The request is validated first with imageartifact.ParseRequest, so a
+// malformed request is refused (InvalidArgument) before anything else. A legacy
+// request (no image identity, a bare target_name, from a manager older than
+// ADR-0009) then emits the deprecation signal (a WARN log and one increment of
+// virtrigaud_provider_image_prepare_legacy_requests_total{provider_type="proxmox"})
+// and is served exactly like an identity request: this provider has no working
+// bare-name path to keep, so in neither mode does it find, reuse or create
+// anything by the target name.
 //
-// The import is driven by a PVE task, so the returned ImagePrepareResponse
-// carries the task ref when the API reports one (the controller polls it); a
-// verify-only or idempotent no-op returns an empty Task, which the controller
-// treats as "completed synchronously" — consistent with the libvirt and vSphere
-// providers. In every case prepared_image_id is the template's name/VMID, which
-// is deterministic and known at trigger time even on the async import path — so
-// the manager can stamp it immediately and create VMs from the prepared template
-// without re-resolving the source (issue #154, PR-6 / #214). prepared_image_path
-// is empty: Proxmox addresses templates by name/VMID, not an on-disk path.
+// The image source in req.ImageJson is served by kind, in precedence order:
+//
+//  1. source.proxmox.{templateID,templateName}: verify-only, unchanged by
+//     ADR-0009 (an explicit reference to an existing template). The template
+//     must already exist on the node: if found, success with prepared_image_id
+//     set to its VMID or name; if missing, an honest NotFound. No import, no
+//     task and no artifact echo (nothing was prepared or stamped). The manager
+//     never sends a reference-style source to a prepare
+//     (imageSourceNeedsPrepare); this path answers direct callers and older
+//     managers exactly as before.
+//  2. source.http.url (or the flat contracts.VMImage URL): refused with
+//     InvalidSpec (urlImportUnsupportedMessage) before any PVE call, with or
+//     without an identity (D10). The pre-ADR import only downloaded a file
+//     named after the bare target name, never turned it into a template VM,
+//     and reported another party's same-named template as "prepared".
+//     ADR-0009 Slice 6 implements the import with stamped template VMs that
+//     are found only by tag and stamp in the provider's own PVE pool.
+//
+// Anything else is InvalidSpec. The provider still advertises
+// supports_image_artifact_identity (capabilities.go): the capability means the
+// provider never reuses a prepared-image artifact by bare name, which holds,
+// and it lets the manager deliver this honest InvalidSpec to the VMImage
+// instead of holding it for a provider upgrade that would change nothing.
 func (p *Provider) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepareRequest) (*providerv1.ImagePrepareResponse, error) {
-	if p.client == nil {
-		return nil, errors.NewUnavailable("PVE client not configured", nil)
+	parsed, err := imageartifact.ParseRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	if parsed.Mode == imageartifact.ModeLegacy {
+		imageartifact.SignalLegacyRequest(ctx, p.logger, proxmoxProviderType, parsed.LegacyTargetName)
 	}
 
-	targetName := strings.TrimSpace(req.GetTargetName())
 	src := parseProxmoxImageSource(req.GetImageJson())
 
-	p.logger.Info("ImagePrepare: starting",
-		"target_name", targetName,
+	logAttrs := []any{
+		"identity", parsed.Mode == imageartifact.ModeIdentity,
 		"has_template_id", src.TemplateID != nil,
 		"has_template_name", src.TemplateName != "",
 		"has_url", src.URL != "",
-		"storage_hint", req.GetStorageHint(),
-	)
+	}
+	if parsed.Mode == imageartifact.ModeIdentity {
+		logAttrs = append(logAttrs,
+			"image", parsed.Image.Namespace+"/"+parsed.Image.Name, "image_uid", parsed.Image.UID)
+	} else {
+		logAttrs = append(logAttrs, "target_name", parsed.LegacyTargetName)
+	}
+	p.logger.InfoContext(ctx, "ImagePrepare: starting", logAttrs...)
 
 	if src.isEmpty() {
-		return nil, errors.NewInvalidSpec(
-			"ImagePrepare requires a Proxmox image source with an existing template " +
-				"(source.proxmox.templateID / source.proxmox.templateName) or an import URL " +
-				"(source.http.url)")
+		return nil, errors.NewInvalidSpec(emptySourceMessage)
 	}
 
+	// URL import guard (ADR-0009 D10): refuse before any PVE call, in either
+	// request mode. Never fall back to a lookup or a download by bare name.
+	if !src.referencesExistingTemplate() {
+		p.logger.WarnContext(ctx, "ImagePrepare: refusing a Proxmox URL image import, which is not supported in this release (ADR-0009 D10)",
+			logAttrs...)
+		return nil, errors.NewInvalidSpec(urlImportUnsupportedMessage)
+	}
+
+	// Verify-only path: an existing template is referenced; never import.
+	if p.client == nil {
+		return nil, errors.NewUnavailable("PVE client not configured", nil)
+	}
 	node, err := p.resolveImageNode(ctx, src.Node)
 	if err != nil {
 		return nil, err
 	}
-
-	// Verify-only path: an existing template is referenced; never import.
-	if src.referencesExistingTemplate() {
-		return p.imagePrepareVerifyTemplate(ctx, node, src)
-	}
-
-	// Import path: source.http.url. A target name is mandatory — never fabricate
-	// one from the URL basename.
-	if targetName == "" {
-		return nil, errors.NewInvalidSpec(
-			"ImagePrepare target name is required when importing from a URL (source.http.url)")
-	}
-	return p.imagePrepareImport(ctx, node, targetName, src, req.GetStorageHint())
+	return p.imagePrepareVerifyTemplate(ctx, node, src)
 }
 
 // imagePrepareVerifyTemplate implements the existing-template source: the
@@ -310,6 +323,13 @@ func (p *Provider) imagePrepareVerifyTemplate(ctx context.Context, node string, 
 // findTemplateByName returns the template VM matching name on the node, or nil if
 // none is found. Only VMs flagged as templates (template=1) are considered, so a
 // running VM that merely shares the name does not satisfy a template reference.
+//
+// It serves ONLY the reference-style source.proxmox.templateName, an explicit
+// reference the image's owner wrote. It must never be used to find, reuse or
+// adopt a prepared-image artifact: PVE names are not unique and a Proxmox
+// artifact name is not disjoint from other names, so artifacts are found only
+// by tag and stamp inside the provider's own PVE pool (ADR-0009 D5, Slice 6;
+// imageartifact.NameRuleProxmox).
 func (p *Provider) findTemplateByName(ctx context.Context, node, name string) (*pveapi.VM, error) {
 	vms, err := p.client.ListVMs(ctx, node)
 	if err != nil {
@@ -326,58 +346,11 @@ func (p *Provider) findTemplateByName(ctx context.Context, node, name string) (*
 	return nil, nil
 }
 
-// imagePrepareImport implements the source.http.url import path. It is
-// idempotency-gated first: if a template named targetName already exists on the
-// node, it returns success without importing. Otherwise it resolves the target
-// storage and asks PVE to download/convert the image into a template named
-// targetName.
-func (p *Provider) imagePrepareImport(ctx context.Context, node, targetName string, src proxmoxImageSource, storageHint string) (*providerv1.ImagePrepareResponse, error) {
-	// Idempotency gate (load-bearing): a re-run must never re-import. If a template
-	// named targetName already exists on the node, we are done — the prepared image
-	// is that template, addressed by name.
-	existing, err := p.findTemplateByName(ctx, node, targetName)
-	if err != nil {
-		return nil, err
-	}
-	if existing != nil {
-		p.logger.Info("ImagePrepare: target template already exists; nothing to do",
-			"node", node, "target_name", targetName, "template_id", existing.VMID)
-		return imagePrepareDone(targetName), nil
-	}
-
-	storage := resolveImageStorage(storageHint, src.Storage)
-	format := strings.TrimSpace(src.Format)
-	if format == "" {
-		format = defaultProxmoxImageFormat
-	}
-
-	p.logger.Info("ImagePrepare: importing image into template",
-		"node", node, "target_name", targetName, "storage", storage,
-		"format", format, "url", src.URL)
-
-	taskID, err := p.client.PrepareImage(ctx, node, storage, src.URL, targetName, format)
-	if err != nil {
-		return nil, errors.NewInternal(
-			fmt.Sprintf("ImagePrepare: import image %q as template %q", src.URL, targetName), err)
-	}
-
-	// The prepared template's name is deterministic and known here — populate
-	// prepared_image_id in the SAME response as the task ref so the manager can
-	// stamp the location now, even though the PVE task is still running (issue
-	// #154, PR-6 / #214). The manager keeps Available=false until the task
-	// completes, but it never has to re-discover the template name.
-	result := imagePrepareDone(targetName)
-	if taskID != "" {
-		result.Task = &providerv1.TaskRef{Id: taskID}
-	}
-	return result, nil
-}
-
 // imagePrepareDone builds an ImagePrepareResponse whose prepared_image_id is the
-// Proxmox template's name/VMID. prepared_image_path is left empty because Proxmox
-// clones templates by name/VMID, not an on-disk path the manager consumes. The
-// Task is left nil; callers populate it on the async import path (issue #154,
-// PR-6 / #214).
+// referenced Proxmox template's name/VMID. prepared_image_path is left empty
+// because Proxmox clones templates by name/VMID, not an on-disk path the manager
+// consumes. There is no Task (verification is synchronous) and no artifact echo
+// (a referenced template is not a prepared, stamped artifact).
 func imagePrepareDone(templateRef string) *providerv1.ImagePrepareResponse {
 	return &providerv1.ImagePrepareResponse{PreparedImageId: templateRef}
 }

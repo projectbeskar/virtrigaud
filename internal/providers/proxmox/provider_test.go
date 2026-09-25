@@ -558,107 +558,8 @@ func TestProxmoxProvider_ImagePrepare_MissingTemplateID(t *testing.T) {
 	assert.Equal(t, codes.NotFound, imagePrepareGRPCCode(t, err))
 }
 
-// TestProxmoxProvider_ImagePrepare_ImportFromURL verifies the source.http.url
-// import path issues the expected PVE download-url call with the target_name,
-// resolved storage, and content=import propagated.
-func TestProxmoxProvider_ImagePrepare_ImportFromURL(t *testing.T) {
-	server, endpoint, err := pvefake.StartFakeServer()
-	require.NoError(t, err)
-	provider := createTestProvider(endpoint)
-	ctx := context.Background()
-
-	const imgURL = "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img"
-	resp, err := provider.ImagePrepare(ctx, &providerv1.ImagePrepareRequest{
-		ImageJson:   `{"source":{"http":{"url":"` + imgURL + `"}}}`,
-		TargetName:  "jammy-base",
-		StorageHint: "local-lvm",
-	})
-	require.NoError(t, err)
-	require.NotNil(t, resp.Task, "import must return a task to poll")
-	// Async-location-at-trigger (#214): the prepared template name is deterministic
-	// and returned in the SAME response as the task ref, before the task completes.
-	assert.Equal(t, "jammy-base", resp.GetPreparedImageId(),
-		"async import reports the prepared template id alongside the task ref")
-	assert.Empty(t, resp.GetPreparedImagePath())
-
-	dl := server.LastDownloadRequest()
-	require.NotNil(t, dl, "import must POST a download-url request")
-	assert.Equal(t, "pve", dl.Node)
-	assert.Equal(t, "local-lvm", dl.Storage)
-	assert.Equal(t, "import", dl.Content, "cloud image is imported as a disk, not an ISO")
-	assert.Equal(t, "jammy-base.qcow2", dl.Filename, "filename derives from target_name + format")
-	assert.Equal(t, imgURL, dl.URL)
-
-	err = waitForTask(ctx, provider, resp.Task.Id)
-	require.NoError(t, err)
-}
-
-// TestProxmoxProvider_ImagePrepare_StoragePrecedence verifies storage resolution:
-// the request StorageHint wins over source.proxmox.storage, which wins over the
-// local-lvm default.
-func TestProxmoxProvider_ImagePrepare_StoragePrecedence(t *testing.T) {
-	ctx := context.Background()
-	const imgURL = "https://images.example.com/base.img"
-
-	t.Run("hint wins over source storage", func(t *testing.T) {
-		server, endpoint, err := pvefake.StartFakeServer()
-		require.NoError(t, err)
-		provider := createTestProvider(endpoint)
-
-		_, err = provider.ImagePrepare(ctx, &providerv1.ImagePrepareRequest{
-			ImageJson:   `{"source":{"proxmox":{"storage":"src-store"},"http":{"url":"` + imgURL + `"}}}`,
-			TargetName:  "p1",
-			StorageHint: "hint-store",
-		})
-		require.NoError(t, err)
-		require.NotNil(t, server.LastDownloadRequest())
-		assert.Equal(t, "hint-store", server.LastDownloadRequest().Storage)
-	})
-
-	t.Run("source storage wins over default", func(t *testing.T) {
-		server, endpoint, err := pvefake.StartFakeServer()
-		require.NoError(t, err)
-		provider := createTestProvider(endpoint)
-
-		_, err = provider.ImagePrepare(ctx, &providerv1.ImagePrepareRequest{
-			ImageJson:  `{"source":{"proxmox":{"storage":"src-store"},"http":{"url":"` + imgURL + `"}}}`,
-			TargetName: "p2",
-		})
-		require.NoError(t, err)
-		require.NotNil(t, server.LastDownloadRequest())
-		assert.Equal(t, "src-store", server.LastDownloadRequest().Storage)
-	})
-
-	t.Run("default when neither set", func(t *testing.T) {
-		server, endpoint, err := pvefake.StartFakeServer()
-		require.NoError(t, err)
-		provider := createTestProvider(endpoint)
-
-		_, err = provider.ImagePrepare(ctx, &providerv1.ImagePrepareRequest{
-			ImageJson:  `{"source":{"http":{"url":"` + imgURL + `"}}}`,
-			TargetName: "p3",
-		})
-		require.NoError(t, err)
-		require.NotNil(t, server.LastDownloadRequest())
-		assert.Equal(t, "local-lvm", server.LastDownloadRequest().Storage)
-	})
-}
-
-// TestProxmoxProvider_ImagePrepare_ImportRequiresTargetName verifies the import
-// path refuses to fabricate a name from the URL when target_name is empty.
-func TestProxmoxProvider_ImagePrepare_ImportRequiresTargetName(t *testing.T) {
-	server, endpoint, err := pvefake.StartFakeServer()
-	require.NoError(t, err)
-	provider := createTestProvider(endpoint)
-	ctx := context.Background()
-
-	_, err = provider.ImagePrepare(ctx, &providerv1.ImagePrepareRequest{
-		ImageJson:  `{"source":{"http":{"url":"https://images.example.com/base.img"}}}`,
-		TargetName: "",
-	})
-	assert.Equal(t, codes.InvalidArgument, imagePrepareGRPCCode(t, err))
-	assert.Nil(t, server.LastDownloadRequest(), "no download without a target name")
-}
+// The source.http.url import is refused in this release (ADR-0009 D10): see
+// image_guard_test.go for the guard, the legacy signal and request validation.
 
 // TestProxmoxProvider_ImagePrepare_EmptySource verifies that an empty or
 // source-less spec yields InvalidSpec rather than a fabricated success.
@@ -683,25 +584,6 @@ func TestProxmoxProvider_ImagePrepare_EmptySource(t *testing.T) {
 		})
 	}
 	assert.Nil(t, server.LastDownloadRequest())
-}
-
-// TestProxmoxProvider_ImagePrepare_Idempotent verifies that importing to a
-// target_name that already exists as a template is a no-op success (no download).
-func TestProxmoxProvider_ImagePrepare_Idempotent(t *testing.T) {
-	server, endpoint, err := pvefake.StartFakeServer()
-	require.NoError(t, err)
-	provider := createTestProvider(endpoint)
-	ctx := context.Background()
-
-	// ubuntu-22-template already exists as a template in the seed data; importing
-	// to that name must skip the download entirely.
-	resp, err := provider.ImagePrepare(ctx, &providerv1.ImagePrepareRequest{
-		ImageJson:  `{"source":{"http":{"url":"https://images.example.com/base.img"}}}`,
-		TargetName: "ubuntu-22-template",
-	})
-	require.NoError(t, err)
-	assert.Nil(t, resp.Task, "idempotent no-op must not return a task")
-	assert.Nil(t, server.LastDownloadRequest(), "idempotent no-op must not download")
 }
 
 func TestProxmoxProvider_MultiNIC(t *testing.T) {

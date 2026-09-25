@@ -30,7 +30,19 @@ func GetProviderCapabilities() *capabilities.Manager {
 		LinkedClones().
 		OnlineReconfigure().
 		OnlineDiskExpansion().
+		// ImageImport routes import-style VMImage sources (source.http) to
+		// ImagePrepare, which in this release refuses them with InvalidSpec
+		// (ADR-0009 D10): the Proxmox URL import never produced a usable
+		// template. Advertising it lets that honest refusal reach the VMImage
+		// (reason InvalidSource). Without it the manager would skip the
+		// prepare and send the unprepared source straight to Create.
 		ImageImport().
+		// ImageArtifactIdentity: this provider never reuses a prepared-image
+		// artifact by bare name (it prepares none until ADR-0009 Slice 6), and
+		// refuses identity and legacy URL imports alike. Not advertising it would
+		// make the manager hold such VMImages with a false "upgrade the provider
+		// image" reason (ProviderLacksArtifactIdentity) (ADR-0009 D10).
+		ImageArtifactIdentity().
 		// Disk export/import RPCs are implemented (ExportDisk/ImportDisk/
 		// GetDiskInfo accept qcow2/raw/vmdk); advertise them so capability
 		// gating (#176) doesn't wrongly block Proxmox disk migration (#198).

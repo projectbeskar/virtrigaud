@@ -2,9 +2,9 @@
 
 ## Status
 
-**Accepted (2026-09-25).** Slices 1–2 implemented (Slice 1: proto, contracts, CRD
-status and the mock provider, #346; Slice 2: the manager); Slices 3–5 (vSphere,
-libvirt, Proxmox guard) and 9 (docs) are pending. **Release blocker** for the release
+**Accepted (2026-09-25).** Slices 1, 2 and 5 implemented (Slice 1: proto, contracts,
+CRD status and the mock provider, #346; Slice 2: the manager, #347; Slice 5: the
+Proxmox guard, D10); Slices 3–4 (vSphere, libvirt) and 9 (docs) are pending. **Release blocker** for the release
 that ships cross-namespace `VMImage` sharing
 ([#343](https://github.com/projectbeskar/virtrigaud/pull/343),
 `spec.consumerNamespaceSelector`). The slices that must land before that release are

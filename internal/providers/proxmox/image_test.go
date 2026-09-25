@@ -143,12 +143,3 @@ func TestParseProxmoxImageSource_Empty(t *testing.T) {
 		})
 	}
 }
-
-// TestResolveImageStorage verifies the hint > source > default precedence.
-func TestResolveImageStorage(t *testing.T) {
-	assert.Equal(t, "hint", resolveImageStorage("hint", "src"))
-	assert.Equal(t, "src", resolveImageStorage("", "src"))
-	assert.Equal(t, "src", resolveImageStorage("   ", "src"))
-	assert.Equal(t, defaultProxmoxStorage, resolveImageStorage("", ""))
-	assert.Equal(t, defaultProxmoxStorage, resolveImageStorage("  ", "  "))
-}
