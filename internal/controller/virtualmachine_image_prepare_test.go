@@ -78,10 +78,11 @@ var (
 	_ contracts.ImagePreparer = (*preparerProvider)(nil)
 )
 
-// importCapableProvider returns a Provider CR that advertises SupportsImageImport.
+// importCapableProvider returns a Provider CR in "default" that advertises
+// SupportsImageImport, with a UID derived from its name.
 func importCapableProvider(name string) *infrav1beta1.Provider {
 	return &infrav1beta1.Provider{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", UID: types.UID("uid-default-" + name)},
 		Status: infrav1beta1.ProviderStatus{
 			ReportedCapabilities: &infrav1beta1.ReportedCapabilities{SupportsImageImport: true},
 		},
@@ -165,16 +166,20 @@ func TestEnsureImageOnProvider_SyncPrepare(t *testing.T) {
 	assert.Empty(t, inst.lastPrepareReq.StorageHint)
 
 	persisted := reloadImage(t, r, img.Name)
-	require.Contains(t, persisted.Status.ProviderStatus, provider.Name)
-	assert.True(t, persisted.Status.ProviderStatus[provider.Name].Available)
+	key := imageProviderKey(provider)
+	assert.Equal(t, "default/libvirt-1", key, "entries are keyed by the Provider's namespace/name")
+	require.Contains(t, persisted.Status.ProviderStatus, key)
+	assert.True(t, persisted.Status.ProviderStatus[key].Available)
+	assert.Equal(t, string(provider.UID), persisted.Status.ProviderStatus[key].ProviderUID)
 	// The prepared location is stamped onto ProviderStatus (#214) so create can
 	// consume it instead of re-resolving the source.
-	assert.Equal(t, "ubuntu", persisted.Status.ProviderStatus[provider.Name].ID)
-	assert.Equal(t, "/var/lib/libvirt/images/ubuntu.qcow2", persisted.Status.ProviderStatus[provider.Name].Path)
-	assert.Contains(t, persisted.Status.AvailableOn, provider.Name)
+	assert.Equal(t, "ubuntu", persisted.Status.ProviderStatus[key].ID)
+	assert.Equal(t, "/var/lib/libvirt/images/ubuntu.qcow2", persisted.Status.ProviderStatus[key].Path)
+	assert.Equal(t, []string{key}, persisted.Status.AvailableOn)
 	assert.True(t, persisted.Status.Ready)
 	assert.Equal(t, infrav1beta1.ImagePhaseReady, persisted.Status.Phase)
-	assert.Empty(t, persisted.Status.PrepareTaskRef)
+	assert.Empty(t, persisted.Status.ProviderStatus[key].TaskRef)
+	assert.Empty(t, persisted.Status.PrepareTaskRef, "the deprecated image-wide task ref is never written")
 }
 
 // (b) Asynchronous prepare: TaskRef set → PrepareTaskRef + Phase=Importing +
@@ -203,14 +208,17 @@ func TestEnsureImageOnProvider_AsyncPrepareThenComplete(t *testing.T) {
 	assert.Equal(t, 1, inst.calls())
 
 	persisted := reloadImage(t, r, img.Name)
-	assert.Equal(t, "task-abc", persisted.Status.PrepareTaskRef)
+	key := imageProviderKey(provider)
+	require.Contains(t, persisted.Status.ProviderStatus, key)
+	assert.Equal(t, "task-abc", persisted.Status.ProviderStatus[key].TaskRef, "the task is recorded in the Provider's own entry")
+	assert.Equal(t, string(provider.UID), persisted.Status.ProviderStatus[key].ProviderUID)
+	assert.Empty(t, persisted.Status.PrepareTaskRef, "the deprecated image-wide task ref is never written")
 	assert.Equal(t, infrav1beta1.ImagePhaseImporting, persisted.Status.Phase)
 	assert.False(t, persisted.Status.Ready)
 	// Async-location-at-trigger (#214): the prepared id is stamped now, but the
 	// provider entry stays NOT Available until the task completes.
-	require.Contains(t, persisted.Status.ProviderStatus, provider.Name)
-	assert.Equal(t, "ubuntu", persisted.Status.ProviderStatus[provider.Name].ID)
-	assert.False(t, persisted.Status.ProviderStatus[provider.Name].Available,
+	assert.Equal(t, "ubuntu", persisted.Status.ProviderStatus[key].ID)
+	assert.False(t, persisted.Status.ProviderStatus[key].Available,
 		"async-prepared image must not be Available until the task completes")
 
 	// Second pass while task still running → still requeue, no new PrepareImage.
@@ -228,11 +236,11 @@ func TestEnsureImageOnProvider_AsyncPrepareThenComplete(t *testing.T) {
 	assert.Equal(t, 1, inst.calls())
 
 	final := reloadImage(t, r, img.Name)
-	assert.True(t, final.Status.ProviderStatus[provider.Name].Available)
+	assert.True(t, final.Status.ProviderStatus[key].Available)
 	// The trigger-time prepared id is preserved through task completion (#214).
-	assert.Equal(t, "ubuntu", final.Status.ProviderStatus[provider.Name].ID)
-	assert.Contains(t, final.Status.AvailableOn, provider.Name)
-	assert.Empty(t, final.Status.PrepareTaskRef)
+	assert.Equal(t, "ubuntu", final.Status.ProviderStatus[key].ID)
+	assert.Contains(t, final.Status.AvailableOn, key)
+	assert.Empty(t, final.Status.ProviderStatus[key].TaskRef)
 	assert.True(t, final.Status.Ready)
 	assert.Equal(t, infrav1beta1.ImagePhaseReady, final.Status.Phase)
 }
@@ -243,9 +251,9 @@ func TestEnsureImageOnProvider_IdempotentAlreadyAvailable(t *testing.T) {
 	img := imageWithSource("ubuntu", "")
 	provider := importCapableProvider("libvirt-1")
 	img.Status.ProviderStatus = map[string]infrav1beta1.ProviderImageStatus{
-		provider.Name: {Available: true},
+		imageProviderKey(provider): {Available: true, ProviderUID: string(provider.UID)},
 	}
-	img.Status.AvailableOn = []string{provider.Name}
+	img.Status.AvailableOn = []string{imageProviderKey(provider)}
 	img.Status.Ready = true
 	r, _ := newEnsureReconciler(t, img)
 	inst := &preparerProvider{}
@@ -393,12 +401,13 @@ func TestEnsureImageOnProvider_ConcurrentProvidersNoClobber(t *testing.T) {
 	require.NoError(t, errs[1])
 
 	final := reloadImage(t, r, img.Name)
-	require.Contains(t, final.Status.ProviderStatus, pA.Name)
-	require.Contains(t, final.Status.ProviderStatus, pB.Name)
-	assert.True(t, final.Status.ProviderStatus[pA.Name].Available)
-	assert.True(t, final.Status.ProviderStatus[pB.Name].Available)
-	assert.Contains(t, final.Status.AvailableOn, pA.Name)
-	assert.Contains(t, final.Status.AvailableOn, pB.Name)
+	keyA, keyB := imageProviderKey(pA), imageProviderKey(pB)
+	require.Contains(t, final.Status.ProviderStatus, keyA)
+	require.Contains(t, final.Status.ProviderStatus, keyB)
+	assert.True(t, final.Status.ProviderStatus[keyA].Available)
+	assert.True(t, final.Status.ProviderStatus[keyB].Available)
+	assert.Contains(t, final.Status.AvailableOn, keyA)
+	assert.Contains(t, final.Status.AvailableOn, keyB)
 }
 
 // Provider PrepareImage error surfaces as a real error (not the hold sentinel).
@@ -416,30 +425,32 @@ func TestEnsureImageOnProvider_PrepareError(t *testing.T) {
 }
 
 // imageWithProviderStatus builds a VMImage with the given source kind and a
-// ProviderStatus[providerName] entry carrying the prepared location, for
-// exercising overrideImageWithPreparedLocation (#214).
-func imageWithProviderStatus(source infrav1beta1.ImageSource, providerName string, ps infrav1beta1.ProviderImageStatus) *infrav1beta1.VMImage {
+// ProviderStatus[key] entry carrying the prepared location, for exercising
+// overrideImageWithPreparedLocation (#214).
+func imageWithProviderStatus(source infrav1beta1.ImageSource, key string, ps infrav1beta1.ProviderImageStatus) *infrav1beta1.VMImage {
 	return &infrav1beta1.VMImage{
 		ObjectMeta: metav1.ObjectMeta{Name: "img", Namespace: "default"},
 		Spec:       infrav1beta1.VMImageSpec{Source: source},
 		Status: infrav1beta1.VMImageStatus{
-			ProviderStatus: map[string]infrav1beta1.ProviderImageStatus{providerName: ps},
+			ProviderStatus: map[string]infrav1beta1.ProviderImageStatus{key: ps},
 		},
 	}
 }
 
 // TestOverrideImageWithPreparedLocation_Consume covers the create-time consume
-// path: when the image is prepared+Available on the provider, the source is
+// path: when the image is prepared+Available on the provider (its own
+// namespace/name entry, recorded through its current UID), the source is
 // rewritten to the prepared location per provider kind; otherwise the original
 // source is kept (no regression).
 func TestOverrideImageWithPreparedLocation_Consume(t *testing.T) {
-	const provider = "prov-1"
+	provider := importCapableProvider("prov-1")
+	key := imageProviderKey(provider)
+	uid := string(provider.UID)
+	libvirtSource := infrav1beta1.ImageSource{Libvirt: &infrav1beta1.LibvirtImageSource{URL: "https://x/y.qcow2"}}
 
 	t.Run("libvirt uses prepared pool path and clears URL", func(t *testing.T) {
-		img := imageWithProviderStatus(
-			infrav1beta1.ImageSource{Libvirt: &infrav1beta1.LibvirtImageSource{URL: "https://x/y.qcow2"}},
-			provider,
-			infrav1beta1.ProviderImageStatus{Available: true, ID: "img", Path: "/pool/img.qcow2"},
+		img := imageWithProviderStatus(libvirtSource, key,
+			infrav1beta1.ProviderImageStatus{Available: true, ProviderUID: uid, ID: "img", Path: "/pool/img.qcow2"},
 		)
 		image := contracts.VMImage{URL: "https://x/y.qcow2"} // as resolved from source
 		overrode, _ := overrideImageWithPreparedLocation(&image, img, provider)
@@ -451,8 +462,8 @@ func TestOverrideImageWithPreparedLocation_Consume(t *testing.T) {
 	t.Run("vsphere uses prepared template name and clears OVA URL", func(t *testing.T) {
 		img := imageWithProviderStatus(
 			infrav1beta1.ImageSource{VSphere: &infrav1beta1.VSphereImageSource{OVAURL: "https://x/y.ova"}},
-			provider,
-			infrav1beta1.ProviderImageStatus{Available: true, ID: "ubuntu-tmpl"},
+			key,
+			infrav1beta1.ProviderImageStatus{Available: true, ProviderUID: uid, ID: "ubuntu-tmpl"},
 		)
 		image := contracts.VMImage{URL: "https://x/y.ova"}
 		overrode, _ := overrideImageWithPreparedLocation(&image, img, provider)
@@ -464,8 +475,8 @@ func TestOverrideImageWithPreparedLocation_Consume(t *testing.T) {
 	t.Run("proxmox uses prepared template ref", func(t *testing.T) {
 		img := imageWithProviderStatus(
 			infrav1beta1.ImageSource{Proxmox: &infrav1beta1.ProxmoxImageSource{}},
-			provider,
-			infrav1beta1.ProviderImageStatus{Available: true, ID: "jammy-base"},
+			key,
+			infrav1beta1.ProviderImageStatus{Available: true, ProviderUID: uid, ID: "jammy-base"},
 		)
 		image := contracts.VMImage{}
 		overrode, _ := overrideImageWithPreparedLocation(&image, img, provider)
@@ -474,10 +485,8 @@ func TestOverrideImageWithPreparedLocation_Consume(t *testing.T) {
 	})
 
 	t.Run("not available falls back to original source (no regression)", func(t *testing.T) {
-		img := imageWithProviderStatus(
-			infrav1beta1.ImageSource{Libvirt: &infrav1beta1.LibvirtImageSource{URL: "https://x/y.qcow2"}},
-			provider,
-			infrav1beta1.ProviderImageStatus{Available: false, ID: "img", Path: "/pool/img.qcow2"},
+		img := imageWithProviderStatus(libvirtSource, key,
+			infrav1beta1.ProviderImageStatus{Available: false, ProviderUID: uid, ID: "img", Path: "/pool/img.qcow2"},
 		)
 		image := contracts.VMImage{URL: "https://x/y.qcow2"}
 		overrode, reason := overrideImageWithPreparedLocation(&image, img, provider)
@@ -487,14 +496,40 @@ func TestOverrideImageWithPreparedLocation_Consume(t *testing.T) {
 		assert.NotEmpty(t, reason)
 	})
 
-	t.Run("prepared on a different provider is not consumed", func(t *testing.T) {
-		img := imageWithProviderStatus(
-			infrav1beta1.ImageSource{Libvirt: &infrav1beta1.LibvirtImageSource{URL: "https://x/y.qcow2"}},
-			"other-provider",
-			infrav1beta1.ProviderImageStatus{Available: true, Path: "/pool/img.qcow2"},
-		)
+	// Every entry below is Available with a prepared location, but is not this
+	// Provider's own entry recorded through its current object: none may be
+	// consumed.
+	for name, tc := range map[string]struct {
+		key string
+		ps  infrav1beta1.ProviderImageStatus
+	}{
+		"prepared on a different provider": {"default/other-provider",
+			infrav1beta1.ProviderImageStatus{Available: true, ProviderUID: "uid-other", Path: "/pool/img.qcow2"}},
+		"prepared by a same-named Provider in another namespace": {"team-b/prov-1",
+			infrav1beta1.ProviderImageStatus{Available: true, ProviderUID: "uid-team-b-prov-1", Path: "/pool/img.qcow2"}},
+		"a bare-name entry from an earlier release": {provider.Name,
+			infrav1beta1.ProviderImageStatus{Available: true, Path: "/pool/img.qcow2"}},
+		"recorded through a re-created Provider (other UID)": {key,
+			infrav1beta1.ProviderImageStatus{Available: true, ProviderUID: "uid-previous", Path: "/pool/img.qcow2"}},
+		"recorded with no Provider UID (migrated)": {key,
+			infrav1beta1.ProviderImageStatus{Available: true, Path: "/pool/img.qcow2"}},
+	} {
+		t.Run(name+" is not consumed", func(t *testing.T) {
+			img := imageWithProviderStatus(libvirtSource, tc.key, tc.ps)
+			image := contracts.VMImage{URL: "https://x/y.qcow2"}
+			overrode, reason := overrideImageWithPreparedLocation(&image, img, provider)
+			assert.False(t, overrode)
+			assert.NotEmpty(t, reason)
+			assert.Equal(t, "https://x/y.qcow2", image.URL)
+			assert.Empty(t, image.Path)
+		})
+	}
+
+	t.Run("no provider keeps the original source", func(t *testing.T) {
+		img := imageWithProviderStatus(libvirtSource, key,
+			infrav1beta1.ProviderImageStatus{Available: true, ProviderUID: uid, Path: "/pool/img.qcow2"})
 		image := contracts.VMImage{URL: "https://x/y.qcow2"}
-		overrode, _ := overrideImageWithPreparedLocation(&image, img, provider)
+		overrode, _ := overrideImageWithPreparedLocation(&image, img, nil)
 		assert.False(t, overrode)
 		assert.Equal(t, "https://x/y.qcow2", image.URL)
 	})
