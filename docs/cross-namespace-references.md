@@ -248,19 +248,26 @@ its own prepare task. So when `team-a` and `team-b` each have a Provider named
   task on one Provider can never mark the image ready on another.
 - A Provider deleted and re-created under the same name re-validates what its
   predecessor prepared before a VM is created from it.
+- The image is prepared only before a VM is created (or re-created). Running
+  VMs never prepare, so a change to a shared image's state never stops them.
 
 Prepare state an earlier release recorded under a bare Provider name is
 migrated to the `VMImage`'s own namespace only when a Provider of that name
 exists there, and re-validated; otherwise it is dropped. It never satisfies a
 Provider in another namespace.
 
-This separates the operator's records, not the hypervisor. A prepared artifact
-is named after the `VMImage`, and each provider's prepare reuses an existing
-artifact of that name. Two Providers whose accounts reach the same inventory
-(the same vCenter datacenter, Proxmox node, or libvirt pool directory) therefore
-end up with the same template or file, whichever prepared it first. As with a
-shared `Provider`, give separate tenants separate hypervisor accounts, scoped to
-what each may see.
+**Known limitation: prepared artifacts on the hypervisor are not per tenant.**
+This separates the operator's records, not the hypervisor. A prepared template
+or image file is named after the `VMImage` (the bare name), and each provider's
+prepare accepts an existing artifact of that name as already prepared, without
+checking who created it or from what. Two Providers whose accounts reach the
+same inventory (the same vCenter datacenter, Proxmox node, or libvirt pool
+directory) therefore share one artifact, whichever prepared it first: a tenant
+allowed to use a shared `Provider` can pre-create, or later change, the template
+another tenant's VMs are created from. This needs a design change (tracked
+separately). Until then, as with a shared `Provider`, give separate tenants
+separate hypervisor accounts scoped to what each may see, and don't share a
+`Provider` between tenants that must not influence each other's images.
 
 ## What is never sent to a provider
 
@@ -333,10 +340,10 @@ readiness fails. The state is on
 - **`VMImage` prepare state is re-keyed.** `status.providerStatus` and
   `status.availableOn` use `<namespace>/<name>` instead of the bare Provider
   name, and `status.prepareTaskRef` is no longer written. Existing state is
-  migrated on each image's first prepare reconcile, which re-issues the
-  idempotent prepare once per image and Provider (see
-  [Shared `VMImage`s](#shared-vmimages-prepare-state-is-per-provider)). Update
-  scripts that read these fields.
+  migrated on the first VM create that uses each image, which re-issues the
+  idempotent prepare once per image and Provider; running VMs are not affected
+  (see [Shared `VMImage`s](#shared-vmimages-prepare-state-is-per-provider)).
+  Update scripts that read these fields.
 
 List what needs a selector (run it before step 3):
 
