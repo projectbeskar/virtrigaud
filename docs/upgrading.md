@@ -190,6 +190,16 @@ See [`docs/clustered-provider-inventory.md`](clustered-provider-inventory.md) an
   ```
   Each line needs `spec.consumerNamespaceSelector` on the object its `Ready` message
   names — see [`docs/cross-namespace-references.md`](cross-namespace-references.md).
+- [ ] No `VMSnapshot` is `Ready` without a snapshot on the hypervisor. Older managers
+      could mark a snapshot `Ready` without calling the provider when its `Provider`
+      could not be resolved on the first attempt. Such snapshots have no
+      `status.creationTime`:
+  ```sh
+  kubectl get vmsnapshots -A -o json | jq -r '.items[]
+    | select(.status.phase=="Ready" and .status.creationTime==null)
+    | "\(.metadata.namespace)/\(.metadata.name)"'
+  ```
+  Delete and re-create each one listed; the new manager does not rewrite them.
 - [ ] Audit bound VMs' `providerRef` before the CRD's admission rule locks them in —
       use the query in [`docs/vm-provider-binding.md`](vm-provider-binding.md#upgrade-notes).
 - [ ] Audit cross-namespace clone/migration targets and confirm each target namespace
