@@ -83,6 +83,14 @@ providers), and rollback caveats in
   described, deleted, powered, and reconfigured across a `Host`/`HostPool`
   inventory (ADR-0007). Still experimental — snapshots, clones, and disk
   export/import on a clustered provider are not implemented yet.
+- The clustered scheduler subtracts what each host already holds: every VM
+  bound to it, pending on it, or being deleted from it, in any namespace. It
+  also keeps concurrent creates from booking the same capacity or breaking
+  hard anti-affinity. A VM no host can take reports `Placed=False/Unschedulable`
+  with the committed-capacity numbers, and is retried with a backoff of up to
+  2 minutes. New gauges: `virtrigaud_host_committed_cpu` and
+  `virtrigaud_host_committed_memory_mib`
+  (→ [`docs/clustered-provider-inventory.md`](docs/clustered-provider-inventory.md#committed-capacity)).
 
 ### Fixes
 

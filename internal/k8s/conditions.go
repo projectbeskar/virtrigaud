@@ -83,8 +83,10 @@ const (
 	ReasonPlacementPolicyNotFound = "PlacementPolicyNotFound"
 	// ReasonUnschedulable indicates the scheduler found no feasible host for the
 	// VM among the pool's candidates (capacity, visibility, or affinity filters
-	// eliminated all of them). The condition message carries the per-host
-	// breakdown.
+	// eliminated all of them). The condition message carries the per-category
+	// tally and, when capacity was short, the committed-capacity arithmetic
+	// (numbers only, no host or VM names). It is set on Provisioning=False and,
+	// since the ADR-0007 scheduler-accuracy amendment, also on Placed=False.
 	ReasonUnschedulable = "Unschedulable"
 	// ReasonPlacementError indicates the scheduler rejected a malformed input the
 	// admin must fix (an unparseable overcommit ratio or affinity selector) —
@@ -101,7 +103,9 @@ const ConditionPlaced = "Placed"
 
 // Placed condition reasons (ADR-0007 Addendum A, A2). The vocabulary is fixed by
 // the ADR: these four, plus the two the A2 amendment (slice 2) adds for a Create
-// refused with a name conflict (ReasonHostExcluded, ReasonAllHostsExcluded).
+// refused with a name conflict (ReasonHostExcluded, ReasonAllHostsExcluded),
+// plus ReasonUnschedulable (declared with the scheduling reasons above) from the
+// scheduler-accuracy amendment in A5.
 const (
 	// ReasonBound is Placed=True: the provider confirmed the VM on the host named
 	// by status.placement.host, and every per-VM call is routed there.

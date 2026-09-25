@@ -65,9 +65,10 @@ limitations under the License.
 //
 // # Scope
 //
-// This is the pure function and its tests only. Wiring it into the VM controller,
-// the target_host_id gRPC field, and writing status.placement are later ADR-0007
-// slices. VMPlacementPolicy constructs that do not map onto the flat Host+labels
+// This package is the pure function and its tests only. The VirtualMachine
+// controller resolves its inputs — including the committed placements it reads
+// from the informer cache plus the in-flight ones held by the assume cache
+// (package assume) — and records the result. VMPlacementPolicy constructs that do not map onto the flat Host+labels
 // model (vSphere/Proxmox datastore/cluster/folder vocabulary, live-utilization
 // caps, secure-boot/TPM security constraints) are honored where they map and
 // documented where they are deferred; this package invents no new API.
