@@ -362,8 +362,32 @@ When the manager sends the `VMImage` identity (its UID, namespace and name) and 
 digest of its `spec.source`, the vSphere provider prepares a `source.vsphere.ovaURL`
 image as follows. Only an `ovaURL` is ever prepared: `templateName` and `contentLibrary`
 reference existing objects and are used by reference. A source that sets `ovaURL`
-together with `templateName` or `contentLibrary`, or an `ovaURL` that is not `http(s)`,
-gets `InvalidSpec`.
+together with `templateName` or `contentLibrary`, an `ovaURL` that is not `http(s)`, or an
+`ovaURL` naming a bare `.ovf` (it cannot carry its disks: publish an `.ova`) gets
+`InvalidSpec`.
+
+**The package is read from the download only.** Every `<References><File ovf:href>` of the
+OVF must be a plain file name (no path separator, no `.`/`..`, no URL scheme, no glob
+character, at most 255 bytes) and a member at the root of the OVA; otherwise the image gets
+`InvalidSpec` before vCenter sees the descriptor. The provider never opens a file on its own
+filesystem named by an OVF. (Before this, a bare `.ovf` whose references named, for example,
+the provider's mounted vCenter credentials made the provider upload that file into the
+template. This applies to requests from an older manager too: a bare `.ovf` that references
+any file is refused; one that references none still imports.)
+
+**The download is restricted.** The provider refuses sources at, or redirecting to,
+loopback, link-local (including `169.254.169.254` cloud metadata), unspecified and
+multicast addresses — checked on every connection, after DNS — follows at most 3 redirects,
+bounds the connect, TLS-handshake and response-header waits, and downloads at most
+`VIRTRIGAUD_VSPHERE_IMAGE_MAX_DOWNLOAD_GIB` GiB (default 256, 1–16384; an invalid value logs
+a warning and keeps the default). Set it on the provider pod through the Provider's
+`spec.runtime.env`. Private (RFC 1918) addresses stay allowed. With an HTTP(S) proxy
+configured for the provider, the proxy resolves named targets: restrict its egress too.
+**Keep credentials and tokens out of `ovaURL`.** A vSphere OVA source has no separate
+credential field, so host images where the provider can fetch them without a secret in the
+URL; a presigned query is hashed into the source digest (a rotation re-imports), and the
+provider shows a URL only as scheme, host and last path segment, never its user-info, the
+rest of its path, or its query.
 
 **Name.** The template is named `<namespace>.<name>_<16 hex>`, at most 80 characters; the
 `<namespace>.<name>` part is cut when it is too long. The hex part is a hash of the
@@ -377,8 +401,8 @@ the Provider's import folder: `spec.defaults.folder`, or the datacenter's VM fol
 that is empty. A configured folder that does not resolve (missing, ambiguous, outside the
 default datacenter's VM folder, or a vCenter error) fails the prepare, which the manager
 retries: the provider never falls back to another folder, so every retry uses the same
-location. A same-named
-template in any other folder is neither reused nor a conflict. `prepared_image_id` (and so
+location. A same-named template in any other folder is neither reused nor a conflict.
+`prepared_image_id` (and so
 `status.providerStatus[...].id`) is the template's **absolute inventory path**, for
 example `/DC0/vm/images/team-a.ubuntu-22.04_3c9e1f0a7b2d4e61`, and `Create` clones exactly
 that template, never a same-named one elsewhere.
@@ -435,18 +459,31 @@ is a template **and** its stamp carries the request's `VMImage` UID and source d
 | The lookup fails | Retryable error, never treated as "absent" |
 
 An unfinished import counts as **live** while any of these holds: a task on it is queued
-or running, vCenter blocks its `Destroy_Task` (as it does while an NFC lease holds it), or
-its `preparedat` is younger than `max(2 × spec.prepare.timeout, 2h)`. Only a powered-off,
-non-template object of this same image that is none of these is removed; its age alone
-never is.
+or running, or its state cannot be read (an import in flight shows as
+`ResourcePool.ImportVAppLRO`, running, in the object's recent tasks); vCenter blocks its
+`Destroy_Task` (a defensive extra — an import lease does not do that); or its
+`preparedat` is younger than `max(2 × spec.prepare.timeout, 2h)` (a timeout above one year
+counts as one year). Only a powered-off, non-template object of this same image that is
+none of these is removed; its age alone never is.
 
-**Concurrent prepares.** vCenter keeps VM names unique within a folder, so a second
-`ImportVApp` of the same name fails with `DuplicateName`; the provider then looks again
-and reuses, waits for, or refuses what is there. If two objects with the name exist anyway,
-the one with the lowest managed object ID survives: every other prepare destroys only the
-object it created. A template is handed out only while the name addresses it alone.
-The `DuplicateName` behaviour of `ImportVApp` still has to be confirmed on a real vCenter
-(the simulator does not model it; the fallback is tested).
+**Concurrent prepares.** vCenter keeps VM names unique within a folder: a second import of
+the same name fails with `DuplicateName`, reported through the import's NFC lease; the
+provider then looks again and reuses, waits for, or refuses what is there. If the name is
+held by something the provider does not look at — a vApp or folder with that name, or a VM
+whose name differs only in case — the prepare is a `Conflict` at once. If two objects with
+the name exist anyway (a vCenter or simulator without that uniqueness), the one with the
+lowest managed object ID survives: every other prepare destroys only the object it created.
+A template is handed out only while the name addresses it alone.
+
+**Verified on vCenter 8.0.2 (2026-09-25):** `DuplicateName` is enforced within one folder
+and arrives through the lease (`lease.Wait`), not from `ImportVApp` itself — for a
+completed VM, a template, an entity still held by an active lease, and 4 concurrent imports
+of one name (exactly one created its entity). While a lease is active the entity already
+carries the stamp, is a powered-off non-template, and has `ResourcePool.ImportVAppLRO`
+running in its recent tasks; `Destroy_Task` is not disabled. Aborting the lease deletes the
+partial entity (the provider aborts on a context detached from the request, so a manager
+timeout still cleans up). MOIDs increase with creation order, so the lowest-MOID
+convergence is a fallback real vCenter should not need.
 
 **An OVF must describe exactly one VM.** A vApp (`VirtualSystemCollection`) gets
 `InvalidSpec`.
@@ -456,12 +493,16 @@ cannot heal on their own, so the manager holds the image instead of retrying:
 
 | Failure | Result |
 |---|---|
-| The source answers 4xx other than 408/429 (for example 404, 410, 403), checksum mismatch, unreadable archive, no or invalid OVF descriptor, an OVF vCenter's parser rejects, a multi-VM OVF, a non-`http(s)` URL | `InvalidSpec` (`InvalidSource`; not retried until the source changes) |
+| The source answers a 4xx other than 408/429, is at (or redirects to) a refused address or scheme, redirects more than 3 times, or is larger than the download limit; checksum mismatch; unreadable archive; no or invalid OVF descriptor; a file reference outside the package; an OVF vCenter's parser rejects; a multi-VM OVF; a non-`http(s)` URL; a bare `.ovf` | `InvalidSpec` (`InvalidSource`; not retried until the source changes) |
 | This image's template is still being imported by another request, or concurrent prepares are still settling on one template | In progress (retried every 30 seconds; not counted toward the Provider's circuit breaker) |
 | The configured import folder is missing, ambiguous or outside the datacenter's VM folder | `FailedPrecondition`: retried, not counted toward the circuit breaker, so a wrong `defaults.folder` does not stop the Provider's other operations. Fix the Provider |
-| The source answers 5xx, 408 or 429, or breaks off; vCenter unreachable or the session expired; the import, upload or template conversion fails midway | Retryable (`Unavailable`). A partial import this call created is destroyed |
+| The source answers 5xx, 408 or 429, is unreachable or breaks off; the download cannot be staged; vCenter refuses to create, upload or convert what the OVF describes | Retryable, tagged `IMAGE_SOURCE_UNAVAILABLE`: the image's own problem, so it is **not** counted toward the Provider's circuit breaker — one tenant's failing image cannot stop the Provider for every tenant. A partial import this call created is destroyed |
+| vCenter itself is unreachable, the session expired, or the provider lacks rights | Retryable (`Unavailable`), counted toward the circuit breaker |
 
-Messages and provider logs show the OVA URL without user-info, query or fragment.
+Messages are fixed text: HTTP status codes (beyond "an HTTP client error"), transport
+errors, archive and XML parser output, vCenter fault text and the computed checksum go to
+the provider log only, so a `VMImage`'s status tells nothing about what an arbitrary URL
+serves.
 
 **Requests from an older manager (deprecated).** A manager older than ADR-0009 sends a bare
 target name and no identity. For this release only, the provider serves it the pre-ADR way

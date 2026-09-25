@@ -4,7 +4,8 @@
 
 **Accepted (2026-09-25).** Slices 1, 2, 3 and 5 implemented (Slice 1: proto, contracts,
 CRD status and the mock provider, #346; Slice 2: the manager, #347; Slice 3: vSphere,
-gated on the vCenter `DuplicateName` lab check; Slice 5: the Proxmox guard, D10);
+its vCenter `DuplicateName` behaviour verified on vCenter 8.0.2 (see D6); Slice 5: the
+Proxmox guard, D10);
 Slices 4 (libvirt) and 9 (docs) are pending. **Release blocker** for the release
 that ships cross-namespace `VMImage` sharing
 ([#343](https://github.com/projectbeskar/virtrigaud/pull/343),
@@ -371,7 +372,14 @@ knob yet. It applies to temp files and incomplete artifacts alike.
   The same rule covers a sidecar that has no artifact.
 - **vSphere** ages the object by the stamp's `preparedAt`. Cleanup **also** requires
   that the entity has no running task in its `recentTask` and no active
-  `HttpNfcLease`. Age alone never licenses a destroy.
+  `HttpNfcLease`. Age alone never licenses a destroy. *Implementation (Slice 3,
+  verified on vCenter 8.0.2):* an active import lease shows as
+  `ResourcePool.ImportVAppLRO` in state `running` in the entity's `recentTask` — that
+  is the signal used; a queued or running task, or one whose state cannot be read,
+  counts as live. An active lease does **not** put `Destroy_Task` in the entity's
+  `disabledMethod` (it disables `PowerOffVM_Task`, `MarkAsVirtualMachine`,
+  `ResetVM_Task` and others); a disabled `Destroy_Task` is still treated as live, as a
+  defensive extra.
 
 The Conflict message is uniform and names only the requester's own artifact, following
 #335's `vmConflictError`: *"a prepared-image artifact named X exists at this Provider's
@@ -505,6 +513,28 @@ See Alternative 5.
     object (the moref it created) and reuses the survivor after the D4 probe.
   - `cleanupPartialImport` (`image.go:720`) keeps destroying **only** the moref this
     call created.
+  - **Verified on vCenter 8.0.2 (build 23504390, 2026-09-25):**
+    1. `DuplicateName` **is** enforced within one folder, and it is reported
+       **asynchronously, through the `HttpNfcLease`** (`lease.Wait` fails with
+       `DuplicateName`, "The name 'X' already exists."), not synchronously by
+       `ImportVApp` — for a completed VM, a template, an entity still held by an active
+       lease, and 4 concurrent imports of one name (exactly one created its entity; 3
+       got `DuplicateName` at the lease). The lease path is the primary one; a
+       synchronous `DuplicateName` is handled the same way. vcsim does not model it
+       (pinned by a test); the tests emulate both paths.
+    2. While a lease is active (ready, not completed) the entity is a powered-off
+       non-template that already carries the stamp, its `recentTask` holds
+       `ResourcePool.ImportVAppLRO` in state `running`, and `Destroy_Task` is **not**
+       disabled — see D4.
+    3. `HttpNfcLease.Abort` **deletes** the partially imported entity. The provider
+       sends the abort on a context detached from the request's, and a cleanup that
+       then finds its own entity gone treats that as success.
+    4. MOIDs increase strictly with creation order. Since vCenter serializes same-name
+       imports with `DuplicateName`, the lowest-MOID convergence is a fallback real
+       vCenter should never need; it stays, for other versions and for simulators.
+  - A `DuplicateName` whose holder the folder probe cannot see (a vApp or folder with the
+    name, or a VM whose name differs only in case: vCenter compares case-insensitively,
+    the probe byte for byte) is a Conflict, never an import loop.
 - **Proxmox (Slice 6):**
   - Slice 6 must first verify two things on the lab PVE: that `content=import` needs
     PVE 8.2 or later, and how `download-url` behaves when the target file already
@@ -1093,5 +1123,5 @@ review's recommendation. Q4, Q5 and Q6 are still open.
   legacy mode, and the legacy counter increments. New-scheme artifacts are untouched
   and are reused on roll-forward.
 - **Lab validation on all three hypervisors** by the maintainer, before Accepted
-  becomes Implemented. vCenter `DuplicateName` gates the Slice 3 merge. The PVE
-  checks belong to Slice 6.
+  becomes Implemented. vCenter `DuplicateName` gated the Slice 3 merge; it was verified
+  on vCenter 8.0.2 on 2026-09-25 (D6). The PVE checks belong to Slice 6.
