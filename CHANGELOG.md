@@ -5,6 +5,28 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-25 00:54] - Upgrade guide and release-notes draft for the security-hardening changes since v0.3.11
+
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `docs/upgrading.md`: consolidated upgrade guide for v0.3.11 → next release — a breaking-changes table (who is affected, exact action), the required upgrade order (CRDs → manager → providers, the chart's CRD hook, `helm upgrade --reset-then-reuse-values`, the `kubectl apply --server-side --force-conflicts -f config/crd/bases` manual path), new required privileges/config (vCenter `VirtualMachine.Config.AdvancedConfig`, manager RBAC, `VIRTRIGAUD_LIBVIRT_IMAGE_DIRS`, the POSIX-login-shell requirement for libvirt SSH), non-breaking-but-visible behavior changes, a post-upgrade verification checklist, and rollback caveats (the CRD-level `providerRef` CEL rule and `status.boundProvider` outlive a manager-only rollback). It indexes, rather than duplicates, the "Upgrade notes" sections already in `docs/vm-provider-binding.md`, `docs/cross-namespace-targets.md`, `docs/vm-ownership.md`, `docs/libvirt-domain-ownership.md` and `docs/image-preparation.md`.
+- `docs/release-notes/next.md`: a paste-ready draft for the GitHub release body — a "Breaking changes" section up top (one line each, linked to the upgrade guide) followed by security/feature/fix highlights.
+
+### Changed
+- `docs/README.md`: table rows for the two new pages.
+- `README.md`: a pointer to `docs/upgrading.md` next to the version banner and in the Quick Start "Upgrade" step; a new "Since v0.3.11 (on `main`, not yet released)" subsection under Security status summarizing the hardening work and linking the upgrade guide; a note in the libvirt Provider walkthrough that a `VirtualMachine` created without `spec.userData` no longer gets a default SSH user, key or sudo grant (#328) — previously undocumented anywhere but the CHANGELOG.
+- `charts/virtrigaud/README.md`: the Upgrading section now opens with a pointer to `docs/upgrading.md` and a one-line summary of what changed, before the existing CRD-upgrade instructions.
+
+### Why
+Since v0.3.11 (2026-06-21), `main` gained a large number of security fixes (PRs #296–#341) closing cross-tenant and privilege-escalation issues in the vSphere and libvirt providers, cross-namespace clone/migration targets, and VM provider binding — several of which are breaking or change default operator-visible behavior. The project rule requires docs to stay current with code, and the maintainer asked for the new behavior to be documented and the upcoming release to clearly call out the breaking changes. This adds the missing single entry point (an operator upgrading from v0.3.11 had to piece the picture together from per-topic "Upgrade notes" sections and the CHANGELOG) and closes the gaps the per-topic docs didn't cover: the libvirt default-cloud-init credential removal (#328) had no mention outside the CHANGELOG, and neither README nor the chart README linked any of the existing upgrade-notes content.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
 ## [2026-09-25 00:25] - Security: VirtualMachine spec.providerRef is immutable once the VM is bound; the operator refuses a VM whose reference no longer names its bound Provider
 **Author:** @wrkode (William Rizzo)
 
