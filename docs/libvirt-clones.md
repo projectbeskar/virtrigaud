@@ -52,6 +52,8 @@ undefined or snapshotted, and no file is removed.
 - **Snapshots**: the `VMSnapshot` shows the refusal in its status (create), or in
   a `SnapshotDeleteFailed` event (delete — the `VMSnapshot` is still removed,
   and the libvirt snapshot is left on the host).
+- **Migration**: a `VMMigration` of the source VM fails at its snapshot step
+  (`Failed to create snapshot: …`).
 
 The message names only the requesting VM's own domain and the number of
 dependent domains — never another domain (it may belong to another tenant) or
