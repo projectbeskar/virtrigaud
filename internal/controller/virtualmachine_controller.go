@@ -2252,6 +2252,9 @@ func (r *VirtualMachineReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err := indexConsumerGrants(mgr, &infravirtrigaudiov1beta1.VirtualMachine{}, vmConsumerGrantIndexValues); err != nil {
 		return err
 	}
+	if err := indexPlacementProvider(mgr); err != nil {
+		return err
+	}
 	b := ctrl.NewControllerManagedBy(mgr).
 		For(&infravirtrigaudiov1beta1.VirtualMachine{})
 	return withConsumerGrantWatches(b, r.vmsForGrantChange).

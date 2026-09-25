@@ -182,17 +182,21 @@ func (r *VirtualMachineReconciler) committedPlacements(
 	provider types.NamespacedName,
 	self *infravirtrigaudiov1beta1.VirtualMachine,
 ) (committedSnapshot, error) {
-	var vms infravirtrigaudiov1beta1.VirtualMachineList
-	if err := r.List(ctx, &vms); err != nil {
-		return committedSnapshot{}, fmt.Errorf("list VirtualMachines for Provider %s: %w", provider, err)
+	// Only this Provider's VMs, through the field index; read-only (shared
+	// with the cache).
+	vms, err := listProviderVMs(ctx, r.Client, provider)
+	if err != nil {
+		return committedSnapshot{}, err
 	}
 	snap := committedSnapshot{recorded: map[string][]string{}}
 	selfUID := vmSchedulingUID(self)
 	classes := map[types.NamespacedName]*infravirtrigaudiov1beta1.VMClass{}
-	for i := range vms.Items {
-		other := &vms.Items[i]
-		// A VM being deleted whose finalizer is gone holds nothing any more;
-		// leaving it out of recorded also settles any assumption of it.
+	for i := range vms {
+		other := &vms[i]
+		// The key is re-checked (defense in depth: a VM counts against a
+		// Provider only when its key is that Provider). A VM being deleted
+		// whose finalizer is gone holds nothing any more; leaving it out of
+		// recorded also settles any assumption of it.
 		if placementProviderKey(other) != provider || !holdsPlacement(other) {
 			continue
 		}
@@ -258,13 +262,13 @@ func committedOnHost(
 	provider types.NamespacedName,
 	host string,
 ) (cpu, memMiB int64, err error) {
-	var vms infravirtrigaudiov1beta1.VirtualMachineList
-	if err := reader.List(ctx, &vms); err != nil {
-		return 0, 0, fmt.Errorf("list VirtualMachines for Host %s/%s: %w", provider.Namespace, host, err)
+	vms, err := listProviderVMs(ctx, reader, provider)
+	if err != nil {
+		return 0, 0, err
 	}
 	classes := map[types.NamespacedName]*infravirtrigaudiov1beta1.VMClass{}
-	for i := range vms.Items {
-		vm := &vms.Items[i]
+	for i := range vms {
+		vm := &vms[i]
 		if placementProviderKey(vm) != provider || !slices.Contains(placementHosts(vm), host) {
 			continue
 		}

@@ -176,3 +176,20 @@ var _ = Describe("Clustered scheduling against committed capacity (envtest)", fu
 		}, "3s", "200ms").Should(Succeed())
 	})
 })
+
+// The VirtualMachine and Host controllers both use the placement-Provider field
+// index (review L8) and both register it; one manager must accept both.
+var _ = Describe("Placement-Provider field index registration (envtest)", func() {
+	It("is registered once per manager, whichever controller comes first", func() {
+		mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+			Scheme:                 k8sClient.Scheme(),
+			Metrics:                metricsserver.Options{BindAddress: "0"},
+			HealthProbeBindAddress: "0",
+			Controller:             ctrlconfig.Controller{SkipNameValidation: &skipNameValidation},
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect((&HostReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager(mgr)).To(Succeed())
+		Expect((&VirtualMachineReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager(mgr)).To(Succeed())
+		Expect(indexPlacementProvider(mgr)).To(Succeed())
+	})
+})

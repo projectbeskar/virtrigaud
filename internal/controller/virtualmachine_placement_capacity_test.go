@@ -144,6 +144,7 @@ func newLaggingClient(t *testing.T, s *runtime.Scheme, objs ...client.Object) *l
 			copies = append(copies, c)
 		}
 		return fake.NewClientBuilder().WithScheme(s).WithObjects(copies...).
+			WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).
 			WithStatusSubresource(&infravirtrigaudiov1beta1.VirtualMachine{}).Build()
 	}
 	return &laggingClient{Client: build(), scheme: s, reader: build()}
@@ -179,6 +180,7 @@ func (c *laggingClient) catchUp(t *testing.T) {
 		objs = append(objs, items...)
 	}
 	fresh := fake.NewClientBuilder().WithScheme(c.scheme).WithObjects(objs...).
+		WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).
 		WithStatusSubresource(&infravirtrigaudiov1beta1.VirtualMachine{}).Build()
 	c.mu.Lock()
 	c.reader = fresh
@@ -816,4 +818,24 @@ func TestPlacementProviderKey(t *testing.T) {
 
 	vm.Status.BoundProvider = &infravirtrigaudiov1beta1.BoundProviderRef{Namespace: "infra", Name: "bound"}
 	assert.Equal(t, types.NamespacedName{Namespace: "infra", Name: "bound"}, placementProviderKey(vm), "the bound Provider wins over spec.providerRef")
+}
+
+// TestListProviderVMs (L8): the field index returns exactly the VMs whose
+// placement Provider is the one asked for, placed or not.
+func TestListProviderVMs(t *testing.T) {
+	other := clusterVM("elsewhere", capNS, "other-provider")
+	boundHere := clusterVM("bound-here", "tenant", "other-provider")
+	boundHere.Status.BoundProvider = &infravirtrigaudiov1beta1.BoundProviderRef{Namespace: capNS, Name: "prov-cluster"}
+	objs := append(capBase(), capVM("unplaced"), withPlacement(capVM("placed"), "host-alpha", ""), other, boundHere)
+	r := newTestReconciler(coverageTestScheme(t), &stubResolver{provider: &concurrentCreateProvider{}}, objs...)
+
+	vms, err := listProviderVMs(context.Background(), r.Client, types.NamespacedName{Namespace: capNS, Name: "prov-cluster"})
+	require.NoError(t, err)
+	var names []string
+	for i := range vms {
+		names = append(names, vms[i].Name)
+	}
+	assert.ElementsMatch(t, []string{"unplaced", "placed", "bound-here"}, names)
+	assert.Equal(t, []string{"infra/p"}, placementProviderIndexValue(clusterVM("x", "infra", "p")))
+	assert.Nil(t, placementProviderIndexValue(&infravirtrigaudiov1beta1.Host{}))
 }

@@ -249,14 +249,14 @@ func hostInUseMessage(users []string) string {
 // in other namespaces than their Provider, so all VirtualMachines are listed; a
 // same-named Host of another Provider is never confused with this one.
 func (r *HostReconciler) vmsUsingHost(ctx context.Context, host *infravirtrigaudiov1beta1.Host) ([]string, error) {
-	var vms infravirtrigaudiov1beta1.VirtualMachineList
-	if err := r.List(ctx, &vms); err != nil {
+	provider := hostProviderKey(host)
+	vms, err := listProviderVMs(ctx, r.Client, provider)
+	if err != nil {
 		return nil, fmt.Errorf("list VirtualMachines for Host %s/%s: %w", host.Namespace, host.Name, err)
 	}
-	provider := hostProviderKey(host)
 	var users []string
-	for i := range vms.Items {
-		vm := &vms.Items[i]
+	for i := range vms {
+		vm := &vms[i]
 		if placementProviderKey(vm) != provider {
 			continue
 		}
@@ -478,6 +478,9 @@ func (r *HostReconciler) getProviderInstance(ctx context.Context, provider *infr
 // self-trigger loop) and sustains the inventory heartbeat via RequeueAfter, which
 // is independent of the event predicate.
 func (r *HostReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if err := indexPlacementProvider(mgr); err != nil {
+		return err
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&infravirtrigaudiov1beta1.Host{}).
 		WithEventFilter(predicate.GenerationChangedPredicate{}).
