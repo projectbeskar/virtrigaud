@@ -5,6 +5,22 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-25 12:00] - ADR-0009: prepared-image artifact identity (Proposed)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `docs/adr/0009-prepared-image-artifact-identity.md`: design record (Status: Proposed) for naming, stamping and verifying the hypervisor-side artifacts that `VMImage` preparation creates. The artifact identity becomes `(VMImage UID, source digest)`, with a provider-derived name `<namespace>.<name>`(cut)`_<16 hex>` (`-` on Proxmox). Every artifact gets a provenance stamp: vSphere ExtraConfig `virtrigaud.image.*`, a libvirt dot-sidecar, or a Proxmox description block plus tags. An existing artifact is reused only when its stamp's UID and digest match; anything else is a fail-closed Conflict, never an overwrite. There is one artifact per image and hypervisor location. Staging is private to each prepare and publishing never overwrites. The proto gains additive fields and a capability the manager requires, so old providers fail closed. Status records the source digest. Legacy artifacts are left in place. The Proxmox URL import fails closed until it is fully implemented. The ADR lists the implementation slices and which of them block the release.
+- `docs/adr/README.md`: index row for ADR-0009.
+
+### Why
+Every provider names a prepared template or image file after the bare `VMImage` name, and accepts any existing artifact of that name as "already prepared" before checking the source or checksum. Once `VMImage`s and `Provider`s can be shared across namespaces (#343), one tenant's prepare can poison, or expose, another tenant's VMs. Same-named images collide even without sharing. The per-Provider status re-key fixes only the operator-side records. This ADR is the design record for the hypervisor side, and a release blocker for #343.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
 ## [2026-09-25 02:55] - Security: VMImage prepare state is per Provider identity (namespace/name + UID), with per-Provider prepare tasks
 **Author:** @wrkode (William Rizzo)
 
