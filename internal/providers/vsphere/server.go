@@ -64,6 +64,12 @@ type Provider struct {
 	finder *find.Finder
 	logger *slog.Logger
 	config *Config
+	// maxImageDownloadBytes is the largest image ImagePrepare downloads
+	// (VIRTRIGAUD_VSPHERE_IMAGE_MAX_DOWNLOAD_GIB; 0 = the default).
+	maxImageDownloadBytes int64
+	// allowLoopbackImageSources lets an image download reach loopback
+	// addresses. Tests only: their image servers listen on 127.0.0.1.
+	allowLoopbackImageSources bool
 }
 
 // Config holds the vSphere provider configuration
@@ -88,6 +94,9 @@ type Config struct {
 //   - PROVIDER_DEFAULT_STORAGE_POD: datastore cluster name for automatic placement
 //   - PROVIDER_DEFAULT_CLUSTER: compute cluster name (default: "cluster01")
 //   - PROVIDER_DEFAULT_FOLDER: VM folder path (default: "research-vms")
+//   - VIRTRIGAUD_VSPHERE_IMAGE_MAX_DOWNLOAD_GIB: the largest image ImagePrepare
+//     downloads, in GiB (default 256, 1..16384; an invalid value logs a warning
+//     and keeps the default)
 //
 // Credentials (username and password) are read from files mounted at CredentialsPath
 // by the provider controller. If credentials or endpoint are missing the govmomi
@@ -118,10 +127,11 @@ func New() *Provider {
 	}
 
 	return &Provider{
-		config: config,
-		client: client,
-		finder: finder,
-		logger: slog.Default(),
+		config:                config,
+		client:                client,
+		finder:                finder,
+		logger:                slog.Default(),
+		maxImageDownloadBytes: maxImageDownloadBytesFromEnv(os.Getenv, slog.Default()),
 	}
 }
 

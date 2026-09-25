@@ -99,11 +99,17 @@ func isDuplicateNameFault(err error) bool {
 // when CreateImportSpec cannot parse the OVF descriptor.
 const ovfDescriptorProperty = "ovfDescriptor"
 
-// isOVFContentFault reports whether err, returned by CreateImportSpec, means
-// vCenter could not use the OVF descriptor itself — an OVF fault, or an
-// InvalidArgument naming the descriptor — which is a permanent property of the
-// source, not a transient vCenter failure. Any other fault (a session, a
-// transport or an inventory problem) is not.
+// isOVFContentFault reports whether err, returned by CreateImportSpec (or one
+// of its result's errors), means vCenter cannot use the OVF descriptor itself
+// — a permanent property of the source: an invalid package (XML format,
+// namespace, elements, attributes, properties, constraints), an unsupported
+// package (types, elements, attributes, hardware family), an import this
+// target can never accept (CPU compatibility, hardware check, OS mapping,
+// missing hardware, disk provisioning), or an InvalidArgument naming the
+// descriptor. vCenter-side OVF failures that may pass — OvfSystemFault
+// (internal errors, unknown devices or entities), consumer callback faults,
+// and the generic OvfImportFailed — are not, nor is any other fault (a
+// session, a transport or an inventory problem).
 func isOVFContentFault(err error) bool {
 	if err == nil {
 		return false
@@ -111,7 +117,9 @@ func isOVFContentFault(err error) bool {
 	content := false
 	fault.In(err, func(f types.BaseMethodFault, _ string, _ []types.LocalizableMessage) bool {
 		switch f := f.(type) {
-		case types.BaseOvfFault:
+		case *types.OvfImportFailed:
+			// A generic import failure: possibly transient.
+		case types.BaseOvfInvalidPackage, types.BaseOvfUnsupportedPackage, types.BaseOvfImport:
 			content = true
 		case *types.InvalidArgument:
 			content = strings.EqualFold(f.InvalidProperty, ovfDescriptorProperty)
@@ -164,19 +172,18 @@ func (p *Provider) importOVA(ctx context.Context, imp *importer.Importer, fpath 
 		return nil, fmt.Errorf("refusing to import: the OVF package is not read through the restricted package reader")
 	}
 
+	// Parser errors quote the downloaded content (an XML root element, a tar
+	// header): they go to the provider log only, in both modes, so a status
+	// is no oracle for what an arbitrary URL serves.
 	descriptor, err := importer.ReadOvf(fpath, imp.Archive)
 	if err != nil {
-		if identity {
-			return nil, errors.NewInvalidSpec("ImagePrepare: the OVF descriptor cannot be read from the downloaded source: %v", err)
-		}
-		return nil, fmt.Errorf("read OVF descriptor: %w", err)
+		p.logger.Warn("ImagePrepare: the OVF descriptor cannot be read from the downloaded source", "error", err)
+		return nil, errors.NewInvalidSpec("ImagePrepare: the OVF descriptor cannot be read from the downloaded source")
 	}
 	envelope, err := importer.ReadEnvelope(descriptor)
 	if err != nil {
-		if identity {
-			return nil, errors.NewInvalidSpec("ImagePrepare: the source is not a valid OVF descriptor: %v", err)
-		}
-		return nil, fmt.Errorf("parse OVF descriptor: %w", err)
+		p.logger.Warn("ImagePrepare: the downloaded source is not a valid OVF descriptor", "error", err)
+		return nil, errors.NewInvalidSpec("ImagePrepare: the downloaded source is not a valid OVF descriptor")
 	}
 	if err := p.admitOVFFileRefs(pkg, envelope); err != nil {
 		return nil, err
@@ -215,15 +222,19 @@ func (p *Provider) importOVA(ctx context.Context, imp *importer.Importer, fpath 
 	spec, err := ovf.NewManager(imp.Client).CreateImportSpec(ctx, string(descriptor), imp.ResourcePool, imp.Datastore, &params)
 	if err != nil {
 		if identity && isOVFContentFault(err) {
-			return nil, errors.NewInvalidSpec("ImagePrepare: vCenter cannot import the OVF descriptor: %v", err)
+			p.logger.Warn("ImagePrepare: vCenter cannot import the OVF descriptor", "error", err)
+			return nil, errors.NewInvalidSpec("ImagePrepare: vCenter cannot import the OVF descriptor " +
+				"(details in the provider log)")
 		}
 		return nil, fmt.Errorf("create OVF import spec: %w", err)
 	}
 	if len(spec.Error) > 0 {
-		if identity {
-			return nil, errors.NewInvalidSpec("ImagePrepare: vCenter rejected the OVF: %s", spec.Error[0].LocalizedMessage)
+		specErr := &task.Error{LocalizedMethodFault: &spec.Error[0]}
+		if identity && isOVFContentFault(specErr) {
+			p.logger.Warn("ImagePrepare: vCenter rejected the OVF", "error", spec.Error[0].LocalizedMessage)
+			return nil, errors.NewInvalidSpec("ImagePrepare: vCenter rejected the OVF (details in the provider log)")
 		}
-		return nil, &task.Error{LocalizedMethodFault: &spec.Error[0]}
+		return nil, specErr
 	}
 	for _, w := range spec.Warning {
 		_, _ = imp.Log(fmt.Sprintf("Warning: %s\n", w.LocalizedMessage))

@@ -60,7 +60,8 @@ func TestClient_PrepareImage_SourceUnavailableDoesNotTripBreaker(t *testing.T) {
 	dialer, cleanup := startBufconnServer(t, &imagePrepareFakeServer{
 		fn: func(_ context.Context, _ *providerv1.ImagePrepareRequest) (*providerv1.ImagePrepareResponse, error) {
 			calls.Add(1)
-			return nil, answer.Load().(error)
+			err, _ := answer.Load().(error)
+			return nil, err
 		},
 	})
 	defer cleanup()

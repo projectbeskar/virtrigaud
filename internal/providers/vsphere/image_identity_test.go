@@ -710,6 +710,21 @@ func TestIdentityPrepare_FailureClassification(t *testing.T) {
 		assert.Empty(t, errorReasons(err), "vCenter itself failing counts toward the circuit breaker")
 	})
 
+	t.Run("parser errors never quote the downloaded content", func(t *testing.T) {
+		p, _, _ := newIdentitySim(t, "")
+		for name, body := range map[string][]byte{
+			"an HTML page as the descriptor": tarOVA(t, "<html><head><title>internal-admin-console</title></head></html>"),
+			"not a tar archive":              []byte("<html><title>internal-admin-console</title></html>" + strings.Repeat(" ", 600)),
+		} {
+			_, err := p.ImagePrepare(context.Background(),
+				identityReq(t, serveBody(t, http.StatusOK, body), testImageUID, testDigestA))
+			requireCode(t, err, codes.InvalidArgument)
+			for _, leak := range []string{"html", "internal-admin-console", "archive/tar", "XML", "xml"} {
+				assert.NotContains(t, err.Error(), leak, name)
+			}
+		}
+	})
+
 	t.Run("an import vCenter refuses for the image's content is the source's fault", func(t *testing.T) {
 		p, _, _ := newIdentitySim(t, "")
 		p.client.RoundTripper = &failImportVApp{RoundTripper: p.client.RoundTripper,

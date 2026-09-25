@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -718,6 +719,23 @@ func (p *Provider) imageSourceError(ctx context.Context, message string, detail 
 	return imageartifact.SourceUnavailableError("ImagePrepare: " + message + " (details in the provider log); will retry")
 }
 
+// forbiddenSourceError logs and returns the InvalidSpec of an image source the
+// provider refuses to connect to (image_download.go).
+func (p *Provider) forbiddenSourceError(ctx context.Context, shownURL string, detail error) error {
+	p.logger.WarnContext(ctx, "ImagePrepare: refusing to download from a forbidden address", "url", shownURL, "error", detail)
+	return errors.NewInvalidSpec("ImagePrepare: the image source address is not allowed " +
+		"(loopback, link-local, unspecified and multicast addresses are refused)")
+}
+
+// imageTooLargeError logs and returns the InvalidSpec of an image larger than
+// the provider's download limit.
+func (p *Provider) imageTooLargeError(ctx context.Context, shownURL string, size, limit int64) error {
+	p.logger.WarnContext(ctx, "ImagePrepare: the image exceeds the download limit", "url", shownURL,
+		"bytes", size, "limit_bytes", limit, "env", maxImageDownloadGiBEnv)
+	return errors.NewInvalidSpec("ImagePrepare: the image is larger than this provider's download limit (%d GiB)",
+		limit/bytesPerGiB)
+}
+
 // downloadOVA streams the OVA/OVF at ovaURL to a temp file on the provider pod's
 // filesystem and returns the local path plus a cleanup func that removes it. The
 // cleanup is always safe to call (it tolerates an already-removed file).
@@ -726,8 +744,11 @@ func (p *Provider) imageSourceError(ctx context.Context, message string, detail 
 // downloaded instead of retrying it forever, and so a failing source never
 // counts against the Provider's health:
 //
-//   - permanent, InvalidSpec: a URL that cannot form a request, or a 4xx
-//     other than 408/429 (isPermanentHTTPStatus);
+//   - permanent, InvalidSpec: a URL that cannot form a request, a source (or
+//     redirect target) at a forbidden address or with a scheme other than
+//     http(s), more than maxImageDownloadRedirects redirects, a 4xx other than
+//     408/429 (isPermanentHTTPStatus), or an image larger than the provider's
+//     download limit (VIRTRIGAUD_VSPHERE_IMAGE_MAX_DOWNLOAD_GIB);
 //   - the source's fault, retryable and tagged IMAGE_SOURCE_UNAVAILABLE
 //     (imageSourceError, kept out of the manager's circuit breaker): a
 //     transport error, a 5xx/408/429, the source breaking off mid-download, or
@@ -767,29 +788,56 @@ func (p *Provider) downloadOVA(ctx context.Context, ovaURL string) (localPath st
 		p.logger.WarnContext(ctx, "ImagePrepare: the OVA URL cannot form a request", "url", shownURL, "error", unwrapURLError(err))
 		return "", noop, errors.NewInvalidSpec("ImagePrepare: the image source URL is not valid")
 	}
-	resp, err := http.DefaultClient.Do(req)
+	if err := checkImageSourceURL(req.URL, p.allowLoopbackImageSources); err != nil {
+		cleanup()
+		return "", noop, p.forbiddenSourceError(ctx, shownURL, err)
+	}
+	client := imageDownloadClient(p.allowLoopbackImageSources)
+	defer client.CloseIdleConnections()
+	resp, err := client.Do(req)
 	if err != nil {
 		cleanup()
+		switch {
+		case stderrors.Is(err, errForbiddenImageSource):
+			return "", noop, p.forbiddenSourceError(ctx, shownURL, unwrapURLError(err))
+		case stderrors.Is(err, errTooManyImageRedirects):
+			p.logger.WarnContext(ctx, "ImagePrepare: the image source redirects too many times", "url", shownURL,
+				"max_redirects", maxImageDownloadRedirects)
+			return "", noop, errors.NewInvalidSpec("ImagePrepare: the image source redirects more than %d times",
+				maxImageDownloadRedirects)
+		}
 		return "", noop, p.imageSourceError(ctx, "the image source could not be reached", unwrapURLError(err), "url", shownURL)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		cleanup()
 		if isPermanentHTTPStatus(resp.StatusCode) {
+			p.logger.WarnContext(ctx, "ImagePrepare: the image source refused the download", "url", shownURL,
+				"http_status", resp.StatusCode)
 			return "", noop, errors.NewInvalidSpec(
-				"ImagePrepare: the OVA source %s answered HTTP %d; fix the image source URL", shownURL, resp.StatusCode)
+				"ImagePrepare: the image source answered with an HTTP client error; fix the image source URL")
 		}
 		return "", noop, p.imageSourceError(ctx, "the image source is unavailable",
 			fmt.Errorf("HTTP status %d", resp.StatusCode), "url", shownURL)
 	}
 
-	body := &sourceReadTracker{r: resp.Body}
-	if _, err := io.Copy(tmp, body); err != nil {
+	limit := p.imageDownloadLimit()
+	if resp.ContentLength > limit {
+		cleanup()
+		return "", noop, p.imageTooLargeError(ctx, shownURL, resp.ContentLength, limit)
+	}
+	body := &sourceReadTracker{r: io.LimitReader(resp.Body, limit+1)}
+	written, err := io.Copy(tmp, body)
+	if err != nil {
 		cleanup()
 		if body.err != nil {
 			return "", noop, p.imageSourceError(ctx, "the image source broke off the download", unwrapURLError(body.err), "url", shownURL)
 		}
 		return "", noop, p.imageSourceError(ctx, "the downloaded image could not be staged on the provider", err)
+	}
+	if written > limit {
+		cleanup()
+		return "", noop, p.imageTooLargeError(ctx, shownURL, written, limit)
 	}
 	if err := tmp.Sync(); err != nil {
 		cleanup()
@@ -828,10 +876,17 @@ func (p *Provider) newOVAArchive(localPath, ovaURL string) (*ovfPackage, string,
 	}
 	descriptor, err := findOVADescriptorName(localPath)
 	if err != nil {
+		if stderrors.Is(err, errUnreadableOVA) {
+			p.logger.Warn("ImagePrepare: the downloaded OVA is not a readable tar archive", "error", err)
+			return nil, "", errors.NewInvalidSpec("ImagePrepare: the downloaded OVA is not a readable tar archive")
+		}
 		return nil, "", err
 	}
 	return newTarPackage(localPath, descriptor), descriptor, nil
 }
+
+// errUnreadableOVA marks a staged OVA that is not a readable tar archive.
+var errUnreadableOVA = stderrors.New("the downloaded OVA is not a readable tar archive")
 
 // findOVADescriptorName returns the member name of the OVF descriptor inside an
 // OVA tar: the first package member (ovaMemberName: a regular file at the
@@ -855,8 +910,9 @@ func findOVADescriptorName(ovaPath string) (string, error) {
 		if err != nil {
 			// The file is the complete body the source served (a truncated
 			// download fails in downloadOVA), so an unreadable archive is a
-			// property of the source: permanent.
-			return "", errors.NewInvalidSpec("ImagePrepare: the downloaded OVA is not a readable tar archive: %v", err)
+			// property of the source: permanent. The parser's text stays out
+			// of the message (newOVAArchive logs it).
+			return "", fmt.Errorf("%w: %v", errUnreadableOVA, err)
 		}
 		if name := ovaMemberName(h); strings.EqualFold(path.Ext(name), ovfDescriptorExt) {
 			return name, nil
@@ -917,8 +973,13 @@ func verifyFileChecksum(path, expected, checksumType string) error {
 	}
 	got := hex.EncodeToString(h.Sum(nil))
 	if !strings.EqualFold(got, strings.TrimSpace(expected)) {
-		return errors.NewInvalidSpec(
-			"ImagePrepare: checksum mismatch for OVA: expected %s, got %s", expected, got)
+		// The computed hash is a digest of whatever the URL served; it goes
+		// to the provider log only, so the status is no oracle for content
+		// the requester cannot otherwise read.
+		slog.Default().Warn("ImagePrepare: checksum mismatch for the downloaded OVA",
+			"algorithm", checksumType, "expected", expected, "got", got)
+		return errors.NewInvalidSpec("ImagePrepare: checksum mismatch for the downloaded OVA; " +
+			"check the image source URL and its checksum")
 	}
 	return nil
 }

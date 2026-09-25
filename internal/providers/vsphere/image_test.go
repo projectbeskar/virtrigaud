@@ -302,6 +302,8 @@ func newImageTestProvider(t *testing.T) (*Provider, func()) {
 		finder: finder,
 		config: cfg,
 		logger: slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		// The tests' image servers listen on 127.0.0.1.
+		allowLoopbackImageSources: true,
 	}
 	cleanup := func() {
 		_ = client.Logout(context.Background())
