@@ -134,11 +134,14 @@ type laggingClient struct {
 	reader client.Reader
 }
 
-func newLaggingClient(s *runtime.Scheme, objs ...client.Object) *laggingClient {
+func newLaggingClient(t *testing.T, s *runtime.Scheme, objs ...client.Object) *laggingClient {
+	t.Helper()
 	build := func() client.Client {
 		copies := make([]client.Object, 0, len(objs))
 		for _, o := range objs {
-			copies = append(copies, o.DeepCopyObject().(client.Object))
+			c, ok := o.DeepCopyObject().(client.Object)
+			require.True(t, ok, "deep copy of %T is not a client.Object", o)
+			copies = append(copies, c)
 		}
 		return fake.NewClientBuilder().WithScheme(s).WithObjects(copies...).
 			WithStatusSubresource(&infravirtrigaudiov1beta1.VirtualMachine{}).Build()
@@ -484,7 +487,7 @@ func TestClusteredCapacity_ConcurrentCreatesNeverOverbook(t *testing.T) {
 	}
 
 	t.Run("shared assume cache", func(t *testing.T) {
-		lc := newLaggingClient(s, objs...)
+		lc := newLaggingClient(t, s, objs...)
 		r := &VirtualMachineReconciler{Client: lc, Scheme: s}
 		prov := &concurrentCreateProvider{}
 		createConcurrently(t, func(int) *VirtualMachineReconciler { return r }, prov, names)
@@ -511,7 +514,7 @@ func TestClusteredCapacity_ConcurrentCreatesNeverOverbook(t *testing.T) {
 	})
 
 	t.Run("control: separate reconcilers overbook", func(t *testing.T) {
-		lc := newLaggingClient(s, objs...)
+		lc := newLaggingClient(t, s, objs...)
 		prov := &concurrentCreateProvider{}
 		createConcurrently(t, func(int) *VirtualMachineReconciler {
 			return &VirtualMachineReconciler{Client: lc, Scheme: s}
@@ -544,7 +547,7 @@ func TestClusteredCapacity_ConcurrentMutualHardAntiAffinity(t *testing.T) {
 	}
 	for round := 0; round < 30; round++ {
 		objs := append(capBase(), capHost("host-alpha", 16), capHost("host-bravo", 16), antiDB.DeepCopy(), db("db-0"), db("db-1"))
-		lc := newLaggingClient(s, objs...)
+		lc := newLaggingClient(t, s, objs...)
 		r := &VirtualMachineReconciler{Client: lc, Scheme: s}
 		prov := &concurrentCreateProvider{}
 		createConcurrently(t, func(int) *VirtualMachineReconciler { return r }, prov, []string{"db-0", "db-1"})
@@ -560,7 +563,7 @@ func TestClusteredCapacity_ConcurrentMutualHardAntiAffinity(t *testing.T) {
 func TestClusteredCapacity_AssumptionSettlesOnInformerConfirmation(t *testing.T) {
 	s := coverageTestScheme(t)
 	objs := append(capBase(), capHost("host-alpha", 4), capVM("a"), capVM("b"), capVM("c"))
-	lc := newLaggingClient(s, objs...)
+	lc := newLaggingClient(t, s, objs...)
 	r := &VirtualMachineReconciler{Client: lc, Scheme: s}
 	prov := &concurrentCreateProvider{}
 	create := func(name string) {

@@ -96,7 +96,7 @@ func TestCommitted_VMIsExcludedFromItsOwnSum(t *testing.T) {
 	// Another VM with the same resources does count.
 	req.PlacedVMs = append(req.PlacedVMs, holding("other", "host-a", 1, 0))
 	_, err = Schedule(req)
-	requireNoFit(t, err)
+	_ = requireNoFit(t, err)
 }
 
 func TestCommitted_EveryEntryCounts_BoundPendingAndAssumed(t *testing.T) {
@@ -137,7 +137,7 @@ func TestCommitted_EmptyUIDsAreNotDeduplicated(t *testing.T) {
 	req := baseReq(newHost("host-a", 4, 65536))
 	req.PlacedVMs = []PlacedVM{holding("", "host-a", 2, 0), holding("", "host-a", 2, 0)}
 	_, err := Schedule(req)
-	requireNoFit(t, err)
+	_ = requireNoFit(t, err)
 }
 
 func TestCommitted_OvercommitScalesCapacityNotTheCommittedSum(t *testing.T) {
@@ -224,7 +224,7 @@ func TestCommitted_NegativeResourcesNeverFreeCapacity(t *testing.T) {
 	req := baseReq(newHost("host-a", 2, 65536))
 	req.PlacedVMs = []PlacedVM{holding("neg", "host-a", -8, -8192), holding("b", "host-a", 1, 0)}
 	_, err := Schedule(req)
-	requireNoFit(t, err)
+	_ = requireNoFit(t, err)
 }
 
 func TestCommitted_NoFitMessageIsBoundedAndNamesNoVMOrHost(t *testing.T) {
@@ -245,7 +245,7 @@ func TestCommitted_NoFitMessageIsBoundedAndNamesNoVMOrHost(t *testing.T) {
 	req := baseReq(hosts...)
 	req.PlacedVMs = placed
 	_, err := Schedule(req)
-	requireNoFit(t, err)
+	_ = requireNoFit(t, err)
 	msg := err.Error()
 	assert.Less(t, len(msg), 400, "bounded message: %q", msg)
 	assert.NotContains(t, msg, "tenant-secret-vm")
@@ -258,7 +258,7 @@ func TestCommitted_CapacitySummaryPicksTheHostWithMostFree(t *testing.T) {
 	req.Resources.CPU = 4
 	req.PlacedVMs = []PlacedVM{holding("a", "host-a", 7, 0), holding("b", "host-b", 5, 0)}
 	_, err := Schedule(req)
-	requireNoFit(t, err)
+	_ = requireNoFit(t, err)
 	msg := err.Error()
 	assert.True(t, strings.Contains(msg, "insufficient CPU on 2 of 3 candidate host(s): requested 4 vCPU, at most 3 free (committed 5 of 8 after overcommit)"), msg)
 	assert.Contains(t, msg, rejNotReady+": 1")
@@ -268,7 +268,7 @@ func TestInsufficientCapacity(t *testing.T) {
 	assert.False(t, InsufficientCapacity(nil))
 	assert.False(t, InsufficientCapacity(errors.New("x")))
 	_, err := Schedule(baseReq(newHost("host-a", 8, 65536, hSchedulable(false))))
-	require.Error(t, err)
+	nf := requireNoFit(t, err)
 	assert.False(t, InsufficientCapacity(err), "a cordoned host is not a capacity shortfall")
-	assert.Empty(t, err.(*NoFeasibleHostError).CapacitySummary())
+	assert.Empty(t, nf.CapacitySummary())
 }
