@@ -23,6 +23,9 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	obsmetrics "github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 	"github.com/projectbeskar/virtrigaud/internal/providers/proxmox"
 	"github.com/projectbeskar/virtrigaud/internal/version"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/middleware"
@@ -97,6 +100,14 @@ func main() {
 		},
 		Auth: tlsResolution.Auth,
 	}
+
+	// Expose the provider's Prometheus registry at /metrics on the health port,
+	// as the libvirt provider does, so the ADR-0009 D7 deprecation counter
+	// virtrigaud_provider_image_prepare_legacy_requests_total{provider_type="proxmox"}
+	// is scrapable: operators alert on it to find a manager that must be
+	// upgraded. Uses the controller-runtime registry every virtrigaud_* metric
+	// registers with (internal/obs/metrics).
+	config.MetricsHandler = promhttp.HandlerFor(obsmetrics.GetRegistry(), promhttp.HandlerOpts{})
 
 	// Create server
 	srv, err := server.New(config)

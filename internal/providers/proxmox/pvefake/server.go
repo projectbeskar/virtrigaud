@@ -40,10 +40,40 @@ type Server struct {
 	snapshots    map[string][]*Snapshot
 	lastDownload *DownloadRequest
 	lastPowerOp  *PowerOpRequest
+	requests     []RecordedRequest
 	nextID       int
 	mu           sync.RWMutex
 	logger       *slog.Logger
 	config       *Config
+}
+
+// RecordedRequest is one API request the fake server received, recorded before
+// authentication and routing, so tests can assert which PVE calls an operation
+// made (or that it made none).
+type RecordedRequest struct {
+	Method string
+	Path   string
+}
+
+// Requests returns a copy of every API request the fake server has received,
+// in arrival order. Safe for concurrent use.
+func (s *Server) Requests() []RecordedRequest {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]RecordedRequest(nil), s.requests...)
+}
+
+// MutatingRequests returns the received requests whose method can create or
+// modify PVE state (anything but GET and HEAD), in arrival order. Safe for
+// concurrent use.
+func (s *Server) MutatingRequests() []RecordedRequest {
+	var out []RecordedRequest
+	for _, r := range s.Requests() {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // DownloadRequest records the parameters of the most recent storage download-url
@@ -258,6 +288,9 @@ func (s *Server) seedData() {
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Log request
 	s.logger.Debug("Fake PVE API request", "method", r.Method, "path", r.URL.Path)
+	s.mu.Lock()
+	s.requests = append(s.requests, RecordedRequest{Method: r.Method, Path: r.URL.Path})
+	s.mu.Unlock()
 
 	// Simulate authentication (accept any token)
 	if auth := r.Header.Get("Authorization"); auth == "" {
