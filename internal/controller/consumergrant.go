@@ -128,6 +128,17 @@ func (e *ConsumerNotAllowedError) Is(target error) bool { return target == errCo
 // ConsumerNotAllowedError.
 func isConsumerNotAllowed(err error) bool { return errors.Is(err, errConsumerNotAllowed) }
 
+// consumerRefusalCause returns the *ConsumerNotAllowedError err wraps, so a
+// refusal reaches a condition with its fixed wording whatever path returned
+// it; any other err is returned unchanged.
+func consumerRefusalCause(err error) error {
+	var cna *ConsumerNotAllowedError
+	if errors.As(err, &cna) {
+		return cna
+	}
+	return err
+}
+
 // consumerSelectorOf returns the kind and spec.consumerNamespaceSelector of a
 // Provider, VMClass or VMImage. Any other type is a programming error and
 // reports ok == false; callers fail closed.

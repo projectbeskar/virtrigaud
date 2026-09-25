@@ -25,6 +25,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -542,6 +543,9 @@ func (r *VMMigrationReconciler) handleValidatingPhase(ctx context.Context, migra
 	// VM's disk is locked and cannot be cloned to streamOptimized (#236, Bug H).
 	if migration.Spec.Source.PowerOffBeforeMigration {
 		done, res, err := r.ensureSourcePoweredOff(ctx, migration)
+		if isConsumerNotAllowed(err) {
+			return r.markConsumerNotAllowed(ctx, migration, err)
+		}
 		if err != nil {
 			return r.transitionToFailed(ctx, migration,
 				fmt.Sprintf("Failed to power off source VM before migration: %v", err))
@@ -683,8 +687,12 @@ func (r *VMMigrationReconciler) handleSnapshottingPhase(ctx context.Context, mig
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	// Get source provider
+	// Get source provider. A refused grant is not a failure: the phase is
+	// kept and the migration waits for access.
 	sourceProvider, err := r.sourceProviderFor(ctx, migration, sourceVM)
+	if isConsumerNotAllowed(err) {
+		return r.markConsumerNotAllowed(ctx, migration, err)
+	}
 	if err != nil {
 		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Invalid source provider: %v", err))
 	}
@@ -729,6 +737,12 @@ func (r *VMMigrationReconciler) handleSnapshottingPhase(ctx context.Context, mig
 		Description:   fmt.Sprintf("Migration snapshot for %s", migration.Name),
 		IncludeMemory: false, // Disk-only snapshot for migration
 		Quiesce:       false,
+	}
+
+	// Re-read the source Provider's grant from the API server (not the cache)
+	// right before the snapshot is created through it.
+	if allowed, res, err := r.confirmSourceConsumerLive(ctx, migration, sourceVM); !allowed {
+		return res, err
 	}
 
 	logger.Info("Creating migration snapshot", "snapshot_name", snapshotName)
@@ -782,8 +796,12 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to get source VM: %v", err))
 	}
 
-	// Get source provider
+	// Get source provider. A refused grant is not a failure: the phase is
+	// kept and the migration waits for access.
 	sourceProvider, err := r.sourceProviderFor(ctx, migration, sourceVM)
+	if isConsumerNotAllowed(err) {
+		return r.markConsumerNotAllowed(ctx, migration, err)
+	}
 	if err != nil {
 		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Invalid source provider: %v", err))
 	}
@@ -920,6 +938,13 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 		func(caps contracts.Capabilities) bool { return caps.SupportsDiskExport },
 		"Source provider does not support disk export"); blocked {
 		return res, nil
+	}
+
+	// Re-read the source Provider's grant from the API server (not the cache)
+	// right before the export through it, and before the in-memory guard is
+	// claimed so a refusal doesn't block a later export.
+	if allowed, res, err := r.confirmSourceConsumerLive(ctx, migration, sourceVM); !allowed {
+		return res, err
 	}
 
 	// Claim the in-memory export guard for this object generation BEFORE
@@ -1155,6 +1180,9 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 	switch migrationBackendType(migration) {
 	case storagemigration.BackendS3:
 		sourceProvider, srcErr := r.getSourceProvider(ctx, migration)
+		if isConsumerNotAllowed(srcErr) {
+			return r.markConsumerNotAllowed(ctx, migration, srcErr)
+		}
 		if srcErr != nil {
 			return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to get source provider: %v", srcErr))
 		}
@@ -2294,6 +2322,34 @@ func migrationForOwnNamespace(migration *infrav1beta1.VMMigration) *infrav1beta1
 	return m
 }
 
+// confirmSourceConsumerLive re-reads, through the uncached APIReader, that the
+// migration's namespace may use the source VM's Provider, immediately before a
+// source-side call with a side effect (SnapshotCreate, ExportDisk), so a
+// revocation the cache has not seen yet is honoured. A source Provider in the
+// migration's own namespace needs no read. A refusal is recorded like the
+// cached one; a read error is returned so the controller retries with backoff
+// and nothing is issued.
+func (r *VMMigrationReconciler) confirmSourceConsumerLive(
+	ctx context.Context,
+	migration *infrav1beta1.VMMigration,
+	sourceVM *infrav1beta1.VirtualMachine,
+) (allowed bool, result ctrl.Result, err error) {
+	key := vmProviderKey(sourceVM)
+	if key.Namespace == migration.Namespace {
+		return true, ctrl.Result{}, nil
+	}
+	err = getForConsumer(ctx, r.liveReader(), key, &infrav1beta1.Provider{}, migration.Namespace)
+	switch {
+	case isConsumerNotAllowed(err):
+		result, err = r.markConsumerNotAllowed(ctx, migration, err)
+		return false, result, err
+	case err != nil:
+		logging.FromContext(ctx).Error(err, "Failed to re-read the source Provider's consumer grant; not proceeding")
+		return false, ctrl.Result{}, err
+	}
+	return true, ctrl.Result{}, nil
+}
+
 // confirmTargetConsumersLive re-reads the target consumer grants
 // (checkTargetConsumers) through the uncached APIReader immediately before a
 // side effect that relies on them — the ImportDisk call and the target
@@ -2322,7 +2378,9 @@ func (r *VMMigrationReconciler) confirmTargetConsumersLive(ctx context.Context, 
 // already created is touched. The Warning event is emitted on the transition
 // only, and the recheck is slow; the grant watches re-drive it promptly.
 func (r *VMMigrationReconciler) markConsumerNotAllowed(ctx context.Context, migration *infrav1beta1.VMMigration, cause error) (ctrl.Result, error) {
+	cause = consumerRefusalCause(cause)
 	msg := cause.Error()
+	before := migration.Status.DeepCopy()
 	if consumerRefusalIsNew(migration.Status.Conditions, cause) {
 		logging.FromContext(ctx).Info("VMMigration uses a Provider or VMClass its namespace may not use; no provider call is made",
 			"phase", migration.Status.Phase, "error", msg)
@@ -2347,8 +2405,11 @@ func (r *VMMigrationReconciler) markConsumerNotAllowed(ctx context.Context, migr
 		})
 	}
 	metrics.RecordError(errReasonConsumerNotAllowed, metrics.ComponentManager)
-	if err := r.updateStatus(ctx, migration); err != nil {
-		return ctrl.Result{}, err
+	// A recheck of the same refusal changes nothing: don't write it again.
+	if !equality.Semantic.DeepEqual(before, &migration.Status) {
+		if err := r.updateStatus(ctx, migration); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 	return ctrl.Result{RequeueAfter: consumerNotAllowedRetryInterval}, nil
 }

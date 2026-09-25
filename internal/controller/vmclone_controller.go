@@ -24,6 +24,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -1054,6 +1055,8 @@ func (r *VMCloneReconciler) gateConsumers(
 // ID — and nothing already created is touched. The Warning event is emitted on
 // the transition only, and the recheck is slow.
 func (r *VMCloneReconciler) markConsumerNotAllowed(ctx context.Context, clone *infrav1beta1.VMClone, cause error) ctrl.Result {
+	cause = consumerRefusalCause(cause)
+	before := clone.Status.DeepCopy()
 	if consumerRefusalIsNew(clone.Status.Conditions, cause) {
 		logging.FromContext(ctx).Info("VMClone uses a Provider or VMClass its namespace may not use; not cloning", "error", cause.Error())
 		r.Recorder.Event(clone, corev1.EventTypeWarning, conditions.ReasonConsumerNotAllowed, cause.Error())
@@ -1071,7 +1074,10 @@ func (r *VMCloneReconciler) markConsumerNotAllowed(ctx context.Context, clone *i
 		ObservedGeneration: clone.Generation,
 	})
 	metrics.RecordError(errReasonConsumerNotAllowed, metrics.ComponentManager)
-	_ = r.updateStatus(ctx, clone) //nolint:errcheck // status errors retried next reconcile
+	// A recheck of the same refusal changes nothing: don't write it again.
+	if !equality.Semantic.DeepEqual(before, &clone.Status) {
+		_ = r.updateStatus(ctx, clone) //nolint:errcheck // status errors retried next reconcile
+	}
 	return ctrl.Result{RequeueAfter: consumerNotAllowedRetryInterval}
 }
 

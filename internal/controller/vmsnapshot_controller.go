@@ -22,6 +22,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -735,8 +736,10 @@ func (r *VMSnapshotReconciler) buildSnapshotCreateRequest(snapshot *infrav1beta1
 // unchanged once access is granted) and no provider is resolved or called. The
 // recheck is slow; the grant watches re-drive it promptly.
 func (r *VMSnapshotReconciler) refuseSnapshotConsumer(ctx context.Context, snapshot *infrav1beta1.VMSnapshot, cause error) ctrl.Result {
-	logging.FromContext(ctx).Info("The VM's Provider may not be used from this namespace; not calling the provider", "error", cause.Error())
+	cause = consumerRefusalCause(cause)
+	before := snapshot.Status.DeepCopy()
 	if consumerRefusalIsNew(snapshot.Status.Conditions, cause) {
+		logging.FromContext(ctx).Info("The VM's Provider may not be used from this namespace; not calling the provider", "error", cause.Error())
 		r.Recorder.Event(snapshot, corev1.EventTypeWarning, conditions.ReasonConsumerNotAllowed, cause.Error())
 	}
 	snapshot.Status.Message = cause.Error()
@@ -749,8 +752,11 @@ func (r *VMSnapshotReconciler) refuseSnapshotConsumer(ctx context.Context, snaps
 		ObservedGeneration: snapshot.Generation,
 	})
 	metrics.RecordError(errReasonConsumerNotAllowed, metrics.ComponentManager)
-	// Status update errors are intentionally ignored to avoid blocking reconciliation
-	_ = r.updateStatus(ctx, snapshot)
+	// A recheck of the same refusal changes nothing: don't write it again.
+	// Status update errors are intentionally ignored to avoid blocking reconciliation.
+	if !equality.Semantic.DeepEqual(before, &snapshot.Status) {
+		_ = r.updateStatus(ctx, snapshot)
+	}
 	return ctrl.Result{RequeueAfter: consumerNotAllowedRetryInterval}
 }
 

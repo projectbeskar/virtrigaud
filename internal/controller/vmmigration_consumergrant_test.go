@@ -273,3 +273,134 @@ func TestVMMigrationConsumer_RefusedMigrationsMapping(t *testing.T) {
 	require.Len(t, reqs, 1)
 	assert.Equal(t, "refused", reqs[0].Name)
 }
+
+// xnsSourceMigration is xnsMigration("") whose source VM runs on a Provider in
+// cgOwnerNS (src-prov there, with sel).
+func xnsSourceMigration(t *testing.T, phase infrav1beta1.MigrationPhase, sel *metav1.LabelSelector) (*infrav1beta1.VMMigration, []client.Object) {
+	t.Helper()
+	migration, objs := xnsMigration("")
+	migration.Status.Phase = phase
+	src, ok := objs[0].(*infrav1beta1.VirtualMachine)
+	require.True(t, ok, "xnsMigration returns the source VM first")
+	src.Spec.ProviderRef = infrav1beta1.ObjectRef{Name: "src-prov", Namespace: cgOwnerNS}
+	src.Status.BoundProvider = &infrav1beta1.BoundProviderRef{Namespace: cgOwnerNS, Name: "src-prov"}
+	shared := readyProvider(cgOwnerNS, "src-prov")
+	shared.Spec.Type = infrav1beta1.ProviderTypeVSphere
+	shared.Spec.ConsumerNamespaceSelector = sel
+	return migration, append(objs, shared, labeledNamespace(xnsSource, nil))
+}
+
+func TestVMMigrationConsumer_SourcePhasesWaitInsteadOfFailing(t *testing.T) {
+	for _, phase := range []infrav1beta1.MigrationPhase{
+		infrav1beta1.MigrationPhaseValidating, // power-off
+		infrav1beta1.MigrationPhaseSnapshotting,
+		infrav1beta1.MigrationPhaseExporting,
+	} {
+		t.Run(string(phase), func(t *testing.T) {
+			ctx := context.Background()
+			migration, objs := xnsSourceMigration(t, phase, nil)
+			migration.Spec.Source.PowerOffBeforeMigration = true
+			migration.Spec.Source.CreateSnapshot = true
+			spy := &migrationSpy{}
+			r, resolved := countedMigrationReconciler(t, spy, append(objs, migration)...)
+
+			var err error
+			switch phase {
+			case infrav1beta1.MigrationPhaseValidating:
+				_, _, pErr := r.ensureSourcePoweredOff(ctx, migration)
+				require.True(t, isConsumerNotAllowed(pErr))
+				_, err = r.handleValidatingPhase(ctx, migration)
+			case infrav1beta1.MigrationPhaseSnapshotting:
+				_, err = r.handleSnapshottingPhase(ctx, migration)
+			case infrav1beta1.MigrationPhaseExporting:
+				_, err = r.handleExportingPhase(ctx, migration)
+			}
+			require.NoError(t, err)
+
+			got := getXNSMigration(t, r, migration)
+			assert.Equal(t, phase, got.Status.Phase, "the phase is kept")
+			requireMigrationConsumerRefused(t, got, consumerKindProvider, cgOwnerNS, "src-prov")
+			assert.Zero(t, resolved.Load())
+			noMigrationSideEffects(t, spy)
+		})
+	}
+}
+
+func TestVMMigrationConsumer_S3FormatLookupWaitsInsteadOfFailing(t *testing.T) {
+	ctx := context.Background()
+	prov := &capturingMigrationProvider{}
+	sourceVM, sourceProvider, targetProvider, migration := directionFixture(
+		infrav1beta1.ProviderTypeVSphere, infrav1beta1.ProviderTypeLibvirt)
+	sourceVM.Spec.ProviderRef.Namespace = cgOwnerNS
+	sourceProvider.Namespace = cgOwnerNS // not shared with "default"
+	r, _ := directionReconciler(t, prov, sourceVM, sourceProvider, targetProvider, migration, s3CredsSecret())
+
+	res, err := r.handleImportingPhase(ctx, migration)
+	require.NoError(t, err)
+	assert.Equal(t, consumerNotAllowedRetryInterval, res.RequeueAfter)
+	assert.Zero(t, prov.importCalls)
+	got := getXNSMigration(t, r, migration)
+	assert.Equal(t, infrav1beta1.MigrationPhaseImporting, got.Status.Phase)
+	requireMigrationConsumerRefused(t, got, consumerKindProvider, cgOwnerNS, "source-provider")
+}
+
+func TestVMMigrationConsumer_SnapshotCreateNotIssuedWhenRevokedLive(t *testing.T) {
+	ctx := context.Background()
+	migration, objs := xnsSourceMigration(t, infrav1beta1.MigrationPhaseSnapshotting, &metav1.LabelSelector{})
+	migration.Spec.Source.CreateSnapshot = true
+	spy := &migrationSpy{}
+	r, _ := countedMigrationReconciler(t, spy, append(objs, migration)...)
+	revoked := readyProvider(cgOwnerNS, "src-prov")
+	r.APIReader = newLiveReader(t, nil, nil, revoked)
+
+	res, err := r.handleSnapshottingPhase(ctx, migration)
+	require.NoError(t, err)
+	assert.Equal(t, consumerNotAllowedRetryInterval, res.RequeueAfter)
+	_, _, snapshots, _ := spy.calls()
+	assert.Zero(t, snapshots, "no SnapshotCreate when the live read shows the Provider no longer shared")
+	got := getXNSMigration(t, r, migration)
+	assert.Equal(t, infrav1beta1.MigrationPhaseSnapshotting, got.Status.Phase)
+	requireMigrationConsumerRefused(t, got, consumerKindProvider, cgOwnerNS, "src-prov")
+}
+
+func TestVMMigrationConsumer_ExportDiskNotIssuedWhenRevokedLive(t *testing.T) {
+	ctx := context.Background()
+	sourceVM, sourceProvider, migration := raceMigrationFixture()
+	sourceVM.Spec.ProviderRef.Namespace = cgOwnerNS
+	sourceProvider.Namespace = cgOwnerNS
+	sourceProvider.Spec.ConsumerNamespaceSelector = &metav1.LabelSelector{} // shared in the cache
+	prov := &countingMigrationProvider{}
+	r, _ := newRaceReconciler(t, prov, sourceVM, sourceProvider, migration)
+	revoked := sourceProvider.DeepCopy()
+	revoked.Spec.ConsumerNamespaceSelector = nil
+	revoked.ResourceVersion = ""
+	r.APIReader = newLiveReader(t, nil, nil, revoked)
+
+	res, err := r.handleExportingPhase(ctx, migration)
+	require.NoError(t, err)
+	assert.Equal(t, consumerNotAllowedRetryInterval, res.RequeueAfter)
+	assert.Zero(t, prov.exportCalls.Load(), "no ExportDisk when the live read shows the Provider no longer shared")
+	got := getXNSMigration(t, r, migration)
+	assert.Equal(t, infrav1beta1.MigrationPhaseExporting, got.Status.Phase)
+	requireMigrationConsumerRefused(t, got, consumerKindProvider, cgOwnerNS, "source-provider")
+	assert.False(t, r.longOpAlreadyStarted(got, longOpExport), "a refusal must not claim the export guard")
+
+	// Shared again, live: the export runs.
+	r.APIReader = newLiveReader(t, nil, nil, sourceProvider.DeepCopy())
+	_, err = r.handleExportingPhase(ctx, getXNSMigration(t, r, migration))
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, prov.exportCalls.Load())
+}
+
+func TestVMMigrationConsumer_UnchangedRefusalIsNotRewritten(t *testing.T) {
+	migration, objs := xnsSourceMigration(t, infrav1beta1.MigrationPhaseSnapshotting, nil)
+	migration.Finalizers = []string{"vmmigration.infra.virtrigaud.io/finalizer"}
+	r, _ := countedMigrationReconciler(t, &migrationSpy{}, append(objs, migration)...)
+
+	reconcileMigration(t, r, migration, 1)
+	first := getXNSMigration(t, r, migration)
+	requireMigrationConsumerRefused(t, first, consumerKindProvider, cgOwnerNS, "src-prov")
+	reconcileMigration(t, r, migration, 3)
+	assert.Equal(t, first.ResourceVersion, getXNSMigration(t, r, migration).ResourceVersion,
+		"a recheck of the same refusal writes nothing")
+}
