@@ -223,7 +223,7 @@ func TestBuildCreateRequest_ImportedDiskFlag(t *testing.T) {
 	r := newTestReconciler(s, nil,
 		landingMigration("m1", "ns-a"), crossNS, otherTargetNS, noDiskInfo, landingMigration("m1-b", "ns-b"))
 	for name, tc := range cases {
-		req, err := r.buildCreateRequest(context.Background(), tc.vm, "", vmClass, nil, nil)
+		req, err := r.buildCreateRequest(context.Background(), tc.vm, nil, vmClass, nil, nil)
 		require.NoError(t, err, name)
 		assert.Equal(t, tc.want, req.Image.ImportedDisk, name)
 		assert.Equal(t, tc.vm.Spec.ImportedDisk.Path, req.Image.Path, name)
@@ -237,7 +237,7 @@ func TestBuildCreateRequest_ImportedDiskFlag(t *testing.T) {
 			Libvirt: &infravirtrigaudiov1beta1.LibvirtImageSource{Path: "/var/lib/libvirt/images/web-migrated.qcow2"},
 		}},
 	}
-	req, err := r.buildCreateRequest(context.Background(), fromImage, "", vmClass, vmImage, nil)
+	req, err := r.buildCreateRequest(context.Background(), fromImage, nil, vmClass, vmImage, nil)
 	require.NoError(t, err)
 	assert.False(t, req.Image.ImportedDisk, "a VMImage path is a base image, never an imported disk")
 }

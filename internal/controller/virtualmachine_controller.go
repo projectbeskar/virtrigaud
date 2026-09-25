@@ -646,7 +646,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 			"desiredCPU", vmClass.Spec.CPU,
 			"currentMemoryMiB", r.getCurrentMemoryMiB(vm),
 			"desiredMemoryMiB", vmClass.Spec.Memory.Value()/(1024*1024))
-		return r.reconfigureVM(ctx, vm, providerInstance, ref, provider.Name, vmClass, vmImage, networks)
+		return r.reconfigureVM(ctx, vm, providerInstance, ref, provider, vmClass, vmImage, networks)
 	}
 
 	// VM is ready
@@ -955,7 +955,7 @@ func (r *VirtualMachineReconciler) createVM(
 	}
 
 	// Build create request
-	req, err := r.buildCreateRequest(ctx, vm, providerCR.Name, vmClass, vmImage, networks)
+	req, err := r.buildCreateRequest(ctx, vm, providerCR, vmClass, vmImage, networks)
 	if err != nil {
 		logger.Error(err, "Failed to build create request")
 		if contracts.IsInvalidSpec(err) {
@@ -1458,10 +1458,13 @@ func (r *VirtualMachineReconciler) isOwnMigrationDisk(
 
 // buildCreateRequest builds a provider create request from VM spec.
 // It resolves cloud-init user data and metadata from both inline content and Secret references.
+// providerCR is the Provider the request is for: an image prepared through it
+// is consumed at its prepared location (overrideImageWithPreparedLocation). A
+// nil providerCR keeps the image's original source.
 func (r *VirtualMachineReconciler) buildCreateRequest(
 	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
-	providerName string,
+	providerCR *infravirtrigaudiov1beta1.Provider,
 	vmClass *infravirtrigaudiov1beta1.VMClass,
 	vmImage *infravirtrigaudiov1beta1.VMImage,
 	networks []*infravirtrigaudiov1beta1.VMNetworkAttachment,
@@ -1702,12 +1705,12 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 		// re-resolving (and re-downloading) the original source. Falls through to
 		// the by-reference source resolved above when the image is not prepared, so
 		// there is no regression for unprepared images or non-importing providers.
-		if overrode, detail := overrideImageWithPreparedLocation(&image, vmImage, providerName); overrode {
+		if overrode, detail := overrideImageWithPreparedLocation(&image, vmImage, providerCR); overrode {
 			log.Info("Consuming prepared image at create (skipping source re-resolution)",
-				"vm", vm.Name, "image", vmImage.Name, "provider", providerName, "override", detail)
+				"vm", vm.Name, "image", vmImage.Name, "provider", client.ObjectKeyFromObject(providerCR).String(), "override", detail)
 		} else {
 			log.V(1).Info("Image not prepared on provider; using original source",
-				"vm", vm.Name, "image", vmImage.Name, "provider", providerName, "reason", detail)
+				"vm", vm.Name, "image", vmImage.Name, "reason", detail)
 		}
 	}
 
@@ -1852,17 +1855,25 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 }
 
 // overrideImageWithPreparedLocation rewrites the create-time image source to the
-// prepared location recorded on vmImage.status for providerName, closing the
+// prepared location recorded on vmImage.status for providerCR, closing the
 // image-prepare loop (issue #154, PR-6 / #214). The provider prepared the image
 // (downloaded/converted/imported it into a template or pool) and reported WHERE
 // it landed; this makes Create consume that prepared location instead of
 // re-resolving — and possibly re-downloading — the original source.
 //
+// Only providerCR's own entry is consulted — the one keyed by its identity
+// "<namespace>/<name>" (imageProviderKey) — and only when it was recorded
+// through providerCR's current object (imageEntryRecordedThrough). An entry of
+// a same-named Provider in another namespace, a bare-name entry from an earlier
+// release, or an entry recorded through a since re-created Provider is never
+// used here: a VM must not be created from an artifact its Provider did not
+// prepare or confirm.
+//
 // It returns (true, detail) when an override was applied, or (false, reason) when
-// the original source is kept (image not prepared / not Available on this
-// provider, or no usable prepared location recorded). The fallback path is the
-// unchanged by-reference behavior, so unprepared images and non-importing
-// providers see no regression.
+// the original source is kept (no Provider, image not prepared / not Available on
+// this provider or not recorded through it, or no usable prepared location
+// recorded). The fallback path is the unchanged by-reference behavior, so
+// unprepared images and non-importing providers see no regression.
 //
 // The override is dispatched by the VMImage source kind:
 //   - libvirt: set image.Path to the prepared pool file and clear image.URL, so
@@ -1874,11 +1885,17 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 func overrideImageWithPreparedLocation(
 	image *contracts.VMImage,
 	vmImage *infravirtrigaudiov1beta1.VMImage,
-	providerName string,
+	providerCR *infravirtrigaudiov1beta1.Provider,
 ) (overrode bool, detail string) {
-	ps, found := vmImage.Status.ProviderStatus[providerName]
+	if providerCR == nil {
+		return false, "no provider"
+	}
+	ps, found := vmImage.Status.ProviderStatus[imageProviderKey(providerCR)]
 	if !found || !ps.Available {
 		return false, "not prepared/available on provider"
+	}
+	if !imageEntryRecordedThrough(ps, providerCR) {
+		return false, "prepare state not recorded through this Provider object"
 	}
 
 	switch {
@@ -1966,7 +1983,7 @@ func (r *VirtualMachineReconciler) reconfigureVM(
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
 	provider contracts.Provider,
 	ref contracts.VMRef,
-	providerName string,
+	providerCR *infravirtrigaudiov1beta1.Provider,
 	vmClass *infravirtrigaudiov1beta1.VMClass,
 	vmImage *infravirtrigaudiov1beta1.VMImage,
 	networks []*infravirtrigaudiov1beta1.VMNetworkAttachment,
@@ -1974,7 +1991,7 @@ func (r *VirtualMachineReconciler) reconfigureVM(
 	logger := log.FromContext(ctx)
 
 	// Build the desired configuration
-	req, err := r.buildCreateRequest(ctx, vm, providerName, vmClass, vmImage, networks)
+	req, err := r.buildCreateRequest(ctx, vm, providerCR, vmClass, vmImage, networks)
 	if err != nil {
 		logger.Error(err, "Failed to build create request")
 		return ctrl.Result{}, err
