@@ -1857,13 +1857,16 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 // a same-named Provider in another namespace, a bare-name entry from an earlier
 // release, or an entry recorded through a since re-created Provider is never
 // used here: a VM must not be created from an artifact its Provider did not
-// prepare or confirm.
+// prepare or confirm. Nor is an entry prepared for another spec.source — or
+// for none, recorded by an earlier release (ADR-0009 D8): its sourceDigest
+// must equal the digest of the current spec.source, for every source kind.
 //
 // It returns (true, detail) when an override was applied, or (false, reason) when
 // the original source is kept (no Provider, image not prepared / not Available on
-// this provider or not recorded through it, or no usable prepared location
-// recorded). The fallback path is the unchanged by-reference behavior, so
-// unprepared images and non-importing providers see no regression.
+// this provider, not recorded through it or not for the current spec.source, or
+// no usable prepared location recorded). The fallback path is the unchanged
+// by-reference behavior, so unprepared images and non-importing providers see
+// no regression.
 //
 // The override is dispatched by the VMImage source kind:
 //   - libvirt: set image.Path to the prepared pool file and clear image.URL, so
@@ -1886,6 +1889,21 @@ func overrideImageWithPreparedLocation(
 	}
 	if !imageEntryRecordedThrough(ps, providerCR) {
 		return false, "prepare state not recorded through this Provider object"
+	}
+	// ADR-0009 D8: the entry must have been prepared for the CURRENT
+	// spec.source, whatever its kind. Otherwise a VMImage switched from, say,
+	// an ovaURL to a templateName would keep cloning the artifact prepared for
+	// the OVA (a reference-style source never prepares, so nothing would
+	// replace the old entry).
+	digest, err := imageSourceDigest(vmImage)
+	if err != nil {
+		return false, "cannot compute the source digest: " + err.Error()
+	}
+	if !imageEntryForSource(ps, digest) {
+		if ps.SourceDigest == "" {
+			return false, "prepare state records no source digest (recorded by an earlier release)"
+		}
+		return false, "prepare state is for a different spec.source (source digest mismatch)"
 	}
 
 	switch {
