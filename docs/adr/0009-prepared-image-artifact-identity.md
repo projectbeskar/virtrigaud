@@ -618,6 +618,12 @@ asynchronous prepare (Proxmox) completes, the manager sends `ImagePrepare` again
 second call is idempotent, and its `artifact` echo is what gets recorded. A task that
 succeeded is never, on its own, proof that the artifact exists.
 
+*Refinement (Slice 2):* a task that ends **in failure** is confirmed the same way: the
+second call finds the artifact abandoned (D4) and the provider imports it again, instead
+of the entry keeping a failed task forever. While a task is in flight its entry records
+the `sourceDigest` of the request that started it, so a task started for an earlier
+`spec.source` is discarded, never confirmed.
+
 ### D8: Status records which source an entry was prepared for (additive CRD status)
 
 - `ProviderImageStatus.sourceDigest` records the digest the entry was prepared for. It
@@ -731,6 +737,18 @@ a prepare (`imageSourceNeedsPrepare`).
   state changes.
 - **Messages** never name another namespace, VMImage, or stamp owner. Those details go
   only to the provider log, following #335.
+- *Refinement (Slice 2):*
+  - The D4 "in progress" answer carries a `google.rpc.ErrorInfo`
+    (`IMAGE_ARTIFACT_IN_PROGRESS`, domain `provider.virtrigaud.io`). The manager maps
+    it to a typed, retryable `InProgress` error, holds the create (30-second requeue,
+    no status write) and keeps it out of the per-Provider circuit breaker, so a long
+    import through one Provider cannot open the breaker of another Provider that shares
+    its location.
+  - The manager cannot observe `abandoned_cleanup`: the response does not say that a
+    cleanup preceded the import, which is counted as `created`. The label value is
+    reserved.
+  - The confirmation call of a Provider's own completed asynchronous import is not
+    counted as `reused` (its import was counted as `created`).
 
 ---
 
