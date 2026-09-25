@@ -50,8 +50,9 @@ const (
 	ProviderTopologyCluster = "cluster"
 )
 
-// ProviderAllowConsumerOrphanOnDeleteAnnotation, set to "true" on a clustered
-// Provider by its administrator, lets VirtualMachines in OTHER namespaces
+// ProviderAllowConsumerOrphanOnDeleteAnnotation is the Provider annotation
+// that, set to "true" on a clustered Provider by its administrator, lets
+// VirtualMachines in OTHER namespaces
 // (consumers granted through spec.consumerNamespaceSelector) be detached with
 // virtrigaud.io/orphan-on-delete. Without it, only VMs in the Provider's own
 // namespace may be orphaned on a clustered Provider: an orphaned VM keeps
