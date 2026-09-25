@@ -2298,6 +2298,10 @@ func (p *Provider) SnapshotCreate(ctx context.Context, req contracts.SnapshotCre
 
 	log.Printf("INFO Domain %s is in state: %s", vmID, domainState)
 
+	if err := refuseIfDiskHasDependents(ctx, p.virshProvider, vmID, guardOpSnapshotCreate); err != nil {
+		return contracts.SnapshotCreateResponse{}, fmt.Errorf("failed to create snapshot: %w", err)
+	}
+
 	// Build virsh snapshot-create-as command
 	args := []string{
 		"snapshot-create-as",
@@ -2353,6 +2357,10 @@ func (p *Provider) SnapshotDelete(ctx context.Context, vm contracts.VMRef, snaps
 		return "", nil
 	}
 
+	if err := refuseIfDiskHasDependents(ctx, p.virshProvider, vmId, guardOpSnapshotDelete); err != nil {
+		return "", fmt.Errorf("failed to delete snapshot: %w", err)
+	}
+
 	// Delete the snapshot
 	args := []string{
 		"snapshot-delete",
@@ -2397,6 +2405,10 @@ func (p *Provider) SnapshotRevert(ctx context.Context, vm contracts.VMRef, snaps
 	}
 
 	log.Printf("INFO Domain %s current state: %s", vmId, domainState)
+
+	if err := refuseIfDiskHasDependents(ctx, p.virshProvider, vmId, guardOpSnapshotRevert); err != nil {
+		return "", fmt.Errorf("failed to revert to snapshot: %w", err)
+	}
 
 	// Revert to snapshot
 	args := []string{

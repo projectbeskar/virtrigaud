@@ -328,6 +328,61 @@ func clusteredLinkedPair(t *testing.T, running bool) (*createHost, *Provider, st
 	return c, p, src, clone
 }
 
+// TestServer_SnapshotOps_RefusedWhileLinkedCloneExists pins the snapshot side
+// of the dependency guard on a single-host provider: SnapshotCreate,
+// SnapshotDelete and SnapshotRevert of a VM whose disk backs a linked clone are
+// refused (FailedPrecondition + VM_DISK_IN_USE) before any snapshot command
+// runs, the clone's own snapshots are unaffected, and the source's are allowed
+// again once the clone is gone.
+func TestServer_SnapshotOps_RefusedWhileLinkedCloneExists(t *testing.T) {
+	c := newCreateHost(t)
+	c.linkedPair(true)
+	s := c.withRegistry()
+	require.NoError(t, os.WriteFile(filepath.Join(c.root, "h1", "snapshots"), []byte("snap1\n"), 0o600))
+	ctx := context.Background()
+
+	ops := map[string]func(vm string) error{
+		"snapshot-create-as": func(vm string) error {
+			_, err := s.SnapshotCreate(ctx, &providerv1.SnapshotCreateRequest{VmId: vm, NameHint: "snap2"})
+			return err
+		},
+		"snapshot-delete": func(vm string) error {
+			_, err := s.SnapshotDelete(ctx, &providerv1.SnapshotDeleteRequest{VmId: vm, SnapshotId: "snap1"})
+			return err
+		},
+		"snapshot-revert": func(vm string) error {
+			_, err := s.SnapshotRevert(ctx, &providerv1.SnapshotRevertRequest{VmId: vm, SnapshotId: "snap1"})
+			return err
+		},
+	}
+	ran := func(sub, vm string) bool {
+		for _, call := range c.virshCalls("h1") {
+			if strings.HasPrefix(call, sub+" "+vm+" ") {
+				return true
+			}
+		}
+		return false
+	}
+	for sub, op := range ops {
+		c.resetLogs()
+		err := op("team-a.web")
+		requireDiskInUseStatus(t, err, false)
+		assert.Contains(t, err.Error(), "delete the linked clones first", sub)
+		assert.False(t, ran(sub, "team-a.web"), "%s must not reach the source", sub)
+
+		require.NoError(t, op("team-b.copy"), "%s of the clone itself is allowed", sub)
+		assert.True(t, ran(sub, "team-b.copy"), sub)
+	}
+
+	_, err := c.p.Delete(ctx, contracts.VMRef{ID: "team-b.copy"})
+	require.NoError(t, err)
+	for sub, op := range ops {
+		c.resetLogs()
+		require.NoError(t, op("team-a.web"), "%s of the source is allowed once its clone is gone", sub)
+		assert.True(t, ran(sub, "team-a.web"), sub)
+	}
+}
+
 // TestServer_Delete_DependentsRefusalWireForm pins the wire form of a refused
 // delete: FailedPrecondition + VM_DISK_IN_USE on a single-host provider (the
 // historical "failed to delete VM" prefix kept), and additionally

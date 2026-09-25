@@ -85,6 +85,7 @@ case "$1" in
       if [ -f "$d/$l" ]; then grep -v -x -F -e "$name" -e "$uuid" "$d/$l" > "$d/$l.tmp" || true; mv "$d/$l.tmp" "$d/$l"; fi
     done
     echo "Domain '$2' has been undefined" ;;
+  snapshot-list) if [ -f "$d/snapshots" ]; then cat "$d/snapshots"; fi ;;
   domuuid)
     if [ -f "$d/fail-domuuid" ]; then echo "error: failed to connect to the hypervisor" >&2; exit 1; fi
     if [ -f "$d/dom-$2.xml" ]; then sed -n 's:.*<uuid>\(.*\)</uuid>.*:\1:p' "$d/dom-$2.xml" | head -n 1; exit 0; fi
