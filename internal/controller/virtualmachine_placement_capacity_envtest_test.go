@@ -26,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/config"
@@ -53,6 +54,31 @@ var _ = Describe("Clustered scheduling against committed capacity (envtest)", fu
 		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "sched-cap-"}}
 		Expect(k8sClient.Create(ctx, ns)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, ns) })
+		// Remove this spec's VMs once its manager has stopped (DeferCleanup is
+		// LIFO, and the manager's stop is registered later). envtest never
+		// finishes deleting a namespace, so VMs left behind with finalizers
+		// would be reconciled by the next spec's manager.
+		DeferCleanup(func() {
+			var vms infravirtrigaudiov1beta1.VirtualMachineList
+			Expect(k8sClient.List(ctx, &vms, client.InNamespace(ns.Name))).To(Succeed())
+			for i := range vms.Items {
+				key := client.ObjectKeyFromObject(&vms.Items[i])
+				Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
+					vm := &infravirtrigaudiov1beta1.VirtualMachine{}
+					if err := k8sClient.Get(ctx, key, vm); err != nil {
+						return client.IgnoreNotFound(err)
+					}
+					vm.Finalizers = nil
+					return k8sClient.Update(ctx, vm)
+				})).To(Succeed())
+				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, &vms.Items[i]))).To(Succeed())
+			}
+			Eventually(func(g Gomega) {
+				var left infravirtrigaudiov1beta1.VirtualMachineList
+				g.Expect(k8sClient.List(ctx, &left, client.InNamespace(ns.Name))).To(Succeed())
+				g.Expect(left.Items).To(BeEmpty())
+			}, "10s", "100ms").Should(Succeed())
+		})
 
 		prov := envtestProvider(ns.Name, "clustered", nil)
 		prov.Spec.Topology = infravirtrigaudiov1beta1.ProviderTopologyCluster
