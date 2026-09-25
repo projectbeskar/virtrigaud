@@ -64,12 +64,23 @@ type sourceDigestEnvelope struct {
 // artifact's name and stamp carry it, so a changed spec.source gets a new
 // artifact and is never served the old one.
 //
-// What it covers: every field of spec.source (URLs and paths, the expected
-// checksum and its algorithm, formats, and the location fields such as
-// libvirt storagePool and Proxmox storage and node), except the transport-only
-// fields of source.http — timeout, headers and authentication — which change
-// how the bytes are fetched, not which bytes are expected (rotating a token
-// must not orphan multi-GB artifacts). Nothing outside spec.source is covered:
+// What it covers: every field of spec.source that says WHAT the image is or
+// WHERE it is placed — URLs and paths, the expected checksum and its
+// algorithm, formats, and the location fields such as libvirt storagePool and
+// Proxmox storage and node (ADR-0009 Q7: "location yes, transport no").
+//
+// What it excludes, because each changes how the bytes are fetched or who
+// fetches them, never which bytes are expected or where they land (so
+// changing one must not orphan multi-GB artifacts):
+//
+//   - source.http.timeout: how long a download may take;
+//   - source.http.headers: request headers, which may carry inline tokens;
+//   - source.http.authentication: the credential references of the download;
+//   - source.registry.pullSecretRef: the credential reference of the pull;
+//   - source.vsphere.providerRef: which Provider imports the image (routing
+//     and credentials).
+//
+// Nothing outside spec.source is covered:
 // not spec.metadata, spec.distribution or spec.consumerNamespaceSelector, and
 // not spec.prepare, which no provider reads today. A spec.prepare field that a
 // provider starts honouring must be added to the digest in the same change,
@@ -99,13 +110,20 @@ func SourceDigest(src infravirtrigaudiov1beta1.ImageSource) (string, error) {
 
 // canonicalSource returns the canonical form SourceDigest hashes.
 func canonicalSource(src infravirtrigaudiov1beta1.ImageSource) ([]byte, error) {
+	// Clear the transport-only fields (ADR-0009 D2, Q7): how or by whom the
+	// bytes are fetched, not which bytes are expected or where they land. See
+	// SourceDigest for the list and the reasons.
 	source := src.DeepCopy()
 	if source.HTTP != nil {
-		// Transport-only (ADR-0009 D2, Q7): how the bytes are fetched, not
-		// which bytes are expected.
 		source.HTTP.Timeout = nil
 		source.HTTP.Headers = nil
 		source.HTTP.Authentication = nil
+	}
+	if source.Registry != nil {
+		source.Registry.PullSecretRef = nil
+	}
+	if source.VSphere != nil {
+		source.VSphere.ProviderRef = nil
 	}
 	typed, err := json.Marshal(sourceDigestEnvelope{Version: SourceDigestVersion, Source: *source})
 	if err != nil {

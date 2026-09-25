@@ -54,6 +54,27 @@ func goldenProxmoxSource() infravirtrigaudiov1beta1.ImageSource {
 	}}
 }
 
+// goldenVSphereSource is the source of the third golden vector: an OVA import
+// whose providerRef (excluded) is set.
+func goldenVSphereSource() infravirtrigaudiov1beta1.ImageSource {
+	return infravirtrigaudiov1beta1.ImageSource{VSphere: &infravirtrigaudiov1beta1.VSphereImageSource{
+		OVAURL:       "https://images.example.com/ubuntu-22.04.ova",
+		Checksum:     "feedface",
+		ChecksumType: infravirtrigaudiov1beta1.ChecksumTypeSHA256,
+		ProviderRef:  &infravirtrigaudiov1beta1.LocalObjectReference{Name: "vsphere-a"},
+	}}
+}
+
+// goldenRegistrySource is the source of the fourth golden vector: a registry
+// image whose pullSecretRef (excluded) is set.
+func goldenRegistrySource() infravirtrigaudiov1beta1.ImageSource {
+	return infravirtrigaudiov1beta1.ImageSource{Registry: &infravirtrigaudiov1beta1.RegistryImageSource{
+		Image:         "registry.example.com/images/ubuntu:22.04",
+		PullSecretRef: &infravirtrigaudiov1beta1.LocalObjectReference{Name: "pull-a"},
+		Format:        infravirtrigaudiov1beta1.ImageFormatQCOW2,
+	}}
+}
+
 // httpSource returns an HTTP source with every field set.
 func httpSource() infravirtrigaudiov1beta1.ImageSource {
 	return infravirtrigaudiov1beta1.ImageSource{HTTP: &infravirtrigaudiov1beta1.HTTPImageSource{
@@ -99,6 +120,17 @@ func TestSourceDigestGolden(t *testing.T) {
 			wantCanonical: `{"source":{"proxmox":{"format":"qcow2","fullClone":true,"node":"pve1",` +
 				`"storage":"local-lvm","templateID":9000}},"v":1}`,
 			wantDigest: "sha256:869df67bab02828f841116caead1a7231c3e77099759614e1a48d529d79a8f45",
+		},
+		"vsphere OVA import (providerRef excluded)": {
+			src: goldenVSphereSource(),
+			wantCanonical: `{"source":{"vsphere":{"checksum":"feedface","checksumType":"sha256",` +
+				`"ovaURL":"https://images.example.com/ubuntu-22.04.ova"}},"v":1}`,
+			wantDigest: "sha256:3fb0af6dd79b82f64029dbeccd79d6a9030b5bda1a9410bc16ef5a362e60bcd5",
+		},
+		"registry image (pullSecretRef excluded)": {
+			src:           goldenRegistrySource(),
+			wantCanonical: `{"source":{"registry":{"format":"qcow2","image":"registry.example.com/images/ubuntu:22.04"}},"v":1}`,
+			wantDigest:    "sha256:8f3e042400bee4a5b656cd08f558a12438e5fbbf3c89d5ab685b97b29512c30d",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -150,6 +182,38 @@ func TestSourceDigestExcludesTransportFields(t *testing.T) {
 	}
 }
 
+// TestSourceDigestExcludesRoutingAndCredentialRefs pins the Q7 refinement
+// ("location yes, transport no"): registry.pullSecretRef (a credential
+// reference) and vsphere.providerRef (which Provider imports: routing and
+// credentials) never change the digest, and the input keeps them.
+func TestSourceDigestExcludesRoutingAndCredentialRefs(t *testing.T) {
+	for name, tc := range map[string]struct {
+		base   func() infravirtrigaudiov1beta1.ImageSource
+		mutate func(*infravirtrigaudiov1beta1.ImageSource)
+	}{
+		"registry pullSecretRef changed": {goldenRegistrySource, func(s *infravirtrigaudiov1beta1.ImageSource) {
+			s.Registry.PullSecretRef = &infravirtrigaudiov1beta1.LocalObjectReference{Name: "pull-b"}
+		}},
+		"registry pullSecretRef removed": {goldenRegistrySource, func(s *infravirtrigaudiov1beta1.ImageSource) {
+			s.Registry.PullSecretRef = nil
+		}},
+		"vsphere providerRef changed": {goldenVSphereSource, func(s *infravirtrigaudiov1beta1.ImageSource) {
+			s.VSphere.ProviderRef = &infravirtrigaudiov1beta1.LocalObjectReference{Name: "vsphere-b"}
+		}},
+		"vsphere providerRef removed": {goldenVSphereSource, func(s *infravirtrigaudiov1beta1.ImageSource) {
+			s.VSphere.ProviderRef = nil
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			src := tc.base()
+			before := mustDigest(t, src)
+			assert.Equal(t, tc.base(), src, "SourceDigest must not modify its input")
+			tc.mutate(&src)
+			assert.Equal(t, before, mustDigest(t, src))
+		})
+	}
+}
+
 // TestSourceDigestCoversContentAndLocation pins ADR-0009 D2/Q7: every
 // content-defining field and every location field changes the digest.
 func TestSourceDigestCoversContentAndLocation(t *testing.T) {
@@ -178,6 +242,17 @@ func TestSourceDigestCoversContentAndLocation(t *testing.T) {
 		"http checksum": {httpSource, func(s *infravirtrigaudiov1beta1.ImageSource) { s.HTTP.Checksum = "deadbeee" }},
 		"vsphere ovaURL added": {goldenLibvirtSource, func(s *infravirtrigaudiov1beta1.ImageSource) {
 			s.VSphere = &infravirtrigaudiov1beta1.VSphereImageSource{OVAURL: "https://x/y.ova"}
+		}},
+		"vsphere ovaURL":   {goldenVSphereSource, func(s *infravirtrigaudiov1beta1.ImageSource) { s.VSphere.OVAURL += "?v=2" }},
+		"vsphere checksum": {goldenVSphereSource, func(s *infravirtrigaudiov1beta1.ImageSource) { s.VSphere.Checksum = "feedfacf" }},
+		"vsphere templateName": {goldenVSphereSource, func(s *infravirtrigaudiov1beta1.ImageSource) {
+			s.VSphere.TemplateName = "ubuntu-tmpl"
+		}},
+		"registry image": {goldenRegistrySource, func(s *infravirtrigaudiov1beta1.ImageSource) {
+			s.Registry.Image = "registry.example.com/images/ubuntu:24.04"
+		}},
+		"registry format": {goldenRegistrySource, func(s *infravirtrigaudiov1beta1.ImageSource) {
+			s.Registry.Format = infravirtrigaudiov1beta1.ImageFormatRaw
 		}},
 		"source kind swapped": {goldenLibvirtSource, func(s *infravirtrigaudiov1beta1.ImageSource) {
 			s.HTTP = &infravirtrigaudiov1beta1.HTTPImageSource{URL: s.Libvirt.URL}
