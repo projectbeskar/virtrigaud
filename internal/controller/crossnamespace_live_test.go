@@ -191,7 +191,7 @@ func TestLiveGrant_ImportDiskNotIssuedWhenRevokedLive(t *testing.T) {
 	assert.False(t, r.longOpAlreadyStarted(got, longOpImport), "a refusal must not claim the import guard")
 
 	// The grant becomes live: the same generation imports.
-	r.APIReader = newLiveReader(t, grantNamespace(xnsTarget, strPtr("default")), nil)
+	r.APIReader = newLiveReader(t, grantNamespace(xnsTarget, strPtr("default")), nil, targetProvider)
 	_, err = r.handleImportingPhase(ctx, getXNSMigration(t, r, migration))
 	require.NoError(t, err)
 	assert.Equal(t, 1, prov.importCalls)

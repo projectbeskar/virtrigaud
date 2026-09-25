@@ -42,6 +42,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
+	conditions "github.com/projectbeskar/virtrigaud/internal/k8s"
 	"github.com/projectbeskar/virtrigaud/internal/obs/logging"
 	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
@@ -288,6 +289,19 @@ func (r *VMMigrationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 	}
 
+	// Every cross-namespace Provider / VMClass the migration acts through or
+	// pins onto its target must select the namespace that uses it
+	// (spec.consumerNamespaceSelector). Checked before every phase that can
+	// call a provider or create the target, so a refusal makes no provider
+	// call and a revocation stops a migration in flight. Ready and Failed are
+	// excluded: their cleanup resolves the source Provider through
+	// sourceProviderFor, which enforces the same grant.
+	if migration.Status.Phase != infrav1beta1.MigrationPhaseReady && migration.Status.Phase != infrav1beta1.MigrationPhaseFailed {
+		if allowed, res, err := r.gateConsumers(ctx, migration); !allowed {
+			return res, err
+		}
+	}
+
 	// Handle migration lifecycle based on phase
 	switch migration.Status.Phase {
 	case infrav1beta1.MigrationPhasePending:
@@ -371,12 +385,18 @@ func (r *VMMigrationReconciler) handleValidatingPhase(ctx context.Context, migra
 	// Validate source provider: the one the source VM runs on. An explicit
 	// spec.source.providerRef naming any other Provider is refused.
 	sourceProvider, err := r.sourceProviderFor(ctx, migration, sourceVM)
+	if isConsumerNotAllowed(err) {
+		return r.markConsumerNotAllowed(ctx, migration, err)
+	}
 	if err != nil {
 		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Invalid source provider: %v", err))
 	}
 
 	// Validate target provider
-	targetProvider, err := r.getProvider(ctx, migration.Spec.Target.ProviderRef, migration.Namespace)
+	targetProvider, err := r.targetProviderFor(ctx, r.Client, migration)
+	if isConsumerNotAllowed(err) {
+		return r.markConsumerNotAllowed(ctx, migration, err)
+	}
 	if err != nil {
 		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to get target provider: %v", err))
 	}
@@ -1029,7 +1049,10 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 	}
 
 	// Get target provider
-	targetProvider, err := r.getProvider(ctx, migration.Spec.Target.ProviderRef, migration.Namespace)
+	targetProvider, err := r.targetProviderFor(ctx, r.Client, migration)
+	if isConsumerNotAllowed(err) {
+		return r.markConsumerNotAllowed(ctx, migration, err)
+	}
 	if err != nil {
 		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to get target provider: %v", err))
 	}
@@ -1190,6 +1213,9 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 	// the API server (not the cache) right before it, and before the in-memory
 	// guard is claimed so a refusal doesn't block a later import.
 	if allowed, res, err := r.confirmTargetNamespaceLive(ctx, migration); !allowed {
+		return res, err
+	}
+	if allowed, res, err := r.confirmTargetConsumersLive(ctx, migration); !allowed {
 		return res, err
 	}
 
@@ -1602,9 +1628,12 @@ func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migrati
 		targetVM.Spec.PlacementRef = migration.Spec.Target.PlacementRef
 	}
 
-	// Re-read the grant from the API server (not the cache) right before the
+	// Re-read the grants from the API server (not the cache) right before the
 	// Create in the target namespace.
 	if allowed, res, err := r.confirmTargetNamespaceLive(ctx, migration); !allowed {
+		return res, err
+	}
+	if allowed, res, err := r.confirmTargetConsumersLive(ctx, migration); !allowed {
 		return res, err
 	}
 
@@ -2066,26 +2095,6 @@ func (r *VMMigrationReconciler) getSourceVM(ctx context.Context, migration *infr
 	return vm, nil
 }
 
-// getProvider retrieves a provider
-func (r *VMMigrationReconciler) getProvider(ctx context.Context, providerRef infrav1beta1.ObjectRef, defaultNamespace string) (*infrav1beta1.Provider, error) {
-	provider := &infrav1beta1.Provider{}
-	namespace := providerRef.Namespace
-	if namespace == "" {
-		namespace = defaultNamespace
-	}
-
-	key := client.ObjectKey{
-		Namespace: namespace,
-		Name:      providerRef.Name,
-	}
-
-	if err := r.Get(ctx, key, provider); err != nil {
-		return nil, err
-	}
-
-	return provider, nil
-}
-
 // getSourceProvider retrieves the source provider for a migration: the
 // Provider the source VM runs on (see sourceProviderFor).
 func (r *VMMigrationReconciler) getSourceProvider(ctx context.Context, migration *infrav1beta1.VMMigration) (*infrav1beta1.Provider, error) {
@@ -2104,13 +2113,21 @@ func (r *VMMigrationReconciler) getSourceProvider(ctx context.Context, migration
 // set and the Provider the VM is bound through (status.boundProvider) — then
 // that Provider object. A reference error is returned unwrapped so its message
 // reaches the migration status as-is.
+//
+// A source Provider in another namespace must select the migration's
+// namespace (spec.consumerNamespaceSelector): otherwise, or when it does not
+// exist, a *ConsumerNotAllowedError is returned and no phase calls it.
 func (r *VMMigrationReconciler) sourceProviderFor(ctx context.Context, migration *infrav1beta1.VMMigration, sourceVM *infrav1beta1.VirtualMachine) (*infrav1beta1.Provider, error) {
 	sourceProviderRef, err := migrationSourceProviderRef(migration, sourceVM)
 	if err != nil {
 		return nil, err
 	}
-	provider, err := r.getProvider(ctx, sourceProviderRef, migration.Namespace)
-	if err != nil {
+	provider := &infrav1beta1.Provider{}
+	key := types.NamespacedName{Namespace: sourceProviderRef.Namespace, Name: sourceProviderRef.Name}
+	if err := getForConsumer(ctx, r.Client, key, provider, migration.Namespace); err != nil {
+		if isConsumerNotAllowed(err) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("get source provider %s/%s: %w", sourceProviderRef.Namespace, sourceProviderRef.Name, err)
 	}
 	return provider, nil
@@ -2156,9 +2173,227 @@ func migrationSourceProviderRef(migration *infrav1beta1.VMMigration, sourceVM *i
 	return vmProvider, nil
 }
 
-// getTargetProvider retrieves the target provider for a migration
+// getTargetProvider retrieves the target provider for a migration (see
+// targetProviderFor).
 func (r *VMMigrationReconciler) getTargetProvider(ctx context.Context, migration *infrav1beta1.VMMigration) (*infrav1beta1.Provider, error) {
-	return r.getProvider(ctx, migration.Spec.Target.ProviderRef, migration.Namespace)
+	return r.targetProviderFor(ctx, r.Client, migration)
+}
+
+// migrationTargetProviderKey is the Provider spec.target.providerRef names; an
+// empty namespace means the migration's (where the import resolves it).
+func migrationTargetProviderKey(migration *infrav1beta1.VMMigration) types.NamespacedName {
+	key := types.NamespacedName{Namespace: migration.Spec.Target.ProviderRef.Namespace, Name: migration.Spec.Target.ProviderRef.Name}
+	if key.Namespace == "" {
+		key.Namespace = migration.Namespace
+	}
+	return key
+}
+
+// targetProviderFor is THE resolution of the Provider a migration imports into
+// and pins onto its target VirtualMachine, read through reader. A target
+// Provider in another namespace must select the migration's namespace (the
+// import runs from it); for a target VM in another namespace it must also
+// select the target namespace, which references it from there
+// (spec.consumerNamespaceSelector). A refusal — also for a cross-namespace
+// Provider that does not exist — is a *ConsumerNotAllowedError.
+func (r *VMMigrationReconciler) targetProviderFor(ctx context.Context, reader client.Reader, migration *infrav1beta1.VMMigration) (*infrav1beta1.Provider, error) {
+	provider := &infrav1beta1.Provider{}
+	if err := getForConsumer(ctx, reader, migrationTargetProviderKey(migration), provider, migration.Namespace); err != nil {
+		return nil, err
+	}
+	if targetNamespace := migrationTargetVMKey(migration).Namespace; targetNamespace != migration.Namespace {
+		if err := checkConsumer(ctx, reader, provider, targetNamespace); err != nil {
+			return nil, err
+		}
+	}
+	return provider, nil
+}
+
+// checkSourceConsumer checks, through the cache, that the migration's
+// namespace may use the source VM's Provider. A missing source VM (or a
+// same-namespace Provider) needs no check here: the phase handlers report it.
+func (r *VMMigrationReconciler) checkSourceConsumer(ctx context.Context, migration *infrav1beta1.VMMigration) error {
+	sourceVM, err := r.getSourceVM(ctx, migration)
+	if errors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("get source VM %s/%s: %w", migration.Namespace, migration.Spec.Source.VMRef.Name, err)
+	}
+	key := vmProviderKey(sourceVM)
+	if key.Namespace == migration.Namespace {
+		return nil
+	}
+	return getForConsumer(ctx, r.Client, key, &infrav1beta1.Provider{}, migration.Namespace)
+}
+
+// checkTargetConsumers checks, through reader, the grants of what the
+// migration pins onto its target VirtualMachine: the target Provider (for the
+// migration's namespace and the target namespace, see targetProviderFor) and,
+// for a target in another namespace, the target VMClass — resolved in the
+// migration's namespace — for the target namespace. A missing own-namespace
+// Provider is left to the phase handlers to report.
+func (r *VMMigrationReconciler) checkTargetConsumers(ctx context.Context, reader client.Reader, migration *infrav1beta1.VMMigration) error {
+	if _, err := r.targetProviderFor(ctx, reader, migration); err != nil && (isConsumerNotAllowed(err) || !errors.IsNotFound(err)) {
+		return err
+	}
+	targetNamespace := migrationTargetVMKey(migration).Namespace
+	if cr := migration.Spec.Target.ClassRef; cr != nil && cr.Name != "" && targetNamespace != migration.Namespace {
+		key := types.NamespacedName{Namespace: migration.Namespace, Name: cr.Name}
+		if err := getForConsumer(ctx, reader, key, &infrav1beta1.VMClass{}, targetNamespace); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// gateConsumers enforces spec.consumerNamespaceSelector for everything the
+// migration uses from another namespace (the source VM's Provider, the target
+// Provider, and what the target VirtualMachine will reference), reading the
+// cache. The target namespace's own consumer grants are checked only once that
+// namespace grants the migration's (AllowedSourceNamespacesAnnotation): until
+// then the phase handlers refuse with TargetNamespaceNotAllowed and create
+// nothing there. allowed=true means every grant holds; a ConsumerNotAllowed
+// refusal left by an earlier reconcile is then cleared. Otherwise the
+// migration is marked refused and (result, err) is what Reconcile returns.
+func (r *VMMigrationReconciler) gateConsumers(ctx context.Context, migration *infrav1beta1.VMMigration) (allowed bool, result ctrl.Result, err error) {
+	err = r.checkSourceConsumer(ctx, migration)
+	if err == nil {
+		targetNamespace := migrationTargetVMKey(migration).Namespace
+		var targetGranted bool
+		if targetGranted, err = targetNamespaceAllowed(ctx, r.Client, migration.Namespace, targetNamespace); err == nil {
+			if targetGranted {
+				err = r.checkTargetConsumers(ctx, r.Client, migration)
+			} else if _, perr := r.targetProviderFor(ctx, r.Client, migrationForOwnNamespace(migration)); isConsumerNotAllowed(perr) {
+				// The migration's own use of the target Provider (the import)
+				// is still checked.
+				err = perr
+			}
+		}
+	}
+	switch {
+	case isConsumerNotAllowed(err):
+		result, err = r.markConsumerNotAllowed(ctx, migration, err)
+		return false, result, err
+	case err != nil:
+		logging.FromContext(ctx).Error(err, "Failed to check the consumer grants; not proceeding")
+		return false, ctrl.Result{}, err
+	}
+	if err := r.clearConsumerRefusal(ctx, migration); err != nil {
+		return false, ctrl.Result{}, err
+	}
+	return true, ctrl.Result{}, nil
+}
+
+// migrationForOwnNamespace returns a copy of migration whose target is its own
+// namespace, so targetProviderFor checks only the migration's own use of the
+// target Provider.
+func migrationForOwnNamespace(migration *infrav1beta1.VMMigration) *infrav1beta1.VMMigration {
+	m := migration.DeepCopy()
+	m.Spec.Target.Namespace = ""
+	return m
+}
+
+// confirmTargetConsumersLive re-reads the target consumer grants
+// (checkTargetConsumers) through the uncached APIReader immediately before a
+// side effect that relies on them — the ImportDisk call and the target
+// VirtualMachine Create — so a revocation the cache has not seen yet is
+// honoured. A refusal is recorded like the cached one; a read error is
+// returned so the controller retries with backoff and nothing is issued.
+func (r *VMMigrationReconciler) confirmTargetConsumersLive(ctx context.Context, migration *infrav1beta1.VMMigration) (allowed bool, result ctrl.Result, err error) {
+	err = r.checkTargetConsumers(ctx, r.liveReader(), migration)
+	switch {
+	case isConsumerNotAllowed(err):
+		result, err = r.markConsumerNotAllowed(ctx, migration, err)
+		return false, result, err
+	case err != nil:
+		logging.FromContext(ctx).Error(err, "Failed to re-read the consumer grants; not proceeding")
+		return false, ctrl.Result{}, err
+	}
+	return true, ctrl.Result{}, nil
+}
+
+// markConsumerNotAllowed records that the migration uses (or would pin onto
+// its target) a Provider or VMClass in another namespace that does not select
+// the namespace using it: Ready=False (and, while still validating,
+// Validating=False) with reason ConsumerNotAllowed. It is NOT a failure: the
+// phase, retry count and any staged or imported state are kept, so the
+// migration resumes where it stopped once the grant is present, and nothing
+// already created is touched. The Warning event is emitted on the transition
+// only, and the recheck is slow; the grant watches re-drive it promptly.
+func (r *VMMigrationReconciler) markConsumerNotAllowed(ctx context.Context, migration *infrav1beta1.VMMigration, cause error) (ctrl.Result, error) {
+	msg := cause.Error()
+	if consumerRefusalIsNew(migration.Status.Conditions, cause) {
+		logging.FromContext(ctx).Info("VMMigration uses a Provider or VMClass its namespace may not use; no provider call is made",
+			"phase", migration.Status.Phase, "error", msg)
+		r.Recorder.Event(migration, corev1.EventTypeWarning, conditions.ReasonConsumerNotAllowed, msg)
+	}
+	migration.Status.Message = msg
+	migration.Status.ObservedGeneration = migration.Generation
+	meta.SetStatusCondition(&migration.Status.Conditions, metav1.Condition{
+		Type:               infrav1beta1.VMMigrationConditionReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             conditions.ReasonConsumerNotAllowed,
+		Message:            msg,
+		ObservedGeneration: migration.Generation,
+	})
+	if migration.Status.Phase == infrav1beta1.MigrationPhaseValidating {
+		meta.SetStatusCondition(&migration.Status.Conditions, metav1.Condition{
+			Type:               infrav1beta1.VMMigrationConditionValidating,
+			Status:             metav1.ConditionFalse,
+			Reason:             conditions.ReasonConsumerNotAllowed,
+			Message:            msg,
+			ObservedGeneration: migration.Generation,
+		})
+	}
+	metrics.RecordError(errReasonConsumerNotAllowed, metrics.ComponentManager)
+	if err := r.updateStatus(ctx, migration); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: consumerNotAllowedRetryInterval}, nil
+}
+
+// clearConsumerRefusal removes the ConsumerNotAllowed Ready / Validating
+// conditions once every grant holds, so the migration does not keep reporting
+// a refusal while it proceeds. It persists immediately and is a no-op when
+// there is nothing to clear.
+func (r *VMMigrationReconciler) clearConsumerRefusal(ctx context.Context, migration *infrav1beta1.VMMigration) error {
+	cleared := false
+	for _, condType := range []string{infrav1beta1.VMMigrationConditionReady, infrav1beta1.VMMigrationConditionValidating} {
+		if c := meta.FindStatusCondition(migration.Status.Conditions, condType); c != nil && c.Reason == conditions.ReasonConsumerNotAllowed {
+			meta.RemoveStatusCondition(&migration.Status.Conditions, condType)
+			cleared = true
+		}
+	}
+	if !cleared {
+		return nil
+	}
+	migration.Status.Message = "Cross-namespace access granted; resuming"
+	migration.Status.ObservedGeneration = migration.Generation
+	r.Recorder.Event(migration, corev1.EventTypeNormal, "ConsumerAllowed", migration.Status.Message)
+	return r.updateStatus(ctx, migration)
+}
+
+// migrationsRefusedAsConsumers maps a consumer-grant change to the unfinished
+// VMMigrations refused with ConsumerNotAllowed. The namespace is not used to
+// filter: a migration's refusal may concern its target namespace.
+func (r *VMMigrationReconciler) migrationsRefusedAsConsumers(ctx context.Context, _ string) []reconcile.Request {
+	migrations := &infrav1beta1.VMMigrationList{}
+	if err := r.List(ctx, migrations); err != nil {
+		logging.FromContext(ctx).Error(err, "Failed to list VMMigrations for a consumer grant change")
+		return nil
+	}
+	var reqs []reconcile.Request
+	for i := range migrations.Items {
+		m := &migrations.Items[i]
+		if m.Status.Phase == infrav1beta1.MigrationPhaseReady || m.Status.Phase == infrav1beta1.MigrationPhaseFailed {
+			continue
+		}
+		if consumerRefused(m.Status.Conditions) {
+			reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(m)})
+		}
+	}
+	return reqs
 }
 
 // isProviderReady checks if a provider is ready
@@ -3206,13 +3441,17 @@ func (r *VMMigrationReconciler) deleteSourceVM(ctx context.Context, migration *i
 // SetupWithManager sets up the controller with the Manager. Besides its own
 // VMMigrations it watches Namespaces, but only for changes to the
 // cross-namespace grant annotation, to re-drive migrations whose target
-// namespace just granted or revoked access.
+// namespace just granted or revoked access; and consumer-grant changes
+// (Namespace labels, the spec.consumerNamespaceSelector of Providers,
+// VMClasses and VMImages) to re-drive migrations refused with
+// ConsumerNotAllowed.
 func (r *VMMigrationReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+	b := ctrl.NewControllerManagedBy(mgr).
 		For(&infrav1beta1.VMMigration{}).
 		Watches(&corev1.Namespace{},
 			handler.EnqueueRequestsFromMapFunc(r.migrationsTargetingNamespace),
-			builder.WithPredicates(allowedSourceNamespacesChanged())).
+			builder.WithPredicates(allowedSourceNamespacesChanged()))
+	return withConsumerGrantWatches(b, r.migrationsRefusedAsConsumers).
 		WithOptions(controller.Options{
 			MaxConcurrentReconciles: 3, // Limit concurrent reconciliations to prevent API server overload
 		}).

@@ -103,9 +103,12 @@ func directionFixture(sourceType, targetType infrav1beta1.ProviderType) (
 		ObjectMeta: metav1.ObjectMeta{Name: "source-provider", Namespace: "default"},
 		Spec:       infrav1beta1.ProviderSpec{Type: sourceType},
 	}
+	// Shared with every namespace (spec.consumerNamespaceSelector: {}) so the
+	// cross-namespace target tests built on this fixture may pin it onto a
+	// target VirtualMachine in another namespace.
 	targetProvider := &infrav1beta1.Provider{
 		ObjectMeta: metav1.ObjectMeta{Name: "target-provider", Namespace: "default"},
-		Spec:       infrav1beta1.ProviderSpec{Type: targetType},
+		Spec:       infrav1beta1.ProviderSpec{Type: targetType, ConsumerNamespaceSelector: &metav1.LabelSelector{}},
 	}
 
 	migration := &infrav1beta1.VMMigration{
