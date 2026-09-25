@@ -5,6 +5,34 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-25 02:55] - Security: VMImage prepare state is per Provider identity (namespace/name + UID), with per-Provider prepare tasks
+**Author:** @wrkode (William Rizzo)
+
+> **Operator note.** `VMImage.status.providerStatus` and `status.availableOn` are now keyed by the Provider's `<namespace>/<name>` instead of its bare name, each entry records the Provider's UID (`providerUID`) and its own asynchronous prepare task (`taskRef`), and the image-wide `status.prepareTaskRef` is no longer written. Existing state is migrated on each image's first prepare reconcile: a bare-name entry moves to `<vmimage-namespace>/<name>` when a Provider of that name exists in the image's namespace (and is re-validated once through the idempotent prepare), otherwise it is dropped; a legacy `prepareTaskRef` is cleared, never polled. **Upgrade the VMImage CRD before the manager** (the existing CRD step): readiness fails while the CRD lacks `providerStatus[].providerUID`/`taskRef`. Scripts and out-of-band preparers that read or write `providerStatus`/`availableOn` must use the new keys (an out-of-band preparer also sets `providerUID`).
+
+### Security
+- `internal/controller/virtualmachine_image_prepare.go`: prepare state was keyed by the Provider's bare name and one task ID was shared across Providers. With a `VMImage` shared across namespaces (`spec.consumerNamespaceSelector`), `team-b/vsphere` preparing first made VMs on `team-a/vsphere` skip their own prepare and be created from `team-b`'s template, and a task started on one Provider could be polled on another and mark the image ready where it was never prepared. `EnsureImageOnProvider` now keys every entry by `imageProviderKey` (`<namespace>/<name>`), trusts an entry only when it was recorded through the Provider's current UID, records each asynchronous task in that Provider's own entry and polls it only through that Provider. A re-created Provider (same namespace/name, new UID) is accepted, as for #341, but not trusted with its predecessor's state: under `onMissing: Import` the idempotent `PrepareImage` is issued again through it (a task recorded through the old object is discarded, never polled); under `Fail`/`Wait`, which forbid a prepare, an available entry is accepted with its UID re-recorded and a `Warning` event `ImagePrepareStateAccepted` on the VM, so running VMs are not held. Legacy bare-name state is migrated in one conflict-safe write (`migrateLegacyImagePrepareState`); a migrated entry carries no UID, so it is re-validated before use — before grants existed, a VM could reference another namespace's `VMImage` with its own namespace's Provider, so a bare name is not proof of the writer. The VirtualMachine controller remains the single writer (ADR-0005), every write under `RetryOnConflict`, now reading into a fresh object on each attempt.
+- `internal/controller/virtualmachine_controller.go`: `overrideImageWithPreparedLocation` (the create-time consumer) and `buildCreateRequest`/`reconfigureVM` take the Provider object instead of its name and consult only that Provider's identity entry recorded through its current UID; any other entry falls back to the image's original source.
+- `internal/controller/vmcrdfeatures.go`, `internal/obs/metrics/metrics.go`: the CRD readiness check also requires `status.providerStatus[].providerUID` and `taskRef` in the VMImage CRD (an older CRD prunes both, so no entry would be trusted and no async task tracked). Same verified/missing/unknown states and `virtrigaud_manager_vm_crd_security_features` gauge.
+
+### Added
+- `api/infra.virtrigaud.io/v1beta1/vmimage_types.go`: optional `ProviderImageStatus.ProviderUID` (`providerUID`) and `TaskRef` (`taskRef`); godoc for the `<namespace>/<name>` key format of `providerStatus`/`availableOn`; `VMImageStatus.PrepareTaskRef` marked deprecated. Additive only; CRD regenerated (deepcopy unchanged: string fields).
+- `internal/controller/virtualmachine_image_prepare.go`: `ImagePrepareStateAccepted` event reason; `PrepareStateDropped` VMImage condition reason (migration dropped every available entry).
+- Tests: `virtualmachine_image_prepare_identity_test.go` (two same-named Providers in different namespaces on one shared image get independent entries and prepares and each VM is created from its own Provider's template; async tasks polled only through their own Provider and the image stays Ready on one while the other imports; bare-name migration kept/dropped/identity-wins/lookup-error; recreated Provider under Import, with an old task, and under Fail/Wait), `vmimage_prepare_identity_envtest_test.go` (the API server keeps the `/` keys, `providerUID` and `taskRef`; migration against the real CRD), `vmcrdfeatures_test.go` (an older VMImage CRD fails readiness); existing prepare and create-consumer tests moved to identity keys, with consumer cases for another namespace's same-named Provider, a bare-name entry, an old UID and a missing UID.
+
+### Changed
+- `internal/controller/virtualmachine_image_prepare.go`: the image-level `Ready`/`Phase` are no longer cleared by a prepare in flight on one Provider while the image is available on another (Ready is the OR across Providers), and the `Importing` condition is cleared only when no Provider has a prepare in flight. A synchronous prepare records exactly the location the provider returned.
+- Docs: `docs/image-preparation.md` (new "Prepare state is per Provider" section: keys, UID trust, re-created Provider, migration table, CRD order), `docs/cross-namespace-references.md` (shared `VMImage`s: prepare state per Provider; hypervisor artifacts are still shared by Providers whose accounts reach the same inventory; CRD check; upgrade note), `docs/upgrading.md`, `docs/release-notes/next.md`, `docs/adr/0005-image-preparation-trigger-model.md` (amendment), `examples/vmimage-prepare-on-create.yaml`, `internal/controller/vmimage_controller.go` (comment).
+
+### Why
+Shared `VMImage`s (#343) made the bare-name key a cross-tenant confusion: one namespace's Provider could consume, or mark ready, another namespace's prepare, creating VMs from an artifact made with someone else's credentials that they can later change. Keying by Provider identity and UID keeps each tenant's prepare state its own.
+
+### Impact
+- [ ] Breaking change (additive CRD fields; the status key format changes and is migrated automatically)
+- [x] Requires cluster rollout (VMImage CRD, then the manager)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-09-25 01:54] - Security: a Provider, VMClass or VMImage in another namespace may be used only if its spec.consumerNamespaceSelector selects the referencing namespace
 **Author:** @wrkode (William Rizzo)
 

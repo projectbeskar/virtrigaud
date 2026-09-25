@@ -40,7 +40,7 @@ type VMImageReconciler struct {
 // Image preparation (issue #154) is driven entirely by the VirtualMachine
 // controller, which is the only actor holding the (image, provider) pair. That
 // controller is the SINGLE WRITER of the prepare-related VMImage status fields
-// (ProviderStatus, PrepareTaskRef, Phase, Ready, AvailableOn) and writes them
+// (ProviderStatus, keyed by Provider identity, Phase, Ready, AvailableOn) and writes them
 // under retry.RetryOnConflict (see EnsureImageOnProvider). Keeping this
 // reconciler a no-op deliberately avoids a second writer and the two-writer
 // status race that bit issue #189 — there is no provider resolver wired here, so
