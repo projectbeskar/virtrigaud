@@ -719,8 +719,8 @@ free = allocatable × overcommit ratio − committed
     applied), or at its VMClass size when nothing is recorded; editing its
     `spec.resources` or `spec.classRef` changes nothing until a resize is
     admitted (below);
-  - a VM whose create is pending counts at its VMClass size raised to its
-    `spec.resources` override. While the create is pending, the CRD rejects any
+  - a VM whose create is pending counts at the size its Create sends: its
+    VMClass with any `spec.resources` override applied. While the create is pending, the CRD rejects any
     change to `spec.classRef` and `spec.resources`, so this is the size it was
     scheduled at;
   - a VMClass in another namespace that the VM's namespace may not use

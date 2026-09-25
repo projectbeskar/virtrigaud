@@ -201,11 +201,26 @@ func withMinimum(r scheduler.ResourceRequest) scheduler.ResourceRequest {
 	return scheduler.ResourceRequest{CPU: max(r.CPU, minFootprintCPU), MemoryMiB: max(r.MemoryMiB, minFootprintMemoryMiB)}
 }
 
-// requestedFootprint is the size a VM asks to be placed with: its VMClass size
-// (classCPU/classMemMiB) raised to any larger spec.resources override. It sizes
-// the VM being scheduled, and another VM whose create is still pending — whose
-// spec.classRef and spec.resources the CRD keeps immutable while it is pending
-// (VirtualMachine XValidation), so it is still the size it was admitted with.
+// pendingFootprint is the size a VM whose create is still pending counts at:
+// effectiveResources — its VMClass with any spec.resources override applied,
+// exactly what its Create sends — which the CRD keeps frozen while the create
+// is pending (VirtualMachine XValidation). When that cannot be computed (no
+// usable class, or an out-of-range override the Create will refuse), it counts
+// at requestedFootprint instead, the conservative reading.
+func pendingFootprint(vm *infravirtrigaudiov1beta1.VirtualMachine, class *infravirtrigaudiov1beta1.VMClass) scheduler.ResourceRequest {
+	if class != nil {
+		if cpu, mem, err := effectiveResources(vm, class); err == nil {
+			return withMinimum(scheduler.ResourceRequest{CPU: cpu, MemoryMiB: int64(mem)})
+		}
+	}
+	cpu, mem := classSize(class)
+	return requestedFootprint(vm, cpu, mem)
+}
+
+// requestedFootprint is a VM's VMClass size (classCPU/classMemMiB) raised to
+// any larger spec.resources override, at least the minimum footprint: the
+// conservative size of a pending VM whose effective size cannot be computed
+// (pendingFootprint).
 func requestedFootprint(vm *infravirtrigaudiov1beta1.VirtualMachine, classCPU int32, classMemMiB int64) scheduler.ResourceRequest {
 	out := scheduler.ResourceRequest{CPU: classCPU, MemoryMiB: classMemMiB}
 	if r := vm.Spec.Resources; r != nil {
@@ -238,7 +253,7 @@ func pendingCreate(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
 //
 //   - status.currentResources, per resource, when recorded: what the operator
 //     recorded as applied by the provider (only the operator writes status);
-//   - otherwise, for a VM whose create is pending, requestedFootprint — frozen
+//   - otherwise, for a VM whose create is pending, pendingFootprint — frozen
 //     by the CRD while it is pending;
 //   - otherwise (a bound VM with nothing recorded, e.g. bound before
 //     currentResources existed), its VMClass size.
@@ -252,7 +267,7 @@ func admittedFootprint(vm *infravirtrigaudiov1beta1.VirtualMachine, class *infra
 	cpu, mem := classSize(class)
 	base := withMinimum(scheduler.ResourceRequest{CPU: cpu, MemoryMiB: mem})
 	if pendingCreate(vm) {
-		base = requestedFootprint(vm, cpu, mem)
+		base = pendingFootprint(vm, class)
 	}
 	if cur := vm.Status.CurrentResources; cur != nil {
 		if cur.CPU != nil {

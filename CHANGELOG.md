@@ -29,15 +29,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `committedPlacements` lists the Provider's VirtualMachines in every namespace through a field index (`placement_index.go`). A VM being deleted counts until the VirtualMachine finalizer is gone; after that, even with a foreign finalizer, it no longer counts.
   - Another VM counts at its admitted size (`admittedFootprint`):
     - `status.currentResources` when recorded;
-    - its requested size while its create is pending;
+    - its effective size (`effectiveResources`: the VMClass with any `spec.resources` override applied) while its create is pending;
     - otherwise its VMClass size, read only if its namespace may use the class;
     - at least 1 vCPU / 128 MiB.
-  - The scheduled VM itself counts at `requestedFootprint`.
+  - The scheduled VM itself counts at the effective size its Create sends.
   - `scheduleAndAssume` / `placedWithAssumptions`: schedule under the lock and settle the assumptions the snapshot supersedes.
   - `updatePlacementStatus`: status writes bounded to 30 s, made after the lock is released.
   - `unschedulableBackoff`: the per-VM retry backoff, 30 s doubling to 2 min.
   - `committedOnHost` gives one host's sum to the Host controller.
-- `internal/controller/virtualmachine_resize_gate.go` (new): `admitClusteredResize` admits a clustered resize-up under the Provider's lock before `Reconfigure` is sent.
+- `internal/controller/virtualmachine_resize_gate.go` (new): `admitClusteredResize` admits a clustered resize-up under the Provider's lock before `Reconfigure` is sent. The desired size is `effectiveResources` (#354), the same one `needsReconfigure` compares and the Reconfigure sends.
   - A refusal sets `Reconfiguring=False/InsufficientHostCapacity`, leaves the VM at its size and retries with the backoff.
   - An unregistered host fails closed.
   - A shrink always passes.

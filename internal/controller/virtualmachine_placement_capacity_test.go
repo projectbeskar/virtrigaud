@@ -526,6 +526,17 @@ func TestFootprints(t *testing.T) {
 	assert.Equal(t, scheduler.ResourceRequest{CPU: 4, MemoryMiB: 16384}, admittedFootprint(pending, class))
 	assert.True(t, pendingCreate(pending))
 	assert.False(t, pendingCreate(created))
+
+	// A pending VM counts at its effective size (#354's effectiveResources):
+	// an override smaller than the class is what Create sends.
+	pending.Spec.Resources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: i32p(1), MemoryMiB: i64p(2048)}
+	assert.Equal(t, scheduler.ResourceRequest{CPU: 1, MemoryMiB: 2048}, admittedFootprint(pending, class))
+	// An out-of-range override (Create will refuse it) counts conservatively.
+	pending.Spec.Resources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: i32p(4096)}
+	assert.Equal(t, scheduler.ResourceRequest{CPU: 4096, MemoryMiB: 16384}, admittedFootprint(pending, class))
+	// No usable class: the override, else the minimum.
+	pending.Spec.Resources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: i32p(3)}
+	assert.Equal(t, scheduler.ResourceRequest{CPU: 3, MemoryMiB: minFootprintMemoryMiB}, admittedFootprint(pending, nil))
 }
 
 // ─── assumptions ─────────────────────────────────────────────────────────────

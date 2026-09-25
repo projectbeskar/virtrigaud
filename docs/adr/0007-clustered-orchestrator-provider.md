@@ -956,8 +956,9 @@ follows; A2's `pendingHost` is its prerequisite.
 >   fields counts once. The VM being scheduled never counts against itself.
 > - Another VM's *footprint* is its **admitted** size, never a size its owner
 >   merely asks for: `status.currentResources` when recorded (only the operator
->   writes status); for a VM whose create is still pending, its VMClass size
->   raised to its `spec.resources` override; otherwise its VMClass size. A
+>   writes status); for a VM whose create is still pending, its effective size
+>   (its VMClass with any `spec.resources` override applied — what its Create
+>   sends); otherwise its VMClass size. A
 >   created VM's `spec.resources` and `spec.classRef` are ignored, so editing
 >   them costs a tenant nothing and blocks nobody. A VMClass the VM's namespace
 >   may not use (no consumer grant) sizes nothing. Every VM counts at least

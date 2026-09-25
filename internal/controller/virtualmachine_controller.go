@@ -1298,14 +1298,15 @@ func (r *VirtualMachineReconciler) resolveClusterPlacement(
 		excludedHosts = vm.Status.Placement.ExcludedHosts
 	}
 
-	// (d) Resources: the size buildCreateRequest already resolved from the
-	// VMClass (no duplicate parse), raised to any larger spec.resources
-	// override (requestedFootprint) — the size this VM counts at while its
-	// create is pending, when the CRD keeps both immutable. RequiredNetworks are the VM's resolved network
+	// (d) Resources: the effective size buildCreateRequest already resolved
+	// (effectiveResources: the VMClass with any spec.resources override
+	// applied, no duplicate parse) — what Create sends, and the size this VM
+	// counts at while its create is pending (pendingFootprint), when the CRD
+	// keeps both immutable. RequiredNetworks are the VM's resolved network
 	// identities as D6 host-visibility constraints. RequiredStoragePools and
 	// RequiredMachineType are deliberately left empty — see the TODO below.
 	schedReq := scheduler.Request{
-		Resources:        requestedFootprint(vm, req.Class.CPU, int64(req.Class.MemoryMiB)),
+		Resources:        withMinimum(scheduler.ResourceRequest{CPU: req.Class.CPU, MemoryMiB: int64(req.Class.MemoryMiB)}),
 		Policy:           policy,
 		Pool:             pool.Spec,
 		Candidates:       candidates,
