@@ -628,7 +628,7 @@ func TestEnsureImageOnProvider_ArtifactInProgressWaitsThenReportsAStall(t *testi
 	}
 
 	// The first answer records when the wait began; the image is importing.
-	ensure()
+	_ = ensure()
 	assert.Equal(t, before+1, artifactOutcome(t, providerType, metrics.ImageArtifactOutcomeInProgress))
 	got := reloadImage(t, r, img.Name)
 	ps := got.Status.ProviderStatus[key]
@@ -640,7 +640,7 @@ func TestEnsureImageOnProvider_ArtifactInProgressWaitsThenReportsAStall(t *testi
 
 	// Waiting within the bound writes nothing.
 	clock.advance(2 * time.Hour)
-	ensure()
+	_ = ensure()
 	assert.Equal(t, got.ResourceVersion, reloadImage(t, r, img.Name).ResourceVersion)
 
 	// Beyond max(2 × 90m, 2h) = 3h the wait is reported as stalled, once.
@@ -655,7 +655,7 @@ func TestEnsureImageOnProvider_ArtifactInProgressWaitsThenReportsAStall(t *testi
 	require.NotNil(t, cond)
 	assert.Equal(t, imageReasonArtifactPrepareStalled, cond.Reason)
 	clock.advance(time.Hour)
-	ensure()
+	_ = ensure()
 	assert.Equal(t, got.ResourceVersion, reloadImage(t, r, img.Name).ResourceVersion)
 	require.Len(t, rec.withReason(eventReasonImageArtifactPrepareStalled), 1, "one event per change of state")
 	assert.Equal(t, 4, inst.calls(), "each retry asks the provider")
@@ -863,7 +863,7 @@ func TestEnsureImageOnProvider_MockProvider_AlwaysFailingImportBacksOff(t *testi
 	// At most one prepare per backoff window: 1 minute, then 2.
 	for _, step := range []time.Duration{10 * time.Second, 30 * time.Second, 19 * time.Second} {
 		clock.advance(step)
-		holds(r, 1)
+		_ = holds(r, 1)
 	}
 	clock.advance(2 * time.Second)
 	sends(2)
@@ -871,17 +871,17 @@ func TestEnsureImageOnProvider_MockProvider_AlwaysFailingImportBacksOff(t *testi
 	err = holds(r, 2)
 	assert.Equal(t, 2*importFailedBackoff.Base, imageHoldRequeueAfter(err), "the wait doubles")
 	clock.advance(61 * time.Second)
-	holds(r, 2)
+	_ = holds(r, 2)
 	clock.advance(60 * time.Second)
 	sends(3)
 
 	// A manager restart loses the count, not the first wait: the entry's
 	// record of the failed import still holds for importFailedBackoff.Base.
 	failTask()
-	holds(r, 3)
+	_ = holds(r, 3)
 	restarted := &VirtualMachineReconciler{Client: r.Client, Scheme: r.Scheme, clock: clock.now}
 	clock.advance(30 * time.Second)
-	holds(restarted, 3)
+	_ = holds(restarted, 3)
 	clock.advance(31 * time.Second)
 	requeue, err := restarted.EnsureImageOnProvider(ctx, vm, getImage(t, r, img), provider, inst)
 	require.NoError(t, err)
@@ -912,7 +912,7 @@ func TestEnsureImageOnProvider_UnconfirmedAnswerBacksOff(t *testing.T) {
 	require.ErrorIs(t, err, errImageArtifactNotConfirmed)
 	assert.Equal(t, 30*time.Second, imageHoldRequeueAfter(err))
 	assert.Equal(t, 1, inst.calls())
-	ensure(vms[1])
+	_ = ensure(vms[1])
 	assert.Equal(t, 1, inst.calls(), "another VM does not ask again within the window")
 
 	clock.advance(31 * time.Second)
