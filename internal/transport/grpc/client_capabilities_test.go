@@ -51,3 +51,29 @@ func TestClient_GetCapabilities_StorageBackendsSurface(t *testing.T) {
 	assert.Equal(t, []string{"pvc"}, caps.SupportedImportBackends)
 	assert.Equal(t, []string{"relay"}, caps.SupportedTransferModes)
 }
+
+// TestClient_GetCapabilities_ImageArtifactIdentity verifies the ADR-0009 D7
+// capability round-trips, and is false from a provider that does not set it
+// (an older provider), which is what makes the manager hold instead of sending
+// an identity request to it.
+func TestClient_GetCapabilities_ImageArtifactIdentity(t *testing.T) {
+	for name, advertised := range map[string]bool{"advertised": true, "absent (older provider)": false} {
+		t.Run(name, func(t *testing.T) {
+			dialer, cleanup := startBufconnServer(t, &fakeProviderServer{
+				GetCapabilitiesFn: func(ctx context.Context, req *providerv1.GetCapabilitiesRequest) (*providerv1.GetCapabilitiesResponse, error) {
+					return &providerv1.GetCapabilitiesResponse{
+						SupportsImageImport:           true,
+						SupportsImageArtifactIdentity: advertised,
+					}, nil
+				},
+			})
+			defer cleanup()
+			cli := newTestClient(t, dialer, "test-caps-identity")
+
+			caps, err := cli.GetCapabilities(context.Background())
+			require.NoError(t, err)
+			assert.True(t, caps.SupportsImageImport)
+			assert.Equal(t, advertised, caps.SupportsImageArtifactIdentity)
+		})
+	}
+}
