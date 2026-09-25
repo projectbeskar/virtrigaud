@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
@@ -125,6 +126,51 @@ func guardCheckFailed(op, domain string, err error) error {
 			"(transient host error; details are in the provider log)", op, domain), nil)
 }
 
+// otherDomains are the references of every domain on a host except one.
+type otherDomains []hostDomainRefs
+
+// otherDomainsOnHost reads the references of every domain defined on the host
+// behind h except selfUUID (domainRefsOnHost), failing closed.
+func otherDomainsOnHost(ctx context.Context, h hostCommandRunner, selfUUID string) (otherDomains, error) {
+	if selfUUID == "" {
+		// Without its UUID the domain cannot be told apart from the others,
+		// and would count as its own dependent.
+		return nil, fmt.Errorf("the domain definition has no UUID")
+	}
+	return domainRefsOnHost(ctx, h, selfUUID)
+}
+
+// using counts the domains that reference any of files — raw, or canonical as
+// canon[i] — as a disk, a backing file anywhere in a disk's chain, or another
+// file or shared directory. self only labels the log line.
+func (o otherDomains) using(self string, files, canon []string) int {
+	n := 0
+	for _, d := range o {
+		for i := range files {
+			if d.refs.files[files[i]] || d.refs.contains(canon[i]) {
+				log.Printf("WARN disk %s of domain %s is used by domain %s", files[i], self, d.uuid)
+				n++
+				break
+			}
+		}
+	}
+	return n
+}
+
+// useUnder reports whether any of the domains references a file inside dir
+// (e.g. a clone whose CD-ROM still points at its source VM's cloud-init seed).
+func (o otherDomains) useUnder(dir string) bool {
+	prefix := strings.TrimSuffix(dir, "/") + "/"
+	for _, d := range o {
+		for f := range d.refs.files {
+			if strings.HasPrefix(f, prefix) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // diskDependents counts the domains defined on the host behind h, other than
 // selfUUID, that reference any of files (canonicalized on the host) as a disk,
 // a backing file anywhere in a disk's chain, or another file or shared
@@ -134,30 +180,15 @@ func diskDependents(ctx context.Context, h hostCommandRunner, selfUUID string, f
 	if len(files) == 0 {
 		return 0, nil
 	}
-	if selfUUID == "" {
-		// Without its UUID the domain cannot be told apart from the others,
-		// and would count as its own dependent.
-		return 0, fmt.Errorf("the domain definition has no UUID")
+	others, err := otherDomainsOnHost(ctx, h, selfUUID)
+	if err != nil {
+		return 0, err
 	}
 	canon, err := canonicalizeOnHost(ctx, h, files)
 	if err != nil {
 		return 0, err
 	}
-	doms, err := domainRefsOnHost(ctx, h, selfUUID)
-	if err != nil {
-		return 0, err
-	}
-	n := 0
-	for _, d := range doms {
-		for i := range files {
-			if d.refs.files[files[i]] || d.refs.contains(canon[i]) {
-				log.Printf("WARN disk %s of domain %s is used by domain %s", files[i], selfUUID, d.uuid)
-				n++
-				break
-			}
-		}
-	}
-	return n, nil
+	return others.using(selfUUID, files, canon), nil
 }
 
 // checkDiskDependents refuses op on the domain doc describes when another

@@ -338,8 +338,8 @@ esac
 // fakeQemuImgScript answers `info` from a <file>.info.json sidecar (default: a
 // plain qcow2) and `info --backing-chain` from <file>.chain.json (default: the
 // file alone; <file>.chainfail simulates a broken link), fails like qemu-img
-// for a missing file, and makes `convert` write its target. Every call is
-// logged.
+// for a missing file, makes `convert` write its target, and makes `create -b`
+// write a linked-clone overlay with its chain sidecar. Every call is logged.
 const fakeQemuImgScript = `#!/bin/sh
 printf '%s\n' "$*" >> "$FAKE_HOST_DIR/qemu-img.log"
 last=""
@@ -358,6 +358,15 @@ case "$1" in
     [ -e "$last" ] || missing
     printf '{"format":"qcow2","filename":"%s"}\n' "$last" ;;
   convert) printf 'converted\n' > "$last" ;;
+  create)
+    # A linked-clone overlay (create -b <base> ... <overlay>): write the overlay
+    # and its chain sidecar, so its backing file is visible like a real one.
+    b=""; prev=""
+    for a in "$@"; do if [ "$prev" = "-b" ]; then b="$a"; fi; prev="$a"; done
+    if [ -n "$b" ]; then
+      printf 'overlay\n' > "$last"
+      printf '[{"format":"qcow2","filename":"%s","backing-filename":"%s","full-backing-filename":"%s"},{"format":"qcow2","filename":"%s"}]\n' "$last" "$b" "$b" "$b" > "$last.chain.json"
+    fi ;;
   *) exit 0 ;;
 esac
 `

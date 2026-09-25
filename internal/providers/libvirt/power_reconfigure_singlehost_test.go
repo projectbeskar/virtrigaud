@@ -78,7 +78,8 @@ nodom() { echo "error: failed to get domain '$1'" >&2; exit 1; }
 if [ -f "$d/dead" ]; then kill -9 $$; fi
 if [ -f "$d/nolibvirtd" ]; then echo "error: failed to connect to the hypervisor" >&2; exit 1; fi
 case "$1" in
-  list) cat "$d/list.txt" ;;
+  list) if [ "$3" = "--uuid" ]; then cat "$d/uuids.txt" 2>/dev/null; else cat "$d/list.txt"; fi ;;
+  pool-dumpxml) printf "<pool type='dir'><name>default</name><target><path>/var/lib/libvirt/images</path></target></pool>\n" ;;
   dumpxml) if [ -f "$d/dom-$2.xml" ]; then cat "$d/dom-$2.xml"; else nodom "$2"; fi ;;
   dominfo)
     [ -f "$d/dom-$2.xml" ] || nodom "$2"
@@ -139,6 +140,7 @@ func newOpsFixture(t *testing.T, hosts map[string]map[string]string) *routingFix
 			}
 		}
 		require.NoError(t, os.WriteFile(filepath.Join(hd, "list.txt"), []byte(list.String()), 0o600))
+		writeFixtureUUIDs(t, hd, domains)
 	}
 	shim := "#!/bin/sh\nprintf 'local %s %s\\n' \"$(basename \"$0\")\" \"$*\" >> \"$FAKE_VIRSH_DIR/calls.log\"\n"
 	bin := t.TempDir()
@@ -146,6 +148,7 @@ func newOpsFixture(t *testing.T, hosts map[string]map[string]string) *routingFix
 	for _, name := range []string{"sudo", "rm"} {
 		require.NoError(t, os.WriteFile(filepath.Join(bin, name), []byte(shim), 0o755)) //nolint:gosec // test shim must be executable
 	}
+	installQemuImgShim(t, bin)
 	t.Setenv("FAKE_VIRSH_DIR", dir)
 	t.Setenv("FAKE_DISK_PATH", opsDiskPath)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
