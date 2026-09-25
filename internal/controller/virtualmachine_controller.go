@@ -23,11 +23,13 @@ import (
 	"strings"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -158,6 +160,11 @@ const (
 // silently orphaned.
 const forceDeleteAnnotation = "virtrigaud.io/force-delete"
 
+// eventReasonOrphaned is the event reason recorded when a VirtualMachine is
+// deleted with the orphan-on-delete annotation (the hypervisor VM is detached,
+// not destroyed).
+const eventReasonOrphaned = "Orphaned"
+
 // vmDeleteRetryInterval is the requeue cadence while a provider Delete keeps
 // failing (finalizer retained until it succeeds or force-delete is set).
 const vmDeleteRetryInterval = 15 * time.Second
@@ -203,10 +210,63 @@ type ProviderResolver interface {
 	GetProvider(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) (contracts.Provider, error)
 }
 
+// VirtualMachineReconciler reconciles VirtualMachine objects against the
+// Provider each one references.
 type VirtualMachineReconciler struct {
 	client.Client
 	Scheme         *runtime.Scheme
 	RemoteResolver ProviderResolver
+	// Recorder emits Kubernetes events on the VirtualMachine (e.g. an
+	// orphan-on-delete detach, a provider reference mismatch). Optional: nil
+	// disables events.
+	Recorder record.EventRecorder
+}
+
+// recordEvent emits an event on vm when a Recorder is configured.
+func (r *VirtualMachineReconciler) recordEvent(vm *infravirtrigaudiov1beta1.VirtualMachine, eventType, reason, msg string) {
+	if r.Recorder != nil {
+		r.Recorder.Event(vm, eventType, reason, msg)
+	}
+}
+
+// reconcileBoundProvider reconciles a bound VM's status.boundProvider with the
+// Provider its spec.providerRef resolved to (in memory; the caller's status
+// write persists it):
+//
+//   - no record (bound before the field existed): record provider — trust on
+//     first reconcile — with a Normal BoundProviderRecorded event;
+//   - a different namespace/name: a *ProviderRefMismatchError (no provider
+//     call may be made for the VM);
+//   - the same namespace/name but a new UID (the Provider was deleted and
+//     re-created): accepted, with a Warning BoundProviderRecreated event, and
+//     the new UID recorded for audit.
+func (r *VirtualMachineReconciler) reconcileBoundProvider(
+	ctx context.Context,
+	vm *infravirtrigaudiov1beta1.VirtualMachine,
+	provider *infravirtrigaudiov1beta1.Provider,
+) error {
+	logger := log.FromContext(ctx)
+	providerKey := types.NamespacedName{Namespace: provider.Namespace, Name: provider.Name}
+	switch {
+	case vm.Status.BoundProvider == nil:
+		logger.Info("Recording the Provider this pre-existing bound VM is bound through (backfill from spec.providerRef)",
+			"provider", providerKey.String(), "id", vm.Status.ID)
+		recordBoundProvider(vm, provider)
+		r.recordEvent(vm, corev1.EventTypeNormal, eventReasonBoundProviderRecorded, fmt.Sprintf(
+			"recorded Provider %s (uid %s) as the Provider this VM is bound through, from its current spec.providerRef",
+			providerKey, provider.UID))
+	case checkVMProvider(vm, provider) != nil:
+		return checkVMProvider(vm, provider)
+	case boundProviderRecreated(vm, provider):
+		oldUID := vm.Status.BoundProvider.UID
+		logger.Info("The Provider this VM is bound through was re-created under the same name; accepting it and recording its new UID",
+			"provider", providerKey.String(), "oldUID", oldUID, "newUID", string(provider.UID))
+		r.recordEvent(vm, corev1.EventTypeWarning, eventReasonBoundProviderRecreated, fmt.Sprintf(
+			"Provider %s this VM is bound through was deleted and re-created (uid %s -> %s); operating through the new object, "+
+				"which is trusted to front the same hypervisor", providerKey, oldUID, provider.UID))
+		vm.Status.BoundProvider.UID = string(provider.UID)
+	}
+	return nil
 }
 
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=virtualmachines,verbs=get;list;watch;create;update;patch;delete
@@ -292,6 +352,15 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	// Update observed generation
 	vm.Status.ObservedGeneration = vm.Generation
 
+	// A bound VM whose spec.providerRef no longer names the Provider it is
+	// bound through is refused before anything is resolved: its status.id is
+	// meaningful only on that Provider.
+	if vmIsBound(vm) {
+		if err := checkBoundProvider(vm, vmProviderKey(vm)); err != nil {
+			return r.handleNotRoutable(ctx, vm, err)
+		}
+	}
+
 	// Get dependencies
 	imageRefName := ""
 	if vm.Spec.ImageRef != nil {
@@ -319,6 +388,19 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 	logger.V(1).Info("Dependencies resolved successfully")
+
+	// Bind the VM to the Provider it resolved to, or refuse it. A VM bound
+	// before status.boundProvider existed is backfilled from its current
+	// spec.providerRef (trust on first reconcile; the reference is immutable
+	// once bound, so only a re-point made before the upgrade is trusted). A
+	// Provider re-created under the same namespace and name is accepted, with a
+	// Warning event, and its new UID recorded. Both records are persisted with
+	// the status write that ends this reconcile.
+	if vmIsBound(vm) {
+		if err := r.reconcileBoundProvider(ctx, vm, provider); err != nil {
+			return r.handleNotRoutable(ctx, vm, err)
+		}
+	}
 
 	// A VM that records a clustered placement on a Provider that is not (or no
 	// longer) clustered is failed CLOSED before any provider call — image
@@ -545,18 +627,29 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 		return ctrl.Result{}, nil
 	}
 
+	// Orphan-on-delete: detach the hypervisor VM instead of destroying it. No
+	// provider is resolved or called; the finalizer is simply removed.
+	if hasOrphanOnDeleteAnnotation(vm) {
+		return r.orphanOnDelete(ctx, vm)
+	}
+
 	// Get provider if we have a provider ref and either a VM ID or a clustered
 	// create in flight (status.placement.pendingHost, ADR-0007 Addendum A, A2).
-	if (vm.Status.ID != "" || pendingHost(vm) != "") && vm.Spec.ProviderRef.Name != "" {
-		provider := &infravirtrigaudiov1beta1.Provider{}
-		providerKey := types.NamespacedName{
-			Name:      vm.Spec.ProviderRef.Name,
-			Namespace: vm.Namespace,
-		}
-		if vm.Spec.ProviderRef.Namespace != "" {
-			providerKey.Namespace = vm.Spec.ProviderRef.Namespace
+	if vmIsBound(vm) && vm.Spec.ProviderRef.Name != "" {
+		providerKey := vmProviderKey(vm)
+
+		// A VM whose spec.providerRef no longer names the Provider it is bound
+		// through is never deleted through the mismatched one (and, unlike a
+		// Provider that is gone, the mismatch does not release the finalizer):
+		// removing the CR takes orphan-on-delete or force-delete.
+		if err := checkBoundProvider(vm, providerKey); err != nil {
+			if res, retain := r.retainForUnroutableDelete(ctx, vm, err); retain {
+				return res, nil
+			}
+			return r.removeFinalizer(ctx, vm)
 		}
 
+		provider := &infravirtrigaudiov1beta1.Provider{}
 		if err := r.Get(ctx, providerKey, provider); err != nil {
 			if !errors.IsNotFound(err) {
 				logger.Error(err, "Failed to get provider for deletion")
@@ -565,8 +658,9 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 			}
 			// Provider not found, continue with cleanup
 		} else if ref, ok, res := r.deletionTarget(ctx, vm, provider); !ok {
-			// deletionTarget decided (an unbound clustered VM without the
-			// force-delete escape hatch): retain the finalizer.
+			// deletionTarget decided (an unbound clustered VM, or one bound
+			// through another Provider object, without the force-delete escape
+			// hatch): retain the finalizer.
 			return res, nil
 		} else if ref.ID != "" {
 			// Delete VM from provider
@@ -612,7 +706,12 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 		}
 	}
 
-	// Remove finalizer
+	return r.removeFinalizer(ctx, vm)
+}
+
+// removeFinalizer removes the VirtualMachine finalizer, completing deletion.
+func (r *VirtualMachineReconciler) removeFinalizer(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
 	if err := k8s.RemoveFinalizer(ctx, r.Client, vm, infravirtrigaudiov1beta1.VirtualMachineFinalizer); err != nil {
 		logger.Error(err, "Failed to remove finalizer")
 		metrics.RecordError(errReasonRemoveFinalizer, metrics.ComponentManager)
@@ -621,6 +720,24 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 
 	logger.Info("VirtualMachine deleted successfully")
 	return ctrl.Result{}, nil
+}
+
+// orphanOnDelete completes the deletion of a VirtualMachine that carries the
+// orphan-on-delete annotation: the finalizer is removed WITHOUT resolving or
+// calling any Provider, so the hypervisor VM (if any) is left in place,
+// untouched and no longer managed. This is the supported way to un-adopt /
+// detach a VM. It is logged and recorded as an event on the VM.
+func (r *VirtualMachineReconciler) orphanOnDelete(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine) (ctrl.Result, error) {
+	provider := vmProviderKey(vm)
+	if b := vm.Status.BoundProvider; b != nil {
+		provider = types.NamespacedName{Namespace: b.Namespace, Name: b.Name}
+	}
+	msg := fmt.Sprintf("%s=true: detaching without deleting the hypervisor VM (id %q, provider %s); it is left in place and no longer managed",
+		infravirtrigaudiov1beta1.VirtualMachineOrphanOnDeleteAnnotation, vm.Status.ID, provider)
+	log.FromContext(ctx).Info("Orphan-on-delete: removing the finalizer without a provider Delete",
+		"id", vm.Status.ID, "provider", provider.String(), "annotation", infravirtrigaudiov1beta1.VirtualMachineOrphanOnDeleteAnnotation)
+	r.recordEvent(vm, corev1.EventTypeNormal, eventReasonOrphaned, msg)
+	return r.removeFinalizer(ctx, vm)
 }
 
 // getDependencies fetches all required dependencies for the VM
@@ -781,7 +898,7 @@ func (r *VirtualMachineReconciler) createVM(
 			// ADR-0007 Addendum A, A2: durably record the attempted host BEFORE
 			// Create, so a retry after a lost status write (or a Create that ran
 			// past its deadline) lands on this same host instead of a second one.
-			if res, recorded, rerr := r.recordPendingHost(ctx, vm, p); !recorded {
+			if res, recorded, rerr := r.recordPendingHost(ctx, vm, providerCR, p); !recorded {
 				return res, rerr
 			}
 			host = p.hostID
@@ -816,8 +933,10 @@ func (r *VirtualMachineReconciler) createVM(
 		return ctrl.Result{RequeueAfter: requeueAfter}, nil
 	}
 
-	// Update status
+	// Update status. The Provider the VM is bound through is recorded in the
+	// same status write as its id.
 	vm.Status.ID = resp.ID
+	recordBoundProvider(vm, providerCR)
 	// Initialize current resources to track for future resize detection
 	r.updateCurrentResources(vm, vmClass)
 

@@ -370,13 +370,9 @@ func (r *VMMigrationReconciler) handleValidatingPhase(ctx context.Context, migra
 
 	// Validate source provider: the one the source VM runs on. An explicit
 	// spec.source.providerRef naming any other Provider is refused.
-	sourceProviderRef, err := migrationSourceProviderRef(migration, sourceVM)
+	sourceProvider, err := r.sourceProviderFor(ctx, migration, sourceVM)
 	if err != nil {
 		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Invalid source provider: %v", err))
-	}
-	sourceProvider, err := r.getProvider(ctx, sourceProviderRef, migration.Namespace)
-	if err != nil {
-		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to get source provider: %v", err))
 	}
 
 	// Validate target provider
@@ -579,6 +575,13 @@ func (r *VMMigrationReconciler) ensureSourcePoweredOff(ctx context.Context, migr
 		return false, ctrl.Result{}, fmt.Errorf("source VM %s has no provider ID yet", sourceVM.Name)
 	}
 
+	// The source is powered off only through the Provider it is bound through
+	// (resolved before any side effect, including the spec patch below).
+	sourceProvider, err := r.sourceProviderFor(ctx, migration, sourceVM)
+	if err != nil {
+		return false, ctrl.Result{}, fmt.Errorf("resolve source provider: %w", err)
+	}
+
 	// Align the source VM's desired power state with the migration intent so the
 	// VirtualMachine reconciler does not race this controller back to On while the
 	// disk is being exported. Without this, the VM reconciler (whose desired state
@@ -594,10 +597,6 @@ func (r *VMMigrationReconciler) ensureSourcePoweredOff(ctx context.Context, migr
 		logger.Info("Set source VM desired power state to Off for migration", "vm", sourceVM.Name)
 	}
 
-	sourceProvider, err := r.getProvider(ctx, sourceVM.Spec.ProviderRef, migration.Namespace)
-	if err != nil {
-		return false, ctrl.Result{}, fmt.Errorf("get source provider: %w", err)
-	}
 	providerInstance, err := r.getProviderInstance(ctx, sourceProvider)
 	if err != nil {
 		return false, ctrl.Result{}, fmt.Errorf("get source provider instance: %w", err)
@@ -665,13 +664,9 @@ func (r *VMMigrationReconciler) handleSnapshottingPhase(ctx context.Context, mig
 	}
 
 	// Get source provider
-	sourceProviderRef, err := migrationSourceProviderRef(migration, sourceVM)
+	sourceProvider, err := r.sourceProviderFor(ctx, migration, sourceVM)
 	if err != nil {
 		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Invalid source provider: %v", err))
-	}
-	sourceProvider, err := r.getProvider(ctx, sourceProviderRef, migration.Namespace)
-	if err != nil {
-		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to get source provider: %v", err))
 	}
 
 	// Get provider instance
@@ -768,13 +763,9 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 	}
 
 	// Get source provider
-	sourceProviderRef, err := migrationSourceProviderRef(migration, sourceVM)
+	sourceProvider, err := r.sourceProviderFor(ctx, migration, sourceVM)
 	if err != nil {
 		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Invalid source provider: %v", err))
-	}
-	sourceProvider, err := r.getProvider(ctx, sourceProviderRef, migration.Namespace)
-	if err != nil {
-		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to get source provider: %v", err))
 	}
 
 	// Get provider instance
@@ -1540,17 +1531,22 @@ func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migrati
 
 	logger.Info("Creating target VM", "name", targetVMName)
 
+	// User annotations first, without the operator's reserved virtrigaud.io
+	// keys (control annotations and provenance); the provenance below is
+	// written last so it cannot be overridden (the cleanup path trusts
+	// virtrigaud.io/migration and virtrigaud.io/migration-completed).
+	targetAnnotations := userTargetAnnotations(migration.Spec.Target.Annotations)
+	targetAnnotations["virtrigaud.io/migrated-from"] = fmt.Sprintf("%s/%s", migration.Namespace, migration.Spec.Source.VMRef.Name)
+	targetAnnotations["virtrigaud.io/migration"] = fmt.Sprintf("%s/%s", migration.Namespace, migration.Name)
+	targetAnnotations["virtrigaud.io/imported-disk-id"] = migration.Status.ImportID
+	targetAnnotations["virtrigaud.io/disk-checksum"] = migration.Status.DiskInfo.TargetChecksum
+
 	targetVM := &infrav1beta1.VirtualMachine{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      targetVMName,
-			Namespace: targetNamespace,
-			Labels:    migration.Spec.Target.Labels,
-			Annotations: map[string]string{
-				"virtrigaud.io/migrated-from":    fmt.Sprintf("%s/%s", migration.Namespace, migration.Spec.Source.VMRef.Name),
-				"virtrigaud.io/migration":        fmt.Sprintf("%s/%s", migration.Namespace, migration.Name),
-				"virtrigaud.io/imported-disk-id": migration.Status.ImportID,
-				"virtrigaud.io/disk-checksum":    migration.Status.DiskInfo.TargetChecksum,
-			},
+			Name:        targetVMName,
+			Namespace:   targetNamespace,
+			Labels:      migration.Spec.Target.Labels,
+			Annotations: targetAnnotations,
 		},
 		Spec: infrav1beta1.VirtualMachineSpec{
 			ProviderRef: migration.Spec.Target.ProviderRef,
@@ -1561,13 +1557,6 @@ func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migrati
 		// MIGRATION's namespace (getProvider). A VM in another namespace would
 		// resolve an unqualified reference there instead — pin it.
 		targetVM.Spec.ProviderRef.Namespace = migration.Namespace
-	}
-
-	// Merge user-provided annotations
-	if migration.Spec.Target.Annotations != nil {
-		for k, v := range migration.Spec.Target.Annotations {
-			targetVM.Annotations[k] = v
-		}
 	}
 
 	// Set class ref if provided
@@ -2098,17 +2087,33 @@ func (r *VMMigrationReconciler) getProvider(ctx context.Context, providerRef inf
 }
 
 // getSourceProvider retrieves the source provider for a migration: the
-// Provider the source VM runs on (see migrationSourceProviderRef).
+// Provider the source VM runs on (see sourceProviderFor).
 func (r *VMMigrationReconciler) getSourceProvider(ctx context.Context, migration *infrav1beta1.VMMigration) (*infrav1beta1.Provider, error) {
 	sourceVM, err := r.getSourceVM(ctx, migration)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get source VM: %w", err)
 	}
+	return r.sourceProviderFor(ctx, migration, sourceVM)
+}
+
+// sourceProviderFor is THE resolution of the Provider a migration acts on its
+// source VM through, used by every phase that calls the source provider
+// (validation, power-off, snapshot, export and its task poll, the s3 import
+// format lookup, snapshot cleanup): migrationSourceProviderRef — the source
+// VM's own reference, which must match spec.source.providerRef when that is
+// set and the Provider the VM is bound through (status.boundProvider) — then
+// that Provider object. A reference error is returned unwrapped so its message
+// reaches the migration status as-is.
+func (r *VMMigrationReconciler) sourceProviderFor(ctx context.Context, migration *infrav1beta1.VMMigration, sourceVM *infrav1beta1.VirtualMachine) (*infrav1beta1.Provider, error) {
 	sourceProviderRef, err := migrationSourceProviderRef(migration, sourceVM)
 	if err != nil {
 		return nil, err
 	}
-	return r.getProvider(ctx, sourceProviderRef, migration.Namespace)
+	provider, err := r.getProvider(ctx, sourceProviderRef, migration.Namespace)
+	if err != nil {
+		return nil, fmt.Errorf("get source provider %s/%s: %w", sourceProviderRef.Namespace, sourceProviderRef.Name, err)
+	}
+	return provider, nil
 }
 
 // migrationSourceProviderRef returns the Provider a migration exports its
@@ -2120,11 +2125,19 @@ func (r *VMMigrationReconciler) getSourceProvider(ctx context.Context, migration
 // Provider. Any other Provider would be asked to snapshot and export the source
 // VM's provider ID on a hypervisor the VM does not run on — i.e. whatever
 // unrelated VM, possibly another tenant's, has that ID there — so a mismatch is
-// refused rather than honoured.
+// refused rather than honoured. For the same reason a source VM whose
+// spec.providerRef no longer names the Provider it is bound through
+// (status.boundProvider) is refused: the export goes only through the bound
+// Provider.
 func migrationSourceProviderRef(migration *infrav1beta1.VMMigration, sourceVM *infrav1beta1.VirtualMachine) (infrav1beta1.ObjectRef, error) {
 	vmProvider := sourceVM.Spec.ProviderRef
 	if vmProvider.Namespace == "" {
 		vmProvider.Namespace = sourceVM.Namespace
+	}
+	if vmIsBound(sourceVM) {
+		if err := checkBoundProvider(sourceVM, types.NamespacedName{Namespace: vmProvider.Namespace, Name: vmProvider.Name}); err != nil {
+			return infrav1beta1.ObjectRef{}, err
+		}
 	}
 	if migration.Spec.Source.ProviderRef == nil {
 		return vmProvider, nil
@@ -3079,12 +3092,14 @@ func cleanupAllowed(m *infrav1beta1.VMMigration) bool {
 	return m.Spec.Options == nil || m.Spec.Options.CleanupPolicy != infrav1beta1.CleanupPolicyNever
 }
 
-// waitForSourceBinding records that the migration is waiting for its clustered
-// source VM's host binding (ADR-0007 Addendum A, A1) and requeues. No per-VM
-// provider call is made for an unbound VM, and the phase is not advanced.
+// waitForSourceBinding records that the migration is waiting because no per-VM
+// call can be made for its source VM (cause is the vmRefFor failure): a
+// clustered source with no host binding (ADR-0007 Addendum A, A1), or a source
+// whose spec.providerRef no longer names the Provider it is bound through. It
+// requeues without advancing the phase.
 func (r *VMMigrationReconciler) waitForSourceBinding(ctx context.Context, migration *infrav1beta1.VMMigration, cause error) (ctrl.Result, error) {
-	logging.FromContext(ctx).Info("Source VM has no host binding; waiting", "error", cause.Error())
-	migration.Status.Message = fmt.Sprintf("Waiting for the source VM's host binding: %v", cause)
+	logging.FromContext(ctx).Info("No provider call can be made for the source VM; waiting", "error", cause.Error())
+	migration.Status.Message = fmt.Sprintf("%s: %v", vmRefWaitMessage(cause), cause)
 	if err := r.updateStatus(ctx, migration); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -3102,14 +3117,9 @@ func (r *VMMigrationReconciler) deleteSourceSnapshot(ctx context.Context, migrat
 	}
 
 	// Get source provider
-	sourceProviderRef, err := migrationSourceProviderRef(migration, sourceVM)
+	sourceProvider, err := r.sourceProviderFor(ctx, migration, sourceVM)
 	if err != nil {
 		return fmt.Errorf("resolve source provider: %w", err)
-	}
-
-	sourceProvider, err := r.getProvider(ctx, sourceProviderRef, migration.Namespace)
-	if err != nil {
-		return fmt.Errorf("failed to get source provider: %w", err)
 	}
 
 	// Get provider instance

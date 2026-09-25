@@ -23,11 +23,26 @@ import (
 const (
 	// VirtualMachineFinalizer is the finalizer for VirtualMachine resources
 	VirtualMachineFinalizer = "virtualmachine.infra.virtrigaud.io/finalizer"
+
+	// VirtualMachineOrphanOnDeleteAnnotation, set to "true" on a VirtualMachine,
+	// makes deleting it detach the hypervisor VM instead of destroying it: the
+	// finalizer is removed WITHOUT a provider Delete, so the hypervisor VM is
+	// left running and unmanaged. It is the supported way to un-adopt a VM
+	// (spec.providerRef is immutable once the VM is bound, so re-pointing it at
+	// a missing Provider no longer works).
+	VirtualMachineOrphanOnDeleteAnnotation = "virtrigaud.io/orphan-on-delete"
 )
 
 // VirtualMachineSpec defines the desired state of VirtualMachine.
 type VirtualMachineSpec struct {
-	// ProviderRef references the Provider that manages this VM
+	// ProviderRef references the Provider that manages this VM. On a
+	// VirtualMachine it is immutable once the VM is bound to a hypervisor VM
+	// (status.id or status.placement.pendingHost is set): every per-VM call
+	// addresses the VM by its provider id, which is meaningful only on the
+	// Provider that assigned it. Before binding (e.g. to fix a typo after a
+	// failed create) it may still be changed. An unset namespace means the VM's
+	// own; changing it from unset to an explicit namespace also counts as a
+	// change.
 	ProviderRef ObjectRef `json:"providerRef"`
 
 	// ClassRef references the VMClass that defines resource allocation
@@ -288,6 +303,41 @@ type VirtualMachineStatus struct {
 	// or thin-client providers, which have no operator-owned placement decision.
 	// +optional
 	Placement *PlacementStatus `json:"placement,omitempty"`
+
+	// BoundProvider records the Provider this VM was bound through: the one
+	// whose hypervisor assigned status.id (or, for a clustered create in
+	// flight, the one status.placement.pendingHost belongs to). The operator
+	// writes it in the same status write that binds the VM (VM create, clone,
+	// adoption) and, for a VM bound before this field existed, backfills it on
+	// the first reconcile from spec.providerRef. While the VM is bound, the
+	// operator makes no provider call for it — and its finalizer does not
+	// delete through a Provider — unless spec.providerRef still resolves to
+	// this Provider (same namespace and name and, when recorded, UID);
+	// otherwise the VM reports Ready=False/ProviderRefMismatch. A
+	// deliberately re-created Provider (new UID) is re-accepted by an
+	// administrator clearing this field through the status subresource.
+	// +optional
+	BoundProvider *BoundProviderRef `json:"boundProvider,omitempty"`
+}
+
+// BoundProviderRef identifies the Provider object a VirtualMachine is bound
+// through (status.boundProvider). It is written only by the operator.
+type BoundProviderRef struct {
+	// Namespace of the Provider.
+	// +kubebuilder:validation:MaxLength=63
+	Namespace string `json:"namespace"`
+
+	// Name of the Provider.
+	// +kubebuilder:validation:MaxLength=253
+	Name string `json:"name"`
+
+	// UID of the Provider object at bind time. Empty when it was not known
+	// (never for a VM bound by this operator version). A Provider deleted and
+	// re-created under the same name has a new UID and is not accepted in its
+	// place.
+	// +optional
+	// +kubebuilder:validation:MaxLength=128
+	UID string `json:"uid,omitempty"`
 }
 
 // PlacementStatus is the operator scheduler's binding for a VM on a clustered
@@ -651,7 +701,19 @@ const (
 //+kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 //+kubebuilder:storageversion
 
-// VirtualMachine is the Schema for the virtualmachines API
+// VirtualMachine is the Schema for the virtualmachines API.
+//
+// spec.providerRef is locked once the VM is bound (status.id or
+// status.placement.pendingHost set in the STORED object). The rule below is a
+// transition rule, evaluated only on update; it lives on the root so it can
+// read the stored status. With the status subresource enabled, a main-resource
+// update is validated against the stored status and a status update carries
+// the stored spec, so neither path can unlock or change it. providerRef is
+// compared as a whole: an unset namespace equals only an unset namespace (an
+// explicit "" is rejected by the ObjectRef pattern), so unset -> explicit is a
+// change. (A per-field comparison through conditional expressions exceeds the
+// apiserver's static CEL cost budget; whole-object equality does not.)
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || ((!has(oldSelf.status.id) || size(oldSelf.status.id) == 0) && (!has(oldSelf.status.placement) || !has(oldSelf.status.placement.pendingHost) || size(oldSelf.status.placement.pendingHost) == 0)) || (has(self.spec) && has(oldSelf.spec) && self.spec.providerRef == oldSelf.spec.providerRef)",message="spec.providerRef is immutable once the VirtualMachine is bound (status.id or status.placement.pendingHost is set); to stop managing the VM without destroying it, annotate it virtrigaud.io/orphan-on-delete=true and delete it",fieldPath=".spec.providerRef"
 type VirtualMachine struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
