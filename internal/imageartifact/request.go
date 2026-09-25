@@ -60,8 +60,11 @@ type Request struct {
 	// informational, zero when the request names none).
 	PreparedBy contracts.ObjectIdentity
 	// LegacyTargetName is the bare target name (ModeLegacy): a DNS-1123
-	// subdomain, as every VMImage name is, so it can never be a new-scheme
-	// artifact name (those contain '_').
+	// subdomain, as every VMImage name is. Under the '_' rules
+	// (NameRuleVSphere, NameRuleLibvirt) it can therefore never be a
+	// new-scheme artifact name. Under NameRuleProxmox it can (a Proxmox
+	// artifact name is itself a DNS name), which is why a Proxmox provider
+	// must never serve a legacy request by name (see NameRuleProxmox).
 	LegacyTargetName string
 }
 

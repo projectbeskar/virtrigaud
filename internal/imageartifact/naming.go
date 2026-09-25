@@ -41,8 +41,16 @@ const (
 	NameRuleLibvirt
 	// NameRuleProxmox names a Proxmox template: at most 80 bytes, separator
 	// '-', because PVE validates a VM name as a DNS name, which has no '_'.
-	// The name is cosmetic on PVE; lookups go by tag and stamp (ADR-0009 D5).
-	// PVE's per-label length limit, if any, is verified in Slice 6.
+	//
+	// The name is cosmetic on PVE, and it is NOT disjoint from Kubernetes
+	// names: a Proxmox artifact name is a valid DNS name, so it may equal a
+	// legacy bare VMImage name or another object's name, and PVE names are
+	// not unique anyway. A Proxmox provider must therefore never resolve,
+	// reuse or adopt an artifact by name: only by its vr-img-<h16> tag and a
+	// matching stamp (with its own VMID) inside the provider's own PVE pool
+	// (ADR-0009 D3, D5). It must never serve a legacy (identity-less) request
+	// by name either (ADR-0009 D10). PVE's per-label length limit, if any, is
+	// verified in Slice 6.
 	NameRuleProxmox
 )
 
@@ -125,7 +133,9 @@ func (r NameRule) String() string {
 //     never share a prefix;
 //   - under the '_' rules (vSphere, libvirt) a name never equals a Kubernetes
 //     name, a legacy bare VMImage name or a #339 "<namespace>.<name>" domain
-//     name, since none can contain '_';
+//     name, since none can contain '_'. This does NOT hold under
+//     NameRuleProxmox, whose names are valid DNS names: Proxmox never looks
+//     an artifact up by name (see NameRuleProxmox);
 //   - it cannot be predicted before the VMImage exists (its UID is assigned by
 //     the API server). This is not access control: names are not secrets.
 //

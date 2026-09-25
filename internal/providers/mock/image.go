@@ -43,8 +43,10 @@ import (
 //     Every answer echoes the stamp in ImagePrepareResponse.artifact.
 //   - A legacy request (no image, a bare target_name, from a manager older than
 //     ADR-0009) is served the pre-ADR way — named and reused by the bare name,
-//     with no artifact echo — and emits the deprecation signal. Bare names never
-//     contain '_', so it can never reach a new-scheme artifact.
+//     with no artifact echo — and emits the deprecation signal. The mock names
+//     artifacts with the '_' libvirt rule and bare names never contain '_', so
+//     a legacy request can never reach a new-scheme artifact. (That argument
+//     does not hold for a '-' rule: see imageartifact.NameRuleProxmox.)
 //
 // An import takes imagePrepareDelay: with a positive delay the response carries
 // a task, and the artifact is complete once the task is done; with 0 it is
