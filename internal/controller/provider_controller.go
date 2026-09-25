@@ -378,6 +378,9 @@ func capabilitiesToReported(caps contracts.Capabilities) *infravirtrigaudiov1bet
 		SupportedExportBackends:     caps.SupportedExportBackends,
 		SupportedImportBackends:     caps.SupportedImportBackends,
 		SupportedTransferModes:      caps.SupportedTransferModes,
+		// ADR-0009 D8: surfaced so an operator can see why import-style
+		// prepares through this Provider are held.
+		SupportsImageArtifactIdentity: caps.SupportsImageArtifactIdentity,
 	}
 }
 

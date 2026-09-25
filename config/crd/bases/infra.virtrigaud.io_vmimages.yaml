@@ -862,6 +862,18 @@ spec:
                       description: Size is the image size on this provider
                       pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                       x-kubernetes-int-or-string: true
+                    sourceDigest:
+                      description: |-
+                        SourceDigest is the digest of the spec.source this entry was prepared
+                        for ("sha256:" and 64 lowercase hex digits), as confirmed by the
+                        provider's stamp on the prepared artifact (ADR-0009). A VirtualMachine is
+                        created from the entry only while it equals the digest of the current
+                        spec.source; an entry without it (recorded by an earlier release) or with
+                        another digest is not used, and the image is prepared again for the
+                        current source when spec.prepare.onMissing allows it.
+                      maxLength: 71
+                      pattern: ^sha256:[0-9a-f]{64}$
+                      type: string
                     taskRef:
                       description: |-
                         TaskRef is the provider task of an in-flight asynchronous prepare on

@@ -758,6 +758,18 @@ type ProviderImageStatus struct {
 	// +optional
 	TaskRef string `json:"taskRef,omitempty"`
 
+	// SourceDigest is the digest of the spec.source this entry was prepared
+	// for ("sha256:" and 64 lowercase hex digits), as confirmed by the
+	// provider's stamp on the prepared artifact (ADR-0009). A VirtualMachine is
+	// created from the entry only while it equals the digest of the current
+	// spec.source; an entry without it (recorded by an earlier release) or with
+	// another digest is not used, and the image is prepared again for the
+	// current source when spec.prepare.onMissing allows it.
+	// +optional
+	// +kubebuilder:validation:MaxLength=71
+	// +kubebuilder:validation:Pattern=`^sha256:[0-9a-f]{64}$`
+	SourceDigest string `json:"sourceDigest,omitempty"`
+
 	// ID is the provider-specific image identifier
 	// +optional
 	ID string `json:"id,omitempty"`

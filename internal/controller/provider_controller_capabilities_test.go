@@ -98,6 +98,8 @@ func TestCapabilitiesToReported(t *testing.T) {
 		SupportedExportBackends:     []string{"pvc"},
 		SupportedImportBackends:     []string{"pvc"},
 		SupportedTransferModes:      []string{"relay"},
+		// ADR-0009 D8.
+		SupportsImageArtifactIdentity: true,
 	}
 
 	got := capabilitiesToReported(caps)
@@ -120,4 +122,8 @@ func TestCapabilitiesToReported(t *testing.T) {
 	assert.Equal(t, []string{"pvc"}, got.SupportedExportBackends)
 	assert.Equal(t, []string{"pvc"}, got.SupportedImportBackends)
 	assert.Equal(t, []string{"relay"}, got.SupportedTransferModes)
+	// ADR-0009 D8: the identity capability surfaces on Provider status.
+	assert.True(t, got.SupportsImageArtifactIdentity)
+	assert.False(t, capabilitiesToReported(contracts.Capabilities{SupportsImageImport: true}).SupportsImageArtifactIdentity,
+		"a provider that does not report the identity capability is surfaced as lacking it")
 }
