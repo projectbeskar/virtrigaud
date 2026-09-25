@@ -643,13 +643,25 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		return r.refuseConsumer(ctx, vm, persisted, deps.classRefusal)
 	}
 
-	// Check if VMClass resources have changed and need reconfiguration
-	if r.needsReconfigure(vm, vmClass) {
-		logger.Info("VMClass resources changed, reconfiguring VM",
+	// Check if the VM's effective resources (VMClass values with any
+	// spec.resources override applied) have changed and need reconfiguration.
+	// An invalid override is refused with a condition here — before any
+	// provider call, never as a Reconfigure that would silently drop it.
+	needsRC, rcErr := r.needsReconfigure(vm, vmClass)
+	if rcErr != nil {
+		logger.Error(rcErr, "Invalid spec.resources override")
+		k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonValidationError,
+			fmt.Sprintf("Invalid spec.resources override: %s", providerErrorMessage(rcErr)))
+		r.updateStatus(ctx, vm)
+		return ctrl.Result{RequeueAfter: vmCreateInvalidSpecRetryInterval}, nil
+	}
+	if needsRC {
+		desiredCPU, desiredMemoryMiB, _ := effectiveResources(vm, vmClass) // already validated above
+		logger.Info("Effective resources changed, reconfiguring VM",
 			"currentCPU", r.getCurrentCPU(vm),
-			"desiredCPU", vmClass.Spec.CPU,
+			"desiredCPU", desiredCPU,
 			"currentMemoryMiB", r.getCurrentMemoryMiB(vm),
-			"desiredMemoryMiB", vmClass.Spec.Memory.Value()/(1024*1024))
+			"desiredMemoryMiB", desiredMemoryMiB)
 		return r.reconfigureVM(ctx, vm, providerInstance, ref, provider, vmClass, vmImage, networks)
 	}
 
@@ -1493,16 +1505,19 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 			"hasProxmoxSource", vmImage.Spec.Source.Proxmox != nil)
 	}
 
-	// Convert VMClass. Memory and the default disk size are range-checked
-	// before the int32 conversion: an out-of-range value is an InvalidSpec
-	// error, never a wrapped-around size.
-	memoryMiB, err := vmClassQuantityUnits("memory", vmClass.Spec.Memory, bytesPerMiB, maxVMClassMemoryBytes)
+	// Convert VMClass. CPU/memory are the VM's *effective* resources — the
+	// VMClass values with any spec.resources override applied (see
+	// effectiveResources) — and are range-checked there before the int32
+	// conversion: an out-of-range value (from the VMClass or the override) is
+	// an InvalidSpec error, never a wrapped-around size and never sent to the
+	// provider.
+	effCPU, effMemoryMiB, err := effectiveResources(vm, vmClass)
 	if err != nil {
 		return contracts.CreateRequest{}, err
 	}
 	class := contracts.VMClass{
-		CPU:              vmClass.Spec.CPU,
-		MemoryMiB:        memoryMiB, // bytes to MiB
+		CPU:              effCPU,
+		MemoryMiB:        effMemoryMiB, // bytes to MiB, override applied
 		Firmware:         string(vmClass.Spec.Firmware),
 		GuestToolsPolicy: string(vmClass.Spec.GuestToolsPolicy),
 		ExtraConfig:      vmClass.Spec.ExtraConfig,
@@ -1953,20 +1968,18 @@ func (r *VirtualMachineReconciler) updateStatus(ctx context.Context, vm *infravi
 	}
 }
 
-// needsReconfigure checks if the VM needs to be reconfigured based on VMClass changes
-func (r *VirtualMachineReconciler) needsReconfigure(vm *infravirtrigaudiov1beta1.VirtualMachine, vmClass *infravirtrigaudiov1beta1.VMClass) bool {
-	// Get desired resources from VMClass (with possible overrides from VM spec)
-	desiredCPU := vmClass.Spec.CPU
-	desiredMemoryMiB := vmClass.Spec.Memory.Value() / (1024 * 1024)
-
-	// Check for VM-level resource overrides
-	if vm.Spec.Resources != nil {
-		if vm.Spec.Resources.CPU != nil {
-			desiredCPU = *vm.Spec.Resources.CPU
-		}
-		if vm.Spec.Resources.MemoryMiB != nil {
-			desiredMemoryMiB = *vm.Spec.Resources.MemoryMiB
-		}
+// needsReconfigure reports whether vm needs a Reconfigure call: whether its
+// effective resources (the VMClass values with any spec.resources override
+// applied — see effectiveResources) differ from status.currentResources, the
+// size the last confirmed Create/Reconfigure actually applied. It returns an
+// error, never a bool, when the override itself is out of bounds
+// (effectiveResources) — the caller must turn that into a condition instead
+// of calling reconfigureVM, since an invalid override is never sent to the
+// provider.
+func (r *VirtualMachineReconciler) needsReconfigure(vm *infravirtrigaudiov1beta1.VirtualMachine, vmClass *infravirtrigaudiov1beta1.VMClass) (bool, error) {
+	desiredCPU, desiredMemoryMiB, err := effectiveResources(vm, vmClass)
+	if err != nil {
+		return false, err
 	}
 
 	// Get current resources from status
@@ -1976,11 +1989,11 @@ func (r *VirtualMachineReconciler) needsReconfigure(vm *infravirtrigaudiov1beta1
 	// If no current resources tracked, assume first reconcile after creation
 	// and update status without triggering reconfigure
 	if currentCPU == 0 && currentMemoryMiB == 0 {
-		return false
+		return false, nil
 	}
 
 	// Check if CPU or memory changed
-	return currentCPU != desiredCPU || currentMemoryMiB != desiredMemoryMiB
+	return currentCPU != desiredCPU || currentMemoryMiB != int64(desiredMemoryMiB), nil
 }
 
 // getCurrentCPU returns the current CPU count from VM status
@@ -2012,10 +2025,20 @@ func (r *VirtualMachineReconciler) reconfigureVM(
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	// Build the desired configuration
+	// Build the desired configuration. needsReconfigure already validated the
+	// spec.resources override once for this same vm/vmClass, so this should
+	// not fail on that account — but if a VMClass field is itself invalid
+	// (e.g. diskDefaults.size), refuse it the same way createVM does: a clear
+	// condition, never a provider call.
 	req, err := r.buildCreateRequest(ctx, vm, providerCR, vmClass, vmImage, networks)
 	if err != nil {
-		logger.Error(err, "Failed to build create request")
+		logger.Error(err, "Failed to build reconfigure request")
+		if contracts.IsInvalidSpec(err) {
+			k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonValidationError,
+				fmt.Sprintf("Failed to build reconfigure request: %s", providerErrorMessage(err)))
+			r.updateStatus(ctx, vm)
+			return ctrl.Result{RequeueAfter: vmCreateInvalidSpecRetryInterval}, nil
+		}
 		return ctrl.Result{}, err
 	}
 
@@ -2054,20 +2077,28 @@ func (r *VirtualMachineReconciler) reconfigureVM(
 	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 }
 
-// updateCurrentResources updates the VM status with current resource allocation
+// updateCurrentResources records vm's effective resources (the VMClass
+// values with any spec.resources override applied — see effectiveResources)
+// as status.currentResources. Callers must call it only right after a
+// Create or Reconfigure the provider has confirmed applied — synchronously,
+// or an async task that has completed — never speculatively from the
+// desired spec: the provider contract's Create/Reconfigure/Describe
+// responses carry no resource fields back (contracts.CreateResponse,
+// contracts.DescribeResponse), so what was sent in the just-confirmed
+// request is the closest honest record available. If effectiveResources
+// cannot be computed (the override is out of bounds — unexpected here, since
+// callers only reach this after a request built from the same vm/vmClass
+// with the same helper already succeeded), status.currentResources is left
+// exactly as it was rather than overwritten with a wrong value.
 func (r *VirtualMachineReconciler) updateCurrentResources(vm *infravirtrigaudiov1beta1.VirtualMachine, vmClass *infravirtrigaudiov1beta1.VMClass) {
-	cpu := vmClass.Spec.CPU
-	memoryMiB := vmClass.Spec.Memory.Value() / (1024 * 1024)
-
-	// Check for VM-level resource overrides
-	if vm.Spec.Resources != nil {
-		if vm.Spec.Resources.CPU != nil {
-			cpu = *vm.Spec.Resources.CPU
-		}
-		if vm.Spec.Resources.MemoryMiB != nil {
-			memoryMiB = *vm.Spec.Resources.MemoryMiB
-		}
+	cpu, memoryMiB32, err := effectiveResources(vm, vmClass)
+	if err != nil {
+		ctrl.Log.WithName("updateCurrentResources").Error(err,
+			"Cannot compute effective resources; leaving status.currentResources unchanged",
+			"vm", vm.Name, "namespace", vm.Namespace)
+		return
 	}
+	memoryMiB := int64(memoryMiB32)
 
 	if vm.Status.CurrentResources == nil {
 		vm.Status.CurrentResources = &infravirtrigaudiov1beta1.VirtualMachineResources{}
