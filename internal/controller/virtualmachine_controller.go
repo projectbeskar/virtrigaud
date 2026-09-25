@@ -1285,12 +1285,12 @@ func (r *VirtualMachineReconciler) resolveClusterPlacement(
 
 	// (d) Resources: the size buildCreateRequest already resolved from the
 	// VMClass (no duplicate parse), raised to any larger spec.resources
-	// override or recorded current size — the same footprint this VM will
-	// count as once placed. RequiredNetworks are the VM's resolved network
+	// override (requestedFootprint) — the size this VM counts at while its
+	// create is pending, when the CRD keeps both immutable. RequiredNetworks are the VM's resolved network
 	// identities as D6 host-visibility constraints. RequiredStoragePools and
 	// RequiredMachineType are deliberately left empty — see the TODO below.
 	schedReq := scheduler.Request{
-		Resources:        footprint(vm, req.Class.CPU, int64(req.Class.MemoryMiB)),
+		Resources:        requestedFootprint(vm, req.Class.CPU, int64(req.Class.MemoryMiB)),
 		Policy:           policy,
 		Pool:             pool.Spec,
 		Candidates:       candidates,

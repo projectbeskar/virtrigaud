@@ -344,13 +344,38 @@ func TestClusteredCapacity_CommittedSources(t *testing.T) {
 			fits: false,
 		},
 		{
-			name: "a spec.resources override larger than the class counts",
+			name: "a created VM's spec.resources is not counted (a tenant cannot inflate it for free)",
 			others: []client.Object{func() client.Object {
-				vm := bound("override")
+				vm := bound("inflated")
+				vm.Spec.Resources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: i32p(128), MemoryMiB: i64p(1 << 20)}
+				vm.Status.CurrentResources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: i32p(2), MemoryMiB: i64p(4096)}
+				return vm
+			}()},
+			fits: true,
+		},
+		{
+			name: "a pending create's spec.resources override counts",
+			others: []client.Object{func() client.Object {
+				vm := withPlacement(capVM("pending-big"), "", "host-alpha")
 				vm.Spec.Resources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: i32p(3)}
 				return vm
 			}()},
 			fits: false,
+		},
+		{
+			name: "a class in another namespace the VM may not use sizes nothing (minimum footprint)",
+			others: []client.Object{
+				&infravirtrigaudiov1beta1.VMClass{
+					ObjectMeta: metav1.ObjectMeta{Name: "huge", Namespace: "infra"},
+					Spec:       infravirtrigaudiov1beta1.VMClassSpec{CPU: 64, Memory: resource.MustParse("512Gi")},
+				},
+				func() client.Object {
+					vm := withPlacement(capVM("ungranted"), "", "host-alpha")
+					vm.Spec.ClassRef = infravirtrigaudiov1beta1.ObjectRef{Name: "huge", Namespace: "infra"}
+					return vm
+				}(),
+			},
+			fits: true,
 		},
 		{
 			name: "a VM whose class is gone is sized from its current resources",
@@ -407,6 +432,8 @@ func TestClusteredCapacity_UnschedulableMessageIsBoundedAndNamesNoOtherVM(t *tes
 		other.Namespace = "tenant-b"
 		other.Spec.ProviderRef.Namespace = capNS
 		other.Spec.ClassRef = infravirtrigaudiov1beta1.ObjectRef{Name: "test-class", Namespace: capNS}
+		// Created VMs count at their recorded (admitted) size.
+		other.Status.CurrentResources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: i32p(2), MemoryMiB: i64p(4096)}
 		objs = append(objs, other)
 	}
 	vm := capVM("new")
@@ -462,20 +489,38 @@ func TestUnschedulableBackoffForgetsIdleRecords(t *testing.T) {
 	assert.Equal(t, 30*time.Second, b.next("a", now))
 }
 
-func TestFootprintTakesTheLargestSize(t *testing.T) {
-	vm := capVM("x")
-	assert.Equal(t, int32(2), footprint(vm, 2, 4096).CPU)
-
-	vm.Spec.Resources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: i32p(1), MemoryMiB: i64p(8192)}
-	vm.Status.CurrentResources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: i32p(6), MemoryMiB: i64p(1024)}
-	got := footprint(vm, 2, 4096)
-	assert.Equal(t, int32(6), got.CPU)
-	assert.Equal(t, int64(8192), got.MemoryMiB)
-
+// TestFootprints (review M2): the VM being scheduled, and another VM whose
+// create is pending, count at their requested size; every other VM counts at
+// its admitted size — never at a size its owner merely asks for.
+func TestFootprints(t *testing.T) {
 	class := smallVMClass(capNS)
 	class.Spec.Memory = resource.MustParse("16Gi")
-	assert.Equal(t, int64(16384), classFootprint(vm, class).MemoryMiB)
-	assert.Equal(t, int32(6), classFootprint(vm, nil).CPU, "no class: overrides and current resources only")
+
+	// requested: the class raised to a larger override, never below the minimum.
+	vm := capVM("x")
+	assert.Equal(t, scheduler.ResourceRequest{CPU: 2, MemoryMiB: 4096}, requestedFootprint(vm, 2, 4096))
+	vm.Spec.Resources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: i32p(1), MemoryMiB: i64p(8192)}
+	assert.Equal(t, scheduler.ResourceRequest{CPU: 2, MemoryMiB: 8192}, requestedFootprint(vm, 2, 4096))
+	assert.Equal(t, scheduler.ResourceRequest{CPU: 1, MemoryMiB: 8192}, requestedFootprint(vm, 0, 0))
+
+	// A created VM counts at its recorded size; its spec is ignored.
+	created := withPlacement(capVM("created"), "host-alpha", "")
+	created.Spec.Resources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: i32p(128), MemoryMiB: i64p(1 << 20)}
+	created.Status.CurrentResources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: i32p(2), MemoryMiB: i64p(2048)}
+	assert.Equal(t, scheduler.ResourceRequest{CPU: 2, MemoryMiB: 2048}, admittedFootprint(created, class))
+
+	// A created VM with nothing recorded counts at its class size (spec still ignored).
+	created.Status.CurrentResources = nil
+	assert.Equal(t, scheduler.ResourceRequest{CPU: 2, MemoryMiB: 16384}, admittedFootprint(created, class))
+	// ... and at the minimum when no class may be used.
+	assert.Equal(t, scheduler.ResourceRequest{CPU: minFootprintCPU, MemoryMiB: minFootprintMemoryMiB}, admittedFootprint(created, nil))
+
+	// A pending create counts at its requested size (frozen by the CRD while pending).
+	pending := withPlacement(capVM("pending"), "", "host-alpha")
+	pending.Spec.Resources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: i32p(4)}
+	assert.Equal(t, scheduler.ResourceRequest{CPU: 4, MemoryMiB: 16384}, admittedFootprint(pending, class))
+	assert.True(t, pendingCreate(pending))
+	assert.False(t, pendingCreate(created))
 }
 
 // ─── assumptions ─────────────────────────────────────────────────────────────

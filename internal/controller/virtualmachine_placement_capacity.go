@@ -118,17 +118,27 @@ func placementHosts(vm *infravirtrigaudiov1beta1.VirtualMachine) []string {
 	return hosts
 }
 
-// footprint is the CPU/memory a VM holds or will hold on its host: the largest
-// of its size as created (baseCPU/baseMemMiB, from its VMClass), its
-// spec.resources overrides, and status.currentResources (what the operator last
-// recorded as applied). Taking the largest counts a resize in progress at its
-// larger size, which is the safe side for placement.
-func footprint(vm *infravirtrigaudiov1beta1.VirtualMachine, baseCPU int32, baseMemMiB int64) scheduler.ResourceRequest {
-	out := scheduler.ResourceRequest{CPU: baseCPU, MemoryMiB: baseMemMiB}
-	for _, r := range []*infravirtrigaudiov1beta1.VirtualMachineResources{vm.Spec.Resources, vm.Status.CurrentResources} {
-		if r == nil {
-			continue
-		}
+// The smallest footprint any VM is counted at: the minimums spec.resources
+// accepts. A VM whose size cannot be read (no class it may use, nothing
+// recorded) still holds at least this much.
+const (
+	minFootprintCPU       int32 = 1
+	minFootprintMemoryMiB int64 = 128
+)
+
+// withMinimum raises r to the minimum footprint.
+func withMinimum(r scheduler.ResourceRequest) scheduler.ResourceRequest {
+	return scheduler.ResourceRequest{CPU: max(r.CPU, minFootprintCPU), MemoryMiB: max(r.MemoryMiB, minFootprintMemoryMiB)}
+}
+
+// requestedFootprint is the size a VM asks to be placed with: its VMClass size
+// (classCPU/classMemMiB) raised to any larger spec.resources override. It sizes
+// the VM being scheduled, and another VM whose create is still pending — whose
+// spec.classRef and spec.resources the CRD keeps immutable while it is pending
+// (VirtualMachine XValidation), so it is still the size it was admitted with.
+func requestedFootprint(vm *infravirtrigaudiov1beta1.VirtualMachine, classCPU int32, classMemMiB int64) scheduler.ResourceRequest {
+	out := scheduler.ResourceRequest{CPU: classCPU, MemoryMiB: classMemMiB}
+	if r := vm.Spec.Resources; r != nil {
 		if r.CPU != nil {
 			out.CPU = max(out.CPU, *r.CPU)
 		}
@@ -136,21 +146,53 @@ func footprint(vm *infravirtrigaudiov1beta1.VirtualMachine, baseCPU int32, baseM
 			out.MemoryMiB = max(out.MemoryMiB, *r.MemoryMiB)
 		}
 	}
-	return out
+	return withMinimum(out)
 }
 
-// classFootprint is footprint with the base size taken from class (nil: no
-// class could be read, so only the overrides and current resources count).
-func classFootprint(vm *infravirtrigaudiov1beta1.VirtualMachine, class *infravirtrigaudiov1beta1.VMClass) scheduler.ResourceRequest {
-	var (
-		cpu int32
-		mem int64
-	)
-	if class != nil {
-		cpu = class.Spec.CPU
-		mem = class.Spec.Memory.Value() / bytesPerMiB
+// classSize returns class's CPU and memory in MiB, or zeros for nil.
+func classSize(class *infravirtrigaudiov1beta1.VMClass) (int32, int64) {
+	if class == nil {
+		return 0, 0
 	}
-	return footprint(vm, cpu, mem)
+	return class.Spec.CPU, class.Spec.Memory.Value() / bytesPerMiB
+}
+
+// pendingCreate reports whether vm's create is in flight and has never
+// succeeded: status.placement.pendingHost set, status.id empty.
+func pendingCreate(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
+	return pendingHost(vm) != "" && vm.Status.ID == ""
+}
+
+// admittedFootprint is what ANOTHER VM is counted at on its host — its
+// admitted size, never a size its owner merely asks for (review M2):
+//
+//   - status.currentResources, per resource, when recorded: what the operator
+//     recorded as applied by the provider (only the operator writes status);
+//   - otherwise, for a VM whose create is pending, requestedFootprint — frozen
+//     by the CRD while it is pending;
+//   - otherwise (a bound VM with nothing recorded, e.g. bound before
+//     currentResources existed), its VMClass size.
+//
+// spec.resources and spec.classRef of a created VM are ignored: its owner can
+// change them at any time, and a clustered resize-up is admitted against
+// committed capacity (admitClusteredResize) before the new size is applied and
+// recorded. class is nil when the VM names none, it does not exist, or the VM's
+// namespace may not use it; every VM counts at least the minimum footprint.
+func admittedFootprint(vm *infravirtrigaudiov1beta1.VirtualMachine, class *infravirtrigaudiov1beta1.VMClass) scheduler.ResourceRequest {
+	cpu, mem := classSize(class)
+	base := withMinimum(scheduler.ResourceRequest{CPU: cpu, MemoryMiB: mem})
+	if pendingCreate(vm) {
+		base = requestedFootprint(vm, cpu, mem)
+	}
+	if cur := vm.Status.CurrentResources; cur != nil {
+		if cur.CPU != nil {
+			base.CPU = *cur.CPU
+		}
+		if cur.MemoryMiB != nil {
+			base.MemoryMiB = *cur.MemoryMiB
+		}
+	}
+	return withMinimum(base)
 }
 
 // committedSnapshot is what one informer snapshot says about a clustered
@@ -174,9 +216,9 @@ type committedSnapshot struct {
 // are outside self's affinity scope (CapacityOnly), and nothing about them but
 // their resources reaches the scheduler's no-fit message.
 //
-// A VM's VMClass is read (from the cache) only to size it; the consumer grant
-// is not checked, because nothing is created from the class here. A class that
-// no longer exists sizes the VM from its overrides and current resources only.
+// Each VM counts at its admittedFootprint. Its VMClass is read (from the
+// cache) only when that needs it, and only when the VM's namespace may use it
+// (the consumer grant, as everywhere else).
 func (r *VirtualMachineReconciler) committedPlacements(
 	ctx context.Context,
 	provider types.NamespacedName,
@@ -190,7 +232,7 @@ func (r *VirtualMachineReconciler) committedPlacements(
 	}
 	snap := committedSnapshot{recorded: map[string][]string{}}
 	selfUID := vmSchedulingUID(self)
-	classes := map[types.NamespacedName]*infravirtrigaudiov1beta1.VMClass{}
+	classes := classMemo{}
 	for i := range vms {
 		other := &vms[i]
 		// The key is re-checked (defense in depth: a VM counts against a
@@ -206,11 +248,10 @@ func (r *VirtualMachineReconciler) committedPlacements(
 		if len(hosts) == 0 || uid == selfUID {
 			continue
 		}
-		class, err := classForSizing(ctx, r.Client, other, classes)
+		res, err := sizeForAccounting(ctx, r.Client, other, classes)
 		if err != nil {
 			return committedSnapshot{}, err
 		}
-		res := classFootprint(other, class)
 		for _, h := range hosts {
 			snap.placed = append(snap.placed, scheduler.PlacedVM{
 				Name:         other.Name,
@@ -225,31 +266,64 @@ func (r *VirtualMachineReconciler) committedPlacements(
 	return snap, nil
 }
 
+// classMemoKey is one VMClass as seen from one consumer namespace: whether the
+// namespace may use it depends on both.
+type classMemoKey struct {
+	class    types.NamespacedName
+	consumer string
+}
+
+// classMemo memoises classForSizing over one accounting pass.
+type classMemo map[classMemoKey]*infravirtrigaudiov1beta1.VMClass
+
+// sizeForAccounting returns vm's admittedFootprint, reading its VMClass only
+// when the footprint needs it (nothing recorded in status.currentResources).
+func sizeForAccounting(ctx context.Context, reader client.Reader, vm *infravirtrigaudiov1beta1.VirtualMachine, seen classMemo) (scheduler.ResourceRequest, error) {
+	if cur := vm.Status.CurrentResources; cur != nil && cur.CPU != nil && cur.MemoryMiB != nil {
+		return admittedFootprint(vm, nil), nil
+	}
+	class, err := classForSizing(ctx, reader, vm, seen)
+	if err != nil {
+		return scheduler.ResourceRequest{}, err
+	}
+	return admittedFootprint(vm, class), nil
+}
+
 // classForSizing returns vm's VMClass for sizing, read through reader and
-// memoised in seen; nil when the VM names none or it does not exist.
+// memoised in seen. It is nil when the VM names none, the class does not
+// exist, or the VM's namespace may not use it: a class in another namespace
+// that does not select the VM's (spec.consumerNamespaceSelector) is refused
+// here exactly as for a create, so a tenant cannot size its VM from a class it
+// was never granted.
 func classForSizing(
 	ctx context.Context,
 	reader client.Reader,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
-	seen map[types.NamespacedName]*infravirtrigaudiov1beta1.VMClass,
+	seen classMemo,
 ) (*infravirtrigaudiov1beta1.VMClass, error) {
 	key, ok := vmClassKey(vm)
 	if !ok {
 		return nil, nil
 	}
-	if c, done := seen[key]; done {
+	memoKey := classMemoKey{class: key, consumer: vm.Namespace}
+	if c, done := seen[memoKey]; done {
 		return c, nil
 	}
 	class := &infravirtrigaudiov1beta1.VMClass{}
-	if err := reader.Get(ctx, key, class); err != nil {
-		if !apierrors.IsNotFound(err) {
+	if err := getForConsumer(ctx, reader, key, class, vm.Namespace); err != nil {
+		switch {
+		case isConsumerNotAllowed(err):
+			log.FromContext(ctx).V(1).Info("VMClass of a placed VM may not be used from its namespace; counting it at the minimum footprint",
+				"class", key.String(), "vm", client.ObjectKeyFromObject(vm).String())
+		case apierrors.IsNotFound(err):
+			log.FromContext(ctx).V(1).Info("VMClass of a placed VM not found; counting it at the minimum footprint",
+				"class", key.String(), "vm", client.ObjectKeyFromObject(vm).String())
+		default:
 			return nil, fmt.Errorf("get VMClass %s to size VirtualMachine %s/%s: %w", key, vm.Namespace, vm.Name, err)
 		}
-		log.FromContext(ctx).V(1).Info("VMClass of a placed VM not found; sizing it from its overrides and current resources only",
-			"class", key.String(), "vm", client.ObjectKeyFromObject(vm).String())
 		class = nil
 	}
-	seen[key] = class
+	seen[memoKey] = class
 	return class, nil
 }
 
@@ -266,17 +340,16 @@ func committedOnHost(
 	if err != nil {
 		return 0, 0, err
 	}
-	classes := map[types.NamespacedName]*infravirtrigaudiov1beta1.VMClass{}
+	classes := classMemo{}
 	for i := range vms {
 		vm := &vms[i]
 		if placementProviderKey(vm) != provider || !slices.Contains(placementHosts(vm), host) {
 			continue
 		}
-		class, err := classForSizing(ctx, reader, vm, classes)
+		fp, err := sizeForAccounting(ctx, reader, vm, classes)
 		if err != nil {
 			return 0, 0, err
 		}
-		fp := classFootprint(vm, class)
 		cpu += max(int64(fp.CPU), 0)
 		memMiB += max(fp.MemoryMiB, 0)
 	}
