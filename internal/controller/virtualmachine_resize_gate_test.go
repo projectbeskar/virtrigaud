@@ -174,6 +174,24 @@ func TestShrink_AppliedOncePoweredOff(t *testing.T) {
 	assert.Equal(t, int32(1), *getVM(t, r, "app").Status.CurrentResources.CPU)
 }
 
+func TestShrink_UserFlowPowerOffThenApply(t *testing.T) {
+	// The documented flow: the owner sets spec.powerState: Off. The deferred
+	// shrink does not stand in the way of the power-off, and is applied on the
+	// next reconcile, once the VM is off.
+	prov := runningRoutingProvider()
+	r := overcommittedShrinkFixture(t, prov, infravirtrigaudiov1beta1.PowerStateOff)
+	_, err := r.reconcileVM(context.Background(), getVM(t, r, "app"))
+	require.NoError(t, err)
+	require.Len(t, prov.powerRefs, 1, "the power-off the owner asked for is sent")
+	assert.Empty(t, prov.reconfigureRefs, "the shrink is not sent while the VM still runs")
+
+	prov.describeResp.PowerState = string(contracts.PowerStateOff)
+	_, err = r.reconcileVM(context.Background(), getVM(t, r, "app"))
+	require.NoError(t, err)
+	require.Len(t, prov.reconfigureRefs, 1)
+	assert.Equal(t, int32(1), *getVM(t, r, "app").Status.CurrentResources.CPU)
+}
+
 func TestShrink_SingleHostIsUnchanged(t *testing.T) {
 	prov := runningRoutingProvider()
 	single := withRuntime(singleProviderCR("prov-single", capNS))
