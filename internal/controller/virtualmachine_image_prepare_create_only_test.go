@@ -19,10 +19,10 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -33,7 +33,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
@@ -310,38 +312,116 @@ func (b *blockingPreparer) PrepareImage(_ context.Context, _ contracts.ImagePrep
 	return b.resp, nil
 }
 
-func TestEnsureImageOnProvider_ConcurrentPreparesShareOneCall(t *testing.T) {
-	img := sharedOVAImage(idImageNS, "ubuntu", "")
-	provA := identityProvider(idTeamA, idProviderName)
-	r, _ := newIdentityReconciler(t, img, provA)
-	inst := &blockingPreparer{
-		started: make(chan struct{}),
-		release: make(chan struct{}),
-		resp:    contracts.ImagePrepareResponse{PreparedImageID: "ubuntu-on-a"},
-	}
-	stale := getImage(t, r, img)
+// arrivalReporter is a VMImageCRDFeatureReporter (CRD current) that marks
+// each reconcile reaching the point right before its prepare.
+type arrivalReporter struct{ arrived *sync.WaitGroup }
 
-	const reconciles = 6
-	var wg sync.WaitGroup
-	errs := make([]error, reconciles)
-	for i := 0; i < reconciles; i++ {
+func (a arrivalReporter) VMImagePrepareStateMissing(context.Context) bool {
+	a.arrived.Done()
+	return false
+}
+
+func TestEnsureImageOnProvider_ConcurrentPreparesShareOneCall(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		resp     contracts.ImagePrepareResponse
+		inFlight bool
+	}{
+		{"synchronous prepare", contracts.ImagePrepareResponse{PreparedImageID: "ubuntu-on-a"}, false},
+		{"asynchronous prepare", contracts.ImagePrepareResponse{TaskRef: "task-a", PreparedImageID: "ubuntu-on-a"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			img := sharedOVAImage(idImageNS, "ubuntu", "")
+			provA := identityProvider(idTeamA, idProviderName)
+			var statusWrites atomic.Int32
+			r, _ := newIdentityReconcilerWithFuncs(t, interceptor.Funcs{
+				SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+					if _, ok := obj.(*infrav1beta1.VMImage); ok {
+						statusWrites.Add(1)
+					}
+					return c.SubResource(sub).Update(ctx, obj, opts...)
+				},
+			}, img, provA)
+			const reconciles = 6
+			var arrived sync.WaitGroup
+			arrived.Add(reconciles)
+			r.ImageCRDFeatures = arrivalReporter{arrived: &arrived}
+			inst := &blockingPreparer{started: make(chan struct{}), release: make(chan struct{}), resp: tc.resp}
+			stale := getImage(t, r, img)
+
+			var wg sync.WaitGroup
+			copies := make([]*infrav1beta1.VMImage, reconciles)
+			requeues := make([]bool, reconciles)
+			errs := make([]error, reconciles)
+			for i := 0; i < reconciles; i++ {
+				copies[i] = stale.DeepCopy() // each reconcile has its own, equally stale, copy
+				wg.Add(1)
+				go func(i int) {
+					defer wg.Done()
+					requeues[i], errs[i] = r.EnsureImageOnProvider(context.Background(), vmUsing(provA, img), copies[i], provA, inst)
+				}(i)
+			}
+			// One reconcile is inside PrepareImage and every reconcile has
+			// reached its prepare: release the provider only now, so they all
+			// overlap with the call in flight.
+			<-inst.started
+			arrived.Wait()
+			close(inst.release)
+			wg.Wait()
+
+			key := imageProviderKey(provA)
+			for i := 0; i < reconciles; i++ {
+				require.NoError(t, errs[i])
+				assert.Equal(t, tc.inFlight, requeues[i], "reconcile %d", i)
+				assert.Equal(t, "ubuntu-on-a", copies[i].Status.ProviderStatus[key].ID,
+					"reconcile %d sees the recorded outcome", i)
+			}
+			// Whether a reconcile joined the call in flight or arrived after it,
+			// the outcome was recorded once, inside the shared call: exactly one
+			// provider call and one status write, so the reconciles never race
+			// each other to write it.
+			assert.EqualValues(t, 1, inst.calls.Load(), "one PrepareImage for all concurrent reconciles")
+			assert.EqualValues(t, 1, statusWrites.Load(), "one VMImage status write for all concurrent reconciles")
+			got := getImage(t, r, img).Status.ProviderStatus[key]
+			assert.Equal(t, !tc.inFlight, got.Available)
+			assert.Equal(t, tc.resp.TaskRef, got.TaskRef)
+		})
+	}
+}
+
+// TestWriteImageStatus_ContendedWritersAllLand runs many writers of distinct
+// providerStatus entries of one VMImage at once: every write lands (the
+// conflict retry re-reads and re-applies each mutation, so none is lost) and
+// none fails on an exhausted retry.
+func TestWriteImageStatus_ContendedWritersAllLand(t *testing.T) {
+	img := sharedOVAImage(idImageNS, "ubuntu", "")
+	r, _ := newIdentityReconciler(t, img)
+	const writers = 16
+	var start, wg sync.WaitGroup
+	start.Add(1)
+	errs := make([]error, writers)
+	for i := 0; i < writers; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			// Each reconcile has its own (equally stale) copy of the image.
-			_, errs[i] = r.EnsureImageOnProvider(context.Background(), vmUsing(provA, img), stale.DeepCopy(), provA, inst)
+			start.Wait()
+			p := identityProvider(fmt.Sprintf("team-%02d", i), idProviderName)
+			_, errs[i] = r.markImagePrepared(context.Background(), getImage(t, r, img), p,
+				&preparedLocation{id: fmt.Sprintf("tmpl-%02d", i)}, "")
 		}(i)
 	}
-	<-inst.started
-	assert.Never(t, func() bool { return inst.calls.Load() > 1 }, 200*time.Millisecond, 10*time.Millisecond,
-		"while one prepare runs, no second one starts")
-	close(inst.release)
+	start.Done()
 	wg.Wait()
-	for _, err := range errs {
-		require.NoError(t, err)
+	for i, err := range errs {
+		require.NoError(t, err, "writer %d", i)
 	}
-	assert.EqualValues(t, 1, inst.calls.Load(), "one PrepareImage for all concurrent reconciles")
-	assert.True(t, getImage(t, r, img).Status.ProviderStatus[imageProviderKey(provA)].Available)
+	got := getImage(t, r, img)
+	require.Len(t, got.Status.ProviderStatus, writers, "no update is lost")
+	for i := 0; i < writers; i++ {
+		key := fmt.Sprintf("team-%02d/%s", i, idProviderName)
+		assert.Equal(t, fmt.Sprintf("tmpl-%02d", i), got.Status.ProviderStatus[key].ID)
+		assert.Contains(t, got.Status.AvailableOn, key)
+	}
 }
 
 func TestEnsureImageOnProvider_StaleReadDoesNotPrepareAgain(t *testing.T) {

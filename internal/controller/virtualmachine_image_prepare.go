@@ -26,10 +26,12 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -375,25 +377,37 @@ func (r *VirtualMachineReconciler) EnsureImageOnProvider(
 		return false, fmt.Errorf("marshal VMImage %s spec for prepare: %w", vmImage.Name, jerr)
 	}
 
-	outcome, perr := r.prepareImageOnce(ctx, ip, vmImage, provider, contracts.ImagePrepareRequest{
+	res, perr := r.prepareImageOnce(ctx, ip, vmImage, provider, contracts.ImagePrepareRequest{
 		ImageJSON:   string(imageJSON),
 		TargetName:  vmImage.Name,
 		StorageHint: "",
 	})
-	if perr == nil && outcome.recorded != nil {
-		// Another reconcile prepared (or started preparing) the image through
-		// this Provider object since this one read the VMImage: use that.
-		outcome.fresh.DeepCopyInto(&vmImage.Status)
-		if outcome.recorded.Available {
-			logger.V(1).Info("Image prepared on provider by a concurrent reconcile; proceeding to create",
-				"provider", key, "image", vmImage.Name)
-			return false, nil
-		}
-		logger.Info("Image prepare started on provider by a concurrent reconcile; requeueing to poll",
-			"provider", key, "image", vmImage.Name, "taskRef", outcome.recorded.TaskRef)
-		return true, nil
+	if perr != nil {
+		return false, perr
 	}
-	resp := outcome.resp
+	// The prepare's outcome was recorded on the VMImage once, by whichever
+	// reconcile issued it (or was found already recorded): reflect it on this
+	// reconcile's copy, so the create consumes the prepared location.
+	res.status.DeepCopyInto(&vmImage.Status)
+	return res.inFlight, nil
+}
+
+// issueImagePrepare sends req through ip and records the outcome in
+// provider's ProviderStatus entry: a rejected source (InvalidSpec), an
+// asynchronous prepare's task (inFlight=true) or a completed prepare's
+// location. It runs inside prepareImageOnce, so concurrent reconciles of one
+// (image, Provider object) issue ONE call and ONE status write between them.
+func (r *VirtualMachineReconciler) issueImagePrepare(
+	ctx context.Context,
+	ip contracts.ImagePreparer,
+	vmImage *infravirtrigaudiov1beta1.VMImage,
+	provider *infravirtrigaudiov1beta1.Provider,
+	req contracts.ImagePrepareRequest,
+) (inFlight bool, err error) {
+	logger := log.FromContext(ctx)
+	key := imageProviderKey(provider)
+	logger.Info("Triggering image prepare on provider", "provider", key, "image", vmImage.Name)
+	resp, perr := ip.PrepareImage(ctx, req)
 	if perr != nil {
 		if contracts.IsInvalidSpec(perr) {
 			// The provider rejected the image source itself (e.g. a libvirt path
@@ -553,14 +567,13 @@ func (r *VirtualMachineReconciler) prepareImageForCreate(
 // imagePrepareResult is the outcome of one de-duplicated prepare
 // (prepareImageOnce).
 type imagePrepareResult struct {
-	// resp is the provider's answer; meaningful only when recorded is nil.
-	resp contracts.ImagePrepareResponse
-	// recorded is set, and no prepare was issued, when the VMImage already
-	// records a prepare through this Provider object that is available or in
-	// flight: another reconcile completed or started one after this one read
-	// the image. fresh is the VMImage status that was read.
-	recorded *infravirtrigaudiov1beta1.ProviderImageStatus
-	fresh    *infravirtrigaudiov1beta1.VMImageStatus
+	// inFlight is true while an asynchronous prepare task is outstanding: the
+	// VM must wait and requeue to poll it.
+	inFlight bool
+	// status is the VMImage status with the outcome recorded (or as re-read,
+	// when a prepare through this Provider object was already recorded). It is
+	// shared by every reconcile of the flight: read it, never modify it.
+	status *infravirtrigaudiov1beta1.VMImageStatus
 }
 
 // imagePrepareFlightKey identifies one prepare of vmImage (at its current
@@ -570,14 +583,16 @@ func imagePrepareFlightKey(vmImage *infravirtrigaudiov1beta1.VMImage, provider *
 		imageProviderKey(provider), provider.UID)
 }
 
-// prepareImageOnce issues req through ip, de-duplicated within this manager:
-// concurrent reconciles (of different VMs) preparing the same VMImage through
-// the same Provider object share ONE PrepareImage call and its result, so a
-// multi-GB import is never started twice in parallel. Before the call it
-// re-reads the VMImage and issues nothing when a prepare through this
-// Provider object is already recorded (available, or with a task in flight),
-// which also covers a reconcile that read the image just before another one
-// finished preparing it. A read error does not block the (idempotent) prepare.
+// prepareImageOnce prepares vmImage through provider, de-duplicated within
+// this manager: concurrent reconciles (of different VMs) preparing the same
+// VMImage through the same Provider object share ONE PrepareImage call AND the
+// one status write that records its outcome (issueImagePrepare), so a
+// multi-GB import is never started twice in parallel and the reconciles do
+// not race each other to write the same outcome. The call first re-reads the
+// VMImage and issues nothing when a prepare through this Provider object is
+// already recorded (available, or with a task in flight); since the outcome
+// is recorded before the flight ends, a reconcile arriving after it finds it
+// there. A read error does not block the (idempotent) prepare.
 func (r *VirtualMachineReconciler) prepareImageOnce(
 	ctx context.Context,
 	ip contracts.ImagePreparer,
@@ -594,20 +609,27 @@ func (r *VirtualMachineReconciler) prepareImageOnce(
 				"image", vmImage.Name, "error", gerr.Error())
 		} else if ps, ok := fresh.Status.ProviderStatus[key]; ok && imageEntryRecordedThrough(ps, provider) &&
 			(ps.Available || ps.TaskRef != "") {
-			return imagePrepareResult{recorded: &ps, fresh: &fresh.Status}, nil
+			logger.V(1).Info("Image prepare already recorded for this Provider by a concurrent reconcile",
+				"provider", key, "image", vmImage.Name, "available", ps.Available, "taskRef", ps.TaskRef)
+			return imagePrepareResult{inFlight: !ps.Available, status: &fresh.Status}, nil
 		}
-		logger.Info("Triggering image prepare on provider", "provider", key, "image", vmImage.Name)
-		resp, perr := ip.PrepareImage(ctx, req)
-		return imagePrepareResult{resp: resp}, perr
+		inFlight, perr := r.issueImagePrepare(ctx, ip, vmImage, provider, req)
+		if perr != nil {
+			return nil, perr
+		}
+		return imagePrepareResult{inFlight: inFlight, status: vmImage.Status.DeepCopy()}, nil
 	})
+	if err != nil {
+		return imagePrepareResult{}, err
+	}
 	if shared {
 		logger.V(1).Info("Image prepare shared with a concurrent reconcile", "provider", key, "image", vmImage.Name)
 	}
 	res, ok := v.(imagePrepareResult)
-	if !ok && err == nil {
-		return imagePrepareResult{}, fmt.Errorf("prepare image %s on provider %s: unexpected result type %T", vmImage.Name, key, v)
+	if !ok || res.status == nil {
+		return imagePrepareResult{}, fmt.Errorf("prepare image %s on provider %s: unexpected result %T", vmImage.Name, key, v)
 	}
-	return res, err
+	return res, nil
 }
 
 // providerAdvertisesImageImport reports whether the Provider CR advertises the
@@ -759,7 +781,8 @@ type preparedLocation struct {
 // completedTask, when set, is the task whose completion is being recorded:
 // if the entry meanwhile records a different task (a newer prepare replaced
 // it), nothing is written and applied is false, so the newer task is not
-// cleared and is polled on its own.
+// cleared and is polled on its own. If another reconcile polling the same task
+// already recorded its completion, nothing is written and applied is true.
 func (r *VirtualMachineReconciler) markImagePrepared(
 	ctx context.Context,
 	vmImage *infravirtrigaudiov1beta1.VMImage,
@@ -770,7 +793,10 @@ func (r *VirtualMachineReconciler) markImagePrepared(
 	key := imageProviderKey(provider)
 	err = r.writeImageStatusE(ctx, vmImage, func(img *infravirtrigaudiov1beta1.VMImage) error {
 		applied = false
-		if completedTask != "" && img.Status.ProviderStatus[key].TaskRef != completedTask {
+		if cur := img.Status.ProviderStatus[key]; completedTask != "" && cur.TaskRef != completedTask {
+			// A newer prepare replaced the task (not applied), or a concurrent
+			// reconcile polling the same task already recorded its completion.
+			applied = cur.Available && cur.TaskRef == "" && cur.ProviderUID == string(provider.UID)
 			return errSkipImageStatusWrite
 		}
 		applied = true
@@ -1065,6 +1091,20 @@ func (r *VirtualMachineReconciler) writeImageStatus(
 	})
 }
 
+// imageStatusRetry is the conflict backoff of every VMImage status write
+// (writeImageStatusE). A shared VMImage is written by the reconciles of every
+// VM that prepares it, on every Provider, so it allows more attempts than
+// retry.DefaultRetry (5 at a fixed ~10ms) and uses full jitter, so writers
+// that conflicted once do not retry in lockstep and conflict again. Worst case
+// it waits a few seconds in total, still well inside one reconcile.
+var imageStatusRetry = wait.Backoff{
+	Steps:    10,
+	Duration: 10 * time.Millisecond,
+	Factor:   1.5,
+	Jitter:   1.0,
+	Cap:      time.Second,
+}
+
 // errSkipImageStatusWrite, returned by a writeImageStatusE mutate, means the
 // status needs no change: nothing is written, and the status that was read is
 // mirrored onto the caller's copy.
@@ -1073,7 +1113,9 @@ var errSkipImageStatusWrite = errors.New("VMImage status needs no change")
 // writeImageStatusE is writeImageStatus for a mutate that can fail: an error
 // from mutate aborts the write (nothing is updated) and is returned wrapped,
 // except errSkipImageStatusWrite (see there). Each attempt reads the VMImage
-// into a fresh object, so nothing a failed attempt changed carries over.
+// into a fresh object and re-applies mutate to it, so nothing a failed attempt
+// changed carries over and no concurrent update is lost; a mutate that changes
+// nothing writes nothing. Conflicts are retried with imageStatusRetry.
 func (r *VirtualMachineReconciler) writeImageStatusE(
 	ctx context.Context,
 	vmImage *infravirtrigaudiov1beta1.VMImage,
@@ -1081,13 +1123,17 @@ func (r *VirtualMachineReconciler) writeImageStatusE(
 ) error {
 	key := types.NamespacedName{Name: vmImage.Name, Namespace: vmImage.Namespace}
 	var latest *infravirtrigaudiov1beta1.VMImage
-	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	if err := retry.RetryOnConflict(imageStatusRetry, func() error {
 		latest = &infravirtrigaudiov1beta1.VMImage{}
 		if getErr := r.Get(ctx, key, latest); getErr != nil {
 			return getErr
 		}
+		before := latest.Status.DeepCopy()
 		if mutateErr := mutate(latest); mutateErr != nil {
 			return mutateErr
+		}
+		if equality.Semantic.DeepEqual(before, &latest.Status) {
+			return nil // nothing to write
 		}
 		return r.Status().Update(ctx, latest)
 	}); err != nil && !errors.Is(err, errSkipImageStatusWrite) {
