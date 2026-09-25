@@ -860,3 +860,36 @@ func TestImagePrepareRequest_RefusesAnImageWithoutUID(t *testing.T) {
 	assert.True(t, req.Provider.IsZero(), "the informational Provider identity is sent only with its UID")
 	assert.NotContains(t, req.ImageJSON, "consumerNamespaceSelector")
 }
+
+func TestEnsureImageOnProvider_ProviderDetailIsSanitized(t *testing.T) {
+	// A provider's error text reaches VMImage status (read in other
+	// namespaces for a shared image) and events only sanitized and capped.
+	detail := "refused https://user:s3cret@images.example.com/x.ova\nINJECTED LINE " + strings.Repeat("x", 1000)
+	for name, perr := range map[string]error{
+		"conflict":       contracts.NewConflictError(detail, nil),
+		"invalid source": contracts.NewInvalidSpecError(detail, nil),
+	} {
+		t.Run(name, func(t *testing.T) {
+			img := imageWithSource("ubuntu", "")
+			r, _ := newEnsureReconciler(t, img)
+			rec := &objectRecorder{}
+			r.Recorder = rec
+			provider := importCapableProvider("libvirt-1")
+			inst := &preparerProvider{prepareErr: perr}
+
+			_, err := r.EnsureImageOnProvider(context.Background(), vmForImage(provider.Name, img.Name), img, provider, inst)
+			require.Error(t, err)
+			got := reloadImage(t, r, img.Name)
+			msgs := []string{got.Status.ProviderStatus[imageProviderKey(provider)].Message, got.Status.Message}
+			for _, ev := range rec.events {
+				msgs = append(msgs, ev.message)
+			}
+			for _, m := range msgs {
+				assert.NotContains(t, m, "s3cret")
+				assert.NotContains(t, m, "\n")
+				assert.Less(t, len(m), 600, "the provider detail is capped")
+			}
+			assert.Contains(t, msgs[0], "https://images.example.com/x.ova")
+		})
+	}
+}

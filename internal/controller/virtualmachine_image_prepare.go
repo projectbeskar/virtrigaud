@@ -732,9 +732,12 @@ func (r *VirtualMachineReconciler) issueImagePrepare(
 // when the entry changes to that state. It returns the hold, retried after
 // imageArtifactConflictRequeueAfter: an operator must act.
 //
-// The message names only this Provider and the provider's own (uniform)
-// refusal, which names only the requester's artifact; who else prepared it is
-// in the provider's log only (ADR-0009 D11).
+// The message is the manager's own, naming only this Provider, followed by
+// the provider's (uniform) refusal, sanitized and length-capped
+// (sanitizeProviderDetail): it names only the requester's artifact, so an
+// operator can find it, and who else prepared it is in the provider's log
+// only (ADR-0009 D11). The event lands in the VMImage's namespace, which may
+// not be the requester's.
 func (r *VirtualMachineReconciler) holdArtifactConflict(
 	ctx context.Context,
 	vmImage *infravirtrigaudiov1beta1.VMImage,
@@ -743,8 +746,8 @@ func (r *VirtualMachineReconciler) holdArtifactConflict(
 ) error {
 	key := imageProviderKey(provider)
 	msg := fmt.Sprintf("provider %q refuses to use or replace an existing artifact at the name derived for this VMImage "+
-		"and its spec.source, because it was not prepared for this VMImage (%s); VirtRigaud never adopts, overwrites "+
-		"or deletes it: an operator must investigate and remove it", key, providerErrorMessage(cause))
+		"and its spec.source, because it was not prepared for this VMImage; VirtRigaud never adopts, overwrites "+
+		"or deletes it: an operator must investigate and remove it (provider detail: %s)", key, sanitizeProviderDetail(cause))
 	log.FromContext(ctx).Error(cause, "Holding VM create: prepared-image artifact conflict",
 		"provider", key, "image", vmImage.Name)
 	changed, err := r.markImageEntryHeld(ctx, vmImage, provider, imageReasonArtifactConflict,
@@ -865,7 +868,7 @@ func (r *VirtualMachineReconciler) prepareImageForCreate(
 		logger.Error(perr, "Failed to ensure image on provider - will retry",
 			"image", vmImage.Name, "provider", provider.Name, "retryIn", requeueAfter)
 		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, reason,
-			fmt.Sprintf("Image prepare failed: %s", providerErrorMessage(perr)))
+			fmt.Sprintf("Image prepare failed: %s", sanitizeProviderDetail(perr)))
 		metrics.RecordError(errReasonImagePrepare, metrics.ComponentManager)
 		r.updateStatus(ctx, vm)
 		return true, ctrl.Result{RequeueAfter: requeueAfter}, nil
@@ -1213,7 +1216,10 @@ func (r *VirtualMachineReconciler) acceptImageEntry(
 // an invalid specification (a non-retryable InvalidArgument from ImagePrepare,
 // such as a libvirt path outside the provider's allowed image directories):
 // the entry and — while the image is available on no provider — the image get
-// reason InvalidSource (markImageEntryHeld).
+// reason InvalidSource (markImageEntryHeld). The provider's reason follows the
+// manager's message, sanitized and length-capped (sanitizeProviderDetail): the
+// owner needs it to fix the source, and a shared VMImage's status is read in
+// other namespaces too.
 func (r *VirtualMachineReconciler) markImageSourceRejected(
 	ctx context.Context,
 	vmImage *infravirtrigaudiov1beta1.VMImage,
@@ -1221,7 +1227,7 @@ func (r *VirtualMachineReconciler) markImageSourceRejected(
 	cause error,
 ) error {
 	key := imageProviderKey(provider)
-	msg := fmt.Sprintf("image source rejected by provider %q: %s", key, providerErrorMessage(cause))
+	msg := fmt.Sprintf("image source rejected by provider %q: %s", key, sanitizeProviderDetail(cause))
 	_, err := r.markImageEntryHeld(ctx, vmImage, provider, imageReasonInvalidSource, infravirtrigaudiov1beta1.ImagePhaseFailed, msg)
 	return err
 }
