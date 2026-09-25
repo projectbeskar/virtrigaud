@@ -94,7 +94,11 @@ func (r *VirtualMachineReconciler) recordPendingHost(
 	setPlacedCondition(vm, metav1.ConditionFalse, k8s.ReasonCreatePending,
 		fmt.Sprintf("create pending on host %s (pool %s)", p.hostID, p.poolName))
 
-	if err := r.Status().Update(ctx, vm); err != nil {
+	// Bounded, so the assumption covering this write (placementAssumeTTL, twice
+	// this bound) always outlives it.
+	writeCtx, cancel := context.WithTimeout(ctx, pendingHostWriteTimeout)
+	defer cancel()
+	if err := r.Status().Update(writeCtx, vm); err != nil {
 		if apierrors.IsConflict(err) {
 			log.FromContext(ctx).Info("Pending-host write lost a resourceVersion race; requeueing without creating (scheduler choice not re-applied)",
 				"host", p.hostID)
@@ -256,6 +260,9 @@ func (r *VirtualMachineReconciler) handleClusteredCreateConflict(
 		retryAfter = vmCreateConflictRetryInterval
 	}
 	pl.PendingHost = ""
+	// The VM holds nothing on the host any more; a leftover assumption of it
+	// there must not keep counting.
+	r.forgetPlacement(vm)
 
 	setPlacedCondition(vm, metav1.ConditionFalse, k8s.ReasonHostExcluded, fmt.Sprintf(
 		"create on host %s was refused because a same-named domain this VirtualMachine does not own exists there, "+
