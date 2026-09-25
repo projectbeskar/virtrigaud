@@ -533,6 +533,10 @@ func (c *Client) Clone(ctx context.Context, req contracts.CloneRequest) (contrac
 // provider reports a TaskRef the caller polls it via IsTaskComplete; an empty
 // TaskRef means the operation completed synchronously.
 func (c *Client) PrepareImage(ctx context.Context, req contracts.ImagePrepareRequest) (contracts.ImagePrepareResponse, error) {
+	if err := validateImagePrepareIdentity(req); err != nil {
+		return contracts.ImagePrepareResponse{}, err
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
@@ -540,8 +544,8 @@ func (c *Client) PrepareImage(ctx context.Context, req contracts.ImagePrepareReq
 		ImageJson:   req.ImageJSON,
 		TargetName:  req.TargetName,
 		StorageHint: req.StorageHint,
-		// ADR-0009 D7: the identity is sent only with its UID (nil otherwise),
-		// so a provider never sees a partial identity it could mistake for one.
+		// ADR-0009 D7: validateImagePrepareIdentity guarantees every identity
+		// sent here carries its UID.
 		Image:        objectIdentityToProto(req.Image),
 		SourceDigest: req.SourceDigest,
 		Provider:     objectIdentityToProto(req.Provider),
@@ -1250,6 +1254,30 @@ func targetIdentityToProto(o contracts.ObjectIdentity) *providerv1.ObjectIdentit
 		Namespace: o.Namespace,
 		Name:      o.Name,
 	}
+}
+
+// validateImagePrepareIdentity refuses, before anything is sent, an
+// ImagePrepareRequest whose ADR-0009 identity is incomplete: a source digest,
+// an image namespace/name or a Provider identity without the image's UID, a
+// Provider identity without its own UID, or an image UID together with a
+// target name. Converted naively, such a request would lose its partial
+// identity on the wire (objectIdentityToProto sends no UID-less identity) and
+// be served as a legacy bare-name request instead of failing. The error is
+// InvalidSpec (non-retryable): it is a manager bug, not a transient state.
+func validateImagePrepareIdentity(req contracts.ImagePrepareRequest) error {
+	hasProvider := req.Provider != (contracts.ObjectIdentity{})
+	switch {
+	case req.Image.IsZero() && (req.SourceDigest != "" || req.Image.Namespace != "" || req.Image.Name != "" || hasProvider):
+		return contracts.NewInvalidSpecError(
+			"image prepare: the request carries part of an image identity but no image UID; refusing to send it", nil)
+	case hasProvider && req.Provider.IsZero():
+		return contracts.NewInvalidSpecError(
+			"image prepare: the request's Provider identity has no UID; refusing to send it", nil)
+	case !req.Image.IsZero() && req.TargetName != "":
+		return contracts.NewInvalidSpecError(
+			"image prepare: an identity request must not carry a target name; the provider derives it", nil)
+	}
+	return nil
 }
 
 // objectIdentityFromProto converts a wire ObjectIdentity to the manager-side

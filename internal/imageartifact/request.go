@@ -69,6 +69,9 @@ type Request struct {
 // codes.InvalidArgument status error for a malformed request:
 //
 //   - neither an image identity nor a target_name;
+//   - a source_digest or a provider identity without an image identity: a
+//     manager older than ADR-0009 never sends either, so such a request is a
+//     broken identity request and is never served as a legacy one;
 //   - an image identity without a uid, or with an invalid uid, namespace or
 //     name, or with a target_name (the provider derives the name);
 //   - an image identity without a well-formed source_digest;
@@ -79,6 +82,10 @@ type Request struct {
 func ParseRequest(req *providerv1.ImagePrepareRequest) (Request, error) {
 	image := req.GetImage()
 	if image == nil {
+		if req.GetSourceDigest() != "" || req.GetProvider() != nil {
+			return Request{}, invalidRequest("it carries a source_digest or a provider identity but no image identity; " +
+				"an identity request must name the VMImage (with its uid), and a legacy request carries neither")
+		}
 		name := req.GetTargetName()
 		if name == "" {
 			return Request{}, invalidRequest("it carries neither an image identity nor a target_name")

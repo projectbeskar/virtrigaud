@@ -18,6 +18,7 @@ package grpc
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -160,9 +161,9 @@ func TestClient_PrepareImage_IdentityRoundTrip(t *testing.T) {
 }
 
 // TestClient_PrepareImage_LegacyRequestSendsNoIdentity verifies a request
-// without an identity (UID) sends none on the wire — not even a partial
-// namespace/name — and that a response without an artifact (an older provider,
-// or legacy mode) surfaces a nil Artifact that confirms nothing.
+// without any identity field is sent as a plain legacy request, and that a
+// response without an artifact (an older provider, or legacy mode) surfaces a
+// nil Artifact that confirms nothing.
 func TestClient_PrepareImage_LegacyRequestSendsNoIdentity(t *testing.T) {
 	var got *providerv1.ImagePrepareRequest
 	dialer, cleanup := startBufconnServer(t, &imagePrepareFakeServer{
@@ -174,20 +175,58 @@ func TestClient_PrepareImage_LegacyRequestSendsNoIdentity(t *testing.T) {
 	defer cleanup()
 	cli := newTestClient(t, dialer, "test-imgprep-legacy")
 
-	req := contracts.ImagePrepareRequest{
-		TargetName: "ubuntu",
-		Image:      contracts.ObjectIdentity{Namespace: "team-a", Name: "ubuntu"},
-		Provider:   contracts.ObjectIdentity{Namespace: "team-a", Name: "libvirt"},
-	}
+	req := contracts.ImagePrepareRequest{TargetName: "ubuntu"}
 	resp, err := cli.PrepareImage(context.Background(), req)
 	require.NoError(t, err)
 	require.NotNil(t, got)
-	assert.Nil(t, got.GetImage(), "an identity without a UID is never sent")
-	assert.Nil(t, got.GetProvider(), "a Provider identity without a UID is never sent")
+	assert.Nil(t, got.GetImage())
+	assert.Nil(t, got.GetProvider())
 	assert.Empty(t, got.GetSourceDigest())
 	assert.Equal(t, "ubuntu", got.GetTargetName())
 	assert.Nil(t, resp.Artifact)
 	assert.False(t, resp.ConfirmsIdentity(req))
+}
+
+// TestClient_PrepareImage_RefusesPartialIdentity verifies the client never
+// sends a request whose ADR-0009 identity is incomplete: such a request would
+// otherwise lose its UID-less identity on the wire and be served as a legacy
+// bare-name request. Each is refused as a non-retryable InvalidSpec with no
+// RPC.
+func TestClient_PrepareImage_RefusesPartialIdentity(t *testing.T) {
+	var calls atomic.Int32
+	dialer, cleanup := startBufconnServer(t, &imagePrepareFakeServer{
+		fn: func(_ context.Context, _ *providerv1.ImagePrepareRequest) (*providerv1.ImagePrepareResponse, error) {
+			calls.Add(1)
+			return &providerv1.ImagePrepareResponse{PreparedImageId: "ubuntu"}, nil
+		},
+	})
+	defer cleanup()
+	cli := newTestClient(t, dialer, "test-imgprep-partial")
+
+	uid := "5f0c6a7e-2d0b-4a8e-9a53-0f1e2d3c4b5a"
+	provider := contracts.ObjectIdentity{UID: "8c1e2f3a-4b5c-4d6e-8f7a-9b0c1d2e3f4a", Namespace: "team-a", Name: "libvirt"}
+	for name, req := range map[string]contracts.ImagePrepareRequest{
+		"image namespace/name without UID, with target name": {
+			TargetName: "ubuntu", Image: contracts.ObjectIdentity{Namespace: "team-a", Name: "ubuntu"}},
+		"image namespace/name without UID, with digest": {
+			Image: contracts.ObjectIdentity{Namespace: "team-a", Name: "ubuntu"}, SourceDigest: testImageDigest},
+		"digest without image, with target name":   {TargetName: "ubuntu", SourceDigest: testImageDigest},
+		"provider without image, with target name": {TargetName: "ubuntu", Provider: provider},
+		"provider without UID": {
+			Image: contracts.ObjectIdentity{UID: uid, Namespace: "team-a", Name: "ubuntu"}, SourceDigest: testImageDigest,
+			Provider: contracts.ObjectIdentity{Namespace: "team-a", Name: "libvirt"}},
+		"identity with a target name": {
+			TargetName: "ubuntu", Image: contracts.ObjectIdentity{UID: uid, Namespace: "team-a", Name: "ubuntu"},
+			SourceDigest: testImageDigest},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := cli.PrepareImage(context.Background(), req)
+			require.Error(t, err)
+			assert.True(t, contracts.IsInvalidSpec(err), "%v", err)
+			assert.False(t, contracts.IsRetryable(err))
+		})
+	}
+	assert.Zero(t, calls.Load(), "no refused request reaches the provider")
 }
 
 // TestClient_PrepareImage_ConflictMapped verifies the provider's refusal of an

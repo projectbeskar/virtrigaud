@@ -70,12 +70,27 @@ func TestParseRequestLegacy(t *testing.T) {
 	got, err := ParseRequest(&providerv1.ImagePrepareRequest{ImageJson: "{}", TargetName: "ubuntu-22.04"})
 	require.NoError(t, err)
 	assert.Equal(t, Request{Mode: ModeLegacy, LegacyTargetName: "ubuntu-22.04"}, got)
+}
 
-	// A digest or Provider without an image identity does not make it an
-	// identity request.
-	got, err = ParseRequest(&providerv1.ImagePrepareRequest{TargetName: "ubuntu", SourceDigest: testDigest, Provider: wireProvider()})
-	require.NoError(t, err)
-	assert.Equal(t, ModeLegacy, got.Mode)
+// TestParseRequestNeverDowngradesToLegacy verifies a request that carries any
+// identity field (source_digest, provider) but no image identity is refused,
+// never served as legacy: an older manager sends neither field, so such a
+// request is a broken identity request (e.g. a UID-less image dropped on the
+// wire) and must not fall back to bare-name reuse.
+func TestParseRequestNeverDowngradesToLegacy(t *testing.T) {
+	for name, req := range map[string]*providerv1.ImagePrepareRequest{
+		"digest and provider with a target_name": {TargetName: "ubuntu", SourceDigest: testDigest, Provider: wireProvider()},
+		"digest with a target_name":              {TargetName: "ubuntu", SourceDigest: testDigest},
+		"provider with a target_name":            {TargetName: "ubuntu", Provider: wireProvider()},
+		"empty provider with a target_name":      {TargetName: "ubuntu", Provider: &providerv1.ObjectIdentity{}},
+		"digest without a target_name":           {SourceDigest: testDigest},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := ParseRequest(req)
+			require.Error(t, err)
+			assert.Equal(t, codes.InvalidArgument, status.Code(err))
+		})
+	}
 }
 
 // TestParseRequestRejectsMalformed verifies every malformed request is
