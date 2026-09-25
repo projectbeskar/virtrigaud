@@ -384,7 +384,7 @@ spec:
 > namespace; unset means its own namespace only, `{}` means every namespace.
 > Otherwise the object waits with `Ready=False` / `ConsumerNotAllowed` and no
 > provider call is made. **Breaking on upgrade:** set the selector on shared
-> objects first. See
+> objects after applying the new CRDs and before rolling the manager. See
 > [`docs/cross-namespace-references.md`](docs/cross-namespace-references.md).
 
 For full migration documentation including provider restart behaviour, see the [Migration Guide](https://projectbeskar.github.io/virtrigaud/operations/vm-migration/).

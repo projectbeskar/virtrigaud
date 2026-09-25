@@ -12,6 +12,11 @@
 # Whoever can label a Namespace can make it match a label selector. The
 # kubernetes.io/metadata.name label (set by the API server) is the safe way to
 # name namespaces explicitly.
+#
+# Sharing a Provider shares everything its credentials can reach: a namespace
+# allowed to use it can write its own VMImage naming any template or image file
+# the Provider's account can read. Share Providers only with namespaces trusted
+# with that, and scope the hypervisor account accordingly.
 
 apiVersion: v1
 kind: Secret

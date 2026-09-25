@@ -19,7 +19,7 @@ is the index and the sequencing, not a duplicate of that detail.
 
 | Change | Who is affected | Action required |
 |---|---|---|
-| **Cross-namespace `Provider` / `VMClass` / `VMImage` references need a grant** ([`docs/cross-namespace-references.md`](cross-namespace-references.md)) | Anyone whose VirtualMachines (or VMClone/VMMigration targets) reference a Provider, VMClass or VMImage in **another** namespace — e.g. a shared Provider in `virtrigaud-system`. Such VMs **fail closed** after upgrade (`Ready=False`, reason `ConsumerNotAllowed`, no provider calls) until access is granted. | **Before upgrading**, set `spec.consumerNamespaceSelector` on every shared Provider, VMClass and VMImage (`{}` = shared with all namespaces; or a label selector on the consumer namespaces). Deleting a VM whose Provider is refused needs `virtrigaud.io/orphan-on-delete: "true"` or `force-delete`. See the upgrade notes in the linked doc for queries that list what needs a selector. |
+| **Cross-namespace `Provider` / `VMClass` / `VMImage` references need a grant** ([`docs/cross-namespace-references.md`](cross-namespace-references.md)) | Anyone whose VirtualMachines (or VMClone/VMMigration targets) reference a Provider, VMClass or VMImage in **another** namespace — e.g. a shared Provider in `virtrigaud-system`. Such VMs **fail closed** after upgrade (`Ready=False`, reason `ConsumerNotAllowed`, no provider calls) until access is granted. | **After applying the new CRDs and before rolling the manager**, set `spec.consumerNamespaceSelector` on every shared Provider, VMClass and VMImage (`{}` = shared with all namespaces; or a label selector on the consumer namespaces). The field does not exist until the CRDs are upgraded: an older CRD rejects it (strict field validation) or prunes it. See step 2 of "Required upgrade order". Deleting a VM whose Provider is refused needs `virtrigaud.io/orphan-on-delete: "true"` or `force-delete`. See the upgrade notes in the linked doc for queries that list what needs a selector. |
 | **`VirtualMachine.spec.providerRef` is immutable once bound** ([#341](https://github.com/projectbeskar/virtrigaud/pull/341), [`docs/vm-provider-binding.md`](vm-provider-binding.md)) | Anyone whose tooling edits `providerRef` after creation, and anyone using the old "re-point to a missing Provider, then delete" un-adopt trick | Detach with `virtrigaud.io/orphan-on-delete: "true"` instead. Upgrade CRDs with or before the manager — the manager refuses readiness on an old CRD. |
 | **Cross-namespace VMClone/VMMigration targets need a grant** ([#340](https://github.com/projectbeskar/virtrigaud/pull/340), [`docs/cross-namespace-targets.md`](cross-namespace-targets.md)) | Anyone whose `spec.target.namespace` differs from the object's own namespace | Annotate the target namespace: `kubectl annotate namespace <target> infra.virtrigaud.io/allowed-source-namespaces=<source-ns>[,<source-ns2>...]`. Do this **before** upgrading if you have objects in flight — see the query in the linked doc. |
 | **vSphere Create/Clone fail closed on VM ownership** ([#335](https://github.com/projectbeskar/virtrigaud/pull/335), [`docs/vm-ownership.md`](vm-ownership.md)) | All vSphere users | Grant the vCenter account **Virtual machine > Change Configuration > Advanced configuration** (`VirtualMachine.Config.AdvancedConfig`). Rename any VirtualMachine, VMImage prepare target, or bare template name matching `vm-<digits>`. Make sure every `VMImage.templateName` names a real vSphere template, not a regular VM. |
@@ -48,11 +48,6 @@ See [`docs/clustered-provider-inventory.md`](clustered-provider-inventory.md) an
 
 ## Required upgrade order
 
-0. **Grant cross-namespace consumers first.** If any VirtualMachine, VMClone or
-   VMMigration references a `Provider`, `VMClass` or `VMImage` in another namespace,
-   set `spec.consumerNamespaceSelector` on those objects **before** upgrading, or the
-   affected VMs stop being managed (`ConsumerNotAllowed`) until you do. See
-   [`docs/cross-namespace-references.md`](cross-namespace-references.md#upgrade-notes).
 1. **CRDs first.**
    - Helm (default): the chart's pre-upgrade hook applies the CRDs baked into the
      chart with `kubectl apply --server-side --force-conflicts` before the manager
@@ -65,19 +60,39 @@ See [`docs/clustered-provider-inventory.md`](clustered-provider-inventory.md) an
      kubectl apply --server-side --force-conflicts -f config/crd/bases
      ```
    - **Why this matters more than usual this release:** the new manager reads the
-     installed `VirtualMachine` CRD at startup and on every readiness probe. If it's
-     missing `status.boundProvider` or the `spec.providerRef` immutability rule
-     (#341), the manager **fails readiness** (it does not crash, and it does not stop
-     managing existing VMs — but `helm upgrade --wait` will time out, and a rolling
-     update will not proceed past the old pod).
-2. **Then the manager.** Wait for the manager Deployment to report Ready before
+     installed `VirtualMachine`, `Provider`, `VMClass` and `VMImage` CRDs at startup
+     and on every readiness probe. If the `VirtualMachine` CRD is missing
+     `status.boundProvider` or the `spec.providerRef` immutability rule (#341), or
+     the other three lack `spec.consumerNamespaceSelector`, the manager **fails
+     readiness** (it does not crash, and it does not stop managing existing VMs —
+     but `helm upgrade --wait` will time out, and a rolling update will not proceed
+     past the old pod).
+2. **Then grant cross-namespace consumers**, before the new manager runs. If any
+   VirtualMachine, VMClone or VMMigration references a `Provider`, `VMClass` or
+   `VMImage` in another namespace, set `spec.consumerNamespaceSelector` on those
+   objects now. The field exists only once step 1 has applied the new CRDs (an
+   older CRD rejects or prunes it), and the old manager ignores it, so setting it
+   here changes nothing until the new manager starts — which then finds the
+   grants in place. Skipping this step makes the affected VMs stop being managed
+   (`ConsumerNotAllowed`, nothing is deleted) until you set it.
+   - **Helm:** the chart's pre-upgrade hook applies the CRDs in the same
+     `helm upgrade` that rolls the manager, so there is no pause between steps 1
+     and 3. Apply the new chart's CRDs yourself first (`kubectl apply
+     --server-side --force-conflicts -f <new chart>/crds/`, or `config/crd/bases`
+     from the release checkout), set the selectors, then run `helm upgrade` (the
+     hook's re-apply is a no-op). If you run `helm upgrade` directly instead,
+     set the selectors right after it: the affected VMs are refused only until
+     then, and the manager re-drives them within seconds of each grant.
+   - See the queries in
+     [`docs/cross-namespace-references.md`](cross-namespace-references.md#upgrade-notes).
+3. **Then the manager.** Wait for the manager Deployment to report Ready before
    touching provider images — see "Post-upgrade verification" below for the exact
    check.
-   - The manager's RBAC changed: `get` on the `virtualmachines.infra.virtrigaud.io`
-     CRD (#341), `get;list;watch` on `namespaces` (#340). The Helm chart applies
-     these with the manager; a manual/kustomize install must reapply
-     `config/rbac/role.yaml`.
-3. **Then the providers**, in any order across hypervisor types, but:
+   - The manager's RBAC changed: `get` on the `virtualmachines`, `providers`,
+     `vmclasses` and `vmimages` `.infra.virtrigaud.io` CRDs (#341, consumer grant),
+     `get;list;watch` on `namespaces` (#340). The Helm chart applies these with the
+     manager; a manual/kustomize install must reapply `config/rbac/role.yaml`.
+4. **Then the providers**, in any order across hypervisor types, but:
    - **libvirt: do not roll the provider ahead of the manager.** A libvirt provider
      built after #339 expects `CreateRequest.owner` and `ImportDiskRequest.target_vm`
      from the manager. A manager older than #333 talking to a new provider still
@@ -90,7 +105,7 @@ See [`docs/clustered-provider-inventory.md`](clustered-provider-inventory.md) an
    - **vSphere: grant the new vCenter privilege before rolling the provider.**
      Without `VirtualMachine.Config.AdvancedConfig`, every `Create` and `Clone`
      starts failing the moment the new provider image is live.
-4. **Helm value carry-over:** if you keep custom `values.yaml` overrides across the
+5. **Helm value carry-over:** if you keep custom `values.yaml` overrides across the
    upgrade, use `helm upgrade --reset-then-reuse-values` (Helm 3.14+), not
    `--reuse-values`. `--reuse-values` reuses the **old** chart's defaults, which is
    exactly the bug #336 fixed for the NetworkPolicy key — settings added in the new
@@ -100,7 +115,9 @@ See [`docs/clustered-provider-inventory.md`](clustered-provider-inventory.md) an
 
 - **vSphere:** `VirtualMachine.Config.AdvancedConfig` on the target VM folder and
   resource pool for the provider's vCenter account (#335).
-- **Manager RBAC:** `get` on the `virtualmachines.infra.virtrigaud.io` CRD (#341);
+- **Manager RBAC:** `get` on the `virtualmachines.infra.virtrigaud.io` CRD (#341) and
+  on the `providers`, `vmclasses` and `vmimages` `.infra.virtrigaud.io` CRDs (the
+  consumer-grant check);
   `get;list;watch` on `namespaces`, cluster-scoped (#340); `serviceaccounts`
   create/get/list/watch/update/patch/delete, already shipped since v0.3.11-era #297
   for per-provider ServiceAccounts — listed here because a manual/kustomize install
@@ -146,7 +163,18 @@ See [`docs/clustered-provider-inventory.md`](clustered-provider-inventory.md) an
   kubectl get crd virtualmachines.infra.virtrigaud.io \
     -o jsonpath='{.spec.versions[?(@.name=="v1beta1")].schema.openAPIV3Schema.properties.status.properties.boundProvider.type}'
   # should print: object
+  kubectl get crd providers.infra.virtrigaud.io \
+    -o jsonpath='{.spec.versions[?(@.name=="v1beta1")].schema.openAPIV3Schema.properties.spec.properties.consumerNamespaceSelector.type}'
+  # should print: object (likewise for vmclasses and vmimages)
   ```
+- [ ] No VM is unexpectedly refused for a cross-namespace reference:
+  ```sh
+  kubectl get virtualmachines -A -o json | jq -r '.items[]
+    | select(any(.status.conditions[]?; .type=="Ready" and .reason=="ConsumerNotAllowed"))
+    | "\(.metadata.namespace)/\(.metadata.name)"'
+  ```
+  Each line needs `spec.consumerNamespaceSelector` on the object its `Ready` message
+  names — see [`docs/cross-namespace-references.md`](cross-namespace-references.md).
 - [ ] Audit bound VMs' `providerRef` before the CRD's admission rule locks them in —
       use the query in [`docs/vm-provider-binding.md`](vm-provider-binding.md#upgrade-notes).
 - [ ] Audit cross-namespace clone/migration targets and confirm each target namespace
@@ -185,6 +213,10 @@ See [`docs/clustered-provider-inventory.md`](clustered-provider-inventory.md) an
   `<namespace>.<name>` (#339) keeps that host name even if you roll the libvirt
   provider image back to an older build — every operation after `Create` addresses it
   by `status.id`, which an older provider still resolves correctly.
+- **An old manager ignores `spec.consumerNamespaceSelector`.** Rolling the manager
+  back re-opens unrestricted cross-namespace `Provider`, `VMClass` and `VMImage`
+  references for the duration. The selectors stay on the objects and take effect
+  again when the new manager returns.
 - **Cross-namespace grants and orphan-on-delete have no equivalent on old code.**
   Anything you did with `infra.virtrigaud.io/allowed-source-namespaces` (#340) or
   `virtrigaud.io/orphan-on-delete` (#341) after upgrading is inert if you roll the

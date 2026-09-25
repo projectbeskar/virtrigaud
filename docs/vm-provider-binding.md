@@ -147,11 +147,12 @@ is tracked as a follow-up ADR. Until then, treat the right to delete and create
 
 A `spec.providerRef` that names another namespace is used only if that
 `Provider`'s `spec.consumerNamespaceSelector` selects the VM's namespace (the
-same applies to `spec.classRef` and `spec.imageRef`). Otherwise the VM reports
-`Ready=False` / `ConsumerNotAllowed` and no provider call is made — for a bound
-VM too. Like a `ProviderRefMismatch`, deleting such a VM keeps the finalizer
-until access is restored or the VM carries `virtrigaud.io/orphan-on-delete` or
-`virtrigaud.io/force-delete`. See
+same applies to `spec.classRef` and `spec.imageRef`, checked where they are
+used). Otherwise the VM reports `Ready=False` / `ConsumerNotAllowed` and no
+provider call is made — for a bound VM too. Like a `ProviderRefMismatch`,
+deleting such a VM keeps the finalizer (also when that cross-namespace
+`Provider` no longer exists) until access is restored or the VM carries
+`virtrigaud.io/orphan-on-delete` or `virtrigaud.io/force-delete`. See
 [`cross-namespace-references.md`](cross-namespace-references.md).
 
 ## 3. The manager checks the installed CRD
@@ -167,19 +168,25 @@ the CRDs after the manager.
 
 The manager therefore reads the installed `VirtualMachine` CRD at startup and
 on every readiness probe (results reused for one minute) and checks that its
-`v1beta1` schema has `status.boundProvider` and the `spec.providerRef` rule:
+`v1beta1` schema has `status.boundProvider` and the `spec.providerRef` rule.
+The same check reads the `Provider`, `VMClass` and `VMImage` CRDs and requires
+`spec.consumerNamespaceSelector` in each (the cross-namespace consumer grant,
+see [`cross-namespace-references.md`](cross-namespace-references.md)): with an
+older CRD no grant can be set, so every cross-namespace reference would be
+refused. A missing feature in any of the four CRDs is `missing`; an unreadable
+one is `unknown`:
 
 | State | Meaning | Readiness |
 |---|---|---|
-| `verified` | Both features are present. | Ready |
+| `verified` | Every feature is present. | Ready |
 | `missing` | The CRD is older than the manager, or absent. An error is logged and `virtrigaud_errors_total{reason="vm-crd-security-features-missing"}` counts each check. | **Not ready** until the CRD is upgraded |
 | `unknown` | The CRD cannot be read (with `rbac.scope: namespace` the manager has no cluster-scoped read). A warning is logged. | Ready |
 
 The state is exported as
 `virtrigaud_manager_vm_crd_security_features{state="verified|missing|unknown"}`
-(1 for the current state). The manager needs `get` on that one CRD
-(`resourceNames: [virtualmachines.infra.virtrigaud.io]`), which the chart's
-ClusterRole grants.
+(1 for the current state). The manager needs `get` on those four CRDs
+(`resourceNames: [virtualmachines, providers, vmclasses, vmimages
+.infra.virtrigaud.io]`), which the chart's ClusterRole grants.
 
 Failing readiness is deliberate. A manager running against an old CRD looks
 healthy while the protection is off. A failing readiness check makes that

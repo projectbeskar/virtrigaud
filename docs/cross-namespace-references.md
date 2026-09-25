@@ -33,8 +33,23 @@ refused unless that object shares itself with the referencing namespace.**
 - **The selector is matched against the `Namespace` object's labels.** Every
   namespace carries the label `kubernetes.io/metadata.name: <name>` (set by the
   API server), so you can name namespaces explicitly.
+- **Any selector with no requirements selects every namespace.** That is `{}`,
+  and also `matchLabels: {}` or `matchExpressions: []` on their own. Only an
+  unset field means "own namespace only".
+- **Negative selectors also match namespaces created later.** `NotIn` and
+  `DoesNotExist` (for example "every namespace except `team-x`") select every
+  new namespace that doesn't carry the excluded label. Prefer positive
+  selectors (`In`, `Exists`, `matchLabels`) that name who may use the object.
 - **Each object grants for itself.** Sharing a `Provider` doesn't share its
   `VMClass`es or `VMImage`s, and the other way round.
+- **Sharing a `Provider` shares everything its credentials can reach.** A
+  tenant allowed to use a `Provider` can create its own `VMImage` in its own
+  namespace (no grant needed) that names any vSphere template or
+  content-library item, Proxmox template, or libvirt image file the Provider's
+  account can read, and create VMs from it. The `VMImage` grant protects the
+  `VMImage` objects of another namespace, not the data behind a shared
+  `Provider`. Share a `Provider` only with namespaces trusted with everything
+  its hypervisor account can see, and scope that account accordingly.
 
 A `Provider` shared with two namespaces by name:
 
@@ -131,11 +146,30 @@ refusal tells a tenant nothing about another namespace.
 
 | Object | Checked | Consumer namespace |
 |---|---|---|
-| `VirtualMachine` | `Provider`, `VMClass`, `VMImage` on every reconcile, before the provider is resolved; again in the image-prepare path before any prepare call or `VMImage` status write; the `Provider` again before the finalizer deletes | the VM's |
+| `VirtualMachine` | the `Provider` on every reconcile, before the provider is resolved, and before the finalizer deletes. The `VMClass` and `VMImage` before the VM is created (and in the image-prepare path, before any prepare call or `VMImage` status write); once the VM exists, only where their content is used — see below | the VM's |
 | `VMSnapshot` | the VM's `Provider`, before create, the task poll and the delete | the snapshot's |
 | `VMClone` | the source VM's `Provider`; the `Provider` and `VMClass` the target VM will reference. Every reconcile, and re-read from the API server right before the provider `Clone` call and the target VM `Create` | the clone's for the source; the target namespace for the target's references |
-| `VMMigration` | the source VM's `Provider`; the target `Provider`; the target `VMClass`. Before every phase except `Ready` and `Failed`, and re-read from the API server right before `ImportDisk` and the target VM `Create` | the migration's; the target namespace too for the target `Provider` and `VMClass` |
+| `VMMigration` | the source VM's `Provider`; the target `Provider`; the target `VMClass`. Before every phase except `Ready` and `Failed`, and re-read from the API server right before `SnapshotCreate`, `ExportDisk`, `ImportDisk` and the target VM `Create` | the migration's; the target namespace too for the target `Provider` and `VMClass` |
 | Adoption | never binds an existing adopted-labelled VM whose `VMClass` or `VMImage` is refused. Adopted VMs are created in the `Provider`'s own namespace, so they need no grant | the `Provider`'s |
+
+#### A VM that already exists
+
+Every provider call goes through the `Provider`, so a `Provider` the VM's
+namespace may no longer use stops everything: describe, power, reconfigure and
+delete. The `VMClass` and `VMImage` are content the VM was created from, so
+their grants are checked only where that content is used again:
+
+| Operation on a bound VM | `VMClass` grant needed | `VMImage` grant needed |
+|---|---|---|
+| describe, power on/off | no | no |
+| reconfigure to the class (and applying a finished reconfigure) | yes | no (the image is not sent) |
+| re-create a VM missing on its hypervisor, or a clustered create still in flight | yes | yes |
+
+So revoking an image share never stops VMs created from the image, and revoking
+a class share stops only reconfiguring to it: the VM keeps running and is
+powered as before, but reports `Ready=False` / `ConsumerNotAllowed` naming the
+class. A VM that is not bound yet needs all three grants before anything is
+created.
 
 A clone or migration into **another namespace** needs both grants: the target
 namespace must allow the source namespace
@@ -154,9 +188,14 @@ Either of these lets the object continue from where it stopped:
 The manager watches `Namespace` label changes and the
 `spec.consumerNamespaceSelector` of `Provider`s, `VMClass`es and `VMImage`s,
 and re-runs the affected objects right away; status-only updates don't trigger
-anything. A refused object is also re-checked every 5 minutes as a safety net.
-It isn't retried faster, because only whoever can set the selector or the
-namespace labels can lift the refusal.
+anything. It finds them through an index, not by listing everything: a
+selector change re-runs only the VMs that reference that object from another
+namespace and the clones, migrations and snapshots refused on it; a namespace
+label change re-runs only the objects whose grants depend on that namespace.
+A refused object is also re-checked every 5 minutes as a safety net; a recheck
+that finds the same refusal writes nothing. It isn't retried faster, because
+only whoever can set the selector or the namespace labels can lift the
+refusal.
 
 Or point the reference at an object in the referencing namespace, if the VM
 isn't bound yet (`spec.providerRef` is immutable once bound, see
@@ -164,12 +203,14 @@ isn't bound yet (`spec.providerRef` is immutable once bound, see
 
 ### Revoking
 
-Removing a namespace from a selector takes effect on the next check. A bound VM
-then fails closed: it keeps its `status.id` and its hypervisor VM, but the
-manager stops describing, powering and reconfiguring it until access is
-restored. Nothing is deleted or unbound. A `VirtualMachine` is re-run when the
-selector of an object it references from another namespace changes, or when its
-namespace's labels change, so a revocation is noticed within seconds.
+Removing a namespace from a selector takes effect on the next check. For a
+`Provider`, a bound VM then fails closed: it keeps its `status.id` and its
+hypervisor VM, but the manager stops describing, powering and reconfiguring it
+until access is restored. For a `VMClass` or `VMImage`, see
+[A VM that already exists](#a-vm-that-already-exists). Nothing is deleted or
+unbound. A `VirtualMachine` is re-run when the selector of an object it
+references from another namespace changes, or when its namespace's labels
+change, so a revocation is noticed within seconds.
 
 ## Deleting a VM whose `Provider` is refused
 
@@ -186,8 +227,10 @@ finalizer**: the `VirtualMachine` stays in `Terminating` with
   a provider call).
 
 A refused `VMClass` or `VMImage` doesn't block deletion: the delete only uses
-the `Provider`. If the `Provider` no longer exists, the finalizer is removed as
-before.
+the `Provider`. A cross-namespace `Provider` that no longer exists is refused
+like one that doesn't select the namespace (the finalizer is kept), so the
+outcome never reveals whether it exists. If a `Provider` in the VM's own
+namespace no longer exists, the finalizer is removed as before.
 
 ## What is never sent to a provider
 
@@ -203,32 +246,59 @@ is accepted by the API server and then refused as described above. Webhooks are
 optional in VirtRigaud, and a grant can change after admission, so the
 controllers check on every reconcile either way.
 
+## The manager checks the installed CRDs
+
+With a `Provider`, `VMClass` or `VMImage` CRD older than the manager, the field
+doesn't exist: the API server rejects it (strict field validation) or prunes it,
+so no grant can be set and every cross-namespace reference is refused. The
+manager's existing CRD check (see
+[`vm-provider-binding.md`](vm-provider-binding.md#3-the-manager-checks-the-installed-crd))
+therefore also requires `spec.consumerNamespaceSelector` in those three CRDs:
+while one lacks it, the state is `missing` and readiness fails. The state is on
+`virtrigaud_manager_vm_crd_security_features`.
+
 ## RBAC
 
-Nothing new. The manager already reads and watches `namespaces`
-(`get`, `list`, `watch`), added for the clone and migration target grant. The
-`VirtualMachine` and `VMSnapshot` controllers now use it too. The manager never
-writes `Namespace` objects.
+- `namespaces`: nothing new. The manager already reads and watches them
+  (`get`, `list`, `watch`), added for the clone and migration target grant. The
+  `VirtualMachine` and `VMSnapshot` controllers now use it too. The manager
+  never writes `Namespace` objects.
+- `customresourcedefinitions`: `get` on `providers.infra.virtrigaud.io`,
+  `vmclasses.infra.virtrigaud.io` and `vmimages.infra.virtrigaud.io`, next to
+  the existing `virtualmachines.infra.virtrigaud.io`, for the CRD check. Only
+  those four objects (`resourceNames`), in the chart's ClusterRole.
 
 ## Upgrade notes
 
 - **Breaking: cross-namespace references need a grant.** A `VirtualMachine`
   that references a `Provider`, `VMClass` or `VMImage` in another namespace
-  used to work with no grant. After the upgrade it fails closed with
-  `ConsumerNotAllowed`, including VMs that are already running: no provider
-  calls, no deletes, until the referenced object selects its namespace.
-  **Set `spec.consumerNamespaceSelector` on every shared `Provider`, `VMClass`
-  and `VMImage` before you upgrade the manager.** The field is ignored by older
-  managers, so you can set it first.
+  used to work with no grant. After the upgrade a VM whose `Provider` is not
+  shared with it fails closed with `ConsumerNotAllowed`, including VMs that are
+  already running: no provider calls, no deletes, until the `Provider` selects
+  its namespace. (An unshared `VMClass` or `VMImage` blocks only what uses it —
+  see [A VM that already exists](#a-vm-that-already-exists).)
+- **Order: CRDs, then the selectors, then the manager.** The field exists only
+  once the new CRDs are applied (an older CRD rejects or prunes it), and older
+  managers ignore it:
+  1. Apply the new CRDs. With Helm, the chart's pre-upgrade hook applies them
+     in the same `helm upgrade` that rolls the manager; to get a pause between
+     the two, apply the new chart's `crds/` (or `config/crd/bases/` from the
+     release checkout) with `kubectl apply --server-side --force-conflicts`
+     first — the hook's later re-apply is a no-op.
+  2. Set `spec.consumerNamespaceSelector` on every shared `Provider`, `VMClass`
+     and `VMImage` (queries below). The old manager is unaffected.
+  3. Roll the manager (and then the providers).
+
+  If you let `helm upgrade` do steps 1 and 3 together, set the selectors right
+  after it: affected VMs are refused only until then, nothing is deleted, and
+  the manager re-drives them within seconds of each grant.
 - **Clones and migrations into another namespace** now also need the pinned
   `Provider` and `VMClass` to select the target namespace, in addition to the
   target-namespace annotation.
-- **Upgrade the CRDs with (or before) the manager.** The chart's CRD upgrade
-  hook does this by default. With `crdUpgrade.enabled: false` or a GitOps flow,
-  apply `charts/virtrigaud/crds/` (or `config/crd/bases/`) first. An older CRD
-  prunes the field, and every cross-namespace reference is then refused.
+- **The manager's readiness also checks the three CRDs** for the field, and
+  needs `get` on them (see [RBAC](#rbac)).
 
-List what needs a selector before upgrading:
+List what needs a selector (run it before step 3):
 
 ```sh
 # VirtualMachines referencing another namespace's Provider, VMClass or VMImage.
