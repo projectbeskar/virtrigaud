@@ -20,9 +20,11 @@ package mock
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"math/rand"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/projectbeskar/virtrigaud/internal/storage/migration"
@@ -40,6 +42,33 @@ type Provider struct {
 	capabilities *capabilities.Manager
 	failureMode  string
 	slowMode     bool
+
+	// images is the mock's single in-memory image location: the prepared-image
+	// artifacts by name (ADR-0009). Guarded by mu.
+	images map[string]*preparedImage
+	// imagePrepareDelay is how long an image import takes; 0 completes it
+	// synchronously (no task).
+	imagePrepareDelay time.Duration
+	// logger receives the provider's log lines (slog.Default() when unset).
+	logger *slog.Logger
+	// idSeq makes generated IDs unique within the process.
+	idSeq atomic.Uint64
+}
+
+// Option configures a Provider built by NewProvider.
+type Option func(*Provider)
+
+// WithImagePrepareDelay sets how long an image import takes (default 15s). A
+// positive delay makes ImagePrepare asynchronous (it returns a task, like the
+// vSphere provider); 0 makes it complete within the call (no task, like the
+// libvirt provider).
+func WithImagePrepareDelay(d time.Duration) Option {
+	return func(p *Provider) { p.imagePrepareDelay = d }
+}
+
+// WithLogger sets the provider's logger (default slog.Default()).
+func WithLogger(logger *slog.Logger) Option {
+	return func(p *Provider) { p.logger = logger }
 }
 
 // VirtualMachine represents a mock virtual machine.
@@ -74,7 +103,7 @@ type Task struct {
 }
 
 // NewProvider creates a new mock provider.
-func NewProvider() *Provider {
+func NewProvider(opts ...Option) *Provider {
 	// Build comprehensive capabilities for mock provider
 	caps := capabilities.NewBuilder().
 		Core().
@@ -85,6 +114,9 @@ func NewProvider() *Provider {
 		OnlineReconfigure().
 		OnlineDiskExpansion().
 		ImageImport().
+		// ADR-0009 D7: ImagePrepare names, stamps and verifies artifacts by
+		// the VMImage identity and source digest (image.go).
+		ImageArtifactIdentity().
 		TaskStatus().
 		// ADR-0006 Slice 0: advertise the status quo honestly. The mock's
 		// migration path (like the production providers) is pod-side only —
@@ -98,11 +130,20 @@ func NewProvider() *Provider {
 		Build()
 
 	provider := &Provider{
-		vms:          make(map[string]*VirtualMachine),
-		tasks:        make(map[string]*Task),
-		capabilities: caps,
-		failureMode:  os.Getenv("MOCK_FAILURE_MODE"),
-		slowMode:     os.Getenv("MOCK_SLOW_MODE") == "true",
+		vms:               make(map[string]*VirtualMachine),
+		tasks:             make(map[string]*Task),
+		capabilities:      caps,
+		failureMode:       os.Getenv("MOCK_FAILURE_MODE"),
+		slowMode:          os.Getenv("MOCK_SLOW_MODE") == "true",
+		images:            make(map[string]*preparedImage),
+		imagePrepareDelay: defaultImagePrepareDelay,
+		logger:            slog.Default(),
+	}
+	for _, opt := range opts {
+		opt(provider)
+	}
+	if provider.logger == nil {
+		provider.logger = slog.Default()
 	}
 
 	// Create some sample VMs for demos
@@ -680,44 +721,6 @@ func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*pr
 	}, nil
 }
 
-// ImagePrepare prepares an image for use. It returns the prepared image's
-// deterministic location (prepared_image_id = the target name, prepared_image_path
-// = a synthetic pool path) alongside the async task ref, so conformance/tests can
-// assert the consume-the-prepared-image path end-to-end (issue #154, PR-6 / #214).
-func (p *Provider) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepareRequest) (*providerv1.ImagePrepareResponse, error) {
-	p.simulateDelay()
-
-	if p.shouldFail("image_prepare") {
-		return nil, errors.NewInternal("mock provider configured to fail image operations", nil)
-	}
-
-	// Create async task
-	taskID := p.generateID("task")
-	task := &Task{
-		ID:      taskID,
-		Done:    false,
-		Created: time.Now(),
-	}
-
-	p.mu.Lock()
-	p.tasks[taskID] = task
-	p.mu.Unlock()
-
-	// Complete image preparation after delay
-	go p.completeTaskAfterDelay(taskID, 15*time.Second)
-
-	// Deterministic prepared location, known at trigger time (even though the
-	// task is still running): id = target name, path = synthetic pool path.
-	targetName := req.GetTargetName()
-	return &providerv1.ImagePrepareResponse{
-		Task: &providerv1.TaskRef{
-			Id: taskID,
-		},
-		PreparedImageId:   targetName,
-		PreparedImagePath: fmt.Sprintf("/var/lib/virtrigaud/mock/%s.qcow2", targetName),
-	}, nil
-}
-
 // GetCapabilities returns the provider's capabilities.
 func (p *Provider) GetCapabilities(ctx context.Context, req *providerv1.GetCapabilitiesRequest) (*providerv1.GetCapabilitiesResponse, error) {
 	return p.capabilities.GetCapabilities(ctx, req)
@@ -725,9 +728,11 @@ func (p *Provider) GetCapabilities(ctx context.Context, req *providerv1.GetCapab
 
 // Helper methods
 
-// generateID generates a unique ID with the given prefix.
+// generateID generates a unique ID with the given prefix. A process-wide
+// sequence number (not a random suffix) keeps two IDs generated in the same
+// second distinct.
 func (p *Provider) generateID(prefix string) string {
-	return fmt.Sprintf("%s-%d-%d", prefix, time.Now().Unix(), rand.Intn(10000))
+	return fmt.Sprintf("%s-%d-%d", prefix, time.Now().Unix(), p.idSeq.Add(1))
 }
 
 // completeTaskAfterDelay completes a task after the specified delay.
