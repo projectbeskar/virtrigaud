@@ -75,7 +75,7 @@ func xnsCloneScheme(t *testing.T) *runtime.Scheme {
 // xnsClone is a VMClone in team-a whose target lives in targetNamespace.
 func xnsClone(targetNamespace string) *infrav1beta1.VMClone {
 	return &infrav1beta1.VMClone{
-		ObjectMeta: metav1.ObjectMeta{Name: "clone-x", Namespace: xnsSource, Generation: 1},
+		ObjectMeta: metav1.ObjectMeta{Name: "clone-x", Namespace: xnsSource, Generation: 1, UID: "uid-clone-x"},
 		Spec: infrav1beta1.VMCloneSpec{
 			Source: infrav1beta1.CloneSource{VMRef: &infrav1beta1.LocalObjectReference{Name: "src-vm"}},
 			Target: infrav1beta1.VMCloneTarget{

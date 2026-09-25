@@ -109,7 +109,11 @@ type VMCloneTarget struct {
 	// +kubebuilder:validation:MaxProperties=50
 	Labels map[string]string `json:"labels,omitempty"`
 
-	// Annotations defines annotations to apply to the target VM
+	// Annotations defines annotations to apply to the target VM. Keys in the
+	// operator's reserved virtrigaud.io domain (virtrigaud.io/... and
+	// *.virtrigaud.io/...), such as virtrigaud.io/orphan-on-delete or the
+	// provenance annotations, are not copied; the controller sets its own
+	// provenance annotations.
 	// +optional
 	// +kubebuilder:validation:MaxProperties=50
 	Annotations map[string]string `json:"annotations,omitempty"`

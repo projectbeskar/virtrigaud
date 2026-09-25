@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -121,7 +122,19 @@ func sourceVMWithID(ns, name, provName, id string) *infrav1beta1.VirtualMachine 
 	return vm
 }
 
+// ensureCloneUIDs gives every VMClone among objs without a UID a deterministic
+// one, as the API server would (the fake client does not assign UIDs). The
+// target bind requires the clone's UID marker on the target VM.
+func ensureCloneUIDs(objs ...client.Object) {
+	for _, o := range objs {
+		if c, ok := o.(*infrav1beta1.VMClone); ok && c.UID == "" {
+			c.UID = types.UID("uid-" + c.Namespace + "-" + c.Name)
+		}
+	}
+}
+
 func newCloneReconciler(s *runtime.Scheme, resolver ProviderResolver, objs ...client.Object) *VMCloneReconciler {
+	ensureCloneUIDs(objs...)
 	fc := fake.NewClientBuilder().
 		WithScheme(s).
 		WithObjects(objs...).
@@ -393,12 +406,14 @@ func TestVMClone_ResumeSeedsStatusIDOnExistingTarget(t *testing.T) {
 	prov := runningProvider(ns, "prov-1")
 	src := sourceVMWithID(ns, "src-vm", "prov-1", "vm-source-123")
 
-	// The partial-bind state: target VM CR exists (adopted) but Status.ID empty.
+	// The partial-bind state: target VM CR exists (adopted, created by this
+	// clone: it carries the clone's UID marker) but Status.ID empty.
 	target := &infrav1beta1.VirtualMachine{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "clone-target",
-			Namespace: ns,
-			Labels:    map[string]string{AdoptedLabel: AdoptedLabelValue},
+			Name:        "clone-target",
+			Namespace:   ns,
+			Labels:      map[string]string{AdoptedLabel: AdoptedLabelValue},
+			Annotations: map[string]string{CloneAnnotationCloneUID: "uid-clone-resume"},
 		},
 		Spec: infrav1beta1.VirtualMachineSpec{
 			ProviderRef: infrav1beta1.ObjectRef{Name: "prov-1"},
@@ -406,11 +421,13 @@ func TestVMClone_ResumeSeedsStatusIDOnExistingTarget(t *testing.T) {
 		},
 	}
 
-	// The clone already issued (TargetVMID persisted), not yet Ready.
+	// The clone already issued (TargetVMID persisted), not yet Ready. The
+	// target VM was created by this clone, so it carries the clone's UID marker.
 	clone := &infrav1beta1.VMClone{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "clone-resume",
 			Namespace:  ns,
+			UID:        "uid-clone-resume",
 			Finalizers: []string{vmCloneFinalizer},
 		},
 		Spec: infrav1beta1.VMCloneSpec{

@@ -19,6 +19,7 @@ package controller
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/types"
@@ -191,6 +192,34 @@ func boundProviderRecreated(vm *infravirtrigaudiov1beta1.VirtualMachine, provide
 	bound := vm.Status.BoundProvider
 	return bound != nil && checkVMProvider(vm, provider) == nil &&
 		bound.UID != "" && provider.UID != "" && types.UID(bound.UID) != provider.UID
+}
+
+// reservedAnnotationDomain is the annotation domain the operator reserves on
+// the VirtualMachines it creates: control annotations (orphan-on-delete,
+// force-delete) and provenance (cloned-from, clone, clone-uid, migration, ...).
+const reservedAnnotationDomain = "virtrigaud.io"
+
+// isReservedAnnotation reports whether key is in the operator's reserved
+// annotation domain: virtrigaud.io/... or <subdomain>.virtrigaud.io/....
+func isReservedAnnotation(key string) bool {
+	prefix, _, found := strings.Cut(key, "/")
+	return found && (prefix == reservedAnnotationDomain || strings.HasSuffix(prefix, "."+reservedAnnotationDomain))
+}
+
+// userTargetAnnotations copies the user-supplied annotations of a VMClone or
+// VMMigration target (spec.target.annotations) for the VirtualMachine the
+// controller creates, dropping every reserved virtrigaud.io key: a requester
+// may not pre-set control annotations (orphan-on-delete, force-delete) or
+// forge provenance on the VM. The caller writes its own provenance afterwards.
+// The result is never nil.
+func userTargetAnnotations(user map[string]string) map[string]string {
+	out := make(map[string]string, len(user)+4)
+	for k, v := range user {
+		if !isReservedAnnotation(k) {
+			out[k] = v
+		}
+	}
+	return out
 }
 
 // hasOrphanOnDeleteAnnotation reports whether vm carries the orphan-on-delete

@@ -1531,17 +1531,22 @@ func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migrati
 
 	logger.Info("Creating target VM", "name", targetVMName)
 
+	// User annotations first, without the operator's reserved virtrigaud.io
+	// keys (control annotations and provenance); the provenance below is
+	// written last so it cannot be overridden (the cleanup path trusts
+	// virtrigaud.io/migration and virtrigaud.io/migration-completed).
+	targetAnnotations := userTargetAnnotations(migration.Spec.Target.Annotations)
+	targetAnnotations["virtrigaud.io/migrated-from"] = fmt.Sprintf("%s/%s", migration.Namespace, migration.Spec.Source.VMRef.Name)
+	targetAnnotations["virtrigaud.io/migration"] = fmt.Sprintf("%s/%s", migration.Namespace, migration.Name)
+	targetAnnotations["virtrigaud.io/imported-disk-id"] = migration.Status.ImportID
+	targetAnnotations["virtrigaud.io/disk-checksum"] = migration.Status.DiskInfo.TargetChecksum
+
 	targetVM := &infrav1beta1.VirtualMachine{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      targetVMName,
-			Namespace: targetNamespace,
-			Labels:    migration.Spec.Target.Labels,
-			Annotations: map[string]string{
-				"virtrigaud.io/migrated-from":    fmt.Sprintf("%s/%s", migration.Namespace, migration.Spec.Source.VMRef.Name),
-				"virtrigaud.io/migration":        fmt.Sprintf("%s/%s", migration.Namespace, migration.Name),
-				"virtrigaud.io/imported-disk-id": migration.Status.ImportID,
-				"virtrigaud.io/disk-checksum":    migration.Status.DiskInfo.TargetChecksum,
-			},
+			Name:        targetVMName,
+			Namespace:   targetNamespace,
+			Labels:      migration.Spec.Target.Labels,
+			Annotations: targetAnnotations,
 		},
 		Spec: infrav1beta1.VirtualMachineSpec{
 			ProviderRef: migration.Spec.Target.ProviderRef,
@@ -1552,13 +1557,6 @@ func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migrati
 		// MIGRATION's namespace (getProvider). A VM in another namespace would
 		// resolve an unqualified reference there instead — pin it.
 		targetVM.Spec.ProviderRef.Namespace = migration.Namespace
-	}
-
-	// Merge user-provided annotations
-	if migration.Spec.Target.Annotations != nil {
-		for k, v := range migration.Spec.Target.Annotations {
-			targetVM.Annotations[k] = v
-		}
 	}
 
 	// Set class ref if provided

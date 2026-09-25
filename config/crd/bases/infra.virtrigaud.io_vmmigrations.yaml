@@ -412,8 +412,12 @@ spec:
                   annotations:
                     additionalProperties:
                       type: string
-                    description: Annotations defines annotations to apply to the target
-                      VM
+                    description: |-
+                      Annotations defines annotations to apply to the target VM. Keys in the
+                      operator's reserved virtrigaud.io domain (virtrigaud.io/... and
+                      *.virtrigaud.io/...), such as virtrigaud.io/orphan-on-delete or the
+                      provenance annotations, are not copied; the controller sets its own
+                      provenance annotations.
                     maxProperties: 50
                     type: object
                   classRef:

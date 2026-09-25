@@ -46,7 +46,7 @@ import (
 
 func bpClone(ns string) *infrav1beta1.VMClone {
 	return &infrav1beta1.VMClone{
-		ObjectMeta: metav1.ObjectMeta{Name: "clone-1", Namespace: ns},
+		ObjectMeta: metav1.ObjectMeta{Name: "clone-1", Namespace: ns, UID: "uid-clone-1"},
 		Spec: infrav1beta1.VMCloneSpec{
 			Source: infrav1beta1.CloneSource{VMRef: &infrav1beta1.LocalObjectReference{Name: "src-vm"}},
 			Target: infrav1beta1.VMCloneTarget{Name: "clone-target"},
@@ -73,39 +73,136 @@ func TestVMClone_BindRecordsBoundProvider(t *testing.T) {
 		target.Status.BoundProvider, "the clone's target is bound through the Provider the clone ran on, in the same write as its id")
 }
 
-func TestVMClone_RefusesToBindATargetThatReferencesAnotherProvider(t *testing.T) {
-	// The clone already ran on prov-1 (TargetVMID recorded), but a
-	// VirtualMachine with the target name — referencing prov-other — appeared
-	// meanwhile. The cloned VM's id is never bound to it.
-	ns := "default"
-	prov := runningProvider(ns, "prov-1")
-	other := runningProvider(ns, "prov-other")
-	src := sourceVMWithID(ns, "src-vm", "prov-1", "vm-source-123")
-	clone := bpClone(ns)
-	clone.Finalizers = []string{vmCloneFinalizer}
-	clone.Status.Phase = infrav1beta1.ClonePhaseCloning
-	clone.Status.TargetVMID = "vm-clone-999"
-	squatter := &infrav1beta1.VirtualMachine{
-		ObjectMeta: metav1.ObjectMeta{Name: "clone-target", Namespace: ns},
-		Spec: infrav1beta1.VirtualMachineSpec{
-			ProviderRef: infrav1beta1.ObjectRef{Name: "prov-other"},
-			ClassRef:    infrav1beta1.ObjectRef{Name: "c"},
+func TestVMClone_BindRefusesATargetItCannotOwn(t *testing.T) {
+	// The clone already ran on prov-1 (TargetVMID recorded) and a
+	// VirtualMachine already exists under the target name. The cloned VM's id
+	// is bound to it only if the clone created it (UID marker), it is unbound
+	// or already bound to this clone, and it references prov-1.
+	marker := map[string]string{CloneAnnotationCloneUID: "uid-clone-1"}
+	cases := map[string]struct {
+		annotations map[string]string
+		providerRef string
+		statusID    string
+		want        string
+	}{
+		"created by someone else (no marker)": {
+			providerRef: "prov-1",
+			want:        "was not created by this VMClone (no virtrigaud.io/clone-uid=uid-clone-1 marker)",
+		},
+		"another clone's marker": {
+			annotations: map[string]string{CloneAnnotationCloneUID: "uid-other-clone"},
+			providerRef: "prov-1",
+			want:        "was not created by this VMClone",
+		},
+		"already bound to another VM": {
+			annotations: marker, providerRef: "prov-1", statusID: "vm-someone-else",
+			want: `is already bound to VM "vm-someone-else"`,
+		},
+		"references another Provider": {
+			annotations: marker, providerRef: "prov-other",
+			want: "references Provider default/prov-other, not the Provider the clone ran on (default/prov-1)",
 		},
 	}
-	cp := &clonerProvider{}
-	r := newCloneReconciler(cloneTestScheme(t), &stubResolver{provider: cp}, prov, other, src, clone, squatter)
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			ns := "default"
+			clone := bpClone(ns)
+			clone.Finalizers = []string{vmCloneFinalizer}
+			clone.Status.Phase = infrav1beta1.ClonePhaseCloning
+			clone.Status.TargetVMID = "vm-clone-999"
+			existing := &infrav1beta1.VirtualMachine{
+				ObjectMeta: metav1.ObjectMeta{Name: "clone-target", Namespace: ns, Annotations: tc.annotations},
+				Spec: infrav1beta1.VirtualMachineSpec{
+					ProviderRef: infrav1beta1.ObjectRef{Name: tc.providerRef},
+					ClassRef:    infrav1beta1.ObjectRef{Name: "c"},
+				},
+				Status: infrav1beta1.VirtualMachineStatus{ID: tc.statusID},
+			}
+			cp := &clonerProvider{}
+			r := newCloneReconciler(cloneTestScheme(t), &stubResolver{provider: cp},
+				runningProvider(ns, "prov-1"), runningProvider(ns, "prov-other"),
+				sourceVMWithID(ns, "src-vm", "prov-1", "vm-source-123"), clone, existing)
 
-	reconcileTwice(t, r, client.ObjectKeyFromObject(clone))
+			reconcileTwice(t, r, client.ObjectKeyFromObject(clone))
 
-	got := &infrav1beta1.VMClone{}
-	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(clone), got))
-	assert.Equal(t, infrav1beta1.ClonePhaseFailed, got.Status.Phase)
-	assert.Contains(t, got.Status.Message, "references Provider default/prov-other, not the Provider the clone ran on (default/prov-1)")
-	target := &infrav1beta1.VirtualMachine{}
-	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: ns, Name: "clone-target"}, target))
-	assert.Empty(t, target.Status.ID, "the cloned id is not bound to a VM that references another Provider")
-	assert.Nil(t, target.Status.BoundProvider)
-	assert.Zero(t, cp.cloneCnt, "and no second clone is issued")
+			got := &infrav1beta1.VMClone{}
+			require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(clone), got))
+			assert.Equal(t, infrav1beta1.ClonePhaseFailed, got.Status.Phase)
+			assert.Contains(t, got.Status.Message, tc.want)
+			assert.Contains(t, got.Status.Message, `the cloned VM "vm-clone-999" is not bound to it`)
+			c := meta.FindStatusCondition(got.Status.Conditions, infrav1beta1.VMCloneConditionReady)
+			require.NotNil(t, c)
+			assert.Equal(t, cloneReasonTargetConflict, c.Reason)
+
+			target := &infrav1beta1.VirtualMachine{}
+			require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: ns, Name: "clone-target"}, target))
+			assert.Equal(t, tc.statusID, target.Status.ID, "the existing VM's binding is never overwritten")
+			assert.Nil(t, target.Status.BoundProvider)
+			assert.Zero(t, cp.cloneCnt, "and no second clone is issued")
+		})
+	}
+}
+
+func TestVMClone_TargetAnnotations_ReservedKeysDroppedAndProvenanceWins(t *testing.T) {
+	ns := "default"
+	clone := bpClone(ns)
+	clone.Spec.Target.Annotations = map[string]string{
+		"team.example.com/owner":                            "db-team",
+		infrav1beta1.VirtualMachineOrphanOnDeleteAnnotation: "true",
+		forceDeleteAnnotation:                               "true",
+		CloneAnnotationClone:                                "forged",
+		CloneAnnotationClonedFrom:                           "forged",
+		CloneAnnotationCloneUID:                             "forged",
+		"infra.virtrigaud.io/allowed-source-namespaces":     "x",
+		"notvirtrigaud.io/kept":                             "yes",
+	}
+	src := sourceVMWithID(ns, "src-vm", "prov-1", "vm-source-123")
+	r := newCloneReconciler(cloneTestScheme(t), &stubResolver{}, clone)
+
+	vm := r.buildTargetVM(clone, src, ns)
+	assert.Equal(t, map[string]string{
+		"team.example.com/owner":  "db-team",
+		"notvirtrigaud.io/kept":   "yes",
+		CloneAnnotationClone:      "clone-1",
+		CloneAnnotationClonedFrom: "src-vm",
+		CloneAnnotationCloneUID:   "uid-clone-1",
+	}, vm.Annotations, "control keys are not copied and the controller's provenance cannot be overridden")
+}
+
+func TestIsReservedAnnotation(t *testing.T) {
+	for key, want := range map[string]bool{
+		"virtrigaud.io/orphan-on-delete":                true,
+		"virtrigaud.io/force-delete":                    true,
+		"infra.virtrigaud.io/allowed-source-namespaces": true,
+		"notvirtrigaud.io/x":                            false,
+		"virtrigaud.io.example.com/x":                   false,
+		"example.com/virtrigaud.io":                     false,
+		"virtrigaud.io":                                 false,
+	} {
+		assert.Equal(t, want, isReservedAnnotation(key), key)
+	}
+	assert.NotNil(t, userTargetAnnotations(nil), "never nil, so provenance can be added")
+}
+
+func TestMigrationTarget_ReservedAnnotationsDroppedAndProvenanceWins(t *testing.T) {
+	ctx := context.Background()
+	sourceVM, sourceProvider, targetProvider, migration := creatingFixture("")
+	migration.Spec.Target.Annotations = map[string]string{
+		"team.example.com/owner":                            "db-team",
+		infrav1beta1.VirtualMachineOrphanOnDeleteAnnotation: "true",
+		"virtrigaud.io/migration":                           "default/someone-else",
+		"virtrigaud.io/migration-completed":                 "true",
+	}
+	r, _ := directionReconciler(t, &capturingMigrationProvider{}, sourceVM, sourceProvider, targetProvider, migration)
+
+	_, err := r.handleCreatingPhase(ctx, migration)
+	require.NoError(t, err)
+	vm := &infrav1beta1.VirtualMachine{}
+	require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: migration.Namespace, Name: "target-vm"}, vm))
+	assert.Equal(t, "db-team", vm.Annotations["team.example.com/owner"])
+	assert.NotContains(t, vm.Annotations, infrav1beta1.VirtualMachineOrphanOnDeleteAnnotation)
+	assert.NotContains(t, vm.Annotations, "virtrigaud.io/migration-completed")
+	assert.Equal(t, migration.Namespace+"/"+migration.Name, vm.Annotations["virtrigaud.io/migration"])
 }
 
 func TestVMClone_SourceBoundThroughAnotherProvider_NoClone(t *testing.T) {

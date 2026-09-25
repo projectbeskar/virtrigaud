@@ -60,6 +60,17 @@ const (
 	// CloneAnnotationClone records the VMClone resource that produced the
 	// target VirtualMachine CR (provenance).
 	CloneAnnotationClone = "virtrigaud.io/clone"
+	// CloneAnnotationCloneUID records the UID of the VMClone that created the
+	// target VirtualMachine CR. bindTargetVM binds the cloned VM's id only to a
+	// target carrying its own clone's UID, so it never binds onto a
+	// VirtualMachine it did not create.
+	CloneAnnotationCloneUID = "virtrigaud.io/clone-uid"
+
+	// cloneReasonTargetConflict is the condition reason used when the clone's
+	// target VirtualMachine cannot be bound to the cloned VM: it was not created
+	// by this clone, is already bound to another VM, or references another
+	// Provider.
+	cloneReasonTargetConflict = "TargetConflict"
 
 	// cloneReasonUnsupportedSource is the condition reason used when the
 	// requested clone source type is not implemented in this MVP.
@@ -492,30 +503,30 @@ func (r *VMCloneReconciler) bindTargetVM(
 	// (ADR-0007 Addendum A, A1) — the target is never observable with an id but
 	// no host. A single-host source has no binding, so nothing is written.
 	landing := clonedPlacement(sourceVM)
-	cloneProvider := client.ObjectKeyFromObject(provider)
+	bound := boundProviderRefFor(provider)
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		latest := &infrav1beta1.VirtualMachine{}
 		if getErr := r.Get(ctx, vmKey, latest); getErr != nil {
 			return getErr
 		}
-		if key := vmProviderKey(latest); key != cloneProvider {
-			return &cloneTargetProviderError{target: vmKey, targetProvider: key, cloneProvider: cloneProvider}
+		if err := cloneTargetBindable(clone, latest, provider, targetVMID); err != nil {
+			return err
 		}
 		if latest.Status.ID == targetVMID && (landing == nil || boundHost(latest) == landing.Host) &&
-			checkVMProvider(latest, provider) == nil && latest.Status.BoundProvider != nil {
+			latest.Status.BoundProvider != nil && *latest.Status.BoundProvider == *bound {
 			return nil
 		}
 		latest.Status.ID = targetVMID
-		recordBoundProvider(latest, provider)
+		latest.Status.BoundProvider = bound
 		if landing != nil {
 			latest.Status.Placement = landing.DeepCopy()
 		}
 		return r.Status().Update(ctx, latest)
 	}); err != nil {
-		var mismatch *cloneTargetProviderError
-		if stderrors.As(err, &mismatch) {
-			logger.Info("Refusing to bind the cloned VM: the target VirtualMachine references another Provider", "vm", vmKey.Name, "error", err.Error())
-			return r.markFailed(ctx, clone, infrav1beta1.VMCloneReasonProviderError, err.Error()), nil
+		var conflict *cloneTargetConflictError
+		if stderrors.As(err, &conflict) {
+			logger.Info("Refusing to bind the cloned VM to the target VirtualMachine", "vm", vmKey.Name, "error", err.Error())
+			return r.markFailed(ctx, clone, cloneReasonTargetConflict, err.Error()), nil
 		}
 		logger.Error(err, "Failed to seed Status.ID on target VM CR; will retry", "vm", vmKey.Name)
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
@@ -525,17 +536,46 @@ func (r *VMCloneReconciler) bindTargetVM(
 	return r.finalizeReady(ctx, clone, targetVM)
 }
 
-// cloneTargetProviderError reports that the target VirtualMachine of a clone
-// references a Provider other than the one the clone ran on, so the cloned
-// VM's id is not bound to it.
-type cloneTargetProviderError struct {
-	target, targetProvider, cloneProvider client.ObjectKey
+// cloneTargetConflictError reports why a clone's target VirtualMachine may
+// not be bound to the cloned VM. The cloned VM is left on the provider (its id
+// is in the message) for an administrator to adopt or remove.
+type cloneTargetConflictError struct {
+	target  client.ObjectKey
+	id      string
+	problem string
 }
 
 // Error implements error.
-func (e *cloneTargetProviderError) Error() string {
-	return fmt.Sprintf("target VM %s references Provider %s, not the Provider the clone ran on (%s); the cloned VM is not bound to it",
-		e.target, e.targetProvider, e.cloneProvider)
+func (e *cloneTargetConflictError) Error() string {
+	return fmt.Sprintf("target VM %s %s; the cloned VM %q is not bound to it and is left on the provider",
+		e.target, e.problem, e.id)
+}
+
+// cloneTargetBindable reports whether target — the VirtualMachine under the
+// clone's target name — may be bound to the cloned VM targetVMID, which the
+// clone made on provider. It may only if all of these hold, so the clone never
+// overwrites or takes over a VirtualMachine it did not create:
+//
+//   - it carries this clone's UID marker (CloneAnnotationCloneUID), which
+//     buildTargetVM sets (and user-supplied target annotations cannot);
+//   - its status.id is empty or already the cloned VM's (a resumed bind);
+//   - its spec.providerRef names the Provider the clone ran on.
+func cloneTargetBindable(clone *infrav1beta1.VMClone, target *infrav1beta1.VirtualMachine,
+	provider *infrav1beta1.Provider, targetVMID string) error {
+	key := client.ObjectKeyFromObject(target)
+	conflict := func(format string, args ...any) error {
+		return &cloneTargetConflictError{target: key, id: targetVMID, problem: fmt.Sprintf(format, args...)}
+	}
+	if clone.UID == "" || target.Annotations[CloneAnnotationCloneUID] != string(clone.UID) {
+		return conflict("was not created by this VMClone (no %s=%s marker)", CloneAnnotationCloneUID, clone.UID)
+	}
+	if target.Status.ID != "" && target.Status.ID != targetVMID {
+		return conflict("is already bound to VM %q", target.Status.ID)
+	}
+	if providerKey, cloneProvider := vmProviderKey(target), client.ObjectKeyFromObject(provider); providerKey != cloneProvider {
+		return conflict("references Provider %s, not the Provider the clone ran on (%s)", providerKey, cloneProvider)
+	}
+	return nil
 }
 
 // clonedPlacement returns the binding a clone of sourceVM lands with: the
@@ -570,13 +610,14 @@ func (r *VMCloneReconciler) buildTargetVM(
 	}
 	labels[AdoptedLabel] = AdoptedLabelValue
 
-	annotations := map[string]string{
-		CloneAnnotationClonedFrom: sourceVM.Name,
-		CloneAnnotationClone:      clone.Name,
-	}
-	for k, v := range clone.Spec.Target.Annotations {
-		annotations[k] = v
-	}
+	// User annotations first, without the operator's reserved virtrigaud.io
+	// keys (control annotations such as orphan-on-delete / force-delete, and
+	// provenance); the controller's provenance is written last so it cannot be
+	// overridden.
+	annotations := userTargetAnnotations(clone.Spec.Target.Annotations)
+	annotations[CloneAnnotationClonedFrom] = sourceVM.Name
+	annotations[CloneAnnotationClone] = clone.Name
+	annotations[CloneAnnotationCloneUID] = string(clone.UID)
 
 	providerRef := sourceVM.Spec.ProviderRef
 	classRef := sourceVM.Spec.ClassRef
