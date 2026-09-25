@@ -945,16 +945,28 @@ follows; A2's `pendingHost` is its prerequisite.
 >   already committed leaves *free* negative: the host takes no new VM, and no
 >   VM is moved.
 > - *committed(host)* is the sum of the footprints of every VirtualMachine whose
->   placement belongs to the Provider (`status.boundProvider`, else
->   `spec.providerRef`) and whose `status.placement.host` or `.pendingHost`
->   names the host. VMs in every namespace count. A VM being deleted counts until
->   its finalizer is gone, because its domain and disks are still on the host. A
->   VM that names the host in both fields counts once. The VM being scheduled
->   never counts against itself.
-> - A VM's *footprint* is, per resource, the largest of its VMClass size, its
->   `spec.resources` override and its `status.currentResources`. A resize in
->   progress therefore counts at its larger size. A VM whose VMClass is gone is
->   sized from the other two.
+>   placement belongs to the Provider and whose `status.placement.host` or
+>   `.pendingHost` names the host. One helper computes the placement Provider
+>   everywhere: `status.boundProvider` (an empty namespace meaning the VM's
+>   own), else `spec.providerRef`. VMs in every namespace count, found through a
+>   cache field index on that key. A VM being deleted counts until the
+>   VirtualMachine finalizer is gone, because its domain and disks are still on
+>   the host; once only another controller's finalizer keeps it, it counts no
+>   more (nor does it block a Host's deletion). A VM that names the host in both
+>   fields counts once. The VM being scheduled never counts against itself.
+> - Another VM's *footprint* is its **admitted** size, never a size its owner
+>   merely asks for: `status.currentResources` when recorded (only the operator
+>   writes status); for a VM whose create is still pending, its VMClass size
+>   raised to its `spec.resources` override; otherwise its VMClass size. A
+>   created VM's `spec.resources` and `spec.classRef` are ignored, so editing
+>   them costs a tenant nothing and blocks nobody. A VMClass the VM's namespace
+>   may not use (no consumer grant) sizes nothing. Every VM counts at least
+>   1 vCPU and 128 MiB. While a create is pending, a CRD rule makes
+>   `spec.classRef` and `spec.resources` immutable, so the pending VM keeps the
+>   size it was admitted at; the manager's readiness check requires that rule.
+> - `status.boundProvider` and `status.placement` are trusted inputs to this
+>   accounting: tenants must never be granted write on
+>   `virtualmachines/status`.
 > - Other namespaces' VMs count toward capacity only. VM (anti-)affinity and the
 >   host-anti-affinity VM cap stay scoped to the VM's own namespace, as before.
 > - Not modelled: domains on a host that VirtRigaud does not manage, and the
@@ -985,10 +997,28 @@ follows; A2's `pendingHost` is its prerequisite.
 > - the informer cache shows the VM's record on the assumed host, or no longer
 >   has the VM. From then on the record counts. A record on another host (for
 >   example a `pendingHost` the VM has since released) does not end it.
-> - the `pendingHost` write fails, a name conflict releases the host (the A2
->   amendment), or the VM is deleted. The controller forgets it.
+> - the API server refused the `pendingHost` write outright (conflict,
+>   invalid, bad request, forbidden, not found), a name conflict releases the
+>   host (the A2 amendment), or the VM is deleted. The controller forgets it.
+>   After an ambiguous failure (a timeout, a 5xx, a broken connection) the
+>   write may have landed, so the assumption stays until the record shows up
+>   or the TTL passes.
 > - its TTL passes: twice the one-minute bound of the `pendingHost` write. This
 >   is only a safety net for a reconcile that died between the two.
+>
+> **Resizes are admitted too** (a decision of this review round). A
+> `Reconfigure` that grows the CPU or memory of a VM on a clustered Provider is
+> checked, under the same lock, against the free capacity of the VM's host,
+> the VM's own current footprint excluded. Only the growing resources are
+> checked; a shrink is always allowed, and host health and cordon do not
+> matter (a resize does not move the VM). If it does not fit, no provider call
+> is made, the VM keeps its size, gets `Reconfiguring=False/
+> InsufficientHostCapacity` (a number-free message) and is retried with the
+> same backoff; a host that is not registered fails closed. An admitted resize
+> is assumed at its new size until `status.currentResources` records it (the
+> assumption is kept alive while a reconfigure task runs), and the scheduler
+> counts each VM once per host at the larger of its listed sizes, so a
+> concurrent create or resize sees it before it is applied.
 >
 > The cache is in process, which is correct because only the elected leader
 > runs reconcilers. A new leader starts with an empty cache but waits for its
@@ -1013,16 +1043,35 @@ follows; A2's `pendingHost` is its prerequisite.
 > **Metrics.** `virtrigaud_host_committed_cpu` and
 > `virtrigaud_host_committed_memory_mib`, labelled by provider
 > (`namespace/name`) and host only. The Host controller refreshes them on each
-> sync and deletes them with the Host.
+> sync and deletes them with the Host, or when its `spec.providerRef` changes.
+> They are **administrator-sensitive**: they show how full each host is, across
+> tenants. The manager serves `/metrics` over plain HTTP when
+> `--metrics-secure=false`, the chart's current default, so restrict it with
+> the chart's NetworkPolicy (`networkPolicy.enabled`, which admits `/metrics`
+> scrapes only from `networkPolicy.monitoringNamespaceSelector`) or enable
+> `--metrics-secure`.
+>
+> **Orphan-on-delete on a clustered Provider.** A VM detached with
+> `virtrigaud.io/orphan-on-delete` keeps running on its host but leaves the
+> accounting. So a VM in another namespace than its clustered Provider is
+> detached only when the Provider carries
+> `infra.virtrigaud.io/allow-consumer-orphan-on-delete: "true"` (set by its
+> administrator). Otherwise the finalizer is kept, the VM gets
+> `Ready=False/OrphanOnDeleteNotAllowed`, and removing the annotation deletes it
+> normally.
+>
+> **No per-tenant quota.** v0.4.0 has none on a shared clustered Provider:
+> any namespace the Provider's `spec.consumerNamespaceSelector` admits can fill
+> its hosts, first come first served, up to their capacity. Administrators who
+> share a clustered Provider limit consumers with Kubernetes `ResourceQuota` on
+> `virtualmachines` counts, or with separate Providers and HostPools.
+> *Follow-up:* an ADR for a per-consumer quota on clustered Providers.
 >
 > **Still not covered:**
 >
-> - `Reconfigure` is not checked against committed capacity. A VM resized up on
->   a full host is applied by the provider, then counts at its new size. The
->   host stays over-committed, and the scheduler only stops placing new VMs on
->   it.
-> - A clone lands on its source host (A1) without being scheduled. It counts
->   from the moment `bindTargetVM` writes its `placement.host`.
+> - A clone lands on its source host (A1) without being scheduled or checked
+>   against capacity. It counts from the moment `bindTargetVM` writes its
+>   `placement.host`.
 >
 > Single-host and thin-client Providers never schedule, so none of this reaches
 > them (D9).
@@ -1370,3 +1419,9 @@ honest.
   - Operator: `contracts.VMRef`; `status.placement.pendingHost`; the Host in-use
     finalizer; the `Placed` condition.
   - Provider: the `withHostConn` helper.
+- **New ADR: per-consumer quota on a shared clustered Provider.** The
+  scheduler-accuracy amendment (A5) counts every consumer's VMs against a
+  host's capacity, but nothing limits how much of a shared Provider one
+  consumer namespace may take (v0.4.0 has no per-tenant quota).
+- Capacity check for a clone, which lands on its source host without being
+  scheduled (A5, *Still not covered*).

@@ -705,23 +705,70 @@ free = allocatable × overcommit ratio − committed
   leave; no VM is moved.
 - **`committed`** is the sum of the footprints of every VirtualMachine of this
   Provider whose `status.placement.host` or `status.placement.pendingHost` names
-  the host:
+  the host. A VM belongs to the Provider it is bound through
+  (`status.boundProvider`), else to the one its `spec.providerRef` names.
   - VMs in **every namespace** count, not only the new VM's.
-  - A VM being **deleted** counts until its finalizer is gone.
+  - A VM being **deleted** counts until its VirtualMachine finalizer is gone.
+    Once only another controller's finalizer keeps it, it no longer counts, and
+    it no longer blocks the Host's deletion.
   - A VM whose Create is still **pending** there counts.
   - A VM naming the host in both fields counts once.
-- **A VM's footprint** is, per resource, the largest of its VMClass size, its
-  `spec.resources` override and its `status.currentResources`. A resize in
-  progress counts at its larger size.
+- **Another VM's footprint is its admitted size**, never what its owner merely
+  asks for:
+  - a created VM counts at `status.currentResources` (the size the provider
+    applied), or at its VMClass size when nothing is recorded; editing its
+    `spec.resources` or `spec.classRef` changes nothing until a resize is
+    admitted (below);
+  - a VM whose create is pending counts at its VMClass size raised to its
+    `spec.resources` override. While the create is pending, the CRD rejects any
+    change to `spec.classRef` and `spec.resources`, so this is the size it was
+    scheduled at;
+  - a VMClass in another namespace that the VM's namespace may not use
+    (no consumer grant) sizes nothing;
+  - every VM counts at least 1 vCPU and 128 MiB.
 - **Not counted**: domains on the host that VirtRigaud does not manage, and the
   hypervisor's own use. To keep room for them, set a ratio below 1 (for example
   `memory: "0.9"`) or cordon the host.
 - **Affinity is unchanged.** VM (anti-)affinity and the host-anti-affinity VM
   cap still consider only VMs in the new VM's own namespace. Other namespaces'
   VMs take up capacity; their labels are never matched.
-- **Reconfigure is not checked.** Resizing a VM up on a full host is applied,
-  and the host then stays over-committed; the scheduler only stops placing new
-  VMs on it.
+- **Trusted status.** The accounting trusts `status.boundProvider` and
+  `status.placement`, which only the operator writes. Never grant tenants
+  write access to `virtualmachines/status`.
+
+**Resizing a VM up is checked too.** When the size a clustered VM asks for
+(its VMClass, or its `spec.resources` override) grows its CPU or memory, the
+controller checks, under the same per-Provider lock, that the growth fits in
+its host's free capacity, not counting the VM's own current size. If it fits,
+the resize is sent and counted at its new size straight away. If it does not,
+nothing is sent, the VM keeps running at its current size, and it gets
+`Reconfiguring=False` with reason `InsufficientHostCapacity`, for example:
+
+```
+resizing to 8 vCPU and 8192 MiB exceeds the free capacity of its host kvm-01; the VM keeps
+4 vCPU and 8192 MiB and the resize is retried (next check in 30s)
+```
+
+The resize is retried after 30 s, 1 min, then every 2 min. Only the resources
+that grow are checked, so a shrink is never refused. The host's health and
+cordon do not matter, because a resize does not move the VM. A VM whose host is
+not registered as a `Host` cannot be resized up. Single-host Providers are not
+affected.
+
+**Detaching (orphan-on-delete) needs the Provider's permission.** A VM detached
+with `virtrigaud.io/orphan-on-delete` keeps running but stops counting. So a VM
+in another namespace than its clustered Provider is detached only when the
+Provider carries `infra.virtrigaud.io/allow-consumer-orphan-on-delete: "true"`.
+Otherwise its deletion is held with `Ready=False/OrphanOnDeleteNotAllowed`
+until the administrator allows it or the annotation is removed (see
+[`vm-provider-binding.md`](vm-provider-binding.md)).
+
+**No per-tenant quota.** Nothing limits how much of a shared clustered Provider
+one consumer namespace may take: hosts fill first come, first served. If you
+share a Provider across tenants, limit each tenant's VM count with a Kubernetes
+`ResourceQuota` (for example `count/virtualmachines.infra.virtrigaud.io`), or
+give tenants separate Providers and HostPools. A per-consumer quota is a
+planned follow-up.
 
 **Many VMs created at once.** The VM controller reconciles several VMs in
 parallel, and its cache may not show another reconcile's `pendingHost` write
@@ -755,9 +802,22 @@ freed host is noticed within 2 minutes.
 **Metrics.** `virtrigaud_host_committed_cpu` and
 `virtrigaud_host_committed_memory_mib` give each Host's committed sum, labelled
 `provider` (`namespace/name`) and `host`. The Host controller refreshes them
-about once a minute and removes them when the Host is deleted. Compare them with
-`Host.status.allocatableCPU` / `allocatableMemoryMiB` times the pool ratio to
-see how full a host is.
+about once a minute and removes them when the Host is deleted or moved to
+another Provider. Compare them with `Host.status.allocatableCPU` /
+`allocatableMemoryMiB` times the pool ratio to see how full a host is.
+
+These gauges are **for administrators**: they show how full each host is,
+across tenants. The manager serves `/metrics` over plain HTTP when
+`--metrics-secure=false` (the chart's current default). Enable the chart's
+NetworkPolicy (`networkPolicy.enabled`, which admits scrapes only from
+`networkPolicy.monitoringNamespaceSelector`) or run the manager with
+`--metrics-secure`.
+
+The capacity check holds the Provider's lock only while it reads the informer
+cache and schedules. Every API write (a condition, `pendingHost`) happens
+after the lock is released, each with a time limit, so a slow API server does
+not stall other VMs. A VM that cannot get the lock within 5 seconds is retried
+about a second later.
 
 ### Idempotent on re-run
 

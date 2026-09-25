@@ -84,12 +84,17 @@ providers), and rollback caveats in
   inventory (ADR-0007). Still experimental — snapshots, clones, and disk
   export/import on a clustered provider are not implemented yet.
 - The clustered scheduler subtracts what each host already holds: every VM
-  bound to it, pending on it, or being deleted from it, in any namespace. It
-  also keeps concurrent creates from booking the same capacity or breaking
-  hard anti-affinity. A VM no host can take reports `Placed=False/Unschedulable`
-  with the committed-capacity numbers, and is retried with a backoff of up to
-  2 minutes. New gauges: `virtrigaud_host_committed_cpu` and
-  `virtrigaud_host_committed_memory_mib`
+  bound to it, pending on it, or being deleted from it, in any namespace, at
+  its admitted size. It also keeps concurrent creates and resizes from booking
+  the same capacity or breaking hard anti-affinity. A VM no host can take
+  reports `Placed=False/Unschedulable` with its own request (no other tenant's
+  figures), and is retried with a backoff of up to 2 minutes. A resize-up is
+  sent only if it fits on the VM's host (`Reconfiguring=False/
+  InsufficientHostCapacity` otherwise); a pending VM's size is frozen until it
+  is created; and a consumer in another namespace may orphan-on-delete a
+  clustered VM only if the Provider allows it. New administrator gauges:
+  `virtrigaud_host_committed_cpu` and `virtrigaud_host_committed_memory_mib`.
+  There is no per-tenant quota on a shared clustered Provider yet
   (→ [`docs/clustered-provider-inventory.md`](docs/clustered-provider-inventory.md#committed-capacity)).
 
 ### Fixes
