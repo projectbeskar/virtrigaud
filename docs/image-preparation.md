@@ -469,8 +469,12 @@ size**. It never holds the URL, a header or a secret:
 ```
 
 A stamp that is oversized, not JSON, repeats a key, contains a `null`, an unknown field, a
-wrong type, an unknown `stampVersion` or a malformed digest is **untrusted** — treated
-exactly like no stamp.
+wrong type, an unknown `stampVersion`, a malformed digest, a namespace or name that is not a
+Kubernetes name, or a `preparedAt` that is not an RFC 3339 time is **untrusted** — treated
+exactly like no stamp. So is a stamp or artifact **file** that the provider's SSH user does
+not own, or that is writable by its group or by others: another principal could rewrite it
+after it was checked. Providers that share one pool directory must therefore use the **same
+SSH user**; a pool shared by different SSH users sees each other's artifacts as a Conflict.
 
 ### Reuse, and what is refused
 
@@ -483,7 +487,7 @@ symlink):
 | The artifact and a trusted stamp for this image's UID and digest, recording the artifact's inode and size | **Reused**; nothing is downloaded |
 | A stamp for this image and digest, no artifact, last written less than the staleness bound ago | **In progress** (another prepare is publishing): retryable `Unavailable` |
 | The same, older than the staleness bound | **Abandoned** by a crashed prepare of this image: that stamp alone is removed (only if unchanged since it was read), then the image is prepared again |
-| Anything else: an artifact without a stamp, an untrusted stamp, another UID or digest, an inode or size that does not match, a symlink or directory | **Conflict** (`AlreadyExists`, ADR-0009 D4): nothing is overwritten, deleted, re-stamped or adopted; an operator has to act |
+| Anything else: an artifact without a stamp, an untrusted stamp, another UID or digest, an inode or size that does not match, a file not owned by the SSH user or writable by group or others, a symlink or directory | **Conflict** (`AlreadyExists`, ADR-0009 D4): nothing is overwritten, deleted, re-stamped or adopted; an operator has to act |
 | The check itself fails (SSH, `stat`) | Retryable error — never taken as "nothing there" |
 
 The Conflict message names only the requester's own artifact; who else the stamp names is
@@ -495,25 +499,35 @@ host's clock.
 
 1. Every prepare works in its **own** staging files in the pool directory, created by
    `mktemp` (exclusive, unpredictable name, mode `0600`):
-   `.virtrigaud-imageprepare-XXXXXXXXXX.download` (the download), `….curlrc` (the curl
-   configuration that carries the URL, so the URL never appears on a command line, in a log
-   or in the host's process list), `….partial` (the `qemu-img convert` output) and
-   `….stamp.partial` (the stamp). They are dotfiles with reserved suffixes, so a pool refresh
-   does not list them and they can never be used as a base image. They are removed when the
-   prepare ends; files of a crashed prepare that have not been written for the staleness
-   bound are swept by the next prepare in that pool.
-2. The download is limited to `http`, `https` and `ftp` (redirects included), its checksum is
-   verified when `checksum` is set, and its header must not reference other files.
-3. The converted image is **finalized read-only**: `chmod 0444`, `restorecon` (best-effort,
-   through `sudo`), `sync`. It is **not** chowned — it stays owned by the provider's SSH user,
-   which is what lets that user hard-link it with `fs.protected_hardlinks=1`, and it only ever
-   needs to be read (each VM gets a copy that is chowned and relabelled as before).
-4. The stamp is linked into place with `ln` (never replacing a file). Of several concurrent
-   prepares of the same image, exactly one creates the stamp; the others re-read the name and
-   reuse, wait or refuse as in the table above.
-5. Only the prepare that created the stamp links the artifact, again with `ln`. If the
-   artifact name is taken at that moment, the prepare first removes **its own** stamp (so it
-   never stamps a file it did not publish) and returns a Conflict.
+   `.virtrigaud-imageprepare-XXXXXXXXXX.download` (the download), `….partial` (the
+   `qemu-img convert` output) and `….stamp.partial` (the stamp). They are dotfiles with
+   reserved suffixes, so a pool refresh does not list them and they can never be used as a
+   base image. They are removed when the prepare ends; files of a crashed prepare that have
+   not been written for the staleness bound are swept by the next prepare in that pool.
+2. The download runs `curl` on the host with its configuration — the URL — on **stdin**
+   (`curl -q -K -`): the URL never appears on a command line, in a log, in the host's
+   process list or in a file, and the SSH user's `~/.curlrc` is not read. It is exactly
+   **one** transfer (URL globbing is off, so `[1-9]` or `{a,b}` in a URL is literal), limited
+   to `http`, `https` and `ftp` (redirects included), with a 30-second connect timeout, a
+   total time limit of `spec.prepare.timeout` (default 30m), and a size limit of
+   `VIRTRIGAUD_LIBVIRT_IMAGE_MAX_DOWNLOAD_GIB` GiB (provider pod environment, default `256`;
+   curl enforces it on the announced size, and recent curl versions also stop a transfer
+   that grows past it). Its checksum is verified when `checksum` is set, and its header must
+   not reference other files.
+3. The converted image is **finalized read-only**: `chmod 0444`, `restorecon` (only when
+   `selinuxenabled` reports SELinux on; through non-interactive `sudo -n`, best-effort),
+   `sync`. It is **not** chowned — it stays owned by the provider's SSH user, which is what
+   lets that user hard-link it with `fs.protected_hardlinks=1`, and it only ever needs to be
+   read (each VM gets a copy that is chowned and relabelled as before).
+4. The stamp is linked into place with `ln -T` (never replacing a file, never linking into
+   a directory). Of several concurrent prepares of the same image, exactly one creates the
+   stamp; the others re-read the name and reuse, wait or refuse as in the table above.
+5. Only the prepare that created the stamp links the artifact, again with `ln -T`. If the
+   artifact name is taken at that moment — by any file, directory or symlink, even a symlink
+   to this prepare's own file — the prepare first removes **its own** stamp (so it never
+   stamps a file it did not publish) and returns a Conflict. If the link's answer is lost
+   (the SSH connection drops), the provider checks whether the artifact is its file before
+   withdrawing anything.
 
 Nothing is ever downloaded, converted, written or removed at the final name. The pool
 directory must be on a filesystem that supports hard links (ext4, xfs, NFS, …); on one that
@@ -538,13 +552,17 @@ A prepare runs synchronously. The provider reports failures that retrying cannot
 
 | Permanent (`InvalidSpec`) | Retried |
 |---|---|
-| The URL answers HTTP 4xx (except 408, 425, 429); curl reports an unsupported or disallowed protocol, a malformed URL, access or login denied, a missing remote file, or a TLS certificate the host cannot verify | HTTP 5xx, 408, 425, 429; DNS, connect, timeout, TLS-handshake and transfer errors |
+| The URL answers HTTP 4xx (except 408, 425, 429); the URL does not result in exactly one transfer; the image is larger than the download limit; curl reports an unsupported or disallowed protocol, a malformed URL, access or login denied, a missing remote file, or a TLS certificate the host cannot verify | HTTP 5xx, 408, 425, 429; DNS, connect, timeout, TLS-handshake and transfer errors |
 | A checksum mismatch or an unsupported `checksumType` | The SSH transport or the host failing (a probe, `mktemp`, `chmod`/`sync`, `qemu-img convert`, `ln`, a checksum command that could not run) |
 | An image `qemu-img` cannot read, an unsupported format, or a header that references other files | A matching stamp still being published (`Unavailable`) |
-| A malformed request or source (see above), a pool that does not exist, has no directory, is outside the allowed image directories or cannot hold hard links | |
+| A malformed request or source (see above), a pool that does not exist (libvirt's "Storage pool not found"), has no directory, is outside the allowed image directories or cannot hold hard links | Any other storage pool lookup failure (for example a libvirtd restart) |
 
 Error messages never contain the source URL (it may embed credentials or a presigned
-token); the provider log records it with the user-info and query removed.
+token), and they do not say which HTTP status or curl error a download ended with, nor
+which checksum the host computed: the `VMImage`'s status is visible to other namespaces
+when the image is shared, and a URL chosen by a tenant must not become a probe of what the
+hypervisor host can reach. The provider log records the details, with the URL's user-info
+and query removed.
 
 ### Deprecated: requests from an older manager
 
@@ -553,7 +571,10 @@ only**, the libvirt provider serves such a request the pre-ADR way — the artif
 `<pool dir>/<VMImage name>.qcow2`, an existing file of that name is reused by name, no stamp
 is written or echoed — but with the fixes above (retryable probe, private staging, read-only
 image published with `ln`, never chowned). It can never reach an ADR-0009 artifact (the names
-are disjoint). Every such request logs
+are disjoint). In legacy mode, two `VMImage`s with the **same name in different namespaces**
+prepared through one Provider (or through Providers that share the pool directory) **share
+one file**, `<pool dir>/<VMImage name>.qcow2`: whichever is prepared first is what both get.
+This is the pre-ADR defect, and it is why legacy mode exists for one release only. Every such request logs
 `WARN deprecated: image prepare without identity from an older manager; upgrade the manager; refused from the next release`
 and increments `virtrigaud_provider_image_prepare_legacy_requests_total{provider_type="libvirt"}`.
 Alert when that counter is non-zero, and do not run an older manager against a Provider
