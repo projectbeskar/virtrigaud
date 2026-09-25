@@ -45,7 +45,8 @@ import (
 //     (RFC 1918 / unique-local) addresses stay allowed, since image servers are
 //     usually internal;
 //   - follows at most maxImageDownloadRedirects redirects, each re-checked for
-//     an http(s) scheme and an allowed address;
+//     an http(s) scheme and an allowed address, and never from https down to
+//     plain http;
 //   - bounds the TCP connect, TLS handshake and response-header waits (the
 //     body itself may take long: images are large);
 //   - reads at most the provider's download limit
@@ -356,6 +357,11 @@ func imageDownloadClient(allowLoopback bool, proxy *url.URL) *http.Client {
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) > maxImageDownloadRedirects {
 				return errTooManyImageRedirects
+			}
+			if len(via) > 0 && via[len(via)-1].URL.Scheme == ovaURLSchemeHTTPS && req.URL.Scheme != ovaURLSchemeHTTPS {
+				// Never downgrade: an https source's content must not come over
+				// plain http.
+				return fmt.Errorf("redirect from https to %s: %w", req.URL.Scheme, errForbiddenImageSource)
 			}
 			return checkImageSourceURL(req.URL, allowLoopback)
 		},

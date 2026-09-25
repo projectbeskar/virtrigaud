@@ -921,6 +921,31 @@ func TestIsVCenterUnreachable(t *testing.T) {
 	}
 }
 
+// TestIsNotFound (review N1): only a ManagedObjectNotFound naming ref itself
+// proves ref is gone; one for the destroy task or a parent does not.
+func TestIsNotFound(t *testing.T) {
+	vm := types.ManagedObjectReference{Type: "VirtualMachine", Value: "vm-42"}
+	other := types.ManagedObjectReference{Type: "Task", Value: "task-7"}
+	notFound := func(obj types.ManagedObjectReference) *types.ManagedObjectNotFound {
+		return &types.ManagedObjectNotFound{Obj: obj}
+	}
+
+	for name, err := range map[string]error{
+		"soap fault":  fmt.Errorf("Destroy: %w", soap.WrapVimFault(notFound(vm))),
+		"task result": &task.Error{LocalizedMethodFault: &types.LocalizedMethodFault{Fault: notFound(vm)}},
+	} {
+		assert.True(t, isNotFound(err, vm), name)
+	}
+	for name, err := range map[string]error{
+		"another object":        soap.WrapVimFault(notFound(other)),
+		"same MOID, other type": soap.WrapVimFault(notFound(types.ManagedObjectReference{Type: "Folder", Value: "vm-42"})),
+		"another fault":         soap.WrapVimFault(&types.NoPermission{}),
+		"nil":                   nil,
+	} {
+		assert.False(t, isNotFound(err, vm), name)
+	}
+}
+
 // tarOVAMember packs one member name with content.
 func tarOVAMember(t *testing.T, name, content string) []byte {
 	t.Helper()

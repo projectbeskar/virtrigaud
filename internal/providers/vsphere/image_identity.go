@@ -301,7 +301,7 @@ func (p *Provider) nameHeldOutOfSight(ctx context.Context, loc artifactLocation,
 	err := property.DefaultCollector(p.client.Client).Retrieve(ctx, []types.ManagedObjectReference{taken.holder}, []string{propName}, &content)
 	switch {
 	case err == nil:
-	case fault.Is(err, &types.ManagedObjectNotFound{}):
+	case isNotFound(err, taken.holder):
 		return false, nil
 	default:
 		return false, p.artifactRetryError(ctx, loc.name, "read the object holding the artifact name", err)
@@ -417,7 +417,7 @@ func (p *Provider) observeArtifactObject(ctx context.Context, ref types.ManagedO
 		propConfigTemplate, propConfigExtraConfig, propRuntimePowerState, propRecentTask, propDisabledMethod,
 	}, &vm)
 	if err != nil {
-		if fault.Is(err, &types.ManagedObjectNotFound{}) {
+		if isNotFound(err, ref) {
 			return artifactObject{}, false, nil
 		}
 		return artifactObject{}, false, fmt.Errorf("read %s: %w", ref.Value, err)
@@ -450,7 +450,7 @@ func (p *Provider) anyTaskActive(ctx context.Context, tasks []types.ManagedObjec
 	for _, ref := range tasks {
 		var t mo.Task
 		if err := pc.RetrieveOne(ctx, ref, []string{propInfoState}, &t); err != nil {
-			if fault.Is(err, &types.ManagedObjectNotFound{}) {
+			if isNotFound(err, ref) {
 				continue
 			}
 			p.logger.WarnContext(ctx, "ImagePrepare: cannot read the state of a task on an unfinished artifact; treating it as running",
@@ -636,9 +636,26 @@ func (p *Provider) removeAbandonedArtifact(ctx context.Context, loc artifactLoca
 	return nil
 }
 
+// isNotFound reports whether err is a ManagedObjectNotFound for ref itself.
+// A not-found for any other object (the destroy task, a parent) proves nothing
+// about ref and is not taken as "gone".
+func isNotFound(err error, ref types.ManagedObjectReference) bool {
+	if err == nil {
+		return false // fault.In panics on a nil error
+	}
+	found := false
+	fault.In(err, func(f types.BaseMethodFault, _ string, _ []types.LocalizableMessage) bool {
+		if nf, ok := f.(*types.ManagedObjectNotFound); ok && nf.Obj == ref {
+			found = true
+		}
+		return found
+	})
+	return found
+}
+
 // destroyVM destroys the VM ref and waits for the task. A VM that no longer
-// exists (ManagedObjectNotFound — vCenter's "has already been deleted or has
-// not been completely created") is already gone: that is success.
+// exists (ManagedObjectNotFound for ref — vCenter's "has already been deleted
+// or has not been completely created") is already gone: that is success.
 func (p *Provider) destroyVM(ctx context.Context, ref types.ManagedObjectReference) error {
 	_, err := p.destroyVMIfPresent(ctx, ref)
 	return err
@@ -649,13 +666,13 @@ func (p *Provider) destroyVM(ctx context.Context, ref types.ManagedObjectReferen
 func (p *Provider) destroyVMIfPresent(ctx context.Context, ref types.ManagedObjectReference) (bool, error) {
 	t, err := object.NewVirtualMachine(p.client.Client, ref).Destroy(ctx)
 	if err != nil {
-		if fault.Is(err, &types.ManagedObjectNotFound{}) {
+		if isNotFound(err, ref) {
 			return false, nil
 		}
 		return false, fmt.Errorf("start destroy of %s: %w", ref.Value, err)
 	}
 	if err := t.Wait(ctx); err != nil {
-		if fault.Is(err, &types.ManagedObjectNotFound{}) {
+		if isNotFound(err, ref) {
 			return false, nil
 		}
 		return false, fmt.Errorf("destroy %s: %w", ref.Value, err)

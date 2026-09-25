@@ -236,6 +236,39 @@ func TestDownloadOVA_Redirects(t *testing.T) {
 	}
 }
 
+// TestImageDownloadClient_NoSchemeDowngrade (review N2): a redirect may keep
+// or raise the scheme, never lower https to http.
+func TestImageDownloadClient_NoSchemeDowngrade(t *testing.T) {
+	client := imageDownloadClient(false, nil)
+	hop := func(raw string) *http.Request {
+		u, err := url.Parse(raw)
+		require.NoError(t, err)
+		return &http.Request{URL: u}
+	}
+	for _, tc := range []struct {
+		from, to string
+		allowed  bool
+	}{
+		{"https://images.example.com/a.ova", "http://images.example.com/a.ova", false},
+		{"https://images.example.com/a.ova", "https://mirror.example.com/a.ova", true},
+		{"http://images.example.com/a.ova", "https://images.example.com/a.ova", true},
+		{"http://images.example.com/a.ova", "http://mirror.example.com/a.ova", true},
+	} {
+		err := client.CheckRedirect(hop(tc.to), []*http.Request{hop(tc.from)})
+		if tc.allowed {
+			assert.NoError(t, err, "%s -> %s", tc.from, tc.to)
+			continue
+		}
+		require.ErrorIs(t, err, errForbiddenImageSource, "%s -> %s", tc.from, tc.to)
+		assert.Contains(t, err.Error(), "from https to http")
+	}
+
+	// The last hop decides: http -> https -> http is still a downgrade.
+	err := client.CheckRedirect(hop("http://c.example.com/a.ova"),
+		[]*http.Request{hop("http://a.example.com/a.ova"), hop("https://b.example.com/a.ova")})
+	require.ErrorIs(t, err, errForbiddenImageSource)
+}
+
 func TestDownloadOVA_SizeLimit(t *testing.T) {
 	const limit = 1024
 	body := bytes.Repeat([]byte("a"), limit+1)
