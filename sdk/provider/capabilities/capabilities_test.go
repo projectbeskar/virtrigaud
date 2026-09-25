@@ -102,6 +102,33 @@ func TestBuilder_Clustering(t *testing.T) {
 	}
 }
 
+// TestBuilder_ImageArtifactIdentity verifies supports_image_artifact_identity
+// (ADR-0009 D7) surfaces only after ImageArtifactIdentity(): ImageImport()
+// alone must not claim it, since the manager holds import-style prepares
+// through such a provider instead of risking a bare-name reuse.
+func TestBuilder_ImageArtifactIdentity(t *testing.T) {
+	for name, tc := range map[string]struct {
+		builder *Builder
+		want    bool
+	}{
+		"image import only":          {NewBuilder().Core().ImageImport(), false},
+		"image import with identity": {NewBuilder().Core().ImageImport().ImageArtifactIdentity(), true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			resp, err := tc.builder.Build().GetCapabilities(context.Background(), &providerv1.GetCapabilitiesRequest{})
+			if err != nil {
+				t.Fatalf("GetCapabilities: %v", err)
+			}
+			if !resp.SupportsImageImport {
+				t.Error("SupportsImageImport should be true after ImageImport()")
+			}
+			if resp.SupportsImageArtifactIdentity != tc.want {
+				t.Errorf("SupportsImageArtifactIdentity = %t, want %t", resp.SupportsImageArtifactIdentity, tc.want)
+			}
+		})
+	}
+}
+
 // TestBuilder_StorageBackends verifies the ADR-0006 backend/transfer-mode
 // builder methods surface on the gRPC GetCapabilitiesResponse so providers can
 // advertise their honest staging-backend support (ADR-0006 Slice 0).

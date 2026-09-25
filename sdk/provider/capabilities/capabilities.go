@@ -52,6 +52,14 @@ const (
 	// implements host inventory (ListHosts/GetHostInfo) plus host-targeted
 	// placement (ADR-0007 P1, D7).
 	CapabilityClustering Capability = "clustering"
+	// CapabilityImageArtifactIdentity marks a provider whose ImagePrepare
+	// implements the prepared-image artifact identity contract (ADR-0009 D7):
+	// it derives the artifact name from ImagePrepareRequest.image and
+	// source_digest, stamps the artifact with them, reuses an artifact only on
+	// a matching stamp (AlreadyExists otherwise), never reuses one by bare
+	// name, and echoes the stamp in ImagePrepareResponse.artifact. Advertise it
+	// only with CapabilityImageImport.
+	CapabilityImageArtifactIdentity Capability = "image_artifact_identity"
 
 	// Provider-specific capabilities
 	CapabilityVSphere     Capability = "vsphere"
@@ -183,6 +191,8 @@ func (m *Manager) GetCapabilities(ctx context.Context, req *providerv1.GetCapabi
 		SupportedImportBackends:     m.supportedImportBackends,
 		SupportedTransferModes:      m.supportedTransferModes,
 		SupportsClustering:          m.HasCapability(CapabilityClustering),
+		// ADR-0009 D7.
+		SupportsImageArtifactIdentity: m.HasCapability(CapabilityImageArtifactIdentity),
 	}, nil
 }
 
@@ -288,6 +298,15 @@ func (b *Builder) LinkedClones() *Builder {
 // ImageImport adds image import capabilities.
 func (b *Builder) ImageImport() *Builder {
 	b.manager.AddCapability(CapabilityImageImport)
+	return b
+}
+
+// ImageArtifactIdentity marks the provider's ImagePrepare as implementing the
+// prepared-image artifact identity contract (ADR-0009 D7; see
+// CapabilityImageArtifactIdentity). It implies nothing on its own: pair it
+// with ImageImport.
+func (b *Builder) ImageArtifactIdentity() *Builder {
+	b.manager.AddCapability(CapabilityImageArtifactIdentity)
 	return b
 }
 
