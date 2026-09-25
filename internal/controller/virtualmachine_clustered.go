@@ -324,8 +324,13 @@ func (r *VirtualMachineReconciler) handleMissingOnBoundHost(
 // Ready=False/PlacementTopologyMismatch; a VM whose spec.providerRef no longer
 // resolves to the Provider it is bound through gets
 // Ready=False/ProviderRefMismatch (plus a warning event) and is re-checked
-// slowly. Any other error is returned as-is.
+// slowly; a VM that references a Provider, VMClass or VMImage in another
+// namespace that does not select its own gets Ready=False/ConsumerNotAllowed
+// (plus a warning event on the transition) and is re-checked slowly — the
+// grant watches re-drive it as soon as access is granted. Any other error is
+// returned as-is.
 func (r *VirtualMachineReconciler) handleNotRoutable(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, err error) (ctrl.Result, error) {
+	newRefusal := consumerRefusalIsNew(vm.Status.Conditions, err)
 	if !markNotRoutable(vm, err) {
 		return ctrl.Result{}, err
 	}
@@ -336,6 +341,12 @@ func (r *VirtualMachineReconciler) handleNotRoutable(ctx context.Context, vm *in
 		metrics.RecordError(errReasonProviderRefMismatch, metrics.ComponentManager)
 		r.recordEvent(vm, corev1.EventTypeWarning, k8s.ReasonProviderRefMismatch, err.Error())
 		return ctrl.Result{RequeueAfter: providerRefMismatchRetryInterval}, nil
+	case isConsumerNotAllowed(err):
+		metrics.RecordError(errReasonConsumerNotAllowed, metrics.ComponentManager)
+		if newRefusal {
+			r.recordEvent(vm, corev1.EventTypeWarning, k8s.ReasonConsumerNotAllowed, err.Error())
+		}
+		return ctrl.Result{RequeueAfter: consumerNotAllowedRetryInterval}, nil
 	case isPlacementTopologyMismatch(err):
 		metrics.RecordError(errReasonPlacement, metrics.ComponentManager)
 		return ctrl.Result{RequeueAfter: placementConfigRetryInterval}, nil
@@ -345,8 +356,8 @@ func (r *VirtualMachineReconciler) handleNotRoutable(ctx context.Context, vm *in
 }
 
 // markNotRoutable sets the condition for a vmRefFor failure and reports
-// whether err was one (unbound, a placement/topology mismatch, or a provider
-// reference mismatch).
+// whether err was one (unbound, a placement/topology mismatch, a provider
+// reference mismatch, or an ungranted cross-namespace reference).
 func markNotRoutable(vm *infravirtrigaudiov1beta1.VirtualMachine, err error) bool {
 	switch {
 	case isProviderRefMismatch(err):
@@ -354,6 +365,14 @@ func markNotRoutable(vm *infravirtrigaudiov1beta1.VirtualMachine, err error) boo
 			Type:               k8s.ConditionReady,
 			Status:             metav1.ConditionFalse,
 			Reason:             k8s.ReasonProviderRefMismatch,
+			Message:            err.Error(),
+			ObservedGeneration: vm.Generation,
+		})
+	case isConsumerNotAllowed(err):
+		meta.SetStatusCondition(&vm.Status.Conditions, metav1.Condition{
+			Type:               k8s.ConditionReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             k8s.ReasonConsumerNotAllowed,
 			Message:            err.Error(),
 			ObservedGeneration: vm.Generation,
 		})
@@ -529,6 +548,12 @@ func (r *VirtualMachineReconciler) retainForUnroutableDelete(
 			"not deleting the hypervisor VM through a Provider it is not bound to: %v. Set %s=true to detach it, or %s=true to drop the finalizer",
 			err, infravirtrigaudiov1beta1.VirtualMachineOrphanOnDeleteAnnotation, forceDeleteAnnotation))
 		return ctrl.Result{RequeueAfter: providerRefMismatchRetryInterval}, true
+	}
+	if isConsumerNotAllowed(err) {
+		r.recordEvent(vm, corev1.EventTypeWarning, k8s.ReasonConsumerNotAllowed, fmt.Sprintf(
+			"not deleting the hypervisor VM through a Provider this namespace may not use: %v. Set %s=true to detach it, or %s=true to drop the finalizer",
+			err, infravirtrigaudiov1beta1.VirtualMachineOrphanOnDeleteAnnotation, forceDeleteAnnotation))
+		return ctrl.Result{RequeueAfter: consumerNotAllowedRetryInterval}, true
 	}
 	return ctrl.Result{RequeueAfter: vmDeleteRetryInterval}, true
 }

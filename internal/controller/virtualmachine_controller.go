@@ -36,6 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
@@ -283,6 +284,7 @@ func (r *VirtualMachineReconciler) reconcileBoundProvider(
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=vmplacementpolicies,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+//+kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
 
 // Reconcile handles VirtualMachine reconciliation.
 //
@@ -371,6 +373,13 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	logger.V(1).Info("Resolving VM dependencies", "provider", vm.Spec.ProviderRef.Name, "class", vm.Spec.ClassRef.Name, "image", imageRefName)
 	provider, vmClass, vmImage, networks, err := r.getDependencies(ctx, vm)
 	if err != nil {
+		// A Provider, VMClass or VMImage in another namespace that does not
+		// select this one (spec.consumerNamespaceSelector) is refused before any
+		// provider is resolved or called — also for a VM that is already bound
+		// (fail closed after an upgrade that introduced the grant).
+		if isConsumerNotAllowed(err) {
+			return r.handleNotRoutable(ctx, vm, err)
+		}
 		// Check if Provider is missing - log at INFO level and skip reconciliation
 		// Check both wrapped errors and error message for "not found"
 		if errors.IsNotFound(err) || strings.Contains(err.Error(), "not found") {
@@ -435,6 +444,9 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	// VMs, and for images already prepared on this provider; in those cases it
 	// returns (false, nil) and we fall through to the unchanged create path.
 	if requeue, err := r.EnsureImageOnProvider(ctx, vm, vmImage, provider, providerInstance); err != nil {
+		if isConsumerNotAllowed(err) {
+			return r.handleNotRoutable(ctx, vm, err)
+		}
 		if stderrors.Is(err, errImagePrepareHold) {
 			// OnMissing forbids preparing (Fail/Wait); the condition is recorded
 			// on the VMImage. Reflect a waiting condition on the VM and requeue
@@ -657,6 +669,21 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 			}
 			// Provider not found, continue with cleanup
+		} else if err := checkConsumer(ctx, r.Client, provider, vm.Namespace); err != nil {
+			// A Provider in another namespace that does not select this one is
+			// never used to delete the hypervisor VM — and, as for a provider
+			// reference mismatch, the refusal does not release the finalizer:
+			// removing the CR takes orphan-on-delete or force-delete (or the
+			// grant).
+			if !isConsumerNotAllowed(err) {
+				logger.Error(err, "Failed to check the provider's consumer grant for deletion")
+				metrics.RecordError(errReasonDepsError, metrics.ComponentManager)
+				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+			}
+			if res, retain := r.retainForUnroutableDelete(ctx, vm, err); retain {
+				return res, nil
+			}
+			// force-delete: the finalizer is removed below without any provider call.
 		} else if ref, ok, res := r.deletionTarget(ctx, vm, provider); !ok {
 			// deletionTarget decided (an unbound clustered VM, or one bound
 			// through another Provider object, without the force-delete escape
@@ -740,7 +767,13 @@ func (r *VirtualMachineReconciler) orphanOnDelete(ctx context.Context, vm *infra
 	return r.removeFinalizer(ctx, vm)
 }
 
-// getDependencies fetches all required dependencies for the VM
+// getDependencies fetches all required dependencies for the VM.
+//
+// The Provider, VMClass and VMImage may be in another namespace only when that
+// object's spec.consumerNamespaceSelector selects the VM's namespace
+// (getForConsumer): otherwise a *ConsumerNotAllowedError is returned — also
+// for a cross-namespace object that does not exist — and the caller makes no
+// provider call. Networks are always in the VM's own namespace.
 func (r *VirtualMachineReconciler) getDependencies(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine) (
 	*infravirtrigaudiov1beta1.Provider,
 	*infravirtrigaudiov1beta1.VMClass,
@@ -750,14 +783,11 @@ func (r *VirtualMachineReconciler) getDependencies(ctx context.Context, vm *infr
 ) {
 	// Get Provider
 	provider := &infravirtrigaudiov1beta1.Provider{}
-	providerKey := types.NamespacedName{
-		Name:      vm.Spec.ProviderRef.Name,
-		Namespace: vm.Namespace,
-	}
-	if vm.Spec.ProviderRef.Namespace != "" {
-		providerKey.Namespace = vm.Spec.ProviderRef.Namespace
-	}
-	if err := r.Get(ctx, providerKey, provider); err != nil {
+	providerKey := vmProviderKey(vm)
+	if err := getForConsumer(ctx, r.Client, providerKey, provider, vm.Namespace); err != nil {
+		if isConsumerNotAllowed(err) {
+			return nil, nil, nil, nil, err
+		}
 		if errors.IsNotFound(err) {
 			// Provider doesn't exist yet - preserve the NotFound error for proper handling upstream
 			return nil, nil, nil, nil, fmt.Errorf("provider %s not found (namespace: %s): %w", vm.Spec.ProviderRef.Name, providerKey.Namespace, err)
@@ -767,31 +797,31 @@ func (r *VirtualMachineReconciler) getDependencies(ctx context.Context, vm *infr
 
 	// Get VMClass
 	vmClass := &infravirtrigaudiov1beta1.VMClass{}
-	classKey := types.NamespacedName{
-		Name:      vm.Spec.ClassRef.Name,
-		Namespace: vm.Namespace,
+	classKey := types.NamespacedName{Namespace: vm.Namespace, Name: vm.Spec.ClassRef.Name}
+	if key, ok := vmClassKey(vm); ok {
+		classKey = key
 	}
-	if vm.Spec.ClassRef.Namespace != "" {
-		classKey.Namespace = vm.Spec.ClassRef.Namespace
-	}
-	if err := r.Get(ctx, classKey, vmClass); err != nil {
+	if err := getForConsumer(ctx, r.Client, classKey, vmClass, vm.Namespace); err != nil {
+		if isConsumerNotAllowed(err) {
+			return nil, nil, nil, nil, err
+		}
 		return nil, nil, nil, nil, fmt.Errorf("failed to get vmclass %s: %w", vm.Spec.ClassRef.Name, err)
 	}
 
 	// Get VMImage (only if ImageRef is specified, not ImportedDisk)
 	var vmImage *infravirtrigaudiov1beta1.VMImage
-	if vm.Spec.ImageRef != nil {
+	if imageKey, ok := vmImageKey(vm); ok {
 		vmImage = &infravirtrigaudiov1beta1.VMImage{}
-		imageKey := types.NamespacedName{
-			Name:      vm.Spec.ImageRef.Name,
-			Namespace: vm.Namespace,
-		}
-		if vm.Spec.ImageRef.Namespace != "" {
-			imageKey.Namespace = vm.Spec.ImageRef.Namespace
-		}
-		if err := r.Get(ctx, imageKey, vmImage); err != nil {
+		if err := getForConsumer(ctx, r.Client, imageKey, vmImage, vm.Namespace); err != nil {
+			if isConsumerNotAllowed(err) {
+				return nil, nil, nil, nil, err
+			}
 			return nil, nil, nil, nil, fmt.Errorf("failed to get vmimage %s: %w", vm.Spec.ImageRef.Name, err)
 		}
+	} else if vm.Spec.ImageRef != nil {
+		// An image reference with an empty name names nothing: report it the
+		// way the lookup always has.
+		return nil, nil, nil, nil, fmt.Errorf("failed to get vmimage %q: empty name", vm.Spec.ImageRef.Name)
 	}
 
 	// Get VMNetworkAttachments (only for networks that have networkRef specified)
@@ -2029,10 +2059,40 @@ func vmIsAdopted(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
 	return vm.Labels[AdoptedLabel] == AdoptedLabelValue
 }
 
-// SetupWithManager sets up the controller with the Manager.
+// vmsAffectedByGrantChange maps a consumer-grant change to the VMs to
+// re-drive: every VM refused with ConsumerNotAllowed, and every VM that
+// references a Provider, VMClass or VMImage in another namespace (so a
+// revocation also takes effect promptly), in namespace — or in every namespace
+// when namespace is "" (a referenced object's selector changed).
+func (r *VirtualMachineReconciler) vmsAffectedByGrantChange(ctx context.Context, namespace string) []reconcile.Request {
+	vms := &infravirtrigaudiov1beta1.VirtualMachineList{}
+	var opts []client.ListOption
+	if namespace != "" {
+		opts = append(opts, client.InNamespace(namespace))
+	}
+	if err := r.List(ctx, vms, opts...); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to list VirtualMachines for a consumer grant change", "namespace", namespace)
+		return nil
+	}
+	var reqs []reconcile.Request
+	for i := range vms.Items {
+		vm := &vms.Items[i]
+		if consumerRefused(vm.Status.Conditions) || vmHasCrossNamespaceRef(vm) {
+			reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(vm)})
+		}
+	}
+	return reqs
+}
+
+// SetupWithManager sets up the controller with the Manager. Besides its own
+// VirtualMachines it watches Namespace label changes and the
+// spec.consumerNamespaceSelector of Providers, VMClasses and VMImages, so a
+// cross-namespace grant (or revocation) takes effect without waiting for the
+// slow recheck.
 func (r *VirtualMachineReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
-		For(&infravirtrigaudiov1beta1.VirtualMachine{}).
+	b := ctrl.NewControllerManagedBy(mgr).
+		For(&infravirtrigaudiov1beta1.VirtualMachine{})
+	return withConsumerGrantWatches(b, r.vmsAffectedByGrantChange).
 		WithEventFilter(predicate.Funcs{
 			UpdateFunc: func(e event.UpdateEvent) bool {
 				// Only reconcile if spec changed (ignore status-only updates)

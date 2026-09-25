@@ -20,17 +20,26 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
+	"github.com/projectbeskar/virtrigaud/internal/k8s"
 )
 
 // Cross-namespace references to a Provider, VMClass or VMImage
@@ -291,4 +300,93 @@ func getVMProvider(ctx context.Context, c client.Reader, vm *infravirtrigaudiov1
 		return nil, err
 	}
 	return provider, nil
+}
+
+// consumerRefusalIsNew reports whether err is a *ConsumerNotAllowedError that
+// the Ready condition in conditions does not already record (same reason and
+// message): the transition on which a refusal is announced with an event, so
+// the slow recheck does not repeat it.
+func consumerRefusalIsNew(conditions []metav1.Condition, err error) bool {
+	if !isConsumerNotAllowed(err) {
+		return false
+	}
+	prev := meta.FindStatusCondition(conditions, k8s.ConditionReady)
+	return prev == nil || prev.Reason != k8s.ReasonConsumerNotAllowed || prev.Message != err.Error()
+}
+
+// consumerRefused reports whether conditions record a ConsumerNotAllowed
+// refusal on the Ready condition.
+func consumerRefused(conditions []metav1.Condition) bool {
+	ready := meta.FindStatusCondition(conditions, k8s.ConditionReady)
+	return ready != nil && ready.Reason == k8s.ReasonConsumerNotAllowed
+}
+
+// namespaceLabelsChanged is the predicate for the Namespace watch that
+// re-drives refused consumers: it passes an update that changes the
+// Namespace's labels (what a consumerNamespaceSelector matches). A created
+// Namespace holds no consumers yet, and a deleted one needs no re-drive.
+func namespaceLabelsChanged() predicate.Predicate {
+	return predicate.Funcs{
+		CreateFunc: func(event.CreateEvent) bool { return false },
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			return !maps.Equal(e.ObjectOld.GetLabels(), e.ObjectNew.GetLabels())
+		},
+		DeleteFunc:  func(event.DeleteEvent) bool { return false },
+		GenericFunc: func(event.GenericEvent) bool { return false },
+	}
+}
+
+// consumerSelectorChanged is the predicate for the Provider, VMClass and
+// VMImage watches that re-drive refused consumers: it passes an object created
+// with a spec.consumerNamespaceSelector (a reference may have been waiting for
+// it) and an update that changes the selector. Status-only updates — frequent
+// on a Provider — never pass.
+func consumerSelectorChanged() predicate.Predicate {
+	return predicate.Funcs{
+		CreateFunc: func(e event.CreateEvent) bool {
+			_, sel, ok := consumerSelectorOf(e.Object)
+			return ok && sel != nil
+		},
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			_, oldSel, oldOK := consumerSelectorOf(e.ObjectOld)
+			_, newSel, newOK := consumerSelectorOf(e.ObjectNew)
+			return oldOK && newOK && !equality.Semantic.DeepEqual(oldSel, newSel)
+		},
+		DeleteFunc:  func(event.DeleteEvent) bool { return false },
+		GenericFunc: func(event.GenericEvent) bool { return false },
+	}
+}
+
+// withConsumerGrantWatches adds to b the watches that re-drive consumers as
+// soon as a grant may have changed, so a grant takes effect within seconds
+// instead of at the next consumerNotAllowedRetryInterval recheck: a
+// Namespace's labels, and a Provider's, VMClass's or VMImage's
+// spec.consumerNamespaceSelector. remap returns the objects to re-drive;
+// namespace is the Namespace whose labels changed, or "" when a selector
+// changed (a consumer in any namespace may be affected).
+func withConsumerGrantWatches(b *builder.Builder, remap func(ctx context.Context, namespace string) []reconcile.Request) *builder.Builder {
+	onNamespace := handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+		return remap(ctx, obj.GetName())
+	})
+	onSelector := handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, _ client.Object) []reconcile.Request {
+		return remap(ctx, "")
+	})
+	return b.
+		Watches(&corev1.Namespace{}, onNamespace, builder.WithPredicates(namespaceLabelsChanged())).
+		Watches(&infravirtrigaudiov1beta1.Provider{}, onSelector, builder.WithPredicates(consumerSelectorChanged())).
+		Watches(&infravirtrigaudiov1beta1.VMClass{}, onSelector, builder.WithPredicates(consumerSelectorChanged())).
+		Watches(&infravirtrigaudiov1beta1.VMImage{}, onSelector, builder.WithPredicates(consumerSelectorChanged()))
+}
+
+// vmHasCrossNamespaceRef reports whether vm references a Provider, VMClass or
+// VMImage outside its own namespace.
+func vmHasCrossNamespaceRef(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
+	if vm.Spec.ProviderRef.Name != "" && vmProviderKey(vm).Namespace != vm.Namespace {
+		return true
+	}
+	if key, ok := vmClassKey(vm); ok && key.Namespace != vm.Namespace {
+		return true
+	}
+	key, ok := vmImageKey(vm)
+	return ok && key.Namespace != vm.Namespace
 }
