@@ -20,7 +20,9 @@ described in [`vm-ownership.md`](vm-ownership.md) protect `Create` and the
 clustered libvirt paths, not these by-id operations on single-host libvirt,
 vSphere and Proxmox.
 
-Two controls close this. Each works on its own.
+Two controls close this. Both live in the `VirtualMachine` CRD, so both need
+the upgraded CRD, which the manager checks at startup and on readiness
+([section 3](#3-the-manager-checks-the-installed-crd)).
 
 ## 1. The CRD locks `spec.providerRef` (admission)
 
@@ -67,7 +69,7 @@ status:
   boundProvider:
     namespace: infra
     name: proxmox-prod
-    uid: 3f0c9c1e-...   # the Provider object's UID at bind time
+    uid: 3f0c9c1e-...   # the Provider object's UID, for audit
 ```
 
 It is written by every bind path:
@@ -80,12 +82,12 @@ It is written by every bind path:
 | Adoption | with the adopted VM's `status.id` |
 
 While a VM is bound, the operator makes no provider call for it unless
-`spec.providerRef` still resolves to that `Provider`: same namespace and name
-and, when recorded, the same object UID. The check runs in the
-`VirtualMachine` controller, in the helper every per-VM call goes through, for
-a `VMClone` source (and its clone task and target bind), for a `VMMigration`
-source (power-off, snapshot, export, snapshot cleanup), and for a `VMSnapshot`
-(create, task poll, delete). On a mismatch:
+`spec.providerRef` still names that `Provider` (same namespace and name). The
+check runs in the `VirtualMachine` controller, in the helper every per-VM call
+goes through, for a `VMClone` source (and its clone task and target bind), for
+a `VMMigration` source (validation, power-off, snapshot, export and its task
+poll, snapshot cleanup), and for a `VMSnapshot` (create, task poll, delete). On
+a mismatch:
 
 - The `VirtualMachine` reports `Ready=False` with reason
   **`ProviderRefMismatch`**, with `observedGeneration` set, and a `Warning`
@@ -106,25 +108,79 @@ source (power-off, snapshot, export, snapshot cleanup), and for a `VMSnapshot`
   through, but that object no longer exists — releases the finalizer as before,
   because there is nothing to delete through.
 
-A `VMClone` also refuses to bind its cloned id to a target `VirtualMachine`
-that references a `Provider` other than the one the clone ran on (for example
-one created under the target name while the clone ran), and adoption only
-binds a pre-existing `virtrigaud.io/adopted` VM whose `spec.providerRef` names
-the adopting `Provider`.
-
 ### A re-created `Provider`
 
-A `Provider` deleted and re-created under the same name has a new UID. Its VMs
-then report `ProviderRefMismatch` ("deleted and re-created"), because the new
-object may point at a different hypervisor. If it manages the same hypervisor,
-an administrator re-accepts it by clearing the record through the status
-subresource; the operator records the current `Provider` again on its next
-reconcile (within 2 minutes):
+A `Provider` deleted and re-created under the same namespace and name is
+accepted in its place: the binding is enforced on namespace and name only. The
+`VirtualMachine` controller records a `Warning` event with reason
+**`BoundProviderRecreated`** (old and new UID), records the new UID in
+`status.boundProvider`, and keeps operating through the new object. No action is
+needed.
 
-```sh
-kubectl patch virtualmachine <vm> -n <ns> --subresource=status --type=merge \
-  -p '{"status":{"boundProvider":null}}'
-```
+The operator therefore trusts that a `Provider` re-created under the same name
+fronts the same hypervisor. Proving that needs a hypervisor identity bound to
+each VM (for example a vCenter instance UUID or a Proxmox cluster name), which
+is tracked as a follow-up ADR. Until then, treat the right to delete and create
+`Provider` objects as the right to redirect every VM bound through them.
+
+### `VMClone` and `VMMigration` targets
+
+- A `VMClone` marks the target `VirtualMachine` it creates with
+  `virtrigaud.io/clone-uid: <VMClone UID>`. It binds the cloned id only to a
+  target that carries its own marker, has an empty `status.id` (or already the
+  cloned id, when a bind is resumed) and references the `Provider` the clone ran
+  on. Anything else — a `VirtualMachine` created under the target name by
+  someone else, one already bound to another VM, one that references another
+  `Provider` — fails the clone with reason `TargetConflict`, leaves that
+  VM's binding untouched, and names the cloned VM left on the provider.
+- `spec.target.annotations` of a `VMClone` or `VMMigration` are copied to the
+  target without keys in the reserved `virtrigaud.io` domain
+  (`virtrigaud.io/...` and `*.virtrigaud.io/...`), such as
+  `virtrigaud.io/orphan-on-delete`, `virtrigaud.io/force-delete` and the
+  provenance annotations. The controller writes its own provenance after the
+  user annotations, so it cannot be overridden.
+- Adoption binds a pre-existing `virtrigaud.io/adopted` VM only if its
+  `spec.providerRef` names the adopting `Provider`, and never adopts a
+  hypervisor VM a `VirtualMachine` is bound to through that `Provider`.
+
+## 3. The manager checks the installed CRD
+
+Both controls live in the `VirtualMachine` CRD, which is upgraded separately
+from the manager. **With an older CRD neither works.** The admission rule is
+absent, so a bound VM can be re-pointed. `status.boundProvider` is not in the
+schema, so the API server prunes it on every write: the record never persists,
+the backfill re-runs on every reconcile from the still-mutable reference, and
+the operator-side check never fires. This happens when the chart's CRD upgrade
+hook is disabled (`crdUpgrade.enabled: false`), or when a GitOps tool applies
+the CRDs after the manager.
+
+The manager therefore reads the installed `VirtualMachine` CRD at startup and
+on every readiness probe (results reused for one minute) and checks that its
+`v1beta1` schema has `status.boundProvider` and the `spec.providerRef` rule:
+
+| State | Meaning | Readiness |
+|---|---|---|
+| `verified` | Both features are present. | Ready |
+| `missing` | The CRD is older than the manager, or absent. An error is logged and `virtrigaud_errors_total{reason="vm-crd-security-features-missing"}` counts each check. | **Not ready** until the CRD is upgraded |
+| `unknown` | The CRD cannot be read (with `rbac.scope: namespace` the manager has no cluster-scoped read). A warning is logged. | Ready |
+
+The state is exported as
+`virtrigaud_manager_vm_crd_security_features{state="verified|missing|unknown"}`
+(1 for the current state). The manager needs `get` on that one CRD
+(`resourceNames: [virtualmachines.infra.virtrigaud.io]`), which the chart's
+ClusterRole grants.
+
+Failing readiness is deliberate. A manager running against an old CRD looks
+healthy while the protection is off. A failing readiness check makes that
+visible: the pod is not Ready, `helm upgrade --wait` fails, and a rolling
+update keeps the previous manager, which has no weaker protection against the
+same CRD, until the CRD is upgraded. VM management is not stopped: controllers
+keep running under leader election. An unreadable CRD doesn't fail readiness,
+because nothing was proven missing.
+
+Each backfill of a pre-existing VM also records a `Normal`
+`BoundProviderRecorded` event on the VM. The same VM getting that event on
+every reconcile is the per-VM symptom of an old CRD.
 
 ## Detaching a VM without deleting it: `virtrigaud.io/orphan-on-delete`
 
@@ -147,6 +203,9 @@ kubectl delete virtualmachine <vm> -n <ns>
 - A detached VM stamped with the deleted `VirtualMachine`'s UID can be adopted
   again later: adoption ignores stamps of `VirtualMachine`s that no longer
   exist.
+- Whoever can annotate and delete a `VirtualMachine` can detach it. Restricting
+  the annotation to administrators is a tracked follow-up; until then, use a
+  policy engine (Kyverno, Gatekeeper) if tenants must not detach their VMs.
 
 This replaces the previous workaround — pointing `spec.providerRef` at a
 `Provider` that doesn't exist and then deleting the `VirtualMachine` — which the
@@ -164,19 +223,33 @@ It is an escape hatch; to detach a VM on purpose, use `orphan-on-delete`.
   un-adopt workaround) now gets `422 Invalid`. Use `orphan-on-delete` to
   detach, or delete and re-create the `VirtualMachine`. A `kubectl apply` that
   leaves `providerRef` as it is keeps working.
-- **The CRD must be upgraded for the admission rule to apply.** It ships in
-  the chart's CRDs; confirm the upgrade replaced the `VirtualMachine` CRD
-  (`kubectl get crd virtualmachines.infra.virtrigaud.io -o yaml | grep -A3 x-kubernetes-validations`).
-  The operator-side check works either way.
+- **Upgrade the CRDs with (or before) the manager.** Both controls need the new
+  `VirtualMachine` CRD (see [section 3](#3-the-manager-checks-the-installed-crd)).
+  The chart's CRD upgrade hook does this by default. With
+  `crdUpgrade.enabled: false` or a GitOps flow, apply
+  `charts/virtrigaud/crds/` (or `config/crd/bases/`) first; until then the new
+  manager is not Ready. To confirm, check that the manager pod is Ready and
+  `virtrigaud_manager_vm_crd_security_features{state="verified"}` is `1`, or
+  that
+  `kubectl get crd virtualmachines.infra.virtrigaud.io -o jsonpath='{.spec.versions[?(@.name=="v1beta1")].schema.openAPIV3Schema.properties.status.properties.boundProvider.type}'`
+  prints `object`.
+- **The manager role gains `get` on the `virtualmachines.infra.virtrigaud.io`
+  CRD** (chart ClusterRole and `config/rbac`). Apply the updated RBAC with the
+  new manager.
 - **Trust on first reconcile.** A VM bound before this version has no
   `status.boundProvider`. The `VirtualMachine` controller records it on the
   VM's first reconcile after the upgrade, from its **current**
-  `spec.providerRef`, and enforces it from then on. A reference that was
-  re-pointed *before* the upgrade is therefore accepted as the binding. Before
-  upgrading in a multi-tenant cluster, you can list bound VMs and check that
-  each references the `Provider` whose hypervisor holds its id:
+  `spec.providerRef`, with a `BoundProviderRecorded` event, and enforces it
+  from then on. A reference that was re-pointed *before* the upgrade is
+  therefore accepted as the binding. Before upgrading in a multi-tenant cluster,
+  you can list bound VMs and check that each references the `Provider` whose
+  hypervisor holds its id:
   `kubectl get vm -A -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name,ID:.status.id,PROVIDER_NS:.spec.providerRef.namespace,PROVIDER:.spec.providerRef.name`.
   Between the upgrade and that first reconcile, `VMClone`, `VMMigration` and
   `VMSnapshot` treat a VM with no record the same way (they trust its current
   reference).
+- **Clones in flight.** A `VMClone` whose target `VirtualMachine` was created by
+  an older manager (no `virtrigaud.io/clone-uid` marker) but not yet bound fails
+  with `TargetConflict` after the upgrade. The cloned VM is left on the
+  provider; adopt it, or delete it and the target, and clone again.
 - The field is additive and optional; older managers ignore it.
