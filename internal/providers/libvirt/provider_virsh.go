@@ -683,42 +683,21 @@ func (p *Provider) getDomainDiskPaths(ctx context.Context, domainName string) ([
 	return domainDiskPaths(ctx, p.virshProvider, domainName)
 }
 
-// domainDiskPaths retrieves all disk paths for a domain on vp's host.
+// domainDiskPaths returns the files of a domain's own disks on vp's host, the
+// primary disk first: the top-level file-backed <disk device='disk'> sources of
+// its definition (domainDisksDoc.diskFiles). A disk's backing chain — which, for
+// a running linked clone, holds its source VM's disk — cdrom/floppy media and
+// cloud-init seeds are never included.
 func domainDiskPaths(ctx context.Context, vp *VirshProvider, domainName string) ([]string, error) {
-	// Get domain XML to extract disk paths
 	result, err := vp.runVirshCommand(ctx, "dumpxml", domainName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to dump domain XML: %w", err)
 	}
-
-	var diskPaths []string
-
-	// Parse XML to find disk source files
-	// Look for lines like: <source file='/var/lib/libvirt/images/vm-disk.qcow2'/>
-	lines := strings.Split(result.Stdout, "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if strings.Contains(line, "<source file=") && !strings.Contains(line, "device='disk'") {
-			// Extract the file path from <source file='...'/>
-			start := strings.Index(line, "file='")
-			if start == -1 {
-				start = strings.Index(line, "file=\"")
-			}
-			if start != -1 {
-				start += 6 // len("file='") or len("file=\"")
-				end := strings.IndexAny(line[start:], "\"'")
-				if end != -1 {
-					diskPath := line[start : start+end]
-					// Skip cloud-init ISOs (we'll handle those separately)
-					if !strings.HasSuffix(diskPath, "-cidata.iso") && !strings.HasSuffix(diskPath, "cloud-init.iso") {
-						diskPaths = append(diskPaths, diskPath)
-					}
-				}
-			}
-		}
+	doc, err := parseDomainDisks(result.Stdout)
+	if err != nil {
+		return nil, err
 	}
-
-	return diskPaths, nil
+	return doc.diskFiles(), nil
 }
 
 // getCloudInitISOPath retrieves the cloud-init ISO path for a domain on vp's host.
