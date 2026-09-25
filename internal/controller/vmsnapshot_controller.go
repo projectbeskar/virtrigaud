@@ -554,12 +554,13 @@ func (r *VMSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *inf
 		}
 
 		// Address the VM (ADR-0007 Addendum A, A1). A clustered VM with no
-		// confirmed host binding is never sent a per-VM call; like any other
-		// provider-side failure here, that is reported and the finalizer is
-		// still removed (the snapshot delete is best-effort).
+		// confirmed host binding, or a VM whose spec.providerRef no longer names
+		// the Provider it is bound through, is never sent a per-VM call; like
+		// any other provider-side failure here, that is reported and the
+		// finalizer is still removed (the snapshot delete is best-effort).
 		ref, refErr := vmRefFor(vm, provider)
 		if refErr != nil {
-			logger.Info("Not deleting the provider snapshot: the VM has no host binding", "error", refErr.Error())
+			logger.Info("Not deleting the provider snapshot: no provider call can be made for the VM", "reason", vmRefErrorReason(refErr), "error", refErr.Error())
 			r.Recorder.Event(snapshot, "Warning", "SnapshotDeleteFailed", fmt.Sprintf("Failed to delete snapshot: %v", refErr))
 		} else {
 			// Delete the snapshot via provider

@@ -383,3 +383,41 @@ func TestVMSnapshot_RefusesAVMBoundElsewhere(t *testing.T) {
 		assert.Equal(t, infrav1beta1.SnapshotPhaseCreating, snap.Status.Phase)
 	})
 }
+
+func TestMigrationPowerOff_RefusesASourceBoundElsewhere(t *testing.T) {
+	ctx := context.Background()
+	migration, objs := xnsMigration("")
+	migration.Spec.Source.PowerOffBeforeMigration = true
+	src, ok := objs[0].(*infrav1beta1.VirtualMachine)
+	require.True(t, ok)
+	src.Spec.ProviderRef = infrav1beta1.ObjectRef{Name: "tgt-prov"}
+	src.Status.BoundProvider = &infrav1beta1.BoundProviderRef{Namespace: xnsSource, Name: "src-prov"}
+	spy := &migrationSpy{}
+	r, _ := newXNSMigrationReconciler(t, mountTestScheme(t), spy, append(objs, migration)...)
+
+	done, _, err := r.ensureSourcePoweredOff(ctx, migration)
+	require.Error(t, err)
+	assert.False(t, done)
+	assert.Contains(t, err.Error(), "is bound through Provider "+xnsSource+"/src-prov")
+	_, _, _, power := spy.calls()
+	assert.Zero(t, power, "no power-off through a Provider the source is not bound to")
+	after := &infrav1beta1.VirtualMachine{}
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(src), after))
+	assert.Equal(t, infrav1beta1.PowerStateOn, after.Spec.PowerState, "no side effect on the source VM either")
+}
+
+func TestMigrationExportTaskPoll_RefusesASourceBoundElsewhere(t *testing.T) {
+	ctx := context.Background()
+	sourceVM, sourceProvider, migration := raceMigrationFixture()
+	sourceVM.Spec.ProviderRef = infrav1beta1.ObjectRef{Name: "decoy"}
+	sourceVM.Status.BoundProvider = &infrav1beta1.BoundProviderRef{Namespace: "default", Name: "source-provider"}
+	migration.Status.ExportID = "export-1"
+	migration.Status.TaskRef = "task-1"
+	decoy := &infrav1beta1.Provider{ObjectMeta: metav1.ObjectMeta{Name: "decoy", Namespace: "default"}}
+	r, _, resolved := providerRecordingReconciler(t, sourceVM, sourceProvider, decoy, migration)
+
+	_, err := r.handleExportingPhase(ctx, migration)
+	require.NoError(t, err)
+	assert.Empty(t, resolved(), "the export task is not polled through a Provider the source is not bound to")
+	assert.Equal(t, infrav1beta1.MigrationPhaseFailed, migration.Status.Phase)
+}

@@ -370,13 +370,9 @@ func (r *VMMigrationReconciler) handleValidatingPhase(ctx context.Context, migra
 
 	// Validate source provider: the one the source VM runs on. An explicit
 	// spec.source.providerRef naming any other Provider is refused.
-	sourceProviderRef, err := migrationSourceProviderRef(migration, sourceVM)
+	sourceProvider, err := r.sourceProviderFor(ctx, migration, sourceVM)
 	if err != nil {
 		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Invalid source provider: %v", err))
-	}
-	sourceProvider, err := r.getProvider(ctx, sourceProviderRef, migration.Namespace)
-	if err != nil {
-		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to get source provider: %v", err))
 	}
 
 	// Validate target provider
@@ -579,6 +575,13 @@ func (r *VMMigrationReconciler) ensureSourcePoweredOff(ctx context.Context, migr
 		return false, ctrl.Result{}, fmt.Errorf("source VM %s has no provider ID yet", sourceVM.Name)
 	}
 
+	// The source is powered off only through the Provider it is bound through
+	// (resolved before any side effect, including the spec patch below).
+	sourceProvider, err := r.sourceProviderFor(ctx, migration, sourceVM)
+	if err != nil {
+		return false, ctrl.Result{}, fmt.Errorf("resolve source provider: %w", err)
+	}
+
 	// Align the source VM's desired power state with the migration intent so the
 	// VirtualMachine reconciler does not race this controller back to On while the
 	// disk is being exported. Without this, the VM reconciler (whose desired state
@@ -594,10 +597,6 @@ func (r *VMMigrationReconciler) ensureSourcePoweredOff(ctx context.Context, migr
 		logger.Info("Set source VM desired power state to Off for migration", "vm", sourceVM.Name)
 	}
 
-	sourceProvider, err := r.getProvider(ctx, sourceVM.Spec.ProviderRef, migration.Namespace)
-	if err != nil {
-		return false, ctrl.Result{}, fmt.Errorf("get source provider: %w", err)
-	}
 	providerInstance, err := r.getProviderInstance(ctx, sourceProvider)
 	if err != nil {
 		return false, ctrl.Result{}, fmt.Errorf("get source provider instance: %w", err)
@@ -665,13 +664,9 @@ func (r *VMMigrationReconciler) handleSnapshottingPhase(ctx context.Context, mig
 	}
 
 	// Get source provider
-	sourceProviderRef, err := migrationSourceProviderRef(migration, sourceVM)
+	sourceProvider, err := r.sourceProviderFor(ctx, migration, sourceVM)
 	if err != nil {
 		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Invalid source provider: %v", err))
-	}
-	sourceProvider, err := r.getProvider(ctx, sourceProviderRef, migration.Namespace)
-	if err != nil {
-		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to get source provider: %v", err))
 	}
 
 	// Get provider instance
@@ -768,13 +763,9 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 	}
 
 	// Get source provider
-	sourceProviderRef, err := migrationSourceProviderRef(migration, sourceVM)
+	sourceProvider, err := r.sourceProviderFor(ctx, migration, sourceVM)
 	if err != nil {
 		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Invalid source provider: %v", err))
-	}
-	sourceProvider, err := r.getProvider(ctx, sourceProviderRef, migration.Namespace)
-	if err != nil {
-		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to get source provider: %v", err))
 	}
 
 	// Get provider instance
@@ -2098,17 +2089,33 @@ func (r *VMMigrationReconciler) getProvider(ctx context.Context, providerRef inf
 }
 
 // getSourceProvider retrieves the source provider for a migration: the
-// Provider the source VM runs on (see migrationSourceProviderRef).
+// Provider the source VM runs on (see sourceProviderFor).
 func (r *VMMigrationReconciler) getSourceProvider(ctx context.Context, migration *infrav1beta1.VMMigration) (*infrav1beta1.Provider, error) {
 	sourceVM, err := r.getSourceVM(ctx, migration)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get source VM: %w", err)
 	}
+	return r.sourceProviderFor(ctx, migration, sourceVM)
+}
+
+// sourceProviderFor is THE resolution of the Provider a migration acts on its
+// source VM through, used by every phase that calls the source provider
+// (validation, power-off, snapshot, export and its task poll, the s3 import
+// format lookup, snapshot cleanup): migrationSourceProviderRef — the source
+// VM's own reference, which must match spec.source.providerRef when that is
+// set and the Provider the VM is bound through (status.boundProvider) — then
+// that Provider object. A reference error is returned unwrapped so its message
+// reaches the migration status as-is.
+func (r *VMMigrationReconciler) sourceProviderFor(ctx context.Context, migration *infrav1beta1.VMMigration, sourceVM *infrav1beta1.VirtualMachine) (*infrav1beta1.Provider, error) {
 	sourceProviderRef, err := migrationSourceProviderRef(migration, sourceVM)
 	if err != nil {
 		return nil, err
 	}
-	return r.getProvider(ctx, sourceProviderRef, migration.Namespace)
+	provider, err := r.getProvider(ctx, sourceProviderRef, migration.Namespace)
+	if err != nil {
+		return nil, fmt.Errorf("get source provider %s/%s: %w", sourceProviderRef.Namespace, sourceProviderRef.Name, err)
+	}
+	return provider, nil
 }
 
 // migrationSourceProviderRef returns the Provider a migration exports its
@@ -3112,14 +3119,9 @@ func (r *VMMigrationReconciler) deleteSourceSnapshot(ctx context.Context, migrat
 	}
 
 	// Get source provider
-	sourceProviderRef, err := migrationSourceProviderRef(migration, sourceVM)
+	sourceProvider, err := r.sourceProviderFor(ctx, migration, sourceVM)
 	if err != nil {
 		return fmt.Errorf("resolve source provider: %w", err)
-	}
-
-	sourceProvider, err := r.getProvider(ctx, sourceProviderRef, migration.Namespace)
-	if err != nil {
-		return fmt.Errorf("failed to get source provider: %w", err)
 	}
 
 	// Get provider instance
