@@ -90,6 +90,10 @@ func (r *VirtualMachineReconciler) recordPendingHost(
 	pl.PendingHost = p.hostID
 	// The admitted size, in the same checked write (review N3).
 	pl.PendingResources = &infravirtrigaudiov1beta1.PlacementResources{CPU: p.resources.CPU, MemoryMiB: p.resources.MemoryMiB}
+	// The balloon ceiling the Create provisions (0: none), kept when bound
+	// (review N1).
+	ceiling := p.memoryCeilingMiB
+	pl.MemoryCeilingMiB = &ceiling
 	pl.Pool = p.poolName
 	pl.LastScheduledTime = &now
 	pl.Reason = p.reason
@@ -155,11 +159,19 @@ func (r *VirtualMachineReconciler) refuseGrownPendingCreate(
 	}
 	admitted := pl.PendingResources
 	cpu, mem := req.Class.CPU, int64(req.Class.MemoryMiB)
-	if cpu <= admitted.CPU && mem <= admitted.MemoryMiB {
+	// A VMClass that turned memory hot-add on since would provision a balloon
+	// ceiling it was not admitted with (review N1).
+	ceilingGrew := pl.MemoryCeilingMiB != nil &&
+		memoryCeilingFor(requestsMemoryHotAdd(req), mem) > *pl.MemoryCeilingMiB
+	if cpu <= admitted.CPU && mem <= admitted.MemoryMiB && !ceilingGrew {
 		return ctrl.Result{}, false
 	}
-	msg := fmt.Sprintf("the create pending on host %s was admitted at %d vCPU and %d MiB, but its VMClass now asks for %d vCPU and %d MiB; "+
-		"it is not sent until the VMClass is restored (or the VirtualMachine deleted)", host, admitted.CPU, admitted.MemoryMiB, cpu, mem)
+	hotAdd := ""
+	if ceilingGrew {
+		hotAdd = " with memory hot-add, which it was not admitted with"
+	}
+	msg := fmt.Sprintf("the create pending on host %s was admitted at %d vCPU and %d MiB, but its VMClass now asks for %d vCPU and %d MiB%s; "+
+		"it is not sent until the VMClass is restored (or the VirtualMachine deleted)", host, admitted.CPU, admitted.MemoryMiB, cpu, mem, hotAdd)
 	log.FromContext(ctx).Info("Not retrying a pending clustered create that has grown since it was admitted", "host", host,
 		"admittedCPU", admitted.CPU, "admittedMemoryMiB", admitted.MemoryMiB, "cpu", cpu, "memoryMiB", mem)
 	setPlacedCondition(vm, metav1.ConditionFalse, k8s.ReasonPendingSizeGrew, msg)

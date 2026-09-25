@@ -16,7 +16,11 @@ limitations under the License.
 
 package libvirt
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
+)
 
 // Hotplug headroom policy for online CPU/memory reconfigure (#203).
 //
@@ -28,22 +32,21 @@ import "fmt"
 // and the initial.
 //
 // These constants are deliberately conservative and tunable:
-//   - hotplugResourceMultiplier: the ceiling is this multiple of the initial
+//   - contracts.HotplugResourceMultiplier: the ceiling is this multiple of the initial
 //     allocation (e.g. 4× initial CPUs / 4× initial memory).
 //   - maxHotplugVCPUs: a hard cap on the provisioned vCPU ceiling so an
 //     unusually large initial CPU count cannot provision an unbootable or
 //     host-hostile maximum. Memory has no hard cap because the guest only
 //     allocates currentMemory; the <memory> ceiling is merely the balloon
 //     maximum.
-const (
-	// hotplugResourceMultiplier is the multiple of the initial allocation used
-	// as the hotplug ceiling when CPU/memory hot-add is enabled.
-	hotplugResourceMultiplier = 4
-
-	// maxHotplugVCPUs caps the provisioned vCPU ceiling. The ceiling is never
-	// allowed to exceed this value, regardless of the multiplier.
-	maxHotplugVCPUs = 64
-)
+//
+// The numbers live in contracts (HotplugResourceMultiplier, MaxHotplugVCPUs,
+// HotplugCeiling*): the clustered scheduler counts a memory hot-add VM at the
+// same ceiling this provider provisions.
+//
+// maxHotplugVCPUs caps the provisioned vCPU ceiling. The ceiling is never
+// allowed to exceed this value, regardless of the multiplier.
+const maxHotplugVCPUs = contracts.MaxHotplugVCPUs
 
 // CPUMemoryXML holds the three domain-XML lines that govern CPU and memory
 // allocation, already rendered. The create-path substitutes these directly into
@@ -59,47 +62,23 @@ type CPUMemoryXML struct {
 }
 
 // computeHotplugCeilingVCPUs returns the vCPU ceiling for a VM created with CPU
-// hot-add enabled. The ceiling is hotplugResourceMultiplier × initial, floored
+// hot-add enabled. The ceiling is contracts.HotplugResourceMultiplier × initial, floored
 // so that it is strictly greater than the initial (so headroom always exists
 // even for a 1-vCPU VM where the multiplier would otherwise be exact), and
 // capped at maxHotplugVCPUs. If the initial already meets or exceeds the cap,
 // the ceiling equals the initial (no headroom is possible).
 func computeHotplugCeilingVCPUs(initial int32) int32 {
-	if initial < 1 {
-		initial = 1
-	}
-	ceiling := initial * hotplugResourceMultiplier
-	// Floor: ensure the ceiling is strictly greater than the initial so that
-	// live grow has somewhere to go.
-	if ceiling <= initial {
-		ceiling = initial + 1
-	}
-	// Hard cap.
-	if ceiling > maxHotplugVCPUs {
-		ceiling = maxHotplugVCPUs
-	}
-	// If the initial is already at/over the cap, no headroom is possible.
-	if ceiling < initial {
-		ceiling = initial
-	}
-	return ceiling
+	return contracts.HotplugCeilingVCPUs(initial)
 }
 
 // computeHotplugCeilingMemoryMiB returns the memory balloon-maximum ceiling for
 // a VM created with memory hot-add enabled. The ceiling is
-// hotplugResourceMultiplier × initial, floored so that it is strictly greater
+// contracts.HotplugResourceMultiplier × initial, floored so that it is strictly greater
 // than the initial. There is no hard cap: the guest only allocates
 // currentMemory (the initial); <memory> is just the balloon maximum that
 // `setmem --live` can inflate up to.
 func computeHotplugCeilingMemoryMiB(initial int64) int64 {
-	if initial < 1 {
-		initial = 1
-	}
-	ceiling := initial * hotplugResourceMultiplier
-	if ceiling <= initial {
-		ceiling = initial + 1
-	}
-	return ceiling
+	return contracts.HotplugCeilingMemoryMiB(initial)
 }
 
 // buildCPUMemoryXML renders the `<vcpu>`, `<memory>`, and `<currentMemory>`

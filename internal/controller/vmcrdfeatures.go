@@ -114,6 +114,10 @@ const (
 	// create; an older CRD would prune it, so a retry that grew could not be
 	// detected.
 	crdFeaturePendingResources = "status.placement.pendingResources"
+	// crdFeatureMemoryCeiling is the balloon ceiling recorded at scheduling;
+	// an older CRD would prune it, so a VM whose VMClass later turned memory
+	// hot-add off would be counted below the ceiling its domain has.
+	crdFeatureMemoryCeiling = "status.placement.memoryCeilingMiB"
 	// crdFeatureConsumerSelector is checked on the Provider, VMClass and
 	// VMImage CRDs.
 	crdFeatureConsumerSelector = consumerNamespaceSelectorField
@@ -278,6 +282,10 @@ func missingVMCRDFeatures(crd *unstructured.Unstructured) ([]string, error) {
 		"properties", "pendingResources"); !found {
 		missing = append(missing, crdFeaturePendingResources)
 	}
+	if _, found, _ := unstructured.NestedMap(schemaRoot, "properties", "status", "properties", "placement",
+		"properties", "memoryCeilingMiB"); !found {
+		missing = append(missing, crdFeatureMemoryCeiling)
+	}
 	return missing, nil
 }
 
@@ -354,7 +362,7 @@ func (c *VMCRDFeatureChecker) Evaluate(ctx context.Context) (string, []string) {
 		case metrics.CRDFeaturesVerified:
 			logger.Info("The installed CRDs have the security features this manager relies on")
 		case metrics.CRDFeaturesMissing:
-			logger.Error(ErrVMCRDSecurityFeaturesMissing, "Upgrade the CRDs: without the VirtualMachine provider-binding features a bound VM's spec.providerRef can still be changed and status.boundProvider is pruned; without the pending-size rule and status.placement.pendingResources a clustered VM can be grown after it was scheduled; without spec.consumerNamespaceSelector no cross-namespace grant can be set and every cross-namespace reference is refused; without VMImage status.providerStatus[].providerUID and taskRef no prepared image is trusted and no asynchronous prepare is tracked; without VMImage status.providerStatus[].sourceDigest and Provider status.reportedCapabilities.supportsImageArtifactIdentity no prepared image can be matched to its source and import-style prepares are held. Readiness fails until the CRDs are upgraded",
+			logger.Error(ErrVMCRDSecurityFeaturesMissing, "Upgrade the CRDs: without the VirtualMachine provider-binding features a bound VM's spec.providerRef can still be changed and status.boundProvider is pruned; without the pending-size rule and status.placement.pendingResources a clustered VM can be grown after it was scheduled; without status.placement.memoryCeilingMiB a memory hot-add VM can be under-counted; without spec.consumerNamespaceSelector no cross-namespace grant can be set and every cross-namespace reference is refused; without VMImage status.providerStatus[].providerUID and taskRef no prepared image is trusted and no asynchronous prepare is tracked; without VMImage status.providerStatus[].sourceDigest and Provider status.reportedCapabilities.supportsImageArtifactIdentity no prepared image can be matched to its source and import-style prepares are held. Readiness fails until the CRDs are upgraded",
 				"missing", missing)
 		case metrics.CRDFeaturesUnknown:
 			logger.Info("WARNING: cannot verify the CRDs' security features (a CRD cannot be read); make sure the CRDs are upgraded with the manager",

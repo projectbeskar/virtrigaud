@@ -2589,6 +2589,11 @@ func (in *PlacementStatus) DeepCopyInto(out *PlacementStatus) {
 		*out = new(PlacementResources)
 		**out = **in
 	}
+	if in.MemoryCeilingMiB != nil {
+		in, out := &in.MemoryCeilingMiB, &out.MemoryCeilingMiB
+		*out = new(int64)
+		**out = **in
+	}
 	if in.LastScheduledTime != nil {
 		in, out := &in.LastScheduledTime, &out.LastScheduledTime
 		*out = (*in).DeepCopy()

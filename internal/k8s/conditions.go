@@ -110,6 +110,13 @@ const (
 	// VMClass grew in the meantime. The Create is not sent and the pending
 	// host is kept; restoring the size lets it continue.
 	ReasonPendingSizeGrew = "PendingSizeGrew"
+	// ReasonShrinkPendingPowerOff is Reconfiguring=False on a running VM of a
+	// clustered Provider whose spec asks for less CPU or memory than it holds.
+	// A running guest can keep using what it has (a live vCPU unplug can
+	// fail, a live memory change only moves the balloon target), so the shrink
+	// is applied only once the VM is powered off; until then the VM counts at
+	// its current size. The operator never powers the VM off by itself.
+	ReasonShrinkPendingPowerOff = "ShrinkPendingPowerOff"
 )
 
 // ConditionPlaced is the single positive placement condition of a VirtualMachine

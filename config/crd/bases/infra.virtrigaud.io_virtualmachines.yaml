@@ -844,6 +844,20 @@ spec:
                       this VM to Host.
                     format: date-time
                     type: string
+                  memoryCeilingMiB:
+                    description: |-
+                      MemoryCeilingMiB is the memory the VM's domain may reach on its host
+                      beyond its current allocation, recorded when its create was scheduled
+                      (ADR-0007 Addendum A, scheduler-accuracy amendment): the balloon maximum
+                      provisioned for a VMClass with memory hot-add (4× the initial memory), or
+                      0 when none was provisioned. A guest can deflate its balloon up to it, so
+                      the clustered accounting counts the VM's memory at the larger of this and
+                      its current size. It is kept when the VM is bound; unset means unknown (a
+                      VM scheduled by an older manager), and the VMClass's hot-add setting is
+                      used instead.
+                    format: int64
+                    minimum: 0
+                    type: integer
                   pendingHost:
                     description: |-
                       PendingHost is the Host (CR name) an in-flight, not yet confirmed Create is

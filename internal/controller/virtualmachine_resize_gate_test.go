@@ -109,18 +109,83 @@ func TestResizeGate_DoesNotFitIsRefused(t *testing.T) {
 	assert.Equal(t, 2*placementUnschedulableRetryInterval, res.RequeueAfter)
 }
 
-func TestResizeGate_ShrinkIsAlwaysApplied(t *testing.T) {
-	prov := runningRoutingProvider()
+// ─── shrinks wait for power-off on a clustered Provider (review N1) ──────────
+
+// overcommittedShrinkFixture: app holds 4 vCPU and asks for 1, on a host whose
+// pool is far over-committed (a shrink is never refused on capacity).
+func overcommittedShrinkFixture(t *testing.T, prov contracts.Provider, powerState infravirtrigaudiov1beta1.PowerState) *VirtualMachineReconciler {
+	t.Helper()
 	pool := hostPoolCR("pool-a", capNS, "prov-cluster")
-	pool.Spec.Overcommit = &infravirtrigaudiov1beta1.OvercommitRatios{CPU: "0.1"} // the host is far over-committed
-	providerCR := withRuntime(clusteredProviderCR("prov-cluster", capNS))
-	r := newTestReconciler(coverageTestScheme(t), &stubResolver{provider: prov},
-		providerCR, pool, capHost("host-alpha", 8), smallVMClass(capNS), minimalVMImage(capNS),
-		sized("neighbour", 4), wantsCPU(sized("app", 4), 1))
+	pool.Spec.Overcommit = &infravirtrigaudiov1beta1.OvercommitRatios{CPU: "0.1"}
+	app := wantsCPU(sized("app", 4), 1)
+	app.Spec.PowerState = powerState
+	return newTestReconciler(coverageTestScheme(t), &stubResolver{provider: prov},
+		withRuntime(clusteredProviderCR("prov-cluster", capNS)), pool, capHost("host-alpha", 8),
+		smallVMClass(capNS), minimalVMImage(capNS), sized("neighbour", 4), app)
+}
+
+func TestShrink_RunningClusteredVMIsDeferred(t *testing.T) {
+	prov := runningRoutingProvider()
+	r := overcommittedShrinkFixture(t, prov, infravirtrigaudiov1beta1.PowerStateOn)
+	res, err := r.reconcileVM(context.Background(), getVM(t, r, "app"))
+	require.NoError(t, err)
+	assert.Empty(t, prov.reconfigureRefs, "no Reconfigure for a shrink while the VM runs")
+	assert.Empty(t, prov.powerRefs, "and the VM is never powered off for it")
+	assert.Equal(t, placementUnschedulableRetryInterval, res.RequeueAfter)
+
+	got := getVM(t, r, "app")
+	assert.Equal(t, int32(4), *got.Status.CurrentResources.CPU, "it keeps counting at its current size")
+	assert.Equal(t, int32(4), admittedFootprint(got, smallVMClass(capNS)).CPU)
+	c := reconfiguringCondition(got)
+	require.NotNil(t, c)
+	assert.Equal(t, k8s.ReasonShrinkPendingPowerOff, c.Reason)
+	assert.Contains(t, c.Message, "set spec.powerState: Off")
+}
+
+func TestShrink_MixedChangeWaitsAsAWhole(t *testing.T) {
+	prov := runningRoutingProvider()
+	app := sized("app", 2)
+	app.Spec.Resources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: i32p(3), MemoryMiB: i64p(2048)} // CPU up, memory down
+	r := resizeFixture(t, prov, app)
 	_, err := r.reconcileVM(context.Background(), getVM(t, r, "app"))
 	require.NoError(t, err)
-	require.Len(t, prov.reconfigureRefs, 1, "a shrink is never refused")
+	assert.Empty(t, prov.reconfigureRefs)
+	assert.Equal(t, k8s.ReasonShrinkPendingPowerOff, reconfiguringCondition(getVM(t, r, "app")).Reason)
+}
+
+func TestShrink_AppliedOncePoweredOff(t *testing.T) {
+	// The VM is found off while its spec still wants it on: the shrink is
+	// applied (offline) and recorded first, and nothing is powered in this
+	// reconcile; the next one powers it on as its spec asks.
+	prov := &routingProvider{describeResp: contracts.DescribeResponse{Exists: true, PowerState: string(contracts.PowerStateOff)}}
+	r := overcommittedShrinkFixture(t, prov, infravirtrigaudiov1beta1.PowerStateOn)
+	_, err := r.reconcileVM(context.Background(), getVM(t, r, "app"))
+	require.NoError(t, err)
+	require.Len(t, prov.reconfigureRefs, 1, "applied while off, even on an over-committed host")
+	assert.Empty(t, prov.powerRefs, "not powered on before the shrink is applied")
+	assert.Equal(t, int32(1), *getVM(t, r, "app").Status.CurrentResources.CPU, "recorded only after the provider applied it")
+
+	// Also when its spec wants it off.
+	prov = &routingProvider{describeResp: contracts.DescribeResponse{Exists: true, PowerState: string(contracts.PowerStateOff)}}
+	r = overcommittedShrinkFixture(t, prov, infravirtrigaudiov1beta1.PowerStateOff)
+	_, err = r.reconcileVM(context.Background(), getVM(t, r, "app"))
+	require.NoError(t, err)
+	require.Len(t, prov.reconfigureRefs, 1)
 	assert.Equal(t, int32(1), *getVM(t, r, "app").Status.CurrentResources.CPU)
+}
+
+func TestShrink_SingleHostIsUnchanged(t *testing.T) {
+	prov := runningRoutingProvider()
+	single := withRuntime(singleProviderCR("prov-single", capNS))
+	vm := clusterVM("small", capNS, single.Name)
+	vm.Status.ID = "small"
+	vm.Status.CurrentResources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: i32p(4), MemoryMiB: i64p(4096)}
+	vm.Spec.Resources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: i32p(1), MemoryMiB: i64p(4096)}
+	r := newTestReconciler(coverageTestScheme(t), &stubResolver{provider: prov}, single, smallVMClass(capNS), minimalVMImage(capNS), vm)
+	_, err := r.reconcileVM(context.Background(), getVM(t, r, "small"))
+	require.NoError(t, err)
+	require.Len(t, prov.reconfigureRefs, 1, "a single-host shrink is sent while running, as before")
+	assert.Nil(t, r.placements.Load())
 }
 
 func TestResizeGate_UnknownHostFailsClosed(t *testing.T) {
