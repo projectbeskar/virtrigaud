@@ -293,6 +293,15 @@ func TestClusteredCapacity_CommittedSources(t *testing.T) {
 		{name: "a pendingHost-only VM counts", others: []client.Object{bound("a"), withPlacement(capVM("p"), "", "host-alpha")}, fits: false},
 		{name: "host == pendingHost counts once", others: []client.Object{withPlacement(capVM("x"), "host-alpha", "host-alpha")}, fits: true},
 		{name: "a VM being deleted still counts", others: []client.Object{bound("a"), deleting(bound("d"))}, fits: false},
+		{
+			name: "a VM being deleted whose finalizer is gone does not count (a foreign finalizer holds nothing)",
+			others: []client.Object{bound("a"), func() client.Object {
+				vm := deleting(bound("gone"))
+				vm.Finalizers = []string{"example.com/someone-else"}
+				return vm
+			}()},
+			fits: true,
+		},
 		{name: "another namespace's VM on this Provider counts", others: []client.Object{bound("a"), otherNS(bound("t"))}, fits: false},
 		{
 			name: "a VM of another Provider on a same-named host does not count",

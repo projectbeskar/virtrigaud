@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -259,7 +260,9 @@ func (r *HostReconciler) vmsUsingHost(ctx context.Context, host *infravirtrigaud
 		if placementProviderKey(vm) != provider {
 			continue
 		}
-		if boundHost(vm) == host.Name || pendingHost(vm) == host.Name {
+		// placementHosts is empty for a VM being deleted whose finalizer is
+		// gone: another controller's finalizer must not block decommissioning.
+		if slices.Contains(placementHosts(vm), host.Name) {
 			users = append(users, vm.Namespace+"/"+vm.Name)
 		}
 	}

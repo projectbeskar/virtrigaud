@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
+	"github.com/projectbeskar/virtrigaud/internal/k8s"
 	"github.com/projectbeskar/virtrigaud/internal/scheduler"
 	"github.com/projectbeskar/virtrigaud/internal/scheduler/assume"
 )
@@ -91,9 +92,22 @@ func vmSchedulingUID(vm *infravirtrigaudiov1beta1.VirtualMachine) string {
 	return vm.Namespace + "/" + vm.Name
 }
 
+// holdsPlacement reports whether vm can still hold resources on a host: every
+// VM except one being deleted whose VirtualMachine finalizer is already gone.
+// Such a VM's hypervisor VM has been deleted (or orphaned) and only another
+// controller's finalizer keeps the object; that foreign finalizer must neither
+// keep capacity committed nor block a Host's decommissioning.
+func holdsPlacement(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
+	return vm.DeletionTimestamp.IsZero() || k8s.HasFinalizer(vm, infravirtrigaudiov1beta1.VirtualMachineFinalizer)
+}
+
 // placementHosts returns the hosts vm holds resources on: its confirmed
-// binding and its pending host, the same host listed once.
+// binding and its pending host, the same host listed once. It is empty for a
+// VM that no longer holds a placement (holdsPlacement).
 func placementHosts(vm *infravirtrigaudiov1beta1.VirtualMachine) []string {
+	if !holdsPlacement(vm) {
+		return nil
+	}
 	var hosts []string
 	if h := boundHost(vm); h != "" {
 		hosts = append(hosts, h)
@@ -177,7 +191,9 @@ func (r *VirtualMachineReconciler) committedPlacements(
 	classes := map[types.NamespacedName]*infravirtrigaudiov1beta1.VMClass{}
 	for i := range vms.Items {
 		other := &vms.Items[i]
-		if placementProviderKey(other) != provider {
+		// A VM being deleted whose finalizer is gone holds nothing any more;
+		// leaving it out of recorded also settles any assumption of it.
+		if placementProviderKey(other) != provider || !holdsPlacement(other) {
 			continue
 		}
 		uid := vmSchedulingUID(other)

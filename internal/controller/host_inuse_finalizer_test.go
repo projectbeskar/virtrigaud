@@ -162,3 +162,27 @@ func TestHostReconciler_InUseKeysOnThePlacementProvider(t *testing.T) {
 		})
 	}
 }
+
+// TestHostReconciler_ForeignFinalizerDoesNotBlockDecommissioning (L5): a VM
+// being deleted whose VirtualMachine finalizer is gone — only another
+// controller's finalizer keeps the object — no longer holds the Host.
+func TestHostReconciler_ForeignFinalizerDoesNotBlockDecommissioning(t *testing.T) {
+	ctx := context.Background()
+	host := hostCR("host-alpha", "prov-a", nil)
+	host.Finalizers = []string{infravirtrigaudiov1beta1.HostInUseFinalizer}
+	vm := vmPlacedOn("default", "leaving", "prov-a", "", infravirtrigaudiov1beta1.PlacementStatus{Host: "host-alpha"})
+	vm.Finalizers = []string{"example.com/someone-else"}
+	r := newHostReconciler(coverageTestScheme(t), &stubResolver{provider: healthyHostStub()},
+		clusterProvider("prov-a"), host, vm)
+	require.NoError(t, r.Delete(ctx, vm)) // kept by the foreign finalizer, with a deletionTimestamp
+
+	cpu, _, err := committedOnHost(ctx, r.Client, types.NamespacedName{Namespace: "default", Name: "prov-a"}, "host-alpha")
+	require.NoError(t, err)
+	assert.Zero(t, cpu, "it commits nothing")
+
+	require.NoError(t, r.Delete(ctx, getHost(t, r.Client, "host-alpha")))
+	_, err = r.Reconcile(ctx, hostReq("host-alpha"))
+	require.NoError(t, err)
+	getErr := r.Get(ctx, types.NamespacedName{Namespace: "default", Name: "host-alpha"}, &infravirtrigaudiov1beta1.Host{})
+	assert.True(t, apierrors.IsNotFound(getErr), "and does not block the Host's deletion")
+}
