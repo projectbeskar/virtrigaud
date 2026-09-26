@@ -39,6 +39,14 @@ Read the upgrade guide before upgrading:
   pre-upgrade VM.
   → [Upgrade guide](docs/upgrading.md#breaking-changes)
 
+- **libvirt linked clones are disabled.** A `VMClone` with
+  `spec.options.type: LinkedClone` through a libvirt Provider fails with
+  `LinkedCloneUnsupported`: a linked clone reads its source VM's live disk, and
+  powering the source on corrupts the clone. Use `FullClone` (the default).
+  Existing linked clones keep working, but their source cannot be deleted or
+  reverted while the clones exist.
+  → [Upgrade guide](docs/upgrading.md#breaking-changes)
+
 See the full breaking-change table, required upgrade order (CRDs → manager →
 providers), and rollback caveats in
 **[docs/upgrading.md](docs/upgrading.md)**.

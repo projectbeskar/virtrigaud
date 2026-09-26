@@ -1,20 +1,53 @@
 # libvirt clones and the linked-clone dependency
 
-This page describes how the libvirt provider clones a VM (`VMClone`), how a
-**linked** clone depends on its source VM, and what the provider refuses to do
-while that dependency exists. It applies to single-host libvirt Providers; a
-clustered (`topology: cluster`) libvirt Provider does not clone yet.
+This page describes how the libvirt provider clones a VM (`VMClone`), why
+**linked** clones are disabled in this release, how an existing linked clone
+depends on its source VM, and what the provider refuses to do while that
+dependency exists. It applies to single-host libvirt Providers; a clustered
+(`topology: cluster`) libvirt Provider does not clone yet.
 
 ## Full and linked clones
 
-| | Full clone (`spec.linked: false`) | Linked clone (`spec.linked: true`) |
+| | Full clone (`spec.options.type: FullClone`, the default) | Linked clone (`spec.options.type: LinkedClone`) |
 |---|---|---|
+| Status on libvirt | **Supported** | **Disabled in this release** (see below); linked clones made by an earlier release keep working |
 | Disk | An independent copy of the source's primary disk (`qemu-img convert`, flattening any backing chain) | A thin qcow2 overlay whose **backing file is the source VM's disk** (`qemu-img create -f qcow2 -b <source disk>`) |
 | Speed and space | Slow, full size | Fast, only the clone's own writes |
 | Dependency | None: deleting either VM never touches the other's disk | The clone reads every block it has not written from the source's disk, for as long as it exists |
 
-Both are named `<target namespace>.<target name>` on the host, with the disk
-`<pool directory>/<domain>-disk.qcow2`, and are left powered off.
+A clone is named `<target namespace>.<target name>` on the host, with the disk
+`<pool directory>/<domain>-disk.qcow2`, and is left powered off.
+
+## Linked clones are disabled
+
+A linked clone's backing file is the source VM's **live** disk, and nothing
+freezes it. If the source is powered on while a linked clone of it exists —
+typically while the clone is shut off — the source's guest writes to the very
+file the clone reads its unwritten blocks from, and the clone's data is
+silently corrupted. No provider-side check can catch this — no delete or
+snapshot is involved, just a power-on — so libvirt linked clones are
+**disabled** until the base is frozen at clone time.
+
+- The libvirt provider reports `supportsLinkedClones: false`, so a `VMClone`
+  with `spec.options.type: LinkedClone` through it fails before any provider call:
+  `Phase=Failed`, `Ready=False` / `Failed=True` with reason
+  `LinkedCloneUnsupported`, a `Warning` event, and a message naming
+  `spec.options.type: FullClone`. Recreate the `VMClone` as a full clone.
+- A linked `Clone` request that still reaches the provider (a manager that could
+  not read the provider's capabilities) is refused with `InvalidArgument`
+  ("linked clones are disabled on libvirt in this release: the source disk is
+  not frozen, so the source's writes would corrupt the clone; use FullClone")
+  before any command runs on the host. It is not counted toward the Provider's
+  circuit breaker.
+- Full clones are unaffected. vSphere linked clones are unaffected.
+- **Existing linked clones** (made by an earlier release) keep working and are
+  not touched. The guards below still protect them. Keep their source VMs
+  powered off.
+
+**Follow-up:** re-enable libvirt linked clones once the base is frozen at clone
+time — either by taking an external snapshot of the source at clone time (the
+clone is backed by the frozen snapshot base while the source continues in a new
+overlay) or by cloning only from an immutable template image.
 
 ## The linked-clone dependency
 
@@ -124,12 +157,10 @@ VM keeps its backing file.
 
 ## Known limitations
 
-- Powering on the **source** VM of a linked clone lets its guest write to the
-  clone's backing file, which corrupts the clone. The provider does not prevent
-  it; keep a linked clone's source powered off (a template).
-- A linked clone created **while** its source is being deleted can be left with
-  a missing backing file: the dependency check runs before the source's domain
-  is removed, not under a lock shared with `Clone`.
+- Powering on the **source** VM of an existing linked clone lets its guest
+  write to the clone's backing file, which corrupts the clone. The provider does
+  not prevent it — this is why new linked clones are disabled; keep the source
+  of an existing linked clone powered off.
 - On a clustered Provider, snapshots are not routed to hosts yet; when they
   are, the same dependency check applies on the VM's host.
 
@@ -140,6 +171,9 @@ bug: **deleting a running linked clone deleted its source VM's disk**, because
 Delete removed every file its definition listed, including the backing file.
 After upgrading:
 
+- **libvirt `LinkedClone` is refused** (`LinkedCloneUnsupported`): use
+  `FullClone`. Existing linked clones keep working, but their source VMs cannot
+  be deleted or reverted while the clones exist;
 - a source VM with linked clones can no longer be deleted, reverted, or
   snapshotted until its clones are deleted (see above);
 - new clone disks are `0660 libvirt-qemu:kvm` — make sure the provider's SSH
