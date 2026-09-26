@@ -280,6 +280,43 @@ func TestVMClone_LinkedBlockedWhenUnsupported(t *testing.T) {
 	require.NotNil(t, ready)
 	assert.Equal(t, metav1.ConditionFalse, ready.Status)
 	assert.Equal(t, cloneReasonLinkedUnsupported, ready.Reason)
+	assert.Contains(t, ready.Message, "use spec.options.type: FullClone", "the way out is named")
+	failed := readyCondition(got.Status.Conditions, infrav1beta1.VMCloneConditionFailed)
+	require.NotNil(t, failed)
+	assert.Equal(t, metav1.ConditionTrue, failed.Status)
+	assert.Equal(t, cloneReasonLinkedUnsupported, failed.Reason)
+}
+
+// TestVMClone_FullCloneUnaffectedWithoutLinkedSupport: the default FullClone
+// through a provider that does not support linked clones (libvirt disables
+// them) is issued and completes as before.
+func TestVMClone_FullCloneUnaffectedWithoutLinkedSupport(t *testing.T) {
+	s := cloneTestScheme(t)
+	ns := "default"
+
+	prov := runningProvider(ns, "prov-1")
+	src := sourceVMWithID(ns, "src-vm", "prov-1", "vm-source-123")
+	clone := &infrav1beta1.VMClone{
+		ObjectMeta: metav1.ObjectMeta{Name: "clone-full", Namespace: ns},
+		Spec: infrav1beta1.VMCloneSpec{
+			Source: infrav1beta1.CloneSource{VMRef: &infrav1beta1.LocalObjectReference{Name: "src-vm"}},
+			Target: infrav1beta1.VMCloneTarget{Name: "clone-target"},
+		},
+	}
+	cp := &clonerProvider{
+		caps:      contracts.Capabilities{SupportsLinkedClones: false},
+		cloneResp: contracts.CloneResponse{TargetVmID: "vm-clone-999"},
+	}
+	r := newCloneReconciler(s, &stubResolver{provider: cp}, prov, src, clone)
+
+	reconcileTwice(t, r, client.ObjectKeyFromObject(clone))
+
+	got := &infrav1beta1.VMClone{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(clone), got))
+	assert.Equal(t, infrav1beta1.ClonePhaseReady, got.Status.Phase)
+	assert.Equal(t, infrav1beta1.CloneTypeFullClone, got.Status.ActualCloneType)
+	require.Equal(t, 1, cp.cloneCnt)
+	assert.False(t, cp.lastClone.Linked)
 }
 
 // TestVMClone_LinkedFailsOpen_NonReporter: type=LinkedClone with a provider that

@@ -9,7 +9,9 @@
 #     provider.
 #   - FullClone (default) and LinkedClone are supported. LinkedClone is
 #     pre-checked against the provider's reported capabilities; a provider
-#     that does not support linked clones will set Phase=Failed.
+#     that does not support linked clones will set Phase=Failed
+#     (reason LinkedCloneUnsupported). The libvirt provider refuses
+#     LinkedClone in this release (docs/libvirt-clones.md): use FullClone.
 #
 # The controller produces a VirtualMachine CR named spec.target.name, seeds
 # its Status.ID with the provider's cloned VM ID, and labels it

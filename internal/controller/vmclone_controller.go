@@ -730,8 +730,10 @@ func (r *VMCloneReconciler) gateLinkedClone(
 		return false, ctrl.Result{}
 	}
 	if !caps.SupportsLinkedClones {
+		// e.g. libvirt, which disables linked clones until the source disk is
+		// frozen at clone time.
 		return true, r.markFailed(ctx, clone, cloneReasonLinkedUnsupported,
-			"provider does not support linked clones")
+			fmt.Sprintf("provider does not support linked clones; use spec.options.type: %s", infrav1beta1.CloneTypeFullClone))
 	}
 	return false, ctrl.Result{}
 }

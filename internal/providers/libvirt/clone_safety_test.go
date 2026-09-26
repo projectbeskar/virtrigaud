@@ -26,42 +26,83 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
+	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
-// These tests pin the clone hardening of the delete-safety fix: a clone's disk
-// is never world-writable, and its UEFI varstore is never written through a
-// symlink or over another domain's varstore.
+// These tests pin the clone hardening of the delete-safety fix: linked clones
+// are refused, a clone's disk is never world-writable, and its UEFI varstore
+// is never written through a symlink or over another domain's varstore.
 
-// cloneReq clones team-a.web into team-b/copy.
-func cloneReq(linked bool) contracts.CloneRequest {
+// cloneReq full-clones team-a.web into team-b/copy.
+func cloneReq() contracts.CloneRequest {
 	return contracts.CloneRequest{
 		Source:     contracts.VMRef{ID: "team-a.web"},
 		TargetName: "copy",
 		TargetVM:   contracts.ObjectIdentity{Namespace: "team-b", Name: "copy"},
-		Linked:     linked,
 	}
 }
 
-func TestClone_DiskIsNotWorldWritable(t *testing.T) {
-	for _, linked := range []bool{true, false} {
-		t.Run(fmt.Sprintf("linked=%v", linked), func(t *testing.T) {
-			c := newCreateHost(t)
-			_, err := c.p.Create(context.Background(), c.createReq(ownerTeamA, c.file(c.images, "ubuntu.qcow2")))
-			require.NoError(t, err)
-			c.resetLogs()
+// TestClone_LinkedIsRefusedBeforeAnyHostCommand pins that libvirt linked
+// clones are disabled: a Linked request is an sdk InvalidSpec (gRPC
+// InvalidArgument) naming FullClone, and no host command runs — the provider's
+// host connection refuses and counts any call.
+func TestClone_LinkedIsRefusedBeforeAnyHostCommand(t *testing.T) {
+	p := &Provider{virshProvider: newUnroutableVirshProvider()}
+	req := cloneReq()
+	req.Linked = true
 
-			_, err = c.p.Clone(context.Background(), cloneReq(linked))
-			require.NoError(t, err)
-			disk := filepath.Join(c.images, "team-b.copy-disk.qcow2")
-			sudo := splitLines(c.log("sudo"))
-			assert.Contains(t, sudo, "chown libvirt-qemu:kvm "+disk)
-			assert.Contains(t, sudo, "chmod 0660 "+disk, "owner and group only")
-			for _, l := range sudo {
-				assert.NotContains(t, l, "777", "no world-writable guest disk on a shared host")
-			}
-		})
+	_, err := p.Clone(context.Background(), req)
+	require.Error(t, err)
+	assert.Equal(t, codes.InvalidArgument, status.Code(err), "%v", err)
+	assert.Contains(t, err.Error(), "linked clones are disabled on libvirt in this release")
+	assert.Contains(t, err.Error(), "use FullClone")
+
+	_, err = NewServer(p).Clone(context.Background(), &providerv1.CloneRequest{
+		SourceVmId: "team-a.web", TargetName: "copy", Linked: true,
+		TargetVm: &providerv1.ObjectIdentity{Namespace: "team-b", Name: "copy"},
+	})
+	require.Error(t, err)
+	assert.Equal(t, codes.InvalidArgument, status.Code(err), "a non-retryable answer the breaker never counts")
+	assert.Contains(t, status.Convert(err).Message(), "use FullClone")
+	assert.Zero(t, p.virshProvider.unroutableHits.Load(), "no host command may run")
+}
+
+func TestClone_FullCloneIsUnchanged(t *testing.T) {
+	c := newCreateHost(t)
+	_, err := c.p.Create(context.Background(), c.createReq(ownerTeamA, c.file(c.images, "ubuntu.qcow2")))
+	require.NoError(t, err)
+	c.resetLogs()
+
+	resp, err := c.p.Clone(context.Background(), cloneReq())
+	require.NoError(t, err)
+	assert.Equal(t, "team-b.copy", resp.TargetVmID)
+	disk := filepath.Join(c.images, "team-b.copy-disk.qcow2")
+	assert.FileExists(t, disk)
+	assert.Contains(t, c.log("qemu-img"), "convert -O qcow2 "+filepath.Join(c.images, "team-a.web-disk.qcow2")+" "+disk,
+		"an independent, flattened copy")
+	assert.NotContains(t, c.log("qemu-img"), "create", "no overlay")
+	assert.NoFileExists(t, disk+".chain.json", "no backing file")
+	assert.Contains(t, c.domainXML("team-b.copy"), "<source file='"+disk+"'/>")
+}
+
+func TestClone_DiskIsNotWorldWritable(t *testing.T) {
+	c := newCreateHost(t)
+	_, err := c.p.Create(context.Background(), c.createReq(ownerTeamA, c.file(c.images, "ubuntu.qcow2")))
+	require.NoError(t, err)
+	c.resetLogs()
+
+	_, err = c.p.Clone(context.Background(), cloneReq())
+	require.NoError(t, err)
+	disk := filepath.Join(c.images, "team-b.copy-disk.qcow2")
+	sudo := splitLines(c.log("sudo"))
+	assert.Contains(t, sudo, "chown libvirt-qemu:kvm "+disk)
+	assert.Contains(t, sudo, "chmod 0660 "+disk, "owner and group only")
+	for _, l := range sudo {
+		assert.NotContains(t, l, "777", "no world-writable guest disk on a shared host")
 	}
 }
 
@@ -93,7 +134,7 @@ func TestClone_NVRAMCopyNeverFollowsSymlinks(t *testing.T) {
 	c := newCreateHost(t)
 	src, target := c.uefiSource()
 
-	_, err := c.p.Clone(context.Background(), cloneReq(true))
+	_, err := c.p.Clone(context.Background(), cloneReq())
 	require.NoError(t, err)
 	sudo := splitLines(c.log("sudo"))
 	assert.Contains(t, sudo, "dd if="+src+" of="+target+" iflag=nofollow oflag=nofollow status=none",
@@ -131,7 +172,7 @@ func TestClone_NVRAMTargetSymlinkIsRefused(t *testing.T) {
 			}
 			require.NoError(t, os.Symlink(victim, target))
 
-			_, err := c.p.Clone(context.Background(), cloneReq(true))
+			_, err := c.p.Clone(context.Background(), cloneReq())
 			c.requireCloneRefusedBeforeWriting(err, "is a symbolic link")
 		})
 	}
@@ -144,7 +185,7 @@ func TestClone_NVRAMTargetInUseIsRefused(t *testing.T) {
 	x := fmt.Sprintf("<domain type='kvm'><name>other</name><uuid>%s</uuid><os><nvram>%s</nvram></os><devices/></domain>", uuidB, target)
 	c.define("h1", "other", uuidB, x)
 
-	_, err := c.p.Clone(context.Background(), cloneReq(true))
+	_, err := c.p.Clone(context.Background(), cloneReq())
 	c.requireCloneRefusedBeforeWriting(err, "is in use by another domain")
 }
 
@@ -153,7 +194,7 @@ func TestClone_NVRAMStaleTargetIsOverwritten(t *testing.T) {
 	src, target := c.uefiSource()
 	require.NoError(t, os.WriteFile(target, []byte("left by a failed clone"), 0o600))
 
-	_, err := c.p.Clone(context.Background(), cloneReq(true))
+	_, err := c.p.Clone(context.Background(), cloneReq())
 	require.NoError(t, err)
 	assert.Contains(t, splitLines(c.log("sudo")), "dd if="+src+" of="+target+" iflag=nofollow oflag=nofollow status=none")
 }

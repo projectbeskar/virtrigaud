@@ -29,7 +29,23 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
+	sdkerrors "github.com/projectbeskar/virtrigaud/sdk/provider/errors"
 )
+
+// linkedClonesDisabledMessage is the refusal of a linked clone (CloneRequest
+// with Linked=true). A linked clone's disk is a qcow2 overlay whose backing file
+// is the source VM's live disk, and nothing freezes that disk: powering the
+// source on while the clone is shut off writes to the file the clone reads and
+// corrupts the clone — a hazard the disk dependency guard (disk_dependents.go)
+// cannot catch, since no delete or snapshot is involved. Linked clones stay
+// disabled until the base is frozen at clone time (an external snapshot of the
+// source, or cloning only from an immutable template image). The refusal is an
+// sdk InvalidSpec (gRPC InvalidArgument: non-retryable, never counted toward
+// the manager's circuit breaker); GetCapabilities reports
+// SupportsLinkedClones=false, so the manager refuses the VMClone
+// (LinkedCloneUnsupported) before calling Clone at all.
+const linkedClonesDisabledMessage = "linked clones are disabled on libvirt in this release: the source disk is not frozen, " +
+	"so the source's writes would corrupt the clone; use FullClone"
 
 // clonePoolName is the storage pool used for cloned disks. Clone is an MVP that
 // operates within the provider's default pool, mirroring Create/GetDiskInfo
@@ -80,6 +96,9 @@ var (
 //     space-efficient, but the clone is lifecycle-bound to the source: the
 //     source disk MUST NOT be modified or deleted while the overlay exists, or
 //     the clone is corrupted. The manager gates this on SupportsLinkedClones.
+//     DISABLED in this release (linkedClonesDisabledMessage): a Linked request
+//     is refused before any host command runs; the overlay code below stays
+//     for when the base is frozen at clone time.
 //
 // The target domain is defined with a fresh UUID and fresh MAC address(es) by
 // rewriting the source domain's XML, so the two domains never collide. The
@@ -97,6 +116,12 @@ func (p *Provider) Clone(ctx context.Context, req contracts.CloneRequest) (contr
 	}
 	if req.TargetName == "" {
 		return contracts.CloneResponse{}, contracts.NewInvalidSpecError("clone target name is required", nil)
+	}
+	// Linked clones are disabled (see linkedClonesDisabledMessage): refused
+	// before any host command runs. Existing linked clones are untouched.
+	if req.Linked {
+		log.Printf("WARN Refusing linked clone of %s -> %s: linked clones are disabled on libvirt in this release", sourceID, req.TargetName)
+		return contracts.CloneResponse{}, sdkerrors.NewInvalidSpec("%s", linkedClonesDisabledMessage)
 	}
 	// Name the target domain. A (legacy) target name virsh would resolve as a
 	// domain ID/UUID would make every later by-name operation on the clone

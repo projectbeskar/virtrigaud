@@ -142,27 +142,42 @@ func (c *createHost) resetLogs() {
 }
 
 // linkedPair creates team-a/web on the fake host and clones it into
-// team-b/copy (linked or full). It returns both disk paths.
+// team-b/copy — a full clone through Clone, or a linked clone the way an
+// earlier release made one (legacyLinkedClone: Clone refuses linked clones
+// now, but existing ones must stay protected). It returns both disk paths.
 func (c *createHost) linkedPair(linked bool) (src, clone string) {
 	c.t.Helper()
 	ctx := context.Background()
 	base := c.file(c.images, "ubuntu.qcow2")
 	_, err := c.p.Create(ctx, c.createReq(ownerTeamA, base))
 	require.NoError(c.t, err)
-	resp, err := c.p.Clone(ctx, contracts.CloneRequest{
-		Source:     contracts.VMRef{ID: "team-a.web"},
-		TargetName: "copy",
-		TargetVM:   contracts.ObjectIdentity{Namespace: "team-b", Name: "copy"},
-		Linked:     linked,
-	})
-	require.NoError(c.t, err)
-	require.Equal(c.t, "team-b.copy", resp.TargetVmID)
 	src = filepath.Join(c.images, "team-a.web-disk.qcow2")
 	clone = filepath.Join(c.images, "team-b.copy-disk.qcow2")
+	if linked {
+		c.legacyLinkedClone(src, clone)
+	} else {
+		resp, err := c.p.Clone(ctx, cloneReq())
+		require.NoError(c.t, err)
+		require.Equal(c.t, "team-b.copy", resp.TargetVmID)
+	}
 	require.FileExists(c.t, src)
 	require.FileExists(c.t, clone)
 	c.resetLogs()
 	return src, clone
+}
+
+// legacyLinkedClone makes team-b.copy a linked clone of team-a.web with the
+// steps Clone took before linked clones were disabled: a qcow2 overlay backed
+// by the source disk, and the source's definition rewritten to use it.
+func (c *createHost) legacyLinkedClone(src, clone string) {
+	c.t.Helper()
+	ctx := context.Background()
+	require.NoError(c.t, c.p.createLinkedOverlay(ctx, src, "qcow2", clone))
+	res, err := c.vp.runVirshCommand(ctx, "dumpxml", "team-a.web")
+	require.NoError(c.t, err)
+	x, _, _, err := rewriteDomainXMLForClone(res.Stdout, "team-b.copy", src, clone)
+	require.NoError(c.t, err)
+	require.NoError(c.t, c.p.defineDomainFromXML(ctx, c.vp, "team-b.copy", x))
 }
 
 // requireDependentsRefusal asserts err is the dependency guard's refusal of op
