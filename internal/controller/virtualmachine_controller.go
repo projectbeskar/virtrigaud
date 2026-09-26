@@ -120,6 +120,12 @@ type clusterPlacement struct {
 	hostID   string
 	poolName string
 	reason   string
+	// resources is the size the scheduler admitted the VM at, recorded as
+	// status.placement.pendingResources with the pending host.
+	resources scheduler.ResourceRequest
+	// memoryCeilingMiB is the balloon ceiling the Create provisions (0: none),
+	// recorded as status.placement.memoryCeilingMiB.
+	memoryCeilingMiB int64
 }
 
 // Clustered-VM lifecycle cadences (ADR-0007 Addendum A). Each is deliberately
@@ -646,6 +652,15 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		desiredPowerState = infravirtrigaudiov1beta1.PowerStateOn
 	}
 
+	// A clustered VM observed powered off with a shrink pending gets it applied
+	// now, before anything powers it on again (review N1: a running clustered
+	// VM is never shrunk). The operator never powers a VM off for this.
+	if ref.Routed() && poweredOff(desc) && deps.classRefusal == nil {
+		if res, handled, err := r.applyPendingShrinkWhileOff(ctx, vm, providerInstance, ref, provider, vmClass, vmImage, networks); handled {
+			return res, err
+		}
+	}
+
 	if desc.PowerState != string(desiredPowerState) {
 		logger.Info("Power state mismatch, adjusting", "current", desc.PowerState, "desired", desiredPowerState)
 		return r.adjustPowerState(ctx, vm, providerInstance, ref, string(desiredPowerState))
@@ -679,9 +694,13 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 			"currentMemoryMiB", r.getCurrentMemoryMiB(vm),
 			"desiredMemoryMiB", desiredMemoryMiB)
 		// A clustered VM's resize-up is admitted against its host's free
-		// capacity first (ADR-0007 Addendum A, scheduler-accuracy amendment);
-		// a shrink, and every single-host / thin-client VM, goes straight on.
+		// capacity first (ADR-0007 Addendum A, scheduler-accuracy amendment),
+		// and a shrink of a running clustered VM waits until it is powered off
+		// (review N1). Every single-host / thin-client VM goes straight on.
 		if ref.Routed() {
+			if res, deferred := r.deferClusteredShrink(ctx, vm, vmClass, desc); deferred {
+				return res, nil
+			}
 			res, admitted, err := r.admitClusteredResize(ctx, vm, provider, vmClass, ref.HostID)
 			if err != nil || !admitted {
 				return res, err
@@ -1055,7 +1074,13 @@ func (r *VirtualMachineReconciler) createVM(
 			host = p.hostID
 		} else {
 			// A create is already in flight on host: reuse it as-is. The
-			// scheduler is NOT re-run for such a VM (A2).
+			// scheduler is NOT re-run for such a VM (A2). The CRD freezes the
+			// VM's classRef and resources while it is pending, but not the
+			// VMClass's content: a retry that has grown beyond the size it was
+			// admitted at is not sent (review N3).
+			if res, grown := r.refuseGrownPendingCreate(ctx, vm, host, req); grown {
+				return res, nil
+			}
 			logger.Info("Retrying clustered create on its pending host (not re-scheduling)", "host", host)
 		}
 		req.TargetHostID = host
@@ -1302,11 +1327,15 @@ func (r *VirtualMachineReconciler) resolveClusterPlacement(
 	// (effectiveResources: the VMClass with any spec.resources override
 	// applied, no duplicate parse) — what Create sends, and the size this VM
 	// counts at while its create is pending (pendingFootprint), when the CRD
-	// keeps both immutable. RequiredNetworks are the VM's resolved network
-	// identities as D6 host-visibility constraints. RequiredStoragePools and
+	// keeps both immutable — with memory raised to the balloon ceiling the
+	// Create provisions when the VMClass enables memory hot-add (review N1).
+	// RequiredNetworks are the VM's resolved network identities as D6
+	// host-visibility constraints. RequiredStoragePools and
 	// RequiredMachineType are deliberately left empty — see the TODO below.
+	effective := withMinimum(scheduler.ResourceRequest{CPU: req.Class.CPU, MemoryMiB: int64(req.Class.MemoryMiB)})
+	ceiling := memoryCeilingFor(requestsMemoryHotAdd(req), effective.MemoryMiB)
 	schedReq := scheduler.Request{
-		Resources:        withMinimum(scheduler.ResourceRequest{CPU: req.Class.CPU, MemoryMiB: int64(req.Class.MemoryMiB)}),
+		Resources:        withMemoryCeiling(effective, ceiling),
 		Policy:           policy,
 		Pool:             pool.Spec,
 		Candidates:       candidates,
@@ -1332,14 +1361,11 @@ func (r *VirtualMachineReconciler) resolveClusterPlacement(
 	// within placementLockWait requeues shortly instead of parking its worker.
 	providerNN := types.NamespacedName{Namespace: providerCR.Namespace, Name: providerCR.Name}
 	providerKey := providerNN.String()
-	assumptions := r.placementAssumptions()
-	unlock, locked := assumptions.LockWithin(ctx, providerKey, placementLockWait)
+	result, locked, err := r.scheduleUnderLock(ctx, r.placementAssumptions(), providerKey, providerNN, vm, &schedReq)
 	if !locked {
 		logger.V(1).Info("Provider's placement lock is busy; requeueing", "provider", providerKey)
 		return nil, ctrl.Result{RequeueAfter: placementLockBusyRetry()}, nil
 	}
-	result, err := r.scheduleAndAssume(ctx, assumptions, providerKey, providerNN, vm, &schedReq)
-	unlock()
 	var infraErr *placementInfraError
 	if stderrors.As(err, &infraErr) {
 		return nil, ctrl.Result{}, infraErr.err
@@ -1400,7 +1426,8 @@ func (r *VirtualMachineReconciler) resolveClusterPlacement(
 	r.unschedulable.reset(vmSchedulingUID(vm))
 	logger.Info("Scheduled VM onto clustered host",
 		"vm", vm.Name, "pool", pool.Name, "host", result.HostID, "reason", result.Reason)
-	return &clusterPlacement{hostID: result.HostID, poolName: pool.Name, reason: result.Reason}, ctrl.Result{}, nil
+	return &clusterPlacement{hostID: result.HostID, poolName: pool.Name, reason: result.Reason,
+		resources: effective, memoryCeilingMiB: ceiling}, ctrl.Result{}, nil
 }
 
 // requiredNetworksForScheduling derives the ADR-0007 D6 network-visibility

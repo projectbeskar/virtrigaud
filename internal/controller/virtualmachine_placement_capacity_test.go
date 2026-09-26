@@ -1095,3 +1095,72 @@ func TestClusteredCapacity_BusyLockRequeues(t *testing.T) {
 	assert.Less(t, res.RequeueAfter, placementLockBusyRetryBase+time.Second)
 	assert.Zero(t, r.placementAssumptions().Len())
 }
+
+// ─── the admitted size of a pending create (review N3) ───────────────────────
+
+// TestPendingCreate_AdmittedSizeIsRecordedAndEnforced: the pendingHost write
+// records the admitted size; a retry after the VMClass grew is not sent (the
+// pending host is kept); a retry at the admitted size or smaller is sent, and
+// the bind clears the record.
+func TestPendingCreate_AdmittedSizeIsRecordedAndEnforced(t *testing.T) {
+	ctx := context.Background()
+	vm := capVM("growing")
+	r := newTestReconciler(coverageTestScheme(t), &stubResolver{provider: &concurrentCreateProvider{}},
+		append(capBase(), capHost("host-alpha", 16), vm)...)
+	providerCR := clusteredProviderCR("prov-cluster", capNS)
+
+	// First attempt: scheduled and recorded, the Create fails transiently.
+	failing := &recordingCreateProvider{err: stderrors.New("transient")}
+	_, err := r.createVM(ctx, readVM(t, r, "growing"), failing, providerCR, smallVMClass(capNS), minimalVMImage(capNS), nil)
+	require.NoError(t, err)
+	stored := readVM(t, r, "growing")
+	require.NotNil(t, stored.Status.Placement)
+	require.Equal(t, "host-alpha", stored.Status.Placement.PendingHost)
+	require.Equal(t, &infravirtrigaudiov1beta1.PlacementResources{CPU: 2, MemoryMiB: 4096}, stored.Status.Placement.PendingResources)
+
+	// Its VMClass grows: the retry is not sent and the pending host is kept.
+	grown := smallVMClass(capNS)
+	grown.Spec.CPU = 8
+	blocked := &recordingCreateProvider{resp: contracts.CreateResponse{ID: "growing"}}
+	res, err := r.createVM(ctx, readVM(t, r, "growing"), blocked, providerCR, grown, minimalVMImage(capNS), nil)
+	require.NoError(t, err)
+	assert.Zero(t, blocked.createCalls, "a grown pending create is not sent")
+	assert.Equal(t, placementConfigRetryInterval, res.RequeueAfter)
+	stored = readVM(t, r, "growing")
+	assert.Equal(t, "host-alpha", stored.Status.Placement.PendingHost, "the pending host is kept (a domain may exist there)")
+	c := placedCondition(stored)
+	require.NotNil(t, c)
+	assert.Equal(t, k8s.ReasonPendingSizeGrew, c.Reason)
+	assert.Contains(t, c.Message, "admitted at 2 vCPU and 4096 MiB, but its VMClass now asks for 8 vCPU")
+
+	// Meanwhile it still counts at its admitted size, not the grown one.
+	assert.Equal(t, scheduler.ResourceRequest{CPU: 2, MemoryMiB: 4096}, admittedFootprint(stored, grown))
+
+	// A smaller size is sent; the bind clears the record.
+	smaller := smallVMClass(capNS)
+	smaller.Spec.CPU = 1
+	sent := &recordingCreateProvider{resp: contracts.CreateResponse{ID: "growing"}}
+	_, err = r.createVM(ctx, readVM(t, r, "growing"), sent, providerCR, smaller, minimalVMImage(capNS), nil)
+	require.NoError(t, err)
+	assert.Equal(t, 1, sent.createCalls)
+	stored = readVM(t, r, "growing")
+	assert.Equal(t, "host-alpha", stored.Status.Placement.Host)
+	assert.Nil(t, stored.Status.Placement.PendingResources, "cleared on bind")
+}
+
+// TestPendingCreate_ConflictReleaseClearsTheAdmittedSize: a name conflict that
+// releases the pending host clears the admitted size with it.
+func TestPendingCreate_ConflictReleaseClearsTheAdmittedSize(t *testing.T) {
+	ctx := context.Background()
+	vm := withPlacement(capVM("conflicted"), "", "host-alpha")
+	vm.Status.Placement.PendingResources = &infravirtrigaudiov1beta1.PlacementResources{CPU: 2, MemoryMiB: 4096}
+	r := newTestReconciler(coverageTestScheme(t), &stubResolver{provider: &concurrentCreateProvider{}},
+		append(capBase(), capHost("host-alpha", 16), vm)...)
+	conflict := &recordingCreateProvider{err: contracts.NewConflictError("taken", nil)}
+	_, err := r.createVM(ctx, readVM(t, r, "conflicted"), conflict, clusteredProviderCR("prov-cluster", capNS),
+		smallVMClass(capNS), minimalVMImage(capNS), nil)
+	require.NoError(t, err)
+	stored := readVM(t, r, "conflicted")
+	assert.Empty(t, stored.Status.Placement.PendingHost)
+	assert.Nil(t, stored.Status.Placement.PendingResources)
+}

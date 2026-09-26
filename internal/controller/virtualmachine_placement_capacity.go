@@ -31,6 +31,7 @@ import (
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
+	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/scheduler"
 	"github.com/projectbeskar/virtrigaud/internal/scheduler/assume"
 )
@@ -52,6 +53,12 @@ const (
 	// normal path the assumption ends earlier (the record appears in the
 	// cache, or the write fails and the assumption is forgotten).
 	placementAssumeTTL = 2 * pendingHostWriteTimeout
+	// resizeAssumeTTL is how long an admitted resize's assumption lives at
+	// most (review N4): the Reconfigure call it covers may run for its full
+	// deadline, and the status write recording the new size comes after it.
+	// Like placementAssumeTTL it is a safety net; the assumption normally ends
+	// when status.currentResources records the new size.
+	resizeAssumeTTL = contracts.ReconfigureCallTimeout + placementStatusWriteTimeout
 	// placementUnschedulableMaxRetryInterval caps the backoff of a VM that no
 	// host can take. It starts at placementUnschedulableRetryInterval and
 	// doubles with each consecutive no-fit. The VM controller does not watch
@@ -99,6 +106,37 @@ func (e *placementInfraError) Error() string { return e.err.Error() }
 
 // Unwrap returns the underlying error.
 func (e *placementInfraError) Unwrap() error { return e.err }
+
+// scheduleUnderLock runs scheduleAndAssume with the Provider's assume lock
+// held. It returns locked == false, doing nothing, when the lock is not free
+// within placementLockWait. The lock is released by a deferred call, so a
+// panic inside (which controller-runtime recovers) cannot leave it held.
+func (r *VirtualMachineReconciler) scheduleUnderLock(
+	ctx context.Context,
+	assumptions *assume.Cache,
+	providerKey string,
+	provider types.NamespacedName,
+	vm *infravirtrigaudiov1beta1.VirtualMachine,
+	req *scheduler.Request,
+) (result scheduler.Result, locked bool, err error) {
+	unlock, locked := assumptions.LockWithin(ctx, providerKey, placementLockWait)
+	if !locked {
+		return scheduler.Result{}, false, nil
+	}
+	defer unlock()
+	lockCtx, cancel := lockBoundContext(ctx)
+	defer cancel()
+	result, err = r.scheduleAndAssume(lockCtx, assumptions, providerKey, provider, vm, req)
+	return result, true, err
+}
+
+// lockBoundContext bounds the work done while holding a Provider's assume lock
+// to placementLockWait (review N6): the cache reads under the lock return
+// promptly even if an informer is still being started lazily, so no other
+// reconcile waits longer than its own lock wait.
+func lockBoundContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, placementLockWait)
+}
 
 // scheduleAndAssume is the part of a clustered create that runs under the
 // Provider's assume lock: read what is committed (informer cache plus live
@@ -208,6 +246,12 @@ func withMinimum(r scheduler.ResourceRequest) scheduler.ResourceRequest {
 // usable class, or an out-of-range override the Create will refuse), it counts
 // at requestedFootprint instead, the conservative reading.
 func pendingFootprint(vm *infravirtrigaudiov1beta1.VirtualMachine, class *infravirtrigaudiov1beta1.VMClass) scheduler.ResourceRequest {
+	// The size it was admitted at, recorded with its pending host (review
+	// N3): its VMClass's content may have changed since, but a retry that
+	// has grown is not sent (refuseGrownPendingCreate).
+	if pl := vm.Status.Placement; pl != nil && pl.PendingResources != nil {
+		return withMinimum(scheduler.ResourceRequest{CPU: pl.PendingResources.CPU, MemoryMiB: pl.PendingResources.MemoryMiB})
+	}
 	if class != nil {
 		if cpu, mem, err := effectiveResources(vm, class); err == nil {
 			return withMinimum(scheduler.ResourceRequest{CPU: cpu, MemoryMiB: int64(mem)})
@@ -277,7 +321,57 @@ func admittedFootprint(vm *infravirtrigaudiov1beta1.VirtualMachine, class *infra
 			base.MemoryMiB = *cur.MemoryMiB
 		}
 	}
-	return withMinimum(base)
+	return withMemoryCeiling(withMinimum(base), memoryCeilingOf(vm, class))
+}
+
+// memoryHotAdd reports whether class enables memory hot-add.
+func memoryHotAdd(class *infravirtrigaudiov1beta1.VMClass) bool {
+	return class != nil && class.Spec.PerformanceProfile != nil && class.Spec.PerformanceProfile.MemoryHotAddEnabled
+}
+
+// requestsMemoryHotAdd reports whether req's VMClass enables memory hot-add.
+func requestsMemoryHotAdd(req contracts.CreateRequest) bool {
+	return req.Class.PerformanceProfile != nil && req.Class.PerformanceProfile.MemoryHotAddEnabled
+}
+
+// memoryCeilingFor is the balloon ceiling a Create with this VMClass
+// provisions for memMiB of initial memory: contracts.HotplugCeilingMemoryMiB
+// with memory hot-add, 0 (none) without.
+func memoryCeilingFor(hotAdd bool, memMiB int64) int64 {
+	if !hotAdd {
+		return 0
+	}
+	return contracts.HotplugCeilingMemoryMiB(memMiB)
+}
+
+// memoryCeilingOf is the memory vm's domain may reach on its host beyond its
+// current allocation (review N1): a guest can deflate its balloon up to the
+// hot-add ceiling, so the VM counts at it. It is status.placement.memoryCeilingMiB
+// when recorded (at scheduling, from the Create's own VMClass), otherwise — a
+// VM scheduled by an older manager, or a clone — derived from class's current
+// hot-add setting and the VM's recorded (else pending, else class) memory.
+// 0 means none.
+func memoryCeilingOf(vm *infravirtrigaudiov1beta1.VirtualMachine, class *infravirtrigaudiov1beta1.VMClass) int64 {
+	if pl := vm.Status.Placement; pl != nil && pl.MemoryCeilingMiB != nil {
+		return *pl.MemoryCeilingMiB
+	}
+	if !memoryHotAdd(class) {
+		return 0
+	}
+	_, base := classSize(class)
+	if pl := vm.Status.Placement; pl != nil && pl.PendingResources != nil {
+		base = pl.PendingResources.MemoryMiB
+	}
+	if cur := vm.Status.CurrentResources; cur != nil && cur.MemoryMiB != nil {
+		base = *cur.MemoryMiB
+	}
+	return memoryCeilingFor(true, base)
+}
+
+// withMemoryCeiling raises r's memory to ceiling.
+func withMemoryCeiling(r scheduler.ResourceRequest, ceiling int64) scheduler.ResourceRequest {
+	r.MemoryMiB = max(r.MemoryMiB, ceiling)
+	return r
 }
 
 // committedSnapshot is what one informer snapshot says about a clustered
@@ -296,8 +390,9 @@ type committedSnapshot struct {
 type recordedVM struct {
 	// hosts are the hosts its placement names (host / pendingHost).
 	hosts []string
-	// size is its recorded size (status.currentResources) and hasSize whether
-	// both resources are recorded.
+	// size is the size it counts at (admittedFootprint: its recorded
+	// status.currentResources with any memory ceiling), and hasSize whether
+	// status.currentResources records both resources.
 	size    scheduler.ResourceRequest
 	hasSize bool
 }
@@ -357,14 +452,17 @@ func (r *VirtualMachineReconciler) committedPlacements(
 		}
 		uid := vmSchedulingUID(other)
 		hosts := placementHosts(other)
-		snap.recorded[uid] = recordVM(other, hosts)
 		if len(hosts) == 0 || uid == selfUID {
+			snap.recorded[uid] = recordedVM{hosts: hosts}
 			continue
 		}
 		res, err := sizeForAccounting(ctx, r.Client, other, classes)
 		if err != nil {
 			return committedSnapshot{}, err
 		}
+		// The size it counts at settles an admitted resize of it once
+		// status.currentResources records the new size.
+		snap.recorded[uid] = recordedVM{hosts: hosts, size: res, hasSize: hasRecordedSize(other)}
 		for _, h := range hosts {
 			snap.placed = append(snap.placed, scheduler.PlacedVM{
 				Name:         other.Name,
@@ -392,7 +490,7 @@ type classMemo map[classMemoKey]*infravirtrigaudiov1beta1.VMClass
 // sizeForAccounting returns vm's admittedFootprint, reading its VMClass only
 // when the footprint needs it (nothing recorded in status.currentResources).
 func sizeForAccounting(ctx context.Context, reader client.Reader, vm *infravirtrigaudiov1beta1.VirtualMachine, seen classMemo) (scheduler.ResourceRequest, error) {
-	if cur := vm.Status.CurrentResources; cur != nil && cur.CPU != nil && cur.MemoryMiB != nil {
+	if hasRecordedSize(vm) && vm.Status.Placement != nil && vm.Status.Placement.MemoryCeilingMiB != nil {
 		return admittedFootprint(vm, nil), nil
 	}
 	class, err := classForSizing(ctx, reader, vm, seen)
@@ -521,15 +619,11 @@ func (r *VirtualMachineReconciler) placedWithAssumptions(
 	return placed, nil
 }
 
-// recordVM is what vm's durable record says for settling assumptions: the
-// hosts its placement names and its recorded size.
-func recordVM(vm *infravirtrigaudiov1beta1.VirtualMachine, hosts []string) recordedVM {
-	rec := recordedVM{hosts: hosts}
-	if cur := vm.Status.CurrentResources; cur != nil && cur.CPU != nil && cur.MemoryMiB != nil {
-		rec.size = scheduler.ResourceRequest{CPU: *cur.CPU, MemoryMiB: *cur.MemoryMiB}
-		rec.hasSize = true
-	}
-	return rec
+// hasRecordedSize reports whether vm's status.currentResources records both
+// CPU and memory.
+func hasRecordedSize(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
+	cur := vm.Status.CurrentResources
+	return cur != nil && cur.CPU != nil && cur.MemoryMiB != nil
 }
 
 // unschedulableBackoff paces the re-scheduling of VMs no host can take: the

@@ -844,6 +844,20 @@ spec:
                       this VM to Host.
                     format: date-time
                     type: string
+                  memoryCeilingMiB:
+                    description: |-
+                      MemoryCeilingMiB is the memory the VM's domain may reach on its host
+                      beyond its current allocation, recorded when its create was scheduled
+                      (ADR-0007 Addendum A, scheduler-accuracy amendment): the balloon maximum
+                      provisioned for a VMClass with memory hot-add (4× the initial memory), or
+                      0 when none was provisioned. A guest can deflate its balloon up to it, so
+                      the clustered accounting counts the VM's memory at the larger of this and
+                      its current size. It is kept when the VM is bound; unset means unknown (a
+                      VM scheduled by an older manager), and the VMClass's hot-add setting is
+                      used instead.
+                    format: int64
+                    minimum: 0
+                    type: integer
                   pendingHost:
                     description: |-
                       PendingHost is the Host (CR name) an in-flight, not yet confirmed Create is
@@ -857,6 +871,30 @@ spec:
                       administrator may clear it to release a VM whose pending host is gone for
                       good (the operator never re-schedules such a VM on its own).
                     type: string
+                  pendingResources:
+                    description: |-
+                      PendingResources is the size the scheduler admitted a pending Create at
+                      (ADR-0007 Addendum A, scheduler-accuracy amendment). The operator writes
+                      it with PendingHost, in the same checked status update, and clears it when
+                      the VM is bound or the pending host is released. While a create is
+                      pending, the VM counts at this size against its host's capacity, and a
+                      retry of the Create whose size has grown beyond it (its VMClass was
+                      changed in the meantime) is not sent.
+                    properties:
+                      cpu:
+                        description: CPU is the number of vCPUs.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      memoryMiB:
+                        description: MemoryMiB is the memory in MiB.
+                        format: int64
+                        minimum: 0
+                        type: integer
+                    required:
+                    - cpu
+                    - memoryMiB
+                    type: object
                   pool:
                     description: Pool is the HostPool the VM was scheduled into.
                     type: string

@@ -5,6 +5,41 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-25 23:50] - ADR-0007 scheduler accuracy, follow-up: live shrinks wait for power-off, memory hot-add counts at its ceiling, pending size recorded
+**Author:** @wrkode (William Rizzo)
+
+> **Operator note (clustered providers only).**
+>
+> - **Shrinking a running VM** on a clustered Provider now waits until the VM is powered off. Nothing is sent while it runs; it keeps counting at its current size and gets `Reconfiguring=False/ShrinkPendingPowerOff`. Set `spec.powerState: Off`, wait for `status.currentResources` to show the new size, then set `On` again. VirtRigaud never powers a VM off by itself. A change that shrinks one resource and grows another waits as a whole.
+> - **Memory hot-add VMs** count at their balloon ceiling, 4× their memory, existing VMs included. After the upgrade, check the committed gauges against each host's capacity.
+> - **A pending create whose VMClass grew** after it was scheduled (larger, or memory hot-add turned on) is not retried: `Placed=False/PendingSizeGrew`, until the VMClass is restored or the VM deleted.
+> - **Upgrade the CRDs first**: readiness requires `status.placement.pendingResources` and `status.placement.memoryCeilingMiB`.
+>
+> Single-host and thin-client Providers are unaffected.
+
+### Added
+- `api/infra.virtrigaud.io/v1beta1/virtualmachine_types.go`: `status.placement.pendingResources` (`PlacementResources`: the CPU and memory a pending clustered create was admitted at) and `status.placement.memoryCeilingMiB` (the balloon ceiling recorded at scheduling; `0` = none). CRDs regenerated.
+- `internal/providers/contracts/hotplug.go`: `HotplugResourceMultiplier`, `MaxHotplugVCPUs`, `HotplugCeilingVCPUs`, `HotplugCeilingMemoryMiB` — the hot-add ceiling rule, now shared by the libvirt provider (`internal/providers/libvirt/reconfigure_online.go` delegates to it) and the scheduler.
+- `internal/providers/contracts/deadlines.go`: `ReconfigureCallTimeout` (5 min), used by the gRPC client's `Reconfigure` and by the resize assumption TTL.
+- `internal/scheduler/assume/assume.go`: `AssumeFor`, an assumption with its own TTL (never below the cache's); `Touch` keeps each entry's TTL.
+- `internal/k8s/conditions.go`: reasons `ShrinkPendingPowerOff` and `PendingSizeGrew`.
+
+### Changed
+- `internal/controller/virtualmachine_resize_gate.go`: on a clustered Provider a shrink of a running VM is deferred (`deferClusteredShrink`: no `Reconfigure`, `Reconfiguring=False/ShrinkPendingPowerOff`, retried with the unschedulable backoff) and applied once the VM is observed powered off (`applyPendingShrinkWhileOff`, run before any power change; `currentResources` recorded only after the provider applied it). A shrink is never refused on capacity. The gate compares footprints with the memory ceiling applied, so a live memory grow within the ceiling needs no check; a missing or foreign HostPool now fails closed (`PlacementError`); the refusal message is built from the VM's own sizes. An admitted resize is assumed for `ReconfigureCallTimeout` plus the status-write bound (N4).
+- `internal/controller/virtualmachine_placement_capacity.go`: `admittedFootprint`, `pendingFootprint` and the scheduling request count a memory hot-add VM at its ceiling (`memoryCeilingOf`: the recorded ceiling, else the VMClass flag); a pending VM counts at `pendingResources` when recorded. Both critical sections (`scheduleUnderLock`, `checkResizeUnderLock`) release the Provider's lock with `defer`, and every read under the lock is bounded by the lock wait (`lockBoundContext`).
+- `internal/controller/virtualmachine_clustered.go`, `virtualmachine_controller.go`: `pendingHost` is recorded with `pendingResources` and `memoryCeilingMiB`; `refuseGrownPendingCreate` stops a retry that grew (or gained a ceiling) with `PendingSizeGrew` and keeps the pending host; the bind and a conflict release clear `pendingResources`.
+- `internal/controller/vmcrdfeatures.go`: readiness also requires `status.placement.pendingResources` and `status.placement.memoryCeilingMiB`.
+- `docs/adr/0007-clustered-orchestrator-provider.md`, `docs/clustered-provider-inventory.md`, `docs/upgrading.md`, `docs/release-notes/next.md`, `docs/vm-provider-binding.md`: the above, the force-delete caveat, and two new follow-ups (the clustered clone bind records no `currentResources` — the Slice 3 branch adds the clone fit check; libvirt `Reconfigure` must return an error for a change it did not apply — tracked separately, affects single-host).
+
+### Why
+Security re-review of #355 (N1–N6): a live shrink only deflates the balloon, so recording it let the scheduler hand out capacity the guest could take back; a hot-add VM's balloon ceiling was not counted; a VMClass edited while a create was pending could grow the retried Create; a panic under the assume lock would have held it forever; and a resize assumption could lapse while its `Reconfigure` still ran.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-09-25 23:03] - ADR-0007 scheduler accuracy: committed capacity, an assume cache and a resize gate for clustered placement
 **Author:** @wrkode (William Rizzo)
 

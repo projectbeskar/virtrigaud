@@ -88,10 +88,11 @@ type Assumption struct {
 	Resize bool
 }
 
-// entry is an Assumption with its Provider and expiry.
+// entry is an Assumption with its Provider, TTL and expiry.
 type entry struct {
 	Assumption
 	provider string
+	ttl      time.Duration
 	expires  time.Time
 }
 
@@ -175,13 +176,22 @@ func (c *Cache) LockWithin(ctx context.Context, provider string, wait time.Durat
 	}
 }
 
-// Assume records a on provider, replacing any earlier assumption of the same
-// VM. Call it with provider's lock held.
+// Assume records a on provider with the Cache's TTL, replacing any earlier
+// assumption of the same VM. Call it with provider's lock held.
 func (c *Cache) Assume(provider string, a Assumption) {
+	c.AssumeFor(provider, a, c.ttl)
+}
+
+// AssumeFor is Assume with a TTL of its own, for an assumption that must
+// outlive a longer operation than the Cache's default covers (an admitted
+// resize outlives its Reconfigure call). A TTL below the Cache's is raised to
+// it. Touch restarts it with the same TTL.
+func (c *Cache) AssumeFor(provider string, a Assumption, ttl time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	ttl = max(ttl, c.ttl)
 	a.Labels = maps.Clone(a.Labels) // the caller's map may be shared with the informer cache
-	c.entries[a.UID] = &entry{Assumption: a, provider: provider, expires: c.now().Add(c.ttl)}
+	c.entries[a.UID] = &entry{Assumption: a, provider: provider, ttl: ttl, expires: c.now().Add(ttl)}
 }
 
 // Touch restarts the TTL of the VM's assumption, if any: a caller whose
@@ -191,7 +201,7 @@ func (c *Cache) Touch(uid string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if e, ok := c.entries[uid]; ok {
-		e.expires = c.now().Add(c.ttl)
+		e.expires = c.now().Add(e.ttl)
 	}
 }
 

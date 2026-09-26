@@ -384,6 +384,29 @@ type PlacementStatus struct {
 	// +kubebuilder:validation:items:MaxLength=253
 	ExcludedHosts []string `json:"excludedHosts,omitempty"`
 
+	// PendingResources is the size the scheduler admitted a pending Create at
+	// (ADR-0007 Addendum A, scheduler-accuracy amendment). The operator writes
+	// it with PendingHost, in the same checked status update, and clears it when
+	// the VM is bound or the pending host is released. While a create is
+	// pending, the VM counts at this size against its host's capacity, and a
+	// retry of the Create whose size has grown beyond it (its VMClass was
+	// changed in the meantime) is not sent.
+	// +optional
+	PendingResources *PlacementResources `json:"pendingResources,omitempty"`
+
+	// MemoryCeilingMiB is the memory the VM's domain may reach on its host
+	// beyond its current allocation, recorded when its create was scheduled
+	// (ADR-0007 Addendum A, scheduler-accuracy amendment): the balloon maximum
+	// provisioned for a VMClass with memory hot-add (4× the initial memory), or
+	// 0 when none was provisioned. A guest can deflate its balloon up to it, so
+	// the clustered accounting counts the VM's memory at the larger of this and
+	// its current size. It is kept when the VM is bound; unset means unknown (a
+	// VM scheduled by an older manager), and the VMClass's hot-add setting is
+	// used instead.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	MemoryCeilingMiB *int64 `json:"memoryCeilingMiB,omitempty"`
+
 	// Pool is the HostPool the VM was scheduled into.
 	// +optional
 	Pool string `json:"pool,omitempty"`
@@ -396,6 +419,18 @@ type PlacementStatus struct {
 	// (e.g. the winning score or the constraint that narrowed the candidates).
 	// +optional
 	Reason string `json:"reason,omitempty"`
+}
+
+// PlacementResources is a CPU/memory size recorded by the clustered scheduler
+// (status.placement.pendingResources).
+type PlacementResources struct {
+	// CPU is the number of vCPUs.
+	// +kubebuilder:validation:Minimum=0
+	CPU int32 `json:"cpu"`
+
+	// MemoryMiB is the memory in MiB.
+	// +kubebuilder:validation:Minimum=0
+	MemoryMiB int64 `json:"memoryMiB"`
 }
 
 // VirtualMachinePhase represents the phase of a VM

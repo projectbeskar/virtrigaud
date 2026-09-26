@@ -154,6 +154,26 @@ func TestTouchRestartsTheTTLAndAssumeCopiesLabels(t *testing.T) {
 	assert.Empty(t, c.List("p1", nil))
 }
 
+// TestAssumeForHasItsOwnTTL (review N4): an assumption made with a longer TTL
+// outlives the Cache's default, Touch restarts it with that TTL, and a shorter
+// TTL is raised to the default.
+func TestAssumeForHasItsOwnTTL(t *testing.T) {
+	clk := newClock()
+	c := New(2*time.Minute, clk.now)
+	c.AssumeFor("p1", assumption("long", "h1"), 6*time.Minute)
+	c.AssumeFor("p1", assumption("short", "h1"), time.Second)
+
+	clk.advance(3 * time.Minute)
+	assert.Equal(t, []string{"long"}, uids(c.List("p1", nil)), "past the default TTL, only the long one lives")
+
+	c.Touch("long")
+	clk.advance(5 * time.Minute)
+	assert.Equal(t, []string{"long"}, uids(c.List("p1", nil)), "Touch restarted it with its own TTL")
+
+	clk.advance(time.Minute)
+	assert.Empty(t, c.List("p1", nil))
+}
+
 func TestLockIsPerProvider(t *testing.T) {
 	c := New(time.Minute, nil)
 	unlock1 := c.Lock("p1")

@@ -20,6 +20,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -108,18 +109,101 @@ func TestResizeGate_DoesNotFitIsRefused(t *testing.T) {
 	assert.Equal(t, 2*placementUnschedulableRetryInterval, res.RequeueAfter)
 }
 
-func TestResizeGate_ShrinkIsAlwaysApplied(t *testing.T) {
-	prov := runningRoutingProvider()
+// ─── shrinks wait for power-off on a clustered Provider (review N1) ──────────
+
+// overcommittedShrinkFixture: app holds 4 vCPU and asks for 1, on a host whose
+// pool is far over-committed (a shrink is never refused on capacity).
+func overcommittedShrinkFixture(t *testing.T, prov contracts.Provider, powerState infravirtrigaudiov1beta1.PowerState) *VirtualMachineReconciler {
+	t.Helper()
 	pool := hostPoolCR("pool-a", capNS, "prov-cluster")
-	pool.Spec.Overcommit = &infravirtrigaudiov1beta1.OvercommitRatios{CPU: "0.1"} // the host is far over-committed
-	providerCR := withRuntime(clusteredProviderCR("prov-cluster", capNS))
-	r := newTestReconciler(coverageTestScheme(t), &stubResolver{provider: prov},
-		providerCR, pool, capHost("host-alpha", 8), smallVMClass(capNS), minimalVMImage(capNS),
-		sized("neighbour", 4), wantsCPU(sized("app", 4), 1))
+	pool.Spec.Overcommit = &infravirtrigaudiov1beta1.OvercommitRatios{CPU: "0.1"}
+	app := wantsCPU(sized("app", 4), 1)
+	app.Spec.PowerState = powerState
+	return newTestReconciler(coverageTestScheme(t), &stubResolver{provider: prov},
+		withRuntime(clusteredProviderCR("prov-cluster", capNS)), pool, capHost("host-alpha", 8),
+		smallVMClass(capNS), minimalVMImage(capNS), sized("neighbour", 4), app)
+}
+
+func TestShrink_RunningClusteredVMIsDeferred(t *testing.T) {
+	prov := runningRoutingProvider()
+	r := overcommittedShrinkFixture(t, prov, infravirtrigaudiov1beta1.PowerStateOn)
+	res, err := r.reconcileVM(context.Background(), getVM(t, r, "app"))
+	require.NoError(t, err)
+	assert.Empty(t, prov.reconfigureRefs, "no Reconfigure for a shrink while the VM runs")
+	assert.Empty(t, prov.powerRefs, "and the VM is never powered off for it")
+	assert.Equal(t, placementUnschedulableRetryInterval, res.RequeueAfter)
+
+	got := getVM(t, r, "app")
+	assert.Equal(t, int32(4), *got.Status.CurrentResources.CPU, "it keeps counting at its current size")
+	assert.Equal(t, int32(4), admittedFootprint(got, smallVMClass(capNS)).CPU)
+	c := reconfiguringCondition(got)
+	require.NotNil(t, c)
+	assert.Equal(t, k8s.ReasonShrinkPendingPowerOff, c.Reason)
+	assert.Contains(t, c.Message, "set spec.powerState: Off")
+}
+
+func TestShrink_MixedChangeWaitsAsAWhole(t *testing.T) {
+	prov := runningRoutingProvider()
+	app := sized("app", 2)
+	app.Spec.Resources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: i32p(3), MemoryMiB: i64p(2048)} // CPU up, memory down
+	r := resizeFixture(t, prov, app)
 	_, err := r.reconcileVM(context.Background(), getVM(t, r, "app"))
 	require.NoError(t, err)
-	require.Len(t, prov.reconfigureRefs, 1, "a shrink is never refused")
+	assert.Empty(t, prov.reconfigureRefs)
+	assert.Equal(t, k8s.ReasonShrinkPendingPowerOff, reconfiguringCondition(getVM(t, r, "app")).Reason)
+}
+
+func TestShrink_AppliedOncePoweredOff(t *testing.T) {
+	// The VM is found off while its spec still wants it on: the shrink is
+	// applied (offline) and recorded first, and nothing is powered in this
+	// reconcile; the next one powers it on as its spec asks.
+	prov := &routingProvider{describeResp: contracts.DescribeResponse{Exists: true, PowerState: string(contracts.PowerStateOff)}}
+	r := overcommittedShrinkFixture(t, prov, infravirtrigaudiov1beta1.PowerStateOn)
+	_, err := r.reconcileVM(context.Background(), getVM(t, r, "app"))
+	require.NoError(t, err)
+	require.Len(t, prov.reconfigureRefs, 1, "applied while off, even on an over-committed host")
+	assert.Empty(t, prov.powerRefs, "not powered on before the shrink is applied")
+	assert.Equal(t, int32(1), *getVM(t, r, "app").Status.CurrentResources.CPU, "recorded only after the provider applied it")
+
+	// Also when its spec wants it off.
+	prov = &routingProvider{describeResp: contracts.DescribeResponse{Exists: true, PowerState: string(contracts.PowerStateOff)}}
+	r = overcommittedShrinkFixture(t, prov, infravirtrigaudiov1beta1.PowerStateOff)
+	_, err = r.reconcileVM(context.Background(), getVM(t, r, "app"))
+	require.NoError(t, err)
+	require.Len(t, prov.reconfigureRefs, 1)
 	assert.Equal(t, int32(1), *getVM(t, r, "app").Status.CurrentResources.CPU)
+}
+
+func TestShrink_UserFlowPowerOffThenApply(t *testing.T) {
+	// The documented flow: the owner sets spec.powerState: Off. The deferred
+	// shrink does not stand in the way of the power-off, and is applied on the
+	// next reconcile, once the VM is off.
+	prov := runningRoutingProvider()
+	r := overcommittedShrinkFixture(t, prov, infravirtrigaudiov1beta1.PowerStateOff)
+	_, err := r.reconcileVM(context.Background(), getVM(t, r, "app"))
+	require.NoError(t, err)
+	require.Len(t, prov.powerRefs, 1, "the power-off the owner asked for is sent")
+	assert.Empty(t, prov.reconfigureRefs, "the shrink is not sent while the VM still runs")
+
+	prov.describeResp.PowerState = string(contracts.PowerStateOff)
+	_, err = r.reconcileVM(context.Background(), getVM(t, r, "app"))
+	require.NoError(t, err)
+	require.Len(t, prov.reconfigureRefs, 1)
+	assert.Equal(t, int32(1), *getVM(t, r, "app").Status.CurrentResources.CPU)
+}
+
+func TestShrink_SingleHostIsUnchanged(t *testing.T) {
+	prov := runningRoutingProvider()
+	single := withRuntime(singleProviderCR("prov-single", capNS))
+	vm := clusterVM("small", capNS, single.Name)
+	vm.Status.ID = "small"
+	vm.Status.CurrentResources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: i32p(4), MemoryMiB: i64p(4096)}
+	vm.Spec.Resources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: i32p(1), MemoryMiB: i64p(4096)}
+	r := newTestReconciler(coverageTestScheme(t), &stubResolver{provider: prov}, single, smallVMClass(capNS), minimalVMImage(capNS), vm)
+	_, err := r.reconcileVM(context.Background(), getVM(t, r, "small"))
+	require.NoError(t, err)
+	require.Len(t, prov.reconfigureRefs, 1, "a single-host shrink is sent while running, as before")
+	assert.Nil(t, r.placements.Load())
 }
 
 func TestResizeGate_UnknownHostFailsClosed(t *testing.T) {
@@ -218,4 +302,137 @@ func TestResizeAssumptionSettles(t *testing.T) {
 	create := assume.Assumption{UID: "u", HostID: "host-alpha"}
 	assert.True(t, snap(recordedVM{hosts: on}).settled(create), "a create settles on its record")
 	assert.False(t, snap(recordedVM{hosts: []string{"host-beta"}}).settled(create), "not on a record elsewhere")
+}
+
+// TestResizeAssumptionOutlivesTheReconfigureCall (review N4): an admitted
+// resize stays assumed for the Reconfigure deadline plus the status-write
+// bound, not only the create path's shorter TTL.
+func TestResizeAssumptionOutlivesTheReconfigureCall(t *testing.T) {
+	require.GreaterOrEqual(t, resizeAssumeTTL, contracts.ReconfigureCallTimeout+placementStatusWriteTimeout)
+	require.Greater(t, resizeAssumeTTL, placementAssumeTTL)
+
+	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
+	vm := wantsCPU(sized("app", 2), 4)
+	r := resizeFixture(t, runningRoutingProvider(), vm)
+	r.clock = func() time.Time { return now }
+	_, admitted, err := r.admitClusteredResize(context.Background(), getVM(t, r, "app"),
+		withRuntime(clusteredProviderCR("prov-cluster", capNS)), smallVMClass(capNS), "host-alpha")
+	require.NoError(t, err)
+	require.True(t, admitted)
+
+	now = now.Add(placementAssumeTTL + time.Minute)
+	assert.Equal(t, []string{"uid-app"}, assumedUIDs(r), "still assumed after the create TTL")
+	now = now.Add(resizeAssumeTTL)
+	assert.Empty(t, assumedUIDs(r), "gone after its own TTL")
+}
+
+// TestResizeGate_UnusablePoolFailsClosed (review N6): a host whose HostPool is
+// missing or belongs to another Provider has no known overcommit ratio, so a
+// resize-up on it is refused instead of assuming 1.0.
+func TestResizeGate_UnusablePoolFailsClosed(t *testing.T) {
+	for name, pool := range map[string]*infravirtrigaudiov1beta1.HostPool{
+		"missing": nil,
+		"foreign": hostPoolCR("pool-a", capNS, "another-provider"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			prov := runningRoutingProvider()
+			objs := []client.Object{withRuntime(clusteredProviderCR("prov-cluster", capNS)), capHost("host-alpha", 64),
+				smallVMClass(capNS), minimalVMImage(capNS), wantsCPU(sized("app", 2), 4)}
+			if pool != nil {
+				objs = append(objs, pool)
+			}
+			r := newTestReconciler(coverageTestScheme(t), &stubResolver{provider: prov}, objs...)
+			res, err := r.reconcileVM(context.Background(), getVM(t, r, "app"))
+			require.NoError(t, err)
+			assert.Empty(t, prov.reconfigureRefs, "no provider call")
+			assert.Equal(t, placementConfigRetryInterval, res.RequeueAfter)
+			c := reconfiguringCondition(getVM(t, r, "app"))
+			require.NotNil(t, c)
+			assert.Equal(t, k8s.ReasonPlacementError, c.Reason)
+			assert.Contains(t, c.Message, "does not exist or belongs to another Provider")
+		})
+	}
+}
+
+// deadlineRecordingClient records whether each VirtualMachine List carried a
+// deadline no later than bound from its start.
+type deadlineRecordingClient struct {
+	client.Client
+	mu      sync.Mutex
+	bounded []bool
+}
+
+func (c *deadlineRecordingClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if _, ok := list.(*infravirtrigaudiov1beta1.VirtualMachineList); ok {
+		d, has := ctx.Deadline()
+		c.mu.Lock()
+		c.bounded = append(c.bounded, has && time.Until(d) <= placementLockWait)
+		c.mu.Unlock()
+	}
+	return c.Client.List(ctx, list, opts...)
+}
+
+// TestReadsUnderTheLockAreBounded (review N6): every cache read made while a
+// Provider's assume lock is held carries a deadline of at most
+// placementLockWait, in the create and the resize path.
+func TestReadsUnderTheLockAreBounded(t *testing.T) {
+	vm := wantsCPU(sized("app", 2), 4)
+	r := resizeFixture(t, runningRoutingProvider(), vm, capVM("new"))
+	rec := &deadlineRecordingClient{Client: r.Client}
+	r.Client = rec
+
+	_, _ = resolve(t, r, readVM(t, r, "new"))
+	_, _, err := r.admitClusteredResize(context.Background(), readVM(t, r, "app"),
+		withRuntime(clusteredProviderCR("prov-cluster", capNS)), smallVMClass(capNS), "host-alpha")
+	require.NoError(t, err)
+	require.Len(t, rec.bounded, 2)
+	assert.Equal(t, []bool{true, true}, rec.bounded)
+}
+
+// panickingListClient panics on every VirtualMachine List: a stand-in for a
+// bug anywhere under the Provider's assume lock.
+type panickingListClient struct{ client.Client }
+
+func (c panickingListClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if _, ok := list.(*infravirtrigaudiov1beta1.VirtualMachineList); ok {
+		panic("boom under the assume lock")
+	}
+	return c.Client.List(ctx, list, opts...)
+}
+
+// TestAssumeLockIsReleasedOnPanic (review N2): controller-runtime recovers a
+// panicking reconcile, so a panic inside the create or resize critical section
+// must not leave the Provider's lock held.
+func TestAssumeLockIsReleasedOnPanic(t *testing.T) {
+	recovered := func(fn func()) (p any) {
+		defer func() { p = recover() }()
+		fn()
+		return nil
+	}
+	lockIsFree := func(t *testing.T, r *VirtualMachineReconciler) {
+		t.Helper()
+		unlock, ok := r.placementAssumptions().LockWithin(context.Background(), capNS+"/prov-cluster", 100*time.Millisecond)
+		require.True(t, ok, "the Provider's lock was left held by the panic")
+		unlock()
+	}
+
+	t.Run("create", func(t *testing.T) {
+		vm := capVM("new")
+		r := newTestReconciler(coverageTestScheme(t), &stubResolver{provider: &concurrentCreateProvider{}},
+			append(capBase(), capHost("host-alpha", 8), vm)...)
+		r.Client = panickingListClient{Client: r.Client}
+		require.NotNil(t, recovered(func() { _, _ = resolve(t, r, vm) }))
+		lockIsFree(t, r)
+	})
+
+	t.Run("resize", func(t *testing.T) {
+		vm := wantsCPU(sized("app", 2), 4)
+		r := resizeFixture(t, runningRoutingProvider(), vm)
+		r.Client = panickingListClient{Client: r.Client}
+		require.NotNil(t, recovered(func() {
+			_, _, _ = r.admitClusteredResize(context.Background(), getVM(t, r, "app"),
+				withRuntime(clusteredProviderCR("prov-cluster", capNS)), smallVMClass(capNS), "host-alpha")
+		}))
+		lockIsFree(t, r)
+	})
 }
