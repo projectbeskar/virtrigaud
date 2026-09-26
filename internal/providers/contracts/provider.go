@@ -118,6 +118,23 @@ type DescribeResponse struct {
 	ConsoleURL string
 	// ProviderRaw contains provider-specific details
 	ProviderRaw map[string]string
+	// MaxMemoryMiB is the most memory, in MiB, the VM's guest can use without
+	// any action on the host: the memory it was started with, including any
+	// balloon headroom above its current allocation (libvirt's <memory>). 0
+	// means the provider does not report it.
+	MaxMemoryMiB int64
+}
+
+// ReconfigureResult is what a Reconfigure applied.
+type ReconfigureResult struct {
+	// TaskRef references an async operation if applicable. A provider that
+	// returns one leaves RestartRequired false; the task's outcome decides.
+	TaskRef string
+	// RestartRequired reports that at least one requested change was applied
+	// only to the VM's persistent definition and takes effect at its next power
+	// cycle (power off, then on); until then the running VM keeps its previous
+	// size. Every other requested change was applied to the running VM too.
+	RestartRequired bool
 }
 
 // Provider defines the interface that all providers must implement
@@ -145,11 +162,15 @@ type Provider interface {
 	Power(ctx context.Context, vm VMRef, op PowerOp) (taskRef string, err error)
 
 	// Reconfigure modifies the resources (CPU/RAM/Disks) of the VM vm
-	// addresses. May be no-op for unsupported fields. On a clustered provider
-	// vm.Owner is checked exactly as for Power: a VM this VirtualMachine does
-	// not own is reported as not-found and left unchanged.
-	// Returns TaskRef if the operation is asynchronous
-	Reconfigure(ctx context.Context, vm VMRef, desired CreateRequest) (taskRef string, err error)
+	// addresses. Every change the request asks for is either applied to the
+	// running VM and its persistent definition, or applied to the persistent
+	// definition only and reported with ReconfigureResult.RestartRequired, or
+	// the call fails: it never reports success for a requested change it did
+	// not apply. On a clustered provider vm.Owner is checked exactly as for
+	// Power: a VM this VirtualMachine does not own is reported as not-found and
+	// left unchanged. The result carries a TaskRef if the operation is
+	// asynchronous.
+	Reconfigure(ctx context.Context, vm VMRef, desired CreateRequest) (ReconfigureResult, error)
 
 	// Describe returns the current state of the VM vm addresses. On a clustered
 	// provider a VM whose owner stamp does not record vm.Owner.UID is reported

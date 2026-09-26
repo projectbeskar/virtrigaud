@@ -2211,7 +2211,8 @@ func (r *VirtualMachineReconciler) reconfigureVM(
 	}
 
 	// Call provider reconfigure
-	taskRef, err := provider.Reconfigure(ctx, ref, req)
+	result, err := provider.Reconfigure(ctx, ref, req)
+	taskRef := result.TaskRef
 	if err != nil {
 		// As for Power: a clustered VM's host-scoped unavailability or
 		// not-found is a host-level fact, not a reconfigure failure to retry

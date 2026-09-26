@@ -1334,20 +1334,21 @@ func syncPersistentXML(ctx context.Context, vp *VirshProvider, domainName string
 // owner stamp against vm.Owner, and runs the same core there on the checked
 // domain — including the online disk grow and its in-guest filesystem grow,
 // whose guest-agent commands go to that host (reconfigureClustered).
-func (p *Provider) Reconfigure(ctx context.Context, vm contracts.VMRef, desired contracts.CreateRequest) (taskRef string, err error) {
+func (p *Provider) Reconfigure(ctx context.Context, vm contracts.VMRef, desired contracts.CreateRequest) (contracts.ReconfigureResult, error) {
 	id := vm.ID
 	log.Printf("INFO Reconfiguring VM: %s", id)
 
 	if p.clustered() {
-		return "", p.withHostConn(ctx, vm.HostID, func(c libvirtConn) error {
+		err := p.withHostConn(ctx, vm.HostID, func(c libvirtConn) error {
 			return p.reconfigureClustered(ctx, c, id, vm.Owner, desired)
 		})
+		return contracts.ReconfigureResult{}, err
 	}
 
 	if p.virshProvider == nil {
-		return "", contracts.NewRetryableError("virsh provider not initialized", nil)
+		return contracts.ReconfigureResult{}, contracts.NewRetryableError("virsh provider not initialized", nil)
 	}
-	return "", p.reconfigureOn(ctx, p.singleHostConn(), byName(id), desired)
+	return contracts.ReconfigureResult{}, p.reconfigureOn(ctx, p.singleHostConn(), byName(id), desired)
 }
 
 // reconfigureClustered is the routed, OWNER-CHECKED Reconfigure of a clustered

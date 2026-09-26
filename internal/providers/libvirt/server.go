@@ -236,7 +236,7 @@ func (s *Server) Reconfigure(ctx context.Context, req *providerv1.ReconfigureReq
 		return nil, fmt.Errorf("failed to parse desired configuration: %w", err)
 	}
 
-	taskRef, err := s.provider.Reconfigure(ctx, contracts.VMRef{ID: req.Id, HostID: req.TargetHostId, Owner: ownerFromProto(req.GetOwner())}, createReq)
+	res, err := s.provider.Reconfigure(ctx, contracts.VMRef{ID: req.Id, HostID: req.TargetHostId, Owner: ownerFromProto(req.GetOwner())}, createReq)
 	if err != nil {
 		if s.clusteredProvider() {
 			return nil, routedRPCError("reconfigure VM", err)
@@ -244,9 +244,9 @@ func (s *Server) Reconfigure(ctx context.Context, req *providerv1.ReconfigureReq
 		return nil, fmt.Errorf("failed to reconfigure VM: %w", err)
 	}
 
-	result := &providerv1.TaskResponse{}
-	if taskRef != "" {
-		result.Task = &providerv1.TaskRef{Id: taskRef}
+	result := &providerv1.TaskResponse{RestartRequired: res.RestartRequired}
+	if res.TaskRef != "" {
+		result.Task = &providerv1.TaskRef{Id: res.TaskRef}
 	}
 
 	return result, nil
@@ -281,6 +281,7 @@ func (s *Server) Describe(ctx context.Context, req *providerv1.DescribeRequest) 
 		Ips:             resp.IPs,
 		ConsoleUrl:      resp.ConsoleURL,
 		ProviderRawJson: providerRawJSON,
+		MaxMemoryMib:    resp.MaxMemoryMiB,
 	}, nil
 }
 

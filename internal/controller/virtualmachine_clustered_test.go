@@ -58,13 +58,14 @@ type routingProvider struct {
 	powerRefs []contracts.VMRef
 	powerErr  error
 
-	reconfigureRefs []contracts.VMRef
-	reconfigureErr  error
+	reconfigureRefs   []contracts.VMRef
+	reconfigureResult contracts.ReconfigureResult
+	reconfigureErr    error
 }
 
-func (p *routingProvider) Reconfigure(_ context.Context, vm contracts.VMRef, _ contracts.CreateRequest) (string, error) {
+func (p *routingProvider) Reconfigure(_ context.Context, vm contracts.VMRef, _ contracts.CreateRequest) (contracts.ReconfigureResult, error) {
 	p.reconfigureRefs = append(p.reconfigureRefs, vm)
-	return "", p.reconfigureErr
+	return p.reconfigureResult, p.reconfigureErr
 }
 
 func (p *routingProvider) Create(_ context.Context, req contracts.CreateRequest) (contracts.CreateResponse, error) {

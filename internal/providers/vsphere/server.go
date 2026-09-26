@@ -1078,8 +1078,11 @@ func (p *Provider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureR
 
 	p.logger.Info("VM reconfigured successfully", "vm_id", req.Id)
 
-	// Return empty task response since we completed synchronously
-	return &providerv1.TaskResponse{}, nil
+	// Return empty task response since we completed synchronously.
+	// RestartRequired is false: vSphere has no pending state for CPU/memory —
+	// ReconfigVM_Task either applies the change (hot-add, or a powered-off VM)
+	// or fails, and a failure is returned above.
+	return &providerv1.TaskResponse{RestartRequired: false}, nil
 }
 
 // HardwareUpgrade implements the ProviderServer interface. It upgrades the virtual
