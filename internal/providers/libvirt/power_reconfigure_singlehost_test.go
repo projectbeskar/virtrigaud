@@ -65,8 +65,15 @@ var opsDiskPath string // inside fixtureImagesDir (set by TestMain)
 // opsFakeVirsh is a scriptable fake `virsh`. It routes on the -c URI (the host
 // tag is the URI path, "local" without -c), logs every call as
 // "<host> <args>", and answers the subcommands Power and Reconfigure use. Per
-// host, a file named fail-<subcommand> makes that subcommand fail, "state"
-// holds the domstate answer (default "shut off"), "disktype" / "disksource"
+// host, a file named fail-<subcommand> makes that subcommand fail
+// (fail-<subcommand>-live / -config / -maximum only its call with that flag,
+// fail-inactive the `dumpxml --inactive` read), "state"
+// holds the domstate answer (default "shut off"), "id" / "vcpus" / "maxmem" /
+// "usedmem" the dominfo Id, CPU(s), Max memory and Used memory (KiB; default
+// "-", 2, 2097152, 2097152), "cfg-vcpus" / "cfg-maxvcpus" / "cfg-mem" /
+// "cfg-maxmem" the persistent definition `dumpxml --inactive` reports (same
+// defaults), "capacity" the domblkinfo Capacity in bytes (default 10 GiB),
+// "disktype" / "disksource"
 // override the primary disk `domblklist --details` reports (default: a file
 // disk at $FAKE_DISK_PATH), "dead" makes every call die without an exit status
 // (the host dropped the connection), "nolibvirtd" makes every call fail as
@@ -82,6 +89,17 @@ fail() { if [ -f "$d/fail-$1" ]; then echo "error: scripted failure of $1" >&2; 
 nodom() { echo "error: failed to get domain '$1'" >&2; exit 1; }
 if [ -f "$d/dead" ]; then kill -9 $$; fi
 if [ -f "$d/nolibvirtd" ]; then echo "error: failed to connect to the hypervisor" >&2; exit 1; fi
+if [ "$1" = "dumpxml" ] && [ "$3" = "--inactive" ]; then
+  fail inactive
+  [ -f "$d/dom-$2.xml" ] || nodom "$2"
+  vc=2; mvc=2; mem=2097152; mmem=2097152
+  if [ -f "$d/cfg-vcpus" ]; then vc=$(cat "$d/cfg-vcpus"); fi
+  if [ -f "$d/cfg-maxvcpus" ]; then mvc=$(cat "$d/cfg-maxvcpus"); fi
+  if [ -f "$d/cfg-mem" ]; then mem=$(cat "$d/cfg-mem"); fi
+  if [ -f "$d/cfg-maxmem" ]; then mmem=$(cat "$d/cfg-maxmem"); fi
+  printf "<domain type='kvm'>\n  <name>%s</name>\n  <memory unit='KiB'>%s</memory>\n  <currentMemory unit='KiB'>%s</currentMemory>\n  <vcpu placement='static' current='%s'>%s</vcpu>\n</domain>\n" "$2" "$mmem" "$mem" "$vc" "$mvc"
+  exit 0
+fi
 case "$1" in
   list) if [ "$3" = "--uuid" ]; then cat "$d/uuids.txt" 2>/dev/null; else cat "$d/list.txt"; fi ;;
   pool-dumpxml) printf "<pool type='dir'><name>default</name><target><path>%s</path></target></pool>\n" "$FAKE_POOL_DIR" ;;
@@ -90,13 +108,21 @@ case "$1" in
     [ -f "$d/dom-$2.xml" ] || nodom "$2"
     uuid=11111111-2222-4333-8444-555555555555
     if [ -f "$d/uuid" ]; then uuid=$(cat "$d/uuid"); fi
-    printf 'Id:             -\nName:           %s\nUUID:           %s\nState:          shut off\nCPU(s):         2\nMax memory:     2097152 KiB\n' "$2" "$uuid" ;;
+    id=-; cpus=2; maxmem=2097152; usedmem=2097152
+    if [ -f "$d/id" ]; then id=$(cat "$d/id"); fi
+    if [ -f "$d/vcpus" ]; then cpus=$(cat "$d/vcpus"); fi
+    if [ -f "$d/maxmem" ]; then maxmem=$(cat "$d/maxmem"); fi
+    if [ -f "$d/usedmem" ]; then usedmem=$(cat "$d/usedmem"); fi
+    printf 'Id:             %s\nName:           %s\nUUID:           %s\nState:          shut off\nCPU(s):         %s\nMax memory:     %s KiB\nUsed memory:    %s KiB\n' "$id" "$2" "$uuid" "$cpus" "$maxmem" "$usedmem" ;;
   domstate)
     fail domstate
     [ -f "$d/dom-$2.xml" ] || nodom "$2"
     if [ -f "$d/state" ]; then cat "$d/state"; else echo "shut off"; fi ;;
   start|destroy|shutdown|setvcpus|setmem|setmaxmem|blockresize|undefine)
     fail "$1"
+    case "$*" in *--live*) fail "$1-live" ;; esac
+    case "$*" in *--config*) fail "$1-config" ;; esac
+    case "$*" in *--maximum*) fail "$1-maximum" ;; esac
     [ -f "$d/dom-$2.xml" ] || nodom "$2" ;;
   vol-resize|define) fail "$1"; exit 0 ;;
   domblklist)
@@ -110,7 +136,9 @@ case "$1" in
     esac ;;
   domblkinfo)
     fail domblkinfo
-    printf 'Capacity:       10737418240\nAllocation:     1073741824\nPhysical:       1073741824\n' ;;
+    capacity=10737418240
+    if [ -f "$d/capacity" ]; then capacity=$(cat "$d/capacity"); fi
+    printf 'Capacity:       %s\nAllocation:     1073741824\nPhysical:       1073741824\n' "$capacity" ;;
   qemu-agent-command)
     fail qemu-agent-command
     case "$*" in
