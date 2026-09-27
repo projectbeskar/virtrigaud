@@ -1664,6 +1664,12 @@ func (p *Provider) describeOn(ctx context.Context, c libvirtConn, id string) (co
 		ProviderRaw: domainInfo, // Pass the enhanced domain info as provider-specific data
 	}
 	p.reportLinkedCloneDependents(domainInfo["UUID"], response.ProviderRaw)
+	// The memory maximum: the running domain's <memory> (the balloon maximum a
+	// guest can reach without host action), or the definition's when it is
+	// off. Rounded up, so a reported ceiling never undercounts.
+	if kib, kErr := dominfoKiB(domainInfo, "Max memory"); kErr == nil {
+		response.MaxMemoryMiB = kibToMiBCeil(kib)
+	}
 
 	log.Printf("INFO Domain %s comprehensive state: power=%s, ips=%v, monitoring_data=collected", id, response.PowerState, ips)
 

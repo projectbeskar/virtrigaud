@@ -422,6 +422,20 @@ func TestClustered_Reconfigure_HonestResult(t *testing.T) {
 	}
 }
 
+// TestDescribe_ReportsMaxMemory (review R2): Describe reports the domain's
+// memory maximum (dominfo "Max memory", rounded up to MiB) on the wire, so the
+// manager can record a clustered VM's balloon ceiling from the provider.
+func TestDescribe_ReportsMaxMemory(t *testing.T) {
+	fx := newOpsFixture(t, map[string]map[string]string{
+		"single": {opsDomainName: routingDomainXML(opsDomainName, contracts.ObjectIdentity{})},
+	})
+	fx.script("single", "maxmem", "8388609") // 8 GiB + 1 KiB: rounds up
+	s := NewServer(&Provider{virshProvider: localHostVP("single")})
+	resp, err := s.Describe(context.Background(), &providerv1.DescribeRequest{Id: opsDomainName})
+	require.NoError(t, err)
+	assert.EqualValues(t, 8193, resp.GetMaxMemoryMib())
+}
+
 // TestGenerateDomainXML_ClusteredDisablesGuestSuspend (review R1c): a clustered
 // provider's new domain may not suspend to RAM or disk; a single-host domain's
 // XML is unchanged (no <pm> element).

@@ -388,11 +388,19 @@ func buildNativeDescribe(lv *golibvirt.Libvirt, id string) (contracts.DescribeRe
 		raw["memory_mib"] = strconv.FormatInt(mib, 10)
 	}
 
-	return contracts.DescribeResponse{
+	resp := contracts.DescribeResponse{
 		Exists:      true,
 		PowerState:  powerState,
 		ProviderRaw: raw,
-	}, nil
+	}
+	// The same memory maximum the virsh Describe reports (not compared by the
+	// shadow harness, which meters ProviderRaw only).
+	if d.Memory != nil {
+		if kib, kErr := kibOf(d.Memory.Value, d.Memory.Unit); kErr == nil {
+			resp.MaxMemoryMiB = kibToMiBCeil(kib)
+		}
+	}
+	return resp, nil
 }
 
 // buildNativeList builds the shadow VMInfo list for the list family from the

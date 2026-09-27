@@ -226,6 +226,11 @@ func kibOf(v uint, unit string) (int64, error) {
 	return 0, fmt.Errorf("unexpected memory unit %q (want KiB)", unit)
 }
 
+// kibToMiBCeil converts KiB to MiB, rounding up.
+func kibToMiBCeil(kib int64) int64 {
+	return (kib + 1023) / 1024
+}
+
 // dominfoKiB parses a `virsh dominfo` memory line ("2097152 KiB") of info.
 func dominfoKiB(info map[string]string, key string) (int64, error) {
 	raw, ok := info[key]
