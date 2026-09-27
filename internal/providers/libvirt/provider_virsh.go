@@ -625,9 +625,12 @@ func checkDomainOwner(ctx context.Context, vp *VirshProvider, host hostconn.Host
 //
 // It first reads the definition and plans what to remove (planDomainDeletion):
 // the domain's OWN top-level disk files that lie directly inside the storage
-// pool or an allowed image directory, and its VirtRigaud cloud-init seed
-// directory — never a <backingStore> (a linked clone's source disk), cdrom or
-// floppy media, or a file elsewhere on the host. BEFORE anything is changed it
+// pool or an allowed image directory, the files below them in their backing
+// chains that are its own (ownChainFiles: named after its disk, used by no
+// other domain — what its external snapshots left), and its VirtRigaud
+// cloud-init seed directory — never another backing file (a linked clone's
+// source disk, a base image), cdrom or floppy media, or a file elsewhere on
+// the host. BEFORE anything is changed it
 // refuses the delete, leaving the domain fully intact, while another domain on
 // the host uses one of those disk files as a disk or backing file (a linked
 // clone of this VM; diskDependentsError). Only then does it force-stop and
@@ -678,7 +681,8 @@ func (p *Provider) deleteExistingDomain(ctx context.Context, vp *VirshProvider, 
 // undefined.
 type domainDeletionPlan struct {
 	// disks are the canonical host paths of the domain's own disk files that
-	// may be removed (deletableDiskFiles) and that no other domain uses.
+	// may be removed (deletableDiskFiles) and that no other domain uses: its
+	// top-level disks, then its own backing-chain files (ownChainFiles).
 	disks []string
 	// seedDir is the domain's VirtRigaud cloud-init seed directory, or "".
 	seedDir string
@@ -742,7 +746,60 @@ func (p *Provider) planDomainDeletion(ctx context.Context, vp *VirshProvider, id
 		plan.seedDir = ""
 	}
 	plan.disks = deletable
+	plan.disks = append(plan.disks, p.ownChainFiles(ctx, vp, doc.Name, deletable, others)...)
 	return plan, nil
+}
+
+// ownChainFiles returns the canonical paths of the files BELOW disks in their
+// backing chains (qemu-img info --backing-chain) that are the domain's own and
+// may go with it: named after its own disk (<domain>-disk.<anything> — the
+// disk it was created with, under the overlays its external snapshots added)
+// and cleared by deletableDiskFiles (a regular file directly inside the
+// storage directories), that no other domain references. Any other chain
+// member — a base image, another VM's disk a linked clone was made from — is
+// never removed, and neither is one another domain still uses (e.g. a linked
+// clone backed by the domain's pre-snapshot disk). A chain that cannot be read
+// is left in place and logged; it never fails the delete.
+func (p *Provider) ownChainFiles(ctx context.Context, vp *VirshProvider, domain string, disks []string, others otherDomains) []string {
+	ownPrefix := vmDiskVolumeName(domain) + "."
+	top := map[string]bool{}
+	for _, d := range disks {
+		top[d] = true
+	}
+	var members []string
+	for _, d := range disks {
+		chain, err := backingChainFiles(ctx, vp, d)
+		if err != nil {
+			log.Printf("WARN Keeping the backing chain of disk %s of domain %s: it could not be read: %v", d, domain, err)
+			continue
+		}
+		for _, f := range chain {
+			if top[f] || !strings.HasPrefix(filepath.Base(f), ownPrefix) {
+				continue
+			}
+			members = append(members, f)
+		}
+	}
+	if len(members) == 0 {
+		return nil
+	}
+	cleared, err := p.deletableDiskFiles(ctx, vp, domain, members)
+	if err != nil {
+		log.Printf("WARN Keeping the backing chain files %v of domain %s: %v", members, domain, err)
+		return nil
+	}
+	var out []string
+	for _, f := range cleared {
+		if top[f] {
+			continue
+		}
+		if others.using(domain, []string{f}, []string{f}) > 0 {
+			log.Printf("WARN Keeping backing file %s of domain %s: another domain still uses it", f, domain)
+			continue
+		}
+		out = append(out, f)
+	}
+	return out
 }
 
 // deletionDirs returns the directories Delete may remove VM disk files from,

@@ -325,6 +325,55 @@ func TestDelete_SingleHost_SymlinkedDiskIsNotFollowed(t *testing.T) {
 	assert.FileExists(t, target)
 }
 
+// chainSidecar writes the qemu-img --backing-chain answer for files[0]: each
+// file backed by the next.
+func (c *createHost) chainSidecar(files ...string) {
+	c.t.Helper()
+	var links []string
+	for i, f := range files {
+		if i+1 < len(files) {
+			links = append(links, fmt.Sprintf(`{"filename":%q,"format":"qcow2","backing-filename":%q,"full-backing-filename":%q}`,
+				f, files[i+1], files[i+1]))
+		} else {
+			links = append(links, fmt.Sprintf(`{"filename":%q,"format":"qcow2"}`, f))
+		}
+	}
+	require.NoError(c.t, os.WriteFile(files[0]+".chain.json", []byte("["+strings.Join(links, ",")+"]"), 0o600))
+}
+
+// TestDelete_SingleHost_RemovesOwnSnapshotChain: a VM whose disk is an
+// external-snapshot overlay (<vm>-disk.snap1 over <vm>-disk.qcow2 over a base
+// image) is deleted with its own chain files; the base image is never removed,
+// and neither is its pre-snapshot disk while a linked clone still reads it.
+func TestDelete_SingleHost_RemovesOwnSnapshotChain(t *testing.T) {
+	for _, withClone := range []bool{false, true} {
+		t.Run(fmt.Sprintf("linked clone of the pre-snapshot disk=%v", withClone), func(t *testing.T) {
+			c := newCreateHost(t)
+			top := c.file(c.images, "team-a.web-disk.snap1")
+			own := c.file(c.images, "team-a.web-disk.qcow2")
+			base := c.file(c.images, "golden.qcow2")
+			c.chainSidecar(top, own, base)
+			c.define("h1", "team-a.web", uuidSource, depDomainXML("team-a.web", uuidSource, top, ""))
+			names := "team-a.web\n"
+			if withClone {
+				clone := c.file(c.images, "team-b.copy-disk.qcow2")
+				c.chainSidecar(clone, own, base)
+				c.define("h1", "team-b.copy", uuidClone, depDomainXML("team-b.copy", uuidClone, clone, ""))
+				names += "team-b.copy\n"
+			}
+			require.NoError(t, os.WriteFile(filepath.Join(c.root, "h1", "names"), []byte(names), 0o600))
+
+			_, err := c.p.Delete(context.Background(), contracts.VMRef{ID: "team-a.web"})
+			require.NoError(t, err)
+			want := []string{top, own}
+			if withClone {
+				want = []string{top}
+			}
+			assert.Equal(t, want, c.removals(), "its own overlay and pre-snapshot disk; never the base image")
+		})
+	}
+}
+
 // TestDeleteDiskFile_RechecksRightBeforeRemoving: a path that stopped being a
 // regular file between the plan and the removal (replaced by a symlink) is
 // not removed.
