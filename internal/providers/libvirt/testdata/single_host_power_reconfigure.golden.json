@@ -83,7 +83,7 @@
     "calls": [
       "single domstate vrcallseq-web"
     ],
-    "err": "Retryable: failed to get domain state (caused by: failed to get domain state: virsh command 'virsh -c qemu:///single domstate vrcallseq-web' failed (exit code 1): stderr=error: scripted failure of domstate\n, stdout=)"
+    "err": "Retryable: could not read the VM's power state (caused by: details are in the provider log)"
   },
   "reconfigure-no-change": {
     "calls": [
@@ -95,7 +95,8 @@
       "single domblklist vrcallseq-web",
       "single domblkstat vrcallseq-web vda",
       "single guestinfo vrcallseq-web --os",
-      "single guestinfo vrcallseq-web --hostname"
+      "single guestinfo vrcallseq-web --hostname",
+      "single dumpxml vrcallseq-web --inactive"
     ],
     "err": ""
   },
@@ -110,10 +111,30 @@
       "single domblkstat vrcallseq-web vda",
       "single guestinfo vrcallseq-web --os",
       "single guestinfo vrcallseq-web --hostname",
+      "single dumpxml vrcallseq-web --inactive",
+      "single setvcpus vrcallseq-web 4 --config --maximum",
       "single setvcpus vrcallseq-web 4 --config",
-      "single setmem vrcallseq-web 4194304K --config",
       "single setmaxmem vrcallseq-web 4194304K --config",
+      "single setmem vrcallseq-web 4194304K --config",
+      "single domblklist vrcallseq-web",
+      "single domblkinfo vrcallseq-web vda",
       "single vol-resize vrcallseq-web-disk 20G --pool default"
+    ],
+    "err": ""
+  },
+  "reconfigure-offline-disk-already-large": {
+    "calls": [
+      "single domstate vrcallseq-web",
+      "single dominfo vrcallseq-web",
+      "single dommemstat vrcallseq-web",
+      "single cpu-stats vrcallseq-web",
+      "single domiflist vrcallseq-web",
+      "single domblklist vrcallseq-web",
+      "single domblkstat vrcallseq-web vda",
+      "single guestinfo vrcallseq-web --os",
+      "single guestinfo vrcallseq-web --hostname",
+      "single domblklist vrcallseq-web",
+      "single domblkinfo vrcallseq-web vda"
     ],
     "err": ""
   },
@@ -128,11 +149,26 @@
       "single domblkstat vrcallseq-web vda",
       "single guestinfo vrcallseq-web --os",
       "single guestinfo vrcallseq-web --hostname",
-      "single setvcpus vrcallseq-web 4 --config",
-      "single setmem vrcallseq-web 4194304K --config",
-      "single vol-resize vrcallseq-web-disk 20G --pool default"
+      "single dumpxml vrcallseq-web --inactive",
+      "single setvcpus vrcallseq-web 4 --config --maximum"
     ],
-    "err": ""
+    "err": "Retryable: could not raise the vCPU maximum of the VM's persistent definition to 4 (caused by: details are in the provider log)"
+  },
+  "reconfigure-offline-setmaxmem-fails": {
+    "calls": [
+      "single domstate vrcallseq-web",
+      "single dominfo vrcallseq-web",
+      "single dommemstat vrcallseq-web",
+      "single cpu-stats vrcallseq-web",
+      "single domiflist vrcallseq-web",
+      "single domblklist vrcallseq-web",
+      "single domblkstat vrcallseq-web vda",
+      "single guestinfo vrcallseq-web --os",
+      "single guestinfo vrcallseq-web --hostname",
+      "single dumpxml vrcallseq-web --inactive",
+      "single setmaxmem vrcallseq-web 4194304K --config"
+    ],
+    "err": "Retryable: could not set the memory maximum of the VM's persistent definition to 4096 MiB (caused by: details are in the provider log)"
   },
   "reconfigure-online-beyond-headroom": {
     "calls": [
@@ -145,10 +181,15 @@
       "single domblkstat vrcallseq-web vda",
       "single guestinfo vrcallseq-web --os",
       "single guestinfo vrcallseq-web --hostname",
+      "single dumpxml vrcallseq-web --inactive",
+      "single setvcpus vrcallseq-web 64 --config --maximum",
+      "single setvcpus vrcallseq-web 64 --config",
       "single setvcpus vrcallseq-web 64 --live",
-      "single setmem vrcallseq-web 67108864K --live"
+      "single setmaxmem vrcallseq-web 67108864K --config",
+      "single setmem vrcallseq-web 67108864K --config"
     ],
-    "err": ""
+    "err": "",
+    "restartRequired": true
   },
   "reconfigure-online-blockresize-fails": {
     "calls": [
@@ -166,7 +207,7 @@
       "single vol-resize vrcallseq-web-disk 20G --pool default",
       "single blockresize vrcallseq-web vda 20G"
     ],
-    "err": "Retryable: online disk grow failed (caused by: blockresize domain vrcallseq-web target vda to 20GB: virsh command 'virsh -c qemu:///single blockresize vrcallseq-web vda 20G' failed (exit code 1): stderr=error: scripted failure of blockresize\n, stdout=)"
+    "err": "Retryable: could not grow the VM's disk to 20 GiB (caused by: details are in the provider log)"
   },
   "reconfigure-online-cpu-mem": {
     "calls": [
@@ -179,7 +220,10 @@
       "single domblkstat vrcallseq-web vda",
       "single guestinfo vrcallseq-web --os",
       "single guestinfo vrcallseq-web --hostname",
+      "single dumpxml vrcallseq-web --inactive",
+      "single setvcpus vrcallseq-web 4 --config",
       "single setvcpus vrcallseq-web 4 --live",
+      "single setmem vrcallseq-web 4194304K --config",
       "single setmem vrcallseq-web 4194304K --live"
     ],
     "err": ""
@@ -211,6 +255,7 @@
       "single domblkstat vrcallseq-web vda",
       "single guestinfo vrcallseq-web --os",
       "single guestinfo vrcallseq-web --hostname",
+      "single dumpxml vrcallseq-web --inactive",
       "single domblklist vrcallseq-web",
       "single domblkinfo vrcallseq-web vda",
       "single vol-resize vrcallseq-web-disk 20G --pool default",
@@ -246,5 +291,53 @@
       "single qemu-agent-command --timeout 3 vrcallseq-web {\"execute\":\"guest-ping\"}"
     ],
     "err": ""
+  },
+  "reconfigure-online-shrink": {
+    "calls": [
+      "single domstate vrcallseq-web",
+      "single dominfo vrcallseq-web",
+      "single dommemstat vrcallseq-web",
+      "single cpu-stats vrcallseq-web",
+      "single domiflist vrcallseq-web",
+      "single domblklist vrcallseq-web",
+      "single domblkstat vrcallseq-web vda",
+      "single guestinfo vrcallseq-web --os",
+      "single guestinfo vrcallseq-web --hostname",
+      "single dumpxml vrcallseq-web --inactive",
+      "single setvcpus vrcallseq-web 2 --config",
+      "single setvcpus vrcallseq-web 2 --live",
+      "single setmaxmem vrcallseq-web 2097152K --config",
+      "single setmem vrcallseq-web 2097152K --config"
+    ],
+    "err": "",
+    "restartRequired": true
+  },
+  "reconfigure-paused-refused": {
+    "calls": [
+      "single domstate vrcallseq-web",
+      "single dominfo vrcallseq-web",
+      "single dommemstat vrcallseq-web",
+      "single cpu-stats vrcallseq-web",
+      "single domiflist vrcallseq-web",
+      "single domblklist vrcallseq-web",
+      "single domblkstat vrcallseq-web vda",
+      "single guestinfo vrcallseq-web --os",
+      "single guestinfo vrcallseq-web --hostname"
+    ],
+    "err": "Retryable: the VM is \"paused\" (active, but not running); its CPU, memory and disk are changed only while it is running or shut off, so nothing was changed and the reconfigure is retried"
+  },
+  "reconfigure-pmsuspended-refused": {
+    "calls": [
+      "single domstate vrcallseq-web",
+      "single dominfo vrcallseq-web",
+      "single dommemstat vrcallseq-web",
+      "single cpu-stats vrcallseq-web",
+      "single domiflist vrcallseq-web",
+      "single domblklist vrcallseq-web",
+      "single domblkstat vrcallseq-web vda",
+      "single guestinfo vrcallseq-web --os",
+      "single guestinfo vrcallseq-web --hostname"
+    ],
+    "err": "Retryable: the VM is \"pmsuspended\" (active, but not running); its CPU, memory and disk are changed only while it is running or shut off, so nothing was changed and the reconfigure is retried"
   }
 }
