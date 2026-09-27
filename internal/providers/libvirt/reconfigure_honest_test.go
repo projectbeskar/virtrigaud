@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	stderrors "errors"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -419,4 +420,31 @@ func TestClustered_Reconfigure_HonestResult(t *testing.T) {
 			assert.Equal(t, map[string]bool{"host-b": true}, hostsOf(fx.calls()), "every call ran on the bound host")
 		})
 	}
+}
+
+// TestGenerateDomainXML_ClusteredDisablesGuestSuspend (review R1c): a clustered
+// provider's new domain may not suspend to RAM or disk; a single-host domain's
+// XML is unchanged (no <pm> element).
+func TestGenerateDomainXML_ClusteredDisablesGuestSuspend(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX-only: the /dev/kvm probe execs test(1)")
+	}
+	ctx := context.Background()
+	req := contracts.CreateRequest{Name: "web", Owner: ownerTeamA}
+
+	single, err := (&Provider{}).generateDomainXMLWithStorage(ctx, localTestVirshProvider(), req, "web", "/var/lib/libvirt/images/web-disk.qcow2", "")
+	require.NoError(t, err)
+	assert.NotContains(t, single, "<pm>", "single-host domain XML is unchanged")
+	assert.Contains(t, single, "  <on_crash>destroy</on_crash>\n  <devices>\n", "single-host layout is byte-identical around the insertion point")
+
+	clustered, _, _ := routedCluster(t)
+	x, err := clustered.generateDomainXMLWithStorage(ctx, localTestVirshProvider(), req, "web", "/var/lib/libvirt/images/web-disk.qcow2", "")
+	require.NoError(t, err)
+	d, err := parseDomainLibvirtxml(x)
+	require.NoError(t, err, "the clustered domain XML stays well-formed")
+	require.NotNil(t, d.PM)
+	require.NotNil(t, d.PM.SuspendToMem)
+	require.NotNil(t, d.PM.SuspendToDisk)
+	assert.Equal(t, "no", d.PM.SuspendToMem.Enabled)
+	assert.Equal(t, "no", d.PM.SuspendToDisk.Enabled)
 }

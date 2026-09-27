@@ -2107,7 +2107,7 @@ func (p *Provider) generateDomainXMLWithStorage(ctx context.Context, vp *VirshPr
   <on_poweroff>destroy</on_poweroff>
   <on_reboot>restart</on_reboot>
   <on_crash>destroy</on_crash>
-  <devices>
+%s  <devices>
 %s
     <controller type='usb' index='0' model='ich9-ehci1'>
       <address type='pci' domain='0x0000' bus='0x00' slot='0x05' function='0x7'/>
@@ -2178,10 +2178,32 @@ func (p *Provider) generateDomainXMLWithStorage(ctx context.Context, vp *VirshPr
 		osXML,
 		featuresXML,
 		cpuXML,
+		p.domainPMXML(),
 		devicesXML,
 		networkInterfacesXML)
 
 	return domainXML, nil
+}
+
+// clusteredDomainPMXML disables guest-initiated suspend to RAM and to disk. A
+// guest suspended to RAM (pmsuspended) is still an active domain that wakes on
+// its own at the size it has (review R1): on a clustered provider, whose
+// committed-capacity accounting relies on a powered-off VM really being off,
+// the guest may not enter that state at all.
+const clusteredDomainPMXML = `  <pm>
+    <suspend-to-mem enabled='no'/>
+    <suspend-to-disk enabled='no'/>
+  </pm>
+`
+
+// domainPMXML is the <pm> element of a new domain: clusteredDomainPMXML on a
+// clustered provider, nothing on a single-host one (whose domain XML stays
+// byte-identical to the historical layout).
+func (p *Provider) domainPMXML() string {
+	if p.clustered() {
+		return clusteredDomainPMXML
+	}
+	return ""
 }
 
 // detectDomainType returns the libvirt <domain type> for new domains: "kvm" when
