@@ -228,7 +228,7 @@ func honestSingleHostCases() []honestCase {
 }
 
 // runSingleHostReconfigure runs one single-host Reconfigure on a fresh fixture.
-func runSingleHostReconfigure(t *testing.T, script map[string]string, desired contracts.CreateRequest) (contracts.ReconfigureResult, error, []string) {
+func runSingleHostReconfigure(t *testing.T, script map[string]string, desired contracts.CreateRequest) (contracts.ReconfigureResult, []string, error) {
 	t.Helper()
 	fx := newOpsFixture(t, map[string]map[string]string{
 		"single": {opsDomainName: routingDomainXML(opsDomainName, contracts.ObjectIdentity{})},
@@ -238,13 +238,13 @@ func runSingleHostReconfigure(t *testing.T, script map[string]string, desired co
 	}
 	p := &Provider{virshProvider: localHostVP("single")}
 	res, err := p.Reconfigure(context.Background(), contracts.VMRef{ID: opsDomainName}, desired)
-	return res, err, fx.calls()
+	return res, fx.calls(), err
 }
 
 func TestReconfigure_SingleHost_HonestResult(t *testing.T) {
 	for _, tc := range honestSingleHostCases() {
 		t.Run(tc.name, func(t *testing.T) {
-			res, err, calls := runSingleHostReconfigure(t, tc.script, tc.desired)
+			res, calls, err := runSingleHostReconfigure(t, tc.script, tc.desired)
 			if tc.wantErr {
 				require.Error(t, err)
 				assert.True(t, contracts.IsRetryable(err), "a host-side failure is retryable: %v", err)
@@ -277,7 +277,7 @@ func TestReconfigure_ActiveButNotRunningDomainIsRefused(t *testing.T) {
 	shrink := reconfigureTo(1, 1024, 0)
 	for _, state := range []string{"paused", "pmsuspended", "in shutdown", "crashed", "no state", "something-new"} {
 		t.Run(state, func(t *testing.T) {
-			res, err, calls := runSingleHostReconfigure(t, map[string]string{"state": state + "\n", "id": "7"}, shrink)
+			res, calls, err := runSingleHostReconfigure(t, map[string]string{"state": state + "\n", "id": "7"}, shrink)
 			require.Error(t, err)
 			assert.True(t, contracts.IsRetryable(err), "%v", err)
 			assert.False(t, res.RestartRequired)
@@ -291,7 +291,7 @@ func TestReconfigure_ActiveButNotRunningDomainIsRefused(t *testing.T) {
 // drops the virsh detail, but the error chain still carries the *VirshError,
 // so a host that could not be reached is still classified as such.
 func TestReconfigure_FailureKeepsHostClassification(t *testing.T) {
-	_, err, _ := runSingleHostReconfigure(t, map[string]string{"fail-setvcpus-config": "", "cfg-maxvcpus": "8"}, reconfigureTo(4, 0, 0))
+	_, _, err := runSingleHostReconfigure(t, map[string]string{"fail-setvcpus-config": "", "cfg-maxvcpus": "8"}, reconfigureTo(4, 0, 0))
 	require.Error(t, err)
 	var ve *VirshError
 	assert.True(t, stderrors.As(err, &ve), "the virsh failure stays in the chain for classification")
