@@ -658,6 +658,9 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	vm.Status.ConsoleURL = desc.ConsoleURL
 	vm.Status.Provider = desc.ProviderRaw
 	r.noteLinkedCloneDependents(vm, desc.ProviderRaw)
+	// A bound clustered VM's memory ceiling follows what its provider reports
+	// (recorded once if missing, lowered after a confirmed shrink).
+	r.syncMemoryCeiling(ctx, vm, ref, desc)
 
 	// A VM the provider reports Suspended (paused, suspended to RAM) or Unknown
 	// is neither powered on or off nor reconfigured (review R1): it is left as
@@ -711,7 +714,11 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		r.updateStatus(ctx, vm)
 		return ctrl.Result{RequeueAfter: vmCreateInvalidSpecRetryInterval}, nil
 	}
-	if needsRC {
+	// A change pending a restart is re-checked with the provider on a slow
+	// cadence, and a failed Reconfigure is re-sent even if the spec now matches
+	// the recorded size (pendingReconfigureRecheck).
+	recheckDue, recheckIn := r.pendingReconfigureRecheck(vm)
+	if (needsRC || recheckDue) && recheckIn == 0 {
 		desiredCPU, desiredMemoryMiB, _ := effectiveResources(vm, vmClass) // already validated above
 		logger.Info("Effective resources changed, reconfiguring VM",
 			"currentCPU", r.getCurrentCPU(vm),
@@ -741,7 +748,11 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	r.updateStatus(ctx, vm)
 
 	// Optimize polling frequency based on VM state
-	return ctrl.Result{RequeueAfter: r.getRequeueInterval(vm, desc)}, nil
+	requeue := r.getRequeueInterval(vm, desc)
+	if recheckIn > 0 && recheckIn < requeue {
+		requeue = recheckIn
+	}
+	return ctrl.Result{RequeueAfter: requeue}, nil
 }
 
 // handleDeletion handles VM deletion
@@ -2240,13 +2251,21 @@ func (r *VirtualMachineReconciler) reconfigureVM(
 
 	// Update status with reconfiguration info
 	vm.Status.Phase = infravirtrigaudiov1beta1.VirtualMachinePhaseReconfiguring
-	now := metav1.Now()
+	now := metav1.NewTime(r.now())
 	vm.Status.LastReconfigureTime = &now
 
-	if taskRef != "" {
+	switch {
+	case taskRef != "":
 		vm.Status.ReconfigureTaskRef = taskRef
 		k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonUpdating, "VM reconfiguration in progress")
-	} else {
+	case result.RestartRequired:
+		// Applied to the persistent definition only: see recordRestartPending
+		// for what status.currentResources then holds.
+		logger.Info("Reconfigure applied to the VM's persistent definition only; it takes effect at the next power cycle")
+		r.recordRestartPending(vm, vmClass)
+		r.updateStatus(ctx, vm)
+		return ctrl.Result{RequeueAfter: restartPendingRecheckInterval}, nil
+	default:
 		// Reconfigure completed synchronously, update current resources
 		r.updateCurrentResources(vm, vmClass)
 		vm.Status.Phase = infravirtrigaudiov1beta1.VirtualMachinePhaseRunning
@@ -2270,7 +2289,9 @@ func (r *VirtualMachineReconciler) reconfigureVM(
 // cannot be computed (the override is out of bounds — unexpected here, since
 // callers only reach this after a request built from the same vm/vmClass
 // with the same helper already succeeded), status.currentResources is left
-// exactly as it was rather than overwritten with a wrong value.
+// exactly as it was rather than overwritten with a wrong value. A Reconfigure
+// the provider applied to the VM's persistent definition only
+// (RestartRequired) is recorded by recordRestartPending instead.
 func (r *VirtualMachineReconciler) updateCurrentResources(vm *infravirtrigaudiov1beta1.VirtualMachine, vmClass *infravirtrigaudiov1beta1.VMClass) {
 	cpu, memoryMiB32, err := effectiveResources(vm, vmClass)
 	if err != nil {

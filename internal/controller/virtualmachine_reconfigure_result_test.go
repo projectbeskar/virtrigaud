@@ -1,0 +1,400 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package controller
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
+	"github.com/projectbeskar/virtrigaud/internal/k8s"
+	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
+)
+
+// These tests pin how the manager records the honest Reconfigure result and
+// the status.currentResources invariant (virtualmachine_reconfigure_result.go):
+// never less than the VM can hold, now or after its next boot.
+
+// resultProvider is a fakeDescribeProvider (Describe: running) whose
+// Reconfigure answers with result / err and counts its calls.
+type resultProvider struct {
+	fakeDescribeProvider
+	result contracts.ReconfigureResult
+	err    error
+	calls  int
+}
+
+func (p *resultProvider) Reconfigure(context.Context, contracts.VMRef, contracts.CreateRequest) (contracts.ReconfigureResult, error) {
+	p.calls++
+	return p.result, p.err
+}
+
+func newResultProvider() *resultProvider {
+	return &resultProvider{fakeDescribeProvider: fakeDescribeProvider{
+		DescribeFn: func(context.Context, string) (contracts.DescribeResponse, error) {
+			return contracts.DescribeResponse{Exists: true, PowerState: "On", IPs: []string{"10.0.0.1"}}, nil
+		},
+	}}
+}
+
+// sizedSingleHostVM is a single-host VM recorded at cpu vCPU / memMiB MiB whose spec
+// asks for wantCPU / wantMem (providerAndClass: 4 vCPU, 8 GiB class).
+func sizedSingleHostVM(cpu int32, memMiB int64, wantCPU int32, wantMem int64) *infravirtrigaudiov1beta1.VirtualMachine {
+	vm := baseVM("default")
+	vm.Generation = 1
+	vm.Status.ID = "vm-1"
+	vm.Status.CurrentResources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: i32p(cpu), MemoryMiB: i64p(memMiB)}
+	vm.Spec.Resources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: i32p(wantCPU), MemoryMiB: i64p(wantMem)}
+	return vm
+}
+
+// fakeClock is a settable reconciler clock.
+type fakeClock struct{ t time.Time }
+
+func (c *fakeClock) now() time.Time { return c.t }
+
+func singleHostReconciler(t *testing.T, prov contracts.Provider) (*VirtualMachineReconciler, *fakeClock) {
+	t.Helper()
+	k8sProv, class := providerAndClass("default")
+	r := newTestReconciler(coverageTestScheme(t), &stubResolver{provider: prov}, k8sProv, class)
+	clock := &fakeClock{t: time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)}
+	r.clock = clock.now
+	return r, clock
+}
+
+func recorded(vm *infravirtrigaudiov1beta1.VirtualMachine) (int32, int64) {
+	return *vm.Status.CurrentResources.CPU, *vm.Status.CurrentResources.MemoryMiB
+}
+
+// TestReconfigureVM_Error_LeavesCurrentResourcesAndSetsCondition: a failed
+// Reconfigure leaves status.currentResources untouched and says why.
+func TestReconfigureVM_Error_LeavesCurrentResourcesAndSetsCondition(t *testing.T) {
+	prov := newResultProvider()
+	prov.err = contracts.NewRetryableError("could not set 8 vCPUs in the VM's persistent definition", nil)
+	r, _ := singleHostReconciler(t, prov)
+	_, class := providerAndClass("default")
+	vm := sizedSingleHostVM(4, 8192, 8, 8192)
+
+	_, err := r.reconfigureVM(context.Background(), vm, prov, contracts.VMRef{ID: vm.Status.ID}, nil, class, nil, nil)
+	require.NoError(t, err)
+
+	cpu, mem := recorded(vm)
+	assert.Equal(t, int32(4), cpu, "a failed Reconfigure never advances status.currentResources")
+	assert.Equal(t, int64(8192), mem)
+	c := meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionReconfiguring)
+	require.NotNil(t, c)
+	assert.Equal(t, metav1.ConditionFalse, c.Status)
+	assert.Equal(t, k8s.ReasonProviderError, c.Reason)
+	assert.Contains(t, c.Message, "could not set 8 vCPUs")
+}
+
+// TestReconfigureVM_RestartRequired_Invariant: a change applied to the
+// persistent definition only records, per resource, the larger of the running
+// size and the next-boot size — a grow is counted at once, a shrink never
+// lowers the counted size while the old size still runs.
+func TestReconfigureVM_RestartRequired_Invariant(t *testing.T) {
+	cases := []struct {
+		name         string
+		cpu, wantCPU int32
+		mem, wantMem int64
+		recordCPU    int32
+		recordMem    int64
+	}{
+		{name: "grow", cpu: 2, wantCPU: 4, mem: 4096, wantMem: 8192, recordCPU: 4, recordMem: 8192},
+		{name: "shrink", cpu: 4, wantCPU: 2, mem: 8192, wantMem: 4096, recordCPU: 4, recordMem: 8192},
+		{name: "CPU up, memory down", cpu: 2, wantCPU: 4, mem: 8192, wantMem: 4096, recordCPU: 4, recordMem: 8192},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			prov := newResultProvider()
+			prov.result = contracts.ReconfigureResult{RestartRequired: true}
+			r, _ := singleHostReconciler(t, prov)
+			_, class := providerAndClass("default")
+			vm := sizedSingleHostVM(tc.cpu, tc.mem, tc.wantCPU, tc.wantMem)
+
+			res, err := r.reconfigureVM(context.Background(), vm, prov, contracts.VMRef{ID: vm.Status.ID}, nil, class, nil, nil)
+			require.NoError(t, err)
+			assert.Equal(t, restartPendingRecheckInterval, res.RequeueAfter)
+
+			cpu, mem := recorded(vm)
+			assert.Equal(t, tc.recordCPU, cpu)
+			assert.Equal(t, tc.recordMem, mem)
+			fp := admittedFootprint(vm, nil)
+			assert.Equal(t, max(tc.cpu, tc.wantCPU), fp.CPU, "the clustered accounting counts the larger size")
+			assert.Equal(t, max(tc.mem, tc.wantMem), fp.MemoryMiB)
+
+			c := meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionReconfiguring)
+			require.NotNil(t, c)
+			assert.Equal(t, metav1.ConditionTrue, c.Status)
+			assert.Equal(t, k8s.ReasonRestartRequired, c.Reason)
+			assert.Equal(t, vm.Generation, c.ObservedGeneration)
+			assert.Contains(t, c.Message, "next power cycle")
+			assert.Equal(t, infravirtrigaudiov1beta1.VirtualMachinePhaseRunning, vm.Status.Phase)
+			ready := meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionReady)
+			require.NotNil(t, ready)
+			assert.Equal(t, metav1.ConditionTrue, ready.Status, "a VM with a change pending a restart is still ready")
+		})
+	}
+}
+
+// TestReconcileVM_RestartPending_RecheckedOnASlowCadence: while a shrink is
+// pending a restart the provider is not asked again on every reconcile (the
+// spec still differs from the recorded size), but every
+// restartPendingRecheckInterval; once the VM has been power-cycled and the
+// provider answers "applied", the smaller size is recorded.
+func TestReconcileVM_RestartPending_RecheckedOnASlowCadence(t *testing.T) {
+	prov := newResultProvider()
+	prov.result = contracts.ReconfigureResult{RestartRequired: true}
+	r, clock := singleHostReconciler(t, prov)
+	vm := sizedSingleHostVM(4, 8192, 2, 8192)
+	ctx := context.Background()
+
+	_, err := r.reconcileVM(ctx, vm)
+	require.NoError(t, err)
+	require.Equal(t, 1, prov.calls)
+	cpu, _ := recorded(vm)
+	require.Equal(t, int32(4), cpu, "the shrink is pending: the old size is still counted")
+
+	clock.t = clock.t.Add(30 * time.Second)
+	res, err := r.reconcileVM(ctx, vm)
+	require.NoError(t, err)
+	assert.Equal(t, 1, prov.calls, "not asked again within the re-check interval")
+	assert.LessOrEqual(t, res.RequeueAfter, restartPendingRecheckInterval-30*time.Second)
+	assert.Equal(t, k8s.ReasonRestartRequired, meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionReconfiguring).Reason)
+
+	// Still pending at the next re-check.
+	clock.t = clock.t.Add(restartPendingRecheckInterval)
+	_, err = r.reconcileVM(ctx, vm)
+	require.NoError(t, err)
+	assert.Equal(t, 2, prov.calls, "asked again once the interval has passed")
+	cpu, _ = recorded(vm)
+	assert.Equal(t, int32(4), cpu)
+
+	// The VM has been power-cycled: the provider now finds it applied.
+	prov.result = contracts.ReconfigureResult{}
+	clock.t = clock.t.Add(restartPendingRecheckInterval)
+	_, err = r.reconcileVM(ctx, vm)
+	require.NoError(t, err)
+	assert.Equal(t, 3, prov.calls)
+	cpu, _ = recorded(vm)
+	assert.Equal(t, int32(2), cpu, "the shrink is recorded once the provider confirms it applied")
+	c := meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionReconfiguring)
+	require.NotNil(t, c)
+	assert.Equal(t, metav1.ConditionFalse, c.Status)
+	assert.Equal(t, k8s.ReasonReconcileSuccess, c.Reason)
+
+	// Settled: nothing more is sent.
+	clock.t = clock.t.Add(restartPendingRecheckInterval)
+	_, err = r.reconcileVM(ctx, vm)
+	require.NoError(t, err)
+	assert.Equal(t, 3, prov.calls)
+}
+
+// TestReconcileVM_RestartPending_GrowIsReverified: a grow pending a restart is
+// recorded at once (so the spec matches status), yet the provider is still
+// asked again until it confirms the change applied, which clears the
+// condition.
+func TestReconcileVM_RestartPending_GrowIsReverified(t *testing.T) {
+	prov := newResultProvider()
+	prov.result = contracts.ReconfigureResult{RestartRequired: true}
+	r, clock := singleHostReconciler(t, prov)
+	vm := sizedSingleHostVM(2, 8192, 4, 8192)
+	ctx := context.Background()
+
+	_, err := r.reconcileVM(ctx, vm)
+	require.NoError(t, err)
+	cpu, _ := recorded(vm)
+	require.Equal(t, int32(4), cpu, "a grow pending a restart is counted at once")
+
+	prov.result = contracts.ReconfigureResult{}
+	clock.t = clock.t.Add(restartPendingRecheckInterval)
+	_, err = r.reconcileVM(ctx, vm)
+	require.NoError(t, err)
+	assert.Equal(t, 2, prov.calls, "re-verified although the spec already matches the recorded size")
+	assert.Equal(t, k8s.ReasonReconcileSuccess, meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionReconfiguring).Reason)
+}
+
+// TestReconcileVM_RestartPending_SpecChangeRechecksAtOnce: a spec change while
+// a change is pending a restart is sent at once.
+func TestReconcileVM_RestartPending_SpecChangeRechecksAtOnce(t *testing.T) {
+	prov := newResultProvider()
+	prov.result = contracts.ReconfigureResult{RestartRequired: true}
+	r, clock := singleHostReconciler(t, prov)
+	vm := sizedSingleHostVM(4, 8192, 2, 8192)
+	ctx := context.Background()
+
+	_, err := r.reconcileVM(ctx, vm)
+	require.NoError(t, err)
+	require.Equal(t, 1, prov.calls)
+
+	// The owner reverts the shrink: the persistent definition must be put back,
+	// even though the spec now equals the recorded size.
+	vm.Generation++
+	vm.Spec.Resources.CPU = i32p(4)
+	prov.result = contracts.ReconfigureResult{}
+	clock.t = clock.t.Add(10 * time.Second)
+	_, err = r.reconcileVM(ctx, vm)
+	require.NoError(t, err)
+	assert.Equal(t, 2, prov.calls, "a spec change is sent without waiting for the re-check interval")
+	cpu, _ := recorded(vm)
+	assert.Equal(t, int32(4), cpu)
+	assert.Equal(t, k8s.ReasonReconcileSuccess, meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionReconfiguring).Reason)
+}
+
+// TestReconcileVM_FailedReconfigure_ResentAfterSpecRevert: a failed
+// Reconfigure may have changed part of the persistent definition, so it is
+// sent again even once the spec is reverted to the recorded size, until one
+// succeeds.
+func TestReconcileVM_FailedReconfigure_ResentAfterSpecRevert(t *testing.T) {
+	prov := newResultProvider()
+	prov.err = contracts.NewRetryableError("could not set 8192 MiB of memory in the VM's persistent definition", nil)
+	r, _ := singleHostReconciler(t, prov)
+	vm := sizedSingleHostVM(4, 8192, 8, 16384)
+	ctx := context.Background()
+
+	_, err := r.reconcileVM(ctx, vm)
+	require.NoError(t, err)
+	require.Equal(t, 1, prov.calls)
+
+	vm.Generation++
+	vm.Spec.Resources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: i32p(4), MemoryMiB: i64p(8192)}
+	prov.err = nil
+	_, err = r.reconcileVM(ctx, vm)
+	require.NoError(t, err)
+	assert.Equal(t, 2, prov.calls, "re-sent to converge the definition, although the spec matches the recorded size")
+	assert.Equal(t, k8s.ReasonReconcileSuccess, meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionReconfiguring).Reason)
+
+	_, err = r.reconcileVM(ctx, vm)
+	require.NoError(t, err)
+	assert.Equal(t, 2, prov.calls, "settled: nothing more is sent")
+}
+
+// ─── clustered ────────────────────────────────────────────────────────────────
+
+// TestClustered_ShrinkWhileOff_NotAppliedIsNotRecorded (review R1): an older
+// provider reports a PM-suspended domain as Off, so the deferred shrink is
+// attempted; the provider refuses it (the domain is active), or finds it
+// running and applies it to the definition only. Either way the smaller size
+// is never recorded while the old size can still run.
+func TestClustered_ShrinkWhileOff_NotAppliedIsNotRecorded(t *testing.T) {
+	for name, setup := range map[string]func(p *routingProvider){
+		"refused": func(p *routingProvider) {
+			p.reconfigureErr = contracts.NewRetryableError("the VM is \"pmsuspended\" (active, but not running)", nil)
+		},
+		"restart required": func(p *routingProvider) { p.reconfigureResult = contracts.ReconfigureResult{RestartRequired: true} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			prov := &routingProvider{describeResp: contracts.DescribeResponse{Exists: true, PowerState: string(contracts.PowerStateOff)}}
+			setup(prov)
+			r := overcommittedShrinkFixture(t, prov, infravirtrigaudiov1beta1.PowerStateOn)
+			_, err := r.reconcileVM(context.Background(), getVM(t, r, "app"))
+			require.NoError(t, err)
+			require.Len(t, prov.reconfigureRefs, 1, "the shrink was attempted")
+			got := getVM(t, r, "app")
+			assert.Equal(t, int32(4), *got.Status.CurrentResources.CPU, "never recorded as applied")
+			assert.Equal(t, int32(4), admittedFootprint(got, smallVMClass(capNS)).CPU, "the VM keeps counting at its old size")
+		})
+	}
+}
+
+// TestClustered_MemoryCeiling_BackfilledOnceFromTheProvider (review R2): a
+// bound clustered VM with no recorded ceiling gets the provider's memory
+// maximum recorded once; it is never raised afterwards, and the VMClass's
+// hot-add flag no longer sizes it.
+func TestClustered_MemoryCeiling_BackfilledOnceFromTheProvider(t *testing.T) {
+	prov := runningRoutingProvider()
+	prov.describeResp.MaxMemoryMiB = 16384
+	app := sized("app", 2) // 4096 MiB recorded, no ceiling recorded
+	require.Nil(t, app.Status.Placement.MemoryCeilingMiB)
+	r := resizeFixture(t, prov, app)
+
+	_, err := r.reconcileVM(context.Background(), getVM(t, r, "app"))
+	require.NoError(t, err)
+	got := getVM(t, r, "app")
+	require.NotNil(t, got.Status.Placement.MemoryCeilingMiB)
+	assert.Equal(t, int64(16384), *got.Status.Placement.MemoryCeilingMiB)
+	assert.Equal(t, int64(16384), admittedFootprint(got, nil).MemoryMiB, "counted at the ceiling the provider reports")
+
+	// Class flips hot-add off: irrelevant now. A higher report never raises it.
+	prov.describeResp.MaxMemoryMiB = 32768
+	_, err = r.reconcileVM(context.Background(), got)
+	require.NoError(t, err)
+	assert.Equal(t, int64(16384), *getVM(t, r, "app").Status.Placement.MemoryCeilingMiB, "never raised")
+}
+
+func TestClustered_MemoryCeiling_BackfillWithoutHeadroomIsZero(t *testing.T) {
+	prov := runningRoutingProvider()
+	prov.describeResp.MaxMemoryMiB = 4096 // == the recorded memory: no balloon headroom
+	r := resizeFixture(t, prov, sized("app", 2))
+	_, err := r.reconcileVM(context.Background(), getVM(t, r, "app"))
+	require.NoError(t, err)
+	got := getVM(t, r, "app")
+	require.NotNil(t, got.Status.Placement.MemoryCeilingMiB)
+	assert.Zero(t, *got.Status.Placement.MemoryCeilingMiB)
+}
+
+// TestClustered_MemoryCeiling_LoweredAfterConfirmedShrink (review R3): once
+// the provider reports a lower memory maximum (a confirmed shrink lowered the
+// domain's <memory>), the recorded ceiling follows — but not while a change is
+// pending a restart.
+func TestClustered_MemoryCeiling_LoweredAfterConfirmedShrink(t *testing.T) {
+	newApp := func() *infravirtrigaudiov1beta1.VirtualMachine {
+		app := sized("app", 2)
+		app.Status.CurrentResources.MemoryMiB = i64p(2048)
+		app.Spec.Resources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: i32p(2), MemoryMiB: i64p(2048)} // already applied
+		app.Status.Placement.MemoryCeilingMiB = i64p(16384)
+		return app
+	}
+
+	prov := &routingProvider{describeResp: contracts.DescribeResponse{Exists: true, PowerState: string(contracts.PowerStateOff), MaxMemoryMiB: 2048}}
+	app := newApp()
+	app.Spec.PowerState = infravirtrigaudiov1beta1.PowerStateOff
+	r := resizeFixture(t, prov, app)
+	_, err := r.reconcileVM(context.Background(), getVM(t, r, "app"))
+	require.NoError(t, err)
+	got := getVM(t, r, "app")
+	assert.Zero(t, *got.Status.Placement.MemoryCeilingMiB, "lowered: the domain can no longer reach more than its own size")
+	assert.Equal(t, int64(2048), admittedFootprint(got, nil).MemoryMiB)
+
+	// Pending a restart: left alone.
+	prov = &routingProvider{describeResp: contracts.DescribeResponse{Exists: true, PowerState: string(contracts.PowerStateOn), MaxMemoryMiB: 2048}}
+	app = newApp()
+	meta.SetStatusCondition(&app.Status.Conditions, metav1.Condition{Type: k8s.ConditionReconfiguring, Status: metav1.ConditionTrue,
+		Reason: k8s.ReasonRestartRequired, Message: "pending"})
+	r = resizeFixture(t, prov, app)
+	_, err = r.reconcileVM(context.Background(), getVM(t, r, "app"))
+	require.NoError(t, err)
+	assert.Equal(t, int64(16384), *getVM(t, r, "app").Status.Placement.MemoryCeilingMiB, "not lowered while a change is pending a restart")
+}
+
+func TestSingleHost_MemoryCeiling_NotRecorded(t *testing.T) {
+	prov := newResultProvider()
+	prov.DescribeFn = func(context.Context, string) (contracts.DescribeResponse, error) {
+		return contracts.DescribeResponse{Exists: true, PowerState: "On", MaxMemoryMiB: 16384}, nil
+	}
+	r, _ := singleHostReconciler(t, prov)
+	vm := sizedSingleHostVM(4, 8192, 4, 8192)
+	_, err := r.reconcileVM(context.Background(), vm)
+	require.NoError(t, err)
+	assert.Nil(t, vm.Status.Placement, "a single-host VM has no placement record")
+}
