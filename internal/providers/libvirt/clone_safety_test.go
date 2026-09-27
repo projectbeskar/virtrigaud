@@ -102,7 +102,35 @@ func TestClone_DiskIsNotWorldWritable(t *testing.T) {
 	assert.Contains(t, sudo, "chown libvirt-qemu:kvm "+disk)
 	assert.Contains(t, sudo, "chmod 0660 "+disk, "owner and group only")
 	for _, l := range sudo {
-		assert.NotContains(t, l, "777", "no world-writable guest disk on a shared host")
+		assert.NotContains(t, l, "chmod 777", "no world-writable guest disk on a shared host")
+	}
+}
+
+// TestVMDisks_AreNotWorldWritable pins vmDiskMode on the other VM-disk paths:
+// a Create that copies a base image into the VM's disk, and a migration's
+// imported disk attached in place — 0660 libvirt-qemu:kvm, never 0777.
+func TestVMDisks_AreNotWorldWritable(t *testing.T) {
+	c := newCreateHost(t)
+	ctx := context.Background()
+	_, err := c.p.Create(ctx, c.createReq(ownerTeamA, c.file(c.images, "ubuntu.qcow2")))
+	require.NoError(t, err)
+	copied := filepath.Join(c.images, "team-a.web-disk.qcow2")
+
+	s := c.withRegistry()
+	landed, err := c.importFor(s, c.file(c.outside, "exported.qcow2"), ownerTeamB, "web"+contracts.ImportedDiskNameSuffix)
+	require.NoError(t, err)
+	_, err = c.p.Create(ctx, contracts.CreateRequest{
+		Name: "web", Owner: ownerTeamB, Image: contracts.VMImage{Path: landed.Path, ImportedDisk: true},
+	})
+	require.NoError(t, err)
+
+	sudo := splitLines(c.log("sudo"))
+	for _, disk := range []string{copied, landed.Path} {
+		assert.Contains(t, sudo, "chown libvirt-qemu:kvm "+disk)
+		assert.Contains(t, sudo, "chmod 0660 "+disk)
+	}
+	for _, l := range sudo {
+		assert.NotContains(t, l, "chmod 777")
 	}
 }
 

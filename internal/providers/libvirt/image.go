@@ -227,7 +227,7 @@ func checksumTool(checksumType string) (tool string, ok bool) {
 //     name: the converted image is finalized READ-ONLY (chmod 0444, restorecon
 //     when SELinux is enabled, sync; no chown, so the provider still owns it and
 //     fs.protected_hardlinks lets it link the file) and published with `ln -T`,
-//     which never replaces an existing file. finalizeClonedDisk (chown + chmod 777) is never applied to
+//     which never replaces an existing file. finalizeClonedDisk (chown + chmod 0660) is never applied to
 //     a prepared image — only to the per-VM copies Create makes from it.
 //
 // Failure classification (the manager holds on InvalidSpec, retries the rest):
@@ -969,7 +969,7 @@ const syncStatScript = `sync -- "$1" && stat -c '%i|%s' -- "$1"`
 // data), and stat'ed for the inode and size the stamp records. It is NEVER
 // chowned: with fs.protected_hardlinks=1 the provider could no longer link a
 // file it does not own, and the image only ever needs to be read (Create
-// copies it). finalizeClonedDisk (chown + chmod 777) is for per-VM disks only.
+// copies it). finalizeClonedDisk (chown + chmod 0660) is for per-VM disks only.
 func (ip *imagePreparer) finalizeStaged(ctx context.Context, path string) (stagedImage, error) {
 	failed := func(step string, err error) (stagedImage, error) {
 		log.Printf("ERROR ImagePrepare: %s %q on the libvirt host: %v", step, path, err)

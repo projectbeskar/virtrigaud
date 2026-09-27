@@ -157,11 +157,18 @@ See [`docs/clustered-provider-inventory.md`](clustered-provider-inventory.md) an
   subdirectory, under a session-mode path, or in a non-default storage pool (#334).
 - **libvirt SSH login shell:** must be POSIX-compatible (`sh`, `bash`, `dash`, `zsh`,
   `ash`) for the SSH-quoting fix to work correctly (#331).
-- **libvirt SSH user can read VM disks:** the disk in-use checks behind Create, Clone,
-  Delete and snapshots read every domain's disk chain on the host with `qemu-img info`
-  as the provider's SSH user, and fail closed when one is unreadable. Clone disks are
-  now `0660 libvirt-qemu:kvm`, so the SSH user must be `root` or a member of the `kvm`
-  group ([`docs/libvirt-clones.md`](libvirt-clones.md)).
+- **libvirt SSH user can read VM disks:** every VM disk VirtRigaud creates — Create,
+  image copy or download, an imported disk adopted in place, Clone — is now
+  `0660 libvirt-qemu:kvm` instead of world-writable `0777`. **Existing disks keep
+  their old mode** (re-`chmod 0660` them by hand if you want them closed). The
+  provider's SSH user must be **a member of the `kvm` group** (or `root`) for the
+  reads it does as itself: `GetDiskInfo`, s3/nfs disk export and a full clone's copy.
+  The disk in-use checks behind Create, Clone, Delete and snapshots read every
+  domain's disk chain on the host with **`sudo -n qemu-img info`** when passwordless
+  sudo for `qemu-img` is allowed, and as the SSH user otherwise; a disk neither can
+  read fails the check closed (retried, not counted toward the circuit breaker)
+  ([`docs/libvirt-clones.md`](libvirt-clones.md)). Follow-up (tracked): least
+  privilege — VM disks `0600 libvirt-qemu`, every read through `sudo -n`.
 - **libvirt image download limit:** `VIRTRIGAUD_LIBVIRT_IMAGE_MAX_DOWNLOAD_GIB` (provider
   pod env via `Provider.spec.runtime.env`), the largest image `ImagePrepare` downloads, in
   GiB. Default `256`; an invalid value falls back to the default (logged). A larger source

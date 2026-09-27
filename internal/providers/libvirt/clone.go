@@ -329,24 +329,28 @@ func createFullCopy(ctx context.Context, vp *VirshProvider, srcDiskPath, targetD
 	return nil
 }
 
-// clonedDiskMode is the mode of a clone's disk: read-write for its owner, the
-// qemu user (libvirt-qemu), and its group, kvm — never for anyone else on a
-// shared host. The provider's SSH user reads VM disks (the disk in-use checks,
-// GetDiskInfo, s3/nfs exports, a clone of the clone) through membership of
-// that group, or as root.
-const clonedDiskMode = "0660"
+// vmDiskMode is the mode of every VM disk VirtRigaud creates or adopts
+// (Create, image copy/download, an imported disk adopted in place, Clone),
+// chowned libvirt-qemu:kvm: read-write for the qemu user and its group, never
+// for anyone else on a shared host (it used to be world-writable 0777). The
+// provider's SSH user reads VM disks as a member of kvm, or as root: the disk
+// in-use checks (through `sudo -n` when allowed, qemuImgInfoOnHost),
+// GetDiskInfo, s3/nfs exports and a full clone's copy. Disks created by an
+// earlier release keep their mode. Least privilege (0600 libvirt-qemu with
+// every read through `sudo -n`) is a tracked follow-up.
+const vmDiskMode = "0660"
 
 // finalizeClonedDisk fixes ownership/permissions/SELinux on a freshly created
 // clone disk on vp's host so libvirt-qemu can open it, and refreshes the pool so the new
 // volume is visible to subsequent lookups. It mirrors StorageProvider.Create-
 // Volume's handling, except that the disk is not world-writable
-// (clonedDiskMode). Every step is best-effort: the host may not use these
+// (vmDiskMode). Every step is best-effort: the host may not use these
 // mechanisms (e.g. no SELinux), so failures are logged, not fatal.
 func finalizeClonedDisk(ctx context.Context, vp *VirshProvider, targetDiskPath string) {
 	if _, e := vp.runVirshCommand(ctx, "!", "sudo", "chown", "libvirt-qemu:kvm", targetDiskPath); e != nil {
 		log.Printf("WARN Failed to set clone disk ownership: %v", e)
 	}
-	if _, e := vp.runVirshCommand(ctx, "!", "sudo", "chmod", clonedDiskMode, targetDiskPath); e != nil {
+	if _, e := vp.runVirshCommand(ctx, "!", "sudo", "chmod", vmDiskMode, targetDiskPath); e != nil {
 		log.Printf("WARN Failed to set clone disk permissions: %v", e)
 	}
 	if _, e := vp.runVirshCommand(ctx, "!", "sudo", "restorecon", targetDiskPath); e != nil {

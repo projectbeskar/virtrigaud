@@ -215,7 +215,7 @@ func (s *StorageProvider) CreateVolume(ctx context.Context, poolName, volumeName
 	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chown", "libvirt-qemu:kvm", volume.Path); err != nil {
 		log.Printf("WARN Failed to set ownership: %v", err)
 	}
-	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chmod", "777", volume.Path); err != nil {
+	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chmod", vmDiskMode, volume.Path); err != nil {
 		log.Printf("WARN Failed to set permissions: %v", err)
 	}
 
@@ -337,7 +337,7 @@ func (s *StorageProvider) DownloadCloudImage(ctx context.Context, imageURL, volu
 	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chown", "libvirt-qemu:kvm", targetPath); err != nil {
 		log.Printf("WARN Failed to set ownership: %v", err)
 	}
-	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chmod", "777", targetPath); err != nil {
+	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chmod", vmDiskMode, targetPath); err != nil {
 		log.Printf("WARN Failed to set permissions: %v", err)
 	}
 
@@ -644,7 +644,7 @@ func (s *StorageProvider) adoptVolumeInPlace(ctx context.Context, path, poolName
 	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chown", "libvirt-qemu:kvm", path); err != nil {
 		log.Printf("WARN Failed to set ownership on existing disk: %v", err)
 	}
-	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chmod", "777", path); err != nil {
+	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chmod", vmDiskMode, path); err != nil {
 		log.Printf("WARN Failed to set permissions on existing disk: %v", err)
 	}
 
@@ -655,7 +655,7 @@ func (s *StorageProvider) adoptVolumeInPlace(ctx context.Context, path, poolName
 
 	// Get volume size
 	var capacityStr string
-	infoResult, err := s.virshProvider.runVirshCommand(ctx, "!", "qemu-img", "info", "--output=json", path)
+	infoResult, err := qemuImgInfoOnHost(ctx, s.virshProvider, "--output=json", "--", path) // 0660 libvirt-qemu:kvm now
 	if err == nil {
 		var diskInfo map[string]interface{}
 		if err := json.Unmarshal([]byte(infoResult.Stdout), &diskInfo); err == nil {
@@ -710,7 +710,7 @@ func (s *StorageProvider) convertImageToVolume(ctx context.Context, srcPath, src
 	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chown", "libvirt-qemu:kvm", targetPath); err != nil {
 		log.Printf("WARN Failed to set ownership: %v", err)
 	}
-	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chmod", "777", targetPath); err != nil {
+	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chmod", vmDiskMode, targetPath); err != nil {
 		log.Printf("WARN Failed to set permissions: %v", err)
 	}
 
