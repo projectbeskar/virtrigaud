@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	stderrors "errors"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -156,7 +157,7 @@ func TestHandleDeletion_ConflictKeepsFinalizerWithCondition(t *testing.T) {
 	s := coverageTestScheme(t)
 	refusal := contracts.NewConflictError(`delete: failed to delete VM: delete of libvirt domain "default.vm-src" refused: `+
 		`its disk is the backing file (or a disk) of 1 other domain(s) on this host, such as a linked clone of this VM; `+
-		`delete the linked clones first`, stderrors.New("rpc error: code = FailedPrecondition"))
+		`delete the linked clones first`, fmt.Errorf("%w: rpc error: code = FailedPrecondition", contracts.ErrVMDiskInUse))
 	prov := &deleteStubProvider{err: refusal}
 	vm := deletionVM("vm-src")
 	r := newTestReconciler(s, &stubResolver{provider: prov}, vm, deletionProviderCR())
@@ -185,4 +186,27 @@ func TestHandleDeletion_ConflictKeepsFinalizerWithCondition(t *testing.T) {
 	require.NoError(t, err)
 	var gone infravirtrigaudiov1beta1.VirtualMachine
 	assert.True(t, apierrors.IsNotFound(r.Get(ctx, client.ObjectKeyFromObject(vm), &gone)))
+}
+
+// TestHandleDeletion_OtherConflictIsAnOrdinaryFailure pins that only the
+// VM_DISK_IN_USE refusal is a blocked delete: any other Conflict keeps the
+// finalizer and retries at the ordinary cadence, with no DeleteBlocked
+// condition claiming another VM depends on the disk.
+func TestHandleDeletion_OtherConflictIsAnOrdinaryFailure(t *testing.T) {
+	ctx := context.Background()
+	s := coverageTestScheme(t)
+	prov := &deleteStubProvider{err: contracts.NewConflictError("delete: something else conflicts", nil)}
+	vm := deletionVM("vm-other")
+	r := newTestReconciler(s, &stubResolver{provider: prov}, vm, deletionProviderCR())
+	marked := markForDeletion(t, r, vm)
+
+	res, err := r.handleDeletion(ctx, marked)
+	require.NoError(t, err)
+	assert.Equal(t, vmDeleteRetryInterval, res.RequeueAfter)
+	var after infravirtrigaudiov1beta1.VirtualMachine
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(vm), &after))
+	assert.Contains(t, after.Finalizers, infravirtrigaudiov1beta1.VirtualMachineFinalizer)
+	if c := meta.FindStatusCondition(after.Status.Conditions, k8s.ConditionReady); c != nil {
+		assert.NotEqual(t, k8s.ReasonDeleteBlocked, c.Reason)
+	}
 }

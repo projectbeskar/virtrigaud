@@ -1477,7 +1477,8 @@ func (c *Client) mapGRPCError(operation string, err error) error {
 		// dependents are gone. Any other FailedPrecondition keeps its
 		// historical untyped form.
 		if isVMDiskInUseStatus(st) {
-			return contracts.NewConflictError(fmt.Sprintf("%s: %s", operation, st.Message()), err)
+			return contracts.NewConflictError(fmt.Sprintf("%s: %s", operation, st.Message()),
+				fmt.Errorf("%w: %w", contracts.ErrVMDiskInUse, err))
 		}
 		return fmt.Errorf("%s failed: %s", operation, st.Message())
 	case codes.Unavailable, codes.DeadlineExceeded:

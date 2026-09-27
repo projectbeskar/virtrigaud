@@ -59,6 +59,7 @@ func TestMapGRPCError_VMDiskInUseIsConflict(t *testing.T) {
 		err := diskInUseErr(t, msg, routed)
 		mapped := (&Client{}).mapGRPCError("delete", err)
 		assert.True(t, contracts.IsConflict(mapped), "routed=%v: %v", routed, mapped)
+		assert.True(t, contracts.IsVMDiskInUse(mapped), "the controllers tell this Conflict from any other")
 		assert.False(t, contracts.IsRetryable(mapped))
 		assert.Contains(t, mapped.Error(), "delete the linked clones first")
 		for _, m := range []string{providerv1.Provider_Delete_FullMethodName, providerv1.Provider_SnapshotRevert_FullMethodName} {
@@ -68,6 +69,8 @@ func TestMapGRPCError_VMDiskInUseIsConflict(t *testing.T) {
 
 	plain := (&Client{}).mapGRPCError("image prepare", status.Error(codes.FailedPrecondition, "import folder missing"))
 	assert.False(t, contracts.IsConflict(plain), "only the VM_DISK_IN_USE reason is a Conflict: %v", plain)
+	assert.False(t, contracts.IsVMDiskInUse((&Client{}).mapGRPCError("create", status.Error(codes.AlreadyExists, "taken"))),
+		"another Conflict is not a disk-in-use refusal")
 	assert.Contains(t, plain.Error(), "image prepare failed: import folder missing")
 
 	other := status.New(codes.FailedPrecondition, "x")

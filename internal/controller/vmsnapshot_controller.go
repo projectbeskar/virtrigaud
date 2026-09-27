@@ -594,7 +594,7 @@ func (r *VMSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *inf
 			// Delete the snapshot via provider
 			logger.Info("Calling provider to delete snapshot", "snapshot_id", snapshot.Status.SnapshotID, "vm_id", vm.Status.ID)
 			if _, err := providerInstance.SnapshotDelete(ctx, ref, snapshot.Status.SnapshotID); err != nil {
-				if contracts.IsConflict(err) && !hasSnapshotForceDeleteAnnotation(snapshot) {
+				if contracts.IsVMDiskInUse(err) && !hasSnapshotForceDeleteAnnotation(snapshot) {
 					// The provider refused BEFORE changing anything: other VMs
 					// on the hypervisor depend on the VM's disk (e.g. a libvirt
 					// linked clone), and deleting the snapshot would rewrite
@@ -643,7 +643,7 @@ func snapshotDeleteBlocked(snapshot *infrav1beta1.VMSnapshot) bool {
 }
 
 // retainForBlockedSnapshotDelete keeps the finalizer of a VMSnapshot whose
-// provider SnapshotDelete was refused with a Conflict — other VMs on the
+// provider SnapshotDelete was refused with VM_DISK_IN_USE (contracts.IsVMDiskInUse) — other VMs on the
 // hypervisor depend on the VM's disk (e.g. linked clones backed by it), and
 // deleting the snapshot would rewrite that disk underneath them. The provider
 // changed nothing, so the snapshot stays on the hypervisor and tracked. It

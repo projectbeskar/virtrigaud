@@ -827,7 +827,7 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 					logger.Error(err, "Provider VM delete failed but force-delete annotation is set; removing finalizer (the provider VM may be orphaned)",
 						"id", ref.ID, "annotation", forceDeleteAnnotation)
 					metrics.RecordError(errReasonProviderDelete, metrics.ComponentManager)
-				case contracts.IsConflict(err):
+				case contracts.IsVMDiskInUse(err):
 					// The provider refused BEFORE changing anything: other VMs on
 					// the hypervisor depend on this one (e.g. a libvirt linked
 					// clone backed by its disk), and deleting it would destroy
@@ -851,8 +851,9 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 }
 
 // retainForBlockedDelete keeps the finalizer of a VirtualMachine whose provider
-// Delete was refused with a Conflict — other VMs on the hypervisor depend on it
-// (e.g. linked clones backed by its disk) — and tells the owner why on the
+// Delete was refused with VM_DISK_IN_USE (contracts.IsVMDiskInUse; any other
+// Conflict is an ordinary failed delete) — other VMs on the hypervisor depend
+// on it (e.g. linked clones backed by its disk) — and tells the owner why on the
 // Ready condition and in a Warning event. The provider changed nothing, so the
 // VM stays intact; the delete is re-checked every vmDeleteBlockedRetryInterval
 // and completes once the dependent VMs are gone.

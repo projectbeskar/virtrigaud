@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -72,7 +73,7 @@ func (p *snapshotDeleteSpy) answer(err error) {
 func diskInUseRefusal() error {
 	return contracts.NewConflictError(`snapshotDelete: failed to delete snapshot: snapshot delete of libvirt domain "default.web" `+
 		`refused: its disk is the backing file (or a disk) of 1 other domain(s) on this host, such as a linked clone of this VM; `+
-		`delete the linked clones first`, errors.New("rpc error: code = FailedPrecondition"))
+		`delete the linked clones first`, fmt.Errorf("%w: rpc error: code = FailedPrecondition", contracts.ErrVMDiskInUse))
 }
 
 // deletingSnapshot sets up a Ready snapshot of the bound VM "web" (Provider

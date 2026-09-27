@@ -193,6 +193,17 @@ func IsConflict(err error) bool {
 	return errors.As(err, &pe) && pe.Type == ErrorTypeConflict
 }
 
+// ErrVMDiskInUse marks (in an error's chain) a provider's refusal carrying
+// VMDiskInUseReason: another VM on the host depends on this VM's disk. The
+// transport client wraps it into the Conflict it maps that refusal to.
+var ErrVMDiskInUse = errors.New("another VM depends on this VM's disk")
+
+// IsVMDiskInUse reports whether err is a provider's VMDiskInUseReason refusal
+// (a Conflict that says so), as opposed to any other Conflict.
+func IsVMDiskInUse(err error) bool {
+	return IsConflict(err) && errors.Is(err, ErrVMDiskInUse)
+}
+
 // IsInvalidSpec reports whether err is, or wraps, a provider InvalidSpec error.
 // The transport client maps a gRPC codes.InvalidArgument into a *ProviderError
 // of this type (see mapGRPCError). It is non-retryable: the same request will
