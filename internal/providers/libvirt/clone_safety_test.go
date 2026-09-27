@@ -137,8 +137,10 @@ func TestClone_NVRAMCopyNeverFollowsSymlinks(t *testing.T) {
 	_, err := c.p.Clone(context.Background(), cloneReq())
 	require.NoError(t, err)
 	sudo := splitLines(c.log("sudo"))
-	assert.Contains(t, sudo, "dd if="+src+" of="+target+" iflag=nofollow oflag=nofollow status=none",
-		"copied with O_NOFOLLOW on both ends, never `cp` as root")
+	i := indexOf(sudo, "rm -f -- "+target)
+	j := indexOf(sudo, "dd if="+src+" of="+target+" iflag=nofollow oflag=nofollow conv=excl status=none")
+	require.GreaterOrEqual(t, i, 0, "any stale target is unlinked first: %v", sudo)
+	require.Greater(t, j, i, "then copied with O_NOFOLLOW on both ends and an exclusive create, never `cp` as root: %v", sudo)
 	assert.Contains(t, sudo, "chmod 0600 "+target)
 	for _, l := range sudo {
 		assert.False(t, strings.HasPrefix(l, "cp "), "no cp of the varstore: %q", l)
@@ -189,12 +191,74 @@ func TestClone_NVRAMTargetInUseIsRefused(t *testing.T) {
 	c.requireCloneRefusedBeforeWriting(err, "is in use by another domain")
 }
 
-func TestClone_NVRAMStaleTargetIsOverwritten(t *testing.T) {
+func TestClone_NVRAMStaleTargetIsReplaced(t *testing.T) {
 	c := newCreateHost(t)
 	src, target := c.uefiSource()
 	require.NoError(t, os.WriteFile(target, []byte("left by a failed clone"), 0o600))
 
 	_, err := c.p.Clone(context.Background(), cloneReq())
 	require.NoError(t, err)
-	assert.Contains(t, splitLines(c.log("sudo")), "dd if="+src+" of="+target+" iflag=nofollow oflag=nofollow status=none")
+	sudo := splitLines(c.log("sudo"))
+	assert.Greater(t, indexOf(sudo, "dd if="+src+" of="+target+" iflag=nofollow oflag=nofollow conv=excl status=none"),
+		indexOf(sudo, "rm -f -- "+target))
+}
+
+// passthroughSudo is a sudo that runs its command as the calling user (a
+// leading -n is dropped), so a test can run copyClonedNVRAM's real commands.
+const passthroughSudo = "#!/bin/sh\nif [ \"$1\" = \"-n\" ]; then shift; fi\nexec \"$@\"\n"
+
+// TestCopyClonedNVRAM_RealCommands runs the varstore copy's actual commands
+// (sudo passed through): a stale target that is a hard link to another file is
+// replaced without rewriting that file, and the copy never writes through a
+// symlink that sits at the target.
+func TestCopyClonedNVRAM_RealCommands(t *testing.T) {
+	requireGNURealpath(t)
+	bin := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "sudo"), []byte(passthroughSudo), 0o700)) //nolint:gosec // test shim must be executable
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	vp := NewVirshProvider(&ProviderConfig{})
+	vp.uri = "test:///nvram"
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src_VARS.fd")
+	require.NoError(t, os.WriteFile(src, []byte("source vars"), 0o600))
+
+	t.Run("hard-linked stale target", func(t *testing.T) {
+		victim := filepath.Join(dir, "victim_VARS.fd")
+		target := filepath.Join(dir, "hard_VARS.fd")
+		require.NoError(t, os.WriteFile(victim, []byte("another domain's vars"), 0o600))
+		require.NoError(t, os.Link(victim, target))
+
+		copyClonedNVRAM(context.Background(), vp, src, target)
+		got, err := os.ReadFile(target) //nolint:gosec // test reads its own scratch file
+		require.NoError(t, err)
+		assert.Equal(t, "source vars", string(got))
+		kept, err := os.ReadFile(victim) //nolint:gosec // test reads its own scratch file
+		require.NoError(t, err)
+		assert.Equal(t, "another domain's vars", string(kept), "the other hard link is never truncated")
+	})
+
+	t.Run("symlink at the target", func(t *testing.T) {
+		victim := filepath.Join(dir, "sym_victim")
+		require.NoError(t, os.WriteFile(victim, []byte("untouched"), 0o600))
+		target := filepath.Join(dir, "sym_VARS.fd")
+		// The symlink appears after the stale-target unlink: the exclusive,
+		// no-follow create refuses it.
+		require.NoError(t, os.Symlink(victim, target))
+		_, err := runHost(context.Background(), vp, "sudo", "dd", "if="+src, "of="+target,
+			"iflag=nofollow", "oflag=nofollow", "conv=excl", "status=none")
+		require.Error(t, err, "dd never writes through a symlink at the target")
+		kept, err := os.ReadFile(victim) //nolint:gosec // test reads its own scratch file
+		require.NoError(t, err)
+		assert.Equal(t, "untouched", string(kept))
+	})
+}
+
+// indexOf returns the index of s in list, or -1.
+func indexOf(list []string, s string) int {
+	for i, v := range list {
+		if v == s {
+			return i
+		}
+	}
+	return -1
 }

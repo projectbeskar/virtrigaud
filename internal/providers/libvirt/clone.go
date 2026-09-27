@@ -365,18 +365,30 @@ func finalizeClonedDisk(ctx context.Context, vp *VirshProvider, targetDiskPath s
 // The copy runs host-side via the "!" direct-exec convention, mirroring the
 // disk copy. The nvram directory (typically /var/lib/libvirt/qemu/nvram) is
 // root-owned, so sudo is used as elsewhere in this provider. The varstore is a
-// small fixed-size firmware-variable image. It is copied with `dd` opening
-// both files with O_NOFOLLOW (iflag/oflag=nofollow): running as root, a symlink
-// at either path makes the copy fail instead of being followed to another file
-// (ensureNVRAMTargetFree has refused a symlinked or in-use target before any
-// file of the clone was written; this closes the race after that check). The
-// copy is then made private to the qemu user (0600). Failure is non-fatal but
+// small fixed-size firmware-variable image. Any stale target is unlinked, then
+// it is copied with `dd` opening the source with O_NOFOLLOW and creating the
+// target with O_CREAT|O_EXCL|O_NOFOLLOW (oflag=nofollow, conv=excl): running
+// as root, a symlink at either path makes the copy fail instead of being
+// followed to another file, and a pre-existing target (a hard link to another
+// file among them) is never truncated (ensureNVRAMTargetFree has refused a
+// symlinked or in-use target before any file of the clone was written; this
+// closes the race after that check). The target stays in the source
+// varstore's directory (rewriteNVRAMPath). The copy is then made private to
+// the qemu user (0600). Failure is non-fatal but
 // logged loudly: the clone may fail to boot UEFI correctly because its <nvram>
 // now points at a path that was never populated.
 func copyClonedNVRAM(ctx context.Context, vp *VirshProvider, srcNvramPath, targetNvramPath string) {
 	log.Printf("INFO Copying UEFI varstore %s -> %s for clone", srcNvramPath, targetNvramPath)
+	// A stale file there (an earlier failed clone; ensureNVRAMTargetFree
+	// verified no domain uses it) is unlinked first — never truncated in place,
+	// which would also rewrite any other hard link to it — and the copy then
+	// creates the target exclusively (conv=excl: O_CREAT|O_EXCL), so anything
+	// that appears at that path in between makes the copy fail.
+	if _, err := runHost(ctx, vp, "sudo", "rm", "-f", "--", targetNvramPath); err != nil {
+		log.Printf("WARN Failed to remove the stale UEFI varstore %s for clone: %v", targetNvramPath, err)
+	}
 	if res, err := runHost(ctx, vp, "sudo", "dd", "if="+srcNvramPath, "of="+targetNvramPath,
-		"iflag=nofollow", "oflag=nofollow", "status=none"); err != nil {
+		"iflag=nofollow", "oflag=nofollow", "conv=excl", "status=none"); err != nil {
 		stderr := ""
 		if res != nil {
 			stderr = res.Stderr
