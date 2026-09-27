@@ -653,11 +653,23 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	recordIPDiscoveryIfFirstSeen(vm.Status.IPs, desc.IPs, vm.CreationTimestamp, string(provider.Spec.Type))
 
 	// Update status with current state
-	vm.Status.PowerState = infravirtrigaudiov1beta1.PowerState(desc.PowerState)
+	vm.Status.PowerState = observedPowerState(desc.PowerState)
 	vm.Status.IPs = desc.IPs
 	vm.Status.ConsoleURL = desc.ConsoleURL
 	vm.Status.Provider = desc.ProviderRaw
 	r.noteLinkedCloneDependents(vm, desc.ProviderRaw)
+
+	// A VM the provider reports Suspended (paused, suspended to RAM) or Unknown
+	// is neither powered on or off nor reconfigured (review R1): it is left as
+	// it is until it runs or is powered off.
+	if powerStateUnmanaged(desc.PowerState) {
+		logger.Info("VM is suspended or in an unknown state; not adjusting its power state or size", "powerState", desc.PowerState)
+		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonPowerStateUnmanaged,
+			fmt.Sprintf("the provider reports the VM %s: its power state is not adjusted and it is not reconfigured until it is running or powered off",
+				vm.Status.PowerState))
+		r.updateStatus(ctx, vm)
+		return ctrl.Result{RequeueAfter: r.getRequeueInterval(vm, desc)}, nil
+	}
 
 	// Check desired power state
 	desiredPowerState := vm.Spec.PowerState

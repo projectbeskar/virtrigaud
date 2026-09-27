@@ -1684,19 +1684,31 @@ func (p *Provider) IsTaskComplete(ctx context.Context, taskRef string) (done boo
 	return true, nil
 }
 
-// mapLibvirtPowerState maps libvirt power states to VirtRigaud standard power states
+// mapLibvirtPowerState maps a libvirt domain state (as `virsh dominfo` / `virsh
+// list` print it) to VirtRigaud's power state. "Off" means the domain is not
+// running and is not about to run on its own — never merely "not running":
+//
+//   - running, and idle (VIR_DOMAIN_BLOCKED: running, its vCPUs waiting) -> On;
+//   - shut off, in shutdown (on its way to shut off) and crashed (our domains
+//     are defined with on_crash=destroy) -> Off;
+//   - paused and pmsuspended -> Suspended: the domain is still active and its
+//     guest resumes (a wake timer suffices for pmsuspended) at the size it
+//     has, so the manager must not treat it as powered off — for instance to
+//     apply a shrink that waits for power-off (review R1);
+//   - anything else (no state, a state this provider does not know) -> Unknown.
+//
+// mapNativeDomainState is the go-libvirt twin and must stay identical (the
+// ADR-0008 shadow compares them).
 func (p *Provider) mapLibvirtPowerState(libvirtState string) contracts.PowerState {
-	switch strings.ToLower(libvirtState) {
-	case "running":
-		return "On"
-	case "shut off", "shutoff":
-		return "Off"
-	case "paused", "suspended":
-		return "Off" // Treat paused/suspended as Off for consistency with vSphere
-	case "in shutdown", "shutting down":
-		return "Off" // Transitioning to off
+	switch strings.ToLower(strings.TrimSpace(libvirtState)) {
+	case domStateRunning, domStateIdle, domStateBlocked:
+		return contracts.PowerStateOn
+	case domStateShutOff, domStateShutoff, domStateInShut, "shutting down", domStateCrashed:
+		return contracts.PowerStateOff
+	case domStatePaused, domStateSuspended, domStatePMSusp:
+		return contracts.PowerStateSuspended
 	default:
-		return "Off" // Default to Off for unknown states
+		return contracts.PowerStateUnknown
 	}
 }
 

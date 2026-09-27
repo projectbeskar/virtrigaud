@@ -66,6 +66,17 @@ const (
 	// Deleting it would destroy their data, so the finalizer is kept and the
 	// delete is retried until the dependents are gone.
 	ReasonDeleteBlocked = "DeleteBlocked"
+	// ReasonPowerStateUnmanaged is Ready=False on a VirtualMachine whose
+	// provider reports it Suspended (paused or suspended to RAM: still active)
+	// or Unknown. The manager neither powers it on or off nor reconfigures it
+	// until it is running or powered off.
+	ReasonPowerStateUnmanaged = "PowerStateUnmanaged"
+	// ReasonRestartRequired is Reconfiguring=True on a VirtualMachine whose
+	// last Reconfigure the provider applied to the VM's persistent definition
+	// only: the new size takes effect at the VM's next power cycle (power off,
+	// then on). status.currentResources then holds, per resource, the larger
+	// of the running size and the next-boot size.
+	ReasonRestartRequired = "RestartRequired"
 )
 
 // ConditionLinkedClonesDependOnDisk is True on a VirtualMachine whose disk other

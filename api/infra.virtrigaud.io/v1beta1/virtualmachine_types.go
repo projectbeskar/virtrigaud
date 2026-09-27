@@ -119,6 +119,28 @@ const (
 	PowerStateOffGraceful PowerState = "OffGraceful"
 )
 
+// ObservedPowerState is a VM's power state as its provider reports it
+// (status.powerState). It is a superset of PowerState: a desired state is only
+// ever On, Off or OffGraceful, but an observed one can also be Suspended or
+// Unknown. OffGraceful stays valid so a status written by an older manager
+// still validates.
+// +kubebuilder:validation:Enum=On;Off;OffGraceful;Suspended;Unknown
+type ObservedPowerState string
+
+const (
+	// ObservedPowerStateOn is a running VM.
+	ObservedPowerStateOn ObservedPowerState = "On"
+	// ObservedPowerStateOff is a powered-off VM.
+	ObservedPowerStateOff ObservedPowerState = "Off"
+	// ObservedPowerStateSuspended is a VM that is paused or suspended to RAM:
+	// still active on its host (it resumes at the size it has), not powered
+	// off.
+	ObservedPowerStateSuspended ObservedPowerState = "Suspended"
+	// ObservedPowerStateUnknown is a VM whose provider reports a state it
+	// cannot classify.
+	ObservedPowerStateUnknown ObservedPowerState = "Unknown"
+)
+
 // VirtualMachineLifecycle defines lifecycle configuration for a VM
 type VirtualMachineLifecycle struct {
 	// PreStop defines actions to take before stopping the VM
@@ -242,9 +264,13 @@ type VirtualMachineStatus struct {
 	// +optional
 	ID string `json:"id,omitempty"`
 
-	// PowerState reflects the current power state
+	// PowerState reflects the current power state as the provider reports it:
+	// On, Off, or — from a provider that can tell (libvirt) — Suspended (the
+	// VM is paused or suspended to RAM: still active, not powered off) or
+	// Unknown. While a VM is Suspended or Unknown its power state is not
+	// adjusted and it is not reconfigured.
 	// +optional
-	PowerState PowerState `json:"powerState,omitempty"`
+	PowerState ObservedPowerState `json:"powerState,omitempty"`
 
 	// IPs contains the IP addresses assigned to the VM
 	// +optional
