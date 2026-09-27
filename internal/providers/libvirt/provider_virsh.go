@@ -876,35 +876,29 @@ func deleteCloudInitResources(ctx context.Context, vp *VirshProvider, domainName
 
 // cleanupOrphanedResources attempts to clean up any resources that might be
 // left behind on vp's host by a domain that no longer exists (single-host
-// delete only): its disk under the provider's naming conventions and its
-// legacy per-name cloud-init seed directory.
+// delete only): the disk VirtRigaud names after it, <pool directory>/<name>-
+// disk.qcow2 in the default storage pool, and its legacy per-name cloud-init
+// seed directory.
 //
-// A disk file is removed only when it exists, lies directly inside a directory
-// Delete may remove disks from (deletableDiskFiles), and no defined domain
-// uses it as a disk or backing file — the domain of that name is gone, but a
-// linked clone of it may not be. When that cannot be established, nothing is
-// removed.
+// The disk file is removed only when it exists, lies directly inside a
+// directory Delete may remove disks from (deletableDiskFiles), and no defined
+// domain uses it as a disk or backing file — the domain of that name is gone,
+// but a linked clone of it may not be. When that cannot be established, nothing
+// is removed. Files VirtRigaud never names this way (<name>.qcow2, <name>-disk)
+// are never touched.
 func (p *Provider) cleanupOrphanedResources(ctx context.Context, vp *VirshProvider, domainName string) {
 	log.Printf("INFO Cleaning up orphaned resources for: %s", domainName)
 
-	// Try to delete disk files with common naming patterns
-	diskPatterns := []string{
-		fmt.Sprintf("/var/lib/libvirt/images/%s-disk.qcow2", domainName),
-		fmt.Sprintf("/var/lib/libvirt/images/%s.qcow2", domainName),
-		fmt.Sprintf("/var/lib/libvirt/images/%s-disk", domainName),
-	}
-	var present []string
-	for _, diskPath := range diskPatterns {
-		exists, err := hostPathExists(ctx, vp, diskPath)
-		if err != nil {
+	if poolDir := storagePoolDir(ctx, vp, defaultStoragePool); poolDir != "" {
+		diskPath := filepath.Join(poolDir, vmDiskVolumeName(domainName)+qcow2Ext)
+		if filepath.Dir(diskPath) != filepath.Clean(poolDir) {
+			log.Printf("WARN Not looking for an orphaned disk of %q: the name is not a file name", domainName)
+		} else if exists, err := hostPathExists(ctx, vp, diskPath); err != nil {
 			log.Printf("DEBUG Could not check for potential orphaned disk %s: %v", diskPath, err)
-			continue
-		}
-		if exists {
-			present = append(present, diskPath)
+		} else if exists {
+			p.removeOrphanedDisks(ctx, vp, domainName, []string{diskPath})
 		}
 	}
-	p.removeOrphanedDisks(ctx, vp, domainName, present)
 
 	// Try to delete the legacy per-name cloud-init directory.
 	legacyRoot := filepath.Join(p.stagingDir(), legacyCloudInitSeedRoot)

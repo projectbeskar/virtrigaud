@@ -346,6 +346,7 @@ func clusteredLinkedPair(t *testing.T, running bool) (*createHost, *Provider, st
 	c := newCreateHost(t)
 	c.host("host-a")
 	p, _, _ := routedCluster(t)
+	p.imageDirs = []string{c.images} // never the real /var/lib/libvirt/images
 	src := c.file(c.images, "team-a.web-disk.qcow2")
 	clone := c.file(c.images, "team-b.copy-disk.qcow2")
 	c.overlay(clone, src)
