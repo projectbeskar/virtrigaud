@@ -124,6 +124,11 @@ type Provider struct {
 	// XML, cloud-init seeds) are made in. Empty means defaultHostStagingDir;
 	// tests point it at a scratch directory (see staging.go).
 	hostStagingDir string
+
+	// linkedDeps records, per host and domain, how many other domains
+	// depended on the domain's disk at its last start, for Describe
+	// (linked_clone_warning.go).
+	linkedDeps linkedCloneDependents
 }
 
 // imagePolicy returns the provider's image-path confinement policy (see

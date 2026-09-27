@@ -384,6 +384,39 @@ func TestDelete_SingleHost_RemovesOwnSnapshotChain(t *testing.T) {
 	}
 }
 
+// TestPowerOn_WarnsWhenLinkedClonesDependOnTheDisk: starting the source of an
+// existing linked clone is not refused, but the provider counts the domains
+// depending on its disk right after the start and Describe reports the count
+// (contracts.ProviderRawLinkedCloneDependentsKey) for the manager's warning; a
+// VM nothing depends on reports 0; a VM never started reports nothing.
+func TestPowerOn_WarnsWhenLinkedClonesDependOnTheDisk(t *testing.T) {
+	c := newCreateHost(t)
+	c.p.hostStagingDir = t.TempDir()
+	c.linkedPair(true)
+	ctx := context.Background()
+
+	_, err := c.p.Power(ctx, contracts.VMRef{ID: "team-a.web"}, contracts.PowerOpOn)
+	require.NoError(t, err, "the start is never refused")
+	assert.Contains(t, c.virshCalls("h1"), "start team-a.web")
+	n, ok := c.p.linkedDeps.get(c.p.hostID, "team-a.web")
+	require.True(t, ok)
+	assert.Equal(t, 1, n)
+
+	raw := map[string]string{}
+	c.p.reportLinkedCloneDependents(c.p.hostID, "team-a.web", raw)
+	assert.Equal(t, "1", raw[contracts.ProviderRawLinkedCloneDependentsKey])
+
+	_, err = c.p.Power(ctx, contracts.VMRef{ID: "team-b.copy"}, contracts.PowerOpReboot)
+	require.NoError(t, err)
+	raw = map[string]string{}
+	c.p.reportLinkedCloneDependents(c.p.hostID, "team-b.copy", raw)
+	assert.Equal(t, "0", raw[contracts.ProviderRawLinkedCloneDependentsKey], "nothing depends on the clone")
+
+	raw = map[string]string{}
+	c.p.reportLinkedCloneDependents(c.p.hostID, "never-started", raw)
+	assert.NotContains(t, raw, contracts.ProviderRawLinkedCloneDependentsKey)
+}
+
 // TestDeleteDiskFile_RechecksRightBeforeRemoving: a path that stopped being a
 // regular file between the plan and the removal (replaced by a symlink) is
 // not removed.

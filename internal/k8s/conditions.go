@@ -68,6 +68,13 @@ const (
 	ReasonDeleteBlocked = "DeleteBlocked"
 )
 
+// ConditionLinkedClonesDependOnDisk is True on a VirtualMachine whose disk other
+// VMs on its hypervisor use as their backing file (libvirt linked clones made
+// by an earlier release) — as the provider counted when the VM was last
+// started. Powering the VM on while those clones are shut off corrupts them.
+// It is a warning only: nothing is refused. Its reason is the same string.
+const ConditionLinkedClonesDependOnDisk = "LinkedClonesDependOnDisk"
+
 // Placement / scheduling condition reasons (ADR-0007 P1, D4). Surfaced on a
 // VirtualMachine's Provisioning=False condition when the operator scheduler
 // cannot bind the VM to a host on a clustered ("brain-in-operator") provider.

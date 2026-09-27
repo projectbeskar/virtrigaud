@@ -1248,6 +1248,11 @@ func (p *Provider) runPowerOp(ctx context.Context, c libvirtConn, d domainTarget
 	}
 
 	log.Printf("INFO Successfully performed power operation %s on %s", op, d.name)
+	if op == contracts.PowerOpOn || op == contracts.PowerOpReboot {
+		// The domain is running: warn (never refuse) when linked clones of it
+		// exist, since its writes now reach their backing file.
+		p.recordLinkedCloneDependents(ctx, vp, c.HostID(), d)
+	}
 	return nil
 }
 
@@ -1838,6 +1843,7 @@ func (p *Provider) describeOn(ctx context.Context, c libvirtConn, id string) (co
 		ConsoleURL:  consoleURL,
 		ProviderRaw: domainInfo, // Pass the enhanced domain info as provider-specific data
 	}
+	p.reportLinkedCloneDependents(c.HostID(), id, response.ProviderRaw)
 
 	log.Printf("INFO Domain %s comprehensive state: power=%s, ips=%v, monitoring_data=collected", id, response.PowerState, ips)
 

@@ -20,6 +20,7 @@ import (
 	"context"
 	stderrors "errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -656,6 +657,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	vm.Status.IPs = desc.IPs
 	vm.Status.ConsoleURL = desc.ConsoleURL
 	vm.Status.Provider = desc.ProviderRaw
+	r.noteLinkedCloneDependents(vm, desc.ProviderRaw)
 
 	// Check desired power state
 	desiredPowerState := vm.Spec.PowerState
@@ -848,6 +850,43 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 	}
 
 	return r.removeFinalizer(ctx, vm)
+}
+
+// noteLinkedCloneDependents reflects the provider's count of other VMs whose
+// backing file is this VM's disk, taken at the VM's last start
+// (contracts.ProviderRawLinkedCloneDependentsKey), as the
+// LinkedClonesDependOnDisk condition: True, with a Warning event when it
+// becomes true, while the count is non-zero; removed when the provider reports
+// zero. A missing count (not known yet, or the provider restarted) leaves the
+// condition as it is. Ready is never changed: this warns, it refuses nothing.
+func (r *VirtualMachineReconciler) noteLinkedCloneDependents(vm *infravirtrigaudiov1beta1.VirtualMachine, raw map[string]string) {
+	v, ok := raw[contracts.ProviderRawLinkedCloneDependentsKey]
+	if !ok {
+		return
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil || n < 0 {
+		return
+	}
+	if n == 0 {
+		meta.RemoveStatusCondition(&vm.Status.Conditions, k8s.ConditionLinkedClonesDependOnDisk)
+		return
+	}
+	msg := fmt.Sprintf("%d other VM(s) on the hypervisor use this VM's disk as their backing file (linked clones of it): "+
+		"powering this VM on while its linked clones are shut off corrupts them. Keep it powered off, or delete the linked clones "+
+		"(a linked clone in another namespace also holds this VM's delete until it is removed, or this VM is detached with %s=true)",
+		n, infravirtrigaudiov1beta1.VirtualMachineOrphanOnDeleteAnnotation)
+	was := meta.IsStatusConditionTrue(vm.Status.Conditions, k8s.ConditionLinkedClonesDependOnDisk)
+	meta.SetStatusCondition(&vm.Status.Conditions, metav1.Condition{
+		Type:               k8s.ConditionLinkedClonesDependOnDisk,
+		Status:             metav1.ConditionTrue,
+		Reason:             k8s.ConditionLinkedClonesDependOnDisk,
+		Message:            msg,
+		ObservedGeneration: vm.Generation,
+	})
+	if !was {
+		r.recordEvent(vm, corev1.EventTypeWarning, k8s.ConditionLinkedClonesDependOnDisk, msg)
+	}
 }
 
 // retainForBlockedDelete keeps the finalizer of a VirtualMachine whose provider

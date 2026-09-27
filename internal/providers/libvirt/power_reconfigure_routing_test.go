@@ -89,6 +89,10 @@ func TestClustered_Power_RoutedToLeasedHostOnTheCheckedDomain(t *testing.T) {
 		"host-b dumpxml " + uuid,
 		"local define /tmp/" + uuid + "-sync.xml",
 		"local rm -f /tmp/" + uuid + "-sync.xml",
+		// After a start: count the domains depending on its disk (linked
+		// clones) for the Describe warning — read-only, on the same host.
+		"host-b dumpxml " + uuid,
+		"host-b list --all --uuid",
 	}
 	cases := map[contracts.PowerOp][]string{
 		contracts.PowerOpOn:               append([]string{"host-b start " + uuid}, sync...),
