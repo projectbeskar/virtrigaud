@@ -297,6 +297,46 @@ func TestDelete_SingleHost_NothingOutsideThePoolIsRemoved(t *testing.T) {
 	assert.Equal(t, []string{own}, c.removals(), "only the disk directly inside the pool directory")
 }
 
+// TestDelete_SingleHost_SymlinkedDiskIsNotFollowed: a disk the definition
+// names through a symlink — even one inside the pool pointing at a file inside
+// the pool — is not a regular file of this domain: neither the link nor its
+// target (possibly another VM's disk) is removed. A directory is not removed
+// either; the domain's own regular disk still is.
+func TestDelete_SingleHost_SymlinkedDiskIsNotFollowed(t *testing.T) {
+	c := newCreateHost(t)
+	own := c.file(c.images, "web-disk.qcow2")
+	target := c.file(c.images, "other-vm-disk.qcow2")
+	link := filepath.Join(c.images, "web-data.qcow2")
+	require.NoError(t, os.Symlink(target, link))
+	dir := filepath.Join(c.images, "not-a-disk.qcow2")
+	require.NoError(t, os.MkdirAll(dir, 0o750))
+
+	x := fmt.Sprintf("<domain type='kvm'><name>web</name><uuid>%s</uuid><devices>"+
+		"<disk type='file' device='disk'><source file='%s'/></disk>"+
+		"<disk type='file' device='disk'><source file='%s'/></disk>"+
+		"<disk type='file' device='disk'><source file='%s'/></disk>"+
+		"</devices></domain>", uuidA, own, link, dir)
+	c.define("h1", "web", uuidA, x)
+	require.NoError(t, os.WriteFile(filepath.Join(c.root, "h1", "names"), []byte("web\n"), 0o600))
+
+	_, err := c.p.Delete(context.Background(), contracts.VMRef{ID: "web"})
+	require.NoError(t, err)
+	assert.Equal(t, []string{own}, c.removals(), "never the symlink's target, the symlink or a directory")
+	assert.FileExists(t, target)
+}
+
+// TestDeleteDiskFile_RechecksRightBeforeRemoving: a path that stopped being a
+// regular file between the plan and the removal (replaced by a symlink) is
+// not removed.
+func TestDeleteDiskFile_RechecksRightBeforeRemoving(t *testing.T) {
+	c := newCreateHost(t)
+	p := filepath.Join(c.images, "swapped.qcow2")
+	require.NoError(t, os.Symlink(c.file(c.outside, "victim.qcow2"), p))
+	require.Error(t, deleteDiskFile(context.Background(), c.vp, p))
+	require.NoError(t, deleteDiskFile(context.Background(), c.vp, filepath.Join(c.images, "gone.qcow2")), "already gone")
+	assert.Empty(t, c.removals())
+}
+
 func TestDelete_SingleHost_UnverifiableDependentsFailClosed(t *testing.T) {
 	c := newCreateHost(t)
 	_, clone := c.linkedPair(true)

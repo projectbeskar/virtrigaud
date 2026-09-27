@@ -792,9 +792,11 @@ func storagePoolDir(ctx context.Context, vp *VirshProvider, pool string) string 
 // deletableDiskFiles returns, deduplicated and in order, the canonical host
 // paths (resolved with realpath on the host) of those disks that lie DIRECTLY
 // inside a directory Delete may remove disk files from (deletionDirs, itself
-// canonicalized on the host; never a system directory). Any other disk file is
-// refused — left in place — and logged: Delete never removes a file outside
-// the VM storage directories, whatever a domain definition points at.
+// canonicalized on the host; never a system directory) and that are, as the
+// definition names them, regular files — not symbolic links. Any other disk
+// file is refused — left in place — and logged: Delete never removes a file
+// outside the VM storage directories, whatever a domain definition points at,
+// and never the target of a symlink.
 func (p *Provider) deletableDiskFiles(ctx context.Context, vp *VirshProvider, domain string, disks []string) ([]string, error) {
 	dirs := p.deletionDirs(ctx, vp)
 	canon, err := canonicalizeOnHost(ctx, vp, append(append([]string(nil), disks...), dirs...))
@@ -816,12 +818,63 @@ func (p *Provider) deletableDiskFiles(ctx context.Context, vp *VirshProvider, do
 				"directory or an allowed image directory %v; it is left in place", disk, domain, dirs)
 			continue
 		}
-		if !seen[c] {
+		if seen[c] {
+			continue
+		}
+		// What the definition names must itself be a regular file: the target
+		// of a symlink is not this domain's to remove (and removing only the
+		// link would strand the target), so neither is touched.
+		kind, err := hostDiskKind(ctx, vp, disk)
+		if err != nil {
+			return nil, err
+		}
+		switch kind {
+		case diskKindFile:
 			seen[c] = true
 			out = append(out, c)
+		case diskKindSymlink:
+			log.Printf("WARN Not deleting disk %s of domain %s: it is a symbolic link; neither it nor its target is removed", disk, domain)
+		case diskKindAbsent:
+			log.Printf("INFO Disk %s of domain %s does not exist; nothing to remove", disk, domain)
+		default:
+			log.Printf("WARN Not deleting disk %s of domain %s: it is not a regular file; it is left in place", disk, domain)
 		}
 	}
 	return out, nil
+}
+
+// What hostDiskKind reports about a path (diskKindScript).
+const (
+	// diskKindSymlink: a symbolic link (dangling or not).
+	diskKindSymlink = "symlink"
+	// diskKindFile: a regular file that is not a symbolic link.
+	diskKindFile = "file"
+	// diskKindOther: anything else that exists (a directory, a device, ...).
+	diskKindOther = "other"
+	// diskKindAbsent: nothing exists at the path.
+	diskKindAbsent = ""
+)
+
+// diskKindScript is the fixed `sh -c` script behind hostDiskKind. The path is
+// ALWAYS the positional parameter "$1", never interpolated into the text.
+const diskKindScript = `if [ -L "$1" ]; then echo ` + diskKindSymlink + `; elif [ -f "$1" ]; then echo ` + diskKindFile +
+	`; elif [ -e "$1" ]; then echo ` + diskKindOther + `; fi`
+
+// hostDiskKind reports what is at path on vp's host, without following a
+// symlink at the path itself: diskKindSymlink, diskKindFile, diskKindOther or
+// diskKindAbsent. A failure to check is a retryable error.
+func hostDiskKind(ctx context.Context, vp *VirshProvider, path string) (string, error) {
+	res, err := runHost(ctx, vp, "sh", "-c", diskKindScript, "sh", path)
+	if err != nil {
+		return "", contracts.NewRetryableError(fmt.Sprintf("check %s on the host", path), err)
+	}
+	switch kind := strings.TrimSpace(res.Stdout); kind {
+	case diskKindSymlink, diskKindFile, diskKindOther, diskKindAbsent:
+		return kind, nil
+	default:
+		return "", contracts.NewRetryableError(fmt.Sprintf("check %s on the host", path),
+			fmt.Errorf("unexpected output %q", kind))
+	}
 }
 
 // getDomainDiskPaths retrieves all disk paths for a domain on the provider's
@@ -848,11 +901,24 @@ func domainDiskPaths(ctx context.Context, vp *VirshProvider, domainName string) 
 }
 
 // deleteDiskFile deletes a disk file from vp's libvirt host. diskPath is a
-// canonical path that deletableDiskFiles and the dependency guard cleared.
+// canonical path that deletableDiskFiles and the dependency guard cleared; it
+// is removed only if it is still a regular file and not a symbolic link.
 func deleteDiskFile(ctx context.Context, vp *VirshProvider, diskPath string) error {
+	kind, err := hostDiskKind(ctx, vp, diskPath)
+	if err != nil {
+		return err
+	}
+	switch kind {
+	case diskKindFile:
+	case diskKindAbsent:
+		log.Printf("INFO Disk file %s is already gone", diskPath)
+		return nil
+	default:
+		return fmt.Errorf("not deleting disk file %s: it is no longer a regular file (%s)", diskPath, kind)
+	}
 	log.Printf("INFO Deleting disk file: %s", diskPath)
 
-	_, err := vp.runVirshCommand(ctx, "!", "sudo", "rm", "-f", "--", diskPath)
+	_, err = vp.runVirshCommand(ctx, "!", "sudo", "rm", "-f", "--", diskPath)
 	if err != nil {
 		return fmt.Errorf("failed to delete disk file %s: %w", diskPath, err)
 	}
