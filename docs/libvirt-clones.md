@@ -82,85 +82,129 @@ undefined or snapshotted, and no file is removed.
   To remove the `VirtualMachine` without deleting the hypervisor VM, set
   `virtrigaud.io/orphan-on-delete: "true"`; `virtrigaud.io/force-delete: "true"`
   also removes the finalizer (the domain is left on the host in both cases).
+  A linked clone in **another namespace** holds the source's delete the same way,
+  until that clone is removed or the source is detached with orphan-on-delete.
 - **Snapshots**: a refused create shows in the `VMSnapshot`'s status. A refused
   delete keeps the `VMSnapshot` and its finalizer — the snapshot is still on the
   host — with `Ready=False` and `Deleting=False`, reason `DeleteBlocked`, and a
   `Warning` event `DeleteBlocked`; it is re-checked every minute and completes
   once the clones are gone. `virtrigaud.io/force-delete: "true"` on the
-  `VMSnapshot` removes it anyway, leaving the snapshot on the host.
+  `VMSnapshot` removes it anyway, leaving the snapshot on the host (a `Warning`
+  event `SnapshotLeftOnHypervisor` names the snapshot).
 - **Migration**: a `VMMigration` of the source VM fails at its snapshot step
   (`Failed to create snapshot: …`).
+- **Power on**: never refused. After the source of an existing linked clone is
+  started, the provider counts the VMs that depend on its disk and the
+  `VirtualMachine` gets the condition `LinkedClonesDependOnDisk=True` (and a
+  `Warning` event): "powering this VM on while its linked clones are shut off
+  corrupts them". `Ready` is unchanged. The condition is removed once a start
+  finds no dependents.
 
 The message names only the requesting VM's own domain and the number of
 dependent domains — never another domain (it may belong to another tenant) or
 a host path. On the wire the refusal is `FailedPrecondition` with a
 `google.rpc.ErrorInfo` reason `VM_DISK_IN_USE` (domain
 `provider.virtrigaud.io`); a clustered Provider's routed `Delete` adds
-`VM_OPERATION_FAILED`. The manager maps it to a `Conflict`, and it never counts
-toward the Provider's circuit breaker.
+`VM_OPERATION_FAILED`. The manager maps it to a `Conflict` (only this reason
+makes a delete `DeleteBlocked`), and it never counts toward the Provider's
+circuit breaker.
+
+A `VMSnapshot` whose provider delete fails for any other reason (an unreachable
+host, an open circuit breaker, a dependency check that could not run) also
+keeps its finalizer, with `Ready=False` / `Deleting=False` reason
+`ProviderError` and a `Warning` event, and is retried with a growing delay (15
+seconds up to 5 minutes). Only a snapshot the provider reports as already gone,
+or `force-delete`, releases it.
 
 ### How the dependency is found
 
 Before the operation, the provider reads every domain defined on the host —
 running or shut off, VirtRigaud's or anyone else's — and each disk's full image
-chain with `qemu-img info -U --backing-chain` (a shut-off domain's definition
-does not list its backing files). A VM "has dependents" when any other domain
-references one of its disk files as a disk, a backing file, or any other file.
+chain. A running domain's definition lists its chain in `<backingStore>`, which
+is used as is; a shut-off domain's chain is read with
+`qemu-img info -U --backing-chain`, through passwordless `sudo -n` when the host
+allows it (so a disk the SSH user cannot read — a `0600 libvirt-qemu` image, a
+root-squashed NFS pool — does not fail the check), and as the SSH user
+otherwise. A VM "has dependents" when any other domain references one of its
+disk files as a disk, a backing file, or any other file. Delete only runs the
+check when it has files to remove.
 
 The check fails closed: if a definition or a disk's image chain cannot be read,
-the operation is not performed and returns a retryable error, with the details
-in the provider log. The provider's SSH user must therefore be able to read
-every domain's disk on the host (be `root`, or a member of the group the disks
-belong to — `kvm` for the disks VirtRigaud creates on Debian/Ubuntu hosts); the
-same already holds for image confinement at create time.
+the operation is not performed and returns a retryable error
+(`Unavailable` with `google.rpc.ErrorInfo` reason `VM_DISK_CHECK_FAILED`, which
+the manager retries and never counts toward the Provider's circuit breaker),
+with the details in the provider log. Give the provider's SSH user passwordless
+`sudo` for `qemu-img`, or membership of the group the disks belong to (`kvm` for
+the disks VirtRigaud creates on Debian/Ubuntu hosts), or run it as `root`.
 
 ## What Delete removes
 
-Delete reads the domain's definition once, structurally, and removes only:
+Delete reads the domain's definition once, structurally — if it cannot be read,
+the delete fails with a retryable error and the domain is left intact — and
+removes only:
 
 - the domain's **own top-level disk files** (`<disk type='file'
-  device='disk'>`) that lie **directly inside** the default storage pool's
+  device='disk'>`) that are, as the definition names them, **regular files**
+  (not symbolic links) lying **directly inside** the default storage pool's
   directory or an allowed image directory (`VIRTRIGAUD_LIBVIRT_IMAGE_DIRS`,
-  default `/var/lib/libvirt/images`), resolved on the host — a symlink out of
-  those directories does not count;
+  default `/var/lib/libvirt/images`), resolved on the host. A symlinked disk is
+  left in place, link and target alike; each file is re-checked right before
+  it is removed;
+- the files **below them in their backing chains that are its own**: named
+  after its disk (`<domain>-disk.<anything>` — the disk it was created with,
+  under the overlays its external snapshots added), meeting the same rules,
+  and used by no other domain. A base image or another VM's disk is never
+  removed, and neither is a pre-snapshot disk a linked clone still reads;
 - its **VirtRigaud cloud-init seed directory** (`/tmp/virtrigaud-cloudinit-<domain>.<random>/`,
   or an earlier release's `/tmp/virtrigaud-cloudinit/<domain>/`) — unless another
   domain still references a file in it (a clone's CD-ROM keeps pointing at its
   source's seed ISO, and a domain whose CD-ROM file is missing no longer
   starts).
 
-It never removes a backing file (`<backingStore>`), cdrom or floppy media, or
-any file outside those directories: such a file is left in place and logged by
-the provider. For a VM that took external (disk-only) snapshots, the disk
-underneath the snapshot overlays is part of its backing chain and is therefore
-also left in place; remove it by hand once nothing references it.
+It never removes any other backing file, cdrom or floppy media, or any file
+outside those directories: such a file is left in place and logged by the
+provider.
 
 A single-host Provider deleting a VM whose domain no longer exists still cleans
-up files named after it (`<name>-disk.qcow2`, `<name>.qcow2`, `<name>-disk`
-under `/var/lib/libvirt/images`), but only files that exist, lie in those
-directories, and that no remaining domain uses — a linked clone of the vanished
-VM keeps its backing file.
+up the disk VirtRigaud named after it, `<name>-disk.qcow2` in the default pool's
+directory, but only if it exists and no remaining domain uses it — a linked
+clone of the vanished VM keeps its backing file. Nothing else is looked for.
 
 ## Clone files on the host
 
-- **Disk mode.** A clone's disk is `chown libvirt-qemu:kvm` and `chmod 0660` —
-  no longer world-writable (`0777`). The provider's SSH user reads it (disk
-  in-use checks, `GetDiskInfo`, s3/nfs disk export, a clone of the clone) through
-  membership of the `kvm` group, or as `root`.
+- **Disk mode.** Every VM disk VirtRigaud creates or adopts — a new VM's disk,
+  an image copied or downloaded for it, an imported disk adopted in place, and
+  a clone's disk — is `chown libvirt-qemu:kvm` and `chmod 0660`, no longer
+  world-writable (`0777`). The provider's SSH user reads VM disks (disk in-use
+  checks, `GetDiskInfo`, s3/nfs disk export, a full clone's copy) as a member of
+  the `kvm` group, or as `root`; the in-use check also uses passwordless
+  `sudo -n qemu-img` where the host allows it. **Disks created by an earlier
+  release keep their mode** — to close one, shut its VM off and
+  `sudo chown libvirt-qemu:kvm` and `sudo chmod 0660` it. Least privilege (`0600
+  libvirt-qemu`, with every read through `sudo -n`) is a tracked follow-up.
 - **UEFI varstore.** For a UEFI source, the clone gets its own copy of the
   source's `<nvram>` varstore, `<nvram directory>/<clone domain>_VARS.fd`. The
   clone is refused (`Conflict`) before any of its files is written when that
   path is a symbolic link or the varstore (or any other file) of an existing
-  domain; an unused file left by an earlier, failed clone is overwritten. The
-  copy is made with `sudo dd iflag=nofollow oflag=nofollow`, so it never follows
-  a symlink at either end, and the copy is `chmod 0600`.
+  domain. An unused file left by an earlier, failed clone is first removed, and
+  the copy is then created fresh: `sudo dd iflag=nofollow oflag=nofollow
+  conv=excl`, so it never follows a symlink at either end and never writes into
+  a file that appeared in between (the clone fails instead). The copy is
+  `chmod 0600`.
 
 ## Known limitations
 
 - Powering on the **source** VM of an existing linked clone lets its guest
   write to the clone's backing file, which corrupts the clone. The provider does
-  not prevent it — this is why new linked clones are disabled; keep the source
-  of an existing linked clone powered off.
+  not prevent it — this is why new linked clones are disabled — but it warns:
+  the source's `VirtualMachine` gets `LinkedClonesDependOnDisk=True` after it is
+  started (see [What the requester sees](#what-the-requester-sees)). Keep the
+  source of an existing linked clone powered off.
+- The dependency check reads the whole host on every guarded operation: every
+  domain's definition, and one `qemu-img info` per disk of every shut-off
+  domain (a running domain's chain comes from its definition). Delete skips it
+  when it has no files to remove, and nothing is cached, so on a host with many
+  shut-off domains Delete and snapshot operations take longer.
 - On a clustered Provider, snapshots are not routed to hosts yet; when they
   are, the same dependency check applies on the VM's host.
 
@@ -173,11 +217,17 @@ After upgrading:
 
 - **libvirt `LinkedClone` is refused** (`LinkedCloneUnsupported`): use
   `FullClone`. Existing linked clones keep working, but their source VMs cannot
-  be deleted or reverted while the clones exist;
-- a source VM with linked clones can no longer be deleted, reverted, or
-  snapshotted until its clones are deleted (see above);
-- new clone disks are `0660 libvirt-qemu:kvm` — make sure the provider's SSH
-  user is `root` or in the `kvm` group before creating clones;
+  be deleted, reverted or snapshotted while the clones exist, and warn when they
+  are powered on;
+- a `VMSnapshot` whose provider delete fails or is refused now **keeps its
+  finalizer** and is retried, instead of being removed with the snapshot left
+  on the host; use `virtrigaud.io/force-delete: "true"` to remove one anyway;
+- new VM disks are `0660 libvirt-qemu:kvm` — make sure the provider's SSH
+  user is `root`, in the `kvm` group, or allowed passwordless `sudo qemu-img`
+  before upgrading, or the dependency check fails (retryably) and Delete and
+  snapshot operations do not proceed;
 - Delete removes fewer files: nothing outside the pool / allowed image
-  directories and no backing files. Check the provider log for
-  `Not deleting disk` lines if disk usage grows.
+  directories, no symbolic links or their targets, and no backing files other
+  than the VM's own external-snapshot chain. A deleted VM whose domain is
+  already gone only has `<name>-disk.qcow2` cleaned up. Check the provider log
+  for `Not deleting disk` lines if disk usage grows.
