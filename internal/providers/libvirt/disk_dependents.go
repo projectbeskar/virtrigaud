@@ -60,6 +60,26 @@ import (
 // of the per-Provider circuit breaker. Its message names only the requesting
 // VM's own domain and the NUMBER of dependents — never another domain (it may
 // be another tenant's) or a host path; the paths are logged provider-side.
+//
+// Call-site checklist. Every core below takes the host it runs on (a
+// hostCommandRunner / *VirshProvider: the single host, or a clustered
+// provider's leased host) and must keep its protection when it is moved into a
+// shared or routed core:
+//
+//   - Delete: deleteExistingDomain → planDomainDeletion (dependents, pool
+//     confinement, own-chain and seed-directory checks) BEFORE destroy/undefine;
+//     reached by deleteOn (single-host) and deleteClustered (routed).
+//   - SnapshotCreate / SnapshotDelete / SnapshotRevert:
+//     refuseIfDiskHasDependents(ctx, host, domain, guardOp*) right before the
+//     snapshot command — Server.SnapshotCreate/Delete/Revert and the
+//     contracts.Provider methods in provider_virsh.go; a routed snapshot core
+//     (snapshotCreateOn/snapshotDeleteOn/snapshotRevertOn) must call it on the
+//     leased host with the owner-checked handle.
+//   - Clone: ensureNVRAMTargetFree before any file is written,
+//     copyClonedNVRAM (O_NOFOLLOW) and finalizeClonedDisk (clonedDiskMode) —
+//     all free functions over the host's *VirshProvider — and the Linked=true
+//     refusal (linkedClonesDisabledMessage) before any host command; a routed
+//     clone core must keep all four.
 
 // Operations the dependency guard protects, as named in its refusal.
 const (
