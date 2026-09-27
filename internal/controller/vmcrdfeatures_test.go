@@ -163,6 +163,14 @@ func TestMissingVMCRDFeatures(t *testing.T) {
 	missing, err = missingVMCRDFeatures(crd)
 	require.NoError(t, err)
 	assert.Equal(t, []string{crdFeatureMemoryCeiling}, missing)
+
+	// A CRD whose status.powerState predates Suspended/Unknown (review R1).
+	crd = generatedVMCRD(t)
+	require.NoError(t, unstructured.SetNestedSlice(v1beta1Schema(t, crd), []any{"On", "Off", "OffGraceful"},
+		"properties", "status", "properties", "powerState", "enum"))
+	missing, err = missingVMCRDFeatures(crd)
+	require.NoError(t, err)
+	assert.Equal(t, []string{crdFeatureObservedPowerState}, missing)
 }
 
 func TestMissingConsumerSelector(t *testing.T) {
