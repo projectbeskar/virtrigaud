@@ -24,6 +24,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -159,31 +160,105 @@ func TestVMSnapshot_DeleteRefusedForDependentsKeepsFinalizer(t *testing.T) {
 }
 
 func TestVMSnapshot_DeleteRefusedWithForceDeleteReleasesFinalizer(t *testing.T) {
-	r, spy, get, events := deletingSnapshot(t, map[string]string{forceDeleteAnnotation: "true"})
-	spy.answer(diskInUseRefusal())
-
-	_, err := r.handleDeletion(context.Background(), get())
-	require.NoError(t, err)
-	assert.Nil(t, get(), "force-delete removes the VMSnapshot; the snapshot stays on the hypervisor")
-	assert.Contains(t, strings.Join(eventsOf(events), "\n"), "Warning SnapshotDeleteFailed")
-}
-
-// TestVMSnapshot_OtherDeleteFailuresKeepBestEffortBehaviour pins that only the
-// dependents refusal holds the finalizer: any other SnapshotDelete failure is
-// still reported in a Warning event and the finalizer is released, as before.
-func TestVMSnapshot_OtherDeleteFailuresKeepBestEffortBehaviour(t *testing.T) {
 	for name, failure := range map[string]error{
-		"plain error": errors.New("snapshotDelete failed: boom"),
-		"not found":   contracts.NewNotFoundError("snapshotDelete: domain not found", nil),
-		"retryable":   contracts.NewRetryableError("snapshotDelete: host unreachable", nil),
+		"dependents refusal": diskInUseRefusal(),
+		"host unreachable":   contracts.NewRetryableError("snapshotDelete: host unreachable", nil),
 	} {
 		t.Run(name, func(t *testing.T) {
-			r, spy, get, events := deletingSnapshot(t, nil)
+			r, spy, get, events := deletingSnapshot(t, map[string]string{forceDeleteAnnotation: "true"})
 			spy.answer(failure)
+
 			_, err := r.handleDeletion(context.Background(), get())
 			require.NoError(t, err)
-			assert.Nil(t, get(), "historical best-effort delete: the finalizer is released")
-			assert.Contains(t, strings.Join(eventsOf(events), "\n"), "Warning SnapshotDeleteFailed")
+			assert.Nil(t, get(), "force-delete removes the VMSnapshot; the snapshot stays on the hypervisor")
+			evs := strings.Join(eventsOf(events), "\n")
+			assert.Contains(t, evs, "Warning "+eventReasonSnapshotLeftOnHypervisor)
+			assert.Contains(t, evs, `snapshot "snap-1" of VM "vm-100"`, "the Warning names the snapshot left on the hypervisor")
+			assert.NotContains(t, evs, "Normal SnapshotDeleted", "nothing was deleted")
 		})
+	}
+}
+
+// TestVMSnapshot_FailedDeleteKeepsTheFinalizer pins that a SnapshotDelete
+// that failed — a plain or retryable error, an open breaker, a disk check that
+// could not run — keeps the VMSnapshot (the snapshot may still be on the
+// hypervisor) with Ready=False/ProviderError and a Warning, and retries with a
+// growing delay, without re-announcing the deletion. Only "already gone"
+// releases the finalizer, with a truthful event.
+func TestVMSnapshot_FailedDeleteKeepsTheFinalizer(t *testing.T) {
+	for name, failure := range map[string]error{
+		"plain error":      errors.New("snapshotDelete failed: boom"),
+		"retryable":        contracts.NewRetryableError("snapshotDelete: host unreachable", nil),
+		"breaker open":     contracts.NewUnavailableError("circuit breaker open", nil),
+		"another conflict": contracts.NewConflictError("snapshotDelete: something else conflicts", nil),
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			r, spy, get, events := deletingSnapshot(t, nil)
+			spy.answer(failure)
+
+			res, err := r.handleDeletion(ctx, get())
+			require.NoError(t, err)
+			assert.Equal(t, snapshotDeleteRetryMin, res.RequeueAfter)
+			snap := get()
+			require.NotNil(t, snap, "the VMSnapshot is kept")
+			assert.Contains(t, snap.Finalizers, "snapshot.infra.virtrigaud.io/finalizer")
+			for _, condType := range []string{infrav1beta1.VMSnapshotConditionReady, infrav1beta1.VMSnapshotConditionDeleting} {
+				c := meta.FindStatusCondition(snap.Status.Conditions, condType)
+				require.NotNil(t, c, condType)
+				assert.Equal(t, metav1.ConditionFalse, c.Status)
+				assert.Equal(t, infrav1beta1.VMSnapshotReasonProviderError, c.Reason)
+				assert.Contains(t, c.Message, forceDeleteAnnotation)
+			}
+			evs := strings.Join(eventsOf(events), "\n")
+			assert.Contains(t, evs, "Warning SnapshotDeleteFailed")
+			assert.NotContains(t, evs, "Normal SnapshotDeleted")
+
+			// The next attempt waits longer the longer the delete has failed,
+			// and does not announce a new deletion.
+			snap = get()
+			for i := range snap.Status.Conditions {
+				if snap.Status.Conditions[i].Type == infrav1beta1.VMSnapshotConditionDeleting {
+					snap.Status.Conditions[i].LastTransitionTime = metav1.NewTime(time.Now().Add(-2 * time.Minute))
+				}
+			}
+			res, err = r.handleDeletion(ctx, snap)
+			require.NoError(t, err)
+			assert.InDelta(t, (2 * time.Minute).Seconds(), res.RequeueAfter.Seconds(), 5)
+			assert.NotContains(t, strings.Join(eventsOf(events), "\n"), "SnapshotDeleting")
+
+			// It succeeds: the finalizer is released.
+			spy.answer(nil)
+			_, err = r.handleDeletion(ctx, get())
+			require.NoError(t, err)
+			assert.Nil(t, get())
+			assert.Contains(t, strings.Join(eventsOf(events), "\n"), "Normal SnapshotDeleted Snapshot deleted from the provider")
+		})
+	}
+}
+
+func TestVMSnapshot_DeleteOfAnAlreadyGoneSnapshotReleases(t *testing.T) {
+	r, spy, get, events := deletingSnapshot(t, nil)
+	spy.answer(contracts.NewNotFoundError("snapshotDelete: domain not found", nil))
+	_, err := r.handleDeletion(context.Background(), get())
+	require.NoError(t, err)
+	assert.Nil(t, get())
+	assert.Contains(t, strings.Join(eventsOf(events), "\n"), "Normal SnapshotDeleted The provider snapshot was already gone")
+}
+
+func TestSnapshotDeleteRetryAfter(t *testing.T) {
+	now := time.Now()
+	snap := &infrav1beta1.VMSnapshot{}
+	assert.Equal(t, snapshotDeleteRetryMin, snapshotDeleteRetryAfter(snap, now), "first failure")
+	for _, tc := range []struct{ failingFor, want time.Duration }{
+		{5 * time.Second, snapshotDeleteRetryMin},
+		{time.Minute, time.Minute},
+		{time.Hour, snapshotDeleteRetryMax},
+	} {
+		snap.Status.Conditions = []metav1.Condition{{
+			Type: infrav1beta1.VMSnapshotConditionDeleting, Status: metav1.ConditionFalse,
+			Reason: infrav1beta1.VMSnapshotReasonProviderError, LastTransitionTime: metav1.NewTime(now.Add(-tc.failingFor)),
+		}}
+		assert.Equal(t, tc.want, snapshotDeleteRetryAfter(snap, now), "failing for %s", tc.failingFor)
 	}
 }
