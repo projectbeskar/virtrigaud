@@ -306,7 +306,9 @@ func providerCircuitBreakerInterceptor(cb *resilience.CircuitBreaker) grpc.Unary
 // Two clustered-provider statuses (ADR-0007 Addendum A) never count, whatever
 // their code, because the provider answered and is healthy: a host-scoped
 // Unavailable (HOST_UNAVAILABLE) and a per-VM operation that failed on its
-// host (VM_OPERATION_FAILED). An ImagePrepare answered with
+// host (VM_OPERATION_FAILED); neither does a per-VM operation a provider did
+// not perform because its disk dependency check could not run
+// (VM_DISK_CHECK_FAILED, single-host and clustered). An ImagePrepare answered with
 // IMAGE_ARTIFACT_IN_PROGRESS or IMAGE_SOURCE_UNAVAILABLE is excluded by
 // countsTowardBreaker, which knows the method.
 func isInfraFailure(err error) bool {
@@ -326,6 +328,14 @@ func isInfraFailure(err error) bool {
 	// must not open the breaker for every VM of the Provider (ADR-0007
 	// Addendum A, slice 2). A plain Unknown / Internal still counts.
 	if st, ok := status.FromError(err); ok && isVMOperationFailedStatus(st) {
+		return false
+	}
+	// Nor does a per-VM operation the provider did not perform because it
+	// could not verify that no other VM depends on the VM's disk
+	// (VM_DISK_CHECK_FAILED, e.g. one unreadable disk on the host): the
+	// provider answered, and the finalizer's retries must not open the breaker
+	// for every VM of the Provider.
+	if st, ok := status.FromError(err); ok && isVMDiskCheckFailedStatus(st) {
 		return false
 	}
 	switch status.Code(err) {
@@ -1277,6 +1287,25 @@ func isVMDiskInUseStatus(st *status.Status) bool {
 	for _, d := range st.Details() {
 		if info, ok := d.(*errdetails.ErrorInfo); ok &&
 			info.GetReason() == contracts.VMDiskInUseReason &&
+			info.GetDomain() == contracts.ErrorInfoDomain {
+			return true
+		}
+	}
+	return false
+}
+
+// isVMDiskCheckFailedStatus reports whether a gRPC status is a provider's
+// "not performed: could not verify that no other VM depends on this VM's disk"
+// (codes.Unavailable carrying a google.rpc.ErrorInfo with
+// contracts.VMDiskCheckFailedReason in VirtRigaud's domain). It is retryable;
+// the provider answered, so it is healthy.
+func isVMDiskCheckFailedStatus(st *status.Status) bool {
+	if st == nil || st.Code() != codes.Unavailable {
+		return false
+	}
+	for _, d := range st.Details() {
+		if info, ok := d.(*errdetails.ErrorInfo); ok &&
+			info.GetReason() == contracts.VMDiskCheckFailedReason &&
 			info.GetDomain() == contracts.ErrorInfoDomain {
 			return true
 		}

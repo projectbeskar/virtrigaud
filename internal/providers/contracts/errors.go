@@ -119,6 +119,17 @@ const ImageSourceUnavailableReason = "IMAGE_SOURCE_UNAVAILABLE"
 // per-Provider circuit breaker.
 const VMDiskInUseReason = "VM_DISK_IN_USE"
 
+// VMDiskCheckFailedReason is the google.rpc.ErrorInfo reason (in
+// ErrorInfoDomain) a provider attaches to the codes.Unavailable status of a
+// per-VM operation it did not perform because it could not verify that no
+// other VM depends on this VM's disk — the check reads every VM's disk chain
+// on the host, and one of them could not be read (e.g. a disk the provider's
+// host account may not read, an inactive storage pool). It is retryable, but
+// the provider is healthy and one unreadable disk on a host must not stop
+// every VM of the Provider, so the manager keeps it out of its per-Provider
+// circuit breaker.
+const VMDiskCheckFailedReason = "VM_DISK_CHECK_FAILED"
+
 // ProviderError represents a categorized error from a provider
 type ProviderError struct {
 	// Type categorizes the error

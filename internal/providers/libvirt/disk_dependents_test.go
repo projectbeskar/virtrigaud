@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -223,6 +224,135 @@ func TestRefuseIfDiskHasDependents_UnreadableDomainFailsClosed(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, contracts.IsRetryable(err), "a failed check is retryable, never a pass: %v", err)
 	assert.NotContains(t, err.Error(), "virsh", "host command details stay in the provider log")
+}
+
+// TestDiskDependents_UnreadableForeignDiskReadThroughSudo: another domain's
+// disk the host account cannot read (0600 libvirt-qemu, root_squash NFS) is
+// read through `sudo -n qemu-img`, so it no longer fails every check on the
+// host; without passwordless sudo the check falls back to the host account and
+// fails closed as before.
+func TestDiskDependents_UnreadableForeignDiskReadThroughSudo(t *testing.T) {
+	h, vp, src, clone := linkedCloneHost(t, false)
+	require.NoError(t, os.WriteFile(clone+".rootonly", nil, 0o600))
+
+	n, err := diskDependents(context.Background(), vp, uuidSource, []string{src})
+	require.NoError(t, err, "read as root through sudo")
+	assert.Equal(t, 1, n)
+
+	require.NoError(t, os.WriteFile(filepath.Join(h.root, "sudo-refuses"), nil, 0o600))
+	_, err = diskDependents(context.Background(), vp, uuidSource, []string{src})
+	require.Error(t, err, "no passwordless sudo: read as the host account, which cannot; fails closed")
+}
+
+// TestDiskDependents_RunningDomainChainFromDefinition: a running domain's
+// chain is taken from its live <backingStore>, without opening its images —
+// even ones nobody on the host account (nor sudo) could read.
+func TestDiskDependents_RunningDomainChainFromDefinition(t *testing.T) {
+	h, vp, src, clone := linkedCloneHost(t, true) // the clone runs: its XML lists the chain
+	require.NoError(t, os.WriteFile(clone+".rootonly", nil, 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(h.root, "sudo-refuses"), nil, 0o600))
+	running := strings.Replace(depDomainXML("team-b.copy", uuidClone, clone, src), "<domain type='kvm'>", "<domain type='kvm' id='7'>", 1)
+	for _, key := range []string{"team-b.copy", uuidClone} {
+		require.NoError(t, os.WriteFile(filepath.Join(h.root, "h1", "dom-"+key+".xml"), []byte(running), 0o600))
+	}
+
+	n, err := diskDependents(context.Background(), vp, uuidSource, []string{src})
+	require.NoError(t, err)
+	assert.Equal(t, 1, n, "the live <backingStore> names the source disk")
+	assert.NotContains(t, h.log("qemu-img"), clone, "the running clone's image is never opened")
+}
+
+func TestLiveChainListed(t *testing.T) {
+	cases := map[string]struct {
+		xml  string
+		want bool
+	}{
+		"running, chain listed": {liveLinkedCloneXML, true},
+		"running, no backingStore element": {"<domain id='3'><devices><disk type='file' device='disk'>" +
+			"<source file='/p/a.qcow2'/></disk></devices></domain>", false},
+		"running, chain ends at once": {"<domain id='3'><devices><disk type='file' device='disk'>" +
+			"<source file='/p/a.qcow2'/><backingStore/></disk><disk type='file' device='cdrom'/></devices></domain>", true},
+		"shut off (no id)": {"<domain><devices><disk type='file' device='disk'><source file='/p/a.qcow2'/>" +
+			"<backingStore/></disk></devices></domain>", false},
+		"id -1":     {"<domain id='-1'><devices/></domain>", false},
+		"malformed": {"<domain id='3'>", false},
+	}
+	for name, tc := range cases {
+		assert.Equal(t, tc.want, liveChainListed(tc.xml), name)
+	}
+}
+
+// scriptedHost is a hostCommandRunner answering "!"-commands by their joined
+// argv (after "!"); anything unscripted fails like a missing command.
+type scriptedHost struct {
+	answers map[string]*VirshResult
+	calls   []string
+}
+
+// runVirshCommand implements hostCommandRunner.
+func (s *scriptedHost) runVirshCommand(_ context.Context, args ...string) (*VirshResult, error) {
+	key := strings.Join(args, " ")
+	s.calls = append(s.calls, key)
+	if r, ok := s.answers[key]; ok {
+		if r.ExitCode != 0 {
+			return r, fmt.Errorf("exit %d: %s", r.ExitCode, r.Stderr)
+		}
+		return r, nil
+	}
+	return &VirshResult{ExitCode: 127}, fmt.Errorf("unscripted: %s", key)
+}
+
+func TestQemuImgInfoOnHost_SudoFallback(t *testing.T) {
+	const sudoArgv = "! sudo -n qemu-img info -U --output=json -- /p/a.qcow2"
+	const plainArgv = "! qemu-img info -U --output=json -- /p/a.qcow2"
+	ok := &VirshResult{Stdout: `{"format":"qcow2"}`}
+	cases := map[string]struct {
+		sudo      *VirshResult
+		wantCalls []string
+		wantErr   bool
+	}{
+		"sudo works":              {ok, []string{sudoArgv}, false},
+		"password required":       {&VirshResult{ExitCode: 1, Stderr: "sudo: a password is required\n"}, []string{sudoArgv, plainArgv}, false},
+		"not allowed":             {&VirshResult{ExitCode: 1, Stderr: "Sorry, user virt is not allowed to execute '/usr/bin/qemu-img' as root on h.\n"}, []string{sudoArgv, plainArgv}, false},
+		"sudo not installed":      {&VirshResult{ExitCode: 127, Stderr: "sh: sudo: not found\n"}, []string{sudoArgv, plainArgv}, false},
+		"qemu-img failed as root": {&VirshResult{ExitCode: 1, Stderr: "qemu-img: Could not open '/p/a.qcow2': No such file or directory\n"}, []string{sudoArgv}, true},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			h := &scriptedHost{answers: map[string]*VirshResult{sudoArgv: tc.sudo, plainArgv: ok}}
+			_, err := qemuImgInfoOnHost(context.Background(), h, "-U", "--output=json", "--", "/p/a.qcow2")
+			assert.Equal(t, tc.wantErr, err != nil, "%v", err)
+			assert.Equal(t, tc.wantCalls, h.calls)
+		})
+	}
+}
+
+// TestGuardCheckFailed_WireFormAndBreaker pins that a dependency guard that
+// could not run is retryable, carries no host detail, and crosses gRPC as
+// Unavailable + VM_DISK_CHECK_FAILED (plus VM_OPERATION_FAILED when routed).
+func TestGuardCheckFailed_WireFormAndBreaker(t *testing.T) {
+	err := guardCheckFailed(guardOpDelete, "team-a.web", fmt.Errorf("virsh -c qemu+ssh://root@10.0.0.1/system: boom"))
+	assert.True(t, contracts.IsRetryable(err))
+	assert.NotContains(t, err.Error(), "10.0.0.1")
+	for _, tc := range []struct {
+		err    error
+		routed bool
+	}{
+		{fmt.Errorf("failed to delete VM: %w", err), false},
+		{routedRPCError("delete VM", &hostOpError{host: "host-a", err: err}), true},
+	} {
+		st, ok := status.FromError(tc.err)
+		require.True(t, ok)
+		assert.Equal(t, codes.Unavailable, st.Code())
+		reasons := map[string]bool{}
+		for _, d := range st.Details() {
+			if info, ok := d.(*errdetails.ErrorInfo); ok {
+				reasons[info.GetReason()] = true
+			}
+		}
+		assert.True(t, reasons[contracts.VMDiskCheckFailedReason])
+		assert.Equal(t, tc.routed, reasons[contracts.VMOperationFailedReason])
+	}
 }
 
 // requireDiskInUseStatus asserts err crosses gRPC as FailedPrecondition with

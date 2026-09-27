@@ -75,3 +75,31 @@ func TestMapGRPCError_VMDiskInUseIsConflict(t *testing.T) {
 	require.NoError(t, werr)
 	assert.False(t, contracts.IsConflict((&Client{}).mapGRPCError("delete", other.Err())), "another domain's reason is not ours")
 }
+
+// TestVMDiskCheckFailed_RetriedButNeverCounted pins how the manager reads a
+// provider's "not performed: could not verify that no other VM depends on this
+// VM's disk" (Unavailable + VM_DISK_CHECK_FAILED): retryable, never counted
+// toward the per-Provider circuit breaker on any per-VM RPC, single-host and
+// routed alike. A plain Unavailable still counts.
+func TestVMDiskCheckFailed_RetriedButNeverCounted(t *testing.T) {
+	for _, routed := range []bool{false, true} {
+		st := status.New(codes.Unavailable, `failed to delete VM: delete of libvirt domain "web" not performed: could not verify that no other domain uses its disks`)
+		reasons := []string{contracts.VMDiskCheckFailedReason}
+		if routed {
+			reasons = append(reasons, contracts.VMOperationFailedReason)
+		}
+		for _, r := range reasons {
+			var err error
+			st, err = st.WithDetails(&errdetails.ErrorInfo{Reason: r, Domain: contracts.ErrorInfoDomain})
+			require.NoError(t, err)
+		}
+		for _, m := range []string{providerv1.Provider_Delete_FullMethodName, providerv1.Provider_SnapshotDelete_FullMethodName,
+			providerv1.Provider_SnapshotRevert_FullMethodName, providerv1.Provider_SnapshotCreate_FullMethodName} {
+			assert.False(t, countsTowardBreaker(m, st.Err()), "routed=%v %s", routed, m)
+		}
+		mapped := (&Client{}).mapGRPCError("delete", st.Err())
+		assert.True(t, contracts.IsRetryable(mapped), "%v", mapped)
+		assert.False(t, contracts.IsConflict(mapped))
+	}
+	assert.True(t, countsTowardBreaker(providerv1.Provider_Delete_FullMethodName, status.Error(codes.Unavailable, "provider down")))
+}

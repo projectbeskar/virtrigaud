@@ -118,32 +118,79 @@ func (e *diskDependentsError) GRPCStatus() *status.Status {
 // msg. routed adds the VM_OPERATION_FAILED ErrorInfo a clustered provider
 // attaches to a per-VM failure on its host (ADR-0007 Addendum A, slice 2).
 func diskInUseStatus(msg string, routed bool) *status.Status {
-	st := status.New(codes.FailedPrecondition, msg)
-	infos := []*errdetails.ErrorInfo{{Reason: contracts.VMDiskInUseReason, Domain: contracts.ErrorInfoDomain}}
+	reasons := []string{contracts.VMDiskInUseReason}
 	if routed {
-		infos = append(infos, &errdetails.ErrorInfo{Reason: contracts.VMOperationFailedReason, Domain: contracts.ErrorInfoDomain})
+		reasons = append(reasons, contracts.VMOperationFailedReason)
 	}
+	return statusWithReasons(codes.FailedPrecondition, msg, reasons...)
+}
+
+// guardCheckFailed logs why the dependency guard could not run and returns the
+// generic retryable error the requester sees (diskCheckFailedError): the
+// underlying error names other domains' disks and host commands, so it stays
+// in the provider log.
+func guardCheckFailed(op, domain string, err error) error {
+	log.Printf("ERROR libvirt disk dependency check for %s of domain %s failed: %v", op, domain, err)
+	return &diskCheckFailedError{op: op, domain: domain}
+}
+
+// diskCheckFailedError reports that op was not performed on domain because
+// the dependency guard could not run: a definition, a disk chain or a path on
+// the host could not be read. Nothing was changed. It is retryable
+// (contracts.IsRetryable sees a Retryable error through Unwrap) and crosses
+// gRPC as codes.Unavailable with a VM_DISK_CHECK_FAILED ErrorInfo, which the
+// manager never counts toward the Provider's circuit breaker: one domain on a
+// host whose disk cannot be read must not fail every VM of the Provider.
+type diskCheckFailedError struct {
+	// op is the operation not performed (guardOp*).
+	op string
+	// domain names the requesting VM's domain.
+	domain string
+}
+
+// Error is the refusal, safe for the requesting VM's status.
+func (e *diskCheckFailedError) Error() string {
+	return fmt.Sprintf("%s of libvirt domain %q not performed: could not verify that no other domain uses its disks "+
+		"(transient host error; details are in the provider log)", e.op, e.domain)
+}
+
+// Unwrap exposes the equivalent retryable contracts error.
+func (e *diskCheckFailedError) Unwrap() error {
+	return contracts.NewRetryableError(e.Error(), nil)
+}
+
+// GRPCStatus renders the failure as codes.Unavailable carrying a
+// google.rpc.ErrorInfo{Reason: VM_DISK_CHECK_FAILED}; status.FromError finds
+// it through the single-host handlers' fmt.Errorf wrapping.
+func (e *diskCheckFailedError) GRPCStatus() *status.Status {
+	return diskCheckFailedStatus(e.Error(), false)
+}
+
+// diskCheckFailedStatus is the wire form of a guard that could not run, with
+// message msg; routed adds the VM_OPERATION_FAILED ErrorInfo of a clustered
+// per-VM failure.
+func diskCheckFailedStatus(msg string, routed bool) *status.Status {
+	reasons := []string{contracts.VMDiskCheckFailedReason}
+	if routed {
+		reasons = append(reasons, contracts.VMOperationFailedReason)
+	}
+	return statusWithReasons(codes.Unavailable, msg, reasons...)
+}
+
+// statusWithReasons is a gRPC status with one VirtRigaud ErrorInfo per reason.
+func statusWithReasons(code codes.Code, msg string, reasons ...string) *status.Status {
+	st := status.New(code, msg)
 	withInfo := st
-	for _, info := range infos {
-		next, err := withInfo.WithDetails(info)
+	for _, r := range reasons {
+		next, err := withInfo.WithDetails(&errdetails.ErrorInfo{Reason: r, Domain: contracts.ErrorInfoDomain})
 		if err != nil {
-			// Unreachable in practice (ErrorInfo always marshals); a plain
-			// FailedPrecondition is still a correct, uncounted answer.
+			// Unreachable in practice (ErrorInfo always marshals); the bare
+			// status is still a correct answer.
 			return st
 		}
 		withInfo = next
 	}
 	return withInfo
-}
-
-// guardCheckFailed logs why the dependency guard could not run and returns the
-// generic retryable error the requester sees: the underlying error names
-// other domains' disks and host commands, so it stays in the provider log.
-func guardCheckFailed(op, domain string, err error) error {
-	log.Printf("ERROR libvirt disk dependency check for %s of domain %s failed: %v", op, domain, err)
-	return contracts.NewRetryableError(fmt.Sprintf(
-		"%s of libvirt domain %q not performed: could not verify that no other domain uses its disks "+
-			"(transient host error; details are in the provider log)", op, domain), nil)
 }
 
 // otherDomains are the references of every domain on a host except one.

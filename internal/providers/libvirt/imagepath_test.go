@@ -348,6 +348,10 @@ for a in "$@"; do last="$a"; if [ "$a" = "--backing-chain" ]; then chain=1; fi; 
 missing() { echo "qemu-img: Could not open '$last': Could not open '$last': No such file or directory" >&2; exit 1; }
 case "$1" in
   info)
+    # <file>.rootonly: only readable through sudo (fakeSudoScript sets SUDO_USER).
+    if [ -f "$last.rootonly" ] && [ -z "$SUDO_USER" ]; then
+      echo "qemu-img: Could not open '$last': Could not open '$last': Permission denied" >&2; exit 1
+    fi
     if [ -n "$chain" ]; then
       if [ -f "$last.chainfail" ]; then echo "qemu-img: Could not open backing file: No such file or directory" >&2; exit 1; fi
       if [ -f "$last.chain.json" ]; then cat "$last.chain.json"; exit 0; fi
@@ -371,10 +375,16 @@ case "$1" in
 esac
 `
 
-// fakeLoggerScript logs its argv to $FAKE_HOST_DIR/<name>.log and succeeds
-// (stands in for sudo: nothing privileged ever runs in tests).
-const fakeLoggerScript = `#!/bin/sh
-printf '%s\n' "$*" >> "$FAKE_HOST_DIR/$(basename "$0").log"
+// fakeSudoScript stands in for sudo: `sudo -n qemu-img ...` (the disk in-use
+// check's chain read) runs the fake qemu-img "as root" (SUDO_USER set, so a
+// <file>.rootonly image opens), which logs itself; anything else is only
+// logged to sudo.log (nothing privileged ever runs in tests). With
+// $FAKE_HOST_DIR/sudo-refuses present it fails like sudo without a
+// passwordless rule.
+const fakeSudoScript = `#!/bin/sh
+if [ -f "$FAKE_HOST_DIR/sudo-refuses" ]; then echo "sudo: a password is required" >&2; exit 1; fi
+if [ "$1" = "-n" ] && [ "$2" = "qemu-img" ]; then shift 2; SUDO_USER=test exec qemu-img "$@"; fi
+printf '%s\n' "$*" >> "$FAKE_HOST_DIR/sudo.log"
 exit 0
 `
 
@@ -444,7 +454,7 @@ func newFakeHost(t *testing.T) *fakeHost {
 
 	bin := t.TempDir()
 	for name, script := range map[string]string{
-		"virsh": fakeVirshScript, "qemu-img": fakeQemuImgScript, "sudo": fakeLoggerScript,
+		"virsh": fakeVirshScript, "qemu-img": fakeQemuImgScript, "sudo": fakeSudoScript,
 		"curl": fakeDownloadScript, "wget": fakeDownloadScript,
 	} {
 		require.NoError(t, os.WriteFile(filepath.Join(bin, name), []byte(script), 0o700)) //nolint:gosec // test fixture must be executable

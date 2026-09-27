@@ -67,8 +67,9 @@ import (
 //  5. It must be a regular, non-empty file (not a device, FIFO, directory).
 //  6. It must not be a disk (or backing file, or shared directory) of ANY domain
 //     defined on the host — VirtRigaud's or anyone else's (shared hosts). Each
-//     disk's backing chain is read with `qemu-img info -U`, because dumpxml
-//     omits <backingStore> for shut-off domains.
+//     disk's backing chain is read with `qemu-img info -U` (through `sudo -n`
+//     when allowed), because dumpxml omits <backingStore> for shut-off
+//     domains; a running domain's chain is taken from its live <backingStore>.
 //  7. Its header must not reference other files: no qcow2 backing file or
 //     external data file, no VMDK extent outside itself. `qemu-img convert`
 //     would otherwise read (and flatten) those files, re-opening the escape.
@@ -769,14 +770,15 @@ const qemuImgMissingFile = "No such file or directory"
 // `virsh dumpxml` omits <backingStore> for a shut-off domain, so a stopped VM's
 // base images would otherwise look unused. It reads with `qemu-img info -U`
 // (force-share: a read-only inspection that must work on running VMs' images;
-// conversions never use -U).
+// conversions never use -U), through passwordless sudo when the host allows it
+// (qemuImgInfoOnHost).
 //
 // It asks for the whole chain at once (--backing-chain). If some link cannot
 // be opened — typically a deleted file — it walks the chain one level at a
 // time instead, so every image that still exists is recorded. A disk that does
 // not exist contributes nothing; any other failure fails the check (closed).
 func backingChainFiles(ctx context.Context, h hostCommandRunner, disk string) ([]string, error) {
-	res, err := runHost(ctx, h, "qemu-img", "info", "-U", "--backing-chain", "--output=json", "--", disk)
+	res, err := qemuImgInfoOnHost(ctx, h, "-U", "--backing-chain", "--output=json", "--", disk)
 	if err == nil {
 		var chain []qemuImgInfo
 		if jerr := json.Unmarshal([]byte(res.Stdout), &chain); jerr != nil {
@@ -795,7 +797,7 @@ func backingChainFiles(ctx context.Context, h hostCommandRunner, disk string) ([
 	var refs []string
 	cur := disk
 	for depth := 0; depth < maxBackingChainDepth && cur != ""; depth++ {
-		lres, lerr := runHost(ctx, h, "qemu-img", "info", "-U", "--output=json", "--", cur)
+		lres, lerr := qemuImgInfoOnHost(ctx, h, "-U", "--output=json", "--", cur)
 		if lerr != nil {
 			if lres != nil && lres.ExitCode == qemuImgFailureExitCode && strings.Contains(lres.Stderr, qemuImgMissingFile) {
 				return refs, nil // the chain ends at a file that no longer exists
@@ -815,6 +817,84 @@ func backingChainFiles(ctx context.Context, h hostCommandRunner, disk string) ([
 		cur = next
 	}
 	return refs, nil
+}
+
+// liveDomainDoc is what liveChainListed reads of a domain definition.
+type liveDomainDoc struct {
+	XMLName xml.Name `xml:"domain"`
+	// ID is the running domain's id; an inactive definition has none.
+	ID      string `xml:"id,attr"`
+	Devices struct {
+		Disks []struct {
+			Source *struct {
+				File   string `xml:"file,attr"`
+				Dev    string `xml:"dev,attr"`
+				Volume string `xml:"volume,attr"`
+			} `xml:"source"`
+			BackingStore *struct{} `xml:"backingStore"`
+		} `xml:"disk"`
+	} `xml:"devices"`
+}
+
+// liveChainListed reports whether domainXML is a RUNNING domain's definition
+// that lists the image chain of every disk with a source: libvirt then shows
+// each backing file as a nested <backingStore> (ending in an empty one), so
+// the chain is taken from the definition instead of opening the images. An
+// inactive definition, or a disk without a <backingStore> element, returns
+// false: its chain is read with qemu-img.
+func liveChainListed(domainXML string) bool {
+	var d liveDomainDoc
+	if err := xml.Unmarshal([]byte(domainXML), &d); err != nil {
+		return false
+	}
+	if id := strings.TrimSpace(d.ID); id == "" || id == "-1" {
+		return false
+	}
+	for _, disk := range d.Devices.Disks {
+		if disk.Source == nil || (disk.Source.File == "" && disk.Source.Dev == "" && disk.Source.Volume == "") {
+			continue // empty removable media: nothing to walk
+		}
+		if disk.BackingStore == nil {
+			return false
+		}
+	}
+	return true
+}
+
+// qemuImgInfoOnHost runs `qemu-img info <args>` on the host behind h through
+// passwordless sudo (`sudo -n`), so a domain's disk the provider's host
+// account cannot read (a 0600 libvirt-qemu image, a root_squash NFS pool) does
+// not fail the disk in-use check: the check reads EVERY domain's disk chain,
+// and one unreadable file used to fail every Delete, snapshot and create on
+// the host. When sudo itself refuses (no passwordless sudo for qemu-img, or
+// no sudo at all), it runs as the host account, as before. It only ever reads
+// the headers of disks named by domain definitions — never a caller-supplied
+// image path, which inspectHostImage reads unprivileged.
+func qemuImgInfoOnHost(ctx context.Context, h hostCommandRunner, args ...string) (*VirshResult, error) {
+	res, err := runHost(ctx, h, append([]string{"sudo", "-n", "qemu-img", "info"}, args...)...)
+	if err != nil && sudoRefused(res) {
+		return runHost(ctx, h, append([]string{"qemu-img", "info"}, args...)...)
+	}
+	return res, err
+}
+
+// sudoRefusedRE matches sudo's own diagnostics ("sudo: a password is
+// required", "sudo: a terminal is required", ...); qemu-img's start with
+// "qemu-img:".
+var sudoRefusedRE = regexp.MustCompile(`(?m)^sudo: |is not allowed to execute|may not run sudo`)
+
+// sudoExitNotFound is the shell's exit status for a command that is not
+// installed (sudo missing).
+const sudoExitNotFound = 127
+
+// sudoRefused reports whether a failed `sudo -n ...` failed in sudo itself —
+// not permitted, a password required, or sudo not installed — rather than in
+// the command it ran.
+func sudoRefused(res *VirshResult) bool {
+	if res == nil {
+		return false
+	}
+	return res.ExitCode == sudoExitNotFound || sudoRefusedRE.MatchString(res.Stderr)
 }
 
 // domainGone reports whether uuid is no longer defined on the host — i.e. it
@@ -911,6 +991,11 @@ func domainRefsOnHost(ctx context.Context, h hostCommandRunner, skipUUID string)
 			}
 			d.files = append(d.files, p)
 			d.disks = append(d.disks, p)
+		}
+		if liveChainListed(xmlRes.Stdout) {
+			// A running domain's definition lists every disk's chain in
+			// <backingStore> (already among d.files): no image is opened.
+			d.disks = nil
 		}
 		doms = append(doms, d)
 	}
