@@ -20,7 +20,9 @@
       "single start vrcallseq-web",
       "single dumpxml vrcallseq-web",
       "local define /tmp/vrcallseq-web-sync.xml",
-      "local rm -f /tmp/vrcallseq-web-sync.xml"
+      "local rm -f /tmp/vrcallseq-web-sync.xml",
+      "single dumpxml vrcallseq-web",
+      "single list --all --uuid"
     ],
     "err": ""
   },
@@ -28,7 +30,9 @@
     "calls": [
       "single start vrcallseq-web",
       "single dumpxml vrcallseq-web",
-      "local define /tmp/vrcallseq-web-sync.xml"
+      "local define /tmp/vrcallseq-web-sync.xml",
+      "single dumpxml vrcallseq-web",
+      "single list --all --uuid"
     ],
     "err": ""
   },
@@ -44,7 +48,9 @@
       "single start vrcallseq-web",
       "single dumpxml vrcallseq-web",
       "local define /tmp/vrcallseq-web-sync.xml",
-      "local rm -f /tmp/vrcallseq-web-sync.xml"
+      "local rm -f /tmp/vrcallseq-web-sync.xml",
+      "single dumpxml vrcallseq-web",
+      "single list --all --uuid"
     ],
     "err": ""
   },
@@ -54,7 +60,9 @@
       "single start vrcallseq-web",
       "single dumpxml vrcallseq-web",
       "local define /tmp/vrcallseq-web-sync.xml",
-      "local rm -f /tmp/vrcallseq-web-sync.xml"
+      "local rm -f /tmp/vrcallseq-web-sync.xml",
+      "single dumpxml vrcallseq-web",
+      "single list --all --uuid"
     ],
     "err": ""
   },

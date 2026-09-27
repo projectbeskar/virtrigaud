@@ -40,6 +40,11 @@ import (
 // commit before the Power/Reconfigure cores were refactored) with
 // VIRTRIGAUD_UPDATE_CALLSEQ_GOLDEN=1. A change to any single-host sequence —
 // which would restart the ADR-0008 D5 soak window — fails here.
+//
+// Deliberately regenerated once since (delete-safety fix, review item 5): a
+// successful start (power-on, power-on-define-fails, power-reboot,
+// power-reboot-stop-fails) is followed by the read-only linked-clone
+// dependents count — `dumpxml` of the domain and `list --all --uuid`.
 
 // callSeqGoldenFile is the golden single-host call sequences, captured on
 // origin/main before the slice 2 refactor.
