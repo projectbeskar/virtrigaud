@@ -46,6 +46,14 @@ Read the upgrade guide before upgrading:
   Existing linked clones keep working, but their source cannot be deleted,
   reverted or snapshotted while the clones exist — keep it powered off.
   → [Upgrade guide](docs/upgrading.md#breaking-changes)
+- **libvirt `Reconfigure` no longer reports success for changes it did not
+  apply.** A change is applied live and persisted, persisted and reported as
+  restart required (`Reconfiguring=True/RestartRequired`: power-cycle the VM),
+  or it fails (`Reconfiguring=False/ProviderError`). A memory shrink of a
+  running VM always needs a restart. `status.powerState` can now be
+  `Suspended` or `Unknown`, and such a VM is left alone.
+  → [Upgrade guide](docs/upgrading.md#breaking-changes),
+  [`docs/reconfigure-results.md`](docs/reconfigure-results.md)
 
 See the full breaking-change table, required upgrade order (CRDs → manager →
 providers), and rollback caveats in
@@ -129,6 +137,18 @@ providers), and rollback caveats in
 
 ### Fixes
 
+- libvirt `Reconfigure` is honest: a failed `setvcpus`, `setmem`, `setmaxmem`
+  or offline disk resize is an error (it used to return success), a live change
+  is also written to the domain's persistent definition (it used to be undone
+  at the next power cycle), a stopped VM's CPU/memory grow beyond its maximum
+  works, and a change the running VM cannot take is reported as
+  restart-required (new `TaskResponse.restart_required`). While a change is
+  pending a restart, `status.currentResources` counts the larger of the
+  running and the next-boot size. A paused or suspended domain is reported as
+  `Suspended` (never `Off`) and is not reconfigured. On clustered Providers, a
+  VM's memory ceiling is recorded once from the provider
+  (`DescribeResponse.max_memory_mib`) when missing and lowered after a
+  confirmed shrink (→ [`docs/reconfigure-results.md`](docs/reconfigure-results.md)).
 - vSphere `Describe` no longer treats a transient vCenter error as "the VM is
   gone" (which used to trigger a spurious re-create).
 - libvirt: hardware-accelerated `<domain type='kvm'>` is used again on hosts

@@ -33,12 +33,12 @@ logged, and metered — it can never change what the caller receives or slow it 
 The shadowed read families are:
 
 - **`describe`** (PR 4b) — the side-effect-free "Describe first" family. It compares
-  `exists`, `power_state` (coarsened), `uuid`, `name`, `vcpu`, and `memory_mib`. Live
+  `exists`, `power_state` (On / Off / Suspended / Unknown), `uuid`, `name`, `vcpu`, and `memory_mib`. Live
   IPs, console URL, and guest-agent enrichment are out of scope for this family's
   native path and are not compared.
 - **`list`** (PR 4c) — the `ListVMs` discovery/adoption family. It enumerates all
   domains (active + inactive) with go-libvirt and compares the **same config-identity
-  projection** per domain, keyed by domain name: `power_state` (coarsened), `uuid`,
+  projection** per domain, keyed by domain name: `power_state` (On / Off / Suspended / Unknown), `uuid`,
   `vcpu`, and `memory_mib`. Disks, Networks, and IPs are excluded (they carry
   qemu-img-derived or guest-agent data, not config identity). One extra field,
   `membership`, is metered when virsh returns a domain the go-libvirt list is

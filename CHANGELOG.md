@@ -49,6 +49,48 @@ A security review found that deleting a running linked clone deleted its source 
 - [ ] Config change only
 - [ ] Documentation only
 
+## [2026-09-27 08:55] - Fix: libvirt Reconfigure applies every change or reports it (restart required / error); "Off" means powered off
+**Author:** @wrkode (William Rizzo)
+
+> **Operator note.**
+>
+> - **libvirt `Reconfigure` no longer reports success for changes it did not apply.** Each CPU/memory/disk change is applied to the running VM and its persistent definition, applied to the definition only and reported as restart-required (`Reconfiguring=True/RestartRequired`: power-cycle the VM — off, then on), or it fails (`Reconfiguring=False/ProviderError`). A memory shrink of a running VM always needs a restart, and lowers the VM's memory maximum (removing memory hot-add headroom).
+> - **`status.powerState` can be `Suspended` or `Unknown`** for libvirt VMs (paused, suspended to RAM, unclassifiable; reported as `Off` before). Such a VM is neither powered on/off nor resized (`Ready=False/PowerStateUnmanaged`).
+> - **Upgrade the CRDs first, then the manager, then the libvirt providers.** Readiness requires the widened `status.powerState` enum. The single-host Reconfigure golden changed: the ADR-0008 D5 soak window restarts.
+
+### Added
+- `proto/provider/v1/provider.proto`: `TaskResponse.restart_required` (field 2; set only by a `Reconfigure` that applied a change to the persistent definition only) and `DescribeResponse.max_memory_mib` (field 6; the most memory the guest can use without host action, 0 = not reported). Additive, backward-compatible; bindings regenerated (`make proto`).
+- `internal/providers/contracts/provider.go`: `ReconfigureResult{TaskRef, RestartRequired}` (returned by `Provider.Reconfigure`, whose doc no longer allows a silent no-op) and `DescribeResponse.MaxMemoryMiB`; mapped by `internal/transport/grpc/client.go`.
+- `api/infra.virtrigaud.io/v1beta1/virtualmachine_types.go`: `ObservedPowerState` for `status.powerState` (enum adds `Suspended`, `Unknown`; spec unchanged). CRDs regenerated.
+- `internal/k8s/conditions.go`: reasons `RestartRequired` and `PowerStateUnmanaged`.
+- `internal/providers/libvirt/reconfigure.go`: the new Reconfigure core (see Fixed).
+- `internal/controller/virtualmachine_reconfigure_result.go`, `internal/controller/virtualmachine_power_observed.go`: manager handling (see Changed).
+- `docs/reconfigure-results.md`: the three outcomes, libvirt semantics, the `status.currentResources` invariant, the clustered memory ceiling.
+
+### Fixed
+- `internal/providers/libvirt/reconfigure.go`, `provider_virsh.go`: the persistent definition (`dumpxml --inactive`) is read and changed first (`--config`), then the running domain (`--live`) — a live change was never persisted before and was undone at the next power cycle. A failed `setvcpus`/`setmem`/`setmaxmem` (live-refused changes excepted) or a failed offline disk resize is an error (was success, `requiresRestart` logged). The vCPU and memory maximums are raised before a grow beyond them (a stopped non-hot-add VM's grow used to fail silently). A live change the running domain refuses — vCPUs beyond its maximum or not hotpluggable, memory beyond its running balloon maximum, any memory shrink (the balloon is not trusted) — is reported as `RestartRequired`. An offline disk already large enough is not resized. A domain that is paused, `pmsuspended`, shutting down, crashed-but-active or in an unknown state is refused retryably, unchanged (review R1a). Errors name what could not be done, never the virsh command, stderr, a path or an endpoint; the cause stays in the chain (an unreachable host is still `HOST_UNAVAILABLE`; otherwise `VM_OPERATION_FAILED` on the routed path).
+- `internal/providers/libvirt/provider_virsh.go`, `shadow.go`: `mapLibvirtPowerState` / `mapNativeDomainState` (kept identical for the ADR-0008 shadow): `running`/`idle` → `On`; `shut off`/`in shutdown`/`crashed` → `Off`; `paused`/`pmsuspended` → `Suspended`; anything else → `Unknown` (every non-running state, even `idle`, was `Off`) (review R1b).
+- `internal/providers/libvirt/provider_virsh.go`: new domains on a clustered Provider get `<pm>` with suspend-to-mem and suspend-to-disk disabled; single-host domain XML is byte-identical (review R1c).
+- `internal/providers/libvirt/testdata/single_host_power_reconfigure.golden.json`: regenerated deliberately in its own commit; power scenarios identical, Reconfigure scenarios changed or added as listed in that commit.
+
+### Changed
+- `internal/controller/virtualmachine_controller.go`, `virtualmachine_reconfigure_result.go`: a restart-required result records `status.currentResources` = max(recorded, desired) per resource — a grow is counted at once, a shrink never lowers the counted size while the old size still runs — with `Reconfiguring=True/RestartRequired`; the provider is asked again every 2 minutes (at once after a spec change) until it answers "applied". A failed `Reconfigure` leaves `status.currentResources` untouched and is re-sent even after the spec is reverted, until one succeeds. `lastReconfigureTime` uses the reconciler clock.
+- `internal/controller/virtualmachine_reconfigure_result.go` (`syncMemoryCeiling`): a bound clustered VM without `status.placement.memoryCeilingMiB` gets it recorded once from `Describe`'s `max_memory_mib` (review R2); a recorded ceiling is lowered, never raised, when the provider reports less — after a confirmed memory shrink (review R3) — never while a change is pending a restart or a task runs.
+- `internal/controller/virtualmachine_power_observed.go`, `virtualmachine_controller.go`, `vmadoption_controller.go`: status records the observed power state (an unexpected value becomes `Unknown`); a `Suspended`/`Unknown` VM is neither powered nor reconfigured; adoption adopts a VM that is not powered off as `spec.powerState: On`.
+- `internal/controller/vmcrdfeatures.go`: readiness requires the `Suspended`/`Unknown` values of `status.powerState`.
+- `internal/providers/libvirt/provider_virsh.go`, `shadow.go`: `Describe` reports `MaxMemoryMiB` (dominfo "Max memory", rounded up).
+- `internal/providers/vsphere/server.go`, `internal/providers/proxmox/server.go`, `internal/providers/mock/provider.go`: `restart_required: false` set explicitly.
+- `docs/upgrading.md`, `docs/release-notes/next.md`, `docs/adr/0007-clustered-orchestrator-provider.md`, `docs/clustered-provider-inventory.md`, `docs/libvirt-shadow-reads.md`, `docs/README.md`: the above; the ADR-0007 follow-up "libvirt Reconfigure must return an error for a change it did not apply" is closed.
+
+### Why
+Since #354 the manager records `status.currentResources` only after a provider-confirmed Reconfigure, and the clustered committed-capacity accounting (#355/#356) trusts it, but the libvirt provider confirmed changes it had not applied — a status showing a size the VM did not have, and an under-count of a clustered host. The scheduler security review (R1–R3) added that a paused or PM-suspended guest was reported `Off`, so a shrink deferred until power-off could be recorded while the guest still held its old size.
+
+### Impact
+- [x] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-09-25 23:50] - ADR-0007 scheduler accuracy, follow-up: live shrinks wait for power-off, memory hot-add counts at its ceiling, pending size recorded
 **Author:** @wrkode (William Rizzo)
 

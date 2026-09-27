@@ -731,8 +731,12 @@ free = allocatable × overcommit ratio − committed
     *ceiling*: 4× its memory, the balloon maximum the libvirt provider gives
     it, which the guest can use at any time. The ceiling is recorded when the
     VM is scheduled (`status.placement.memoryCeilingMiB`, `0` for none), so
-    turning hot-add off in the VMClass later does not lower it, and it is not
-    lowered after a resize either. CPU hot-add is not counted at its ceiling,
+    turning hot-add off in the VMClass later does not lower it. A VM scheduled
+    before that field existed gets it recorded once from its provider (the
+    domain's actual memory maximum, reported by `Describe`), after which the
+    VMClass flag no longer matters. A recorded ceiling is lowered, never
+    raised, when the provider reports less — after a memory shrink, which
+    lowers the domain's maximum with it. CPU hot-add is not counted at its ceiling,
     because extra vCPUs stay offline until a resize (which is checked) brings
     them online;
   - a VMClass in another namespace that the VM's namespace may not use
@@ -772,17 +776,39 @@ up. Single-host Providers are not affected.
 **Shrinking a running VM waits for it to be powered off.** A shrink is never
 refused, but on a clustered Provider it is applied only while the VM is off. A
 running guest can take back memory that was removed live (the balloon), and a
-live vCPU removal that fails is not reported as a failure, so recording the
-smaller size early could let another VM be placed on capacity this one still
-uses. While the VM runs, nothing is sent, the VM keeps counting at its current
+live vCPU removal can fail, so recording the smaller size early could let
+another VM be placed on capacity this one still uses. While the VM runs, nothing is sent, the VM keeps counting at its current
 size, and it gets `Reconfiguring=False` with reason `ShrinkPendingPowerOff`.
 Power it off (`spec.powerState: Off`, or shut it down from inside the guest)
 and the shrink is applied and recorded; set `spec.powerState: On` again to
 restart it. If the VM is found off while its spec still says `On`, the shrink
 is applied first and the VM is powered on in the next reconcile. VirtRigaud
 never powers a VM off by itself to apply a shrink. A change that shrinks one
-resource and grows another waits as a whole. Single-host Providers still shrink
-a running VM live, as before.
+resource and grows another waits as a whole. Single-host Providers still send
+a shrink of a running VM at once; it is applied at the VM's next power cycle
+(below).
+
+A VM reported **`Suspended`** (paused, or suspended to RAM by its guest) is not
+powered off: it resumes at the size it has. The manager neither powers it on or
+off nor resizes it while it is suspended (`Ready=False/PowerStateUnmanaged`),
+and the libvirt provider refuses to change a domain that is active but not
+running. New clustered domains are created with guest suspend to RAM and to
+disk disabled.
+
+**A change the running VM cannot take waits for its next power cycle.** The
+libvirt provider applies each change to the domain's persistent definition
+first, then to the running domain. When the running domain cannot take it — a
+vCPU count beyond its running maximum, vCPUs that are not hotpluggable, memory
+beyond its running balloon maximum, or any memory shrink — the change is kept in
+the definition and reported as *restart required*: the VM gets
+`Reconfiguring=True` with reason `RestartRequired`, and takes the new size the
+next time it is powered off and on (a reboot from inside the guest is not
+enough). Until then `status.currentResources` holds, per resource, the larger of
+the size it runs with and the size it will boot with — a grow is counted at
+once, a shrink only once applied — and the provider is asked again every
+2 minutes (or at once after a spec change). A change the provider cannot apply
+at all fails (`Reconfiguring=False/ProviderError`), and `status.currentResources`
+is left as it was.
 
 **Detaching (orphan-on-delete) needs the Provider's permission.** A VM detached
 with `virtrigaud.io/orphan-on-delete` keeps running but stops counting. So a VM
@@ -1027,7 +1053,7 @@ every per-VM call** and the provider never looks it up (A1, D1). Slice 1 routed
 | `Describe` | **Routed** to `target_host_id` and **owner-checked** (slice 1): the domain's state is returned only if its owner stamp is the requester's UID. An absent domain, or one whose stamp is missing, unreadable or foreign, is reported `exists=false` and none of its state is read; a domain replaced between the check and the read (different UUID) is reported absent too |
 | `Delete` | **Routed** and **owner-checked** (slice 1): destroyed only if its owner stamp is the requester's UID; a missing, unreadable or foreign stamp is answered `NotFound` and the domain is never touched. Since slice 2 the teardown addresses the checked domain **by its UUID**, like `Power` and `Reconfigure` |
 | `Power` (on, off, reboot, graceful shutdown) | **Routed** and **owner-checked** (slice 2): nothing happens unless the owner stamp is the requester's UID (otherwise `NotFound`, domain untouched); the operation then addresses the checked domain **by its UUID**, so a domain replaced after the check is not acted on. The post-start persistent-XML sync runs on the same host |
-| `Reconfigure` (offline and online CPU/memory, disk grow) | **Routed** and **owner-checked** (slice 2), addressed by UUID like `Power`. Every step runs on the bound host: `setvcpus`/`setmem`, the disk resize, `blockresize`, and the best-effort in-guest filesystem grow through that host's guest agent. The disk that is resized is the checked domain's **own** primary disk, read with `domblklist --details` and resized by its path — never a volume found by name. Offline, it is resized with `vol-resize`; online, a block-device disk is resized before `blockresize`, while a file-backed disk is grown by `blockresize` alone (resizing a qcow2 under a running QEMU would be unsafe) |
+| `Reconfigure` (offline and online CPU/memory, disk grow) | **Routed** and **owner-checked** (slice 2), addressed by UUID like `Power`. Every step runs on the bound host: `setvcpus`/`setmem`, the disk resize, `blockresize`, and the best-effort in-guest filesystem grow through that host's guest agent. The disk that is resized is the checked domain's **own** primary disk, read with `domblklist --details` and resized by its path — never a volume found by name. Offline, it is resized with `vol-resize`; online, a block-device disk is resized before `blockresize`, while a file-backed disk is grown by `blockresize` alone (resizing a qcow2 under a running QEMU would be unsafe). Offline, a disk already at the requested size is not resized, and a disk with no host path (a network disk) that needs to grow fails the call. Each CPU/memory change is applied to the persistent definition first, then live; one the running domain cannot take is reported as `restart_required`; any failure fails the call (`VM_OPERATION_FAILED`); a domain that is paused, suspended to RAM or shutting down is refused unchanged |
 | `HardwareUpgrade` | `Unimplemented` (libvirt has no hardware versions; the request carries `target_host_id` for a future provider) |
 | snapshots, `Clone`, `ExportDisk`, `GetDiskInfo` | `Unimplemented` until slice 3 |
 | `ListVMs` | `Unimplemented` until slice 4 (it must run across all hosts) |

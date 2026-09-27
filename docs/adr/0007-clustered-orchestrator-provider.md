@@ -988,10 +988,17 @@ follows; A2's `pendingHost` is its prerequisite.
 >   at any time, so counting less could over-book the host. The ceiling is
 >   recorded when the VM is scheduled, in `status.placement.memoryCeilingMiB`
 >   (`0` means none), and counts from then on whatever the VMClass later says.
->   It is not lowered after a resize: the provider does not verify that it
->   lowered `<memory>` offline, so after a shrink the VM may be over-counted,
->   never under-counted. A VM without the record (scheduled by an older
->   manager, or a clone) falls back to its VMClass's current flag. A memory
+>   *(Amended 2026-09-27, honest Reconfigure result.)* A VM without the record
+>   (scheduled by an older manager) gets it recorded **once** from its
+>   provider: `Describe` reports the domain's actual memory maximum
+>   (`DescribeResponse.max_memory_mib`, libvirt's `<memory>`), recorded as the
+>   ceiling (`0` when it is no more than the VM's recorded memory); the VMClass
+>   flag is never consulted for it again. A recorded ceiling is lowered — never
+>   raised — when the provider reports less, which is how a confirmed memory
+>   shrink (the provider lowers `<memory>` with it) stops over-counting; never
+>   while a change is pending a restart or a reconfigure task runs. A clone
+>   without the record still falls back to its VMClass's current flag until its
+>   first `Describe`. A memory
 >   grow within the ceiling commits nothing new and is admitted without a
 >   capacity check. CPU hot-add is **not** counted at its ceiling: vCPUs above
 >   the current count are offline until a resize brings them online, and that
@@ -1061,7 +1068,9 @@ follows; A2's `pendingHost` is its prerequisite.
 > A **shrink** is never refused on capacity, but on a clustered Provider it is
 > applied only while the VM is powered off. Live, libvirt's `setmem --live`
 > moves only the balloon, which the guest can re-inflate up to `<memory>`, and
-> a failed live `setvcpus` is reported as success with a restart required.
+> a live `setvcpus` unplug fails for vCPUs that are not hotpluggable (the
+> provider then applies the change to the definition only and reports
+> `restart_required`, below).
 > Recording the smaller size would let the scheduler give the difference to
 > another VM while this one can still use it. So while the VM runs no
 > `Reconfigure` is sent: the VM keeps counting at its current size, gets
@@ -1137,14 +1146,21 @@ follows; A2's `pendingHost` is its prerequisite.
 >   (`bindTargetVM` / `clonedPlacement`) records no `currentResources` or
 >   memory ceiling yet. The ADR-0007 Slice 3 branch adds the clone fit check
 >   and records `currentResources` at bind.
-> - The libvirt provider's `Reconfigure` reports success for a change it did
->   not apply (a failed `setvcpus` or `setmem`, live or offline, sets
->   `requiresRestart` and returns no error), so the operator records a size the
->   domain does not have. For an unapplied grow that over-counts, which is
->   safe; an unapplied shrink under-counts. The clustered shrink deferral above
->   keeps shrinks off the live path, where they fail, but an offline failure
->   would still be recorded. The provider fix affects single-host Providers
->   too and is tracked separately.
+>
+> *(Resolved 2026-09-27, honest Reconfigure result.)* The libvirt provider's
+> `Reconfigure` no longer reports success for a change it did not apply. Every
+> requested change is applied to the running domain and its persistent
+> definition, or to the persistent definition only — reported as
+> `TaskResponse.restart_required` — or the call fails (as `VM_OPERATION_FAILED`
+> on the routed path). The manager records a restart-pending change as
+> `Reconfiguring=True/RestartRequired` and keeps `status.currentResources` at
+> the larger of the running and the next-boot size per resource, so a shrink
+> pending a restart never lowers the counted size. A domain that is active but
+> not running (paused, suspended to RAM, shutting down) is refused rather than
+> changed in its definition; `Describe` reports paused and pmsuspended domains
+> as `Suspended` — never `Off`, so the shrink deferral cannot mistake a guest
+> suspended to RAM for powered off — and new clustered domains are created
+> with guest suspend disabled (`<pm>`).
 >
 > Single-host and thin-client Providers never schedule, so none of this reaches
 > them (D9).
@@ -1500,7 +1516,6 @@ honest.
   scheduled, and `currentResources` recorded at the clustered clone bind
   (`bindTargetVM` / `clonedPlacement`), which today writes `placement.host`
   only (A5, *Still not covered*). Planned on the ADR-0007 Slice 3 branch.
-- The libvirt provider's `Reconfigure` must return an error when a requested
-  change was not applied (today a failed `setvcpus` or `setmem`, live or
-  offline, returns success with `requiresRestart`). This affects single-host
-  Providers too, so it is tracked separately from ADR-0007.
+- ~~The libvirt provider's `Reconfigure` must return an error when a requested
+  change was not applied.~~ Done (2026-09-27): applied, applied with
+  `restart_required`, or an error — see A5 *Still not covered*.
