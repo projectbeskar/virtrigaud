@@ -426,9 +426,11 @@ type PlacementStatus struct {
 	// provisioned for a VMClass with memory hot-add (4× the initial memory), or
 	// 0 when none was provisioned. A guest can deflate its balloon up to it, so
 	// the clustered accounting counts the VM's memory at the larger of this and
-	// its current size. It is kept when the VM is bound; unset means unknown (a
-	// VM scheduled by an older manager), and the VMClass's hot-add setting is
-	// used instead.
+	// its current size. It is kept when the VM is bound. Unset means unknown (a
+	// VM scheduled by an older manager): the VMClass's hot-add setting is used
+	// until the VM's first Describe reports its domain's actual memory maximum,
+	// which is then recorded once. A recorded value is lowered, never raised,
+	// when the provider later reports less (after a confirmed memory shrink).
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	MemoryCeilingMiB *int64 `json:"memoryCeilingMiB,omitempty"`

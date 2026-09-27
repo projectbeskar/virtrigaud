@@ -347,10 +347,11 @@ func memoryCeilingFor(hotAdd bool, memMiB int64) int64 {
 // memoryCeilingOf is the memory vm's domain may reach on its host beyond its
 // current allocation (review N1): a guest can deflate its balloon up to the
 // hot-add ceiling, so the VM counts at it. It is status.placement.memoryCeilingMiB
-// when recorded (at scheduling, from the Create's own VMClass), otherwise — a
-// VM scheduled by an older manager, or a clone — derived from class's current
-// hot-add setting and the VM's recorded (else pending, else class) memory.
-// 0 means none.
+// when recorded (at scheduling, from the Create's own VMClass; or, for a VM
+// scheduled by an older manager, once from its provider's Describe —
+// syncMemoryCeiling), otherwise — until then, or for a clone — derived from
+// class's current hot-add setting and the VM's recorded (else pending, else
+// class) memory. 0 means none.
 func memoryCeilingOf(vm *infravirtrigaudiov1beta1.VirtualMachine, class *infravirtrigaudiov1beta1.VMClass) int64 {
 	if pl := vm.Status.Placement; pl != nil && pl.MemoryCeilingMiB != nil {
 		return *pl.MemoryCeilingMiB
