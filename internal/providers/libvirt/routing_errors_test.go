@@ -120,7 +120,7 @@ func TestClustered_VMOperationFailureCarriesVMOperationFailed(t *testing.T) {
 		prefix string
 	}{
 		"Power":       {perr, "failed to perform power operation: Retryable: failed to perform power operation On"},
-		"Reconfigure": {rerr, "failed to reconfigure VM: Retryable: online disk grow failed"},
+		"Reconfigure": {rerr, "failed to reconfigure VM: Retryable: could not grow the VM's disk to 20 GiB"},
 	} {
 		st, ok := status.FromError(tc.err)
 		require.True(t, ok, name)

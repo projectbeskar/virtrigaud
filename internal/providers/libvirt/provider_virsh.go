@@ -1334,221 +1334,45 @@ func syncPersistentXML(ctx context.Context, vp *VirshProvider, domainName string
 // owner stamp against vm.Owner, and runs the same core there on the checked
 // domain — including the online disk grow and its in-guest filesystem grow,
 // whose guest-agent commands go to that host (reconfigureClustered).
+//
+// Every requested change is applied live and persistently, applied
+// persistently only and reported as RestartRequired, or the call fails; see
+// reconfigure.go.
 func (p *Provider) Reconfigure(ctx context.Context, vm contracts.VMRef, desired contracts.CreateRequest) (contracts.ReconfigureResult, error) {
 	id := vm.ID
 	log.Printf("INFO Reconfiguring VM: %s", id)
 
 	if p.clustered() {
+		var restart bool
 		err := p.withHostConn(ctx, vm.HostID, func(c libvirtConn) error {
-			return p.reconfigureClustered(ctx, c, id, vm.Owner, desired)
+			var rerr error
+			restart, rerr = p.reconfigureClustered(ctx, c, id, vm.Owner, desired)
+			return rerr
 		})
-		return contracts.ReconfigureResult{}, err
+		return contracts.ReconfigureResult{RestartRequired: restart && err == nil}, err
 	}
 
 	if p.virshProvider == nil {
 		return contracts.ReconfigureResult{}, contracts.NewRetryableError("virsh provider not initialized", nil)
 	}
-	return contracts.ReconfigureResult{}, p.reconfigureOn(ctx, p.singleHostConn(), byName(id), desired)
+	restart, err := p.reconfigureOn(ctx, p.singleHostConn(), byName(id), desired)
+	return contracts.ReconfigureResult{RestartRequired: restart && err == nil}, err
 }
 
 // reconfigureClustered is the routed, OWNER-CHECKED Reconfigure of a clustered
 // VM on its bound host's leased connection c: nothing about a domain is read or
 // changed unless its owner stamp records owner's UID, and every command then
 // addresses it by its UUID (ownedDomainTarget).
-func (p *Provider) reconfigureClustered(ctx context.Context, c libvirtConn, id string, owner contracts.ObjectIdentity, desired contracts.CreateRequest) error {
+func (p *Provider) reconfigureClustered(ctx context.Context, c libvirtConn, id string, owner contracts.ObjectIdentity, desired contracts.CreateRequest) (restartRequired bool, err error) {
 	vp, err := virshOf(c)
 	if err != nil {
-		return err
+		return false, err
 	}
 	d, err := ownedDomainTarget(ctx, vp, c.HostID(), id, owner, "reconfigure")
 	if err != nil {
-		return err
+		return false, err
 	}
 	return p.reconfigureOn(ctx, c, d, desired)
-}
-
-// reconfigureOn is the Reconfigure core, run on connection c — p.virshProvider's
-// connection in single-host mode, the leased host connection in clustered
-// mode — against domain d. Every helper it reaches (the online CPU/memory
-// change, the offline and online disk resize, the guest agent that grows the
-// in-guest filesystem) runs on that same connection. The virsh/host command
-// sequence is the historical one, unchanged.
-func (p *Provider) reconfigureOn(ctx context.Context, c libvirtConn, d domainTarget, desired contracts.CreateRequest) error {
-	vp, err := virshOf(c)
-	if err != nil {
-		return err
-	}
-	id := d.name
-
-	hasChanges := false
-	requiresRestart := false
-
-	// Get current domain state
-	domainState, err := vp.getDomainState(ctx, d.handle)
-	if err != nil {
-		return contracts.NewRetryableError("failed to get domain state", err)
-	}
-
-	isRunning := domainState == "running"
-	log.Printf("INFO Domain %s current state: %s", id, domainState)
-
-	// Get current domain info for comparison
-	currentInfo, err := vp.getDomainInfo(ctx, d.handle)
-	if err != nil {
-		return contracts.NewRetryableError("failed to get current domain info", err)
-	}
-
-	// Handle CPU changes
-	if desired.Class.CPU > 0 {
-		currentCPUs, err := p.extractCPUCount(currentInfo)
-		if err == nil && currentCPUs != desired.Class.CPU {
-			log.Printf("INFO CPU change requested for %s: %d -> %d", id, currentCPUs, desired.Class.CPU)
-
-			if isRunning {
-				// Try online CPU change with --live flag
-				_, err = vp.runVirshCommand(ctx, "setvcpus", d.handle,
-					fmt.Sprintf("%d", desired.Class.CPU), "--live")
-				if err != nil {
-					// A `setvcpus --live` failure here means the desired vCPU
-					// count exceeds the hotplug headroom provisioned at create
-					// (the <vcpu> max), or the VM was created without
-					// CPUHotAddEnabled (no headroom at all). Either way the
-					// increase requires a power cycle to take effect (#203).
-					log.Printf("WARN Online CPU change to %d failed for %s: exceeds provisioned hotplug headroom (the <vcpu> max) or the VM was created without CPUHotAddEnabled; a power cycle is required to apply this increase: %v",
-						desired.Class.CPU, id, err)
-					requiresRestart = true
-				} else {
-					log.Printf("INFO Successfully changed CPUs online for domain: %s", id)
-					hasChanges = true
-				}
-			} else {
-				// Domain is off, change config
-				_, err = vp.runVirshCommand(ctx, "setvcpus", d.handle,
-					fmt.Sprintf("%d", desired.Class.CPU), "--config")
-				if err != nil {
-					log.Printf("WARN Failed to set CPUs in config: %v", err)
-					requiresRestart = true
-				} else {
-					hasChanges = true
-				}
-			}
-		}
-	}
-
-	// Handle Memory changes
-	if desired.Class.MemoryMiB > 0 {
-		currentMemoryKB, err := p.extractMemoryKB(currentInfo)
-		desiredMemoryKB := int64(desired.Class.MemoryMiB) * 1024 // Convert MiB to KiB
-
-		if err == nil && currentMemoryKB != desiredMemoryKB {
-			log.Printf("INFO Memory change requested for %s: %d KiB -> %d KiB", id, currentMemoryKB, desiredMemoryKB)
-
-			if isRunning {
-				// Try online memory change with --live flag
-				_, err = vp.runVirshCommand(ctx, "setmem", d.handle,
-					fmt.Sprintf("%dK", desiredMemoryKB), "--live")
-				if err != nil {
-					// `setmem --live` inflates the balloon up to the <memory>
-					// ceiling. A failure here means the desired memory exceeds
-					// the hotplug headroom provisioned at create (the <memory>
-					// balloon maximum), or the VM was created without
-					// MemoryHotAddEnabled (no headroom at all). Either way the
-					// increase requires a power cycle to take effect (#203).
-					log.Printf("WARN Online memory change to %d KiB failed for %s: exceeds provisioned hotplug headroom (the <memory> balloon maximum) or the VM was created without MemoryHotAddEnabled; a power cycle is required to apply this increase: %v",
-						desiredMemoryKB, id, err)
-					requiresRestart = true
-				} else {
-					log.Printf("INFO Successfully changed memory online for domain: %s", id)
-					hasChanges = true
-				}
-			} else {
-				// Domain is off, change config
-				_, err = vp.runVirshCommand(ctx, "setmem", d.handle,
-					fmt.Sprintf("%dK", desiredMemoryKB), "--config")
-				if err != nil {
-					log.Printf("WARN Failed to set memory in config: %v", err)
-					requiresRestart = true
-				} else {
-					// Also update max memory
-					_, _ = vp.runVirshCommand(ctx, "setmaxmem", d.handle,
-						fmt.Sprintf("%dK", desiredMemoryKB), "--config")
-					hasChanges = true
-				}
-			}
-		}
-	}
-
-	// Handle Disk changes.
-	//
-	// Online (domain running): grow the live block device via `virsh
-	// blockresize` so QEMU exposes the new size immediately, then best-effort
-	// extend the in-guest filesystem via the guest agent. The target device and
-	// current size are resolved from the live domain (domblklist/domblkinfo),
-	// not the "<vmid>-disk" volume-name guess. Grow-only: shrinks are rejected
-	// (libvirt/qcow2 cannot shrink live) and resizing to the current size is a
-	// no-op. A blockresize failure is fatal to the disk step; the in-guest FS
-	// grow is non-fatal (#201).
-	//
-	// Offline (domain stopped): resize the backing volume so the larger size
-	// applies on next boot.
-	if len(desired.Disks) > 0 || (desired.Class.DiskDefaults != nil && desired.Class.DiskDefaults.SizeGiB > 0) {
-		storageProvider := NewStorageProvider(vp)
-
-		// Get desired disk size
-		var desiredDiskGB int
-		if desired.Class.DiskDefaults != nil && desired.Class.DiskDefaults.SizeGiB > 0 {
-			desiredDiskGB = int(desired.Class.DiskDefaults.SizeGiB)
-		}
-
-		if desiredDiskGB > 0 {
-			if isRunning {
-				// Online live grow (grow-only + idempotent guards inside).
-				log.Printf("INFO Attempting online disk grow for running VM %s to %dGB", id, desiredDiskGB)
-				grew, gerr := growDiskOnline(ctx, vp, d, desiredDiskGB, storageProvider)
-				if gerr != nil {
-					// The live block-device resize failing IS fatal to the disk
-					// step: the guest would not see the requested capacity.
-					log.Printf("WARN Online disk grow failed for VM %s: %v", id, gerr)
-					return contracts.NewRetryableError("online disk grow failed", gerr)
-				}
-				if grew {
-					hasChanges = true
-				}
-			} else {
-				// Offline: resize the backing volume so the larger size applies
-				// on next boot. Single-host finds the VM's disk volume by the pool
-				// convention (historical). A clustered target resizes the
-				// owner-checked domain's own primary disk, by its path.
-				log.Printf("INFO Attempting offline disk resize for VM %s to %dGB", id, desiredDiskGB)
-				if d.diskByPath {
-					err = resizePrimaryDiskOffline(ctx, vp, d, storageProvider, desiredDiskGB)
-				} else {
-					err = storageProvider.ResizeVolume(ctx, "default", vmDiskVolumeName(id), desiredDiskGB)
-				}
-				if err != nil {
-					log.Printf("WARN Offline disk resize failed: %v", err)
-					// Offline resize failure is not fatal, just log it.
-				} else {
-					log.Printf("INFO Successfully resized disk for VM: %s", id)
-					hasChanges = true
-				}
-			}
-		}
-	}
-
-	// Log reconfiguration results
-	if !hasChanges && !requiresRestart {
-		log.Printf("INFO No configuration changes needed for domain: %s", id)
-		return nil
-	}
-
-	if requiresRestart {
-		log.Printf("WARN Some changes for domain %s require a restart to take effect", id)
-		// Note: The caller (controller) should handle restarting the VM if needed
-	}
-
-	log.Printf("INFO Successfully reconfigured domain: %s", id)
-	return nil
 }
 
 // resizePrimaryDiskOffline grows the primary disk of the stopped domain d (the
@@ -1594,45 +1418,6 @@ func (p *Provider) getVNCPort(ctx context.Context, vp *VirshProvider, domainName
 	}
 
 	return 0, fmt.Errorf("VNC port not found in domain XML")
-}
-
-// extractCPUCount extracts the CPU count from domain info map
-func (p *Provider) extractCPUCount(domainInfo map[string]string) (int32, error) {
-	cpuStr, exists := domainInfo["CPU(s)"]
-	if !exists {
-		return 0, fmt.Errorf("CPU count not found in domain info")
-	}
-
-	cpuCount, err := strconv.ParseInt(cpuStr, 10, 32)
-	if err != nil {
-		return 0, fmt.Errorf("failed to parse CPU count: %w", err)
-	}
-
-	return int32(cpuCount), nil
-}
-
-// extractMemoryKB extracts the memory in KiB from domain info map
-func (p *Provider) extractMemoryKB(domainInfo map[string]string) (int64, error) {
-	memStr, exists := domainInfo["Max memory"]
-	if !exists {
-		// Try alternative key
-		memStr, exists = domainInfo["Used memory"]
-		if !exists {
-			return 0, fmt.Errorf("memory not found in domain info")
-		}
-	}
-
-	// Parse memory string (format: "XXXXXX KiB")
-	memStr = strings.TrimSpace(memStr)
-	memStr = strings.TrimSuffix(memStr, " KiB")
-	memStr = strings.TrimSuffix(memStr, " kB")
-
-	memKB, err := strconv.ParseInt(memStr, 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("failed to parse memory: %w", err)
-	}
-
-	return memKB, nil
 }
 
 // Describe returns comprehensive VM information using virsh (enhanced monitoring like vSphere)

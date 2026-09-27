@@ -159,6 +159,7 @@ func TestClustered_Reconfigure_RoutedToLeasedHostOnTheCheckedDomain(t *testing.T
 		}
 	}
 	details := "host-b domblklist " + uuid + " --details"
+	inactive := "host-b dumpxml " + uuid + " --inactive"
 	pingOnly := `host-b qemu-agent-command --timeout 3 ` + uuid + ` {"execute":"guest-ping"}`
 	cases := []struct {
 		name    string
@@ -168,28 +169,42 @@ func TestClustered_Reconfigure_RoutedToLeasedHostOnTheCheckedDomain(t *testing.T
 		want    []string
 	}{
 		{
-			// The offline resize acts on the checked domain's own primary disk,
-			// by its path — never on a "<name>-disk" volume found by name.
+			// The persistent definition is read first; the vCPU maximum is raised
+			// before the count, the memory maximum before the allocation. The
+			// offline resize reads the disk's size from the checked domain and
+			// acts on its own primary disk, by its path — never on a
+			// "<name>-disk" volume found by name.
 			name: "offline CPU, memory and disk", desired: reconfigureTo(4, 4096, 20),
 			want: []string{
+				inactive,
+				"host-b setvcpus " + uuid + " 4 --config --maximum",
 				"host-b setvcpus " + uuid + " 4 --config",
-				"host-b setmem " + uuid + " 4194304K --config",
 				"host-b setmaxmem " + uuid + " 4194304K --config",
+				"host-b setmem " + uuid + " 4194304K --config",
+				"host-b domblklist " + uuid,
+				"host-b domblkinfo " + uuid + " vda",
 				details,
 				"host-b vol-resize --vol " + opsDiskPath + " --capacity 20G",
 			},
 		},
 		{
-			// A network disk has no host path to resize: nothing is resized, and
-			// the offline resize stays non-fatal as before.
-			name: "offline disk on a network source is not resized", desired: reconfigureTo(0, 0, 20),
-			script: map[string]string{"disktype": "network", "disksource": "pool/web"},
-			want:   []string{details},
+			// A network disk has no host path to resize. One already at the
+			// requested size needs none, so nothing is resized and nothing fails
+			// (a grow it would need fails: TestClustered_Reconfigure_HonestResult).
+			name: "offline disk on a network source already large enough is not resized", desired: reconfigureTo(0, 0, 20),
+			script: map[string]string{"disktype": "network", "disksource": "pool/web", "capacity": "21474836480"},
+			want:   []string{"host-b domblklist " + uuid, "host-b domblkinfo " + uuid + " vda"},
 		},
 		{
+			// A VM created with CPU and memory hot-add: both grow live within
+			// their ceilings, each persisted first.
 			name: "online CPU and memory", running: true, desired: reconfigureTo(4, 4096, 0),
+			script: map[string]string{"cfg-maxvcpus": "8", "maxmem": "8388608", "cfg-maxmem": "8388608"},
 			want: []string{
+				inactive,
+				"host-b setvcpus " + uuid + " 4 --config",
 				"host-b setvcpus " + uuid + " 4 --live",
+				"host-b setmem " + uuid + " 4194304K --config",
 				"host-b setmem " + uuid + " 4194304K --live",
 			},
 		},
