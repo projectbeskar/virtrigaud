@@ -688,9 +688,11 @@ type domainDeletionPlan struct {
 // an owner-checked clustered domain) on vp's host and returns what its delete
 // removes, or the refusal of the delete — before anything is changed.
 //
-// A definition that cannot be read is not a refusal: as before, the domain is
-// still undefined, and none of its files are removed. A disk file outside the
-// storage pool and the allowed image directories is left in place and logged.
+// A definition that cannot be read or parsed fails the delete with a retryable
+// error and leaves the domain intact: undefining it anyway would strand its
+// disks with no definition left to find them by (a domain undefined meanwhile
+// is found absent by the retry). A disk file outside the storage pool and the
+// allowed image directories is left in place and logged.
 // When another domain uses one of the remaining disk files, the delete is
 // refused (diskDependentsError); when that cannot be established, it fails
 // with a retryable error. Either way the domain is left untouched. The seed
@@ -700,13 +702,11 @@ type domainDeletionPlan struct {
 func (p *Provider) planDomainDeletion(ctx context.Context, vp *VirshProvider, id string) (domainDeletionPlan, error) {
 	res, err := vp.runVirshCommand(ctx, "dumpxml", id)
 	if err != nil {
-		log.Printf("WARN Failed to read the definition of domain %s; none of its files will be removed: %v", id, err)
-		return domainDeletionPlan{}, nil
+		return domainDeletionPlan{}, guardCheckFailed(guardOpDelete, id, fmt.Errorf("read the domain definition: %w", err))
 	}
 	doc, err := parseDomainDisks(res.Stdout)
 	if err != nil {
-		log.Printf("WARN Failed to parse the definition of domain %s; none of its files will be removed: %v", id, err)
-		return domainDeletionPlan{}, nil
+		return domainDeletionPlan{}, guardCheckFailed(guardOpDelete, id, err)
 	}
 	if doc.Name == "" {
 		doc.Name = id

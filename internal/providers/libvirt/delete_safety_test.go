@@ -312,6 +312,22 @@ func TestDelete_SingleHost_UnverifiableDependentsFailClosed(t *testing.T) {
 	c.requireUntouched("h1", "team-a.web")
 }
 
+// TestDelete_SingleHost_UnreadableDefinitionLeavesDomainIntact: a domain that
+// is listed but whose definition cannot be read is not undefined — that would
+// strand its disks — the delete fails retryably and changes nothing.
+func TestDelete_SingleHost_UnreadableDefinitionLeavesDomainIntact(t *testing.T) {
+	c := newCreateHost(t)
+	require.NoError(t, os.WriteFile(filepath.Join(c.root, "h1", "names"), []byte("web\n"), 0o600)) // listed, no definition
+
+	_, err := c.p.Delete(context.Background(), contracts.VMRef{ID: "web"})
+	require.Error(t, err)
+	assert.True(t, contracts.IsRetryable(err), "%v", err)
+	for _, call := range c.virshCalls("h1") {
+		assert.NotRegexp(t, `^(destroy|undefine) `, call, "the domain must not be torn down")
+	}
+	assert.Empty(t, c.removals())
+}
+
 func TestRemoveOrphanedDisks_KeepsBackingFileOfSurvivingClone(t *testing.T) {
 	c := newCreateHost(t)
 	src, _ := c.linkedPair(true)
