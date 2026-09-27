@@ -390,6 +390,13 @@ func TestDelete_SingleHost_RemovesOwnSnapshotChain(t *testing.T) {
 // (contracts.ProviderRawLinkedCloneDependentsKey) for the manager's warning; a
 // VM nothing depends on reports 0; a VM never started reports nothing.
 func TestPowerOn_WarnsWhenLinkedClonesDependOnTheDisk(t *testing.T) {
+	// A local connection's Power syncs the persistent XML through
+	// /tmp/<domain>-sync.xml (syncPersistentXML), which a failed define leaves.
+	t.Cleanup(func() {
+		for _, d := range []string{"team-a.web", "team-b.copy"} {
+			_ = os.Remove(filepath.Join("/tmp", d+"-sync.xml"))
+		}
+	})
 	c := newCreateHost(t)
 	c.p.hostStagingDir = t.TempDir()
 	c.linkedPair(true)
