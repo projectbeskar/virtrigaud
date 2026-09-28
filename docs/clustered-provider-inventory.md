@@ -1081,14 +1081,14 @@ slice 4 runs `ListVMs` on every host and adds `TransferOwner` for adoption.
 
 | RPC on a clustered provider | Behaviour |
 |---|---|
-| `Create` | Routed to `target_host_id` (shipped in P1) |
+| `Create` | Routed to `target_host_id` (shipped in P1). A same-named domain there stamped for the VM's namespace and name under another UID is answered `VM_PREVIOUS_INCARNATION`, and a disk file that already exists where the VM's disk goes is written only when no domain on **any** host of the Provider uses it (A6.1; see [the cluster-wide disk guard](#shared-storage-the-cluster-wide-disk-guard-a61)) |
 | `Describe` | **Routed** to `target_host_id` and **owner-checked** (slice 1): the domain's state is returned only if its owner stamp is the requester's UID. An absent domain, or one whose stamp is missing, unreadable or foreign, is reported `exists=false` and none of its state is read; a domain replaced between the check and the read (different UUID) is reported absent too |
-| `Delete` | **Routed** and **owner-checked** (slice 1): destroyed only if its owner stamp is the requester's UID; a missing, unreadable or foreign stamp is answered `NotFound` and the domain is never touched. Since slice 2 the teardown addresses the checked domain **by its UUID**, like `Power` and `Reconfigure` |
+| `Delete` | **Routed** and **owner-checked** (slice 1): destroyed only if its owner stamp is the requester's UID; a missing, unreadable or foreign stamp is answered `NotFound` and the domain is never touched. Since slice 2 the teardown addresses the checked domain **by its UUID**, like `Power` and `Reconfigure`. Since A6.1 every **other** host of the Provider is checked too before anything is destroyed or removed: a disk file a domain on another host uses refuses the delete (`VM_DISK_IN_USE`), and a host that cannot be checked fails it closed (see [the cluster-wide disk guard](#shared-storage-the-cluster-wide-disk-guard-a61)) |
 | `Power` (on, off, reboot, graceful shutdown) | **Routed** and **owner-checked** (slice 2): nothing happens unless the owner stamp is the requester's UID (otherwise `NotFound`, domain untouched); the operation then addresses the checked domain **by its UUID**, so a domain replaced after the check is not acted on. The post-start persistent-XML sync runs on the same host |
 | `Reconfigure` (offline and online CPU/memory, disk grow) | **Routed** and **owner-checked** (slice 2), addressed by UUID like `Power`. Every step runs on the bound host: `setvcpus`/`setmem`, the disk resize, `blockresize`, and the best-effort in-guest filesystem grow through that host's guest agent. The disk that is resized is the checked domain's **own** primary disk, read with `domblklist --details` and resized by its path — never a volume found by name. Offline, it is resized with `vol-resize`; online, a block-device disk is resized before `blockresize`, while a file-backed disk is grown by `blockresize` alone (resizing a qcow2 under a running QEMU would be unsafe). Offline, a disk already at the requested size is not resized, and a disk with no host path (a network disk) that needs to grow fails the call. Each CPU/memory change is applied to the persistent definition first, then live; one the running domain cannot take is reported as `restart_required`; any failure fails the call (`VM_OPERATION_FAILED`); a domain that is paused, suspended to RAM or shutting down is refused unchanged |
 | `HardwareUpgrade` | `Unimplemented` (libvirt has no hardware versions; the request carries `target_host_id` for a future provider) |
 | `SnapshotCreate`, `SnapshotDelete`, `SnapshotRevert` | **Routed** and **owner-checked** (slice 3), addressed by UUID like `Power`: a domain this VM does not own is `NotFound` and none of its snapshots is created, deleted or reverted. A snapshot id this provider could not have created (for example one starting with `-`, which virsh would read as an option) is `InvalidArgument` before any host is touched. Memory snapshots work as on a single host. As on a single host (#358), each refuses while another domain on the host depends on one of the VM's disks — a linked clone's overlay — (`FailedPrecondition`, `VM_DISK_IN_USE` + `VM_OPERATION_FAILED`, never naming the other domain), and is retried when that cannot be checked (`Unavailable`, `VM_DISK_CHECK_FAILED` + `VM_OPERATION_FAILED`) |
-| `Clone` (full clones only) | **Routed** to the source VM's bound host and **owner-checked** on the source (slice 3). A **linked** clone is `InvalidArgument` on a clustered provider in v0.4.0 (its overlay would depend on the source's disk for its whole life) and is not advertised. `target_host_id` must equal `source_host_id` (disks are host-local; no cross-host clone in v1), and an empty or different value is `InvalidArgument` — the provider never picks a landing host. The request must carry the target VirtualMachine's identity **with its uid**: the clone is stamped with it (never with the source's stamp). A domain of the clone's name that the target does not own is `AlreadyExists` and nothing is copied; one it does own is an earlier attempt's clone and is reported as done (a retry is idempotent). The clone gets **its own copy of the cloud-init seed ISO** in a per-clone seed directory, so deleting either VM never removes the other's seed. It is defined from the source's **persistent** definition (`dumpxml --inactive`), without the source disk's `<backingStore>` chain (the clone's disk is a standalone copy; only `/domain/devices/disk/backingStore` is removed, never another tool's `<metadata>`). **Single-disk sources only** for now: a source with more than one writable medium (`device='disk'`, `'lun'` or `'floppy'`, of any type) or a disk with an external data file (`<source><dataStore>`) is `InvalidArgument` before anything is copied, because only the primary disk is re-pointed at the clone's copy and any other would be shared by source and clone. Only read-only CD-ROM media (the seed among them) are not counted |
+| `Clone` (full clones only) | **Routed** to the source VM's bound host and **owner-checked** on the source (slice 3). A **linked** clone is `InvalidArgument` on a clustered provider in v0.4.0 (its overlay would depend on the source's disk for its whole life) and is not advertised. `target_host_id` must equal `source_host_id` (disks are host-local; no cross-host clone in v1), and an empty or different value is `InvalidArgument` — the provider never picks a landing host. The request must carry the target VirtualMachine's identity **with its uid**: the clone is stamped with it (never with the source's stamp). A domain of the clone's name that the target does not own is `AlreadyExists` and nothing is copied — with `VM_PREVIOUS_INCARNATION` when it is stamped for the target's namespace and name under another UID (A6.1); one it does own is an earlier attempt's clone and is reported as done (a retry is idempotent). A file already at the clone's disk or varstore path is overwritten only when no domain on any host of the Provider uses it (A6.1, [the cluster-wide disk guard](#shared-storage-the-cluster-wide-disk-guard-a61)). The clone gets **its own copy of the cloud-init seed ISO** in a per-clone seed directory, so deleting either VM never removes the other's seed. It is defined from the source's **persistent** definition (`dumpxml --inactive`), without the source disk's `<backingStore>` chain (the clone's disk is a standalone copy; only `/domain/devices/disk/backingStore` is removed, never another tool's `<metadata>`). **Single-disk sources only** for now: a source with more than one writable medium (`device='disk'`, `'lun'` or `'floppy'`, of any type) or a disk with an external data file (`<source><dataStore>`) is `InvalidArgument` before anything is copied, because only the primary disk is re-pointed at the clone's copy and any other would be shared by source and clone. Only read-only CD-ROM media (the seed among them) are not counted |
 | `GetDiskInfo` | **Routed** and **owner-checked** (slice 3): the disks are read from the checked domain's own definition, nothing is looked up by volume name, and an explicit disk path must be one of that domain's disks |
 | `ExportDisk` | **Routed** and **owner-checked** (slice 3) for the host-side backends only: `s3` (the host flattens the disk, the pod streams it to S3) and `nfs` (the host writes it to the export). The `pvc` export (and the empty legacy backend, which means `pvc`) reads the disk from the provider pod and is refused (`Unimplemented`), as on Proxmox. The export runs on the owner-checked domain's own disk; a host that is not reached over `ssh://` is refused naming the host id only, never its endpoint |
 | `TaskStatus` | **Routed** to the host encoded in the task reference (slice 3; see above) |
@@ -1236,7 +1236,9 @@ for a clustered provider.
 - **`Placed` condition** (one positive condition): `True`/`Bound` once the
   provider confirmed the VM on its host; `False` with `CreatePending`,
   `HostUnavailable`, `Unbound`, `HostExcluded` or `AllHostsExcluded` (the last
-  two since slice 2, see below). It is never set on single-host VMs.
+  two since slice 2, see below), or `RestorePending` (A6.1, see
+  [Previous incarnations](#previous-incarnations-and-the-a6-runbook)). It is
+  never set on single-host VMs.
 - **No re-creation (A4).** If the bound host reports a clustered VM missing — or
   the domain there is not this VM's (owner-checked `Describe`, `Power` or
   `Reconfigure` answers not-found) — the VM shows `Ready=False`
@@ -1263,6 +1265,10 @@ for a clustered provider.
   minutes: resolve the name conflicts (or rename the VirtualMachine), then clear
   the list, for example with
   `kubectl patch virtualmachines.infra.virtrigaud.io <name> --subresource=status --type=json -p '[{"op":"remove","path":"/status/placement/excludedHosts"}]'`.
+  **Except for a previous incarnation (A6.1):** when the conflicting domain is
+  stamped with the VM's own namespace and name under another UID, the answer
+  is `VM_PREVIOUS_INCARNATION` and the VM is **held**, not moved: see
+  [Previous incarnations](#previous-incarnations-and-the-a6-runbook).
 - **Deleting a VM whose create is in flight.** A VM with `pendingHost` set and no
   `status.id` gets an owner-checked `Delete` sent to the pending host, so a domain
   the create already made there does not leak — and one that is not the VM's own
@@ -1333,7 +1339,12 @@ for a clustered provider.
   - A name conflict on the host (`AlreadyExists`) excludes the host for the
     target and clears its pending host, as for a create; since the clone can
     land nowhere else it waits (`SourceHostExcluded`) until an administrator
-    resolves the conflict and clears the target's `excludedHosts`. An
+    resolves the conflict and clears the target's `excludedHosts`. A previous
+    incarnation of the target (`VM_PREVIOUS_INCARNATION`, A6.1) is not a name
+    conflict: the target keeps its pending host, shows
+    `Placed=False/RestorePending`, and the clone stays `Pending`
+    (`RestorePending`, re-checked every 2 minutes, never failed) until an
+    administrator re-attaches or removes that domain. An
     unreachable host keeps the pending host, and the clone is retried on the
     same host (`HostUnavailable`, every 30 s). Any other failure fails the
     clone (terminal `Failed`).
@@ -1481,9 +1492,10 @@ slice 4 is refused with a message and nothing is listed. For each listed VM:
    reports them (raw strings — two paths to one file through a symlink or a
    different mount are not matched), and the listing reports file-backed
    disks only, so block and network disks (a shared LUN, an RBD image) are
-   not compared. *Follow-up:* a clustered `Delete` checks only its own host
-   for other domains using the disk; it should scan every host, as ADR-0007
-   A6.1's R3 does for `Create`.
+   not compared. (A clustered `Delete` checks every host of the Provider
+   since A6.1, so deleting a VM whose shared disk a stale definition on
+   another host uses is refused; see
+   [the cluster-wide disk guard](#shared-storage-the-cluster-wide-disk-guard-a61).)
    **A Host whose endpoint another Host object, or a single-host Provider's
    `spec.endpoint`, names** (same scheme, host and port, whatever the SSH user;
    any Provider, any namespace) is not adopted from, and the manager logs a
@@ -1567,6 +1579,145 @@ A domain adopted on a clustered provider is managed exactly like a created one:
 deleting its VirtualMachine deletes the domain and its disks on its host (use
 `virtrigaud.io/orphan-on-delete` to let go of it instead).
 
+### Shared storage: the cluster-wide disk guard (A6.1)
+
+The hosts of one clustered Provider may share a storage pool directory (an NFS
+export mounted on every host, ADR-0007 D6). A VM's disk is then visible — and
+writable — from every host, but each host's libvirtd knows only its own
+domains. Before ADR-0007 A6.1, a create of `team-a/web` on host B overwrote
+`<pool>/team-a.web-disk.qcow2` while a domain `team-a.web` — orphaned with
+`orphan-on-delete`, left by a force-delete, or the original of a VM restored
+with a new UID — was still running on host A from that file; and deleting a
+VM on host B could remove a disk a domain on host A was using. The provider
+now checks every host of the Provider:
+
+- **Create and Clone.** When a file already exists where the VM's disk goes
+  (`<pool>/<namespace>.<name>-disk.qcow2`, a blank disk included), where a
+  clone's UEFI varstore goes, or where an imported disk would be attached in
+  place, the file is written only after **every host** in the provider's
+  registry — the landing host too — has been scanned and no domain on any of
+  them uses it. The common case, with nothing there, is unchanged: one `test`
+  on the landing host and no other host is contacted.
+- **Delete.** After the host-local checks and **before** anything is
+  destroyed, undefined or removed, every **other** host is scanned for a
+  domain that uses one of the files the delete would remove. This runs on
+  every clustered delete that has files to remove.
+
+"Uses" is the host-local definition, applied per host: any domain defined
+there — running or not, VirtRigaud's or anyone else's — that references the
+file as a disk, anywhere in a disk's backing chain (read with `qemu-img info`,
+as for the host-local check), or as another file or shared directory.
+
+| What the scan finds | Answer | What the manager does |
+|---|---|---|
+| Create / Clone: a domain on any host stamped with the VM's namespace and name (any UID) | `AlreadyExists` + `VM_PREVIOUS_INCARNATION`; nothing written | Holds the VM on its pending host (`RestorePending`), see [Previous incarnations](#previous-incarnations-and-the-a6-runbook) |
+| Create / Clone: another domain uses the file | `AlreadyExists`; nothing written | The slice 2 name-conflict rule: the host is excluded and the VM re-scheduled |
+| Delete: a domain on another host uses one of the files | `FailedPrecondition` + `VM_DISK_IN_USE` + `VM_OPERATION_FAILED`; nothing changed | Keeps the finalizer (`Ready=False/DeleteBlocked`), re-checks |
+| A host could not be reached (not leased, dropped, past its deadline) | `Unavailable` + `HOST_UNAVAILABLE`; nothing changed | Create: `Placed=False/HostUnavailable`, retried on the same pending host every 30 s. Delete: finalizer kept, retried |
+| A host answered but could not be scanned (a definition or disk chain unreadable, more than 2000 domains) | `Unavailable` + `VM_DISK_CHECK_FAILED` + `VM_OPERATION_FAILED`; nothing changed | Retried, as above |
+| Nothing uses the file | The existing file is a leftover of an earlier failed attempt and is replaced (create); the delete proceeds | — |
+
+None of these answers counts toward the Provider's circuit breaker, and their
+messages name no host, no path and no other domain (the provider logs the
+details).
+
+**Fail closed, and what it costs.** A host that cannot be checked fails the
+operation; nothing is ever written or removed on a partial answer. For Create
+and Clone that happens only when a file is already where the disk goes. **A
+clustered Delete, however, always has files to remove, so while any host of
+the Provider cannot be reached, deleting a clustered VM is held** (the
+finalizer stays, and the delete is retried) on every host of the Provider.
+To get out of it: bring the host back; or remove the dead host from the
+Provider (delete its `Host` — possible only when no VM is bound or pending
+on it); or detach the VM with `virtrigaud.io/orphan-on-delete=true` (the
+domain and its disks stay for manual removal; a VM in another namespace than
+the Provider needs the Provider's permission, see above);
+`virtrigaud.io/force-delete` releases the finalizer after the failed delete in
+the same way. A delete held this way is retried every 15 seconds, and each
+retry scans the reachable hosts again.
+
+**Bounds.** The scan is slice 4's fan-out: at most 8 hosts at a time, each on
+its own lease with a 60-second deadline, and the whole scan inside the
+caller's deadline less 30 seconds, so the operation — a delete's teardown, a
+create's disk write — and its answer still fit. A host with more than 2000
+domains fails the scan closed instead of being read partially. The landing
+host of a create or clone is scanned over the call's own connection. A scan
+reads every domain's definition on each host, plus the disk chains of
+shut-off domains, so a clustered delete now costs roughly one SSH command
+per domain of the Provider.
+
+**Paths are compared per host, canonically.** The candidate file — the path
+the landing host uses and the path it resolves to there — is resolved again
+with `realpath` on each scanned host and compared with that host's own
+references, raw and resolved. So symbolic links on either side are followed.
+**Mount a shared pool at the same path on every host of a Provider** (libvirt's
+shared-storage migration needs that as well). *Residual:* a host that mounts
+the same export under a **different** path, or reaches a file through a second
+mount or a bind mount (which `realpath` does not resolve), is not matched.
+Comparing `(st_dev, st_ino)` does not close that gap: `st_dev` is assigned by
+each NFS client, so it differs between hosts for the same file, and `st_ino`
+alone is not unique across filesystems. Other residuals: a host removed from
+the Provider's inventory (or draining) is not scanned; disks without a host
+path (network disks such as RBD) are not compared; and on a **host-local**
+pool, a previous incarnation on another host leaves no file where the new
+disk goes, so this guard does not see it — the pre-schedule check (A6.2, R4)
+does.
+
+### Previous incarnations and the A6 runbook
+
+On a clustered Provider there is at most one domain VirtRigaud created per
+`<namespace>.<name>` (ADR-0007 A6, decision 2): the domains VirtRigaud created
+for a namespace and name carry them in their owner stamp. A domain stamped
+with a VM's namespace and name under **another UID** is a *previous
+incarnation* of that VM — left by `orphan-on-delete`, a force-delete, or a
+backup restore that re-created the VirtualMachine with a new UID.
+
+**Since A6.1 (R2).** A create or clone that meets a previous incarnation — on
+its landing host by name, or on any host during
+[the cluster-wide disk guard](#shared-storage-the-cluster-wide-disk-guard-a61)
+— is refused with `AlreadyExists` + `VM_PREVIOUS_INCARNATION` and creates
+nothing. The manager then **holds** the VM:
+
+- it keeps `status.placement.pendingHost`: the host is **not** excluded and the
+  VM is **not** re-scheduled (moving on is exactly how a second domain would be
+  made). The VM keeps counting on that host at its pending size, and its
+  `spec.providerRef` stays locked;
+- `Placed=False` and `Provisioning=False` with reason `RestorePending`, one
+  `Warning` event, and the create is retried on the same host every 2 minutes;
+- a clone's target VM is held the same way, and the `VMClone` stays `Pending`
+  (`RestorePending`), never `Failed`;
+- deleting a held VM never touches the previous incarnation: its owner-checked
+  `Delete` carries the held VM's own UID and gets `NotFound`.
+
+A foreign or unstamped domain that merely has the name keeps the slice 2
+behaviour (the host is excluded and the VM placed elsewhere). The restore
+marker and the pre-schedule check (A6.2) hold such VMs before they are ever
+scheduled; until then R2 is the guard.
+
+**The runbook.** Re-attaching is not automated in v0.4.0. As an administrator:
+
+1. Find the previous incarnation. On each host of the Provider, run
+   `virsh metadata <namespace>.<name> --uri https://virtrigaud.io/xmlns/libvirt/owner/v1`
+   (and, for a domain named otherwise, check `virsh dumpxml`). Stop if more
+   than one host has one, and check that no VirtualMachine with the stamp's
+   UID still exists (`kubectl get virtualmachines -A -o jsonpath='{range .items[*]}{.metadata.uid}{"\n"}{end}'`).
+2. Either **re-attach** it: rewrite the stamp's `uid` to the held VM's UID,
+   keeping the namespace and name —
+   `virsh metadata --domain <uuid> --uri https://virtrigaud.io/xmlns/libvirt/owner/v1 --key virtrigaud --set "<owner uid='<new uid>' namespace='<namespace>' name='<name>'/>" --config`
+   (add `--live` if the domain is running). If the held VM's
+   `status.placement.pendingHost` is that domain's host, the next create retry
+   binds it as an idempotent success. If it names another host (the domain was
+   found there by the disk guard), set it to the domain's host first:
+   `kubectl patch virtualmachines.infra.virtrigaud.io <name> -n <namespace> --subresource=status --type=merge -p '{"status":{"placement":{"pendingHost":"<host>"}}}'`.
+3. Or **discard** it: remove the domain and its disk
+   (`<pool>/<namespace>.<name>-disk.qcow2`) and cloud-init seed on its host;
+   the next create retry creates the VM as new on its pending host.
+
+Never run `kubectl replace --force` on a VirtualMachine (its delete half
+destroys the domain), and prefer backups that include VirtualMachine status
+(Velero `restoreStatus`). The full backup and restore guide (A6.3) and the
+automated re-attach (`VMRestoreBinding`, A6.4) follow.
+
 ## What "clustered" does not mean (yet)
 
 - **No automatic HA / failover.** v1 detects and surfaces host-down and supports
@@ -1576,8 +1727,10 @@ deleting its VirtualMachine deletes the domain and its disks on its host (use
 - **Experimental.** A clustered VM can be scheduled, created, described,
   powered, reconfigured, snapshotted, cloned (onto its own host), exported
   (s3 / nfs) and deleted on its host (ADR-0007 Addendum A slices 1–3), and
-  VMs can be listed across hosts and adopted (slice 4). Nothing can be
-  migrated **into** a clustered provider (P3).
+  VMs can be listed across hosts and adopted (slice 4). Disks on a shared
+  pool are protected across hosts, and a previous incarnation holds its
+  VirtualMachine (A6.1); the restore marker and pre-schedule check (A6.2) are
+  not in yet. Nothing can be migrated **into** a clustered provider (P3).
   The `vprovider.kb.io` validating webhook enforces the topology×type rule at
   admission (ADR-0007 D2). Until Addendum A slice 5 validates a real clustered VM
   end to end, do not run workloads on `topology: cluster`.
