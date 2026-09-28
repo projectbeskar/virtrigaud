@@ -27,6 +27,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -495,23 +496,78 @@ func TestClusteredAdoption_RespectsTheConsumerGrant(t *testing.T) {
 }
 
 // TestClusteredAdoption_FailedTransferDoesNotBind: when the provider refuses
-// the owner transfer (the domain was taken over in between), the created
-// VirtualMachine is not bound — no status.id, no host — and the failure is
-// counted.
+// the owner transfer for good (the domain was taken over in between: a
+// Conflict), the VirtualMachine this discovery created is not bound and is
+// removed again (no status.id, so no provider call), and the failure is
+// counted. A retryable failure (the host unreachable) keeps it waiting for the
+// next discovery, and a refusal never removes a VirtualMachine this discovery
+// did not create.
 func TestClusteredAdoption_FailedTransferDoesNotBind(t *testing.T) {
-	prov := &fakeClusteredAdopter{caps: routedAdoptionCaps,
-		transferErr: contracts.NewConflictError("owned by another VirtualMachine", nil),
-		domains: []*fakeDomain{
-			{host: "host-a", id: "web", uuid: "uuid-a-web", cpu: 1, memMiB: 1024, power: "On"},
-		}}
+	domains := func() []*fakeDomain {
+		return []*fakeDomain{{host: "host-a", id: "web", uuid: "uuid-a-web", cpu: 1, memMiB: 1024, power: "On"}}
+	}
+	name := clusteredAdoptedVMName("host-a", "web")
+
+	t.Run("refused for good: the created VM is removed", func(t *testing.T) {
+		prov := &fakeClusteredAdopter{caps: routedAdoptionCaps, domains: domains(),
+			transferErr: contracts.NewConflictError("owned by another VirtualMachine", nil)}
+		r := clusteredAdoptionReconciler(t, prov, clusteredAdoptionProvider(), clusterHost("host-a", "prov-c"))
+		res := reconcileAdoption(t, r)
+		assert.Equal(t, clusteredAdoptionRetryInterval, res.RequeueAfter)
+		err := r.Get(context.Background(), types.NamespacedName{Namespace: clusterNS, Name: name}, &infravirtrigaudiov1beta1.VirtualMachine{})
+		assert.True(t, apierrors.IsNotFound(err), "the stranded VM is removed: %v", err)
+		assert.EqualValues(t, 1, adoptionStatus(t, r).FailedAdoptions)
+	})
+
+	t.Run("retryable: the created VM keeps waiting, unbound", func(t *testing.T) {
+		prov := &fakeClusteredAdopter{caps: routedAdoptionCaps, domains: domains(),
+			transferErr: contracts.NewHostUnavailableError("host unreachable", nil)}
+		r := clusteredAdoptionReconciler(t, prov, clusteredAdoptionProvider(), clusterHost("host-a", "prov-c"))
+		reconcileAdoption(t, r)
+		vm := adoptedVMGet(t, r, name)
+		assert.Empty(t, vm.Status.ID)
+		assert.Nil(t, vm.Status.Placement)
+		assert.EqualValues(t, 1, adoptionStatus(t, r).FailedAdoptions)
+	})
+
+	t.Run("refused for good, VM not created by this discovery: kept", func(t *testing.T) {
+		prov := &fakeClusteredAdopter{caps: routedAdoptionCaps, domains: domains(),
+			transferErr: contracts.NewConflictError("owned by another VirtualMachine", nil)}
+		r := clusteredAdoptionReconciler(t, prov, clusteredAdoptionProvider(), clusterHost("host-a", "prov-c"),
+			awaitingAdoptedVM("host-a", "web", "uid-waiting"))
+		reconcileAdoption(t, r)
+		vm := adoptedVMGet(t, r, name)
+		assert.Equal(t, types.UID("uid-waiting"), vm.UID)
+		assert.Empty(t, vm.Status.ID)
+	})
+}
+
+// TestClusteredAdoption_UnreliableStampIsNotAdopted: a VM whose stamp state
+// the provider reports (unreadable, or several owners) is skipped before
+// anything is created for it.
+func TestClusteredAdoption_UnreliableStampIsNotAdopted(t *testing.T) {
+	prov := &unreliableStampAdopter{fakeClusteredAdopter: fakeClusteredAdopter{caps: routedAdoptionCaps, domains: []*fakeDomain{
+		{host: "host-a", id: "web", uuid: "uuid-a-web", power: "On"},
+	}}}
 	r := clusteredAdoptionReconciler(t, prov, clusteredAdoptionProvider(), clusterHost("host-a", "prov-c"))
 
-	res := reconcileAdoption(t, r)
-	assert.Equal(t, clusteredAdoptionRetryInterval, res.RequeueAfter)
-	vm := adoptedVMGet(t, r, clusteredAdoptedVMName("host-a", "web"))
-	assert.Empty(t, vm.Status.ID)
-	assert.Nil(t, vm.Status.Placement)
-	assert.EqualValues(t, 1, adoptionStatus(t, r).FailedAdoptions)
+	reconcileAdoption(t, r)
+	assert.Empty(t, prov.transfers)
+	var vms infravirtrigaudiov1beta1.VirtualMachineList
+	require.NoError(t, r.List(context.Background(), &vms))
+	assert.Empty(t, vms.Items, "nothing is created for it")
+	assert.Contains(t, adoptionStatus(t, r).Message, "owner stamp unreadable")
+}
+
+// unreliableStampAdopter lists every VM with an unreadable owner stamp.
+type unreliableStampAdopter struct{ fakeClusteredAdopter }
+
+func (f *unreliableStampAdopter) ListVMs(ctx context.Context) (contracts.VMList, error) {
+	list, err := f.fakeClusteredAdopter.ListVMs(ctx)
+	for i := range list.VMs {
+		list.VMs[i].ProviderRaw[contracts.VMInfoOwnerStampStateKey] = contracts.OwnerStampUnreadable
+	}
+	return list, err
 }
 
 // TestClusteredAdoption_HostNotOfTheProviderIsNotAdoptedFrom: a listed host id

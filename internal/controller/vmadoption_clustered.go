@@ -186,6 +186,10 @@ const (
 	// from one hypervisor could each take the same unstamped domain.
 	skipSharedEndpoint adoptionSkipReason = "on a Host whose endpoint another Host object also names " +
 		"(one clustered Provider per host endpoint)"
+	// skipStampUnreliable: its owner stamp cannot be read, records no UID, or
+	// names more than one owner across its definitions; a transfer would be
+	// refused, so nothing is created for it.
+	skipStampUnreliable adoptionSkipReason = "owner stamp unreadable or naming more than one owner (inspect the domain's metadata)"
 )
 
 // pendingAdoption is an adopted VirtualMachine whose domain already carries
@@ -459,6 +463,10 @@ func planClusteredAdoption(provider *infravirtrigaudiov1beta1.Provider, listed c
 			skip(info, skipSharedEndpoint)
 			continue
 		}
+		if info.ProviderRaw[contracts.VMInfoOwnerStampStateKey] != "" {
+			skip(info, skipStampUnreliable)
+			continue
+		}
 		if duplicated(info) {
 			skip(info, skipDuplicate)
 			continue
@@ -577,6 +585,7 @@ func (r *VMAdoptionReconciler) adoptClusteredVM(ctx context.Context, provider *i
 
 	name := clusteredAdoptedVMName(info.HostID, info.ID)
 	vm := &infravirtrigaudiov1beta1.VirtualMachine{}
+	created := false
 	err := r.Get(ctx, types.NamespacedName{Namespace: provider.Namespace, Name: name}, vm)
 	switch {
 	case apierrors.IsNotFound(err):
@@ -584,6 +593,7 @@ func (r *VMAdoptionReconciler) adoptClusteredVM(ctx context.Context, provider *i
 		if err != nil {
 			return err
 		}
+		created = true
 	case err != nil:
 		return fmt.Errorf("get VirtualMachine %s/%s: %w", provider.Namespace, name, err)
 	default:
@@ -594,7 +604,34 @@ func (r *VMAdoptionReconciler) adoptClusteredVM(ctx context.Context, provider *i
 			return fmt.Errorf("VirtualMachine %s/%s exists and is not waiting for this adoption: %w", vm.Namespace, name, errAdoptionSkipped)
 		}
 	}
-	return r.completeClusteredAdoption(ctx, provider, transferrer, providerInstance, vm, info, nil)
+	err = r.completeClusteredAdoption(ctx, provider, transferrer, providerInstance, vm, info, nil)
+	if created && refusedForGood(err) {
+		r.removeStrandedAdoptedVM(ctx, vm)
+	}
+	return err
+}
+
+// refusedForGood reports whether an adoption failed with a provider answer a
+// retry cannot change: the domain is owned by someone else or its stamp is
+// unusable (Conflict), it is gone or was replaced (NotFound), or the request
+// was refused (InvalidSpec).
+func refusedForGood(err error) bool {
+	return err != nil && (contracts.IsConflict(err) || contracts.IsNotFound(err) || contracts.IsInvalidSpec(err))
+}
+
+// removeStrandedAdoptedVM deletes vm — the VirtualMachine this discovery
+// created to adopt a domain the provider then refused — so it does not stay
+// waiting for a binding it will never get. It has no status.id and no
+// pending host, so its deletion makes no provider call; the delete is
+// preconditioned on its UID. A failure is logged: the next discovery reports
+// the VM (it stays waiting) and an administrator can remove it.
+func (r *VMAdoptionReconciler) removeStrandedAdoptedVM(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine) {
+	uid := vm.UID
+	if err := r.Delete(ctx, vm, client.Preconditions{UID: &uid}); err != nil && !apierrors.IsNotFound(err) {
+		log.FromContext(ctx).Error(err, "Failed to remove the adopted VirtualMachine the provider refused", "vm", vm.Name)
+		return
+	}
+	log.FromContext(ctx).Info("Removed the adopted VirtualMachine the provider refused (no provider call)", "vm", vm.Name)
 }
 
 // createClusteredAdoptedVM creates the VirtualMachine (and its VMClass) that

@@ -1416,9 +1416,12 @@ for a clustered provider.
   VM is identified by **(`host_id`, `id`)**, never by its name: two hosts may
   each have a domain named `web`, and they are two entries;
 - every `VMInfo` also carries the namespace and name recorded in the domain's
-  owner stamp (`owner_namespace`, `owner_name`; the UID stays in
+  owner stamp (`owner_namespace`, `owner_name`; the UIDs stay in
   `provider_raw["owner_uid"]`), empty for an unstamped domain or one with more
-  than one stamp. They are informational — only the UID identifies an owner —
+  than one owner. For an active domain the stamps of **both** definitions are
+  read (a transfer stamps both), and `provider_raw["owner_stamp_state"]` says
+  `unreadable` (a stamp cannot be read or has no UID) or `multiple` (more than
+  one owner) — adoption skips such a VM before creating anything. They are informational — only the UID identifies an owner —
   and A6's pre-schedule uniqueness check (R4) looks a VM's previous
   incarnations up by them;
 - every host whose VMs could not be listed — unknown or draining in the
@@ -1489,7 +1492,11 @@ slice 4 is refused with a message and nothing is listed. For each listed VM:
    unstamped domain (A6.4's re-attach will list the previous incarnation's).
    A domain stamped for anyone else, with two stamps, or whose stamp cannot be
    read, is refused (`AlreadyExists`) and not touched; a replaced domain is
-   `NotFound`. Transfers are serialized per host in the provider process, so
+   `NotFound`. When the provider refuses the transfer for good (`AlreadyExists`,
+   `NotFound`, `InvalidArgument`), the VirtualMachine this discovery created
+   for it is removed again — it has no `status.id`, so its deletion makes no
+   provider call; a retryable failure leaves it waiting for the next
+   discovery. Transfers are serialized per host in the provider process, so
    the check-and-set holds only while **one provider process** fronts a host:
    the provider controller runs a clustered Provider with **one replica and
    the `Recreate` strategy** (`spec.runtime.replicas` above 1 is ignored and

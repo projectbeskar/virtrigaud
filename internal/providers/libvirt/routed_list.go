@@ -217,8 +217,8 @@ func (p *Provider) listHostVMs(ctx context.Context, c libvirtConn) ([]contracts.
 				transportErr = rerr
 			}
 		},
-		ownerIdentity: true,
-		maxDomains:    clusteredListMaxDomainsPerHost,
+		stampReport: true,
+		maxDomains:  clusteredListMaxDomainsPerHost,
 	})
 	if err != nil {
 		return nil, err

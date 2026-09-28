@@ -2965,8 +2965,16 @@ func (p *Provider) listVMsOn(ctx context.Context, vp *VirshProvider, opts listOp
 			providerRaw[contracts.VMInfoOwnerUIDKey] = uids
 		}
 		var owner contracts.ObjectIdentity
-		if opts.ownerIdentity {
-			owner = soleOwner(raw.Stdout)
+		if opts.stampReport {
+			sr := clusteredStampReport(ctx, vp, domain, raw.Stdout, dx.UUID, opts.onReadFailure)
+			delete(providerRaw, contracts.VMInfoOwnerUIDKey)
+			if sr.uids != "" {
+				providerRaw[contracts.VMInfoOwnerUIDKey] = sr.uids
+			}
+			if sr.state != "" {
+				providerRaw[contracts.VMInfoOwnerStampStateKey] = sr.state
+			}
+			owner = sr.owner
 		}
 
 		vmInfos = append(vmInfos, contracts.VMInfo{
@@ -2993,12 +3001,94 @@ type listOptions struct {
 	// failed: the clustered listing uses it to report a host whose connection
 	// dropped mid-list as unreachable instead of as a host with fewer VMs.
 	onReadFailure func(domain string, err error)
-	// ownerIdentity reports each VM's owner stamp namespace and name
-	// (VMInfo.OwnerNamespace/OwnerName; ADR-0007 Addendum A, slice 4).
-	ownerIdentity bool
+	// stampReport reports each VM's owner stamps as a clustered listing does
+	// (clusteredStampReport; ADR-0007 Addendum A, slice 4): the stamps of both
+	// definitions of an active domain, the stamp state, and the sole owner's
+	// namespace and name (VMInfo.OwnerNamespace/OwnerName).
+	stampReport bool
 	// maxDomains, when positive, fails a listing of a host with more domains
 	// than that before any definition is read.
 	maxDomains int
+}
+
+// stampReport is what a clustered listing reports about one domain's owner
+// stamps.
+type stampReport struct {
+	// uids are the distinct stamped UIDs, comma-separated (VMInfoOwnerUIDKey).
+	uids string
+	// state is contracts.OwnerStampUnreadable or OwnerStampMultiple, or "".
+	state string
+	// owner is the one owner recorded, when there is exactly one.
+	owner contracts.ObjectIdentity
+}
+
+// clusteredStampReport reads a domain's owner stamps for a clustered listing:
+// the running definition's (liveXML, already read) and, for an active domain,
+// the persistent definition's (`virsh dumpxml --inactive <uuid>`), because a
+// transfer stamps both and an adoption must see a stamp that is only in one.
+// A stamp that cannot be read, or records no UID, makes the state
+// OwnerStampUnreadable; more than one distinct owner, OwnerStampMultiple. A
+// failed persistent read is reported to onReadFailure (the listing treats a
+// host that stopped answering as unreachable) and makes the state unreadable.
+func clusteredStampReport(ctx context.Context, vp *VirshProvider, domain VirshDomain, liveXML, uuid string,
+	onReadFailure func(string, error)) stampReport {
+	stamps, err := domainOwners(liveXML)
+	if err != nil {
+		return stampReport{state: contracts.OwnerStampUnreadable}
+	}
+	if domain.State != domainStateShutOff {
+		if !canonicalUUIDRE.MatchString(strings.TrimSpace(uuid)) {
+			return stampReport{uids: joinOwnerUIDs(stamps), state: contracts.OwnerStampUnreadable}
+		}
+		res, rerr := vp.runVirshCommand(ctx, "dumpxml", "--inactive", strings.TrimSpace(uuid))
+		if rerr != nil {
+			if onReadFailure != nil {
+				onReadFailure(domain.Name, rerr)
+			}
+			return stampReport{uids: joinOwnerUIDs(stamps), state: contracts.OwnerStampUnreadable}
+		}
+		persisted, perr := domainOwners(res.Stdout)
+		if perr != nil {
+			return stampReport{uids: joinOwnerUIDs(stamps), state: contracts.OwnerStampUnreadable}
+		}
+		stamps = append(stamps, persisted...)
+	}
+	distinct := map[contracts.ObjectIdentity]bool{}
+	var unique []contracts.ObjectIdentity
+	for _, s := range stamps {
+		if !distinct[s] {
+			distinct[s] = true
+			unique = append(unique, s)
+		}
+	}
+	sr := stampReport{uids: joinOwnerUIDs(unique)}
+	for _, s := range unique {
+		if s.UID == "" {
+			sr.state = contracts.OwnerStampUnreadable
+			return sr
+		}
+	}
+	switch len(unique) {
+	case 0:
+	case 1:
+		sr.owner = unique[0]
+	default:
+		sr.state = contracts.OwnerStampMultiple
+	}
+	return sr
+}
+
+// joinOwnerUIDs joins the non-empty, distinct UIDs of owners, in order.
+func joinOwnerUIDs(owners []contracts.ObjectIdentity) string {
+	var uids []string
+	seen := map[string]bool{}
+	for _, o := range owners {
+		if o.UID != "" && !seen[o.UID] {
+			seen[o.UID] = true
+			uids = append(uids, o.UID)
+		}
+	}
+	return strings.Join(uids, ",")
 }
 
 // soleOwner returns the owner stamped on a domain document when it carries

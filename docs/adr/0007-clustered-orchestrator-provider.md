@@ -995,7 +995,11 @@ slice 4 is implemented (see the slice 4 amendment below); slice 5 is open.
 >   `VMInfo` also reports its owner stamp's namespace and name
 >   (`owner_namespace` 11, `owner_name` 12; empty when unstamped or when more
 >   than one stamp is recorded; the UID stays in `provider_raw["owner_uid"]`),
->   so A6.2 needs no second proto change. Single-host leaves them empty. The
+>   so A6.2 needs no second proto change. Single-host leaves them empty. For
+>   an active domain a clustered listing reads both definitions' stamps and
+>   reports `provider_raw["owner_stamp_state"]` (`unreadable` / `multiple`)
+>   when they cannot be relied on; adoption skips such a VM, and removes a
+>   VirtualMachine it created when the provider refuses the transfer for good. The
 >   `ListVMsRequest` owner filter R4 also wants is **left to A6.2**: honouring
 >   it honestly needs every provider to filter or a capability to say it
 >   does — a single-host, vSphere, Proxmox or mock provider would otherwise

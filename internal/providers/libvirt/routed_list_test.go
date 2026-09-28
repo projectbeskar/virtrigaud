@@ -590,3 +590,41 @@ func TestCappedBuffer(t *testing.T) {
 	assert.True(t, b.exceeded)
 	assert.Equal(t, "abcde", b.String())
 }
+
+// TestClustered_ListVMs_ReportsStampsOfBothDefinitions: for an active domain
+// the persistent definition's stamps are read too (a transfer stamps both),
+// and a stamp that cannot be relied on is reported as a stamp state.
+func TestClustered_ListVMs_ReportsStampsOfBothDefinitions(t *testing.T) {
+	persistOnly := listDomain{name: "persist-only", uuid: "aaaaaaaa-0000-4000-8000-0000000000a1", state: "running"}
+	two := listDomain{name: "two-owners", uuid: "aaaaaaaa-0000-4000-8000-0000000000a2", state: "running", owner: ownerTeamA}
+	bad := listDomain{name: "bad-stamp", uuid: "aaaaaaaa-0000-4000-8000-0000000000a3"}
+	fx := newListFixture(t, map[string][]listDomain{"host-a": {persistOnly, two, bad}})
+	stamped := persistOnly
+	stamped.owner = ownerTeamB
+	fx.write("host-a", "dom-"+persistOnly.uuid+".xml", listDomainDoc(stamped)) // `dumpxml --inactive <uuid>`
+	other := two
+	other.owner = ownerTeamB
+	fx.write("host-a", "dom-"+two.uuid+".xml", listDomainDoc(other))
+	fx.write("host-a", "dom-bad-stamp.xml", strings.Replace(listDomainDoc(bad), "<memory",
+		"<metadata><virtrigaud:owner xmlns:virtrigaud='"+ownerMetadataNamespaceURI+"' uid='a' uid='b'/></metadata>\n  <memory", 1))
+	p := clusterOf(t, []string{"host-a"})
+
+	list, err := p.ListVMs(context.Background())
+	require.NoError(t, err)
+	byID := map[string]contracts.VMInfo{}
+	for _, v := range list.VMs {
+		byID[v.ID] = v
+	}
+	assert.Equal(t, ownerTeamB.UID, byID["persist-only"].ProviderRaw[contracts.VMInfoOwnerUIDKey],
+		"a stamp only in the persistent definition is seen")
+	assert.Empty(t, byID["persist-only"].ProviderRaw[contracts.VMInfoOwnerStampStateKey])
+	assert.Equal(t, ownerTeamB.Namespace, byID["persist-only"].OwnerNamespace)
+	assert.Equal(t, ownerTeamA.UID+","+ownerTeamB.UID, byID["two-owners"].ProviderRaw[contracts.VMInfoOwnerUIDKey])
+	assert.Equal(t, contracts.OwnerStampMultiple, byID["two-owners"].ProviderRaw[contracts.VMInfoOwnerStampStateKey])
+	assert.Empty(t, byID["two-owners"].OwnerNamespace, "several owners: none is reported")
+	assert.Equal(t, contracts.OwnerStampUnreadable, byID["bad-stamp"].ProviderRaw[contracts.VMInfoOwnerStampStateKey])
+	assert.Contains(t, fx.calls(), "host-a dumpxml --inactive "+persistOnly.uuid)
+	for _, c := range fx.calls() {
+		assert.NotEqual(t, "host-a dumpxml --inactive "+bad.uuid, c, "a shut-off domain has one definition")
+	}
+}

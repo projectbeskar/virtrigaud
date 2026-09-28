@@ -25,6 +25,22 @@ import "context"
 // never stamped.
 const VMInfoUUIDKey = "uuid"
 
+// VMInfoOwnerStampStateKey is the VMInfo.ProviderRaw key under which a
+// clustered provider reports that a listed VM's owner stamp cannot be relied
+// on (ADR-0007 Addendum A, slice 4): OwnerStampUnreadable or
+// OwnerStampMultiple. Absent when the VM carries no stamp or exactly one
+// readable owner. Adoption skips a VM with this key set.
+const VMInfoOwnerStampStateKey = "owner_stamp_state"
+
+const (
+	// OwnerStampUnreadable: a stamp (in the running or the persistent
+	// definition) could not be read, or records no UID.
+	OwnerStampUnreadable = "unreadable"
+	// OwnerStampMultiple: more than one owner is recorded across the VM's
+	// definitions (only a hand-edited definition has that).
+	OwnerStampMultiple = "multiple"
+)
+
 // TransferOwnerRequest asks a clustered provider to hand one VM on one of its
 // hosts to a VirtualMachine by re-stamping the VM's owner (ADR-0007 Addendum
 // A, slice 4). It is the manager-side mirror of the provider.v1
