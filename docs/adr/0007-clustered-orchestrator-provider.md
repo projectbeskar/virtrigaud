@@ -1074,7 +1074,9 @@ slice 4 is implemented (see the slice 4 amendment below); slice 5 is open.
 >   and `VMInfo.Disks` lists file-backed disks only (no block or network
 >   disks). A clustered `Delete`'s in-use scan is still host-local — it should
 >   fan out across hosts as A6.1's R3 does for `Create` (follow-up). A Host whose endpoint another Host
->   object names is not adopted from (logged), and an unstamped domain whose
+>   object or a single-host Provider's `spec.endpoint` names is not adopted
+>   from (logged; a failed Host or Provider list adopts nothing that pass;
+>   one host under two names — an alias, an IP — is not recognized), and an unstamped domain whose
 >   name is the `status.id` of a VirtualMachine bound through a single-host
 >   Provider is skipped (a hypervisor must not be fronted by both kinds). Before any transfer that names
 >   a replaceable owner (none from adoption until A6.4), the manager proves
