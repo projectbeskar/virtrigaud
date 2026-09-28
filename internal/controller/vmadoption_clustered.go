@@ -154,6 +154,10 @@ var errAdoptionDeferred = errors.New("adoption deferred")
 // binding is retried.
 var errTransferRefused = errors.New("the provider refused the owner transfer")
 
+// errAdoptionStranded marks a refused adoption whose waiting VirtualMachine
+// could not be removed; the adoption message names it for an administrator.
+var errAdoptionStranded = errors.New("adopted VirtualMachine stranded")
+
 // clusteredAdoptionPlan is what one clustered discovery found to do.
 type clusteredAdoptionPlan struct {
 	// adopt are listed VMs no VirtualMachine manages.
@@ -299,7 +303,11 @@ func (r *VMAdoptionReconciler) reconcileClusteredAdoption(ctx context.Context, p
 		"pendingBindings", len(plan.complete), "unreachableHosts", listed.UnreachableHostIDs)
 
 	adopted, failed, deferred := int32(0), int32(0), int32(0)
+	var stranded []string
 	count := func(err error, msg string, info contracts.VMInfo) {
+		if errors.Is(err, errAdoptionStranded) {
+			stranded = append(stranded, clusteredAdoptedVMName(info.HostID, info.ID))
+		}
 		switch {
 		case err == nil:
 			adopted++
@@ -314,7 +322,7 @@ func (r *VMAdoptionReconciler) reconcileClusteredAdoption(ctx context.Context, p
 		}
 	}
 	for _, p := range plan.complete {
-		count(r.completeAdoption(ctx, provider, transferrer, providerInstance, p.vm, p.info, false),
+		count(r.completeAdoption(ctx, provider, transferrer, providerInstance, p.vm, p.info),
 			"Failed to complete the adoption of a VM", p.info)
 	}
 	for _, info := range unmanaged {
@@ -327,7 +335,8 @@ func (r *VMAdoptionReconciler) reconcileClusteredAdoption(ctx context.Context, p
 	provider.Status.Adoption.DiscoveredVMs = int32(len(unmanaged) + countSkipped(plan.skipped, skipHostsUnknown))
 	provider.Status.Adoption.AdoptedVMs = adopted
 	provider.Status.Adoption.FailedAdoptions = failed
-	provider.Status.Adoption.Message = clusteredAdoptionMessage(adopted, failed, deferred, plan.skipped, listed.UnreachableHostIDs)
+	provider.Status.Adoption.Message = clusteredAdoptionMessage(adopted, failed, deferred, plan.skipped, listed.UnreachableHostIDs) +
+		strandedSummary(stranded)
 	if err := r.Status().Update(ctx, provider); err != nil {
 		logger.Error(err, "Failed to update adoption status")
 		metrics.RecordError(errReasonAdoptionStatus, metrics.ComponentManager)
@@ -366,6 +375,26 @@ func clusteredAdoptionMessage(adopted, failed, deferred int32, skipped []adoptio
 		if more := len(hosts) - len(named); more > 0 {
 			msg += fmt.Sprintf(" and %d more", more)
 		}
+	}
+	return msg
+}
+
+// strandedSummary names, for the adoption message, the adopting
+// VirtualMachines the provider refused a domain for and that could not be
+// removed (at most unreachableHostsListed of them).
+func strandedSummary(names []string) string {
+	if len(names) == 0 {
+		return ""
+	}
+	sort.Strings(names)
+	shown := names
+	if len(shown) > unreachableHostsListed {
+		shown = shown[:unreachableHostsListed]
+	}
+	msg := fmt.Sprintf("; %d adopted VirtualMachine(s) wait for a domain the provider refused and could not be removed "+
+		"(delete them; no provider call is made): %s", len(names), strings.Join(shown, ", "))
+	if more := len(names) - len(shown); more > 0 {
+		msg += fmt.Sprintf(" and %d more", more)
 	}
 	return msg
 }
@@ -681,7 +710,6 @@ func (r *VMAdoptionReconciler) adoptClusteredVM(ctx context.Context, provider *i
 
 	name := clusteredAdoptedVMName(info.HostID, info.ID)
 	vm := &infravirtrigaudiov1beta1.VirtualMachine{}
-	created := false
 	err := r.Get(ctx, types.NamespacedName{Namespace: provider.Namespace, Name: name}, vm)
 	switch {
 	case apierrors.IsNotFound(err):
@@ -689,7 +717,6 @@ func (r *VMAdoptionReconciler) adoptClusteredVM(ctx context.Context, provider *i
 		if err != nil {
 			return err
 		}
-		created = true
 	case err != nil:
 		return fmt.Errorf("get VirtualMachine %s/%s: %w", provider.Namespace, name, err)
 	default:
@@ -700,21 +727,26 @@ func (r *VMAdoptionReconciler) adoptClusteredVM(ctx context.Context, provider *i
 			return fmt.Errorf("VirtualMachine %s/%s exists and is not waiting for this adoption: %w", vm.Namespace, name, errAdoptionSkipped)
 		}
 	}
-	return r.completeAdoption(ctx, provider, transferrer, providerInstance, vm, info, created)
+	return r.completeAdoption(ctx, provider, transferrer, providerInstance, vm, info)
 }
 
 // completeAdoption runs completeClusteredAdoption for an adopting
-// VirtualMachine and, when this discovery created it and the provider refused
-// the owner transfer for good (errTransferRefused), removes it so it does not
-// wait for a binding it will never get (removeStrandedAdoptedVM). Any other
-// failure — including one after a successful transfer — keeps the VM, and the
-// next discovery retries the binding from the stamp.
+// VirtualMachine (newly created, left by an earlier discovery, or waiting for
+// a lost binding) and, when the provider refused the owner transfer for good
+// (errTransferRefused), removes that VirtualMachine so it does not wait for a
+// binding it will never get (removeStrandedAdoptedVM). A VM it could not
+// remove is reported as stranded (errAdoptionStranded). Any other failure —
+// including one after a successful transfer — keeps the VM, and the next
+// discovery retries the binding from the stamp.
 func (r *VMAdoptionReconciler) completeAdoption(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider,
 	transferrer contracts.OwnerTransferrer, providerInstance contracts.Provider,
-	vm *infravirtrigaudiov1beta1.VirtualMachine, info contracts.VMInfo, created bool) error {
+	vm *infravirtrigaudiov1beta1.VirtualMachine, info contracts.VMInfo) error {
 	err := r.completeClusteredAdoption(ctx, provider, transferrer, providerInstance, vm, info, nil)
-	if created && errors.Is(err, errTransferRefused) {
-		r.removeStrandedAdoptedVM(ctx, provider, vm, info)
+	if !errors.Is(err, errTransferRefused) {
+		return err
+	}
+	if !r.removeStrandedAdoptedVM(ctx, provider, vm, info) {
+		return fmt.Errorf("%w (%s/%s): %w", errAdoptionStranded, vm.Namespace, vm.Name, err)
 	}
 	return err
 }

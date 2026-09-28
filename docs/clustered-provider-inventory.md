@@ -1506,11 +1506,14 @@ slice 4 is refused with a message and nothing is listed. For each listed VM:
    unstamped domain (A6.4's re-attach will list the previous incarnation's).
    A domain stamped for anyone else, with two stamps, or whose stamp cannot be
    read, is refused (`AlreadyExists`) and not touched; a replaced domain is
-   `NotFound`. When the provider refuses the transfer for good (`AlreadyExists`,
-   `NotFound`, `InvalidArgument`), the VirtualMachine this discovery created
-   for it is removed again — it has no `status.id`, so its deletion makes no
-   provider call; a retryable failure leaves it waiting for the next
-   discovery. Transfers are serialized per host in the provider process, so
+   `NotFound`. When the provider refuses the transfer itself for good
+   (`AlreadyExists`, `NotFound`, `InvalidArgument`), the adopting
+   VirtualMachine — whichever discovery created it — is removed again, after
+   a fresh read shows it still waiting for that very domain, unbound: it has
+   no `status.id`, so its deletion makes no provider call. One that cannot be
+   removed is named in `status.adoption.message`. A retryable failure, or any
+   failure after a successful transfer (the domain already carries its
+   stamp), keeps it, and the next discovery completes the binding. Transfers are serialized per host in the provider process, so
    the check-and-set holds only while **one provider process** fronts a host:
    the provider controller runs a clustered Provider with **one replica and
    the `Recreate` strategy** (`spec.runtime.replicas` above 1 is ignored and

@@ -544,15 +544,33 @@ func TestClusteredAdoption_FailedTransferDoesNotBind(t *testing.T) {
 		assert.EqualValues(t, 1, adoptionStatus(t, r).FailedAdoptions)
 	})
 
-	t.Run("refused for good, VM not created by this discovery: kept", func(t *testing.T) {
+	t.Run("refused for good, VM left by an earlier discovery: removed too", func(t *testing.T) {
 		prov := &fakeClusteredAdopter{caps: routedAdoptionCaps, domains: domains(),
 			transferErr: contracts.NewConflictError("owned by another VirtualMachine", nil)}
 		r := clusteredAdoptionReconciler(t, prov, clusteredAdoptionProvider(), clusterHost("host-a", "prov-c"),
 			awaitingAdoptedVM("host-a", "web", "uid-waiting"))
 		reconcileAdoption(t, r)
-		vm := adoptedVMGet(t, r, name)
-		assert.Equal(t, types.UID("uid-waiting"), vm.UID)
-		assert.Empty(t, vm.Status.ID)
+		err := r.Get(context.Background(), types.NamespacedName{Namespace: clusterNS, Name: name}, &infravirtrigaudiov1beta1.VirtualMachine{})
+		assert.True(t, apierrors.IsNotFound(err), "a stranded VM from an earlier discovery is removed: %v", err)
+	})
+
+	t.Run("refused for good, the VM cannot be removed: named in the message", func(t *testing.T) {
+		prov := &fakeClusteredAdopter{caps: routedAdoptionCaps, domains: domains(),
+			transferErr: contracts.NewConflictError("owned by another VirtualMachine", nil)}
+		r := clusteredAdoptionReconciler(t, prov, clusteredAdoptionProvider(), clusterHost("host-a", "prov-c"),
+			awaitingAdoptedVM("host-a", "web", "uid-waiting"))
+		ww, ok := r.Client.(client.WithWatch)
+		require.True(t, ok)
+		r.Client = interceptor.NewClient(ww, interceptor.Funcs{
+			Delete: func(context.Context, client.WithWatch, client.Object, ...client.DeleteOption) error {
+				return fmt.Errorf("delete refused by a webhook")
+			},
+		})
+		reconcileAdoption(t, r)
+		assert.Equal(t, types.UID("uid-waiting"), adoptedVMGet(t, r, name).UID)
+		msg := adoptionStatus(t, r).Message
+		assert.Contains(t, msg, "wait for a domain the provider refused and could not be removed")
+		assert.Contains(t, msg, name)
 	})
 }
 
