@@ -790,3 +790,52 @@ func TestTransientSSHConnectError_ExcludesKnownHostsAndAuth(t *testing.T) {
 	// A genuine handshake-stage drop with neither substring still matches.
 	assert.True(t, transientSSHConnectError("ssh handshake with host:22 failed: ssh: handshake failed: EOF"))
 }
+
+// TestRunOverSSH_LargeStderrNeverFailsTheCommand pins the stderr bound (review
+// of slice 4): a command that writes more stderr than is kept — wget's
+// progress dots on a large download — and exits 0 succeeds, with its stdout
+// intact and the start and end of its stderr kept; its exit status is what
+// decides success.
+func TestRunOverSSH_LargeStderrNeverFailsTheCommand(t *testing.T) {
+	hostKey := generateTestHostKey(t)
+	addr := startTestSSHServer(t, hostKey, testSSHServerOpts{password: "s3cret"})
+	useTempKnownHosts(t, knownhosts.Line([]string{addr}, hostKey.PublicKey())+"\n")
+	v := testVirshProvider("virtrigaud", addr, &Credentials{Password: "s3cret"})
+	t.Cleanup(func() { _ = v.Cleanup() })
+
+	// 2 MiB of stderr between a first and a last line, then stdout, exit 0.
+	cmd := `echo first-line >&2; head -c 2097152 /dev/zero | tr '\0' . >&2; echo last-line >&2; echo done`
+	res, err := v.runOverSSH(t.Context(), cmd)
+	require.NoError(t, err, "a large stderr never fails a command that exited 0")
+	assert.Equal(t, 0, res.ExitCode)
+	assert.Equal(t, "done\n", res.Stdout)
+	assert.True(t, strings.HasPrefix(res.Stderr, "first-line\n"))
+	assert.True(t, strings.HasSuffix(res.Stderr, "last-line\n"), "the end of stderr (the error text) is kept")
+	assert.Contains(t, res.Stderr, "bytes of stderr omitted")
+	assert.LessOrEqual(t, len(res.Stderr), sshStderrHeadBytes+sshStderrTailBytes+100)
+
+	// A failing command keeps its own exit status and its last words.
+	res, err = v.runOverSSH(t.Context(), `head -c 2097152 /dev/zero | tr '\0' . >&2; echo boom >&2; exit 3`)
+	require.Error(t, err)
+	assert.Equal(t, 3, res.ExitCode)
+	assert.True(t, strings.HasSuffix(res.Stderr, "boom\n"))
+}
+
+// TestHeadTailBuffer keeps the head and the tail, marks what it dropped, and
+// is exact when nothing was dropped.
+func TestHeadTailBuffer(t *testing.T) {
+	b := headTailBuffer{headMax: 4, tailMax: 4}
+	_, _ = b.WriteString("ab")
+	assert.Equal(t, "ab", b.String())
+	assert.False(t, b.truncated())
+	_, _ = b.WriteString("cdef")
+	assert.Equal(t, "abcdef", b.String(), "head + tail, nothing dropped yet")
+	_, _ = b.WriteString("gh")
+	assert.Equal(t, "abcdefgh", b.String())
+	_, _ = b.WriteString("ij")
+	assert.True(t, b.truncated())
+	assert.Equal(t, "abcd\n[... 2 bytes of stderr omitted ...]\nghij", b.String())
+	_, _ = b.WriteString("0123456789")
+	assert.Equal(t, "abcd\n[... 12 bytes of stderr omitted ...]\n6789", b.String())
+	assert.Equal(t, 20, b.Len())
+}

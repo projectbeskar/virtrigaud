@@ -1018,8 +1018,12 @@ slice 4 is implemented (see the slice 4 amendment below); slice 5 is open.
 >   reference. Draining hosts are not listed. Each call starts at another
 >   host (rotation). Size bounds: a host with more than 2000 domains is
 >   reported unreachable; the manager accepts a `ListVMs` answer of up to 64
->   MiB; one SSH command keeps at most 64 MiB of output (1 MiB stderr) and
->   fails beyond it (single-host too — no realistic output comes near it).
+>   MiB; one SSH command keeps at most 64 MiB of stdout and fails beyond it
+>   (a parser must never read a truncated document; single-host too — no
+>   realistic stdout comes near it). stderr never fails a command: its first
+>   64 KiB and last 960 KiB are kept (the error text is at the end) and the
+>   middle is dropped and marked, so wget's progress output on a large image
+>   download cannot fail a create that succeeded.
 >   Follow-up: the per-domain `dumpxml` reads are sequential.
 > - **A new RPC: `TransferOwner`** (deviation). Every routed per-VM call is
 >   owner-checked, so a domain adopted as it is — unstamped, or stamped by a

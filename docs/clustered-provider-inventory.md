@@ -1407,9 +1407,11 @@ for a clustered provider.
   the same hosts unlisted;
 - bounded in size: a host with more than 2000 domains is reported unreachable
   (logged) instead of read; the manager accepts an answer of up to 64 MiB; and
-  a command run over a host's SSH connection keeps at most 64 MiB of output
-  (1 MiB of errors) — a larger output fails the command instead of being
-  parsed truncated. Each domain's definition is still read with its own
+  a command run over a host's SSH connection keeps at most 64 MiB of stdout —
+  a larger stdout fails the command instead of being parsed truncated. Its
+  stderr never fails it: the first 64 KiB and the last 960 KiB are kept (the
+  error text comes last) and the middle is dropped and marked, so a large
+  download's progress output does not fail a create that succeeded. Each domain's definition is still read with its own
   `virsh dumpxml`: a host near the bound may need a batched read to fit its
   deadline (follow-up, with ADR-0008's native list);
 - every `VMInfo` carries `host_id` (the `Host` name). On a clustered provider a
