@@ -1,0 +1,78 @@
+{
+  "dumpxml-fails-for-all": {
+    "calls": [
+      "single virsh list --all",
+      "single virsh dumpxml legacy-web",
+      "single virsh dumpxml team-a.db"
+    ],
+    "resp": "{}",
+    "err": ""
+  },
+  "dumpxml-missing-for-one": {
+    "calls": [
+      "single virsh list --all",
+      "single virsh dumpxml ghost",
+      "single virsh dumpxml legacy-web"
+    ],
+    "resp": "{\"vms\":[{\"id\":\"legacy-web\",\"name\":\"legacy-web\",\"power_state\":\"On\",\"cpu\":2,\"memory_mib\":2048,\"disks\":[{\"id\":\"legacy-web-disk-0\",\"path\":\"/var/lib/libvirt/images/legacy-web-disk.qcow2\",\"format\":\"qcow2\"}],\"networks\":[{\"mac\":\"52:54:00:aa:00:01\"}],\"provider_raw\":{\"domain_id\":\"1\",\"domain_name\":\"legacy-web\",\"power_state\":\"On\",\"state\":\"running\",\"uuid\":\"aaaaaaaa-1111-4111-8111-111111111111\"}}]}",
+    "err": ""
+  },
+  "empty-host": {
+    "calls": [
+      "single virsh list --all"
+    ],
+    "resp": "{}",
+    "err": ""
+  },
+  "list-fails": {
+    "calls": [
+      "single virsh list --all"
+    ],
+    "resp": "",
+    "err": "failed to list VMs: failed to list domains: failed to list domains: virsh command 'virsh -c qemu:///single list --all' failed (exit code 1): stderr=cat: \u003cfake\u003e/single/list.txt: No such file or directory\n, stdout="
+  },
+  "mixed-domains": {
+    "calls": [
+      "single virsh list --all",
+      "single virsh dumpxml legacy-web",
+      "single virsh dumpxml team-a.db",
+      "single virsh dumpxml no-vcpu",
+      "single virsh dumpxml paused-vm"
+    ],
+    "resp": "{\"vms\":[{\"id\":\"legacy-web\",\"name\":\"legacy-web\",\"power_state\":\"On\",\"cpu\":2,\"memory_mib\":2048,\"disks\":[{\"id\":\"legacy-web-disk-0\",\"path\":\"/var/lib/libvirt/images/legacy-web-disk.qcow2\",\"format\":\"qcow2\"}],\"networks\":[{\"mac\":\"52:54:00:aa:00:01\"}],\"provider_raw\":{\"domain_id\":\"0\",\"domain_name\":\"legacy-web\",\"power_state\":\"On\",\"state\":\"running\",\"uuid\":\"aaaaaaaa-1111-4111-8111-111111111111\"}},{\"id\":\"team-a.db\",\"name\":\"team-a.db\",\"power_state\":\"Off\",\"cpu\":4,\"memory_mib\":8192,\"disks\":[{\"id\":\"team-a.db-disk-0\",\"path\":\"/var/lib/libvirt/images/team-a.db-disk.qcow2\",\"format\":\"qcow2\"},{\"id\":\"team-a.db-disk-1\",\"path\":\"/var/lib/libvirt/images/team-a.db-data.img\",\"format\":\"raw\"}],\"networks\":[{\"mac\":\"52:54:00:bb:00:01\"},{\"mac\":\"52:54:00:bb:00:02\"}],\"provider_raw\":{\"domain_id\":\"1\",\"domain_name\":\"team-a.db\",\"owner_uid\":\"0b8f5e0e-7a53-4f6b-9a0e-1d2c3b4a5f60\",\"power_state\":\"Off\",\"state\":\"shut off\",\"uuid\":\"bbbbbbbb-2222-4222-8222-222222222222\"}},{\"id\":\"no-vcpu\",\"name\":\"no-vcpu\",\"power_state\":\"Off\",\"cpu\":1,\"memory_mib\":1024,\"disks\":[{\"id\":\"no-vcpu-disk-0\",\"path\":\"/var/lib/libvirt/images/no-vcpu.qcow2\",\"format\":\"qcow2\"}],\"provider_raw\":{\"domain_id\":\"2\",\"domain_name\":\"no-vcpu\",\"power_state\":\"Off\",\"state\":\"shut off\",\"uuid\":\"cccccccc-3333-4333-8333-333333333333\"}},{\"id\":\"paused-vm\",\"name\":\"paused-vm\",\"power_state\":\"Suspended\",\"cpu\":1,\"memory_mib\":512,\"provider_raw\":{\"domain_id\":\"3\",\"domain_name\":\"paused-vm\",\"power_state\":\"Suspended\",\"state\":\"paused\",\"uuid\":\"dddddddd-4444-4444-8444-444444444444\"}}]}",
+    "err": ""
+  },
+  "no-header-separator": {
+    "calls": [
+      "single virsh list --all"
+    ],
+    "resp": "{}",
+    "err": ""
+  },
+  "non-kib-memory-skipped": {
+    "calls": [
+      "single virsh list --all",
+      "single virsh dumpxml mib-unit",
+      "single virsh dumpxml paused-vm"
+    ],
+    "resp": "{\"vms\":[{\"id\":\"paused-vm\",\"name\":\"paused-vm\",\"power_state\":\"Suspended\",\"cpu\":1,\"memory_mib\":512,\"provider_raw\":{\"domain_id\":\"1\",\"domain_name\":\"paused-vm\",\"power_state\":\"Suspended\",\"state\":\"paused\",\"uuid\":\"dddddddd-4444-4444-8444-444444444444\"}}]}",
+    "err": ""
+  },
+  "two-owner-stamps": {
+    "calls": [
+      "single virsh list --all",
+      "single virsh dumpxml hand-edited"
+    ],
+    "resp": "{\"vms\":[{\"id\":\"hand-edited\",\"name\":\"hand-edited\",\"power_state\":\"Off\",\"cpu\":1,\"memory_mib\":1024,\"provider_raw\":{\"domain_id\":\"0\",\"domain_name\":\"hand-edited\",\"owner_uid\":\"0b8f5e0e-7a53-4f6b-9a0e-1d2c3b4a5f60,c4d1a9f2-3e6b-4c7d-8e9f-0a1b2c3d4e5f\",\"power_state\":\"Off\",\"state\":\"shut off\",\"uuid\":\"eeeeeeee-5555-4555-8555-555555555555\"}}]}",
+    "err": ""
+  },
+  "unparseable-domain-skipped": {
+    "calls": [
+      "single virsh list --all",
+      "single virsh dumpxml garbage",
+      "single virsh dumpxml team-a.db"
+    ],
+    "resp": "{\"vms\":[{\"id\":\"team-a.db\",\"name\":\"team-a.db\",\"power_state\":\"Off\",\"cpu\":4,\"memory_mib\":8192,\"disks\":[{\"id\":\"team-a.db-disk-0\",\"path\":\"/var/lib/libvirt/images/team-a.db-disk.qcow2\",\"format\":\"qcow2\"},{\"id\":\"team-a.db-disk-1\",\"path\":\"/var/lib/libvirt/images/team-a.db-data.img\",\"format\":\"raw\"}],\"networks\":[{\"mac\":\"52:54:00:bb:00:01\"},{\"mac\":\"52:54:00:bb:00:02\"}],\"provider_raw\":{\"domain_id\":\"1\",\"domain_name\":\"team-a.db\",\"owner_uid\":\"0b8f5e0e-7a53-4f6b-9a0e-1d2c3b4a5f60\",\"power_state\":\"Off\",\"state\":\"shut off\",\"uuid\":\"bbbbbbbb-2222-4222-8222-222222222222\"}}]}",
+    "err": ""
+  }
+}

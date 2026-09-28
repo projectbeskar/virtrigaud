@@ -34,8 +34,11 @@
 > `ExportDisk` (s3 / nfs), all owner-checked, and host-encodes task references
 > so `TaskStatus` is routed too — see
 > [Post-create routing](#post-create-routing-adr-0007-addendum-a).
+> **Slice 4** lists VMs across every host (`VMInfo.host_id`,
+> `ListVMsResponse.unreachable_host_ids`) and adopts from a clustered provider,
+> keyed on (host, id) — see [Listing and adoption](#listing-and-adoption-slice-4).
 > `topology: cluster` stays **experimental** until Addendum A slice 5. Still to
-> come: cross-host `ListVMs` + adoption (slice 4), host→host migration (P2).
+> come: host→host migration (P2).
 
 VirtRigaud is adding a new *class* of provider — a **clustered / orchestrator**
 provider — that makes VirtRigaud itself the cluster manager for hypervisors that
@@ -1040,7 +1043,8 @@ feature.
 Only the operator knows where a VM runs, so **the operator names the host on
 every per-VM call** and the provider never looks it up (A1, D1). Slice 1 routed
 `Describe` and `Delete`; slice 2 routed `Power` and `Reconfigure`; slice 3 routes
-the snapshot family, `Clone`, `GetDiskInfo`, `ExportDisk` and `TaskStatus`.
+the snapshot family, `Clone`, `GetDiskInfo`, `ExportDisk` and `TaskStatus`;
+slice 4 runs `ListVMs` on every host and adds `TransferOwner` for adoption.
 
 ### On the wire and in the manager
 
@@ -1088,7 +1092,8 @@ the snapshot family, `Clone`, `GetDiskInfo`, `ExportDisk` and `TaskStatus`.
 | `GetDiskInfo` | **Routed** and **owner-checked** (slice 3): the disks are read from the checked domain's own definition, nothing is looked up by volume name, and an explicit disk path must be one of that domain's disks |
 | `ExportDisk` | **Routed** and **owner-checked** (slice 3) for the host-side backends only: `s3` (the host flattens the disk, the pod streams it to S3) and `nfs` (the host writes it to the export). The `pvc` export (and the empty legacy backend, which means `pvc`) reads the disk from the provider pod and is refused (`Unimplemented`), as on Proxmox. The export runs on the owner-checked domain's own disk; a host that is not reached over `ssh://` is refused naming the host id only, never its endpoint |
 | `TaskStatus` | **Routed** to the host encoded in the task reference (slice 3; see above) |
-| `ListVMs` | `Unimplemented` until slice 4 (it must run across all hosts) |
+| `ListVMs` | Runs on **every routable host** (slice 4; see [Listing and adoption](#listing-and-adoption-slice-4)): each `VMInfo` carries its `host_id`, and every host that could not be listed is named in `unreachable_host_ids` — never dropped, never a failed call |
+| `TransferOwner` | **Routed** to `target_host_id` (slice 4): the owner re-stamp adoption uses — a serialized check-and-set with read-back (see below) |
 | `ImagePrepare`, `ImportDisk` | `Unimplemented` (host-scoped, no target host yet) |
 
 An empty `target_host_id` is `InvalidArgument` (never a default host). An unknown,
@@ -1382,9 +1387,185 @@ for a clustered provider.
   A cross-namespace clone (#340 grant) therefore hands the source's user-data
   to the target namespace. See
   [`cross-namespace-targets.md`](cross-namespace-targets.md#a-clone-carries-the-sources-cloud-init-seed).
-- **Adoption** is refused on a clustered provider until slice 4
-  (`Provider.status.adoption.message` says why), and a **VMMigration into** a
-  clustered provider fails validation until P3.
+- **Adoption** works on a clustered provider since slice 4, keyed on
+  (host, id); see [Listing and adoption](#listing-and-adoption-slice-4). A
+  **VMMigration into** a clustered provider fails validation until P3.
+
+### Listing and adoption (slice 4)
+
+`ListVMs` is the one call that does not go to a single host (A3).
+
+**The listing.** The provider lists every routable host of its registry
+(draining hosts are being removed and are not listed):
+
+- at most **8 hosts at a time**, each on its own lease with its own
+  **60-second deadline**, so one dead or hung host cannot starve the others;
+- inside the caller's deadline: the manager gives `ListVMs` 2 minutes, and the
+  provider keeps 5 seconds of it back, so it always answers in time. A host not
+  finished (or not yet started) by then is reported, not waited for. Each call
+  starts the fan-out at another host, so a spent budget does not always leave
+  the same hosts unlisted;
+- bounded in size: a host with more than 2000 domains is reported unreachable
+  (logged) instead of read; the manager accepts an answer of up to 64 MiB; and
+  a command run over a host's SSH connection keeps at most 64 MiB of stdout —
+  a larger stdout fails the command instead of being parsed truncated. Its
+  stderr never fails it: the first 64 KiB and the last 960 KiB are kept (the
+  error text comes last) and the middle is dropped and marked, so a large
+  download's progress output does not fail a create that succeeded. Each domain's definition is still read with its own
+  `virsh dumpxml`, and a running domain's persistent definition with a second
+  one (`dumpxml --inactive`, to see a stamp that is only there), so a host of
+  running domains takes about two SSH calls per domain. A host with more than
+  roughly 600–1000 running domains may not finish within its 60 s deadline
+  and is then reported unreachable (unknown). *Follow-up:* a batched or
+  native (ADR-0008 go-libvirt) read;
+- every `VMInfo` carries `host_id` (the `Host` name). On a clustered provider a
+  VM is identified by **(`host_id`, `id`)**, never by its name: two hosts may
+  each have a domain named `web`, and they are two entries;
+- every `VMInfo` also carries the namespace and name recorded in the domain's
+  owner stamp (`owner_namespace`, `owner_name`; the UIDs stay in
+  `provider_raw["owner_uid"]`), empty for an unstamped domain or one with more
+  than one owner. For an active domain the stamps of **both** definitions are
+  read (a transfer stamps both), and `provider_raw["owner_stamp_state"]` says
+  `unreadable` (a stamp cannot be read or has no UID) or `multiple` (more than
+  one owner) — adoption skips such a VM before creating anything. They are informational — only the UID identifies an owner —
+  and A6's pre-schedule uniqueness check (R4) looks a VM's previous
+  incarnations up by them;
+- every host whose VMs could not be listed — unknown or draining in the
+  registry, unreachable, past its deadline, a failed `virsh list`, or a
+  connection that dropped while its domains were read — is named in
+  `unreachable_host_ids`. **Its VMs are unknown, not absent.** The call does not
+  fail for it, so a dead host never counts toward the Provider's circuit
+  breaker; the provider logs the cause (classified like the routed calls:
+  host unavailable, deadline, or a failed listing). A domain whose definition
+  the host returned but that cannot be used (unparseable, an unexpected memory
+  unit) is skipped, as on a single host;
+- only a provider-level failure fails the call (its host registry is not
+  initialized), as a sanitized routed error;
+- the ADR-0008 list shadow runs per host, on the same lease as that host's
+  `virsh` list, and compares on (`host_id`, `id`).
+
+Single-host `ListVMs` is unchanged (no `host_id`, never an unreachable host);
+`testdata/single_host_listvms.golden.json` pins it byte for byte.
+
+The `Host` object reports its own reachability on its `Ready` condition, from
+the Host controller's `GetHostInfo` heartbeat (a host whose connection cannot be
+leased is `HostNotReady`); `ListVMs` does not write `Host` status.
+
+**Adoption** (`virtrigaud.io/adopt-vms` on the Provider) runs only when the
+provider reports `supportsRoutedAdoption` (D7): a clustered provider older than
+slice 4 is refused with a message and nothing is listed. For each listed VM:
+
+1. **Managed?** A VM is managed, and left alone, when a VirtualMachine of this
+   Provider is bound to its (`host_id`, `id`) — `status.placement.host` and
+   `status.id` — or when it is stamped with the UID of a VirtualMachine that
+   still exists (in any namespace, through any Provider object), exactly as on a
+   single host. A VM without a `host_id` or UUID is never adopted.
+   **Only unstamped domains are adopted** (until ADR-0007 A6.4). A domain with
+   a VirtRigaud owner stamp whose VirtualMachine no longer exists is the
+   *previous incarnation* of a VirtualMachine deleted with `orphan-on-delete`
+   or restored from a backup with a new UID. It is skipped and named in
+   `Provider.status.adoption.message` — by the namespace/name its stamp
+   records, e.g. `team-a/web (team-a.web on host-a)` — with the hint to
+   re-attach it per the A6 runbook or remove it. Unlike single-host adoption,
+   a clustered one never takes it over.
+   **Cross-host duplicates are not adopted either.** A brownfield domain whose
+   UUID is listed on more than one host, or one of whose disk paths a VM listed
+   on another host uses (common with a shared NFS pool: a stale definition left
+   on a second host), is skipped and reported on every host. Adopting both
+   copies would let deleting the stale one remove the running VM's disk.
+   Because a duplicate on a host that could not be listed is invisible, **a
+   discovery with any unreachable host starts no new adoption**: its
+   candidates are reported as held ("not adopted while a host is unknown")
+   and retried with the next discovery; bindings already in progress are
+   still completed. *Remaining gaps:* disk paths are compared as the provider
+   reports them (raw strings — two paths to one file through a symlink or a
+   different mount are not matched), and the listing reports file-backed
+   disks only, so block and network disks (a shared LUN, an RBD image) are
+   not compared. *Follow-up:* a clustered `Delete` checks only its own host
+   for other domains using the disk; it should scan every host, as ADR-0007
+   A6.1's R3 does for `Create`.
+   **A Host whose endpoint another Host object, or a single-host Provider's
+   `spec.endpoint`, names** (same scheme, host and port, whatever the SSH user;
+   any Provider, any namespace) is not adopted from, and the manager logs a
+   warning: two Providers fronting one hypervisor could each adopt the same
+   unstamped domain. When the Hosts or Providers cannot be listed, the
+   discovery adopts nothing. Keep one clustered Provider per host endpoint.
+   *Residual risk:* one hypervisor reached under two names (a DNS alias, a
+   host name and its IP address) is not recognized.
+   **Do not front one hypervisor with both a single-host and a clustered
+   Provider.** A single-host provider does not stamp the domains it manages,
+   so a clustered adoption could take one of them. As a guard, an unstamped
+   domain whose name is the `status.id` of a VirtualMachine bound through a
+   non-clustered Provider is skipped and reported.
+2. **The adopting VirtualMachine** is created in the Provider's namespace, as on
+   a single host, but named after the domain **plus a digest of (host, id)**
+   (for example `team-a-web-3f2a9c1b04`), so the same name on two hosts gives
+   two VirtualMachines and a retry finds the same one. It carries the
+   annotations `virtrigaud.io/adopted-host` and `virtrigaud.io/adopted-id`.
+   Its status stays empty for now; the VirtualMachine controller waits for it
+   (it never creates an adopted VM).
+3. **Owner transfer.** Every routed call is owner-checked, so the domain is
+   handed to the new VirtualMachine first: `TransferOwner` stamps it with the
+   VirtualMachine's UID, namespace and name. It is a **serialized
+   check-and-set with read-back**: the domain must still carry the UUID that
+   was listed, and every stamp on it must be the new owner's (a retry) or one
+   the caller lists as replaceable — adoption lists none, so it takes only an
+   unstamped domain (A6.4's re-attach will list the previous incarnation's).
+   A domain stamped for anyone else, with two stamps, or whose stamp cannot be
+   read, is refused (`AlreadyExists`) and not touched; a replaced domain is
+   `NotFound`. When the provider refuses the transfer itself for good
+   (`AlreadyExists`, `NotFound`, `InvalidArgument`), the adopting
+   VirtualMachine — whichever discovery created it — is removed again, after
+   a fresh read shows it still waiting for that very domain, unbound: it has
+   no `status.id`, so its deletion makes no provider call. One that cannot be
+   removed is named in `status.adoption.message`. A retryable failure, or any
+   failure after a successful transfer (the domain already carries its
+   stamp), keeps it, and the next discovery completes the binding. Transfers are serialized per host in the provider process, so
+   the check-and-set holds only while **one provider process** fronts a host:
+   the provider controller runs a clustered Provider with **one replica and
+   the `Recreate` strategy** (`spec.runtime.replicas` above 1 is ignored and
+   logged), and each host endpoint must belong to **one clustered Provider**.
+   `Recreate` stops the old provider pod before the new one starts, so a
+   clustered provider's rollout (an image upgrade, a changed spec) is a short
+   outage: its gRPC endpoint is down until the new pod is ready, and VM
+   reconciles against it fail and are retried meanwhile.
+   The provider refuses (`InvalidArgument`) an owner whose UID is not a
+   canonical UUID or whose namespace/name are not DNS-1123, and a domain name
+   virsh would read as a domain id or UUID (adoption skips those names); every
+   `virsh` call addresses the domain with `--domain`, and the definition read
+   must name the requested domain.
+   The stamp is written with `virsh metadata`
+   to the domain's persistent definition (and to the running domain when it is
+   active), addressed by UUID, and read back before the call succeeds. A retry
+   that finds the stamp already there succeeds without writing.
+4. **Binding.** A routed, owner-checked `Describe` of the new VirtualMachine
+   must then find the domain; only then is one status write made:
+   `status.id`, `status.boundProvider`, `status.placement.host` (the listed
+   host) and `.pool` (the Host's pool), and the domain's size from provider
+   truth — `status.currentResources` (its effective size, the CPU raised to the
+   vCPUs `Describe` reports online) and `status.placement.memoryCeilingMiB`
+   (`Describe`'s memory maximum when it exceeds that, else 0). From then on the
+   committed-capacity accounting counts it on its host, and the Host's in-use
+   finalizer holds the Host.
+5. If the binding write is lost after the owner transfer, the next discovery
+   finds the domain stamped with a VirtualMachine that is still waiting for
+   this very (host, id) and completes the binding — it never adopts it again.
+
+As on a single host, an existing adopted-labelled VirtualMachine is bound only
+when it references this Provider and every cross-namespace VMClass or VMImage it
+references grants the Provider's namespace; without the grant it is not even
+handed the domain. A listed host that is not a `Host` of this Provider, or is
+being deleted, is never adopted from.
+
+**Unknown is not empty.** Adoption only adds: it never unbinds, deletes or
+re-adopts anything because a VM is missing from a list. The hosts in
+`unreachable_host_ids` are named in `Provider.status.adoption.message` (by
+`Host` name, never endpoint), and discovery is retried after 5 minutes instead
+of an hour.
+
+A domain adopted on a clustered provider is managed exactly like a created one:
+deleting its VirtualMachine deletes the domain and its disks on its host (use
+`virtrigaud.io/orphan-on-delete` to let go of it instead).
 
 ## What "clustered" does not mean (yet)
 
@@ -1394,8 +1575,8 @@ for a clustered provider.
   HA is a deferred future ADR (ADR-0007 D8/P5).
 - **Experimental.** A clustered VM can be scheduled, created, described,
   powered, reconfigured, snapshotted, cloned (onto its own host), exported
-  (s3 / nfs) and deleted on its host (ADR-0007 Addendum A slices 1–3). It cannot
-  yet be listed across hosts or adopted (slice 4), and nothing can be
+  (s3 / nfs) and deleted on its host (ADR-0007 Addendum A slices 1–3), and
+  VMs can be listed across hosts and adopted (slice 4). Nothing can be
   migrated **into** a clustered provider (P3).
   The `vprovider.kb.io` validating webhook enforces the topology×type rule at
   admission (ADR-0007 D2). Until Addendum A slice 5 validates a real clustered VM

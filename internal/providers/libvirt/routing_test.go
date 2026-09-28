@@ -309,10 +309,6 @@ func TestClustered_EveryPerVMRPC_NeverReachesPlaceholder(t *testing.T) {
 			_, e := s.ImagePrepare(ctx, &providerv1.ImagePrepareRequest{ImageJson: `{"path":"/var/lib/libvirt/images/b.qcow2"}`, TargetName: "t"})
 			return e
 		},
-		"ListVMs": func() error {
-			_, e := s.ListVMs(ctx, &providerv1.ListVMsRequest{})
-			return e
-		},
 	}
 	for name, call := range unimplemented {
 		err := call()

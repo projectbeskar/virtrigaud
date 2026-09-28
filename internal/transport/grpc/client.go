@@ -42,12 +42,13 @@ import (
 
 // Compile-time assertions that the gRPC Client satisfies the core Provider
 // interface plus the optional capability interfaces it advertises via
-// type-assertion (issues #176, #179, #154).
+// type-assertion (issues #176, #179, #154; ADR-0007 Addendum A slice 4).
 var (
 	_ contracts.Provider           = (*Client)(nil)
 	_ contracts.CapabilityReporter = (*Client)(nil)
 	_ contracts.Cloner             = (*Client)(nil)
 	_ contracts.ImagePreparer      = (*Client)(nil)
+	_ contracts.OwnerTransferrer   = (*Client)(nil)
 )
 
 // Client wraps a gRPC provider client and implements the contracts.Provider interface
@@ -531,6 +532,8 @@ func (c *Client) GetCapabilities(ctx context.Context) (contracts.Capabilities, e
 		SupportsHonestReconfigure: resp.GetSupportsHonestReconfigure(),
 		// ADR-0007 Addendum A slice 3: false from a provider that predates it.
 		SupportsRoutedClone: resp.GetSupportsRoutedClone(),
+		// ADR-0007 Addendum A slice 4: false from a provider that predates it.
+		SupportsRoutedAdoption: resp.GetSupportsRoutedAdoption(),
 	}, nil
 }
 
@@ -1070,14 +1073,27 @@ func (c *Client) GetDiskInfo(ctx context.Context, req contracts.GetDiskInfoReque
 	return result, nil
 }
 
-// ListVMs implements contracts.Provider
-func (c *Client) ListVMs(ctx context.Context) ([]contracts.VMInfo, error) {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+// listVMsCallTimeout is the deadline the manager gives one ListVMs call. A
+// clustered provider fits its per-host fan-out inside it (ADR-0007 Addendum A,
+// A3) and reports the hosts it could not list in time as unreachable.
+const listVMsCallTimeout = 2 * time.Minute
+
+// listVMsMaxRecvBytes bounds a ListVMs answer the manager accepts. A clustered
+// provider's answer covers every host (up to clusteredListMaxDomainsPerHost
+// domains each), well past gRPC's 4 MiB default; the bound is explicit so an
+// answer is never unbounded either.
+const listVMsMaxRecvBytes = 64 << 20
+
+// ListVMs implements contracts.Provider. A clustered provider's per-VM host
+// (VMInfo.host_id) and the hosts it could not list (unreachable_host_ids,
+// which the caller must treat as unknown) are carried through unchanged.
+func (c *Client) ListVMs(ctx context.Context) (contracts.VMList, error) {
+	ctx, cancel := context.WithTimeout(ctx, listVMsCallTimeout)
 	defer cancel()
 
-	resp, err := c.client.ListVMs(ctx, &providerv1.ListVMsRequest{})
+	resp, err := c.client.ListVMs(ctx, &providerv1.ListVMsRequest{}, grpc.MaxCallRecvMsgSize(listVMsMaxRecvBytes))
 	if err != nil {
-		return nil, c.mapGRPCError("listVMs", err)
+		return contracts.VMList{}, c.mapGRPCError("listVMs", err)
 	}
 
 	// Convert proto VMInfo to contracts VMInfo
@@ -1114,12 +1130,43 @@ func (c *Client) ListVMs(ctx context.Context) ([]contracts.VMInfo, error) {
 			Disks:       disks,
 			Networks:    networks,
 			ProviderRaw: protoVM.ProviderRaw,
+			HostID:      protoVM.GetHostId(),
+			// ADR-0007 Addendum A slice 4: the owner stamp's namespace and
+			// name (informational; empty from single-host providers).
+			OwnerNamespace: protoVM.GetOwnerNamespace(),
+			OwnerName:      protoVM.GetOwnerName(),
 		}
 
 		vmInfos = append(vmInfos, vmInfo)
 	}
 
-	return vmInfos, nil
+	return contracts.VMList{VMs: vmInfos, UnreachableHostIDs: resp.GetUnreachableHostIds()}, nil
+}
+
+// transferOwnerCallTimeout bounds one TransferOwner call: a few reads and one metadata
+// write on the VM's host.
+const transferOwnerCallTimeout = 2 * time.Minute
+
+// TransferOwner implements contracts.OwnerTransferrer (ADR-0007 Addendum A, slice 4): it
+// asks a clustered provider to stamp the VM req.VM addresses — on host
+// req.VM.HostID — with its adopting VirtualMachine's identity. A provider that
+// does not adopt (single-host, thin-client, or a clustered one older than
+// slice 4) answers Unimplemented, which maps to a NotSupported error.
+func (c *Client) TransferOwner(ctx context.Context, req contracts.TransferOwnerRequest) error {
+	ctx, cancel := context.WithTimeout(ctx, transferOwnerCallTimeout)
+	defer cancel()
+
+	_, err := c.client.TransferOwner(ctx, &providerv1.TransferOwnerRequest{
+		Id:                   req.VM.ID,
+		TargetHostId:         req.VM.HostID,
+		Owner:                objectIdentityToProto(req.VM.Owner),
+		ReplaceableOwnerUids: req.ReplaceableOwnerUIDs,
+		ExpectedUuid:         req.ExpectedUUID,
+	})
+	if err != nil {
+		return c.mapGRPCError("transferOwner", err)
+	}
+	return nil
 }
 
 // ListHosts implements contracts.Provider. It returns the hosts a clustered

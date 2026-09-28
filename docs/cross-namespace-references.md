@@ -150,7 +150,7 @@ refusal tells a tenant nothing about another namespace.
 | `VMSnapshot` | the VM's `Provider`, before create, the task poll and the delete | the snapshot's |
 | `VMClone` | the source VM's `Provider`; the `Provider` and `VMClass` the target VM will reference. Every reconcile, and re-read from the API server right before the provider `Clone` call and the target VM `Create` | the clone's for the source; the target namespace for the target's references |
 | `VMMigration` | the source VM's `Provider`; the target `Provider`; the target `VMClass`. Before every phase except `Ready` and `Failed`, and re-read from the API server right before `SnapshotCreate`, `ExportDisk`, `ImportDisk` and the target VM `Create` | the migration's; the target namespace too for the target `Provider` and `VMClass` |
-| Adoption | never binds an existing adopted-labelled VM whose `VMClass` or `VMImage` is refused. Adopted VMs are created in the `Provider`'s own namespace, so they need no grant | the `Provider`'s |
+| Adoption | never binds an existing adopted-labelled VM whose `VMClass` or `VMImage` is refused (on a clustered `Provider` it is not even handed the domain's owner stamp). Adopted VMs are created in the `Provider`'s own namespace, so they need no grant | the `Provider`'s |
 
 #### A VM that already exists
 

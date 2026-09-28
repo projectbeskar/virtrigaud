@@ -240,7 +240,8 @@ func (v *VirshProvider) runOverSSHStdin(ctx context.Context, remoteCmd string, s
 	defer release()
 
 	start := time.Now()
-	var stdout, stderr bytes.Buffer
+	stdout := cappedBuffer{max: sshMaxStdoutBytes}
+	stderr := headTailBuffer{headMax: sshStderrHeadBytes, tailMax: sshStderrTailBytes}
 	log.Printf("DEBUG Executing over ssh: %s", remoteCmd)
 
 	runErr := v.withSession(ctx, func(sess *ssh.Session) error {
@@ -266,10 +267,29 @@ func (v *VirshProvider) runOverSSHStdin(ctx context.Context, remoteCmd string, s
 		}
 	})
 	duration := time.Since(start)
+	// Only a stdout overflow fails the command: stdout is what callers parse,
+	// and a truncated document must never be read as complete. stderr is
+	// diagnostic — a command may write a lot of it and still succeed (wget's
+	// progress dots, about 156 KB per 100 MiB downloaded) — so its middle is
+	// dropped (headTailBuffer keeps the start and the end, where the error
+	// text is) and the command's own exit status stands.
+	overflow := runErr == nil && stdout.exceeded
+	if overflow {
+		runErr = fmt.Errorf("remote command stdout exceeded its bound of %d bytes", sshMaxStdoutBytes)
+	}
+	if stderr.truncated() {
+		log.Printf("WARN stderr of %q was %d bytes; kept its first %d and last %d", remoteCmd, stderr.Len(),
+			sshStderrHeadBytes, sshStderrTailBytes)
+	}
 
 	exitCode := 0
 	if runErr != nil {
 		exitCode = sshExitCode(runErr)
+		if overflow {
+			// The command completed on the host (not a transport failure,
+			// which a negative exit code means): report it as failed.
+			exitCode = sshOutputOverflowExitCode
+		}
 		if stderr.Len() == 0 {
 			// The failure happened before any remote I/O (dial, handshake, or
 			// session-open never reached the remote command), so the usual
@@ -277,7 +297,7 @@ func (v *VirshProvider) runOverSSHStdin(ctx context.Context, remoteCmd string, s
 			// stderr — is empty. Surface the connect-stage error text there
 			// instead, so a transient connection failure (#191) is still
 			// classified and retried under the new transport.
-			stderr.WriteString(runErr.Error())
+			_, _ = stderr.WriteString(runErr.Error()) // headTailBuffer writes never fail
 		}
 	}
 
@@ -295,6 +315,120 @@ func (v *VirshProvider) runOverSSHStdin(ctx context.Context, remoteCmd string, s
 	}
 	log.Printf("DEBUG Command successful: %s (duration: %v)", remoteCmd, duration)
 	return result, nil
+}
+
+// sshMaxStdoutBytes and sshMaxStderrBytes bound what one command run over the
+// persistent SSH client keeps in memory. Bulk data (disk export/import) never
+// goes through here — it is streamed (runSSHStdout) — so the largest outputs
+// are `virsh list --all` of a busy host and a domain's XML, far below the
+// bounds.
+const (
+	sshMaxStdoutBytes = 64 << 20
+	// sshStderrHeadBytes and sshStderrTailBytes are how much of a command's
+	// stderr is kept: its start and its end (where an error message is). The
+	// rest is dropped and marked; a large stderr never fails the command.
+	sshStderrHeadBytes = 64 << 10
+	sshStderrTailBytes = 960 << 10
+	// sshOutputOverflowExitCode is the exit code reported for a command whose
+	// stdout exceeded its bound: positive, because the command ran on the host.
+	sshOutputOverflowExitCode = 1
+)
+
+// cappedBuffer is a bytes.Buffer that keeps at most max bytes: the rest of a
+// write is discarded (and still reported written, so the remote command is
+// drained, never blocked), and exceeded is set.
+type cappedBuffer struct {
+	bytes.Buffer
+	max      int
+	exceeded bool
+}
+
+// Write keeps what fits under the bound and discards the rest.
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	if room := b.max - b.Len(); room < len(p) {
+		b.exceeded = true
+		if room > 0 {
+			_, _ = b.Buffer.Write(p[:room])
+		}
+		return len(p), nil
+	}
+	return b.Buffer.Write(p)
+}
+
+// headTailBuffer keeps the first headMax and the last tailMax bytes written to
+// it and counts the rest, so a command's stderr is bounded in memory without
+// losing the error text at its end. The tail is a ring, allocated only once
+// the head is full, so a command with little stderr costs nothing extra.
+type headTailBuffer struct {
+	headMax, tailMax int
+	head             []byte
+	ring             []byte
+	pos              int  // next write position in ring
+	wrapped          bool // ring has been filled at least once
+	total            int
+}
+
+// Write keeps what the head and the tail can hold; it never fails, so the
+// remote command's stderr is always drained.
+func (b *headTailBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	b.total += n
+	if room := b.headMax - len(b.head); room > 0 {
+		take := min(room, len(p))
+		b.head = append(b.head, p[:take]...)
+		p = p[take:]
+	}
+	if len(p) == 0 || b.tailMax <= 0 {
+		return n, nil
+	}
+	if b.ring == nil {
+		b.ring = make([]byte, b.tailMax)
+	}
+	if len(p) >= b.tailMax {
+		copy(b.ring, p[len(p)-b.tailMax:])
+		b.pos, b.wrapped = 0, true
+		return n, nil
+	}
+	c := copy(b.ring[b.pos:], p)
+	if c < len(p) {
+		b.pos = copy(b.ring, p[c:])
+		b.wrapped = true
+	} else {
+		b.pos += c
+		if b.pos == b.tailMax {
+			b.pos, b.wrapped = 0, true
+		}
+	}
+	return n, nil
+}
+
+// WriteString writes s (see Write).
+func (b *headTailBuffer) WriteString(s string) (int, error) { return b.Write([]byte(s)) }
+
+// Len is the number of bytes written, kept or not.
+func (b *headTailBuffer) Len() int { return b.total }
+
+// tail returns the kept tail, oldest byte first.
+func (b *headTailBuffer) tail() []byte {
+	if !b.wrapped {
+		return b.ring[:b.pos]
+	}
+	return append(append([]byte{}, b.ring[b.pos:]...), b.ring[:b.pos]...)
+}
+
+// truncated reports whether bytes were dropped between the head and the tail.
+func (b *headTailBuffer) truncated() bool {
+	return b.total > len(b.head)+len(b.tail())
+}
+
+// String returns the head and the tail, with a marker where bytes were
+// dropped; exactly what was written when nothing was.
+func (b *headTailBuffer) String() string {
+	tail := b.tail()
+	if dropped := b.total - len(b.head) - len(tail); dropped > 0 {
+		return string(b.head) + fmt.Sprintf("\n[... %d bytes of stderr omitted ...]\n", dropped) + string(tail)
+	}
+	return string(b.head) + string(tail)
 }
 
 // sshExitCode extracts a process exit code from an ssh.Session error, mirroring

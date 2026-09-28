@@ -24,6 +24,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -93,11 +94,39 @@ type Provider struct {
 	// native results/errors/panics without a live libvirtd.
 	describeNativeFn func(ctx context.Context, c libvirtConn, id string) (contracts.DescribeResponse, error)
 
-	// listNativeFn produces the go-libvirt shadow VMInfo list (ADR-0008 PR 4c). It
-	// defaults to (*Provider).listNative (the real go-libvirt path) and is a struct
-	// field, mirroring describeNativeFn, so unit tests can script native
+	// listNativeFn produces the go-libvirt shadow VMInfo list (ADR-0008 PR 4c) on
+	// connection c — the connection the virsh list ran on: nil for the
+	// single-host connection (resolved through the registry exactly as before),
+	// or a clustered host's retained lease (ADR-0007 Addendum A, A5). It
+	// defaults to (*Provider).listNative (the real go-libvirt path) and is a
+	// struct field, mirroring describeNativeFn, so unit tests can script native
 	// results/errors/panics without a live libvirtd.
-	listNativeFn func(ctx context.Context) ([]contracts.VMInfo, error)
+	listNativeFn func(ctx context.Context, c libvirtConn) ([]contracts.VMInfo, error)
+
+	// listHostVMsFn lists one clustered host's VMs on its leased connection c
+	// (ADR-0007 Addendum A, A3). nil means (*Provider).listHostVMs (the shared
+	// listing core plus the host's list shadow). It is a struct field so the
+	// fan-out tests can script slow, failing and hanging hosts without a live
+	// libvirtd.
+	listHostVMsFn func(ctx context.Context, c libvirtConn) ([]contracts.VMInfo, error)
+
+	// listHostTimeout bounds one host's listing in a clustered ListVMs; zero
+	// means clusteredListHostTimeout. Tests shorten it.
+	listHostTimeout time.Duration
+
+	// listHostConcurrency bounds how many hosts one clustered ListVMs lists at
+	// once; zero means clusteredListHostConcurrency.
+	listHostConcurrency int
+
+	// listRotation rotates the host a clustered ListVMs starts with.
+	listRotation atomic.Uint64
+
+	// transferLocks serializes TransferOwner per host in this provider
+	// process (ADR-0007 Addendum A, slice 4; hostLocks), so two owner
+	// transfers on one host cannot both pass the stamp check before either
+	// writes, while transfers on other hosts are not held up. Waiting honours
+	// the call's context.
+	transferLocks hostLocks
 
 	// createOnHostFn runs the clustered create pipeline over a single leased host
 	// connection (ADR-0007 P1). nil means "use the default",

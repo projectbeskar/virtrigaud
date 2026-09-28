@@ -87,6 +87,13 @@ type Capabilities struct {
 	// a clustered clone's target VirtualMachine. False for single-host and
 	// thin-client providers (their Clone does not depend on it).
 	SupportsRoutedClone bool
+	// SupportsRoutedAdoption reports that a clustered provider lists VMs across
+	// all of its hosts (every VMInfo carries its HostID; VMList.
+	// UnreachableHostIDs names the hosts it could not list) and implements
+	// TransferOwner (ADR-0007 Addendum A, slice 4). The adoption controller adopts
+	// from a clustered provider only when it reports it. False for single-host
+	// and thin-client providers (their adoption does not depend on it).
+	SupportsRoutedAdoption bool
 }
 
 // CapabilityReporter is an optional capability of a Provider: it reports the

@@ -41,7 +41,6 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
 	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
-	"github.com/projectbeskar/virtrigaud/internal/runtime/remote"
 )
 
 // Reason labels specific to the VMAdoption reconciler. Reuses the
@@ -52,12 +51,6 @@ const (
 	errReasonAdoptionStatus = "adoption-status-update"
 	errReasonInvalidFilter  = "adoption-invalid-filter"
 )
-
-// clusteredAdoptionUnsupportedMessage is recorded on Provider.status.adoption
-// for a clustered provider: adoption there needs the cross-host ListVMs with a
-// per-VM host id (ADR-0007 Addendum A, A3/slice 4), so it is refused until then.
-const clusteredAdoptionUnsupportedMessage = "Adoption is not supported on a clustered (topology: cluster) provider yet: " +
-	"an adopted VM needs its host binding, which requires the cross-host VM listing (ADR-0007 Addendum A, slice 4)"
 
 const (
 	// AdoptionAnnotation is the annotation that triggers VM adoption
@@ -97,8 +90,15 @@ type VMAdoptionFilter struct {
 // VMAdoptionReconciler reconciles Provider resources for VM adoption
 type VMAdoptionReconciler struct {
 	client.Client
-	Scheme         *runtime.Scheme
-	RemoteResolver *remote.Resolver
+	Scheme *runtime.Scheme
+	// RemoteResolver resolves a Provider to its provider client (the manager
+	// wires the *remote.Resolver).
+	RemoteResolver ProviderResolver
+	// APIReader is an uncached reader (the manager's GetAPIReader). Clustered
+	// adoption re-reads through it before a binding write and to confirm a
+	// VirtualMachine is gone (ADR-0007 Addendum A, slice 4); nil falls back to
+	// the cached client.
+	APIReader client.Reader
 }
 
 // VMAdoptionReconciler watches Providers and, on the adoption annotation,
@@ -113,6 +113,7 @@ type VMAdoptionReconciler struct {
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=virtualmachines,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=vmclasses,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=vmimages,verbs=get;list;watch
+// +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=hosts,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile handles adoption requests.
@@ -182,20 +183,6 @@ func (r *VMAdoptionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
-	// A clustered ("brain-in-operator") provider is not adopted from yet. An
-	// adopted VM must carry its host binding (status.placement.host) or every
-	// per-VM call for it is refused as unbound (ADR-0007 Addendum A, A1), and the
-	// binding comes from VMInfo.host_id, which only the cross-host ListVMs (A3,
-	// slice 4) reports. Refuse honestly instead of creating unroutable VMs.
-	if isClusterTopology(&provider) {
-		logger.Info("Adoption is not supported on a clustered provider yet; not adopting", "provider", provider.Name)
-		provider.Status.Adoption.Message = clusteredAdoptionUnsupportedMessage
-		if err := r.Status().Update(ctx, &provider); err != nil {
-			logger.Error(err, "Failed to update adoption status")
-		}
-		return ctrl.Result{RequeueAfter: 1 * time.Hour}, nil
-	}
-
 	// Parse filter annotation if present
 	var filter *VMAdoptionFilter
 	if filterStr := provider.Annotations[AdoptionFilterAnnotation]; filterStr != "" {
@@ -211,6 +198,15 @@ func (r *VMAdoptionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		}
 		filter = parsedFilter
 		logger.Info("Using VM adoption filter", "filter", filterStr)
+	}
+
+	// A clustered ("brain-in-operator") provider is adopted from host by host:
+	// VMs are keyed on (host id, VM id), each adopted VM's domain is handed to
+	// it (owner transfer) and it is bound to its host (ADR-0007 Addendum A,
+	// slice 4; vmadoption_clustered.go). Single-host adoption below is
+	// unchanged.
+	if isClusterTopology(&provider) {
+		return r.reconcileClusteredAdoption(ctx, &provider, filter)
 	}
 
 	// Discover unmanaged VMs
@@ -283,7 +279,8 @@ func (r *VMAdoptionReconciler) discoverUnmanagedVMs(ctx context.Context, provide
 	}
 
 	// List all VMs from provider
-	allVMs, err := providerInstance.ListVMs(ctx)
+	listed, err := providerInstance.ListVMs(ctx)
+	allVMs := listed.VMs
 	if err != nil {
 		return nil, fmt.Errorf("failed to list VMs: %w", err)
 	}
@@ -454,9 +451,42 @@ func (r *VMAdoptionReconciler) adoptVM(ctx context.Context, provider *infravirtr
 	// VMImage is not required since we're referencing an existing disk
 
 	// Create VirtualMachine CR
+	vm := adoptedVMObject(provider, vmInfo, vmName, vmClass)
+
+	if err := r.Create(ctx, vm); err != nil {
+		return fmt.Errorf("failed to create VirtualMachine CR: %w", err)
+	}
+
+	// Update status separately - Kubernetes status subresource is not persisted during Create
+	// This is critical for adopted VMs: Status.ID must be set so VirtualMachine controller
+	// knows the VM already exists and skips creation
+	vm.Status.ID = vmInfo.ID
+	recordBoundProvider(vm, provider)
+	vm.Status.PowerState = observedPowerState(vmInfo.PowerState)
+	vm.Status.IPs = vmInfo.IPs
+	vm.Status.Provider = vmInfo.ProviderRaw
+	if err := r.Status().Update(ctx, vm); err != nil {
+		// If status update fails, log error but don't fail adoption
+		// The VirtualMachine controller will reconcile and may try to create the VM
+		// but it should fail gracefully if the VM already exists
+		logger.Error(err, "Failed to update VirtualMachine status after adoption", "vm_name", vmName)
+		return fmt.Errorf("failed to update VM status: %w", err)
+	}
+
+	logger.Info("Successfully adopted VM", "vm_name", vmName, "vm_id", vmInfo.ID)
+	return nil
+}
+
+// adoptedVMObject is the VirtualMachine that adopts vmInfo: named name, in
+// the Provider's namespace, labelled adopted, referencing the Provider and the
+// adopted VMClass, with the VM's disk as its imported disk and its listed size
+// and power state as its spec. Its Status (which Create does not persist) is
+// written by the caller.
+func adoptedVMObject(provider *infravirtrigaudiov1beta1.Provider, vmInfo contracts.VMInfo, name string,
+	vmClass *infravirtrigaudiov1beta1.VMClass) *infravirtrigaudiov1beta1.VirtualMachine {
 	vm := &infravirtrigaudiov1beta1.VirtualMachine{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      vmName,
+			Name:      name,
 			Namespace: provider.Namespace,
 			Labels: map[string]string{
 				AdoptedLabel: AdoptedLabelValue,
@@ -498,35 +528,15 @@ func (r *VMAdoptionReconciler) adoptVM(ctx context.Context, provider *infravirtr
 	if vmInfo.CPU > 0 || vmInfo.MemoryMiB > 0 {
 		vm.Spec.Resources = &infravirtrigaudiov1beta1.VirtualMachineResources{}
 		if vmInfo.CPU > 0 {
-			vm.Spec.Resources.CPU = &vmInfo.CPU
+			cpu := vmInfo.CPU
+			vm.Spec.Resources.CPU = &cpu
 		}
 		if vmInfo.MemoryMiB > 0 {
-			vm.Spec.Resources.MemoryMiB = &vmInfo.MemoryMiB
+			mem := vmInfo.MemoryMiB
+			vm.Spec.Resources.MemoryMiB = &mem
 		}
 	}
-
-	if err := r.Create(ctx, vm); err != nil {
-		return fmt.Errorf("failed to create VirtualMachine CR: %w", err)
-	}
-
-	// Update status separately - Kubernetes status subresource is not persisted during Create
-	// This is critical for adopted VMs: Status.ID must be set so VirtualMachine controller
-	// knows the VM already exists and skips creation
-	vm.Status.ID = vmInfo.ID
-	recordBoundProvider(vm, provider)
-	vm.Status.PowerState = observedPowerState(vmInfo.PowerState)
-	vm.Status.IPs = vmInfo.IPs
-	vm.Status.Provider = vmInfo.ProviderRaw
-	if err := r.Status().Update(ctx, vm); err != nil {
-		// If status update fails, log error but don't fail adoption
-		// The VirtualMachine controller will reconcile and may try to create the VM
-		// but it should fail gracefully if the VM already exists
-		logger.Error(err, "Failed to update VirtualMachine status after adoption", "vm_name", vmName)
-		return fmt.Errorf("failed to update VM status: %w", err)
-	}
-
-	logger.Info("Successfully adopted VM", "vm_name", vmName, "vm_id", vmInfo.ID)
-	return nil
+	return vm
 }
 
 // ensureVMClass creates or finds appropriate VMClass

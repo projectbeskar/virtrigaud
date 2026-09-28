@@ -141,7 +141,10 @@ is tracked as a follow-up ADR. Until then, treat the right to delete and create
   user annotations, so it cannot be overridden.
 - Adoption binds a pre-existing `virtrigaud.io/adopted` VM only if its
   `spec.providerRef` names the adopting `Provider`, and never adopts a
-  hypervisor VM a `VirtualMachine` is bound to through that `Provider`.
+  hypervisor VM a `VirtualMachine` is bound to through that `Provider`. On a
+  clustered `Provider` the hypervisor VM is identified by (host, id) and the
+  adoption also records `status.placement.host`
+  ([`clustered-provider-inventory.md`](clustered-provider-inventory.md#listing-and-adoption-slice-4)).
 
 ### A `Provider` in another namespace
 

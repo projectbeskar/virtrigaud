@@ -759,6 +759,20 @@ func (r *ProviderReconciler) reconcileDeployment(ctx context.Context, provider *
 	if provider.Spec.Runtime.Replicas != nil {
 		replicas = *provider.Spec.Runtime.Replicas
 	}
+	// A clustered provider runs exactly one replica, replaced with the
+	// Recreate strategy (ADR-0007 Addendum A, slice 4): its owner transfers
+	// (TransferOwner) and its per-host guards are serialized inside one
+	// process, so two replicas — or an old and a new pod overlapping in a
+	// rolling update — could both pass a check before either writes.
+	var strategy appsv1.DeploymentStrategy
+	if isClusterTopology(provider) {
+		if replicas > 1 {
+			log.FromContext(ctx).Info("A clustered Provider runs one replica; ignoring spec.runtime.replicas",
+				"provider", provider.Name, "replicas", replicas)
+			replicas = 1
+		}
+		strategy = appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType}
+	}
 
 	// Build container spec
 	container, err := r.buildProviderContainer(provider)
@@ -781,6 +795,7 @@ func (r *ProviderReconciler) reconcileDeployment(ctx context.Context, provider *
 		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: &replicas,
+			Strategy: strategy,
 			Selector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{
 					"app.kubernetes.io/name":     "virtrigaud-provider",
@@ -848,6 +863,9 @@ func (r *ProviderReconciler) reconcileDeployment(ctx context.Context, provider *
 		existing.Spec.Replicas = &replicas
 		existing.Spec.Template = desired.Spec.Template
 		existing.Labels = desired.Labels
+		if isClusterTopology(provider) {
+			existing.Spec.Strategy = desired.Spec.Strategy // Recreate (no rollingUpdate parameters)
+		}
 
 		// Try to update
 		return r.Update(ctx, existing)

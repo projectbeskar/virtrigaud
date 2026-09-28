@@ -36,3 +36,12 @@ func (p *Provider) ListHosts(ctx context.Context, req *providerv1.ListHostsReque
 func (p *Provider) GetHostInfo(ctx context.Context, req *providerv1.GetHostInfoRequest) (*providerv1.HostInfo, error) {
 	return nil, errors.NewUnimplemented("GetHostInfo")
 }
+
+// TransferOwner stamps a VM a clustered provider listed with its adopting
+// VirtualMachine's identity (ADR-0007 Addendum A, slice 4). The mock provider
+// is not clustered — it does not model a clustered host set — so its ListVMs reports no host and its adoption
+// does not stamp: it reports Unimplemented and advertises
+// supports_routed_adoption = false (D7, honesty-first).
+func (p *Provider) TransferOwner(ctx context.Context, req *providerv1.TransferOwnerRequest) (*providerv1.TransferOwnerResponse, error) {
+	return nil, errors.NewUnimplemented("TransferOwner")
+}

@@ -217,9 +217,12 @@ type Provider interface {
 	// Useful for migration planning and validation
 	GetDiskInfo(ctx context.Context, req GetDiskInfoRequest) (GetDiskInfoResponse, error)
 
-	// ListVMs returns all VMs managed by this provider
-	// Used for discovery and adoption of existing VMs
-	ListVMs(ctx context.Context) ([]VMInfo, error)
+	// ListVMs returns all VMs managed by this provider. Used for discovery and
+	// adoption of existing VMs. A clustered provider lists every host it
+	// fronts (ADR-0007 Addendum A, A3): each VMInfo carries its HostID, and
+	// VMList.UnreachableHostIDs names the hosts whose VMs could not be listed —
+	// which a caller must treat as unknown, never as empty.
+	ListVMs(ctx context.Context) (VMList, error)
 
 	// ListHosts returns every hypervisor host fronted by this provider.
 	// Clustered providers (ADR-0007 P1) report their host inventory here so the
@@ -254,6 +257,41 @@ type VMInfo struct {
 	Networks []NetworkInfo
 	// ProviderRaw contains provider-specific metadata
 	ProviderRaw map[string]string
+	// HostID is the host (Host CR name) a clustered provider found the VM on
+	// (ADR-0007 Addendum A, A3). On a clustered provider a VM is identified by
+	// (HostID, ID), never by ID or name alone: two hosts may each have a VM of
+	// the same name. Empty for single-host and thin-client providers.
+	HostID string
+	// OwnerNamespace and OwnerName are the namespace and name recorded in the
+	// VM's owner stamp (its UID is ProviderRaw[VMInfoOwnerUIDKey]); empty when
+	// the VM carries no stamp or more than one. Informational only — never an
+	// authorization. Set by a clustered provider (ADR-0007 Addendum A, slice 4;
+	// A6's R4 check uses them); single-host and thin-client providers leave
+	// them empty.
+	OwnerNamespace string
+	OwnerName      string
+}
+
+// VMList is the result of ListVMs.
+type VMList struct {
+	// VMs are the VMs the provider listed.
+	VMs []VMInfo
+	// UnreachableHostIDs names every host of a clustered provider whose VMs
+	// could not be listed in this call (unreachable, past its per-host deadline,
+	// or a failed listing; ADR-0007 Addendum A, A3). Each is UNKNOWN, not empty:
+	// a VM the caller knows on one of these hosts must never be treated as
+	// gone. Always empty for single-host and thin-client providers.
+	UnreachableHostIDs []string
+}
+
+// Unreachable reports whether hostID is one of the hosts l could not list.
+func (l VMList) Unreachable(hostID string) bool {
+	for _, h := range l.UnreachableHostIDs {
+		if h == hostID {
+			return true
+		}
+	}
+	return false
 }
 
 // VMInfoOwnerUIDKey is the VMInfo.ProviderRaw key under which a provider that

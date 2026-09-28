@@ -198,6 +198,16 @@ var vmListFields = []vmListFieldCmp{
 	},
 }
 
+// listJoinKey is the key compareList joins the two lists on: (host id, VM id)
+// (ADR-0007 Addendum A, A5). A clustered provider lists several hosts, and two
+// of them may each have a domain of the same name, so the name alone is not an
+// identity there. For libvirt the VM id is the domain name on both sides
+// (virsh's ListVMs and nativeListVMInfo), and a single-host list carries no
+// host id, so for single-host this is the same domain-name join as before.
+func listJoinKey(v contracts.VMInfo) string {
+	return strings.TrimSpace(v.HostID) + "\x00" + strings.TrimSpace(v.ID)
+}
+
 // compareList returns the names of the fields that SEMANTICALLY diverge between the
 // authoritative virsh VM list and the shadow go-libvirt list, after
 // canonicalization. Each field name is returned at most once even if it diverges on
@@ -207,7 +217,7 @@ var vmListFields = []vmListFieldCmp{
 //
 // # Membership is deliberately ONE-DIRECTIONAL
 //
-// The two lists are keyed by domain name and joined. For a domain in BOTH, the
+// The two lists are keyed by (host id, VM id) — listJoinKey — and joined. For a domain in BOTH, the
 // per-field projection above is compared. For a domain in only ONE list, the
 // direction matters:
 //
@@ -221,9 +231,9 @@ var vmListFields = []vmListFieldCmp{
 //     stricter, not native being wrong; counting it would meter phantom drift. We
 //     therefore iterate the virsh (authoritative) side only and never flag extras.
 func compareList(virsh, native []contracts.VMInfo) []string {
-	nativeByName := make(map[string]contracts.VMInfo, len(native))
+	nativeByKey := make(map[string]contracts.VMInfo, len(native))
 	for _, v := range native {
-		nativeByName[strings.TrimSpace(v.Name)] = v
+		nativeByKey[listJoinKey(v)] = v
 	}
 
 	seen := make(map[string]bool)
@@ -236,7 +246,7 @@ func compareList(virsh, native []contracts.VMInfo) []string {
 	}
 
 	for _, vv := range virsh {
-		nv, ok := nativeByName[strings.TrimSpace(vv.Name)]
+		nv, ok := nativeByKey[listJoinKey(vv)]
 		if !ok {
 			add(membershipField) // native missed a VM virsh saw (see doc above)
 			continue
@@ -533,25 +543,37 @@ func (p *Provider) describeNative(ctx context.Context, c libvirtConn, id string)
 	return resp, nil
 }
 
-// listNative is the production native ListVMs: it resolves the host connection
-// through the seam and runs buildNativeList under the go-libvirt connection watchdog
-// (callLibvirt), so a hung RPC is bounded by ctx and evicts the connection instead
-// of blocking forever (ADR-0008 Fact 5). It mirrors describeNative and is the
-// default value of Provider.listNativeFn; unit tests swap that field to script
-// native results, errors, and panics without a live libvirtd.
-func (p *Provider) listNative(ctx context.Context) ([]contracts.VMInfo, error) {
-	lc, err := p.conn(ctx)
-	if err != nil {
-		return nil, err
+// listNative is the production native ListVMs: it runs buildNativeList on
+// connection c under the go-libvirt connection watchdog (callLibvirt), so a hung
+// RPC is bounded by ctx and evicts the connection instead of blocking forever
+// (ADR-0008 Fact 5). It mirrors describeNative and is the default value of
+// Provider.listNativeFn; unit tests swap that field to script native results,
+// errors, and panics without a live libvirtd.
+//
+// A nil c is the single-host connection, resolved through the seam exactly as
+// before routing existed (the ADR-0008 D5 soak path, unchanged). A clustered
+// ListVMs passes the host lease its virsh list ran on (ADR-0007 Addendum A,
+// A5), and every native VMInfo is tagged with that host, so compareList joins
+// the two answers on (host id, VM id).
+func (p *Provider) listNative(ctx context.Context, c libvirtConn) ([]contracts.VMInfo, error) {
+	lc := c
+	if lc == nil {
+		var err error
+		if lc, err = p.conn(ctx); err != nil {
+			return nil, err
+		}
 	}
 	var vms []contracts.VMInfo
-	err = lc.callLibvirt(ctx, func(lv *golibvirt.Libvirt) error {
+	err := lc.callLibvirt(ctx, func(lv *golibvirt.Libvirt) error {
 		var bErr error
 		vms, bErr = buildNativeList(lv)
 		return bErr
 	})
 	if err != nil {
 		return nil, err
+	}
+	if c != nil {
+		tagHost(vms, c.HostID())
 	}
 	return vms, nil
 }
@@ -658,15 +680,25 @@ func (p *Provider) runShadowDescribe(ctx context.Context, c libvirtConn, id stri
 // under identical isolation. The ctx argument is intentionally not forwarded (see
 // runDetachedShadow). virshVMs is the authoritative answer the caller already
 // received; it is never mutated here.
-func (p *Provider) maybeShadowList(ctx context.Context, virshVMs []contracts.VMInfo) {
+//
+// c is the connection the virsh list ran on: nil for single-host (unchanged), or
+// a clustered host's lease, which is retained for the detached goroutine's
+// lifetime so the native list runs on the same host (ADR-0007 Addendum A, A5).
+// A clustered ListVMs shadows each host's list separately.
+func (p *Provider) maybeShadowList(ctx context.Context, c libvirtConn, virshVMs []contracts.VMInfo) {
 	if p.nativeCfg.effectiveMode(familyList) != modeShadow {
 		return
 	}
 	if !p.shadowSampler.sample() {
 		return
 	}
+	release := func() {}
+	if c != nil {
+		release = retainConn(c)
+	}
 	p.runDetachedShadow(familyList, func(sctx context.Context) {
-		p.runShadowList(sctx, virshVMs)
+		defer release()
+		p.runShadowList(sctx, c, virshVMs)
 	})
 }
 
@@ -677,8 +709,8 @@ func (p *Provider) maybeShadowList(ctx context.Context, virshVMs []contracts.VMI
 // directly (Provider.listNativeFn scripted) to assert the metering and the error
 // isolation without a live libvirtd; maybeShadowList wraps it with the goroutine,
 // timeout, and panic recovery.
-func (p *Provider) runShadowList(ctx context.Context, virshVMs []contracts.VMInfo) {
-	nativeVMs, err := p.listNativeFn(ctx)
+func (p *Provider) runShadowList(ctx context.Context, c libvirtConn, virshVMs []contracts.VMInfo) {
+	nativeVMs, err := p.listNativeFn(ctx, c)
 	if err != nil {
 		obsmetrics.RecordShadowCompare(string(familyList), obsmetrics.ShadowResultError)
 		p.shadowLogger().Warn("shadow-compare ListVMs: go-libvirt path failed; metered, not propagated (caller got virsh's answer)",
