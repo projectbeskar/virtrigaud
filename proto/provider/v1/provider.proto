@@ -657,6 +657,15 @@ message ListVMsRequest {}
 
 message ListVMsResponse {
   repeated VMInfo vms = 1;
+  // unreachable_host_ids names every host of a clustered ("brain-in-operator")
+  // provider whose VMs could not be listed in this call — the host could not
+  // be reached, did not answer within its per-host deadline, or failed the
+  // listing (ADR-0007 Addendum A, A3 / slice 4). A caller must treat each such
+  // host as UNKNOWN, never as empty: a VM it knows on that host is not gone.
+  // A clustered provider never silently drops a host from the result. AGNOSTIC.
+  // Always empty from single-host and thin-client providers, whose ListVMs
+  // either answers for their one endpoint or fails as a whole.
+  repeated string unreachable_host_ids = 2;
 }
 
 message VMInfo {
@@ -669,6 +678,13 @@ message VMInfo {
   repeated DiskInfo disks = 7;  // Disk information
   repeated NetworkInfo networks = 8; // Network information
   map<string, string> provider_raw = 9; // Provider-specific metadata
+  // host_id is the host (the Host CR name, as in HostInfo.id) a clustered
+  // ("brain-in-operator") provider found this VM on (ADR-0007 Addendum A, A3 /
+  // slice 4). On a clustered provider a VM is identified by (host_id, id),
+  // never by id or name alone: two hosts may each have a VM of the same name.
+  // Set on every VMInfo a clustered provider lists; empty from single-host and
+  // thin-client providers. AGNOSTIC.
+  string host_id = 10;
 }
 
 message DiskInfo {
@@ -778,12 +794,61 @@ message GetCapabilitiesResponse {
   // thin-client providers, which do not route clones (their Clone is
   // unaffected), and on a clustered provider older than slice 3.
   bool supports_routed_clone = 20;
+  // supports_routed_adoption reports that a clustered ("brain-in-operator")
+  // provider lists VMs across all of its hosts — every VMInfo carries its
+  // host_id and ListVMsResponse.unreachable_host_ids names every host that
+  // could not be listed — and implements AdoptVM, which stamps a listed VM
+  // with the adopting VirtualMachine's identity on its host (ADR-0007
+  // Addendum A, A3 / slice 4). The manager adopts from a clustered provider
+  // only when it reports it. False on single-host and thin-client providers
+  // (their ListVMs and adoption do not depend on it) and on a clustered
+  // provider older than slice 4.
+  bool supports_routed_adoption = 21;
 }
+
+// AdoptVM brings one VM a clustered provider listed under management by a
+// VirtualMachine: it stamps the VM with the VirtualMachine's identity (owner)
+// on the host it was listed on, after which the provider's routed, owner-checked
+// per-VM calls accept that VirtualMachine (ADR-0007 Addendum A, slice 4). It is
+// never a create and never moves or changes anything else about the VM.
+//
+// The provider stamps the VM ONLY when every owner already stamped on it is
+// either owner itself (an idempotent retry) or listed in replaceable_owner_uids
+// — the stamps of VirtualMachines the manager has verified no longer exist. A
+// VM stamped for anyone else, or whose stamp cannot be read, is refused
+// (ALREADY_EXISTS) and left untouched. A VM without a stamp may be adopted.
+// Single-host and thin-client providers return Unimplemented: their adoption
+// does not stamp (they do not check owners on per-VM calls).
+message AdoptVMRequest {
+  // id is the VM's provider-specific identifier as ListVMs reported it
+  // (VMInfo.id).
+  string id = 1;
+  // target_host_id is the host the VM was listed on (VMInfo.host_id).
+  // Required by a clustered provider, which never looks a VM's host up by
+  // itself. AGNOSTIC.
+  string target_host_id = 2;
+  // owner is the adopting VirtualMachine's identity; uid is required and is
+  // what the provider stamps (see ObjectIdentity).
+  ObjectIdentity owner = 3;
+  // replaceable_owner_uids are owner UIDs recorded on the VM (VMInfo
+  // provider_raw "owner_uid") that the manager verified belong to no existing
+  // VirtualMachine (for example one deleted with orphan-on-delete). Only these
+  // stamps may be replaced. Empty adopts only an unstamped VM.
+  repeated string replaceable_owner_uids = 4;
+  // expected_uuid is the provider's immutable identifier of the VM ListVMs
+  // reported (libvirt: the domain UUID, VMInfo provider_raw "uuid"). Required
+  // by a clustered provider, which refuses (FAILED_PRECONDITION) when the VM
+  // named id on the host now carries another, so a VM replaced since the list
+  // is never stamped.
+  string expected_uuid = 5;
+}
+
+message AdoptVMResponse {}
 
 // ObjectIdentity names a Kubernetes object on the wire (CreateRequest.owner,
 // the owner of the routed per-VM requests, CloneRequest.target_vm and
 // .source_owner, ImportDiskRequest.target_vm, ImagePrepareRequest.image and
-// .provider, PreparedArtifact.image).
+// .provider, PreparedArtifact.image, AdoptVMRequest.owner).
 // uid is the authoritative identity (unique for the object's whole lifetime,
 // never reused after deletion); namespace and name are informational (audit,
 // operator diagnostics, and naming the hypervisor-side object — e.g. the
@@ -844,8 +909,16 @@ service Provider {
   rpc ImportDisk(ImportDiskRequest) returns (ImportDiskResponse);
   rpc GetDiskInfo(GetDiskInfoRequest) returns (GetDiskInfoResponse);
   
-  // List all VMs managed by this provider
+  // List all VMs managed by this provider. A clustered provider lists every
+  // host it fronts, tags each VM with its host_id and names the hosts it could
+  // not list in unreachable_host_ids (ADR-0007 Addendum A, A3).
   rpc ListVMs(ListVMsRequest) returns (ListVMsResponse);
+
+  // Stamp a VM a clustered provider listed with its adopting VirtualMachine's
+  // identity (ADR-0007 Addendum A, slice 4). Single-host and thin-client
+  // providers return Unimplemented and advertise supports_routed_adoption =
+  // false.
+  rpc AdoptVM(AdoptVMRequest) returns (AdoptVMResponse);
 
   // Host inventory (ADR-0007 P1). Clustered providers report the hosts they
   // front so the operator can schedule across them; single-host and thin-client
