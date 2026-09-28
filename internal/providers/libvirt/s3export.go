@@ -105,34 +105,16 @@ func (s *Server) exportDiskToS3(ctx context.Context, req *providerv1.ExportDiskR
 	defer s3client.Close()
 
 	exportID := fmt.Sprintf("export-libvirt-%s-%d", req.VmId, time.Now().Unix())
-	hostTmp := hostExportStagePath(srcPath, req.VmId)
 
-	log.Printf("INFO Exporting disk from libvirt host to S3: backend=s3 vm=%s src=%s hostTmp=%s dest=%s",
-		req.VmId, srcPath, hostTmp, req.DestinationUrl)
+	log.Printf("INFO Exporting disk from libvirt host to S3: backend=s3 vm=%s src=%s dest=%s",
+		req.VmId, srcPath, req.DestinationUrl)
 
 	// --- FLATTEN (ADR D4) ---
-	// Collapse the (possibly snapshot-overlay) backing chain into one standalone
-	// qcow2 on the host. -f qcow2 forces the source driver (no format probing of
-	// the overlay); -O qcow2 keeps the native format the target expects. -U skips
-	// the shared-disk lock so a still-running source (e.g. powerOffBeforeMigration
-	// not yet honored, or createSnapshot=false) can be read — this is a
-	// crash-consistent copy; a consistent copy still requires the source to be
-	// powered off or snapshotted first.
-	// RunHost is argv-safe (every element is shell-quoted by the transport), so
-	// the paths are passed raw — pre-quoting them would now double-quote.
-	if res, err := conn.RunHost(ctx, "qemu-img", "convert", "-U", "-f", "qcow2", "-O", "qcow2",
-		srcPath, hostTmp); err != nil {
-		return nil, fmt.Errorf("host-side qemu-img flatten (qcow2→standalone qcow2) failed: %w%s", err, qemuImgStderr(res))
+	hostTmp, cleanup, err := flattenForExport(ctx, hostConnRunner{conn: conn}, srcPath, req.VmId)
+	if err != nil {
+		return nil, err
 	}
-
-	// Cleanup the flattened temp ALWAYS — success or failure — so a failed export
-	// never leaks a multi-GB temp on the host. Best-effort; WARN on failure.
-	defer func() {
-		if _, rmErr := conn.RunHost(context.Background(), "rm", "-f", hostTmp); rmErr != nil {
-			log.Printf("WARN failed to remove flattened export temp %s on host (manual cleanup may be needed): %v",
-				hostTmp, rmErr)
-		}
-	}()
+	defer cleanup()
 
 	log.Printf("INFO Source disk flattened to standalone qcow2 on host: hostTmp=%s", hostTmp)
 
@@ -171,17 +153,64 @@ func (s *Server) exportDiskToS3(ctx context.Context, req *providerv1.ExportDiskR
 	}, nil
 }
 
-// hostExportStagePath returns the path of the transient host-side flattened
-// qcow2 for an S3 export. It lives in the SAME directory as the source disk (so
-// the flatten convert reads/writes within one filesystem, no cross-device copy)
-// under a dot-prefixed, unix-ts-suffixed name so it is distinguishable, hidden
-// from a casual directory listing, and unlikely to collide with a real volume.
-// The .qcow2 suffix matches the staged (and uploaded) object's format.
-func hostExportStagePath(srcPath, vmID string) string {
+// exportStageUmask is the umask the flatten writes the export's staging file
+// under: it stays 0600 (mktemp creates it so), private to the SSH user — it is
+// a full copy of a VM's disk.
+const exportStageUmask = "0177"
+
+// hostExportStageSuffix ends the export's staging file name: the staged (and
+// uploaded) object's format.
+const hostExportStageSuffix = ".qcow2"
+
+// flattenForExport collapses the (possibly snapshot-overlay) backing chain of
+// srcPath into one standalone qcow2 on the host behind h and returns its path
+// and the function that removes it.
+//
+// The file is made for this export alone before the flatten runs (mktemp:
+// created exclusively, unpredictable name, mode 0600 — kept by the
+// exportStageUmask the flatten runs under), in the source disk's directory,
+// so the convert stays within one filesystem. Its removal is armed as soon as
+// it exists — the flatten failing, or the request being cancelled, still
+// removes it (removeHostPath runs detached from the request's cancellation,
+// bounded): a failed export used to leave a world-readable multi-GB copy
+// behind under a predictable name.
+//
+// -f qcow2 forces the source driver (no format probing of the overlay); -O
+// qcow2 keeps the native format the target expects. -U skips the shared-disk
+// lock so a still-running source (e.g. powerOffBeforeMigration not yet
+// honored, or createSnapshot=false) can be read — this is a crash-consistent
+// copy; a consistent copy still requires the source to be powered off or
+// snapshotted first.
+func flattenForExport(ctx context.Context, h hostCommandRunner, srcPath, vmID string) (string, func(), error) {
+	hostTmp, err := makeHostTempSuffix(ctx, h, hostExportStageTemplate(srcPath, vmID), hostExportStageSuffix, false)
+	if err != nil {
+		return "", nil, fmt.Errorf("create the export staging file on the host: %w", err)
+	}
+	cleanup := func() { removeHostPath(ctx, h, hostTmp, false) }
+	if res, err := runHost(ctx, h, withUmask(exportStageUmask, "qemu-img", "convert", "-U", "-f", "qcow2", "-O", "qcow2",
+		srcPath, hostTmp)...); err != nil {
+		cleanup()
+		stderr := ""
+		if res != nil && strings.TrimSpace(res.Stderr) != "" {
+			stderr = fmt.Sprintf(" (qemu-img stderr: %s)", strings.TrimSpace(res.Stderr))
+		}
+		return "", nil, fmt.Errorf("host-side qemu-img flatten (qcow2→standalone qcow2) failed: %w%s", err, stderr)
+	}
+	return hostTmp, cleanup, nil
+}
+
+// hostExportStageTemplate returns the mktemp template of the transient
+// host-side flattened qcow2 for an S3 export: in the SAME directory as the
+// source disk (so the flatten convert reads/writes within one filesystem, no
+// cross-device copy), under a dot-prefixed name carrying the (sanitized) VM
+// id, so it is distinguishable and hidden from a casual directory listing;
+// mktemp replaces the trailing mktempTemplateSuffix with random characters
+// and appends hostExportStageSuffix.
+func hostExportStageTemplate(srcPath, vmID string) string {
 	dir := srcPath
 	if idx := strings.LastIndex(srcPath, "/"); idx >= 0 {
 		dir = srcPath[:idx]
 	}
 	dir = strings.TrimRight(dir, "/")
-	return fmt.Sprintf("%s/.virtrigaud-export-%s-%d.qcow2", dir, sanitizeVolumeName(vmID), time.Now().Unix())
+	return fmt.Sprintf("%s/.virtrigaud-export-%s.%s", dir, sanitizeVolumeName(vmID), mktempTemplateSuffix)
 }
