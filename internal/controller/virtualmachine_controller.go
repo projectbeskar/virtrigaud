@@ -264,6 +264,10 @@ type VirtualMachineReconciler struct {
 	placements atomic.Pointer[assume.Cache]
 	// unschedulable paces the re-scheduling of clustered VMs no host can take.
 	unschedulable unschedulableBackoff
+	// reconfigureRetry paces re-sending a failed Reconfigure, per VM: from
+	// providerErrorRetryInterval doubling to reconfigureRetryMaxInterval
+	// (review H2). A Reconfigure that succeeds resets it.
+	reconfigureRetry unschedulableBackoff
 	// clock returns the current time for the image-prepare backoff and stall
 	// bounds; nil uses time.Now. Tests set it.
 	clock func() time.Time
@@ -2243,18 +2247,20 @@ func (r *VirtualMachineReconciler) reconfigureVM(
 		// The failed call may have applied part of the change: record it
 		// (recordReconfigureFailure — on a clustered Provider the size is
 		// counted at the larger of the recorded and the desired one, review H1)
-		// before anything else, so it is re-sent until one succeeds.
-		r.recordReconfigureFailure(vm, ref, vmClass, err)
+		// before anything else, so it is re-sent — on the VM's backoff (review
+		// H2) — until one succeeds.
+		retryAfter := r.recordReconfigureFailure(vm, ref, vmClass, err)
 		// As for Power: a clustered VM's host-scoped unavailability or
 		// not-found is a host-level fact, not a reconfigure failure to retry
 		// every few seconds (ADR-0007 Addendum A, slice 2).
 		if res, handled := r.handleRoutedOpError(ctx, vm, ref, err, errReasonProviderReconfigure); handled {
 			return res, nil
 		}
-		logger.Error(err, "Failed to reconfigure VM")
+		logger.Error(err, "Failed to reconfigure VM", "retryAfter", retryAfter)
 		r.updateStatus(ctx, vm)
-		return ctrl.Result{RequeueAfter: routedCallRetryAfter(ref, err)}, nil
+		return ctrl.Result{RequeueAfter: max(retryAfter, routedCallRetryAfter(ref, err))}, nil
 	}
+	r.recordReconfigureSuccess(vm)
 
 	// Update status with reconfiguration info
 	vm.Status.Phase = infravirtrigaudiov1beta1.VirtualMachinePhaseReconfiguring

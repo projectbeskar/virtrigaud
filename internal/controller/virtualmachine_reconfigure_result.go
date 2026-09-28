@@ -59,9 +59,10 @@ import (
 //     at the larger size, and the committed-capacity accounting must not
 //     count it below that. On a single-host Provider, which has no capacity
 //     accounting, it is left untouched (#354: status reports only a size the
-//     provider confirmed). Either way the Reconfigure is sent again — even if
-//     the spec is reverted to the recorded size — until one succeeds, which
-//     then records what was applied.
+//     provider confirmed). Either way the Reconfigure is sent again — on a
+//     per-VM backoff from 5 s doubling to 5 min (review H2), at once after a
+//     spec change, and even if the spec is reverted to the recorded size —
+//     until one succeeds, which then records what was applied.
 //   - A clustered VM's recorded CPU is also raised to the vCPUs its provider
 //     reports it has (DescribeResponse.vcpus), and its memory ceiling to the
 //     memory maximum its provider reports, whenever those are higher
@@ -78,6 +79,12 @@ import (
 // whether a change pending a restart has taken effect (the VM was power-cycled)
 // while the spec stays the same.
 const restartPendingRecheckInterval = 2 * time.Minute
+
+// reconfigureRetryMaxInterval caps the per-VM backoff of re-sending a failed
+// Reconfigure (review H2): it starts at providerErrorRetryInterval and doubles
+// with each consecutive failure, so one tenant's persistently failing resize
+// cannot hammer its provider every few seconds.
+const reconfigureRetryMaxInterval = 5 * time.Minute
 
 // recordRestartPending records a synchronous Reconfigure the provider applied
 // to the VM's persistent definition only: status.currentResources raised to
@@ -130,13 +137,16 @@ func (r *VirtualMachineReconciler) recordAtLeastDesired(vm *infravirtrigaudiov1b
 // have applied part of the change (review H1). A NotFound (the domain is gone
 // or not this VM's: the provider's ownership check refused it before anything
 // changed) records nothing; the caller hands it to the routed-error handling.
-func (r *VirtualMachineReconciler) recordReconfigureFailure(vm *infravirtrigaudiov1beta1.VirtualMachine, ref contracts.VMRef, vmClass *infravirtrigaudiov1beta1.VMClass, err error) {
+// It returns how long to wait before the Reconfigure is sent again: the VM's
+// next step on the reconfigureRetry backoff (review H2), 0 for a NotFound.
+func (r *VirtualMachineReconciler) recordReconfigureFailure(vm *infravirtrigaudiov1beta1.VirtualMachine, ref contracts.VMRef, vmClass *infravirtrigaudiov1beta1.VMClass, err error) time.Duration {
 	if contracts.IsNotFound(err) {
-		return
+		return 0
 	}
 	if ref.Routed() {
 		r.recordAtLeastDesired(vm, vmClass)
 	}
+	retryAfter := r.reconfigureRetry.nextWithin(vmSchedulingUID(vm), r.now(), providerErrorRetryInterval, reconfigureRetryMaxInterval)
 	meta.SetStatusCondition(&vm.Status.Conditions, metav1.Condition{
 		Type:               k8s.ConditionReconfiguring,
 		Status:             metav1.ConditionFalse,
@@ -144,18 +154,28 @@ func (r *VirtualMachineReconciler) recordReconfigureFailure(vm *infravirtrigaudi
 		Message:            fmt.Sprintf("Failed to reconfigure VM: %v", err),
 		ObservedGeneration: vm.Generation,
 	})
+	return retryAfter
+}
+
+// recordReconfigureSuccess forgets the VM's failed-Reconfigure backoff: the
+// provider answered (applied, or applied to the definition pending a
+// restart).
+func (r *VirtualMachineReconciler) recordReconfigureSuccess(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+	r.reconfigureRetry.reset(vmSchedulingUID(vm))
 }
 
 // pendingReconfigureRecheck reports whether the VM must be sent a Reconfigure
-// even though its spec matches status.currentResources (due), and, for a
-// change pending a restart, how long to wait before asking the provider again
-// (wait > 0 means: do not send one now, whatever the spec says).
+// even though its spec matches status.currentResources (due), and how long to
+// wait before asking the provider again (wait > 0 means: do not send one now,
+// whatever the spec says).
 //
 //   - Reconfiguring=True/RestartRequired: due once restartPendingRecheckInterval
 //     has passed since the last Reconfigure, or at once when the spec changed
 //     since (the condition's observedGeneration); otherwise wait.
 //   - Reconfiguring=False/ProviderError (the last Reconfigure failed, possibly
-//     after changing part of the definition): due.
+//     after changing part of the definition): due once the VM's
+//     reconfigureRetry backoff (5 s doubling to 5 min) has passed, or at once
+//     when the spec changed since; otherwise wait (review H2).
 //   - anything else: not due.
 func (r *VirtualMachineReconciler) pendingReconfigureRecheck(vm *infravirtrigaudiov1beta1.VirtualMachine) (due bool, wait time.Duration) {
 	cond := meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionReconfiguring)
@@ -164,6 +184,12 @@ func (r *VirtualMachineReconciler) pendingReconfigureRecheck(vm *infravirtrigaud
 	}
 	switch {
 	case cond.Status == metav1.ConditionFalse && cond.Reason == k8s.ReasonProviderError:
+		if cond.ObservedGeneration != vm.Generation {
+			return true, 0
+		}
+		if w := r.reconfigureRetry.remaining(vmSchedulingUID(vm), r.now()); w > 0 {
+			return false, w
+		}
 		return true, 0
 	case cond.Status == metav1.ConditionTrue && cond.Reason == k8s.ReasonRestartRequired:
 		if cond.ObservedGeneration != vm.Generation || vm.Status.LastReconfigureTime == nil {

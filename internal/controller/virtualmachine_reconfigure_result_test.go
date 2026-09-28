@@ -476,3 +476,40 @@ func TestSingleHost_MemoryCeiling_NotRecorded(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, vm.Status.Placement, "a single-host VM has no placement record")
 }
+
+// TestReconcileVM_FailedReconfigure_BacksOff (review H2): a Reconfigure that
+// keeps failing is re-sent on a per-VM backoff — 5 s doubling to 5 min — not
+// on every reconcile; a spec change is sent at once, and a success resets it.
+func TestReconcileVM_FailedReconfigure_BacksOff(t *testing.T) {
+	prov := newResultProvider()
+	prov.err = contracts.NewRetryableError("could not set 8 vCPUs in the VM's persistent definition", nil)
+	r, clock := singleHostReconciler(t, prov)
+	vm := sizedSingleHostVM(4, 8192, 8, 8192)
+	ctx := context.Background()
+
+	var waits []time.Duration
+	for range 8 {
+		res, err := r.reconcileVM(ctx, vm)
+		require.NoError(t, err)
+		waits = append(waits, res.RequeueAfter)
+		// A reconcile before the wait is over sends nothing.
+		clock.t = clock.t.Add(res.RequeueAfter / 2)
+		calls := prov.calls
+		_, err = r.reconcileVM(ctx, vm)
+		require.NoError(t, err)
+		require.Equal(t, calls, prov.calls, "not re-sent within the backoff")
+		clock.t = clock.t.Add(res.RequeueAfter - res.RequeueAfter/2)
+	}
+	assert.Equal(t, []time.Duration{5 * time.Second, 10 * time.Second, 20 * time.Second, 40 * time.Second, 80 * time.Second,
+		160 * time.Second, 5 * time.Minute, 5 * time.Minute}, waits)
+
+	// A spec change is sent at once, whatever is left of the wait.
+	calls := prov.calls
+	vm.Generation++
+	vm.Spec.Resources.CPU = i32p(6)
+	prov.err = nil
+	_, err := r.reconcileVM(ctx, vm)
+	require.NoError(t, err)
+	assert.Equal(t, calls+1, prov.calls)
+	assert.Zero(t, r.reconfigureRetry.remaining(vmSchedulingUID(vm), clock.t), "a success resets the backoff")
+}

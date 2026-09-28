@@ -642,11 +642,21 @@ type unschedulableBackoff struct {
 type unschedulableEntry struct {
 	failures int
 	last     time.Time
+	// until is when the wait the last failure started ends.
+	until time.Time
 }
 
 // next records a no-fit of the VM uid at now and returns how long to wait
 // before scheduling it again.
 func (b *unschedulableBackoff) next(uid string, now time.Time) time.Duration {
+	return b.nextWithin(uid, now, placementUnschedulableRetryInterval, placementUnschedulableMaxRetryInterval)
+}
+
+// nextWithin records a failure of the VM uid at now and returns how long to
+// wait before trying again: base for the first failure, twice as long for
+// each consecutive one, at most maxWait. The same per-VM record serves any
+// retry cadence (the placement no-fit backoff uses next).
+func (b *unschedulableBackoff) nextWithin(uid string, now time.Time, base, maxWait time.Duration) time.Duration {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.entries == nil {
@@ -664,11 +674,25 @@ func (b *unschedulableBackoff) next(uid string, now time.Time) time.Duration {
 	}
 	e.failures++
 	e.last = now
-	d := placementUnschedulableRetryInterval
-	for i := 1; i < e.failures && d < placementUnschedulableMaxRetryInterval; i++ {
+	d := base
+	for i := 1; i < e.failures && d < maxWait; i++ {
 		d *= 2
 	}
-	return min(d, placementUnschedulableMaxRetryInterval)
+	d = min(d, maxWait)
+	e.until = now.Add(d)
+	return d
+}
+
+// remaining returns how much of the VM uid's current wait is left at now; 0
+// when it has none (never failed, reset, or the wait is over).
+func (b *unschedulableBackoff) remaining(uid string, now time.Time) time.Duration {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	e, ok := b.entries[uid]
+	if !ok || !now.Before(e.until) {
+		return 0
+	}
+	return e.until.Sub(now)
 }
 
 // reset forgets the VM uid's no-fits.

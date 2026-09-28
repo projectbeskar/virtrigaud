@@ -222,6 +222,23 @@ func (s *Server) Power(ctx context.Context, req *providerv1.PowerRequest) (*prov
 	return result, nil
 }
 
+// singleHostReconfigureRPCError is the wire form of a failed single-host
+// Reconfigure (review H2). A failure of the operation on that one VM — it
+// reached the host, and the host refused or failed it (hostOpError, not a
+// transport failure) — keeps its historical code (Unknown) and message and
+// gains the VM_OPERATION_FAILED ErrorInfo, so the manager keeps it out of the
+// Provider's circuit breaker: one tenant's resize that keeps failing must not
+// open the breaker for every VM of the Provider. A host that could not be
+// reached (the SSH connection, or its libvirtd), and a provider that is not
+// ready, keep the historical plain error, which the breaker counts.
+func singleHostReconfigureRPCError(err error) error {
+	var ho *hostOpError
+	if stderrors.As(err, &ho) && !isHostTransportFailure(err) {
+		return vmOperationFailedStatus(fmt.Sprintf("failed to reconfigure VM: %v", err))
+	}
+	return fmt.Errorf("failed to reconfigure VM: %w", err)
+}
+
 // Reconfigure reconfigures a virtual machine. On a clustered provider the
 // reconfigure is routed to target_host_id and owner-checked (ADR-0007 Addendum
 // A, slice 2); a domain this VM does not own is answered NotFound and none of
@@ -241,7 +258,7 @@ func (s *Server) Reconfigure(ctx context.Context, req *providerv1.ReconfigureReq
 		if s.clusteredProvider() {
 			return nil, routedRPCError("reconfigure VM", err)
 		}
-		return nil, fmt.Errorf("failed to reconfigure VM: %w", err)
+		return nil, singleHostReconfigureRPCError(err)
 	}
 
 	result := &providerv1.TaskResponse{RestartRequired: res.RestartRequired}

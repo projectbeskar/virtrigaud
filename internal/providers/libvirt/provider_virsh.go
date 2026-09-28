@@ -1356,7 +1356,14 @@ func (p *Provider) Reconfigure(ctx context.Context, vm contracts.VMRef, desired 
 		return contracts.ReconfigureResult{}, contracts.NewRetryableError("virsh provider not initialized", nil)
 	}
 	restart, err := p.reconfigureOn(ctx, p.singleHostConn(), byName(id), desired)
-	return contracts.ReconfigureResult{RestartRequired: restart && err == nil}, err
+	if err != nil {
+		// The failure arose on the provider's one host, like a routed call's on
+		// its leased host: the server classifies it (per-VM failure vs the host
+		// being unreachable) for the manager's circuit breaker (review H2).
+		// hostOpError is transparent: the error text is unchanged.
+		return contracts.ReconfigureResult{}, &hostOpError{host: p.hostID, err: err}
+	}
+	return contracts.ReconfigureResult{RestartRequired: restart}, nil
 }
 
 // reconfigureClustered is the routed, OWNER-CHECKED Reconfigure of a clustered
