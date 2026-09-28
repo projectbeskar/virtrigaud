@@ -455,10 +455,12 @@ func TestDescribe_ReportsMaxMemory(t *testing.T) {
 		"single": {opsDomainName: routingDomainXML(opsDomainName, contracts.ObjectIdentity{})},
 	})
 	fx.script("single", "maxmem", "8388609") // 8 GiB + 1 KiB: rounds up
+	fx.script("single", "vcpus", "6")
 	s := NewServer(&Provider{virshProvider: localHostVP("single")})
 	resp, err := s.Describe(context.Background(), &providerv1.DescribeRequest{Id: opsDomainName})
 	require.NoError(t, err)
 	assert.EqualValues(t, 8193, resp.GetMaxMemoryMib())
+	assert.EqualValues(t, 6, resp.GetVcpus(), "the vCPUs online (dominfo CPU(s)) — review H1d")
 }
 
 // TestGenerateDomainXML_ClusteredDisablesGuestSuspend (review R1c): a clustered

@@ -72,11 +72,13 @@ func TestClient_Reconfigure_MapsRestartRequired(t *testing.T) {
 // reaches the manager as DescribeResponse.MaxMemoryMiB; 0 means not reported.
 func TestClient_Describe_MapsMaxMemory(t *testing.T) {
 	for _, maxMiB := range []int64{0, 8192} {
+		vcpus := int32(maxMiB / 1024)
 		cli := newTestClientForVMOps(t, &reconfigureResultServer{
-			describe: &providerv1.DescribeResponse{Exists: true, PowerState: "On", MaxMemoryMib: maxMiB},
+			describe: &providerv1.DescribeResponse{Exists: true, PowerState: "On", MaxMemoryMib: maxMiB, Vcpus: vcpus},
 		}, "describe-maxmem", "describe-maxmem")
 		got, err := cli.Describe(context.Background(), contracts.VMRef{ID: "vm-1"})
 		require.NoError(t, err)
 		assert.Equal(t, maxMiB, got.MaxMemoryMiB)
+		assert.Equal(t, vcpus, got.VCPUs, "the reported vCPUs; 0 = not reported")
 	}
 }

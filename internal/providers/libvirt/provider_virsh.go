@@ -1670,6 +1670,11 @@ func (p *Provider) describeOn(ctx context.Context, c libvirtConn, id string) (co
 	if kib, kErr := dominfoKiB(domainInfo, "Max memory"); kErr == nil {
 		response.MaxMemoryMiB = kibToMiBCeil(kib)
 	}
+	// The vCPUs online now (dominfo "CPU(s)": the running domain's count, or
+	// the definition's when it is off).
+	if n, cErr := strconv.ParseInt(strings.TrimSpace(domainInfo["CPU(s)"]), 10, 32); cErr == nil && n > 0 {
+		response.VCPUs = int32(n)
+	}
 
 	log.Printf("INFO Domain %s comprehensive state: power=%s, ips=%v, monitoring_data=collected", id, response.PowerState, ips)
 

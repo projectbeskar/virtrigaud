@@ -123,6 +123,10 @@ type DescribeResponse struct {
 	// balloon headroom above its current allocation (libvirt's <memory>). 0
 	// means the provider does not report it.
 	MaxMemoryMiB int64
+	// VCPUs is the number of vCPUs the VM has online now (the running VM's
+	// count, or the count it boots with when off). 0 means the provider does
+	// not report it.
+	VCPUs int32
 }
 
 // ReconfigureResult is what a Reconfigure applied.

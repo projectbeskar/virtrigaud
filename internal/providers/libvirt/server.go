@@ -282,6 +282,7 @@ func (s *Server) Describe(ctx context.Context, req *providerv1.DescribeRequest) 
 		ConsoleUrl:      resp.ConsoleURL,
 		ProviderRawJson: providerRawJSON,
 		MaxMemoryMib:    resp.MaxMemoryMiB,
+		Vcpus:           resp.VCPUs,
 	}, nil
 }
 

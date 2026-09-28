@@ -808,6 +808,7 @@ func (c *Client) Describe(ctx context.Context, vm contracts.VMRef) (result contr
 		ConsoleURL:   resp.ConsoleUrl,
 		ProviderRaw:  providerRaw,
 		MaxMemoryMiB: resp.GetMaxMemoryMib(),
+		VCPUs:        resp.GetVcpus(),
 	}, nil
 }
 

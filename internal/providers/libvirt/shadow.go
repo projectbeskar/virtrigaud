@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -398,6 +399,16 @@ func buildNativeDescribe(lv *golibvirt.Libvirt, id string) (contracts.DescribeRe
 	if d.Memory != nil {
 		if kib, kErr := kibOf(d.Memory.Value, d.Memory.Unit); kErr == nil {
 			resp.MaxMemoryMiB = kibToMiBCeil(kib)
+		}
+	}
+	// The vCPUs online (the live document's <vcpu current>, else <vcpu>).
+	if d.VCPU != nil {
+		n := d.VCPU.Current
+		if n == 0 {
+			n = d.VCPU.Value
+		}
+		if n > 0 && n <= math.MaxInt32 {
+			resp.VCPUs = int32(n)
 		}
 	}
 	return resp, nil

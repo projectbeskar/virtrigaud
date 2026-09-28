@@ -224,9 +224,18 @@ message DescribeResponse {
   // balloon maximum). 0 means the provider does not report it. Additive and
   // backward-compatible. The clustered scheduler records it once as
   // status.placement.memoryCeilingMiB for a VM scheduled before that field
-  // existed, and lowers a recorded ceiling to it once the provider reports less
-  // (ADR-0007 Addendum A, scheduler-accuracy amendment).
+  // existed, raises a recorded ceiling to it when it is higher, and lowers a
+  // recorded ceiling to it once the provider reports less (ADR-0007 Addendum A,
+  // scheduler-accuracy amendment).
   int64 max_memory_mib = 6;
+
+  // vcpus is the number of vCPUs the VM has online now: the running VM's
+  // count, or, for a VM that is off, the count it boots with. 0 means the
+  // provider does not report it. Additive and backward-compatible. The
+  // clustered scheduler raises a VM's recorded CPU (status.currentResources)
+  // to it when it is higher, so a VM is never counted below the vCPUs it has
+  // (ADR-0007 Addendum A, scheduler-accuracy amendment).
+  int32 vcpus = 7;
 }
 
 // Check async task status
