@@ -157,7 +157,7 @@ func (r *VMAdoptionReconciler) reconcileClusteredAdoption(ctx context.Context, p
 	if err != nil {
 		return r.clusteredAdoptionFailed(ctx, provider, fmt.Sprintf("Discovery failed: %v", err), errReasonDiscoverVMs)
 	}
-	transferer, ok := r.routedAdopter(ctx, provider, providerInstance)
+	transferrer, ok := r.routedAdopter(ctx, provider, providerInstance)
 	if !ok {
 		return ctrl.Result{RequeueAfter: clusteredAdoptionRetryInterval}, nil
 	}
@@ -199,11 +199,11 @@ func (r *VMAdoptionReconciler) reconcileClusteredAdoption(ctx context.Context, p
 		}
 	}
 	for _, p := range plan.complete {
-		count(r.completeClusteredAdoption(ctx, provider, transferer, providerInstance, p.vm, p.info),
+		count(r.completeClusteredAdoption(ctx, provider, transferrer, providerInstance, p.vm, p.info),
 			"Failed to complete the adoption of a VM", p.info)
 	}
 	for _, info := range unmanaged {
-		count(r.adoptClusteredVM(ctx, provider, transferer, providerInstance, info), "Failed to adopt VM", info)
+		count(r.adoptClusteredVM(ctx, provider, transferrer, providerInstance, info), "Failed to adopt VM", info)
 	}
 
 	now := metav1.Now()
@@ -257,10 +257,10 @@ func (r *VMAdoptionReconciler) clusteredAdoptionFailed(ctx context.Context, prov
 // reports supports_routed_adoption (D7, fail closed). Otherwise it records why
 // on the Provider and returns false; nothing is listed or created.
 func (r *VMAdoptionReconciler) routedAdopter(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider,
-	providerInstance contracts.Provider) (contracts.OwnerTransferer, bool) {
+	providerInstance contracts.Provider) (contracts.OwnerTransferrer, bool) {
 	logger := log.FromContext(ctx)
 	reporter, okCaps := providerInstance.(contracts.CapabilityReporter)
-	transferer, okTransfer := providerInstance.(contracts.OwnerTransferer)
+	transferrer, okTransfer := providerInstance.(contracts.OwnerTransferrer)
 	msg := clusteredAdoptionNotSupportedMessage
 	if okCaps && okTransfer {
 		caps, err := reporter.GetCapabilities(ctx)
@@ -269,7 +269,7 @@ func (r *VMAdoptionReconciler) routedAdopter(ctx context.Context, provider *infr
 			msg = fmt.Sprintf("Waiting for the provider's capabilities before a clustered discovery: %v", err)
 			metrics.RecordError(errReasonAdoptionCapabilities, metrics.ComponentManager)
 		case caps.SupportsRoutedAdoption:
-			return transferer, true
+			return transferrer, true
 		}
 	}
 	logger.Info("Not adopting from a clustered provider", "provider", provider.Name, "reason", msg)
@@ -392,7 +392,7 @@ func clusteredAdoptedVMName(host, id string) string {
 // resolves its Host, creates (or re-finds) the adopting VirtualMachine and
 // hands it the domain (completeClusteredAdoption).
 func (r *VMAdoptionReconciler) adoptClusteredVM(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider,
-	transferer contracts.OwnerTransferer, providerInstance contracts.Provider, info contracts.VMInfo) error {
+	transferrer contracts.OwnerTransferrer, providerInstance contracts.Provider, info contracts.VMInfo) error {
 	logger := log.FromContext(ctx).WithValues("host", info.HostID, "vm_id", info.ID)
 	if _, err := r.adoptionHost(ctx, provider, info.HostID); err != nil {
 		return err
@@ -417,7 +417,7 @@ func (r *VMAdoptionReconciler) adoptClusteredVM(ctx context.Context, provider *i
 			return fmt.Errorf("VirtualMachine %s/%s exists and is not waiting for this adoption: %w", vm.Namespace, name, errAdoptionSkipped)
 		}
 	}
-	return r.completeClusteredAdoption(ctx, provider, transferer, providerInstance, vm, info)
+	return r.completeClusteredAdoption(ctx, provider, transferrer, providerInstance, vm, info)
 }
 
 // createClusteredAdoptedVM creates the VirtualMachine (and its VMClass) that
@@ -473,7 +473,7 @@ func (r *VMAdoptionReconciler) adoptionHost(ctx context.Context, provider *infra
 // known from a restored hint would go through the same transfer, Describe and
 // binding write.
 func (r *VMAdoptionReconciler) completeClusteredAdoption(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider,
-	transferer contracts.OwnerTransferer, providerInstance contracts.Provider,
+	transferrer contracts.OwnerTransferrer, providerInstance contracts.Provider,
 	vm *infravirtrigaudiov1beta1.VirtualMachine, info contracts.VMInfo) error {
 	logger := log.FromContext(ctx).WithValues("host", info.HostID, "vm_id", info.ID, "vm_name", vm.Name)
 	host, err := r.adoptionHost(ctx, provider, info.HostID)
@@ -506,7 +506,7 @@ func (r *VMAdoptionReconciler) completeClusteredAdoption(ctx context.Context, pr
 			replaceable = append(replaceable, uid)
 		}
 	}
-	if err := transferer.TransferOwner(ctx, contracts.TransferOwnerRequest{
+	if err := transferrer.TransferOwner(ctx, contracts.TransferOwnerRequest{
 		VM:                   ref,
 		ReplaceableOwnerUIDs: replaceable,
 		ExpectedUUID:         info.ProviderRaw[contracts.VMInfoUUIDKey],

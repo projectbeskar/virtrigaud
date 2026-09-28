@@ -49,7 +49,9 @@ func (s *slice4Server) ListVMs(context.Context, *providerv1.ListVMsRequest) (*pr
 func (s *slice4Server) TransferOwner(_ context.Context, r *providerv1.TransferOwnerRequest) (*providerv1.TransferOwnerResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.transfer = proto.Clone(r).(*providerv1.TransferOwnerRequest)
+	if clone, ok := proto.Clone(r).(*providerv1.TransferOwnerRequest); ok {
+		s.transfer = clone
+	}
 	if s.transferErr != nil {
 		return nil, s.transferErr
 	}

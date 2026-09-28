@@ -48,7 +48,7 @@ var (
 	_ contracts.CapabilityReporter = (*Client)(nil)
 	_ contracts.Cloner             = (*Client)(nil)
 	_ contracts.ImagePreparer      = (*Client)(nil)
-	_ contracts.OwnerTransferer    = (*Client)(nil)
+	_ contracts.OwnerTransferrer   = (*Client)(nil)
 )
 
 // Client wraps a gRPC provider client and implements the contracts.Provider interface
@@ -1137,7 +1137,7 @@ func (c *Client) ListVMs(ctx context.Context) (contracts.VMList, error) {
 // write on the VM's host.
 const transferOwnerCallTimeout = 2 * time.Minute
 
-// TransferOwner implements contracts.OwnerTransferer (ADR-0007 Addendum A, slice 4): it
+// TransferOwner implements contracts.OwnerTransferrer (ADR-0007 Addendum A, slice 4): it
 // asks a clustered provider to stamp the VM req.VM addresses — on host
 // req.VM.HostID — with its adopting VirtualMachine's identity. A provider that
 // does not adopt (single-host, thin-client, or a clustered one older than

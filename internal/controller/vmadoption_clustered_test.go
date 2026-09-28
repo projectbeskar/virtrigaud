@@ -76,7 +76,7 @@ type fakeClusteredAdopter struct {
 
 var (
 	_ contracts.CapabilityReporter = (*fakeClusteredAdopter)(nil)
-	_ contracts.OwnerTransferer    = (*fakeClusteredAdopter)(nil)
+	_ contracts.OwnerTransferrer   = (*fakeClusteredAdopter)(nil)
 )
 
 func (f *fakeClusteredAdopter) GetCapabilities(context.Context) (contracts.Capabilities, error) {

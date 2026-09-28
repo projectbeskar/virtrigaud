@@ -84,7 +84,7 @@ type providerBackend interface {
 	// TransferOwner re-stamps a VM on a CLUSTERED provider's host with the
 	// VirtualMachine that takes it over, compare-and-swap (ADR-0007 Addendum A,
 	// slice 4; routed_transfer_owner.go). It is defined on *Provider, not on
-	// contracts.Provider (the manager reaches it as contracts.OwnerTransferer).
+	// contracts.Provider (the manager reaches it as contracts.OwnerTransferrer).
 	TransferOwner(ctx context.Context, req contracts.TransferOwnerRequest) error
 }
 

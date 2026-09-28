@@ -44,10 +44,10 @@ type TransferOwnerRequest struct {
 	ExpectedUUID string
 }
 
-// OwnerTransferer is an optional capability of a Provider: it re-stamps a VM
+// OwnerTransferrer is an optional capability of a Provider: it re-stamps a VM
 // on a clustered provider's host with the VirtualMachine that takes it over
 // (TransferOwner), compare-and-swap. The manager gRPC client implements it;
-// the adoption controller type-asserts a Provider to OwnerTransferer, and uses
+// the adoption controller type-asserts a Provider to OwnerTransferrer, and uses
 // it only when the provider reports Capabilities.SupportsRoutedAdoption, so
 // the core Provider interface and the test fakes that do not adopt are
 // unaffected. This mirrors the Cloner pattern.
@@ -55,7 +55,7 @@ type TransferOwnerRequest struct {
 // A6 (restore re-binding) can reuse it: a VirtualMachine restored from a
 // backup has a new UID, so its VM's stamp names a VirtualMachine that no longer
 // exists and is replaceable exactly as for adoption.
-type OwnerTransferer interface {
+type OwnerTransferrer interface {
 	// TransferOwner stamps req.VM.Owner onto the VM req.VM addresses. It
 	// succeeds when the VM now carries exactly that owner's stamp (including
 	// when it already did); it refuses — Conflict, never touching the VM —
