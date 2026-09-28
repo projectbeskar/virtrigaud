@@ -1450,6 +1450,15 @@ slice 4 is refused with a message and nothing is listed. For each listed VM:
    records, e.g. `team-a/web (team-a.web on host-a)` — with the hint to
    re-attach it per the A6 runbook or remove it. Unlike single-host adoption,
    a clustered one never takes it over.
+   **Cross-host duplicates are not adopted either.** A brownfield domain whose
+   UUID is listed on more than one host, or one of whose disk paths a VM listed
+   on another host uses (common with a shared NFS pool: a stale definition left
+   on a second host), is skipped and reported on every host. Adopting both
+   copies would let deleting the stale one remove the running VM's disk.
+   *Remaining gap:* a duplicate on a host that could not be listed is not seen
+   (its VMs are unknown). *Follow-up:* a clustered `Delete` checks only its own
+   host for other domains using the disk; it should scan every host, as
+   ADR-0007 A6.1's R3 does for `Create`.
 2. **The adopting VirtualMachine** is created in the Provider's namespace, as on
    a single host, but named after the domain **plus a digest of (host, id)**
    (for example `team-a-web-3f2a9c1b04`), so the same name on two hosts gives

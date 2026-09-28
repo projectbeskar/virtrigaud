@@ -165,6 +165,12 @@ const (
 	// ADR-0007 A6.4 it is re-attached by an administrator, never adopted.
 	skipPreviousIncarnation adoptionSkipReason = "previous incarnation of a VirtualMachine that no longer exists " +
 		"(re-attach it per the ADR-0007 A6 runbook, or remove it)"
+	// skipDuplicate: the same domain (its UUID) is defined on more than one
+	// host, or one of its disks is used by a VM listed on another host — a
+	// brownfield duplicate, common with a shared (NFS) pool. Adopting both
+	// would let deleting the stale definition remove the running VM's disk.
+	skipDuplicate adoptionSkipReason = "defined on more than one host (the same UUID, or a disk a VM on another host uses; " +
+		"remove the stale definition)"
 )
 
 // pendingAdoption is an adopted VirtualMachine whose domain already carries
@@ -379,6 +385,11 @@ func (r *VMAdoptionReconciler) routedAdopter(ctx context.Context, provider *infr
 //     Provider that is still waiting for its binding and was created for this
 //     very (host, id) (isAwaitingAdoptionOf): its binding is completed;
 //   - a VM without a host id or UUID cannot be adopted (skipped);
+//   - a VM whose UUID is listed on more than one host, or one of whose disk
+//     paths a VM listed on another host uses, is a cross-host duplicate
+//     (skipped and reported): adopting both copies would let one's delete
+//     remove the other's disk. A duplicate on an UNREACHABLE host is not seen
+//     (that host's VMs are unknown); see the docs;
 //   - a VM with any other owner stamp is a previous incarnation (skipped and
 //     reported; ADR-0007 A6);
 //   - an unstamped VM is unmanaged and may be adopted.
@@ -411,12 +422,17 @@ func planClusteredAdoption(provider *infravirtrigaudiov1beta1.Provider, listed c
 	skip := func(info contracts.VMInfo, reason adoptionSkipReason) {
 		plan.skipped = append(plan.skipped, adoptionSkip{info: info, reason: reason})
 	}
+	duplicated := crossHostDuplicates(listed.VMs)
 	for _, info := range listed.VMs {
 		if strings.TrimSpace(info.HostID) == "" || strings.TrimSpace(info.ProviderRaw[contracts.VMInfoUUIDKey]) == "" {
 			skip(info, skipNoIdentity)
 			continue
 		}
 		if managed[vmHostKey{host: info.HostID, id: info.ID}] {
+			continue
+		}
+		if duplicated(info) {
+			skip(info, skipDuplicate)
 			continue
 		}
 		uids := ownerUIDs(info)
@@ -436,6 +452,41 @@ func planClusteredAdoption(provider *infravirtrigaudiov1beta1.Provider, listed c
 		plan.adopt = append(plan.adopt, info)
 	}
 	return plan
+}
+
+// crossHostDuplicates returns a predicate that reports whether a listed VM is
+// defined on more than one host: its UUID is listed on another host too, or
+// one of its disk paths is a disk path of a VM listed on another host. Paths
+// are compared as listed (the provider reports each domain's disk source).
+func crossHostDuplicates(vms []contracts.VMInfo) func(contracts.VMInfo) bool {
+	uuidHosts := map[string]map[string]bool{}
+	diskHosts := map[string]map[string]bool{}
+	note := func(m map[string]map[string]bool, key, host string) {
+		if key == "" {
+			return
+		}
+		if m[key] == nil {
+			m[key] = map[string]bool{}
+		}
+		m[key][host] = true
+	}
+	for _, v := range vms {
+		note(uuidHosts, strings.ToLower(strings.TrimSpace(v.ProviderRaw[contracts.VMInfoUUIDKey])), v.HostID)
+		for _, d := range v.Disks {
+			note(diskHosts, strings.TrimSpace(d.Path), v.HostID)
+		}
+	}
+	return func(v contracts.VMInfo) bool {
+		if len(uuidHosts[strings.ToLower(strings.TrimSpace(v.ProviderRaw[contracts.VMInfoUUIDKey]))]) > 1 {
+			return true
+		}
+		for _, d := range v.Disks {
+			if len(diskHosts[strings.TrimSpace(d.Path)]) > 1 {
+				return true
+			}
+		}
+		return false
+	}
 }
 
 // ownerUIDs returns the non-empty owner UIDs a listed VM is stamped with.

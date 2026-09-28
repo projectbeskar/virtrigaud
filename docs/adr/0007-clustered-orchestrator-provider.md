@@ -1044,7 +1044,13 @@ slice 4 is implemented (see the slice 4 amendment below); slice 5 is open.
 >   domain is adopted** (the slice 4 review, following A6's fail-closed
 >   choice): a domain stamped only by VirtualMachines that no longer exist is a
 >   previous incarnation and is skipped and reported with the A6 runbook hint
->   (see A6, *Slice 4 coordination*). The adopting
+>   (see A6, *Slice 4 coordination*). A **cross-host duplicate** — a UUID
+>   listed on more than one host, or a disk path a VM on another host uses (a
+>   stale brownfield definition on a shared pool) — is skipped and reported
+>   too: adopting both copies would let one's delete remove the other's disk.
+>   A duplicate on an unreachable host is not seen; and a clustered `Delete`'s
+>   in-use scan is still host-local — it should fan out across hosts as A6.1's
+>   R3 does for `Create` (follow-up). The adopting
 >   VirtualMachine is named `<sanitized domain name>-<10 hex digits of
 >   sha256(host/id)>` in the Provider's namespace, annotated
 >   `virtrigaud.io/adopted-host` / `-id`, and created with an empty status. The

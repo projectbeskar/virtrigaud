@@ -59,6 +59,7 @@ type fakeDomain struct {
 	maxMemMiB   int64
 	vcpusOnline int32
 	power       string
+	disks       []string
 }
 
 // fakeClusteredAdopter is a clustered provider: ListVMs across hosts (with
@@ -99,8 +100,12 @@ func (f *fakeClusteredAdopter) ListVMs(context.Context) (contracts.VMList, error
 		if d.owner != "" {
 			raw[contracts.VMInfoOwnerUIDKey] = d.owner
 		}
+		var disks []contracts.DiskInfo
+		for _, path := range d.disks {
+			disks = append(disks, contracts.DiskInfo{Path: path, Format: "qcow2"})
+		}
 		out.VMs = append(out.VMs, contracts.VMInfo{ID: d.id, Name: d.id, HostID: d.host, PowerState: d.power,
-			CPU: d.cpu, MemoryMiB: d.memMiB, ProviderRaw: raw, OwnerNamespace: d.ownerNS, OwnerName: d.ownerName})
+			CPU: d.cpu, MemoryMiB: d.memMiB, ProviderRaw: raw, OwnerNamespace: d.ownerNS, OwnerName: d.ownerName, Disks: disks})
 	}
 	return out, nil
 }
@@ -648,4 +653,45 @@ func TestClusteredAdoption_PreviousIncarnationsAreNeverAdopted(t *testing.T) {
 	assert.Contains(t, st.Message, "team-a/web (team-a.web on host-a)")
 	assert.Contains(t, st.Message, "legacy.db on host-a", "an incarnation whose stamp names no namespace/name is named by its domain")
 	assert.Contains(t, st.Message, "re-attach it per the ADR-0007 A6 runbook, or remove it")
+}
+
+// TestClusteredAdoption_CrossHostDuplicatesAreNeverAdopted: a brownfield
+// domain defined on two hosts — the same UUID, or a disk a VM on another host
+// uses (common on a shared NFS pool) — is skipped and reported on every host,
+// so deleting a stale copy can never remove the running VM's disk. A
+// duplicate of a managed domain is skipped too; the managed one is untouched.
+func TestClusteredAdoption_CrossHostDuplicatesAreNeverAdopted(t *testing.T) {
+	bound := &infravirtrigaudiov1beta1.VirtualMachine{
+		ObjectMeta: metav1.ObjectMeta{Name: "db", Namespace: clusterNS, UID: "uid-db"},
+		Spec:       infravirtrigaudiov1beta1.VirtualMachineSpec{ProviderRef: infravirtrigaudiov1beta1.ObjectRef{Name: "prov-c"}},
+		Status: infravirtrigaudiov1beta1.VirtualMachineStatus{ID: "db",
+			Placement: &infravirtrigaudiov1beta1.PlacementStatus{Host: "host-a"}},
+	}
+	prov := &fakeClusteredAdopter{caps: routedAdoptionCaps, domains: []*fakeDomain{
+		// The same UUID on two hosts.
+		{host: "host-a", id: "web", uuid: "uuid-web", power: "On", disks: []string{"/pool/web-a.qcow2"}},
+		{host: "host-b", id: "web", uuid: "UUID-WEB", power: "Off", disks: []string{"/pool/web-b.qcow2"}},
+		// Different UUIDs, one shared disk (a stale definition on another host).
+		{host: "host-a", id: "app", uuid: "uuid-app-a", power: "On", disks: []string{"/pool/app.qcow2"}},
+		{host: "host-b", id: "app-old", uuid: "uuid-app-b", power: "Off", disks: []string{"/pool/app.qcow2"}},
+		// A stale copy of a managed domain.
+		{host: "host-a", id: "db", uuid: "uuid-db", owner: "uid-db", power: "On", disks: []string{"/pool/db.qcow2"}},
+		{host: "host-b", id: "db-copy", uuid: "uuid-db-copy", power: "Off", disks: []string{"/pool/db.qcow2"}},
+		// Unique: adopted. The same disk twice on ONE host is not a cross-host duplicate.
+		{host: "host-b", id: "solo", uuid: "uuid-solo", power: "On", disks: []string{"/pool/solo.qcow2", "/pool/solo.qcow2"}},
+	}}
+	r := clusteredAdoptionReconciler(t, prov, clusteredAdoptionProvider(),
+		clusterHost("host-a", "prov-c"), clusterHost("host-b", "prov-c"), bound)
+
+	reconcileAdoption(t, r)
+	require.Len(t, prov.transfers, 1, "only the unique domain is adopted")
+	assert.Equal(t, "solo", prov.transfers[0].VM.ID)
+	st := adoptionStatus(t, r)
+	assert.EqualValues(t, 1, st.AdoptedVMs)
+	assert.Contains(t, st.Message, "5 not adopted")
+	for _, name := range []string{"web on host-a", "web on host-b", "app on host-a", "app-old on host-b", "db-copy on host-b"} {
+		assert.Contains(t, st.Message, name)
+	}
+	assert.Contains(t, st.Message, "defined on more than one host")
+	assert.Equal(t, "db", adoptedVMGet(t, r, "db").Status.ID, "the managed VM is untouched")
 }
