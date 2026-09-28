@@ -178,6 +178,7 @@ func (c *createHost) legacyLinkedClone(src, clone string) {
 	c.t.Helper()
 	ctx := context.Background()
 	require.NoError(c.t, createLinkedOverlay(ctx, c.vp, src, "qcow2", clone))
+	c.overlay(clone, src) // the fake qemu-img's sidecar stayed in the private write directory
 	res, err := c.vp.runVirshCommand(ctx, "dumpxml", "team-a.web")
 	require.NoError(c.t, err)
 	x, _, _, err := rewriteDomainXMLForClone(res.Stdout, "team-b.copy", src, clone)

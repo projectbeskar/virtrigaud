@@ -312,8 +312,15 @@ func (s *StorageProvider) DownloadCloudImage(ctx context.Context, imageURL, volu
 		return nil, fmt.Errorf("inspect downloaded image: %w", err)
 	}
 
-	// Create target volume path
+	// Create target volume path. The disk is written (with vmDiskMode) in a
+	// private directory next to it and renamed into place (diskWriteDir).
 	targetPath := filepath.Join(poolInfo.Path, fmt.Sprintf("%s.qcow2", volumeName))
+	wd, err := newDiskWriteDir(ctx, s.virshProvider, poolInfo.Path)
+	if err != nil {
+		return nil, err
+	}
+	defer wd.cleanup(ctx)
+	newDisk := wd.file(filepath.Base(targetPath))
 
 	// Convert and resize image if needed
 	if sizeGB > 0 {
@@ -321,14 +328,14 @@ func (s *StorageProvider) DownloadCloudImage(ctx context.Context, imageURL, volu
 
 		// First convert the image (created with vmDiskMode)
 		result, err = runHost(ctx, s.virshProvider, withUmask(vmDiskUmask,
-			"qemu-img", "convert", "-f", srcFormat, "-O", "qcow2", tempImage, targetPath)...)
+			"qemu-img", "convert", "-f", srcFormat, "-O", "qcow2", tempImage, newDisk)...)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert image: %w, output: %s", err, result.Stderr)
 		}
 
 		// Then resize it
 		sizeSpec := fmt.Sprintf("%dG", sizeGB)
-		result, err = s.virshProvider.runVirshCommand(ctx, "!", "qemu-img", "resize", targetPath, sizeSpec)
+		result, err = s.virshProvider.runVirshCommand(ctx, "!", "qemu-img", "resize", newDisk, sizeSpec)
 		if err != nil {
 			return nil, fmt.Errorf("failed to resize image: %w, output: %s", err, result.Stderr)
 		}
@@ -336,10 +343,13 @@ func (s *StorageProvider) DownloadCloudImage(ctx context.Context, imageURL, volu
 		// Just convert to target location (created with vmDiskMode)
 		log.Printf("INFO Converting image to qcow2 format")
 		result, err = runHost(ctx, s.virshProvider, withUmask(vmDiskUmask,
-			"qemu-img", "convert", "-f", srcFormat, "-O", "qcow2", tempImage, targetPath)...)
+			"qemu-img", "convert", "-f", srcFormat, "-O", "qcow2", tempImage, newDisk)...)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert image: %w, output: %s", err, result.Stderr)
 		}
+	}
+	if err := wd.publish(ctx, filepath.Base(targetPath), targetPath); err != nil {
+		return nil, err
 	}
 
 	// Give it to the qemu user without following a symbolic link (its mode
@@ -690,10 +700,16 @@ func (s *StorageProvider) adoptVolumeInPlace(ctx context.Context, path, poolName
 func (s *StorageProvider) convertImageToVolume(ctx context.Context, srcPath, srcFormat, targetPath, volumeName, poolName string, sizeGB int) (*StorageVolume, error) {
 	log.Printf("INFO Source is external or wrong format - copying and converting: %s -> %s", srcPath, targetPath)
 
-	// Convert the source image to the target location, created with
-	// vmDiskMode
+	// Convert the source image, created with vmDiskMode in a private
+	// directory next to the target and renamed into place (diskWriteDir).
+	wd, err := newDiskWriteDir(ctx, s.virshProvider, filepath.Dir(targetPath))
+	if err != nil {
+		return nil, err
+	}
+	defer wd.cleanup(ctx)
+	newDisk := wd.file(filepath.Base(targetPath))
 	result, err := runHost(ctx, s.virshProvider, withUmask(vmDiskUmask, "qemu-img", "convert",
-		"-f", srcFormat, "-O", "qcow2", srcPath, targetPath)...)
+		"-f", srcFormat, "-O", "qcow2", srcPath, newDisk)...)
 	if err != nil {
 		stderr := ""
 		if result != nil {
@@ -707,11 +723,14 @@ func (s *StorageProvider) convertImageToVolume(ctx context.Context, srcPath, src
 		sizeSpec := fmt.Sprintf("%dG", sizeGB)
 		log.Printf("INFO Resizing disk to %s", sizeSpec)
 
-		_, err = s.virshProvider.runVirshCommand(ctx, "!", "qemu-img", "resize", targetPath, sizeSpec)
+		_, err = s.virshProvider.runVirshCommand(ctx, "!", "qemu-img", "resize", newDisk, sizeSpec)
 		if err != nil {
 			log.Printf("WARN Failed to resize image (may already be correct size): %v", err)
 			// Don't fail here - the image may already be the right size or larger
 		}
+	}
+	if err := wd.publish(ctx, filepath.Base(targetPath), targetPath); err != nil {
+		return nil, err
 	}
 
 	// Give it to the qemu user without following a symbolic link (its mode

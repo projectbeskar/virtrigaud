@@ -26,6 +26,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 )
 
 // swapSudo stands in for sudo in the real-command tests below and plays the
@@ -237,4 +239,77 @@ func TestWarnIfDiskDirUnsafe_ChecksEachDirectoryOnce(t *testing.T) {
 	got, err := os.ReadFile(calls) //nolint:gosec // test reads its own log
 	require.NoError(t, err)
 	assert.Equal(t, 2, strings.Count(string(got), "id\n"), "one check per directory")
+}
+
+// TestDiskWriteDir_ReplacesALinkPlantedAtTheFinalName runs a disk write with
+// the real commands after a symbolic link was planted at its final name (as if
+// between the target check and the write): the disk is written in a private
+// directory (mode 0700) and renamed onto the name, which replaces the link
+// without following it — the link's target is never written — and the private
+// directory is removed.
+func TestDiskWriteDir_ReplacesALinkPlantedAtTheFinalName(t *testing.T) {
+	s := newSwapHost(t)
+	ctx := context.Background()
+	src := filepath.Join(s.dir, "src.qcow2")
+	out, err := exec.Command("qemu-img", "create", "-q", "-f", "qcow2", src, "1M").CombinedOutput() //nolint:gosec // test-controlled paths
+	require.NoError(t, err, "%s", out)
+	pool := filepath.Join(s.dir, "pool")
+	require.NoError(t, os.Mkdir(pool, 0o750))
+	dst := filepath.Join(pool, "team-b.copy-disk.qcow2")
+	require.NoError(t, os.Symlink(s.victim, dst))
+
+	wd, err := newDiskWriteDir(ctx, s.vp, pool)
+	require.NoError(t, err)
+	fi, err := os.Stat(wd.dir)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o700), fi.Mode().Perm(), "private to the SSH user")
+	assert.Equal(t, pool, filepath.Dir(wd.dir), "next to the final name: the rename never crosses a filesystem")
+	_, err = runHost(ctx, s.vp, withUmask(vmDiskUmask, "qemu-img", "convert", "-O", "qcow2", src, wd.file("d.qcow2"))...)
+	require.NoError(t, err)
+	require.NoError(t, wd.publish(ctx, "d.qcow2", dst))
+	wd.cleanup(ctx)
+
+	fi, err = os.Lstat(dst)
+	require.NoError(t, err)
+	assert.True(t, fi.Mode().IsRegular(), "the link was replaced by the disk")
+	assert.Equal(t, os.FileMode(0o640), fi.Mode().Perm())
+	b, err := os.ReadFile(s.victim)
+	require.NoError(t, err)
+	assert.Equal(t, "root's file", string(b), "the link's target was never written")
+	_, err = os.Stat(wd.dir)
+	assert.True(t, os.IsNotExist(err), "the private directory is removed")
+
+	// The whole full-clone path: the same, through createFullCopy.
+	dst2 := filepath.Join(pool, "team-c.copy-disk.qcow2")
+	require.NoError(t, os.Symlink(s.victim, dst2))
+	require.NoError(t, createFullCopy(ctx, s.vp, src, dst2))
+	s.requireVictimUntouched(t)
+	entries, err := os.ReadDir(pool)
+	require.NoError(t, err)
+	for _, e := range entries {
+		assert.NotContains(t, e.Name(), vmDiskWriteDirPrefix, "no private directory left behind")
+	}
+}
+
+// TestEnsureDiskTargetFree_Kinds: a free path passes, an unused regular file
+// is a leftover to replace, a symbolic link — dangling or not — is refused.
+func TestEnsureDiskTargetFree_Kinds(t *testing.T) {
+	h := newFakeHost(t)
+	vp := h.host("h1")
+	ctx := context.Background()
+	subject := domainDiskSubject("team-a.web")
+
+	require.NoError(t, ensureDiskTargetFree(ctx, vp, subject, filepath.Join(h.images, "free.qcow2")))
+	require.NoError(t, ensureDiskTargetFree(ctx, vp, subject, h.file(h.images, "stale.qcow2")))
+
+	live := filepath.Join(h.images, "live.qcow2")
+	require.NoError(t, os.Symlink(h.file(h.outside, "keys"), live))
+	dangling := filepath.Join(h.images, "dangling.qcow2")
+	require.NoError(t, os.Symlink(filepath.Join(h.outside, "nothing"), dangling))
+	for _, p := range []string{live, dangling} {
+		err := ensureDiskTargetFree(ctx, vp, subject, p)
+		require.Error(t, err)
+		assert.True(t, contracts.IsConflict(err), "%v", err)
+		assert.NotContains(t, err.Error(), h.base)
+	}
 }

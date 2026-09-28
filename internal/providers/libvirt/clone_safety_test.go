@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -82,11 +83,24 @@ func TestClone_FullCloneIsUnchanged(t *testing.T) {
 	assert.Equal(t, "team-b.copy", resp.TargetVmID)
 	disk := filepath.Join(c.images, "team-b.copy-disk.qcow2")
 	assert.FileExists(t, disk)
-	assert.Contains(t, c.log("qemu-img"), "convert -O qcow2 "+filepath.Join(c.images, "team-a.web-disk.qcow2")+" "+disk,
-		"an independent, flattened copy")
+	assert.Regexp(t, `convert -O qcow2 `+regexp.QuoteMeta(filepath.Join(c.images, "team-a.web-disk.qcow2"))+" "+
+		regexp.QuoteMeta(c.images+"/"+vmDiskWriteDirPrefix)+`[A-Za-z0-9]{10}/team-b\.copy-disk\.qcow2\n`, c.log("qemu-img"),
+		"an independent, flattened copy, written in a private directory and renamed into place")
+	requireNoWriteDirsLeft(t, c.images)
 	assert.NotContains(t, c.log("qemu-img"), "create", "no overlay")
 	assert.NoFileExists(t, disk+".info.json", "no backing file")
 	assert.Contains(t, c.domainXML("team-b.copy"), "<source file='"+disk+"'/>")
+}
+
+// requireNoWriteDirsLeft asserts no private write directory (diskWriteDir) is
+// left in dir.
+func requireNoWriteDirsLeft(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	for _, e := range entries {
+		assert.False(t, strings.HasPrefix(e.Name(), vmDiskWriteDirPrefix), "left behind: %s", e.Name())
+	}
 }
 
 // requireCreatedWithVMDiskMode asserts disk was created with vmDiskMode (the
@@ -315,4 +329,42 @@ func indexOf(list []string, s string) int {
 		}
 	}
 	return -1
+}
+
+// TestClone_DiskTargetSymlinkIsRefused: a symbolic link planted at the clone's
+// disk path — dangling (a write would create its target) or to an existing,
+// unused file (it would look like a stale leftover to overwrite) — refuses the
+// clone before any file is written.
+func TestClone_DiskTargetSymlinkIsRefused(t *testing.T) {
+	for name, dangling := range map[string]bool{"to a file": false, "dangling": true} {
+		t.Run(name, func(t *testing.T) {
+			c := newCreateHost(t)
+			_, err := c.p.Create(context.Background(), c.createReq(ownerTeamA, c.file(c.images, "ubuntu.qcow2")))
+			require.NoError(t, err)
+			c.resetLogs()
+			victim := filepath.Join(c.outside, "authorized_keys")
+			if !dangling {
+				victim = c.file(c.outside, "authorized_keys")
+			}
+			disk := filepath.Join(c.images, "team-b.copy-disk.qcow2")
+			require.NoError(t, os.Symlink(victim, disk))
+
+			_, err = c.p.Clone(context.Background(), cloneReq())
+			require.Error(t, err)
+			assert.True(t, contracts.IsConflict(err), "want a Conflict: %v", err)
+			assert.Contains(t, err.Error(), "is a symbolic link")
+			assert.NotContains(t, err.Error(), c.base, "no host path in the message")
+			assert.NotContains(t, c.log("qemu-img"), "convert", "nothing was written")
+			fi, err := os.Lstat(disk)
+			require.NoError(t, err)
+			assert.Equal(t, os.ModeSymlink, fi.Mode()&os.ModeSymlink, "the link is left as it was")
+			if dangling {
+				assert.NoFileExists(t, victim, "its target was never created")
+			} else {
+				b, err := os.ReadFile(victim) //nolint:gosec // test reads its own scratch file
+				require.NoError(t, err)
+				assert.Equal(t, "image-bytes", string(b), "its target was never written")
+			}
+		})
+	}
 }

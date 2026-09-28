@@ -273,11 +273,19 @@ func (p *Provider) resolvePrimaryDisk(ctx context.Context, sourceVMID string, sp
 
 // createLinkedOverlay creates a copy-on-write qcow2 overlay backed by the
 // source disk on vp's host. The overlay is created remotely (the disk lives on
-// the libvirt host) with vmDiskMode (withUmask), then given to the qemu user so
+// the libvirt host) with vmDiskMode (withUmask) in a private directory and
+// renamed onto targetDiskPath (diskWriteDir), then given to the qemu user so
 // QEMU can open it — mirroring CreateVolume's handling. The source disk is
-// opened read-only as a backing file and is never modified here.
+// opened read-only as a backing file (by its absolute path) and is never
+// modified here.
 func createLinkedOverlay(ctx context.Context, vp *VirshProvider, srcDiskPath, srcDiskFormat, targetDiskPath string) error {
 	log.Printf("INFO Creating linked-clone overlay %s backed by %s (%s)", targetDiskPath, srcDiskPath, srcDiskFormat)
+	wd, err := newDiskWriteDir(ctx, vp, filepath.Dir(targetDiskPath))
+	if err != nil {
+		return fmt.Errorf("create linked-clone overlay: %w", err)
+	}
+	defer wd.cleanup(ctx)
+	name := filepath.Base(targetDiskPath)
 
 	// qemu-img create -f qcow2 -b <src> -F <srcFormat> <overlay>
 	res, err := runHost(ctx, vp, withUmask(vmDiskUmask,
@@ -285,10 +293,13 @@ func createLinkedOverlay(ctx context.Context, vp *VirshProvider, srcDiskPath, sr
 		"-f", "qcow2",
 		"-b", srcDiskPath,
 		"-F", srcDiskFormat,
-		targetDiskPath,
+		wd.file(name),
 	)...)
 	if err != nil {
 		return fmt.Errorf("create linked-clone overlay: %w, output: %s", err, res.Stderr)
+	}
+	if err := wd.publish(ctx, name, targetDiskPath); err != nil {
+		return fmt.Errorf("create linked-clone overlay: %w", err)
 	}
 
 	finalizeClonedDisk(ctx, vp, targetDiskPath)
@@ -315,15 +326,25 @@ func createFullCopy(ctx context.Context, vp *VirshProvider, srcDiskPath, targetD
 	// qemu-img convert -O qcow2 <src> <target>. The source format is
 	// auto-probed by qemu-img (do not force -f, which would break if the
 	// resolved format is wrong); convert flattens any backing chain. The copy
-	// is created with vmDiskMode (withUmask).
+	// is created with vmDiskMode (withUmask) in a private directory and
+	// renamed onto targetDiskPath (diskWriteDir).
+	wd, err := newDiskWriteDir(ctx, vp, filepath.Dir(targetDiskPath))
+	if err != nil {
+		return fmt.Errorf("create full-clone copy: %w", err)
+	}
+	defer wd.cleanup(ctx)
+	name := filepath.Base(targetDiskPath)
 	res, err := runHost(ctx, vp, withUmask(vmDiskUmask,
 		"qemu-img", "convert",
 		"-O", "qcow2",
 		srcDiskPath,
-		targetDiskPath,
+		wd.file(name),
 	)...)
 	if err != nil {
 		return fmt.Errorf("create full-clone copy: %w, output: %s", err, res.Stderr)
+	}
+	if err := wd.publish(ctx, name, targetDiskPath); err != nil {
+		return fmt.Errorf("create full-clone copy: %w", err)
 	}
 
 	finalizeClonedDisk(ctx, vp, targetDiskPath)
@@ -403,16 +424,6 @@ func copyClonedNVRAM(ctx context.Context, vp *VirshProvider, srcNvramPath, targe
 	}
 }
 
-// nvramTargetScript is the fixed `sh -c` script behind ensureNVRAMTargetFree.
-// The path is ALWAYS the positional parameter "$1", never interpolated into
-// the text. It prints nvramTargetSymlink for a symbolic link (dangling or not),
-// pathExistsMarker for anything else that exists, and nothing for a free path.
-const nvramTargetScript = `if [ -L "$1" ]; then echo ` + nvramTargetSymlink +
-	`; elif [ -e "$1" ]; then echo ` + pathExistsMarker + `; fi`
-
-// nvramTargetSymlink is what nvramTargetScript prints for a symbolic link.
-const nvramTargetSymlink = "symlink"
-
 // ensureNVRAMTargetFree refuses to let a clone of domainName write its UEFI
 // varstore to target — as root — when target is a symbolic link (the copy
 // would write through it to another file) or the varstore (or any other file)
@@ -422,14 +433,14 @@ const nvramTargetSymlink = "symlink"
 // the same name and is overwritten. The refusal is a Conflict whose message
 // names only the clone's own domain.
 func ensureNVRAMTargetFree(ctx context.Context, h hostCommandRunner, domainName, target string) error {
-	res, err := runHost(ctx, h, "sh", "-c", nvramTargetScript, "sh", target)
+	res, err := runHost(ctx, h, "sh", "-c", targetKindScript, "sh", target)
 	if err != nil {
 		log.Printf("ERROR Could not check the UEFI varstore path %s for clone %s: %v", target, domainName, err)
 		return contracts.NewRetryableError(fmt.Sprintf(
 			"could not check the UEFI varstore path of libvirt domain %q on the host (details are in the provider log)", domainName), nil)
 	}
 	switch strings.TrimSpace(res.Stdout) {
-	case nvramTargetSymlink:
+	case targetKindSymlink:
 		log.Printf("WARN Refusing to write the UEFI varstore of clone %s: %s is a symbolic link", domainName, target)
 		return contracts.NewConflictError(fmt.Sprintf(
 			"the UEFI varstore path of libvirt domain %q is a symbolic link on the host; refusing to write through it", domainName), nil)

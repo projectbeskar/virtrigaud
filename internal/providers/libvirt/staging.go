@@ -257,18 +257,28 @@ func verifyDefined(ctx context.Context, vp *VirshProvider, domainName, domainXML
 // path in corner cases (a legacy VM literally named "<namespace>.<name>", a
 // hand-made domain, a linked clone backed by it, or a VM already running on a
 // disk a second migration would re-import), but `qemu-img convert` would
-// silently replace a live disk, so it is checked. A file at target that no
-// domain uses is overwritten: it can only be left over from an earlier,
-// failed attempt for this very domain name (same namespace and name — the
-// same VM retried, or a deleted one it replaces), which is exactly the file
-// about to be written. The common case — no file there — costs one `test -e`;
-// the full in-use scan runs only when a file exists.
+// silently replace a live disk, so it is checked. A symbolic link at target —
+// dangling or not — is refused (Conflict): the disk would be written through
+// it to another file (the write itself replaces the name without following
+// it, diskWriteDir, but the link is still no leftover of this VM). A regular
+// file at target that no domain uses is replaced: it can only be left over
+// from an earlier, failed attempt for this very domain name (same namespace
+// and name — the same VM retried, or a deleted one it replaces), which is
+// exactly the file about to be written. The common case — nothing there —
+// costs one `test`; the full in-use scan runs only when a file exists.
 func ensureDiskTargetFree(ctx context.Context, h hostCommandRunner, subject, target string) error {
-	exists, err := hostPathExists(ctx, h, target)
+	res, err := runHost(ctx, h, "sh", "-c", targetKindScript, "sh", target)
 	if err != nil {
-		return err
+		log.Printf("ERROR Could not check %s at %s on the host: %v", subject, target, err)
+		return contracts.NewRetryableError(fmt.Sprintf("could not check %s on the host (details are in the provider log)", subject), nil)
 	}
-	if !exists {
+	switch strings.TrimSpace(res.Stdout) {
+	case targetKindSymlink:
+		log.Printf("WARN Refusing to write %s: %s is a symbolic link", subject, target)
+		return contracts.NewConflictError(fmt.Sprintf(
+			"%s is a symbolic link on the host; refusing to write through it", subject), nil)
+	case pathExistsMarker:
+	default:
 		return nil
 	}
 	inUse, err := pathInUseOnHost(ctx, h, target)
@@ -283,6 +293,17 @@ func ensureDiskTargetFree(ctx context.Context, h hostCommandRunner, subject, tar
 	log.Printf("INFO %s exists at %s but no domain uses it (left by an earlier failed attempt); overwriting it", subject, target)
 	return nil
 }
+
+// targetKindScript is the fixed `sh -c` script behind ensureDiskTargetFree and
+// ensureNVRAMTargetFree. The path is ALWAYS the positional parameter "$1",
+// never interpolated into the text. It prints targetKindSymlink for a symbolic
+// link (dangling or not), pathExistsMarker for anything else that exists, and
+// nothing for a free path.
+const targetKindScript = `if [ -L "$1" ]; then echo ` + targetKindSymlink +
+	`; elif [ -e "$1" ]; then echo ` + pathExistsMarker + `; fi`
+
+// targetKindSymlink is what targetKindScript prints for a symbolic link.
+const targetKindSymlink = "symlink"
 
 // pathExistsScript is the fixed `sh -c` script behind hostPathExists. The path
 // is ALWAYS the positional parameter "$1", never interpolated into the text. It

@@ -42,10 +42,15 @@ import (
 //   - a clone's UEFI varstore is created by dd under clonedNVRAMUmask: 0600;
 //   - ownership then goes to the qemu user with chownToQemu.
 //
-// The provider warns once per host and directory when a non-root account
+// A disk is written inside a private directory next to its final name and
+// then renamed onto it (diskWriteDir), so no other account can plant a
+// symbolic link the writer would follow, or swap the file while it is written;
+// a symbolic link already at the final name is refused (ensureDiskTargetFree)
+// and would in any case be replaced, never followed, by the rename. The
+// provider still warns once per host and directory when a non-root account
 // other than its own can write a directory it creates VM files in and the
-// directory is not sticky (warnIfDiskDirUnsafe): such an account can still
-// plant a symbolic link at a name before it is created.
+// directory is not sticky (warnIfDiskDirUnsafe): that account can replace a
+// finished disk. A root SSH user is not supported on such a directory.
 
 // vmDiskMode is the mode of every VM disk VirtRigaud creates: read-write for the
 // owner (the qemu user, after chownToQemu), read-only for its group (kvm), and
@@ -102,6 +107,54 @@ func chownToQemu(ctx context.Context, vp *VirshProvider, path string) error {
 	vp.warnIfDiskDirUnsafe(ctx, filepath.Dir(path))
 	_, err := runHost(ctx, vp, "sudo", "chown", "-h", qemuFileOwner, "--", path)
 	return err
+}
+
+// vmDiskWriteDirPrefix starts the name of the private directory a VM disk is
+// written in (diskWriteDir): a dotfile, so image confinement never takes it
+// for an image and a pool listing hides it.
+const vmDiskWriteDirPrefix = ".virtrigaud-write-"
+
+// diskWriteDir is a private directory made next to a VM disk that is being
+// written: `mktemp -d` in the disk's own directory — an unpredictable name,
+// mode 0700, owned by the provider's SSH user — so qemu-img or cat create the
+// disk (and any staged input) where no other non-root account can plant a
+// symbolic link for the writer to follow, or swap the file while it is
+// written. The finished disk is renamed onto its final name (publish): a
+// rename(2) in the same directory, which replaces whatever is at the name — a
+// stale file, or a symbolic link planted there — and never follows it.
+type diskWriteDir struct {
+	h   hostCommandRunner
+	dir string
+}
+
+// newDiskWriteDir makes a diskWriteDir in parent on the host behind h.
+func newDiskWriteDir(ctx context.Context, h hostCommandRunner, parent string) (*diskWriteDir, error) {
+	dir, err := makeHostTemp(ctx, h, filepath.Join(parent, vmDiskWriteDirPrefix+mktempTemplateSuffix), true)
+	if err != nil {
+		return nil, fmt.Errorf("create a private directory for the disk: %w", err)
+	}
+	return &diskWriteDir{h: h, dir: dir}, nil
+}
+
+// file returns the path of name inside the directory.
+func (d *diskWriteDir) file(name string) string {
+	return filepath.Join(d.dir, name)
+}
+
+// publish renames name (inside the directory) onto final with `mv -f -T`:
+// whatever is at final is replaced by the rename, never followed, and a
+// directory there makes it fail.
+func (d *diskWriteDir) publish(ctx context.Context, name, final string) error {
+	if _, err := runHost(ctx, d.h, "mv", "-f", "-T", "--", d.file(name), final); err != nil {
+		return fmt.Errorf("move the new disk into place: %w", err)
+	}
+	return nil
+}
+
+// cleanup removes the directory and anything left in it (a failed write, a
+// staged input), even when ctx is cancelled (removeHostPath).
+func (d *diskWriteDir) cleanup(ctx context.Context) {
+	removeHostPath(ctx, d.h, d.dir, true)
 }
 
 // diskDirModeScript is the fixed `sh -c` script behind warnIfDiskDirUnsafe: it

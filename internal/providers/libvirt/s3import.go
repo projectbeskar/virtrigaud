@@ -122,10 +122,19 @@ func (s *Server) importDiskFromS3(ctx context.Context, req *providerv1.ImportDis
 	if stagedFormat == "" {
 		stagedFormat = "vmdk"
 	}
-	// Stage the source-format object to a regular file in the SAME directory as the
-	// target so the later qemu-img convert reads/writes within one filesystem (no
-	// cross-device copy) and a leaked temp is co-located with the pool for cleanup.
-	stagePath := hostStagePath(poolPath, volumeName, stagedFormat)
+	// Stage the source-format object, and convert it, inside a private
+	// directory in the pool (diskWriteDir): the same filesystem as the target
+	// (no cross-device copy), and no other account can plant a symbolic link
+	// at, or swap, the staged object or the converted disk. The converted disk
+	// is renamed onto targetPath once checked; the directory — with the
+	// staged object — is removed whatever the outcome, even on cancellation.
+	wd, err := newDiskWriteDir(ctx, hostConnRunner{conn: conn}, poolPath)
+	if err != nil {
+		return nil, fmt.Errorf("s3 import: %w", err)
+	}
+	defer wd.cleanup(ctx)
+	stagePath := hostStagePath(wd.dir, volumeName, stagedFormat)
+	newDisk := wd.file(volumeName + qcow2Ext)
 
 	log.Printf("INFO Importing disk from S3 to libvirt host: backend=s3 pool=%s volume=%s stage=%s target=%s",
 		poolName, volumeName, stagePath, targetPath)
@@ -166,15 +175,6 @@ func (s *Server) importDiskFromS3(ctx context.Context, req *providerv1.ImportDis
 	_ = pr.CloseWithError(io.ErrClosedPipe)
 	dl := <-dlCh
 
-	// Cleanup the staged vmdk ALWAYS — success or failure — so a failed import
-	// never leaks a multi-GB temp on the host. Best-effort; WARN on failure.
-	defer func() {
-		if _, rmErr := conn.RunHost(context.Background(), "rm", "-f", stagePath); rmErr != nil {
-			log.Printf("WARN failed to remove staged import temp %s on host (manual cleanup may be needed): %v",
-				stagePath, rmErr)
-		}
-	}()
-
 	// Surface the REAL stage failure: the download/checksum error is the root
 	// cause when the stream broke (e.g. checksum mismatch); only if the download
 	// was clean do we attribute a stage failure to the host `cat`.
@@ -205,7 +205,7 @@ func (s *Server) importDiskFromS3(ctx context.Context, req *providerv1.ImportDis
 	// target is created with vmDiskMode (withUmask: Create adopts it without a
 	// chmod).
 	if res, err := conn.RunHost(ctx, withUmask(vmDiskUmask, "qemu-img", "convert", "-f", stagedFormat, "-O", "qcow2",
-		stagePath, targetPath)...); err != nil {
+		stagePath, newDisk)...); err != nil {
 		return nil, fmt.Errorf("host-side qemu-img convert (%s→qcow2) failed: %w%s", stagedFormat, err, qemuImgStderr(res))
 	}
 
@@ -213,8 +213,11 @@ func (s *Server) importDiskFromS3(ctx context.Context, req *providerv1.ImportDis
 
 	// --- VALIDATE (ADR D5 part 2) ---
 	// qemu-img check on the converted qcow2. Surface its stderr on failure too.
-	if res, err := conn.RunHost(ctx, "qemu-img", "check", targetPath); err != nil {
+	if res, err := conn.RunHost(ctx, "qemu-img", "check", newDisk); err != nil {
 		return nil, fmt.Errorf("qemu-img check failed on converted qcow2 %s: %w%s", targetPath, err, qemuImgStderr(res))
+	}
+	if err := wd.publish(ctx, volumeName+qcow2Ext, targetPath); err != nil {
+		return nil, fmt.Errorf("s3 import: %w", err)
 	}
 
 	// Make libvirt aware of the new volume.
@@ -235,10 +238,11 @@ func (s *Server) importDiskFromS3(ctx context.Context, req *providerv1.ImportDis
 }
 
 // hostStagePath returns the path of the transient host-side staging file for an
-// import. It lives in the pool directory (same filesystem as the target so the
-// convert is intra-device) under a dot-prefixed, unix-ts-suffixed name so it is
-// distinguishable, hidden from a casual pool listing, and unlikely to collide
-// with a real volume. The suffix matches the staged object's source format
+// import in poolPath — the import's private directory inside the pool
+// (diskWriteDir: same filesystem as the target so the convert is intra-device)
+// — under a dot-prefixed, unix-ts-suffixed name so it is distinguishable,
+// hidden from a casual pool listing, and unlikely to collide with a real
+// volume. The suffix matches the staged object's source format
 // (vmdk from a vSphere source, qcow2 from a libvirt/proxmox source) so qemu-img's
 // format probing has the right hint.
 func hostStagePath(poolPath, volumeName, format string) string {

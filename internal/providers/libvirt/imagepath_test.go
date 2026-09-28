@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -962,7 +963,9 @@ func TestCreateDiskFromHostImage_CopiesBaseImage(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, filepath.Join(h.images, "team-a.web-disk.qcow2"), vol.Path, "the VM gets its own disk, named after its domain")
 	assert.NotEqual(t, img, vol.Path)
-	assert.Contains(t, h.log("qemu-img"), "convert -f raw -O qcow2 "+img+" "+vol.Path)
+	assert.Regexp(t, `convert -f raw -O qcow2 `+regexp.QuoteMeta(img)+" "+regexp.QuoteMeta(h.images+"/"+vmDiskWriteDirPrefix)+
+		`[A-Za-z0-9]{10}/team-a\.web-disk\.qcow2\n`, h.log("qemu-img"), "written in a private directory, renamed into place")
+	assert.FileExists(t, vol.Path)
 }
 
 // TestCreateDiskFromHostImage_AdoptsOwnImportedDisk proves the migration
