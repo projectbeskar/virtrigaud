@@ -91,7 +91,17 @@ func (s *Server) exportDiskToS3(ctx context.Context, req *providerv1.ExportDiskR
 	if srcPath == "" {
 		return nil, fmt.Errorf("source disk %q has no resolvable host path", req.DiskId)
 	}
+	return exportFlattenToS3(ctx, conn, req, req.VmId, srcPath, nil)
+}
 
+// exportFlattenToS3 is the S3 export core, run on conn — the single host's
+// connection, or a clustered host's leased connection after the owner check
+// (exportDiskRouted): flatten srcPath on the host, stream the standalone qcow2
+// up to S3, and remove the flattened temp. vmID names the temp and the export.
+// guard wraps the flatten (flock + timeout on a clustered host,
+// routed_budget.go); a nil guard — the single-host path — runs the historical
+// command sequence, unchanged.
+func exportFlattenToS3(ctx context.Context, conn libvirtConn, req *providerv1.ExportDiskRequest, vmID, srcPath string, guard hostCmdGuard) (*providerv1.ExportDiskResponse, error) {
 	// Build the S3 client (pod is the S3 client). Options come from
 	// storage_options_json; credentials from the credentials map. Never logged.
 	storageConfig, err := migration.S3StorageConfigFromRequest(req.StorageOptionsJson, req.Credentials)
@@ -104,13 +114,13 @@ func (s *Server) exportDiskToS3(ctx context.Context, req *providerv1.ExportDiskR
 	}
 	defer s3client.Close()
 
-	exportID := fmt.Sprintf("export-libvirt-%s-%d", req.VmId, time.Now().Unix())
+	exportID := fmt.Sprintf("export-libvirt-%s-%d", vmID, time.Now().Unix())
 
 	log.Printf("INFO Exporting disk from libvirt host to S3: backend=s3 vm=%s src=%s dest=%s",
-		req.VmId, srcPath, req.DestinationUrl)
+		vmID, srcPath, req.DestinationUrl)
 
 	// --- FLATTEN (ADR D4) ---
-	hostTmp, cleanup, err := flattenForExport(ctx, hostConnRunner{conn: conn}, srcPath, req.VmId)
+	hostTmp, cleanup, err := flattenForExport(ctx, hostConnRunner{conn: conn}, srcPath, vmID, guard)
 	if err != nil {
 		return nil, err
 	}
@@ -164,16 +174,21 @@ const hostExportStageSuffix = ".qcow2"
 
 // flattenForExport collapses the (possibly snapshot-overlay) backing chain of
 // srcPath into one standalone qcow2 on the host behind h and returns its path
-// and the function that removes it.
+// and the function that removes it. It is the flatten of both export paths:
+// the single host's (guard nil) and a clustered host's, where guard runs the
+// flatten under flock(1) on the export's lock and timeout(1) within the
+// routed call's budget (routed_budget.go), and refuses a symlinked staging
+// file.
 //
 // The file is made for this export alone before the flatten runs (mktemp:
 // created exclusively, unpredictable name, mode 0600 — kept by the
 // exportStageUmask the flatten runs under), in the source disk's directory,
 // so the convert stays within one filesystem. Its removal is armed as soon as
-// it exists — the flatten failing, or the request being cancelled, still
-// removes it (removeHostPath runs detached from the request's cancellation,
-// bounded): a failed export used to leave a world-readable multi-GB copy
-// behind under a predictable name.
+// it exists — the flatten failing or being stopped, or the request being
+// cancelled, still removes it (detached from the request's cancellation,
+// bounded; on a clustered host within routedCleanupTimeout, so the answer
+// still reaches the manager before its deadline): a failed export used to
+// leave a world-readable multi-GB copy behind under a predictable name.
 //
 // -f qcow2 forces the source driver (no format probing of the overlay); -O
 // qcow2 keeps the native format the target expects. -U skips the shared-disk
@@ -181,14 +196,23 @@ const hostExportStageSuffix = ".qcow2"
 // honored, or createSnapshot=false) can be read — this is a crash-consistent
 // copy; a consistent copy still requires the source to be powered off or
 // snapshotted first.
-func flattenForExport(ctx context.Context, h hostCommandRunner, srcPath, vmID string) (string, func(), error) {
+func flattenForExport(ctx context.Context, h hostCommandRunner, srcPath, vmID string, guard hostCmdGuard) (string, func(), error) {
 	hostTmp, err := makeHostTempSuffix(ctx, h, hostExportStageTemplate(srcPath, vmID), hostExportStageSuffix, false)
 	if err != nil {
 		return "", nil, fmt.Errorf("create the export staging file on the host: %w", err)
 	}
-	cleanup := func() { removeHostPath(ctx, h, hostTmp, false) }
-	if res, err := runHost(ctx, h, withUmask(exportStageUmask, "qemu-img", "convert", "-U", "-f", "qcow2", "-O", "qcow2",
-		srcPath, hostTmp)...); err != nil {
+	cleanupWithin := stagingCleanupTimeout
+	if guard != nil {
+		cleanupWithin = routedCleanupTimeout
+	}
+	cleanup := func() { removeHostPathWithin(ctx, h, hostTmp, false, cleanupWithin) }
+	flatten, err := guard.apply(hostTmp, withUmask(exportStageUmask, "qemu-img", "convert", "-U", "-f", "qcow2", "-O", "qcow2",
+		srcPath, hostTmp)...)
+	if err != nil {
+		cleanup()
+		return "", nil, err
+	}
+	if res, err := runHost(ctx, h, flatten...); err != nil {
 		cleanup()
 		stderr := ""
 		if res != nil && strings.TrimSpace(res.Stderr) != "" {

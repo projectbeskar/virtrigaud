@@ -132,7 +132,7 @@ func TestFlattenForExport(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	tmp, cleanup, err := flattenForExport(ctx, vp, src, "vm-1")
+	tmp, cleanup, err := flattenForExport(ctx, vp, src, "vm-1", nil)
 	require.NoError(t, err)
 	assert.Equal(t, dir, filepath.Dir(tmp))
 	assert.NotEqual(t, src, tmp)
@@ -144,7 +144,7 @@ func TestFlattenForExport(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(info), `"format": "qcow2"`)
 
-	tmp2, cleanup2, err := flattenForExport(ctx, vp, src, "vm-1")
+	tmp2, cleanup2, err := flattenForExport(ctx, vp, src, "vm-1", nil)
 	require.NoError(t, err)
 	assert.NotEqual(t, tmp, tmp2, "one staging file per export")
 	cleanup2()
@@ -153,7 +153,7 @@ func TestFlattenForExport(t *testing.T) {
 	cleanup()
 	assert.Empty(t, staged(), "removed")
 
-	_, _, err = flattenForExport(context.Background(), vp, filepath.Join(dir, "missing.qcow2"), "vm-1")
+	_, _, err = flattenForExport(context.Background(), vp, filepath.Join(dir, "missing.qcow2"), "vm-1", nil)
 	require.Error(t, err)
 	assert.Empty(t, staged(), "a failed flatten leaves nothing behind")
 }

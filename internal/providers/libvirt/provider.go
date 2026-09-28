@@ -107,6 +107,12 @@ type Provider struct {
 	// host selection and lease release without a live libvirtd.
 	createOnHostFn func(ctx context.Context, lease hostconn.Conn, req contracts.CreateRequest) (contracts.CreateResponse, error)
 
+	// hostDiskTransportFn checks that a clustered host's leased connection can
+	// run a host-side disk export (s3 / nfs: the host's qemu-img plus an SSH
+	// stream). nil means requireSSHDiskTransport. It is a struct field so tests
+	// can drive the routed export over local per-host fakes.
+	hostDiskTransportFn func(c libvirtConn) error
+
 	// shadowWG tracks in-flight detached shadow goroutines so tests (and a future
 	// graceful shutdown) can drain them; each is independently time-bounded.
 	shadowWG sync.WaitGroup

@@ -23,17 +23,27 @@ import "context"
 // provider.v1 CloneRequest message (issue #179).
 type CloneRequest struct {
 	// Source addresses the VM to clone from: its provider-specific identifier
-	// and, for a clustered provider, the host it is bound to — threaded to the
-	// wire as source_vm_id / source_host_id (ADR-0007 Addendum A, A1).
+	// and, for a clustered provider, the host it is bound to and its owner —
+	// threaded to the wire as source_vm_id / source_host_id / source_owner
+	// (ADR-0007 Addendum A, A1, slice 3).
 	Source VMRef
+	// TargetHostID names the host the clone lands on for a clustered provider:
+	// the target VirtualMachine's status.placement.pendingHost, threaded to the
+	// wire as target_host_id (ADR-0007 Addendum A, slice 3). In v1 it must equal
+	// Source.HostID (disks are host-local). Empty for single-host and
+	// thin-client providers, which never receive it.
+	TargetHostID string
 	// TargetName is the desired name of the cloned VM.
 	TargetName string
 	// TargetVM identifies the VirtualMachine the clone will be bound to: its
-	// namespace and name (== TargetName); no UID, as it does not exist yet. A
-	// provider whose VM names are host-global names the clone from it (libvirt:
-	// "<namespace>.<name>", the same rule as Create) and returns that name as
-	// TargetVmID. Providers that do not need it ignore it; left empty, the
-	// legacy TargetName naming applies.
+	// namespace and name (== TargetName). On a single-host provider it carries
+	// no UID (the VirtualMachine is created after the clone). On a clustered
+	// provider the VirtualMachine exists before the clone and UID is set: the
+	// clone's domain is stamped with this identity (ADR-0007 Addendum A, slice
+	// 3). A provider whose VM names are host-global names the clone from it
+	// (libvirt: "<namespace>.<name>", the same rule as Create) and returns that
+	// name as TargetVmID. Providers that do not need it ignore it; left empty,
+	// the legacy TargetName naming applies.
 	TargetVM ObjectIdentity
 	// Linked requests a copy-on-write linked clone when true. Best-effort:
 	// providers that cannot honor it fall back to a full clone unless the

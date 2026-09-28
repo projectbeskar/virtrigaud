@@ -210,8 +210,9 @@ func TestNewClusteredProvider_PlaceholderAlwaysFails(t *testing.T) {
 // (and the host-scoped / list RPCs) through the gRPC Server of a clustered
 // provider and proves none of them reaches the single-host placeholder:
 // Describe, Delete (slice 1), Power in every op and Reconfigure in every branch
-// (slice 2) are routed to their host; everything else is an honest
-// Unimplemented until its slice lands.
+// (slice 2), the snapshot family, GetDiskInfo, Clone, the s3 / nfs ExportDisk
+// and TaskStatus (slice 3) are routed to their host; everything else is an
+// honest Unimplemented until its slice lands.
 func TestClustered_EveryPerVMRPC_NeverReachesPlaceholder(t *testing.T) {
 	t.Cleanup(func() { _ = os.Remove("/tmp/" + routingDomainUUID + "-sync.xml") })
 	fx := newOpsFixture(t, map[string]map[string]string{
@@ -242,6 +243,50 @@ func TestClustered_EveryPerVMRPC_NeverReachesPlaceholder(t *testing.T) {
 		require.NoError(t, err, "reconfigure (running=%v)", running)
 	}
 
+	// Slice 3: the snapshot family is routed to its host and owner-checked. The
+	// ops fake answers no snapshot command, so the calls may fail on the host;
+	// what matters here is that they reach host-a, never the placeholder.
+	routedSlice3 := map[string]func() error{
+		"SnapshotCreate": func() error {
+			_, e := s.SnapshotCreate(ctx, &providerv1.SnapshotCreateRequest{VmId: "web", TargetHostId: "host-a", Owner: owner, NameHint: "s"})
+			return e
+		},
+		"SnapshotDelete": func() error {
+			_, e := s.SnapshotDelete(ctx, &providerv1.SnapshotDeleteRequest{VmId: "web", SnapshotId: "s", TargetHostId: "host-a", Owner: owner})
+			return e
+		},
+		"SnapshotRevert": func() error {
+			_, e := s.SnapshotRevert(ctx, &providerv1.SnapshotRevertRequest{VmId: "web", SnapshotId: "s", TargetHostId: "host-a", Owner: owner})
+			return e
+		},
+		"GetDiskInfo": func() error {
+			_, e := s.GetDiskInfo(ctx, &providerv1.GetDiskInfoRequest{VmId: "web", TargetHostId: "host-a", Owner: owner})
+			return e
+		},
+		"Clone": func() error {
+			_, e := s.Clone(ctx, &providerv1.CloneRequest{SourceVmId: "web", SourceHostId: "host-a", TargetHostId: "host-a",
+				SourceOwner: owner, TargetName: "copy",
+				TargetVm: &providerv1.ObjectIdentity{Uid: "uid-copy", Namespace: "team-a", Name: "copy"}})
+			return e
+		},
+		"TaskStatus": func() error {
+			_, e := s.TaskStatus(ctx, &providerv1.TaskStatusRequest{Task: &providerv1.TaskRef{Id: encodeHostTaskRef("host-a", "t")}})
+			return e
+		},
+		"ExportDisk(s3)": func() error {
+			_, e := s.ExportDisk(ctx, &providerv1.ExportDiskRequest{VmId: "web", TargetHostId: "host-a", BackendType: "s3", Owner: owner})
+			return e
+		},
+		"ExportDisk(nfs)": func() error {
+			_, e := s.ExportDisk(ctx, &providerv1.ExportDiskRequest{VmId: "web", TargetHostId: "host-a", BackendType: "nfs",
+				DestinationUrl: "nfs://nas/e/web.qcow2", Owner: owner})
+			return e
+		},
+	}
+	for name, call := range routedSlice3 {
+		assert.NotEqual(t, codes.Unimplemented, status.Code(call()), "%s is routed since slice 3", name)
+	}
+
 	_, err = s.Delete(ctx, &providerv1.DeleteRequest{Id: "web", TargetHostId: "host-a", Owner: owner})
 	require.NoError(t, err)
 
@@ -250,36 +295,10 @@ func TestClustered_EveryPerVMRPC_NeverReachesPlaceholder(t *testing.T) {
 			_, e := s.HardwareUpgrade(ctx, &providerv1.HardwareUpgradeRequest{Id: "web", TargetHostId: "host-a"})
 			return e
 		},
-		"SnapshotCreate": func() error {
-			_, e := s.SnapshotCreate(ctx, &providerv1.SnapshotCreateRequest{VmId: "web", TargetHostId: "host-a"})
-			return e
-		},
-		"SnapshotDelete": func() error {
-			_, e := s.SnapshotDelete(ctx, &providerv1.SnapshotDeleteRequest{VmId: "web", SnapshotId: "s", TargetHostId: "host-a"})
-			return e
-		},
-		"SnapshotRevert": func() error {
-			_, e := s.SnapshotRevert(ctx, &providerv1.SnapshotRevertRequest{VmId: "web", SnapshotId: "s", TargetHostId: "host-a"})
-			return e
-		},
-		"Clone": func() error {
-			_, e := s.Clone(ctx, &providerv1.CloneRequest{SourceVmId: "web", SourceHostId: "host-a", TargetName: "copy"})
-			return e
-		},
+		// The pvc export reads the disk from the pod: a clustered provider
+		// never serves it (its disks live on its hosts).
 		"ExportDisk(pvc)": func() error {
-			_, e := s.ExportDisk(ctx, &providerv1.ExportDiskRequest{VmId: "web", TargetHostId: "host-a", BackendType: "pvc"})
-			return e
-		},
-		"ExportDisk(s3)": func() error {
-			_, e := s.ExportDisk(ctx, &providerv1.ExportDiskRequest{VmId: "web", TargetHostId: "host-a", BackendType: "s3"})
-			return e
-		},
-		"ExportDisk(nfs)": func() error {
-			_, e := s.ExportDisk(ctx, &providerv1.ExportDiskRequest{VmId: "web", TargetHostId: "host-a", BackendType: "nfs"})
-			return e
-		},
-		"GetDiskInfo": func() error {
-			_, e := s.GetDiskInfo(ctx, &providerv1.GetDiskInfoRequest{VmId: "web", TargetHostId: "host-a"})
+			_, e := s.ExportDisk(ctx, &providerv1.ExportDiskRequest{VmId: "web", TargetHostId: "host-a", BackendType: "pvc", Owner: owner})
 			return e
 		},
 		"ImportDisk": func() error {
@@ -566,18 +585,42 @@ func TestClustered_GetCapabilities_HidesUnroutedPerVMCapabilities(t *testing.T) 
 	assert.Equal(t, single.SupportsReconfigureOnline, caps.SupportsReconfigureOnline)
 	assert.Equal(t, single.SupportsDiskExpansionOnline, caps.SupportsDiskExpansionOnline)
 
+	// Routed since slice 3: the snapshot family (same core, so memory snapshots
+	// too), full clones on the source's host and the host-side disk export —
+	// advertised exactly as served: s3 and nfs only (never the pod-side pvc
+	// export), relay only, qcow2 only, uncompressed.
 	for name, v := range map[string]bool{
-		"snapshots":          caps.SupportsSnapshots,
-		"memory snapshots":   caps.SupportsMemorySnapshots,
-		"linked clones":      caps.SupportsLinkedClones,
-		"disk export":        caps.SupportsDiskExport,
-		"disk import":        caps.SupportsDiskImport,
-		"export compression": caps.SupportsExportCompression,
+		"snapshots":        caps.SupportsSnapshots,
+		"memory snapshots": caps.SupportsMemorySnapshots,
+		"disk export":      caps.SupportsDiskExport,
 	} {
-		assert.False(t, v, "%s must be hidden until its slice routes it", name)
+		assert.True(t, v, "%s is routed since slice 3", name)
 	}
-	assert.Empty(t, caps.SupportedExportBackends)
+	assert.False(t, caps.SupportsLinkedClones, "a clustered provider serves full clones only (v0.4.0)")
+	assert.Equal(t, []string{"s3", "nfs"}, caps.SupportedExportBackends)
+	assert.Equal(t, []string{"relay"}, caps.SupportedTransferModes)
+	assert.Equal(t, []string{"qcow2"}, caps.SupportedExportFormats)
+	assert.False(t, caps.SupportsExportCompression, "neither host-side export transport compresses")
+
+	// Still hidden: import has no target host until P3.
+	assert.False(t, caps.SupportsDiskImport, "disk import is not routed")
 	assert.Empty(t, caps.SupportedImportBackends)
+	assert.Empty(t, caps.SupportedImportFormats)
+	assert.False(t, caps.SupportsImageArtifactIdentity)
+	assert.True(t, caps.SupportsRoutedClone, "Clone is routed to the source's host (slice 3)")
+}
+
+// TestSingleHost_GetCapabilities_Unchanged pins that slice 3 changes only the
+// clustered answer.
+func TestSingleHost_GetCapabilities_Unchanged(t *testing.T) {
+	caps, err := NewServer(&Provider{virshProvider: localHostVP("single")}).GetCapabilities(context.Background(), &providerv1.GetCapabilitiesRequest{})
+	require.NoError(t, err)
+	assert.False(t, caps.SupportsClustering)
+	assert.False(t, caps.SupportsRoutedClone, "a single-host provider does not route clones")
+	assert.True(t, caps.SupportsDiskImport)
+	assert.True(t, caps.SupportsExportCompression)
+	assert.Equal(t, []string{"pvc", "s3", "nfs"}, caps.SupportedExportBackends)
+	assert.Equal(t, []string{"qcow2", "raw"}, caps.SupportedExportFormats)
 }
 
 // ─── single-host: unchanged ───────────────────────────────────────────────────

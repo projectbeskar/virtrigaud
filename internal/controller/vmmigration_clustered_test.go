@@ -33,7 +33,8 @@ import (
 // These tests pin the VMMigration controller's side of ADR-0007 Addendum A, A1:
 // a clustered TARGET provider is rejected until disk import is routed (P3), and
 // a clustered SOURCE VM with no confirmed host binding is waited for, never
-// sent a per-VM call.
+// sent a per-VM call. Since slice 3 a bound clustered source exports through
+// the host-side s3 / nfs backends; pvc is refused up front.
 
 func clusteredMigrationFixture(t *testing.T, srcClustered, tgtClustered bool, srcPlacement *infravirtrigaudiov1beta1.PlacementStatus) (*VMMigrationReconciler, *infravirtrigaudiov1beta1.VMMigration) {
 	t.Helper()
@@ -87,6 +88,58 @@ func TestHandleValidatingPhase_ClusteredTargetRejected(t *testing.T) {
 	got := getMigration(t, r)
 	assert.Equal(t, infravirtrigaudiov1beta1.MigrationPhaseFailed, got.Status.Phase)
 	assert.Contains(t, got.Status.Message, "topology: cluster")
+}
+
+// TestGateMigrationStorageBackend_ClusteredSource pins ADR-0007 Addendum A
+// slice 3 on the migration side: a clustered SOURCE may export through the
+// host-side s3 and nfs backends it advertises, but never through pvc (which
+// reads the disk from the provider pod) — even when an older clustered provider
+// advertised no export backends at all.
+func TestGateMigrationStorageBackend_ClusteredSource(t *testing.T) {
+	clustered := readyProvider("default", "src-prov")
+	clustered.Spec.Topology = infravirtrigaudiov1beta1.ProviderTopologyCluster
+	clustered.Status.ReportedCapabilities = &infravirtrigaudiov1beta1.ReportedCapabilities{
+		SupportedExportBackends: []string{"s3", "nfs"},
+		SupportedTransferModes:  []string{"relay"},
+	}
+	olderClustered := readyProvider("default", "src-prov")
+	olderClustered.Spec.Topology = infravirtrigaudiov1beta1.ProviderTopologyCluster
+	target := readyProvider("default", "tgt-prov")
+	target.Status.ReportedCapabilities = &infravirtrigaudiov1beta1.ReportedCapabilities{
+		SupportedImportBackends: []string{"pvc", "s3", "nfs"},
+		SupportedTransferModes:  []string{"relay"},
+	}
+	r := &VMMigrationReconciler{}
+	migrationWith := func(backend string) *infravirtrigaudiov1beta1.VMMigration {
+		m := &infravirtrigaudiov1beta1.VMMigration{}
+		if backend != "" {
+			m.Spec.Storage = &infravirtrigaudiov1beta1.MigrationStorage{Type: backend}
+		}
+		return m
+	}
+
+	for _, backend := range []string{"s3", "nfs"} {
+		assert.Empty(t, r.gateMigrationStorageBackend(migrationWith(backend), clustered, target),
+			"a clustered source exports through %s", backend)
+	}
+	for name, src := range map[string]*infravirtrigaudiov1beta1.Provider{"slice 3 provider": clustered, "older clustered provider": olderClustered} {
+		for _, backend := range []string{"pvc", ""} {
+			msg := r.gateMigrationStorageBackend(migrationWith(backend), src, target)
+			assert.Contains(t, msg, "clustered provider", "%s, backend %q: pvc is refused up front", name, backend)
+		}
+	}
+}
+
+// TestHandleValidatingPhase_ClusteredBoundSourcePassesTheRoutingGate: a bound
+// clustered source is no longer waited for or refused by the routing gate.
+func TestHandleValidatingPhase_ClusteredBoundSourcePassesTheRoutingGate(t *testing.T) {
+	r, migration := clusteredMigrationFixture(t, true, false, &infravirtrigaudiov1beta1.PlacementStatus{Host: "host-a"})
+	_, err := r.handleValidatingPhase(context.Background(), migration)
+	require.NoError(t, err)
+	got := getMigration(t, r)
+	assert.NotContains(t, got.Status.Message, "host binding", "a bound clustered source is addressable")
+	assert.Contains(t, got.Status.Message, "clustered provider", "and a pvc export from it is refused with an honest message")
+	assert.Equal(t, infravirtrigaudiov1beta1.MigrationPhaseFailed, got.Status.Phase)
 }
 
 func TestHandleValidatingPhase_ClusteredUnboundSourceWaits(t *testing.T) {

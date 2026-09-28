@@ -1,0 +1,614 @@
+{
+  "clone-class-override": {
+    "calls": [
+      "single virsh domstate vrgold-web",
+      "single virsh list --all",
+      "single virsh dumpxml vrgold-web",
+      "single virsh vol-info vrgold-web-disk --pool default",
+      "single virsh vol-path vrgold-web-disk --pool default",
+      "single virsh pool-info default",
+      "single virsh pool-dumpxml default",
+      "local sh -c if [ -L \"$1\" ]; then echo symlink; elif [ -e \"$1\" ]; then echo present; fi sh /var/lib/libvirt/images/team-a.copy-disk.qcow2",
+      "single virsh dumpxml vrgold-web",
+      "local mktemp -d /var/lib/libvirt/images/.virtrigaud-write-XXXXXXXXXX",
+      "local sh -c umask \"$1\" \u0026\u0026 shift \u0026\u0026 exec \"$@\" sh 0137 qemu-img convert -O qcow2 /var/lib/libvirt/images/vrgold-web-disk.qcow2 /var/lib/libvirt/images/.virtrigaud-write-0000000000/team-a.copy-disk.qcow2",
+      "local qemu-img convert -O qcow2 /var/lib/libvirt/images/vrgold-web-disk.qcow2 /var/lib/libvirt/images/.virtrigaud-write-0000000000/team-a.copy-disk.qcow2",
+      "local mv -f -T -- /var/lib/libvirt/images/.virtrigaud-write-0000000000/team-a.copy-disk.qcow2 /var/lib/libvirt/images/team-a.copy-disk.qcow2",
+      "local sh -c stat -L -c '%a %u' -- \"$1\" \u0026\u0026 id -u sh /var/lib/libvirt/images",
+      "local sudo chown -h libvirt-qemu:kvm -- /var/lib/libvirt/images/team-a.copy-disk.qcow2",
+      "local sudo restorecon /var/lib/libvirt/images/team-a.copy-disk.qcow2",
+      "single virsh pool-refresh default",
+      "local rm -rf -- /var/lib/libvirt/images/.virtrigaud-write-0000000000",
+      "local mktemp \u003cstaging\u003e/team-a.copy-domain.xml.XXXXXXXXXX",
+      "local virsh define \u003cstaging\u003e/team-a.copy-domain.xml.0000000000",
+      "local rm -f -- \u003cstaging\u003e/team-a.copy-domain.xml.0000000000"
+    ],
+    "resp": "{\"target_vm_id\":\"team-a.copy\"}",
+    "err": "",
+    "defined": "\u003cdomain type='kvm'\u003e\n  \u003cname\u003eteam-a.copy\u003c/name\u003e\n  \u003cuuid\u003eUUID\u003c/uuid\u003e\n  \u003cmemory unit='MiB'\u003e4096\u003c/memory\u003e\n  \u003ccurrentMemory unit='MiB'\u003e4096\u003c/currentMemory\u003e\n  \u003cvcpu placement='static' current='4'\u003e16\u003c/vcpu\u003e\n  \u003cos\u003e\n    \u003ctype arch='x86_64' machine='pc-q35-8.2'\u003ehvm\u003c/type\u003e\n  \u003c/os\u003e\n  \u003cdevices\u003e\n    \u003cdisk type='file' device='disk'\u003e\n      \u003cdriver name='qemu' type='qcow2'/\u003e\n      \u003csource file='/var/lib/libvirt/images/team-a.copy-disk.qcow2'/\u003e\n      \u003ctarget dev='vda' bus='virtio'/\u003e\n    \u003c/disk\u003e\n    \u003cdisk type='file' device='cdrom'\u003e\n      \u003cdriver name='qemu' type='raw'/\u003e\n      \u003csource file='/tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso'/\u003e\n      \u003ctarget dev='sda' bus='sata'/\u003e\n      \u003creadonly/\u003e\n    \u003c/disk\u003e\n    \u003cinterface type='network'\u003e\n      \u003cmac address='MAC'/\u003e\n      \u003csource network='default'/\u003e\n      \u003cmodel type='virtio'/\u003e\n    \u003c/interface\u003e\n  \u003c/devices\u003e\n\u003c/domain\u003e\n"
+  },
+  "clone-copy-fails": {
+    "calls": [
+      "single virsh domstate vrgold-web",
+      "single virsh list --all",
+      "single virsh dumpxml vrgold-web",
+      "single virsh vol-info vrgold-web-disk --pool default",
+      "single virsh vol-path vrgold-web-disk --pool default",
+      "single virsh pool-info default",
+      "single virsh pool-dumpxml default",
+      "local sh -c if [ -L \"$1\" ]; then echo symlink; elif [ -e \"$1\" ]; then echo present; fi sh /var/lib/libvirt/images/team-a.copy-disk.qcow2",
+      "single virsh dumpxml vrgold-web",
+      "local mktemp -d /var/lib/libvirt/images/.virtrigaud-write-XXXXXXXXXX",
+      "local sh -c umask \"$1\" \u0026\u0026 shift \u0026\u0026 exec \"$@\" sh 0137 qemu-img convert -O qcow2 /var/lib/libvirt/images/vrgold-web-disk.qcow2 /var/lib/libvirt/images/.virtrigaud-write-0000000000/team-a.copy-disk.qcow2",
+      "local qemu-img convert -O qcow2 /var/lib/libvirt/images/vrgold-web-disk.qcow2 /var/lib/libvirt/images/.virtrigaud-write-0000000000/team-a.copy-disk.qcow2",
+      "local rm -rf -- /var/lib/libvirt/images/.virtrigaud-write-0000000000"
+    ],
+    "resp": "null",
+    "err": "failed to clone VM: create full-clone copy: virsh command 'sh -c umask \"$1\" \u0026\u0026 shift \u0026\u0026 exec \"$@\" sh 0137 qemu-img convert -O qcow2 /var/lib/libvirt/images/vrgold-web-disk.qcow2 /var/lib/libvirt/images/.virtrigaud-write-0000000000/team-a.copy-disk.qcow2' failed (exit code 1): stderr=error: scripted failure of qemu-img\n, stdout=, output: error: scripted failure of qemu-img\n"
+  },
+  "clone-customize-json-not-applied": {
+    "calls": [
+      "single virsh domstate vrgold-web",
+      "single virsh list --all",
+      "single virsh dumpxml vrgold-web",
+      "single virsh vol-info vrgold-web-disk --pool default",
+      "single virsh vol-path vrgold-web-disk --pool default",
+      "single virsh pool-info default",
+      "single virsh pool-dumpxml default",
+      "local sh -c if [ -L \"$1\" ]; then echo symlink; elif [ -e \"$1\" ]; then echo present; fi sh /var/lib/libvirt/images/team-a.copy-disk.qcow2",
+      "single virsh dumpxml vrgold-web",
+      "local mktemp -d /var/lib/libvirt/images/.virtrigaud-write-XXXXXXXXXX",
+      "local sh -c umask \"$1\" \u0026\u0026 shift \u0026\u0026 exec \"$@\" sh 0137 qemu-img convert -O qcow2 /var/lib/libvirt/images/vrgold-web-disk.qcow2 /var/lib/libvirt/images/.virtrigaud-write-0000000000/team-a.copy-disk.qcow2",
+      "local qemu-img convert -O qcow2 /var/lib/libvirt/images/vrgold-web-disk.qcow2 /var/lib/libvirt/images/.virtrigaud-write-0000000000/team-a.copy-disk.qcow2",
+      "local mv -f -T -- /var/lib/libvirt/images/.virtrigaud-write-0000000000/team-a.copy-disk.qcow2 /var/lib/libvirt/images/team-a.copy-disk.qcow2",
+      "local sh -c stat -L -c '%a %u' -- \"$1\" \u0026\u0026 id -u sh /var/lib/libvirt/images",
+      "local sudo chown -h libvirt-qemu:kvm -- /var/lib/libvirt/images/team-a.copy-disk.qcow2",
+      "local sudo restorecon /var/lib/libvirt/images/team-a.copy-disk.qcow2",
+      "single virsh pool-refresh default",
+      "local rm -rf -- /var/lib/libvirt/images/.virtrigaud-write-0000000000",
+      "local mktemp \u003cstaging\u003e/team-a.copy-domain.xml.XXXXXXXXXX",
+      "local virsh define \u003cstaging\u003e/team-a.copy-domain.xml.0000000000",
+      "local rm -f -- \u003cstaging\u003e/team-a.copy-domain.xml.0000000000"
+    ],
+    "resp": "{\"target_vm_id\":\"team-a.copy\"}",
+    "err": "",
+    "defined": "\u003cdomain type='kvm'\u003e\n  \u003cname\u003eteam-a.copy\u003c/name\u003e\n  \u003cuuid\u003eUUID\u003c/uuid\u003e\n  \u003cmemory unit='KiB'\u003e2097152\u003c/memory\u003e\n  \u003ccurrentMemory unit='KiB'\u003e2097152\u003c/currentMemory\u003e\n  \u003cvcpu placement='static'\u003e2\u003c/vcpu\u003e\n  \u003cos\u003e\n    \u003ctype arch='x86_64' machine='pc-q35-8.2'\u003ehvm\u003c/type\u003e\n  \u003c/os\u003e\n  \u003cdevices\u003e\n    \u003cdisk type='file' device='disk'\u003e\n      \u003cdriver name='qemu' type='qcow2'/\u003e\n      \u003csource file='/var/lib/libvirt/images/team-a.copy-disk.qcow2'/\u003e\n      \u003ctarget dev='vda' bus='virtio'/\u003e\n    \u003c/disk\u003e\n    \u003cdisk type='file' device='cdrom'\u003e\n      \u003cdriver name='qemu' type='raw'/\u003e\n      \u003csource file='/tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso'/\u003e\n      \u003ctarget dev='sda' bus='sata'/\u003e\n      \u003creadonly/\u003e\n    \u003c/disk\u003e\n    \u003cinterface type='network'\u003e\n      \u003cmac address='MAC'/\u003e\n      \u003csource network='default'/\u003e\n      \u003cmodel type='virtio'/\u003e\n    \u003c/interface\u003e\n  \u003c/devices\u003e\n\u003c/domain\u003e\n"
+  },
+  "clone-define-fails": {
+    "calls": [
+      "single virsh domstate vrgold-web",
+      "single virsh list --all",
+      "single virsh dumpxml vrgold-web",
+      "single virsh vol-info vrgold-web-disk --pool default",
+      "single virsh vol-path vrgold-web-disk --pool default",
+      "single virsh pool-info default",
+      "single virsh pool-dumpxml default",
+      "local sh -c if [ -L \"$1\" ]; then echo symlink; elif [ -e \"$1\" ]; then echo present; fi sh /var/lib/libvirt/images/team-a.copy-disk.qcow2",
+      "single virsh dumpxml vrgold-web",
+      "local mktemp -d /var/lib/libvirt/images/.virtrigaud-write-XXXXXXXXXX",
+      "local sh -c umask \"$1\" \u0026\u0026 shift \u0026\u0026 exec \"$@\" sh 0137 qemu-img convert -O qcow2 /var/lib/libvirt/images/vrgold-web-disk.qcow2 /var/lib/libvirt/images/.virtrigaud-write-0000000000/team-a.copy-disk.qcow2",
+      "local qemu-img convert -O qcow2 /var/lib/libvirt/images/vrgold-web-disk.qcow2 /var/lib/libvirt/images/.virtrigaud-write-0000000000/team-a.copy-disk.qcow2",
+      "local mv -f -T -- /var/lib/libvirt/images/.virtrigaud-write-0000000000/team-a.copy-disk.qcow2 /var/lib/libvirt/images/team-a.copy-disk.qcow2",
+      "local sh -c stat -L -c '%a %u' -- \"$1\" \u0026\u0026 id -u sh /var/lib/libvirt/images",
+      "local sudo chown -h libvirt-qemu:kvm -- /var/lib/libvirt/images/team-a.copy-disk.qcow2",
+      "local sudo restorecon /var/lib/libvirt/images/team-a.copy-disk.qcow2",
+      "single virsh pool-refresh default",
+      "local rm -rf -- /var/lib/libvirt/images/.virtrigaud-write-0000000000",
+      "local mktemp \u003cstaging\u003e/team-a.copy-domain.xml.XXXXXXXXXX",
+      "local virsh define \u003cstaging\u003e/team-a.copy-domain.xml.0000000000",
+      "single virsh domuuid team-a.copy",
+      "local rm -f -- \u003cstaging\u003e/team-a.copy-domain.xml.0000000000"
+    ],
+    "resp": "null",
+    "err": "failed to clone VM: define target domain: could not establish whether the domain was defined: failed to define domain: virsh command 'virsh define \u003cstaging\u003e/team-a.copy-domain.xml.0000000000' failed (exit code 1): stderr=error: scripted failure of define\n, stdout=, output: error: scripted failure of define\n",
+    "defined": "\u003cdomain type='kvm'\u003e\n  \u003cname\u003eteam-a.copy\u003c/name\u003e\n  \u003cuuid\u003eUUID\u003c/uuid\u003e\n  \u003cmemory unit='KiB'\u003e2097152\u003c/memory\u003e\n  \u003ccurrentMemory unit='KiB'\u003e2097152\u003c/currentMemory\u003e\n  \u003cvcpu placement='static'\u003e2\u003c/vcpu\u003e\n  \u003cos\u003e\n    \u003ctype arch='x86_64' machine='pc-q35-8.2'\u003ehvm\u003c/type\u003e\n  \u003c/os\u003e\n  \u003cdevices\u003e\n    \u003cdisk type='file' device='disk'\u003e\n      \u003cdriver name='qemu' type='qcow2'/\u003e\n      \u003csource file='/var/lib/libvirt/images/team-a.copy-disk.qcow2'/\u003e\n      \u003ctarget dev='vda' bus='virtio'/\u003e\n    \u003c/disk\u003e\n    \u003cdisk type='file' device='cdrom'\u003e\n      \u003cdriver name='qemu' type='raw'/\u003e\n      \u003csource file='/tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso'/\u003e\n      \u003ctarget dev='sda' bus='sata'/\u003e\n      \u003creadonly/\u003e\n    \u003c/disk\u003e\n    \u003cinterface type='network'\u003e\n      \u003cmac address='MAC'/\u003e\n      \u003csource network='default'/\u003e\n      \u003cmodel type='virtio'/\u003e\n    \u003c/interface\u003e\n  \u003c/devices\u003e\n\u003c/domain\u003e\n"
+  },
+  "clone-full": {
+    "calls": [
+      "single virsh domstate vrgold-web",
+      "single virsh list --all",
+      "single virsh dumpxml vrgold-web",
+      "single virsh vol-info vrgold-web-disk --pool default",
+      "single virsh vol-path vrgold-web-disk --pool default",
+      "single virsh pool-info default",
+      "single virsh pool-dumpxml default",
+      "local sh -c if [ -L \"$1\" ]; then echo symlink; elif [ -e \"$1\" ]; then echo present; fi sh /var/lib/libvirt/images/team-a.copy-disk.qcow2",
+      "single virsh dumpxml vrgold-web",
+      "local mktemp -d /var/lib/libvirt/images/.virtrigaud-write-XXXXXXXXXX",
+      "local sh -c umask \"$1\" \u0026\u0026 shift \u0026\u0026 exec \"$@\" sh 0137 qemu-img convert -O qcow2 /var/lib/libvirt/images/vrgold-web-disk.qcow2 /var/lib/libvirt/images/.virtrigaud-write-0000000000/team-a.copy-disk.qcow2",
+      "local qemu-img convert -O qcow2 /var/lib/libvirt/images/vrgold-web-disk.qcow2 /var/lib/libvirt/images/.virtrigaud-write-0000000000/team-a.copy-disk.qcow2",
+      "local mv -f -T -- /var/lib/libvirt/images/.virtrigaud-write-0000000000/team-a.copy-disk.qcow2 /var/lib/libvirt/images/team-a.copy-disk.qcow2",
+      "local sh -c stat -L -c '%a %u' -- \"$1\" \u0026\u0026 id -u sh /var/lib/libvirt/images",
+      "local sudo chown -h libvirt-qemu:kvm -- /var/lib/libvirt/images/team-a.copy-disk.qcow2",
+      "local sudo restorecon /var/lib/libvirt/images/team-a.copy-disk.qcow2",
+      "single virsh pool-refresh default",
+      "local rm -rf -- /var/lib/libvirt/images/.virtrigaud-write-0000000000",
+      "local mktemp \u003cstaging\u003e/team-a.copy-domain.xml.XXXXXXXXXX",
+      "local virsh define \u003cstaging\u003e/team-a.copy-domain.xml.0000000000",
+      "local rm -f -- \u003cstaging\u003e/team-a.copy-domain.xml.0000000000"
+    ],
+    "resp": "{\"target_vm_id\":\"team-a.copy\"}",
+    "err": "",
+    "defined": "\u003cdomain type='kvm'\u003e\n  \u003cname\u003eteam-a.copy\u003c/name\u003e\n  \u003cuuid\u003eUUID\u003c/uuid\u003e\n  \u003cmemory unit='KiB'\u003e2097152\u003c/memory\u003e\n  \u003ccurrentMemory unit='KiB'\u003e2097152\u003c/currentMemory\u003e\n  \u003cvcpu placement='static'\u003e2\u003c/vcpu\u003e\n  \u003cos\u003e\n    \u003ctype arch='x86_64' machine='pc-q35-8.2'\u003ehvm\u003c/type\u003e\n  \u003c/os\u003e\n  \u003cdevices\u003e\n    \u003cdisk type='file' device='disk'\u003e\n      \u003cdriver name='qemu' type='qcow2'/\u003e\n      \u003csource file='/var/lib/libvirt/images/team-a.copy-disk.qcow2'/\u003e\n      \u003ctarget dev='vda' bus='virtio'/\u003e\n    \u003c/disk\u003e\n    \u003cdisk type='file' device='cdrom'\u003e\n      \u003cdriver name='qemu' type='raw'/\u003e\n      \u003csource file='/tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso'/\u003e\n      \u003ctarget dev='sda' bus='sata'/\u003e\n      \u003creadonly/\u003e\n    \u003c/disk\u003e\n    \u003cinterface type='network'\u003e\n      \u003cmac address='MAC'/\u003e\n      \u003csource network='default'/\u003e\n      \u003cmodel type='virtio'/\u003e\n    \u003c/interface\u003e\n  \u003c/devices\u003e\n\u003c/domain\u003e\n"
+  },
+  "clone-ignores-source-host": {
+    "calls": [
+      "single virsh domstate vrgold-web",
+      "single virsh list --all",
+      "single virsh dumpxml vrgold-web",
+      "single virsh vol-info vrgold-web-disk --pool default",
+      "single virsh vol-path vrgold-web-disk --pool default",
+      "single virsh pool-info default",
+      "single virsh pool-dumpxml default",
+      "local sh -c if [ -L \"$1\" ]; then echo symlink; elif [ -e \"$1\" ]; then echo present; fi sh /var/lib/libvirt/images/team-a.copy-disk.qcow2",
+      "single virsh dumpxml vrgold-web",
+      "local mktemp -d /var/lib/libvirt/images/.virtrigaud-write-XXXXXXXXXX",
+      "local sh -c umask \"$1\" \u0026\u0026 shift \u0026\u0026 exec \"$@\" sh 0137 qemu-img convert -O qcow2 /var/lib/libvirt/images/vrgold-web-disk.qcow2 /var/lib/libvirt/images/.virtrigaud-write-0000000000/team-a.copy-disk.qcow2",
+      "local qemu-img convert -O qcow2 /var/lib/libvirt/images/vrgold-web-disk.qcow2 /var/lib/libvirt/images/.virtrigaud-write-0000000000/team-a.copy-disk.qcow2",
+      "local mv -f -T -- /var/lib/libvirt/images/.virtrigaud-write-0000000000/team-a.copy-disk.qcow2 /var/lib/libvirt/images/team-a.copy-disk.qcow2",
+      "local sh -c stat -L -c '%a %u' -- \"$1\" \u0026\u0026 id -u sh /var/lib/libvirt/images",
+      "local sudo chown -h libvirt-qemu:kvm -- /var/lib/libvirt/images/team-a.copy-disk.qcow2",
+      "local sudo restorecon /var/lib/libvirt/images/team-a.copy-disk.qcow2",
+      "single virsh pool-refresh default",
+      "local rm -rf -- /var/lib/libvirt/images/.virtrigaud-write-0000000000",
+      "local mktemp \u003cstaging\u003e/team-a.copy-domain.xml.XXXXXXXXXX",
+      "local virsh define \u003cstaging\u003e/team-a.copy-domain.xml.0000000000",
+      "local rm -f -- \u003cstaging\u003e/team-a.copy-domain.xml.0000000000"
+    ],
+    "resp": "{\"target_vm_id\":\"team-a.copy\"}",
+    "err": "",
+    "defined": "\u003cdomain type='kvm'\u003e\n  \u003cname\u003eteam-a.copy\u003c/name\u003e\n  \u003cuuid\u003eUUID\u003c/uuid\u003e\n  \u003cmemory unit='KiB'\u003e2097152\u003c/memory\u003e\n  \u003ccurrentMemory unit='KiB'\u003e2097152\u003c/currentMemory\u003e\n  \u003cvcpu placement='static'\u003e2\u003c/vcpu\u003e\n  \u003cos\u003e\n    \u003ctype arch='x86_64' machine='pc-q35-8.2'\u003ehvm\u003c/type\u003e\n  \u003c/os\u003e\n  \u003cdevices\u003e\n    \u003cdisk type='file' device='disk'\u003e\n      \u003cdriver name='qemu' type='qcow2'/\u003e\n      \u003csource file='/var/lib/libvirt/images/team-a.copy-disk.qcow2'/\u003e\n      \u003ctarget dev='vda' bus='virtio'/\u003e\n    \u003c/disk\u003e\n    \u003cdisk type='file' device='cdrom'\u003e\n      \u003cdriver name='qemu' type='raw'/\u003e\n      \u003csource file='/tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso'/\u003e\n      \u003ctarget dev='sda' bus='sata'/\u003e\n      \u003creadonly/\u003e\n    \u003c/disk\u003e\n    \u003cinterface type='network'\u003e\n      \u003cmac address='MAC'/\u003e\n      \u003csource network='default'/\u003e\n      \u003cmodel type='virtio'/\u003e\n    \u003c/interface\u003e\n  \u003c/devices\u003e\n\u003c/domain\u003e\n"
+  },
+  "clone-legacy-target-name": {
+    "calls": [
+      "single virsh domstate vrgold-web",
+      "single virsh list --all",
+      "single virsh dumpxml vrgold-web",
+      "single virsh vol-info vrgold-web-disk --pool default",
+      "single virsh vol-path vrgold-web-disk --pool default",
+      "single virsh pool-info default",
+      "single virsh pool-dumpxml default",
+      "local sh -c if [ -L \"$1\" ]; then echo symlink; elif [ -e \"$1\" ]; then echo present; fi sh /var/lib/libvirt/images/copy-disk.qcow2",
+      "single virsh dumpxml vrgold-web",
+      "local mktemp -d /var/lib/libvirt/images/.virtrigaud-write-XXXXXXXXXX",
+      "local sh -c umask \"$1\" \u0026\u0026 shift \u0026\u0026 exec \"$@\" sh 0137 qemu-img convert -O qcow2 /var/lib/libvirt/images/vrgold-web-disk.qcow2 /var/lib/libvirt/images/.virtrigaud-write-0000000000/copy-disk.qcow2",
+      "local qemu-img convert -O qcow2 /var/lib/libvirt/images/vrgold-web-disk.qcow2 /var/lib/libvirt/images/.virtrigaud-write-0000000000/copy-disk.qcow2",
+      "local mv -f -T -- /var/lib/libvirt/images/.virtrigaud-write-0000000000/copy-disk.qcow2 /var/lib/libvirt/images/copy-disk.qcow2",
+      "local sh -c stat -L -c '%a %u' -- \"$1\" \u0026\u0026 id -u sh /var/lib/libvirt/images",
+      "local sudo chown -h libvirt-qemu:kvm -- /var/lib/libvirt/images/copy-disk.qcow2",
+      "local sudo restorecon /var/lib/libvirt/images/copy-disk.qcow2",
+      "single virsh pool-refresh default",
+      "local rm -rf -- /var/lib/libvirt/images/.virtrigaud-write-0000000000",
+      "local mktemp \u003cstaging\u003e/copy-domain.xml.XXXXXXXXXX",
+      "local virsh define \u003cstaging\u003e/copy-domain.xml.0000000000",
+      "local rm -f -- \u003cstaging\u003e/copy-domain.xml.0000000000"
+    ],
+    "resp": "{\"target_vm_id\":\"copy\"}",
+    "err": "",
+    "defined": "\u003cdomain type='kvm'\u003e\n  \u003cname\u003ecopy\u003c/name\u003e\n  \u003cuuid\u003eUUID\u003c/uuid\u003e\n  \u003cmemory unit='KiB'\u003e2097152\u003c/memory\u003e\n  \u003ccurrentMemory unit='KiB'\u003e2097152\u003c/currentMemory\u003e\n  \u003cvcpu placement='static'\u003e2\u003c/vcpu\u003e\n  \u003cos\u003e\n    \u003ctype arch='x86_64' machine='pc-q35-8.2'\u003ehvm\u003c/type\u003e\n  \u003c/os\u003e\n  \u003cdevices\u003e\n    \u003cdisk type='file' device='disk'\u003e\n      \u003cdriver name='qemu' type='qcow2'/\u003e\n      \u003csource file='/var/lib/libvirt/images/copy-disk.qcow2'/\u003e\n      \u003ctarget dev='vda' bus='virtio'/\u003e\n    \u003c/disk\u003e\n    \u003cdisk type='file' device='cdrom'\u003e\n      \u003cdriver name='qemu' type='raw'/\u003e\n      \u003csource file='/tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso'/\u003e\n      \u003ctarget dev='sda' bus='sata'/\u003e\n      \u003creadonly/\u003e\n    \u003c/disk\u003e\n    \u003cinterface type='network'\u003e\n      \u003cmac address='MAC'/\u003e\n      \u003csource network='default'/\u003e\n      \u003cmodel type='virtio'/\u003e\n    \u003c/interface\u003e\n  \u003c/devices\u003e\n\u003c/domain\u003e\n"
+  },
+  "clone-linked": {
+    "calls": null,
+    "resp": "null",
+    "err": "failed to clone VM: linked clones are disabled on libvirt in this release: the source disk is not frozen, so the source's writes would corrupt the clone; use FullClone"
+  },
+  "clone-mismatched-target-name": {
+    "calls": null,
+    "resp": "null",
+    "err": "failed to clone VM: InvalidSpec: clone target name \"other\" does not match its target VM name \"copy\""
+  },
+  "clone-source-missing": {
+    "calls": [
+      "single virsh domstate gone"
+    ],
+    "resp": "null",
+    "err": "failed to clone VM: NotFound: source VM \"gone\" not found (caused by: failed to get domain state: virsh command 'virsh -c qemu:///single domstate gone' failed (exit code 1): stderr=error: failed to get domain 'gone'\n, stdout=)"
+  },
+  "clone-strips-source-owner-stamp": {
+    "calls": [
+      "single virsh domstate vrgold-web",
+      "single virsh list --all",
+      "single virsh dumpxml vrgold-web",
+      "single virsh vol-info vrgold-web-disk --pool default",
+      "single virsh vol-path vrgold-web-disk --pool default",
+      "single virsh pool-info default",
+      "single virsh pool-dumpxml default",
+      "local sh -c if [ -L \"$1\" ]; then echo symlink; elif [ -e \"$1\" ]; then echo present; fi sh /var/lib/libvirt/images/team-a.copy-disk.qcow2",
+      "single virsh dumpxml vrgold-web",
+      "local mktemp -d /var/lib/libvirt/images/.virtrigaud-write-XXXXXXXXXX",
+      "local sh -c umask \"$1\" \u0026\u0026 shift \u0026\u0026 exec \"$@\" sh 0137 qemu-img convert -O qcow2 /var/lib/libvirt/images/vrgold-web-disk.qcow2 /var/lib/libvirt/images/.virtrigaud-write-0000000000/team-a.copy-disk.qcow2",
+      "local qemu-img convert -O qcow2 /var/lib/libvirt/images/vrgold-web-disk.qcow2 /var/lib/libvirt/images/.virtrigaud-write-0000000000/team-a.copy-disk.qcow2",
+      "local mv -f -T -- /var/lib/libvirt/images/.virtrigaud-write-0000000000/team-a.copy-disk.qcow2 /var/lib/libvirt/images/team-a.copy-disk.qcow2",
+      "local sh -c stat -L -c '%a %u' -- \"$1\" \u0026\u0026 id -u sh /var/lib/libvirt/images",
+      "local sudo chown -h libvirt-qemu:kvm -- /var/lib/libvirt/images/team-a.copy-disk.qcow2",
+      "local sudo restorecon /var/lib/libvirt/images/team-a.copy-disk.qcow2",
+      "single virsh pool-refresh default",
+      "local rm -rf -- /var/lib/libvirt/images/.virtrigaud-write-0000000000",
+      "local mktemp \u003cstaging\u003e/team-a.copy-domain.xml.XXXXXXXXXX",
+      "local virsh define \u003cstaging\u003e/team-a.copy-domain.xml.0000000000",
+      "local rm -f -- \u003cstaging\u003e/team-a.copy-domain.xml.0000000000"
+    ],
+    "resp": "{\"target_vm_id\":\"team-a.copy\"}",
+    "err": "",
+    "defined": "\u003cdomain type='kvm'\u003e\n  \u003cname\u003eteam-a.copy\u003c/name\u003e\n  \u003cuuid\u003eUUID\u003c/uuid\u003e\n  \u003cmetadata\u003e\n    \n  \u003c/metadata\u003e\n  \u003cmemory unit='KiB'\u003e2097152\u003c/memory\u003e\n  \u003ccurrentMemory unit='KiB'\u003e2097152\u003c/currentMemory\u003e\n  \u003cvcpu placement='static'\u003e2\u003c/vcpu\u003e\n  \u003cos\u003e\n    \u003ctype arch='x86_64' machine='pc-q35-8.2'\u003ehvm\u003c/type\u003e\n  \u003c/os\u003e\n  \u003cdevices\u003e\n    \u003cdisk type='file' device='disk'\u003e\n      \u003cdriver name='qemu' type='qcow2'/\u003e\n      \u003csource file='/var/lib/libvirt/images/team-a.copy-disk.qcow2'/\u003e\n      \u003ctarget dev='vda' bus='virtio'/\u003e\n    \u003c/disk\u003e\n    \u003cdisk type='file' device='cdrom'\u003e\n      \u003cdriver name='qemu' type='raw'/\u003e\n      \u003csource file='/tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso'/\u003e\n      \u003ctarget dev='sda' bus='sata'/\u003e\n      \u003creadonly/\u003e\n    \u003c/disk\u003e\n    \u003cinterface type='network'\u003e\n      \u003cmac address='MAC'/\u003e\n      \u003csource network='default'/\u003e\n      \u003cmodel type='virtio'/\u003e\n    \u003c/interface\u003e\n  \u003c/devices\u003e\n\u003c/domain\u003e\n"
+  },
+  "clone-target-exists": {
+    "calls": [
+      "single virsh domstate vrgold-web",
+      "single virsh list --all"
+    ],
+    "resp": "null",
+    "err": "failed to clone VM: InvalidSpec: target VM \"copy\" already exists (libvirt domain \"team-a.copy\")"
+  },
+  "clone-uefi-nvram": {
+    "calls": [
+      "single virsh domstate vrgold-web",
+      "single virsh list --all",
+      "single virsh dumpxml vrgold-web",
+      "single virsh vol-info vrgold-web-disk --pool default",
+      "single virsh vol-path vrgold-web-disk --pool default",
+      "single virsh pool-info default",
+      "single virsh pool-dumpxml default",
+      "local sh -c if [ -L \"$1\" ]; then echo symlink; elif [ -e \"$1\" ]; then echo present; fi sh /var/lib/libvirt/images/team-a.copy-disk.qcow2",
+      "single virsh dumpxml vrgold-web",
+      "local sh -c if [ -L \"$1\" ]; then echo symlink; elif [ -e \"$1\" ]; then echo present; fi sh /var/lib/libvirt/qemu/nvram/team-a.copy_VARS.fd",
+      "local mktemp -d /var/lib/libvirt/images/.virtrigaud-write-XXXXXXXXXX",
+      "local sh -c umask \"$1\" \u0026\u0026 shift \u0026\u0026 exec \"$@\" sh 0137 qemu-img convert -O qcow2 /var/lib/libvirt/images/vrgold-web-disk.qcow2 /var/lib/libvirt/images/.virtrigaud-write-0000000000/team-a.copy-disk.qcow2",
+      "local qemu-img convert -O qcow2 /var/lib/libvirt/images/vrgold-web-disk.qcow2 /var/lib/libvirt/images/.virtrigaud-write-0000000000/team-a.copy-disk.qcow2",
+      "local mv -f -T -- /var/lib/libvirt/images/.virtrigaud-write-0000000000/team-a.copy-disk.qcow2 /var/lib/libvirt/images/team-a.copy-disk.qcow2",
+      "local sh -c stat -L -c '%a %u' -- \"$1\" \u0026\u0026 id -u sh /var/lib/libvirt/images",
+      "local sudo chown -h libvirt-qemu:kvm -- /var/lib/libvirt/images/team-a.copy-disk.qcow2",
+      "local sudo restorecon /var/lib/libvirt/images/team-a.copy-disk.qcow2",
+      "single virsh pool-refresh default",
+      "local rm -rf -- /var/lib/libvirt/images/.virtrigaud-write-0000000000",
+      "local sudo rm -f -- /var/lib/libvirt/qemu/nvram/team-a.copy_VARS.fd",
+      "local sh -c umask \"$1\" \u0026\u0026 shift \u0026\u0026 exec \"$@\" sh 0177 sudo dd if=/var/lib/libvirt/qemu/nvram/vrgold-web_VARS.fd of=/var/lib/libvirt/qemu/nvram/team-a.copy_VARS.fd iflag=nofollow oflag=nofollow conv=excl status=none",
+      "local sudo dd if=/var/lib/libvirt/qemu/nvram/vrgold-web_VARS.fd of=/var/lib/libvirt/qemu/nvram/team-a.copy_VARS.fd iflag=nofollow oflag=nofollow conv=excl status=none",
+      "local sh -c stat -L -c '%a %u' -- \"$1\" \u0026\u0026 id -u sh /var/lib/libvirt/qemu/nvram",
+      "local sudo chown -h libvirt-qemu:kvm -- /var/lib/libvirt/qemu/nvram/team-a.copy_VARS.fd",
+      "local sudo restorecon /var/lib/libvirt/qemu/nvram/team-a.copy_VARS.fd",
+      "local mktemp \u003cstaging\u003e/team-a.copy-domain.xml.XXXXXXXXXX",
+      "local virsh define \u003cstaging\u003e/team-a.copy-domain.xml.0000000000",
+      "local rm -f -- \u003cstaging\u003e/team-a.copy-domain.xml.0000000000"
+    ],
+    "resp": "{\"target_vm_id\":\"team-a.copy\"}",
+    "err": "",
+    "defined": "\u003cdomain type='kvm'\u003e\n  \u003cname\u003eteam-a.copy\u003c/name\u003e\n  \u003cuuid\u003eUUID\u003c/uuid\u003e\n  \u003cmemory unit='KiB'\u003e2097152\u003c/memory\u003e\n  \u003ccurrentMemory unit='KiB'\u003e2097152\u003c/currentMemory\u003e\n  \u003cvcpu placement='static'\u003e2\u003c/vcpu\u003e\n  \u003cos\u003e\n    \u003ctype arch='x86_64' machine='pc-q35-8.2'\u003ehvm\u003c/type\u003e\n    \u003cloader readonly='yes' type='pflash'\u003e/usr/share/OVMF/OVMF_CODE.fd\u003c/loader\u003e\n    \u003cnvram\u003e/var/lib/libvirt/qemu/nvram/team-a.copy_VARS.fd\u003c/nvram\u003e\n  \u003c/os\u003e\n  \u003cdevices\u003e\n    \u003cdisk type='file' device='disk'\u003e\n      \u003cdriver name='qemu' type='qcow2'/\u003e\n      \u003csource file='/var/lib/libvirt/images/team-a.copy-disk.qcow2'/\u003e\n      \u003ctarget dev='vda' bus='virtio'/\u003e\n    \u003c/disk\u003e\n    \u003cdisk type='file' device='cdrom'\u003e\n      \u003cdriver name='qemu' type='raw'/\u003e\n      \u003csource file='/tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso'/\u003e\n      \u003ctarget dev='sda' bus='sata'/\u003e\n      \u003creadonly/\u003e\n    \u003c/disk\u003e\n    \u003cinterface type='network'\u003e\n      \u003cmac address='MAC'/\u003e\n      \u003csource network='default'/\u003e\n      \u003cmodel type='virtio'/\u003e\n    \u003c/interface\u003e\n  \u003c/devices\u003e\n\u003c/domain\u003e\n"
+  },
+  "diskinfo-explicit-path": {
+    "calls": [
+      "single virsh dumpxml vrgold-web",
+      "single virsh vol-info vrgold-web-disk --pool default",
+      "single virsh vol-path vrgold-web-disk --pool default",
+      "local qemu-img info -U --output=json /var/lib/libvirt/images/other.qcow2",
+      "single virsh snapshot-list vrgold-web --name"
+    ],
+    "resp": "{\"disk_id\":\"/var/lib/libvirt/images/other.qcow2\",\"format\":\"qcow2\",\"virtual_size_bytes\":10737418240,\"actual_size_bytes\":\u003cunix\u003e,\"path\":\"/var/lib/libvirt/images/other.qcow2\",\"is_bootable\":true,\"metadata\":{\"pool\":\"default\",\"type\":\"file\"}}",
+    "err": ""
+  },
+  "diskinfo-ignores-target-host": {
+    "calls": [
+      "single virsh dumpxml vrgold-web",
+      "single virsh vol-info vrgold-web-disk --pool default",
+      "single virsh vol-path vrgold-web-disk --pool default",
+      "local qemu-img info -U --output=json /var/lib/libvirt/images/vrgold-web-disk.qcow2",
+      "single virsh snapshot-list vrgold-web --name"
+    ],
+    "resp": "{\"disk_id\":\"/var/lib/libvirt/images/vrgold-web-disk.qcow2\",\"format\":\"qcow2\",\"virtual_size_bytes\":10737418240,\"actual_size_bytes\":\u003cunix\u003e,\"path\":\"/var/lib/libvirt/images/vrgold-web-disk.qcow2\",\"is_bootable\":true,\"metadata\":{\"pool\":\"default\",\"type\":\"file\"}}",
+    "err": ""
+  },
+  "diskinfo-missing-domain": {
+    "calls": [
+      "single virsh dumpxml gone"
+    ],
+    "resp": "null",
+    "err": "failed to get disk info: failed to resolve primary disk: Retryable: failed to read disks for source VM \"gone\" (caused by: failed to dump domain XML: virsh command 'virsh -c qemu:///single dumpxml gone' failed (exit code 1): stderr=error: failed to get domain 'gone'\n, stdout=)"
+  },
+  "diskinfo-non-path-disk-id": {
+    "calls": [
+      "single virsh dumpxml vrgold-web",
+      "single virsh vol-info vrgold-web-disk --pool default",
+      "single virsh vol-path vrgold-web-disk --pool default",
+      "local qemu-img info -U --output=json /var/lib/libvirt/images/vrgold-web-disk.qcow2",
+      "single virsh snapshot-list vrgold-web --name"
+    ],
+    "resp": "{\"disk_id\":\"/var/lib/libvirt/images/vrgold-web-disk.qcow2\",\"format\":\"qcow2\",\"virtual_size_bytes\":10737418240,\"actual_size_bytes\":\u003cunix\u003e,\"path\":\"/var/lib/libvirt/images/vrgold-web-disk.qcow2\",\"is_bootable\":true,\"metadata\":{\"pool\":\"default\",\"type\":\"file\"}}",
+    "err": ""
+  },
+  "diskinfo-primary": {
+    "calls": [
+      "single virsh dumpxml vrgold-web",
+      "single virsh vol-info vrgold-web-disk --pool default",
+      "single virsh vol-path vrgold-web-disk --pool default",
+      "local qemu-img info -U --output=json /var/lib/libvirt/images/vrgold-web-disk.qcow2",
+      "single virsh snapshot-list vrgold-web --name"
+    ],
+    "resp": "{\"disk_id\":\"/var/lib/libvirt/images/vrgold-web-disk.qcow2\",\"format\":\"qcow2\",\"virtual_size_bytes\":10737418240,\"actual_size_bytes\":\u003cunix\u003e,\"path\":\"/var/lib/libvirt/images/vrgold-web-disk.qcow2\",\"is_bootable\":true,\"snapshots\":[\"s1\",\"s2\"],\"metadata\":{\"pool\":\"default\",\"type\":\"file\"}}",
+    "err": ""
+  },
+  "diskinfo-qemu-img-fails": {
+    "calls": [
+      "single virsh dumpxml vrgold-web",
+      "single virsh vol-info vrgold-web-disk --pool default",
+      "single virsh vol-path vrgold-web-disk --pool default",
+      "local qemu-img info -U --output=json /var/lib/libvirt/images/vrgold-web-disk.qcow2",
+      "single virsh snapshot-list vrgold-web --name"
+    ],
+    "resp": "{\"disk_id\":\"/var/lib/libvirt/images/vrgold-web-disk.qcow2\",\"format\":\"qcow2\",\"path\":\"/var/lib/libvirt/images/vrgold-web-disk.qcow2\",\"is_bootable\":true,\"metadata\":{\"pool\":\"default\",\"type\":\"file\"}}",
+    "err": ""
+  },
+  "diskinfo-snapshot-list-fails": {
+    "calls": [
+      "single virsh dumpxml vrgold-web",
+      "single virsh vol-info vrgold-web-disk --pool default",
+      "single virsh vol-path vrgold-web-disk --pool default",
+      "local qemu-img info -U --output=json /var/lib/libvirt/images/vrgold-web-disk.qcow2",
+      "single virsh snapshot-list vrgold-web --name"
+    ],
+    "resp": "{\"disk_id\":\"/var/lib/libvirt/images/vrgold-web-disk.qcow2\",\"format\":\"qcow2\",\"virtual_size_bytes\":10737418240,\"actual_size_bytes\":\u003cunix\u003e,\"path\":\"/var/lib/libvirt/images/vrgold-web-disk.qcow2\",\"is_bootable\":true,\"metadata\":{\"pool\":\"default\",\"type\":\"file\"}}",
+    "err": ""
+  },
+  "export-nfs-needs-ssh": {
+    "calls": null,
+    "resp": "null",
+    "err": "nfs export requires an ssh:// libvirt transport (host-side qemu-img → nfs://); got \"qemu:///single\""
+  },
+  "export-pvc-compressed": {
+    "calls": [
+      "single virsh dumpxml vrgold-web",
+      "single virsh vol-info vrgold-web-disk --pool default",
+      "single virsh vol-path vrgold-web-disk --pool default",
+      "local qemu-img info -U --output=json /var/lib/libvirt/images/vrgold-web-disk.qcow2",
+      "single virsh snapshot-list vrgold-web --name",
+      "local qemu-img convert -p -f qcow2 -O qcow2 -c /var/lib/libvirt/images/vrgold-web-disk.qcow2 /tmp/export-vrgold-web-\u003cunix\u003e.qcow2"
+    ],
+    "resp": "null",
+    "err": "failed to export disk: failed to create storage client: PVC mount path does not exist: /mnt/migration-storage/vrgold-pvc (PVC may not be mounted to pod): stat /mnt/migration-storage/vrgold-pvc: no such file or directory"
+  },
+  "export-pvc-ignores-target-host": {
+    "calls": [
+      "single virsh dumpxml vrgold-web",
+      "single virsh vol-info vrgold-web-disk --pool default",
+      "single virsh vol-path vrgold-web-disk --pool default",
+      "local qemu-img info -U --output=json /var/lib/libvirt/images/vrgold-web-disk.qcow2",
+      "single virsh snapshot-list vrgold-web --name"
+    ],
+    "resp": "null",
+    "err": "failed to export disk: failed to create storage client: PVC mount path does not exist: /mnt/migration-storage/vrgold-pvc (PVC may not be mounted to pod): stat /mnt/migration-storage/vrgold-pvc: no such file or directory"
+  },
+  "export-pvc-no-conversion": {
+    "calls": [
+      "single virsh dumpxml vrgold-web",
+      "single virsh vol-info vrgold-web-disk --pool default",
+      "single virsh vol-path vrgold-web-disk --pool default",
+      "local qemu-img info -U --output=json /var/lib/libvirt/images/vrgold-web-disk.qcow2",
+      "single virsh snapshot-list vrgold-web --name"
+    ],
+    "resp": "null",
+    "err": "failed to export disk: failed to create storage client: PVC mount path does not exist: /mnt/migration-storage/vrgold-pvc (PVC may not be mounted to pod): stat /mnt/migration-storage/vrgold-pvc: no such file or directory"
+  },
+  "export-pvc-unsupported-format": {
+    "calls": [
+      "single virsh dumpxml vrgold-web",
+      "single virsh vol-info vrgold-web-disk --pool default",
+      "single virsh vol-path vrgold-web-disk --pool default",
+      "local qemu-img info -U --output=json /var/lib/libvirt/images/vrgold-web-disk.qcow2",
+      "single virsh snapshot-list vrgold-web --name"
+    ],
+    "resp": "null",
+    "err": "failed to export disk: unsupported export format: vmdk (libvirt supports qcow2, raw)"
+  },
+  "export-s3-direct-mode": {
+    "calls": null,
+    "resp": "null",
+    "err": "rpc error: code = InvalidArgument desc = transfer mode \"direct\" not supported; only \"relay\" is implemented (ADR-0006 Slice 1)"
+  },
+  "export-s3-needs-ssh": {
+    "calls": null,
+    "resp": "null",
+    "err": "s3 export requires an ssh:// libvirt transport (host-side qemu-img flatten + stream); got \"qemu:///single\""
+  },
+  "export-unknown-backend": {
+    "calls": null,
+    "resp": "null",
+    "err": "rpc error: code = Unimplemented desc = backend \"ftp\" not yet supported on this provider/direction (ADR-0006)"
+  },
+  "snapshot-create-default-name-and-description": {
+    "calls": [
+      "single virsh domstate vrgold-web",
+      "single virsh dumpxml vrgold-web",
+      "single virsh list --all --uuid",
+      "single virsh snapshot-create-as vrgold-web snapshot-\u003cunix\u003e --description Snapshot created by VirtRigaud at \u003ctime\u003e --atomic --disk-only"
+    ],
+    "resp": "{\"snapshot_id\":\"snapshot-\u003cunix\u003e\"}",
+    "err": ""
+  },
+  "snapshot-create-disk-only": {
+    "calls": [
+      "single virsh domstate vrgold-web",
+      "single virsh dumpxml vrgold-web",
+      "single virsh list --all --uuid",
+      "single virsh snapshot-create-as vrgold-web pre-upgrade --description before the upgrade --atomic --disk-only"
+    ],
+    "resp": "{\"snapshot_id\":\"pre-upgrade\"}",
+    "err": ""
+  },
+  "snapshot-create-domstate-fails": {
+    "calls": [
+      "single virsh domstate vrgold-web"
+    ],
+    "resp": "null",
+    "err": "failed to get domain state: failed to get domain state: virsh command 'virsh -c qemu:///single domstate vrgold-web' failed (exit code 1): stderr=error: scripted failure of domstate\n, stdout="
+  },
+  "snapshot-create-fails": {
+    "calls": [
+      "single virsh domstate vrgold-web",
+      "single virsh dumpxml vrgold-web",
+      "single virsh list --all --uuid",
+      "single virsh snapshot-create-as vrgold-web x --description d --atomic --disk-only"
+    ],
+    "resp": "null",
+    "err": "failed to create snapshot: virsh command 'virsh -c qemu:///single snapshot-create-as vrgold-web x --description d --atomic --disk-only' failed (exit code 1): stderr=error: scripted failure of snapshot-create-as\n, stdout="
+  },
+  "snapshot-create-ignores-target-host": {
+    "calls": [
+      "single virsh domstate vrgold-web",
+      "single virsh dumpxml vrgold-web",
+      "single virsh list --all --uuid",
+      "single virsh snapshot-create-as vrgold-web h --description d --atomic --disk-only"
+    ],
+    "resp": "{\"snapshot_id\":\"h\"}",
+    "err": ""
+  },
+  "snapshot-create-memory-running": {
+    "calls": [
+      "single virsh domstate vrgold-web",
+      "single virsh dumpxml vrgold-web",
+      "single virsh list --all --uuid",
+      "single virsh snapshot-create-as vrgold-web mem --description d --atomic"
+    ],
+    "resp": "{\"snapshot_id\":\"mem\"}",
+    "err": ""
+  },
+  "snapshot-create-memory-stopped-downgrades": {
+    "calls": [
+      "single virsh domstate vrgold-web",
+      "single virsh dumpxml vrgold-web",
+      "single virsh list --all --uuid",
+      "single virsh snapshot-create-as vrgold-web mem --description d --atomic --disk-only"
+    ],
+    "resp": "{\"snapshot_id\":\"mem\"}",
+    "err": ""
+  },
+  "snapshot-create-missing-domain": {
+    "calls": [
+      "single virsh domstate gone"
+    ],
+    "resp": "null",
+    "err": "failed to get domain state: failed to get domain state: virsh command 'virsh -c qemu:///single domstate gone' failed (exit code 1): stderr=error: failed to get domain 'gone'\n, stdout="
+  },
+  "snapshot-create-sanitized-name": {
+    "calls": [
+      "single virsh domstate vrgold-web",
+      "single virsh dumpxml vrgold-web",
+      "single virsh list --all --uuid",
+      "single virsh snapshot-create-as vrgold-web my-snap-1- --description d --atomic --disk-only"
+    ],
+    "resp": "{\"snapshot_id\":\"my-snap-1-\"}",
+    "err": ""
+  },
+  "snapshot-delete-absent": {
+    "calls": [
+      "single virsh snapshot-list vrgold-web --name"
+    ],
+    "resp": "{}",
+    "err": ""
+  },
+  "snapshot-delete-existing": {
+    "calls": [
+      "single virsh snapshot-list vrgold-web --name",
+      "single virsh dumpxml vrgold-web",
+      "single virsh list --all --uuid",
+      "single virsh snapshot-delete vrgold-web s1"
+    ],
+    "resp": "{}",
+    "err": ""
+  },
+  "snapshot-delete-fails": {
+    "calls": [
+      "single virsh snapshot-list vrgold-web --name",
+      "single virsh dumpxml vrgold-web",
+      "single virsh list --all --uuid",
+      "single virsh snapshot-delete vrgold-web s1"
+    ],
+    "resp": "null",
+    "err": "failed to delete snapshot: virsh command 'virsh -c qemu:///single snapshot-delete vrgold-web s1' failed (exit code 1): stderr=error: scripted failure of snapshot-delete\n, stdout="
+  },
+  "snapshot-delete-ignores-target-host": {
+    "calls": [
+      "single virsh snapshot-list vrgold-web --name",
+      "single virsh dumpxml vrgold-web",
+      "single virsh list --all --uuid",
+      "single virsh snapshot-delete vrgold-web s2"
+    ],
+    "resp": "{}",
+    "err": ""
+  },
+  "snapshot-delete-list-fails": {
+    "calls": [
+      "single virsh snapshot-list vrgold-web --name"
+    ],
+    "resp": "null",
+    "err": "failed to check snapshot existence: failed to list snapshots: virsh command 'virsh -c qemu:///single snapshot-list vrgold-web --name' failed (exit code 1): stderr=error: scripted failure of snapshot-list\n, stdout="
+  },
+  "snapshot-revert-absent": {
+    "calls": [
+      "single virsh snapshot-list vrgold-web --name"
+    ],
+    "resp": "null",
+    "err": "snapshot s9 does not exist"
+  },
+  "snapshot-revert-domstate-fails": {
+    "calls": [
+      "single virsh snapshot-list vrgold-web --name",
+      "single virsh domstate vrgold-web"
+    ],
+    "resp": "null",
+    "err": "failed to get domain state: failed to get domain state: virsh command 'virsh -c qemu:///single domstate vrgold-web' failed (exit code 1): stderr=error: scripted failure of domstate\n, stdout="
+  },
+  "snapshot-revert-fails": {
+    "calls": [
+      "single virsh snapshot-list vrgold-web --name",
+      "single virsh domstate vrgold-web",
+      "single virsh dumpxml vrgold-web",
+      "single virsh list --all --uuid",
+      "single virsh snapshot-revert vrgold-web s1 --force"
+    ],
+    "resp": "null",
+    "err": "failed to revert to snapshot: virsh command 'virsh -c qemu:///single snapshot-revert vrgold-web s1 --force' failed (exit code 1): stderr=error: scripted failure of snapshot-revert\n, stdout="
+  },
+  "snapshot-revert-list-fails": {
+    "calls": [
+      "single virsh snapshot-list vrgold-web --name"
+    ],
+    "resp": "null",
+    "err": "failed to check snapshot existence: failed to list snapshots: virsh command 'virsh -c qemu:///single snapshot-list vrgold-web --name' failed (exit code 1): stderr=error: scripted failure of snapshot-list\n, stdout="
+  },
+  "snapshot-revert-running": {
+    "calls": [
+      "single virsh snapshot-list vrgold-web --name",
+      "single virsh domstate vrgold-web",
+      "single virsh dumpxml vrgold-web",
+      "single virsh list --all --uuid",
+      "single virsh snapshot-revert vrgold-web s1 --force --running"
+    ],
+    "resp": "{}",
+    "err": ""
+  },
+  "snapshot-revert-stopped": {
+    "calls": [
+      "single virsh snapshot-list vrgold-web --name",
+      "single virsh domstate vrgold-web",
+      "single virsh dumpxml vrgold-web",
+      "single virsh list --all --uuid",
+      "single virsh snapshot-revert vrgold-web s1 --force"
+    ],
+    "resp": "{}",
+    "err": ""
+  },
+  "task-status-any-ref": {
+    "calls": null,
+    "resp": "{\"done\":true}",
+    "err": ""
+  },
+  "task-status-empty-ref": {
+    "calls": null,
+    "resp": "{\"done\":true}",
+    "err": ""
+  },
+  "task-status-host-looking-ref": {
+    "calls": null,
+    "resp": "{\"done\":true}",
+    "err": ""
+  }
+}

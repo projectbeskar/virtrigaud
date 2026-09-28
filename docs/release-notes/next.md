@@ -115,9 +115,15 @@ providers), and rollback caveats in
 ### Clustered providers (experimental, opt-in)
 
 - `topology: cluster` libvirt providers can now be scheduled, created,
-  described, deleted, powered, and reconfigured across a `Host`/`HostPool`
-  inventory (ADR-0007). Still experimental — snapshots, clones, and disk
-  export/import on a clustered provider are not implemented yet.
+  described, deleted, powered, reconfigured, snapshotted, cloned (full clones,
+  onto the source VM's own host) and exported (s3 / nfs, as a migration source) across a
+  `Host`/`HostPool` inventory (ADR-0007). Every per-VM call is routed to the
+  VM's host and checked against the VM's owner stamp. A clone is admitted
+  against its source host's free capacity like any create (it waits,
+  `Unschedulable`, when it does not fit, and never moves to another host), and
+  a clone that fails for good removes the target VM it created. Still
+  experimental — cross-host listing and adoption, migration into a clustered
+  provider, and host-to-host migration are not implemented yet.
 - The clustered scheduler subtracts what each host already holds: every VM
   bound to it, pending on it, or being deleted from it, in any namespace, at
   its admitted size. It also keeps concurrent creates and resizes from booking

@@ -737,6 +737,9 @@ func (r *VMMigrationReconciler) handleSnapshottingPhase(ctx context.Context, mig
 		Description:   fmt.Sprintf("Migration snapshot for %s", migration.Name),
 		IncludeMemory: false, // Disk-only snapshot for migration
 		Quiesce:       false,
+		// The migration's uid: a retried create adopts only the snapshot made
+		// for this migration.
+		RequestToken: string(migration.UID),
 	}
 
 	// Re-read the source Provider's grant from the API server (not the cache)
@@ -3135,6 +3138,18 @@ func (r *VMMigrationReconciler) gateMigrationStorageBackend(
 		return fmt.Sprintf(
 			"transfer mode %q is not yet implemented; only %q (and %q) are supported today (ADR-0006 Slice 1)",
 			storagemigration.TransferModeDirect, storagemigration.TransferModeRelay, storagemigration.TransferModeAuto)
+	}
+
+	// A clustered source's disks live on its hosts: only the host-side s3 and
+	// nfs exports are routed to the bound host (ADR-0007 Addendum A, slice 3).
+	// The pvc export reads the disk from the provider pod, so it is refused up
+	// front — even if an older clustered provider reported no export backends,
+	// which reportedExportBackends would read as the implicit pvc default.
+	if isClusterTopology(sourceProvider) && backend == storagemigration.BackendPVC {
+		return fmt.Sprintf(
+			"storage backend %q is not supported for a source on clustered provider %q: its disks live on its hosts; "+
+				"use %q or %q (ADR-0007 Addendum A)",
+			backend, sourceProvider.Name, storagemigration.BackendS3, storagemigration.BackendNFS)
 	}
 
 	exportBackends := reportedExportBackends(sourceProvider)

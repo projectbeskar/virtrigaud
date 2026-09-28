@@ -529,6 +529,8 @@ func (c *Client) GetCapabilities(ctx context.Context) (contracts.Capabilities, e
 		SupportsImageArtifactIdentity: resp.GetSupportsImageArtifactIdentity(),
 		// False from a provider that predates the honest Reconfigure result.
 		SupportsHonestReconfigure: resp.GetSupportsHonestReconfigure(),
+		// ADR-0007 Addendum A slice 3: false from a provider that predates it.
+		SupportsRoutedClone: resp.GetSupportsRoutedClone(),
 	}, nil
 }
 
@@ -545,8 +547,13 @@ func (c *Client) Clone(ctx context.Context, req contracts.CloneRequest) (contrac
 	defer cancel()
 
 	resp, err := c.client.Clone(ctx, &providerv1.CloneRequest{
-		SourceVmId:    req.Source.ID,
-		SourceHostId:  req.Source.HostID,
+		SourceVmId:   req.Source.ID,
+		SourceHostId: req.Source.HostID,
+		// ADR-0007 Addendum A, slice 3: a routed (clustered) clone also names its
+		// landing host and the source's owner; a single-host clone carries
+		// neither, exactly as before.
+		SourceOwner:   routedOwner(req.Source),
+		TargetHostId:  routedTargetHost(req),
 		TargetName:    req.TargetName,
 		Linked:        req.Linked,
 		ClassJson:     req.ClassJSON,
@@ -878,6 +885,8 @@ func (c *Client) SnapshotCreate(ctx context.Context, req contracts.SnapshotCreat
 		Description:   req.Description,
 		IncludeMemory: req.IncludeMemory,
 		TargetHostId:  req.VM.HostID,
+		Owner:         routedOwner(req.VM),
+		RequestToken:  req.RequestToken,
 		// Note: Quiesce not in proto yet, would need to add to provider.proto
 	}
 
@@ -909,6 +918,7 @@ func (c *Client) SnapshotDelete(ctx context.Context, vm contracts.VMRef, snapsho
 		VmId:         vm.ID,
 		SnapshotId:   snapshotID,
 		TargetHostId: vm.HostID,
+		Owner:        routedOwner(vm),
 	}
 
 	resp, err := c.client.SnapshotDelete(ctx, grpcReq)
@@ -933,6 +943,7 @@ func (c *Client) SnapshotRevert(ctx context.Context, vm contracts.VMRef, snapsho
 		VmId:         vm.ID,
 		SnapshotId:   snapshotID,
 		TargetHostId: vm.HostID,
+		Owner:        routedOwner(vm),
 	}
 
 	resp, err := c.client.SnapshotRevert(ctx, grpcReq)
@@ -956,6 +967,7 @@ func (c *Client) ExportDisk(ctx context.Context, req contracts.ExportDiskRequest
 	grpcReq := &providerv1.ExportDiskRequest{
 		VmId:               req.VM.ID,
 		TargetHostId:       req.VM.HostID,
+		Owner:              routedOwner(req.VM),
 		DiskId:             req.DiskId,
 		SnapshotId:         req.SnapshotId,
 		DestinationUrl:     req.DestinationURL,
@@ -1035,6 +1047,7 @@ func (c *Client) GetDiskInfo(ctx context.Context, req contracts.GetDiskInfoReque
 		DiskId:       req.DiskId,
 		SnapshotId:   req.SnapshotId,
 		TargetHostId: req.VM.HostID,
+		Owner:        routedOwner(req.VM),
 	}
 
 	resp, err := c.client.GetDiskInfo(ctx, grpcReq)
@@ -1247,6 +1260,16 @@ func routedOwner(vm contracts.VMRef) *providerv1.ObjectIdentity {
 		return nil
 	}
 	return objectIdentityToProto(vm.Owner)
+}
+
+// routedTargetHost is the landing host a clone request carries on the wire
+// (CloneRequest.target_host_id): req.TargetHostID for a routed (clustered)
+// source, and nothing for a single-host clone, whose request is unchanged.
+func routedTargetHost(req contracts.CloneRequest) string {
+	if !req.Source.Routed() {
+		return ""
+	}
+	return req.TargetHostID
 }
 
 // isHostUnavailableStatus reports whether a gRPC status is a clustered

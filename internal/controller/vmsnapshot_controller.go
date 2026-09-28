@@ -300,6 +300,21 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 
 	// Call provider to create snapshot
 	resp, err := providerInstance.SnapshotCreate(ctx, req)
+	if err != nil && req.VM.HostID != "" && contracts.IsRetryable(err) {
+		// A ROUTED (clustered) create without a definite outcome — its host
+		// unavailable, its time budget run out while libvirtd may still be
+		// writing the snapshot, or another job on the VM still running — is
+		// retried, never failed: a failed VMSnapshot would leave a snapshot
+		// that completes afterwards untracked on the host. The provider's
+		// routed create is idempotent per request (request_token, the
+		// VMSnapshot's uid), so the retry finds that snapshot instead of making
+		// a second one. A disk-dependents check that could not run
+		// (VM_DISK_CHECK_FAILED, #358) is retried here too; a refusal because
+		// another VM depends on the disk (VM_DISK_IN_USE, a Conflict) fails the
+		// create, as on a single host. Single-host failures are unchanged.
+		logger.Info("Snapshot creation did not reach a definite outcome; retrying", "error", err.Error())
+		return r.retrySnapshotCreate(ctx, snapshot, fmt.Sprintf("Snapshot creation will be retried: %v", err)), nil
+	}
 	if err != nil {
 		logger.Error(err, "Failed to create snapshot")
 		snapshot.Status.Phase = infrav1beta1.SnapshotPhaseFailed
@@ -973,6 +988,10 @@ func (r *VMSnapshotReconciler) retrySnapshotCreate(ctx context.Context, snapshot
 func (r *VMSnapshotReconciler) buildSnapshotCreateRequest(snapshot *infrav1beta1.VMSnapshot, vm contracts.VMRef) contracts.SnapshotCreateRequest {
 	req := contracts.SnapshotCreateRequest{
 		VM: vm,
+		// The VMSnapshot's uid: a provider that retries a create by name adopts
+		// an existing snapshot only when it was made for this VMSnapshot, never
+		// one an earlier VMSnapshot of the same name left behind.
+		RequestToken: string(snapshot.UID),
 	}
 
 	// Set snapshot configuration if provided

@@ -51,12 +51,19 @@ type clonerProvider struct {
 	// method but tests use clonerProviderNoCaps instead.
 	caps    contracts.Capabilities
 	capsErr error
+
+	// onClone, when set, runs inside Clone (e.g. to observe the API state the
+	// clone is sent in).
+	onClone func()
 }
 
 func (p *clonerProvider) Clone(_ context.Context, req contracts.CloneRequest) (contracts.CloneResponse, error) {
 	p.cloneCnt++
 	r := req
 	p.lastClone = &r
+	if p.onClone != nil {
+		p.onClone()
+	}
 	return p.cloneResp, p.cloneErr
 }
 
@@ -142,6 +149,7 @@ func newCloneReconciler(s *runtime.Scheme, resolver ProviderResolver, objs ...cl
 			&infrav1beta1.VMClone{},
 			&infrav1beta1.VirtualMachine{},
 		).
+		WithIndex(&infrav1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).
 		Build()
 	return &VMCloneReconciler{
 		Client:         fc,
@@ -319,9 +327,11 @@ func TestVMClone_FullCloneUnaffectedWithoutLinkedSupport(t *testing.T) {
 	assert.False(t, cp.lastClone.Linked)
 }
 
-// TestVMClone_LinkedFailsOpen_NonReporter: type=LinkedClone with a provider that
-// is NOT a CapabilityReporter → proceeds (fail open), clone happens.
-func TestVMClone_LinkedFailsOpen_NonReporter(t *testing.T) {
+// TestVMClone_LinkedFailsClosed_NonReporter: type=LinkedClone with a provider
+// that is NOT a CapabilityReporter → refused (fail closed): a linked clone
+// depends on its source disk for its whole life, so it is only issued to a
+// provider that says it can make one.
+func TestVMClone_LinkedFailsClosed_NonReporter(t *testing.T) {
 	s := cloneTestScheme(t)
 	ns := "default"
 
@@ -329,7 +339,7 @@ func TestVMClone_LinkedFailsOpen_NonReporter(t *testing.T) {
 	src := sourceVMWithID(ns, "src-vm", "prov-1", "vm-source-123")
 	linked := infrav1beta1.CloneTypeLinkedClone
 	clone := &infrav1beta1.VMClone{
-		ObjectMeta: metav1.ObjectMeta{Name: "clone-linked-open", Namespace: ns},
+		ObjectMeta: metav1.ObjectMeta{Name: "clone-linked-closed", Namespace: ns},
 		Spec: infrav1beta1.VMCloneSpec{
 			Source:  infrav1beta1.CloneSource{VMRef: &infrav1beta1.LocalObjectReference{Name: "src-vm"}},
 			Target:  infrav1beta1.VMCloneTarget{Name: "clone-target"},
@@ -343,9 +353,11 @@ func TestVMClone_LinkedFailsOpen_NonReporter(t *testing.T) {
 
 	got := &infrav1beta1.VMClone{}
 	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(clone), got))
-	assert.Equal(t, infrav1beta1.ClonePhaseReady, got.Status.Phase)
-	assert.Equal(t, 1, cp.cloneCnt, "fail-open: clone must proceed for non-CapabilityReporter providers")
-	assert.Equal(t, infrav1beta1.CloneTypeLinkedClone, got.Status.ActualCloneType)
+	assert.Equal(t, infrav1beta1.ClonePhaseFailed, got.Status.Phase)
+	assert.Zero(t, cp.cloneCnt, "fail closed: no linked clone without confirmed support")
+	ready := readyCondition(got.Status.Conditions, infrav1beta1.VMCloneConditionReady)
+	require.NotNil(t, ready)
+	assert.Equal(t, cloneReasonLinkedUnsupported, ready.Reason)
 }
 
 // TestVMClone_NonVMRefSource_Failed: a snapshotRef source (no vmRef) → Failed.

@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Modes and ownership of the files VirtRigaud creates for a VM.
@@ -155,6 +156,13 @@ func (d *diskWriteDir) publish(ctx context.Context, name, final string) error {
 // staged input), even when ctx is cancelled (removeHostPath).
 func (d *diskWriteDir) cleanup(ctx context.Context) {
 	removeHostPath(ctx, d.h, d.dir, true)
+}
+
+// cleanupWithin is cleanup bounded by within instead of the staging default:
+// a routed call's cleanup must end before the manager's deadline
+// (routedCleanupTimeout).
+func (d *diskWriteDir) cleanupWithin(ctx context.Context, within time.Duration) {
+	removeHostPathWithin(ctx, d.h, d.dir, true, within)
 }
 
 // diskDirModeScript is the fixed `sh -c` script behind warnIfDiskDirUnsafe: it

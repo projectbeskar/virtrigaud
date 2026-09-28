@@ -102,4 +102,25 @@ var _ = Describe("Provider spec.topology immutability (CRD CEL rule)", func() {
 			client.RawPatch(types.MergePatchType, []byte(`{"spec":{"topology":null}}`))))
 		Expect(get("topo-cluster").Spec.Topology).To(Equal(infravirtrigaudiov1beta1.ProviderTopologyCluster))
 	})
+
+	// spec.type is immutable too: the controllers decide type-specific safety
+	// rules from it (a libvirt linked clone into another namespace is refused),
+	// so a Provider can never be re-typed in place.
+	It("rejects any change of spec.type and keeps accepting updates that leave it alone", func() {
+		p := newProvider("type-fixed", "")
+		Expect(k8sClient.Create(ctx, p)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, p) })
+
+		got := get("type-fixed")
+		got.Spec.Endpoint = "qemu+ssh://virt@kvm-04/system"
+		Expect(k8sClient.Update(ctx, got)).To(Succeed(), "an update that leaves the type alone is allowed")
+
+		retype := get("type-fixed")
+		retype.Spec.Type = infravirtrigaudiov1beta1.ProviderTypeVSphere
+		err := k8sClient.Update(ctx, retype)
+		Expect(err).To(HaveOccurred())
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "got %v", err)
+		Expect(err.Error()).To(ContainSubstring("spec.type is immutable"))
+		Expect(get("type-fixed").Spec.Type).To(Equal(infravirtrigaudiov1beta1.ProviderTypeLibvirt))
+	})
 })

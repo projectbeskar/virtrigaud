@@ -108,6 +108,10 @@ func (p *Provider) Clone(ctx context.Context, req contracts.CloneRequest) (contr
 	sourceID := req.Source.ID
 	log.Printf("INFO Cloning VM %s -> %s (linked=%t)", sourceID, req.TargetName, req.Linked)
 
+	if p.clustered() {
+		return p.cloneClustered(ctx, req)
+	}
+
 	if p.virshProvider == nil {
 		return contracts.CloneResponse{}, contracts.NewRetryableError("virsh provider not initialized", nil)
 	}
@@ -247,28 +251,58 @@ func (p *Provider) Clone(ctx context.Context, req contracts.CloneRequest) (contr
 }
 
 // resolvePrimaryDisk returns the source domain's primary (boot) disk path and
-// format. It prefers the live domain XML (domblklist via getDomainDiskPaths) so
+// format. It prefers the live domain XML (domainDiskPaths) so
 // it works regardless of the volume naming convention, and falls back to the
 // pool volume lookup used by GetDiskInfo for the format.
 func (p *Provider) resolvePrimaryDisk(ctx context.Context, sourceVMID string, sp *StorageProvider) (path, format string, err error) {
-	diskPaths, derr := p.getDomainDiskPaths(ctx, sourceVMID)
+	return resolvePrimaryDiskOn(ctx, p.virshProvider, byName(sourceVMID), sp)
+}
+
+// resolvePrimaryDiskOn is resolvePrimaryDisk for domain d on vp's host (see
+// resolveDomainDisksOn): the first of its disks, and their format.
+func resolvePrimaryDiskOn(ctx context.Context, vp *VirshProvider, d domainTarget, sp *StorageProvider) (path, format string, err error) {
+	paths, format, err := resolveDomainDisksOn(ctx, vp, d, sp)
+	if err != nil {
+		return "", "", err
+	}
+	return paths[0], format, nil
+}
+
+// defaultDiskFormat is the provider's standard disk format, assumed when no
+// better answer is available.
+const defaultDiskFormat = "qcow2"
+
+// resolveDomainDisksOn returns the disk paths of domain d on vp's host, read
+// from its live definition (the primary disk first; cloud-init and CD-ROM
+// media excluded), and their format.
+//
+// On a single-host provider (byName) the format is looked up best-effort via
+// the "<name>-disk" pool volume convention, exactly as before. On the
+// owner-checked clustered target (d.diskByPath) nothing is looked up by name —
+// a volume found by a name may belong to another domain — and the provider's
+// standard format is used; the name-based lookup never yields another answer
+// anyway, as GetVolumeInfo does not report a format.
+func resolveDomainDisksOn(ctx context.Context, vp *VirshProvider, d domainTarget, sp *StorageProvider) ([]string, string, error) {
+	diskPaths, derr := domainDiskPaths(ctx, vp, d.handle)
 	if derr != nil {
-		return "", "", contracts.NewRetryableError(
-			fmt.Sprintf("failed to read disks for source VM %q", sourceVMID), derr)
+		return nil, "", contracts.NewRetryableError(
+			fmt.Sprintf("failed to read disks for source VM %q", d.name), derr)
 	}
 	if len(diskPaths) == 0 {
-		return "", "", contracts.NewInvalidSpecError(
-			fmt.Sprintf("source VM %q has no usable disk to clone", sourceVMID), nil)
+		return nil, "", contracts.NewInvalidSpecError(
+			fmt.Sprintf("source VM %q has no usable disk to clone", d.name), nil)
 	}
-	path = diskPaths[0]
 
 	// Best-effort format lookup via the pool volume convention; default to
 	// qcow2 (the provider's standard) when unavailable.
-	format = "qcow2"
-	if vol, verr := sp.GetVolumeInfo(ctx, clonePoolName, vmDiskVolumeName(sourceVMID)); verr == nil && vol.Format != "" {
+	format := defaultDiskFormat
+	if d.diskByPath {
+		return diskPaths, format, nil
+	}
+	if vol, verr := sp.GetVolumeInfo(ctx, clonePoolName, vmDiskVolumeName(d.name)); verr == nil && vol.Format != "" {
 		format = vol.Format
 	}
-	return path, format, nil
+	return diskPaths, format, nil
 }
 
 // createLinkedOverlay creates a copy-on-write qcow2 overlay backed by the

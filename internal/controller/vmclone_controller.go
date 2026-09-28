@@ -21,6 +21,8 @@ import (
 	"encoding/json"
 	stderrors "errors"
 	"fmt"
+	"strings"
+	"sync/atomic"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -43,6 +45,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/obs/logging"
 	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
+	"github.com/projectbeskar/virtrigaud/internal/scheduler/assume"
 	"github.com/projectbeskar/virtrigaud/internal/util/k8s"
 )
 
@@ -78,8 +81,12 @@ const (
 	// requested clone source type is not implemented in this MVP.
 	cloneReasonUnsupportedSource = "UnsupportedSource"
 	// cloneReasonLinkedUnsupported is the condition reason used when the
-	// provider reports it cannot perform linked clones.
+	// provider reports it cannot perform linked clones, or its capabilities
+	// cannot be read (a linked clone fails closed).
 	cloneReasonLinkedUnsupported = "LinkedCloneUnsupported"
+	// cloneReasonLinkedCrossNamespace is the condition reason used when a
+	// libvirt linked clone targets another namespace.
+	cloneReasonLinkedCrossNamespace = "LinkedCloneCrossNamespace"
 )
 
 // VMCloneReconciler reconciles a VMClone object. It supports the MVP source
@@ -103,6 +110,21 @@ type VMCloneReconciler struct {
 	// is honoured even while the cache still shows it. Nil falls back to
 	// Client, which only unit tests built as struct literals rely on.
 	APIReader client.Reader
+
+	// Placements is the per-Provider assume cache of clustered placements
+	// shared with the VirtualMachine controller
+	// (VirtualMachineReconciler.PlacementAssumptions): a clustered clone is
+	// admitted against its host's capacity under the same lock, and assumed
+	// in the same cache, as a VM's create or resize, so the two never book
+	// the same capacity (vmclone_capacity.go). The manager always sets it;
+	// nil — a reconciler built directly in a unit test — uses a cache of its
+	// own.
+	Placements *assume.Cache
+	// ownPlacements is the cache used when Placements is nil.
+	ownPlacements atomic.Pointer[assume.Cache]
+	// unschedulable paces the re-checks of clustered clones that do not fit
+	// on their source's host.
+	unschedulable unschedulableBackoff
 }
 
 // NewVMCloneReconciler creates a new VMClone reconciler. apiReader must be an
@@ -126,10 +148,11 @@ func NewVMCloneReconciler(
 //+kubebuilder:rbac:groups=infra.virtrigaud.io,resources=vmclones,verbs=get;list;watch;update;patch
 //+kubebuilder:rbac:groups=infra.virtrigaud.io,resources=vmclones/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=infra.virtrigaud.io,resources=vmclones/finalizers,verbs=update
-//+kubebuilder:rbac:groups=infra.virtrigaud.io,resources=virtualmachines,verbs=get;list;watch;create;update;patch
+//+kubebuilder:rbac:groups=infra.virtrigaud.io,resources=virtualmachines,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=infra.virtrigaud.io,resources=virtualmachines/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=infra.virtrigaud.io,resources=vmclasses,verbs=get;list;watch
 //+kubebuilder:rbac:groups=infra.virtrigaud.io,resources=providers,verbs=get;list;watch
+//+kubebuilder:rbac:groups=infra.virtrigaud.io,resources=hosts,verbs=get;list;watch
 //+kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 //+kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
 
@@ -186,10 +209,14 @@ func (r *VMCloneReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	// Terminal states: nothing further to do.
+	// Terminal states: nothing further to do, except that a clustered clone
+	// that failed for good removes the target VirtualMachine it created before
+	// its Clone RPC (vmclone_clustered.go).
 	switch clone.Status.Phase {
-	case infrav1beta1.ClonePhaseReady, infrav1beta1.ClonePhaseFailed:
+	case infrav1beta1.ClonePhaseReady:
 		return ctrl.Result{}, nil
+	case infrav1beta1.ClonePhaseFailed:
+		return r.removeFailedClusteredTarget(ctx, clone), nil
 	}
 
 	clone.Status.ObservedGeneration = clone.Generation
@@ -267,15 +294,6 @@ func (r *VMCloneReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 
 	linked := r.requestedCloneType(clone) == infrav1beta1.CloneTypeLinkedClone
 
-	// Linked-clone capability pre-check (intrinsic correctness, independent of
-	// the #176 enforcement flag). Fails OPEN if the provider is not a
-	// CapabilityReporter or the query errors.
-	if linked {
-		if blocked, res := r.gateLinkedClone(ctx, clone, providerInstance); blocked {
-			return res, nil
-		}
-	}
-
 	// A clone task is still in flight (async clone): wait for it, then bind.
 	// Checked before TargetVMID so async clones don't bind before the provider
 	// has finished cloning.
@@ -295,15 +313,28 @@ func (r *VMCloneReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 
 	// No clone issued yet. Refuse if a VM with the target name already exists
 	// and was NOT produced by this clone (no recorded TargetVMID) — cloning
-	// over a foreign VM would be destructive.
+	// over a foreign VM would be destructive. On a clustered provider the
+	// clone creates its target BEFORE the Clone RPC (vmclone_clustered.go), so
+	// a target carrying this clone's marker and no binding is its own.
 	existing := &infrav1beta1.VirtualMachine{}
 	existingKey := client.ObjectKey{Namespace: targetNamespace, Name: clone.Spec.Target.Name}
 	if err := r.Get(ctx, existingKey, existing); err == nil {
-		return r.markFailed(ctx, clone, infrav1beta1.VMCloneReasonProviderError,
-			fmt.Sprintf("target VM %q already exists and was not created by this clone", existingKey.Name)), nil
+		if !isClusterTopology(provider) || cloneTargetBindable(clone, existing, provider, "") != nil {
+			return r.markFailed(ctx, clone, infrav1beta1.VMCloneReasonProviderError,
+				fmt.Sprintf("target VM %q already exists and was not created by this clone", existingKey.Name)), nil
+		}
 	} else if !errors.IsNotFound(err) {
 		logger.Error(err, "Failed to check for existing target VM", "vm", existingKey.Name)
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	// Linked-clone checks (intrinsic correctness, independent of the #176
+	// enforcement flag), made only before a clone is issued: a clone already
+	// in flight is never re-gated on its task poll or bind.
+	if linked {
+		if blocked, res := r.gateLinkedClone(ctx, clone, provider, providerInstance, targetNamespace); blocked {
+			return res, nil
+		}
 	}
 
 	// Address the source VM (ADR-0007 Addendum A, A1): on a clustered provider
@@ -315,7 +346,11 @@ func (r *VMCloneReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		return r.markPending(ctx, clone, vmRefErrorReason(err), err.Error()), nil
 	}
 
-	// Issue the clone.
+	// Issue the clone. A routed source (clustered provider) clones onto its own
+	// host, after the target VM and its pending host are recorded (slice 3).
+	if sourceRef.Routed() {
+		return r.startClusteredClone(ctx, clone, sourceRef, provider, providerInstance, targetNamespace, sourceVM, linked)
+	}
 	return r.startClone(ctx, clone, sourceRef, provider, providerInstance, targetNamespace, sourceVM, linked)
 }
 
@@ -526,6 +561,15 @@ func (r *VMCloneReconciler) bindTargetVM(
 	// no host. A single-host source has no binding, so nothing is written.
 	landing := clonedPlacement(sourceVM)
 	bound := boundProviderRefFor(provider)
+	// A clustered clone's target is recorded at the size actually cloned —
+	// the admitted size its Clone RPC sent — with its balloon ceiling, in the
+	// same write: it then counts against its host at that size, never at its
+	// VMClass floor or at a hot-add flag its tenant controls (scheduler review
+	// N5).
+	var cloned *clonedSize
+	if landing != nil {
+		cloned = clonedSizeFor(targetVM)
+	}
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		latest := &infrav1beta1.VirtualMachine{}
 		if getErr := r.Get(ctx, vmKey, latest); getErr != nil {
@@ -541,7 +585,8 @@ func (r *VMCloneReconciler) bindTargetVM(
 		latest.Status.ID = targetVMID
 		latest.Status.BoundProvider = bound
 		if landing != nil {
-			latest.Status.Placement = landing.DeepCopy()
+			applyClonedBinding(latest, landing)
+			cloned.recordOn(latest)
 		}
 		return r.Status().Update(ctx, latest)
 	}); err != nil {
@@ -591,6 +636,12 @@ func cloneTargetBindable(clone *infrav1beta1.VMClone, target *infrav1beta1.Virtu
 	if clone.UID == "" || target.Annotations[CloneAnnotationCloneUID] != string(clone.UID) {
 		return conflict("was not created by this VMClone (no %s=%s marker)", CloneAnnotationCloneUID, clone.UID)
 	}
+	if clone.Status.TargetUID != "" && string(target.UID) != clone.Status.TargetUID {
+		// The marker is only an annotation: a VirtualMachine re-created under
+		// the target name can carry a copy of it. The object this clone
+		// created is identified by its uid.
+		return conflict("is not the VirtualMachine this VMClone created (it was deleted and re-created)")
+	}
 	if target.Status.ID != "" && target.Status.ID != targetVMID {
 		return conflict("is already bound to VM %q", target.Status.ID)
 	}
@@ -615,6 +666,30 @@ func clonedPlacement(sourceVM *infrav1beta1.VirtualMachine) *infrav1beta1.Placem
 		LastScheduledTime: &now,
 		Reason:            fmt.Sprintf("cloned from %s on its host", sourceVM.Name),
 	}
+}
+
+// applyClonedBinding writes a clone's landing binding into vm's placement. It
+// sets only the fields the clone owns — host, pool, scheduling time and
+// reason — and never replaces the placement as a whole, so every other field
+// (excludedHosts, and any field added later) is preserved. A pendingHost that
+// names the landing host is the clone's own in-flight record and is promoted:
+// it becomes the binding and is cleared (ADR-0007 Addendum A, A2). A
+// pendingHost on any other host is kept: a create may have left a domain
+// there that only the finalizer's owner-checked cleanup can remove.
+func applyClonedBinding(vm *infrav1beta1.VirtualMachine, landing *infrav1beta1.PlacementStatus) {
+	pl := vm.Status.Placement
+	if pl == nil {
+		pl = &infrav1beta1.PlacementStatus{}
+		vm.Status.Placement = pl
+	}
+	pl.Host = landing.Host
+	pl.Pool = landing.Pool
+	pl.LastScheduledTime = landing.LastScheduledTime.DeepCopy()
+	pl.Reason = landing.Reason
+	if strings.TrimSpace(pl.PendingHost) == landing.Host {
+		pl.PendingHost = ""
+	}
+	setPlacedCondition(vm, metav1.ConditionTrue, conditions.ReasonBound, fmt.Sprintf("VM is bound to host %s", landing.Host))
 }
 
 // buildTargetVM constructs the target VirtualMachine CR for a clone: it carries
@@ -705,29 +780,47 @@ func (r *VMCloneReconciler) finalizeReady(
 	return ctrl.Result{}, nil
 }
 
-// gateLinkedClone refuses a linked-clone request when the resolved provider
-// reports it cannot perform linked clones. It is INTRINSIC clone correctness:
-// it always runs (independent of the #176 enforcement flag) but fails OPEN if
-// the provider does not implement contracts.CapabilityReporter or the
-// capability query errors. Returns blocked=true (with the ctrl.Result the
-// caller should return) only when the provider explicitly reports
-// !SupportsLinkedClones.
+// gateLinkedClone decides whether a linked-clone request may be issued. It is
+// INTRINSIC clone correctness: it always runs before a linked clone is issued
+// (independent of the #176 enforcement flag), and it fails CLOSED — a linked
+// clone depends on its source disk for its whole life, so it is only sent to
+// a provider that says it can make one:
+//
+//   - a libvirt linked clone into ANOTHER namespace is refused: the clone
+//     would keep reading the source VM's disk for as long as it exists, while
+//     a cross-namespace grant (#340) covers a point-in-time copy, not ongoing
+//     access to another namespace's disk. A full clone is the supported way.
+//     vSphere linked clones are not affected.
+//   - a provider that does not report capabilities is refused (Failed);
+//   - a capability query that fails is retried (Pending), never assumed;
+//   - a provider that reports !SupportsLinkedClones is refused (Failed) — a
+//     clustered libvirt provider among them (ADR-0007 Addendum A, slice 3).
+//
+// It returns blocked=true with the ctrl.Result the caller should return.
 func (r *VMCloneReconciler) gateLinkedClone(
 	ctx context.Context,
 	clone *infrav1beta1.VMClone,
+	provider *infrav1beta1.Provider,
 	providerInstance contracts.Provider,
+	targetNamespace string,
 ) (blocked bool, result ctrl.Result) {
-	logger := logging.FromContext(ctx)
+	if provider.Spec.Type == infrav1beta1.ProviderTypeLibvirt && targetNamespace != clone.Namespace {
+		return true, r.markFailed(ctx, clone, cloneReasonLinkedCrossNamespace, fmt.Sprintf(
+			"a libvirt linked clone into another namespace (%s) is not allowed: the clone would keep reading the source VM's disk "+
+				"in namespace %s for its whole life, and a cross-namespace grant covers a copy, not ongoing access; use a full clone",
+			targetNamespace, clone.Namespace))
+	}
 
 	reporter, ok := providerInstance.(contracts.CapabilityReporter)
 	if !ok {
-		logger.V(1).Info("Provider does not report capabilities; allowing linked clone (fail open)")
-		return false, ctrl.Result{}
+		return true, r.markFailed(ctx, clone, cloneReasonLinkedUnsupported,
+			"provider does not report its capabilities, so a linked clone cannot be confirmed as supported (fail closed); use a full clone")
 	}
 	caps, err := reporter.GetCapabilities(ctx)
 	if err != nil {
-		logger.V(1).Info("GetCapabilities failed; allowing linked clone (fail open)", "error", err.Error())
-		return false, ctrl.Result{}
+		logging.FromContext(ctx).Info("GetCapabilities failed; not issuing the linked clone until it answers (fail closed)", "error", err.Error())
+		return true, r.markPending(ctx, clone, cloneReasonLinkedUnsupported,
+			fmt.Sprintf("waiting for the provider's capabilities before a linked clone: %v", err))
 	}
 	if !caps.SupportsLinkedClones {
 		// e.g. libvirt, which disables linked clones until the source disk is
@@ -1116,6 +1209,12 @@ func (r *VMCloneReconciler) clonesForGrantChange(ctx context.Context, indexValue
 // re-drive clones refused with ConsumerNotAllowed.
 func (r *VMCloneReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err := indexConsumerGrants(mgr, &infrav1beta1.VMClone{}, cloneConsumerGrantIndexValues); err != nil {
+		return err
+	}
+	// A clustered clone is admitted against its host's committed capacity,
+	// which is read through the placement-provider index (registered once per
+	// cache, whichever controller comes first).
+	if err := indexPlacementProvider(mgr); err != nil {
 		return err
 	}
 	b := ctrl.NewControllerManagedBy(mgr).

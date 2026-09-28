@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -29,6 +30,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/projectbeskar/virtrigaud/internal/clustered/hostsecret"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt/hostconn"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
@@ -100,8 +102,12 @@ func TestClustered_DeadLeasedHostIsHostUnavailable(t *testing.T) {
 }
 
 // TestClustered_VMOperationFailureCarriesVMOperationFailed: an operation the
-// host ran and rejected keeps the historical code (Unknown) and message, plus
-// the VM_OPERATION_FAILED detail.
+// host ran and rejected keeps the historical code (Unknown), carries the
+// VM_OPERATION_FAILED detail, and — since the slice 3 security review — only
+// the categorized message: the operation and the host id, never the virsh
+// command line or its stderr. A failure the provider described for the
+// requester (#357's honest Reconfigure: its cause kept out of the text) keeps
+// that description after them.
 func TestClustered_VMOperationFailureCarriesVMOperationFailed(t *testing.T) {
 	fx, p := clusteredOpsFixture(t)
 	fx.script("host-b", "fail-start", "")
@@ -117,17 +123,48 @@ func TestClustered_VMOperationFailureCarriesVMOperationFailed(t *testing.T) {
 	_, rerr := s.Reconfigure(ctx, &providerv1.ReconfigureRequest{Id: "web", DesiredJson: string(desired), TargetHostId: "host-b", Owner: owner})
 
 	for name, tc := range map[string]struct {
-		err    error
-		prefix string
+		err  error
+		want string
 	}{
-		"Power":       {perr, "failed to perform power operation: Retryable: failed to perform power operation On"},
-		"Reconfigure": {rerr, "failed to reconfigure VM: Retryable: could not grow the VM's disk to 20 GiB"},
+		"Power":       {perr, `failed to perform power operation on host "host-b"`},
+		"Reconfigure": {rerr, `failed to reconfigure VM on host "host-b": could not grow the VM's disk to 20 GiB`},
 	} {
 		st, ok := status.FromError(tc.err)
 		require.True(t, ok, name)
 		assert.Equal(t, codes.Unknown, st.Code(), name)
 		assert.Equal(t, contracts.VMOperationFailedReason, errorInfoReason(st), name)
-		assert.Contains(t, st.Message(), tc.prefix, "%s keeps its historical message", name)
+		assert.Equal(t, tc.want, st.Message(), "%s sends only the categorized message", name)
+		for _, leak := range []string{"virsh", "stderr", "scripted failure", "/var/lib", "qemu:///"} {
+			assert.NotContains(t, st.Message(), leak, "%s leaks no command, stderr or path", name)
+		}
+	}
+}
+
+// TestRequesterFacingMessage: only a provider error whose text the provider
+// wrote for the requester — no cause, or a cause kept out of the text
+// (providerLogOnly) — is sent after the operation and host; one that carries
+// any other cause (it may quote host output) is not.
+func TestRequesterFacingMessage(t *testing.T) {
+	raw := &VirshError{Command: "virsh -c qemu+ssh://10.0.0.1/system blockresize web vda 20G", ExitCode: 1,
+		Stderr: "error: cannot resize /var/lib/libvirt/images/web-disk.qcow2"}
+	for name, tc := range map[string]struct {
+		err  error
+		want string
+	}{
+		"no cause":          {contracts.NewRetryableError("the VM is paused; nothing was changed", nil), "the VM is paused; nothing was changed"},
+		"log-only cause":    {reconfigureFailed("web", "grow the VM's disk to 20 GiB", raw), "could not grow the VM's disk to 20 GiB"},
+		"wrapped log-only":  {fmt.Errorf("reconfigure: %w", reconfigureFailed("web", "set 4 vCPUs", raw)), "could not set 4 vCPUs"},
+		"raw cause":         {contracts.NewRetryableError("failed to perform power operation On", raw), ""},
+		"no provider error": {raw, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, tc.want, requesterFacingMessage(tc.err))
+			st, ok := status.FromError(hostOpRPCError("reconfigure VM", &hostOpError{host: "host-b", err: tc.err}, tc.err))
+			require.True(t, ok)
+			for _, leak := range []string{"10.0.0.1", "/var/lib", "blockresize", "qemu+ssh"} {
+				assert.NotContains(t, st.Message(), leak)
+			}
+		})
 	}
 }
 
@@ -146,17 +183,41 @@ func TestClustered_CreateFailureOnHostIsClassified(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, codes.Unknown, st.Code())
 	assert.Equal(t, contracts.VMOperationFailedReason, errorInfoReason(st))
-	assert.Contains(t, st.Message(), "failed to create VM: Retryable: failed to create VM")
+	assert.Equal(t, `failed to create VM on host "host-b"`, st.Message())
+	assert.NotContains(t, st.Message(), "bad xml", "no stderr crosses the wire")
 
 	p.createOnHostFn = func(context.Context, hostconn.Conn, contracts.CreateRequest) (contracts.CreateResponse, error) {
 		return contracts.CreateResponse{}, contracts.NewRetryableError("failed to list existing domains",
-			&VirshError{Command: "virsh list --all", ExitCode: -1, Cause: errors.New("ssh: handshake failed: EOF")})
+			&VirshError{Command: "virsh list --all", ExitCode: -1, Cause: errors.New("ssh: handshake failed: dial ssh host 10.0.0.5:22: EOF")})
 	}
 	_, err = s.Create(context.Background(), &providerv1.CreateRequest{Name: "web", TargetHostId: "host-b"})
 	st, ok = status.FromError(err)
 	require.True(t, ok)
 	assert.Equal(t, codes.Unavailable, st.Code())
 	assert.True(t, hasHostUnavailableInfo(st))
+	assert.Equal(t, `create VM: host "host-b" is unreachable`, st.Message())
+	assert.NotContains(t, st.Message(), "10.0.0.5", "the host's SSH address is never on the wire")
+}
+
+// TestClustered_HostUnavailableSendsNoDialAddress: a host that cannot be
+// leased (its dial fails) is reported by id only; the dial error — which
+// names the SSH address — stays in the provider's log.
+func TestClustered_HostUnavailableSendsNoDialAddress(t *testing.T) {
+	inv := hostsecret.Inventory{SchemaVersion: hostsecret.SchemaVersion, Hosts: []hostsecret.Host{
+		{ID: "host-a", Endpoint: "qemu+ssh://virt@10.0.0.5/system"},
+	}}
+	dial := func(context.Context, hostsecret.Host) (hostconn.Conn, error) {
+		return nil, errors.New("dial ssh host 10.0.0.5:22: connection refused")
+	}
+	p, _ := newClusteredProviderForTest(t, inv, dial)
+	p.virshProvider = newUnroutableVirshProvider()
+	_, err := NewServer(p).Describe(context.Background(), &providerv1.DescribeRequest{Id: "web", TargetHostId: "host-a",
+		Owner: ownerFromIdentity(ownerTeamA)})
+	st, ok := status.FromError(err)
+	require.True(t, ok)
+	assert.Equal(t, codes.Unavailable, st.Code())
+	assert.True(t, hasHostUnavailableInfo(st))
+	assert.Equal(t, `connect to host "host-a"`, st.Message())
 }
 
 func TestRoutedRPCError_Classification(t *testing.T) {

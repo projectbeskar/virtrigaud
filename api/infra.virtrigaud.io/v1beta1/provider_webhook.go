@@ -84,9 +84,9 @@ func (v *ProviderCustomValidator) ValidateCreate(_ context.Context, obj runtime.
 }
 
 // ValidateUpdate validates a Provider on update. It rejects any change of
-// spec.topology (it is immutable, ADR-0007 Addendum A — the CRD enforces the
-// same rule with a CEL transition rule), and re-checks the D2 topology×type
-// rule against the new object. It returns no admission warnings.
+// spec.type or spec.topology (both immutable; the CRD enforces the same rules
+// with CEL transition rules), and re-checks the D2 topology×type rule against
+// the new object. It returns no admission warnings.
 func (v *ProviderCustomValidator) ValidateUpdate(_ context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
 	provider, ok := newObj.(*Provider)
 	if !ok {
@@ -96,10 +96,34 @@ func (v *ProviderCustomValidator) ValidateUpdate(_ context.Context, oldObj, newO
 	if !ok {
 		return nil, fmt.Errorf("expected a Provider object but got %T", oldObj)
 	}
+	if err := validateTypeUnchanged(old, provider); err != nil {
+		return nil, err
+	}
 	if err := validateTopologyUnchanged(old, provider); err != nil {
 		return nil, err
 	}
 	return nil, validateProviderTopology(provider)
+}
+
+// validateTypeUnchanged rejects an update that changes spec.type (the CRD
+// enforces the same rule with a CEL transition rule). The controllers decide
+// type-specific safety rules from the type — a libvirt linked clone into
+// another namespace is refused — and a Provider's VMs were created by the
+// provider implementation of its type, so a Provider can never be re-typed.
+func validateTypeUnchanged(old, updated *Provider) error {
+	if old.Spec.Type == updated.Spec.Type {
+		return nil
+	}
+	fieldErr := field.Invalid(
+		field.NewPath("spec").Child("type"),
+		updated.Spec.Type,
+		fmt.Sprintf("spec.type is immutable (was %q); create a new Provider to change it", old.Spec.Type),
+	)
+	return apierrors.NewInvalid(
+		GroupVersion.WithKind("Provider").GroupKind(),
+		updated.Name,
+		field.ErrorList{fieldErr},
+	)
 }
 
 // effectiveTopology is the topology a Provider actually has: the empty string

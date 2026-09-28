@@ -18,6 +18,7 @@ package v1beta1
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -155,10 +156,8 @@ func TestProviderCustomValidator_ValidateUpdate(t *testing.T) {
 		{"unset -> unset is allowed", ProviderTypeVSphere, ProviderTypeVSphere, "", "", false},
 		{"unset -> cluster is rejected (immutable)", ProviderTypeLibvirt, ProviderTypeLibvirt, "", ProviderTopologyCluster, true},
 		{"cluster -> unset is rejected (immutable)", ProviderTypeLibvirt, ProviderTypeLibvirt, ProviderTopologyCluster, "", true},
-
-		// Flipping the type out of libvirt while remaining cluster is rejected
-		// (the D2 rule is evaluated on the new object's type+topology).
-		{"type libvirt -> vsphere while cluster is rejected", ProviderTypeLibvirt, ProviderTypeVSphere, ProviderTopologyCluster, ProviderTopologyCluster, true},
+		// (A type change is rejected before the topology rules: see
+		// TestProviderCustomValidator_TypeImmutable.)
 	}
 
 	for _, tc := range tests {
@@ -171,6 +170,55 @@ func TestProviderCustomValidator_ValidateUpdate(t *testing.T) {
 			}
 			assertTopologyResult(t, err, tc.wantErr)
 		})
+	}
+}
+
+// TestProviderCustomValidator_TypeImmutable pins that spec.type can never
+// change on update (the controllers decide type-specific safety rules from it,
+// e.g. refusing a libvirt linked clone into another namespace): every change is
+// rejected with a FieldValueInvalid cause on spec.type — including one that
+// would also break the D2 topology×type rule — and an unchanged type is not.
+func TestProviderCustomValidator_TypeImmutable(t *testing.T) {
+	v := &ProviderCustomValidator{}
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name             string
+		oldType, newType ProviderType
+		topology         string
+	}{
+		{"libvirt -> vsphere", ProviderTypeLibvirt, ProviderTypeVSphere, ProviderTopologySingle},
+		{"vsphere -> libvirt", ProviderTypeVSphere, ProviderTypeLibvirt, ProviderTopologySingle},
+		{"proxmox -> libvirt", ProviderTypeProxmox, ProviderTypeLibvirt, ""},
+		{"libvirt -> vsphere while cluster", ProviderTypeLibvirt, ProviderTypeVSphere, ProviderTopologyCluster},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := v.ValidateUpdate(ctx, newProviderForTopology("p", tc.oldType, tc.topology), newProviderForTopology("p", tc.newType, tc.topology))
+			if err == nil {
+				t.Fatal("expected a type change to be rejected")
+			}
+			if !apierrors.IsInvalid(err) {
+				t.Fatalf("expected an Invalid API error, got %v", err)
+			}
+			var status apierrors.APIStatus
+			if !errors.As(err, &status) || status.Status().Details == nil {
+				t.Fatalf("expected status details, got %v", err)
+			}
+			found := false
+			for _, cause := range status.Status().Details.Causes {
+				if cause.Field == "spec.type" && cause.Type == metav1.CauseTypeFieldValueInvalid {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("expected a FieldValueInvalid cause on spec.type, got %+v", status.Status().Details.Causes)
+			}
+			if !strings.Contains(err.Error(), "spec.type is immutable") {
+				t.Errorf("expected an actionable message, got %v", err)
+			}
+		})
+	}
+	if _, err := v.ValidateUpdate(ctx, newProviderForTopology("p", ProviderTypeLibvirt, ""), newProviderForTopology("p", ProviderTypeLibvirt, "")); err != nil {
+		t.Fatalf("an update that keeps the type must be allowed, got %v", err)
 	}
 }
 

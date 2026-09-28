@@ -33,6 +33,7 @@ import (
 
 	"github.com/projectbeskar/virtrigaud/internal/imageartifact"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
+	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt/hostconn"
 	"github.com/projectbeskar/virtrigaud/internal/storage/migration"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
@@ -61,8 +62,9 @@ func NewServer(provider providerBackend) *Server {
 
 // clusteredProvider reports whether the backend runs in CLUSTERED topology
 // (ADR-0007 D3). Per-VM RPCs then need a routed host (ADR-0007 Addendum A):
-// Describe, Delete, Power and Reconfigure are routed; the rest are refused
-// until their slice lands.
+// Describe, Delete, Power, Reconfigure, the snapshot family, Clone,
+// GetDiskInfo, ExportDisk and TaskStatus are routed; ImportDisk and ListVMs are
+// refused until their slice lands.
 func (s *Server) clusteredProvider() bool {
 	return s.provider != nil && s.provider.clustered()
 }
@@ -114,7 +116,7 @@ func (s *Server) Create(ctx context.Context, req *providerv1.CreateRequest) (*pr
 	}
 
 	if resp.TaskRef != "" {
-		result.Task = &providerv1.TaskRef{Id: resp.TaskRef}
+		result.Task = &providerv1.TaskRef{Id: s.routedTaskRef(req.TargetHostId, resp.TaskRef)}
 	}
 
 	return result, nil
@@ -178,7 +180,7 @@ func (s *Server) Delete(ctx context.Context, req *providerv1.DeleteRequest) (*pr
 
 	result := &providerv1.TaskResponse{}
 	if taskRef != "" {
-		result.Task = &providerv1.TaskRef{Id: taskRef}
+		result.Task = &providerv1.TaskRef{Id: s.routedTaskRef(req.TargetHostId, taskRef)}
 	}
 
 	return result, nil
@@ -216,7 +218,7 @@ func (s *Server) Power(ctx context.Context, req *providerv1.PowerRequest) (*prov
 
 	result := &providerv1.TaskResponse{}
 	if taskRef != "" {
-		result.Task = &providerv1.TaskRef{Id: taskRef}
+		result.Task = &providerv1.TaskRef{Id: s.routedTaskRef(req.TargetHostId, taskRef)}
 	}
 
 	return result, nil
@@ -234,7 +236,7 @@ func (s *Server) Power(ctx context.Context, req *providerv1.PowerRequest) (*prov
 func singleHostReconfigureRPCError(err error) error {
 	var ho *hostOpError
 	if stderrors.As(err, &ho) && !isHostTransportFailure(err) {
-		return vmOperationFailedStatus(fmt.Sprintf("failed to reconfigure VM: %v", err))
+		return vmOperationStatus(codes.Unknown, fmt.Sprintf("failed to reconfigure VM: %v", err))
 	}
 	return fmt.Errorf("failed to reconfigure VM: %w", err)
 }
@@ -263,7 +265,7 @@ func (s *Server) Reconfigure(ctx context.Context, req *providerv1.ReconfigureReq
 
 	result := &providerv1.TaskResponse{RestartRequired: res.RestartRequired, HonestResult: res.Honest}
 	if res.TaskRef != "" {
-		result.Task = &providerv1.TaskRef{Id: res.TaskRef}
+		result.Task = &providerv1.TaskRef{Id: s.routedTaskRef(req.TargetHostId, res.TaskRef)}
 	}
 
 	return result, nil
@@ -303,8 +305,34 @@ func (s *Server) Describe(ctx context.Context, req *providerv1.DescribeRequest) 
 	}, nil
 }
 
-// TaskStatus checks the status of an async task
+// routedTaskRef is the wire form of a task reference a per-VM call returned:
+// on a clustered provider it is host-encoded with the host the call was routed
+// to (hostID, the request's target_host_id), so TaskStatus can be routed back
+// there (ADR-0007 Addendum A, slice 3); on a single-host provider it is
+// returned unchanged.
+func (s *Server) routedTaskRef(hostID, taskRef string) string {
+	if !s.clusteredProvider() {
+		return taskRef
+	}
+	return encodeHostTaskRef(hostconn.HostID(strings.TrimSpace(hostID)), taskRef)
+}
+
+// TaskStatus checks the status of an async task.
+//
+// On a clustered provider the task reference must be one this provider issued
+// — host-encoded, naming a host of its own registry — and the check is routed
+// to that host (ADR-0007 Addendum A, slice 3). A refusal or an unreachable host
+// is a gRPC error (routedRPCError), never a task failure: a forged or foreign
+// reference must not be reported as a failed task, and a host-scoped
+// unavailability stays out of the manager's circuit breaker.
 func (s *Server) TaskStatus(ctx context.Context, req *providerv1.TaskStatusRequest) (*providerv1.TaskStatusResponse, error) {
+	if s.clusteredProvider() {
+		done, err := s.provider.IsTaskComplete(ctx, req.GetTask().GetId())
+		if err != nil {
+			return nil, routedRPCError("check task status", err)
+		}
+		return &providerv1.TaskStatusResponse{Done: done}, nil
+	}
 	done, err := s.provider.IsTaskComplete(ctx, req.Task.Id)
 	if err != nil {
 		return &providerv1.TaskStatusResponse{
@@ -413,10 +441,46 @@ func importVolumeName(req *providerv1.ImportDiskRequest) (string, error) {
 	return name, nil
 }
 
-// SnapshotCreate creates a VM snapshot
+// SnapshotCreate creates a VM snapshot. On a clustered provider it is routed to
+// target_host_id and owner-checked (ADR-0007 Addendum A, slice 3): the snapshot
+// is taken only of a domain this VM owns, addressed by its UUID; any other
+// domain is answered NotFound and is never snapshotted.
 func (s *Server) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotCreateRequest) (*providerv1.SnapshotCreateResponse, error) {
 	if s.clusteredProvider() {
-		return nil, notRoutedYet("SnapshotCreate", sliceRoutedSnapshotCloneDisk)
+		if err := checkSnapshotRequestToken(req.GetRequestToken()); err != nil {
+			return nil, routedRPCError("create snapshot", err)
+		}
+		// A snapshot (with memory, of a large VM) can be long: it runs under
+		// the routed budget, so an overrun is answered before the manager's
+		// deadline (routed_budget.go).
+		bctx, cancel := withRoutedBudget(ctx)
+		defer cancel()
+		var resp *providerv1.SnapshotCreateResponse
+		err := s.provider.withOwnedDomain(bctx, snapshotVMRef(req.GetVmId(), req.GetTargetHostId(), req.GetOwner()), "snapshot create",
+			func(c libvirtConn, d domainTarget) error {
+				// Idempotent per request: a snapshot of this name already on
+				// the owner-checked domain is this request's earlier attempt's
+				// only when it records this request's token
+				// (routed_snapshot_token.go); any other is refused.
+				if existing, err := existingRoutedSnapshot(bctx, c, d.handle, req); err != nil || existing != nil {
+					resp = existing
+					return err
+				}
+				r, err := snapshotCreateOn(bctx, c, d.handle, withSnapshotRequestToken(req))
+				if err != nil {
+					return err
+				}
+				if r.Task != nil {
+					r.Task.Id = encodeHostTaskRef(c.HostID(), r.Task.Id)
+				}
+				resp = r
+				return nil
+			})
+		if err != nil {
+			return nil, routedRPCError("create snapshot",
+				classifySnapshotCreateFailure(strings.TrimSpace(req.GetTargetHostId()), ctx, bctx, err))
+		}
+		return resp, nil
 	}
 	log.Printf("INFO Creating snapshot for VM: %s", req.VmId)
 
@@ -429,7 +493,51 @@ func (s *Server) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotCre
 	if err != nil {
 		return nil, err
 	}
+	return snapshotCreateOn(ctx, conn, req.VmId, req)
+}
 
+// libvirtJobBusyMarker is libvirt's error text for a domain job that could not
+// start because another job on the domain (e.g. an earlier snapshot still
+// being written) holds its job lock.
+const libvirtJobBusyMarker = "cannot acquire state change lock"
+
+// classifySnapshotCreateFailure is classifyRoutedFailure for SnapshotCreate on
+// host. Its budget running out does NOT stop the snapshot: closing the virsh
+// client's session leaves libvirtd's snapshot job running, so the snapshot
+// may still complete on the host (a memory snapshot writing the guest's RAM).
+// The outcome is unknown, and the answer says so: retryable
+// (codes.Unavailable, VM_OPERATION_FAILED, out of the breaker). A retry while
+// that job still runs is refused by libvirt's job lock and is answered
+// retryable too; once the job is done the retry finds the snapshot by name
+// (existingRoutedSnapshot) rather than making a second one. Any other failure
+// is returned unchanged.
+func classifySnapshotCreateFailure(host string, parent, budget context.Context, err error) error {
+	if err == nil {
+		return nil
+	}
+	if budgetRanOut(parent, budget) {
+		return &routedOpError{code: codes.Unavailable, cause: err, wire: fmt.Sprintf(
+			"create snapshot on host %q did not answer within its time budget; its outcome is unknown "+
+				"and it may still complete on the host: retry", host)}
+	}
+	var ve *VirshError
+	if stderrors.As(err, &ve) && strings.Contains(ve.Stderr, libvirtJobBusyMarker) {
+		return &routedOpError{code: codes.Unavailable, cause: err, wire: fmt.Sprintf(
+			"create snapshot on host %q: another operation on this VM is still running on the host; retry", host)}
+	}
+	return err
+}
+
+// snapshotVMRef is the routed reference of a snapshot request's VM.
+func snapshotVMRef(vmID, hostID string, owner *providerv1.ObjectIdentity) contracts.VMRef {
+	return contracts.VMRef{ID: vmID, HostID: hostID, Owner: ownerFromProto(owner)}
+}
+
+// snapshotCreateOn is the SnapshotCreate core, run on connection conn against
+// domain — the single host's connection and the requested name, or a clustered
+// host's leased connection and the owner-checked domain's UUID. The virsh
+// command sequence is the historical one, unchanged.
+func snapshotCreateOn(ctx context.Context, conn libvirtConn, domain string, req *providerv1.SnapshotCreateRequest) (*providerv1.SnapshotCreateResponse, error) {
 	// Generate snapshot name if not provided
 	snapshotName := req.NameHint
 	if snapshotName == "" {
@@ -442,20 +550,20 @@ func (s *Server) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotCre
 	// Prepare snapshot description
 	description := req.Description
 	if description == "" {
-		description = fmt.Sprintf("Snapshot created by VirtRigaud at %s", time.Now().Format(time.RFC3339))
+		description = defaultSnapshotDescription()
 	}
 
 	// Check if domain exists and get its state
-	domainState, err := conn.getDomainState(ctx, req.VmId)
+	domainState, err := conn.getDomainState(ctx, domain)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get domain state: %w", err)
 	}
 
-	log.Printf("INFO Domain %s is in state: %s", req.VmId, domainState)
+	log.Printf("INFO Domain %s is in state: %s", domain, domainState)
 
 	// No snapshot of a VM whose disk another domain depends on (a linked
 	// clone): see the disk dependency guard (disk_dependents.go).
-	if err := refuseIfDiskHasDependents(ctx, hostConnRunner{conn: conn}, req.VmId, guardOpSnapshotCreate); err != nil {
+	if err := refuseIfDiskHasDependents(ctx, hostConnRunner{conn: conn}, domain, guardOpSnapshotCreate); err != nil {
 		return nil, fmt.Errorf("failed to create snapshot: %w", err)
 	}
 
@@ -463,18 +571,18 @@ func (s *Server) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotCre
 	// system) snapshot omits --disk-only and is only possible for a RUNNING
 	// domain (there is no RAM state to capture otherwise); any other case is a
 	// disk-only snapshot.
-	args, memorySnapshot := buildSnapshotCreateArgs(req.VmId, snapshotName, description, req.IncludeMemory, domainState == "running")
+	args, memorySnapshot := buildSnapshotCreateArgs(domain, snapshotName, description, req.IncludeMemory, domainState == "running")
 	switch {
 	case memorySnapshot:
-		log.Printf("INFO Creating memory snapshot (full system checkpoint including RAM) for domain %s", req.VmId)
+		log.Printf("INFO Creating memory snapshot (full system checkpoint including RAM) for domain %s", domain)
 	case req.IncludeMemory:
 		// Honest downgrade: a stopped VM has no RAM state to capture. The
 		// snapshot still succeeds as disk-only; the caller is told why rather
 		// than silently advertising a memory snapshot that did not happen.
 		log.Printf("WARN Memory snapshot requested for domain %s but it is not running (state=%s); "+
-			"creating a disk-only snapshot — memory state cannot be captured for a stopped VM", req.VmId, domainState)
+			"creating a disk-only snapshot — memory state cannot be captured for a stopped VM", domain, domainState)
 	default:
-		log.Printf("INFO Creating disk-only snapshot for domain %s", req.VmId)
+		log.Printf("INFO Creating disk-only snapshot for domain %s", domain)
 	}
 
 	// Execute snapshot creation (control-plane exec through the seam)
@@ -515,10 +623,42 @@ func buildSnapshotCreateArgs(vmID, name, description string, includeMemory, runn
 	return append(args, "--disk-only"), false
 }
 
-// SnapshotDelete deletes a VM snapshot
+// routedSnapshotIDRE is the shape of every snapshot name this provider creates
+// (sanitizeSnapshotName): it starts with a letter or digit, so it can never be
+// read by virsh as an option.
+var routedSnapshotIDRE = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$`)
+
+// checkRoutedSnapshotID refuses, on a clustered provider, a snapshot id this
+// provider could not have created (InvalidSpec). It is defense in depth: the id
+// is passed to virsh as an argument, and one starting with '-' would be read as
+// an option.
+func checkRoutedSnapshotID(id string) error {
+	if !routedSnapshotIDRE.MatchString(id) {
+		return contracts.NewInvalidSpecError(fmt.Sprintf(
+			"snapshot id %q is not a snapshot name this provider creates (a letter or digit, then letters, digits, '_', '.' or '-'; at most 64)", id), nil)
+	}
+	return nil
+}
+
+// SnapshotDelete deletes a VM snapshot. On a clustered provider it is routed
+// and owner-checked like SnapshotCreate: a snapshot of a domain this VM does not
+// own is never deleted (NotFound).
 func (s *Server) SnapshotDelete(ctx context.Context, req *providerv1.SnapshotDeleteRequest) (*providerv1.TaskResponse, error) {
 	if s.clusteredProvider() {
-		return nil, notRoutedYet("SnapshotDelete", sliceRoutedSnapshotCloneDisk)
+		if err := checkRoutedSnapshotID(req.GetSnapshotId()); err != nil {
+			return nil, routedRPCError("delete snapshot", err)
+		}
+		var resp *providerv1.TaskResponse
+		err := s.provider.withOwnedDomain(ctx, snapshotVMRef(req.GetVmId(), req.GetTargetHostId(), req.GetOwner()), "snapshot delete",
+			func(c libvirtConn, d domainTarget) error {
+				r, err := snapshotDeleteOn(ctx, c, d.handle, req.SnapshotId)
+				resp = routedTaskResponse(c.HostID(), r)
+				return err
+			})
+		if err != nil {
+			return nil, routedRPCError("delete snapshot", err)
+		}
+		return resp, nil
 	}
 	log.Printf("INFO Deleting snapshot %s from VM: %s", req.SnapshotId, req.VmId)
 
@@ -530,21 +670,37 @@ func (s *Server) SnapshotDelete(ctx context.Context, req *providerv1.SnapshotDel
 	if err != nil {
 		return nil, err
 	}
+	return snapshotDeleteOn(ctx, conn, req.VmId, req.SnapshotId)
+}
 
+// routedTaskResponse host-encodes the task reference of a routed call's
+// TaskResponse (ADR-0007 Addendum A, slice 3). A nil response stays nil, and a
+// response without a task is returned as is.
+func routedTaskResponse(host hostconn.HostID, r *providerv1.TaskResponse) *providerv1.TaskResponse {
+	if r != nil && r.Task != nil {
+		r.Task.Id = encodeHostTaskRef(host, r.Task.Id)
+	}
+	return r
+}
+
+// snapshotDeleteOn is the SnapshotDelete core, run on connection conn against
+// domain (see snapshotCreateOn). The virsh command sequence is the historical
+// one, unchanged.
+func snapshotDeleteOn(ctx context.Context, conn libvirtConn, domain, snapshotID string) (*providerv1.TaskResponse, error) {
 	// Check if snapshot exists
-	exists, err := conn.snapshotExists(ctx, req.VmId, req.SnapshotId)
+	exists, err := conn.snapshotExists(ctx, domain, snapshotID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check snapshot existence: %w", err)
 	}
 
 	if !exists {
-		log.Printf("WARN Snapshot %s does not exist, considering deletion successful", req.SnapshotId)
+		log.Printf("WARN Snapshot %s does not exist, considering deletion successful", snapshotID)
 		return &providerv1.TaskResponse{}, nil
 	}
 
 	// Deleting an external snapshot commits it into the disk another domain
 	// may use as its backing file (disk_dependents.go).
-	if err := refuseIfDiskHasDependents(ctx, hostConnRunner{conn: conn}, req.VmId, guardOpSnapshotDelete); err != nil {
+	if err := refuseIfDiskHasDependents(ctx, hostConnRunner{conn: conn}, domain, guardOpSnapshotDelete); err != nil {
 		return nil, fmt.Errorf("failed to delete snapshot: %w", err)
 	}
 
@@ -554,8 +710,8 @@ func (s *Server) SnapshotDelete(ctx context.Context, req *providerv1.SnapshotDel
 	// For internal snapshots, this will delete both metadata and disk changes
 	args := []string{
 		"snapshot-delete",
-		req.VmId,
-		req.SnapshotId,
+		domain,
+		snapshotID,
 	}
 
 	result, err := conn.Virsh(ctx, args...)
@@ -563,16 +719,31 @@ func (s *Server) SnapshotDelete(ctx context.Context, req *providerv1.SnapshotDel
 		return nil, fmt.Errorf("failed to delete snapshot: %w", err)
 	}
 
-	log.Printf("INFO Snapshot deleted successfully: %s\nOutput: %s", req.SnapshotId, result.Stdout)
+	log.Printf("INFO Snapshot deleted successfully: %s\nOutput: %s", snapshotID, result.Stdout)
 
 	// Return empty response (synchronous operation)
 	return &providerv1.TaskResponse{}, nil
 }
 
-// SnapshotRevert reverts a VM to a snapshot
+// SnapshotRevert reverts a VM to a snapshot. On a clustered provider it is
+// routed and owner-checked like SnapshotCreate: a domain this VM does not own is
+// never reverted (NotFound).
 func (s *Server) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotRevertRequest) (*providerv1.TaskResponse, error) {
 	if s.clusteredProvider() {
-		return nil, notRoutedYet("SnapshotRevert", sliceRoutedSnapshotCloneDisk)
+		if err := checkRoutedSnapshotID(req.GetSnapshotId()); err != nil {
+			return nil, routedRPCError("revert to snapshot", err)
+		}
+		var resp *providerv1.TaskResponse
+		err := s.provider.withOwnedDomain(ctx, snapshotVMRef(req.GetVmId(), req.GetTargetHostId(), req.GetOwner()), "snapshot revert",
+			func(c libvirtConn, d domainTarget) error {
+				r, err := snapshotRevertOn(ctx, c, d.handle, req.SnapshotId)
+				resp = routedTaskResponse(c.HostID(), r)
+				return err
+			})
+		if err != nil {
+			return nil, routedRPCError("revert to snapshot", err)
+		}
+		return resp, nil
 	}
 	log.Printf("INFO Reverting VM %s to snapshot: %s", req.VmId, req.SnapshotId)
 
@@ -584,28 +755,34 @@ func (s *Server) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotRev
 	if err != nil {
 		return nil, err
 	}
+	return snapshotRevertOn(ctx, conn, req.VmId, req.SnapshotId)
+}
 
+// snapshotRevertOn is the SnapshotRevert core, run on connection conn against
+// domain (see snapshotCreateOn). The virsh command sequence is the historical
+// one, unchanged.
+func snapshotRevertOn(ctx context.Context, conn libvirtConn, domain, snapshotID string) (*providerv1.TaskResponse, error) {
 	// Check if snapshot exists
-	exists, err := conn.snapshotExists(ctx, req.VmId, req.SnapshotId)
+	exists, err := conn.snapshotExists(ctx, domain, snapshotID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check snapshot existence: %w", err)
 	}
 
 	if !exists {
-		return nil, fmt.Errorf("snapshot %s does not exist", req.SnapshotId)
+		return nil, fmt.Errorf("snapshot %s does not exist", snapshotID)
 	}
 
 	// Get current domain state
-	domainState, err := conn.getDomainState(ctx, req.VmId)
+	domainState, err := conn.getDomainState(ctx, domain)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get domain state: %w", err)
 	}
 
-	log.Printf("INFO Domain %s current state: %s", req.VmId, domainState)
+	log.Printf("INFO Domain %s current state: %s", domain, domainState)
 
 	// A revert rewrites the disk another domain may use as its backing file
 	// (disk_dependents.go).
-	if err := refuseIfDiskHasDependents(ctx, hostConnRunner{conn: conn}, req.VmId, guardOpSnapshotRevert); err != nil {
+	if err := refuseIfDiskHasDependents(ctx, hostConnRunner{conn: conn}, domain, guardOpSnapshotRevert); err != nil {
 		return nil, fmt.Errorf("failed to revert to snapshot: %w", err)
 	}
 
@@ -613,8 +790,8 @@ func (s *Server) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotRev
 	// Format: virsh snapshot-revert DOMAIN SNAPSHOT --running|--paused
 	args := []string{
 		"snapshot-revert",
-		req.VmId,
-		req.SnapshotId,
+		domain,
+		snapshotID,
 		"--force", // Force revert even if domain is running
 	}
 
@@ -628,7 +805,7 @@ func (s *Server) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotRev
 		return nil, fmt.Errorf("failed to revert to snapshot: %w", err)
 	}
 
-	log.Printf("INFO Successfully reverted to snapshot: %s\nOutput: %s", req.SnapshotId, result.Stdout)
+	log.Printf("INFO Successfully reverted to snapshot: %s\nOutput: %s", snapshotID, result.Stdout)
 
 	// Return empty response (synchronous operation)
 	return &providerv1.TaskResponse{}, nil
@@ -643,11 +820,8 @@ func (s *Server) Clone(ctx context.Context, req *providerv1.CloneRequest) (*prov
 	if s.provider == nil {
 		return nil, fmt.Errorf("libvirt provider not initialized")
 	}
-	if s.clusteredProvider() {
-		return nil, notRoutedYet("Clone", sliceRoutedSnapshotCloneDisk)
-	}
 
-	resp, err := s.provider.Clone(ctx, contracts.CloneRequest{
+	cloneReq := contracts.CloneRequest{
 		Source:        contracts.VMRef{ID: req.SourceVmId, HostID: req.SourceHostId},
 		TargetName:    req.TargetName,
 		TargetVM:      ownerFromProto(req.GetTargetVm()),
@@ -655,8 +829,19 @@ func (s *Server) Clone(ctx context.Context, req *providerv1.CloneRequest) (*prov
 		ClassJSON:     req.ClassJson,
 		PlacementJSON: req.PlacementJson,
 		CustomizeJSON: req.CustomizeJson,
-	})
+	}
+	if s.clusteredProvider() {
+		// Routed and owner-checked (ADR-0007 Addendum A, slice 3): the clone
+		// lands on the source's host, which target_host_id must name, and is
+		// stamped with its target VirtualMachine (cloneClustered).
+		cloneReq.Source.Owner = ownerFromProto(req.GetSourceOwner())
+		cloneReq.TargetHostID = req.GetTargetHostId()
+	}
+	resp, err := s.provider.Clone(ctx, cloneReq)
 	if err != nil {
+		if s.clusteredProvider() {
+			return nil, routedRPCError("clone VM", err)
+		}
 		return nil, fmt.Errorf("failed to clone VM: %w", err)
 	}
 
@@ -824,18 +1009,34 @@ func (s *Server) GetCapabilities(ctx context.Context, req *providerv1.GetCapabil
 // Create (target_host_id) and the routed Describe/Delete/Power need no flag;
 // the routed Reconfigure (slice 2) runs the same core as single-host, so its
 // online CPU/memory reconfigure and online disk expansion are advertised as on
-// a single-host provider; supports_clustering is true. Every per-VM capability
-// whose RPC is still refused until its slice lands — snapshots, linked clones,
-// disk export (slice 3) — is hidden, as are disk import (no target host until
-// P3) and image import (host-scoped, no target_host_id yet). The format /
-// backend / transfer lists are left empty with their capability off.
+// a single-host provider; supports_clustering is true.
+//
+// Slice 3 routes the snapshot family (same core as single-host, so memory
+// snapshots too), Clone (full clones only, on the source's host) and the
+// host-side disk export. The export is advertised as it is actually served:
+// the s3 and nfs backends only (the pvc export reads the disk from the pod and
+// is refused), relay mode only, qcow2 only (both transports flatten to a
+// standalone qcow2), and no compression (neither transport compresses).
+//
+// Still hidden: linked clones (refused on a clustered provider for v0.4.0),
+// disk import (no target host until P3) and image import (host-scoped, no
+// target_host_id yet), with their format and backend lists empty.
 func clusteredCapabilities() *providerv1.GetCapabilitiesResponse {
 	return &providerv1.GetCapabilitiesResponse{
 		SupportsReconfigureOnline:   true, // routed + owner-checked since Addendum A slice 2; same setvcpus/setmem --live core as single-host (#203)
 		SupportsDiskExpansionOnline: true, // routed + owner-checked since Addendum A slice 2; blockresize + guest-agent FS grow on the bound host (#201)
-		SupportedDiskTypes:          []string{"qcow2", "raw", "vmdk"},
-		SupportedNetworkTypes:       []string{"virtio", "e1000", "rtl8139"},
-		SupportsClustering:          true,
+		SupportsSnapshots:           true, // routed + owner-checked since Addendum A slice 3
+		SupportsMemorySnapshots:     true, // same snapshot-create-as core as single-host; requires the VM running (#202)
+		// SupportsLinkedClones stays false: a clustered Clone serves full clones
+		// only (linkedCloneClusteredRefusal).
+		SupportedDiskTypes:      []string{"qcow2", "raw", "vmdk"},
+		SupportedNetworkTypes:   []string{"virtio", "e1000", "rtl8139"},
+		SupportsDiskExport:      true, // routed + owner-checked since Addendum A slice 3 (host-side s3 / nfs)
+		SupportedExportFormats:  []string{"qcow2"},
+		SupportedExportBackends: migration.S3AndNFSExportBackends(),
+		SupportedTransferModes:  migration.RelayOnlyTransferModes(),
+		SupportsClustering:      true,
+		SupportsRoutedClone:     true, // Clone routed to the source's host since Addendum A slice 3
 		// The routed Reconfigure runs the same honest core (reconfigure.go).
 		SupportsHonestReconfigure: true,
 	}
@@ -845,9 +1046,13 @@ func clusteredCapabilities() *providerv1.GetCapabilitiesResponse {
 // Provider implementation (provider_virsh.go), translating between the gRPC and
 // provider-contract types. Previously this RPC was unreachable over gRPC and
 // returned Unimplemented despite a working implementation (issue #177).
+//
+// On a clustered provider the s3 / nfs export is routed to target_host_id and
+// owner-checked (exportDiskRouted, ADR-0007 Addendum A, slice 3); the pvc
+// backend, which reads the disk from the pod, is refused.
 func (s *Server) ExportDisk(ctx context.Context, req *providerv1.ExportDiskRequest) (*providerv1.ExportDiskResponse, error) {
 	if s.clusteredProvider() {
-		return nil, notRoutedYet("ExportDisk", sliceRoutedSnapshotCloneDisk)
+		return s.provider.exportDiskRouted(ctx, req)
 	}
 	// ADR-0006: libvirt is a SOURCE for the S3 relay export (Slice 2, the reverse
 	// of Slice 1's vSphere→S3→libvirt). Accept pvc and s3; reject nfs/unknown
@@ -910,20 +1115,28 @@ func (s *Server) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReque
 // delegates to the libvirt Provider implementation (provider_virsh.go),
 // translating between the gRPC and provider-contract types. Previously this RPC
 // was unreachable over gRPC and returned Unimplemented (issue #177).
+//
+// On a clustered provider the read is routed to target_host_id and
+// owner-checked (ADR-0007 Addendum A, slice 3): a domain this VM does not own
+// is NotFound and none of its disks is read.
 func (s *Server) GetDiskInfo(ctx context.Context, req *providerv1.GetDiskInfoRequest) (*providerv1.GetDiskInfoResponse, error) {
 	if s.provider == nil {
 		return nil, fmt.Errorf("provider not initialized")
 	}
-	if s.clusteredProvider() {
-		return nil, notRoutedYet("GetDiskInfo", sliceRoutedSnapshotCloneDisk)
-	}
 
+	vm := contracts.VMRef{ID: req.VmId, HostID: req.TargetHostId}
+	if s.clusteredProvider() {
+		vm.Owner = ownerFromProto(req.GetOwner())
+	}
 	resp, err := s.provider.GetDiskInfo(ctx, contracts.GetDiskInfoRequest{
-		VM:         contracts.VMRef{ID: req.VmId, HostID: req.TargetHostId},
+		VM:         vm,
 		DiskId:     req.DiskId,
 		SnapshotId: req.SnapshotId,
 	})
 	if err != nil {
+		if s.clusteredProvider() {
+			return nil, routedRPCError("get disk info", err)
+		}
 		return nil, fmt.Errorf("failed to get disk info: %w", err)
 	}
 

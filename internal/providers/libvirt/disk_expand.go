@@ -39,7 +39,7 @@ const growThresholdBytes = int64(1024) * 1024 // 1 MiB
 // parseDomblklistPrimaryTarget extracts the primary (boot) disk's target device
 // name (e.g. "vda") from `virsh domblklist <dom>` output. It skips the header,
 // separator, and any non-primary devices (cloud-init ISOs, CD-ROMs) using the
-// same heuristics as getDomainDiskPaths so the result is naming-convention
+// same heuristics as domainDiskPaths so the result is naming-convention
 // agnostic — it relies on the live domain's real block topology, NOT on the
 // fragile "<vmid>-disk" volume-name guess that bit the clone full-path bug
 // (#207).
@@ -76,7 +76,7 @@ func parseDomblklistPrimaryTarget(domblklistStdout string) (string, error) {
 		if source == "" || source == "-" {
 			continue
 		}
-		// Skip cloud-init ISOs / CD-ROMs; mirror getDomainDiskPaths.
+		// Skip cloud-init ISOs / CD-ROMs; mirror domainDiskPaths.
 		if strings.HasSuffix(source, "-cidata.iso") || strings.HasSuffix(source, "cloud-init.iso") {
 			continue
 		}

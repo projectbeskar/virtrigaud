@@ -30,6 +30,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/imageartifact"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt/hostconn"
+	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
 // providerBackend is the surface the gRPC Server (server.go) needs from the
@@ -67,6 +68,18 @@ type providerBackend interface {
 	// D9). It is the *Provider's clusterReg != nil discriminator, exposed through
 	// the seam so the Server never type-asserts the concrete type.
 	clustered() bool
+
+	// withOwnedDomain runs fn on a CLUSTERED provider's leased connection to
+	// vm.HostID, with domain vm.ID owner-checked against vm.Owner and addressed
+	// by its UUID (ADR-0007 Addendum A, slice 3; routing.go). The Server's
+	// routed snapshot and export RPCs, whose cores live on the Server, reach
+	// the host through it.
+	withOwnedDomain(ctx context.Context, vm contracts.VMRef, op string, fn func(c libvirtConn, d domainTarget) error) error
+
+	// exportDiskRouted is a CLUSTERED provider's ExportDisk: the s3 / nfs export
+	// of an owner-checked domain's disk, run on its bound host (ADR-0007
+	// Addendum A, slice 3; routed_export.go). It returns wire errors.
+	exportDiskRouted(ctx context.Context, req *providerv1.ExportDiskRequest) (*providerv1.ExportDiskResponse, error)
 }
 
 // libvirtConn is the libvirt-specific view of one host's connection that the

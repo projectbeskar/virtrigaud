@@ -81,6 +81,12 @@ type Capabilities struct {
 	// committed-capacity accounting trusts the result); single-host Providers
 	// are resized as before, with a warning.
 	SupportsHonestReconfigure bool
+	// SupportsRoutedClone reports that a clustered provider routes Clone to the
+	// source VM's bound host and stamps the clone with its target VM (ADR-0007
+	// Addendum A, slice 3). The VMClone controller checks it before it creates
+	// a clustered clone's target VirtualMachine. False for single-host and
+	// thin-client providers (their Clone does not depend on it).
+	SupportsRoutedClone bool
 }
 
 // CapabilityReporter is an optional capability of a Provider: it reports the

@@ -130,11 +130,17 @@ that `VirtualMachine` created the domain.**
    `crypto/rand`. libvirt refuses to define a domain whose name already exists
    under a different UUID. As a result, if two creates for the same name race,
    the second fails at `virsh define` and can't redefine the first domain.
-6. **Clones start with no owner.** A clone is named
-   `<target namespace>.<target name>` and never binds to or redefines an
-   existing domain with that name. The provider also removes the source VM's
+6. **A clone never inherits the source's owner.** A clone is named
+   `<target namespace>.<target name>`. The provider removes the source VM's
    owner stamp from the cloned XML, so the clone doesn't claim the source's
-   owner.
+   owner. On a single-host provider the clone starts with no owner and never
+   binds to or redefines an existing domain with that name. On a clustered
+   provider (ADR-0007 Addendum A, slice 3) the target VirtualMachine exists
+   before the clone, and the clone is **stamped with the target's identity**
+   (uid included): an existing domain of the clone's name is reported as the
+   clone only when that stamp is the target's (a retry whose answer was lost);
+   any other is refused with `AlreadyExists`. The clustered clone also reads the
+   source only after checking the source VM's own stamp.
 7. **No disk is written over another domain's disk.** Before `qemu-img` writes
    a VM's disk (`Create` from an image, `Clone`) or a migration's landing disk
    (`ImportDisk`), the provider checks the target path. If a file is there and
@@ -193,6 +199,21 @@ the seed ISO). Each create gets its own:
   `Delete` removes it. Domains created before this change keep their seed under
   `/tmp/virtrigaud-cloudinit/<name>/`, which `Delete` still finds from the domain
   XML.
+- **Clones and the seed.** A clone's CD-ROM is the source's cloud-init seed. On a
+  **clustered** provider (slice 3) the clone gets its own copy: the source's ISO
+  is copied into a fresh per-clone seed directory
+  (`/tmp/virtrigaud-cloudinit-<clone domain>.<random>/cloud-init.iso`, same
+  modes as a create's) and the clone's CD-ROM is re-pointed at it, so deleting
+  either VM never removes the other's seed. The copy is removed if the clone's
+  define fails and the domain is known not to exist. On a **single-host**
+  provider the clone still references the source's seed (the known shared-seed
+  issue): deleting the clone removes the source's seed directory, and deleting
+  the source leaves the clone's CD-ROM pointing at a missing ISO. That path is
+  unchanged in this release, to keep single-host behaviour stable while the
+  ADR-0008 soak runs. Either way the clone boots with the **source's
+  user-data**, provisioning secrets included; a cross-namespace clone hands
+  them to the target namespace (see
+  [`cross-namespace-targets.md`](cross-namespace-targets.md#a-clone-carries-the-sources-cloud-init-seed)).
 
 ## Adoption
 

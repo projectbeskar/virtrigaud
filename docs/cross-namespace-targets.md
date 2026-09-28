@@ -151,6 +151,25 @@ to be copied, or the target VM's create to be refused. A migration into its
 own namespace is unaffected. See
 [`image-preparation.md`](image-preparation.md) for the base-image rules.
 
+### No libvirt linked clone into another namespace
+
+A grant allows a **copy** of the source VM into the target namespace. A libvirt
+linked clone is not a copy: its disk is an overlay that keeps reading the
+source VM's disk for as long as the clone exists. A `VMClone` with
+`options.type: LinkedClone` on a libvirt Provider whose target is in another
+namespace is therefore refused before any provider call (`Failed`,
+`Ready=False` / `LinkedCloneCrossNamespace`); use a full clone. vSphere linked
+clones are not affected.
+
+### A clone carries the source's cloud-init seed
+
+A clone is a copy of the source VM's disk and definition, including its
+cloud-init CD-ROM. On a clustered libvirt provider the clone gets its own copy
+of the source's seed ISO; on a single-host one it references the source's.
+Either way the target VM receives the source's user-data — any provisioning
+secrets in it (passwords, keys, tokens) included. Grant a namespace only if its
+users may see the source VMs' user-data, or keep secrets out of user-data.
+
 ## Source references
 
 Every source reference is local to the object's namespace.

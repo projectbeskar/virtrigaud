@@ -122,7 +122,9 @@ func driveEveryPerVMCall(t *testing.T, cli *Client, vm contracts.VMRef) {
 	require.NoError(t, err)
 	_, err = cli.SnapshotRevert(ctx, vm, "s")
 	require.NoError(t, err)
-	_, err = cli.Clone(ctx, contracts.CloneRequest{Source: vm, TargetName: "copy"})
+	// The landing host is always set here: a single-host clone must still put
+	// nothing on the wire (routedTargetHost).
+	_, err = cli.Clone(ctx, contracts.CloneRequest{Source: vm, TargetHostID: "host-a", TargetName: "copy"})
 	require.NoError(t, err)
 	_, err = cli.ExportDisk(ctx, contracts.ExportDiskRequest{VM: vm})
 	require.NoError(t, err)
@@ -200,15 +202,31 @@ func recordedReconfigure(t *testing.T, srv *routingRecorderServer) *providerv1.R
 	return r
 }
 
+// recordedAs returns the request of type T the server received for name.
+func recordedAs[T proto.Message](t *testing.T, srv *routingRecorderServer, name string) T {
+	t.Helper()
+	r, ok := srv.got(name).(T)
+	require.True(t, ok, "%s never reached the server", name)
+	return r
+}
+
 // routedOwners returns the owner every owner-carrying per-VM request arrived
-// with (Describe and Delete from slice 1; Power and Reconfigure from slice 2).
+// with (Describe and Delete from slice 1; Power and Reconfigure from slice 2;
+// the snapshot family, ExportDisk, GetDiskInfo and the clone source from
+// slice 3).
 func routedOwners(t *testing.T, srv *routingRecorderServer) map[string]*providerv1.ObjectIdentity {
 	t.Helper()
 	return map[string]*providerv1.ObjectIdentity{
-		"Delete":      recordedDelete(t, srv).Owner,
-		"Describe":    recordedDescribe(t, srv).Owner,
-		"Power":       recordedPower(t, srv).Owner,
-		"Reconfigure": recordedReconfigure(t, srv).Owner,
+		"Delete":         recordedDelete(t, srv).Owner,
+		"Describe":       recordedDescribe(t, srv).Owner,
+		"Power":          recordedPower(t, srv).Owner,
+		"Reconfigure":    recordedReconfigure(t, srv).Owner,
+		"SnapshotCreate": recordedAs[*providerv1.SnapshotCreateRequest](t, srv, "SnapshotCreate").Owner,
+		"SnapshotDelete": recordedAs[*providerv1.SnapshotDeleteRequest](t, srv, "SnapshotDelete").Owner,
+		"SnapshotRevert": recordedAs[*providerv1.SnapshotRevertRequest](t, srv, "SnapshotRevert").Owner,
+		"ExportDisk":     recordedAs[*providerv1.ExportDiskRequest](t, srv, "ExportDisk").Owner,
+		"GetDiskInfo":    recordedAs[*providerv1.GetDiskInfoRequest](t, srv, "GetDiskInfo").Owner,
+		"Clone":          recordedAs[*providerv1.CloneRequest](t, srv, "Clone").SourceOwner,
 	}
 }
 
@@ -232,6 +250,21 @@ func TestClient_PerVMCalls_ThreadHostAndOwner(t *testing.T) {
 		assert.Equal(t, "team-a", got.Namespace, name)
 		assert.Equal(t, "web", got.Name, name)
 	}
+	assert.Equal(t, "host-a", recordedAs[*providerv1.CloneRequest](t, srv, "Clone").TargetHostId,
+		"a routed clone names its landing host")
+}
+
+// TestClient_SnapshotCreate_SendsTheRequestToken: the request token (the
+// VMSnapshot's uid) reaches the provider, which keys a retried create on it.
+func TestClient_SnapshotCreate_SendsTheRequestToken(t *testing.T) {
+	srv := &routingRecorderServer{}
+	cli := newTestClientForVMOps(t, srv, "libvirt", "routing")
+	_, err := cli.SnapshotCreate(context.Background(), contracts.SnapshotCreateRequest{
+		VM:       contracts.VMRef{ID: "web", HostID: "host-a", Owner: contracts.ObjectIdentity{UID: "uid-1", Namespace: "team-a", Name: "web"}},
+		NameHint: "nightly", RequestToken: "uid-snap-1",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "uid-snap-1", recordedAs[*providerv1.SnapshotCreateRequest](t, srv, "SnapshotCreate").GetRequestToken())
 }
 
 // TestClient_PerVMCalls_SingleHostSendsNoHost proves D9 on the wire: a
@@ -250,6 +283,8 @@ func TestClient_PerVMCalls_SingleHostSendsNoHost(t *testing.T) {
 	for name, got := range routedOwners(t, srv) {
 		assert.Nil(t, got, "a single-host %s carries no owner", name)
 	}
+	assert.Empty(t, recordedAs[*providerv1.CloneRequest](t, srv, "Clone").TargetHostId,
+		"a single-host clone carries no landing host")
 }
 
 // TestClient_RoutedOwnerWithoutUIDIsNotSent pins that an owner with no UID is

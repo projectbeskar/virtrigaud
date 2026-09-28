@@ -6,14 +6,17 @@
 The five cross-ADR blocking decisions are settled (see `0007-0008-blocking-decisions.md`
 and the folded D-sections below).
 
-**Implementation status (2026-09-24):** P1's inventory, placement and admission
+**Implementation status (2026-09-25):** P1's inventory, placement and admission
 halves are merged (#312–#325; security-hardened by #330, #331, #333 and #334): `Host`/`HostPool`,
 `ListHosts`/`GetHostInfo` + inventory sync, the filter+score scheduler, and
-`target_host_id` + `status.placement.host` binding **at create**. **Not yet done:**
-routing every *post-create* per-VM RPC to the bound host. Today only `Create` is
-host-aware, so a clustered VM can be created but not described, powered, reconfigured,
-snapshotted or deleted. The contract for that is **Addendum A** below; until it lands,
-`topology: cluster` must be treated as experimental. This ADR proposes a new *class* of provider — a **clustered /
+`target_host_id` + `status.placement.host` binding **at create**. Post-create
+routing (**Addendum A** below) is in progress: slice 1 (#337: `Describe`,
+`Delete`, `pendingHost`) and slice 2 (#338: `Power`, `Reconfigure`, excluded
+hosts) are merged, and slice 3 routes the snapshot family, `Clone`,
+`GetDiskInfo`, `ExportDisk` (s3 / nfs) and host-encoded task references (see
+the slice 3 amendment under A5). **Not yet done:** `ListVMs` across hosts and
+adoption (slice 4) and the end-to-end lab validation (slice 5); until slice 5
+passes, `topology: cluster` must be treated as experimental. This ADR proposes a new *class* of provider — a **clustered /
 orchestrator** provider — that makes VirtRigaud itself the cluster manager for
 hypervisors that lack a native one: register N individual bare hosts, present
 them as one cluster, and do placement + cross-node migration. The first target
@@ -911,6 +914,67 @@ It is the security fix for the released domain-name takeover.
 | 4 | `ListVMs` across all hosts (A3); adoption keyed on `(host_id, id)`. |
 | 5 | End-to-end lab validation: schedule, create, power, describe, snapshot and delete a real VM on a clustered provider. This is the first real clustered VM. |
 
+**Status (2026-09-25):** slices 0, 1 (#337) and 2 (#338) are merged; slice 3 is
+implemented (see the amendment below); slices 4 and 5 are open.
+
+> **Amendment (2026-09-25, slice 3): what slice 3 adds to the wire and the flows.**
+>
+> - **Owner on every routed per-VM request.** Besides `DeleteRequest.owner`
+>   (A2) and the slice 2 `owner` fields, the three snapshot requests,
+>   `ExportDiskRequest` and `GetDiskInfoRequest` gain an additive `owner`, and
+>   `CloneRequest` gains `source_owner`. A clustered provider checks the
+>   domain's owner stamp before it reads or changes anything and answers
+>   `NotFound` for a domain the requester does not own.
+> - **`CloneRequest.target_host_id` is field 9** (field 7 is `source_host_id`
+>   and 8 is `target_vm`). It must equal `source_host_id`, as A1 says.
+> - **A clustered clone is created with its target VirtualMachine first.** To
+>   honour A2 for clones, the VMClone controller creates the target
+>   VirtualMachine before the Clone RPC and records its `pendingHost` (the
+>   source's host) in a checked status update. `CloneRequest.target_vm` then
+>   carries the target's uid, and the clone's domain is stamped with the
+>   target's identity (never the source's), so a retry is an idempotent success
+>   and the target's finalizer can clean up. The bind promotes the pending host
+>   in the same write as `status.id`. A source host that is gone, cordoned, not
+>   Ready or excluded for the target stops the clone with a condition; a name
+>   conflict excludes the host for the target (as in the slice 2 amendment),
+>   and the clone then waits, because it can land nowhere else. The clustered
+>   clone also gives the new domain its own copy of the cloud-init seed ISO.
+> - **Host-encoded task references.** `host-task/v1/<host id>/<host-local
+>   reference>`. A host id is a `Host` name (DNS-1123 subdomain) and never
+>   contains `/`. A clustered provider refuses a reference that is not
+>   host-encoded (`InvalidArgument`) or that names a host outside its own
+>   registry (`NotFound`), and never dials anything for it. Single-host
+>   references are unchanged. No routed libvirt call returns a task yet (they
+>   are synchronous); the encoding is in place for D5's `MigrateVM`.
+> - **Disk export from a clustered source is host-side only.** The `s3` and
+>   `nfs` exports run on the bound host; the `pvc` export, which reads the disk
+>   from the provider pod, is refused by the provider and by the VMMigration
+>   controller's validation. Import into a clustered provider stays refused
+>   until P3.
+> - **Capabilities (D7).** A clustered provider now advertises snapshots,
+>   memory snapshots and disk export (backends `s3` and `nfs`, relay, `qcow2`,
+>   no compression), and `supports_routed_clone` (field 20, additive; field 19
+>   is `supports_honest_reconfigure`): the
+>   VMClone controller checks it before creating a clustered clone's target
+>   VirtualMachine, so an older clustered provider never gets a target made for
+>   a Clone it would refuse. Linked clones, disk import and image import stay
+>   hidden.
+> - **No linked clones on a clustered provider in v0.4.0.** A linked clone's
+>   overlay reads its source's disk for its whole life, and the source disk is
+>   not frozen at clone time, so a clustered provider refuses `Clone` with
+>   `linked=true` (`InvalidArgument`) and does not advertise
+>   `supports_linked_clones` (single-host linked clones are disabled for the
+>   same reason). The routed lifecycle calls that would break an existing
+>   overlay — `Delete`, `SnapshotCreate`, `SnapshotDelete`, `SnapshotRevert` —
+>   run the same disk-dependents guard as single-host (#358): each refuses
+>   while another domain's disk chain holds one of the VM's disks
+>   (`VM_DISK_IN_USE`, `FailedPrecondition`), and when the check cannot run
+>   (`VM_DISK_CHECK_FAILED`, `Unavailable`). The VMClone controller's
+>   linked-clone gate now fails closed (a provider whose capabilities cannot
+>   be read gets no linked clone), and a libvirt linked clone into another
+>   namespace is refused: a cross-namespace grant (#340) covers a copy, not
+>   ongoing access to the source's disk.
+
 **Capability honesty (D7).** A clustered provider's `GetCapabilities` hides each
 per-VM capability until the slice that routes it has landed.
 
@@ -1140,12 +1204,13 @@ follows; A2's `pendingHost` is its prerequisite.
 >
 > **Still not covered:**
 >
-> - A clone lands on its source host (A1) without being scheduled or checked
->   against capacity. It counts from the moment `bindTargetVM` writes its
->   `placement.host`, and at its VMClass size: the clustered clone bind
->   (`bindTargetVM` / `clonedPlacement`) records no `currentResources` or
->   memory ceiling yet. The ADR-0007 Slice 3 branch adds the clone fit check
->   and records `currentResources` at bind.
+> - ~~A clone lands on its source host (A1) without being checked against
+>   capacity.~~ Covered by the Slice 3 branch: a clustered clone is admitted
+>   against its source host's free capacity (not scheduled: it has one
+>   possible host) under the same per-Provider lock and assume cache, counts
+>   from its pending host at its admitted size (`pendingResources`, the
+>   source's `memoryCeilingMiB`), and is recorded at bind with
+>   `currentResources` at the cloned size.
 >
 > *(Resolved 2026-09-27, honest Reconfigure result.)* The libvirt provider's
 > `Reconfigure` no longer reports success for a change it did not apply. Every
@@ -1512,8 +1577,13 @@ honest.
 - **New ADR (P5)**: automatic HA + fencing/STONITH.
 - **Addendum A** (post-create lifecycle routing), delivered in slices 1–5 (see A5):
   - Proto: `target_host_id` on every per-VM request; `CloneRequest.source_host_id`;
-    `owner` on `DeleteRequest`; `VMInfo.host_id` and
+    `owner` on `DeleteRequest` (and, since slices 2 and 3, on every routed
+    per-VM request, with `CloneRequest.source_owner` and
+    `CloneRequest.target_host_id`); `VMInfo.host_id` and
     `ListVMsResponse.unreachable_host_ids`.
+  - Single-host clone seed sharing: a single-host clone still references the
+    source's cloud-init seed ISO (fixed for clustered clones in slice 3); fix it
+    once the ADR-0008 D5 soak window allows a single-host behaviour change.
   - Operator: `contracts.VMRef`; `status.placement.pendingHost`; the Host in-use
     finalizer; the `Placed` condition.
   - Provider: the `withHostConn` helper.
@@ -1521,10 +1591,18 @@ honest.
   scheduler-accuracy amendment (A5) counts every consumer's VMs against a
   host's capacity, but nothing limits how much of a shared Provider one
   consumer namespace may take (v0.4.0 has no per-tenant quota).
-- Capacity check for a clone, which lands on its source host without being
-  scheduled, and `currentResources` recorded at the clustered clone bind
-  (`bindTargetVM` / `clonedPlacement`), which today writes `placement.host`
-  only (A5, *Still not covered*). Planned on the ADR-0007 Slice 3 branch.
+- ~~Capacity check for a clone, and `currentResources` recorded at the
+  clustered clone bind (A5, *Still not covered*).~~ Done on the Slice 3
+  branch: a clustered clone is admitted against its source host's free
+  capacity (at `admittedFootprint`, balloon ceiling included) under the
+  per-Provider assume lock the VMClone and VirtualMachine controllers share,
+  before its pending host is recorded; on no fit its target reports
+  `Placed=False/Unschedulable` and the clone waits, never moving to another
+  host. The pending host records `pendingResources` and the source's
+  `memoryCeilingMiB`; the bind records `currentResources` at the cloned size
+  and keeps the ceiling. A clustered clone that fails for good removes the
+  target VirtualMachine it created (owner-checked cleanup through its
+  finalizer).
 - ~~The libvirt provider's `Reconfigure` must return an error when a requested
   change was not applied.~~ Done (2026-09-27): applied, applied with
   `restart_required`, or an error — see A5 *Still not covered*.
