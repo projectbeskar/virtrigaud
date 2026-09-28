@@ -75,6 +75,7 @@ type fakeClusteredAdopter struct {
 	caps        contracts.Capabilities
 	capsErr     error
 	transferErr error
+	describeErr error
 	transfers   []contracts.TransferOwnerRequest
 	lists       int
 }
@@ -144,6 +145,9 @@ func (f *fakeClusteredAdopter) TransferOwner(_ context.Context, req contracts.Tr
 func (f *fakeClusteredAdopter) Describe(_ context.Context, ref contracts.VMRef) (contracts.DescribeResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.describeErr != nil {
+		return contracts.DescribeResponse{}, f.describeErr
+	}
 	d := f.find(ref.HostID, ref.ID)
 	if d == nil || d.owner == "" || d.owner != ref.Owner.UID {
 		return contracts.DescribeResponse{Exists: false}, nil
@@ -550,6 +554,31 @@ func TestClusteredAdoption_FailedTransferDoesNotBind(t *testing.T) {
 		assert.Equal(t, types.UID("uid-waiting"), vm.UID)
 		assert.Empty(t, vm.Status.ID)
 	})
+}
+
+// TestClusteredAdoption_FailureAfterTheTransferKeepsTheVM: when the owner
+// transfer succeeded but the Describe that follows fails (even with NotFound),
+// the adopting VM is kept — the domain already carries its stamp — and the
+// next discovery completes the binding from that stamp.
+func TestClusteredAdoption_FailureAfterTheTransferKeepsTheVM(t *testing.T) {
+	prov := &fakeClusteredAdopter{caps: routedAdoptionCaps,
+		describeErr: contracts.NewNotFoundError("not found", nil),
+		domains: []*fakeDomain{
+			{host: "host-a", id: "web", uuid: "uuid-a-web", cpu: 1, memMiB: 1024, power: "On"},
+		}}
+	r := clusteredAdoptionReconciler(t, prov, clusteredAdoptionProvider(), clusterHost("host-a", "prov-c"))
+	name := clusteredAdoptedVMName("host-a", "web")
+
+	reconcileAdoption(t, r)
+	vm := adoptedVMGet(t, r, name)
+	assert.Empty(t, vm.Status.ID, "not bound yet")
+	assert.Equal(t, string(vm.UID), prov.find("host-a", "web").owner, "the transfer happened")
+	assert.EqualValues(t, 1, adoptionStatus(t, r).FailedAdoptions)
+
+	prov.describeErr = nil
+	r.setLastDiscovery(t, time.Now().Add(-time.Hour))
+	reconcileAdoption(t, r)
+	assert.Equal(t, "web", adoptedVMGet(t, r, name).Status.ID, "the binding is completed from the stamp")
 }
 
 // TestClusteredAdoption_UnreliableStampIsNotAdopted: a VM whose stamp state

@@ -145,6 +145,15 @@ var errAdoptionSkipped = errors.New("adoption skipped")
 // reports the domain. It is counted apart from failures.
 var errAdoptionDeferred = errors.New("adoption deferred")
 
+// errTransferRefused marks an adoption whose TransferOwner the provider
+// refused for good — the domain is owned by someone else or its stamp is
+// unusable (Conflict), it is gone or was replaced (NotFound), or the request
+// was refused (InvalidSpec) — so the domain was NOT handed over. Only this
+// makes the waiting VirtualMachine stranded; a failure after a successful
+// transfer (the domain already carries the VM's stamp) never does, and the
+// binding is retried.
+var errTransferRefused = errors.New("the provider refused the owner transfer")
+
 // clusteredAdoptionPlan is what one clustered discovery found to do.
 type clusteredAdoptionPlan struct {
 	// adopt are listed VMs no VirtualMachine manages.
@@ -305,7 +314,7 @@ func (r *VMAdoptionReconciler) reconcileClusteredAdoption(ctx context.Context, p
 		}
 	}
 	for _, p := range plan.complete {
-		count(r.completeClusteredAdoption(ctx, provider, transferrer, providerInstance, p.vm, p.info, nil),
+		count(r.completeAdoption(ctx, provider, transferrer, providerInstance, p.vm, p.info, false),
 			"Failed to complete the adoption of a VM", p.info)
 	}
 	for _, info := range unmanaged {
@@ -691,9 +700,21 @@ func (r *VMAdoptionReconciler) adoptClusteredVM(ctx context.Context, provider *i
 			return fmt.Errorf("VirtualMachine %s/%s exists and is not waiting for this adoption: %w", vm.Namespace, name, errAdoptionSkipped)
 		}
 	}
-	err = r.completeClusteredAdoption(ctx, provider, transferrer, providerInstance, vm, info, nil)
-	if created && refusedForGood(err) {
-		r.removeStrandedAdoptedVM(ctx, vm)
+	return r.completeAdoption(ctx, provider, transferrer, providerInstance, vm, info, created)
+}
+
+// completeAdoption runs completeClusteredAdoption for an adopting
+// VirtualMachine and, when this discovery created it and the provider refused
+// the owner transfer for good (errTransferRefused), removes it so it does not
+// wait for a binding it will never get (removeStrandedAdoptedVM). Any other
+// failure — including one after a successful transfer — keeps the VM, and the
+// next discovery retries the binding from the stamp.
+func (r *VMAdoptionReconciler) completeAdoption(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider,
+	transferrer contracts.OwnerTransferrer, providerInstance contracts.Provider,
+	vm *infravirtrigaudiov1beta1.VirtualMachine, info contracts.VMInfo, created bool) error {
+	err := r.completeClusteredAdoption(ctx, provider, transferrer, providerInstance, vm, info, nil)
+	if created && errors.Is(err, errTransferRefused) {
+		r.removeStrandedAdoptedVM(ctx, provider, vm, info)
 	}
 	return err
 }
@@ -706,19 +727,37 @@ func refusedForGood(err error) bool {
 	return err != nil && (contracts.IsConflict(err) || contracts.IsNotFound(err) || contracts.IsInvalidSpec(err))
 }
 
-// removeStrandedAdoptedVM deletes vm — the VirtualMachine this discovery
-// created to adopt a domain the provider then refused — so it does not stay
-// waiting for a binding it will never get. It has no status.id and no
-// pending host, so its deletion makes no provider call; the delete is
-// preconditioned on its UID. A failure is logged: the next discovery reports
-// the VM (it stays waiting) and an administrator can remove it.
-func (r *VMAdoptionReconciler) removeStrandedAdoptedVM(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine) {
-	uid := vm.UID
-	if err := r.Delete(ctx, vm, client.Preconditions{UID: &uid}); err != nil && !apierrors.IsNotFound(err) {
-		log.FromContext(ctx).Error(err, "Failed to remove the adopted VirtualMachine the provider refused", "vm", vm.Name)
-		return
+// removeStrandedAdoptedVM deletes vm — a VirtualMachine waiting to adopt the
+// domain info names, whose owner transfer the provider refused for good — so
+// it does not wait for a binding it will never get, whichever discovery
+// created it. It re-reads the VM first and deletes it only while the fresh
+// object is the same VirtualMachine (UID), unbound and still waiting for
+// exactly this (host, id) (isAwaitingAdoptionOf); such a VM has no status.id
+// and no pending host, so its deletion makes no provider call. The delete is
+// preconditioned on the UID and resourceVersion read. It reports whether the
+// VM is out of the way (deleted, gone, replaced, bound or being deleted);
+// false means it could not be removed and is left for an administrator.
+func (r *VMAdoptionReconciler) removeStrandedAdoptedVM(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider,
+	vm *infravirtrigaudiov1beta1.VirtualMachine, info contracts.VMInfo) bool {
+	logger := log.FromContext(ctx).WithValues("vm", vm.Name)
+	fresh := &infravirtrigaudiov1beta1.VirtualMachine{}
+	if err := r.freshReader().Get(ctx, client.ObjectKeyFromObject(vm), fresh); err != nil {
+		if apierrors.IsNotFound(err) {
+			return true
+		}
+		logger.Error(err, "Failed to re-read the adopted VirtualMachine the provider refused")
+		return false
 	}
-	log.FromContext(ctx).Info("Removed the adopted VirtualMachine the provider refused (no provider call)", "vm", vm.Name)
+	if fresh.UID != vm.UID || !isAwaitingAdoptionOf(fresh, provider, info) {
+		return true // replaced, bound or being deleted: not stranded
+	}
+	uid, rv := fresh.UID, fresh.ResourceVersion
+	if err := r.Delete(ctx, fresh, client.Preconditions{UID: &uid, ResourceVersion: &rv}); err != nil && !apierrors.IsNotFound(err) {
+		logger.Error(err, "Failed to remove the adopted VirtualMachine the provider refused")
+		return false
+	}
+	logger.Info("Removed the adopted VirtualMachine the provider refused (no provider call)")
+	return true
 }
 
 // createClusteredAdoptedVM creates the VirtualMachine (and its VMClass) that
@@ -823,6 +862,9 @@ func (r *VMAdoptionReconciler) completeClusteredAdoption(ctx context.Context, pr
 		ReplaceableOwnerUIDs: replaceableUIDs,
 		ExpectedUUID:         info.ProviderRaw[contracts.VMInfoUUIDKey],
 	}); err != nil {
+		if refusedForGood(err) {
+			return fmt.Errorf("transfer the owner of VM %s on host %s: %w: %w", info.ID, info.HostID, errTransferRefused, err)
+		}
 		return fmt.Errorf("transfer the owner of VM %s on host %s: %w", info.ID, info.HostID, err)
 	}
 
