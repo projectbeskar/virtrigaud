@@ -829,7 +829,8 @@ type adoptionBinding struct {
 // writeAdoptionBinding writes the binding of vm — adopted for info from
 // provider — in one status write: status.id, boundProvider, placement (host,
 // pool, memory ceiling), currentResources, the observed power state and IPs,
-// and Placed=True/Bound.
+// and Placed=True/Bound. (ADR-0007 A6.2 must also set the placement-uid
+// marker, R1, in this write, so an adopted VM is never held as restored.)
 //
 // The VirtualMachine controller adds its finalizer and writes the VM's status
 // right after the VM is created, so the object read before the owner transfer
@@ -877,7 +878,7 @@ func (r *VMAdoptionReconciler) writeAdoptionBinding(ctx context.Context, provide
 		latest.Status.CurrentResources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: &cpu, MemoryMiB: &mem}
 		latest.Status.PowerState = observedPowerState(b.desc.PowerState)
 		latest.Status.IPs = b.desc.IPs
-		latest.Status.Provider = info.ProviderRaw
+		latest.Status.Provider = adoptedProviderRaw(info.ProviderRaw)
 		setPlacedCondition(latest, metav1.ConditionTrue, k8s.ReasonBound, fmt.Sprintf("VM is bound to host %s", info.HostID))
 		if err := r.Status().Update(ctx, latest); err != nil {
 			return err
@@ -1012,6 +1013,22 @@ func endpointKey(endpoint string) string {
 		return endpoint
 	}
 	return strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Hostname()) + ":" + u.Port()
+}
+
+// adoptedProviderRaw is the listing's provider data recorded in an adopted
+// VM's status.provider, without the owner-stamp keys: after the transfer they
+// describe the domain's previous owner (possibly another namespace's UID), are
+// stale, and are nothing the VM's reader needs.
+func adoptedProviderRaw(raw map[string]string) map[string]string {
+	out := make(map[string]string, len(raw))
+	for k, v := range raw {
+		switch k {
+		case contracts.VMInfoOwnerUIDKey, contracts.VMInfoOwnerStampStateKey:
+			continue
+		}
+		out[k] = v
+	}
+	return out
 }
 
 // freshReader is the reader the adoption re-reads objects with before it

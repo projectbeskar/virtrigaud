@@ -435,6 +435,8 @@ func TestClusteredAdoption_CompletesALostBinding(t *testing.T) {
 	vm := adoptedVMGet(t, r, waiting.Name)
 	assert.Equal(t, "web", vm.Status.ID)
 	assert.Equal(t, "host-a", vm.Status.Placement.Host)
+	assert.NotContains(t, vm.Status.Provider, contracts.VMInfoOwnerUIDKey, "no owner stamp UID is copied into status")
+	assert.Equal(t, "uuid-a-web", vm.Status.Provider[contracts.VMInfoUUIDKey])
 	transfers := prov.transfersTo("host-a", "web")
 	require.Len(t, transfers, 1)
 	assert.Empty(t, transfers[0].ReplaceableOwnerUIDs, "its own stamp is never 'replaced'")
