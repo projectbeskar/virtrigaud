@@ -434,6 +434,12 @@ func (s *Server) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotCre
 
 	log.Printf("INFO Domain %s is in state: %s", req.VmId, domainState)
 
+	// No snapshot of a VM whose disk another domain depends on (a linked
+	// clone): see the disk dependency guard (disk_dependents.go).
+	if err := refuseIfDiskHasDependents(ctx, hostConnRunner{conn: conn}, req.VmId, guardOpSnapshotCreate); err != nil {
+		return nil, fmt.Errorf("failed to create snapshot: %w", err)
+	}
+
 	// Build the virsh snapshot-create-as arguments. A memory-inclusive (full
 	// system) snapshot omits --disk-only and is only possible for a RUNNING
 	// domain (there is no RAM state to capture otherwise); any other case is a
@@ -517,6 +523,12 @@ func (s *Server) SnapshotDelete(ctx context.Context, req *providerv1.SnapshotDel
 		return &providerv1.TaskResponse{}, nil
 	}
 
+	// Deleting an external snapshot commits it into the disk another domain
+	// may use as its backing file (disk_dependents.go).
+	if err := refuseIfDiskHasDependents(ctx, hostConnRunner{conn: conn}, req.VmId, guardOpSnapshotDelete); err != nil {
+		return nil, fmt.Errorf("failed to delete snapshot: %w", err)
+	}
+
 	// Delete the snapshot
 	// Format: virsh snapshot-delete DOMAIN SNAPSHOT --metadata
 	// Using --metadata keeps the data but removes snapshot metadata (safer for external snapshots)
@@ -571,6 +583,12 @@ func (s *Server) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotRev
 	}
 
 	log.Printf("INFO Domain %s current state: %s", req.VmId, domainState)
+
+	// A revert rewrites the disk another domain may use as its backing file
+	// (disk_dependents.go).
+	if err := refuseIfDiskHasDependents(ctx, hostConnRunner{conn: conn}, req.VmId, guardOpSnapshotRevert); err != nil {
+		return nil, fmt.Errorf("failed to revert to snapshot: %w", err)
+	}
 
 	// Revert to snapshot
 	// Format: virsh snapshot-revert DOMAIN SNAPSHOT --running|--paused
@@ -742,12 +760,12 @@ func (s *Server) GetCapabilities(ctx context.Context, req *providerv1.GetCapabil
 		return clusteredCapabilities(), nil
 	}
 	return &providerv1.GetCapabilitiesResponse{
-		SupportsReconfigureOnline:   true, // Online CPU/mem reconfigure via `setvcpus/setmem --live` for VMs created with CPU/MemoryHotAddEnabled (headroom provisioned at create); grows up to the ~4× ceiling, beyond which a power-cycle is required (#203)
-		SupportsDiskExpansionOnline: true, // Online grow via `virsh blockresize` + best-effort in-guest FS grow (resize2fs/xfs_growfs) when the guest agent is present; grow-only (#201)
-		SupportsSnapshots:           true, // Libvirt supports snapshots (storage-dependent)
-		SupportsMemorySnapshots:     true, // Full system checkpoints incl. RAM via `snapshot-create-as` without --disk-only; requires the VM running (#202)
-		SupportsLinkedClones:        true, // Clone RPC implemented: qcow2 overlay (linked) + vol-clone (full) (issue #153)
-		SupportsImageImport:         true, // ImagePrepare RPC implemented: import/convert image into a storage pool (issue #154)
+		SupportsReconfigureOnline:   true,  // Online CPU/mem reconfigure via `setvcpus/setmem --live` for VMs created with CPU/MemoryHotAddEnabled (headroom provisioned at create); grows up to the ~4× ceiling, beyond which a power-cycle is required (#203)
+		SupportsDiskExpansionOnline: true,  // Online grow via `virsh blockresize` + best-effort in-guest FS grow (resize2fs/xfs_growfs) when the guest agent is present; grow-only (#201)
+		SupportsSnapshots:           true,  // Libvirt supports snapshots (storage-dependent)
+		SupportsMemorySnapshots:     true,  // Full system checkpoints incl. RAM via `snapshot-create-as` without --disk-only; requires the VM running (#202)
+		SupportsLinkedClones:        false, // Clone refuses Linked=true: the source disk is not frozen, so its writes would corrupt the clone (linkedClonesDisabledMessage); full clones are supported
+		SupportsImageImport:         true,  // ImagePrepare RPC implemented: import/convert image into a storage pool (issue #154)
 		// ADR-0009 Slice 4: prepared images are named from the VMImage identity
 		// and source digest, stamped (sidecar), reused only on a matching stamp
 		// and published with link(2) — never reused by a bare name. Hidden on a

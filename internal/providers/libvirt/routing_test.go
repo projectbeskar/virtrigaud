@@ -54,7 +54,9 @@ import (
 // commands ("!" escape: sudo rm / rm -rf) hit fake `sudo`/`rm` shims that only
 // log, so nothing on the test machine is touched.
 
-const routingDiskPath = "/var/lib/libvirt/images/web-disk.qcow2"
+// routingDiskPath is the file-backed disk of routingDomainXML, inside
+// fixtureImagesDir (set by TestMain).
+var routingDiskPath string
 
 // routingDomainXML is a `virsh dumpxml` document for name carrying owner's stamp
 // (none when owner is zero) and one file-backed disk.
@@ -85,8 +87,12 @@ func newRoutingFixture(t *testing.T, hosts map[string]map[string]string) *routin
 		for name, xml := range domains {
 			fmt.Fprintf(&list, " -    %-20s shut off\n", name)
 			require.NoError(t, os.WriteFile(filepath.Join(hd, "dom-"+name+".xml"), []byte(xml), 0o600))
+			if d, err := parseDomainLibvirtxml(xml); err == nil && strings.TrimSpace(d.UUID) != "" {
+				require.NoError(t, os.WriteFile(filepath.Join(hd, "dom-"+strings.TrimSpace(d.UUID)+".xml"), []byte(xml), 0o600))
+			}
 		}
 		require.NoError(t, os.WriteFile(filepath.Join(hd, "list.txt"), []byte(list.String()), 0o600))
+		writeFixtureUUIDs(t, hd, domains)
 	}
 
 	virsh := `#!/bin/sh
@@ -95,7 +101,8 @@ if [ "$1" = "-c" ]; then host="${2##*/}"; shift 2; fi
 printf '%s %s\n' "$host" "$*" >> "$FAKE_VIRSH_DIR/calls.log"
 d="$FAKE_VIRSH_DIR/$host"
 case "$1" in
-  list) cat "$d/list.txt" ;;
+  list) if [ "$3" = "--uuid" ]; then cat "$d/uuids.txt" 2>/dev/null; else cat "$d/list.txt"; fi ;;
+  pool-dumpxml) printf "<pool type='dir'><name>default</name><target><path>%s</path></target></pool>\n" "$FAKE_POOL_DIR" ;;
   dumpxml)
     f="$d/dom-$2.xml"
     if [ -f "$f" ]; then cat "$f"; else echo "error: failed to get domain '$2'" >&2; exit 1; fi ;;
@@ -115,7 +122,9 @@ esac
 	for _, name := range []string{"sudo", "rm"} {
 		require.NoError(t, os.WriteFile(filepath.Join(bin, name), []byte(shim), 0o755)) //nolint:gosec // test shim must be executable
 	}
+	installQemuImgShim(t, bin)
 	t.Setenv("FAKE_VIRSH_DIR", dir)
+	useFixtureImages(t)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	return &routingFixture{t: t, dir: dir}
 }
@@ -390,14 +399,17 @@ func TestClustered_Delete_OwnerChecked(t *testing.T) {
 			if tc.destroyed {
 				require.NoError(t, err)
 				// Slice 2: the teardown addresses the checked domain by UUID.
+				// The disk dependency guard (storage pool, other domains) runs
+				// on the leased host before destroy/undefine.
 				assert.Equal(t, []string{
 					"host-a list --all",
 					"host-a dumpxml web",
 					"host-a dumpxml " + routingDomainUUID,
-					"host-a dumpxml " + routingDomainUUID,
+					"host-a pool-dumpxml default",
+					"host-a list --all --uuid",
 					"host-a destroy " + routingDomainUUID,
 					"host-a undefine " + routingDomainUUID,
-					"local sudo rm -f " + routingDiskPath,
+					"local sudo rm -f -- " + routingDiskPath,
 				}, calls)
 				return
 			}
@@ -574,7 +586,10 @@ func TestClustered_GetCapabilities_HidesUnroutedPerVMCapabilities(t *testing.T) 
 // single-host provider Describe and Delete still run on p.virshProvider — no
 // registry is involved (none is configured here), any HostID is ignored, the
 // owner is not checked (a legacy unstamped domain stays deletable), and the
-// virsh/host command sequence is the historical one.
+// virsh/host command sequence is the historical one — for Delete, as changed
+// deliberately by the delete-safety fix: one read of the definition, the
+// storage pool and the host's other domains (the disk dependency guard) before
+// destroy/undefine, and an argv-terminated rm of the canonical disk path.
 func TestSingleHost_DescribeAndDelete_UnchangedOnVirshProvider(t *testing.T) {
 	for _, hostID := range []string{"", "host-ignored"} {
 		t.Run(fmt.Sprintf("hostID=%q", hostID), func(t *testing.T) {
@@ -597,11 +612,12 @@ func TestSingleHost_DescribeAndDelete_UnchangedOnVirshProvider(t *testing.T) {
 			assert.Equal(t, []string{
 				"single list --all",
 				"single dumpxml web",
-				"single dumpxml web",
+				"single pool-dumpxml default",
+				"single list --all --uuid",
 				"single destroy web",
 				"single undefine web",
-				"local sudo rm -f " + routingDiskPath,
-			}, fx.calls()[len(describeCalls):], "the historical delete sequence, unchanged")
+				"local sudo rm -f -- " + routingDiskPath,
+			}, fx.calls()[len(describeCalls):], "the delete sequence, with the dependency guard before destroy")
 		})
 	}
 }
@@ -619,16 +635,51 @@ func TestSingleHost_NativeDescribeStillResolvesThroughRegistry(t *testing.T) {
 
 // TestSingleHost_DeleteAbsentStillCleansOrphans pins that the single-host
 // absent-domain path keeps its name-based orphan cleanup (the clustered path
-// deliberately does not).
+// deliberately does not). Since the delete-safety fix it looks only for the
+// disk VirtRigaud names after the VM, <pool directory>/<name>-disk.qcow2, and
+// removes it only when it exists and no domain uses it.
 func TestSingleHost_DeleteAbsentStillCleansOrphans(t *testing.T) {
-	fx := newRoutingFixture(t, map[string]map[string]string{"single": {}})
-	p := &Provider{virshProvider: localHostVP("single")}
-	_, err := p.Delete(context.Background(), contracts.VMRef{ID: "web"})
-	require.NoError(t, err)
-	calls := fx.calls()
-	assert.Equal(t, "single list --all", calls[0])
-	assert.Contains(t, calls, "local sudo rm -f /var/lib/libvirt/images/web-disk.qcow2")
-	assert.Contains(t, calls, "local rm -rf /tmp/virtrigaud-cloudinit/web")
+	t.Run("its disk exists and nothing uses it", func(t *testing.T) {
+		fx := newRoutingFixture(t, map[string]map[string]string{"single": {}})
+		staging := t.TempDir()
+		p := &Provider{virshProvider: localHostVP("single"), hostStagingDir: staging}
+		_, err := p.Delete(context.Background(), contracts.VMRef{ID: "web"})
+		require.NoError(t, err)
+		calls := fx.calls()
+		assert.Equal(t, "single list --all", calls[0])
+		assert.Contains(t, calls, "local sudo rm -f -- "+routingDiskPath, "<pool>/<name>-disk.qcow2 is removed")
+		assert.Contains(t, calls, "local rm -rf -- "+filepath.Join(staging, "virtrigaud-cloudinit", "web"))
+		for _, c := range calls {
+			if strings.Contains(c, "sudo rm") {
+				assert.Equal(t, "local sudo rm -f -- "+routingDiskPath, c, "no other file is removed")
+			}
+		}
+	})
+	t.Run("its disk is the backing file of a surviving domain", func(t *testing.T) {
+		clone := filepath.Join(fixtureImagesDir, "copy-disk.qcow2")
+		require.NoError(t, os.WriteFile(clone, []byte("overlay"), 0o600))
+		fx := newRoutingFixture(t, map[string]map[string]string{"single": {
+			"copy": "<domain type='kvm'><name>copy</name><uuid>" + uuidClone + "</uuid><devices>" +
+				"<disk type='file' device='disk'><source file='" + clone + "'/><backingStore type='file'>" +
+				"<source file='" + routingDiskPath + "'/><backingStore/></backingStore></disk></devices></domain>",
+		}})
+		p := &Provider{virshProvider: localHostVP("single"), hostStagingDir: t.TempDir()}
+		_, err := p.Delete(context.Background(), contracts.VMRef{ID: "web"})
+		require.NoError(t, err)
+		for _, c := range fx.calls() {
+			assert.NotContains(t, c, "sudo rm", "a linked clone of the vanished VM keeps its backing file")
+		}
+	})
+	t.Run("no disk", func(t *testing.T) {
+		fx := newRoutingFixture(t, map[string]map[string]string{"single": {}})
+		require.NoError(t, os.Remove(routingDiskPath))
+		p := &Provider{virshProvider: localHostVP("single"), hostStagingDir: t.TempDir()}
+		_, err := p.Delete(context.Background(), contracts.VMRef{ID: "web"})
+		require.NoError(t, err)
+		for _, c := range fx.calls() {
+			assert.NotContains(t, c, "sudo rm")
+		}
+	})
 }
 
 // TestSingleHost_ServerErrorsKeepLegacyWireForm pins that the routed error

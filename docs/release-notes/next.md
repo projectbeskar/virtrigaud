@@ -39,6 +39,14 @@ Read the upgrade guide before upgrading:
   pre-upgrade VM.
   → [Upgrade guide](docs/upgrading.md#breaking-changes)
 
+- **libvirt linked clones are disabled.** A `VMClone` with
+  `spec.options.type: LinkedClone` through a libvirt Provider fails with
+  `LinkedCloneUnsupported`: a linked clone reads its source VM's live disk, and
+  powering the source on corrupts the clone. Use `FullClone` (the default).
+  Existing linked clones keep working, but their source cannot be deleted,
+  reverted or snapshotted while the clones exist — keep it powered off.
+  → [Upgrade guide](docs/upgrading.md#breaking-changes)
+
 See the full breaking-change table, required upgrade order (CRDs → manager →
 providers), and rollback caveats in
 **[docs/upgrading.md](docs/upgrading.md)**.
@@ -71,6 +79,21 @@ providers), and rollback caveats in
   prepare or create from the other's template, and a prepare task is only ever
   polled through the Provider that started it. Existing state is migrated on
   first use (→ [`docs/image-preparation.md`](docs/image-preparation.md#prepare-state-is-per-provider)).
+- libvirt: **deleting a running linked clone no longer deletes its source VM's
+  disk.** Delete removes only the VM's own disk files inside the storage pool
+  (and its own external-snapshot chain, never a symlink's target), and a source
+  VM whose disk a linked clone still uses can no longer be deleted, reverted or
+  snapshotted until the clone is gone (`DeleteBlocked`); powering it on sets a
+  `LinkedClonesDependOnDisk` warning. A `VMSnapshot` whose provider delete fails
+  keeps its finalizer and is retried (`force-delete` to drop it), also when no
+  provider call can be made for its VM. VM disks are created
+  `0640 libvirt-qemu:kvm` (never `chmod`'ed as root; `chown -h`), no longer
+  world-writable — the provider's SSH user needs the `kvm` group, `root`, or
+  passwordless `sudo qemu-img info -U` — disks are written in a private
+  directory and renamed into place (a symbolic link at a disk's name is
+  refused), the s3 export's temporary copy is private and always removed, and a
+  UEFI clone's varstore is never copied through a symlink
+  (→ [`docs/libvirt-clones.md`](docs/libvirt-clones.md)).
 - The manager's webhook and metrics servers pin an explicit TLS 1.2 floor.
 - Optional, opt-in `NetworkPolicy` templates for the manager and provider pods
   (`networkPolicy.enabled`, default off).

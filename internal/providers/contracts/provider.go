@@ -231,6 +231,14 @@ type VMInfo struct {
 // object or in another namespace).
 const VMInfoOwnerUIDKey = "owner_uid"
 
+// ProviderRawLinkedCloneDependentsKey is the DescribeResponse.ProviderRaw key
+// in which a provider reports how many other VMs on the host depended on this
+// VM's disk (as a backing file, e.g. linked clones of it) when the VM was last
+// started — a decimal count; absent when not known. Powering such a VM on
+// while those VMs are shut off corrupts them, so the manager surfaces a
+// non-zero count as the LinkedClonesDependOnDisk condition.
+const ProviderRawLinkedCloneDependentsKey = "linked_clone_dependents"
+
 // DiskInfo contains information about a VM disk
 type DiskInfo struct {
 	// ID is the disk identifier

@@ -89,6 +89,10 @@ func TestClustered_Power_RoutedToLeasedHostOnTheCheckedDomain(t *testing.T) {
 		"host-b dumpxml " + uuid,
 		"local define /tmp/" + uuid + "-sync.xml",
 		"local rm -f /tmp/" + uuid + "-sync.xml",
+		// After a start: count the domains depending on its disk (linked
+		// clones) for the Describe warning — read-only, on the same host.
+		"host-b dumpxml " + uuid,
+		"host-b list --all --uuid",
 	}
 	cases := map[contracts.PowerOp][]string{
 		contracts.PowerOpOn:               append([]string{"host-b start " + uuid}, sync...),
@@ -299,12 +303,15 @@ func TestClustered_PowerAndReconfigure_ActOnlyOnTheCheckedDomain(t *testing.T) {
 	_, err = p.Reconfigure(context.Background(), webOnHostB, reconfigureTo(4, 4096, 20))
 	require.Error(t, err)
 	_, err = p.Delete(context.Background(), webOnHostB)
-	require.Error(t, err, "the undefine of a domain that is no longer the checked one fails")
+	require.Error(t, err, "the delete of a domain that is no longer the checked one fails")
 
 	calls := fx.calls()
 	assert.Contains(t, calls, "host-b start "+routingDomainUUID, "the start addressed the checked UUID")
 	assert.Contains(t, calls, "host-b domstate "+routingDomainUUID, "the reconfigure read addressed the checked UUID")
-	assert.Contains(t, calls, "host-b undefine "+routingDomainUUID, "the delete addressed the checked UUID")
+	assert.Contains(t, calls, "host-b dumpxml "+routingDomainUUID,
+		"the delete read the checked UUID's definition; finding it gone, it destroys and undefines nothing")
+	assert.NotContains(t, calls, "host-b undefine "+routingDomainUUID)
+	assert.NotContains(t, calls, "host-b destroy "+routingDomainUUID)
 	for _, c := range calls {
 		f := strings.Fields(c)
 		if len(f) >= 3 && slices.Contains(mutatingVerbs, f[1]) {

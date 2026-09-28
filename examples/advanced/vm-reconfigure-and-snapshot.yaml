@@ -189,7 +189,7 @@ spec:
     placementRef:
       name: production-policy
   options:
-    type: LinkedClone  # Use linked clone for faster creation
+    type: FullClone  # libvirt refuses LinkedClone in this release (docs/libvirt-clones.md)
     powerOn: true
   customization:
     hostname: web-server-01-test

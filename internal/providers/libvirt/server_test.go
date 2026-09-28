@@ -66,9 +66,10 @@ func TestServer_ImagePrepare_NilProvider(t *testing.T) {
 }
 
 // TestServer_GetCapabilities_HonestFlags verifies that the libvirt provider
-// advertises capabilities that match its actual behavior: linked clones are now
-// supported (Clone implemented, issue #153), image import remains unsupported
-// (issue #154), and snapshots remain supported.
+// advertises capabilities that match its actual behavior: linked clones are
+// NOT advertised (Clone refuses them in this release: the source disk is not
+// frozen; full clones remain, issue #153), image import is supported (issue
+// #154), and snapshots remain supported.
 func TestServer_GetCapabilities_HonestFlags(t *testing.T) {
 	s := &Server{}
 
@@ -76,8 +77,8 @@ func TestServer_GetCapabilities_HonestFlags(t *testing.T) {
 
 	require.NoError(t, err)
 	require.NotNil(t, caps)
-	assert.True(t, caps.SupportsLinkedClones,
-		"libvirt advertises linked clones now that Clone is implemented (issue #153)")
+	assert.False(t, caps.SupportsLinkedClones,
+		"libvirt linked clones are disabled: the manager must refuse them before calling Clone")
 	assert.True(t, caps.SupportsImageImport,
 		"libvirt advertises image import now that ImagePrepare is implemented (issue #154)")
 	assert.True(t, caps.SupportsSnapshots,

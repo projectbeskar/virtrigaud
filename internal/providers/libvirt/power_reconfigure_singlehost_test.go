@@ -40,6 +40,11 @@ import (
 // commit before the Power/Reconfigure cores were refactored) with
 // VIRTRIGAUD_UPDATE_CALLSEQ_GOLDEN=1. A change to any single-host sequence —
 // which would restart the ADR-0008 D5 soak window — fails here.
+//
+// Deliberately regenerated once since (delete-safety fix, review item 5): a
+// successful start (power-on, power-on-define-fails, power-reboot,
+// power-reboot-stop-fails) is followed by the read-only linked-clone
+// dependents count — `dumpxml` of the domain and `list --all --uuid`.
 
 // callSeqGoldenFile is the golden single-host call sequences, captured on
 // origin/main before the slice 2 refactor.
@@ -55,7 +60,7 @@ const callSeqUpdateEnv = "VIRTRIGAUD_UPDATE_CALLSEQ_GOLDEN"
 const opsDomainName = "vrcallseq-web"
 
 // opsDiskPath is the primary disk the fake domblklist reports.
-const opsDiskPath = "/var/lib/libvirt/images/" + opsDomainName + "-disk.qcow2"
+var opsDiskPath string // inside fixtureImagesDir (set by TestMain)
 
 // opsFakeVirsh is a scriptable fake `virsh`. It routes on the -c URI (the host
 // tag is the URI path, "local" without -c), logs every call as
@@ -78,7 +83,8 @@ nodom() { echo "error: failed to get domain '$1'" >&2; exit 1; }
 if [ -f "$d/dead" ]; then kill -9 $$; fi
 if [ -f "$d/nolibvirtd" ]; then echo "error: failed to connect to the hypervisor" >&2; exit 1; fi
 case "$1" in
-  list) cat "$d/list.txt" ;;
+  list) if [ "$3" = "--uuid" ]; then cat "$d/uuids.txt" 2>/dev/null; else cat "$d/list.txt"; fi ;;
+  pool-dumpxml) printf "<pool type='dir'><name>default</name><target><path>%s</path></target></pool>\n" "$FAKE_POOL_DIR" ;;
   dumpxml) if [ -f "$d/dom-$2.xml" ]; then cat "$d/dom-$2.xml"; else nodom "$2"; fi ;;
   dominfo)
     [ -f "$d/dom-$2.xml" ] || nodom "$2"
@@ -99,7 +105,7 @@ case "$1" in
       *--details*)
         t=file; if [ -f "$d/disktype" ]; then t=$(cat "$d/disktype"); fi
         src="$FAKE_DISK_PATH"; if [ -f "$d/disksource" ]; then src=$(cat "$d/disksource"); fi
-        printf ' Type   Device   Target   Source\n------------------------------------------------\n %s   disk     vda      %s\n file   cdrom    hda      /var/lib/libvirt/images/web-cidata.iso\n' "$t" "$src" ;;
+        printf ' Type   Device   Target   Source\n------------------------------------------------\n %s   disk     vda      %s\n file   cdrom    hda      %s/web-cidata.iso\n' "$t" "$src" "$FAKE_POOL_DIR" ;;
       *) printf ' Target   Source\n------------------------------------------------\n vda      %s\n' "$FAKE_DISK_PATH" ;;
     esac ;;
   domblkinfo)
@@ -139,6 +145,7 @@ func newOpsFixture(t *testing.T, hosts map[string]map[string]string) *routingFix
 			}
 		}
 		require.NoError(t, os.WriteFile(filepath.Join(hd, "list.txt"), []byte(list.String()), 0o600))
+		writeFixtureUUIDs(t, hd, domains)
 	}
 	shim := "#!/bin/sh\nprintf 'local %s %s\\n' \"$(basename \"$0\")\" \"$*\" >> \"$FAKE_VIRSH_DIR/calls.log\"\n"
 	bin := t.TempDir()
@@ -146,7 +153,9 @@ func newOpsFixture(t *testing.T, hosts map[string]map[string]string) *routingFix
 	for _, name := range []string{"sudo", "rm"} {
 		require.NoError(t, os.WriteFile(filepath.Join(bin, name), []byte(shim), 0o755)) //nolint:gosec // test shim must be executable
 	}
+	installQemuImgShim(t, bin)
 	t.Setenv("FAKE_VIRSH_DIR", dir)
+	useFixtureImages(t)
 	t.Setenv("FAKE_DISK_PATH", opsDiskPath)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	return &routingFixture{t: t, dir: dir}

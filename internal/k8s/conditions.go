@@ -60,7 +60,20 @@ const (
 	// resolved by retrying: an operator must adopt the existing resource through
 	// the adoption flow, remove it, or rename this object.
 	ReasonProviderConflict = "ProviderConflict"
+	// ReasonDeleteBlocked indicates the provider refused to delete the
+	// resource because other resources on the hypervisor still depend on it —
+	// e.g. a libvirt linked clone whose disk is backed by this VM's disk.
+	// Deleting it would destroy their data, so the finalizer is kept and the
+	// delete is retried until the dependents are gone.
+	ReasonDeleteBlocked = "DeleteBlocked"
 )
+
+// ConditionLinkedClonesDependOnDisk is True on a VirtualMachine whose disk other
+// VMs on its hypervisor use as their backing file (libvirt linked clones made
+// by an earlier release) — as the provider counted when the VM was last
+// started. Powering the VM on while those clones are shut off corrupts them.
+// It is a warning only: nothing is refused. Its reason is the same string.
+const ConditionLinkedClonesDependOnDisk = "LinkedClonesDependOnDisk"
 
 // Placement / scheduling condition reasons (ADR-0007 P1, D4). Surfaced on a
 // VirtualMachine's Provisioning=False condition when the operator scheduler

@@ -530,15 +530,18 @@ func (r *VMSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *inf
 
 	logger.Info("Deleting VM snapshot")
 
-	// Update phase
-	snapshot.Status.Phase = infrav1beta1.SnapshotPhaseDeleting
-	k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionDeleting,
-		metav1.ConditionTrue, infrav1beta1.VMSnapshotReasonDeleting,
-		"Snapshot deletion initiated")
+	// Update phase — once: a delete the provider refused or failed is
+	// retried without announcing a new deletion each time.
+	if !snapshotDeleteRetrying(snapshot) {
+		snapshot.Status.Phase = infrav1beta1.SnapshotPhaseDeleting
+		k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionDeleting,
+			metav1.ConditionTrue, infrav1beta1.VMSnapshotReasonDeleting,
+			"Snapshot deletion initiated")
 
-	_ = r.updateStatus(ctx, snapshot) //nolint:errcheck // Status update errors logged elsewhere
+		_ = r.updateStatus(ctx, snapshot) //nolint:errcheck // Status update errors logged elsewhere
 
-	r.Recorder.Event(snapshot, "Normal", "SnapshotDeleting", "Started snapshot deletion")
+		r.Recorder.Event(snapshot, "Normal", "SnapshotDeleting", "Started snapshot deletion")
+	}
 
 	// Get the VM to find the provider
 	vm := &infrav1beta1.VirtualMachine{}
@@ -560,6 +563,10 @@ func (r *VMSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *inf
 		}
 	}
 
+	// removed is the Normal event recorded once the finalizer is released
+	// ("" = none: nothing was confirmed deleted).
+	removed := "VMSnapshot removed; there was no provider snapshot to delete"
+
 	// Only call provider if VM still exists and we have a snapshot ID
 	if !vmNotFound && snapshot.Status.SnapshotID != "" && vm.Status.ID != "" {
 		// Get the provider. A Provider in another namespace that does not select
@@ -571,32 +578,70 @@ func (r *VMSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *inf
 		}
 
 		// Address the VM (ADR-0007 Addendum A, A1) before resolving a client for
-		// the Provider. An ungranted cross-namespace Provider, a clustered VM
-		// with no confirmed host binding, or a VM whose spec.providerRef no
-		// longer names the Provider it is bound through, is never sent a per-VM
-		// call; like any other provider-side failure here, that is reported and
-		// the finalizer is still removed (the snapshot delete is best-effort).
+		// the Provider. An ungranted (or revoked) cross-namespace Provider, a
+		// clustered VM with no confirmed host binding, or a VM whose
+		// spec.providerRef no longer names the Provider it is bound through, is
+		// never sent a per-VM call. The snapshot is then still on the
+		// hypervisor: the finalizer stays and the delete is retried with
+		// backoff, unless force-delete says to leave the snapshot behind.
 		refErr := err
 		var ref contracts.VMRef
 		if refErr == nil {
 			ref, refErr = vmRefFor(vm, provider)
 		}
 		if refErr != nil {
-			logger.Info("Not deleting the provider snapshot: no provider call can be made for the VM", "reason", vmRefErrorReason(refErr), "error", refErr.Error())
-			r.Recorder.Event(snapshot, "Warning", "SnapshotDeleteFailed", fmt.Sprintf("Failed to delete snapshot: %v", refErr))
+			if !hasSnapshotForceDeleteAnnotation(snapshot) {
+				return r.retainForUnaddressableSnapshotDelete(ctx, snapshot, refErr), nil
+			}
+			providerName := ""
+			if provider != nil {
+				providerName = provider.Name
+			}
+			msg := fmt.Sprintf("%s=true: removing the VMSnapshot although no provider call can be made for VM %q (%s), so "+
+				"snapshot %q was not deleted (provider %s); it is left on the hypervisor. Detail: %v", forceDeleteAnnotation,
+				vm.Status.ID, vmRefErrorReason(refErr), snapshot.Status.SnapshotID, providerName, refErr)
+			logger.Info("No provider call can be made for the VM but force-delete annotation is set; removing finalizer, the snapshot is left on the hypervisor",
+				"snapshot_id", snapshot.Status.SnapshotID, "vm_id", vm.Status.ID, "reason", vmRefErrorReason(refErr), "annotation", forceDeleteAnnotation)
+			r.Recorder.Event(snapshot, corev1.EventTypeWarning, eventReasonSnapshotLeftOnHypervisor, msg)
+			removed = ""
 		} else if providerInstance, err := r.getProviderInstance(ctx, provider); err != nil {
 			logger.Error(err, "Failed to get provider instance")
 			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		} else {
 			// Delete the snapshot via provider
 			logger.Info("Calling provider to delete snapshot", "snapshot_id", snapshot.Status.SnapshotID, "vm_id", vm.Status.ID)
-			if _, err := providerInstance.SnapshotDelete(ctx, ref, snapshot.Status.SnapshotID); err != nil {
-				logger.Error(err, "Failed to delete snapshot via provider")
-				// Log the error but continue with finalizer removal
-				// The snapshot may already be deleted or the VM may be gone
-				r.Recorder.Event(snapshot, "Warning", "SnapshotDeleteFailed", fmt.Sprintf("Failed to delete snapshot: %v", err))
-			} else {
+			_, err := providerInstance.SnapshotDelete(ctx, ref, snapshot.Status.SnapshotID)
+			switch {
+			case err == nil:
 				logger.Info("Snapshot deleted successfully via provider")
+				removed = "Snapshot deleted from the provider"
+			case contracts.IsNotFound(err):
+				logger.Info("The provider snapshot is already gone", "snapshot_id", snapshot.Status.SnapshotID)
+				removed = "The provider snapshot was already gone"
+			case hasSnapshotForceDeleteAnnotation(snapshot):
+				// The operator opted out: release the finalizer although the
+				// snapshot is still on the hypervisor, and say which one.
+				msg := fmt.Sprintf("%s=true: removing the VMSnapshot although the provider did not delete snapshot %q of VM %q "+
+					"(provider %s); it is left on the hypervisor. Provider detail: %s", forceDeleteAnnotation,
+					snapshot.Status.SnapshotID, vm.Status.ID, provider.Name, sanitizeProviderDetail(err))
+				logger.Error(err, "Provider snapshot delete failed but force-delete annotation is set; removing finalizer, the snapshot is left on the hypervisor",
+					"snapshot_id", snapshot.Status.SnapshotID, "vm_id", vm.Status.ID, "provider", provider.Name, "annotation", forceDeleteAnnotation)
+				r.Recorder.Event(snapshot, corev1.EventTypeWarning, eventReasonSnapshotLeftOnHypervisor, msg)
+				removed = ""
+			case contracts.IsVMDiskInUse(err):
+				// The provider refused BEFORE changing anything: other VMs
+				// on the hypervisor depend on the VM's disk (e.g. a libvirt
+				// linked clone), and deleting the snapshot would rewrite
+				// it. Keep the finalizer — releasing it would leave the
+				// snapshot on the hypervisor with nothing tracking it —
+				// say why, and re-check.
+				return r.retainForBlockedSnapshotDelete(ctx, snapshot, err), nil
+			default:
+				// Any other failure (a host or provider error, an open
+				// breaker, a check that could not run): the snapshot may
+				// still be on the hypervisor, so the finalizer stays and the
+				// delete is retried with backoff.
+				return r.retainForFailedSnapshotDelete(ctx, snapshot, err), nil
 			}
 		}
 	}
@@ -608,10 +653,184 @@ func (r *VMSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *inf
 		return ctrl.Result{}, err
 	}
 
-	r.Recorder.Event(snapshot, "Normal", "SnapshotDeleted", "Snapshot deleted successfully")
-	logger.Info("VM snapshot deleted successfully")
+	if removed != "" {
+		r.Recorder.Event(snapshot, "Normal", "SnapshotDeleted", removed)
+	}
+	logger.Info("VMSnapshot finalizer removed", "outcome", removed)
 
 	return ctrl.Result{}, nil
+}
+
+// hasSnapshotForceDeleteAnnotation reports whether the VMSnapshot carries the
+// force-delete escape hatch (the VirtualMachine's annotation,
+// forceDeleteAnnotation, set to "true"): a snapshot delete that fails, is
+// refused, or cannot be made then releases the finalizer, leaving the
+// snapshot on the hypervisor (a SnapshotLeftOnHypervisor Warning names it).
+func hasSnapshotForceDeleteAnnotation(snapshot *infrav1beta1.VMSnapshot) bool {
+	return snapshot.Annotations[forceDeleteAnnotation] == "true"
+}
+
+// snapshotDeleteBlocked reports whether snapshot's delete was last refused by
+// the provider (Ready=False/DeleteBlocked, retainForBlockedSnapshotDelete).
+func snapshotDeleteBlocked(snapshot *infrav1beta1.VMSnapshot) bool {
+	c := meta.FindStatusCondition(snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionReady)
+	return c != nil && c.Status == metav1.ConditionFalse && c.Reason == conditions.ReasonDeleteBlocked
+}
+
+// snapshotDeleteRetrying reports whether snapshot's delete already started and
+// is being retried: refused (DeleteBlocked), failed (ProviderError) or not
+// possible yet (a vmRefErrorReason) — Deleting=False, which only the retain
+// paths set.
+func snapshotDeleteRetrying(snapshot *infrav1beta1.VMSnapshot) bool {
+	c := meta.FindStatusCondition(snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionDeleting)
+	return c != nil && c.Status == metav1.ConditionFalse
+}
+
+// eventReasonSnapshotLeftOnHypervisor is the Warning event reason recorded
+// when force-delete removes a VMSnapshot whose provider snapshot could not be
+// deleted.
+const eventReasonSnapshotLeftOnHypervisor = "SnapshotLeftOnHypervisor"
+
+// Backoff of a provider SnapshotDelete that failed or could not be made
+// (retainForFailedSnapshotDelete, retainForUnaddressableSnapshotDelete).
+const (
+	// snapshotDeleteRetryMin is the first retry delay.
+	snapshotDeleteRetryMin = 15 * time.Second
+	// snapshotDeleteRetryMax caps the delay.
+	snapshotDeleteRetryMax = 5 * time.Minute
+)
+
+// snapshotDeleteRetryAfter is the delay before the next attempt of a failing
+// snapshot delete: the time since the first failure (the Deleting condition's
+// last transition to False), so it roughly doubles per attempt, within
+// [snapshotDeleteRetryMin, snapshotDeleteRetryMax].
+func snapshotDeleteRetryAfter(snapshot *infrav1beta1.VMSnapshot, now time.Time) time.Duration {
+	if !snapshotDeleteRetrying(snapshot) {
+		return snapshotDeleteRetryMin
+	}
+	c := meta.FindStatusCondition(snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionDeleting)
+	d := now.Sub(c.LastTransitionTime.Time)
+	switch {
+	case d < snapshotDeleteRetryMin:
+		return snapshotDeleteRetryMin
+	case d > snapshotDeleteRetryMax:
+		return snapshotDeleteRetryMax
+	}
+	return d
+}
+
+// retainForFailedSnapshotDelete keeps the finalizer of a VMSnapshot whose
+// provider SnapshotDelete failed for any reason other than "already gone" or
+// a VM_DISK_IN_USE refusal — an unreachable host, an open circuit breaker, a
+// disk check that could not run: the snapshot may still be on the hypervisor
+// (with the guest's RAM, for a memory snapshot), and a VM whose snapshot
+// metadata remains cannot be undefined. It records Ready=False and
+// Deleting=False with reason ProviderError and the way out, a Warning event,
+// and retries with backoff (snapshotDeleteRetryAfter) until the delete
+// succeeds or the force-delete annotation is set.
+func (r *VMSnapshotReconciler) retainForFailedSnapshotDelete(ctx context.Context, snapshot *infrav1beta1.VMSnapshot, err error) ctrl.Result {
+	now := time.Now()
+	retryAfter := snapshotDeleteRetryAfter(snapshot, now)
+	logging.FromContext(ctx).Error(err, "Provider snapshot delete failed; retaining finalizer and retrying",
+		"snapshot_id", snapshot.Status.SnapshotID, "retryAfter", retryAfter.String())
+	metrics.RecordError(errReasonProviderDelete, metrics.ComponentManager)
+
+	msg := fmt.Sprintf("Provider could not delete the snapshot; the VMSnapshot is kept (the snapshot may still be on the hypervisor) "+
+		"and the delete is retried (next in %s). Set %s=true to remove it anyway. Provider detail: %s",
+		retryAfter, forceDeleteAnnotation, sanitizeProviderDetail(err))
+	r.Recorder.Event(snapshot, corev1.EventTypeWarning, "SnapshotDeleteFailed", msg)
+	snapshot.Status.Message = msg
+	for _, condType := range []string{infrav1beta1.VMSnapshotConditionReady, infrav1beta1.VMSnapshotConditionDeleting} {
+		meta.SetStatusCondition(&snapshot.Status.Conditions, metav1.Condition{
+			Type:               condType,
+			Status:             metav1.ConditionFalse,
+			Reason:             infrav1beta1.VMSnapshotReasonProviderError,
+			Message:            msg,
+			ObservedGeneration: snapshot.Generation,
+			LastTransitionTime: metav1.NewTime(now),
+		})
+	}
+	// Status update errors are intentionally ignored to avoid blocking reconciliation.
+	_ = r.updateStatus(ctx, snapshot)
+	return ctrl.Result{RequeueAfter: retryAfter}
+}
+
+// retainForUnaddressableSnapshotDelete keeps the finalizer of a VMSnapshot
+// whose provider SnapshotDelete cannot be made at all: the VM still exists,
+// but no provider call can be made for it (vmRefFor) — a cross-namespace
+// Provider that does not, or no longer, allow this namespace; a clustered VM
+// with no confirmed host binding (e.g. while it is re-placed); a
+// spec.providerRef that no longer names the Provider it is bound through. The
+// snapshot is then still on the hypervisor, and releasing the finalizer would
+// leave it untracked. It records Ready=False and Deleting=False with
+// vmRefErrorReason(err) and the way out, a Warning event, and retries with
+// backoff (snapshotDeleteRetryAfter) until a call can be made, the VM is gone,
+// or the force-delete annotation is set.
+func (r *VMSnapshotReconciler) retainForUnaddressableSnapshotDelete(ctx context.Context, snapshot *infrav1beta1.VMSnapshot, err error) ctrl.Result {
+	now := time.Now()
+	retryAfter := snapshotDeleteRetryAfter(snapshot, now)
+	reason := vmRefErrorReason(err)
+	logging.FromContext(ctx).Info("No provider call can be made for the VM; retaining the VMSnapshot finalizer and retrying",
+		"snapshot_id", snapshot.Status.SnapshotID, "reason", reason, "retryAfter", retryAfter.String(), "error", err.Error())
+
+	msg := fmt.Sprintf("%s. The VMSnapshot is kept (the snapshot may still be on the hypervisor) and its delete is retried "+
+		"(next in %s). Set %s=true to remove it anyway, leaving the snapshot on the hypervisor. Detail: %v",
+		vmRefWaitMessage(err), retryAfter, forceDeleteAnnotation, err)
+	r.Recorder.Event(snapshot, corev1.EventTypeWarning, "SnapshotDeleteFailed", msg)
+	snapshot.Status.Message = msg
+	for _, condType := range []string{infrav1beta1.VMSnapshotConditionReady, infrav1beta1.VMSnapshotConditionDeleting} {
+		meta.SetStatusCondition(&snapshot.Status.Conditions, metav1.Condition{
+			Type:               condType,
+			Status:             metav1.ConditionFalse,
+			Reason:             reason,
+			Message:            msg,
+			ObservedGeneration: snapshot.Generation,
+			LastTransitionTime: metav1.NewTime(now),
+		})
+	}
+	// Status update errors are intentionally ignored to avoid blocking reconciliation.
+	_ = r.updateStatus(ctx, snapshot)
+	return ctrl.Result{RequeueAfter: retryAfter}
+}
+
+// retainForBlockedSnapshotDelete keeps the finalizer of a VMSnapshot whose
+// provider SnapshotDelete was refused with VM_DISK_IN_USE (contracts.IsVMDiskInUse) — other VMs on the
+// hypervisor depend on the VM's disk (e.g. linked clones backed by it), and
+// deleting the snapshot would rewrite that disk underneath them. The provider
+// changed nothing, so the snapshot stays on the hypervisor and tracked. It
+// records Ready=False/DeleteBlocked (and Deleting=False) with the way out, a
+// Warning event when the refusal is new, and re-checks every
+// vmDeleteBlockedRetryInterval — the VirtualMachine's cadence — until the
+// dependent VMs are gone or the force-delete annotation is set.
+func (r *VMSnapshotReconciler) retainForBlockedSnapshotDelete(ctx context.Context, snapshot *infrav1beta1.VMSnapshot, err error) ctrl.Result {
+	logging.FromContext(ctx).Info("Provider refused to delete the snapshot because other VMs depend on the VM's disk; retaining finalizer",
+		"snapshot_id", snapshot.Status.SnapshotID, "retryAfter", vmDeleteBlockedRetryInterval.String(), "error", err.Error())
+	metrics.RecordError(errReasonProviderDelete, metrics.ComponentManager)
+
+	msg := fmt.Sprintf("Provider refused to delete the snapshot: other VMs on its hypervisor depend on the VM's disk (e.g. linked clones of the VM), "+
+		"and deleting the snapshot would rewrite it. Delete them first, or set %s=true to remove this VMSnapshot and leave the snapshot "+
+		"on the hypervisor (re-checking every %s). Provider detail: %s",
+		forceDeleteAnnotation, vmDeleteBlockedRetryInterval, sanitizeProviderDetail(err))
+	if !snapshotDeleteBlocked(snapshot) {
+		r.Recorder.Event(snapshot, corev1.EventTypeWarning, conditions.ReasonDeleteBlocked, msg)
+	}
+	before := snapshot.Status.DeepCopy()
+	snapshot.Status.Message = msg
+	for _, condType := range []string{infrav1beta1.VMSnapshotConditionReady, infrav1beta1.VMSnapshotConditionDeleting} {
+		meta.SetStatusCondition(&snapshot.Status.Conditions, metav1.Condition{
+			Type:               condType,
+			Status:             metav1.ConditionFalse,
+			Reason:             conditions.ReasonDeleteBlocked,
+			Message:            msg,
+			ObservedGeneration: snapshot.Generation,
+		})
+	}
+	// A recheck of the same refusal changes nothing: don't write it again.
+	// Status update errors are intentionally ignored to avoid blocking reconciliation.
+	if !equality.Semantic.DeepEqual(before, &snapshot.Status) {
+		_ = r.updateStatus(ctx, snapshot)
+	}
+	return ctrl.Result{RequeueAfter: vmDeleteBlockedRetryInterval}
 }
 
 // updateStatus updates the snapshot status

@@ -23,6 +23,7 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"path/filepath"
 
 	golibvirt "github.com/digitalocean/go-libvirt"
 
@@ -336,16 +337,27 @@ func (v *VirshProvider) copyDiskToRemote(ctx context.Context, localPath, volumeN
 	}
 	defer func() { _ = f.Close() }()
 
-	// remotePath is caller-derived (volumeName), so it is never interpolated
-	// into shell text: the redirect lives in a fixed `sh -c` script and the
-	// path is passed as its positional parameter "$1" (writeStdinToFileArgv),
-	// with the whole argv shell-quoted by shellJoin.
-	remoteCmd, err := shellJoin(writeStdinToFileArgv(remotePath))
+	// The disk is written in a private directory next to remotePath and
+	// renamed into place (diskWriteDir), created with vmDiskMode, so Create
+	// adopts it without a chmod. The path is caller-derived (volumeName), so
+	// it is never interpolated into shell text: the redirect lives in a fixed
+	// `sh -c` script and the path is passed as its positional parameter "$1"
+	// (writeVMDiskArgv), with the whole argv shell-quoted by shellJoin.
+	wd, err := newDiskWriteDir(ctx, v, remoteDir)
+	if err != nil {
+		return "", fmt.Errorf("disk copy to remote host: %w", err)
+	}
+	defer wd.cleanup(ctx)
+	name := filepath.Base(remotePath)
+	remoteCmd, err := shellJoin(writeVMDiskArgv(wd.file(name)))
 	if err != nil {
 		return "", fmt.Errorf("build remote copy command: %w", err)
 	}
 	if err := runSSHStdin(ctx, v, f, remoteCmd); err != nil {
 		return "", fmt.Errorf("disk copy to remote host failed: %w", err)
+	}
+	if err := wd.publish(ctx, name, remotePath); err != nil {
+		return "", fmt.Errorf("disk copy to remote host: %w", err)
 	}
 
 	log.Printf("INFO Successfully copied disk file to remote host: %s", remotePath)

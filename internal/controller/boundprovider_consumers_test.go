@@ -479,6 +479,27 @@ func TestVMSnapshot_RefusesAVMBoundElsewhere(t *testing.T) {
 		assert.Equal(t, k8s.ReasonProviderRefMismatch, c.Reason)
 		assert.Equal(t, infrav1beta1.SnapshotPhaseCreating, snap.Status.Phase)
 	})
+
+	t.Run("delete keeps the finalizer", func(t *testing.T) {
+		ctx := context.Background()
+		snap := snapshot.DeepCopy()
+		snap.Finalizers = []string{"snapshot.infra.virtrigaud.io/finalizer"}
+		snap.Status.SnapshotID = "snap-1"
+		r := newR(vm, provB, snap)
+		require.NoError(t, r.Delete(ctx, snap))
+		marked := &infrav1beta1.VMSnapshot{}
+		require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(snap), marked))
+
+		res, err := r.handleDeletion(ctx, marked)
+		require.NoError(t, err)
+		assert.Greater(t, res.RequeueAfter, time.Duration(0))
+		kept := &infrav1beta1.VMSnapshot{}
+		require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(snap), kept), "the snapshot may still be on the hypervisor")
+		c := meta.FindStatusCondition(kept.Status.Conditions, infrav1beta1.VMSnapshotConditionDeleting)
+		require.NotNil(t, c)
+		assert.Equal(t, metav1.ConditionFalse, c.Status)
+		assert.Equal(t, k8s.ReasonProviderRefMismatch, c.Reason)
+	})
 }
 
 func TestMigrationPowerOff_RefusesASourceBoundElsewhere(t *testing.T) {

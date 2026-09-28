@@ -38,11 +38,13 @@ import (
 // unique to one create and cleaned up.
 
 // createHostVirshScript extends fakeVirshScript with what a full create needs:
-// `list --all` reports the defined domains, and `define <file>` records the
+// `list --all` reports the defined domains, `define <file>` records the
 // domain (by name and by UUID) the way libvirt would, refusing a name that is
-// already defined. A file named fail-define in the host directory makes define
-// fail. With no -c URI (runRemoteVirshCommand on a non-system URI) the host is
-// $FAKE_DEFAULT_HOST.
+// already defined, and `undefine` forgets it again. A file named fail-define
+// in the host directory makes define fail. `vol-create <pool> <file>` records
+// the volume definition it reads in vol-create.xml, and `vol-path <name>
+// --pool <pool>` answers from vol-<pool>-<name>. With no -c URI
+// (runRemoteVirshCommand on a non-system URI) the host is $FAKE_DEFAULT_HOST.
 const createHostVirshScript = `#!/bin/sh
 uri=""
 if [ "$1" = "-c" ]; then uri="$2"; shift 2; fi
@@ -75,6 +77,17 @@ case "$1" in
     echo "$2" > "$d/defined-path"
     if [ -f "$d/define-reply-lost" ]; then echo "error: Disconnected from the hypervisor due to end of file" >&2; exit 1; fi
     echo "Domain '$name' defined from $2" ;;
+  undefine)
+    f="$d/dom-$2.xml"
+    if [ ! -f "$f" ]; then echo "error: failed to get domain '$2'" >&2; exit 1; fi
+    name=$(sed -n 's:.*<name>\(.*\)</name>.*:\1:p' "$f" | head -n 1)
+    uuid=$(sed -n 's:.*<uuid>\(.*\)</uuid>.*:\1:p' "$f" | head -n 1)
+    rm -f "$d/dom-$name.xml" "$d/dom-$uuid.xml"
+    for l in names uuids; do
+      if [ -f "$d/$l" ]; then grep -v -x -F -e "$name" -e "$uuid" "$d/$l" > "$d/$l.tmp" || true; mv "$d/$l.tmp" "$d/$l"; fi
+    done
+    echo "Domain '$2' has been undefined" ;;
+  snapshot-list) if [ -f "$d/snapshots" ]; then cat "$d/snapshots"; fi ;;
   domuuid)
     if [ -f "$d/fail-domuuid" ]; then echo "error: failed to connect to the hypervisor" >&2; exit 1; fi
     if [ -f "$d/dom-$2.xml" ]; then sed -n 's:.*<uuid>\(.*\)</uuid>.*:\1:p' "$d/dom-$2.xml" | head -n 1; exit 0; fi
@@ -82,7 +95,10 @@ case "$1" in
   pool-list) printf ' Name      State    Autostart\n-------------------------------\n default   active   yes\n\n' ;;
   pool-info) printf 'Name:           default\nState:          running\n' ;;
   pool-dumpxml) printf "<pool type='dir'><name>default</name><target><path>%s</path></target></pool>\n<!-- /var/lib/libvirt/images -->\n" "$(cat "$d/pooldir")" ;;
-  vol-path) exec cat "$d/vol-$3-$5" ;;
+  vol-create) cat "$3" > "$d/vol-create.xml" ;;
+  vol-path)
+    if [ "$3" = "--pool" ]; then exec cat "$d/vol-$4-$2"; fi
+    exec cat "$d/vol-$3-$5" ;;
   *) exit 0 ;;
 esac
 `

@@ -426,7 +426,7 @@ func TestImagePrepareIdentity_FreshPrepare(t *testing.T) {
 	sudo := h.log("sudo")
 	assert.Contains(t, sudo, "-n restorecon -- "+filepath.Join(h.images, imagePrepareStagingPrefix))
 	assert.NotContains(t, sudo, "chown")
-	assert.NotContains(t, sudo, "777")
+	assert.NotContains(t, sudo, "chmod 777")
 	assert.Contains(t, h.log("virsh"), "pool-refresh --pool default")
 
 	// Create can consume it: the artifact passes the #334 confinement.

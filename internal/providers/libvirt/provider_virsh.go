@@ -19,6 +19,7 @@ package libvirt
 import (
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"log"
@@ -619,23 +620,25 @@ func checkDomainOwner(ctx context.Context, vp *VirshProvider, host hostconn.Host
 	return domainOwnership{present: true}, nil
 }
 
-// deleteExistingDomain tears down an existing domain on vp's host: it records
-// the domain's disks and cloud-init ISO, force-stops and undefines it, then
-// removes those files. Shared by the single-host and the owner-checked
-// clustered delete.
+// deleteExistingDomain tears down an existing domain on vp's host. Shared by
+// the single-host and the owner-checked clustered delete.
+//
+// It first reads the definition and plans what to remove (planDomainDeletion):
+// the domain's OWN top-level disk files that lie directly inside the storage
+// pool or an allowed image directory, the files below them in their backing
+// chains that are its own (ownChainFiles: named after its disk, used by no
+// other domain — what its external snapshots left), and its VirtRigaud
+// cloud-init seed directory — never another backing file (a linked clone's
+// source disk, a base image), cdrom or floppy media, or a file elsewhere on
+// the host. BEFORE anything is changed it
+// refuses the delete, leaving the domain fully intact, while another domain on
+// the host uses one of those disk files as a disk or backing file (a linked
+// clone of this VM; diskDependentsError). Only then does it force-stop and
+// undefine the domain and remove the planned files.
 func (p *Provider) deleteExistingDomain(ctx context.Context, vp *VirshProvider, id string) (string, error) {
-	// Get disk paths before deleting the domain
-	diskPaths, err := domainDiskPaths(ctx, vp, id)
+	plan, err := p.planDomainDeletion(ctx, vp, id)
 	if err != nil {
-		log.Printf("WARN Failed to get disk paths for %s: %v", id, err)
-		// Continue with deletion even if we can't get disk paths
-	}
-
-	// Get cloud-init ISO path before deleting the domain
-	cloudInitISOPath, err := getCloudInitISOPath(ctx, vp, id)
-	if err != nil {
-		log.Printf("WARN Failed to get cloud-init ISO path for %s: %v", id, err)
-		// Continue with deletion
+		return "", err
 	}
 
 	// Stop the domain if running
@@ -644,16 +647,15 @@ func (p *Provider) deleteExistingDomain(ctx context.Context, vp *VirshProvider, 
 		// Continue with undefine even if destroy fails
 	}
 
-	// Remove the domain definition (this should also remove storage if --remove-all-storage is used)
-	// However, we'll explicitly delete disks to ensure cleanup
+	// Remove the domain definition, then its planned files explicitly.
 	if err := vp.undefineDomain(ctx, id); err != nil {
 		return "", contracts.NewRetryableError("failed to undefine domain", err)
 	}
+	p.linkedDeps.drop(plan.uuid)
 
-	// Delete disk images
-	if len(diskPaths) > 0 {
-		log.Printf("INFO Deleting %d disk(s) for VM %s", len(diskPaths), id)
-		for _, diskPath := range diskPaths {
+	if len(plan.disks) > 0 {
+		log.Printf("INFO Deleting %d disk(s) for VM %s", len(plan.disks), id)
+		for _, diskPath := range plan.disks {
 			if err := deleteDiskFile(ctx, vp, diskPath); err != nil {
 				log.Printf("WARN Failed to delete disk %s: %v", diskPath, err)
 				// Continue with other deletions
@@ -663,9 +665,8 @@ func (p *Provider) deleteExistingDomain(ctx context.Context, vp *VirshProvider, 
 		}
 	}
 
-	// Delete cloud-init ISO
-	if cloudInitISOPath != "" {
-		if err := deleteCloudInitResources(ctx, vp, id, cloudInitISOPath); err != nil {
+	if plan.seedDir != "" {
+		if err := deleteCloudInitResources(ctx, vp, id, plan.seedDir); err != nil {
 			log.Printf("WARN Failed to delete cloud-init resources: %v", err)
 			// Continue - not a critical error
 		} else {
@@ -677,91 +678,338 @@ func (p *Provider) deleteExistingDomain(ctx context.Context, vp *VirshProvider, 
 	return "", nil
 }
 
+// domainDeletionPlan is what deleteExistingDomain removes once the domain is
+// undefined.
+type domainDeletionPlan struct {
+	// uuid is the domain's UUID (its linked-clone dependents count is dropped
+	// once it is undefined).
+	uuid string
+	// disks are the canonical host paths of the domain's own disk files that
+	// may be removed (deletableDiskFiles) and that no other domain uses: its
+	// top-level disks, then its own backing-chain files (ownChainFiles).
+	disks []string
+	// seedDir is the domain's VirtRigaud cloud-init seed directory, or "".
+	seedDir string
+}
+
+// planDomainDeletion reads the definition of domain id (a name, or the UUID of
+// an owner-checked clustered domain) on vp's host and returns what its delete
+// removes, or the refusal of the delete — before anything is changed.
+//
+// A definition that cannot be read or parsed fails the delete with a retryable
+// error and leaves the domain intact: undefining it anyway would strand its
+// disks with no definition left to find them by (a domain undefined meanwhile
+// is found absent by the retry). A disk file outside the storage pool and the
+// allowed image directories is left in place and logged.
+// When another domain uses one of the remaining disk files, the delete is
+// refused (diskDependentsError); when that cannot be established, it fails
+// with a retryable error. Either way the domain is left untouched. The seed
+// directory is kept (and logged) while another domain still references a file
+// in it — a clone's CD-ROM points at its source VM's seed ISO, and a domain
+// whose CD-ROM file is gone no longer starts.
+func (p *Provider) planDomainDeletion(ctx context.Context, vp *VirshProvider, id string) (domainDeletionPlan, error) {
+	res, err := vp.runVirshCommand(ctx, "dumpxml", id)
+	if err != nil {
+		return domainDeletionPlan{}, guardCheckFailed(guardOpDelete, id, fmt.Errorf("read the domain definition: %w", err))
+	}
+	doc, err := parseDomainDisks(res.Stdout)
+	if err != nil {
+		return domainDeletionPlan{}, guardCheckFailed(guardOpDelete, id, err)
+	}
+	if doc.Name == "" {
+		doc.Name = id
+	}
+	plan := domainDeletionPlan{uuid: doc.UUID, seedDir: doc.cloudInitSeedDir(p.stagingDir())}
+
+	var deletable []string
+	if disks := doc.diskFiles(); len(disks) > 0 {
+		if deletable, err = p.deletableDiskFiles(ctx, vp, doc.Name, disks); err != nil {
+			return domainDeletionPlan{}, guardCheckFailed(guardOpDelete, doc.Name, err)
+		}
+	}
+	if len(deletable) == 0 && plan.seedDir == "" {
+		return plan, nil
+	}
+
+	others, err := otherDomainsOnHost(ctx, vp, doc.UUID)
+	switch {
+	case err != nil && len(deletable) > 0:
+		return domainDeletionPlan{}, guardCheckFailed(guardOpDelete, doc.Name, err)
+	case err != nil:
+		log.Printf("WARN Keeping the cloud-init seed directory %s of domain %s: could not verify that no other domain uses it: %v",
+			plan.seedDir, doc.Name, err)
+		plan.seedDir = ""
+		return plan, nil
+	}
+	if n := others.using(doc.Name, deletable, deletable); n > 0 {
+		log.Printf("WARN Refusing %s of libvirt domain %s: %d other domain(s) use its disk(s) %v", guardOpDelete, doc.Name, n, deletable)
+		return domainDeletionPlan{}, &diskDependentsError{domain: doc.Name, op: guardOpDelete, dependents: n}
+	}
+	if plan.seedDir != "" && others.useUnder(plan.seedDir) {
+		log.Printf("WARN Keeping the cloud-init seed directory %s of domain %s: another domain references it", plan.seedDir, doc.Name)
+		plan.seedDir = ""
+	}
+	plan.disks = deletable
+	plan.disks = append(plan.disks, p.ownChainFiles(ctx, vp, doc.Name, deletable, others)...)
+	return plan, nil
+}
+
+// ownChainFiles returns the canonical paths of the files BELOW disks in their
+// backing chains (walkBackingChain) that are the domain's own and may go with
+// it (ownChainMembers: the overlays its external snapshots added, down to the
+// disk it was created with), cleared by deletableDiskFiles (a regular file
+// directly inside the storage directories), that no other domain references.
+// Any other chain member — a base image, another VM's disk a linked clone was
+// made from — is never removed, and neither is one another domain still uses
+// (e.g. a linked clone backed by the domain's pre-snapshot disk). A chain that
+// cannot be read is left in place and logged; it never fails the delete.
+func (p *Provider) ownChainFiles(ctx context.Context, vp *VirshProvider, domain string, disks []string, others otherDomains) []string {
+	top := map[string]bool{}
+	for _, d := range disks {
+		top[d] = true
+	}
+	var members []string
+	for _, d := range disks {
+		levels, err := walkBackingChain(ctx, vp, d)
+		if err != nil {
+			log.Printf("WARN Keeping the backing chain of disk %s of domain %s: it could not be read: %v", d, domain, err)
+			continue
+		}
+		for _, f := range ownChainMembers(domain, levels) {
+			if !top[f] {
+				members = append(members, f)
+			}
+		}
+	}
+	if len(members) == 0 {
+		return nil
+	}
+	cleared, err := p.deletableDiskFiles(ctx, vp, domain, members)
+	if err != nil {
+		log.Printf("WARN Keeping the backing chain files %v of domain %s: %v", members, domain, err)
+		return nil
+	}
+	var out []string
+	for _, f := range cleared {
+		if top[f] {
+			continue
+		}
+		if others.using(domain, []string{f}, []string{f}) > 0 {
+			log.Printf("WARN Keeping backing file %s of domain %s: another domain still uses it", f, domain)
+			continue
+		}
+		out = append(out, f)
+	}
+	return out
+}
+
+// deletionDirs returns the directories Delete may remove VM disk files from,
+// as configured (canonicalized later, on the host): the allowed image
+// directories (EnvImageDirs, default DefaultImageDir) and the directory of the
+// default storage pool, where Create and Clone put VM disks. A pool whose
+// directory cannot be read contributes nothing.
+func (p *Provider) deletionDirs(ctx context.Context, vp *VirshProvider) []string {
+	var dirs []string
+	if pol, err := p.imagePolicy(); err == nil {
+		dirs = append(dirs, pol.dirs...)
+	} else {
+		log.Printf("WARN Could not load the allowed image directories: %v", err)
+	}
+	if poolDir := storagePoolDir(ctx, vp, defaultStoragePool); poolDir != "" {
+		dirs = append(dirs, poolDir)
+	}
+	return dirs
+}
+
+// storagePoolDir returns the target directory of storage pool pool on vp's
+// host (`virsh pool-dumpxml`, read structurally), or "" when it has none or
+// cannot be read.
+func storagePoolDir(ctx context.Context, vp *VirshProvider, pool string) string {
+	res, err := vp.runVirshCommand(ctx, "pool-dumpxml", pool)
+	if err != nil {
+		log.Printf("WARN Could not read storage pool %q: %v", pool, err)
+		return ""
+	}
+	var doc struct {
+		XMLName xml.Name `xml:"pool"`
+		Target  struct {
+			Path string `xml:"path"`
+		} `xml:"target"`
+	}
+	if err := xml.Unmarshal([]byte(res.Stdout), &doc); err != nil {
+		log.Printf("WARN Could not parse storage pool %q: %v", pool, err)
+		return ""
+	}
+	dir := strings.TrimSpace(doc.Target.Path)
+	if !strings.HasPrefix(dir, "/") {
+		return ""
+	}
+	return dir
+}
+
+// snapshotOverlaySuffixRE matches what follows "<domain>-disk." in the name of
+// an external-snapshot overlay: libvirt names a disk-only snapshot's overlay
+// after the disk it covers with its suffix replaced by the snapshot's name
+// (sanitizeSnapshotName: letters, digits, '_', '.', '-'; at most 64).
+var snapshotOverlaySuffixRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
+
+// ownChainMembers returns the images below the top of a disk's chain (levels,
+// top first) that are the domain's own: the external-snapshot overlays its
+// snapshots added (<domain>-disk.<snapshot>), down to and including the disk it
+// was created with (<domain>-disk.qcow2, or <domain>-disk for a blank volume).
+// The chain is the domain's own only down to that disk: what lies below it —
+// a base image, the source VM's disk of a linked clone, even one named like
+// <domain>-disk.<x> (another VM called "<domain>-disk.<x>") — is not, and a
+// chain that never reaches that disk, or holds any other name above it, gives
+// nothing.
+func ownChainMembers(domain string, levels []backingLevel) []string {
+	stem := vmDiskVolumeName(domain)
+	var mine []string
+	for i := 1; i < len(levels); i++ {
+		p := levels[i].path
+		name := filepath.Base(p)
+		switch {
+		case name == stem+qcow2Ext || name == stem:
+			return append(mine, p)
+		case strings.HasPrefix(name, stem+".") && snapshotOverlaySuffixRE.MatchString(strings.TrimPrefix(name, stem+".")):
+			mine = append(mine, p)
+		default:
+			return nil
+		}
+	}
+	return nil
+}
+
+// deletableDiskFiles returns, deduplicated and in order, the canonical host
+// paths (resolved with realpath on the host) of those disks that lie DIRECTLY
+// inside a directory Delete may remove disk files from (deletionDirs, itself
+// canonicalized on the host; never a system directory) and that are, as the
+// definition names them, regular files — not symbolic links. Any other disk
+// file is refused — left in place — and logged: Delete never removes a file
+// outside the VM storage directories, whatever a domain definition points at,
+// and never the target of a symlink.
+func (p *Provider) deletableDiskFiles(ctx context.Context, vp *VirshProvider, domain string, disks []string) ([]string, error) {
+	dirs := p.deletionDirs(ctx, vp)
+	canon, err := canonicalizeOnHost(ctx, vp, append(append([]string(nil), disks...), dirs...))
+	if err != nil {
+		return nil, err
+	}
+	allowed := map[string]bool{}
+	for _, d := range canon[len(disks):] {
+		if !isForbiddenImageDir(d) {
+			allowed[d] = true
+		}
+	}
+	var out []string
+	seen := map[string]bool{}
+	for i, disk := range disks {
+		c := canon[i]
+		if !allowed[filepath.Dir(c)] {
+			log.Printf("WARN Not deleting disk %s of domain %s: it is not a file directly inside the storage pool "+
+				"directory or an allowed image directory %v; it is left in place", disk, domain, dirs)
+			continue
+		}
+		if seen[c] {
+			continue
+		}
+		// What the definition names must itself be a regular file: the target
+		// of a symlink is not this domain's to remove (and removing only the
+		// link would strand the target), so neither is touched.
+		kind, err := hostDiskKind(ctx, vp, disk)
+		if err != nil {
+			return nil, err
+		}
+		switch kind {
+		case diskKindFile:
+			seen[c] = true
+			out = append(out, c)
+		case diskKindSymlink:
+			log.Printf("WARN Not deleting disk %s of domain %s: it is a symbolic link; neither it nor its target is removed", disk, domain)
+		case diskKindAbsent:
+			log.Printf("INFO Disk %s of domain %s does not exist; nothing to remove", disk, domain)
+		default:
+			log.Printf("WARN Not deleting disk %s of domain %s: it is not a regular file; it is left in place", disk, domain)
+		}
+	}
+	return out, nil
+}
+
+// What hostDiskKind reports about a path (diskKindScript).
+const (
+	// diskKindSymlink: a symbolic link (dangling or not).
+	diskKindSymlink = "symlink"
+	// diskKindFile: a regular file that is not a symbolic link.
+	diskKindFile = "file"
+	// diskKindOther: anything else that exists (a directory, a device, ...).
+	diskKindOther = "other"
+	// diskKindAbsent: nothing exists at the path.
+	diskKindAbsent = ""
+)
+
+// diskKindScript is the fixed `sh -c` script behind hostDiskKind. The path is
+// ALWAYS the positional parameter "$1", never interpolated into the text.
+const diskKindScript = `if [ -L "$1" ]; then echo ` + diskKindSymlink + `; elif [ -f "$1" ]; then echo ` + diskKindFile +
+	`; elif [ -e "$1" ]; then echo ` + diskKindOther + `; fi`
+
+// hostDiskKind reports what is at path on vp's host, without following a
+// symlink at the path itself: diskKindSymlink, diskKindFile, diskKindOther or
+// diskKindAbsent. A failure to check is a retryable error.
+func hostDiskKind(ctx context.Context, vp *VirshProvider, path string) (string, error) {
+	res, err := runHost(ctx, vp, "sh", "-c", diskKindScript, "sh", path)
+	if err != nil {
+		return "", contracts.NewRetryableError(fmt.Sprintf("check %s on the host", path), err)
+	}
+	switch kind := strings.TrimSpace(res.Stdout); kind {
+	case diskKindSymlink, diskKindFile, diskKindOther, diskKindAbsent:
+		return kind, nil
+	default:
+		return "", contracts.NewRetryableError(fmt.Sprintf("check %s on the host", path),
+			fmt.Errorf("unexpected output %q", kind))
+	}
+}
+
 // getDomainDiskPaths retrieves all disk paths for a domain on the provider's
 // single-host connection.
 func (p *Provider) getDomainDiskPaths(ctx context.Context, domainName string) ([]string, error) {
 	return domainDiskPaths(ctx, p.virshProvider, domainName)
 }
 
-// domainDiskPaths retrieves all disk paths for a domain on vp's host.
+// domainDiskPaths returns the files of a domain's own disks on vp's host, the
+// primary disk first: the top-level file-backed <disk device='disk'> sources of
+// its definition (domainDisksDoc.diskFiles). A disk's backing chain — which, for
+// a running linked clone, holds its source VM's disk — cdrom/floppy media and
+// cloud-init seeds are never included.
 func domainDiskPaths(ctx context.Context, vp *VirshProvider, domainName string) ([]string, error) {
-	// Get domain XML to extract disk paths
 	result, err := vp.runVirshCommand(ctx, "dumpxml", domainName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to dump domain XML: %w", err)
 	}
-
-	var diskPaths []string
-
-	// Parse XML to find disk source files
-	// Look for lines like: <source file='/var/lib/libvirt/images/vm-disk.qcow2'/>
-	lines := strings.Split(result.Stdout, "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if strings.Contains(line, "<source file=") && !strings.Contains(line, "device='disk'") {
-			// Extract the file path from <source file='...'/>
-			start := strings.Index(line, "file='")
-			if start == -1 {
-				start = strings.Index(line, "file=\"")
-			}
-			if start != -1 {
-				start += 6 // len("file='") or len("file=\"")
-				end := strings.IndexAny(line[start:], "\"'")
-				if end != -1 {
-					diskPath := line[start : start+end]
-					// Skip cloud-init ISOs (we'll handle those separately)
-					if !strings.HasSuffix(diskPath, "-cidata.iso") && !strings.HasSuffix(diskPath, "cloud-init.iso") {
-						diskPaths = append(diskPaths, diskPath)
-					}
-				}
-			}
-		}
-	}
-
-	return diskPaths, nil
-}
-
-// getCloudInitISOPath retrieves the cloud-init ISO path for a domain on vp's host.
-func getCloudInitISOPath(ctx context.Context, vp *VirshProvider, domainName string) (string, error) {
-	// Get domain XML
-	result, err := vp.runVirshCommand(ctx, "dumpxml", domainName)
+	doc, err := parseDomainDisks(result.Stdout)
 	if err != nil {
-		return "", fmt.Errorf("failed to dump domain XML: %w", err)
+		return nil, err
 	}
-
-	// Look for cloud-init ISO in XML
-	lines := strings.Split(result.Stdout, "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if strings.Contains(line, "<source file=") {
-			// Extract the file path
-			start := strings.Index(line, "file='")
-			if start == -1 {
-				start = strings.Index(line, "file=\"")
-			}
-			if start != -1 {
-				start += 6
-				end := strings.IndexAny(line[start:], "\"'")
-				if end != -1 {
-					filePath := line[start : start+end]
-					// Check if this is a cloud-init ISO
-					if strings.HasSuffix(filePath, "cloud-init.iso") || strings.Contains(filePath, "virtrigaud-cloudinit") {
-						return filePath, nil
-					}
-				}
-			}
-		}
-	}
-
-	return "", nil
+	return doc.diskFiles(), nil
 }
 
-// deleteDiskFile deletes a disk file from vp's libvirt host
+// deleteDiskFile deletes a disk file from vp's libvirt host. diskPath is a
+// canonical path that deletableDiskFiles and the dependency guard cleared; it
+// is removed only if it is still a regular file and not a symbolic link.
 func deleteDiskFile(ctx context.Context, vp *VirshProvider, diskPath string) error {
+	kind, err := hostDiskKind(ctx, vp, diskPath)
+	if err != nil {
+		return err
+	}
+	switch kind {
+	case diskKindFile:
+	case diskKindAbsent:
+		log.Printf("INFO Disk file %s is already gone", diskPath)
+		return nil
+	default:
+		return fmt.Errorf("not deleting disk file %s: it is no longer a regular file (%s)", diskPath, kind)
+	}
 	log.Printf("INFO Deleting disk file: %s", diskPath)
 
-	// Use rm to delete the disk file
-	_, err := vp.runVirshCommand(ctx, "!", "sudo", "rm", "-f", diskPath)
+	_, err = vp.runVirshCommand(ctx, "!", "sudo", "rm", "-f", "--", diskPath)
 	if err != nil {
 		return fmt.Errorf("failed to delete disk file %s: %w", diskPath, err)
 	}
@@ -769,54 +1017,91 @@ func deleteDiskFile(ctx context.Context, vp *VirshProvider, diskPath string) err
 	return nil
 }
 
-// deleteCloudInitResources deletes cloud-init ISO and associated files on vp's host
-func deleteCloudInitResources(ctx context.Context, vp *VirshProvider, domainName, isoPath string) error {
+// deleteCloudInitResources deletes a domain's cloud-init seed directory
+// (domainDisksDoc.cloudInitSeedDir: the ISO, user-data and meta-data) on vp's
+// host.
+func deleteCloudInitResources(ctx context.Context, vp *VirshProvider, domainName, seedDir string) error {
 	log.Printf("INFO Deleting cloud-init resources for: %s", domainName)
 
-	// Delete the cloud-init directory which contains ISO, user-data, and meta-data
-	// Extract directory from ISO path by removing the filename
-	lastSlash := strings.LastIndex(isoPath, "/")
-	cloudInitDir := isoPath
-	if lastSlash != -1 {
-		cloudInitDir = isoPath[:lastSlash]
-	}
-
-	_, err := vp.runVirshCommand(ctx, "!", "rm", "-rf", cloudInitDir)
+	_, err := vp.runVirshCommand(ctx, "!", "rm", "-rf", "--", seedDir)
 	if err != nil {
-		return fmt.Errorf("failed to delete cloud-init directory %s: %w", cloudInitDir, err)
+		return fmt.Errorf("failed to delete cloud-init directory %s: %w", seedDir, err)
 	}
 
 	return nil
 }
 
 // cleanupOrphanedResources attempts to clean up any resources that might be
-// left behind on vp's host (single-host delete only).
+// left behind on vp's host by a domain that no longer exists (single-host
+// delete only): the disk VirtRigaud names after it, <pool directory>/<name>-
+// disk.qcow2 in the default storage pool, and its legacy per-name cloud-init
+// seed directory.
+//
+// The disk file is removed only when it exists, lies directly inside a
+// directory Delete may remove disks from (deletableDiskFiles), and no defined
+// domain uses it as a disk or backing file — the domain of that name is gone,
+// but a linked clone of it may not be. When that cannot be established, nothing
+// is removed. Files VirtRigaud never names this way (<name>.qcow2, <name>-disk)
+// are never touched.
 func (p *Provider) cleanupOrphanedResources(ctx context.Context, vp *VirshProvider, domainName string) {
 	log.Printf("INFO Cleaning up orphaned resources for: %s", domainName)
 
-	// Try to delete disk files with common naming patterns
-	diskPatterns := []string{
-		fmt.Sprintf("/var/lib/libvirt/images/%s-disk.qcow2", domainName),
-		fmt.Sprintf("/var/lib/libvirt/images/%s.qcow2", domainName),
-		fmt.Sprintf("/var/lib/libvirt/images/%s-disk", domainName),
-	}
-
-	for _, diskPath := range diskPatterns {
-		_, err := vp.runVirshCommand(ctx, "!", "sudo", "rm", "-f", diskPath)
-		if err != nil {
-			log.Printf("DEBUG Could not delete potential orphaned disk %s: %v", diskPath, err)
-		} else {
-			log.Printf("INFO Cleaned up orphaned disk: %s", diskPath)
+	if poolDir := storagePoolDir(ctx, vp, defaultStoragePool); poolDir != "" {
+		diskPath := filepath.Join(poolDir, vmDiskVolumeName(domainName)+qcow2Ext)
+		if filepath.Dir(diskPath) != filepath.Clean(poolDir) {
+			log.Printf("WARN Not looking for an orphaned disk of %q: the name is not a file name", domainName)
+		} else if exists, err := hostPathExists(ctx, vp, diskPath); err != nil {
+			log.Printf("DEBUG Could not check for potential orphaned disk %s: %v", diskPath, err)
+		} else if exists {
+			p.removeOrphanedDisks(ctx, vp, domainName, []string{diskPath})
 		}
 	}
 
-	// Try to delete cloud-init directory
-	cloudInitDir := fmt.Sprintf("/tmp/virtrigaud-cloudinit/%s", domainName)
-	_, err := vp.runVirshCommand(ctx, "!", "rm", "-rf", cloudInitDir)
+	// Try to delete the legacy per-name cloud-init directory.
+	legacyRoot := filepath.Join(p.stagingDir(), legacyCloudInitSeedRoot)
+	cloudInitDir := filepath.Join(legacyRoot, domainName)
+	if filepath.Dir(cloudInitDir) != legacyRoot {
+		log.Printf("WARN Not removing %s: it is not a cloud-init seed directory", cloudInitDir)
+		return
+	}
+	_, err := vp.runVirshCommand(ctx, "!", "rm", "-rf", "--", cloudInitDir)
 	if err != nil {
 		log.Printf("DEBUG Could not delete cloud-init directory %s: %v", cloudInitDir, err)
 	} else {
 		log.Printf("INFO Cleaned up orphaned cloud-init directory: %s", cloudInitDir)
+	}
+}
+
+// removeOrphanedDisks removes those of present (existing files named after a
+// deleted domain) that deletableDiskFiles clears and that no defined domain on
+// vp's host uses. Best-effort: every refusal or failure is logged.
+func (p *Provider) removeOrphanedDisks(ctx context.Context, vp *VirshProvider, domainName string, present []string) {
+	if len(present) == 0 {
+		return
+	}
+	deletable, err := p.deletableDiskFiles(ctx, vp, domainName, present)
+	if err != nil {
+		log.Printf("WARN Not removing orphaned disks of %s: could not resolve them: %v", domainName, err)
+		return
+	}
+	if len(deletable) == 0 {
+		return
+	}
+	inUse, err := diskSourcesInUse(ctx, vp)
+	if err != nil {
+		log.Printf("WARN Not removing orphaned disks of %s: could not verify that no domain uses them: %v", domainName, err)
+		return
+	}
+	for _, diskPath := range deletable {
+		if inUse.contains(diskPath) {
+			log.Printf("WARN Not removing orphaned disk %s: another domain uses it as a disk or backing file", diskPath)
+			continue
+		}
+		if err := deleteDiskFile(ctx, vp, diskPath); err != nil {
+			log.Printf("DEBUG Could not delete potential orphaned disk %s: %v", diskPath, err)
+		} else {
+			log.Printf("INFO Cleaned up orphaned disk: %s", diskPath)
+		}
 	}
 }
 
@@ -997,6 +1282,11 @@ func (p *Provider) runPowerOp(ctx context.Context, c libvirtConn, d domainTarget
 	}
 
 	log.Printf("INFO Successfully performed power operation %s on %s", op, d.name)
+	if op == contracts.PowerOpOn || op == contracts.PowerOpReboot {
+		// The domain is running: warn (never refuse) when linked clones of it
+		// exist, since its writes now reach their backing file.
+		p.recordLinkedCloneDependents(ctx, vp, d)
+	}
 	return nil
 }
 
@@ -1587,6 +1877,7 @@ func (p *Provider) describeOn(ctx context.Context, c libvirtConn, id string) (co
 		ConsoleURL:  consoleURL,
 		ProviderRaw: domainInfo, // Pass the enhanced domain info as provider-specific data
 	}
+	p.reportLinkedCloneDependents(domainInfo["UUID"], response.ProviderRaw)
 
 	log.Printf("INFO Domain %s comprehensive state: power=%s, ips=%v, monitoring_data=collected", id, response.PowerState, ips)
 
@@ -2164,6 +2455,10 @@ func (p *Provider) SnapshotCreate(ctx context.Context, req contracts.SnapshotCre
 
 	log.Printf("INFO Domain %s is in state: %s", vmID, domainState)
 
+	if err := refuseIfDiskHasDependents(ctx, p.virshProvider, vmID, guardOpSnapshotCreate); err != nil {
+		return contracts.SnapshotCreateResponse{}, fmt.Errorf("failed to create snapshot: %w", err)
+	}
+
 	// Build virsh snapshot-create-as command
 	args := []string{
 		"snapshot-create-as",
@@ -2219,6 +2514,10 @@ func (p *Provider) SnapshotDelete(ctx context.Context, vm contracts.VMRef, snaps
 		return "", nil
 	}
 
+	if err := refuseIfDiskHasDependents(ctx, p.virshProvider, vmId, guardOpSnapshotDelete); err != nil {
+		return "", fmt.Errorf("failed to delete snapshot: %w", err)
+	}
+
 	// Delete the snapshot
 	args := []string{
 		"snapshot-delete",
@@ -2263,6 +2562,10 @@ func (p *Provider) SnapshotRevert(ctx context.Context, vm contracts.VMRef, snaps
 	}
 
 	log.Printf("INFO Domain %s current state: %s", vmId, domainState)
+
+	if err := refuseIfDiskHasDependents(ctx, p.virshProvider, vmId, guardOpSnapshotRevert); err != nil {
+		return "", fmt.Errorf("failed to revert to snapshot: %w", err)
+	}
 
 	// Revert to snapshot
 	args := []string{

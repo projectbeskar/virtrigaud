@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -336,36 +337,48 @@ esac
 `
 
 // fakeQemuImgScript answers `info` from a <file>.info.json sidecar (default: a
-// plain qcow2) and `info --backing-chain` from <file>.chain.json (default: the
-// file alone; <file>.chainfail simulates a broken link), fails like qemu-img
-// for a missing file, and makes `convert` write its target. Every call is
-// logged.
+// plain qcow2 with no backing file) — one image at a time; it refuses
+// --backing-chain, which the provider never uses — fails like qemu-img for a
+// missing file, makes `convert` write its target, and makes `create -b` write
+// a linked-clone overlay with its info sidecar. Every call is logged.
 const fakeQemuImgScript = `#!/bin/sh
 printf '%s\n' "$*" >> "$FAKE_HOST_DIR/qemu-img.log"
 last=""
-chain=""
-for a in "$@"; do last="$a"; if [ "$a" = "--backing-chain" ]; then chain=1; fi; done
+for a in "$@"; do last="$a"; if [ "$a" = "--backing-chain" ]; then echo "qemu-img: --backing-chain is never used" >&2; exit 2; fi; done
 missing() { echo "qemu-img: Could not open '$last': Could not open '$last': No such file or directory" >&2; exit 1; }
 case "$1" in
   info)
-    if [ -n "$chain" ]; then
-      if [ -f "$last.chainfail" ]; then echo "qemu-img: Could not open backing file: No such file or directory" >&2; exit 1; fi
-      if [ -f "$last.chain.json" ]; then cat "$last.chain.json"; exit 0; fi
-      [ -e "$last" ] || missing
-      printf '[{"format":"qcow2","filename":"%s"}]\n' "$last"; exit 0
+    # <file>.rootonly: only readable through sudo (fakeSudoScript sets SUDO_USER).
+    if [ -f "$last.rootonly" ] && [ -z "$SUDO_USER" ]; then
+      echo "qemu-img: Could not open '$last': Could not open '$last': Permission denied" >&2; exit 1
     fi
     if [ -f "$last.info.json" ]; then cat "$last.info.json"; exit 0; fi
     [ -e "$last" ] || missing
     printf '{"format":"qcow2","filename":"%s"}\n' "$last" ;;
   convert) printf 'converted\n' > "$last" ;;
+  create)
+    # A linked-clone overlay (create -b <base> ... <overlay>): write the overlay
+    # and its info sidecar, so its backing file is visible like a real one.
+    b=""; prev=""
+    for a in "$@"; do if [ "$prev" = "-b" ]; then b="$a"; fi; prev="$a"; done
+    if [ -n "$b" ]; then
+      printf 'overlay\n' > "$last"
+      printf '{"format":"qcow2","filename":"%s","backing-filename":"%s","full-backing-filename":"%s"}\n' "$last" "$b" "$b" > "$last.info.json"
+    fi ;;
   *) exit 0 ;;
 esac
 `
 
-// fakeLoggerScript logs its argv to $FAKE_HOST_DIR/<name>.log and succeeds
-// (stands in for sudo: nothing privileged ever runs in tests).
-const fakeLoggerScript = `#!/bin/sh
-printf '%s\n' "$*" >> "$FAKE_HOST_DIR/$(basename "$0").log"
+// fakeSudoScript stands in for sudo: `sudo -n qemu-img ...` (the disk in-use
+// check's chain read) runs the fake qemu-img "as root" (SUDO_USER set, so a
+// <file>.rootonly image opens), which logs itself; anything else is only
+// logged to sudo.log (nothing privileged ever runs in tests). With
+// $FAKE_HOST_DIR/sudo-refuses present it fails like sudo without a
+// passwordless rule.
+const fakeSudoScript = `#!/bin/sh
+if [ -f "$FAKE_HOST_DIR/sudo-refuses" ]; then echo "sudo: a password is required" >&2; exit 1; fi
+if [ "$1" = "-n" ] && [ "$2" = "qemu-img" ]; then shift 2; SUDO_USER=test exec qemu-img "$@"; fi
+printf '%s\n' "$*" >> "$FAKE_HOST_DIR/sudo.log"
 exit 0
 `
 
@@ -435,7 +448,7 @@ func newFakeHost(t *testing.T) *fakeHost {
 
 	bin := t.TempDir()
 	for name, script := range map[string]string{
-		"virsh": fakeVirshScript, "qemu-img": fakeQemuImgScript, "sudo": fakeLoggerScript,
+		"virsh": fakeVirshScript, "qemu-img": fakeQemuImgScript, "sudo": fakeSudoScript,
 		"curl": fakeDownloadScript, "wget": fakeDownloadScript,
 	} {
 		require.NoError(t, os.WriteFile(filepath.Join(bin, name), []byte(script), 0o700)) //nolint:gosec // test fixture must be executable
@@ -784,22 +797,21 @@ func TestConfine_ShutOffDomainBackingChainIsInUse(t *testing.T) {
 	vp := h.host("h1")
 	overlay := h.file(h.images, "vm1-overlay.qcow2")
 	base := h.file(h.images, "golden-base.qcow2")
-	require.NoError(t, os.WriteFile(overlay+".chain.json", []byte(`[
-	  {"filename":"`+overlay+`","format":"qcow2","backing-filename":"golden-base.qcow2","full-backing-filename":"`+base+`"},
-	  {"filename":"`+base+`","format":"qcow2"}]`), 0o600))
+	h.info(overlay, `{"filename":"`+overlay+`","format":"qcow2","backing-filename":"golden-base.qcow2",`+
+		`"full-backing-filename":"`+base+`","backing-filename-format":"qcow2"}`)
 
-	// A broken chain (a deleted link) is walked one level at a time.
+	// A chain that ends at a deleted file records every image that exists.
 	overlay2 := h.file(h.images, "vm2-overlay.qcow2")
 	mid := h.file(h.images, "golden-mid.qcow2")
-	require.NoError(t, os.WriteFile(overlay2+".chainfail", nil, 0o600))
-	h.info(overlay2, `{"filename":"`+overlay2+`","format":"qcow2","full-backing-filename":"`+mid+`"}`)
-	h.info(mid, `{"filename":"`+mid+`","format":"qcow2","full-backing-filename":"`+filepath.Join(h.images, "deleted.qcow2")+`"}`)
+	h.info(overlay2, `{"filename":"`+overlay2+`","format":"qcow2","full-backing-filename":"`+mid+`","backing-filename":"`+mid+`"}`)
+	h.info(mid, `{"filename":"`+mid+`","format":"qcow2","full-backing-filename":"`+filepath.Join(h.images, "deleted.qcow2")+
+		`","backing-filename":"deleted.qcow2"}`)
 
 	// A data file of a stopped VM's disk is in use too.
 	withData := h.file(h.images, "vm3.qcow2")
 	dataFile := h.file(h.images, "vm3-data.raw")
-	require.NoError(t, os.WriteFile(withData+".chain.json", []byte(`[{"filename":"`+withData+`","format":"qcow2",`+
-		`"format-specific":{"type":"qcow2","data":{"data-file":"`+dataFile+`"}}}]`), 0o600))
+	h.info(withData, `{"filename":"`+withData+`","format":"qcow2",`+
+		`"format-specific":{"type":"qcow2","data":{"data-file":"`+dataFile+`"}}}`)
 
 	h.domain("h1", uuidA, diskDomainXML(overlay, overlay2)) // shut off: no <backingStore>
 	h.domain("h1", uuidB, diskDomainXML(withData))
@@ -809,7 +821,10 @@ func TestConfine_ShutOffDomainBackingChainIsInUse(t *testing.T) {
 		_, err := pol.confine(context.Background(), vp, imagePathRequest{Path: p})
 		requireRejected(t, err, "existing VM")
 	}
-	assert.Contains(t, h.log("qemu-img"), "info -U --backing-chain --output=json -- "+overlay)
+	qlog := h.log("qemu-img")
+	assert.Contains(t, qlog, "info -U --output=json -- "+overlay, "one image at a time")
+	assert.Contains(t, qlog, "info -U -f qcow2 --output=json -- "+base, "in the format its parent's header names")
+	assert.NotContains(t, qlog, "--backing-chain")
 
 	// Unrelated images stay usable.
 	free := h.file(h.images, "ubuntu.qcow2")
@@ -948,7 +963,9 @@ func TestCreateDiskFromHostImage_CopiesBaseImage(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, filepath.Join(h.images, "team-a.web-disk.qcow2"), vol.Path, "the VM gets its own disk, named after its domain")
 	assert.NotEqual(t, img, vol.Path)
-	assert.Contains(t, h.log("qemu-img"), "convert -f raw -O qcow2 "+img+" "+vol.Path)
+	assert.Regexp(t, `convert -f raw -O qcow2 `+regexp.QuoteMeta(img)+" "+regexp.QuoteMeta(h.images+"/"+vmDiskWriteDirPrefix)+
+		`[A-Za-z0-9]{10}/team-a\.web-disk\.qcow2\n`, h.log("qemu-img"), "written in a private directory, renamed into place")
+	assert.FileExists(t, vol.Path)
 }
 
 // TestCreateDiskFromHostImage_AdoptsOwnImportedDisk proves the migration

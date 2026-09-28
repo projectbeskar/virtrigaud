@@ -67,8 +67,9 @@ import (
 //  5. It must be a regular, non-empty file (not a device, FIFO, directory).
 //  6. It must not be a disk (or backing file, or shared directory) of ANY domain
 //     defined on the host — VirtRigaud's or anyone else's (shared hosts). Each
-//     disk's backing chain is read with `qemu-img info -U`, because dumpxml
-//     omits <backingStore> for shut-off domains.
+//     disk's backing chain is read with `qemu-img info -U` (through `sudo -n`
+//     when allowed), because dumpxml omits <backingStore> for shut-off
+//     domains; a running domain's chain is taken from its live <backingStore>.
 //  7. Its header must not reference other files: no qcow2 backing file or
 //     external data file, no VMDK extent outside itself. `qemu-img convert`
 //     would otherwise read (and flatten) those files, re-opening the escape.
@@ -409,11 +410,28 @@ const hostCheckFailedMessage = "could not verify the image on the libvirt host "
 	"(transient host error; details are in the provider log)"
 
 // hostCheckFailed logs a host-side check failure in full, provider-side only,
-// and returns a generic retryable error that carries none of it.
+// and returns a generic retryable error whose message carries none of it. The
+// failure stays reachable through errors.As/Is (hiddenCauseError), so a host
+// that could not be reached is still recognized as such
+// (isHostTransportFailure).
 func hostCheckFailed(what string, err error) error {
 	log.Printf("ERROR libvirt image confinement: %s: %v", what, err)
-	return contracts.NewRetryableError(hostCheckFailedMessage, nil)
+	return &hiddenCauseError{visible: contracts.NewRetryableError(hostCheckFailedMessage, nil), cause: err}
 }
+
+// hiddenCauseError is visible — its message and its contracts error — with
+// cause attached for classification only: Error never includes it, and
+// errors.As/Is reach it after visible.
+type hiddenCauseError struct {
+	visible error
+	cause   error
+}
+
+// Error returns the visible error's message only.
+func (e *hiddenCauseError) Error() string { return e.visible.Error() }
+
+// Unwrap exposes the visible error, then the hidden cause.
+func (e *hiddenCauseError) Unwrap() []error { return []error{e.visible, e.cause} }
 
 // confine applies the full image-path confinement (see the file comment) to req
 // on the host behind h and returns the canonical, checked image. Every
@@ -546,7 +564,10 @@ type qemuImgInfo struct {
 	Format              string `json:"format"`
 	BackingFilename     string `json:"backing-filename"`
 	FullBackingFilename string `json:"full-backing-filename"`
-	FormatSpecific      *struct {
+	// BackingFilenameFormat is the backing file's format as the header
+	// names it (empty: probed).
+	BackingFilenameFormat string `json:"backing-filename-format"`
+	FormatSpecific        *struct {
 		Data struct {
 			DataFile string `json:"data-file"`
 			Extents  []struct {
@@ -758,63 +779,218 @@ func listDomainUUIDs(ctx context.Context, h hostCommandRunner) ([]string, error)
 	return uuids, nil
 }
 
-// maxBackingChainDepth bounds the one-level-at-a-time backing-chain walk.
-const maxBackingChainDepth = 16
+// maxBackingChainDepth bounds the backing-chain walk: a longer chain (or a
+// loop) fails the check closed.
+const maxBackingChainDepth = 32
 
 // qemuImgMissingFile is the qemu-img error text for a file that does not exist.
 const qemuImgMissingFile = "No such file or directory"
+
+// backingFormatRE matches a qemu block-driver name as a header's
+// backing-filename-format, passed to qemu-img as -f.
+var backingFormatRE = regexp.MustCompile(`^[a-z0-9]+$`)
+
+// What backingKindScript reports about a backing file path.
+const (
+	backingKindFile  = "file"
+	backingKindOther = "other"
+)
+
+// backingKindScript is the fixed `sh -c` script behind checkChainFileKind.
+// The path is "$1", never interpolated into the text. It prints
+// backingKindFile for a regular file (a symbolic link is followed),
+// backingKindOther for anything else that exists (a device, FIFO, socket,
+// directory), and nothing when the SSH user cannot see it.
+const backingKindScript = `if [ -f "$1" ]; then echo ` + backingKindFile + `; elif [ -e "$1" ]; then echo ` +
+	backingKindOther + `; fi`
 
 // backingChainFiles returns every host file in disk's image chain: the disk,
 // each backing file, qcow2 data files and VMDK extents. It is needed because
 // `virsh dumpxml` omits <backingStore> for a shut-off domain, so a stopped VM's
 // base images would otherwise look unused. It reads with `qemu-img info -U`
 // (force-share: a read-only inspection that must work on running VMs' images;
-// conversions never use -U).
+// conversions never use -U), through passwordless sudo when the host allows it
+// (qemuImgInfoOnHost).
 //
-// It asks for the whole chain at once (--backing-chain). If some link cannot
-// be opened — typically a deleted file — it walks the chain one level at a
-// time instead, so every image that still exists is recorded. A disk that does
-// not exist contributes nothing; any other failure fails the check (closed).
+// The chain is walked one image at a time — never `--backing-chain`, which
+// would have qemu-img open, as root, whatever backing name each header holds.
+// Every image — the disk itself too — must be a regular file before qemu-img
+// opens it (checkChainFileKind: a device or FIFO is refused at once). A
+// backing file is followed only when it is an absolute local path
+// (full-backing-filename), opened with the format its parent's header names;
+// a protocol (nbd:, http:, ...), json: or relative backing name, a device,
+// FIFO or other non-regular file, an unknown backing format and a chain deeper
+// than maxBackingChainDepth fail the check (closed), as does any unreadable
+// image. A qcow2 external data file is recorded, never opened by the walk; one
+// named by anything but an absolute local path fails the check too. A file
+// that no longer exists ends the chain: a missing disk contributes nothing.
 func backingChainFiles(ctx context.Context, h hostCommandRunner, disk string) ([]string, error) {
-	res, err := runHost(ctx, h, "qemu-img", "info", "-U", "--backing-chain", "--output=json", "--", disk)
-	if err == nil {
-		var chain []qemuImgInfo
-		if jerr := json.Unmarshal([]byte(res.Stdout), &chain); jerr != nil {
-			return nil, hostCheckFailed("parse backing chain", jerr)
-		}
-		var refs []string
-		for _, link := range chain {
-			refs = append(refs, link.referencedFiles()...)
-		}
-		return refs, nil
+	levels, err := walkBackingChain(ctx, h, disk)
+	if err != nil {
+		return nil, err
 	}
-	if res == nil || res.ExitCode != qemuImgFailureExitCode {
-		return nil, hostCheckFailed("read backing chain", err)
-	}
-
 	var refs []string
-	cur := disk
-	for depth := 0; depth < maxBackingChainDepth && cur != ""; depth++ {
-		lres, lerr := runHost(ctx, h, "qemu-img", "info", "-U", "--output=json", "--", cur)
-		if lerr != nil {
-			if lres != nil && lres.ExitCode == qemuImgFailureExitCode && strings.Contains(lres.Stderr, qemuImgMissingFile) {
-				return refs, nil // the chain ends at a file that no longer exists
+	for _, l := range levels {
+		refs = append(refs, l.path)
+		refs = append(refs, l.refs...)
+	}
+	return refs, nil
+}
+
+// backingLevel is one image of a backing chain (walkBackingChain): its path
+// as named (disk, then each full-backing-filename) and every host file it
+// consists of or points at (qemuImgInfo.referencedFiles).
+type backingLevel struct {
+	path string
+	refs []string
+}
+
+// walkBackingChain reads disk's image chain one image at a time, top first,
+// under the rules backingChainFiles documents.
+func walkBackingChain(ctx context.Context, h hostCommandRunner, disk string) ([]backingLevel, error) {
+	var levels []backingLevel
+	cur, format := disk, ""
+	for depth := 0; ; depth++ {
+		if depth > maxBackingChainDepth {
+			return nil, hostCheckFailed("read backing chain", fmt.Errorf("%s: backing chain longer than %d images", disk, maxBackingChainDepth))
+		}
+		if err := checkChainFileKind(ctx, h, cur); err != nil {
+			return nil, err
+		}
+		args := []string{"-U"}
+		if format != "" {
+			args = append(args, "-f", format)
+		}
+		res, err := qemuImgInfoOnHost(ctx, h, append(args, "--output=json", "--", cur)...)
+		if err != nil {
+			if res != nil && res.ExitCode == qemuImgFailureExitCode && strings.Contains(res.Stderr, qemuImgMissingFile) {
+				return levels, nil // the chain ends at a file that no longer exists
 			}
-			return nil, hostCheckFailed("read backing chain", lerr)
+			return nil, hostCheckFailed("read backing chain", err)
 		}
 		var info qemuImgInfo
-		if jerr := json.Unmarshal([]byte(lres.Stdout), &info); jerr != nil {
+		if jerr := json.Unmarshal([]byte(res.Stdout), &info); jerr != nil {
 			return nil, hostCheckFailed("parse backing chain", jerr)
 		}
-		refs = append(refs, cur)
-		refs = append(refs, info.referencedFiles()...)
+		if info.FormatSpecific != nil {
+			if df := info.FormatSpecific.Data.DataFile; df != "" && !strings.HasPrefix(df, "/") {
+				return nil, hostCheckFailed("read backing chain",
+					fmt.Errorf("%s: external data file %q is not a local file path", cur, df))
+			}
+		}
+		levels = append(levels, backingLevel{path: cur, refs: info.referencedFiles()})
+		if info.BackingFilename == "" && info.FullBackingFilename == "" {
+			return levels, nil
+		}
 		next := info.FullBackingFilename
 		if !strings.HasPrefix(next, "/") {
-			break // no backing file, or a protocol/json: backing (recorded, not walkable)
+			return nil, hostCheckFailed("read backing chain",
+				fmt.Errorf("%s: backing file %q is not a local file path; not followed", cur, next))
+		}
+		format = info.BackingFilenameFormat
+		if format != "" && !backingFormatRE.MatchString(format) {
+			return nil, hostCheckFailed("read backing chain",
+				fmt.Errorf("%s: backing file format %q is not a qemu format name; not followed", cur, format))
 		}
 		cur = next
 	}
-	return refs, nil
+}
+
+// checkChainFileKind refuses to have qemu-img open an image of a chain — the
+// disk itself or a backing file — that exists and is not a regular file
+// (backingKindScript): qemu-img would open a device, or block forever on a
+// FIFO. A path the SSH user cannot see is left to qemu-img (through sudo) to
+// open or report missing.
+func checkChainFileKind(ctx context.Context, h hostCommandRunner, path string) error {
+	res, err := runHost(ctx, h, "sh", "-c", backingKindScript, "sh", path)
+	if err != nil {
+		return hostCheckFailed("check chain file", err)
+	}
+	if strings.TrimSpace(res.Stdout) == backingKindOther {
+		return hostCheckFailed("read backing chain", fmt.Errorf("%s is not a regular file; not opened", path))
+	}
+	return nil
+}
+
+// liveDomainDoc is what liveChainListed reads of a domain definition.
+type liveDomainDoc struct {
+	XMLName xml.Name `xml:"domain"`
+	// ID is the running domain's id; an inactive definition has none.
+	ID      string `xml:"id,attr"`
+	Devices struct {
+		Disks []struct {
+			Source *struct {
+				File   string `xml:"file,attr"`
+				Dev    string `xml:"dev,attr"`
+				Volume string `xml:"volume,attr"`
+			} `xml:"source"`
+			BackingStore *struct{} `xml:"backingStore"`
+		} `xml:"disk"`
+	} `xml:"devices"`
+}
+
+// liveChainListed reports whether domainXML is a RUNNING domain's definition
+// that lists the image chain of every disk with a source: libvirt then shows
+// each backing file as a nested <backingStore> (ending in an empty one), so
+// the chain is taken from the definition instead of opening the images. An
+// inactive definition, or a disk without a <backingStore> element, returns
+// false: its chain is read with qemu-img.
+func liveChainListed(domainXML string) bool {
+	var d liveDomainDoc
+	if err := xml.Unmarshal([]byte(domainXML), &d); err != nil {
+		return false
+	}
+	if id := strings.TrimSpace(d.ID); id == "" || id == "-1" {
+		return false
+	}
+	for _, disk := range d.Devices.Disks {
+		if disk.Source == nil || (disk.Source.File == "" && disk.Source.Dev == "" && disk.Source.Volume == "") {
+			continue // empty removable media: nothing to walk
+		}
+		if disk.BackingStore == nil {
+			return false
+		}
+	}
+	return true
+}
+
+// qemuImgInfoOnHost runs `qemu-img info <args>` on the host behind h through
+// passwordless sudo (`sudo -n`), so a domain's disk the provider's host
+// account cannot read (a 0600 libvirt-qemu image, a root_squash NFS pool) does
+// not fail the disk in-use check: the check reads EVERY domain's disk chain,
+// and one unreadable file used to fail every Delete, snapshot and create on
+// the host. When sudo itself refuses (no passwordless sudo for qemu-img, or
+// no sudo at all), it runs as the host account, as before. It only ever reads
+// the headers of disks named by domain definitions and of the local, regular
+// backing files their headers name (backingChainFiles) — never a
+// caller-supplied image path, which inspectHostImage reads unprivileged. Every
+// call starts `qemu-img info -U`, so sudo can be limited to exactly that
+// (`qemu-img info -U *`, see docs/upgrading.md).
+func qemuImgInfoOnHost(ctx context.Context, h hostCommandRunner, args ...string) (*VirshResult, error) {
+	res, err := runHost(ctx, h, append([]string{"sudo", "-n", "qemu-img", "info"}, args...)...)
+	if err != nil && sudoRefused(res) {
+		return runHost(ctx, h, append([]string{"qemu-img", "info"}, args...)...)
+	}
+	return res, err
+}
+
+// sudoRefusedRE matches sudo's own diagnostics ("sudo: a password is
+// required", "sudo: a terminal is required", ...); qemu-img's start with
+// "qemu-img:".
+var sudoRefusedRE = regexp.MustCompile(`(?m)^sudo: |is not allowed to execute|may not run sudo`)
+
+// sudoExitNotFound is the shell's exit status for a command that is not
+// installed (sudo missing).
+const sudoExitNotFound = 127
+
+// sudoRefused reports whether a failed `sudo -n ...` failed in sudo itself —
+// not permitted, a password required, or sudo not installed — rather than in
+// the command it ran.
+func sudoRefused(res *VirshResult) bool {
+	if res == nil {
+		return false
+	}
+	return res.ExitCode == sudoExitNotFound || sudoRefusedRE.MatchString(res.Stderr)
 }
 
 // domainGone reports whether uuid is no longer defined on the host — i.e. it
@@ -834,74 +1010,140 @@ func domainGone(ctx context.Context, h hostCommandRunner, uuid string) (bool, er
 // retryable error rather than an incomplete set. A domain undefined between the
 // list and the dumpxml is skipped.
 func diskSourcesInUse(ctx context.Context, h hostCommandRunner) (inUseSet, error) {
-	uuids, err := listDomainUUIDs(ctx, h)
+	doms, err := domainRefsOnHost(ctx, h, "")
 	if err != nil {
 		return inUseSet{}, err
 	}
-	var files, dirs, disks []string
+	set := inUseSet{files: map[string]bool{}}
+	for _, d := range doms {
+		for f := range d.refs.files {
+			set.files[f] = true
+		}
+		set.dirs = append(set.dirs, d.refs.dirs...)
+	}
+	return set, nil
+}
+
+// hostDomainRefs is what one domain defined on a host references: every path of
+// its definition (disks and their full backing chains, other file-backed
+// devices, firmware/kernel files, shared directories), raw and canonical.
+type hostDomainRefs struct {
+	// uuid is the domain's UUID as `virsh list --uuid` printed it.
+	uuid string
+	// refs are the domain's references (see inUseSet).
+	refs inUseSet
+}
+
+// domainRefsOnHost reads, on the host behind h, the references of every defined
+// domain (running or not) except skipUUID (never read when non-empty), one
+// entry per domain. It is diskSourcesInUse's scan, kept per domain so a caller
+// can tell which OTHER domains use a file (diskDependents), with the same
+// fail-closed rules: an unreadable definition that still exists, volume path
+// or backing chain is a (generic) retryable error, and a domain undefined
+// between the list and its dumpxml is skipped. Each disk's chain is read once,
+// however many domains reference it, and every path is canonicalized in one
+// call.
+func domainRefsOnHost(ctx context.Context, h hostCommandRunner, skipUUID string) ([]hostDomainRefs, error) {
+	uuids, err := listDomainUUIDs(ctx, h)
+	if err != nil {
+		return nil, err
+	}
+	type rawRefs struct {
+		uuid               string
+		files, dirs, disks []string
+	}
+	var doms []rawRefs
 	for _, uuid := range uuids {
+		if skipUUID != "" && strings.EqualFold(uuid, skipUUID) {
+			continue
+		}
 		xmlRes, err := h.runVirshCommand(ctx, "dumpxml", uuid)
 		if err != nil {
 			gone, gerr := domainGone(ctx, h, uuid)
 			if gerr != nil {
-				return inUseSet{}, gerr
+				return nil, gerr
 			}
 			if gone {
-				log.Printf("INFO domain %s was undefined during the image in-use check; skipping it", uuid)
+				log.Printf("INFO domain %s was undefined during the disk in-use check; skipping it", uuid)
 				continue
 			}
-			return inUseSet{}, hostCheckFailed(fmt.Sprintf("read definition of domain %s", uuid), err)
+			return nil, hostCheckFailed(fmt.Sprintf("read definition of domain %s", uuid), err)
 		}
 		refs, err := parseDomainPathRefs(xmlRes.Stdout)
 		if err != nil {
-			return inUseSet{}, hostCheckFailed(fmt.Sprintf("parse definition of domain %s", uuid), err)
+			return nil, hostCheckFailed(fmt.Sprintf("parse definition of domain %s", uuid), err)
 		}
-		files = append(files, refs.files...)
-		dirs = append(dirs, refs.dirs...)
-		disks = append(disks, refs.disks...)
+		d := rawRefs{uuid: uuid, files: refs.files, dirs: refs.dirs, disks: refs.disks}
 		for _, pv := range refs.volumes {
 			volRes, verr := h.runVirshCommand(ctx, "vol-path", "--pool", pv[0], "--vol", pv[1])
 			if verr != nil {
-				return inUseSet{}, hostCheckFailed(
+				return nil, hostCheckFailed(
 					fmt.Sprintf("resolve volume %q in pool %q of domain %s", pv[1], pv[0], uuid), verr)
 			}
 			p := strings.TrimSpace(volRes.Stdout)
 			if p == "" {
-				return inUseSet{}, hostCheckFailed(
+				return nil, hostCheckFailed(
 					fmt.Sprintf("resolve volume %q in pool %q of domain %s", pv[1], pv[0], uuid), errors.New("empty path"))
 			}
-			files = append(files, p)
-			disks = append(disks, p)
+			d.files = append(d.files, p)
+			d.disks = append(d.disks, p)
+		}
+		if liveChainListed(xmlRes.Stdout) {
+			// A running domain's definition lists every disk's chain in
+			// <backingStore> (already among d.files): no image is opened.
+			d.disks = nil
+		}
+		doms = append(doms, d)
+	}
+
+	chains := map[string][]string{}
+	for _, d := range doms {
+		for _, disk := range d.disks {
+			if _, walked := chains[disk]; walked {
+				continue
+			}
+			chain, err := backingChainFiles(ctx, h, disk)
+			if err != nil {
+				return nil, err
+			}
+			chains[disk] = chain
 		}
 	}
 
-	walked := make(map[string]bool, len(disks))
-	for _, d := range disks {
-		if walked[d] {
-			continue
+	// One canonicalization for every domain: its files and chains, then its
+	// shared directories, in domain order.
+	var all []string
+	type span struct{ files, dirs [2]int }
+	spans := make([]span, len(doms))
+	for i, d := range doms {
+		start := len(all)
+		all = append(all, d.files...)
+		for _, disk := range d.disks {
+			all = append(all, chains[disk]...)
 		}
-		walked[d] = true
-		chain, err := backingChainFiles(ctx, h, d)
-		if err != nil {
-			return inUseSet{}, err
-		}
-		files = append(files, chain...)
+		spans[i].files = [2]int{start, len(all)}
 	}
-
-	all := append(append([]string(nil), files...), dirs...)
+	for i, d := range doms {
+		start := len(all)
+		all = append(all, d.dirs...)
+		spans[i].dirs = [2]int{start, len(all)}
+	}
 	canon, err := canonicalizeOnHost(ctx, h, all)
 	if err != nil {
-		return inUseSet{}, err
+		return nil, err
 	}
-	set := inUseSet{files: make(map[string]bool, len(files))}
-	for i := range files {
-		set.files[files[i]] = true
-		set.files[canon[i]] = true
+
+	out := make([]hostDomainRefs, len(doms))
+	for i, d := range doms {
+		set := inUseSet{files: map[string]bool{}}
+		for j := spans[i].files[0]; j < spans[i].files[1]; j++ {
+			set.files[all[j]] = true
+			set.files[canon[j]] = true
+		}
+		set.dirs = append(set.dirs, canon[spans[i].dirs[0]:spans[i].dirs[1]]...)
+		out[i] = hostDomainRefs{uuid: d.uuid, refs: set}
 	}
-	for i := range dirs {
-		set.dirs = append(set.dirs, canon[len(files)+i])
-	}
-	return set, nil
+	return out, nil
 }
 
 // pathInUseOnHost reports whether path (canonicalized on the host) is a disk,

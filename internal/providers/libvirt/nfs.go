@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -150,16 +151,28 @@ func (s *Server) importDiskFromNFS(ctx context.Context, req *providerv1.ImportDi
 		return nil, fmt.Errorf("inspect staged nfs object: %w", err)
 	}
 
-	// Read the staged qcow2 straight from NFS and write the pool volume.
-	// Raw values: RunHost shell-quotes every argv element itself.
-	if res, err := conn.RunHost(ctx, "qemu-img", "convert", "-f", "qcow2", "-O", "qcow2",
-		nfsURL, targetPath); err != nil {
+	// Read the staged qcow2 straight from NFS and write the pool volume,
+	// created with vmDiskMode (withUmask: Create adopts it without a chmod) in
+	// a private directory next to it, checked there and then renamed into
+	// place (diskWriteDir). Raw values: RunHost shell-quotes every argv
+	// element itself.
+	wd, err := newDiskWriteDir(ctx, hostConnRunner{conn: conn}, poolPath)
+	if err != nil {
+		return nil, fmt.Errorf("nfs import: %w", err)
+	}
+	defer wd.cleanup(ctx)
+	newDisk := wd.file(filepath.Base(targetPath))
+	if res, err := conn.RunHost(ctx, withUmask(vmDiskUmask, "qemu-img", "convert", "-f", "qcow2", "-O", "qcow2",
+		nfsURL, newDisk)...); err != nil {
 		return nil, fmt.Errorf("host-side qemu-img convert from nfs failed: %w%s", err, qemuImgStderr(res))
 	}
 
 	// Validate the converted qcow2 (ADR-0006 D5 structural integrity for NFS).
-	if res, err := conn.RunHost(ctx, "qemu-img", "check", targetPath); err != nil {
+	if res, err := conn.RunHost(ctx, "qemu-img", "check", newDisk); err != nil {
 		return nil, fmt.Errorf("qemu-img check failed on imported qcow2 %s: %w%s", targetPath, err, qemuImgStderr(res))
+	}
+	if err := wd.publish(ctx, filepath.Base(targetPath), targetPath); err != nil {
+		return nil, fmt.Errorf("nfs import: %w", err)
 	}
 
 	if _, err := conn.Virsh(ctx, "pool-refresh", poolName); err != nil {

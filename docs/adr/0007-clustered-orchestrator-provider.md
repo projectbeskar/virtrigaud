@@ -733,6 +733,13 @@ the clone lands. In v1 a clustered provider requires the two to be equal, becaus
 disks are host-local and a linked clone depends on its source disk. It returns
 `InvalidArgument` if they differ.
 
+> **Note (2026-09-26):** libvirt linked clones are disabled in v0.4.0, single-host
+> and clustered alike: the source disk is not frozen, so powering the source on
+> corrupts the clone ([`docs/libvirt-clones.md`](../libvirt-clones.md#linked-clones-are-disabled)).
+> Follow-up: re-enable them once the base is frozen at clone time — an external
+> snapshot of the source at clone time, or cloning only from an immutable
+> template image.
+
 **Calls that are not per-VM, or are host-scoped:**
 
 - `TaskStatus` is not per-VM. A clustered provider's async task refs **must**

@@ -19,6 +19,7 @@ package libvirt
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -58,19 +59,59 @@ type fakeSeamConn struct {
 
 func (f *fakeSeamConn) HostID() hostconn.HostID { return f.id }
 
+// seamDomainUUID is the UUID of the one domain a fakeSeamConn host defines.
+const seamDomainUUID = "5eab0000-0000-4000-8000-000000000001"
+
 func (f *fakeSeamConn) Virsh(_ context.Context, args ...string) (*hostconn.Result, error) {
 	f.virshCalls = append(f.virshCalls, args)
 	if f.virshErr != nil {
 		return nil, f.virshErr
 	}
+	// The snapshot RPCs' disk dependency guard reads the domain and lists the
+	// host's domains: this host has just the one, so nothing depends on it.
+	if len(args) > 0 {
+		switch args[0] {
+		case "dumpxml":
+			return &hostconn.Result{Stdout: fmt.Sprintf("<domain><name>%s</name><uuid>%s</uuid><devices>"+
+				"<disk type='file' device='disk'><source file='/var/lib/libvirt/images/%s-disk.qcow2'/></disk>"+
+				"</devices></domain>", args[1], seamDomainUUID, args[1])}, nil
+		case "list":
+			return &hostconn.Result{Stdout: seamDomainUUID + "\n"}, nil
+		}
+	}
 	return &hostconn.Result{Stdout: "ok"}, nil
 }
 
-func (f *fakeSeamConn) RunHost(_ context.Context, _ ...string) (*hostconn.Result, error) {
+func (f *fakeSeamConn) RunHost(_ context.Context, argv ...string) (*hostconn.Result, error) {
 	if f.runHostErr != nil {
 		return nil, f.runHostErr
 	}
+	if len(argv) > 0 && argv[0] == "realpath" {
+		// `realpath -m -z -- <paths>`: already canonical here.
+		var out strings.Builder
+		for i, a := range argv {
+			if a == "--" {
+				for _, p := range argv[i+1:] {
+					out.WriteString(p + "\x00")
+				}
+				break
+			}
+		}
+		return &hostconn.Result{Stdout: out.String()}, nil
+	}
 	return &hostconn.Result{Stdout: f.runHostOut}, nil
+}
+
+// virshCallOf returns the args of the first virsh command sub the conn saw.
+func virshCallOf(t *testing.T, c *fakeSeamConn, sub string) []string {
+	t.Helper()
+	for _, args := range c.virshCalls {
+		if len(args) > 0 && args[0] == sub {
+			return args
+		}
+	}
+	require.Failf(t, "missing virsh call", "no %q among %v", sub, c.virshCalls)
+	return nil
 }
 
 func (f *fakeSeamConn) Stream(_ context.Context, _ ...string) (io.ReadCloser, error) {
@@ -145,13 +186,6 @@ func (f *fakeSeamProvider) imagePrepare(_ context.Context, _ imageartifact.Reque
 	return imagePrepareResult{ID: f.prepID, Path: f.prepPath}, f.prepErr
 }
 
-// firstVirshCall returns the args of the first virsh command the conn saw.
-func firstVirshCall(t *testing.T, c *fakeSeamConn) []string {
-	t.Helper()
-	require.NotEmpty(t, c.virshCalls, "expected at least one virsh command through the seam")
-	return c.virshCalls[0]
-}
-
 // TestServer_SnapshotCreate_ThroughSeam proves SnapshotCreate reaches the host
 // via conn.getDomainState + conn.Virsh (no *Provider assertion). A running VM
 // with IncludeMemory yields a memory snapshot: snapshot-create-as WITHOUT
@@ -169,7 +203,7 @@ func TestServer_SnapshotCreate_ThroughSeam(t *testing.T) {
 	require.NotNil(t, resp)
 	assert.Equal(t, "snap-mem", resp.SnapshotId)
 
-	args := firstVirshCall(t, fc)
+	args := virshCallOf(t, fc, "snapshot-create-as")
 	assert.Equal(t, "snapshot-create-as", args[0])
 	assert.NotContains(t, args, "--disk-only", "a running VM + IncludeMemory must be a full (memory) snapshot")
 }
@@ -187,7 +221,7 @@ func TestServer_SnapshotCreate_StoppedDowngradesToDiskOnly(t *testing.T) {
 		IncludeMemory: true,
 	})
 	require.NoError(t, err)
-	assert.Contains(t, firstVirshCall(t, fc), "--disk-only")
+	assert.Contains(t, virshCallOf(t, fc, "snapshot-create-as"), "--disk-only")
 }
 
 // TestServer_SnapshotDelete_ThroughSeam proves SnapshotDelete reaches the host
@@ -201,7 +235,7 @@ func TestServer_SnapshotDelete_ThroughSeam(t *testing.T) {
 		SnapshotId: "snap-1",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "snapshot-delete", firstVirshCall(t, fc)[0])
+	assert.Equal(t, "snapshot-delete", virshCallOf(t, fc, "snapshot-delete")[0])
 }
 
 // TestServer_SnapshotDelete_MissingIsSuccess verifies the seam preserves the
@@ -230,7 +264,7 @@ func TestServer_SnapshotRevert_ThroughSeam(t *testing.T) {
 		SnapshotId: "snap-1",
 	})
 	require.NoError(t, err)
-	args := firstVirshCall(t, fc)
+	args := virshCallOf(t, fc, "snapshot-revert")
 	assert.Equal(t, "snapshot-revert", args[0])
 	assert.Contains(t, args, "--running")
 }

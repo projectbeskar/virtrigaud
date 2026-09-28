@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	stderrors "errors"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -26,10 +27,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
+	"github.com/projectbeskar/virtrigaud/internal/k8s"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 )
 
@@ -140,4 +143,70 @@ func TestHandleDeletion_ForceDeleteAnnotationRemovesFinalizer(t *testing.T) {
 	var after infravirtrigaudiov1beta1.VirtualMachine
 	getErr := r.Get(ctx, client.ObjectKeyFromObject(vm), &after)
 	assert.True(t, apierrors.IsNotFound(getErr), "force-delete annotation must remove the finalizer despite the failure")
+}
+
+// TestHandleDeletion_ConflictKeepsFinalizerWithCondition verifies a provider
+// Delete refused because other VMs depend on this one (a Conflict — e.g. a
+// libvirt linked clone backed by its disk) keeps the finalizer, sets
+// Ready=False/DeleteBlocked with the provider's categorized message and the
+// way out, and re-checks at the slower blocked cadence; force-delete still
+// removes the finalizer (the provider changed nothing, so the VM is left on
+// the hypervisor, detached).
+func TestHandleDeletion_ConflictKeepsFinalizerWithCondition(t *testing.T) {
+	ctx := context.Background()
+	s := coverageTestScheme(t)
+	refusal := contracts.NewConflictError(`delete: failed to delete VM: delete of libvirt domain "default.vm-src" refused: `+
+		`its disk is the backing file (or a disk) of 1 other domain(s) on this host, such as a linked clone of this VM; `+
+		`delete the linked clones first`, fmt.Errorf("%w: rpc error: code = FailedPrecondition", contracts.ErrVMDiskInUse))
+	prov := &deleteStubProvider{err: refusal}
+	vm := deletionVM("vm-src")
+	r := newTestReconciler(s, &stubResolver{provider: prov}, vm, deletionProviderCR())
+	marked := markForDeletion(t, r, vm)
+
+	res, err := r.handleDeletion(ctx, marked)
+	require.NoError(t, err)
+	assert.Equal(t, vmDeleteBlockedRetryInterval, res.RequeueAfter)
+	require.EqualValues(t, 1, prov.calls.Load())
+
+	var after infravirtrigaudiov1beta1.VirtualMachine
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(vm), &after), "VM must still exist (finalizer retained)")
+	assert.Contains(t, after.Finalizers, infravirtrigaudiov1beta1.VirtualMachineFinalizer)
+	ready := meta.FindStatusCondition(after.Status.Conditions, k8s.ConditionReady)
+	require.NotNil(t, ready, "the owner is told why the delete does not complete")
+	assert.Equal(t, metav1.ConditionFalse, ready.Status)
+	assert.Equal(t, k8s.ReasonDeleteBlocked, ready.Reason)
+	assert.Contains(t, ready.Message, "delete the linked clones first")
+	assert.Contains(t, ready.Message, infravirtrigaudiov1beta1.VirtualMachineOrphanOnDeleteAnnotation)
+	assert.NotContains(t, ready.Message, "rpc error", "the raw gRPC chain stays out of the condition")
+
+	// force-delete still wins.
+	after.Annotations = map[string]string{forceDeleteAnnotation: "true"}
+	require.NoError(t, r.Update(ctx, &after))
+	_, err = r.handleDeletion(ctx, &after)
+	require.NoError(t, err)
+	var gone infravirtrigaudiov1beta1.VirtualMachine
+	assert.True(t, apierrors.IsNotFound(r.Get(ctx, client.ObjectKeyFromObject(vm), &gone)))
+}
+
+// TestHandleDeletion_OtherConflictIsAnOrdinaryFailure pins that only the
+// VM_DISK_IN_USE refusal is a blocked delete: any other Conflict keeps the
+// finalizer and retries at the ordinary cadence, with no DeleteBlocked
+// condition claiming another VM depends on the disk.
+func TestHandleDeletion_OtherConflictIsAnOrdinaryFailure(t *testing.T) {
+	ctx := context.Background()
+	s := coverageTestScheme(t)
+	prov := &deleteStubProvider{err: contracts.NewConflictError("delete: something else conflicts", nil)}
+	vm := deletionVM("vm-other")
+	r := newTestReconciler(s, &stubResolver{provider: prov}, vm, deletionProviderCR())
+	marked := markForDeletion(t, r, vm)
+
+	res, err := r.handleDeletion(ctx, marked)
+	require.NoError(t, err)
+	assert.Equal(t, vmDeleteRetryInterval, res.RequeueAfter)
+	var after infravirtrigaudiov1beta1.VirtualMachine
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(vm), &after))
+	assert.Contains(t, after.Finalizers, infravirtrigaudiov1beta1.VirtualMachineFinalizer)
+	if c := meta.FindStatusCondition(after.Status.Conditions, k8s.ConditionReady); c != nil {
+		assert.NotEqual(t, k8s.ReasonDeleteBlocked, c.Reason)
+	}
 }

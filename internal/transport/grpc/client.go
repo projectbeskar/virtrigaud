@@ -306,7 +306,9 @@ func providerCircuitBreakerInterceptor(cb *resilience.CircuitBreaker) grpc.Unary
 // Two clustered-provider statuses (ADR-0007 Addendum A) never count, whatever
 // their code, because the provider answered and is healthy: a host-scoped
 // Unavailable (HOST_UNAVAILABLE) and a per-VM operation that failed on its
-// host (VM_OPERATION_FAILED). An ImagePrepare answered with
+// host (VM_OPERATION_FAILED); neither does a per-VM operation a provider did
+// not perform because its disk dependency check could not run
+// (VM_DISK_CHECK_FAILED, single-host and clustered). An ImagePrepare answered with
 // IMAGE_ARTIFACT_IN_PROGRESS or IMAGE_SOURCE_UNAVAILABLE is excluded by
 // countsTowardBreaker, which knows the method.
 func isInfraFailure(err error) bool {
@@ -326,6 +328,14 @@ func isInfraFailure(err error) bool {
 	// must not open the breaker for every VM of the Provider (ADR-0007
 	// Addendum A, slice 2). A plain Unknown / Internal still counts.
 	if st, ok := status.FromError(err); ok && isVMOperationFailedStatus(st) {
+		return false
+	}
+	// Nor does a per-VM operation the provider did not perform because it
+	// could not verify that no other VM depends on the VM's disk
+	// (VM_DISK_CHECK_FAILED, e.g. one unreadable disk on the host): the
+	// provider answered, and the finalizer's retries must not open the breaker
+	// for every VM of the Provider.
+	if st, ok := status.FromError(err); ok && isVMDiskCheckFailedStatus(st) {
 		return false
 	}
 	switch status.Code(err) {
@@ -1265,6 +1275,44 @@ func isVMOperationFailedStatus(st *status.Status) bool {
 	return false
 }
 
+// isVMDiskInUseStatus reports whether a gRPC status is a provider's refusal of
+// a per-VM operation because another VM on the host depends on this VM's disk
+// (e.g. its linked clone): codes.FailedPrecondition carrying a
+// google.rpc.ErrorInfo with contracts.VMDiskInUseReason in VirtRigaud's
+// domain. The provider answered, so it is healthy.
+func isVMDiskInUseStatus(st *status.Status) bool {
+	if st == nil || st.Code() != codes.FailedPrecondition {
+		return false
+	}
+	for _, d := range st.Details() {
+		if info, ok := d.(*errdetails.ErrorInfo); ok &&
+			info.GetReason() == contracts.VMDiskInUseReason &&
+			info.GetDomain() == contracts.ErrorInfoDomain {
+			return true
+		}
+	}
+	return false
+}
+
+// isVMDiskCheckFailedStatus reports whether a gRPC status is a provider's
+// "not performed: could not verify that no other VM depends on this VM's disk"
+// (codes.Unavailable carrying a google.rpc.ErrorInfo with
+// contracts.VMDiskCheckFailedReason in VirtRigaud's domain). It is retryable;
+// the provider answered, so it is healthy.
+func isVMDiskCheckFailedStatus(st *status.Status) bool {
+	if st == nil || st.Code() != codes.Unavailable {
+		return false
+	}
+	for _, d := range st.Details() {
+		if info, ok := d.(*errdetails.ErrorInfo); ok &&
+			info.GetReason() == contracts.VMDiskCheckFailedReason &&
+			info.GetDomain() == contracts.ErrorInfoDomain {
+			return true
+		}
+	}
+	return false
+}
+
 // isImageArtifactInProgressStatus reports whether a gRPC status is an
 // ImagePrepare's "the artifact is still being prepared for this VMImage by
 // another request" (ADR-0009 D4): codes.Unavailable carrying a
@@ -1422,6 +1470,17 @@ func (c *Client) mapGRPCError(operation string, err error) error {
 		// (non-retryable) so the controller surfaces a condition and backs off
 		// instead of retrying on a tight loop (contracts.IsConflict).
 		return contracts.NewConflictError(fmt.Sprintf("%s: %s", operation, st.Message()), err)
+	case codes.FailedPrecondition:
+		// The provider refused because another VM on the host depends on this
+		// VM's disk (e.g. a linked clone): typed Conflict, so the controller
+		// surfaces a condition and keeps the VM (and its finalizer) until the
+		// dependents are gone. Any other FailedPrecondition keeps its
+		// historical untyped form.
+		if isVMDiskInUseStatus(st) {
+			return contracts.NewConflictError(fmt.Sprintf("%s: %s", operation, st.Message()),
+				fmt.Errorf("%w: %w", contracts.ErrVMDiskInUse, err))
+		}
+		return fmt.Errorf("%s failed: %s", operation, st.Message())
 	case codes.Unavailable, codes.DeadlineExceeded:
 		if isHostUnavailableStatus(st) {
 			return contracts.NewHostUnavailableError(fmt.Sprintf("%s: %s", operation, st.Message()), err)

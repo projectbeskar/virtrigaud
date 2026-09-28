@@ -20,6 +20,7 @@ import (
 	"context"
 	stderrors "errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -178,6 +179,17 @@ const eventReasonOrphaned = "Orphaned"
 // vmDeleteRetryInterval is the requeue cadence while a provider Delete keeps
 // failing (finalizer retained until it succeeds or force-delete is set).
 const vmDeleteRetryInterval = 15 * time.Second
+
+// vmDeleteBlockedRetryInterval is the requeue cadence while the provider
+// refuses a Delete because other VMs on the hypervisor depend on this one (a
+// Conflict, e.g. a libvirt linked clone backed by its disk). The refusal holds
+// until those VMs are deleted, and each check scans the host, so it is
+// re-checked less often than a failing Delete is retried.
+const vmDeleteBlockedRetryInterval = time.Minute
+
+// eventReasonDeleteBlocked is the event reason recorded when the provider
+// refuses to delete a VM that other VMs depend on.
+const eventReasonDeleteBlocked = k8s.ReasonDeleteBlocked
 
 // providerErrorRetryInterval is the requeue cadence after a provider Create /
 // image-prepare failure that may be transient (host unreachable, task error).
@@ -645,6 +657,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	vm.Status.IPs = desc.IPs
 	vm.Status.ConsoleURL = desc.ConsoleURL
 	vm.Status.Provider = desc.ProviderRaw
+	r.noteLinkedCloneDependents(vm, desc.ProviderRaw)
 
 	// Check desired power state
 	desiredPowerState := vm.Spec.PowerState
@@ -816,6 +829,12 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 					logger.Error(err, "Provider VM delete failed but force-delete annotation is set; removing finalizer (the provider VM may be orphaned)",
 						"id", ref.ID, "annotation", forceDeleteAnnotation)
 					metrics.RecordError(errReasonProviderDelete, metrics.ComponentManager)
+				case contracts.IsVMDiskInUse(err):
+					// The provider refused BEFORE changing anything: other VMs on
+					// the hypervisor depend on this one (e.g. a libvirt linked
+					// clone backed by its disk), and deleting it would destroy
+					// their data. Keep the finalizer, say why, and re-check.
+					return r.retainForBlockedDelete(ctx, vm, ref.ID, err), nil
 				default:
 					// Real failure (e.g. PVE "VM is running - destroy failed"). Do
 					// NOT remove the finalizer — that would orphan the hypervisor VM.
@@ -831,6 +850,74 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 	}
 
 	return r.removeFinalizer(ctx, vm)
+}
+
+// noteLinkedCloneDependents reflects the provider's count of other VMs whose
+// backing file is this VM's disk, taken at the VM's last start
+// (contracts.ProviderRawLinkedCloneDependentsKey), as the
+// LinkedClonesDependOnDisk condition: True, with a Warning event when it
+// becomes true, while the count is non-zero; removed when the provider reports
+// zero. A missing count (not known yet, or the provider restarted) leaves the
+// condition as it is. Ready is never changed: this warns, it refuses nothing.
+func (r *VirtualMachineReconciler) noteLinkedCloneDependents(vm *infravirtrigaudiov1beta1.VirtualMachine, raw map[string]string) {
+	v, ok := raw[contracts.ProviderRawLinkedCloneDependentsKey]
+	if !ok {
+		return
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil || n < 0 {
+		return
+	}
+	if n == 0 {
+		meta.RemoveStatusCondition(&vm.Status.Conditions, k8s.ConditionLinkedClonesDependOnDisk)
+		return
+	}
+	msg := fmt.Sprintf("%d other VM(s) on the hypervisor use this VM's disk as their backing file (linked clones of it): "+
+		"powering this VM on while its linked clones are shut off corrupts them. Keep it powered off, or delete the linked clones "+
+		"(a linked clone in another namespace also holds this VM's delete until it is removed, or this VM is detached with %s=true)",
+		n, infravirtrigaudiov1beta1.VirtualMachineOrphanOnDeleteAnnotation)
+	was := meta.IsStatusConditionTrue(vm.Status.Conditions, k8s.ConditionLinkedClonesDependOnDisk)
+	meta.SetStatusCondition(&vm.Status.Conditions, metav1.Condition{
+		Type:               k8s.ConditionLinkedClonesDependOnDisk,
+		Status:             metav1.ConditionTrue,
+		Reason:             k8s.ConditionLinkedClonesDependOnDisk,
+		Message:            msg,
+		ObservedGeneration: vm.Generation,
+	})
+	if !was {
+		r.recordEvent(vm, corev1.EventTypeWarning, k8s.ConditionLinkedClonesDependOnDisk, msg)
+	}
+}
+
+// retainForBlockedDelete keeps the finalizer of a VirtualMachine whose provider
+// Delete was refused with VM_DISK_IN_USE (contracts.IsVMDiskInUse; any other
+// Conflict is an ordinary failed delete) — other VMs on the hypervisor depend
+// on it (e.g. linked clones backed by its disk) — and tells the owner why on the
+// Ready condition and in a Warning event. The provider changed nothing, so the
+// VM stays intact; the delete is re-checked every vmDeleteBlockedRetryInterval
+// and completes once the dependent VMs are gone.
+func (r *VirtualMachineReconciler) retainForBlockedDelete(
+	ctx context.Context,
+	vm *infravirtrigaudiov1beta1.VirtualMachine,
+	id string,
+	err error,
+) ctrl.Result {
+	log.FromContext(ctx).Info("Provider refused to delete the VM because other VMs depend on it; retaining finalizer",
+		"id", id, "retryAfter", vmDeleteBlockedRetryInterval.String(), "error", err.Error())
+	metrics.RecordError(errReasonProviderDelete, metrics.ComponentManager)
+	msg := fmt.Sprintf("Provider refused to delete the VM: other VMs on its hypervisor depend on its disk (e.g. linked clones of it). "+
+		"Delete them first, or set %s=true to detach this VM without deleting it (re-checking every %s). Provider detail: %s",
+		infravirtrigaudiov1beta1.VirtualMachineOrphanOnDeleteAnnotation, vmDeleteBlockedRetryInterval, sanitizeProviderDetail(err))
+	meta.SetStatusCondition(&vm.Status.Conditions, metav1.Condition{
+		Type:               k8s.ConditionReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             k8s.ReasonDeleteBlocked,
+		Message:            msg,
+		ObservedGeneration: vm.Generation,
+	})
+	r.updateStatus(ctx, vm)
+	r.recordEvent(vm, corev1.EventTypeWarning, eventReasonDeleteBlocked, msg)
+	return ctrl.Result{RequeueAfter: vmDeleteBlockedRetryInterval}
 }
 
 // removeFinalizer removes the VirtualMachine finalizer, completing deletion.

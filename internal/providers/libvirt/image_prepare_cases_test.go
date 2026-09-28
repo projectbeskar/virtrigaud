@@ -602,7 +602,7 @@ func TestImagePrepareLegacy_DeprecatedPath(t *testing.T) {
 	_, _, mode := fileIdentity(t, artifact)
 	assert.Equal(t, os.FileMode(0o444), mode)
 	assert.NotContains(t, h.log("sudo"), "chown")
-	assert.NotContains(t, h.log("sudo"), "777")
+	assert.NotContains(t, h.log("sudo"), "chmod 777")
 	assert.NoFileExists(t, filepath.Join(h.images, imageSidecarName("ubuntu-22.04")), "legacy mode writes no stamp")
 	assertNoStagingFiles(t, h.images)
 	assert.Equal(t, before+1, libvirtLegacyCount(t))
