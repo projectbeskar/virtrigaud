@@ -607,12 +607,31 @@ func (p *Provider) deleteOn(ctx context.Context, c libvirtConn, id string) (stri
 // disk guard, ADR-0007 A6 R3: checkDeletionAcrossHosts). A use refuses the
 // delete (VM_DISK_IN_USE), and a host that cannot be checked fails it closed
 // (HOST_UNAVAILABLE or VM_DISK_CHECK_FAILED); either way nothing is changed.
+// The whole delete — owner check included — runs under the domain's lock
+// (lockDomain), so it never races a Create of the same VM in this process.
 func (p *Provider) deleteClustered(ctx context.Context, c libvirtConn, id string, owner contracts.ObjectIdentity) error {
 	vp, err := virshOf(c)
 	if err != nil {
 		return err
 	}
 	host := c.HostID()
+
+	// The domain's lock is taken BEFORE the owner check and held until the
+	// teardown completes (ADR-0007 A6.1): a finalizer Delete that races a
+	// Create of the same VM still running in this provider waits for it,
+	// instead of finding nothing yet, answering NotFound — which releases the
+	// finalizer — and leaving the domain the Create then defines orphaned. The
+	// key is the name Create locks: the namespaced domain name, also when the
+	// finalizer addresses an in-flight create by the VM's bare name.
+	lockKey := id
+	if alt, ok := pendingCreateDomainName(id, owner); ok {
+		lockKey = alt
+	}
+	unlock, err := p.lockDomain(ctx, lockKey, guardOpDelete)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 
 	d, err := ownedDomainTarget(ctx, vp, host, id, owner, "delete")
 	if contracts.IsNotFound(err) {
@@ -636,12 +655,8 @@ func (p *Provider) deleteClustered(ctx context.Context, c libvirtConn, id string
 	// The host-local plan sees only this host's domains; on a shared pool a
 	// domain on another host of the Provider may use the same files, so every
 	// other host is checked before anything is changed (ADR-0007 A6, R3) —
-	// under the domain's lock, held until the teardown completes.
-	unlock, err := p.lockDomain(ctx, d.name, guardOpDelete)
-	if err != nil {
-		return err
-	}
-	defer unlock()
+	// under the domain's lock, taken above and held until the teardown
+	// completes.
 	_, err = p.deleteExistingDomainChecked(ctx, vp, d.handle, func(plan domainDeletionPlan) (domainDeletionPlan, error) {
 		return p.checkDeletionAcrossHosts(ctx, host, plan)
 	})

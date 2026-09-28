@@ -861,6 +861,38 @@ func TestClustered_DomainLockSerializesCheckAndAct(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, []string{disk}, s.removals())
 	})
+	// A6.1 fix verification, N1: the finalizer's Delete of a VM whose Create
+	// is still running (it addresses the VM by its bare name, no status.id
+	// yet) takes the domain's lock BEFORE its owner check. It waits for the
+	// Create, then finds and removes the domain the Create defined — instead
+	// of finding nothing yet, answering NotFound (which releases the
+	// finalizer) and leaving that domain orphaned.
+	t.Run("finalizer delete racing a create", func(t *testing.T) {
+		s := newSharedPool(t)
+		disk := filepath.Join(s.images, "team-a.web-disk.qcow2")
+		unlockCreate, err := s.p.lockDomain(context.Background(), "team-a.web", "test")
+		require.NoError(t, err)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		done := make(chan error, 1)
+		go func() {
+			_, derr := s.p.Delete(ctx, contracts.VMRef{ID: "web", HostID: "host-b", Owner: ownerTeamA})
+			done <- derr
+		}()
+		require.Eventually(t, func() bool { return s.p.domainLocks.refs("team-a.web") == 2 }, 10*time.Second, time.Millisecond,
+			"the Delete waits for the Create's lock")
+		assert.Empty(t, s.virshCalls("host-b"), "nothing was looked up while the Create held the lock")
+
+		// The Create completes: its disk is written and its domain defined.
+		require.NoError(t, os.WriteFile(disk, []byte("new-disk"), 0o600))
+		s.defineOn("host-b", "team-a.web", uuidVMOnB, guardDomainXML("team-a.web", uuidVMOnB, disk, ownerTeamA, false))
+		unlockCreate()
+
+		require.NoError(t, <-done, "the Delete found the domain the Create defined")
+		assert.Equal(t, []string{disk}, s.removals(), "and removed it with its disk")
+		assert.Zero(t, s.p.domainLocks.refs("team-a.web"))
+	})
 }
 
 // ─── the clustered Clone (routed SCD fixture) ────────────────────────────────

@@ -1707,7 +1707,11 @@ the check until the act completes, for every clustered Create, Clone and
 Delete: a retry that arrives while an earlier attempt still runs (the manager
 stopped waiting, the provider did not) waits for it, within its own budget,
 instead of checking and writing next to it; one that gets no lock in time is
-not performed (`Unavailable` + `VM_OPERATION_FAILED`, retried). *Remaining
+not performed (`Unavailable` + `VM_OPERATION_FAILED`, retried). A Delete
+takes the lock **before** its owner check: the finalizer's Delete of a VM
+whose Create is still running waits for it and removes the domain that
+Create defined, instead of finding nothing yet and releasing the
+finalizer. *Remaining
 gap:* the lock is in-process, so an actor outside VirtRigaud — an
 administrator's `virsh`, another tool, a second provider process fronting the
 same hosts — can still change a disk between the check and the act.

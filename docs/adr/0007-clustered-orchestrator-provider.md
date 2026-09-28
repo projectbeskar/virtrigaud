@@ -1815,7 +1815,10 @@ runbook or remove it. There is no opt-in in v0.4.0. A6.2 must also set the
 >   in-process lock on the domain name from the scan until the write, define
 >   or teardown completes (Create, Clone, Delete), so a retry never checks and
 >   acts next to an earlier attempt still running; a lock not obtained within
->   the call's budget answers `Unavailable` + `VM_OPERATION_FAILED`.
+>   the call's budget answers `Unavailable` + `VM_OPERATION_FAILED`. A Delete
+>   takes it before its owner check (keyed on the namespaced name, also when
+>   the finalizer addresses an in-flight create by the bare name), so it never
+>   answers `NotFound` while the VM's Create is still defining the domain.
 >   Remaining gap: actors outside the provider process (an administrator's
 >   `virsh`, other tools, a second provider process) are not serialized.
 > - **Hosts the operator could not render** *(security review of A6.1)*: a
