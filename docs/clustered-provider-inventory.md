@@ -1476,6 +1476,11 @@ slice 4 is refused with a message and nothing is listed. For each listed VM:
    from, and the manager logs a warning: two Providers fronting one hypervisor
    could each adopt the same unstamped domain. Keep one clustered Provider per
    host endpoint.
+   **Do not front one hypervisor with both a single-host and a clustered
+   Provider.** A single-host provider does not stamp the domains it manages,
+   so a clustered adoption could take one of them. As a guard, an unstamped
+   domain whose name is the `status.id` of a VirtualMachine bound through a
+   non-clustered Provider is skipped and reported.
 2. **The adopting VirtualMachine** is created in the Provider's namespace, as on
    a single host, but named after the domain **plus a digest of (host, id)**
    (for example `team-a-web-3f2a9c1b04`), so the same name on two hosts gives

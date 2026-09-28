@@ -632,7 +632,7 @@ func TestPlanClusteredAdoption_KeysOnHostAndID(t *testing.T) {
 	delete(noUUID.ProviderRaw, contracts.VMInfoUUIDKey)
 	plan := planClusteredAdoption(provider, contracts.VMList{VMs: []contracts.VMInfo{
 		info("host-a", "web"), info("host-b", "web"), info("", "web"), noUUID,
-	}}, []infravirtrigaudiov1beta1.VirtualMachine{bound}, nil)
+	}}, []infravirtrigaudiov1beta1.VirtualMachine{bound}, adoptionGuards{})
 
 	require.Len(t, plan.adopt, 1)
 	assert.Equal(t, "host-b", plan.adopt[0].HostID, "a name bound on host-a says nothing about host-b's domain")
@@ -876,4 +876,27 @@ func TestClusteredAdoption_SharedHostEndpointIsNotAdoptedFrom(t *testing.T) {
 	assert.Contains(t, adoptionStatus(t, r).Message, "one clustered Provider per host endpoint")
 	assert.Equal(t, endpointKey("qemu+ssh://virt@host-a/system"), endpointKey("qemu+ssh://root@HOST-A/system"))
 	assert.NotEqual(t, endpointKey("qemu+ssh://virt@host-a/system"), endpointKey("qemu+ssh://virt@host-a:2222/system"))
+}
+
+// TestClusteredAdoption_DomainManagedThroughASingleHostProviderIsSkipped: an
+// unstamped domain whose name is the status.id of a VM bound through a
+// single-host Provider (the same hypervisor fronted by both kinds) is not
+// adopted; a clustered Provider's own ids do not count.
+func TestClusteredAdoption_DomainManagedThroughASingleHostProviderIsSkipped(t *testing.T) {
+	single := readyProvider(clusterNS, "prov-single")
+	onSingle := &infravirtrigaudiov1beta1.VirtualMachine{
+		ObjectMeta: metav1.ObjectMeta{Name: "legacy", Namespace: clusterNS, UID: "uid-legacy"},
+		Spec:       infravirtrigaudiov1beta1.VirtualMachineSpec{ProviderRef: infravirtrigaudiov1beta1.ObjectRef{Name: "prov-single"}},
+		Status:     infravirtrigaudiov1beta1.VirtualMachineStatus{ID: "legacy"},
+	}
+	prov := &fakeClusteredAdopter{caps: routedAdoptionCaps, domains: []*fakeDomain{
+		{host: "host-a", id: "legacy", uuid: "uuid-a-legacy", power: "On"},
+		{host: "host-a", id: "fresh", uuid: "uuid-a-fresh", power: "On"},
+	}}
+	r := clusteredAdoptionReconciler(t, prov, clusteredAdoptionProvider(), single, clusterHost("host-a", "prov-c"), onSingle)
+
+	reconcileAdoption(t, r)
+	require.Len(t, prov.transfers, 1)
+	assert.Equal(t, "fresh", prov.transfers[0].VM.ID)
+	assert.Contains(t, adoptionStatus(t, r).Message, "managed through a single-host Provider")
 }

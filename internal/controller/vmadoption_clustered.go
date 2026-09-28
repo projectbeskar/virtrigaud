@@ -190,7 +190,25 @@ const (
 	// names more than one owner across its definitions; a transfer would be
 	// refused, so nothing is created for it.
 	skipStampUnreliable adoptionSkipReason = "owner stamp unreadable or naming more than one owner (inspect the domain's metadata)"
+	// skipSingleHostManaged: an unstamped domain whose name is the status.id
+	// of a VirtualMachine bound through a single-host (not clustered)
+	// Provider. A hypervisor fronted by both a single-host and a clustered
+	// Provider: the single-host provider does not stamp, so the name is the
+	// only sign the domain is already managed.
+	skipSingleHostManaged adoptionSkipReason = "managed through a single-host Provider fronting the same hypervisor " +
+		"(do not front one host with both a single-host and a clustered Provider)"
 )
+
+// adoptionGuards are facts from outside the listing that make a clustered
+// discovery skip listed VMs.
+type adoptionGuards struct {
+	// sharedEndpointHosts are the Provider's Hosts whose endpoint another Host
+	// object names (hostsWithSharedEndpoints).
+	sharedEndpointHosts map[string]bool
+	// singleHostIDs are the status.id values of VirtualMachines bound through
+	// a Provider that is not clustered (singleHostBoundIDs).
+	singleHostIDs map[string]bool
+}
 
 // pendingAdoption is an adopted VirtualMachine whose domain already carries
 // its stamp but whose binding is not written yet.
@@ -234,8 +252,11 @@ func (r *VMAdoptionReconciler) reconcileClusteredAdoption(ctx context.Context, p
 		return r.clusteredAdoptionFailed(ctx, provider, fmt.Sprintf("Discovery failed: list VirtualMachines: %v", err), errReasonDiscoverVMs)
 	}
 
-	shared := r.hostsWithSharedEndpoints(ctx, provider)
-	plan := planClusteredAdoption(provider, listed, vmList.Items, shared)
+	guards := adoptionGuards{
+		sharedEndpointHosts: r.hostsWithSharedEndpoints(ctx, provider),
+		singleHostIDs:       r.singleHostBoundIDs(ctx, vmList.Items),
+	}
+	plan := planClusteredAdoption(provider, listed, vmList.Items, guards)
 	var unmanaged []contracts.VMInfo
 	for _, info := range plan.adopt {
 		if filter != nil && !r.matchesFilter(info, filter) {
@@ -420,12 +441,14 @@ func (r *VMAdoptionReconciler) routedAdopter(ctx context.Context, provider *infr
 //     (that host's VMs are unknown); see the docs;
 //   - a VM with any other owner stamp is a previous incarnation (skipped and
 //     reported; ADR-0007 A6);
+//   - an unstamped VM whose name is the status.id of a VirtualMachine bound
+//     through a single-host Provider is skipped (guards.singleHostIDs);
 //   - an unstamped VM is unmanaged and may be adopted.
 //
 // VMs on unreachable hosts are not in the list, and nothing is concluded
 // about them.
 func planClusteredAdoption(provider *infravirtrigaudiov1beta1.Provider, listed contracts.VMList,
-	vms []infravirtrigaudiov1beta1.VirtualMachine, sharedEndpointHosts map[string]bool) clusteredAdoptionPlan {
+	vms []infravirtrigaudiov1beta1.VirtualMachine, guards adoptionGuards) clusteredAdoptionPlan {
 	managed := map[vmHostKey]bool{}
 	liveUIDs := make(map[string]bool, len(vms))
 	awaiting := map[string]*infravirtrigaudiov1beta1.VirtualMachine{}
@@ -459,7 +482,7 @@ func planClusteredAdoption(provider *infravirtrigaudiov1beta1.Provider, listed c
 		if managed[vmHostKey{host: info.HostID, id: info.ID}] {
 			continue
 		}
-		if sharedEndpointHosts[info.HostID] {
+		if guards.sharedEndpointHosts[info.HostID] {
 			skip(info, skipSharedEndpoint)
 			continue
 		}
@@ -483,6 +506,10 @@ func planClusteredAdoption(provider *infravirtrigaudiov1beta1.Provider, listed c
 		}
 		if len(uids) > 0 {
 			skip(info, skipPreviousIncarnation)
+			continue
+		}
+		if guards.singleHostIDs[info.ID] {
+			skip(info, skipSingleHostManaged)
 			continue
 		}
 		plan.adopt = append(plan.adopt, info)
@@ -914,6 +941,33 @@ func (r *VMAdoptionReconciler) hostsWithSharedEndpoints(ctx context.Context, pro
 		}
 	}
 	return shared
+}
+
+// singleHostBoundIDs returns the status.id of every VirtualMachine in vms that
+// is bound through a Provider that is not clustered — including one whose
+// Provider cannot be read (conservative). A single-host provider never stamps
+// the domains it manages, so on a hypervisor fronted by both a single-host and
+// a clustered Provider the id is the only sign an unstamped domain is managed.
+func (r *VMAdoptionReconciler) singleHostBoundIDs(ctx context.Context, vms []infravirtrigaudiov1beta1.VirtualMachine) map[string]bool {
+	providers := &infravirtrigaudiov1beta1.ProviderList{}
+	clustered := map[types.NamespacedName]bool{}
+	if err := r.List(ctx, providers); err != nil {
+		log.FromContext(ctx).Error(err, "List Providers to find single-host bindings; treating every bound VM as single-host")
+	} else {
+		for i := range providers.Items {
+			if isClusterTopology(&providers.Items[i]) {
+				clustered[client.ObjectKeyFromObject(&providers.Items[i])] = true
+			}
+		}
+	}
+	ids := map[string]bool{}
+	for i := range vms {
+		vm := &vms[i]
+		if vm.Status.ID != "" && !clustered[placementProviderKey(vm)] {
+			ids[vm.Status.ID] = true
+		}
+	}
+	return ids
 }
 
 // endpointKey reduces a Host endpoint to what identifies the hypervisor: the
