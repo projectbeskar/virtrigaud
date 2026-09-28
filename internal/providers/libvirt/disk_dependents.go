@@ -127,12 +127,57 @@ func diskInUseStatus(msg string, routed bool) *status.Status {
 }
 
 // guardCheckFailed logs why the dependency guard could not run and returns the
-// generic retryable error the requester sees (diskCheckFailedError): the
-// underlying error names other domains' disks and host commands, so it stays
-// in the provider log.
+// generic retryable error the requester sees: the underlying error names other
+// domains' disks and host commands, so it stays in the provider log.
+//
+// When the host answered but a definition, a disk chain or a path could not be
+// read, that is diskCheckFailedError (VM_DISK_CHECK_FAILED, kept out of the
+// circuit breaker). When the host could not be reached at all
+// (isHostTransportFailure: the SSH connection or the host's libvirtd failed),
+// it is a host failure like any other and is classified as one
+// (guardHostUnreachableError): HOST_UNAVAILABLE when routed on a clustered
+// provider, a plain Unavailable — counted by the breaker — on a single-host
+// one.
 func guardCheckFailed(op, domain string, err error) error {
 	log.Printf("ERROR libvirt disk dependency check for %s of domain %s failed: %v", op, domain, err)
+	if isHostTransportFailure(err) {
+		return &guardHostUnreachableError{op: op, domain: domain, cause: err}
+	}
 	return &diskCheckFailedError{op: op, domain: domain}
+}
+
+// guardHostUnreachableError reports that op was not performed on domain
+// because the host could not be reached while the dependency guard ran.
+// Nothing was changed. Its message is generic; the host failure itself stays
+// reachable through Unwrap (never through Error), so isHostTransportFailure —
+// and routedRPCError's HOST_UNAVAILABLE on a clustered provider — see it. It
+// is retryable, and crosses the single-host wire as a plain codes.Unavailable.
+type guardHostUnreachableError struct {
+	// op is the operation not performed (guardOp*).
+	op string
+	// domain names the requesting VM's domain.
+	domain string
+	// cause is the host failure (a *VirshError); provider log only.
+	cause error
+}
+
+// Error is the refusal, safe for the requesting VM's status.
+func (e *guardHostUnreachableError) Error() string {
+	return fmt.Sprintf("%s of libvirt domain %q not performed: the libvirt host could not be reached "+
+		"(details are in the provider log)", e.op, e.domain)
+}
+
+// Unwrap exposes the equivalent retryable contracts error and the host
+// failure, for errors.As/Is only.
+func (e *guardHostUnreachableError) Unwrap() []error {
+	return []error{contracts.NewRetryableError(e.Error(), nil), e.cause}
+}
+
+// GRPCStatus renders the failure as a plain codes.Unavailable (no ErrorInfo),
+// which the manager counts toward the Provider's circuit breaker: on a
+// single-host provider an unreachable host is the provider being unavailable.
+func (e *guardHostUnreachableError) GRPCStatus() *status.Status {
+	return status.New(codes.Unavailable, e.Error())
 }
 
 // diskCheckFailedError reports that op was not performed on domain because

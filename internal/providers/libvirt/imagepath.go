@@ -410,11 +410,28 @@ const hostCheckFailedMessage = "could not verify the image on the libvirt host "
 	"(transient host error; details are in the provider log)"
 
 // hostCheckFailed logs a host-side check failure in full, provider-side only,
-// and returns a generic retryable error that carries none of it.
+// and returns a generic retryable error whose message carries none of it. The
+// failure stays reachable through errors.As/Is (hiddenCauseError), so a host
+// that could not be reached is still recognized as such
+// (isHostTransportFailure).
 func hostCheckFailed(what string, err error) error {
 	log.Printf("ERROR libvirt image confinement: %s: %v", what, err)
-	return contracts.NewRetryableError(hostCheckFailedMessage, nil)
+	return &hiddenCauseError{visible: contracts.NewRetryableError(hostCheckFailedMessage, nil), cause: err}
 }
+
+// hiddenCauseError is visible — its message and its contracts error — with
+// cause attached for classification only: Error never includes it, and
+// errors.As/Is reach it after visible.
+type hiddenCauseError struct {
+	visible error
+	cause   error
+}
+
+// Error returns the visible error's message only.
+func (e *hiddenCauseError) Error() string { return e.visible.Error() }
+
+// Unwrap exposes the visible error, then the hidden cause.
+func (e *hiddenCauseError) Unwrap() []error { return []error{e.visible, e.cause} }
 
 // confine applies the full image-path confinement (see the file comment) to req
 // on the host behind h and returns the canonical, checked image. Every

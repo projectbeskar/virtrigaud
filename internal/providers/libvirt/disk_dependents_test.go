@@ -355,6 +355,95 @@ func TestGuardCheckFailed_WireFormAndBreaker(t *testing.T) {
 	}
 }
 
+// errorInfoReasons returns the ErrorInfo reasons st carries.
+func errorInfoReasons(st *status.Status) map[string]bool {
+	reasons := map[string]bool{}
+	for _, d := range st.Details() {
+		if info, ok := d.(*errdetails.ErrorInfo); ok {
+			reasons[info.GetReason()] = true
+		}
+	}
+	return reasons
+}
+
+// TestGuardCheckFailed_HostUnreachableIsAHostFailure pins that a host that
+// could not be reached while the guard ran (the SSH connection failed: no exit
+// status; or the host's libvirtd is down) is classified as a host failure, not
+// as VM_DISK_CHECK_FAILED: HOST_UNAVAILABLE when routed, a plain Unavailable
+// (which the manager's breaker counts) on a single-host provider — with no
+// host detail in the message. A host that answered but could not read a file
+// is still VM_DISK_CHECK_FAILED.
+func TestGuardCheckFailed_HostUnreachableIsAHostFailure(t *testing.T) {
+	for name, cause := range map[string]error{
+		"ssh failed": &VirshError{Command: "virsh dumpxml 9f0c-other-uuid", ExitCode: -1,
+			Stderr: "dial tcp 10.0.0.1:22: connect: connection refused"},
+		"libvirtd down": &VirshError{Command: "virsh list --all --uuid", ExitCode: 1,
+			Stderr: "error: failed to connect to the hypervisor\nerror: Failed to connect socket to '/var/run/libvirt/libvirt-sock'"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := guardCheckFailed(guardOpDelete, "team-a.web", fmt.Errorf("read the domain definition: %w", cause))
+			var hu *guardHostUnreachableError
+			require.ErrorAs(t, err, &hu)
+			assert.True(t, contracts.IsRetryable(err))
+			assert.True(t, isHostTransportFailure(err), "the host failure stays classifiable")
+			for _, leak := range []string{"10.0.0.1", "9f0c-other-uuid", "libvirt-sock", "virsh"} {
+				assert.NotContains(t, err.Error(), leak)
+			}
+
+			st, ok := status.FromError(fmt.Errorf("failed to delete VM: %w", err))
+			require.True(t, ok)
+			assert.Equal(t, codes.Unavailable, st.Code(), "single-host: a plain Unavailable")
+			assert.Empty(t, errorInfoReasons(st), "no VM_DISK_CHECK_FAILED: the breaker counts it")
+			assert.NotContains(t, st.Message(), "10.0.0.1")
+
+			st, ok = status.FromError(routedRPCError("delete VM", &hostOpError{host: "host-a", err: err}))
+			require.True(t, ok)
+			assert.Equal(t, codes.Unavailable, st.Code())
+			reasons := errorInfoReasons(st)
+			assert.True(t, reasons[contracts.HostUnavailableReason], "routed: HOST_UNAVAILABLE")
+			assert.False(t, reasons[contracts.VMDiskCheckFailedReason])
+			assert.NotContains(t, st.Message(), "10.0.0.1")
+		})
+	}
+
+	answered := &VirshError{Command: "qemu-img info", ExitCode: 1, Stderr: "Could not open '/p/x': Permission denied"}
+	var dc *diskCheckFailedError
+	require.ErrorAs(t, guardCheckFailed(guardOpDelete, "team-a.web", answered), &dc, "the host answered: VM_DISK_CHECK_FAILED")
+}
+
+// TestDiskDependents_HostUnreachableDuringTheScan: a connection that fails in
+// the middle of the host scan (after the domain's own definition was read)
+// still reaches the guard as a host failure, through the scan's generic,
+// detail-free errors (hostCheckFailed keeps the cause for classification).
+func TestDiskDependents_HostUnreachableDuringTheScan(t *testing.T) {
+	down := &VirshResult{ExitCode: -1, Stderr: "ssh: handshake failed: EOF"}
+	h := &transportFailingHost{scriptedHost: scriptedHost{answers: map[string]*VirshResult{
+		"dumpxml team-a.web": {Stdout: "<domain><name>team-a.web</name><uuid>u-a</uuid><devices>" +
+			"<disk type='file' device='disk'><source file='/p/team-a.web-disk.qcow2'/></disk></devices></domain>"},
+		"list --all --uuid": down,
+	}}}
+	err := refuseIfDiskHasDependents(context.Background(), h, "team-a.web", guardOpSnapshotRevert)
+	var hu *guardHostUnreachableError
+	require.ErrorAs(t, err, &hu, "%v", err)
+	assert.NotContains(t, err.Error(), "handshake")
+}
+
+// transportFailingHost is a scriptedHost whose failing answers are
+// *VirshErrors, as the real transport returns them (ExitCode -1: the command
+// never completed on the host).
+type transportFailingHost struct {
+	scriptedHost
+}
+
+// runVirshCommand implements hostCommandRunner.
+func (h *transportFailingHost) runVirshCommand(ctx context.Context, args ...string) (*VirshResult, error) {
+	res, err := h.scriptedHost.runVirshCommand(ctx, args...)
+	if err != nil && res != nil {
+		return res, &VirshError{Command: strings.Join(args, " "), ExitCode: res.ExitCode, Stderr: res.Stderr}
+	}
+	return res, err
+}
+
 // requireDiskInUseStatus asserts err crosses gRPC as FailedPrecondition with
 // the VM_DISK_IN_USE ErrorInfo (and VM_OPERATION_FAILED when routed).
 func requireDiskInUseStatus(t *testing.T, err error, routed bool) {
