@@ -85,10 +85,12 @@ providers), and rollback caveats in
   VM whose disk a linked clone still uses can no longer be deleted, reverted or
   snapshotted until the clone is gone (`DeleteBlocked`); powering it on sets a
   `LinkedClonesDependOnDisk` warning. A `VMSnapshot` whose provider delete fails
-  keeps its finalizer and is retried (`force-delete` to drop it). VM disks are
-  `0660 libvirt-qemu:kvm`, no longer world-writable — the provider's SSH user
-  needs the `kvm` group, `root`, or passwordless `sudo qemu-img` — and a UEFI
-  clone's varstore is never copied through a symlink
+  keeps its finalizer and is retried (`force-delete` to drop it), also when no
+  provider call can be made for its VM. VM disks are created
+  `0640 libvirt-qemu:kvm` (never `chmod`'ed as root; `chown -h`), no longer
+  world-writable — the provider's SSH user needs the `kvm` group, `root`, or
+  passwordless `sudo qemu-img info -U` — and a UEFI clone's varstore is never
+  copied through a symlink
   (→ [`docs/libvirt-clones.md`](docs/libvirt-clones.md)).
 - The manager's webhook and metrics servers pin an explicit TLS 1.2 floor.
 - Optional, opt-in `NetworkPolicy` templates for the manager and provider pods
