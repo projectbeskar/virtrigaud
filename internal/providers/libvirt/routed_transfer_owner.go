@@ -22,6 +22,7 @@ import (
 	"log"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt/hostconn"
@@ -59,9 +60,15 @@ import (
 //     read back: the domain must carry exactly the new owner's stamp (in both
 //     definitions when it is active), or the call fails and the manager does
 //     not bind;
-//   - transfers are serialized in the provider process, so two transfers of one
-//     domain through this provider cannot both pass the check before either
-//     writes.
+//   - it is a serialized check-and-set with read-back, not an atomic
+//     compare-and-swap: transfers are serialized per host in the provider
+//     process (the wait honours the call's context), so two transfers through
+//     this provider cannot both pass the check before either writes. Two
+//     provider processes fronting the same host are not serialized, which is
+//     why a clustered Provider runs one replica (the provider controller
+//     enforces replicas=1 and the Recreate strategy) and a host endpoint must
+//     belong to one clustered Provider (the adoption controller refuses to
+//     adopt from a shared endpoint).
 //
 // Single-host adoption does not stamp and is unchanged: a single-host provider
 // does not check owners on per-VM calls, and its TransferOwner answers
@@ -69,6 +76,34 @@ import (
 
 // domainStateShutOff is the `virsh list --all` state of an inactive domain.
 const domainStateShutOff = "shut off"
+
+// hostLocks is a set of per-host mutexes whose lock waits honour a context.
+// The zero value is ready to use.
+type hostLocks struct {
+	mu    sync.Mutex
+	locks map[string]chan struct{}
+}
+
+// lock takes host's lock, waiting at most until ctx is done, and returns its
+// release.
+func (h *hostLocks) lock(ctx context.Context, host string) (func(), error) {
+	h.mu.Lock()
+	if h.locks == nil {
+		h.locks = map[string]chan struct{}{}
+	}
+	ch, ok := h.locks[host]
+	if !ok {
+		ch = make(chan struct{}, 1)
+		h.locks[host] = ch
+	}
+	h.mu.Unlock()
+	select {
+	case ch <- struct{}{}:
+		return func() { <-ch }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
 
 // transferRefusedMessage is the uniform refusal of a domain whose owner may not
 // be transferred: it never discloses which other VirtualMachine (if any) owns
@@ -86,8 +121,11 @@ func (p *Provider) TransferOwner(ctx context.Context, req contracts.TransferOwne
 	if err := validateTransferOwnerRequest(req); err != nil {
 		return err
 	}
-	p.transferMu.Lock()
-	defer p.transferMu.Unlock()
+	unlock, err := p.transferLocks.lock(ctx, strings.TrimSpace(req.VM.HostID))
+	if err != nil {
+		return contracts.NewRetryableError("wait for another owner transfer on the host", err)
+	}
+	defer unlock()
 	return p.withHostConn(ctx, req.VM.HostID, func(c libvirtConn) error {
 		vp, err := virshOf(c)
 		if err != nil {

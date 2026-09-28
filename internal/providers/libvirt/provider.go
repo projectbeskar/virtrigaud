@@ -117,10 +117,12 @@ type Provider struct {
 	// once; zero means clusteredListHostConcurrency.
 	listHostConcurrency int
 
-	// transferMu serializes TransferOwner per provider process (ADR-0007
-	// Addendum A, slice 4), so two owner transfers of one domain through this
-	// provider cannot both pass the stamp check before either writes.
-	transferMu sync.Mutex
+	// transferLocks serializes TransferOwner per host in this provider
+	// process (ADR-0007 Addendum A, slice 4; hostLocks), so two owner
+	// transfers on one host cannot both pass the stamp check before either
+	// writes, while transfers on other hosts are not held up. Waiting honours
+	// the call's context.
+	transferLocks hostLocks
 
 	// createOnHostFn runs the clustered create pipeline over a single leased host
 	// connection (ADR-0007 P1). nil means "use the default",

@@ -20,6 +20,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -305,4 +306,26 @@ func TestClustered_TransferOwner_ActiveDomainPersistentStampIsCheckedToo(t *test
 	require.Error(t, err)
 	assert.Equal(t, codes.AlreadyExists, status.Code(err))
 	assert.Empty(t, metadataCalls(fx))
+}
+
+// TestHostLocks_PerHostAndContextAware: transfers on one host wait for each
+// other, a wait gives up with its context, and another host is not held up.
+func TestHostLocks_PerHostAndContextAware(t *testing.T) {
+	var locks hostLocks
+	unlockA, err := locks.lock(context.Background(), "host-a")
+	require.NoError(t, err)
+
+	unlockB, err := locks.lock(context.Background(), "host-b")
+	require.NoError(t, err, "another host is not held up")
+	unlockB()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err = locks.lock(ctx, "host-a")
+	require.ErrorIs(t, err, context.DeadlineExceeded, "a wait on a busy host gives up with its context")
+
+	unlockA()
+	unlockA2, err := locks.lock(context.Background(), "host-a")
+	require.NoError(t, err, "released: the next transfer on the host proceeds")
+	unlockA2()
 }

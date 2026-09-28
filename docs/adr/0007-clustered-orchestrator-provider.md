@@ -919,7 +919,7 @@ It is the security fix for the released domain-name takeover.
 | 1 | `VMRef` threading for **all** per-VM calls (proto, contracts, transport, every controller); `withHostConn` on `libvirtConn`; the always-failing clustered placeholder with its test; routed `Describe` and `Delete` (including the owner-checked `Delete`); A2 (`pendingHost`, the checked update, the Host in-use finalizer); A4; the `Placed` condition. `Describe` goes first because every reconcile calls it before `Power` or `Reconfigure`. |
 | 2 | Routed `Power` and `Reconfigure`. `HardwareUpgrade` gets the proto field only. |
 | 3 | The snapshot family, `Clone` (`source_host_id` equal to the landing host), `ExportDisk` / `GetDiskInfo`, and host-encoded task refs. |
-| 4 | `ListVMs` across all hosts (A3); adoption keyed on `(host_id, id)`. Adoption re-stamps the adopted domain's owner through a compare-and-swap step (A6, *Slice 4 coordination*). |
+| 4 | `ListVMs` across all hosts (A3); adoption keyed on `(host_id, id)`. Adoption re-stamps the adopted domain's owner through a check-and-set step, serialized and read back (A6, *Slice 4 coordination*). |
 | A6.1 | A6 guards R3 and R2: the cluster-wide disk-overwrite guard, and a previous incarnation pins the VM. After slice 4. |
 | A6.2 | A6 guards R1 and R4: the restore marker and hold, and the pre-schedule uniqueness check. After slice 4. |
 | A6.3 | A6 docs: backup and restore, and the re-attach runbook. |
@@ -1018,13 +1018,18 @@ slice 4 is implemented (see the slice 4 amendment below); slice 5 is open.
 >   adopts it. Single-host adoption never stamped (a single-host provider does
 >   not check owners), so there was nothing to reuse. `TransferOwner(id,
 >   target_host_id, owner, replaceable_owner_uids, expected_uuid)` re-stamps
->   one domain with a new owner, compare-and-swap: the domain must still carry
+>   one domain with a new owner — a serialized check-and-set with read-back,
+>   not an atomic compare-and-swap: the domain must still carry
 >   `expected_uuid`, and every stamp on it (in both definitions of a running
 >   domain) must be the new owner's (an idempotent success) or listed as
 >   replaceable — the manager lists only UIDs of VirtualMachines that no
 >   longer exist. Anything else is `AlreadyExists` and untouched. The stamp is
 >   written with `virsh metadata --config [--live]` to the domain addressed by
->   UUID and read back — a serialized check-and-set with read-back. It is the
+>   UUID and read back. Transfers are serialized per host (a context-aware
+>   lock) inside the provider process, which is only enough while one process
+>   fronts a host: the provider controller runs a clustered Provider with one
+>   replica and the `Recreate` strategy, and a host endpoint must belong to
+>   one clustered Provider (adoption refuses a shared endpoint). It is the
 >   owner re-stamp of A6's *Slice 4 coordination*, and it is named for owner
 >   transfer, not
 >   adoption, because **A6.4 reuses it**: a VirtualMachine restored with a

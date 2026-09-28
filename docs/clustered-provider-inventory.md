@@ -1093,7 +1093,7 @@ slice 4 runs `ListVMs` on every host and adds `TransferOwner` for adoption.
 | `ExportDisk` | **Routed** and **owner-checked** (slice 3) for the host-side backends only: `s3` (the host flattens the disk, the pod streams it to S3) and `nfs` (the host writes it to the export). The `pvc` export (and the empty legacy backend, which means `pvc`) reads the disk from the provider pod and is refused (`Unimplemented`), as on Proxmox. The export runs on the owner-checked domain's own disk; a host that is not reached over `ssh://` is refused naming the host id only, never its endpoint |
 | `TaskStatus` | **Routed** to the host encoded in the task reference (slice 3; see above) |
 | `ListVMs` | Runs on **every routable host** (slice 4; see [Listing and adoption](#listing-and-adoption-slice-4)): each `VMInfo` carries its `host_id`, and every host that could not be listed is named in `unreachable_host_ids` — never dropped, never a failed call |
-| `TransferOwner` | **Routed** to `target_host_id` (slice 4): the compare-and-swap owner re-stamp adoption uses (see below) |
+| `TransferOwner` | **Routed** to `target_host_id` (slice 4): the owner re-stamp adoption uses — a serialized check-and-set with read-back (see below) |
 | `ImagePrepare`, `ImportDisk` | `Unimplemented` (host-scoped, no target host yet) |
 
 An empty `target_host_id` is `InvalidArgument` (never a default host). An unknown,
@@ -1480,7 +1480,12 @@ slice 4 is refused with a message and nothing is listed. For each listed VM:
    unstamped domain (A6.4's re-attach will list the previous incarnation's).
    A domain stamped for anyone else, with two stamps, or whose stamp cannot be
    read, is refused (`AlreadyExists`) and not touched; a replaced domain is
-   `NotFound`. The stamp is written with `virsh metadata`
+   `NotFound`. Transfers are serialized per host in the provider process, so
+   the check-and-set holds only while **one provider process** fronts a host:
+   the provider controller runs a clustered Provider with **one replica and
+   the `Recreate` strategy** (`spec.runtime.replicas` above 1 is ignored and
+   logged), and each host endpoint must belong to **one clustered Provider**.
+   The stamp is written with `virsh metadata`
    to the domain's persistent definition (and to the running domain when it is
    active), addressed by UUID, and read back before the call succeeds. A retry
    that finds the stamp already there succeeds without writing.
