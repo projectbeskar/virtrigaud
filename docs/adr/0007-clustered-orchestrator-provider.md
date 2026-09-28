@@ -1852,6 +1852,12 @@ runbook or remove it. There is no opt-in in v0.4.0. A6.2 must also set the
 >   host after the re-stamp (see the inventory doc). A stamped legacy
 >   (bare-named) domain that is not the VM's own does not stop a namespaced
 >   create unless R3 runs. Each retry of a held delete rescans every host.
+>   The legacy bare names are probed too, and they are not namespaced: while a
+>   pre-namespacing VM of the same name in another namespace keeps its
+>   `<name>-disk…` file, every create or clone of this name runs the full scan
+>   (a cost, not a refusal) *(fix verification, N9)*. An unused leftover where
+>   a blank volume goes is removed (`vol-delete`) after the scan, since
+>   `vol-create` refuses an existing file.
 > - **Single-host** is unchanged: the three single-host goldens are byte for
 >   byte identical, and the host-local guard runs the same commands.
 

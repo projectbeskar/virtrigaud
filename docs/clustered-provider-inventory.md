@@ -1605,7 +1605,14 @@ now checks every host of the Provider:
   clone writes is written only when no domain on any host uses it. (A foreign
   use of one of the *other* names refuses nothing: that file is not written.)
   The common case, with none of them there, costs two host commands on the
-  landing host and contacts no other host. A clone's UEFI varstore is
+  landing host and contacts no other host. The legacy bare names are not
+  namespaced: a pre-namespacing VM of the **same name in another namespace**
+  may own `<name>-disk…`, and while that file exists every create or clone
+  of this name scans every host (it refuses nothing unless its domain is
+  stamped for this VM's namespace and name — a cost, not a refusal). An
+  unused leftover where a **blank** volume goes is removed first
+  (`vol-delete`, after the scan proved it unused), because `vol-create`
+  refuses an existing file. A clone's UEFI varstore is
   written next to its source's varstore: an existing one that resolves into
   the host-local NVRAM directory keeps the host-local check, and one that
   resolves anywhere else (a source whose varstore lives on shared storage) is
@@ -1640,7 +1647,7 @@ as for the host-local check), or as another file or shared directory.
 | Delete: a domain on another host uses one of the files | `FailedPrecondition` + `VM_DISK_IN_USE` + `VM_OPERATION_FAILED`; nothing changed | Keeps the finalizer (`Ready=False/DeleteBlocked`), re-checks |
 | A host could not be reached (not leased, dropped, past its deadline, tombstoned) | `Unavailable` + `HOST_UNAVAILABLE`; nothing changed | Create: `Placed=False/HostUnavailable`, retried on the same pending host with the backoff (15 s doubling to 5 min, from when the hold began). Delete: finalizer kept, `DeleteBlocked=True/HostUnreachable`, retried with a backoff (15 s doubling to 5 min) |
 | A host answered but could not be scanned (a definition or disk chain unreadable, more than 2000 domains), or the provider was too busy to scan | `Unavailable` + `VM_DISK_CHECK_FAILED` + `VM_OPERATION_FAILED`; nothing changed | Create: `Placed=False/CreatePending`, retried with the backoff. Delete: `DeleteBlocked=True/DiskCheckFailed`, retried with the backoff |
-| Nothing uses the file | The existing file is a leftover of an earlier failed attempt and is replaced (create); the delete proceeds | — |
+| Nothing uses the file | The existing file is a leftover of an earlier failed attempt and is replaced (create; a blank volume's leftover is removed with `vol-delete` first, and a leftover that cannot be removed is a retryable error); the delete proceeds | — |
 
 None of these answers counts toward the Provider's circuit breaker, and their
 messages name no host, no path and no other domain (the provider logs the

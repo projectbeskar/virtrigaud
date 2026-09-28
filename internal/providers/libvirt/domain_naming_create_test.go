@@ -45,7 +45,9 @@ import (
 // the volume definition it reads in vol-create.xml and, as libvirt's dir pool
 // does, creates the volume's file <pool directory>/<name> — WITHOUT an
 // extension; it refuses a name whose file already exists. `vol-path <name>
-// --pool <pool>` answers from vol-<pool>-<name>. With no -c URI
+// --pool <pool>` answers from vol-<pool>-<name>. `vol-delete <name> --pool
+// <pool>` removes <pool directory>/<name> (fail-vol-delete makes it fail).
+// With no -c URI
 // (runRemoteVirshCommand on a non-system URI) the host is $FAKE_DEFAULT_HOST.
 const createHostVirshScript = `#!/bin/sh
 uri=""
@@ -109,6 +111,10 @@ case "$1" in
   vol-path)
     if [ "$3" = "--pool" ]; then exec cat "$d/vol-$4-$2"; fi
     exec cat "$d/vol-$3-$5" ;;
+  vol-delete)
+    pool=$(cat "$d/pooldir")
+    if [ -f "$d/fail-vol-delete" ]; then echo "error: scripted vol-delete failure" >&2; exit 1; fi
+    rm -f -- "$pool/$2" ;;
   *) exit 0 ;;
 esac
 `

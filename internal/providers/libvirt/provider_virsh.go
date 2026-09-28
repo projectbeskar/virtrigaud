@@ -321,7 +321,8 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, vp *VirshProvider,
 		// from an image or blank — is answered VM_PREVIOUS_INCARNATION instead
 		// of a second domain for the same namespace and name (or a failed
 		// vol-create retried forever). The blank volume's file is
-		// <pool>/<volume>, without an extension.
+		// <pool>/<volume>, without an extension; a leftover there that no
+		// domain on any host uses is removed before vol-create.
 		if g != nil {
 			if err := ensureBlankVolumeFree(ctx, vp, storageProvider, domainName, diskVolumeName, g); err != nil {
 				return "", fmt.Errorf("failed to create disk volume: %w", err)
@@ -437,6 +438,12 @@ func ensureDiskVolumeFree(ctx context.Context, vp *VirshProvider, sp *StoragePro
 // clustered provider: vol-create makes <default pool directory>/<volumeName>
 // (no extension), so that is the file the cluster-wide guard protects. A pool
 // without a path is left to vol-create, which refuses an existing volume.
+//
+// vol-create also refuses a file that no domain uses (a leftover of an
+// earlier failed attempt for this very name), which would fail the create
+// on every retry. Once the guard has proved that no domain on any host of
+// the Provider uses it, the leftover is removed (removeUnusedBlankLeftover) —
+// under the domain's lock the caller holds (lockDomain).
 func ensureBlankVolumeFree(ctx context.Context, vp *VirshProvider, sp *StorageProvider, domainName, volumeName string, g *clusterDiskGuard) error {
 	pool, err := sp.GetPoolInfo(ctx, defaultStoragePool)
 	if err != nil {
@@ -445,7 +452,34 @@ func ensureBlankVolumeFree(ctx context.Context, vp *VirshProvider, sp *StoragePr
 	if pool.Path == "" {
 		return nil
 	}
-	return g.ensureDiskFree(ctx, vp, domainDiskSubject(domainName), pool.Path, filepath.Join(pool.Path, volumeName))
+	leftover, err := g.checkDiskFree(ctx, vp, domainDiskSubject(domainName), pool.Path, filepath.Join(pool.Path, volumeName))
+	if err != nil || !leftover {
+		return err
+	}
+	return removeUnusedBlankLeftover(ctx, vp, domainName, volumeName)
+}
+
+// removeUnusedBlankLeftover removes the blank volume volumeName of domain
+// domainName from the default pool: a file an earlier, failed create left
+// that the cluster-wide guard has just found unused on every host of the
+// Provider (ensureBlankVolumeFree). The pool is refreshed first so libvirt
+// knows the file as a volume; vol-delete unlinks it (a symbolic link at that
+// name was already refused, and unlink never follows one). A failure is a
+// retryable error that says what is in the way, without the path.
+func removeUnusedBlankLeftover(ctx context.Context, vp *VirshProvider, domainName, volumeName string) error {
+	log.Printf("INFO Removing the unused leftover blank volume %s of libvirt domain %s before vol-create "+
+		"(left by an earlier failed attempt; no domain on any host of the Provider uses it)", volumeName, domainName)
+	if _, err := vp.runVirshCommand(ctx, "pool-refresh", defaultStoragePool); err != nil {
+		log.Printf("WARN pool-refresh before removing the leftover volume %s failed: %v", volumeName, err)
+	}
+	if _, err := vp.runVirshCommand(ctx, "vol-delete", volumeName, "--pool", defaultStoragePool); err != nil {
+		log.Printf("ERROR Could not remove the leftover blank volume %s of libvirt domain %s: %v", volumeName, domainName, err)
+		return contracts.NewRetryableError(fmt.Sprintf(
+			"%s exists (left by an earlier failed attempt; no domain on any host of this Provider uses it) but could "+
+				"not be removed before the new blank volume is created; it is retried (details are in the provider log)",
+			domainDiskSubject(domainName)), nil)
+	}
+	return nil
 }
 
 // createDiskFromHostImage builds the primary disk of the domain domainName

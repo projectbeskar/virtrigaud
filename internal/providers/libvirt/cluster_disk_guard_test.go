@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -324,6 +325,62 @@ func TestClusteredCreate_SharedPool_UnusedLeftoverIsOverwritten(t *testing.T) {
 	b, err := os.ReadFile(disk) //nolint:gosec // test reads its own fixture
 	require.NoError(t, err)
 	assert.Equal(t, "converted\n", string(b), "the leftover was replaced by the new disk")
+}
+
+// TestClusteredCreate_UnusedBlankLeftoverIsRemovedFirst (A6.1 fix
+// verification, N9): vol-create refuses an existing file, so an unused blank
+// leftover used to fail the create on every retry. Once every host was
+// scanned and no domain uses it, it is removed (pool-refresh, vol-delete) and
+// the blank volume is created afresh. A leftover that cannot be removed is a
+// retryable error that says so, without a path.
+func TestClusteredCreate_UnusedBlankLeftoverIsRemovedFirst(t *testing.T) {
+	blankReq := func(s *sharedPool) contracts.CreateRequest {
+		req := s.createReq(ownerTeamA, "")
+		req.Image = contracts.VMImage{}
+		req.TargetHostID = "host-b"
+		return req
+	}
+	t.Run("removed, then created", func(t *testing.T) {
+		s := newSharedPool(t)
+		leftover := s.disk("team-a.web-disk", "leftover")
+		s.defineOn("host-a", "other-vm", uuidForeign, guardDomainXML("other-vm", uuidForeign, s.disk("other-vm-disk.qcow2", "x"), ownerForeign, false))
+
+		resp, err := s.p.Create(context.Background(), blankReq(s))
+		require.NoError(t, err)
+		assert.Equal(t, "team-a.web", resp.ID)
+		assert.Contains(t, s.virshCalls("host-a"), "list --all --uuid", "every host was scanned first")
+		s.requireReadOnly("host-a")
+		calls := s.virshCalls("host-b")
+		del := slices.Index(calls, "vol-delete team-a.web-disk --pool default")
+		create := slices.IndexFunc(calls, func(c string) bool { return strings.HasPrefix(c, "vol-create default") })
+		require.GreaterOrEqual(t, del, 0, "the leftover was removed: %v", calls)
+		assert.Less(t, del, create, "before vol-create")
+		b, rerr := os.ReadFile(leftover) //nolint:gosec // test reads its own fixture
+		require.NoError(t, rerr)
+		assert.Empty(t, b, "a fresh blank volume, not the leftover")
+	})
+	t.Run("used elsewhere: never removed", func(t *testing.T) {
+		s := newSharedPool(t)
+		blank := s.disk("team-a.web-disk", "someone-elses")
+		s.defineOn("host-a", "legacy-web", uuidForeign, guardDomainXML("legacy-web", uuidForeign, blank, ownerForeign, true))
+
+		_, err := s.p.Create(context.Background(), blankReq(s))
+		require.Error(t, err)
+		assert.True(t, contracts.IsConflict(err), "%v", err)
+		assert.NotContains(t, s.virshCalls("host-b"), "vol-delete team-a.web-disk --pool default")
+		assert.FileExists(t, blank)
+	})
+	t.Run("removal fails", func(t *testing.T) {
+		s := newSharedPool(t)
+		s.disk("team-a.web-disk", "leftover")
+		require.NoError(t, os.WriteFile(filepath.Join(s.root, "host-b", "fail-vol-delete"), nil, 0o600))
+
+		_, err := s.p.Create(context.Background(), blankReq(s))
+		require.Error(t, err)
+		assert.True(t, contracts.IsRetryable(err), "%v", err)
+		assert.Contains(t, err.Error(), "could not be removed before the new blank volume is created")
+		assert.NotContains(t, err.Error(), s.images, "no host path")
+	})
 }
 
 // TestClusteredCreate_NoFileScansNoOtherHost: the common case — nothing where

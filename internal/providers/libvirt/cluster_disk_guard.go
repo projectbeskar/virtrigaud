@@ -208,9 +208,19 @@ func (g *clusterDiskGuard) ensureDiskFree(ctx context.Context, h hostCommandRunn
 	if g == nil {
 		return ensureDiskTargetFree(ctx, h, subject, target)
 	}
+	_, err := g.checkDiskFree(ctx, h, subject, poolDir, target)
+	return err
+}
+
+// checkDiskFree is ensureDiskFree on a clustered provider (g non-nil). leftover
+// reports that a file exists at target and that no domain on any host of the
+// Provider uses it: a leftover of an earlier, failed attempt for this very
+// name, which the caller may replace (or, when its writer refuses an existing
+// file, remove first: removeUnusedBlankLeftover).
+func (g *clusterDiskGuard) checkDiskFree(ctx context.Context, h hostCommandRunner, subject, poolDir, target string) (leftover bool, err error) {
 	targetExists, err := checkWriteTarget(ctx, h, subject, target)
 	if err != nil {
-		return err
+		return false, err
 	}
 	var candidates []string
 	for _, name := range g.diskFileNames() {
@@ -220,16 +230,19 @@ func (g *clusterDiskGuard) ensureDiskFree(ctx context.Context, h hostCommandRunn
 	}
 	others, err := existingHostPaths(ctx, h, candidates)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if !targetExists && len(others) == 0 {
-		return nil
+		return false, nil
 	}
 	var targets []string
 	if targetExists {
 		targets = []string{target}
 	}
-	return g.refuseIfUsed(ctx, h, subject, targets, others)
+	if err := g.refuseIfUsed(ctx, h, subject, targets, others); err != nil {
+		return false, err
+	}
+	return targetExists, nil
 }
 
 // refuseIfUsed scans every host of the Provider once for the existing files
@@ -287,7 +300,7 @@ func (g *clusterDiskGuard) refuseIfUsed(ctx context.Context, h hostCommandRunner
 	}
 	if len(targets) > 0 {
 		log.Printf("INFO %s exists at %s on host %s but no domain on any host of the Provider uses it "+
-			"(left by an earlier failed attempt); overwriting it", subject, targets[0], g.host)
+			"(left by an earlier failed attempt); it may be replaced", subject, targets[0], g.host)
 	}
 	return nil
 }
