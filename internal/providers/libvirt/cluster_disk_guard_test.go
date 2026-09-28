@@ -277,9 +277,76 @@ func TestClusteredCreate_SharedPool_UnusedLeftoverIsOverwritten(t *testing.T) {
 // the disk goes — is unchanged: no other host is contacted.
 func TestClusteredCreate_NoFileScansNoOtherHost(t *testing.T) {
 	s := newSharedPool(t)
-	_, err := s.createOnB()
+	_, err := s.createFromURLOnB()
 	require.NoError(t, err)
-	assert.Empty(t, s.virshCalls("host-a"), "no fan-out without a candidate file")
+	assert.Empty(t, s.virshCalls("host-a"), "no fan-out without a candidate file (and no host-path image to check)")
+}
+
+// createFromURLOnB is team-a/web's create from an image URL (downloaded, never
+// a host path: no image confinement), landing on host-b.
+func (s *sharedPool) createFromURLOnB() (contracts.CreateResponse, error) {
+	req := s.createReq(ownerTeamA, "")
+	req.Image = contracts.VMImage{URL: "https://images.example/ubuntu.qcow2"}
+	req.TargetHostID = "host-b"
+	return s.p.Create(context.Background(), req)
+}
+
+// TestClusteredCreate_BaseImageIsCheckedOnEveryHost (security review of A6.1,
+// item 4): the base image a clustered create copies is checked on every host
+// of the Provider, not only the landing one. A tenant's VMImage path that
+// names a live disk of a domain on another host is refused — with the same
+// answer as a path that does not exist or is not allowed, so it cannot probe
+// the pool — and nothing is copied; a host that cannot be checked fails the
+// create closed.
+func TestClusteredCreate_BaseImageIsCheckedOnEveryHost(t *testing.T) {
+	notAllowed := "it does not resolve to a file directly inside an allowed image directory"
+	t.Run("a live disk on another host is refused like a missing path", func(t *testing.T) {
+		s := newSharedPool(t)
+		live := s.disk("legacy.qcow2", "someone-elses-data")
+		s.defineOn("host-a", "legacy-web", uuidForeign, guardDomainXML("legacy-web", uuidForeign, live, ownerForeign, true))
+
+		req := s.createReq(ownerTeamA, live)
+		req.TargetHostID = "host-b"
+		_, err := s.p.Create(context.Background(), req)
+		require.Error(t, err)
+		assert.True(t, isInvalidArgument(err), "%v", err)
+		st, _ := status.FromError(createRPCError(err))
+		assert.Equal(t, codes.InvalidArgument, st.Code())
+		assert.Contains(t, st.Message(), notAllowed)
+		// The tenant's own path is echoed; nothing about the other host is.
+		for _, leak := range []string{"host-a", "legacy-web", ownerForeign.UID, "in use", "existing VM"} {
+			assert.NotContains(t, st.Message(), leak)
+		}
+		assert.NotContains(t, s.log("qemu-img"), "convert", "nothing was copied")
+
+		missing := s.createReq(ownerTeamA, filepath.Join(s.images, "nope.qcow2"))
+		missing.TargetHostID = "host-b"
+		_, merr := s.p.Create(context.Background(), missing)
+		mst, _ := status.FromError(createRPCError(merr))
+		assert.Equal(t, st.Code(), mst.Code())
+		assert.Equal(t, strings.ReplaceAll(st.Message(), live, "X"), strings.ReplaceAll(mst.Message(), filepath.Join(s.images, "nope.qcow2"), "X"),
+			"a live disk elsewhere and a missing file get the same answer")
+	})
+	t.Run("an unused base image is copied after every host was checked", func(t *testing.T) {
+		s := newSharedPool(t)
+		_, err := s.createOnB()
+		require.NoError(t, err)
+		assert.Contains(t, s.virshCalls("host-a"), "list --all --uuid", "the image was checked on host-a")
+		s.requireReadOnly("host-a")
+	})
+	t.Run("a host that cannot be checked fails the create closed", func(t *testing.T) {
+		s := newSharedPoolWithDeadHost(t)
+		_, err := s.createOnB()
+		var ie *clusterGuardIncompleteError
+		require.ErrorAs(t, err, &ie)
+		assert.True(t, ie.unreachable)
+		assert.NotContains(t, s.log("qemu-img"), "convert")
+	})
+	t.Run("single-host keeps its distinct answers", func(t *testing.T) {
+		c := newCreateHost(t)
+		_, err := c.p.Create(context.Background(), c.createReq(ownerTeamA, filepath.Join(c.images, "nope.qcow2")))
+		assert.Contains(t, err.Error(), "it does not exist on the libvirt host", "unchanged on a single host")
+	})
 }
 
 // TestClusteredCreate_UnreachableHostFailsClosed: with a file where the disk
@@ -590,10 +657,16 @@ func TestClusterScan_UnroutableHostsFailClosed(t *testing.T) {
 		assert.True(t, ie.unreachable)
 		s.requireNothingWrittenOnB(disk, "original-disk")
 	})
-	t.Run("create with nothing there", func(t *testing.T) {
+	t.Run("create from a host-path image", func(t *testing.T) {
 		s := withTombstone(t)
 		_, err := s.createOnB()
-		require.NoError(t, err, "no candidate file: nothing is scanned")
+		var ie *clusterGuardIncompleteError
+		require.ErrorAs(t, err, &ie, "the base image is checked on every host, the tombstone included")
+	})
+	t.Run("create from a URL with nothing there", func(t *testing.T) {
+		s := withTombstone(t)
+		_, err := s.createFromURLOnB()
+		require.NoError(t, err, "no candidate file and no host-path image: nothing is scanned")
 	})
 }
 

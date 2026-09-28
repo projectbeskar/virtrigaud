@@ -1780,6 +1780,18 @@ runbook or remove it. There is no opt-in in v0.4.0. A6.2 must also set the
 >   The landing host of a `Create` or `Clone` is scanned over the call's own
 >   connection (a landing host that left the registry mid-call is still
 >   scanned); the other hosts are leased.
+> - **The base image is checked on every host** *(security review of A6.1;
+>   a pre-existing gap)*: the image confinement checked only the landing host
+>   for a domain using a host-path image, so a tenant's VMImage could name
+>   another host's live disk and have it copied into their VM. On a clustered
+>   Provider the image is now scanned on every other host too (the first use
+>   refuses, a host that cannot be checked fails closed), after the VM's own
+>   disk names are checked, so a previous incarnation still answers first.
+>   Every clustered create from a host-path image therefore scans every host
+>   and waits while any host is unreachable. The clustered confinement answers
+>   a missing file, a reserved name, a non-regular file and a file in use with
+>   the same "not allowed" message, and the rejection stays InvalidArgument on
+>   the wire (it used to reach the manager as VM_OPERATION_FAILED).
 > - **Hosts the operator could not render** *(security review of A6.1)*: a
 >   `Host` the Provider fronts whose credentials are missing or refused, whose
 >   endpoint is invalid or whose id is duplicated is still passed to the

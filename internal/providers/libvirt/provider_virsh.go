@@ -460,10 +460,12 @@ func ensureBlankVolumeFree(ctx context.Context, vp *VirshProvider, sp *StoragePr
 //     the file it landed for this VM (importedDiskVolumeName).
 //
 // A rejected path returns an InvalidArgument error (non-retryable). On a
-// clustered provider (g non-nil) the disk file — the copy's target, or the
-// imported disk attached in place — is checked across every host of the
-// Provider (clusterDiskGuard): the host-local confinement sees only vp's
-// host's domains.
+// clustered provider (g non-nil) the disk file — the copy's target, checked
+// first, or the imported disk attached in place — is checked across every
+// host of the Provider (clusterDiskGuard), and so is the base image itself:
+// the host-local confinement sees only vp's host's domains, and a live disk of
+// another host must never be copied into this VM (imagePathRequest.Clustered,
+// with refusals that do not tell whether a file exists).
 func (p *Provider) createDiskFromHostImage(ctx context.Context, vp *VirshProvider, sp *StorageProvider,
 	req contracts.CreateRequest, domainName, imagePath, volumeName string, sizeGB int, g *clusterDiskGuard) (*StorageVolume, error) {
 	policy, err := p.imagePolicy()
@@ -472,12 +474,29 @@ func (p *Provider) createDiskFromHostImage(ctx context.Context, vp *VirshProvide
 	}
 
 	confReq := imagePathRequest{Path: imagePath, ImportedDisk: req.Image.ImportedDisk, VMName: domainName}
+	if g != nil {
+		// Clustered: uniform refusals, and a base image no domain on any
+		// other host of the Provider uses (ADR-0007 A6.1 security review).
+		confReq.Clustered = true
+		confReq.UsedElsewhere = g.imageUsedElsewhere
+	}
 	if req.Image.ImportedDisk {
 		poolInfo, err := sp.GetPoolInfo(ctx, defaultStoragePool)
 		if err != nil {
 			return nil, fmt.Errorf("get storage pool %q info: %w", defaultStoragePool, err)
 		}
 		confReq.PoolDir = poolInfo.Path
+	}
+
+	// Clustered, from a base image: the VM's own disk is checked first, so a
+	// previous incarnation holds the VM before the image is looked at (the
+	// image check scans every host and fails closed on one it cannot reach).
+	diskChecked := false
+	if g != nil && !req.Image.ImportedDisk {
+		if err := ensureDiskVolumeFree(ctx, vp, sp, domainName, volumeName, g); err != nil {
+			return nil, err
+		}
+		diskChecked = true
 	}
 
 	img, err := policy.confine(ctx, vp, confReq)
@@ -493,8 +512,10 @@ func (p *Provider) createDiskFromHostImage(ctx context.Context, vp *VirshProvide
 		log.Printf("INFO Attaching imported disk %q in place for VM %s (libvirt domain %s)", img.Path, req.Name, domainName)
 		return sp.adoptVolumeInPlace(ctx, img.Path, defaultStoragePool)
 	}
-	if err := ensureDiskVolumeFree(ctx, vp, sp, domainName, volumeName, g); err != nil {
-		return nil, err
+	if !diskChecked {
+		if err := ensureDiskVolumeFree(ctx, vp, sp, domainName, volumeName, g); err != nil {
+			return nil, err
+		}
 	}
 	log.Printf("INFO Copying base image %q (%s) into the disk of VM %s (libvirt domain %s)", img.Path, img.Format, req.Name, domainName)
 	return sp.CopyImageToVolume(ctx, img.Path, img.Format, volumeName, defaultStoragePool, sizeGB)

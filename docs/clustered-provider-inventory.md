@@ -1606,6 +1606,19 @@ now checks every host of the Provider:
   The common case, with none of them there, costs two host commands on the
   landing host and contacts no other host. A clone's UEFI varstore lives in
   the host-local NVRAM directory and keeps the host-local check.
+- **The base image, too.** A clustered create from a host-path image
+  (`VMImage.spec.source.libvirt.path`) copies that file into the VM's disk.
+  The image confinement used to check only the landing host for a domain
+  using it, so a tenant could name another host's live disk (an adopted
+  domain's disk, say) and have it copied into their VM. Every other host is
+  now scanned for the image as well, before anything is copied: a use refuses
+  the create, and a host that cannot be checked fails it closed. **So every
+  clustered create from a host-path image scans every host, and waits while
+  any host of the Provider is unreachable** (creates from a URL or a template
+  do not). On a clustered Provider the confinement also answers a missing
+  file, a VirtRigaud-managed file name, a file that is not a regular file and
+  a file in use with the **same** "not allowed" message, so a tenant's VMImage
+  path cannot probe the hosts' storage (single-host answers are unchanged).
 - **Delete.** After the host-local checks and **before** anything is
   destroyed, undefined or removed, every **other** host is scanned for a
   domain that uses one of the files the delete would remove. This runs on

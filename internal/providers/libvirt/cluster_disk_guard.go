@@ -286,6 +286,30 @@ func (g *clusterDiskGuard) refuseIfUsed(ctx context.Context, h hostCommandRunner
 	return nil
 }
 
+// imageUsedElsewhere reports whether a domain on another host of the Provider
+// uses the base image a create is about to copy — raw as the tenant named it,
+// canonical as the landing host h resolved it (imagePathRequest.UsedElsewhere;
+// ADR-0007 A6.1 security review). The host-local confinement already checked
+// h; copying a live disk of another host would hand its content to this VM's
+// tenant. The first use decides; a host that cannot be checked fails closed
+// (clusterGuardIncompleteError).
+func (g *clusterDiskGuard) imageUsedElsewhere(ctx context.Context, _ hostCommandRunner, raw, canonical string) (bool, error) {
+	files := []string{raw}
+	if canonical != raw {
+		files = append(files, canonical)
+	}
+	res, err := g.p.scanClusterDiskUse(ctx, clusterScan{files: files, target: g.host, skipTarget: true,
+		stopWhen: func(r hostDiskScan, _ error) bool { return r.users > 0 },
+	})
+	if res.users > 0 {
+		return true, nil
+	}
+	if err != nil {
+		return false, g.incomplete(err)
+	}
+	return false, nil
+}
+
 // existingPathsScript is the fixed `sh -c` script behind existingHostPaths.
 // The paths are ALWAYS the positional parameters, never interpolated into the
 // text. It prints, one per line, each of them that exists (a symbolic link,

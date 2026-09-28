@@ -156,6 +156,14 @@ func createRPCError(err error) error {
 	if st := clusterGuardStatus(err); st != nil {
 		return st.Err()
 	}
+	// A clustered create's request rejection (an image path refused by the
+	// confinement — whose clustered answers do not tell whether a file exists)
+	// stays InvalidArgument: non-retryable, and never mistaken for a failure
+	// on the host. The message carries only the tenant's own path.
+	var onHost *hostOpError
+	if stderrors.As(err, &onHost) && isInvalidArgument(err) {
+		return status.Error(codes.InvalidArgument, err.Error())
+	}
 	var pe *contracts.ProviderError
 	if stderrors.As(err, &pe) {
 		switch pe.Type {

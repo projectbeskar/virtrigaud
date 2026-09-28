@@ -1020,7 +1020,10 @@ func TestCreate_Clustered_ConfinesOnTargetHost(t *testing.T) {
 	_, err := p.Create(context.Background(), contracts.CreateRequest{
 		Name: "web", TargetHostID: "host-b", Image: contracts.VMImage{Path: img},
 	})
-	requireRejected(t, err, "existing VM")
+	// A clustered provider answers every existence-dependent refusal the same
+	// way (ADR-0007 A6.1 security review), in use included.
+	requireRejected(t, err, "does not resolve to a file directly inside an allowed image directory")
+	assert.NotContains(t, err.Error(), "existing VM", "no in-use disclosure on a clustered provider")
 
 	virshLog := h.log("virsh")
 	assert.Contains(t, virshLog, "host-b\tlist --all --uuid", "the in-use check must run on the target host")

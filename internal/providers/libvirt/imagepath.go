@@ -194,6 +194,20 @@ type imagePathRequest struct {
 	// PoolDir is the directory of the storage pool the VM's disks are created
 	// in, the only place an imported disk is attached in place from.
 	PoolDir string
+	// Clustered, set by a clustered provider's create, applies two rules the
+	// single host does not need (ADR-0007 A6.1 security review):
+	//   - Uniform: every refusal that depends on whether a file exists or
+	//     what it is — missing, a reserved (VirtRigaud-managed) name, not a
+	//     regular file, in use by a domain — is the same "not allowed"
+	//     answer, so a tenant's VMImage path cannot probe the hosts' storage;
+	//   - UsedElsewhere, when non-nil, is asked about a base image (never an
+	//     imported disk attached in place, which the create's disk guard
+	//     checks) after the host-local in-use check: whether a domain on ANY
+	//     other host of the Provider uses it — copying another host's live
+	//     disk would hand its content to this VM's tenant. It fails closed
+	//     (an error) when a host cannot be checked.
+	Clustered     bool
+	UsedElsewhere func(ctx context.Context, h hostCommandRunner, raw, canonical string) (bool, error)
 }
 
 // confinedImage is an image path that passed confinement.
@@ -483,8 +497,11 @@ func (pol imagePathPolicy) confine(ctx context.Context, h hostCommandRunner, req
 			return confinedImage{}, hostCheckFailed("resolve image path", err)
 		}
 		lexParent := filepath.Dir(filepath.Clean(req.Path))
-		if allowed[lexParent] || containsString(pol.dirs, lexParent) || (poolDir != "" && lexParent == poolDir) {
+		if !req.Clustered && (allowed[lexParent] || containsString(pol.dirs, lexParent) || (poolDir != "" && lexParent == poolDir)) {
 			return confinedImage{}, newImagePathError(req.Path, "it does not exist on the libvirt host")
+		}
+		if req.Clustered {
+			log.Printf("WARN rejected libvirt image path %q: it does not exist on the host", req.Path)
 		}
 		return confinedImage{}, notAllowed
 	}
@@ -509,6 +526,10 @@ func (pol imagePathPolicy) confine(ctx context.Context, h hostCommandRunner, req
 			return confinedImage{}, notAllowed
 		}
 		if reservedImageName(base) {
+			if req.Clustered {
+				log.Printf("WARN rejected libvirt image path %q: it names a VirtRigaud-managed file", req.Path)
+				return confinedImage{}, notAllowed
+			}
 			return confinedImage{}, newImagePathError(req.Path,
 				"it names a VirtRigaud-managed file (a VM disk, an imported migration disk, a cloud-init seed, "+
 					"or a staging file), which cannot be used as a base image")
@@ -516,6 +537,10 @@ func (pol imagePathPolicy) confine(ctx context.Context, h hostCommandRunner, req
 	}
 
 	if err := checkRegularFile(ctx, h, req.Path, canonical); err != nil {
+		if req.Clustered && isInvalidArgument(err) {
+			log.Printf("WARN rejected libvirt image path %q: %v", req.Path, err)
+			return confinedImage{}, notAllowed
+		}
 		return confinedImage{}, err
 	}
 	inUse, err := diskSourcesInUse(ctx, h)
@@ -524,7 +549,20 @@ func (pol imagePathPolicy) confine(ctx context.Context, h hostCommandRunner, req
 	}
 	if inUse.contains(canonical) {
 		log.Printf("WARN rejected libvirt image path %q: it is in use by a domain on the host", req.Path)
+		if req.Clustered {
+			return confinedImage{}, notAllowed
+		}
 		return confinedImage{}, newImagePathError(req.Path, inUseRejectionReason)
+	}
+	if !adopt && req.UsedElsewhere != nil {
+		used, err := req.UsedElsewhere(ctx, h, req.Path, canonical)
+		if err != nil {
+			return confinedImage{}, err
+		}
+		if used {
+			log.Printf("WARN rejected libvirt image path %q: a domain on another host of the Provider uses it", req.Path)
+			return confinedImage{}, notAllowed
+		}
 	}
 	format, err := inspectHostImage(ctx, h, imagePathSubject(req.Path), canonical)
 	if err != nil {
