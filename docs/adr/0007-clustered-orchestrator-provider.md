@@ -999,7 +999,7 @@ slice 4 is implemented (see the slice 4 amendment below); slice 5 is open.
 >   (the cause is logged with the routed calls' classification). Only a
 >   provider-level failure fails the call.
 > - **Fan-out.** At most 8 hosts at a time (a bounded errgroup), each on its
->   own lease with a 30 s deadline, inside the caller's deadline less 5 s so
+>   own lease with a 60 s deadline, inside the caller's deadline less 5 s so
 >   the answer, with the late hosts reported, always reaches the caller. The
 >   call waits for every per-host goroutine before it returns; only the
 >   detached, time-bounded list shadow outlives it, holding its own lease

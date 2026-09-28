@@ -106,6 +106,10 @@ const (
 
 	// errReasonAdoptionCapabilities labels a failed capability query.
 	errReasonAdoptionCapabilities = "adoption-capabilities"
+
+	// unreachableHostsListed caps how many unreachable hosts the adoption
+	// status message names (the count is always given in full).
+	unreachableHostsListed = 10
 )
 
 // clusteredAdoptionNotSupportedMessage is recorded on Provider.status.adoption
@@ -235,8 +239,15 @@ func clusteredAdoptionMessage(adopted, failed int32, unreachable []string) strin
 	if len(unreachable) > 0 {
 		hosts := append([]string(nil), unreachable...)
 		sort.Strings(hosts)
+		named := hosts
+		if len(named) > unreachableHostsListed {
+			named = named[:unreachableHostsListed]
+		}
 		msg += fmt.Sprintf("; %d host(s) could not be listed, their VMs are unknown (not absent) and discovery is retried: %s",
-			len(hosts), strings.Join(hosts, ", "))
+			len(hosts), strings.Join(named, ", "))
+		if more := len(hosts) - len(named); more > 0 {
+			msg += fmt.Sprintf(" and %d more", more)
+		}
 	}
 	return msg
 }

@@ -586,3 +586,18 @@ func TestAdoptedSize(t *testing.T) {
 	assert.EqualValues(t, 3, cpu, "no readable class: the listed size")
 	assert.EqualValues(t, 4096, mem)
 }
+
+// TestClusteredAdoptionMessage_CapsTheNamedHosts: the status message names at
+// most unreachableHostsListed hosts and counts the rest.
+func TestClusteredAdoptionMessage_CapsTheNamedHosts(t *testing.T) {
+	var hosts []string
+	for i := 0; i < 13; i++ {
+		hosts = append(hosts, fmt.Sprintf("host-%02d", i))
+	}
+	msg := clusteredAdoptionMessage(1, 0, hosts)
+	assert.Contains(t, msg, "13 host(s) could not be listed")
+	assert.Contains(t, msg, "host-09")
+	assert.NotContains(t, msg, "host-10")
+	assert.Contains(t, msg, "and 3 more")
+	assert.Equal(t, "Successfully adopted 2 VMs", clusteredAdoptionMessage(2, 0, nil))
+}

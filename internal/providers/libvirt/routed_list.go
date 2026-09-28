@@ -67,8 +67,11 @@ const (
 	// clusteredListHostConcurrency bounds how many hosts one clustered
 	// ListVMs lists at once.
 	clusteredListHostConcurrency = 8
-	// clusteredListHostTimeout is each host's deadline in a clustered ListVMs.
-	clusteredListHostTimeout = 30 * time.Second
+	// clusteredListHostTimeout is each host's deadline in a clustered ListVMs:
+	// long enough for one `virsh list` plus a `virsh dumpxml` per domain of a
+	// busy host over its persistent SSH connection, short enough that a hung
+	// host frees its slot well inside the manager's 2-minute ListVMs deadline.
+	clusteredListHostTimeout = 60 * time.Second
 	// clusteredListResponseMargin is kept back from the caller's deadline so a
 	// clustered ListVMs answers — reporting the hosts it could not finish as
 	// unreachable — before the caller's deadline expires.

@@ -1399,7 +1399,7 @@ for a clustered provider.
 (draining hosts are being removed and are not listed):
 
 - at most **8 hosts at a time**, each on its own lease with its own
-  **30-second deadline**, so one dead or hung host cannot starve the others;
+  **60-second deadline**, so one dead or hung host cannot starve the others;
 - inside the caller's deadline: the manager gives `ListVMs` 2 minutes, and the
   provider keeps 5 seconds of it back, so it always answers in time. A host not
   finished (or not yet started) by then is reported, not waited for;
