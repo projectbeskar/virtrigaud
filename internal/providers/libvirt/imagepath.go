@@ -796,7 +796,7 @@ const (
 	backingKindOther = "other"
 )
 
-// backingKindScript is the fixed `sh -c` script behind checkBackingFileKind.
+// backingKindScript is the fixed `sh -c` script behind checkChainFileKind.
 // The path is "$1", never interpolated into the text. It prints
 // backingKindFile for a regular file (a symbolic link is followed),
 // backingKindOther for anything else that exists (a device, FIFO, socket,
@@ -814,13 +814,16 @@ const backingKindScript = `if [ -f "$1" ]; then echo ` + backingKindFile + `; el
 //
 // The chain is walked one image at a time — never `--backing-chain`, which
 // would have qemu-img open, as root, whatever backing name each header holds.
-// A backing file is followed only when it is an absolute local path
-// (full-backing-filename) to a regular file, opened with the format its
-// parent's header names; a protocol (nbd:, http:, ...), json: or relative
-// backing name, a device, FIFO or other non-regular file, an unknown backing
-// format and a chain deeper than maxBackingChainDepth fail the check (closed),
-// as does any unreadable image. A file that no longer exists ends the chain: a
-// missing disk contributes nothing.
+// Every image — the disk itself too — must be a regular file before qemu-img
+// opens it (checkChainFileKind: a device or FIFO is refused at once). A
+// backing file is followed only when it is an absolute local path
+// (full-backing-filename), opened with the format its parent's header names;
+// a protocol (nbd:, http:, ...), json: or relative backing name, a device,
+// FIFO or other non-regular file, an unknown backing format and a chain deeper
+// than maxBackingChainDepth fail the check (closed), as does any unreadable
+// image. A qcow2 external data file is recorded, never opened by the walk; one
+// named by anything but an absolute local path fails the check too. A file
+// that no longer exists ends the chain: a missing disk contributes nothing.
 func backingChainFiles(ctx context.Context, h hostCommandRunner, disk string) ([]string, error) {
 	levels, err := walkBackingChain(ctx, h, disk)
 	if err != nil {
@@ -851,10 +854,8 @@ func walkBackingChain(ctx context.Context, h hostCommandRunner, disk string) ([]
 		if depth > maxBackingChainDepth {
 			return nil, hostCheckFailed("read backing chain", fmt.Errorf("%s: backing chain longer than %d images", disk, maxBackingChainDepth))
 		}
-		if depth > 0 {
-			if err := checkBackingFileKind(ctx, h, cur); err != nil {
-				return nil, err
-			}
+		if err := checkChainFileKind(ctx, h, cur); err != nil {
+			return nil, err
 		}
 		args := []string{"-U"}
 		if format != "" {
@@ -870,6 +871,12 @@ func walkBackingChain(ctx context.Context, h hostCommandRunner, disk string) ([]
 		var info qemuImgInfo
 		if jerr := json.Unmarshal([]byte(res.Stdout), &info); jerr != nil {
 			return nil, hostCheckFailed("parse backing chain", jerr)
+		}
+		if info.FormatSpecific != nil {
+			if df := info.FormatSpecific.Data.DataFile; df != "" && !strings.HasPrefix(df, "/") {
+				return nil, hostCheckFailed("read backing chain",
+					fmt.Errorf("%s: external data file %q is not a local file path", cur, df))
+			}
 		}
 		levels = append(levels, backingLevel{path: cur, refs: info.referencedFiles()})
 		if info.BackingFilename == "" && info.FullBackingFilename == "" {
@@ -889,17 +896,18 @@ func walkBackingChain(ctx context.Context, h hostCommandRunner, disk string) ([]
 	}
 }
 
-// checkBackingFileKind refuses to follow a backing file path that exists and
-// is not a regular file (backingKindScript): qemu-img would open a device, or
-// block forever on a FIFO. A path the SSH user cannot see is left to
-// qemu-img (through sudo) to open or report missing.
-func checkBackingFileKind(ctx context.Context, h hostCommandRunner, path string) error {
+// checkChainFileKind refuses to have qemu-img open an image of a chain — the
+// disk itself or a backing file — that exists and is not a regular file
+// (backingKindScript): qemu-img would open a device, or block forever on a
+// FIFO. A path the SSH user cannot see is left to qemu-img (through sudo) to
+// open or report missing.
+func checkChainFileKind(ctx context.Context, h hostCommandRunner, path string) error {
 	res, err := runHost(ctx, h, "sh", "-c", backingKindScript, "sh", path)
 	if err != nil {
-		return hostCheckFailed("check backing file", err)
+		return hostCheckFailed("check chain file", err)
 	}
 	if strings.TrimSpace(res.Stdout) == backingKindOther {
-		return hostCheckFailed("read backing chain", fmt.Errorf("backing file %s is not a regular file; not followed", path))
+		return hostCheckFailed("read backing chain", fmt.Errorf("%s is not a regular file; not opened", path))
 	}
 	return nil
 }

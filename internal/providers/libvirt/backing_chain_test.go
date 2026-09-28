@@ -142,3 +142,51 @@ func TestDiskDependents_NonLocalBackingFailsTheCheck(t *testing.T) {
 	var dc *diskCheckFailedError
 	require.ErrorAs(t, err, &dc, "%v", err)
 }
+
+// TestBackingChainFiles_TopImageAndDataFiles: the disk itself is checked like
+// every backing file — a FIFO or a device at the top is refused before
+// qemu-img opens it — and a qcow2 external data file is recorded (so a file
+// used as another domain's data file counts as in use) but never opened by
+// the walk; one named by anything but a local path fails the check closed.
+func TestBackingChainFiles_TopImageAndDataFiles(t *testing.T) {
+	ctx := context.Background()
+
+	for name, top := range map[string]func(h *fakeHost) string{
+		"a FIFO": func(h *fakeHost) string {
+			p := filepath.Join(h.images, "fifo-disk.qcow2")
+			require.NoError(t, syscall.Mkfifo(p, 0o600))
+			return p
+		},
+		"a device": func(*fakeHost) string { return "/dev/null" },
+	} {
+		t.Run("top is "+name, func(t *testing.T) {
+			h := newFakeHost(t)
+			vp := h.host("h1")
+			_, err := backingChainFiles(ctx, vp, top(h))
+			require.Error(t, err)
+			assert.Empty(t, h.log("qemu-img"), "qemu-img never opens it")
+		})
+	}
+
+	t.Run("a local data file is recorded, not opened", func(t *testing.T) {
+		h := newFakeHost(t)
+		vp := h.host("h1")
+		disk := h.file(h.images, "vm-disk.qcow2")
+		data := h.file(h.images, "vm-data.raw")
+		h.info(disk, `{"filename":"`+disk+`","format":"qcow2","format-specific":{"type":"qcow2","data":{"data-file":"`+data+`"}}}`)
+		refs, err := backingChainFiles(ctx, vp, disk)
+		require.NoError(t, err)
+		assert.Contains(t, refs, data)
+		assert.Equal(t, []string{"info -U --output=json -- " + disk}, splitLines(h.log("qemu-img")))
+	})
+
+	t.Run("a non-local data file fails the check", func(t *testing.T) {
+		h := newFakeHost(t)
+		vp := h.host("h1")
+		disk := h.file(h.images, "vm-disk.qcow2")
+		h.info(disk, `{"filename":"`+disk+`","format":"qcow2","format-specific":{"type":"qcow2","data":{"data-file":"nbd://10.0.0.9/x"}}}`)
+		_, err := backingChainFiles(ctx, vp, disk)
+		require.Error(t, err)
+		assert.NotContains(t, err.Error(), "10.0.0.9")
+	})
+}
