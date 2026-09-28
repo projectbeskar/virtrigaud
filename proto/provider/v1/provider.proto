@@ -667,6 +667,16 @@ message GetCapabilitiesResponse {
   // ImagePrepareResponse.artifact. A manager holds import-style prepares
   // through a provider that supports image import but does not advertise this.
   bool supports_image_artifact_identity = 18;
+  // supports_honest_reconfigure reports that Reconfigure implements the honest
+  // result contract: every requested change is applied to the running VM and
+  // its persistent definition, or applied to the definition only and reported
+  // with TaskResponse.restart_required, or the call fails — it never reports
+  // success for a change it did not apply. Additive and backward-compatible:
+  // false (the default) from a provider that predates it or does not
+  // implement it. A manager holds resizes of VMs on a clustered Provider that
+  // does not advertise it (its committed-capacity accounting trusts the
+  // result); single-host Providers are resized as before.
+  bool supports_honest_reconfigure = 19;
 }
 
 // ObjectIdentity names a Kubernetes object on the wire (CreateRequest.owner,

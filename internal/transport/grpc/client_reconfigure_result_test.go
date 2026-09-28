@@ -68,6 +68,25 @@ func TestClient_Reconfigure_MapsRestartRequired(t *testing.T) {
 	}
 }
 
+// TestClient_GetCapabilities_HonestReconfigure (review H3): the capability
+// round-trips, and is false from a provider that predates it — which makes
+// the manager hold clustered resizes instead of trusting its reply.
+func TestClient_GetCapabilities_HonestReconfigure(t *testing.T) {
+	for name, advertised := range map[string]bool{"advertised": true, "absent (older provider)": false} {
+		t.Run(name, func(t *testing.T) {
+			dialer, cleanup := startBufconnServer(t, &fakeProviderServer{
+				GetCapabilitiesFn: func(context.Context, *providerv1.GetCapabilitiesRequest) (*providerv1.GetCapabilitiesResponse, error) {
+					return &providerv1.GetCapabilitiesResponse{SupportsHonestReconfigure: advertised}, nil
+				},
+			})
+			defer cleanup()
+			caps, err := newTestClient(t, dialer, "test-caps-honest").GetCapabilities(context.Background())
+			require.NoError(t, err)
+			assert.Equal(t, advertised, caps.SupportsHonestReconfigure)
+		})
+	}
+}
+
 // TestClient_Describe_MapsMaxMemory: the provider-reported memory ceiling
 // reaches the manager as DescribeResponse.MaxMemoryMiB; 0 means not reported.
 func TestClient_Describe_MapsMaxMemory(t *testing.T) {

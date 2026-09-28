@@ -477,6 +477,60 @@ func TestSingleHost_MemoryCeiling_NotRecorded(t *testing.T) {
 	assert.Nil(t, vm.Status.Placement, "a single-host VM has no placement record")
 }
 
+// TestClustered_ResizeHeldWithoutHonestReconfigure (review H3): a clustered
+// Provider that does not report supportsHonestReconfigure (an older provider
+// image) gets no Reconfigure — neither a grow nor a shrink applied while off —
+// and the VM says why; a single-host Provider is resized as before.
+func TestClustered_ResizeHeldWithoutHonestReconfigure(t *testing.T) {
+	older := func(p *infravirtrigaudiov1beta1.Provider) *infravirtrigaudiov1beta1.Provider {
+		p.Status.ReportedCapabilities = nil
+		return p
+	}
+	cases := map[string]struct {
+		vm    *infravirtrigaudiov1beta1.VirtualMachine
+		power string
+	}{
+		"grow":                  {wantsCPU(sized("app", 2), 4), string(contracts.PowerStateOn)},
+		"shrink while off":      {wantsCPU(sized("app", 4), 1), string(contracts.PowerStateOff)},
+		"shrink while running":  {wantsCPU(sized("app", 4), 1), string(contracts.PowerStateOn)},
+		"memory grow (hot-add)": {sizedWithMem(sized("app", 2), 8192), string(contracts.PowerStateOn)},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			prov := &routingProvider{describeResp: contracts.DescribeResponse{Exists: true, PowerState: tc.power}}
+			tc.vm.Spec.PowerState = infravirtrigaudiov1beta1.PowerState(tc.power)
+			providerCR := older(withRuntime(clusteredProviderCR("prov-cluster", capNS)))
+			r := newTestReconciler(coverageTestScheme(t), &stubResolver{provider: prov}, providerCR,
+				hostPoolCR("pool-a", capNS, "prov-cluster"), capHost("host-alpha", 8), smallVMClass(capNS), minimalVMImage(capNS), tc.vm)
+			res, err := r.reconcileVM(context.Background(), getVM(t, r, "app"))
+			require.NoError(t, err)
+			assert.Empty(t, prov.reconfigureRefs, "nothing is sent to a Provider without the honest Reconfigure result")
+			assert.Equal(t, placementConfigRetryInterval, res.RequeueAfter)
+			got := getVM(t, r, "app")
+			c := reconfiguringCondition(got)
+			require.NotNil(t, c)
+			assert.Equal(t, metav1.ConditionFalse, c.Status)
+			assert.Equal(t, k8s.ReasonProviderLacksHonestReconfigure, c.Reason)
+			assert.Equal(t, got.Generation, c.ObservedGeneration)
+			assert.Equal(t, tc.vm.Status.CurrentResources.CPU, got.Status.CurrentResources.CPU, "the VM keeps its size")
+		})
+	}
+
+	// A single-host Provider without it is resized as before.
+	single := newResultProvider()
+	rs, _ := singleHostReconciler(t, single) // providerAndClass: no ReportedCapabilities
+	vm := sizedSingleHostVM(2, 8192, 4, 8192)
+	_, err := rs.reconcileVM(context.Background(), vm)
+	require.NoError(t, err)
+	assert.Equal(t, 1, single.calls, "single-host keeps today's behaviour")
+}
+
+// sizedWithMem asks vm for memMiB of memory at its recorded CPU.
+func sizedWithMem(vm *infravirtrigaudiov1beta1.VirtualMachine, memMiB int64) *infravirtrigaudiov1beta1.VirtualMachine {
+	vm.Spec.Resources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: vm.Status.CurrentResources.CPU, MemoryMiB: i64p(memMiB)}
+	return vm
+}
+
 // TestReconcileVM_FailedReconfigure_BacksOff (review H2): a Reconfigure that
 // keeps failing is re-sent on a per-VM backoff — 5 s doubling to 5 min — not
 // on every reconcile; a spec change is sent at once, and a success resets it.

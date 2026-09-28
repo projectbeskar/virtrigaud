@@ -736,6 +736,11 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		// capacity first (ADR-0007 Addendum A, scheduler-accuracy amendment),
 		// and a shrink of a running clustered VM waits until it is powered off
 		// (review N1). Every single-host / thin-client VM goes straight on.
+		// Nothing is sent to a clustered Provider that does not report the
+		// honest Reconfigure result (review H3).
+		if res, held := r.holdResizeWithoutHonestReconfigure(ctx, vm, ref, provider); held {
+			return res, nil
+		}
 		if ref.Routed() {
 			if res, deferred := r.deferClusteredShrink(ctx, vm, vmClass, desc); deferred {
 				return res, nil

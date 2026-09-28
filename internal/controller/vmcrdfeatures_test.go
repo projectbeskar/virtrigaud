@@ -270,6 +270,14 @@ func TestMissingProviderCRDFeatures(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{crdFeatureProviderImageArtifactIdentity}, missing)
 
+	// A Provider CRD without supportsHonestReconfigure (review H3).
+	noHonest := generatedCRD(t, ProviderCRDName)
+	unstructured.RemoveNestedField(v1beta1Schema(t, noHonest), "properties", "status", "properties",
+		"reportedCapabilities", "properties", "supportsHonestReconfigure")
+	missing, err = missingProviderCRDFeatures(noHonest)
+	require.NoError(t, err)
+	assert.Equal(t, []string{crdFeatureProviderHonestReconfigure}, missing)
+
 	missing, err = missingProviderCRDFeatures(olderConsumerCRD(t, ProviderCRDName))
 	require.NoError(t, err)
 	assert.Equal(t, []string{crdFeatureConsumerSelector}, missing)

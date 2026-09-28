@@ -23,6 +23,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
@@ -107,6 +108,48 @@ func (r *VirtualMachineReconciler) recordRestartPending(vm *infravirtrigaudiov1b
 	})
 	vm.Status.Phase = infravirtrigaudiov1beta1.VirtualMachinePhaseRunning
 	k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonReconcileSuccess, "VM is ready")
+}
+
+// providerAdvertisesHonestReconfigure reports whether the Provider CR reports
+// the honest Reconfigure result (status.reportedCapabilities.
+// supportsHonestReconfigure). A nil ReportedCapabilities (not reported yet, or
+// an older provider) reads as false.
+func providerAdvertisesHonestReconfigure(provider *infravirtrigaudiov1beta1.Provider) bool {
+	caps := provider.Status.ReportedCapabilities
+	return caps != nil && caps.SupportsHonestReconfigure
+}
+
+// holdResizeWithoutHonestReconfigure holds a resize — grow or shrink — of a
+// VM on a clustered Provider that does not report the honest Reconfigure
+// result (review H3): an older provider can answer success for a change it
+// did not apply, and the committed-capacity accounting would trust it. The VM
+// keeps its size and gets Reconfiguring=False/ProviderLacksHonestReconfigure,
+// re-checked every placementConfigRetryInterval; nothing is sent. It reports
+// whether it held. A single-host Provider is resized as before, with a
+// warning in the manager log.
+func (r *VirtualMachineReconciler) holdResizeWithoutHonestReconfigure(
+	ctx context.Context,
+	vm *infravirtrigaudiov1beta1.VirtualMachine,
+	ref contracts.VMRef,
+	providerCR *infravirtrigaudiov1beta1.Provider,
+) (ctrl.Result, bool) {
+	if providerCR == nil || providerAdvertisesHonestReconfigure(providerCR) {
+		return ctrl.Result{}, false
+	}
+	logger := log.FromContext(ctx)
+	if !ref.Routed() {
+		logger.Info("WARNING: the VM's Provider does not report supportsHonestReconfigure; its Reconfigure may report a change "+
+			"applied that was not, so status.currentResources may not match the VM. Upgrade the provider image.",
+			"provider", providerCR.Name)
+		return ctrl.Result{}, false
+	}
+	msg := fmt.Sprintf("the VM is not resized: its Provider %s does not report supportsHonestReconfigure (an older provider image), "+
+		"so a Reconfigure could report a change applied that was not, and the host's committed capacity would count a size the VM "+
+		"does not have. Upgrade the provider image; the VM keeps its current size until then", providerCR.Name)
+	logger.Info("Holding a clustered resize: the Provider does not report the honest Reconfigure result", "provider", providerCR.Name)
+	setResizeRefused(vm, k8s.ReasonProviderLacksHonestReconfigure, msg)
+	r.updatePlacementStatus(ctx, vm)
+	return ctrl.Result{RequeueAfter: placementConfigRetryInterval}, true
 }
 
 // recordAtLeastDesired raises status.currentResources, per resource, to the

@@ -527,6 +527,8 @@ func (c *Client) GetCapabilities(ctx context.Context) (contracts.Capabilities, e
 		SupportsClustering:          resp.SupportsClustering,
 		// ADR-0009 D7: false from a provider that predates the field.
 		SupportsImageArtifactIdentity: resp.GetSupportsImageArtifactIdentity(),
+		// False from a provider that predates the honest Reconfigure result.
+		SupportsHonestReconfigure: resp.GetSupportsHonestReconfigure(),
 	}, nil
 }
 

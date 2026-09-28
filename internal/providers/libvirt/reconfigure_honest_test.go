@@ -447,6 +447,21 @@ func TestClustered_Reconfigure_HonestResult(t *testing.T) {
 	}
 }
 
+// TestGetCapabilities_AdvertisesHonestReconfigure (review H3): both the
+// single-host and the clustered libvirt provider report the honest
+// Reconfigure result.
+func TestGetCapabilities_AdvertisesHonestReconfigure(t *testing.T) {
+	single, err := NewServer(&Provider{virshProvider: localHostVP("single")}).GetCapabilities(context.Background(), &providerv1.GetCapabilitiesRequest{})
+	require.NoError(t, err)
+	assert.True(t, single.GetSupportsHonestReconfigure())
+
+	p, _, _ := routedCluster(t)
+	clustered, err := NewServer(p).GetCapabilities(context.Background(), &providerv1.GetCapabilitiesRequest{})
+	require.NoError(t, err)
+	assert.True(t, clustered.GetSupportsClustering())
+	assert.True(t, clustered.GetSupportsHonestReconfigure())
+}
+
 // TestDescribe_ReportsMaxMemory (review R2): Describe reports the domain's
 // memory maximum (dominfo "Max memory", rounded up to MiB) on the wire, so the
 // manager can record a clustered VM's balloon ceiling from the provider.

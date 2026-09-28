@@ -813,6 +813,9 @@ func (s *Server) GetCapabilities(ctx context.Context, req *providerv1.GetCapabil
 		// surface Unimplemented there (D9). This flips true only now that the real
 		// libvirt host-inventory implementation ships.
 		SupportsClustering: s.provider != nil && s.provider.clustered(),
+		// Reconfigure applies every change live and persistently, persistently
+		// only with restart_required, or fails (reconfigure.go).
+		SupportsHonestReconfigure: true,
 	}, nil
 }
 
@@ -833,6 +836,8 @@ func clusteredCapabilities() *providerv1.GetCapabilitiesResponse {
 		SupportedDiskTypes:          []string{"qcow2", "raw", "vmdk"},
 		SupportedNetworkTypes:       []string{"virtio", "e1000", "rtl8139"},
 		SupportsClustering:          true,
+		// The routed Reconfigure runs the same honest core (reconfigure.go).
+		SupportsHonestReconfigure: true,
 	}
 }
 

@@ -77,6 +77,12 @@ const (
 	// then on). status.currentResources then holds, per resource, the larger
 	// of the running size and the next-boot size.
 	ReasonRestartRequired = "RestartRequired"
+	// ReasonProviderLacksHonestReconfigure is Reconfiguring=False on a VM of a
+	// clustered Provider that does not report supportsHonestReconfigure (an
+	// older provider image): its Reconfigure could report a change applied that
+	// was not, which the committed-capacity accounting would trust, so the
+	// resize — grow or shrink — is not sent until the provider is upgraded.
+	ReasonProviderLacksHonestReconfigure = "ProviderLacksHonestReconfigure"
 )
 
 // ConditionLinkedClonesDependOnDisk is True on a VirtualMachine whose disk other

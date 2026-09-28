@@ -139,6 +139,11 @@ const (
 	// crdFeatureProviderImageArtifactIdentity is checked on the Provider CRD
 	// (ADR-0009 D8).
 	crdFeatureProviderImageArtifactIdentity = "status.reportedCapabilities.supportsImageArtifactIdentity"
+	// crdFeatureProviderHonestReconfigure is checked on the Provider CRD: an
+	// older CRD would prune it, so every clustered Provider would look like
+	// one without the honest Reconfigure result and every clustered resize
+	// would be held.
+	crdFeatureProviderHonestReconfigure = "status.reportedCapabilities.supportsHonestReconfigure"
 	// crdMissingPrefix prefixes the name of a checked CRD that does not exist.
 	crdMissingPrefix = "the CustomResourceDefinition "
 )
@@ -212,8 +217,8 @@ func missingConsumerSelector(crd *unstructured.Unstructured) ([]string, error) {
 
 // missingProviderCRDFeatures returns the features the Provider CRD crd lacks in
 // its v1beta1 schema: spec.consumerNamespaceSelector and
-// status.reportedCapabilities.supportsImageArtifactIdentity (nil when it has
-// both).
+// status.reportedCapabilities.supportsImageArtifactIdentity and
+// supportsHonestReconfigure (nil when it has all three).
 func missingProviderCRDFeatures(crd *unstructured.Unstructured) ([]string, error) {
 	missing, err := missingConsumerSelector(crd)
 	if err != nil {
@@ -226,6 +231,10 @@ func missingProviderCRDFeatures(crd *unstructured.Unstructured) ([]string, error
 	if _, found, _ := unstructured.NestedMap(schemaRoot, "properties", "status", "properties",
 		"reportedCapabilities", "properties", "supportsImageArtifactIdentity"); !found {
 		missing = append(missing, crdFeatureProviderImageArtifactIdentity)
+	}
+	if _, found, _ := unstructured.NestedMap(schemaRoot, "properties", "status", "properties",
+		"reportedCapabilities", "properties", "supportsHonestReconfigure"); !found {
+		missing = append(missing, crdFeatureProviderHonestReconfigure)
 	}
 	return missing, nil
 }
