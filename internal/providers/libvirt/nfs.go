@@ -64,6 +64,17 @@ func (s *Server) exportDiskToNFS(ctx context.Context, req *providerv1.ExportDisk
 	if srcPath == "" {
 		return nil, fmt.Errorf("source disk %q has no resolvable host path", req.DiskId)
 	}
+	return exportConvertToNFS(ctx, conn, req, srcPath, nil)
+}
+
+// exportConvertToNFS is the NFS export core, run on conn — the single host's
+// connection, or a clustered host's leased connection after the owner check
+// (exportDiskRouted): the host's qemu-img flattens srcPath straight into the
+// nfs:// destination. guard wraps the convert (flock + timeout on a clustered
+// host, routed_budget.go); a nil guard — the single-host path — runs the
+// historical command, unchanged.
+func exportConvertToNFS(ctx context.Context, conn libvirtConn, req *providerv1.ExportDiskRequest, srcPath string, guard hostCmdGuard) (*providerv1.ExportDiskResponse, error) {
+	nfsURL := strings.TrimSpace(req.DestinationUrl)
 
 	log.Printf("INFO Exporting disk from libvirt host to NFS: backend=nfs vm=%s src=%s dest=%s",
 		req.VmId, srcPath, nfsURL)
@@ -73,8 +84,13 @@ func (s *Server) exportDiskToNFS(ctx context.Context, req *providerv1.ExportDisk
 	// first). qemu-img's libnfs driver performs the NFS write — no pod buffering.
 	// RunHost is argv-safe (the transport shell-quotes every element), so the
 	// values are passed raw — pre-quoting them would now double-quote.
-	if res, err := conn.RunHost(ctx, "qemu-img", "convert", "-U", "-f", "qcow2", "-O", "qcow2",
-		srcPath, nfsURL); err != nil {
+	// It writes no host file (the destination is the NFS export), so the
+	// guard has no host target to check.
+	convert, err := guard.apply("", "qemu-img", "convert", "-U", "-f", "qcow2", "-O", "qcow2", srcPath, nfsURL)
+	if err != nil {
+		return nil, err
+	}
+	if res, err := conn.RunHost(ctx, convert...); err != nil {
 		return nil, fmt.Errorf("host-side qemu-img convert to nfs failed: %w%s", err, qemuImgStderr(res))
 	}
 

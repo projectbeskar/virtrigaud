@@ -77,3 +77,25 @@ func TestClient_GetCapabilities_ImageArtifactIdentity(t *testing.T) {
 		})
 	}
 }
+
+// TestClient_GetCapabilities_RoutedClone verifies the ADR-0007 Addendum A
+// slice 3 capability round-trips and is false from a provider that does not
+// set it (a clustered provider older than slice 3), which is what keeps the
+// VMClone controller from creating a clustered clone's target for it.
+func TestClient_GetCapabilities_RoutedClone(t *testing.T) {
+	for name, advertised := range map[string]bool{"advertised": true, "absent (older provider)": false} {
+		t.Run(name, func(t *testing.T) {
+			dialer, cleanup := startBufconnServer(t, &fakeProviderServer{
+				GetCapabilitiesFn: func(ctx context.Context, req *providerv1.GetCapabilitiesRequest) (*providerv1.GetCapabilitiesResponse, error) {
+					return &providerv1.GetCapabilitiesResponse{SupportsClustering: true, SupportsRoutedClone: advertised}, nil
+				},
+			})
+			defer cleanup()
+			cli := newTestClient(t, dialer, "test-caps-routed-clone")
+
+			caps, err := cli.GetCapabilities(context.Background())
+			require.NoError(t, err)
+			assert.Equal(t, advertised, caps.SupportsRoutedClone)
+		})
+	}
+}

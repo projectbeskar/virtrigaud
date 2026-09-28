@@ -343,13 +343,14 @@ func main() {
 	// prepare state, VM creates that need a prepare are held.
 	vmCRDCheck := controller.NewVMCRDFeatureChecker(mgr.GetAPIReader())
 
-	if err = (&controller.VirtualMachineReconciler{
+	vmReconciler := &controller.VirtualMachineReconciler{
 		Client:           mgr.GetClient(),
 		Scheme:           mgr.GetScheme(),
 		RemoteResolver:   remoteResolver,
 		Recorder:         mgr.GetEventRecorderFor("virtualmachine-controller"),
 		ImageCRDFeatures: vmCRDCheck,
-	}).SetupWithManager(mgr); err != nil {
+	}
+	if err = vmReconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "VirtualMachine")
 		os.Exit(1)
 	}
@@ -438,6 +439,10 @@ func main() {
 		remoteResolver,
 		mgr.GetEventRecorderFor("vmclone-controller"),
 	)
+	// A clustered clone is admitted against its host's capacity under the
+	// same per-Provider lock, and in the same assume cache, as a VM's create
+	// or resize: share the VirtualMachine controller's.
+	vmcloneReconciler.Placements = vmReconciler.PlacementAssumptions()
 	if err = vmcloneReconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "VMClone")
 		os.Exit(1)

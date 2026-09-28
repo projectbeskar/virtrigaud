@@ -29,11 +29,13 @@
 > provider, and a `Host` cannot be deleted while a VM uses it. **Slice 2** routes
 > `Power` and `Reconfigure` to the bound host, owner-checked, and releases a
 > pending host whose create hit a name conflict (the host is excluded and the VM
-> re-scheduled) — see
+> re-scheduled). **Slice 3** routes the snapshot family, `Clone` (onto the
+> source VM's host, stamped with its target VM), `GetDiskInfo` and the host-side
+> `ExportDisk` (s3 / nfs), all owner-checked, and host-encodes task references
+> so `TaskStatus` is routed too — see
 > [Post-create routing](#post-create-routing-adr-0007-addendum-a).
 > `topology: cluster` stays **experimental** until Addendum A slice 5. Still to
-> come: snapshots / clone / disk export (slice 3), cross-host `ListVMs` +
-> adoption (slice 4), host→host migration (P2).
+> come: cross-host `ListVMs` + adoption (slice 4), host→host migration (P2).
 
 VirtRigaud is adding a new *class* of provider — a **clustered / orchestrator**
 provider — that makes VirtRigaud itself the cluster manager for hypervisors that
@@ -1037,18 +1039,32 @@ feature.
 
 Only the operator knows where a VM runs, so **the operator names the host on
 every per-VM call** and the provider never looks it up (A1, D1). Slice 1 routed
-`Describe` and `Delete`; slice 2 routes `Power` and `Reconfigure`.
+`Describe` and `Delete`; slice 2 routed `Power` and `Reconfigure`; slice 3 routes
+the snapshot family, `Clone`, `GetDiskInfo`, `ExportDisk` and `TaskStatus`.
 
 ### On the wire and in the manager
 
 - Every per-VM request carries `target_host_id` (`DeleteRequest`, `PowerRequest`,
   `ReconfigureRequest`, `HardwareUpgradeRequest`, `DescribeRequest`, the three
   snapshot requests, `ExportDiskRequest`, `GetDiskInfoRequest`);
-  `CloneRequest.source_host_id` routes a clone by its source VM; and
-  `DescribeRequest.owner`, `DeleteRequest.owner`, `PowerRequest.owner` and
-  `ReconfigureRequest.owner` (slice 2) carry the requesting VirtualMachine's
+  `CloneRequest.source_host_id` routes a clone by its source VM and
+  `CloneRequest.target_host_id` (slice 3) names the host it lands on; and
+  the `owner` of the `Describe`, `Delete`, `Power`, `Reconfigure` (slice 2),
+  snapshot, `ExportDisk` and `GetDiskInfo` requests plus
+  `CloneRequest.source_owner` (slice 3) carry the requesting VirtualMachine's
   identity. The owner is sent only together with a host. All additive:
   single-host and thin-client providers ignore them and are never sent them.
+- `TaskStatus` carries no host, so a clustered provider **host-encodes** every
+  task reference a routed call returns: `host-task/v1/<host id>/<host-local
+  reference>`. The host id is a `Host` name (a DNS-1123 subdomain, so it never
+  contains the `/` that ends it); the rest is the host-local reference,
+  verbatim. The provider routes `TaskStatus` to that host and refuses any
+  reference it could not have issued: one that is not host-encoded or is
+  malformed is `InvalidArgument`, and one naming a host that is not in its own
+  host registry is `NotFound` — the reference is never turned into an endpoint
+  and nothing is dialed. The reference is opaque to the operator. Single-host
+  task references are unchanged. (libvirt calls are synchronous today, so no
+  routed call returns a task yet; the encoding is in place for `MigrateVM`.)
 - Manager-side, every per-VM method takes a `contracts.VMRef{ID, HostID, Owner}`,
   and one helper builds it from a VirtualMachine and its Provider: for `topology:
   cluster` the host is `status.placement.host` and the owner is the VM's
@@ -1067,7 +1083,11 @@ every per-VM call** and the provider never looks it up (A1, D1). Slice 1 routed
 | `Power` (on, off, reboot, graceful shutdown) | **Routed** and **owner-checked** (slice 2): nothing happens unless the owner stamp is the requester's UID (otherwise `NotFound`, domain untouched); the operation then addresses the checked domain **by its UUID**, so a domain replaced after the check is not acted on. The post-start persistent-XML sync runs on the same host |
 | `Reconfigure` (offline and online CPU/memory, disk grow) | **Routed** and **owner-checked** (slice 2), addressed by UUID like `Power`. Every step runs on the bound host: `setvcpus`/`setmem`, the disk resize, `blockresize`, and the best-effort in-guest filesystem grow through that host's guest agent. The disk that is resized is the checked domain's **own** primary disk, read with `domblklist --details` and resized by its path — never a volume found by name. Offline, it is resized with `vol-resize`; online, a block-device disk is resized before `blockresize`, while a file-backed disk is grown by `blockresize` alone (resizing a qcow2 under a running QEMU would be unsafe). Offline, a disk already at the requested size is not resized, and a disk with no host path (a network disk) that needs to grow fails the call. Each CPU/memory change is applied to the persistent definition first, then live; one the running domain cannot take is reported as `restart_required`; any failure fails the call (`VM_OPERATION_FAILED`); a domain that is paused, suspended to RAM or shutting down is refused unchanged |
 | `HardwareUpgrade` | `Unimplemented` (libvirt has no hardware versions; the request carries `target_host_id` for a future provider) |
-| snapshots, `Clone`, `ExportDisk`, `GetDiskInfo` | `Unimplemented` until slice 3 |
+| `SnapshotCreate`, `SnapshotDelete`, `SnapshotRevert` | **Routed** and **owner-checked** (slice 3), addressed by UUID like `Power`: a domain this VM does not own is `NotFound` and none of its snapshots is created, deleted or reverted. A snapshot id this provider could not have created (for example one starting with `-`, which virsh would read as an option) is `InvalidArgument` before any host is touched. Memory snapshots work as on a single host |
+| `Clone` (full clones only) | **Routed** to the source VM's bound host and **owner-checked** on the source (slice 3). A **linked** clone is `InvalidArgument` on a clustered provider in v0.4.0 (its overlay would depend on the source's disk for its whole life) and is not advertised. `target_host_id` must equal `source_host_id` (disks are host-local; no cross-host clone in v1), and an empty or different value is `InvalidArgument` — the provider never picks a landing host. The request must carry the target VirtualMachine's identity **with its uid**: the clone is stamped with it (never with the source's stamp). A domain of the clone's name that the target does not own is `AlreadyExists` and nothing is copied; one it does own is an earlier attempt's clone and is reported as done (a retry is idempotent). The clone gets **its own copy of the cloud-init seed ISO** in a per-clone seed directory, so deleting either VM never removes the other's seed. It is defined from the source's **persistent** definition (`dumpxml --inactive`), without the source disk's `<backingStore>` chain (the clone's disk is a standalone copy; only `/domain/devices/disk/backingStore` is removed, never another tool's `<metadata>`). **Single-disk sources only** for now: a source with more than one writable medium (`device='disk'`, `'lun'` or `'floppy'`, of any type) or a disk with an external data file (`<source><dataStore>`) is `InvalidArgument` before anything is copied, because only the primary disk is re-pointed at the clone's copy and any other would be shared by source and clone. Only read-only CD-ROM media (the seed among them) are not counted |
+| `GetDiskInfo` | **Routed** and **owner-checked** (slice 3): the disks are read from the checked domain's own definition, nothing is looked up by volume name, and an explicit disk path must be one of that domain's disks |
+| `ExportDisk` | **Routed** and **owner-checked** (slice 3) for the host-side backends only: `s3` (the host flattens the disk, the pod streams it to S3) and `nfs` (the host writes it to the export). The `pvc` export (and the empty legacy backend, which means `pvc`) reads the disk from the provider pod and is refused (`Unimplemented`), as on Proxmox. The export runs on the owner-checked domain's own disk; a host that is not reached over `ssh://` is refused naming the host id only, never its endpoint |
+| `TaskStatus` | **Routed** to the host encoded in the task reference (slice 3; see above) |
 | `ListVMs` | `Unimplemented` until slice 4 (it must run across all hosts) |
 | `ImagePrepare`, `ImportDisk` | `Unimplemented` (host-scoped, no target host yet) |
 
@@ -1084,23 +1104,118 @@ failure, a connection dropped mid-command), or a virsh that cannot reach the
 host's libvirtd, is classified as host-scoped. Any other failure of a routed
 call on its host (the host answered, but the operation on that one VM failed —
 for example a disk grow the host cannot satisfy) keeps its historical code and
-message and carries an `ErrorInfo` with reason `VM_OPERATION_FAILED`, which the
+carries an `ErrorInfo` with reason `VM_OPERATION_FAILED`, which the
 manager also keeps out of the breaker: one tenant's failing VM, retried every
-few seconds, cannot open it for every VM of the Provider. A bound
+few seconds, cannot open it for every VM of the Provider. **Routed errors carry
+only a categorized message** — the operation and the host id, for example
+`failed to create snapshot on host "host-b"` or `connect to host "host-b"` —
+because they end up in tenant-readable conditions and events. The cause (SSH
+dial address, virsh or qemu-img output, host paths) is in the provider's log
+only. Single-host errors are unchanged.
+
+**Long routed calls have a time budget (slice 3).** `Clone`, `SnapshotCreate`
+and `ExportDisk` run under a budget that ends 15 s before the manager's
+deadline (5 min for `Clone` and `SnapshotCreate`, 30 min for `ExportDisk`), so
+an overrun is answered as `VM_OPERATION_FAILED` ("did not finish within its time
+budget and was stopped") instead of reaching the manager as `DeadlineExceeded`,
+which its circuit breaker counts. The qemu-img that copies a clone's disk or
+flattens an export runs on the host as `flock -n -E 75 <lock> timeout
+--kill-after=10s <budget>s qemu-img ...`: `timeout` stops it when the budget
+runs out (cancelling the call alone would only close the SSH session and leave
+it running), and `flock` holds a lock, so a retry while an earlier copy still
+runs is answered `Unavailable` ("the same copy is still running", retryable,
+still out of the breaker) instead of starting a second copy. **Clustered hosts
+need `flock` (util-linux) and `timeout` (coreutils)**; a host without them fails
+these calls with a message naming them and never runs the copy unguarded.
+
+**A failed or stopped copy leaves no partial copy of the tenant's disk on the
+host.** A clone whose copy fails, is stopped by its budget, or fails later
+before its domain is defined removes the clone's disk
+(`<pool>/<namespace>.<name>-disk.qcow2`) again, under the clone's lock: it
+waits a few seconds for a copy that `timeout` just stopped, and leaves the disk
+alone when another attempt still holds the lock (that attempt owns it) or when
+the define's outcome is unknown (the domain may exist and use it; its
+owner-checked Delete removes it). An `s3` export's flattened copy is created
+by `mktemp` (exclusively, mode `0600`, unpredictable name) next to the source
+disk, and its removal is registered before the flatten runs, so a flatten that
+fails or is stopped never leaves a readable partial copy. The cleanup runs even
+after the budget ran out and is bounded so the answer still reaches the manager
+in time. An `nfs` export writes no host file: a stopped export leaves a partial
+object at the migration's own destination on the NFS export, which the next
+attempt overwrites (the manager does not yet delete NFS staging objects, even
+after a successful migration). Single-host exports are unchanged.
+
+The locks are separate files, `clone-<domain>.lock` and
+`export-<domain>.lock`, in a directory VirtRigaud owns on each host:
+`/tmp/virtrigaud-locks` (under the host staging directory), made mode `0700`
+by the first guarded command. They are never the disk file itself: on an
+NFS-backed pool `flock` is emulated as a whole-file POSIX lock that would
+conflict with qemu's own image locks, and an export would otherwise need write
+access to the source disk's directory just for its lock. Before every guarded
+command the host checks that the lock directory is a directory, not a symbolic
+link, owned by the SSH user, and that neither the lock nor the file the command
+writes (the clone's disk, an export's temporary copy) is a symbolic link; if
+any check fails the call is refused (`FailedPrecondition`, "was refused",
+`VM_OPERATION_FAILED`) and nothing is copied. A lock directory another user
+created first cannot be used: remove it (as root) and the next call recreates
+it. Its predictable name is an accepted risk: a local user of a host can only
+make clustered clones and exports on that host fail closed, never redirect
+them. Every refusal increments
+`virtrigaud_provider_host_guard_refusals_total{provider_type, reason}` (reason
+`lock_dir_unsafe`, `lock_symlink`, `target_symlink` or `unknown`; no host,
+path or tenant label) on the provider's `/metrics`, and is logged as
+`ERROR ALERT host guard refused …` naming the host. Alert on any increase: it
+means a host path VirtRigaud writes to was tampered with or pre-created.
+*Follow-up:* make the staging (and lock) directory configurable per Host, so
+clustered hosts can keep it outside the world-writable `/tmp`.
+
+**Keep pool directories sticky or private.** A routed call writes files into
+the storage pool directory (a clone's disk) or next to the source disk (an s3
+export's temporary copy). If that directory is writable by other local users
+of the host and has no sticky bit (for example mode `2777`), any of them can
+replace or remove those files, which no check VirtRigaud makes can prevent.
+The provider logs a `WARN` naming the directory and host, once per host and
+directory, the first time a routed call uses it; it does not refuse, so
+existing hosts keep working. Fix it with `chmod +t <dir>`, or remove world
+write access.
+
+`virsh snapshot-create-as` is bounded by the budget but not wrapped: killing the virsh client would not stop
+libvirtd's snapshot job, and libvirt refuses a second concurrent job on the
+same domain. So a `SnapshotCreate` whose budget runs out is **not** reported as
+stopped: the snapshot may still complete on the host (a memory snapshot writing
+the guest's RAM), so the answer is `Unavailable` ("its outcome is unknown ...
+retry", `VM_OPERATION_FAILED`), as is a retry that finds the earlier job still
+holding the domain's job lock. The routed create is **idempotent per request,
+not per name**: the manager sends the VMSnapshot's uid (a migration's uid for
+its snapshot) as `request_token`, the provider records it at the end of the
+snapshot's description (`[virtrigaud-request-token=<uid>]`), and a snapshot of
+the requested (sanitized) name already on the owner-checked domain is returned
+as the result only when it records the same token. Any other snapshot of that
+name — a leftover of an earlier VMSnapshot of the same name (force-deleted, or
+whose finalizer was dropped), or one made by hand — is `AlreadyExists`: it is
+never adopted and never replaced, and the VMSnapshot fails saying so (delete
+the leftover, or use another snapshot name). The VMSnapshot controller retries
+a routed create with an unknown outcome (every 30 s) instead of failing it, so
+a snapshot that completes late is found and tracked, never left on the host
+untracked. A clone whose disk takes longer to copy than the budget cannot
+complete (as on a single host, where the same 5-minute limit applies). A bound
 VM whose host is unavailable — on `Describe`, `Power` or `Reconfigure` — shows
 `Ready=False` (`HostUnavailable`) and is re-checked every 30 s. A host that
-starts draining mid-call still completes that call. The Describe, Delete, Power
-and Reconfigure cores are shared with single-host mode — only the connection
-differs — and single-host `Power`/`Reconfigure` emit exactly the virsh command
-sequence they did before routing. The ADR-0008 shadow read of a routed
+starts draining mid-call still completes that call. The Describe, Delete, Power,
+Reconfigure, snapshot, Clone, GetDiskInfo and export cores are shared with
+single-host mode — only the connection differs — and single-host calls emit
+exactly the virsh / host command sequence, response and error they did before
+routing (pinned by golden files). The ADR-0008 shadow read of a routed
 `Describe` runs on the same leased connection. The single-host connection handle
 a clustered provider used to carry is now an **always-failing placeholder**: any
 call not routed to a host fails instead of reaching some unintended connection.
 
 Clustered `GetCapabilities` is honest about this (D7): it advertises
-`supports_clustering`, and — since slice 2 routes `Reconfigure` — online
-reconfigure and online disk expansion, exactly as a single-host provider does.
-It still hides snapshots, linked clones, disk export and import, and reports
+`supports_clustering`; since slice 2, online reconfigure and online disk
+expansion, exactly as a single-host provider does; and since slice 3,
+snapshots, memory snapshots and disk export — the export exactly
+as served: backends `s3` and `nfs` only, relay mode, `qcow2` only, no
+compression — and `supportsRoutedClone` (it routes `Clone` to the source's host). It still hides linked clones and disk import, and reports
 `supports_image_import=false`. The operator therefore skips image preparation
 for a clustered provider.
 
@@ -1155,6 +1270,111 @@ for a clustered provider.
   provider answers `Unimplemented` (for example an older clustered provider
   image that does not route it yet) is re-checked every 2 minutes. Any other
   failure is reported as before (`ProviderError`, retried after 5 s).
+- **Snapshots (slice 3).** A `VMSnapshot` of a clustered VM is sent to its bound
+  host with the VM's owner. A VM without a confirmed binding — including one
+  whose create is only pending — is never snapshotted: the snapshot waits
+  (`Creating` condition, `Unbound`). Deleting a `VMSnapshot` of a VM whose
+  domain the provider reports as not this VM's removes the finalizer without
+  touching any snapshot.
+- **Clones (slice 3).** A `VMClone` of a clustered VM is a full clone (a linked
+  one is refused before anything is created: the provider does not advertise
+  linked clones, and the controller's linked-clone gate fails closed). It lands
+  on the source VM's bound host, and only there:
+  - The Provider must report `supportsRoutedClone` (a clustered provider older than slice 3 does not): otherwise the clone fails (`Unsupported`), and a failed capability query makes it wait — before anything is created. The source's host is checked next. A `Host` that is gone (or not this
+    Provider's), being deleted or cordoned (`spec.schedulable: false`), or not
+    `Ready` stops the clone: it stays `Pending` with `Ready=False`
+    (`SourceHostGone`, `SourceHostCordoned` or `SourceHostNotReady`) and is
+    re-checked every 2 minutes. No other host is ever tried and nothing is
+    created.
+  - The clone then creates its target VirtualMachine **before** the Clone call.
+  - **The clone must fit on its host.** It is admitted against the free
+    capacity of the source's host — the only host it can land on — exactly as
+    a create or a resize-up is: everything the Provider's VMs, in any
+    namespace, commit to that host, plus placements other reconciles have
+    chosen but not yet recorded, under the same per-Provider lock (the VMClone
+    and VirtualMachine controllers share it, so a concurrent create and clone
+    never book the same capacity). The clone counts at the size it will have:
+    the class named by `spec.target.classRef` (the provider applies it), or
+    else the source VM's own size (its `status.currentResources`, including a
+    `spec.resources` override), raised to its balloon ceiling when it has
+    memory hot-add (for a clone of the source's size, when the source was
+    provisioned with a ceiling — its recorded `memoryCeilingMiB` — never a
+    class flag its tenant can change). A clone that does not fit is not sent: its target VM reports
+    `Placed=False/Unschedulable` with the clone's own size and host only (no
+    other tenant's figures), the VMClone stays `Pending` and is re-checked with
+    a backoff of up to 2 minutes, and no other host is ever tried. A clone
+    whose size cannot be read (its VMClass is missing or not granted) waits
+    instead of being admitted blind.
+  - It then records the target's `status.placement.pendingHost` (the source's
+    host), with the admitted size (`pendingResources`) and the balloon ceiling
+    the clone is provisioned with (`memoryCeilingMiB`: the source's for a clone
+    of its size), in a checked status update before anything is created on
+    the host (A2). **The size is frozen from then on:** the Clone call carries
+    exactly the admitted vCPU, memory and headroom as its class override, so a
+    VMClass edited after admission cannot change what is created or make it
+    outgrow what was admitted (once bound, the VM converges to its class
+    through the resize gate like any VM). A clone whose VMClass can no longer
+    be read waits with a condition; it is never sent without its override.
+    The clone is stamped with the target's identity, so a lost answer is safe:
+    the retry lands on the same host, where the clone is reported as done, and
+    deleting the target runs the owner-checked cleanup on the pending host.
+  - A name conflict on the host (`AlreadyExists`) excludes the host for the
+    target and clears its pending host, as for a create; since the clone can
+    land nowhere else it waits (`SourceHostExcluded`) until an administrator
+    resolves the conflict and clears the target's `excludedHosts`. An
+    unreachable host keeps the pending host, and the clone is retried on the
+    same host (`HostUnavailable`, every 30 s). Any other failure fails the
+    clone (terminal `Failed`).
+  - **A clone that fails for good removes the target VirtualMachine it
+    created** (event `TargetRemoved` on the VMClone). The target's finalizer
+    then runs the owner-checked Delete on its pending host, which removes a
+    domain the clone may have defined there stamped as that VM's. Only the
+    object the clone created is ever deleted: it records that object's uid in
+    `status.targetUID` when it creates it (the `virtrigaud.io/clone-uid`
+    annotation alone can be copied onto a VM re-created under the same name,
+    by GitOps or `kubectl get -o yaml | kubectl apply`, and is never enough),
+    and a VM under the target name with another uid is neither cloned onto nor
+    removed. The target must also be unbound (no `status.id`, no bound host),
+    not refused by the clone (`TargetConflict`), and in a namespace that still
+    grants the clone's namespace, and the delete is conditional on the uid and
+    version that were checked, so a target bound in the meantime is kept. The
+    decision is made **once** and recorded as the VMClone condition
+    `TargetCleanup` (`True/TargetRemoved`, or `False/TargetKept` with why); a
+    failed VMClone never acts on its target name again. A clone that is only retrying or waiting (`Pending`,
+    including a blocked or excluded host) never removes its target. Single-host
+    clones are unchanged: their target is created only after the clone
+    succeeded.
+  - On success the target is bound in one status write: `status.id`, the host,
+    and the pending host cleared (`Placed=True`, `Bound`), with
+    `status.currentResources` at the size actually cloned (the admitted size
+    the Clone call sent) and its `status.placement.memoryCeilingMiB` kept, so
+    the clone counts at its admitted size — never at its class floor or at a
+    hot-add flag its tenant controls.
+- **Migrations from a clustered VM (slice 3).** A clustered VM can be a
+  `VMMigration` **source**: its disk is exported on its bound host through the
+  `s3` or `nfs` backend. A `pvc` migration from it fails validation up front,
+  because the pvc export reads the disk from the provider pod.
+  - **`s3`:** the host flattens the disk and the provider pod streams it to S3
+    over the host's SSH connection. The S3 credentials stay in the provider
+    pod; they are never sent to the host. The host needs no route to S3.
+  - **`nfs`:** the **host's** `qemu-img` writes the disk straight to the NFS
+    export (libnfs). So every host of the pool that a migration source may be
+    bound to needs network egress to the NFS server (TCP 2049, and 111 for
+    NFSv3 mount/portmapper), and the export must allow those hosts' addresses,
+    not only the provider pod's. The share is accessed with AUTH_SYS: the
+    server trusts the uid/gid the client presents (`nfs.uid` / `nfs.gid` in
+    the migration's storage options) and the host's address, over cleartext
+    NFSv3 with no Kerberos. Anyone with root on a pool host, or able to send
+    from its address, can therefore read or write the export: use a dedicated
+    export per trust domain, restrict it to the pool hosts' addresses, and keep
+    the storage network isolated (ADR-0006 C6).
+- **A clone carries the source's cloud-init seed.** Every clone is a copy of
+  the source's disk and definition, cloud-init CD-ROM included: the clustered
+  clone gets its own copy of the source's seed ISO, so its user-data — and any
+  provisioning secrets in it (passwords, SSH keys, tokens) — is the source's.
+  A cross-namespace clone (#340 grant) therefore hands the source's user-data
+  to the target namespace. See
+  [`cross-namespace-targets.md`](cross-namespace-targets.md#a-clone-carries-the-sources-cloud-init-seed).
 - **Adoption** is refused on a clustered provider until slice 4
   (`Provider.status.adoption.message` says why), and a **VMMigration into** a
   clustered provider fails validation until P3.
@@ -1165,11 +1385,11 @@ for a clustered provider.
   operator-initiated evacuation, but does **not** auto-restart VMs elsewhere.
   Without fencing/STONITH that would risk split-brain disk corruption; automatic
   HA is a deferred future ADR (ADR-0007 D8/P5).
-- **Experimental: only `Create`, `Describe`, `Delete`, `Power` and `Reconfigure`
-  are host-aware so far.** A clustered VM can be scheduled, created, described,
-  powered, reconfigured and deleted on its host (ADR-0007 Addendum A slices 1
-  and 2), but not yet snapshotted, cloned or exported — those RPCs are refused
-  until slice 3.
+- **Experimental.** A clustered VM can be scheduled, created, described,
+  powered, reconfigured, snapshotted, cloned (onto its own host), exported
+  (s3 / nfs) and deleted on its host (ADR-0007 Addendum A slices 1–3). It cannot
+  yet be listed across hosts or adopted (slice 4), and nothing can be
+  migrated **into** a clustered provider (P3).
   The `vprovider.kb.io` validating webhook enforces the topology×type rule at
   admission (ADR-0007 D2). Until Addendum A slice 5 validates a real clustered VM
   end to end, do not run workloads on `topology: cluster`.

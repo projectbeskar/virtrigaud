@@ -183,6 +183,11 @@ type SnapshotCreateRequest struct {
 	IncludeMemory bool
 	// Quiesce indicates whether to quiesce the filesystem
 	Quiesce bool
+	// RequestToken identifies the request object (the VMSnapshot's uid) this
+	// snapshot is created for. A provider that makes a retried create
+	// idempotent by name adopts an existing snapshot only when it records this
+	// token; empty means none (never adopted).
+	RequestToken string
 }
 
 // SnapshotCreateResponse contains the result of snapshot creation

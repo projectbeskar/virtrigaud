@@ -68,14 +68,18 @@ const (
 
 	// cloudInitSeedDirPrefix starts a per-create cloud-init seed directory name:
 	// <staging>/virtrigaud-cloudinit-<domain>.<random>. The seed ISO inside it
-	// is what a created domain's CD-ROM references; getCloudInitISOPath
-	// recognizes it by this prefix, and Delete removes the directory.
+	// (cloudInitISOName) is what a created domain's CD-ROM references;
+	// domainDisksDoc.cloudInitSeedDir recognizes it by this prefix, and Delete
+	// removes the directory.
 	cloudInitSeedDirPrefix = "virtrigaud-cloudinit-"
 
 	// cloudInitSeedDirMode is applied to a seed directory once its ISO is
 	// built: the qemu process (another user) can reach the ISO by its exact
 	// path, but nobody else can list the directory to discover it.
 	cloudInitSeedDirMode = "0711"
+
+	// cloudInitISOMode is the seed ISO's mode: readable by the qemu process.
+	cloudInitISOMode = "0644"
 
 	// stagingCleanupTimeout bounds a best-effort cleanup command, which runs
 	// even after the request context is cancelled.
@@ -135,7 +139,14 @@ func makeHostTempSuffix(ctx context.Context, h hostCommandRunner, template, suff
 // with a context that survives the caller's cancellation so a cancelled create
 // still cleans up after itself.
 func removeHostPath(ctx context.Context, h hostCommandRunner, path string, recursive bool) {
-	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), stagingCleanupTimeout)
+	removeHostPathWithin(ctx, h, path, recursive, stagingCleanupTimeout)
+}
+
+// removeHostPathWithin is removeHostPath bounded by within: a routed call's
+// cleanup uses routedCleanupTimeout, so its answer still reaches the manager
+// before its deadline.
+func removeHostPathWithin(ctx context.Context, h hostCommandRunner, path string, recursive bool, within time.Duration) {
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), within)
 	defer cancel()
 	flag := "-f"
 	if recursive {

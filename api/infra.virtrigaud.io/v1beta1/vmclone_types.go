@@ -504,6 +504,16 @@ type VMCloneStatus struct {
 	// +optional
 	TargetVMID string `json:"targetVMID,omitempty"`
 
+	// TargetUID is the uid of the target VirtualMachine this clone created
+	// (a clone on a clustered Provider creates its target before cloning).
+	// Only that object is ever used as the clone's target or removed when the
+	// clone fails: a VirtualMachine re-created later under the target name —
+	// even one carrying a copied virtrigaud.io/clone-uid annotation — is
+	// never touched.
+	// +optional
+	// +kubebuilder:validation:MaxLength=128
+	TargetUID string `json:"targetUID,omitempty"`
+
 	// Phase represents the current phase of the clone operation
 	// +optional
 	Phase ClonePhase `json:"phase,omitempty"`

@@ -240,7 +240,14 @@ const (
 
 // ProviderSpec defines the desired state of Provider
 type ProviderSpec struct {
-	// Type specifies the provider type
+	// Type specifies the provider type.
+	//
+	// Type is IMMUTABLE once set: the controllers decide type-specific safety
+	// rules from it (for example, a libvirt linked clone into another namespace
+	// is refused), and the VMs a Provider manages were created by, and are
+	// addressed with, the provider implementation of this type. To change it,
+	// create a new Provider.
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.type is immutable; create a new Provider to change it"
 	Type ProviderType `json:"type"`
 
 	// Topology selects the provider's deployment topology (ADR-0007 D9). It is a

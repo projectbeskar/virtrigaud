@@ -95,7 +95,7 @@ func (c *CloudInitProvider) PrepareCloudInit(ctx context.Context, config CloudIn
 	}
 
 	// Create cloud-init ISO using genisoimage (NoCloud datasource) on remote host
-	isoPath := filepath.Join(remoteDir, "cloud-init.iso")
+	isoPath := filepath.Join(remoteDir, cloudInitISOName)
 	if err := c.createRemoteCloudInitISO(ctx, remoteDir, isoPath); err != nil {
 		return "", fmt.Errorf("failed to create remote cloud-init ISO: %w", err)
 	}
@@ -238,7 +238,7 @@ func (c *CloudInitProvider) copyISOToRemote(ctx context.Context, localPath, doma
 	if err != nil {
 		return "", fmt.Errorf("failed to copy cloud-init ISO on remote host: %w, output: %s", err, result.Stderr)
 	}
-	if _, err := c.virshProvider.runVirshCommand(ctx, "!", "chmod", "0644", remotePath); err != nil {
+	if _, err := c.virshProvider.runVirshCommand(ctx, "!", "chmod", cloudInitISOMode, remotePath); err != nil {
 		return "", fmt.Errorf("failed to chmod remote cloud-init ISO: %w", err)
 	}
 

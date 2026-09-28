@@ -416,26 +416,29 @@ func (s committedSnapshot) settled(a assume.Assumption) bool {
 	return slices.Contains(rec.hosts, a.HostID)
 }
 
-// committedPlacements lists every VirtualMachine, in every namespace, whose
-// placement belongs to provider (placementProviderKey) and returns the
-// resources each holds on the hosts its record names: a bound VM on its host, a
-// VM with a create in flight on its pending host. A VM being deleted still
-// counts until its finalizer is gone, because its domain and disks are still on
-// the host. VMs in another namespace than self count toward capacity only: they
-// are outside self's affinity scope (CapacityOnly), and nothing about them but
-// their resources reaches the scheduler's no-fit message.
+// committedPlacementsFrom lists, through reader (the informer cache), every
+// VirtualMachine, in every namespace, whose placement belongs to provider
+// (placementProviderKey) and returns the resources each holds on the hosts its
+// record names: a bound VM on its host, a VM with a create in flight on its
+// pending host. A VM being deleted still counts until its finalizer is gone,
+// because its domain and disks are still on the host. VMs in another namespace
+// than self count toward capacity only: they are outside self's affinity scope
+// (CapacityOnly), and nothing about them but their resources reaches the
+// scheduler's no-fit message. The VirtualMachine controller schedules and
+// admits resizes with it, and the VMClone controller admits clustered clones.
 //
 // Each VM counts at its admittedFootprint. Its VMClass is read (from the
 // cache) only when that needs it, and only when the VM's namespace may use it
 // (the consumer grant, as everywhere else).
-func (r *VirtualMachineReconciler) committedPlacements(
+func committedPlacementsFrom(
 	ctx context.Context,
+	reader client.Reader,
 	provider types.NamespacedName,
 	self *infravirtrigaudiov1beta1.VirtualMachine,
 ) (committedSnapshot, error) {
 	// Only this Provider's VMs, through the field index; read-only (shared
 	// with the cache).
-	vms, err := listProviderVMs(ctx, r.Client, provider)
+	vms, err := listProviderVMs(ctx, reader, provider)
 	if err != nil {
 		return committedSnapshot{}, err
 	}
@@ -457,7 +460,7 @@ func (r *VirtualMachineReconciler) committedPlacements(
 			snap.recorded[uid] = recordedVM{hosts: hosts}
 			continue
 		}
-		res, err := sizeForAccounting(ctx, r.Client, other, classes)
+		res, err := sizeForAccounting(ctx, reader, other, classes)
 		if err != nil {
 			return committedSnapshot{}, err
 		}
@@ -603,7 +606,21 @@ func (r *VirtualMachineReconciler) placedWithAssumptions(
 	provider types.NamespacedName,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
 ) ([]scheduler.PlacedVM, error) {
-	snap, err := r.committedPlacements(ctx, provider, vm)
+	return placedWithAssumptionsFrom(ctx, r.Client, cache, providerKey, provider, vm)
+}
+
+// placedWithAssumptionsFrom is placedWithAssumptions read through reader
+// (the informer cache); the VMClone controller admits a clustered clone with
+// it, under the same lock and against the same assumptions.
+func placedWithAssumptionsFrom(
+	ctx context.Context,
+	reader client.Reader,
+	cache *assume.Cache,
+	providerKey string,
+	provider types.NamespacedName,
+	vm *infravirtrigaudiov1beta1.VirtualMachine,
+) ([]scheduler.PlacedVM, error) {
+	snap, err := committedPlacementsFrom(ctx, reader, provider, vm)
 	if err != nil {
 		return nil, err
 	}

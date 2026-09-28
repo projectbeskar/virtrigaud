@@ -93,13 +93,121 @@ func renderOwnerMetadataXML(owner contracts.ObjectIdentity) string {
 	if owner.IsZero() {
 		return ""
 	}
-	return fmt.Sprintf("  <%s>\n    <%s:%s xmlns:%s='%s' %s='%s' %s='%s' %s='%s'/>\n  </%s>\n",
-		domainXMLMetadataElement,
+	return fmt.Sprintf("  <%s>\n    %s\n  </%s>\n",
+		domainXMLMetadataElement, renderOwnerElementXML(owner), domainXMLMetadataElement)
+}
+
+// renderOwnerElementXML renders the owner stamp element itself (the child of
+// <metadata>). Every value is CR-derived and passed through xmlEscape.
+func renderOwnerElementXML(owner contracts.ObjectIdentity) string {
+	return fmt.Sprintf("<%s:%s xmlns:%s='%s' %s='%s' %s='%s' %s='%s'/>",
 		ownerMetadataPrefix, ownerMetadataElement, ownerMetadataPrefix, ownerMetadataNamespaceURI,
 		ownerAttrUID, xmlEscape(owner.UID),
 		ownerAttrNamespace, xmlEscape(owner.Namespace),
-		ownerAttrName, xmlEscape(owner.Name),
-		domainXMLMetadataElement)
+		ownerAttrName, xmlEscape(owner.Name))
+}
+
+// stampOwnerMetadata adds owner's stamp to a domain document that carries
+// none (ADR-0007 Addendum A, slice 3: a clustered clone is stamped with its
+// target VirtualMachine's identity, after the source's stamp was stripped). The
+// stamp is spliced into the existing /domain/metadata element, or a
+// <metadata> element carrying it is inserted right after the root start tag;
+// every other byte of the document is kept. The result is re-read and must
+// carry exactly one stamp, owner's — anything else is an error, and the
+// document is never used.
+func stampOwnerMetadata(domainXML string, owner contracts.ObjectIdentity) (string, error) {
+	if owner.IsZero() {
+		return "", fmt.Errorf("stamp owner metadata: the owner has no uid")
+	}
+	if existing, err := scanOwnerElements(domainXML); err != nil {
+		return "", err
+	} else if len(existing) != 0 {
+		return "", fmt.Errorf("stamp owner metadata: the domain already carries an owner stamp")
+	}
+	span, err := scanMetadataElement(domainXML)
+	if err != nil {
+		return "", err
+	}
+	elem := renderOwnerElementXML(owner)
+	var out string
+	switch {
+	case span.found && span.selfClosing:
+		out = domainXML[:span.start] + "<" + domainXMLMetadataElement + ">" + elem +
+			"</" + domainXMLMetadataElement + ">" + domainXML[span.afterStart:]
+	case span.found:
+		out = domainXML[:span.endTag] + elem + domainXML[span.endTag:]
+	default:
+		insert := span.afterRoot
+		if insert < int64(len(domainXML)) && domainXML[insert] == '\n' {
+			insert++
+		}
+		out = domainXML[:insert] + renderOwnerMetadataXML(owner) + domainXML[insert:]
+	}
+	owners, err := domainOwners(out)
+	if err != nil {
+		return "", fmt.Errorf("stamp owner metadata: re-read the stamped domain: %w", err)
+	}
+	if len(owners) != 1 || owners[0].UID != owner.UID {
+		return "", fmt.Errorf("stamp owner metadata: the stamped domain does not carry exactly the requested owner")
+	}
+	return out, nil
+}
+
+// metadataSpan locates the /domain/metadata element in a domain document.
+type metadataSpan struct {
+	// afterRoot is the byte offset just after the root <domain ...> start tag.
+	afterRoot int64
+	// found reports whether a /domain/metadata element exists.
+	found bool
+	// start and afterStart delimit its start tag; endTag is where its end
+	// tag begins (== afterStart for a self-closing <metadata/>).
+	start, afterStart, endTag int64
+	// selfClosing reports a <metadata/> element.
+	selfClosing bool
+}
+
+// scanMetadataElement tokenizes a domain document (never re-serializing it)
+// and returns the byte offsets stampOwnerMetadata splices at.
+func scanMetadataElement(domainXML string) (metadataSpan, error) {
+	dec := xml.NewDecoder(strings.NewReader(domainXML))
+	var span metadataSpan
+	depth := 0
+	inMetadata := false
+	for {
+		offset := dec.InputOffset()
+		tok, err := dec.Token()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return metadataSpan{}, fmt.Errorf("parse domain XML: %w", err)
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			depth++
+			switch {
+			case depth == 1:
+				if t.Name.Local != domainXMLRootElement {
+					return metadataSpan{}, fmt.Errorf("parse domain XML: root element is <%s>, not <%s>", t.Name.Local, domainXMLRootElement)
+				}
+				span.afterRoot = dec.InputOffset()
+			case depth == 2 && t.Name.Space == "" && t.Name.Local == domainXMLMetadataElement && !span.found:
+				span.found, inMetadata = true, true
+				span.start, span.afterStart = offset, dec.InputOffset()
+				span.selfClosing = strings.HasSuffix(domainXML[offset:span.afterStart], "/>")
+			}
+		case xml.EndElement:
+			if depth == 2 && inMetadata {
+				span.endTag = offset
+				inMetadata = false
+			}
+			depth--
+		}
+	}
+	if depth != 0 {
+		return metadataSpan{}, fmt.Errorf("parse domain XML: unexpected end of document")
+	}
+	return span, nil
 }
 
 // ownerElement is one VirtRigaud owner stamp found in a domain document, with

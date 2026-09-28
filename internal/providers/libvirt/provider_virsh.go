@@ -27,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -1701,7 +1702,14 @@ func (p *Provider) describeOn(ctx context.Context, c libvirtConn, id string) (co
 }
 
 // IsTaskComplete checks if a task is complete (virsh operations are usually synchronous)
+//
+// On a clustered provider the reference must be host-encoded by this provider
+// and is routed to that host (routedTaskComplete, ADR-0007 Addendum A, slice
+// 3); the single-host answer is unchanged.
 func (p *Provider) IsTaskComplete(ctx context.Context, taskRef string) (done bool, err error) {
+	if p.clustered() {
+		return p.routedTaskComplete(ctx, taskRef)
+	}
 	// Most virsh operations are synchronous, so tasks are immediately complete
 	return true, nil
 }
@@ -2434,7 +2442,17 @@ func (p *Provider) SnapshotRevert(ctx context.Context, vm contracts.VMRef, snaps
 }
 
 // TaskStatus returns the status of a task (libvirt operations are mostly synchronous)
+//
+// On a clustered provider the reference is routed exactly as for
+// IsTaskComplete; the single-host answer is unchanged.
 func (p *Provider) TaskStatus(ctx context.Context, taskRef string) (contracts.TaskStatus, error) {
+	if p.clustered() {
+		done, err := p.routedTaskComplete(ctx, taskRef)
+		if err != nil {
+			return contracts.TaskStatus{}, err
+		}
+		return contracts.TaskStatus{IsCompleted: done, Message: "Task completed"}, nil
+	}
 	// LibVirt operations are synchronous, so if we have a taskRef, it's completed
 	return contracts.TaskStatus{
 		IsCompleted: true,
@@ -2444,26 +2462,63 @@ func (p *Provider) TaskStatus(ctx context.Context, taskRef string) (contracts.Ta
 }
 
 // GetDiskInfo retrieves detailed information about a VM's disk
+//
+// Topology dispatch (ADR-0007 Addendum A, slice 3): a single-host provider
+// reads on p.virshProvider exactly as before (req.VM.HostID and req.VM.Owner
+// are ignored); a clustered one leases req.VM.HostID's connection, checks the
+// domain's owner stamp against req.VM.Owner, and runs the same core there on
+// the checked domain (a domain this VM does not own is NotFound, and none of
+// its disks is read).
 func (p *Provider) GetDiskInfo(ctx context.Context, req contracts.GetDiskInfoRequest) (contracts.GetDiskInfoResponse, error) {
 	log.Printf("INFO Getting disk info for VM: %s", req.VM.ID)
+
+	if p.clustered() {
+		var resp contracts.GetDiskInfoResponse
+		err := p.withOwnedDomain(ctx, req.VM, "disk info", func(c libvirtConn, d domainTarget) error {
+			vp, err := virshOf(c)
+			if err != nil {
+				return err
+			}
+			resp, err = diskInfoOn(ctx, vp, d, req)
+			return err
+		})
+		return resp, err
+	}
 
 	if p.virshProvider == nil {
 		return contracts.GetDiskInfoResponse{}, contracts.NewRetryableError("virsh provider not initialized", nil)
 	}
+	return diskInfoOn(ctx, p.virshProvider, byName(req.VM.ID), req)
+}
 
-	storageProvider := NewStorageProvider(p.virshProvider)
+// diskInfoOn is the GetDiskInfo core, run on vp's host against domain d — the
+// single host and the requested name (byName), or a clustered host's leased
+// connection and the owner-checked domain's UUID. The virsh / host command
+// sequence is the historical one, unchanged, except that on the owner-checked
+// clustered target the primary disk's format is not looked up by volume name
+// (resolveDomainDisksOn) and an explicit disk path must be one of the domain's
+// own disks.
+func diskInfoOn(ctx context.Context, vp *VirshProvider, d domainTarget, req contracts.GetDiskInfoRequest) (contracts.GetDiskInfoResponse, error) {
+	storageProvider := NewStorageProvider(vp)
 
 	// Resolve the primary disk path + format from the LIVE domain topology
-	// (domblklist via getDomainDiskPaths), NOT the fragile "<vmid>-disk" volume
+	// (domainDiskPaths), NOT the fragile "<vmid>-disk" volume
 	// guess — that guess only holds for VirtRigaud-created volumes and fails for
 	// adopted/externally-created VMs (Bug G; same class as the clone #207 fix).
 	// resolvePrimaryDisk also skips cloud-init/CDROM devices.
-	diskPath, format, err := p.resolvePrimaryDisk(ctx, req.VM.ID, storageProvider)
+	diskPaths, format, err := resolveDomainDisksOn(ctx, vp, d, storageProvider)
 	if err != nil {
 		return contracts.GetDiskInfoResponse{}, fmt.Errorf("failed to resolve primary disk: %w", err)
 	}
+	diskPath := diskPaths[0]
 	// An explicit disk path (DiskId carrying a path) overrides the primary.
 	if req.DiskId != "" && strings.Contains(req.DiskId, "/") {
+		// On a clustered host the path must be a disk of the owner-checked
+		// domain: any other file on the host is never read (or exported).
+		if d.diskByPath && !slices.Contains(diskPaths, req.DiskId) {
+			return contracts.GetDiskInfoResponse{}, contracts.NewInvalidSpecError(
+				fmt.Sprintf("disk %q is not a disk of VM %q", req.DiskId, d.name), nil)
+		}
 		diskPath = req.DiskId
 	}
 
@@ -2471,7 +2526,7 @@ func (p *Provider) GetDiskInfo(ctx context.Context, req contracts.GetDiskInfoReq
 	// via qemu-img — read-only with -U so a still-running source's write lock is
 	// ignored. Best-effort: sizes default to 0 (status-only) if it fails.
 	var virtualSize, actualSize int64
-	if res, qerr := p.virshProvider.runVirshCommand(ctx, "!", "qemu-img", "info", "-U", "--output=json", diskPath); qerr == nil {
+	if res, qerr := vp.runVirshCommand(ctx, "!", "qemu-img", "info", "-U", "--output=json", diskPath); qerr == nil {
 		var qi struct {
 			VirtualSize int64  `json:"virtual-size"`
 			ActualSize  int64  `json:"actual-size"`
@@ -2490,7 +2545,7 @@ func (p *Provider) GetDiskInfo(ctx context.Context, req contracts.GetDiskInfoReq
 	}
 
 	// Get snapshots for this domain
-	snapshots, err := p.virshProvider.listSnapshots(ctx, req.VM.ID)
+	snapshots, err := vp.listSnapshots(ctx, d.handle)
 	if err != nil {
 		log.Printf("WARN Failed to list snapshots: %v", err)
 		snapshots = []string{}
@@ -2517,8 +2572,18 @@ func (p *Provider) GetDiskInfo(ctx context.Context, req contracts.GetDiskInfoReq
 }
 
 // ExportDisk exports a VM disk for migration
+//
+// This is the pvc export: the disk is read and uploaded from the provider pod.
+// A clustered provider's disks live on its hosts, so it never serves it; its
+// s3 and nfs exports run on the host (exportDiskRouted, ADR-0007 Addendum A,
+// slice 3).
 func (p *Provider) ExportDisk(ctx context.Context, req contracts.ExportDiskRequest) (contracts.ExportDiskResponse, error) {
 	log.Printf("INFO Exporting disk for VM: %s to %s", req.VM.ID, req.DestinationURL)
+
+	if p.clustered() {
+		return contracts.ExportDiskResponse{}, contracts.NewNotSupportedError(
+			"pvc disk export is not supported on a clustered libvirt provider; use the s3 or nfs backend")
+	}
 
 	if p.virshProvider == nil {
 		return contracts.ExportDiskResponse{}, contracts.NewRetryableError("virsh provider not initialized", nil)

@@ -20,6 +20,7 @@ import (
 	"context"
 	stderrors "errors"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -43,18 +44,19 @@ import (
 //     read and the shadow read all hit that one host,
 //  3. release the lease.
 //
-// Slice 1 routes Describe and Delete; slice 2 routes Power and Reconfigure.
-// Every routed call except Create checks the domain's owner stamp before it
-// reads or changes anything. The other per-VM RPCs are refused with an honest
-// Unimplemented until their slice lands (see notRoutedYet), and the clustered
-// GetCapabilities hides them.
+// Slice 1 routes Describe and Delete; slice 2 routes Power and Reconfigure;
+// slice 3 routes the snapshot family, Clone, GetDiskInfo and ExportDisk (s3 and
+// nfs), and host-encodes task references so TaskStatus is routed too
+// (routed_tasks.go). Every routed call except Create checks the domain's owner
+// stamp before it reads or changes anything (withOwnedDomain). ImportDisk and
+// ListVMs are refused with an honest Unimplemented until their slice lands
+// (see notRoutedYet), and the clustered GetCapabilities hides them.
 
 // The ADR-0007 delivery step (Addendum A, A5 slice, or main-ADR phase) that
 // routes each RPC a clustered provider refuses today. They only appear in the
 // refusal message.
 const (
-	sliceRoutedSnapshotCloneDisk = "Addendum A slice 3"
-	sliceRoutedListVMs           = "Addendum A slice 4"
+	sliceRoutedListVMs = "Addendum A slice 4"
 	// sliceRoutedImport: import is not per-VM; routing it into a clustered
 	// provider needs a target-host design (phase P3).
 	sliceRoutedImport = "phase P3"
@@ -104,6 +106,27 @@ func (p *Provider) withHostConn(ctx context.Context, hostID string, fn func(libv
 		return &hostOpError{host: hostconn.HostID(id), err: err}
 	}
 	return nil
+}
+
+// withOwnedDomain is the routing + ownership gate of a routed per-VM call
+// after Create (ADR-0007 Addendum A, slices 2 and 3): it leases vm.HostID's
+// connection (withHostConn), checks the owner stamp of domain vm.ID against
+// vm.Owner BEFORE anything else is read or changed (ownedDomainTarget, which
+// fails closed and answers NotFound for a domain this VM does not own), and
+// runs fn with the leased connection and the checked domain, addressed by its
+// UUID. op names the call for the refusal message and the operator log.
+func (p *Provider) withOwnedDomain(ctx context.Context, vm contracts.VMRef, op string, fn func(c libvirtConn, d domainTarget) error) error {
+	return p.withHostConn(ctx, vm.HostID, func(c libvirtConn) error {
+		vp, err := virshOf(c)
+		if err != nil {
+			return err
+		}
+		d, err := ownedDomainTarget(ctx, vp, c.HostID(), vm.ID, vm.Owner, op)
+		if err != nil {
+			return err
+		}
+		return fn(c, d)
+	})
 }
 
 // hostOpError marks an error as having arisen while a routed call ran on a
@@ -246,12 +269,24 @@ func notRoutedYet(rpc, routedIn string) error {
 			"topology: cluster is experimental", rpc, routedIn)
 }
 
+// Routed wire errors are SANITIZED (security review of slice 3): they land in
+// VirtualMachine, VMSnapshot, VMClone and VMMigration conditions and events,
+// readable by tenants, so they carry only a categorized message — the
+// operation and the host id — never a cause's text (an SSH dial address,
+// virsh or qemu-img stderr, a host path). The cause is logged by the provider,
+// for the operator. The single-host path never goes through these and keeps
+// its historical errors.
+
 // hostUnavailableStatus renders a host-scoped unavailability as
 // codes.Unavailable carrying a google.rpc.ErrorInfo{Reason: HOST_UNAVAILABLE},
 // which the manager maps to contracts.ErrorTypeHostUnavailable and keeps out of
-// its circuit breaker. The message names the host only (never credentials).
+// its circuit breaker. Only pe.Message (which names the host id) crosses the
+// wire; the cause is logged.
 func hostUnavailableStatus(pe *contracts.ProviderError) error {
-	st := status.New(codes.Unavailable, pe.Error())
+	if pe.Cause != nil {
+		log.Printf("WARN %s: %v", pe.Message, pe.Cause)
+	}
+	st := status.New(codes.Unavailable, pe.Message)
 	withInfo, err := st.WithDetails(&errdetails.ErrorInfo{
 		Reason: contracts.HostUnavailableReason,
 		Domain: contracts.HostUnavailableErrorDomain,
@@ -264,13 +299,14 @@ func hostUnavailableStatus(pe *contracts.ProviderError) error {
 	return withInfo.Err()
 }
 
-// vmOperationFailedStatus renders a failed per-VM operation that reached its
-// host as codes.Unknown with message msg — exactly the code and message the
-// historical wrapped error produced — plus a google.rpc.ErrorInfo{Reason:
-// VM_OPERATION_FAILED}, which the manager keeps out of its circuit breaker
-// (ADR-0007 Addendum A, slice 2).
-func vmOperationFailedStatus(msg string) error {
-	st := status.New(codes.Unknown, msg)
+// vmOperationStatus renders a failed per-VM operation that reached its host as
+// code (codes.Unknown for a failure, codes.Unavailable for one the caller
+// should retry, e.g. the same copy still running) with the categorized message
+// msg, plus a google.rpc.ErrorInfo{Reason: VM_OPERATION_FAILED}, which the
+// manager keeps out of its circuit breaker whatever the code (ADR-0007
+// Addendum A, slice 2).
+func vmOperationStatus(code codes.Code, msg string) error {
+	st := status.New(code, msg)
 	withInfo, err := st.WithDetails(&errdetails.ErrorInfo{
 		Reason: contracts.VMOperationFailedReason,
 		Domain: contracts.ErrorInfoDomain,
@@ -281,18 +317,44 @@ func vmOperationFailedStatus(msg string) error {
 	return withInfo.Err()
 }
 
+// routedOpError is a failure of a routed operation that carries its own
+// categorized, tenant-safe wire message and code: a time budget that ran out,
+// a copy of the same disk already running, a host tool missing
+// (routed_budget.go). routedRPCError puts wire (never the cause) on the wire.
+type routedOpError struct {
+	// code is the wire code: codes.Unknown (the operation failed) or
+	// codes.Unavailable (retry: the same operation is still in progress).
+	code codes.Code
+	// wire is the categorized message sent to the manager.
+	wire string
+	// cause is logged, never sent.
+	cause error
+}
+
+// Error returns the wire message and the cause, for the provider's log.
+func (e *routedOpError) Error() string {
+	if e.cause != nil {
+		return e.wire + ": " + e.cause.Error()
+	}
+	return e.wire
+}
+
+// Unwrap exposes the cause.
+func (e *routedOpError) Unwrap() error { return e.cause }
+
 // hostOpRPCError is the wire form of an error that arose on a leased host
 // (hostOpError) and is not one of the categorized classes: a host that could
 // not be reached is a host-scoped Unavailable (HOST_UNAVAILABLE); anything
 // else is a failure of the operation on that one VM (VM_OPERATION_FAILED,
-// historical code and message). Neither counts toward the manager's
-// per-Provider circuit breaker.
+// codes.Unknown). Neither counts toward the manager's per-Provider circuit
+// breaker. Only "<op> ... host <id>" crosses the wire; the error is logged.
 func hostOpRPCError(op string, ho *hostOpError, err error) error {
+	log.Printf("WARN %s on host %s failed: %v", op, ho.host, err)
 	if isHostTransportFailure(err) {
 		return hostUnavailableStatus(contracts.NewHostUnavailableError(
-			fmt.Sprintf("%s: host %q is unreachable", op, ho.host), err))
+			fmt.Sprintf("%s: host %q is unreachable", op, ho.host), nil))
 	}
-	return vmOperationFailedStatus(fmt.Sprintf("failed to %s: %v", op, err))
+	return vmOperationStatus(codes.Unknown, fmt.Sprintf("failed to %s on host %q", op, ho.host))
 }
 
 // routedRPCError converts an error from a ROUTED call on a clustered provider
@@ -302,17 +364,23 @@ func hostOpRPCError(op string, ho *hostOpError, err error) error {
 //     operation);
 //   - HostUnavailable -> Unavailable with a HOST_UNAVAILABLE ErrorInfo (an
 //     unknown, draining or unreachable host; retryable, host-scoped);
-//   - NotFound -> NotFound (a delete, power operation or reconfigure of a
-//     domain this VM does not own, reported as absent and never touched);
+//   - NotFound -> NotFound (a delete, power operation, reconfigure, snapshot,
+//     clone, export or disk read of a domain this VM does not own, reported as
+//     absent and never touched; a task reference naming a host this provider
+//     does not front);
+//   - Conflict -> AlreadyExists (a clone whose target domain name is taken on
+//     the host by a domain the target VirtualMachine does not own);
+//   - a routedOpError (a time budget that ran out, the same copy in progress,
+//     a host tool missing) -> its own code and categorized message with a
+//     VM_OPERATION_FAILED ErrorInfo;
 //   - any other failure that arose on the leased host (hostOpError): a host
 //     that could not be reached (isHostTransportFailure) is HOST_UNAVAILABLE,
-//     and anything else is VM_OPERATION_FAILED with the historical code and
-//     message. Neither is counted by the manager's circuit breaker, so neither
-//     a dead host nor one tenant's failing VM can open it for the whole
-//     Provider;
+//     and anything else is VM_OPERATION_FAILED (codes.Unknown). Neither is
+//     counted by the manager's circuit breaker, so neither a dead host nor one
+//     tenant's failing VM can open it for the whole Provider;
 //   - a provider-level Unavailable (the provider itself is not ready, e.g. its
 //     host registry is not initialized) -> a plain Unavailable, which the
-//     breaker DOES count; anything else keeps the historical wrapped form.
+//     breaker DOES count; anything else is a plain "failed to <op>".
 //
 // A refusal by the disk dependency guard (diskDependentsError: another domain
 // on the host uses this VM's disk, e.g. its linked clone) is FailedPrecondition
@@ -320,10 +388,11 @@ func hostOpRPCError(op string, ho *hostOpError, err error) error {
 // that the manager maps to a Conflict and never counts toward its breaker. A
 // guard that could not run (diskCheckFailedError) is Unavailable with the
 // VM_DISK_CHECK_FAILED and VM_OPERATION_FAILED ErrorInfos: retried, not
-// counted.
+// counted. A guard that could not reach the host (guardHostUnreachableError)
+// is a host failure like any other: HOST_UNAVAILABLE (hostOpRPCError).
 //
-// Only the categorized message crosses the wire. It is never used on the
-// single-host path, whose wire errors are unchanged.
+// Only the categorized message crosses the wire; causes are logged. It is
+// never used on the single-host path, whose wire errors are unchanged.
 func routedRPCError(op string, err error) error {
 	var de *diskDependentsError
 	if stderrors.As(err, &de) {
@@ -332,6 +401,11 @@ func routedRPCError(op string, err error) error {
 	var dc *diskCheckFailedError
 	if stderrors.As(err, &dc) {
 		return diskCheckFailedStatus(fmt.Sprintf("failed to %s: %v", op, dc), true).Err()
+	}
+	var roe *routedOpError
+	if stderrors.As(err, &roe) {
+		log.Printf("WARN %s failed: %v", op, err)
+		return vmOperationStatus(roe.code, roe.wire)
 	}
 	var pe *contracts.ProviderError
 	if stderrors.As(err, &pe) {
@@ -342,14 +416,17 @@ func routedRPCError(op string, err error) error {
 			return hostUnavailableStatus(pe)
 		case contracts.ErrorTypeNotFound:
 			return status.Error(codes.NotFound, pe.Message)
+		case contracts.ErrorTypeConflict:
+			return status.Error(codes.AlreadyExists, pe.Message)
 		}
 	}
 	var ho *hostOpError
 	if stderrors.As(err, &ho) {
 		return hostOpRPCError(op, ho, err)
 	}
+	log.Printf("WARN %s failed: %v", op, err)
 	if pe != nil && pe.Type == contracts.ErrorTypeUnavailable {
 		return status.Error(codes.Unavailable, pe.Message)
 	}
-	return fmt.Errorf("failed to %s: %w", op, err)
+	return status.Errorf(codes.Unknown, "failed to %s", op)
 }

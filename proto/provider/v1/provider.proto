@@ -254,7 +254,16 @@ message DescribeResponse {
   int32 vcpus = 7;
 }
 
-// Check async task status
+// Check async task status.
+//
+// TaskStatus is not per-VM, so it carries no target_host_id. A clustered
+// ("brain-in-operator") provider therefore encodes the host into every task
+// reference a routed call returns, and routes TaskStatus by it (ADR-0007
+// Addendum A, A1, slice 3); the reference stays opaque to the operator. A
+// clustered provider refuses a reference it did not issue: one that is not
+// host-encoded, or that names a host not in its own host registry, is
+// rejected and never dialed. Single-host and thin-client providers' task
+// references are unchanged.
 message TaskStatusRequest {
   TaskRef task = 1;
 }
@@ -280,6 +289,27 @@ message SnapshotCreateRequest {
   // InvalidArgument rather than defaulting to some host (honesty-first, D9). The
   // provider never looks a VM's host up by itself (D1).
   string target_host_id = 5;
+
+  // owner identifies the Kubernetes object (the VirtualMachine) this snapshot
+  // is taken for — the identity CreateRequest.owner stamps onto the VM
+  // (ADR-0007 Addendum A, slice 3). AGNOSTIC. Additive and backward-compatible:
+  // single-host and thin-client providers ignore it, and the operator sends it
+  // only with a target_host_id. A clustered provider snapshots a VM ONLY when
+  // its recorded owner uid equals this uid; a VM whose stamp is missing,
+  // unreadable or records a different owner is reported NOT_FOUND and is never
+  // snapshotted.
+  ObjectIdentity owner = 6;
+
+  // request_token identifies the request object this snapshot is created for
+  // (the VMSnapshot's uid), so a retry of the SAME request can find the
+  // snapshot an earlier attempt made instead of making a second one, and a
+  // snapshot of the same name left by ANOTHER request (an earlier VMSnapshot
+  // of that name) is never taken for it. AGNOSTIC. Additive and
+  // backward-compatible: providers that do not retry snapshots by name ignore
+  // it. A clustered libvirt provider records it with the snapshot it creates
+  // and treats an existing snapshot of the requested name as this request's
+  // only when it records the same token; any other is ALREADY_EXISTS.
+  string request_token = 7;
 }
 
 message SnapshotCreateResponse {
@@ -300,6 +330,13 @@ message SnapshotDeleteRequest {
   // InvalidArgument rather than defaulting to some host (honesty-first, D9). The
   // provider never looks a VM's host up by itself (D1).
   string target_host_id = 3;
+
+  // owner identifies the VirtualMachine the snapshot belongs to (ADR-0007
+  // Addendum A, slice 3), exactly as SnapshotCreateRequest.owner. A clustered
+  // provider deletes a snapshot ONLY of a VM whose recorded owner uid equals
+  // this uid; any other VM is reported NOT_FOUND and none of its snapshots is
+  // touched.
+  ObjectIdentity owner = 4;
 }
 
 message SnapshotRevertRequest {
@@ -315,6 +352,12 @@ message SnapshotRevertRequest {
   // InvalidArgument rather than defaulting to some host (honesty-first, D9). The
   // provider never looks a VM's host up by itself (D1).
   string target_host_id = 3;
+
+  // owner identifies the VirtualMachine being reverted (ADR-0007 Addendum A,
+  // slice 3), exactly as SnapshotCreateRequest.owner. A clustered provider
+  // reverts a VM ONLY when its recorded owner uid equals this uid; any other VM
+  // is reported NOT_FOUND and is never reverted.
+  ObjectIdentity owner = 4;
 }
 
 // Clone operations
@@ -348,8 +391,30 @@ message CloneRequest {
   // "<namespace>.<name>", the same rule as Create) and returns that name as
   // target_vm_id, which the operator records as the VM's status.id. Additive
   // and backward-compatible: other providers ignore it, and an unset value
-  // keeps the legacy target_name naming.
+  // keeps the legacy target_name naming. A clustered provider requires it with
+  // the target VirtualMachine's uid (the operator creates that VirtualMachine
+  // before the clone on a clustered provider) and stamps the clone with it.
   ObjectIdentity target_vm = 8;
+
+  // target_host_id names the host where the clone LANDS on a clustered
+  // ("brain-in-operator") provider (ADR-0007 Addendum A, A1, slice 3): the
+  // target VirtualMachine's status.placement.pendingHost, recorded before the
+  // clone is sent. AGNOSTIC. Additive and backward-compatible: single-host and
+  // thin-client providers ignore it, and the operator never sends it to them.
+  // In v1 a clustered provider REQUIRES it to equal source_host_id (disks are
+  // host-local and a linked clone depends on its source disk) and rejects an
+  // empty or different value with InvalidArgument; it never lands a clone on a
+  // host it chose itself.
+  string target_host_id = 9;
+
+  // source_owner identifies the VirtualMachine being cloned — the identity
+  // CreateRequest.owner stamps onto the source VM (ADR-0007 Addendum A, slice
+  // 3). AGNOSTIC. Additive and backward-compatible: single-host and thin-client
+  // providers ignore it, and the operator sends it only with a source_host_id.
+  // A clustered provider reads (and copies the disk of) a source VM ONLY when
+  // its recorded owner uid equals this uid; any other VM is reported NOT_FOUND
+  // and none of its disks or definition is read.
+  ObjectIdentity source_owner = 10;
 }
 
 message CloneResponse {
@@ -501,6 +566,12 @@ message ExportDiskRequest {
   // InvalidArgument rather than defaulting to some host (honesty-first, D9). The
   // provider never looks a VM's host up by itself (D1).
   string target_host_id = 11;
+
+  // owner identifies the VirtualMachine whose disk is exported (ADR-0007
+  // Addendum A, slice 3), exactly as SnapshotCreateRequest.owner. A clustered
+  // provider exports a disk ONLY of a VM whose recorded owner uid equals this
+  // uid; any other VM is reported NOT_FOUND and none of its disks is read.
+  ObjectIdentity owner = 12;
 }
 
 message ExportDiskResponse {
@@ -561,6 +632,12 @@ message GetDiskInfoRequest {
   // InvalidArgument rather than defaulting to some host (honesty-first, D9). The
   // provider never looks a VM's host up by itself (D1).
   string target_host_id = 4;
+
+  // owner identifies the VirtualMachine whose disk is described (ADR-0007
+  // Addendum A, slice 3), exactly as SnapshotCreateRequest.owner. A clustered
+  // provider describes a disk ONLY of a VM whose recorded owner uid equals
+  // this uid; any other VM is reported NOT_FOUND and none of its disks is read.
+  ObjectIdentity owner = 5;
 }
 
 message GetDiskInfoResponse {
@@ -693,12 +770,20 @@ message GetCapabilitiesResponse {
   // does not advertise it (its committed-capacity accounting trusts the
   // result); single-host Providers are resized as before.
   bool supports_honest_reconfigure = 19;
+  // supports_routed_clone reports that a clustered ("brain-in-operator")
+  // provider routes Clone to the source VM's bound host (ADR-0007 Addendum A,
+  // slice 3): it honours source_host_id, target_host_id and source_owner and
+  // stamps the clone with target_vm's uid. The manager checks it BEFORE it
+  // creates a clustered clone's target VirtualMachine. False on single-host and
+  // thin-client providers, which do not route clones (their Clone is
+  // unaffected), and on a clustered provider older than slice 3.
+  bool supports_routed_clone = 20;
 }
 
 // ObjectIdentity names a Kubernetes object on the wire (CreateRequest.owner,
-// DeleteRequest.owner, DescribeRequest.owner, CloneRequest.target_vm,
-// ImportDiskRequest.target_vm, ImagePrepareRequest.image and .provider,
-// PreparedArtifact.image).
+// the owner of the routed per-VM requests, CloneRequest.target_vm and
+// .source_owner, ImportDiskRequest.target_vm, ImagePrepareRequest.image and
+// .provider, PreparedArtifact.image).
 // uid is the authoritative identity (unique for the object's whole lifetime,
 // never reused after deletion); namespace and name are informational (audit,
 // operator diagnostics, and naming the hypervisor-side object — e.g. the

@@ -107,6 +107,12 @@ type Provider struct {
 	// host selection and lease release without a live libvirtd.
 	createOnHostFn func(ctx context.Context, lease hostconn.Conn, req contracts.CreateRequest) (contracts.CreateResponse, error)
 
+	// hostDiskTransportFn checks that a clustered host's leased connection can
+	// run a host-side disk export (s3 / nfs: the host's qemu-img plus an SSH
+	// stream). nil means requireSSHDiskTransport. It is a struct field so tests
+	// can drive the routed export over local per-host fakes.
+	hostDiskTransportFn func(c libvirtConn) error
+
 	// shadowWG tracks in-flight detached shadow goroutines so tests (and a future
 	// graceful shutdown) can drain them; each is independently time-bounded.
 	shadowWG sync.WaitGroup
@@ -129,6 +135,11 @@ type Provider struct {
 	// depended on the domain's disk at its last start, for Describe
 	// (linked_clone_warning.go).
 	linkedDeps linkedCloneDependents
+	// unsafeDirChecked records the "<host>\x00<directory>" pairs whose mode a
+	// routed call already checked (warnIfUnsafeDir), so the WARN about a
+	// world-writable directory without the sticky bit is logged once per host
+	// and directory.
+	unsafeDirChecked sync.Map
 }
 
 // imagePolicy returns the provider's image-path confinement policy (see
