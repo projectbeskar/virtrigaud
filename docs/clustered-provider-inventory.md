@@ -1627,9 +1627,21 @@ now checks every host of the Provider:
   clustered create from a host-path image scans every host, and waits while
   any host of the Provider is unreachable** (creates from a URL or a template
   do not). On a clustered Provider the confinement also answers a missing
-  file, a VirtRigaud-managed file name, a file that is not a regular file and
-  a file in use with the **same** "not allowed" message, so a tenant's VMImage
-  path cannot probe the hosts' storage (single-host answers are unchanged).
+  file, a VirtRigaud-managed file name, a file that is not a regular file, a
+  file in use and an image header it may not have (a backing file, say) with
+  the **same** "not allowed" message, so a refused VMImage path tells a
+  tenant much less about the hosts' storage (single-host answers are
+  unchanged). That is not a guarantee: a path that is **accepted** still
+  shows that a usable image is there — and copies it into the tenant's VM.
+- **Keep the image catalog apart from a shared pool.** An image directory
+  (`VIRTRIGAUD_LIBVIRT_IMAGE_DIRS`, default `/var/lib/libvirt/images`) is
+  where any tenant of the Provider may name a base image, and the default
+  equals the default storage pool's directory. On a clustered Provider with a
+  shared pool, **set `VIRTRIGAUD_LIBVIRT_IMAGE_DIRS` to a catalog directory
+  separate from the pool**: otherwise every file in the pool that no domain
+  uses and that is not a VirtRigaud-managed name (a detached disk, a copy an
+  administrator left there) can be copied into their VM by any tenant of the
+  Provider.
 - **Delete.** After the host-local checks and **before** anything is
   destroyed, undefined or removed, every **other** host is scanned for a
   domain that uses one of the files the delete would remove. This runs on

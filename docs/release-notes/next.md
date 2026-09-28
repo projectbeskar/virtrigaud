@@ -109,8 +109,13 @@ providers), and rollback caveats in
 - libvirt, clustered Providers: a `VMImage` whose host path is another VM's
   live disk on **any** host of the Provider is refused (it used to be checked
   on the landing host only), and fails closed while a host cannot be checked;
-  a refused image path answers the same whether it does not exist or is not
-  allowed, so a tenant cannot probe a host's files. Clustered disk writes,
+  a refused image path answers the same whether it does not exist, is not
+  allowed, is in use or has a header it may not have, which narrows what a
+  tenant learns about the hosts' files (an accepted path still shows an image
+  is there). **With a shared pool, set `VIRTRIGAUD_LIBVIRT_IMAGE_DIRS` to a
+  catalog directory apart from the pool**: the default image directory is
+  the default pool's, and any unused, non-reserved file in it is copyable by
+  any tenant of the Provider. Clustered disk writes,
   domain defines and deletes of one domain name are serialized inside the
   provider (→ [`docs/clustered-provider-inventory.md`](docs/clustered-provider-inventory.md#shared-storage-the-cluster-wide-disk-guard-a61)).
 - The manager's webhook and metrics servers pin an explicit TLS 1.2 floor.

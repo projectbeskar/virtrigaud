@@ -456,6 +456,26 @@ func TestClusteredCreate_BaseImageIsCheckedOnEveryHost(t *testing.T) {
 		c := newCreateHost(t)
 		_, err := c.p.Create(context.Background(), c.createReq(ownerTeamA, filepath.Join(c.images, "nope.qcow2")))
 		assert.Contains(t, err.Error(), "it does not exist on the libvirt host", "unchanged on a single host")
+		backed := c.file(c.images, "backed.qcow2")
+		c.info(backed, `{"format":"qcow2","backing-filename":"/etc/shadow","backing-filename-format":"raw"}`)
+		_, err = c.p.Create(context.Background(), c.createReq(ownerTeamA, backed))
+		assert.Contains(t, err.Error(), "backing file", "a header refusal keeps its detail on a single host")
+	})
+	// A6.1 fix verification, N4: a header refusal (here a backing file) is the
+	// same "not allowed" answer on a clustered Provider.
+	t.Run("a header refusal is the same answer", func(t *testing.T) {
+		s := newSharedPool(t)
+		backed := s.file(s.images, "backed.qcow2")
+		s.info(backed, `{"format":"qcow2","backing-filename":"/etc/shadow","backing-filename-format":"raw"}`)
+		req := s.createReq(ownerTeamA, backed)
+		req.TargetHostID = "host-b"
+		_, err := s.p.Create(context.Background(), req)
+		st, _ := status.FromError(createRPCError(err))
+		assert.Equal(t, codes.InvalidArgument, st.Code(), "%v", err)
+		assert.Contains(t, st.Message(), notAllowed)
+		assert.NotContains(t, st.Message(), "backing")
+		assert.NotContains(t, st.Message(), "/etc/shadow")
+		assert.NotContains(t, s.log("qemu-img"), "convert", "nothing was copied")
 	})
 }
 

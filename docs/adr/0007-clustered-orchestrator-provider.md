@@ -1812,9 +1812,16 @@ runbook or remove it. There is no opt-in in v0.4.0. A6.2 must also set the
 >   disk names are checked, so a previous incarnation still answers first.
 >   Every clustered create from a host-path image therefore scans every host
 >   and waits while any host is unreachable. The clustered confinement answers
->   a missing file, a reserved name, a non-regular file and a file in use with
->   the same "not allowed" message, and the rejection stays InvalidArgument on
->   the wire (it used to reach the manager as VM_OPERATION_FAILED).
+>   a missing file, a reserved name, a non-regular file, a file in use and a
+>   refused image header (fix verification, N4) with the same "not allowed"
+>   message, and the rejection stays InvalidArgument on the wire (it used to
+>   reach the manager as VM_OPERATION_FAILED). This narrows what a refused
+>   path discloses; it does not hide the pool: an accepted path shows a
+>   usable image is there and copies it. So a clustered Provider with a shared
+>   pool should set `VIRTRIGAUD_LIBVIRT_IMAGE_DIRS` to a catalog directory
+>   apart from the pool (the default image directory is the default pool's):
+>   otherwise any unused, non-reserved file in the pool is copyable by any
+>   tenant of the Provider.
 > - **The VM's own domain elsewhere** *(security review of A6.1)*: a domain
 >   stamped with the requester's namespace, name and OWN UID found by the scan
 >   is counted apart from previous incarnations (ErrorInfo metadata

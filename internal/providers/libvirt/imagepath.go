@@ -198,8 +198,13 @@ type imagePathRequest struct {
 	// single host does not need (ADR-0007 A6.1 security review):
 	//   - Uniform: every refusal that depends on whether a file exists or
 	//     what it is — missing, a reserved (VirtRigaud-managed) name, not a
-	//     regular file, in use by a domain — is the same "not allowed"
-	//     answer, so a tenant's VMImage path cannot probe the hosts' storage;
+	//     regular file, in use by a domain, a header it may not have — is the
+	//     same "not allowed" answer, so a refused VMImage path tells a tenant
+	//     much less about the hosts' storage. It is not a guarantee: a path
+	//     that is ACCEPTED still shows that a usable image is there (and is
+	//     copied into the tenant's VM), so an allowed image directory must not
+	//     be one the tenant should not read (see EnvImageDirs, and keep it
+	//     apart from a shared storage pool);
 	//   - UsedElsewhere, when non-nil, is asked about a base image (never an
 	//     imported disk attached in place, which the create's disk guard
 	//     checks) after the host-local in-use check: whether a domain on ANY
@@ -566,6 +571,13 @@ func (pol imagePathPolicy) confine(ctx context.Context, h hostCommandRunner, req
 	}
 	format, err := inspectHostImage(ctx, h, imagePathSubject(req.Path), canonical)
 	if err != nil {
+		// A header the image may not have (a backing file, an external data
+		// file, an unsupported format) says what the file is: on a clustered
+		// Provider it is the same "not allowed" answer too.
+		if req.Clustered && isInvalidArgument(err) {
+			log.Printf("WARN rejected libvirt image path %q: %v", req.Path, err)
+			return confinedImage{}, notAllowed
+		}
 		return confinedImage{}, err
 	}
 	return confinedImage{Path: canonical, Format: format, AdoptInPlace: adopt}, nil

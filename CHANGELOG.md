@@ -28,7 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `internal/providers/libvirt/server.go`: a clustered image refused as `InvalidArgument` is returned as such, not as `VM_OPERATION_FAILED`.
 
 ### Security
-- `internal/providers/libvirt/imagepath.go`, `provider_virsh.go`: on a clustered Provider a host-path base image is refused while a domain on **any** host of the Provider uses it (it was checked on the landing host only), failing closed while a host cannot be checked; "does not exist" and "not allowed" answer the same, so a tenant cannot probe the hosts' files. Single-host behaviour is unchanged.
+- `internal/providers/libvirt/imagepath.go`, `provider_virsh.go`: on a clustered Provider a host-path base image is refused while a domain on **any** host of the Provider uses it (it was checked on the landing host only), failing closed while a host cannot be checked; "does not exist" and "not allowed" answer the same, which narrows what a refused path tells a tenant about the hosts' files (an accepted path still shows an image is there). Single-host behaviour is unchanged.
 - A Host the operator cannot route to can no longer make the guard skip it and delete a disk that host's domains still use.
 - The scan's cost is bounded (concurrency, short-circuit, unreachable memo, manager backoff) so a dead host or many held VMs cannot turn every reconcile into a scan of every host.
 
