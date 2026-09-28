@@ -1068,9 +1068,12 @@ slice 4 is implemented (see the slice 4 amendment below); slice 5 is open.
 >   listed on more than one host, or a disk path a VM on another host uses (a
 >   stale brownfield definition on a shared pool) — is skipped and reported
 >   too: adopting both copies would let one's delete remove the other's disk.
->   A duplicate on an unreachable host is not seen; and a clustered `Delete`'s
->   in-use scan is still host-local — it should fan out across hosts as A6.1's
->   R3 does for `Create` (follow-up). A Host whose endpoint another Host
+>   A duplicate on an unreachable host would not be seen, so a discovery with
+>   any unreachable host starts no new adoption (in-progress bindings are
+>   still completed). Residual gaps: disk paths are compared as raw strings,
+>   and `VMInfo.Disks` lists file-backed disks only (no block or network
+>   disks). A clustered `Delete`'s in-use scan is still host-local — it should
+>   fan out across hosts as A6.1's R3 does for `Create` (follow-up). A Host whose endpoint another Host
 >   object names is not adopted from (logged), and an unstamped domain whose
 >   name is the `status.id` of a VirtualMachine bound through a single-host
 >   Provider is skipped (a hypervisor must not be fronted by both kinds). Before any transfer that names

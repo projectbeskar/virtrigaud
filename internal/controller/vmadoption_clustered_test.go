@@ -369,7 +369,9 @@ func (r *VMAdoptionReconciler) setLastDiscovery(t *testing.T, at time.Time) {
 // could not list is unknown. The VM bound to it is not touched (not unbound,
 // not deleted, not re-adopted), a VirtualMachine waiting to bind a domain on
 // it keeps waiting, nothing is sent to it, and the Provider's adoption status
-// names it and discovery is retried sooner.
+// names it and discovery is retried sooner. No new adoption starts on the
+// reachable hosts either: a copy of a candidate on the unknown host (a stale
+// definition sharing its disk) could not be ruled out.
 func TestClusteredAdoption_UnreachableHostIsUnknownNotEmpty(t *testing.T) {
 	bound := &infravirtrigaudiov1beta1.VirtualMachine{
 		ObjectMeta: metav1.ObjectMeta{Name: "db", Namespace: clusterNS, UID: "uid-bound"},
@@ -396,11 +398,17 @@ func TestClusteredAdoption_UnreachableHostIsUnknownNotEmpty(t *testing.T) {
 	assert.Equal(t, waitingBefore, &adoptedVMGet(t, r, waiting.Name).Status, "an adoption waiting on an unreachable host keeps waiting")
 	assert.Empty(t, prov.transfersTo("host-c", "db"))
 	assert.Empty(t, prov.transfersTo("host-c", "cache"))
-	assert.Equal(t, "web", adoptedVMGet(t, r, clusteredAdoptedVMName("host-a", "web")).Status.ID, "the reachable host is adopted from")
+	assert.Empty(t, prov.transfersTo("host-a", "web"), "no new adoption while a host is unknown")
+	err := r.Get(context.Background(), types.NamespacedName{Namespace: clusterNS, Name: clusteredAdoptedVMName("host-a", "web")},
+		&infravirtrigaudiov1beta1.VirtualMachine{})
+	assert.True(t, apierrors.IsNotFound(err), "nothing is created for a held candidate")
 
 	st := adoptionStatus(t, r)
 	assert.Contains(t, st.Message, "host-c")
 	assert.Contains(t, st.Message, "unknown (not absent)")
+	assert.Contains(t, st.Message, "1 not adopted while a host is unknown")
+	assert.Contains(t, st.Message, "web on host-a")
+	assert.EqualValues(t, 1, st.DiscoveredVMs)
 	assert.NotContains(t, st.Message, "qemu+ssh", "the host's endpoint never reaches the status")
 }
 
@@ -912,4 +920,26 @@ func TestAmbiguousVMID(t *testing.T) {
 	} {
 		assert.Equal(t, want, ambiguousVMID(id), id)
 	}
+}
+
+// TestClusteredAdoption_HeldWhileAHostIsUnknownButBindingsComplete: while a
+// host is unknown, a binding whose owner transfer already happened (the domain
+// carries the waiting VM's stamp) is still completed; only new adoptions wait.
+// This is the scenario that motivates the hold: a stale copy on the reachable
+// host whose running twin (sharing its NFS disk) is on the unknown host.
+func TestClusteredAdoption_HeldWhileAHostIsUnknownButBindingsComplete(t *testing.T) {
+	waiting := awaitingAdoptedVM("host-a", "db", "uid-waiting")
+	prov := &fakeClusteredAdopter{caps: routedAdoptionCaps, unreachable: []string{"host-b"}, domains: []*fakeDomain{
+		{host: "host-a", id: "db", uuid: "uuid-a-db", owner: "uid-waiting", cpu: 1, memMiB: 1024, power: "On"},
+		// The stale copy: it looks unique because its twin is on host-b.
+		{host: "host-a", id: "app-old", uuid: "uuid-a-app", power: "Off", disks: []string{"/nfs/app.qcow2"}},
+		{host: "host-b", id: "app", uuid: "uuid-b-app", power: "On", disks: []string{"/nfs/app.qcow2"}},
+	}}
+	r := clusteredAdoptionReconciler(t, prov, clusteredAdoptionProvider(),
+		clusterHost("host-a", "prov-c"), clusterHost("host-b", "prov-c"), waiting)
+
+	reconcileAdoption(t, r)
+	assert.Equal(t, "db", adoptedVMGet(t, r, waiting.Name).Status.ID, "the pending binding is completed")
+	assert.Empty(t, prov.transfersTo("host-a", "app-old"), "the stale copy is not adopted")
+	assert.Contains(t, adoptionStatus(t, r).Message, "app-old on host-a")
 }

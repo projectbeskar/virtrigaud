@@ -201,6 +201,12 @@ const (
 	// domain id or UUID before a name (virsh), so it cannot be addressed by
 	// name safely; the provider would refuse its transfer.
 	skipAmbiguousName adoptionSkipReason = "named like a domain id or UUID (rename the domain to adopt it)"
+	// skipHostsUnknown: not adopted in a discovery that could not list every
+	// host. A copy of the domain (the same UUID, or its shared disk) on an
+	// unlisted host could not be ruled out, and adopting the stale copy would
+	// let its delete remove the running VM's disk. Retried with the next
+	// discovery; bindings already in progress are still completed.
+	skipHostsUnknown adoptionSkipReason = "not adopted while a host is unknown (a copy of it there could not be ruled out)"
 )
 
 // adoptionGuards are facts from outside the listing that make a clustered
@@ -269,6 +275,17 @@ func (r *VMAdoptionReconciler) reconcileClusteredAdoption(ctx context.Context, p
 		}
 		unmanaged = append(unmanaged, info)
 	}
+	// A discovery that could not list every host starts no new adoption: a
+	// duplicate of a candidate (the same UUID, or a disk it shares) on an
+	// unlisted host is invisible, and adopting the stale copy would let its
+	// delete remove the running VM's disk. Bindings already in progress
+	// (plan.complete: the owner was transferred before) are still completed.
+	if len(listed.UnreachableHostIDs) > 0 {
+		for _, info := range unmanaged {
+			plan.skipped = append(plan.skipped, adoptionSkip{info: info, reason: skipHostsUnknown})
+		}
+		unmanaged = nil
+	}
 	logger.Info("Clustered discovery", "listed", len(listed.VMs), "unmanaged", len(unmanaged),
 		"pendingBindings", len(plan.complete), "unreachableHosts", listed.UnreachableHostIDs)
 
@@ -298,7 +315,7 @@ func (r *VMAdoptionReconciler) reconcileClusteredAdoption(ctx context.Context, p
 	now := metav1.Now()
 	provider.Status.Adoption.LastDiscoveryTime = &now
 	// #nosec G115 -- a VM count never approaches 2^31.
-	provider.Status.Adoption.DiscoveredVMs = int32(len(unmanaged))
+	provider.Status.Adoption.DiscoveredVMs = int32(len(unmanaged) + countSkipped(plan.skipped, skipHostsUnknown))
 	provider.Status.Adoption.AdoptedVMs = adopted
 	provider.Status.Adoption.FailedAdoptions = failed
 	provider.Status.Adoption.Message = clusteredAdoptionMessage(adopted, failed, deferred, plan.skipped, listed.UnreachableHostIDs)
@@ -342,6 +359,17 @@ func clusteredAdoptionMessage(adopted, failed, deferred int32, skipped []adoptio
 		}
 	}
 	return msg
+}
+
+// countSkipped counts the skipped VMs with reason.
+func countSkipped(skipped []adoptionSkip, reason adoptionSkipReason) int {
+	n := 0
+	for _, sk := range skipped {
+		if sk.reason == reason {
+			n++
+		}
+	}
+	return n
 }
 
 // skippedSummary renders the skipped VMs for the adoption message, grouped

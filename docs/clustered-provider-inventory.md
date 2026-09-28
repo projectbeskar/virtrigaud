@@ -1469,10 +1469,17 @@ slice 4 is refused with a message and nothing is listed. For each listed VM:
    on another host uses (common with a shared NFS pool: a stale definition left
    on a second host), is skipped and reported on every host. Adopting both
    copies would let deleting the stale one remove the running VM's disk.
-   *Remaining gap:* a duplicate on a host that could not be listed is not seen
-   (its VMs are unknown). *Follow-up:* a clustered `Delete` checks only its own
-   host for other domains using the disk; it should scan every host, as
-   ADR-0007 A6.1's R3 does for `Create`.
+   Because a duplicate on a host that could not be listed is invisible, **a
+   discovery with any unreachable host starts no new adoption**: its
+   candidates are reported as held ("not adopted while a host is unknown")
+   and retried with the next discovery; bindings already in progress are
+   still completed. *Remaining gaps:* disk paths are compared as the provider
+   reports them (raw strings — two paths to one file through a symlink or a
+   different mount are not matched), and the listing reports file-backed
+   disks only, so block and network disks (a shared LUN, an RBD image) are
+   not compared. *Follow-up:* a clustered `Delete` checks only its own host
+   for other domains using the disk; it should scan every host, as ADR-0007
+   A6.1's R3 does for `Create`.
    **A Host whose endpoint another Host object names** (same scheme, host and
    port, whatever the SSH user; any Provider, any namespace) is not adopted
    from, and the manager logs a warning: two Providers fronting one hypervisor
