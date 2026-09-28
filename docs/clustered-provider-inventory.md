@@ -1343,7 +1343,8 @@ for a clustered provider.
     incarnation of the target (`VM_PREVIOUS_INCARNATION`, A6.1) is not a name
     conflict: the target keeps its pending host, shows
     `Placed=False/RestorePending`, and the clone stays `Pending`
-    (`RestorePending`, re-checked every 2 minutes, never failed) until an
+    (`RestorePending`, re-checked with a backoff from 15 s doubling to
+    5 minutes, never failed) until an
     administrator re-attaches or removes that domain. An
     unreachable host keeps the pending host, and the clone is retried on the
     same host (`HostUnavailable`, every 30 s). Any other failure fails the
@@ -1761,7 +1762,9 @@ nothing. The manager then **holds** the VM:
   made). The VM keeps counting on that host at its pending size, and its
   `spec.providerRef` stays locked;
 - `Placed=False` and `Provisioning=False` with reason `RestorePending`, one
-  `Warning` event, and the create is retried on the same host every 2 minutes;
+  `Warning` event, and the create is retried on the same host with a backoff
+  per VM (15 seconds, doubling up to 5 minutes, counted from when the hold
+  began), so a held VM does not scan every host every few seconds;
 - a clone's target VM is held the same way, and the `VMClone` stays `Pending`
   (`RestorePending`), never `Failed`;
 - deleting a held VM never touches the previous incarnation: its owner-checked

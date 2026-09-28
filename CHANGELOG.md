@@ -5,6 +5,42 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-28 21:27] - ADR-0007 A6.1 security-review follow-ups: every disk name probed, tombstoned hosts, bounded scans, backoff with DeleteBlocked, cross-host base-image check
+**Author:** @wrkode (William Rizzo)
+
+> **Operator note.** Only `Provider.spec.topology: cluster` (experimental) changes, on top of the A6.1 entry below. Held clustered deletes, `RestorePending` VMs and creates answered `VM_DISK_CHECK_FAILED` now back off per VM (15 s doubling to 5 min) and a held delete shows `DeleteBlocked=True` + `Ready=False/DeleteBlocked`; `force-delete` / `orphan-on-delete` still act at once. A `Host` the operator cannot render (bad endpoint, unresolved credentials, duplicate id) now **blocks** its Provider's clustered deletes instead of being skipped silently. Every clustered create from a host-path image scans every host and fails closed while one cannot be checked. **Fence a host (power it off or revoke its export access) before deleting its `Host` to release held deletes; mount a shared pool only on the hosts of one clustered Provider, with NFS locking enabled.** Single-host providers are unchanged: the single-host goldens are byte for byte identical.
+
+### Added
+- `internal/clustered/hostsecret/hostsecret.go`, `internal/controller/provider_hostinventory.go`: `Inventory.UnroutableHostIDs` (`unroutableHostIds`): the ids of Hosts the manager skipped (no endpoint and no credentials in the Secret) are rendered as id-only tombstones.
+- `internal/providers/libvirt/hostconn/cluster.go`: `ClusterRegistry.UnroutableHosts`, `RecentlyUnreachable` and `MarkUnreachable` (a dial failure, a transport failure or a per-host timeout is remembered, cleared on the next successful dial).
+- `internal/providers/libvirt/cluster_disk_guard.go`: `lockDomain`, an in-process, context-aware lock per domain name `<ns>.<name>`, held from the scan until the write, define or teardown is done (Create, Clone, Delete); an operation that cannot get it within its budget is not performed (`Unavailable` + `VM_OPERATION_FAILED`, retried, never counted by the circuit breaker). Actors outside VirtRigaud are not serialized by it (documented).
+- `internal/providers/contracts/errors.go`: `ErrVMDiskCheckFailed`, `ErrVMOwnDomainElsewhere` and the ErrorInfo metadata `incarnation: own` (`VMPreviousIncarnationKindKey` / `VMPreviousIncarnationKindOwn`); `internal/transport/grpc/client.go` marks both.
+- `internal/k8s/conditions.go`: condition type `DeleteBlocked` with reasons `HostUnreachable`, `DiskCheckFailed`, `OwnDomainOnAnotherHost`.
+- Tests: `TestClusteredCreate_BlankVolumeFileIsTheOneGuarded`, `_EveryDiskNameOfTheVMIsProbed`, `_AnotherNamesForeignUseRefusesNothing`, `_BaseImageIsCheckedOnEveryHost`, `_OwnDomainElsewhereIsCountedApart`, `TestClusteredClone_BlankIncarnationOfTheTargetIsFound`, `TestClusterScan_UnroutableHostsFailClosed`, `_ShortCircuitsOnceDecided`, `_KnownUnreachableHostIsNotDialedAgain`, `_BusyProviderFailsClosed`, `TestClustered_DomainLockSerializesCheckAndAct`, `TestScanHostDiskUse_HostLocalDirsAndSeedDir`, `TestIncarnationKinds`, `TestClusterRegistry_UnroutableHosts`, `_RecentlyUnreachable`, `TestMarshal_UnroutableHostIDs`, `TestHandleDeletion_Clustered_UncheckedDeleteIsHeldWithBackoff`, `_HeldDeleteReasonChangeIsATransition`, `TestHandleDeletion_SingleHost_DiskCheckFailedUnchanged`, `TestVMUpdateNeedsReconcile`, `TestBlockedRetryBackoff`, `TestClustered_OwnDomainElsewhere`.
+
+### Changed
+- `internal/providers/libvirt/cluster_disk_guard.go`: the scan covers the tombstoned hosts (they answer `HOST_UNAVAILABLE`); stops once its outcome is decided (a Delete on the first use or failure, a Create on the first incarnation); fails a host that failed within the last 30 s without dialing it; and runs at most 2 scans per provider at once (a scan that cannot start within its deadline fails closed). The libvirt NVRAM directory (`/var/lib/libvirt/qemu/nvram`) is compared on the scanned host only, and the cloud-init seed directory is resolved on each scanned host. A domain stamped with the requester's own UID elsewhere is counted apart and answered with its own message and `incarnation: own`.
+- `internal/controller/virtualmachine_clustered.go`, `virtualmachine_controller.go`, `vmclone_clustered.go`: a clustered delete answered `HOST_UNAVAILABLE` or `VM_DISK_CHECK_FAILED` keeps the finalizer with `DeleteBlocked=True` (`HostUnreachable` / `DiskCheckFailed`) and `Ready=False/DeleteBlocked`, a message naming no host, and one Warning event per transition. It is retried with a per-VM backoff from the condition's `lastTransitionTime` (15 s doubling to 5 min); the same backoff paces `RestorePending` (VM and clone) and a clustered create answered `VM_DISK_CHECK_FAILED` (was 5 s). A VM being deleted is reconciled on every update, so `force-delete` / `orphan-on-delete` act at once. A VM held because its own domain is on another host keeps its finalizer when deleted (`DeleteBlocked=True/OwnDomainOnAnotherHost`) instead of releasing on `NotFound`.
+- Docs: ADR-0007 A6.1 amendment (the guarded names, tombstones, bounds, backoff and `DeleteBlocked`, the domain lock, the own-UID kind, host-local directories, residuals, follow-ups: a pool ownership marker, batching, a guard before SnapshotRevert/SnapshotDelete/SnapshotCreate and the offline disk grow), `docs/clustered-provider-inventory.md`, `docs/upgrading.md`, `docs/release-notes/next.md`.
+
+### Fixed
+- `internal/providers/libvirt/provider_virsh.go`, `clone_clustered.go`, `domain_naming.go`: the blank-disk guard checked `<pool>/<vol>.qcow2` while `vol-create` writes `<pool>/<vol>`, so a used blank disk could be overwritten. The guard now probes every name the VM's disk may have had (`<vol>`, `<vol>.qcow2`, the legacy `<name>-disk[.qcow2]`, `<domain>-migrated.qcow2`) and runs one fan-out over those that exist.
+- `internal/providers/libvirt/server.go`: a clustered image refused as `InvalidArgument` is returned as such, not as `VM_OPERATION_FAILED`.
+
+### Security
+- `internal/providers/libvirt/imagepath.go`, `provider_virsh.go`: on a clustered Provider a host-path base image is refused while a domain on **any** host of the Provider uses it (it was checked on the landing host only), failing closed while a host cannot be checked; "does not exist" and "not allowed" answer the same, so a tenant cannot probe the hosts' files. Single-host behaviour is unchanged.
+- A Host the operator cannot route to can no longer make the guard skip it and delete a disk that host's domains still use.
+- The scan's cost is bounded (concurrency, short-circuit, unreachable memo, manager backoff) so a dead host or many held VMs cannot turn every reconcile into a scan of every host.
+
+### Why
+The security review of A6.1 found that the blank-disk check guarded the wrong file, that Hosts skipped by the operator were silently not checked, that fail-closed scans had no cost bound, and that base-image confinement looked only at the landing host. These changes close them. They also give tenants a clear, host-free condition while a delete is held.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-09-28 16:03] - ADR-0007 A6.1: cluster-wide disk guard (R3, also on Delete) and previous-incarnation hold (R2)
 **Author:** @wrkode (William Rizzo)
 

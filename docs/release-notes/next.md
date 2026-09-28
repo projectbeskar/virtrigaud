@@ -106,6 +106,13 @@ providers), and rollback caveats in
   refused), the s3 export's temporary copy is private and always removed, and a
   UEFI clone's varstore is never copied through a symlink
   (→ [`docs/libvirt-clones.md`](docs/libvirt-clones.md)).
+- libvirt, clustered Providers: a `VMImage` whose host path is another VM's
+  live disk on **any** host of the Provider is refused (it used to be checked
+  on the landing host only), and fails closed while a host cannot be checked;
+  a refused image path answers the same whether it does not exist or is not
+  allowed, so a tenant cannot probe a host's files. Clustered disk writes,
+  domain defines and deletes of one domain name are serialized inside the
+  provider (→ [`docs/clustered-provider-inventory.md`](docs/clustered-provider-inventory.md#shared-storage-the-cluster-wide-disk-guard-a61)).
 - The manager's webhook and metrics servers pin an explicit TLS 1.2 floor.
 - Optional, opt-in `NetworkPolicy` templates for the manager and provider pods
   (`networkPolicy.enabled`, default off).
@@ -147,15 +154,25 @@ providers), and rollback caveats in
   (→ [`docs/clustered-provider-inventory.md`](docs/clustered-provider-inventory.md#committed-capacity)).
 - Clustered disks on a shared pool are protected across hosts (ADR-0007
   A6.1). A create or clone that finds a file where the VM's disk goes writes
-  it only when no domain on **any** host of the Provider uses it, and a delete
-  first checks every other host; a host that cannot be checked makes the
-  operation fail closed (retried, never counted by the circuit breaker) — so
-  **clustered deletes wait while any host of the Provider is unreachable**. A
-  VirtualMachine re-created under the name of a previous incarnation (after
-  `orphan-on-delete`, a force-delete or a backup restore) is held as
+  it only when no domain on **any** host of the Provider uses it (every name
+  the disk may have had is checked), a host-path base image is checked on
+  every host too, and a delete first checks every other host. A host that
+  cannot be checked — including a `Host` that exists but cannot be routed —
+  makes the operation fail closed (never counted by the circuit breaker) — so
+  **clustered deletes wait while any host of the Provider is unreachable**:
+  the VM shows `DeleteBlocked=True` (`HostUnreachable` or `DiskCheckFailed`)
+  and `Ready=False/DeleteBlocked`, and is retried with a backoff from 15 s
+  doubling to 5 min; `force-delete` and `orphan-on-delete` still release it at
+  once. A VirtualMachine re-created under the name of a previous incarnation
+  (after `orphan-on-delete`, a force-delete or a backup restore) is held as
   `Placed=False/RestorePending` on its pending host instead of making a second
   domain; an administrator re-attaches or removes the old domain with the A6
-  runbook (→ [`docs/clustered-provider-inventory.md`](docs/clustered-provider-inventory.md#shared-storage-the-cluster-wide-disk-guard-a61)).
+  runbook. A VM whose own domain turns up on another host (lost placement
+  record) is held the same way, and deleting it is held until its pending host
+  is moved. **Before deleting a `Host` to release held deletes, fence it**
+  (power it off or revoke its access to the export); mount a shared pool only
+  on the hosts of one clustered Provider, at the same path, with NFS locking
+  enabled (→ [`docs/clustered-provider-inventory.md`](docs/clustered-provider-inventory.md#shared-storage-the-cluster-wide-disk-guard-a61)).
 - On a clustered Provider, shrinking a **running** VM waits until the VM is
   powered off (`Reconfiguring=False/ShrinkPendingPowerOff`): a live shrink
   only deflates the balloon, which the guest can take back. VirtRigaud never

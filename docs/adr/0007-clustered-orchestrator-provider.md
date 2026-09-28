@@ -1703,10 +1703,18 @@ runbook or remove it. There is no opt-in in v0.4.0. A6.2 must also set the
 >   delete (`FailedPrecondition`, `VM_DISK_IN_USE` + `VM_OPERATION_FAILED`: the
 >   manager keeps the finalizer), and a host that cannot be checked fails it
 >   closed. A delete always has files to remove, so **a clustered delete is held
->   while any host of the Provider cannot be checked** (retried every 15 s;
->   `orphan-on-delete` or `force-delete` release the VirtualMachine and leave
->   the domain). The cloud-init seed directory is host-local staging: when it
->   alone would be removed, a failed scan keeps it and the delete proceeds.
+>   while any host of the Provider cannot be checked**. *(William's decision
+>   after the security review: fail closed, with backoff and a clear
+>   condition.)* The VM keeps its finalizer with `DeleteBlocked=True` (reason
+>   `HostUnreachable` or `DiskCheckFailed`) and `Ready=False/DeleteBlocked`, a
+>   constant message naming no host, one `Warning` event per transition, and a
+>   per-VM exponential backoff from when the hold began (15 s doubling to
+>   5 min; the same backoff paces `RestorePending` and a clustered create
+>   answered `VM_DISK_CHECK_FAILED`). `orphan-on-delete` or `force-delete` are
+>   acted on at once — a VM being deleted is reconciled on every update — and
+>   release the VirtualMachine, leaving the domain. The cloud-init seed
+>   directory is host-local staging: when it alone would be removed, a failed
+>   scan keeps it and the delete proceeds.
 > - **What R3 covers on `Create` and `Clone`.** The landing host probes every
 >   name the VM's disk may have had in the pool, in any incarnation and of any
 >   kind: `<domain>-disk` (a blank volume: a dir pool names the file after the
@@ -1739,7 +1747,9 @@ runbook or remove it. There is no opt-in in v0.4.0. A6.2 must also set the
 >   not it uses the file, and **whatever its UID**: a domain stamped with the
 >   requester's own UID on another host is its own domain elsewhere, and a
 >   second one must not be made either (decision 2). Any such domain answers
->   `VM_PREVIOUS_INCARNATION`; a use by anything else is plain `AlreadyExists`.
+>   `VM_PREVIOUS_INCARNATION` (the own-UID kind with ErrorInfo metadata
+>   `incarnation: own`, see below); a use by anything else is plain
+>   `AlreadyExists`.
 >   On the landing host the name check answers first (`bindExistingDomain`,
 >   the clone's target check): a domain of the requested name stamped for the
 >   request's namespace and name under another UID is `VM_PREVIOUS_INCARNATION`;
@@ -1748,7 +1758,7 @@ runbook or remove it. There is no opt-in in v0.4.0. A6.2 must also set the
 >   (a file where the disk goes); R4 (A6.2) is the check before scheduling.
 > - **The manager's hold** uses the reason `RestorePending` (which A6.2's R1
 >   reuses): `Placed=False` and `Provisioning=False`, one `Warning` event, the
->   metric reason `restore-pending`, a re-check every 2 minutes, `pendingHost`
+>   metric reason `restore-pending`, a re-check with the backoff above, `pendingHost`
 >   (and `pendingResources`) kept, nothing excluded. A clone's target is held
 >   the same way and the `VMClone` stays `Pending` — never `Failed`, which would
 >   remove its target. The message points at the runbook in
