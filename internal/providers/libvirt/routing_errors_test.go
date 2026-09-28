@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -104,7 +105,9 @@ func TestClustered_DeadLeasedHostIsHostUnavailable(t *testing.T) {
 // host ran and rejected keeps the historical code (Unknown), carries the
 // VM_OPERATION_FAILED detail, and — since the slice 3 security review — only
 // the categorized message: the operation and the host id, never the virsh
-// command line or its stderr.
+// command line or its stderr. A failure the provider described for the
+// requester (#357's honest Reconfigure: its cause kept out of the text) keeps
+// that description after them.
 func TestClustered_VMOperationFailureCarriesVMOperationFailed(t *testing.T) {
 	fx, p := clusteredOpsFixture(t)
 	fx.script("host-b", "fail-start", "")
@@ -124,7 +127,7 @@ func TestClustered_VMOperationFailureCarriesVMOperationFailed(t *testing.T) {
 		want string
 	}{
 		"Power":       {perr, `failed to perform power operation on host "host-b"`},
-		"Reconfigure": {rerr, `failed to reconfigure VM on host "host-b"`},
+		"Reconfigure": {rerr, `failed to reconfigure VM on host "host-b": could not grow the VM's disk to 20 GiB`},
 	} {
 		st, ok := status.FromError(tc.err)
 		require.True(t, ok, name)
@@ -134,6 +137,34 @@ func TestClustered_VMOperationFailureCarriesVMOperationFailed(t *testing.T) {
 		for _, leak := range []string{"virsh", "stderr", "scripted failure", "/var/lib", "qemu:///"} {
 			assert.NotContains(t, st.Message(), leak, "%s leaks no command, stderr or path", name)
 		}
+	}
+}
+
+// TestRequesterFacingMessage: only a provider error whose text the provider
+// wrote for the requester — no cause, or a cause kept out of the text
+// (providerLogOnly) — is sent after the operation and host; one that carries
+// any other cause (it may quote host output) is not.
+func TestRequesterFacingMessage(t *testing.T) {
+	raw := &VirshError{Command: "virsh -c qemu+ssh://10.0.0.1/system blockresize web vda 20G", ExitCode: 1,
+		Stderr: "error: cannot resize /var/lib/libvirt/images/web-disk.qcow2"}
+	for name, tc := range map[string]struct {
+		err  error
+		want string
+	}{
+		"no cause":          {contracts.NewRetryableError("the VM is paused; nothing was changed", nil), "the VM is paused; nothing was changed"},
+		"log-only cause":    {reconfigureFailed("web", "grow the VM's disk to 20 GiB", raw), "could not grow the VM's disk to 20 GiB"},
+		"wrapped log-only":  {fmt.Errorf("reconfigure: %w", reconfigureFailed("web", "set 4 vCPUs", raw)), "could not set 4 vCPUs"},
+		"raw cause":         {contracts.NewRetryableError("failed to perform power operation On", raw), ""},
+		"no provider error": {raw, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, tc.want, requesterFacingMessage(tc.err))
+			st, ok := status.FromError(hostOpRPCError("reconfigure VM", &hostOpError{host: "host-b", err: tc.err}, tc.err))
+			require.True(t, ok)
+			for _, leak := range []string{"10.0.0.1", "/var/lib", "blockresize", "qemu+ssh"} {
+				assert.NotContains(t, st.Message(), leak)
+			}
+		})
 	}
 }
 

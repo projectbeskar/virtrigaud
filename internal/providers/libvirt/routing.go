@@ -347,14 +347,43 @@ func (e *routedOpError) Unwrap() error { return e.cause }
 // not be reached is a host-scoped Unavailable (HOST_UNAVAILABLE); anything
 // else is a failure of the operation on that one VM (VM_OPERATION_FAILED,
 // codes.Unknown). Neither counts toward the manager's per-Provider circuit
-// breaker. Only "<op> ... host <id>" crosses the wire; the error is logged.
+// breaker. Only "<op> ... host <id>" crosses the wire — followed by the
+// provider's own requester-facing account of the failure when it wrote one
+// (requesterFacingMessage) — and the error is logged.
 func hostOpRPCError(op string, ho *hostOpError, err error) error {
 	log.Printf("WARN %s on host %s failed: %v", op, ho.host, err)
 	if isHostTransportFailure(err) {
 		return hostUnavailableStatus(contracts.NewHostUnavailableError(
 			fmt.Sprintf("%s: host %q is unreachable", op, ho.host), nil))
 	}
-	return vmOperationStatus(codes.Unknown, fmt.Sprintf("failed to %s on host %q", op, ho.host))
+	msg := fmt.Sprintf("failed to %s on host %q", op, ho.host)
+	if detail := requesterFacingMessage(err); detail != "" {
+		msg += ": " + detail
+	}
+	return vmOperationStatus(codes.Unknown, msg)
+}
+
+// requesterFacingMessage returns the message of the outermost provider error
+// in err's chain when the provider composed it for the requester: a
+// ProviderError with no cause, or whose cause is kept out of its text
+// (providerLogOnly, #357's honest Reconfigure) — "could not grow the VM's disk
+// to 20 GiB", "the VM is \"paused\" (active, but not running); ... nothing was
+// changed". Such a message names the outcome, never raw host output. A
+// provider error that carries any other cause may quote virsh or qemu-img
+// output (disk paths, the connection URI): "" is returned and only the
+// operation and host reach the wire.
+func requesterFacingMessage(err error) string {
+	var pe *contracts.ProviderError
+	if !stderrors.As(err, &pe) {
+		return ""
+	}
+	if pe.Cause == nil {
+		return pe.Message
+	}
+	if _, ok := pe.Cause.(*providerLogOnly); ok {
+		return pe.Message
+	}
+	return ""
 }
 
 // routedRPCError converts an error from a ROUTED call on a clustered provider
