@@ -135,13 +135,64 @@ func TestVMSnapshot_DeleteNeverUsesUngrantedProvider(t *testing.T) {
 	marked := &infrav1beta1.VMSnapshot{}
 	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(snap), marked))
 
+	res, err := r.handleDeletion(ctx, marked)
+	require.NoError(t, err)
+	// No provider call can be made, so the snapshot is still on the
+	// hypervisor: the VMSnapshot is kept, says why, and is retried with
+	// backoff. (Resolving the Provider would have failed with a different
+	// reason — there is no resolver — so none was attempted.)
+	assert.Equal(t, snapshotDeleteRetryMin, res.RequeueAfter)
+	kept := &infrav1beta1.VMSnapshot{}
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(snap), kept), "the finalizer is kept")
+	assert.Contains(t, kept.Finalizers, "snapshot.infra.virtrigaud.io/finalizer")
+	requireSnapshotRefused(t, kept)
+	deleting := meta.FindStatusCondition(kept.Status.Conditions, infrav1beta1.VMSnapshotConditionDeleting)
+	require.NotNil(t, deleting)
+	assert.Equal(t, metav1.ConditionFalse, deleting.Status)
+	assert.Equal(t, k8s.ReasonConsumerNotAllowed, deleting.Reason)
+	assert.Contains(t, deleting.Message, forceDeleteAnnotation)
+	events := strings.Join(drainEvents(rec), "\n")
+	assert.Contains(t, events, "Warning SnapshotDeleteFailed")
+	assert.Contains(t, events, consumerNamespaceSelectorField)
+
+	// A retry is not announced as a new deletion.
+	_, err = r.handleDeletion(ctx, kept)
+	require.NoError(t, err)
+	assert.NotContains(t, strings.Join(drainEvents(rec), "\n"), "SnapshotDeleting")
+
+	// force-delete releases it, naming the snapshot left on the hypervisor.
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(snap), kept))
+	kept.Annotations = map[string]string{forceDeleteAnnotation: "true"}
+	require.NoError(t, r.Update(ctx, kept))
+	_, err = r.handleDeletion(ctx, kept)
+	require.NoError(t, err)
+	err = r.Get(ctx, client.ObjectKeyFromObject(snap), &infrav1beta1.VMSnapshot{})
+	assert.True(t, apierrors.IsNotFound(err), "force-delete releases the finalizer")
+	events = strings.Join(drainEvents(rec), "\n")
+	assert.Contains(t, events, "Warning "+eventReasonSnapshotLeftOnHypervisor)
+	assert.Contains(t, events, `snapshot "snap-1"`)
+}
+
+// TestVMSnapshot_DeleteReleasesWhenTheVMIsGone: with the VM itself gone there
+// is no snapshot left to track — even behind an ungranted Provider.
+func TestVMSnapshot_DeleteReleasesWhenTheVMIsGone(t *testing.T) {
+	ctx := context.Background()
+	_, snap, objs := snapConsumerFixture(nil)
+	snap.Finalizers = []string{"snapshot.infra.virtrigaud.io/finalizer"}
+	snap.Status.SnapshotID = "snap-1"
+	var noVM []client.Object
+	for _, o := range objs {
+		if _, isVM := o.(*infrav1beta1.VirtualMachine); !isVM {
+			noVM = append(noVM, o)
+		}
+	}
+	r, _ := newSnapConsumerReconciler(t, append(noVM, snap)...)
+	require.NoError(t, r.Delete(ctx, snap))
+	marked := &infrav1beta1.VMSnapshot{}
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(snap), marked))
+
 	_, err := r.handleDeletion(ctx, marked)
 	require.NoError(t, err)
-	// Resolving the Provider would have failed (no resolver) and retained the
-	// finalizer; the snapshot is gone, so no resolution was attempted.
 	err = r.Get(ctx, client.ObjectKeyFromObject(snap), &infrav1beta1.VMSnapshot{})
-	assert.True(t, apierrors.IsNotFound(err), "the best-effort delete releases the finalizer")
-	events := strings.Join(drainEvents(rec), "\n")
-	assert.Contains(t, events, "SnapshotDeleteFailed")
-	assert.Contains(t, events, consumerNamespaceSelectorField)
+	assert.True(t, apierrors.IsNotFound(err))
 }
