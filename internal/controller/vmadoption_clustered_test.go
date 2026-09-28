@@ -900,3 +900,14 @@ func TestClusteredAdoption_DomainManagedThroughASingleHostProviderIsSkipped(t *t
 	assert.Equal(t, "fresh", prov.transfers[0].VM.ID)
 	assert.Contains(t, adoptionStatus(t, r).Message, "managed through a single-host Provider")
 }
+
+// TestAmbiguousVMID: names virsh reads as a domain id or UUID are skipped.
+func TestAmbiguousVMID(t *testing.T) {
+	for id, want := range map[string]bool{
+		"7": true, "-0": true, "+12": true, "0042": true,
+		"1b4e28ba-2fa1-11d2-883f-0016d3cca427": true, "1B4E28BA2FA111D2883F0016D3CCA427": true,
+		"web": false, "team-a.web": false, "7web": false, "": false, "deadbeef": false,
+	} {
+		assert.Equal(t, want, ambiguousVMID(id), id)
+	}
+}

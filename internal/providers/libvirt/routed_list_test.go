@@ -75,7 +75,8 @@ case "$1" in
     cat "$d/list.txt" ;;
   dumpxml)
     fail dumpxml
-    n="$2"; if [ "$n" = "--inactive" ]; then n="$3"; fi
+    shift; n=""
+    for a in "$@"; do case "$a" in --inactive|--domain) ;; *) n="$a" ;; esac; done
     if [ -f "$d/dom-$n.xml" ]; then cat "$d/dom-$n.xml"; else echo "error: failed to get domain '$n'" >&2; exit 1; fi ;;
   dominfo)
     if [ -f "$d/dom-$2.xml" ]; then
@@ -84,10 +85,11 @@ case "$1" in
   domstate) echo "shut off" ;;
   metadata)
     fail metadata
-    if [ -f "$d/stamped-$2.xml" ]; then
-      n=$(cat "$d/name-$2")
-      cp "$d/stamped-$2.xml" "$d/dom-$n.xml"
-      cp "$d/stamped-$2.xml" "$d/dom-$2.xml"
+    u="$2"; if [ "$u" = "--domain" ]; then u="$3"; fi
+    if [ -f "$d/stamped-$u.xml" ]; then
+      n=$(cat "$d/name-$u")
+      cp "$d/stamped-$u.xml" "$d/dom-$n.xml"
+      cp "$d/stamped-$u.xml" "$d/dom-$u.xml"
     fi ;;
   destroy|start|shutdown) exit 0 ;;
   *) echo "fake virsh: unsupported: $*" >&2; exit 1 ;;
@@ -623,8 +625,8 @@ func TestClustered_ListVMs_ReportsStampsOfBothDefinitions(t *testing.T) {
 	assert.Equal(t, contracts.OwnerStampMultiple, byID["two-owners"].ProviderRaw[contracts.VMInfoOwnerStampStateKey])
 	assert.Empty(t, byID["two-owners"].OwnerNamespace, "several owners: none is reported")
 	assert.Equal(t, contracts.OwnerStampUnreadable, byID["bad-stamp"].ProviderRaw[contracts.VMInfoOwnerStampStateKey])
-	assert.Contains(t, fx.calls(), "host-a dumpxml --inactive "+persistOnly.uuid)
+	assert.Contains(t, fx.calls(), "host-a dumpxml --inactive --domain "+persistOnly.uuid)
 	for _, c := range fx.calls() {
-		assert.NotEqual(t, "host-a dumpxml --inactive "+bad.uuid, c, "a shut-off domain has one definition")
+		assert.NotEqual(t, "host-a dumpxml --inactive --domain "+bad.uuid, c, "a shut-off domain has one definition")
 	}
 }

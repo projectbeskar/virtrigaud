@@ -97,7 +97,7 @@ func TestClustered_TransferOwner_StampsUnstampedDomainAndRoutedCallsPassOwnerChe
 	require.NoError(t, err)
 
 	assert.Equal(t, []string{
-		"host-a metadata " + uuidWebA + " --uri " + ownerMetadataNamespaceURI + " --key " + ownerMetadataPrefix +
+		"host-a metadata --domain " + uuidWebA + " --uri " + ownerMetadataNamespaceURI + " --key " + ownerMetadataPrefix +
 			" --set <owner uid='" + adopter.UID + "' namespace='infra' name='web-3f2a9c1b'/> --config",
 	}, metadataCalls(fx), "one stamp, addressed by UUID, persistent definition only (the domain is shut off)")
 	owners, err := domainOwners(fx.read("host-a", "dom-web.xml"))
@@ -129,7 +129,7 @@ func TestClustered_TransferOwner_ActiveDomainStampsBothDefinitions(t *testing.T)
 	calls := metadataCalls(fx)
 	require.Len(t, calls, 1)
 	assert.True(t, strings.HasSuffix(calls[0], " --config --live"), calls[0])
-	assert.Contains(t, fx.calls(), "host-a dumpxml --inactive "+uuidWebA, "the persistent definition is verified too")
+	assert.Contains(t, fx.calls(), "host-a dumpxml --inactive --domain "+uuidWebA, "the persistent definition is verified too")
 }
 
 // TestClustered_TransferOwner_ReplacesAStaleStamp: a domain stamped by a
@@ -176,7 +176,7 @@ func TestClustered_TransferOwner_RefusesWithoutTouching(t *testing.T) {
 		{name: "two stamps", dom: listDomain{name: "web", uuid: uuidWebA}, setup: twoStamps,
 			req: transferReq(staleOwner.UID, ownerTeamB.UID), code: codes.AlreadyExists},
 		{name: "unreadable stamp", dom: listDomain{name: "web", uuid: uuidWebA}, setup: unreadable,
-			req: transferReq("a", "b"), code: codes.AlreadyExists},
+			req: transferReq(staleOwner.UID, ownerTeamB.UID), code: codes.AlreadyExists},
 		{name: "replaced since it was listed", dom: listDomain{name: "web", uuid: uuidWebB},
 			req: transferReq(), code: codes.NotFound},
 		{name: "gone from the host", dom: listDomain{name: "other", uuid: uuidWebA},
@@ -187,6 +187,14 @@ func TestClustered_TransferOwner_RefusesWithoutTouching(t *testing.T) {
 			req: func() *providerv1.TransferOwnerRequest { r := transferReq(); r.ExpectedUuid = ""; return r }(), code: codes.InvalidArgument},
 		{name: "no host", dom: listDomain{name: "web", uuid: uuidWebA},
 			req: func() *providerv1.TransferOwnerRequest { r := transferReq(); r.TargetHostId = ""; return r }(), code: codes.InvalidArgument},
+		{name: "owner uid not a UUID", dom: listDomain{name: "web", uuid: uuidWebA},
+			req: func() *providerv1.TransferOwnerRequest { r := transferReq(); r.Owner.Uid = "a,b"; return r }(), code: codes.InvalidArgument},
+		{name: "owner namespace not DNS-1123", dom: listDomain{name: "web", uuid: uuidWebA},
+			req: func() *providerv1.TransferOwnerRequest { r := transferReq(); r.Owner.Namespace = "Team_A"; return r }(), code: codes.InvalidArgument},
+		{name: "replaceable uid not a UUID", dom: listDomain{name: "web", uuid: uuidWebA},
+			req: transferReq("a,b"), code: codes.InvalidArgument},
+		{name: "a name virsh reads as a domain id", dom: listDomain{name: "7", uuid: uuidWebA},
+			req: func() *providerv1.TransferOwnerRequest { r := transferReq(); r.Id = "7"; return r }(), code: codes.InvalidArgument},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fx := newListFixture(t, map[string][]listDomain{"host-a": {tc.dom}})

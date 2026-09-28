@@ -3040,7 +3040,7 @@ func clusteredStampReport(ctx context.Context, vp *VirshProvider, domain VirshDo
 		if !canonicalUUIDRE.MatchString(strings.TrimSpace(uuid)) {
 			return stampReport{uids: joinOwnerUIDs(stamps), state: contracts.OwnerStampUnreadable}
 		}
-		res, rerr := vp.runVirshCommand(ctx, "dumpxml", "--inactive", strings.TrimSpace(uuid))
+		res, rerr := vp.runVirshCommand(ctx, "dumpxml", "--inactive", "--domain", strings.TrimSpace(uuid))
 		if rerr != nil {
 			if onReadFailure != nil {
 				onReadFailure(domain.Name, rerr)

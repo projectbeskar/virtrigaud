@@ -24,6 +24,8 @@ import (
 	"strings"
 	"sync"
 
+	"k8s.io/apimachinery/pkg/util/validation"
+
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt/hostconn"
 )
@@ -136,16 +138,31 @@ func (p *Provider) TransferOwner(ctx context.Context, req contracts.TransferOwne
 }
 
 // validateTransferOwnerRequest refuses, before any host is touched, a transfer
-// that names no domain, no owner UID or no canonical expected UUID. A missing
-// host is refused by withHostConn.
+// that names no domain or a domain name virsh would resolve as an id or UUID
+// (ambiguousDomainNameError), an owner whose UID is not a canonical UUID or
+// whose namespace/name are not a DNS-1123 label/subdomain (what a Kubernetes
+// object carries; a UID cannot then contain the ',' the listing joins UIDs
+// with), a replaceable UID that is not a canonical UUID, or no canonical
+// expected UUID. A missing host is refused by withHostConn.
 func validateTransferOwnerRequest(req contracts.TransferOwnerRequest) error {
+	owner := req.VM.Owner
 	switch {
 	case strings.TrimSpace(req.VM.ID) == "":
 		return contracts.NewInvalidSpecError("TransferOwner requires the VM's id", nil)
-	case req.VM.Owner.IsZero():
-		return contracts.NewInvalidSpecError("TransferOwner requires the new owner's uid", nil)
+	case ambiguousDomainNameError(req.VM.ID) != nil:
+		return contracts.NewInvalidSpecError(fmt.Sprintf(
+			"TransferOwner refuses domain %q: virsh would resolve it as a domain id or UUID", req.VM.ID), nil)
+	case !canonicalUUIDRE.MatchString(owner.UID):
+		return contracts.NewInvalidSpecError("TransferOwner requires the new owner's uid, a canonical UUID", nil)
+	case len(validation.IsDNS1123Label(owner.Namespace)) > 0 || len(validation.IsDNS1123Subdomain(owner.Name)) > 0:
+		return contracts.NewInvalidSpecError("TransferOwner requires the new owner's namespace and name (DNS-1123)", nil)
 	case !canonicalUUIDRE.MatchString(strings.TrimSpace(req.ExpectedUUID)):
 		return contracts.NewInvalidSpecError("TransferOwner requires the VM's UUID (expected_uuid)", nil)
+	}
+	for _, uid := range req.ReplaceableOwnerUIDs {
+		if !canonicalUUIDRE.MatchString(uid) {
+			return contracts.NewInvalidSpecError("TransferOwner: every replaceable owner uid must be a canonical UUID", nil)
+		}
 	}
 	return nil
 }
@@ -170,11 +187,16 @@ func transferOwnerOn(ctx context.Context, vp *VirshProvider, host hostconn.HostI
 		return contracts.NewNotFoundError(fmt.Sprintf("libvirt domain %q not found on host %s; its owner was not changed", id, host), nil)
 	}
 
-	res, err := vp.runVirshCommand(ctx, "dumpxml", id)
+	// --domain: the name is never read as an option, whatever it starts with.
+	res, err := vp.runVirshCommand(ctx, "dumpxml", "--domain", id)
 	if err != nil {
 		return contracts.NewRetryableError(fmt.Sprintf("read the definition of domain %q", id), err)
 	}
 	d, perr := parseDomainLibvirtxml(res.Stdout)
+	if perr == nil && strings.TrimSpace(d.Name) != id {
+		// virsh resolved the argument to another domain (as an id or UUID).
+		perr = fmt.Errorf("the definition read is domain %q, not %q", strings.TrimSpace(d.Name), id)
+	}
 	if perr != nil || !canonicalUUIDRE.MatchString(strings.TrimSpace(d.UUID)) {
 		log.Printf("WARN Refusing to transfer the owner of domain %s on host %s: its identity cannot be read (%v)", id, host, perr)
 		return contracts.NewConflictError(fmt.Sprintf(transferRefusedMessage, id, host), nil)
@@ -194,7 +216,7 @@ func transferOwnerOn(ctx context.Context, vp *VirshProvider, host hostconn.HostI
 		// A running domain has two definitions, and the stamp is written to
 		// both: the persistent one must pass the same check, so a stamp that
 		// differs there is never overwritten either.
-		inactive, ierr := vp.runVirshCommand(ctx, "dumpxml", "--inactive", uuid)
+		inactive, ierr := vp.runVirshCommand(ctx, "dumpxml", "--inactive", "--domain", uuid)
 		if ierr != nil {
 			return contracts.NewRetryableError(fmt.Sprintf("read the persistent definition of domain %q", id), ierr)
 		}
@@ -219,7 +241,7 @@ func transferOwnerOn(ctx context.Context, vp *VirshProvider, host hostconn.HostI
 	// the running domain when it is active. virsh metadata replaces the element
 	// of this namespace URI (libvirt keeps one per URI), so a replaceable stale
 	// stamp is overwritten, never duplicated.
-	args := []string{"metadata", uuid,
+	args := []string{"metadata", "--domain", uuid,
 		"--uri", ownerMetadataNamespaceURI,
 		"--key", ownerMetadataPrefix,
 		"--set", renderOwnerSetXML(owner),
@@ -268,9 +290,9 @@ func ownerTransferDecision(owner contracts.ObjectIdentity, recorded []contracts.
 // id and carries exactly owner's stamp — in the persistent definition too when
 // the domain is active.
 func verifyOwnerStamp(ctx context.Context, vp *VirshProvider, uuid, id string, owner contracts.ObjectIdentity, active bool) error {
-	reads := [][]string{{"dumpxml", uuid}}
+	reads := [][]string{{"dumpxml", "--domain", uuid}}
 	if active {
-		reads = append(reads, []string{"dumpxml", "--inactive", uuid})
+		reads = append(reads, []string{"dumpxml", "--inactive", "--domain", uuid})
 	}
 	for _, args := range reads {
 		res, err := vp.runVirshCommand(ctx, args...)

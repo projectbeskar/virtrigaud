@@ -197,6 +197,10 @@ const (
 	// only sign the domain is already managed.
 	skipSingleHostManaged adoptionSkipReason = "managed through a single-host Provider fronting the same hypervisor " +
 		"(do not front one host with both a single-host and a clustered Provider)"
+	// skipAmbiguousName: a domain name the hypervisor tool would read as a
+	// domain id or UUID before a name (virsh), so it cannot be addressed by
+	// name safely; the provider would refuse its transfer.
+	skipAmbiguousName adoptionSkipReason = "named like a domain id or UUID (rename the domain to adopt it)"
 )
 
 // adoptionGuards are facts from outside the listing that make a clustered
@@ -490,6 +494,10 @@ func planClusteredAdoption(provider *infravirtrigaudiov1beta1.Provider, listed c
 			skip(info, skipStampUnreliable)
 			continue
 		}
+		if ambiguousVMID(info.ID) {
+			skip(info, skipAmbiguousName)
+			continue
+		}
 		if duplicated(info) {
 			skip(info, skipDuplicate)
 			continue
@@ -550,6 +558,30 @@ func crossHostDuplicates(vms []contracts.VMInfo) func(contracts.VMInfo) bool {
 		}
 		return false
 	}
+}
+
+// ambiguousVMID reports whether a listed VM id is one virsh resolves as a
+// domain id (optional sign, decimal digits) or a UUID (32 hex digits, any
+// '-' or space separators) before trying it as a name — so the clustered
+// provider refuses to transfer it (TransferOwner) and adoption skips it
+// instead of creating a VirtualMachine that could only be removed again.
+func ambiguousVMID(id string) bool {
+	s := strings.TrimSpace(id)
+	s = strings.TrimLeft(s, "+-")
+	if s != "" && strings.Trim(s, "0123456789") == "" {
+		return true
+	}
+	hex := 0
+	for _, r := range id {
+		switch {
+		case r == '-' || r == ' ' || r == '\t':
+		case (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F'):
+			hex++
+		default:
+			return false
+		}
+	}
+	return hex == 32
 }
 
 // ownerUIDs returns the non-empty owner UIDs a listed VM is stamped with.

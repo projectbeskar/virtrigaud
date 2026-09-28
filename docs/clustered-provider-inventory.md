@@ -1506,6 +1506,11 @@ slice 4 is refused with a message and nothing is listed. For each listed VM:
    the provider controller runs a clustered Provider with **one replica and
    the `Recreate` strategy** (`spec.runtime.replicas` above 1 is ignored and
    logged), and each host endpoint must belong to **one clustered Provider**.
+   The provider refuses (`InvalidArgument`) an owner whose UID is not a
+   canonical UUID or whose namespace/name are not DNS-1123, and a domain name
+   virsh would read as a domain id or UUID (adoption skips those names); every
+   `virsh` call addresses the domain with `--domain`, and the definition read
+   must name the requested domain.
    The stamp is written with `virsh metadata`
    to the domain's persistent definition (and to the running domain when it is
    active), addressed by UUID, and read back before the call succeeds. A retry
