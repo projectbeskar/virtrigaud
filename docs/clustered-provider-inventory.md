@@ -1657,19 +1657,32 @@ per domain of the Provider.
 **Paths are compared per host, canonically.** The candidate file — the path
 the landing host uses and the path it resolves to there — is resolved again
 with `realpath` on each scanned host and compared with that host's own
-references, raw and resolved. So symbolic links on either side are followed.
+references, raw and resolved; a delete's cloud-init seed directory is resolved
+on each host as well. So symbolic links on either side are followed. Files in
+the libvirt NVRAM directory (`/var/lib/libvirt/qemu/nvram`) are host-local —
+the same path on another host is another file — and are compared on the
+operation's own host only; a clone's UEFI varstore therefore keeps the
+host-local check. Each host is scanned through its `Host` endpoint's libvirt
+instance (`qemu+ssh://…/system` or `…/session`): domains that another libvirt
+instance on the same host runs (another user's session) are not seen.
 **Mount a shared pool at the same path on every host of a Provider** (libvirt's
-shared-storage migration needs that as well). *Residual:* a host that mounts
-the same export under a **different** path, or reaches a file through a second
-mount or a bind mount (which `realpath` does not resolve), is not matched.
-Comparing `(st_dev, st_ino)` does not close that gap: `st_dev` is assigned by
-each NFS client, so it differs between hosts for the same file, and `st_ino`
-alone is not unique across filesystems. Other residuals: a host removed from
-the Provider's inventory (or draining) is not scanned; disks without a host
-path (network disks such as RBD) are not compared; and on a **host-local**
-pool, a previous incarnation on another host leaves no file where the new
-disk goes, so this guard does not see it — the pre-schedule check (A6.2, R4)
-does.
+shared-storage migration needs that as well), and **enable NFS locking** on
+it (NFSv4, or NFSv3 with `lockd`/`statd`): QEMU's own image locks are what stop
+two running domains from opening one disk, and they need working NFS locks.
+*Not matched (residuals):* a host that mounts the same export under a
+**different** path, or reaches a file through a second mount, a bind mount or a
+hard link (`realpath` resolves none of them); and disks without a host path —
+protocol disks such as NBD, RBD or iSCSI. Comparing `(st_dev, st_ino)` does not
+close that gap: `st_dev` is assigned by each NFS client, so it differs between
+hosts for the same file, and `st_ino` alone is not unique across filesystems.
+*The converse:* on **host-local** pools the same path on two hosts is two
+files, so a domain on another host whose disk has the same path is reported
+as a use — a false "in use" that fails safe (refuses) — until a pool ownership
+marker tells the provider which hosts share a pool (a follow-up). Other
+residuals: a host removed from the Provider's inventory is not scanned (see
+*Fencing* below); and on a **host-local** pool a previous incarnation on
+another host leaves no file where the new disk goes, so this guard does not
+see it — the pre-schedule check (A6.2, R4) does.
 
 ### Previous incarnations and the A6 runbook
 

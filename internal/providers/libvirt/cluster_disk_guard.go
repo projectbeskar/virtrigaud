@@ -74,13 +74,23 @@ import (
 // Paths are compared canonically ON EACH HOST: the candidate — as the landing
 // host names it, and as it resolves there — is resolved again with
 // `realpath -m` on the scanned host and compared with that host's raw and
-// canonical references. Residual (documented): a host that mounts the shared
-// export under a DIFFERENT path, or reaches the file through a second mount
-// or a bind mount that realpath does not resolve, is not matched. (st_dev,
-// st_ino) cannot close that gap: st_dev is assigned by each NFS client, so it
-// differs between hosts for the same file, and st_ino alone is not unique
-// across filesystems. Mount a shared pool at the same path on every host of a
-// Provider (libvirt's shared-storage migration requires that too).
+// canonical references; a Delete's seed directory is resolved on each host
+// too. A candidate in a host-local directory (hostLocalDirs: the NVRAM
+// directory) is compared on the operation's own host only. Each host is
+// scanned through its Host endpoint's libvirt instance (qemu+ssh://…/system
+// or …/session): domains of the other instance on that host are not seen.
+// Residuals (documented): a host that mounts the shared export under a
+// DIFFERENT path, reaches the file through a second mount, a bind mount or a
+// hard link (realpath resolves none of them), or uses it as a protocol disk
+// (nbd, rbd, iSCSI: no host path), is not matched. (st_dev, st_ino) cannot
+// close that gap: st_dev is assigned by each NFS client, so it differs between
+// hosts for the same file, and st_ino alone is not unique across filesystems.
+// Mount a shared pool at the same path on every host of a Provider (libvirt's
+// shared-storage migration requires that too). The converse residual: on
+// host-LOCAL pools the same path on two hosts is two files, so a domain on
+// another host with the same disk path is reported as a use (a false "in
+// use", fail-safe) until a pool ownership marker says which hosts share a pool
+// (follow-up).
 //
 // Fail closed: a host that cannot be checked — not leased (unknown, draining,
 // unreachable), past its deadline, or whose domains or disk chains cannot be
@@ -404,7 +414,7 @@ func (p *Provider) scanClusterDiskUse(ctx context.Context, s clusterScan) (clust
 		if hosts[i] == s.target && s.conn != nil {
 			hctx, hcancel := context.WithTimeout(budget, p.effectiveListHostTimeout())
 			defer hcancel()
-			r, err := scanHostDiskUse(hctx, s.conn, s)
+			r, err := scanHostDiskUse(hctx, s.conn, s, false)
 			if err == nil {
 				err = hctx.Err()
 			}
@@ -416,7 +426,7 @@ func (p *Provider) scanClusterDiskUse(ctx context.Context, s clusterScan) (clust
 			if err != nil {
 				return err
 			}
-			r, err := scanHostDiskUse(hctx, vp, s)
+			r, err := scanHostDiskUse(hctx, vp, s, hosts[i] != s.target)
 			scans[i] = r
 			return err
 		})
@@ -470,24 +480,54 @@ func guardHostUnreachable(err error) bool {
 	return contracts.IsHostUnavailable(err) || isHostTransportFailure(err) || stderrors.Is(err, context.DeadlineExceeded)
 }
 
+// hostLocalDirs are directories that are never shared storage: the same path
+// on two hosts is two files. A candidate file inside one is compared on the
+// operation's own host only, never across hosts (ADR-0007 A6.1 review). The
+// libvirt NVRAM directory holds every UEFI domain's varstore by name.
+var hostLocalDirs = []string{"/var/lib/libvirt/qemu/nvram"}
+
+// inHostLocalDir reports whether p (raw or canonical) lies in a hostLocalDirs
+// directory.
+func inHostLocalDir(p string) bool {
+	for _, d := range hostLocalDirs {
+		if strings.HasPrefix(p, strings.TrimSuffix(d, "/")+"/") {
+			return true
+		}
+	}
+	return false
+}
+
 // scanHostDiskUse is one host's scan: every domain defined on the host behind
-// h (domainRefsOnHostBounded; none skipped), the candidate files resolved on
-// this host, and the counts of s.
-func scanHostDiskUse(ctx context.Context, h hostCommandRunner, s clusterScan) (hostDiskScan, error) {
+// h (domainRefsOnHostBounded; none skipped), the candidate files and the seed
+// directory resolved on THIS host, and the counts of s. remote is true for a
+// host other than the operation's own: a candidate in a host-local directory
+// (hostLocalDirs) names another file there and is not compared.
+func scanHostDiskUse(ctx context.Context, h hostCommandRunner, s clusterScan, remote bool) (hostDiskScan, error) {
 	doms, err := domainRefsOnHostBounded(ctx, h, "", clusteredListMaxDomainsPerHost)
 	if err != nil {
 		return hostDiskScan{}, err
 	}
+	lookup := append([]string(nil), s.files...)
+	if s.seedDir != "" {
+		lookup = append(lookup, s.seedDir)
+	}
 	var canon []string
-	if len(s.files) > 0 {
-		if canon, err = canonicalizeOnHost(ctx, h, s.files); err != nil {
+	if len(lookup) > 0 {
+		if canon, err = canonicalizeOnHost(ctx, h, lookup); err != nil {
 			return hostDiskScan{}, err
 		}
+	}
+	compared := make([]bool, len(s.files))
+	for i, f := range s.files {
+		compared[i] = !remote || (!inHostLocalDir(f) && !inHostLocalDir(canon[i]))
 	}
 	out := hostDiskScan{used: make([]bool, len(s.files))}
 	for _, d := range doms {
 		uses := false
 		for i := range s.files {
+			if !compared[i] {
+				continue
+			}
 			if d.refs.files[s.files[i]] || d.refs.contains(canon[i]) {
 				log.Printf("WARN cluster disk guard: file %s is used by domain %s", s.files[i], d.uuid)
 				out.used[i] = true
@@ -497,7 +537,7 @@ func scanHostDiskUse(ctx context.Context, h hostCommandRunner, s clusterScan) (h
 		if uses {
 			out.users++
 		}
-		if s.seedDir != "" && (otherDomains{d}).useUnder(s.seedDir) {
+		if s.seedDir != "" && ((otherDomains{d}).useUnder(s.seedDir) || (otherDomains{d}).useUnder(canon[len(s.files)])) {
 			out.seedUsed = true
 		}
 		if stampsNameOwner(d.owners, s.owner) {

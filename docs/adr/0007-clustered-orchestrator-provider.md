@@ -1759,10 +1759,21 @@ runbook or remove it. There is no opt-in in v0.4.0. A6.2 must also set the
 >   references. Comparing `(st_dev, st_ino)` was considered and not adopted:
 >   `st_dev` is assigned by each NFS client, so it differs between hosts for the
 >   same file, and `st_ino` alone is not unique across filesystems; it would add
->   a command per host and still not close the cross-host gap. *Residual:* a
->   host that mounts the shared export under a different path, or reaches a
->   file through a second or bind mount, is not matched; shared pools must be
->   mounted at the same path on every host of a Provider.
+>   a command per host and still not close the cross-host gap. A delete's seed
+>   directory is resolved on each host too, and a candidate in the host-local
+>   NVRAM directory (`/var/lib/libvirt/qemu/nvram`) is compared on the
+>   operation's own host only (the same path elsewhere is another file; a
+>   clone's varstore keeps the host-local check). Each host is scanned through
+>   its `Host` endpoint's libvirt instance (`/system` or `/session`); another
+>   instance's domains on that host are not seen. *Residuals:* a host that
+>   mounts the shared export under a different path, or reaches a file through
+>   a second mount, a bind mount or a hard link, is not matched, and neither is
+>   a protocol disk (NBD, RBD, iSCSI: no host path); shared pools must be
+>   mounted at the same path on every host of a Provider, with NFS locking
+>   enabled (QEMU's image locks depend on it). Conversely, on host-local pools
+>   the same path on two hosts is two files, so a domain elsewhere with the same
+>   disk path is a false "in use" (fail-safe) until the pool ownership marker
+>   (follow-up) says which hosts share a pool.
 > - **Bounds.** Slice 4's fan-out (`fanOutHosts`, `onHostWithin`, now shared
 >   with `ListVMs`): 8 hosts at a time, 60 s per host, inside the caller's
 >   deadline less 30 s so the operation's own work and its answer still fit.

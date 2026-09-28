@@ -633,6 +633,37 @@ func TestClusteredClone_DiskUsedOnAnotherHostIsRefused(t *testing.T) {
 
 // ─── units ───────────────────────────────────────────────────────────────────
 
+// TestScanHostDiskUse_HostLocalDirsAndSeedDir (security review of A6.1, item
+// 7): a candidate in the host-local NVRAM directory is compared on the
+// operation's own host only — on another host the same path is another file —
+// and the seed directory is resolved again on each scanned host, so a domain
+// there that names it by its resolved path is found.
+func TestScanHostDiskUse_HostLocalDirsAndSeedDir(t *testing.T) {
+	const uuid = "cccccccc-0000-4000-8000-000000000001"
+	const nvram = "/var/lib/libvirt/qemu/nvram/team-a.copy_VARS.fd"
+	const iso = "/tmp/stage/seed/cloud-init.iso"
+	domXML := "<domain id='3'><uuid>" + uuid + "</uuid><os><nvram>" + nvram + "</nvram></os><devices>" +
+		"<disk type='file' device='cdrom'><source file='" + iso + "'/><backingStore/></disk></devices></domain>"
+	h := &scriptedHost{answers: map[string]*VirshResult{
+		"list --all --uuid":                                  {Stdout: uuid + "\n"},
+		"dumpxml " + uuid:                                    {Stdout: domXML},
+		"! realpath -m -z -- " + nvram + " " + iso:           {Stdout: nvram + "\x00" + iso + "\x00"},
+		"! realpath -m -z -- " + nvram + " /stage-link/seed": {Stdout: nvram + "\x00/tmp/stage/seed\x00"},
+	}}
+	s := clusterScan{files: []string{nvram}, seedDir: "/stage-link/seed"}
+
+	remote, err := scanHostDiskUse(context.Background(), h, s, true)
+	require.NoError(t, err)
+	assert.Equal(t, []bool{false}, remote.used, "another host's NVRAM directory is another file")
+	assert.Zero(t, remote.users)
+	assert.True(t, remote.seedUsed, "the seed directory resolved on the scanned host matches its domain's CD-ROM")
+
+	local, err := scanHostDiskUse(context.Background(), h, s, false)
+	require.NoError(t, err)
+	assert.Equal(t, []bool{true}, local.used, "on the operation's own host the NVRAM path is compared")
+	assert.Equal(t, 1, local.users)
+}
+
 func TestStampsNameOwner(t *testing.T) {
 	assert.True(t, stampsNameOwner([]contracts.ObjectIdentity{staleTeamAWeb}, ownerTeamA), "same namespace and name, another UID")
 	assert.True(t, stampsNameOwner([]contracts.ObjectIdentity{ownerTeamA}, ownerTeamA), "the requester's own UID counts too")
