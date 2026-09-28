@@ -178,6 +178,8 @@ func TestHandleDeletion_ConflictKeepsFinalizerWithCondition(t *testing.T) {
 	assert.Contains(t, ready.Message, "delete the linked clones first")
 	assert.Contains(t, ready.Message, infravirtrigaudiov1beta1.VirtualMachineOrphanOnDeleteAnnotation)
 	assert.NotContains(t, ready.Message, "rpc error", "the raw gRPC chain stays out of the condition")
+	assert.Nil(t, meta.FindStatusCondition(after.Status.Conditions, k8s.ConditionDeleteBlocked),
+		"a single-host VM never carries the clustered DeleteBlocked condition")
 
 	// force-delete still wins.
 	after.Annotations = map[string]string{forceDeleteAnnotation: "true"}

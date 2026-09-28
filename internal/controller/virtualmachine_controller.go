@@ -888,7 +888,7 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 					// the hypervisor depend on this one (e.g. a libvirt linked
 					// clone backed by its disk), and deleting it would destroy
 					// their data. Keep the finalizer, say why, and re-check.
-					return r.retainForBlockedDelete(ctx, vm, ref.ID, err), nil
+					return r.retainForBlockedDelete(ctx, vm, ref.ID, err, ref.Routed()), nil
 				case ref.Routed() && (contracts.IsHostUnavailable(err) || contracts.IsVMDiskCheckFailed(err)):
 					// A clustered delete the provider did not perform because a
 					// host it needs could not be reached or checked (ADR-0007
@@ -903,6 +903,11 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 					logger.Error(err, "Failed to delete VM from provider; retaining finalizer and retrying",
 						"id", ref.ID)
 					metrics.RecordError(errReasonProviderDelete, metrics.ComponentManager)
+					// A DeleteBlocked left by an earlier hold no longer says
+					// why the delete waits (A6.1 fix verification, N8).
+					if meta.RemoveStatusCondition(&vm.Status.Conditions, k8s.ConditionDeleteBlocked) {
+						r.updateStatus(ctx, vm)
+					}
 					return ctrl.Result{RequeueAfter: vmDeleteRetryInterval}, nil
 				}
 			}
@@ -956,11 +961,17 @@ func (r *VirtualMachineReconciler) noteLinkedCloneDependents(vm *infravirtrigaud
 // Ready condition and in a Warning event. The provider changed nothing, so the
 // VM stays intact; the delete is re-checked every vmDeleteBlockedRetryInterval
 // and completes once the dependent VMs are gone.
+//
+// For a clustered (routed) VM the DeleteBlocked condition says so too —
+// True/DiskInUse, with a constant message — so a condition left by an earlier
+// hold (HostUnreachable, DiskCheckFailed) never outlives its cause (A6.1 fix
+// verification, N8). A single-host VM never carries DeleteBlocked.
 func (r *VirtualMachineReconciler) retainForBlockedDelete(
 	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
 	id string,
 	err error,
+	routed bool,
 ) ctrl.Result {
 	log.FromContext(ctx).Info("Provider refused to delete the VM because other VMs depend on it; retaining finalizer",
 		"id", id, "retryAfter", vmDeleteBlockedRetryInterval.String(), "error", err.Error())
@@ -975,6 +986,17 @@ func (r *VirtualMachineReconciler) retainForBlockedDelete(
 		Message:            msg,
 		ObservedGeneration: vm.Generation,
 	})
+	if routed {
+		meta.SetStatusCondition(&vm.Status.Conditions, metav1.Condition{
+			Type:               k8s.ConditionDeleteBlocked,
+			Status:             metav1.ConditionTrue,
+			Reason:             k8s.ReasonDiskInUse,
+			Message:            deleteBlockedMessages[k8s.ReasonDiskInUse],
+			ObservedGeneration: vm.Generation,
+		})
+	} else {
+		meta.RemoveStatusCondition(&vm.Status.Conditions, k8s.ConditionDeleteBlocked)
+	}
 	r.updateStatus(ctx, vm)
 	r.recordEvent(vm, corev1.EventTypeWarning, eventReasonDeleteBlocked, msg)
 	return ctrl.Result{RequeueAfter: vmDeleteBlockedRetryInterval}

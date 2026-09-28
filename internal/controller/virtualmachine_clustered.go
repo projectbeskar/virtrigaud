@@ -470,6 +470,9 @@ var deleteBlockedMessages = map[string]string{
 	k8s.ReasonDiskCheckFailed: fmt.Sprintf("Delete blocked: the provider could not verify that no VM on another host of "+
 		"this VirtualMachine's Provider uses its disk, so nothing was deleted; it is retried with a backoff of up to %s. %s",
 		blockedRetryMax, deleteBlockedEscape),
+	k8s.ReasonDiskInUse: fmt.Sprintf("Delete blocked: another VM — on this VirtualMachine's host (e.g. a linked clone of "+
+		"it) or on another host of its Provider — uses its disk, so nothing was deleted; delete that VM first. It is "+
+		"re-checked every %s. %s", vmDeleteBlockedRetryInterval, deleteBlockedEscape),
 }
 
 // retainForUncheckedDelete keeps the finalizer of a clustered VirtualMachine

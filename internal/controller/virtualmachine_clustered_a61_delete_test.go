@@ -150,6 +150,43 @@ func TestHandleDeletion_Clustered_HeldDeleteReasonChangeIsATransition(t *testing
 	assert.Len(t, drainEvents(rec), 2, "one event per transition")
 }
 
+// TestHandleDeletion_Clustered_DeleteBlockedFollowsTheLatestRefusal (A6.1 fix
+// verification, N8): DeleteBlocked always says why the delete waits now. A
+// held delete (HostUnreachable) later refused with VM_DISK_IN_USE becomes
+// DeleteBlocked=True/DiskInUse — never a stale HostUnreachable — and an
+// ordinary failure after that removes the condition.
+func TestHandleDeletion_Clustered_DeleteBlockedFollowsTheLatestRefusal(t *testing.T) {
+	ctx := context.Background()
+	prov := &routingProvider{deleteErr: contracts.NewHostUnavailableError("delete VM: unreachable", nil)}
+	r := clusteredFixture(t, prov, boundClusterVMForDelete())
+	blockedOf := func() *metav1.Condition {
+		return meta.FindStatusCondition(getVM(t, r, "web").Status.Conditions, k8s.ConditionDeleteBlocked)
+	}
+	_, err := r.handleDeletion(ctx, deletingClusterVM(t, r, "web"))
+	require.NoError(t, err)
+	require.Equal(t, k8s.ReasonHostUnreachable, blockedOf().Reason)
+
+	prov.deleteErr = contracts.NewConflictError(`delete: delete of libvirt domain "default.web" refused: 1 domain(s) on `+
+		`other hosts of this Provider use its disk(s)`, fmt.Errorf("%w: rpc error: code = FailedPrecondition", contracts.ErrVMDiskInUse))
+	res, err := r.handleDeletion(ctx, getVM(t, r, "web"))
+	require.NoError(t, err)
+	assert.Equal(t, vmDeleteBlockedRetryInterval, res.RequeueAfter)
+	blocked := blockedOf()
+	require.NotNil(t, blocked)
+	assert.Equal(t, metav1.ConditionTrue, blocked.Status)
+	assert.Equal(t, k8s.ReasonDiskInUse, blocked.Reason)
+	assert.NotContains(t, blocked.Message, "host-alpha", "no host is named")
+	assert.Contains(t, blocked.Message, infrav1beta1.VirtualMachineOrphanOnDeleteAnnotation)
+	assert.Contains(t, getVM(t, r, "web").Finalizers, infrav1beta1.VirtualMachineFinalizer)
+
+	prov.deleteErr = fmt.Errorf("delete: the hypervisor said no")
+	res, err = r.handleDeletion(ctx, getVM(t, r, "web"))
+	require.NoError(t, err)
+	assert.Equal(t, vmDeleteRetryInterval, res.RequeueAfter)
+	assert.Nil(t, blockedOf(), "an ordinary failure removes a DeleteBlocked that no longer applies")
+	assert.Contains(t, getVM(t, r, "web").Finalizers, infrav1beta1.VirtualMachineFinalizer)
+}
+
 // TestHandleDeletion_SingleHost_DiskCheckFailedUnchanged: a single-host VM's
 // delete answered VM_DISK_CHECK_FAILED keeps its historical handling — the
 // fixed delete retry, no DeleteBlocked condition.

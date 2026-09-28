@@ -1710,9 +1710,12 @@ runbook or remove it. There is no opt-in in v0.4.0. A6.2 must also set the
 >   constant message naming no host, one `Warning` event per transition, and a
 >   per-VM exponential backoff from when the hold began (15 s doubling to
 >   5 min; the same backoff paces `RestorePending` and a clustered create
->   answered `VM_DISK_CHECK_FAILED`). `orphan-on-delete` or `force-delete` are
+>   answered `HOST_UNAVAILABLE` or `VM_DISK_CHECK_FAILED`). `orphan-on-delete` or `force-delete` are
 >   acted on at once — a VM being deleted is reconciled on every update — and
->   release the VirtualMachine, leaving the domain. The cloud-init seed
+>   release the VirtualMachine, leaving the domain. `DeleteBlocked` always
+>   says why the delete waits now *(fix verification, N8)*: a `VM_DISK_IN_USE`
+>   refusal sets it to `DiskInUse` (re-checked every minute), and an ordinary
+>   failure removes it. The cloud-init seed
 >   directory is host-local staging: when it alone would be removed, a failed
 >   scan keeps it and the delete proceeds.
 > - **What R3 covers on `Create` and `Clone`.** The landing host probes every

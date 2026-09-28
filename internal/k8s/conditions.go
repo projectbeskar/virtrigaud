@@ -209,7 +209,8 @@ const (
 // ConditionDeleteBlocked is True while the deletion of a clustered
 // VirtualMachine is held because the provider could not delete it safely yet
 // (ADR-0007 A6.1). Its reason says why (ReasonHostUnreachable,
-// ReasonDiskCheckFailed, ReasonOwnDomainOnAnotherHost); Ready is False with
+// ReasonDiskCheckFailed, ReasonOwnDomainOnAnotherHost, ReasonDiskInUse); it
+// is removed when a later delete attempt fails for another reason. Ready is False with
 // ReasonDeleteBlocked meanwhile. Its LastTransitionTime is when the hold
 // began, which paces the retries (15 s doubling to 5 min). Its message never
 // names a host.
@@ -232,6 +233,10 @@ const (
 	// its pending host would leave that domain running, so the finalizer is
 	// kept until the pending host points at it.
 	ReasonOwnDomainOnAnotherHost = "OwnDomainOnAnotherHost"
+	// ReasonDiskInUse: the provider refused the delete because another VM —
+	// on the VM's own host (e.g. a linked clone of it) or on another host of
+	// the Provider — uses its disk (VM_DISK_IN_USE). Nothing was deleted.
+	ReasonDiskInUse = "DiskInUse"
 )
 
 // ReasonPlacementTopologyMismatch indicates that a VirtualMachine records a
