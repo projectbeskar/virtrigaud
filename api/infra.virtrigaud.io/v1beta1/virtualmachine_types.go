@@ -268,8 +268,9 @@ type VirtualMachineStatus struct {
 	// On, Off, or — from a provider that can tell (libvirt) — Suspended (the
 	// VM is paused or suspended to RAM: still active, not powered off) or
 	// Unknown. While a VM is Suspended or Unknown it is not reconfigured and
-	// not powered on; a Suspended VM whose spec.powerState is Off (or
-	// OffGraceful) is powered off.
+	// not powered on; a Suspended VM whose spec.powerState is Off is powered
+	// off (hard), while OffGraceful is held until the VM is resumed (a
+	// suspended guest cannot shut down gracefully).
 	// +optional
 	PowerState ObservedPowerState `json:"powerState,omitempty"`
 

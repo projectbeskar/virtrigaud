@@ -111,11 +111,17 @@ func TestReconcileVM_SuspendedOrUnknown_NeitherPoweredNorReconfigured(t *testing
 	}
 }
 
-// TestReconcileVM_SuspendedWithSpecOff_IsPoweredOff (review H4): a Suspended
-// VM whose spec asks for Off (or OffGraceful — a suspended guest cannot shut
-// down gracefully) is powered off (destroy); it is still not reconfigured.
+// TestReconcileVM_SuspendedWithSpecOff_IsPoweredOff (review H4, L3): a
+// Suspended VM whose spec asks for Off is powered off (destroy); one whose
+// spec asks for OffGraceful is held — a suspended guest cannot shut down
+// gracefully, and OffGraceful is never turned into a hard power-off — with a
+// condition saying a hard Off is required. Neither is reconfigured.
 func TestReconcileVM_SuspendedWithSpecOff_IsPoweredOff(t *testing.T) {
-	for _, desired := range []infravirtrigaudiov1beta1.PowerState{infravirtrigaudiov1beta1.PowerStateOff, infravirtrigaudiov1beta1.PowerStateOffGraceful} {
+	cases := map[infravirtrigaudiov1beta1.PowerState][]contracts.PowerOp{
+		infravirtrigaudiov1beta1.PowerStateOff:         {contracts.PowerOpOff},
+		infravirtrigaudiov1beta1.PowerStateOffGraceful: nil,
+	}
+	for desired, wantOps := range cases {
 		t.Run(string(desired), func(t *testing.T) {
 			prov := &powerRecordingProvider{fakeDescribeProvider: fakeDescribeProvider{
 				DescribeFn: func(context.Context, string) (contracts.DescribeResponse, error) {
@@ -132,8 +138,14 @@ func TestReconcileVM_SuspendedWithSpecOff_IsPoweredOff(t *testing.T) {
 
 			_, err := r.reconcileVM(context.Background(), vm)
 			require.NoError(t, err)
-			assert.Equal(t, []contracts.PowerOp{contracts.PowerOpOff}, prov.powerOps, "powered off (destroy), as the spec asks")
+			assert.Equal(t, wantOps, prov.powerOps)
 			assert.Zero(t, prov.reconfigures)
+			if wantOps == nil {
+				ready := meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionReady)
+				require.NotNil(t, ready)
+				assert.Equal(t, k8s.ReasonPowerStateUnmanaged, ready.Reason)
+				assert.Contains(t, ready.Message, "Set spec.powerState: Off to power it off (hard)")
+			}
 		})
 	}
 }
