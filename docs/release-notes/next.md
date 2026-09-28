@@ -51,7 +51,11 @@ Read the upgrade guide before upgrading:
   restart required (`Reconfiguring=True/RestartRequired`: power-cycle the VM),
   or it fails (`Reconfiguring=False/ProviderError`). A memory shrink of a
   running VM always needs a restart. `status.powerState` can now be
-  `Suspended` or `Unknown`, and such a VM is left alone.
+  `Suspended` or `Unknown`; such a VM is not resized or powered on (a
+  suspended one is powered off if its spec says `Off`). On clustered
+  Providers, resizes are held until the libvirt provider reports
+  `supportsHonestReconfigure` — roll the providers promptly after the
+  manager.
   → [Upgrade guide](docs/upgrading.md#breaking-changes),
   [`docs/reconfigure-results.md`](docs/reconfigure-results.md)
 
@@ -147,8 +151,13 @@ providers), and rollback caveats in
   running and the next-boot size. A paused or suspended domain is reported as
   `Suspended` (never `Off`) and is not reconfigured. On clustered Providers, a
   VM's memory ceiling is recorded once from the provider
-  (`DescribeResponse.max_memory_mib`) when missing and lowered after a
-  confirmed shrink (→ [`docs/reconfigure-results.md`](docs/reconfigure-results.md)).
+  (`DescribeResponse.max_memory_mib`) when missing, raised when the provider
+  reports more and lowered after a confirmed shrink; its recorded CPU is raised
+  to the vCPUs `Describe` reports; a failed Reconfigure is counted at the
+  larger size and retried on a per-VM backoff (5 s to 5 min); the disk is grown
+  before any CPU/memory change; and a single-host per-VM failure no longer
+  counts toward the Provider's circuit breaker
+  (→ [`docs/reconfigure-results.md`](docs/reconfigure-results.md)).
 - vSphere `Describe` no longer treats a transient vCenter error as "the VM is
   gone" (which used to trigger a spurious re-create).
 - libvirt: hardware-accelerated `<domain type='kvm'>` is used again on hosts

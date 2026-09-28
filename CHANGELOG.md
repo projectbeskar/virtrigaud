@@ -49,6 +49,42 @@ A security review found that deleting a running linked clone deleted its source 
 - [ ] Config change only
 - [ ] Documentation only
 
+## [2026-09-28 06:47] - Security review of the honest Reconfigure result: failures counted at the larger size, disk first, backoff, honest-reconfigure capability
+**Author:** @wrkode (William Rizzo)
+
+> **Operator note.**
+>
+> - **Clustered Providers: resizes are held until the provider reports `supportsHonestReconfigure`.** Roll the libvirt provider images promptly after the manager; until then resizes of clustered VMs wait (`Reconfiguring=False/ProviderLacksHonestReconfigure`). Single-host Providers are resized as before (warning logged).
+> - **Upgrade the CRDs first**: readiness also requires `Provider` `status.reportedCapabilities.supportsHonestReconfigure`.
+> - A failed Reconfigure is retried on a per-VM backoff (5 s doubling to 5 min) instead of every 5 s.
+
+### Added
+- `proto/provider/v1/provider.proto`: `DescribeResponse.vcpus` (field 7; the vCPUs online, 0 = not reported) and `GetCapabilitiesResponse.supports_honest_reconfigure` (field 19). Additive; bindings regenerated. `contracts.DescribeResponse.VCPUs`, `contracts.Capabilities.SupportsHonestReconfigure`, mapped by `internal/transport/grpc/client.go`. `contracts.ReconfigureResult` / `restart_required` unchanged.
+- `sdk/provider/capabilities/capabilities.go`: `CapabilityHonestReconfigure` and `Builder.HonestReconfigure()`.
+- `api/infra.virtrigaud.io/v1beta1/provider_types.go`: `status.reportedCapabilities.supportsHonestReconfigure` (CRD regenerated); `internal/controller/provider_controller.go` surfaces it; `internal/controller/vmcrdfeatures.go` readiness requires it.
+- `internal/k8s/conditions.go`: reason `ProviderLacksHonestReconfigure`.
+
+### Fixed
+- `internal/providers/libvirt/reconfigure.go`: the disk is grown before any CPU/memory change, so a disk grow a tenant's VMClass forces to fail leaves no CPU/memory grow applied (review H1c). The single-host golden was regenerated in its own commit (disk-first order).
+- `internal/controller/virtualmachine_reconfigure_result.go`, `virtualmachine_controller.go`: a failed Reconfigure on a clustered Provider records `status.currentResources` = max(recorded, desired) per resource, as for restart-required, because it may have applied part of the change; `Reconfiguring=False/ProviderError` carries `observedGeneration` and is also set when the failure is handled as host-scoped (review H1a). Single-host is untouched (no capacity accounting; #354 rule). `syncMemoryCeiling` raises a recorded ceiling to a higher provider-reported maximum and no longer lowers it after a failure (H1b); `syncRecordedCPU` raises a clustered VM's recorded CPU to the vCPUs `Describe` reports (H1d).
+- `internal/controller/virtualmachine_reconfigure_result.go`, `virtualmachine_placement_capacity.go`: the failed-Reconfigure re-send is paced by a per-VM backoff, 5 s doubling to 5 min, reusing the placement backoff (`nextWithin`/`remaining`); a spec change is sent at once; success resets it (review H2).
+- `internal/providers/libvirt/server.go`, `provider_virsh.go`: a single-host Reconfigure that failed on the VM carries `VM_OPERATION_FAILED` (historical code and message kept) and no longer counts toward the manager's circuit breaker; an unreachable host keeps the plain, counted error (review H2).
+- `internal/controller/virtualmachine_reconfigure_result.go`, `virtualmachine_controller.go`, `virtualmachine_resize_gate.go`: no resize — grow, shrink, or shrink applied while off — is sent to a clustered Provider that does not report `supportsHonestReconfigure` (review H3). libvirt advertises it; vSphere, Proxmox and mock do not yet.
+- `internal/controller/virtualmachine_controller.go`: a `Suspended` VM whose `spec.powerState` is `Off`/`OffGraceful` is powered off (destroy); `Unknown` stays fully hands-off (review H4).
+- `internal/providers/libvirt/provider_virsh.go`, `shadow.go`: `Describe` reports `VCPUs` (dominfo `CPU(s)` / live `<vcpu current>`).
+
+### Changed
+- `docs/upgrading.md`: rows for the capability hold and the updated Reconfigure/Suspended behaviour; the `ObservedPowerState` Go type is wire- but not source-compatible; do not downgrade the CRD while VMs are `Suspended`/`Unknown`; pre-release clustered domains can still suspend to RAM (safe; `<pm>` backfill is a follow-up); third-party providers' non-enum states read as `Unknown` (review H5). `docs/reconfigure-results.md`, `docs/clustered-provider-inventory.md`, `docs/adr/0007-clustered-orchestrator-provider.md`, `docs/release-notes/next.md` updated.
+
+### Why
+Security review of the honest-Reconfigure change: a tenant could force a failure after an admitted grow (a huge VMClass disk size), revert the spec, and leave the domain at the grown size while it was counted at the old one; a failing resize was retried every 5 s and single-host failures tripped the breaker; an older provider's reply was still trusted; hands-off blocked powering off a suspended VM.
+
+### Impact
+- [x] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-09-27 08:55] - Fix: libvirt Reconfigure applies every change or reports it (restart required / error); "Off" means powered off
 **Author:** @wrkode (William Rizzo)
 

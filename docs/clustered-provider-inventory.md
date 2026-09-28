@@ -789,8 +789,9 @@ a shrink of a running VM at once; it is applied at the VM's next power cycle
 (below).
 
 A VM reported **`Suspended`** (paused, or suspended to RAM by its guest) is not
-powered off: it resumes at the size it has. The manager neither powers it on or
-off nor resizes it while it is suspended (`Ready=False/PowerStateUnmanaged`),
+powered off: it resumes at the size it has. The manager neither powers it on nor
+resizes it while it is suspended (`Ready=False/PowerStateUnmanaged`) — it powers
+it off only if its `spec.powerState` is `Off` —
 and the libvirt provider refuses to change a domain that is active but not
 running. New clustered domains are created with guest suspend to RAM and to
 disk disabled.
@@ -807,8 +808,19 @@ enough). Until then `status.currentResources` holds, per resource, the larger of
 the size it runs with and the size it will boot with — a grow is counted at
 once, a shrink only once applied — and the provider is asked again every
 2 minutes (or at once after a spec change). A change the provider cannot apply
-at all fails (`Reconfiguring=False/ProviderError`), and `status.currentResources`
-is left as it was.
+at all fails (`Reconfiguring=False/ProviderError`); since it may have applied
+part of the change, the VM is then counted at the larger of its old and its
+requested size, and the call is retried on a per-VM backoff (5 s doubling to
+5 min) until one succeeds. The libvirt provider grows the disk before any CPU or
+memory change, so a disk grow the host refuses fails the call before anything
+else changes. A VM is also never counted below the vCPUs, or the memory
+maximum, its provider reports it has.
+
+**A Provider must report the honest Reconfigure result.** A resize is sent to a
+clustered Provider only if it reports
+`status.reportedCapabilities.supportsHonestReconfigure` (the current libvirt
+provider does). Otherwise — an older provider image — the VM keeps its size and
+gets `Reconfiguring=False` with reason `ProviderLacksHonestReconfigure`.
 
 **Detaching (orphan-on-delete) needs the Provider's permission.** A VM detached
 with `virtrigaud.io/orphan-on-delete` keeps running but stops counting. So a VM

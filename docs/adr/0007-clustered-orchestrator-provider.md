@@ -1162,6 +1162,15 @@ follows; A2's `pendingHost` is its prerequisite.
 > suspended to RAM for powered off — and new clustered domains are created
 > with guest suspend disabled (`<pm>`).
 >
+> *(Amended 2026-09-28, security review of the honest result.)* A failed
+> `Reconfigure` may have applied part of the change, so on a clustered Provider
+> it is counted like a restart-pending one, at the larger size; the libvirt
+> provider grows the disk (the step a tenant's VMClass can make fail) before
+> any CPU or memory change; the recorded CPU and memory ceiling are raised
+> whenever `Describe` reports more (`DescribeResponse.vcpus`,
+> `max_memory_mib`); and no resize is sent to a clustered Provider that does
+> not report `supports_honest_reconfigure` (`ProviderLacksHonestReconfigure`).
+>
 > Single-host and thin-client Providers never schedule, so none of this reaches
 > them (D9).
 
