@@ -84,7 +84,7 @@ func newRoutedSCD(t *testing.T, hosts map[string]map[string]string) *routedSCD {
 	// staging); mktemp never creates anything outside the test's directories.
 	for tool, script := range map[string]string{
 		"flock": routedFakeFlock, "timeout": routedFakeTimeout, "sh": routedGuardShell, "mktemp": routedFakeMktemp,
-		"virsh": routedFakeVirsh, "qemu-img": routedFakeQemuImg, "sudo": routedFakeSudo,
+		"qemu-img": routedFakeQemuImg, "sudo": routedFakeSudo,
 	} {
 		require.NoError(t, os.WriteFile(filepath.Join(bin, tool), []byte(script), 0o755)) //nolint:gosec // test shim must be executable
 	}
@@ -117,22 +117,6 @@ done
 if [ -f "$FAKE_SCD_DIR/local/flock-busy" ]; then exit "$code"; fi
 shift
 exec "$@"
-`
-
-// routedFakeVirsh is scdFakeTool's virsh, plus `list --all --uuid` (the
-// host-wide in-use check lists every domain by UUID): the UUIDs of the host's
-// seeded domains.
-const routedFakeVirsh = `#!/bin/sh
-case "$*" in *"list --all --uuid"*)
-  host=local; if [ "$1" = -c ]; then host="${2##*/}"; fi
-  printf '%s virsh list --all --uuid\n' "$host" >> "$FAKE_SCD_DIR/calls.log"
-  for f in "$FAKE_SCD_DIR/$host"/dom-*-*-*-*-*.xml; do
-    [ -f "$f" ] || continue
-    n="${f##*/dom-}"; echo "${n%.xml}"
-  done
-  exit 0 ;;
-esac
-exec "$FAKE_SCD_TOOLS/virsh" "$@"
 `
 
 // routedFakeQemuImg is scdFakeTool's qemu-img, plus `info --backing-chain`

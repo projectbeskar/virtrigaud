@@ -41,11 +41,14 @@ import (
 // GetDiskInfo, ExportDisk and TaskStatus — driven through the gRPC Server, the
 // path production serves — emit exactly the virsh / host command sequence,
 // return exactly the response and error, and (Clone) define exactly the domain
-// XML they did before slice 3. The expected results live in
+// XML they do without slice 3. The expected results live in
 // testdata/single_host_snapshot_clone_disk.golden.json, captured by running
-// this test against origin/main at 392d79a (before any slice 3 provider
-// change) with VIRTRIGAUD_UPDATE_CALLSEQ_GOLDEN=1. A change to any of them —
-// which would restart the ADR-0008 D5 soak window — fails here.
+// this test file against origin/main — first at 392d79a, then again at df4ec4f
+// for #358's single-host changes (disk-dependents guard, linked clones
+// refused, the private-directory write path, the varstore dd) — with
+// VIRTRIGAUD_UPDATE_CALLSEQ_GOLDEN=1; the slice 3 branch reproduces it byte
+// for byte. A change to any of them — which would restart the ADR-0008 D5
+// soak window — fails here.
 
 // scdGoldenFile is the golden single-host snapshot / clone / disk results.
 const scdGoldenFile = "testdata/single_host_snapshot_clone_disk.golden.json"
@@ -65,12 +68,16 @@ const (
 // logged as "<host> <tool> <args>" — the host is the -c URI path for virsh,
 // "local" otherwise. Per host, fail-<subcommand or tool> makes it fail, "state"
 // holds the domstate answer (default "shut off"), snaps-<domain> the snapshot
-// list, and dom-<name>.xml marks a domain as present. mktemp is deterministic
+// list, and dom-<name>.xml marks a domain as present (`list --all --uuid`
+// prints the UUID of every domain seeded under its UUID, as #358's disk
+// guards read the host). mktemp is deterministic
 // (the X run becomes 0000000000) and creates what it names only inside the
 // test's own directories (FAKE_SCD_DIR, FAKE_SCD_STAGING) — never in a real
 // host directory such as /var/lib/libvirt/images; sh answers "no such path"
-// for every host existence check; every other host tool (mv included: it
-// never moves a real file) only logs.
+// for every host existence check and runs withUmask's fixed script
+// (umaskExecScript) for real, so the command it wraps (qemu-img, sudo dd)
+// reaches its fake; every other host tool (mv included: it never moves a real
+// file) only logs.
 const scdFakeTool = `#!/bin/sh
 tool=$(basename "$0")
 host=local
@@ -82,7 +89,12 @@ nodom() { echo "error: failed to get domain '$1'" >&2; exit 1; }
 case "$tool" in
 virsh)
   case "$1" in
-    list) cat "$d/list.txt" ;;
+    list)
+      if [ "$*" = "list --all --uuid" ]; then
+        for f in "$d"/dom-*-*-*-*-*.xml; do [ -f "$f" ] || continue; n="${f##*/dom-}"; echo "${n%.xml}"; done
+      else
+        cat "$d/list.txt"
+      fi ;;
     dumpxml) fail dumpxml; if [ -f "$d/dom-$2.xml" ]; then cat "$d/dom-$2.xml"; else nodom "$2"; fi ;;
     domstate)
       fail domstate
@@ -121,6 +133,8 @@ mktemp)
 qemu-img)
   fail qemu-img
   if [ "$1" = info ]; then printf '{"virtual-size": 10737418240, "actual-size": 1073741824, "format": "qcow2"}\n'; fi ;;
+sh)
+  case "$2" in '` + umaskExecScript + `') exec /bin/sh "$@" ;; esac ;;
 *) exit 0 ;;
 esac
 `
