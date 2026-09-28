@@ -297,7 +297,7 @@ func (v *VirshProvider) runOverSSHStdin(ctx context.Context, remoteCmd string, s
 			// stderr — is empty. Surface the connect-stage error text there
 			// instead, so a transient connection failure (#191) is still
 			// classified and retried under the new transport.
-			stderr.WriteString(runErr.Error())
+			_, _ = stderr.WriteString(runErr.Error()) // headTailBuffer writes never fail
 		}
 	}
 
