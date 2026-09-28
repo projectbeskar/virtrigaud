@@ -34,20 +34,21 @@ import (
 
 // This file pins D9 for Power and Reconfigure (ADR-0007 Addendum A, slice 2):
 // on a SINGLE-HOST provider both run on p.virshProvider and emit exactly the
-// virsh / host command sequence they emitted before routing. The expected
-// sequences live in testdata/single_host_power_reconfigure.golden.json, which
-// was captured by running this very test against origin/main at 5c4a335 (the
-// commit before the Power/Reconfigure cores were refactored) with
-// VIRTRIGAUD_UPDATE_CALLSEQ_GOLDEN=1. A change to any single-host sequence —
-// which would restart the ADR-0008 D5 soak window — fails here.
-//
-// Deliberately regenerated once since (delete-safety fix, review item 5): a
-// successful start (power-on, power-on-define-fails, power-reboot,
-// power-reboot-stop-fails) is followed by the read-only linked-clone
-// dependents count — `dumpxml` of the domain and `list --all --uuid`.
+// virsh / host command sequence pinned in
+// testdata/single_host_power_reconfigure.golden.json. The Power sequences were
+// captured against origin/main at 5c4a335 (the commit before the
+// Power/Reconfigure cores were refactored) and deliberately regenerated once
+// since (delete-safety fix, review item 5): a successful start (power-on,
+// power-on-define-fails, power-reboot, power-reboot-stop-fails) is followed by
+// the read-only linked-clone dependents count — `dumpxml` of the domain and
+// `list --all --uuid`. The Reconfigure sequences, errors and restart-required
+// answers were deliberately re-captured (VIRTRIGAUD_UPDATE_CALLSEQ_GOLDEN=1)
+// when Reconfigure stopped reporting success for changes it did not apply (the
+// honest-result fix, see reconfigure.go). A change to any single-host sequence
+// — which would restart the ADR-0008 D5 soak window — fails here.
 
-// callSeqGoldenFile is the golden single-host call sequences, captured on
-// origin/main before the slice 2 refactor.
+// callSeqGoldenFile is the golden single-host call sequences (see the file
+// comment for when each part was captured).
 const callSeqGoldenFile = "testdata/single_host_power_reconfigure.golden.json"
 
 // callSeqUpdateEnv, set to "1", rewrites callSeqGoldenFile from the current
@@ -65,8 +66,15 @@ var opsDiskPath string // inside fixtureImagesDir (set by TestMain)
 // opsFakeVirsh is a scriptable fake `virsh`. It routes on the -c URI (the host
 // tag is the URI path, "local" without -c), logs every call as
 // "<host> <args>", and answers the subcommands Power and Reconfigure use. Per
-// host, a file named fail-<subcommand> makes that subcommand fail, "state"
-// holds the domstate answer (default "shut off"), "disktype" / "disksource"
+// host, a file named fail-<subcommand> makes that subcommand fail
+// (fail-<subcommand>-live / -config / -maximum only its call with that flag,
+// fail-inactive the `dumpxml --inactive` read), "state"
+// holds the domstate answer (default "shut off"), "id" / "vcpus" / "maxmem" /
+// "usedmem" the dominfo Id, CPU(s), Max memory and Used memory (KiB; default
+// "-", 2, 2097152, 2097152), "cfg-vcpus" / "cfg-maxvcpus" / "cfg-mem" /
+// "cfg-maxmem" the persistent definition `dumpxml --inactive` reports (same
+// defaults), "capacity" the domblkinfo Capacity in bytes (default 10 GiB),
+// "disktype" / "disksource"
 // override the primary disk `domblklist --details` reports (default: a file
 // disk at $FAKE_DISK_PATH), "dead" makes every call die without an exit status
 // (the host dropped the connection), "nolibvirtd" makes every call fail as
@@ -82,6 +90,17 @@ fail() { if [ -f "$d/fail-$1" ]; then echo "error: scripted failure of $1" >&2; 
 nodom() { echo "error: failed to get domain '$1'" >&2; exit 1; }
 if [ -f "$d/dead" ]; then kill -9 $$; fi
 if [ -f "$d/nolibvirtd" ]; then echo "error: failed to connect to the hypervisor" >&2; exit 1; fi
+if [ "$1" = "dumpxml" ] && [ "$3" = "--inactive" ]; then
+  fail inactive
+  [ -f "$d/dom-$2.xml" ] || nodom "$2"
+  vc=2; mvc=2; mem=2097152; mmem=2097152
+  if [ -f "$d/cfg-vcpus" ]; then vc=$(cat "$d/cfg-vcpus"); fi
+  if [ -f "$d/cfg-maxvcpus" ]; then mvc=$(cat "$d/cfg-maxvcpus"); fi
+  if [ -f "$d/cfg-mem" ]; then mem=$(cat "$d/cfg-mem"); fi
+  if [ -f "$d/cfg-maxmem" ]; then mmem=$(cat "$d/cfg-maxmem"); fi
+  printf "<domain type='kvm'>\n  <name>%s</name>\n  <memory unit='KiB'>%s</memory>\n  <currentMemory unit='KiB'>%s</currentMemory>\n  <vcpu placement='static' current='%s'>%s</vcpu>\n</domain>\n" "$2" "$mmem" "$mem" "$vc" "$mvc"
+  exit 0
+fi
 case "$1" in
   list) if [ "$3" = "--uuid" ]; then cat "$d/uuids.txt" 2>/dev/null; else cat "$d/list.txt"; fi ;;
   pool-dumpxml) printf "<pool type='dir'><name>default</name><target><path>%s</path></target></pool>\n" "$FAKE_POOL_DIR" ;;
@@ -90,13 +109,21 @@ case "$1" in
     [ -f "$d/dom-$2.xml" ] || nodom "$2"
     uuid=11111111-2222-4333-8444-555555555555
     if [ -f "$d/uuid" ]; then uuid=$(cat "$d/uuid"); fi
-    printf 'Id:             -\nName:           %s\nUUID:           %s\nState:          shut off\nCPU(s):         2\nMax memory:     2097152 KiB\n' "$2" "$uuid" ;;
+    id=-; cpus=2; maxmem=2097152; usedmem=2097152
+    if [ -f "$d/id" ]; then id=$(cat "$d/id"); fi
+    if [ -f "$d/vcpus" ]; then cpus=$(cat "$d/vcpus"); fi
+    if [ -f "$d/maxmem" ]; then maxmem=$(cat "$d/maxmem"); fi
+    if [ -f "$d/usedmem" ]; then usedmem=$(cat "$d/usedmem"); fi
+    printf 'Id:             %s\nName:           %s\nUUID:           %s\nState:          shut off\nCPU(s):         %s\nMax memory:     %s KiB\nUsed memory:    %s KiB\n' "$id" "$2" "$uuid" "$cpus" "$maxmem" "$usedmem" ;;
   domstate)
     fail domstate
     [ -f "$d/dom-$2.xml" ] || nodom "$2"
     if [ -f "$d/state" ]; then cat "$d/state"; else echo "shut off"; fi ;;
   start|destroy|shutdown|setvcpus|setmem|setmaxmem|blockresize|undefine)
     fail "$1"
+    case "$*" in *--live*) fail "$1-live" ;; esac
+    case "$*" in *--config*) fail "$1-config" ;; esac
+    case "$*" in *--maximum*) fail "$1-maximum" ;; esac
     [ -f "$d/dom-$2.xml" ] || nodom "$2" ;;
   vol-resize|define) fail "$1"; exit 0 ;;
   domblklist)
@@ -110,7 +137,9 @@ case "$1" in
     esac ;;
   domblkinfo)
     fail domblkinfo
-    printf 'Capacity:       10737418240\nAllocation:     1073741824\nPhysical:       1073741824\n' ;;
+    capacity=10737418240
+    if [ -f "$d/capacity" ]; then capacity=$(cat "$d/capacity"); fi
+    printf 'Capacity:       %s\nAllocation:     1073741824\nPhysical:       1073741824\n' "$capacity" ;;
   qemu-agent-command)
     fail qemu-agent-command
     case "$*" in
@@ -168,18 +197,21 @@ func (f *routingFixture) script(host, name, content string) {
 }
 
 // callSeqScenario is one single-host Power or Reconfigure call whose command
-// sequence is pinned.
+// sequence is pinned. run reports whether a Reconfigure left a change pending
+// a restart (always false for Power).
 type callSeqScenario struct {
 	name  string
 	setup func(fx *routingFixture)
-	run   func(ctx context.Context, p *Provider) error
+	run   func(ctx context.Context, p *Provider) (restartRequired bool, err error)
 }
 
-// callSeqResult is what a scenario produced: the logged commands and the
-// returned error ("" on success).
+// callSeqResult is what a scenario produced: the logged commands, the
+// returned error ("" on success) and, for a Reconfigure, whether it reported a
+// restart required (omitted when false, so the Power entries are unchanged).
 type callSeqResult struct {
-	Calls []string `json:"calls"`
-	Err   string   `json:"err"`
+	Calls           []string `json:"calls"`
+	Err             string   `json:"err"`
+	RestartRequired bool     `json:"restartRequired,omitempty"`
 }
 
 // reconfigureTo is a desired state for Reconfigure: cpu/memMiB/diskGiB of 0
@@ -193,25 +225,38 @@ func reconfigureTo(cpu, memMiB, diskGiB int32) contracts.CreateRequest {
 }
 
 // singleHostCallSeqScenarios covers every Power op (success and fallback /
-// failure variants) and every Reconfigure branch: offline CPU/memory/disk,
-// online CPU/memory (success and beyond-headroom failure), online disk grow
-// with and without the guest agent, a failed blockresize, a no-op and a
-// domstate failure.
+// failure variants) and every Reconfigure branch: offline CPU/memory/disk
+// (applied, a failed persistent change, a failed setmaxmem, a disk already
+// large enough), online CPU/memory (applied live within the hot-add ceilings,
+// beyond them and shrinks — restart required), online disk grow with and
+// without the guest agent, a failed blockresize, a no-op, a domstate failure,
+// and the refusal of a paused or PM-suspended domain.
 func singleHostCallSeqScenarios() []callSeqScenario {
 	vm := contracts.VMRef{ID: opsDomainName}
-	power := func(op contracts.PowerOp) func(context.Context, *Provider) error {
-		return func(ctx context.Context, p *Provider) error {
+	power := func(op contracts.PowerOp) func(context.Context, *Provider) (bool, error) {
+		return func(ctx context.Context, p *Provider) (bool, error) {
 			_, err := p.Power(ctx, vm, op)
-			return err
+			return false, err
 		}
 	}
-	reconfigure := func(desired contracts.CreateRequest) func(context.Context, *Provider) error {
-		return func(ctx context.Context, p *Provider) error {
-			_, err := p.Reconfigure(ctx, vm, desired)
-			return err
+	reconfigure := func(desired contracts.CreateRequest) func(context.Context, *Provider) (bool, error) {
+		return func(ctx context.Context, p *Provider) (bool, error) {
+			res, err := p.Reconfigure(ctx, vm, desired)
+			return res.RestartRequired, err
 		}
 	}
-	running := func(fx *routingFixture) { fx.script("single", "state", "running\n") }
+	running := func(fx *routingFixture) {
+		fx.script("single", "state", "running\n")
+		fx.script("single", "id", "7")
+	}
+	// hotAdd scripts a running VM created with CPU and memory hot-add: an 8
+	// vCPU and 8 GiB ceiling above its 2 vCPUs and 2 GiB.
+	hotAdd := func(fx *routingFixture) {
+		running(fx)
+		fx.script("single", "cfg-maxvcpus", "8")
+		fx.script("single", "maxmem", "8388608")
+		fx.script("single", "cfg-maxmem", "8388608")
+	}
 	return []callSeqScenario{
 		{name: "power-on", run: power(contracts.PowerOpOn)},
 		{name: "power-on-start-fails", setup: func(fx *routingFixture) { fx.script("single", "fail-start", "") }, run: power(contracts.PowerOpOn)},
@@ -232,12 +277,33 @@ func singleHostCallSeqScenarios() []callSeqScenario {
 			fx.script("single", "fail-setmem", "")
 			fx.script("single", "fail-vol-resize", "")
 		}, run: reconfigure(reconfigureTo(4, 4096, 20))},
-		{name: "reconfigure-online-cpu-mem", setup: running, run: reconfigure(reconfigureTo(4, 4096, 0))},
+		{name: "reconfigure-offline-setmaxmem-fails", setup: func(fx *routingFixture) {
+			fx.script("single", "fail-setmaxmem", "")
+		}, run: reconfigure(reconfigureTo(0, 4096, 0))},
+		{name: "reconfigure-offline-disk-already-large", setup: func(fx *routingFixture) {
+			fx.script("single", "capacity", "21474836480")
+		}, run: reconfigure(reconfigureTo(0, 0, 20))},
+		{name: "reconfigure-online-cpu-mem", setup: hotAdd, run: reconfigure(reconfigureTo(4, 4096, 0))},
 		{name: "reconfigure-online-beyond-headroom", setup: func(fx *routingFixture) {
 			running(fx)
-			fx.script("single", "fail-setvcpus", "")
-			fx.script("single", "fail-setmem", "")
+			fx.script("single", "fail-setvcpus-live", "")
 		}, run: reconfigure(reconfigureTo(64, 65536, 0))},
+		{name: "reconfigure-online-shrink", setup: func(fx *routingFixture) {
+			running(fx)
+			for f, v := range map[string]string{"vcpus": "4", "cfg-vcpus": "4", "cfg-maxvcpus": "4",
+				"maxmem": "4194304", "usedmem": "4194304", "cfg-mem": "4194304", "cfg-maxmem": "4194304"} {
+				fx.script("single", f, v)
+			}
+			fx.script("single", "fail-setvcpus-live", "")
+		}, run: reconfigure(reconfigureTo(2, 2048, 0))},
+		{name: "reconfigure-paused-refused", setup: func(fx *routingFixture) {
+			fx.script("single", "state", "paused\n")
+			fx.script("single", "id", "7")
+		}, run: reconfigure(reconfigureTo(1, 1024, 0))},
+		{name: "reconfigure-pmsuspended-refused", setup: func(fx *routingFixture) {
+			fx.script("single", "state", "pmsuspended\n")
+			fx.script("single", "id", "7")
+		}, run: reconfigure(reconfigureTo(1, 1024, 0))},
 		{name: "reconfigure-online-disk-grow-guest-agent", setup: running, run: reconfigure(reconfigureTo(2, 2048, 20))},
 		{name: "reconfigure-online-disk-grow-no-agent", setup: func(fx *routingFixture) {
 			running(fx)
@@ -271,9 +337,11 @@ func TestSingleHost_PowerAndReconfigure_CallSequencesUnchanged(t *testing.T) {
 			p := &Provider{virshProvider: localHostVP("single")}
 			require.False(t, p.clustered())
 			res := callSeqResult{}
-			if err := sc.run(context.Background(), p); err != nil {
+			restart, err := sc.run(context.Background(), p)
+			if err != nil {
 				res.Err = err.Error()
 			}
+			res.RestartRequired = restart
 			res.Calls = fx.calls()
 			got[sc.name] = res
 		})
@@ -298,6 +366,7 @@ func TestSingleHost_PowerAndReconfigure_CallSequencesUnchanged(t *testing.T) {
 		require.True(t, ok, "scenario %s not run", name)
 		assert.Equal(t, w.Calls, g.Calls, "%s: the single-host command sequence changed", name)
 		assert.Equal(t, w.Err, g.Err, "%s: the single-host error changed", name)
+		assert.Equal(t, w.RestartRequired, g.RestartRequired, "%s: the single-host restart-required answer changed", name)
 	}
 }
 

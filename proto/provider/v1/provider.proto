@@ -170,6 +170,36 @@ message HardwareUpgradeRequest {
 // Generic task response for async operations
 message TaskResponse {
   TaskRef task = 1;
+
+  // restart_required is set by a Reconfigure (and only by a Reconfigure) that
+  // applied at least one requested change to the VM's persistent definition
+  // only: the change takes effect at the VM's next power cycle (power off, then
+  // on — a reboot from inside the guest does not apply it), and until then the
+  // running VM keeps its previous size. Every other requested change was
+  // applied to the running VM as well. A Reconfigure that could apply a
+  // requested change neither way fails instead; it never reports success for a
+  // change in none of these states. Additive and backward-compatible: false
+  // (the default) is what every provider that applies all changes live, or
+  // fails, returns; a provider that answers with a task reports false and the
+  // task's outcome decides. The manager records a restart-pending change as
+  // Reconfiguring=True with reason RestartRequired.
+  bool restart_required = 2;
+
+  // honest_result is set by a provider on EVERY Reconfigure response it gives
+  // under the honest result contract (the contract GetCapabilitiesResponse.
+  // supports_honest_reconfigure advertises): each requested change was applied
+  // to the running VM and its persistent definition, or applied to the
+  // definition only and reported with restart_required — a success is never
+  // returned for a change it did not apply. It is the per-response proof of
+  // that contract: the capability is a snapshot the manager may hold after a
+  // provider was rolled back, the marker is not. Additive and
+  // backward-compatible: false (unset) from a provider that predates or does
+  // not implement the contract. The manager treats a successful Reconfigure
+  // of a VM on a clustered Provider without it as not honest: it counts the
+  // VM at the larger of its recorded and requested size and holds further
+  // resizes (Reconfiguring=False/ProviderLacksHonestReconfigure). Set only on
+  // Reconfigure responses.
+  bool honest_result = 3;
 }
 
 // Describe virtual machine current state
@@ -203,6 +233,25 @@ message DescribeResponse {
   repeated string ips = 3;
   string console_url = 4;
   string provider_raw_json = 5; // Provider-specific additional data
+
+  // max_memory_mib is the most memory, in MiB, the VM's guest can use without
+  // any action on the host: the memory it was started with, including any
+  // balloon headroom above its current allocation (libvirt's <memory>, the
+  // balloon maximum). 0 means the provider does not report it. Additive and
+  // backward-compatible. The clustered scheduler records it once as
+  // status.placement.memoryCeilingMiB for a VM scheduled before that field
+  // existed, raises a recorded ceiling to it when it is higher, and lowers a
+  // recorded ceiling to it once the provider reports less (ADR-0007 Addendum A,
+  // scheduler-accuracy amendment).
+  int64 max_memory_mib = 6;
+
+  // vcpus is the number of vCPUs the VM has online now: the running VM's
+  // count, or, for a VM that is off, the count it boots with. 0 means the
+  // provider does not report it. Additive and backward-compatible. The
+  // clustered scheduler raises a VM's recorded CPU (status.currentResources)
+  // to it when it is higher, so a VM is never counted below the vCPUs it has
+  // (ADR-0007 Addendum A, scheduler-accuracy amendment).
+  int32 vcpus = 7;
 }
 
 // Check async task status
@@ -634,6 +683,16 @@ message GetCapabilitiesResponse {
   // ImagePrepareResponse.artifact. A manager holds import-style prepares
   // through a provider that supports image import but does not advertise this.
   bool supports_image_artifact_identity = 18;
+  // supports_honest_reconfigure reports that Reconfigure implements the honest
+  // result contract: every requested change is applied to the running VM and
+  // its persistent definition, or applied to the definition only and reported
+  // with TaskResponse.restart_required, or the call fails — it never reports
+  // success for a change it did not apply. Additive and backward-compatible:
+  // false (the default) from a provider that predates it or does not
+  // implement it. A manager holds resizes of VMs on a clustered Provider that
+  // does not advertise it (its committed-capacity accounting trusts the
+  // result); single-host Providers are resized as before.
+  bool supports_honest_reconfigure = 19;
 }
 
 // ObjectIdentity names a Kubernetes object on the wire (CreateRequest.owner,

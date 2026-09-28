@@ -115,7 +115,7 @@ func TestVirtualMachine_BetaAlphaBeta_RoundTrip(t *testing.T) {
 			PowerState: PowerStateOn,
 		},
 		Status: VirtualMachineStatus{
-			PowerState: PowerStateOn,
+			PowerState: ObservedPowerStateOn,
 			Phase:      "Running",
 		},
 	}

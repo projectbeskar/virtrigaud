@@ -110,21 +110,28 @@ func TestCompareDescribe(t *testing.T) {
 			wantDiff: []string{"exists"},
 		},
 		{
-			// #291 M2: a domain in a non-running state. virsh coarsens it to Off; the
-			// native path (mapNativeDomainState) coarsens DomainBlocked to Off too, so
-			// there is NO divergence — the drift #291 flagged as benign is proven benign.
-			name:     "M2 power-state coarsening agrees (blocked -> Off both sides)",
-			virsh:    virshResp("Off", map[string]string{"UUID": "abc"}),
+			// #291 M2: a domain whose vCPUs are blocked (virsh prints "idle") is
+			// running. virsh maps it to On; the native path (mapNativeDomainState)
+			// maps DomainBlocked to On too, so there is NO divergence.
+			name:     "M2 power-state mapping agrees (blocked -> On both sides)",
+			virsh:    virshResp(string((&Provider{}).mapLibvirtPowerState("idle")), map[string]string{"UUID": "abc"}),
 			native:   nativeResp(mapNativeDomainState(golibvirt.DomainBlocked), map[string]string{"uuid": "abc"}),
 			wantDiff: nil,
 		},
 		{
-			// The negative of M2: if the native mapping were WRONG (blocked -> On), the
+			// A paused domain is Suspended on both sides (review R1).
+			name:     "paused -> Suspended both sides",
+			virsh:    virshResp(string((&Provider{}).mapLibvirtPowerState("paused")), map[string]string{"UUID": "abc"}),
+			native:   nativeResp(mapNativeDomainState(golibvirt.DomainPaused), map[string]string{"uuid": "abc"}),
+			wantDiff: nil,
+		},
+		{
+			// The negative of M2: if the native mapping were WRONG (paused -> Off), the
 			// comparator MUST catch it. This is what proves the harness detects real
 			// text->typed drift rather than silently passing.
 			name:     "M2 negative: a wrong native power-state mapping IS caught",
-			virsh:    virshResp("Off", map[string]string{"UUID": "abc"}),
-			native:   nativeResp("On", map[string]string{"uuid": "abc"}),
+			virsh:    virshResp("Suspended", map[string]string{"UUID": "abc"}),
+			native:   nativeResp("Off", map[string]string{"uuid": "abc"}),
 			wantDiff: []string{"power_state"},
 		},
 	}
@@ -137,22 +144,31 @@ func TestCompareDescribe(t *testing.T) {
 	}
 }
 
-// TestMapNativeDomainState verifies the native coarsening matches the virsh path's
-// mapLibvirtPowerState: only running is "On"; everything else (incl. blocked, the
-// #291 M2 case) is "Off".
+// TestMapNativeDomainState verifies the native mapping matches the virsh path's
+// mapLibvirtPowerState for every libvirt domain state: running and blocked are
+// On, shutoff / shutdown / crashed are Off, paused and pmsuspended are
+// Suspended (still active, review R1), nostate is Unknown.
 func TestMapNativeDomainState(t *testing.T) {
-	assert.Equal(t, "On", mapNativeDomainState(golibvirt.DomainRunning))
-	for _, s := range []golibvirt.DomainState{
-		golibvirt.DomainNostate,
-		golibvirt.DomainBlocked,
-		golibvirt.DomainPaused,
-		golibvirt.DomainShutdown,
-		golibvirt.DomainShutoff,
-		golibvirt.DomainCrashed,
-		golibvirt.DomainPmsuspended,
-	} {
-		assert.Equal(t, "Off", mapNativeDomainState(s), "state %d should coarsen to Off", s)
+	p := &Provider{}
+	cases := []struct {
+		native golibvirt.DomainState
+		virsh  string // as virsh dominfo / list prints it
+		want   contracts.PowerState
+	}{
+		{golibvirt.DomainRunning, "running", contracts.PowerStateOn},
+		{golibvirt.DomainBlocked, "idle", contracts.PowerStateOn},
+		{golibvirt.DomainShutoff, "shut off", contracts.PowerStateOff},
+		{golibvirt.DomainShutdown, "in shutdown", contracts.PowerStateOff},
+		{golibvirt.DomainCrashed, "crashed", contracts.PowerStateOff},
+		{golibvirt.DomainPaused, "paused", contracts.PowerStateSuspended},
+		{golibvirt.DomainPmsuspended, "pmsuspended", contracts.PowerStateSuspended},
+		{golibvirt.DomainNostate, "no state", contracts.PowerStateUnknown},
 	}
+	for _, tc := range cases {
+		assert.Equal(t, string(tc.want), mapNativeDomainState(tc.native), "native state %d", tc.native)
+		assert.Equal(t, tc.want, p.mapLibvirtPowerState(tc.virsh), "virsh state %q", tc.virsh)
+	}
+	assert.Equal(t, contracts.PowerStateUnknown, p.mapLibvirtPowerState("something-new"), "an unknown state is never Off")
 }
 
 // shadowCounter reads a shadow metric counter series value from the provider's

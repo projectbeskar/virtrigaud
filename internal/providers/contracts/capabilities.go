@@ -73,6 +73,14 @@ type Capabilities struct {
 	// import-style prepares through an import-capable provider that does not
 	// report it, and sends no RPC.
 	SupportsImageArtifactIdentity bool
+	// SupportsHonestReconfigure reports that the provider's Reconfigure
+	// implements the honest result contract: every requested change is
+	// applied live and persistently, or persistently only with
+	// ReconfigureResult.RestartRequired, or the call fails. The manager holds
+	// resizes of VMs on a clustered Provider that does not report it (its
+	// committed-capacity accounting trusts the result); single-host Providers
+	// are resized as before, with a warning.
+	SupportsHonestReconfigure bool
 }
 
 // CapabilityReporter is an optional capability of a Provider: it reports the

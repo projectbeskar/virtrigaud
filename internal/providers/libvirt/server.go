@@ -222,6 +222,23 @@ func (s *Server) Power(ctx context.Context, req *providerv1.PowerRequest) (*prov
 	return result, nil
 }
 
+// singleHostReconfigureRPCError is the wire form of a failed single-host
+// Reconfigure (review H2). A failure of the operation on that one VM — it
+// reached the host, and the host refused or failed it (hostOpError, not a
+// transport failure) — keeps its historical code (Unknown) and message and
+// gains the VM_OPERATION_FAILED ErrorInfo, so the manager keeps it out of the
+// Provider's circuit breaker: one tenant's resize that keeps failing must not
+// open the breaker for every VM of the Provider. A host that could not be
+// reached (the SSH connection, or its libvirtd), and a provider that is not
+// ready, keep the historical plain error, which the breaker counts.
+func singleHostReconfigureRPCError(err error) error {
+	var ho *hostOpError
+	if stderrors.As(err, &ho) && !isHostTransportFailure(err) {
+		return vmOperationFailedStatus(fmt.Sprintf("failed to reconfigure VM: %v", err))
+	}
+	return fmt.Errorf("failed to reconfigure VM: %w", err)
+}
+
 // Reconfigure reconfigures a virtual machine. On a clustered provider the
 // reconfigure is routed to target_host_id and owner-checked (ADR-0007 Addendum
 // A, slice 2); a domain this VM does not own is answered NotFound and none of
@@ -236,17 +253,17 @@ func (s *Server) Reconfigure(ctx context.Context, req *providerv1.ReconfigureReq
 		return nil, fmt.Errorf("failed to parse desired configuration: %w", err)
 	}
 
-	taskRef, err := s.provider.Reconfigure(ctx, contracts.VMRef{ID: req.Id, HostID: req.TargetHostId, Owner: ownerFromProto(req.GetOwner())}, createReq)
+	res, err := s.provider.Reconfigure(ctx, contracts.VMRef{ID: req.Id, HostID: req.TargetHostId, Owner: ownerFromProto(req.GetOwner())}, createReq)
 	if err != nil {
 		if s.clusteredProvider() {
 			return nil, routedRPCError("reconfigure VM", err)
 		}
-		return nil, fmt.Errorf("failed to reconfigure VM: %w", err)
+		return nil, singleHostReconfigureRPCError(err)
 	}
 
-	result := &providerv1.TaskResponse{}
-	if taskRef != "" {
-		result.Task = &providerv1.TaskRef{Id: taskRef}
+	result := &providerv1.TaskResponse{RestartRequired: res.RestartRequired, HonestResult: res.Honest}
+	if res.TaskRef != "" {
+		result.Task = &providerv1.TaskRef{Id: res.TaskRef}
 	}
 
 	return result, nil
@@ -281,6 +298,8 @@ func (s *Server) Describe(ctx context.Context, req *providerv1.DescribeRequest) 
 		Ips:             resp.IPs,
 		ConsoleUrl:      resp.ConsoleURL,
 		ProviderRawJson: providerRawJSON,
+		MaxMemoryMib:    resp.MaxMemoryMiB,
+		Vcpus:           resp.VCPUs,
 	}, nil
 }
 
@@ -794,6 +813,9 @@ func (s *Server) GetCapabilities(ctx context.Context, req *providerv1.GetCapabil
 		// surface Unimplemented there (D9). This flips true only now that the real
 		// libvirt host-inventory implementation ships.
 		SupportsClustering: s.provider != nil && s.provider.clustered(),
+		// Reconfigure applies every change live and persistently, persistently
+		// only with restart_required, or fails (reconfigure.go).
+		SupportsHonestReconfigure: true,
 	}, nil
 }
 
@@ -814,6 +836,8 @@ func clusteredCapabilities() *providerv1.GetCapabilitiesResponse {
 		SupportedDiskTypes:          []string{"qcow2", "raw", "vmdk"},
 		SupportedNetworkTypes:       []string{"virtio", "e1000", "rtl8139"},
 		SupportsClustering:          true,
+		// The routed Reconfigure runs the same honest core (reconfigure.go).
+		SupportsHonestReconfigure: true,
 	}
 }
 

@@ -92,7 +92,8 @@ func (r *VirtualMachineReconciler) recordPendingHost(
 	pl.PendingResources = &infravirtrigaudiov1beta1.PlacementResources{CPU: p.resources.CPU, MemoryMiB: p.resources.MemoryMiB}
 	// The balloon ceiling the Create provisions (0: none), kept when bound
 	// (review N1).
-	ceiling := p.memoryCeilingMiB
+	// Bounded like every recorded memory figure (the CRD Maximum, review L2).
+	ceiling := min(p.memoryCeilingMiB, maxRecordedMemoryMiB)
 	pl.MemoryCeilingMiB = &ceiling
 	pl.Pool = p.poolName
 	pl.LastScheduledTime = &now

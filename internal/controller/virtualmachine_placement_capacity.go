@@ -347,10 +347,11 @@ func memoryCeilingFor(hotAdd bool, memMiB int64) int64 {
 // memoryCeilingOf is the memory vm's domain may reach on its host beyond its
 // current allocation (review N1): a guest can deflate its balloon up to the
 // hot-add ceiling, so the VM counts at it. It is status.placement.memoryCeilingMiB
-// when recorded (at scheduling, from the Create's own VMClass), otherwise — a
-// VM scheduled by an older manager, or a clone — derived from class's current
-// hot-add setting and the VM's recorded (else pending, else class) memory.
-// 0 means none.
+// when recorded (at scheduling, from the Create's own VMClass; or, for a VM
+// scheduled by an older manager, once from its provider's Describe —
+// syncMemoryCeiling), otherwise — until then, or for a clone — derived from
+// class's current hot-add setting and the VM's recorded (else pending, else
+// class) memory. 0 means none.
 func memoryCeilingOf(vm *infravirtrigaudiov1beta1.VirtualMachine, class *infravirtrigaudiov1beta1.VMClass) int64 {
 	if pl := vm.Status.Placement; pl != nil && pl.MemoryCeilingMiB != nil {
 		return *pl.MemoryCeilingMiB
@@ -561,8 +562,9 @@ func committedOnHost(
 		if err != nil {
 			return 0, 0, err
 		}
-		cpu += max(int64(fp.CPU), 0)
-		memMiB += max(fp.MemoryMiB, 0)
+		// Saturating (review L2): the gauges never wrap negative.
+		cpu = scheduler.SaturatingAdd(cpu, int64(fp.CPU))
+		memMiB = scheduler.SaturatingAdd(memMiB, fp.MemoryMiB)
 	}
 	return cpu, memMiB, nil
 }
@@ -641,11 +643,21 @@ type unschedulableBackoff struct {
 type unschedulableEntry struct {
 	failures int
 	last     time.Time
+	// until is when the wait the last failure started ends.
+	until time.Time
 }
 
 // next records a no-fit of the VM uid at now and returns how long to wait
 // before scheduling it again.
 func (b *unschedulableBackoff) next(uid string, now time.Time) time.Duration {
+	return b.nextWithin(uid, now, placementUnschedulableRetryInterval, placementUnschedulableMaxRetryInterval)
+}
+
+// nextWithin records a failure of the VM uid at now and returns how long to
+// wait before trying again: base for the first failure, twice as long for
+// each consecutive one, at most maxWait. The same per-VM record serves any
+// retry cadence (the placement no-fit backoff uses next).
+func (b *unschedulableBackoff) nextWithin(uid string, now time.Time, base, maxWait time.Duration) time.Duration {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.entries == nil {
@@ -663,11 +675,25 @@ func (b *unschedulableBackoff) next(uid string, now time.Time) time.Duration {
 	}
 	e.failures++
 	e.last = now
-	d := placementUnschedulableRetryInterval
-	for i := 1; i < e.failures && d < placementUnschedulableMaxRetryInterval; i++ {
+	d := base
+	for i := 1; i < e.failures && d < maxWait; i++ {
 		d *= 2
 	}
-	return min(d, placementUnschedulableMaxRetryInterval)
+	d = min(d, maxWait)
+	e.until = now.Add(d)
+	return d
+}
+
+// remaining returns how much of the VM uid's current wait is left at now; 0
+// when it has none (never failed, reset, or the wait is over).
+func (b *unschedulableBackoff) remaining(uid string, now time.Time) time.Duration {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	e, ok := b.entries[uid]
+	if !ok || !now.Before(e.until) {
+		return 0
+	}
+	return e.until.Sub(now)
 }
 
 // reset forgets the VM uid's no-fits.

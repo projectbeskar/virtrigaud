@@ -119,6 +119,28 @@ const (
 	PowerStateOffGraceful PowerState = "OffGraceful"
 )
 
+// ObservedPowerState is a VM's power state as its provider reports it
+// (status.powerState). It is a superset of PowerState: a desired state is only
+// ever On, Off or OffGraceful, but an observed one can also be Suspended or
+// Unknown. OffGraceful stays valid so a status written by an older manager
+// still validates.
+// +kubebuilder:validation:Enum=On;Off;OffGraceful;Suspended;Unknown
+type ObservedPowerState string
+
+const (
+	// ObservedPowerStateOn is a running VM.
+	ObservedPowerStateOn ObservedPowerState = "On"
+	// ObservedPowerStateOff is a powered-off VM.
+	ObservedPowerStateOff ObservedPowerState = "Off"
+	// ObservedPowerStateSuspended is a VM that is paused or suspended to RAM:
+	// still active on its host (it resumes at the size it has), not powered
+	// off.
+	ObservedPowerStateSuspended ObservedPowerState = "Suspended"
+	// ObservedPowerStateUnknown is a VM whose provider reports a state it
+	// cannot classify.
+	ObservedPowerStateUnknown ObservedPowerState = "Unknown"
+)
+
 // VirtualMachineLifecycle defines lifecycle configuration for a VM
 type VirtualMachineLifecycle struct {
 	// PreStop defines actions to take before stopping the VM
@@ -242,9 +264,15 @@ type VirtualMachineStatus struct {
 	// +optional
 	ID string `json:"id,omitempty"`
 
-	// PowerState reflects the current power state
+	// PowerState reflects the current power state as the provider reports it:
+	// On, Off, or — from a provider that can tell (libvirt) — Suspended (the
+	// VM is paused or suspended to RAM: still active, not powered off) or
+	// Unknown. While a VM is Suspended or Unknown it is not reconfigured and
+	// not powered on; a Suspended VM whose spec.powerState is Off is powered
+	// off (hard), while OffGraceful is held until the VM is resumed (a
+	// suspended guest cannot shut down gracefully).
 	// +optional
-	PowerState PowerState `json:"powerState,omitempty"`
+	PowerState ObservedPowerState `json:"powerState,omitempty"`
 
 	// IPs contains the IP addresses assigned to the VM
 	// +optional
@@ -400,11 +428,15 @@ type PlacementStatus struct {
 	// provisioned for a VMClass with memory hot-add (4× the initial memory), or
 	// 0 when none was provisioned. A guest can deflate its balloon up to it, so
 	// the clustered accounting counts the VM's memory at the larger of this and
-	// its current size. It is kept when the VM is bound; unset means unknown (a
-	// VM scheduled by an older manager), and the VMClass's hot-add setting is
-	// used instead.
+	// its current size. It is kept when the VM is bound. Unset means unknown (a
+	// VM scheduled by an older manager): the VMClass's hot-add setting is used
+	// until the VM's first Describe reports its domain's actual memory maximum,
+	// which is then recorded once. A recorded value is raised when the
+	// provider reports more, and lowered when it reports less (after a
+	// confirmed memory shrink). At most the VMClass memory maximum (100 TiB).
 	// +optional
 	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=104857600
 	MemoryCeilingMiB *int64 `json:"memoryCeilingMiB,omitempty"`
 
 	// Pool is the HostPool the VM was scheduled into.
@@ -424,12 +456,14 @@ type PlacementStatus struct {
 // PlacementResources is a CPU/memory size recorded by the clustered scheduler
 // (status.placement.pendingResources).
 type PlacementResources struct {
-	// CPU is the number of vCPUs.
+	// CPU is the number of vCPUs (at most the VMClass maximum, 128).
 	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=128
 	CPU int32 `json:"cpu"`
 
-	// MemoryMiB is the memory in MiB.
+	// MemoryMiB is the memory in MiB (at most the VMClass maximum, 100 TiB).
 	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=104857600
 	MemoryMiB int64 `json:"memoryMiB"`
 }
 

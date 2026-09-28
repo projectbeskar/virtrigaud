@@ -126,4 +126,7 @@ func TestCapabilitiesToReported(t *testing.T) {
 	assert.True(t, got.SupportsImageArtifactIdentity)
 	assert.False(t, capabilitiesToReported(contracts.Capabilities{SupportsImageImport: true}).SupportsImageArtifactIdentity,
 		"a provider that does not report the identity capability is surfaced as lacking it")
+	// Review H3: the honest Reconfigure result surfaces on Provider status.
+	assert.True(t, capabilitiesToReported(contracts.Capabilities{SupportsHonestReconfigure: true}).SupportsHonestReconfigure)
+	assert.False(t, got.SupportsHonestReconfigure, "not reported, not surfaced")
 }

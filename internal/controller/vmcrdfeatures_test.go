@@ -163,6 +163,14 @@ func TestMissingVMCRDFeatures(t *testing.T) {
 	missing, err = missingVMCRDFeatures(crd)
 	require.NoError(t, err)
 	assert.Equal(t, []string{crdFeatureMemoryCeiling}, missing)
+
+	// A CRD whose status.powerState predates Suspended/Unknown (review R1).
+	crd = generatedVMCRD(t)
+	require.NoError(t, unstructured.SetNestedSlice(v1beta1Schema(t, crd), []any{"On", "Off", "OffGraceful"},
+		"properties", "status", "properties", "powerState", "enum"))
+	missing, err = missingVMCRDFeatures(crd)
+	require.NoError(t, err)
+	assert.Equal(t, []string{crdFeatureObservedPowerState}, missing)
 }
 
 func TestMissingConsumerSelector(t *testing.T) {
@@ -261,6 +269,14 @@ func TestMissingProviderCRDFeatures(t *testing.T) {
 	missing, err = missingProviderCRDFeatures(olderProviderCRD(t))
 	require.NoError(t, err)
 	assert.Equal(t, []string{crdFeatureProviderImageArtifactIdentity}, missing)
+
+	// A Provider CRD without supportsHonestReconfigure (review H3).
+	noHonest := generatedCRD(t, ProviderCRDName)
+	unstructured.RemoveNestedField(v1beta1Schema(t, noHonest), "properties", "status", "properties",
+		"reportedCapabilities", "properties", "supportsHonestReconfigure")
+	missing, err = missingProviderCRDFeatures(noHonest)
+	require.NoError(t, err)
+	assert.Equal(t, []string{crdFeatureProviderHonestReconfigure}, missing)
 
 	missing, err = missingProviderCRDFeatures(olderConsumerCRD(t, ProviderCRDName))
 	require.NoError(t, err)

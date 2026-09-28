@@ -45,6 +45,11 @@ const (
 	// again in effectiveResources, for a spec.resources override stored before
 	// that CRD validation existed.
 	maxVMClassCPU = int32(128)
+	// maxRecordedMemoryMiB is the most memory, in MiB, the operator records for
+	// a VM (a memory ceiling, a pending size) or takes a provider's report at:
+	// the VMClass memory maximum (100 TiB), the CRD Maximum of
+	// status.placement.memoryCeilingMiB and pendingResources.memoryMiB.
+	maxRecordedMemoryMiB = maxVMClassMemoryBytes / bytesPerMiB
 	// minVMClassCPU is the CRD minimum for both fields (kubebuilder Minimum=1).
 	minVMClassCPU = int32(1)
 	// minVMResourceOverrideMemoryMiB is the CRD minimum for

@@ -390,10 +390,13 @@ func (p *Provider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureR
 	// Complete reconfiguration after delay
 	go p.completeTaskAfterDelay(taskID, 3*time.Second)
 
+	// The mock applies every change in the task and never leaves one pending a
+	// restart; a provider that answers with a task reports RestartRequired false.
 	return &providerv1.TaskResponse{
 		Task: &providerv1.TaskRef{
 			Id: taskID,
 		},
+		RestartRequired: false,
 	}, nil
 }
 

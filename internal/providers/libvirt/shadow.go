@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -173,9 +174,10 @@ type vmListFieldCmp struct {
 // adding a compared field would change what the running D5 soak meters.
 var vmListFields = []vmListFieldCmp{
 	{
-		// Both drivers coarsen non-running states to "Off" (virsh via
-		// mapLibvirtPowerState, native via mapNativeDomainState), so this is a
-		// 0-divergence field when they agree (#291 M2), compared case-insensitively.
+		// Both drivers map domain states to the same On/Off/Suspended/Unknown
+		// vocabulary (virsh via mapLibvirtPowerState, native via
+		// mapNativeDomainState), so this is a 0-divergence field when they agree
+		// (#291 M2), compared case-insensitively.
 		field:   "power_state",
 		project: func(v contracts.VMInfo) (string, bool) { return canonLower(v.PowerState) },
 	},
@@ -317,17 +319,24 @@ func firstInt(s string) (int64, bool) {
 	return n, true
 }
 
-// mapNativeDomainState coarsens a go-libvirt DomainState to the same "On"/"Off"
-// vocabulary the virsh path's mapLibvirtPowerState produces: only DomainRunning is
-// "On"; every other state (shutoff, paused, blocked, pmsuspended, shutdown,
-// crashed, nostate) folds to "Off". Keeping this coarsening IDENTICAL to virsh's
-// is the whole point — it is what makes power_state a 0-divergence field (#291 M2)
-// rather than a text->typed drift the shadow harness would flag.
+// mapNativeDomainState maps a go-libvirt DomainState to the same vocabulary the
+// virsh path's mapLibvirtPowerState produces: running and blocked (idle) are
+// "On"; shutoff, shutdown and crashed are "Off"; paused and pmsuspended are
+// "Suspended" (still active — review R1); nostate and anything else is
+// "Unknown". Keeping this mapping IDENTICAL to virsh's is the whole point — it
+// is what makes power_state a 0-divergence field (#291 M2) rather than a
+// text->typed drift the shadow harness would flag.
 func mapNativeDomainState(state golibvirt.DomainState) string {
-	if state == golibvirt.DomainRunning {
-		return "On"
+	switch state {
+	case golibvirt.DomainRunning, golibvirt.DomainBlocked:
+		return string(contracts.PowerStateOn)
+	case golibvirt.DomainShutoff, golibvirt.DomainShutdown, golibvirt.DomainCrashed:
+		return string(contracts.PowerStateOff)
+	case golibvirt.DomainPaused, golibvirt.DomainPmsuspended:
+		return string(contracts.PowerStateSuspended)
+	default:
+		return string(contracts.PowerStateUnknown)
 	}
-	return "Off"
 }
 
 // buildNativeDescribe builds a DescribeResponse for id from the go-libvirt client
@@ -360,10 +369,10 @@ func buildNativeDescribe(lv *golibvirt.Libvirt, id string) (contracts.DescribeRe
 		return contracts.DescribeResponse{}, fmt.Errorf("native parse domain XML %q: %w", id, err)
 	}
 
-	// DomainGetState is side-effect free; a failure degrades power_state to "Off"
-	// (the comparator then still compares config identity) rather than failing the
-	// whole shadow describe.
-	powerState := "Off"
+	// DomainGetState is side-effect free; a failure degrades power_state to
+	// "Unknown" (the comparator then still compares config identity) rather than
+	// failing the whole shadow describe.
+	powerState := string(contracts.PowerStateUnknown)
 	if stateInt, _, sErr := lv.DomainGetState(dom, 0); sErr == nil {
 		powerState = mapNativeDomainState(golibvirt.DomainState(stateInt))
 	}
@@ -380,11 +389,29 @@ func buildNativeDescribe(lv *golibvirt.Libvirt, id string) (contracts.DescribeRe
 		raw["memory_mib"] = strconv.FormatInt(mib, 10)
 	}
 
-	return contracts.DescribeResponse{
+	resp := contracts.DescribeResponse{
 		Exists:      true,
 		PowerState:  powerState,
 		ProviderRaw: raw,
-	}, nil
+	}
+	// The same memory maximum the virsh Describe reports (not compared by the
+	// shadow harness, which meters ProviderRaw only).
+	if d.Memory != nil {
+		if kib, kErr := kibOf(d.Memory.Value, d.Memory.Unit); kErr == nil {
+			resp.MaxMemoryMiB = kibToMiBCeil(kib)
+		}
+	}
+	// The vCPUs online (the live document's <vcpu current>, else <vcpu>).
+	if d.VCPU != nil {
+		n := d.VCPU.Current
+		if n == 0 {
+			n = d.VCPU.Value
+		}
+		if n > 0 && n <= math.MaxInt32 {
+			resp.VCPUs = int32(n)
+		}
+	}
+	return resp, nil
 }
 
 // buildNativeList builds the shadow VMInfo list for the list family from the
@@ -427,9 +454,10 @@ func buildNativeList(lv *golibvirt.Libvirt) ([]contracts.VMInfo, error) {
 			continue // same rationale as the DomainGetXMLDesc skip above
 		}
 
-		// DomainGetState is side-effect free; a failure degrades power_state to "Off"
-		// (identical to buildNativeDescribe) rather than dropping the whole domain.
-		powerState := "Off"
+		// DomainGetState is side-effect free; a failure degrades power_state to
+		// "Unknown" (identical to buildNativeDescribe) rather than dropping the
+		// whole domain.
+		powerState := string(contracts.PowerStateUnknown)
 		if stateInt, _, sErr := lv.DomainGetState(dom, 0); sErr == nil {
 			powerState = mapNativeDomainState(golibvirt.DomainState(stateInt))
 		}

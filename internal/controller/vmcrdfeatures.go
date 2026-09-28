@@ -66,6 +66,11 @@ import (
 // status.reportedCapabilities.supportsImageArtifactIdentity (pruned, every
 // import-capable Provider would look like one without identity support, and
 // every import-style prepare would be held). The checker verifies both.
+//
+// A VM's observed power state (status.powerState) can be Suspended or Unknown
+// (review R1): an older VirtualMachine CRD, whose enum lacks them, would reject
+// every status write of a VM its provider reports so — its conditions and
+// recorded size would stop updating. The checker verifies the enum.
 
 // Names of the CustomResourceDefinitions whose security features the manager
 // verifies.
@@ -118,6 +123,10 @@ const (
 	// an older CRD would prune it, so a VM whose VMClass later turned memory
 	// hot-add off would be counted below the ceiling its domain has.
 	crdFeatureMemoryCeiling = "status.placement.memoryCeilingMiB"
+	// crdFeatureObservedPowerState is the Suspended and Unknown values of
+	// status.powerState (review R1); an older CRD would reject every status
+	// write of a VM its provider reports suspended or in an unknown state.
+	crdFeatureObservedPowerState = "status.powerState values Suspended and Unknown"
 	// crdFeatureConsumerSelector is checked on the Provider, VMClass and
 	// VMImage CRDs.
 	crdFeatureConsumerSelector = consumerNamespaceSelectorField
@@ -130,6 +139,11 @@ const (
 	// crdFeatureProviderImageArtifactIdentity is checked on the Provider CRD
 	// (ADR-0009 D8).
 	crdFeatureProviderImageArtifactIdentity = "status.reportedCapabilities.supportsImageArtifactIdentity"
+	// crdFeatureProviderHonestReconfigure is checked on the Provider CRD: an
+	// older CRD would prune it, so every clustered Provider would look like
+	// one without the honest Reconfigure result and every clustered resize
+	// would be held.
+	crdFeatureProviderHonestReconfigure = "status.reportedCapabilities.supportsHonestReconfigure"
 	// crdMissingPrefix prefixes the name of a checked CRD that does not exist.
 	crdMissingPrefix = "the CustomResourceDefinition "
 )
@@ -203,8 +217,8 @@ func missingConsumerSelector(crd *unstructured.Unstructured) ([]string, error) {
 
 // missingProviderCRDFeatures returns the features the Provider CRD crd lacks in
 // its v1beta1 schema: spec.consumerNamespaceSelector and
-// status.reportedCapabilities.supportsImageArtifactIdentity (nil when it has
-// both).
+// status.reportedCapabilities.supportsImageArtifactIdentity and
+// supportsHonestReconfigure (nil when it has all three).
 func missingProviderCRDFeatures(crd *unstructured.Unstructured) ([]string, error) {
 	missing, err := missingConsumerSelector(crd)
 	if err != nil {
@@ -217,6 +231,10 @@ func missingProviderCRDFeatures(crd *unstructured.Unstructured) ([]string, error
 	if _, found, _ := unstructured.NestedMap(schemaRoot, "properties", "status", "properties",
 		"reportedCapabilities", "properties", "supportsImageArtifactIdentity"); !found {
 		missing = append(missing, crdFeatureProviderImageArtifactIdentity)
+	}
+	if _, found, _ := unstructured.NestedMap(schemaRoot, "properties", "status", "properties",
+		"reportedCapabilities", "properties", "supportsHonestReconfigure"); !found {
+		missing = append(missing, crdFeatureProviderHonestReconfigure)
 	}
 	return missing, nil
 }
@@ -286,7 +304,31 @@ func missingVMCRDFeatures(crd *unstructured.Unstructured) ([]string, error) {
 		"properties", "memoryCeilingMiB"); !found {
 		missing = append(missing, crdFeatureMemoryCeiling)
 	}
+	if !enumHas(schemaRoot, []string{"properties", "status", "properties", "powerState", "enum"},
+		string(infravirtrigaudiov1beta1.ObservedPowerStateSuspended), string(infravirtrigaudiov1beta1.ObservedPowerStateUnknown)) {
+		missing = append(missing, crdFeatureObservedPowerState)
+	}
 	return missing, nil
+}
+
+// enumHas reports whether the enum at path in schema lists every one of values.
+func enumHas(schema map[string]any, path []string, values ...string) bool {
+	enum, found, err := unstructured.NestedSlice(schema, path...)
+	if err != nil || !found {
+		return false
+	}
+	have := map[string]bool{}
+	for _, v := range enum {
+		if s, ok := v.(string); ok {
+			have[s] = true
+		}
+	}
+	for _, v := range values {
+		if !have[v] {
+			return false
+		}
+	}
+	return true
 }
 
 // VMCRDFeatureChecker verifies that the installed CRDs carry the security

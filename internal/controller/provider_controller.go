@@ -381,6 +381,9 @@ func capabilitiesToReported(caps contracts.Capabilities) *infravirtrigaudiov1bet
 		// ADR-0009 D8: surfaced so an operator can see why import-style
 		// prepares through this Provider are held.
 		SupportsImageArtifactIdentity: caps.SupportsImageArtifactIdentity,
+		// Surfaced so an operator can see why resizes of VMs on a clustered
+		// Provider are held.
+		SupportsHonestReconfigure: caps.SupportsHonestReconfigure,
 	}
 }
 

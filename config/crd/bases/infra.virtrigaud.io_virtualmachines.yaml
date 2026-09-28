@@ -852,10 +852,14 @@ spec:
                       provisioned for a VMClass with memory hot-add (4× the initial memory), or
                       0 when none was provisioned. A guest can deflate its balloon up to it, so
                       the clustered accounting counts the VM's memory at the larger of this and
-                      its current size. It is kept when the VM is bound; unset means unknown (a
-                      VM scheduled by an older manager), and the VMClass's hot-add setting is
-                      used instead.
+                      its current size. It is kept when the VM is bound. Unset means unknown (a
+                      VM scheduled by an older manager): the VMClass's hot-add setting is used
+                      until the VM's first Describe reports its domain's actual memory maximum,
+                      which is then recorded once. A recorded value is raised when the
+                      provider reports more, and lowered when it reports less (after a
+                      confirmed memory shrink). At most the VMClass memory maximum (100 TiB).
                     format: int64
+                    maximum: 104857600
                     minimum: 0
                     type: integer
                   pendingHost:
@@ -882,13 +886,17 @@ spec:
                       changed in the meantime) is not sent.
                     properties:
                       cpu:
-                        description: CPU is the number of vCPUs.
+                        description: CPU is the number of vCPUs (at most the VMClass
+                          maximum, 128).
                         format: int32
+                        maximum: 128
                         minimum: 0
                         type: integer
                       memoryMiB:
-                        description: MemoryMiB is the memory in MiB.
+                        description: MemoryMiB is the memory in MiB (at most the VMClass
+                          maximum, 100 TiB).
                         format: int64
+                        maximum: 104857600
                         minimum: 0
                         type: integer
                     required:
@@ -905,11 +913,20 @@ spec:
                     type: string
                 type: object
               powerState:
-                description: PowerState reflects the current power state
+                description: |-
+                  PowerState reflects the current power state as the provider reports it:
+                  On, Off, or — from a provider that can tell (libvirt) — Suspended (the
+                  VM is paused or suspended to RAM: still active, not powered off) or
+                  Unknown. While a VM is Suspended or Unknown it is not reconfigured and
+                  not powered on; a Suspended VM whose spec.powerState is Off is powered
+                  off (hard), while OffGraceful is held until the VM is resumed (a
+                  suspended guest cannot shut down gracefully).
                 enum:
                 - "On"
                 - "Off"
                 - OffGraceful
+                - Suspended
+                - Unknown
                 type: string
               provider:
                 additionalProperties:

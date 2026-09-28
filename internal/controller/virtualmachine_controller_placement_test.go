@@ -58,13 +58,18 @@ func (p *recordingCreateProvider) Create(_ context.Context, req contracts.Create
 func i32p(v int32) *int32 { return &v }
 func i64p(v int64) *int64 { return &v }
 
-// clusteredProviderCR returns a Provider CR with topology=cluster.
+// clusteredProviderCR returns a Provider CR with topology=cluster that reports
+// the honest Reconfigure result, as a current libvirt provider does (a
+// clustered resize is held otherwise).
 func clusteredProviderCR(name, ns string) *infravirtrigaudiov1beta1.Provider {
 	return &infravirtrigaudiov1beta1.Provider{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
 		Spec: infravirtrigaudiov1beta1.ProviderSpec{
 			Type:     infravirtrigaudiov1beta1.ProviderTypeLibvirt,
 			Topology: infravirtrigaudiov1beta1.ProviderTopologyCluster,
+		},
+		Status: infravirtrigaudiov1beta1.ProviderStatus{
+			ReportedCapabilities: &infravirtrigaudiov1beta1.ReportedCapabilities{SupportsHonestReconfigure: true},
 		},
 	}
 }

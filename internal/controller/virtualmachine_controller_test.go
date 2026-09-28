@@ -34,11 +34,14 @@ import (
 )
 
 // stubProvider implements contracts.Provider for unit tests.
-// Only ReconfigureFn, IsTaskCompleteFn and GetHostInfoFn are configurable; all other methods are no-ops.
+// Only ReconfigureFn (or ReconfigureResultFn, which takes precedence and can
+// report RestartRequired), IsTaskCompleteFn and GetHostInfoFn are
+// configurable; all other methods are no-ops.
 type stubProvider struct {
-	ReconfigureFn    func(ctx context.Context, id string, desired contracts.CreateRequest) (string, error)
-	IsTaskCompleteFn func(ctx context.Context, taskRef string) (bool, error)
-	GetHostInfoFn    func(ctx context.Context, hostID string) (contracts.HostInfo, error)
+	ReconfigureFn       func(ctx context.Context, id string, desired contracts.CreateRequest) (string, error)
+	ReconfigureResultFn func(ctx context.Context, id string, desired contracts.CreateRequest) (contracts.ReconfigureResult, error)
+	IsTaskCompleteFn    func(ctx context.Context, taskRef string) (bool, error)
+	GetHostInfoFn       func(ctx context.Context, hostID string) (contracts.HostInfo, error)
 }
 
 func (s *stubProvider) Validate(_ context.Context) error { return nil }
@@ -51,11 +54,15 @@ func (s *stubProvider) Delete(_ context.Context, _ contracts.VMRef) (string, err
 func (s *stubProvider) Power(_ context.Context, _ contracts.VMRef, _ contracts.PowerOp) (string, error) {
 	return "", nil
 }
-func (s *stubProvider) Reconfigure(ctx context.Context, vm contracts.VMRef, desired contracts.CreateRequest) (string, error) {
-	if s.ReconfigureFn != nil {
-		return s.ReconfigureFn(ctx, vm.ID, desired)
+func (s *stubProvider) Reconfigure(ctx context.Context, vm contracts.VMRef, desired contracts.CreateRequest) (contracts.ReconfigureResult, error) {
+	if s.ReconfigureResultFn != nil {
+		return s.ReconfigureResultFn(ctx, vm.ID, desired)
 	}
-	return "", nil
+	if s.ReconfigureFn != nil {
+		taskRef, err := s.ReconfigureFn(ctx, vm.ID, desired)
+		return contracts.ReconfigureResult{TaskRef: taskRef}, err
+	}
+	return contracts.ReconfigureResult{}, nil
 }
 func (s *stubProvider) Describe(_ context.Context, _ contracts.VMRef) (contracts.DescribeResponse, error) {
 	return contracts.DescribeResponse{}, nil

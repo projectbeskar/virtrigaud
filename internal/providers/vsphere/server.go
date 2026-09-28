@@ -491,8 +491,11 @@ func (p *Provider) GetCapabilities(ctx context.Context, req *providerv1.GetCapab
 		// the VMImage identity and source digest, and never reuses one by bare
 		// name for an identity request (image_identity.go).
 		SupportsImageArtifactIdentity: true,
-		SupportedDiskTypes:            []string{"thin", "thick", "eager-zeroed"},
-		SupportedNetworkTypes:         []string{"standard", "distributed"},
+		// Not yet: a smaller disk size is ignored silently. Flipped by the
+		// vSphere honest-Reconfigure follow-up.
+		SupportsHonestReconfigure: false,
+		SupportedDiskTypes:        []string{"thin", "thick", "eager-zeroed"},
+		SupportedNetworkTypes:     []string{"standard", "distributed"},
 		// Disk migration: ExportDisk and ImportDisk are implemented (issue #178).
 		// Previously these were left at the zero value, understating real support
 		// and (once capability gating is enabled, #176) wrongly blocking migration.
@@ -1078,8 +1081,11 @@ func (p *Provider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureR
 
 	p.logger.Info("VM reconfigured successfully", "vm_id", req.Id)
 
-	// Return empty task response since we completed synchronously
-	return &providerv1.TaskResponse{}, nil
+	// Return empty task response since we completed synchronously.
+	// RestartRequired is false: vSphere has no pending state for CPU/memory —
+	// ReconfigVM_Task either applies the change (hot-add, or a powered-off VM)
+	// or fails, and a failure is returned above.
+	return &providerv1.TaskResponse{RestartRequired: false}, nil
 }
 
 // HardwareUpgrade implements the ProviderServer interface. It upgrades the virtual

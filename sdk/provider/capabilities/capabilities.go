@@ -60,6 +60,13 @@ const (
 	// name, and echoes the stamp in ImagePrepareResponse.artifact. Advertise it
 	// only with CapabilityImageImport.
 	CapabilityImageArtifactIdentity Capability = "image_artifact_identity"
+	// CapabilityHonestReconfigure marks a provider whose Reconfigure
+	// implements the honest result contract: every requested change is
+	// applied to the running VM and its persistent definition, or applied to
+	// the definition only and reported with TaskResponse.restart_required, or
+	// the call fails — never success for a change it did not apply. A manager
+	// holds resizes on a clustered Provider that does not advertise it.
+	CapabilityHonestReconfigure Capability = "honest_reconfigure"
 
 	// Provider-specific capabilities
 	CapabilityVSphere     Capability = "vsphere"
@@ -193,6 +200,8 @@ func (m *Manager) GetCapabilities(ctx context.Context, req *providerv1.GetCapabi
 		SupportsClustering:          m.HasCapability(CapabilityClustering),
 		// ADR-0009 D7.
 		SupportsImageArtifactIdentity: m.HasCapability(CapabilityImageArtifactIdentity),
+		// Honest Reconfigure result (restart_required).
+		SupportsHonestReconfigure: m.HasCapability(CapabilityHonestReconfigure),
 	}, nil
 }
 
@@ -308,6 +317,29 @@ func (b *Builder) ImageImport() *Builder {
 func (b *Builder) ImageArtifactIdentity() *Builder {
 	b.manager.AddCapability(CapabilityImageArtifactIdentity)
 	return b
+}
+
+// HonestReconfigure adds CapabilityHonestReconfigure: Reconfigure applies
+// every requested change, reports one applied to the persistent definition
+// only with restart_required, or fails. A provider that advertises it must
+// also mark every Reconfigure response (HonestReconfigureResponse).
+func (b *Builder) HonestReconfigure() *Builder {
+	b.manager.AddCapability(CapabilityHonestReconfigure)
+	return b
+}
+
+// HonestReconfigureResponse builds the Reconfigure response of a provider that
+// implements the honest result contract: honest_result is set (the
+// per-response marker the manager requires on a clustered Provider),
+// restart_required reports a change applied to the persistent definition only,
+// and taskID, when not empty, references an asynchronous task (whose outcome
+// then decides; restartRequired should be false with a task).
+func HonestReconfigureResponse(taskID string, restartRequired bool) *providerv1.TaskResponse {
+	resp := &providerv1.TaskResponse{HonestResult: true, RestartRequired: restartRequired}
+	if taskID != "" {
+		resp.Task = &providerv1.TaskRef{Id: taskID}
+	}
+	return resp
 }
 
 // Reconfigure adds reconfiguration capabilities.

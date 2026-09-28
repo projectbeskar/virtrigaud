@@ -2270,6 +2270,16 @@ spec:
                     description: SupportsExportCompression reports export compression
                       support.
                     type: boolean
+                  supportsHonestReconfigure:
+                    description: |-
+                      SupportsHonestReconfigure reports that the provider's Reconfigure never
+                      reports success for a change it did not apply: each change is applied
+                      to the running VM and its persistent definition, or to the definition
+                      only and reported as restart-required, or the call fails. A VM on a
+                      clustered Provider that does not report this is not resized
+                      (Reconfiguring=False/ProviderLacksHonestReconfigure): its
+                      committed-capacity accounting trusts the result.
+                    type: boolean
                   supportsImageArtifactIdentity:
                     description: |-
                       SupportsImageArtifactIdentity reports that the provider's image prepare

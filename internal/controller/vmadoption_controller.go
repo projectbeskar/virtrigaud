@@ -423,7 +423,7 @@ func (r *VMAdoptionReconciler) adoptVM(ctx context.Context, provider *infravirtr
 				logger.Info("Fixing Status.ID for existing adopted VM", "vm_name", vmName, "vm_id", vmInfo.ID)
 				existingVM.Status.ID = vmInfo.ID
 				recordBoundProvider(existingVM, provider)
-				existingVM.Status.PowerState = infravirtrigaudiov1beta1.PowerState(vmInfo.PowerState)
+				existingVM.Status.PowerState = observedPowerState(vmInfo.PowerState)
 				existingVM.Status.IPs = vmInfo.IPs
 				existingVM.Status.Provider = vmInfo.ProviderRaw
 				if err := r.Status().Update(ctx, existingVM); err != nil {
@@ -476,11 +476,11 @@ func (r *VMAdoptionReconciler) adoptVM(ctx context.Context, provider *infravirtr
 				Format: "qcow2", // Default, will be updated from disk info if available
 				Source: "manual",
 			},
-			PowerState: infravirtrigaudiov1beta1.PowerState(vmInfo.PowerState),
+			PowerState: adoptedDesiredPowerState(vmInfo.PowerState),
 		},
 		Status: infravirtrigaudiov1beta1.VirtualMachineStatus{
 			ID:         vmInfo.ID,
-			PowerState: infravirtrigaudiov1beta1.PowerState(vmInfo.PowerState),
+			PowerState: observedPowerState(vmInfo.PowerState),
 			IPs:        vmInfo.IPs,
 			Provider:   vmInfo.ProviderRaw,
 		},
@@ -514,7 +514,7 @@ func (r *VMAdoptionReconciler) adoptVM(ctx context.Context, provider *infravirtr
 	// knows the VM already exists and skips creation
 	vm.Status.ID = vmInfo.ID
 	recordBoundProvider(vm, provider)
-	vm.Status.PowerState = infravirtrigaudiov1beta1.PowerState(vmInfo.PowerState)
+	vm.Status.PowerState = observedPowerState(vmInfo.PowerState)
 	vm.Status.IPs = vmInfo.IPs
 	vm.Status.Provider = vmInfo.ProviderRaw
 	if err := r.Status().Update(ctx, vm); err != nil {

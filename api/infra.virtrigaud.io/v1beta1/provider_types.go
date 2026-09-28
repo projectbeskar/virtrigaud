@@ -505,6 +505,15 @@ type ReportedCapabilities struct {
 	// the provider is upgraded.
 	// +optional
 	SupportsImageArtifactIdentity bool `json:"supportsImageArtifactIdentity,omitempty"`
+	// SupportsHonestReconfigure reports that the provider's Reconfigure never
+	// reports success for a change it did not apply: each change is applied
+	// to the running VM and its persistent definition, or to the definition
+	// only and reported as restart-required, or the call fails. A VM on a
+	// clustered Provider that does not report this is not resized
+	// (Reconfiguring=False/ProviderLacksHonestReconfigure): its
+	// committed-capacity accounting trusts the result.
+	// +optional
+	SupportsHonestReconfigure bool `json:"supportsHonestReconfigure,omitempty"`
 }
 
 // ProviderAdoptionStatus tracks VM adoption progress

@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -120,7 +121,7 @@ func TestClustered_VMOperationFailureCarriesVMOperationFailed(t *testing.T) {
 		prefix string
 	}{
 		"Power":       {perr, "failed to perform power operation: Retryable: failed to perform power operation On"},
-		"Reconfigure": {rerr, "failed to reconfigure VM: Retryable: online disk grow failed"},
+		"Reconfigure": {rerr, "failed to reconfigure VM: Retryable: could not grow the VM's disk to 20 GiB"},
 	} {
 		st, ok := status.FromError(tc.err)
 		require.True(t, ok, name)
@@ -186,25 +187,56 @@ func TestRoutedRPCError_Classification(t *testing.T) {
 	}
 }
 
-// TestSingleHost_WireErrorsCarryNoErrorInfo pins that the classification is
-// clustered-only: a single-host Power / Reconfigure failure keeps its
-// historical wire form exactly (codes.Unknown, no detail).
+// TestSingleHost_WireErrorsCarryNoErrorInfo pins that a single-host Power
+// failure keeps its historical wire form exactly (codes.Unknown, no detail).
 func TestSingleHost_WireErrorsCarryNoErrorInfo(t *testing.T) {
 	fx := newOpsFixture(t, map[string]map[string]string{
 		"single": {opsDomainName: routingDomainXML(opsDomainName, contracts.ObjectIdentity{})},
 	})
 	fx.script("single", "fail-start", "")
-	fx.script("single", "fail-domstate", "")
 	s := NewServer(&Provider{virshProvider: localHostVP("single")})
 
-	_, perr := s.Power(context.Background(), &providerv1.PowerRequest{Id: opsDomainName, Op: providerv1.PowerOp_POWER_OP_ON})
-	_, rerr := s.Reconfigure(context.Background(), &providerv1.ReconfigureRequest{Id: opsDomainName, DesiredJson: "{}"})
-	for name, err := range map[string]error{"Power": perr, "Reconfigure": rerr} {
-		require.Error(t, err, name)
-		_, isStatus := status.FromError(err)
-		assert.False(t, isStatus, "%s: single-host still returns a plain wrapped error (codes.Unknown on the wire)", name)
-		st := status.Convert(err)
-		assert.Equal(t, codes.Unknown, st.Code(), name)
-		assert.Empty(t, st.Details(), "%s: no ErrorInfo on single-host", name)
+	_, err := s.Power(context.Background(), &providerv1.PowerRequest{Id: opsDomainName, Op: providerv1.PowerOp_POWER_OP_ON})
+	require.Error(t, err)
+	_, isStatus := status.FromError(err)
+	assert.False(t, isStatus, "single-host Power still returns a plain wrapped error (codes.Unknown on the wire)")
+	st := status.Convert(err)
+	assert.Equal(t, codes.Unknown, st.Code())
+	assert.Empty(t, st.Details(), "no ErrorInfo on a single-host Power")
+}
+
+// TestSingleHost_ReconfigureFailureKeptOutOfTheBreaker (review H2): a
+// single-host Reconfigure that reached the host and failed there keeps its
+// historical code and message and carries VM_OPERATION_FAILED, which the
+// manager keeps out of the Provider's circuit breaker; a host that could not
+// be reached keeps the plain error, which the breaker counts.
+func TestSingleHost_ReconfigureFailureKeptOutOfTheBreaker(t *testing.T) {
+	cases := map[string]struct {
+		script map[string]string
+		reason string // "" = no ErrorInfo (counted by the breaker)
+	}{
+		"the host refused the change":  {map[string]string{"fail-domstate": ""}, contracts.VMOperationFailedReason},
+		"a paused domain is refused":   {map[string]string{"state": "paused\n", "id": "7"}, contracts.VMOperationFailedReason},
+		"the host's libvirtd is down":  {map[string]string{"nolibvirtd": ""}, ""},
+		"the connection to it dropped": {map[string]string{"dead": ""}, ""},
+	}
+	desired, err := json.Marshal(reconfigureTo(4, 0, 0))
+	require.NoError(t, err)
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			fx := newOpsFixture(t, map[string]map[string]string{
+				"single": {opsDomainName: routingDomainXML(opsDomainName, contracts.ObjectIdentity{})},
+			})
+			for f, v := range tc.script {
+				fx.script("single", f, v)
+			}
+			s := NewServer(&Provider{virshProvider: localHostVP("single")})
+			_, rerr := s.Reconfigure(context.Background(), &providerv1.ReconfigureRequest{Id: opsDomainName, DesiredJson: string(desired)})
+			require.Error(t, rerr)
+			st := status.Convert(rerr)
+			assert.Equal(t, codes.Unknown, st.Code(), "the historical code")
+			assert.True(t, strings.HasPrefix(st.Message(), "failed to reconfigure VM: "), "the historical message: %s", st.Message())
+			assert.Equal(t, tc.reason, errorInfoReason(st))
+		})
 	}
 }

@@ -264,6 +264,10 @@ type VirtualMachineReconciler struct {
 	placements atomic.Pointer[assume.Cache]
 	// unschedulable paces the re-scheduling of clustered VMs no host can take.
 	unschedulable unschedulableBackoff
+	// reconfigureRetry paces re-sending a failed Reconfigure, per VM: from
+	// providerErrorRetryInterval doubling to reconfigureRetryMaxInterval
+	// (review H2). A Reconfigure that succeeds resets it.
+	reconfigureRetry unschedulableBackoff
 	// clock returns the current time for the image-prepare backoff and stall
 	// bounds; nil uses time.Now. Tests set it.
 	clock func() time.Time
@@ -653,16 +657,49 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	recordIPDiscoveryIfFirstSeen(vm.Status.IPs, desc.IPs, vm.CreationTimestamp, string(provider.Spec.Type))
 
 	// Update status with current state
-	vm.Status.PowerState = infravirtrigaudiov1beta1.PowerState(desc.PowerState)
+	vm.Status.PowerState = observedPowerState(desc.PowerState)
 	vm.Status.IPs = desc.IPs
 	vm.Status.ConsoleURL = desc.ConsoleURL
 	vm.Status.Provider = desc.ProviderRaw
 	r.noteLinkedCloneDependents(vm, desc.ProviderRaw)
+	// A bound clustered VM's memory ceiling follows what its provider reports
+	// (recorded once if missing, raised when it reports more, lowered after a
+	// confirmed shrink), and its recorded CPU never stays below the vCPUs the
+	// provider reports it has (review H1).
+	r.syncMemoryCeiling(ctx, vm, ref, desc)
+	r.syncRecordedCPU(ctx, vm, ref, desc)
 
 	// Check desired power state
 	desiredPowerState := vm.Spec.PowerState
 	if desiredPowerState == "" {
 		desiredPowerState = infravirtrigaudiov1beta1.PowerStateOn
+	}
+
+	// A VM the provider reports Suspended (paused, suspended to RAM) or Unknown
+	// is not reconfigured and not powered on (review R1): it is left as it is
+	// until it runs or is powered off. The one exception is a Suspended VM whose
+	// spec asks for Off: it is powered off (destroyed), as asked (review H4). A
+	// suspended guest cannot shut down gracefully, so OffGraceful is NOT turned
+	// into a hard power-off (review L3): the VM is held with a condition saying
+	// a hard Off is required. An Unknown VM is left alone entirely: acting on a
+	// state nobody can classify is a guess.
+	if powerStateUnmanaged(desc.PowerState) {
+		suspended := vm.Status.PowerState == infravirtrigaudiov1beta1.ObservedPowerStateSuspended
+		if suspended && desiredPowerState == infravirtrigaudiov1beta1.PowerStateOff {
+			logger.Info("VM is suspended and its spec asks for Off; powering it off (hard)")
+			return r.adjustPowerState(ctx, vm, providerInstance, ref, string(infravirtrigaudiov1beta1.PowerStateOff))
+		}
+		msg := fmt.Sprintf("the provider reports the VM %s: it is not reconfigured, and not powered on, until it is running or powered off "+
+			"(a suspended VM is powered off if its spec.powerState is Off)", vm.Status.PowerState)
+		if suspended && desiredPowerState == infravirtrigaudiov1beta1.PowerStateOffGraceful {
+			msg = "the VM is suspended, and a suspended guest cannot shut down gracefully: spec.powerState OffGraceful is not applied. " +
+				"Set spec.powerState: Off to power it off (hard), or resume it on the hypervisor and it is then shut down gracefully"
+		}
+		logger.Info("VM is suspended or in an unknown state; not adjusting its power state or size", "powerState", desc.PowerState,
+			"desired", desiredPowerState)
+		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonPowerStateUnmanaged, msg)
+		r.updateStatus(ctx, vm)
+		return ctrl.Result{RequeueAfter: r.getRequeueInterval(vm, desc)}, nil
 	}
 
 	// A clustered VM observed powered off with a shrink pending gets it applied
@@ -699,7 +736,11 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		r.updateStatus(ctx, vm)
 		return ctrl.Result{RequeueAfter: vmCreateInvalidSpecRetryInterval}, nil
 	}
-	if needsRC {
+	// A change pending a restart is re-checked with the provider on a slow
+	// cadence, and a failed Reconfigure is re-sent even if the spec now matches
+	// the recorded size (pendingReconfigureRecheck).
+	recheckDue, recheckIn := r.pendingReconfigureRecheck(vm)
+	if (needsRC || recheckDue) && recheckIn == 0 {
 		desiredCPU, desiredMemoryMiB, _ := effectiveResources(vm, vmClass) // already validated above
 		logger.Info("Effective resources changed, reconfiguring VM",
 			"currentCPU", r.getCurrentCPU(vm),
@@ -710,6 +751,11 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		// capacity first (ADR-0007 Addendum A, scheduler-accuracy amendment),
 		// and a shrink of a running clustered VM waits until it is powered off
 		// (review N1). Every single-host / thin-client VM goes straight on.
+		// Nothing is sent to a clustered Provider that does not report the
+		// honest Reconfigure result (review H3).
+		if res, held := r.holdResizeWithoutHonestReconfigure(ctx, vm, ref, provider); held {
+			return res, nil
+		}
 		if ref.Routed() {
 			if res, deferred := r.deferClusteredShrink(ctx, vm, vmClass, desc); deferred {
 				return res, nil
@@ -729,7 +775,11 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	r.updateStatus(ctx, vm)
 
 	// Optimize polling frequency based on VM state
-	return ctrl.Result{RequeueAfter: r.getRequeueInterval(vm, desc)}, nil
+	requeue := r.getRequeueInterval(vm, desc)
+	if recheckIn > 0 && recheckIn < requeue {
+		requeue = recheckIn
+	}
+	return ctrl.Result{RequeueAfter: requeue}, nil
 }
 
 // handleDeletion handles VM deletion
@@ -2211,29 +2261,52 @@ func (r *VirtualMachineReconciler) reconfigureVM(
 	}
 
 	// Call provider reconfigure
-	taskRef, err := provider.Reconfigure(ctx, ref, req)
+	result, err := provider.Reconfigure(ctx, ref, req)
+	taskRef := result.TaskRef
 	if err != nil {
+		// The failed call may have applied part of the change: record it
+		// (recordReconfigureFailure — on a clustered Provider the size is
+		// counted at the larger of the recorded and the desired one, review H1)
+		// before anything else, so it is re-sent — on the VM's backoff (review
+		// H2) — until one succeeds.
+		retryAfter := r.recordReconfigureFailure(vm, ref, vmClass, err)
 		// As for Power: a clustered VM's host-scoped unavailability or
 		// not-found is a host-level fact, not a reconfigure failure to retry
 		// every few seconds (ADR-0007 Addendum A, slice 2).
 		if res, handled := r.handleRoutedOpError(ctx, vm, ref, err, errReasonProviderReconfigure); handled {
 			return res, nil
 		}
-		logger.Error(err, "Failed to reconfigure VM")
-		k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Failed to reconfigure VM: %v", err))
+		logger.Error(err, "Failed to reconfigure VM", "retryAfter", retryAfter)
 		r.updateStatus(ctx, vm)
-		return ctrl.Result{RequeueAfter: routedCallRetryAfter(ref, err)}, nil
+		return ctrl.Result{RequeueAfter: max(retryAfter, routedCallRetryAfter(ref, err))}, nil
 	}
+	r.recordReconfigureSuccess(vm)
 
 	// Update status with reconfiguration info
 	vm.Status.Phase = infravirtrigaudiov1beta1.VirtualMachinePhaseReconfiguring
-	now := metav1.Now()
+	now := metav1.NewTime(r.now())
 	vm.Status.LastReconfigureTime = &now
 
-	if taskRef != "" {
+	switch {
+	case ref.Routed() && !result.Honest:
+		// A clustered VM's accounting trusts only an answer marked honest
+		// (review L1): an unmarked one — an older provider image behind a stale
+		// capability snapshot — is not trusted. See recordUnmarkedResult.
+		logger.Info("Reconfigure answered without the honest-result marker; not trusting it")
+		r.recordUnmarkedResult(vm, vmClass)
+		r.updateStatus(ctx, vm)
+		return ctrl.Result{RequeueAfter: restartPendingRecheckInterval}, nil
+	case taskRef != "":
 		vm.Status.ReconfigureTaskRef = taskRef
 		k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonUpdating, "VM reconfiguration in progress")
-	} else {
+	case result.RestartRequired:
+		// Applied to the persistent definition only: see recordRestartPending
+		// for what status.currentResources then holds.
+		logger.Info("Reconfigure applied to the VM's persistent definition only; it takes effect at the next power cycle")
+		r.recordRestartPending(vm, vmClass)
+		r.updateStatus(ctx, vm)
+		return ctrl.Result{RequeueAfter: restartPendingRecheckInterval}, nil
+	default:
 		// Reconfigure completed synchronously, update current resources
 		r.updateCurrentResources(vm, vmClass)
 		vm.Status.Phase = infravirtrigaudiov1beta1.VirtualMachinePhaseRunning
@@ -2257,7 +2330,9 @@ func (r *VirtualMachineReconciler) reconfigureVM(
 // cannot be computed (the override is out of bounds — unexpected here, since
 // callers only reach this after a request built from the same vm/vmClass
 // with the same helper already succeeded), status.currentResources is left
-// exactly as it was rather than overwritten with a wrong value.
+// exactly as it was rather than overwritten with a wrong value. A Reconfigure
+// the provider applied to the VM's persistent definition only
+// (RestartRequired) is recorded by recordRestartPending instead.
 func (r *VirtualMachineReconciler) updateCurrentResources(vm *infravirtrigaudiov1beta1.VirtualMachine, vmClass *infravirtrigaudiov1beta1.VMClass) {
 	cpu, memoryMiB32, err := effectiveResources(vm, vmClass)
 	if err != nil {

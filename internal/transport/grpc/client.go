@@ -527,6 +527,8 @@ func (c *Client) GetCapabilities(ctx context.Context) (contracts.Capabilities, e
 		SupportsClustering:          resp.SupportsClustering,
 		// ADR-0009 D7: false from a provider that predates the field.
 		SupportsImageArtifactIdentity: resp.GetSupportsImageArtifactIdentity(),
+		// False from a provider that predates the honest Reconfigure result.
+		SupportsHonestReconfigure: resp.GetSupportsHonestReconfigure(),
 	}, nil
 }
 
@@ -729,10 +731,14 @@ func (c *Client) Power(ctx context.Context, vm contracts.VMRef, op contracts.Pow
 // provider) it threads vm.HostID to the wire as target_host_id and vm.Owner as
 // owner (ADR-0007 Addendum A, slice 2); a single-host request carries neither.
 //
+// The provider's restart_required answer (a change applied to the VM's
+// persistent definition only, taking effect at its next power cycle) is
+// returned as ReconfigureResult.RestartRequired.
+//
 // Records virtrigaud_vm_operations_total{operation="Reconfigure",...}
 // via deferred recordVMOp using the named retErr return value (G7.1 /
 // #124).
-func (c *Client) Reconfigure(ctx context.Context, vm contracts.VMRef, desired contracts.CreateRequest) (taskRef string, retErr error) {
+func (c *Client) Reconfigure(ctx context.Context, vm contracts.VMRef, desired contracts.CreateRequest) (result contracts.ReconfigureResult, retErr error) {
 	defer c.recordVMOp(metrics.OpReconfigure, &retErr)
 
 	ctx, cancel := context.WithTimeout(ctx, contracts.ReconfigureCallTimeout)
@@ -740,7 +746,7 @@ func (c *Client) Reconfigure(ctx context.Context, vm contracts.VMRef, desired co
 
 	desiredJSON, err := json.Marshal(desired)
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal desired configuration: %w", err)
+		return contracts.ReconfigureResult{}, fmt.Errorf("failed to marshal desired configuration: %w", err)
 	}
 
 	resp, err := c.client.Reconfigure(ctx, &providerv1.ReconfigureRequest{
@@ -750,15 +756,17 @@ func (c *Client) Reconfigure(ctx context.Context, vm contracts.VMRef, desired co
 		Owner:        routedOwner(vm),
 	})
 	if err != nil {
-		return "", c.mapGRPCError("reconfigure", err)
+		return contracts.ReconfigureResult{}, c.mapGRPCError("reconfigure", err)
 	}
 
+	result.RestartRequired = resp.GetRestartRequired()
+	// False from a provider that predates the honest result contract.
+	result.Honest = resp.GetHonestResult()
 	if resp.Task != nil {
 		c.trackTaskStart(resp.Task.Id) // G7.3 (#129)
-		return resp.Task.Id, nil
+		result.TaskRef = resp.Task.Id
 	}
-
-	return "", nil
+	return result, nil
 }
 
 // Describe implements contracts.Provider.
@@ -798,11 +806,13 @@ func (c *Client) Describe(ctx context.Context, vm contracts.VMRef) (result contr
 	}
 
 	return contracts.DescribeResponse{
-		Exists:      resp.Exists,
-		PowerState:  resp.PowerState,
-		IPs:         resp.Ips,
-		ConsoleURL:  resp.ConsoleUrl,
-		ProviderRaw: providerRaw,
+		Exists:       resp.Exists,
+		PowerState:   resp.PowerState,
+		IPs:          resp.Ips,
+		ConsoleURL:   resp.ConsoleUrl,
+		ProviderRaw:  providerRaw,
+		MaxMemoryMiB: resp.GetMaxMemoryMib(),
+		VCPUs:        resp.GetVcpus(),
 	}, nil
 }
 

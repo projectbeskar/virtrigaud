@@ -247,6 +247,18 @@ func (r *VirtualMachineReconciler) applyPendingShrinkWhileOff(
 	if err != nil || !shrinks(r.recordedResources(vm), desired) {
 		return ctrl.Result{}, false, nil
 	}
+	// Not even while off through a Provider without the honest Reconfigure
+	// result (review H3).
+	if res, held := r.holdResizeWithoutHonestReconfigure(ctx, vm, ref, providerCR); held {
+		return res, true, nil
+	}
+	// A failed or untrusted earlier attempt is re-sent on its own cadence
+	// (the failure backoff, or the re-check interval), not on every reconcile
+	// (reviews H2, L1). The VM is not powered on meanwhile: the shrink goes
+	// first.
+	if _, wait := r.pendingReconfigureRecheck(vm); wait > 0 {
+		return ctrl.Result{RequeueAfter: wait}, true, nil
+	}
 	res, admitted, err := r.admitClusteredResize(ctx, vm, providerCR, vmClass, ref.HostID)
 	if err != nil || !admitted {
 		return res, true, err

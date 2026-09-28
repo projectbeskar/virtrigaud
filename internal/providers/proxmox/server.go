@@ -598,13 +598,14 @@ func (p *Provider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureR
 			return nil, errors.NewInternal("failed to reconfigure VM", err)
 		}
 
-		result := &providerv1.TaskResponse{}
+		// RestartRequired stays false: this provider does not yet detect a
+		// change PVE stored as pending (hotplug not enabled for it) and so
+		// cannot report it; the Reconfigure contract's restart_required is
+		// set only by providers that do.
+		result := &providerv1.TaskResponse{RestartRequired: false}
 		if taskID != "" {
 			result.Task = &providerv1.TaskRef{Id: taskID}
 		}
-
-		// Note: Power cycle requirement should be handled at a higher level
-		// The TaskResponse only contains task reference for async operations
 
 		return result, nil
 	}
