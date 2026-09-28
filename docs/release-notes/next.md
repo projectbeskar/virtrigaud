@@ -127,7 +127,10 @@ providers), and rollback caveats in
   adopted, keyed on (host, domain): the adopted VM's domain is stamped with its
   new owner (a serialized check-and-set with read-back) and the VM is bound to
   its host and counted in its capacity. A domain left by a deleted or restored
-  VirtualMachine is not adopted; it is reported for the A6 re-attach runbook. Still experimental — migration into a clustered provider and
+  VirtualMachine is not adopted; it is reported for the A6 re-attach runbook,
+  and nothing new is adopted while a host cannot be listed. A clustered
+  provider runs one replica with the `Recreate` strategy, so its rollout is a
+  short outage. Still experimental — migration into a clustered provider and
   host-to-host migration are not implemented yet.
 - The clustered scheduler subtracts what each host already holds: every VM
   bound to it, pending on it, or being deleted from it, in any namespace, at
