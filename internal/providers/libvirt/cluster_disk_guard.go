@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"golang.org/x/sync/semaphore"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -261,13 +262,17 @@ func (g *clusterDiskGuard) refuseIfUsed(ctx context.Context, h hostCommandRunner
 	}
 	res, err := g.p.scanClusterDiskUse(ctx, clusterScan{files: files, owner: g.owner, target: g.host, conn: h,
 		// A previous incarnation holds the VM whatever the other hosts say.
-		stopWhen: func(r hostDiskScan, _ error) bool { return r.incarnations > 0 },
+		stopWhen: func(r hostDiskScan, _ error) bool { return r.incarnations > 0 || r.ownElsewhere > 0 },
 	})
 	targetUsed := false
 	for i, used := range res.used {
 		targetUsed = targetUsed || (used && isTarget[files[i]])
 	}
 	switch {
+	case res.ownElsewhere > 0:
+		log.Printf("WARN Refusing %s of libvirt domain %s on host %s: %d domain(s) on the Provider's hosts are stamped with "+
+			"%s/%s's own UID (its own domain elsewhere; ADR-0007 A6)", g.op, g.domain, g.host, res.ownElsewhere, g.owner.Namespace, g.owner.Name)
+		return &previousIncarnationError{op: g.op, domain: g.domain, own: true}
 	case res.incarnations > 0:
 		log.Printf("WARN Refusing %s of libvirt domain %s on host %s: %d domain(s) on the Provider's hosts are stamped for %s/%s "+
 			"(a previous incarnation; ADR-0007 A6)", g.op, g.domain, g.host, res.incarnations, g.owner.Namespace, g.owner.Name)
@@ -370,6 +375,29 @@ func stampsNameOwner(recorded []contracts.ObjectIdentity, owner contracts.Object
 	return false
 }
 
+// incarnationKinds classifies the recorded owner stamps of one domain against
+// the requester owner (ADR-0007 A6, decision 2): own is true when a stamp names
+// owner's namespace and name with owner's own UID — the requester's own domain
+// (its placement record was lost) — and previous when one names them under
+// another UID — a previous incarnation. A domain with two stamps can be both.
+// An owner without a namespace or name matches nothing.
+func incarnationKinds(recorded []contracts.ObjectIdentity, owner contracts.ObjectIdentity) (previous, own bool) {
+	if owner.Namespace == "" || owner.Name == "" {
+		return false, false
+	}
+	for _, r := range recorded {
+		if r.Namespace != owner.Namespace || r.Name != owner.Name {
+			continue
+		}
+		if owner.UID != "" && r.UID == owner.UID {
+			own = true
+		} else {
+			previous = true
+		}
+	}
+	return previous, own
+}
+
 // clusterScan is one cluster-wide disk scan.
 type clusterScan struct {
 	// files are the candidate files as the operation's host names them (raw
@@ -380,7 +408,8 @@ type clusterScan struct {
 	// references a file under it.
 	seedDir string
 	// owner, when its namespace and name are set, makes the scan count the
-	// domains whose owner stamp names them (stampsNameOwner).
+	// domains whose owner stamp names them (incarnationKinds: under another
+	// UID, or with the owner's own).
 	owner contracts.ObjectIdentity
 	// target is the host the operation runs on and conn the operation's own
 	// connection to it: that host is scanned over conn, never re-leased —
@@ -405,8 +434,12 @@ type clusterScanResult struct {
 	// references it.
 	used []bool
 	// incarnations counts the domains stamped with the owner's namespace and
-	// name.
+	// name under another UID (previous incarnations).
 	incarnations int
+	// ownElsewhere counts the domains stamped with the owner's namespace, name
+	// and own UID: its own domain, found where the operation does not expect
+	// it (another host, or another name).
+	ownElsewhere int
 	// seedUsed reports whether a domain references a file under seedDir.
 	seedUsed bool
 }
@@ -418,6 +451,7 @@ type hostDiskScan = clusterScanResult
 func (s *clusterScanResult) add(r clusterScanResult) {
 	s.users += r.users
 	s.incarnations += r.incarnations
+	s.ownElsewhere += r.ownElsewhere
 	s.seedUsed = s.seedUsed || r.seedUsed
 	if len(s.used) < len(r.used) {
 		s.used = append(s.used, make([]bool, len(r.used)-len(s.used))...)
@@ -659,8 +693,15 @@ func scanHostDiskUse(ctx context.Context, h hostCommandRunner, s clusterScan, re
 		if s.seedDir != "" && ((otherDomains{d}).useUnder(s.seedDir) || (otherDomains{d}).useUnder(canon[len(s.files)])) {
 			out.seedUsed = true
 		}
-		if stampsNameOwner(d.owners, s.owner) {
-			log.Printf("WARN cluster disk guard: domain %s is stamped for %s/%s", d.uuid, s.owner.Namespace, s.owner.Name)
+		previous, own := incarnationKinds(d.owners, s.owner)
+		if own {
+			log.Printf("WARN cluster disk guard: domain %s is stamped with the requester's own UID (%s/%s)",
+				d.uuid, s.owner.Namespace, s.owner.Name)
+			out.ownElsewhere++
+		}
+		if previous {
+			log.Printf("WARN cluster disk guard: domain %s is stamped for %s/%s under another UID",
+				d.uuid, s.owner.Namespace, s.owner.Name)
 			out.incarnations++
 		}
 	}
@@ -721,10 +762,20 @@ type previousIncarnationError struct {
 	op string
 	// domain is the domain that was to be created.
 	domain string
+	// own marks the domain found as stamped with the requester's OWN UID: its
+	// own domain, elsewhere (VMPreviousIncarnationKindOwn), not a previous
+	// incarnation under another UID.
+	own bool
 }
 
 // Error is the refusal, safe for the requesting VM's status.
 func (e *previousIncarnationError) Error() string {
+	if e.own {
+		return fmt.Sprintf("%s of libvirt domain %q refused: a domain of this VirtualMachine — stamped with its own UID — "+
+			"already exists on another host of this Provider (its placement record was lost); nothing was created. An "+
+			"administrator must point the VirtualMachine's status.placement.pendingHost at that host; no re-stamp is "+
+			"needed (ADR-0007 A6 runbook)", e.op, e.domain)
+	}
 	return fmt.Sprintf("%s of libvirt domain %q refused: a domain VirtRigaud created for this VirtualMachine's namespace and name "+
 		"(a previous incarnation of it, e.g. left by orphan-on-delete, a force-delete or a backup restore) exists on a host "+
 		"of this Provider; nothing was created. An administrator must re-attach it to this VirtualMachine or remove it "+
@@ -740,8 +791,19 @@ func (e *previousIncarnationError) Unwrap() error {
 // GRPCStatus renders the refusal as codes.AlreadyExists carrying a
 // google.rpc.ErrorInfo{Reason: VM_PREVIOUS_INCARNATION}: the manager holds the
 // VM on its pending host instead of excluding the host.
+// The own kind is marked with ErrorInfo metadata
+// (VMPreviousIncarnationKindKey: VMPreviousIncarnationKindOwn), so the manager
+// can keep a deleted VM's finalizer while its own domain runs elsewhere.
 func (e *previousIncarnationError) GRPCStatus() *status.Status {
-	return statusWithReasons(codes.AlreadyExists, e.Error(), contracts.VMPreviousIncarnationReason)
+	info := &errdetails.ErrorInfo{Reason: contracts.VMPreviousIncarnationReason, Domain: contracts.ErrorInfoDomain}
+	if e.own {
+		info.Metadata = map[string]string{contracts.VMPreviousIncarnationKindKey: contracts.VMPreviousIncarnationKindOwn}
+	}
+	st := status.New(codes.AlreadyExists, e.Error())
+	if withInfo, err := st.WithDetails(info); err == nil {
+		return withInfo
+	}
+	return st
 }
 
 // clusterGuardIncompleteError reports that op of domain was not performed

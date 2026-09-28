@@ -1792,6 +1792,15 @@ runbook or remove it. There is no opt-in in v0.4.0. A6.2 must also set the
 >   a missing file, a reserved name, a non-regular file and a file in use with
 >   the same "not allowed" message, and the rejection stays InvalidArgument on
 >   the wire (it used to reach the manager as VM_OPERATION_FAILED).
+> - **The VM's own domain elsewhere** *(security review of A6.1)*: a domain
+>   stamped with the requester's namespace, name and OWN UID found by the scan
+>   is counted apart from previous incarnations (ErrorInfo metadata
+>   `incarnation: own`): the VM is held the same way, with its own message —
+>   move `pendingHost` to that host, no re-stamp — and, because its Delete on
+>   the pending host finds nothing while its own domain runs elsewhere, deleting
+>   it keeps the finalizer (`DeleteBlocked=True/OwnDomainOnAnotherHost`) until
+>   the pending host points there or `force-delete` / `orphan-on-delete` is
+>   set. A previous incarnation under another UID still releases on delete.
 > - **Check-then-act** *(security review of A6.1)*: the provider holds an
 >   in-process lock on the domain name from the scan until the write, define
 >   or teardown completes (Create, Clone, Delete), so a retry never checks and

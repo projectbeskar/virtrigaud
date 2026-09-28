@@ -1765,7 +1765,21 @@ nothing. The manager then **holds** the VM:
 - a clone's target VM is held the same way, and the `VMClone` stays `Pending`
   (`RestorePending`), never `Failed`;
 - deleting a held VM never touches the previous incarnation: its owner-checked
-  `Delete` carries the held VM's own UID and gets `NotFound`.
+  `Delete` carries the held VM's own UID and gets `NotFound`, and the
+  VirtualMachine goes.
+
+**The VM's own domain on another host.** A domain stamped with the VM's
+namespace, name **and its own UID** on another host is not a previous
+incarnation: it is this VM's own domain, and only its placement record was
+lost. The provider counts it apart and says so (`VM_PREVIOUS_INCARNATION` with
+ErrorInfo metadata `incarnation: own`): the VM is held the same way, but its
+message asks for the pending host to be moved — **no re-stamp is needed**:
+`kubectl patch virtualmachines.infra.virtrigaud.io <name> -n <namespace> --subresource=status --type=merge -p '{"status":{"placement":{"pendingHost":"<host>"}}}'`;
+the next create retry binds the domain. Deleting such a VM is **held** too
+(`DeleteBlocked=True/OwnDomainOnAnotherHost`): its `Delete` on the pending host
+finds nothing, and releasing it would leave its own domain running. Move the
+pending host (the delete then removes the domain), or set `force-delete` /
+`orphan-on-delete` to release it and leave the domain for manual removal.
 
 A foreign or unstamped domain that merely has the name keeps the slice 2
 behaviour (the host is excluded and the VM placed elsewhere). The restore

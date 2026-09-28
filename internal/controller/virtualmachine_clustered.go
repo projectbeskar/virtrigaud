@@ -342,6 +342,37 @@ var restorePendingMessage = fmt.Sprintf(
 		"VM stays on its pending host. An administrator must re-attach that domain to this VirtualMachine or remove it; "+
 		"see %s. Re-checked with a backoff of up to %s", restorePendingRunbook, blockedRetryMax)
 
+// restorePendingOwnMessage is the Placed / Provisioning message of a VM held
+// because its OWN domain (stamped with its UID) exists on another host of its
+// Provider — its placement record was lost (contracts.IsVMOwnDomainElsewhere).
+// Nothing needs re-stamping; the pending host must point at that host. It
+// names no host. heldForOwnDomainElsewhere recognizes the hold by it.
+var restorePendingOwnMessage = fmt.Sprintf(
+	"held: a domain of this VirtualMachine — stamped with its own UID — already exists on another host of its "+
+		"Provider (its placement record was lost), so nothing is created on its pending host. An administrator must "+
+		"set status.placement.pendingHost to that domain's host (no re-stamp is needed); until then deleting this "+
+		"VirtualMachine is held too, so that its domain is not left running. See %s. Re-checked with a backoff of up to %s",
+	restorePendingRunbook, blockedRetryMax)
+
+// heldForOwnDomainElsewhere reports whether vm's last create was answered with
+// its own domain on another host (holdForPreviousIncarnation recorded that
+// hold) and vm is still unbound: its delete on the pending host would find
+// nothing there and leave that domain running.
+func heldForOwnDomainElsewhere(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
+	if vm.Status.ID != "" {
+		return false
+	}
+	c := meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionPlaced)
+	return c != nil && c.Reason == k8s.ReasonRestorePending && c.Message == restorePendingOwnMessage
+}
+
+// ownDomainDeleteMessage is the DeleteBlocked message of a VM held by
+// heldForOwnDomainElsewhere. It names no host.
+var ownDomainDeleteMessage = fmt.Sprintf("Delete blocked: this VirtualMachine's own domain exists on another host of its "+
+	"Provider, and deleting it on its pending host would leave that domain running; set "+
+	"status.placement.pendingHost to that host (see %s) so the delete removes it. %s",
+	restorePendingRunbook, deleteBlockedEscape)
+
 // holdForPreviousIncarnation is ADR-0007 A6, R2 on the manager side: the
 // provider refused the Create on the pending host with
 // VM_PREVIOUS_INCARNATION — a domain stamped with this VM's namespace and name
@@ -366,21 +397,27 @@ func (r *VirtualMachineReconciler) holdForPreviousIncarnation(
 ) (ctrl.Result, error) {
 	log.FromContext(ctx).Info("Create refused: a previous incarnation of this VM exists on a host of the Provider; "+
 		"holding the VM on its pending host (not excluded, not re-scheduled)", "host", host, "error", err.Error())
+	// The VM's own domain elsewhere (item 8 of the A6.1 security review) is
+	// held the same way, with its own message and runbook hint.
+	msg := restorePendingMessage
+	if contracts.IsVMOwnDomainElsewhere(err) {
+		msg = restorePendingOwnMessage
+	}
 	// Read before the conditions are set: FindStatusCondition returns a
 	// pointer into the slice that setPlacedCondition updates in place.
 	prev := meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionPlaced)
-	alreadyHeld := prev != nil && prev.Reason == k8s.ReasonRestorePending
-	setPlacedCondition(vm, metav1.ConditionFalse, k8s.ReasonRestorePending, restorePendingMessage)
+	alreadyHeld := prev != nil && prev.Reason == k8s.ReasonRestorePending && prev.Message == msg
+	setPlacedCondition(vm, metav1.ConditionFalse, k8s.ReasonRestorePending, msg)
 	meta.SetStatusCondition(&vm.Status.Conditions, metav1.Condition{
 		Type:               k8s.ConditionProvisioning,
 		Status:             metav1.ConditionFalse,
 		Reason:             k8s.ReasonRestorePending,
-		Message:            restorePendingMessage,
+		Message:            msg,
 		ObservedGeneration: vm.Generation,
 	})
 	metrics.RecordError(errReasonRestorePending, metrics.ComponentManager)
 	if !alreadyHeld {
-		r.recordEvent(vm, corev1.EventTypeWarning, k8s.ReasonRestorePending, restorePendingMessage)
+		r.recordEvent(vm, corev1.EventTypeWarning, k8s.ReasonRestorePending, msg)
 	}
 	r.updateStatus(ctx, vm)
 	return ctrl.Result{RequeueAfter: blockedRetryBackoff(conditionSince(vm.Status.Conditions, k8s.ConditionPlaced))}, nil

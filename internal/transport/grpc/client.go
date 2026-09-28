@@ -1393,6 +1393,19 @@ func isVMPreviousIncarnationStatus(st *status.Status) bool {
 	return false
 }
 
+// previousIncarnationKind returns the VMPreviousIncarnationKindKey metadata of
+// st's VM_PREVIOUS_INCARNATION ErrorInfo, or "".
+func previousIncarnationKind(st *status.Status) string {
+	for _, d := range st.Details() {
+		if info, ok := d.(*errdetails.ErrorInfo); ok &&
+			info.GetReason() == contracts.VMPreviousIncarnationReason &&
+			info.GetDomain() == contracts.ErrorInfoDomain {
+			return info.GetMetadata()[contracts.VMPreviousIncarnationKindKey]
+		}
+	}
+	return ""
+}
+
 // isVMDiskCheckFailedStatus reports whether a gRPC status is a provider's
 // "not performed: could not verify that no other VM depends on this VM's disk"
 // (codes.Unavailable carrying a google.rpc.ErrorInfo with
@@ -1572,6 +1585,10 @@ func (c *Client) mapGRPCError(operation string, err error) error {
 		// marked in the chain (contracts.IsVMPreviousIncarnation), so the
 		// controller holds the VM on its pending host instead of excluding it.
 		if isVMPreviousIncarnationStatus(st) {
+			if previousIncarnationKind(st) == contracts.VMPreviousIncarnationKindOwn {
+				return contracts.NewConflictError(fmt.Sprintf("%s: %s", operation, st.Message()),
+					fmt.Errorf("%w: %w: %w", contracts.ErrVMPreviousIncarnation, contracts.ErrVMOwnDomainElsewhere, err))
+			}
 			return contracts.NewConflictError(fmt.Sprintf("%s: %s", operation, st.Message()),
 				fmt.Errorf("%w: %w", contracts.ErrVMPreviousIncarnation, err))
 		}

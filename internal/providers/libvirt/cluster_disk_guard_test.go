@@ -29,6 +29,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -225,6 +226,58 @@ func TestClusteredCreate_SharedPool_PreviousIncarnationElsewhereIsRefused(t *tes
 			assert.Contains(t, s.virshCalls("host-a"), "list --all --uuid", "host-a was scanned")
 		})
 	}
+}
+
+// TestClusteredCreate_OwnDomainElsewhereIsCountedApart (security review of
+// A6.1, item 8): a domain stamped with the requester's OWN UID on another host
+// is its own domain (its placement record was lost), not a previous
+// incarnation: the create is held the same way, but the answer says so —
+// ErrorInfo metadata incarnation=own and its own sentence, naming no host — so
+// the manager can point the operator at the pending host and keep a deleted
+// VM's finalizer.
+func TestClusteredCreate_OwnDomainElsewhereIsCountedApart(t *testing.T) {
+	s := newSharedPool(t)
+	disk := s.disk("team-a.web-disk.qcow2", "own-disk")
+	s.defineOn("host-a", "team-a.web", uuidPrevious, guardDomainXML("team-a.web", uuidPrevious, disk, ownerTeamA, true))
+
+	_, err := s.createOnB()
+	var pi *previousIncarnationError
+	require.ErrorAs(t, err, &pi)
+	assert.True(t, pi.own)
+	st, _ := status.FromError(createRPCError(err))
+	assert.Equal(t, codes.AlreadyExists, st.Code())
+	var kind string
+	for _, d := range st.Details() {
+		if info, ok := d.(*errdetails.ErrorInfo); ok && info.GetReason() == contracts.VMPreviousIncarnationReason {
+			kind = info.GetMetadata()[contracts.VMPreviousIncarnationKindKey]
+		}
+	}
+	assert.Equal(t, contracts.VMPreviousIncarnationKindOwn, kind)
+	assert.Contains(t, st.Message(), "stamped with its own UID")
+	assert.Contains(t, st.Message(), "no re-stamp is needed")
+	requireWireSafe(t, st.Message(), s.images)
+	s.requireNothingWrittenOnB(disk, "own-disk")
+}
+
+func TestIncarnationKinds(t *testing.T) {
+	for name, tc := range map[string]struct {
+		recorded       []contracts.ObjectIdentity
+		previous, owns bool
+	}{
+		"another UID":        {[]contracts.ObjectIdentity{staleTeamAWeb}, true, false},
+		"own UID":            {[]contracts.ObjectIdentity{ownerTeamA}, false, true},
+		"both stamps":        {[]contracts.ObjectIdentity{ownerTeamA, staleTeamAWeb}, true, true},
+		"another namespace":  {[]contracts.ObjectIdentity{ownerTeamB}, false, false},
+		"unstamped":          {nil, false, false},
+		"another tenant too": {[]contracts.ObjectIdentity{ownerForeign}, false, false},
+	} {
+		previous, own := incarnationKinds(tc.recorded, ownerTeamA)
+		assert.Equal(t, tc.previous, previous, name)
+		assert.Equal(t, tc.owns, own, name)
+	}
+	previous, own := incarnationKinds([]contracts.ObjectIdentity{staleTeamAWeb}, contracts.ObjectIdentity{Namespace: "team-a", Name: "web"})
+	assert.True(t, previous, "a requester without a UID never owns one")
+	assert.False(t, own)
 }
 
 // TestClusteredCreate_SharedPool_ForeignUserIsPlainAlreadyExists: the file is

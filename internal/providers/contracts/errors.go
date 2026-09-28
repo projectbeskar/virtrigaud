@@ -240,6 +240,30 @@ func IsVMDiskCheckFailed(err error) bool {
 // transport client wraps it into the Conflict it maps that refusal to.
 var ErrVMPreviousIncarnation = errors.New("a previous incarnation of this VirtualMachine exists on a host of the Provider")
 
+// VMPreviousIncarnationKindKey is the google.rpc.ErrorInfo metadata key of a
+// VMPreviousIncarnationReason status that says which kind of domain was
+// found; its only value today is VMPreviousIncarnationKindOwn. Absent means a
+// previous incarnation under another UID.
+const VMPreviousIncarnationKindKey = "incarnation"
+
+// VMPreviousIncarnationKindOwn marks a VMPreviousIncarnationReason status
+// whose domain is stamped with the requester's OWN UID, on another host of the
+// Provider: the VirtualMachine's own domain, whose placement record was lost.
+// Nothing has to be re-stamped; the VM's pending host must point at that host,
+// and deleting the VM must not release it while the domain runs elsewhere.
+const VMPreviousIncarnationKindOwn = "own"
+
+// ErrVMOwnDomainElsewhere marks (in an error's chain, next to
+// ErrVMPreviousIncarnation) a VMPreviousIncarnationReason refusal of kind
+// VMPreviousIncarnationKindOwn.
+var ErrVMOwnDomainElsewhere = errors.New("this VirtualMachine's own domain exists on another host of the Provider")
+
+// IsVMOwnDomainElsewhere reports whether err is a provider's previous
+// incarnation refusal of kind VMPreviousIncarnationKindOwn.
+func IsVMOwnDomainElsewhere(err error) bool {
+	return IsVMPreviousIncarnation(err) && errors.Is(err, ErrVMOwnDomainElsewhere)
+}
+
 // IsVMPreviousIncarnation reports whether err is a provider's
 // VMPreviousIncarnationReason refusal (a Conflict that says so), as opposed
 // to any other Conflict (ADR-0007 A6, R2): the caller must hold the VM on its

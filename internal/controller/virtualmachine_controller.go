@@ -867,6 +867,13 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 						logger.Info("VM deletion initiated", "taskRef", taskRef)
 						// TODO: Wait for task completion in future iterations
 					}
+				case contracts.IsNotFound(err) && ref.Routed() && heldForOwnDomainElsewhere(vm) && !hasForceDeleteAnnotation(vm):
+					// The VM's last create found its OWN domain on another host
+					// (ADR-0007 A6.1): nothing is on its pending host, but
+					// releasing the finalizer would leave that domain running.
+					// Keep it until pendingHost points at that host (the next
+					// Delete then removes it), or force-delete / orphan-on-delete.
+					return r.holdDelete(ctx, vm, k8s.ReasonOwnDomainOnAnotherHost, ownDomainDeleteMessage, err), nil
 				case contracts.IsNotFound(err):
 					// The hypervisor VM is already gone — nothing to orphan, so
 					// proceed to finalizer removal (idempotent delete). A clustered

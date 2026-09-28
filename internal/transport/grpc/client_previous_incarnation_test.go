@@ -59,6 +59,16 @@ func TestMapGRPCError_VMPreviousIncarnationIsMarkedConflict(t *testing.T) {
 		assert.False(t, countsTowardBreaker(m, st.Err()), "%s: the provider answered", m)
 	}
 
+	assert.False(t, contracts.IsVMOwnDomainElsewhere((&Client{}).mapGRPCError("create", st.Err())),
+		"no metadata: a previous incarnation under another UID")
+	own := status.New(codes.AlreadyExists, "a domain of this VirtualMachine — stamped with its own UID — already exists")
+	own, err = own.WithDetails(&errdetails.ErrorInfo{Reason: contracts.VMPreviousIncarnationReason, Domain: contracts.ErrorInfoDomain,
+		Metadata: map[string]string{contracts.VMPreviousIncarnationKindKey: contracts.VMPreviousIncarnationKindOwn}})
+	require.NoError(t, err)
+	ownMapped := (&Client{}).mapGRPCError("create", own.Err())
+	assert.True(t, contracts.IsVMPreviousIncarnation(ownMapped), "held like any previous incarnation")
+	assert.True(t, contracts.IsVMOwnDomainElsewhere(ownMapped), "and marked as the VM's own domain")
+
 	plain := (&Client{}).mapGRPCError("create", status.Error(codes.AlreadyExists, "taken"))
 	assert.True(t, contracts.IsConflict(plain))
 	assert.False(t, contracts.IsVMPreviousIncarnation(plain), "a plain AlreadyExists keeps the slice 2 exclusion")

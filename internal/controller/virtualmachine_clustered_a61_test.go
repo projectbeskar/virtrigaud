@@ -170,6 +170,68 @@ func TestHandleDeletion_Clustered_HeldVMNeverTouchesThePreviousIncarnation(t *te
 	assert.True(t, apierrors.IsNotFound(getErr), "finalizer released")
 }
 
+// ownDomainElsewhereErr is the error the transport maps a provider's
+// AlreadyExists + VM_PREVIOUS_INCARNATION of kind "own" to.
+func ownDomainElsewhereErr(domain string) error {
+	return contracts.NewConflictError(
+		fmt.Sprintf("create: create of libvirt domain %q refused: a domain of this VirtualMachine — stamped with its own "+
+			"UID — already exists on another host of this Provider", domain),
+		fmt.Errorf("%w: %w: rpc error", contracts.ErrVMPreviousIncarnation, contracts.ErrVMOwnDomainElsewhere))
+}
+
+// TestClustered_OwnDomainElsewhere (security review of A6.1, item 8): a
+// create answered with the VM's OWN domain on another host is held like a
+// previous incarnation, with its own message (move pendingHost, no re-stamp)
+// naming no host; deleting the held VM keeps the finalizer — its owner-checked
+// Delete on the pending host finds nothing, and releasing it would leave its
+// own domain running — with DeleteBlocked=True/OwnDomainOnAnotherHost, until
+// force-delete (or pendingHost pointing at that host). A previous incarnation
+// under another UID still releases (it is not this VM's domain).
+func TestClustered_OwnDomainElsewhere(t *testing.T) {
+	ctx := context.Background()
+	vm := clusterVM("web", clusteredNS, "prov-cluster")
+	vm.UID = "uid-web"
+	vm.Finalizers = []string{infrav1beta1.VirtualMachineFinalizer}
+	prov := &routingProvider{
+		onCreate: func(contracts.CreateRequest) (contracts.CreateResponse, error) {
+			return contracts.CreateResponse{}, ownDomainElsewhereErr("default.web")
+		},
+		deleteErr: contracts.NewNotFoundError("delete: libvirt domain \"web\" not found on host host-alpha", nil),
+	}
+	r := clusteredFixture(t, prov, vm)
+	rec := record.NewFakeRecorder(16)
+	r.Recorder = rec
+
+	createClustered(t, r, prov, "web")
+	held := getVM(t, r, "web")
+	placed := placedCondition(held)
+	require.NotNil(t, placed)
+	assert.Equal(t, k8s.ReasonRestorePending, placed.Reason)
+	assert.Contains(t, placed.Message, "stamped with its own UID")
+	assert.Contains(t, placed.Message, "no re-stamp is needed")
+	assert.NotContains(t, placed.Message, "host-alpha")
+	assert.Equal(t, "host-alpha", held.Status.Placement.PendingHost)
+	assert.Empty(t, held.Status.Placement.ExcludedHosts)
+
+	res, err := r.handleDeletion(ctx, deletingClusterVM(t, r, "web"))
+	require.NoError(t, err)
+	assert.Equal(t, blockedRetryMin, res.RequeueAfter)
+	kept := getVM(t, r, "web")
+	assert.Contains(t, kept.Finalizers, infrav1beta1.VirtualMachineFinalizer, "its own domain elsewhere keeps the finalizer")
+	blocked := meta.FindStatusCondition(kept.Status.Conditions, k8s.ConditionDeleteBlocked)
+	require.NotNil(t, blocked)
+	assert.Equal(t, k8s.ReasonOwnDomainOnAnotherHost, blocked.Reason)
+	assert.NotContains(t, blocked.Message, "host-alpha")
+	require.Len(t, prov.deleteRefs, 1, "the owner-checked Delete still went to the pending host first")
+
+	kept.Annotations = map[string]string{forceDeleteAnnotation: "true"}
+	require.NoError(t, r.Update(ctx, kept))
+	_, err = r.handleDeletion(ctx, getVM(t, r, "web"))
+	require.NoError(t, err)
+	getErr := r.Get(ctx, types.NamespacedName{Namespace: clusteredNS, Name: "web"}, &infrav1beta1.VirtualMachine{})
+	assert.True(t, apierrors.IsNotFound(getErr), "force-delete releases it")
+}
+
 // TestVMClone_Clustered_PreviousIncarnationOfTheTargetHolds: a Clone answered
 // VM_PREVIOUS_INCARNATION keeps the target's pendingHost (no exclusion), marks
 // the target Placed=False/RestorePending, and leaves the clone Pending — never
