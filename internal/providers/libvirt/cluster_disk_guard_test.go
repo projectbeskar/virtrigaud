@@ -23,7 +23,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -60,44 +62,63 @@ var ownerForeign = contracts.ObjectIdentity{UID: "bbbbbbbb-1111-4000-8000-000000
 type sharedPool struct {
 	*createHost
 	p *Provider
+
+	mu     sync.Mutex
+	dialed map[string]int
 }
 
 // newSharedPool builds the fixture over host-a and host-b.
 func newSharedPool(t *testing.T) *sharedPool {
 	t.Helper()
-	c := newCreateHost(t)
-	c.host("host-a")
-	c.host("host-b")
-	p, _, _ := routedCluster(t)
-	p.imageDirs = []string{c.images}
-	p.hostStagingDir = c.staging
-	return &sharedPool{createHost: c, p: p}
+	return newSharedPoolOf(t, []string{"host-a", "host-b"})
 }
 
 // newSharedPoolWithDeadHost is newSharedPool plus host-c, which is in the
 // inventory but can never be dialed (a host that is down).
 func newSharedPoolWithDeadHost(t *testing.T) *sharedPool {
 	t.Helper()
+	return newSharedPoolOf(t, []string{"host-a", "host-b"}, "host-c")
+}
+
+// newSharedPoolOf builds the fixture over the live hosts, plus dead hosts that
+// are in the inventory but whose dial always fails. Every dial is counted
+// (sharedPool.dials).
+func newSharedPoolOf(t *testing.T, live []string, dead ...string) *sharedPool {
+	t.Helper()
 	c := newCreateHost(t)
-	c.host("host-a")
-	c.host("host-b")
-	conns := map[string]*virshConn{
-		"host-a": newClusteredVirshConn("host-a", localHostVP("host-a"), nil),
-		"host-b": newClusteredVirshConn("host-b", localHostVP("host-b"), nil),
+	inv := hostsecret.Inventory{SchemaVersion: hostsecret.SchemaVersion}
+	conns := map[string]*virshConn{}
+	for _, h := range live {
+		c.host(h)
+		conns[h] = newClusteredVirshConn(hostconn.HostID(h), localHostVP(h), nil)
+		inv.Hosts = append(inv.Hosts, hostsecret.Host{ID: h, Endpoint: "qemu+ssh://virt@" + h + "/system"})
 	}
+	for _, h := range dead {
+		inv.Hosts = append(inv.Hosts, hostsecret.Host{ID: h, Endpoint: "qemu+ssh://virt@" + h + "/system"})
+	}
+	s := &sharedPool{createHost: c, dialed: map[string]int{}}
 	dial := func(_ context.Context, h hostsecret.Host) (hostconn.Conn, error) {
+		s.mu.Lock()
+		s.dialed[h.ID]++
+		s.mu.Unlock()
 		if vc, ok := conns[h.ID]; ok {
 			return vc, nil
 		}
 		return nil, fmt.Errorf("dial %s: no route to host", h.ID)
 	}
-	inv := twoHostInventory()
-	inv.Hosts = append(inv.Hosts, hostsecret.Host{ID: "host-c", Endpoint: "qemu+ssh://virt@host-c/system"})
 	p, _ := newClusteredProviderForTest(t, inv, dial)
 	p.virshProvider = newUnroutableVirshProvider()
 	p.imageDirs = []string{c.images}
 	p.hostStagingDir = c.staging
-	return &sharedPool{createHost: c, p: p}
+	s.p = p
+	return s
+}
+
+// dials returns how often host was dialed.
+func (s *sharedPool) dials(host string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.dialed[host]
 }
 
 // guardDomainXML is a definition with one file-backed disk, stamped with owner
@@ -528,6 +549,97 @@ func TestClusterScan_HostOverTheDomainBoundFailsClosed(t *testing.T) {
 	for _, call := range s.virshCalls("host-a") {
 		assert.NotContains(t, call, "dumpxml", "no definition is read on a host over the bound")
 	}
+	s.requireNothingWrittenOnB(disk, "original-disk")
+}
+
+// ─── cost bounds (security review of A6.1, item 3) ──────────────────────────
+
+// TestClusterScan_ShortCircuitsOnceDecided: once a host's answer decides the
+// operation, the hosts not yet scanned are never contacted — a Delete on its
+// first use (or failure), a Create on its first previous incarnation. With
+// one host at a time, host-a decides and host-c is never read.
+func TestClusterScan_ShortCircuitsOnceDecided(t *testing.T) {
+	t.Run("delete: the first use refuses it", func(t *testing.T) {
+		s := newSharedPoolOf(t, []string{"host-a", "host-b", "host-c"})
+		s.p.listHostConcurrency = 1
+		disk := s.disk("team-a.web-disk.qcow2", "live-disk")
+		s.defineOn("host-b", "team-a.web", uuidVMOnB, guardDomainXML("team-a.web", uuidVMOnB, disk, ownerTeamA, false))
+		s.defineOn("host-a", "legacy-web", uuidForeign, guardDomainXML("legacy-web", uuidForeign, disk, contracts.ObjectIdentity{}, true))
+
+		_, err := s.p.Delete(context.Background(), contracts.VMRef{ID: "team-a.web", HostID: "host-b", Owner: ownerTeamA})
+		var de *diskDependentsError
+		require.ErrorAs(t, err, &de)
+		assert.Empty(t, s.virshCalls("host-c"), "decided on host-a: host-c is never scanned")
+		s.requireUntouched("host-b", "team-a.web")
+	})
+	t.Run("delete: the first failure refuses it", func(t *testing.T) {
+		s := newSharedPoolOf(t, []string{"host-b", "host-c"}, "host-a")
+		s.p.listHostConcurrency = 1
+		disk := s.disk("team-a.web-disk.qcow2", "live-disk")
+		s.defineOn("host-b", "team-a.web", uuidVMOnB, guardDomainXML("team-a.web", uuidVMOnB, disk, ownerTeamA, false))
+
+		_, err := s.p.Delete(context.Background(), contracts.VMRef{ID: "team-a.web", HostID: "host-b", Owner: ownerTeamA})
+		var ie *clusterGuardIncompleteError
+		require.ErrorAs(t, err, &ie)
+		assert.True(t, ie.unreachable)
+		assert.Empty(t, s.virshCalls("host-c"), "decided on host-a's failure: host-c is never scanned")
+	})
+	t.Run("create: the first previous incarnation holds it", func(t *testing.T) {
+		s := newSharedPoolOf(t, []string{"host-a", "host-b", "host-c"})
+		s.p.listHostConcurrency = 1
+		disk := s.disk("team-a.web-disk.qcow2", "original-disk")
+		s.defineOn("host-a", "team-a.web", uuidPrevious, guardDomainXML("team-a.web", uuidPrevious, disk, staleTeamAWeb, true))
+
+		_, err := s.createOnB()
+		var pi *previousIncarnationError
+		require.ErrorAs(t, err, &pi)
+		assert.Empty(t, s.virshCalls("host-c"), "decided on host-a: host-c is never scanned")
+		s.requireNothingWrittenOnB(disk, "original-disk")
+	})
+}
+
+// TestClusterScan_KnownUnreachableHostIsNotDialedAgain: a host whose dial just
+// failed is failed at once by the next scans (fail closed, HOST_UNAVAILABLE)
+// without being dialed again, so a dead host does not cost every retry its
+// dial timeout.
+func TestClusterScan_KnownUnreachableHostIsNotDialedAgain(t *testing.T) {
+	s := newSharedPoolWithDeadHost(t)
+	disk := s.disk("team-a.web-disk.qcow2", "live-disk")
+	s.defineOn("host-b", "team-a.web", uuidVMOnB, guardDomainXML("team-a.web", uuidVMOnB, disk, ownerTeamA, false))
+
+	for i := 0; i < 3; i++ {
+		_, err := s.p.Delete(context.Background(), contracts.VMRef{ID: "team-a.web", HostID: "host-b", Owner: ownerTeamA})
+		var ie *clusterGuardIncompleteError
+		require.ErrorAs(t, err, &ie, "attempt %d", i)
+		assert.True(t, ie.unreachable, "attempt %d", i)
+	}
+	assert.Equal(t, 1, s.dials("host-c"), "only the first scan dialed the dead host")
+	s.requireUntouched("host-b", "team-a.web")
+}
+
+// TestClusterScan_BusyProviderFailsClosed: while the provider's scan slots are
+// all taken, a scan that gets none within its budget fails closed as busy
+// (VM_DISK_CHECK_FAILED: retried, never counted by the breaker) and nothing is
+// written.
+func TestClusterScan_BusyProviderFailsClosed(t *testing.T) {
+	s := newSharedPool(t)
+	disk := s.disk("team-a.web-disk.qcow2", "original-disk")
+	require.NoError(t, s.p.guardSemaphore().Acquire(context.Background(), clusterGuardConcurrency))
+	defer s.p.guardSemaphore().Release(clusterGuardConcurrency)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	req := s.createReq(ownerTeamA, s.file(s.images, "ubuntu.qcow2"))
+	req.TargetHostID = "host-b"
+	_, err := s.p.Create(ctx, req)
+	var ie *clusterGuardIncompleteError
+	require.ErrorAs(t, err, &ie)
+	assert.True(t, ie.busy)
+	st, _ := status.FromError(createRPCError(err))
+	assert.Equal(t, codes.Unavailable, st.Code())
+	assert.True(t, errorInfoReasons(st)[contracts.VMDiskCheckFailedReason], "got %v", st)
+	assert.Contains(t, st.Message(), "busy")
+	assert.Empty(t, s.virshCalls("host-a"), "no host was scanned")
 	s.requireNothingWrittenOnB(disk, "original-disk")
 }
 

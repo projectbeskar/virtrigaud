@@ -26,6 +26,7 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	golibvirt "github.com/digitalocean/go-libvirt"
 
@@ -114,6 +115,11 @@ type clusterEntry struct {
 	draining bool
 	// closed guards against a double Close of conn. Guarded by ClusterRegistry.mu.
 	closed bool
+	// unreachableAt is when the host was last found unreachable — a failed
+	// lazy dial, or a caller's MarkUnreachable — and zero when the last dial
+	// succeeded since. Guarded by ClusterRegistry.mu. It only answers
+	// RecentlyUnreachable; ConnFor never refuses on it.
+	unreachableAt time.Time
 }
 
 // Dialer opens a Conn to one host from its inventory entry (endpoint + inlined
@@ -209,10 +215,16 @@ func (r *ClusterRegistry) ConnFor(ctx context.Context, id HostID) (Conn, error) 
 		dialed, err := r.dial(ctx, spec)
 		if err != nil {
 			e.dialMu.Unlock()
+			if ctx.Err() == nil {
+				r.mu.Lock()
+				e.unreachableAt = time.Now()
+				r.mu.Unlock()
+			}
 			r.release(e) // undo the reservation; drains if the host was removed meanwhile
 			return nil, fmt.Errorf("hostconn: dial host %q: %w", id, err)
 		}
 		r.mu.Lock()
+		e.unreachableAt = time.Time{}
 		if r.closed {
 			// Registry was closed while we dialed; don't stash a connection Close
 			// will never see. Drop it here.
@@ -380,6 +392,34 @@ func (r *ClusterRegistry) removeFromDrainingLocked(e *clusterEntry) {
 			r.draining = append(r.draining[:i], r.draining[i+1:]...)
 			return
 		}
+	}
+}
+
+// RecentlyUnreachable reports whether routable host id was found unreachable
+// — its lazy dial failed, or a caller reported it (MarkUnreachable) — less
+// than within ago, with no successful dial since. A caller that must fail
+// closed on an unreachable host (the cluster-wide disk guard) uses it to fail
+// fast without dialing again; ConnFor itself never refuses on it. An unknown
+// or draining host reports false (ConnFor already refuses it).
+func (r *ClusterRegistry) RecentlyUnreachable(id HostID, within time.Duration) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e := r.live[id]
+	if e == nil || e.draining || e.unreachableAt.IsZero() {
+		return false
+	}
+	return time.Since(e.unreachableAt) < within
+}
+
+// MarkUnreachable records that a caller found routable host id unreachable on
+// an already-dialed connection (the registry reuses a dialed connection
+// without probing it), for RecentlyUnreachable. The next successful dial
+// clears it. An unknown or draining host is ignored.
+func (r *ClusterRegistry) MarkUnreachable(id HostID) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if e := r.live[id]; e != nil && !e.draining {
+		e.unreachableAt = time.Now()
 	}
 }
 

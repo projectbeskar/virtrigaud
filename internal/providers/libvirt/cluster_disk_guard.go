@@ -24,8 +24,10 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
+	"golang.org/x/sync/semaphore"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -257,7 +259,10 @@ func (g *clusterDiskGuard) refuseIfUsed(ctx context.Context, h hostCommandRunner
 		add(p, i < len(targets))
 		add(canon[i], i < len(targets))
 	}
-	res, err := g.p.scanClusterDiskUse(ctx, clusterScan{files: files, owner: g.owner, target: g.host, conn: h})
+	res, err := g.p.scanClusterDiskUse(ctx, clusterScan{files: files, owner: g.owner, target: g.host, conn: h,
+		// A previous incarnation holds the VM whatever the other hosts say.
+		stopWhen: func(r hostDiskScan, _ error) bool { return r.incarnations > 0 },
+	})
 	targetUsed := false
 	for i, used := range res.used {
 		targetUsed = targetUsed || (used && isTarget[files[i]])
@@ -317,7 +322,7 @@ func existingHostPaths(ctx context.Context, h hostCommandRunner, paths []string)
 func (g *clusterDiskGuard) incomplete(err error) error {
 	var ie *clusterGuardIncompleteError
 	if stderrors.As(err, &ie) {
-		return &clusterGuardIncompleteError{op: g.op, domain: g.domain, unreachable: ie.unreachable}
+		return ie.with(g.op, g.domain)
 	}
 	return err
 }
@@ -360,6 +365,12 @@ type clusterScan struct {
 	target     hostconn.HostID
 	conn       hostCommandRunner
 	skipTarget bool
+	// stopWhen, when set, is asked after each host: true means that host's
+	// answer (its scan, or its failure) already decides the operation, so the
+	// hosts still running are cancelled and the rest are not started (a
+	// Delete: the first use or failure; a Create or Clone: the first previous
+	// incarnation).
+	stopWhen func(r hostDiskScan, err error) bool
 }
 
 // clusterScanResult sums what the scanned hosts reported.
@@ -409,27 +420,76 @@ func (p *Provider) scanClusterDiskUse(ctx context.Context, s clusterScan) (clust
 	budget, cancel := budgetWithMargin(ctx, clusterDiskGuardMargin)
 	defer cancel()
 
-	scans := make([]hostDiskScan, len(hosts))
-	errs := p.fanOutHosts(budget, len(hosts), 0, func(i int) error {
-		if hosts[i] == s.target && s.conn != nil {
+	// At most clusterGuardConcurrency scans run at once in this provider
+	// process, so a burst of creates, clones or deletes (or a tenant retrying
+	// them) cannot multiply the per-host reads. A scan that gets no slot within
+	// the call's budget fails closed as busy (retried; never counted by the
+	// breaker).
+	if err := p.guardSemaphore().Acquire(budget, 1); err != nil {
+		if cerr := ctx.Err(); cerr != nil {
+			return clusterScanResult{}, cerr
+		}
+		log.Printf("WARN cluster disk guard: no scan slot within the call's budget (%d scans at a time); failing closed",
+			clusterGuardConcurrency)
+		return clusterScanResult{}, &clusterGuardIncompleteError{busy: true}
+	}
+	defer p.guardSemaphore().Release(1)
+
+	var (
+		mu      sync.Mutex
+		decided bool // s.stopWhen settled the outcome; the other hosts are cancelled
+		scans   = make([]hostDiskScan, len(hosts))
+		errs    = make([]error, len(hosts))
+		counted = make([]bool, len(hosts))
+	)
+	// finish records host i's outcome unless the scan was already decided
+	// (then the host was cancelled, or finished too late to matter), and
+	// decides — cancelling the hosts still running — when s.stopWhen says so.
+	finish := func(i int, r hostDiskScan, err error) error {
+		mu.Lock()
+		defer mu.Unlock()
+		if decided {
+			return err
+		}
+		scans[i], errs[i], counted[i] = r, err, true
+		if s.stopWhen != nil && s.stopWhen(r, err) {
+			decided = true
+			cancel()
+		}
+		return err
+	}
+	p.fanOutHosts(budget, len(hosts), 0, func(i int) error {
+		id := hosts[i]
+		if id == s.target && s.conn != nil {
 			hctx, hcancel := context.WithTimeout(budget, p.effectiveListHostTimeout())
 			defer hcancel()
 			r, err := scanHostDiskUse(hctx, s.conn, s, false)
 			if err == nil {
 				err = hctx.Err()
 			}
-			scans[i] = r
-			return err
+			return finish(i, r, err)
 		}
-		return p.onHostWithin(budget, hosts[i], func(hctx context.Context, c libvirtConn) error {
-			vp, err := virshOf(c)
-			if err != nil {
-				return err
+		// A host found unreachable moments ago is failed at once, without
+		// dialing it again (a dead host must not cost every scan its dial
+		// timeout).
+		if p.clusterReg.RecentlyUnreachable(id, clusterGuardUnreachableMemo) {
+			return finish(i, hostDiskScan{}, contracts.NewHostUnavailableError(
+				fmt.Sprintf("host %q was unreachable moments ago; not dialed again", id), nil))
+		}
+		var r hostDiskScan
+		err := p.onHostWithin(budget, id, func(hctx context.Context, c libvirtConn) error {
+			vp, verr := virshOf(c)
+			if verr != nil {
+				return verr
 			}
-			r, err := scanHostDiskUse(hctx, vp, s, hosts[i] != s.target)
-			scans[i] = r
-			return err
+			var serr error
+			r, serr = scanHostDiskUse(hctx, vp, s, id != s.target)
+			return serr
 		})
+		if isHostTransportFailure(err) || (stderrors.Is(err, context.DeadlineExceeded) && budget.Err() == nil) {
+			p.clusterReg.MarkUnreachable(id)
+		}
+		return finish(i, r, err)
 	})
 	if err := ctx.Err(); err != nil {
 		return clusterScanResult{}, err
@@ -438,20 +498,44 @@ func (p *Provider) scanClusterDiskUse(ctx context.Context, s clusterScan) (clust
 	var out clusterScanResult
 	incomplete := &clusterGuardIncompleteError{}
 	failed := false
-	for i, err := range errs {
-		if err != nil {
+	for i := range hosts {
+		switch {
+		case !counted[i] && decided:
+			continue // cancelled once the outcome was decided
+		case !counted[i]:
+			// Never run: the budget was spent before its turn.
+			log.Printf("WARN cluster disk guard: host %s was not checked within the call's budget; failing closed", hosts[i])
+			failed, incomplete.unreachable = true, true
+		case errs[i] != nil:
 			log.Printf("WARN cluster disk guard: host %s could not be checked (%s); failing closed: %v",
-				hosts[i], listFailureClass(err), err)
+				hosts[i], listFailureClass(errs[i]), errs[i])
 			failed = true
-			incomplete.unreachable = incomplete.unreachable || guardHostUnreachable(err)
-			continue
+			incomplete.unreachable = incomplete.unreachable || guardHostUnreachable(errs[i])
+		default:
+			out.add(scans[i])
 		}
-		out.add(scans[i])
 	}
 	if failed {
 		return out, incomplete
 	}
 	return out, nil
+}
+
+// clusterGuardConcurrency bounds how many cluster-wide disk scans one provider
+// process runs at once (each scan itself reads at most
+// effectiveListHostConcurrency hosts at a time).
+const clusterGuardConcurrency = 2
+
+// clusterGuardUnreachableMemo is how long a host found unreachable (a failed
+// dial, a dropped connection, no answer within its deadline) is failed at once
+// by the scans that follow, without being dialed again.
+const clusterGuardUnreachableMemo = 30 * time.Second
+
+// guardSemaphore returns the provider's scan semaphore
+// (clusterGuardConcurrency slots), made on first use.
+func (p *Provider) guardSemaphore() *semaphore.Weighted {
+	p.guardSemOnce.Do(func() { p.guardSem = semaphore.NewWeighted(clusterGuardConcurrency) })
+	return p.guardSem
 }
 
 // guardHosts returns the hosts s scans: every routable host of the registry,
@@ -562,7 +646,13 @@ func (p *Provider) checkDeletionAcrossHosts(ctx context.Context, host hostconn.H
 	if len(files) == 0 && plan.seedDir == "" {
 		return plan, nil
 	}
-	res, err := p.scanClusterDiskUse(ctx, clusterScan{files: files, seedDir: plan.seedDir, target: host, skipTarget: true})
+	s := clusterScan{files: files, seedDir: plan.seedDir, target: host, skipTarget: true}
+	if len(files) > 0 {
+		// The first use, or the first host that cannot be checked, refuses
+		// the delete whatever the other hosts say.
+		s.stopWhen = func(r hostDiskScan, err error) bool { return err != nil || r.users > 0 }
+	}
+	res, err := p.scanClusterDiskUse(ctx, s)
 	switch {
 	case res.users > 0:
 		log.Printf("WARN Refusing %s of libvirt domain %s on host %s: %d domain(s) on other hosts of the Provider use its disk(s) %v",
@@ -571,7 +661,7 @@ func (p *Provider) checkDeletionAcrossHosts(ctx context.Context, host hostconn.H
 	case err != nil && len(files) > 0:
 		var ie *clusterGuardIncompleteError
 		if stderrors.As(err, &ie) {
-			return domainDeletionPlan{}, &clusterGuardIncompleteError{op: guardOpDelete, domain: plan.name, unreachable: ie.unreachable}
+			return domainDeletionPlan{}, ie.with(guardOpDelete, plan.name)
 		}
 		return domainDeletionPlan{}, err
 	case err != nil:
@@ -630,13 +720,26 @@ type clusterGuardIncompleteError struct {
 	// unreachable reports that a host could not be reached (as opposed to a
 	// host that answered but could not be scanned).
 	unreachable bool
+	// busy reports that the scan never started: the provider's scan slots
+	// (clusterGuardConcurrency) stayed taken for the call's whole budget.
+	busy bool
+}
+
+// with returns e for op of domain (a scan's answer, given to the operation
+// that asked for it).
+func (e *clusterGuardIncompleteError) with(op, domain string) *clusterGuardIncompleteError {
+	return &clusterGuardIncompleteError{op: op, domain: domain, unreachable: e.unreachable, busy: e.busy}
 }
 
 // Error is the refusal, safe for the requesting VM's status.
 func (e *clusterGuardIncompleteError) Error() string {
-	if e.unreachable {
+	switch {
+	case e.unreachable:
 		return fmt.Sprintf("%s of libvirt domain %q not performed: a host of this Provider could not be reached to verify "+
 			"that no domain on it uses the VM's disk file (details are in the provider log); it is retried", e.op, e.domain)
+	case e.busy:
+		return fmt.Sprintf("%s of libvirt domain %q not performed: the provider is busy with other cross-host disk checks "+
+			"and could not verify in time that no other domain uses the VM's disk file; it is retried", e.op, e.domain)
 	}
 	return fmt.Sprintf("%s of libvirt domain %q not performed: could not verify on every host of this Provider that no other "+
 		"domain uses the VM's disk file (transient host error; details are in the provider log)", e.op, e.domain)
