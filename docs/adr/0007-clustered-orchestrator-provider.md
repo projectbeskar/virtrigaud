@@ -1707,11 +1707,21 @@ runbook or remove it. There is no opt-in in v0.4.0. A6.2 must also set the
 >   `orphan-on-delete` or `force-delete` release the VirtualMachine and leave
 >   the domain). The cloud-init seed directory is host-local staging: when it
 >   alone would be removed, a failed scan keeps it and the delete proceeds.
-> - **What R3 covers on `Create` and `Clone`.** Every file the call would write
->   over, when it exists: the VM's disk (a blank volume too — `vol-create`
->   refuses an existing file, but the guard answers first with the right
->   reason), a clone's UEFI varstore, and an imported disk attached in place.
->   With no file there, nothing is scanned: one `test`, as before.
+> - **What R3 covers on `Create` and `Clone`.** The landing host probes every
+>   name the VM's disk may have had in the pool, in any incarnation and of any
+>   kind: `<domain>-disk` (a blank volume: a dir pool names the file after the
+>   volume, without an extension), `<domain>-disk.qcow2` (from an image, or a
+>   clone), `<domain>-migrated.qcow2` (an imported disk attached in place), and
+>   the same for the legacy bare name. *(Corrected by the A6.1 security review:
+>   the first cut probed only the file being written, so a blank previous
+>   incarnation was invisible to a create from an image, and the reverse.)*
+>   When any exists, all of them go into ONE scan: a previous incarnation found
+>   under any name holds the VM, and the file being written (a blank volume, an
+>   image copy, a clone, an imported disk attached in place) is written only
+>   when no domain uses it; a foreign use of another name refuses nothing. With
+>   none there, nothing is scanned (two host commands on the landing host). A
+>   clone's UEFI varstore is in the host-local NVRAM directory and keeps the
+>   host-local check.
 > - **What "uses" means** is the host-local check's definition, per host: any
 >   domain, running or not, that references the file as a disk, anywhere in a
 >   disk's backing chain (`qemu-img info` for shut-off domains), or as another

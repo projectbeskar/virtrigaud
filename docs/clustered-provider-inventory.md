@@ -1591,13 +1591,21 @@ with a new UID — was still running on host A from that file; and deleting a
 VM on host B could remove a disk a domain on host A was using. The provider
 now checks every host of the Provider:
 
-- **Create and Clone.** When a file already exists where the VM's disk goes
-  (`<pool>/<namespace>.<name>-disk.qcow2`, a blank disk included), where a
-  clone's UEFI varstore goes, or where an imported disk would be attached in
-  place, the file is written only after **every host** in the provider's
-  registry — the landing host too — has been scanned and no domain on any of
-  them uses it. The common case, with nothing there, is unchanged: one `test`
-  on the landing host and no other host is contacted.
+- **Create and Clone.** The landing host probes **every name the VM's disk
+  may have had** in the storage pool, in this incarnation or an earlier one,
+  whatever kind of disk it was: `<namespace>.<name>-disk` (a blank volume —
+  libvirt names the file after the volume, without an extension),
+  `<namespace>.<name>-disk.qcow2` (a disk copied from an image, or a clone),
+  `<namespace>.<name>-migrated.qcow2` (an imported disk attached in place), and
+  the same three for the VM's legacy bare name. When any of them exists,
+  **every host** in the provider's registry — the landing host too — is
+  scanned once, for all of them, before anything is written: a previous
+  incarnation found under any name holds the VM, and the file this create or
+  clone writes is written only when no domain on any host uses it. (A foreign
+  use of one of the *other* names refuses nothing: that file is not written.)
+  The common case, with none of them there, costs two host commands on the
+  landing host and contacts no other host. A clone's UEFI varstore lives in
+  the host-local NVRAM directory and keeps the host-local check.
 - **Delete.** After the host-local checks and **before** anything is
   destroyed, undefined or removed, every **other** host is scanned for a
   domain that uses one of the files the delete would remove. This runs on

@@ -301,7 +301,7 @@ func ensureDiskTargetFree(ctx context.Context, h hostCommandRunner, subject, tar
 // generic retryable error; otherwise it reports whether anything exists at
 // target. subject names the file for the answers, which reach the
 // requester's status. It is the first step of ensureDiskTargetFree and of the
-// clustered clusterDiskGuard.ensureTargetFree.
+// clustered clusterDiskGuard.ensureDiskFree.
 func checkWriteTarget(ctx context.Context, h hostCommandRunner, subject, target string) (bool, error) {
 	res, err := runHost(ctx, h, "sh", "-c", targetKindScript, "sh", target)
 	if err != nil {

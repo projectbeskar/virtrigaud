@@ -21,7 +21,9 @@ import (
 	stderrors "errors"
 	"fmt"
 	"log"
+	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -49,12 +51,17 @@ import (
 //
 // The guard closes both:
 //
-//   - Create and Clone: when a file already exists where the VM's disk (or a
-//     clone's UEFI varstore, or an imported disk attached in place) is about to
-//     be written, EVERY host of the provider's registry is scanned — the landing
-//     host too — and the file is overwritten only when no domain on any host
-//     uses it. The common case, with nothing there, costs the one `test` it
-//     always did and scans nothing.
+//   - Create and Clone: every name the VM's disk may have had in the storage
+//     pool — "<domain>-disk" (blank), "<domain>-disk.qcow2" (from an image, or
+//     a clone), "<domain>-migrated.qcow2" (imported), and the same for the
+//     legacy bare name (diskFileNames) — is probed on the landing host. When
+//     any of them exists, EVERY host of the provider's registry is scanned
+//     once — the landing host too — and the file about to be written (a blank
+//     volume, an image copy, a clone, or an imported disk attached in place) is
+//     written only when no domain on any host uses it. The common case, with
+//     nothing there, costs two host commands on the landing host and scans
+//     nothing. A clone's UEFI varstore lives in the host-local NVRAM directory
+//     and keeps the host-local check (ensureNVRAMTargetFree).
 //   - Delete: after the host-local plan (planDomainDeletion) and before
 //     anything is destroyed, undefined or removed, every OTHER host is scanned
 //     for a domain using one of the files the delete would remove.
@@ -130,62 +137,169 @@ type clusterDiskGuard struct {
 	// for the answers.
 	domain string
 	op     string
+	// legacy is the VM's bare, pre-namespacing domain name when it has one
+	// (legacyNameOf), "" otherwise: a disk of an earlier incarnation may carry
+	// it.
+	legacy string
 }
 
 // newClusterDiskGuard returns the guard of a clustered op of domain for owner,
-// landing on host.
-func (p *Provider) newClusterDiskGuard(host hostconn.HostID, owner contracts.ObjectIdentity, domain, op string) *clusterDiskGuard {
-	return &clusterDiskGuard{p: p, host: host, owner: owner, domain: domain, op: op}
+// landing on host; legacy is the VM's bare domain name, or "".
+func (p *Provider) newClusterDiskGuard(host hostconn.HostID, owner contracts.ObjectIdentity, domain, legacy, op string) *clusterDiskGuard {
+	return &clusterDiskGuard{p: p, host: host, owner: owner, domain: domain, legacy: legacy, op: op}
 }
 
-// ensureTargetFree refuses to let the create or clone write a file (subject,
-// for the answer) over target on host h. On a single-host provider (nil g) it
-// is exactly ensureDiskTargetFree. On a clustered one: a symbolic link at
-// target is refused as there; nothing at target is fine (no scan); and an
-// existing file is overwritten only when no domain on any host of the
-// Provider uses it (refuseIfUsed).
-func (g *clusterDiskGuard) ensureTargetFree(ctx context.Context, h hostCommandRunner, subject, target string) error {
+// diskFileNames are the names, in the storage pool directory, that a disk of
+// the VM this guard protects may have had — in THIS incarnation or an earlier
+// one, whichever way it was made — for the domain name and the legacy bare
+// name alike:
+//
+//   - "<domain>-disk": a blank volume (vol-create names the file after the
+//     volume, without an extension);
+//   - "<domain>-disk.qcow2": a disk copied from an image or cloned;
+//   - "<domain>-migrated.qcow2": an imported migration disk attached in place.
+//
+// A VM re-created with another disk kind than its previous incarnation (a
+// blank VM re-created from an image, or the reverse) would otherwise never
+// meet the earlier disk, and its previous incarnation would stay unseen.
+func (g *clusterDiskGuard) diskFileNames() []string {
+	var out []string
+	for _, d := range []string{g.domain, g.legacy} {
+		if d == "" {
+			continue
+		}
+		vol := vmDiskVolumeName(d)
+		out = append(out, vol, vol+qcow2Ext, importedVolumeFileName(d))
+	}
+	return out
+}
+
+// ensureDiskFree refuses to let the create or clone write the VM's disk file
+// target (subject, for the answer) in the storage pool directory poolDir, on
+// host h (the landing host). On a single-host provider (nil g) it is exactly
+// ensureDiskTargetFree. On a clustered one:
+//
+//   - a symbolic link at target is refused, as there;
+//   - every name the VM's disk may have had (diskFileNames) is probed on h, in
+//     one command;
+//   - when none of them — target included — exists, nothing is scanned (the
+//     common case);
+//   - otherwise every host of the Provider is scanned once, for all of the
+//     existing names (refuseIfUsed): a previous incarnation of the VM anywhere
+//     holds it, a domain that uses target refuses the write, and a host that
+//     cannot be checked fails it closed. An existing target no domain uses is a
+//     leftover of an earlier, failed attempt for this very name, and may be
+//     replaced.
+func (g *clusterDiskGuard) ensureDiskFree(ctx context.Context, h hostCommandRunner, subject, poolDir, target string) error {
 	if g == nil {
 		return ensureDiskTargetFree(ctx, h, subject, target)
 	}
-	exists, err := checkWriteTarget(ctx, h, subject, target)
-	if err != nil || !exists {
-		return err
-	}
-	return g.refuseIfUsed(ctx, h, subject, target)
-}
-
-// refuseIfUsed refuses the write of an EXISTING file at target (on host h, the
-// landing host) when any domain on any host of the Provider uses it, or when a
-// previous incarnation of the owner exists on any host (see the file comment),
-// and fails closed when a host cannot be checked. When nothing uses it, it is
-// a leftover of an earlier, failed attempt for this very name, and the write
-// may replace it.
-func (g *clusterDiskGuard) refuseIfUsed(ctx context.Context, h hostCommandRunner, subject, target string) error {
-	canon, err := canonicalizeOnHost(ctx, h, []string{target})
+	targetExists, err := checkWriteTarget(ctx, h, subject, target)
 	if err != nil {
 		return err
 	}
-	files := []string{target}
-	if canon[0] != target {
-		files = append(files, canon[0])
+	var candidates []string
+	for _, name := range g.diskFileNames() {
+		if p := filepath.Join(poolDir, name); p != target && filepath.Dir(p) == filepath.Clean(poolDir) {
+			candidates = append(candidates, p)
+		}
+	}
+	others, err := existingHostPaths(ctx, h, candidates)
+	if err != nil {
+		return err
+	}
+	if !targetExists && len(others) == 0 {
+		return nil
+	}
+	var targets []string
+	if targetExists {
+		targets = []string{target}
+	}
+	return g.refuseIfUsed(ctx, h, subject, targets, others)
+}
+
+// refuseIfUsed scans every host of the Provider once for the existing files
+// targets (the file about to be written) and others (other names a disk of
+// the VM may have had), as host h (the landing host) names and resolves them,
+// and decides (see the file comment): a domain stamped for the owner's
+// namespace and name on any host is a previous incarnation
+// (previousIncarnationError); a domain that uses a target refuses the write
+// (Conflict); a host that cannot be checked fails it closed
+// (clusterGuardIncompleteError). A use of an OTHER name by a domain that is not
+// a previous incarnation refuses nothing: that file is not written.
+func (g *clusterDiskGuard) refuseIfUsed(ctx context.Context, h hostCommandRunner, subject string, targets, others []string) error {
+	raw := append(append([]string(nil), targets...), others...)
+	canon, err := canonicalizeOnHost(ctx, h, raw)
+	if err != nil {
+		return err
+	}
+	var files []string
+	isTarget := map[string]bool{}
+	add := func(p string, target bool) {
+		if !slices.Contains(files, p) {
+			files = append(files, p)
+		}
+		if target {
+			isTarget[p] = true
+		}
+	}
+	for i, p := range raw {
+		add(p, i < len(targets))
+		add(canon[i], i < len(targets))
 	}
 	res, err := g.p.scanClusterDiskUse(ctx, clusterScan{files: files, owner: g.owner, target: g.host, conn: h})
+	targetUsed := false
+	for i, used := range res.used {
+		targetUsed = targetUsed || (used && isTarget[files[i]])
+	}
 	switch {
 	case res.incarnations > 0:
 		log.Printf("WARN Refusing %s of libvirt domain %s on host %s: %d domain(s) on the Provider's hosts are stamped for %s/%s "+
 			"(a previous incarnation; ADR-0007 A6)", g.op, g.domain, g.host, res.incarnations, g.owner.Namespace, g.owner.Name)
 		return &previousIncarnationError{op: g.op, domain: g.domain}
-	case res.users > 0:
-		log.Printf("WARN Refusing to write %s at %s on host %s: %d domain(s) on the Provider's hosts use it", subject, target, g.host, res.users)
+	case targetUsed:
+		log.Printf("WARN Refusing to write %s at %v on host %s: a domain on the Provider's hosts uses it", subject, targets, g.host)
 		return contracts.NewConflictError(fmt.Sprintf(
 			"%s already exists and is in use by another domain on a host of this Provider; refusing to overwrite it", subject), nil)
 	case err != nil:
 		return g.incomplete(err)
 	}
-	log.Printf("INFO %s exists at %s on host %s but no domain on any host of the Provider uses it "+
-		"(left by an earlier failed attempt); overwriting it", subject, target, g.host)
+	if len(targets) > 0 {
+		log.Printf("INFO %s exists at %s on host %s but no domain on any host of the Provider uses it "+
+			"(left by an earlier failed attempt); overwriting it", subject, targets[0], g.host)
+	}
 	return nil
+}
+
+// existingPathsScript is the fixed `sh -c` script behind existingHostPaths.
+// The paths are ALWAYS the positional parameters, never interpolated into the
+// text. It prints, one per line, each of them that exists (a symbolic link,
+// dangling or not, included). It holds no single quote, so it can be matched
+// verbatim by a quoting shell (the test fixtures do).
+const existingPathsScript = `for p; do if [ -e "$p" ] || [ -L "$p" ]; then printf "%s\n" "$p"; fi; done`
+
+// existingHostPaths returns those of paths that exist on the host behind h, in
+// one command. An answer that is not one of the paths fails the check (a
+// generic retryable error), as does a failure to run it.
+func existingHostPaths(ctx context.Context, h hostCommandRunner, paths []string) ([]string, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	res, err := runHost(ctx, h, append([]string{"sh", "-c", existingPathsScript, "sh"}, paths...)...)
+	if err != nil {
+		return nil, hostCheckFailed("probe the disk names of the VM", err)
+	}
+	var out []string
+	for _, line := range strings.Split(res.Stdout, "\n") {
+		if line == "" {
+			continue
+		}
+		if !slices.Contains(paths, line) {
+			return nil, hostCheckFailed("probe the disk names of the VM", fmt.Errorf("unexpected output line %q", line))
+		}
+		out = append(out, line)
+	}
+	return out, nil
 }
 
 // incomplete turns a scan that could not check every host into the refusal
@@ -196,11 +310,6 @@ func (g *clusterDiskGuard) incomplete(err error) error {
 		return &clusterGuardIncompleteError{op: g.op, domain: g.domain, unreachable: ie.unreachable}
 	}
 	return err
-}
-
-// nvramSubject names a clone's UEFI varstore file for the guard's answers.
-func nvramSubject(domainName string) string {
-	return fmt.Sprintf("the UEFI varstore path of libvirt domain %q", domainName)
 }
 
 // stampsNameOwner reports whether any of the recorded owner stamps names
@@ -247,6 +356,9 @@ type clusterScan struct {
 type clusterScanResult struct {
 	// users counts the domains that reference a candidate file.
 	users int
+	// used reports, per candidate file (clusterScan.files), whether a domain
+	// references it.
+	used []bool
 	// incarnations counts the domains stamped with the owner's namespace and
 	// name.
 	incarnations int
@@ -256,6 +368,19 @@ type clusterScanResult struct {
 
 // hostDiskScan is one host's part of a clusterScanResult.
 type hostDiskScan = clusterScanResult
+
+// add folds one host's scan r into the sum.
+func (s *clusterScanResult) add(r clusterScanResult) {
+	s.users += r.users
+	s.incarnations += r.incarnations
+	s.seedUsed = s.seedUsed || r.seedUsed
+	if len(s.used) < len(r.used) {
+		s.used = append(s.used, make([]bool, len(r.used)-len(s.used))...)
+	}
+	for i, u := range r.used {
+		s.used[i] = s.used[i] || u
+	}
+}
 
 // scanClusterDiskUse runs s on every host of the registry (see the file
 // comment) and sums the answers. It returns what the hosts that answered
@@ -311,9 +436,7 @@ func (p *Provider) scanClusterDiskUse(ctx context.Context, s clusterScan) (clust
 			incomplete.unreachable = incomplete.unreachable || guardHostUnreachable(err)
 			continue
 		}
-		out.users += scans[i].users
-		out.incarnations += scans[i].incarnations
-		out.seedUsed = out.seedUsed || scans[i].seedUsed
+		out.add(scans[i])
 	}
 	if failed {
 		return out, incomplete
@@ -361,14 +484,18 @@ func scanHostDiskUse(ctx context.Context, h hostCommandRunner, s clusterScan) (h
 			return hostDiskScan{}, err
 		}
 	}
-	var out hostDiskScan
+	out := hostDiskScan{used: make([]bool, len(s.files))}
 	for _, d := range doms {
+		uses := false
 		for i := range s.files {
 			if d.refs.files[s.files[i]] || d.refs.contains(canon[i]) {
 				log.Printf("WARN cluster disk guard: file %s is used by domain %s", s.files[i], d.uuid)
-				out.users++
-				break
+				out.used[i] = true
+				uses = true
 			}
+		}
+		if uses {
+			out.users++
 		}
 		if s.seedDir != "" && (otherDomains{d}).useUnder(s.seedDir) {
 			out.seedUsed = true

@@ -154,10 +154,10 @@ func TestVMDisks_AreNotWorldWritable(t *testing.T) {
 	}
 
 	// A blank disk: libvirt creates it (vol-create, the definition on stdin)
-	// with the mode, and it is only chowned.
+	// with the mode, and it is only chowned. A dir pool names the file after
+	// the volume, WITHOUT an extension: <pool>/blank.
 	c.resetLogs()
-	blank := filepath.Join(c.images, "blank.qcow2")
-	require.NoError(t, os.WriteFile(filepath.Join(c.root, "h1", "vol-default-blank"), []byte(blank+"\n"), 0o600))
+	blank := filepath.Join(c.images, "blank")
 	vol, err := NewStorageProvider(c.vp).CreateVolume(ctx, "default", "blank", "qcow2", 3)
 	require.NoError(t, err)
 	assert.Equal(t, blank, vol.Path)

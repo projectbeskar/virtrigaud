@@ -330,6 +330,84 @@ func TestClusteredCreate_BlankDiskIsGuardedToo(t *testing.T) {
 	s.requireNothingWrittenOnB(disk, "original-disk")
 }
 
+// TestClusteredCreate_EveryDiskNameOfTheVMIsProbed (security review of A6.1):
+// a previous incarnation's disk may carry any name the VM's disk could have
+// had — blank ("<domain>-disk", no extension), from an image
+// ("<domain>-disk.qcow2"), imported ("<domain>-migrated.qcow2"), or the
+// legacy bare name's — whatever kind of disk the new create makes. Each is
+// found, and the create is held with nothing written.
+func TestClusteredCreate_EveryDiskNameOfTheVMIsProbed(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		oldDisk  string // the previous incarnation's disk, in the shared pool
+		newBlank bool   // the new create makes a blank volume (else: from an image)
+	}{
+		{"blank incarnation, create from an image", "team-a.web-disk", false},
+		{"image incarnation, blank create", "team-a.web-disk.qcow2", true},
+		{"imported incarnation, create from an image", "team-a.web-migrated.qcow2", false},
+		{"imported incarnation, blank create", "team-a.web-migrated.qcow2", true},
+		{"legacy blank incarnation, create from an image", "web-disk", false},
+		{"legacy image incarnation, blank create", "web-disk.qcow2", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newSharedPool(t)
+			disk := s.disk(tc.oldDisk, "original-disk")
+			s.defineOn("host-a", "team-a.web", uuidPrevious, guardDomainXML("team-a.web", uuidPrevious, disk, staleTeamAWeb, true))
+
+			req := s.createReq(ownerTeamA, s.file(s.images, "ubuntu.qcow2"))
+			if tc.newBlank {
+				req.Image = contracts.VMImage{}
+			}
+			req.TargetHostID = "host-b"
+			_, err := s.p.Create(context.Background(), req)
+			var pi *previousIncarnationError
+			require.ErrorAs(t, err, &pi, "the incarnation's %s is found", tc.oldDisk)
+			s.requireNothingWrittenOnB(disk, "original-disk")
+			for _, made := range []string{"team-a.web-disk", "team-a.web-disk.qcow2"} {
+				if made != tc.oldDisk {
+					assert.NoFileExists(t, filepath.Join(s.images, made), "no disk was made")
+				}
+			}
+		})
+	}
+}
+
+// TestClusteredCreate_AnotherNamesForeignUseRefusesNothing: a foreign domain
+// that uses a file under ANOTHER of the VM's disk names (not the one this
+// create writes) triggers the scan but refuses nothing — that file is not
+// written — and the create proceeds.
+func TestClusteredCreate_AnotherNamesForeignUseRefusesNothing(t *testing.T) {
+	s := newSharedPool(t)
+	blank := s.disk("team-a.web-disk", "someone-elses")
+	s.defineOn("host-a", "legacy-web", uuidForeign, guardDomainXML("legacy-web", uuidForeign, blank, ownerForeign, true))
+
+	resp, err := s.createOnB()
+	require.NoError(t, err)
+	assert.Equal(t, "team-a.web", resp.ID)
+	assert.Contains(t, s.virshCalls("host-a"), "list --all --uuid", "the existing name triggered the scan")
+	b, err := os.ReadFile(blank) //nolint:gosec // test reads its own fixture
+	require.NoError(t, err)
+	assert.Equal(t, "someone-elses", string(b), "the other name's file is never touched")
+}
+
+// TestClusteredCreate_BlankVolumeFileIsTheOneGuarded: a blank create writes
+// <pool>/<domain>-disk (no extension); a foreign domain using THAT file refuses
+// the create (plain AlreadyExists) before vol-create runs.
+func TestClusteredCreate_BlankVolumeFileIsTheOneGuarded(t *testing.T) {
+	s := newSharedPool(t)
+	blank := s.disk("team-a.web-disk", "someone-elses")
+	s.defineOn("host-a", "legacy-web", uuidForeign, guardDomainXML("legacy-web", uuidForeign, blank, ownerForeign, true))
+
+	req := s.createReq(ownerTeamA, "")
+	req.Image = contracts.VMImage{}
+	req.TargetHostID = "host-b"
+	_, err := s.p.Create(context.Background(), req)
+	require.Error(t, err)
+	assert.True(t, contracts.IsConflict(err), "%v", err)
+	assert.False(t, contracts.IsVMPreviousIncarnation(err))
+	s.requireNothingWrittenOnB(blank, "someone-elses")
+}
+
 // TestClusteredCreate_PathsComparedCanonicallyOnEachHost: host-b reaches the
 // pool through a symbolic link (its pool path is an alias), host-a's domain
 // names the file by its canonical path. The guard resolves the candidate on
@@ -514,6 +592,27 @@ func TestClusteredClone_PreviousIncarnationOfTheTarget(t *testing.T) {
 		assert.Equal(t, codes.AlreadyExists, st.Code(), "got %v", err)
 		assert.Empty(t, st.Details(), "a plain AlreadyExists: the host is excluded for the target")
 	})
+}
+
+// TestClusteredClone_BlankIncarnationOfTheTargetIsFound: the clone writes
+// "<domain>-disk.qcow2", but a previous incarnation of its target made from a
+// blank volume ("<domain>-disk") is found too, and the clone is held.
+func TestClusteredClone_BlankIncarnationOfTheTargetIsFound(t *testing.T) {
+	fx := sourceWeb(t, nil)
+	pool := filepath.Join(fx.dir, "pool")
+	require.NoError(t, os.Mkdir(pool, 0o700))
+	answerPoolPath(t, fx.dir, pool)
+	oldBlank := filepath.Join(pool, cloneTargetDomain+"-disk")
+	require.NoError(t, os.WriteFile(oldBlank, []byte("original-disk"), 0o600))
+	seedSCDHost(t, filepath.Join(fx.dir, "host-a"), map[string]string{
+		cloneTargetDomain: guardDomainXML(cloneTargetDomain, uuidPrevious, oldBlank, previousCopy, true),
+	})
+
+	_, err := NewServer(fx.p).Clone(context.Background(), routedCloneReq())
+	st, _ := status.FromError(err)
+	assert.Equal(t, codes.AlreadyExists, st.Code(), "got %v", err)
+	assert.True(t, errorInfoReasons(st)[contracts.VMPreviousIncarnationReason], "got %v", st)
+	assertNothingWritten(t, fx.calls())
 }
 
 func TestClusteredClone_DiskUsedOnAnotherHostIsRefused(t *testing.T) {

@@ -214,7 +214,8 @@ func (p *Provider) createOnLeasedHost(ctx context.Context, lease hostconn.Conn, 
 	if err != nil {
 		return contracts.CreateResponse{}, err
 	}
-	g := p.newClusterDiskGuard(lease.HostID(), req.Owner, domainName, guardOpCreate)
+	legacy, _ := legacyNameOf(req.Owner, req.Name, domainName)
+	g := p.newClusterDiskGuard(lease.HostID(), req.Owner, domainName, legacy, guardOpCreate)
 	return p.createVM(ctx, vc.virsh, req, g)
 }
 
@@ -308,14 +309,16 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, vp *VirshProvider,
 		}
 		diskPath = volume.Path
 	} else {
-		// Create empty disk volume. vol-create-as refuses an existing volume
-		// name, so this never replaces a file. On a clustered provider an
-		// existing file is still checked first, across every host (ADR-0007
-		// A6): a previous incarnation of this VM on another host that uses it
-		// is answered VM_PREVIOUS_INCARNATION instead of a failed vol-create
-		// retried forever.
+		// Create empty disk volume. vol-create refuses an existing volume
+		// name, so this never replaces a file. On a clustered provider every
+		// name this VM's disk may have had is still checked first, across
+		// every host (ADR-0007 A6): a previous incarnation of this VM — made
+		// from an image or blank — is answered VM_PREVIOUS_INCARNATION instead
+		// of a second domain for the same namespace and name (or a failed
+		// vol-create retried forever). The blank volume's file is
+		// <pool>/<volume>, without an extension.
 		if g != nil {
-			if err := ensureDiskVolumeFree(ctx, vp, storageProvider, domainName, diskVolumeName, g); err != nil {
+			if err := ensureBlankVolumeFree(ctx, vp, storageProvider, domainName, diskVolumeName, g); err != nil {
 				return "", fmt.Errorf("failed to create disk volume: %w", err)
 			}
 		}
@@ -411,7 +414,7 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, vp *VirshProvider,
 // ensureDiskVolumeFree applies ensureDiskTargetFree to the VM's own disk file,
 // <default pool directory>/<volumeName>.qcow2, on vp's host, before a
 // qemu-img convert writes it — or, on a clustered provider (g non-nil), the
-// cluster-wide guard (clusterDiskGuard.ensureTargetFree), which checks every
+// cluster-wide guard (clusterDiskGuard.ensureDiskFree), which checks every
 // host of the Provider when the file exists. A pool without a path is left to
 // the copy itself, which refuses it.
 func ensureDiskVolumeFree(ctx context.Context, vp *VirshProvider, sp *StorageProvider, domainName, volumeName string, g *clusterDiskGuard) error {
@@ -422,7 +425,22 @@ func ensureDiskVolumeFree(ctx context.Context, vp *VirshProvider, sp *StoragePro
 	if pool.Path == "" {
 		return nil
 	}
-	return g.ensureTargetFree(ctx, vp, domainDiskSubject(domainName), filepath.Join(pool.Path, volumeName+qcow2Ext))
+	return g.ensureDiskFree(ctx, vp, domainDiskSubject(domainName), pool.Path, filepath.Join(pool.Path, volumeName+qcow2Ext))
+}
+
+// ensureBlankVolumeFree is ensureDiskVolumeFree for a blank volume on a
+// clustered provider: vol-create makes <default pool directory>/<volumeName>
+// (no extension), so that is the file the cluster-wide guard protects. A pool
+// without a path is left to vol-create, which refuses an existing volume.
+func ensureBlankVolumeFree(ctx context.Context, vp *VirshProvider, sp *StorageProvider, domainName, volumeName string, g *clusterDiskGuard) error {
+	pool, err := sp.GetPoolInfo(ctx, defaultStoragePool)
+	if err != nil {
+		return fmt.Errorf("get storage pool %q info: %w", defaultStoragePool, err)
+	}
+	if pool.Path == "" {
+		return nil
+	}
+	return g.ensureDiskFree(ctx, vp, domainDiskSubject(domainName), pool.Path, filepath.Join(pool.Path, volumeName))
 }
 
 // createDiskFromHostImage builds the primary disk of the domain domainName
@@ -468,7 +486,7 @@ func (p *Provider) createDiskFromHostImage(ctx context.Context, vp *VirshProvide
 	}
 	if img.AdoptInPlace {
 		if g != nil {
-			if err := g.refuseIfUsed(ctx, vp, importedDiskSubject(importedVolumeFileName(domainName)), img.Path); err != nil {
+			if err := g.ensureDiskFree(ctx, vp, importedDiskSubject(importedVolumeFileName(domainName)), confReq.PoolDir, img.Path); err != nil {
 				return nil, err
 			}
 		}

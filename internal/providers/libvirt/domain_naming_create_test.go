@@ -42,7 +42,9 @@ import (
 // domain (by name and by UUID) the way libvirt would, refusing a name that is
 // already defined, and `undefine` forgets it again. A file named fail-define
 // in the host directory makes define fail. `vol-create <pool> <file>` records
-// the volume definition it reads in vol-create.xml, and `vol-path <name>
+// the volume definition it reads in vol-create.xml and, as libvirt's dir pool
+// does, creates the volume's file <pool directory>/<name> — WITHOUT an
+// extension; it refuses a name whose file already exists. `vol-path <name>
 // --pool <pool>` answers from vol-<pool>-<name>. With no -c URI
 // (runRemoteVirshCommand on a non-system URI) the host is $FAKE_DEFAULT_HOST.
 const createHostVirshScript = `#!/bin/sh
@@ -95,7 +97,15 @@ case "$1" in
   pool-list) printf ' Name      State    Autostart\n-------------------------------\n default   active   yes\n\n' ;;
   pool-info) printf 'Name:           default\nState:          running\n' ;;
   pool-dumpxml) printf "<pool type='dir'><name>default</name><target><path>%s</path></target></pool>\n<!-- /var/lib/libvirt/images -->\n" "$(cat "$d/pooldir")" ;;
-  vol-create) cat "$3" > "$d/vol-create.xml" ;;
+  vol-create)
+    cat "$3" > "$d/vol-create.xml"
+    name=$(sed -n 's:.*<name>\(.*\)</name>.*:\1:p' "$d/vol-create.xml" | head -n 1)
+    pool=$(cat "$d/pooldir")
+    if [ -e "$pool/$name" ] || [ -L "$pool/$name" ]; then
+      echo "error: storage volume target path '$pool/$name' already exists" >&2; exit 1
+    fi
+    : > "$pool/$name"
+    printf '%s\n' "$pool/$name" > "$d/vol-$2-$name" ;;
   vol-path)
     if [ "$3" = "--pool" ]; then exec cat "$d/vol-$4-$2"; fi
     exec cat "$d/vol-$3-$5" ;;

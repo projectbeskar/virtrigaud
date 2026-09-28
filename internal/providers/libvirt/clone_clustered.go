@@ -272,8 +272,9 @@ func (p *Provider) cloneOnHost(ctx context.Context, vp *VirshProvider, c libvirt
 	// Never let the copy replace a disk a domain on ANY host of the Provider
 	// uses (the pool may be shared, ADR-0007 A6 R3), or write through a
 	// symbolic link.
-	guard := p.newClusterDiskGuard(host, req.TargetVM, domainName, guardOpClone)
-	if err := guard.ensureTargetFree(ctx, vp, domainDiskSubject(domainName), targetDiskPath); err != nil {
+	legacy, _ := legacyNameOf(req.TargetVM, req.TargetName, domainName)
+	guard := p.newClusterDiskGuard(host, req.TargetVM, domainName, legacy, guardOpClone)
+	if err := guard.ensureDiskFree(ctx, vp, domainDiskSubject(domainName), poolInfo.Path, targetDiskPath); err != nil {
 		return contracts.CloneResponse{}, err
 	}
 
@@ -291,10 +292,12 @@ func (p *Provider) cloneOnHost(ctx context.Context, vp *VirshProvider, c libvirt
 		return contracts.CloneResponse{}, contracts.NewInvalidSpecError("stamp the clone with its target VirtualMachine", err)
 	}
 	uefi := srcNvramPath != "" && targetNvramPath != ""
-	// Never write the clone's varstore through a symbolic link or over the
-	// varstore (or any file) of a domain on any host of the Provider.
+	// Never write the clone's varstore through a symbolic link or over another
+	// domain's varstore. The NVRAM directory is host-local (never a shared
+	// pool), so the same path on another host is another file: the host-local
+	// check is the whole check (ADR-0007 A6.1).
 	if uefi {
-		if err := guard.ensureTargetFree(ctx, vp, nvramSubject(domainName), targetNvramPath); err != nil {
+		if err := ensureNVRAMTargetFree(ctx, vp, domainName, targetNvramPath); err != nil {
 			return contracts.CloneResponse{}, err
 		}
 	}
