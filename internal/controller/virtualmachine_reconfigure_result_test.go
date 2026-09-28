@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 
@@ -582,6 +583,29 @@ func TestClustered_UnmarkedAnswerIsNotTrusted(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, int32(2), *vm.Status.CurrentResources.CPU, "single-host records the answer as before")
 	})
+}
+
+// TestClustered_ProviderReportsAreBounded (review L2): a huge (or negative)
+// memory maximum or vCPU count from a provider is clamped to the VMClass
+// maxima (100 TiB, 128 vCPUs) before it is recorded.
+func TestClustered_ProviderReportsAreBounded(t *testing.T) {
+	prov := runningRoutingProvider()
+	prov.describeResp.MaxMemoryMiB = math.MaxInt64
+	prov.describeResp.VCPUs = math.MaxInt32
+	app := sized("app", 2)
+	app.Spec.Resources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: i32p(128), MemoryMiB: i64p(4096)}
+	r := resizeFixture(t, prov, app)
+	_, err := r.reconcileVM(context.Background(), getVM(t, r, "app"))
+	require.NoError(t, err)
+	got := getVM(t, r, "app")
+	require.NotNil(t, got.Status.Placement.MemoryCeilingMiB)
+	assert.Equal(t, maxRecordedMemoryMiB, *got.Status.Placement.MemoryCeilingMiB, "clamped to 100 TiB")
+	assert.Equal(t, int64(104857600), maxRecordedMemoryMiB)
+	assert.Equal(t, maxVMClassCPU, *got.Status.CurrentResources.CPU, "clamped to 128")
+
+	assert.Zero(t, clampReportedMemoryMiB(-5))
+	assert.Zero(t, clampReportedVCPUs(-5))
+	assert.Equal(t, int64(2048), clampReportedMemoryMiB(2048))
 }
 
 // sizedWithMem asks vm for memMiB of memory at its recorded CPU.

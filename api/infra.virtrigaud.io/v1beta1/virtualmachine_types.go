@@ -430,10 +430,12 @@ type PlacementStatus struct {
 	// its current size. It is kept when the VM is bound. Unset means unknown (a
 	// VM scheduled by an older manager): the VMClass's hot-add setting is used
 	// until the VM's first Describe reports its domain's actual memory maximum,
-	// which is then recorded once. A recorded value is lowered, never raised,
-	// when the provider later reports less (after a confirmed memory shrink).
+	// which is then recorded once. A recorded value is raised when the
+	// provider reports more, and lowered when it reports less (after a
+	// confirmed memory shrink). At most the VMClass memory maximum (100 TiB).
 	// +optional
 	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=104857600
 	MemoryCeilingMiB *int64 `json:"memoryCeilingMiB,omitempty"`
 
 	// Pool is the HostPool the VM was scheduled into.
@@ -453,12 +455,14 @@ type PlacementStatus struct {
 // PlacementResources is a CPU/memory size recorded by the clustered scheduler
 // (status.placement.pendingResources).
 type PlacementResources struct {
-	// CPU is the number of vCPUs.
+	// CPU is the number of vCPUs (at most the VMClass maximum, 128).
 	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=128
 	CPU int32 `json:"cpu"`
 
-	// MemoryMiB is the memory in MiB.
+	// MemoryMiB is the memory in MiB (at most the VMClass maximum, 100 TiB).
 	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=104857600
 	MemoryMiB int64 `json:"memoryMiB"`
 }
 

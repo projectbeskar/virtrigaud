@@ -562,8 +562,9 @@ func committedOnHost(
 		if err != nil {
 			return 0, 0, err
 		}
-		cpu += max(int64(fp.CPU), 0)
-		memMiB += max(fp.MemoryMiB, 0)
+		// Saturating (review L2): the gauges never wrap negative.
+		cpu = scheduler.SaturatingAdd(cpu, int64(fp.CPU))
+		memMiB = scheduler.SaturatingAdd(memMiB, fp.MemoryMiB)
 	}
 	return cpu, memMiB, nil
 }

@@ -304,11 +304,15 @@ func restartPending(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
 // persisted with the reconcile's status write.
 func (r *VirtualMachineReconciler) syncMemoryCeiling(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, ref contracts.VMRef, desc contracts.DescribeResponse) {
 	pl := vm.Status.Placement
-	if !ref.Routed() || pl == nil || pl.Host == "" || desc.MaxMemoryMiB <= 0 {
+	// A provider's report is bounded (review L2): at most the VMClass memory
+	// maximum, so a hostile or broken value can neither overflow the capacity
+	// sums nor fail the status write.
+	maxMem := clampReportedMemoryMiB(desc.MaxMemoryMiB)
+	if !ref.Routed() || pl == nil || pl.Host == "" || maxMem <= 0 {
 		return
 	}
 	recordedMem := r.getCurrentMemoryMiB(vm)
-	reported := desc.MaxMemoryMiB
+	reported := maxMem
 	if reported <= recordedMem {
 		reported = 0
 	}
@@ -317,10 +321,10 @@ func (r *VirtualMachineReconciler) syncMemoryCeiling(ctx context.Context, vm *in
 	case pl.MemoryCeilingMiB == nil:
 		pl.MemoryCeilingMiB = &reported
 		logger.Info("Recorded the clustered VM's memory ceiling from its provider (once)", "memoryCeilingMiB", reported)
-	case desc.MaxMemoryMiB > max(*pl.MemoryCeilingMiB, recordedMem):
+	case maxMem > max(*pl.MemoryCeilingMiB, recordedMem):
 		logger.Info("Raised the clustered VM's memory ceiling to what its provider reports",
-			"from", *pl.MemoryCeilingMiB, "to", desc.MaxMemoryMiB)
-		raised := desc.MaxMemoryMiB
+			"from", *pl.MemoryCeilingMiB, "to", maxMem)
+		raised := maxMem
 		pl.MemoryCeilingMiB = &raised
 	case reported < *pl.MemoryCeilingMiB && vm.Status.ReconfigureTaskRef == "" && !restartPending(vm) && !lastReconfigureFailed(vm):
 		logger.Info("Lowered the clustered VM's memory ceiling to what its provider reports",
@@ -347,11 +351,24 @@ func lastReconfigureFailed(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
 func (r *VirtualMachineReconciler) syncRecordedCPU(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, ref contracts.VMRef, desc contracts.DescribeResponse) {
 	pl := vm.Status.Placement
 	cur := vm.Status.CurrentResources
-	if !ref.Routed() || pl == nil || pl.Host == "" || cur == nil || cur.CPU == nil || desc.VCPUs <= *cur.CPU {
+	vcpus := clampReportedVCPUs(desc.VCPUs) // bounded, review L2
+	if !ref.Routed() || pl == nil || pl.Host == "" || cur == nil || cur.CPU == nil || vcpus <= *cur.CPU {
 		return
 	}
 	log.FromContext(ctx).Info("Raised the clustered VM's recorded CPU to the vCPUs its provider reports",
-		"from", *cur.CPU, "to", desc.VCPUs)
-	cpu := desc.VCPUs
-	cur.CPU = &cpu
+		"from", *cur.CPU, "to", vcpus)
+	cur.CPU = &vcpus
+}
+
+// clampReportedMemoryMiB bounds a provider-reported memory figure (MiB) to
+// [0, maxRecordedMemoryMiB] (review L2).
+func clampReportedMemoryMiB(v int64) int64 {
+	return min(max(v, 0), maxRecordedMemoryMiB)
+}
+
+// clampReportedVCPUs bounds a provider-reported vCPU count to
+// [0, maxVMClassCPU] — the CRD maximum of status.currentResources.cpu
+// (review L2).
+func clampReportedVCPUs(v int32) int32 {
+	return min(max(v, 0), maxVMClassCPU)
 }

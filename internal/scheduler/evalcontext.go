@@ -18,6 +18,7 @@ package scheduler
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
@@ -125,8 +126,10 @@ func indexPlaced(placed []PlacedVM, self string) (map[string][]PlacedVM, map[str
 	committedByHost := make(map[string]committed, len(merged))
 	for _, p := range merged {
 		c := committedByHost[p.HostID]
-		c.cpu += nonNegative(int64(p.Resources.CPU))
-		c.memMiB += nonNegative(p.Resources.MemoryMiB)
+		// Saturating (review L2): an overflow must never wrap a sum negative
+		// and make a host look free.
+		c.cpu = SaturatingAdd(c.cpu, nonNegative(int64(p.Resources.CPU)))
+		c.memMiB = SaturatingAdd(c.memMiB, nonNegative(p.Resources.MemoryMiB))
 		committedByHost[p.HostID] = c
 		if !p.CapacityOnly {
 			placedByHost[p.HostID] = append(placedByHost[p.HostID], p)
@@ -221,6 +224,18 @@ func int32Deref(p *int32) int64 {
 		return 0
 	}
 	return int64(*p)
+}
+
+// SaturatingAdd returns a + b for non-negative a and b, or math.MaxInt64 when
+// the sum would overflow: a committed-capacity sum saturates instead of
+// wrapping negative, which would make a host look free (review L2). A
+// negative operand is treated as 0.
+func SaturatingAdd(a, b int64) int64 {
+	a, b = nonNegative(a), nonNegative(b)
+	if b > math.MaxInt64-a {
+		return math.MaxInt64
+	}
+	return a + b
 }
 
 // nonNegative returns v, or 0 when v is negative (a malformed demand never
