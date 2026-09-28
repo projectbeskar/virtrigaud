@@ -191,6 +191,15 @@ func clusterHost(name, provider string) *infravirtrigaudiov1beta1.Host {
 // returning prov.
 func clusteredAdoptionReconciler(t *testing.T, prov contracts.Provider, objs ...client.Object) *VMAdoptionReconciler {
 	t.Helper()
+	return clusteredAdoptionReconcilerWith(t, prov, nil, objs...)
+}
+
+// clusteredAdoptionReconcilerWith is clusteredAdoptionReconciler with a hook
+// run right after each create (e.g. what the VirtualMachine controller does
+// to a new VM).
+func clusteredAdoptionReconcilerWith(t *testing.T, prov contracts.Provider,
+	afterCreate func(ctx context.Context, cl client.WithWatch, obj client.Object), objs ...client.Object) *VMAdoptionReconciler {
+	t.Helper()
 	s := coverageTestScheme(t)
 	var n int
 	var mu sync.Mutex
@@ -205,7 +214,13 @@ func clusteredAdoptionReconciler(t *testing.T, prov contracts.Provider, objs ...
 					obj.SetUID(types.UID(fmt.Sprintf("uid-created-%d", n)))
 					mu.Unlock()
 				}
-				return cl.Create(ctx, obj, opts...)
+				if err := cl.Create(ctx, obj, opts...); err != nil {
+					return err
+				}
+				if afterCreate != nil {
+					afterCreate(ctx, cl, obj)
+				}
+				return nil
 			},
 		}).Build()
 	return &VMAdoptionReconciler{Client: c, Scheme: s, RemoteResolver: &stubResolver{provider: prov}}
@@ -616,12 +631,12 @@ func TestClusteredAdoptionMessage_CapsTheNamedHosts(t *testing.T) {
 	for i := 0; i < 13; i++ {
 		hosts = append(hosts, fmt.Sprintf("host-%02d", i))
 	}
-	msg := clusteredAdoptionMessage(1, 0, nil, hosts)
+	msg := clusteredAdoptionMessage(1, 0, 0, nil, hosts)
 	assert.Contains(t, msg, "13 host(s) could not be listed")
 	assert.Contains(t, msg, "host-09")
 	assert.NotContains(t, msg, "host-10")
 	assert.Contains(t, msg, "and 3 more")
-	assert.Equal(t, "Successfully adopted 2 VMs", clusteredAdoptionMessage(2, 0, nil, nil))
+	assert.Equal(t, "Successfully adopted 2 VMs", clusteredAdoptionMessage(2, 0, 0, nil, nil))
 }
 
 // TestClusteredAdoption_PreviousIncarnationsAreNeverAdopted: a domain stamped
@@ -694,4 +709,65 @@ func TestClusteredAdoption_CrossHostDuplicatesAreNeverAdopted(t *testing.T) {
 	}
 	assert.Contains(t, st.Message, "defined on more than one host")
 	assert.Equal(t, "db", adoptedVMGet(t, r, "db").Status.ID, "the managed VM is untouched")
+}
+
+// vmControllerTouch is what the VirtualMachine controller does to a new VM
+// within milliseconds: it adds its finalizer (a new resourceVersion), so the
+// adoption's copy of the object is stale by the time it writes the binding.
+func vmControllerTouch(ctx context.Context, cl client.WithWatch, obj client.Object) {
+	vm, ok := obj.(*infravirtrigaudiov1beta1.VirtualMachine)
+	if !ok {
+		return
+	}
+	latest := &infravirtrigaudiov1beta1.VirtualMachine{}
+	if err := cl.Get(ctx, client.ObjectKeyFromObject(vm), latest); err != nil {
+		return
+	}
+	latest.Finalizers = append(latest.Finalizers, infravirtrigaudiov1beta1.VirtualMachineFinalizer)
+	_ = cl.Update(ctx, latest)
+}
+
+// TestClusteredAdoption_BindingSurvivesAConcurrentWriter: the VirtualMachine
+// controller bumps the new VM's resourceVersion between its create and the
+// binding write; the write re-reads the VM and binds it anyway.
+func TestClusteredAdoption_BindingSurvivesAConcurrentWriter(t *testing.T) {
+	prov := &fakeClusteredAdopter{caps: routedAdoptionCaps, domains: []*fakeDomain{
+		{host: "host-a", id: "web", uuid: "uuid-a-web", cpu: 1, memMiB: 1024, power: "On"},
+	}}
+	r := clusteredAdoptionReconcilerWith(t, prov, vmControllerTouch, clusteredAdoptionProvider(), clusterHost("host-a", "prov-c"))
+
+	reconcileAdoption(t, r)
+	vm := adoptedVMGet(t, r, clusteredAdoptedVMName("host-a", "web"))
+	assert.Equal(t, "web", vm.Status.ID, "bound despite the concurrent write")
+	assert.Equal(t, "host-a", boundHost(vm))
+	assert.Contains(t, vm.Finalizers, infravirtrigaudiov1beta1.VirtualMachineFinalizer, "the concurrent writer's change is kept")
+	st := adoptionStatus(t, r)
+	assert.EqualValues(t, 1, st.AdoptedVMs)
+	assert.EqualValues(t, 0, st.FailedAdoptions)
+}
+
+// TestClusteredAdoption_BindingDeferredWhenTheVMIsGoingAway: a VM deleted
+// between its create and the binding write is not bound; the adoption is
+// deferred (not a failure) and retried sooner.
+func TestClusteredAdoption_BindingDeferredWhenTheVMIsGoingAway(t *testing.T) {
+	prov := &fakeClusteredAdopter{caps: routedAdoptionCaps, domains: []*fakeDomain{
+		{host: "host-a", id: "web", uuid: "uuid-a-web", cpu: 1, memMiB: 1024, power: "On"},
+	}}
+	deleteRightAway := func(ctx context.Context, cl client.WithWatch, obj client.Object) {
+		vmControllerTouch(ctx, cl, obj) // a finalizer keeps it, being deleted
+		latest := &infravirtrigaudiov1beta1.VirtualMachine{}
+		if err := cl.Get(ctx, client.ObjectKeyFromObject(obj), latest); err == nil {
+			_ = cl.Delete(ctx, latest)
+		}
+	}
+	r := clusteredAdoptionReconcilerWith(t, prov, deleteRightAway, clusteredAdoptionProvider(), clusterHost("host-a", "prov-c"))
+
+	res := reconcileAdoption(t, r)
+	assert.Equal(t, clusteredAdoptionRetryInterval, res.RequeueAfter)
+	vm := adoptedVMGet(t, r, clusteredAdoptedVMName("host-a", "web"))
+	assert.Empty(t, vm.Status.ID, "a VM being deleted is never bound")
+	st := adoptionStatus(t, r)
+	assert.EqualValues(t, 0, st.AdoptedVMs)
+	assert.EqualValues(t, 0, st.FailedAdoptions, "deferred, not failed")
+	assert.Contains(t, st.Message, "1 deferred to the next discovery")
 }

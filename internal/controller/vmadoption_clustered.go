@@ -29,6 +29,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -135,6 +136,13 @@ const clusteredAdoptionNotSupportedMessage = "Adoption from this clustered (topo
 // granted.
 var errAdoptionSkipped = errors.New("adoption skipped")
 
+// errAdoptionDeferred marks an adoption whose binding write could not be made
+// this time although nothing failed: the adopting VirtualMachine kept changing
+// (conflicts) or is no longer waiting for this binding (deleted, being
+// deleted, or replaced). The next discovery completes it from the stamp, or
+// reports the domain. It is counted apart from failures.
+var errAdoptionDeferred = errors.New("adoption deferred")
+
 // clusteredAdoptionPlan is what one clustered discovery found to do.
 type clusteredAdoptionPlan struct {
 	// adopt are listed VMs no VirtualMachine manages.
@@ -227,13 +235,16 @@ func (r *VMAdoptionReconciler) reconcileClusteredAdoption(ctx context.Context, p
 	logger.Info("Clustered discovery", "listed", len(listed.VMs), "unmanaged", len(unmanaged),
 		"pendingBindings", len(plan.complete), "unreachableHosts", listed.UnreachableHostIDs)
 
-	adopted, failed := int32(0), int32(0)
+	adopted, failed, deferred := int32(0), int32(0), int32(0)
 	count := func(err error, msg string, info contracts.VMInfo) {
 		switch {
 		case err == nil:
 			adopted++
 		case errors.Is(err, errAdoptionSkipped):
 			logger.Info("Not adopting a listed VM", "host", info.HostID, "vm_id", info.ID, "reason", err.Error())
+		case errors.Is(err, errAdoptionDeferred):
+			logger.Info("Adoption deferred to the next discovery", "host", info.HostID, "vm_id", info.ID, "reason", err.Error())
+			deferred++
 		default:
 			logger.Error(err, msg, "host", info.HostID, "vm_id", info.ID)
 			failed++
@@ -253,13 +264,13 @@ func (r *VMAdoptionReconciler) reconcileClusteredAdoption(ctx context.Context, p
 	provider.Status.Adoption.DiscoveredVMs = int32(len(unmanaged))
 	provider.Status.Adoption.AdoptedVMs = adopted
 	provider.Status.Adoption.FailedAdoptions = failed
-	provider.Status.Adoption.Message = clusteredAdoptionMessage(adopted, failed, plan.skipped, listed.UnreachableHostIDs)
+	provider.Status.Adoption.Message = clusteredAdoptionMessage(adopted, failed, deferred, plan.skipped, listed.UnreachableHostIDs)
 	if err := r.Status().Update(ctx, provider); err != nil {
 		logger.Error(err, "Failed to update adoption status")
 		metrics.RecordError(errReasonAdoptionStatus, metrics.ComponentManager)
 		return ctrl.Result{}, err
 	}
-	if failed > 0 || len(listed.UnreachableHostIDs) > 0 {
+	if failed > 0 || deferred > 0 || len(listed.UnreachableHostIDs) > 0 {
 		return ctrl.Result{RequeueAfter: clusteredAdoptionRetryInterval}, nil
 	}
 	return ctrl.Result{RequeueAfter: clusteredAdoptionInterval}, nil
@@ -271,10 +282,13 @@ func (r *VMAdoptionReconciler) reconcileClusteredAdoption(ctx context.Context, p
 // deliberately not adopted (skipped): a previous incarnation by the namespace
 // and name its stamp records, with the hint to re-attach it per the A6
 // runbook or remove it. Every list is capped (unreachableHostsListed).
-func clusteredAdoptionMessage(adopted, failed int32, skipped []adoptionSkip, unreachable []string) string {
+func clusteredAdoptionMessage(adopted, failed, deferred int32, skipped []adoptionSkip, unreachable []string) string {
 	msg := fmt.Sprintf("Successfully adopted %d VMs", adopted)
 	if failed > 0 {
 		msg = fmt.Sprintf("Adopted %d VMs, %d failed", adopted, failed)
+	}
+	if deferred > 0 {
+		msg += fmt.Sprintf(", %d deferred to the next discovery", deferred)
 	}
 	msg += skippedSummary(skipped)
 	if len(unreachable) > 0 {
@@ -674,29 +688,105 @@ func (r *VMAdoptionReconciler) completeClusteredAdoption(ctx context.Context, pr
 
 	class := r.adoptedClass(ctx, vm)
 	cpu, mem, ceiling := adoptedSize(vm, class, info, desc)
-	now := metav1.Now()
-	vm.Status.ID = info.ID
-	recordBoundProvider(vm, provider)
-	vm.Status.Placement = &infravirtrigaudiov1beta1.PlacementStatus{
-		Host:              info.HostID,
-		Pool:              host.Spec.PoolRef.Name,
-		MemoryCeilingMiB:  &ceiling,
-		LastScheduledTime: &now,
-		Reason:            "adopted: the VM was found on this host (ADR-0007 Addendum A, slice 4)",
-	}
-	vm.Status.CurrentResources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: &cpu, MemoryMiB: &mem}
-	vm.Status.PowerState = observedPowerState(desc.PowerState)
-	vm.Status.IPs = desc.IPs
-	vm.Status.Provider = info.ProviderRaw
-	setPlacedCondition(vm, metav1.ConditionTrue, k8s.ReasonBound, fmt.Sprintf("VM is bound to host %s", info.HostID))
-	// A checked write: a conflict (the object changed since it was read) is
-	// retried by the next discovery, which finds the stamp and completes the
-	// binding.
-	if err := r.Status().Update(ctx, vm); err != nil {
-		return fmt.Errorf("write the binding of adopted VirtualMachine %s/%s: %w", vm.Namespace, vm.Name, err)
+	if err := r.writeAdoptionBinding(ctx, provider, vm, info, adoptionBinding{
+		pool: host.Spec.PoolRef.Name, cpu: cpu, memMiB: mem, ceilingMiB: ceiling, desc: desc,
+	}); err != nil {
+		return err
 	}
 	logger.Info("Adopted clustered VM", "cpu", cpu, "memoryMiB", mem, "memoryCeilingMiB", ceiling)
 	return nil
+}
+
+// adoptionBinding is what the binding write of an adopted clustered VM
+// records besides its id, host and Provider.
+type adoptionBinding struct {
+	pool               string
+	cpu                int32
+	memMiB, ceilingMiB int64
+	desc               contracts.DescribeResponse
+}
+
+// writeAdoptionBinding writes the binding of vm — adopted for info from
+// provider — in one status write: status.id, boundProvider, placement (host,
+// pool, memory ceiling), currentResources, the observed power state and IPs,
+// and Placed=True/Bound.
+//
+// The VirtualMachine controller adds its finalizer and writes the VM's status
+// right after the VM is created, so the object read before the owner transfer
+// is usually stale: the write re-reads the VM (from the API server when an
+// uncached reader is configured) and retries on conflict. It writes only
+// while the fresh object is the same VirtualMachine (UID) and still waiting
+// for exactly this binding (isAwaitingAdoptionOf, not being deleted); a VM
+// already bound to this (host, id) is a success. Anything else — or
+// conflicts that outlast the retries — is errAdoptionDeferred: the next
+// discovery completes the binding from the stamp.
+func (r *VMAdoptionReconciler) writeAdoptionBinding(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider,
+	vm *infravirtrigaudiov1beta1.VirtualMachine, info contracts.VMInfo, b adoptionBinding) error {
+	key := client.ObjectKeyFromObject(vm)
+	wantUID := vm.UID
+	var alreadyBound bool
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latest := &infravirtrigaudiov1beta1.VirtualMachine{}
+		if err := r.freshReader().Get(ctx, key, latest); err != nil {
+			if apierrors.IsNotFound(err) {
+				return fmt.Errorf("VirtualMachine %s is gone: %w", key, errAdoptionDeferred)
+			}
+			return err
+		}
+		switch {
+		case latest.UID != wantUID:
+			return fmt.Errorf("VirtualMachine %s was replaced: %w", key, errAdoptionDeferred)
+		case latest.Status.ID == info.ID && boundHost(latest) == info.HostID && latest.DeletionTimestamp.IsZero():
+			alreadyBound = true
+			return nil
+		case !isAwaitingAdoptionOf(latest, provider, info):
+			return fmt.Errorf("VirtualMachine %s is no longer waiting for this adoption: %w", key, errAdoptionDeferred)
+		}
+		now := metav1.Now()
+		ceiling := b.ceilingMiB
+		cpu, mem := b.cpu, b.memMiB
+		latest.Status.ID = info.ID
+		recordBoundProvider(latest, provider)
+		latest.Status.Placement = &infravirtrigaudiov1beta1.PlacementStatus{
+			Host:              info.HostID,
+			Pool:              b.pool,
+			MemoryCeilingMiB:  &ceiling,
+			LastScheduledTime: &now,
+			Reason:            "adopted: the VM was found on this host (ADR-0007 Addendum A, slice 4)",
+		}
+		latest.Status.CurrentResources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: &cpu, MemoryMiB: &mem}
+		latest.Status.PowerState = observedPowerState(b.desc.PowerState)
+		latest.Status.IPs = b.desc.IPs
+		latest.Status.Provider = info.ProviderRaw
+		setPlacedCondition(latest, metav1.ConditionTrue, k8s.ReasonBound, fmt.Sprintf("VM is bound to host %s", info.HostID))
+		if err := r.Status().Update(ctx, latest); err != nil {
+			return err
+		}
+		*vm = *latest
+		return nil
+	})
+	switch {
+	case err == nil:
+		if alreadyBound {
+			log.FromContext(ctx).Info("Adopted VirtualMachine is already bound to its domain", "vm", key.String())
+		}
+		return nil
+	case apierrors.IsConflict(err):
+		return fmt.Errorf("write the binding of adopted VirtualMachine %s: kept conflicting: %w", key, errAdoptionDeferred)
+	case errors.Is(err, errAdoptionDeferred):
+		return err
+	}
+	return fmt.Errorf("write the binding of adopted VirtualMachine %s: %w", key, err)
+}
+
+// freshReader is the reader the adoption re-reads objects with before it
+// writes or decides on them: the uncached API reader when configured, the
+// cached client otherwise.
+func (r *VMAdoptionReconciler) freshReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
 }
 
 // adoptedClass returns vm's VMClass, or nil when it cannot be read (the size

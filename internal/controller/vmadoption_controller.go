@@ -94,6 +94,11 @@ type VMAdoptionReconciler struct {
 	// RemoteResolver resolves a Provider to its provider client (the manager
 	// wires the *remote.Resolver).
 	RemoteResolver ProviderResolver
+	// APIReader is an uncached reader (the manager's GetAPIReader). Clustered
+	// adoption re-reads through it before a binding write and to confirm a
+	// VirtualMachine is gone (ADR-0007 Addendum A, slice 4); nil falls back to
+	// the cached client.
+	APIReader client.Reader
 }
 
 // VMAdoptionReconciler watches Providers and, on the adoption annotation,
