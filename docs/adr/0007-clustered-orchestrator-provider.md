@@ -16,7 +16,9 @@ hosts) are merged, and slice 3 routes the snapshot family, `Clone`,
 `GetDiskInfo`, `ExportDisk` (s3 / nfs) and host-encoded task references (see
 the slice 3 amendment under A5). **Not yet done:** `ListVMs` across hosts and
 adoption (slice 4) and the end-to-end lab validation (slice 5); until slice 5
-passes, `topology: cluster` must be treated as experimental. This ADR proposes a new *class* of provider — a **clustered /
+passes, `topology: cluster` must be treated as experimental. A6 (backup and
+restore of clustered VMs) has a decision proposal, dated 2026-09-28, that awaits
+the maintainer. This ADR proposes a new *class* of provider — a **clustered /
 orchestrator** provider — that makes VirtRigaud itself the cluster manager for
 hypervisors that lack a native one: register N individual bare hosts, present
 them as one cluster, and do placement + cross-node migration. The first target
@@ -1239,13 +1241,357 @@ follows; A2's `pendingHost` is its prerequisite.
 > Single-host and thin-client Providers never schedule, so none of this reaches
 > them (D9).
 
-### A6: open question
+### A6: backup and restore of clustered VMs — decision proposal (2026-09-28)
 
-Restoring from a backup (for example with Velero) drops the status subresource,
-and with it `placement.host` and `placement.pendingHost`. The next reconcile would
-then schedule the VM again. Should the binding also be copied into an annotation, or
-into a spec-side "last bound host" hint that a restore brings back? Decide before
-slice 5.
+**Status: Proposed (2026-09-28). Awaiting the maintainer's decision.** This
+replaces the open question that stood here: *restoring from a backup drops the
+status subresource, and with it `placement.host` and `placement.pendingHost`;
+should the binding be copied into an annotation or a spec-side "last bound host"
+hint? Decide before slice 5.* Reviewed against `main` 21dd588.
+
+**What is being decided.** A restore, whether by Velero or by `kubectl apply` of
+an exported manifest, re-creates a VirtualMachine with a **new UID**. By default
+it comes back **without its status**. On a clustered Provider the UID is the only
+identity the domain's owner stamp accepts, and the status held the binding. Two
+things need deciding:
+
+1. What stops the first reconcile after a restore from creating a second domain.
+2. Who may re-attach a restored object to its existing domain, and how that is
+   verified.
+
+#### What a restore does today (traced)
+
+| Provider | Status dropped (the default) | Status restored (for example Velero `restoreStatus`) |
+|---|---|---|
+| libvirt, `topology: cluster` | The VM is treated as new. It is scheduled, `pendingHost` is written and `Create` is sent. On the host that holds the original domain, the create is refused with `AlreadyExists`, because the stamp carries the old UID. The slice 2 rule then **excludes that host and re-schedules**, and the next host creates a **second domain** `<ns>.<name>` from the image. The original keeps running, unmanaged and **outside committed capacity**. If the pool directory is shared across hosts (D6's NFS model), the second create **overwrites the original's disk**. `ensureDiskTargetFree` scans only the create host's domains, finds none using `<pool>/<ns>.<name>-disk.qcow2`, and treats the file as a leftover. | Owner-checked calls carry the new UID and get `NotFound`. A4 reports `VMMissingOnHost` and stops: safe, but stuck. A restored `pendingHost` whose domain exists retries `Create`, is refused, and the exclusion rule re-schedules it, which makes a second domain as in the first column. |
+| libvirt, single host | `Create` finds `<ns>.<name>` stamped with the old UID and fails with `ProviderConflict`, re-checked every 2 minutes: safe, stuck. A pre-#333 bare-named domain carries no stamp and does not block the create, so a second domain `<ns>.<name>` is created. | Works: by-id calls are not owner-checked on a single host. |
+| vSphere | Same as single-host libvirt: the ExtraConfig `virtrigaud.owner.uid` does not match in the target folder, so the result is `ProviderConflict`. Safe, stuck. | Works (addressed by MOID). |
+| Proxmox | There is no owner stamp. `Create` allocates `/cluster/nextid`, which makes a **second VM** and orphans the original. | Works (addressed by VMID). |
+
+#### Scope
+
+A6 covers the clustered libvirt provider. There a restore does not merely get
+stuck: it duplicates the VM, and on shared storage it destroys the VM's disk. The
+other cases are recorded here but handled separately:
+
+- **The disk overwrite on a shared pool (R3 below) is not specific to restores.**
+  Any leftover domain of the same `<ns>.<name>` on another host triggers it:
+  `orphan-on-delete`, or a force-delete that left the domain behind, followed by
+  a re-create of the same name. It should ship as a fix of its own, before
+  slice 5.
+- **Single-host libvirt and vSphere fail closed.** v0.4.0 documents their
+  recovery (the re-stamp below). Automating it later can reuse A6's primitive.
+- **Proxmox duplicates on restore** because it has no owner stamp. That is a
+  separate issue. The restore marker (R1) does not depend on topology, so it
+  would close the restore path there if enabled (question 3).
+- Restored `VMSnapshot`, `VMClone` and `VMMigration` objects are out of scope.
+  So is a restore into a *second* Kubernetes cluster that manages the same
+  hosts (see *Out of scope*).
+
+#### Threat model
+
+1. **Nothing a tenant can edit authorizes a bind.** Labels, annotations and spec
+   may only *hold* the tenant's own VM (fail closed). They never name the host,
+   domain or UID that the operator binds to, and they never steer the scheduler.
+2. **A namespace and name are not an identity over time.** A namespace can be
+   deleted and re-created for another tenant. A domain left behind under
+   `team-a/web` must not be claimed by the next owner of `team-a`. Only the UID
+   is an identity; this follows the ADR-0009 precedent that a restore mints new
+   identities. Moving a domain from one UID to another is an **administrator's
+   decision**.
+3. **Hypervisor truth before trust.** Whatever carries the binding across a
+   restore is checked on the host before it is used:
+   - the stamp's namespace and name equal the VM's;
+   - no VirtualMachine with the stamp's UID still exists, in any namespace,
+     terminating ones included;
+   - it is the only domain for that name across the Provider's hosts;
+   - the owner change is a compare-and-swap on the domain UUID and the current
+     stamp.
+4. **The scheduler is never bypassed.** A re-attach records the host where the
+   domain is proven to be. It never chooses a host.
+5. **Nothing is disclosed.** Conditions and events name no host and no other
+   tenant's object, as in A5's scheduler-accuracy amendment.
+
+Admin-only paths are acceptable for a restore: a writer of
+`virtualmachines/status`, root on a host, or an object in the Provider's
+namespace (the same-namespace model).
+
+#### Is there a durable "restored, not new" signal?
+
+| Signal | Survives Velero | Survives an exported manifest | Survives a GitOps re-create | Tenant can forge / remove | Use |
+|---|---|---|---|---|---|
+| Velero labels (`velero.io/restore-name`) | yes | no | no | yes / yes | No: tool-specific |
+| A finalizer | depends on the tool | if exported | no | yes / yes | No |
+| A spec hint ("last bound host") | yes | yes | only if it is in git | yes / yes | No: a v1beta1 field that exists only to be distrusted |
+| **An operator-written marker annotation** holding the UID under which the object entered placement | yes | yes | no | yes / yes | **Yes, as a hold only** |
+| The restored status (Velero `restoreStatus`) | if enabled | no (`apply` ignores status) | no | no (an admin write) | Recommended procedure, never required |
+| **Hypervisor truth**: a domain stamped with this VM's namespace and name under another UID | always | always | always | no | **Yes, as the enforcement** |
+
+So a VM whose marker names another UID is held before it is first scheduled. The
+provider fails closed on any create that would put a second domain next to a
+previous incarnation.
+
+#### Options
+
+- **(a) Mirror the binding into the object and trust it on restore.** The
+  operator copies the host, id and UID into an annotation (or a spec hint). A
+  VM without status restores its status from it after a stamp check.
+- **(b) An admin-gated restore-rebind.** The operator finds the domain with the
+  fan-out `ListVMs` (slice 4) by the stamp's namespace and name, and checks the
+  rules of threat 3. It then re-stamps the domain with the new UID and binds it.
+  The gate is one of:
+  - (b1) a Provider annotation listing namespaces;
+  - (b2) a one-shot VM annotation that only administrators may set;
+  - (b3) a `VMRestoreBinding` object that an administrator creates in the
+    Provider's namespace.
+- **(c) Refuse and hold; an administrator recovers.** Restored VMs are held and
+  never scheduled, and the provider refuses to create next to a previous
+  incarnation. An administrator re-stamps the domain by hand, and the VM binds
+  through its ordinary create retry: an idempotent success on its own stamp.
+- **(d) An admin-owned binding ledger.** The operator mirrors each clustered
+  binding into an object in the Provider's namespace. A DR restore brings the
+  ledger back with the VMs, and the rebind trusts it (it is admin data) after
+  the stamp check.
+
+| | (a) trusted hint | (b3) `VMRestoreBinding` | (c) hold + manual re-stamp | (d) ledger |
+|---|---|---|---|---|
+| Who authorizes the bind | anyone who can edit the VM | an administrator (Provider namespace) | an administrator (root on the host + a status write) | an administrator (restores the ledger) |
+| Verified against the stamp | only against a UID the tenant supplies (the VM's own UID is new by construction) | yes: all of threat 3, then compare-and-swap | by the administrator, following the runbook | yes, as in (b) |
+| Bypasses the scheduler | yes, if the hint feeds placement | no | no | no |
+| Committed capacity | a tenant field becomes an accounting input, which A5 forbids | recorded at rebind, not admitted: the VM already runs there, and a host pushed over its ratio takes no new VM while nothing moves. Uncounted until then, unless the status was restored | a pinned VM counts at its pending size; a marker-held VM is uncounted until it is recovered | counted throughout, orphans included |
+| Host unreachable | waits on the hinted host | waits, because uniqueness needs every host to answer | the hold is unaffected; R3 fails closed | as in (b) |
+| New API surface | an annotation or spec field | a CRD, an RPC and a `ListVMs` filter | one annotation, one ErrorInfo reason | a CRD, a write per bind, and garbage collection |
+| Fits v0.4.0 | — | no: needs slice 4 and a new CRD | **yes** | no |
+
+The rejected variants and options:
+
+- **(b1)** is (b3) without per-VM precision. While the annotation is set, every
+  held VM in the listed namespaces re-attaches, which opens threat 2 for that
+  window.
+- **(b2)** cannot be enforced without a validating webhook or an admission
+  policy. The same gap is why tenants can still set `orphan-on-delete` today.
+- **(a)** fails threats 1, 2 and 4 and is rejected. Its marker survives as the
+  hold in (c).
+- **(d)** duplicates D3's source of truth, and a stale ledger would authorize
+  rebinds nobody asked for. It is deferred, to be revisited with the
+  per-consumer quota ADR, which needs an orphan-aware count too.
+
+#### Scenarios
+
+| Scenario | Today | (b3) | (c), the v0.4.0 recommendation |
+|---|---|---|---|
+| Velero restore into the same namespace, original gone | a second domain; on a shared pool the disk is overwritten | held until an administrator creates a `VMRestoreBinding` | held (`RestorePending`); recovered with the runbook |
+| The same, with the status restored | stuck at `VMMissingOnHost`; a restored `pendingHost` makes a second domain | held; the rebind already knows the host | held; the runbook is the re-stamp alone |
+| `kubectl apply` of an exported manifest | as with Velero | as with Velero | as with Velero (the marker is in the manifest) |
+| GitOps re-create (no marker, no status) | as with Velero | held by the pre-schedule check | if the old host is picked, pinned and held (R2); on a shared pool, refused (R3); on a host-local pool with another host picked, a second domain is created. That **residual** is closed by (b)'s pre-schedule check |
+| Restore into a new namespace while the original runs | a new VM `<new-ns>.<name>` | held; never rebinds, because the namespace differs and the old UID is live; a release makes a new VM | held; a release makes a new VM |
+| Restore or apply while the original object still exists | nothing happens: Velero skips it by default, and `update` and `apply` keep the UID | nothing happens | nothing happens |
+| The host with the domain is unreachable during the restore | scheduled elsewhere, which makes a second domain | the rebind waits for every host | the marker hold is unaffected; R3 fails closed on a shared pool |
+| The backup is older than a normal delete (the domain is gone) | a new VM (correct) | the rebind finds nothing and says so; a release makes a new VM | held; a release makes a new VM |
+
+*Release* means removing the marker annotation. A tenant may do that: the marker
+only holds, and R2 and R3 still stand behind it.
+
+#### Recommendation
+
+**For v0.4.0, option (c) with three guards; after v0.4.0, option (b3).** Option
+(c) needs no new CRD or RPC and makes every restore path fail closed. Its manual
+recovery is exactly the flow that (b3) automates later.
+
+- **R1: a restore marker and a hold (manager).**
+  - Before the first `pendingHost` write of a clustered VM, the manager sets
+    `infra.virtrigaud.io/placement-uid: <the VM's UID>`. This applies to a
+    create and to a clone target. Adoption sets the marker when it binds.
+  - A clustered VM whose marker names **another** UID, and which has neither a
+    `status.id` nor a `status.placement.pendingHost`, is held before
+    scheduling. It gets `Placed=False/RestorePending` and
+    `Provisioning=False/RestorePending` and a `Warning` event, and no `Create`
+    is sent. It is re-checked every 2 minutes.
+  - A VM whose binding was restored is not held by the marker. Its
+    owner-checked calls fail closed, and they are reported as `RestorePending`
+    instead of `VMMissingOnHost`.
+  - After an owner-checked call on its bound host succeeds, the manager
+    rewrites the marker to the VM's own UID. A marker that names the VM's own
+    UID never holds anything, so a lost write cannot block a create.
+  - The key is in the reserved domain, so a `VMClone` or `VMMigration` target
+    never inherits it.
+- **R2: a previous incarnation pins the VM, never excludes the host (provider
+  and manager).**
+  - A clustered `Create` or `Clone` may find, on its target host, a domain of
+    the requested name whose stamp names the request's namespace and name under
+    another UID. It then answers `AlreadyExists` with the ErrorInfo reason
+    `VM_PREVIOUS_INCARNATION`.
+  - On that answer the manager keeps `pendingHost`: there is no exclusion and no
+    re-schedule. It holds the VM with `RestorePending`.
+  - Retries go to that host and are refused the same way until an administrator
+    re-stamps or removes the domain. Meanwhile the VM counts on that host at its
+    pending size, standing in for the previous incarnation, and the providerRef
+    lock is on.
+  - Every other `AlreadyExists` keeps the slice 2 exclusion.
+- **R3: a cluster-wide guard against disk overwrites (provider).**
+  - It applies when a file already exists where a clustered `Create` or `Clone`
+    would write the VM's disk. The in-use scan then runs on every host in the
+    provider's registry, not only the target.
+  - A file that a domain on any host uses is never overwritten. The answer is
+    `VM_PREVIOUS_INCARNATION` if that domain's stamp names the request's
+    namespace and name, and plain `AlreadyExists` otherwise.
+  - A host that cannot be scanned fails the call with a host-scoped
+    `Unavailable` (`HOST_UNAVAILABLE`, kept out of the circuit breaker), so the
+    create waits on its pending host.
+  - The common case, with no file there, is unchanged.
+- **A runbook (docs).** Restoring clustered VMs is not automated in v0.4.0. To
+  recover a held VM, an administrator:
+  1. Finds the domain whose stamp UID equals the marker, running
+     `virsh metadata <ns>.<name> --uri https://virtrigaud.io/xmlns/libvirt/owner/v1`
+     on each host. They stop if more than one host has one, and check that no
+     VirtualMachine with that UID exists.
+  2. Rewrites the stamp's `uid` to the restored VM's UID, keeping the namespace
+     and name (`--config`, plus `--live` if the domain is running).
+  3. If the VM has no `pendingHost`, writes `status.placement.pendingHost`,
+     `.pool` and `status.boundProvider` through the status subresource.
+
+  The next create retry on that host is an idempotent success on the VM's own
+  stamp, and it binds the VM, recording the id and resources as for any create.
+  The same re-stamp, without step 3, recovers a single-host libvirt VM, and on
+  vSphere it is done on `virtrigaud.owner.uid`. The docs also advise including
+  VirtualMachine status in restores, which keeps the lock and the count. They
+  also warn never to run `kubectl replace --force` on a VirtualMachine: its
+  delete half destroys the domain.
+- **(b3), after v0.4.0.** It automates the runbook:
+  - A `VMRestoreBinding` in the Provider's namespace names a target namespace
+    and VM names, and optionally the previous UID.
+  - The controller finds each VM's previous incarnation with a filtered
+    cross-host `ListVMs`. `ListVMsRequest` gets an additive owner filter, and
+    `VMInfo` reports the stamp's namespace and name.
+  - The controller checks threat 3, with every host answering.
+  - It calls a new `TransferOwner` RPC. That is a compare-and-swap on the
+    domain UUID and the full current stamp, allowed only when the namespace and
+    name stay the same, and idempotent when the stamp already names the new
+    owner.
+  - It then writes `pendingHost` under the Provider's assume lock, and the
+    ordinary create retry binds the VM.
+  - Slice 4 needs the same RPC anyway to stamp a domain adopted on a clustered
+    Provider (see *Consistency*).
+  - (b3) also adds the pre-schedule uniqueness check that closes the GitOps
+    residual. Before a VM is first scheduled, a filtered lookup refuses to
+    place it if a domain for its namespace and name already exists in the pool.
+
+**Implementation slices.**
+
+| Slice | Scope | Release |
+|---|---|---|
+| A6.1 | R3, plus R2's provider reason and manager pin, for clustered `Create` and `Clone`. Can ship on its own (question 2). | v0.4.0, before slice 5 |
+| A6.2 | R1: the marker, the hold, the `RestorePending` reason, the event and the metric reason. | v0.4.0 |
+| A6.3 | Docs: a backup and restore section in `docs/clustered-provider-inventory.md`, the runbook (clustered, single-host libvirt, vSphere), `docs/upgrading.md`, the release notes. | v0.4.0 |
+| A6.4 | The `TransferOwner` RPC (shared with slice 4 adoption), the `ListVMs` owner filter, the `VMRestoreBinding` CRD and controller, and the pre-schedule uniqueness check. It gets its own amendment. | after v0.4.0 |
+
+**What slice 5 must validate**, in addition to its lifecycle run. Use a pool with
+at least two hosts and, if one is available, a shared pool directory.
+
+1. Export a clustered VM, delete it with `orphan-on-delete` and re-apply the
+   manifest. Expect `RestorePending`, no `Create` RPC, and one domain in the
+   pool, still running.
+2. Repeat with the marker removed:
+   - with only the original host schedulable, the VM is pinned and held (R2);
+   - on a shared pool with another host picked, the create is refused (R3) and
+     the checksum of the original's disk is unchanged.
+3. Write the status back through the subresource. Expect the VM held, no call
+   acting on the domain, and the VM included in the committed-capacity gauge.
+4. Follow the runbook. Expect the VM to bind through the create retry,
+   `Describe` and `Power` to work, the host to count it once, and the marker to
+   name the new UID.
+5. Delete a held VM. Expect the domain untouched.
+6. With one Host unreachable, steps 1 and 2 still fail closed.
+
+**Out of scope for v0.4.0.**
+
+- The automated rebind, the `VMRestoreBinding` kind and `TransferOwner` (A6.4).
+- Re-attaching a VM restored into another namespace. Domain names derive from
+  the namespace and name, so such a VM can only ever become a new VM, or be
+  cloned.
+- Restored `VMSnapshot`, `VMClone` and `VMMigration` objects. None of them
+  duplicates a domain: an unbound source VM makes them wait. A restored
+  `VMClone` whose target was restored too fails with `TargetConflict`, because
+  the target carries the old clone's UID marker. A restored `VMClone` without
+  its target clones again. A restored `VMSnapshot` takes a new snapshot after
+  the rebind rather than re-attaching the old one.
+- A restore into a **second** Kubernetes cluster whose manager also manages the
+  hosts. Threat 3's liveness check sees only one cluster. Fence the first
+  cluster (scale its manager to zero) before recovering. A re-stamp makes the
+  first cluster's calls fail closed (`VMMissingOnHost`).
+- Proxmox and legacy bare-named libvirt domains: a separate issue (question 3).
+
+#### Consistency with the rest of this ADR
+
+- **A2 and its slice 2 amendment.** Pinning on `VM_PREVIOUS_INCARNATION`
+  narrows the exclusion rule. That rule assumed a UID mismatch meant *another*
+  VM's domain. A stamp with the same namespace and name is this VM's previous
+  incarnation, and moving on to another host is exactly how a duplicate is made.
+  Exclusion still applies to foreign and unstamped domains.
+- **A4** is unchanged. Nothing is re-created after a restore; held VMs are
+  reported, not recovered automatically.
+- **D3 (honesty-first).** The bind after a restore is the ordinary idempotent
+  create. Status is written only after the provider confirms a domain stamped
+  with this VM's UID.
+- **The providerRef CEL lock** reads the stored `status.id` or `pendingHost`. A
+  marker-held VM has neither, so its `spec.providerRef` stays editable until it
+  is re-attached. That is harmless: nothing is bound, and re-pointing leaves the
+  previous incarnation where it is. R2's pin, the runbook's `pendingHost` write
+  and a restored status all engage the lock. `status.boundProvider` is written
+  with `pendingHost` on each of these paths, as today.
+- **orphan-on-delete and force-delete** leave stamped domains behind. A later VM
+  with the same namespace and name now meets such a domain as a previous
+  incarnation: it is pinned or refused, and a second domain never shares a disk
+  on a shared pool. (The host-local residual above still applies.) The docs
+  will say: remove or re-attach the leftover domain before re-creating the name.
+  The consumer permission for `orphan-on-delete` is unchanged.
+- **Deleting a held VM never touches the domain.** An unbound VM makes no
+  provider call. A pinned VM's owner-checked `Delete` carries the new UID and
+  gets `NotFound`.
+- **Consumer grants** are re-checked on the create retry that binds, as for any
+  create. (b3) also requires `spec.providerRef` to name the Provider the gate
+  object belongs to.
+- **Status fields.** The binding create records `currentResources` from the
+  restored spec, as any create does. The honest-reconfigure rules raise the
+  recorded CPU and memory ceiling whenever `Describe` reports more. The restored
+  spec is the desired state: a VM resized after the backup is reconciled back to
+  the backup's size, and a shrink waits for power-off (A5). (b3) writes
+  `pendingResources` from `Describe`, so the footprint is the running domain's.
+- **Slice 4 adoption** must stamp the domains it adopts on a clustered Provider.
+  Otherwise every routed call for them answers `NotFound`. That stamping is
+  `TransferOwner`, from "no stamp" or from "a dead UID", and A6.4 reuses it.
+  Adoption's liveness rule (never adopt a domain whose stamp names a live VM) is
+  the same as threat 3's.
+- **D1.** The marker is a hint to hold, never state the operator trusts. The
+  binding stays in `status`, and the provider holds nothing new.
+
+#### Questions for the maintainer
+
+1. **The v0.4.0 answer.** Approve (c) as the v0.4.0 position: the hold, R1 to
+   R3 and the manual runbook, with no automated rebind (recommended)? Or pull
+   (b3) into v0.4.0?
+2. **R3 as a standalone fix.** It is a hazard that exists today: a leftover
+   domain plus a re-create of its name on a shared pool. Ship A6.1 before
+   slice 5, independently of the rest (recommended)?
+3. **The marker's scope.** Clustered only (recommended for A6), or every
+   topology now? Every topology would also stop Proxmox's restore duplicate and
+   the legacy bare-name case, with a change to the manager only. Please confirm
+   whether that counts as a single-host behaviour change for the ADR-0008 soak
+   window.
+4. **An invariant.** Adopt "at most one domain per `<namespace>.<name>` per
+   clustered Provider" as a rule (recommended)? It turns an orphan followed by a
+   re-create of the same name from "a fresh VM on another host" into "held".
+   And for (b3)'s pre-schedule check, should an unreachable host hold every
+   first create (strict), or only VMs that carry a marker (recommended)? One
+   dead host must not stop the pool, as D8 and `HOST_UNAVAILABLE` already
+   decide.
+5. **The gate for (b).** A `VMRestoreBinding` in the Provider's namespace
+   (recommended), or a Provider annotation listing namespaces (cheaper, but
+   coarser)? And should VMs in the Provider's own namespace re-attach without a
+   gate object, mirroring the `orphan-on-delete` rule?
+6. **The restore procedure.** Should the docs recommend restoring VirtualMachine
+   status (Velero `restoreStatus`) (recommended)? It keeps the lock and the
+   count from the first moment, and the owner checks keep it fail-closed.
 
 ---
 
@@ -1587,6 +1933,13 @@ honest.
   - Operator: `contracts.VMRef`; `status.placement.pendingHost`; the Host in-use
     finalizer; the `Placed` condition.
   - Provider: the `withHostConn` helper.
+- **A6, backup and restore (proposed 2026-09-28, not yet decided).** For
+  v0.4.0: A6.1, the cluster-wide disk-overwrite guard and the
+  previous-incarnation pin; A6.2, the restore marker and hold; A6.3, the
+  runbook and docs. After v0.4.0: A6.4, `TransferOwner`, shared with slice 4
+  adoption, plus `VMRestoreBinding` and the pre-schedule uniqueness check.
+  Separate issue: Proxmox creates a duplicate VM on restore, because it has no
+  owner stamp.
 - **New ADR: per-consumer quota on a shared clustered Provider.** The
   scheduler-accuracy amendment (A5) counts every consumer's VMs against a
   host's capacity, but nothing limits how much of a shared Provider one
