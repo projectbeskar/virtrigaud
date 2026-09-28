@@ -1171,13 +1171,20 @@ clustered hosts can keep it outside the world-writable `/tmp`.
 
 **Keep pool directories sticky or private.** A routed call writes files into
 the storage pool directory (a clone's disk) or next to the source disk (an s3
-export's temporary copy). If that directory is writable by other local users
-of the host and has no sticky bit (for example mode `2777`), any of them can
-replace or remove those files, which no check VirtRigaud makes can prevent.
-The provider logs a `WARN` naming the directory and host, once per host and
-directory, the first time a routed call uses it; it does not refuse, so
-existing hosts keep working. Fix it with `chmod +t <dir>`, or remove world
-write access.
+export's temporary copy). It uses the single-host write path (#358): a
+clone's disk is written with mode `0640` inside a private `mktemp -d`
+directory next to its name and renamed onto the name (`mv -f -T`, which
+replaces a symbolic link there rather than following it), a symbolic link
+already at the name is refused, and the disk is given to the qemu user with
+`chown -h` — never `chmod`'ed; a UEFI clone's varstore is created by `dd`
+with `O_NOFOLLOW`/`O_EXCL` under a `0600` umask. Still, if that directory is
+writable by a local user other than root and the provider's SSH user and has
+no sticky bit (for example mode `2777`), that user can replace or remove a
+finished file, which no check VirtRigaud makes can prevent. The provider logs
+a `WARN` naming the directory once per host connection and directory (the
+same check as single-host, `warnIfDiskDirUnsafe`); it does not refuse, so
+existing hosts keep working. Fix it with `chmod +t <dir>`, or make the
+directory writable only by root and the SSH user.
 
 `virsh snapshot-create-as` is bounded by the budget but not wrapped: killing the virsh client would not stop
 libvirtd's snapshot job, and libvirt refuses a second concurrent job on the

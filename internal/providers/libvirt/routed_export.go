@@ -116,8 +116,9 @@ func (p *Provider) exportDiskRouted(ctx context.Context, req *providerv1.ExportD
 		if req.BackendType == migration.BackendNFS {
 			r, err = exportConvertToNFS(bctx, c, req, info.Path, guard)
 		} else {
-			// The s3 export stages its flattened copy next to the source disk.
-			p.warnIfUnsafeDir(bctx, vp, c.HostID(), filepath.Dir(info.Path))
+			// The s3 export stages its flattened copy next to the source disk:
+			// warn once when others can write that directory (#358's check).
+			vp.warnIfDiskDirUnsafe(bctx, filepath.Dir(info.Path))
 			r, err = exportFlattenToS3(bctx, c, req, d.name, info.Path, guard)
 		}
 		if r != nil && r.Task != nil {

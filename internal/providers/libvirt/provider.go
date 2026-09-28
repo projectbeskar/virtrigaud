@@ -135,11 +135,6 @@ type Provider struct {
 	// depended on the domain's disk at its last start, for Describe
 	// (linked_clone_warning.go).
 	linkedDeps linkedCloneDependents
-	// unsafeDirChecked records the "<host>\x00<directory>" pairs whose mode a
-	// routed call already checked (warnIfUnsafeDir), so the WARN about a
-	// world-writable directory without the sticky bit is logged once per host
-	// and directory.
-	unsafeDirChecked sync.Map
 }
 
 // imagePolicy returns the provider's image-path confinement policy (see

@@ -30,7 +30,6 @@ import (
 	"google.golang.org/grpc/codes"
 
 	obsmetrics "github.com/projectbeskar/virtrigaud/internal/obs/metrics"
-	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt/hostconn"
 )
 
 // Time budgets and host-command guards for the long routed calls of a
@@ -350,41 +349,4 @@ func guardExitCode(err error) int {
 		return ve.ExitCode
 	}
 	return -1
-}
-
-// warnIfUnsafeDir logs a WARN, once per host and directory, when dir — a
-// storage pool or another directory a routed call writes files into — is
-// world-writable without the sticky bit: any local user of that host could
-// then replace or remove the files VirtRigaud writes there (a clone's disk, an
-// export's temporary copy), which no check VirtRigaud makes can prevent. It
-// never refuses (existing hosts keep working) and reports whether it warned.
-// A directory whose mode could not be read is checked again next time.
-func (p *Provider) warnIfUnsafeDir(ctx context.Context, h hostCommandRunner, host hostconn.HostID, dir string) bool {
-	key := string(host) + "\x00" + dir
-	if _, done := p.unsafeDirChecked.Load(key); done {
-		return false
-	}
-	res, err := runHost(ctx, h, "stat", "-L", "-c", "%a", "--", dir)
-	if err != nil || res == nil {
-		return false
-	}
-	mode, err := strconv.ParseUint(strings.TrimSpace(res.Stdout), 8, 32)
-	if err != nil {
-		return false
-	}
-	if _, loaded := p.unsafeDirChecked.LoadOrStore(key, struct{}{}); loaded || !worldWritableWithoutSticky(mode) {
-		return false
-	}
-	log.Printf("WARN Directory %s on host %s is world-writable without the sticky bit (mode %o): any local user of "+
-		"the host can replace or remove the files VirtRigaud writes there (clone disks, export copies). "+
-		"Set the sticky bit (chmod +t) or remove world write access", dir, host, mode)
-	return true
-}
-
-// worldWritableWithoutSticky reports whether a directory mode (permission and
-// special bits, as `stat -c %a` prints them) lets others write without the
-// sticky bit.
-func worldWritableWithoutSticky(mode uint64) bool {
-	const otherWrite, sticky = 0o002, 0o1000
-	return mode&otherWrite != 0 && mode&sticky == 0
 }

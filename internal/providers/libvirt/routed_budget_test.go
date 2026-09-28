@@ -207,28 +207,6 @@ func answerPoolPath(t *testing.T, fakeDir, path string) {
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
-// TestWarnIfUnsafeDir: a directory writable by others without the sticky bit
-// is warned about once per host and directory; a sticky or private one never.
-func TestWarnIfUnsafeDir(t *testing.T) {
-	for mode, want := range map[string]bool{"2777": true, "777": true, "1777": false, "3777": false, "755": false, "0711": false} {
-		t.Run(mode, func(t *testing.T) {
-			h := &statRunner{out: mode + "\n"}
-			p := &Provider{}
-			assert.Equal(t, want, p.warnIfUnsafeDir(context.Background(), h, "host-a", "/pool"))
-			assert.False(t, p.warnIfUnsafeDir(context.Background(), h, "host-a", "/pool"), "once per host and directory")
-			assert.Equal(t, 1, h.calls, "the mode is read once")
-			assert.Equal(t, want, p.warnIfUnsafeDir(context.Background(), h, "host-b", "/pool"), "another host is checked")
-		})
-	}
-	t.Run("unreadable mode is checked again", func(t *testing.T) {
-		h := &statRunner{out: "stat: cannot statx\n"}
-		p := &Provider{}
-		assert.False(t, p.warnIfUnsafeDir(context.Background(), h, "host-a", "/pool"))
-		assert.False(t, p.warnIfUnsafeDir(context.Background(), h, "host-a", "/pool"))
-		assert.Equal(t, 2, h.calls)
-	})
-}
-
 // statRunner answers every host command with out and counts the calls.
 type statRunner struct {
 	out   string
