@@ -1635,7 +1635,7 @@ as for the host-local check), or as another file or shared directory.
 | Create / Clone: a domain on any host stamped with the VM's namespace and name (any UID) | `AlreadyExists` + `VM_PREVIOUS_INCARNATION`; nothing written | Holds the VM on its pending host (`RestorePending`), see [Previous incarnations](#previous-incarnations-and-the-a6-runbook) |
 | Create / Clone: another domain uses the file | `AlreadyExists`; nothing written | The slice 2 name-conflict rule: the host is excluded and the VM re-scheduled |
 | Delete: a domain on another host uses one of the files | `FailedPrecondition` + `VM_DISK_IN_USE` + `VM_OPERATION_FAILED`; nothing changed | Keeps the finalizer (`Ready=False/DeleteBlocked`), re-checks |
-| A host could not be reached (not leased, dropped, past its deadline, tombstoned) | `Unavailable` + `HOST_UNAVAILABLE`; nothing changed | Create: `Placed=False/HostUnavailable`, retried on the same pending host every 30 s. Delete: finalizer kept, `DeleteBlocked=True/HostUnreachable`, retried with a backoff (15 s doubling to 5 min) |
+| A host could not be reached (not leased, dropped, past its deadline, tombstoned) | `Unavailable` + `HOST_UNAVAILABLE`; nothing changed | Create: `Placed=False/HostUnavailable`, retried on the same pending host with the backoff (15 s doubling to 5 min, from when the hold began). Delete: finalizer kept, `DeleteBlocked=True/HostUnreachable`, retried with a backoff (15 s doubling to 5 min) |
 | A host answered but could not be scanned (a definition or disk chain unreadable, more than 2000 domains), or the provider was too busy to scan | `Unavailable` + `VM_DISK_CHECK_FAILED` + `VM_OPERATION_FAILED`; nothing changed | Create: `Placed=False/CreatePending`, retried with the backoff. Delete: `DeleteBlocked=True/DiskCheckFailed`, retried with the backoff |
 | Nothing uses the file | The existing file is a leftover of an earlier failed attempt and is replaced (create); the delete proceeds | — |
 
@@ -1689,7 +1689,12 @@ create's disk write — and its answer still fit. It stops as soon as the
 outcome is decided — a delete at its first use or failure, a create or clone
 at its first previous incarnation — and cancels the hosts still running. A
 host whose dial failed, whose connection dropped or that timed out less than
-30 seconds ago is failed at once without being dialed again. At most 2 scans
+30 seconds ago is failed at once without being dialed again. A scan that any
+failure decides — a delete's, and the base-image check — fails closed
+**before** it starts when such a host, or a tombstoned one, is among the
+hosts: no other host is read for an answer already known. A create's disk
+scan still runs (a previous incarnation elsewhere is the more specific
+answer) and checks those hosts first. At most 2 scans
 run at once per provider process; one that gets no slot within its budget
 fails closed as busy (`VM_DISK_CHECK_FAILED`, retried). A host with more than
 2000 domains fails the scan closed instead of being read partially. The

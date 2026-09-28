@@ -252,12 +252,15 @@ func (r *VirtualMachineReconciler) handleClusteredCreateError(
 			"host", host, "error", err.Error())
 		setPlacedCondition(vm, metav1.ConditionFalse, k8s.ReasonHostUnavailable, fmt.Sprintf(
 			"the create on pending host %s could not reach a host (the pending host, or another host of the Provider the "+
-				"create must check); it is retried on the same host and never re-scheduled "+
-				"(an administrator may clear status.placement.pendingHost to release it): %s", host, msg))
+				"create must check); it is retried on the same host with a backoff of up to %s and never re-scheduled "+
+				"(an administrator may clear status.placement.pendingHost to release it): %s", host, blockedRetryMax, msg))
 		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError,
 			fmt.Sprintf("Failed to create VM: %s", msg))
 		r.updateStatus(ctx, vm)
-		return ctrl.Result{RequeueAfter: pendingHostUnavailableRetryInterval}, nil
+		// Backed off like the other holds (A6.1 fix verification, N2): each
+		// retry may scan every host of the Provider, and a host that is down
+		// stays down for longer than a fixed short cadence.
+		return ctrl.Result{RequeueAfter: blockedRetryBackoff(createHoldSince(vm))}, nil
 	}
 
 	// The cluster-wide disk guard could not check every host (a host answered
@@ -274,7 +277,7 @@ func (r *VirtualMachineReconciler) handleClusteredCreateError(
 		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError,
 			fmt.Sprintf("Failed to create VM: %s", msg))
 		r.updateStatus(ctx, vm)
-		return ctrl.Result{RequeueAfter: blockedRetryBackoff(conditionSince(vm.Status.Conditions, k8s.ConditionPlaced))}, nil
+		return ctrl.Result{RequeueAfter: blockedRetryBackoff(createHoldSince(vm))}, nil
 	}
 
 	setPlacedCondition(vm, metav1.ConditionFalse, k8s.ReasonCreatePending,
@@ -292,6 +295,7 @@ func (r *VirtualMachineReconciler) handleClusteredCreateError(
 
 // Retry pacing of a clustered VM held because the provider cannot act on it
 // safely yet (ADR-0007 A6.1): a delete answered HOST_UNAVAILABLE or
+// VM_DISK_CHECK_FAILED, a create answered HOST_UNAVAILABLE or
 // VM_DISK_CHECK_FAILED, and a create held as RestorePending. Each is retried
 // with an exponential backoff per VM, from blockedRetryMin up to
 // blockedRetryMax (blockedRetryBackoff), so a dead host or a held VM does not
@@ -312,6 +316,19 @@ func blockedRetryBackoff(since time.Time) time.Duration {
 		return blockedRetryMin
 	}
 	return min(max(time.Since(since), blockedRetryMin), blockedRetryMax)
+}
+
+// createHoldSince is when the hold of vm's create on its pending host began,
+// for blockedRetryBackoff: the later of when its Placed condition went False
+// and when its pending host was recorded (status.placement.lastScheduledTime).
+// A VM that waited unplaced (Unschedulable) before it was scheduled starts
+// its backoff afresh on the host it was given, instead of at the maximum.
+func createHoldSince(vm *infravirtrigaudiov1beta1.VirtualMachine) time.Time {
+	since := conditionSince(vm.Status.Conditions, k8s.ConditionPlaced)
+	if pl := vm.Status.Placement; pl != nil && pl.LastScheduledTime != nil && pl.LastScheduledTime.After(since) {
+		since = pl.LastScheduledTime.Time
+	}
+	return since
 }
 
 // conditionSince returns when condition condType last changed status, or zero.
@@ -384,7 +401,7 @@ var ownDomainDeleteMessage = fmt.Sprintf("Delete blocked: this VirtualMachine's 
 // committed capacity and the providerRef lock), gets Placed=False and
 // Provisioning=False with RestorePending plus one Warning event, and the
 // Create is retried on the same host with the blocked-VM backoff
-// (blockedRetryBackoff, from when the Placed condition went False: 15 s
+// (blockedRetryBackoff, from when the hold began — createHoldSince: 15 s
 // doubling to 5 min) until an administrator re-attaches or removes the
 // previous incarnation. Nothing
 // about the placement is written, so the plain (error-tolerant) status update
@@ -420,7 +437,7 @@ func (r *VirtualMachineReconciler) holdForPreviousIncarnation(
 		r.recordEvent(vm, corev1.EventTypeWarning, k8s.ReasonRestorePending, msg)
 	}
 	r.updateStatus(ctx, vm)
-	return ctrl.Result{RequeueAfter: blockedRetryBackoff(conditionSince(vm.Status.Conditions, k8s.ConditionPlaced))}, nil
+	return ctrl.Result{RequeueAfter: blockedRetryBackoff(createHoldSince(vm))}, nil
 }
 
 // deleteBlockedEscape is the part of every DeleteBlocked message that says how

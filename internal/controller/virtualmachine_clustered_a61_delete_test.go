@@ -195,3 +195,48 @@ func TestBlockedRetryBackoff(t *testing.T) {
 	assert.True(t, got >= time.Minute && got < time.Minute+time.Second, "got %s", got)
 	assert.Equal(t, blockedRetryMax, blockedRetryBackoff(time.Now().Add(-24*time.Hour)))
 }
+
+// TestCreateHoldSince: a create's hold starts at the later of when its Placed
+// condition went False and when its pending host was recorded, so a VM that
+// waited Unschedulable for an hour starts its backoff afresh on its host.
+func TestCreateHoldSince(t *testing.T) {
+	longAgo, recently := metav1.NewTime(time.Now().Add(-time.Hour)), metav1.NewTime(time.Now().Add(-time.Minute))
+	vm := clusterVM("web", clusteredNS, "prov-cluster")
+	assert.True(t, createHoldSince(vm).IsZero(), "no record: the first retry")
+
+	vm.Status.Conditions = []metav1.Condition{{Type: k8s.ConditionPlaced, Status: metav1.ConditionFalse,
+		Reason: k8s.ReasonCreatePending, LastTransitionTime: longAgo}}
+	assert.Equal(t, longAgo.Time, createHoldSince(vm))
+
+	vm.Status.Placement = &infrav1beta1.PlacementStatus{PendingHost: "host-alpha", LastScheduledTime: &recently}
+	assert.Equal(t, recently.Time, createHoldSince(vm), "scheduled after it went unplaced: the pending host's record")
+
+	vm.Status.Placement.LastScheduledTime = &longAgo
+	vm.Status.Conditions[0].LastTransitionTime = recently
+	assert.Equal(t, recently.Time, createHoldSince(vm))
+}
+
+// TestCreateVM_Clustered_UnreachablePendingHostBacksOff (A6.1 fix
+// verification, N2): a clustered create answered HOST_UNAVAILABLE is retried
+// with the blocked-VM backoff from when its hold began — not every 30 s — as
+// each retry may scan every host of the Provider.
+func TestCreateVM_Clustered_UnreachablePendingHostBacksOff(t *testing.T) {
+	longAgo := metav1.NewTime(time.Now().Add(-time.Hour))
+	vm := clusterVM("vm-unreach", clusteredNS, "prov-cluster")
+	vm.Status.Placement = &infrav1beta1.PlacementStatus{PendingHost: "host-alpha", Pool: "pool-a", LastScheduledTime: &longAgo}
+	vm.Status.Conditions = []metav1.Condition{{Type: k8s.ConditionPlaced, Status: metav1.ConditionFalse,
+		Reason: k8s.ReasonHostUnavailable, LastTransitionTime: longAgo}}
+	prov := &routingProvider{onCreate: func(contracts.CreateRequest) (contracts.CreateResponse, error) {
+		return contracts.CreateResponse{}, contracts.NewHostUnavailableError("create: a host of this Provider could not be reached", nil)
+	}}
+	r := clusteredFixture(t, prov, vm)
+
+	res := createClustered(t, r, prov, "vm-unreach")
+	assert.Equal(t, ctrlResult{after: blockedRetryMax.String()}, res, "an hour into the hold: the longest backoff")
+	require.Len(t, prov.createReqs, 1)
+	assert.Equal(t, "host-alpha", prov.createReqs[0].TargetHostID)
+	placed := placedCondition(getVM(t, r, "vm-unreach"))
+	require.NotNil(t, placed)
+	assert.Equal(t, k8s.ReasonHostUnavailable, placed.Reason)
+	assert.Contains(t, placed.Message, "with a backoff of up to "+blockedRetryMax.String())
+}

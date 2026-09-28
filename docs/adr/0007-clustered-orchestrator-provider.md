@@ -1741,7 +1741,15 @@ runbook or remove it. There is no opt-in in v0.4.0. A6.2 must also set the
 >   `Unavailable` + `VM_DISK_CHECK_FAILED` + `VM_OPERATION_FAILED`. Neither names
 >   the host, neither counts toward the breaker, and nothing is written or
 >   removed. A use or an incarnation found on a reachable host is definitive
->   even when another host failed.
+>   even when another host failed. A scan that any failure decides (Delete,
+>   the base-image check) fails closed before it starts — no scan slot, no
+>   dial, no other host read — when a tombstoned host, or one found
+>   unreachable less than 30 s ago, is among its hosts *(fix verification,
+>   N2)*; a Create's disk scan still runs (an incarnation is the more
+>   specific answer), those hosts first. The manager backs off every clustered
+>   create answered `HOST_UNAVAILABLE` or `VM_DISK_CHECK_FAILED` like the
+>   other holds (15 s doubling to 5 min, from the later of `Placed` going
+>   False and the pending host's `lastScheduledTime`).
 > - **R2 through the fan-out.** While it scans, R3 counts every domain whose
 >   owner stamp names the request's namespace and name — on any host, whether or
 >   not it uses the file, and **whatever its UID**: a domain stamped with the

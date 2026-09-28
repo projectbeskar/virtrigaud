@@ -298,7 +298,7 @@ func TestCreateVM_Clustered_UnreachablePendingHost(t *testing.T) {
 		live := getVM(t, r, "vm-unreach")
 		res, err := r.createVM(ctx, live, prov, clusteredProviderCR("prov-cluster", clusteredNS), smallVMClass(clusteredNS), minimalVMImage(clusteredNS), nil)
 		require.NoError(t, err)
-		assert.Equal(t, pendingHostUnavailableRetryInterval, res.RequeueAfter)
+		assert.Equal(t, blockedRetryMin, res.RequeueAfter, "attempt %d: the first retries of the backoff", i)
 	}
 	require.Len(t, prov.createReqs, 2)
 	for _, req := range prov.createReqs {
@@ -582,7 +582,7 @@ func TestHandleDeletion_SingleHost_DeleteCarriesNoHost(t *testing.T) {
 
 // guard against an accidental tight loop constant regression.
 func TestClusteredRequeueCadencesAreNotTight(t *testing.T) {
-	for _, d := range []time.Duration{placementUnboundRetryInterval, pendingHostUnavailableRetryInterval,
+	for _, d := range []time.Duration{placementUnboundRetryInterval,
 		vmMissingOnHostRetryInterval, boundHostUnavailableRetryInterval, vmCreateConflictRetryInterval,
 		routedOpNotSupportedRetryInterval} {
 		assert.GreaterOrEqual(t, d, 30*time.Second)

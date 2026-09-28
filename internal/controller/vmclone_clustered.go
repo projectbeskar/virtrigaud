@@ -503,7 +503,7 @@ func (r *VMCloneReconciler) holdCloneForPreviousIncarnation(
 		r.Recorder.Event(clone, "Warning", k8s.ReasonRestorePending, msg)
 	}
 	return r.waitForCloneHost(ctx, clone, k8s.ReasonRestorePending, msg,
-		blockedRetryBackoff(conditionSince(target.Status.Conditions, k8s.ConditionPlaced))), nil
+		blockedRetryBackoff(createHoldSince(target))), nil
 }
 
 const (

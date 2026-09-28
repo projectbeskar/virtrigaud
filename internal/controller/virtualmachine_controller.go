@@ -138,9 +138,6 @@ const (
 	// id but no confirmed host binding (Placed=False/Unbound). No per-VM call is
 	// sent while it waits.
 	placementUnboundRetryInterval = 30 * time.Second
-	// pendingHostUnavailableRetryInterval re-tries a Create whose pending host is
-	// unreachable (Placed=False/HostUnavailable). The VM is never re-scheduled.
-	pendingHostUnavailableRetryInterval = 30 * time.Second
 	// vmMissingOnHostRetryInterval re-describes a clustered VM whose bound host
 	// reports it missing (A4). It is never re-created; the re-check only notices
 	// an administrator restoring the domain.

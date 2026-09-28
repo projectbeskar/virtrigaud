@@ -788,6 +788,80 @@ func TestClusterScan_KnownUnreachableHostIsNotDialedAgain(t *testing.T) {
 	s.requireUntouched("host-b", "team-a.web")
 }
 
+// TestClusterScan_KnownBadHostFailsFastWithoutASlot (A6.1 fix verification,
+// N2): a scan that any failure decides — a Delete, the base-image check —
+// fails closed at once when a host is already known to fail (tombstoned, or
+// unreachable moments ago): it takes no scan slot (all are held here, so a
+// scan that waited for one would answer busy instead) and reads no host. A
+// Create's disk scan is not decided by a failure — a previous incarnation
+// elsewhere is the more specific answer — so it still scans, known-bad hosts
+// first.
+func TestClusterScan_KnownBadHostFailsFastWithoutASlot(t *testing.T) {
+	knownBad := map[string]func(t *testing.T) *sharedPool{
+		"tombstoned": func(t *testing.T) *sharedPool {
+			s := newSharedPool(t)
+			inv := twoHostInventory()
+			inv.UnroutableHostIDs = []string{"host-t"}
+			require.NoError(t, s.p.clusterReg.Reconcile(inv))
+			return s
+		},
+		"recently unreachable": func(t *testing.T) *sharedPool {
+			s := newSharedPoolWithDeadHost(t)
+			s.p.clusterReg.MarkUnreachable("host-c")
+			return s
+		},
+	}
+	for name, setup := range knownBad {
+		t.Run(name+"/delete", func(t *testing.T) {
+			s := setup(t)
+			disk := s.disk("team-a.web-disk.qcow2", "live-disk")
+			s.defineOn("host-b", "team-a.web", uuidVMOnB, guardDomainXML("team-a.web", uuidVMOnB, disk, ownerTeamA, false))
+			require.NoError(t, s.p.guardSemaphore().Acquire(context.Background(), clusterGuardConcurrency))
+			defer s.p.guardSemaphore().Release(clusterGuardConcurrency)
+
+			// A short deadline: a scan that waited for a slot would answer
+			// busy at once rather than hang.
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			_, err := s.p.Delete(ctx, contracts.VMRef{ID: "team-a.web", HostID: "host-b", Owner: ownerTeamA})
+			var ie *clusterGuardIncompleteError
+			require.ErrorAs(t, err, &ie)
+			assert.True(t, ie.unreachable, "HOST_UNAVAILABLE, not busy: no scan slot was waited for")
+			assert.False(t, ie.busy)
+			assert.Empty(t, s.virshCalls("host-a"), "no other host was read for an answer already known")
+			assert.Zero(t, s.dials("host-c"), "nothing was dialed")
+			s.requireUntouched("host-b", "team-a.web")
+		})
+		t.Run(name+"/base image", func(t *testing.T) {
+			s := setup(t)
+			require.NoError(t, s.p.guardSemaphore().Acquire(context.Background(), clusterGuardConcurrency))
+			defer s.p.guardSemaphore().Release(clusterGuardConcurrency)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			req := s.createReq(ownerTeamA, s.file(s.images, "ubuntu.qcow2"))
+			req.TargetHostID = "host-b"
+			_, err := s.p.Create(ctx, req)
+			var ie *clusterGuardIncompleteError
+			require.ErrorAs(t, err, &ie)
+			assert.True(t, ie.unreachable)
+			assert.False(t, ie.busy)
+			assert.Empty(t, s.virshCalls("host-a"), "no other host was read")
+			assert.Zero(t, s.dials("host-c"))
+		})
+		t.Run(name+"/create still finds a previous incarnation", func(t *testing.T) {
+			s := setup(t)
+			disk := s.disk("team-a.web-disk.qcow2", "original-disk")
+			s.defineOn("host-a", "team-a.web", uuidPrevious, guardDomainXML("team-a.web", uuidPrevious, disk, staleTeamAWeb, true))
+
+			_, err := s.createOnB()
+			var pi *previousIncarnationError
+			require.ErrorAs(t, err, &pi, "a Create's disk scan is not decided by a failure: %v", err)
+			s.requireNothingWrittenOnB(disk, "original-disk")
+		})
+	}
+}
+
 // TestClusterScan_BusyProviderFailsClosed: while the provider's scan slots are
 // all taken, a scan that gets none within its budget fails closed as busy
 // (VM_DISK_CHECK_FAILED: retried, never counted by the breaker) and nothing is

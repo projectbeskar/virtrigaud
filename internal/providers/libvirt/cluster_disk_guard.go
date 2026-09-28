@@ -262,7 +262,7 @@ func (g *clusterDiskGuard) refuseIfUsed(ctx context.Context, h hostCommandRunner
 	}
 	res, err := g.p.scanClusterDiskUse(ctx, clusterScan{files: files, owner: g.owner, target: g.host, conn: h,
 		// A previous incarnation holds the VM whatever the other hosts say.
-		stopWhen: func(r hostDiskScan, _ error) bool { return r.incarnations > 0 || r.ownElsewhere > 0 },
+		stopWhen: func(r hostDiskScan) bool { return r.incarnations > 0 || r.ownElsewhere > 0 },
 	})
 	targetUsed := false
 	for i, used := range res.used {
@@ -303,8 +303,10 @@ func (g *clusterDiskGuard) imageUsedElsewhere(ctx context.Context, _ hostCommand
 	if canonical != raw {
 		files = append(files, canonical)
 	}
+	// The first use, or the first host that cannot be checked, decides.
 	res, err := g.p.scanClusterDiskUse(ctx, clusterScan{files: files, target: g.host, skipTarget: true,
-		stopWhen: func(r hostDiskScan, _ error) bool { return r.users > 0 },
+		stopWhen:    func(r hostDiskScan) bool { return r.users > 0 },
+		stopOnError: true,
 	})
 	if res.users > 0 {
 		return true, nil
@@ -418,12 +420,19 @@ type clusterScan struct {
 	target     hostconn.HostID
 	conn       hostCommandRunner
 	skipTarget bool
-	// stopWhen, when set, is asked after each host: true means that host's
-	// answer (its scan, or its failure) already decides the operation, so the
-	// hosts still running are cancelled and the rest are not started (a
-	// Delete: the first use or failure; a Create or Clone: the first previous
+	// stopWhen, when set, is asked after each host that answered: true means
+	// that host's scan already decides the operation, so the hosts still
+	// running are cancelled and the rest are not started (a Delete or an
+	// image check: the first use; a Create or Clone: the first previous
 	// incarnation).
-	stopWhen func(r hostDiskScan, err error) bool
+	stopWhen func(r hostDiskScan) bool
+	// stopOnError means that any host that cannot be checked decides the
+	// operation (it fails closed whatever the other hosts say: a Delete, an
+	// image check). The scan then stops at the first such host, and when a
+	// host is ALREADY known to fail — tombstoned, or found unreachable less
+	// than clusterGuardUnreachableMemo ago — it fails at once, before taking
+	// a scan slot or dialing anything.
+	stopOnError bool
 }
 
 // clusterScanResult sums what the scanned hosts reported.
@@ -485,6 +494,36 @@ func (p *Provider) scanClusterDiskUse(ctx context.Context, s clusterScan) (clust
 	if len(hosts) == 0 {
 		return clusterScanResult{}, nil
 	}
+	// Hosts already known to fail: tombstoned, or found unreachable moments
+	// ago (the landing host, scanned over the call's own connection, never
+	// is). A scan that any failure decides (stopOnError) fails at once on
+	// one — no scan slot taken, nothing dialed, no other host read for an
+	// answer already known. Any other scan checks them first, so their
+	// failures are known before the slow hosts are read.
+	knownBad := map[hostconn.HostID]bool{}
+	for _, id := range hosts {
+		if id == s.target && s.conn != nil {
+			continue
+		}
+		if unroutable[id] || slices.Contains(snap.RecentlyUnreachable, id) {
+			knownBad[id] = true
+		}
+	}
+	if s.stopOnError && len(knownBad) > 0 {
+		log.Printf("WARN cluster disk guard: %d host(s) of the Provider are known to be unreachable (tombstoned, or "+
+			"unreachable less than %s ago); failing closed without scanning", len(knownBad), clusterGuardUnreachableMemo)
+		return clusterScanResult{}, &clusterGuardIncompleteError{unreachable: true}
+	}
+	slices.SortStableFunc(hosts, func(a, b hostconn.HostID) int {
+		switch {
+		case knownBad[a] == knownBad[b]:
+			return 0
+		case knownBad[a]:
+			return -1
+		default:
+			return 1
+		}
+	})
 	budget, cancel := budgetWithMargin(ctx, clusterDiskGuardMargin)
 	defer cancel()
 
@@ -520,7 +559,7 @@ func (p *Provider) scanClusterDiskUse(ctx context.Context, s clusterScan) (clust
 			return err
 		}
 		scans[i], errs[i], counted[i] = r, err, true
-		if s.stopWhen != nil && s.stopWhen(r, err) {
+		if (err != nil && s.stopOnError) || (err == nil && s.stopWhen != nil && s.stopWhen(r)) {
 			decided = true
 			cancel()
 		}
@@ -729,7 +768,8 @@ func (p *Provider) checkDeletionAcrossHosts(ctx context.Context, host hostconn.H
 	if len(files) > 0 {
 		// The first use, or the first host that cannot be checked, refuses
 		// the delete whatever the other hosts say.
-		s.stopWhen = func(r hostDiskScan, err error) bool { return err != nil || r.users > 0 }
+		s.stopWhen = func(r hostDiskScan) bool { return r.users > 0 }
+		s.stopOnError = true
 	}
 	res, err := p.scanClusterDiskUse(ctx, s)
 	switch {
