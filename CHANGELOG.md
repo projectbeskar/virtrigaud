@@ -5,6 +5,43 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-28 12:22] - ADR-0007 Addendum A slice 4: clustered ListVMs across all hosts; adoption keyed on (host_id, id)
+**Author:** @wrkode (William Rizzo)
+
+> **Operator note.** Only `Provider.spec.topology: cluster` (experimental) changes. A clustered libvirt provider now lists VMs on every host and can be adopted from: **`virtrigaud.io/adopt-vms: "true"` on a clustered Provider — refused until now — adopts every domain on its hosts that no VirtualMachine manages** (unstamped, or stamped only by a deleted VirtualMachine) and rewrites its owner stamp. Remove the annotation before upgrading if its hosts carry domains you do not want managed: deleting an adopted VM deletes its domain and disks. Roll the manager and the clustered libvirt provider together; an older clustered provider does not report `supportsRoutedAdoption` and nothing is adopted from it. Single-host `ListVMs` and adoption are unchanged: `testdata/single_host_listvms.golden.json` (captured on unmodified origin/main 21dd588, in its own commit) is reproduced byte for byte, so the ADR-0008 D5 soak window is not affected.
+
+### Added
+- `proto/provider/v1/provider.proto`: additive `VMInfo.host_id` (10), `ListVMsResponse.unreachable_host_ids` (2), `GetCapabilitiesResponse.supports_routed_adoption` (21), and the `TransferOwner` RPC (`TransferOwnerRequest{id=1, target_host_id=2, owner=3, replaceable_owner_uids=4, expected_uuid=5}`, empty `TransferOwnerResponse`): a compare-and-swap owner re-stamp of one VM on a clustered provider's host. vSphere, Proxmox, mock and single-host libvirt return `Unimplemented`.
+- `internal/providers/libvirt/routed_list.go`: the clustered `ListVMs` — every routable host, at most 8 at a time (bounded errgroup), each on its own lease with a 30 s deadline, inside the caller's deadline less 5 s; every `VMInfo` tagged with its host; every host whose VMs could not be listed (unknown or draining, unreachable, past its deadline, a failed `virsh list`, a connection that dropped mid-list) in `unreachable_host_ids`, never dropped and never failing the call, so it never reaches the Provider's circuit breaker. The per-host ADR-0008 list shadow runs on the same lease.
+- `internal/providers/libvirt/routed_transfer_owner.go`: clustered `TransferOwner` — routed to `target_host_id`; the domain must still carry `expected_uuid`, and every owner stamp on it (both definitions of a running domain) must be the new owner's (idempotent success) or listed replaceable; anything else is `AlreadyExists` and untouched, a replaced or missing domain `NotFound`. The stamp (uid, namespace, name) is written with `virsh metadata --config [--live]` to the domain addressed by UUID and read back; transfers are serialized per provider process.
+- `internal/controller/vmadoption_clustered.go`: adoption from a clustered Provider that reports `supportsRoutedAdoption`, keyed on (host id, VM id): the adopting VirtualMachine is named `<domain>-<10 hex of sha256(host/id)>` and annotated `virtrigaud.io/adopted-host`/`-id`; the domain's owner is transferred to it; a routed owner-checked `Describe` must find it; one checked status write binds it (`status.id`, `boundProvider`, `placement.host`/`.pool`, `currentResources` raised to the online vCPUs, `placement.memoryCeilingMiB` from `max_memory_mib`) so committed capacity counts it at once. A lost binding write is completed from the stamp on the next discovery. `completeClusteredAdoption` is the reusable building block for A6.
+- `internal/providers/contracts`: `VMInfo.HostID`, `VMList{VMs, UnreachableHostIDs}`, `TransferOwnerRequest`, the optional `OwnerTransferrer` interface, `Capabilities.SupportsRoutedAdoption`, `VMInfoUUIDKey`.
+- `sdk/provider/client`: `ListVMsResponse` (keeps `unreachable_host_ids`) and `TransferOwner`; `sdk/provider/capabilities`: `CapabilityRoutedAdoption`.
+- Tests: `listvms_singlehost_test.go` + golden (9 single-host scenarios through the gRPC Server); `routed_list_test.go` (3 hosts with 1 unreachable, same name on two hosts, failing and hung hosts, per-host deadline, concurrency bound, caller-deadline budget, caller gone, breaker untouched over a real gRPC hop, per-host shadow on the same lease, capabilities); `routed_transfer_owner_test.go` (unstamped and stale domains stamped — then routed `Describe` and `Power` pass the owner check —, live, two, unreadable and persistent-only stamps refused, replaced domain, idempotent retry, a stamp that did not take, routed error classes); `vmadoption_clustered_test.go` (adopts by (host, id) and records the binding and size, never takes a live VM's domain, unreachable host is unknown not empty, lost binding completed, a stamp for another key not taken, consumer grant, failed transfer does not bind, foreign host, capability gate); transport and SDK mapping tests.
+
+### Changed
+- `internal/providers/contracts/provider.go`: `Provider.ListVMs` returns `VMList` (the compiler finds every consumer; the adoption controller is the only one).
+- `internal/providers/libvirt/provider_virsh.go`, `server.go`: `ListVMs` dispatches on topology; the listing core (`listVMsOn`) is shared, unchanged for single-host. The clustered provider advertises `supports_routed_adoption`.
+- `internal/providers/libvirt/shadow.go`: the list shadow compares on (host id, VM id) (`listJoinKey`) and runs on the virsh list's own connection; for single-host (no host id, nil connection) the join and connection are as before.
+- `internal/transport/grpc/client.go`: maps `host_id`, `unreachable_host_ids`, `supports_routed_adoption` and `TransferOwner`.
+- `internal/controller/vmadoption_controller.go`: the clustered refusal is replaced by the clustered adoption flow; `RemoteResolver` is the `ProviderResolver` interface; the adopted VM object is built by one helper shared with single-host (unchanged spec); RBAC marker `hosts: get;list;watch` (already granted to the manager).
+- Docs: `docs/clustered-provider-inventory.md` (listing and adoption), ADR-0007 (status, A5 status line, slice 4 amendment, A6 note), `docs/upgrading.md`, `docs/release-notes/next.md`, `docs/libvirt-domain-ownership.md`, `docs/vm-provider-binding.md`, `docs/cross-namespace-references.md`, `docs/libvirt-shadow-reads.md`, `examples/vm-adoption-example.yaml`.
+
+### Security
+- Adoption never takes over a domain stamped with the UID of a VirtualMachine that still exists (any namespace, any Provider object); `TransferOwner` enforces the same on the host as a compare-and-swap on the domain UUID and every stamp, and the manager lists only stamps of VirtualMachines that no longer exist as replaceable.
+- A clustered VM is identified by (host id, VM id), never by name alone (ADR-0007 D1): no VirtualMachine is bound to a same-named domain on another host.
+- The consumer grant is checked before a domain is handed to an existing adopted VirtualMachine; a host id that is not a `Host` of the Provider, or one being deleted, is never adopted from.
+- Tenant- and admin-facing messages name hosts by `Host` name only, never an SSH endpoint or path; `TransferOwner` refusals never name the other owner.
+
+### Why
+Slices 1–3 routed every per-VM call to the VM's host under an owner check, but a clustered provider could not list its VMs and adoption was refused, because an adopted VM needs its host binding and — with every routed call owner-checked — its domain's owner stamp. Slice 4 implements A3 (a host that cannot be listed is unknown, not empty) and adoption keyed on (host id, VM id).
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (manager and clustered libvirt provider; no CRD change; single-host providers are unaffected)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-09-28 12:05] - ADR-0007 A6: backup and restore of clustered VMs (Accepted)
 **Author:** @wrkode (William Rizzo)
 
@@ -32,6 +69,7 @@ Restoring a clustered VM from a backup created a second domain instead of recove
 - [ ] Requires cluster rollout
 - [ ] Config change only
 - [x] Documentation only
+
 
 ## [2026-09-28 09:27] - ADR-0007 Addendum A slice 3: clustered libvirt routes snapshots, Clone, GetDiskInfo, ExportDisk and task references to the VM's host
 **Author:** @wrkode (William Rizzo)
