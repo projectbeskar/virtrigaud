@@ -287,3 +287,22 @@ func TestOwnerTransferDecision(t *testing.T) {
 		})
 	}
 }
+
+// TestClustered_TransferOwner_ActiveDomainPersistentStampIsCheckedToo: a
+// running domain whose persistent definition carries another VirtualMachine's
+// stamp (its live definition none) is refused: both definitions are stamped,
+// so both must pass the compare-and-swap.
+func TestClustered_TransferOwner_ActiveDomainPersistentStampIsCheckedToo(t *testing.T) {
+	dom := listDomain{name: "web", uuid: uuidWebA, state: "running"}
+	fx := newListFixture(t, map[string][]listDomain{"host-a": {dom}})
+	persisted := dom
+	persisted.owner = ownerTeamA
+	fx.write("host-a", "dom-"+uuidWebA+".xml", listDomainDoc(persisted)) // what `dumpxml --inactive <uuid>` reads
+	fx.scriptStamp("host-a", dom, adopter)
+	p := clusterOf(t, []string{"host-a"})
+
+	_, err := NewServer(p).TransferOwner(context.Background(), transferReq())
+	require.Error(t, err)
+	assert.Equal(t, codes.AlreadyExists, status.Code(err))
+	assert.Empty(t, metadataCalls(fx))
+}

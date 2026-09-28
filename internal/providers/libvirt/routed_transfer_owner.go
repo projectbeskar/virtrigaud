@@ -42,7 +42,9 @@ import (
 // It is a compare-and-swap and fails closed:
 //
 //   - the domain must still be the one the manager saw: the same name and the
-//     same UUID (expected_uuid), read in one document with its stamp;
+//     same UUID (expected_uuid), read in one document with its stamp (and, for
+//     an active domain, its persistent definition's stamp, which must pass the
+//     same check);
 //   - the domain is stamped only when every stamp it carries is the new
 //     owner's (an idempotent retry, which succeeds) or one the manager
 //     verified belongs to no existing VirtualMachine (replaceable_owner_uids);
@@ -149,19 +151,30 @@ func transferOwnerOn(ctx context.Context, vp *VirshProvider, host hostconn.HostI
 
 	recorded, oerr := domainOwners(res.Stdout)
 	already, derr := ownerTransferDecision(owner, recorded, oerr, req.ReplaceableOwnerUIDs)
+	active := state != domainStateShutOff
+	if derr == nil && active {
+		// A running domain has two definitions, and the stamp is written to
+		// both: the persistent one must pass the same check, so a stamp that
+		// differs there is never overwritten either.
+		inactive, ierr := vp.runVirshCommand(ctx, "dumpxml", "--inactive", uuid)
+		if ierr != nil {
+			return contracts.NewRetryableError(fmt.Sprintf("read the persistent definition of domain %q", id), ierr)
+		}
+		persisted, perr := domainOwners(inactive.Stdout)
+		var persistedAlready bool
+		persistedAlready, derr = ownerTransferDecision(owner, persisted, perr, req.ReplaceableOwnerUIDs)
+		already = already && persistedAlready
+		recorded = append(recorded, persisted...)
+	}
 	if derr != nil {
 		log.Printf("WARN Refusing to transfer the owner of domain %s on host %s to %s/%s (uid %s): %v (recorded %v)",
 			id, host, owner.Namespace, owner.Name, owner.UID, derr, recorded)
 		return contracts.NewConflictError(fmt.Sprintf(transferRefusedMessage, id, host), nil)
 	}
-	active := state != domainStateShutOff
 	if already {
-		// An idempotent retry: the stamp is there. It is still verified (in both
-		// definitions of an active domain), so a stamp an interrupted earlier
-		// transfer wrote to only one of them is completed below.
-		if verifyOwnerStamp(ctx, vp, uuid, id, owner, active) == nil {
-			return nil
-		}
+		// An idempotent retry: the stamp is there, in both definitions of an
+		// active domain. Nothing is written.
+		return nil
 	}
 
 	// Stamp the domain addressed by its UUID: the persistent definition, and
