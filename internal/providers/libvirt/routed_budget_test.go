@@ -47,6 +47,18 @@ import (
 // cloneTargetDisk is the disk a clone of "web" into team-a/copy writes.
 const cloneTargetDisk = "/var/lib/libvirt/images/" + cloneTargetDomain + "-disk.qcow2"
 
+// cloneWriteDir is the private directory the clone's copy is written in
+// (#358's diskWriteDir, named by the fake mktemp), and cloneWriteFile the copy
+// in it, renamed onto cloneTargetDisk once complete.
+const (
+	cloneWriteDir  = "/var/lib/libvirt/images/" + vmDiskWriteDirPrefix + "0000000000"
+	cloneWriteFile = cloneWriteDir + "/" + cloneTargetDomain + "-disk.qcow2"
+)
+
+// cloneCopyCmd is the clone's copy as the guard runs it: qemu-img convert
+// under the VM-disk umask (withUmask), into the private directory.
+const cloneCopyCmd = "sh -c " + umaskExecScript + " sh " + vmDiskUmask + " qemu-img convert -O qcow2 " + scdDiskPath + " " + cloneWriteFile
+
 // Locks live in the provider's lock directory under the staging directory
 // (normalized to <staging> in the call log), never next to a disk.
 const (
@@ -87,7 +99,7 @@ func TestClustered_Clone_CopyIsGuardedAndBudgeted(t *testing.T) {
 	require.NoError(t, err)
 
 	calls := fx.calls()
-	_, secs := guardedCall(t, calls, cloneLock, "qemu-img convert -O qcow2 "+scdDiskPath+" "+cloneTargetDisk)
+	_, secs := guardedCall(t, calls, cloneLock, cloneCopyCmd)
 	budget := 5*time.Minute - routedBudgetMargin - hostCommandSlack
 	assert.LessOrEqual(t, secs, int(budget/time.Second), "the copy is stopped before the call's budget ends")
 	assert.Greater(t, secs, int(budget/time.Second)-10)

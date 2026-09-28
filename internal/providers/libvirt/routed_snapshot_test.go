@@ -84,7 +84,7 @@ func newRoutedSCD(t *testing.T, hosts map[string]map[string]string) *routedSCD {
 	// staging); mktemp never creates anything outside the test's directories.
 	for tool, script := range map[string]string{
 		"flock": routedFakeFlock, "timeout": routedFakeTimeout, "sh": routedGuardShell, "mktemp": routedFakeMktemp,
-		"virsh": routedFakeVirsh, "qemu-img": routedFakeQemuImg,
+		"virsh": routedFakeVirsh, "qemu-img": routedFakeQemuImg, "sudo": routedFakeSudo,
 	} {
 		require.NoError(t, os.WriteFile(filepath.Join(bin, tool), []byte(script), 0o755)) //nolint:gosec // test shim must be executable
 	}
@@ -148,16 +148,53 @@ esac
 exec "$FAKE_SCD_TOOLS/qemu-img" "$@"
 `
 
-// routedGuardShell is sh for the routed fixture: the host guard script
+// routedFakeSudo is scdFakeTool's sudo (it only logs), plus `sudo -n qemu-img
+// info ... -- <image>` (the in-use check and the disk-dependents guard read
+// each disk's chain one image at a time, #358): a standalone qcow2 image,
+// unless local/backing-<image base name> names its backing file (a linked
+// clone's overlay), or local/fail-qemu-img-info makes the read fail. It reads
+// nothing on the machine running the test.
+const routedFakeSudo = `#!/bin/sh
+case "$*" in "-n qemu-img info "*)
+  printf 'local sudo %s\n' "$*" >> "$FAKE_SCD_DIR/calls.log"
+  if [ -f "$FAKE_SCD_DIR/local/fail-qemu-img-info" ]; then echo "qemu-img: Could not open: scripted failure" >&2; exit 1; fi
+  for a in "$@"; do img="$a"; done
+  b="$FAKE_SCD_DIR/local/backing-${img##*/}"
+  if [ -f "$b" ]; then
+    bf=$(cat "$b")
+    printf '{"filename": "%s", "format": "qcow2", "backing-filename": "%s", "full-backing-filename": "%s", "backing-filename-format": "qcow2"}\n' "$img" "$bf" "$bf"
+  else
+    printf '{"filename": "%s", "format": "qcow2"}\n' "$img"
+  fi
+  exit 0 ;;
+esac
+exec "$FAKE_SCD_TOOLS/sudo" "$@"
+`
+
+// routedGuardShell is sh for the routed fixture. The host guard script
 // (hostGuardScript, recognized by hostGuardMarker) is logged as
 // "local guard <lock dir> <lock> <target>" and run by the real /bin/sh — its
-// directory checks are real, against the test's staging directory — and every
-// other sh call is scdFakeTool's.
+// directory checks are real, against the test's staging directory. withUmask's
+// script (umaskExecScript) is logged as "local umask <mask> <command>" and run
+// by the real /bin/sh too, so the command it wraps (qemu-img, sudo dd) reaches
+// its fake. The disk/varstore target check (targetKindScript) is logged as
+// scdFakeTool logs it, and runs for real only on a path inside the test's own
+// directory (FAKE_SCD_DIR): a real host path is never inspected. Every other
+// sh call is scdFakeTool's.
 const routedGuardShell = `#!/bin/sh
 case "$2" in
 "` + hostGuardMarker + `"*)
   printf 'local guard %s %s %s\n' "$4" "$5" "$6" >> "$FAKE_SCD_DIR/calls.log"
   exec /bin/sh "$@" ;;
+'` + umaskExecScript + `')
+  shift 3
+  printf 'local umask %s\n' "$*" >> "$FAKE_SCD_DIR/calls.log"
+  exec /bin/sh -c '` + umaskExecScript + `' sh "$@" ;;
+'` + targetKindScript + `')
+  case "$4" in "$FAKE_SCD_DIR"/*)
+    printf 'local sh %s\n' "$*" >> "$FAKE_SCD_DIR/calls.log"
+    exec /bin/sh "$@" ;;
+  esac ;;
 esac
 exec "$FAKE_SCD_TOOLS/sh" "$@"
 `
@@ -224,6 +261,12 @@ var teamAOwner = &providerv1.ObjectIdentity{Uid: ownerTeamA.UID, Namespace: owne
 // call starts with.
 var snapshotOwnerCheck = []string{"host-b virsh list --all", "host-b virsh dumpxml web"}
 
+// snapshotDependentsGuard is #358's disk-dependents guard, run on the leased
+// host with the owner-checked UUID right before a snapshot is created, deleted
+// or reverted: the VM's own definition, then every domain on the host (only
+// itself here, so no disk chain is read).
+var snapshotDependentsGuard = []string{"host-b virsh dumpxml " + routingDomainUUID, "host-b virsh list --all --uuid"}
+
 // scdMutatingSnapshotVerbs change a domain's snapshots or state.
 var scdMutatingSnapshotVerbs = []string{"snapshot-create-as", "snapshot-delete", "snapshot-revert"}
 
@@ -240,11 +283,12 @@ func TestClustered_Snapshots_RoutedOwnerCheckedByUUID(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "pre", resp.SnapshotId)
 		assert.Nil(t, resp.Task, "libvirt snapshots are synchronous")
-		assert.Equal(t, append(append([]string{}, snapshotOwnerCheck...),
+		assert.Equal(t, append(append(append(append([]string{}, snapshotOwnerCheck...),
 			"host-b virsh snapshot-list "+uuid+" --name",
-			"host-b virsh domstate "+uuid,
+			"host-b virsh domstate "+uuid),
+			snapshotDependentsGuard...),
 			"host-b virsh snapshot-create-as "+uuid+" pre --description d --atomic --disk-only"), fx.calls(),
-			"the name is looked up first (idempotent create), then the snapshot is made")
+			"the name is looked up first (idempotent create), the disk-dependents guard runs, then the snapshot is made")
 	})
 
 	t.Run("create of a name this request already made is the earlier attempt's snapshot", func(t *testing.T) {
@@ -289,8 +333,9 @@ func TestClustered_Snapshots_RoutedOwnerCheckedByUUID(t *testing.T) {
 		})
 		require.NoError(t, err)
 		assert.Nil(t, resp.Task)
-		assert.Equal(t, append(append([]string{}, snapshotOwnerCheck...),
-			"host-b virsh snapshot-list "+uuid+" --name",
+		assert.Equal(t, append(append(append(append([]string{}, snapshotOwnerCheck...),
+			"host-b virsh snapshot-list "+uuid+" --name"),
+			snapshotDependentsGuard...),
 			"host-b virsh snapshot-delete "+uuid+" s1"), fx.calls())
 	})
 
@@ -301,9 +346,10 @@ func TestClustered_Snapshots_RoutedOwnerCheckedByUUID(t *testing.T) {
 			VmId: "web", SnapshotId: "s2", TargetHostId: "host-b", Owner: teamAOwner,
 		})
 		require.NoError(t, err)
-		assert.Equal(t, append(append([]string{}, snapshotOwnerCheck...),
+		assert.Equal(t, append(append(append(append([]string{}, snapshotOwnerCheck...),
 			"host-b virsh snapshot-list "+uuid+" --name",
-			"host-b virsh domstate "+uuid,
+			"host-b virsh domstate "+uuid),
+			snapshotDependentsGuard...),
 			"host-b virsh snapshot-revert "+uuid+" s2 --force --running"), fx.calls())
 	})
 
@@ -431,7 +477,7 @@ func TestClustered_SnapshotCreate_WhileAnEarlierJobRunsIsRetryable(t *testing.T)
 	script := "#!/bin/sh\ncase \"$*\" in *snapshot-create-as*)\n" +
 		"  echo 'error: Timed out during operation: " + libvirtJobBusyMarker +
 		" (held by monitor=remoteDispatchDomainSnapshotCreateXML)' >&2; exit 1 ;;\nesac\n" +
-		"exec \"$FAKE_SCD_TOOLS/virsh\" \"$@\"\n"
+		"exec \"$FAKE_SCD_BIN/virsh\" \"$@\"\n"
 	bin := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(bin, "virsh"), []byte(script), 0o755)) //nolint:gosec // test shim must be executable
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))

@@ -33,9 +33,11 @@ import (
 
 // These tests pin that a clustered clone or s3 export that fails — or whose
 // copy is stopped by its time budget — never leaves a partial copy of the
-// tenant's disk on the host: the clone's disk is removed under the clone's
-// lock (unless another attempt holds it), and the export's temporary copy is
-// removed whatever happens once it exists.
+// tenant's disk on the host: the clone's copy is written in a private
+// directory that is removed whatever happens (#358's write path), a complete
+// copy whose clone then fails is removed under the clone's lock (unless
+// another attempt holds it or a domain uses it), and the export's temporary
+// copy is removed whatever happens once it exists.
 
 // clonedDiskRemoval is the logged removal of the clone's disk: through the
 // guard, under the clone's lock (waiting for a copy that is still exiting),
@@ -55,33 +57,46 @@ func failQemuImgConvert(t *testing.T, fx *routedSCD) {
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
-func TestClustered_Clone_FailedCopyIsRemoved(t *testing.T) {
+// TestClustered_Clone_FailedCopyNeverReachesTheDisk: the clone's copy is
+// written in a private directory next to the disk's name (#358's diskWriteDir)
+// and renamed onto the name only when complete, so a copy that fails, is
+// stopped by its budget, or never starts (another attempt holds the lock, a
+// tool is missing, the guard refused) leaves nothing at the disk's name: the
+// private directory is removed with whatever partial copy it holds, and the
+// disk's name is never touched. Only a rename that failed — it may have
+// happened, its answer lost — removes the name again, under the clone's lock.
+func TestClustered_Clone_FailedCopyNeverReachesTheDisk(t *testing.T) {
 	cases := map[string]struct {
-		setup  func(fx *routedSCD)
-		remove bool
-		why    string
+		setup      func(fx *routedSCD)
+		removeName bool
+		why        string
 	}{
 		"the copy failed": {
-			setup: func(fx *routedSCD) { failQemuImgConvert(t, fx) }, remove: true,
-			why: "a failed copy leaves a partial disk no domain references",
+			setup: func(fx *routedSCD) { failQemuImgConvert(t, fx) },
+			why:   "a failed copy stays in the private directory",
 		},
 		"the copy was stopped by its budget": {
-			setup: func(fx *routedSCD) { fx.script("local", "timeout-expire", "") }, remove: true,
-			why: "a stopped copy leaves a partial disk no domain references",
+			setup: func(fx *routedSCD) { fx.script("local", "timeout-expire", "") },
+			why:   "a stopped copy stays in the private directory",
 		},
 		"another attempt holds the lock": {
-			setup: func(fx *routedSCD) { fx.script("local", "flock-busy", "") }, remove: false,
-			why: "the disk belongs to the attempt still writing it",
+			setup: func(fx *routedSCD) { fx.script("local", "flock-busy", "") },
+			why:   "the disk belongs to the attempt still writing it",
 		},
 		"a host tool is missing": {
-			setup: func(fx *routedSCD) { fx.script("local", "flock-missing", "") }, remove: false,
-			why: "nothing of this attempt ran",
+			setup: func(fx *routedSCD) { fx.script("local", "flock-missing", "") },
+			why:   "nothing of this attempt ran",
 		},
 		"the guard refused the paths": {
 			setup: func(fx *routedSCD) {
 				require.NoError(t, os.Symlink(t.TempDir(), filepath.Join(fx.staging, hostLockDirName)))
 			},
-			remove: false, why: "a refused path is never touched",
+			why: "a refused path is never touched",
+		},
+		"the rename failed": {
+			setup:      func(fx *routedSCD) { failHostTool(t, "mv") },
+			removeName: true,
+			why:        "the rename may have happened with its answer lost: the name is removed again",
 		},
 	}
 	for name, tc := range cases {
@@ -91,11 +106,13 @@ func TestClustered_Clone_FailedCopyIsRemoved(t *testing.T) {
 			_, err := NewServer(fx.p).Clone(context.Background(), routedCloneReq())
 			require.Error(t, err)
 			calls := fx.calls()
-			if tc.remove {
+			assert.Contains(t, calls, "local rm -rf -- "+cloneWriteDir, "the private directory is removed: %s", tc.why)
+			if tc.removeName {
 				assert.Contains(t, calls, clonedDiskRemoval, tc.why)
 			} else {
 				for _, c := range calls {
 					assert.NotContains(t, c, "rm -f -- "+cloneTargetDisk, "%s: %q", tc.why, c)
+					assert.False(t, strings.HasPrefix(c, "local mv "), "%s: nothing is renamed onto the disk's name: %q", tc.why, c)
 				}
 			}
 			for _, c := range calls {
@@ -203,7 +220,7 @@ func failInactiveDumpxml(t *testing.T) {
 	t.Helper()
 	script := "#!/bin/sh\ncase \"$*\" in *dumpxml*--inactive*)\n" +
 		"  echo 'error: scripted failure of dumpxml --inactive' >&2; exit 1 ;;\nesac\n" +
-		"exec \"$FAKE_SCD_TOOLS/virsh\" \"$@\"\n"
+		"exec \"$FAKE_SCD_BIN/virsh\" \"$@\"\n"
 	bin := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(bin, "virsh"), []byte(script), 0o755)) //nolint:gosec // test shim must be executable
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))

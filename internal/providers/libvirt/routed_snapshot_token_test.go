@@ -46,7 +46,7 @@ func answerSnapshotDescription(t *testing.T, desc string) {
 		"  host=local; if [ \"$1\" = -c ]; then host=\"${2##*/}\"; shift 2; fi\n" +
 		"  printf '%s virsh %s\\n' \"$host\" \"$*\" >> \"$FAKE_SCD_DIR/calls.log\"\n" +
 		"  printf '<domainsnapshot><name>%s</name><description>%s</description></domainsnapshot>\\n' \"$3\" \"$FAKE_SNAP_DESC\"; exit 0 ;;\nesac\n" +
-		"exec \"$FAKE_SCD_TOOLS/virsh\" \"$@\"\n"
+		"exec \"$FAKE_SCD_BIN/virsh\" \"$@\"\n"
 	bin := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(bin, "virsh"), []byte(script), 0o755)) //nolint:gosec // test shim must be executable
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))

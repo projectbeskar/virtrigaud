@@ -50,10 +50,12 @@ import (
 
 // linkedCloneClusteredRefusal is the InvalidArgument answer to a linked clone
 // on a clustered provider. A linked clone's overlay keeps reading its source's
-// disk for its whole life; until the source's lifecycle calls (Delete,
-// SnapshotRevert, SnapshotDelete) are guarded against dependent overlays on a
-// clustered host, only full clones are served there (v0.4.0), and the
-// provider does not advertise linked clones.
+// disk for its whole life, and the source's disk is not frozen at clone time
+// (the reason #358 disables single-host linked clones too), so only full
+// clones are served there (v0.4.0), and the provider does not advertise linked
+// clones. The source's lifecycle calls (Delete, SnapshotCreate/Delete/Revert)
+// refuse while any overlay depends on its disk (disk_dependents.go) on both
+// paths.
 const linkedCloneClusteredRefusal = "linked clones are not supported on a clustered libvirt provider: " +
 	"a linked clone depends on its source's disk for its whole life; use a full clone"
 
@@ -110,45 +112,51 @@ func (p *Provider) cloneClustered(ctx context.Context, req contracts.CloneReques
 	return resp, classifyRoutedFailure("clone VM", source, ctx, bctx, err)
 }
 
-// createFullCopyGuarded is createFullCopy for a clustered clone: the same
-// qemu-img convert, run under flock(1) on the clone's lock (a retry while an
-// earlier copy still writes the disk is "in progress", never a second copy)
-// and timeout(1) (it is stopped on the host when the call's budget runs out),
-// and refused when the disk path is a symbolic link. The disk is then
-// finalized as for any clone.
+// createFullCopyGuarded is createFullCopy for a clustered clone, on the same
+// write path (#358): qemu-img convert writes the copy with vmDiskMode
+// (withUmask) inside a private directory next to the disk's name
+// (diskWriteDir), the finished copy is renamed onto the name (`mv -f -T`,
+// which replaces a symbolic link there instead of following it), and the disk
+// is then finalized as for any clone (chown -h, never chmod'ed:
+// finalizeClonedDisk). The convert alone runs under flock(1) on the clone's
+// lock (a retry while an earlier copy still runs is "in progress", never a
+// second copy) and timeout(1) (it is stopped on the host when the call's
+// budget runs out); the guard refuses a lock, or a disk name, that is a
+// symbolic link:
+//
+//	sh -c <hostGuardScript> … flock -n -E 75 <lock> timeout … sh -c <umask> 0137 qemu-img convert … <private dir>/<name>
+//
+// A copy that fails or is stopped never reaches the disk's name: its partial
+// file is removed with the private directory, whatever happens, within
+// routedCleanupTimeout. When the rename itself fails, the name may already
+// hold the copy (the answer was lost), so it is removed again under the lock
+// (removeClonedDisk).
 func createFullCopyGuarded(ctx context.Context, vp *VirshProvider, lock hostLock, srcDiskPath, targetDiskPath string) error {
 	log.Printf("INFO Creating full-clone copy %s from %s (guarded)", targetDiskPath, srcDiskPath)
-	argv, err := guardedHostCommand(ctx, lock, targetDiskPath, "qemu-img", "convert", "-O", "qcow2", srcDiskPath, targetDiskPath)
+	wd, err := newDiskWriteDir(ctx, vp, filepath.Dir(targetDiskPath))
+	if err != nil {
+		return fmt.Errorf("create full-clone copy: %w", err)
+	}
+	defer wd.cleanupWithin(ctx, routedCleanupTimeout)
+	name := filepath.Base(targetDiskPath)
+	argv, err := guardedHostCommand(ctx, lock, targetDiskPath,
+		withUmask(vmDiskUmask, "qemu-img", "convert", "-O", "qcow2", srcDiskPath, wd.file(name))...)
 	if err != nil {
 		return err
 	}
-	res, err := vp.runVirshCommand(ctx, append([]string{"!"}, argv...)...)
-	if err != nil {
+	if res, err := runHost(ctx, vp, argv...); err != nil {
 		stderr := ""
 		if res != nil {
 			stderr = res.Stderr
 		}
 		return fmt.Errorf("create full-clone copy: %w, output: %s", err, stderr)
 	}
+	if err := wd.publish(ctx, name, targetDiskPath); err != nil {
+		removeClonedDisk(ctx, vp, lock, targetDiskPath)
+		return fmt.Errorf("create full-clone copy: %w", err)
+	}
 	finalizeClonedDisk(ctx, vp, targetDiskPath)
 	return nil
-}
-
-// copyMayHaveWritten reports whether a failed guarded clone copy may have left
-// (part of) the clone's disk that this attempt owns. It did not when the lock
-// was held (another attempt is writing the disk), the guard refused the paths,
-// a host tool was missing, or the budget ran out before the copy could start —
-// in each case nothing of this attempt ran.
-func copyMayHaveWritten(err error) bool {
-	var roe *routedOpError
-	if errors.As(err, &roe) {
-		return false
-	}
-	switch guardExitCode(err) {
-	case flockBusyExit, hostGuardRefusedExit, commandNotFound, commandNotRunnable:
-		return false
-	}
-	return true
 }
 
 // removeClonedDisk removes a failed clustered clone's disk, best-effort, only
@@ -188,7 +196,13 @@ func removeClonedDisk(ctx context.Context, vp *VirshProvider, lock hostLock, tar
 // the target name that the target VirtualMachine owns is an idempotent
 // success (a retry) and any other is a Conflict; the definition is stamped
 // with the target VirtualMachine's identity; and the cloud-init seed ISO is
-// copied for the clone (cloneSeedISO).
+// copied for the clone (cloneSeedISO). It keeps every protection of the
+// single-host Clone (disk_dependents.go, call-site checklist): linked clones
+// are refused before any host is touched (cloneClustered); the definition is
+// built and the UEFI varstore path checked (ensureNVRAMTargetFree) before any
+// file is written; the disk is written on #358's path (createFullCopyGuarded:
+// withUmask, private directory, `mv -T`, finalizeClonedDisk) and the
+// varstore by copyClonedNVRAM.
 func (p *Provider) cloneOnHost(ctx context.Context, vp *VirshProvider, c libvirtConn, d domainTarget, req contracts.CloneRequest, domainName string) (contracts.CloneResponse, error) {
 	host := c.HostID()
 
@@ -244,25 +258,45 @@ func (p *Provider) cloneOnHost(ctx context.Context, vp *VirshProvider, c libvirt
 	if err != nil {
 		return contracts.CloneResponse{}, fmt.Errorf("get pool %q info: %w", clonePoolName, err)
 	}
-	p.warnIfUnsafeDir(ctx, vp, host, poolInfo.Path)
+	vp.warnIfDiskDirUnsafe(ctx, poolInfo.Path)
 	targetDiskPath := filepath.Join(poolInfo.Path, fmt.Sprintf("%s.qcow2", vmDiskVolumeName(domainName)))
-	// Never let the overlay/copy replace a disk another domain uses.
+	// Never let the copy replace a disk another domain uses, or write through
+	// a symbolic link.
 	if err := ensureDiskTargetFree(ctx, vp, domainDiskSubject(domainName), targetDiskPath); err != nil {
 		return contracts.CloneResponse{}, err
 	}
+
+	// The target definition is built — and a UEFI varstore path checked —
+	// before any file is written, as on the single host, so a refusal leaves
+	// nothing behind.
+	targetXML, srcNvramPath, targetNvramPath, err := rewriteDomainXMLForClone(cloneXML, domainName, srcDiskPath, targetDiskPath)
+	if err != nil {
+		return contracts.CloneResponse{}, contracts.NewInvalidSpecError("rewrite source domain XML for clone", err)
+	}
+	// rewriteDomainXMLForClone dropped the source's stamp; the clone carries
+	// its own VirtualMachine's.
+	targetXML, err = stampOwnerMetadata(targetXML, req.TargetVM)
+	if err != nil {
+		return contracts.CloneResponse{}, contracts.NewInvalidSpecError("stamp the clone with its target VirtualMachine", err)
+	}
+	uefi := srcNvramPath != "" && targetNvramPath != ""
+	// Never write the clone's varstore through a symbolic link or over another
+	// domain's varstore.
+	if uefi {
+		if err := ensureNVRAMTargetFree(ctx, vp, domainName, targetNvramPath); err != nil {
+			return contracts.CloneResponse{}, err
+		}
+	}
+
 	lock, err := p.hostLockFor(cloneLockKind, domainName)
 	if err != nil {
 		return contracts.CloneResponse{}, err
 	}
-	// Full clones only on a clustered provider (cloneClustered refuses linked).
+	// Full clones only on a clustered provider (cloneClustered refuses
+	// linked). A copy that fails or is stopped never reaches the disk's name:
+	// it is written in a private directory, removed with it
+	// (createFullCopyGuarded).
 	if err := createFullCopyGuarded(ctx, vp, lock, srcDiskPath, targetDiskPath); err != nil {
-		// A copy that failed or was stopped leaves a partial copy of the
-		// source's disk that no domain references (so the target's Delete
-		// would never find it): remove it — unless it may be another
-		// attempt's.
-		if copyMayHaveWritten(err) {
-			removeClonedDisk(ctx, vp, lock, targetDiskPath)
-		}
 		return contracts.CloneResponse{}, err
 	}
 	// From here the disk is a complete copy of the source's: any failure
@@ -272,23 +306,15 @@ func (p *Provider) cloneOnHost(ctx context.Context, vp *VirshProvider, c libvirt
 		return contracts.CloneResponse{}, err
 	}
 
-	targetXML, srcNvramPath, targetNvramPath, err := rewriteDomainXMLForClone(cloneXML, domainName, srcDiskPath, targetDiskPath)
-	if err != nil {
-		return fail(contracts.NewInvalidSpecError("rewrite source domain XML for clone", err))
-	}
-	// rewriteDomainXMLForClone dropped the source's stamp; the clone carries
-	// its own VirtualMachine's.
-	targetXML, err = stampOwnerMetadata(targetXML, req.TargetVM)
-	if err != nil {
-		return fail(contracts.NewInvalidSpecError("stamp the clone with its target VirtualMachine", err))
-	}
-
 	targetXML, seedDir, err := p.cloneSeedISO(ctx, vp, targetXML, srcSeedISO, domainName)
 	if err != nil {
 		return fail(err)
 	}
 
-	if srcNvramPath != "" && targetNvramPath != "" {
+	// The varstore is copied with #358's single-host helper: the stale target
+	// unlinked, then `dd` with O_NOFOLLOW on both ends and O_EXCL on the
+	// target, under a 0600 umask, and chown -h to the qemu user.
+	if uefi {
 		copyClonedNVRAM(ctx, vp, srcNvramPath, targetNvramPath)
 	}
 	targetXML = applyClassOverrides(targetXML, req.ClassJSON)
@@ -304,7 +330,7 @@ func (p *Provider) cloneOnHost(ctx context.Context, vp *VirshProvider, c libvirt
 		// seed.
 		if !errors.Is(err, errDefineOutcomeUnknown) {
 			if seedDir != "" {
-				removeHostPath(ctx, vp, seedDir, true)
+				removeHostPathWithin(ctx, vp, seedDir, true, routedCleanupTimeout)
 			}
 			removeClonedDisk(ctx, vp, lock, targetDiskPath)
 		}
@@ -333,7 +359,7 @@ func (p *Provider) cloneSeedISO(ctx context.Context, vp *VirshProvider, domainXM
 	}
 	iso := filepath.Join(dir, cloudInitISOName)
 	fail := func(step string, err error) (string, string, error) {
-		removeHostPath(ctx, vp, dir, true)
+		removeHostPathWithin(ctx, vp, dir, true, routedCleanupTimeout)
 		return "", "", fmt.Errorf("%s: %w", step, err)
 	}
 	if _, err := runHost(ctx, vp, "cp", "--", srcISO, iso); err != nil {
