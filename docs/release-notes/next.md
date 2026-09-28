@@ -145,6 +145,17 @@ providers), and rollback caveats in
   `virtrigaud_host_committed_cpu` and `virtrigaud_host_committed_memory_mib`.
   There is no per-tenant quota on a shared clustered Provider yet
   (→ [`docs/clustered-provider-inventory.md`](docs/clustered-provider-inventory.md#committed-capacity)).
+- Clustered disks on a shared pool are protected across hosts (ADR-0007
+  A6.1). A create or clone that finds a file where the VM's disk goes writes
+  it only when no domain on **any** host of the Provider uses it, and a delete
+  first checks every other host; a host that cannot be checked makes the
+  operation fail closed (retried, never counted by the circuit breaker) — so
+  **clustered deletes wait while any host of the Provider is unreachable**. A
+  VirtualMachine re-created under the name of a previous incarnation (after
+  `orphan-on-delete`, a force-delete or a backup restore) is held as
+  `Placed=False/RestorePending` on its pending host instead of making a second
+  domain; an administrator re-attaches or removes the old domain with the A6
+  runbook (→ [`docs/clustered-provider-inventory.md`](docs/clustered-provider-inventory.md#shared-storage-the-cluster-wide-disk-guard-a61)).
 - On a clustered Provider, shrinking a **running** VM waits until the VM is
   powered off (`Reconfiguring=False/ShrinkPendingPowerOff`): a live shrink
   only deflates the balloon, which the guest can take back. VirtRigaud never

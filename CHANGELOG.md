@@ -5,6 +5,40 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-28 16:03] - ADR-0007 A6.1: cluster-wide disk guard (R3, also on Delete) and previous-incarnation hold (R2)
+**Author:** @wrkode (William Rizzo)
+
+> **Operator note.** Only `Provider.spec.topology: cluster` (experimental) changes. On a clustered Provider a VirtualMachine re-created under the name of a previous incarnation (after `orphan-on-delete`, a force-delete or a backup restore) is now **held** (`Placed=False/RestorePending`, pending host kept) instead of making a second domain; a create or clone overwrites an existing disk file only when no domain on any host uses it; and **every clustered Delete checks every other host first — it is refused while another host's domain uses the disk, and held (retried) while any host of the Provider cannot be reached.** Mount shared pools at the same path on every host. Roll the manager and the clustered libvirt provider together. Single-host providers are unchanged: the three single-host goldens are byte for byte identical.
+
+### Added
+- `internal/providers/libvirt/cluster_disk_guard.go`: the cluster-wide disk guard. `clusterDiskGuard.ensureTargetFree` (Create, Clone): a file that already exists where the VM's disk, a blank disk, a clone's UEFI varstore or an imported disk attached in place goes is written only after every host of the registry (the landing host over the call's own connection, the others leased) was scanned and no domain uses it (as a disk, anywhere in a disk's backing chain, or as another file/shared directory). `checkDeletionAcrossHosts` (Delete): every other host is scanned before the teardown. Scans reuse slice 4's fan-out (8 hosts at a time, 60 s per host, inside the caller's deadline less 30 s; more than 2000 domains fails closed). Candidate paths are resolved with `realpath` on each scanned host. Answers: a domain stamped with the requester's namespace and name → `AlreadyExists` + `VM_PREVIOUS_INCARNATION`; another use → plain `AlreadyExists` (Create/Clone) or `FailedPrecondition` + `VM_DISK_IN_USE` + `VM_OPERATION_FAILED` (Delete); a host not reached → `Unavailable` + `HOST_UNAVAILABLE`; a host not scannable → `Unavailable` + `VM_DISK_CHECK_FAILED` + `VM_OPERATION_FAILED`. Nothing is written or removed on a partial answer; no answer names a host, path or other domain.
+- `internal/providers/contracts/errors.go`: `VMPreviousIncarnationReason` (`VM_PREVIOUS_INCARNATION`), `ErrVMPreviousIncarnation`, `IsVMPreviousIncarnation`.
+- `internal/k8s/conditions.go`: Placed/Provisioning reason `RestorePending`.
+- Tests: `cluster_disk_guard_test.go` (a shared-pool fixture of two fake hosts over one scratch pool: previous incarnation elsewhere, foreign and unstamped users, unused leftover overwritten after every host is checked, no fan-out without a file, unreachable and unscannable hosts fail closed, blank disk, canonical paths, per-host domain bound; clustered Delete refused and fail-closed with the disk kept; clustered Clone by name and via the fan-out), `client_previous_incarnation_test.go` (mapping; the guard's three answers never trip the breaker over a real gRPC hop on Create, Clone and Delete), `virtualmachine_clustered_a61_test.go` (hold on the pending host, no exclusion, one event, retry on the same host, plain conflict still excludes, held VM's delete never touches the previous incarnation, clone target held), `TestEndpointKey_DefaultPortNormalized`.
+
+### Changed
+- `internal/providers/libvirt/provider_virsh.go`, `domain_identity.go`, `clone_clustered.go`, `server.go`, `routing.go`: the clustered Create and Clone run the guard; a same-named domain on the landing host stamped for the requester's namespace and name under another UID answers `VM_PREVIOUS_INCARNATION`; the clustered Delete runs `checkDeletionAcrossHosts` between its plan and its teardown (`deleteExistingDomainChecked`); `createRPCError` and `routedRPCError` render the guard's answers. Single-host paths pass no guard and run the same commands.
+- `internal/providers/libvirt/routed_list.go`: the fan-out is factored into `fanOutHosts` / `onHostWithin` / `budgetWithMargin`, shared by `ListVMs` and the guard (ListVMs unchanged).
+- `internal/providers/libvirt/imagepath.go`, `staging.go`, `disk_dependents.go`: `domainRefsOnHost` also returns each domain's owner stamps and takes an optional domain bound (no new command); `checkWriteTarget` is factored out of `ensureDiskTargetFree` (same commands and messages); `diskDependentsError` words a refusal caused by other hosts.
+- `internal/transport/grpc/client.go`: `AlreadyExists` + `VM_PREVIOUS_INCARNATION` maps to a Conflict marked with `ErrVMPreviousIncarnation`.
+- `internal/controller/virtualmachine_clustered.go`, `vmclone_clustered.go`: on `VM_PREVIOUS_INCARNATION` the VM (or the clone's target) keeps its `pendingHost`, is not excluded, gets `Placed=False/RestorePending` (a VM also `Provisioning`), one Warning event and a 2-minute re-check; the VMClone stays `Pending`. The `HostUnavailable` message also covers a host the create had to check.
+- `internal/controller/vmadoption_clustered.go`: `endpointKey` maps an omitted port to the scheme's default (`qemu+ssh`/`ssh` 22, `qemu+tcp` 16509, `qemu+tls` 16514), so `h1` and `h1:22` are one hypervisor.
+- Docs: ADR-0007 (status, A5 status, slice 4 follow-up closed, A6.1 amendment), `docs/clustered-provider-inventory.md` (the guard, fail-closed semantics, residuals, the runbook), `docs/upgrading.md`, `docs/release-notes/next.md`.
+
+### Security
+- Closes the cross-host disk overwrite on a shared pool: a clustered create on host B could replace the disk of a domain `<namespace>.<name>` still running on host A, and a clustered delete on host B could remove a disk a domain on host A used. Both now fail closed.
+- A previous incarnation is never duplicated or bound by name: the VM waits for an administrator (A6 threat 2: a namespace and name are not an identity over time).
+- Residuals (documented): a host mounting the shared export under a different path is not matched (`(st_dev, st_ino)` differs per NFS client, so it cannot close that); hosts removed from the inventory are not scanned; network disks are not compared.
+
+### Why
+ADR-0007 A6 (accepted) requires R3 and R2 before slice 5. On a pool shared across hosts the host-local in-use checks cannot see another host's domains, so a re-created clustered VM could overwrite its previous incarnation's disk and a clustered delete could remove a disk still in use elsewhere (the slice 4 review).
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (manager and clustered libvirt provider together; no CRD or proto change)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-09-28 12:22] - ADR-0007 Addendum A slice 4: clustered ListVMs across all hosts; adoption keyed on (host_id, id)
 **Author:** @wrkode (William Rizzo)
 
