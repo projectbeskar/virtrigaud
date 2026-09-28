@@ -31,6 +31,7 @@ import (
 	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
 	"github.com/projectbeskar/virtrigaud/internal/obs/logging"
+	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	utilk8s "github.com/projectbeskar/virtrigaud/internal/util/k8s"
 )
@@ -395,6 +396,10 @@ func (r *VMCloneReconciler) recordClonePendingHost(
 // handleClusteredCloneError handles a failed Clone RPC on the clone's landing
 // host:
 //
+//   - a previous incarnation of the target VM (VM_PREVIOUS_INCARNATION,
+//     ADR-0007 A6 R2): the target keeps its pendingHost, the host is NOT
+//     excluded, and the clone waits (RestorePending) until an administrator
+//     re-attaches or removes that domain (holdCloneForPreviousIncarnation).
 //   - a name conflict (Conflict / ALREADY_EXISTS): a domain of the clone's name
 //     that the target VM does not own is on the host. The provider checks that
 //     before copying anything, so nothing was created: as for a Create (A2
@@ -417,6 +422,12 @@ func (r *VMCloneReconciler) handleClusteredCloneError(
 ) (ctrl.Result, error) {
 	logger := logging.FromContext(ctx)
 	switch {
+	case contracts.IsVMPreviousIncarnation(err):
+		// ADR-0007 A6, R2: a previous incarnation of the TARGET VirtualMachine
+		// exists on a host of the Provider. The target keeps its pendingHost
+		// (the host is not excluded) and the clone waits; nothing is created
+		// until an administrator re-attaches or removes it.
+		return r.holdCloneForPreviousIncarnation(ctx, clone, target, host, err)
 	case contracts.IsConflict(err):
 		pl := target.Status.Placement
 		if pl == nil {
@@ -458,6 +469,39 @@ func (r *VMCloneReconciler) handleClusteredCloneError(
 			"clone failed: %v (the target VM %s/%s this clone created is removed; its finalizer removes anything the clone left on host %s)",
 			err, target.Namespace, target.Name, host)), nil
 	}
+}
+
+// holdCloneForPreviousIncarnation is ADR-0007 A6, R2 for a clustered clone:
+// the provider refused the Clone with VM_PREVIOUS_INCARNATION, because a
+// domain stamped with the TARGET VirtualMachine's namespace and name under
+// another UID exists on a host of the Provider. The target keeps its
+// pendingHost (so it keeps counting on its host and nothing is excluded) and
+// shows Placed=False/RestorePending; the clone stays Pending with the same
+// reason and one Warning event, and is re-checked every
+// cloneHostBlockedRetryInterval — it is never failed for this (a failed clone
+// would remove the target, and the next attempt would meet the same domain).
+func (r *VMCloneReconciler) holdCloneForPreviousIncarnation(
+	ctx context.Context,
+	clone *infrav1beta1.VMClone,
+	target *infrav1beta1.VirtualMachine,
+	host string,
+	err error,
+) (ctrl.Result, error) {
+	logging.FromContext(ctx).Info("Clone refused: a previous incarnation of the target VM exists on a host of the Provider; "+
+		"holding it (the host is not excluded)", "host", host, "target", target.Name, "error", err.Error())
+	setPlacedCondition(target, metav1.ConditionFalse, k8s.ReasonRestorePending, restorePendingMessage)
+	if uerr := r.Status().Update(ctx, target); uerr != nil {
+		if apierrors.IsConflict(uerr) {
+			return ctrl.Result{Requeue: true}, nil
+		}
+		return ctrl.Result{}, fmt.Errorf("record RestorePending for clone target %s/%s: %w", target.Namespace, target.Name, uerr)
+	}
+	metrics.RecordError(errReasonRestorePending, metrics.ComponentManager)
+	msg := fmt.Sprintf("the clone's target VirtualMachine %s/%s is %s", target.Namespace, target.Name, restorePendingMessage)
+	if c := meta.FindStatusCondition(clone.Status.Conditions, infrav1beta1.VMCloneConditionReady); c == nil || c.Reason != k8s.ReasonRestorePending {
+		r.Recorder.Event(clone, "Warning", k8s.ReasonRestorePending, msg)
+	}
+	return r.waitForCloneHost(ctx, clone, k8s.ReasonRestorePending, msg, cloneHostBlockedRetryInterval), nil
 }
 
 const (

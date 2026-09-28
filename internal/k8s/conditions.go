@@ -160,7 +160,7 @@ const ConditionPlaced = "Placed"
 // the ADR: these four, plus the two the A2 amendment (slice 2) adds for a Create
 // refused with a name conflict (ReasonHostExcluded, ReasonAllHostsExcluded),
 // plus ReasonUnschedulable (declared with the scheduling reasons above) from the
-// scheduler-accuracy amendment in A5.
+// scheduler-accuracy amendment in A5, plus ReasonRestorePending from A6.
 const (
 	// ReasonBound is Placed=True: the provider confirmed the VM on the host named
 	// by status.placement.host, and every per-VM call is routed there.
@@ -190,6 +190,16 @@ const (
 	// re-checked slowly until an administrator resolves the name conflicts (or
 	// renames the VM) and clears the list.
 	ReasonAllHostsExcluded = "AllHostsExcluded"
+	// ReasonRestorePending is Placed=False (and Provisioning=False): the VM is
+	// held because a previous incarnation of it — a domain VirtRigaud created
+	// for the same namespace and name under another UID, left by
+	// orphan-on-delete, a force-delete or a backup restore — exists on a host
+	// of its clustered Provider (ADR-0007 A6). Nothing is created until an
+	// administrator re-attaches or removes that domain (the A6 runbook). In
+	// A6.1 it is set when the provider answers a Create or Clone with
+	// VM_PREVIOUS_INCARNATION (R2): the VM keeps its pendingHost, the host is
+	// NOT excluded, and it is re-checked every 2 minutes.
+	ReasonRestorePending = "RestorePending"
 )
 
 // ReasonPlacementTopologyMismatch indicates that a VirtualMachine records a

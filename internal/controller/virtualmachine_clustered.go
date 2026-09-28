@@ -215,7 +215,9 @@ func promotePendingHost(vm *infravirtrigaudiov1beta1.VirtualMachine, host string
 //     provider found a same-named domain this VM does not own on the host
 //     BEFORE creating anything, so this VM has no domain there and the
 //     attempt created nothing. The host is excluded and the VM re-scheduled
-//     (handleClusteredCreateConflict, the A2 amendment).
+//     (handleClusteredCreateConflict, the A2 amendment) — unless the
+//     conflict is VM_PREVIOUS_INCARNATION (ADR-0007 A6, R2): then the VM is
+//     held on its pending host (holdForPreviousIncarnation), never excluded.
 //   - A host-scoped unavailability (the pending host is unknown, draining or
 //     unreachable) sets Placed=False/HostUnavailable. The VM is never
 //     re-scheduled automatically, because a domain may already exist on that
@@ -233,15 +235,24 @@ func (r *VirtualMachineReconciler) handleClusteredCreateError(
 	logger := log.FromContext(ctx)
 	msg := providerErrorMessage(err)
 
+	// Checked before the plain Conflict: a previous incarnation of this VM
+	// holds it on its pending host (ADR-0007 A6, R2) — excluding the host
+	// would re-schedule it and create a second domain for the same namespace
+	// and name elsewhere.
+	if contracts.IsVMPreviousIncarnation(err) {
+		return r.holdForPreviousIncarnation(ctx, vm, host, err)
+	}
+
 	if contracts.IsConflict(err) {
 		return r.handleClusteredCreateConflict(ctx, vm, host, msg)
 	}
 
 	if contracts.IsHostUnavailable(err) {
-		logger.Info("Pending host is unreachable; retrying the create on the same host (never re-scheduled)",
+		logger.Info("Pending host, or a host the create had to check, is unreachable; retrying the create on the same host (never re-scheduled)",
 			"host", host, "error", err.Error())
 		setPlacedCondition(vm, metav1.ConditionFalse, k8s.ReasonHostUnavailable, fmt.Sprintf(
-			"pending host %s is unreachable; the create is retried on the same host and never re-scheduled "+
+			"the create on pending host %s could not reach a host (the pending host, or another host of the Provider the "+
+				"create must check); it is retried on the same host and never re-scheduled "+
 				"(an administrator may clear status.placement.pendingHost to release it): %s", host, msg))
 		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError,
 			fmt.Sprintf("Failed to create VM: %s", msg))
@@ -260,6 +271,72 @@ func (r *VirtualMachineReconciler) handleClusteredCreateError(
 		fmt.Sprintf("Failed to create VM: %s", msg))
 	r.updateStatus(ctx, vm)
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
+}
+
+// restorePendingRetryInterval re-checks a clustered VM held as RestorePending
+// (ADR-0007 A6): only an administrator resolves it, so the retry is slow.
+const restorePendingRetryInterval = 2 * time.Minute
+
+// errReasonRestorePending counts the reconciles that hold a clustered VM (or
+// a clone's target) as RestorePending because its Provider holds a previous
+// incarnation of it (ADR-0007 A6).
+const errReasonRestorePending = "restore-pending"
+
+// restorePendingRunbook is where the tenant-visible RestorePending messages
+// point: the A6 runbook in the clustered-provider documentation.
+const restorePendingRunbook = "docs/clustered-provider-inventory.md, \"Previous incarnations and the A6 runbook\""
+
+// restorePendingMessage is the Placed / Provisioning message of a VM held as
+// RestorePending by R2 (ADR-0007 A6). It names no host, no domain and no
+// other object: the previous incarnation carries this VM's own namespace and
+// name, and threat 5 of A6 forbids disclosing anything else.
+var restorePendingMessage = fmt.Sprintf(
+	"held: a domain VirtRigaud created for this VirtualMachine's namespace and name under another UID — a previous "+
+		"incarnation, left by orphan-on-delete, a force-delete or a backup restore — exists on a host of its Provider, "+
+		"and a clustered Provider holds at most one per namespace and name (ADR-0007 A6). Nothing is created and the "+
+		"VM stays on its pending host. An administrator must re-attach that domain to this VirtualMachine or remove it; "+
+		"see %s. Re-checked every %s", restorePendingRunbook, restorePendingRetryInterval)
+
+// holdForPreviousIncarnation is ADR-0007 A6, R2 on the manager side: the
+// provider refused the Create on the pending host with
+// VM_PREVIOUS_INCARNATION — a domain stamped with this VM's namespace and name
+// under another UID exists on a host of the Provider (on the pending host by
+// name, or anywhere the cluster-wide disk guard looked). Unlike a plain name
+// conflict (handleClusteredCreateConflict), the host is NOT excluded and the
+// VM is NOT re-scheduled: that is exactly how a second domain for the same
+// namespace and name would be made. The VM keeps its pendingHost (and so its
+// committed capacity and the providerRef lock), gets Placed=False and
+// Provisioning=False with RestorePending plus one Warning event, and the
+// Create is retried on the same host every restorePendingRetryInterval until
+// an administrator re-attaches or removes the previous incarnation. Nothing
+// about the placement is written, so the plain (error-tolerant) status update
+// suffices.
+func (r *VirtualMachineReconciler) holdForPreviousIncarnation(
+	ctx context.Context,
+	vm *infravirtrigaudiov1beta1.VirtualMachine,
+	host string,
+	err error,
+) (ctrl.Result, error) {
+	log.FromContext(ctx).Info("Create refused: a previous incarnation of this VM exists on a host of the Provider; "+
+		"holding the VM on its pending host (not excluded, not re-scheduled)", "host", host, "error", err.Error())
+	// Read before the conditions are set: FindStatusCondition returns a
+	// pointer into the slice that setPlacedCondition updates in place.
+	prev := meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionPlaced)
+	alreadyHeld := prev != nil && prev.Reason == k8s.ReasonRestorePending
+	setPlacedCondition(vm, metav1.ConditionFalse, k8s.ReasonRestorePending, restorePendingMessage)
+	meta.SetStatusCondition(&vm.Status.Conditions, metav1.Condition{
+		Type:               k8s.ConditionProvisioning,
+		Status:             metav1.ConditionFalse,
+		Reason:             k8s.ReasonRestorePending,
+		Message:            restorePendingMessage,
+		ObservedGeneration: vm.Generation,
+	})
+	metrics.RecordError(errReasonRestorePending, metrics.ComponentManager)
+	if !alreadyHeld {
+		r.recordEvent(vm, corev1.EventTypeWarning, k8s.ReasonRestorePending, restorePendingMessage)
+	}
+	r.updateStatus(ctx, vm)
+	return ctrl.Result{RequeueAfter: restorePendingRetryInterval}, nil
 }
 
 // maxExcludedHosts caps status.placement.excludedHosts. It must equal the
