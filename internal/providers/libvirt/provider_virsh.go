@@ -969,12 +969,6 @@ func hostDiskKind(ctx context.Context, vp *VirshProvider, path string) (string, 
 	}
 }
 
-// getDomainDiskPaths retrieves all disk paths for a domain on the provider's
-// single-host connection.
-func (p *Provider) getDomainDiskPaths(ctx context.Context, domainName string) ([]string, error) {
-	return domainDiskPaths(ctx, p.virshProvider, domainName)
-}
-
 // domainDiskPaths returns the files of a domain's own disks on vp's host, the
 // primary disk first: the top-level file-backed <disk device='disk'> sources of
 // its definition (domainDisksDoc.diskFiles). A disk's backing chain — which, for

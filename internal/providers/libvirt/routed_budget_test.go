@@ -207,17 +207,6 @@ func answerPoolPath(t *testing.T, fakeDir, path string) {
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
-// statRunner answers every host command with out and counts the calls.
-type statRunner struct {
-	out   string
-	calls int
-}
-
-func (s *statRunner) runVirshCommand(_ context.Context, args ...string) (*VirshResult, error) {
-	s.calls++
-	return &VirshResult{Stdout: s.out}, nil
-}
-
 // TestClustered_RetryWhileCopyRunsIsInProgress: the lock of the clone's disk
 // (or of the source's export) is held by an earlier copy still running: the
 // retry is answered retryable "in progress" — no second copy, nothing

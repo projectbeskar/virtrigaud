@@ -305,15 +305,6 @@ func resolveDomainDisksOn(ctx context.Context, vp *VirshProvider, d domainTarget
 	return diskPaths, format, nil
 }
 
-// createCloneDisk creates the clone's disk at targetDiskPath on vp's host: a
-// linked overlay (linked) or a full copy of srcDiskPath.
-func createCloneDisk(ctx context.Context, vp *VirshProvider, linked bool, srcDiskPath, srcDiskFormat, targetDiskPath string) error {
-	if linked {
-		return createLinkedOverlay(ctx, vp, srcDiskPath, srcDiskFormat, targetDiskPath)
-	}
-	return createFullCopy(ctx, vp, srcDiskPath, targetDiskPath)
-}
-
 // createLinkedOverlay creates a copy-on-write qcow2 overlay backed by the
 // source disk on vp's host. The overlay is created remotely (the disk lives on
 // the libvirt host) with vmDiskMode (withUmask) in a private directory and
