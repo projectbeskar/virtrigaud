@@ -5,6 +5,44 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-28 22:07] - ADR-0007 A6.1 fix-verification nits: delete lock order, fail-fast scans, varstore scope, own-domain reason
+**Author:** @wrkode (William Rizzo)
+
+> **Operator note.** Only `Provider.spec.topology: cluster` (experimental) changes. A clustered create on an unreachable pending host now backs off (15 s doubling to 5 min) instead of retrying every 30 s. A held own-domain VM shows `Placed=False/OwnDomainOnAnotherHost` (was `RestorePending`). A routed `VM_DISK_IN_USE` delete refusal sets `DeleteBlocked=True/DiskInUse`. **With a shared pool, set `VIRTRIGAUD_LIBVIRT_IMAGE_DIRS` to a catalog directory apart from the pool.** Single-host behaviour and the single-host goldens are unchanged.
+
+### Added
+- `internal/providers/libvirt/hostconn/cluster.go`: `ClusterRegistry.Snapshot` (routable, unroutable and recently unreachable hosts read under one lock) (N6).
+- `internal/providers/libvirt/cluster_disk_guard.go`: `clusterScan.stopOnError`, `clusterDiskGuard.checkDiskFree`, `ensureVarstoreFree`, `varstoreSubject` (N2, N3, N9).
+- `internal/controller/virtualmachine_clustered.go`: `createHoldSince`, `incarnationHold`; `internal/k8s/conditions.go`: DeleteBlocked reason `DiskInUse` (N2, N7, N8).
+- Tests: `TestHostLocks_EntriesAreReferenceCounted`, `TestClusterRegistry_Snapshot`, `TestClustered_DomainLockSerializesCheckAndAct/finalizer delete racing a create`, `TestClusterScan_KnownBadHostFailsFastWithoutASlot`, `TestClusteredClone_SharedVarstoreIsCheckedOnEveryHost`, `TestEnsureVarstoreFree_WhereItResolvesDecides`, `TestClusteredCreate_UnusedBlankLeftoverIsRemovedFirst`, `TestClusteredCreate_BaseImageIsCheckedOnEveryHost/a header refusal is the same answer`, `TestCreateHoldSince`, `TestCreateVM_Clustered_UnreachablePendingHostBacksOff`, `TestVMClone_Clustered_OwnDomainOfTheTargetHolds`, `TestHeldForOwnDomainElsewhere`, `TestHandleDeletion_Clustered_DeleteBlockedFollowsTheLatestRefusal`.
+
+### Changed
+- `internal/providers/libvirt/cluster_disk_guard.go`: the base-image check stops on its first failure as well as its first use; a scan that any failure decides (Delete, base image) fails closed before taking a scan slot or dialing when a tombstoned or recently unreachable host is among its hosts, and other scans check those hosts first (N2). The guard reads its host sets from one registry snapshot (N6).
+- `internal/providers/libvirt/routed_transfer_owner.go`: `hostLocks` entries are reference-counted and removed on their last release; a release is idempotent (N5).
+- `internal/providers/libvirt/clone_clustered.go`, `clone.go`: an existing clone varstore gets the host-local check only when it resolves under the host-local NVRAM directory, and the cluster-wide scan otherwise (`rewriteNVRAMPath` keeps the source's directory) (N3).
+- `internal/providers/libvirt/imagepath.go`: on a clustered Provider an image header refusal (backing file, data file, format) is the same "not allowed" answer (N4).
+- `internal/controller/virtualmachine_clustered.go`, `virtualmachine_controller.go`: a clustered create answered `HOST_UNAVAILABLE` backs off like the other holds, and every create hold measures from `createHoldSince` (`pendingHostUnavailableRetryInterval` removed) (N2).
+- `internal/controller/virtualmachine_clustered.go`, `vmclone_clustered.go`, `internal/k8s/conditions.go`: the own-domain hold uses the dedicated reason `OwnDomainOnAnotherHost` on Placed/Provisioning, for clone targets too, and the delete gate reads it instead of message text (N7).
+- Docs: ADR-0007 A6.1 amendment, `docs/clustered-provider-inventory.md`, `docs/upgrading.md`, `docs/release-notes/next.md`. The "a tenant cannot probe the hosts' files" claim is softened: uniform refusals narrow what a refused path discloses, and an accepted path still shows an image is there. Also documented: an image catalog apart from a shared pool, and the full scans caused by another namespace's legacy bare-named file (N4, N9).
+
+### Fixed
+- `internal/providers/libvirt/provider_virsh.go`: a clustered Delete takes the domain lock BEFORE its owner check, keyed on the namespaced name. Before, a finalizer Delete racing an in-flight Create found nothing, released the finalizer, and left the domain orphaned (N1).
+- `internal/providers/libvirt/provider_virsh.go`: an unused blank leftover is removed (`pool-refresh`, `vol-delete`) after the cluster-wide scan proves it unused, instead of `vol-create` failing on it forever. A failed removal is a specific retryable error (N9).
+- `internal/controller/virtualmachine_controller.go`: a routed `VM_DISK_IN_USE` refusal sets `DeleteBlocked=True/DiskInUse` instead of leaving a stale `HostUnreachable`. An ordinary delete failure removes a DeleteBlocked that no longer applies (N8).
+- `internal/controller/vmclone_clustered.go`: a clone target whose own domain is on another host is now delete-held like a VM (N7).
+
+### Security
+- The N1 race could leave a running domain that no VirtualMachine owned. The N3 gap let a clone overwrite a varstore on shared storage that a domain on another host used. Both are closed.
+
+### Why
+The fix verification of A6.1 (PR #365) approved it with nits: two Low items before merge (N1, N2), two Low items (N3, N4), and five nits (N5 to N9). These changes address all of them.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-09-28 21:27] - ADR-0007 A6.1 security-review follow-ups: every disk name probed, tombstoned hosts, bounded scans, backoff with DeleteBlocked, cross-host base-image check
 **Author:** @wrkode (William Rizzo)
 
