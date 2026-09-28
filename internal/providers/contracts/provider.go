@@ -262,6 +262,14 @@ type VMInfo struct {
 	// (HostID, ID), never by ID or name alone: two hosts may each have a VM of
 	// the same name. Empty for single-host and thin-client providers.
 	HostID string
+	// OwnerNamespace and OwnerName are the namespace and name recorded in the
+	// VM's owner stamp (its UID is ProviderRaw[VMInfoOwnerUIDKey]); empty when
+	// the VM carries no stamp or more than one. Informational only — never an
+	// authorization. Set by a clustered provider (ADR-0007 Addendum A, slice 4;
+	// A6's R4 check uses them); single-host and thin-client providers leave
+	// them empty.
+	OwnerNamespace string
+	OwnerName      string
 }
 
 // VMList is the result of ListVMs.

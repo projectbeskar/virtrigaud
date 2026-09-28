@@ -2878,7 +2878,7 @@ func (p *Provider) listVMsSingleHost(ctx context.Context) ([]contracts.VMInfo, e
 		return nil, contracts.NewRetryableError("virsh provider not initialized", nil)
 	}
 
-	vmInfos, err := p.listVMsOn(ctx, p.virshProvider, nil)
+	vmInfos, err := p.listVMsOn(ctx, p.virshProvider, listOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -2898,12 +2898,10 @@ func (p *Provider) listVMsSingleHost(ctx context.Context) ([]contracts.VMInfo, e
 // (per-host) listing: every domain of vp's host, one `virsh list --all` plus
 // one `virsh dumpxml` per domain. A domain whose definition cannot be read or
 // parsed is skipped (logged), as it always was (#285); only a failed `virsh
-// list` fails the call. onReadFailure, when not nil, is also told about every
-// `virsh dumpxml` that failed (the clustered listing uses it to report a host
-// whose connection dropped mid-list as unreachable instead of as a host with
-// fewer VMs); single-host passes nil. The VMInfos carry no host id; a
-// clustered caller tags them.
-func (p *Provider) listVMsOn(ctx context.Context, vp *VirshProvider, onReadFailure func(domain string, err error)) ([]contracts.VMInfo, error) {
+// list` fails the call. The VMInfos carry no host id; a clustered caller tags
+// them. opts is the zero value for single-host, whose result is pinned by
+// testdata/single_host_listvms.golden.json.
+func (p *Provider) listVMsOn(ctx context.Context, vp *VirshProvider, opts listOptions) ([]contracts.VMInfo, error) {
 	// List all domains
 	domains, err := vp.listDomains(ctx)
 	if err != nil {
@@ -2924,8 +2922,8 @@ func (p *Provider) listVMsOn(ctx context.Context, vp *VirshProvider, onReadFailu
 		raw, err := vp.runVirshCommand(ctx, "dumpxml", domain.Name)
 		if err != nil {
 			log.Printf("WARN Failed to dump XML for %s: %v", domain.Name, err)
-			if onReadFailure != nil {
-				onReadFailure(domain.Name, err)
+			if opts.onReadFailure != nil {
+				opts.onReadFailure(domain.Name, err)
 			}
 			continue
 		}
@@ -2962,18 +2960,47 @@ func (p *Provider) listVMsOn(ctx context.Context, vp *VirshProvider, onReadFailu
 		if uids := domainOwnerUIDs(raw.Stdout); uids != "" {
 			providerRaw[contracts.VMInfoOwnerUIDKey] = uids
 		}
+		var owner contracts.ObjectIdentity
+		if opts.ownerIdentity {
+			owner = soleOwner(raw.Stdout)
+		}
 
 		vmInfos = append(vmInfos, contracts.VMInfo{
-			ID:          domain.Name, // Use domain name as ID
-			Name:        domain.Name,
-			PowerState:  powerState,
-			CPU:         cpu,
-			MemoryMiB:   memoryMiB,
-			Disks:       dx.Disks(domain.Name),
-			Networks:    dx.Networks(),
-			ProviderRaw: providerRaw,
+			ID:             domain.Name, // Use domain name as ID
+			Name:           domain.Name,
+			PowerState:     powerState,
+			CPU:            cpu,
+			MemoryMiB:      memoryMiB,
+			Disks:          dx.Disks(domain.Name),
+			Networks:       dx.Networks(),
+			ProviderRaw:    providerRaw,
+			OwnerNamespace: owner.Namespace,
+			OwnerName:      owner.Name,
 		})
 	}
 
 	return vmInfos, nil
+}
+
+// listOptions are the clustered additions to the shared listing core
+// (listVMsOn); the zero value is the single-host listing.
+type listOptions struct {
+	// onReadFailure, when not nil, is told about every `virsh dumpxml` that
+	// failed: the clustered listing uses it to report a host whose connection
+	// dropped mid-list as unreachable instead of as a host with fewer VMs.
+	onReadFailure func(domain string, err error)
+	// ownerIdentity reports each VM's owner stamp namespace and name
+	// (VMInfo.OwnerNamespace/OwnerName; ADR-0007 Addendum A, slice 4).
+	ownerIdentity bool
+}
+
+// soleOwner returns the owner stamped on a domain document when it carries
+// exactly one stamp, and the zero identity otherwise (none, several, or an
+// unreadable stamp).
+func soleOwner(domainXML string) contracts.ObjectIdentity {
+	owners, err := domainOwners(domainXML)
+	if err != nil || len(owners) != 1 {
+		return contracts.ObjectIdentity{}
+	}
+	return owners[0]
 }

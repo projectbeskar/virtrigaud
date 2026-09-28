@@ -1125,6 +1125,10 @@ func (c *Client) ListVMs(ctx context.Context) (contracts.VMList, error) {
 			Networks:    networks,
 			ProviderRaw: protoVM.ProviderRaw,
 			HostID:      protoVM.GetHostId(),
+			// ADR-0007 Addendum A slice 4: the owner stamp's namespace and
+			// name (informational; empty from single-host providers).
+			OwnerNamespace: protoVM.GetOwnerNamespace(),
+			OwnerName:      protoVM.GetOwnerName(),
 		}
 
 		vmInfos = append(vmInfos, vmInfo)

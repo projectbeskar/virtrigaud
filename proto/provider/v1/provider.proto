@@ -685,6 +685,16 @@ message VMInfo {
   // Set on every VMInfo a clustered provider lists; empty from single-host and
   // thin-client providers. AGNOSTIC.
   string host_id = 10;
+  // owner_namespace and owner_name are the namespace and name recorded in the
+  // VM's VirtRigaud owner stamp (the VirtualMachine it was created or adopted
+  // for; its uid is in provider_raw "owner_uid"), read from the same definition
+  // the listing reads (ADR-0007 Addendum A, slice 4; A6's R4 uniqueness check
+  // looks previous incarnations up by them). Informational: never an
+  // authorization on their own (only the uid identifies an owner). Empty when
+  // the VM carries no stamp, or more than one (ambiguous). Set by a clustered
+  // provider; single-host and thin-client providers leave them empty.
+  string owner_namespace = 11;
+  string owner_name = 12;
 }
 
 message DiskInfo {

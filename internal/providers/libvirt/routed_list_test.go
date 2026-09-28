@@ -257,6 +257,12 @@ func TestClustered_ListVMs_FansOutTagsHostsAndReportsUnreachable(t *testing.T) {
 	assert.Equal(t, uuidWebB, got[[2]string{"host-b", "web"}].GetProviderRaw()[contracts.VMInfoUUIDKey])
 	assert.Equal(t, "On", got[[2]string{"host-a", "web"}].GetPowerState())
 	assert.Equal(t, ownerTeamA.UID, got[[2]string{"host-a", "team-a.db"}].GetProviderRaw()[contracts.VMInfoOwnerUIDKey])
+	// The owner stamp's namespace and name (A6's R4 looks incarnations up by
+	// them); empty for an unstamped domain.
+	assert.Equal(t, ownerTeamA.Namespace, got[[2]string{"host-a", "team-a.db"}].GetOwnerNamespace())
+	assert.Equal(t, ownerTeamA.Name, got[[2]string{"host-a", "team-a.db"}].GetOwnerName())
+	assert.Empty(t, got[[2]string{"host-a", "web"}].GetOwnerNamespace())
+	assert.Empty(t, got[[2]string{"host-a", "web"}].GetOwnerName())
 	assert.Equal(t, []string{"host-c"}, resp.GetUnreachableHostIds())
 
 	assert.Zero(t, p.virshProvider.unroutableHits.Load(), "the listing never reaches the single-host placeholder")
@@ -500,4 +506,16 @@ func TestClustered_Capabilities_AdvertiseRoutedAdoption(t *testing.T) {
 
 	_, err = NewServer(single).TransferOwner(context.Background(), &providerv1.TransferOwnerRequest{Id: "web"})
 	assert.Equal(t, codes.Unimplemented, status.Code(err), "single-host adoption does not stamp")
+}
+
+// TestSoleOwner: the owner namespace and name are reported only for a domain
+// with exactly one readable stamp.
+func TestSoleOwner(t *testing.T) {
+	stamped := listDomainDoc(listDomain{name: "web", uuid: uuidWebA, owner: ownerTeamA})
+	assert.Equal(t, ownerTeamA, soleOwner(stamped))
+	assert.Equal(t, contracts.ObjectIdentity{}, soleOwner(listDomainDoc(listDomain{name: "web", uuid: uuidWebA})))
+	two := strings.Replace(listDomainDoc(listDomain{name: "web", uuid: uuidWebA}), "<memory",
+		"<metadata>"+renderOwnerElementXML(ownerTeamA)+renderOwnerElementXML(ownerTeamB)+"</metadata>\n  <memory", 1)
+	assert.Equal(t, contracts.ObjectIdentity{}, soleOwner(two), "two stamps are ambiguous")
+	assert.Equal(t, contracts.ObjectIdentity{}, soleOwner("<domain"), "unreadable")
 }

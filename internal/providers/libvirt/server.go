@@ -1384,16 +1384,18 @@ func (s *Server) ListVMs(ctx context.Context, req *providerv1.ListVMsRequest) (*
 		}
 
 		protoVMInfos = append(protoVMInfos, &providerv1.VMInfo{
-			Id:          vmInfo.ID,
-			Name:        vmInfo.Name,
-			PowerState:  vmInfo.PowerState,
-			Ips:         vmInfo.IPs,
-			Cpu:         vmInfo.CPU,
-			MemoryMib:   vmInfo.MemoryMiB,
-			Disks:       protoDisks,
-			Networks:    protoNetworks,
-			ProviderRaw: vmInfo.ProviderRaw,
-			HostId:      vmInfo.HostID,
+			Id:             vmInfo.ID,
+			Name:           vmInfo.Name,
+			PowerState:     vmInfo.PowerState,
+			Ips:            vmInfo.IPs,
+			Cpu:            vmInfo.CPU,
+			MemoryMib:      vmInfo.MemoryMiB,
+			Disks:          protoDisks,
+			Networks:       protoNetworks,
+			ProviderRaw:    vmInfo.ProviderRaw,
+			HostId:         vmInfo.HostID,
+			OwnerNamespace: vmInfo.OwnerNamespace,
+			OwnerName:      vmInfo.OwnerName,
 		})
 	}
 

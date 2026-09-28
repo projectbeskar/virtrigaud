@@ -67,7 +67,8 @@ func (s *slice4Server) GetCapabilities(context.Context, *providerv1.GetCapabilit
 func TestClient_ListVMs_CarriesHostIDsAndUnreachableHosts(t *testing.T) {
 	srv := &slice4Server{list: &providerv1.ListVMsResponse{
 		Vms: []*providerv1.VMInfo{
-			{Id: "web", Name: "web", HostId: "host-a", ProviderRaw: map[string]string{"uuid": "u-a"}},
+			{Id: "web", Name: "web", HostId: "host-a", ProviderRaw: map[string]string{"uuid": "u-a"},
+				OwnerNamespace: "team-a", OwnerName: "web"},
 			{Id: "web", Name: "web", HostId: "host-b", ProviderRaw: map[string]string{"uuid": "u-b"}},
 		},
 		UnreachableHostIds: []string{"host-c"},
@@ -81,6 +82,9 @@ func TestClient_ListVMs_CarriesHostIDsAndUnreachableHosts(t *testing.T) {
 	require.Len(t, list.VMs, 2)
 	assert.Equal(t, "host-a", list.VMs[0].HostID)
 	assert.Equal(t, "host-b", list.VMs[1].HostID)
+	assert.Equal(t, "team-a", list.VMs[0].OwnerNamespace)
+	assert.Equal(t, "web", list.VMs[0].OwnerName)
+	assert.Empty(t, list.VMs[1].OwnerNamespace)
 	assert.Equal(t, []string{"host-c"}, list.UnreachableHostIDs)
 
 	caps, err := c.GetCapabilities(context.Background())

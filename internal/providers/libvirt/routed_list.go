@@ -195,10 +195,13 @@ func (p *Provider) listHostVMs(ctx context.Context, c libvirtConn) ([]contracts.
 		return nil, err
 	}
 	var transportErr error
-	vms, err := p.listVMsOn(ctx, vp, func(_ string, rerr error) {
-		if transportErr == nil && isHostTransportFailure(rerr) {
-			transportErr = rerr
-		}
+	vms, err := p.listVMsOn(ctx, vp, listOptions{
+		onReadFailure: func(_ string, rerr error) {
+			if transportErr == nil && isHostTransportFailure(rerr) {
+				transportErr = rerr
+			}
+		},
+		ownerIdentity: true,
 	})
 	if err != nil {
 		return nil, err
