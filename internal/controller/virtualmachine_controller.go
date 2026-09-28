@@ -659,8 +659,11 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	vm.Status.Provider = desc.ProviderRaw
 	r.noteLinkedCloneDependents(vm, desc.ProviderRaw)
 	// A bound clustered VM's memory ceiling follows what its provider reports
-	// (recorded once if missing, lowered after a confirmed shrink).
+	// (recorded once if missing, raised when it reports more, lowered after a
+	// confirmed shrink), and its recorded CPU never stays below the vCPUs the
+	// provider reports it has (review H1).
 	r.syncMemoryCeiling(ctx, vm, ref, desc)
+	r.syncRecordedCPU(ctx, vm, ref, desc)
 
 	// A VM the provider reports Suspended (paused, suspended to RAM) or Unknown
 	// is neither powered on or off nor reconfigured (review R1): it is left as
@@ -2237,6 +2240,11 @@ func (r *VirtualMachineReconciler) reconfigureVM(
 	result, err := provider.Reconfigure(ctx, ref, req)
 	taskRef := result.TaskRef
 	if err != nil {
+		// The failed call may have applied part of the change: record it
+		// (recordReconfigureFailure — on a clustered Provider the size is
+		// counted at the larger of the recorded and the desired one, review H1)
+		// before anything else, so it is re-sent until one succeeds.
+		r.recordReconfigureFailure(vm, ref, vmClass, err)
 		// As for Power: a clustered VM's host-scoped unavailability or
 		// not-found is a host-level fact, not a reconfigure failure to retry
 		// every few seconds (ADR-0007 Addendum A, slice 2).
@@ -2244,7 +2252,6 @@ func (r *VirtualMachineReconciler) reconfigureVM(
 			return res, nil
 		}
 		logger.Error(err, "Failed to reconfigure VM")
-		k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Failed to reconfigure VM: %v", err))
 		r.updateStatus(ctx, vm)
 		return ctrl.Result{RequeueAfter: routedCallRetryAfter(ref, err)}, nil
 	}

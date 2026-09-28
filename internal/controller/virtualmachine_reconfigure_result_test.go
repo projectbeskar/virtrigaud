@@ -317,10 +317,10 @@ func TestClustered_ShrinkWhileOff_NotAppliedIsNotRecorded(t *testing.T) {
 	}
 }
 
-// TestClustered_MemoryCeiling_BackfilledOnceFromTheProvider (review R2): a
-// bound clustered VM with no recorded ceiling gets the provider's memory
-// maximum recorded once; it is never raised afterwards, and the VMClass's
-// hot-add flag no longer sizes it.
+// TestClustered_MemoryCeiling_BackfilledOnceFromTheProvider (review R2, H1b):
+// a bound clustered VM with no recorded ceiling gets the provider's memory
+// maximum recorded; the VMClass's hot-add flag no longer sizes it, and a
+// higher report raises it at once.
 func TestClustered_MemoryCeiling_BackfilledOnceFromTheProvider(t *testing.T) {
 	prov := runningRoutingProvider()
 	prov.describeResp.MaxMemoryMiB = 16384
@@ -335,11 +335,89 @@ func TestClustered_MemoryCeiling_BackfilledOnceFromTheProvider(t *testing.T) {
 	assert.Equal(t, int64(16384), *got.Status.Placement.MemoryCeilingMiB)
 	assert.Equal(t, int64(16384), admittedFootprint(got, nil).MemoryMiB, "counted at the ceiling the provider reports")
 
-	// Class flips hot-add off: irrelevant now. A higher report never raises it.
+	// A higher report — the domain can now reach more, e.g. after a failed or
+	// partial Reconfigure raised its <memory> — raises it at once (review H1b).
 	prov.describeResp.MaxMemoryMiB = 32768
 	_, err = r.reconcileVM(context.Background(), got)
 	require.NoError(t, err)
-	assert.Equal(t, int64(16384), *getVM(t, r, "app").Status.Placement.MemoryCeilingMiB, "never raised")
+	got = getVM(t, r, "app")
+	assert.Equal(t, int64(32768), *got.Status.Placement.MemoryCeilingMiB, "raised to what the provider reports")
+	assert.Equal(t, int64(32768), admittedFootprint(got, nil).MemoryMiB)
+
+	// A report at or below the recorded memory never raises it.
+	prov.describeResp.MaxMemoryMiB = 4096
+	app2 := sized("app2", 2)
+	app2.Status.Placement.MemoryCeilingMiB = i64p(0)
+	r2 := resizeFixture(t, prov, app2)
+	_, err = r2.reconcileVM(context.Background(), getVM(t, r2, "app2"))
+	require.NoError(t, err)
+	assert.Zero(t, *getVM(t, r2, "app2").Status.Placement.MemoryCeilingMiB)
+}
+
+// TestClustered_ReconfigureFailure_CountedAtTheLargerSize (review H1a): a
+// clustered Reconfigure that fails may have applied part of the change, so
+// the VM is counted at max(recorded, desired); reverting the spec afterwards
+// never lowers the count while the domain may still hold the larger size.
+func TestClustered_ReconfigureFailure_CountedAtTheLargerSize(t *testing.T) {
+	prov := runningRoutingProvider()
+	prov.reconfigureErr = contracts.NewRetryableError("could not grow the VM's disk to 1048576 GiB", nil)
+	r := resizeFixture(t, prov, wantsCPU(sized("app", 2), 4)) // 4 + 4 = 8 of 8: admitted
+	_, err := r.reconcileVM(context.Background(), getVM(t, r, "app"))
+	require.NoError(t, err)
+	require.Len(t, prov.reconfigureRefs, 1, "the admitted grow was sent")
+
+	got := getVM(t, r, "app")
+	assert.Equal(t, int32(4), *got.Status.CurrentResources.CPU, "a failed grow is counted at the desired size")
+	assert.Equal(t, int32(4), admittedFootprint(got, nil).CPU)
+	c := reconfiguringCondition(got)
+	require.NotNil(t, c)
+	assert.Equal(t, metav1.ConditionFalse, c.Status)
+	assert.Equal(t, k8s.ReasonProviderError, c.Reason)
+	assert.Equal(t, got.Generation, c.ObservedGeneration)
+
+	// The tenant reverts. The domain may still run with 4 vCPUs (it reports 4):
+	// the count stays at 4 — the shrink waits for power-off — never 2.
+	got.Spec.Resources.CPU = i32p(2)
+	require.NoError(t, r.Update(context.Background(), got))
+	prov.reconfigureErr = nil
+	prov.describeResp.VCPUs = 4
+	_, err = r.reconcileVM(context.Background(), getVM(t, r, "app"))
+	require.NoError(t, err)
+	got = getVM(t, r, "app")
+	assert.Equal(t, int32(4), *got.Status.CurrentResources.CPU)
+	assert.Equal(t, int32(4), admittedFootprint(got, nil).CPU, "never counted below what the domain may hold")
+}
+
+// TestClustered_RecordedCPU_RaisedToWhatTheProviderReports (review H1d): a
+// clustered VM whose provider reports more vCPUs online than recorded is
+// counted at them; a lower report never lowers the record; single-host VMs are
+// untouched.
+func TestClustered_RecordedCPU_RaisedToWhatTheProviderReports(t *testing.T) {
+	prov := runningRoutingProvider()
+	prov.describeResp.VCPUs = 6
+	app := sized("app", 2)
+	app.Spec.Resources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: i32p(6), MemoryMiB: i64p(4096)}
+	r := resizeFixture(t, prov, app)
+	_, err := r.reconcileVM(context.Background(), getVM(t, r, "app"))
+	require.NoError(t, err)
+	got := getVM(t, r, "app")
+	assert.Equal(t, int32(6), *got.Status.CurrentResources.CPU)
+	assert.Empty(t, prov.reconfigureRefs, "the recorded size now matches the spec: nothing to send")
+
+	prov.describeResp.VCPUs = 1
+	_, err = r.reconcileVM(context.Background(), got)
+	require.NoError(t, err)
+	assert.Equal(t, int32(6), *getVM(t, r, "app").Status.CurrentResources.CPU, "never lowered by a report")
+
+	single := newResultProvider()
+	single.DescribeFn = func(context.Context, string) (contracts.DescribeResponse, error) {
+		return contracts.DescribeResponse{Exists: true, PowerState: "On", VCPUs: 16}, nil
+	}
+	rs, _ := singleHostReconciler(t, single)
+	vm := sizedSingleHostVM(4, 8192, 4, 8192)
+	_, err = rs.reconcileVM(context.Background(), vm)
+	require.NoError(t, err)
+	assert.Equal(t, int32(4), *vm.Status.CurrentResources.CPU, "single-host: status is not rewritten from Describe")
 }
 
 func TestClustered_MemoryCeiling_BackfillWithoutHeadroomIsZero(t *testing.T) {

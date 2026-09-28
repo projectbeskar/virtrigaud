@@ -51,11 +51,22 @@ import (
 //     again every restartPendingRecheckInterval (sooner if the spec changes):
 //     once the VM has been power-cycled it answers "applied", and the desired
 //     size — the smaller one, for a shrink — is recorded.
-//   - Failed: status.currentResources is untouched and the VM gets
-//     Reconfiguring=False/ProviderError. Because a failed Reconfigure may have
-//     changed part of the persistent definition before it failed, it is sent
-//     again even if the spec is reverted to the recorded size, until one
-//     succeeds.
+//   - Failed: the VM gets Reconfiguring=False/ProviderError. A failed
+//     Reconfigure may have applied part of the change before it failed — the
+//     definition, or even the running VM — so on a clustered Provider
+//     status.currentResources is recorded exactly as for RestartRequired, per
+//     resource max(recorded, desired) (review H1): what failed may still run
+//     at the larger size, and the committed-capacity accounting must not
+//     count it below that. On a single-host Provider, which has no capacity
+//     accounting, it is left untouched (#354: status reports only a size the
+//     provider confirmed). Either way the Reconfigure is sent again — even if
+//     the spec is reverted to the recorded size — until one succeeds, which
+//     then records what was applied.
+//   - A clustered VM's recorded CPU is also raised to the vCPUs its provider
+//     reports it has (DescribeResponse.vcpus), and its memory ceiling to the
+//     memory maximum its provider reports, whenever those are higher
+//     (syncRecordedCPU, syncMemoryCeiling): whatever a failed or partial
+//     change left behind, the VM is never counted below what it holds.
 //
 // On a clustered Provider a shrink of a running VM is deferred until the VM is
 // powered off (ShrinkPendingPowerOff, #356), and a powered-off domain takes a
@@ -76,16 +87,7 @@ const restartPendingRecheckInterval = 2 * time.Minute
 // the request was just built from them) status.currentResources is left as it
 // is.
 func (r *VirtualMachineReconciler) recordRestartPending(vm *infravirtrigaudiov1beta1.VirtualMachine, vmClass *infravirtrigaudiov1beta1.VMClass) {
-	desiredCPU, desiredMem32, err := effectiveResources(vm, vmClass)
-	if err == nil {
-		cpu := max(r.getCurrentCPU(vm), desiredCPU)
-		mem := max(r.getCurrentMemoryMiB(vm), int64(desiredMem32))
-		if vm.Status.CurrentResources == nil {
-			vm.Status.CurrentResources = &infravirtrigaudiov1beta1.VirtualMachineResources{}
-		}
-		vm.Status.CurrentResources.CPU = &cpu
-		vm.Status.CurrentResources.MemoryMiB = &mem
-	}
+	desiredCPU, desiredMem32, _ := r.recordAtLeastDesired(vm, vmClass)
 	msg := fmt.Sprintf("the new size (%d vCPU, %d MiB) is in the VM's persistent definition and takes effect at its next power cycle "+
 		"(power off, then on; a reboot from inside the guest is not enough). Until then the running VM keeps its previous size; "+
 		"status.currentResources counts the larger of the two", desiredCPU, desiredMem32)
@@ -98,6 +100,50 @@ func (r *VirtualMachineReconciler) recordRestartPending(vm *infravirtrigaudiov1b
 	})
 	vm.Status.Phase = infravirtrigaudiov1beta1.VirtualMachinePhaseRunning
 	k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonReconcileSuccess, "VM is ready")
+}
+
+// recordAtLeastDesired raises status.currentResources, per resource, to the
+// VM's desired size (effectiveResources) where that is larger, and keeps it
+// where it is not: max(recorded, desired). It returns the desired size, and
+// ok == false (nothing recorded) if the effective resources cannot be computed
+// — unexpected, since a request was just built from them.
+func (r *VirtualMachineReconciler) recordAtLeastDesired(vm *infravirtrigaudiov1beta1.VirtualMachine, vmClass *infravirtrigaudiov1beta1.VMClass) (desiredCPU, desiredMemMiB int32, ok bool) {
+	desiredCPU, desiredMemMiB, err := effectiveResources(vm, vmClass)
+	if err != nil {
+		return desiredCPU, desiredMemMiB, false
+	}
+	cpu := max(r.getCurrentCPU(vm), desiredCPU)
+	mem := max(r.getCurrentMemoryMiB(vm), int64(desiredMemMiB))
+	if vm.Status.CurrentResources == nil {
+		vm.Status.CurrentResources = &infravirtrigaudiov1beta1.VirtualMachineResources{}
+	}
+	vm.Status.CurrentResources.CPU = &cpu
+	vm.Status.CurrentResources.MemoryMiB = &mem
+	return desiredCPU, desiredMemMiB, true
+}
+
+// recordReconfigureFailure records a Reconfigure that failed with err:
+// Reconfiguring=False/ProviderError (observedGeneration set, so a later spec
+// change is sent at once) and — on a clustered Provider, whose
+// committed-capacity accounting trusts status.currentResources — the size
+// counted at max(recorded, desired) per resource, because the failed call may
+// have applied part of the change (review H1). A NotFound (the domain is gone
+// or not this VM's: the provider's ownership check refused it before anything
+// changed) records nothing; the caller hands it to the routed-error handling.
+func (r *VirtualMachineReconciler) recordReconfigureFailure(vm *infravirtrigaudiov1beta1.VirtualMachine, ref contracts.VMRef, vmClass *infravirtrigaudiov1beta1.VMClass, err error) {
+	if contracts.IsNotFound(err) {
+		return
+	}
+	if ref.Routed() {
+		r.recordAtLeastDesired(vm, vmClass)
+	}
+	meta.SetStatusCondition(&vm.Status.Conditions, metav1.Condition{
+		Type:               k8s.ConditionReconfiguring,
+		Status:             metav1.ConditionFalse,
+		Reason:             k8s.ReasonProviderError,
+		Message:            fmt.Sprintf("Failed to reconfigure VM: %v", err),
+		ObservedGeneration: vm.Generation,
+	})
 }
 
 // pendingReconfigureRecheck reports whether the VM must be sent a Reconfigure
@@ -148,24 +194,28 @@ func restartPending(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
 //     recorded once from the provider (review R2). From then on the VMClass's
 //     memory hot-add setting, which the VM's owner can flip, is never used to
 //     size it again.
+//   - A recorded ceiling below what the provider reports — more than both the
+//     ceiling and the recorded memory — is raised to it at once (review H1): the
+//     domain can reach that much, whatever a failed or partial Reconfigure
+//     left behind, and counting it is always the conservative side.
 //   - A recorded ceiling above what the provider now reports — a confirmed
 //     shrink lowered the domain's memory maximum (review R3), or the create
 //     provisioned less than was scheduled — is lowered to it. Never while a
-//     Reconfigure is in flight or pending a restart: the running domain's
-//     maximum is then not necessarily what it boots with next.
+//     Reconfigure is in flight, pending a restart, or failed and not yet
+//     retried successfully: the running domain's maximum is then not
+//     necessarily what it boots with next.
 //
-// A recorded ceiling is never raised: a grow beyond it is recorded in
-// status.currentResources, which the accounting counts at least. The value
-// recorded is the reported maximum when it exceeds the recorded memory, else 0
-// (no headroom beyond the VM's own size). The change is persisted with the
-// reconcile's status write.
+// The value recorded is the reported maximum when it exceeds the recorded
+// memory, else 0 (no headroom beyond the VM's own size). The change is
+// persisted with the reconcile's status write.
 func (r *VirtualMachineReconciler) syncMemoryCeiling(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, ref contracts.VMRef, desc contracts.DescribeResponse) {
 	pl := vm.Status.Placement
 	if !ref.Routed() || pl == nil || pl.Host == "" || desc.MaxMemoryMiB <= 0 {
 		return
 	}
+	recordedMem := r.getCurrentMemoryMiB(vm)
 	reported := desc.MaxMemoryMiB
-	if reported <= r.getCurrentMemoryMiB(vm) {
+	if reported <= recordedMem {
 		reported = 0
 	}
 	logger := log.FromContext(ctx)
@@ -173,9 +223,41 @@ func (r *VirtualMachineReconciler) syncMemoryCeiling(ctx context.Context, vm *in
 	case pl.MemoryCeilingMiB == nil:
 		pl.MemoryCeilingMiB = &reported
 		logger.Info("Recorded the clustered VM's memory ceiling from its provider (once)", "memoryCeilingMiB", reported)
-	case reported < *pl.MemoryCeilingMiB && vm.Status.ReconfigureTaskRef == "" && !restartPending(vm):
+	case desc.MaxMemoryMiB > max(*pl.MemoryCeilingMiB, recordedMem):
+		logger.Info("Raised the clustered VM's memory ceiling to what its provider reports",
+			"from", *pl.MemoryCeilingMiB, "to", desc.MaxMemoryMiB)
+		raised := desc.MaxMemoryMiB
+		pl.MemoryCeilingMiB = &raised
+	case reported < *pl.MemoryCeilingMiB && vm.Status.ReconfigureTaskRef == "" && !restartPending(vm) && !lastReconfigureFailed(vm):
 		logger.Info("Lowered the clustered VM's memory ceiling to what its provider reports",
 			"from", *pl.MemoryCeilingMiB, "to", reported)
 		pl.MemoryCeilingMiB = &reported
 	}
+}
+
+// lastReconfigureFailed reports whether the VM's last Reconfigure failed and has
+// not been retried successfully since.
+func lastReconfigureFailed(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
+	cond := meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionReconfiguring)
+	return cond != nil && cond.Status == metav1.ConditionFalse && cond.Reason == k8s.ReasonProviderError
+}
+
+// syncRecordedCPU raises the recorded CPU (status.currentResources.cpu) of a
+// bound clustered VM to the vCPUs its provider reports it has online
+// (desc.VCPUs; 0 = not reported) whenever that is higher (review H1): a
+// failed or partial Reconfigure, or a change made outside VirtualMachine,
+// can leave a domain with more vCPUs than recorded, and the
+// committed-capacity accounting must never count it below what it runs with.
+// It never lowers the recorded CPU — only a Reconfigure the provider confirms
+// applied does — and does nothing for a VM with no recorded size.
+func (r *VirtualMachineReconciler) syncRecordedCPU(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, ref contracts.VMRef, desc contracts.DescribeResponse) {
+	pl := vm.Status.Placement
+	cur := vm.Status.CurrentResources
+	if !ref.Routed() || pl == nil || pl.Host == "" || cur == nil || cur.CPU == nil || desc.VCPUs <= *cur.CPU {
+		return
+	}
+	log.FromContext(ctx).Info("Raised the clustered VM's recorded CPU to the vCPUs its provider reports",
+		"from", *cur.CPU, "to", desc.VCPUs)
+	cpu := desc.VCPUs
+	cur.CPU = &cpu
 }
