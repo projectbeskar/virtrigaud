@@ -22,6 +22,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/url"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -179,6 +181,11 @@ const (
 	// would let deleting the stale definition remove the running VM's disk.
 	skipDuplicate adoptionSkipReason = "defined on more than one host (the same UUID, or a disk a VM on another host uses; " +
 		"remove the stale definition)"
+	// skipSharedEndpoint: listed on a Host whose endpoint another Host object
+	// (of any Provider, in any namespace) also names. Two Providers adopting
+	// from one hypervisor could each take the same unstamped domain.
+	skipSharedEndpoint adoptionSkipReason = "on a Host whose endpoint another Host object also names " +
+		"(one clustered Provider per host endpoint)"
 )
 
 // pendingAdoption is an adopted VirtualMachine whose domain already carries
@@ -223,7 +230,8 @@ func (r *VMAdoptionReconciler) reconcileClusteredAdoption(ctx context.Context, p
 		return r.clusteredAdoptionFailed(ctx, provider, fmt.Sprintf("Discovery failed: list VirtualMachines: %v", err), errReasonDiscoverVMs)
 	}
 
-	plan := planClusteredAdoption(provider, listed, vmList.Items)
+	shared := r.hostsWithSharedEndpoints(ctx, provider)
+	plan := planClusteredAdoption(provider, listed, vmList.Items, shared)
 	var unmanaged []contracts.VMInfo
 	for _, info := range plan.adopt {
 		if filter != nil && !r.matchesFilter(info, filter) {
@@ -251,7 +259,7 @@ func (r *VMAdoptionReconciler) reconcileClusteredAdoption(ctx context.Context, p
 		}
 	}
 	for _, p := range plan.complete {
-		count(r.completeClusteredAdoption(ctx, provider, transferrer, providerInstance, p.vm, p.info),
+		count(r.completeClusteredAdoption(ctx, provider, transferrer, providerInstance, p.vm, p.info, nil),
 			"Failed to complete the adoption of a VM", p.info)
 	}
 	for _, info := range unmanaged {
@@ -399,6 +407,8 @@ func (r *VMAdoptionReconciler) routedAdopter(ctx context.Context, provider *infr
 //     Provider that is still waiting for its binding and was created for this
 //     very (host, id) (isAwaitingAdoptionOf): its binding is completed;
 //   - a VM without a host id or UUID cannot be adopted (skipped);
+//   - a VM on a Host whose endpoint another Host object names is skipped
+//     (sharedEndpointHosts);
 //   - a VM whose UUID is listed on more than one host, or one of whose disk
 //     paths a VM listed on another host uses, is a cross-host duplicate
 //     (skipped and reported): adopting both copies would let one's delete
@@ -411,7 +421,7 @@ func (r *VMAdoptionReconciler) routedAdopter(ctx context.Context, provider *infr
 // VMs on unreachable hosts are not in the list, and nothing is concluded
 // about them.
 func planClusteredAdoption(provider *infravirtrigaudiov1beta1.Provider, listed contracts.VMList,
-	vms []infravirtrigaudiov1beta1.VirtualMachine) clusteredAdoptionPlan {
+	vms []infravirtrigaudiov1beta1.VirtualMachine, sharedEndpointHosts map[string]bool) clusteredAdoptionPlan {
 	managed := map[vmHostKey]bool{}
 	liveUIDs := make(map[string]bool, len(vms))
 	awaiting := map[string]*infravirtrigaudiov1beta1.VirtualMachine{}
@@ -443,6 +453,10 @@ func planClusteredAdoption(provider *infravirtrigaudiov1beta1.Provider, listed c
 			continue
 		}
 		if managed[vmHostKey{host: info.HostID, id: info.ID}] {
+			continue
+		}
+		if sharedEndpointHosts[info.HostID] {
+			skip(info, skipSharedEndpoint)
 			continue
 		}
 		if duplicated(info) {
@@ -580,7 +594,7 @@ func (r *VMAdoptionReconciler) adoptClusteredVM(ctx context.Context, provider *i
 			return fmt.Errorf("VirtualMachine %s/%s exists and is not waiting for this adoption: %w", vm.Namespace, name, errAdoptionSkipped)
 		}
 	}
-	return r.completeClusteredAdoption(ctx, provider, transferrer, providerInstance, vm, info)
+	return r.completeClusteredAdoption(ctx, provider, transferrer, providerInstance, vm, info, nil)
 }
 
 // createClusteredAdoptedVM creates the VirtualMachine (and its VMClass) that
@@ -637,7 +651,7 @@ func (r *VMAdoptionReconciler) adoptionHost(ctx context.Context, provider *infra
 // binding write.
 func (r *VMAdoptionReconciler) completeClusteredAdoption(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider,
 	transferrer contracts.OwnerTransferrer, providerInstance contracts.Provider,
-	vm *infravirtrigaudiov1beta1.VirtualMachine, info contracts.VMInfo) error {
+	vm *infravirtrigaudiov1beta1.VirtualMachine, info contracts.VMInfo, replaceable []contracts.ObjectIdentity) error {
 	logger := log.FromContext(ctx).WithValues("host", info.HostID, "vm_id", info.ID, "vm_name", vm.Name)
 	host, err := r.adoptionHost(ctx, provider, info.HostID)
 	if err != nil {
@@ -660,20 +674,30 @@ func (r *VMAdoptionReconciler) completeClusteredAdoption(ctx context.Context, pr
 		return fmt.Errorf("VirtualMachine %s/%s has no UID yet", vm.Namespace, vm.Name)
 	}
 
-	// Until ADR-0007 A6.4 adoption takes only an unstamped domain, or one
-	// already stamped with this VirtualMachine (an idempotent retry after a
-	// lost binding write). Any other stamp is a previous incarnation
-	// (planClusteredAdoption skips it; this re-checks it), so nothing is ever
-	// listed as replaceable here.
+	// Every stamp the domain was listed with must be this VirtualMachine's (an
+	// idempotent retry after a lost binding write) or one the caller names as
+	// replaceable. Adoption names none until ADR-0007 A6.4: any other stamp is
+	// a previous incarnation (planClusteredAdoption skips it; this re-checks
+	// it). A6.4's re-attach will name the previous incarnation.
+	replaceableUIDs := make([]string, 0, len(replaceable))
+	for _, o := range replaceable {
+		replaceableUIDs = append(replaceableUIDs, o.UID)
+	}
 	for _, uid := range ownerUIDs(info) {
-		if uid != ref.Owner.UID {
+		if uid != ref.Owner.UID && !slices.Contains(replaceableUIDs, uid) {
 			return fmt.Errorf("VM %s on host %s carries another VirtualMachine's owner stamp: %w",
 				info.ID, info.HostID, errAdoptionSkipped)
 		}
 	}
+	// Right before the transfer, prove with an uncached read that no
+	// replaceable owner exists (defense in depth against a lagging cache).
+	if err := r.confirmOwnersGone(ctx, replaceable); err != nil {
+		return err
+	}
 	if err := transferrer.TransferOwner(ctx, contracts.TransferOwnerRequest{
-		VM:           ref,
-		ExpectedUUID: info.ProviderRaw[contracts.VMInfoUUIDKey],
+		VM:                   ref,
+		ReplaceableOwnerUIDs: replaceableUIDs,
+		ExpectedUUID:         info.ProviderRaw[contracts.VMInfoUUIDKey],
 	}); err != nil {
 		return fmt.Errorf("transfer the owner of VM %s on host %s: %w", info.ID, info.HostID, err)
 	}
@@ -777,6 +801,94 @@ func (r *VMAdoptionReconciler) writeAdoptionBinding(ctx context.Context, provide
 		return err
 	}
 	return fmt.Errorf("write the binding of adopted VirtualMachine %s: %w", key, err)
+}
+
+// errOwnerStillExists marks a replaceable owner that the uncached read found
+// alive: its domain is never re-stamped.
+var errOwnerStillExists = errors.New("the stamped owner VirtualMachine still exists")
+
+// confirmOwnersGone proves, with an UNCACHED read of each owner's
+// namespace/name, that no VirtualMachine with one of the owners' UIDs exists
+// (a terminating one counts as existing). A VirtualMachine's namespace and
+// name never change, so a GET of the stamp's namespace/name finds it if it
+// exists. It fails closed: an owner without a namespace, name or UID, a read
+// error, or no uncached reader configured refuses the transfer.
+func (r *VMAdoptionReconciler) confirmOwnersGone(ctx context.Context, owners []contracts.ObjectIdentity) error {
+	if len(owners) == 0 {
+		return nil
+	}
+	if r.APIReader == nil {
+		return fmt.Errorf("no uncached reader to confirm that a stamped owner is gone: %w", errOwnerStillExists)
+	}
+	for _, o := range owners {
+		if o.UID == "" || o.Namespace == "" || o.Name == "" {
+			return fmt.Errorf("stamped owner %q cannot be looked up (namespace/name unknown): %w", o.UID, errOwnerStillExists)
+		}
+		vm := &infravirtrigaudiov1beta1.VirtualMachine{}
+		err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: o.Namespace, Name: o.Name}, vm)
+		switch {
+		case apierrors.IsNotFound(err):
+			continue
+		case err != nil:
+			return fmt.Errorf("confirm stamped owner %s/%s is gone: %w", o.Namespace, o.Name, err)
+		case string(vm.UID) == o.UID:
+			return fmt.Errorf("stamped owner %s/%s (uid %s): %w", o.Namespace, o.Name, o.UID, errOwnerStillExists)
+		}
+	}
+	return nil
+}
+
+// hostsWithSharedEndpoints returns the names of provider's Hosts whose
+// endpoint (scheme, host and port; the user is ignored) another Host object —
+// of any Provider, in any namespace — also names, and logs a warning for each.
+// Adoption from such a host is skipped: two Providers fronting one hypervisor
+// could each adopt the same unstamped domain. A Host list that cannot be read
+// is logged and treated as no sharing (each Provider's adoption still stamps
+// with a check-and-set).
+func (r *VMAdoptionReconciler) hostsWithSharedEndpoints(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) map[string]bool {
+	logger := log.FromContext(ctx)
+	hosts := &infravirtrigaudiov1beta1.HostList{}
+	if err := r.List(ctx, hosts); err != nil {
+		logger.Error(err, "List Hosts to detect shared endpoints")
+		return nil
+	}
+	byEndpoint := map[string][]*infravirtrigaudiov1beta1.Host{}
+	for i := range hosts.Items {
+		h := &hosts.Items[i]
+		if key := endpointKey(h.Spec.Endpoint); key != "" {
+			byEndpoint[key] = append(byEndpoint[key], h)
+		}
+	}
+	shared := map[string]bool{}
+	for _, group := range byEndpoint {
+		if len(group) < 2 {
+			continue
+		}
+		var names []string
+		for _, h := range group {
+			names = append(names, h.Namespace+"/"+h.Name)
+		}
+		for _, h := range group {
+			if h.Namespace == provider.Namespace && h.Spec.ProviderRef.Name == provider.Name {
+				shared[h.Name] = true
+				logger.Info("WARNING: Host objects share one hypervisor endpoint; not adopting from it "+
+					"(one clustered Provider per host endpoint)", "host", h.Name, "hosts", names)
+			}
+		}
+	}
+	return shared
+}
+
+// endpointKey reduces a Host endpoint to what identifies the hypervisor: the
+// URL scheme, host name (lower-cased) and port, without the user or path. An
+// endpoint that does not parse is compared as written.
+func endpointKey(endpoint string) string {
+	endpoint = strings.TrimSpace(endpoint)
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Hostname() == "" {
+		return endpoint
+	}
+	return strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Hostname()) + ":" + u.Port()
 }
 
 // freshReader is the reader the adoption re-reads objects with before it

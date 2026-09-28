@@ -1459,6 +1459,11 @@ slice 4 is refused with a message and nothing is listed. For each listed VM:
    (its VMs are unknown). *Follow-up:* a clustered `Delete` checks only its own
    host for other domains using the disk; it should scan every host, as
    ADR-0007 A6.1's R3 does for `Create`.
+   **A Host whose endpoint another Host object names** (same scheme, host and
+   port, whatever the SSH user; any Provider, any namespace) is not adopted
+   from, and the manager logs a warning: two Providers fronting one hypervisor
+   could each adopt the same unstamped domain. Keep one clustered Provider per
+   host endpoint.
 2. **The adopting VirtualMachine** is created in the Provider's namespace, as on
    a single host, but named after the domain **plus a digest of (host, id)**
    (for example `team-a-web-3f2a9c1b04`), so the same name on two hosts gives

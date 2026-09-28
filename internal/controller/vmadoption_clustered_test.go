@@ -576,7 +576,7 @@ func TestPlanClusteredAdoption_KeysOnHostAndID(t *testing.T) {
 	delete(noUUID.ProviderRaw, contracts.VMInfoUUIDKey)
 	plan := planClusteredAdoption(provider, contracts.VMList{VMs: []contracts.VMInfo{
 		info("host-a", "web"), info("host-b", "web"), info("", "web"), noUUID,
-	}}, []infravirtrigaudiov1beta1.VirtualMachine{bound})
+	}}, []infravirtrigaudiov1beta1.VirtualMachine{bound}, nil)
 
 	require.Len(t, plan.adopt, 1)
 	assert.Equal(t, "host-b", plan.adopt[0].HostID, "a name bound on host-a says nothing about host-b's domain")
@@ -770,4 +770,54 @@ func TestClusteredAdoption_BindingDeferredWhenTheVMIsGoingAway(t *testing.T) {
 	assert.EqualValues(t, 0, st.AdoptedVMs)
 	assert.EqualValues(t, 0, st.FailedAdoptions, "deferred, not failed")
 	assert.Contains(t, st.Message, "1 deferred to the next discovery")
+}
+
+// TestConfirmOwnersGone_UsesTheUncachedReader: a replaceable owner the cache
+// no longer shows but the API server does (a lagging cache) refuses the
+// transfer; one gone from the API server, or re-created under a new UID,
+// allows it; no uncached reader or an owner without namespace/name fails
+// closed. (Adoption names no replaceable owner until A6.4; this is the check
+// A6.4's re-attach relies on.)
+func TestConfirmOwnersGone_UsesTheUncachedReader(t *testing.T) {
+	s := coverageTestScheme(t)
+	live := &infravirtrigaudiov1beta1.VirtualMachine{ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "team-a", UID: "uid-live"}}
+	recreated := &infravirtrigaudiov1beta1.VirtualMachine{ObjectMeta: metav1.ObjectMeta{Name: "db", Namespace: "team-a", UID: "uid-new"}}
+	api := fake.NewClientBuilder().WithScheme(s).WithObjects(live, recreated).Build()
+	cache := fake.NewClientBuilder().WithScheme(s).Build() // lags: shows none of them
+	r := &VMAdoptionReconciler{Client: cache, Scheme: s, APIReader: api}
+	ctx := context.Background()
+
+	require.NoError(t, r.confirmOwnersGone(ctx, nil))
+	require.NoError(t, r.confirmOwnersGone(ctx, []contracts.ObjectIdentity{{UID: "uid-gone", Namespace: "team-a", Name: "gone"}}))
+	require.NoError(t, r.confirmOwnersGone(ctx, []contracts.ObjectIdentity{{UID: "uid-old", Namespace: "team-a", Name: "db"}}),
+		"the name exists again under another UID: the stamped owner is gone")
+	err := r.confirmOwnersGone(ctx, []contracts.ObjectIdentity{{UID: "uid-live", Namespace: "team-a", Name: "web"}})
+	require.ErrorIs(t, err, errOwnerStillExists, "the uncached read finds it although the cache does not")
+	err = r.confirmOwnersGone(ctx, []contracts.ObjectIdentity{{UID: "uid-x"}})
+	require.ErrorIs(t, err, errOwnerStillExists, "no namespace/name: fail closed")
+	r.APIReader = nil
+	err = r.confirmOwnersGone(ctx, []contracts.ObjectIdentity{{UID: "uid-gone", Namespace: "team-a", Name: "gone"}})
+	require.ErrorIs(t, err, errOwnerStillExists, "no uncached reader: fail closed")
+}
+
+// TestClusteredAdoption_SharedHostEndpointIsNotAdoptedFrom: a Host whose
+// endpoint (ignoring the SSH user) another Host object names — here one of
+// another Provider in another namespace — is not adopted from.
+func TestClusteredAdoption_SharedHostEndpointIsNotAdoptedFrom(t *testing.T) {
+	other := clusterHost("elsewhere", "prov-other")
+	other.Namespace = "other-ns"
+	other.Spec.Endpoint = "qemu+ssh://root@HOST-A/system"
+	prov := &fakeClusteredAdopter{caps: routedAdoptionCaps, domains: []*fakeDomain{
+		{host: "host-a", id: "web", uuid: "uuid-a-web", power: "On"},
+		{host: "host-b", id: "web", uuid: "uuid-b-web", power: "On"},
+	}}
+	r := clusteredAdoptionReconciler(t, prov, clusteredAdoptionProvider(),
+		clusterHost("host-a", "prov-c"), clusterHost("host-b", "prov-c"), other)
+
+	reconcileAdoption(t, r)
+	require.Len(t, prov.transfers, 1)
+	assert.Equal(t, "host-b", prov.transfers[0].VM.HostID)
+	assert.Contains(t, adoptionStatus(t, r).Message, "one clustered Provider per host endpoint")
+	assert.Equal(t, endpointKey("qemu+ssh://virt@host-a/system"), endpointKey("qemu+ssh://root@HOST-A/system"))
+	assert.NotEqual(t, endpointKey("qemu+ssh://virt@host-a/system"), endpointKey("qemu+ssh://virt@host-a:2222/system"))
 }
