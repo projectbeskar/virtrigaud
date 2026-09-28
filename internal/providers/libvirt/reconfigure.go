@@ -46,7 +46,9 @@ import (
 // The persistent definition is always changed first: a live change that
 // succeeded but was never persisted would silently revert at the next power
 // cycle, so there is no order in which a failure leaves the running domain
-// ahead of its definition.
+// ahead of its definition. The disk is grown before any CPU or memory change,
+// so a disk grow that fails (the request controls its size) fails the call
+// before the domain's CPU or memory has changed.
 //
 // What "applied" means for memory. A domain's memory is its <memory> (the
 // balloon maximum: what the guest can use without host action) and its
@@ -276,6 +278,16 @@ func (p *Provider) reconfigureOn(ctx context.Context, c libvirtConn, d domainTar
 		return false, err
 	}
 
+	// The disk first: it is the step most likely to fail for a reason the
+	// request itself controls (a VMClass disk size the host cannot give), and
+	// it must fail before the CPU or memory of the domain is changed, so a
+	// failed call leaves no applied CPU/memory grow behind (review H1).
+	if desired.Class.DiskDefaults != nil && desired.Class.DiskDefaults.SizeGiB > 0 {
+		if err := reconfigureDisk(ctx, vp, d, mode, int(desired.Class.DiskDefaults.SizeGiB)); err != nil {
+			return false, err
+		}
+	}
+
 	var pending []string
 	if desired.Class.CPU > 0 || desired.Class.MemoryMiB > 0 {
 		cfg, err := persistentDomainSize(ctx, vp, d.handle)
@@ -299,12 +311,6 @@ func (p *Provider) reconfigureOn(ctx context.Context, c libvirtConn, d domainTar
 			if pend {
 				pending = append(pending, fmt.Sprintf("%d MiB of memory", desired.Class.MemoryMiB))
 			}
-		}
-	}
-
-	if desired.Class.DiskDefaults != nil && desired.Class.DiskDefaults.SizeGiB > 0 {
-		if err := reconfigureDisk(ctx, vp, d, mode, int(desired.Class.DiskDefaults.SizeGiB)); err != nil {
-			return false, err
 		}
 	}
 

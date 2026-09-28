@@ -187,13 +187,29 @@ func honestSingleHostCases() []honestCase {
 			wantErr: true,
 		},
 		{
-			name:    "a stopped domain gets every change persistently, the vCPU maximum raised first",
+			name:    "a stopped domain gets every change persistently: the disk first, the vCPU maximum raised first",
 			desired: reconfigureTo(4, 4096, 20),
 			changes: []string{
+				"vol-resize " + h + "-disk 20G --pool default",
 				"setvcpus " + h + " 4 --config --maximum", "setvcpus " + h + " 4 --config",
 				"setmaxmem " + h + " 4194304K --config", "setmem " + h + " 4194304K --config",
-				"vol-resize " + h + "-disk 20G --pool default",
 			},
+		},
+		{
+			// Review H1: a disk grow the host refuses fails the call before the
+			// CPU or memory of the domain changes, so no grow is left applied.
+			name:    "a failed disk grow changes no CPU or memory (stopped)",
+			script:  map[string]string{"fail-vol-resize": ""},
+			desired: reconfigureTo(4, 4096, 20),
+			changes: []string{"vol-resize " + h + "-disk 20G --pool default"},
+			wantErr: true,
+		},
+		{
+			name:    "a failed disk grow changes no CPU or memory (running)",
+			script:  running(map[string]string{"cfg-maxvcpus": "8", "maxmem": "8388608", "cfg-maxmem": "8388608", "fail-blockresize": ""}),
+			desired: reconfigureTo(4, 4096, 20),
+			changes: []string{"vol-resize " + h + "-disk 20G --pool default", "blockresize " + h + " vda 20G"},
+			wantErr: true,
 		},
 		{
 			name:    "a stopped domain's memory shrink lowers the maximum first",
@@ -369,13 +385,22 @@ func TestClustered_Reconfigure_HonestResult(t *testing.T) {
 			failed:  true,
 		},
 		{
-			name:    "a stopped domain applies persistently",
+			name:    "a stopped domain applies persistently, the disk first",
 			desired: reconfigureTo(4, 4096, 20),
 			changes: []string{
+				"vol-resize --vol " + opsDiskPath + " --capacity 20G",
 				"setvcpus " + uuid + " 4 --config --maximum", "setvcpus " + uuid + " 4 --config",
 				"setmaxmem " + uuid + " 4194304K --config", "setmem " + uuid + " 4194304K --config",
-				"vol-resize --vol " + opsDiskPath + " --capacity 20G",
 			},
+		},
+		{
+			// Review H1: a disk grow the tenant's VMClass asks for and the host
+			// cannot give fails before any CPU or memory change.
+			name:    "a failed disk grow changes no CPU or memory",
+			script:  map[string]string{"fail-vol-resize": ""},
+			desired: reconfigureTo(4, 4096, 20),
+			changes: []string{"vol-resize --vol " + opsDiskPath + " --capacity 20G"},
+			failed:  true,
 		},
 		{
 			name:    "a PM-suspended domain is refused as a VM operation failure",

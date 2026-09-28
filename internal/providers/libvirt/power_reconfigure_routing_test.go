@@ -169,22 +169,22 @@ func TestClustered_Reconfigure_RoutedToLeasedHostOnTheCheckedDomain(t *testing.T
 		want    []string
 	}{
 		{
-			// The persistent definition is read first; the vCPU maximum is raised
-			// before the count, the memory maximum before the allocation. The
-			// offline resize reads the disk's size from the checked domain and
-			// acts on its own primary disk, by its path — never on a
-			// "<name>-disk" volume found by name.
+			// The disk first (review H1): the offline resize reads the disk's
+			// size from the checked domain and acts on its own primary disk, by
+			// its path — never on a "<name>-disk" volume found by name. Then the
+			// persistent definition is read; the vCPU maximum is raised before
+			// the count, the memory maximum before the allocation.
 			name: "offline CPU, memory and disk", desired: reconfigureTo(4, 4096, 20),
 			want: []string{
+				"host-b domblklist " + uuid,
+				"host-b domblkinfo " + uuid + " vda",
+				details,
+				"host-b vol-resize --vol " + opsDiskPath + " --capacity 20G",
 				inactive,
 				"host-b setvcpus " + uuid + " 4 --config --maximum",
 				"host-b setvcpus " + uuid + " 4 --config",
 				"host-b setmaxmem " + uuid + " 4194304K --config",
 				"host-b setmem " + uuid + " 4194304K --config",
-				"host-b domblklist " + uuid,
-				"host-b domblkinfo " + uuid + " vda",
-				details,
-				"host-b vol-resize --vol " + opsDiskPath + " --capacity 20G",
 			},
 		},
 		{
