@@ -413,7 +413,14 @@ func (p *Provider) scanClusterDiskUse(ctx context.Context, s clusterScan) (clust
 	if p.clusterReg == nil {
 		return clusterScanResult{}, contracts.NewUnavailableError("clustered libvirt provider registry not initialized", nil)
 	}
-	hosts := guardHosts(p.clusterReg.Hosts(), s)
+	// The hosts the inventory names but that cannot be routed to (the
+	// operator's tombstones, rejected entries) are scanned too — and fail
+	// closed at once: they exist, and may use the file.
+	unroutable := map[hostconn.HostID]bool{}
+	for _, id := range p.clusterReg.UnroutableHosts() {
+		unroutable[id] = true
+	}
+	hosts := guardHosts(append(p.clusterReg.Hosts(), p.clusterReg.UnroutableHosts()...), s)
 	if len(hosts) == 0 {
 		return clusterScanResult{}, nil
 	}
@@ -468,6 +475,10 @@ func (p *Provider) scanClusterDiskUse(ctx context.Context, s clusterScan) (clust
 				err = hctx.Err()
 			}
 			return finish(i, r, err)
+		}
+		if unroutable[id] {
+			return finish(i, hostDiskScan{}, contracts.NewHostUnavailableError(
+				fmt.Sprintf("host %q is in the Provider's inventory but cannot be connected to", id), nil))
 		}
 		// A host found unreachable moments ago is failed at once, without
 		// dialing it again (a dead host must not cost every scan its dial
@@ -538,10 +549,10 @@ func (p *Provider) guardSemaphore() *semaphore.Weighted {
 	return p.guardSem
 }
 
-// guardHosts returns the hosts s scans: every routable host of the registry,
-// plus s.target when it is not among them (a landing host that started
-// draining mid-call is still scanned, over the call's own connection), minus
-// s.target when s.skipTarget.
+// guardHosts returns the hosts s scans: every host the registry knows
+// (routable, and — failing closed — unroutable), plus s.target when it is not
+// among them (a landing host that started draining mid-call is still scanned,
+// over the call's own connection), minus s.target when s.skipTarget.
 func guardHosts(registry []hostconn.HostID, s clusterScan) []hostconn.HostID {
 	out := make([]hostconn.HostID, 0, len(registry)+1)
 	for _, h := range registry {

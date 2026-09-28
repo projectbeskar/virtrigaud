@@ -23,6 +23,40 @@ import (
 	"time"
 )
 
+// TestClusterRegistry_UnroutableHosts pins the hosts the registry knows but
+// cannot route to (ADR-0007 A6.1 review, item 2a): entries it rejected (a
+// duplicated id, an invalid endpoint) and the operator's tombstones; never an
+// empty id, never a routable host; never dialed; replaced by every Reconcile.
+func TestClusterRegistry_UnroutableHosts(t *testing.T) {
+	d := newMockDialer()
+	i := inv(host("h1", "ep-1", nil, nil), host("dup", "ep-2", nil, nil), host("dup", "ep-3", nil, nil),
+		host("bad", "not a url", nil, nil), host("", "ep-4", nil, nil))
+	i.UnroutableHostIDs = []string{"tomb", "h1", ""}
+	r := mustCluster(t, d, i)
+
+	if got := r.UnroutableHosts(); !hostsEqual(got, "bad", "dup", "tomb") {
+		t.Fatalf("UnroutableHosts = %v", got)
+	}
+	if got := r.Hosts(); !hostsEqual(got, "h1") {
+		t.Fatalf("Hosts = %v: an unroutable host is never routable", got)
+	}
+	for _, id := range []HostID{"bad", "dup", "tomb"} {
+		if _, err := r.ConnFor(context.Background(), id); err == nil {
+			t.Fatalf("%s must not be connectable", id)
+		}
+		if n := d.dialCount(id); n != 0 {
+			t.Fatalf("%s was dialed %d times", id, n)
+		}
+	}
+
+	if err := r.Reconcile(inv(host("h1", "ep-1", nil, nil))); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if got := r.UnroutableHosts(); len(got) != 0 {
+		t.Fatalf("a Reconcile replaces the set; got %v", got)
+	}
+}
+
 // TestClusterRegistry_RecentlyUnreachable pins the memo the cluster-wide disk
 // guard uses to fail fast without dialing (ADR-0007 A6.1 review): a failed
 // lazy dial or MarkUnreachable makes a host recently unreachable for the

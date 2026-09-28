@@ -552,6 +552,51 @@ func TestClusterScan_HostOverTheDomainBoundFailsClosed(t *testing.T) {
 	s.requireNothingWrittenOnB(disk, "original-disk")
 }
 
+// TestClusterScan_UnroutableHostsFailClosed (security review of A6.1, item
+// 2a): a host the Provider fronts but the operator could not render (an
+// id-only tombstone) exists and may use the shared disk, so the guard fails
+// closed on it — HOST_UNAVAILABLE, never dialed, nothing written or removed —
+// while a create with nothing where its disk goes is unaffected.
+func TestClusterScan_UnroutableHostsFailClosed(t *testing.T) {
+	withTombstone := func(t *testing.T) *sharedPool {
+		t.Helper()
+		s := newSharedPool(t)
+		inv := twoHostInventory()
+		inv.UnroutableHostIDs = []string{"host-t"}
+		require.NoError(t, s.p.clusterReg.Reconcile(inv))
+		require.Equal(t, []hostconn.HostID{"host-t"}, s.p.clusterReg.UnroutableHosts())
+		return s
+	}
+	t.Run("delete", func(t *testing.T) {
+		s := withTombstone(t)
+		disk := s.disk("team-a.web-disk.qcow2", "live-disk")
+		s.defineOn("host-b", "team-a.web", uuidVMOnB, guardDomainXML("team-a.web", uuidVMOnB, disk, ownerTeamA, false))
+		_, err := NewServer(s.p).Delete(context.Background(), &providerv1.DeleteRequest{
+			Id: "team-a.web", TargetHostId: "host-b", Owner: teamAOwner,
+		})
+		st, _ := status.FromError(err)
+		assert.Equal(t, codes.Unavailable, st.Code(), "got %v", err)
+		assert.True(t, hasHostUnavailableInfo(st))
+		assert.NotContains(t, st.Message(), "host-t", "the tombstoned host is not named")
+		s.requireUntouched("host-b", "team-a.web")
+		assert.Zero(t, s.dials("host-t"), "a tombstone is never dialed")
+	})
+	t.Run("create over an existing file", func(t *testing.T) {
+		s := withTombstone(t)
+		disk := s.disk("team-a.web-disk.qcow2", "original-disk")
+		_, err := s.createOnB()
+		var ie *clusterGuardIncompleteError
+		require.ErrorAs(t, err, &ie)
+		assert.True(t, ie.unreachable)
+		s.requireNothingWrittenOnB(disk, "original-disk")
+	})
+	t.Run("create with nothing there", func(t *testing.T) {
+		s := withTombstone(t)
+		_, err := s.createOnB()
+		require.NoError(t, err, "no candidate file: nothing is scanned")
+	})
+}
+
 // ─── cost bounds (security review of A6.1, item 3) ──────────────────────────
 
 // TestClusterScan_ShortCircuitsOnceDecided: once a host's answer decides the

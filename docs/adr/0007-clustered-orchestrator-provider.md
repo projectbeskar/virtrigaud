@@ -1780,6 +1780,17 @@ runbook or remove it. There is no opt-in in v0.4.0. A6.2 must also set the
 >   The landing host of a `Create` or `Clone` is scanned over the call's own
 >   connection (a landing host that left the registry mid-call is still
 >   scanned); the other hosts are leased.
+> - **Hosts the operator could not render** *(security review of A6.1)*: a
+>   `Host` the Provider fronts whose credentials are missing or refused, whose
+>   endpoint is invalid or whose id is duplicated is still passed to the
+>   provider as an id-only tombstone (`Inventory.unroutableHostIds`: no
+>   endpoint, no credentials); the provider's own rejects join them. The guard
+>   fails closed on them (`HOST_UNAVAILABLE`, never dialed).
+> - **Operator duties** *(security review of A6.1)*: the guard sees the hosts
+>   of ONE Provider, so a shared pool must be mounted only by hosts of one
+>   clustered Provider; and before deleting the `Host` of a dead host (which
+>   removes it from the scan, and so releases held deletes), the administrator
+>   MUST fence it — power it off or revoke its access to the export.
 > - **Other residuals.** A host removed from the inventory (or draining) is not
 >   scanned. Disks without a host path (network disks) are not compared. On a
 >   host-local pool a previous incarnation on another host leaves no file where
@@ -2257,6 +2268,18 @@ honest.
   - After v0.4.0, A6.4: `VMRestoreBinding`, over slice 4's compare-and-swap
     owner re-stamp.
   - The Proxmox restore duplicate is tracked with the parked Proxmox work.
+  - A6.1 follow-ups (security review):
+    - **A pool ownership marker**: `<pool>/.virtrigaud-pool`, created with
+      `O_EXCL` and holding the owning Provider's UID. It lets a provider refuse
+      a pool another Provider (or nothing) claims, tells it which hosts share
+      a pool, and so scopes the cluster-wide scan to them (ending the false
+      "in use" on host-local pools that share a path).
+    - **Batch the scan**: one read per host instead of a `dumpxml` per domain
+      (ADR-0008's native list).
+    - **Run the cross-host check before `SnapshotRevert`, `SnapshotDelete`,
+      `SnapshotCreate` and the offline disk grow** of a clustered VM: each
+      rewrites a disk file another host's domain could use through a shared
+      pool; today they check the VM's own host only.
 - **New ADR: per-consumer quota on a shared clustered Provider.** The
   scheduler-accuracy amendment (A5) counts every consumer's VMs against a
   host's capacity, but nothing limits how much of a shared Provider one

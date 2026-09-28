@@ -82,6 +82,11 @@ type ClusterRegistry struct {
 	// and never land here.
 	draining []*clusterEntry
 
+	// unroutable holds the ids of hosts the inventory names but that cannot be
+	// routed to (desiredHosts' rejects and the operator's tombstones): never
+	// dialed, reported by UnroutableHosts. Replaced by every Reconcile.
+	unroutable map[HostID]bool
+
 	// closed is set by Close; it rejects further ConnFor/Reconcile and is the
 	// terminal state.
 	closed bool
@@ -276,7 +281,7 @@ func (r *ClusterRegistry) release(e *clusterEntry) {
 // It never dials and never severs an in-flight operation. It is safe to call
 // concurrently with ConnFor. After Close it errors.
 func (r *ClusterRegistry) Reconcile(inv hostsecret.Inventory) error {
-	desired := desiredHosts(inv, r.logger)
+	desired, unroutable := desiredHosts(inv, r.logger)
 
 	var toClose []Conn
 	r.mu.Lock()
@@ -284,6 +289,7 @@ func (r *ClusterRegistry) Reconcile(inv hostsecret.Inventory) error {
 		r.mu.Unlock()
 		return errRegistryClosed
 	}
+	r.unroutable = unroutable
 
 	// Existing entries: keep / change / remove.
 	for id, e := range r.live {
@@ -338,13 +344,19 @@ func (r *ClusterRegistry) Reconcile(inv hostsecret.Inventory) error {
 // None of these is fatal — a malformed inventory yields a smaller registry,
 // never a panic (ADR-0007 D9 fail-safe). Log lines carry the host id and a
 // coarse reason only, never the endpoint or credential material.
-func desiredHosts(inv hostsecret.Inventory, logger *slog.Logger) map[HostID]hostsecret.Host {
+//
+// It also returns the ids of the hosts that exist but are not routable: the
+// entries it rejected (a duplicated id, an invalid endpoint — never an empty
+// id) and the operator's tombstones (inv.UnroutableHostIDs: hosts it could not
+// render). They are never dialed; UnroutableHosts reports them.
+func desiredHosts(inv hostsecret.Inventory, logger *slog.Logger) (map[HostID]hostsecret.Host, map[HostID]bool) {
 	counts := make(map[HostID]int, len(inv.Hosts))
 	for _, h := range inv.Hosts {
 		counts[HostID(h.ID)]++
 	}
 
 	desired := make(map[HostID]hostsecret.Host, len(inv.Hosts))
+	rejected := make(map[HostID]bool)
 	for _, h := range inv.Hosts {
 		id := HostID(h.ID)
 		switch {
@@ -354,16 +366,27 @@ func desiredHosts(inv hostsecret.Inventory, logger *slog.Logger) map[HostID]host
 		case counts[id] > 1:
 			logger.Warn("hostconn: skipping duplicated inventory host id (ambiguous; no entry is routable)",
 				"host", string(id), "occurrences", counts[id])
+			rejected[id] = true
 			continue
 		}
 		if err := hostsecret.ValidateEndpoint(h.Endpoint); err != nil {
 			logger.Warn("hostconn: skipping inventory host with invalid endpoint",
 				"host", string(id), "error", err.Error())
+			rejected[id] = true
 			continue
 		}
 		desired[id] = h
 	}
-	return desired
+	// The operator's own tombstones: hosts it could not render (A6.1).
+	for _, id := range inv.UnroutableHostIDs {
+		if id != "" {
+			rejected[HostID(id)] = true
+		}
+	}
+	for id := range desired {
+		delete(rejected, id)
+	}
+	return desired, rejected
 }
 
 // startDrainLocked begins draining e (must hold mu). An idle entry is closed
@@ -393,6 +416,23 @@ func (r *ClusterRegistry) removeFromDrainingLocked(e *clusterEntry) {
 			return
 		}
 	}
+}
+
+// UnroutableHosts returns, sorted, the ids of the hosts the inventory names
+// that cannot be routed to: entries the registry rejected (a duplicated id, an
+// invalid endpoint) and the operator's id-only tombstones (hosts it could not
+// render, e.g. for missing credentials). They are known to exist, so a check
+// that must cover every host of the Provider fails closed on them (ADR-0007
+// A6.1). They are never dialed, and Hosts never includes them.
+func (r *ClusterRegistry) UnroutableHosts() []HostID {
+	r.mu.Lock()
+	ids := make([]HostID, 0, len(r.unroutable))
+	for id := range r.unroutable {
+		ids = append(ids, id)
+	}
+	r.mu.Unlock()
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	return ids
 }
 
 // RecentlyUnreachable reports whether routable host id was found unreachable

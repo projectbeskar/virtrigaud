@@ -33,6 +33,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 )
 
@@ -115,6 +116,18 @@ type Inventory struct {
 	// ID and never as JSON null (an empty inventory renders "hosts": []), so
 	// re-renders of an unchanged inventory are byte-for-byte stable.
 	Hosts []Host `json:"hosts"`
+
+	// UnroutableHostIDs are the ids of hosts the Provider fronts that the
+	// operator could NOT render into Hosts — their credentials are missing or
+	// refused, their endpoint is invalid, or their id is duplicated — as
+	// id-only tombstones: no endpoint, no credential material. The provider
+	// cannot connect to them, but it knows they exist, so a check that must
+	// cover every host of the Provider (the cluster-wide disk guard, ADR-0007
+	// A6.1) fails closed on them instead of silently skipping them. Additive:
+	// omitted when empty (an unchanged inventory renders byte for byte as
+	// before) and ignored by an older provider. Marshal emits it sorted and
+	// deduplicated.
+	UnroutableHostIDs []string `json:"unroutableHostIds,omitempty"`
 }
 
 // Host is one host a clustered provider fronts. It carries connection metadata
@@ -223,10 +236,24 @@ func Marshal(inv Inventory) ([]byte, error) {
 	// make() above returns a non-nil slice even when len==0, so an empty
 	// inventory marshals to "hosts": [] rather than "hosts": null.
 	normalized := Inventory{
-		SchemaVersion: inv.SchemaVersion,
-		Hosts:         hosts,
+		SchemaVersion:     inv.SchemaVersion,
+		Hosts:             hosts,
+		UnroutableHostIDs: sortedUniqueIDs(inv.UnroutableHostIDs),
 	}
 	return json.MarshalIndent(normalized, "", "  ")
+}
+
+// sortedUniqueIDs returns ids sorted, without duplicates or empty entries; nil
+// when none remain (so the field is omitted).
+func sortedUniqueIDs(ids []string) []string {
+	var out []string
+	for _, id := range ids {
+		if id != "" {
+			out = append(out, id)
+		}
+	}
+	sort.Strings(out)
+	return slices.Compact(out)
 }
 
 // Unmarshal parses a host-inventory document (as produced by Marshal) into an

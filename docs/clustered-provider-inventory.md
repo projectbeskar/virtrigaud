@@ -1621,38 +1621,70 @@ as for the host-local check), or as another file or shared directory.
 | Create / Clone: a domain on any host stamped with the VM's namespace and name (any UID) | `AlreadyExists` + `VM_PREVIOUS_INCARNATION`; nothing written | Holds the VM on its pending host (`RestorePending`), see [Previous incarnations](#previous-incarnations-and-the-a6-runbook) |
 | Create / Clone: another domain uses the file | `AlreadyExists`; nothing written | The slice 2 name-conflict rule: the host is excluded and the VM re-scheduled |
 | Delete: a domain on another host uses one of the files | `FailedPrecondition` + `VM_DISK_IN_USE` + `VM_OPERATION_FAILED`; nothing changed | Keeps the finalizer (`Ready=False/DeleteBlocked`), re-checks |
-| A host could not be reached (not leased, dropped, past its deadline) | `Unavailable` + `HOST_UNAVAILABLE`; nothing changed | Create: `Placed=False/HostUnavailable`, retried on the same pending host every 30 s. Delete: finalizer kept, retried |
-| A host answered but could not be scanned (a definition or disk chain unreadable, more than 2000 domains) | `Unavailable` + `VM_DISK_CHECK_FAILED` + `VM_OPERATION_FAILED`; nothing changed | Retried, as above |
+| A host could not be reached (not leased, dropped, past its deadline, tombstoned) | `Unavailable` + `HOST_UNAVAILABLE`; nothing changed | Create: `Placed=False/HostUnavailable`, retried on the same pending host every 30 s. Delete: finalizer kept, `DeleteBlocked=True/HostUnreachable`, retried with a backoff (15 s doubling to 5 min) |
+| A host answered but could not be scanned (a definition or disk chain unreadable, more than 2000 domains), or the provider was too busy to scan | `Unavailable` + `VM_DISK_CHECK_FAILED` + `VM_OPERATION_FAILED`; nothing changed | Create: `Placed=False/CreatePending`, retried with the backoff. Delete: `DeleteBlocked=True/DiskCheckFailed`, retried with the backoff |
 | Nothing uses the file | The existing file is a leftover of an earlier failed attempt and is replaced (create); the delete proceeds | — |
 
 None of these answers counts toward the Provider's circuit breaker, and their
 messages name no host, no path and no other domain (the provider logs the
 details).
 
+**Which hosts are scanned.** Every host of the Provider's inventory — and
+also every `Host` the Provider fronts that the operator could **not** render
+(its credentials are missing or refused, its endpoint is invalid, its id is
+duplicated). Those are passed to the provider as id-only tombstones (no
+endpoint, no credentials): it cannot connect to them, but it knows they exist,
+so the guard fails closed on them rather than silently skipping them. A host
+whose `Host` object is gone is no longer part of the Provider and is not
+scanned.
+
 **Fail closed, and what it costs.** A host that cannot be checked fails the
 operation; nothing is ever written or removed on a partial answer. For Create
 and Clone that happens only when a file is already where the disk goes. **A
 clustered Delete, however, always has files to remove, so while any host of
-the Provider cannot be reached, deleting a clustered VM is held** (the
-finalizer stays, and the delete is retried) on every host of the Provider.
-To get out of it: bring the host back; or remove the dead host from the
-Provider (delete its `Host` — possible only when no VM is bound or pending
-on it); or detach the VM with `virtrigaud.io/orphan-on-delete=true` (the
-domain and its disks stay for manual removal; a VM in another namespace than
-the Provider needs the Provider's permission, see above);
-`virtrigaud.io/force-delete` releases the finalizer after the failed delete in
-the same way. A delete held this way is retried every 15 seconds, and each
-retry scans the reachable hosts again.
+the Provider cannot be reached (or is tombstoned), deleting a clustered VM is
+held**: the finalizer stays, the VM shows `DeleteBlocked=True` (reason
+`HostUnreachable` or `DiskCheckFailed`) and `Ready=False` (`DeleteBlocked`)
+with a message that names no host, one `Warning` event is emitted per change,
+and the delete is retried with a backoff per VM — 15 seconds, doubling up to
+5 minutes. To get out of it: bring the host back (the next retry succeeds);
+detach the VM with `virtrigaud.io/orphan-on-delete=true` (the domain and its
+disks stay for manual removal; a VM in another namespace than the Provider
+needs the Provider's permission, see above) or `virtrigaud.io/force-delete`
+(the same, after the failed delete) — both are acted on at once, whatever the
+backoff; or remove the dead host from the Provider (below).
+
+**Fencing a host before you remove it.** Deleting the `Host` of a dead host
+(possible only when no VM is bound or pending on it) removes it from the
+Provider, and from then on the guard no longer looks at it. **Fence the host
+first: power it off, or revoke its access to the shared export.** A host that
+is merely unreachable from the provider may still run domains on the shared
+pool; once it is out of the inventory, a delete or a re-create elsewhere can
+remove or overwrite a disk it is using.
+
+**One Provider per shared pool.** The guard sees the hosts of **one**
+Provider. A shared pool (an NFS export) must be mounted only by the hosts of a
+single clustered Provider — never by hosts of another Provider, a single-host
+Provider, or anything VirtRigaud does not manage — or their domains are
+invisible to it.
 
 **Bounds.** The scan is slice 4's fan-out: at most 8 hosts at a time, each on
 its own lease with a 60-second deadline, and the whole scan inside the
 caller's deadline less 30 seconds, so the operation — a delete's teardown, a
-create's disk write — and its answer still fit. A host with more than 2000
-domains fails the scan closed instead of being read partially. The landing
-host of a create or clone is scanned over the call's own connection. A scan
-reads every domain's definition on each host, plus the disk chains of
-shut-off domains, so a clustered delete now costs roughly one SSH command
-per domain of the Provider.
+create's disk write — and its answer still fit. It stops as soon as the
+outcome is decided — a delete at its first use or failure, a create or clone
+at its first previous incarnation — and cancels the hosts still running. A
+host whose dial failed, whose connection dropped or that timed out less than
+30 seconds ago is failed at once without being dialed again. At most 2 scans
+run at once per provider process; one that gets no slot within its budget
+fails closed as busy (`VM_DISK_CHECK_FAILED`, retried). A host with more than
+2000 domains fails the scan closed instead of being read partially. The
+landing host of a create or clone is scanned over the call's own connection.
+A scan reads every domain's definition on each host, plus the disk chains of
+shut-off domains, so a clustered delete costs roughly one SSH command per
+domain of the Provider. *Follow-ups:* batch the per-domain reads (ADR-0008's
+native list), and scope the scan to the hosts that share the pool once a pool
+ownership marker exists.
 
 **Paths are compared per host, canonically.** The candidate file — the path
 the landing host uses and the path it resolves to there — is resolved again
@@ -1680,7 +1712,7 @@ files, so a domain on another host whose disk has the same path is reported
 as a use — a false "in use" that fails safe (refuses) — until a pool ownership
 marker tells the provider which hosts share a pool (a follow-up). Other
 residuals: a host removed from the Provider's inventory is not scanned (see
-*Fencing* below); and on a **host-local** pool a previous incarnation on
+*Fencing a host before you remove it*); and on a **host-local** pool a previous incarnation on
 another host leaves no file where the new disk goes, so this guard does not
 see it — the pre-schedule check (A6.2, R4) does.
 
