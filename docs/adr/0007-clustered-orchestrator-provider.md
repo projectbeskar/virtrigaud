@@ -1024,8 +1024,9 @@ slice 4 is implemented (see the slice 4 amendment below); slice 5 is open.
 >   replaceable — the manager lists only UIDs of VirtualMachines that no
 >   longer exist. Anything else is `AlreadyExists` and untouched. The stamp is
 >   written with `virsh metadata --config [--live]` to the domain addressed by
->   UUID and read back. It is the compare-and-swap owner re-stamp of A6's
->   *Slice 4 coordination*, and it is named for owner transfer, not
+>   UUID and read back — a serialized check-and-set with read-back. It is the
+>   owner re-stamp of A6's *Slice 4 coordination*, and it is named for owner
+>   transfer, not
 >   adoption, because **A6.4 reuses it**: a VirtualMachine restored with a
 >   new UID finds its domain stamped with a UID that no longer exists (A6.4
 >   restricts it to an identical namespace and name; adoption does not, as
@@ -1039,7 +1040,11 @@ slice 4 is implemented (see the slice 4 amendment below); slice 5 is open.
 >   capabilities are unchanged.
 > - **Adoption flow.** A listed VM is managed when a VirtualMachine of the
 >   Provider is bound to its `(host_id, id)`, or when it is stamped with the UID
->   of any existing VirtualMachine (the single-host rule). The adopting
+>   of any existing VirtualMachine (the single-host rule). **Only an unstamped
+>   domain is adopted** (the slice 4 review, following A6's fail-closed
+>   choice): a domain stamped only by VirtualMachines that no longer exist is a
+>   previous incarnation and is skipped and reported with the A6 runbook hint
+>   (see A6, *Slice 4 coordination*). The adopting
 >   VirtualMachine is named `<sanitized domain name>-<10 hex digits of
 >   sha256(host/id)>` in the Provider's namespace, annotated
 >   `virtrigaud.io/adopted-host` / `-id`, and created with an empty status. The
@@ -1616,11 +1621,24 @@ recovery is exactly the flow that (b3) automates later.
 
 **Slice 4 coordination (2026-09-28).** Every routed call is owner-checked, so
 adoption on a clustered Provider **re-stamps the adopted domain's owner through a
-compare-and-swap step**. The step is conditional on the domain UUID and on its
-current stamp, which must be none or a UID that no VirtualMachine holds. Without
-it, every call for an adopted domain would answer `NotFound`. A6.4 reuses this
-step for the restore re-attach. Adoption's liveness rule (never adopt a domain
-whose stamp names a live VM) is threat 3's.
+check-and-set step** (`TransferOwner`: serialized, with read-back). The step is
+conditional on the domain UUID and on its current stamp, which must be none, the
+new owner's, or a UID the caller lists as replaceable (one no VirtualMachine
+holds). Without it, every call for an adopted domain would answer `NotFound`.
+A6.4 reuses this step for the restore re-attach. Adoption's liveness rule (never
+adopt a domain whose stamp names a live VM) is threat 3's.
+
+*(Amended 2026-09-28, slice 4 review.)* **Until A6.4, clustered adoption takes
+only unstamped domains.** A domain carrying any VirtRigaud owner stamp whose
+VirtualMachine no longer exists is a previous incarnation — orphaned with
+`orphan-on-delete`, or left by a VirtualMachine restored with a new UID — and
+re-stamping it into the Provider's namespace would pre-empt A6's hold and
+runbook and break the one-domain-per-name rule (decision 2). Adoption skips it,
+never lists a stamp as replaceable, and names it in
+`Provider.status.adoption.message` with the hint to re-attach it per the
+runbook or remove it. There is no opt-in in v0.4.0. A6.2 must also set the
+`placement-uid` marker (R1) in the adoption's binding write
+(`completeClusteredAdoption`), so an adopted VM is never held as restored.
 
 **Implementation slices.** Rows A6.1 to A6.3 are also in A5's rollout table.
 

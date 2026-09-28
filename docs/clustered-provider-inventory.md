@@ -1442,6 +1442,14 @@ slice 4 is refused with a message and nothing is listed. For each listed VM:
    `status.id` — or when it is stamped with the UID of a VirtualMachine that
    still exists (in any namespace, through any Provider object), exactly as on a
    single host. A VM without a `host_id` or UUID is never adopted.
+   **Only unstamped domains are adopted** (until ADR-0007 A6.4). A domain with
+   a VirtRigaud owner stamp whose VirtualMachine no longer exists is the
+   *previous incarnation* of a VirtualMachine deleted with `orphan-on-delete`
+   or restored from a backup with a new UID. It is skipped and named in
+   `Provider.status.adoption.message` — by the namespace/name its stamp
+   records, e.g. `team-a/web (team-a.web on host-a)` — with the hint to
+   re-attach it per the A6 runbook or remove it. Unlike single-host adoption,
+   a clustered one never takes it over.
 2. **The adopting VirtualMachine** is created in the Provider's namespace, as on
    a single host, but named after the domain **plus a digest of (host, id)**
    (for example `team-a-web-3f2a9c1b04`), so the same name on two hosts gives
@@ -1450,14 +1458,15 @@ slice 4 is refused with a message and nothing is listed. For each listed VM:
    Its status stays empty for now; the VirtualMachine controller waits for it
    (it never creates an adopted VM).
 3. **Owner transfer.** Every routed call is owner-checked, so the domain is
-   handed to the new VirtualMachine first: `TransferOwner` re-stamps it with
-   the VirtualMachine's UID, namespace and name. It is a **compare-and-swap**:
-   the domain must still carry the UUID that was listed, and every stamp on it
-   must be one the manager verified belongs to no existing VirtualMachine (for
-   example one deleted with `orphan-on-delete`) — an unstamped domain may be
-   taken over too. A domain stamped for anyone else, with two stamps, or whose
-   stamp cannot be read, is refused (`AlreadyExists`) and not touched; a
-   replaced domain is `NotFound`. The stamp is written with `virsh metadata`
+   handed to the new VirtualMachine first: `TransferOwner` stamps it with the
+   VirtualMachine's UID, namespace and name. It is a **serialized
+   check-and-set with read-back**: the domain must still carry the UUID that
+   was listed, and every stamp on it must be the new owner's (a retry) or one
+   the caller lists as replaceable — adoption lists none, so it takes only an
+   unstamped domain (A6.4's re-attach will list the previous incarnation's).
+   A domain stamped for anyone else, with two stamps, or whose stamp cannot be
+   read, is refused (`AlreadyExists`) and not touched; a replaced domain is
+   `NotFound`. The stamp is written with `virsh metadata`
    to the domain's persistent definition (and to the running domain when it is
    active), addressed by UUID, and read back before the call succeeds. A retry
    that finds the stamp already there succeeds without writing.

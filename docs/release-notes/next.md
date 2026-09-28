@@ -123,10 +123,11 @@ providers), and rollback caveats in
   `Unschedulable`, when it does not fit, and never moves to another host), and
   a clone that fails for good removes the target VM it created. VMs are
   listed across every host (each tagged with its host; a host that cannot be
-  listed is reported as unknown, never as empty) and can be adopted, keyed on
-  (host, domain): the adopted VM's domain is re-stamped with its new owner
-  (compare-and-swap) and the VM is bound to its host and counted in its
-  capacity. Still experimental — migration into a clustered provider and
+  listed is reported as unknown, never as empty) and unstamped domains can be
+  adopted, keyed on (host, domain): the adopted VM's domain is stamped with its
+  new owner (a serialized check-and-set with read-back) and the VM is bound to
+  its host and counted in its capacity. A domain left by a deleted or restored
+  VirtualMachine is not adopted; it is reported for the A6 re-attach runbook. Still experimental — migration into a clustered provider and
   host-to-host migration are not implemented yet.
 - The clustered scheduler subtracts what each host already holds: every VM
   bound to it, pending on it, or being deleted from it, in any namespace, at

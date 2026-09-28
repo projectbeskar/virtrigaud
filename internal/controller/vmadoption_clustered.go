@@ -42,14 +42,24 @@ import (
 // Adoption on a CLUSTERED provider (ADR-0007 Addendum A, A3 / slice 4).
 //
 // A clustered provider lists every host it fronts (VMInfo.HostID) and names
-// the hosts it could not list (VMList.UnreachableHostIDs). Adoption differs
-// from single-host in four ways, and follows the single-host rules otherwise
-// (the VirtualMachine and its VMClass are created in the Provider's own
-// namespace, so no consumer grant is needed; an existing adopted-labelled
-// VirtualMachine is bound only when it references this Provider and every
-// cross-namespace reference it has is granted; a domain stamped with the UID
-// of a VirtualMachine that still exists is never adopted; an unstamped
-// domain, or one stamped only by VirtualMachines that no longer exist, may be):
+// the hosts it could not list (VMList.UnreachableHostIDs). Adoption follows
+// the single-host rules (the VirtualMachine and its VMClass are created in the
+// Provider's own namespace, so no consumer grant is needed; an existing
+// adopted-labelled VirtualMachine is bound only when it references this
+// Provider and every cross-namespace reference it has is granted; a domain
+// stamped with the UID of a VirtualMachine that still exists is never
+// adopted), with one deliberate restriction and four differences.
+//
+// The restriction (ADR-0007 A6, until A6.4): only UNSTAMPED domains are
+// adopted. A domain carrying any VirtRigaud owner stamp whose VirtualMachine no
+// longer exists is the previous incarnation of a VirtualMachine that was
+// deleted with orphan-on-delete or restored from a backup (a new UID). Adopting
+// it would pre-empt A6's hold and runbook and break its one-domain-per-name
+// rule, so it is skipped and named in Provider.status.adoption.message with a
+// hint: re-attach it per the A6 runbook, or remove it. Single-host adoption
+// still adopts such domains; it is unchanged.
+//
+// The differences:
 //
 //  1. A listed VM is identified by (host id, VM id), never by its id or name
 //     alone: two hosts may each have a domain named "web". A VM is managed
@@ -58,11 +68,11 @@ import (
 //     derived from the pair (clusteredAdoptedVMName) and recorded in its
 //     annotations, so the same name on two hosts gives two VirtualMachines.
 //  2. The domain's owner is transferred to the adopted VirtualMachine
-//     (TransferOwner, compare-and-swap on the domain UUID and its stamp)
-//     BEFORE the binding is written: every routed per-VM call is owner
-//     checked, so a VirtualMachine bound to a domain it does not own could
-//     never describe or manage it. Only the stamps the manager verified belong
-//     to no existing VirtualMachine may be replaced.
+//     (TransferOwner: a serialized check-and-set on the domain UUID and its
+//     stamp, with read-back) BEFORE the binding is written: every routed
+//     per-VM call is owner checked, so a VirtualMachine bound to a domain it
+//     does not own could never describe or manage it. Adoption transfers only
+//     unstamped domains, so it never lists a stamp as replaceable.
 //  3. The binding (status.id, status.boundProvider, status.placement.host and
 //     .pool) is written only after a routed, owner-checked Describe of the
 //     adopted VirtualMachine confirms the domain, and it records the domain's
@@ -132,9 +142,30 @@ type clusteredAdoptionPlan struct {
 	// complete are listed VMs whose owner was already transferred to an
 	// adopted VirtualMachine that is still waiting for its binding.
 	complete []pendingAdoption
-	// skipped counts listed VMs that cannot be adopted (no host id, no UUID).
-	skipped int
+	// skipped are listed VMs that are deliberately not adopted, with why.
+	skipped []adoptionSkip
 }
+
+// adoptionSkip is a listed VM a clustered discovery does not adopt.
+type adoptionSkip struct {
+	info   contracts.VMInfo
+	reason adoptionSkipReason
+}
+
+// adoptionSkipReason says why a listed VM is not adopted. Each is reported,
+// by count and a few names, in Provider.status.adoption.message.
+type adoptionSkipReason string
+
+const (
+	// skipNoIdentity: listed without a host id or a UUID; it cannot be bound
+	// or transferred safely.
+	skipNoIdentity adoptionSkipReason = "listed without a host id or UUID"
+	// skipPreviousIncarnation: stamped only by VirtualMachines that no longer
+	// exist — deleted with orphan-on-delete, or restored with a new UID. Until
+	// ADR-0007 A6.4 it is re-attached by an administrator, never adopted.
+	skipPreviousIncarnation adoptionSkipReason = "previous incarnation of a VirtualMachine that no longer exists " +
+		"(re-attach it per the ADR-0007 A6 runbook, or remove it)"
+)
 
 // pendingAdoption is an adopted VirtualMachine whose domain already carries
 // its stamp but whose binding is not written yet.
@@ -190,7 +221,7 @@ func (r *VMAdoptionReconciler) reconcileClusteredAdoption(ctx context.Context, p
 	logger.Info("Clustered discovery", "listed", len(listed.VMs), "unmanaged", len(unmanaged),
 		"pendingBindings", len(plan.complete), "unreachableHosts", listed.UnreachableHostIDs)
 
-	adopted, failed := int32(0), int32(plan.skipped)
+	adopted, failed := int32(0), int32(0)
 	count := func(err error, msg string, info contracts.VMInfo) {
 		switch {
 		case err == nil:
@@ -216,7 +247,7 @@ func (r *VMAdoptionReconciler) reconcileClusteredAdoption(ctx context.Context, p
 	provider.Status.Adoption.DiscoveredVMs = int32(len(unmanaged))
 	provider.Status.Adoption.AdoptedVMs = adopted
 	provider.Status.Adoption.FailedAdoptions = failed
-	provider.Status.Adoption.Message = clusteredAdoptionMessage(adopted, failed, listed.UnreachableHostIDs)
+	provider.Status.Adoption.Message = clusteredAdoptionMessage(adopted, failed, plan.skipped, listed.UnreachableHostIDs)
 	if err := r.Status().Update(ctx, provider); err != nil {
 		logger.Error(err, "Failed to update adoption status")
 		metrics.RecordError(errReasonAdoptionStatus, metrics.ComponentManager)
@@ -230,12 +261,16 @@ func (r *VMAdoptionReconciler) reconcileClusteredAdoption(ctx context.Context, p
 
 // clusteredAdoptionMessage summarizes one clustered discovery. It names the
 // hosts that could not be listed (Host names, never an endpoint): their VMs
-// are unknown, not absent.
-func clusteredAdoptionMessage(adopted, failed int32, unreachable []string) string {
+// are unknown, not absent. It names, by reason, the listed VMs that were
+// deliberately not adopted (skipped): a previous incarnation by the namespace
+// and name its stamp records, with the hint to re-attach it per the A6
+// runbook or remove it. Every list is capped (unreachableHostsListed).
+func clusteredAdoptionMessage(adopted, failed int32, skipped []adoptionSkip, unreachable []string) string {
 	msg := fmt.Sprintf("Successfully adopted %d VMs", adopted)
 	if failed > 0 {
 		msg = fmt.Sprintf("Adopted %d VMs, %d failed", adopted, failed)
 	}
+	msg += skippedSummary(skipped)
 	if len(unreachable) > 0 {
 		hosts := append([]string(nil), unreachable...)
 		sort.Strings(hosts)
@@ -250,6 +285,49 @@ func clusteredAdoptionMessage(adopted, failed int32, unreachable []string) strin
 		}
 	}
 	return msg
+}
+
+// skippedSummary renders the skipped VMs for the adoption message, grouped
+// by reason in a fixed order, each naming at most unreachableHostsListed VMs.
+func skippedSummary(skipped []adoptionSkip) string {
+	if len(skipped) == 0 {
+		return ""
+	}
+	byReason := map[adoptionSkipReason][]string{}
+	var order []adoptionSkipReason
+	for _, sk := range skipped {
+		if _, seen := byReason[sk.reason]; !seen {
+			order = append(order, sk.reason)
+		}
+		byReason[sk.reason] = append(byReason[sk.reason], skippedVMName(sk))
+	}
+	sort.Slice(order, func(i, j int) bool { return order[i] < order[j] })
+	var parts []string
+	for _, reason := range order {
+		names := byReason[reason]
+		sort.Strings(names)
+		shown := names
+		if len(shown) > unreachableHostsListed {
+			shown = shown[:unreachableHostsListed]
+		}
+		part := fmt.Sprintf("%d %s: %s", len(names), reason, strings.Join(shown, ", "))
+		if more := len(names) - len(shown); more > 0 {
+			part += fmt.Sprintf(" and %d more", more)
+		}
+		parts = append(parts, part)
+	}
+	return fmt.Sprintf("; %d not adopted — %s", len(skipped), strings.Join(parts, "; "))
+}
+
+// skippedVMName names a skipped VM for the adoption message: a previous
+// incarnation by the VirtualMachine its stamp records (namespace/name), when
+// known, and always by its domain and Host name (never an endpoint).
+func skippedVMName(sk adoptionSkip) string {
+	name := fmt.Sprintf("%s on %s", sk.info.ID, sk.info.HostID)
+	if sk.reason == skipPreviousIncarnation && sk.info.OwnerNamespace != "" && sk.info.OwnerName != "" {
+		name = fmt.Sprintf("%s/%s (%s)", sk.info.OwnerNamespace, sk.info.OwnerName, name)
+	}
+	return name
 }
 
 // clusteredAdoptionFailed records a discovery failure on the Provider and
@@ -300,8 +378,10 @@ func (r *VMAdoptionReconciler) routedAdopter(ctx context.Context, provider *infr
 //   - a VM stamped with exactly the UID of an adopted VirtualMachine of this
 //     Provider that is still waiting for its binding and was created for this
 //     very (host, id) (isAwaitingAdoptionOf): its binding is completed;
-//   - a VM without a host id or UUID cannot be adopted (counted as skipped);
-//   - anything else is unmanaged and may be adopted.
+//   - a VM without a host id or UUID cannot be adopted (skipped);
+//   - a VM with any other owner stamp is a previous incarnation (skipped and
+//     reported; ADR-0007 A6);
+//   - an unstamped VM is unmanaged and may be adopted.
 //
 // VMs on unreachable hosts are not in the list, and nothing is concluded
 // about them.
@@ -328,9 +408,12 @@ func planClusteredAdoption(provider *infravirtrigaudiov1beta1.Provider, listed c
 	}
 
 	var plan clusteredAdoptionPlan
+	skip := func(info contracts.VMInfo, reason adoptionSkipReason) {
+		plan.skipped = append(plan.skipped, adoptionSkip{info: info, reason: reason})
+	}
 	for _, info := range listed.VMs {
 		if strings.TrimSpace(info.HostID) == "" || strings.TrimSpace(info.ProviderRaw[contracts.VMInfoUUIDKey]) == "" {
-			plan.skipped++
+			skip(info, skipNoIdentity)
 			continue
 		}
 		if managed[vmHostKey{host: info.HostID, id: info.ID}] {
@@ -344,6 +427,10 @@ func planClusteredAdoption(provider *infravirtrigaudiov1beta1.Provider, listed c
 			}
 		}
 		if ownedByLiveVM(info, liveUIDs) {
+			continue
+		}
+		if len(uids) > 0 {
+			skip(info, skipPreviousIncarnation)
 			continue
 		}
 		plan.adopt = append(plan.adopt, info)
@@ -508,19 +595,20 @@ func (r *VMAdoptionReconciler) completeClusteredAdoption(ctx context.Context, pr
 		return fmt.Errorf("VirtualMachine %s/%s has no UID yet", vm.Namespace, vm.Name)
 	}
 
-	// The listed stamps all belong to VirtualMachines that no longer exist
-	// (planClusteredAdoption); the adopting VirtualMachine's own is an
-	// idempotent retry.
-	var replaceable []string
+	// Until ADR-0007 A6.4 adoption takes only an unstamped domain, or one
+	// already stamped with this VirtualMachine (an idempotent retry after a
+	// lost binding write). Any other stamp is a previous incarnation
+	// (planClusteredAdoption skips it; this re-checks it), so nothing is ever
+	// listed as replaceable here.
 	for _, uid := range ownerUIDs(info) {
 		if uid != ref.Owner.UID {
-			replaceable = append(replaceable, uid)
+			return fmt.Errorf("VM %s on host %s carries another VirtualMachine's owner stamp: %w",
+				info.ID, info.HostID, errAdoptionSkipped)
 		}
 	}
 	if err := transferrer.TransferOwner(ctx, contracts.TransferOwnerRequest{
-		VM:                   ref,
-		ReplaceableOwnerUIDs: replaceable,
-		ExpectedUUID:         info.ProviderRaw[contracts.VMInfoUUIDKey],
+		VM:           ref,
+		ExpectedUUID: info.ProviderRaw[contracts.VMInfoUUIDKey],
 	}); err != nil {
 		return fmt.Errorf("transfer the owner of VM %s on host %s: %w", info.ID, info.HostID, err)
 	}

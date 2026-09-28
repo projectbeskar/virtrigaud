@@ -235,13 +235,17 @@ new object with a new UID.
 On a **single-host** provider the adopted domain keeps whatever stamp it had:
 a single-host provider does not check owners on per-VM calls. On a
 **clustered** provider every routed call is owner-checked, so the domain is
-handed to the adopted `VirtualMachine` first: `TransferOwner` rewrites its owner
-stamp (UID, namespace and name) with `virsh metadata`, compare-and-swap — only
-when the domain still has the UUID that was listed and every stamp on it
-belongs to a `VirtualMachine` that no longer exists (or it has none) — and
-reads it back. A domain stamped for a live `VirtualMachine` is never touched. On
-a clustered provider domains are identified by (host, domain) — the same name on
-two hosts is two adoptions. See
+handed to the adopted `VirtualMachine` first: `TransferOwner` writes its owner
+stamp (UID, namespace and name) with `virsh metadata` — a serialized
+check-and-set on the domain's UUID and its current stamp — and reads it back.
+Until ADR-0007 A6.4 a clustered provider adopts **only unstamped** domains: a
+domain stamped by a `VirtualMachine` that no longer exists (left by
+`orphan-on-delete`, or by a restore that gave the `VirtualMachine` a new UID)
+is a previous incarnation, skipped and named in the Provider's adoption status
+with the hint to re-attach it per the A6 runbook or remove it. A domain stamped
+for a live `VirtualMachine` is never touched. On a clustered provider domains
+are identified by (host, domain) — the same name on two hosts is two
+adoptions. See
 [`clustered-provider-inventory.md`](clustered-provider-inventory.md#listing-and-adoption-slice-4).
 
 ## What operators see

@@ -49,8 +49,11 @@ import (
 // fakeDomain is one domain on a fake clustered provider's host.
 type fakeDomain struct {
 	host, id, uuid string
-	// owner is the UID stamped on the domain ("" = unstamped).
+	// owner is the UID stamped on the domain ("" = unstamped); ownerNS and
+	// ownerName the namespace and name the stamp records.
 	owner       string
+	ownerNS     string
+	ownerName   string
 	cpu         int32
 	memMiB      int64
 	maxMemMiB   int64
@@ -97,7 +100,7 @@ func (f *fakeClusteredAdopter) ListVMs(context.Context) (contracts.VMList, error
 			raw[contracts.VMInfoOwnerUIDKey] = d.owner
 		}
 		out.VMs = append(out.VMs, contracts.VMInfo{ID: d.id, Name: d.id, HostID: d.host, PowerState: d.power,
-			CPU: d.cpu, MemoryMiB: d.memMiB, ProviderRaw: raw})
+			CPU: d.cpu, MemoryMiB: d.memMiB, ProviderRaw: raw, OwnerNamespace: d.ownerNS, OwnerName: d.ownerName})
 	}
 	return out, nil
 }
@@ -233,9 +236,11 @@ var routedAdoptionCaps = contracts.Capabilities{SupportsClustering: true, Suppor
 
 // TestClusteredAdoption_AdoptsByHostAndIDAndRecordsTheBinding: the same
 // domain name on two hosts is two adoptions; each VirtualMachine is handed its
-// domain (owner transfer, replacing only a deleted VirtualMachine's stamp)
-// before it is bound to its host, and records its size from provider truth; a
-// domain stamped for a VirtualMachine that still exists is never taken.
+// unstamped domain (owner transfer, nothing replaceable) before it is bound to
+// its host, and records its size from provider truth; a domain stamped for a
+// VirtualMachine that still exists is never taken, and one stamped only by a
+// VirtualMachine that no longer exists (a previous incarnation) is skipped and
+// reported, never adopted (ADR-0007 A6, until A6.4).
 func TestClusteredAdoption_AdoptsByHostAndIDAndRecordsTheBinding(t *testing.T) {
 	live := &infravirtrigaudiov1beta1.VirtualMachine{
 		ObjectMeta: metav1.ObjectMeta{Name: "db", Namespace: "team-a", UID: "uid-live"},
@@ -243,8 +248,9 @@ func TestClusteredAdoption_AdoptsByHostAndIDAndRecordsTheBinding(t *testing.T) {
 	}
 	prov := &fakeClusteredAdopter{caps: routedAdoptionCaps, domains: []*fakeDomain{
 		{host: "host-a", id: "web", uuid: "uuid-a-web", cpu: 2, memMiB: 2048, maxMemMiB: 8192, vcpusOnline: 4, power: "On"},
-		{host: "host-b", id: "web", uuid: "uuid-b-web", owner: "uid-deleted", cpu: 1, memMiB: 1024, maxMemMiB: 1024, vcpusOnline: 1, power: "Off"},
-		{host: "host-a", id: "team-a.db", uuid: "uuid-a-db", owner: "uid-live", cpu: 1, memMiB: 1024, power: "On"},
+		{host: "host-b", id: "web", uuid: "uuid-b-web", cpu: 1, memMiB: 1024, maxMemMiB: 1024, vcpusOnline: 1, power: "Off"},
+		{host: "host-a", id: "team-a.db", uuid: "uuid-a-db", owner: "uid-live", ownerNS: "team-a", ownerName: "db", cpu: 1, memMiB: 1024, power: "On"},
+		{host: "host-b", id: "team-b.old", uuid: "uuid-b-old", owner: "uid-deleted", ownerNS: "team-b", ownerName: "old", cpu: 1, memMiB: 1024, power: "On"},
 	}}
 	r := clusteredAdoptionReconciler(t, prov, clusteredAdoptionProvider(),
 		clusterHost("host-a", "prov-c"), clusterHost("host-b", "prov-c"), live)
@@ -288,13 +294,17 @@ func TestClusteredAdoption_AdoptsByHostAndIDAndRecordsTheBinding(t *testing.T) {
 	assert.Equal(t, "uuid-a-web", ta[0].ExpectedUUID)
 	tb := prov.transfersTo("host-b", "web")
 	require.Len(t, tb, 1)
-	assert.Equal(t, []string{"uid-deleted"}, tb[0].ReplaceableOwnerUIDs, "only a deleted VirtualMachine's stamp is replaceable")
+	assert.Empty(t, tb[0].ReplaceableOwnerUIDs, "adoption never replaces a stamp")
 	assert.Equal(t, string(vmA.UID), prov.find("host-a", "web").owner)
 	assert.Equal(t, string(vmB.UID), prov.find("host-b", "web").owner)
 
 	// The domain a live VirtualMachine owns was neither transferred nor adopted.
 	assert.Empty(t, prov.transfersTo("host-a", "team-a.db"))
 	assert.Equal(t, "uid-live", prov.find("host-a", "team-a.db").owner)
+	// The previous incarnation was neither transferred nor adopted, and is
+	// named with the A6 hint.
+	assert.Empty(t, prov.transfersTo("host-b", "team-b.old"))
+	assert.Equal(t, "uid-deleted", prov.find("host-b", "team-b.old").owner)
 	var vms infravirtrigaudiov1beta1.VirtualMachineList
 	require.NoError(t, r.List(context.Background(), &vms, client.InNamespace(clusterNS)))
 	assert.Len(t, vms.Items, 2)
@@ -302,6 +312,10 @@ func TestClusteredAdoption_AdoptsByHostAndIDAndRecordsTheBinding(t *testing.T) {
 	st := adoptionStatus(t, r)
 	assert.EqualValues(t, 2, st.AdoptedVMs)
 	assert.EqualValues(t, 0, st.FailedAdoptions)
+	assert.Contains(t, st.Message, "1 not adopted")
+	assert.Contains(t, st.Message, "team-b/old (team-b.old on host-b)")
+	assert.Contains(t, st.Message, "A6 runbook")
+	assert.NotContains(t, st.Message, "team-a/db", "a live VirtualMachine's domain is managed, not reported")
 
 	// The committed-capacity accounting counts the adopted VM from now on, at
 	// its recorded size and memory ceiling.
@@ -546,7 +560,10 @@ func TestPlanClusteredAdoption_KeysOnHostAndID(t *testing.T) {
 
 	require.Len(t, plan.adopt, 1)
 	assert.Equal(t, "host-b", plan.adopt[0].HostID, "a name bound on host-a says nothing about host-b's domain")
-	assert.Equal(t, 2, plan.skipped, "no host id or no UUID: never adopted")
+	require.Len(t, plan.skipped, 2, "no host id or no UUID: never adopted")
+	for _, sk := range plan.skipped {
+		assert.Equal(t, skipNoIdentity, sk.reason)
+	}
 	assert.Empty(t, plan.complete)
 }
 
@@ -594,10 +611,41 @@ func TestClusteredAdoptionMessage_CapsTheNamedHosts(t *testing.T) {
 	for i := 0; i < 13; i++ {
 		hosts = append(hosts, fmt.Sprintf("host-%02d", i))
 	}
-	msg := clusteredAdoptionMessage(1, 0, hosts)
+	msg := clusteredAdoptionMessage(1, 0, nil, hosts)
 	assert.Contains(t, msg, "13 host(s) could not be listed")
 	assert.Contains(t, msg, "host-09")
 	assert.NotContains(t, msg, "host-10")
 	assert.Contains(t, msg, "and 3 more")
-	assert.Equal(t, "Successfully adopted 2 VMs", clusteredAdoptionMessage(2, 0, nil))
+	assert.Equal(t, "Successfully adopted 2 VMs", clusteredAdoptionMessage(2, 0, nil, nil))
+}
+
+// TestClusteredAdoption_PreviousIncarnationsAreNeverAdopted: a domain stamped
+// only by VirtualMachines that no longer exist — orphaned with
+// orphan-on-delete, or the old domain of a VirtualMachine restored with a new
+// UID — is skipped and named with the A6 hint, even when the VirtualMachine it
+// names by namespace and name exists again under a new UID. Nothing is created
+// or transferred.
+func TestClusteredAdoption_PreviousIncarnationsAreNeverAdopted(t *testing.T) {
+	restored := &infravirtrigaudiov1beta1.VirtualMachine{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "team-a", UID: "uid-restored"},
+		Spec:       infravirtrigaudiov1beta1.VirtualMachineSpec{ProviderRef: infravirtrigaudiov1beta1.ObjectRef{Name: "prov-c", Namespace: clusterNS}},
+	}
+	prov := &fakeClusteredAdopter{caps: routedAdoptionCaps, domains: []*fakeDomain{
+		{host: "host-a", id: "team-a.web", uuid: "uuid-a-web", owner: "uid-before-restore", ownerNS: "team-a", ownerName: "web", power: "On"},
+		{host: "host-a", id: "legacy.db", uuid: "uuid-a-db", owner: "uid-orphaned", power: "Off"},
+	}}
+	r := clusteredAdoptionReconciler(t, prov, clusteredAdoptionProvider(), clusterHost("host-a", "prov-c"), restored)
+
+	reconcileAdoption(t, r)
+	assert.Empty(t, prov.transfers, "no stamp is ever replaced by adoption")
+	var vms infravirtrigaudiov1beta1.VirtualMachineList
+	require.NoError(t, r.List(context.Background(), &vms, client.InNamespace(clusterNS)))
+	assert.Empty(t, vms.Items, "nothing is adopted")
+	st := adoptionStatus(t, r)
+	assert.EqualValues(t, 0, st.AdoptedVMs)
+	assert.EqualValues(t, 0, st.FailedAdoptions, "a skip is not a failure")
+	assert.Contains(t, st.Message, "2 not adopted")
+	assert.Contains(t, st.Message, "team-a/web (team-a.web on host-a)")
+	assert.Contains(t, st.Message, "legacy.db on host-a", "an incarnation whose stamp names no namespace/name is named by its domain")
+	assert.Contains(t, st.Message, "re-attach it per the ADR-0007 A6 runbook, or remove it")
 }

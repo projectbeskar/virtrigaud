@@ -78,9 +78,11 @@ spec:
 # The same annotations work on a CLUSTERED libvirt Provider (spec.topology:
 # cluster, experimental; ADR-0007 Addendum A slice 4). There a domain is
 # identified by (host, domain name), the adopted VirtualMachine is named
-# "<domain>-<10 hex digits>" and bound to its host, the domain's owner stamp is
-# rewritten to the new VirtualMachine (compare-and-swap), and a host that could
-# not be listed is named in status.adoption.message. See
+# "<domain>-<10 hex digits>" and bound to its host, and the domain is stamped
+# with the new VirtualMachine. Only UNSTAMPED domains are adopted there: one
+# left by a deleted or restored VirtualMachine is reported in
+# status.adoption.message for the ADR-0007 A6 runbook, as is a host that could
+# not be listed. See
 # docs/clustered-provider-inventory.md#listing-and-adoption-slice-4.
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: Provider
