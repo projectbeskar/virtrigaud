@@ -111,14 +111,14 @@
       "single domblkstat vrcallseq-web vda",
       "single guestinfo vrcallseq-web --os",
       "single guestinfo vrcallseq-web --hostname",
+      "single domblklist vrcallseq-web",
+      "single domblkinfo vrcallseq-web vda",
+      "single vol-resize vrcallseq-web-disk 20G --pool default",
       "single dumpxml vrcallseq-web --inactive",
       "single setvcpus vrcallseq-web 4 --config --maximum",
       "single setvcpus vrcallseq-web 4 --config",
       "single setmaxmem vrcallseq-web 4194304K --config",
-      "single setmem vrcallseq-web 4194304K --config",
-      "single domblklist vrcallseq-web",
-      "single domblkinfo vrcallseq-web vda",
-      "single vol-resize vrcallseq-web-disk 20G --pool default"
+      "single setmem vrcallseq-web 4194304K --config"
     ],
     "err": ""
   },
@@ -149,10 +149,11 @@
       "single domblkstat vrcallseq-web vda",
       "single guestinfo vrcallseq-web --os",
       "single guestinfo vrcallseq-web --hostname",
-      "single dumpxml vrcallseq-web --inactive",
-      "single setvcpus vrcallseq-web 4 --config --maximum"
+      "single domblklist vrcallseq-web",
+      "single domblkinfo vrcallseq-web vda",
+      "single vol-resize vrcallseq-web-disk 20G --pool default"
     ],
-    "err": "Retryable: could not raise the vCPU maximum of the VM's persistent definition to 4 (caused by: details are in the provider log)"
+    "err": "Retryable: could not grow the VM's disk to 20 GiB (caused by: details are in the provider log)"
   },
   "reconfigure-offline-setmaxmem-fails": {
     "calls": [
@@ -255,7 +256,6 @@
       "single domblkstat vrcallseq-web vda",
       "single guestinfo vrcallseq-web --os",
       "single guestinfo vrcallseq-web --hostname",
-      "single dumpxml vrcallseq-web --inactive",
       "single domblklist vrcallseq-web",
       "single domblkinfo vrcallseq-web vda",
       "single vol-resize vrcallseq-web-disk 20G --pool default",
@@ -269,7 +269,8 @@
       "single qemu-agent-command --timeout 3 vrcallseq-web {\"execute\":\"guest-exec-status\",\"arguments\":{\"pid\":7}}",
       "single qemu-agent-command --timeout 3 vrcallseq-web {\"execute\":\"guest-ping\"}",
       "single qemu-agent-command --timeout 3 vrcallseq-web {\"execute\":\"guest-exec\",\"arguments\":{\"path\":\"/bin/sh\",\"arg\":[\"-c\",\"xfs_growfs /\"],\"capture-output\":true}}",
-      "single qemu-agent-command --timeout 3 vrcallseq-web {\"execute\":\"guest-exec-status\",\"arguments\":{\"pid\":7}}"
+      "single qemu-agent-command --timeout 3 vrcallseq-web {\"execute\":\"guest-exec-status\",\"arguments\":{\"pid\":7}}",
+      "single dumpxml vrcallseq-web --inactive"
     ],
     "err": ""
   },
