@@ -299,7 +299,12 @@ func (c *Client) TransferOwner(ctx context.Context, req *providerv1.TransferOwne
 	ctx, cancel := c.withTimeout(ctx, "/provider.v1.Provider/TransferOwner")
 	defer cancel()
 	resp, err := c.client.TransferOwner(ctx, req)
-	return resp, errors.FromGRPCError(err)
+	if err != nil {
+		// Only a real error is converted: FromGRPCError(nil) is a typed nil
+		// *ProviderError, which would be a non-nil error interface.
+		return nil, errors.FromGRPCError(err)
+	}
+	return resp, nil
 }
 
 // ListHosts lists the hypervisor hosts a clustered provider fronts (ADR-0007
