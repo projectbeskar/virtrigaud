@@ -154,7 +154,9 @@ providers), and rollback caveats in
   (`DescribeResponse.max_memory_mib`) when missing, raised when the provider
   reports more and lowered after a confirmed shrink; its recorded CPU is raised
   to the vCPUs `Describe` reports; a failed Reconfigure is counted at the
-  larger size and retried on a per-VM backoff (5 s to 5 min); the disk is grown
+  larger size and retried on a per-VM backoff (5 s to 5 min); a clustered answer
+  without the new `honest_result` marker is not trusted; provider-reported sizes
+  are bounded and committed sums saturate; the disk is grown
   before any CPU/memory change; and a single-host per-VM failure no longer
   counts toward the Provider's circuit breaker
   (→ [`docs/reconfigure-results.md`](docs/reconfigure-results.md)).

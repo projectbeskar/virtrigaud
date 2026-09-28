@@ -49,6 +49,31 @@ A security review found that deleting a running linked clone deleted its source 
 - [ ] Config change only
 - [ ] Documentation only
 
+## [2026-09-28 07:05] - Honest Reconfigure, review round 2: per-response honest_result marker, bounded provider reports, OffGraceful held for suspended VMs
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `proto/provider/v1/provider.proto`: `TaskResponse.honest_result` (field 3, additive) — the per-response marker of the honest result contract, set on every Reconfigure response by a provider that implements it. `contracts.ReconfigureResult.Honest`, mapped by `internal/transport/grpc/client.go`; `sdk/provider/capabilities`: `HonestReconfigureResponse(taskID, restartRequired)`. The libvirt provider sets it (single-host and clustered); vSphere, Proxmox and mock leave it unset.
+- `internal/scheduler/evalcontext.go`: `SaturatingAdd`.
+
+### Fixed
+- `internal/controller/virtualmachine_controller.go`, `virtualmachine_reconfigure_result.go`: a clustered Reconfigure answered without the marker is not trusted (a rolled-back provider behind a stale capability snapshot, review L1): `status.currentResources` = max(recorded, desired), `Reconfiguring=False/ProviderLacksHonestReconfigure`, re-checked every 2 minutes (at once after a spec change). The capability stays the first gate. `virtualmachine_resize_gate.go`: a shrink applied while off now respects the re-send gate (failure backoff, re-check interval).
+- `internal/controller/virtualmachine_reconfigure_result.go`, `virtualmachine_clustered.go`, `vmclass_quantity.go`: provider-reported `max_memory_mib` and `vcpus` are clamped to 100 TiB and 128 (the VMClass / CRD maxima), and the scheduling-time ceiling to 100 TiB (review L2). `internal/scheduler/evalcontext.go`, `internal/controller/virtualmachine_placement_capacity.go`: committed-capacity sums saturate instead of wrapping negative.
+- `api/infra.virtrigaud.io/v1beta1/virtualmachine_types.go`: CRD `Maximum` on `status.placement.memoryCeilingMiB` and `pendingResources` (CRDs regenerated).
+- `internal/controller/virtualmachine_controller.go`: a `Suspended` VM whose `spec.powerState` is `OffGraceful` is held with a condition that a hard `Off` is required, instead of being destroyed (review L3, option b).
+
+### Changed
+- `docs/reconfigure-results.md` (incl. N1: a clustered grow that failed with `HostUnavailable` is counted at the grown size, so a revert needs a power-off before the count comes down), `docs/upgrading.md`, `docs/release-notes/next.md`.
+
+### Why
+Second security review round (L1–L3, N1): the capability is a snapshot that can outlive a provider rollback; provider-reported sizes were unbounded; a graceful power-off request was turned into a hard destroy.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-09-28 06:47] - Security review of the honest Reconfigure result: failures counted at the larger size, disk first, backoff, honest-reconfigure capability
 **Author:** @wrkode (William Rizzo)
 
@@ -70,7 +95,7 @@ A security review found that deleting a running linked clone deleted its source 
 - `internal/controller/virtualmachine_reconfigure_result.go`, `virtualmachine_placement_capacity.go`: the failed-Reconfigure re-send is paced by a per-VM backoff, 5 s doubling to 5 min, reusing the placement backoff (`nextWithin`/`remaining`); a spec change is sent at once; success resets it (review H2).
 - `internal/providers/libvirt/server.go`, `provider_virsh.go`: a single-host Reconfigure that failed on the VM carries `VM_OPERATION_FAILED` (historical code and message kept) and no longer counts toward the manager's circuit breaker; an unreachable host keeps the plain, counted error (review H2).
 - `internal/controller/virtualmachine_reconfigure_result.go`, `virtualmachine_controller.go`, `virtualmachine_resize_gate.go`: no resize — grow, shrink, or shrink applied while off — is sent to a clustered Provider that does not report `supportsHonestReconfigure` (review H3). libvirt advertises it; vSphere, Proxmox and mock do not yet.
-- `internal/controller/virtualmachine_controller.go`: a `Suspended` VM whose `spec.powerState` is `Off`/`OffGraceful` is powered off (destroy); `Unknown` stays fully hands-off (review H4).
+- `internal/controller/virtualmachine_controller.go`: a `Suspended` VM whose `spec.powerState` is `Off` is powered off (destroy); `Unknown` stays fully hands-off (review H4). (`OffGraceful` is held since review L3, entry above.)
 - `internal/providers/libvirt/provider_virsh.go`, `shadow.go`: `Describe` reports `VCPUs` (dominfo `CPU(s)` / live `<vcpu current>`).
 
 ### Changed

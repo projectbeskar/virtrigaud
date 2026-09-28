@@ -16,6 +16,13 @@ reaches the manager as `contracts.ReconfigureResult.RestartRequired`. vSphere,
 Proxmox and the mock provider report `false`; see
 [Other providers](#other-providers).
 
+A provider that implements this contract (the **honest result contract**)
+marks **every** Reconfigure response with `TaskResponse.honest_result`
+(`contracts.ReconfigureResult.Honest`; the SDK's
+`capabilities.HonestReconfigureResponse` builds one) and advertises
+`GetCapabilitiesResponse.supports_honest_reconfigure`. The libvirt provider
+does both.
+
 ## libvirt: what "applied" means
 
 The libvirt provider grows the disk first — the step a request can make fail
@@ -71,8 +78,16 @@ The libvirt provider reports `running`/`idle` domains as `On`; `shut off`,
 **`Suspended`**; anything else as **`Unknown`** (both new values of
 `status.powerState`). While a VM is `Suspended` or `Unknown` the manager neither
 powers it on nor reconfigures it (`Ready=False`, reason `PowerStateUnmanaged`).
-A `Suspended` VM whose `spec.powerState` is `Off` (or `OffGraceful`) is powered
-off (destroyed); an `Unknown` VM is left alone entirely — including one a
+A `Suspended` VM whose `spec.powerState` is `Off` is powered off (destroyed). One
+whose `spec.powerState` is `OffGraceful` is **held** with a message saying a hard
+`Off` is required: a suspended guest cannot shut down gracefully, and a graceful
+request is never turned into a hard power-off. (Resuming or waking the domain
+first was not chosen: it would run the guest again at the size it holds — on a
+clustered Provider with a shrink waiting for power-off, exactly what the
+`Suspended` state guards against — a `pmsuspended` wake needs the guest's
+cooperation, and a timed destroy fallback is more machinery than one field
+change by the owner.) Resume it on the hypervisor and it is shut down
+gracefully. An `Unknown` VM is left alone entirely — including one a
 third-party provider reports in a state outside the enum. An adopted VM that is not powered off is adopted with
 `spec.powerState: On`. New domains on a clustered Provider are created with
 guest suspend to RAM and to disk disabled (`<pm>`). Clustered domains created
@@ -101,12 +116,28 @@ boots with next.
   VM that may run with its grown size is never counted below it, even if its
   owner reverts the spec. On a single-host Provider (no capacity accounting)
   `status.currentResources` is untouched.
+  - This includes a clustered **grow** that failed because its host was
+    unreachable (`HostUnavailable`): nobody can tell whether the host applied
+    it, so the VM is counted at the grown size. If the owner then reverts the
+    spec, that is a shrink — and a running clustered VM's shrink waits for a
+    power-off (`ShrinkPendingPowerOff`) — so the count comes back down only
+    after the VM is powered off (`spec.powerState: Off`) and the shrink is
+    applied.
+- A clustered answer **without the honest-result marker** (an older provider
+  image behind a capability snapshot that is out of date) is not trusted: it is
+  recorded like a failure — the larger size — with
+  `Reconfiguring=False/ProviderLacksHonestReconfigure`, and re-checked every
+  2 minutes until a marked answer records what was applied. Single-host
+  Providers ignore the marker.
 - A failed `Reconfigure` is sent again — on a per-VM backoff, 5 s doubling to
   5 min, and at once after a spec change — even if the spec is reverted to the
   recorded size, until one succeeds, so a partly-applied definition converges.
 - On a clustered Provider, whenever `Describe` reports more vCPUs online
   (`DescribeResponse.vcpus`) than recorded, the recorded CPU is raised to them;
-  it is never lowered by a report.
+  it is never lowered by a report. A reported value is bounded first: vCPUs to
+  128 and a memory maximum to 100 TiB (the VMClass maxima, which are also the
+  CRD maxima of the recorded fields), and the committed-capacity sums saturate
+  rather than overflow, so no report can make a host look free.
 
 ## Clustered memory ceiling
 
@@ -129,13 +160,22 @@ the domain's actual memory maximum (`DescribeResponse.max_memory_mib`):
 
 A provider reports the contract with
 `GetCapabilitiesResponse.supports_honest_reconfigure`, surfaced as
-`Provider.status.reportedCapabilities.supportsHonestReconfigure`. The libvirt
-provider reports it. On a **clustered** Provider that does not (an older
-provider image), the manager sends no resize at all — grow or shrink — because
-the committed-capacity accounting would trust a reply that may not be true: the
-VM keeps its size with `Reconfiguring=False`, reason
-`ProviderLacksHonestReconfigure`, re-checked every 30 s. A single-host Provider
-without it is resized as before, and the manager logs a warning.
+`Provider.status.reportedCapabilities.supportsHonestReconfigure`, and proves it
+on every answer with `TaskResponse.honest_result`. The libvirt provider does
+both. On a **clustered** Provider:
+
+- without the capability (an older provider image), the manager sends no resize
+  at all — grow or shrink — because the committed-capacity accounting would
+  trust a reply that may not be true: the VM keeps its size with
+  `Reconfiguring=False`, reason `ProviderLacksHonestReconfigure`, re-checked
+  every 30 s;
+- with the capability but an answer without the marker (the capability is a
+  snapshot the manager keeps if a later `GetCapabilities` fails, so a
+  rolled-back provider can still look capable), the answer is not trusted —
+  see the invariant above.
+
+A single-host Provider without either is resized as before, and the manager
+logs a warning.
 
 ## Other providers
 
